@@ -28,6 +28,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
 
 // migrationSQL contains immutable, versioned migration resources.
@@ -69,6 +72,7 @@ const (
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
 	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
 	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
+	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -202,6 +206,8 @@ var schemaVersions = []struct {
 		Name:    governanceProposalOrderSchemaRelease,
 		Dir:     "v33",
 	},
+	{Version: 34, Name: "leios-transaction-ledger-context", Dir: "v34"},
+	{Version: 35, Name: accountDRepClearSchemaRelease, Dir: "v35"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -326,9 +332,142 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = rewardCreditRoundBackfill
 		}
+		if version.Name == accountDRepClearSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = accountDRepClearBackfill
+		}
 		ret = append(ret, migration)
 	}
 	return ret, nil
+}
+
+func accountDRepClearBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	if batch.Cursor != "" {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT cbor, added_slot FROM pparams
+WHERE era_id = ? ORDER BY added_slot ASC, id ASC`), conway.EraIdConway)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("read Conway protocol parameters: %w", err)
+	}
+	var boundary uint64
+	foundBoundary := false
+	if err := func() error {
+		defer rows.Close()
+		for rows.Next() {
+			var data []byte
+			var addedSlot int64
+			if err := rows.Scan(&data, &addedSlot); err != nil {
+				return err
+			}
+			var fields []cbor.RawMessage
+			if _, err := cbor.Decode(data, &fields); err != nil {
+				return fmt.Errorf(
+					"decode Conway protocol parameters at slot %d: %w",
+					addedSlot,
+					err,
+				)
+			}
+			if len(fields) <= 12 {
+				return fmt.Errorf(
+					"decode Conway protocol parameters at slot %d: missing protocol version",
+					addedSlot,
+				)
+			}
+			var version common.ProtocolParametersProtocolVersion
+			if _, err := cbor.Decode(fields[12], &version); err != nil {
+				return fmt.Errorf(
+					"decode Conway protocol version at slot %d: %w",
+					addedSlot,
+					err,
+				)
+			}
+			if version.Major == 10 {
+				if addedSlot < 0 {
+					return fmt.Errorf(
+						"negative PV10 boundary slot %d", addedSlot,
+					)
+				}
+				boundary = uint64(addedSlot)
+				foundBoundary = true
+				break
+			}
+		}
+		return rows.Err()
+	}(); err != nil {
+		return BatchResult{}, err
+	}
+	if !foundBoundary {
+		return BatchResult{Cursor: "checked", Done: true}, nil
+	}
+
+	var rawBoundary string
+	err = batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT value FROM sync_state WHERE sync_key = ?`),
+		"mithril_ledger_slot").Scan(&rawBoundary)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, errors.New(
+			"PV10 DRep clear history is unavailable; resync is required",
+		)
+	}
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("read Mithril boundary: %w", err)
+	}
+	mithrilBoundary, err := strconv.ParseUint(rawBoundary, 10, 64)
+	if err != nil || mithrilBoundary < boundary {
+		return BatchResult{}, errors.New(
+			"PV10 DRep clear history is unavailable; resync is required",
+		)
+	}
+	var incomplete int64
+	if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+WITH registration_event AS (
+    SELECT credential_tag, staking_key, added_slot FROM stake_registration
+    UNION ALL SELECT credential_tag, staking_key, added_slot
+        FROM stake_registration_delegation
+    UNION ALL SELECT credential_tag, staking_key, added_slot
+        FROM stake_vote_registration_delegation
+    UNION ALL SELECT credential_tag, staking_key, added_slot
+        FROM vote_registration_delegation
+    UNION ALL SELECT credential_tag, staking_key, added_slot FROM registration
+), deregistration_event AS (
+    SELECT credential_tag, staking_key, added_slot FROM stake_deregistration
+    UNION ALL SELECT credential_tag, staking_key, added_slot FROM deregistration
+)
+SELECT COUNT(*) FROM account a
+WHERE a.created_slot <= ?
+  AND NOT EXISTS (
+      SELECT 1 FROM account_import_baseline b
+      WHERE b.credential_tag = a.credential_tag
+        AND b.staking_key = a.staking_key
+        AND b.added_slot = ?
+  )
+  AND (a.active = TRUE OR NOT EXISTS (
+      SELECT 1 FROM deregistration_event d
+      WHERE d.credential_tag = a.credential_tag
+        AND d.staking_key = a.staking_key
+        AND d.added_slot <= ?
+        AND d.added_slot > COALESCE((
+            SELECT MAX(r.added_slot) FROM registration_event r
+            WHERE r.credential_tag = a.credential_tag
+              AND r.staking_key = a.staking_key
+              AND r.added_slot <= ?
+        ), -1)
+  ))`), mithrilBoundary, mithrilBoundary, mithrilBoundary,
+		mithrilBoundary).Scan(&incomplete); err != nil {
+		return BatchResult{}, fmt.Errorf("verify Mithril account baseline: %w", err)
+	}
+	if incomplete != 0 {
+		return BatchResult{}, fmt.Errorf(
+			"mithril account baseline is incomplete for %d credentials; resync is required",
+			incomplete,
+		)
+	}
+	return BatchResult{Cursor: "checked", Done: true}, nil
 }
 
 // rewardCreditRoundBackfill moves the legacy JSON round list into its indexed
@@ -1114,6 +1253,9 @@ const (
 	restampCursorRewardPhase = "R"
 )
 
+// Version 2 changed sigma_a only; this migration cannot certify newer SNAP rules.
+const rewardSigmaCalculationVersion uint = 2
+
 // rewardStakeVersionRestampBackfill re-stamps snapshot rows a prior
 // RewardStakeCalculationVersion bump left behind, in two phases encoded in
 // the cursor ("P:<id>" then "R:<id>"), so upgrading in place only forces a
@@ -1205,8 +1347,8 @@ func restampPoolStakeSnapshotBatch(
 	lastID int64,
 ) (int64, int64, bool, error) {
 	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(
-		"SELECT id FROM pool_stake_snapshot WHERE id > ? AND calculation_version <> ? ORDER BY id LIMIT ?",
-	), lastID, models.RewardStakeCalculationVersion, batch.Limit)
+		"SELECT id FROM pool_stake_snapshot WHERE id > ? AND calculation_version < ? ORDER BY id LIMIT ?",
+	), lastID, rewardSigmaCalculationVersion, batch.Limit)
 	if err != nil {
 		return 0, 0, false, err
 	}
@@ -1230,7 +1372,7 @@ func restampPoolStakeSnapshotBatch(
 			batch.Rebind(
 				"UPDATE pool_stake_snapshot SET calculation_version = ? WHERE id = ?",
 			),
-			models.RewardStakeCalculationVersion, id,
+			rewardSigmaCalculationVersion, id,
 		); err != nil {
 			return 0, 0, false, err
 		}
@@ -1256,9 +1398,9 @@ FROM reward_snapshot
 LEFT JOIN epoch_summary ON epoch_summary.epoch = reward_snapshot.epoch
 WHERE reward_snapshot.id > ?
   AND reward_snapshot.snapshot_type = 'mark'
-  AND reward_snapshot.calculation_version <> ?
+  AND reward_snapshot.calculation_version < ?
 ORDER BY reward_snapshot.id LIMIT ?`),
-		lastID, models.RewardStakeCalculationVersion, batch.Limit,
+		lastID, rewardSigmaCalculationVersion, batch.Limit,
 	)
 	if err != nil {
 		return 0, 0, false, err
@@ -1291,7 +1433,7 @@ ORDER BY reward_snapshot.id LIMIT ?`),
 			batch.Rebind(
 				"UPDATE reward_snapshot SET calculation_version = ? WHERE id = ?",
 			),
-			models.RewardStakeCalculationVersion, id,
+			rewardSigmaCalculationVersion, id,
 		); err != nil {
 			return 0, 0, false, err
 		}

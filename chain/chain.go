@@ -129,6 +129,9 @@ type Chain struct {
 	// this mutex's read side to exclude a record from appearing under a
 	// removal path that already holds it for write.
 	batchCommitMutex sync.RWMutex
+	// beforeRawBlockMutationBarrierForTesting is nil in production. Tests set
+	// it before concurrent use to observe an AddRawBlocks barrier attempt.
+	beforeRawBlockMutationBarrierForTesting func()
 
 	// pendingAdds keeps a removal path from resolving a block index whose
 	// store write is still held in an uncommitted caller-supplied
@@ -441,8 +444,10 @@ func (c *Chain) MaxQueuedHeaders() int {
 		return DefaultMaxQueuedHeaders
 	}
 	// Before SetLedger succeeds, securityParam is zero and the default
-	// floor applies (tests or early bootstrap only).
-	if sp := c.manager.securityParam; sp > 0 {
+	// floor applies (tests or early bootstrap only). Read through the
+	// manager lock: addBlockHeader calls this holding only c.mutex, and
+	// SetLedger can run again while headers are arriving.
+	if sp := c.manager.SecurityParam(); sp > 0 {
 		return max(sp*2, DefaultMaxQueuedHeaders)
 	}
 	return DefaultMaxQueuedHeaders
@@ -1400,6 +1405,22 @@ func (c *Chain) AddRawBlocks(blocks []RawBlock) error {
 	return c.addRawBlocks(blocks, nil)
 }
 
+// SetBeforeRawBlockMutationBarrierForTesting installs a hook immediately
+// before AddRawBlocks enters the chain mutation barrier.
+func (c *Chain) SetBeforeRawBlockMutationBarrierForTesting(hook func()) {
+	c.beforeRawBlockMutationBarrierForTesting = hook
+}
+
+// RawBlockMutationBarrierExcludesAddsForTesting reports whether a writer owns
+// or is waiting for the chain mutation barrier.
+func (c *Chain) RawBlockMutationBarrierExcludesAddsForTesting() bool {
+	if c.batchCommitMutex.TryRLock() {
+		c.batchCommitMutex.RUnlock()
+		return false
+	}
+	return true
+}
+
 // AddRawBlocksWithCallback adds a batch of pre-extracted blocks to the chain
 // and runs the callback in the same transaction after each block is persisted.
 // Callers can use this to atomically attach additional blob-side state, such as
@@ -1473,6 +1494,9 @@ func (c *Chain) addRawBlocks(
 		// concurrent rollback cannot resolve an index the store has yet to
 		// commit. See the batchCommitMutex field.
 		err := func() error {
+			if c.beforeRawBlockMutationBarrierForTesting != nil {
+				c.beforeRawBlockMutationBarrierForTesting()
+			}
 			c.batchCommitMutex.RLock()
 			defer c.batchCommitMutex.RUnlock()
 			txn := c.manager.db.BlobTxn(true)
@@ -1691,6 +1715,31 @@ func (c *Chain) RollbackDeferred(
 		return nil, errors.New("chain is nil")
 	}
 	return c.rollbackLocked(point, false)
+}
+
+// RollbackDeferredThen rewinds the chain like RollbackDeferred and runs after
+// the rewind before admitting another persistent-chain mutation. Event
+// publication stays deferred until the caller has released its own outer locks.
+func (c *Chain) RollbackDeferredThen(
+	point ocommon.Point,
+	after func() error,
+) ([]event.Event, error) {
+	if c == nil {
+		return nil, errors.New("chain is nil")
+	}
+	return c.rollbackLockedThen(point, false, after)
+}
+
+// RollbackUnboundedDeferredThen is RollbackDeferredThen without the security
+// parameter bound. It is restricted to startup reconciliation of local state.
+func (c *Chain) RollbackUnboundedDeferredThen(
+	point ocommon.Point,
+	after func() error,
+) ([]event.Event, error) {
+	if c == nil {
+		return nil, errors.New("chain is nil")
+	}
+	return c.rollbackLockedThen(point, true, after)
 }
 
 // rollbackForkDepth returns the number of blocks a rollback to
@@ -1927,12 +1976,36 @@ func (c *Chain) rollbackLocked(
 	point ocommon.Point,
 	unbounded bool,
 ) ([]event.Event, error) {
+	return c.rollbackLockedThen(point, unbounded, nil)
+}
+
+func (c *Chain) rollbackLockedThen(
+	point ocommon.Point,
+	unbounded bool,
+	after func() error,
+) ([]event.Event, error) {
 	// Wait for any chain-owned batch transaction that has already applied to
 	// the in-memory chain to conclude, so the removal loop below cannot ask
 	// the store for an index whose write has not committed yet. See the
 	// batchCommitMutex field.
 	c.batchCommitMutex.Lock()
 	defer c.batchCommitMutex.Unlock()
+	events, err := c.rollbackWithMutationBarrierHeld(point, unbounded)
+	if err != nil {
+		return events, err
+	}
+	if after != nil {
+		if err := after(); err != nil {
+			return events, err
+		}
+	}
+	return events, nil
+}
+
+func (c *Chain) rollbackWithMutationBarrierHeld(
+	point ocommon.Point,
+	unbounded bool,
+) ([]event.Event, error) {
 	// A queued-header rollback does not remove persistent blocks and therefore
 	// must not wait for unrelated caller transactions. Check that case before
 	// waiting; the full check is repeated below after the wait because headers
@@ -2366,6 +2439,47 @@ func (c *Chain) PointAtDepth(
 		return ocommon.Point{}, false, err
 	}
 	return ocommon.NewPoint(block.Slot, block.Hash), true, nil
+}
+
+// PointAtDepthFrom returns the point depth blocks behind from when from is on
+// this chain. The relation and result are resolved under one chain lock, so a
+// concurrent tip change cannot move the anchor.
+func (c *Chain) PointAtDepthFrom(
+	from ocommon.Point,
+	depth uint64,
+) (point ocommon.Point, found bool, err error) {
+	if c == nil {
+		return ocommon.Point{}, false, errors.New("chain is nil")
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	unlocks := c.lockBlockIndexReadLocks()
+	defer unlocks()
+	block, err := c.manager.blockByPoint(from, nil)
+	if err != nil {
+		return ocommon.Point{}, false, err
+	}
+	if block.ID < initialBlockIndex || block.ID > c.tipBlockIndex {
+		return ocommon.Point{}, false, nil
+	}
+	active, err := c.blockByIndexLocked(block.ID)
+	if err != nil {
+		return ocommon.Point{}, false, err
+	}
+	if active.Slot != from.Slot || !bytes.Equal(active.Hash, from.Hash) {
+		return ocommon.Point{}, false, nil
+	}
+	if depth >= block.ID {
+		return ocommon.Point{}, false, nil
+	}
+	if depth == 0 {
+		return ocommon.NewPoint(active.Slot, active.Hash), true, nil
+	}
+	ancestor, err := c.blockByIndexLocked(block.ID - depth)
+	if err != nil {
+		return ocommon.Point{}, false, err
+	}
+	return ocommon.NewPoint(ancestor.Slot, ancestor.Hash), true, nil
 }
 
 // IntersectPoints returns up to count points in descending order for

@@ -131,19 +131,3 @@ func (d *Database) ListSyncStateKeysByPrefix(
 	}
 	return keys, nil
 }
-
-// ClearSyncState removes all sync state entries.
-func (d *Database) ClearSyncState(txn *Txn) error {
-	var err error
-	if txn == nil {
-		err = d.metadata.ClearSyncState(nil)
-	} else {
-		err = d.metadata.ClearSyncState(txn.Metadata())
-	}
-	if err != nil {
-		return fmt.Errorf(
-			"Database.ClearSyncState: %w", err,
-		)
-	}
-	return nil
-}

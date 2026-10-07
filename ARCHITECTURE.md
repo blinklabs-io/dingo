@@ -84,7 +84,11 @@ connection (never the write pool) — see `checkpointWAL` and
 the commit-triggered `wal_autocheckpoint` alone cannot shrink the WAL file's
 on-disk size even when it fully succeeds. `journal_size_limit` caps a reset
 WAL at 64 MiB, while the periodic TRUNCATE can reduce it to zero; an active
-reader can prevent either operation from reclaiming space. The tagged
+reader can prevent either operation from reclaiming space. Bulk metadata
+imports drain and pause the scheduled TRUNCATE callback until normal pragmas
+are restored, while commit-triggered auto-checkpoints remain enabled. If the
+final restore fails, the next scheduled callback retries it before checkpointing.
+The tagged
 PostgreSQL/MySQL factories configure their direct drivers, pools, advisory
 migration locks, and repeatable-read snapshots. All three return
 `*sqlstore.Store`; metadata business behavior is implemented once in
@@ -227,6 +231,20 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
 - [Stake Snapshots](#stake-snapshots)
 
 ## Overview
+
+The NPM distribution is a wrapper around the release binary. Its postinstall
+script selects only targets present in the release matrix, downloads the
+version-matched HTTPS archive, verifies it against the six-target checksum
+manifest embedded by the NPM release job, and streams its `dingo` member into
+a size-bounded temporary file before atomically installing the executable.
+Downloads have a size bound and retry only transient transport and server
+failures. Archive paths are never extracted as filesystem paths. The
+JavaScript command inherits standard I/O
+and forwards arguments and termination signals to the native process; it
+preserves the process exit result. The package contains only this installer,
+command wrapper and package documentation. For stable release tags, the
+release workflow stamps its version, verifies the finalized release asset and
+publishes it only after release finalization.
 
 Dingo's architecture is built on several key principles:
 
@@ -805,8 +823,21 @@ back into `LedgerState` methods that take `chainsyncMutex`** (in practice
 to do real work should hand off to their own goroutine, which
 `event/doc.go` already requires of every subscriber callback.
 
-The BlockFetch server path mirrors the retrieval flow for downstream peers:
-when a peer requests a range, `ouroboros/blockfetch.go` opens chain iterators
+The BlockFetch server path mirrors the retrieval flow for downstream peers.
+Each admitted range owns a chain iterator and a sender goroutine.
+`blockfetchRangeAdmission` (`ouroboros/blockfetch_admission.go`) reserves a
+slot per connection (`blockfetchMaxRangesPerConnDefault`) and process-wide
+(`blockfetchMaxRangesGlobalDefault`) before any iterator is opened, and a
+saturated request is answered with `NoBlocks`. BlockFetch permits pipelined
+`RequestRange` messages while earlier batches are streaming, so saturation is
+normal backpressure and does not feed the stuck-peer disconnect valve. Only
+the sender goroutine releases global capacity, on completion, error, or
+connection shutdown. Per-connection buckets also carry the protocol
+generation: after an old generation closes, a replacement connection that
+reuses its `ConnectionId` starts with an empty bucket while the old senders
+remain charged against the process-wide limit until they exit.
+
+When a peer requests a range, `ouroboros/blockfetch.go` opens chain iterators
 at the requested start and end points to validate both endpoints against the
 serving chain, then sends `StartBatch`. Checking only
 the end slot let a peer name an end point the server does not hold and receive
@@ -845,6 +876,11 @@ can return promptly, but it applies backpressure between messages by waiting
 for the underlying gouroboros protocol send queue to drain. This keeps large
 Leios catch-up ranges from filling the mux pending-message queue and turning a
 slow consumer into a connection-level protocol violation.
+
+The inbound TxSubmission server applies a per-peer token bucket to the
+transaction IDs a peer offers before requesting any bodies. `Node` sets it
+through `defaultMaxTxSubmissionsPerSecond` in `newOuroborosConfig`; the
+`ouroboros` package itself leaves the limiter off when the setting is zero.
 
 On the client path, BlockFetch events carry fully decoded blocks. The ledger
 subscriber therefore buffers one eight-block chain-store commit batch; when it
@@ -1116,10 +1152,28 @@ not durably adopted:
   cannot be written fails the forge, rather than signing unprotected.
   The `dingo_metrics_forgeFenceBlocked_int` counter is zero in normal
   operation: any increment points at a slot-clock regression or a
-  rolled-back database. The fence lives in `sync_state`, so a Mithril
-  import that ends in a full `ClearSyncState` drops it; a producer
-  bootstrapped from a snapshot has only the chain-tip check until it
-  next forges.
+  rolled-back database. The fence lives in `sync_state`, and the Mithril
+  import's completion cleanup (`mithril/sync_import.go`) deletes only
+  transient sync keys and leaves every `forge_fence:` row untouched.
+  Concurrent fence advances cannot be overwritten by a stale import read,
+  so a producer bootstrapped from a snapshot keeps its latest fence.
+- **Credential and rotation metrics.** Alongside the KES gauges
+  (`cardano_node_metrics_currentKESPeriod_int`,
+  `..._remainingKESPeriods_int`, `..._operationalCertificateStartKESPeriod_int`,
+  `..._operationalCertificateExpiryKESPeriod_int`) the forger exports, in
+  `core` and `api` storage modes alike and evaluated at scrape time:
+  `dingo_forge_opcert_counter_loaded` (issue number of the loaded certificate),
+  `dingo_forge_opcert_counter_onchain` (the highest counter the ledger applied
+  for this pool, the value `LedgerState.LatestOpCertSequence` returns and block
+  application persists; `NaN` until one is observed),
+  `dingo_forge_slots_per_kes_period`, and `dingo_forge_credentials_valid`
+  (1 when the loaded credentials could sign at the current slot). The next
+  certificate to issue carries counter `dingo_forge_opcert_counter_onchain + 1`.
+  `dingo_forge_missed_leader_slots_total` counts leader slots this node won
+  and did not turn into a block of its own on the chain after leader selection:
+  a build, validation or adoption failure, a post-selection refusal, or an
+  equal-slot alternative that lost. KES and tip safety refusals before leader
+  selection are excluded.
 
 ```mermaid
 sequenceDiagram
@@ -1298,6 +1352,7 @@ dingo/
 │   ├── quotas.go        # Per-source quotas
 │   ├── score.go         # Peer scoring
 │   ├── ledger.go        # Ledger-based peer discovery
+│   ├── weighted_selection.go # Stake-weighted relay sampling
 │   └── event.go         # Peer events
 ├── topology/            # Network topology handling
 │   └── topology.go      # Topology and peer-snapshot configuration
@@ -1620,6 +1675,17 @@ outgoing instance and silently lost.
 
 ### Shutdown Flow
 
+Credential zeroization is skipped if an earlier component's drain is unconfirmed,
+so abandoned key consumers retain their signing material. Reinitialization
+intentionally does not close such retained credentials when publishing a new
+set. Hot credential swaps
+serialize reciprocal moves and distinguish material revisions from invalidation
+generations: an outgoing attempt evolves its private KES snapshot without
+mutating the newly installed key. Remote signer readiness checks availability
+with a fresh bounded agent Hello handshake without signing or evolving a key.
+The handshake holds neither the credential lock nor the KES lock, so readiness
+I/O cannot block signing-key evolution.
+
 Bark serializes TLS/listener preflight and server publication with a lifecycle
 lock that shutdown can wait on with its context. A deadline during preflight
 returns without observing a partially published server. Plugin host shutdown
@@ -1790,7 +1856,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 
 | Event | Source | Purpose |
 |-------|--------|---------|
-| `chain.update` | ChainManager | Block added to chain (`ChainBlockEvent`), or chain rolled back (`ChainRollbackEvent`, which also carries `Seq`, the chain-mutation sequence number shared with the matching `chain.header` invalidation). Consumed by LedgerState, by the Leios PipelineManager for instance and ranking-block pruning, and by the Leios VoteManager for rollback pruning and as an idempotent apply-time backstop for announcements. The VoteManager no longer arms announcements from this topic; that is `chain.header` |
+| `chain.update` | ChainManager | Block added to chain (`ChainBlockEvent`), or chain rolled back (`ChainRollbackEvent`, which also carries `Seq`, the chain-mutation sequence number shared with the matching `chain.header` invalidation). Consumed by LedgerState, by the Leios PipelineManager for instance and ranking-block pruning, by the Leios VoteManager for rollback pruning and as an idempotent apply-time backstop for announcements, and by `Node.subscribeChainSelectorEvents`'s detachable diagnostic observer, which forwards each `ChainRollbackEvent`'s rolled-back blocks to `Ouroboros.RecordForkBattleParticipants` so the blockfetch fork-battle ring (`dingo_blockfetch_recent_fork_participants`/`..._distinct_slots`/`..._block_number`, a collector separate from the delay ring) can distinguish a fork-battle delay from a genuinely slow fetch. The VoteManager no longer arms announcements from this topic; that is `chain.header` |
 | `chain.header` | ChainManager | Ordered header-lifecycle stream. Carries `ChainHeaderAnnouncementEvent` (announcing ranking block's slot and header hash, announced endorser-block hash, `Seq`) when a crypto-verified ranking-block header bearing a Leios announcement enters the header queue, or when a block that bypasses the queue -- a local forge, a bulk restore -- is added; and `ChainHeaderInvalidationEvent` (highest still-valid point, discarded ranking-block hashes, reason, `Seq`) when queued headers leave the queue without becoming blocks. Both are enqueued under the chain mutex on this one topic, so a subscriber observes them in true chain-mutation order. Consumed by the Leios VoteManager to arm vote announcements while the vote window is still open |
 | `chain.fork_detected` | ChainManager | Fork detected |
 | `chainselection.peer_tip_update` | ChainSelector | Peer tip updated |
@@ -1838,6 +1904,29 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `peergov.quota_status` | PeerGov | Quota status update |
 | `peergov.bootstrap_exited` | PeerGov | Exited bootstrap mode |
 | `peergov.bootstrap_recovery` | PeerGov | Bootstrap recovery |
+
+**Equivocation detection.** The node subscribes an observer
+(`equivocationDetector`, `node_equivocation.go`) to `chain.update`, detachable
+because a missed event loses the metric, not node state. It keeps the blocks
+named by each `ChainRollbackEvent` (decoded for their issuer, bounded to 2160
+entries) and compares every later `ChainBlockEvent` block against them. A block
+with a different hash, the same slot or block number, and the same
+`IssuerVkey().PoolId()` as a retained block is equivocation: two pools cannot
+share a cold key, so that key is forging in two places. Each such pair
+increments `dingo_equivocation_total{pool_id,self_key}` and logs a warning;
+three competing blocks are three pairs. `self_key="true"` when the pool is this
+node's own, taken from the block producer credentials validated at startup. A
+distinct pair is counted once while it remains in the bounded recently
+reported pair set; after eviction, the same pair may be counted again.
+Repeated rolled-back hashes are retained only once. Both the rollback history
+and recently reported pair set are bounded to 2160 entries. On
+rollback, every rolled-back block is decoded to read its issuer. For later
+added blocks, the detector first scans stored slot and block-number fields and
+decodes only when a possible match exists, so each added block pays one scan
+of the rollback history. Entries leave it only by eviction at the 2160-entry
+cap, so on a long-running node the history fills to the cap and each added
+block scans up to 2160 entries. A competing block this node never applied,
+because it never became the chain, is not seen.
 
 The six topics the ChainSelector publishes itself —
 `chainselection.chain_switch`, `selection`, `peer_evicted`,
@@ -2143,7 +2232,17 @@ only ever ahead.
 
 That asymmetry is deliberate, because only one direction is recoverable.
 A blob store ahead of the metadata tip holds orphaned blocks that startup
-trims (`LedgerState.cleanupOrphanedBlobs`). A blob store behind the metadata tip
+trims (`LedgerState.cleanupOrphanedBlobs`). The chain manager has already
+loaded its tip from the newest stored block by then, so recovery first rewinds
+the primary chain to the metadata tip through the chain manager
+(`rewindPrimaryChainForOrphanCleanup`). The rewind and orphan cleanup share the
+chain mutation barrier, so blockfetch and forging cannot append a block between
+them that cleanup would then delete. Rollback events publish only after the
+blockfetch lock is released. A rewind refused for exceeding K skips cleanup and
+leaves the chain as a forward extension the ledger replays; any other rewind or
+cleanup error stops recovery. A continuation-audit window is retained when its
+fork point survives the rewind and discarded when that point is truncated. A
+blob store behind the metadata tip
 is missing blocks the ledger has already applied, and nothing local can rebuild
 them, so `reconcilePrimaryChainTipWithLedgerTip` rolls the ledger back to the
 blob tip — a rollback whose depth is set by however far the two stores drifted,
@@ -2674,9 +2773,13 @@ fallback:
   wrapper. Normal block writes still go to the local blob plugin. Reads first
   check local storage; expired or missing historical blocks fall back to the
   remote Bark archive and download the signed URL response. Block download URLs
-  are accepted only when they are HTTPS, credential-free, and hosted by the
-  expected archive hostname or a configured `barkBlockDownloadHosts` allowlist
-  entry; redirects are disabled and response bodies are capped before buffering.
+  are accepted only when they are HTTPS, credential-free, and match the
+  effective HTTPS hostname and port of the archive or a configured
+  `barkBlockDownloadHosts` allowlist entry. An HTTP Bark RPC base anchors the
+  corresponding HTTPS download origin. The same check runs on redirects,
+  and every resolved address is rejected if it is private or special-use before
+  dialing. The client ignores ambient proxy settings, and response bodies are
+  capped before buffering.
   This wrapper can be used with or without local History Expiry. It is
   installed by replacing the database's blob-store reference
   (`Database.SetBlobStore`) after `database.New` has returned, on both the
@@ -2807,6 +2910,8 @@ Interfaces:
 ### Database Lifecycle (Snapshot, Restore, Truncate)
 
 `database/lifecycle/` implements point-in-time database snapshots, restore from a snapshot, and truncation to an earlier chain point (see `DATABASE.md` for the manifest format, plugin-interface, and cloud-destination details). It is a pure library over `*database.Database` with no node-composition knowledge; `internal/dblifecycle` supplies the node-facing orchestration. Every snapshot is always written locally; if `databaseLifecycle.snapshotCloudDestination` is set (an `s3://` or `gcs://` URI), `lifecycle.SnapshotToCloud` additionally mirrors it there via a build-tag-gated (`dingo_extra_plugins`) `CloudDestination` implementation, and `lifecycle.Restore` accepts that same URI as its source, downloading into a temp directory first — this is also how a snapshot taken on one node can be restored onto another without sharing a filesystem.
+
+`lifecycle.WithMaxCommitPause` bounds how long `Snapshot` holds the commit barrier. The deadline starts after the barrier is acquired and covers the snapshot-state reads and both backups. A stalled state read releases the barrier at cancellation, and its read goroutine finishes independently. A cancelled backup keeps the barrier until both providers return, so cross-store consistency holds even when a provider observes cancellation late. `databaseLifecycle.snapshotMaxCommitPause` sets the bound for the CLI, Bark and automatic snapshots; zero is unbounded. `dingo_snapshot_commit_pause_seconds{result}` and `dingo_snapshot_bytes_written_total{store}` record the hold and the bytes each backup wrote.
 
 #### Recoverable remote live restore
 
@@ -3295,6 +3400,12 @@ output included, as the reference sizes the whole `TxAux`, and the output
 address rules (`byronValidateUnknownAttributes`, `byronValidateOutputNetwork`)
 still cover every output. Later outputs remain in the transaction body and its
 ID, and a transaction is not rejected for having more outputs.
+
+Input indexes are Word16 as well: the gouroboros decoder and
+`NewByronTransactionInput` refuse an index above 65535, and
+`byronValidateInputIndexes` repeats the bound for a transaction assembled
+without the decoder, so a transaction naming a wider index is rejected
+whether or not a UTxO is stored there.
 
 The Byron update state is not persisted. It is rebuilt by replaying the stored
 chain from its first block, so a restart or a rollback restores the limits and
@@ -4027,6 +4138,22 @@ The `LedgerView` interface provides query access to ledger state:
   and 11 to reject key-hash reward withdrawals whose stake credential is not
   delegated to a DRep. Script-hash reward credentials are governed by script
   validation and do not participate in this DRep-delegation gate.
+- Governance purpose roots seeded from a ledger-state snapshot are verified at
+  three points. `ledgerstate` import re-reads every non-null
+  `ParsedPrevGovActionIds` root after seeding and fails the import unless it is
+  an enacted `governance_proposal` row that `GetLastEnactedGovernanceProposal`
+  resolves as its purpose's current root; a resumed import that skips the
+  governance phase runs the same check. Before starting its worker pool and
+  cleanup timer, `LedgerState.Start` calls `governance.VerifyPurposeRoots` at
+  the latest stored epoch and refuses to start a Mithril-bootstrapped
+  database (one with a `mithril_ledger_slot` sync-state row) when an active
+  chained proposal names a parent that has no enacted purpose root, is not an
+  active proposal and is not a stored row. The epoch tally applies the same
+  predicate where `validateParentChain` fails and returns
+  `governance.MissingEnactedRootError` (`ErrMissingEnactedRoot`) instead of
+  skipping. A pending-sibling parent and a stored superseded or non-root parent
+  keep the skip, and a genesis-synced database always keeps it because a
+  rootless purpose is legitimate there.
 - Conway governance validation exposes the authoritative enacted root for each
   CIP-1694 purpose through `GovPurposeRoots`. A non-nil result with nil fields
   means those roots are known to be absent; lookup failures are propagated
@@ -4226,9 +4353,13 @@ buffer entry -- and a purely slot-keyed lookup has no notion of "applied"
 at all) or when the chain's block at `at.Slot` doesn't have hash `at.Hash`
 (rolled back after acquisition, or never on this node's chain at all).
 
-**Acquired ledger snapshots.** Every `Acquire` -- specific point, volatile tip
-or immutable tip -- calls `LedgerState.AcquireQueryView`, which waits (inside the
-caller's deadline) for any epoch-boundary job, opens a coordinated read
+**Acquired ledger snapshots.** A specific-point Acquire pins the requested
+point, a volatile-tip Acquire pins the coordinated snapshot's tip, and an
+immutable-tip Acquire resolves and pins the primary-chain point `k` blocks
+behind the applied ledger tip. The applied tip and its era are captured
+together, and the chain lookup stays anchored to that exact point while the
+header chain can advance. Each calls `LedgerState.AcquireQueryView`, which waits (inside
+the caller's deadline) for any epoch-boundary job and opens a coordinated read
 snapshot
 (`database.NewReadSnapshotContext`, whose blob and metadata views are fixed at
 one commit boundary), and validates the point against it with
@@ -4241,7 +4372,8 @@ is answered by `QueryView.Query`, which runs the ordinary query handlers
 through that held transaction: a block applied, a rollback or a retention
 prune committed after `Acquire` is invisible to the session, and the point
 validated at `Acquire` stays answerable. Chain-tip queries
-(`GetChainPoint`, `GetChainBlockNo`) read the snapshot's own tip. Queries the
+(`GetChainPoint`, `GetChainBlockNo`) report a pinned specific or immutable
+point when present and otherwise read the snapshot's own tip. Queries the
 ledger otherwise answers from its in-memory consensus snapshot for an unpinned
 acquire -- current epoch number, era, current protocol parameters, the epoch
 `GetStakeSnapshots` reports, and the tip and current era of `GetEraHistory` (pinned or not) --
@@ -4263,10 +4395,12 @@ one metadata read connection free for the rest of the node; once the cap is
 reached an `Acquire` waits up to five seconds for a snapshot to close and then
 fails. It is closed on `Release`,
 on re-`Acquire` (before the replacement opens, so a connection never needs a
-second admission slot; a failed `Acquire` leaves the session registered with a
-closed view), on the connection closing, and on
+second admission slot; a failed `Acquire` returns the protocol to idle with no
+session), on the connection closing, and on
 `Ouroboros.Close`, which shutdown calls after connections drain and before the
-ledger and database close. A snapshot still held after
+ledger and database close. Connection close also cancels an Acquire waiting
+for snapshot admission, and the Acquire must still own its in-flight token
+before it can install the opened view. A snapshot still held after
 `localStateQueryViewMaxLifetime` (default `5m`, env
 `DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME`) is closed by a per-session timer
 and logged with its age and idle time; the session stays recorded so its next
@@ -4457,6 +4591,33 @@ passes Acquire is answered from the snapshot Acquire opened, so a rollback or
 retention-floor pruning committed afterwards does not reach the session. Only a
 snapshot closed by the lifetime bound above reproduces this connection-teardown
 behavior.
+
+A specific acquired point is also pinned against pruning
+(`ledger/acquired_point_pins.go`). Acquire calls `LedgerState.PinAcquiredPoint`
+*before* `AcquireQueryView` verifies the point, and the consumed-UTxO cleanup
+and the pool-snapshot retention guard each cap their prune floor at the oldest
+pinned slot. Each pruning path reads the pins, caps its floor, and announces
+that floor in memory under the registry's lock, then releases the lock and only
+afterwards deletes; `VerifyPointQueryable` refuses any point below an announced
+floor. So either the pin lands first and the prune retains the point, or the
+prune announces first and the point is refused at Acquire, where the protocol
+has a clean reply. No I/O runs under that lock: holding a lock across the
+delete is what deadlocked an earlier design of the pool-snapshot guard on
+SQLite's single write connection. The snapshot keeps the session's own reads
+consistent; the pin keeps the rows themselves from being deleted while a
+session needs them.
+
+The pin lives in the connection's `localstatequerySession` and is released
+wherever the session's view is closed: Release, a re-Acquire (which closes the
+previous session first, so a rejected re-Acquire leaves no pin), connection
+close, `Ouroboros.Close`, and lifetime expiry. A failed Acquire releases its pin
+before replying. A connection that closes while its Acquire is still verifying
+cancels that acquisition, and the Acquire closes the view it opened and releases
+its pin. A pin cannot hold pruning back without limit in any case: the UTxO
+floor is held back by at most `acquiredPointMaxUtxoHoldWindows` stability
+windows, and pool snapshots by the existing `poolSnapshotRetentionMaxDepth`.
+Protocol-parameter rows need no pin; they are only ever deleted on rollback.
+
 `GetPoolDistr2` therefore logs and omits a pool that holds snapshot stake but
 has no registration to supply a VRF key hash (the unfiltered form covers every
 pool on the chain, so aborting would take `leadership-schedule` down for every
@@ -4611,6 +4772,32 @@ bridge the gap, the ledger emits `chainsync.resync` with reason
 `chain switch cursor ahead of local tip`; Ouroboros then closes that connection
 for a fresh intersect from the current local tip instead of waiting for a cursor
 that has already moved past the missing blocks.
+
+Two bounds keep that close from looping while the node is far behind the
+network, where every selected peer is ahead by construction and closing one
+moves selection to the next:
+
+- The close is speculative, so it applies only to a peer near its advertised
+  tip, which may send nothing for many slots. A peer with at least
+  `headerMismatchResyncThreshold` blocks left before its advertised tip keeps
+  streaming headers, and a cursor past the local tip then shows up in the
+  header handler as consecutive mismatches, which request a resync from
+  headers actually received. The advertised tip is untrusted, but it only
+  withholds a close; overstating it cannot force one. A fallback connection,
+  which the switch event carries no advertised tip for, is measured against
+  the chain selector's sync target instead. That target never exceeds the
+  advertised tip, so the fallback withholds a close less often, never more.
+- The close reconnects the peer under a new connection ID, so the ledger
+  records the request against the peer's remote address and does not request
+  another fresh cursor for that peer until a header from it reaches the
+  ledger, or for 30 minutes. A request coalesced into one made moments earlier
+  for the same connection closes nothing, so it is not recorded.
+
+A switch that withholds a repeat logs it once per request at Info, and
+`freshCursorStallWarnRequests` fresh-cursor requests without the local tip
+moving past the highest tip it has reached log a Warn, since each one closes a
+connection and nothing else reports the stall. A rollback, or a return to a
+tip already reached, is not progress.
 
 Each peer has two distinct frontiers. `PeerChainTip.Tip` is the remote peer's
 untrusted advertised network tip; `PeerChainTip.ObservedTip` is the latest
@@ -4890,22 +5077,52 @@ it. Dingo implements this as a **corroboration gate**
 
 - A candidate peer is **corroborated** when at least `corroborationPeers`
   independent witness peers *confirm the candidate's recent chain*
-  (`confirmsRecentChain`): every block a witness observed within the candidate's
-  window slot range matches the candidate's own `(slot, hash)`, and they share at
-  least one such block. The observed frontier is populated per header during
-  chainsync (dense), so two peers on the same chain agree on every block in their
-  overlap. This is deliberately stronger than "share any common point": a fast
-  source that agrees on one old ancestor and then produces different blocks for
+  (`confirmsRecentChain`): every block a witness observed within the slot range
+  of the candidate's observed frontier matches the candidate's own
+  `(slot, hash)`, and the witness independently delivered the candidate's
+  current point. The current-point requirement is what keeps a match in older
+  candidate history from authorizing blocks the witness never observed. The
+  observed frontier is populated per header during chainsync (dense), so two
+  peers on the same chain agree on every block in their overlap. This is
+  deliberately stronger than "share any common point": a fast source that agrees on one old ancestor and then produces different blocks for
   the rest of the window is **not** confirmed, because the witness observed
   recent blocks the candidate lacks (or a conflicting hash at the same slot).
-- Witnesses are counted by distinct remote **host**, and a witness on the
-  candidate's own host is excluded, so several connections from one operator
-  cannot self-corroborate a private fork. This is a lower bound on independence,
-  not a guarantee: genuine independence (distinct operators, ASNs, and chain
-  views) depends on the operator's validated topology and peer-governance
-  diversity groups. Raising `corroborationPeers` raises the *count* required, not
-  the independence of the peers supplied — that remains an operator
-  responsibility.
+- A witness must also **reach the candidate's suffix**: it must have delivered
+  the candidate's current point, and its delivered frontier block number must
+  remain within the `securityParam` bound (`witnessSupportsSuffixLocked`). A
+  witness that only shares an older point, however recently it answered a
+  keepalive, does not count, and neither does one that rolled back to a point
+  outside its retained history: it keeps the candidate's points but its block
+  number is unknown (zero), so it cannot vouch for the candidate's height.
+- Witnesses are counted by distinct **peer identity**, and a witness with the
+  candidate's own identity is excluded, so several connections from one operator
+  cannot self-corroborate a private fork. The identity is peer governance's
+  diversity group (`PeerGovernor.DiversityGroupByConnId`, wired through
+  `ChainSelectorConfig.PeerIdentity`): the topology group ID, else the /24
+  (IPv4) or /64 (IPv6) prefix, else the host name. A connection the hook
+  cannot place, such as an inbound connection peer governance declined to
+  track at its peer-list cap, has no identity and fails closed: as a candidate
+  it has no corroborators, and as a witness it does not count. Keying it by
+  remote host instead would put it in a different namespace from its tracked
+  siblings, so one operator could corroborate itself. Without a hook the
+  selector groups by remote host. This is a lower bound on independence, not a
+  guarantee: genuine independence (distinct operators, ASNs, and chain views)
+  depends on the operator's validated topology. Raising `corroborationPeers`
+  raises the *count* required, not the independence of the peers supplied —
+  that remains an operator responsibility.
+- **Candidate exclusion uses a trusted frontier, whatever the threshold.** In
+  Genesis mode the "behind the best known tip" filter
+  (`bestKnownBlockNumber`) takes its frontier only from a live, eligible,
+  non-stale peer corroborated by at least `max(1, corroborationPeers)`
+  witnesses (`frontierTrustedLocked`). One uncorroborated peer, or one whose
+  connection is gone, therefore cannot make honest candidates look behind. When
+  no frontier is trusted nothing is excluded as behind. Outside Genesis mode
+  every eligible, non-stale frontier counts. Trust costs a corroboration scan,
+  so frontiers are tried from the highest down and the first trusted one is
+  the answer, and an evaluation pass computes the frontier once and shares it
+  between the mode check, every candidate, the incumbent re-check and the
+  anti-flap pin. A delivered header in Genesis mode is always evaluated, so it
+  does not advance the mode separately beforehand.
 - In Genesis mode with `corroborationPeers > 0`, an **uncorroborated** candidate
   is denied chain selection (`isPeerSelectableLocked`). A fully divergent fast
   source shares no recent block with any honest peer, so it is never corroborated
@@ -4952,8 +5169,9 @@ it. Dingo implements this as a **corroboration gate**
   corroboration-failure event to react.
 - `corroborationPeers = 0` disables the gate (density-only Genesis selection,
   the historical default), preserving prior behavior for nodes that do not opt
-  into the Genesis trust model. While the gate is disabled the per-peer hash
-  frontier is not tracked, so normal Praos operation carries no extra state.
+  into the Genesis trust model. The per-peer hash frontier is tracked in every
+  Genesis mode (the trusted-frontier rule above needs it) and dropped in Praos,
+  so normal Praos operation carries no extra state.
 - **Header-crypto verification gates observation, independent of
   corroboration.** Density and the corroboration hash frontier are both
   populated from `recordObservedPoint`, driven by `PeerTipUpdateEvent`
@@ -5039,18 +5257,12 @@ corroboration is active, so corroboration granted or revoked takes effect
 immediately rather than on the next periodic tick.
 
 **Deferred / not implemented**: Dingo does not yet implement **ChainSync
-Jumping** or **Devoted BlockFetch**. The corroboration gate also cannot
-testify about blocks a fast source produced beyond every witness's frontier: a
-source that stays consistent with honest peers up to their frontiers but forks
-only in the not-yet-witnessed suffix remains corroborated until a witness
-advances past the fork. Intersection-anchored fork resolution still compares
-that fetched suffix against the local candidate, but independent corroboration
-of the suffix necessarily waits for witnesses to observe it. Wiring
+Jumping** or **Devoted BlockFetch**. The corroboration gate stalls a fast source
+until independent witnesses deliver its current point; it does not buffer and
+apply only the confirmed prefix of a source that runs ahead. Wiring
 peer-governance demotion to the corroboration-failure event is likewise
-deferred. These remain future work; the corroboration gate confirms only the
-overlap that independent witnesses have observed. Density-at-intersection can
-compare an unseen suffix with the local candidate, but does not independently
-corroborate that suffix.
+deferred. Density-at-intersection can compare an unseen suffix with the local
+candidate, but does not independently corroborate that suffix.
 
 #### Genesis Limit on Patience
 
@@ -5437,6 +5649,11 @@ slots.
 
 `Start()` owns its inbound-connection and connection-closed EventBus subscriptions, and `Stop(ctx)` removes them with `UnsubscribeAndWaitContext`. This is required when live restore/truncate replaces the governor while retaining the EventBus: a stopped governor must not process delayed events or publish stale chain-selection updates after the replacement reconnects. The unsubscribe itself always happens; only the wait for a handler already in flight is bounded by `ctx`, so one stuck handler cannot overrun the shutdown deadline. A deadline expiry is returned as an error, unprefixed — every caller adds its own `peer governor shutdown:` prefix, as it does for the other components.
 
+The chain selector remains active while live restore/truncate replaces the peer
+governor. Node's peer-identity and peer-activity callbacks read and use the
+current governor while holding `peerGovMu`; replacement takes its write lock
+before publishing the new governor.
+
 Outbound-dial goroutines are registered with the governor's wait group while
 holding the same mutex `Stop()` uses to clear `stopCh`. Runtime peer additions,
 reconnects, bootstrap recovery, and ledger discovery therefore cannot add work
@@ -5811,9 +6028,11 @@ or reference -- cannot be repaired by selecting a different UTxO producer
 history. Every Shelley-family era delegates that rule to
 `shelley.UtxoValidateNoDuplicateInputs` and so reports
 `shelley.DuplicateInputError`. Byron permits a repeated input, but its
-`eras.TxTooLargeByronError`, `eras.UnknownAttributesByronError` and
-`eras.UnknownAddressAttributesByronError` read only the transaction and the
-protocol parameters. `isDeterministicTxValidationError` classifies all of them. Replay recovery therefore rejects the primary-chain branch
+`eras.TxTooLargeByronError`, `eras.InputIndexByronError`,
+`eras.UnknownAttributesByronError` and `eras.UnknownAddressAttributesByronError`
+read only the transaction and the protocol parameters.
+`isDeterministicTxValidationError` classifies all of them. Replay recovery
+therefore rejects the primary-chain branch
 and rolls both stores back to the last applied ledger tip, then publishes a
 `chainsync.resync` event with reason `deterministic tx validation recovery` so
 ChainSync obtains a fresh intersection. Other transaction-validation errors
@@ -6213,6 +6432,28 @@ Live ledger peer discovery is adapted at the node composition boundary:
 `ledger/` exposes stake pool relay data and current slot through neutral
 ledger/database types, while `internal/node/ledgerpeers` converts that data to
 the `peergov.LedgerPeerProvider` interface consumed by the peer governor.
+
+`ledger.PoolRelayProvider` attaches each relay's delegated pool stake (one
+batched `Database.GetStakeByPools` per cache refill; a lookup failure leaves
+stake at zero rather than failing discovery) and flags MultiHostName relays
+(hostname, no port). Discovery draws pools without replacement weighted by
+their stake (`weightedSample` in `peergov/weighted_selection.go`, zero stake
+carrying a floor weight so such pools stay discoverable), chooses one relay
+from each drawn pool per round, and walks the resulting relay order until the
+ledger-peer deficit is filled. A MultiHostName relay is
+carried as `host:0`; resolution looks up its SRV record for target and port,
+falls back to A/AAAA on the default port, and never leaves port 0 as the
+dial target. MultiHost reconnects preserve SRV-selected ports and absolute
+SRV target names; resolution is bounded by the caller's context. Ledger SRV
+selection tries later targets and the hostname fallback when an earlier target
+has no supported routable address. Discovery offers one address per relay before
+alternates and resolves each distinct address once per round. Sampling keeps
+exact stake weights when their total fits, and scales them together on overflow.
+A discovered peer keeps its pool's stake in `StakeLovelace` and carries
+`StakeKnown` through the ledger adapter, so known zero stake scores below unknown
+stake. `UpdatePeerScore` folds stake in as a log-scaled sixth component (weight
+0.10, neutral 0.5 when unknown). Rediscovery refreshes retained peers' stake as
+well as newly admitted peers.
 
 Bootstrap peers are used during initial sync and recovery. Bootstrap exit can
 be triggered by enough connected ledger peers, or by the configured slot/progress
@@ -7279,6 +7520,42 @@ requires the same validated interval; `PoolCredentials.KESSign` remains the
 lower-level cryptographic primitive used by credential tooling and tests that
 may not have Shelley genesis context.
 
+**Reload.** A block producer re-reads its VRF, KES and operational certificate
+files on `SIGHUP` (`internal/node.reloadOnSignal`, registered only when
+`blockProducer` is set, so relays keep the signal's default behaviour). A
+Kubernetes Secret rotated in place is picked up with `kill -HUP` and no pod
+restart, so no leader schedule is lost. `Node.ReloadBlockProducerCredentials`
+loads the files into credentials of their own and runs the checks startup runs:
+certificate signature, KES window against the wall-clock slot, and the ledger
+cross-check against the pool registration and the on-chain counter. Only then
+does `PoolCredentials.ReplaceWith` move the material into the live set in one
+critical section. It refuses a replacement that is unvalidated, that belongs to
+another pool or VRF key, or whose counter is **below** the loaded one, and every
+refusal leaves the loaded credentials untouched: loading into the live set
+instead would fail closed on a bad file and stop a healthy producer. A
+successful reload logs the old and new counter and certificate KES period.
+Credentials sourced from a KES agent are rotated through the agent, and a
+reload against them is refused. A reload is also refused while startup,
+shutdown, or a live restore or truncate holds the lifecycle gates, since those
+replace the ledger state and the live credentials the reload reads. Unlike
+initial startup, reload refuses a wall-clock slot outside confirmed era history:
+it cannot replace working keys without verifying the replacement's KES window.
+
+`ReplaceWith` deliberately does not advance the credential generation. A forge
+attempt that already holds a snapshot owns a private copy of the outgoing
+material, still validly signed for the slot it selected, so the swap does not
+abandon it; an attempt begun afterwards acquires the new material. A double
+forge across the swap is prevented by the duplicate-slot fence, not by the
+generation.
+
+**Close.** `PoolCredentials.Close` zeroizes the VRF seed and the KES secret key
+and makes the credentials permanently unloaded, so no later load or reload can
+put keys back. The node owns the live set (`Node.blockProducerCreds`) and closes
+it in the same stop sequence that quiesces the forger, after the forger, the KES
+agent client and the leader election, which read from or install into it.
+The leader election holds no copy of the VRF seed: it takes one from the
+credentials for each schedule computation and wipes it afterwards.
+
 ### KES Agent (`kesagent/`, `ledger/forging/kes_signer.go`)
 
 `--shelley-kes-agent-socket` sources the KES signing key from an external
@@ -7409,10 +7686,14 @@ fixed-size `sun_path` field --- 104 bytes on macOS, 108 on Linux --- so a
 longer path is refused with `EINVAL`, which Go reports as a bare
 `invalid argument` naming neither the length nor the limit. macOS is four
 bytes tighter than Linux, so a path that works on a Linux node can fail on a
-developer's Mac. Dingo never constructs this path; it connects to exactly what
-`--shelley-kes-agent-socket` names, and `kesagent.NewClient` rejects an
-over-long one at block-producer startup with an error that states the length
-and the limit.
+developer's Mac. `kesagent.NewClient` resolves a relative filesystem path to
+one absolute path before the first connection, then reuses that path for every
+reconnect; changing the process working directory cannot redirect later
+connections to another local agent. Absolute filesystem paths are cleaned,
+and Linux abstract socket addresses use Go's `@name` form and are kept as
+configured. Literal NUL-prefixed addresses are rejected as nonportable. The
+client rejects an over-long resolved path at block-producer startup with an
+error that states the length and the limit.
 
 `internal/config.ValidateKESKeySources` rejects a block producer that sets
 both `shelleyKesKey` and `shelleyKesAgentSocket`, so an operator's explicit
@@ -7487,6 +7768,13 @@ The latter is ancillary-key-signed data, not stake-certified data. Normal
 Ouroboros validation resumes at the imported point and covers the gap and all
 future network blocks.
 
+The post-download ImmutableDB copy completes before ledger-state import starts.
+The copy persists block and transaction metadata as well as block blobs, so it
+is a metadata writer even though its bulk payload belongs to the blob store.
+Ordering the two resumable phases keeps their SQLite write transactions from
+contending during bootstrap. A later import failure resumes against the already
+copied immutable data.
+
 The container entrypoint installs its SIGINT/SIGTERM handlers before deciding
 whether to run a first or resumed Mithril sync. Both that bootstrap command and
 the later `serve` command run as one tracked direct child: the handler forwards
@@ -7555,6 +7843,23 @@ Package layout:
 3. `bootstrap.go` verifies the certificate chain, dispatches on the
    configured backend, and orchestrates the v1 snapshot workflow;
    `bootstrap_v2.go` orchestrates the v2 digest/immutable/ancillary workflow
+
+The certificate-chain walk (`bootstrap.go`) runs before any certificate is
+trusted, so it is bounded on every axis the aggregator controls. Each
+certificate body is read through a limit of 8 MiB with overflow detection, and
+the bytes of every certificate read share one 512 MiB budget (the walk retains
+them all). The walk follows at most 10000 certificates, rejects metadata listing
+more than 8192 signers or a protocol message with more than 64 parts (a
+decoded map entry costs several times its JSON bytes, so the byte budget alone
+does not bound the retained heap), and, in STM mode, rejects an aggregate signature with
+more than 8192 signatures, 65536 lottery indices in total or 262144 Merkle path
+values. The binary parser and the message-part decoder check these counts before
+allocating, the index total included, and the checks
+precede signature, lottery and Merkle verification. Verification work is
+charged to one cumulative budget of 2^26 weighted units for the whole chain
+(64 per signer, 1 per lottery index, 1 per path value) before the work
+runs. Live data sits far inside each bound (mainnet: about 660
+certificates of at most 150 KB, 134 signers, 1949 lottery indices).
 
 Bootstrap progress is emitted through one callback even though v2 downloads
 the ancillary ledger state and immutable archives concurrently. Each progress
@@ -8214,7 +8519,7 @@ hash, and — once the certified ImmutableDB is open — the certified tip slot)
 The pin is written from `BootstrapConfig.OnArtifactSelected`, which both
 backends invoke after the artifact is identity-checked and, when enabled,
 certificate-verified, and before the first byte is downloaded. It is ephemeral:
-`ClearSyncState` on sync completion wipes it, so its presence means a run is
+Mithril completion cleanup deletes it, so its presence means a run is
 mid-flight against that artifact.
 
 A resuming run (`sync_status` non-empty) passes the pinned digest to
@@ -8533,17 +8838,13 @@ manifest. The metadata plugin exposes
 critical subset before clearing `sync_status`, then leaves the pending
 sync-state marker set. API-mode `serve` verifies the critical subset before
 startup and runs the full lazy rebuild as background maintenance; the rebuild
-paths clear the marker only after the full manifest has been rebuilt, but they
-are not the only writer of that row. `ClearSyncState`
-(`DELETE FROM sync_state`, no `WHERE`) removes it too, and Mithril sync runs
-that clear through `updateMithrilReadyState` immediately after the critical
-rebuild. It therefore re-writes every row a completed sync still needs —
-`mithril_ledger_slot`, `mithril_ledger_hash`, the post-backfill statistics marker,
-and the deferred-index marker —
-back after the clear; without the last of those, every Mithril-bootstrapped
-database loses the marker moments after `BuildCritical` set it and never builds
-the lazy manifest entries at all. Core-mode startup still
-repairs the full manifest synchronously before serving. Both repair entry
+paths clear the marker only after the full manifest has been rebuilt. Mithril
+completion cleanup leaves the deferred-index marker, post-backfill statistics
+marker, and forge fences untouched, and deletes transient keys individually.
+It writes `mithril_ledger_slot` and
+`mithril_ledger_hash` after cleanup. This preserves the pending marker set by
+`BuildCritical` so a bootstrapped database still builds the lazy manifest.
+Core-mode startup still repairs the full manifest synchronously before serving. Both repair entry
 points also restore any missing critical index when no cycle is pending at all:
 the marker records that a cycle was interrupted, not which indexes exist, and a
 database bootstrapped by a binary that predates the marker being carried across
@@ -8587,7 +8888,7 @@ when enabled, and the health listener on `healthPort` (default `12799`, `0` disa
 The health listener is **not** gated on storage mode. The four API
 listeners start only when `storageMode.IsAPI()`, so a probe wired the same
 way would be inert in the default `core` mode — the mode the shipped
-`docker-compose.yml` runs. It binds `bindAddr`, the address the relay/NtN
+image runs. It binds `bindAddr`, the address the relay/NtN
 listener already uses, rather than the API listeners' own
 loopback-by-default address: a Docker `HEALTHCHECK` runs inside the
 container and would be satisfied by loopback, but a Kubernetes kubelet probe
@@ -8598,8 +8899,18 @@ onto a port an operator exposes for probing.
 
 | Path | Semantics |
 |------|-----------|
-| `/healthz`, `/health` | Liveness: 200 whenever the process is up and this listener answered. Independent of sync state. |
-| `/readyz` | Readiness: 200 only when the chain tip is within `healthReadyGapSlots` of the wall-clock slot; 503 otherwise. |
+| `/healthz`, `/health` | Liveness: 200 whenever the process is up and this listener answered, independent of sync state. The one exception is a wedged event loop: once the slot clock has ticked, 503 if it then stays silent for five minutes. A clock that pauses its ticks because era history does not reach the wall-clock slot reports each paused slot and is not silent. A node that has not ticked yet (database open, Mithril bootstrap, ledger startup) is live. |
+| `/readyz` | Readiness: 200 only when the chain tip is within `healthReadyGapSlots` of the wall-clock slot **and** the database answers a read (not ready during startup, live restore or truncate, and shutdown); for a node configured as a block producer, also when the forger is running and its credentials could sign at the current slot (operational certificate loaded, validated and inside its KES window). 503 otherwise, with the first failing condition as the body's `reason`. |
+
+The checks beyond the tip gap are supplied by `Node.EventLoopResponsive`,
+`Node.DatabaseReady` and `Node.BlockProducerReady` through
+`health.Check`, and `nodeHealthChecks` marks only the first as a liveness
+check. The database and forger pointers are read under the node's lifecycle
+gates with `TryLock`, so a probe never waits on a restore and a gate held by
+one reads as not ready. The gates are released before the database read and
+the forger check run: the chain-switch and chainsync callback handlers
+`TryLock` `liveLifecycleMu` and drop their work when it is held, so a probe
+must not hold it across I/O.
 
 The separation is a deliberate operational contract, not two names for one
 check. An orchestrator answers a liveness failure by *restarting* and a
@@ -8687,6 +8998,10 @@ new starts and closes its owned pool after listener shutdown; a timed-out start
 is awaited by deferred cleanup before closing that pool.
 
 SQLite-backed tools and resources enforce the configured query timeout.
+Per-table schema resources are enumerated once during server construction,
+bounded by the larger of the query timeout and 30 seconds, so construction
+can wait that long on a busy pool. An enumeration failure is logged through
+the provider logger and leaves those resources unregistered until restart.
 Tip responses report synchronization as unknown without a measured current
 slot, and database lookup failures remain errors rather than missing records.
 
@@ -8933,10 +9248,9 @@ Dingo's internal state and Blockfrost response types and supports
 Blockfrost-style pagination headers. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
 shared strict pagination parser (count 1–100, page 1–21474836).
-The root document is served only at the literal `/` path (`GET /{$}`); any
-other unregistered path falls through to a catch-all `404` handler instead
-of the root document, matching real Blockfrost's behavior for unimplemented
-routes.
+The root document is served only at the literal `/` path (`GET /{$}`).
+Documented operations without a handler return `501`; unknown paths fall
+through to a catch-all `404` handler instead of the root document.
 
 The account UTxOs, withdrawals, and transactions endpoints resolve everything
 by stake credential rather than a single address. Account UTxOs reuse the
@@ -9169,6 +9483,19 @@ persisted blocks. A deeper rollback walks persisted predecessors synchronously
 inside the stream handler, keeping cancellation and conversion errors in the
 request lifecycle; an unexpected persisted-block conversion failure is
 returned as a stream error.
+
+### Blockfrost unsupported operations
+
+The Blockfrost server distinguishes documented, unimplemented operations from
+unknown paths. Unsupported Blockfrost OpenAPI 0.1.93 operations return HTTP 501
+with the usual JSON error fields; an unsupported method on these paths returns
+HTTP 405 with an `Allow` header. Unknown paths retain HTTP 404. Implemented
+operations retain their handlers, while reserved literals such as `pools/retired`
+take precedence over generic parameter routes. Ambiguous upstream wildcard
+patterns are recognized by the bounded catch-all operation list rather than
+registered as conflicting Go `ServeMux` patterns. The IPFS path parameter
+matches the remaining path segments, so an object inside an IPFS directory is
+recognized as the same operation.
 
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
@@ -11447,14 +11774,61 @@ periodic full checks reported as "diverged" on essentially every run that
 took long enough for the live tip to move during the walk -- confirmed
 live against a real Preview cardano-node: every flagged row's own
 `AddedSlot` was strictly after the pinned slot. The live path's
-reply is still fully materialized rather than streamed. Every other query type
-still ignores the acquired point and answers from live state --
-`ShelleyUtxoByAddressQuery` shares the same utxo table and columns as
-`GetUTxOByTxIn` and could extend the same way, but no current caller needs
-it; `queryShelleyStakeSnapshots` in particular looks like a cheap addition
-(the same epoch-snapshot shape as stake distribution) but its
-zero-pool-omission rule depends on the *live* protocol version, so pinning
-it would need the same not-yet-built historical-pparams machinery.
+reply is still fully materialized rather than streamed.
+`GetUTxOByAddress` (`queryShelleyUtxoByAddress`) applies the same predicate
+and `checkUtxoRetentionWindow` floor to the requested addresses
+(`database.UtxosByAddressAsOf`). `GetAccountState`
+(`queryShelleyAccountState`) reads the `network_state` row in effect at the
+pinned slot (`GetNetworkStateAsOfSlot`); those rows are removed only by
+rollback, so no retention floor applies, and a slot older than every row is
+rejected rather than answered with zeros. `GetStakeSnapshots`
+(`queryShelleyStakeSnapshots`) reads the mark, set and go snapshots of the
+pinned point's epoch and the two before it, rejects the point once the go
+snapshot leaves the pool-snapshot retention window, and takes the protocol
+version for its PV11 zero-pool rule from that epoch's protocol parameters:
+the live consensus snapshot's for the current epoch, the persisted row for
+an earlier one. `VerifyPointQueryable` applies both of these conditions at
+Acquire, so outside API storage mode a point more than one epoch behind the
+live tip is refused there rather than failing a later `GetStakeSnapshots`.
+`GetStakePools` (`queryShelleyStakePools`) answers with the pools active at
+the pinned slot through `GetActivePoolKeyHashesAtSlot`, the lookup the
+unpinned path already runs at the tip; pool registration and retirement rows
+are removed only by rollback, so no retention floor applies.
+`GetStakeDelegDeposits` (`queryShelleyStakeDelegDeposits`) reports each
+credential's deposit from its latest registration event at or before the
+pinned slot (`GetLatestAccountRegistrationAtOrBefore`, one query), or from
+the credential's snapshot import baseline when that is at least as new, as
+`LedgerView.StakeCredentialDeposit` treats it; certificate rows and the
+baseline are likewise removed only by rollback.
+`GetFilteredDelegationsAndRewardAccounts` and `GetFilteredVoteDelegatees`
+read the requested accounts as they stood at the pinned slot through
+`GetAccountsByCredentialAtSlot`: an account registered then, with the pool,
+DRep and reward balance it held. The pool and DRep come from the live account
+row when it was last written at or before the slot, and otherwise from the
+derivation `RestoreAccountStateAtSlot` applies on rollback. Certificate,
+snapshot-import baseline, POOLREAP, and PV10 dangling-DRep-clear history share
+that derivation. A snapshot baseline is the authoritative full state at its
+slot and wins ties; a same-slot certificate wins a PV10 clear because the
+clear runs at the epoch transition before the block. The reward balance is
+reconstructed from the
+`account_reward_delta` journal the way historical stake reads it, including
+the credits of a pending reward round applied at or before the slot, so the
+unpinned path's separate pending-credit addition is skipped. Certificates,
+baselines, PV10 clear rows, and the reward journal are removed only by
+rollback, so no retention floor applies. `GetDRepState`, `GetProposals` and
+`DebugChainDepState` still
+ignore the acquired point.
+
+Every pinned query also needs history the node actually holds, so
+`VerifyPointQueryable` refuses a point below the latest Mithril import's
+ledger slot (`mithril_ledger_slot`, `checkMithrilTrustBoundary`). The
+import writes the snapshot's state, not the history that led to it: the
+blocks below that slot carry no certificate, transaction or reward-journal
+rows. Catch-up reconciliation records accounts absent from the newer snapshot
+as an inactive full-state baseline at that slot; it also deactivates DReps,
+retires pools, and tombstones UTxOs the snapshot no longer holds. A point at
+the snapshot slot or after it is exact. A node synced from genesis has no such
+slot and is unaffected.
 
 Identifying a pinned point by slot alone is ambiguous across a rollback: a
 fork switch can leave a different block at the same slot than the one the
@@ -12775,9 +13149,15 @@ exhaustiveness test decides what a configuration log contains, so a nested
 
 ## Stake Snapshots
 
-Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Set distribution — stake at the end of epoch E-2 — to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and MIR, and before POOLREAP and governance enactment — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
+Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Set distribution — stake at the end of epoch E-2 — to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and MIR; Conway and earlier eras run SNAP before POOLREAP and governance enactment, while Dijkstra runs it after those rules and HARDFORK — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
 
 Live stake and persisted consensus snapshots carry a shared calculation version. At startup the node compares every live aggregate row with canonical account and unspent-UTxO state and atomically rebuilds it if necessary. If a Mark/Set/Go snapshot or authoritative Mark metadata has an older version, startup stops with a rebootstrap error: after consumed-UTxO tombstones have been pruned, regenerating a historical SNAP from current state would be unsafe.
+
+Calculation version 3 includes Dijkstra boundary credits in its Mark snapshot.
+It also preserves genesis pool deposits and pays rewards earned by nonempty
+genesis staking during the initial reward rounds. Existing snapshots from an
+older calculation version require replay from genesis or a trusted ledger-state
+import; the prior sigma-denominator migration only certifies version 2.
 
 ### Ouroboros Praos Snapshot Model
 
@@ -12912,13 +13292,15 @@ producer absent from a populated snapshot always hard-rejects. See the retention
 section in `DATABASE.md` for the per-table
 detail.
 
-A skipped reward round is never made up later, and that has consequences
-well beyond the reward figures. Applying the round at the boundary into N
-requires this node's own `RewardSnapshot` for N-3 and `RewardAdaPots` for
-N-1; when either is absent the round is skipped, while the reference node
-credits it regardless. Reward balances — and the leadership stake
-distribution derived from them, since `reward_live_stake` sums UTxO plus
-reward — are then permanently short by that epoch's rewards. Leader
+At a boundary with a Shelley reward round, applying the round requires this
+node's own `RewardSnapshot` for N-3 and
+`RewardAdaPots` for N-1. When the authoritative boundary lacks either input,
+or lacks the retained stake inputs or performance block counts needed to
+consume them, it returns `errHaltLedgerPipeline` and stops before committing
+the boundary. Opportunistic precompute remains retryable while those inputs
+are not yet available. Continuing without the round would permanently shorten
+reward balances and the leadership stake distribution derived from them,
+since `reward_live_stake` sums UTxO plus reward. Leader
 eligibility compares a VRF value against a stake-derived threshold, so a
 sigma shortfall of eps flips a decision with probability about eps per
 block, and a flipped decision rejects a canonical block. Measured on preview:
@@ -12931,8 +13313,8 @@ predates the imported state or because an imported basis could not be derived
 without understating stake. The ledger-state import closes the pots half of
 that gap by seeding a `RewardAdaPots` row for the snapshot's own epoch from the
 state it already decodes -- treasury and reserves from `AccountState`, the fee
-pot from `UTxOState` -- so the round at the first boundary after import is not
-skipped for want of pots. The fee pot is decoded specifically for this,
+pot from `UTxOState` -- so the round at the first boundary after import has its
+required pots. The fee pot is decoded specifically for this,
 because it is an addend of the reward pot and a row seeded with zero fees
 would credit the round at the wrong amount rather than visibly not running
 it.
@@ -13536,8 +13918,8 @@ write belong at different places in the sequence:
 
 - `Manager.ComputeEpochBoundarySnapshot`, installed via
   `LedgerState.SetEpochBoundarySnapshotStakeHook`, reads the stake distribution at
-  the SNAP point — immediately after `applyStakeRewards` and `applyMIRCerts`, and
-  before POOLREAP and governance enactment. It writes nothing and holds the distribution in the
+  the era-specific SNAP point: before POOLREAP and enactment through Conway,
+  after POOLREAP, enactment and HARDFORK in Dijkstra. It writes nothing and holds the distribution in the
   manager, keyed to the exact boundary (new epoch, boundary slot, snapshot slot,
   CIP-0163 gate argument).
 - `Manager.CaptureEpochBoundarySnapshot`, installed via
@@ -13608,6 +13990,18 @@ the Shelley-era MIR rule — and their credits belong in the mark snapshot.
 Aligning with that required swapping dingo's POOLREAP and MIR, which had run in
 the opposite order; MIR is now also pre-POOLREAP, matching the reference, so its
 pot movements are visible to the deposit refunds.
+
+The Musashi Leios prototype folds a certified endorser closure onto the parent's
+unticked ledger before this sequence (`applyLeiosClosure`, then `tickThenApply`
+in ouroboros-consensus). `ledgerProcessBlocksFromSource` resolves and checks a
+boundary closure before entering the rollover transaction, then applies it
+before `processEpochRollover`. Its deposits, withdrawals, governance effects,
+donations, fees, and stake are therefore evaluated in the parent epoch. The
+certifying ranking block's own body follows the transition. Closure transactions
+keep the certifier's point for rollback and record the parent ledger slot in
+`leios_transaction_context` for historical epoch accounting. Apply notifications
+remain pending until the certifying block commits; replay suppresses duplicate
+ledger effects while publishing those pending notifications once.
 
 A failed SNAP-point read is isolated with a savepoint (so a read error cannot
 poison the rollover transaction on a backend that aborts on SQL error). The
@@ -13797,7 +14191,13 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    distributions (summed from protocol version 5, replaced before it) and
    net pot transfers, and the cutoff. Every transaction's certificates are
    written immediately after that transaction validates, so this is always
-   caught up as of the currently validating slot. For legacy stake
+   caught up as of the currently validating slot. The gouroboros
+   `UtxoValidateDelegation` rule in the same rule lists checks
+   `MIRProducesNegativeUpdate` again from protocol version 5, reading the
+   pending rewards through `*LedgerView.PendingInstantaneousRewards` (the
+   epoch's committed distributions for one credential and pot, summed);
+   without that capability it rejects any negative delta an earlier
+   transaction covers as undecidable. For legacy stake
    certificates the same walk enforces `StakeKeyAlreadyRegisteredDELEG`,
    `StakeKeyNotRegisteredDELEG` and `StakeKeyNonZeroAccountBalanceDELEG`,
    with withdrawals drained first. For genesis key delegation certificates it
@@ -14171,6 +14571,18 @@ Rewards omitted by the filter return to reserves. Calculated rewards that fail
 the application-time account-registration check are unspendable and go to
 treasury. Spendable rewards are credited through `account_reward_delta`.
 
+`ValidateTxDijkstra` builds its rule list from the upstream Dijkstra descriptors
+and rule functions, whose phase-2-valid-only rules (governance, certificate and
+entity semantics) are already no-ops for an `is_valid=false` transaction; the
+always-run rules (collateral, redeemer, witness, value and structural rules)
+still apply. Dingo's own replacements for the committee-certificate and
+unknown-voter rules, and the pool-margin floor, carry the same phase as the rule
+they replace: each returns before any upstream call or state query when the
+transaction is declared invalid. Declared-invalid transactions reach no other
+path with governance effects: the mempool wire form has no `is_valid` field, and
+block application records only the collateral input and collateral return for
+them.
+
 CIP-23 minimum pool margin is an optional, consensus-affecting operator setting
 that defaults off (0) and takes effect only in Dijkstra and later. When
 `LedgerStateConfig.MinPoolMargin` (basis points) is nonzero, `rewardParameters`
@@ -14347,7 +14759,7 @@ reach the boundaries that applied them. The folded flag is the job's progress
 record, so a stopped job resumes where it left off, and a rollback over a
 compacted round reverts it the same way as a withdrawal's folds. A rollback below the boundary removes the round
 and clears `folded` on its surviving outputs in the transaction that reverts
-the folded credits' journal rows. Core-mode retention keeps a credited round's
+the folded credits' journal rows. A Mithril catch-up/repair import removes post-anchor credited rounds and clears their `folded` flags in its pre-phase sweep (`ledgerstate.ImportLedgerState`, see DATABASE.md's `reward_credit_round` row). After importing certified account balances, it also deletes later reward-journal entries for credentials covered by the snapshot, including entries for credits folded during the anchor-to-tip gap; resumed imports perform that journal cleanup even when the cert-state phase already completed. Core-mode retention keeps a credited round's
 unfolded rows. A precompute for a credited round does nothing, and replacing a
 credited round's outputs is refused: they are balances, and rewritten rows
 would count folded credits again.
@@ -14430,10 +14842,21 @@ workers set by `blockPipelineWorkerCount()` (`ledger/state.go`) — the host's
 and capped at `blockPipelineMaxWorkers` (8) — and validation disabled
 (`ValidateWorkers: 0`) unless `BlockPipelineValidateEnabled` is also set, in
 which case validate workers use the same CPU-scaled count. Each gathered batch
-of raw blocks (`decodeReadChainBatch`) is submitted to the pipeline up
-front and drained back from `Results()` in submission order — the
-pipeline's apply stage guarantees this ordering regardless of which worker
-decodes first — so decode work for multiple blocks can overlap while
+of raw blocks (`decodeReadChainBatch`) is submitted to the pipeline from a
+separate goroutine while the caller drains `Results()` in submission order —
+the pipeline's apply stage guarantees this ordering regardless of which
+worker decodes first. Draining concurrently is required: `Submit` waits once
+`MaxPendingBlocks` sequences are outstanding, and once the `Results()`
+buffer is full the apply stage completes no further sequences until results
+are consumed, so a batch larger than that limit would otherwise stall in
+`Submit`. If a `Submit` fails, the results of the blocks already
+submitted are still drained before the error is returned, so none are left
+for a later batch to read. That drain is bounded by the pipeline shutdown
+timeout because a fatal apply-stage error can cancel the pipeline before every
+submitted block produces a result. The submission context is not derived from the
+reader attempt's context, so a per-attempt cancel cannot leave results
+misaligned with the batch; every return cancels it and joins the submitter.
+Decode work for multiple blocks can overlap while
 downstream ledger validation/apply remains fully serial and unchanged. The
 pipeline's own apply stage is a no-op here (`ApplyFunc` is nil): its only
 job in this phase is re-sequencing decoded results, not applying ledger

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
@@ -41,6 +42,7 @@ type storedHashStore struct {
 	committeeHot      *models.AuthCommitteeHot
 	epoch             *models.Epoch
 	rebuiltInputs     []*models.RewardStakeInput
+	rebuiltErr        error
 	registrationsSeen [][]lcommon.PoolKeyHash
 }
 
@@ -103,6 +105,9 @@ func (s *storedHashStore) GetEpochBoundaryRewardStakeInputsForPools(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) ([]*models.RewardStakeInput, error) {
+	if s.rebuiltErr != nil {
+		return nil, s.rebuiltErr
+	}
 	if s.rebuiltInputs == nil {
 		return s.MetadataStore.GetEpochBoundaryRewardStakeInputsForPools(
 			poolKeyHashes,
@@ -438,8 +443,33 @@ func TestRebuildPrunedRewardStakeInputsRejectsMalformedPoolInput(t *testing.T) {
 		&models.RewardSnapshot{CapturedSlot: 150, BoundarySlot: 199},
 		[]*models.RewardPoolInput{{PoolKeyHash: short}},
 	)
+	require.ErrorIs(t, err, errRewardStakeInputsUnrecoverable)
 	require.ErrorContains(t, err, "reward pool input for epoch 5")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Empty(t, store.registrationsSeen,
 		"a padded pool id must not reach the owner-resolution query")
+}
+
+func TestRebuildPrunedRewardStakeInputsKeepsQueryFailureRetryable(
+	t *testing.T,
+) {
+	t.Parallel()
+	queryErr := errors.New("database temporarily unavailable")
+	_, store := newStoredHashDB(t, func(s *storedHashStore) {
+		s.rebuiltErr = queryErr
+	})
+	ls := &LedgerState{config: LedgerStateConfig{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}}
+	_, err := ls.rebuildPrunedRewardStakeInputs(
+		store,
+		nil,
+		5,
+		&models.RewardSnapshot{CapturedSlot: 150, BoundarySlot: 199},
+		[]*models.RewardPoolInput{{
+			PoolKeyHash: bytes.Repeat([]byte{0x61}, lcommon.Blake2b224Size),
+		}},
+	)
+	require.ErrorIs(t, err, queryErr)
+	require.NotErrorIs(t, err, errRewardStakeInputsUnrecoverable)
 }

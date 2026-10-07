@@ -1333,11 +1333,15 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 			"peer_tip_slot",
 			effectiveObservedTip.Point.Slot,
 		)
-		ls.requestChainsyncResync(
+		// A request coalesced into a recent one closes nothing, so it
+		// must not arm the per-peer record or count toward the stall.
+		if ls.requestChainsyncResync(
 			effectiveConnId,
 			event.ChainsyncResyncReasonChainSwitchCursorAhead,
 			&pending,
-		)
+		) {
+			ls.markFreshCursorRequestedLocked(effectiveConnId)
+		}
 		return
 	}
 	if connIdKey(replayConnId) != "" {
@@ -1755,11 +1759,185 @@ func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
 		return false
 	}
 	localTip := ls.PrimaryChainTip()
-	if newObservedTip.BlockNumber > localTip.BlockNumber {
-		return true
+	if !tipAhead(newObservedTip, localTip) {
+		return false
 	}
-	return newObservedTip.BlockNumber == localTip.BlockNumber &&
-		newObservedTip.Point.Slot > localTip.Point.Slot
+	if ls.chainSwitchPeerStillStreamingLocked(e, connId, newObservedTip) {
+		ls.config.Logger.Debug(
+			"chain switch selected peer is still streaming headers, leaving cursor recovery to the header path",
+			"component",
+			"ledger",
+			"connection_id",
+			connId.String(),
+			"local_tip_slot",
+			localTip.Point.Slot,
+			"peer_observed_tip_slot",
+			newObservedTip.Point.Slot,
+		)
+		return false
+	}
+	if ls.freshCursorAwaitingHeadersLocked(connId) {
+		ls.logFreshCursorNotRepeatedLocked(connId, localTip, newObservedTip)
+		return false
+	}
+	return true
+}
+
+// tipAhead reports whether a is past b: a higher block number, or the same
+// block number at a later slot.
+func tipAhead(a, b ochainsync.Tip) bool {
+	return a.BlockNumber > b.BlockNumber ||
+		(a.BlockNumber == b.BlockNumber && a.Point.Slot > b.Point.Slot)
+}
+
+// chainSwitchPeerStillStreamingLocked reports whether connId's peer has at
+// least headerMismatchResyncThreshold blocks left to deliver before its
+// target tip. Such a peer keeps sending headers, so a cursor that has moved
+// past the local tip shows up in the header handler as consecutive
+// mismatches, which request a resync from received headers. Closing it
+// speculatively instead is what, far behind the network, closes every
+// reconnected peer before it delivers anything. A peer at its tip may send
+// nothing for many slots, so only there is the speculative close needed.
+//
+// For the selected peer the target is the untrusted advertised tip the
+// switch event carries. It is used only to withhold a close: overstating it
+// routes the peer through the evidence-based path and cannot force one. A
+// fallback connection has no advertised tip here, so its target is the chain
+// selector's sync target, which is the advertised tip or, when that is
+// implausibly far ahead, the delivered frontier. It never exceeds the
+// advertised tip, so the fallback withholds a close less often and keeps the
+// speculative close, which freshCursorPeers still limits to one per peer.
+func (ls *LedgerState) chainSwitchPeerStillStreamingLocked(
+	e chainselection.ChainSwitchEvent,
+	connId ouroboros.ConnectionId,
+	observedTip ochainsync.Tip,
+) bool {
+	var targetTip ochainsync.Tip
+	switch {
+	case sameConnectionId(connId, e.NewConnectionId):
+		targetTip = e.NewTip
+	case ls.config.GetPeerSyncTargetFunc != nil:
+		var ok bool
+		targetTip, ok = ls.config.GetPeerSyncTargetFunc(connId)
+		if !ok {
+			return false
+		}
+	default:
+		return false
+	}
+	return targetTip.BlockNumber > observedTip.BlockNumber &&
+		targetTip.BlockNumber-observedTip.BlockNumber >=
+			headerMismatchResyncThreshold
+}
+
+const (
+	// freshCursorPeerRetention bounds how long a peer stays in
+	// freshCursorPeers without delivering a header, so a peer that never
+	// reconnects does not stay there for the life of the process.
+	freshCursorPeerRetention = 30 * time.Minute
+	// freshCursorStallWarnRequests is how many chain-switch fresh-cursor
+	// requests may pass without the local tip advancing before the ledger
+	// warns. Each request closes a connection, so a run of them with no
+	// progress is a stall that no other component reports.
+	freshCursorStallWarnRequests = 3
+)
+
+// freshCursorRequest records a chain-switch fresh-cursor request for a peer.
+type freshCursorRequest struct {
+	at time.Time
+	// repeatLogged is set once a later switch to the same peer has been
+	// logged as not repeating the request, so it is reported once per
+	// request rather than on every switch.
+	repeatLogged bool
+}
+
+// freshCursorAwaitingHeadersLocked reports whether a chain switch already
+// closed connId's peer for a fresh cursor and no header from that peer has
+// reached the ledger since. Requesting another would only close the
+// reconnected cursor before it can deliver anything, which while far behind
+// cycles through every peer without fetching a block.
+func (ls *LedgerState) freshCursorAwaitingHeadersLocked(
+	connId ouroboros.ConnectionId,
+) bool {
+	req, ok := ls.freshCursorPeers[netAddrString(connId.RemoteAddr)]
+	return ok && time.Since(req.at) < freshCursorPeerRetention
+}
+
+func (ls *LedgerState) logFreshCursorNotRepeatedLocked(
+	connId ouroboros.ConnectionId,
+	localTip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+) {
+	req := ls.freshCursorPeers[netAddrString(connId.RemoteAddr)]
+	if req == nil || req.repeatLogged {
+		return
+	}
+	req.repeatLogged = true
+	ls.config.Logger.Info(
+		"chain switch selected peer has delivered no header since its fresh chainsync cursor, not requesting another",
+		"component",
+		"ledger",
+		"connection_id",
+		connId.String(),
+		"local_tip_slot",
+		localTip.Point.Slot,
+		"peer_observed_tip_slot",
+		observedTip.Point.Slot,
+	)
+}
+
+func (ls *LedgerState) markFreshCursorRequestedLocked(
+	connId ouroboros.ConnectionId,
+) {
+	ls.noteFreshCursorProgressLocked()
+	key := netAddrString(connId.RemoteAddr)
+	if key == "" {
+		return
+	}
+	now := time.Now()
+	for k, req := range ls.freshCursorPeers {
+		if now.Sub(req.at) >= freshCursorPeerRetention {
+			delete(ls.freshCursorPeers, k)
+		}
+	}
+	if ls.freshCursorPeers == nil {
+		ls.freshCursorPeers = make(map[string]*freshCursorRequest)
+	}
+	ls.freshCursorPeers[key] = &freshCursorRequest{at: now}
+}
+
+// noteFreshCursorProgressLocked counts fresh-cursor requests made since the
+// local tip last moved past the highest tip it had reached, and warns when
+// they reach freshCursorStallWarnRequests. Neither a rollback nor a return to
+// a tip already reached is progress, so comparing against the previous
+// request's tip instead would let a node that rolls back and re-applies the
+// same blocks reset the count indefinitely.
+func (ls *LedgerState) noteFreshCursorProgressLocked() {
+	localTip := ls.PrimaryChainTip()
+	if tipAhead(localTip, ls.freshCursorStallTip) {
+		ls.freshCursorStallTip = localTip
+		ls.freshCursorStallRequests = 0
+	}
+	ls.freshCursorStallRequests++
+	if ls.freshCursorStallRequests == freshCursorStallWarnRequests {
+		ls.config.Logger.Warn(
+			"chain switch fresh chainsync cursor requests are not advancing the local tip",
+			"component",
+			"ledger",
+			"requests",
+			ls.freshCursorStallRequests,
+			"local_tip_slot",
+			localTip.Point.Slot,
+			"local_tip_block",
+			localTip.BlockNumber,
+		)
+	}
+}
+
+func (ls *LedgerState) clearFreshCursorRequestedLocked(
+	connId ouroboros.ConnectionId,
+) {
+	delete(ls.freshCursorPeers, netAddrString(connId.RemoteAddr))
 }
 
 func (ls *LedgerState) chainSwitchObservedTipForConnection(
@@ -2401,18 +2579,21 @@ func desiredBlockfetchBatchHeaders(
 // may be nil otherwise. This event's subscriber calls
 // RecoverAfterLocalRollback, which takes that mutex, so publishing inline
 // from under the lock is the deadlock pendingPublishes exists to break.
+//
+// It reports whether the request was queued for publication, which is false
+// when it was coalesced into one made within chainsyncResyncCoalesceWindow.
 func (ls *LedgerState) requestChainsyncResync(
 	connId ouroboros.ConnectionId,
 	reason string,
 	pending *pendingPublishes,
-) {
+) bool {
 	ls.headerMismatchCount = 0
 	ls.clearRollbackHistory()
 	ls.bufferedHeaderMutex.Lock()
 	delete(ls.bufferedHeaderEvents, connIdKey(connId))
 	ls.bufferedHeaderMutex.Unlock()
 	if ls.coalesceChainsyncResync(connId, reason) {
-		return
+		return false
 	}
 	pending.add(
 		ls.config.EventBus,
@@ -2425,6 +2606,7 @@ func (ls *LedgerState) requestChainsyncResync(
 			},
 		),
 	)
+	return true
 }
 
 // coalesceChainsyncResync reports whether a resync request for connId repeats
@@ -3965,6 +4147,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// released. Idempotent per chain. See
 	// chain.Chain.PublishPendingChainUpdates.
 	pending.drainChain(ls.chain)
+	ls.clearFreshCursorRequestedLocked(e.ConnectionId)
 	// Detect connection switch so pipeline ownership is handed off
 	// even when the first post-switch event is a header rather than
 	// a rollback. Without this, headers from a newly-selected active
@@ -6481,10 +6664,11 @@ func (ls *LedgerState) createGenesisBlock() error {
 				),
 				"component", "ledger",
 			)
-			if err := ls.db.SetGenesisStaking(
+			if err := ls.db.SetGenesisStakingWithDeposits(
 				genesisPools,
 				genesisStake,
 				uint64(shelleyGenesis.ProtocolParameters.KeyDeposit),
+				uint64(shelleyGenesis.ProtocolParameters.PoolDeposit),
 				genesisHash[:],
 				txn,
 			); err != nil {
@@ -6597,7 +6781,17 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 // its real history is left alone instead of being reverted to genesis state.
 func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
 	conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
-	if conwayGenesis == nil || len(conwayGenesis.Committee.Members) == 0 {
+	if conwayGenesis == nil {
+		// Without the genesis the committee is seeded from nothing, so
+		// committee-dependent rules reject every credential until a
+		// snapshot or an enacted action supplies members.
+		ls.config.Logger.Warn(
+			"conway genesis not configured, genesis committee not seeded",
+			"component", "ledger",
+		)
+		return nil
+	}
+	if len(conwayGenesis.Committee.Members) == 0 {
 		return nil
 	}
 	existing, err := ls.db.GetCommitteeMembersIncludeDeleted(txn)
@@ -7467,7 +7661,7 @@ func (ls *LedgerState) processEpochRollover(
 	// The reward prefix mirrors cardano-ledger's NEWEPOCH sequence: the delayed
 	// reward update is applied first so reward-driven reserves/treasury movement
 	// is visible to governance withdrawals and to the end-of-boundary ADA-pot
-	// capture. The remainder mirrors cardano-ledger's Conway/Rules/Epoch.hs:
+	// capture. Through Conway, the remainder mirrors Conway/Rules/Epoch.hs:
 	// 374-379 (EPOCH STS), which dispatches HARDFORK only after enactment +
 	// pparams write. The relative order matters because the HARDFORK rule branch
 	// is selected from the new pparams' major version — a HARDFORK rule that ran
@@ -7476,7 +7670,7 @@ func (ls *LedgerState) processEpochRollover(
 	// The order, asserted by TestProcessEpochRollover_OrderingInvariant,
 	// TestProcessEpochRollover_RewardOrdering and
 	// TestProcessEpochRollover_SnapStakeReadOrdering in
-	// chainsync_test.go and chainsync_test.go, is:
+	// chainsync_test.go, is (Dijkstra moves step 3 after step 10):
 	//
 	//   1. applyStakeRewards             — apply the delayed reward update
 	//      (rewards from the snapshot three epochs back): credit spendable
@@ -7557,12 +7751,13 @@ func (ls *LedgerState) processEpochRollover(
 		return nil, fmt.Errorf("apply MIR certs: %w", err)
 	}
 
-	// SNAP read point. Everything below this line is a rule cardano-ledger runs
+	// Conway SNAP read point. Everything below this line is a rule Conway runs
 	// after SNAP, and several of them credit reward accounts at epochStartSlot
 	// (POOLREAP deposit refunds, enacted treasury withdrawals,
 	// proposal-deposit refunds). The mark snapshot's stake is therefore read
 	// here — after the delayed reward update and MIR, which precede SNAP, and
-	// before any of them — while the snapshot row is written at the end of the
+	// before any of them. Dijkstra takes its stake read after enactment below.
+	// The snapshot row is written at the end of the
 	// rollover where the new epoch record and the post-enactment protocol
 	// version exist.
 	// A Conway boundary with the deferred-snapshot hooks leaves mark[new
@@ -7577,7 +7772,9 @@ func (ls *LedgerState) processEpochRollover(
 		!ls.ratifyAtBoundary && !deferBoundarySnapshot &&
 		currentEra.Id == eras.ConwayEraDesc.Id &&
 		!ls.config.DelegatorInactivityEnabled
-	if snapDeferred {
+	if currentEra.Id >= eras.DijkstraEraDesc.Id {
+		// Dijkstra captures SNAP after enactment below.
+	} else if snapDeferred {
 		if err := ls.timeRolloverPhase(
 			currentEpoch.EpochId+1, "snap_capture", func() error {
 				return ls.captureDeferredBoundarySnapshot(
@@ -7590,7 +7787,7 @@ func (ls *LedgerState) processEpochRollover(
 	} else if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "snap", func() error {
 			return ls.captureEpochBoundarySnapshotStake(
-				txn, currentEpoch, epochStartSlot,
+				txn, currentEpoch, epochStartSlot, 0,
 			)
 		},
 	); err != nil {
@@ -7610,7 +7807,7 @@ func (ls *LedgerState) processEpochRollover(
 	// governance silently fall back to reading the not-yet-written row and
 	// see zero SPO stake for every gated action at every boundary.
 	var currentBoundarySPOState *governance.SPOVotingState
-	if !snapDeferred {
+	if !snapDeferred && currentEra.Id < eras.DijkstraEraDesc.Id {
 		if err := ls.timeRolloverPhase(
 			currentEpoch.EpochId+1, "spo_state_resolve", func() error {
 				var err error
@@ -7735,7 +7932,7 @@ func (ls *LedgerState) processEpochRollover(
 				DelegatorInactivityOn:    ls.config.DelegatorInactivityEnabled,
 				CurrentBoundarySPOState:  currentBoundarySPOState,
 				DeferRatification:        true,
-				BoundarySPOStateDeferred: snapDeferred,
+				BoundarySPOStateDeferred: snapDeferred || currentEra.Id >= eras.DijkstraEraDesc.Id,
 				PendingTreasuryDonations: pendingDonations,
 			})
 			return err
@@ -7759,40 +7956,51 @@ func (ls *LedgerState) processEpochRollover(
 		snapDeferred = false
 	}
 	var deferredPlan *governance.RatificationPlan
-	if plan := govOut.Ratification; plan != nil {
-		if err := ls.timeRolloverPhase(
-			currentEpoch.EpochId+1, "ratify", func() error {
-				// A major-version change runs HARDFORK and an era
-				// transition rewrites state later in this transaction;
-				// RATIFY reads the state before either.
-				if ls.ratifyAtBoundary || deferBoundarySnapshot ||
-					hardForkHere {
-					if currentBoundarySPOState == nil {
-						state, err := ls.currentBoundarySPOStakeState(
-							txn, currentEpoch, epochStartSlot,
-						)
-						if err != nil {
-							return fmt.Errorf(
-								"resolve current-boundary SPO stake: %w",
-								err,
+	applyRatification := func() error {
+		if plan := govOut.Ratification; plan != nil {
+			if err := ls.timeRolloverPhase(
+				currentEpoch.EpochId+1, "ratify", func() error {
+					if ls.ratifyAtBoundary || deferBoundarySnapshot ||
+						hardForkHere {
+						if currentBoundarySPOState == nil {
+							state, err := ls.currentBoundarySPOStakeState(
+								txn, currentEpoch, epochStartSlot,
 							)
+							if err != nil {
+								return fmt.Errorf(
+									"resolve current-boundary SPO stake: %w",
+									err,
+								)
+							}
+							plan.SetBoundarySPOState(state)
 						}
-						plan.SetBoundarySPOState(state)
-					}
-					decision, err := plan.Decide(txn)
-					if err != nil {
+						decision, err := plan.Decide(txn)
+						if err != nil {
+							return err
+						}
+						_, err = plan.Apply(decision, txn)
 						return err
 					}
-					_, err = plan.Apply(decision, txn)
-					return err
-				}
-				deferredPlan = plan
-				return nil
-			},
-		); err != nil {
-			return nil, fmt.Errorf("ratify governance: %w", err)
+					deferredPlan = plan
+					return nil
+				},
+			); err != nil {
+				return fmt.Errorf("ratify governance: %w", err)
+			}
+		}
+		return nil
+	}
+	snapshotAfterEnactment := currentEra.Id >= eras.DijkstraEraDesc.Id
+	if version, err := GetProtocolVersion(govOut.UpdatedPParams); err == nil &&
+		version.Major >= lcommon.ProtocolVersionDijkstra {
+		snapshotAfterEnactment = true
+	}
+	if !snapshotAfterEnactment {
+		if err := applyRatification(); err != nil {
+			return nil, err
 		}
 	}
+
 	// Move the ending epoch's accumulated treasury donations into the
 	// treasury. Per the Conway EPOCH rule, donations are added after enacted
 	// treasury withdrawals (handled in governance.ProcessEpoch above), so an
@@ -8006,6 +8214,30 @@ func (ls *LedgerState) processEpochRollover(
 		nil,
 	)
 
+	if snapshotAfterEnactment {
+		// Dijkstra EPOCH moves SNAP after POOLREAP, enactment and HARDFORK.
+		// RATIFY must use this same mark distribution for its next pulser.
+		if err := ls.captureEpochBoundarySnapshotStake(
+			txn, currentEpoch, epochStartSlot, lcommon.ProtocolVersionDijkstra,
+		); err != nil {
+			return nil, err
+		}
+		currentBoundarySPOState, err = ls.currentBoundarySPOStakeState(
+			txn,
+			currentEpoch,
+			epochStartSlot,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("resolve post-enactment SPO stake: %w", err)
+		}
+		if plan := govOut.Ratification; plan != nil {
+			plan.SetBoundarySPOState(currentBoundarySPOState)
+		}
+		if err := applyRatification(); err != nil {
+			return nil, err
+		}
+	}
+
 	// SNAP point: capture the authoritative mark snapshot inside this rollover
 	// transaction, now that the new epoch record (and its nonce/boundary slot)
 	// exist. Runs only for the normal N->N+1 rollover; epoch 0 is seeded by
@@ -8076,8 +8308,9 @@ func epochBoundarySnapshotSlot(boundarySlot uint64) uint64 {
 // captureEpochBoundarySnapshotStake invokes the optional SNAP-point stake hook
 // at the correct place in the boundary sequence: after the two boundary rules
 // cardano-ledger applies before SNAP (the delayed reward update and MIR) and
-// before POOLREAP and governance enactment, which credit reward accounts at the
-// boundary slot after it.
+// before POOLREAP and governance enactment through Conway. Dijkstra calls it
+// after those rules and HARDFORK, passing its protocol version to prevent an
+// earlier Conway-point capture from being reused at the era transition.
 //
 // It only reads, so it needs nothing from the not-yet-written new epoch record;
 // the boundary identity is fully determined here (the new epoch is
@@ -8092,6 +8325,7 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 	txn *database.Txn,
 	prevEpoch models.Epoch,
 	boundarySlot uint64,
+	protocolVersion uint,
 ) error {
 	hook := ls.epochBoundarySnapshotStakeHook()
 	if hook == nil {
@@ -8103,6 +8337,8 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 		BoundarySlot:  boundarySlot,
 		SnapshotSlot:  epochBoundarySnapshotSlot(boundarySlot),
 	}
+	evt.ProtocolVersion = protocolVersion
+
 	const savepoint = "epoch_boundary_snapshot_stake"
 	if err := txn.SavePoint(savepoint); err != nil {
 		ls.config.Logger.Warn(

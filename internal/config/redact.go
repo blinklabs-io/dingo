@@ -132,6 +132,7 @@ var logPlainConfigFields = []string{
 	"DatabaseLifecycle.SnapshotDir",
 	"DatabaseLifecycle.SnapshotEnabled",
 	"DatabaseLifecycle.SnapshotEveryNEpochs",
+	"DatabaseLifecycle.SnapshotMaxCommitPause",
 	"DatabaseLifecycle.SnapshotRetention",
 	"DatabasePath",
 	"DatabaseQueueSize",

@@ -134,15 +134,36 @@ func seedRetentionRewardEpochs(t *testing.T, db *database.Database) {
 	}, nil))
 }
 
-// TestApplyStakeRewardsSkipsPrunedStakeInputs covers a retention interaction:
+func TestApplyStakeRewardsHaltsWhenRequiredRewardBasisIsMissing(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	seedRetentionRewardEpochs(t, db)
+	var fatalErr error
+	ls.config.FatalErrorFunc = func(err error) {
+		fatalErr = err
+	}
+
+	txn := db.Transaction(true)
+	err := txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(
+			txn, retentionNewEpoch, retentionBoundarySlot,
+		)
+	})
+	require.ErrorIs(t, err, errHaltLedgerPipeline)
+	require.ErrorContains(t, err, "required stake reward basis unavailable")
+	require.ErrorIs(t, fatalErr, errHaltLedgerPipeline)
+	require.ErrorContains(t, fatalErr, "required stake reward basis unavailable")
+}
+
+// TestApplyStakeRewardsHaltsOnUnrecoverablePrunedStakeInputs covers a retention interaction:
 // reward_ada_pots, reward_snapshot,
 // reward_pool_input and reward_pool_output are retained for the life of the
 // database while reward_stake_input is pruned to the rotation window, so an
 // aged-out epoch presents complete-looking pots and snapshot rows over an empty
-// credential set. Reward application must skip that epoch rather than hand
-// validateRewardCalculatorInputs an unreconcilable snapshot, whose error would
-// fail the whole epoch rollover.
-func TestApplyStakeRewardsSkipsPrunedStakeInputs(t *testing.T) {
+// credential set. Reward application must halt before committing a boundary
+// that would permanently omit the reference node's reward update.
+func TestApplyStakeRewardsHaltsOnUnrecoverablePrunedStakeInputs(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
@@ -191,11 +212,13 @@ func TestApplyStakeRewardsSkipsPrunedStakeInputs(t *testing.T) {
 	}))
 
 	txn := db.Transaction(true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+	err := txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(
 			txn, retentionNewEpoch, retentionBoundarySlot,
 		)
-	}), "aged-out stake inputs must skip reward application, not error")
+	})
+	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+	require.ErrorIs(t, err, errHaltLedgerPipeline)
 
 	// Nothing was credited and no outputs were persisted for the skipped epoch.
 	account, err := db.GetAccountByCredential(0, rewardAccount, false, nil)
@@ -263,7 +286,7 @@ func TestApplyStakeRewardsAcceptsZeroDelegatorSnapshot(t *testing.T) {
 
 // seedPrunedStakeInputSnapshot seeds a mark snapshot and pool input that
 // survive retention over an empty reward_stake_input credential set -- the
-// same aged-out-epoch shape TestApplyStakeRewardsSkipsPrunedStakeInputs
+// same aged-out-epoch shape TestApplyStakeRewardsHaltsOnUnrecoverablePrunedStakeInputs
 // seeds -- so a test can drive the retention skip without duplicating the
 // pool/account wiring at every call site.
 func seedPrunedStakeInputSnapshot(
@@ -308,17 +331,9 @@ func seedPrunedStakeInputSnapshot(
 	// retention window.
 }
 
-// TestApplyStakeRewardsSkipsPrunedStakeInputsReportsLoudly proves the
-// retention skip tracked in is reported the same way its three
-// sibling skips in calculateStakeRewardApplication are, through
-// reportSkippedStakeRewards: counted, and logged with the permanent-shortfall
-// consequence spelled out. Before this fix the retention skip was the one
-// silent-by-comparison exception to what this file otherwise guards against
-// -- it logged
-// inline at Warn with a bare reason and no metric increment, so monitoring
-// built on the shared skippedStakeRewardRounds counter never saw this
-// specific permanent-reward-loss condition.
-func TestApplyStakeRewardsSkipsPrunedStakeInputsReportsLoudly(t *testing.T) {
+// TestApplyStakeRewardsReportsUnavailablePrunedStakeInputs proves the
+// permanent shortfall is reported before the ledger pipeline halts.
+func TestApplyStakeRewardsReportsUnavailablePrunedStakeInputs(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
@@ -329,21 +344,22 @@ func TestApplyStakeRewardsSkipsPrunedStakeInputsReportsLoudly(t *testing.T) {
 
 	var logs bytes.Buffer
 	ls.config.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{
-		Level: slog.LevelWarn,
+		Level: slog.LevelError,
 	}))
 
 	txn := db.Transaction(true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+	err := txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(
 			txn, retentionNewEpoch, retentionBoundarySlot,
 		)
-	}), "aged-out stake inputs must still skip, not error")
+	})
+	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+	require.ErrorIs(t, err, errHaltLedgerPipeline)
 
 	out := logs.String()
 	require.NotEmpty(t, out,
-		"the retention skip must be visible at the default log level, "+
-			"the same as its three sibling skips")
-	assert.Contains(t, out, "level=WARN")
+		"the missing basis must be visible at the default log level")
+	assert.Contains(t, out, "level=ERROR")
 	assert.Contains(
 		t,
 		out,
@@ -351,9 +367,9 @@ func TestApplyStakeRewardsSkipsPrunedStakeInputsReportsLoudly(t *testing.T) {
 	)
 	assert.Contains(t, out, "reward_snapshot_epoch=1")
 	assert.Contains(t, out, "snapshot_delegators=2")
-	// The consequence, not just the event -- see reportSkippedStakeRewards.
+	// The consequence, not just the event.
 	assert.Contains(t, out, "permanently")
-	assert.Contains(t, out, "basis was never persisted")
+	assert.Contains(t, out, "missing basis")
 }
 
 // TestSkippedPrunedStakeInputsSuppressedDuringPrecompute proves the retention
@@ -6004,6 +6020,13 @@ func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
 	))
 
 	var got event.EpochTransitionEvent
+	seedEmptyRewardBasisForRollover(t, db, models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		SlotLength:    1,
+		LengthInSlots: 100,
+		EraId:         eras.ShelleyEraDesc.Id,
+	}, pparams)
 	ls.SetEpochBoundarySnapshotHook(func(
 		_ *database.Txn,
 		evt event.EpochTransitionEvent,
@@ -6482,6 +6505,73 @@ func newRewardCalculationTestLedger(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}, db
+}
+
+func seedEmptyRewardBasisForRollover(
+	t testing.TB,
+	db *database.Database,
+	currentEpoch models.Epoch,
+	pparams lcommon.ProtocolParameters,
+) {
+	t.Helper()
+	epochs, ok := stakeRewardEpochsForApplication(currentEpoch.EpochId + 1)
+	require.True(t, ok)
+	meta := db.Metadata()
+	for _, epochID := range []uint64{
+		epochs.snapshot,
+		epochs.performance,
+		epochs.pots,
+	} {
+		epoch, err := meta.GetEpoch(epochID, nil)
+		require.NoError(t, err)
+		if epoch != nil {
+			continue
+		}
+		delta := currentEpoch.EpochId - epochID
+		startSlot := currentEpoch.StartSlot -
+			delta*uint64(currentEpoch.LengthInSlots)
+		require.NoError(t, meta.SetEpoch(
+			startSlot,
+			epochID,
+			nil, nil, nil, nil,
+			currentEpoch.EraId,
+			currentEpoch.SlotLength,
+			currentEpoch.LengthInSlots,
+			nil,
+		))
+	}
+	encoded, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+	performanceEpoch, err := meta.GetEpoch(epochs.performance, nil)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		encoded,
+		performanceEpoch.StartSlot,
+		epochs.performance,
+		currentEpoch.EraId,
+		nil,
+	))
+	state, err := meta.GetNetworkState(nil)
+	require.NoError(t, err)
+	var treasury, reserves types.Uint64
+	if state != nil {
+		treasury = state.Treasury
+		reserves = state.Reserves
+	}
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        epochs.pots,
+		Treasury:     treasury,
+		Reserves:     reserves,
+		CapturedSlot: currentEpoch.StartSlot,
+	}, nil))
+	require.NoError(t, meta.DeleteRewardInputsForEpoch(epochs.snapshot, nil))
+	require.NoError(t, meta.DeleteRewardOutputsForEpoch(epochs.snapshot, nil))
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:        epochs.snapshot,
+		SnapshotType: "mark",
+		CapturedSlot: currentEpoch.StartSlot,
+		BoundarySlot: currentEpoch.StartSlot,
+	}, nil))
 }
 
 func newRewardCalculationTestNodeConfig(
@@ -8843,6 +8933,40 @@ func TestRewardBlockCountsUnknownWhenAnchorHidesTheEpoch(t *testing.T) {
 	)
 }
 
+func TestRewardBlockCountsAcceptsObservableZero(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+	const (
+		performanceEpoch = uint64(2)
+		epochStartSlot   = uint64(100)
+		epochLength      = 100
+	)
+	poolKey := rewardCalcHash(0x85)
+	require.NoError(t, meta.SetEpoch(
+		epochStartSlot,
+		performanceEpoch,
+		nil, nil, nil, nil,
+		eras.ShelleyEraDesc.Id,
+		1,
+		epochLength,
+		nil,
+	))
+
+	counts, total, known, err := ls.rewardBlockCounts(
+		meta,
+		nil,
+		performanceEpoch,
+		[]*models.RewardPoolInput{{PoolKeyHash: poolKey}},
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, known)
+	assert.Zero(t, counts[string(poolKey)])
+	assert.Zero(t, total)
+}
+
 // The imported counts are consulted only for an epoch the anchor actually
 // covers. A node that never bootstrapped counts its own blocks exactly as it
 // did before.
@@ -8909,8 +9033,9 @@ func TestRewardBlockCountsIgnoresImportedCountsAboveTheAnchor(t *testing.T) {
 
 // The round-level consequence. seedRewardPrecomputeTimingState places ten
 // blocks for the single pool inside performance epoch 2; putting the anchor
-// past that epoch removes every one of them from the node's reach.
-func TestStakeRewardRoundDeclinedWhenAnchorHidesTheBlockCounts(t *testing.T) {
+// past that epoch removes every one of them from the node's reach. The
+// authoritative boundary must reject that incomplete basis.
+func TestStakeRewardRoundRejectsHiddenBlockCounts(t *testing.T) {
 	t.Parallel()
 
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
@@ -8932,12 +9057,11 @@ func TestStakeRewardRoundDeclinedWhenAnchorHidesTheBlockCounts(t *testing.T) {
 		1_200,
 		true,
 	)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
 	require.False(
 		t,
 		ok,
-		"a round whose performance epoch cannot be counted must be declined, "+
-			"not distributed as zero",
+		"a round whose performance epoch cannot be counted must be rejected",
 	)
 	require.Nil(t, app)
 	assert.Contains(
@@ -9014,7 +9138,7 @@ func TestBootstrapStakeRewardRoundSurvivesAMithrilAnchor(t *testing.T) {
 // TestStakeRewardEpochsForInitialApplication pins the two bootstrap rounds.
 // The round into epoch 1 reads genesis pots and empty previous block counts;
 // the round into epoch 2 reads epoch 1's pots and epoch 0's blocks. Both have
-// empty Go distributions. Byron-prefix networks are suppressed by
+// genesis Go distributions. Byron-prefix networks are suppressed by
 // applyStakeRewards' Byron performance-epoch guard, not by this helper.
 func TestStakeRewardEpochsForInitialApplication(t *testing.T) {
 	t.Parallel()
@@ -9049,46 +9173,6 @@ func TestStakeRewardEpochsForInitialApplication(t *testing.T) {
 	}, epochs)
 }
 
-func TestSuppressBootstrapStakeRewardsReturnsAvailableRewardsToReserves(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	result := &rewards.Result{
-		PoolRewards:      []rewards.PoolReward{{PoolReward: 600}},
-		AccountRewards:   []rewards.AccountReward{{Amount: 600}},
-		TotalRewardPot:   1_000,
-		AvailableRewards: 800,
-		EffectiveRewards: 600,
-		Unspendable:      50,
-		Undistributed:    150,
-	}
-	suppressBootstrapStakeRewards(result)
-
-	require.Empty(t, result.PoolRewards)
-	require.Empty(t, result.AccountRewards)
-	require.Zero(t, result.EffectiveRewards)
-	require.Zero(t, result.Unspendable)
-	require.Equal(t, uint64(800), result.Undistributed)
-
-	app := &stakeRewardApplication{
-		params: rewards.Parameters{
-			TreasuryExpansion: big.NewRat(1, 5),
-		},
-		pots: &models.RewardAdaPots{
-			Reserves: types.Uint64(10_000),
-			Treasury: types.Uint64(10),
-		},
-		totalRewardPot:   result.TotalRewardPot,
-		availableRewards: result.AvailableRewards,
-		undistributed:    result.Undistributed,
-	}
-	reserves, treasury, err := stakeRewardUpdatedPots(app)
-	require.NoError(t, err)
-	require.Equal(t, uint64(9_800), reserves)
-	require.Equal(t, uint64(210), treasury)
-}
-
 func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
 	t.Parallel()
 
@@ -9115,9 +9199,12 @@ func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
 // With d=0 this gives eta=0; the same 180 blocks enter the next update,
 // giving eta=180/(500*0.4)=0.9. Fees collected in epoch 0 enter that update
 // too. These are the reference devnet inputs and pots.
-func TestApplyStakeRewardsConwayGenesisPerformance(t *testing.T) {
+func TestApplyStakeRewardsPrototypeGenesisPerformance(t *testing.T) {
 	t.Parallel()
 	ls, db := newRewardCalculationTestLedger(t)
+	ls.config.EnableDijkstra = true
+	zero := uint64(0)
+	ls.config.CardanoNodeConfig.TestShelleyHardForkAtEpoch = &zero
 	ls.currentEra = eras.ConwayEraDesc
 	require.NoError(t, ls.config.CardanoNodeConfig.
 		LoadShelleyGenesisFromReader(strings.NewReader(`{
@@ -9194,8 +9281,27 @@ INSERT INTO "transaction" (
 		fraction *big.Rat
 	}{
 		{1, 0, 2_000_000_000_000, big.NewRat(1, 4)},
-		{2, 1_080_080_000, 1_998_920_320_000, big.NewRat(1_562_500, 6_251_687)},
+		{2, 1_080_080_000, 1_998_876_009_026, big.NewRat(1_000_022_155_487, 4_001_123_990_974)},
 	} {
+		if tc.epoch == 2 {
+			readTxn := db.Transaction(false)
+			app, ok, err := ls.calculateStakeRewardApplication(
+				readTxn,
+				2,
+				1000,
+				1000,
+				true,
+			)
+			require.NoError(t, readTxn.Rollback())
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.NotEmpty(
+				t,
+				app.accountOutputs,
+				"genesis staking must receive rewards from epoch 0's blocks",
+			)
+		}
+
 		boundary := tc.epoch * 500
 		ended, err := meta.GetEpoch(tc.epoch-1, nil)
 		require.NoError(t, err)
@@ -10307,10 +10413,9 @@ func TestApplyStakeRewardsPreviewEpoch3Pots(t *testing.T) {
 	require.Equal(t, previewEpoch3Reserves, uint64(state.Reserves))
 }
 
-// A skipped reward round is not a benign no-op. The reference node credits
-// the round regardless, so every skip leaves this node's reward balances --
-// and the leadership stake distribution derived from them -- permanently
-// short by that epoch's rewards, with nothing to backfill it later.
+// An unavailable reward basis is not a benign no-op. The reference node
+// credits the round, so continuing leaves this node's reward balances and the
+// leadership stake distribution derived from them permanently short.
 //
 // That shortfall is what rejects canonical blocks: leader eligibility
 // compares a VRF value against a stake-derived threshold, so a sigma
@@ -10318,40 +10423,32 @@ func TestApplyStakeRewardsPreviewEpoch3Pots(t *testing.T) {
 // On Preview, the shortfall was ~3 epochs of reward
 // accrual, sigma was 0.042% short, and the rejected block's leader value sat
 // between this node's threshold and the reference's.
-//
-// Both skip paths logged at Debug before this, invisible at the default
-// level, which is why three separate field reports were investigated without
-// anyone seeing the cause. The level is the fix: a node quietly diverging
-// from the network has to say so before it wedges, not after.
-func TestSkippedStakeRewardsIsReportedLoudly(t *testing.T) {
+func TestUnavailableStakeRewardBasisIsReportedAndRejected(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
-				// Deliberately Warn: the point of the change is that this
-				// survives the default level. A Debug-level report would
-				// produce no output here.
-				Level: slog.LevelWarn,
+				Level: slog.LevelError,
 			})),
 		},
 	}
 
-	ls.reportSkippedStakeRewards(1386, "missing ADA pots", "pots_epoch", 1385)
+	err := ls.requiredStakeRewardBasisUnavailable(
+		true, 1386, "missing ADA pots", "pots_epoch", 1385,
+	)
+	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
 
 	logs := buf.String()
-	require.NotEmpty(t, logs,
-		"a skipped reward round must be visible at the default log level; "+
-			"at Debug it stays hidden until the node rejects a block")
-	assert.Contains(t, logs, "level=WARN")
+	require.NotEmpty(t, logs)
+	assert.Contains(t, logs, "level=ERROR")
 	assert.Contains(t, logs, "missing ADA pots")
 	assert.Contains(t, logs, "new_epoch=1386")
 	assert.Contains(t, logs, "pots_epoch=1385")
 	// The consequence, not just the event: whoever reads this needs to know
 	// the balances stay short rather than catching up on their own.
 	assert.Contains(t, logs, "permanently")
-	assert.Contains(t, logs, "basis was never persisted")
 	assert.Contains(t, logs, "ledgerstate import warnings")
 	assert.NotContains(t, logs, "expected after a Mithril bootstrap",
 		"a failed imported-basis seed must not be misreported as an "+
@@ -10361,17 +10458,19 @@ func TestSkippedStakeRewardsIsReportedLoudly(t *testing.T) {
 // The reporting path must tolerate a LedgerState with no logger and no
 // metrics, since it runs on the epoch-boundary hot path where a nil
 // dereference would take down block application.
-func TestSkippedStakeRewardsSurvivesNilDependencies(t *testing.T) {
+func TestUnavailableStakeRewardBasisSurvivesNilDependencies(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{}
 	require.NotPanics(t, func() {
-		ls.reportSkippedStakeRewards(
+		err := ls.requiredStakeRewardBasisUnavailable(
+			true,
 			1386,
 			"missing reward snapshot",
 			"reward_snapshot_epoch",
 			1383,
 		)
+		require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
 	})
 }
 
@@ -10396,11 +10495,11 @@ func TestMissingRewardSnapshotReportsImportedSeedFailure(t *testing.T) {
 			seedFailure: true,
 			wantReason: "imported reward basis seeding failed: " +
 				failureReason,
-			notReason: "skipping stake rewards: missing reward snapshot;",
+			notReason: "cannot apply stake rewards: missing reward snapshot;",
 		},
 		{
 			name:       "genuinely missing import",
-			wantReason: "skipping stake rewards: missing reward snapshot;",
+			wantReason: "cannot apply stake rewards: missing reward snapshot;",
 			notReason:  "imported reward basis seeding failed",
 		},
 	} {
@@ -10436,11 +10535,175 @@ func TestMissingRewardSnapshotReportsImportedSeedFailure(t *testing.T) {
 				400,
 				true,
 			)
-			require.NoError(t, err)
+			require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
 			require.False(t, ok)
 			require.Nil(t, app)
 			assert.Contains(t, logs.String(), tc.wantReason)
 			assert.NotContains(t, logs.String(), tc.notReason)
 		})
 	}
+}
+
+func TestApplyStakeRewardsConwayGenesisPerformance(t *testing.T) {
+	t.Parallel()
+	ls, db := newRewardCalculationTestLedger(t)
+	ls.currentEra = eras.ConwayEraDesc
+	require.NoError(t, ls.config.CardanoNodeConfig.
+		LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.4,
+		"epochLength": 500,
+		"maxLovelaceSupply": 6000000000000,
+		"securityParam": 40,
+		"slotLength": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`)))
+	pp := mockledger.NewMockConwayProtocolParams()
+	pp.NOpt = 150
+	pp.A0 = rewardCalcRat(3, 10)
+	pp.Rho = rewardCalcRat(3, 1_000)
+	pp.Tau = rewardCalcRat(1, 5)
+	pp.ProtocolVersion = lcommon.ProtocolParametersProtocolVersion{Major: 10}
+	encoded, err := cbor.Encode(&pp)
+	require.NoError(t, err)
+	meta := db.Metadata()
+	for epoch := range uint64(3) {
+		require.NoError(t, meta.SetEpoch(
+			epoch*500, epoch, nil, nil, nil, nil,
+			eras.ConwayEraDesc.Id, 1, 500, nil,
+		))
+		require.NoError(t, db.SetPParams(
+			encoded, epoch*500, epoch, eras.ConwayEraDesc.Id, nil,
+		))
+	}
+	require.NoError(t, meta.SetNetworkState(0, 2_000_000_000_000, 0, nil))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch: 0, Reserves: 2_000_000_000_000,
+	}, nil))
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch: 0, SnapshotType: "mark", ProtocolVersion: 10,
+		TotalActiveStake: 2_000_000_000_000,
+		TotalPoolCount:   2, TotalDelegators: 2,
+	}, nil))
+	for _, key := range []byte{0x11, 0x22} {
+		poolKey := rewardCalcHash(key)
+		poolID := seedLiveStakeFixture(
+			t, db, poolKey, bytes.Repeat([]byte{key}, 32),
+			1_000_000_000_000, 0,
+		)
+		require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{{
+			Epoch: 0, PoolKeyHash: poolKey, RewardAccount: poolKey,
+			Margin:         &types.Rat{Rat: big.NewRat(0, 1)},
+			DelegatedStake: 1_000_000_000_000, DelegatorCount: 1,
+		}}, nil))
+		require.NoError(
+			t,
+			meta.SaveRewardStakeInputs([]*models.RewardStakeInput{{
+				Epoch: 0, PoolKeyHash: poolKey, StakingKey: poolKey,
+				Stake: 1_000_000_000_000, Registered: true,
+			}}, nil),
+		)
+		for i := range uint64(90) {
+			require.NoError(t, db.UpdatePoolOpCertSequence(
+				poolID, i+1, 1+2*i+uint64(key), nil,
+			))
+		}
+	}
+	_, err = rewardCalcSQLDB(t, db).Exec(`
+INSERT INTO "transaction" (
+    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (1, ?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
+		[]byte("genesis-performance-tx"), []byte("genesis-performance-block"))
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		epoch    uint64
+		treasury uint64
+		reserves uint64
+		fraction *big.Rat
+	}{
+		{1, 0, 2_000_000_000_000, big.NewRat(1, 4)},
+		{2, 1_080_080_000, 1_998_920_320_000, big.NewRat(1_562_500, 6_251_687)},
+	} {
+		boundary := tc.epoch * 500
+		ended, err := meta.GetEpoch(tc.epoch-1, nil)
+		require.NoError(t, err)
+		require.NotNil(t, ended)
+		txn := db.Transaction(true)
+		require.NoError(t, txn.Do(func(txn *database.Txn) error {
+			if err := ls.applyStakeRewards(txn, tc.epoch, boundary); err != nil {
+				return err
+			}
+			return ls.saveRewardAdaPotsForEpoch(txn, tc.epoch, *ended, boundary)
+		}))
+		state, err := meta.GetNetworkState(nil)
+		require.NoError(t, err)
+		require.NotNil(t, state)
+		require.Equal(t, tc.treasury, uint64(state.Treasury),
+			"treasury at boundary into epoch %d", tc.epoch)
+		require.Equal(t, tc.reserves, uint64(state.Reserves),
+			"reserves at boundary into epoch %d", tc.epoch)
+		pots, err := meta.GetRewardAdaPots(tc.epoch, nil)
+		require.NoError(t, err)
+		require.NotNil(t, pots)
+		require.Equal(t, state.Treasury, pots.Treasury)
+		require.Equal(t, state.Reserves, pots.Reserves)
+		if tc.epoch == 1 {
+			require.Equal(t, uint64(400_000), uint64(pots.Fees))
+		}
+
+		hash := bytes.Repeat([]byte{byte(tc.epoch)}, 32)
+		seedBlockAtSlot(t, ls, boundary, hash)
+		require.NoError(t, db.SetTip(ochainsync.Tip{
+			Point: ocommon.NewPoint(boundary, hash),
+		}, nil))
+		result, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+		require.NoError(t, err)
+		dist := decodeStakeDistributionResult(t, result)
+		require.Len(t, dist.Results, 2)
+		for _, entry := range dist.Results {
+			require.Equal(t, tc.fraction, entry.StakeFraction.Rat,
+				"stake fraction at boundary into epoch %d", tc.epoch)
+		}
+	}
+}
+
+func TestSuppressBootstrapStakeRewardsReturnsAvailableRewardsToReserves(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	result := &rewards.Result{
+		PoolRewards:      []rewards.PoolReward{{PoolReward: 600}},
+		AccountRewards:   []rewards.AccountReward{{Amount: 600}},
+		TotalRewardPot:   1_000,
+		AvailableRewards: 800,
+		EffectiveRewards: 600,
+		Unspendable:      50,
+		Undistributed:    150,
+	}
+	suppressBootstrapStakeRewards(result)
+
+	require.Empty(t, result.PoolRewards)
+	require.Empty(t, result.AccountRewards)
+	require.Zero(t, result.EffectiveRewards)
+	require.Zero(t, result.Unspendable)
+	require.Equal(t, uint64(800), result.Undistributed)
+
+	app := &stakeRewardApplication{
+		params: rewards.Parameters{
+			TreasuryExpansion: big.NewRat(1, 5),
+		},
+		pots: &models.RewardAdaPots{
+			Reserves: types.Uint64(10_000),
+			Treasury: types.Uint64(10),
+		},
+		totalRewardPot:   result.TotalRewardPot,
+		availableRewards: result.AvailableRewards,
+		undistributed:    result.Undistributed,
+	}
+	reserves, treasury, err := stakeRewardUpdatedPots(app)
+	require.NoError(t, err)
+	require.Equal(t, uint64(9_800), reserves)
+	require.Equal(t, uint64(210), treasury)
 }

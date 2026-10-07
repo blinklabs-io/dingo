@@ -872,6 +872,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.DatabaseLifecycle.SnapshotEveryNEpochs,
 		))
 	}
+	if c.DatabaseLifecycle.SnapshotMaxCommitPause < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid databaseLifecycle.snapshotMaxCommitPause: %s (must not be negative)",
+			c.DatabaseLifecycle.SnapshotMaxCommitPause,
+		))
+	}
 	if dest := c.DatabaseLifecycle.SnapshotCloudDestination; dest != "" {
 		u, err := url.Parse(dest)
 		if err != nil || u.Scheme == "" || u.Host == "" {

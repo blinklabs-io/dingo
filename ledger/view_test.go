@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
@@ -6797,6 +6798,7 @@ func newTreasuryRolloverFixture(
 
 	cfg := newTestEraHistoryCfg(t)
 	cfg.ShelleyGenesisHash = treasuryRolloverGenesisHash
+	cfg.ShelleyGenesis().MaxLovelaceSupply = 45_000_000_000_000_000
 	currentEpoch := newTestEpoch(5, 500, 100, eras.ConwayEraDesc.Id)
 	require.NoError(t, db.SetEpoch(
 		currentEpoch.StartSlot,
@@ -6862,6 +6864,7 @@ func (f *treasuryRolloverFixture) rollover(
 	currentPParams lcommon.ProtocolParameters,
 ) *EpochRolloverResult {
 	t.Helper()
+	seedEmptyRewardBasisForRollover(t, f.db, currentEpoch, currentPParams)
 	var result *EpochRolloverResult
 	txn := f.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
@@ -6901,6 +6904,10 @@ func donationTestConwayPParams(major uint) *conway.ConwayProtocolParameters {
 	rat := func(n, d int64) cbor.Rat { return cbor.Rat{Rat: big.NewRat(n, d)} }
 	p := &conway.ConwayProtocolParameters{}
 	p.ProtocolVersion.Major = major
+	p.NOpt = 500
+	p.A0 = &cbor.Rat{Rat: big.NewRat(3, 10)}
+	p.Rho = &cbor.Rat{Rat: big.NewRat(3, 1000)}
+	p.Tau = &cbor.Rat{Rat: big.NewRat(1, 5)}
 	p.MinCommitteeSize = 3
 	p.DRepVotingThresholds = conway.DRepVotingThresholds{
 		MotionNoConfidence:    rat(67, 100),
@@ -7778,6 +7785,85 @@ func repeatByte(length int, b byte) []byte {
 		out[i] = b
 	}
 	return out
+}
+
+func TestEpochRolloverUsesEraSpecificEnactmentSnapshot(t *testing.T) {
+	for _, era := range []eras.EraDesc{eras.ConwayEraDesc, eras.DijkstraEraDesc} {
+		t.Run(era.Name, func(t *testing.T) {
+			f := newTreasuryRolloverFixture(t, 100)
+			address, returnAddress, credential := f.rewardAddress(t, 0xa7)
+			f.addProposal(
+				t,
+				0xa8,
+				501,
+				map[*lcommon.Address]uint64{address: 40},
+				returnAddress,
+				0,
+				true,
+			)
+			var params lcommon.ProtocolParameters = f.currentPParams
+			if era.Id == eras.DijkstraEraDesc.Id {
+				var err error
+				params, err = eras.HardForkDijkstra(nil, f.currentPParams)
+				require.NoError(t, err)
+				f.ls.config.EnableDijkstra = true
+				f.ls.activeEras = eras.ErasWithDijkstra
+			}
+			f.currentEpoch.EraId = era.Id
+			f.ls.currentEra = era
+			f.ls.currentEpoch = f.currentEpoch
+			f.ls.currentPParams = params
+			require.NoError(
+				t,
+				f.db.SetEpoch(
+					500,
+					5,
+					f.currentEpoch.Nonce,
+					f.currentEpoch.EvolvingNonce,
+					f.currentEpoch.CandidateNonce,
+					f.currentEpoch.LastEpochBlockNonce,
+					era.Id,
+					1,
+					100,
+					nil,
+				),
+			)
+			seedEmptyRewardBasisForRollover(t, f.db, f.currentEpoch, params)
+			var observed []uint64
+			f.ls.SetEpochBoundarySnapshotStakeHook(
+				func(txn *database.Txn, _ event.EpochTransitionEvent) error {
+					account, err := f.db.GetAccountByCredential(
+						0,
+						credential,
+						false,
+						txn,
+					)
+					if err != nil {
+						return err
+					}
+					observed = append(observed, uint64(account.Reward))
+					return nil
+				},
+			)
+			txn := f.db.Transaction(true)
+			require.NoError(t, txn.Do(func(txn *database.Txn) error {
+				_, err := f.ls.processEpochRollover(
+					txn,
+					f.currentEpoch,
+					era,
+					params,
+					false,
+				)
+				return err
+			}))
+			expected := uint64(0)
+			if era.Id == eras.DijkstraEraDesc.Id {
+				expected = 40
+			}
+			require.Equal(t, []uint64{expected}, observed)
+			require.Equal(t, uint64(40), f.accountReward(t, credential))
+		})
+	}
 }
 
 // A genesis key delegation certificate is checked against the delegations in

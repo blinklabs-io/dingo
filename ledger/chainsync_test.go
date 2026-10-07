@@ -9919,6 +9919,7 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 		},
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	ls.metrics.init(prometheus.NewRegistry())
 
 	ancestorTip := ochainsync.Tip{
@@ -10628,7 +10629,7 @@ func TestCaptureEpochBoundarySnapshotStakeHookInvoked(t *testing.T) {
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		ls.captureEpochBoundarySnapshotStake(
-			txn, models.Epoch{EpochId: 0}, 432000,
+			txn, models.Epoch{EpochId: 0}, 432000, 0,
 		)
 		return nil
 	}))
@@ -10668,7 +10669,7 @@ func TestCaptureEpochBoundarySnapshotStakeHookFailureDeferred(t *testing.T) {
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		ls.captureEpochBoundarySnapshotStake(
-			txn, models.Epoch{EpochId: 0}, 432000,
+			txn, models.Epoch{EpochId: 0}, 432000, 0,
 		)
 		return nil
 	}))
@@ -11515,6 +11516,414 @@ func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
 		t,
 		event.ChainsyncResyncReasonChainSwitchCursorAhead,
 		resync.Reason,
+	)
+}
+
+// The fresh-cursor close reconnects the peer under a new connection ID, so
+// the per-connection resync coalescing never matches the next request. A
+// peer that delivers no header in between must not be closed again, or a
+// node far behind cycles through its peers without ever fetching a block.
+func TestHandleChainSwitchEventDoesNotRepeatFreshCursorBeforeHeaders(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	previousConnId := testChainsyncConnId(6000, 3001)
+	peerConnId := testChainsyncConnId(6000, 3002)
+	reconnectedConnId := testChainsyncConnId(6001, 3002)
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			EventBus: bus,
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	switchEvent := func(
+		connId ouroboros.ConnectionId,
+	) chainselection.ChainSwitchEvent {
+		return chainselection.ChainSwitchEvent{
+			PreviousConnectionId: previousConnId,
+			NewConnectionId:      connId,
+			NewTip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(200, []byte("peer-tip")),
+				BlockNumber: 10,
+			},
+		}
+	}
+	needsFreshCursor := func(connId ouroboros.ConnectionId) bool {
+		ls.chainsyncMutex.Lock()
+		defer ls.chainsyncMutex.Unlock()
+		return ls.chainSwitchNeedsFreshCursorLocked(switchEvent(connId), connId)
+	}
+
+	ls.handleChainSwitchEvent(event.NewEvent(
+		chainselection.ChainSwitchEventType,
+		switchEvent(peerConnId),
+	))
+	evt := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"first switch must request a fresh cursor",
+	)
+	resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, peerConnId, resync.ConnectionId)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonChainSwitchCursorAhead,
+		resync.Reason,
+	)
+
+	assert.False(
+		t,
+		needsFreshCursor(reconnectedConnId),
+		"a reconnected peer that delivered no header must not be closed again",
+	)
+	assert.True(
+		t,
+		needsFreshCursor(previousConnId),
+		"another peer is unaffected by this peer's pending fresh cursor",
+	)
+
+	// Any header reaching the ledger from the peer shows its new cursor is
+	// live. The fixture cannot fetch blocks, so the header's own outcome is
+	// irrelevant; only the queue it may leave behind is cleared.
+	_ = ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: reconnectedConnId,
+		BlockHeader:  mockHeader{slot: 150, blockNumber: 5},
+		Point:        ocommon.Point{Slot: 150},
+	})
+	ls.chainsyncMutex.Lock()
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.clearQueuedHeaders()
+	ls.blockfetchRequestRangeCleanup()
+	ls.chainsyncBlockfetchMutex.Unlock()
+	ls.chainsyncMutex.Unlock()
+	assert.True(
+		t,
+		needsFreshCursor(reconnectedConnId),
+		"a peer that delivered a header may be given a fresh cursor again",
+	)
+}
+
+// Far behind the network, the selected peer still has many headers to
+// deliver, and a cursor that has moved past the local tip is caught by the
+// header handler's mismatch resync from those headers. Only a peer near its
+// advertised tip, which may stay silent, is closed speculatively.
+func TestChainSwitchNeedsFreshCursorLeavesStreamingPeerToHeaderPath(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	chainManager, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	testChain := chainManager.PrimaryChain()
+	require.NoError(t, testChain.AddLocalBlock(&mockBabbageBlock{slot: 100}))
+	localTip := testChain.Tip()
+
+	previousConnId := testChainsyncConnId(6000, 3001)
+	peerConnId := testChainsyncConnId(6000, 3002)
+	fallbackConnId := testChainsyncConnId(6000, 3003)
+	observed := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			localTip.Point.Slot+100,
+			[]byte("peer-frontier"),
+		),
+		BlockNumber: localTip.BlockNumber + 5,
+	}
+	var fallbackSyncTarget ochainsync.Tip
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetPeerObservedTipFunc: func(
+				connId ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				return observed, sameConnectionId(connId, fallbackConnId)
+			},
+			GetPeerSyncTargetFunc: func(
+				connId ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				return fallbackSyncTarget,
+					sameConnectionId(connId, fallbackConnId)
+			},
+		},
+	}
+
+	for _, tc := range []struct {
+		name        string
+		blocksAhead uint64
+		want        bool
+	}{
+		{
+			name:        "at the mismatch resync threshold",
+			blocksAhead: headerMismatchResyncThreshold,
+			want:        false,
+		},
+		{
+			name:        "one block short of the threshold",
+			blocksAhead: headerMismatchResyncThreshold - 1,
+			want:        true,
+		},
+		{name: "at its advertised tip", blocksAhead: 0, want: true},
+	} {
+		advertised := ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				observed.Point.Slot+tc.blocksAhead*20,
+				[]byte("peer-advertised"),
+			),
+			BlockNumber: observed.BlockNumber + tc.blocksAhead,
+		}
+		fallbackSyncTarget = advertised
+		assert.Equal(
+			t,
+			tc.want,
+			ls.chainSwitchNeedsFreshCursorLocked(
+				chainselection.ChainSwitchEvent{
+					PreviousConnectionId: previousConnId,
+					NewConnectionId:      peerConnId,
+					NewTip:               advertised,
+					NewObservedTip:       observed,
+					NewObservedTipSet:    true,
+				},
+				peerConnId,
+			),
+			"selected peer %s",
+			tc.name,
+		)
+		assert.Equal(
+			t,
+			tc.want,
+			ls.chainSwitchNeedsFreshCursorLocked(
+				chainselection.ChainSwitchEvent{
+					PreviousConnectionId: previousConnId,
+					NewConnectionId:      peerConnId,
+				},
+				fallbackConnId,
+			),
+			"fallback peer %s",
+			tc.name,
+		)
+	}
+}
+
+// The loop reported against v0.73.2: each fresh-cursor close disconnects the
+// best peer, the selector moves to the next one, and every peer reconnects
+// under a new connection ID. However many rounds that runs, each peer must
+// be closed once, and the stall must be logged.
+func TestHandleChainSwitchEventCyclingPeersRequestsOneFreshCursorEach(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	logs := &syncSafeBuffer{}
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			EventBus: bus,
+			Logger:   slog.New(slog.NewJSONHandler(logs, nil)),
+		},
+	}
+
+	remotePorts := []int{3001, 3002, 3003}
+	const rounds = 4
+	for round := range rounds {
+		for i, port := range remotePorts {
+			previousPort := remotePorts[(i+len(remotePorts)-1)%len(remotePorts)]
+			ls.handleChainSwitchEvent(event.NewEvent(
+				chainselection.ChainSwitchEventType,
+				chainselection.ChainSwitchEvent{
+					PreviousConnectionId: testChainsyncConnId(
+						6000+round,
+						previousPort,
+					),
+					NewConnectionId: testChainsyncConnId(6000+round, port),
+					NewTip: ochainsync.Tip{
+						Point: ocommon.NewPoint(
+							200,
+							[]byte("peer-tip"),
+						),
+						BlockNumber: 10,
+					},
+				},
+			))
+		}
+	}
+
+	// The subscription delivers in publish order, so every request made
+	// above is received before this barrier.
+	const barrierReason = "test barrier"
+	bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{Reason: barrierReason},
+		),
+	)
+	var requestedPeers []string
+	for {
+		evt := testutil.RequireReceive(
+			t,
+			resyncCh,
+			testutil.AsyncWait,
+			"resync barrier",
+		)
+		resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+		require.True(t, ok)
+		if resync.Reason == barrierReason {
+			break
+		}
+		require.Equal(
+			t,
+			event.ChainsyncResyncReasonChainSwitchCursorAhead,
+			resync.Reason,
+		)
+		requestedPeers = append(
+			requestedPeers,
+			netAddrString(resync.ConnectionId.RemoteAddr),
+		)
+	}
+	assert.ElementsMatch(
+		t,
+		[]string{"127.0.0.1:3001", "127.0.0.1:3002", "127.0.0.1:3003"},
+		requestedPeers,
+		"each peer is closed for a fresh cursor once, however often it is reselected",
+	)
+
+	out := logs.String()
+	assert.Equal(
+		t,
+		1,
+		strings.Count(
+			out,
+			"fresh chainsync cursor requests are not advancing the local tip",
+		),
+		"the stall is warned once per episode",
+	)
+	assert.Equal(
+		t,
+		len(remotePorts),
+		strings.Count(
+			out,
+			"has delivered no header since its fresh chainsync cursor",
+		),
+		"a suppressed repeat is reported once per peer, not on every switch",
+	)
+}
+
+// A rollback is not progress, and neither is re-applying blocks up to a tip
+// already reached. Only moving past the highest tip resets the stall count.
+func TestFreshCursorStallCountIgnoresRollbackAndReapply(t *testing.T) {
+	t.Parallel()
+
+	chainAtSlot := func(slot uint64) *chain.Chain {
+		t.Helper()
+		chainManager, err := chain.NewManager(nil, nil)
+		require.NoError(t, err)
+		c := chainManager.PrimaryChain()
+		require.NoError(t, c.AddLocalBlock(&mockBabbageBlock{slot: slot}))
+		return c
+	}
+	reached := chainAtSlot(200)
+	rolledBack := chainAtSlot(100)
+	advanced := chainAtSlot(300)
+
+	logs := &syncSafeBuffer{}
+	ls := &LedgerState{
+		chain: reached,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(logs, nil)),
+		},
+	}
+	const stallWarning = "fresh chainsync cursor requests are not advancing the local tip"
+
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
+	ls.markFreshCursorRequestedLocked(testChainsyncConnId(6000, 3001))
+	ls.chain = rolledBack
+	ls.markFreshCursorRequestedLocked(testChainsyncConnId(6000, 3002))
+	ls.chain = reached
+	ls.markFreshCursorRequestedLocked(testChainsyncConnId(6000, 3003))
+	assert.Equal(
+		t,
+		1,
+		strings.Count(logs.String(), stallWarning),
+		"rolling back and re-applying to the same tip must not reset the stall count",
+	)
+
+	ls.chain = advanced
+	ls.markFreshCursorRequestedLocked(testChainsyncConnId(6000, 3004))
+	assert.Equal(
+		t,
+		1,
+		ls.freshCursorStallRequests,
+		"moving past the highest tip reached starts a new count",
+	)
+}
+
+// A fresh-cursor request coalesced into a resync made moments earlier for the
+// same connection closes nothing, so it must not arm the per-peer record or
+// count toward the stall.
+func TestHandleChainSwitchEventCoalescedFreshCursorIsNotRecorded(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	previousConnId := testChainsyncConnId(6000, 3001)
+	peerConnId := testChainsyncConnId(6000, 3002)
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			EventBus: bus,
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	require.True(t, ls.requestChainsyncResync(
+		peerConnId,
+		event.ChainsyncResyncReasonPersistentFork,
+		nil,
+	))
+	testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"earlier resync on the peer's connection",
+	)
+
+	ls.handleChainSwitchEvent(event.NewEvent(
+		chainselection.ChainSwitchEventType,
+		chainselection.ChainSwitchEvent{
+			PreviousConnectionId: previousConnId,
+			NewConnectionId:      peerConnId,
+			NewTip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(200, []byte("peer-tip")),
+				BlockNumber: 10,
+			},
+		},
+	))
+
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
+	assert.False(
+		t,
+		ls.freshCursorAwaitingHeadersLocked(peerConnId),
+		"a coalesced request must not arm the per-peer record",
+	)
+	assert.Zero(
+		t,
+		ls.freshCursorStallRequests,
+		"a coalesced request must not count toward the stall",
 	)
 }
 
@@ -17236,6 +17645,9 @@ func TestProcessEpochRolloverReplayEnactmentFailureRemainsFatal(
 	proposal.EnactedEpoch = &enactedEpoch
 	proposal.EnactedSlot = &enactedSlot
 	require.NoError(t, f.db.SetGovernanceProposal(proposal, nil))
+	seedEmptyRewardBasisForRollover(
+		t, f.db, f.currentEpoch, f.currentPParams,
+	)
 
 	txn := f.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
@@ -17580,6 +17992,7 @@ func newChainsyncRollbackFixtureWithBus(
 		},
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	ls.metrics.init(prometheus.NewRegistry())
 	// Attached after construction so NewLedgerState does not register the
 	// node-level subscribers this focused test does not want.
@@ -17933,6 +18346,42 @@ func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
 	require.Equal(t, fixture.connId, e.ConnectionId)
 }
 
+func TestCreateGenesisBlockPreservesPoolDeposit(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	cfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"devnet/config.json",
+		"devnet",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	cfg.ShelleyGenesis().ProtocolParameters.PoolDeposit = 500_000_000
+
+	pools, _, err := cfg.ShelleyGenesis().InitialPools()
+	require.NoError(t, err)
+	require.NotEmpty(t, pools)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{Database: db, CardanoNodeConfig: cfg,
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+	}
+	require.NoError(t, ls.createGenesisBlock())
+	for key := range pools {
+		hash, err := hex.DecodeString(key)
+		require.NoError(t, err)
+		pool, err := db.GetPool(lcommon.PoolKeyHash(hash), true, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, pool.Registration)
+		require.Equal(
+			t,
+			uint64(cfg.ShelleyGenesis().ProtocolParameters.PoolDeposit),
+			uint64(pool.Registration[0].DepositAmount),
+		)
+	}
+}
+
 // A peer repeating a rollback to our own tip must cost constant work: the
 // no-op is recognised before any rollback history is recorded.
 func TestHandleEventChainsyncRollbackToCurrentTipRecordsNoHistory(
@@ -18153,4 +18602,27 @@ func TestRequestChainsyncResyncCoalescesPerConnectionWithinWindow(
 	fixture.ls.resyncCoalesceMutex.Unlock()
 	fixture.ls.requestChainsyncResync(fixture.connId, "next episode", nil)
 	waitFor(4, "a request after the window must be published")
+}
+
+// TestEnsureGenesisCommitteeWarnsWithoutConwayGenesis proves a node with no
+// Conway genesis configured says so, rather than silently skipping the
+// committee seed.
+func TestEnsureGenesisCommitteeWarnsWithoutConwayGenesis(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger:            slog.New(slog.NewTextHandler(&logs, nil)),
+		},
+	}
+	require.Nil(t, ls.config.CardanoNodeConfig.ConwayGenesis())
+
+	require.NoError(t, ls.ensureGenesisCommittee(nil))
+	require.Contains(
+		t,
+		logs.String(),
+		"level=WARN msg=\"conway genesis not configured, genesis committee not seeded\"",
+	)
 }
