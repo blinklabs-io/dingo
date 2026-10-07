@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"log/slog"
 	"net/http"
@@ -35,6 +36,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
+	"modernc.org/sqlite"
 )
 
 func reviewSession(t *testing.T, server *mcp.Server) *mcp.ClientSession {
@@ -555,25 +557,11 @@ func TestTableResourcesRegisteredWhenEnumerationExceedsQueryTimeout(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db, err := sql.Open("sqlite", ":memory:")
-	require.NoError(t, err)
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { _ = db.Close() })
-	_, err = db.Exec(
+	db, deadlines := newDeadlineRecordingDB(t)
+	_, err := db.Exec(
 		`CREATE TABLE "transaction"(slot INTEGER, block_hash BLOB)`,
 	)
 	require.NoError(t, err)
-	// Hold the only connection so the construction-time enumeration query
-	// cannot start until after the (tiny) per-request timeout has elapsed.
-	conn, err := db.Conn(t.Context())
-	require.NoError(t, err)
-	released := make(chan struct{})
-	go func() {
-		defer close(released)
-		time.Sleep(200 * time.Millisecond)
-		_ = conn.Close()
-	}()
-	t.Cleanup(func() { <-released })
 	cfg := DefaultProviderConfig()
 	cfg.QueryTimeout = 10 * time.Millisecond
 	server, _, err := NewMCPServer(
@@ -581,6 +569,13 @@ func TestTableResourcesRegisteredWhenEnumerationExceedsQueryTimeout(
 		ProviderDependencies{SQLDB: db, Network: "preview"},
 	)
 	require.NoError(t, err)
+	remaining := testutil.RequireReceive(
+		t,
+		deadlines,
+		testutil.AsyncWait,
+		"table enumeration query did not start",
+	)
+	require.Greater(t, remaining, 20*time.Second)
 	cs := reviewSession(t, server)
 	res, err := cs.ReadResource(
 		t.Context(),
@@ -616,25 +611,11 @@ func TestTableEnumerationFailureLoggedToProviderLogger(t *testing.T) {
 
 func TestTableEnumerationKeepsLongerQueryTimeout(t *testing.T) {
 	t.Parallel()
-	db, err := sql.Open("sqlite", ":memory:")
-	require.NoError(t, err)
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { _ = db.Close() })
-	_, err = db.Exec(
+	db, deadlines := newDeadlineRecordingDB(t)
+	_, err := db.Exec(
 		`CREATE TABLE "transaction"(slot INTEGER, block_hash BLOB)`,
 	)
 	require.NoError(t, err)
-	// Hold the only connection past the enumeration floor but well inside
-	// the configured query timeout.
-	conn, err := db.Conn(t.Context())
-	require.NoError(t, err)
-	released := make(chan struct{})
-	go func() {
-		defer close(released)
-		time.Sleep(200 * time.Millisecond)
-		_ = conn.Close()
-	}()
-	t.Cleanup(func() { <-released })
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "review", Version: "1"},
 		nil,
@@ -648,14 +629,58 @@ func TestTableEnumerationKeepsLongerQueryTimeout(t *testing.T) {
 		10*time.Millisecond,
 		slog.Default(),
 	)
-	cs := reviewSession(t, server)
-	_, err = cs.ReadResource(
-		t.Context(),
-		&mcp.ReadResourceParams{URI: "dingo://schema/table/transaction"},
-	)
-	require.NoError(
+	remaining := testutil.RequireReceive(
 		t,
-		err,
-		"a configured query timeout above the floor must bound enumeration",
+		deadlines,
+		testutil.AsyncWait,
+		"table enumeration query did not start",
 	)
+	require.Greater(t, remaining, 4*time.Second)
+}
+
+type deadlineRecordingConnector struct {
+	dsn       string
+	deadlines chan<- time.Duration
+}
+
+func (c deadlineRecordingConnector) Connect(context.Context) (driver.Conn, error) {
+	conn, err := (&sqlite.Driver{}).Open(c.dsn)
+	if err != nil {
+		return nil, err
+	}
+	return &deadlineRecordingConn{Conn: conn, deadlines: c.deadlines}, nil
+}
+
+func (c deadlineRecordingConnector) Driver() driver.Driver { return &sqlite.Driver{} }
+
+type deadlineRecordingConn struct {
+	driver.Conn
+	deadlines chan<- time.Duration
+}
+
+func (c *deadlineRecordingConn) QueryContext(
+	ctx context.Context,
+	query string,
+	args []driver.NamedValue,
+) (driver.Rows, error) {
+	deadline, ok := ctx.Deadline()
+	if ok {
+		select {
+		case c.deadlines <- time.Until(deadline):
+		default:
+		}
+	}
+	return c.Conn.(driver.QueryerContext).QueryContext(ctx, query, args)
+}
+
+func newDeadlineRecordingDB(t *testing.T) (*sql.DB, <-chan time.Duration) {
+	t.Helper()
+	deadlines := make(chan time.Duration, 1)
+	db := sql.OpenDB(deadlineRecordingConnector{
+		dsn:       filepath.Join(t.TempDir(), "mcp.sqlite"),
+		deadlines: deadlines,
+	})
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	return db, deadlines
 }
