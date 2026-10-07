@@ -15,8 +15,11 @@
 package mithril
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // Certificate-chain limits. Everything a certificate carries is
@@ -175,4 +178,58 @@ func stmAggregateSignatureWork(sig *stmAggregateSignature) uint64 {
 		work += uint64(len(s.Sig.Indexes)) * stmWorkPerIndex
 	}
 	return work + uint64(len(sig.BatchProof.Values))*stmWorkPerPathNode
+}
+
+// walkBoundedJSONArray visits each array element without first materializing
+// the complete collection. It is used at untrusted JSON collection boundaries
+// where a short serialized element can expand into a much larger Go value.
+func walkBoundedJSONArray(
+	data []byte,
+	limit int,
+	label string,
+	visit func(json.RawMessage) error,
+) (int, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil {
+		return 0, err
+	}
+	if token == nil {
+		return 0, nil
+	}
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '[' {
+		return 0, fmt.Errorf("%s is not a JSON array", label)
+	}
+	count := 0
+	for decoder.More() {
+		if count >= limit {
+			return 0, fmt.Errorf(
+				"%w: %s exceed limit %d",
+				errCertificateChainBudget,
+				label,
+				limit,
+			)
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return 0, err
+		}
+		if visit != nil {
+			if err := visit(raw); err != nil {
+				return 0, err
+			}
+		}
+		count++
+	}
+	if _, err := decoder.Token(); err != nil {
+		return 0, err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return 0, fmt.Errorf("%s has trailing JSON data", label)
+		}
+		return 0, err
+	}
+	return count, nil
 }

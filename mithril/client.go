@@ -198,6 +198,52 @@ type CertificateMetadata struct {
 	Signers     []StakeDistributionParty `json:"signers"`
 }
 
+// UnmarshalJSON bounds the signer collection while it is decoded. The
+// certificate body limit bounds serialized bytes, but a JSON array of tiny
+// objects expands into a much larger slice of Go structs before a caller can
+// inspect its length.
+func (m *CertificateMetadata) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Network     string             `json:"network"`
+		Version     string             `json:"version"`
+		Parameters  ProtocolParameters `json:"parameters"`
+		InitiatedAt string             `json:"initiated_at"`
+		SealedAt    string             `json:"sealed_at"`
+		Signers     json.RawMessage    `json:"signers"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	var signers []StakeDistributionParty
+	if len(wire.Signers) > 0 {
+		_, err := walkBoundedJSONArray(
+			wire.Signers,
+			stmMaxSigners,
+			"certificate signers",
+			func(raw json.RawMessage) error {
+				var signer StakeDistributionParty
+				if err := json.Unmarshal(raw, &signer); err != nil {
+					return err
+				}
+				signers = append(signers, signer)
+				return nil
+			},
+		)
+		if err != nil {
+			return err
+		}
+	}
+	*m = CertificateMetadata{
+		Network:     wire.Network,
+		Version:     wire.Version,
+		Parameters:  wire.Parameters,
+		InitiatedAt: wire.InitiatedAt,
+		SealedAt:    wire.SealedAt,
+		Signers:     signers,
+	}
+	return nil
+}
+
 // ComputeHash matches the upstream Mithril certificate-metadata hash.
 func (m CertificateMetadata) ComputeHash() (string, error) {
 	hasher := sha256.New()
@@ -367,19 +413,9 @@ func (s *SignedEntityType) Kind() (string, error) {
 	if s == nil || s.raw == nil {
 		return "", errors.New("signed entity type is nil")
 	}
-	var parsed map[string]json.RawMessage
-	if err := json.Unmarshal(s.raw, &parsed); err != nil {
-		return "", fmt.Errorf("parsing signed entity type: %w", err)
-	}
-	if len(parsed) != 1 {
-		return "", fmt.Errorf(
-			"signed entity type must contain exactly one key, got %d",
-			len(parsed),
-		)
-	}
-	var key string
-	for k := range parsed {
-		key = k
+	key, _, err := s.singleEntry()
+	if err != nil {
+		return "", err
 	}
 	return key, nil
 }
@@ -388,12 +424,12 @@ func (s *SignedEntityType) beaconForType(typeName string) *Beacon {
 	if s == nil || s.raw == nil {
 		return nil
 	}
-	var parsed map[string]Beacon
-	if err := json.Unmarshal(s.raw, &parsed); err != nil {
+	key, raw, err := s.singleEntry()
+	if err != nil || key != typeName {
 		return nil
 	}
-	beacon, ok := parsed[typeName]
-	if !ok {
+	var beacon Beacon
+	if err := json.Unmarshal(raw, &beacon); err != nil {
 		return nil
 	}
 	return &beacon
@@ -403,15 +439,64 @@ func (s *SignedEntityType) epochBeaconForType(typeName string) *Beacon {
 	if s == nil || s.raw == nil {
 		return nil
 	}
-	var parsed map[string]uint64
-	if err := json.Unmarshal(s.raw, &parsed); err != nil {
+	key, raw, err := s.singleEntry()
+	if err != nil || key != typeName {
 		return nil
 	}
-	epoch, ok := parsed[typeName]
-	if !ok {
+	var epoch uint64
+	if err := json.Unmarshal(raw, &epoch); err != nil {
 		return nil
 	}
 	return &Beacon{Epoch: epoch}
+}
+
+// singleEntry reads only the tagged union's one permitted entry. Rejecting a
+// second key before decoding its value prevents a large attacker-controlled
+// object from expanding into a Go map before the shape check fails.
+func (s *SignedEntityType) singleEntry() (string, json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(s.raw))
+	token, err := decoder.Token()
+	if err != nil {
+		return "", nil, fmt.Errorf("parsing signed entity type: %w", err)
+	}
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '{' {
+		return "", nil, errors.New("signed entity type is not a JSON object")
+	}
+	if !decoder.More() {
+		return "", nil, errors.New(
+			"signed entity type must contain exactly one key, got 0",
+		)
+	}
+	keyToken, err := decoder.Token()
+	if err != nil {
+		return "", nil, fmt.Errorf("parsing signed entity type key: %w", err)
+	}
+	key, ok := keyToken.(string)
+	if !ok {
+		return "", nil, errors.New("signed entity type key is not a string")
+	}
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
+		return "", nil, fmt.Errorf("parsing signed entity type value: %w", err)
+	}
+	if decoder.More() {
+		return "", nil, errors.New(
+			"signed entity type must contain exactly one key, got at least 2",
+		)
+	}
+	if _, err := decoder.Token(); err != nil {
+		return "", nil, fmt.Errorf("parsing signed entity type: %w", err)
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return "", nil, errors.New(
+				"signed entity type has trailing JSON data",
+			)
+		}
+		return "", nil, fmt.Errorf("parsing signed entity type: %w", err)
+	}
+	return key, raw, nil
 }
 
 func (s *SignedEntityType) feedHash(hasher hash.Hash) error {

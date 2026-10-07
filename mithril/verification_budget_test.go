@@ -29,6 +29,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/blake2b"
 )
 
 // budgetChain serves a structural certificate chain of length certs whose
@@ -159,6 +160,40 @@ func TestVerifyCertificateChainSignerCountCap(t *testing.T) {
 	)
 	require.ErrorIs(t, err, errCertificateChainBudget)
 	require.Contains(t, err.Error(), "signers")
+}
+
+func TestCertificateMetadataSignerCountCapDuringDecode(t *testing.T) {
+	t.Parallel()
+
+	metadata := func(signers int) []byte {
+		items := make([]string, signers)
+		for i := range items {
+			items[i] = `{}`
+		}
+		return []byte(`{"signers":[` + strings.Join(items, ",") + `]}`)
+	}
+
+	var got CertificateMetadata
+	require.NoError(
+		t,
+		json.Unmarshal(metadata(stmMaxSigners), &got),
+		"a signer array exactly at the cap is accepted",
+	)
+	require.Len(t, got.Signers, stmMaxSigners)
+
+	err := json.Unmarshal(metadata(stmMaxSigners+1), &got)
+	require.ErrorIs(t, err, errCertificateChainBudget)
+	require.Contains(t, err.Error(), "certificate signers")
+}
+
+func TestSignedEntityTypeRejectsSecondKeyBeforeItsValue(t *testing.T) {
+	t.Parallel()
+
+	entity := SignedEntityType{
+		raw: json.RawMessage(`{"CardanoDatabase":{},"oversized":`),
+	}
+	_, err := entity.Kind()
+	require.ErrorContains(t, err, "exactly one key")
 }
 
 func TestGetCertificateBodyLimit(t *testing.T) {
@@ -321,6 +356,32 @@ func TestVerifySTMSignatureWorkBudget(t *testing.T) {
 	})
 }
 
+func TestParseSTMAggregateVerificationKeyRequiresFixedRoot(t *testing.T) {
+	t.Parallel()
+
+	jsonAVK := stmAggregateVerificationKey{
+		MTCommitment: stmMerkleTreeBatchCommitment{
+			Root:     make([]byte, blake2b.Size256+1),
+			NrLeaves: 1,
+		},
+		TotalStake: 1,
+	}
+	jsonBytes, err := json.Marshal(jsonAVK)
+	require.NoError(t, err)
+	_, err = parseSTMAggregateVerificationKey(hex.EncodeToString(jsonBytes))
+	require.ErrorContains(t, err, "invalid Merkle root length")
+
+	binaryAVK := binary.BigEndian.AppendUint64(nil, 1)
+	binaryAVK = append(binaryAVK, make([]byte, blake2b.Size256+1)...)
+	binaryAVK = binary.BigEndian.AppendUint64(binaryAVK, 1)
+	_, err = parseSTMAggregateVerificationKey(hex.EncodeToString(binaryAVK))
+	require.ErrorContains(
+		t,
+		err,
+		"invalid aggregate verification key payload length",
+	)
+}
+
 func TestVerifyCertificateChainChargesSTMWorkToChainBudget(t *testing.T) {
 	t.Parallel()
 
@@ -438,11 +499,9 @@ func TestVerifySTMSignatureRejectsOverCapJSONSignature(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			encoded := budgetJSONSignature(t, tt.sigs, tt.indices, tt.values)
-			// The JSON form must reach the verifier as JSON, not fall
-			// through to the binary parser.
-			parsed, err := parseSTMAggregateSignature(encoded)
-			require.NoError(t, err)
-			require.NotEmpty(t, parsed.Signatures)
+			_, err := parseSTMAggregateSignature(encoded)
+			require.ErrorIs(t, err, errCertificateChainBudget)
+			require.Contains(t, err.Error(), tt.wantErr)
 
 			err = verifySTMSignature(
 				msg, avk, encoded, params, newCertificateChainBudget(),
