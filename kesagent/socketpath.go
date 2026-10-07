@@ -15,6 +15,7 @@
 package kesagent
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -36,7 +37,7 @@ const (
 // socketPathLimit returns the longest socket path this platform accepts.
 //
 // A non-abstract path is NUL-terminated inside sun_path, costing one byte; a
-// Linux abstract address (leading "@" or NUL) is not, so it may use the full
+// Linux abstract address (leading "@") is not, so it may use the full
 // field. Getting that distinction right matters because an abstract address
 // is a legitimate way to name a KES agent socket on Linux, and rejecting one
 // byte of it would be a bug in this check rather than in the operator's
@@ -53,13 +54,18 @@ func socketPathLimit(path string) int {
 }
 
 func isAbstractSocketPath(path string) bool {
-	return strings.HasPrefix(path, "@") || strings.HasPrefix(path, "\x00")
+	return strings.HasPrefix(path, "@")
 }
 
 // resolveSocketPath fixes a named socket to one filesystem location before
 // the client starts reconnecting. Abstract socket names are already complete
 // kernel addresses and must not be interpreted as filesystem paths.
 func resolveSocketPath(path string) (string, error) {
+	if strings.HasPrefix(path, "\x00") {
+		return "", errors.New(
+			"kesagent: NUL-prefixed socket addresses are not portable; use the @ prefix for a Linux abstract socket",
+		)
+	}
 	if isAbstractSocketPath(path) {
 		return path, nil
 	}

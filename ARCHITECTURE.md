@@ -7554,9 +7554,10 @@ developer's Mac. `kesagent.NewClient` resolves a relative filesystem path to
 one absolute path before the first connection, then reuses that path for every
 reconnect; changing the process working directory cannot redirect later
 connections to another local agent. Absolute filesystem paths are cleaned,
-and Linux abstract socket addresses are kept as configured. The client rejects
-an over-long resolved path at block-producer startup with an error that states
-the length and the limit.
+and Linux abstract socket addresses use Go's `@name` form and are kept as
+configured. Literal NUL-prefixed addresses are rejected as nonportable. The
+client rejects an over-long resolved path at block-producer startup with an
+error that states the length and the limit.
 
 `internal/config.ValidateKESKeySources` rejects a block producer that sets
 both `shelleyKesKey` and `shelleyKesAgentSocket`, so an operator's explicit

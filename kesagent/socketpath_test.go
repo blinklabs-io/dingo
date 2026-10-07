@@ -68,6 +68,17 @@ func TestNewClientKeepsAbstractSocketAddress(t *testing.T) {
 	require.Equal(t, want, client.cfg.SocketPath)
 }
 
+func TestNewClientRejectsNULPrefixedSocketAddress(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewClient(Config{
+		SocketPath: "\x00kes-agent",
+		Mode:       ModeServeKey,
+	})
+	require.ErrorContains(t, err, "NUL-prefixed")
+	require.ErrorContains(t, err, "@ prefix")
+}
+
 // TestNewClientRejectsOverLongSocketPath pins the operator-facing half of this
 // check: a path too long for the platform is refused at construction, with an
 // error naming the length and the limit, rather than surfacing much later as
