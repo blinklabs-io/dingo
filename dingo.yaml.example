@@ -1008,3 +1008,8 @@
   # every single one
   # CLI: --db-snapshot-every-n-epochs
   # snapshotEveryNEpochs: 1
+  # Cancel a snapshot (manual or automatic) still holding the commit
+  # barrier after this long; commits resume and the partial snapshot is
+  # removed. 0 means no bound
+  # CLI: --db-snapshot-max-commit-pause
+  # snapshotMaxCommitPause: 0s

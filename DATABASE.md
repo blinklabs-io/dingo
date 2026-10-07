@@ -87,6 +87,12 @@ cleanup preserves this marker alongside the deferred-index marker. This avoids
 repeating a full analysis on every restart while replacing statistics captured
 before historical transaction rows were loaded.
 
+SQLite reward live stake rebuilds from running totals analyze the transaction
+table before joining delegation certificates to transactions. Batched rebuilds
+reload the statistics on each batch's transaction connection before preparing
+the join, so pooled connections with independent planner caches use the updated
+estimates.
+
 MCP's `dingo://node/status` reports critical index availability separately from
 background index maintenance and recorded post-backfill statistics. A pending
 background rebuild alone does not make critical index readiness fail. These
@@ -624,6 +630,22 @@ A plugin that implements neither interface simply cannot be snapshotted/restored
 
 Each backup call is independently consistent, but `lifecycle.Snapshot` runs the two concurrently (in separate goroutines, joined via a `sync.WaitGroup`), not sequentially — neither Badger's `Backup` nor SQLite's `VACUUM INTO` exposes a way to separate "capture a consistent point" from "stream/copy it", so the full duration of whichever call runs longer must still be covered by the same pause, bounded by the slower of the two rather than their sum. Without that pause, a commit landing during either call's own window would write its commit timestamp to one store's backup and not the other's, and the restored copy fails `Database.checkCommitTimestamp`'s cross-store validation on open. `database.Database.PauseCommitsContext` closes that window (its non-cancellable sibling `PauseCommits` is what pre-dates `Snapshot` accepting a `ctx`; `Snapshot` itself calls the cancellable variant, so a caller can give up on a snapshot stuck waiting behind a long-running write transaction): every read-write `Txn` that opens a metadata write transaction holds the shared (`RLock`) side of the barrier from construction through `Commit`/`Rollback`/`Release`, and `lifecycle.Snapshot` takes the exclusive side around both concurrent backup calls together, so no such transaction — committed or still open — can straddle them. The barrier is held from construction, not just around `Commit`, because the metadata plugin's write connection pool is sized to exactly one connection: an already-opened-but-uncommitted transaction holds that connection regardless of whether `Commit` has been called, and if the barrier only guarded `Commit`, `PauseCommitsContext` could acquire its lock while such a transaction sat open — deadlocking `Snapshot`'s metadata backup (`VACUUM INTO`, which needs that same connection) against a writer that can now never reach `Commit`'s release. A blob-only `Txn` (`NewBlobOnlyTxn`) deliberately does *not* participate in the barrier: unlike SQLite, Badger natively supports concurrent read-write transactions, so a blob-only `Txn` never holds the single metadata connection the barrier protects, and its commit never writes the commit timestamp this barrier keeps consistent (only a paired blob+metadata `Txn.Commit` does). Several callers (`deleteUtxoBlobs`, `deleteTxBlobs`) open batched blob-only `Txn`s while an outer read-write `Txn` from the same call is already open on the same goroutine — if blob-only `Txn`s took the barrier too, that nested acquire could deadlock against a concurrent `PauseCommitsContext` caller, since the barrier's write side isn't reentrant. This pauses new read-write transactions only — not reads, and not a quiesce (nothing is torn down or disconnected) — so a snapshot against a live, actively-syncing node stays safe.
 
+**Commit-pause bound and metrics.** The time `lifecycle.Snapshot` holds the commit barrier is recorded in the `dingo_snapshot_commit_pause_seconds` histogram (label `result`: `ok`, `failed`, or `exceeded`) on the database's `PromRegistry`, and the bytes each backup wrote to disk in `dingo_snapshot_bytes_written_total` (label `store`: `blob` or `metadata`); the latter is also the temporary disk a snapshot needs. `lifecycle.WithMaxCommitPause(d)` (a `ManifestOption`, so it flows through `SnapshotToCloud` unchanged) bounds the hold: the clock starts once the barrier is acquired and covers the tip, commit-timestamp and gate reads as well as both backups, and when that work is still running at `d` they are cancelled, the barrier is released, the partial snapshot directory is removed, and `Snapshot` returns an error wrapping `lifecycle.ErrCommitPauseExceeded`. The barrier is released only once both cancelled backups return, so the hold can exceed `d` by however long a provider takes to observe cancellation: Badger checks the context on each streamed write, and SQLite's `VACUUM INTO` runs under `ExecContext`. Time spent waiting to acquire the barrier is bounded by the caller's context, not by `d`. A backup that returns success after `d` is still rejected with `ErrCommitPauseExceeded`, since the deadline is measured rather than inferred from the provider's error. Caller cancellation and a failure of either backup follow the same release-and-cleanup path and are not reported as `ErrCommitPauseExceeded`. `databaseLifecycle.snapshotMaxCommitPause` (`--db-snapshot-max-commit-pause`, `DINGO_DB_LIFECYCLE_SNAPSHOT_MAX_COMMIT_PAUSE`) sets `d` for every snapshot the node takes: the `dingo database snapshot` CLI, Bark's `CreateSnapshot`, and automatic epoch-boundary snapshots. The default, zero, is no bound.
+
+**Storage scale benchmarks.** `make bench-storage-scale` runs `BenchmarkStorageScaleUtxo`, `BenchmarkStorageScaleBlobBlocks` and `BenchmarkStorageScaleSnapshotPause` in `internal/integration` against file-backed Badger and SQLite stores. UTxO and block benchmarks use 100 timed samples per scale so their latency percentiles are meaningful; the snapshot benchmark uses one iteration because it copies the seeded stores. When `DINGO_BENCH_SCALE` is set, Badger uses production value-log and memtable sizes; plain `go test -bench=.` keeps the bounded test sizes. Environment knobs:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DINGO_BENCH_SCALE` | `10000` (`1m` under the make target) | Comma-separated UTxO counts; `k`, `m` and `b` suffixes accepted. Invalid values fail the run. |
+| `DINGO_BENCH_BLOCKS` | `1000` (`100k` under the make target) | Block count, one value per run. Set independently of `DINGO_BENCH_SCALE`: block volume does not follow from UTxO cardinality. |
+| `DINGO_BENCH_BLOCK_BYTES` | `32768` | Bytes per block payload. |
+| `DINGO_BENCH_LATENCY_SAMPLES` | `20000` | Latency samples kept per series; later samples are dropped. |
+| `DINGO_BENCH_DATADIR` | temporary directory | Volume the stores and snapshots are written to. Point it at the disk being measured. |
+
+Reported metrics: `lookup-*` and `write-batch-*` (p50, p95, p99, max nanoseconds per UTxO lookup and per 1000-row insert transaction), `read-*` (per block read), `seed-rows/s` and `write-blocks/s`, `block-volume-bytes` (blocks times payload bytes written), `data-dir-allocated-bytes`, `blob-dir-allocated-bytes` and `blob-dir-allocated-bytes-after-flatten` (allocated filesystem blocks for the data and blob directories; omitted when the filesystem does not expose allocated-block counts), `sst-tables` and `flatten-s` (Badger table count, and size and duration of a forced compaction), `rss-bytes` (process resident set, Linux only), and for the snapshot benchmark `commit-pause-s` (the mean `dingo_snapshot_commit_pause_seconds` observation) with `snapshot-blob-bytes` and `snapshot-metadata-bytes`. RSS is process-wide and includes earlier sub-benchmarks, so compare it across separate runs of one scale rather than within one.
+
+Mainnet run: record the live Mainnet UTxO count, block count and blob-store bytes at the start of the run, then set `DINGO_BENCH_SCALE` to that UTxO count, `DINGO_BENCH_BLOCKS` to the block count, and `DINGO_BENCH_BLOCK_BYTES` to the blob-store bytes divided by the block count, for example `DINGO_BENCH_SCALE=11m DINGO_BENCH_BLOCKS=12m DINGO_BENCH_BLOCK_BYTES=20000 DINGO_BENCH_DATADIR=/path/on/target/volume make bench-storage-scale`. `block-volume-bytes` reports the synthetic volume written, so the approximation to the measured volume can be stated with the results. Blocks take `DINGO_BENCH_BLOCKS` times `DINGO_BENCH_BLOCK_BYTES` on disk, and the snapshot benchmark needs further free space of the same order for the snapshot copy. A UTxO count above the captured Mainnet cardinality is a synthetic stress point and is reported as such, not as a Mainnet forecast. To run one benchmark, call `go test -run='^$' -bench=<name> -benchtime=100x ./internal/integration` for UTxO or block benchmarks, or use `-benchtime=1x` for snapshots. Scale values are positive counts with optional `k`, `m`, or `b` suffixes; block payloads must be at least eight bytes. Seeding dominates wall-clock time and is outside the timed region. Results are specific to the host and filesystem; record the hardware alongside them.
+
 **Snapshot directory layout**, written by `lifecycle.Snapshot`:
 
 ```
@@ -842,6 +864,37 @@ potentially large `utxo`/stake-reference scan cannot hold SQLite's single write
 connection indefinitely; later timer or epoch-boundary runs reclaim the
 remaining rows once the node is near the upstream tip.
 API mode retains spent UTxO metadata for historical transaction queries.
+
+**Acquired-point pins.** Consumed-UTxO cleanup also defers to LocalStateQuery
+points that clients currently hold. A node-to-client Acquire of a specific
+point pins its slot (`LedgerState.PinAcquiredPoint`,
+`ledger/acquired_point_pins.go`) *before* `VerifyPointQueryable` checks it, and
+`cleanupConsumedUtxos` takes its delete floor from `capUtxoPruneFloor`, which
+lowers `tip - stabilityWindow` to the oldest pinned slot. The capped floor is
+announced in memory, under the pin registry's own lock, before
+`consumed_utxo_prune_floor` is persisted and before any row is deleted, and
+Acquire's verify also refuses a point below an announced floor. So a concurrent
+Acquire is either retained, because its pin landed first, or refused at
+Acquire, where the protocol has a clean `AcquireFailure`; it is never approved
+and then left pointing at rows a prune is deleting. No I/O runs under that
+lock.
+
+A pin holds the floor back by at most `acquiredPointMaxUtxoHoldWindows` (4)
+stability windows behind its normal value; a pin older than that stops being
+protected, so a client that acquires and never releases cannot stop spent-UTxO
+pruning, and its later queries fall back to the ordinary retention rejection.
+A pin only holds back *future* advances: `consumed_utxo_prune_floor` still only
+ever rises, so rows already below a persisted floor are not recovered, and an
+Acquire of a point below that floor is refused as before.
+
+A pin lives in the connection's LocalStateQuery session and is released
+wherever that session's ledger snapshot is closed: Release, an Acquire of the
+volatile or immutable tip, a re-Acquire (which closes the previous session
+before verifying the new point, so a rejected re-Acquire leaves no pin),
+connection close, and the snapshot's lifetime expiry. A failed Acquire releases
+its pin before replying, and a close that lands while the Acquire is still
+verifying cancels it, so its pin is released too. API storage mode is
+unaffected: it never prunes spent rows, so no cap or announced floor applies.
 
 ## ER Diagrams
 
@@ -1751,8 +1804,9 @@ Every epoch transition runs `cleanupOldSnapshots`, which prunes to the four
 epochs the Shelley rotation and delayed reward model need: current, current-1,
 current-2 for Go, and current-3 so reward calculation can be replayed after a
 rollback across the boundary where those rewards were applied. It only ever
-deletes rows below that window (but see the deferred-header retention pin
-below, which can hold `pool_stake_snapshot` rows longer).
+deletes rows below that window (but see the deferred-header and
+acquired-point retention pins below, which can hold `pool_stake_snapshot` rows
+longer).
 
 `reward_account_output` and `pool_stake_snapshot` are the two tables whose
 retention depends on node configuration. `reward_account_output` is retained
@@ -1866,6 +1920,30 @@ its in-memory entry but loses its durable marker, so after a restart
 is skipped for a header that is still outstanding. The earlier claim that this lock "does no I/O, so it cannot deadlock" was
 wrong: the hazard is never the mutex holder's own I/O, it is the *caller on the
 other path* holding the single write connection while it waits for this mutex.
+
+**Acquired-point retention pin.** `pool_stake_snapshot` is also held for
+LocalStateQuery points that clients currently hold, since a pinned
+`GetStakeDistribution`/`GetPoolDistr2` reads the mark snapshot of the point's
+epoch (`StakeSnapshotEpoch(epochOf(slot))`). After the deferred-header lock is
+released and before `prune` runs, `PrunePoolSnapshotsWithRetentionFloor` passes
+the boundary through `capPoolSnapshotPruneBefore`, which lowers it to the
+oldest acquired point's mark-snapshot epoch and announces the result under the
+pin registry's lock (`ledger/acquired_point_pins.go`); slots are mapped against
+one epoch-cache snapshot, which takes no lock. The same
+`current - poolSnapshotRetentionMaxDepth` (24) depth cap clamps it, so an
+acquired point holds pool snapshots back no further than a deferred header
+can, and a slot that cannot be mapped retains down to that cap rather than
+everything. Reward-table retention is unaffected.
+
+Unlike a deferred header, an acquired point cannot recover from a snapshot
+pruned in the narrow window around the floor read: a deferred header is
+re-checked on a later pass, but a pinned query against a missing snapshot
+simply fails, and the LocalStateQuery protocol has no failure reply mid-query,
+so the connection drops. That is why the floor is announced before the delete
+and Acquire's verify also refuses a point below an announced floor. The pin is
+the same one the consumed-UTxO cleanup reads, released on the same lifecycle
+(see the consumed-UTxO cleanup notes under SQL Conventions). API storage mode
+never calls the guard, since it retains `pool_stake_snapshot` without bound.
 
 Releasing the lock before `prune` means a header admitted after the release is
 not pinned by the pass in flight. This is safe because the retention floor is a
@@ -3246,7 +3324,7 @@ by the API adapter, which compares each candidate output's decoded
 address bytes, because the pointer payload is not represented in the
 `utxo` table.
 
-### `GetUtxosByAddress`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
+### `GetUtxosByAddress`, `GetUtxosByAddressAsOf`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
 
 `GetUtxosByAddress` accepts multiple address patterns and OR-joins their coarse
 SQL branches into a single query, mirroring `GetUtxosByAddressWithOrdering`.
@@ -3283,6 +3361,17 @@ the dialect's parameter limit, not just counted against it afterward: a
 chunk that filled to exactly that limit on WHERE-clause args alone would
 otherwise produce a statement with one more bound parameter than the
 dialect allows once the `LIMIT ?` placeholder is appended.
+
+`GetUtxosByAddressAsOf` is the point-pinned form, used by `GetUTxOByAddress`
+when the LocalStateQuery session has an acquired point. It shares
+`GetUtxosByAddress`'s chunking and `maxResults` bound but replaces
+`deleted_slot = 0` with `GetUtxosByRefsAsOf`'s as-of predicate,
+`added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)`. Its two slot
+parameters are reserved in every chunk's parameter budget alongside the
+`LIMIT` placeholder. It inherits `GetUtxosByRefsAsOf`'s ambiguity for an old
+slot, so the caller rejects a point below `checkUtxoRetentionWindow`'s floor
+before calling it. The existing `payment_key` and `staking_key` indexes serve
+it; no index is added.
 
 Live UTxOs for a payment key with assets:
 
@@ -4073,6 +4162,18 @@ Surfaces with no representation for an unknown deposit render it as `0` and are
 unchanged: the Blockfrost account registration-history response and the
 `StakeDelegDeposits` local-state query.
 
+`GetLatestAccountRegistrationAtOrBefore(credentialTag, stakingKey, slot, txn)`
+returns the single newest row of that same union whose `added_slot` is at or
+before `slot`, in the same `added_slot`, `block_index`, `cert_index` order, or
+nil when there is none. It wraps the union in a subquery filtered by
+`added_slot <= ?` with `LIMIT 1`, so the lookup is one round trip however many
+events follow the slot. A `slot` above `math.MaxInt64` is rejected. Like the
+history it reads, it does not consult `account_import_baseline`; the
+`StakeDelegDeposits` local-state query (`ledger.LedgerState.stakeRegistrationAsOf`)
+applies the baseline the way `LedgerView.StakeCredentialDeposit` does, as the
+latest registration when it is at least as new as the newest certificate at
+or before the queried point.
+
 ### `GetAccountSumsByCredential`
 
 Backs the Blockfrost account `withdrawals_sum`, `reserves_sum`, and
@@ -4670,6 +4771,19 @@ LIMIT 1;
 
 The action-type list is bound for both the candidate and child predicates, so
 actions from another governance purpose cannot advance this root.
+
+A ledger-state import writes one synthetic enacted row (`added_slot` 0) for
+each non-null per-purpose root in the snapshot, then re-reads every one and
+fails the import unless it is a row with `enacted_epoch` set that
+`GetLastEnactedGovernanceProposal` returns as that purpose's current root.
+A resumed import whose governance phase is already checkpointed re-parses the
+snapshot and runs the same check. A
+database with a `mithril_ledger_slot` sync-state row is Mithril-bootstrapped;
+at startup and at each epoch boundary such a database must have an enacted
+root for every chained purpose whose active proposals name a parent that is
+neither an active proposal nor a stored row, otherwise startup or the
+boundary fails with `ErrMissingEnactedRoot`. Genesis-synced databases keep
+skipping such proposals.
 
 ```sql
 -- GetExpiredGovernanceProposalsAt(epoch, slot)

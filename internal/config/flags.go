@@ -954,6 +954,11 @@ var flagSpecs = []flagSpec{
 		"db-snapshot-every-n-epochs",
 		"capture an automatic snapshot every N epoch boundaries",
 	),
+	durationFlag(
+		"DatabaseLifecycle.SnapshotMaxCommitPause",
+		"db-snapshot-max-commit-pause",
+		"cancel a snapshot still holding the commit barrier after this long (0 = no bound)",
+	),
 }
 
 // RegisterFlags registers persistent CLI flags for every Config field.

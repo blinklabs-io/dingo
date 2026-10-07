@@ -1127,7 +1127,11 @@ type LedgerState struct {
 	// with rollback flows that may truncate the primary chain before restoring
 	// ledger metadata. It must never be held while acquiring chainsyncMutex;
 	// ChainSync handlers already hold chainsyncMutex when they enter rollback.
-	consumedUtxoPruneMutex        sync.Mutex
+	consumedUtxoPruneMutex sync.Mutex
+	// acquiredPins tracks LocalStateQuery points currently acquired, so the
+	// consumed-UTxO and pool-snapshot pruning paths retain what they need.
+	// See acquiredPointPins.
+	acquiredPins                  acquiredPointPins
 	chainsyncBlockfetchMutex      sync.Mutex
 	chainsyncBlockfetchReadyMutex sync.Mutex
 	// bufferedHeaderMutex guards bufferedHeaderEvents alone. That map is
@@ -2074,6 +2078,15 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 
 	if err := ls.loadMithrilTrustBoundary(); err != nil {
 		return fmt.Errorf("failed to load Mithril trust boundary: %w", err)
+	}
+	// Refuse to start on a snapshot-seeded database whose governance
+	// purpose roots are missing: tallying would skip ratifications the
+	// network performs and diverge at enactment. This runs before the
+	// worker pool and cleanup timer start because the caller only closes
+	// the ledger after Start succeeds, so the epoch comes from the stored
+	// epoch rows rather than currentEpoch, which loadEpochs sets later.
+	if err := ls.verifyGovernancePurposeRoots(); err != nil {
+		return fmt.Errorf("verify governance purpose roots: %w", err)
 	}
 	// Repopulate the in-memory deferred-header set from the persisted markers
 	// so the snapshot retention floor covers headers still awaiting apply from
@@ -3706,7 +3719,10 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		return
 	}
 	if tipSlot > stabilityWindow {
-		floor := tipSlot - stabilityWindow
+		// Capped at the oldest acquired LocalStateQuery point, and announced,
+		// before anything below is persisted or deleted -- see
+		// acquiredPointPins for why that order matters.
+		floor := ls.capUtxoPruneFloor(tipSlot-stabilityWindow, stabilityWindow)
 		// Persisted before the delete below, and this run must not proceed
 		// to delete anything if the persist itself fails: this durably
 		// records that rows at-or-behind floor are now ELIGIBLE for
@@ -3732,7 +3748,7 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		// No lock needed here - the database handles its own consistency
 		// and we're not accessing any in-memory LedgerState fields.
 		// The tipSlot was captured above with a read lock.
-		pruneSlot := tipSlot - stabilityWindow
+		pruneSlot := floor
 		pruned, err := ls.db.UtxosDeleteConsumed(
 			pruneSlot,
 			cleanupConsumedUtxoBatchSize,
@@ -10022,6 +10038,20 @@ func (ls *LedgerState) computeGenesisProtocolParameters(
 	return pparams, nil
 }
 
+// verifyGovernancePurposeRoots runs governance.VerifyPurposeRoots at the
+// latest stored epoch, the epoch loadEpochs makes current.
+func (ls *LedgerState) verifyGovernancePurposeRoots() error {
+	epochs, err := ls.db.GetEpochs(nil)
+	if err != nil {
+		return fmt.Errorf("get epochs: %w", err)
+	}
+	var epoch uint64
+	if len(epochs) > 0 {
+		epoch = epochs[len(epochs)-1].EpochId
+	}
+	return governance.VerifyPurposeRoots(ls.db, nil, epoch)
+}
+
 func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	// Load and cache all epochs
 	epochs, err := ls.db.GetEpochs(txn)
@@ -11802,6 +11832,35 @@ func (ls *LedgerState) GetChainFromPointReverseContext(
 // Tip returns the current chain tip
 func (ls *LedgerState) Tip() ochainsync.Tip {
 	return cloneTip(ls.loadTipSnapshot().currentTip)
+}
+
+// ImmutablePoint returns the primary-chain point k blocks behind the applied
+// ledger tip.
+// found is false while the retained chain is too short to have a non-origin
+// immutable point.
+func (ls *LedgerState) ImmutablePoint() (
+	ocommon.Point,
+	bool,
+	error,
+) {
+	ls.RLock()
+	primaryChain := ls.chain
+	eraID := ls.currentEra.Id
+	appliedTip := cloneTip(ls.currentTip)
+	ls.RUnlock()
+	if primaryChain == nil {
+		return ocommon.Point{}, false, errors.New("primary chain is nil")
+	}
+	securityParam, ok := ls.securityParamForEra(eraID)
+	if !ok {
+		return ocommon.Point{}, false, errors.New(
+			"security parameter is not configured",
+		)
+	}
+	if appliedTip.Point.Slot == 0 && len(appliedTip.Point.Hash) == 0 {
+		return ocommon.Point{}, false, nil
+	}
+	return primaryChain.PointAtDepthFrom(appliedTip.Point, securityParam)
 }
 
 // ForgeTipSnapshot returns the applied tip and its era's security parameter
