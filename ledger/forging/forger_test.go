@@ -2228,6 +2228,74 @@ func (l *forgerCountingLeader) callCount() int {
 	return l.calls
 }
 
+// forgerNotLeader counts slot checks and never wins one, so every cycle of
+// the producer loop reaches the leader check and moves the count.
+type forgerNotLeader struct {
+	forgerCountingLeader
+}
+
+func (l *forgerNotLeader) ShouldProduceBlock(slot uint64) bool {
+	l.forgerCountingLeader.ShouldProduceBlock(slot)
+	return false
+}
+
+// forgerFastSlotClock ends each slot a few milliseconds ahead so the
+// slot-aligned loop cycles quickly.
+type forgerFastSlotClock struct {
+	forgerTestSlotClock
+}
+
+func (forgerFastSlotClock) NextSlotTime() (time.Time, error) {
+	return time.Now().Add(5 * time.Millisecond), nil
+}
+
+// A fatal component error, such as a ledger rollover that cannot apply its
+// reward update, cancels the node context the producer loop runs under. The
+// loop must then exit and check no further slots, so the node stops forging
+// on a ledger that halted.
+func TestForgerStopsCheckingSlotsWhenItsContextIsCancelled(t *testing.T) {
+	t.Parallel()
+
+	leader := &forgerNotLeader{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    leader,
+		BlockBuilder:     &forgerTestBuilder{},
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgerFastSlotClock{forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+		}},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	// No deferred Stop: Stop waits for the loop, so on the failure this test
+	// exists to catch it would hang the package instead of failing the test.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, forger.Start(ctx))
+
+	require.Eventually(t, func() bool {
+		return leader.callCount() >= 2
+	}, 5*time.Second, time.Millisecond, "producer loop never checked a slot")
+
+	cancel()
+
+	require.Eventually(t, func() bool {
+		return !forger.IsRunning()
+	}, 5*time.Second, time.Millisecond,
+		"producer loop kept running after its context was cancelled")
+	checked := leader.callCount()
+	require.Never(t, func() bool {
+		return leader.callCount() != checked
+	}, 100*time.Millisecond, 5*time.Millisecond,
+		"producer loop checked a slot after its context was cancelled")
+}
+
 type forgerTestSlotClock struct {
 	currentSlot         uint64
 	chainTipSlot        uint64
