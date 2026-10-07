@@ -174,7 +174,7 @@ func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
 
 	var count int
 	require.NoError(t, raw.QueryRow(
-		"SELECT COUNT(*) FROM epoch WHERE slot > ?", anchorSlot,
+		"SELECT COUNT(*) FROM epoch WHERE start_slot > ?", anchorSlot,
 	).Scan(&count))
 	require.Equal(t, 1, count, "epoch sweep must roll back with the failed delete")
 	require.NoError(t, raw.QueryRow(
