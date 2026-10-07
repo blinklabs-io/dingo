@@ -2202,6 +2202,26 @@ func (n *Node) subscribeChainSelectorEvents() {
 			)
 		},
 	)
+	// Feed rolled-back blocks to the blockfetch fork-battle ring so a
+	// dashboard can tell a fork-battle delay from a genuinely slow fetch.
+	// ChainUpdateEventType also carries chain.ChainBlockEvent for ordinary
+	// adds; only chain.ChainRollbackEvent is relevant here, so non-matching
+	// payloads are silently ignored rather than logged as unexpected. This
+	// observer only emits diagnostics; dropping it does not affect state.
+	n.subscribeDetachableEvent(
+		chain.ChainUpdateEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(chain.ChainRollbackEvent)
+			if !ok {
+				return
+			}
+			o := n.ouroboros()
+			if o == nil {
+				return
+			}
+			o.RecordForkBattleParticipants(e.RolledBackBlocks)
+		},
+	)
 	// Subscribe to connection closed events to remove peers from chain selector
 	// Connection removal updates selector eligibility and ingress bookkeeping;
 	// the close event is not replayed if this subscription detaches.

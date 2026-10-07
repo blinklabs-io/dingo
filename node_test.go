@@ -440,7 +440,7 @@ func TestNodeEventSubscriptionPoliciesAreExplicit(t *testing.T) {
 			},
 			"subscribeChainSelectorEvents": {
 				required:   8,
-				detachable: 1,
+				detachable: 2,
 			},
 		},
 		"node_lifecycle.go": {
@@ -4021,7 +4021,7 @@ func TestNodeEventSubscriptionClassifications(t *testing.T) {
 		expectedRequired[group.function] = group.count
 	}
 	expectedDetachable := map[string]int{
-		"subscribeChainSelectorEvents":  1,
+		"subscribeChainSelectorEvents":  2,
 		"subscribeEquivocationDetector": 1,
 	}
 	expectedPolicies := map[string]string{
