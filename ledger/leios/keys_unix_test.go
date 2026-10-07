@@ -14,30 +14,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package forging
+package leios
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/keystore"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoadSecretKeyRejectsFIFOWithoutBlocking(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "key.fifo")
-	require.NoError(t, syscall.Mkfifo(path, 0o600))
+func TestLoadVoteSigningKeyFileRejectsFIFOContent(t *testing.T) {
+	t.Parallel()
 
-	_, err := loadSecretKeyFromFile(path)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "is not a regular file")
-}
-
-func TestLoadOperationalCertificateRejectsFIFOContent(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "opcert.fifo")
+	path := filepath.Join(t.TempDir(), "vote.fifo")
 	require.NoError(t, syscall.Mkfifo(path, 0o600))
 
 	writerDone := make(chan struct{})
@@ -47,11 +40,11 @@ func TestLoadOperationalCertificateRejectsFIFOContent(t *testing.T) {
 		if err != nil {
 			return
 		}
-		_, _ = f.WriteString(testOpCertJSON)
+		_, _ = fmt.Fprintf(f, "%064x", 42)
 		_ = f.Close()
 	}()
 
-	_, err := LoadOperationalCertificateFile(path)
+	_, err := LoadVoteSigningKeyFile(path)
 	require.ErrorIs(t, err, keystore.ErrNotRegularFile)
 
 	drain, openErr := os.OpenFile(

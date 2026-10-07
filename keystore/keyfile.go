@@ -48,6 +48,10 @@ type loadedKey struct {
 	OpCertColdVKey    []byte
 }
 
+// Cardano key envelopes are small JSON objects containing fixed-size key
+// material. One MiB leaves ample room for formatting while bounding reads.
+const maxKeyFileSize = 1 << 20
+
 // CheckOpenFilePermissions verifies that an already-opened key file is
 // not accessible beyond its owner, returning ErrInsecureFileMode
 // otherwise. On Unix this checks the file mode via fstat on the open
@@ -59,6 +63,51 @@ func CheckOpenFilePermissions(f *os.File) error {
 	return checkOpenFilePermissions(f)
 }
 
+// OpenRegularFile opens path and verifies from the returned handle that it is
+// a regular file. On Unix the open itself is nonblocking, so a FIFO cannot
+// stall key loading before its type is checked. Symlinks to regular files are
+// accepted, and the caller reads from the same handle that was validated.
+func OpenRegularFile(path string) (*os.File, error) {
+	f, err := openFileForValidation(path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("failed to stat key file %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf(
+			"key file %q is not a regular file (mode %s): %w",
+			path, info.Mode(), ErrNotRegularFile,
+		)
+	}
+	return f, nil
+}
+
+// ReadRegularKeyFile reads a bounded Cardano key envelope from a regular file.
+func ReadRegularKeyFile(path string) ([]byte, error) {
+	f, err := OpenRegularFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // read-only handle
+
+	data, err := io.ReadAll(io.LimitReader(f, maxKeyFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxKeyFileSize {
+		return nil, fmt.Errorf(
+			"key file %q exceeds maximum size of %d bytes",
+			path, maxKeyFileSize,
+		)
+	}
+	return data, nil
+}
+
 // loadKeyFromFile loads a key from a file path (cardano-cli format).
 // Supports VRF, KES, and operational certificates.
 // Returns ErrInsecureFileMode if the file has group or other access.
@@ -67,7 +116,7 @@ func CheckOpenFilePermissions(f *os.File) error {
 // (via fstat on Unix) to avoid a TOCTOU race between the permission check
 // and the read.
 func loadKeyFromFile(path string) (*loadedKey, error) {
-	f, err := os.Open(path)
+	f, err := OpenRegularFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open key file %q: %w", path, err)
 	}
@@ -79,10 +128,15 @@ func loadKeyFromFile(path string) (*loadedKey, error) {
 
 	// Limit read to 1 MiB to guard against accidentally pointing at a
 	// large file. Valid key files are well under this size.
-	const maxKeyFileSize = 1 << 20
-	data, err := io.ReadAll(io.LimitReader(f, maxKeyFileSize))
+	data, err := io.ReadAll(io.LimitReader(f, maxKeyFileSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read key file %q: %w", path, err)
+	}
+	if len(data) > maxKeyFileSize {
+		return nil, fmt.Errorf(
+			"key file %q exceeds maximum size of %d bytes",
+			path, maxKeyFileSize,
+		)
 	}
 	key, err := parseKeyEnvelope(data)
 	if err != nil {
@@ -96,7 +150,7 @@ func loadKeyFromFile(path string) (*loadedKey, error) {
 // operational certificates contain only public data (cold vkey, KES vkey,
 // signature) and do not require protection like secret keys.
 func loadOpCertFromFile(path string) (*loadedKey, error) {
-	data, err := os.ReadFile(path)
+	data, err := ReadRegularKeyFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read OpCert file %q: %w", path, err)
 	}
