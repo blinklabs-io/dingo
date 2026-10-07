@@ -187,9 +187,10 @@ type ChainSelectorConfig struct {
 	// OnGenesisDensityDisconnect is called, outside the selector lock, once
 	// per peer the Genesis Density Disconnector finds provably sparser than
 	// another candidate chain. The composition layer disconnects and denies
-	// the peer. The disconnector is inactive while this is nil or outside
-	// Genesis mode. Evaluation runs at most once per
-	// GenesisDensityEvaluationInterval.
+	// the peer. The disconnector is inactive while this is nil, outside
+	// Genesis mode, or while GenesisWindowSlots is zero: the 3k-slot
+	// fallback is too short to compare densities. Evaluation runs at most
+	// once per GenesisDensityEvaluationInterval.
 	OnGenesisDensityDisconnect func(GenesisDensityDisconnect)
 }
 

@@ -5052,7 +5052,12 @@ implemented by this type.
 
 **Genesis Density Disconnector** (`chainselection/density_disconnector.go`)
 disconnects peers whose candidate chain is provably sparser than another
-candidate's. It runs only in Genesis mode, from `EvaluateAndSwitch`, at most
+candidate's. It runs only in Genesis mode with `GenesisWindowSlots`
+configured, which the node always sets to 3k/f through
+`GenesisWindowSlotsForParams`; the selector's 3k-slot fallback holds about 3kf
+blocks, few enough that an honest short fork can lose a complete-window
+comparison, so the disconnector stays off without a configured window. It runs
+from `EvaluateAndSwitch`, at most
 once per `GenesisDensityEvaluationInterval` (one second, as upstream's
 `gcfGDDRateLimit`), because the pairwise comparison is quadratic in the number
 of tracked peers. For each ordered pair of live, eligible, non-stale
@@ -5060,9 +5065,10 @@ candidates it takes the `CandidateFragment.Intersect` of the two fragments and
 counts blocks in `(intersection, intersection + window]`, where the window is
 the Genesis window (`3k/f`). Peer B is disconnected when B's head has reached
 the window end, so its window is complete, and the blocks peer A has delivered
-in that window exceed B's. Upstream `densityDisconnect` disconnects a peer with
-an incomplete window only for a rival offering more than k headers after the
-intersection; fragments retain at most k+1 headers and the intersection must
+in that window exceed B's. Upstream `densityDisconnect`
+(ouroboros-consensus `Ouroboros/Consensus/Genesis/Governor.hs`) guards on
+`offersMoreThanK || lb0 == ub0`, so it disconnects a peer with an incomplete
+window only for a rival offering more than k headers after the intersection; fragments retain at most k+1 headers and the intersection must
 lie in both, so no rival here can offer that, and a peer whose window is
 incomplete is never disconnected. A peer that has delivered up to its
 advertised tip is incomplete, not complete: that tip can still advance, so an

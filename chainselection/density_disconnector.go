@@ -89,8 +89,13 @@ func fragmentWindowBounds(
 //
 // Callers must hold cs.mutex.
 func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisconnect {
+	// The 3k-slot fallback in genesisWindowSlotsLocked is not a Genesis
+	// window: it holds about 3kf blocks, few enough that an honest short
+	// fork can lose a complete-window comparison. Only a configured 3k/f
+	// window is meaningful here.
 	if cs.config.OnGenesisDensityDisconnect == nil ||
-		cs.mode != SelectionModeGenesis {
+		cs.mode != SelectionModeGenesis ||
+		cs.config.GenesisWindowSlots == 0 {
 		return nil
 	}
 	now := cs.now()

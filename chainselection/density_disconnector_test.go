@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"fmt"
+	"math/big"
 	"sync"
 	"testing"
 	"time"
@@ -25,9 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// gddFixture drives a Genesis-mode selector with k=40 (window 120 slots) and a
-// fake clock. Peers share a block at slot 10; the window under comparison is
-// therefore (10, 130].
+// gddFixture drives a Genesis-mode selector with k=40, a configured 120-slot
+// window and a fake clock. Peers share a block at slot 10; the window under
+// comparison is therefore (10, 130].
 type gddFixture struct {
 	cs          *ChainSelector
 	mu          sync.Mutex
@@ -37,10 +38,22 @@ type gddFixture struct {
 
 func newGDDFixture(t *testing.T, genesis bool) *gddFixture {
 	t.Helper()
+	return newGDDFixtureWindow(t, genesis, 120)
+}
+
+// newGDDFixtureWindow is newGDDFixture with an explicit GenesisWindowSlots;
+// zero leaves it unset.
+func newGDDFixtureWindow(
+	t *testing.T,
+	genesis bool,
+	windowSlots uint64,
+) *gddFixture {
+	t.Helper()
 	f := &gddFixture{now: time.Unix(1_700_000_000, 0)}
 	f.cs = NewChainSelector(ChainSelectorConfig{
-		GenesisMode:   genesis,
-		SecurityParam: 40,
+		GenesisMode:        genesis,
+		SecurityParam:      40,
+		GenesisWindowSlots: windowSlots,
 		OnGenesisDensityDisconnect: func(d GenesisDensityDisconnect) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
@@ -158,6 +171,41 @@ func TestGDDKeepsIncompletePeerAgainstRivalWithinK(t *testing.T) {
 	f.evaluate()
 
 	assert.Empty(t, f.disconnected())
+}
+
+// Without a configured window the selector falls back to 3k slots, not 3k/f.
+// At k=40 that window averages 6 honest blocks, so a peer on an honest short
+// fork can show a complete window of 1 block against a rival's 2. Only a real
+// Genesis window makes that comparison meaningful.
+func TestGDDInactiveWithoutConfiguredWindow(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixtureWindow(t, true, 0)
+	rival, peer := corrConn(1), corrConn(2)
+	f.deliver(t, rival, 0, 10, 11, 12)
+	// 1 block in (10,130], head past the window end: complete.
+	f.deliver(t, peer, 0, 10, 60, 200)
+
+	f.evaluate()
+
+	assert.Empty(t, f.disconnected())
+}
+
+// The same 1-versus-2 shape over a full 3k/f window, where the peer's head
+// genuinely passes the window end, is upstream's lb0 == ub0 case and still
+// disconnects.
+func TestGDDDisconnectsCompleteSparsePeerOverGenesisWindow(t *testing.T) {
+	t.Parallel()
+	window := GenesisWindowSlotsForParams(40, big.NewRat(1, 20))
+	require.Equal(t, uint64(2400), window)
+	f := newGDDFixtureWindow(t, true, window)
+	rival, peer := corrConn(1), corrConn(2)
+	f.deliver(t, rival, 0, 10, 11, 12)
+	// 1 block in (10,2410], head past the window end: complete.
+	f.deliver(t, peer, 0, 10, 60, 2500)
+
+	f.evaluate()
+
+	assert.Equal(t, []ouroboros.ConnectionId{peer}, f.disconnected())
 }
 
 func TestGDDNeverDisconnectsLastPeer(t *testing.T) {
