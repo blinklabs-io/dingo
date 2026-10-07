@@ -7966,7 +7966,11 @@ func TestEraTransitionPathRejectsLargerJump(t *testing.T) {
 func TestBoundaryEraForBlockUsesSuccessorHeaderEra(t *testing.T) {
 	t.Parallel()
 
-	ls := &LedgerState{}
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
 	target, allowTwoTransitions := ls.boundaryEraForBlock(
 		eras.MaryEraDesc.Id,
 		eras.AlonzoEraDesc.Id,
@@ -8061,6 +8065,28 @@ func TestBoundaryEraForBlockHonoursScheduledEpoch(t *testing.T) {
 		require.Equal(t, eras.ConwayEraDesc.Id, target)
 		require.True(t, allowTwoTransitions)
 	})
+}
+
+// TestBoundaryEraForBlockRefusesElevationWithoutShape pins the guard as
+// fail-closed. Without a resolvable hard-fork shape the configured
+// TriggerAtEpoch cannot be checked, so the header must not elevate the
+// ledger past the body era, even on a boundary that would otherwise qualify.
+func TestBoundaryEraForBlockRefusesElevationWithoutShape(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	_, shapeErr := ls.eraShapeWithError()
+	require.Error(t, shapeErr, "the premise: no shape can be built")
+
+	target, allowTwoTransitions := ls.boundaryEraForBlock(
+		eras.MaryEraDesc.Id,
+		eras.AlonzoEraDesc.Id,
+		7,
+		true,
+		10,
+	)
+	require.Equal(t, eras.AlonzoEraDesc.Id, target)
+	require.False(t, allowTwoTransitions)
 }
 
 // TestBoundaryEraForBlockVersionTriggerKeepsHeaderElevation pins that the

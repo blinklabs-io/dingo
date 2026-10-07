@@ -2094,7 +2094,12 @@ func (ls *LedgerState) boundaryEraForBlock(
 		!ls.isValidEraAdvancement(blockEraID, headerEraID) {
 		return targetEraID, false
 	}
-	if entry, ok := ls.eraShape().EraForID(blockEraID); ok &&
+	// Fail closed: without a shape the configured trigger cannot be checked.
+	shape, err := ls.eraShapeWithError()
+	if err != nil {
+		return targetEraID, false
+	}
+	if entry, ok := shape.EraForID(blockEraID); ok &&
 		entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch &&
 		newEpochID < entry.NextEraTrigger.Epoch {
 		return targetEraID, false
