@@ -16,6 +16,7 @@ package kesagent
 
 import (
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -53,6 +54,20 @@ func socketPathLimit(path string) int {
 
 func isAbstractSocketPath(path string) bool {
 	return strings.HasPrefix(path, "@") || strings.HasPrefix(path, "\x00")
+}
+
+// resolveSocketPath fixes a named socket to one filesystem location before
+// the client starts reconnecting. Abstract socket names are already complete
+// kernel addresses and must not be interpreted as filesystem paths.
+func resolveSocketPath(path string) (string, error) {
+	if isAbstractSocketPath(path) {
+		return path, nil
+	}
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("kesagent: resolve socket path %s: %w", path, err)
+	}
+	return resolved, nil
 }
 
 // checkSocketPathLen is socketPathLimit's decision split out from the
