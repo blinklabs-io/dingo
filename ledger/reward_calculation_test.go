@@ -10719,7 +10719,6 @@ func TestRequiredRewardBasisErrorNamesEpochInputAndRecovery(t *testing.T) {
 		setup     func(t *testing.T) (*LedgerState, *database.Database)
 		wantInput string
 		wantEpoch string
-		tolerated bool
 	}{
 		{
 			name: "missing ADA pots",
@@ -10728,7 +10727,6 @@ func TestRequiredRewardBasisErrorNamesEpochInputAndRecovery(t *testing.T) {
 			},
 			wantInput: "missing ADA pots",
 			wantEpoch: "pots_epoch=3",
-			tolerated: true,
 		},
 		{
 			name: "missing reward snapshot",
@@ -10739,7 +10737,6 @@ func TestRequiredRewardBasisErrorNamesEpochInputAndRecovery(t *testing.T) {
 			},
 			wantInput: "missing reward snapshot",
 			wantEpoch: "reward_snapshot_epoch=1",
-			tolerated: true,
 		},
 		{
 			name: "pruned reward stake inputs",
@@ -10753,7 +10750,6 @@ func TestRequiredRewardBasisErrorNamesEpochInputAndRecovery(t *testing.T) {
 			},
 			wantInput: "reward stake inputs",
 			wantEpoch: "reward_snapshot_epoch=1",
-			tolerated: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

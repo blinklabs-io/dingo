@@ -2229,13 +2229,20 @@ func (l *forgerCountingLeader) callCount() int {
 }
 
 // forgerNotLeader counts slot checks and never wins one, so every cycle of
-// the producer loop reaches the leader check and moves the count.
+// the producer loop reaches the leader check and moves the count. When
+// cancelAt is set it calls cancel from inside that check, so the
+// cancellation lands at a known point in the loop.
 type forgerNotLeader struct {
 	forgerCountingLeader
+	cancelAt int
+	cancel   context.CancelFunc
 }
 
 func (l *forgerNotLeader) ShouldProduceBlock(slot uint64) bool {
 	l.forgerCountingLeader.ShouldProduceBlock(slot)
+	if l.cancelAt > 0 && l.callCount() == l.cancelAt {
+		l.cancel()
+	}
 	return false
 }
 
@@ -2256,7 +2263,11 @@ func (forgerFastSlotClock) NextSlotTime() (time.Time, error) {
 func TestForgerStopsCheckingSlotsWhenItsContextIsCancelled(t *testing.T) {
 	t.Parallel()
 
-	leader := &forgerNotLeader{}
+	// No deferred Stop: Stop waits for the loop, so on the failure this test
+	// exists to catch it would hang the package instead of failing the test.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	leader := &forgerNotLeader{cancelAt: 2, cancel: cancel}
 	forger, err := NewBlockForger(ForgerConfig{
 		Mode:             ModeProduction,
 		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -2272,27 +2283,13 @@ func TestForgerStopsCheckingSlotsWhenItsContextIsCancelled(t *testing.T) {
 		PromRegistry: prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
-
-	// No deferred Stop: Stop waits for the loop, so on the failure this test
-	// exists to catch it would hang the package instead of failing the test.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	require.NoError(t, forger.Start(ctx))
-
-	require.Eventually(t, func() bool {
-		return leader.callCount() >= 2
-	}, 5*time.Second, time.Millisecond, "producer loop never checked a slot")
-
-	cancel()
 
 	require.Eventually(t, func() bool {
 		return !forger.IsRunning()
 	}, 5*time.Second, time.Millisecond,
 		"producer loop kept running after its context was cancelled")
-	checked := leader.callCount()
-	require.Never(t, func() bool {
-		return leader.callCount() != checked
-	}, 100*time.Millisecond, 5*time.Millisecond,
+	require.Equal(t, 2, leader.callCount(),
 		"producer loop checked a slot after its context was cancelled")
 }
 
