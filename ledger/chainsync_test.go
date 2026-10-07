@@ -11927,6 +11927,19 @@ func TestHandleChainSwitchEventCoalescedFreshCursorIsNotRecorded(
 	)
 }
 
+func TestFreshCursorAwaitingHeadersIgnoresNilRequest(t *testing.T) {
+	t.Parallel()
+
+	connId := testChainsyncConnId(6000, 3001)
+	ls := &LedgerState{
+		freshCursorPeers: map[string]*freshCursorRequest{
+			netAddrString(connId.RemoteAddr): nil,
+		},
+	}
+
+	assert.False(t, ls.freshCursorAwaitingHeadersLocked(connId))
+}
+
 func TestChainSwitchNeedsFreshCursorUsesObservedTip(
 	t *testing.T,
 ) {

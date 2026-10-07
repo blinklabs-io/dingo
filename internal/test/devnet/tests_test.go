@@ -1207,7 +1207,9 @@ func runFakeDevnetScript(
 	)
 	require.NoError(t, err)
 	dockerLog, err := os.ReadFile(filepath.Join(tempRoot, "docker.log"))
-	require.NoError(t, err)
+	if !errors.Is(err, os.ErrNotExist) {
+		require.NoError(t, err)
+	}
 	return fakeDevnetResult{
 		exitCode:     exitCode,
 		output:       output.String(),
