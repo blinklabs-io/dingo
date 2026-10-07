@@ -420,12 +420,6 @@ func (s *queryServiceServer) ReadUtxos(
 ) (*connect.Response[query.ReadUtxosResponse], error) {
 	keys := req.Msg.GetKeys() // []*TxoRef
 
-	release, err := s.utxorpc.acquireBulk()
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-
 	// Enforce request size limit
 	if len(keys) > s.utxorpc.config.MaxUtxoKeys {
 		return nil, connect.NewError(
@@ -442,6 +436,11 @@ func (s *queryServiceServer) ReadUtxos(
 		"Got a ReadUtxos request",
 		"keys", len(keys),
 	)
+	release, err := s.utxorpc.acquireBulk(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	budget := byteBudget{limit: s.utxorpc.config.MaxResponseBytes}
 	resp := &query.ReadUtxosResponse{}
 
@@ -538,12 +537,6 @@ func (s *queryServiceServer) SearchUtxos(
 	startToken := req.Msg.GetStartToken() // string
 	maxItems := req.Msg.GetMaxItems()     // int32
 
-	release, err := s.utxorpc.acquireBulk()
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-
 	maxAllowed := int32(
 		s.utxorpc.config.MaxHistoryItems,
 	) // #nosec G115 -- DefaultMaxHistoryItems (10000)
@@ -565,15 +558,6 @@ func (s *queryServiceServer) SearchUtxos(
 	}
 	effectiveMax := effectiveSearchUtxosMaxItems(maxItems, maxAllowed)
 
-	s.utxorpc.config.Logger.Info(
-		"Got a SearchUtxos request",
-		"has_predicate", predicate != nil,
-		"has_start_token", startToken != "",
-		"max_items", maxItems,
-		"effective_max_items", effectiveMax,
-	)
-	resp := &query.SearchUtxosResponse{}
-
 	addressPattern, assetPattern := extractSearchPredicatePatterns(predicate)
 
 	// Address resolution for the query:
@@ -590,16 +574,6 @@ func (s *queryServiceServer) SearchUtxos(
 	addressPatterns, err := searchUtxoAddressPatterns(addressPattern)
 	if err != nil {
 		return nil, err
-	}
-
-	if !matchAllAddresses && len(addressPatterns) == 0 {
-		resp.LedgerTip = s.searchUtxosLedgerTip()
-		return connect.NewResponse(resp), nil
-	}
-
-	if effectiveMax == 0 {
-		resp.LedgerTip = s.searchUtxosLedgerTip()
-		return connect.NewResponse(resp), nil
 	}
 
 	filterByAsset := assetPattern != nil
@@ -620,6 +594,31 @@ func (s *queryServiceServer) SearchUtxos(
 	if err != nil {
 		return nil, err
 	}
+
+	s.utxorpc.config.Logger.Info(
+		"Got a SearchUtxos request",
+		"has_predicate", predicate != nil,
+		"has_start_token", startToken != "",
+		"max_items", maxItems,
+		"effective_max_items", effectiveMax,
+	)
+	resp := &query.SearchUtxosResponse{}
+
+	if !matchAllAddresses && len(addressPatterns) == 0 {
+		resp.LedgerTip = s.searchUtxosLedgerTip()
+		return connect.NewResponse(resp), nil
+	}
+
+	if effectiveMax == 0 {
+		resp.LedgerTip = s.searchUtxosLedgerTip()
+		return connect.NewResponse(resp), nil
+	}
+
+	release, err := s.utxorpc.acquireBulk(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	utxoQ := &models.UtxoWithOrderingQuery{
 		MatchAllAddresses: matchAllAddresses,
@@ -681,12 +680,6 @@ func (s *queryServiceServer) ReadData(
 ) (*connect.Response[query.ReadDataResponse], error) {
 	keys := req.Msg.GetKeys() // [][]byte
 
-	release, err := s.utxorpc.acquireBulk()
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-
 	// Enforce request size limit
 	if len(keys) > s.utxorpc.config.MaxDataKeys {
 		return nil, connect.NewError(
@@ -698,13 +691,6 @@ func (s *queryServiceServer) ReadData(
 			),
 		)
 	}
-
-	s.utxorpc.config.Logger.Info(
-		"Got a ReadData request",
-		"keys", len(keys),
-	)
-	budget := byteBudget{limit: s.utxorpc.config.MaxResponseBytes}
-	resp := &query.ReadDataResponse{}
 
 	for _, key := range keys {
 		if len(key) != lcommon.Blake2b256Size {
@@ -718,6 +704,21 @@ func (s *queryServiceServer) ReadData(
 				),
 			)
 		}
+	}
+
+	s.utxorpc.config.Logger.Info(
+		"Got a ReadData request",
+		"keys", len(keys),
+	)
+	release, err := s.utxorpc.acquireBulk(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	budget := byteBudget{limit: s.utxorpc.config.MaxResponseBytes}
+	resp := &query.ReadDataResponse{}
+
+	for _, key := range keys {
 		datum, err := s.utxorpc.config.LedgerState.Datum(key)
 		if err != nil {
 			if errors.Is(err, database.ErrDatumNotFound) {

@@ -134,3 +134,30 @@ func newBoundedTestMempool(t *testing.T, useDAG bool) *Mempool {
 	}
 	return m
 }
+
+// TestMempool_TransactionsBounded_DAGWalksOnlyPrefix orders the DAG opposite
+// to admission and leaves the last ordered hash unresolvable. A bounded read
+// never reaches that hash, so it answers in DAG order; a full read reaches it
+// and falls back to admission order.
+func TestMempool_TransactionsBounded_DAGWalksOnlyPrefix(t *testing.T) {
+	t.Parallel()
+	m := newBoundedTestMempool(t, true)
+	txs := addMockTransactions(t, m, 6)
+	m.Lock()
+	for i := len(txs) - 1; i >= 0; i-- {
+		m.dag.add(appliedTx{hash: txs[i].Hash, cbor: txs[i].Cbor})
+	}
+	delete(m.txByHash, txs[0].Hash)
+	m.Unlock()
+
+	got, total := m.TransactionsBounded(2, 0)
+	require.Equal(t, 6, total)
+	require.Len(t, got, 2)
+	require.Equal(t, txs[5].Hash, got[0].Hash, "DAG order, not admission")
+	require.Equal(t, txs[4].Hash, got[1].Hash)
+
+	all, _ := m.TransactionsBounded(0, 0)
+	require.Len(t, all, 6)
+	require.Equal(t, txs[0].Hash, all[0].Hash,
+		"a full read reaches the unresolvable hash and falls back")
+}

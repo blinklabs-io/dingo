@@ -369,7 +369,7 @@ func (s *submitServiceServer) ReadMempool(
 	ctx context.Context,
 	req *connect.Request[submit.ReadMempoolRequest],
 ) (*connect.Response[submit.ReadMempoolResponse], error) {
-	release, err := s.utxorpc.acquireBulk()
+	release, err := s.utxorpc.acquireBulk(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -187,7 +187,7 @@ func TestBulkRequests_ConcurrencyBudget(t *testing.T) {
 		_, err := querySrv.ReadData(
 			context.Background(),
 			connect.NewRequest(&query.ReadDataRequest{
-				Keys: [][]byte{{0x01}},
+				Keys: [][]byte{bytes.Repeat([]byte{0x01}, 32)},
 			}),
 		)
 		refused <- err

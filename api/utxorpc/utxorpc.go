@@ -351,13 +351,13 @@ func (u *Utxorpc) newServeMux() *http.ServeMux {
 		betaWatchPath,
 		watchPath,
 	)
-	mux.Handle(queryPath, queryHandler)
-	mux.Handle(submitPath, submitHandler)
-	mux.Handle(syncPath, syncHandler)
+	mux.Handle(queryPath, holdBulkSlotsUntilWritten(queryHandler))
+	mux.Handle(submitPath, holdBulkSlotsUntilWritten(submitHandler))
+	mux.Handle(syncPath, holdBulkSlotsUntilWritten(syncHandler))
 	mux.Handle(watchPath, watchHandler)
-	mux.Handle(betaQueryPath, betaQueryHandler)
-	mux.Handle(betaSubmitPath, betaSubmitHandler)
-	mux.Handle(betaSyncPath, betaSyncHandler)
+	mux.Handle(betaQueryPath, holdBulkSlotsUntilWritten(betaQueryHandler))
+	mux.Handle(betaSubmitPath, holdBulkSlotsUntilWritten(betaSubmitHandler))
+	mux.Handle(betaSyncPath, holdBulkSlotsUntilWritten(betaSyncHandler))
 	mux.Handle(betaWatchPath, betaWatchHandler)
 	// One list drives health checking and both reflection versions so the
 	// served set cannot drift between them. The v1alpha reflection service is

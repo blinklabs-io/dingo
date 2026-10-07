@@ -85,9 +85,12 @@ type UtxorpcLedgerState interface {
 // server.
 type UtxorpcMempool interface {
 	AddTransaction(txType uint, txBytes []byte) error
-	// TransactionsBounded returns at most maxItems transactions within
-	// maxBytes of CBOR (zero or less is unbounded) and the pool's total
-	// transaction count.
+	// TransactionsBounded returns a prefix of the pool in its snapshot
+	// order holding at most maxItems transactions whose CBOR totals at most
+	// maxBytes, together with the pool's total transaction count. A bound of
+	// zero or less is not applied. The first transaction is returned even
+	// when it alone exceeds maxBytes, so a non-empty pool never yields an
+	// empty result.
 	TransactionsBounded(
 		maxItems int,
 		maxBytes int64,

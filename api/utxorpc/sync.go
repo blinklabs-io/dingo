@@ -40,12 +40,6 @@ func (s *syncServiceServer) FetchBlock(
 ) (*connect.Response[sync.FetchBlockResponse], error) {
 	ref := req.Msg.GetRef() // []*BlockRef
 
-	release, err := s.utxorpc.acquireBulk()
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-
 	resp := &sync.FetchBlockResponse{}
 
 	// Enforce request size limit
@@ -64,6 +58,11 @@ func (s *syncServiceServer) FetchBlock(
 		"Got a FetchBlock request",
 		"refs", len(ref),
 	)
+	release, err := s.utxorpc.acquireBulk(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	// Get our points
 	var points []ocommon.Point
@@ -108,12 +107,6 @@ func (s *syncServiceServer) DumpHistory(
 	startToken := req.Msg.GetStartToken() // *BlockRef
 	maxItems := req.Msg.GetMaxItems()     // uint32; 0 = omitted in protobuf
 
-	release, err := s.utxorpc.acquireBulk()
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-
 	maxAllowed := uint32(
 		s.utxorpc.config.MaxHistoryItems,
 	) // #nosec G115 -- bounded by DefaultMaxHistoryItems (10000)
@@ -138,6 +131,11 @@ func (s *syncServiceServer) DumpHistory(
 		"max_items", maxItems,
 		"effective_max_items", effectiveMax,
 	)
+	release, err := s.utxorpc.acquireBulk(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	resp := &sync.DumpHistoryResponse{}
 
 	var startPoint ocommon.Point
