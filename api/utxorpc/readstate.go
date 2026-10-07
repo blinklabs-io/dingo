@@ -52,9 +52,9 @@ func (s *betaQueryServiceServer) ReadState(
 	ctx context.Context,
 	req *connect.Request[betaquery.ReadStateRequest],
 ) (*connect.Response[betaquery.ReadStateResponse], error) {
-	fieldMask := req.Msg.GetFieldMask()
 	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf("Got a ReadState request with fieldMask %v", fieldMask),
+		"Got a ReadState request",
+		"field_mask_paths", len(req.Msg.GetFieldMask().GetPaths()),
 	)
 
 	chainQuery := req.Msg.GetQuery()

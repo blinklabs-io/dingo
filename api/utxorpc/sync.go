@@ -39,15 +39,13 @@ func (s *syncServiceServer) FetchBlock(
 	req *connect.Request[sync.FetchBlockRequest],
 ) (*connect.Response[sync.FetchBlockResponse], error) {
 	ref := req.Msg.GetRef() // []*BlockRef
-	fieldMask := req.Msg.GetFieldMask()
 
-	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf(
-			"Got a FetchBlock request with ref %v and fieldMask %v",
-			ref,
-			fieldMask,
-		),
-	)
+	release, err := s.utxorpc.acquireBulk()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	resp := &sync.FetchBlockResponse{}
 
 	// Enforce request size limit
@@ -61,6 +59,11 @@ func (s *syncServiceServer) FetchBlock(
 			),
 		)
 	}
+
+	s.utxorpc.config.Logger.Info(
+		"Got a FetchBlock request",
+		"refs", len(ref),
+	)
 
 	// Get our points
 	var points []ocommon.Point
@@ -77,11 +80,16 @@ func (s *syncServiceServer) FetchBlock(
 		points = append(points, point)
 	}
 
+	budget := byteBudget{limit: s.utxorpc.config.MaxResponseBytes}
 	for _, point := range points {
 		block, err := s.utxorpc.config.LedgerState.GetBlock(point)
 		if err != nil {
 			return nil, err
 		}
+		if !budget.fits(len(block.Cbor)) {
+			return nil, budget.exceeded()
+		}
+		budget.add(len(block.Cbor))
 		acb, err := anyChainBlockFromModel(block)
 		if err != nil {
 			return nil, err
@@ -99,7 +107,12 @@ func (s *syncServiceServer) DumpHistory(
 ) (*connect.Response[sync.DumpHistoryResponse], error) {
 	startToken := req.Msg.GetStartToken() // *BlockRef
 	maxItems := req.Msg.GetMaxItems()     // uint32; 0 = omitted in protobuf
-	fieldMask := req.Msg.GetFieldMask()
+
+	release, err := s.utxorpc.acquireBulk()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	maxAllowed := uint32(
 		s.utxorpc.config.MaxHistoryItems,
@@ -120,13 +133,10 @@ func (s *syncServiceServer) DumpHistory(
 
 	effectiveMax := effectiveDumpHistoryMaxItems(maxItems, maxAllowed)
 	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf(
-			"Got a DumpHistory request with token %v maxItems raw=%d effective=%d fieldMask %v",
-			startToken,
-			maxItems,
-			effectiveMax,
-			fieldMask,
-		),
+		"Got a DumpHistory request",
+		"has_start_token", startToken != nil,
+		"max_items", maxItems,
+		"effective_max_items", effectiveMax,
 	)
 	resp := &sync.DumpHistoryResponse{}
 
@@ -193,10 +203,8 @@ func (s *syncServiceServer) FollowTip(
 	}
 
 	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf(
-			"Got a FollowTip request with intersect %v",
-			intersect,
-		),
+		"Got a FollowTip request",
+		"intersect", len(intersect),
 	)
 
 	// Get our points

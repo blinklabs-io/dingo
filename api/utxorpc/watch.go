@@ -214,12 +214,10 @@ func (s *watchServiceServer) WatchTx(
 	}
 
 	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf(
-			"Got a WatchTx request with predicate %v and fieldMask %v and intersect %v",
-			predicate,
-			fieldMask,
-			intersect,
-		),
+		"Got a WatchTx request",
+		"has_predicate", predicate != nil,
+		"field_mask_paths", len(fieldMask.GetPaths()),
+		"intersect", len(intersect),
 	)
 
 	var predTree *txPredicateNode

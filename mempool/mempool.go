@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"log/slog"
 	"maps"
 	"slices"
@@ -100,6 +101,10 @@ type Service interface {
 	AddTransaction(uint, []byte) error
 	GetTransaction(string) (MempoolTransaction, bool)
 	Transactions() []MempoolTransaction
+	TransactionsBounded(
+		maxItems int,
+		maxBytes int64,
+	) ([]MempoolTransaction, int)
 	RemoveTransaction(string)
 	RemoveTxsByHash([]string)
 	NewConsumer(ouroboros.ConnectionId) Consumer
@@ -1686,33 +1691,60 @@ func (m *Mempool) GetTransaction(txHash string) (MempoolTransaction, bool) {
 }
 
 func (m *Mempool) Transactions() []MempoolTransaction {
+	ret, _ := m.TransactionsBounded(0, 0)
+	return ret
+}
+
+// TransactionsBounded returns a snapshot of at most maxItems transactions
+// whose combined CBOR size stays within maxBytes, in the same order as
+// Transactions, together with the total number of transactions in the pool.
+// A bound of zero or less is not applied. The first transaction is always
+// returned when the pool is non-empty, so a byte bound smaller than one
+// transaction cannot yield an empty snapshot of a non-empty pool.
+//
+// Only the returned prefix is copied, headers and CBOR alike, so the memory a
+// caller retains follows the size of the result rather than the size of the
+// pool.
+func (m *Mempool) TransactionsBounded(
+	maxItems int,
+	maxBytes int64,
+) ([]MempoolTransaction, int) {
 	m.RLock()
-	ret := make([]MempoolTransaction, 0)
+	total := len(m.transactions)
+	var ret []MempoolTransaction
 	var dagErr error
 	if m.dag != nil {
 		var order []string
 		order, dagErr = m.dag.topologicalOrder()
 		if dagErr == nil {
-			ret = make([]MempoolTransaction, 0, len(order))
-			for _, hash := range order {
-				if tx := m.txByHash[hash]; tx != nil {
-					ret = append(ret, *tx)
+			inOrder := func(yield func(*MempoolTransaction) bool) {
+				for _, hash := range order {
+					if tx := m.txByHash[hash]; tx != nil && !yield(tx) {
+						return
+					}
 				}
 			}
-			if len(ret) != len(m.transactions) {
+			resolved := 0
+			for range inOrder {
+				resolved++
+			}
+			if resolved != len(m.transactions) {
 				dagErr = fmt.Errorf(
 					"DAG transaction index inconsistent: %d of %d transactions resolved",
-					len(ret),
+					resolved,
 					len(m.transactions),
 				)
+			} else {
+				ret = boundedSnapshot(inOrder, maxItems, maxBytes)
 			}
 		}
 	}
 	if m.dag == nil || dagErr != nil {
-		ret = make([]MempoolTransaction, len(m.transactions))
-		for i := range m.transactions {
-			ret[i] = *m.transactions[i]
-		}
+		ret = boundedSnapshot(
+			slices.Values(m.transactions),
+			maxItems,
+			maxBytes,
+		)
 	}
 	m.RUnlock()
 	if dagErr != nil {
@@ -1729,6 +1761,37 @@ func (m *Mempool) Transactions() []MempoolTransaction {
 	// proportion to total transaction bytes.
 	for i := range ret {
 		ret[i].Cbor = slices.Clone(ret[i].Cbor)
+	}
+	return ret, total
+}
+
+// boundedSnapshot copies the longest prefix of txs within both bounds into a
+// slice sized for that prefix. It walks txs twice, once to size the result
+// and once to copy it, so it never allocates for transactions it drops.
+func boundedSnapshot(
+	txs iter.Seq[*MempoolTransaction],
+	maxItems int,
+	maxBytes int64,
+) []MempoolTransaction {
+	n := 0
+	var used int64
+	for tx := range txs {
+		if maxItems > 0 && n >= maxItems {
+			break
+		}
+		size := int64(len(tx.Cbor))
+		if maxBytes > 0 && n > 0 && used+size > maxBytes {
+			break
+		}
+		used += size
+		n++
+	}
+	ret := make([]MempoolTransaction, 0, n)
+	for tx := range txs {
+		if len(ret) == n {
+			break
+		}
+		ret = append(ret, *tx)
 	}
 	return ret
 }

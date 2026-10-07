@@ -85,7 +85,13 @@ type UtxorpcLedgerState interface {
 // server.
 type UtxorpcMempool interface {
 	AddTransaction(txType uint, txBytes []byte) error
-	Transactions() []mempool.MempoolTransaction
+	// TransactionsBounded returns at most maxItems transactions within
+	// maxBytes of CBOR (zero or less is unbounded) and the pool's total
+	// transaction count.
+	TransactionsBounded(
+		maxItems int,
+		maxBytes int64,
+	) ([]mempool.MempoolTransaction, int)
 }
 
 // UtxorpcEventBus is the subset of event.EventBus needed by the UTxO RPC

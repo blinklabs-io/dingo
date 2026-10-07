@@ -61,7 +61,15 @@ const (
 	// filter, so a long explicit list is not the way to ask for the whole
 	// distribution.
 	DefaultMaxPoolFilter = 1000
-	DefaultServerTimeout = time.Hour
+	// DefaultMaxMempoolItems caps the transactions ReadMempool returns.
+	DefaultMaxMempoolItems = 1000
+	// DefaultMaxResponseBytes caps the payload a single unary bulk response
+	// retains (UTxO, datum, block and mempool bodies).
+	DefaultMaxResponseBytes = 16 << 20 // 16 MiB
+	// DefaultMaxConcurrentBulkRequests caps how many bulk read handlers run
+	// at once; further requests are refused with ResourceExhausted.
+	DefaultMaxConcurrentBulkRequests = 32
+	DefaultServerTimeout             = time.Hour
 	// DefaultShutdownTimeout bounds Stop's graceful http.Server.Shutdown
 	// before it escalates to a hard Close, matching midnight/server's
 	// identical ShutdownTimeout/defaultShutdownTimeout pattern.
@@ -74,6 +82,8 @@ type Utxorpc struct {
 	// internal/apilistener.
 	listener *apilistener.Listener
 	config   UtxorpcConfig
+	// bulkSlots is a counting semaphore sized by MaxConcurrentBulkRequests.
+	bulkSlots chan struct{}
 }
 
 type UtxorpcConfig struct {
@@ -94,6 +104,14 @@ type UtxorpcConfig struct {
 	MaxDataKeys     int
 	// MaxPoolFilter caps ReadState's pool_keyhashes filter length.
 	MaxPoolFilter int
+	// MaxMempoolItems caps ReadMempool's result size (0 = use default).
+	MaxMempoolItems int
+	// MaxResponseBytes caps the payload bytes one bulk read response may
+	// retain (0 = use default).
+	MaxResponseBytes int64
+	// MaxConcurrentBulkRequests caps concurrently running bulk read handlers
+	// (0 = use default).
+	MaxConcurrentBulkRequests int
 	// ServerTimeout bounds long-running UTxO RPC handlers server-side
 	// (0 = use default).
 	ServerTimeout time.Duration
@@ -133,6 +151,15 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	if cfg.MaxPoolFilter <= 0 {
 		cfg.MaxPoolFilter = DefaultMaxPoolFilter
 	}
+	if cfg.MaxMempoolItems <= 0 {
+		cfg.MaxMempoolItems = DefaultMaxMempoolItems
+	}
+	if cfg.MaxResponseBytes <= 0 {
+		cfg.MaxResponseBytes = DefaultMaxResponseBytes
+	}
+	if cfg.MaxConcurrentBulkRequests <= 0 {
+		cfg.MaxConcurrentBulkRequests = DefaultMaxConcurrentBulkRequests
+	}
 	if cfg.ServerTimeout <= 0 {
 		cfg.ServerTimeout = DefaultServerTimeout
 	}
@@ -140,7 +167,8 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 		cfg.ShutdownTimeout = DefaultShutdownTimeout
 	}
 	return &Utxorpc{
-		config: cfg,
+		config:    cfg,
+		bulkSlots: make(chan struct{}, cfg.MaxConcurrentBulkRequests),
 		listener: apilistener.New(
 			"utxorpc gRPC", cfg.Logger,
 		),
