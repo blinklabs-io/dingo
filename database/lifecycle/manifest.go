@@ -21,6 +21,7 @@
 package lifecycle
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -65,6 +66,10 @@ type manifestConfig struct {
 	maxBytes int64
 	// maxPause is consumed only by Snapshot and SnapshotToCloud.
 	maxPause time.Duration
+	// pauseNow and pauseContext are per-call test seams consumed only by
+	// Snapshot. Production callers cannot construct options that set them.
+	pauseNow     func() time.Time
+	pauseContext func(context.Context) context.Context
 }
 
 // WithManifestMaxBytes sets the maximum encoded manifest size. Zero uses

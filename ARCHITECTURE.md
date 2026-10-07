@@ -2185,7 +2185,17 @@ only ever ahead.
 
 That asymmetry is deliberate, because only one direction is recoverable.
 A blob store ahead of the metadata tip holds orphaned blocks that startup
-trims (`LedgerState.cleanupOrphanedBlobs`). A blob store behind the metadata tip
+trims (`LedgerState.cleanupOrphanedBlobs`). The chain manager has already
+loaded its tip from the newest stored block by then, so recovery first rewinds
+the primary chain to the metadata tip through the chain manager
+(`rewindPrimaryChainForOrphanCleanup`). The rewind and orphan cleanup share the
+chain mutation barrier, so blockfetch and forging cannot append a block between
+them that cleanup would then delete. Rollback events publish only after the
+blockfetch lock is released. A rewind refused for exceeding K skips cleanup and
+leaves the chain as a forward extension the ledger replays; any other rewind or
+cleanup error stops recovery. A continuation-audit window is retained when its
+fork point survives the rewind and discarded when that point is truncated. A
+blob store behind the metadata tip
 is missing blocks the ledger has already applied, and nothing local can rebuild
 them, so `reconcilePrimaryChainTipWithLedgerTip` rolls the ledger back to the
 blob tip — a rollback whose depth is set by however far the two stores drifted,
@@ -3327,6 +3337,12 @@ address rules (`byronValidateUnknownAttributes`, `byronValidateOutputNetwork`)
 still cover every output. Later outputs remain in the transaction body and its
 ID, and a transaction is not rejected for having more outputs.
 
+Input indexes are Word16 as well: the gouroboros decoder and
+`NewByronTransactionInput` refuse an index above 65535, and
+`byronValidateInputIndexes` repeats the bound for a transaction assembled
+without the decoder, so a transaction naming a wider index is rejected
+whether or not a UTxO is stored there.
+
 The Byron update state is not persisted. It is rebuilt by replaying the stored
 chain from its first block, so a restart or a rollback restores the limits and
 fee policy adopted as of the new tip. A stored chain that begins after genesis,
@@ -4062,6 +4078,22 @@ The `LedgerView` interface provides query access to ledger state:
   and 11 to reject key-hash reward withdrawals whose stake credential is not
   delegated to a DRep. Script-hash reward credentials are governed by script
   validation and do not participate in this DRep-delegation gate.
+- Governance purpose roots seeded from a ledger-state snapshot are verified at
+  three points. `ledgerstate` import re-reads every non-null
+  `ParsedPrevGovActionIds` root after seeding and fails the import unless it is
+  an enacted `governance_proposal` row that `GetLastEnactedGovernanceProposal`
+  resolves as its purpose's current root; a resumed import that skips the
+  governance phase runs the same check. Before starting its worker pool and
+  cleanup timer, `LedgerState.Start` calls `governance.VerifyPurposeRoots` at
+  the latest stored epoch and refuses to start a Mithril-bootstrapped
+  database (one with a `mithril_ledger_slot` sync-state row) when an active
+  chained proposal names a parent that has no enacted purpose root, is not an
+  active proposal and is not a stored row. The epoch tally applies the same
+  predicate where `validateParentChain` fails and returns
+  `governance.MissingEnactedRootError` (`ErrMissingEnactedRoot`) instead of
+  skipping. A pending-sibling parent and a stored superseded or non-root parent
+  keep the skip, and a genesis-synced database always keeps it because a
+  rootless purpose is legitimate there.
 - Conway governance validation exposes the authoritative enacted root for each
   CIP-1694 purpose through `GovPurposeRoots`. A non-nil result with nil fields
   means those roots are known to be absent; lookup failures are propagated
@@ -4499,6 +4531,33 @@ passes Acquire is answered from the snapshot Acquire opened, so a rollback or
 retention-floor pruning committed afterwards does not reach the session. Only a
 snapshot closed by the lifetime bound above reproduces this connection-teardown
 behavior.
+
+A specific acquired point is also pinned against pruning
+(`ledger/acquired_point_pins.go`). Acquire calls `LedgerState.PinAcquiredPoint`
+*before* `AcquireQueryView` verifies the point, and the consumed-UTxO cleanup
+and the pool-snapshot retention guard each cap their prune floor at the oldest
+pinned slot. Each pruning path reads the pins, caps its floor, and announces
+that floor in memory under the registry's lock, then releases the lock and only
+afterwards deletes; `VerifyPointQueryable` refuses any point below an announced
+floor. So either the pin lands first and the prune retains the point, or the
+prune announces first and the point is refused at Acquire, where the protocol
+has a clean reply. No I/O runs under that lock: holding a lock across the
+delete is what deadlocked an earlier design of the pool-snapshot guard on
+SQLite's single write connection. The snapshot keeps the session's own reads
+consistent; the pin keeps the rows themselves from being deleted while a
+session needs them.
+
+The pin lives in the connection's `localstatequerySession` and is released
+wherever the session's view is closed: Release, a re-Acquire (which closes the
+previous session first, so a rejected re-Acquire leaves no pin), connection
+close, `Ouroboros.Close`, and lifetime expiry. A failed Acquire releases its pin
+before replying. A connection that closes while its Acquire is still verifying
+cancels that acquisition, and the Acquire closes the view it opened and releases
+its pin. A pin cannot hold pruning back without limit in any case: the UTxO
+floor is held back by at most `acquiredPointMaxUtxoHoldWindows` stability
+windows, and pool snapshots by the existing `poolSnapshotRetentionMaxDepth`.
+Protocol-parameter rows need no pin; they are only ever deleted on rollback.
+
 `GetPoolDistr2` therefore logs and omits a pool that holds snapshot stake but
 has no registration to supply a VRF key hash (the unfiltered form covers every
 pool on the chain, so aborting would take `leadership-schedule` down for every
@@ -5883,9 +5942,11 @@ or reference -- cannot be repaired by selecting a different UTxO producer
 history. Every Shelley-family era delegates that rule to
 `shelley.UtxoValidateNoDuplicateInputs` and so reports
 `shelley.DuplicateInputError`. Byron permits a repeated input, but its
-`eras.TxTooLargeByronError`, `eras.UnknownAttributesByronError` and
-`eras.UnknownAddressAttributesByronError` read only the transaction and the
-protocol parameters. `isDeterministicTxValidationError` classifies all of them. Replay recovery therefore rejects the primary-chain branch
+`eras.TxTooLargeByronError`, `eras.InputIndexByronError`,
+`eras.UnknownAttributesByronError` and `eras.UnknownAddressAttributesByronError`
+read only the transaction and the protocol parameters.
+`isDeterministicTxValidationError` classifies all of them. Replay recovery
+therefore rejects the primary-chain branch
 and rolls both stores back to the last applied ledger tip, then publishes a
 `chainsync.resync` event with reason `deterministic tx validation recovery` so
 ChainSync obtains a fresh intersection. Other transaction-validation errors
@@ -11557,11 +11618,21 @@ version for its PV11 zero-pool rule from that epoch's protocol parameters:
 the live consensus snapshot's for the current epoch, the persisted row for
 an earlier one. `VerifyPointQueryable` applies both of these conditions at
 Acquire, so outside API storage mode a point more than one epoch behind the
-live tip is refused there rather than failing a later `GetStakeSnapshots`. The per-credential, per-pool and per-proposal queries
-(`GetFilteredDelegationsAndRewardAccounts`, `GetStakeDelegDeposits`,
-`GetDRepState`, `GetFilteredVoteDelegatees`, `GetStakePools`,
-`GetProposals`) and `DebugChainDepState` still ignore the acquired point:
-Dingo keeps no history for that state.
+live tip is refused there rather than failing a later `GetStakeSnapshots`.
+`GetStakePools` (`queryShelleyStakePools`) answers with the pools active at
+the pinned slot through `GetActivePoolKeyHashesAtSlot`, the lookup the
+unpinned path already runs at the tip; pool registration and retirement rows
+are removed only by rollback, so no retention floor applies.
+`GetStakeDelegDeposits` (`queryShelleyStakeDelegDeposits`) reports each
+credential's deposit from its latest registration event at or before the
+pinned slot (`GetLatestAccountRegistrationAtOrBefore`, one query), or from
+the credential's snapshot import baseline when that is at least as new, as
+`LedgerView.StakeCredentialDeposit` treats it; certificate rows and the
+baseline are likewise removed only by rollback. The remaining
+per-credential and per-proposal queries
+(`GetFilteredDelegationsAndRewardAccounts`, `GetDRepState`,
+`GetFilteredVoteDelegatees`, `GetProposals`) and `DebugChainDepState` still
+ignore the acquired point.
 
 Identifying a pinned point by slot alone is ambiguous across a rollback: a
 fork switch can leave a different block at the same slot than the one the
@@ -13922,7 +13993,13 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    distributions (summed from protocol version 5, replaced before it) and
    net pot transfers, and the cutoff. Every transaction's certificates are
    written immediately after that transaction validates, so this is always
-   caught up as of the currently validating slot. For legacy stake
+   caught up as of the currently validating slot. The gouroboros
+   `UtxoValidateDelegation` rule in the same rule lists checks
+   `MIRProducesNegativeUpdate` again from protocol version 5, reading the
+   pending rewards through `*LedgerView.PendingInstantaneousRewards` (the
+   epoch's committed distributions for one credential and pot, summed);
+   without that capability it rejects any negative delta an earlier
+   transaction covers as undecidable. For legacy stake
    certificates the same walk enforces `StakeKeyAlreadyRegisteredDELEG`,
    `StakeKeyNotRegisteredDELEG` and `StakeKeyNonZeroAccountBalanceDELEG`,
    with withdrawals drained first. For genesis key delegation certificates it

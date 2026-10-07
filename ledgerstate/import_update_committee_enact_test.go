@@ -17,6 +17,7 @@ package ledgerstate
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"math/big"
 	"testing"
 
@@ -119,11 +120,19 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	var logs bytes.Buffer
+	importCfg := govImportConfigForTest(db, govStateData)
+	importCfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 	require.NoError(t, importGovState(
 		context.Background(),
-		govImportConfigForTest(db, govStateData),
+		importCfg,
 		func(ImportProgress) {},
 	))
+	require.Contains(
+		t,
+		logs.String(),
+		"level=WARN msg=\"snapshot holds ratified committee actions not yet enacted\"",
+	)
 
 	members, err := db.GetCommitteeMembers(nil)
 	require.NoError(t, err)
@@ -188,4 +197,43 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 		}.Key()] = true
 	}
 	require.Equal(t, want, got)
+}
+
+// A snapshot whose ratified action is not a committee action leaves the
+// imported committee authoritative, so the import raises no committee warning.
+func TestImportRatifiedNonCommitteeActionDoesNotWarn(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	txHash := bytes.Repeat([]byte{0x78}, 32)
+	proposal := govActionStateForTest(
+		txHash, 0, govActionTypeParameterChange, nil, 499,
+	)
+	inForce := committeeWithMember(t, bytes.Repeat([]byte{0x42}, 28), 700)
+	govStateData, err := cbor.Encode([]any{
+		[]any{encodeRootsAsAny(t, [4]*ParsedGovActionId{}), []any{proposal}},
+		inForce,
+		constitutionForTest(),
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		drepPulsingStateWithEnactCommittee(t, inForce, proposal),
+	})
+	require.NoError(t, err)
+
+	var logs bytes.Buffer
+	importCfg := govImportConfigForTest(db, govStateData)
+	importCfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	require.NoError(t, importGovState(
+		context.Background(),
+		importCfg,
+		func(ImportProgress) {},
+	))
+	row, err := db.Metadata().GetGovernanceProposal(txHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, row.RatifiedEpoch, "the action must be imported ratified")
+	require.NotContains(t, logs.String(), "level=WARN")
 }

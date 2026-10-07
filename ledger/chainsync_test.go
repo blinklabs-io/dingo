@@ -9925,6 +9925,7 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 		},
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	ls.metrics.init(prometheus.NewRegistry())
 
 	ancestorTip := ochainsync.Tip{
@@ -17586,6 +17587,7 @@ func newChainsyncRollbackFixtureWithBus(
 		},
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	ls.metrics.init(prometheus.NewRegistry())
 	// Attached after construction so NewLedgerState does not register the
 	// node-level subscribers this focused test does not want.
@@ -18424,4 +18426,27 @@ func TestDeferredHeaderAttributedMarkerReadFromDatabase(t *testing.T) {
 			assert.Equal(t, addr.String(), source.RemoteAddr.String())
 		})
 	}
+}
+
+// TestEnsureGenesisCommitteeWarnsWithoutConwayGenesis proves a node with no
+// Conway genesis configured says so, rather than silently skipping the
+// committee seed.
+func TestEnsureGenesisCommitteeWarnsWithoutConwayGenesis(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger:            slog.New(slog.NewTextHandler(&logs, nil)),
+		},
+	}
+	require.Nil(t, ls.config.CardanoNodeConfig.ConwayGenesis())
+
+	require.NoError(t, ls.ensureGenesisCommittee(nil))
+	require.Contains(
+		t,
+		logs.String(),
+		"level=WARN msg=\"conway genesis not configured, genesis committee not seeded\"",
+	)
 }

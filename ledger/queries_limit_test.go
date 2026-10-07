@@ -192,7 +192,11 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 			name:  "stake delegation deposits",
 			query: "GetStakeDelegDeposits",
 			run: func() (any, error) {
-				return ls.queryShelleyStakeDelegDeposits(stakeCredentials, nil)
+				return ls.queryShelleyStakeDelegDeposits(
+					stakeCredentials,
+					QueryPoint{},
+					nil,
+				)
 			},
 		},
 	}

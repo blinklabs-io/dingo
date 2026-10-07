@@ -6674,7 +6674,17 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 // its real history is left alone instead of being reverted to genesis state.
 func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
 	conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
-	if conwayGenesis == nil || len(conwayGenesis.Committee.Members) == 0 {
+	if conwayGenesis == nil {
+		// Without the genesis the committee is seeded from nothing, so
+		// committee-dependent rules reject every credential until a
+		// snapshot or an enacted action supplies members.
+		ls.config.Logger.Warn(
+			"conway genesis not configured, genesis committee not seeded",
+			"component", "ledger",
+		)
+		return nil
+	}
+	if len(conwayGenesis.Committee.Members) == 0 {
 		return nil
 	}
 	existing, err := ls.db.GetCommitteeMembersIncludeDeleted(txn)

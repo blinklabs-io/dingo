@@ -260,6 +260,7 @@ var certificateStoreMethods = []string{
 	"GetAccountDelegationHistoryByCredential",
 	"CountAccountDelegationHistoryByCredential",
 	"GetAccountRegistrationHistoryByCredential",
+	"GetLatestAccountRegistrationAtOrBefore",
 	"CountAccountRegistrationHistoryByCredential",
 	"SetCommitteeAuthImmutableSlot",
 }
