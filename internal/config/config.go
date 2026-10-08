@@ -307,7 +307,9 @@ type GenesisBootstrapConfig struct {
 	// Genesis-mode chain selection. This is the Ouroboros Genesis trust control
 	// for biased fast-sync sources: an uncorroborated or divergent fast source
 	// is denied selection and stalls rather than steering the local chain. A
-	// zero value disables corroboration (density-only Genesis selection).
+	// zero value disables the selection gate (density-only Genesis selection);
+	// a peer's frontier still needs one independent witness before it can
+	// exclude other candidates as behind.
 	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
 	// LimitOnPatienceEnabled turns on the Genesis Limit on Patience: while
 	// Genesis selection is syncing, a ChainSync peer that delivers its
@@ -803,11 +805,10 @@ type Config struct {
 	// --shelley-kes-agent-socket.
 	//
 	// Block production is supported on Linux and macOS only, so this flag
-	// does not apply on Windows. The path must fit the platform's sun_path
-	// field -- 104 bytes on macOS, 108 on Linux -- because a socket address
-	// is a fixed-size struct. kesagent.NewClient rejects an over-long path at
-	// startup rather than leaving it to surface as a bare "invalid argument"
-	// from connect().
+	// does not apply on Windows. Relative filesystem paths are resolved once
+	// at client construction and reused for every reconnect. The resolved path
+	// must fit the platform's sun_path field -- 104 bytes on macOS, 108 on
+	// Linux -- because a socket address is a fixed-size struct.
 	ShelleyKESAgentSocket string `yaml:"shelleyKesAgentSocket"            envconfig:"SHELLEY_KES_AGENT_SOCKET"`
 	// ShelleyKESAgentMode selects the agent service mode: "serve-key" (the
 	// agent pushes the evolving KES sign key and the node signs headers
@@ -1241,6 +1242,11 @@ type DatabaseLifecycleConfig struct {
 	// SnapshotEveryNEpochs captures an automatic snapshot every N epoch
 	// boundaries instead of every single one.
 	SnapshotEveryNEpochs int `yaml:"snapshotEveryNEpochs"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_EVERY_N_EPOCHS"`
+	// SnapshotMaxCommitPause bounds how long a snapshot (manual or
+	// automatic) may hold the commit barrier once acquired. A snapshot still
+	// running at the bound is cancelled and removed, and commits resume.
+	// Zero means no bound.
+	SnapshotMaxCommitPause time.Duration `yaml:"snapshotMaxCommitPause"         envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_MAX_COMMIT_PAUSE"`
 }
 
 var configMu sync.RWMutex

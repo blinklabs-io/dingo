@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -242,8 +243,11 @@ const maxCachedSchedules = 3
 // runs without holding the election lock so that ShouldProduceBlock remains
 // a fast, lock-free lookup on the forger's hot path.
 type Election struct {
-	poolId      lcommon.PoolKeyHash
-	poolVrfSkey []byte
+	poolId lcommon.PoolKeyHash
+	// vrfSeed hands out a fresh copy of the pool's VRF seed. The election
+	// keeps no copy of its own: each schedule computation takes one, uses it
+	// for that epoch's proofs, and wipes it.
+	vrfSeed func() []byte
 
 	stakeProvider StakeDistributionProvider
 	epochProvider EpochInfoProvider
@@ -268,10 +272,11 @@ type Election struct {
 	wg sync.WaitGroup
 }
 
-// NewElection creates a new leader election manager for a stake pool.
+// NewElection creates a new leader election manager for a stake pool. vrfSeed
+// returns a copy of the pool's VRF seed that the election wipes after use.
 func NewElection(
 	poolId lcommon.PoolKeyHash,
-	poolVrfSkey []byte,
+	vrfSeed func() []byte,
 	stakeProvider StakeDistributionProvider,
 	epochProvider EpochInfoProvider,
 	eventBus *event.EventBus,
@@ -282,7 +287,7 @@ func NewElection(
 	}
 	return &Election{
 		poolId:        poolId,
-		poolVrfSkey:   poolVrfSkey,
+		vrfSeed:       vrfSeed,
 		stakeProvider: stakeProvider,
 		epochProvider: epochProvider,
 		eventBus:      eventBus,
@@ -931,12 +936,20 @@ func (e *Election) computeSchedule(
 		return nil, fmt.Errorf("resolve active slot coefficient: %w", err)
 	}
 
+	if e.vrfSeed == nil {
+		return nil, errors.New("pool VRF seed is unavailable")
+	}
+	seed := e.vrfSeed()
+	defer clear(seed)
+	if len(seed) == 0 {
+		return nil, errors.New("pool VRF seed is unavailable")
+	}
 	vrfEvalStart := time.Now()
 	schedule, err := calc.CalculateSchedule(
 		currentEpoch,
 		epochRange,
 		e.poolId,
-		e.poolVrfSkey,
+		seed,
 		poolStake,
 		totalStake,
 		epochNonce,

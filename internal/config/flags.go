@@ -124,7 +124,7 @@ var flagSpecs = []flagSpec{
 		"ImmutableDbPath",
 		"immutable-db-path",
 		"",
-		"path to ImmutableDB for load mode",
+		"path or http(s) URL of the ImmutableDB for load mode",
 	),
 	boolFlag("IntersectTip", "intersect-tip", "start from current tip"),
 	boolFlag(
@@ -395,7 +395,7 @@ var flagSpecs = []flagSpec{
 	stringSliceFlag(
 		"BarkBlockDownloadHosts",
 		"bark-block-download-hosts",
-		"allowed HTTPS hostnames for Bark block downloads",
+		"allowed HTTPS origins for Bark block downloads (ports matched exactly)",
 	),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
 	stringFlag(
@@ -953,6 +953,11 @@ var flagSpecs = []flagSpec{
 		"DatabaseLifecycle.SnapshotEveryNEpochs",
 		"db-snapshot-every-n-epochs",
 		"capture an automatic snapshot every N epoch boundaries",
+	),
+	durationFlag(
+		"DatabaseLifecycle.SnapshotMaxCommitPause",
+		"db-snapshot-max-commit-pause",
+		"cancel a snapshot still holding the commit barrier after this long (0 = no bound)",
 	),
 }
 

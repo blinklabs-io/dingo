@@ -2531,10 +2531,12 @@ latest_ret AS (
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
 )
 SELECT relay.ipv4, relay.ipv6, relay.hostname, relay.id,
-       relay.pool_registration_id, relay.pool_id, relay.port
+       relay.pool_registration_id, relay.pool_id, relay.port,
+       pool.pool_key_hash
 FROM latest_reg reg
 LEFT JOIN latest_ret ret ON ret.pool_id = reg.pool_id AND ret.rn = 1
 JOIN pool_registration_relay relay ON relay.pool_registration_id = reg.id
+JOIN pool ON pool.id = reg.pool_id
 WHERE reg.rn = 1
   AND (
       ret.pool_id IS NULL
@@ -2566,6 +2568,7 @@ ORDER BY relay.id`,
 			&relay.PoolRegistrationID,
 			&relay.PoolID,
 			&relay.Port,
+			&relay.PoolKeyHash,
 		); err != nil {
 			return nil, err
 		}

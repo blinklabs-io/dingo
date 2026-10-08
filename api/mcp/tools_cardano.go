@@ -135,7 +135,7 @@ func RegisterCardanoTools(
 	addressLookups ...utxoAddressLookup,
 ) {
 	if queryTimeout <= 0 {
-		queryTimeout = 5 * time.Second
+		queryTimeout = defaultQueryTimeout
 	}
 
 	registerExtendedCardanoTools(server, db, ls, mp, network, queryTimeout)

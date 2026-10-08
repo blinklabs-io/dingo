@@ -77,7 +77,7 @@ type accountStore interface {
 	GetActiveAccountCredentials(
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
-	DeactivateAccounts(types.Txn, []models.StakeCredentialRef) error
+	DeactivateAccounts(types.Txn, []models.StakeCredentialRef, uint64) error
 	AddAccountRewardByCredential(
 		uint8,
 		[]byte,
@@ -258,6 +258,7 @@ func exerciseAccountStore(t *testing.T, store accountStore) accountState {
 		[]models.StakeCredentialRef{
 			models.NewStakeCredentialRef(0, activeKey),
 		},
+		1_000,
 	))
 	ret.deactivated, err = store.GetAccountByCredential(
 		0,
@@ -446,7 +447,7 @@ type drepStore interface {
 		[]byte,
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
-	UpdateDRepActivity(uint8, []byte, uint64, uint64, types.Txn) error
+	UpdateDRepActivity(uint8, []byte, uint64, uint64, uint64, types.Txn) error
 	GetExpiredDReps(uint64, types.Txn) ([]*models.Drep, error)
 	GetDrepLastRegistrationSlot(uint8, []byte, types.Txn) (uint64, error)
 	GetDrepLastRegistrationDeposit(uint8, []byte, types.Txn) (*uint64, error)
@@ -685,6 +686,7 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		importedCredential,
 		30,
 		5,
+		300,
 		nil,
 	))
 	require.NoError(t, store.CreateAccount(nil, &models.Account{
@@ -844,7 +846,7 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		},
 		ret.Deposits,
 	)
-	err = store.UpdateDRepActivity(0, missingCredential, 1, 1, nil)
+	err = store.UpdateDRepActivity(0, missingCredential, 1, 1, 10, nil)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, models.ErrDrepActivityNotUpdated))
 	ret.MissingActivityError = err.Error()
@@ -1096,7 +1098,7 @@ func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
 	// The Mithril bootstrap sequence: drop the manifest for the bulk load,
 	// then rebuild only the critical subset before the database is marked
 	// ready. The lazy remainder is finished by later maintenance, and on a
-	// database whose pending marker the sync's own ClearSyncState wiped,
+	// database whose pending marker an older sync's blanket clear wiped,
 	// never — so whatever the rollback path needs has to be in this
 	// subset.
 	require.NoError(t, store.DropDeferredIndexes())
@@ -1785,7 +1787,6 @@ type operationalStore interface {
 	GetSyncState(string, types.Txn) (string, error)
 	SetSyncState(string, string, types.Txn) error
 	DeleteSyncState(string, types.Txn) error
-	ClearSyncState(types.Txn) error
 	SetEpoch(
 		uint64,
 		uint64,

@@ -261,6 +261,11 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool, crossingClosure 
 	ls.currentTipBlockNonce = nonce
 	ls.publishSnapshotsLocked()
 	require.NoError(t, cm.SetLedger(ls))
+	rewardPParams := lcommon.ProtocolParameters(dijkstraRetentionPParams())
+	if hardFork {
+		rewardPParams = epochBoundaryBenchPParams()
+	}
+	seedEmptyRewardBasisForRollover(t, db, epoch0, rewardPParams)
 	var closureVisibleAtSnap bool
 	if crossingClosure {
 		ls.SetEpochBoundarySnapshotStakeHook(func(txn *database.Txn, _ event.EpochTransitionEvent) error {

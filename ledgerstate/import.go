@@ -501,16 +501,52 @@ func ImportLedgerState(
 		"slot", slot,
 	)
 
+	if cfg.State.UTxOHD && cfg.State.UTxOTablePath == "" &&
+		!models.IsPhaseCompleted(completedPhase, models.ImportPhaseUTxO) {
+		return errors.New(
+			"UTxO-HD ledger state requires external UTxO table file",
+		)
+	}
+
+	// Delete post-anchor rollover residue so replay can re-trigger every
+	// crossed epoch boundary. See DATABASE.md for the cleanup's scope and
+	// rationale.
+	//
+	// Run the full sweep atomically so a failed delete cannot leave only part
+	// of the post-anchor state removed.
+	sweepTxn := cfg.Database.MetadataTxn(true)
+	defer sweepTxn.Release()
+	if err := sweepTxn.Do(func(txn *database.Txn) error {
+		if err := cfg.Database.DeleteEpochsAfterSlot(slot, txn); err != nil {
+			return fmt.Errorf("deleting post-anchor epoch rows: %w", err)
+		}
+		if err := cfg.Database.DeleteRewardStateAfterSlot(slot, txn); err != nil {
+			return fmt.Errorf("deleting post-anchor reward state: %w", err)
+		}
+		if err := cfg.Database.DeleteBlockNoncesAfterPoint(
+			ocommon.Point{Slot: slot, Hash: cfg.State.Tip.BlockHash},
+			txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor block nonces: %w", err)
+		}
+		if err := cfg.Database.DeleteNetworkStateAfterSlot(slot, txn); err != nil {
+			return fmt.Errorf("deleting post-anchor network state: %w", err)
+		}
+		if err := cfg.Database.DeleteNetworkDonationsAfterSlot(
+			slot, txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor network donations: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
 	// Import UTxOs (from UTxO table file or inline data)
 	if !models.IsPhaseCompleted(
 		completedPhase,
 		models.ImportPhaseUTxO,
 	) {
-		if cfg.State.UTxOHD && cfg.State.UTxOTablePath == "" {
-			return errors.New(
-				"UTxO-HD ledger state requires external UTxO table file",
-			)
-		}
 		if cfg.State.UTxOTablePath != "" ||
 			cfg.State.UTxOData != nil {
 			if err := importUTxOs(
@@ -574,7 +610,7 @@ func ImportLedgerState(
 	) {
 		certStatePhaseRan = true
 		if cfg.State.CertStateData != nil {
-			poolsImported, err := importCertState(
+			poolsImported, importedAccounts, err := importCertState(
 				ctx, cfg, slot, progress,
 			)
 			if err != nil {
@@ -584,6 +620,18 @@ func ImportLedgerState(
 				)
 			}
 			certStatePoolsImported = poolsImported > 0
+
+			// The snapshot sets account.reward at its anchor. Clear later
+			// journal entries without reversing amounts applied against the
+			// pre-import balance. See DATABASE.md, "account_reward_delta".
+			if err := cfg.Database.DeleteAccountRewardJournalForCredentialsAfterSlot(
+				slot, importedAccounts, nil,
+			); err != nil {
+				return fmt.Errorf(
+					"rolling back post-anchor account reward journal: %w",
+					err,
+				)
+			}
 		}
 		if err := setCheckpoint(
 			cfg, models.ImportPhaseCertState,
@@ -595,6 +643,26 @@ func ImportLedgerState(
 			"skipping cert state import (already completed)",
 			"component", "ledgerstate",
 		)
+		// A checkpoint at or past cert-state but short of tip belongs to an
+		// import that never finished, so the node has not served (and
+		// journaled nothing) since that cert-state phase ran. A checkpoint
+		// written by an importer without the journal cleanup above can
+		// therefore still leave stale post-anchor rows behind the account
+		// balances it overwrote; repeat the cleanup for the same
+		// credentials. It is idempotent when the cleanup already ran. A
+		// tip checkpoint marks a completed import whose journal may since
+		// hold legitimate post-anchor rows, so it is left alone.
+		if cfg.State.CertStateData != nil &&
+			!models.IsPhaseCompleted(
+				completedPhase,
+				models.ImportPhaseTip,
+			) {
+			if err := rollbackResumedAccountRewardJournal(
+				cfg, slot,
+			); err != nil {
+				return err
+			}
+		}
 	}
 	// Import stake snapshots
 	if !models.IsPhaseCompleted(
@@ -689,6 +757,17 @@ func ImportLedgerState(
 				"(already completed)",
 			"component", "ledgerstate",
 		)
+		// The checkpoint may predate the root verifier, so verify the
+		// seeded roots even though the phase is not re-run.
+		if cfg.State.GovStateData != nil &&
+			cfg.State.EraIndex >= EraConway {
+			if err := verifyImportedPurposeRoots(cfg); err != nil {
+				return fmt.Errorf(
+					"verifying per-purpose governance roots: %w",
+					err,
+				)
+			}
+		}
 	}
 
 	// Mithril v2 catch-up: the snapshot is the complete, trusted ledger state
@@ -1025,7 +1104,7 @@ func importCertState(
 	cfg ImportConfig,
 	slot uint64,
 	progress func(ImportProgress),
-) (int, error) {
+) (int, []models.StakeCredentialRef, error) {
 	cfg.Logger.Info(
 		"parsing cert state",
 		"component", "ledgerstate",
@@ -1034,7 +1113,7 @@ func importCertState(
 	certState, err := ParseCertState(cfg.State.CertStateData)
 	if err != nil {
 		if certState == nil {
-			return 0, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"parsing cert state: %w", err,
 			)
 		}
@@ -1044,7 +1123,7 @@ func importCertState(
 		// reconcile forbids checkpoint resume, so a re-run fails here again —
 		// tell the operator how to get unstuck instead of looping.
 		if cfg.Reconcile {
-			return 0, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"parsing cert state for reconcile: %w; catch-up cannot "+
 					"continue with a partial cert state and the database may "+
 					"contain a partial import — perform a full Mithril "+
@@ -1055,7 +1134,7 @@ func importCertState(
 		// A skipped or partially decoded entry would import an account,
 		// pool or DRep set that differs from the ledger state, and every
 		// stake distribution and reward derived from it would be wrong.
-		return 0, fmt.Errorf(
+		return 0, nil, fmt.Errorf(
 			"parsing cert state: %w; the ledger state cannot be "+
 				"imported with skipped or partially decoded entries",
 			err,
@@ -1097,15 +1176,27 @@ func importCertState(
 	}
 
 	// Import accounts
+	var importedAccounts []models.StakeCredentialRef
 	if len(certState.Accounts) > 0 {
 		if err := importAccounts(
 			ctx, cfg, certState.Accounts, slot,
 		); err != nil {
-			return 0, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"importing accounts: %w",
 				err,
 			)
 		}
+		// importAccounts has already validated every entry's credential type
+		// (it errors out above otherwise), so converting again here cannot
+		// fail in practice; still handled rather than ignored, since a
+		// dropped credential here would silently widen the "untouched"
+		// exemption DeleteAccountRewardJournalForCredentialsAfterSlot relies
+		// on for coverage it does not have.
+		refs, refsErr := accountCredentialRefs(certState.Accounts)
+		if refsErr != nil {
+			return 0, nil, refsErr
+		}
+		importedAccounts = refs
 		progress(ImportProgress{
 			Stage:   "accounts",
 			Current: len(certState.Accounts),
@@ -1125,7 +1216,7 @@ func importCertState(
 			ctx, cfg, certState.Pools, slot,
 			certState.PendingPoolRetirements,
 		); err != nil {
-			return 0, fmt.Errorf("importing pools: %w", err)
+			return 0, nil, fmt.Errorf("importing pools: %w", err)
 		}
 		importedPools = len(certState.Pools)
 		progress(ImportProgress{
@@ -1145,7 +1236,7 @@ func importCertState(
 		if err := importDReps(
 			ctx, cfg, certState.DReps, slot,
 		); err != nil {
-			return 0, fmt.Errorf("importing DReps: %w", err)
+			return 0, nil, fmt.Errorf("importing DReps: %w", err)
 		}
 		progress(ImportProgress{
 			Stage:   "dreps",
@@ -1164,10 +1255,72 @@ func importCertState(
 		snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
 		nil,
 	); err != nil {
-		return 0, fmt.Errorf("importing committee authorizations: %w", err)
+		return 0, nil, fmt.Errorf("importing committee authorizations: %w", err)
 	}
 
-	return importedPools, nil
+	return importedPools, importedAccounts, nil
+}
+
+// accountCredentialRefs converts parsed accounts to the stake credential
+// refs cert-state import writes them under.
+func accountCredentialRefs(
+	accounts []ParsedAccount,
+) ([]models.StakeCredentialRef, error) {
+	refs := make([]models.StakeCredentialRef, 0, len(accounts))
+	for i := range accounts {
+		tag, err := models.CredentialTagFromUint(
+			uint(accounts[i].StakingKey.Type),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"resolving imported account %x credential type %d: %w",
+				accounts[i].StakingKey.Hash,
+				accounts[i].StakingKey.Type,
+				err,
+			)
+		}
+		refs = append(
+			refs,
+			models.NewStakeCredentialRef(tag, accounts[i].StakingKey.Hash),
+		)
+	}
+	return refs, nil
+}
+
+// rollbackResumedAccountRewardJournal deletes post-anchor reward journal
+// rows for the snapshot's accounts when a resumed import skips the
+// cert-state phase. The accounts are re-derived from the snapshot's cert
+// state, since the phase that returned them ran in an earlier process.
+func rollbackResumedAccountRewardJournal(
+	cfg ImportConfig,
+	slot uint64,
+) error {
+	certState, err := ParseCertState(cfg.State.CertStateData)
+	if err != nil {
+		if certState == nil {
+			return fmt.Errorf(
+				"parsing cert state for resumed journal rollback: %w", err,
+			)
+		}
+		cfg.Logger.Warn(
+			"cert state parse warnings",
+			"component", "ledgerstate",
+			"warning", err.Error(),
+		)
+	}
+	refs, err := accountCredentialRefs(certState.Accounts)
+	if err != nil {
+		return err
+	}
+	if err := cfg.Database.DeleteAccountRewardJournalForCredentialsAfterSlot(
+		slot, refs, nil,
+	); err != nil {
+		return fmt.Errorf(
+			"rolling back post-anchor account reward journal: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 // importAccounts imports parsed accounts into the metadata store.
@@ -3681,6 +3834,7 @@ func importGovState(
 				cfg.State.Epoch,
 			)
 		}
+		ratifiedCommitteeActions := 0
 		if err := func() error {
 			txn := cfg.Database.MetadataTxn(true)
 			defer txn.Release()
@@ -3715,6 +3869,10 @@ func importGovState(
 					rs := currentEpochSlot
 					ratifiedEpoch = &re
 					ratifiedSlot = &rs
+					if prop.ActionType == govActionTypeNoConfidence ||
+						prop.ActionType == govActionTypeUpdateCommittee {
+						ratifiedCommitteeActions++
+					}
 				}
 				if err := store.SetGovernanceProposal(
 					&models.GovernanceProposal{
@@ -3759,6 +3917,18 @@ func importGovState(
 				"saving governance proposals: %w", err,
 			)
 		}
+		if ratifiedCommitteeActions > 0 {
+			// The committee imported above is the one in force at the
+			// snapshot; the ratified action only takes effect at the next
+			// epoch boundary, so committee-dependent validation before then
+			// sees the pre-action committee.
+			cfg.Logger.Warn(
+				"snapshot holds ratified committee actions not yet enacted",
+				"component", "ledgerstate",
+				"count", ratifiedCommitteeActions,
+				"ratified_epoch", cfg.State.Epoch,
+			)
+		}
 		cfg.Logger.Info(
 			"imported governance proposals",
 			"component", "ledgerstate",
@@ -3791,6 +3961,14 @@ func importGovState(
 				"seeded per-purpose governance chain roots",
 				"component", "ledgerstate",
 				"count", seeded,
+			)
+		}
+		if err := verifyPrevGovActionIdsSeeded(
+			cfg, store, govState.PrevGovActionIds,
+		); err != nil {
+			return fmt.Errorf(
+				"verifying per-purpose governance roots: %w",
+				err,
 			)
 		}
 	}
@@ -4072,6 +4250,120 @@ func seedPrevGovActionIds(
 		)
 	}
 	return count, nil
+}
+
+// verifyImportedPurposeRoots parses the snapshot governance state and
+// verifies its per-purpose roots against the database.
+func verifyImportedPurposeRoots(cfg ImportConfig) error {
+	govState, err := ParseGovState(
+		cfg.State.GovStateData,
+		cfg.State.EraIndex,
+	)
+	if govState == nil {
+		if err != nil {
+			return fmt.Errorf("parsing governance state: %w", err)
+		}
+		return nil
+	}
+	// A GovRelation that fails to decode leaves PrevGovActionIds nil, which
+	// would otherwise read as a snapshot with no roots.
+	if govState.ImportParseError != nil {
+		return fmt.Errorf(
+			"parsing governance state: %w",
+			govState.ImportParseError,
+		)
+	}
+	if govState.PrevGovActionIds == nil {
+		return nil
+	}
+	return verifyPrevGovActionIdsSeeded(
+		cfg, cfg.Database.Metadata(), govState.PrevGovActionIds,
+	)
+}
+
+// verifyPrevGovActionIdsSeeded fails unless every non-null per-purpose
+// root in the snapshot is an enacted governance_proposal row that the tally
+// resolves as that purpose's current root. Without it a skipped seed, or an
+// enacted row left above the snapshot that outranks the seed, is only
+// visible later as chained proposals that never ratify.
+func verifyPrevGovActionIdsSeeded(
+	cfg ImportConfig,
+	store metadata.MetadataStore,
+	prev *ParsedPrevGovActionIds,
+) error {
+	roots := []struct {
+		purpose     string
+		id          *ParsedGovActionId
+		actionTypes []uint8
+	}{
+		{
+			"parameter-change", prev.PParamUpdate,
+			[]uint8{govActionTypeParameterChange},
+		},
+		{
+			"hard-fork", prev.HardFork,
+			[]uint8{govActionTypeHardForkInitiation},
+		},
+		{
+			"committee", prev.Committee,
+			[]uint8{
+				govActionTypeNoConfidence,
+				govActionTypeUpdateCommittee,
+			},
+		},
+		{
+			"constitution", prev.Constitution,
+			[]uint8{govActionTypeNewConstitution},
+		},
+	}
+	txn := cfg.Database.MetadataTxn(false)
+	defer txn.Release()
+	for _, r := range roots {
+		if r.id == nil {
+			continue
+		}
+		row, err := store.GetGovernanceProposal(
+			r.id.TxHash, r.id.ActionIndex, txn.Metadata(),
+		)
+		if err != nil && !errors.Is(
+			err, models.ErrGovernanceProposalNotFound,
+		) {
+			return fmt.Errorf(
+				"looking up %s root %s#%d: %w",
+				r.purpose,
+				hex.EncodeToString(r.id.TxHash),
+				r.id.ActionIndex,
+				err,
+			)
+		}
+		if row == nil || row.EnactedEpoch == nil {
+			return fmt.Errorf(
+				"%s root %s#%d is not an enacted governance proposal",
+				r.purpose,
+				hex.EncodeToString(r.id.TxHash),
+				r.id.ActionIndex,
+			)
+		}
+		current, err := store.GetLastEnactedGovernanceProposal(
+			r.actionTypes, txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"resolving current %s root: %w", r.purpose, err,
+			)
+		}
+		if current == nil ||
+			!bytes.Equal(current.TxHash, r.id.TxHash) ||
+			current.ActionIndex != r.id.ActionIndex {
+			return fmt.Errorf(
+				"%s root %s#%d does not resolve as the current root",
+				r.purpose,
+				hex.EncodeToString(r.id.TxHash),
+				r.id.ActionIndex,
+			)
+		}
+	}
+	return nil
 }
 
 // findRatifiedHFICandidate returns the unique active HFI proposal whose
