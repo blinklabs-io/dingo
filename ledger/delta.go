@@ -523,6 +523,7 @@ func (d *LedgerDelta) processGovernance(
 		if err := governance.ProcessDRepActivityCertificates(
 			ctx,
 			tx,
+			d.Point,
 			currentEpoch,
 			conwayPParams.DRepInactivityPeriod,
 			ls.db,

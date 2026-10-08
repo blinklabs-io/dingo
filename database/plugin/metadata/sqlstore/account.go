@@ -943,6 +943,15 @@ WHERE mir.pot = 1 AND reward.credential_tag = ?
 	return ret, nil
 }
 
+// accountVoteDelegationTables are the certificate tables that set an
+// account's DRep delegation.
+var accountVoteDelegationTables = []string{
+	"vote_delegation",
+	"vote_registration_delegation",
+	"stake_vote_delegation",
+	"stake_vote_registration_delegation",
+}
+
 // accountStateAtSlot is one account's registration, pool and DRep state at a
 // slot, as derived from the certificate history and import baseline that
 // survive at that slot.
@@ -1025,12 +1034,7 @@ func deriveAccountStateAtSlot(
 	drep, hasDrep, err := latestAccountEvent(
 		ctx,
 		db,
-		[]string{
-			"vote_delegation",
-			"vote_registration_delegation",
-			"stake_vote_delegation",
-			"stake_vote_registration_delegation",
-		},
+		accountVoteDelegationTables,
 		tag,
 		key,
 		slot,

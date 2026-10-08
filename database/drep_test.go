@@ -60,6 +60,7 @@ func TestUpdateDRepActivityExpiryBounds(t *testing.T) {
 				credential,
 				tc.activity,
 				tc.inactivity,
+				100,
 				nil,
 			)
 			if tc.valid {

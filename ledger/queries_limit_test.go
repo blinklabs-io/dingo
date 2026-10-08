@@ -193,7 +193,7 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 			name:  "DRep state",
 			query: "GetDRepState",
 			run: func() (any, error) {
-				return ls.queryShelleyDRepState(context.Background(), credentials, nil)
+				return ls.queryShelleyDRepState(context.Background(), credentials, QueryPoint{}, nil)
 			},
 		},
 		{
@@ -255,7 +255,7 @@ func TestLocalStateQueryEmptyDRepStateRemainsUnrestricted(t *testing.T) {
 
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryShelleyDRepState(context.Background(), nil, nil)
+	result, err := ls.queryShelleyDRepState(context.Background(), nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)
@@ -317,7 +317,7 @@ func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
 
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryShelleyDRepState(context.Background(), nil, nil)
+	result, err := ls.queryShelleyDRepState(context.Background(), nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)

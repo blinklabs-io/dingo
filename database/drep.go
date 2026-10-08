@@ -218,6 +218,61 @@ func (d *Database) GetDRepDelegators(
 	)
 }
 
+// GetDRepDelegatorsAtSlot returns the stake credentials delegating to each
+// of dreps (every DRep when empty) at slot, keyed by the DRep's
+// StakeCredentialRef.MapKey().
+func (d *Database) GetDRepDelegatorsAtSlot(
+	ctx context.Context,
+	dreps []models.StakeCredentialRef,
+	slot uint64,
+	txn *Txn,
+) (map[string][]models.StakeCredentialRef, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetDRepDelegatorsAtSlot(
+		dreps,
+		slot,
+		txn.Metadata(),
+	)
+}
+
+// GetDrepsAtSlot returns the given DReps (every DRep when refs is empty)
+// that were registered at slot, as they stood there.
+func (d *Database) GetDrepsAtSlot(
+	ctx context.Context,
+	refs []models.StakeCredentialRef,
+	slot uint64,
+	txn *Txn,
+) ([]*models.Drep, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetDrepsAtSlot(refs, slot, txn.Metadata())
+}
+
+// GetDrepRegistrationDepositsAtSlot returns the deposit recorded against
+// the latest registration at or before slot of each of refs (every DRep when
+// empty), keyed by models.DrepDepositKey.
+func (d *Database) GetDrepRegistrationDepositsAtSlot(
+	ctx context.Context,
+	refs []models.StakeCredentialRef,
+	slot uint64,
+	txn *Txn,
+) (map[string]uint64, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetDrepRegistrationDepositsAtSlot(
+		refs,
+		slot,
+		txn.Metadata(),
+	)
+}
+
 // GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower; see
 // the metadata-store interface for the contract. expiryEpoch is the
 // CIP-0163 gate; see GetDRepVotingPower.
@@ -284,6 +339,7 @@ func (d *Database) UpdateDRepActivity(
 	drepCredential []byte,
 	activityEpoch uint64,
 	inactivityPeriod uint64,
+	slot uint64,
 	txn *Txn,
 ) error {
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
@@ -292,6 +348,7 @@ func (d *Database) UpdateDRepActivity(
 			drepCredential,
 			activityEpoch,
 			inactivityPeriod,
+			slot,
 			txn.Metadata(),
 		); err != nil {
 			return fmt.Errorf(

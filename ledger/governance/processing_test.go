@@ -257,6 +257,7 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 		return ProcessDRepActivityCertificates(
 			context.Background(),
 			tx,
+			ocommon.NewPoint(5000, nil),
 			100,
 			20,
 			db,

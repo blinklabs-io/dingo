@@ -2857,7 +2857,9 @@ func (c *Chain) BlockByPoint(
 
 // BlockBeforeSlot returns the highest-slot block before slotNumber on this
 // chain. It walks the chain index instead of scanning blob keys so retained
-// fork or synthetic blobs cannot be returned as canonical blocks.
+// fork or synthetic blobs cannot be returned as canonical blocks. It returns
+// ErrNoBlockBeforeSlot when the chain holds no block before slotNumber, and
+// the lookup's own error when a block on the search path cannot be read.
 func (c *Chain) BlockBeforeSlot(
 	ctx context.Context,
 	slotNumber uint64,
@@ -2873,7 +2875,7 @@ func (c *Chain) BlockBeforeSlot(
 		return models.Block{}, err
 	}
 	if c.tipBlockIndex < initialBlockIndex {
-		return models.Block{}, models.ErrBlockNotFound
+		return models.Block{}, ErrNoBlockBeforeSlot
 	}
 	// Block slots are strictly increasing with block index on the canonical
 	// chain, so binary-search for the highest index whose slot is below
@@ -2907,7 +2909,7 @@ func (c *Chain) BlockBeforeSlot(
 		}
 	}
 	if !found {
-		return models.Block{}, models.ErrBlockNotFound
+		return models.Block{}, ErrNoBlockBeforeSlot
 	}
 	return result, nil
 }

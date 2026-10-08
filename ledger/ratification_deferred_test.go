@@ -141,7 +141,7 @@ func queryProposals(
 	ls *LedgerState,
 ) olocalstatequery.ProposalsResult {
 	t.Helper()
-	result, err := ls.queryShelleyGetProposals(context.Background(), nil, nil)
+	result, err := ls.queryShelleyGetProposals(context.Background(), nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	wrapped, ok := result.([]any)
 	require.True(t, ok)

@@ -2135,7 +2135,7 @@ func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyDRepState(context.Background(), nil, nil)
+	result, err := ls.queryShelleyDRepState(context.Background(), nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	// Wire shape: []any{ map }. cardano-cli expects the result map wrapped in
 	// the single-element result array; verified against cardano-node, whose
@@ -2187,7 +2187,7 @@ func TestQueryShelleyDRepState_Populated(t *testing.T) {
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyDRepState(context.Background(), nil, nil)
+	result, err := ls.queryShelleyDRepState(context.Background(), nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 
 	encoded, err := cbor.Encode(result)
@@ -2685,7 +2685,7 @@ func TestQueryShelleyGetProposalsReturnsDepositProcedure(t *testing.T) {
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyGetProposals(context.Background(), nil, nil)
+	result, err := ls.queryShelleyGetProposals(context.Background(), nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)

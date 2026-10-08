@@ -50,12 +50,13 @@ func HasDRepActivityCertificates(tx lcommon.Transaction) bool {
 	return false
 }
 
-// drepActivityWriter records that a DRep was active in an epoch.
+// drepActivityWriter records that a DRep was active in an epoch, at slot.
 type drepActivityWriter func(
 	ctx context.Context,
 	credentialTag uint8,
 	credential []byte,
 	epoch uint64,
+	slot uint64,
 	txn *database.Txn,
 ) error
 
@@ -69,6 +70,7 @@ func renewDRepExpiry(
 		credentialTag uint8,
 		credential []byte,
 		epoch uint64,
+		slot uint64,
 		txn *database.Txn,
 	) error {
 		return db.UpdateDRepActivity(
@@ -77,6 +79,7 @@ func renewDRepExpiry(
 			credential,
 			epoch,
 			drepInactivityPeriod,
+			slot,
 			txn,
 		)
 	}
@@ -88,7 +91,22 @@ func renewDRepExpiry(
 // recomputed from a historical vote or certificate would replace the correct
 // expiry the snapshot recorded with a stale one.
 func recordDRepActivityEpoch(db *database.Database) drepActivityWriter {
-	return db.RecordDRepActivityEpoch
+	return func(
+		ctx context.Context,
+		credentialTag uint8,
+		credential []byte,
+		epoch uint64,
+		_ uint64,
+		txn *database.Txn,
+	) error {
+		return db.RecordDRepActivityEpoch(
+			ctx,
+			credentialTag,
+			credential,
+			epoch,
+			txn,
+		)
+	}
 }
 
 // ProcessDRepActivityCertificates renews DRep activity for registration and
@@ -98,6 +116,7 @@ func recordDRepActivityEpoch(db *database.Database) drepActivityWriter {
 func ProcessDRepActivityCertificates(
 	ctx context.Context,
 	tx lcommon.Transaction,
+	point ocommon.Point,
 	currentEpoch uint64,
 	drepInactivityPeriod uint64,
 	db *database.Database,
@@ -106,6 +125,7 @@ func ProcessDRepActivityCertificates(
 	return processDRepActivityCertificates(
 		ctx,
 		tx,
+		point.Slot,
 		currentEpoch,
 		renewDRepExpiry(db, drepInactivityPeriod),
 		txn,
@@ -125,6 +145,7 @@ func ProcessHistoricalDRepActivityCertificates(
 	return processDRepActivityCertificates(
 		ctx,
 		tx,
+		0,
 		currentEpoch,
 		recordDRepActivityEpoch(db),
 		txn,
@@ -134,6 +155,7 @@ func ProcessHistoricalDRepActivityCertificates(
 func processDRepActivityCertificates(
 	ctx context.Context,
 	tx lcommon.Transaction,
+	slot uint64,
 	currentEpoch uint64,
 	recordActivity drepActivityWriter,
 	txn *database.Txn,
@@ -175,6 +197,7 @@ func processDRepActivityCertificates(
 			credentialTag,
 			credential.Credential[:],
 			currentEpoch,
+			slot,
 			txn,
 		); err != nil {
 			return fmt.Errorf(
@@ -496,6 +519,7 @@ func processVotes(
 					drepCredTag,
 					voter.Hash[:],
 					currentEpoch,
+					point.Slot,
 					txn,
 				)
 				if errors.Is(err, models.ErrDrepActivityNotUpdated) {
@@ -536,6 +560,7 @@ func processVotes(
 						drepCredTag,
 						voter.Hash[:],
 						currentEpoch,
+						point.Slot,
 						txn,
 					)
 				}

@@ -2281,7 +2281,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// transition epoch, matching the Haskell HFC semantics.
 	ls.evaluateTriggerAtEpoch()
 	ls.evaluateTransitionImpossible()
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(ctx)
 	ls.evaluateHardForkInitiationStability(ctx)
 	// Publish the transitionInfo changes made above so snapshot readers observe
 	// the reconstructed startup state. The HFI stability evaluation above may
@@ -4713,7 +4713,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	// of committing stale data.
 	ls.hfiEvalDoneEpoch = 0
 	ls.hfiEvalGeneration.Add(1)
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(ctx)
 	ls.evaluateHardForkInitiationStability(ctx)
 	// Always update nonce - clear it on genesis rollback, set
 	// it otherwise
@@ -7819,7 +7819,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// advanced ls.currentEra to a new era whose own successor may
 			// carry its own AtEpoch override or already-met quorum.
 			ls.evaluateTriggerAtEpoch()
-			ls.evaluateProtocolVersionBump()
+			ls.evaluateProtocolVersionBump(ctx)
 			ls.publishSnapshotsLocked()
 			ls.Unlock()
 
@@ -8695,7 +8695,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// epoch-end slot instead of a stale safeZone cap.
 				ls.evaluateTriggerAtEpoch()
 				ls.evaluateTransitionImpossible()
-				ls.evaluateProtocolVersionBump()
+				ls.evaluateProtocolVersionBump(ctx)
 				ls.evaluateHardForkInitiationStability(ctx)
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
@@ -9798,31 +9798,28 @@ func (ls *LedgerState) evaluateTriggerAtEpoch() {
 // truly invalid transaction, even though the same block is canonical and
 // every node that reaches quorum-based TransitionKnown early accepts it.
 //
-// Unlike TriggerAtEpoch, the classic update-proposal system has no
-// protocol-enforced voting deadline: a genesis delegate may submit a
-// different, superseding proposal in any block of the submission epoch,
-// right up to its last slot, so "quorum met" here is not guaranteed final
-// the way a post-deadline CIP-1694 tally is. That asymmetry is why this
-// function reads state instead of gating on a deadline that does not exist
-// for this trigger kind, and why it never touches enactment: it only ever
-// calls Database.ForecastPParamUpdates (via forecastPendingPParamUpdate),
-// which is documented to mirror ComputeAndApplyPParamUpdates' quorum, decode,
-// and apply semantics exactly while performing no writes, so calling it here
-// cannot make ComputeAndApplyPParamUpdates itself, or any other
-// protocol-parameter enactment, run any earlier than it already does at the
-// real epoch rollover. A premature or later-superseded reading only widens
-// the forecast horizon for the remainder of this epoch; it never changes
-// which era's validation rules apply (ls.currentEra) or what pparams get
-// enacted (both still come solely from processEpochRollover's own,
-// independent, unaffected re-read at the real boundary), and every
-// Shelley-family era shares the same epoch size and slot length, so even a
-// wrongly-forecast successor's slot/time arithmetic still matches the era
-// that actually continues.
+// A proposal for the next epoch can be submitted or superseded only before
+// the voting deadline, 2 * stabilityWindow before the next epoch starts (the
+// Shelley PPUP rule). A reading taken before then can still change, and
+// knowledge of an era end must not be withdrawn on the same chain, so the
+// transition is reported only once k blocks of this epoch lie at or past the
+// deadline: the last block before it can then no longer be rolled back. This
+// is ouroboros-consensus shelleyTransition's shelleyAfterVoting >= k
+// (Shelley/ShelleyHFC.hs, counted in Shelley/Ledger/Ledger.hs). The count is
+// derived from the chain rather than stored, so a rollback or a restart
+// recomputes it.
+//
+// The function never touches enactment: it only ever calls
+// Database.ForecastPParamUpdates (via forecastPendingPParamUpdate), which
+// mirrors ComputeAndApplyPParamUpdates' quorum, decode, and apply semantics
+// while performing no writes, so enactment still happens only at the real
+// epoch rollover.
 //
 // The call is a no-op when:
 //   - the shape is unavailable, the current era is unknown to it, or its
 //     NextEraTrigger is not TriggerAtVersion (i.e. a TestXHardForkAtEpoch
 //     override, or the final configured era),
+//   - fewer than k blocks of this epoch lie at or past the voting deadline,
 //   - currentPParams is nil or has no forecast-eligible pparams update
 //     functions for this era (e.g. Byron),
 //   - no pending update meets the configured genesis-key quorum for next
@@ -9834,7 +9831,7 @@ func (ls *LedgerState) evaluateTriggerAtEpoch() {
 //
 // Call under ls.Lock() (runtime paths) or without a lock during
 // single-threaded startup.
-func (ls *LedgerState) evaluateProtocolVersionBump() {
+func (ls *LedgerState) evaluateProtocolVersionBump(ctx context.Context) {
 	shape := ls.eraShape()
 	if len(shape.Eras) == 0 {
 		return
@@ -9854,6 +9851,12 @@ func (ls *LedgerState) evaluateProtocolVersionBump() {
 	if ls.currentPParams == nil {
 		return
 	}
+	// Checked before the forecast so the database is not read for most of
+	// the epoch, while the tip is still before the deadline.
+	countFromSlot, ok := ls.pparamVotingCountStartSlot()
+	if !ok || ls.currentTip.Point.Slot < countFromSlot {
+		return
+	}
 	forecasted, err := ls.forecastPendingPParamUpdate(
 		ls.currentEra, targetEpoch, ls.currentPParams,
 	)
@@ -9868,7 +9871,67 @@ func (ls *LedgerState) evaluateProtocolVersionBump() {
 	if !ls.isHardForkTransition(oldVer, newVer) {
 		return
 	}
+	k, ok := ls.securityParamForEra(ls.currentEra.Id)
+	if !ok || ls.blocksAppliedFromSlot(ctx, countFromSlot) < k {
+		return
+	}
 	ls.transitionInfo = hardfork.NewTransitionKnown(targetEpoch)
+}
+
+// pparamVotingCountStartSlot returns the first slot whose blocks count toward
+// the post-deadline total evaluateProtocolVersionBump requires: the voting
+// deadline, 2 * stabilityWindow before the next epoch starts. Upstream counts
+// only blocks of the current epoch, so an epoch shorter than 2 *
+// stabilityWindow, as on some test networks, counts from its first slot.
+func (ls *LedgerState) pparamVotingCountStartSlot() (uint64, bool) {
+	if ls.currentEpoch.LengthInSlots == 0 {
+		return 0, false
+	}
+	nextEpochStart, err := checkedSlotAdd(
+		ls.currentEpoch.StartSlot,
+		uint64(ls.currentEpoch.LengthInSlots),
+	)
+	if err != nil {
+		return 0, false
+	}
+	// A stability window above half the slot range cannot be doubled
+	// without wrapping, and such a window covers the whole epoch anyway.
+	stabilityWindow := ls.calculateStabilityWindowForEra(ls.currentEra.Id)
+	if stabilityWindow > math.MaxUint64/2 {
+		return ls.currentEpoch.StartSlot, true
+	}
+	votingWindow := 2 * stabilityWindow
+	if nextEpochStart <= votingWindow ||
+		nextEpochStart-votingWindow < ls.currentEpoch.StartSlot {
+		return ls.currentEpoch.StartSlot, true
+	}
+	return nextEpochStart - votingWindow, true
+}
+
+// blocksAppliedFromSlot returns how many blocks up to the ledger tip lie at or
+// after slot. Block numbers are contiguous along the chain, so it is the tip's
+// block number less that of the last block before slot. When the chain holds
+// no block before slot it returns the tip's block number, which undercounts by
+// at most the first block. Any other failure, such as a predecessor evicted
+// from a non-persistent chain's cache, counts nothing: the tip's block number
+// would then include blocks before slot and could report a transition early.
+// Both fallbacks can only delay a reported transition, never advance it.
+func (ls *LedgerState) blocksAppliedFromSlot(ctx context.Context, slot uint64) uint64 {
+	tip := ls.currentTip
+	if tip.Point.Slot < slot {
+		return 0
+	}
+	before, err := ls.canonicalBlockBeforeSlot(ctx, nil, slot)
+	if err != nil {
+		if errors.Is(err, chain.ErrNoBlockBeforeSlot) {
+			return tip.BlockNumber
+		}
+		return 0
+	}
+	if before.Number >= tip.BlockNumber {
+		return 0
+	}
+	return tip.BlockNumber - before.Number
 }
 
 // evaluateTransitionImpossible sets transitionInfo to TransitionImpossible
