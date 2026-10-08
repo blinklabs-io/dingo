@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,6 +75,7 @@ const (
 	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
 	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
+	committeeRenewalTermStartSchemaRelease              = "committee-renewal-term-start-repair"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -215,6 +217,11 @@ var schemaVersions = []struct {
 		Dir:     "v36",
 	},
 	{Version: 37, Name: "drep-expiry-history", Dir: "v37"},
+	{
+		Version: 38,
+		Name:    committeeRenewalTermStartSchemaRelease,
+		Dir:     "v38",
+	},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -342,6 +349,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == accountDRepClearSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = accountDRepClearBackfill
+		}
+		if version.Name == committeeRenewalTermStartSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = committeeRenewalTermStartBackfill
 		}
 		ret = append(ret, migration)
 	}
@@ -1269,6 +1280,199 @@ func committeeTermStartBackfill(
 		Cursor: strconv.FormatInt(ids[len(ids)-1], 10),
 		Rows:   int64(len(ids)),
 	}, nil
+}
+
+type committeeColdCredential struct {
+	tag  int64
+	hash []byte
+}
+
+type committeeTermRow struct {
+	id            int64
+	termStartSlot int64
+	addedSlot     int64
+	deletedSlot   sql.NullInt64
+	enacted       bool
+}
+
+// updateCommitteeActionType is the governance_proposal.action_type of an
+// UpdateCommittee action, held here for the same reason as alonzoEraID.
+const updateCommitteeActionType = 4
+
+// committeeRenewalTermStartBackfill repairs committee_member rows that an
+// UpdateCommittee enactment renewed while it still stamped a fresh
+// term_start_slot on continuing members. That stamp hides the member's
+// still-valid hot-key authorization, and the row is normally beyond the
+// rollback window, so nothing else rewrites it.
+//
+// SetCommitteeMembers soft-deletes the live row at the new row's added_slot, so
+// a row whose added_slot equals its predecessor's deleted_slot replaced a seated
+// member in place, and inherits the predecessor's term start when an
+// UpdateCommittee was enacted at that slot. Among enactments the shape is
+// unambiguous: one action cannot both remove and re-add a credential (Conway
+// GOV ConflictingCommitteeUpdate), and NoConfidence and UpdateCommittee both
+// delay further enactment, so a removal and a re-election never share a slot.
+// A row added after a gap followed a removal and keeps its own term start.
+//
+// The enactment check excludes the Mithril import, which writes the same
+// replace-in-place shape when it runs over an existing database and
+// deliberately starts a fresh term at the snapshot anchor. Its synthetic
+// committee root carries an enacted_slot at that anchor but no action CBOR,
+// which every enacted proposal has.
+//
+// The cursor is the last credential processed, so each credential's whole
+// history is walked in one batch: a chain of renewals must carry the oldest
+// term start forward through rows already repaired.
+func committeeRenewalTermStartBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	credentials, err := committeeCredentialsAfter(ctx, batch)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	if len(credentials) == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	var repaired int64
+	for _, credential := range credentials {
+		count, err := repairCommitteeRenewalTermStart(
+			ctx, batch, credential,
+		)
+		if err != nil {
+			return BatchResult{}, err
+		}
+		repaired += count
+	}
+	last := credentials[len(credentials)-1]
+	return BatchResult{
+		Cursor: formatCommitteeCredentialCursor(last),
+		Rows:   repaired,
+		Done:   len(credentials) < batch.Limit,
+	}, nil
+}
+
+func committeeCredentialsAfter(
+	ctx context.Context,
+	batch Batch,
+) ([]committeeColdCredential, error) {
+	query := `SELECT DISTINCT cold_credential_tag, cold_cred_hash
+FROM committee_member`
+	args := []any{}
+	if batch.Cursor != "" {
+		tag, hash, err := parseCommitteeCredentialCursor(batch.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		query += `
+WHERE cold_credential_tag > ?
+   OR (cold_credential_tag = ? AND cold_cred_hash > ?)`
+		args = append(args, tag, tag, hash)
+	}
+	query += `
+ORDER BY cold_credential_tag, cold_cred_hash
+LIMIT ?`
+	args = append(args, batch.Limit)
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(query), args...)
+	if err != nil {
+		return nil, fmt.Errorf("read committee credentials: %w", err)
+	}
+	defer rows.Close()
+	var ret []committeeColdCredential
+	for rows.Next() {
+		var credential committeeColdCredential
+		if err := rows.Scan(&credential.tag, &credential.hash); err != nil {
+			return nil, err
+		}
+		ret = append(ret, credential)
+	}
+	return ret, rows.Err()
+}
+
+func repairCommitteeRenewalTermStart(
+	ctx context.Context,
+	batch Batch,
+	credential committeeColdCredential,
+) (int64, error) {
+	members, err := func() ([]committeeTermRow, error) {
+		rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT cm.id, cm.term_start_slot, cm.added_slot, cm.deleted_slot,
+    EXISTS (
+        SELECT 1 FROM governance_proposal gp
+        WHERE gp.enacted_slot = cm.added_slot
+          AND gp.action_type = ?
+          AND gp.gov_action_cbor IS NOT NULL
+    )
+FROM committee_member cm
+WHERE cm.cold_credential_tag = ? AND cm.cold_cred_hash = ?
+ORDER BY cm.added_slot, cm.id`),
+			updateCommitteeActionType, credential.tag, credential.hash,
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var ret []committeeTermRow
+		for rows.Next() {
+			var row committeeTermRow
+			if err := rows.Scan(
+				&row.id, &row.termStartSlot, &row.addedSlot, &row.deletedSlot,
+				&row.enacted,
+			); err != nil {
+				return nil, err
+			}
+			ret = append(ret, row)
+		}
+		return ret, rows.Err()
+	}()
+	if err != nil {
+		return 0, fmt.Errorf("read committee member history: %w", err)
+	}
+	var repaired int64
+	for i := 1; i < len(members); i++ {
+		prev := &members[i-1]
+		member := &members[i]
+		if !member.enacted ||
+			!prev.deletedSlot.Valid ||
+			prev.deletedSlot.Int64 != member.addedSlot ||
+			member.termStartSlot == prev.termStartSlot {
+			continue
+		}
+		member.termStartSlot = prev.termStartSlot
+		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
+UPDATE committee_member
+SET term_start_slot = ?, term_start_slot_set = TRUE
+WHERE id = ?`),
+			member.termStartSlot, member.id,
+		); err != nil {
+			return 0, fmt.Errorf("repair committee member term start: %w", err)
+		}
+		repaired++
+	}
+	return repaired, nil
+}
+
+func formatCommitteeCredentialCursor(
+	credential committeeColdCredential,
+) string {
+	return strconv.FormatInt(credential.tag, 10) + ":" +
+		hex.EncodeToString(credential.hash)
+}
+
+func parseCommitteeCredentialCursor(cursor string) (int64, []byte, error) {
+	rawTag, rawHash, ok := strings.Cut(cursor, ":")
+	if !ok {
+		return 0, nil, fmt.Errorf("committee credential cursor %q is malformed", cursor)
+	}
+	tag, err := strconv.ParseInt(rawTag, 10, 64)
+	if err != nil {
+		return 0, nil, fmt.Errorf("parse committee credential cursor tag: %w", err)
+	}
+	hash, err := hex.DecodeString(rawHash)
+	if err != nil {
+		return 0, nil, fmt.Errorf("parse committee credential cursor hash: %w", err)
+	}
+	return tag, hash, nil
 }
 
 const (
