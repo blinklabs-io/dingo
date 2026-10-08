@@ -213,8 +213,9 @@ type Ouroboros struct {
 	// any observed-tip, dedup, or ledger mutation. Resync timers recover the
 	// protocol cursor after a deliberate beyond-skew drop without recycling
 	// the connection; one earliest-onset timer is retained per connection.
-	chainsyncHeaderAdmission chainsyncHeaderAdmissionFunc
-	chainsyncHeaderSlotTime  func(uint64) (time.Time, error)
+	chainsyncHeaderAdmission    chainsyncHeaderAdmissionFunc
+	chainsyncHeaderBackpressure func(context.Context, int) error
+	chainsyncHeaderSlotTime     func(uint64) (time.Time, error)
 	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
 	// gate whether a peer-reported header may influence Genesis chain-selection
 	// density or corroboration before its VRF/KES cryptography (and, once local
@@ -671,6 +672,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	o.blockfetchRangeBytes = func(ocommon.Point, ocommon.Point) uint64 { return 0 }
 	if o.ledgerState != nil {
 		o.blockfetchRangeBytes = o.ledgerState.BlockfetchRangeExpectedBytes
+		o.chainsyncHeaderBackpressure = o.ledgerState.AwaitChainsyncHeaderCapacity
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto

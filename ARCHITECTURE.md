@@ -505,6 +505,8 @@ sequenceDiagram
 
     Note over Peer,DB: Stage 1 — Header Discovery (ChainSync)
     Peer->>OB: RollForward(header, tip)
+    OB->>LS: await bounded header capacity
+    LS->>ChM: wait for header queue drain
     OB->>EB: publish ChainsyncEvent(header)
     EB->>LS: handleEventChainsyncBlockHeader()
     LS->>LS: verify header crypto (VRF/KES/OpCert)
@@ -562,6 +564,18 @@ configured Byron genesis hash. A rollback to origin drops the queue, so the
 rule applies again. Headers verified before they reach the queue (chain
 selection ingress, `ValidateBlockHeaderCrypto`) are peer-relative and skip
 the rule, since the EBB's own queueing event is delivered asynchronously.
+
+The ChainSync client uses gouroboros's default 75-request pipeline and receive
+queue to cover network latency. Before future-header admission or header
+cryptography, an eligible peer waits when queued headers plus admitted ledger
+events reach the working bound (`min(4 * BlockfetchBatchSize,
+MaxQueuedHeaders)`). The lossless `ledger.chainsync` subscriber holds one
+protocol window; headroom also covers its active handler and one blocked
+publisher per configured ChainSync client. A client count that consumes the
+whole working bound is rejected instead of weakening the limit. BlockFetch
+draining one batch releases the event-driven wait; connection cancellation
+releases it immediately. This keeps several batches ready without admitting
+and verifying headers up to the chain's larger emergency capacity.
 
 While the local header tip is at least `blockfetchMinBatchGapSlots` behind the
 peer tip, BlockFetch starts only once `blockfetchMinBatchHeaders` headers are

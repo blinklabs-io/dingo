@@ -26,6 +26,12 @@ import (
 )
 
 const (
+	// ChainsyncEventBufferSize bounds headers admitted by protocol callbacks
+	// but not yet reflected in the chain header queue. Keep it aligned with
+	// the peer request window so one network pipeline can drain without a
+	// round trip while EventBus backpressure stops further admission.
+	ChainsyncEventBufferSize = ochainsync.DefaultPipelineLimit
+
 	BlockfetchEventType                 event.EventType = "ledger.blockfetch"
 	BlockEventType                      event.EventType = "ledger.block"
 	ChainsyncEventType                  event.EventType = "ledger.chainsync"

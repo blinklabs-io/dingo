@@ -1581,6 +1581,33 @@ func (ls *LedgerState) allowedQueuedHeaders() int {
 	)
 }
 
+// AwaitChainsyncHeaderCapacity pauses ChainSync before header admission when
+// queued headers plus admitted EventBus work would fill the working buffer.
+// It resumes after blockfetch drains one batch, retaining several ready
+// batches while preventing a fast peer from outrunning ledger application.
+func (ls *LedgerState) AwaitChainsyncHeaderCapacity(
+	ctx context.Context,
+	admittedHeadroom int,
+) error {
+	if ls == nil || ls.chain == nil {
+		return nil
+	}
+	capacity := ls.allowedQueuedHeaders()
+	if admittedHeadroom < 0 || admittedHeadroom >= capacity {
+		return fmt.Errorf(
+			"chainsync admitted headroom %d must be between 0 and %d",
+			admittedHeadroom,
+			capacity-1,
+		)
+	}
+	pauseAt := capacity - admittedHeadroom
+	if ls.chain.HeaderCount() < pauseAt {
+		return nil
+	}
+	resumeAt := max(pauseAt-BlockfetchBatchSize, 0)
+	return ls.chain.WaitForHeaderCountBelow(ctx, resumeAt+1)
+}
+
 // blockfetchMinBatchHeaders returns how many headers must be queued before a
 // blockfetch starts while the local header tip is at least
 // blockfetchMinBatchGapSlots behind peerTip. It returns 0 near the peer tip,
