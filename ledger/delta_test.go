@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -225,8 +226,8 @@ func TestLedgerDeltaPublishesApplyEventsOnlyAfterCommit(t *testing.T) {
 		defer delta.Release()
 		addTransactionEventTestTransaction(t, delta, 2, 1)
 
-		txn := db.Transaction(true)
-		require.NoError(t, delta.apply(ls, txn))
+		txn := db.Transaction(context.Background(), true)
+		require.NoError(t, delta.apply(context.Background(), ls, txn))
 		testutil.RequireNoReceive(
 			t,
 			events,
@@ -254,8 +255,8 @@ func TestLedgerDeltaPublishesApplyEventsOnlyAfterCommit(t *testing.T) {
 		delta := newTransactionEventTestDelta(t, 3, 0)
 		defer delta.Release()
 
-		txn := db.Transaction(true)
-		require.NoError(t, delta.apply(ls, txn))
+		txn := db.Transaction(context.Background(), true)
+		require.NoError(t, delta.apply(context.Background(), ls, txn))
 		require.NoError(t, txn.Rollback())
 		testutil.RequireNoReceive(
 			t,
@@ -274,9 +275,10 @@ func TestLedgerDeltaPublishesApplyEventsOnlyAfterCommit(t *testing.T) {
 		batch.addDelta(second)
 		defer batch.Release()
 
-		err := db.Transaction(true).Do(func(txn *database.Txn) error {
-			return batch.apply(ls, txn)
-		})
+		err := db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				return batch.apply(context.Background(), ls, txn)
+			})
 		require.ErrorContains(t, err, "transaction index out of range")
 		testutil.RequireNoReceive(
 			t,
@@ -290,6 +292,7 @@ func TestLedgerDeltaPublishesApplyEventsOnlyAfterCommit(t *testing.T) {
 		ls, baseDB, events := newTransactionEventTestLedger(t)
 		commitErr := errors.New("injected blob commit failure")
 		failingDB, err := database.New(
+			context.Background(),
 			baseDB.Config(),
 			database.Stores{
 				Blob: commitFailingBlobStore{
@@ -305,9 +308,10 @@ func TestLedgerDeltaPublishesApplyEventsOnlyAfterCommit(t *testing.T) {
 		delta := newTransactionEventTestDelta(t, 6, 0)
 		defer delta.Release()
 
-		err = failingDB.Transaction(true).Do(func(txn *database.Txn) error {
-			return delta.apply(ls, txn)
-		})
+		err = failingDB.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				return delta.apply(context.Background(), ls, txn)
+			})
 		require.ErrorIs(t, err, commitErr)
 		testutil.RequireNoReceive(
 			t,
@@ -397,12 +401,17 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 	)
 	defer delta.Release()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return delta.processGovernance(ls, tx, 0, txn, nil)
+		return delta.processGovernance(context.Background(), ls, tx, 0, txn, nil)
 	}))
 
-	got, err := db.GetGovernanceProposal(tx.Hash().Bytes(), 0, nil)
+	got, err := db.GetGovernanceProposal(
+		context.Background(),
+		tx.Hash().Bytes(),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(12), got.ProposedEpoch)
 	require.Equal(t, uint64(18), got.ExpiresEpoch)
@@ -491,9 +500,9 @@ func TestLedgerDeltaPersistsMultipleCertificateDepositsFromOneSnapshot(
 		publisherWG.Wait()
 	}()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return delta.apply(ls, txn)
+		return delta.apply(context.Background(), ls, txn)
 	}))
 
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
@@ -564,7 +573,7 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 	credentialBytes := bytes.Repeat([]byte{0xAB}, 28)
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], credentialBytes)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag:     0,
 		Credential:        credentialBytes,
 		AddedSlot:         10,
@@ -584,7 +593,7 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 	})
 	tx.WithValid(true)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	delta := NewLedgerDelta(
 		ocommon.NewPoint(100, bytes.Repeat([]byte{0x22}, 32)),
 		uint(dijkstra.EraIdDijkstra),
@@ -592,10 +601,23 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 	)
 	defer delta.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return delta.processGovernance(ls, tx, 0, txn, nil)
+		return delta.processGovernance(
+			context.Background(),
+			ls,
+			tx,
+			0,
+			txn,
+			nil,
+		)
 	}))
 
-	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	drep, err := db.GetDrepByCredential(
+		context.Background(),
+		0,
+		credentialBytes,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(12), drep.LastActivityEpoch)
 	require.Equal(t, uint64(19), drep.ExpiryEpoch)
@@ -667,7 +689,14 @@ func TestProcessGovernanceTypedNilPParams(t *testing.T) {
 
 			var err error
 			require.NotPanics(t, func() {
-				err = (&LedgerDelta{}).processGovernance(ls, tx, 0, nil, nil)
+				err = (&LedgerDelta{}).processGovernance(
+					context.Background(),
+					ls,
+					tx,
+					0,
+					nil,
+					nil,
+				)
 			})
 			require.Error(t, err)
 			require.Contains(
@@ -781,7 +810,7 @@ func TestLedgerDeltaRecordNetworkDonationsOverflowPreservesState(t *testing.T) {
 		},
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
 		return delta.recordNetworkDonations(ls, txn, nil)
 	})

@@ -109,7 +109,7 @@ func TestBackfillProcessBlockGovernanceRecordsDRepActivityFromCertificateOnly(
 	credentialBytes := bytes.Repeat([]byte{0xAB}, 28)
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], credentialBytes)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag:     0,
 		Credential:        credentialBytes,
 		AddedSlot:         10,
@@ -130,10 +130,11 @@ func TestBackfillProcessBlockGovernanceRecordsDRepActivityFromCertificateOnly(
 	pparams := mockledger.NewMockConwayProtocolParams()
 	pparams.DRepInactivityPeriod = 20
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return backfill.processBlockGovernanceLevel(
+			context.Background(),
 			tx,
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
 			0,
@@ -144,7 +145,13 @@ func TestBackfillProcessBlockGovernanceRecordsDRepActivityFromCertificateOnly(
 		)
 	}))
 
-	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	drep, err := db.GetDrepByCredential(
+		context.Background(),
+		0,
+		credentialBytes,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
 	// Backfill replays blocks below a Mithril anchor, whose DRepState expiry
@@ -169,7 +176,7 @@ func testBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
 	backfill := NewBackfill(db, nil, slog.Default())
 	backfill.SetDelegatorInactivityEnabled(false)
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 
 	stakeKeyBytes := bytes.Repeat([]byte{0x51}, lcommon.AddressHashSize)
@@ -189,7 +196,7 @@ func testBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
 		stakeKeyBytes,
 	)
 	require.NoError(t, err)
-	_, err = db.GetAccountByCredential(0, stakeKeyBytes, true, nil)
+	_, err = db.GetAccountByCredential(context.Background(), 0, stakeKeyBytes, true, nil)
 	require.ErrorIs(t, err, models.ErrAccountNotFound)
 
 	makeTransaction := func(
@@ -246,6 +253,7 @@ func testBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
 		slot uint64,
 	) error {
 		return backfill.processBlockTxsBatched(
+			context.Background(),
 			[]lcommon.Transaction{tx},
 			ocommon.Point{
 				Slot: slot,
@@ -278,10 +286,11 @@ func testBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
 	require.NoError(t, db.FlushBatch(acc, txn))
 	require.NoError(t, txn.Commit())
 
-	account, err := db.GetAccountByCredential(0, stakeKeyBytes, true, nil)
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeKeyBytes, true, nil)
 	require.NoError(t, err)
 	assert.True(t, account.Active)
 	count, err := db.CountAccountWithdrawalHistoryByCredential(
+		context.Background(),
 		0, stakeKeyBytes, nil,
 	)
 	require.NoError(t, err)
@@ -297,7 +306,7 @@ func TestBackfillProcessBlockGovernanceRecordsDRepActivityInDijkstra(t *testing.
 	credentialBytes := bytes.Repeat([]byte{0xBC}, 28)
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], credentialBytes)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag:     0,
 		Credential:        credentialBytes,
 		AddedSlot:         10,
@@ -321,10 +330,11 @@ func TestBackfillProcessBlockGovernanceRecordsDRepActivityInDijkstra(t *testing.
 		ConwayProtocolParameters: conwayPParams,
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return backfill.processBlockGovernanceLevel(
+			context.Background(),
 			tx,
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
 			0,
@@ -335,7 +345,13 @@ func TestBackfillProcessBlockGovernanceRecordsDRepActivityInDijkstra(t *testing.
 		)
 	}))
 
-	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	drep, err := db.GetDrepByCredential(
+		context.Background(),
+		0,
+		credentialBytes,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
 	// Backfill replays blocks below a Mithril anchor, whose DRepState expiry
@@ -441,10 +457,11 @@ func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
 		},
 	}
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		if err := backfill.processBlockTxsBatched(
+			context.Background(),
 			[]lcommon.Transaction{tx},
 			point,
 			12,
@@ -473,7 +490,12 @@ func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
 	rootUtxo, err := db.Metadata().GetUtxo(rootHash.Bytes(), 0, nil)
 	require.NoError(t, err)
 	require.Nil(t, rootUtxo)
-	proposalRow, err := db.GetGovernanceProposal(childHash.Bytes(), 0, nil)
+	proposalRow, err := db.GetGovernanceProposal(
+		context.Background(),
+		childHash.Bytes(),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, childHash.Bytes(), proposalRow.TxHash)
 }
@@ -488,7 +510,7 @@ func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
 	db := newTestDB(t)
 	backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	stakeKey := bytes.Repeat([]byte{0x42}, 28)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey:    stakeKey,
 		CredentialTag: 0,
 		AddedSlot:     1,
@@ -545,10 +567,10 @@ func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
 	)
 	require.NoError(t, err)
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := backfill.processBlockTxsBatched(
+		if err := backfill.processBlockTxsBatched(context.Background(),
 			[]lcommon.Transaction{tx},
 			point,
 			12,
@@ -564,7 +586,7 @@ func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
 		}
 		return db.FlushBatch(acc, txn)
 	}))
-	account, err := db.GetAccountByCredential(0, stakeKey, false, nil)
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(5), uint64(account.Reward))
 }
@@ -923,7 +945,7 @@ func testRun_RestoresSnapshotAccountDelegationAtAnchor(
 	))
 
 	stakeKey := bytes.Repeat([]byte{0x71}, lcommon.AddressHashSize)
-	importTxn := db.MetadataTxn(true)
+	importTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, importTxn.Do(func(txn *database.Txn) error {
 		return db.Metadata().ImportAccount(&models.Account{
 			StakingKey: stakeKey,
@@ -990,8 +1012,9 @@ func testRun_RestoresSnapshotAccountDelegationAtAnchor(
 	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	bf.DisableNonceComputation()
 	acc := db.NewBatchAccumulator()
-	replayTxn := db.Transaction(true)
+	replayTxn := db.Transaction(context.Background(), true)
 	require.NoError(t, bf.processBlockTxsBatched(
+		context.Background(),
 		[]lcommon.Transaction{tx},
 		ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x76}, 32)},
 		0,
@@ -1011,7 +1034,7 @@ func testRun_RestoresSnapshotAccountDelegationAtAnchor(
 	require.NoError(t, db.FlushBatch(acc, replayTxn))
 	require.NoError(t, replayTxn.Commit())
 	replayTxn.Release()
-	replayed, err := db.GetAccountByCredential(0, stakeKey, true, nil)
+	replayed, err := db.GetAccountByCredential(context.Background(), 0, stakeKey, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, retiredPool.Bytes(), replayed.Pool)
 	require.Equal(t, unregisteredDRep, replayed.Drep)
@@ -1028,7 +1051,7 @@ func testRun_RestoresSnapshotAccountDelegationAtAnchor(
 	))
 	require.NoError(t, bf.Run(context.Background()))
 
-	account, err := db.GetAccountByCredential(0, stakeKey, true, nil)
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeKey, true, nil)
 	require.NoError(t, err)
 	assert.True(t, account.Active)
 	assert.Empty(t, account.Pool, "retired-pool delegation survived backfill")
@@ -1071,7 +1094,7 @@ func testRun_KeepsSnapshotDRepExpiryAtAnchor(
 
 	drepA := bytes.Repeat([]byte{0x81}, lcommon.AddressHashSize)
 	drepB := bytes.Repeat([]byte{0x82}, lcommon.AddressHashSize)
-	importTxn := db.MetadataTxn(true)
+	importTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, importTxn.Do(func(txn *database.Txn) error {
 		for _, imported := range []struct {
 			credential []byte
@@ -1097,7 +1120,7 @@ func testRun_KeepsSnapshotDRepExpiryAtAnchor(
 		return nil
 	}))
 	proposalTxHash := bytes.Repeat([]byte{0x83}, 32)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        proposalTxHash,
 		ActionType:    uint8(lcommon.GovActionTypeInfo),
 		ProposedEpoch: 509,
@@ -1163,9 +1186,10 @@ func testRun_KeepsSnapshotDRepExpiryAtAnchor(
 			}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
 		}
 		acc := db.NewBatchAccumulator()
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		defer txn.Release()
 		require.NoError(t, bf.processBlockTxsBatched(
+			context.Background(),
 			[]lcommon.Transaction{tx},
 			ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{id + 2}, 32)},
 			epoch,
@@ -1224,7 +1248,7 @@ func testRun_KeepsSnapshotDRepExpiryAtAnchor(
 		expiry       uint64
 		lastActivity uint64
 	}{{drepA, 523, 500}, {drepB, 533, 510}} {
-		drep, err := db.GetDrep(want.credential, true, nil)
+		drep, err := db.GetDrep(context.Background(), want.credential, true, nil)
 		require.NoError(t, err)
 		require.NotNil(t, drep)
 		assert.True(t, drep.Active)
@@ -1269,7 +1293,7 @@ func testRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(
 	rewardAccountBytes, err := rewardAccount.Bytes()
 	require.NoError(t, err)
 	liveTxHash := bytes.Repeat([]byte{0xb0}, 32)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        liveTxHash,
 		ActionType:    uint8(lcommon.GovActionTypeInfo),
 		ProposedEpoch: 508,
@@ -1344,9 +1368,10 @@ func testRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(
 			}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
 		}
 		acc := db.NewBatchAccumulator()
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		defer txn.Release()
 		require.NoError(t, bf.processBlockTxsBatched(
+			context.Background(),
 			[]lcommon.Transaction{tx},
 			ocommon.Point{Slot: 1, Hash: append([]byte{0x02}, txHash[1:]...)},
 			epoch,
@@ -1386,20 +1411,21 @@ func testRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(
 		}
 		return ret
 	}
-	active, err := db.GetActiveGovernanceProposals(anchorEpoch, nil)
+	active, err := db.GetActiveGovernanceProposals(context.Background(), anchorEpoch, nil)
 	require.NoError(t, err)
 	assert.Equal(t, [][]byte{liveTxHash}, txHashes(active))
-	expiring, err := db.GetExpiringGovernanceProposals(anchorEpoch+1, nil)
+	expiring, err := db.GetExpiringGovernanceProposals(context.Background(), anchorEpoch+1, nil)
 	require.NoError(t, err)
 	assert.Empty(t, txHashes(expiring), "replayed proposal would expire again")
 	awaitingDrop, err := db.GetExpiredAwaitingDropGovernanceProposals(
+		context.Background(),
 		anchorEpoch+2,
 		nil,
 	)
 	require.NoError(t, err)
 	assert.Empty(t, txHashes(awaitingDrop), "replayed proposal would be refunded again")
 	for _, txHash := range [][]byte{expiredTxHash, settledTxHash} {
-		stored, err := db.GetGovernanceProposal(txHash, 0, nil)
+		stored, err := db.GetGovernanceProposal(context.Background(), txHash, 0, nil)
 		require.NoError(t, err)
 		assert.NotNil(t, stored, "replayed proposal history was dropped")
 	}
@@ -1630,6 +1656,55 @@ func TestRun_MalformedBlockDoesNotAdvanceCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, checkpoint)
 	assert.Equal(t, uint64(3), checkpoint.LastSlot)
+	assert.False(t, checkpoint.Completed)
+}
+
+// TestRun_MidBatchFailureKeepsLastFlushedCheckpoint fails on the third block
+// of a batch of three, after two blocks are buffered but unflushed. The
+// checkpoint must stay at the last flushed batch; the failing blocks in the
+// boundary-aligned tests above cannot tell that apart from persisting
+// cp.LastSlot, which has already advanced past the flush.
+func TestRun_MidBatchFailureKeepsLastFlushedCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   0,
+			TotalSlots: 1,
+			StartedAt:  now,
+			UpdatedAt:  now,
+		},
+		nil,
+	))
+
+	// Slots 0-2 flush as the first batch; slots 3 and 4 stay buffered when
+	// the malformed block at slot 5 fails.
+	addValidBackfillBlocks(t, db, 5)
+	hash := make([]byte, 32)
+	hash[0] = 6
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 5,
+		Hash: hash,
+		Cbor: []byte{0xff},
+		Type: 1,
+	}, nil))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, bf.SetBatchSize(3))
+	err := bf.Run(context.Background())
+	require.ErrorContains(t, err, "parsing block at slot 5")
+
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	assert.Equal(t, uint64(2), checkpoint.LastSlot)
 	assert.False(t, checkpoint.Completed)
 }
 

@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"math/big"
@@ -124,6 +125,7 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 			tx.WithProposalProcedures(procedure)
 
 			err = ProcessProposals(
+				context.Background(),
 				tx,
 				ocommon.Point{Slot: 100},
 				0,
@@ -134,7 +136,12 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 				nil,
 				nil,
 			)
-			stored, getErr := db.GetGovernanceProposal(txHash, 0, nil)
+			stored, getErr := db.GetGovernanceProposal(
+				context.Background(),
+				txHash,
+				0,
+				nil,
+			)
 			if test.wantError {
 				require.Error(t, err)
 				require.ErrorIs(t, getErr, models.ErrGovernanceProposalNotFound)
@@ -211,7 +218,7 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 	credentialBytes := testHash28("shared-drep-hash")
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], credentialBytes)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag:     0,
 		Credential:        credentialBytes,
 		AddedSlot:         10,
@@ -219,7 +226,7 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 		ExpiryEpoch:       25,
 		Active:            true,
 	}))
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag:     1,
 		Credential:        credentialBytes,
 		AddedSlot:         20,
@@ -246,23 +253,43 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 	)
 	require.True(t, HasDRepActivityCertificates(tx))
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ProcessDRepActivityCertificates(tx, 100, 20, db, txn)
+		return ProcessDRepActivityCertificates(
+			context.Background(),
+			tx,
+			ocommon.NewPoint(5000, nil),
+			100,
+			20,
+			db,
+			txn,
+		)
 	}))
 
-	keyDRep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	keyDRep, err := db.GetDrepByCredential(
+		context.Background(),
+		0,
+		credentialBytes,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), keyDRep.LastActivityEpoch)
 	assert.Equal(t, uint64(120), keyDRep.ExpiryEpoch)
 
-	scriptDRep, err := db.GetDrepByCredential(1, credentialBytes, true, nil)
+	scriptDRep, err := db.GetDrepByCredential(
+		context.Background(),
+		1,
+		credentialBytes,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), scriptDRep.LastActivityEpoch)
 	assert.Equal(t, uint64(120), scriptDRep.ExpiryEpoch)
 
-	expired, err := db.GetExpiredDReps(100, nil)
+	expired, err := db.GetExpiredDReps(context.Background(), 100, nil)
 	require.NoError(t, err)
 	assert.Empty(t, expired)
 }
@@ -465,20 +492,29 @@ func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
 	returnAddress := append([]byte{0xE1}, testHash28("reward-account")...)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(&models.GovernanceProposal{
-			TxHash:        proposalTxHash,
-			ActionIndex:   0,
-			ActionType:    uint8(lcommon.GovActionTypeInfo),
-			ProposedEpoch: 100,
-			ExpiresEpoch:  120,
-			AnchorURL:     "https://example.com/proposal",
-			AnchorHash:    testHash32("proposal-anchor"),
-			Deposit:       1,
-			ReturnAddress: returnAddress,
-			AddedSlot:     1000,
-		}, nil),
+		db.SetGovernanceProposal(
+			context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        proposalTxHash,
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeInfo),
+				ProposedEpoch: 100,
+				ExpiresEpoch:  120,
+				AnchorURL:     "https://example.com/proposal",
+				AnchorHash:    testHash32("proposal-anchor"),
+				Deposit:       1,
+				ReturnAddress: returnAddress,
+				AddedSlot:     1000,
+			},
+			nil,
+		),
 	)
-	proposal, err := db.GetGovernanceProposal(proposalTxHash, 0, nil)
+	proposal, err := db.GetGovernanceProposal(
+		context.Background(),
+		proposalTxHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 
 	drepCred := testHash28("drep-voter")
@@ -506,16 +542,24 @@ func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
 		Hash: testHash32("vote-block"),
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(
 		t,
 		txn.Do(func(txn *database.Txn) error {
-			return ProcessVotes(tx, point, 100, 20, db, txn)
+			return ProcessVotes(
+				context.Background(),
+				tx,
+				point,
+				100,
+				20,
+				db,
+				txn,
+			)
 		}),
 	)
 
-	drep, err := db.GetDrep(drepCred, true, nil)
+	drep, err := db.GetDrep(context.Background(), drepCred, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, drep)
 	assert.True(t, drep.Active)
@@ -523,7 +567,7 @@ func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
 	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
 
-	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	assert.Equal(t, uint8(models.VoterTypeDRep), votes[0].VoterType)
@@ -670,13 +714,18 @@ func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 		Hash: testHash32("vote-block"),
 	}
 
-	_, err = db.GetGovernanceProposal(proposalTxHash.Bytes(), 0, nil)
+	_, err = db.GetGovernanceProposal(
+		context.Background(),
+		proposalTxHash.Bytes(),
+		0,
+		nil,
+	)
 	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
 
 	// Mirror the production gap-block + vote processing path, where the
 	// blob write and ProcessVotes happen inside the same write txn so
 	// ResolveTxCbor must see the uncommitted blob to repair the proposal.
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(
 		t,
@@ -694,6 +743,7 @@ func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 				return err
 			}
 			if err := db.SetGapBlockTransaction(
+				context.Background(),
 				proposalTx,
 				proposalPoint,
 				0,
@@ -703,11 +753,24 @@ func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 			); err != nil {
 				return err
 			}
-			return ProcessVotes(voteTx, votePoint, voteEpoch, 20, db, txn)
+			return ProcessVotes(
+				context.Background(),
+				voteTx,
+				votePoint,
+				voteEpoch,
+				20,
+				db,
+				txn,
+			)
 		}),
 	)
 
-	proposal, err := db.GetGovernanceProposal(proposalTxHash.Bytes(), 0, nil)
+	proposal, err := db.GetGovernanceProposal(
+		context.Background(),
+		proposalTxHash.Bytes(),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, proposal)
 	assert.Equal(t, proposalTxHash.Bytes(), proposal.TxHash)
@@ -724,7 +787,7 @@ func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 	assert.Equal(t, proposalSlot, proposal.AddedSlot)
 	assert.NotEmpty(t, proposal.GovActionCbor)
 
-	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	assert.Equal(t, uint8(models.VoterTypeCC), votes[0].VoterType)
@@ -861,9 +924,14 @@ func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
 		Hash: testHash32("dijkstra-vote-block"),
 	}
 
-	_, err = db.GetGovernanceProposal(proposalTxHash.Bytes(), 0, nil)
+	_, err = db.GetGovernanceProposal(
+		context.Background(),
+		proposalTxHash.Bytes(),
+		0,
+		nil,
+	)
 	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		if err := db.Blob().SetBlock(
@@ -879,6 +947,7 @@ func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
 			return err
 		}
 		if err := db.SetGapBlockTransaction(
+			context.Background(),
 			proposalTx,
 			proposalPoint,
 			0,
@@ -888,10 +957,23 @@ func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
 		); err != nil {
 			return err
 		}
-		return ProcessVotes(voteTx, votePoint, voteEpoch, 20, db, txn)
+		return ProcessVotes(
+			context.Background(),
+			voteTx,
+			votePoint,
+			voteEpoch,
+			20,
+			db,
+			txn,
+		)
 	}))
 
-	proposal, err := db.GetGovernanceProposal(proposalTxHash.Bytes(), 0, nil)
+	proposal, err := db.GetGovernanceProposal(
+		context.Background(),
+		proposalTxHash.Bytes(),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, proposal)
 	assert.Equal(t, proposalTxHash.Bytes(), proposal.TxHash)
@@ -908,7 +990,7 @@ func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
 	assert.Equal(t, proposalSlot, proposal.AddedSlot)
 	assert.NotEmpty(t, proposal.GovActionCbor)
 
-	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	assert.Equal(t, uint8(models.VoterTypeCC), votes[0].VoterType)
@@ -1040,7 +1122,7 @@ func TestProcessHistoricalVotesSettlesRebuiltProposal(t *testing.T) {
 				Hash: testHash32("settle-vote-block"),
 			}
 
-			txn := db.Transaction(true)
+			txn := db.Transaction(context.Background(), true)
 			defer txn.Release()
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
 				if err := db.Blob().SetBlock(
@@ -1050,35 +1132,38 @@ func TestProcessHistoricalVotesSettlesRebuiltProposal(t *testing.T) {
 					return err
 				}
 				if err := db.SetGapBlockTransaction(
+					context.Background(),
 					proposalTx, proposalPoint, 0, nil, offsets, txn,
 				); err != nil {
 					return err
 				}
 				if tc.historical {
 					return ProcessHistoricalVotes(
+						context.Background(),
 						voteTx, votePoint, voteEpoch, db, txn,
 					)
 				}
-				return ProcessVotes(voteTx, votePoint, voteEpoch, 20, db, txn)
+				return ProcessVotes(context.Background(), voteTx, votePoint, voteEpoch, 20, db, txn)
 			}))
 
-			active, err := db.GetActiveGovernanceProposals(voteEpoch, nil)
+			active, err := db.GetActiveGovernanceProposals(context.Background(), voteEpoch, nil)
 			require.NoError(t, err)
 			if !tc.historical {
 				require.Len(t, active, 1)
 				return
 			}
 			assert.Empty(t, active)
-			expiring, err := db.GetExpiringGovernanceProposals(200, nil)
+			expiring, err := db.GetExpiringGovernanceProposals(context.Background(), 200, nil)
 			require.NoError(t, err)
 			assert.Empty(t, expiring)
 			awaitingDrop, err := db.GetExpiredAwaitingDropGovernanceProposals(
+				context.Background(),
 				200,
 				nil,
 			)
 			require.NoError(t, err)
 			assert.Empty(t, awaitingDrop)
-			rebuilt, err := db.GetGovernanceProposal(proposalHash[:], 0, nil)
+			rebuilt, err := db.GetGovernanceProposal(context.Background(), proposalHash[:], 0, nil)
 			require.NoError(t, err)
 			require.NotNil(t, rebuilt.DroppedEpoch)
 			assert.Equal(t, proposalEpoch, *rebuilt.DroppedEpoch)

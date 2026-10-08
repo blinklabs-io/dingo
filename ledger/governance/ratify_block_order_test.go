@@ -227,11 +227,19 @@ func TestProcessProposalsRecordsTransactionPosition(t *testing.T) {
 	tx.WithProposalProcedures(procedure(), procedure())
 
 	require.NoError(t, ProcessProposals(
-		tx, ocommon.Point{Slot: 400}, 7, stabilityTestEpoch, 6,
-		testConwayProtocolParameters(), db, nil, nil,
+		t.Context(),
+		tx,
+		ocommon.Point{Slot: 400},
+		7,
+		stabilityTestEpoch,
+		6,
+		testConwayProtocolParameters(),
+		db,
+		nil,
+		nil,
 	))
 	for actionIndex := range uint32(2) {
-		stored, err := db.GetGovernanceProposal(txHash, actionIndex, nil)
+		stored, err := db.GetGovernanceProposal(t.Context(), txHash, actionIndex, nil)
 		require.NoError(t, err)
 		require.NotNil(t, stored.TxIndex)
 		assert.Equal(t, uint32(7), *stored.TxIndex)

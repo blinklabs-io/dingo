@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -135,7 +136,7 @@ func TestValidateTxCommitteeAuthorizationByMemberOfAnyPendingProposal(
 			require.NoError(t, err)
 			require.NoError(
 				t,
-				db.SetGovernanceProposal(&models.GovernanceProposal{
+				db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 					TxHash:        governanceTestHash(0x74),
 					ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
 					ExpiresEpoch:  100,

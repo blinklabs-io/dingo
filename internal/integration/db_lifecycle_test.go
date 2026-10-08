@@ -63,7 +63,7 @@ func setupLifecycleTestChain(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: tmpDir})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(&mockLedgerState{securityParam: 50}))
 	c := cm.PrimaryChain()
@@ -147,7 +147,7 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 	// Every real block that was in the source database must round-trip
 	// byte-identically-addressable (same hash resolves) in the restored one.
 	for _, p := range points {
-		_, err := database.BlockByHash(restoredDB, p.Hash)
+		_, err := database.BlockByHash(context.Background(), restoredDB, p.Hash)
 		require.NoErrorf(
 			t,
 			err,
@@ -176,7 +176,7 @@ func TestDatabaseLifecycleTruncateRealChain(t *testing.T) {
 	defer db.Close()
 
 	targetIndex := numBlocks / 2
-	target, err := lifecycle.ResolveTargetBySlot(db, points[targetIndex].Slot)
+	target, err := lifecycle.ResolveTargetBySlot(context.Background(), db, points[targetIndex].Slot)
 	require.NoError(t, err)
 	require.Equal(t, points[targetIndex].Slot, target.Slot)
 
@@ -195,7 +195,7 @@ func TestDatabaseLifecycleTruncateRealChain(t *testing.T) {
 	require.Equal(t, uint64(numBlocks-1-targetIndex), blocksRemoved)
 
 	for i, p := range points {
-		_, err := database.BlockByHash(db, p.Hash)
+		_, err := database.BlockByHash(context.Background(), db, p.Hash)
 		if i <= targetIndex {
 			require.NoErrorf(
 				t,
@@ -232,7 +232,7 @@ func TestDatabaseLifecycleTruncateRejectsBeyondMithrilBoundary(t *testing.T) {
 		nil,
 	))
 
-	beforeBoundary, err := lifecycle.ResolveTargetBySlot(
+	beforeBoundary, err := lifecycle.ResolveTargetBySlot(context.Background(),
 		db, points[boundaryIndex/2].Slot,
 	)
 	require.NoError(t, err)

@@ -54,8 +54,8 @@ func TestProcessGovernanceJudgesPreviousEraBlockByItsEraParameters(
 		fx.block.BlockNumber(),
 	)
 	t.Cleanup(delta.Release)
-	require.NoError(t, fx.db.Transaction(true).Do(func(txn *database.Txn) error {
-		return delta.processGovernance(fx.ls, fx.tx, 0, txn, nil)
+	require.NoError(t, fx.db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+		return delta.processGovernance(t.Context(), fx.ls, fx.tx, 0, txn, nil)
 	}))
 	require.True(t, fx.proposalStored(t))
 }

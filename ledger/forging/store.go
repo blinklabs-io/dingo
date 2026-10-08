@@ -27,6 +27,12 @@ import (
 const (
 	syncStateForgeFencePrefix = "forge_fence"
 
+	// ForgeFenceSyncKeyPrefix begins the sync_state key of every pool's
+	// fence. Sync-state cleanup must leave these rows untouched, including
+	// concurrent writes: the fence is not chain state, and losing it
+	// re-opens slots whose blocks may already have been signed.
+	ForgeFenceSyncKeyPrefix = syncStateForgeFencePrefix + ":"
+
 	// forgeFenceFormatVersion guards the on-disk record shape. A record
 	// written by a build with an incompatible layout must fail loudly
 	// rather than decode into a weaker fence.
@@ -165,9 +171,5 @@ func (s *syncStateForgeFenceStore) StoreLastForgedSlot(slot uint64) error {
 }
 
 func syncStateForgeFenceKey(poolID lcommon.PoolKeyHash) string {
-	return fmt.Sprintf(
-		"%s:%s",
-		syncStateForgeFencePrefix,
-		hex.EncodeToString(poolID[:]),
-	)
+	return ForgeFenceSyncKeyPrefix + hex.EncodeToString(poolID[:])
 }

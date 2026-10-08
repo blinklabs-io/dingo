@@ -16,6 +16,7 @@ package node
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"testing"
 
@@ -108,10 +109,11 @@ func TestBackfillRejectsMalformedParameterChange(t *testing.T) {
 				}
 			}
 
-			txn := db.Transaction(true)
+			txn := db.Transaction(context.Background(), true)
 			defer txn.Release()
 			err = txn.Do(func(txn *database.Txn) error {
 				return backfill.processBlockGovernanceLevel(
+					context.Background(),
 					tx,
 					ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
 					0,
@@ -121,7 +123,9 @@ func TestBackfillRejectsMalformedParameterChange(t *testing.T) {
 					nil,
 				)
 			})
-			stored, getErr := db.GetGovernanceProposal(tx.Id().Bytes(), 0, nil)
+			stored, getErr := db.GetGovernanceProposal(
+				context.Background(), tx.Id().Bytes(), 0, nil,
+			)
 			if test.wantErr != "" {
 				require.ErrorContains(t, err, test.wantErr)
 				require.ErrorIs(t, getErr, models.ErrGovernanceProposalNotFound)
@@ -235,8 +239,9 @@ func TestBackfillRejectsOutOfDomainParameterChange(t *testing.T) {
 				}
 			}
 			if err == nil {
-				err = db.Transaction(true).Do(func(txn *database.Txn) error {
+				err = db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 					return backfill.processBlockGovernanceLevel(
+						context.Background(),
 						tx,
 						ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCF}, 32)),
 						0,
@@ -253,6 +258,7 @@ func TestBackfillRejectsOutOfDomainParameterChange(t *testing.T) {
 				// persistence path at all.
 				if tx != nil {
 					_, getErr := db.GetGovernanceProposal(
+						context.Background(),
 						tx.Id().Bytes(),
 						0,
 						nil,
@@ -266,7 +272,9 @@ func TestBackfillRejectsOutOfDomainParameterChange(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			stored, getErr := db.GetGovernanceProposal(tx.Id().Bytes(), 0, nil)
+			stored, getErr := db.GetGovernanceProposal(
+				context.Background(), tx.Id().Bytes(), 0, nil,
+			)
 			require.NoError(t, getErr)
 			require.NotNil(t, stored)
 		})

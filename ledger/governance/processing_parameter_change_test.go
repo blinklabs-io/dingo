@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -159,6 +160,7 @@ func TestProcessProposalsEnforcesParameterChangeWellFormedness(
 				testutil.ParameterChangeTxCbor(t, test.ppu, test.name),
 			)
 			err = ProcessProposals(
+				context.Background(),
 				tx,
 				ocommon.Point{Slot: 100},
 				0,
@@ -170,6 +172,7 @@ func TestProcessProposalsEnforcesParameterChangeWellFormedness(
 				nil,
 			)
 			stored, getErr := db.GetGovernanceProposal(
+				context.Background(),
 				tx.Id().Bytes(), 0, nil,
 			)
 			if test.wantErr != "" {
@@ -250,6 +253,7 @@ func TestProcessProposalsRejectsProgrammaticParameterUpdateWidths(
 				tc.set(&action.ParamUpdate, value)
 
 				err = ProcessProposals(
+					context.Background(),
 					tx,
 					ocommon.Point{Slot: 100},
 					0,
@@ -261,6 +265,7 @@ func TestProcessProposalsRejectsProgrammaticParameterUpdateWidths(
 					nil,
 				)
 				stored, getErr := db.GetGovernanceProposal(
+					context.Background(),
 					tx.Id().Bytes(), 0, nil,
 				)
 				if over {

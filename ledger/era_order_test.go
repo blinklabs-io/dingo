@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -54,7 +55,7 @@ func newEraOrderTestLedger(t *testing.T, tip gledger.Block) *LedgerState {
 		t,
 		lcommon.Blake2b256Hash([]byte("mainnet byron genesis")).String(),
 	)
-	require.NoError(t, primaryChain.AddBlock(tip, nil))
+	require.NoError(t, primaryChain.AddBlock(context.Background(), tip, nil))
 	return ls
 }
 

@@ -687,9 +687,9 @@ func stubSRV(
 	ips map[string][]net.IP,
 ) {
 	t.Helper()
-	oldSRV, oldIP, oldIPAddr := lookupSRV, lookupIP, lookupIPAddr
+	oldSRV, oldIPAddr := lookupSRV, lookupIPAddr
 	t.Cleanup(func() {
-		lookupSRV, lookupIP, lookupIPAddr = oldSRV, oldIP, oldIPAddr
+		lookupSRV, lookupIPAddr = oldSRV, oldIPAddr
 	})
 	lookupSRV = func(_ context.Context, host string) ([]*net.SRV, error) {
 		if r, ok := records[host]; ok {
@@ -703,13 +703,10 @@ func stubSRV(
 		}
 		return nil, errors.New("no such host")
 	}
-	lookupIP = func(host string) ([]net.IP, error) {
-		return lookupIPAddr(context.Background(), host)
-	}
 }
 
-// Not t.Parallel: swaps the package-level lookupSRV, lookupIP and
-// lookupIPAddr resolver seams.
+// Not t.Parallel: swaps the package-level lookupSRV and lookupIPAddr resolver
+// seams.
 func TestResolveAddress_SRVResolvesTargetAndPort(t *testing.T) {
 	stubSRV(t,
 		map[string][]*net.SRV{

@@ -86,8 +86,8 @@ func newParameterChangeFixture(
 	require.NoError(t, err)
 
 	inputTxID := bytes.Repeat([]byte{0x94}, lcommon.Blake2b256Size)
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		if err := db.CreateUtxo(txn, &models.Utxo{
+	require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+		if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
 			TxId:       inputTxID,
 			OutputIdx:  0,
 			PaymentKey: paymentHash.Bytes(),
@@ -110,7 +110,7 @@ func newParameterChangeFixture(
 		[]byte{0xe0},
 		bytes.Repeat([]byte{0x95}, lcommon.Blake2b224Size)...,
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(t.Context(), nil, &models.Account{
 		StakingKey:    rewardAccount[1:],
 		CredentialTag: 0,
 		Active:        true,
@@ -166,7 +166,7 @@ func newParameterChangeFixture(
 	originHash := bytes.Repeat([]byte{0xf3}, lcommon.Blake2b256Size)
 	originTip := ochainsync.Tip{Point: ocommon.Point{Slot: 1, Hash: originHash}}
 	require.NoError(t, db.SetTip(originTip, nil))
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
 	config := newTestShelleyGenesisCfg(t)
 	config.ShelleyGenesis().NetworkId = "Testnet"
@@ -239,7 +239,9 @@ func newParameterChangeFixture(
 
 func (fx *parameterChangeFixture) proposalStored(t *testing.T) bool {
 	t.Helper()
-	_, err := fx.db.GetGovernanceProposal(fx.tx.Id().Bytes(), 0, nil)
+	_, err := fx.db.GetGovernanceProposal(
+		t.Context(), fx.tx.Id().Bytes(), 0, nil,
+	)
 	if err == nil {
 		return true
 	}
@@ -277,8 +279,9 @@ func (fx *parameterChangeFixture) applyLiveBlock(t *testing.T) error {
 		Slot: fx.block.SlotNumber(),
 		Hash: fx.block.Hash().Bytes(),
 	}
-	return fx.db.Transaction(true).Do(func(txn *database.Txn) error {
+	return fx.db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
 		_, err := fx.ls.ledgerProcessBlock(
+			t.Context(),
 			txn,
 			point,
 			fx.block,

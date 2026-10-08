@@ -122,15 +122,16 @@ type operation struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	mu              sync.Mutex
-	status          databasev1alpha1.OperationStatus
-	message         string
-	updatedAt       time.Time
-	completedAt     time.Time
-	hasCompleted    bool
-	cancelRequested bool
-	snapshotID      string // CreateSnapshot only
-	blocksRemoved   uint64 // Truncate only
+	mu                 sync.Mutex
+	status             databasev1alpha1.OperationStatus
+	message            string
+	updatedAt          time.Time
+	completedAt        time.Time
+	hasCompleted       bool
+	completionReserved bool
+	cancelRequested    bool
+	snapshotID         string // CreateSnapshot only
+	blocksRemoved      uint64 // Truncate only
 }
 
 func (o *operation) setRunning() {
@@ -175,11 +176,19 @@ func (o *operation) complete(err error, blocksRemoved uint64) {
 func (o *operation) requestCancel() databasev1alpha1.OperationStatus {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if !o.hasCompleted {
+	if !o.hasCompleted && !o.completionReserved {
 		o.cancelRequested = true
 		o.cancel()
 	}
 	return o.status
+}
+
+// reserveCompletion freezes cancellation before the service releases its busy
+// flag, while leaving terminal status unpublished until the next operation can start.
+func (o *operation) reserveCompletion() {
+	o.mu.Lock()
+	o.completionReserved = true
+	o.mu.Unlock()
 }
 
 func (o *operation) progress() *databasev1alpha1.OperationProgress {
@@ -348,6 +357,20 @@ func (h *databaseServiceHandler) finishOperation() {
 	h.mu.Unlock()
 }
 
+// completeOperation releases the busy flag and then publishes op's terminal
+// status. The order matters: a client that observes a terminal status must be
+// able to start the next operation, so the flag cannot still be held when the
+// status becomes visible.
+func (h *databaseServiceHandler) completeOperation(
+	op *operation,
+	err error,
+	blocksRemoved uint64,
+) {
+	op.reserveCompletion()
+	h.finishOperation()
+	op.complete(err, blocksRemoved)
+}
+
 func (h *databaseServiceHandler) lookupOperation(
 	id string,
 ) (*operation, error) {
@@ -423,9 +446,8 @@ func (h *databaseServiceHandler) CreateSnapshot(
 	description := req.Msg.GetDescription()
 
 	go func() {
-		defer h.finishOperation()
 		op.setRunning()
-		op.complete(runProtected(func() error {
+		h.completeOperation(op, runProtected(func() error {
 			_, snapErr := h.bark.config.Lifecycle.Snapshot(
 				ctx, destDir, name, description,
 			)
@@ -790,7 +812,11 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 	if errors.Is(localErr, lifecycle.ErrManifestTooLarge) {
 		return "", connect.NewError(
 			connect.CodeResourceExhausted,
-			fmt.Errorf("snapshot %q manifest exceeds size limit: %w", snapshotID, localErr),
+			fmt.Errorf(
+				"snapshot %q manifest exceeds size limit: %w",
+				snapshotID,
+				localErr,
+			),
 		)
 	}
 	// A corrupted/hand-edited manifest means the snapshot IS there, just
@@ -994,9 +1020,8 @@ func (h *databaseServiceHandler) VerifySnapshot(
 	)
 
 	go func() {
-		defer h.finishOperation()
 		op.setRunning()
-		op.complete(runProtected(func() error {
+		h.completeOperation(op, runProtected(func() error {
 			return verifySnapshotIntegrity(
 				opCtx,
 				h.bark.config.DestinationRegistry,
@@ -1042,9 +1067,8 @@ func (h *databaseServiceHandler) Restore(
 	)
 
 	go func() {
-		defer h.finishOperation()
 		op.setRunning()
-		op.complete(runProtected(func() error {
+		h.completeOperation(op, runProtected(func() error {
 			_, restoreErr := h.bark.config.Lifecycle.Restore(opCtx, source)
 			return restoreErr
 		}), 0)
@@ -1136,7 +1160,6 @@ func (h *databaseServiceHandler) Truncate(
 	}
 
 	go func() {
-		defer h.finishOperation()
 		op.setRunning()
 		var blocksRemoved uint64
 		err := runProtected(func() error {
@@ -1147,7 +1170,7 @@ func (h *databaseServiceHandler) Truncate(
 			)
 			return truncErr
 		})
-		op.complete(err, blocksRemoved)
+		h.completeOperation(op, err, blocksRemoved)
 	}()
 
 	return connect.NewResponse(&databasev1alpha1.TruncateResponse{

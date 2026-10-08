@@ -64,7 +64,7 @@ func TestReconcileStaleLedgerState(t *testing.T) {
 	keepDrep, staleDrep := b28(0xee), b28(0xff)
 
 	// Seed two live UTxOs, two active accounts, two pools, two DReps.
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, store.CreateUtxo(txn.Metadata(), &models.Utxo{
 		TxId: keepTxId, OutputIdx: 0, AddedSlot: 100, DeletedSlot: 0,
 	}))
@@ -117,7 +117,7 @@ func TestReconcileStaleLedgerState(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
 
-	read := db.MetadataTxn(false)
+	read := db.MetadataTxn(context.Background(), false)
 	defer read.Release()
 	rstore := db.Metadata()
 
@@ -209,7 +209,7 @@ func TestReconcileSkipsEntitiesWithIncompleteRecording(t *testing.T) {
 	livePool := b28(0xcc)
 	liveDrep := b28(0xee)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, store.CreateUtxo(txn.Metadata(), &models.Utxo{
 		TxId: liveTxId, OutputIdx: 0, AddedSlot: 100, DeletedSlot: 0,
 	}))
@@ -249,7 +249,7 @@ func TestReconcileSkipsEntitiesWithIncompleteRecording(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
 
-	read := db.MetadataTxn(false)
+	read := db.MetadataTxn(context.Background(), false)
 	defer read.Release()
 
 	u, err := store.GetUtxo(liveTxId, 0, read.Metadata())
@@ -307,7 +307,7 @@ func TestReconcileCompletedEmptyKeySetsAreAuthoritative(t *testing.T) {
 	livePool := b28(0xcc)
 	liveDrep := b28(0xee)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, store.CreateUtxo(txn.Metadata(), &models.Utxo{
 		TxId: liveTxId, OutputIdx: 0, AddedSlot: 100, DeletedSlot: 0,
 	}))
@@ -341,7 +341,7 @@ func TestReconcileCompletedEmptyKeySetsAreAuthoritative(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
 
-	read := db.MetadataTxn(false)
+	read := db.MetadataTxn(context.Background(), false)
 	defer read.Release()
 
 	u, err := store.GetUtxo(liveTxId, 0, read.Metadata())
@@ -404,7 +404,7 @@ func TestReconcileStaleLedgerStateCanceledBeforeMarkersDoesNotMutate(
 	store := db.Metadata()
 	staleStake := b28(0xbb)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, store.CreateAccount(txn.Metadata(), &models.Account{
 		StakingKey: staleStake, CredentialTag: 0, AddedSlot: 100, Active: true,
 	}))
@@ -418,7 +418,7 @@ func TestReconcileStaleLedgerStateCanceledBeforeMarkersDoesNotMutate(
 	)
 	require.ErrorIs(t, err, context.Canceled)
 
-	read := db.MetadataTxn(false)
+	read := db.MetadataTxn(context.Background(), false)
 	defer read.Release()
 	acct, err := store.GetAccountByCredential(
 		0, staleStake, true, read.Metadata(),

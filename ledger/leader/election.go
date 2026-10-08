@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -132,7 +133,7 @@ type EpochInfoProvider interface {
 	CurrentEpoch() uint64
 
 	// EpochNonce returns the nonce for the given epoch.
-	EpochNonce(epoch uint64) []byte
+	EpochNonce(context.Context, uint64) []byte
 
 	// NextEpochNonceReadyEpoch reports the next epoch number when the
 	// upcoming epoch's nonce is already stable and its leader schedule can
@@ -242,8 +243,11 @@ const maxCachedSchedules = 3
 // runs without holding the election lock so that ShouldProduceBlock remains
 // a fast, lock-free lookup on the forger's hot path.
 type Election struct {
-	poolId      lcommon.PoolKeyHash
-	poolVrfSkey []byte
+	poolId lcommon.PoolKeyHash
+	// vrfSeed hands out a fresh copy of the pool's VRF seed. The election
+	// keeps no copy of its own: each schedule computation takes one, uses it
+	// for that epoch's proofs, and wipes it.
+	vrfSeed func() []byte
 
 	stakeProvider StakeDistributionProvider
 	epochProvider EpochInfoProvider
@@ -268,10 +272,11 @@ type Election struct {
 	wg sync.WaitGroup
 }
 
-// NewElection creates a new leader election manager for a stake pool.
+// NewElection creates a new leader election manager for a stake pool. vrfSeed
+// returns a copy of the pool's VRF seed that the election wipes after use.
 func NewElection(
 	poolId lcommon.PoolKeyHash,
-	poolVrfSkey []byte,
+	vrfSeed func() []byte,
 	stakeProvider StakeDistributionProvider,
 	epochProvider EpochInfoProvider,
 	eventBus *event.EventBus,
@@ -282,7 +287,7 @@ func NewElection(
 	}
 	return &Election{
 		poolId:        poolId,
-		poolVrfSkey:   poolVrfSkey,
+		vrfSeed:       vrfSeed,
 		stakeProvider: stakeProvider,
 		epochProvider: epochProvider,
 		eventBus:      eventBus,
@@ -667,7 +672,7 @@ func (e *Election) RefreshScheduleForEpoch(
 			"error", err,
 		)
 	} else if schedule != nil {
-		valid, reason, err := e.validatePersistedSchedule(epoch, schedule)
+		valid, reason, err := e.validatePersistedSchedule(ctx, epoch, schedule)
 		if err != nil {
 			e.logger.Warn(
 				"failed to validate persisted leader schedule",
@@ -727,6 +732,7 @@ func (e *Election) loadPersistedSchedule(
 }
 
 func (e *Election) validatePersistedSchedule(
+	ctx context.Context,
 	epoch uint64,
 	schedule *Schedule,
 ) (bool, string, error) {
@@ -746,7 +752,7 @@ func (e *Election) validatePersistedSchedule(
 		), nil
 	}
 
-	expectedNonce := e.epochProvider.EpochNonce(epoch)
+	expectedNonce := e.epochProvider.EpochNonce(ctx, epoch)
 	if len(expectedNonce) == 0 {
 		return false, "epoch nonce unavailable", nil
 	}
@@ -894,7 +900,7 @@ func (e *Election) computeSchedule(
 	// Get epoch nonce. The nonce may not be available yet if the slot clock
 	// fired the epoch transition before block processing computed the nonce.
 	// In that case, skip this schedule — the next epoch transition will retry.
-	epochNonce := e.epochProvider.EpochNonce(currentEpoch)
+	epochNonce := e.epochProvider.EpochNonce(ctx, currentEpoch)
 	if len(epochNonce) == 0 {
 		e.logger.Info(
 			"epoch nonce not yet available, skipping schedule",
@@ -931,12 +937,20 @@ func (e *Election) computeSchedule(
 		return nil, fmt.Errorf("resolve active slot coefficient: %w", err)
 	}
 
+	if e.vrfSeed == nil {
+		return nil, errors.New("pool VRF seed is unavailable")
+	}
+	seed := e.vrfSeed()
+	defer clear(seed)
+	if len(seed) == 0 {
+		return nil, errors.New("pool VRF seed is unavailable")
+	}
 	vrfEvalStart := time.Now()
 	schedule, err := calc.CalculateSchedule(
 		currentEpoch,
 		epochRange,
 		e.poolId,
-		e.poolVrfSkey,
+		seed,
 		poolStake,
 		totalStake,
 		epochNonce,

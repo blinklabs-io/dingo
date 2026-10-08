@@ -772,17 +772,19 @@ func (c *CardanoNodeConfig) P2PTargets() (
 }
 
 // HardForkEpoch returns the epoch at which the named era's hard fork is
-// scheduled to occur, and whether it is scheduled at all. When
-// ExperimentalHardForksEnabled is not explicitly set to true, no hard fork is
-// scheduled regardless of what the file declares, matching cardano-node's
-// treatment of the TestXHardForkAtEpoch overrides.
+// scheduled to occur, and whether it is scheduled at all.
+//
+// This matches cardano-node, which honours TestShelleyHardForkAtEpoch through
+// TestConwayHardForkAtEpoch whatever ExperimentalHardForksEnabled says, and
+// reads TestDijkstraHardForkAtEpoch only when that flag is explicitly true.
 //
 // Callers asking what the configuration *declares*, rather than what is
 // scheduled, want DeclaredHardForkEpoch. Both read the same field through the
 // same switch so the two questions cannot drift apart.
 func (c *CardanoNodeConfig) HardForkEpoch(era string) (uint64, bool) {
-	if c.ExperimentalHardForksEnabled == nil ||
-		!*c.ExperimentalHardForksEnabled {
+	if era == "dijkstra" &&
+		(c.ExperimentalHardForksEnabled == nil ||
+			!*c.ExperimentalHardForksEnabled) {
 		return 0, false
 	}
 	return c.DeclaredHardForkEpoch(era)
@@ -790,13 +792,8 @@ func (c *CardanoNodeConfig) HardForkEpoch(era string) (uint64, bool) {
 
 // DeclaredHardForkEpoch returns the epoch the configuration declares for the
 // named era's hard fork, and whether the setting is present, ignoring
-// ExperimentalHardForksEnabled.
-//
-// The declaration is a property of the file and some shipped configurations
-// carry one with the flag off: preview sets TestShelleyHardForkAtEpoch to 0
-// alongside ExperimentalHardForksEnabled: False. A caller asking "does this
-// network begin after Byron" needs to see that, while a caller asking "is a
-// fork scheduled" must not. Use HardForkEpoch for the latter.
+// ExperimentalHardForksEnabled. It differs from HardForkEpoch only for
+// Dijkstra, whose override is not scheduled unless that flag is set.
 func (c *CardanoNodeConfig) DeclaredHardForkEpoch(
 	era string,
 ) (uint64, bool) {
