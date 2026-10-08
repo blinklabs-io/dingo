@@ -1078,17 +1078,81 @@ func sameConnectionId(a, b ouroboros.ConnectionId) bool {
 		sameNetAddr(a.RemoteAddr, b.RemoteAddr)
 }
 
+// SetPeerHotByConnId marks the peer holding connId hot when the governor's
+// hot budgets allow it. Starting a chainsync client does not by itself entitle
+// a peer to a hot slot: the peer stays in its current state (warm) when
+// promotion would exceed TargetNumberOfActivePeers, the peer's per-source
+// active quota, or InboundHotQuota (plus the inbound hot eligibility rules).
+// Local roots are never held back. The chainsync client keeps running on a
+// warm peer; the reconcile loop owns later promotion.
 func (p *PeerGovernor) SetPeerHotByConnId(connId ouroboros.ConnectionId) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	peerIdx := p.peerIndexByConnId(connId)
-	if peerIdx != -1 && p.peers[peerIdx] != nil &&
-		!p.upstreamWithheldLocked(p.peers[peerIdx]) {
-		p.recordPeerStateChange(p.peers[peerIdx].State, PeerStateHot)
-		p.peers[peerIdx].State = PeerStateHot
-		p.peers[peerIdx].LastActivity = time.Now()
-		p.updatePeerMetrics()
+	if peerIdx == -1 || p.peers[peerIdx] == nil ||
+		p.upstreamWithheldLocked(p.peers[peerIdx]) {
+		return
 	}
+	peer := p.peers[peerIdx]
+	if peer.State != PeerStateHot && !p.hotBudgetAllowsLocked(peer) {
+		peer.LastActivity = time.Now()
+		return
+	}
+	p.recordPeerStateChange(peer.State, PeerStateHot)
+	peer.State = PeerStateHot
+	peer.LastActivity = time.Now()
+	p.updatePeerMetrics()
+}
+
+// hotBudgetAllowsLocked reports whether promoting peer to hot keeps the hot
+// counts within TargetNumberOfActivePeers, the peer's per-source quota, and
+// the inbound hot budget. Inbound peers are budgeted separately from outbound
+// selection: they neither consume nor are limited by the outbound active
+// target. Must be called with p.mu held.
+func (p *PeerGovernor) hotBudgetAllowsLocked(peer *Peer) bool {
+	if peer.Source == PeerSourceTopologyLocalRoot {
+		return true
+	}
+	if peer.Source == PeerSourceInboundConn {
+		if !p.isInboundEligibleForHot(peer) {
+			return false
+		}
+		inboundHot := 0
+		for _, other := range p.peers {
+			if other != nil && other.Source == PeerSourceInboundConn &&
+				other.State == PeerStateHot {
+				inboundHot++
+			}
+		}
+		return inboundHot < p.config.InboundHotQuota
+	}
+	outboundHot := 0
+	categoryHot := 0
+	category := p.getSourceCategory(peer.Source)
+	for _, other := range p.peers {
+		if other == nil || other.State != PeerStateHot ||
+			other.Source == PeerSourceInboundConn {
+			continue
+		}
+		outboundHot++
+		if p.getSourceCategory(other.Source) == category {
+			categoryHot++
+		}
+	}
+	if p.config.TargetNumberOfActivePeers > 0 &&
+		outboundHot >= p.config.TargetNumberOfActivePeers {
+		return false
+	}
+	quota := 0
+	switch category {
+	case "gossip":
+		quota = p.config.ActivePeersGossipQuota
+	case "ledger":
+		quota = p.config.ActivePeersLedgerQuota
+	case "topology":
+		quota = p.config.ActivePeersTopologyQuota
+	}
+	return quota <= 0 || categoryHot < quota
 }
 
 func (p *PeerGovernor) TouchPeerByConnId(connId ouroboros.ConnectionId) {

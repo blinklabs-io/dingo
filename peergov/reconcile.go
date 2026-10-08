@@ -617,6 +617,14 @@ func (p *PeerGovernor) enforceStateLimit(
 		if peer == nil || peer.State != state {
 			continue
 		}
+		// Inbound peers chose to sync from this node; they do not count
+		// toward, and are never removed for, the outbound hot/warm
+		// selection targets. Inbound-specific policy (connection limits,
+		// idle/flap pruning, InboundWarmTarget/InboundHotQuota) governs them.
+		if peer.Source == PeerSourceInboundConn &&
+			state != PeerStateCold {
+			continue
+		}
 		stateCount++
 		if p.isTopologyPeer(peer.Source) {
 			continue

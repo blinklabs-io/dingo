@@ -5645,6 +5645,15 @@ RFC 3849 `2001:db8::/32`. Operator-configured topology peers intentionally
 retain their separate exemption for private addresses, and an already
 established inbound peer is not reclassified by this admission check.
 
+Hot and warm selection targets govern outbound peers only. Inbound peers are
+not counted toward, and are never removed by, the `TargetNumberOfActivePeers`
+and `TargetNumberOfEstablishedPeers` limits; only inbound-specific policy
+(connection and per-IP limits, idle/flap pruning, `InboundWarmTarget`,
+`InboundHotQuota`) closes them. The governor owns hot promotion: starting a
+chainsync client calls `SetPeerHotByConnId`, which leaves the peer warm when
+promotion would exceed the active target, its per-source quota, or the inbound
+hot budget (local roots are exempt). Reconcile promotes it later.
+
 Peer targets configured directly by Dingo through YAML, environment variables,
 or CLI flags take precedence over the corresponding Cardano configuration.
 When Dingo's root-peer target is unset, composition applies
