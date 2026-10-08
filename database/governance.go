@@ -133,6 +133,29 @@ func (d *Database) GetGovernanceProposalSet(
 	return proposals, nil
 }
 
+// GetGovernanceProposalSetAtSlot returns the Conway proposals set as it stood
+// at slot.
+func (d *Database) GetGovernanceProposalSetAtSlot(
+	slot uint64,
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	proposals, err := d.governanceStore().GetGovernanceProposalSetAtSlot(
+		slot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get governance proposal set at slot: %w",
+			err,
+		)
+	}
+	return proposals, nil
+}
+
 // GetExpiringGovernanceProposals returns unratified proposals whose
 // expires_epoch is strictly less than the given epoch and that have not yet
 // been enacted, expired, or soft-deleted.
@@ -376,6 +399,28 @@ func (d *Database) GetGovernanceVotes(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get governance votes: %w", err)
+	}
+	return votes, nil
+}
+
+// GetGovernanceVotesAtSlot returns a governance proposal's votes as they
+// stood at slot.
+func (d *Database) GetGovernanceVotesAtSlot(
+	proposalID uint,
+	slot uint64,
+	txn *Txn,
+) ([]*models.GovernanceVote, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	votes, err := d.governanceStore().GetGovernanceVotesAtSlot(
+		proposalID,
+		slot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get governance votes at slot: %w", err)
 	}
 	return votes, nil
 }

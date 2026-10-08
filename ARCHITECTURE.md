@@ -11839,9 +11839,28 @@ reconstructed from the
 the credits of a pending reward round applied at or before the slot, so the
 unpinned path's separate pending-credit addition is skipped. Certificates,
 baselines, PV10 clear rows, and the reward journal are removed only by
-rollback, so no retention floor applies. `GetDRepState`, `GetProposals` and
-`DebugChainDepState` still
-ignore the acquired point.
+rollback, so no retention floor applies.
+
+`GetProposals` (`queryShelleyGetProposals`) reads the proposals set at the
+pinned slot through `GetGovernanceProposalSetAtSlot`: proposals added at or
+before it and not yet enacted, dropped or soft-deleted by then, the lifecycle
+slots rollback reverts by. Each proposal's votes come from
+`GetGovernanceVotesAtSlot`, which takes a replaced vote's value from
+`governance_vote_history`. `GetDRepState` (`queryShelleyDRepStateAt`) reads
+the DReps registered at the slot through `GetDrepsAtSlot`, with the anchor
+from their certificates, the expiry from `drep_expiry_history`, the deposit of
+their latest registration at or before the slot, and their delegators through
+`GetDRepDelegatorsAtSlot`, which reads accounts as
+`GetAccountsByCredentialAtSlot` does. A DRep's expiry changes on every vote,
+registration and update certificate without a certificate of its own for the
+vote, so it is recorded in `drep_expiry_history` at the slot of each change;
+`RestoreDrepStateAtSlot` restores expiry from the same history on rollback.
+On a database upgraded to schema v37, history before the upgrade is one seed
+row per DRep (see DATABASE.md), so a point before a DRep's latest pre-upgrade
+activity has no recorded expiry: a DRep whose certificate state at that point
+is still its current one (or that was imported at slot 0) reports its current
+expiry, and any other reports 0 (unset). Rollback applies the same rule.
+`DebugChainDepState` still ignores the acquired point.
 
 Every pinned query also needs history the node actually holds, so
 `VerifyPointQueryable` refuses a point below the latest Mithril import's
