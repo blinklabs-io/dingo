@@ -1,2 +1,3 @@
--- No schema change. The backfill restores the term start of committee members
--- an UpdateCommittee enactment renewed before renewals preserved it.
+-- No schema change. The backfill restores the term_start_slot of committee
+-- members renewed by an UpdateCommittee enactment before renewals began
+-- preserving the predecessor's term start.

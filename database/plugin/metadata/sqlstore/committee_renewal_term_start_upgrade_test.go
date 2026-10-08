@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -146,7 +147,7 @@ func setEnactedUpdateCommittee(
 	require.NoError(t, store.SetGovernanceProposal(
 		&models.GovernanceProposal{
 			TxHash:        bytes.Repeat([]byte{seed}, 32),
-			ActionType:    4,
+			ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
 			EnactedEpoch:  &epoch,
 			EnactedSlot:   &slot,
 			AnchorHash:    make([]byte, 32),

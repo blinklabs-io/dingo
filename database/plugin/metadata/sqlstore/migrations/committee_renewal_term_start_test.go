@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -57,7 +58,7 @@ func TestCommitteeRenewalTermStartBackfill(t *testing.T) {
 		{1000, updateCommitteeActionType, cbor},
 		{2000, updateCommitteeActionType, cbor},
 		{3000, updateCommitteeActionType, cbor},
-		{4000, 3, cbor}, // NoConfidence
+		{4000, int64(lcommon.GovActionTypeNoConfidence), cbor},
 		{4500, updateCommitteeActionType, cbor},
 		{5000, updateCommitteeActionType, cbor},
 		{6000, updateCommitteeActionType, cbor},
@@ -155,6 +156,18 @@ INSERT INTO committee_member (
 			i, fixture.tag, fixture.addedSlot,
 		)
 	}
+}
+
+// The backfill matches enacted proposals by the action_type the ledger stores,
+// a direct cast of the gouroboros enum, so a wrong copy would silently match
+// nothing and repair no row.
+func TestUpdateCommitteeActionTypeMatchesLedger(t *testing.T) {
+	t.Parallel()
+	require.EqualValues(
+		t,
+		lcommon.GovActionTypeUpdateCommittee,
+		updateCommitteeActionType,
+	)
 }
 
 func TestCommitteeCredentialCursorRoundTrip(t *testing.T) {

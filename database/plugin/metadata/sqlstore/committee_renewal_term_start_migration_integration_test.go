@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -86,24 +87,26 @@ func exerciseCommitteeRenewalTermStartUpgrade(
 
 	renewed := bytes.Repeat([]byte{0xaa}, 28)
 	reelected := bytes.Repeat([]byte{0xbb}, 28)
-	noConfidence := bytes.Repeat([]byte{0xcc}, 28)
+	noConfidenceMember := bytes.Repeat([]byte{0xcc}, 28)
 	imported := bytes.Repeat([]byte{0xee}, 28)
 	deleted := func(slot int64) sql.NullInt64 {
 		return sql.NullInt64{Int64: slot, Valid: true}
 	}
 	cbor := []byte{0x80}
+	updateCommittee := int64(lcommon.GovActionTypeUpdateCommittee)
+	noConfidence := int64(lcommon.GovActionTypeNoConfidence)
 	proposals := []struct {
 		slot          int64
 		actionType    int64
 		govActionCbor []byte
 	}{
-		{1000, 4, cbor},
-		{2000, 4, cbor},
-		{3000, 4, cbor},
-		{4000, 3, cbor},
-		{4500, 4, cbor},
-		{5000, 4, cbor},
-		{8000, 4, nil},
+		{1000, updateCommittee, cbor},
+		{2000, updateCommittee, cbor},
+		{3000, updateCommittee, cbor},
+		{4000, noConfidence, cbor},
+		{4500, updateCommittee, cbor},
+		{5000, updateCommittee, cbor},
+		{8000, updateCommittee, nil},
 	}
 	fixtures := []struct {
 		tag           int64
@@ -120,8 +123,8 @@ func exerciseCommitteeRenewalTermStartUpgrade(
 		{1, renewed, 1000, sql.NullInt64{}, 1000, 50},
 		{0, reelected, 100, deleted(2000), 100, 100},
 		{0, reelected, 3000, sql.NullInt64{}, 2900, 2900},
-		{0, noConfidence, 0, deleted(4000), 0, 0},
-		{0, noConfidence, 4500, sql.NullInt64{}, 4400, 4400},
+		{0, noConfidenceMember, 0, deleted(4000), 0, 0},
+		{0, noConfidenceMember, 4500, sql.NullInt64{}, 4400, 4400},
 		{0, imported, 0, deleted(8000), 0, 0},
 		{0, imported, 8000, sql.NullInt64{}, 8000, 8000},
 	}

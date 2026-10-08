@@ -1295,8 +1295,10 @@ type committeeTermRow struct {
 	enacted       bool
 }
 
-// updateCommitteeActionType is the governance_proposal.action_type of an
-// UpdateCommittee action, held here for the same reason as alonzoEraID.
+// updateCommitteeActionType is the governance_proposal.action_type the ledger
+// writes for an UpdateCommittee action: gouroboros' GovActionTypeUpdateCommittee,
+// which is the CIP-1694 gov_action tag 4. It is a copy for the same reason as
+// alonzoEraID, and a test pins it to the gouroboros value.
 const updateCommitteeActionType = 4
 
 // committeeRenewalTermStartBackfill repairs committee_member rows that an
