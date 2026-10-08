@@ -1971,6 +1971,13 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, error)
 
+	// LatestPoolOpCertSequencesAtOrBefore is LatestPoolOpCertSequences
+	// restricted to rows at or before slot: the counters as they stood there.
+	LatestPoolOpCertSequencesAtOrBefore(
+		uint64, // slot
+		types.Txn,
+	) (map[string]uint64, error)
+
 	// GetPoolBlockIssuersInSlotRange returns observed pool/op-cert issuer
 	// rows in the inclusive slot range, ordered by slot and pool key hash.
 	GetPoolBlockIssuersInSlotRange(
