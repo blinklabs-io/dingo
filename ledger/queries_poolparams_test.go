@@ -77,7 +77,8 @@ func seedStakePoolParamsRegistration(
 	pledge uint64,
 ) {
 	t.Helper()
-	ipv4 := net.IPv4(192, 168, 1, 1)
+	// Imported ledger relays already carry the ledger's wire-order bytes.
+	ipv4 := net.IP{1, 1, 168, 192}
 	relays := []models.PoolRegistrationRelay{
 		{Ipv4: &ipv4, Port: 3001},
 		{Hostname: "relay.example", Port: 3001},
@@ -658,33 +659,56 @@ func TestQueryStakePoolParams_GenesisRelayWireOrderAndBlsKey(t *testing.T) {
 	ls.currentPParams = pp
 	ls.publishSnapshotsLocked()
 
-	poolID := repeatedBytes(28, 0x11)
-	operator := lcommon.PoolKeyHash(poolID)
+	cfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json",
+		"musashi",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	genesis := cfg.ShelleyGenesis()
+	key := &lcommon.LeiosKey{
+		PublicKey:       repeatedBytes(96, 0x66),
+		PossessionProof: repeatedBytes(48, 0x77),
+	}
+	encodedKey, err := json.Marshal(key)
+	require.NoError(t, err)
+	var poolID string
+	for id, pool := range genesis.ExtraConfig.StakePools.Data {
+		if pool.Unknown == nil {
+			pool.Unknown = make(map[string]json.RawMessage)
+		}
+		pool.Unknown["blsKey"] = encodedKey
+		genesis.ExtraConfig.StakePools.Data[id] = pool
+		poolID = id
+		break
+	}
+	require.NotEmpty(t, poolID)
+	pools, delegations, err := initialPools(genesis)
+	require.NoError(t, err)
+	stakeDelegations, err := genesisStakeDelegations(delegations)
+	require.NoError(t, err)
+	cert := pools[poolID]
 	ipv4 := net.IPv4(192, 168, 1, 1)
 	ipv6 := net.ParseIP("2001:db8::1").To16()
 	port := uint32(3001)
-	cert := lcommon.PoolRegistrationCertificate{
-		Operator:      operator,
-		VrfKeyHash:    lcommon.VrfKeyHash(repeatedBytes(32, 0xAA)),
-		LeiosKey:      &lcommon.LeiosKey{PublicKey: repeatedBytes(96, 0x66), PossessionProof: repeatedBytes(48, 0x77)},
-		Margin:        lcommon.GenesisRat{Rat: big.NewRat(0, 1)},
-		RewardAccount: lcommon.AddrKeyHash(repeatedBytes(28, 0x22)),
-		Relays: []lcommon.PoolRelay{{
-			Type: lcommon.PoolRelayTypeSingleHostAddress,
-			Port: &port,
-			Ipv4: &ipv4,
-			Ipv6: &ipv6,
-		}},
-	}
+	cert.Relays = []lcommon.PoolRelay{{
+		Type: lcommon.PoolRelayTypeSingleHostAddress,
+		Port: &port,
+		Ipv4: &ipv4,
+		Ipv6: &ipv6,
+	}}
+	pools[poolID] = cert
 	require.NoError(t, ls.db.SetGenesisStaking(
-		map[string]lcommon.PoolRegistrationCertificate{"pool": cert},
-		map[string]string{},
+		pools,
+		stakeDelegations,
 		0,
 		nil,
 		nil,
 	))
 
-	got, err := ls.Query(stakePoolParamsQuery(poolID), QueryPoint{})
+	poolHash, err := hex.DecodeString(poolID)
+	require.NoError(t, err)
+	got, err := ls.Query(stakePoolParamsQuery(poolHash), QueryPoint{})
 	require.NoError(t, err)
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
@@ -696,6 +720,36 @@ func TestQueryStakePoolParams_GenesisRelayWireOrderAndBlsKey(t *testing.T) {
 		encoded,
 		"5860"+strings.Repeat("66", 96)+"5830"+strings.Repeat("77", 48),
 	)
+}
+
+func TestQueryStakePoolParams_SnapshotRelayWireOrder(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
+	setStakePoolParamsLiveState(ls, 0, 0, 10)
+	poolID := repeatedBytes(28, 0x11)
+	vrf := repeatedBytes(32, 0xAA)
+	reward := repeatedBytes(28, 0x22)
+	ipv4 := net.IP{1, 1, 168, 192}
+	require.NoError(t, ls.db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash: poolID, VrfKeyHash: vrf, RewardAccount: reward,
+		},
+		&models.PoolRegistration{
+			PoolKeyHash: poolID, VrfKeyHash: vrf, RewardAccount: reward,
+			AddedSlot: 5,
+			Relays:    []models.PoolRegistrationRelay{{Ipv4: &ipv4, Port: 3001}},
+		},
+		nil,
+	))
+
+	got, err := ls.Query(stakePoolParamsQuery(poolID), QueryPoint{})
+	require.NoError(t, err)
+	gotCbor, err := cbor.Encode(got)
+	require.NoError(t, err)
+	require.Contains(t, hex.EncodeToString(gotCbor), "440101a8c0")
 }
 
 func TestInitialPoolsReadsGenesisBlsKeyAlias(t *testing.T) {

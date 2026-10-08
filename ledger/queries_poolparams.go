@@ -213,9 +213,10 @@ func (ls *LedgerState) queryShelleyStakePoolParams(
 		if err != nil {
 			return nil, err
 		}
-		// Genesis and snapshot-import registrations originate as textual IP
-		// addresses. On-chain certificates are decoded from ledger wire bytes.
-		if reg.CertificateID == 0 {
+		// Genesis registrations are parsed from textual IP addresses. Snapshot
+		// imports have no certificate ID either, but their relay bytes are
+		// already in ledger wire order.
+		if reg.CertificateID == 0 && reg.AddedSlot == 0 {
 			cert.Relays = wireOrderRelays(cert.Relays)
 		}
 		if includeBlsKey &&
