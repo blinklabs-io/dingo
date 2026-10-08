@@ -663,8 +663,8 @@ func TestDijkstraChildPredicatesRejectedOnEveryProductionPath(t *testing.T) {
 					require.True(t, f.live(t, childProdChildInput, 0))
 					return
 				}
-				require.NoError(t, replay.chain.Rollback(ocommon.Point{}))
-				require.NoError(t, replay.chain.AddRawBlocks([]chain.RawBlock{{
+				require.NoError(t, replay.chain.Rollback(context.Background(), ocommon.Point{}))
+				require.NoError(t, replay.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
 					Slot:        f.block.SlotNumber(),
 					Hash:        f.block.Hash().Bytes(),
 					BlockNumber: f.block.BlockNumber(),

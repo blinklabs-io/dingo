@@ -3620,7 +3620,7 @@ func TestTxValidationCommitExcludesLedgerPublication(t *testing.T) {
 	ls := newFakeEraLedgerState(db, nil, nil)
 	before, _ := ls.loadStateSnapshots()
 
-	err = ls.WithTxValidationSession(func(
+	err = ls.WithTxValidationSession(context.Background(), func(
 		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 		_ func() bool,
 		commitIfCurrent func(func() error) (bool, error),
@@ -3664,7 +3664,7 @@ func TestTxValidationCommitDoesNotWaitForLedgerWriteLock(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- ls.WithTxValidationSession(func(
+		done <- ls.WithTxValidationSession(context.Background(), func(
 			_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 			_ func() bool,
 			commitIfCurrent func(func() error) (bool, error),

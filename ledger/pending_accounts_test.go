@@ -219,7 +219,7 @@ func TestTxValidationSessionAccountsForPendingWithdrawals(t *testing.T) {
 	first := f.withdrawalTx(0x01, 100)
 	second := f.withdrawalTx(0x02, 100)
 
-	err := f.ls.WithTxValidationSession(func(
+	err := f.ls.WithTxValidationSession(context.Background(), func(
 		validate func(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
@@ -461,6 +461,7 @@ func TestValidateTxWithOverlayFollowsPublicationAtSameTip(t *testing.T) {
 	credential, err := models.CredentialTagFromUint(f.credential.CredType)
 	require.NoError(t, err)
 	require.NoError(t, f.ls.db.AddAccountRewardByCredential(
+		context.Background(),
 		credential,
 		f.credential.Credential[:],
 		100,

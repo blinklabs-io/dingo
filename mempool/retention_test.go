@@ -347,6 +347,7 @@ func (v *confirmingSessionValidator) ValidateTxWithOverlay(
 }
 
 func (v *confirmingSessionValidator) WithTxValidationSession(
+	_ context.Context,
 	fn func(
 		func(
 			gledger.Transaction,

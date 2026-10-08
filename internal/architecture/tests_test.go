@@ -419,6 +419,8 @@ var importBoundaryRules = []importBoundaryRule{
 			// Drives Dijkstra batches with child-level defects through mempool
 			// admission and every block path.
 			"ledger/dijkstra_child_production_test.go": {
+				"mempool",
+			},
 			// Submits Dijkstra transactions through mempool admission, then
 			// through block application, replay and rollback.
 			"ledger/dijkstra_production_paths_fixture_test.go": {

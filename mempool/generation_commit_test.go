@@ -109,6 +109,7 @@ func (v *generationCommitRaceValidator) session(
 }
 
 func (v *generationCommitRaceValidator) WithTxValidationSession(
+	_ context.Context,
 	fn func(
 		func(
 			gledger.Transaction,
@@ -170,6 +171,7 @@ type alwaysMovingValidator struct {
 }
 
 func (v *alwaysMovingValidator) WithTxValidationSession(
+	ctx context.Context,
 	fn func(
 		func(
 			gledger.Transaction,

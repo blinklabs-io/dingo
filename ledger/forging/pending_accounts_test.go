@@ -117,7 +117,7 @@ func TestBuildBlockAccountsForSelectedWithdrawals(t *testing.T) {
 		validator,
 	)
 
-	block, _, err := builder.BuildBlock(1001, 0)
+	block, _, err := builder.BuildBlock(t.Context(), 1001, 0)
 	require.NoError(t, err)
 	require.Len(
 		t,
@@ -135,6 +135,7 @@ func TestSelectValidLeiosTransactionsAccountsForSelectedWithdrawals(
 	txs, validator := twoWithdrawalsOfOneBalance(t)
 
 	selected, _, err := selectValidLeiosTransactions(
+		t.Context(),
 		txs,
 		validator,
 		leiosSelectionLimits{},

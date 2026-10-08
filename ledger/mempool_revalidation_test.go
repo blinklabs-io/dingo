@@ -76,8 +76,8 @@ func seedLedgerUtxo(
 	t.Helper()
 	outputCbor, err := cbor.Encode([]any{revalidationTestAddress, amount})
 	require.NoError(t, err)
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		if err := db.CreateUtxo(txn, &models.Utxo{
+	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
 			TxId:      txID,
 			OutputIdx: index,
 			AddedSlot: 1,
@@ -100,6 +100,7 @@ func confirmSpend(
 ) {
 	t.Helper()
 	require.NoError(t, f.ls.db.MarkUtxosDeletedAtSlot(
+		context.Background(),
 		nil,
 		[]types.UtxoKey{{TxId: spentID, OutputIdx: 0}},
 		2,

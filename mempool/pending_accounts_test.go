@@ -148,6 +148,7 @@ func (v *balanceValidator) ValidateTxWithOverlay(
 }
 
 func (v *balanceValidator) WithTxValidationSession(
+	_ context.Context,
 	fn func(
 		func(
 			gledger.Transaction,
@@ -525,6 +526,7 @@ func (v *overlappingRebuildValidator) ValidateTxWithOverlay(
 }
 
 func (v *overlappingRebuildValidator) WithTxValidationSession(
+	_ context.Context,
 	fn func(
 		func(
 			gledger.Transaction,
