@@ -57,7 +57,7 @@ type LifecycleStore interface {
 // SettingsStore owns singleton metadata about database and node state.
 type SettingsStore interface {
 	// GetCommitTimestamp retrieves the last commit timestamp from the database.
-	GetCommitTimestamp() (int64, error)
+	GetCommitTimestamp(context.Context) (int64, error)
 
 	// SetCommitTimestamp sets the last commit timestamp in the database.
 	// Parameter order is (timestamp, txn) to match other store methods where
@@ -66,7 +66,7 @@ type SettingsStore interface {
 
 	// GetNodeSettings returns the persisted immutable node settings, or
 	// nil if the database has never been initialised.
-	GetNodeSettings() (*types.NodeSettings, error)
+	GetNodeSettings(ctx context.Context) (*types.NodeSettings, error)
 
 	// SetNodeSettings persists the immutable node settings via an
 	// idempotent insert that succeeds on repeated calls. If the row
@@ -74,21 +74,21 @@ type SettingsStore interface {
 	// fields and should only populate network fields when they are
 	// currently unset so callers like CheckNodeSettings can perform
 	// a one-time network backfill.
-	SetNodeSettings(*types.NodeSettings) error
+	SetNodeSettings(context.Context, *types.NodeSettings) error
 
 	// GetNodeSettingsGates returns the persisted node settings gate
 	// values, keyed by gate name. These are the values enforced on every
 	// startup by database/nodesettings.Evaluate; an empty result means no
 	// gates have been recorded yet, which is normal before the first
 	// successful start.
-	GetNodeSettingsGates() (nodesettings.Values, error)
+	GetNodeSettingsGates(ctx context.Context) (nodesettings.Values, error)
 
 	// SetNodeSettingsGates persists gates, one row per gate, so that a
 	// later call overwrites an earlier value for the same name. The
 	// recorded epoch and slot are stamped on every row written by this
 	// call and are zero when the write happens before the first block
 	// has been processed. A nil or empty gates is a no-op.
-	SetNodeSettingsGates(
+	SetNodeSettingsGates(ctx context.Context,
 		gates nodesettings.Values,
 		recordedEpoch uint64,
 		recordedSlot uint64,
@@ -105,7 +105,7 @@ type SettingsStore interface {
 	// record that a collision happened. A caller that gets inserted=false
 	// lost the race and must re-read what is now actually persisted rather
 	// than assume its own write took effect.
-	InsertNodeSettingsGateIfAbsent(
+	InsertNodeSettingsGateIfAbsent(ctx context.Context,
 		name string,
 		value string,
 		recordedEpoch uint64,
@@ -115,7 +115,7 @@ type SettingsStore interface {
 	// InsertNodeSettingsGatesIfAbsent persists the complete first-fill set in
 	// one metadata transaction. It returns false when another initializer
 	// already claimed any member of the set; no partial set is committed.
-	InsertNodeSettingsGatesIfAbsent(
+	InsertNodeSettingsGatesIfAbsent(ctx context.Context,
 		gates nodesettings.Values,
 		recordedEpoch uint64,
 		recordedSlot uint64,
@@ -202,6 +202,14 @@ type GovernanceStore interface {
 	// proposal not yet enacted, dropped, or soft-deleted. An expired action
 	// stays a member until the boundary that drops it.
 	GetGovernanceProposalSet(
+		types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetGovernanceProposalSetAtSlot is GetGovernanceProposalSet as the set
+	// stood at slot: proposals added at or before it and not yet enacted,
+	// dropped, or soft-deleted by then.
+	GetGovernanceProposalSetAtSlot(
+		uint64, // slot
 		types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
@@ -307,6 +315,15 @@ type GovernanceStore interface {
 	// GetGovernanceVotes retrieves all votes for a governance proposal.
 	GetGovernanceVotes(
 		uint, // proposalID
+		types.Txn,
+	) ([]*models.GovernanceVote, error)
+
+	// GetGovernanceVotesAtSlot is GetGovernanceVotes as the votes stood at
+	// slot: votes cast at or before it and not deleted by then, each with
+	// the value governance_vote_history records in effect at slot.
+	GetGovernanceVotesAtSlot(
+		uint, // proposalID
+		uint64, // slot
 		types.Txn,
 	) ([]*models.GovernanceVote, error)
 
@@ -461,6 +478,37 @@ type GovernanceStore interface {
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
 
+	// GetDRepDelegatorsAtSlot returns, for each of dreps (every DRep when
+	// empty), the stake credentials delegating to it at slot, keyed by the
+	// DRep's StakeCredentialRef.MapKey() and in canonical (tag, hash) order.
+	// Accounts are read as GetAccountsByCredentialAtSlot reads them.
+	GetDRepDelegatorsAtSlot(
+		[]models.StakeCredentialRef, // dreps
+		uint64, // slot
+		types.Txn,
+	) (map[string][]models.StakeCredentialRef, error)
+
+	// GetDrepsAtSlot returns the given DReps (every DRep when refs is
+	// empty) that were registered at slot, with the anchor and expiry they
+	// had there. A row last written at or before slot with no later
+	// drep_expiry_history entry is exact there; any other is derived as
+	// RestoreDrepStateAtSlot derives it on rollback.
+	GetDrepsAtSlot(
+		[]models.StakeCredentialRef, // refs
+		uint64, // slot
+		types.Txn,
+	) ([]*models.Drep, error)
+
+	// GetDrepRegistrationDepositsAtSlot returns the deposit recorded against
+	// the latest registration at or before slot of each of refs (every DRep
+	// when empty), keyed by models.DrepDepositKey. A DRep with no such
+	// registration, or a NULL deposit, is absent.
+	GetDrepRegistrationDepositsAtSlot(
+		[]models.StakeCredentialRef, // refs
+		uint64, // slot
+		types.Txn,
+	) (map[string]uint64, error)
+
 	// GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower.
 	// Returns a StakeCredentialRef.MapKey()-to-power map; credentials with
 	// no delegated stake are omitted. Use StakeCredentialRef to carry both
@@ -487,11 +535,14 @@ type GovernanceStore interface {
 	// UpdateDRepActivity updates the DRep's last activity epoch and
 	// recalculates the expiry epoch. credentialTag distinguishes key (0)
 	// from script (1) DRep credentials that share the same 28-byte hash.
+	// slot is the slot of the activity; the new values are also recorded in
+	// drep_expiry_history at it.
 	UpdateDRepActivity(
 		uint8, // credentialTag
 		[]byte, // drepCredential
 		uint64, // activityEpoch
 		uint64, // inactivityPeriod
+		uint64, // slot
 		types.Txn,
 	) error
 
@@ -2187,6 +2238,20 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]*models.Account, error)
 
+	// GetAccountsByCredentialAtSlot is GetAccountsByCredential with
+	// includeInactive false, answered as the accounts stood at slot: the
+	// accounts registered then, with the pool, DRep and reward balance they
+	// held. Pool and DRep come from the live row when it was last written at
+	// or before slot, otherwise from the derivation RestoreAccountStateAtSlot
+	// applies on rollback. Reward is the balance reconstructed from the
+	// account_reward_delta journal, including credits of a pending reward
+	// round applied at or before slot.
+	GetAccountsByCredentialAtSlot(
+		[]models.StakeCredentialRef, // stakeCredentials
+		uint64, // slot
+		types.Txn,
+	) (map[string]*models.Account, error)
+
 	// GetAccountsActiveAtSlot returns the subset of stake credentials that
 	// were registered and not subsequently deregistered at or before the given
 	// slot. The returned map is keyed by StakeCredentialRef.MapKey().
@@ -2262,6 +2327,18 @@ type MetadataStore interface {
 	// after the given slot and deletes their journal entries.
 	DeleteAccountRewardsAfterSlot(uint64, types.Txn) error
 
+	// DeleteAccountRewardJournalForCredentialsAfterSlot deletes reward
+	// journal entries recorded after the given slot for exactly the given
+	// credentials, without reversing any balance. Used by ledger-state
+	// import for credentials an authoritative snapshot re-import has just
+	// overwritten; see the sqlstore implementation for why reversal is
+	// unsafe there.
+	DeleteAccountRewardJournalForCredentialsAfterSlot(
+		uint64, // slot
+		[]models.StakeCredentialRef, // refs
+		types.Txn,
+	) error
+
 	// GetBlockNonce retrieves a block nonce for a given point.
 	GetBlockNonce(
 		ocommon.Point,
@@ -2319,10 +2396,10 @@ type MetadataStore interface {
 	// runs certificates but not POOLREAP or the PV10 HARDFORK rule.
 	RestoreImportedAccountStates(uint64, types.Txn) (int, error)
 
-	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
-	// by Mithril v2 catch-up reconciliation; rows are never deleted, only
-	// tombstoned via the active flag. Credentials that match no row are ignored.
-	DeactivateAccounts(types.Txn, []models.StakeCredentialRef) error
+	// DeactivateAccounts records the imported snapshot's inactive state for the
+	// given accounts at the supplied slot. Used by Mithril v2 catch-up
+	// reconciliation; credentials that match no row are ignored.
+	DeactivateAccounts(types.Txn, []models.StakeCredentialRef, uint64) error
 
 	// DeactivateDreps marks the given DReps inactive (Active=false). Used by
 	// Mithril v2 catch-up reconciliation; rows are never deleted, only
@@ -2926,9 +3003,6 @@ type MetadataStore interface {
 	// the given prefix (used to enumerate the persisted deferred-header
 	// markers so their retention floor survives a restart).
 	ListSyncStateKeysByPrefix(string, types.Txn) ([]string, error)
-
-	// ClearSyncState removes all sync state entries.
-	ClearSyncState(types.Txn) error
 
 	// Backfill checkpoint methods
 

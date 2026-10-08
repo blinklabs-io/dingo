@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
@@ -177,12 +178,18 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 				},
 			}
 
-			require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
-				TxId: regularInputID, OutputIdx: 0, AddedSlot: 1,
-			}))
-			require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
-				TxId: collateralInputID, OutputIdx: 0, AddedSlot: 1,
-			}))
+			require.NoError(
+				t,
+				db.CreateUtxo(context.Background(), nil, &models.Utxo{
+					TxId: regularInputID, OutputIdx: 0, AddedSlot: 1,
+				}),
+			)
+			require.NoError(
+				t,
+				db.CreateUtxo(context.Background(), nil, &models.Utxo{
+					TxId: collateralInputID, OutputIdx: 0, AddedSlot: 1,
+				}),
+			)
 			initialTip := ochainsync.Tip{Point: ocommon.Point{
 				Slot: 1, Hash: []byte("unchanged-tip"),
 			}}
@@ -241,9 +248,10 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 				txs: []lcommon.Transaction{tx},
 				era: gdijkstra.EraDijkstra,
 			}
-			processErr := db.Transaction(true).
+			processErr := db.Transaction(context.Background(), true).
 				Do(func(txn *database.Txn) error {
 					_, err := ls.ledgerProcessBlock(
+						context.Background(),
 						txn,
 						ocommon.NewPoint(10, block.Hash().Bytes()),
 						block,
@@ -398,9 +406,10 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 				txs: []lcommon.Transaction{tx},
 				era: gdijkstra.EraDijkstra,
 			}
-			processErr := db.Transaction(true).
+			processErr := db.Transaction(context.Background(), true).
 				Do(func(txn *database.Txn) error {
 					_, err := ls.ledgerProcessBlock(
+						context.Background(),
 						txn,
 						ocommon.NewPoint(10, block.Hash().Bytes()),
 						block,
@@ -494,26 +503,28 @@ func TestLedgerProcessBlockEnforcesTransactionValidationOutcomes(
 				txs:    []lcommon.Transaction{tx},
 			}
 
-			err = db.Transaction(true).Do(func(txn *database.Txn) error {
-				_, err := ls.ledgerProcessBlock(
-					txn,
-					ocommon.NewPoint(1, block.Hash().Bytes()),
-					block,
-					true,
-					false,
-					false,
-					nil,
-					envelopeParent{origin: true},
-					nil,
-					testEra,
-					nil,
-					nil,
-					0,
-					0,
-					false,
-				)
-				return err
-			})
+			err = db.Transaction(context.Background(), true).
+				Do(func(txn *database.Txn) error {
+					_, err := ls.ledgerProcessBlock(
+						context.Background(),
+						txn,
+						ocommon.NewPoint(1, block.Hash().Bytes()),
+						block,
+						true,
+						false,
+						false,
+						nil,
+						envelopeParent{origin: true},
+						nil,
+						testEra,
+						nil,
+						nil,
+						0,
+						0,
+						false,
+					)
+					return err
+				})
 			require.True(
 				t,
 				called,

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -206,7 +207,7 @@ func TestHealMithrilGapBlockNonces_CanonicalChainExcludesForkBlob(
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	canonicalChain := cm.PrimaryChain()
 
@@ -215,7 +216,10 @@ func TestHealMithrilGapBlockNonces_CanonicalChainExcludesForkBlob(
 	require.NoError(t, err)
 	require.Len(t, blocks, 3)
 	for _, block := range blocks {
-		require.NoError(t, canonicalChain.AddBlock(block, nil))
+		require.NoError(
+			t,
+			canonicalChain.AddBlock(context.Background(), block, nil),
+		)
 	}
 	anchorBlock := blocks[0] // slot 100
 	boundary := blocks[1].SlotNumber()
@@ -298,7 +302,7 @@ func TestHealMithrilGapBlockNonces_BoundaryCompletionRequiresTrustHash(
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	canonicalChain := cm.PrimaryChain()
 
@@ -307,7 +311,10 @@ func TestHealMithrilGapBlockNonces_BoundaryCompletionRequiresTrustHash(
 	require.NoError(t, err)
 	require.Len(t, blocks, 3)
 	for _, block := range blocks {
-		require.NoError(t, canonicalChain.AddBlock(block, nil))
+		require.NoError(
+			t,
+			canonicalChain.AddBlock(context.Background(), block, nil),
+		)
 	}
 	anchorBlock := blocks[0]
 	boundaryBlock := blocks[1]
@@ -397,7 +404,7 @@ func TestHealMithrilGapBlockNonces_FallsBackFromNonCanonicalAnchor(
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	canonicalChain := cm.PrimaryChain()
 
@@ -406,7 +413,10 @@ func TestHealMithrilGapBlockNonces_FallsBackFromNonCanonicalAnchor(
 	require.NoError(t, err)
 	require.Len(t, blocks, 3)
 	for _, block := range blocks {
-		require.NoError(t, canonicalChain.AddBlock(block, nil))
+		require.NoError(
+			t,
+			canonicalChain.AddBlock(context.Background(), block, nil),
+		)
 	}
 	anchorBlock := blocks[0]
 	boundaryBlock := blocks[1]

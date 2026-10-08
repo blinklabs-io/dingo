@@ -109,6 +109,7 @@ func TestNodeStopEscalatesWhenPhase1ComponentNeverReturns(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 
+	var credentialsClosed atomic.Bool
 	previous := componentStopsForShutdownPhase1
 	t.Cleanup(func() { componentStopsForShutdownPhase1 = previous })
 	componentStopsForShutdownPhase1 = func(*Node) []namedStop {
@@ -118,7 +119,7 @@ func TestNodeStopEscalatesWhenPhase1ComponentNeverReturns(t *testing.T) {
 				<-release
 				return nil
 			},
-		}}
+		}, {name: "block producer credentials", stop: func() error { credentialsClosed.Store(true); return nil }}}
 	}
 
 	n := &Node{}
@@ -140,6 +141,11 @@ func TestNodeStopEscalatesWhenPhase1ComponentNeverReturns(t *testing.T) {
 				"are not bounded",
 		)
 	}
+	require.False(
+		t,
+		credentialsClosed.Load(),
+		"unconfirmed consumers must retain their credentials",
+	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errStorageDrainUnconfirmed,
 		"an unfinished phase 1 stop must be reported, not silently dropped")
@@ -253,7 +259,7 @@ func (h shutdownTestResourceLogHandler) WithGroup(string) slog.Handler {
 func TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
@@ -334,7 +340,7 @@ func TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 func TestNodeStopClosesLedgerStateWhenPhase1DrainConfirmed(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{

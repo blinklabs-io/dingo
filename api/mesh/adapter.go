@@ -15,6 +15,7 @@
 package mesh
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -36,10 +37,10 @@ func NewMeshDatabase(db *database.Database) MeshDatabase {
 	return &meshDatabaseAdapter{db: db}
 }
 
-func (a *meshDatabaseAdapter) BlockByHash(
+func (a *meshDatabaseAdapter) BlockByHash(ctx context.Context,
 	hash []byte,
 ) (models.Block, error) {
-	return database.BlockByHash(a.db, hash)
+	return database.BlockByHash(ctx, a.db, hash)
 }
 
 // BlockByIndex resolves a Cardano block height, which is what the Mesh
@@ -52,7 +53,7 @@ func (a *meshDatabaseAdapter) BlockByHash(
 // for, and height 0 never resolves. Guard the addition first: no real
 // chain approaches math.MaxUint64, but without the check that value
 // would wrap to internal index 0 instead of failing.
-func (a *meshDatabaseAdapter) BlockByIndex(
+func (a *meshDatabaseAdapter) BlockByIndex(ctx context.Context,
 	height uint64,
 ) (models.Block, error) {
 	if height > math.MaxUint64-database.BlockInitialIndex {
@@ -62,20 +63,24 @@ func (a *meshDatabaseAdapter) BlockByIndex(
 			models.ErrBlockNotFound,
 		)
 	}
-	return a.db.BlockByIndex(
-		height+database.BlockInitialIndex,
-		nil,
-	)
+	if err := ctx.Err(); err != nil {
+		return models.Block{}, err
+	}
+	block, err := a.db.BlockByIndex(height+database.BlockInitialIndex, nil)
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return models.Block{}, cancelErr
+	}
+	return block, err
 }
 
-func (a *meshDatabaseAdapter) GetTransactionByHash(
+func (a *meshDatabaseAdapter) GetTransactionByHash(ctx context.Context,
 	hash []byte,
 ) (*models.Transaction, error) {
-	return a.db.GetTransactionByHash(hash, nil)
+	return a.db.GetTransactionByHash(ctx, hash, nil)
 }
 
-func (a *meshDatabaseAdapter) GetTransactionsByBlockHash(
+func (a *meshDatabaseAdapter) GetTransactionsByBlockHash(ctx context.Context,
 	hash []byte,
 ) ([]models.Transaction, error) {
-	return a.db.GetTransactionsByBlockHash(hash, nil)
+	return a.db.GetTransactionsByBlockHash(ctx, hash, nil)
 }
