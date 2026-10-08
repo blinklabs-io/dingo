@@ -168,7 +168,7 @@ func repairPendingMithrilRewardState(
 	cfg *config.Config,
 	logger *slog.Logger,
 ) error {
-	pending, err := mithrilRewardRepairPending(cfg, logger)
+	pending, err := mithrilRewardRepairPending(ctx, cfg, logger)
 	if err != nil || !pending {
 		return err
 	}
@@ -196,7 +196,7 @@ func repairPendingMithrilRewardState(
 	); err != nil {
 		return fmt.Errorf("repairing legacy Mithril reward state: %w", err)
 	}
-	pending, err = mithrilRewardRepairPending(cfg, logger)
+	pending, err = mithrilRewardRepairPending(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -271,11 +271,12 @@ func retryMithrilRewardStateRepair(
 }
 
 func mithrilRewardRepairPending(
+	ctx context.Context,
 	cfg *config.Config,
 	logger *slog.Logger,
 ) (bool, error) {
 	runtime, err := openConfiguredDatabase(
-		context.Background(), cfg, logger, 1,
+		ctx, cfg, logger, 1,
 	)
 	if err != nil {
 		return false, fmt.Errorf("opening database for reward repair check: %w", err)
@@ -284,7 +285,7 @@ func mithrilRewardRepairPending(
 	if err != nil {
 		return false, err
 	}
-	defer runtime.Close(context.Background()) //nolint:contextcheck
+	defer runtime.Close(context.WithoutCancel(ctx))
 	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
 			return false, fmt.Errorf("opening database: %w", recoveryErr)

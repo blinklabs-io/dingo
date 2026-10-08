@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 
@@ -183,13 +184,14 @@ func nonceFromBytes(b []byte) (lcommon.Nonce, error) {
 // point older than that (API storage mode accepts one) the nonce fold
 // recomputes from the stored blocks instead.
 func (ls *LedgerState) queryShelleyDebugChainDepState(
+	ctx context.Context,
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
 	// Every value in the reply is read from this one transaction, tip and epoch
 	// included; see epochAtTip for why neither may come from the in-memory
 	// snapshots.
-	txn, release := ls.readTxn(txn)
+	txn, release := ls.readTxn(ctx, txn)
 	defer release()
 
 	tip, current, err := ls.epochAtPoint(at, txn)
@@ -202,7 +204,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 		lastSlot.Slot = tip.Point.Slot
 	}
 
-	counters, err := ls.chainDepStateOpCertCounters(txn, at)
+	counters, err := ls.chainDepStateOpCertCounters(ctx, txn, at)
 	if err != nil {
 		return nil, err
 	}
@@ -222,6 +224,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 		// describes it at the tip. Recomputed here through the same function
 		// the consensus path uses at a boundary, stopped at the tip.
 		candidate, evolving, err := ls.computeCandidateNonceAsOf(
+			ctx,
 			txn,
 			current.EraId,
 			current.EvolvingNonce,
@@ -423,6 +426,7 @@ func (ls *LedgerState) chainDepStateLabNonce(
 // has since left the active set still has one the chain enforces against any
 // block claiming its cold key.
 func (ls *LedgerState) chainDepStateOpCertCounters(
+	ctx context.Context,
 	txn *database.Txn,
 	at QueryPoint,
 ) (
@@ -432,9 +436,13 @@ func (ls *LedgerState) chainDepStateOpCertCounters(
 	var sequences map[string]uint64
 	var err error
 	if at.pinned() {
-		sequences, err = ls.db.LatestPoolOpCertSequencesAtOrBefore(at.Slot, txn)
+		sequences, err = ls.db.LatestPoolOpCertSequencesAtOrBefore(
+			ctx,
+			at.Slot,
+			txn,
+		)
 	} else {
-		sequences, err = ls.db.LatestPoolOpCertSequences(txn)
+		sequences, err = ls.db.LatestPoolOpCertSequences(ctx, txn)
 	}
 	if err != nil {
 		return nil, err

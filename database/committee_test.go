@@ -15,6 +15,7 @@
 package database_test
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -28,14 +29,17 @@ func TestCommitteeQuorumZeroPersistsAndClearRemainsAbsent(t *testing.T) {
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
-	require.NoError(t, db.SetCommitteeQuorum(big.NewRat(0, 1), 10, nil))
-	quorum, err := db.GetCommitteeQuorum(nil)
+	require.NoError(
+		t,
+		db.SetCommitteeQuorum(context.Background(), big.NewRat(0, 1), 10, nil),
+	)
+	quorum, err := db.GetCommitteeQuorum(context.Background(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, quorum)
 	require.Zero(t, quorum.Sign())
 
-	require.NoError(t, db.ClearCommitteeQuorum(20, nil))
-	quorum, err = db.GetCommitteeQuorum(nil)
+	require.NoError(t, db.ClearCommitteeQuorum(context.Background(), 20, nil))
+	quorum, err = db.GetCommitteeQuorum(context.Background(), nil)
 	require.NoError(t, err)
 	require.Nil(t, quorum)
 }

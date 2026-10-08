@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -115,7 +116,7 @@ func TestLedgerViewPoolCurrentStateRejectsMalformedHashes(t *testing.T) {
 					store.pool = pool
 				},
 			)
-			txn := db.Transaction(false)
+			txn := db.Transaction(context.Background(), false)
 			defer txn.Release()
 			view := &LedgerView{ls: &LedgerState{db: db}, txn: txn}
 
@@ -133,7 +134,7 @@ func TestLedgerViewDRepRegistrationsRejectsMalformedCredential(t *testing.T) {
 			{Credential: make([]byte, lcommon.Blake2b224Size-1)},
 		}
 	})
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 	view := &LedgerView{ls: &LedgerState{db: db}, txn: txn}
 
@@ -196,7 +197,7 @@ func TestQueryLedgerPeerSnapshotRejectsMalformedActivePoolKey(t *testing.T) {
 	})
 	ls := &LedgerState{db: db}
 
-	_, err := ls.queryLedgerPeerSnapshot(olocalstatequery.LedgerPeerKindAll, nil)
+	_, err := ls.queryLedgerPeerSnapshot(context.Background(), olocalstatequery.LedgerPeerKindAll, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "active pool key")
 	require.Contains(t, err.Error(), "invalid blake2b-224 hash")

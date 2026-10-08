@@ -134,7 +134,7 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 		// caller of setEpochCache -- not by hand-assigning
 		// ls.currentEpoch, which would make the rollover trigger below
 		// true regardless of what the import actually swept.
-		loadTxn := db.Transaction(true)
+		loadTxn := db.Transaction(context.Background(), true)
 		require.NoError(t, loadTxn.Do(func(txn *database.Txn) error {
 			return ls.loadEpochs(txn)
 		}))
@@ -144,10 +144,11 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 		ls.currentPParams = currentParams
 
 		var rollover *EpochRolloverResult
-		rolloverTxn := db.Transaction(true)
+		rolloverTxn := db.Transaction(context.Background(), true)
 		require.NoError(t, rolloverTxn.Do(func(txn *database.Txn) error {
 			var rolloverErr error
 			rollover, rolloverErr = ls.processEpochRollover(
+				context.Background(),
 				txn,
 				ls.currentEpoch,
 				ls.currentEra,
@@ -165,6 +166,7 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 	effectiveBalance := func(credentialTag uint8, stakingKey []byte) uint64 {
 		t.Helper()
 		account, err := db.GetAccountByCredential(
+			context.Background(),
 			credentialTag, stakingKey, true, nil,
 		)
 		require.NoError(t, err)

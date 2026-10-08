@@ -30,7 +30,7 @@ func (b *Blockfrost) handlePoolsList(
 		return
 	}
 
-	pools, total, err := b.node.PoolsList(params)
+	pools, total, err := b.node.PoolsList(r.Context(), params)
 	if err != nil {
 		b.logger.Error(
 			"failed to list pools",

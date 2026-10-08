@@ -468,7 +468,7 @@ func TestNewReadSnapshotContextWaitsForLogicalDestructiveTransition(
 	// The metadata rollback is an ordinary combined write nested beneath the
 	// transition. It must remain able to open and commit; making all writes
 	// acquire the transition barrier would deadlock here.
-	metadataTxn := NewMetadataOnlyTxn(db, true)
+	metadataTxn := NewMetadataOnlyTxn(context.Background(), db, true)
 	require.NoError(t, metadataTxn.Commit())
 	finishTransition()
 	transitionFinished = true

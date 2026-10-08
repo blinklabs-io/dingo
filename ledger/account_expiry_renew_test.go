@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -347,9 +348,14 @@ func runRenew(
 	txs ...lcommon.Transaction,
 ) {
 	t.Helper()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.renewWitnessedAccountExpirations(txn, currentEpoch, txs)
+		return ls.renewWitnessedAccountExpirations(
+			context.Background(),
+			txn,
+			currentEpoch,
+			txs,
+		)
 	}))
 }
 
@@ -382,15 +388,24 @@ func TestRenewWitnessedAccountExpirationsGateOn(t *testing.T) {
 	ls, db := newRenewTestLedger(t, true, inactivity)
 
 	cred := renewTestCred(0x01)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:    cred,
-		CredentialTag: 0,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:    cred,
+			CredentialTag: 0,
+			Active:        true,
+		}),
+	)
 
 	runRenew(t, ls, db, epoch, stakeDelegationTx(cred))
 
-	acct, err := db.GetAccountByCredential(0, cred, false, nil)
+	acct, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, epoch+inactivity, acct.ExpirationEpoch)
 }
@@ -404,15 +419,24 @@ func TestRenewWitnessedAccountExpirationsGateOff(t *testing.T) {
 	ls, db := newRenewTestLedger(t, false, 90)
 
 	cred := renewTestCred(0x01)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:    cred,
-		CredentialTag: 0,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:    cred,
+			CredentialTag: 0,
+			Active:        true,
+		}),
+	)
 
 	runRenew(t, ls, db, epoch, stakeDelegationTx(cred))
 
-	acct, err := db.GetAccountByCredential(0, cred, false, nil)
+	acct, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), acct.ExpirationEpoch)
 }
@@ -431,11 +455,14 @@ func TestRenewWitnessedAccountExpirationsWithdrawal(t *testing.T) {
 	// A key-hash reward address (header 0xE1) over the 0xAB..AB credential.
 	rewardAddr := renewTestRewardAddress(t, 0xE1, 0xAB)
 	cred := renewTestCred(0xAB)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:    cred,
-		CredentialTag: 0,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:    cred,
+			CredentialTag: 0,
+			Active:        true,
+		}),
+	)
 
 	tx := mockledger.NewTransactionBuilder()
 	tx.WithValid(true)
@@ -443,7 +470,13 @@ func TestRenewWitnessedAccountExpirationsWithdrawal(t *testing.T) {
 
 	runRenew(t, ls, db, epoch, tx)
 
-	acct, err := db.GetAccountByCredential(0, cred, false, nil)
+	acct, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, epoch+inactivity, acct.ExpirationEpoch)
 }
@@ -459,7 +492,13 @@ func TestRenewWitnessedAccountExpirationsMissingRowIgnored(t *testing.T) {
 	cred := renewTestCred(0x07)
 	runRenew(t, ls, db, 5, stakeDelegationTx(cred))
 
-	_, err := db.GetAccountByCredential(0, cred, true, nil)
+	_, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		true,
+		nil,
+	)
 	require.ErrorIs(t, err, models.ErrAccountNotFound)
 }
 
@@ -472,11 +511,14 @@ func TestRenewWitnessedAccountExpirationsSkipsInvalidTx(t *testing.T) {
 	ls, db := newRenewTestLedger(t, true, 90)
 
 	cred := renewTestCred(0x01)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:    cred,
-		CredentialTag: 0,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:    cred,
+			CredentialTag: 0,
+			Active:        true,
+		}),
+	)
 
 	stakeCred := lcommon.Credential{
 		CredType:   0,
@@ -491,7 +533,13 @@ func TestRenewWitnessedAccountExpirationsSkipsInvalidTx(t *testing.T) {
 
 	runRenew(t, ls, db, 5, tx)
 
-	acct, err := db.GetAccountByCredential(0, cred, false, nil)
+	acct, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), acct.ExpirationEpoch)
 }
