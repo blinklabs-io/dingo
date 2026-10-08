@@ -321,7 +321,7 @@ func newByronShelleyBoundaryLedger(
 	))
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{
 		securityParam: 2,
@@ -352,7 +352,10 @@ func newByronShelleyBoundaryLedger(
 		PrevHash:    firstShelley.PrevHash().Bytes(),
 		Cbor:        firstShelley.Cbor(),
 	})
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), rawBlocks),
+	)
 
 	const (
 		byronEpoch       = uint64(207)
@@ -786,7 +789,7 @@ func TestRollbackChainAndStateClearsShelleyPParamsInsideByronPrefix(
 		lastByron.SlotNumber(),
 		lastByron.Hash().Bytes(),
 	)
-	require.NoError(t, ls.rollbackChainAndStateDeferred(byronPoint, nil))
+	require.NoError(t, ls.rollbackChainAndStateDeferred(context.Background(), byronPoint, nil))
 
 	assert.Equal(t, byronPoint, ls.currentTip.Point)
 	assert.Equal(t, eras.ByronEraDesc.Id, ls.currentEra.Id)

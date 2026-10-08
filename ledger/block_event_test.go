@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -208,13 +209,13 @@ func TestRollbackTxEventsPrecedeLaterForwardTxEvents(t *testing.T) {
 	// The rollback path emits before chain.Rollback truncates; the
 	// block-apply goroutine publishes forward events only after it
 	// observes that truncation, i.e. strictly afterwards.
-	ls.emitRollbackTransactionEvents(undoOrder)
+	ls.emitRollbackTransactionEvents(context.Background(), undoOrder)
 
 	forwardBlk, err := blocks[0].Decode()
 	require.NoError(t, err)
 	forwardTxs := forwardBlk.Transactions()
 	require.NotEmpty(t, forwardTxs)
-	ls.publishTransactionEvent(TransactionEvent{
+	ls.publishTransactionEvent(context.Background(), TransactionEvent{
 		Transaction: forwardTxs[0],
 		Point: ocommon.Point{
 			Slot: blocks[0].Slot,
@@ -314,10 +315,11 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 	}()
 	go func() {
 		applyDone <- ls.submitBlockApplyDBTxn(
+			context.Background(),
 			fixture.currentTip,
 			fixture.currentTip.Point,
 			func(txn *database.Txn) error {
-				return delta.apply(ls, txn)
+				return delta.apply(context.Background(), ls, txn)
 			},
 		)
 	}()
@@ -330,7 +332,7 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 
 	rollbackDone := make(chan error, 1)
 	go func() {
-		rollbackDone <- ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil)
+		rollbackDone <- ls.rollbackChainAndStateDeferred(context.Background(), fixture.ancestorTip.Point, nil)
 	}()
 	testutil.RequireNoReceive(
 		t,
@@ -450,7 +452,7 @@ func TestBlockApplyRejectsRolledBackCandidate(t *testing.T) {
 	rolledBackCandidate := fixture.currentTip.Point
 	require.NoError(
 		t,
-		fixture.ls.rollbackChainAndStateDeferred(
+		fixture.ls.rollbackChainAndStateDeferred(context.Background(),
 			fixture.ancestorTip.Point,
 			nil,
 		),
@@ -458,6 +460,7 @@ func TestBlockApplyRejectsRolledBackCandidate(t *testing.T) {
 
 	operationCalled := false
 	err := fixture.ls.submitBlockApplyDBTxn(
+		context.Background(),
 		fixture.ancestorTip,
 		rolledBackCandidate,
 		func(*database.Txn) error {
@@ -515,8 +518,8 @@ func TestRollbackAndForwardTxEventsStayOrderedAcrossRepeatedCycles(
 
 	point := ocommon.Point{Slot: blocks[0].Slot, Hash: blocks[0].Hash}
 	for range cycles {
-		ls.emitRollbackTransactionEvents(blocks)
-		ls.publishTransactionEvent(TransactionEvent{
+		ls.emitRollbackTransactionEvents(context.Background(), blocks)
+		ls.publishTransactionEvent(context.Background(), TransactionEvent{
 			Transaction: cycleTxs[0],
 			Point:       point,
 			BlockNumber: blocks[0].Number,
@@ -582,7 +585,7 @@ func TestRollbackChainAndStateEmitsUndoEventsBeforeTruncating(t *testing.T) {
 
 	require.NoError(
 		t,
-		ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil),
+		ls.rollbackChainAndStateDeferred(context.Background(), fixture.ancestorTip.Point, nil),
 	)
 
 	// The block above the rollback point was visited by the undo emitter.
@@ -633,7 +636,7 @@ func TestRejectedRollbackEmitsNoUndoEvents(t *testing.T) {
 		fixture.ancestorTip.Point.Slot,
 		testHashBytes("no-such-block"),
 	)
-	require.Error(t, ls.rollbackChainAndStateDeferred(badPoint, nil))
+	require.Error(t, ls.rollbackChainAndStateDeferred(context.Background(), badPoint, nil))
 
 	testutil.RequireNoReceive(
 		t, txCh, 250*time.Millisecond,
@@ -686,17 +689,23 @@ func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
 	// ledger tip is no longer on it, but the fixture's ancestor still
 	// is, so reconciliation rewinds to it.
 	forkHash := testHashBytes("reconcile-undo-race-fork")
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
-		{
-			Slot:        fixture.currentTip.Point.Slot + 5,
-			Hash:        forkHash,
-			BlockNumber: fixture.currentTip.BlockNumber + 1,
-			Type:        1,
-			PrevHash:    fixture.ancestorTip.Point.Hash,
-			Cbor:        []byte{0x80},
-		},
-	}))
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot:        fixture.currentTip.Point.Slot + 5,
+				Hash:        forkHash,
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+				Type:        1,
+				PrevHash:    fixture.ancestorTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
 
 	// Force a concurrent block-apply commit into the window between the
 	// reconciler's ledgerTip snapshot and its later undo-block
@@ -714,16 +723,19 @@ func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
 	}
 	raceNonce := []byte("nonce-race-applied")
 	ls.beforeReconciliationUndoSnapshot = func() {
-		require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
-			{
-				Slot:        raceTip.Point.Slot,
-				Hash:        raceTip.Point.Hash,
-				BlockNumber: raceTip.BlockNumber,
-				Type:        1,
-				PrevHash:    forkHash,
-				Cbor:        []byte{0x80},
-			},
-		}))
+		require.NoError(
+			t,
+			ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{
+				{
+					Slot:        raceTip.Point.Slot,
+					Hash:        raceTip.Point.Hash,
+					BlockNumber: raceTip.BlockNumber,
+					Type:        1,
+					PrevHash:    forkHash,
+					Cbor:        []byte{0x80},
+				},
+			}),
+		)
 		require.NoError(t, ls.db.SetBlockNonce(
 			raceTip.Point.Hash,
 			raceTip.Point.Slot,
@@ -737,7 +749,10 @@ func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
 		ls.Unlock()
 	}
 
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(
+		t,
+		ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()),
+	)
 
 	// Both the originally-applied block and the one applied during the
 	// race must have been considered for undo: each is unresolvable
@@ -805,19 +820,28 @@ func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
 	// applied -- from the primary chain's active index, retaining it
 	// only in the manager's block cache.
 	forkHash := testHashBytes("reconcile-undo-fork")
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
-		{
-			Slot:        fixture.currentTip.Point.Slot + 5,
-			Hash:        forkHash,
-			BlockNumber: fixture.currentTip.BlockNumber + 1,
-			Type:        1,
-			PrevHash:    fixture.ancestorTip.Point.Hash,
-			Cbor:        []byte{0x80},
-		},
-	}))
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot:        fixture.currentTip.Point.Slot + 5,
+				Hash:        forkHash,
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+				Type:        1,
+				PrevHash:    fixture.ancestorTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
 
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(
+		t,
+		ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()),
+	)
 
 	evt := testutil.RequireReceive(
 		t, errCh, testutil.AsyncWait,
@@ -877,23 +901,33 @@ func TestReconciliationUndoDegradesGracefullyAfterRestart(t *testing.T) {
 	// removes fixture.currentTip from the active index, retaining it
 	// only in the (about to be discarded) manager's block cache.
 	forkHash := testHashBytes("reconcile-undo-restart-fork")
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
-		{
-			Slot:        fixture.currentTip.Point.Slot + 5,
-			Hash:        forkHash,
-			BlockNumber: fixture.currentTip.BlockNumber + 1,
-			Type:        1,
-			PrevHash:    fixture.ancestorTip.Point.Hash,
-			Cbor:        []byte{0x80},
-		},
-	}))
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot:        fixture.currentTip.Point.Slot + 5,
+				Hash:        forkHash,
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+				Type:        1,
+				PrevHash:    fixture.ancestorTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
 
 	// Simulate a restart: a brand new ChainManager over the same
 	// database has an empty block cache, so it cannot answer for a
 	// block chain selection already replaced before this process
 	// started, the same as after a real process restart.
-	restartedCM, err := chain.NewManager(fixture.ls.db, nil)
+	restartedCM, err := chain.NewManager(
+		context.Background(),
+		fixture.ls.db,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -902,7 +936,10 @@ func TestReconciliationUndoDegradesGracefullyAfterRestart(t *testing.T) {
 	ls.config.ChainManager = restartedCM
 	ls.chain = restartedCM.PrimaryChain()
 
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(
+		t,
+		ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()),
+	)
 
 	// The reconciliation still lands: the ledger tip moves to the
 	// ancestor even though its undo notification could not be built.
@@ -969,17 +1006,23 @@ func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewin
 	// ledger tip (fixture.currentTip) is no longer on the primary chain,
 	// but the common ancestor (fixture.ancestorTip) still is.
 	forkHash := testHashBytes("reconcile-undo-crash-recovery-fork")
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
-		{
-			Slot:        fixture.currentTip.Point.Slot + 5,
-			Hash:        forkHash,
-			BlockNumber: fixture.currentTip.BlockNumber + 1,
-			Type:        1,
-			PrevHash:    fixture.ancestorTip.Point.Hash,
-			Cbor:        []byte{0x80},
-		},
-	}))
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot:        fixture.currentTip.Point.Slot + 5,
+				Hash:        forkHash,
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+				Type:        1,
+				PrevHash:    fixture.ancestorTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
 
 	// Simulate the crash itself: truncate the primary chain to the
 	// ancestor directly, the same call RewindPrimaryChainToPoint makes
@@ -991,6 +1034,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewin
 	require.NoError(
 		t,
 		ls.config.ChainManager.RewindPrimaryChainToPoint(
+			context.Background(),
 			fixture.ancestorTip.Point,
 		),
 	)
@@ -1001,7 +1045,10 @@ func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewin
 	)
 
 	// The "restarted" reconciliation attempt.
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(
+		t,
+		ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()),
+	)
 
 	evt := testutil.RequireReceive(
 		t, errCh, testutil.AsyncWait,
@@ -1031,15 +1078,21 @@ func TestReconcileKeepsIntentWhenMetadataRollbackFailsAfterChainRewind(
 	require.NotZero(t, txSubID)
 	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
 	forkHash := testHashBytes("reconcile-metadata-failure-fork")
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
-		Slot:        fixture.currentTip.Point.Slot + 5,
-		Hash:        forkHash,
-		BlockNumber: fixture.currentTip.BlockNumber + 1,
-		Type:        1,
-		PrevHash:    fixture.ancestorTip.Point.Hash,
-		Cbor:        []byte{0x80},
-	}}))
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		}}),
+	)
 
 	injected := errors.New("injected metadata truncation failure")
 	ls.rollbackTruncateAfterSlotFunc = func(
@@ -1049,7 +1102,7 @@ func TestReconcileKeepsIntentWhenMetadataRollbackFailsAfterChainRewind(
 	) (ochainsync.Tip, []byte, error) {
 		return ochainsync.Tip{}, nil, injected
 	}
-	err := ls.reconcilePrimaryChainTipWithLedgerTip()
+	err := ls.reconcilePrimaryChainTipWithLedgerTip(context.Background())
 	require.ErrorIs(t, err, injected)
 	require.Equal(t, fixture.ancestorTip, ls.chain.Tip())
 	require.Equal(t, fixture.currentTip, ls.currentTip)
@@ -1117,6 +1170,7 @@ func TestRollbackRetainsIntentUntilOrderedDelivery(t *testing.T) {
 			Type:     1,
 		}}
 		if err := ls.rollbackWithBlocksRetainingIntent(
+			context.Background(),
 			fixture.ancestorTip.Point,
 			blocks,
 			false,
@@ -1124,7 +1178,7 @@ func TestRollbackRetainsIntentUntilOrderedDelivery(t *testing.T) {
 			done <- err
 			return
 		}
-		ls.emitRollbackTransactionEvents(blocks)
+		ls.emitRollbackTransactionEvents(context.Background(), blocks)
 		if !bus.PublishOrdered(
 			TransactionEventType,
 			event.NewEvent(TransactionEventType, TransactionEvent{}),
@@ -1132,7 +1186,7 @@ func TestRollbackRetainsIntentUntilOrderedDelivery(t *testing.T) {
 			done <- errors.New("publish ordered test event")
 			return
 		}
-		done <- ls.finishRollbackIntentForPoint(fixture.ancestorTip.Point)
+		done <- ls.finishRollbackIntentForPoint(context.Background(), fixture.ancestorTip.Point)
 	}()
 	testutil.WaitForCondition(
 		t,
@@ -1195,17 +1249,23 @@ func TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmit
 
 	// Diverge the primary chain exactly as the sibling tests above.
 	forkHash := testHashBytes("reconcile-mithril-boundary-fork")
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
-		{
-			Slot:        fixture.currentTip.Point.Slot + 5,
-			Hash:        forkHash,
-			BlockNumber: fixture.currentTip.BlockNumber + 1,
-			Type:        1,
-			PrevHash:    fixture.ancestorTip.Point.Hash,
-			Cbor:        []byte{0x80},
-		},
-	}))
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot:        fixture.currentTip.Point.Slot + 5,
+				Hash:        forkHash,
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+				Type:        1,
+				PrevHash:    fixture.ancestorTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
 
 	// The ancestor sits below this Mithril boundary, so ls.rollback would
 	// reject this target deterministically -- the same rejection
@@ -1215,7 +1275,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmit
 	// undo event, and before ever calling RewindPrimaryChainToPoint.
 	ls.mithrilLedgerSlot = fixture.ancestorTip.Point.Slot + 1
 
-	err := ls.reconcilePrimaryChainTipWithLedgerTip()
+	err := ls.reconcilePrimaryChainTipWithLedgerTip(context.Background())
 	require.ErrorIs(t, err, ErrRollbackExceedsMithrilBoundary)
 
 	// No undo notification for a rollback that is rejected outright, not
@@ -1246,15 +1306,21 @@ func TestReconcileDeclinesPruneFloorWithoutRewindingOrPersistingIntent(
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	forkHash := testHashBytes("reconcile-prune-floor-fork")
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
-		Slot:        fixture.currentTip.Point.Slot + 5,
-		Hash:        forkHash,
-		BlockNumber: fixture.currentTip.BlockNumber + 1,
-		Type:        1,
-		PrevHash:    fixture.ancestorTip.Point.Hash,
-		Cbor:        []byte{0x80},
-	}}))
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		}}),
+	)
 	chainTip := ls.chain.Tip()
 	require.NoError(t, ls.db.SetSyncState(
 		database.ConsumedUtxoPruneFloorSyncKey,
@@ -1269,7 +1335,7 @@ func TestReconcileDeclinesPruneFloorWithoutRewindingOrPersistingIntent(
 	require.NotZero(t, txSubID)
 	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
 
-	err := ls.reconcilePrimaryChainTipWithLedgerTip()
+	err := ls.reconcilePrimaryChainTipWithLedgerTip(context.Background())
 	require.ErrorIs(t, err, ErrRollbackBelowUtxoPruneFloor)
 	require.Equal(t, chainTip, ls.chain.Tip())
 	require.Equal(t, fixture.currentTip, ls.currentTip)
@@ -1302,16 +1368,19 @@ func TestReconciliationUndoBlocksIncludesNilNonceRecords(t *testing.T) {
 	// reconciler) with one more Byron-like applied block. Its durable
 	// applied-point row intentionally has no evolving nonce.
 	byronLikeHash := testHashBytes("byron-like-no-nonce-row")
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
-		{
-			Slot:        fixture.currentTip.Point.Slot + 5,
-			Hash:        byronLikeHash,
-			BlockNumber: fixture.currentTip.BlockNumber + 1,
-			Type:        1,
-			PrevHash:    fixture.currentTip.Point.Hash,
-			Cbor:        []byte{0x80},
-		},
-	}))
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot:        fixture.currentTip.Point.Slot + 5,
+				Hash:        byronLikeHash,
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+				Type:        1,
+				PrevHash:    fixture.currentTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
 	require.NoError(t, ls.db.SetBlockNonce(
 		byronLikeHash,
 		fixture.currentTip.Point.Slot+5,
@@ -1321,6 +1390,7 @@ func TestReconciliationUndoBlocksIncludesNilNonceRecords(t *testing.T) {
 	))
 
 	blocks := ls.reconciliationUndoBlocks(
+		context.Background(),
 		fixture.ancestorTip.Point,
 		fixture.currentTip.Point.Slot+5,
 		fixture.currentTip.BlockNumber+1,
@@ -1366,16 +1436,20 @@ func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
 	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
 
 	byronLikeHash := testHashBytes("byron-like-absent-nonce-row")
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
-		Slot:        fixture.currentTip.Point.Slot + 5,
-		Hash:        byronLikeHash,
-		BlockNumber: fixture.currentTip.BlockNumber + 1,
-		Type:        1,
-		PrevHash:    fixture.currentTip.Point.Hash,
-		Cbor:        []byte{0x80},
-	}}))
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        byronLikeHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		}}),
+	)
 
 	blocks := ls.reconciliationUndoBlocks(
+		context.Background(),
 		fixture.ancestorTip.Point,
 		fixture.currentTip.Point.Slot+5,
 		fixture.currentTip.BlockNumber+1,
@@ -1414,28 +1488,41 @@ func TestReconcilePrimaryChainTipWithLedgerTipSucceedsBeforeSetLedger(
 
 	// Diverge the primary chain exactly as in the tests above.
 	forkHash := testHashBytes("reconcile-undo-presetledger-fork")
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
-		{
-			Slot:        fixture.currentTip.Point.Slot + 5,
-			Hash:        forkHash,
-			BlockNumber: fixture.currentTip.BlockNumber + 1,
-			Type:        1,
-			PrevHash:    fixture.ancestorTip.Point.Hash,
-			Cbor:        []byte{0x80},
-		},
-	}))
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot:        fixture.currentTip.Point.Slot + 5,
+				Hash:        forkHash,
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+				Type:        1,
+				PrevHash:    fixture.ancestorTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
 
 	// Simulate the pre-SetLedger startup window: a brand new
 	// ChainManager over the same database, with SetLedger never
 	// called, the same as NewLedgerState sees it in node.go.
-	presetupCM, err := chain.NewManager(fixture.ls.db, nil)
+	presetupCM, err := chain.NewManager(
+		context.Background(),
+		fixture.ls.db,
+		nil,
+	)
 	require.NoError(t, err)
 	require.False(t, presetupCM.SecurityParamConfigured())
 	ls.config.ChainManager = presetupCM
 	ls.chain = presetupCM.PrimaryChain()
 
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(
+		t,
+		ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()),
+	)
 
 	require.Equal(t, fixture.ancestorTip, ls.currentTip)
 	dbTip, err := ls.db.GetTip(nil)
@@ -1463,7 +1550,7 @@ func TestBlocksAboveSlotServesLedgerErrorOnlySubscribers(t *testing.T) {
 
 	require.NoError(
 		t,
-		ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil),
+		ls.rollbackChainAndStateDeferred(context.Background(), fixture.ancestorTip.Point, nil),
 	)
 
 	evt := testutil.RequireReceive(
@@ -1493,7 +1580,7 @@ func TestRejectedWindowedRollbackEmitsNoUndoEvents(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
@@ -1514,7 +1601,10 @@ func TestRejectedWindowedRollbackEmitsNoUndoEvents(t *testing.T) {
 		prev = h
 	}
 	require.Len(t, raw, blockCount)
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(raw))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), raw),
+	)
 
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
@@ -1613,7 +1703,7 @@ func TestEmitTransactionRollbackEvents_decodeFailureEmitsLedgerErrorPerBlock(
 		},
 	}
 
-	ls.emitRollbackTransactionEvents(rolledBack)
+	ls.emitRollbackTransactionEvents(context.Background(), rolledBack)
 
 	for i, wantSlot := range []uint64{100, 200} {
 		evt := testutil.RequireReceive(

@@ -37,6 +37,9 @@ type forgingMetrics struct {
 	forgeForged       prometheus.Counter
 	forgeAdopted      prometheus.Counter
 	forgeCouldNot     prometheus.Counter
+	// Slots this node won the leader election for and did not turn into a
+	// block of its own on the chain.
+	forgeMissedLeaderSlots prometheus.Counter
 
 	// Dingo-specific (no cardano-node equivalent)
 	slotBattlesTotal prometheus.Counter
@@ -165,6 +168,13 @@ func initForgingMetrics(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_Forge_could_not_forge_int",
 			Help: "slots where forging failed (syncing, build error, etc)",
+		},
+	)
+
+	m.forgeMissedLeaderSlots = factory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_missed_leader_slots_total",
+			Help: "slots confirmed by leader selection that did not end with a block of this node adopted (build, validation or adoption failure, a lost slot battle, or a post-selection refusal); excludes pre-selection KES and tip safety refusals",
 		},
 	)
 

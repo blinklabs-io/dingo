@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -24,10 +25,11 @@ import (
 // slot and clears deleted_slot for any that were soft-deleted after that
 // slot. This is used during chain rollbacks.
 func (d *Database) DeleteConstitutionsAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().DeleteConstitutionsAfterSlot(
 			slot,
 			txn.Metadata(),

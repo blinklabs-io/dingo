@@ -84,7 +84,11 @@ const (
 )
 
 type Peer struct {
-	LastActivity       time.Time
+	LastActivity time.Time
+	// LastServedActivity is when this peer last consumed from this node
+	// (chainsync/blockfetch server requests, keepalive pings). Kept apart
+	// from LastActivity, which drives outbound hot/churn decisions.
+	LastServedActivity time.Time
 	LastTestTime       time.Time // When peer was last tested for suitability
 	LastBlockFetchTime time.Time // Timestamp of last observed block fetch
 	FirstSeen          time.Time // When peer was first seen (used for tenure calculation)

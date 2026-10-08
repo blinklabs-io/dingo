@@ -79,7 +79,7 @@ func TestPreprodByronChainIsValid(t *testing.T) {
 		"preprod/config.json",
 	)
 	require.NoError(t, err)
-	cm, err := chain.NewManager(newTestDB(t), nil)
+	cm, err := chain.NewManager(context.Background(), newTestDB(t), nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2160}))
 	primary := cm.PrimaryChain()
@@ -102,14 +102,19 @@ func TestPreprodByronChainIsValid(t *testing.T) {
 			"envelope of preprod Byron block at slot %d",
 			block.SlotNumber(),
 		)
-		state, err = ls.advanceByronPBFTState(state, block, true)
+		state, err = ls.advanceByronPBFTState(
+			context.Background(),
+			state,
+			block,
+			true,
+		)
 		require.NoError(
 			t,
 			err,
 			"apply preprod Byron block at slot %d",
 			block.SlotNumber(),
 		)
-		require.NoError(t, primary.AddBlock(block, nil))
+		require.NoError(t, primary.AddBlock(context.Background(), block, nil))
 		parent = envelopeParentFromBlock(block)
 	}
 	require.Equal(t, uint64(84_242), parent.slot)

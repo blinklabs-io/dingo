@@ -124,8 +124,35 @@ const (
 	// committeeAuthMaintenanceInterval is deliberately long enough that the
 	// background sweep cannot compete with block application, while ensuring a
 	// credential that never re-authorizes still eventually drains.
-	committeeAuthMaintenanceInterval = 24 * time.Hour
+	committeeAuthMaintenanceInterval  = 24 * time.Hour
+	committeeAuthMaintenanceBatchSize = 128
 )
+
+const committeeAuthMaintenanceCandidatesQuery = `
+SELECT DISTINCT cold_credential_tag, cold_credential
+FROM auth_committee_hot
+WHERE added_slot <= ?
+ORDER BY cold_credential_tag, cold_credential
+LIMIT ?`
+
+const committeeAuthMaintenanceNextCandidatesQuery = `
+SELECT DISTINCT cold_credential_tag, cold_credential
+FROM auth_committee_hot
+WHERE added_slot <= ?
+  AND (cold_credential_tag, cold_credential) > (?, ?)
+ORDER BY cold_credential_tag, cold_credential
+LIMIT ?`
+
+type committeeAuthIdentity struct {
+	tag        uint8
+	credential []byte
+}
+
+type committeeAuthImmutableSlotState struct {
+	everSet bool
+	known   bool
+	slot    uint64
+}
 
 // committeeAuthRetentionSlots returns the configured rollback window, falling
 // back to the default. Zero means "unset", not "disabled", so a Store built
@@ -152,16 +179,25 @@ func (s *Store) committeeAuthRetention() uint64 {
 //
 // The caller -- a periodic sync outside this package, since sqlstore cannot
 // import chain -- may call this from a goroutine independent of any
-// certificate write or the maintenance sweep, so this is lock-free and never
-// blocks.
+// certificate write or the maintenance sweep. The state changes together
+// under one lock so a prune cannot observe fields from different updates.
 func (s *Store) SetCommitteeAuthImmutableSlot(slot uint64, known bool) {
-	s.committeeAuthImmutableSlotEverSet.Store(true)
-	if !known {
-		s.committeeAuthImmutableSlotKnown.Store(false)
-		return
+	s.committeeAuthImmutableSlotMu.Lock()
+	s.committeeAuthImmutableSlot = committeeAuthImmutableSlotState{
+		everSet: true,
+		known:   known,
+		slot:    slot,
 	}
-	s.committeeAuthImmutableSlot.Store(slot)
-	s.committeeAuthImmutableSlotKnown.Store(true)
+	s.committeeAuthImmutableSlotMu.Unlock()
+}
+
+func (s *Store) invalidateCommitteeAuthImmutableSlot() {
+	s.committeeAuthImmutableSlotMu.Lock()
+	if s.committeeAuthImmutableSlot.everSet {
+		s.committeeAuthImmutableSlot.known = false
+		s.committeeAuthImmutableSlot.slot = 0
+	}
+	s.committeeAuthImmutableSlotMu.Unlock()
 }
 
 // committeeAuthHorizon returns the retention horizon for a prune call at
@@ -170,8 +206,14 @@ func (s *Store) SetCommitteeAuthImmutableSlot(slot uint64, known bool) {
 // use the slot-window assumption once a live syncer is wired but currently
 // has no value.
 func (s *Store) committeeAuthHorizon(tipSlot uint64) (uint64, bool) {
-	if s.committeeAuthImmutableSlotEverSet.Load() &&
-		!s.committeeAuthImmutableSlotKnown.Load() {
+	s.committeeAuthImmutableSlotMu.RLock()
+	defer s.committeeAuthImmutableSlotMu.RUnlock()
+	return s.committeeAuthHorizonLocked(tipSlot)
+}
+
+func (s *Store) committeeAuthHorizonLocked(tipSlot uint64) (uint64, bool) {
+	state := s.committeeAuthImmutableSlot
+	if state.everSet && !state.known {
 		return 0, false
 	}
 	retention := s.committeeAuthRetention()
@@ -180,8 +222,8 @@ func (s *Store) committeeAuthHorizon(tipSlot uint64) (uint64, bool) {
 		return 0, false
 	}
 	horizon := tipSlot - retention
-	if s.committeeAuthImmutableSlotKnown.Load() {
-		if live := s.committeeAuthImmutableSlot.Load(); live < horizon {
+	if state.known {
+		if live := state.slot; live < horizon {
 			horizon = live
 		}
 	}
@@ -203,9 +245,14 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 	coldCredential []byte,
 	tipSlot uint64,
 ) (int64, error) {
-	horizon, ok := s.committeeAuthHorizon(tipSlot)
+	s.committeeAuthImmutableSlotMu.RLock()
+	defer s.committeeAuthImmutableSlotMu.RUnlock()
+	horizon, ok := s.committeeAuthHorizonLocked(tipSlot)
 	if !ok {
 		return 0, nil
+	}
+	if s.committeeAuthPruneLocked != nil {
+		s.committeeAuthPruneLocked()
 	}
 	// The inner ORDER BY ... LIMIT ? OFFSET 1 is the rule: skip the single
 	// newest row at or below the horizon, take up to a batch of the rest. The
@@ -254,7 +301,9 @@ WHERE id IN (
 func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
 	ctx context.Context,
 ) error {
-	tip, err := s.GetTip(nil)
+	tipTxn := s.ReadTransaction(ctx)
+	tip, err := s.GetTip(tipTxn) //nolint:contextcheck // tipTxn carries ctx
+	_ = tipTxn.Rollback()
 	if err != nil {
 		return fmt.Errorf("read tip for committee hot maintenance: %w", err)
 	}
@@ -262,53 +311,95 @@ func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
 	if !ok {
 		return nil
 	}
-	db := s.instrumentedQueryer(s.writeDB)
+	var after *committeeAuthIdentity
 	for {
-		result, err := db.ExecContext(ctx, `
-DELETE FROM auth_committee_hot
-WHERE id IN (
-    SELECT id FROM (
-        SELECT old.id
-        FROM auth_committee_hot old
-        WHERE old.added_slot <= ?
-          AND EXISTS (
-              SELECT 1
-              FROM auth_committee_hot newer
-              WHERE newer.cold_credential_tag = old.cold_credential_tag
-                AND newer.cold_credential = old.cold_credential
-                AND newer.added_slot <= ?
-                AND (
-                    newer.added_slot > old.added_slot
-                    OR (
-                        newer.added_slot = old.added_slot
-                        AND newer.certificate_id > old.certificate_id
-                    )
-                    OR (
-                        newer.added_slot = old.added_slot
-                        AND newer.certificate_id = old.certificate_id
-                        AND newer.id > old.id
-                    )
-                )
-          )
-        ORDER BY old.added_slot ASC, old.certificate_id ASC, old.id ASC
-        LIMIT ?
-    ) superseded
-)`, horizon, horizon, committeeAuthPruneBatch)
+		// Candidate discovery closes its read cursor before any write batch so
+		// the full history scan never occupies the single SQLite writer.
+		identities, err := s.committeeAuthMaintenanceCandidates(
+			ctx, horizon, after,
+		)
 		if err != nil {
-			return fmt.Errorf(
-				"prune superseded committee hot authorizations in maintenance: %w",
-				err,
-			)
+			return err
 		}
-		pruned, err := result.RowsAffected()
-		if err != nil {
-			return fmt.Errorf(
-				"prune superseded committee hot authorizations in maintenance: row count: %w",
-				err,
-			)
-		}
-		if pruned == 0 {
+		if len(identities) == 0 {
 			return nil
 		}
+		for _, identity := range identities {
+			for {
+				var pruned int64
+				pruneErr := s.withWriteTransactionContext(
+					ctx,
+					nil,
+					func(db queryer, txnCtx context.Context) error {
+						var err error
+						pruned, err = s.pruneCommitteeHotAuthorizations(
+							txnCtx,
+							db,
+							identity.tag,
+							identity.credential,
+							tip.Point.Slot,
+						)
+						return err
+					},
+				)
+				if pruneErr != nil {
+					return fmt.Errorf(
+						"prune committee hot authorization maintenance: %w",
+						pruneErr,
+					)
+				}
+				if pruned == 0 {
+					break
+				}
+			}
+		}
+		after = &identities[len(identities)-1]
 	}
+}
+
+func (s *Store) committeeAuthMaintenanceCandidates(
+	ctx context.Context,
+	horizon uint64,
+	after *committeeAuthIdentity,
+) ([]committeeAuthIdentity, error) {
+	query := committeeAuthMaintenanceCandidatesQuery
+	args := []any{horizon}
+	if after != nil {
+		query = committeeAuthMaintenanceNextCandidatesQuery
+		args = append(args, after.tag, after.credential)
+	}
+	args = append(args, committeeAuthMaintenanceBatchSize)
+
+	rows, err := s.instrumentedQueryer(s.readDB).QueryContext(
+		ctx, query, args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"select committee hot authorization maintenance candidates: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	identities := make(
+		[]committeeAuthIdentity, 0, committeeAuthMaintenanceBatchSize,
+	)
+	for rows.Next() {
+		var identity committeeAuthIdentity
+		if err := rows.Scan(&identity.tag, &identity.credential); err != nil {
+			return nil, fmt.Errorf(
+				"scan committee hot authorization maintenance candidate: %w",
+				err,
+			)
+		}
+		identity.credential = append([]byte(nil), identity.credential...)
+		identities = append(identities, identity)
+	}
+	rowsErr := rows.Err()
+	if rowsErr != nil {
+		return nil, fmt.Errorf(
+			"read committee hot authorization maintenance candidates: %w",
+			rowsErr,
+		)
+	}
+	return identities, nil
 }

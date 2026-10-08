@@ -216,7 +216,7 @@ func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for id := uint64(2); id < concurrentCommits+2; id++ {
-			txn := db.Transaction(true)
+			txn := db.Transaction(context.Background(), true)
 			if err := db.BlockCreate(testBlock(id, byte(id)), txn); err != nil {
 				txn.Rollback() //nolint:errcheck
 				return

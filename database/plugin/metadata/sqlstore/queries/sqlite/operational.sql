@@ -49,9 +49,6 @@ ON CONFLICT (sync_key) DO UPDATE SET value = excluded.value;
 DELETE FROM sync_state
 WHERE sync_key = ?;
 
--- name: ClearSyncState :exec
-DELETE FROM sync_state;
-
 -- name: GetEpoch :one
 SELECT id, epoch_id, start_slot, nonce, evolving_nonce, candidate_nonce,
        last_epoch_block_nonce, era_id, slot_length, length_in_slots

@@ -69,7 +69,7 @@ func TestLeiosFetchVoteRequestBoundOnWire(t *testing.T) {
 			make([]oleiosfetch.MsgVotesRequestVoteId, 1000),
 		),
 	)
-	segment := peer.readResponse(t, 5*time.Second)
+	segment := peer.readResponse(t, testutil.AsyncWait)
 	msg, err := oleiosfetch.NewMsgFromCbor(
 		oleiosfetch.MessageTypeVotes,
 		segment.Payload,
@@ -110,7 +110,7 @@ func TestLeiosFetchLargeVoteRequestWithoutManager(t *testing.T) {
 			make([]oleiosfetch.MsgVotesRequestVoteId, 1001),
 		),
 	)
-	segment := peer.readResponse(t, 5*time.Second)
+	segment := peer.readResponse(t, testutil.AsyncWait)
 	require.Equal(
 		t,
 		[]byte{0x82, oleiosfetch.MessageTypeVotes, 0x80},
@@ -119,7 +119,7 @@ func TestLeiosFetchLargeVoteRequestWithoutManager(t *testing.T) {
 	// A second request demonstrates that the unavailable-manager response
 	// returned protocol agency instead of closing or parking the bearer.
 	peer.send(t, oleiosfetch.ProtocolId, oleiosfetch.NewMsgVotesRequest(nil))
-	segment = peer.readResponse(t, 5*time.Second)
+	segment = peer.readResponse(t, testutil.AsyncWait)
 	require.Equal(
 		t,
 		[]byte{0x82, oleiosfetch.MessageTypeVotes, 0x80},
