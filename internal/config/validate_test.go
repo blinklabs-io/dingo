@@ -1084,6 +1084,18 @@ func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
 	}
 }
 
+func TestValidateDatabaseLifecycleSnapshotMaxCommitPause(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.DatabaseLifecycle.SnapshotMaxCommitPause = -time.Second
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "snapshotMaxCommitPause")
+
+	cfg = validTestConfig()
+	cfg.DatabaseLifecycle.SnapshotMaxCommitPause = time.Minute
+	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
 // TestValidateDatabaseLifecycleSnapshotDirWritability guards against a raw
 // filesystem permission error surfacing deep inside a snapshot attempt
 // instead of a clean, actionable one at startup -- the failure mode for a
@@ -1238,6 +1250,84 @@ func TestValidateBarkDatabaseServiceSecurity(t *testing.T) {
 			t,
 			err,
 			"must be a 32-byte SHA-256 certificate fingerprint",
+		)
+	})
+}
+
+func TestValidateBarkLifecycleSecurity(t *testing.T) {
+	t.Parallel()
+
+	newConfig := func() *Config {
+		cfg := validTestConfig()
+		cfg.BarkPort = 8091
+		cfg.BarkClientCAFilePath = "/certs/ca.crt"
+		cfg.BarkLifecycleEnabled = true
+		cfg.BarkLifecycleOperatorCertificateFingerprints = []string{
+			strings.Repeat("cd", 32),
+		}
+		cfg.TlsCertFilePath = "/certs/tls.crt"
+		cfg.TlsKeyFilePath = "/certs/tls.key"
+		return cfg
+	}
+
+	t.Run("complete policy", func(t *testing.T) {
+		require.NoError(t, newConfig().validate(RunModeServe, minUnprivilegedPort))
+	})
+
+	t.Run("database credentials do not enable lifecycle", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.BarkLifecycleEnabled = false
+		cfg.BarkLifecycleOperatorCertificateFingerprints = nil
+		cfg.BarkOperatorCertificateFingerprints = []string{
+			strings.Repeat("ab", 32),
+		}
+		require.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
+	})
+
+	t.Run("allowlist requires explicit enablement", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.BarkLifecycleEnabled = false
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(
+			t,
+			err,
+			"barkLifecycleOperatorCertificateFingerprints requires barkLifecycleEnabled",
+		)
+	})
+
+	t.Run("enabled service requires port", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.BarkPort = 0
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(t, err, "barkPort must be non-zero")
+	})
+
+	t.Run("enabled service requires client CA", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.BarkClientCAFilePath = ""
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(t, err, "barkClientCaFilePath is required")
+	})
+
+	t.Run("enabled service requires its own operator allowlist", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.BarkLifecycleOperatorCertificateFingerprints = nil
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(
+			t,
+			err,
+			"barkLifecycleOperatorCertificateFingerprints requires at least one",
+		)
+	})
+
+	t.Run("invalid lifecycle operator fingerprint", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.BarkLifecycleOperatorCertificateFingerprints = []string{"invalid"}
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(
+			t,
+			err,
+			"barkLifecycleOperatorCertificateFingerprints[0] must be a 32-byte",
 		)
 	})
 }

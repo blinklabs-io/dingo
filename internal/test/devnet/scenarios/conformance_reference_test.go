@@ -17,7 +17,6 @@
 package scenarios
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -26,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/nodeparity"
 	"github.com/blinklabs-io/dingo/internal/test/devnet"
+	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/require"
 )
@@ -78,22 +78,10 @@ func TestCardanoProducerChainAdvances(t *testing.T) {
 // the whole UTxO set) in epochs 1 and 2. This exercises both bootstrap reward
 // updates instead of sampling several points within an arbitrary epoch.
 //
-// Sampling, not true per-block comparison: Dingo's LocalStateQuery server
-// (ouroboros/localstatequery.go) currently answers every Acquire against
-// its live tip regardless of the requested point — it has no point-specific
-// ledger view yet. That means
-// Acquire(specific historical point) cannot be used to pin an exact block on
-// Dingo today, so a true block-by-block replay comparison isn't possible
-// yet. Instead, each sample: (1) polls both nodes' chain tips over NtN until
-// they report an identical slot and block hash, (2) immediately queries both
-// nodes' LocalStateQuery (AcquireVolatileTip, i.e. "current tip"), and
-// (3) re-polls both tips afterward to confirm neither node advanced during
-// the query round trip, discarding and retrying the sample if it did. This
-// still anchors every successful sample to one exact, agreed-upon block —
-// it just doesn't visit every block, since finding a settled common tip and
-// running the LocalStateQuery calls per node is far more expensive than a
-// chain-tip poll. Revisit this once lands: Acquire(point) would let
-// this walk every block, not just periodic settled samples.
+// Each sample acquires the trailing node's tip as a specific point on both
+// nodes' LocalStateQuery, so both answers describe one block both chains
+// contain even while the nodes keep forging. It samples rather than visiting
+// every block because each sample walks the whole UTxO set on both nodes.
 func TestLedgerStateConsensus(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
@@ -139,8 +127,9 @@ func TestLedgerStateConsensus(t *testing.T) {
 		)
 		h.WaitForNodeSlot(cardanoEP, targetSlot, sampleTimeout)
 
-		dingoState, cardanoState, tip := sampleLedgerStateAtStableTip(
+		dingoState, cardanoState, tip := sampleLedgerStateAtCommonPoint(
 			t, h, dingoEP, cardanoEP, dingoNtc, cardanoNtc, cfg.NetworkMagic,
+			(targetSlot/cfg.EpochLength+1)*cfg.EpochLength,
 			sampleTimeout,
 		)
 
@@ -192,22 +181,23 @@ func TestLedgerStateConsensus(t *testing.T) {
 	}
 }
 
-// sampleLedgerStateAtStableTip polls dingoEP and cardanoEP until they
-// report an identical chain tip, queries both nodes' LocalStateQuery
-// interfaces, and confirms neither node's tip moved during the query round
-// trip. If either node advanced in the meantime, the two LocalStateQuery
-// responses would reflect different blocks and any divergence found would
-// be meaningless noise rather than a real conformance failure, so the
-// sample is discarded and retried instead.
+// sampleLedgerStateAtCommonPoint acquires one block on both nodes and samples
+// their ledger state there, so both answers describe the same canonical block
+// however far either node advances while the queries run.
 //
-// Queries and retries share the sample timeout. The caller also verifies
-// the observed epoch so a delayed sample cannot silently miss a boundary.
-func sampleLedgerStateAtStableTip(
+// The candidate is the trailing node's tip: the leading node has normally
+// applied it already, and when the two have forked its Acquire fails with
+// point-not-on-chain, so two successful Acquires prove a common block. A
+// candidate at or past endSlot belongs to a later epoch than the caller
+// intends, and every later candidate would too, so the sample fails rather
+// than retrying. Queries and retries share the sample timeout.
+func sampleLedgerStateAtCommonPoint(
 	t *testing.T,
 	h *devnet.TestHarness,
 	dingoEP, cardanoEP devnet.NodeEndpoint,
 	dingoNtc, cardanoNtc string,
 	magic uint32,
+	endSlot uint64,
 	timeout time.Duration,
 ) (dingoState, cardanoState *ledgerConsensusSample, tip devnet.ChainTip) {
 	t.Helper()
@@ -216,97 +206,61 @@ func sampleLedgerStateAtStableTip(
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
 
-	var (
-		attempt                int
-		resultDingo, resultRef *ledgerConsensusSample
-		resultTip              devnet.ChainTip
-	)
-	require.Eventually(t, func() bool {
-		attempt++
-		before, err := h.GetChainTip(dingoEP)
-		if err != nil {
-			t.Logf(
-				"sampleLedgerStateAtStableTip: attempt %d: dingo-producer"+
-					" tip: %v", attempt, err,
-			)
-			return false
+	for attempt := 1; ; attempt++ {
+		candidate, err := trailingChainTip(h, dingoEP, cardanoEP)
+		if err == nil {
+			require.Less(t, candidate.SlotNumber, endSlot,
+				"trailing tip crossed the intended epoch before a common"+
+					" point could be sampled")
+			point := pcommon.NewPoint(candidate.SlotNumber, candidate.Hash)
+			var ds, cs *ledgerConsensusSample
+			ds, err = queryLedgerConsensusSample(ctx, dingoNtc, magic, &point)
+			if err != nil {
+				err = fmt.Errorf("dingo-producer at slot %d: %w",
+					candidate.SlotNumber, err)
+			} else {
+				cs, err = queryLedgerConsensusSample(
+					ctx, cardanoNtc, magic, &point,
+				)
+				if err != nil {
+					err = fmt.Errorf("cardano-producer at slot %d: %w",
+						candidate.SlotNumber, err)
+				}
+			}
+			if err == nil {
+				return ds, cs, candidate
+			}
 		}
-		beforeRef, err := h.GetChainTip(cardanoEP)
-		if err != nil {
-			t.Logf(
-				"sampleLedgerStateAtStableTip: attempt %d: cardano-producer"+
-					" tip: %v", attempt, err,
+		t.Logf("sampleLedgerStateAtCommonPoint: attempt %d: %v", attempt, err)
+		select {
+		case <-ctx.Done():
+			require.FailNowf(t,
+				"no common point sampled",
+				"dingo-producer and cardano-producer could not both acquire"+
+					" a common point within %s: %v",
+				timeout, err,
 			)
-			return false
+		case <-time.After(pollInterval):
 		}
-		if before.SlotNumber != beforeRef.SlotNumber ||
-			!bytes.Equal(before.Hash, beforeRef.Hash) {
-			t.Logf(
-				"sampleLedgerStateAtStableTip: attempt %d: no common tip yet"+
-					" (dingo-producer slot %d, cardano-producer slot %d)",
-				attempt, before.SlotNumber, beforeRef.SlotNumber,
-			)
-			return false
-		}
+	}
+}
 
-		ds, err := queryLedgerConsensusSample(ctx, dingoNtc, magic)
-		if err != nil {
-			t.Logf(
-				"sampleLedgerStateAtStableTip: attempt %d: dingo-producer"+
-					" ledger state query: %v", attempt, err,
-			)
-			return false
-		}
-		cs, err := queryLedgerConsensusSample(ctx, cardanoNtc, magic)
-		if err != nil {
-			t.Logf(
-				"sampleLedgerStateAtStableTip: attempt %d: cardano-producer"+
-					" ledger state query: %v", attempt, err,
-			)
-			return false
-		}
-
-		after, err := h.GetChainTip(dingoEP)
-		if err != nil {
-			t.Logf(
-				"sampleLedgerStateAtStableTip: attempt %d: dingo-producer"+
-					" re-check: %v", attempt, err,
-			)
-			return false
-		}
-		afterRef, err := h.GetChainTip(cardanoEP)
-		if err != nil {
-			t.Logf(
-				"sampleLedgerStateAtStableTip: attempt %d: cardano-producer"+
-					" re-check: %v", attempt, err,
-			)
-			return false
-		}
-		if !bytes.Equal(before.Hash, after.Hash) ||
-			!bytes.Equal(beforeRef.Hash, afterRef.Hash) {
-			t.Logf(
-				"sampleLedgerStateAtStableTip: attempt %d: tip advanced"+
-					" during the query round trip",
-				attempt,
-			)
-			return false
-		}
-
-		resultDingo, resultRef, resultTip = ds, cs, before
-		return true
-	}, timeout, pollInterval,
-		"dingo-producer and cardano-producer never settled on a stable"+
-			" common tip within %s",
-		timeout,
-	)
-	// require.Eventually calls t.FailNow() (halting this goroutine) rather
-	// than returning when the condition never succeeds, so resultDingo and
-	// resultRef are always set by the time execution reaches here -- this
-	// check is for the static analyzer, not a runtime possibility.
-	require.NotNil(t, resultDingo, "internal error: no dingo-producer result")
-	require.NotNil(t, resultRef, "internal error: no cardano-producer result")
-
-	return resultDingo, resultRef, resultTip
+// trailingChainTip returns the tip of whichever node is behind.
+func trailingChainTip(
+	h *devnet.TestHarness, dingoEP, cardanoEP devnet.NodeEndpoint,
+) (devnet.ChainTip, error) {
+	dingoTip, err := h.GetChainTip(dingoEP)
+	if err != nil {
+		return devnet.ChainTip{}, fmt.Errorf("dingo-producer tip: %w", err)
+	}
+	cardanoTip, err := h.GetChainTip(cardanoEP)
+	if err != nil {
+		return devnet.ChainTip{}, fmt.Errorf("cardano-producer tip: %w", err)
+	}
+	if cardanoTip.SlotNumber < dingoTip.SlotNumber {
+		return cardanoTip, nil
+	}
+	return dingoTip, nil
 }
 
 type ledgerConsensusSample struct {
@@ -315,22 +269,23 @@ type ledgerConsensusSample struct {
 	stake  *localstatequery.StakeSnapshotsResult
 }
 
-// The caller's tip sandwich covers every query, including the second acquire.
+// Both acquires name point, so the snapshot and the account and stake queries
+// describe the same block.
 func queryLedgerConsensusSample(
-	ctx context.Context, addr string, magic uint32,
+	ctx context.Context, addr string, magic uint32, point *pcommon.Point,
 ) (*ledgerConsensusSample, error) {
 	conn, err := nodeparity.Dial(ctx, addr, magic)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close() //nolint:errcheck
-	snapshot, err := nodeparity.QuerySnapshot(conn, nil)
+	snapshot, err := nodeparity.QuerySnapshot(conn, point)
 	if err != nil {
 		return nil, err
 	}
 	client := conn.LocalStateQuery().Client
-	if err := client.Acquire(nil); err != nil {
-		return nil, err
+	if err := client.Acquire(point); err != nil {
+		return nil, fmt.Errorf("acquire point: %w", err)
 	}
 	defer client.Release() //nolint:errcheck
 	pots, err := client.GetAccountState()

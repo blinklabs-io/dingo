@@ -15,6 +15,7 @@
 package ledgerpeers
 
 import (
+	"context"
 	"errors"
 	"net"
 	"testing"
@@ -29,7 +30,7 @@ type testRelayProvider struct {
 	err    error
 }
 
-func (p *testRelayProvider) GetPoolRelays() ([]ledger.PoolRelay, error) {
+func (p *testRelayProvider) GetPoolRelays(ctx context.Context) ([]ledger.PoolRelay, error) {
 	if p.err != nil {
 		return nil, p.err
 	}
@@ -63,7 +64,7 @@ func TestProviderConvertsLedgerRelays(t *testing.T) {
 		},
 	})
 
-	relays, err := provider.GetPoolRelays()
+	relays, err := provider.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, relays, 4)
 
@@ -101,7 +102,7 @@ func TestProviderReturnsRelayCopy(t *testing.T) {
 	}
 	provider := NewProvider(source)
 
-	relays, err := provider.GetPoolRelays()
+	relays, err := provider.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, relays, 1)
 	relays[0].Hostname = "mutated.example.com"
@@ -115,7 +116,29 @@ func TestProviderReturnsRelayProviderError(t *testing.T) {
 	expectedErr := errors.New("relay read failed")
 	provider := NewProvider(&testRelayProvider{err: expectedErr})
 
-	relays, err := provider.GetPoolRelays()
+	relays, err := provider.GetPoolRelays(context.Background())
 	require.ErrorIs(t, err, expectedErr)
 	require.Nil(t, relays)
+}
+
+func TestProviderCarriesStakeAndMultiHost(t *testing.T) {
+	t.Parallel()
+	poolKeyHash := []byte{0xaa, 0xbb}
+	provider := NewProvider(&testRelayProvider{
+		relays: []ledger.PoolRelay{
+			{
+				Hostname:    "multi.example.com",
+				PoolKeyHash: poolKeyHash,
+				Stake:       77,
+				IsMultiHost: true,
+			},
+		},
+	})
+
+	relays, err := provider.GetPoolRelays(t.Context())
+	require.NoError(t, err)
+	require.Len(t, relays, 1)
+	require.Equal(t, uint64(77), relays[0].Stake)
+	require.Equal(t, poolKeyHash, relays[0].PoolKeyHash)
+	require.True(t, relays[0].IsMultiHost)
 }

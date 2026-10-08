@@ -55,6 +55,28 @@ func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
 	return nil
 }
 
+func validateCertificateFingerprints(field string, values []string) []error {
+	var errs []error
+	for idx, fingerprint := range values {
+		normalized := strings.ReplaceAll(
+			strings.TrimSpace(fingerprint),
+			":",
+			"",
+		)
+		decoded, err := hex.DecodeString(normalized)
+		if err != nil || len(decoded) != sha256.Size {
+			errs = append(errs, fmt.Errorf(
+				"%s[%d] must be a %d-byte SHA-256 certificate fingerprint "+
+					"encoded as hexadecimal",
+				field,
+				idx,
+				sha256.Size,
+			))
+		}
+	}
+	return errs
+}
+
 // ValidateKESAgentSignTimeout accepts zero as the documented default
 // selector, or an explicit positive timeout shorter than one mainnet slot.
 func ValidateKESAgentSignTimeout(timeout time.Duration) error {
@@ -496,22 +518,38 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				"does not authorize destructive DatabaseService RPCs",
 		))
 	}
-	for idx, fingerprint := range c.BarkOperatorCertificateFingerprints {
-		normalized := strings.ReplaceAll(
-			strings.TrimSpace(fingerprint),
-			":",
-			"",
-		)
-		decoded, err := hex.DecodeString(normalized)
-		if err != nil || len(decoded) != sha256.Size {
-			errs = append(errs, fmt.Errorf(
-				"barkOperatorCertificateFingerprints[%d] must be a %d-byte "+
-					"SHA-256 certificate fingerprint encoded as hexadecimal",
-				idx,
-				sha256.Size,
-			))
-		}
+	errs = append(errs, validateCertificateFingerprints(
+		"barkOperatorCertificateFingerprints",
+		c.BarkOperatorCertificateFingerprints,
+	)...)
+	if len(c.BarkLifecycleOperatorCertificateFingerprints) > 0 &&
+		!c.BarkLifecycleEnabled {
+		errs = append(errs, errors.New(
+			"barkLifecycleOperatorCertificateFingerprints requires "+
+				"barkLifecycleEnabled",
+		))
 	}
+	if serving && c.BarkLifecycleEnabled && c.BarkPort == 0 {
+		errs = append(errs, errors.New(
+			"barkPort must be non-zero when barkLifecycleEnabled is true",
+		))
+	}
+	if serving && c.BarkLifecycleEnabled && c.BarkClientCAFilePath == "" {
+		errs = append(errs, errors.New(
+			"barkClientCaFilePath is required when barkLifecycleEnabled is true",
+		))
+	}
+	if serving && c.BarkLifecycleEnabled &&
+		len(c.BarkLifecycleOperatorCertificateFingerprints) == 0 {
+		errs = append(errs, errors.New(
+			"barkLifecycleOperatorCertificateFingerprints requires at least one "+
+				"SHA-256 client certificate fingerprint when barkLifecycleEnabled is true",
+		))
+	}
+	errs = append(errs, validateCertificateFingerprints(
+		"barkLifecycleOperatorCertificateFingerprints",
+		c.BarkLifecycleOperatorCertificateFingerprints,
+	)...)
 	// mTLS client verification also needs the server's own TLS pair --
 	// without it, bark.Bark.Start's own equivalent check (independent of
 	// Lifecycle, since it applies to any TlsClientCAFilePath) would fail
@@ -871,6 +909,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"invalid databaseLifecycle.snapshotEveryNEpochs: %d (must not be negative)",
 			c.DatabaseLifecycle.SnapshotEveryNEpochs,
+		))
+	}
+	if c.DatabaseLifecycle.SnapshotMaxCommitPause < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid databaseLifecycle.snapshotMaxCommitPause: %s (must not be negative)",
+			c.DatabaseLifecycle.SnapshotMaxCommitPause,
 		))
 	}
 	if dest := c.DatabaseLifecycle.SnapshotCloudDestination; dest != "" {

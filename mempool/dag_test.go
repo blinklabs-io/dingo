@@ -97,7 +97,7 @@ func (v *oneShotBlockingValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-func (v *oneShotBlockingValidator) WithTxValidationSession(
+func (v *oneShotBlockingValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		validate func(
 			gledger.Transaction,
@@ -422,7 +422,7 @@ func TestDAGAdmissionContinuesDuringRevalidation(t *testing.T) {
 
 	validator.arm()
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- pool.rebuildOverlay() }()
+	go func() { rebuildDone <- pool.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -479,7 +479,7 @@ func TestDAGRemovalContinuesDuringRevalidation(t *testing.T) {
 
 	validator.arm()
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- pool.rebuildOverlay() }()
+	go func() { rebuildDone <- pool.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -527,7 +527,7 @@ func TestDAGRevalidationRetriesAfterLedgerGenerationChange(t *testing.T) {
 
 	validator.arm()
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- pool.rebuildOverlay() }()
+	go func() { rebuildDone <- pool.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -568,7 +568,7 @@ func TestDAGRevalidationBoundsLedgerGenerationRetries(t *testing.T) {
 	)
 
 	validator.advanceEveryCall.Store(true)
-	err = pool.rebuildOverlay()
+	err = pool.rebuildOverlay(context.Background())
 	require.ErrorIs(t, err, errValidationSnapshotChanged)
 	assert.Len(t, pool.Transactions(), 1)
 	assert.False(t, pool.journalActive)
@@ -592,7 +592,7 @@ func TestDAGRevalidationJournalOverflowLeavesLiveStateUntouched(t *testing.T) {
 
 	validator.arm()
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- pool.rebuildOverlay() }()
+	go func() { rebuildDone <- pool.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -645,7 +645,7 @@ func TestDAGRevalidationSkipsInvalidDescendantValidation(t *testing.T) {
 
 	validator.failHash = parentHash
 	validator.calls = 0
-	require.NoError(t, pool.rebuildOverlay())
+	require.NoError(t, pool.rebuildOverlay(context.Background()))
 
 	assert.Equal(t, 1, validator.calls)
 	assert.Empty(t, pool.Transactions())
@@ -681,7 +681,7 @@ func TestFIFORevalidationPrunesDescendantsOfMissingIndexedTransaction(
 	pool.Unlock()
 	validator.calls = 0
 
-	require.NoError(t, pool.rebuildOverlay())
+	require.NoError(t, pool.rebuildOverlay(context.Background()))
 
 	assert.Zero(t, validator.calls)
 	assert.Empty(t, pool.Transactions())

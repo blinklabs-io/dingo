@@ -89,7 +89,7 @@ func (v *changingSessionValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-func (v *changingSessionValidator) WithTxValidationSession(
+func (v *changingSessionValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		func(
 			gledger.Transaction,
@@ -131,7 +131,7 @@ func (v *blockingSessionValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-func (v *blockingSessionValidator) WithTxValidationSession(
+func (v *blockingSessionValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		func(
 			gledger.Transaction,
@@ -3413,7 +3413,7 @@ func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(t *testing.T) {
 	validator.shouldBlock.Store(true)
 
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- m.rebuildOverlay() }()
+	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -3497,7 +3497,7 @@ func TestMempool_AdmissionContinuesDuringRevalidation(t *testing.T) {
 		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- m.rebuildOverlay() }()
+	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -3569,7 +3569,7 @@ func TestMempool_RemovalsContinueDuringRevalidation(t *testing.T) {
 			hash := m.Transactions()[0].Hash
 
 			rebuildDone := make(chan error, 1)
-			go func() { rebuildDone <- m.rebuildOverlay() }()
+			go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 			dingotestutil.RequireReceive(
 				t,
 				validator.started,
@@ -3652,7 +3652,7 @@ func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 	firstHash := m.Transactions()[0].Hash
 
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- m.rebuildOverlay() }()
+	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -3699,7 +3699,7 @@ func TestMempool_RevalidationStopsAfterBoundedGenerationRetries(t *testing.T) {
 		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 
-	err := m.rebuildOverlay()
+	err := m.rebuildOverlay(context.Background())
 	require.ErrorIs(t, err, errValidationSnapshotChanged)
 	assert.Equal(t, int32(2), validator.sessions.Load())
 	assert.Len(
@@ -3725,7 +3725,7 @@ func TestMempool_RevalidationJournalOverflowLeavesLiveStateUntouched(
 	m.revalidationJournalCap = 1
 
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- m.rebuildOverlay() }()
+	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -3764,7 +3764,7 @@ func TestMempool_StopContinuesDuringRevalidation(t *testing.T) {
 	)
 
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- m.rebuildOverlay() }()
+	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -4236,7 +4236,7 @@ func TestOverlayRebuildOnChainUpdate(t *testing.T) {
 	v.removeBaseUtxo(realInputKey)
 
 	// Rebuild overlay (simulates what processChainEvents does)
-	require.NoError(t, m.rebuildOverlay())
+	require.NoError(t, m.rebuildOverlay(context.Background()))
 
 	// TX should be evicted because its input is no longer in base UTxOs
 	m.RLock()
@@ -4255,7 +4255,7 @@ func TestOverlayRebuildOnChainUpdate(t *testing.T) {
 // programming error — but it should not panic.
 func TestRebuildOverlayReturnsErrorOnNilValidator(t *testing.T) {
 	m := &Mempool{}
-	err := m.rebuildOverlay()
+	err := m.rebuildOverlay(context.Background())
 	require.ErrorIs(t, err, ErrNilValidator)
 }
 
@@ -4566,7 +4566,7 @@ func (v *blockingRejectingValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-func (v *blockingRejectingValidator) WithTxValidationSession(
+func (v *blockingRejectingValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		func(
 			gledger.Transaction,
@@ -4628,7 +4628,7 @@ func TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget(
 	backlog := maxRevalidationCatchupRounds * 3
 
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- m.rebuildOverlay() }()
+	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t, validator.started, 2*time.Second, "revalidation start",
 	)

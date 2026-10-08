@@ -199,7 +199,7 @@ func (s *submitServiceServer) waitForTx(
 			if !stillPending {
 				continue
 			}
-			txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(r)
+			txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(ctx, r)
 			if err != nil {
 				return fmt.Errorf(
 					"lookup committed transaction %x: %w",
@@ -288,9 +288,7 @@ func (s *submitServiceServer) EvalTx(
 		return nil, errors.New("decoded transaction is nil")
 	}
 	// Evaluate TX
-	fee, totalExUnits, redeemerExUnits, err := s.utxorpc.config.LedgerState.EvaluateTx(
-		tx,
-	)
+	fee, totalExUnits, redeemerExUnits, err := s.utxorpc.config.LedgerState.EvaluateTxContext(ctx, tx)
 	// Populate response
 	redeemerData := redeemerPlutusDataByKey(tx)
 	tmpRedeemers := make([]*cardano.Redeemer, 0, len(redeemerExUnits))

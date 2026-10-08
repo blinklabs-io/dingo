@@ -133,7 +133,7 @@ func newNoByronIssuersTestLedger(
 	cache, err := newByronPBFTCache(lsConfig)
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(newTestDB(t), nil)
+	cm, err := chain.NewManager(context.Background(), newTestDB(t), nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -221,15 +221,19 @@ func TestByronHeaderRejectedWithoutGenesisIssuers(t *testing.T) {
 					genesisHash,
 				)
 				if !input.atOrigin {
-					require.NoError(t, primaryChain.AddRawBlocks(
-						[]chain.RawBlock{{
-							Slot:        1,
-							Hash:        bytes.Repeat([]byte{0xcc}, 32),
-							BlockNumber: 0,
-							Type:        gledger.BlockTypeConway,
-							Cbor:        []byte{0x80},
-						}},
-					))
+					require.NoError(
+						t,
+						primaryChain.AddRawBlocks(
+							context.Background(),
+							[]chain.RawBlock{{
+								Slot:        1,
+								Hash:        bytes.Repeat([]byte{0xcc}, 32),
+								BlockNumber: 0,
+								Type:        gledger.BlockTypeConway,
+								Cbor:        []byte{0x80},
+							}},
+						),
+					)
 				}
 				require.Equal(
 					t,
@@ -289,7 +293,7 @@ func TestByronHeaderGateReadsOnlyConstructionTimeFields(t *testing.T) {
 	for range iterations {
 		require.ErrorContains(
 			t,
-			ls.validateByronPBFTHeaderCrypto(ebb),
+			ls.validateByronPBFTHeaderCrypto(context.Background(), ebb),
 			noByronIssuersRule,
 		)
 	}
@@ -708,11 +712,21 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 	state, err := newByronPBFTState(config, nil)
 	require.NoError(t, err)
 
-	state, err = ls.advanceByronPBFTState(state, block, true)
+	state, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		block,
+		true,
+	)
 	require.NoError(t, err)
-	state, err = ls.advanceByronPBFTState(state, block, true)
+	state, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		block,
+		true,
+	)
 	require.NoError(t, err)
-	_, err = ls.advanceByronPBFTState(state, block, true)
+	_, err = ls.advanceByronPBFTState(context.Background(), state, block, true)
 	require.ErrorContains(t, err, "signature threshold")
 	require.Len(t, state.issuerState.SignatureHistory(), 2)
 }
@@ -835,7 +849,12 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		[]any{activationCertificate},
 	)
 	require.Equal(t, origin, scheduleActivation.PrevHash())
-	state, err = ls.advanceByronPBFTState(state, scheduleActivation, true)
+	state, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		scheduleActivation,
+		true,
+	)
 	require.NoError(t, err)
 
 	beforeActivation := newSignedByronPBFTBlock(
@@ -857,7 +876,12 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		scheduleActivation.SlotNumber(),
 	)
 	require.Equal(t, scheduleActivation.Hash(), beforeActivation.PrevHash())
-	state, err = ls.advanceByronPBFTState(state, beforeActivation, true)
+	state, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		beforeActivation,
+		true,
+	)
 	require.NoError(t, err)
 
 	staleAtActivation := newSignedByronPBFTBlock(
@@ -873,7 +897,12 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		genesisCertificate,
 		nil,
 	)
-	_, err = ls.advanceByronPBFTState(state, staleAtActivation, true)
+	_, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		staleAtActivation,
+		true,
+	)
 	require.ErrorContains(t, err, "does not authorize delegate")
 
 	activated := newSignedByronPBFTBlock(
@@ -890,7 +919,12 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		nil,
 	)
 	require.Equal(t, beforeActivation.Hash(), activated.PrevHash())
-	state, err = ls.advanceByronPBFTState(state, activated, true)
+	state, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		activated,
+		true,
+	)
 	require.NoError(t, err)
 
 	scheduleRevocation := newSignedByronPBFTBlock(
@@ -908,7 +942,12 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 	)
 	require.Greater(t, scheduleRevocation.SlotNumber(), activated.SlotNumber())
 	require.Equal(t, activated.Hash(), scheduleRevocation.PrevHash())
-	state, err = ls.advanceByronPBFTState(state, scheduleRevocation, true)
+	state, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		scheduleRevocation,
+		true,
+	)
 	require.NoError(t, err)
 
 	beforeRevocation := newSignedByronPBFTBlock(
@@ -925,7 +964,12 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		nil,
 	)
 	require.Equal(t, scheduleRevocation.Hash(), beforeRevocation.PrevHash())
-	state, err = ls.advanceByronPBFTState(state, beforeRevocation, true)
+	state, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		beforeRevocation,
+		true,
+	)
 	require.NoError(t, err)
 
 	staleAfterRevocation := newSignedByronPBFTBlock(
@@ -941,7 +985,12 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		activationCertificate,
 		nil,
 	)
-	_, err = ls.advanceByronPBFTState(state, staleAfterRevocation, true)
+	_, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		staleAfterRevocation,
+		true,
+	)
 	require.ErrorContains(t, err, "does not authorize delegate")
 
 	revoked := newSignedByronPBFTBlock(
@@ -958,7 +1007,12 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		nil,
 	)
 	require.Equal(t, beforeRevocation.Hash(), revoked.PrevHash())
-	state, err = ls.advanceByronPBFTState(state, revoked, true)
+	state, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		revoked,
+		true,
+	)
 	require.NoError(t, err)
 	issuerHash, err := byronconsensus.PBFTVerificationKeyHash(
 		issuer.verificationKey,
@@ -1034,7 +1088,12 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 		genesisCertificate,
 		[]any{revocationCertificate},
 	)
-	state, err = ls.advanceByronPBFTState(state, scheduleRevocation, true)
+	state, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		scheduleRevocation,
+		true,
+	)
 	require.NoError(t, err)
 	beforeRevocation := newSignedByronPBFTBlock(
 		t,
@@ -1050,7 +1109,12 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 		nil,
 	)
 	require.Equal(t, scheduleRevocation.Hash(), beforeRevocation.PrevHash())
-	state, err = ls.advanceByronPBFTState(state, beforeRevocation, true)
+	state, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		beforeRevocation,
+		true,
+	)
 	require.NoError(t, err)
 	staleDelegate := newSignedByronPBFTBlock(
 		t,
@@ -1065,7 +1129,12 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 		genesisCertificate,
 		nil,
 	)
-	_, err = ls.advanceByronPBFTState(state, staleDelegate, true)
+	_, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		staleDelegate,
+		true,
+	)
 	require.ErrorContains(t, err, "does not authorize delegate")
 	revoked := newSignedByronPBFTBlock(
 		t,
@@ -1081,7 +1150,12 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 		nil,
 	)
 	require.Equal(t, beforeRevocation.Hash(), revoked.PrevHash())
-	_, err = ls.advanceByronPBFTState(state, revoked, true)
+	_, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		revoked,
+		true,
+	)
 	require.NoError(t, err)
 }
 
@@ -1235,12 +1309,15 @@ func TestByronPBFTStateAtTipRebuildsAfterRestartAndRollback(t *testing.T) {
 	}
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{
 		securityParam: securityParam,
 	}))
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), rawBlocks),
+	)
 	ls := &LedgerState{
 		chain: cm.PrimaryChain(),
 		config: LedgerStateConfig{
@@ -1434,7 +1511,7 @@ func TestValidateByronPBFTHeaderRejectsFutureEbb(t *testing.T) {
 	}
 	ebb.BlockHeader.ConsensusData.Epoch = 1
 
-	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	err := ls.validateByronPBFTHeaderCrypto(context.Background(), ebb)
 	require.ErrorContains(t, err, "current slot")
 }
 
@@ -1448,7 +1525,7 @@ func newByronGenesisAnchorTestLedger(
 ) (*LedgerState, *chain.Chain) {
 	t.Helper()
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -1498,7 +1575,10 @@ func TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, ls.validateByronPBFTHeaderCrypto(ebb))
+	require.NoError(
+		t,
+		ls.validateByronPBFTHeaderCrypto(context.Background(), ebb),
+	)
 }
 
 // TestValidateByronPBFTHeaderRejectsGenesisHashMismatch is the
@@ -1522,7 +1602,7 @@ func TestValidateByronPBFTHeaderRejectsGenesisHashMismatch(t *testing.T) {
 		},
 	}
 
-	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	err := ls.validateByronPBFTHeaderCrypto(context.Background(), ebb)
 	require.ErrorContains(t, err, "genesis hash")
 }
 
@@ -1565,7 +1645,7 @@ func TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin(t *testing.T) {
 	ebb.BlockHeader.ConsensusData.Epoch = 1
 	ebb.BlockHeader.ConsensusData.Difficulty.Value = 0
 
-	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	err := ls.validateByronPBFTHeaderCrypto(context.Background(), ebb)
 	require.ErrorContains(t, err, "epoch 0")
 }
 
@@ -1589,7 +1669,7 @@ func TestValidateByronPBFTHeaderRejectsMainBlockAtOrigin(t *testing.T) {
 		BlockHeader: &byron.ByronMainBlockHeader{},
 	}
 
-	err := ls.validateByronPBFTHeaderCrypto(mainBlock)
+	err := ls.validateByronPBFTHeaderCrypto(context.Background(), mainBlock)
 	require.ErrorContains(t, err, "epoch-boundary block")
 }
 
@@ -1606,15 +1686,18 @@ func TestValidateByronPBFTHeaderSkipsGenesisAnchorAwayFromOrigin(t *testing.T) {
 	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis")).
 		String()
 	ls, primaryChain := newByronGenesisAnchorTestLedger(t, genesisHash)
-	require.NoError(t, primaryChain.AddRawBlocks([]chain.RawBlock{
-		{
-			Slot:        0,
-			Hash:        bytes.Repeat([]byte{0xaa}, 32),
-			BlockNumber: 0,
-			Type:        gledger.BlockTypeByronEbb,
-			Cbor:        []byte{0x80},
-		},
-	}))
+	require.NoError(
+		t,
+		primaryChain.AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot:        0,
+				Hash:        bytes.Repeat([]byte{0xaa}, 32),
+				BlockNumber: 0,
+				Type:        gledger.BlockTypeByronEbb,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
 	require.NotZero(t, primaryChain.Tip().Point.Hash)
 
 	// A prev hash that matches neither genesis nor the block just added:
@@ -1627,7 +1710,7 @@ func TestValidateByronPBFTHeaderSkipsGenesisAnchorAwayFromOrigin(t *testing.T) {
 	}
 	ebb.BlockHeader.ConsensusData.Epoch = 1
 
-	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	err := ls.validateByronPBFTHeaderCrypto(context.Background(), ebb)
 	require.ErrorContains(t, err, "current slot")
 	require.NotContains(t, err.Error(), "genesis hash")
 }
@@ -1646,18 +1729,24 @@ func TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin(
 	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis")).
 		String()
 	ls, primaryChain := newByronGenesisAnchorTestLedger(t, genesisHash)
-	require.NoError(t, primaryChain.AddRawBlocks([]chain.RawBlock{
-		{
-			Slot:        0,
-			Hash:        bytes.Repeat([]byte{0xaa}, 32),
-			BlockNumber: 0,
-			Type:        gledger.BlockTypeByronEbb,
-			Cbor:        []byte{0x80},
-		},
-	}))
+	require.NoError(
+		t,
+		primaryChain.AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot:        0,
+				Hash:        bytes.Repeat([]byte{0xaa}, 32),
+				BlockNumber: 0,
+				Type:        gledger.BlockTypeByronEbb,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
 	require.NotZero(t, primaryChain.Tip().Point.Hash)
 
-	require.NoError(t, primaryChain.RollbackUnbounded(ocommon.Point{}))
+	require.NoError(
+		t,
+		primaryChain.RollbackUnbounded(context.Background(), ocommon.Point{}),
+	)
 	require.Zero(t, primaryChain.Tip().Point.Slot)
 	require.Empty(t, primaryChain.Tip().Point.Hash)
 
@@ -1668,7 +1757,7 @@ func TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin(
 		},
 	}
 
-	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	err := ls.validateByronPBFTHeaderCrypto(context.Background(), ebb)
 	require.ErrorContains(t, err, "genesis hash")
 }
 
@@ -1682,7 +1771,10 @@ func queueByronOriginEbbHeader(
 ) *byron.ByronEpochBoundaryBlockHeader {
 	t.Helper()
 	ebbHeader := &byron.ByronEpochBoundaryBlockHeader{PrevBlock: genesisHash}
-	require.NoError(t, primaryChain.AddBlockHeader(ebbHeader))
+	require.NoError(
+		t,
+		primaryChain.AddBlockHeader(context.Background(), ebbHeader),
+	)
 	require.Equal(t, 1, primaryChain.HeaderCount())
 	// Only headers are queued: the primary chain tip is still origin.
 	require.Zero(t, primaryChain.Tip().Point.Slot)
@@ -1715,7 +1807,7 @@ func TestValidateByronPBFTHeaderAcceptsMainBlockAfterQueuedOriginEbb(
 
 	// The unsigned header still fails PBFT verification, but past the
 	// first-block gate.
-	err := ls.validateByronPBFTHeaderCrypto(mainBlock)
+	err := ls.validateByronPBFTHeaderCrypto(context.Background(), mainBlock)
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "epoch-boundary block")
 	require.NotContains(t, err.Error(), "first block")
@@ -1736,6 +1828,7 @@ func TestValidateByronPBFTHeaderKeepsAnchorForQueuedOriginEbb(t *testing.T) {
 	require.NoError(
 		t,
 		ls.validateByronPBFTHeaderCrypto(
+			context.Background(),
 			&byron.ByronEpochBoundaryBlock{BlockHeader: ebbHeader},
 		),
 	)
@@ -1744,6 +1837,7 @@ func TestValidateByronPBFTHeaderKeepsAnchorForQueuedOriginEbb(t *testing.T) {
 		PrevBlock: lcommon.Blake2b256Hash([]byte("wrong prev hash")),
 	}
 	err := ls.validateByronPBFTHeaderCrypto(
+		context.Background(),
 		&byron.ByronEpochBoundaryBlock{BlockHeader: badHeader},
 	)
 	require.ErrorContains(t, err, "genesis hash")
@@ -1763,7 +1857,10 @@ func TestValidateByronPBFTHeaderRejectsMainBlockAfterRollbackDropsQueuedEbb(
 		genesisHash.String(),
 	)
 	ebbHeader := queueByronOriginEbbHeader(t, primaryChain, genesisHash)
-	require.NoError(t, primaryChain.RollbackUnbounded(ocommon.Point{}))
+	require.NoError(
+		t,
+		primaryChain.RollbackUnbounded(context.Background(), ocommon.Point{}),
+	)
 	require.Zero(t, primaryChain.HeaderCount())
 
 	mainBlock := &byron.ByronMainBlock{
@@ -1771,7 +1868,7 @@ func TestValidateByronPBFTHeaderRejectsMainBlockAfterRollbackDropsQueuedEbb(
 			PrevBlock: ebbHeader.Hash(),
 		},
 	}
-	err := ls.validateByronPBFTHeaderCrypto(mainBlock)
+	err := ls.validateByronPBFTHeaderCrypto(context.Background(), mainBlock)
 	require.ErrorContains(t, err, "epoch-boundary block")
 }
 
@@ -1832,18 +1929,25 @@ func TestValidateByronPBFTHeaderCryptoRejectsNilHeaders(t *testing.T) {
 					lcommon.Blake2b256Hash([]byte("genesis")).String(),
 				)
 				if !atOrigin {
-					require.NoError(t, primaryChain.AddBlock(
-						loadBoundaryBlock(
-							t,
-							"mainnet-byron-last-4492799.cbor",
-							gledger.BlockTypeByronMain,
+					require.NoError(
+						t,
+						primaryChain.AddBlock(
+							context.Background(),
+							loadBoundaryBlock(
+								t,
+								"mainnet-byron-last-4492799.cbor",
+								gledger.BlockTypeByronMain,
+							),
+							nil,
 						),
-						nil,
-					))
+					)
 				}
 				var err error
 				require.NotPanics(t, func() {
-					err = ls.validateByronPBFTHeaderCrypto(block)
+					err = ls.validateByronPBFTHeaderCrypto(
+						context.Background(),
+						block,
+					)
 				})
 				require.ErrorContains(t, err, "nil header")
 			})
@@ -2087,11 +2191,11 @@ func (c *byronAdoptionChain) newLedger(
 	raw []chain.RawBlock,
 ) (*LedgerState, *chain.Chain) {
 	t.Helper()
-	cm, err := chain.NewManager(newTestDB(t), nil)
+	cm, err := chain.NewManager(context.Background(), newTestDB(t), nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 10}))
 	primary := cm.PrimaryChain()
-	require.NoError(t, primary.AddRawBlocks(raw))
+	require.NoError(t, primary.AddRawBlocks(context.Background(), raw))
 	return &LedgerState{
 		chain:  primary,
 		config: LedgerStateConfig{CardanoNodeConfig: nodeConfig},
@@ -2228,7 +2332,10 @@ func TestByronAdoptedParamsRollbackAcrossAdoptions(t *testing.T) {
 	// Roll back across update B's adoption.
 	require.NoError(
 		t,
-		primary.RollbackUnbounded(rawTip(c.raw[blockLastUnderA]).Point),
+		primary.RollbackUnbounded(
+			context.Background(),
+			rawTip(c.raw[blockLastUnderA]).Point,
+		),
 	)
 	state, params = stateAt(t, ls, c.raw[blockLastUnderA])
 	requireByronParams(t, params, c.adoptedA, "rolled back across B")
@@ -2237,14 +2344,23 @@ func TestByronAdoptedParamsRollbackAcrossAdoptions(t *testing.T) {
 	// Roll back across update A's adoption as well.
 	require.NoError(
 		t,
-		primary.RollbackUnbounded(rawTip(c.raw[blockGenesisOnlyLast]).Point),
+		primary.RollbackUnbounded(
+			context.Background(),
+			rawTip(c.raw[blockGenesisOnlyLast]).Point,
+		),
 	)
 	state, params = stateAt(t, ls, c.raw[blockGenesisOnlyLast])
 	requireByronParams(t, params, c.genesis, "rolled back across A")
 	cache(state, c.raw[blockGenesisOnlyLast])
 
 	// Replaying forward from the cached ancestor adopts both again.
-	require.NoError(t, primary.AddRawBlocks(c.raw[blockGenesisOnlyLast+1:]))
+	require.NoError(
+		t,
+		primary.AddRawBlocks(
+			context.Background(),
+			c.raw[blockGenesisOnlyLast+1:],
+		),
+	)
 	_, params = stateAt(t, ls, c.raw[blockTip])
 	requireByronParams(t, params, c.adoptedB, "replayed forward")
 }
@@ -2270,7 +2386,10 @@ func TestByronAdoptedParamsForkDoesNotInheritAbandonedAdoption(t *testing.T) {
 
 	// The fork keeps the confirmed proposal but never endorses it, and its
 	// first epoch-1 block is one slot later than the abandoned one.
-	require.NoError(t, primary.RollbackUnbounded(rawTip(c.raw[2]).Point))
+	require.NoError(
+		t,
+		primary.RollbackUnbounded(context.Background(), rawTip(c.raw[2]).Point),
+	)
 	template := loadRealByronMainBlock(t)
 	unendorsed := newSignedByronPBFTBlockWithBody(
 		t, template, c.magic, 0, 30, 3, c.blocks[2].Hash(),
@@ -2293,7 +2412,7 @@ func TestByronAdoptedParamsForkDoesNotInheritAbandonedAdoption(t *testing.T) {
 	forkRaw := []chain.RawBlock{
 		rawByronPBFTBlock(t, unendorsed), rawByronPBFTBlock(t, nextEpoch),
 	}
-	require.NoError(t, primary.AddRawBlocks(forkRaw))
+	require.NoError(t, primary.AddRawBlocks(context.Background(), forkRaw))
 	_, params = stateAt(t, ls, forkRaw[1])
 	requireByronParams(t, params, c.genesis, "fork without an adoption")
 }
@@ -2489,7 +2608,7 @@ func TestByronAdoptedUpdateChangesSizeLimitsAtAdoptionPoint(t *testing.T) {
 				newBlock(0, 7, 2, byronUpdatePayload(nil, vote), current),
 				newBlock(0, 30, 3, byronUpdatePayload(nil), adoptedVersion),
 			} {
-				state, err = ls.advanceByronPBFTState(state, block, false)
+				state, err = ls.advanceByronPBFTState(context.Background(), state, block, false)
 				require.NoError(t, err)
 			}
 			require.Zero(t, state.update.AdoptedVersion().Minor)
@@ -2500,7 +2619,7 @@ func TestByronAdoptedUpdateChangesSizeLimitsAtAdoptionPoint(t *testing.T) {
 				wantErr string,
 			) {
 				t.Helper()
-				next, err := ls.advanceByronPBFTState(state, block, false)
+				next, err := ls.advanceByronPBFTState(context.Background(), state, block, false)
 				require.NoError(t, err)
 				require.Equal(t, wantVersion, next.update.AdoptedVersion().Minor)
 				params, ok := byronBlockPParams(block, next, nil).(*eras.ByronProtocolParameters)

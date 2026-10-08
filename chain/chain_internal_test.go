@@ -16,6 +16,7 @@ package chain
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -213,7 +214,7 @@ func TestBlockNumberContiguous(t *testing.T) {
 func TestHeaderSeqIsTotalAcrossChainsSharingABus(t *testing.T) {
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
-	cm, err := NewManager(nil, bus)
+	cm, err := NewManager(context.Background(), nil, bus)
 	require.NoError(t, err)
 
 	primary := cm.PrimaryChain()
@@ -243,7 +244,7 @@ func TestHeaderSeqIsTotalAcrossChainsSharingABus(t *testing.T) {
 func TestHeaderSeqConcurrentStampsAreUnique(t *testing.T) {
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
-	cm, err := NewManager(nil, bus)
+	cm, err := NewManager(context.Background(), nil, bus)
 	require.NoError(t, err)
 
 	chains := []*Chain{
@@ -310,7 +311,7 @@ func TestIntersectPointsKeepsCurrentTipFallback(t *testing.T) {
 	}
 	require.NoError(t, db.BlockCreate(persistedBlock, nil))
 
-	cm, err := NewManager(db, nil)
+	cm, err := NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	c := cm.PrimaryChain()
 
@@ -321,7 +322,7 @@ func TestIntersectPointsKeepsCurrentTipFallback(t *testing.T) {
 	}
 	c.tipBlockIndex = initialBlockIndex + 1
 
-	points := c.IntersectPoints(4)
+	points := c.IntersectPoints(context.Background(), 4)
 	require.Len(t, points, 2)
 	require.Equal(t, pendingTip.Slot, points[0].Slot)
 	require.Equal(t, pendingTip.Hash, points[0].Hash)
@@ -353,7 +354,7 @@ func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
 		prevHash = hash
 	}
 
-	cm, err := NewManager(db, nil)
+	cm, err := NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	c := cm.PrimaryChain()
 
@@ -365,7 +366,7 @@ func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
 		)
 	}))
 
-	points := c.IntersectPoints(40)
+	points := c.IntersectPoints(context.Background(), 40)
 	require.GreaterOrEqual(t, len(points), intersectDensePointCount)
 
 	pointSlots := make(map[uint64]struct{}, len(points))
@@ -551,7 +552,7 @@ func TestCallerTxnEventsWaitForCommit(t *testing.T) {
 			t.Cleanup(bus.Stop)
 			subID, updates := bus.Subscribe(ChainUpdateEventType)
 			defer bus.Unsubscribe(ChainUpdateEventType, subID)
-			cm, err := NewManager(db, bus)
+			cm, err := NewManager(context.Background(), db, bus)
 			require.NoError(t, err)
 			c := cm.PrimaryChain()
 			blocks, err := testfixtures.GenerateConwayChain(1)
@@ -562,7 +563,12 @@ func TestCallerTxnEventsWaitForCommit(t *testing.T) {
 			}
 			txn := db.BlobTxn(true)
 			defer txn.Release()
-			_, err = c.AddBlockWithPointDeferred(blocks[0], point, txn)
+			_, err = c.AddBlockWithPointDeferred(
+				context.Background(),
+				blocks[0],
+				point,
+				txn,
+			)
 			require.NoError(t, err)
 			c.PublishPendingChainUpdates()
 			testutil.RequireNoReceive(
@@ -613,7 +619,7 @@ func TestNonDeferredRollbackQueuesEventsOnSequencer(t *testing.T) {
 	subId, ch := bus.Subscribe(ChainUpdateEventType)
 	defer bus.Unsubscribe(ChainUpdateEventType, subId)
 
-	cm, err := NewManager(nil, bus)
+	cm, err := NewManager(context.Background(), nil, bus)
 	require.NoError(t, err)
 	c := cm.PrimaryChain()
 	require.NotNil(t, c)
@@ -622,10 +628,15 @@ func TestNonDeferredRollbackQueuesEventsOnSequencer(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, blocks, 3)
 	for i := range blocks {
-		_, addErr := c.AddBlockWithPointDeferred(blocks[i], ocommon.Point{
-			Slot: blocks[i].SlotNumber(),
-			Hash: blocks[i].Hash().Bytes(),
-		}, nil)
+		_, addErr := c.AddBlockWithPointDeferred(
+			context.Background(),
+			blocks[i],
+			ocommon.Point{
+				Slot: blocks[i].SlotNumber(),
+				Hash: blocks[i].Hash().Bytes(),
+			},
+			nil,
+		)
 		require.NoError(t, addErr)
 	}
 	c.PublishPendingChainUpdates()
@@ -637,7 +648,7 @@ func TestNonDeferredRollbackQueuesEventsOnSequencer(t *testing.T) {
 		}
 	}
 
-	evts, err := c.rollbackLocked(ocommon.Point{
+	evts, err := c.rollbackLocked(context.Background(), ocommon.Point{
 		Slot: blocks[0].SlotNumber(),
 		Hash: blocks[0].Hash().Bytes(),
 	}, false)
@@ -694,7 +705,7 @@ func TestDeferredAddAfterNonDeferredRollbackKeepsMutationOrder(t *testing.T) {
 	subId, ch := bus.Subscribe(ChainUpdateEventType)
 	defer bus.Unsubscribe(ChainUpdateEventType, subId)
 
-	cm, err := NewManager(nil, bus)
+	cm, err := NewManager(context.Background(), nil, bus)
 	require.NoError(t, err)
 	c := cm.PrimaryChain()
 	require.NotNil(t, c)
@@ -702,10 +713,15 @@ func TestDeferredAddAfterNonDeferredRollbackKeepsMutationOrder(t *testing.T) {
 	blocks, err := testfixtures.GenerateConwayChain(3)
 	require.NoError(t, err)
 	for i := range blocks {
-		_, addErr := c.AddBlockWithPointDeferred(blocks[i], ocommon.Point{
-			Slot: blocks[i].SlotNumber(),
-			Hash: blocks[i].Hash().Bytes(),
-		}, nil)
+		_, addErr := c.AddBlockWithPointDeferred(
+			context.Background(),
+			blocks[i],
+			ocommon.Point{
+				Slot: blocks[i].SlotNumber(),
+				Hash: blocks[i].Hash().Bytes(),
+			},
+			nil,
+		)
 		require.NoError(t, addErr)
 	}
 	c.PublishPendingChainUpdates()
@@ -720,13 +736,18 @@ func TestDeferredAddAfterNonDeferredRollbackKeepsMutationOrder(t *testing.T) {
 		Slot: blocks[0].SlotNumber(),
 		Hash: blocks[0].Hash().Bytes(),
 	}
-	evts, err := c.rollbackLocked(rollbackPoint, false)
+	evts, err := c.rollbackLocked(context.Background(), rollbackPoint, false)
 	require.NoError(t, err)
 	require.NotEmpty(t, evts)
-	_, err = c.AddBlockWithPointDeferred(blocks[1], ocommon.Point{
-		Slot: blocks[1].SlotNumber(),
-		Hash: blocks[1].Hash().Bytes(),
-	}, nil)
+	_, err = c.AddBlockWithPointDeferred(
+		context.Background(),
+		blocks[1],
+		ocommon.Point{
+			Slot: blocks[1].SlotNumber(),
+			Hash: blocks[1].Hash().Bytes(),
+		},
+		nil,
+	)
 	require.NoError(t, err)
 
 	c.PublishPendingChainUpdates()

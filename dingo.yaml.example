@@ -174,15 +174,23 @@
 # outside, so loopback would fail those closed.
 #
 #   GET /health, GET /healthz  -> liveness. 200 whenever the process is up
-#     and serving, independent of sync state. This is what the container
-#     HEALTHCHECK probes: an orchestrator answers an unhealthy container by
-#     replacing it, and a node in initial sync is legitimately not useful
-#     for hours without needing to be killed.
+#     and serving, independent of sync state, unless the slot clock ticked
+#     and then stayed silent for five minutes (a wedged event loop; a clock
+#     paused behind the era-history horizon is not silent). This is
+#     what the container HEALTHCHECK probes: an orchestrator answers an
+#     unhealthy container by replacing it, and a node in initial sync is
+#     legitimately not useful for hours without needing to be killed.
 #   GET /readyz                -> readiness. 200 only once the chain tip is
-#     within healthReadyGapSlots of the wall-clock slot; 503 while syncing,
-#     bootstrapping, or when the tip has frozen. Use it for a Kubernetes
-#     readinessProbe or a load-balancer target check, where failing drains
-#     traffic instead of restarting the node.
+#     within healthReadyGapSlots of the wall-clock slot and the database
+#     answers; for a block producer also only while the forger is running and
+#     its operational certificate is loaded and inside its KES window. 503
+#     while syncing, bootstrapping, restoring, or when the tip has frozen. Use
+#     it for a Kubernetes readinessProbe or a load-balancer target check,
+#     where failing drains traffic instead of restarting the node.
+#
+# Kubernetes (healthPort 12799):
+#   livenessProbe:  { httpGet: { path: /healthz, port: 12799 } }
+#   readinessProbe: { httpGet: { path: /readyz,  port: 12799 } }
 #
 # Both bodies are JSON carrying the readiness verdict, a reason, and the
 # observed tip gap.
@@ -284,11 +292,11 @@
 # barkPort: 0
 
 # Interface Bark binds to. Left empty (the default), Bark binds to all
-# interfaces UNLESS the database lifecycle service is also enabled (see
-# databaseLifecycle.snapshotDir below), in which case it defaults to
-# loopback-only (127.0.0.1) instead: exposing that service's destructive
-# RPCs beyond the local host is an explicit, deliberate choice an operator
-# must opt into here. Bind address is a network control independent of
+# interfaces UNLESS the database lifecycle service or remote node lifecycle
+# service is enabled, in which case it defaults to loopback-only (127.0.0.1)
+# instead. Exposing either service's destructive RPCs beyond the local host is
+# an explicit, deliberate choice an operator must opt into here. Bind address
+# is a network control independent of
 # barkClientCaFilePath below (the identity control) -- narrowing this is
 # defense in depth, not a substitute for configuring a client CA.
 # Can be overridden with DINGO_BARK_HOST
@@ -299,6 +307,7 @@
 # whenever the database lifecycle service is enabled (barkPort set alongside
 # databaseLifecycle.snapshotDir below): every DatabaseService RPC requires a
 # certificate verified against this CA. ArchiveService remains public.
+# Also required when barkLifecycleEnabled is true.
 # Also requires tlsCertFilePath/tlsKeyFilePath above to be set. dingoctl's
 # --client-cert/--client-key/--ca-cert flags are the client side of this.
 # Can be overridden with DINGO_BARK_CLIENT_CA_FILE_PATH
@@ -315,6 +324,22 @@
 # Can be overridden with DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS
 # CLI: --bark-operator-certificate-fingerprints
 # barkOperatorCertificateFingerprints: []
+
+# Explicitly enable Bark's remote LifecycleService (Stop, Restart, GetStatus).
+# Disabled by default and independent of the DatabaseService policy above.
+# Requires barkPort, barkClientCaFilePath, tlsCertFilePath/tlsKeyFilePath, and
+# barkLifecycleOperatorCertificateFingerprints.
+# Can be overridden with DINGO_BARK_LIFECYCLE_ENABLED
+# CLI: --bark-lifecycle-enabled
+# barkLifecycleEnabled: false
+
+# SHA-256 fingerprints of client certificate DER bytes authorized to invoke
+# LifecycleService Stop and Restart. GetStatus requires a certificate verified
+# against barkClientCaFilePath but does not require membership in this list.
+# These credentials are intentionally separate from DatabaseService operators.
+# Can be overridden with DINGO_BARK_LIFECYCLE_OPERATOR_CERTIFICATE_FINGERPRINTS
+# CLI: --bark-lifecycle-operator-certificate-fingerprints
+# barkLifecycleOperatorCertificateFingerprints: []
 
 # Local immutable block history expiry. When enabled, Dingo replaces block CBOR
 # older than the ledger-derived stability window with an expired-history marker
@@ -590,6 +615,10 @@
 
 # Path to ImmutableDB for batch import (used when runMode is "load")
 # Can also be provided as argument to 'dingo load' command
+# An https:// value, or http:// on loopback for local development, names a
+# remote ImmutableDB root serving NNNNN.chunk, NNNNN.primary, NNNNN.secondary
+# and tip.json; chunks download into <databasePath>/immutable-download and load
+# as they arrive in order. Non-loopback HTTP is rejected.
 #
 # Can be overridden with the DINGO_IMMUTABLE_DB_PATH environment variable
 # CLI: --immutable-db-path
@@ -1018,3 +1047,8 @@
   # every single one
   # CLI: --db-snapshot-every-n-epochs
   # snapshotEveryNEpochs: 1
+  # Cancel a snapshot (manual or automatic) still holding the commit
+  # barrier after this long; commits resume and the partial snapshot is
+  # removed. 0 means no bound
+  # CLI: --db-snapshot-max-commit-pause
+  # snapshotMaxCommitPause: 0s

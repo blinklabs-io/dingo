@@ -273,10 +273,11 @@ func setPendingTruncate(
 
 // ResolveTargetByHash resolves a truncate target identified by block hash.
 func ResolveTargetByHash(
+	ctx context.Context,
 	db *database.Database,
 	hash []byte,
 ) (models.Block, error) {
-	block, err := database.BlockByHash(db, hash)
+	block, err := database.BlockByHash(ctx, db, hash)
 	if err != nil {
 		return models.Block{}, fmt.Errorf(
 			"resolve target by hash: %w", err,
@@ -293,16 +294,19 @@ func ResolveTargetByHash(
 // disaster-recovery truncate is very unlikely to know a block-populated
 // slot exactly and should not have to.
 func ResolveTargetBySlot(
+	ctx context.Context,
 	db *database.Database,
 	slot uint64,
 ) (models.Block, error) {
-	tip, err := db.GetTip(nil)
+	tipTxn := db.MetadataTxn(ctx, false)
+	tip, err := db.GetTip(tipTxn)
+	tipTxn.Release()
 	if err != nil {
 		return models.Block{}, fmt.Errorf(
 			"resolve target by slot: get tip: %w", err,
 		)
 	}
-	tipBlock, err := database.BlockByPoint(db, tip.Point)
+	tipBlock, err := database.BlockByPoint(ctx, db, tip.Point)
 	if err != nil {
 		return models.Block{}, fmt.Errorf(
 			"resolve target by slot: get tip block: %w", err,
@@ -322,6 +326,9 @@ func ResolveTargetBySlot(
 	lo, hi := uint64(1), tipBlock.ID
 	var best *models.Block
 	for lo <= hi {
+		if err := ctx.Err(); err != nil {
+			return models.Block{}, err
+		}
 		mid := lo + (hi-lo)/2
 		block, err := db.BlockAtOrAfterIndex(mid, nil)
 		if err != nil {
@@ -369,16 +376,19 @@ func ResolveTargetBySlot(
 // tip, comparing each candidate's Number field, mirroring the technique
 // Chain.BlockBeforeSlot uses for slot-ordered lookups.
 func ResolveTargetByNumber(
+	ctx context.Context,
 	db *database.Database,
 	number uint64,
 ) (models.Block, error) {
-	tip, err := db.GetTip(nil)
+	tipTxn := db.MetadataTxn(ctx, false)
+	tip, err := db.GetTip(tipTxn)
+	tipTxn.Release()
 	if err != nil {
 		return models.Block{}, fmt.Errorf(
 			"resolve target by number: get tip: %w", err,
 		)
 	}
-	tipBlock, err := database.BlockByPoint(db, tip.Point)
+	tipBlock, err := database.BlockByPoint(ctx, db, tip.Point)
 	if err != nil {
 		return models.Block{}, fmt.Errorf(
 			"resolve target by number: get tip block: %w", err,
@@ -397,6 +407,9 @@ func ResolveTargetByNumber(
 	// forward to the next actually-indexed block instead of failing.
 	lo, hi := uint64(1), tipBlock.ID
 	for lo <= hi {
+		if err := ctx.Err(); err != nil {
+			return models.Block{}, err
+		}
 		mid := lo + (hi-lo)/2
 		block, err := db.BlockAtOrAfterIndex(mid, nil)
 		if err != nil {
@@ -495,7 +508,7 @@ func Truncate(
 			err,
 		)
 	}
-	metadataTipBlock, err := database.BlockByPoint(db, metadataTip.Point)
+	metadataTipBlock, err := database.BlockByPoint(ctx, db, metadataTip.Point)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"%w: get metadata tip block: %w",
@@ -514,7 +527,7 @@ func Truncate(
 		)
 	}
 
-	recentBlocks, err := database.BlocksRecent(db, 1)
+	recentBlocks, err := database.BlocksRecent(ctx, db, 1)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"%w: get indexed blob tip: %w",
@@ -784,12 +797,13 @@ func finishPendingTruncate(
 	// calculations after any offline or live truncate, since rolled-away
 	// activity could leave expiration_epoch renewed past what the
 	// surviving chain actually witnessed.
-	txn := db.Transaction(true)
+	txn := db.Transaction(ctx, true)
 	err = txn.Do(func(txn *database.Txn) error {
 		var affectedRefs []models.StakeCredentialRef
 		if delegatorInactivityEnabled {
 			var affErr error
 			affectedRefs, affErr = db.AccountsWitnessedAfterSlot(
+				ctx,
 				point.Slot,
 				txn,
 			)
@@ -801,6 +815,7 @@ func finishPendingTruncate(
 			}
 		}
 		if _, _, err := db.TruncateAfterSlot(
+			ctx,
 			point,
 			pending.MithrilFloor,
 			txn,
@@ -808,6 +823,7 @@ func finishPendingTruncate(
 			return fmt.Errorf("truncate metadata: %w", err)
 		}
 		if err := database.RecomputeAccountExpirationsAfterTruncate(
+			ctx,
 			db,
 			txn,
 			delegatorInactivityEnabled,

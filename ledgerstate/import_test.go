@@ -230,7 +230,13 @@ func TestImportDRepsCarriesExpiryEpoch(t *testing.T) {
 		tag, err := models.CredentialTagFromUint(uint(tc.cred.Type))
 		require.NoError(t, err, tc.name)
 
-		got, err := db.GetDrepByCredential(tag, tc.cred.Hash, true, nil)
+		got, err := db.GetDrepByCredential(
+			context.Background(),
+			tag,
+			tc.cred.Hash,
+			true,
+			nil,
+		)
 		require.NoError(t, err, tc.name)
 		require.NotNil(t, got, tc.name)
 		require.Equal(
@@ -562,7 +568,7 @@ func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(t *testing.T) 
 		},
 	}
 	noProgress := func(ImportProgress) {}
-	_, err = importCertState(
+	_, _, err = importCertState(
 		context.Background(), cfg, state.Tip.Slot, noProgress,
 	)
 	require.NoError(t, err)
@@ -650,7 +656,7 @@ func TestImportSnapShotsPreservesAuthoritativeRewardBasis(t *testing.T) {
 		},
 	}
 	noProgress := func(ImportProgress) {}
-	_, err = importCertState(
+	_, _, err = importCertState(
 		context.Background(), cfg, state.Tip.Slot, noProgress,
 	)
 	require.NoError(t, err)
@@ -795,7 +801,7 @@ func TestImportSnapShotsSeedsRewardInputs(t *testing.T) {
 	// populates the pool registrations the seeding takes its parameters from.
 	// If this ever stops running before the snapshots, the seeding silently
 	// finds no parameters and writes nothing.
-	poolsImported, err := importCertState(ctx, cfg, slot, noProgress)
+	poolsImported, _, err := importCertState(ctx, cfg, slot, noProgress)
 	require.NoError(t, err)
 	require.Positive(t, poolsImported,
 		"the fixture must import pools, or the seeding below would be "+
@@ -1017,7 +1023,7 @@ func TestImportOpCertCountersStoresCertifiedBaseline(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := bytes.Repeat([]byte{0x77}, 28)
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, importOpCertCounters(
 		db.Metadata(),
 		map[string]uint64{string(poolKeyHash): 490},
@@ -1028,6 +1034,7 @@ func TestImportOpCertCountersStoresCertifiedBaseline(t *testing.T) {
 	txn.Release()
 
 	sequence, found, err := db.LatestPoolOpCertSequence(
+		context.Background(),
 		testPoolKeyHash(poolKeyHash), nil,
 	)
 	require.NoError(t, err)
@@ -1048,7 +1055,7 @@ func TestImportOpCertCountersRefusesUnpersistableCounter(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := bytes.Repeat([]byte{0x78}, 28)
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	err = importOpCertCounters(
 		db.Metadata(),
 		map[string]uint64{
@@ -1065,6 +1072,7 @@ func TestImportOpCertCountersRefusesUnpersistableCounter(t *testing.T) {
 	txn.Release()
 
 	sequence, found, err := db.LatestPoolOpCertSequence(
+		context.Background(),
 		testPoolKeyHash(poolKeyHash), nil,
 	)
 	require.NoError(t, err)
@@ -1081,7 +1089,7 @@ func TestImportOpCertCountersStoresCounterAtBound(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := bytes.Repeat([]byte{0x79}, 28)
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, importOpCertCounters(
 		db.Metadata(),
 		map[string]uint64{
@@ -1094,6 +1102,7 @@ func TestImportOpCertCountersStoresCounterAtBound(t *testing.T) {
 	txn.Release()
 
 	sequence, found, err := db.LatestPoolOpCertSequence(
+		context.Background(),
 		testPoolKeyHash(poolKeyHash), nil,
 	)
 	require.NoError(t, err)
@@ -1195,7 +1204,7 @@ func TestImportSnapShotsPreservesBoundaryCaptureProvenance(t *testing.T) {
 	}
 	ctx := context.Background()
 	progress := func(ImportProgress) {}
-	_, err = importCertState(ctx, cfg, state.Tip.Slot, progress)
+	_, _, err = importCertState(ctx, cfg, state.Tip.Slot, progress)
 	require.NoError(t, err)
 	require.NoError(t, importSnapShots(
 		ctx,
@@ -1418,6 +1427,7 @@ func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
 	require.NoError(t, store.SaveEpochSummary(existingSummary, nil))
 
 	err = persistImportedSnapshot(
+		context.Background(),
 		ImportConfig{
 			Database: db,
 			State: &RawLedgerState{
@@ -1482,13 +1492,17 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 		127178646,
 	)
 
-	require.NoError(t, persistImportedActivePoolDistribution(
-		ImportConfig{
-			Database: db,
-			State:    &RawLedgerState{Epoch: 298},
-		},
-		rows,
-	))
+	require.NoError(
+		t,
+		persistImportedActivePoolDistribution(
+			context.Background(),
+			ImportConfig{
+				Database: db,
+				State:    &RawLedgerState{Epoch: 298},
+			},
+			rows,
+		),
+	)
 
 	stored, err := db.Metadata().GetPoolStakeSnapshot(
 		298,
@@ -1528,6 +1542,7 @@ func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
 		LeiosKeyPossessionProof: possessionProof,
 	}}
 	require.NoError(t, persistImportedSnapshot(
+		context.Background(),
 		ImportConfig{
 			Database: db,
 			State:    &RawLedgerState{Epoch: 102},
@@ -1643,6 +1658,7 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := persistImportedSnapshot(
+				context.Background(),
 				ImportConfig{
 					Database: db,
 					State: &RawLedgerState{
@@ -1705,6 +1721,7 @@ func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 	}
 
 	err = persistImportedSnapshot(
+		context.Background(),
 		ImportConfig{
 			Database: db,
 			State: &RawLedgerState{
@@ -1832,6 +1849,7 @@ func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
 				CapturedSlot:   55,
 			}}
 			require.NoError(t, persistImportedSnapshot(
+				context.Background(),
 				ImportConfig{
 					Database: db,
 					State: &RawLedgerState{
@@ -1906,6 +1924,7 @@ func TestPersistImportedSnapshotHistoricalLeftUnresolved(t *testing.T) {
 		CapturedSlot:   55,
 	}}
 	err = persistImportedSnapshot(
+		context.Background(),
 		ImportConfig{
 			Database: db,
 			State: &RawLedgerState{
@@ -2097,6 +2116,7 @@ func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
 		CapturedSlot:   999,
 	}}
 	require.NoError(t, persistImportedSnapshot(
+		context.Background(),
 		ImportConfig{
 			Database: db,
 			State: &RawLedgerState{
@@ -2222,12 +2242,24 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 		123,
 	))
 
-	keyAcct, err := db.GetAccountByCredential(0, stakeKey, true, nil)
+	keyAcct, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		stakeKey,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint8(0), keyAcct.CredentialTag)
 	require.Equal(t, types.Uint64(1), keyAcct.Reward)
 
-	scriptAcct, err := db.GetAccountByCredential(1, stakeKey, true, nil)
+	scriptAcct, err := db.GetAccountByCredential(
+		context.Background(),
+		1,
+		stakeKey,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint8(1), scriptAcct.CredentialTag)
 	require.Equal(t, types.Uint64(2), scriptAcct.Reward)
@@ -2242,6 +2274,7 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 	} {
 		t.Run(tc.name+" registration deposit", func(t *testing.T) {
 			registration, err := db.GetAccountImportRegistrationByCredential(
+				context.Background(),
 				tc.tag,
 				stakeKey,
 				nil,
@@ -2255,6 +2288,7 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 	}
 
 	zeroRegistration, err := db.GetAccountImportRegistrationByCredential(
+		context.Background(),
 		0,
 		bytes.Repeat([]byte{0xA5}, 28),
 		nil,
@@ -2265,6 +2299,7 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 	require.Zero(t, *zeroRegistration.Deposit)
 
 	unknownRegistration, err := db.GetAccountImportRegistrationByCredential(
+		context.Background(),
 		0,
 		bytes.Repeat([]byte{0xA6}, 28),
 		nil,
@@ -2366,7 +2401,12 @@ func TestImportPoolsWritesPendingRetirementForBothQueries(t *testing.T) {
 	require.Equal(t, poolKeyHash, retiring[0].PoolKeyHash)
 	require.Equal(t, uint64(656), retiring[0].Epoch)
 
-	refunds, err := db.GetPoolsRetiringAtEpoch(656, 11, nil)
+	refunds, err := db.GetPoolsRetiringAtEpoch(
+		context.Background(),
+		656,
+		11,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, refunds, 1)
 	require.Equal(t, poolKeyHash, refunds[0].PoolKeyHash)
@@ -2406,7 +2446,12 @@ func TestImportPoolsRejectsUnmatchedRetirementBeforeWritingRows(t *testing.T) {
 	retiring, err := db.Metadata().GetRetiringPools(650, nil)
 	require.NoError(t, err)
 	require.Empty(t, retiring)
-	refunds, err := db.GetPoolsRetiringAtEpoch(656, 11, nil)
+	refunds, err := db.GetPoolsRetiringAtEpoch(
+		context.Background(),
+		656,
+		11,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Empty(t, refunds)
 }
@@ -2486,7 +2531,7 @@ func TestIndefiniteUTxOMapPartialCommitIsSafeToRetry(t *testing.T) {
 		for i := range batch {
 			utxos = append(utxos, UTxOToModel(&batch[i], slot))
 		}
-		txn := db.MetadataTxn(true)
+		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		if err := store.ImportUtxos(utxos, txn.Metadata()); err != nil {
 			return err

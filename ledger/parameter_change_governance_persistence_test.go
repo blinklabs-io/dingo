@@ -151,7 +151,7 @@ func TestLedgerProcessBlockRejectsParameterChangeProtocolVersionAndPersistsNoPro
 		tx:     tx,
 	}
 
-	processErr := db.Transaction(true).
+	processErr := db.Transaction(context.Background(), true).
 		Do(func(txn *database.Txn) error {
 			_, err := ls.ledgerProcessBlock(
 				context.Background(),
@@ -182,7 +182,7 @@ func TestLedgerProcessBlockRejectsParameterChangeProtocolVersionAndPersistsNoPro
 		"block carrying a protocol-version ParameterChange must be rejected",
 	)
 
-	_, getErr := db.GetGovernanceProposal(txHash, 0, nil)
+	_, getErr := db.GetGovernanceProposal(context.Background(), txHash, 0, nil)
 	require.ErrorIs(
 		t,
 		getErr,
@@ -249,7 +249,7 @@ func TestLedgerProcessBlockRejectsDijkstraParameterChangeProtocolVersionAndPersi
 		tx:     tx,
 	}
 
-	processErr := db.Transaction(true).
+	processErr := db.Transaction(context.Background(), true).
 		Do(func(txn *database.Txn) error {
 			_, err := ls.ledgerProcessBlock(
 				context.Background(),
@@ -280,7 +280,7 @@ func TestLedgerProcessBlockRejectsDijkstraParameterChangeProtocolVersionAndPersi
 		"block carrying a protocol-version ParameterChange must be rejected",
 	)
 
-	_, getErr := db.GetGovernanceProposal(txHash, 0, nil)
+	_, getErr := db.GetGovernanceProposal(context.Background(), txHash, 0, nil)
 	require.ErrorIs(
 		t,
 		getErr,

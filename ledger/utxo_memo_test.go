@@ -123,27 +123,28 @@ func TestUtxoByIdMemoReducesDbReads_LedgerProcessBlock(t *testing.T) {
 	point := ocommon.NewPoint(blockSlot, block.Hash().Bytes())
 
 	before := fx.dingoLS.utxoByRefReads.Load()
-	err := fx.db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := fx.dingoLS.ledgerProcessBlock(
-			context.Background(),
-			txn,
-			point,
-			block,
-			true,  // shouldValidate
-			false, // reachesTip
-			false, // skipPhase2Validation
-			nil,   // expectedPrevHash
-			envelopeParent{origin: true},
-			offsets,
-			eras.ConwayEraDesc,
-			fx.dingoLS.currentPParams,
-			nil, // prevEraPParams
-			0,   // committeeEpoch
-			0,   // epochStartSlot
-			false,
-		)
-		return err
-	})
+	err := fx.db.Transaction(context.Background(), true).
+		Do(func(txn *database.Txn) error {
+			_, err := fx.dingoLS.ledgerProcessBlock(
+				context.Background(),
+				txn,
+				point,
+				block,
+				true,  // shouldValidate
+				false, // reachesTip
+				false, // skipPhase2Validation
+				nil,   // expectedPrevHash
+				envelopeParent{origin: true},
+				offsets,
+				eras.ConwayEraDesc,
+				fx.dingoLS.currentPParams,
+				nil, // prevEraPParams
+				0,   // committeeEpoch
+				0,   // epochStartSlot
+				false,
+			)
+			return err
+		})
 	require.NoError(t, err)
 	reads := fx.dingoLS.utxoByRefReads.Load() - before
 
@@ -167,7 +168,7 @@ func TestLedgerViewUtxoByIdMemoNotSharedAcrossViews(t *testing.T) {
 	require.NotEmpty(t, fxInputs)
 	input := fxInputs[0]
 
-	txn := fx.db.Transaction(false)
+	txn := fx.db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	before := fx.dingoLS.utxoByRefReads.Load()
@@ -212,7 +213,7 @@ func TestLedgerViewUtxoByIdChecksOverlaysBeforeMemo(t *testing.T) {
 	require.NotEmpty(t, fxInputs)
 	input := fxInputs[0]
 
-	txn := fx.db.Transaction(false)
+	txn := fx.db.Transaction(context.Background(), false)
 	defer txn.Release()
 	lv := &LedgerView{
 		txn:           txn,
@@ -256,34 +257,48 @@ func TestLedgerViewUtxoByIdDoesNotMemoizeNotFound(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		lv := &LedgerView{txn: txn, ls: ls}
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				lv := &LedgerView{txn: txn, ls: ls}
 
-		_, err := lv.UtxoById(input)
-		require.Error(t, err, "ref must not exist yet")
+				_, err := lv.UtxoById(input)
+				require.Error(t, err, "ref must not exist yet")
 
-		require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
-			TxId:      txId,
-			OutputIdx: 0,
-			AddedSlot: 1,
-		}))
-		encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
-			OutputAddress: address,
-			OutputAmount:  5_000_000,
-		})
-		require.NoError(t, err)
-		require.NoError(t, db.Blob().SetUtxo(txn.Blob(), txId, 0, encoded))
+				require.NoError(
+					t,
+					db.CreateUtxo(context.Background(), txn, &models.Utxo{
+						TxId:      txId,
+						OutputIdx: 0,
+						AddedSlot: 1,
+					}),
+				)
+				encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+					OutputAddress: address,
+					OutputAmount:  5_000_000,
+				})
+				require.NoError(t, err)
+				require.NoError(
+					t,
+					db.Blob().SetUtxo(txn.Blob(), txId, 0, encoded),
+				)
 
-		utxo, err := lv.UtxoById(input)
-		require.NoError(
-			t,
-			err,
-			"a not-found result must not be memoized: the ref is now resolvable",
-		)
-		require.NotNil(t, utxo.Output)
-		require.Equal(t, uint64(5_000_000), utxo.Output.Amount().Uint64())
-		return nil
-	}))
+				utxo, err := lv.UtxoById(input)
+				require.NoError(
+					t,
+					err,
+					"a not-found result must not be memoized: the ref is now resolvable",
+				)
+				require.NotNil(t, utxo.Output)
+				require.Equal(
+					t,
+					uint64(5_000_000),
+					utxo.Output.Amount().Uint64(),
+				)
+				return nil
+			}),
+	)
 }
 
 // intraBlockDoubleSpendFixture is a block whose two transactions spend the
@@ -319,7 +334,7 @@ func newIntraBlockDoubleSpendFixture(
 	)
 	require.NoError(t, err)
 
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId: fundingTxId, OutputIdx: 0, AddedSlot: 1,
 	}))
 	fundingOutputCbor, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
@@ -452,27 +467,28 @@ func TestLedgerProcessBlockRejectsIntraBlockDoubleSpend(t *testing.T) {
 	t.Parallel()
 	fx := newIntraBlockDoubleSpendFixture(t)
 
-	processErr := fx.db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := fx.ls.ledgerProcessBlock(
-			context.Background(),
-			txn,
-			ocommon.NewPoint(10, fx.block.Hash().Bytes()),
-			fx.block,
-			true,
-			false,
-			false,
-			nil,
-			envelopeParent{origin: true},
-			fx.offsets,
-			fx.era,
-			fx.pparams,
-			nil,
-			0,
-			0,
-			false,
-		)
-		return err
-	})
+	processErr := fx.db.Transaction(context.Background(), true).
+		Do(func(txn *database.Txn) error {
+			_, err := fx.ls.ledgerProcessBlock(
+				context.Background(),
+				txn,
+				ocommon.NewPoint(10, fx.block.Hash().Bytes()),
+				fx.block,
+				true,
+				false,
+				false,
+				nil,
+				envelopeParent{origin: true},
+				fx.offsets,
+				fx.era,
+				fx.pparams,
+				nil,
+				0,
+				0,
+				false,
+			)
+			return err
+		})
 
 	require.ErrorIs(
 		t,
@@ -495,7 +511,7 @@ func TestValidateForgedTxsRejectsIntraBlockDoubleSpend(t *testing.T) {
 	t.Parallel()
 	fx := newIntraBlockDoubleSpendFixture(t)
 
-	err := fx.ls.validateForgedTxs(fx.block)
+	err := fx.ls.validateForgedTxs(context.Background(), fx.block)
 
 	require.ErrorIs(
 		t,
@@ -530,7 +546,12 @@ func TestLedgerViewMemoizedUtxosUnchangedByValidation(t *testing.T) {
 	require.Len(t, lv.utxoMemo, distinctUtxoRefs(fx.tx))
 
 	for key, cached := range lv.utxoMemo {
-		stored, err := fx.db.UtxoByRef(key.TxId.Bytes(), key.Index, nil)
+		stored, err := fx.db.UtxoByRef(
+			context.Background(),
+			key.TxId.Bytes(),
+			key.Index,
+			nil,
+		)
 		require.NoError(t, err)
 		fresh, err := stored.Decode()
 		require.NoError(t, err)

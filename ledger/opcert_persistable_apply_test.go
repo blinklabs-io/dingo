@@ -80,27 +80,28 @@ func TestLedgerProcessBlockRejectsOpCertCounterAbovePersistableBound(
 		},
 	}
 
-	err := db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
-			context.Background(),
-			txn,
-			ocommon.Point{Slot: 10},
-			block,
-			false,
-			false,
-			false,
-			nil,
-			envelopeParent{},
-			nil,
-			eras.BabbageEraDesc,
-			nil,
-			nil,
-			0,
-			0,
-			false,
-		)
-		return err
-	})
+	err := db.Transaction(context.Background(), true).
+		Do(func(txn *database.Txn) error {
+			_, err := ls.ledgerProcessBlock(
+				context.Background(),
+				txn,
+				ocommon.Point{Slot: 10},
+				block,
+				false,
+				false,
+				false,
+				nil,
+				envelopeParent{},
+				nil,
+				eras.BabbageEraDesc,
+				nil,
+				nil,
+				0,
+				0,
+				false,
+			)
+			return err
+		})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "pool_opcert_sequence")
 

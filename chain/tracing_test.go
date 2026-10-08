@@ -31,7 +31,7 @@ import (
 func TestAddBlocksRecordsSpan(t *testing.T) {
 	spans := testutil.RecordSpans(t)
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	c := cm.PrimaryChain()
 	require.NotNil(t, c)

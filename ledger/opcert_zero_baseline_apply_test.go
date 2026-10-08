@@ -130,27 +130,28 @@ func applyOpCertBaselineBlock(
 			ProtocolMajor:      7,
 		}
 	}
-	return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
-			context.Background(),
-			txn,
-			ocommon.Point{Slot: slot, Hash: block.Hash().Bytes()},
-			block,
-			true,
-			false,
-			false,
-			nil,
-			envelopeParent{origin: true},
-			nil,
-			era,
-			pparams,
-			nil,
-			0,
-			0,
-			false,
-		)
-		return err
-	})
+	return ls.db.Transaction(context.Background(), true).
+		Do(func(txn *database.Txn) error {
+			_, err := ls.ledgerProcessBlock(
+				context.Background(),
+				txn,
+				ocommon.Point{Slot: slot, Hash: block.Hash().Bytes()},
+				block,
+				true,
+				false,
+				false,
+				nil,
+				envelopeParent{origin: true},
+				nil,
+				era,
+				pparams,
+				nil,
+				0,
+				0,
+				false,
+			)
+			return err
+		})
 }
 
 func newOpCertBaselineLedgerState(
@@ -177,6 +178,7 @@ func opCertBaselineRecorded(
 	t.Helper()
 	issuer := opCertBaselineIssuer()
 	stored, found, err := ls.db.LatestPoolOpCertSequence(
+		context.Background(),
 		lcommon.PoolKeyHash(issuer.Hash()),
 		nil,
 	)
@@ -261,9 +263,13 @@ func TestLedgerProcessBlockOpCertMithrilPoolWithoutCertifiedCounter(
 			otherPool := lcommon.PoolKeyHash(
 				lcommon.NewBlake2b224([]byte("certified-other-pool")),
 			)
-			require.NoError(t, ls.db.UpdatePoolOpCertSequence(
-				otherPool, 7, boundarySlot, nil,
-			))
+			require.NoError(
+				t,
+				ls.db.UpdatePoolOpCertSequence(
+					context.Background(),
+					otherPool, 7, boundarySlot, nil,
+				),
+			)
 
 			err := applyOpCertBaselineBlock(
 				t, ls, true, boundarySlot+10, tt.counter,

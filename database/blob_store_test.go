@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -71,7 +72,7 @@ func TestBlockNumberBoundTxnUsesPinnedStore(t *testing.T) {
 	require.NotNil(t, base)
 	t.Cleanup(func() { db.SetBlobStore(base) })
 
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	t.Cleanup(txn.Release)
 
 	// Replace the installed store after the transaction opened. The
@@ -193,7 +194,7 @@ func TestSetBlobStoreConcurrentWithReaders(t *testing.T) {
 				}
 				blobTxn.Release()
 				// A combined transaction reads the installed store too.
-				txn := db.Transaction(false)
+				txn := db.Transaction(context.Background(), false)
 				txn.Release()
 			}
 		})
@@ -359,7 +360,7 @@ func TestTxnKeepsBlobStoreAcrossReplacement(t *testing.T) {
 	base := db.Blob()
 	require.NotNil(t, base)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.True(t, txn.BlobStore() == base)
 

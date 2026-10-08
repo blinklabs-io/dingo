@@ -107,8 +107,8 @@ func newRequiredDatumFixture(
 		require.NoError(t, err)
 		require.NoError(
 			t,
-			f.db.Transaction(true).Do(func(txn *database.Txn) error {
-				if err := f.db.CreateUtxo(txn, &models.Utxo{
+			f.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+				if err := f.db.CreateUtxo(context.Background(), txn, &models.Utxo{
 					TxId: *txId, OutputIdx: 0, AddedSlot: 1,
 				}); err != nil {
 					return err
@@ -231,9 +231,8 @@ func applyRequiredDatumBlock(
 	era eras.EraDesc,
 	pparams lcommon.ProtocolParameters,
 ) error {
-	return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
-			context.Background(),
+	return ls.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(context.Background(),
 			txn,
 			ocommon.NewPoint(slot, block.Hash().Bytes()),
 			block,

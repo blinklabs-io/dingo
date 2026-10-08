@@ -125,7 +125,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 		internalplugins.StorageDependencies{DataDir: tmpDir, Logger: logger},
 	)
 	require.NoError(t, err)
-	db, err := database.New(&database.Config{
+	db, err := database.New(context.Background(), &database.Config{
 		DataDir: tmpDir,
 		Logger:  logger,
 		Network: "preview",
@@ -134,7 +134,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 
 	eventBus := event.NewEventBus(nil, nil)
 
-	cm, err := chain.NewManager(db, eventBus)
+	cm, err := chain.NewManager(context.Background(), db, eventBus)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -290,7 +290,7 @@ func loadLiveLifecycleTestBlocks(
 
 	var points []ocommon.Point
 	for i, block := range blocks {
-		require.NoError(t, c.AddBlock(block, nil))
+		require.NoError(t, c.AddBlock(context.Background(), block, nil))
 		points = append(points, ocommon.Point{
 			Slot: block.SlotNumber(),
 			Hash: block.Hash().Bytes(),
@@ -340,6 +340,19 @@ func lifecycleSnapshot(
 		"badger",
 		"sqlite",
 	)
+}
+
+// TestLiveSnapshotAppliesMaxCommitPause verifies the live-node path passes
+// databaseLifecycle.snapshotMaxCommitPause to lifecycle.Snapshot. A
+// nanosecond bound has always elapsed by the time the state reads finish.
+func TestLiveSnapshotAppliesMaxCommitPause(t *testing.T) {
+	n, _ := newLiveLifecycleTestNode(t, 1)
+	n.config.databaseLifecycle.SnapshotMaxCommitPause = time.Nanosecond
+
+	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	_, err := n.Snapshot(context.Background(), snapshotDir, "", "")
+	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
+	require.NoDirExists(t, snapshotDir)
 }
 
 // TestInitLeiosManagersDoNotRequireOuroboros pins the startup ordering. Run
@@ -485,7 +498,7 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	require.Equal(t, targetSlot, tip.Point.Slot)
 
 	for i, p := range points {
-		_, err := database.BlockByHash(n.db, p.Hash)
+		_, err := database.BlockByHash(context.Background(), n.db, p.Hash)
 		if i <= targetIndex {
 			require.NoErrorf(
 				t,
@@ -819,7 +832,10 @@ func requireGenesisDeepForkWins(
 	// chain.
 	ancestorEpoch, err := n.ledgerState.SlotToEpoch(ancestor.Slot)
 	require.NoError(t, err)
-	epochNonce := n.ledgerState.EpochNonce(ancestorEpoch.EpochId)
+	epochNonce := n.ledgerState.EpochNonce(
+		context.Background(),
+		ancestorEpoch.EpochId,
+	)
 	require.NotEmpty(
 		t,
 		epochNonce,
@@ -1028,7 +1044,7 @@ func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(
 	require.NoError(t, tipErr)
 	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
 	for _, p := range points {
-		_, blockErr := database.BlockByHash(n.db, p.Hash)
+		_, blockErr := database.BlockByHash(context.Background(), n.db, p.Hash)
 		require.NoErrorf(
 			t, blockErr,
 			"block at slot %d missing after a rejected truncate", p.Slot,
@@ -1167,7 +1183,7 @@ func TestLiveTruncateResumesAfterCompletedStorageStopFailure(t *testing.T) {
 	require.NoError(t, tipErr)
 	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
 	for _, p := range points {
-		_, blockErr := database.BlockByHash(n.db, p.Hash)
+		_, blockErr := database.BlockByHash(context.Background(), n.db, p.Hash)
 		require.NoErrorf(
 			t, blockErr,
 			"block at slot %d missing after a resumed stop failure", p.Slot,
@@ -1350,7 +1366,7 @@ func TestLiveTruncateRecoveryRechecksAlonzoPParamsUnit(t *testing.T) {
 		alonzo.EraIdAlonzo,
 		nil,
 	))
-	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(
+	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
 		},
@@ -1403,7 +1419,7 @@ func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
 	for _, p := range points {
-		_, err := database.BlockByHash(n.db, p.Hash)
+		_, err := database.BlockByHash(context.Background(), n.db, p.Hash)
 		require.NoErrorf(
 			t,
 			err,
@@ -1486,7 +1502,7 @@ func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
 	require.NoError(t, tipErr)
 	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
 	for _, p := range points {
-		_, blockErr := database.BlockByHash(n.db, p.Hash)
+		_, blockErr := database.BlockByHash(context.Background(), n.db, p.Hash)
 		require.NoErrorf(
 			t, blockErr,
 			"block at slot %d missing after a rejected restore", p.Slot,
@@ -1560,7 +1576,7 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 	require.NoError(t, tipErr)
 	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
 	for _, p := range points {
-		_, blockErr := database.BlockByHash(n.db, p.Hash)
+		_, blockErr := database.BlockByHash(context.Background(), n.db, p.Hash)
 		require.NoErrorf(
 			t, blockErr,
 			"block at slot %d missing after a rejected restore", p.Slot,
@@ -1948,7 +1964,11 @@ func smallEpochGenesisCfgForLifecycleTest(
 func addBlocksSerially(t *testing.T, n *Node, blocks []gledger.Block) {
 	t.Helper()
 	for _, b := range blocks {
-		require.NoError(t, n.chainManager.PrimaryChain().AddBlock(b, nil))
+		require.NoError(
+			t,
+			n.chainManager.PrimaryChain().
+				AddBlock(context.Background(), b, nil),
+		)
 		targetSlot := b.SlotNumber()
 		require.Eventually(t, func() bool {
 			tip, err := n.db.GetTip(nil)

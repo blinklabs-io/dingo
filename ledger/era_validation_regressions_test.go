@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"testing"
 
@@ -177,27 +176,27 @@ func validateTxInBlock(
 		txs:    []lcommon.Transaction{tx},
 		era:    era,
 	}
-	return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
-			context.Background(),
-			txn,
-			ocommon.NewPoint(200, block.Hash().Bytes()),
-			block,
-			true,
-			false,
-			false,
-			nil,
-			envelopeParent{origin: true},
-			nil,
-			desc,
-			pp,
-			nil,
-			0,
-			0,
-			false,
-		)
-		return err
-	})
+	return ls.db.Transaction(t.Context(), true).
+		Do(func(txn *database.Txn) error {
+			_, err := ls.ledgerProcessBlock(t.Context(),
+				txn,
+				ocommon.NewPoint(200, block.Hash().Bytes()),
+				block,
+				true,
+				false,
+				false,
+				nil,
+				envelopeParent{origin: true},
+				nil,
+				desc,
+				pp,
+				nil,
+				0,
+				0,
+				false,
+			)
+			return err
+		})
 }
 
 // conwayBlockTestPparams extends the stake-refund fixture with the block size

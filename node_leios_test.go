@@ -263,7 +263,7 @@ func TestLeiosDijkstraPParamsFallbackUsesFirstEraRow(t *testing.T) {
 			nil,
 		))
 	}
-	txn := db.MetadataTxn(false)
+	txn := db.MetadataTxn(context.Background(), false)
 	defer txn.Rollback()
 
 	pp, err := leiosDijkstraPParamsForSnapshot(db, 9, txn)

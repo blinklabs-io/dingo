@@ -96,7 +96,7 @@ func TestProcessEpochRolloverRecordsSpan(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 		_, err := ls.processEpochRollover(
 			context.Background(),
 			txn,

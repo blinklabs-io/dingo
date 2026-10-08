@@ -35,10 +35,11 @@ import (
 // RPC server. Using this interface keeps the server and service handlers free
 // of a direct *ledger.LedgerState dependency.
 type UtxorpcLedgerState interface {
-	BlockByHash(hash []byte) (models.Block, error)
+	BlockByHash(ctx context.Context, hash []byte) (models.Block, error)
 	CardanoNodeConfig() *cardano.CardanoNodeConfig
 	Datum(hash []byte) (*models.Datum, error)
-	EvaluateTx(
+	EvaluateTxContext(
+		ctx context.Context,
 		tx lcommon.Transaction,
 	) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error)
 	GetBlock(point ocommon.Point) (models.Block, error)
@@ -50,7 +51,10 @@ type UtxorpcLedgerState interface {
 	GetCurrentPParams() lcommon.ProtocolParameters
 	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
 	GetEpochs() ([]models.Epoch, error)
-	GetIntersectPoint(points []ocommon.Point) (*ocommon.Point, error)
+	GetIntersectPoint(
+		ctx context.Context,
+		points []ocommon.Point,
+	) (*ocommon.Point, error)
 	GetPParamsForEpoch(
 		epoch uint64,
 		era eras.EraDesc,
@@ -61,6 +65,7 @@ type UtxorpcLedgerState interface {
 	// the zero value and txn is nil here -- this RPC handler always answers
 	// live, never pinned.
 	PoolStakeDistribution(
+		ctx context.Context,
 		poolFilter []lcommon.PoolKeyHash,
 		at ledger.QueryPoint,
 		txn *database.Txn,
@@ -68,7 +73,7 @@ type UtxorpcLedgerState interface {
 	SlotToTime(slot uint64) (time.Time, error)
 	SystemStart() (time.Time, error)
 	Tip() ochainsync.Tip
-	TransactionByHash(hash []byte) (*models.Transaction, error)
+	TransactionByHash(ctx context.Context, hash []byte) (*models.Transaction, error)
 	UtxoByRef(txId []byte, outputIdx uint32) (*models.Utxo, error)
 	UtxosByRefs(refs []models.UtxoId) ([]models.Utxo, error)
 	UtxosByAddressWithOrdering(
