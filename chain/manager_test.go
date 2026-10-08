@@ -30,7 +30,7 @@ import (
 func TestRewindPrimaryChainToPointDoesNotDeadlockWithIterator(t *testing.T) {
 	t.Parallel()
 
-	cm, err := NewManager(nil, nil)
+	cm, err := NewManager(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %s", err)
 	}
@@ -46,7 +46,7 @@ func TestRewindPrimaryChainToPointDoesNotDeadlockWithIterator(t *testing.T) {
 	}
 	iterDone := make(chan error, 1)
 	go func() {
-		_, err := primaryChain.iterNext(iter, false)
+		_, err := primaryChain.iterNext(context.Background(), iter, false)
 		iterDone <- err
 	}()
 	testutil.WaitForCondition(t, func() bool {
@@ -61,7 +61,7 @@ func TestRewindPrimaryChainToPointDoesNotDeadlockWithIterator(t *testing.T) {
 	rewindDone := make(chan error, 1)
 	go func() {
 		close(rewindStarted)
-		rewindDone <- cm.RewindPrimaryChainToPoint(ocommon.NewPointOrigin())
+		rewindDone <- cm.RewindPrimaryChainToPoint(context.Background(), ocommon.NewPointOrigin())
 	}()
 	testutil.RequireReceive(
 		t,
@@ -96,9 +96,9 @@ func TestNewManagerReusesRegisteredMetrics(t *testing.T) {
 	t.Parallel()
 
 	registry := prometheus.NewRegistry()
-	first, err := NewManager(nil, nil, registry)
+	first, err := NewManager(context.Background(), nil, nil, registry)
 	require.NoError(t, err)
-	second, err := NewManager(nil, nil, registry)
+	second, err := NewManager(context.Background(), nil, nil, registry)
 	require.NoError(t, err)
 
 	require.Same(t, first.rollbackPointNotOnChain, second.rollbackPointNotOnChain)
@@ -173,7 +173,7 @@ func TestNewManagerRejectsIncompatibleRegisteredMetrics(t *testing.T) {
 
 			registry := prometheus.NewRegistry()
 			require.NoError(t, test.register(registry))
-			manager, err := NewManager(nil, nil, registry)
+			manager, err := NewManager(context.Background(), nil, nil, registry)
 			require.Error(t, err)
 			require.Nil(t, manager)
 		})

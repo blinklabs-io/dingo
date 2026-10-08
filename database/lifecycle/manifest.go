@@ -21,6 +21,7 @@
 package lifecycle
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -57,12 +58,18 @@ const MaxManifestBytes = 1 << 20
 // Callers can distinguish this resource rejection from missing or corrupt data.
 var ErrManifestTooLarge = errors.New("manifest size limit exceeded")
 
-// ManifestOption configures manifest I/O. The same options should be used
-// when creating, listing, labeling, and restoring a snapshot.
+// ManifestOption configures snapshot and manifest operations. Each option is
+// consumed only by the operations that use it.
 type ManifestOption func(*manifestConfig)
 
 type manifestConfig struct {
 	maxBytes int64
+	// maxPause is consumed only by Snapshot and SnapshotToCloud.
+	maxPause time.Duration
+	// pauseNow and pauseContext are per-call test seams consumed only by
+	// Snapshot. Production callers cannot construct options that set them.
+	pauseNow     func() time.Time
+	pauseContext func(context.Context) context.Context
 }
 
 // WithManifestMaxBytes sets the maximum encoded manifest size. Zero uses

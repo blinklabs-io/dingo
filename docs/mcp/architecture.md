@@ -113,7 +113,7 @@ Resources can be inspected directly without calling tools. Six resources are alw
 - `dingo://node/status`: Configured network, tip slot, block height, block hash, and sync status. It does not report epoch, percentage progress, or storage statistics.
 - `dingo://dbsync/cheatsheet`: Translation cheatsheet mapping `cardano-db-sync` PostgreSQL tables to Dingo SQLite equivalents.
 - `dingo://schema/tables`: Catalog of the connected SQLite database, queried at read time; reports schema unavailability without a SQL pool.
-- `dingo://schema/table/{name}`: Schema definitions for tables discovered at server construction. Discovery has a five-second minimum timeout so a shorter per-request timeout cannot silently omit table resources; each read queries the current DDL and columns with the configured request timeout.
+- `dingo://schema/table/{name}`: Schema definitions for tables discovered at server construction. Discovery is bounded by the larger of the request timeout and 30 seconds so a shorter per-request timeout cannot omit table resources, and a discovery failure is logged; each read queries the current DDL and columns with the configured request timeout.
 
 ---
 

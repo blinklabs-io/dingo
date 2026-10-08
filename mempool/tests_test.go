@@ -693,7 +693,7 @@ func runBenchmarkSyncer(
 ) {
 	for benchmarkWait(ctx, syncPeriod) {
 		start := time.Now()
-		if err := pool.rebuildOverlay(); err != nil {
+		if err := pool.rebuildOverlay(context.Background()); err != nil {
 			reportBenchmarkError(errCh, err)
 			return
 		}
@@ -1284,7 +1284,7 @@ func (v *fifoRevalidationBenchmarkValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-func (v *fifoRevalidationBenchmarkValidator) WithTxValidationSession(
+func (v *fifoRevalidationBenchmarkValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		func(
 			gledger.Transaction,
@@ -1351,7 +1351,7 @@ func BenchmarkFIFORevalidation(b *testing.B) {
 
 				syncStart := time.Now()
 				rebuildDone := make(chan error, 1)
-				go func() { rebuildDone <- pool.rebuildOverlay() }()
+				go func() { rebuildDone <- pool.rebuildOverlay(context.Background()) }()
 				waitCtx, cancelWait := context.WithTimeout(
 					context.Background(),
 					3*time.Second,

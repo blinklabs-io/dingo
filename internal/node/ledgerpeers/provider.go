@@ -15,6 +15,7 @@
 package ledgerpeers
 
 import (
+	"context"
 	"net"
 
 	"github.com/blinklabs-io/dingo/ledger"
@@ -22,7 +23,7 @@ import (
 )
 
 type relayProvider interface {
-	GetPoolRelays() ([]ledger.PoolRelay, error)
+	GetPoolRelays(context.Context) ([]ledger.PoolRelay, error)
 	CurrentSlot() uint64
 }
 
@@ -40,8 +41,8 @@ func NewProvider(relays relayProvider) *Provider {
 }
 
 // GetPoolRelays returns active stake pool relays in peer-governance terms.
-func (p *Provider) GetPoolRelays() ([]peergov.PoolRelay, error) {
-	relays, err := p.relays.GetPoolRelays()
+func (p *Provider) GetPoolRelays(ctx context.Context) ([]peergov.PoolRelay, error) {
+	relays, err := p.relays.GetPoolRelays(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -61,6 +62,11 @@ func toPeerGovRelays(relays []ledger.PoolRelay) []peergov.PoolRelay {
 			Port:     relay.Port,
 			IPv4:     copyIP(relay.IPv4),
 			IPv6:     copyIP(relay.IPv6),
+
+			PoolKeyHash: append([]byte(nil), relay.PoolKeyHash...),
+			Stake:       relay.Stake,
+			StakeKnown:  relay.StakeKnown,
+			IsMultiHost: relay.IsMultiHost,
 		}
 	}
 	return result

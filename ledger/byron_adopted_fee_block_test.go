@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -77,8 +78,8 @@ func processByronBlockWithPParams(
 			OutputIdx: utxo.Id.Index(),
 		}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
 	}
-	return db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
+	return db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(context.Background(),
 			txn,
 			ocommon.Point{Slot: 1, Hash: block.Hash().Bytes()},
 			block,

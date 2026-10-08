@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
@@ -29,7 +30,7 @@ import (
 func TestGetDatumRejectsWrongLengthHash(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
-	datum, err := db.GetDatum(bytes.Repeat([]byte{0x01}, 31), nil)
+	datum, err := db.GetDatum(context.Background(), bytes.Repeat([]byte{0x01}, 31), nil)
 	require.ErrorContains(t, err, "datum hash")
 	require.ErrorContains(t, err, "invalid blake2b-256 hash")
 	require.False(t, errors.Is(err, ErrDatumNotFound))
@@ -47,6 +48,7 @@ func TestResolvePoolRewardAccountAutoVotesRejectsMalformedPoolKey(
 	var err error
 	require.NotPanics(t, func() {
 		err = db.ResolvePoolRewardAccountAutoVotes(
+			context.Background(),
 			[]*models.PoolStakeSnapshot{{
 				Epoch: 3,
 				PoolKeyHash: bytes.Repeat(
@@ -68,7 +70,7 @@ func TestResolvePoolRewardAccountAutoVotesRejectsMalformedPoolKey(
 func TestRecoverUtxoCborRejectsWrongLengthTransactionID(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 	cbor, err := recoverUtxoCbor(db, txn, bytes.Repeat([]byte{0x03}, 31), 0)
 	require.ErrorContains(t, err, "utxo recovery transaction id")

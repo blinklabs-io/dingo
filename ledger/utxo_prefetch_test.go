@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -62,26 +63,28 @@ func processFixtureBlock(
 		}
 	}
 	point := ocommon.NewPoint(fx.blockSlot, block.Hash().Bytes())
-	return fx.db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := fx.dingoLS.ledgerProcessBlock(
-			txn,
-			point,
-			block,
-			true,
-			false,
-			false,
-			nil,
-			envelopeParent{origin: true},
-			offsets,
-			eras.ConwayEraDesc,
-			fx.dingoLS.currentPParams,
-			nil,
-			0,
-			0,
-			false,
-		)
-		return err
-	})
+	return fx.db.Transaction(context.Background(), true).
+		Do(func(txn *database.Txn) error {
+			_, err := fx.dingoLS.ledgerProcessBlock(
+				context.Background(),
+				txn,
+				point,
+				block,
+				true,
+				false,
+				false,
+				nil,
+				envelopeParent{origin: true},
+				offsets,
+				eras.ConwayEraDesc,
+				fx.dingoLS.currentPParams,
+				nil,
+				0,
+				0,
+				false,
+			)
+			return err
+		})
 }
 
 // TestLedgerProcessBlockPrefetchesUtxosInOneBatch checks that block

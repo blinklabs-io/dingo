@@ -78,23 +78,15 @@ type StakeDistributionEntry struct {
 // (Dingo or a real cardano-node) answers directly.
 //
 // point pins the session to a specific historical block instead of
-// whatever's live when each individual query runs
-// -- the whole-UTxO walk can take on the order of minutes against Dingo's
-// disk-backed store, long enough for a live testnet's tip to advance many
-// blocks before it finishes. A real cardano-node's Acquire(point) genuinely
-// pins its whole reply (every query on the session), but Dingo's
-// server-side Acquire (ouroboros/localstatequery.go) only recognizes the
-// pinned point for GetStakeDistribution/GetPoolDistr2, not GetUTxOWhole:
-// GetUTxOWhole always answers at Dingo's live tip regardless of what was
-// acquired, an accepted MVP gap tracked separately (not part of this
-// change) -- there is no tip-sandwich or other before/after check
-// discarding a result if Dingo's live tip moved during the walk, so a
-// UTxO comparison against Dingo should be read as approximate rather
-// than exactly pinned. GetCurrentProtocolParams and GetStakeDistribution
-// are single round-trip queries issued immediately after Acquire, before
-// the slow UTxO walk even starts, so the window for Dingo's live tip to
-// move underneath them is negligible in comparison, and GetStakeDistribution
-// does honor the acquired point (see ledger/queries_stakedistribution.go).
+// whatever's live when each individual query runs -- the whole-UTxO walk can
+// take on the order of minutes against Dingo's disk-backed store, long enough
+// for a live testnet's tip to advance many blocks before it finishes. Both a
+// real cardano-node and Dingo answer every query in an acquired session at
+// the acquired point: Dingo serves the session from a ledger snapshot opened
+// at Acquire, and its protocol-parameter, stake-distribution and whole-UTxO
+// handlers read at the pinned slot (see ledger/queries.go's point-pinning
+// audit), so the three fields describe the same block however long the walk
+// takes.
 func QuerySnapshot(
 	conn *ouroboros.Connection,
 	point *pcommon.Point,
