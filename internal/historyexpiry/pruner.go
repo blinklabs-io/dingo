@@ -48,7 +48,7 @@ type Pruner struct {
 	ledgerState LedgerWindow
 	db          *database.Database
 	// expire is a seam so a test can inject a per-block failure.
-	expire func(*database.BlobBlockResult) error
+	expire func(context.Context, *database.BlobBlockResult) error
 
 	wg     sync.WaitGroup
 	cancel context.CancelFunc
@@ -68,8 +68,11 @@ func NewPruner(cfg PrunerConfig) *Pruner {
 	return p
 }
 
-func (p *Pruner) pruneBlock(next *database.BlobBlockResult) error {
-	if _, err := p.db.PruneBlock(next.Slot, next.Hash); err != nil {
+func (p *Pruner) pruneBlock(
+	ctx context.Context,
+	next *database.BlobBlockResult,
+) error {
+	if _, err := p.db.PruneBlock(ctx, next.Slot, next.Hash); err != nil {
 		return fmt.Errorf("history expiry: %w", err)
 	}
 	return nil
@@ -164,7 +167,10 @@ func (p *Pruner) prune(ctx context.Context) {
 				return
 			}
 
-			if err := p.expire(next); err != nil {
+			if err := p.expire(ctx, next); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				p.logger.Error(
 					"history expiry: failed to expire block",
 					"error",

@@ -90,6 +90,57 @@ func waitForSignalOrError(
 	}
 }
 
+// waitForStop is waitForSignalOrError plus the remote lifecycle request that
+// ended the run, if any. endRequests closes the node's request intake and
+// returns the accepted request, so a request is either returned here or
+// refused; Bark keeps serving into shutdown, and a request accepted after this
+// point would never be performed. It is called however the run ended: Node.Run
+// returns nil on the cancellation a request causes, which can reach errChan
+// before the cancellation is observed.
+func waitForStop(
+	signalCtx context.Context,
+	errChan <-chan error,
+	endRequests func() (dingo.ShutdownRequest, bool),
+) (*dingo.ShutdownRequest, bool, error) {
+	err, signaled := waitForSignalOrError(signalCtx, errChan)
+	req, ok := endRequests()
+	if !ok {
+		return nil, signaled, err
+	}
+	return &req, signaled, err
+}
+
+// runRequestedShutdown performs a stop or restart accepted over the remote
+// lifecycle service. The graceful shutdown is abandoned once req.Timeout
+// elapses so the request can never leave the process hanging, and a restart
+// re-executes the process even then.
+func runRequestedShutdown(
+	req dingo.ShutdownRequest,
+	causalErr error,
+	shutdown func() error,
+	reExec func() error,
+) error {
+	done := make(chan error, 1)
+	go func() { done <- shutdown() }()
+	remaining := req.Timeout
+	if !req.Deadline.IsZero() {
+		remaining = max(time.Until(req.Deadline), 0)
+	}
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(remaining):
+		err = fmt.Errorf("graceful shutdown exceeded %s", req.Timeout)
+	}
+	if !req.Restart {
+		return errors.Join(causalErr, err)
+	}
+	if reExecErr := reExec(); reExecErr != nil {
+		return errors.Join(causalErr, err, reExecErr)
+	}
+	return errors.Join(causalErr, err)
+}
+
 func gracefulShutdown(
 	logger *slog.Logger,
 	metricsServer *http.Server,
@@ -571,6 +622,15 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			go serveAuxiliaryListenerOn("health", healthServer, listener, logger)
 		}
 	}
+	// A remote stop or restart ends the run exactly like a signal does;
+	// waitForStop then tells them apart.
+	go func() {
+		select {
+		case <-d.ShutdownRequests():
+			signalCtxStop()
+		case <-signalCtx.Done():
+		}
+	}()
 	go func() {
 		//nolint:contextcheck
 		err := d.Run(signalCtx)
@@ -583,19 +643,29 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		}
 	}()
 
-	// Wait for signal or error
-	err, signaled := waitForSignalOrError(signalCtx, errChan)
-	if signaled {
-		logger.Info("signal received, initiating graceful shutdown")
-
-		if err := gracefulShutdown(
+	// Wait for signal, remote request or error
+	req, signaled, err := waitForStop(signalCtx, errChan, d.EndShutdownRequests)
+	shutdown := func() error {
+		return gracefulShutdown(
 			logger,
 			metricsServer,
 			debugServer,
 			healthServer,
 			d,
 			shutdownTimeout,
-		); err != nil {
+		)
+	}
+	if req != nil {
+		logger.Info(
+			"remote lifecycle request received, initiating graceful shutdown",
+			"restart", req.Restart,
+			"timeout", req.Timeout,
+		)
+		return runRequestedShutdown(*req, err, shutdown, dingo.ReExec)
+	}
+	if signaled {
+		logger.Info("signal received, initiating graceful shutdown")
+		if err := shutdown(); err != nil {
 			return err
 		}
 		logger.Info("shutdown complete")
@@ -604,17 +674,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 
 	if err == nil {
 		logger.Info("node stopped")
-		if err := gracefulShutdown(
-			logger,
-			metricsServer,
-			debugServer,
-			healthServer,
-			d,
-			shutdownTimeout,
-		); err != nil {
-			return err
-		}
-		return nil
+		return shutdown()
 	}
 
 	logger.Error("node error", "error", err)
@@ -734,6 +794,10 @@ func buildDingoConfig(
 		),
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
+		),
+		dingo.WithBarkLifecycleEnabled(cfg.BarkLifecycleEnabled),
+		dingo.WithBarkLifecycleOperatorCertificateFingerprints(
+			cfg.BarkLifecycleOperatorCertificateFingerprints,
 		),
 		dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 			Enabled:   cfg.HistoryExpiry.Enabled,

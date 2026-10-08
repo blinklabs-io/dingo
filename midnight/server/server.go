@@ -90,12 +90,12 @@ type MidnightDatabase interface {
 	) ([]*models.PoolStakeSnapshot, error)
 	GetEpoch(epochId uint64) (*models.Epoch, error)
 	GetEpochBySlot(slot uint64) (*models.Epoch, error)
-	BlockByHash(hash []byte) (models.Block, error)
+	BlockByHash(ctx context.Context, hash []byte) (models.Block, error)
 	// BlockByNumber returns the block at the given 0-based consensus block
 	// number, translating to the blob store's internal 1-based index.
-	BlockByNumber(number uint64) (models.Block, error)
-	BlocksRecent(count int) ([]models.Block, error)
-	BlockBeforeSlot(slot uint64) (models.Block, error)
+	BlockByNumber(ctx context.Context, number uint64) (models.Block, error)
+	BlocksRecent(ctx context.Context, count int) ([]models.Block, error)
+	BlockBeforeSlot(ctx context.Context, slot uint64) (models.Block, error)
 }
 
 // Config holds the configuration for the Midnight gRPC server.

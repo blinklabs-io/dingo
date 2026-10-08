@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -210,8 +211,8 @@ func applySubGovBlock(
 	delta.Offsets = offsets
 	delta.addTransaction(tx, 0)
 	t.Cleanup(delta.Release)
-	return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
-		return delta.apply(ls, txn)
+	return ls.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		return delta.apply(context.Background(), ls, txn)
 	})
 }
 
@@ -221,7 +222,7 @@ func requireSubGovProposal(
 	id common.Blake2b256,
 ) *models.GovernanceProposal {
 	t.Helper()
-	got, err := db.GetGovernanceProposal(id.Bytes(), 0, nil)
+	got, err := db.GetGovernanceProposal(context.Background(), id.Bytes(), 0, nil)
 	require.NoError(t, err)
 	require.Equal(t, id.Bytes(), got.TxHash)
 	return got
@@ -233,7 +234,7 @@ func requireNoSubGovProposal(
 	id common.Blake2b256,
 ) {
 	t.Helper()
-	_, err := db.GetGovernanceProposal(id.Bytes(), 0, nil)
+	_, err := db.GetGovernanceProposal(context.Background(), id.Bytes(), 0, nil)
 	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
 }
 
@@ -270,7 +271,7 @@ func TestDijkstraBatchChildVoteOnExistingProposal(t *testing.T) {
 	})
 	require.NoError(t, applySubGovBlock(t, ls, 2, tx))
 
-	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	require.Equal(t, drep.Hash[:], votes[0].VoterCredential)
@@ -298,7 +299,7 @@ func TestDijkstraBatchLaterChildVotesOnEarlierChildProposal(t *testing.T) {
 	require.NoError(t, applySubGovBlock(t, ls, 1, tx))
 
 	proposal := requireSubGovProposal(t, db, child1ID)
-	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	require.Equal(t, drep.Hash[:], votes[0].VoterCredential)
@@ -347,7 +348,7 @@ func TestDijkstraBatchTopLevelVoteOnChildProposal(t *testing.T) {
 	require.NoError(t, applySubGovBlock(t, ls, 1, tx))
 
 	proposal := requireSubGovProposal(t, db, childID)
-	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 }
@@ -454,7 +455,7 @@ func requireSharedSubGovState(
 	require.Equal(t, fixture.RootID.Bytes(), child.ParentTxHash)
 	require.NotNil(t, child.ParentActionIdx)
 	require.Zero(t, *child.ParentActionIdx)
-	votes, err := db.GetGovernanceVotes(root.ID, nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), root.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 2)
 	voters := make(map[byte]bool, len(votes))
@@ -515,8 +516,8 @@ func replaySubGovBlock(
 		block,
 	)
 	require.NoError(t, err)
-	return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
-		delta, err := ls.ledgerProcessBlock(
+	return ls.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		delta, err := ls.ledgerProcessBlock(context.Background(),
 			txn,
 			ocommon.Point{Slot: slot, Hash: blockHash},
 			block,
@@ -540,7 +541,7 @@ func replaySubGovBlock(
 			return nil
 		}
 		defer delta.Release()
-		return delta.apply(ls, txn)
+		return delta.apply(context.Background(), ls, txn)
 	})
 }
 
@@ -584,11 +585,11 @@ func TestDijkstraBatchChildDRepRegistrationAndChildVote(t *testing.T) {
 	tx := subGovTx(t, true, nil, proposing, registering, voting)
 	require.NoError(t, applySubGovBlock(t, ls, 1, tx))
 
-	got, err := db.GetDrepByCredential(0, drep.Hash[:], true, nil)
+	got, err := db.GetDrepByCredential(context.Background(), 0, drep.Hash[:], true, nil)
 	require.NoError(t, err)
 	require.Equal(t, anchor.Url, got.AnchorURL)
 	proposal := requireSubGovProposal(t, db, proposalID)
-	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 }
@@ -612,21 +613,21 @@ func TestDijkstraBatchChildGovernanceRollbackAndReapply(t *testing.T) {
 	tx := subGovTx(t, true, nil, proposing, voting)
 	require.NoError(t, applySubGovBlock(t, ls, 5, tx))
 	before := requireSubGovProposal(t, db, proposalID)
-	votesBefore, err := db.GetGovernanceVotes(before.ID, nil)
+	votesBefore, err := db.GetGovernanceVotes(context.Background(), before.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votesBefore, 1)
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		if err := db.DeleteGovernanceVotesAfterSlot(4, txn); err != nil {
+	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		if err := db.DeleteGovernanceVotesAfterSlot(context.Background(), 4, txn); err != nil {
 			return err
 		}
-		return db.DeleteGovernanceProposalsAfterSlot(4, txn)
+		return db.DeleteGovernanceProposalsAfterSlot(context.Background(), 4, txn)
 	}))
 	requireNoSubGovProposal(t, db, proposalID)
 
 	require.NoError(t, applySubGovBlock(t, ls, 5, tx))
 	after := requireSubGovProposal(t, db, proposalID)
-	votesAfter, err := db.GetGovernanceVotes(after.ID, nil)
+	votesAfter, err := db.GetGovernanceVotes(context.Background(), after.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votesAfter, 1)
 	require.Equal(t, before.ActionType, after.ActionType)
@@ -658,6 +659,6 @@ func TestDijkstraBatchPhase2InvalidPersistsNoChildGovernance(t *testing.T) {
 	tx := subGovTx(t, false, nil, proposing, voting)
 	require.NoError(t, applySubGovBlock(t, ls, 1, tx))
 	requireNoSubGovProposal(t, db, proposalID)
-	_, err := db.GetDrepByCredential(0, drep.Hash[:], true, nil)
+	_, err := db.GetDrepByCredential(context.Background(), 0, drep.Hash[:], true, nil)
 	require.ErrorIs(t, err, models.ErrDrepNotFound)
 }

@@ -659,7 +659,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to reopen storage: %w", err)
 	}
-	db, err := database.New(n.databaseConfig(), stores)
+	db, err := database.New(ctx, n.databaseConfig(), stores)
 	if db == nil {
 		if err != nil {
 			return fmt.Errorf("failed to reopen database: %w", err)
@@ -679,7 +679,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		dbNeedsRecovery = true
 	}
 
-	cm, err := chain.NewManager(n.db, n.eventBus, n.config.promRegistry)
+	cm, err := chain.NewManager(ctx, n.db, n.eventBus, n.config.promRegistry)
 	if err != nil {
 		return fmt.Errorf("failed to reload chain manager: %w", err)
 	}
@@ -727,10 +727,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	// Recovery changes both the ledger tip and blob contents. Complete it
 	// before starting background maintenance that reads or prunes either store.
 	if dbNeedsRecovery {
-		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
+		if err := n.ledgerState.RecoverCommitTimestampConflict(ctx); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
 		}
-		if err := n.enforceRecoveredNodeSettings(); err != nil {
+		if err := n.enforceRecoveredNodeSettings(ctx); err != nil {
 			return err
 		}
 	}
@@ -766,7 +766,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		)
 	}
 
-	if err := n.backfillRewardLiveStake(); err != nil {
+	if err := n.backfillRewardLiveStake(ctx); err != nil {
 		return err
 	}
 
@@ -985,11 +985,11 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			Logger:   n.config.logger,
 			EventBus: n.eventBus,
 			ListenersProvider: func() []connmanager.ListenerConfig {
-				return n.ouroboros().ConfigureListeners(n.config.listeners)
+				return n.ouroboros().ConfigureListeners(n.ctx, n.config.listeners)
 			},
 			OutboundSourcePort: n.config.outboundSourcePort,
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
-				return n.ouroboros().OutboundConnOpts()
+				return n.ouroboros().OutboundConnOpts(n.ctx)
 			},
 			PromRegistry:            n.config.promRegistry,
 			MaxConnectionsPerIP:     n.config.maxConnectionsPerIP,
@@ -1105,14 +1105,14 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		if usePeerSnapshot {
 			topologyConfig = topologyConfig.WithoutBootstrapPeers()
 		}
-		n.peerGov.LoadTopologyConfig(topologyConfig)
+		n.peerGov.LoadTopologyConfig(topologyConfig) //nolint:contextcheck // address normalization bounds its own DNS lookup
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
 				ctx,
 				n.config.topologyConfig.PeerSnapshot,
 			)
 			if added == 0 {
-				n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
+				n.peerGov.LoadTopologyConfig(n.config.topologyConfig) //nolint:contextcheck // address normalization bounds its own DNS lookup
 			}
 		}
 	}
@@ -1183,7 +1183,11 @@ func (n *Node) reinitializeAPIServers() error {
 				Logger:   n.config.logger,
 				Metadata: n.db.Metadata(),
 				BlockNumberByHash: func(hash []byte) (uint64, bool, error) {
-					block, err := database.BlockByHash(n.db, hash)
+					block, err := database.BlockByHash(
+						n.ctx,
+						n.db,
+						hash,
+					)
 					if err != nil {
 						if errors.Is(err, models.ErrBlockNotFound) {
 							return 0, false, nil
@@ -1612,6 +1616,8 @@ func (n *Node) Restore(
 ) (lifecycle.Manifest, error) {
 	n.liveLifecycleMu.Lock()
 	defer n.liveLifecycleMu.Unlock()
+	n.networkingCoreMu.Lock()
+	defer n.networkingCoreMu.Unlock()
 	// Excludes a concurrent Snapshot too -- see snapshotMu's doc comment
 	// (node.go) for why Snapshot itself only takes this lock, not
 	// liveLifecycleMu.
@@ -2118,6 +2124,8 @@ func (n *Node) Truncate(
 ) (uint64, error) {
 	n.liveLifecycleMu.Lock()
 	defer n.liveLifecycleMu.Unlock()
+	n.networkingCoreMu.Lock()
+	defer n.networkingCoreMu.Unlock()
 	// Excludes a concurrent Snapshot too -- see snapshotMu's doc comment
 	// (node.go) for why Snapshot itself only takes this lock, not
 	// liveLifecycleMu.
@@ -2227,7 +2235,7 @@ func (n *Node) Truncate(
 			)
 		}
 
-		block, err := dblifecycle.ResolveTarget(tmpDB, target)
+		block, err := dblifecycle.ResolveTarget(ctx, tmpDB, target)
 		if err != nil {
 			return 0, fmt.Errorf(
 				"%w: %w", lifecycle.ErrTruncateNotStarted, err,

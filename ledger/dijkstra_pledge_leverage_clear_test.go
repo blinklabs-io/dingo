@@ -149,7 +149,7 @@ func TestDijkstraPledgeLeverageClearProposalThroughProduction(t *testing.T) {
 					}] = database.CborOffset{BlockSlot: dijkstraCollateralReturnTestSlot, ByteLength: 1}
 				}
 				applyBlock := func(txn *database.Txn) error {
-					delta, err := fx.ls.ledgerProcessBlock(
+					delta, err := fx.ls.ledgerProcessBlock(t.Context(),
 						txn,
 						ocommon.NewPoint(
 							dijkstraCollateralReturnTestSlot,
@@ -175,12 +175,12 @@ func TestDijkstraPledgeLeverageClearProposalThroughProduction(t *testing.T) {
 					// Without validation the block's delta is returned for the
 					// caller to apply in a batch.
 					defer delta.Release()
-					return delta.apply(fx.ls, txn)
+					return delta.apply(t.Context(), fx.ls, txn)
 				}
 				// Backfill persists proposals through the same function as
 				// block application, without applying the block.
 				backfill := func(txn *database.Txn) error {
-					return governance.ProcessProposals(
+					return governance.ProcessProposals(t.Context(),
 						tx,
 						ocommon.NewPoint(
 							dijkstraCollateralReturnTestSlot,
@@ -197,9 +197,12 @@ func TestDijkstraPledgeLeverageClearProposalThroughProduction(t *testing.T) {
 				if mode == "backfilled" {
 					apply = backfill
 				}
-				require.NoError(t, fx.db.Transaction(true).Do(apply))
+				require.NoError(
+					t,
+					fx.db.Transaction(t.Context(), true).Do(apply),
+				)
 
-				stored, err := fx.db.GetGovernanceProposal(
+				stored, err := fx.db.GetGovernanceProposal(t.Context(),
 					tx.Hash().Bytes(),
 					0,
 					nil,
@@ -223,11 +226,21 @@ func TestDijkstraPledgeLeverageClearProposalThroughProduction(t *testing.T) {
 
 				require.NoError(
 					t,
-					fx.db.Transaction(true).Do(func(txn *database.Txn) error {
-						return fx.db.DeleteGovernanceProposalsAfterSlot(0, txn)
-					}),
+					fx.db.Transaction(t.Context(), true).
+						Do(func(txn *database.Txn) error {
+							return fx.db.DeleteGovernanceProposalsAfterSlot(
+								t.Context(),
+								0,
+								txn,
+							)
+						}),
 				)
-				_, err = fx.db.GetGovernanceProposal(tx.Hash().Bytes(), 0, nil)
+				_, err = fx.db.GetGovernanceProposal(
+					t.Context(),
+					tx.Hash().Bytes(),
+					0,
+					nil,
+				)
 				require.Error(t, err, "rollback must drop the proposal")
 			})
 		}

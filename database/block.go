@@ -267,9 +267,13 @@ func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	return blob.DeleteBlock(blobTxn, block.Slot, block.Hash, block.ID)
 }
 
-func BlockByPoint(db *Database, point ocommon.Point) (models.Block, error) {
+func BlockByPoint(
+	ctx context.Context,
+	db *Database,
+	point ocommon.Point,
+) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockByPointTxn(txn, point)
@@ -588,9 +592,13 @@ func canonicalPointForID(txn *Txn, point ocommon.Point, id uint64) (bool, error)
 	return indexed.Slot == point.Slot && bytes.Equal(indexed.Hash, point.Hash), nil
 }
 
-func BlockByHash(db *Database, hash []byte) (models.Block, error) {
+func BlockByHash(
+	ctx context.Context,
+	db *Database,
+	hash []byte,
+) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockByHashTxn(txn, hash)
@@ -599,9 +607,13 @@ func BlockByHash(db *Database, hash []byte) (models.Block, error) {
 	return ret, err
 }
 
-func BlockBySlot(db *Database, slot uint64) (models.Block, error) {
+func BlockBySlot(
+	ctx context.Context,
+	db *Database,
+	slot uint64,
+) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockBySlotTxn(txn, slot)
@@ -639,9 +651,12 @@ type BlockNumberBound struct {
 // ResolveBlockNumberBound reads the highest indexed block to bound a
 // block-number search. See BlockNumberBound for why the result is worth
 // carrying across lookups.
-func ResolveBlockNumberBound(db *Database) (BlockNumberBound, error) {
+func ResolveBlockNumberBound(
+	ctx context.Context,
+	db *Database,
+) (BlockNumberBound, error) {
 	var ret BlockNumberBound
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = ResolveBlockNumberBoundTxn(txn)
@@ -728,9 +743,13 @@ func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
 // search rather than calling this: a truncate target must not resolve past
 // the persisted tip, while a read should serve any block the blob store
 // actually holds.
-func BlockByNumber(db *Database, number uint64) (models.Block, error) {
+func BlockByNumber(
+	ctx context.Context,
+	db *Database,
+	number uint64,
+) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockByNumberTxn(txn, number)
@@ -754,12 +773,13 @@ func BlockByNumberTxn(txn *Txn, number uint64) (models.Block, error) {
 // bound, so a batch of numbers costs one ResolveBlockNumberBound rather
 // than one per number.
 func BlockByNumberBounded(
+	ctx context.Context,
 	db *Database,
 	number uint64,
 	bound BlockNumberBound,
 ) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockByNumberBoundedTxn(txn, number, bound)
@@ -1297,9 +1317,13 @@ func (d *Database) BlockAtOrAfterIndex(
 	return models.Block{}, models.ErrBlockNotFound
 }
 
-func BlocksRecent(db *Database, count int) ([]models.Block, error) {
+func BlocksRecent(
+	ctx context.Context,
+	db *Database,
+	count int,
+) ([]models.Block, error) {
 	var ret []models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlocksRecentTxn(txn, count)
@@ -1365,9 +1389,13 @@ func BlocksRecentTxn(txn *Txn, count int) ([]models.Block, error) {
 	return ret, nil
 }
 
-func BlockBeforeSlot(db *Database, slotNumber uint64) (models.Block, error) {
+func BlockBeforeSlot(
+	ctx context.Context,
+	db *Database,
+	slotNumber uint64,
+) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockBeforeSlotTxn(txn, slotNumber)

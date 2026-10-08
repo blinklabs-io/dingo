@@ -110,6 +110,8 @@ var logPlainConfigFields = []string{
 	"BarkArchiveMaxConcurrentFetches",
 	"BarkClientCAFilePath",
 	"BarkHost",
+	"BarkLifecycleEnabled",
+	"BarkLifecycleOperatorCertificateFingerprints",
 	"BarkOperatorCertificateFingerprints",
 	"BarkPort",
 	"BindAddr",

@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"testing"
 
@@ -86,7 +87,7 @@ func seedRollbackUtxos(
 		})
 	}
 
-	seedTxn := db.MetadataTxn(true)
+	seedTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, seedTxn.Do(func(txn *Txn) error {
 		return db.Metadata().ImportUtxos(utxos, txn.Metadata())
 	}))
@@ -118,7 +119,7 @@ func seedRollbackUtxos(
 // countUtxoBlobs reports how many of the given UTxOs still have blob data.
 func countUtxoBlobs(t *testing.T, db *Database, utxos []models.Utxo) int {
 	t.Helper()
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 	store := txn.BlobStore()
 	require.NotNil(t, store)
@@ -165,16 +166,16 @@ func TestTruncateAfterSlotCommitsWithOverBudgetBlobDeletes(t *testing.T) {
 	)
 
 	point := ocommon.Point{Slot: rollbackSlot, Hash: targetBlock.Hash}
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *Txn) error {
-		_, _, err := db.TruncateAfterSlot(point, 0, txn)
+		_, _, err := db.TruncateAfterSlot(context.Background(), point, 0, txn)
 		return err
 	}), "rollback commit must survive a blob-delete set larger than the "+
 		"blob store's per-transaction budget")
 
 	// The rollback still means what it meant: the metadata that names the
 	// rolled-back UTxOs is gone, whether or not their blobs could be.
-	readTxn := db.Transaction(false)
+	readTxn := db.Transaction(context.Background(), false)
 	defer readTxn.Release()
 	remaining, err := db.Metadata().GetUtxosAddedAfterSlot(
 		rollbackSlot,
@@ -218,7 +219,7 @@ func TestDeleteTxBlobsLeavesRoomForCommit(t *testing.T) {
 		txHashes = append(txHashes, hash)
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	err := deleteTxBlobs(db, txHashes, txn)
 	require.Error(t, err, "the over-budget tail must be reported")
 	require.ErrorIs(t, err, ErrBlobDeleteIncomplete)
@@ -246,7 +247,7 @@ func TestTruncateAfterSlotObservesDuration(t *testing.T) {
 	targetBlock := testIndexedBlock(1500, 1, 0x15)
 	require.NoError(t, db.BlockCreate(targetBlock, nil))
 	point := ocommon.Point{Slot: 1500, Hash: targetBlock.Hash}
-	_, _, err := db.TruncateAfterSlot(point, 0, nil)
+	_, _, err := db.TruncateAfterSlot(context.Background(), point, 0, nil)
 	require.NoError(t, err)
 
 	require.Equal(
@@ -275,7 +276,7 @@ func TestTruncateAfterSlotRecordsFailureSeparately(t *testing.T) {
 		Slot: 4242,
 		Hash: bytes.Repeat([]byte{0x99}, 32),
 	}
-	_, _, err := db.TruncateAfterSlot(point, 0, nil)
+	_, _, err := db.TruncateAfterSlot(context.Background(), point, 0, nil)
 	require.Error(t, err)
 
 	assert.Equal(
@@ -408,7 +409,12 @@ func TestTruncateAfterSlotAllowsTargetWithPrunedNonceWhenCheckpointSurvives(
 	// Sanity check: before pruning, TruncateAfterSlot correctly returns
 	// the target block's own nonce.
 	point := ocommon.Point{Slot: targetBlock.Slot, Hash: targetBlock.Hash}
-	_, nonceBeforePruning, err := db.TruncateAfterSlot(point, 0, nil)
+	_, nonceBeforePruning, err := db.TruncateAfterSlot(
+		context.Background(),
+		point,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, targetNonce, nonceBeforePruning,
 		"sanity check: truncate must return the target's own nonce "+
@@ -447,7 +453,12 @@ func TestTruncateAfterSlotAllowsTargetWithPrunedNonceWhenCheckpointSurvives(
 	// a checkpoint survives to reconstruct from: LedgerState's startup heal
 	// is responsible for actually computing and persisting the correct
 	// nonce before anything folds forward from it.
-	_, nonceAfterPruning, err := db.TruncateAfterSlot(point, 0, nil)
+	_, nonceAfterPruning, err := db.TruncateAfterSlot(
+		context.Background(),
+		point,
+		0,
+		nil,
+	)
 	require.NoError(t, err,
 		"TruncateAfterSlot must allow a truncate whose target's block_nonce "+
 			"row was pruned when an earlier checkpoint survives to "+
@@ -498,7 +509,12 @@ func TestTruncateAfterSlotRejectsTargetWithPrunedNonceAndNoCheckpoint(
 		"sanity check: the target's own block_nonce row must actually "+
 			"be gone")
 
-	_, nonceAfterPruning, err := db.TruncateAfterSlot(point, 0, nil)
+	_, nonceAfterPruning, err := db.TruncateAfterSlot(
+		context.Background(),
+		point,
+		0,
+		nil,
+	)
 	require.Error(t, err,
 		"TruncateAfterSlot must reject a target whose block_nonce row was "+
 			"pruned when no checkpoint survives to reconstruct from -- "+
@@ -533,7 +549,7 @@ func TestTruncateAfterSlotRestoresPoolDenormalizedFields(t *testing.T) {
 	rewardAfter := bytes.Repeat([]byte{0xb2}, 28)
 
 	// Initial registration, before the truncate target.
-	require.NoError(t, db.ImportPool(nil,
+	require.NoError(t, db.ImportPool(context.Background(), nil,
 		&models.Pool{
 			PoolKeyHash:   poolKeyHash,
 			Pledge:        100,
@@ -554,7 +570,7 @@ func TestTruncateAfterSlotRestoresPoolDenormalizedFields(t *testing.T) {
 	// Re-registration with different terms, after the truncate target.
 	// This is the one truncate must discard, restoring the pool to its
 	// pre-re-registration state.
-	require.NoError(t, db.ImportPool(nil,
+	require.NoError(t, db.ImportPool(context.Background(), nil,
 		&models.Pool{
 			PoolKeyHash:   poolKeyHash,
 			Pledge:        999,
@@ -573,15 +589,25 @@ func TestTruncateAfterSlotRestoresPoolDenormalizedFields(t *testing.T) {
 	))
 
 	// Sanity check: the pool currently reflects the later registration.
-	poolBefore, err := db.GetPool(lcommon.PoolKeyHash(poolKeyHash), true, nil)
+	poolBefore, err := db.GetPool(
+		context.Background(),
+		lcommon.PoolKeyHash(poolKeyHash),
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(999), uint64(poolBefore.Pledge))
 
 	point := ocommon.Point{Slot: 1500, Hash: targetBlock.Hash}
-	_, _, err = db.TruncateAfterSlot(point, 0, nil)
+	_, _, err = db.TruncateAfterSlot(context.Background(), point, 0, nil)
 	require.NoError(t, err)
 
-	poolAfter, err := db.GetPool(lcommon.PoolKeyHash(poolKeyHash), true, nil)
+	poolAfter, err := db.GetPool(
+		context.Background(),
+		lcommon.PoolKeyHash(poolKeyHash),
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(100), uint64(poolAfter.Pledge),
 		"pledge must revert to the surviving pre-truncate registration")
@@ -675,6 +701,7 @@ func TestTruncateAfterSlotLoadsNonceForSlotZeroBlock(t *testing.T) {
 	))
 
 	tip, nonce, err := db.TruncateAfterSlot(
+		context.Background(),
 		ocommon.Point{Slot: 0, Hash: block0.Hash}, 0, nil,
 	)
 	require.NoError(t, err)
@@ -698,6 +725,7 @@ func TestTruncateAfterSlotByronSlotZeroBlockHasNoNonce(t *testing.T) {
 	require.NoError(t, db.BlockCreate(block0, nil))
 
 	tip, nonce, err := db.TruncateAfterSlot(
+		context.Background(),
 		ocommon.Point{Slot: 0, Hash: block0.Hash}, 0, nil,
 	)
 	require.NoError(t, err)
@@ -720,7 +748,7 @@ func TestTruncateAfterSlotOriginClearsNonce(t *testing.T) {
 		block0.Hash, block0.Slot, bytes.Repeat([]byte{0xe0}, 32), true, nil,
 	))
 
-	tip, nonce, err := db.TruncateAfterSlot(ocommon.NewPointOrigin(), 0, nil)
+	tip, nonce, err := db.TruncateAfterSlot(context.Background(), ocommon.NewPointOrigin(), 0, nil)
 	require.NoError(t, err)
 	require.Empty(t, nonce)
 	require.Zero(t, tip.BlockNumber)

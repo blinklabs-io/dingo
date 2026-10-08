@@ -136,7 +136,7 @@ func TestPrunerSkipsAlreadyExpiredBlocks(t *testing.T) {
 	firstHash := insertTestBlock(t, db, 1, 0x01)
 	secondHash := insertTestBlock(t, db, 2, 0x02)
 
-	_, err := db.PruneBlock(1, firstHash)
+	_, err := db.PruneBlock(context.Background(), 1, firstHash)
 	require.NoError(t, err)
 
 	pruner := NewPruner(PrunerConfig{
@@ -287,11 +287,11 @@ func TestPrunerCursorDoesNotPassFailedBlock(t *testing.T) {
 
 	p := newTestPruner(db, 10, 5)
 	realExpire := p.expire
-	p.expire = func(b *database.BlobBlockResult) error {
+	p.expire = func(ctx context.Context, b *database.BlobBlockResult) error {
 		if b.Slot == 2 {
 			return errors.New("injected")
 		}
-		return realExpire(b)
+		return realExpire(ctx, b)
 	}
 	p.prune(context.Background())
 	assert.False(t, blockIsExpired(t, db, 2, failing))

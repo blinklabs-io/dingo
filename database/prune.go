@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -86,7 +87,11 @@ func (d *Database) lowerHistoryExpiryCursor(slot uint64, txn *Txn) error {
 // expired block without requiring a wrapping archive proxy.
 //
 // Returns the number of UTxOs that were materialized.
-func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
+func (d *Database) PruneBlock(
+	ctx context.Context,
+	slot uint64,
+	hash []byte,
+) (int, error) {
 	// Read UTxO refs for this slot from metadata. This is a separate
 	// transaction so the blob write txn below has a single, simple commit
 	// scope. A UTxO consumed between this read and the blob write is
@@ -94,7 +99,7 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 	// is skipped. Release the read txn as soon as the refs are
 	// materialized so the connection is freed before the blob write txn
 	// and block operations run.
-	mdTxn := d.MetadataTxn(false)
+	mdTxn := d.MetadataTxn(ctx, false)
 	var (
 		utxoRefs []models.UtxoId
 		err      error
@@ -113,9 +118,15 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 		)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	var materialized int
 	blobTxn := d.BlobTxn(true)
 	if err := blobTxn.Do(func(txn *Txn) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		blobStore := txn.BlobStore()
 		if blobStore == nil {
 			return types.ErrBlobStoreUnavailable
@@ -129,11 +140,17 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 			)
 		}
 		for _, ref := range utxoRefs {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			n, err := d.materializeUtxo(txn, slot, hash, blockCbor, ref)
 			if err != nil {
 				return err
 			}
 			materialized += n
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if err := blobStore.TombstoneBlock(txn.Blob(), slot, hash); err != nil {
 			return fmt.Errorf(

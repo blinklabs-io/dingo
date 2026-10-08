@@ -447,7 +447,7 @@ type drepStore interface {
 		[]byte,
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
-	UpdateDRepActivity(uint8, []byte, uint64, uint64, types.Txn) error
+	UpdateDRepActivity(uint8, []byte, uint64, uint64, uint64, types.Txn) error
 	GetExpiredDReps(uint64, types.Txn) ([]*models.Drep, error)
 	GetDrepLastRegistrationSlot(uint8, []byte, types.Txn) (uint64, error)
 	GetDrepLastRegistrationDeposit(uint8, []byte, types.Txn) (*uint64, error)
@@ -686,6 +686,7 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		importedCredential,
 		30,
 		5,
+		300,
 		nil,
 	))
 	require.NoError(t, store.CreateAccount(nil, &models.Account{
@@ -845,7 +846,7 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		},
 		ret.Deposits,
 	)
-	err = store.UpdateDRepActivity(0, missingCredential, 1, 1, nil)
+	err = store.UpdateDRepActivity(0, missingCredential, 1, 1, 10, nil)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, models.ErrDrepActivityNotUpdated))
 	ret.MissingActivityError = err.Error()

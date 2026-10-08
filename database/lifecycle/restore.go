@@ -1368,7 +1368,7 @@ func validateRestoredDatabase(
 			return err
 		}
 	}
-	db, err := database.New(&database.Config{
+	db, err := database.New(ctx, &database.Config{
 		DataDir:                   targetDataDir,
 		StorageMode:               manifest.StorageMode,
 		Network:                   manifest.Network,
