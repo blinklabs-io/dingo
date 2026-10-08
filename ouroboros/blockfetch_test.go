@@ -462,7 +462,10 @@ func TestBlockfetchClientRequestRangeUsesLedgerEstimateByDefault(
 	blocks, err := testfixtures.GenerateConwayChainWithTransactions(3)
 	require.NoError(t, err)
 	for _, b := range blocks {
-		require.NoError(t, ls.Chain().AddBlockHeader(b.Header()))
+		require.NoError(
+			t,
+			ls.Chain().AddBlockHeader(context.Background(), b.Header()),
+		)
 	}
 	start := ocommon.NewPoint(blocks[0].SlotNumber(), blocks[0].Hash().Bytes())
 	end := ocommon.NewPoint(blocks[2].SlotNumber(), blocks[2].Hash().Bytes())
@@ -586,7 +589,7 @@ func (f *blockfetchRangeFixture) readMessageTypes(
 	t.Helper()
 	types := make([]byte, 0, count)
 	for range count {
-		protocolID, message := f.peer.readMessage(t, 5*time.Second)
+		protocolID, message := f.peer.readMessage(t, testutil.AsyncWait)
 		require.Equal(t, blockfetch.ProtocolId, protocolID)
 		require.GreaterOrEqual(t, len(message), 2)
 		types = append(types, message[1])
@@ -633,7 +636,7 @@ func newBlockfetchRangeFixtureWithSlotsAndConfig(
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -655,7 +658,10 @@ func newBlockfetchRangeFixtureWithSlotsAndConfig(
 		})
 		prevHash = hash
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), blocks),
+	)
 
 	logger := slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
@@ -2328,7 +2334,7 @@ func TestBlockfetchServerRequestRange_RepeatedInvertedRangeReachesCloseThreshold
 			blockfetch.NewMsgRequestRange(start, end),
 		)
 
-		segment := peer.readResponse(t, 5*time.Second)
+		segment := peer.readResponse(t, testutil.AsyncWait)
 		assert.Equal(t, blockfetch.ProtocolId, segment.GetProtocolId())
 		assert.Equal(
 			t,

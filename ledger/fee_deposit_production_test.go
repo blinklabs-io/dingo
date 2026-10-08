@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"maps"
 	"math/big"
 	"testing"
 	"time"
@@ -165,8 +166,8 @@ func (f *feeProdFixture) seedOutput(
 	id := bytes.Repeat([]byte{b}, lcommon.Blake2b256Size)
 	encoded, err := cbor.Encode(output)
 	require.NoError(t, err)
-	require.NoError(t, f.db.Transaction(true).Do(func(txn *database.Txn) error {
-		if err := f.db.CreateUtxo(txn, &models.Utxo{
+	require.NoError(t, f.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		if err := f.db.CreateUtxo(context.Background(), txn, &models.Utxo{
 			TxId: id, OutputIdx: 0, AddedSlot: 0,
 		}); err != nil {
 			return err
@@ -211,9 +212,7 @@ func (f *feeProdFixture) spendCbor(t *testing.T, s feeProdSpend) []byte {
 		1: []any{map[uint]any{0: f.keyAddr, 1: uint64(output)}},
 		2: s.fee,
 	}
-	for key, value := range s.extra {
-		body[key] = value
-	}
+	maps.Copy(body, s.extra)
 	witnessSet := map[uint]any{}
 	if s.script != nil {
 		body[13] = set([]any{s.collateral, uint(0)})
@@ -333,8 +332,9 @@ func (c feeProdCase) ledger(t *testing.T) *LedgerState {
 }
 
 func (c feeProdCase) applyBlock(ls *LedgerState) error {
-	return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
+	return ls.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.NewPoint(c.block.SlotNumber(), c.block.Hash().Bytes()),
 			c.block,
@@ -410,7 +410,7 @@ var (
 	feeProdForgedRevalidation = feeProdPath{
 		name: "forged block revalidation",
 		run: func(t *testing.T, c feeProdCase) error {
-			return c.ledger(t).validateForgedTxs(c.block)
+			return c.ledger(t).validateForgedTxs(context.Background(), c.block)
 		},
 	}
 	feeProdReplay = feeProdPath{
@@ -432,9 +432,10 @@ var (
 			ls := c.ledger(t)
 			first := replayTestBlock(ls, c.block)
 			if first == nil {
-				require.NoError(t, ls.rollback(ocommon.Point{}))
+				require.NoError(t, ls.rollback(context.Background(), ocommon.Point{}))
 				for _, input := range c.tx.Inputs() {
 					_, err := c.fx.db.UtxoByRef(
+						context.Background(),
 						input.Id().Bytes(), input.Index(), nil,
 					)
 					require.NoError(t, err, "rollback left %s spent", input)
@@ -473,7 +474,7 @@ var (
 func requireOneBatchFeePersisted(t *testing.T, c feeProdCase) {
 	t.Helper()
 	for _, level := range TransactionLevels(c.tx) {
-		stored, err := c.fx.db.GetTransactionByHash(level.Hash().Bytes(), nil)
+		stored, err := c.fx.db.GetTransactionByHash(context.Background(), level.Hash().Bytes(), nil)
 		require.NoError(t, err)
 		require.NotNil(t, stored)
 		want := uint64(0)
@@ -978,7 +979,7 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 				}}}
 			},
 			setup: func(t *testing.T, fx *feeProdFixture) {
-				require.NoError(t, fx.db.CreateAccount(nil, &models.Account{
+				require.NoError(t, fx.db.CreateAccount(context.Background(), nil, &models.Account{
 					StakingKey:    fx.keyHash.Bytes(),
 					CredentialTag: 0,
 					Active:        true,
@@ -1070,10 +1071,12 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 					}
 					// Only the collateral is consumed.
 					_, err := c.fx.db.UtxoByRef(
+						context.Background(),
 						c.tx.Collateral()[0].Id().Bytes(), 0, nil,
 					)
 					require.ErrorIs(t, err, types.ErrUtxoNotFound)
 					_, err = c.fx.db.UtxoByRef(
+						context.Background(),
 						c.tx.Inputs()[0].Id().Bytes(), 0, nil,
 					)
 					require.NoError(t, err)

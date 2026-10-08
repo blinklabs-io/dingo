@@ -986,6 +986,10 @@ func ceilRatToUint64(val *big.Rat) uint64 {
 	if r.Sign() > 0 {
 		q.Add(q, big.NewInt(1))
 	}
+	// Only overflow saturates: a negative result is not the largest value.
+	if q.Sign() < 0 {
+		return 0
+	}
 	if !q.IsUint64() {
 		return math.MaxUint64
 	}

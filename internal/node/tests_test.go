@@ -40,8 +40,8 @@ const rollbackCascadeIndex = "idx_utxo_transaction_id"
 // index absent, and no pending marker to say so.
 //
 // Mithril sync produced it: BuildCritical leaves the marker set for the lazy
-// remainder, and updateMithrilReadyState then runs ClearSyncState, an
-// unqualified DELETE FROM sync_state, which removes it (fixed for new syncs in
+// remainder, and updateMithrilReadyState previously deleted that marker
+// during sync-state cleanup (fixed for new syncs in
 // mithril/sync_import.go; databases bootstrapped before that fix stay in this
 // state). The migration that created the index is recorded complete, so its
 // CREATE INDEX IF NOT EXISTS never runs again. Dropping the index directly is

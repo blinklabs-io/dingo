@@ -190,6 +190,9 @@ func (s *Service) Snapshot(
 		s.cfg.DatabaseLifecycle.SnapshotCloudDestination,
 		name,
 		description,
+		lifecycle.WithMaxCommitPause(
+			s.cfg.DatabaseLifecycle.SnapshotMaxCommitPause,
+		),
 	)
 }
 
@@ -379,7 +382,7 @@ func (s *Service) Truncate(
 		)
 	}
 
-	block, err := ResolveTarget(db.Database, target)
+	block, err := ResolveTarget(ctx, db.Database, target)
 	if err != nil {
 		return 0, err
 	}
@@ -411,6 +414,7 @@ func (s *Service) Truncate(
 // mutually-consistent combination outright (e.g. an operator passing both
 // a slot and a hash it already resolved, for extra safety).
 func ResolveTarget(
+	ctx context.Context,
 	db *database.Database,
 	target TruncateTarget,
 ) (models.Block, error) {
@@ -426,11 +430,15 @@ func ResolveTarget(
 	)
 	switch {
 	case target.Hash != nil:
-		block, err = lifecycle.ResolveTargetByHash(db, target.Hash)
+		block, err = lifecycle.ResolveTargetByHash(ctx, db, target.Hash)
 	case target.BlockNumber != nil:
-		block, err = lifecycle.ResolveTargetByNumber(db, *target.BlockNumber)
+		block, err = lifecycle.ResolveTargetByNumber(
+			ctx,
+			db,
+			*target.BlockNumber,
+		)
 	default:
-		block, err = lifecycle.ResolveTargetBySlot(db, *target.Slot)
+		block, err = lifecycle.ResolveTargetBySlot(ctx, db, *target.Slot)
 	}
 	if err != nil {
 		return models.Block{}, err

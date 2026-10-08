@@ -307,7 +307,9 @@ type GenesisBootstrapConfig struct {
 	// Genesis-mode chain selection. This is the Ouroboros Genesis trust control
 	// for biased fast-sync sources: an uncorroborated or divergent fast source
 	// is denied selection and stalls rather than steering the local chain. A
-	// zero value disables corroboration (density-only Genesis selection).
+	// zero value disables the selection gate (density-only Genesis selection);
+	// a peer's frontier still needs one independent witness before it can
+	// exclude other candidates as behind.
 	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
 	// LimitOnPatienceEnabled turns on the Genesis Limit on Patience: while
 	// Genesis selection is syncing, a ChainSync peer that delivers its
@@ -622,18 +624,18 @@ type Config struct {
 	// Default: "5m".
 	LocalStateQueryViewMaxLifetime string `yaml:"localStateQueryViewMaxLifetime" envconfig:"DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME"`
 	// BarkHost is the interface Bark binds to. Left empty, node.go defaults
-	// it to loopback-only (127.0.0.1) whenever the database lifecycle
-	// service (Restore/Truncate and friends — gated on BarkClientCAFilePath,
-	// see its own doc comment) is mounted, rather than bark's own
+	// it to loopback-only (127.0.0.1) whenever the database lifecycle or
+	// remote node lifecycle service is mounted, rather than bark's own
 	// all-interfaces "0.0.0.0" default; set explicitly to widen that on
 	// purpose.
 	BarkHost string `yaml:"barkHost"                            envconfig:"DINGO_BARK_HOST"`
 	// BarkClientCAFilePath is a PEM CA bundle Bark verifies client
 	// certificates (mTLS) against. Required whenever the database lifecycle
 	// service is mounted (databaseLifecycle.snapshotDir set alongside
-	// barkPort): every DatabaseService RPC requires a certificate verified
-	// against this CA. Destructive methods additionally require an explicit
-	// BarkOperatorCertificateFingerprints match. Also requires
+	// barkPort), or BarkLifecycleEnabled is true. Every DatabaseService and
+	// LifecycleService RPC requires a certificate verified against this CA.
+	// Destructive methods additionally require their service's explicit
+	// operator fingerprint match. Also requires
 	// TlsCertFilePath/TlsKeyFilePath to be set.
 	BarkClientCAFilePath string `yaml:"barkClientCaFilePath"                envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
 	// BarkOperatorCertificateFingerprints is the explicit operator allowlist
@@ -641,8 +643,16 @@ type Config struct {
 	// authenticate with BarkClientCAFilePath; only these SHA-256 certificate
 	// fingerprints may invoke destructive methods.
 	BarkOperatorCertificateFingerprints []string `yaml:"barkOperatorCertificateFingerprints" envconfig:"DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS"`
-	CORSAllowedOrigins                  []string `yaml:"corsAllowedOrigins"                  envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort                         uint     `yaml:"metricsPort"                                                                                  split_words:"true"`
+	// BarkLifecycleEnabled explicitly mounts Bark's remote node lifecycle
+	// service. It defaults to false so configuring DatabaseService credentials
+	// does not also grant process-control access.
+	BarkLifecycleEnabled bool `yaml:"barkLifecycleEnabled" envconfig:"DINGO_BARK_LIFECYCLE_ENABLED"`
+	// BarkLifecycleOperatorCertificateFingerprints is the separate operator
+	// allowlist for remote Stop and Restart. GetStatus requires only a client
+	// certificate verified through BarkClientCAFilePath.
+	BarkLifecycleOperatorCertificateFingerprints []string `yaml:"barkLifecycleOperatorCertificateFingerprints" envconfig:"DINGO_BARK_LIFECYCLE_OPERATOR_CERTIFICATE_FINGERPRINTS"`
+	CORSAllowedOrigins                           []string `yaml:"corsAllowedOrigins"                  envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
+	MetricsPort                                  uint     `yaml:"metricsPort"                                                                                  split_words:"true"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
@@ -803,11 +813,10 @@ type Config struct {
 	// --shelley-kes-agent-socket.
 	//
 	// Block production is supported on Linux and macOS only, so this flag
-	// does not apply on Windows. The path must fit the platform's sun_path
-	// field -- 104 bytes on macOS, 108 on Linux -- because a socket address
-	// is a fixed-size struct. kesagent.NewClient rejects an over-long path at
-	// startup rather than leaving it to surface as a bare "invalid argument"
-	// from connect().
+	// does not apply on Windows. Relative filesystem paths are resolved once
+	// at client construction and reused for every reconnect. The resolved path
+	// must fit the platform's sun_path field -- 104 bytes on macOS, 108 on
+	// Linux -- because a socket address is a fixed-size struct.
 	ShelleyKESAgentSocket string `yaml:"shelleyKesAgentSocket"            envconfig:"SHELLEY_KES_AGENT_SOCKET"`
 	// ShelleyKESAgentMode selects the agent service mode: "serve-key" (the
 	// agent pushes the evolving KES sign key and the node signs headers
@@ -1247,6 +1256,11 @@ type DatabaseLifecycleConfig struct {
 	// SnapshotEveryNEpochs captures an automatic snapshot every N epoch
 	// boundaries instead of every single one.
 	SnapshotEveryNEpochs int `yaml:"snapshotEveryNEpochs"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_EVERY_N_EPOCHS"`
+	// SnapshotMaxCommitPause bounds how long a snapshot (manual or
+	// automatic) may hold the commit barrier once acquired. A snapshot still
+	// running at the bound is cancelled and removed, and commits resume.
+	// Zero means no bound.
+	SnapshotMaxCommitPause time.Duration `yaml:"snapshotMaxCommitPause"         envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_MAX_COMMIT_PAUSE"`
 }
 
 var configMu sync.RWMutex
@@ -1290,17 +1304,19 @@ func newDefaultConfig() *Config {
 		BarkHost:                            "",
 		BarkClientCAFilePath:                "",
 		BarkOperatorCertificateFingerprints: nil,
-		CORSAllowedOrigins:                  []string{"*"},
-		Topology:                            "",
-		TlsCertFilePath:                     "",
-		TlsKeyFilePath:                      "",
-		StorageMode:                         "core",
-		RunMode:                             RunModeServe,
-		StartEra:                            StartEraDefault,
-		ImmutableDbPath:                     "",
-		ShutdownTimeout:                     DefaultShutdownTimeout,
-		LedgerCatchupTimeout:                DefaultLedgerCatchupTimeout,
-		LocalStateQueryViewMaxLifetime:      DefaultLocalStateQueryViewMaxLifetime,
+		BarkLifecycleEnabled:                false,
+		BarkLifecycleOperatorCertificateFingerprints: nil,
+		CORSAllowedOrigins:                           []string{"*"},
+		Topology:                                     "",
+		TlsCertFilePath:                              "",
+		TlsKeyFilePath:                               "",
+		StorageMode:                                  "core",
+		RunMode:                                      RunModeServe,
+		StartEra:                                     StartEraDefault,
+		ImmutableDbPath:                              "",
+		ShutdownTimeout:                              DefaultShutdownTimeout,
+		LedgerCatchupTimeout:                         DefaultLedgerCatchupTimeout,
+		LocalStateQueryViewMaxLifetime:               DefaultLocalStateQueryViewMaxLifetime,
 		// Defaults for database worker pool and API backfill tuning
 		DatabaseWorkers:   5,
 		DatabaseQueueSize: 50,
@@ -1436,6 +1452,10 @@ func cloneConfig(cfg *Config) *Config {
 	clone.BarkOperatorCertificateFingerprints = append(
 		[]string(nil),
 		cfg.BarkOperatorCertificateFingerprints...,
+	)
+	clone.BarkLifecycleOperatorCertificateFingerprints = append(
+		[]string(nil),
+		cfg.BarkLifecycleOperatorCertificateFingerprints...,
 	)
 	clone.CORSAllowedOrigins = append([]string(nil), cfg.CORSAllowedOrigins...)
 	if cfg.PeerSharing != nil {

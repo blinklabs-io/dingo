@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"testing"
@@ -257,7 +258,7 @@ func TestGetPoolKeyHashesRetiredByEpoch(t *testing.T) {
 		seeder.seed(t, f)
 	}
 
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 	got, err := db.Metadata().GetPoolKeyHashesRetiredByEpoch(
 		queryEpoch,
@@ -490,9 +491,10 @@ func TestGetPoolsRetiringAtEpochSameSlotResolution(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			txn := db.Transaction(false)
+			txn := db.Transaction(context.Background(), false)
 			defer txn.Release()
 			refunds, err := db.GetPoolsRetiringAtEpoch(
+				context.Background(),
 				tc.epoch,
 				boundarySlot,
 				txn,
@@ -533,20 +535,33 @@ func TestImportPoolRejectsTransactionWithoutMetadataWriteHandle(t *testing.T) {
 		})
 		pool, reg := newPool()
 
-		err := db.ImportPool(txn, pool, reg)
+		err := db.ImportPool(context.Background(), txn, pool, reg)
 
 		require.ErrorIs(t, err, types.ErrNilTxn)
 	})
 
 	t.Run("read-only metadata transaction", func(t *testing.T) {
-		txn := db.MetadataTxn(false)
+		txn := db.MetadataTxn(context.Background(), false)
 		t.Cleanup(func() {
 			require.NoError(t, txn.Rollback())
 		})
 		pool, reg := newPool()
 
-		err := db.ImportPool(txn, pool, reg)
+		err := db.ImportPool(context.Background(), txn, pool, reg)
 
 		require.ErrorIs(t, err, types.ErrTxnWrongType)
 	})
+}
+
+func TestDatabaseGetStakeByPoolsWrapper(t *testing.T) {
+	t.Parallel()
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	pool := bytes.Repeat([]byte{0x31}, 28)
+	stakes, delegators, err := db.GetStakeByPools(t.Context(), [][]byte{pool}, nil)
+	require.NoError(t, err)
+	require.Contains(t, stakes, string(pool))
+	require.Zero(t, stakes[string(pool)])
+	require.Contains(t, delegators, string(pool))
+	require.Zero(t, delegators[string(pool)])
 }

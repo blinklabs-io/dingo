@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -27,10 +28,11 @@ import (
 // denormalized fields restored from the most recent registration at or
 // before the slot.
 func (d *Database) RestorePoolStateAtSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.RestorePoolStateAtSlot(
 			slot,
 			txn.Metadata(),
@@ -47,12 +49,13 @@ func (d *Database) RestorePoolStateAtSlot(
 
 // GetPool returns a pool by its key hash
 func (d *Database) GetPool(
+	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
 	includeInactive bool,
 	txn *Txn,
 ) (*models.Pool, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	ret, err := d.metadata.GetPool(pkh, includeInactive, txn.Metadata())
@@ -70,6 +73,7 @@ func (d *Database) GetPool(
 // transaction is opened, committed on success and rolled back on error via
 // Txn.Do.
 func (d *Database) ImportPool(
+	ctx context.Context,
 	txn *Txn,
 	pool *models.Pool,
 	reg *models.PoolRegistration,
@@ -83,7 +87,7 @@ func (d *Database) ImportPool(
 		}
 		return d.metadata.ImportPool(pool, reg, txn.Metadata())
 	}
-	return d.MetadataTxn(true).Do(func(t *Txn) error {
+	return d.MetadataTxn(ctx, true).Do(func(t *Txn) error {
 		return d.metadata.ImportPool(pool, reg, t.Metadata())
 	})
 }
@@ -91,12 +95,13 @@ func (d *Database) ImportPool(
 // UpdatePoolOpCertSequence records an observed op-cert sequence for a pool
 // and updates the pool's denormalized maximum.
 func (d *Database) UpdatePoolOpCertSequence(
+	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
 	sequence uint64,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.UpdatePoolOpCertSequence(
 			pkh,
 			sequence,
@@ -112,11 +117,12 @@ func (d *Database) UpdatePoolOpCertSequence(
 // LatestPoolOpCertSequence returns the highest observed op-cert sequence for
 // a pool.
 func (d *Database) LatestPoolOpCertSequence(
+	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
 	txn *Txn,
 ) (uint64, bool, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.LatestPoolOpCertSequence(pkh, txn.Metadata())
@@ -125,12 +131,13 @@ func (d *Database) LatestPoolOpCertSequence(
 // LatestPoolOpCertSequenceAfter returns the highest observed op-cert sequence
 // for a pool strictly after afterSlot.
 func (d *Database) LatestPoolOpCertSequenceAfter(
+	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
 	afterSlot uint64,
 	txn *Txn,
 ) (uint64, bool, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.LatestPoolOpCertSequenceAfter(
@@ -144,12 +151,13 @@ func (d *Database) LatestPoolOpCertSequenceAfter(
 // sequence for a pool at or before slot. It provides a historical
 // chain-dependent view without changing or restoring the live database tip.
 func (d *Database) LatestPoolOpCertSequenceAtOrBefore(
+	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
 	slot uint64,
 	txn *Txn,
 ) (uint64, bool, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.LatestPoolOpCertSequenceAtOrBefore(
@@ -164,11 +172,12 @@ func (d *Database) LatestPoolOpCertSequenceAtOrBefore(
 // trust boundary to tell an imported certified counter map from one that was
 // never imported.
 func (d *Database) PoolOpCertSequencesExistAtSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) (bool, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.PoolOpCertSequencesExistAtSlot(slot, txn.Metadata())
@@ -179,10 +188,11 @@ func (d *Database) PoolOpCertSequencesExistAtSlot(
 // GetChainDepState local-state-query, whose counters cover every cold key the
 // chain has accepted a certificate for rather than only the active pools.
 func (d *Database) LatestPoolOpCertSequences(
+	ctx context.Context,
 	txn *Txn,
 ) (map[string]uint64, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.LatestPoolOpCertSequences(txn.Metadata())
@@ -190,6 +200,7 @@ func (d *Database) LatestPoolOpCertSequences(
 
 // GetPools returns pools by key hash.
 func (d *Database) GetPools(
+	ctx context.Context,
 	pkhs []lcommon.PoolKeyHash,
 	txn *Txn,
 ) ([]models.Pool, error) {
@@ -197,7 +208,7 @@ func (d *Database) GetPools(
 		return []models.Pool{}, nil
 	}
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.GetPools(pkhs, txn.Metadata())
@@ -208,12 +219,13 @@ func (d *Database) GetPools(
 // active pool claims it. See metadata.MetadataStore's GetPoolByVrfKeyHash
 // for the epoch-boundary deferral rule this respects.
 func (d *Database) GetPoolByVrfKeyHash(
+	ctx context.Context,
 	vrfKeyHash []byte,
 	epochStartSlot uint64,
 	txn *Txn,
 ) (*models.Pool, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.GetPoolByVrfKeyHash(
@@ -226,23 +238,40 @@ func (d *Database) GetPoolByVrfKeyHash(
 // GetActivePoolRelays returns all relays from currently active pools.
 // This is used for ledger peer discovery.
 func (d *Database) GetActivePoolRelays(
+	ctx context.Context,
 	txn *Txn,
 ) ([]models.PoolRegistrationRelay, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.GetActivePoolRelays(txn.Metadata())
+}
+
+// GetStakeByPools returns delegated stake for multiple pools in a single
+// query: pool key hash (as a string) to total stake, and to delegator count.
+// A pool with no delegation maps to zero.
+func (d *Database) GetStakeByPools(
+	ctx context.Context,
+	poolKeyHashes [][]byte,
+	txn *Txn,
+) (map[string]uint64, map[string]uint64, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	return d.metadata.GetStakeByPools(poolKeyHashes, txn.Metadata())
 }
 
 // GetActivePoolKeyHashes returns the key hashes of all currently active
 // (registered, non-retired) stake pools. This backs the GetStakePools
 // local-state-query.
 func (d *Database) GetActivePoolKeyHashes(
+	ctx context.Context,
 	txn *Txn,
 ) ([][]byte, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.GetActivePoolKeyHashes(txn.Metadata())
@@ -254,10 +283,11 @@ func (d *Database) GetActivePoolKeyHashes(
 // metadata.MetadataStore.GetActivePoolKeyHashesOrdered for the full
 // ordering semantics. This backs the Blockfrost pool_list endpoint.
 func (d *Database) GetActivePoolKeyHashesOrdered(
+	ctx context.Context,
 	txn *Txn,
 ) ([][]byte, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.GetActivePoolKeyHashesOrdered(txn.Metadata())
@@ -266,11 +296,12 @@ func (d *Database) GetActivePoolKeyHashesOrdered(
 // GetPoolCertificateHistory returns the transaction hashes of a pool's
 // registration and retirement certificates, in chronological order.
 func (d *Database) GetPoolCertificateHistory(
+	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
 	txn *Txn,
 ) ([][]byte, [][]byte, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.GetPoolCertificateHistory(pkh, txn.Metadata())

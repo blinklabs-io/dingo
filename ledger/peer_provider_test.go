@@ -15,14 +15,20 @@
 package ledger
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -114,14 +120,14 @@ func TestPoolRelayProviderCacheHit(t *testing.T) {
 	seedCache(adapter, relays)
 
 	// First call should return cached data
-	result1, err := adapter.GetPoolRelays()
+	result1, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result1, len(relays))
 	require.Equal(t, relays[0].Hostname, result1[0].Hostname)
 	require.Equal(t, relays[1].Hostname, result1[1].Hostname)
 
 	// Second call should also return cached data (same values)
-	result2, err := adapter.GetPoolRelays()
+	result2, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result2, len(relays))
 	require.Equal(t, relays[0].Hostname, result2[0].Hostname)
@@ -143,7 +149,7 @@ func TestPoolRelayProviderCacheTTLExpiry(t *testing.T) {
 	seedCache(adapter, relays)
 
 	// Verify cache is populated initially
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result, len(relays))
 
@@ -157,7 +163,7 @@ func TestPoolRelayProviderCacheTTLExpiry(t *testing.T) {
 
 	// After TTL expires, GetPoolRelays should re-fetch from DB.
 	// The in-memory DB has no pool registrations, so it returns empty.
-	result, err = adapter.GetPoolRelays()
+	result, err = adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Empty(
 		t,
@@ -176,7 +182,7 @@ func TestPoolRelayProviderInvalidateCache(t *testing.T) {
 	seedCache(adapter, relays)
 
 	// Verify cache is populated
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result, len(relays))
 
@@ -190,7 +196,7 @@ func TestPoolRelayProviderInvalidateCache(t *testing.T) {
 	adapter.cacheMu.RUnlock()
 
 	// Next call should re-fetch from DB (returns empty since no data)
-	result, err = adapter.GetPoolRelays()
+	result, err = adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Empty(
 		t,
@@ -212,7 +218,7 @@ func TestPoolRelayProviderEventDrivenInvalidation(t *testing.T) {
 	seedCache(adapter, relays)
 
 	// Verify cache is populated
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result, len(relays))
 
@@ -236,7 +242,7 @@ func TestPoolRelayProviderEventDrivenInvalidation(t *testing.T) {
 	)
 
 	// After invalidation, fetching returns empty (no DB data)
-	result, err = adapter.GetPoolRelays()
+	result, err = adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, result)
 }
@@ -251,7 +257,7 @@ func TestPoolRelayProviderDeepCopy(t *testing.T) {
 	seedCache(adapter, relays)
 
 	// Get the first copy
-	result1, err := adapter.GetPoolRelays()
+	result1, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result1, 2)
 
@@ -269,7 +275,7 @@ func TestPoolRelayProviderDeepCopy(t *testing.T) {
 	})
 
 	// Get a second copy from the cache
-	result2, err := adapter.GetPoolRelays()
+	result2, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(
 		t,
@@ -322,14 +328,14 @@ func TestPoolRelayProviderDeepCopyIPv6(t *testing.T) {
 	seedCache(adapter, relays)
 
 	// Get a copy and mutate the IPv6 address
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result, 1)
 	require.NotNil(t, result[0].IPv6)
 	(*result[0].IPv6)[0] = 0xFF
 
 	// Get another copy and verify it is unaffected
-	result2, err := adapter.GetPoolRelays()
+	result2, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -351,7 +357,7 @@ func TestPoolRelayProviderNilEventBus(t *testing.T) {
 	require.NotNil(t, adapter)
 
 	// Basic operations should still work
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, result)
 
@@ -366,7 +372,7 @@ func TestPoolRelayProviderCacheMissFetchesFromDB(t *testing.T) {
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
 	// With no seeded cache and empty DB, GetPoolRelays should return empty
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, result)
 
@@ -432,7 +438,7 @@ func TestPoolRelayProviderConcurrentAccess(t *testing.T) {
 			defer func() { done <- struct{}{} }()
 			for range iterations {
 				// Mix of reads and invalidations
-				_, _ = adapter.GetPoolRelays()
+				_, _ = adapter.GetPoolRelays(context.Background())
 				adapter.InvalidateCache()
 				seedCache(adapter, relays)
 			}
@@ -478,7 +484,7 @@ func TestPoolRelayProviderCacheNilIPFields(t *testing.T) {
 	}
 	seedCache(adapter, relays)
 
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result, 1)
 	require.Equal(t, "hostname-only.example.com", result[0].Hostname)
@@ -565,4 +571,154 @@ func TestPoolRelayProviderCloseUnsubscribes(t *testing.T) {
 
 	// Safe to call more than once.
 	require.NotPanics(t, adapter.Close)
+}
+
+// seedStakedPools registers two active pools: the first has a single-host
+// relay and a MultiHostName relay (hostname, no port) and 700 lovelace
+// delegated; the second has one relay and no delegation.
+func seedStakedPools(
+	t *testing.T,
+	db *database.Database,
+) (poolA, poolB []byte) {
+	t.Helper()
+	poolA = bytes.Repeat([]byte{0xa1}, 28)
+	poolB = bytes.Repeat([]byte{0xb2}, 28)
+	vrfA := bytes.Repeat([]byte{0xa3}, 32)
+	vrfB := bytes.Repeat([]byte{0xb3}, 32)
+	reward := bytes.Repeat([]byte{0xc4}, 28)
+	ipA := net.ParseIP("44.0.0.1").To4()
+	ipB := net.ParseIP("44.0.0.2").To4()
+	for _, p := range []struct {
+		key, vrf []byte
+		relays   []models.PoolRegistrationRelay
+	}{
+		{poolA, vrfA, []models.PoolRegistrationRelay{
+			{Ipv4: &ipA, Port: 3001},
+			{Hostname: "multi.example.com"},
+		}},
+		{poolB, vrfB, []models.PoolRegistrationRelay{
+			{Ipv4: &ipB, Port: 3002},
+		}},
+	} {
+		require.NoError(t, db.ImportPool(
+			t.Context(),
+			nil,
+			&models.Pool{
+				PoolKeyHash: p.key, VrfKeyHash: p.vrf, RewardAccount: reward,
+			},
+			&models.PoolRegistration{
+				PoolKeyHash: p.key, VrfKeyHash: p.vrf, RewardAccount: reward,
+				AddedSlot: 10, Relays: p.relays,
+			},
+		))
+	}
+	require.NoError(t, db.SetEpoch(
+		2, 0, nil, nil, nil, nil, 0, 1, 100, nil,
+	))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 25, Hash: []byte("tip")},
+		BlockNumber: 1,
+	}, nil))
+	stakeKey := bytes.Repeat([]byte{0xd5}, 28)
+	require.NoError(t, db.CreateAccount(t.Context(), nil, &models.Account{
+		StakingKey: stakeKey, Pool: poolA, Active: true,
+	}))
+	require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
+		TxId:       bytes.Repeat([]byte{0xe6}, 32),
+		StakingKey: stakeKey, Amount: 700, AddedSlot: 15,
+	}))
+	return poolA, poolB
+}
+
+func relayByPort(t *testing.T, relays []PoolRelay, port uint) PoolRelay {
+	t.Helper()
+	for _, r := range relays {
+		if r.Port == port && r.Hostname == "" {
+			return r
+		}
+	}
+	t.Fatalf("no relay with port %d in %v", port, relays)
+	return PoolRelay{}
+}
+
+func TestPoolRelayProviderPopulatesStake(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	poolA, poolB := seedStakedPools(t, db)
+	adapter := newTestAdapter(t, db, nil, time.Minute)
+
+	relays, err := adapter.GetPoolRelays(t.Context())
+	require.NoError(t, err)
+	require.Len(t, relays, 3)
+
+	require.Equal(t, uint64(700), relayByPort(t, relays, 3001).Stake)
+	require.Equal(t, poolA, relayByPort(t, relays, 3001).PoolKeyHash)
+	require.Zero(t, relayByPort(t, relays, 3002).Stake)
+	require.Equal(t, poolB, relayByPort(t, relays, 3002).PoolKeyHash)
+	foundMulti := false
+	for _, r := range relays {
+		if r.Hostname == "multi.example.com" {
+			foundMulti = true
+			// Both relays of the staked pool carry its stake.
+			require.Equal(t, uint64(700), r.Stake)
+			require.True(t, r.IsMultiHost)
+			require.Zero(t, r.Port)
+			continue
+		}
+		require.False(t, r.IsMultiHost)
+	}
+	require.True(t, foundMulti, "registered MultiHostName relay is missing")
+	require.True(
+		t,
+		relayByPort(t, relays, 3002).StakeKnown,
+		"successful zero-stake lookup must remain known",
+	)
+}
+
+func TestPoolRelayProviderStakeLookupFailureIsNonFatal(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	seedStakedPools(t, db)
+	adapter := newTestAdapter(t, db, nil, time.Minute)
+	adapter.stakeByPools = func(context.Context, [][]byte) (map[string]uint64, error) {
+		return nil, errors.New("stake store unavailable")
+	}
+
+	relays, err := adapter.GetPoolRelays(t.Context())
+	require.NoError(t, err)
+	require.Len(t, relays, 3)
+	for _, r := range relays {
+		require.Zero(t, r.Stake)
+	}
+}
+
+func TestPoolRelayProviderStakeLookupGetsUniquePoolHashes(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	poolA, poolB := seedStakedPools(t, db)
+	adapter := newTestAdapter(t, db, nil, time.Minute)
+	var got [][]byte
+	adapter.stakeByPools = func(_ context.Context, h [][]byte) (map[string]uint64, error) {
+		got = h
+		return nil, nil
+	}
+	_, err := adapter.GetPoolRelays(t.Context())
+	require.NoError(t, err)
+	require.ElementsMatch(t, [][]byte{poolA, poolB}, got)
+}
+
+func TestCopyPoolRelaysCopiesStakeAndMultiHost(t *testing.T) {
+	t.Parallel()
+	original := []PoolRelay{
+		{
+			Hostname:    "multi.example.com",
+			PoolKeyHash: []byte{0xaa},
+			Stake:       99,
+			IsMultiHost: true,
+		},
+	}
+	result := copyPoolRelays(original)
+	require.Equal(t, original, result)
+	result[0].PoolKeyHash[0] = 0xbb
+	require.Equal(t, byte(0xaa), original[0].PoolKeyHash[0])
 }

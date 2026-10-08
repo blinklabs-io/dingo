@@ -330,6 +330,9 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		ReportTipGapFunc: func(gapSlots uint64) {
 			n.health.recordTipGap(healthGeneration, gapSlots)
 		},
+		ReportSlotClockAliveFunc: func() {
+			n.health.recordSlotClockAlive(healthGeneration)
+		},
 		FatalErrorFunc: func(err error) {
 			n.config.logger.Error(
 				"fatal ledger error, initiating shutdown",

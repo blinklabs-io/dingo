@@ -50,6 +50,7 @@ func RegisterProvider(host *hostplugin.Host) error {
 		},
 		func() Config { return Config{} },
 		func(_ context.Context, cfg Config, deps metadata.ProviderDependencies) (*sqlstore.Store, hostplugin.Instance, error) {
+			//nolint:contextcheck // the disk-size probe runs on the store's metrics goroutine, not under the plugin start ctx
 			store, err := NewSQLStore(cfg, deps)
 			if err != nil {
 				return nil, nil, err

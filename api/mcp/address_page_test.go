@@ -55,7 +55,7 @@ func TestExactAddressCursorBudgetAndResume(t *testing.T) {
 		payment,
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+	require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
 		for i := range addressCandidateBudget + 103 {
 			address := base
 			stake := payment
@@ -71,7 +71,7 @@ func TestExactAddressCursorBudgetAndResume(t *testing.T) {
 			}
 			txID := make([]byte, 32)
 			binary.BigEndian.PutUint64(txID[24:], uint64(i+1))
-			if err := db.CreateUtxo(txn, &models.Utxo{
+			if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
 				TxId: txID, PaymentKey: payment, StakingKey: stake,
 				AddedSlot: uint64(i + 1), Amount: 1000000,
 			}); err != nil {
@@ -206,10 +206,10 @@ func TestExactAddressInterruptedPageResumes(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(
 				t,
-				db.Transaction(true).Do(func(txn *database.Txn) error {
+				db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
 					for i := range 3 {
 						id := bytes.Repeat([]byte{byte(i + 1)}, 32)
-						if err := db.CreateUtxo(txn, &models.Utxo{TxId: id, PaymentKey: payment, AddedSlot: uint64(i + 1), Amount: 1000000}); err != nil {
+						if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{TxId: id, PaymentKey: payment, AddedSlot: uint64(i + 1), Amount: 1000000}); err != nil {
 							return err
 						}
 						if err := db.Blob().SetUtxo(txn.Blob(), id, 0, raw); err != nil {
@@ -367,7 +367,7 @@ func TestExactAddressFiltersBeforePagination(t *testing.T) {
 		if kind == lcommon.AddressTypeKeyKey {
 			model.StakingKey = hash
 		}
-		require.NoError(t, nodeDB.CreateUtxo(nil, &model))
+		require.NoError(t, nodeDB.CreateUtxo(t.Context(), nil, &model))
 		require.NoError(
 			t,
 			nodeDB.BlobTxn(true).
@@ -376,6 +376,7 @@ func TestExactAddressFiltersBeforePagination(t *testing.T) {
 	}
 	// SQL tools and full-address lookup share the same active store.
 	_, ro, err := NewMCPServer(
+		t.Context(),
 		DefaultProviderConfig(),
 		ProviderDependencies{Database: nodeDB},
 	)
@@ -416,7 +417,7 @@ func TestExactAddressFiltersBeforePagination(t *testing.T) {
 	require.NoError(t, err)
 	for i := range 130 {
 		txHash := bytes.Repeat([]byte{byte(i + 5)}, 32)
-		require.NoError(t, nodeDB.CreateUtxo(nil, &models.Utxo{
+		require.NoError(t, nodeDB.CreateUtxo(t.Context(), nil, &models.Utxo{
 			TxId: txHash, PaymentKey: hash, StakingKey: hash,
 			AddedSlot: uint64(i + 5), Amount: 1000000,
 		}))
