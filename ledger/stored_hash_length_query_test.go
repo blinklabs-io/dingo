@@ -205,6 +205,7 @@ func TestGovernanceProposalStateRejectsMalformedStoredSPOVoter(t *testing.T) {
 			GovActionCbor: []byte{0x80},
 		},
 		lcommon.GovActionId{},
+		QueryPoint{},
 		nil,
 	)
 	require.ErrorContains(t, err, "governance vote")

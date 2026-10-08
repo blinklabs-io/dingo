@@ -214,6 +214,7 @@ var schemaVersions = []struct {
 		Name:    committeeHotAuthorizationPruneOrderSchemaRelease,
 		Dir:     "v36",
 	},
+	{Version: 37, Name: "drep-expiry-history", Dir: "v37"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

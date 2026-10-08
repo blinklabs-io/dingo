@@ -3847,15 +3847,22 @@ CIP-1694 `HardForkInitiation` governance action, post-voting-deadline only).
 Each era's `NextEraTrigger` kind is exactly one of `TriggerAtEpoch`,
 `TriggerAtVersion`, or `TriggerNotDuringThisExecution` (the final configured
 era), so `evaluateTriggerAtEpoch` and `evaluateProtocolVersionBump` never
-compete for the same era. Unlike the CIP-1694 path, the classic
-update-proposal system has no protocol-enforced voting deadline -- a genesis
-delegate may submit a superseding proposal in any block of the submission
-epoch -- so `evaluateProtocolVersionBump` reads fresh state on every call
-rather than gating on a deadline that does not exist for this trigger kind;
-a premature or later-superseded reading only widens the forecast horizon for
-the rest of the epoch; it never changes `ls.currentEra` or what
-`processEpochRollover` actually enacts, both of which re-read the real
-quorum state independently at the boundary. Without this evaluator,
+compete for the same era. The classic update-proposal system has a voting
+deadline too: a proposal for the next epoch can be submitted or superseded
+only before `2 * stabilityWindow` before that epoch starts (the Shelley PPUP
+rule). `evaluateProtocolVersionBump` therefore reports the transition only
+once `k` blocks of the current epoch lie at or past that deadline, so the
+last pre-deadline block can no longer be rolled back and the reading cannot
+change; this matches ouroboros-consensus `shelleyTransition`
+(`shelleyAfterVoting >= k`). Reported earlier, a superseded proposal would
+make the era end known and then withdraw it at the boundary, which
+cardano-node never does. The count is the ledger tip's block number less
+that of the last block before the deadline, read from the chain, so a
+rollback or restart recomputes it without stored state; an epoch shorter
+than `2 * stabilityWindow` counts from its own first slot. The forecast never
+changes `ls.currentEra` or what `processEpochRollover` actually enacts, both
+of which re-read the real quorum state independently at the boundary.
+Without this evaluator,
 `transitionInfo` stays `TransitionUnknown` for the entire epoch preceding
 any version-triggered hard fork, so the ordinary tip-anchored safe zone (see
 above) lands exactly at the era boundary with no margin past it instead of
@@ -11832,9 +11839,28 @@ reconstructed from the
 the credits of a pending reward round applied at or before the slot, so the
 unpinned path's separate pending-credit addition is skipped. Certificates,
 baselines, PV10 clear rows, and the reward journal are removed only by
-rollback, so no retention floor applies. `GetDRepState`, `GetProposals` and
-`DebugChainDepState` still
-ignore the acquired point.
+rollback, so no retention floor applies.
+
+`GetProposals` (`queryShelleyGetProposals`) reads the proposals set at the
+pinned slot through `GetGovernanceProposalSetAtSlot`: proposals added at or
+before it and not yet enacted, dropped or soft-deleted by then, the lifecycle
+slots rollback reverts by. Each proposal's votes come from
+`GetGovernanceVotesAtSlot`, which takes a replaced vote's value from
+`governance_vote_history`. `GetDRepState` (`queryShelleyDRepStateAt`) reads
+the DReps registered at the slot through `GetDrepsAtSlot`, with the anchor
+from their certificates, the expiry from `drep_expiry_history`, the deposit of
+their latest registration at or before the slot, and their delegators through
+`GetDRepDelegatorsAtSlot`, which reads accounts as
+`GetAccountsByCredentialAtSlot` does. A DRep's expiry changes on every vote,
+registration and update certificate without a certificate of its own for the
+vote, so it is recorded in `drep_expiry_history` at the slot of each change;
+`RestoreDrepStateAtSlot` restores expiry from the same history on rollback.
+On a database upgraded to schema v37, history before the upgrade is one seed
+row per DRep (see DATABASE.md), so a point before a DRep's latest pre-upgrade
+activity has no recorded expiry: a DRep whose certificate state at that point
+is still its current one (or that was imported at slot 0) reports its current
+expiry, and any other reports 0 (unset). Rollback applies the same rule.
+`DebugChainDepState` still ignores the acquired point.
 
 Every pinned query also needs history the node actually holds, so
 `VerifyPointQueryable` refuses a point below the latest Mithril import's
