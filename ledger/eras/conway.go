@@ -17,6 +17,7 @@ package eras
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -1238,6 +1239,10 @@ func evaluateConwayPlutusScript(
 	if restrictive {
 		evalBudget = pp.MaxTxExUnits
 	}
+	machineCtx := context.Background()
+	if !restrictive {
+		machineCtx = evaluationContext(txInfos.ls)
+	}
 	switch s := plutusScript.(type) {
 	case lcommon.PlutusV3Script:
 		if err := script.ValidatePlutusV3ReferenceInputs(
@@ -1270,7 +1275,8 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 		}
-		usedBudget, err := s.Evaluate(
+		usedBudget, err := s.EvaluateContext(
+			machineCtx,
 			ctx.ToPlutusData(),
 			evalBudget,
 			evalContext,
@@ -1318,7 +1324,8 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 		}
-		usedBudget, err := s.Evaluate(
+		usedBudget, err := s.EvaluateContext(
+			machineCtx,
 			datum,
 			redeemer.Data,
 			ctx.ToPlutusData(),
@@ -1358,7 +1365,8 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 		}
-		usedBudget, err := s.Evaluate(
+		usedBudget, err := s.EvaluateContext(
+			machineCtx,
 			datum,
 			redeemer.Data,
 			ctx.ToPlutusData(),

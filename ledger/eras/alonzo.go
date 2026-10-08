@@ -476,7 +476,8 @@ func EvaluateTxAlonzo(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 			}
-			usedBudget, err := s.Evaluate(
+			usedBudget, err := s.EvaluateContext(
+				evaluationContext(ls),
 				datum,
 				redeemer.Data,
 				sc.ToPlutusData(),

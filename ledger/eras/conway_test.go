@@ -2195,6 +2195,40 @@ type cancelingEvaluationLedgerState struct {
 	reads  int
 }
 
+type cancelDuringCekContext struct {
+	checks int
+	limit  int
+	done   chan struct{}
+}
+
+func (*cancelDuringCekContext) Deadline() (time.Time, bool) {
+	return time.Time{}, false
+}
+
+func (c *cancelDuringCekContext) Done() <-chan struct{} { return c.done }
+
+func (c *cancelDuringCekContext) Err() error {
+	c.checks++
+	if c.checks == c.limit {
+		close(c.done)
+	}
+	if c.checks >= c.limit {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (*cancelDuringCekContext) Value(any) any { return nil }
+
+type activeEvaluationLedgerState struct {
+	*mockLedgerState
+	ctx context.Context
+}
+
+func (ls *activeEvaluationLedgerState) EvaluationContext() context.Context {
+	return ls.ctx
+}
+
 func (ls *cancelingEvaluationLedgerState) EvaluationContext() context.Context {
 	return ls.ctx
 }
@@ -4341,4 +4375,62 @@ func TestEvaluateTxConwayStopsAfterCanceledInputLookup(t *testing.T) {
 	_, _, _, err = EvaluateTxConway(tx, ls, pp)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, 1, ls.reads)
+}
+
+func TestEvaluateTxConwayCancelsActivePlutusMachine(t *testing.T) {
+	t.Parallel()
+
+	selfApply := &syn.Lambda[syn.DeBruijn]{
+		Body: &syn.Apply[syn.DeBruijn]{
+			Function: &syn.Var[syn.DeBruijn]{Name: 1},
+			Argument: &syn.Var[syn.DeBruijn]{Name: 1},
+		},
+	}
+	term := syn.Term[syn.DeBruijn](&syn.Lambda[syn.DeBruijn]{
+		Body: &syn.Apply[syn.DeBruijn]{
+			Function: selfApply,
+			Argument: selfApply,
+		},
+	})
+	flatProgram, err := syn.Encode(&syn.Program[syn.DeBruijn]{
+		Version: lang.LanguageVersion{1, 1, 0},
+		Term:    term,
+	})
+	require.NoError(t, err)
+	scriptBytes, err := cbor.Encode(flatProgram)
+	require.NoError(t, err)
+	plutusScript := lcommon.PlutusV3Script(scriptBytes)
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: plutusScript.Hash(),
+	}
+	tx := conwayTxInfoCertificateTx(
+		plutusScript,
+		&lcommon.RegistrationCertificate{
+			CertType:        uint(lcommon.CertificateTypeRegistration),
+			StakeCredential: credential,
+			Amount:          conwayExplicitStakeAmount,
+		},
+	)
+	ctx := &cancelDuringCekContext{limit: 64, done: make(chan struct{})}
+	ls := &activeEvaluationLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		ctx:             ctx,
+	}
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: lcommon.ProtocolVersionVanRossem,
+		},
+		CostModels: map[uint][]int64{
+			2: defaultMachineCostModel(t, lang.LanguageVersionV3),
+		},
+		MaxTxExUnits: lcommon.ExUnits{
+			Memory: 10_000_000,
+			Steps:  100_000_000,
+		},
+	}
+
+	_, _, _, err = EvaluateTxConway(tx, ls, pp)
+	require.ErrorIs(t, err, context.Canceled)
+	require.GreaterOrEqual(t, ctx.checks, ctx.limit)
 }
