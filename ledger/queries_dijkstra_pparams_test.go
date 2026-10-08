@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -93,7 +94,9 @@ func TestQueryShelleyCurrentProtocolParams_DijkstraLive(t *testing.T) {
 	ls.syntheticV2CostModel = true
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.Query(protocolParamsQuery(), QueryPoint{})
+	result, err := ls.Query(
+		context.Background(), protocolParamsQuery(), QueryPoint{},
+	)
 	require.NoError(t, err)
 	requireDijkstraQueryReply(t, result, 25600)
 
@@ -130,7 +133,7 @@ func TestQueryShelleyCurrentProtocolParams_DijkstraPersistedRow(t *testing.T) {
 	}, nil))
 
 	result, err := ls.queryShelleyCurrentProtocolParams(
-		QueryPoint{Slot: 350}, nil,
+		context.Background(), QueryPoint{Slot: 350}, nil,
 	)
 	require.NoError(t, err)
 	requireDijkstraQueryReply(t, result, 25600)
