@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3648,6 +3649,46 @@ func TestChainsyncServerFindIntersect_ClientRegistrationFailure(
 	// The registration error is surfaced to the caller.
 	require.ErrorContains(t, err, "add chainsync client")
 	require.ErrorContains(t, err, "no chain provider available")
+}
+
+// TestChainsyncServerFindIntersect_ServedActivityOnlyWhenServed verifies a
+// rejected FindIntersect does not count as downstream consumption: a warm
+// inbound peer must not dodge the idle prune with requests we refuse.
+func TestChainsyncServerFindIntersect_ServedActivityOnlyWhenServed(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o := newFindIntersectTestOuroboros(t)
+	var reports atomic.Int64
+	o.servedActivityHook = func(ouroboros.ConnectionId) { reports.Add(1) }
+	limiter := newChainsyncFindIntersectRateLimiter(200, 1000)
+
+	// Oversized point list: rejected before any lookup.
+	tooMany := make([]ocommon.Point, chainsyncMaxFindIntersectPoints+1)
+	for i := range tooMany {
+		tooMany[i] = ocommon.NewPointOrigin()
+	}
+	_, _, err := o.chainsyncServerFindIntersect(
+		limiter,
+		ochainsync.CallbackContext{
+			ConnectionId: newTestConnId("127.0.0.1:6000", "1.1.1.1:3001"),
+		},
+		tooMany,
+	)
+	require.ErrorIs(t, err, ochainsync.ErrIntersectNotFound)
+	assert.Zero(t, reports.Load(), "a rejected request is not served activity")
+
+	// A served intersection is reported.
+	_, _, err = o.chainsyncServerFindIntersect(
+		limiter,
+		ochainsync.CallbackContext{
+			ConnectionId: newTestConnId("127.0.0.1:6000", "1.1.1.2:3001"),
+		},
+		[]ocommon.Point{ocommon.NewPointOrigin()},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), reports.Load())
 }
 
 // TestChainsyncServerRequestNext_AddClientFailure verifies RequestNext returns

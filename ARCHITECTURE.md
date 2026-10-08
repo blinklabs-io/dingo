@@ -5655,15 +5655,18 @@ score); hot inbound peers are bounded at promotion by `InboundHotQuota`. The gov
 chainsync client calls `SetPeerHotByConnId`, which leaves the peer warm when
 promotion would exceed the active target, its per-source quota, or the inbound
 hot budget (local roots are exempt). Reconcile promotes it later.
-Reconcile's hot refill counts outbound hot peers only, so inbound hot peers
-never occupy outbound refill slots.
+Reconcile's hot refill counts outbound hot peers only, and an inbound peer it
+promotes does not use up an outbound refill slot, so inbound hot peers never
+occupy outbound refill slots.
 
 Inbound idle pruning treats a peer as idle only when it is quiet in both
 directions. `Peer.LastServedActivity` records downstream consumption: chainsync
 server FindIntersect/RequestNext/awaited-reply, blockfetch server RequestRange,
-and keepalive pings. `ouroboros` reports it through
-`PeerGovernor.RecordServedActivityByConnId`, throttled to once per 10 seconds
-per connection so the per-header path never takes the governor lock. It is kept
+and keepalive pings. FindIntersect counts only when an intersection is
+actually served, so rejected or unmatched requests cannot keep an idle peer.
+`ouroboros` reports it through `PeerGovernor.RecordServedActivityByConnId`,
+throttled to once per 10 seconds per connection (on the monotonic clock) so
+the per-header path never takes the governor lock. It is kept
 separate from `LastActivity`, which drives outbound hot and churn decisions.
 Flapping cooldown ignores served activity, but it judges the current session:
 a peer whose live inbound session has lasted past `minStableConnectionDuration`

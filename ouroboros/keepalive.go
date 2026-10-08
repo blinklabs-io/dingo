@@ -112,6 +112,11 @@ func (o *Ouroboros) keepaliveClientResponse(
 // lock.
 const servedActivityReportInterval = 10 * time.Second
 
+// servedActivityClockBase anchors the throttle's timestamps. Storing
+// time.Since(base) keeps the monotonic reading, so a wall-clock step cannot
+// stall or burst reports.
+var servedActivityClockBase = time.Now()
+
 type servedActivityKey struct {
 	local, remote netip.AddrPort
 }
@@ -141,14 +146,19 @@ func (o *Ouroboros) recordServedActivity(connId connection.ConnectionId) {
 		// unthrottled would take the governor lock per served header.
 		return
 	}
-	now := time.Now().UnixNano()
+	interval := servedActivityReportInterval
+	if o.servedActivityInterval > 0 {
+		interval = o.servedActivityInterval
+	}
+	// +1 so a stored value is never 0, which marks "never reported".
+	now := int64(time.Since(servedActivityClockBase)) + 1
 	v, loaded := o.servedActivityLast.Load(key)
 	if !loaded {
 		v, _ = o.servedActivityLast.LoadOrStore(key, new(atomic.Int64))
 	}
 	last := v.(*atomic.Int64)
 	prev := last.Load()
-	if prev != 0 && now-prev < int64(servedActivityReportInterval) {
+	if prev != 0 && now-prev < int64(interval) {
 		return
 	}
 	if !last.CompareAndSwap(prev, now) {

@@ -98,13 +98,17 @@ type Ouroboros struct {
 	// Unix nanoseconds; 0 means "never warned".
 	lastOriginOnlyIntersectWarn atomic.Int64
 	// servedActivityLast throttles recordServedActivity per connection
-	// (served activityKey -> *atomic.Int64 unix nanos of the last report).
+	// (servedActivityKey -> *atomic.Int64 nanoseconds since
+	// servedActivityClockBase of the last report).
 	servedActivityLast sync.Map
 	// servedActivityHook, when non-nil, replaces the peer governor as the
 	// sink for throttled served-activity reports. Test-only seam: the
 	// governor exposes no way to attach a connection to a peer from outside
 	// its package.
 	servedActivityHook func(ouroboros.ConnectionId)
+	// servedActivityInterval overrides servedActivityReportInterval when
+	// non-zero (tests).
+	servedActivityInterval time.Duration
 	// leiosAnnouncementLedger is the narrow synchronous ledger view used by
 	// LeiosNotify. It returns validation facts only; this package owns peer,
 	// publication, and relay semantics.

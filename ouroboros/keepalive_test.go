@@ -322,3 +322,24 @@ func TestRecordServedActivitySkipsNonTCPConnections(t *testing.T) {
 	assert.Equal(t, int64(0), reports.Load(),
 		"node-to-client unix connections are not reported to the governor")
 }
+
+func TestRecordServedActivityReportsAgainAfterInterval(t *testing.T) {
+	t.Parallel()
+	var reports atomic.Int64
+	o := &Ouroboros{
+		servedActivityHook: func(ouroboros.ConnectionId) {
+			reports.Add(1)
+		},
+		servedActivityInterval: 20 * time.Millisecond,
+	}
+	connId := servedTestConnId(40004)
+	o.recordServedActivity(connId)
+	o.recordServedActivity(connId)
+	require.Equal(t, int64(1), reports.Load(),
+		"a second call inside the interval is throttled")
+	require.Eventually(t, func() bool {
+		o.recordServedActivity(connId)
+		return reports.Load() == 2
+	}, 2*time.Second, 5*time.Millisecond,
+		"the throttle must re-arm once the interval has passed")
+}

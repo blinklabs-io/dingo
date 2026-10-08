@@ -638,7 +638,6 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 	points []ocommon.Point,
 ) (ocommon.Point, ochainsync.Tip, error) {
 	var retPoint ocommon.Point
-	o.recordServedActivity(ctx.ConnectionId)
 	o.config.Logger.Debug(
 		"chainsync server: FindIntersect callback entered",
 		"component", "ouroboros",
@@ -718,6 +717,9 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 		)
 	}
 	retPoint = *intersectPoint
+	// Count only an intersection actually served: rejected or unmatched
+	// requests must not keep an otherwise idle inbound peer from pruning.
+	o.recordServedActivity(ctx.ConnectionId)
 	return retPoint, tip, nil
 }
 
