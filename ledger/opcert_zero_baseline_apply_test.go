@@ -279,6 +279,27 @@ func TestLedgerProcessBlockOpCertMithrilPoolWithoutCertifiedCounter(
 	}
 }
 
+func TestLedgerProcessBlockOpCertRejectsBoundaryCounterConflict(t *testing.T) {
+	t.Parallel()
+
+	const boundarySlot = uint64(100)
+	ls := newOpCertBaselineLedgerState(t, boundarySlot)
+	poolKeyHash := lcommon.PoolKeyHash(opCertBaselineIssuer().Hash())
+	require.NoError(t, ls.db.UpdatePoolOpCertSequence(
+		poolKeyHash,
+		0,
+		boundarySlot,
+		nil,
+	))
+
+	err := applyOpCertBaselineBlock(t, ls, true, boundarySlot, 1)
+	require.ErrorContains(t, err, "opcert counter conflict")
+
+	stored, found := opCertBaselineRecorded(t, ls)
+	require.True(t, found)
+	require.Equal(t, uint64(0), stored)
+}
+
 // TestLedgerProcessBlockOpCertMithrilWithoutCertifiedCounterMapFailsClosed
 // covers a Mithril-restored ledger that holds no certified counter at its
 // trust boundary at all: a database imported before the HeaderState counter
