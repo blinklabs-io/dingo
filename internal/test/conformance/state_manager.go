@@ -1048,6 +1048,7 @@ func (m *DingoStateManager) ApplyTransaction(
 		if governance.HasDRepActivityCertificates(level) {
 			if err := governance.ProcessDRepActivityCertificates(
 				level,
+				point,
 				m.currentEpoch,
 				drepInactivityPeriod,
 				m.db,

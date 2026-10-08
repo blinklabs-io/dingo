@@ -611,9 +611,13 @@ func TestChainBlockBeforeSlotBinarySearchBoundaries(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			block, err := c.BlockBeforeSlot(tc.slot)
 			if !tc.wantFound {
-				if !errors.Is(err, models.ErrBlockNotFound) {
+				// An empty prefix must be distinguishable from a
+				// predecessor that could not be read, while still
+				// reading as not found to existing callers.
+				if !errors.Is(err, chain.ErrNoBlockBeforeSlot) ||
+					!errors.Is(err, models.ErrBlockNotFound) {
 					t.Fatalf(
-						"slot %d: expected ErrBlockNotFound, got slot=%d err=%v",
+						"slot %d: expected ErrNoBlockBeforeSlot, got slot=%d err=%v",
 						tc.slot,
 						block.Slot,
 						err,
@@ -631,6 +635,19 @@ func TestChainBlockBeforeSlotBinarySearchBoundaries(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestChainBlockBeforeSlotEmptyChain(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	_, err = cm.PrimaryChain().BlockBeforeSlot(100)
+	if !errors.Is(err, chain.ErrNoBlockBeforeSlot) {
+		t.Fatalf("expected ErrNoBlockBeforeSlot, got %v", err)
 	}
 }
 

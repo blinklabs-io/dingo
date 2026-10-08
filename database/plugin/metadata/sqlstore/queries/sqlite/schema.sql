@@ -542,3 +542,15 @@ CREATE TABLE IF NOT EXISTS `leios_transaction_context` (
 );
 CREATE INDEX IF NOT EXISTS `idx_leios_transaction_context_slot`
     ON `leios_transaction_context`(`slot`);
+CREATE TABLE IF NOT EXISTS `drep_expiry_history` (
+    `id` integer PRIMARY KEY AUTOINCREMENT,
+    `credential_tag` integer NOT NULL,
+    `credential` blob NOT NULL,
+    `added_slot` integer NOT NULL,
+    `last_activity_epoch` integer NOT NULL,
+    `expiry_epoch` integer NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS `idx_drep_expiry_history_credential_slot`
+    ON `drep_expiry_history`(`credential_tag`,`credential`,`added_slot`);
+CREATE INDEX IF NOT EXISTS `idx_drep_expiry_history_added_slot`
+    ON `drep_expiry_history`(`added_slot`);
