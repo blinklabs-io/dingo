@@ -194,8 +194,8 @@ func (s *Store) insertUtxoModelsChecked(
 		for i, utxo := range batch {
 			key := utxoIdentityKey(utxo.TxId, utxo.OutputIdx)
 			if _, duplicate := processed[key]; duplicate {
-				wasCreated, err := s.insertUtxoModelChecked(
-					ctx, db, utxo, true,
+				wasCreated, err := s.insertUtxoModelCheckedWithRows(
+					ctx, db, utxo, true, deferredRows,
 				)
 				if err != nil {
 					return nil, err
@@ -206,8 +206,8 @@ func (s *Store) insertUtxoModelsChecked(
 			processed[key] = struct{}{}
 			id, created := createdIDs[key]
 			if !created {
-				wasCreated, err := s.insertUtxoModelChecked(
-					ctx, db, utxo, true,
+				wasCreated, err := s.insertUtxoModelCheckedWithRows(
+					ctx, db, utxo, true, deferredRows,
 				)
 				if err != nil {
 					return nil, err
