@@ -34,7 +34,7 @@ jobs:
       - name: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.7
+          go-version: 1.26.x
           cache: false
 
       - name: cache-go-modules
@@ -43,9 +43,9 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.7-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.7-
+            ${{ runner.os }}-go-1.26.x-
 
       # Prepares a linked worktree (sharing the main checkout's `origin`
       # remote; push auth is not persisted in git config -- it is provided by

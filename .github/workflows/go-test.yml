@@ -65,16 +65,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.7
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.7-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.7-
+            ${{ runner.os }}-go-1.26.x-
       # One step per Go module.
       #
       # These are steps of a single `lint` job rather than a matrix on
@@ -122,16 +122,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.7
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.7-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.7-
+            ${{ runner.os }}-go-1.26.x-
       - name: govulncheck
         # govulncheck exits non-zero only for vulnerabilities this module
         # actually calls, so the unreachable findings it also prints (currently
@@ -161,16 +161,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.7
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.7-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.7-
+            ${{ runner.os }}-go-1.26.x-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 https://github.com/actions/setup-node/releases/tag/v7.1.0
@@ -199,8 +199,7 @@ jobs:
   # Do not add a matrix dimension to this job or rename it without updating
   # branch protection: GitHub appends the matrix combination to a job name
   # that contains no expression, so this renders as the required context
-  # "go-test (Linux) (1.26.x)". The matrix value is only the stable check
-  # label; setup-go installs the exact version below.
+  # "go-test (Linux) (1.26.x)".
   go-test-linux:
     name: go-test (Linux)
     needs: [go-test-linux-quick]
@@ -304,16 +303,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.7
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.7-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.7-
+            ${{ runner.os }}-go-1.26.x-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: install-mariadb-client
@@ -417,7 +416,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.7
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -467,16 +466,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.7
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/Library/Caches/go-build
-          key: ${{ runner.os }}-go-1.26.7-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.7-
+            ${{ runner.os }}-go-1.26.x-
       - name: go-build
         run: go build ./...
       - name: go-test
@@ -503,16 +502,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.7
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.7-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.7-
+            ${{ runner.os }}-go-1.26.x-
       - name: build
         env:
           BUILD_TARGETS: linux/amd64 linux/arm64 freebsd/amd64 freebsd/arm64
@@ -531,16 +530,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.7
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/Library/Caches/go-build
-          key: ${{ runner.os }}-go-1.26.7-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.7-
+            ${{ runner.os }}-go-1.26.x-
       - name: build
         env:
           BUILD_TARGETS: darwin/amd64 darwin/arm64

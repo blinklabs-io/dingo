@@ -26,12 +26,11 @@ PROTOC=$(PROTOC_DIR)/bin/protoc
 SQLC_VERSION=v1.31.1
 SQLC_SUM=h1:+V+BjBJfFNPX/RFfL8eiZD9jk9lVJUEGGllWvnYNqbc=
 SQLC_MODULE=github.com/sqlc-dev/sqlc
-PINNED_GO_TOOLCHAIN=go1.26.7
-SQLC=GOTOOLCHAIN=$(PINNED_GO_TOOLCHAIN) go run $(SQLC_MODULE)/cmd/sqlc@$(SQLC_VERSION)
+SQLC=go run $(SQLC_MODULE)/cmd/sqlc@$(SQLC_VERSION)
 GOVULNCHECK_VERSION=v1.8.0
 GOVULNCHECK_SUM=h1:clG4qBU6zH5VKjti8n5j8BBuYzoSha392xXMkXS351U=
 GOVULNCHECK_MODULE=golang.org/x/vuln
-GOVULNCHECK=GOTOOLCHAIN=$(PINNED_GO_TOOLCHAIN) go run $(GOVULNCHECK_MODULE)/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+GOVULNCHECK=go run $(GOVULNCHECK_MODULE)/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 PROTOC_SHA256_osx_aarch_64=a7b51b2113862690fa52c62f8891a6037bafb9db88d4f9924c486de9d9bb89d5
 PROTOC_SHA256_osx_x86_64=f9caa5b4d0b537acffb0ffd7d53225511a5574ef903fca550ea9e7600987f13b
 PROTOC_SHA256_linux_aarch_64=4a802ed23d70f7bad7eb19e5a3e724b3aa967250d572cadfd537c1ba939aee6a
@@ -39,7 +38,7 @@ PROTOC_SHA256_linux_x86_64=e9c129c176bb7df02546c4cd6185126ca53c89e7d2f09511e2093
 PROTOC_SHA256=$(PROTOC_SHA256_$(PROTOC_OS)_$(PROTOC_ARCH))
 
 define VERIFY_GO_MODULE
-	actual="$$(GOTOOLCHAIN=$(PINNED_GO_TOOLCHAIN) go mod download -json $(1)@$(2) | sed -n 's/^[[:space:]]*"Sum": "\(.*\)",/\1/p')"; \
+	actual="$$(go mod download -json $(1)@$(2) | sed -n 's/^[[:space:]]*"Sum": "\(.*\)",/\1/p')"; \
 		test "$$actual" = "$(3)"
 endef
 
