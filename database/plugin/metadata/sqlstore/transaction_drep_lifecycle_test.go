@@ -572,21 +572,19 @@ func TestDormantDRepExpiryBumpIsIdempotentAndRollbackable(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), dormant, "replaying a boundary must not increment dormancy twice")
 
-	require.NoError(t, store.UpdateDRepActivity(0, credential, 40, 25, 5, nil))
+	require.NoError(t, store.UpdateDRepActivity(0, credential, 25, 5, 40, nil))
 	drep, err := store.GetDrepByCredential(0, credential, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(30), drep.ExpiryEpoch)
 	require.Equal(t, uint64(25), drep.LastActivityEpoch)
 
-	db, ctx, err := store.dbFromTxn(nil)
-	require.NoError(t, err)
-	require.NoError(t, store.restoreDrepExpiryHistory(db, ctx, 39))
+	require.NoError(t, store.RestoreDrepStateAtSlot(39, nil))
 	drep, err = store.GetDrepByCredential(0, credential, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(21), drep.ExpiryEpoch)
 	require.Equal(t, uint64(4), drep.LastActivityEpoch)
 
-	require.NoError(t, store.restoreDrepExpiryHistory(db, ctx, 29))
+	require.NoError(t, store.RestoreDrepStateAtSlot(29, nil))
 	dormant, err = store.GetDormantDRepEpochs(nil)
 	require.NoError(t, err)
 	require.Zero(t, dormant, "rollback before the dormant boundary restores the counter")
@@ -606,9 +604,7 @@ func TestDormantDRepEpochResetRestoresAtRollbackPoint(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, dormant)
 
-	db, ctx, err := store.dbFromTxn(nil)
-	require.NoError(t, err)
-	require.NoError(t, store.restoreDrepExpiryHistory(db, ctx, 39))
+	require.NoError(t, store.RestoreDrepStateAtSlot(39, nil))
 	dormant, err = store.GetDormantDRepEpochs(nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), dormant)
@@ -644,7 +640,7 @@ func TestDrepActivityRenewalsRestoreAtRollbackPoint(t *testing.T) {
 				{300, 27},
 			} {
 				require.NoError(t, store.UpdateDRepActivity(
-					0, credential, renewal.slot, renewal.epoch, 5, nil,
+					0, credential, renewal.epoch, 5, renewal.slot, nil,
 				))
 			}
 
@@ -679,9 +675,9 @@ func TestDrepActivityAndExpirySurviveDeregistrationRollback(t *testing.T) {
 	require.NoError(t, store.UpdateDRepActivity(
 		0,
 		credential,
-		10,
 		4,
 		16,
+		10,
 		nil,
 	))
 	credentialHash := common.NewBlake2b224(credential)

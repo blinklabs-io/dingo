@@ -23,38 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-func recordDrepExpiryHistory(
-	ctx context.Context,
-	db queryer,
-	tag uint8,
-	credential []byte,
-	slot uint64,
-	dialect string,
-) error {
-	slotValue, err := checkedInt64(slot)
-	if err != nil {
-		return err
-	}
-	insert := `INSERT INTO drep_expiry_history (
-    credential_tag, credential, added_slot,
-    previous_expiry_epoch, previous_last_activity_epoch
-)
-SELECT credential_tag, credential, ?, expiry_epoch, last_activity_epoch
-FROM drep
-WHERE credential_tag = ? AND credential = ?`
-	if dialect == "mysql" {
-		insert = strings.Replace(insert, "INSERT INTO", "INSERT IGNORE INTO", 1)
-	} else {
-		insert += "\nON CONFLICT (credential_tag, credential, added_slot) DO NOTHING"
-	}
-	_, err = db.ExecContext(ctx, insert,
-		slotValue,
-		tag,
-		credential,
-	)
-	return err
-}
-
 func (s *Store) BumpDormantDRepExpiries(
 	slot uint64,
 	txn types.Txn,
@@ -100,22 +68,32 @@ SELECT EXISTS (
 				return fmt.Errorf("dormant DRep expiry exceeds storage range at slot %d", slot)
 			}
 
-			historyQuery := `INSERT INTO drep_expiry_history (
-    credential_tag, credential, added_slot,
-    previous_expiry_epoch, previous_last_activity_epoch
-)
-SELECT credential_tag, credential, ?, expiry_epoch, last_activity_epoch
-FROM drep
-WHERE active = TRUE AND expiry_epoch > 0`
-			if s.dialect.Name() == "mysql" {
-				historyQuery = strings.Replace(historyQuery, "INSERT INTO", "INSERT IGNORE INTO", 1)
-			} else {
-				historyQuery += "\nON CONFLICT (credential_tag, credential, added_slot) DO NOTHING"
+			type expiryRow struct {
+				tag        uint8
+				credential []byte
+				activity   uint64
+				expiry     uint64
 			}
-			if _, err := db.ExecContext(ctx, historyQuery,
-				slotValue,
-			); err != nil {
-				return fmt.Errorf("record dormant DRep expiries: %w", err)
+			rows, err := db.QueryContext(ctx, `
+SELECT credential_tag, credential, last_activity_epoch, expiry_epoch
+FROM drep WHERE active = TRUE AND expiry_epoch > 0`)
+			if err != nil {
+				return fmt.Errorf("read dormant DRep expiries: %w", err)
+			}
+			var items []expiryRow
+			for rows.Next() {
+				var item expiryRow
+				if err := rows.Scan(&item.tag, &item.credential, &item.activity, &item.expiry); err != nil {
+					rows.Close()
+					return err
+				}
+				items = append(items, item)
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			if err := rows.Err(); err != nil {
+				return err
 			}
 			result, err := db.ExecContext(ctx, `
 UPDATE drep
@@ -124,11 +102,17 @@ WHERE active = TRUE AND expiry_epoch > 0`)
 			if err != nil {
 				return fmt.Errorf("bump dormant DRep expiries: %w", err)
 			}
-			rows, err := result.RowsAffected()
+			rowsAffected, err := result.RowsAffected()
 			if err != nil {
 				return err
 			}
-			affected = int(rows)
+			affected = int(rowsAffected)
+			for _, item := range items {
+				if err := recordDrepExpiry(ctx, db, item.tag, item.credential, slot, item.activity, item.expiry+1); err != nil {
+					return fmt.Errorf("record dormant DRep expiry: %w", err)
+				}
+			}
+
 			return nil
 		},
 	)
@@ -271,73 +255,6 @@ func (s *Store) recordDormantDRepEpochHistory(
 INSERT INTO drep_dormancy_history (added_slot, previous_dormant_epochs)
 VALUES (?, ?)`, slot, dormant); err != nil {
 		return fmt.Errorf("record dormant DRep epoch history: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) restoreDrepExpiryHistory(
-	db queryer,
-	ctx context.Context,
-	slot uint64,
-) error {
-	rows, err := db.QueryContext(ctx, `
-SELECT credential_tag, credential, previous_expiry_epoch,
-       previous_last_activity_epoch
-FROM drep_expiry_history
-WHERE added_slot > ?
-ORDER BY added_slot DESC`, slot)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	type historyRow struct {
-		tag          uint8
-		credential   []byte
-		expiry       uint64
-		lastActivity uint64
-	}
-	var items []historyRow
-	for rows.Next() {
-		var item historyRow
-		if err := rows.Scan(
-			&item.tag,
-			&item.credential,
-			&item.expiry,
-			&item.lastActivity,
-		); err != nil {
-			return err
-		}
-		items = append(items, item)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, item := range items {
-		if _, err := db.ExecContext(ctx, `
-UPDATE drep
-SET expiry_epoch = ?, last_activity_epoch = ?
-WHERE credential_tag = ? AND credential = ?`,
-			item.expiry,
-			item.lastActivity,
-			item.tag,
-			item.credential,
-		); err != nil {
-			return err
-		}
-	}
-	if _, err := db.ExecContext(ctx,
-		`DELETE FROM drep_expiry_history WHERE added_slot > ?`, slot); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx,
-		`DELETE FROM drep_expiry_epoch_event WHERE added_slot > ?`, slot); err != nil {
-		return err
-	}
-	if err := s.restoreDormantDRepEpochHistory(db, ctx, slot); err != nil {
-		return err
 	}
 	return nil
 }

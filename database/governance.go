@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -25,10 +26,11 @@ import (
 // the given slot and clears deleted_slot for any that were soft-deleted after
 // that slot. This is used during chain rollbacks.
 func (d *Database) DeleteGovernanceProposalsAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().DeleteGovernanceProposalsAfterSlot(
 			slot,
 			txn.Metadata(),
@@ -47,10 +49,11 @@ func (d *Database) DeleteGovernanceProposalsAfterSlot(
 // given slot and clears deleted_slot for any that were soft-deleted after
 // that slot. This is used during chain rollbacks.
 func (d *Database) DeleteGovernanceVotesAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().DeleteGovernanceVotesAfterSlot(
 			slot,
 			txn.Metadata(),
@@ -68,6 +71,7 @@ func (d *Database) DeleteGovernanceVotesAfterSlot(
 // DeleteGovernanceVotesForDrep soft-deletes a DRep's votes on proposals active
 // in the current epoch at its deregistration slot so rollback can restore them.
 func (d *Database) DeleteGovernanceVotesForDrep(
+	ctx context.Context,
 	credentialTag uint8,
 	credential []byte,
 	epoch uint64,
@@ -75,7 +79,7 @@ func (d *Database) DeleteGovernanceVotesForDrep(
 	txn *Txn,
 ) (int, error) {
 	var n int
-	err := d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	err := d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		deleted, err := d.governanceStore().DeleteGovernanceVotesForDrep(
 			credentialTag,
 			credential,
@@ -97,12 +101,13 @@ func (d *Database) DeleteGovernanceVotesForDrep(
 
 // GetGovernanceProposal returns a governance proposal by transaction hash and action index
 func (d *Database) GetGovernanceProposal(
+	ctx context.Context,
 	txHash []byte,
 	actionIndex uint32,
 	txn *Txn,
 ) (*models.GovernanceProposal, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	proposal, err := d.governanceStore().GetGovernanceProposal(
@@ -122,11 +127,12 @@ func (d *Database) GetGovernanceProposal(
 // GetActiveGovernanceProposals returns all governance proposals that are
 // still in the active pool (not expired, not enacted, not soft-deleted).
 func (d *Database) GetActiveGovernanceProposals(
+	ctx context.Context,
 	epoch uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	proposals, err := d.governanceStore().GetActiveGovernanceProposals(
@@ -145,10 +151,11 @@ func (d *Database) GetActiveGovernanceProposals(
 // GetGovernanceProposalSet returns the Conway proposals set: every proposal
 // not yet enacted, dropped, or soft-deleted.
 func (d *Database) GetGovernanceProposalSet(
+	ctx context.Context,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	proposals, err := d.governanceStore().GetGovernanceProposalSet(
@@ -163,15 +170,40 @@ func (d *Database) GetGovernanceProposalSet(
 	return proposals, nil
 }
 
+// GetGovernanceProposalSetAtSlot returns the Conway proposals set as it stood
+// at slot.
+func (d *Database) GetGovernanceProposalSetAtSlot(
+	ctx context.Context,
+	slot uint64,
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	proposals, err := d.governanceStore().GetGovernanceProposalSetAtSlot(
+		slot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get governance proposal set at slot: %w",
+			err,
+		)
+	}
+	return proposals, nil
+}
+
 // GetExpiringGovernanceProposals returns unratified proposals whose
 // expires_epoch is strictly less than the given epoch and that have not yet
 // been enacted, expired, or soft-deleted.
 func (d *Database) GetExpiringGovernanceProposals(
+	ctx context.Context,
 	epoch uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	proposals, err := d.governanceStore().GetExpiringGovernanceProposals(
@@ -188,12 +220,13 @@ func (d *Database) GetExpiringGovernanceProposals(
 // GetExpiredGovernanceProposalsAt returns proposals expired at the exact
 // epoch-boundary slot. Used by epoch replay to restore deposit-return effects.
 func (d *Database) GetExpiredGovernanceProposalsAt(
+	ctx context.Context,
 	epoch uint64,
 	slot uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	proposals, err := d.governanceStore().GetExpiredGovernanceProposalsAt(
@@ -214,11 +247,12 @@ func (d *Database) GetExpiredGovernanceProposalsAt(
 // expired, to return the deposit and finalize proposals expired as of a prior
 // boundary.
 func (d *Database) GetExpiredAwaitingDropGovernanceProposals(
+	ctx context.Context,
 	epoch uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	proposals, err := d.governanceStore().
@@ -236,12 +270,13 @@ func (d *Database) GetExpiredAwaitingDropGovernanceProposals(
 // returned) at the exact epoch-boundary slot. Used by epoch replay to
 // restore deposit-return effects.
 func (d *Database) GetDroppedGovernanceProposalsAt(
+	ctx context.Context,
 	epoch uint64,
 	slot uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	proposals, err := d.governanceStore().GetDroppedGovernanceProposalsAt(
@@ -260,10 +295,11 @@ func (d *Database) GetDroppedGovernanceProposalsAt(
 // enacted, ordered by (ratified_epoch, ratified_slot, id). Used at epoch
 // start for enactment.
 func (d *Database) GetRatifiedGovernanceProposals(
+	ctx context.Context,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	proposals, err := d.governanceStore().GetRatifiedGovernanceProposals(
@@ -280,12 +316,13 @@ func (d *Database) GetRatifiedGovernanceProposals(
 // GetEnactedGovernanceProposalsAt returns proposals enacted at the exact
 // epoch-boundary slot. Used by epoch replay to restore enactment effects.
 func (d *Database) GetEnactedGovernanceProposalsAt(
+	ctx context.Context,
 	epoch uint64,
 	slot uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	proposals, err := d.governanceStore().GetEnactedGovernanceProposalsAt(
@@ -305,11 +342,12 @@ func (d *Database) GetEnactedGovernanceProposalsAt(
 // Callers group per-purpose action types (CIP-1694 chain roots) in
 // the slice; the single-type case passes a one-element slice.
 func (d *Database) GetLastEnactedGovernanceProposal(
+	ctx context.Context,
 	actionTypes []uint8,
 	txn *Txn,
 ) (*models.GovernanceProposal, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	proposal, err := d.governanceStore().GetLastEnactedGovernanceProposal(
@@ -325,13 +363,14 @@ func (d *Database) GetLastEnactedGovernanceProposal(
 
 // SetGovernanceProposal creates or updates a governance proposal
 func (d *Database) SetGovernanceProposal(
+	ctx context.Context,
 	proposal *models.GovernanceProposal,
 	txn *Txn,
 ) error {
 	if proposal == nil {
 		return errors.New("proposal cannot be nil")
 	}
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().SetGovernanceProposal(
 			proposal,
 			txn.Metadata(),
@@ -346,12 +385,13 @@ func (d *Database) SetGovernanceProposal(
 // pending state at transitionSlot. Governance epoch processing uses it when a
 // legacy ratified row fails a deterministic enactment precondition.
 func (d *Database) ClearGovernanceProposalRatification(
+	ctx context.Context,
 	txHash []byte,
 	actionIndex uint32,
 	transitionSlot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().ClearGovernanceProposalRatification(
 			txHash,
 			actionIndex,
@@ -372,12 +412,13 @@ func (d *Database) ClearGovernanceProposalRatification(
 // yet enacted, expired, or soft-deleted are returned. Used during epoch
 // boundary orphan sweeps.
 func (d *Database) GetChildGovernanceProposals(
+	ctx context.Context,
 	parentTxHash []byte,
 	parentActionIdx uint32,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	proposals, err := d.governanceStore().GetChildGovernanceProposals(
@@ -393,11 +434,12 @@ func (d *Database) GetChildGovernanceProposals(
 
 // GetGovernanceVotes returns all votes for a governance proposal
 func (d *Database) GetGovernanceVotes(
+	ctx context.Context,
 	proposalID uint,
 	txn *Txn,
 ) ([]*models.GovernanceVote, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	votes, err := d.governanceStore().GetGovernanceVotes(
@@ -410,15 +452,39 @@ func (d *Database) GetGovernanceVotes(
 	return votes, nil
 }
 
+// GetGovernanceVotesAtSlot returns a governance proposal's votes as they
+// stood at slot.
+func (d *Database) GetGovernanceVotesAtSlot(
+	ctx context.Context,
+	proposalID uint,
+	slot uint64,
+	txn *Txn,
+) ([]*models.GovernanceVote, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	votes, err := d.governanceStore().GetGovernanceVotesAtSlot(
+		proposalID,
+		slot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get governance votes at slot: %w", err)
+	}
+	return votes, nil
+}
+
 // SetGovernanceVote records a vote on a governance proposal
 func (d *Database) SetGovernanceVote(
+	ctx context.Context,
 	vote *models.GovernanceVote,
 	txn *Txn,
 ) error {
 	if vote == nil {
 		return errors.New("vote cannot be nil")
 	}
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().SetGovernanceVote(
 			vote,
 			txn.Metadata(),

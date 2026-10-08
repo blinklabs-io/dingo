@@ -1278,6 +1278,74 @@ func TestLatestPoolOpCertSequencesReadsIndexOnly(t *testing.T) {
 	)
 }
 
+// TestLatestPoolOpCertSequencesAtOrBefore pins both the values the counters
+// at a slot take and the indexes each of the read's two statements uses: the
+// slot index finds the pools with a later row, and the (pool, slot) index
+// recomputes each of those, so neither reads the table end to end.
+func TestLatestPoolOpCertSequencesAtOrBefore(t *testing.T) {
+	t.Parallel()
+	store, db := newSharedSQLStore(t)
+
+	pool := func(b byte) lcommon.PoolKeyHash {
+		return lcommon.PoolKeyHash(
+			lcommon.NewBlake2b224(bytes.Repeat([]byte{b}, 28)),
+		)
+	}
+	early, both, late := pool(0xA1), pool(0xB2), pool(0xC3)
+	require.NoError(t, store.UpdatePoolOpCertSequence(early, 2, 10, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(both, 1, 15, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(both, 9, 25, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(late, 4, 30, nil))
+
+	key := func(p lcommon.PoolKeyHash) string { return string(p[:]) }
+	for _, tc := range []struct {
+		slot uint64
+		want map[string]uint64
+	}{
+		{5, map[string]uint64{}},
+		{12, map[string]uint64{key(early): 2}},
+		{20, map[string]uint64{key(early): 2, key(both): 1}},
+		{30, map[string]uint64{key(early): 2, key(both): 9, key(late): 4}},
+	} {
+		got, err := store.LatestPoolOpCertSequencesAtOrBefore(tc.slot, nil)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, got, "slot %d", tc.slot)
+	}
+
+	for _, tc := range []struct {
+		statement string
+		args      []any
+		index     string
+	}{
+		{
+			sqlstore.PoolOpCertSequencesChangedAfterSQL,
+			[]any{12},
+			"idx_pool_opcert_sequence_slot",
+		},
+		{
+			sqlstore.PoolOpCertSequenceAtOrBeforeSQL,
+			[]any{key(both), 20},
+			"idx_pool_opcert_sequence_pool_slot",
+		},
+	} {
+		rows, err := db.Query("EXPLAIN QUERY PLAN "+tc.statement, tc.args...)
+		require.NoError(t, err)
+		var details string
+		for rows.Next() {
+			var id, parent, notUsed int
+			var detail string
+			require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
+			details += detail + "\n"
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+		assert.Contains(t, details, tc.index,
+			"the statement must read through its index:\n%s", details)
+		assert.NotContains(t, details, "SCAN pool_opcert_sequence\n",
+			"the statement must not scan the table:\n%s", details)
+	}
+}
+
 // TestLatestPoolOpCertSequences covers the bulk read backing the
 // GetChainDepState query's operational-certificate counters.
 //

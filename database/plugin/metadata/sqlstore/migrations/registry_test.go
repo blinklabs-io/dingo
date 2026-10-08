@@ -31,11 +31,13 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 39)
+	require.Len(t, registry, 40)
+
 	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
 	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
 		"CREATE TABLE IF NOT EXISTS `account_drep_clear`")
 	require.NotNil(t, registry[34].Backfill)
+	require.Equal(t, poolRelayTypeSchemaRelease, registry[37].Name)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -270,9 +272,11 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, drepExpiryHistorySchemaRelease, registry[36].Name)
 	require.Contains(t, strings.Join(registry[36].SQL["sqlite"].Expand, "\n"), "drep_expiry_history")
 	require.Equal(t, 38, registry[37].Version)
-	require.Equal(t, drepDormancyStateSchemaRelease, registry[37].Name)
+	require.Equal(t, poolRelayTypeSchemaRelease, registry[37].Name)
 	require.Equal(t, 39, registry[38].Version)
-	require.Equal(t, drepDelegatorStateSchemaRelease, registry[38].Name)
+	require.Equal(t, drepDormancyStateSchemaRelease, registry[38].Name)
+	require.Equal(t, 40, registry[39].Version)
+	require.Equal(t, drepDelegatorStateSchemaRelease, registry[39].Name)
 }
 
 func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
@@ -290,8 +294,8 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 39)
-			migration := registry[37]
+			require.Len(t, registry, 40)
+			migration := registry[38]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
 			require.Contains(t, seed, "WHERE NOT EXISTS")
@@ -519,7 +523,8 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 39)
+	require.Len(t, registry, 40)
+
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

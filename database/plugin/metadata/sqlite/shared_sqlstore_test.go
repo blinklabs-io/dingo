@@ -685,8 +685,8 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		1,
 		importedCredential,
 		30,
-		30,
 		5,
+		300,
 		nil,
 	))
 	require.NoError(t, store.CreateAccount(nil, &models.Account{
@@ -846,7 +846,7 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		},
 		ret.Deposits,
 	)
-	err = store.UpdateDRepActivity(0, missingCredential, 1, 1, 1, nil)
+	err = store.UpdateDRepActivity(0, missingCredential, 1, 1, 10, nil)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, models.ErrDrepActivityNotUpdated))
 	ret.MissingActivityError = err.Error()

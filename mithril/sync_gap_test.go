@@ -57,13 +57,13 @@ func TestProcessGapBlocksDoesNotDoubleCountImportedDormancy(t *testing.T) {
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
 	credential := testGapHash28("dormant-gap-boundary")
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag: 0,
 		Credential:    credential,
 		ExpiryEpoch:   21,
 		Active:        true,
 	}))
-	require.NoError(t, db.SetImportedDormantDRepEpochs(1, nil))
+	require.NoError(t, db.SetImportedDormantDRepEpochs(context.Background(), 1, nil))
 	for epoch, slot := range []uint64{0, 1} {
 		require.NoError(t, db.SetEpoch(
 			slot,
@@ -95,10 +95,10 @@ func TestProcessGapBlocksDoesNotDoubleCountImportedDormancy(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		gapBlocks,
 	))
-	drep, err := db.GetDrepByCredential(0, credential, true, nil)
+	drep, err := db.GetDrepByCredential(context.Background(), 0, credential, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(21), drep.ExpiryEpoch)
-	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
+	dormantEpochs, err := db.GetDormantDRepEpochs(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), dormantEpochs,
 		"gap replay must preserve dormancy already incorporated into the imported state")
@@ -117,7 +117,7 @@ func TestGapBlockDRepCertificatesUseBabbageProtocolMajor(t *testing.T) {
 	drepTwo := testGapHash28("pv9-drep-two")
 	stakeCredential := testGapHash28("pv9-stake")
 	for _, credential := range [][]byte{drepOne, drepTwo} {
-		require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 			CredentialTag: 0,
 			Credential:    credential,
 			AddedSlot:     1,
@@ -172,8 +172,7 @@ func TestGapBlockDRepCertificatesUseBabbageProtocolMajor(t *testing.T) {
 		}
 	}
 	pparams := &babbage.BabbageProtocolParameters{ProtocolMajor: 9}
-	require.NoError(t, processGapBlockTransactions(
-		db,
+	require.NoError(t, processGapBlockTransactions(context.Background(), db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
 		txns,
@@ -186,7 +185,7 @@ func TestGapBlockDRepCertificatesUseBabbageProtocolMajor(t *testing.T) {
 		pparams,
 		nil,
 	))
-	account, err := db.GetAccountByCredential(0, stakeCredential, true, nil)
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeCredential, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	require.Nil(t, account.Drep, "PV9 DRep deregistration clears the stale reverse delegation")
@@ -201,7 +200,7 @@ func TestGapBlockKeepsImportedDormancyForHistoricalDRepRegistration(t *testing.T
 	})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
-	require.NoError(t, db.SetImportedDormantDRepEpochs(3, nil))
+	require.NoError(t, db.SetImportedDormantDRepEpochs(context.Background(), 3, nil))
 
 	drepCredential := testGapHash28("fresh-gap-drep")
 	pparams := &conway.ConwayProtocolParameters{
@@ -245,8 +244,7 @@ func TestGapBlockKeepsImportedDormancyForHistoricalDRepRegistration(t *testing.T
 	var blockHash [32]byte
 	copy(blockHash[:], point.Hash)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	require.NoError(t, processGapBlockTransactions(
-		db,
+	require.NoError(t, processGapBlockTransactions(context.Background(), db,
 		logger,
 		point,
 		[]lcommon.Transaction{tx},
@@ -262,13 +260,13 @@ func TestGapBlockKeepsImportedDormancyForHistoricalDRepRegistration(t *testing.T
 		pparams,
 	))
 
-	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	drep, err := db.GetDrepByCredential(context.Background(), 0, drepCredential, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, drep)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
 	// The imported state already covers the gap, so replay neither resets the
 	// dormancy counter nor recomputes the recorded expiry.
-	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
+	dormantEpochs, err := db.GetDormantDRepEpochs(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(3), dormantEpochs)
 }
@@ -656,7 +654,7 @@ func TestProcessGapBlockTransactionsProcessesGovernanceAndDRepDeregistration(
 		},
 	}
 	drepCred := testGapHash28("drep-voter")
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag: 0,
 		Credential:    drepCred,
 		Active:        true,
@@ -734,7 +732,7 @@ func TestProcessGapBlockTransactionsProcessesGovernanceAndDRepDeregistration(
 	}
 
 	conwayPParams := testGapConwayProtocolParameters()
-	err = processGapBlockTransactions(
+	err = processGapBlockTransactions(context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
@@ -747,7 +745,7 @@ func TestProcessGapBlockTransactionsProcessesGovernanceAndDRepDeregistration(
 	)
 	require.NoError(t, err)
 
-	proposal, err := db.GetGovernanceProposal(
+	proposal, err := db.GetGovernanceProposal(context.Background(),
 		proposalTxHash.Bytes(),
 		0,
 		nil,
@@ -762,7 +760,7 @@ func TestProcessGapBlockTransactionsProcessesGovernanceAndDRepDeregistration(
 	assert.Equal(t, proposalProcedure.PPAnchor.Url, proposal.AnchorURL)
 	assert.Equal(t, proposalProcedure.PPAnchor.DataHash[:], proposal.AnchorHash)
 
-	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	// Gap blocks replay below the Mithril anchor, so the proposal is stored
 	// settled and DRep deregistration, which clears votes only on live
@@ -832,7 +830,7 @@ func TestProcessGapBlockTransactionsWithoutConwayParameters(t *testing.T) {
 			})
 			require.NoError(t, err)
 			defer dbtest.CloseDatabase(db)
-			require.NoError(t, db.CreateDrep(nil, &models.Drep{
+			require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 				CredentialTag: 0,
 				Credential:    drepCred,
 				Active:        true,
@@ -863,8 +861,7 @@ func TestProcessGapBlockTransactionsWithoutConwayParameters(t *testing.T) {
 				},
 				UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
 			}
-			err = processGapBlockTransactions(
-				db,
+			err = processGapBlockTransactions(context.Background(), db,
 				slog.New(slog.NewTextHandler(io.Discard, nil)),
 				point,
 				[]lcommon.Transaction{tx},
@@ -978,7 +975,7 @@ func TestProcessGapBlockTransactionsProcessesDijkstraSubtransactionGovernance(
 			DRepInactivityPeriod:    20,
 		},
 	}
-	require.NoError(t, processGapBlockTransactions(
+	require.NoError(t, processGapBlockTransactions(context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
@@ -990,10 +987,18 @@ func TestProcessGapBlockTransactionsProcessesDijkstraSubtransactionGovernance(
 		&pparams.ConwayProtocolParameters,
 	))
 
-	got, err := db.GetGovernanceProposal(childHash.Bytes(), 0, nil)
+	got, err := db.GetGovernanceProposal(context.Background(),
+		childHash.Bytes(),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, childHash.Bytes(), got.TxHash)
-	rootProposal, err := db.GetGovernanceProposal(rootHash.Bytes(), 0, nil)
+	rootProposal, err := db.GetGovernanceProposal(context.Background(),
+		rootHash.Bytes(),
+		0,
+		nil,
+	)
 	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
 	require.Nil(t, rootProposal)
 	childUtxo, err := db.Metadata().GetUtxo(childHash.Bytes(), 0, nil)
@@ -1018,7 +1023,7 @@ func TestProcessGapBlockTransactionsLeavesSnapshotBalanceForDirectDeposit(
 	defer dbtest.CloseDatabase(db)
 
 	stakeKey := testGapHash28("dijkstra-gap-deposit")
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey:    stakeKey,
 		CredentialTag: 0,
 		AddedSlot:     1,
@@ -1056,7 +1061,7 @@ func TestProcessGapBlockTransactionsLeavesSnapshotBalanceForDirectDeposit(
 		},
 	}
 	pparams := &dijkstra.DijkstraProtocolParameters{}
-	require.NoError(t, processGapBlockTransactions(
+	require.NoError(t, processGapBlockTransactions(context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
@@ -1067,7 +1072,7 @@ func TestProcessGapBlockTransactionsLeavesSnapshotBalanceForDirectDeposit(
 		pparams,
 		&pparams.ConwayProtocolParameters,
 	))
-	account, err := db.GetAccountByCredential(0, stakeKey, false, nil)
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(5), uint64(account.Reward))
 }
@@ -1205,7 +1210,7 @@ func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
 		require.NoError(t, db.BlockCreate(b, nil))
 	}
 
-	require.NoError(t, deleteBlobBlocksAboveSlotExcept(db, 150, nil))
+	require.NoError(t, deleteBlobBlocksAboveSlotExcept(context.Background(), db, 150, nil))
 
 	remaining, err := loadGapBlocksFromBlob(db, 0, 1000)
 	require.NoError(t, err)
@@ -1213,7 +1218,7 @@ func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
 	assert.Equal(t, uint64(100), remaining[0].Slot)
 
 	// Idempotent re-run is a no-op.
-	require.NoError(t, deleteBlobBlocksAboveSlotExcept(db, 150, nil))
+	require.NoError(t, deleteBlobBlocksAboveSlotExcept(context.Background(), db, 150, nil))
 	remaining, err = loadGapBlocksFromBlob(db, 0, 1000)
 	require.NoError(t, err)
 	require.Len(t, remaining, 1)
@@ -1255,7 +1260,7 @@ func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
 		require.NoError(t, db.BlockCreate(b, nil))
 	}
 
-	require.NoError(t, deleteBlobBlocksAboveSlotExcept(db, 200, nil))
+	require.NoError(t, deleteBlobBlocksAboveSlotExcept(context.Background(), db, 200, nil))
 
 	remaining, err := loadGapBlocksFromBlob(db, 0, 1000)
 	require.NoError(t, err)
@@ -1263,7 +1268,7 @@ func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
 	assert.Equal(t, uint64(100), remaining[0].Slot)
 	assert.Equal(t, uint64(200), remaining[1].Slot)
 
-	recent, err := database.BlocksRecent(db, 1)
+	recent, err := database.BlocksRecent(context.Background(), db, 1)
 	require.NoError(t, err)
 	require.Len(t, recent, 1)
 	assert.Equal(t, uint64(200), recent[0].Slot)
@@ -1295,11 +1300,12 @@ func TestCleanupInvalidRepairGapBeforeImport(t *testing.T) {
 		Type:     1,
 	}, nil))
 	staleTxID := testGapHash32("stale-gap-output")
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId: staleTxID, AddedSlot: 150,
 	}))
 
 	cleaned, err := cleanupInvalidRepairStoredGapBeforeImport(
+		context.Background(),
 		db,
 		ocommon.NewPoint(100, immutableHash),
 		&preparedLedgerStateImport{state: &ledgerstate.RawLedgerState{
@@ -1313,19 +1319,19 @@ func TestCleanupInvalidRepairGapBeforeImport(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.True(t, cleaned)
-	_, err = database.BlockByHash(db, staleGapHash)
+	_, err = database.BlockByHash(context.Background(), db, staleGapHash)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
-	exists, err := db.UtxoExists(staleTxID, 0, nil)
+	exists, err := db.UtxoExists(context.Background(), staleTxID, 0, nil)
 	require.NoError(t, err)
 	require.False(t, exists)
 
 	// Even a linked partial prefix cannot be tied to a signed state it does
 	// not reach. Importing that state after cleanup leaves its UTxOs intact.
 	snapshotTxID := testGapHash32("signed-snapshot-output")
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId: snapshotTxID, AddedSlot: 200,
 	}))
-	exists, err = db.UtxoExists(snapshotTxID, 0, nil)
+	exists, err = db.UtxoExists(context.Background(), snapshotTxID, 0, nil)
 	require.NoError(t, err)
 	require.True(t, exists)
 }
@@ -1417,7 +1423,7 @@ func TestProcessGapBlockVoteKeepsSnapshotDRepExpiry(t *testing.T) {
 	defer dbtest.CloseDatabase(db)
 
 	drepCred := testGapHash28("gap-drep")
-	importTxn := db.MetadataTxn(true)
+	importTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, importTxn.Do(func(txn *database.Txn) error {
 		return db.Metadata().ImportDrep(
 			&models.Drep{
@@ -1435,7 +1441,7 @@ func TestProcessGapBlockVoteKeepsSnapshotDRepExpiry(t *testing.T) {
 		)
 	}))
 	proposalTxHash := testGapHash32("gap-proposal")
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        proposalTxHash,
 		ActionType:    uint8(lcommon.GovActionTypeInfo),
 		ProposedEpoch: 509,
@@ -1480,7 +1486,7 @@ func TestProcessGapBlockVoteKeepsSnapshotDRepExpiry(t *testing.T) {
 		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
 	}
 	conwayPParams := testGapConwayProtocolParameters()
-	require.NoError(t, processGapBlockTransactions(
+	require.NoError(t, processGapBlockTransactions(context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
@@ -1492,7 +1498,7 @@ func TestProcessGapBlockVoteKeepsSnapshotDRepExpiry(t *testing.T) {
 		conwayPParams,
 	))
 
-	drep, err := db.GetDrep(drepCred, true, nil)
+	drep, err := db.GetDrep(context.Background(), drepCred, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, drep)
 	assert.Equal(t, uint64(533), drep.ExpiryEpoch)
@@ -1546,7 +1552,7 @@ func TestProcessGapBlockProposalsSettleWhatTheSnapshotDoesNotHold(
 	}
 	liveTx := proposalTx("gap-live-proposal")
 	settledTx := proposalTx("gap-settled-proposal")
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        liveTx.hash.Bytes(),
 		ActionType:    uint8(lcommon.GovActionTypeInfo),
 		ProposedEpoch: 100,
@@ -1575,7 +1581,7 @@ func TestProcessGapBlockProposalsSettleWhatTheSnapshotDoesNotHold(
 		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
 	}
 	conwayPParams := testGapConwayProtocolParameters()
-	require.NoError(t, processGapBlockTransactions(
+	require.NoError(t, processGapBlockTransactions(context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
@@ -1587,15 +1593,15 @@ func TestProcessGapBlockProposalsSettleWhatTheSnapshotDoesNotHold(
 		conwayPParams,
 	))
 
-	active, err := db.GetActiveGovernanceProposals(101, nil)
+	active, err := db.GetActiveGovernanceProposals(context.Background(), 101, nil)
 	require.NoError(t, err)
 	require.Len(t, active, 1)
 	assert.Equal(t, liveTx.hash.Bytes(), active[0].TxHash)
-	expiring, err := db.GetExpiringGovernanceProposals(121, nil)
+	expiring, err := db.GetExpiringGovernanceProposals(context.Background(), 121, nil)
 	require.NoError(t, err)
 	require.Len(t, expiring, 1)
 	assert.Equal(t, liveTx.hash.Bytes(), expiring[0].TxHash)
-	settled, err := db.GetGovernanceProposal(settledTx.hash.Bytes(), 0, nil)
+	settled, err := db.GetGovernanceProposal(context.Background(), settledTx.hash.Bytes(), 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, settled.ExpiredEpoch)
 	require.NotNil(t, settled.DroppedEpoch)

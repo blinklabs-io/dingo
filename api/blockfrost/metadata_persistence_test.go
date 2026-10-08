@@ -43,7 +43,7 @@ func TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders(t *testing.T) {
 		StorageMode: types.StorageModeAPI,
 	})
 	require.NoError(t, err)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -99,6 +99,7 @@ func TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders(t *testing.T) {
 		tx, err := txBuilder.Build()
 		require.NoError(t, err)
 		require.NoError(t, db.SetTransactionMetadataOnly(
+			t.Context(),
 			tx,
 			ocommon.Point{
 				Slot: uint64(100 + i),

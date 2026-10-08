@@ -299,7 +299,7 @@ func TestMCPPromptsCapabilities(t *testing.T) {
 	deps := ProviderDependencies{
 		Network: "preview",
 	}
-	server, _, err := NewMCPServer(cfg, deps)
+	server, _, err := NewMCPServer(t.Context(), cfg, deps)
 	require.NoError(t, err)
 
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
@@ -432,6 +432,7 @@ VALUES (zeroblob(32), X'182A', 123);`)
 	require.NoError(t, err)
 
 	server, _, err := NewMCPServer(
+		t.Context(),
 		DefaultProviderConfig(),
 		ProviderDependencies{SQLDB: db},
 	)

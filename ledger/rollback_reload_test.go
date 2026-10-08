@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -69,6 +70,7 @@ func TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit(
 
 	base := ls.db
 	failing, err := database.New(
+		context.Background(),
 		base.Config(),
 		database.Stores{
 			Blob: base.Blob(),
@@ -90,6 +92,7 @@ func TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit(
 	}
 
 	rbErr := ls.rollbackWithBlocksAndIntent(
+		context.Background(),
 		fixture.ancestorTip.Point,
 		nil,
 		false,
@@ -145,6 +148,7 @@ func TestRollbackWithResyncSucceedsWithoutFatalWhenReloadWorks(t *testing.T) {
 	}
 
 	rbErr := ls.rollbackWithBlocksAndIntent(
+		context.Background(),
 		fixture.ancestorTip.Point,
 		nil,
 		false,
@@ -171,6 +175,7 @@ func TestRollbackWithResyncFailsFastWhenDurableFloorReadFails(
 	floorErr := errors.New("injected durable tip floor failure")
 	base := ls.db
 	failing, err := database.New(
+		context.Background(),
 		base.Config(),
 		database.Stores{
 			Blob: base.Blob(),
@@ -189,7 +194,12 @@ func TestRollbackWithResyncFailsFastWhenDurableFloorReadFails(
 		fatalErrs = append(fatalErrs, err)
 	}
 
-	rbErr := ls.rollbackWithBlocks(fixture.ancestorTip.Point, nil, false)
+	rbErr := ls.rollbackWithBlocks(
+		context.Background(),
+		fixture.ancestorTip.Point,
+		nil,
+		false,
+	)
 
 	var committedErr *rollbackCommittedError
 	require.ErrorAs(t, rbErr, &committedErr)
@@ -365,6 +375,7 @@ func TestRollbackWithResyncFailsFastOnEachPostCommitReloadFailure(
 			ls := fixture.ls
 			base := ls.db
 			wrapped, err := database.New(
+				context.Background(),
 				base.Config(),
 				database.Stores{
 					Blob:     base.Blob(),
@@ -381,6 +392,7 @@ func TestRollbackWithResyncFailsFastOnEachPostCommitReloadFailure(
 			}
 
 			rbErr := ls.rollbackWithBlocksAndIntent(
+				context.Background(),
 				fixture.ancestorTip.Point,
 				nil,
 				false,

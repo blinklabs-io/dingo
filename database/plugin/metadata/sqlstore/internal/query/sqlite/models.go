@@ -123,16 +123,38 @@ type Drep struct {
 	Active            sql.NullBool
 }
 
+type DrepDelegator struct {
+	ID                 int64
+	DrepCredentialTag  int64
+	DrepCredential     []byte
+	StakeCredentialTag int64
+	StakeCredential    []byte
+	AddedSlot          int64
+	RemovedSlot        sql.NullInt64
+}
+
+type DrepDormancyHistory struct {
+	ID                    int64
+	AddedSlot             int64
+	PreviousDormantEpochs int64
+}
+
+type DrepDormancyState struct {
+	ID            int64
+	DormantEpochs int64
+}
+
 type DrepExpiryEpochEvent struct {
 	AddedSlot int64
 }
 
 type DrepExpiryHistory struct {
-	CredentialTag             int64
-	Credential                []byte
-	AddedSlot                 int64
-	PreviousExpiryEpoch       int64
-	PreviousLastActivityEpoch int64
+	ID                int64
+	CredentialTag     int64
+	Credential        []byte
+	AddedSlot         int64
+	LastActivityEpoch int64
+	ExpiryEpoch       int64
 }
 
 type Epoch struct {

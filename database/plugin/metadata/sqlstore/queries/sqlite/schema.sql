@@ -486,18 +486,6 @@ CREATE TABLE drep (
     UNIQUE (credential_tag, credential)
 );
 
-CREATE TABLE drep_expiry_history (
-    credential_tag INTEGER NOT NULL,
-    credential BLOB NOT NULL,
-    added_slot INTEGER NOT NULL,
-    previous_expiry_epoch INTEGER NOT NULL,
-    previous_last_activity_epoch INTEGER NOT NULL,
-    PRIMARY KEY (credential_tag, credential, added_slot)
-);
-
-CREATE INDEX idx_drep_expiry_history_slot
-    ON drep_expiry_history (added_slot);
-
 CREATE TABLE drep_expiry_epoch_event (
     added_slot INTEGER PRIMARY KEY
 );
@@ -558,3 +546,39 @@ CREATE TABLE IF NOT EXISTS `leios_transaction_context` (
 );
 CREATE INDEX IF NOT EXISTS `idx_leios_transaction_context_slot`
     ON `leios_transaction_context`(`slot`);
+CREATE TABLE IF NOT EXISTS `drep_expiry_history` (
+    `id` integer PRIMARY KEY AUTOINCREMENT,
+    `credential_tag` integer NOT NULL,
+    `credential` blob NOT NULL,
+    `added_slot` integer NOT NULL,
+    `last_activity_epoch` integer NOT NULL,
+    `expiry_epoch` integer NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS `idx_drep_expiry_history_credential_slot`
+    ON `drep_expiry_history`(`credential_tag`,`credential`,`added_slot`);
+CREATE INDEX IF NOT EXISTS `idx_drep_expiry_history_added_slot`
+    ON `drep_expiry_history`(`added_slot`);
+CREATE TABLE IF NOT EXISTS `drep_dormancy_state` (
+    `id` integer PRIMARY KEY CHECK (`id` = 1),
+    `dormant_epochs` integer NOT NULL
+);
+CREATE TABLE IF NOT EXISTS `drep_dormancy_history` (
+    `id` integer PRIMARY KEY AUTOINCREMENT,
+    `added_slot` integer NOT NULL,
+    `previous_dormant_epochs` integer NOT NULL
+);
+CREATE INDEX IF NOT EXISTS `idx_drep_dormancy_history_slot`
+    ON `drep_dormancy_history`(`added_slot`);
+CREATE TABLE IF NOT EXISTS `drep_delegator` (
+    `id` integer PRIMARY KEY AUTOINCREMENT,
+    `drep_credential_tag` integer NOT NULL,
+    `drep_credential` blob NOT NULL,
+    `stake_credential_tag` integer NOT NULL,
+    `stake_credential` blob NOT NULL,
+    `added_slot` integer NOT NULL,
+    `removed_slot` integer
+);
+CREATE INDEX IF NOT EXISTS `idx_drep_delegator_active`
+    ON `drep_delegator`(`drep_credential_tag`,`drep_credential`,`removed_slot`);
+CREATE INDEX IF NOT EXISTS `idx_drep_delegator_rollback`
+    ON `drep_delegator`(`added_slot`,`removed_slot`);

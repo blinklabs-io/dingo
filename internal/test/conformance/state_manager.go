@@ -18,6 +18,7 @@
 package conformance
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -396,7 +397,7 @@ func (m *DingoStateManager) LoadInitialState(
 	maps.Copy(m.stakeDeposits, state.StakeCredentialDeposits)
 	m.syncRewardBalanceMirrors()
 
-	txn := m.db.Transaction(true)
+	txn := m.db.Transaction(context.Background(), true)
 	defer txn.Release()
 
 	// A vector's initial-state registration has no registration certificate
@@ -439,6 +440,7 @@ func (m *DingoStateManager) LoadInitialState(
 			continue
 		}
 		if err := m.db.ImportPool(
+			context.Background(),
 			txn,
 			&models.Pool{PoolKeyHash: hash[:]},
 			&models.PoolRegistration{PoolKeyHash: hash[:]},
@@ -536,7 +538,7 @@ func (m *DingoStateManager) LoadInitialState(
 				TermStartSlotSet: true,
 			})
 		}
-		if err := m.db.SetCommitteeMembers(members, txn); err != nil {
+		if err := m.db.SetCommitteeMembers(context.Background(), members, txn); err != nil {
 			return fmt.Errorf("seed committee members: %w", err)
 		}
 	}
@@ -571,7 +573,7 @@ func (m *DingoStateManager) LoadInitialState(
 
 	for id, proposal := range state.Proposals {
 		govProposal := m.proposalToModel(id, proposal)
-		if err := m.db.SetGovernanceProposal(&govProposal, txn); err != nil {
+		if err := m.db.SetGovernanceProposal(context.Background(), &govProposal, txn); err != nil {
 			return fmt.Errorf("seed governance proposal: %w", err)
 		}
 	}
@@ -706,6 +708,7 @@ func (m *DingoStateManager) seedAuthCommitteeHot(
 		return fmt.Errorf("resolve protocol major: %w", err)
 	}
 	if err := m.db.SetTransactionMetadataOnly(
+		context.Background(),
 		tx, point, 0, map[int]uint64{}, txn, protocolMajor,
 	); err != nil {
 		return fmt.Errorf("seed auth committee hot: %w", err)
@@ -801,7 +804,7 @@ func (m *DingoStateManager) createUtxo(
 	if err != nil {
 		return fmt.Errorf("convert utxo to model: %w", err)
 	}
-	if err := m.db.CreateUtxo(txn, &utxoModel); err != nil {
+	if err := m.db.CreateUtxo(context.Background(), txn, &utxoModel); err != nil {
 		return fmt.Errorf("create utxo metadata: %w", err)
 	}
 	// The transaction's own store, so the handle and the store it is used
@@ -842,7 +845,7 @@ func (m *DingoStateManager) spendUtxos(
 	if len(refs) == 0 {
 		return nil
 	}
-	return m.db.MarkUtxosDeletedAtSlot(txn, refs, slot)
+	return m.db.MarkUtxosDeletedAtSlot(context.Background(), txn, refs, slot)
 }
 
 // certDepositsFor builds the per-certificate-index deposit map
@@ -921,7 +924,7 @@ func (m *DingoStateManager) ApplyTransaction(
 	idx := m.nextBlockIndex(slot)
 	m.appliedSlotMax = max(m.appliedSlotMax, slot)
 
-	txn := m.db.Transaction(true)
+	txn := m.db.Transaction(context.Background(), true)
 	defer txn.Release()
 
 	if !tx.IsValid() {
@@ -969,6 +972,7 @@ func (m *DingoStateManager) ApplyTransaction(
 	for levelIndex, level := range levels {
 		storageIndex := idx + uint32(levelIndex) //nolint:gosec
 		if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+			context.Background(),
 			level,
 			point,
 			m.db,
@@ -1000,6 +1004,7 @@ func (m *DingoStateManager) ApplyTransaction(
 			}
 		}
 		if err := m.db.SetTransactionMetadataOnly(
+			context.Background(),
 			level,
 			point,
 			storageIndex,
@@ -1026,6 +1031,7 @@ func (m *DingoStateManager) ApplyTransaction(
 		}
 		directDepositEffects[levelIndex] = effects
 		if err := dledger.ApplyDijkstraDirectDeposits(
+			context.Background(),
 			m.db,
 			level,
 			slot,
@@ -1039,6 +1045,7 @@ func (m *DingoStateManager) ApplyTransaction(
 		}
 
 		if err := governance.ProcessTransactionEffects(
+			context.Background(),
 			level,
 			point,
 			storageIndex,
@@ -1461,7 +1468,7 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 
 	boundarySlot := newEpoch * conformanceSlotsPerEpoch
 
-	txn := m.db.Transaction(true)
+	txn := m.db.Transaction(context.Background(), true)
 	defer txn.Release()
 
 	// Phase 1: enact proposals that were ratified in previous epochs.
@@ -1828,6 +1835,7 @@ func (m *DingoStateManager) credentialVotingStake(
 ) (uint64, error) {
 	tag := conformanceCredentialTag(credential.AsCredential())
 	utxoStake, err := m.db.GetControlledAmountByCredential(
+		context.Background(),
 		tag, credential.Credential[:], txn,
 	)
 	if err != nil {
@@ -2032,7 +2040,7 @@ func (m *DingoStateManager) persistRatification(
 	ratifiedSlot := boundarySlot
 	proposal.RatifiedEpoch = &ratifiedEpoch
 	proposal.RatifiedSlot = &ratifiedSlot
-	return m.db.SetGovernanceProposal(proposal, txn)
+	return m.db.SetGovernanceProposal(context.Background(), proposal, txn)
 }
 
 // enactProposal applies a ratified proposal's effects to the pre-validation
@@ -2122,7 +2130,7 @@ func (m *DingoStateManager) persistEnactment(
 	if skipSideEffect {
 		enactedEpoch := m.currentEpoch
 		dbProposal.EnactedEpoch = &enactedEpoch
-		return m.db.SetGovernanceProposal(dbProposal, txn)
+		return m.db.SetGovernanceProposal(context.Background(), dbProposal, txn)
 	}
 
 	conwayPP := stateManagerConwayProtocolParameters(m.protocolParams)
@@ -2136,7 +2144,7 @@ func (m *DingoStateManager) persistEnactment(
 	if dijkstraPP, ok := m.protocolParams.(*dijkstra.DijkstraProtocolParameters); ok {
 		enactmentPP = dijkstraPP
 	}
-	result, err := governance.EnactProposal(&governance.EnactmentContext{
+	result, err := governance.EnactProposal(context.Background(), &governance.EnactmentContext{
 		DB:                 m.db,
 		Txn:                txn,
 		Epoch:              m.currentEpoch,
@@ -2178,7 +2186,7 @@ func (m *DingoStateManager) expireGovernanceProposal(
 	expiredSlot := newEpoch * conformanceSlotsPerEpoch
 	dbProposal.ExpiredEpoch = &expiredEpoch
 	dbProposal.ExpiredSlot = &expiredSlot
-	return m.db.SetGovernanceProposal(dbProposal, txn)
+	return m.db.SetGovernanceProposal(context.Background(), dbProposal, txn)
 }
 
 // lookupGovernanceProposal fetches the real governance_proposal row for a
@@ -2194,7 +2202,12 @@ func (m *DingoStateManager) lookupGovernanceProposal(
 ) (*models.GovernanceProposal, error) {
 	txHash := parseProposalTxHash(id)
 	actionIdx := parseProposalActionIdx(id)
-	proposal, err := m.db.GetGovernanceProposal(txHash, actionIdx, txn)
+	proposal, err := m.db.GetGovernanceProposal(
+		context.Background(),
+		txHash,
+		actionIdx,
+		txn,
+	)
 	if errors.Is(err, models.ErrGovernanceProposalNotFound) {
 		return nil, nil
 	}

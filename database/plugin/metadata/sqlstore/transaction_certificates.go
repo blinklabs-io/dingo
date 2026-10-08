@@ -965,6 +965,7 @@ INSERT INTO pool_registration_owner (
 		}
 	}
 	for _, relay := range cert.Relays {
+		relayType := relay.Type
 		var port uint
 		var hostname string
 		if relay.Port != nil {
@@ -975,10 +976,11 @@ INSERT INTO pool_registration_owner (
 		}
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO pool_registration_relay (
-    ipv4, ipv6, hostname, pool_registration_id, pool_id, port
-) VALUES (?, ?, ?, ?, ?, ?)`,
+    ipv4, ipv6, relay_type, hostname, pool_registration_id, pool_id, port
+) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			netIPValue(relay.Ipv4),
 			netIPValue(relay.Ipv6),
+			&relayType,
 			hostname,
 			registrationID,
 			poolID,

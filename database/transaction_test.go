@@ -229,6 +229,7 @@ func TestSetTransactionMetadataOnlyRecordsCertificatesWithoutUtxos(
 		Hash: bytes.Repeat([]byte{0x24}, lcommon.Blake2b256Size),
 	}
 	require.NoError(t, db.SetTransactionMetadataOnly(
+		context.Background(),
 		tx,
 		point,
 		7,
@@ -600,7 +601,7 @@ func TestDeleteTxBlobsUsesCallerBlobTxn(t *testing.T) {
 			),
 		),
 	}
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 
 	txHashes := [][]byte{{0x01}, {0x02}, {0x03}}
 	require.NoError(t, deleteTxBlobs(db, txHashes, txn))
@@ -716,7 +717,10 @@ func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(
 	)
 	require.NoError(t, err)
 
-	require.NoError(t, db.TransactionsDeleteRolledback(100, nil))
+	require.NoError(
+		t,
+		db.TransactionsDeleteRolledback(context.Background(), 100, nil),
+	)
 
 	var count int64
 	require.NoError(t, raw.QueryRow(
@@ -780,7 +784,7 @@ VALUES (?, ?, ?, ?)`,
 	)
 	require.NoError(t, err)
 
-	require.NoError(t, db.UtxosDeleteRolledback(100, nil))
+	require.NoError(t, db.UtxosDeleteRolledback(context.Background(), 100, nil))
 
 	var count int64
 	require.NoError(t, raw.QueryRow(`
@@ -822,7 +826,7 @@ func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(
 	require.NoError(t, err)
 	store.utxoData[fmt.Sprintf("%x:%d", txId, 0)] = rawOutput
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 
 	_, err = db.recoverConsumedUtxo(
@@ -858,7 +862,7 @@ func TestRecoveredProducerOnPrimaryChain(t *testing.T) {
 
 	create := func(slot uint64, hash []byte) {
 		t.Helper()
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(itxn *Txn) error {
 			return db.BlockCreate(models.Block{
 				ID:       height,
@@ -876,7 +880,7 @@ func TestRecoveredProducerOnPrimaryChain(t *testing.T) {
 	// has already loaded the producer), so the check is by ID and hash.
 	check := func(producerID uint64, hash []byte) bool {
 		t.Helper()
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		defer txn.Release()
 		onChain, cErr := db.recoveredProducerOnPrimaryChain(
 			txn, producerID, hash,
@@ -931,7 +935,7 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 	// rows to exist so the consumer's recovery has a real FK target.
 	for _, p := range candidate.producers {
 		storeBlockOffsetsOnly(t, db, p.block)
-		metaTxn := db.MetadataTxn(true)
+		metaTxn := db.MetadataTxn(context.Background(), true)
 		producer := p
 		require.NoError(
 			t,
@@ -977,7 +981,7 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 			Idx:  input.Index(),
 		})
 	}
-	metaTxn := db.MetadataTxn(true)
+	metaTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(
 		t,
 		metaTxn.Do(func(txn *Txn) error {
@@ -1006,6 +1010,7 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 	require.NoError(
 		t,
 		db.SetTransaction(
+			context.Background(),
 			candidate.consumerTx,
 			candidate.consumerPoint,
 			0,
@@ -1054,7 +1059,7 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 	// Stronger end-to-end check: rollback past the consumer slot and
 	// confirm the producer Transaction's preloaded Outputs include
 	// each reanimated row.
-	rollbackTxn := db.MetadataTxn(true)
+	rollbackTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(
 		t,
 		rollbackTxn.Do(func(txn *Txn) error {
@@ -1065,7 +1070,7 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 		}),
 	)
 	rollbackTxn.Release()
-	rollbackTxn = db.MetadataTxn(true)
+	rollbackTxn = db.MetadataTxn(context.Background(), true)
 	require.NoError(
 		t,
 		rollbackTxn.Do(func(txn *Txn) error {
@@ -1135,7 +1140,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 
 		for _, p := range candidate.producers {
 			storeBlockOffsetsOnly(t, db, p.block)
-			metaTxn := db.MetadataTxn(true)
+			metaTxn := db.MetadataTxn(context.Background(), true)
 			producer := p
 			require.NoError(t, metaTxn.Do(func(txn *Txn) error {
 				return db.Metadata().SetGapBlockTransaction(
@@ -1157,7 +1162,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 				Idx:  input.Index(),
 			})
 		}
-		metaTxn := db.MetadataTxn(true)
+		metaTxn := db.MetadataTxn(context.Background(), true)
 		require.NoError(t, metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().DeleteUtxos(refs, txn.Metadata())
 		}))
@@ -1168,6 +1173,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 	setConsumer := func(t *testing.T, db *Database, opts BatchedTxIngestOpts) error {
 		t.Helper()
 		return db.SetTransactionWithOpts(
+			context.Background(),
 			candidate.consumerTx,
 			candidate.consumerPoint,
 			0,
@@ -1238,7 +1244,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 		t.Cleanup(func() { _ = db.Close() })
 		for _, p := range candidate.producers {
 			storeBlockOffsetsOnly(t, db, p.block)
-			metaTxn := db.MetadataTxn(true)
+			metaTxn := db.MetadataTxn(context.Background(), true)
 			producer := p
 			require.NoError(t, metaTxn.Do(func(txn *Txn) error {
 				return db.Metadata().SetGapBlockTransaction(
@@ -1259,7 +1265,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 				Idx:  input.Index(),
 			})
 		}
-		metaTxn := db.MetadataTxn(true)
+		metaTxn := db.MetadataTxn(context.Background(), true)
 		require.NoError(t, metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().DeleteUtxos(refs, txn.Metadata())
 		}))
@@ -1303,6 +1309,7 @@ func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 	setTransaction := func(t *testing.T, db *Database) error {
 		t.Helper()
 		return db.SetTransaction(
+			context.Background(),
 			candidate.consumerTx,
 			candidate.consumerPoint,
 			0,
@@ -1382,7 +1389,7 @@ func TestRecoverConsumedUtxoRefusesOffPrimaryChainProducer(t *testing.T) {
 
 	createBlock := func(hash []byte, slot uint64) {
 		t.Helper()
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(itxn *Txn) error {
 			return db.BlockCreate(models.Block{
 				ID:       producerID,
@@ -1417,7 +1424,7 @@ func TestRecoverConsumedUtxoRefusesOffPrimaryChainProducer(t *testing.T) {
 
 	recover := func(enforcePrimaryChain bool) error {
 		t.Helper()
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		defer txn.Release()
 		_, rErr := db.recoverConsumedUtxo(
 			dbtestutil.NewMockInput(txId, 0), txn, enforcePrimaryChain,
@@ -1473,7 +1480,7 @@ func TestDeleteUtxoBlobsUsesCallerBlobTxn(t *testing.T) {
 			),
 		),
 	}
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 
 	utxos := []models.Utxo{
 		{TxId: []byte{0x01}, OutputIdx: 0},

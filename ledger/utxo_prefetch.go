@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"context"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -26,6 +28,7 @@ import (
 // query. Rows that fail to decode are left out so the point lookup in
 // LedgerView.UtxoById reports the error as before. A failed batch yields nil.
 func (ls *LedgerState) prefetchBlockUtxos(
+	ctx context.Context,
 	txn *database.Txn,
 	txs []lcommon.Transaction,
 ) map[utxoref.Key]lcommon.Utxo {
@@ -62,7 +65,7 @@ func (ls *LedgerState) prefetchBlockUtxos(
 		return nil
 	}
 	ls.utxoBatchLookups.Add(1)
-	rows, err := ls.db.UtxosByRefs(refs, txn)
+	rows, err := ls.db.UtxosByRefs(ctx, refs, txn)
 	if err != nil {
 		// Prefetching is an optimization: a failed batch must not reject a
 		// block whose validators may never read the failing ref. The same

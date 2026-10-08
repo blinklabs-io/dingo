@@ -265,9 +265,13 @@ func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	return blob.DeleteBlock(blobTxn, block.Slot, block.Hash, block.ID)
 }
 
-func BlockByPoint(db *Database, point ocommon.Point) (models.Block, error) {
+func BlockByPoint(
+	ctx context.Context,
+	db *Database,
+	point ocommon.Point,
+) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockByPointTxn(txn, point)
@@ -345,6 +349,73 @@ func BlockMetadataByPointLocalTxn(
 		)
 	}
 	return metadata, nil
+}
+
+// ErrAncestorMissing reports that a block's parent cannot be resolved from the
+// local store, so the chain behind it cannot be followed. It deliberately does
+// not wrap models.ErrBlockNotFound: callers treat that as "no such block on
+// the chain", which a broken link does not establish.
+var ErrAncestorMissing = errors.New("ancestor block missing from local store")
+
+// BlockParentPointTxn returns the point of the block that point extends, read
+// from point's retained metadata and the hash index without loading either
+// block body. Following it from a block walks that block's own chain, which a
+// lookup by slot cannot do: the blob store keeps blocks rollback abandoned, so
+// the highest block below a slot may belong to another fork.
+//
+// ok is false when point is the first block this store holds: its metadata
+// names no parent, or names one the store never held and nothing lies below
+// it (a chain's first block names the genesis hash). Any other unresolvable
+// link is ErrAncestorMissing.
+func BlockParentPointTxn(
+	txn *Txn,
+	point ocommon.Point,
+) (parent ocommon.Point, ok bool, err error) {
+	metadata, err := BlockMetadataByPointLocalTxn(txn, point)
+	if err != nil {
+		return ocommon.Point{}, false, fmt.Errorf(
+			"%w: block at slot %d hash %x: %s",
+			ErrAncestorMissing, point.Slot, point.Hash, err.Error(),
+		)
+	}
+	if len(metadata.PrevHash) == 0 {
+		return ocommon.Point{}, false, nil
+	}
+	key, err := txn.BlobStore().Get(
+		txn.Blob(), types.BlockHashIndexKey(metadata.PrevHash),
+	)
+	if err != nil {
+		if !errors.Is(err, types.ErrBlobKeyNotFound) {
+			return ocommon.Point{}, false, err
+		}
+		if _, belowErr := BlockBeforeSlotTxn(txn, point.Slot); errors.Is(
+			belowErr, models.ErrBlockNotFound,
+		) {
+			return ocommon.Point{}, false, nil
+		} else if belowErr != nil {
+			return ocommon.Point{}, false, belowErr
+		}
+		return ocommon.Point{}, false, fmt.Errorf(
+			"%w: parent %x of block at slot %d is not indexed",
+			ErrAncestorMissing, metadata.PrevHash, point.Slot,
+		)
+	}
+	slot, hash, err := types.ParseBlockBlobKey(key)
+	if err != nil {
+		return ocommon.Point{}, false, fmt.Errorf(
+			"parent of block at slot %d: %w", point.Slot, err,
+		)
+	}
+	// A parent at or above its child is corruption, and following it would
+	// loop rather than walk back.
+	if !bytes.Equal(hash, metadata.PrevHash) || slot >= point.Slot {
+		return ocommon.Point{}, false, fmt.Errorf(
+			"hash index entry for %x names slot %d hash %x, "+
+				"not a parent of the block at slot %d",
+			metadata.PrevHash, slot, hash, point.Slot,
+		)
+	}
+	return ocommon.Point{Slot: slot, Hash: hash}, true, nil
 }
 
 // BlockPointBySlotTxn returns the canonical point at slot without loading
@@ -586,9 +657,13 @@ func canonicalPointForID(txn *Txn, point ocommon.Point, id uint64) (bool, error)
 	return indexed.Slot == point.Slot && bytes.Equal(indexed.Hash, point.Hash), nil
 }
 
-func BlockByHash(db *Database, hash []byte) (models.Block, error) {
+func BlockByHash(
+	ctx context.Context,
+	db *Database,
+	hash []byte,
+) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockByHashTxn(txn, hash)
@@ -597,9 +672,13 @@ func BlockByHash(db *Database, hash []byte) (models.Block, error) {
 	return ret, err
 }
 
-func BlockBySlot(db *Database, slot uint64) (models.Block, error) {
+func BlockBySlot(
+	ctx context.Context,
+	db *Database,
+	slot uint64,
+) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockBySlotTxn(txn, slot)
@@ -640,9 +719,12 @@ type BlockNumberBound struct {
 // ResolveBlockNumberBound reads the highest indexed block to bound a
 // block-number search. See BlockNumberBound for why the result is worth
 // carrying across lookups.
-func ResolveBlockNumberBound(db *Database) (BlockNumberBound, error) {
+func ResolveBlockNumberBound(
+	ctx context.Context,
+	db *Database,
+) (BlockNumberBound, error) {
 	var ret BlockNumberBound
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = ResolveBlockNumberBoundTxn(txn)
@@ -735,9 +817,13 @@ func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
 // search rather than calling this: a truncate target must not resolve past
 // the persisted tip, while a read should serve any block the blob store
 // actually holds.
-func BlockByNumber(db *Database, number uint64) (models.Block, error) {
+func BlockByNumber(
+	ctx context.Context,
+	db *Database,
+	number uint64,
+) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockByNumberTxn(txn, number)
@@ -761,12 +847,13 @@ func BlockByNumberTxn(txn *Txn, number uint64) (models.Block, error) {
 // bound, so a batch of numbers costs one ResolveBlockNumberBound rather
 // than one per number.
 func BlockByNumberBounded(
+	ctx context.Context,
 	db *Database,
 	number uint64,
 	bound BlockNumberBound,
 ) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockByNumberBoundedTxn(txn, number, bound)
@@ -1294,9 +1381,13 @@ func (d *Database) BlockAtOrAfterIndex(
 	return models.Block{}, models.ErrBlockNotFound
 }
 
-func BlocksRecent(db *Database, count int) ([]models.Block, error) {
+func BlocksRecent(
+	ctx context.Context,
+	db *Database,
+	count int,
+) ([]models.Block, error) {
 	var ret []models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlocksRecentTxn(txn, count)
@@ -1362,9 +1453,13 @@ func BlocksRecentTxn(txn *Txn, count int) ([]models.Block, error) {
 	return ret, nil
 }
 
-func BlockBeforeSlot(db *Database, slotNumber uint64) (models.Block, error) {
+func BlockBeforeSlot(
+	ctx context.Context,
+	db *Database,
+	slotNumber uint64,
+) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
 		ret, err = BlockBeforeSlotTxn(txn, slotNumber)

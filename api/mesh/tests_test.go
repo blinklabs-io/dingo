@@ -857,7 +857,7 @@ type fakeDatabase struct {
 	txsByBlockHash func(hash []byte) ([]models.Transaction, error)
 }
 
-func (f *fakeDatabase) BlockByHash(
+func (f *fakeDatabase) BlockByHash(ctx context.Context,
 	hash []byte,
 ) (models.Block, error) {
 	if f.blockByHash == nil {
@@ -866,7 +866,7 @@ func (f *fakeDatabase) BlockByHash(
 	return f.blockByHash(hash)
 }
 
-func (f *fakeDatabase) BlockByIndex(
+func (f *fakeDatabase) BlockByIndex(ctx context.Context,
 	idx uint64,
 ) (models.Block, error) {
 	if f.blockByIndex == nil {
@@ -875,7 +875,7 @@ func (f *fakeDatabase) BlockByIndex(
 	return f.blockByIndex(idx)
 }
 
-func (f *fakeDatabase) GetTransactionByHash(
+func (f *fakeDatabase) GetTransactionByHash(ctx context.Context,
 	hash []byte,
 ) (*models.Transaction, error) {
 	if f.txByHash == nil {
@@ -884,7 +884,7 @@ func (f *fakeDatabase) GetTransactionByHash(
 	return f.txByHash(hash)
 }
 
-func (f *fakeDatabase) GetTransactionsByBlockHash(
+func (f *fakeDatabase) GetTransactionsByBlockHash(ctx context.Context,
 	hash []byte,
 ) ([]models.Transaction, error) {
 	if f.txsByBlockHash == nil {

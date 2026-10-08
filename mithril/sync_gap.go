@@ -284,10 +284,12 @@ func fetchGapBlocksFromPeer(
 // hashes are preserved for replay. It drops derived metadata above slot and
 // restores UTxOs spent by removed blocks.
 func deleteBlobBlocksAboveSlotExcept(
+	ctx context.Context,
 	db *database.Database,
 	slot uint64,
 	preserved map[string]struct{},
 ) error {
+	ctx = context.WithoutCancel(ctx)
 	if slot == ^uint64(0) {
 		return nil
 	}
@@ -317,7 +319,7 @@ func deleteBlobBlocksAboveSlotExcept(
 	if len(stale) == 0 && len(preserved) == 0 {
 		return nil
 	}
-	txn := db.Transaction(true)
+	txn := db.Transaction(ctx, true)
 	return txn.Do(func(txn *database.Txn) error {
 		for _, p := range stale {
 			block, err := database.BlockByPointTxn(txn, p)
@@ -341,25 +343,26 @@ func deleteBlobBlocksAboveSlotExcept(
 		// the refetched chain would inherit stale UTxO consumption,
 		// duplicate tx records, and orphan governance proposals/votes
 		// from the previous run's gap-block processing.
-		if err := db.UtxosDeleteRolledback(slot, txn); err != nil {
+		if err := db.UtxosDeleteRolledback(ctx, slot, txn); err != nil {
 			return fmt.Errorf(
 				"delete rolled-back UTxOs above slot %d: %w",
 				slot, err,
 			)
 		}
-		if err := db.TransactionsDeleteRolledback(slot, txn); err != nil {
+		if err := db.TransactionsDeleteRolledback(ctx, slot, txn); err != nil {
 			return fmt.Errorf(
 				"delete rolled-back transactions above slot %d: %w",
 				slot, err,
 			)
 		}
-		if err := db.UtxosUnspend(slot, txn); err != nil {
+		if err := db.UtxosUnspend(ctx, slot, txn); err != nil {
 			return fmt.Errorf(
 				"restore UTxOs spent above slot %d: %w",
 				slot, err,
 			)
 		}
 		if err := db.DeleteGovernanceVotesAfterSlot(
+			ctx,
 			slot, txn,
 		); err != nil {
 			return fmt.Errorf(
@@ -368,6 +371,7 @@ func deleteBlobBlocksAboveSlotExcept(
 			)
 		}
 		if err := db.DeleteGovernanceProposalsAfterSlot(
+			ctx,
 			slot, txn,
 		); err != nil {
 			return fmt.Errorf(
@@ -608,6 +612,7 @@ func processGapBlocks(
 			}
 		}
 		if err := processGapBlockTransactions(
+			ctx,
 			db,
 			logger,
 			point,
@@ -634,6 +639,7 @@ func processGapBlocks(
 }
 
 func processGapBlockTransactions(
+	ctx context.Context,
 	db *database.Database,
 	logger *slog.Logger,
 	point ocommon.Point,
@@ -644,7 +650,7 @@ func processGapBlockTransactions(
 	pparams lcommon.ProtocolParameters,
 	conwayPParams *conway.ConwayProtocolParameters,
 ) error {
-	txn := db.Transaction(true)
+	txn := db.Transaction(ctx, true)
 	defer txn.Release()
 	var storageIndexOffset uint64
 	for i, tx := range txs {
@@ -668,6 +674,7 @@ func processGapBlockTransactions(
 		}
 		for levelIndex, level := range levels {
 			if err := db.SetGapBlockTransaction(
+				ctx,
 				level,
 				point,
 				uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec
@@ -699,6 +706,7 @@ func processGapBlockTransactions(
 				govActionLifetime = conwayPParams.GovActionValidityPeriod
 			}
 			if err := governance.ProcessHistoricalTransactionEffects(
+				ctx,
 				level,
 				point,
 				uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec

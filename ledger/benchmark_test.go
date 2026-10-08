@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -345,7 +346,7 @@ func seedFixtureTransactions(
 	window := fixtureBlockWindow(b, immDb, startSlot, blockCount)
 	records := seededLedgerRecords{}
 	certDeposits := map[int]uint64{}
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	err := txn.Do(func(t *database.Txn) error {
 		for _, entry := range window {
@@ -356,7 +357,7 @@ func seedFixtureTransactions(
 				if keep != nil && !keep(tx) {
 					continue
 				}
-				if err := db.SetTransactionMetadataOnly(
+				if err := db.SetTransactionMetadataOnly(context.Background(),
 					tx,
 					entry.point,
 					// #nosec G115 -- transaction index within a block
@@ -410,7 +411,7 @@ func seedFixtureUtxos(
 	window := fixtureBlockWindow(b, immDb, startSlot, blockCount)
 	seeded := make([]models.Utxo, 0, maxUtxos)
 	addrs := make([]ledger.Address, 0, maxUtxos)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	err := txn.Do(func(t *database.Txn) error {
 		for _, entry := range window {
@@ -426,7 +427,7 @@ func seedFixtureUtxos(
 					if err != nil {
 						return err
 					}
-					if err := db.CreateUtxo(t, &model); err != nil {
+					if err := db.CreateUtxo(context.Background(), t, &model); err != nil {
 						return err
 					}
 					if err := db.Blob().SetUtxo(
@@ -465,7 +466,7 @@ func seedFixtureDatums(
 	b.Helper()
 	window := fixtureBlockWindow(b, immDb, startSlot, blockCount)
 	var hashes []lcommon.Blake2b256
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	err := txn.Do(func(t *database.Txn) error {
 		for _, entry := range window {
@@ -867,7 +868,7 @@ func BenchmarkUtxoLookupByAddressNoData(b *testing.B) {
 
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
-		_, err := db.UtxosByAddress(
+		_, err := db.UtxosByAddress(context.Background(),
 			[]ledger.Address{testAddr},
 			database.MaxUtxosByAddressResults,
 			nil,
@@ -902,7 +903,7 @@ func BenchmarkUtxoLookupByAddressRealData(b *testing.B) {
 	// measures the miss path publishes its NoData twin's figure under
 	// another name.
 	for _, addr := range addrs {
-		found, err := db.UtxosByAddress(
+		found, err := db.UtxosByAddress(context.Background(),
 			[]ledger.Address{addr},
 			database.MaxUtxosByAddressResults,
 			nil,
@@ -918,7 +919,7 @@ func BenchmarkUtxoLookupByAddressRealData(b *testing.B) {
 
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
-		if _, err := db.UtxosByAddress(
+		if _, err := db.UtxosByAddress(context.Background(),
 			[]ledger.Address{addrs[i%len(addrs)]},
 			database.MaxUtxosByAddressResults,
 			nil,
@@ -955,7 +956,7 @@ func BenchmarkUtxoLookupByRefNoData(b *testing.B) {
 	for b.Loop() {
 		// UtxoByRef returns nil, ErrUtxoNotFound for missing UTxOs
 		// This is expected and not an error for benchmarking
-		_, err := db.UtxoByRef(testTxId, testOutputIdx, nil)
+		_, err := db.UtxoByRef(context.Background(), testTxId, testOutputIdx, nil)
 		if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
 			b.Fatalf("unexpected error: %v", err)
 		}
@@ -984,7 +985,7 @@ func BenchmarkUtxoLookupByRefRealData(b *testing.B) {
 
 	// Confirm the query hits before timing it
 	for _, utxo := range seeded {
-		if _, err := db.UtxoByRef(utxo.TxId, utxo.OutputIdx, nil); err != nil {
+		if _, err := db.UtxoByRef(context.Background(), utxo.TxId, utxo.OutputIdx, nil); err != nil {
 			b.Fatalf(
 				"seeded UTxO %x#%d is not readable: %v",
 				utxo.TxId,
@@ -1000,7 +1001,7 @@ func BenchmarkUtxoLookupByRefRealData(b *testing.B) {
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
 		utxo := seeded[i%len(seeded)]
-		if _, err := db.UtxoByRef(utxo.TxId, utxo.OutputIdx, nil); err != nil {
+		if _, err := db.UtxoByRef(context.Background(), utxo.TxId, utxo.OutputIdx, nil); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -1866,7 +1867,7 @@ func BenchmarkEraTransitionPerformanceRealData(b *testing.B) {
 	points := fixtureEraTransitionPoints(b, immDb)
 	seeded := seedBlocksAtPoints(b, db, immDb, points)
 	for _, point := range points {
-		stored, err := database.BlockByPoint(db, point)
+		stored, err := database.BlockByPoint(context.Background(), db, point)
 		if err != nil {
 			b.Fatalf("read seeded block at slot %d: %v", point.Slot, err)
 		}
@@ -1877,7 +1878,7 @@ func BenchmarkEraTransitionPerformanceRealData(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		for _, point := range points {
-			stored, err := database.BlockByPoint(db, point)
+			stored, err := database.BlockByPoint(context.Background(), db, point)
 			if err != nil {
 				b.Fatalf("read block at slot %d: %v", point.Slot, err)
 			}
@@ -2273,7 +2274,7 @@ func BenchmarkTransactionValidation(b *testing.B) {
 	defer dbtest.CloseDatabase(db)
 
 	// Create chain manager
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -2394,7 +2395,7 @@ func BenchmarkBlockProcessingThroughput(b *testing.B) {
 		txn := db.BlobTxn(true)
 
 		// Add block to chain (this includes transaction validation and state updates)
-		if err := ledgerState.Chain().AddBlock(ledgerBlock, txn); err != nil {
+		if err := ledgerState.Chain().AddBlock(context.Background(), ledgerBlock, txn); err != nil {
 			_ = txn.Rollback()
 			b.Fatalf("AddBlock failed: %v", err)
 		}
@@ -2644,7 +2645,7 @@ func BenchmarkBlockfetchNearTipQueuedHeaderPredecoded(b *testing.B) {
 		point := points[blockIdx]
 		blockIdx++
 
-		if err := ledgerState.chain.AddBlockHeader(block.Header()); err != nil {
+		if err := ledgerState.chain.AddBlockHeader(context.Background(), block.Header()); err != nil {
 			b.Fatalf("AddBlockHeader failed: %v", err)
 		}
 
@@ -2764,7 +2765,7 @@ func BenchmarkBlockfetchVerifiedHeaderDispatch(b *testing.B) {
 	}
 	b.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -2788,7 +2789,7 @@ func BenchmarkBlockfetchVerifiedHeaderDispatch(b *testing.B) {
 	ledgerState.epochCache = []models.Epoch{epoch}
 	ledgerState.publishSnapshotsLocked()
 
-	if err := ledgerState.chain.AddBlockHeader(testBlock.block.Header()); err != nil {
+	if err := ledgerState.chain.AddBlockHeader(context.Background(), testBlock.block.Header()); err != nil {
 		b.Fatalf("seed header queue: %v", err)
 	}
 
@@ -2858,7 +2859,7 @@ func BenchmarkBlockProcessingThroughputPredecoded(b *testing.B) {
 		blockIdx++
 		txn := db.BlobTxn(true)
 
-		if err := ledgerState.Chain().AddBlock(block, txn); err != nil {
+		if err := ledgerState.Chain().AddBlock(context.Background(), block, txn); err != nil {
 			_ = txn.Rollback()
 			b.Fatalf("AddBlock failed: %v", err)
 		}
@@ -2886,7 +2887,7 @@ func BenchmarkBlockBatchProcessingThroughput(b *testing.B) {
 		b.StopTimer()
 		db, ledgerState := newBatchBenchmarkLedgerState(b, seedModels)
 		b.StartTimer()
-		if err := ledgerState.Chain().AddBlocks(batchBlocks); err != nil {
+		if err := ledgerState.Chain().AddBlocks(context.Background(), batchBlocks); err != nil {
 			_ = dbtest.CloseDatabase(db)
 			b.Fatal(err)
 		}
@@ -2914,7 +2915,7 @@ func BenchmarkRawBlockBatchProcessingThroughput(b *testing.B) {
 		b.StopTimer()
 		db, ledgerState := newBatchBenchmarkLedgerState(b, seedModels)
 		b.StartTimer()
-		if err := ledgerState.Chain().AddRawBlocks(rawBlocks); err != nil {
+		if err := ledgerState.Chain().AddRawBlocks(context.Background(), rawBlocks); err != nil {
 			_ = dbtest.CloseDatabase(db)
 			b.Fatal(err)
 		}
@@ -3147,7 +3148,7 @@ func newBatchBenchmarkLedgerState(
 			b.Fatalf("seed batch benchmark block: %v", err)
 		}
 	}
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	if err != nil {
 		_ = dbtest.CloseDatabase(db)
 		b.Fatal(err)
@@ -3188,7 +3189,7 @@ func newBlockProcessingBenchmarkLedgerState(
 			b.Fatalf("seed block processing benchmark block: %v", err)
 		}
 	}
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	if err != nil {
 		_ = dbtest.CloseDatabase(db)
 		b.Fatal(err)
@@ -3233,13 +3234,13 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 		b.Fatalf("seeded %d blocks; concurrent query benchmark requires 10", seeded)
 	}
 	seededUtxos, addresses := seedFixtureUtxos(b, db, immDb, 0, 100, 256)
-	addressRows, err := db.UtxosByAddress(
+	addressRows, err := db.UtxosByAddress(context.Background(),
 		addresses[:1], database.MaxUtxosByAddressResults, nil,
 	)
 	if err != nil || len(addressRows) == 0 {
 		b.Fatalf("preflight address query returned %d rows: %v", len(addressRows), err)
 	}
-	refRow, err := db.UtxoByRef(
+	refRow, err := db.UtxoByRef(context.Background(),
 		seededUtxos[0].TxId,
 		seededUtxos[0].OutputIdx,
 		nil,
@@ -3285,7 +3286,7 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 
 			switch queryType {
 			case "utxo_address":
-				res, err := db.UtxosByAddress(
+				res, err := db.UtxosByAddress(context.Background(),
 					[]ledger.Address{addresses[workerID%len(addresses)]},
 					database.MaxUtxosByAddressResults,
 					nil,
@@ -3299,7 +3300,7 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 
 			case "utxo_ref":
 				ref := seededUtxos[workerID%len(seededUtxos)]
-				res, err := db.UtxoByRef(ref.TxId, ref.OutputIdx, nil)
+				res, err := db.UtxoByRef(context.Background(), ref.TxId, ref.OutputIdx, nil)
 				if err != nil || res == nil {
 					recordQueryError(
 						fmt.Errorf("reference query returned %v: %v", res, err),
@@ -3383,13 +3384,13 @@ func storageModeBenchmarkCanIngestBlock(
 			for _, input := range inputs {
 				var err error
 				if includeSpent {
-					_, err = db.UtxoByRefIncludingSpent(
+					_, err = db.UtxoByRefIncludingSpent(context.Background(),
 						input.Id().Bytes(),
 						input.Index(),
 						nil,
 					)
 				} else {
-					_, err = db.UtxoByRef(input.Id().Bytes(), input.Index(), nil)
+					_, err = db.UtxoByRef(context.Background(), input.Id().Bytes(), input.Index(), nil)
 				}
 				if err == nil {
 					continue
@@ -3569,7 +3570,7 @@ func ingestStorageModeBenchmarkBlocks(
 	db *database.Database,
 	blocks []storageModeBenchmarkBlock,
 ) (int, error) {
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Rollback() //nolint:errcheck
 
 	totalTxs := 0
@@ -3580,7 +3581,7 @@ func ingestStorageModeBenchmarkBlocks(
 			)
 		}
 		for txIdx, txData := range blockData.transactions {
-			if err := db.SetTransaction(
+			if err := db.SetTransaction(context.Background(),
 				txData.tx,
 				blockData.point,
 				uint32(txIdx),
@@ -3700,7 +3701,7 @@ func BenchmarkStorageModeIngestSteadyState(b *testing.B) {
 			totalBlocks := 0
 			totalTxs := 0
 			for b.Loop() {
-				txn := db.Transaction(true)
+				txn := db.Transaction(context.Background(), true)
 				if txn == nil {
 					b.Fatal("nil transaction")
 				}
@@ -3712,7 +3713,7 @@ func BenchmarkStorageModeIngestSteadyState(b *testing.B) {
 						b.Fatal(err)
 					}
 					for txIdx, txData := range blockData.transactions {
-						if err := db.SetTransaction(
+						if err := db.SetTransaction(context.Background(),
 							txData.tx,
 							blockData.point,
 							uint32(txIdx),
