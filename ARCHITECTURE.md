@@ -527,7 +527,7 @@ sequenceDiagram
     LS->>LS: update UTXO set, process certs & governance
     LS->>LS: compute epoch nonce contributions
     LS->>LS: at an era boundary, enact source-era pparams before hard-fork transitions
-    LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block
+    LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block, never ahead of a configured TriggerAtEpoch
     LS->>LS: on a two-era boundary, defer the mark-snapshot capture until the final era and pparams are persisted
 
     Note over Peer,DB: Stage 4 — Persistence
@@ -3859,7 +3859,15 @@ CIP-1694 `HardForkInitiation` governance action, post-voting-deadline only).
 Each era's `NextEraTrigger` kind is exactly one of `TriggerAtEpoch`,
 `TriggerAtVersion`, or `TriggerNotDuringThisExecution` (the final configured
 era), so `evaluateTriggerAtEpoch` and `evaluateProtocolVersionBump` never
-compete for the same era. The classic update-proposal system has a voting
+compete for the same era. `eras.BuildShape` resolves `TriggerAtEpoch` through
+`CardanoNodeConfig.HardForkEpoch`, which, like cardano-node's
+`parseHardForkProtocol`, honours `TestShelleyHardForkAtEpoch` through
+`TestConwayHardForkAtEpoch` whatever `ExperimentalHardForksEnabled` says and
+reads `TestDijkstraHardForkAtEpoch` only when that flag is true. The same
+trigger bounds `boundaryEraForBlock`'s two-era elevation: a boundary block's
+header protocol major is cardano-node's advertised `cardanoProtocolVersion`
+(11, or 12 with the flag), not its era, so it cannot carry the ledger into a
+successor whose configured epoch has not arrived. The classic update-proposal system has a voting
 deadline too: a proposal for the next epoch can be submitted or superseded
 only before `2 * stabilityWindow` before that epoch starts (the Shelley PPUP
 rule). `evaluateProtocolVersionBump` therefore reports the transition only
@@ -5660,6 +5668,35 @@ benchmarking, and documentation-only ranges such as RFC 5737 TEST-NET and
 RFC 3849 `2001:db8::/32`. Operator-configured topology peers intentionally
 retain their separate exemption for private addresses, and an already
 established inbound peer is not reclassified by this admission check.
+
+Hot and warm selection targets govern outbound peers only. Inbound peers are
+not counted toward, and are never removed by, the `TargetNumberOfActivePeers`
+and `TargetNumberOfEstablishedPeers` limits; only inbound-specific policy
+(connection and per-IP limits, idle/flap pruning, `InboundWarmTarget`,
+`InboundHotQuota`) closes them. Warm inbound peers beyond `InboundWarmTarget`
+are removed in `enforcePeerLimits`, least recently served first (then lowest
+score); hot inbound peers are bounded at promotion by `InboundHotQuota`. The governor owns hot promotion: starting a
+chainsync client calls `SetPeerHotByConnId`, which leaves the peer warm when
+promotion would exceed the active target, its per-source quota, or the inbound
+hot budget (local roots are exempt). Reconcile promotes it later.
+Reconcile's hot refill counts outbound hot peers only, and an inbound peer it
+promotes does not use up an outbound refill slot, so inbound hot peers never
+occupy outbound refill slots.
+
+Inbound idle pruning treats a peer as idle only when it is quiet in both
+directions. `Peer.LastServedActivity` records downstream consumption: chainsync
+server FindIntersect/RequestNext/awaited-reply, blockfetch server RequestRange,
+and keepalive pings. FindIntersect counts only when an intersection is
+actually served, so rejected or unmatched requests cannot keep an idle peer.
+`ouroboros` reports it through `PeerGovernor.RecordServedActivityByConnId`,
+throttled to once per 10 seconds per connection (on the monotonic clock) so
+the per-header path never takes the governor lock. It is kept
+separate from `LastActivity`, which drives outbound hot and churn decisions.
+Flapping cooldown ignores served activity, but it judges the current session:
+a peer whose live inbound session has lasted past `minStableConnectionDuration`
+(30s) is not flapping, whatever its earlier short sessions were. Without that,
+a warm inbound peer that once reconnected twice in quick succession was cut
+from a stable session and its host was denied for the cooldown.
 
 Peer targets configured directly by Dingo through YAML, environment variables,
 or CLI flags take precedence over the corresponding Cardano configuration.
