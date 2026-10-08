@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -153,6 +154,7 @@ func TestProcessGapBlockTransactionsRejectsMalformedSubtransactionParameterChang
 				},
 			}
 			err = processGapBlockTransactions(
+				context.Background(),
 				db,
 				slog.New(slog.NewTextHandler(io.Discard, nil)),
 				point,
@@ -163,7 +165,9 @@ func TestProcessGapBlockTransactionsRejectsMalformedSubtransactionParameterChang
 				pparams,
 				&pparams.ConwayProtocolParameters,
 			)
-			got, getErr := db.GetGovernanceProposal(childHash.Bytes(), 0, nil)
+			got, getErr := db.GetGovernanceProposal(
+				context.Background(), childHash.Bytes(), 0, nil,
+			)
 			if tc.wantErr {
 				require.ErrorContains(t, err, "govActionDeposit")
 				require.ErrorIs(t, getErr, models.ErrGovernanceProposalNotFound)

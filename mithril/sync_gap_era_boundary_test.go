@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -125,9 +126,9 @@ func TestProcessGapBlockJudgesPreviousEraBlockByItsEraParameters(
 			// The gap path consumes the snapshot's live row for each input.
 			inputs := tx.Inputs()
 			require.Len(t, inputs, 1)
-			require.NoError(t, db.Transaction(true).Do(
+			require.NoError(t, db.Transaction(context.Background(), true).Do(
 				func(txn *database.Txn) error {
-					return db.CreateUtxo(txn, &models.Utxo{
+					return db.CreateUtxo(context.Background(), txn, &models.Utxo{
 						TxId:      inputs[0].Id().Bytes(),
 						OutputIdx: inputs[0].Index(),
 						AddedSlot: 1,
@@ -156,6 +157,7 @@ func TestProcessGapBlockJudgesPreviousEraBlockByItsEraParameters(
 				},
 			}
 			err = processGapBlockTransactions(
+				context.Background(),
 				db,
 				slog.New(slog.NewTextHandler(io.Discard, nil)),
 				point,
@@ -166,7 +168,9 @@ func TestProcessGapBlockJudgesPreviousEraBlockByItsEraParameters(
 				pparams,
 				conwayPParams,
 			)
-			got, getErr := db.GetGovernanceProposal(txHash[:], 0, nil)
+			got, getErr := db.GetGovernanceProposal(
+				context.Background(), txHash[:], 0, nil,
+			)
 			if test.wantErr != "" {
 				require.ErrorContains(t, err, test.wantErr)
 				require.ErrorIs(t, getErr, models.ErrGovernanceProposalNotFound)
