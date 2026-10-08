@@ -527,7 +527,7 @@ sequenceDiagram
     LS->>LS: update UTXO set, process certs & governance
     LS->>LS: compute epoch nonce contributions
     LS->>LS: at an era boundary, enact source-era pparams before hard-fork transitions
-    LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block
+    LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block, never ahead of a configured TriggerAtEpoch
     LS->>LS: on a two-era boundary, defer the mark-snapshot capture until the final era and pparams are persisted
 
     Note over Peer,DB: Stage 4 — Persistence
@@ -3859,7 +3859,15 @@ CIP-1694 `HardForkInitiation` governance action, post-voting-deadline only).
 Each era's `NextEraTrigger` kind is exactly one of `TriggerAtEpoch`,
 `TriggerAtVersion`, or `TriggerNotDuringThisExecution` (the final configured
 era), so `evaluateTriggerAtEpoch` and `evaluateProtocolVersionBump` never
-compete for the same era. The classic update-proposal system has a voting
+compete for the same era. `eras.BuildShape` resolves `TriggerAtEpoch` through
+`CardanoNodeConfig.HardForkEpoch`, which, like cardano-node's
+`parseHardForkProtocol`, honours `TestShelleyHardForkAtEpoch` through
+`TestConwayHardForkAtEpoch` whatever `ExperimentalHardForksEnabled` says and
+reads `TestDijkstraHardForkAtEpoch` only when that flag is true. The same
+trigger bounds `boundaryEraForBlock`'s two-era elevation: a boundary block's
+header protocol major is cardano-node's advertised `cardanoProtocolVersion`
+(11, or 12 with the flag), not its era, so it cannot carry the ledger into a
+successor whose configured epoch has not arrived. The classic update-proposal system has a voting
 deadline too: a proposal for the next epoch can be submitted or superseded
 only before `2 * stabilityWindow` before that epoch starts (the Shelley PPUP
 rule). `evaluateProtocolVersionBump` therefore reports the transition only
