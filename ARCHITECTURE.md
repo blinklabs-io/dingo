@@ -4887,11 +4887,73 @@ corroborated and becomes that connection's own reference, like a known peer's
 previous frontier: its next update is accepted within `securityParam` of its
 claim even when the corroborating frontier sits up to `securityParam` below
 it, and the entry is cleared once the connection is accepted.
-A lone far peer therefore stays rejected, and two connections delivering
-frontiers more than `securityParam` apart do not corroborate each other. The
-check counts connections, not operators, so it is not a Sybil defence;
-acceptance only admits the frontier to chain selection, and the ledger still
-verifies every applied header, completing deferred verification at apply time.
+A lone far peer is also accepted, on its own connected header chain. The
+selector requires more than `securityParam` consecutive delivered headers from
+the connection (`farTipClaim.run`), each naming the previous header's hash as
+its parent (`PeerTipUpdateEvent.ObservedPrevHash`, filled from the header by the
+ChainSync roll-forward handler), exactly one block and a later slot above it,
+with a block number no higher than the local block number plus `securityParam`
+plus the slot distance from the local tip (a chain holds at most one block per
+slot). A Byron epoch boundary block is the one header that adds no block: it
+carries its parent's block number, a later slot, and the epoch's first ordinary
+block may share its slot. The selector sees only the header type the peer sent
+(`PeerTipUpdateEvent.ObservedBoundary`), not an era, so it accepts a boundary
+block only after an ordinary header, at its parent's block number and a later
+slot, and counts it neither as progress nor as a break; two in a row, or one
+with any other block number, break the chain. A boundary-typed header therefore
+never adds height and cannot be repeated to stall a run or to dodge revocation.
+A repeated header neither advances nor resets the run; a regression, a skipped
+block, a different parent, a non-increasing slot or a delivery with no parent
+hash restarts it. Two connections delivering frontiers more than
+`securityParam` apart do not corroborate each other.
+
+The accepted connection keeps its `farTipClaims` entry marked `lone`. A marked
+frontier is excluded from the reference frontier used to admit a new peer; if
+no independently admitted frontier remains, the local tip is the reference.
+The lone peer therefore cannot indirectly admit an unrelated peer, which would
+otherwise retain ordinary standing after the lone frontier was revoked. While
+its frontier stays beyond the catch-up allowance, every delivery must continue
+the frontier it last delivered by the same rules, or the peer is removed from
+the selector (`loneFrontierBrokenLocked`, then `RemovePeer`) and has to build a
+new run from nothing. After a RollBackward to a point inside the retained `k+1`
+delivered-header history, where the block number is known, the next header must
+continue that point's block number by one. A rollback
+to any other point leaves the block number unknown (zero), and an unknown
+height continues nothing: the next delivery, whatever it names and whether
+or not it is within the catch-up allowance, removes the peer, so a peer-chosen
+rollback point cannot carry an accepted frontier or a run to another height.
+The `lone` mark is cleared without removal only when the last delivered height
+is known and both it and the new delivery are within the allowance. The
+boundary-block allowance is not restored by a
+rollback: a rollback to a boundary block followed by a block sharing its slot
+also removes the peer. Removal also happens when the connection closes, which is
+what a header-verification failure at ledger apply ends in: the ledger recycles
+the connection and `ConnectionClosedEvent` calls `RemovePeer`. The selector
+holds this state in memory only, so no persisted state depends on a lone
+frontier.
+
+This is not verification. A header this far ahead of local ledger state has
+passed no signature check: epoch resolution defers before the opcert or KES
+signature, VRF proof or leader-eligibility checks run, and a peer signing with
+its own keys would pass the signature checks that need no ledger state. A lone
+peer can therefore fabricate a connected chain of more than `securityParam`
+headers with a claimed height up to the slot-distance bound and become a
+selectable peer ahead of honest ones. What bounds it: the claimed height is
+capped by the slot distance rather than arbitrary; every later delivery must
+continue the chain or the peer is removed; the ledger verifies every applied
+header, completing deferred verification at apply time, and recycles a
+connection whose header fails; and nothing is persisted from the selector. The
+cost to honest sync is time spent following that peer until the ledger reaches
+the first header that fails. The lone run accepts only a subset of what the
+peer's own previous frontier already allows once it is tracked (each header at
+most `securityParam` above the last): it adds the connected-chain requirement
+to a bound the selector applies to every known peer, and removes the peer when
+that requirement stops holding. The check counts connections, not operators, so
+corroboration is not a Sybil defence; acceptance only admits the frontier to
+chain selection. A rejection log line is still emitted for every header of an
+unaccepted far connection, and for a new peer whose reference sits above the
+local tip, which this path does not touch, so the line volume is not removed.
+
 Genesis exit may consult the advertised slot only through the separately
 documented delivered-frontier gate below. A RollBackward restores the
 delivered frontier from a bounded `k+1` header history; if the point is no longer retained, the
