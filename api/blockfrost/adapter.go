@@ -3694,6 +3694,7 @@ func utxoDatumAndScriptRef(
 // AddressTransactions returns paginated transaction
 // history for the requested address.
 func (a *NodeAdapter) AddressTransactions(
+	ctx context.Context,
 	address string,
 	params TransactionRangeParams,
 ) ([]AddressTransactionInfo, int, error) {
@@ -3708,7 +3709,7 @@ func (a *NodeAdapter) AddressTransactions(
 	}
 
 	from, fromSatisfiable, err := a.resolveBlockRangeBound(
-		context.Background(), params.From, true,
+		ctx, params.From, true,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3720,7 +3721,7 @@ func (a *NodeAdapter) AddressTransactions(
 		return []AddressTransactionInfo{}, 0, nil
 	}
 	to, toSatisfiable, err := a.resolveBlockRangeBound(
-		context.Background(), params.To, false,
+		ctx, params.To, false,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3732,7 +3733,13 @@ func (a *NodeAdapter) AddressTransactions(
 		return []AddressTransactionInfo{}, 0, nil
 	}
 
-	total, err := a.ledgerState.CountTransactionsByAddress(addr, from, to)
+	total, err := a.ledgerState.Database().CountTransactionsByAddress(
+		ctx,
+		addr,
+		from,
+		to,
+		nil,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count address transactions for %q: %w",
@@ -3741,13 +3748,15 @@ func (a *NodeAdapter) AddressTransactions(
 		)
 	}
 
-	txs, err := a.ledgerState.GetTransactionsByAddressWithOrder(
+	txs, err := a.ledgerState.Database().GetTransactionsByAddressWithOrder(
+		ctx,
 		addr,
 		params.Pagination.Count,
 		(params.Pagination.Page-1)*params.Pagination.Count,
 		params.Pagination.Order,
 		from,
 		to,
+		nil,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3763,10 +3772,7 @@ func (a *NodeAdapter) AddressTransactions(
 		blockHashKey := hex.EncodeToString(tx.BlockHash)
 		blockHeight, ok := blockNumbers[blockHashKey]
 		if !ok {
-			block, err := a.ledgerState.BlockByHash(
-				context.Background(),
-				tx.BlockHash,
-			)
+			block, err := a.ledgerState.BlockByHash(ctx, tx.BlockHash)
 			if err != nil {
 				return nil, 0, fmt.Errorf(
 					"get block for transaction %x: %w",

@@ -100,6 +100,7 @@ type BlockfrostNode interface {
 	// inclusive from/to block-range position, along with the total
 	// number of matching results before pagination.
 	AddressTransactions(
+		ctx context.Context,
 		address string,
 		params TransactionRangeParams,
 	) ([]AddressTransactionInfo, int, error)

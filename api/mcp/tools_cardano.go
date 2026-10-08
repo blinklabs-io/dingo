@@ -2334,10 +2334,9 @@ type evaluationResult struct {
 	redeemers map[lcommon.RedeemerKey]lcommon.ExUnits
 }
 
-// evaluate receives ctx so that a canceled request stops the evaluator at its
-// next cancellation check. The gate is retained until evaluate returns, so a
-// canceled request cannot accumulate background evaluations while the
-// evaluator finishes the script it is running.
+// evaluate receives ctx so that cancellation stops the evaluator at its next
+// check, including during script execution. The gate is retained until evaluate
+// returns, preventing concurrent background evaluations.
 func runBoundedEvaluation(
 	ctx context.Context,
 	gate chan struct{},

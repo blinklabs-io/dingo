@@ -38,6 +38,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -827,6 +828,7 @@ func TestResolveBlockRangeUpperBoundInSparseChain(t *testing.T) {
 			Type: 0, Cbor: []byte{byte(block.height)},
 		}, nil))
 	}
+	require.NoError(t, db.SetTip(ochainsync.Tip{BlockNumber: 3}, nil))
 
 	bound, ok, err := adapter.resolveBlockRangeBound(
 		context.Background(), &BlockRangePosition{Block: 2}, false,
@@ -843,6 +845,95 @@ func TestResolveBlockRangeUpperBoundInSparseChain(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Nil(t, bound)
+}
+
+func TestAddressTransactionsApplyResolvedBoundsToCountAndPage(t *testing.T) {
+	t.Parallel()
+
+	nodeConfig, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		cardano.EmbeddedConfigPath("mainnet"),
+	)
+	require.NoError(t, err)
+	adapter, raw, db := newDBBackedAdapter(t, nodeConfig)
+	payment := bytes.Repeat([]byte{0x31}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	blocks := []struct {
+		height uint64
+		slot   uint64
+		hash   []byte
+		txHash []byte
+	}{
+		{height: 1, slot: 10, hash: fill32(0x41), txHash: fill32(0x51)},
+		{height: 3, slot: 30, hash: fill32(0x43), txHash: fill32(0x53)},
+	}
+	for i, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Hash: block.hash, Slot: block.slot, Number: block.height,
+			ID:   block.height + database.BlockInitialIndex,
+			Type: 0, Cbor: []byte{byte(block.height)},
+		}, nil))
+		// The association row below supplies the chain slot used for range
+		// filtering; slot zero keeps unrelated time conversion at genesis.
+		tx := &models.Transaction{
+			Hash: block.txHash, BlockHash: block.hash, Slot: 0,
+			BlockIndex: 0, Valid: true,
+			Outputs: []models.Utxo{{
+				TxId: block.txHash, OutputIdx: 0, PaymentKey: payment,
+				AddedSlot: block.slot, Amount: types.Uint64(1_000_000),
+			}},
+		}
+		insertAdapterTransaction(t, raw, tx)
+		storePointerOutputCbor(t, db, block.txHash, 0, addr, 1_000_000)
+		_, err := raw.Exec(`
+INSERT INTO address_transaction (
+    payment_key, staking_key, credential_tag, transaction_id, slot, tx_index
+) VALUES (?, NULL, 0, ?, ?, 0)`, payment, tx.ID, block.slot)
+		require.NoError(t, err)
+		if i == len(blocks)-1 {
+			require.NoError(t, db.SetTip(
+				ochainsync.Tip{BlockNumber: block.height}, nil,
+			))
+		}
+	}
+
+	rows, total, err := adapter.AddressTransactions(
+		context.Background(),
+		addr.String(),
+		TransactionRangeParams{
+			Pagination: PaginationParams{
+				Count: 10, Page: 1, Order: PaginationOrderAsc,
+			},
+			From: &BlockRangePosition{Block: 1},
+			To:   &BlockRangePosition{Block: 2},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, rows, 1)
+	assert.Equal(t, hex.EncodeToString(blocks[0].txHash), rows[0].TxHash)
+	assert.Equal(t, uint64(1), rows[0].BlockHeight)
+
+	rows, total, err = adapter.AddressTransactions(
+		context.Background(),
+		addr.String(),
+		TransactionRangeParams{
+			Pagination: PaginationParams{
+				Count: 10, Page: 1, Order: PaginationOrderAsc,
+			},
+			To: &BlockRangePosition{Block: 999},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	require.Len(t, rows, 2)
 }
 
 // TestNodeAdapterPoolMetadataOffchainStoreError guards the error path at the

@@ -379,7 +379,7 @@ pools, and the previous connection settings are restored afterward.
 
 `evaluate_tx` permits one evaluation at a time per MCP server. The request
 returns on cancellation or the configured timeout, and the ledger evaluator
-stops at its next cancellation check; a script already running completes first.
+stops at its next cancellation check, including while a script is running.
 The slot is held until the evaluator returns, so subsequent evaluations receive
 a busy error. Set `MCP_SSE_SURVIVAL_TEST=1` when running the MCP tests to
 include the 61-second SSE idle-survival regression.

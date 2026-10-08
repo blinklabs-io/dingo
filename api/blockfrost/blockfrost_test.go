@@ -1190,6 +1190,7 @@ func (m *mockNode) AddressUTXOs(ctx context.Context,
 }
 
 func (m *mockNode) AddressTransactions(
+	_ context.Context,
 	_ string,
 	params TransactionRangeParams,
 ) ([]AddressTransactionInfo, int, error) {

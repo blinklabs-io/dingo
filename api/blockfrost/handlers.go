@@ -1025,7 +1025,7 @@ func (b *Blockfrost) handleAddressTransactions(
 		return
 	}
 	address := r.PathValue("address")
-	txs, total, err := b.node.AddressTransactions(address, params)
+	txs, total, err := b.node.AddressTransactions(r.Context(), address, params)
 	if err != nil {
 		b.logger.Error(
 			"failed to get address transactions",

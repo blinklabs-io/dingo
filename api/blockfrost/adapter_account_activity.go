@@ -422,18 +422,35 @@ func (a *NodeAdapter) resolveBlockRangeBound(ctx context.Context,
 	if pos == nil {
 		return nil, true, nil
 	}
-	if pos.Block > math.MaxUint64-database.BlockInitialIndex {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
+	defer txn.Rollback() //nolint:errcheck
+
+	tip, err := db.GetTip(txn)
+	if err != nil {
+		return nil, false, fmt.Errorf("get chain tip for block range: %w", err)
+	}
+	blockNumber := pos.Block
+	exactRequest := true
+	if blockNumber > tip.BlockNumber {
 		if lower {
 			return nil, false, nil
 		}
-		return nil, true, nil
+		blockNumber = tip.BlockNumber
+		exactRequest = false
 	}
-	idx := pos.Block + database.BlockInitialIndex
+	if blockNumber > math.MaxUint64-database.BlockInitialIndex {
+		return nil, !lower, nil
+	}
+	idx := blockNumber + database.BlockInitialIndex
 
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
-	block, err := a.ledgerState.Database().BlockByIndex(idx, nil)
+	block, err := db.BlockByIndex(idx, txn)
 	if cancelErr := ctx.Err(); cancelErr != nil {
 		return nil, false, cancelErr
 	}
@@ -443,7 +460,7 @@ func (a *NodeAdapter) resolveBlockRangeBound(ctx context.Context,
 		if !lower {
 			txIndex = math.MaxUint32
 		}
-		if pos.Index != nil {
+		if pos.Index != nil && exactRequest {
 			txIndex = *pos.Index
 		}
 		return &models.AddressTransactionPosition{
@@ -452,7 +469,7 @@ func (a *NodeAdapter) resolveBlockRangeBound(ctx context.Context,
 		}, true, nil
 	case errors.Is(err, models.ErrBlockNotFound):
 		if !lower {
-			prev, prevErr := a.ledgerState.Database().BlockAtOrBeforeIndex(idx, nil)
+			prev, prevErr := db.BlockAtOrBeforeIndex(ctx, idx, txn)
 			if errors.Is(prevErr, models.ErrBlockNotFound) {
 				return nil, false, nil
 			}
@@ -461,7 +478,7 @@ func (a *NodeAdapter) resolveBlockRangeBound(ctx context.Context,
 			}
 			return &models.AddressTransactionPosition{Slot: prev.Slot, TxIndex: math.MaxUint32}, true, nil
 		}
-		next, err := a.ledgerState.Database().BlockAtOrAfterIndex(idx, nil)
+		next, err := db.BlockAtOrAfterIndex(idx, txn)
 		if err == nil {
 			return &models.AddressTransactionPosition{
 				Slot:    next.Slot,

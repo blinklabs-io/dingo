@@ -3670,12 +3670,12 @@ transaction the reference node rejects.
 
 Public Blockfrost and UTxO RPC evaluation passes the request context through
 `LedgerState.EvaluateTxContext` into the evaluation's `LedgerView`. Era
-evaluation checks cancellation before input reads and each redeemer, and after
-each script run, so abandoned requests stop further database and script work
+evaluation checks cancellation before input reads and each redeemer, and Plutigo
+checks each CEK step, so abandoned requests stop further database and script work
 and release their shared evaluation admission slot. The original `EvaluateTx`
 entry point uses a background context for internal callers that have no request
-lifetime. The current gouroboros script API does not accept a context, so an
-already-running CEK invocation completes before Dingo observes cancellation.
+lifetime. Plutigo checks that context at each CEK step, so cancellation stops an
+already-running script at its next evaluation step.
 
 Where Phase 2 does run, the Plutus script context (`TxInfo`) is constructed only for transactions that carry at least one redeemer (`txHasRedeemers`, `ledger/eras/validation.go`); `ValidateTxAlonzo`, `ValidateTxBabbage`, `EvaluateTxAlonzo`, `EvaluateTxBabbage`, and `EvaluateTxConway` skip the build for the rest. Redeemers are what drive Phase 2, so a transaction without any runs no Plutus script, and the context is not merely unused work for it: the context embeds the transaction's validity interval translated to wall-clock time, so building it converts the transaction's TTL through the bounded HFC forecast horizon (see "Header Forecast Horizon") and returns `hardfork.ErrPastHorizon` for a TTL past that horizon. A script-free transaction was therefore rejected during replay whenever its TTL reached past the current era's safe zone, and the tx-validation recovery path read that as inconsistent local ledger state. cardano-ledger performs the translation only while assembling the context for the Plutus scripts a transaction actually needs (`collectPlutusScriptsWithContext`). The horizon itself is unchanged: a transaction that does carry redeemers still translates its validity interval per redeemer language and still fails past the horizon, matching cardano-ledger's `TimeTranslationPastHorizon`.
 
@@ -9245,9 +9245,9 @@ and an exact 28-byte payload.
 `evaluate_tx` admits at most one ledger evaluation per MCP server and passes the
 request context, bounded by the configured query timeout, to
 `LedgerState.EvaluateTxContext`. Cancellation or the timeout releases the
-request at once; the ledger call stops at its next cancellation check, and only
-an already-running CEK invocation completes first. The admission slot is held
-until the ledger call returns, so further evaluations receive a busy error and
+request at once; the ledger call stops at its next cancellation check, including
+during CEK execution. The admission slot is held until the ledger call returns,
+so further evaluations receive a busy error and
 canceled requests cannot accumulate workers.
 Arbitrary SQLite queries borrow one connection, enable `query_only`, and apply
 SQLite size limits before execution. The original settings are restored before

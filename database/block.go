@@ -1382,62 +1382,65 @@ func (d *Database) BlockAtOrAfterIndex(
 }
 
 // BlockAtOrBeforeIndex returns the last indexed block at or before blockIndex.
-// It seeks the ordered index so gaps and stale mappings do not select raw
-// block blobs that are absent from the current chain index.
+// It binary-searches forward index seeks so object-store backends do not need
+// to enumerate the entire block index for a reverse seek.
 func (d *Database) BlockAtOrBeforeIndex(
+	ctx context.Context,
 	blockIndex uint64,
 	txn *Txn,
 ) (models.Block, error) {
 	if txn == nil {
-		txn = d.BlobTxn(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Rollback() //nolint:errcheck
 	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return models.Block{}, types.ErrNilTxn
-	}
-	blob := txn.BlobStore()
-	if blob == nil {
-		return models.Block{}, types.ErrBlobStoreUnavailable
-	}
-	prefix := []byte(types.BlockBlobIndexKeyPrefix)
-	it := blob.NewIterator(blobTxn, types.BlobIteratorOptions{
-		Reverse: true,
-		Prefix:  prefix,
-	})
-	if it == nil {
-		return models.Block{}, errors.New("blob iterator is nil")
-	}
-	defer it.Close()
-	for it.Seek(types.BlockBlobIndexKey(blockIndex)); it.ValidForPrefix(prefix); it.Next() {
-		item := it.Item()
-		if item == nil {
-			continue
-		}
-		indexKey := item.Key()
-		if indexKey == nil {
-			continue
-		}
-		blockKey, err := item.ValueCopy(nil)
-		if err != nil {
-			return models.Block{}, err
-		}
-		block, err := blockByKey(txn, blockKey)
-		if err != nil {
-			if errors.Is(err, models.ErrBlockNotFound) {
-				continue
-			}
-			return models.Block{}, err
-		}
-		if !bytes.Equal(indexKey, types.BlockBlobIndexKey(block.ID)) {
-			continue
-		}
-		return block, nil
-	}
-	if err := it.Err(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return models.Block{}, err
 	}
-	return models.Block{}, models.ErrBlockNotFound
+	block, err := d.BlockByIndex(blockIndex, txn)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return models.Block{}, ctxErr
+	}
+	if err == nil {
+		return block, nil
+	}
+	if !errors.Is(err, models.ErrBlockNotFound) {
+		return models.Block{}, err
+	}
+
+	low := BlockInitialIndex
+	high := blockIndex
+	found := false
+	var previous models.Block
+	for low <= high {
+		if err := ctx.Err(); err != nil {
+			return models.Block{}, err
+		}
+		mid := low + (high-low)/2
+		candidate, err := d.BlockAtOrAfterIndex(mid, txn)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return models.Block{}, ctxErr
+		}
+		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
+			return models.Block{}, err
+		}
+		if err == nil && candidate.ID <= blockIndex {
+			previous = candidate
+			found = true
+			if candidate.ID == blockIndex {
+				return candidate, nil
+			}
+			low = mid + 1
+			continue
+		}
+		if mid == 0 {
+			break
+		}
+		high = mid - 1
+	}
+	if !found {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	return previous, nil
 }
 
 func BlocksRecent(

@@ -736,12 +736,12 @@ func TestBlockAtOrBeforeIndexSkipsSparseAndInvalidMappings(t *testing.T) {
 			types.BlockBlobKey(20, bytes.Repeat([]byte{0x02}, 32)))
 	}))
 
-	block, err := db.BlockAtOrBeforeIndex(299, nil)
+	block, err := db.BlockAtOrBeforeIndex(context.Background(), 299, nil)
 	require.NoError(t, err)
 	require.Equal(t, first.ID, block.ID)
 	require.Equal(t, first.Hash, block.Hash)
 
-	_, err = db.BlockAtOrBeforeIndex(0, nil)
+	_, err = db.BlockAtOrBeforeIndex(context.Background(), 0, nil)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
