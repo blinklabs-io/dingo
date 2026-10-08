@@ -6717,7 +6717,7 @@ func TestRewardCalculationFixtureDrainsCompactionOnCleanup(t *testing.T) {
 		ls, _ = newRewardCalculationTestLedger(t)
 		ls.rewardPrecomputeWriteMu.Lock()
 		t.Cleanup(ls.rewardPrecomputeWriteMu.Unlock)
-		ls.queueRewardCreditCompaction()
+		ls.queueRewardCreditCompaction(t.Context())
 		ls.rewardPrecomputeMu.Lock()
 		compacting := ls.rewardCreditCompacting
 		ls.rewardPrecomputeMu.Unlock()
