@@ -805,9 +805,9 @@
 # Multi-client ChainSync (header synchronization) configuration
 # chainsync:
   # Maximum number of concurrent ChainSync client connections
-  # Default: 3
+  # Default: 0 (automatic: at least 3, and one per local-root access point)
   # CLI: --chainsync-max-clients  Env: DINGO_CHAINSYNC_MAX_CLIENTS
-  # maxClients: 3
+  # maxClients: 0
   # Duration with no activity after which a ChainSync client is
   # considered stalled and eligible for failover/recycling
   # Default: "2m"

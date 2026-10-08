@@ -1908,8 +1908,9 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 	}
 }
 
-// WithChainsyncMaxClients specifies the maximum number of
-// concurrent chainsync client connections. Default is 3.
+// WithChainsyncMaxClients specifies the maximum number of concurrent chainsync
+// client connections. Zero selects an automatic limit: at least 3 and large
+// enough for every configured local-root access point.
 func WithChainsyncMaxClients(
 	maxClients int,
 ) ConfigOptionFunc {

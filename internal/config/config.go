@@ -279,7 +279,8 @@ func midnightYAMLFieldSet(field string) bool {
 // subsystem.
 type ChainsyncConfig struct {
 	// MaxClients is the maximum number of concurrent chainsync client
-	// connections. Default: 3.
+	// connections. Zero selects an automatic limit: at least 3 and large enough
+	// for every configured local-root access point.
 	MaxClients int `yaml:"maxClients"   envconfig:"DINGO_CHAINSYNC_MAX_CLIENTS"`
 	// StallTimeout is the duration after which a client with no
 	// activity is considered stalled. Default: "2m".
@@ -485,7 +486,6 @@ type TokenRegistryConfig struct {
 // fallback in internal/node/node.go.
 func DefaultChainsyncConfig() ChainsyncConfig {
 	return ChainsyncConfig{
-		MaxClients:   3,
 		StallTimeout: "2m",
 		Strategy:     "primary",
 	}
