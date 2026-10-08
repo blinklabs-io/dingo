@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"math/big"
 	"strings"
 	"testing"
@@ -114,9 +115,7 @@ func (b childProdBatch) build(
 		1: []any{keys.output(childProdChildAmount)},
 	}
 	if b.body != nil {
-		for key, value := range b.body(keys) {
-			childBody[key] = value
-		}
+		maps.Copy(childBody, b.body(keys))
 	}
 	childBodyCbor, err := cbor.Encode(childBody)
 	require.NoError(t, err)
