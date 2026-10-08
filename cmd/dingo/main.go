@@ -416,6 +416,12 @@ Database Workers:
 		if isInformationalCommand(top) {
 			return nil
 		}
+		// The devnet command builds an isolated runtime config and invokes this
+		// binary again. Loading the caller's config here would make that shortcut
+		// depend on whatever node configuration happens to be in the working dir.
+		if top != nil && top.Name() == "devnet" {
+			return nil
+		}
 
 		cfg, err := config.LoadConfig(configFile)
 		if err != nil {
@@ -485,6 +491,7 @@ Database Workers:
 	rootCmd.AddCommand(loadCommand())
 	rootCmd.AddCommand(listCommand())
 	rootCmd.AddCommand(versionCommand())
+	rootCmd.AddCommand(devnetCommand())
 	rootCmd.AddCommand(mithrilCommand())
 	rootCmd.AddCommand(syncCommand())
 	rootCmd.AddCommand(databaseCommand())
