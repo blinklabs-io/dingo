@@ -153,6 +153,8 @@ type Node struct {
 	shutdownRunning              bool
 	shutdownDone                 bool
 	shutdownErr                  error
+	startedAt                    time.Time
+	remoteLifecycle              remoteLifecycle
 	// startupLifecycleMu keeps the startup rollback and normal shutdown from
 	// operating on the same partially initialized component concurrently. Run
 	// holds it until startup has either completed or unwound its LIFO cleanup;
@@ -249,6 +251,10 @@ func New(cfg Config) (*Node, error) {
 		config:              cfg,
 		pluginHost:          pluginHost,
 		destinationRegistry: destinationRegistry,
+		startedAt:           time.Now(),
+		remoteLifecycle: remoteLifecycle{
+			requests: make(chan ShutdownRequest, 1),
+		},
 	}
 	for capability, selection := range cfg.pluginSelections {
 		// API capabilities are validated against their *merged* config
@@ -485,18 +491,18 @@ func (n *Node) apiPluginSelection(
 }
 
 // effectiveBarkHost decides the interface Bark actually binds to.
-// configuredHost (from --bark-host/DINGO_BARK_HOST/config) always wins when
-// set -- an explicit operator choice. Otherwise, when lifecycleEnabled (the
+// configuredHost (from --bark-host/DINGO_BARK_HOST/config) always wins when set
+// -- an explicit operator choice. Otherwise, when lifecycleEnabled (the
 // database lifecycle service's destructive Restore/Truncate/CreateSnapshot/
-// etc. RPCs will be mounted), this defaults to loopback-only rather than
-// letting bark.go's own empty-Host default ("0.0.0.0") expose them on every
-// interface; with no lifecycle service mounted, "" is returned unchanged so
-// bark's own existing default behavior (all interfaces) is preserved for
-// deployments only using it for the read-only Archive service. Bind address
-// is a network control, independent of the mTLS client-certificate
-// authentication and operator-fingerprint authorization checks Bark.Start
-// enforces whenever lifecycleEnabled -- this default narrows exposure as
-// defense in depth, it is not what makes those RPCs safe to reach.
+// etc. RPCs, or the remote Stop/Restart RPCs, will be mounted), this defaults
+// to loopback-only rather than letting bark.go's own empty-Host default
+// ("0.0.0.0") expose them on every interface; with no lifecycle service
+// mounted, "" is returned unchanged so bark's own existing default behavior
+// (all interfaces) is preserved for deployments only using it for the read-only
+// Archive service. Bind address is a network control, independent of the mTLS
+// client-certificate authentication and operator-fingerprint authorization
+// checks Bark.Start enforces whenever lifecycleEnabled -- this default narrows
+// exposure as defense in depth, it is not what makes those RPCs safe to reach.
 func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 	if configuredHost != "" {
 		return configuredHost
@@ -1512,25 +1518,33 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 	if n.config.barkPort > 0 {
 		lifecycleEnabled := n.config.databaseLifecycle.SnapshotDir != ""
-		barkHost := effectiveBarkHost(n.config.barkHost, lifecycleEnabled)
+		remoteLifecycleEnabled := n.config.barkLifecycleEnabled
+		barkHost := effectiveBarkHost(
+			n.config.barkHost,
+			lifecycleEnabled || remoteLifecycleEnabled,
+		)
 		if barkHost != n.config.barkHost {
 			n.config.logger.Warn(
-				"bark database lifecycle service (Restore/Truncate and friends) defaults to a loopback-only bind since no --bark-host was set; every DatabaseService RPC requires a verified mTLS client certificate (--bark-client-ca-file-path), and destructive RPCs require an allowlisted certificate fingerprint (--bark-operator-certificate-fingerprints), independent of bind address; widen this bind only behind your own trusted network controls",
+				"bark database lifecycle and remote Stop/Restart services default to a loopback-only bind since no --bark-host was set; every DatabaseService RPC requires a verified mTLS client certificate (--bark-client-ca-file-path), and destructive RPCs require an allowlisted certificate fingerprint (--bark-operator-certificate-fingerprints), independent of bind address; widen this bind only behind your own trusted network controls",
 				"component",
 				"bark",
 			)
 		}
 		barkConfig := bark.BarkConfig{
-			Logger:                          n.config.logger,
-			DB:                              db,
-			TlsCertFilePath:                 n.config.tlsCertFilePath,
-			TlsKeyFilePath:                  n.config.tlsKeyFilePath,
-			TlsClientCAFilePath:             n.config.barkClientCAFilePath,
-			OperatorCertificateFingerprints: n.config.barkOperatorCertificateFingerprints,
-			Host:                            barkHost,
-			Port:                            n.config.barkPort,
-			CORSAllowedOrigins:              n.config.corsAllowedOrigins,
-			DestinationRegistry:             n.destinationRegistry,
+			Logger:                                   n.config.logger,
+			DB:                                       db,
+			TlsCertFilePath:                          n.config.tlsCertFilePath,
+			TlsKeyFilePath:                           n.config.tlsKeyFilePath,
+			TlsClientCAFilePath:                      n.config.barkClientCAFilePath,
+			OperatorCertificateFingerprints:          n.config.barkOperatorCertificateFingerprints,
+			LifecycleOperatorCertificateFingerprints: n.config.barkLifecycleOperatorCertificateFingerprints,
+			Host:                                     barkHost,
+			Port:                                     n.config.barkPort,
+			CORSAllowedOrigins:                       n.config.corsAllowedOrigins,
+			DestinationRegistry:                      n.destinationRegistry,
+		}
+		if remoteLifecycleEnabled {
+			barkConfig.Node = n
 		}
 		// Mount the DatabaseService only when a snapshot directory is
 		// configured — bark.NewBark requires one alongside Lifecycle, and
