@@ -898,35 +898,49 @@ func (s *Store) UpdatePoolOpCertSequence(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			if _, err := db.ExecContext(ctx, `
+			result, err := db.ExecContext(ctx, `
 INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
 VALUES (?, ?, ?)
 ON CONFLICT (pool_key_hash, slot) DO NOTHING`,
 				poolKeyHash.Bytes(),
 				slotValue,
 				sequenceValue,
-			); err != nil {
+			)
+			if err != nil {
 				return err
 			}
-			var storedSequence int64
-			if err := db.QueryRowContext(ctx, `
+			inserted, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if inserted == 0 || s.dialect.Name() == "mysql" {
+				var storedSequence int64
+				if err := db.QueryRowContext(ctx, `
 SELECT sequence FROM pool_opcert_sequence
 WHERE pool_key_hash = ? AND slot = ?`,
-				poolKeyHash.Bytes(),
-				slotValue,
-			).Scan(&storedSequence); err != nil {
-				return err
-			}
-			if storedSequence != sequenceValue {
+					poolKeyHash.Bytes(),
+					slotValue,
+				).Scan(&storedSequence); err != nil {
+					return err
+				}
+				if storedSequence != sequenceValue {
+					return fmt.Errorf(
+						"opcert counter conflict for pool %x at slot %d: existing %d, candidate %d",
+						poolKeyHash.Bytes(),
+						slot,
+						storedSequence,
+						sequence,
+					)
+				}
+			} else if inserted != 1 {
 				return fmt.Errorf(
-					"opcert counter conflict for pool %x at slot %d: existing %d, candidate %d",
+					"insert opcert counter for pool %x at slot %d affected %d rows",
 					poolKeyHash.Bytes(),
 					slot,
-					storedSequence,
-					sequence,
+					inserted,
 				)
 			}
-			_, err := db.ExecContext(ctx, `
+			_, err = db.ExecContext(ctx, `
 UPDATE pool SET latest_op_cert_sequence = ?
 WHERE pool_key_hash = ?
   AND latest_op_cert_sequence < ?`,
