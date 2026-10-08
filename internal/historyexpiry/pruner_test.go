@@ -133,7 +133,7 @@ func TestPrunerSkipsAlreadyExpiredBlocks(t *testing.T) {
 	firstHash := insertTestBlock(t, db, 1, 0x01)
 	secondHash := insertTestBlock(t, db, 2, 0x02)
 
-	_, err := db.PruneBlock(1, firstHash)
+	_, err := db.PruneBlock(context.Background(), 1, firstHash)
 	require.NoError(t, err)
 
 	pruner := NewPruner(PrunerConfig{
@@ -219,4 +219,56 @@ func TestPrunerHandlesCurrentSlotError(t *testing.T) {
 	defer txn.Release()
 	_, _, err := db.Blob().GetBlock(txn.Blob(), 1, hash)
 	assert.NoError(t, err)
+}
+
+// TestPrunerRepeatedRoundsSkipTombstonesAndFindNewlyEligible exercises a small
+// initialized database across multiple prune rounds. The first round leaves
+// tombstone keys in place; the second round must tolerate scanning them again,
+// and a block inserted after that round must be discovered by a fresh scan.
+func TestPrunerRepeatedRoundsSkipTombstonesAndFindNewlyEligible(t *testing.T) {
+	db := newTestDB(t)
+	oldHash := insertTestBlock(t, db, 1, 0x01)
+	secondHash := insertTestBlock(t, db, 2, 0x02)
+	newHash := insertTestBlock(t, db, 20, 0x14)
+	pruner := NewPruner(PrunerConfig{
+		LedgerState: testLedgerWindow{currentSlot: 10, stabilityWindow: 5},
+		DB:          db,
+	})
+
+	pruner.prune(context.Background())
+	pruner.prune(context.Background())
+
+	txn := db.BlobTxn(false)
+	defer txn.Release()
+	_, _, err := db.Blob().GetBlock(txn.Blob(), 1, oldHash)
+	require.ErrorIs(t, err, types.ErrHistoryExpired)
+	_, _, err = db.Blob().GetBlock(txn.Blob(), 2, secondHash)
+	require.ErrorIs(t, err, types.ErrHistoryExpired)
+	_, _, err = db.Blob().GetBlock(txn.Blob(), 20, newHash)
+	require.NoError(t, err)
+
+	// A newly eligible block is found by the next independent range scan.
+	thirdHash := insertTestBlock(t, db, 3, 0x03)
+	pruner.prune(context.Background())
+	txn2 := db.BlobTxn(false)
+	defer txn2.Release()
+	_, _, err = db.Blob().GetBlock(txn2.Blob(), 3, thirdHash)
+	require.ErrorIs(t, err, types.ErrHistoryExpired)
+}
+
+func TestPrunerCanceledBeforeScanDoesNotPrune(t *testing.T) {
+	db := newTestDB(t)
+	hash := insertTestBlock(t, db, 1, 0x01)
+	pruner := NewPruner(PrunerConfig{
+		LedgerState: testLedgerWindow{currentSlot: 10, stabilityWindow: 5},
+		DB:          db,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pruner.prune(ctx)
+
+	txn := db.BlobTxn(false)
+	defer txn.Release()
+	_, _, err := db.Blob().GetBlock(txn.Blob(), 1, hash)
+	require.NoError(t, err)
 }

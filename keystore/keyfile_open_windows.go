@@ -1,4 +1,4 @@
-//go:build !unix && !windows
+//go:build windows
 
 // Copyright 2026 Blink Labs Software
 //
@@ -14,10 +14,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package forging
+package keystore
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
-func openSecretKeyFile(path string) (*os.File, error) {
+func openFileForValidation(path string) (*os.File, error) {
+	// Stat rejects directories and named pipes without connecting to them.
+	// OpenRegularFile validates the opened handle again, so replacement with
+	// another disk object between these calls cannot bypass the type check.
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf(
+			"key file %q is not a regular file (mode %s): %w",
+			path, info.Mode(), ErrNotRegularFile,
+		)
+	}
 	return os.Open(path) // #nosec G304 -- operator-configured key path
 }

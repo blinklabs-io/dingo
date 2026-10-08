@@ -51,7 +51,7 @@ func TestSyncerPushesResolvedImmutableSlot(t *testing.T) {
 	t.Parallel()
 	sink := &slotSink{}
 	syncer := NewSyncer(SyncerConfig{
-		PointAtDepth: func(depth uint64) (ocommon.Point, bool, error) {
+		PointAtDepth: func(_ context.Context, depth uint64) (ocommon.Point, bool, error) {
 			require.Equal(t, uint64(2160), depth)
 			return ocommon.Point{Slot: 150_000}, true, nil
 		},
@@ -71,7 +71,7 @@ func TestSyncerPushesUnknownWhenSecurityParamUnavailable(t *testing.T) {
 	t.Parallel()
 	sink := &slotSink{}
 	syncer := NewSyncer(SyncerConfig{
-		PointAtDepth: func(depth uint64) (ocommon.Point, bool, error) {
+		PointAtDepth: func(_ context.Context, depth uint64) (ocommon.Point, bool, error) {
 			t.Fatal(
 				"PointAtDepth must not be called without a security parameter",
 			)
@@ -92,7 +92,7 @@ func TestSyncerPushesUnknownOnPointAtDepthError(t *testing.T) {
 	t.Parallel()
 	sink := &slotSink{}
 	syncer := NewSyncer(SyncerConfig{
-		PointAtDepth: func(depth uint64) (ocommon.Point, bool, error) {
+		PointAtDepth: func(_ context.Context, depth uint64) (ocommon.Point, bool, error) {
 			return ocommon.Point{}, false, errors.New("boom")
 		},
 		SecurityParam:    func() int { return 2160 },
@@ -109,7 +109,7 @@ func TestSyncerPushesUnknownWhenNotFound(t *testing.T) {
 	t.Parallel()
 	sink := &slotSink{}
 	syncer := NewSyncer(SyncerConfig{
-		PointAtDepth: func(depth uint64) (ocommon.Point, bool, error) {
+		PointAtDepth: func(_ context.Context, depth uint64) (ocommon.Point, bool, error) {
 			return ocommon.Point{}, false, nil
 		},
 		SecurityParam:    func() int { return 2160 },
@@ -128,7 +128,7 @@ func TestSyncerRefreshesOnEachTick(t *testing.T) {
 	slot := uint64(100)
 	var mu sync.Mutex
 	syncer := NewSyncer(SyncerConfig{
-		PointAtDepth: func(depth uint64) (ocommon.Point, bool, error) {
+		PointAtDepth: func(_ context.Context, depth uint64) (ocommon.Point, bool, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			slot++
@@ -151,7 +151,7 @@ func TestSyncerStartRequiresAllDependencies(t *testing.T) {
 	t.Parallel()
 	sink := &slotSink{}
 	base := SyncerConfig{
-		PointAtDepth: func(depth uint64) (ocommon.Point, bool, error) {
+		PointAtDepth: func(_ context.Context, depth uint64) (ocommon.Point, bool, error) {
 			return ocommon.Point{}, true, nil
 		},
 		SecurityParam:    func() int { return 2160 },
@@ -178,7 +178,7 @@ func TestSyncerStopIsIdempotentAndSafeBeforeStart(t *testing.T) {
 	t.Parallel()
 	sink := &slotSink{}
 	syncer := NewSyncer(SyncerConfig{
-		PointAtDepth: func(depth uint64) (ocommon.Point, bool, error) {
+		PointAtDepth: func(_ context.Context, depth uint64) (ocommon.Point, bool, error) {
 			return ocommon.Point{Slot: 1}, true, nil
 		},
 		SecurityParam:    func() int { return 2160 },

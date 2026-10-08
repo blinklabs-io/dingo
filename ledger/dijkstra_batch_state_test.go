@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
@@ -153,8 +154,8 @@ func newStateBatchHarness(t *testing.T) *stateBatchHarness {
 
 func (h *stateBatchHarness) seedUtxo(t *testing.T, ref batchRef, amount uint64) {
 	t.Helper()
-	require.NoError(t, h.db.Transaction(true).Do(func(txn *database.Txn) error {
-		return h.db.CreateUtxo(txn, &models.Utxo{
+	require.NoError(t, h.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		return h.db.CreateUtxo(context.Background(), txn, &models.Utxo{
 			TxId:       ref.txID(),
 			OutputIdx:  uint32(ref.index), //nolint:gosec
 			PaymentKey: bytes.Repeat([]byte{0x42}, 28),
@@ -170,7 +171,7 @@ func (h *stateBatchHarness) seedAccount(
 	reward uint64,
 ) {
 	t.Helper()
-	require.NoError(t, h.db.CreateAccount(nil, &models.Account{
+	require.NoError(t, h.db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey:    stakeKey,
 		CredentialTag: 0,
 		AddedSlot:     1,
@@ -240,8 +241,8 @@ func (h *stateBatchHarness) apply(
 	delta.Offsets = offsets
 	delta.addTransaction(tx, 0)
 	t.Cleanup(delta.Release)
-	err = h.db.Transaction(true).Do(func(txn *database.Txn) error {
-		return delta.applyWithoutRecordingDonations(h.ls, txn)
+	err = h.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		return delta.applyWithoutRecordingDonations(context.Background(), h.ls, txn)
 	})
 	return delta, err
 }
@@ -255,7 +256,7 @@ func (h *stateBatchHarness) utxoLive(t *testing.T, txID []byte, index uint32) bo
 
 func (h *stateBatchHarness) reward(t *testing.T, stakeKey []byte) uint64 {
 	t.Helper()
-	account, err := h.db.GetAccountByCredential(0, stakeKey, false, nil)
+	account, err := h.db.GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
 	require.NoError(t, err)
 	return uint64(account.Reward)
 }
@@ -391,8 +392,8 @@ func TestDijkstraBatchRollbackAndReapplyRestoresEveryLevel(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, applied, snapshot())
 
-	require.NoError(t, h.db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, _, err := h.db.TruncateAfterSlot(
+	require.NoError(t, h.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		_, _, err := h.db.TruncateAfterSlot(context.Background(),
 			ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x01}, 32)},
 			0,
 			txn,

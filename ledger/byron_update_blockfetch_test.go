@@ -196,7 +196,7 @@ func newByronUpdateBlockfetchChain(t *testing.T) *byronUpdateBlockfetchChain {
 	limits.MaxProposalSize = 700
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{
 		securityParam: securityParam,
@@ -208,7 +208,11 @@ func newByronUpdateBlockfetchChain(t *testing.T) *byronUpdateBlockfetchChain {
 		Type:        uint(gledger.BlockTypeByronEbb),
 		Cbor:        []byte{0x80},
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{parent}))
+	require.NoError(
+		t,
+		cm.PrimaryChain().
+			AddRawBlocks(context.Background(), []chain.RawBlock{parent}),
+	)
 	require.NoError(t, db.SetEpoch(
 		0, 0, nil, nil, nil, nil, eras.ByronEraDesc.Id, 20_000, 100, nil,
 	))

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -181,7 +182,7 @@ func TestHealTruncateGapBlockNonces_CanonicalChainExcludesForkBlob(
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	canonicalChain := cm.PrimaryChain()
 
@@ -190,7 +191,10 @@ func TestHealTruncateGapBlockNonces_CanonicalChainExcludesForkBlob(
 	require.NoError(t, err)
 	require.Len(t, blocks, 3)
 	for _, block := range blocks {
-		require.NoError(t, canonicalChain.AddBlock(block, nil))
+		require.NoError(
+			t,
+			canonicalChain.AddBlock(context.Background(), block, nil),
+		)
 	}
 	checkpointBlock := blocks[0]
 	tipBlock := blocks[2]
@@ -369,7 +373,7 @@ func TestHealTruncateGapBlockNonces_FailsWhenOnlyCheckpointIsForkOnly(
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	canonicalChain := cm.PrimaryChain()
 
@@ -378,7 +382,10 @@ func TestHealTruncateGapBlockNonces_FailsWhenOnlyCheckpointIsForkOnly(
 	require.NoError(t, err)
 	require.Len(t, blocks, 2)
 	for _, block := range blocks {
-		require.NoError(t, canonicalChain.AddBlock(block, nil))
+		require.NoError(
+			t,
+			canonicalChain.AddBlock(context.Background(), block, nil),
+		)
 	}
 	tipBlock := blocks[1]
 

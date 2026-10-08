@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -70,7 +71,7 @@ func NewDeferredHeaderRecoveryFixture(
 		blocks = append(blocks, block)
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}),
@@ -87,7 +88,7 @@ func NewDeferredHeaderRecoveryFixture(
 	ls.config.EventBus = bus
 	ls.config.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ls.metrics.init(prometheus.NewRegistry())
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 	return &DeferredHeaderRecoveryFixture{
 		Ledger:  ls,
 		t:       t,
@@ -112,7 +113,9 @@ func (f *DeferredHeaderRecoveryFixture) SupplyStateInvalidDeferredBlock(
 		f.tb.block.Hash().Bytes(),
 	)
 	f.Ledger.markDeferredHeaderValidationFrom(point, source)
-	err := f.Ledger.verifyDeferredBlockHeaderState(nil, point, f.tb.block)
+	err := f.Ledger.verifyDeferredBlockHeaderState(
+		context.Background(), nil, point, f.tb.block,
+	)
 	require.Error(f.t, err)
 	var verdict *headerValidationError
 	require.ErrorAs(f.t, err, &verdict)
@@ -145,7 +148,7 @@ func (f *DeferredHeaderRecoveryFixture) AppendReplacementBlock() ocommon.Point {
 	f.t.Helper()
 	rejected := f.blocks[3]
 	replacement := makeTestBlock(rejected.Slot+1, rejected.ID)
-	require.NoError(f.t, f.cm.PrimaryChain().AddRawBlocks(
+	require.NoError(f.t, f.cm.PrimaryChain().AddRawBlocks(context.Background(),
 		[]chain.RawBlock{{
 			Slot:        replacement.Slot,
 			Hash:        replacement.Hash,

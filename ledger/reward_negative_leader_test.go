@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"math/big"
 	"sync"
@@ -95,6 +96,7 @@ func seedNegativeLeaderRewardRound(
 	}
 	for i := range uint64(10) {
 		require.NoError(t, db.UpdatePoolOpCertSequence(
+			context.Background(),
 			poolID,
 			i+1,
 			140+i,
@@ -157,12 +159,12 @@ func seedNegativeLeaderRewardRound(
 		},
 	}, nil))
 	pool := models.Pool{PoolKeyHash: poolKey}
-	require.NoError(t, db.ImportPool(nil, &pool, &models.PoolRegistration{
+	require.NoError(t, db.ImportPool(context.Background(), nil, &pool, &models.PoolRegistration{
 		PoolID:      pool.ID,
 		PoolKeyHash: poolKey,
 		AddedSlot:   0,
 	}))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey: member,
 		Pool:       poolKey,
 		Active:     true,
@@ -172,7 +174,7 @@ func seedNegativeLeaderRewardRound(
 		uint(lcommon.CertificateTypeStakeRegistration),
 	)
 	if accountRegistered {
-		require.NoError(t, db.CreateAccount(nil, &models.Account{
+		require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 			StakingKey: rewardAccount,
 			Pool:       poolKey,
 			Active:     true,
@@ -197,9 +199,9 @@ func TestApplyStakeRewardsNegativeLeaderRewardUnregisteredAccount(t *testing.T) 
 	ls, db, _ := seedNegativeLeaderRewardRound(t, false)
 	meta := db.Metadata()
 	for range 2 {
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return ls.applyStakeRewards(
+			return ls.applyStakeRewards(context.Background(),
 				txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 			)
 		}))
@@ -234,9 +236,9 @@ func TestApplyStakeRewardsNegativeLeaderRewardRegisteredAccountStops(t *testing.
 		defer fatalMu.Unlock()
 		fatalErrs = append(fatalErrs, err)
 	}
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.applyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 		)
 	})
@@ -257,7 +259,9 @@ func TestApplyStakeRewardsNegativeLeaderRewardRegisteredAccountStops(t *testing.
 	outputs, err := meta.GetRewardPoolOutputs(negativeLeaderSnapshot, nil)
 	require.NoError(t, err)
 	require.Empty(t, outputs)
-	account, err := db.GetAccountByCredential(0, rewardAccount, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(), 0, rewardAccount, false, nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	require.Zero(t, uint64(account.Reward))
@@ -269,7 +273,7 @@ func TestPrecomputeStakeRewardsSkipsNegativeLeaderReward(t *testing.T) {
 	t.Parallel()
 
 	ls, db, _ := seedNegativeLeaderRewardRound(t, false)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.precomputeStakeRewards(
 			txn, negativeLeaderNewEpoch, 300, negativeLeaderBoundarySlot,
@@ -316,15 +320,16 @@ func TestNegativeLeaderRewardExpiredRewardAccountIsGuarded(t *testing.T) {
 	ls.config.DelegatorInactivityEnabled = true
 	ls.config.DelegatorInactivity = 1
 	require.NoError(t, db.RenewAccountExpirations(
+		context.Background(),
 		[]models.StakeCredentialRef{
 			models.NewStakeCredentialRef(0, rewardAccount),
 		},
 		1,
 		nil,
 	))
-	applyTxn := db.Transaction(true)
+	applyTxn := db.Transaction(context.Background(), true)
 	require.NoError(t, applyTxn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.applyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 		)
 	}))
@@ -344,9 +349,9 @@ func TestApplyStakeRewardsPersistsNegativeLeaderRewardDeficit(t *testing.T) {
 	t.Parallel()
 
 	ls, db, _ := seedNegativeLeaderRewardRound(t, false)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.applyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 		)
 	}))

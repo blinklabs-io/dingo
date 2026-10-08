@@ -30,29 +30,90 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
+// recordDrepExpiry writes a DRep's activity and expiry epochs to
+// drep_expiry_history at slot. A second write at the same slot replaces the
+// first, which is the value in force from that slot on.
+func recordDrepExpiry(
+	ctx context.Context,
+	db queryer,
+	credentialTag uint8,
+	credential []byte,
+	slot uint64,
+	lastActivityEpoch uint64,
+	expiryEpoch uint64,
+) error {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	activity, err := checkedInt64(lastActivityEpoch)
+	if err != nil {
+		return err
+	}
+	expiry, err := checkedInt64(expiryEpoch)
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO drep_expiry_history (
+    credential_tag, credential, added_slot, last_activity_epoch, expiry_epoch
+) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (credential_tag, credential, added_slot) DO UPDATE SET
+    last_activity_epoch = excluded.last_activity_epoch,
+    expiry_epoch = excluded.expiry_epoch`,
+		credentialTag,
+		credential,
+		slotValue,
+		activity,
+		expiry,
+	); err != nil {
+		return fmt.Errorf("record drep expiry history: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) CreateDrep(txn types.Txn, drep *models.Drep) error {
 	if drep == nil {
 		return errors.New("create drep: drep is nil")
 	}
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return err
-	}
-	q := s.operationalQueries(db)
 	params, err := drepParams(drep)
 	if err != nil {
 		return err
 	}
-	id, err := q.CreateDrep(
-		ctx,
-		sqlitequery.CreateDrepParams(params),
-	)
-	if err != nil {
-		return fmt.Errorf("create drep: %w", err)
+	// Validated before the row is written, so a value the history cannot
+	// hold fails the call instead of leaving a row without its history.
+	for _, value := range []uint64{
+		drep.AddedSlot,
+		drep.LastActivityEpoch,
+		drep.ExpiryEpoch,
+	} {
+		if _, err := checkedInt64(value); err != nil {
+			return err
+		}
 	}
-	drep.ID = uint(id)
-	drep.Active = params.Active.Bool
-	return nil
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			id, err := s.operationalQueries(db).CreateDrep(
+				ctx,
+				sqlitequery.CreateDrepParams(params),
+			)
+			if err != nil {
+				return fmt.Errorf("create drep: %w", err)
+			}
+			drep.ID = uint(id)
+			drep.Active = params.Active.Bool
+			return recordDrepExpiry(
+				ctx,
+				db,
+				drep.CredentialTag,
+				drep.Credential,
+				drep.AddedSlot,
+				drep.LastActivityEpoch,
+				drep.ExpiryEpoch,
+			)
+		},
+	)
 }
 
 func (s *Store) ImportDrep(
@@ -83,6 +144,17 @@ func (s *Store) ImportDrep(
 			}
 			drep.ID = uint(id)
 			drep.Active = params.Active.Bool
+			if err := recordDrepExpiry(
+				ctx,
+				db,
+				drep.CredentialTag,
+				drep.Credential,
+				drep.AddedSlot,
+				drep.LastActivityEpoch,
+				drep.ExpiryEpoch,
+			); err != nil {
+				return err
+			}
 
 			regParams, err := drepRegistrationParams(registration)
 			if err != nil {
@@ -102,6 +174,165 @@ func (s *Store) ImportDrep(
 			return nil
 		},
 	)
+}
+
+// drepStateAtSlot is one DRep's registration, anchor and expiry state at a
+// slot, as derived from the certificate history and drep_expiry_history that
+// survive at that slot.
+type drepStateAtSlot struct {
+	active     bool
+	anchorURL  string
+	anchorHash []byte
+	// latestSlot is the slot of the certificate the state comes from, and
+	// registrationSlot that of the registration in force.
+	latestSlot       uint64
+	registrationSlot uint64
+	// hasExpiry is false when drep_expiry_history holds no row at or before
+	// the slot, so lastActivity and expiry are unknown there.
+	hasExpiry    bool
+	lastActivity uint64
+	expiry       uint64
+}
+
+// deriveDrepStateAtSlot derives a DRep's state at slot without writing
+// anything. found is false when the DRep has no registration at or before
+// slot. RestoreDrepStateAtSlot writes the result back on rollback;
+// GetDrepsAtSlot answers queries at a past slot with it.
+func deriveDrepStateAtSlot(
+	ctx context.Context,
+	db queryer,
+	tag uint8,
+	credential []byte,
+	slot uint64,
+) (drepStateAtSlot, bool, error) {
+	var state drepStateAtSlot
+	registration, found, err := latestDrepEvent(
+		ctx,
+		db,
+		"registration_drep",
+		"drep_credential",
+		tag,
+		credential,
+		slot,
+		true,
+	)
+	if err != nil || !found {
+		return state, false, err
+	}
+	deregistration, hasDeregistration, err := latestDrepEvent(
+		ctx,
+		db,
+		"deregistration_drep",
+		"drep_credential",
+		tag,
+		credential,
+		slot,
+		false,
+	)
+	if err != nil {
+		return state, false, err
+	}
+	update, hasUpdate, err := latestDrepEvent(
+		ctx,
+		db,
+		"update_drep",
+		"credential",
+		tag,
+		credential,
+		slot,
+		true,
+	)
+	if err != nil {
+		return state, false, err
+	}
+	state.active = !hasDeregistration ||
+		compareCertificatePosition(
+			registration.position,
+			deregistration.position,
+		) > 0
+	latest := registration
+	if !state.active {
+		latest = deregistration
+		latest.anchorURL = ""
+		latest.anchorHash = nil
+	} else if hasUpdate &&
+		compareCertificatePosition(
+			update.position,
+			latest.position,
+		) > 0 {
+		latest = update
+	}
+	state.anchorURL = latest.anchorURL
+	state.anchorHash = latest.anchorHash
+	state.latestSlot = latest.position.slot
+	state.registrationSlot = registration.position.slot
+	lastActivity, expiry, hasExpiry, err := latestDrepExpiry(
+		ctx,
+		db,
+		tag,
+		credential,
+		slot,
+	)
+	if err != nil {
+		return state, false, err
+	}
+	state.lastActivity = lastActivity
+	state.expiry = expiry
+	state.hasExpiry = hasExpiry
+	return state, true, nil
+}
+
+// keepsCurrentExpiry reports whether a DRep whose row was last written at
+// rowAddedSlot keeps its current activity and expiry at slot instead of the
+// derived ones. With no expiry history at or before slot the value there is
+// unknown: an imported registration (slot 0) or a row whose certificate state
+// is not being rewound keeps what it has, and any other is left unset. On a
+// database upgraded to v37 that covers every point before a DRep's seed row.
+func (state drepStateAtSlot) keepsCurrentExpiry(
+	rowAddedSlot uint64,
+	slot uint64,
+) bool {
+	return !state.hasExpiry &&
+		(state.registrationSlot == 0 || rowAddedSlot <= slot)
+}
+
+// latestDrepExpiry reads the drep_expiry_history row in force at slot.
+func latestDrepExpiry(
+	ctx context.Context,
+	db queryer,
+	tag uint8,
+	credential []byte,
+	slot uint64,
+) (uint64, uint64, bool, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	var activity, expiry int64
+	err = db.QueryRowContext(ctx, `
+SELECT last_activity_epoch, expiry_epoch
+FROM drep_expiry_history
+WHERE credential_tag = ? AND credential = ? AND added_slot <= ?
+ORDER BY added_slot DESC, id DESC
+LIMIT 1`,
+		tag,
+		credential,
+		slotValue,
+	).Scan(&activity, &expiry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, false, nil
+	}
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("read drep expiry history: %w", err)
+	}
+	if activity < 0 || expiry < 0 {
+		return 0, 0, false, fmt.Errorf(
+			"read drep expiry history: negative epoch %d/%d",
+			activity,
+			expiry,
+		)
+	}
+	return uint64(activity), uint64(expiry), true, nil
 }
 
 func (s *Store) RestoreDrepStateAtSlot(
@@ -125,9 +356,21 @@ WHERE added_slot > ?
 			); err != nil {
 				return err
 			}
+			// Activity renews expiry without touching drep.added_slot, so
+			// a DRep whose only change after slot is a vote is found
+			// through its expiry history instead.
 			rows, err := db.QueryContext(ctx, `
-SELECT credential_tag, credential, expiry_epoch, last_activity_epoch
-FROM drep WHERE added_slot > ?`,
+SELECT credential_tag, credential, added_slot, expiry_epoch,
+       last_activity_epoch
+FROM drep
+WHERE added_slot > ?
+   OR EXISTS (
+       SELECT 1 FROM drep_expiry_history history
+       WHERE history.credential_tag = drep.credential_tag
+         AND history.credential = drep.credential
+         AND history.added_slot > ?
+   )`,
+				slot,
 				slot,
 			)
 			if err != nil {
@@ -136,6 +379,7 @@ FROM drep WHERE added_slot > ?`,
 			type restoreRow struct {
 				tag          uint8
 				credential   []byte
+				addedSlot    uint64
 				expiry       uint64
 				lastActivity uint64
 			}
@@ -145,6 +389,7 @@ FROM drep WHERE added_slot > ?`,
 				if err := rows.Scan(
 					&item.tag,
 					&item.credential,
+					&item.addedSlot,
 					&item.expiry,
 					&item.lastActivity,
 				); err != nil {
@@ -160,95 +405,97 @@ FROM drep WHERE added_slot > ?`,
 				return err
 			}
 			for _, item := range items {
-				registration, found, err := latestDrepEvent(
+				state, found, err := deriveDrepStateAtSlot(
 					ctx,
 					db,
-					"registration_drep",
-					"drep_credential",
 					item.tag,
 					item.credential,
 					slot,
-					true,
 				)
 				if err != nil {
 					return err
 				}
 				if !found {
-					return fmt.Errorf(
-						"DRep %x has no registration at or before slot %d",
+					if item.addedSlot > slot {
+						return fmt.Errorf(
+							"DRep %x has no registration at or before slot %d",
+							item.credential,
+							slot,
+						)
+					}
+					// A row the vote path recreated without a registration
+					// (InsertDrepIfAbsent) and selected only for its expiry
+					// history: nothing else of it is being rewound.
+					if err := restoreDrepExpiryOnly(
+						ctx,
+						db,
+						item.tag,
 						item.credential,
 						slot,
-					)
+					); err != nil {
+						return err
+					}
+					continue
 				}
-				deregistration, hasDeregistration, err := latestDrepEvent(
-					ctx,
-					db,
-					"deregistration_drep",
-					"drep_credential",
-					item.tag,
-					item.credential,
-					slot,
-					false,
-				)
-				if err != nil {
-					return err
-				}
-				update, hasUpdate, err := latestDrepEvent(
-					ctx,
-					db,
-					"update_drep",
-					"credential",
-					item.tag,
-					item.credential,
-					slot,
-					true,
-				)
-				if err != nil {
-					return err
-				}
-				active := !hasDeregistration ||
-					compareCertificatePosition(
-						registration.position,
-						deregistration.position,
-					) > 0
-				latest := registration
-				if !active {
-					latest = deregistration
-					latest.anchorURL = ""
-					latest.anchorHash = nil
-				} else if hasUpdate &&
-					compareCertificatePosition(
-						update.position,
-						latest.position,
-					) > 0 {
-					latest = update
-				}
-				expiry := uint64(0)
-				lastActivity := uint64(0)
-				if registration.position.slot == 0 {
-					expiry = item.expiry
-					lastActivity = item.lastActivity
+				if state.keepsCurrentExpiry(item.addedSlot, slot) {
+					state.expiry = item.expiry
+					state.lastActivity = item.lastActivity
 				}
 				if _, err := db.ExecContext(ctx, `
 UPDATE drep
 SET active = ?, anchor_url = ?, anchor_hash = ?, added_slot = ?,
     last_activity_epoch = ?, expiry_epoch = ?
 WHERE credential_tag = ? AND credential = ?`,
-					active,
-					latest.anchorURL,
-					latest.anchorHash,
-					latest.position.slot,
-					lastActivity,
-					expiry,
+					state.active,
+					state.anchorURL,
+					state.anchorHash,
+					state.latestSlot,
+					state.lastActivity,
+					state.expiry,
 					item.tag,
 					item.credential,
 				); err != nil {
 					return err
 				}
 			}
-			return nil
+			_, err = db.ExecContext(ctx, `
+DELETE FROM drep_expiry_history WHERE added_slot > ?`,
+				slot,
+			)
+			return err
 		},
 	)
+}
+
+// restoreDrepExpiryOnly sets a DRep's activity and expiry to its latest
+// drep_expiry_history row at or before slot, and leaves the row alone when it
+// has none.
+func restoreDrepExpiryOnly(
+	ctx context.Context,
+	db queryer,
+	tag uint8,
+	credential []byte,
+	slot uint64,
+) error {
+	lastActivity, expiry, hasExpiry, err := latestDrepExpiry(
+		ctx,
+		db,
+		tag,
+		credential,
+		slot,
+	)
+	if err != nil || !hasExpiry {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `
+UPDATE drep SET last_activity_epoch = ?, expiry_epoch = ?
+WHERE credential_tag = ? AND credential = ?`,
+		lastActivity,
+		expiry,
+		tag,
+		credential,
+	)
+	return err
 }
 
 type drepRestoreEvent struct {
@@ -785,6 +1032,7 @@ func (s *Store) UpdateDRepActivity(
 	credential []byte,
 	activityEpoch uint64,
 	inactivityPeriod uint64,
+	slot uint64,
 	txn types.Txn,
 ) error {
 	// Existence is checked explicitly rather than inferred from the UPDATE's
@@ -804,19 +1052,11 @@ func (s *Store) UpdateDRepActivity(
 	// rely on the *current* semantics -- see EnsureOffchainMetadataPointers
 	// in offchain_metadata.go, which would silently over-count duplicates
 	// as newly created rows under CLIENT_FOUND_ROWS).
-	existing, err := s.GetDrepByCredential(credentialTag, credential, true, txn)
-	if err != nil {
-		return fmt.Errorf("check drep exists before activity update: %w", err)
-	}
-	if existing == nil {
-		return models.ErrDrepActivityNotUpdated
-	}
-
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return err
-	}
-	q := s.operationalQueries(db)
+	//
+	// Every value is validated before the first write, and the row and its
+	// drep_expiry_history entry commit together: a row renewed without the
+	// matching history entry would leave reads at an older point and
+	// rollback without the event that explains the live expiry.
 	activity, err := checkedInt64(activityEpoch)
 	if err != nil {
 		return err
@@ -832,18 +1072,51 @@ func (s *Store) UpdateDRepActivity(
 	if err != nil {
 		return err
 	}
-	if _, err := q.UpdateDRepActivity(
-		ctx,
-		sqlitequery.UpdateDRepActivityParams{
-			LastActivityEpoch: validInt64(activity),
-			ExpiryEpoch:       validInt64(expiry),
-			CredentialTag:     int64(credentialTag),
-			Credential:        credential,
-		},
-	); err != nil {
-		return fmt.Errorf("update drep activity: %w", err)
+	if _, err := checkedInt64(slot); err != nil {
+		return err
 	}
-	return nil
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			q := s.operationalQueries(db)
+			_, err := q.GetDrepByCredential(
+				ctx,
+				sqlitequery.GetDrepByCredentialParams{
+					CredentialTag: int64(credentialTag),
+					Credential:    credential,
+				},
+			)
+			if errors.Is(err, sql.ErrNoRows) {
+				return models.ErrDrepActivityNotUpdated
+			}
+			if err != nil {
+				return fmt.Errorf(
+					"check drep exists before activity update: %w",
+					err,
+				)
+			}
+			if _, err := q.UpdateDRepActivity(
+				ctx,
+				sqlitequery.UpdateDRepActivityParams{
+					LastActivityEpoch: validInt64(activity),
+					ExpiryEpoch:       validInt64(expiry),
+					CredentialTag:     int64(credentialTag),
+					Credential:        credential,
+				},
+			); err != nil {
+				return fmt.Errorf("update drep activity: %w", err)
+			}
+			return recordDrepExpiry(
+				ctx,
+				db,
+				credentialTag,
+				credential,
+				slot,
+				activityEpoch,
+				activityEpoch+inactivityPeriod,
+			)
+		},
+	)
 }
 
 // RecordDRepActivityEpoch sets a DRep's last activity epoch and leaves its
@@ -1138,30 +1411,39 @@ func (s *Store) ClearDanglingDRepDelegations(
 	atSlot uint64,
 	txn types.Txn,
 ) (int, error) {
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return 0, err
-	}
 	slot, err := checkedInt64(atSlot)
 	if err != nil {
 		return 0, err
 	}
-	result, err := db.ExecContext(ctx, `
-UPDATE account
-SET drep = NULL, drep_type = 0, added_slot = ?
-WHERE drep IS NOT NULL
+	cleared := 0
+	err = s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
+		const predicate = `drep IS NOT NULL
   AND drep_type IN (0, 1)
   AND NOT EXISTS (
       SELECT 1 FROM drep
       WHERE drep.credential_tag = account.drep_type
         AND drep.credential = account.drep
         AND drep.active = TRUE
-  )`, slot)
-	if err != nil {
-		return 0, err
-	}
-	affected, err := result.RowsAffected()
-	return int(affected), err
+  )`
+		if _, err := db.ExecContext(ctx, `
+INSERT INTO account_drep_clear (credential_tag, staking_key, added_slot)
+SELECT credential_tag, staking_key, ? FROM account
+WHERE `+predicate+`
+ON CONFLICT (credential_tag, staking_key, added_slot) DO NOTHING`, slot); err != nil {
+			return fmt.Errorf("record dangling DRep delegation clears: %w", err)
+		}
+		result, err := db.ExecContext(ctx, `
+UPDATE account
+SET drep = NULL, drep_type = 0, added_slot = ?
+WHERE `+predicate, slot)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		cleared = int(affected)
+		return err
+	})
+	return cleared, err
 }
 
 func expandDrepCollectionQuery(query string, count int) string {

@@ -501,16 +501,52 @@ func ImportLedgerState(
 		"slot", slot,
 	)
 
+	if cfg.State.UTxOHD && cfg.State.UTxOTablePath == "" &&
+		!models.IsPhaseCompleted(completedPhase, models.ImportPhaseUTxO) {
+		return errors.New(
+			"UTxO-HD ledger state requires external UTxO table file",
+		)
+	}
+
+	// Delete post-anchor rollover residue so replay can re-trigger every
+	// crossed epoch boundary. See DATABASE.md for the cleanup's scope and
+	// rationale.
+	//
+	// Run the full sweep atomically so a failed delete cannot leave only part
+	// of the post-anchor state removed.
+	sweepTxn := cfg.Database.MetadataTxn(ctx, true)
+	defer sweepTxn.Release()
+	if err := sweepTxn.Do(func(txn *database.Txn) error {
+		if err := cfg.Database.DeleteEpochsAfterSlot(slot, txn); err != nil {
+			return fmt.Errorf("deleting post-anchor epoch rows: %w", err)
+		}
+		if err := cfg.Database.DeleteRewardStateAfterSlot(slot, txn); err != nil {
+			return fmt.Errorf("deleting post-anchor reward state: %w", err)
+		}
+		if err := cfg.Database.DeleteBlockNoncesAfterPoint(
+			ocommon.Point{Slot: slot, Hash: cfg.State.Tip.BlockHash},
+			txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor block nonces: %w", err)
+		}
+		if err := cfg.Database.DeleteNetworkStateAfterSlot(ctx, slot, txn); err != nil {
+			return fmt.Errorf("deleting post-anchor network state: %w", err)
+		}
+		if err := cfg.Database.DeleteNetworkDonationsAfterSlot(
+			ctx, slot, txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor network donations: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
 	// Import UTxOs (from UTxO table file or inline data)
 	if !models.IsPhaseCompleted(
 		completedPhase,
 		models.ImportPhaseUTxO,
 	) {
-		if cfg.State.UTxOHD && cfg.State.UTxOTablePath == "" {
-			return errors.New(
-				"UTxO-HD ledger state requires external UTxO table file",
-			)
-		}
 		if cfg.State.UTxOTablePath != "" ||
 			cfg.State.UTxOData != nil {
 			if err := importUTxOs(
@@ -520,6 +556,7 @@ func ImportLedgerState(
 			}
 		}
 		if err := setCheckpoint(
+			ctx,
 			cfg, models.ImportPhaseUTxO,
 		); err != nil {
 			return err
@@ -558,7 +595,7 @@ func ImportLedgerState(
 	// judge either way. The rollback is unconditional because it is
 	// idempotent and a no-op on a fresh database, which has no post-anchor
 	// rows.
-	if err := cfg.Database.UtxosDeleteRolledback(slot, nil); err != nil {
+	if err := cfg.Database.UtxosDeleteRolledback(ctx, slot, nil); err != nil {
 		return fmt.Errorf(
 			"rolling back post-anchor-created UTxOs: %w",
 			err,
@@ -574,7 +611,7 @@ func ImportLedgerState(
 	) {
 		certStatePhaseRan = true
 		if cfg.State.CertStateData != nil {
-			poolsImported, err := importCertState(
+			poolsImported, importedAccounts, err := importCertState(
 				ctx, cfg, slot, progress,
 			)
 			if err != nil {
@@ -584,8 +621,21 @@ func ImportLedgerState(
 				)
 			}
 			certStatePoolsImported = poolsImported > 0
+
+			// The snapshot sets account.reward at its anchor. Clear later
+			// journal entries without reversing amounts applied against the
+			// pre-import balance. See DATABASE.md, "account_reward_delta".
+			if err := cfg.Database.DeleteAccountRewardJournalForCredentialsAfterSlot(
+				ctx, slot, importedAccounts, nil,
+			); err != nil {
+				return fmt.Errorf(
+					"rolling back post-anchor account reward journal: %w",
+					err,
+				)
+			}
 		}
 		if err := setCheckpoint(
+			ctx,
 			cfg, models.ImportPhaseCertState,
 		); err != nil {
 			return err
@@ -595,6 +645,26 @@ func ImportLedgerState(
 			"skipping cert state import (already completed)",
 			"component", "ledgerstate",
 		)
+		// A checkpoint at or past cert-state but short of tip belongs to an
+		// import that never finished, so the node has not served (and
+		// journaled nothing) since that cert-state phase ran. A checkpoint
+		// written by an importer without the journal cleanup above can
+		// therefore still leave stale post-anchor rows behind the account
+		// balances it overwrote; repeat the cleanup for the same
+		// credentials. It is idempotent when the cleanup already ran. A
+		// tip checkpoint marks a completed import whose journal may since
+		// hold legitimate post-anchor rows, so it is left alone.
+		if cfg.State.CertStateData != nil &&
+			!models.IsPhaseCompleted(
+				completedPhase,
+				models.ImportPhaseTip,
+			) {
+			if err := rollbackResumedAccountRewardJournal(
+				ctx, cfg, slot,
+			); err != nil {
+				return err
+			}
+		}
 	}
 	// Import stake snapshots
 	if !models.IsPhaseCompleted(
@@ -609,7 +679,7 @@ func ImportLedgerState(
 				// On resume, cert-state may have completed in a prior run.
 				// Allow snapshot fallback only when no active pools exist
 				// in the database.
-				hasActivePools, err := hasActivePoolsInDatabase(cfg)
+				hasActivePools, err := hasActivePoolsInDatabase(ctx, cfg)
 				if err != nil {
 					return fmt.Errorf(
 						"checking existing pools before snapshot fallback: %w",
@@ -628,6 +698,7 @@ func ImportLedgerState(
 			}
 		}
 		if err := setCheckpoint(
+			ctx,
 			cfg, models.ImportPhaseSnapshots,
 		); err != nil {
 			return err
@@ -651,6 +722,7 @@ func ImportLedgerState(
 			)
 		}
 		if err := setCheckpoint(
+			ctx,
 			cfg, models.ImportPhasePParams,
 		); err != nil {
 			return err
@@ -679,6 +751,7 @@ func ImportLedgerState(
 			}
 		}
 		if err := setCheckpoint(
+			ctx,
 			cfg, models.ImportPhaseGovState,
 		); err != nil {
 			return err
@@ -693,7 +766,7 @@ func ImportLedgerState(
 		// seeded roots even though the phase is not re-run.
 		if cfg.State.GovStateData != nil &&
 			cfg.State.EraIndex >= EraConway {
-			if err := verifyImportedPurposeRoots(cfg); err != nil {
+			if err := verifyImportedPurposeRoots(ctx, cfg); err != nil {
 				return fmt.Errorf(
 					"verifying per-purpose governance roots: %w",
 					err,
@@ -722,16 +795,15 @@ func ImportLedgerState(
 	}
 
 	// RebuildRewardLiveStake is a full-table rebuild in a single expensive
-	// transaction and takes no context, so it cannot observe cancellation once
-	// started. Bail out here if the import was cancelled during the preceding
-	// phases rather than beginning the rebuild on an interrupted sync.
+	// transaction. Check cancellation before starting; the rebuild also checks
+	// the caller context between SQL batches.
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf(
 			"cancelled before rebuilding reward live stake: %w",
 			err,
 		)
 	}
-	if err := cfg.Database.RebuildRewardLiveStake(slot, nil); err != nil {
+	if err := cfg.Database.RebuildRewardLiveStake(ctx, slot, nil); err != nil {
 		return fmt.Errorf("rebuilding reward live stake: %w", err)
 	}
 	progress(ImportProgress{
@@ -751,6 +823,7 @@ func ImportLedgerState(
 			return fmt.Errorf("setting tip: %w", err)
 		}
 		if err := setCheckpoint(
+			ctx,
 			cfg, models.ImportPhaseTip,
 		); err != nil {
 			return err
@@ -790,8 +863,11 @@ func validateReconcileImportConfig(cfg ImportConfig) error {
 	return nil
 }
 
-func hasActivePoolsInDatabase(cfg ImportConfig) (bool, error) {
-	txn := cfg.Database.MetadataTxn(false)
+func hasActivePoolsInDatabase(
+	ctx context.Context,
+	cfg ImportConfig,
+) (bool, error) {
+	txn := cfg.Database.MetadataTxn(ctx, false)
 	defer txn.Release()
 	store := cfg.Database.Metadata()
 	pools, err := store.GetActivePoolKeyHashes(txn.Metadata())
@@ -803,12 +879,12 @@ func hasActivePoolsInDatabase(cfg ImportConfig) (bool, error) {
 
 // setCheckpoint persists the completed phase if resume tracking
 // is enabled (ImportKey is set).
-func setCheckpoint(cfg ImportConfig, phase string) error {
+func setCheckpoint(ctx context.Context, cfg ImportConfig, phase string) error {
 	if cfg.ImportKey == "" {
 		return nil
 	}
 	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(true)
+	txn := cfg.Database.MetadataTxn(ctx, true)
 	defer txn.Release()
 
 	err := store.SetImportCheckpoint(
@@ -898,7 +974,7 @@ func importUTxOs(
 			)
 		}
 
-		txn := cfg.Database.Transaction(true)
+		txn := cfg.Database.Transaction(ctx, true)
 		defer txn.Release()
 
 		var err error
@@ -1036,7 +1112,7 @@ func importCertState(
 	cfg ImportConfig,
 	slot uint64,
 	progress func(ImportProgress),
-) (int, error) {
+) (int, []models.StakeCredentialRef, error) {
 	cfg.Logger.Info(
 		"parsing cert state",
 		"component", "ledgerstate",
@@ -1045,7 +1121,7 @@ func importCertState(
 	certState, err := ParseCertState(cfg.State.CertStateData)
 	if err != nil {
 		if certState == nil {
-			return 0, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"parsing cert state: %w", err,
 			)
 		}
@@ -1055,7 +1131,7 @@ func importCertState(
 		// reconcile forbids checkpoint resume, so a re-run fails here again —
 		// tell the operator how to get unstuck instead of looping.
 		if cfg.Reconcile {
-			return 0, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"parsing cert state for reconcile: %w; catch-up cannot "+
 					"continue with a partial cert state and the database may "+
 					"contain a partial import — perform a full Mithril "+
@@ -1066,7 +1142,7 @@ func importCertState(
 		// A skipped or partially decoded entry would import an account,
 		// pool or DRep set that differs from the ledger state, and every
 		// stake distribution and reward derived from it would be wrong.
-		return 0, fmt.Errorf(
+		return 0, nil, fmt.Errorf(
 			"parsing cert state: %w; the ledger state cannot be "+
 				"imported with skipped or partially decoded entries",
 			err,
@@ -1108,15 +1184,27 @@ func importCertState(
 	}
 
 	// Import accounts
+	var importedAccounts []models.StakeCredentialRef
 	if len(certState.Accounts) > 0 {
 		if err := importAccounts(
 			ctx, cfg, certState.Accounts, slot,
 		); err != nil {
-			return 0, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"importing accounts: %w",
 				err,
 			)
 		}
+		// importAccounts has already validated every entry's credential type
+		// (it errors out above otherwise), so converting again here cannot
+		// fail in practice; still handled rather than ignored, since a
+		// dropped credential here would silently widen the "untouched"
+		// exemption DeleteAccountRewardJournalForCredentialsAfterSlot relies
+		// on for coverage it does not have.
+		refs, refsErr := accountCredentialRefs(certState.Accounts)
+		if refsErr != nil {
+			return 0, nil, refsErr
+		}
+		importedAccounts = refs
 		progress(ImportProgress{
 			Stage:   "accounts",
 			Current: len(certState.Accounts),
@@ -1136,7 +1224,7 @@ func importCertState(
 			ctx, cfg, certState.Pools, slot,
 			certState.PendingPoolRetirements,
 		); err != nil {
-			return 0, fmt.Errorf("importing pools: %w", err)
+			return 0, nil, fmt.Errorf("importing pools: %w", err)
 		}
 		importedPools = len(certState.Pools)
 		progress(ImportProgress{
@@ -1156,7 +1244,7 @@ func importCertState(
 		if err := importDReps(
 			ctx, cfg, certState.DReps, slot,
 		); err != nil {
-			return 0, fmt.Errorf("importing DReps: %w", err)
+			return 0, nil, fmt.Errorf("importing DReps: %w", err)
 		}
 		progress(ImportProgress{
 			Stage:   "dreps",
@@ -1170,15 +1258,79 @@ func importCertState(
 		})
 	}
 	if err := persistImportedCommitteeCertificates(
+		ctx,
 		cfg.Database,
 		certState,
 		snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
 		nil,
 	); err != nil {
-		return 0, fmt.Errorf("importing committee authorizations: %w", err)
+		return 0, nil, fmt.Errorf("importing committee authorizations: %w", err)
 	}
 
-	return importedPools, nil
+	return importedPools, importedAccounts, nil
+}
+
+// accountCredentialRefs converts parsed accounts to the stake credential
+// refs cert-state import writes them under.
+func accountCredentialRefs(
+	accounts []ParsedAccount,
+) ([]models.StakeCredentialRef, error) {
+	refs := make([]models.StakeCredentialRef, 0, len(accounts))
+	for i := range accounts {
+		tag, err := models.CredentialTagFromUint(
+			uint(accounts[i].StakingKey.Type),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"resolving imported account %x credential type %d: %w",
+				accounts[i].StakingKey.Hash,
+				accounts[i].StakingKey.Type,
+				err,
+			)
+		}
+		refs = append(
+			refs,
+			models.NewStakeCredentialRef(tag, accounts[i].StakingKey.Hash),
+		)
+	}
+	return refs, nil
+}
+
+// rollbackResumedAccountRewardJournal deletes post-anchor reward journal
+// rows for the snapshot's accounts when a resumed import skips the
+// cert-state phase. The accounts are re-derived from the snapshot's cert
+// state, since the phase that returned them ran in an earlier process.
+func rollbackResumedAccountRewardJournal(
+	ctx context.Context,
+	cfg ImportConfig,
+	slot uint64,
+) error {
+	certState, err := ParseCertState(cfg.State.CertStateData)
+	if err != nil {
+		if certState == nil {
+			return fmt.Errorf(
+				"parsing cert state for resumed journal rollback: %w", err,
+			)
+		}
+		cfg.Logger.Warn(
+			"cert state parse warnings",
+			"component", "ledgerstate",
+			"warning", err.Error(),
+		)
+	}
+	refs, err := accountCredentialRefs(certState.Accounts)
+	if err != nil {
+		return err
+	}
+	if err := cfg.Database.DeleteAccountRewardJournalForCredentialsAfterSlot(
+		ctx, slot, refs, nil,
+	); err != nil {
+		return fmt.Errorf(
+			"rolling back post-anchor account reward journal: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 // importAccounts imports parsed accounts into the metadata store.
@@ -1197,7 +1349,7 @@ func importAccounts(
 	const accountBatchSize = 10000
 
 	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(true)
+	txn := cfg.Database.MetadataTxn(ctx, true)
 	defer func() {
 		if txn != nil {
 			txn.Release()
@@ -1269,7 +1421,7 @@ func importAccounts(
 			}
 			inBatch = 0
 			txn.Release()
-			txn = cfg.Database.MetadataTxn(true)
+			txn = cfg.Database.MetadataTxn(ctx, true)
 		}
 	}
 
@@ -1303,7 +1455,7 @@ func importPools(
 	const poolBatchSize = 5000
 
 	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(true)
+	txn := cfg.Database.MetadataTxn(ctx, true)
 	defer func() {
 		if txn != nil {
 			txn.Release()
@@ -1422,7 +1574,7 @@ func importPools(
 			}
 			inBatch = 0
 			txn.Release()
-			txn = cfg.Database.MetadataTxn(true)
+			txn = cfg.Database.MetadataTxn(ctx, true)
 		}
 	}
 
@@ -1471,7 +1623,7 @@ func importPendingPoolRetirements(
 	slices.Sort(epochs)
 
 	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(true)
+	txn := cfg.Database.MetadataTxn(ctx, true)
 	defer txn.Release()
 	metaTxn := txn.Metadata()
 
@@ -1588,7 +1740,7 @@ func importDReps(
 	const drepBatchSize = 10000
 
 	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(true)
+	txn := cfg.Database.MetadataTxn(ctx, true)
 	defer func() {
 		if txn != nil {
 			txn.Release()
@@ -1655,7 +1807,7 @@ func importDReps(
 			}
 			inBatch = 0
 			txn.Release()
-			txn = cfg.Database.MetadataTxn(true)
+			txn = cfg.Database.MetadataTxn(ctx, true)
 		}
 	}
 
@@ -1776,6 +1928,7 @@ func importSnapShots(
 		)
 
 		if err := persistImportedSnapshot(
+			ctx,
 			cfg,
 			slot,
 			st,
@@ -1833,6 +1986,7 @@ func importSnapShots(
 			slot,
 		)
 		if err := persistImportedActivePoolDistribution(
+			ctx,
 			cfg,
 			activeSnapshots,
 		); err != nil {
@@ -1877,6 +2031,7 @@ func importSnapShots(
 	}
 
 	if err := seedImportedRewardBasis(
+		ctx,
 		cfg, snapshots, epoch, slot,
 	); err != nil {
 		return fmt.Errorf("seeding imported reward inputs: %w", err)
@@ -1900,12 +2055,13 @@ func importSnapShots(
 // a resume where cert state completed in an earlier run, that meant deriving
 // against an empty pool table.
 func seedImportedRewardBasis(
+	ctx context.Context,
 	cfg ImportConfig,
 	snapshots *ParsedSnapShots,
 	epoch uint64,
 	slot uint64,
 ) error {
-	txn := cfg.Database.MetadataTxn(true)
+	txn := cfg.Database.MetadataTxn(ctx, true)
 	defer func() {
 		if txn != nil {
 			txn.Release()
@@ -2046,13 +2202,14 @@ func seedImportedRewardBasis(
 }
 
 func persistImportedSnapshot(
+	ctx context.Context,
 	cfg ImportConfig,
 	slot uint64,
 	st snapshotImportTarget,
 	poolSnapshots []*models.PoolStakeSnapshot,
 ) error {
 	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(true)
+	txn := cfg.Database.MetadataTxn(ctx, true)
 	defer txn.Release()
 	metaTxn := txn.Metadata()
 
@@ -2091,6 +2248,7 @@ func persistImportedSnapshot(
 		// DRep-delegation state is persisted.
 		if st.targetEpoch == cfg.State.Epoch {
 			if err := cfg.Database.ResolvePoolRewardAccountAutoVotes(
+				ctx,
 				poolSnapshots, txn,
 			); err != nil {
 				return fmt.Errorf(
@@ -2155,11 +2313,12 @@ func persistImportedSnapshot(
 }
 
 func persistImportedActivePoolDistribution(
+	ctx context.Context,
 	cfg ImportConfig,
 	poolSnapshots []*models.PoolStakeSnapshot,
 ) error {
 	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(true)
+	txn := cfg.Database.MetadataTxn(ctx, true)
 	defer txn.Release()
 	metaTxn := txn.Metadata()
 
@@ -2259,7 +2418,7 @@ func synthesizeRetiredScheduledPools(
 	}
 
 	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(true)
+	txn := cfg.Database.MetadataTxn(ctx, true)
 	defer txn.Release()
 	metaTxn := txn.Metadata()
 
@@ -2514,7 +2673,7 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 	)
 
 	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(true)
+	txn := cfg.Database.MetadataTxn(ctx, true)
 	defer txn.Release()
 
 	oTip := ochainsync.Tip{
@@ -3294,7 +3453,7 @@ func importPParams(
 	)
 
 	store := cfg.Database.Metadata()
-	txn := cfg.Database.MetadataTxn(true)
+	txn := cfg.Database.MetadataTxn(ctx, true)
 	defer txn.Release()
 
 	pparamsCbor := []byte(cfg.State.PParamsData)
@@ -3546,7 +3705,7 @@ func importGovState(
 	// Import constitution
 	if govState.Constitution != nil {
 		if err := func() error {
-			txn := cfg.Database.MetadataTxn(true)
+			txn := cfg.Database.MetadataTxn(ctx, true)
 			defer txn.Release()
 			if err := store.SetConstitution(
 				&models.Constitution{
@@ -3581,7 +3740,7 @@ func importGovState(
 	// Import committee members and quorum.
 	if len(govState.Committee) > 0 || govState.CommitteeQuorum != nil {
 		if err := func() error {
-			txn := cfg.Database.MetadataTxn(true)
+			txn := cfg.Database.MetadataTxn(ctx, true)
 			defer txn.Release()
 			if len(govState.Committee) > 0 {
 				members := make(
@@ -3694,7 +3853,7 @@ func importGovState(
 		}
 		ratifiedCommitteeActions := 0
 		if err := func() error {
-			txn := cfg.Database.MetadataTxn(true)
+			txn := cfg.Database.MetadataTxn(ctx, true)
 			defer txn.Release()
 			metaTxn := txn.Metadata()
 			for position, prop := range govState.Proposals {
@@ -3803,6 +3962,7 @@ func importGovState(
 	// don't surface them otherwise.
 	if govState.PrevGovActionIds != nil {
 		seeded, err := seedPrevGovActionIds(
+			ctx,
 			cfg,
 			store,
 			govState,
@@ -3822,7 +3982,7 @@ func importGovState(
 			)
 		}
 		if err := verifyPrevGovActionIdsSeeded(
-			cfg, store, govState.PrevGovActionIds,
+			ctx, cfg, store, govState.PrevGovActionIds,
 		); err != nil {
 			return fmt.Errorf(
 				"verifying per-purpose governance roots: %w",
@@ -3898,6 +4058,7 @@ func committeeMemberKey(member ParsedCommitteeMember) string {
 }
 
 func persistImportedCommitteeCertificates(
+	ctx context.Context,
 	db *database.Database,
 	certState *ParsedCertState,
 	slot uint64,
@@ -3952,6 +4113,7 @@ func persistImportedCommitteeCertificates(
 	hash := lcommon.Blake2b256Hash(seed)
 	tx := importedCommitteeTransaction{hash: hash, certs: certs}
 	return db.SetTransactionMetadataOnly(
+		ctx,
 		&tx, ocommon.Point{Slot: slot, Hash: hash[:]}, 0, map[int]uint64{}, txn,
 	)
 }
@@ -3991,6 +4153,7 @@ func govActionIdKey(txHash []byte, actionIdx uint32) string {
 // a higher enacted slot/epoch) sorts above this synthetic row in
 // GetLastEnactedGovernanceProposal's ORDER BY.
 func seedPrevGovActionIds(
+	ctx context.Context,
 	cfg ImportConfig,
 	store metadata.MetadataStore,
 	govState *ParsedGovState,
@@ -4033,7 +4196,7 @@ func seedPrevGovActionIds(
 		},
 	}
 
-	txn := cfg.Database.MetadataTxn(true)
+	txn := cfg.Database.MetadataTxn(ctx, true)
 	defer txn.Release()
 	metaTxn := txn.Metadata()
 
@@ -4112,7 +4275,7 @@ func seedPrevGovActionIds(
 
 // verifyImportedPurposeRoots parses the snapshot governance state and
 // verifies its per-purpose roots against the database.
-func verifyImportedPurposeRoots(cfg ImportConfig) error {
+func verifyImportedPurposeRoots(ctx context.Context, cfg ImportConfig) error {
 	govState, err := ParseGovState(
 		cfg.State.GovStateData,
 		cfg.State.EraIndex,
@@ -4135,7 +4298,7 @@ func verifyImportedPurposeRoots(cfg ImportConfig) error {
 		return nil
 	}
 	return verifyPrevGovActionIdsSeeded(
-		cfg, cfg.Database.Metadata(), govState.PrevGovActionIds,
+		ctx, cfg, cfg.Database.Metadata(), govState.PrevGovActionIds,
 	)
 }
 
@@ -4145,6 +4308,7 @@ func verifyImportedPurposeRoots(cfg ImportConfig) error {
 // enacted row left above the snapshot that outranks the seed, is only
 // visible later as chained proposals that never ratify.
 func verifyPrevGovActionIdsSeeded(
+	ctx context.Context,
 	cfg ImportConfig,
 	store metadata.MetadataStore,
 	prev *ParsedPrevGovActionIds,
@@ -4174,7 +4338,7 @@ func verifyPrevGovActionIdsSeeded(
 			[]uint8{govActionTypeNewConstitution},
 		},
 	}
-	txn := cfg.Database.MetadataTxn(false)
+	txn := cfg.Database.MetadataTxn(ctx, false)
 	defer txn.Release()
 	for _, r := range roots {
 		if r.id == nil {

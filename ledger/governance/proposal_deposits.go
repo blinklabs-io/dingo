@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -27,11 +28,12 @@ type activeProposalDeposit struct {
 }
 
 func activeProposalDepositsByReturnCredential(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	currentEpoch uint64,
 ) (map[string]activeProposalDeposit, error) {
-	proposals, err := db.GetActiveGovernanceProposals(currentEpoch, txn)
+	proposals, err := db.GetActiveGovernanceProposals(ctx, currentEpoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf("get active governance proposals: %w", err)
 	}
@@ -64,6 +66,7 @@ func activeProposalDepositsByReturnCredential(
 }
 
 func accountsForProposalDeposits(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	deposits map[string]activeProposalDeposit,
@@ -74,7 +77,7 @@ func accountsForProposalDeposits(
 	}
 	// An inactive reward account has no DRep or SPO voting power, deposits
 	// included, matching the account-state checks in Conway's pulser.
-	accounts, err := db.GetAccountsByCredential(refs, false, txn)
+	accounts, err := db.GetAccountsByCredential(ctx, refs, false, txn)
 	if err != nil {
 		return nil, fmt.Errorf("get proposal return accounts: %w", err)
 	}
@@ -109,23 +112,25 @@ func proposalDepositAccountActive(
 // entirely, mirroring tallyDRepVotes' treatment of Abstain stake as outside
 // every DRep's power (and every other bucket).
 func ActiveProposalDepositDRepPower(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	currentEpoch uint64,
 	expiryEpoch uint64,
 ) (map[string]uint64, uint64, error) {
-	return activeProposalDepositDRepPowerAtEpochs(
+	return activeProposalDepositDRepPowerAtEpochs(ctx,
 		db, txn, currentEpoch, expiryEpoch,
 	)
 }
 
 func activeProposalDepositDRepPowerAtEpochs(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	activeProposalEpoch uint64,
 	expiryEpoch uint64,
 ) (map[string]uint64, uint64, error) {
-	deposits, err := activeProposalDepositsByReturnCredential(
+	deposits, err := activeProposalDepositsByReturnCredential(ctx,
 		db, txn, activeProposalEpoch,
 	)
 	if err != nil {
@@ -135,7 +140,7 @@ func activeProposalDepositDRepPowerAtEpochs(
 		return nil, 0, nil
 	}
 
-	accounts, err := accountsForProposalDeposits(db, txn, deposits)
+	accounts, err := accountsForProposalDeposits(ctx, db, txn, deposits)
 	if err != nil {
 		return nil, 0, err
 	}

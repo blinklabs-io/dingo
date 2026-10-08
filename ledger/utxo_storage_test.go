@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -109,7 +110,7 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 		}
 
 		// First, store the block
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		err = txn.Do(func(txn *database.Txn) error {
 			// Store block CBOR
 			blockRecord := models.Block{
@@ -153,7 +154,7 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 				}
 
 				// Store the transaction - offsets MUST be available
-				err := db.SetTransaction(
+				err := db.SetTransaction(context.Background(),
 					tx,
 					point,
 					uint32(txIdx),
@@ -224,7 +225,7 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 	var successCount int
 
 	for _, utxoRef := range storedUtxos {
-		txn := db.Transaction(false)
+		txn := db.Transaction(context.Background(), false)
 
 		// Step 1: Check if metadata exists
 		metaTxn := txn.Metadata()
@@ -432,7 +433,7 @@ func nextProducingBlock(
 			continue
 		}
 
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		err = txn.Do(func(txn *database.Txn) error {
 			if _, err := tryStoreBlockFirstTx(db, txn, block, immBlock.Cbor); err != nil {
 				return err
@@ -503,7 +504,7 @@ func tryStoreBlockFirstTx(
 		return nil, errors.New("block has no transactions")
 	}
 	tx := txs[0]
-	if err := db.SetTransaction(
+	if err := db.SetTransaction(context.Background(),
 		tx,
 		point,
 		0,
@@ -531,7 +532,7 @@ func TestUtxoByRefAfterSetTransaction(t *testing.T) {
 	block, blockCbor := nextProducingBlock(t, db, iter)
 
 	// Store block and verify UTxO retrieval in same transaction
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
 		tx := storeBlockFirstTx(t, db, txn, block, blockCbor)
 
@@ -543,7 +544,7 @@ func TestUtxoByRefAfterSetTransaction(t *testing.T) {
 			t.Logf("Attempting to retrieve %s#%d within same transaction...",
 				hex.EncodeToString(txId[:8]), outputIdx)
 
-			retrieved, err := db.UtxoByRef(txId, outputIdx, txn)
+			retrieved, err := db.UtxoByRef(context.Background(), txId, outputIdx, txn)
 			if err != nil {
 				t.Errorf("Failed to retrieve %s#%d: %v",
 					hex.EncodeToString(txId[:8]), outputIdx, err)
@@ -571,7 +572,7 @@ func TestUtxosByRefsAfterSetTransaction(t *testing.T) {
 	iter := newUtxoStorageTestIterator(t)
 	block, blockCbor := nextProducingBlock(t, db, iter)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
 		tx := storeBlockFirstTx(t, db, txn, block, blockCbor)
 		produced := tx.Produced()
@@ -591,7 +592,7 @@ func TestUtxosByRefsAfterSetTransaction(t *testing.T) {
 		bogusHash := make([]byte, 32)
 		refs = append(refs, models.UtxoId{Hash: bogusHash, Idx: 9999})
 
-		results, err := db.UtxosByRefs(refs, txn)
+		results, err := db.UtxosByRefs(context.Background(), refs, txn)
 		if err != nil {
 			return err
 		}
@@ -689,7 +690,7 @@ func TestUtxoByRefRecoversMissingBlobFromProducerBlock(t *testing.T) {
 				txId := tx.Hash().Bytes()
 				outputIdx := expectedUtxo.Id.Index()
 
-				txn := db.Transaction(true)
+				txn := db.Transaction(context.Background(), true)
 				err = txn.Do(func(txn *database.Txn) error {
 					blockRecord := models.Block{
 						Slot:     point.Slot,
@@ -707,7 +708,7 @@ func TestUtxoByRefRecoversMissingBlobFromProducerBlock(t *testing.T) {
 					if err != nil {
 						return fmt.Errorf("compute offsets: %w", err)
 					}
-					return db.SetTransaction(
+					return db.SetTransaction(context.Background(),
 						tx,
 						point,
 						0,
@@ -723,7 +724,7 @@ func TestUtxoByRefRecoversMissingBlobFromProducerBlock(t *testing.T) {
 				})
 				require.NoError(t, err)
 
-				deleteTxn := db.Transaction(true)
+				deleteTxn := db.Transaction(context.Background(), true)
 				err = deleteTxn.Do(func(txn *database.Txn) error {
 					if err := db.Blob().DeleteUtxo(txn.Blob(), txId, outputIdx); err != nil {
 						return err
@@ -741,9 +742,9 @@ func TestUtxoByRefRecoversMissingBlobFromProducerBlock(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, metaUtxo)
 
-				lookupTxn := db.Transaction(true)
+				lookupTxn := db.Transaction(context.Background(), true)
 				err = lookupTxn.Do(func(txn *database.Txn) error {
-					retrieved, err := db.UtxoByRef(txId, outputIdx, txn)
+					retrieved, err := db.UtxoByRef(context.Background(), txId, outputIdx, txn)
 					require.NoError(t, err)
 					require.Equal(t, expectedUtxo.Output.Cbor(), retrieved.Cbor)
 
@@ -755,7 +756,7 @@ func TestUtxoByRefRecoversMissingBlobFromProducerBlock(t *testing.T) {
 					require.NoError(t, err)
 
 					// A second UtxoByRef should succeed without recovery.
-					retrieved2, err := db.UtxoByRef(txId, outputIdx, txn)
+					retrieved2, err := db.UtxoByRef(context.Background(), txId, outputIdx, txn)
 					require.NoError(t, err)
 					require.Equal(
 						t,
