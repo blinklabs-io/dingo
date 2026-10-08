@@ -105,6 +105,11 @@ func TestDevnetValidatesRootFlagsAndStateBeforeCreatingLock(t *testing.T) {
 			require.Equal(t, 1, run())
 			require.Contains(t, output.String(), test.wantError)
 			requirePathMissing(t, filepath.Join(runDir, devnetStateLock))
+			if test.state == "unmarked" {
+				data, err := os.ReadFile(filepath.Join(runDir, "keep.txt"))
+				require.NoError(t, err)
+				require.Equal(t, "user data", string(data))
+			}
 		})
 	}
 }
