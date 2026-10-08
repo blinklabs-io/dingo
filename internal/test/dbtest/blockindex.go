@@ -15,6 +15,7 @@
 package dbtest
 
 import (
+	"context"
 	"encoding/binary"
 	"testing"
 
@@ -68,7 +69,7 @@ func RunCloudBlockNumberBoundWork(
 	for _, n := range []uint64{200, 75_000} {
 		seedTo(n)
 		lists, listed := fc.Requests("LIST"), fc.Listed()
-		bound, err := database.ResolveBlockNumberBound(db)
+		bound, err := database.ResolveBlockNumberBound(context.Background(), db)
 		require.NoError(t, err)
 		lists, listed = fc.Requests("LIST")-lists, fc.Listed()-listed
 

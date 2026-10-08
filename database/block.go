@@ -353,6 +353,73 @@ func BlockMetadataByPointLocalTxn(
 	return metadata, nil
 }
 
+// ErrAncestorMissing reports that a block's parent cannot be resolved from the
+// local store, so the chain behind it cannot be followed. It deliberately does
+// not wrap models.ErrBlockNotFound: callers treat that as "no such block on
+// the chain", which a broken link does not establish.
+var ErrAncestorMissing = errors.New("ancestor block missing from local store")
+
+// BlockParentPointTxn returns the point of the block that point extends, read
+// from point's retained metadata and the hash index without loading either
+// block body. Following it from a block walks that block's own chain, which a
+// lookup by slot cannot do: the blob store keeps blocks rollback abandoned, so
+// the highest block below a slot may belong to another fork.
+//
+// ok is false when point is the first block this store holds: its metadata
+// names no parent, or names one the store never held and nothing lies below
+// it (a chain's first block names the genesis hash). Any other unresolvable
+// link is ErrAncestorMissing.
+func BlockParentPointTxn(
+	txn *Txn,
+	point ocommon.Point,
+) (parent ocommon.Point, ok bool, err error) {
+	metadata, err := BlockMetadataByPointLocalTxn(txn, point)
+	if err != nil {
+		return ocommon.Point{}, false, fmt.Errorf(
+			"%w: block at slot %d hash %x: %s",
+			ErrAncestorMissing, point.Slot, point.Hash, err.Error(),
+		)
+	}
+	if len(metadata.PrevHash) == 0 {
+		return ocommon.Point{}, false, nil
+	}
+	key, err := txn.BlobStore().Get(
+		txn.Blob(), types.BlockHashIndexKey(metadata.PrevHash),
+	)
+	if err != nil {
+		if !errors.Is(err, types.ErrBlobKeyNotFound) {
+			return ocommon.Point{}, false, err
+		}
+		if _, belowErr := BlockBeforeSlotTxn(txn, point.Slot); errors.Is(
+			belowErr, models.ErrBlockNotFound,
+		) {
+			return ocommon.Point{}, false, nil
+		} else if belowErr != nil {
+			return ocommon.Point{}, false, belowErr
+		}
+		return ocommon.Point{}, false, fmt.Errorf(
+			"%w: parent %x of block at slot %d is not indexed",
+			ErrAncestorMissing, metadata.PrevHash, point.Slot,
+		)
+	}
+	slot, hash, err := types.ParseBlockBlobKey(key)
+	if err != nil {
+		return ocommon.Point{}, false, fmt.Errorf(
+			"parent of block at slot %d: %w", point.Slot, err,
+		)
+	}
+	// A parent at or above its child is corruption, and following it would
+	// loop rather than walk back.
+	if !bytes.Equal(hash, metadata.PrevHash) || slot >= point.Slot {
+		return ocommon.Point{}, false, fmt.Errorf(
+			"hash index entry for %x names slot %d hash %x, "+
+				"not a parent of the block at slot %d",
+			metadata.PrevHash, slot, hash, point.Slot,
+		)
+	}
+	return ocommon.Point{Slot: slot, Hash: hash}, true, nil
+}
+
 // BlockPointBySlotTxn returns the canonical point at slot without loading
 // block CBOR. Retained history-expiry tombstones are valid because their bp
 // keys, metadata, and canonical block-index entries remain present.
