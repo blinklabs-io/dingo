@@ -135,7 +135,7 @@ func RegisterCardanoTools(
 	addressLookups ...utxoAddressLookup,
 ) {
 	if queryTimeout <= 0 {
-		queryTimeout = 5 * time.Second
+		queryTimeout = defaultQueryTimeout
 	}
 
 	evaluationGate := make(chan struct{}, 1)
@@ -1179,7 +1179,7 @@ func RegisterCardanoTools(
 			evalCtx,
 			evaluationGate,
 			func() (evaluationResult, error) {
-				fee, total, redeemers, err := ls.EvaluateTx(tx)
+				fee, total, redeemers, err := ls.EvaluateTxContext(evalCtx, tx)
 				return evaluationResult{fee, total, redeemers}, err
 			},
 		)

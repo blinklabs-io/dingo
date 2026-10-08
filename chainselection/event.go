@@ -84,6 +84,13 @@ type PeerTipUpdateEvent struct {
 	Admitted    bool
 	// Rejected removes the candidate after definite ledger rejection.
 	Rejected bool
+	// ObservedPrevHash is the hash of the parent the delivered header names.
+	// It lets the selector require that far frontiers claimed by one
+	// connection form a connected header chain; empty means unknown.
+	ObservedPrevHash []byte
+	// ObservedBoundary is set when the delivered header is a Byron epoch
+	// boundary block, whose block number equals its parent's.
+	ObservedBoundary bool
 }
 
 // PeerActivityEvent is published when a peer has recent protocol activity

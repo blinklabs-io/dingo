@@ -184,6 +184,14 @@ type ChainSelectorConfig struct {
 	// zero value) is replaced with defaultSwitchBackCooldown by
 	// NewChainSelector, matching EvaluationInterval and StaleTipThreshold.
 	SwitchBackCooldown time.Duration
+	// OnGenesisDensityDisconnect is called, outside the selector lock, once
+	// per peer the Genesis Density Disconnector finds provably sparser than
+	// another candidate chain. The composition layer disconnects and denies
+	// the peer. The disconnector is inactive while this is nil, outside
+	// Genesis mode, or while GenesisWindowSlots is zero: the 3k-slot
+	// fallback is too short to compare densities. Evaluation runs at most
+	// once per GenesisDensityEvaluationInterval.
+	OnGenesisDensityDisconnect func(GenesisDensityDisconnect)
 }
 
 // ChainSelector tracks chain tips from multiple peers and selects the best
@@ -208,15 +216,19 @@ type ChainSelector struct {
 	// frontier that exceeded the catch-up plausibility ceiling. Entries are
 	// provisional: they never enter peerTips and so never influence chain
 	// selection, corroboration, or the Genesis exit horizon by themselves.
-	// They exist only so that a second connection delivering a similar far
-	// frontier is accepted; the first claim is then marked corroborated and
-	// bounds that connection's next update -- see
-	// corroborateFarTipClaimLocked. Bounded to maxTrackedPeers entries and
-	// pruned in deletePeerLocked. Guarded by mutex.
-	farTipClaims map[ouroboros.ConnectionId]farTipClaim
-	mutex        sync.RWMutex
-	ctx          context.Context
-	cancel       context.CancelFunc
+	// They exist so that a second connection delivering a similar far
+	// frontier is accepted, the first claim then being marked corroborated
+	// and bounding that connection's next update, and so that a lone
+	// connection's run of connected headers can be counted. An accepted lone
+	// claim remains here alongside its peer tip so it can be revoked, but is
+	// never a reference for another peer -- see corroborateFarTipClaimLocked.
+	// Bounded to maxTrackedPeers entries and pruned in deletePeerLocked.
+	// Guarded by mutex.
+	farTipClaims        map[ouroboros.ConnectionId]farTipClaim
+	pendingFarTipClaims map[ouroboros.ConnectionId]farTipClaim
+	mutex               sync.RWMutex
+	ctx                 context.Context
+	cancel              context.CancelFunc
 
 	// Anti-flap incumbent pin state (guarded by mutex).
 	//
@@ -258,6 +270,13 @@ type ChainSelector struct {
 	// recordSwitchAwayLocked.
 	lastDiscretionarySwitchAt time.Time
 
+	// lastGenesisDensityEval is when the Genesis Density Disconnector last
+	// ran; genesisDensityDisconnected holds peers already reported so a peer
+	// whose connection has not yet closed is not reported on every pass.
+	// Pruned in deletePeerLocked. Guarded by mutex.
+	lastGenesisDensityEval     time.Time
+	genesisDensityDisconnected map[ouroboros.ConnectionId]struct{}
+
 	// lastCorroborationFailedConn dedups GenesisCorroborationFailedEvent so a
 	// persistently uncorroborated fast source does not emit an event on every
 	// evaluation. Reset when the leading density source becomes corroborated
@@ -291,7 +310,8 @@ type ChainSelector struct {
 }
 
 type peerTipAdmissionCandidate struct {
-	update PeerTipUpdateEvent
+	update    PeerTipUpdateEvent
+	plausible bool
 }
 
 func clonePeerChainTip(peerTip *PeerChainTip) *PeerChainTip {
@@ -349,6 +369,17 @@ func (cs *ChainSelector) applyPeerTipAdmissionUpdateLocked(
 		update.ObservedTip,
 		safeAddUint64(cs.securityParam, 1),
 	)
+}
+
+func cloneFarTipClaims(
+	claims map[ouroboros.ConnectionId]farTipClaim,
+) map[ouroboros.ConnectionId]farTipClaim {
+	clone := make(map[ouroboros.ConnectionId]farTipClaim, len(claims))
+	for connId, claim := range claims {
+		claim.hash = bytes.Clone(claim.hash)
+		clone[connId] = claim
+	}
+	return clone
 }
 
 // genesisSelectionSnapshot is the immutable pair GenesisSelectionState
@@ -412,6 +443,8 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		peerTips:                make(map[ouroboros.ConnectionId]*PeerChainTip),
 		pendingPeerTips:         make(map[ouroboros.ConnectionId][]peerTipAdmissionCandidate),
 		pendingPeerTipFrontiers: make(map[ouroboros.ConnectionId]*PeerChainTip),
+		farTipClaims:            make(map[ouroboros.ConnectionId]farTipClaim),
+		pendingFarTipClaims:     make(map[ouroboros.ConnectionId]farTipClaim),
 		committedPeerTips:       make(map[ouroboros.ConnectionId]uint64),
 		eligible:                make(map[ouroboros.ConnectionId]bool),
 		priority:                make(map[ouroboros.ConnectionId]int),
@@ -455,7 +488,7 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 // to relevant events.
 func (cs *ChainSelector) Start(ctx context.Context) error {
 	cs.ctx, cs.cancel = context.WithCancel(ctx)
-	go cs.evaluationLoop()
+	go cs.evaluationLoop() //nolint:contextcheck // evaluationLoop observes the stored lifecycle context
 	return nil
 }
 
@@ -476,7 +509,7 @@ func (cs *ChainSelector) genesisWindowSlotsLocked() uint64 {
 			safeAddUint64(cs.securityParam, cs.securityParam),
 		)
 	}
-	return defaultGenesisWindowSlots
+	return DefaultGenesisWindowSlots
 }
 
 // bestKnownGenesisSlotLocked returns the exit horizon: the network tip slot the
@@ -648,6 +681,21 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 	vrfOutput []byte,
 	praosView PraosTiebreakerView,
 ) bool {
+	return cs.updatePeerTipObservedLinked(
+		connId, tip, observedTip, vrfOutput, praosView, deliveredLink{},
+	)
+}
+
+// updatePeerTipObservedLinked is updatePeerTipObservedPraosView for a header
+// whose parent hash is known, which a lone far frontier needs to be accepted.
+func (cs *ChainSelector) updatePeerTipObservedLinked(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+	vrfOutput []byte,
+	praosView PraosTiebreakerView,
+	link deliveredLink,
+) bool {
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(connId) {
 		cs.config.Logger.Debug(
@@ -662,12 +710,22 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 	accepted := true
 	var evictedConn *ouroboros.ConnectionId
 	var modeChanged bool
+	var revoke bool
 
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 
-		if !cs.checkPeerTipPlausibleLocked(connId, tip, observedTip) {
+		if cs.loneFrontierBrokenLocked(
+			connId, observedTip, link, cs.farTipClaims,
+		) {
+			revoke = true
+			accepted = false
+			return
+		}
+		if !cs.checkPeerTipPlausibleLocked(
+			connId, tip, observedTip, link,
+		) {
 			accepted = false
 			return
 		}
@@ -758,6 +816,7 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 			// No best peer yet, trigger evaluation
 			shouldEvaluate = true
 		}
+		cs.rebuildPendingAdmissionStateLocked()
 	}()
 
 	// Publish eviction event outside the lock to prevent deadlock
@@ -769,6 +828,9 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 		cs.publishSelection(PeerEvictedEventType, evt)
 	}
 
+	if revoke {
+		cs.RemovePeer(connId)
+	}
 	if !accepted {
 		return false
 	}
@@ -815,34 +877,39 @@ func (cs *ChainSelector) PreparePeerTipAdmission(
 				return
 			}
 		}
-		if !cs.checkPeerTipPlausibleLocked(
+		if cs.pendingFarTipClaims == nil {
+			cs.pendingFarTipClaims = cloneFarTipClaims(cs.farTipClaims)
+		}
+		link := deliveredLink{
+			prevHash: update.ObservedPrevHash,
+			boundary: update.ObservedBoundary,
+		}
+		plausible := cs.checkPeerTipPlausibleWithClaimsLocked(
 			update.ConnectionId,
 			update.Tip,
 			update.ObservedTip,
-		) {
+			link,
+			cs.pendingFarTipClaims,
+			true,
+		)
+		claim, hasClaim := cs.pendingFarTipClaims[update.ConnectionId]
+		evidence := hasClaim &&
+			claim.slot == update.ObservedTip.Point.Slot &&
+			bytes.Equal(claim.hash, update.ObservedTip.Point.Hash)
+		if !plausible && !evidence {
+			cs.rebuildPendingAdmissionStateLocked()
 			return
 		}
-		peerTip := cs.pendingPeerTipFrontiers[update.ConnectionId]
-		if peerTip == nil {
-			if previous := cs.peerTips[update.ConnectionId]; previous != nil {
-				peerTip = clonePeerChainTip(previous)
-			} else {
-				peerTip = &PeerChainTip{
-					ConnectionId: update.ConnectionId,
-					nowFn:        cs.nowFn,
-				}
-			}
-			cs.pendingPeerTipFrontiers[update.ConnectionId] = peerTip
-		}
 		update = clonePeerTipUpdate(update)
-		cs.applyPeerTipAdmissionUpdateLocked(peerTip, update)
 		pending = append(pending, peerTipAdmissionCandidate{
-			update: update,
+			update:    update,
+			plausible: plausible,
 		})
 		if len(pending) > maxPendingPeerTipAdmissions {
 			pending = pending[len(pending)-maxPendingPeerTipAdmissions:]
 		}
 		cs.pendingPeerTips[update.ConnectionId] = pending
+		cs.rebuildPendingAdmissionStateLocked()
 		commitImmediately = cs.admittedPeerTipPointLocked(update)
 		accepted = true
 	}()
@@ -888,9 +955,86 @@ func (cs *ChainSelector) rebuildPeerTipAdmissionFrontierLocked(
 		frontier = &PeerChainTip{ConnectionId: connId, nowFn: cs.nowFn}
 	}
 	for _, candidate := range pending {
+		if !candidate.plausible {
+			continue
+		}
 		cs.applyPeerTipAdmissionUpdateLocked(frontier, candidate.update)
 	}
 	cs.pendingPeerTipFrontiers[connId] = frontier
+}
+
+func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
+	type staged struct {
+		connId ouroboros.ConnectionId
+		index  int
+		id     uint64
+	}
+	var stagedUpdates []staged
+	for connId, pending := range cs.pendingPeerTips {
+		for i, candidate := range pending {
+			stagedUpdates = append(stagedUpdates, staged{
+				connId: connId,
+				index:  i,
+				id:     candidate.update.AdmissionID,
+			})
+		}
+	}
+	slices.SortFunc(stagedUpdates, func(a, b staged) int {
+		if result := cmp.Compare(a.id, b.id); result != 0 {
+			return result
+		}
+		return cmp.Compare(a.connId.String(), b.connId.String())
+	})
+	previousFrontiers := cs.pendingPeerTipFrontiers
+	cs.pendingPeerTipFrontiers = make(
+		map[ouroboros.ConnectionId]*PeerChainTip,
+		len(previousFrontiers),
+	)
+	claims := cloneFarTipClaims(cs.farTipClaims)
+	for _, stagedUpdate := range stagedUpdates {
+		pending := cs.pendingPeerTips[stagedUpdate.connId]
+		candidate := &pending[stagedUpdate.index]
+		update := candidate.update
+		plausible := cs.checkPeerTipPlausibleWithClaimsLocked(
+			update.ConnectionId,
+			update.Tip,
+			update.ObservedTip,
+			deliveredLink{
+				prevHash: update.ObservedPrevHash,
+				boundary: update.ObservedBoundary,
+			},
+			claims,
+			true,
+		)
+		claim, hasClaim := claims[update.ConnectionId]
+		evidence := hasClaim && claim.slot == update.ObservedTip.Point.Slot &&
+			bytes.Equal(claim.hash, update.ObservedTip.Point.Hash)
+		candidate.plausible = plausible
+		if !plausible && !evidence {
+			continue
+		}
+		if !plausible {
+			continue
+		}
+		frontier := cs.pendingPeerTipFrontiers[update.ConnectionId]
+		if frontier == nil {
+			if committed := cs.peerTips[update.ConnectionId]; committed != nil {
+				frontier = clonePeerChainTip(committed)
+			} else {
+				frontier = &PeerChainTip{
+					ConnectionId: update.ConnectionId,
+					nowFn:        cs.nowFn,
+				}
+			}
+		}
+		cs.applyPeerTipAdmissionUpdateLocked(frontier, update)
+		if previous := previousFrontiers[update.ConnectionId]; previous != nil {
+			*previous = *frontier
+			frontier = previous
+		}
+		cs.pendingPeerTipFrontiers[update.ConnectionId] = frontier
+	}
+	cs.pendingFarTipClaims = claims
 }
 
 // RejectPeerTipAdmission removes a candidate and later candidate headers from
@@ -917,6 +1061,7 @@ func (cs *ChainSelector) RejectPeerTipAdmission(
 			pruned = true
 		}
 		if pruned {
+			cs.rebuildPendingAdmissionStateLocked()
 			shouldEvaluate = cs.genesisCorroborationActiveLocked()
 		}
 	}()
@@ -998,12 +1143,16 @@ func (cs *ChainSelector) CommitPeerTipAdmission(
 	update PeerTipUpdateEvent,
 ) bool {
 	if update.AdmissionID == 0 {
-		accepted := cs.updatePeerTipObservedPraosView(
+		accepted := cs.updatePeerTipObservedLinked(
 			update.ConnectionId,
 			update.Tip,
 			update.ObservedTip,
 			update.VRFOutput,
 			update.PraosView,
+			deliveredLink{
+				prevHash: update.ObservedPrevHash,
+				boundary: update.ObservedBoundary,
+			},
 		)
 		if !accepted {
 			return false
@@ -1081,6 +1230,44 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 			if candidate.update.AdmissionID != update.AdmissionID {
 				continue
 			}
+			link := deliveredLink{
+				prevHash: candidate.update.ObservedPrevHash,
+				boundary: candidate.update.ObservedBoundary,
+			}
+			if cs.loneFrontierBrokenLocked(
+				update.ConnectionId,
+				candidate.update.ObservedTip,
+				link,
+				cs.farTipClaims,
+			) {
+				cs.deletePeerLocked(update.ConnectionId)
+				cs.rebuildPendingAdmissionStateLocked()
+				shouldEvaluate = true
+				accepted = true
+				return
+			}
+			plausible := cs.checkPeerTipPlausibleWithClaimsLocked(
+				update.ConnectionId,
+				candidate.update.Tip,
+				candidate.update.ObservedTip,
+				link,
+				cs.farTipClaims,
+				false,
+			)
+			cs.committedPeerTips[update.ConnectionId] = update.AdmissionID
+			if i == len(pending)-1 {
+				delete(cs.pendingPeerTips, update.ConnectionId)
+			} else {
+				cs.pendingPeerTips[update.ConnectionId] = append(
+					[]peerTipAdmissionCandidate(nil),
+					pending[i+1:]...,
+				)
+			}
+			cs.rebuildPendingAdmissionStateLocked()
+			accepted = true
+			if !plausible {
+				return
+			}
 			peerTip := cs.peerTips[update.ConnectionId]
 			if peerTip == nil {
 				var ok bool
@@ -1099,17 +1286,6 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 				maxPendingPeerTipAdmissions,
 			)
 			cs.peerTips[update.ConnectionId] = peerTip
-			cs.committedPeerTips[update.ConnectionId] = update.AdmissionID
-			if i == len(pending)-1 {
-				delete(cs.pendingPeerTips, update.ConnectionId)
-				delete(cs.pendingPeerTipFrontiers, update.ConnectionId)
-			} else {
-				cs.pendingPeerTips[update.ConnectionId] = append(
-					[]peerTipAdmissionCandidate(nil),
-					pending[i+1:]...,
-				)
-				cs.rebuildPeerTipAdmissionFrontierLocked(update.ConnectionId)
-			}
 			modeChanged := cs.advanceSelectionModeLocked()
 			trackHashes := cs.genesisCorroborationActiveLocked()
 			switch {
@@ -1142,12 +1318,16 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 		if requireStaged {
 			return false
 		}
-		accepted = cs.updatePeerTipObservedPraosView(
+		accepted = cs.updatePeerTipObservedLinked(
 			update.ConnectionId,
 			update.Tip,
 			update.ObservedTip,
 			update.VRFOutput,
 			update.PraosView,
+			deliveredLink{
+				prevHash: update.ObservedPrevHash,
+				boundary: update.ObservedBoundary,
+			},
 		)
 		if accepted {
 			cs.mutex.Lock()
@@ -1207,6 +1387,23 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 	connId ouroboros.ConnectionId,
 	tip ochainsync.Tip,
 	observedTip ochainsync.Tip,
+	link deliveredLink,
+) bool {
+	if cs.farTipClaims == nil {
+		cs.farTipClaims = make(map[ouroboros.ConnectionId]farTipClaim)
+	}
+	return cs.checkPeerTipPlausibleWithClaimsLocked(
+		connId, tip, observedTip, link, cs.farTipClaims, true,
+	)
+}
+
+func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsLocked(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+	link deliveredLink,
+	claims map[ouroboros.ConnectionId]farTipClaim,
+	includePending bool,
 ) bool {
 	// Reject implausible delivered frontiers that jump too far ahead of a
 	// trusted reference point. Before any local block has been applied,
@@ -1244,9 +1441,11 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 		var advertisedReferenceBlock uint64
 		var maxPlausibleBlock uint64
 		var maxPlausibleAdvertisedBlock uint64
-		prevTip := cs.latestPeerTipCandidateLocked(connId)
-		if prevTip == nil {
-			prevTip = cs.peerTips[connId]
+		prevTip := cs.peerTips[connId]
+		if includePending {
+			if pendingTip := cs.latestPeerTipCandidateLocked(connId); pendingTip != nil {
+				prevTip = pendingTip
+			}
 		}
 		if prevTip != nil && !prevTip.awaitingFirstHeader {
 			// Case 1: known peer — compare against the peer's own
@@ -1254,15 +1453,24 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 			hasReference = true
 			referenceBlock = prevTip.SelectionTip().BlockNumber
 			advertisedReferenceBlock = prevTip.Tip.BlockNumber
-		} else if len(cs.peerTips)+len(cs.pendingPeerTips) > 0 {
+		} else if len(cs.peerTips) > 0 ||
+			(includePending && len(cs.pendingPeerTips) > 0) {
 			// Case 2: new peer — check against the best observed and
-			// advertised frontiers separately.
+			// advertised frontiers separately. Lone far frontiers do not count
+			// as independent references for a new peer.
+			excludedLone := false
 			for peerConn, committedTip := range cs.peerTips {
-				pt := cs.latestPeerTipCandidateLocked(peerConn)
-				if pt == nil {
-					pt = committedTip
+				pt := committedTip
+				if includePending {
+					if pendingTip := cs.latestPeerTipCandidateLocked(peerConn); pendingTip != nil {
+						pt = pendingTip
+					}
 				}
 				if pt == nil || pt.awaitingFirstHeader {
+					continue
+				}
+				if claim, ok := claims[peerConn]; ok && claim.lone {
+					excludedLone = true
 					continue
 				}
 				hasReference = true
@@ -1274,21 +1482,34 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 					advertisedReferenceBlock = pt.Tip.BlockNumber
 				}
 			}
-			for peerConn := range cs.pendingPeerTips {
-				if _, exists := cs.peerTips[peerConn]; exists {
-					continue
+			if includePending {
+				for peerConn := range cs.pendingPeerTips {
+					if _, exists := cs.peerTips[peerConn]; exists {
+						continue
+					}
+					pt := cs.latestPeerTipCandidateLocked(peerConn)
+					if pt == nil || pt.awaitingFirstHeader {
+						continue
+					}
+					if claim, ok := claims[peerConn]; ok && claim.lone {
+						excludedLone = true
+						continue
+					}
+					hasReference = true
+					if blockNumber := pt.SelectionTip().BlockNumber; blockNumber > referenceBlock {
+						referenceBlock = blockNumber
+					}
+					if pt.Tip.BlockNumber > advertisedReferenceBlock {
+						advertisedReferenceBlock = pt.Tip.BlockNumber
+					}
 				}
-				pt := cs.latestPeerTipCandidateLocked(peerConn)
-				if pt == nil || pt.awaitingFirstHeader {
-					continue
-				}
+			}
+			// If every delivered frontier is lone-only, keep the local tip as
+			// the trusted reference. Treating the new peer as a bootstrap peer
+			// here would admit its first unrelated far header without a run.
+			if !hasReference && excludedLone && cs.localTip.BlockNumber > 0 {
 				hasReference = true
-				if blockNumber := pt.SelectionTip().BlockNumber; blockNumber > referenceBlock {
-					referenceBlock = blockNumber
-				}
-				if pt.Tip.BlockNumber > advertisedReferenceBlock {
-					advertisedReferenceBlock = pt.Tip.BlockNumber
-				}
+				referenceBlock = cs.localTip.BlockNumber
 			}
 		}
 		if hasReference {
@@ -1317,7 +1538,7 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 		// corroborated it may sit up to K below it, so the Case 2 ceiling
 		// (that frontier + K) alone would reject the claimant's next header.
 		if observedReject {
-			if claim, ok := cs.farTipClaims[connId]; ok && claim.corroborated {
+			if claim, ok := claims[connId]; ok && claim.corroborated {
 				claimCeiling := safeAddUint64(claim.block, cs.securityParam)
 				if observedBlock <= claimCeiling {
 					observedReject = false
@@ -1342,17 +1563,16 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 			// never itself become a fresher reference -- a one-way ratchet.
 			//
 			// Every reference the selector holds is stale here (that is
-			// what put us in this branch), and this frontier's own leader
-			// eligibility is itself unverifiable this far ahead of local
-			// ledger state (ValidateChainSelectionHeaderCrypto defers), so
-			// nothing already verified can tell an honest far frontier from
-			// a fabricated one. Require independent agreement instead: a
-			// frontier beyond the catch-up ceiling is trusted only once
-			// another, distinct connection has independently delivered a
-			// frontier within K of it. A lone claim, honest or fabricated,
-			// still cannot break the ratchet by itself.
+			// what put us in this branch), and nothing about this frontier
+			// can be verified yet: its epoch is beyond the ledger's forecast
+			// horizon, so header verification is deferred before any
+			// signature is checked. Require corroboration instead: another,
+			// distinct connection has delivered a frontier within K of it,
+			// or this connection has delivered a connected header chain
+			// (see corroborateFarTipClaimLocked). A single claim, honest or
+			// fabricated, cannot break the ratchet by itself.
 			if observedReject &&
-				cs.corroborateFarTipClaimLocked(connId, observedBlock) {
+				cs.corroborateFarTipClaimLocked(connId, observedTip, link, claims) {
 				observedReject = false
 				maxPlausibleBlock = observedBlock
 			}
@@ -1377,48 +1597,94 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 			return false
 		}
 		// Accepted: this connection no longer needs to be tracked as a
-		// pending far-tip claim, whether or not it ever was one.
-		delete(cs.farTipClaims, connId)
+		// pending far-tip claim, whether or not it ever was one. A claim
+		// accepted on its own chain keeps its entry, which marks the
+		// connection's frontier for revocation (loneFrontierBrokenLocked).
+		if claim, ok := claims[connId]; !ok || !claim.lone {
+			delete(claims, connId)
+		}
 	}
 	return true
 }
 
 // corroborateFarTipClaimLocked records connId's delivered frontier, which
 // exceeded the catch-up plausibility ceiling, and reports whether it is now
-// corroborated: at least one OTHER distinct connection has independently
-// delivered a frontier within securityParam of it. Every such other claim is
-// marked corroborated, so its connection's next update is bounded against
-// its own claim rather than against this lower frontier. One connection cannot
-// corroborate itself; two connections delivering close to the same frontier
-// is the expected shape of an honest far-behind catch-up. Nothing here tells
-// two connections to one operator from two independent peers, so this is not
-// a Sybil defence: acceptance only admits the frontier to selection, and
-// headers from any ingress-eligible peer are still crypto-verified before
-// ledger apply (deferred verification is completed at apply time).
+// accepted. Two things accept it:
 //
-// Entries recorded here are provisional: they never enter cs.peerTips and so
-// never influence chain selection, corroboration, or the Genesis exit
-// horizon by themselves.
+//   - corroboration: at least one OTHER distinct connection has independently
+//     delivered a frontier within securityParam of it. Every such other claim
+//     is marked corroborated, so its connection's next update is bounded
+//     against its own claim rather than against this lower frontier.
+//   - a connected header chain: connId alone has delivered more than
+//     securityParam consecutive headers, each naming the previous one as its
+//     parent, one block and a later slot above it, with the block number
+//     within the slot distance from the local tip (a chain has at most one
+//     block per slot). A Byron epoch boundary block and the block after it are
+//     handled by deliveredLink.step. A repeated header neither advances nor
+//     resets the run; any other break restarts it. The accepted connection
+//     stays marked lone and is not a witness for another connection's claim.
+//
+// The chain acceptance is not verification. At these slots the ledger has
+// verified nothing about a header, and a liar's own keys would pass any
+// signature check that is possible, so a fabricated chain can still be built.
+// What it cannot do is claim an arbitrary height, skip or reorder headers, or
+// keep standing once a header fails: see loneFrontierBrokenLocked, RemovePeer
+// on the failed connection, and the ledger, which verifies every applied
+// header. Nothing here tells two connections to one operator from two
+// independent peers, so corroboration is not a Sybil defence either.
+//
+// Pending entries recorded here are provisional: they never enter cs.peerTips
+// and so never influence chain selection, corroboration, or the Genesis exit
+// horizon by themselves. An accepted lone claim remains alongside its peer
+// tip only to enforce revocation and is excluded from other peers' references.
 //
 // Must be called with cs.mutex held and cs.securityParam > 0.
 func (cs *ChainSelector) corroborateFarTipClaimLocked(
 	connId ouroboros.ConnectionId,
-	claimed uint64,
+	observedTip ochainsync.Tip,
+	link deliveredLink,
+	claims map[ouroboros.ConnectionId]farTipClaim,
 ) bool {
-	if cs.farTipClaims == nil {
-		cs.farTipClaims = make(map[ouroboros.ConnectionId]farTipClaim)
+	claimed := observedTip.BlockNumber
+	if claims == nil {
+		return false
 	}
 	// Bounded like peerTips: connection churn must not grow this map without
 	// limit. A claim that does not fit is still compared against the recorded
 	// ones, so a full table cannot keep its own claims from being
 	// corroborated.
-	if _, exists := cs.farTipClaims[connId]; exists ||
-		len(cs.farTipClaims) < cs.maxTrackedPeers {
-		cs.farTipClaims[connId] = farTipClaim{block: claimed}
+	prev, exists := claims[connId]
+	updated := farTipClaim{
+		block:        claimed,
+		slot:         observedTip.Point.Slot,
+		hash:         bytes.Clone(observedTip.Point.Hash),
+		boundary:     link.boundary,
+		corroborated: prev.corroborated,
+		lone:         prev.lone,
+		run:          1,
+	}
+	switch {
+	case !cs.blockWithinSlotDistanceLocked(observedTip):
+	case !exists:
+	case len(observedTip.Point.Hash) > 0 &&
+		bytes.Equal(observedTip.Point.Hash, prev.hash):
+		// A repeat shows no progress and does not break the run.
+		updated.run = prev.run
+	default:
+		switch link.step(prev.block, prev.slot, prev.hash, prev.boundary, observedTip) {
+		case stepAdvance:
+			updated.run = prev.run + 1
+		case stepBoundary:
+			updated.run = prev.run
+		case stepBroken:
+		}
+	}
+	if exists || len(claims) < cs.maxTrackedPeers {
+		claims[connId] = updated
 	}
 	corroborated := false
-	for otherConn, other := range cs.farTipClaims {
-		if otherConn == connId {
+	for otherConn, other := range claims {
+		if otherConn == connId || other.lone {
 			continue
 		}
 		lo, hi := claimed, other.block
@@ -1427,19 +1693,190 @@ func (cs *ChainSelector) corroborateFarTipClaimLocked(
 		}
 		if safeAddUint64(lo, cs.securityParam) >= hi {
 			other.corroborated = true
-			cs.farTipClaims[otherConn] = other
+			claims[otherConn] = other
 			corroborated = true
 		}
 	}
-	return corroborated
+	if corroborated {
+		return true
+	}
+	if updated.run > cs.securityParam {
+		updated.lone = true
+		claims[connId] = updated
+		return true
+	}
+	return false
 }
 
-// farTipClaim is a connection's recorded frontier beyond the catch-up
-// plausibility ceiling. corroborated is set once another connection has
-// delivered a frontier within securityParam of block.
+// blockWithinSlotDistanceLocked reports whether observedTip's block number is
+// reachable from the local tip: a chain has at most one block per slot, so it
+// may exceed the local block number by at most the slot distance from the
+// local tip, plus securityParam for a local tip on a fork within K of the
+// delivered chain. It is a loose bound -- the real chain grows at a fraction
+// of one block per slot -- that still rejects a claimed height no chain could
+// have reached. Must be called with cs.mutex held.
+func (cs *ChainSelector) blockWithinSlotDistanceLocked(
+	observedTip ochainsync.Tip,
+) bool {
+	localSlot := cs.localTip.Point.Slot
+	slot := max(observedTip.Point.Slot, localSlot)
+	maxBlock := safeAddUint64(
+		cs.localTip.BlockNumber,
+		safeAddUint64(cs.securityParam, slot-localSlot),
+	)
+	return observedTip.BlockNumber <= maxBlock
+}
+
+// loneFrontierBrokenLocked reports whether connId's frontier was accepted on
+// its own chain (see corroborateFarTipClaimLocked) and this delivery does not
+// continue it: the header must name the previously delivered header as its
+// parent and sit at a later slot, and at one block above it when that block
+// number is known (a rollback outside the retained history leaves it zero). A
+// repeated header continues it. The caller then removes the peer, so a
+// frontier that stops being a connected chain loses its standing at once.
+// The mark is dropped once the frontier is back within the ordinary
+// catch-up ceiling, where the ordinary bound applies, but only from a known
+// height: after a rollback outside the retained history the previous height
+// reads zero, which is below any ceiling, so the next header is held to the
+// chain and, continuing nothing, removes the peer. Must be called with
+// cs.mutex held.
+func (cs *ChainSelector) loneFrontierBrokenLocked(
+	connId ouroboros.ConnectionId,
+	observedTip ochainsync.Tip,
+	link deliveredLink,
+	claims map[ouroboros.ConnectionId]farTipClaim,
+) bool {
+	claim, ok := claims[connId]
+	if !ok || !claim.lone {
+		return false
+	}
+	peerTip := cs.peerTips[connId]
+	if peerTip == nil {
+		delete(claims, connId)
+		return false
+	}
+	ceiling := safeAddUint64(
+		cs.localTip.BlockNumber,
+		safeAddUint64(cs.securityParam, cs.securityParam),
+	)
+	if peerTip.ObservedTip.BlockNumber != 0 &&
+		peerTip.ObservedTip.BlockNumber <= ceiling &&
+		observedTip.BlockNumber <= ceiling {
+		delete(claims, connId)
+		return false
+	}
+	last := peerTip.ObservedTip
+	if len(observedTip.Point.Hash) > 0 &&
+		bytes.Equal(observedTip.Point.Hash, last.Point.Hash) {
+		return false
+	}
+	// Only the latest delivered header's type is kept. After a RollBackward to
+	// an earlier boundary block, last is that block but the claim describes a
+	// later header, so lastBoundary is false and a next block sharing the
+	// boundary's slot removes the peer. Honest peers roll back only near their
+	// own tip, never inside the far history a lone frontier is built from.
+	lastBoundary := claim.boundary && bytes.Equal(claim.hash, last.Point.Hash)
+	if cs.blockWithinSlotDistanceLocked(observedTip) &&
+		link.step(
+			last.BlockNumber, last.Point.Slot, last.Point.Hash,
+			lastBoundary, observedTip,
+		) != stepBroken {
+		claim.block = observedTip.BlockNumber
+		claim.slot = observedTip.Point.Slot
+		claim.hash = bytes.Clone(observedTip.Point.Hash)
+		claim.boundary = link.boundary
+		claims[connId] = claim
+		return false
+	}
+	cs.config.Logger.Warn(
+		"revoking lone far peer frontier: delivery does not continue it",
+		"connection_id", connId.String(),
+		"observed_block", observedTip.BlockNumber,
+		"last_observed_block", last.BlockNumber,
+		"local_block", cs.localTip.BlockNumber,
+	)
+	return true
+}
+
+// deliveredLink is what a delivered header says about how it attaches to the
+// chain: the hash of the parent it names, and whether it is a Byron epoch
+// boundary block.
+type deliveredLink struct {
+	prevHash []byte
+	boundary bool
+}
+
+type linkStep int
+
+const (
+	// stepBroken means the header does not continue the previous one.
+	stepBroken linkStep = iota
+	// stepAdvance means the header is the next block of the chain.
+	stepAdvance
+	// stepBoundary means the header is an epoch boundary block: it continues
+	// the chain without adding a block.
+	stepBoundary
+)
+
+// step classifies observed against the previous delivered header (lastBlock,
+// lastSlot, lastHash, lastBoundary). A header must name the previous one as
+// its parent and not sit at an earlier slot. An ordinary header is then one
+// block above it, and at a later slot -- or at the same slot when the previous
+// header was a boundary block, which sits at the first slot of its epoch that
+// the epoch's first block may also occupy. A boundary block carries its
+// parent's block number and a later slot, and must follow an ordinary header,
+// so two consecutive boundary blocks, or a boundary block repeating a number
+// that is not its parent's, break the chain. A zero lastBlock means the block
+// number is not known (a rollback outside the retained history, which the
+// peer chose and nothing validated), so no header can continue it: carrying a
+// run or an accepted frontier over an unknown height would let one header
+// name any height. The flag is the header type the peer sent, not proof of an era:
+// it buys no height, since a boundary block adds none and cannot repeat.
+func (l deliveredLink) step(
+	lastBlock, lastSlot uint64,
+	lastHash []byte,
+	lastBoundary bool,
+	observed ochainsync.Tip,
+) linkStep {
+	if len(l.prevHash) == 0 || !bytes.Equal(l.prevHash, lastHash) ||
+		observed.Point.Slot < lastSlot {
+		return stepBroken
+	}
+	if lastBlock == 0 {
+		return stepBroken
+	}
+	if l.boundary {
+		if lastBoundary || observed.Point.Slot == lastSlot ||
+			observed.BlockNumber != lastBlock {
+			return stepBroken
+		}
+		return stepBoundary
+	}
+	if observed.BlockNumber != safeAddUint64(lastBlock, 1) {
+		return stepBroken
+	}
+	if observed.Point.Slot == lastSlot && !lastBoundary {
+		return stepBroken
+	}
+	return stepAdvance
+}
+
+// farTipClaim is a connection's most recent delivered frontier beyond the
+// catch-up plausibility ceiling. corroborated is set once another connection
+// has delivered a frontier within securityParam of block.
 type farTipClaim struct {
 	block        uint64
+	slot         uint64
+	hash         []byte
+	boundary     bool
 	corroborated bool
+	// lone marks a claim accepted on the connection's own header chain rather
+	// than by another connection's agreement.
+	lone bool
+	// run counts the connection's consecutive connected headers, starting at
+	// 1. A repeated header leaves it unchanged; anything else that does not
+	// continue the previous header restarts it at 1.
+	run uint64
 }
 
 // makeRoomForNewPeerLocked makes room in the tracked-peer table for a new
@@ -1571,6 +2008,8 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.priority, connId)
 	delete(cs.recentlyLeft, connId)
 	delete(cs.farTipClaims, connId)
+	delete(cs.genesisDensityDisconnected, connId)
+	cs.rebuildPendingAdmissionStateLocked()
 }
 
 // RemovePeer removes a peer from tracking.
@@ -1670,6 +2109,7 @@ func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 		}
 		cs.localTipProgressBlock = tip.BlockNumber
 		cs.localTip = tip
+		cs.rebuildPendingAdmissionStateLocked()
 		shouldEvaluate = cs.advanceSelectionModeLocked()
 	}()
 	if shouldEvaluate {
@@ -1696,6 +2136,7 @@ func (cs *ChainSelector) SetSecurityParam(k uint64) {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 		cs.securityParam = k
+		cs.rebuildPendingAdmissionStateLocked()
 		shouldEvaluate = cs.advanceSelectionModeLocked()
 		// advanceSelectionModeLocked already refreshes the snapshot when it
 		// transitions the mode. Refresh again unconditionally: the window it
@@ -1743,7 +2184,7 @@ func (cs *ChainSelector) GenesisSelectionState() (bool, uint64) {
 		// A ChainSelector that did not come from NewChainSelector has never
 		// published a snapshot. Answer as the pre-cache implementation did
 		// for that zero value: Praos, and the default window.
-		return false, defaultGenesisWindowSlots
+		return false, DefaultGenesisWindowSlots
 	}
 	return snapshot.active, snapshot.window
 }
@@ -2945,15 +3386,20 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 	var switchEvent *event.Event
 	var selectionEvent *event.Event
 	var corroborationEvent *event.Event
+	var sparse []GenesisDensityDisconnect
 	switchOccurred := false
 
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 		switchOccurred, switchEvent, selectionEvent, corroborationEvent = cs.evaluateBestPeerLocked()
+		sparse = cs.genesisDensityDisconnectsLocked()
 	}()
 
 	cs.publishSelectionEvents(switchEvent, selectionEvent, corroborationEvent)
+	for _, d := range sparse {
+		cs.config.OnGenesisDensityDisconnect(d)
+	}
 	return switchOccurred
 }
 
@@ -2968,12 +3414,16 @@ func (cs *ChainSelector) HandlePeerTipUpdateEvent(evt event.Event) {
 		return
 	}
 	if e.AdmissionID == 0 {
-		cs.updatePeerTipObservedPraosView(
+		cs.updatePeerTipObservedLinked(
 			e.ConnectionId,
 			e.Tip,
 			e.ObservedTip,
 			e.VRFOutput,
 			e.PraosView,
+			deliveredLink{
+				prevHash: e.ObservedPrevHash,
+				boundary: e.ObservedBoundary,
+			},
 		)
 		return
 	}
@@ -3056,10 +3506,12 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 		defer cs.mutex.Unlock()
 		delete(cs.pendingPeerTips, e.ConnectionId)
 		delete(cs.pendingPeerTipFrontiers, e.ConnectionId)
+		cs.rebuildPendingAdmissionStateLocked()
 		// Re-check under the lock: a concurrent roll forward (or another
 		// rollback) may have created the entry while liveness was evaluated.
 		if peerTip, exists := cs.peerTips[e.ConnectionId]; exists {
 			peerTip.ApplyRollback(e.Point, e.Tip)
+			cs.rebuildPendingAdmissionStateLocked()
 			shouldEvaluate = true
 			return
 		}
@@ -3100,6 +3552,7 @@ func (cs *ChainSelector) applyRollbackToTrackedPeer(e PeerRollbackEvent) bool {
 	delete(cs.pendingPeerTips, e.ConnectionId)
 	delete(cs.pendingPeerTipFrontiers, e.ConnectionId)
 	peerTip.ApplyRollback(e.Point, e.Tip)
+	cs.rebuildPendingAdmissionStateLocked()
 	return true
 }
 
@@ -3132,6 +3585,7 @@ func (cs *ChainSelector) registerPeerFromRollbackLocked(
 		e.ConnectionId,
 		e.Tip,
 		ochainsync.Tip{Point: e.Point},
+		deliveredLink{},
 	) {
 		return nil, RollbackRegistrationImplausibleTip
 	}

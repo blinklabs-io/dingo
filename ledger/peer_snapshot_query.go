@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -56,10 +57,11 @@ var bigLedgerPeerQuota = big.NewRat(9, 10)
 // QueryView it describes the tip the view was acquired at; without one it
 // describes the current tip. The reported slot is that tip's slot.
 func (ls *LedgerState) queryLedgerPeerSnapshot(
+	ctx context.Context,
 	peerKind olocalstatequery.LedgerPeerKind,
 	txn *database.Txn,
 ) (any, error) {
-	txn, release := ls.readTxn(txn)
+	txn, release := ls.readTxn(ctx, txn)
 	defer release()
 
 	// Read the tip from the same read transaction as the pool/stake data so
@@ -102,7 +104,7 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 	if err != nil {
 		return nil, err
 	}
-	pools, err := ls.db.GetPools(pkhs, txn)
+	pools, err := ls.db.GetPools(ctx, pkhs, txn)
 	if err != nil {
 		return nil, fmt.Errorf("GetLedgerPeerSnapshot: get pools: %w", err)
 	}

@@ -15,6 +15,7 @@
 package chain_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,7 +32,7 @@ const eraRegressionRule = "precedes the era of its parent"
 
 func newEraOrderTestChain(t *testing.T) *chain.Chain {
 	t.Helper()
-	cm, err := chain.NewManager(newTestDB(t), nil)
+	cm, err := chain.NewManager(context.Background(), newTestDB(t), nil)
 	require.NoError(t, err)
 	mustSetLedger(t, cm, 10)
 	return cm.PrimaryChain()
@@ -105,11 +106,14 @@ func TestAddBlockHeaderRejectsEraRegression(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c := newEraOrderTestChain(t)
-			require.NoError(t, c.AddBlock(conwayTip, nil))
+			require.NoError(t, c.AddBlock(context.Background(), conwayTip, nil))
 			if tc.queueConway {
-				require.NoError(t, c.AddBlockHeader(conwayHeader))
+				require.NoError(
+					t,
+					c.AddBlockHeader(context.Background(), conwayHeader),
+				)
 			}
-			err := c.AddBlockHeader(tc.byronHeader())
+			err := c.AddBlockHeader(context.Background(), tc.byronHeader())
 			require.ErrorContains(t, err, eraRegressionRule)
 		})
 	}
@@ -149,8 +153,11 @@ func TestAddBlockHeaderAcceptsByronShelleyBoundary(t *testing.T) {
 			lastByron := load(t, fx.byronFile, gledger.BlockTypeByronMain)
 			firstShelley := load(t, fx.shelleyFile, gledger.BlockTypeShelley)
 			c := newEraOrderTestChain(t)
-			require.NoError(t, c.AddBlock(lastByron, nil))
-			require.NoError(t, c.AddBlockHeader(firstShelley.Header()))
+			require.NoError(t, c.AddBlock(context.Background(), lastByron, nil))
+			require.NoError(
+				t,
+				c.AddBlockHeader(context.Background(), firstShelley.Header()),
+			)
 		})
 	}
 }

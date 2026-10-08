@@ -1044,7 +1044,7 @@ func parseKoiosCoverageTable(doc string) (koiosCoverageTable, error) {
 			endpoint := unquote(cells[0])
 			class := unquote(cells[1])
 			fields := 0
-			for _, field := range strings.Split(cells[2], ",") {
+			for field := range strings.SplitSeq(cells[2], ",") {
 				field = unquote(field)
 				if field == "" {
 					continue
@@ -3493,7 +3493,7 @@ func TestServiceContainersRelaxDurability(t *testing.T) {
 						)
 				}
 				command := strings.ReplaceAll(step.Run, "\\\n", " ")
-				for _, line := range strings.Split(command, "\n") {
+				for line := range strings.SplitSeq(command, "\n") {
 					fields := strings.Fields(line)
 					if len(fields) < 3 || fields[0] != "docker" ||
 						fields[1] != "run" {

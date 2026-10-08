@@ -168,6 +168,7 @@ func (r blockRefRequest) resolved(
 // these lookups key on -- FetchBlock validates it against the block
 // metadata instead.
 func resolveBlockPoint(
+	ctx context.Context,
 	db *database.Database,
 	ref blockRefRequest,
 	bound database.BlockNumberBound,
@@ -178,19 +179,19 @@ func resolveBlockPoint(
 		// about whether the archive holds the block.
 		return common.NewPoint(ref.slot, ref.hash), false, nil
 	case ref.hasHash:
-		block, err := database.BlockByHash(db, ref.hash)
+		block, err := database.BlockByHash(ctx, db, ref.hash)
 		if err != nil {
 			return common.Point{}, false, err
 		}
 		return common.NewPoint(block.Slot, block.Hash), true, nil
 	case ref.hasSlot:
-		block, err := database.BlockBySlot(db, ref.slot)
+		block, err := database.BlockBySlot(ctx, db, ref.slot)
 		if err != nil {
 			return common.Point{}, false, err
 		}
 		return common.NewPoint(block.Slot, block.Hash), true, nil
 	default:
-		block, err := database.BlockByNumberBounded(db, ref.height, bound)
+		block, err := database.BlockByNumberBounded(ctx, db, ref.height, bound)
 		if err != nil {
 			return common.Point{}, false, err
 		}
@@ -267,7 +268,7 @@ func (a *archiveServiceHandler) FetchBlock(
 	// hash+slot references still touches no index at all.
 	var bound database.BlockNumberBound
 	if slices.ContainsFunc(refs, blockRefRequest.resolvesByHeight) {
-		bound, err = database.ResolveBlockNumberBound(db)
+		bound, err = database.ResolveBlockNumberBound(ctx, db)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"failed resolving highest indexed block: %w",
@@ -277,7 +278,7 @@ func (a *archiveServiceHandler) FetchBlock(
 	}
 
 	for _, ref := range refs {
-		point, confirmed, err := resolveBlockPoint(db, ref, bound)
+		point, confirmed, err := resolveBlockPoint(ctx, db, ref, bound)
 		if err != nil {
 			if isBlockMissing(err) {
 				resp.NotFound = append(resp.NotFound, ref.requested())

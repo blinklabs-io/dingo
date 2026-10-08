@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -23,9 +24,13 @@ import (
 
 // RebuildRewardLiveStake rebuilds the live reward stake aggregate from
 // canonical account and live UTxO metadata.
-func (d *Database) RebuildRewardLiveStake(slot uint64, txn *Txn) error {
+func (d *Database) RebuildRewardLiveStake(
+	ctx context.Context,
+	slot uint64,
+	txn *Txn,
+) error {
 	if txn == nil {
-		return d.MetadataTxn(true).Do(func(t *Txn) error {
+		return d.MetadataTxn(ctx, true).Do(func(t *Txn) error {
 			return d.metadata.RebuildRewardLiveStake(slot, t.Metadata())
 		})
 	}
@@ -57,6 +62,7 @@ func (d *Database) RebuildRewardLiveStake(slot uint64, txn *Txn) error {
 // would only repeat work. Providers without this optional fast path fall back
 // to the authoritative rebuild.
 func (d *Database) RebuildRewardLiveStakeFromRunningTotals(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
@@ -73,7 +79,7 @@ func (d *Database) RebuildRewardLiveStakeFromRunningTotals(
 			return finalizer.RebuildRewardLiveStakeFromRunningTotalsInBatches(
 				slot,
 				func(runBatch func(types.Txn) error) error {
-					return d.withMetadataWriteTxn(nil, func(t *Txn) error {
+					return d.withMetadataWriteTxn(ctx, nil, func(t *Txn) error {
 						return runBatch(t.Metadata())
 					})
 				},
@@ -84,10 +90,10 @@ func (d *Database) RebuildRewardLiveStakeFromRunningTotals(
 		RebuildRewardLiveStakeFromRunningTotals(uint64, types.Txn) error
 	})
 	if !ok {
-		return d.RebuildRewardLiveStake(slot, txn)
+		return d.RebuildRewardLiveStake(ctx, slot, txn)
 	}
 	if txn == nil {
-		return d.MetadataTxn(true).Do(func(t *Txn) error {
+		return d.MetadataTxn(ctx, true).Do(func(t *Txn) error {
 			return finalizer.RebuildRewardLiveStakeFromRunningTotals(
 				slot,
 				t.Metadata(),
@@ -142,6 +148,7 @@ func (d *Database) DeleteRewardStateAfterSlot(
 // paginated and ordered by epoch. Used by the Blockfrost account
 // reward-history endpoint (GET /accounts/{stake_address}/rewards).
 func (d *Database) GetRewardAccountOutputsByCredential(
+	ctx context.Context,
 	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
@@ -150,7 +157,7 @@ func (d *Database) GetRewardAccountOutputsByCredential(
 	txn *Txn,
 ) ([]*models.RewardAccountOutput, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	rows, err := d.metadata.GetRewardAccountOutputsByCredential(
@@ -173,12 +180,13 @@ func (d *Database) GetRewardAccountOutputsByCredential(
 // CountRewardAccountOutputsByCredential returns the total count of reward
 // account output rows for a stake credential.
 func (d *Database) CountRewardAccountOutputsByCredential(
+	ctx context.Context,
 	credentialTag uint8,
 	stakingKey []byte,
 	txn *Txn,
 ) (int, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	count, err := d.metadata.CountRewardAccountOutputsByCredential(

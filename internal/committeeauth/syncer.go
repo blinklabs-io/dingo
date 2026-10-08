@@ -52,7 +52,7 @@ const DefaultFrequency = 5 * time.Minute
 type SyncerConfig struct {
 	// PointAtDepth resolves the point a given number of blocks behind the
 	// chain tip. Chain.PointAtDepth satisfies this.
-	PointAtDepth func(depth uint64) (point ocommon.Point, found bool, err error)
+	PointAtDepth func(ctx context.Context, depth uint64) (point ocommon.Point, found bool, err error)
 
 	// SecurityParam returns the security parameter for the current era, or a
 	// non-positive value when it is not yet known. LedgerState.SecurityParam
@@ -95,13 +95,13 @@ func NewSyncer(cfg SyncerConfig) *Syncer {
 // resolve a fresh value pushes known=false rather than leaving a stale value
 // in place: a stale slot from an earlier, since-superseded chain state is not
 // distinguishable from a fresh one once stored, so this must not guess.
-func (s *Syncer) sync() {
+func (s *Syncer) sync(ctx context.Context) {
 	k := s.config.SecurityParam()
 	if k <= 0 {
 		s.config.SetImmutableSlot(0, false)
 		return
 	}
-	point, found, err := s.config.PointAtDepth(uint64(k)) //nolint:gosec
+	point, found, err := s.config.PointAtDepth(ctx, uint64(k)) //nolint:gosec
 	if err != nil {
 		s.logger.Warn(
 			"committee auth immutable slot sync: failed to resolve immutable point",
@@ -125,7 +125,7 @@ func (s *Syncer) run(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			s.sync()
+			s.sync(ctx)
 		case <-ctx.Done():
 			return
 		}
@@ -145,7 +145,7 @@ func (s *Syncer) Start(ctx context.Context) error {
 
 	// Resolve once immediately so pruning has a live bound from the start
 	// rather than waiting a full tick.
-	s.sync()
+	s.sync(ctx)
 
 	s.wg.Go(func() {
 		s.run(ctx)
