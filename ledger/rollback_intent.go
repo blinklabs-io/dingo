@@ -164,6 +164,7 @@ func clearRollbackIntent(db *database.Database) error {
 // retries, and below it the two payloads are merged, because the older
 // record's bodies no longer exist on the chain to be re-read.
 func (ls *LedgerState) ensureRollbackIntent(
+	ctx context.Context,
 	point ocommon.Point,
 	rollbackBlocks []models.Block,
 ) error {
@@ -183,7 +184,7 @@ func (ls *LedgerState) ensureRollbackIntent(
 				)
 			}
 			if rollbackBlocks == nil {
-				rollbackBlocks, err = ls.readBlocksAboveSlot(point.Slot)
+				rollbackBlocks, err = ls.readBlocksAboveSlot(ctx, point.Slot)
 				if err != nil {
 					return fmt.Errorf("read rollback undo blocks: %w", err)
 				}
@@ -197,7 +198,7 @@ func (ls *LedgerState) ensureRollbackIntent(
 		}
 	}
 	if rollbackBlocks == nil {
-		rollbackBlocks, err = ls.readBlocksAboveSlot(point.Slot)
+		rollbackBlocks, err = ls.readBlocksAboveSlot(ctx, point.Slot)
 		if err != nil {
 			return fmt.Errorf("read rollback undo blocks: %w", err)
 		}
@@ -209,17 +210,21 @@ func (ls *LedgerState) ensureRollbackIntent(
 }
 
 func (ls *LedgerState) prepareRollbackIntent(
+	ctx context.Context,
 	point ocommon.Point,
 	rollbackBlocks []models.Block,
 ) error {
-	if err := ls.ensureRollbackIntent(point, rollbackBlocks); err != nil {
+	if err := ls.ensureRollbackIntent(ctx, point, rollbackBlocks); err != nil {
 		if !errors.Is(err, errRollbackIntentConflict) {
 			return err
 		}
-		if recoverErr := ls.recoverRollbackIntentLocked(); recoverErr != nil {
-			return fmt.Errorf("complete previous rollback intent: %w", recoverErr)
+		if recoverErr := ls.recoverRollbackIntentLocked(ctx); recoverErr != nil {
+			return fmt.Errorf(
+				"complete previous rollback intent: %w",
+				recoverErr,
+			)
 		}
-		if retryErr := ls.ensureRollbackIntent(point, rollbackBlocks); retryErr != nil {
+		if retryErr := ls.ensureRollbackIntent(ctx, point, rollbackBlocks); retryErr != nil {
 			return retryErr
 		}
 	}
@@ -307,7 +312,7 @@ func loadRollbackIntent(
 // written but whose chain or metadata mutation did not complete. The outbox
 // owns the block payload because the primary-chain rewind may already have
 // deleted the corresponding block rows.
-func (ls *LedgerState) recoverRollbackIntent() error {
+func (ls *LedgerState) recoverRollbackIntent(ctx context.Context) error {
 	// consumedUtxoPruneMutex before transactionEventMutex, matching
 	// rollbackChainAndStateDeferred and reconcilePrimaryChainTipWithLedgerTip.
 	// recoverRollbackIntentLocked truncates through rollbackWithBlocks, so it
@@ -316,11 +321,11 @@ func (ls *LedgerState) recoverRollbackIntent() error {
 	return ls.withConsumedUtxoPruneBoundary(func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
-		return ls.recoverRollbackIntentLocked()
+		return ls.recoverRollbackIntentLocked(ctx)
 	})
 }
 
-func (ls *LedgerState) recoverRollbackIntentLocked() error {
+func (ls *LedgerState) recoverRollbackIntentLocked(ctx context.Context) error {
 	point, blocks, pending, err := loadRollbackIntent(ls.db)
 	if errors.Is(err, errInvalidRollbackIntent) {
 		ls.config.Logger.Error(
@@ -353,11 +358,11 @@ func (ls *LedgerState) recoverRollbackIntentLocked() error {
 			"component", "ledger", "ledger_tip_slot", current.Slot,
 			"intent_slot", point.Slot,
 		)
-		ls.emitRollbackTransactionEvents(blocks)
-		return ls.finishRollbackIntent()
+		ls.emitRollbackTransactionEvents(ctx, blocks)
+		return ls.finishRollbackIntent(ctx)
 	}
 	if point.Slot > 0 || len(point.Hash) > 0 {
-		contains, err := ls.primaryChainContainsPoint(point)
+		contains, err := ls.primaryChainContainsPoint(ctx, point)
 		if err != nil {
 			return fmt.Errorf("validate rollback intent point: %w", err)
 		}
@@ -367,34 +372,37 @@ func (ls *LedgerState) recoverRollbackIntentLocked() error {
 				"component", "ledger",
 				"intent_slot", point.Slot,
 			)
-			ls.emitRollbackTransactionEvents(blocks)
-			return ls.finishRollbackIntent()
+			ls.emitRollbackTransactionEvents(ctx, blocks)
+			return ls.finishRollbackIntent(ctx)
 		}
 	}
 	if ls.config.ChainManager != nil {
-		if err := ls.config.ChainManager.RewindPrimaryChainToPoint(point); err != nil {
+		if err := ls.config.ChainManager.RewindPrimaryChainToPoint(ctx, point); err != nil {
 			return fmt.Errorf("recover primary chain rollback: %w", err)
 		}
 	}
 
-	ls.emitRollbackTransactionEvents(blocks)
-	if err := ls.rollbackWithBlocks(point, blocks, false); err != nil {
+	ls.emitRollbackTransactionEvents(ctx, blocks)
+	if err := ls.rollbackWithBlocks(ctx, point, blocks, false); err != nil {
 		return fmt.Errorf("recover rollback intent: %w", err)
 	}
 	return nil
 }
 
-func (ls *LedgerState) finishRollbackIntent() error {
+func (ls *LedgerState) finishRollbackIntent(ctx context.Context) error {
 	_, blocks, pending, err := loadRollbackIntent(ls.db)
 	if err != nil || !pending {
 		return err
 	}
 	if len(blocks) > 0 && ls.config.EventBus != nil {
-		ctx := ls.publishCtx
-		if ctx == nil {
-			ctx = context.Background()
+		publishCtx := ls.publishCtx //nolint:contextcheck // the ledger lifecycle context bounds the flush
+		if publishCtx == nil {
+			publishCtx = ctx
 		}
-		if !ls.config.EventBus.FlushOrderedContext(ctx, TransactionEventType) {
+		if !ls.config.EventBus.FlushOrderedContext(
+			publishCtx,
+			TransactionEventType,
+		) {
 			ls.config.Logger.Warn(
 				"retaining rollback intent until ordered undo delivery completes",
 				"component", "ledger",
@@ -406,6 +414,7 @@ func (ls *LedgerState) finishRollbackIntent() error {
 }
 
 func (ls *LedgerState) finishRollbackIntentForPoint(
+	ctx context.Context,
 	point ocommon.Point,
 ) error {
 	pendingPoint, _, pending, err := loadRollbackIntent(ls.db)
@@ -415,5 +424,5 @@ func (ls *LedgerState) finishRollbackIntentForPoint(
 	if !pointMatches(pendingPoint, point) {
 		return nil
 	}
-	return ls.finishRollbackIntent()
+	return ls.finishRollbackIntent(ctx)
 }

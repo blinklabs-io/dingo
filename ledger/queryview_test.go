@@ -121,6 +121,7 @@ func TestQueryViewIsolatedFromLaterCommits(t *testing.T) {
 	t.Cleanup(view.Close)
 
 	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		context.Background(),
 		nil,
 		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
 		500,
@@ -139,14 +140,14 @@ func TestQueryViewIsolatedFromLaterCommits(t *testing.T) {
 		{"StakePools", poolsQuery, poolCount, 2, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			live, err := ls.Query(tc.query, QueryPoint{})
+			live, err := ls.Query(context.Background(), tc.query, QueryPoint{})
 			require.NoError(t, err)
 			require.Equal(
 				t, tc.wantLive, tc.count(live),
 				"a direct query must see the later commit",
 			)
 
-			viewed, err := view.Query(tc.query, 0)
+			viewed, err := view.Query(t.Context(), tc.query, 0)
 			require.NoError(t, err)
 			require.Equal(
 				t, tc.wantV, tc.count(viewed),
@@ -177,11 +178,11 @@ func TestQueryViewChainTipIsAcquireTip(t *testing.T) {
 		BlockNumber: 4,
 	}, nil))
 
-	point, err := view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	point, err := view.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.NoError(t, err)
 	require.Equal(t, ocommon.NewPoint(10, acquiredHash), point)
 
-	blockNo, err := view.Query(&olocalstatequery.ChainBlockNoQuery{}, 0)
+	blockNo, err := view.Query(t.Context(), &olocalstatequery.ChainBlockNoQuery{}, 0)
 	require.NoError(t, err)
 	require.Equal(t, []any{1, uint64(3)}, blockNo)
 }
@@ -227,13 +228,13 @@ func TestQueryViewPinnedPointSurvivesRollback(t *testing.T) {
 	query := shelleyBlockQuery(&olocalstatequery.ShelleyUtxoByTxinQuery{
 		TxIns: []ledger.ShelleyTransactionInput{txIn},
 	})
-	_, err = ls.Query(query, point)
+	_, err = ls.Query(context.Background(), query, point)
 	require.ErrorIs(
 		t, err, ErrPointNotOnChain,
 		"a direct query must see the rolled-back tip",
 	)
 
-	result, err := view.Query(query, 0)
+	result, err := view.Query(t.Context(), query, 0)
 	require.NoError(t, err)
 	require.Equal(t, 1, utxoMapLen(t, result))
 }
@@ -265,7 +266,7 @@ func TestQueryViewClose(t *testing.T) {
 	default:
 	}
 
-	_, err = view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err = view.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.ErrorIs(t, err, ErrQueryViewClosed)
 
 	view.finishQuery()
@@ -331,17 +332,17 @@ func TestQueryViewEpochAndEraAreThoseFrozenAtAcquire(t *testing.T) {
 		},
 	}
 
-	live, err := ls.Query(epochQuery, QueryPoint{})
+	live, err := ls.Query(context.Background(), epochQuery, QueryPoint{})
 	require.NoError(t, err)
 	require.Equal(t, []any{uint64(6)}, live)
-	viewed, err := view.Query(epochQuery, 0)
+	viewed, err := view.Query(t.Context(), epochQuery, 0)
 	require.NoError(t, err)
 	require.Equal(t, []any{uint64(3)}, viewed)
 
-	live, err = ls.Query(eraQuery, QueryPoint{})
+	live, err = ls.Query(context.Background(), eraQuery, QueryPoint{})
 	require.NoError(t, err)
 	require.Equal(t, eras.ConwayEraDesc.Id, live)
-	viewed, err = view.Query(eraQuery, 0)
+	viewed, err = view.Query(t.Context(), eraQuery, 0)
 	require.NoError(t, err)
 	require.Equal(t, eras.ShelleyEraDesc.Id, viewed)
 }
@@ -384,10 +385,10 @@ func TestQueryViewProtocolParametersAreThoseFrozenAtAcquire(t *testing.T) {
 			t, ls, db, eras.ConwayEraDesc, eras.ConwayEraDesc,
 		)
 
-		live, err := ls.Query(ppQuery, QueryPoint{})
+		live, err := ls.Query(context.Background(), ppQuery, QueryPoint{})
 		require.NoError(t, err)
 		require.Equal(t, []int64{9, 9, 9}, costModel(t, live))
-		viewed, err := view.Query(ppQuery, 0)
+		viewed, err := view.Query(t.Context(), ppQuery, 0)
 		require.NoError(t, err)
 		require.Equal(t, []int64{1, 1, 1}, costModel(t, viewed))
 	})
@@ -399,7 +400,7 @@ func TestQueryViewProtocolParametersAreThoseFrozenAtAcquire(t *testing.T) {
 			t, ls, db, eras.ConwayEraDesc, eras.ConwayEraDesc,
 		)
 
-		viewed, err := view.Query(ppQuery, 0)
+		viewed, err := view.Query(t.Context(), ppQuery, 0)
 		require.NoError(t, err)
 		require.Equal(t, []int64{9, 9, 9}, costModel(t, viewed))
 	})
@@ -438,10 +439,10 @@ func TestQueryViewStakeSnapshotsUseFrozenEpoch(t *testing.T) {
 		return snapshot.StakeMark
 	}
 
-	live, err := ls.Query(query, QueryPoint{})
+	live, err := ls.Query(context.Background(), query, QueryPoint{})
 	require.NoError(t, err)
 	require.Equal(t, uint64(666), markStake(live))
-	viewed, err := view.Query(query, 0)
+	viewed, err := view.Query(t.Context(), query, 0)
 	require.NoError(t, err)
 	require.Equal(t, uint64(111), markStake(viewed))
 }
@@ -475,20 +476,20 @@ func TestQueryViewEraHistoryUsesFrozenTip(t *testing.T) {
 		},
 	}
 
-	before, err := ls.Query(query, QueryPoint{})
+	before, err := ls.Query(context.Background(), query, QueryPoint{})
 	require.NoError(t, err)
 	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
 	require.NoError(t, err)
 	t.Cleanup(view.Close)
 	setTip(530_000)
 
-	after, err := ls.Query(query, QueryPoint{})
+	after, err := ls.Query(context.Background(), query, QueryPoint{})
 	require.NoError(t, err)
 	require.NotEqual(
 		t, before, after,
 		"the live tip must change the forecast for this test to mean anything",
 	)
-	viewed, err := view.Query(query, 0)
+	viewed, err := view.Query(t.Context(), query, 0)
 	require.NoError(t, err)
 	require.Equal(t, before, viewed)
 }
@@ -530,7 +531,7 @@ func TestQueryViewLeavesAReadConnectionForOtherReaders(t *testing.T) {
 
 	// The context only bounds the wait to acquire: a view outlives it.
 	for _, view := range views {
-		_, err := view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+		_, err := view.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
 		require.NoError(t, err)
 	}
 
@@ -632,12 +633,12 @@ func TestQueryViewQueryRecoversPanic(t *testing.T) {
 
 	var nilQuery *olocalstatequery.ShelleyStakeSnapshotsQuery
 	require.NotPanics(t, func() {
-		_, err = view.Query(shelleyBlockQuery(nilQuery), 0)
+		_, err = view.Query(t.Context(), shelleyBlockQuery(nilQuery), 0)
 	})
 	require.Error(t, err)
 	require.ErrorIs(t, err, database.ErrTxnPanic)
 
-	_, err = view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err = view.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.NoError(t, err)
 }
 
@@ -672,11 +673,11 @@ func TestQueryViewStakeSnapshotsOmitZeroPoolsUsesFrozenProtocolVersion(
 			cbor.NewSetType([]ledger.PoolId{ledger.PoolId(poolID)}, true),
 		},
 	})
-	liveResult, err := ls.Query(query, QueryPoint{})
+	liveResult, err := ls.Query(context.Background(), query, QueryPoint{})
 	require.NoError(t, err)
 	require.Empty(t, liveResult.([]any)[0].(olocalstatequery.StakeSnapshotsResult).PoolSnapshots)
 
-	viewed, err := view.Query(query, 0)
+	viewed, err := view.Query(t.Context(), query, 0)
 	require.NoError(t, err)
 	require.Contains(t,
 		viewed.([]any)[0].(olocalstatequery.StakeSnapshotsResult).PoolSnapshots,

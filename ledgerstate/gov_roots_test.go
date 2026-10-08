@@ -52,7 +52,7 @@ func TestImportGovStatePurposeRootPresence(t *testing.T) {
 				func(ImportProgress) {},
 			))
 			for j, g := range groups {
-				root, err := db.GetLastEnactedGovernanceProposal(g, nil)
+				root, err := db.GetLastEnactedGovernanceProposal(context.Background(), g, nil)
 				require.NoError(t, err)
 				if j == i {
 					require.NotNil(t, root)
@@ -76,7 +76,7 @@ func TestImportGovStatePurposeRootPresence(t *testing.T) {
 			func(ImportProgress) {},
 		))
 		for _, g := range groups {
-			root, err := db.GetLastEnactedGovernanceProposal(g, nil)
+			root, err := db.GetLastEnactedGovernanceProposal(context.Background(), g, nil)
 			require.NoError(t, err)
 			require.Nil(t, root)
 		}
@@ -120,7 +120,7 @@ func TestImportGovStateRejectsShadowedPurposeRoot(t *testing.T) {
 	require.NoError(t, err)
 	staleEpoch := uint64(501)
 	staleSlot := uint64(50_100)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        bytes.Repeat([]byte{0x22}, 32),
 		ActionType:    govActionTypeParameterChange,
 		EnactedEpoch:  &staleEpoch,
@@ -155,7 +155,7 @@ func TestImportLedgerStateResumeVerifiesPurposeRoots(t *testing.T) {
 		Slot:      50_000,
 		BlockHash: bytes.Repeat([]byte{0x44}, 32),
 	}
-	require.NoError(t, setCheckpoint(cfg, models.ImportPhaseGovState))
+	require.NoError(t, setCheckpoint(context.Background(), cfg, models.ImportPhaseGovState))
 
 	err = ImportLedgerState(context.Background(), cfg)
 	require.ErrorContains(t, err, "is not an enacted governance proposal")
@@ -177,7 +177,7 @@ func TestImportLedgerStateResumeRejectsUndecodableRoots(t *testing.T) {
 		Slot:      50_000,
 		BlockHash: bytes.Repeat([]byte{0x44}, 32),
 	}
-	require.NoError(t, setCheckpoint(cfg, models.ImportPhaseGovState))
+	require.NoError(t, setCheckpoint(context.Background(), cfg, models.ImportPhaseGovState))
 
 	err = ImportLedgerState(context.Background(), cfg)
 	require.ErrorContains(t, err, "GovRelation has 3 elements")

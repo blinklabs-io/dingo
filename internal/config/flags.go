@@ -124,7 +124,7 @@ var flagSpecs = []flagSpec{
 		"ImmutableDbPath",
 		"immutable-db-path",
 		"",
-		"path to ImmutableDB for load mode",
+		"path or http(s) URL of the ImmutableDB for load mode",
 	),
 	boolFlag("IntersectTip", "intersect-tip", "start from current tip"),
 	boolFlag(
@@ -420,6 +420,16 @@ var flagSpecs = []flagSpec{
 		"BarkOperatorCertificateFingerprints",
 		"bark-operator-certificate-fingerprints",
 		"SHA-256 client certificate fingerprints authorized for destructive Bark DatabaseService RPCs",
+	),
+	boolFlag(
+		"BarkLifecycleEnabled",
+		"bark-lifecycle-enabled",
+		"enable Bark remote Stop, Restart, and GetStatus RPCs",
+	),
+	stringSliceFlag(
+		"BarkLifecycleOperatorCertificateFingerprints",
+		"bark-lifecycle-operator-certificate-fingerprints",
+		"SHA-256 client certificate fingerprints authorized for Bark Stop and Restart RPCs",
 	),
 
 	// History expiry

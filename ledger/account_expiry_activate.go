@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
@@ -58,7 +59,7 @@ import (
 // two would otherwise either re-run the stamp or, worse, record activation
 // without ever having stamped anything. Passing the rollover's txn rules out
 // both partial states.
-func (ls *LedgerState) activateDelegatorInactivityIfNeeded(
+func (ls *LedgerState) activateDelegatorInactivityIfNeeded(ctx context.Context,
 	txn *database.Txn,
 	currentEpoch uint64,
 ) error {
@@ -76,7 +77,11 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(
 		return nil
 	}
 	expiration := currentEpoch + ls.config.DelegatorInactivity
-	stamped, err := ls.db.StampAllActiveAccountExpirations(expiration, txn)
+	stamped, err := ls.db.StampAllActiveAccountExpirations(
+		ctx,
+		expiration,
+		txn,
+	)
 	if err != nil {
 		return err
 	}

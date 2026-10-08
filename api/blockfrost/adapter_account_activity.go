@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -34,7 +35,7 @@ import (
 // /txs/{hash}/utxos. Unlike a single-address query, each row's address
 // must be recovered per-UTxO from decoded output CBOR, because a stake
 // credential can be shared by many distinct payment addresses.
-func (a *NodeAdapter) AccountUTXOs(
+func (a *NodeAdapter) AccountUTXOs(ctx context.Context,
 	stakeAddress string,
 	params PaginationParams,
 ) ([]AccountUTXOInfo, int, error) {
@@ -46,11 +47,11 @@ func (a *NodeAdapter) AccountUTXOs(
 	// the total and the returned page describe the same snapshot: two
 	// separate (nil-txn) calls could otherwise straddle a concurrent
 	// commit and return a page inconsistent with the reported total.
-	txn := a.ledgerState.Database().Transaction(false)
+	txn := a.ledgerState.Database().Transaction(ctx, false)
 	defer txn.Release()
 
 	if _, err := a.ledgerState.Database().
-		GetAccountByCredential(credentialTag, stakeKey, true, txn); err != nil {
+		GetAccountByCredential(ctx, credentialTag, stakeKey, true, txn); err != nil {
 		return nil, 0, err
 	}
 
@@ -63,10 +64,12 @@ func (a *NodeAdapter) AccountUTXOs(
 	addressPatterns := []models.UtxoAddressPattern{
 		{DelegationPart: stakeKey},
 	}
-	total, err := a.ledgerState.Database().CountUtxosByAddressWithOrdering(
-		&models.UtxoWithOrderingQuery{AddressPatterns: addressPatterns},
-		txn,
-	)
+	total, err := a.ledgerState.Database().
+		CountUtxosByAddressWithOrdering(
+			ctx,
+			&models.UtxoWithOrderingQuery{AddressPatterns: addressPatterns},
+			txn,
+		)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count account UTxOs for %q: %w",
@@ -79,15 +82,17 @@ func (a *NodeAdapter) AccountUTXOs(
 		return []AccountUTXOInfo{}, total, nil
 	}
 
-	paged, err := a.ledgerState.Database().UtxosByAddressWithOrdering(
-		&models.UtxoWithOrderingQuery{
-			AddressPatterns: addressPatterns,
-			Limit:           params.Count,
-			Offset:          offset,
-			Descending:      params.Order == PaginationOrderDesc,
-		},
-		txn,
-	)
+	paged, err := a.ledgerState.Database().
+		UtxosByAddressWithOrdering(
+			ctx,
+			&models.UtxoWithOrderingQuery{
+				AddressPatterns: addressPatterns,
+				Limit:           params.Count,
+				Offset:          offset,
+				Descending:      params.Order == PaginationOrderDesc,
+			},
+			txn,
+		)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get account UTxOs for %q: %w",
@@ -96,7 +101,7 @@ func (a *NodeAdapter) AccountUTXOs(
 		)
 	}
 
-	txBlockHashes, err := a.addressUtxoBlockHashes(paged)
+	txBlockHashes, err := a.addressUtxoBlockHashes(ctx, paged)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get block hashes for account UTxOs %q: %w",
@@ -152,7 +157,7 @@ func (a *NodeAdapter) AccountUTXOs(
 
 // AccountWithdrawals returns withdrawal history rows for the stake
 // credential behind stakeAddress.
-func (a *NodeAdapter) AccountWithdrawals(
+func (a *NodeAdapter) AccountWithdrawals(ctx context.Context,
 	stakeAddress string,
 	params PaginationParams,
 ) ([]AccountWithdrawalInfo, int, error) {
@@ -161,13 +166,13 @@ func (a *NodeAdapter) AccountWithdrawals(
 		return nil, 0, err
 	}
 	if _, err := a.ledgerState.Database().
-		GetAccountByCredential(credentialTag, stakeKey, true, nil); err != nil {
+		GetAccountByCredential(ctx, credentialTag, stakeKey, true, nil); err != nil {
 		return nil, 0, err
 	}
 
 	offset := (params.Page - 1) * params.Count
 	total, err := a.ledgerState.Database().
-		CountAccountWithdrawalHistoryByCredential(credentialTag, stakeKey, nil)
+		CountAccountWithdrawalHistoryByCredential(ctx, credentialTag, stakeKey, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count account withdrawal history: %w",
@@ -179,6 +184,7 @@ func (a *NodeAdapter) AccountWithdrawals(
 	}
 	rows, err := a.ledgerState.Database().
 		GetAccountWithdrawalHistoryByCredential(
+			ctx,
 			credentialTag,
 			stakeKey,
 			params.Count,
@@ -196,7 +202,7 @@ func (a *NodeAdapter) AccountWithdrawals(
 	blockNumbers := make(map[string]uint64, len(rows))
 	ret := make([]AccountWithdrawalInfo, 0, len(rows))
 	for _, row := range rows {
-		txSlot, blockTime, blockHeight, err := a.accountHistoryBlockInfo(
+		txSlot, blockTime, blockHeight, err := a.accountHistoryBlockInfo(ctx,
 			row.TxSlot,
 			row.BlockHash,
 			blockNumbers,
@@ -226,7 +232,7 @@ func (a *NodeAdapter) AccountWithdrawals(
 // from/to range is a SQL predicate, not an in-memory filter), and the
 // payment-credential script/key bit and block height/time are then
 // resolved only for the <= count rows on the page.
-func (a *NodeAdapter) AccountTransactions(
+func (a *NodeAdapter) AccountTransactions(ctx context.Context,
 	stakeAddress string,
 	params AccountTransactionsParams,
 ) ([]AccountTransactionInfo, int, error) {
@@ -242,11 +248,11 @@ func (a *NodeAdapter) AccountTransactions(
 		return nil, 0, err
 	}
 	if _, err := a.ledgerState.Database().
-		GetAccountByCredential(credentialTag, stakeKey, true, nil); err != nil {
+		GetAccountByCredential(ctx, credentialTag, stakeKey, true, nil); err != nil {
 		return nil, 0, err
 	}
 
-	from, fromSatisfiable, err := a.resolveBlockRangeBound(params.From, true)
+	from, fromSatisfiable, err := a.resolveBlockRangeBound(ctx, params.From, true)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"resolve account transactions from range: %w",
@@ -256,7 +262,7 @@ func (a *NodeAdapter) AccountTransactions(
 	if !fromSatisfiable {
 		return []AccountTransactionInfo{}, 0, nil
 	}
-	to, _, err := a.resolveBlockRangeBound(params.To, false)
+	to, _, err := a.resolveBlockRangeBound(ctx, params.To, false)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"resolve account transactions to range: %w",
@@ -265,13 +271,15 @@ func (a *NodeAdapter) AccountTransactions(
 	}
 
 	offset := (params.Pagination.Page - 1) * params.Pagination.Count
-	total, err := a.ledgerState.Database().CountAddressTransactionsByCredential(
-		credentialTag,
-		stakeKey,
-		from,
-		to,
-		nil,
-	)
+	total, err := a.ledgerState.Database().
+		CountAddressTransactionsByCredential(
+			ctx,
+			credentialTag,
+			stakeKey,
+			from,
+			to,
+			nil,
+		)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count account transactions for %q: %w",
@@ -282,16 +290,18 @@ func (a *NodeAdapter) AccountTransactions(
 	if offset >= total {
 		return []AccountTransactionInfo{}, total, nil
 	}
-	rows, err := a.ledgerState.Database().GetAddressTransactionsByCredential(
-		credentialTag,
-		stakeKey,
-		params.Pagination.Count,
-		offset,
-		params.Pagination.Order,
-		from,
-		to,
-		nil,
-	)
+	rows, err := a.ledgerState.Database().
+		GetAddressTransactionsByCredential(
+			ctx,
+			credentialTag,
+			stakeKey,
+			params.Pagination.Count,
+			offset,
+			params.Pagination.Order,
+			from,
+			to,
+			nil,
+		)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get account transactions for %q: %w",
@@ -312,7 +322,7 @@ func (a *NodeAdapter) AccountTransactions(
 		keyList = append(keyList, key)
 	}
 	scriptFlags, err := a.ledgerState.Database().
-		GetUtxoPaymentScriptByCredential(credentialTag, stakeKey, keyList, nil)
+		GetUtxoPaymentScriptByCredential(ctx, credentialTag, stakeKey, keyList, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"resolve account transaction payment credential types: %w",
@@ -326,7 +336,10 @@ func (a *NodeAdapter) AccountTransactions(
 		blockHashKey := hex.EncodeToString(row.BlockHash)
 		blockHeight, ok := blockNumbers[blockHashKey]
 		if !ok {
-			block, err := a.ledgerState.BlockByHash(row.BlockHash)
+			block, err := a.ledgerState.BlockByHash(
+				ctx,
+				row.BlockHash,
+			)
 			if err != nil {
 				return nil, 0, fmt.Errorf(
 					"get block for transaction %x: %w",
@@ -401,7 +414,7 @@ func (a *NodeAdapter) AccountTransactions(
 // was found; a gap-fallback ignores it and defaults to the start (from)
 // or end (to) of the resolved block, since the requested index was
 // scoped to a block that does not exist.
-func (a *NodeAdapter) resolveBlockRangeBound(
+func (a *NodeAdapter) resolveBlockRangeBound(ctx context.Context,
 	pos *BlockRangePosition,
 	lower bool,
 ) (*models.AddressTransactionPosition, bool, error) {
@@ -416,7 +429,13 @@ func (a *NodeAdapter) resolveBlockRangeBound(
 	}
 	idx := pos.Block + database.BlockInitialIndex
 
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	block, err := a.ledgerState.Database().BlockByIndex(idx, nil)
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return nil, false, cancelErr
+	}
 	switch {
 	case err == nil:
 		txIndex := uint32(0)

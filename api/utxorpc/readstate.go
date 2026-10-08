@@ -49,7 +49,7 @@ const stakeFractionScale = 1_000_000_000
 // so that is the only variant handled here. A variant added by a later codegen
 // bump falls through to Unimplemented rather than being answered wrongly.
 func (s *betaQueryServiceServer) ReadState(
-	_ context.Context,
+	ctx context.Context,
 	req *connect.Request[betaquery.ReadStateRequest],
 ) (*connect.Response[betaquery.ReadStateResponse], error) {
 	fieldMask := req.Msg.GetFieldMask()
@@ -90,7 +90,7 @@ func (s *betaQueryServiceServer) ReadState(
 		// A nil inner message is a query with no pool filter rather than a
 		// malformed one: the generated getters are nil-safe and proto3 reads an
 		// absent message as its default.
-		return s.readStakePoolDistribution(query.StakePoolDistribution)
+		return s.readStakePoolDistribution(ctx, query.StakePoolDistribution)
 	default:
 		return nil, connect.NewError(
 			connect.CodeUnimplemented,
@@ -107,6 +107,7 @@ func (s *betaQueryServiceServer) ReadState(
 // ledger.PoolStakeDistribution that also answers the node-to-client
 // GetPoolDistr2 query.
 func (s *betaQueryServiceServer) readStakePoolDistribution(
+	ctx context.Context,
 	query *betacardano.GetStakePoolDistribution,
 ) (*connect.Response[betaquery.ReadStateResponse], error) {
 	// LedgerState is an optional dependency: Utxorpc.Start admits an untyped
@@ -130,6 +131,7 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 	}
 
 	dist, err := s.utxorpc.config.LedgerState.PoolStakeDistribution(
+		ctx,
 		poolFilter,
 		ledger.QueryPoint{},
 		nil,

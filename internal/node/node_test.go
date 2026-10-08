@@ -831,8 +831,11 @@ func TestBuildDingoConfigWiresBarkOperatorFingerprints(t *testing.T) {
 		strings.Repeat("ab", 32),
 		strings.Repeat("cd", 32),
 	}
+	wantLifecycle := []string{strings.Repeat("ef", 32)}
 	cfg := &config.Config{
-		BarkOperatorCertificateFingerprints: want,
+		BarkOperatorCertificateFingerprints:          want,
+		BarkLifecycleEnabled:                         true,
+		BarkLifecycleOperatorCertificateFingerprints: wantLifecycle,
 	}
 
 	built := buildDingoConfig(
@@ -853,6 +856,18 @@ func TestBuildDingoConfigWiresBarkOperatorFingerprints(t *testing.T) {
 	) {
 		t.Fatalf(
 			"expected Bark operator fingerprints to flow through, got %v",
+			got,
+		)
+	}
+	if !built.BarkLifecycleEnabled() {
+		t.Fatal("expected Bark lifecycle service to remain enabled")
+	}
+	if got := built.BarkLifecycleOperatorCertificateFingerprints(); !slices.Equal(
+		got,
+		wantLifecycle,
+	) {
+		t.Fatalf(
+			"expected Bark lifecycle operator fingerprints to flow through, got %v",
 			got,
 		)
 	}
