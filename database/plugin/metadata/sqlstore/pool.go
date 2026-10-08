@@ -898,21 +898,14 @@ func (s *Store) UpdatePoolOpCertSequence(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			if _, err := db.ExecContext(ctx, `
-INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
-VALUES (?, ?, ?)
-ON CONFLICT (pool_key_hash, slot) DO UPDATE
-SET sequence = excluded.sequence`,
+			if _, err := s.execCached(ctx, db, poolOpCertSequenceUpsertSQL,
 				poolKeyHash.Bytes(),
 				slotValue,
 				sequenceValue,
 			); err != nil {
 				return err
 			}
-			_, err := db.ExecContext(ctx, `
-UPDATE pool SET latest_op_cert_sequence = ?
-WHERE pool_key_hash = ?
-  AND latest_op_cert_sequence < ?`,
+			_, err := s.execCached(ctx, db, poolUpdateLatestOpCertSequenceSQL,
 				sequenceValue,
 				poolKeyHash.Bytes(),
 				sequenceValue,
@@ -921,6 +914,17 @@ WHERE pool_key_hash = ?
 		},
 	)
 }
+
+const poolOpCertSequenceUpsertSQL = `
+INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
+VALUES (?, ?, ?)
+ON CONFLICT (pool_key_hash, slot) DO UPDATE
+SET sequence = excluded.sequence`
+
+const poolUpdateLatestOpCertSequenceSQL = `
+UPDATE pool SET latest_op_cert_sequence = ?
+WHERE pool_key_hash = ?
+  AND latest_op_cert_sequence < ?`
 
 func (s *Store) LatestPoolOpCertSequence(
 	poolKeyHash lcommon.PoolKeyHash,

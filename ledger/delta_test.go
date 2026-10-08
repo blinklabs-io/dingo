@@ -200,6 +200,60 @@ func requireTransactionEvent(
 	return txEvt
 }
 
+func TestLedgerDeltaBatchAPIStorageFlushesTransactionMetadata(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     "",
+		StorageMode: dbtypes.StorageModeAPI,
+	})
+	require.NoError(t, err)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			EventBus: bus,
+			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	t.Run("commit persists queued metadata", func(t *testing.T) {
+		delta := newTransactionEventTestDelta(t, 21, 0)
+		batch := NewLedgerDeltaBatch()
+		batch.addDelta(delta)
+		t.Cleanup(batch.Release)
+
+		err := db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+			return batch.apply(context.Background(), ls, txn)
+		})
+		require.NoError(t, err)
+		stored, err := db.Metadata().GetTransactionByHash(
+			delta.Transactions[0].Tx.Hash().Bytes(), nil,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, stored)
+	})
+
+	t.Run("failed batch rolls back earlier metadata", func(t *testing.T) {
+		first := newTransactionEventTestDelta(t, 22, 0)
+		invalid := newTransactionEventTestDelta(t, 23, -1)
+		batch := NewLedgerDeltaBatch()
+		batch.addDelta(first)
+		batch.addDelta(invalid)
+		t.Cleanup(batch.Release)
+
+		err := db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+			return batch.apply(context.Background(), ls, txn)
+		})
+		require.ErrorContains(t, err, "transaction index out of range")
+		stored, err := db.Metadata().GetTransactionByHash(
+			first.Transactions[0].Tx.Hash().Bytes(), nil,
+		)
+		require.NoError(t, err)
+		require.Nil(t, stored)
+	})
+}
+
 func TestLedgerDeltaPublishesApplyEventsOnlyAfterCommit(t *testing.T) {
 	t.Parallel()
 

@@ -334,6 +334,35 @@ func apiDetailTx(t *testing.T, seed byte) (lcommon.Transaction, ocommon.Point) {
 	return tx, ocommon.Point{Slot: 300 + uint64(seed), Hash: txID}
 }
 
+func assetOutputTx(
+	t *testing.T,
+	seed byte,
+) (lcommon.Transaction, ocommon.Point, []byte, []byte) {
+	t.Helper()
+	fx := buildSharedCredentialTx(t, seed)
+	policyID := make([]byte, 28)
+	policyID[0] = seed
+	assetName := []byte{seed, 0x42}
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(fx.tx.Outputs()[0].Address().String()).
+		WithLovelace(3_000_000).
+		WithAssets(mockledger.Asset{
+			PolicyId:  policyID,
+			AssetName: assetName,
+			Amount:    7,
+		}).
+		Build()
+	require.NoError(t, err)
+	txID := make([]byte, 32)
+	txID[0] = seed
+	txID[1] = 0xdd
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithId(txID)
+	tx.WithOutputs(output)
+	tx.WithValid(true)
+	return tx, ocommon.Point{Slot: 400 + uint64(seed), Hash: txID}, policyID, assetName
+}
+
 func tableCounts(
 	t *testing.T,
 	store *Store,
@@ -393,6 +422,43 @@ func TestBatchedAPIDetailRowsWaitForFlush(t *testing.T) {
 	}, tableCounts(t, store, txn, tables...))
 	require.NoError(t, store.FlushBatch(acc, txn))
 	require.Equal(t, want, tableCounts(t, store, txn, tables...))
+}
+
+func TestBatchedProducedAssetRowsWaitForFlush(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	txn := store.Transaction(context.Background())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	acc := store.NewBatchAccumulator()
+	defer acc.Reset()
+
+	type assetRef struct {
+		policyID []byte
+		name     []byte
+	}
+	assets := make([]assetRef, 0, 3)
+	for seed := byte(1); seed <= 3; seed++ {
+		tx, point, policyID, name := assetOutputTx(t, seed)
+		require.NoError(t, store.SetTransactionBatchedHistorical(
+			tx, point, 0, nil, true, true, acc, txn,
+		))
+		assets = append(assets, assetRef{policyID: policyID, name: name})
+	}
+	require.Zero(
+		t,
+		tableCounts(t, store, txn, "asset")["asset"],
+		"new UTxO asset rows must remain staged with the transaction batch",
+	)
+	require.NoError(t, store.FlushBatch(acc, txn))
+	require.Equal(t, 3, tableCounts(t, store, txn, "asset")["asset"])
+	for _, ref := range assets {
+		stored, err := store.GetAssetByPolicyAndName(
+			lcommon.NewBlake2b224(ref.policyID), ref.name, txn,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, stored)
+		require.Equal(t, types.Uint64(7), stored.Amount)
+	}
 }
 
 // TestBatchedRowsOfFailedWriteAreNotQueued applies a transaction whose write
@@ -463,6 +529,34 @@ func TestRowBatchFlushSplitsAtParameterLimit(t *testing.T) {
 	require.Equal(t, float64(2), counterValue(t, reg, "insert")-insertsBefore)
 	require.Equal(t, rowCount, keyWitnessCount(t, store, txn))
 	require.True(t, rows.empty())
+}
+
+func TestRowBatchFlushAssetMintBurnKeepsUniqueEvents(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	txn := store.Transaction(context.Background())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	db, ctx, err := store.dbFromTxn(txn)
+	require.NoError(t, err)
+
+	txHash := make([]byte, 32)
+	policyID := make([]byte, 28)
+	rows := rowBatch{}
+	rows.add(assetMintBurnShape, txHash, policyID, []byte("first"), []byte("fp1"), uint64(100), "5", uint32(0))
+	rows.add(assetMintBurnShape, txHash, policyID, []byte("second"), []byte("fp2"), uint64(100), "-2", uint32(0))
+	rows.add(assetMintBurnShape, txHash, policyID, []byte("first"), []byte("fp1"), uint64(100), "5", uint32(0))
+
+	require.NoError(t, rows.flush(ctx, db, store.dialect.ParameterLimit()))
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM asset_mint_burn`,
+	).Scan(&count))
+	require.Equal(t, 2, count)
+	var quantity string
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT quantity FROM asset_mint_burn WHERE name = ?`, []byte("second"),
+	).Scan(&quantity))
+	require.Equal(t, "-2", quantity)
 }
 
 type recordingQueryer struct {

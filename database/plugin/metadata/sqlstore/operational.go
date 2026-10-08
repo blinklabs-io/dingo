@@ -591,6 +591,60 @@ func (s *Store) SetBlockNonce(
 	)
 }
 
+// SetBlockNonces writes a block-nonce batch with one multi-row SQLite upsert.
+func (s *Store) SetBlockNonces(
+	nonces []models.BlockNonce,
+	txn types.Txn,
+) error {
+	if len(nonces) == 0 {
+		return nil
+	}
+	if s.dialect.Name() != "sqlite" {
+		for _, nonce := range nonces {
+			if err := s.SetBlockNonce(
+				nonce.Hash,
+				nonce.Slot,
+				nonce.Nonce,
+				nonce.IsCheckpoint,
+				txn,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	batchSize := s.dialect.ParameterLimit() / 4
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	for start := 0; start < len(nonces); start += batchSize {
+		end := min(start+batchSize, len(nonces))
+		values := make([]string, end-start)
+		args := make([]any, 0, (end-start)*4)
+		for i, nonce := range nonces[start:end] {
+			slot, err := checkedInt64(nonce.Slot)
+			if err != nil {
+				return err
+			}
+			values[i] = "(?, ?, ?, ?)"
+			args = append(args, nonce.Hash, slot, nonce.Nonce, nonce.IsCheckpoint)
+		}
+		query := `INSERT INTO block_nonce (hash, slot, nonce, is_checkpoint)
+VALUES ` + strings.Join(values, ",") + `
+ON CONFLICT (hash, slot) DO UPDATE SET
+    nonce = excluded.nonce,
+    is_checkpoint = block_nonce.is_checkpoint OR excluded.is_checkpoint`
+		if _, err := s.execCached(ctx, db, query, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) GetBlockNonce(
 	point ocommon.Point,
 	txn types.Txn,

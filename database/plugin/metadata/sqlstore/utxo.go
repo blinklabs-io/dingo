@@ -881,6 +881,19 @@ func utxoStakeConsumedDeltaQuery(n int) string {
 		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
 }
 
+var utxoStakeConsumedDeltaQuerySizes = [...]int{
+	1, 2, 4, 8, 16, 32, 64, 128, 256, 400,
+}
+
+func utxoStakeConsumedDeltaQuerySize(n int) int {
+	for _, size := range utxoStakeConsumedDeltaQuerySizes {
+		if n <= size {
+			return size
+		}
+	}
+	return utxoStakeConsumedDeltaQuerySizes[len(utxoStakeConsumedDeltaQuerySizes)-1]
+}
+
 // queryUtxoStakeConsumedDeltas is queryUtxoStakeRefs's counterpart for the
 // setTransactionWithAccumulator fast path: alongside each spent input's
 // credential it also reads the row's amount, so the caller can pass
@@ -901,7 +914,7 @@ func utxoStakeConsumedDeltaQuery(n int) string {
 // transaction just spent, by (tx_id, output_idx), so the deleted_slot value
 // (already set to this transaction's slot by the caller) does not change
 // which row answers the lookup.
-func queryUtxoStakeConsumedDeltas(
+func (s *Store) queryUtxoStakeConsumedDeltas(
 	ctx context.Context,
 	db queryer,
 	ids []models.UtxoId,
@@ -920,8 +933,11 @@ func queryUtxoStakeConsumedDeltas(
 		for i, txID := range batch {
 			args[i] = txID
 		}
-		query := utxoStakeConsumedDeltaQuery(len(batch))
-		rows, err := db.QueryContext(ctx, query, args...)
+		querySize := utxoStakeConsumedDeltaQuerySize(len(batch))
+		query := utxoStakeConsumedDeltaQuery(querySize)
+		queryArgs := make([]any, querySize)
+		copy(queryArgs, args)
+		rows, err := s.queryRowsCached(ctx, db, query, queryArgs...)
 		if err != nil {
 			return nil, err
 		}

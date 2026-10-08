@@ -83,6 +83,19 @@ var (
 		columns: []string{"hash", "raw_datum", "added_slot"},
 		suffix:  "ON CONFLICT (hash) DO NOTHING",
 	}
+	assetShape = rowShape{
+		table:   "asset",
+		columns: []string{"name", "policy_id", "fingerprint", "utxo_id", "amount"},
+		suffix:  "ON CONFLICT (name, policy_id, utxo_id) DO NOTHING",
+	}
+	assetMintBurnShape = rowShape{
+		table: "asset_mint_burn",
+		columns: []string{
+			"tx_hash", "policy_id", "name", "fingerprint", "slot",
+			"quantity", "tx_index",
+		},
+		suffix: "ON CONFLICT (tx_hash, policy_id, name) DO NOTHING",
+	}
 )
 
 // shapeRows holds rows queued for one shape. txIDCol indexes the

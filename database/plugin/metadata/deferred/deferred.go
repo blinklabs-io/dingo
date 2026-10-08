@@ -23,8 +23,8 @@ package deferred
 // Index is one entry in the deferred-index manifest. Each entry
 // names an index that is safe to drop while the database is in
 // bulk-load mode (Mithril sync ledger-state import, immutable blob
-// load, API-mode historical metadata backfill) and rebuild before
-// the database is marked ready.
+// load, API-mode historical metadata backfill, or trusted immutable
+// replay by dingo load) and rebuild before the database is marked ready.
 //
 // The manifest deliberately excludes:
 //
@@ -55,7 +55,7 @@ package deferred
 //     import path runs once per transaction cannot afford a scan of
 //     a table the same import path is growing.
 //  2. Does the index only serve API/query/rollback paths that do
-//     not run during Mithril sync? If yes, add it here.
+//     not run during bulk import or trusted immutable replay? If yes, add it here.
 //  3. Composite indexes share state with their constituent columns. If a field
 //     has both a deferrable single-column query index and a protected composite
 //     unique index, give the single-column index an explicit name and list that

@@ -89,7 +89,7 @@ func TestStoreTransactionWitnessesIncludesPlutusV4(t *testing.T) {
 
 	const slot = uint64(43)
 	rows := &rowBatch{}
-	require.NoError(t, storeTransactionWitnesses(
+	require.NoError(t, store.storeTransactionWitnesses(
 		t.Context(),
 		store.writeDB,
 		rows,
@@ -179,7 +179,7 @@ func TestStoreTransactionWitnessesIncludesDijkstraSubTransactions(
 
 	const slot = uint64(45)
 	rows := &rowBatch{}
-	require.NoError(t, storeTransactionWitnesses(
+	require.NoError(t, store.storeTransactionWitnesses(
 		t.Context(),
 		store.writeDB,
 		rows,

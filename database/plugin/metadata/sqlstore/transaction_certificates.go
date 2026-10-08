@@ -28,6 +28,17 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+const transactionCertificateInsertSQL = `
+INSERT INTO certs (
+    block_hash, transaction_id, certificate_id, slot, cert_index, cert_type
+) VALUES (?, ?, 0, ?, ?, ?)
+ON CONFLICT (transaction_id, cert_index) DO UPDATE SET
+    block_hash = excluded.block_hash,
+    certificate_id = 0,
+    slot = excluded.slot,
+    cert_type = excluded.cert_type
+RETURNING id`
+
 var certificateTables = []string{
 	"stake_registration",
 	"pool_registration",
@@ -48,6 +59,43 @@ var certificateTables = []string{
 	"vote_registration_delegation",
 	"move_instantaneous_rewards",
 	"genesis_delegation",
+}
+
+const hasSpecializedCertificatesSQL = `
+SELECT EXISTS (
+    SELECT 1 FROM certs WHERE transaction_id = ?
+)`
+
+const (
+	deletePoolRegistrationOwnersSQL = `
+DELETE FROM pool_registration_owner
+WHERE pool_registration_id IN (
+    SELECT pool_registration.id
+    FROM pool_registration
+    JOIN certs ON certs.id = pool_registration.certificate_id
+    WHERE certs.transaction_id = ?
+)`
+	deletePoolRegistrationRelaysSQL = `
+DELETE FROM pool_registration_relay
+WHERE pool_registration_id IN (
+    SELECT pool_registration.id
+    FROM pool_registration
+    JOIN certs ON certs.id = pool_registration.certificate_id
+    WHERE certs.transaction_id = ?
+)`
+	deleteMIRRewardsSQL = `
+DELETE FROM move_instantaneous_rewards_reward
+WHERE mir_id IN (
+    SELECT move_instantaneous_rewards.id
+    FROM move_instantaneous_rewards
+    JOIN certs ON certs.id = move_instantaneous_rewards.certificate_id
+    WHERE certs.transaction_id = ?
+)`
+)
+
+func certificateTableCleanupSQL(table string) string {
+	return "DELETE FROM " + table + " WHERE certificate_id IN (" +
+		"SELECT id FROM certs WHERE transaction_id = ?)"
 }
 
 type certificateAccountState struct {
@@ -87,7 +135,7 @@ func (s *Store) applyTransactionCertificates(
 	if len(certificates) == 0 {
 		return nil, nil
 	}
-	if err := deleteSpecializedCertificates(ctx, db, transactionID); err != nil {
+	if err := s.deleteSpecializedCertificates(ctx, db, transactionID); err != nil {
 		return nil, err
 	}
 	refs := make(map[string]models.StakeCredentialRef)
@@ -96,22 +144,14 @@ func (s *Store) applyTransactionCertificates(
 		if err != nil {
 			return nil, err
 		}
-		unifiedID, err := queryReturnedID(ctx, db, `
-INSERT INTO certs (
-    block_hash, transaction_id, certificate_id, slot, cert_index, cert_type
-) VALUES (?, ?, 0, ?, ?, ?)
-ON CONFLICT (transaction_id, cert_index) DO UPDATE SET
-    block_hash = excluded.block_hash,
-    certificate_id = 0,
-    slot = excluded.slot,
-    cert_type = excluded.cert_type
-RETURNING id`,
+		var unifiedID int64
+		err = s.queryRowCached(ctx, db, transactionCertificateInsertSQL,
 			point.Hash,
 			transactionID,
 			point.Slot,
 			certIndex,
 			certType,
-		)
+		).Scan(&unifiedID)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"create certificate %d: %w",
@@ -179,54 +219,38 @@ UPDATE certs SET certificate_id = ? WHERE id = ?`,
 	return ret, nil
 }
 
-func deleteSpecializedCertificates(
+func (s *Store) deleteSpecializedCertificates(
 	ctx context.Context,
 	db queryer,
 	transactionID int64,
 ) error {
-	if _, err := db.ExecContext(ctx, `
-DELETE FROM pool_registration_owner
-WHERE pool_registration_id IN (
-    SELECT pool_registration.id
-    FROM pool_registration
-    JOIN certs ON certs.id = pool_registration.certificate_id
-    WHERE certs.transaction_id = ?
-)`,
+	var exists bool
+	if err := s.queryRowCached(
+		ctx, db, hasSpecializedCertificatesSQL, transactionID,
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if _, err := s.execCached(ctx, db, deletePoolRegistrationOwnersSQL,
 		transactionID,
 	); err != nil {
 		return fmt.Errorf("delete existing pool registration owners: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `
-DELETE FROM pool_registration_relay
-WHERE pool_registration_id IN (
-    SELECT pool_registration.id
-    FROM pool_registration
-    JOIN certs ON certs.id = pool_registration.certificate_id
-    WHERE certs.transaction_id = ?
-)`,
+	if _, err := s.execCached(ctx, db, deletePoolRegistrationRelaysSQL,
 		transactionID,
 	); err != nil {
 		return fmt.Errorf("delete existing pool registration relays: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `
-DELETE FROM move_instantaneous_rewards_reward
-WHERE mir_id IN (
-    SELECT move_instantaneous_rewards.id
-    FROM move_instantaneous_rewards
-    JOIN certs ON certs.id = move_instantaneous_rewards.certificate_id
-    WHERE certs.transaction_id = ?
-)`,
+	if _, err := s.execCached(ctx, db, deleteMIRRewardsSQL,
 		transactionID,
 	); err != nil {
 		return fmt.Errorf("delete existing MIR rewards: %w", err)
 	}
 	for _, table := range certificateTables {
-		query := "DELETE FROM " + table +
-			" WHERE certificate_id IN (" +
-			"SELECT id FROM certs WHERE transaction_id = ?)"
-		if _, err := db.ExecContext(
-			ctx,
-			query,
+		if _, err := s.execCached(
+			ctx, db, certificateTableCleanupSQL(table),
 			transactionID,
 		); err != nil {
 			return fmt.Errorf(

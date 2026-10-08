@@ -84,6 +84,12 @@ type BatchedTxIngestOpts struct {
 	// replay paths where producer rows may be absent.
 	SkipConsumedInputRecovery bool
 
+	// TrustedImmutableReplay elides consumed-input blob recovery while
+	// preserving normal transaction conflict validation. Use only when replaying
+	// a complete, trusted immutable history in slot order, so each consumed
+	// output was written by an earlier block in the same replay.
+	TrustedImmutableReplay bool
+
 	// StrictAppliedInputConservation marks the steady-state, at-tip, validated
 	// path. Past the Mithril trust boundary, a missing producer row is recovered
 	// only when the producer block is still on the applied primary chain. This

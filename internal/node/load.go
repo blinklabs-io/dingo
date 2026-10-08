@@ -724,6 +724,7 @@ func LoadWithDB(
 	defer closeDB()
 	// Enable bulk-load optimizations if the metadata store supports them
 	defer WithBulkLoadPragmas(db, logger)()
+	deferredIndexes := WithDeferredIndexes(db, logger)
 	// Immutable load replays trusted block batches directly into the ledger, so
 	// it does not need the event-driven reread path here.
 	cm, err := chain.NewManager(
@@ -935,6 +936,9 @@ func LoadWithDB(
 	// the database missing mark/reward snapshots for those epochs.
 	if err := captureFailures.err(); err != nil {
 		return err
+	}
+	if err := deferredIndexes.BuildCritical(); err != nil {
+		return fmt.Errorf("rebuilding critical metadata indexes after immutable load: %w", err)
 	}
 	return nil
 }

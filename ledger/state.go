@@ -8221,6 +8221,11 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// Track pending state changes during transaction
 			var pendingTip ochainsync.Tip
 			var pendingNonce []byte
+			pendingBlockNonces := make(
+				[]models.BlockNonce,
+				0,
+				len(nextBatch[i:end]),
+			)
 			var blocksProcessed int
 			runningNonce := snapshotNonce
 			trackByronPBFT := batchContainsByronBlocks(nextBatch[i:end])
@@ -8570,21 +8575,23 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// Store an applied point for every block. Byron blocks do
 						// not have an evolving nonce, but reconciliation still
 						// needs their durable point to build rollback notifications.
-						err = ls.db.SetBlockNonce(
-							tmpPoint.Hash,
-							tmpPoint.Slot,
-							blockNonce,
-							isCheckpoint,
-							txn,
+						pendingBlockNonces = append(
+							pendingBlockNonces,
+							models.BlockNonce{
+								Hash:         tmpPoint.Hash,
+								Slot:         tmpPoint.Slot,
+								Nonce:        blockNonce,
+								IsCheckpoint: isCheckpoint,
+							},
 						)
-						if err != nil {
-							deltaBatch.Release()
-							return err
-						}
 						if len(blockNonce) > 0 {
 							// Track pending nonce (will be committed after txn succeeds)
 							pendingNonce = blockNonce
 						}
+					}
+					if err := ls.db.SetBlockNonces(pendingBlockNonces, txn); err != nil {
+						deltaBatch.Release()
+						return err
 					}
 					// Apply delta batch
 					applyStart := time.Now()

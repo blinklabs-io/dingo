@@ -332,16 +332,16 @@ PRIMARY KEY (utxo_id, transaction_hash))`)
 	require.NoError(t, err)
 	input, err := mockledger.NewSimpleTransactionInput(utxoID, 0)
 	require.NoError(t, err)
-	require.NoError(t, markTransactionUtxoReferences(
+	require.NoError(t, store.markTransactionUtxoReferences(
 		t.Context(), store.writeDB, []lcommon.TransactionInput{input},
 		"collateral_by_tx_id", ownerA,
 	))
 	// Re-indexing is idempotent, while a second transaction retains its own edge.
-	require.NoError(t, markTransactionUtxoReferences(
+	require.NoError(t, store.markTransactionUtxoReferences(
 		t.Context(), store.writeDB, []lcommon.TransactionInput{input},
 		"collateral_by_tx_id", ownerA,
 	))
-	require.NoError(t, markTransactionUtxoReferences(
+	require.NoError(t, store.markTransactionUtxoReferences(
 		t.Context(), store.writeDB, []lcommon.TransactionInput{input},
 		"collateral_by_tx_id", ownerB,
 	))

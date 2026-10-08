@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
@@ -77,6 +78,160 @@ ON CONFLICT (hash) DO UPDATE SET
     slot = excluded.slot,
     collateral_fee = excluded.collateral_fee
 RETURNING id`
+
+const consumeUtxoSQL = `
+UPDATE utxo
+SET deleted_slot = ?, spent_at_tx_id = ?
+WHERE tx_id = ? AND output_idx = ?
+  AND deleted_slot = 0 AND spent_at_tx_id IS NULL`
+
+func insertUtxoBatchQuery(rowCount int) string {
+	row := "(" + strings.TrimSuffix(strings.Repeat("?,", 15), ",") + ")"
+	values := strings.TrimSuffix(strings.Repeat(row+",", rowCount), ",")
+	return `INSERT INTO utxo (
+    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
+    staking_key, credential_tag, datum_hash, spent_at_tx_id,
+    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
+    amount, output_idx, payment_script
+) VALUES ` + values + `
+ON CONFLICT (tx_id, output_idx) DO NOTHING
+RETURNING id, tx_id, output_idx`
+}
+
+func consumeUtxosBatchQuery(rowCount int) string {
+	row := "(?,?)"
+	values := strings.TrimSuffix(strings.Repeat(row+",", rowCount), ",")
+	return `UPDATE utxo
+SET deleted_slot = ?, spent_at_tx_id = ?
+WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL
+  AND (tx_id, output_idx) IN (` + values + `)
+RETURNING tx_id, output_idx`
+}
+
+func utxoIdentityKey(txID []byte, outputIdx uint32) string {
+	return string(txID) + ":" + strconv.FormatUint(uint64(outputIdx), 10)
+}
+
+const utxoBatchSize = 8
+
+func (s *Store) insertUtxoModelsChecked(
+	ctx context.Context,
+	db queryer,
+	utxos []*models.Utxo,
+	ignoreConflict bool,
+	deferredRows *rowBatch,
+) ([]bool, error) {
+	inserted := make([]bool, len(utxos))
+	if len(utxos) < 2 || s.dialect.Name() != "sqlite" || !ignoreConflict {
+		for i, utxo := range utxos {
+			created, err := s.insertUtxoModelCheckedWithRows(
+				ctx, db, utxo, ignoreConflict, deferredRows,
+			)
+			if err != nil {
+				return nil, err
+			}
+			inserted[i] = created
+		}
+		return inserted, nil
+	}
+
+	for start := 0; start < len(utxos); start += utxoBatchSize {
+		end := min(start+utxoBatchSize, len(utxos))
+		batch := utxos[start:end]
+		query := insertUtxoBatchQuery(len(batch))
+		args := make([]any, 0, len(batch)*15)
+		for _, utxo := range batch {
+			params, err := createUtxoParams(utxo)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args,
+				params.TransactionID,
+				params.CollateralReturnForTxID,
+				params.TxID,
+				params.PaymentKey,
+				params.StakingKey,
+				params.CredentialTag,
+				params.DatumHash,
+				nullBytes(params.SpentAtTxID),
+				nullBytes(params.ReferencedByTxID),
+				nullBytes(params.CollateralByTxID),
+				params.AddedSlot,
+				params.DeletedSlot,
+				params.Amount,
+				params.OutputIdx,
+				params.PaymentScript,
+			)
+		}
+
+		rows, err := s.queryRowsCached(ctx, db, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		createdIDs := make(map[string]uint, len(batch))
+		for rows.Next() {
+			var (
+				id        uint
+				txID      []byte
+				outputIdx uint32
+			)
+			if err := rows.Scan(&id, &txID, &outputIdx); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			createdIDs[utxoIdentityKey(txID, outputIdx)] = id
+		}
+		rowsErr := rows.Err()
+		closeErr := rows.Close()
+		if rowsErr != nil {
+			return nil, rowsErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+
+		processed := make(map[string]struct{}, len(batch))
+		for i, utxo := range batch {
+			key := utxoIdentityKey(utxo.TxId, utxo.OutputIdx)
+			if _, duplicate := processed[key]; duplicate {
+				wasCreated, err := s.insertUtxoModelChecked(
+					ctx, db, utxo, true,
+				)
+				if err != nil {
+					return nil, err
+				}
+				inserted[start+i] = wasCreated
+				continue
+			}
+			processed[key] = struct{}{}
+			id, created := createdIDs[key]
+			if !created {
+				wasCreated, err := s.insertUtxoModelChecked(
+					ctx, db, utxo, true,
+				)
+				if err != nil {
+					return nil, err
+				}
+				inserted[start+i] = wasCreated
+				continue
+			}
+			utxo.ID = id
+			inserted[start+i] = true
+			var err error
+			if deferredRows != nil {
+				err = s.persistUtxoRelationsWithDeferredAssets(
+					ctx, db, utxo, id, deferredRows,
+				)
+			} else {
+				err = s.persistUtxoRelations(ctx, db, utxo, id)
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return inserted, nil
+}
 
 func (a *transactionBatchAccumulator) insertTransaction(
 	ctx context.Context,
@@ -391,7 +546,7 @@ func (s *Store) setTransactionWithAccumulator(
 				)
 				transactionID = int64(id)
 			} else {
-				transactionID, err = queryReturnedID(ctx, db, transactionInsertSQL,
+				err = s.queryRowCached(ctx, db, transactionInsertSQL,
 					hash,
 					point.Hash,
 					metadataValue,
@@ -402,7 +557,7 @@ func (s *Store) setTransactionWithAccumulator(
 					decimalUint64(types.Uint64(transaction.TTL())),
 					index,
 					transaction.IsValid(),
-				)
+				).Scan(&transactionID)
 			}
 			if err != nil {
 				return fmt.Errorf("create transaction %x: %w", hash, err)
@@ -418,16 +573,13 @@ func (s *Store) setTransactionWithAccumulator(
 				point.Slot,
 				metadataLabels,
 			)
-			if err := s.applyTransactionAssetMintBurn(
-				ctx,
-				db,
+			s.applyTransactionAssetMintBurn(
 				transaction,
 				hash,
 				point.Slot,
 				index,
-			); err != nil {
-				return err
-			}
+				&staged,
+			)
 			// Collected here and merged with this transaction's UTxO-driven
 			// refresh below rather than refreshed immediately: see the
 			// mergeStakeCredentialRefs call beside stakeRefs for why.
@@ -465,7 +617,6 @@ func (s *Store) setTransactionWithAccumulator(
 				0,
 				len(transaction.Produced()),
 			)
-			producedStakeDeltas := make([]stakeCredentialDelta, 0)
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
@@ -483,24 +634,31 @@ func (s *Store) setTransactionWithAccumulator(
 					id := uint(transactionID)
 					model.TransactionID = &id
 				}
-				inserted, err := s.insertUtxoModelChecked(
-					ctx, db, &model, true,
-				)
-				if err != nil {
-					return fmt.Errorf(
-						"create output %x#%d: %w",
-						model.TxId,
-						model.OutputIdx,
-						err,
-					)
-				}
 				producedModels = append(producedModels, model)
+			}
+			producedModelPtrs := make([]*models.Utxo, len(producedModels))
+			for i := range producedModels {
+				producedModelPtrs[i] = &producedModels[i]
+			}
+			var deferredRows *rowBatch
+			if batchedAccumulator != nil {
+				deferredRows = &staged
+			}
+			producedInserted, err := s.insertUtxoModelsChecked(
+				ctx, db, producedModelPtrs, true, deferredRows,
+			)
+			if err != nil {
+				return fmt.Errorf("create transaction outputs: %w", err)
+			}
+			producedStakeDeltas := make([]stakeCredentialDelta, 0)
+			for i := range producedModels {
+				model := &producedModels[i]
 				if len(model.StakingKey) > 0 {
 					gain, err := producedStakeCredentialDelta(
 						model.CredentialTag,
 						model.StakingKey,
 						model.Amount,
-						inserted,
+						producedInserted[i],
 					)
 					if err != nil {
 						return err
@@ -542,93 +700,125 @@ func (s *Store) setTransactionWithAccumulator(
 				map[string]struct{},
 				len(transaction.Consumed()),
 			)
+			uniqueConsumed := make(
+				[]models.UtxoId,
+				0,
+				len(transaction.Consumed()),
+			)
 			for _, input := range transaction.Consumed() {
-				refKey := fmt.Sprintf(
-					"%x:%d",
-					input.Id().Bytes(),
-					input.Index(),
-				)
+				refKey := utxoIdentityKey(input.Id().Bytes(), input.Index())
 				if _, ok := seenConsumed[refKey]; ok {
 					continue
 				}
 				seenConsumed[refKey] = struct{}{}
-				utxoID := models.UtxoId{
+				uniqueConsumed = append(uniqueConsumed, models.UtxoId{
 					Hash: input.Id().Bytes(),
 					Idx:  input.Index(),
+				})
+			}
+			for start := 0; start < len(uniqueConsumed); start += utxoBatchSize {
+				end := min(start+utxoBatchSize, len(uniqueConsumed))
+				batch := uniqueConsumed[start:end]
+				updated := make(map[string]struct{}, len(batch))
+				if s.dialect.Name() == "sqlite" && len(batch) > 1 {
+					query := consumeUtxosBatchQuery(len(batch))
+					args := make([]any, 0, 2+len(batch)*2)
+					args = append(args, point.Slot, hash)
+					for _, ref := range batch {
+						args = append(args, ref.Hash, ref.Idx)
+					}
+					rows, err := s.queryRowsCached(ctx, db, query, args...)
+					if err != nil {
+						return err
+					}
+					for rows.Next() {
+						var (
+							txID      []byte
+							outputIdx uint32
+						)
+						if err := rows.Scan(&txID, &outputIdx); err != nil {
+							_ = rows.Close()
+							return err
+						}
+						updated[utxoIdentityKey(txID, outputIdx)] = struct{}{}
+					}
+					rowsErr := rows.Err()
+					closeErr := rows.Close()
+					if rowsErr != nil {
+						return rowsErr
+					}
+					if closeErr != nil {
+						return closeErr
+					}
+				} else {
+					for _, ref := range batch {
+						result, err := s.execCached(
+							ctx, db, consumeUtxoSQL,
+							point.Slot, hash, ref.Hash, ref.Idx,
+						)
+						if err != nil {
+							return err
+						}
+						affected, err := result.RowsAffected()
+						if err != nil {
+							return err
+						}
+						if affected > 0 {
+							updated[utxoIdentityKey(ref.Hash, ref.Idx)] = struct{}{}
+						}
+					}
 				}
-				result, err := db.ExecContext(ctx, `
-UPDATE utxo
-SET deleted_slot = ?, spent_at_tx_id = ?
-WHERE tx_id = ? AND output_idx = ?
-  AND deleted_slot = 0 AND spent_at_tx_id IS NULL`,
-					point.Slot,
-					hash,
-					input.Id().Bytes(),
-					input.Index(),
-				)
-				if err != nil {
-					return err
-				}
-				affected, err := result.RowsAffected()
-				if err != nil {
-					return err
-				}
-				if affected > 0 {
-					spentRefs = append(spentRefs, utxoID)
-					continue
-				}
-				skippedRefs = append(skippedRefs, utxoID)
-				var (
-					deletedSlot uint64
-					spentBy     []byte
-				)
-				err = db.QueryRowContext(ctx, `
+
+				for _, utxoID := range batch {
+					if _, ok := updated[utxoIdentityKey(utxoID.Hash, utxoID.Idx)]; ok {
+						spentRefs = append(spentRefs, utxoID)
+						continue
+					}
+					skippedRefs = append(skippedRefs, utxoID)
+					var (
+						deletedSlot uint64
+						spentBy     []byte
+					)
+					err = db.QueryRowContext(ctx, `
 SELECT deleted_slot, spent_at_tx_id
 FROM utxo WHERE tx_id = ? AND output_idx = ?`,
-					input.Id().Bytes(),
-					input.Index(),
-				).Scan(&deletedSlot, &spentBy)
-				if errors.Is(err, sql.ErrNoRows) {
-					// Gap/partial-history ingestion intentionally tolerates a
-					// missing producer output.
-					continue
-				}
-				if err != nil {
-					return err
-				}
-				if bytes.Equal(spentBy, hash) {
-					continue
-				}
-				if deletedSlot == 0 && len(spentBy) == 0 {
+						utxoID.Hash,
+						utxoID.Idx,
+					).Scan(&deletedSlot, &spentBy)
+					if errors.Is(err, sql.ErrNoRows) {
+						continue
+					}
+					if err != nil {
+						return err
+					}
+					if bytes.Equal(spentBy, hash) {
+						continue
+					}
+					if deletedSlot == 0 && len(spentBy) == 0 {
+						return fmt.Errorf(
+							"consume UTxO %x#%d: row was not updated",
+							utxoID.Hash,
+							utxoID.Idx,
+						)
+					}
+					if tolerateConsumedInputConflict {
+						continue
+					}
 					return fmt.Errorf(
-						"consume UTxO %x#%d: row was not updated",
-						input.Id().Bytes(),
-						input.Index(),
+						"%w: %x:%d (already spent_by=%x deleted_slot=%d, this_tx=%x)",
+						types.ErrUtxoConflict,
+						utxoID.Hash,
+						utxoID.Idx,
+						spentBy,
+						deletedSlot,
+						hash,
 					)
 				}
-				// Leios closure path: the input is already spent by an earlier
-				// certified endorser-block transaction. The reference ledger
-				// treats this re-consume as a no-op (applyLeiosClosure folds the
-				// closure without re-validation), so skip this input instead of
-				// wedging the pipeline. The produced outputs and the remaining
-				// consumed inputs of this transaction are still applied.
-				if tolerateConsumedInputConflict {
-					continue
-				}
-				return fmt.Errorf(
-					"%w: %x:%d (already spent_by=%x deleted_slot=%d, this_tx=%x)",
-					types.ErrUtxoConflict,
-					input.Id().Bytes(),
-					input.Index(),
-					spentBy,
-					deletedSlot,
-					hash,
-				)
 			}
 			if historicalBackfill {
 				return nil
 			}
-			consumedStakeDeltas, err := queryUtxoStakeConsumedDeltas(
+			consumedStakeDeltas, err := s.queryUtxoStakeConsumedDeltas(
 				ctx,
 				db,
 				spentRefs,
@@ -1059,6 +1249,13 @@ INSERT INTO asset (
 ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
 `
 
+const importAssetReturningIDQuery = `
+INSERT INTO asset (
+    name, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
+RETURNING id`
+
 // getAssetIDQuery looks up the id of the asset row insertUtxoModel's
 // ImportAsset call just created (or matched via its own ON CONFLICT), so
 // utxo.Assets[i].ID can be populated for the caller. It carries no RETURNING
@@ -1096,6 +1293,18 @@ func (s *Store) insertUtxoModelChecked(
 	db queryer,
 	utxo *models.Utxo,
 	ignoreConflict bool,
+) (bool, error) {
+	return s.insertUtxoModelCheckedWithRows(
+		ctx, db, utxo, ignoreConflict, nil,
+	)
+}
+
+func (s *Store) insertUtxoModelCheckedWithRows(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+	ignoreConflict bool,
+	deferredRows *rowBatch,
 ) (bool, error) {
 	inserted := true
 	params, err := createUtxoParams(utxo)
@@ -1160,36 +1369,86 @@ WHERE id = ?`,
 	// resolved when stake is computed. This runs on the
 	// conflict path too: an output a snapshot import created before its
 	// producing transaction was replayed has no pointer row yet.
-	if err := persistUtxoPointer(ctx, db, id, utxo.Pointer); err != nil {
-		return false, err
+	var relationErr error
+	if deferredRows != nil && inserted {
+		relationErr = s.persistUtxoRelationsWithDeferredAssets(
+			ctx, db, utxo, uint(id), deferredRows,
+		)
+	} else {
+		relationErr = s.persistUtxoRelations(ctx, db, utxo, uint(id))
+	}
+	if relationErr != nil {
+		return false, relationErr
+	}
+	return inserted, nil
+}
+
+func (s *Store) persistUtxoRelations(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+	id uint,
+) error {
+	utxo.ID = id
+	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
+		return err
 	}
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
-		asset.UtxoID = utxo.ID
-		_, err := s.execCached(ctx, db, importAssetQuery,
+		asset.UtxoID = id
+		var assetID uint
+		err := s.queryRowCached(ctx, db, importAssetReturningIDQuery,
 			asset.Name,
 			asset.PolicyId,
 			asset.Fingerprint,
-			sql.NullInt64{Int64: id, Valid: true},
+			sql.NullInt64{Int64: int64(id), Valid: true},
+			sql.NullString{
+				String: decimalUint64(asset.Amount),
+				Valid:  true,
+			},
+		).Scan(&assetID)
+		if errors.Is(err, sql.ErrNoRows) {
+			err = s.queryRowCached(ctx, db, getAssetIDQuery,
+				id,
+				asset.PolicyId,
+				asset.Name,
+			).Scan(&assetID)
+		}
+		if err != nil {
+			return err
+		}
+		asset.ID = assetID
+	}
+	return nil
+}
+
+func (s *Store) persistUtxoRelationsWithDeferredAssets(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+	id uint,
+	rows *rowBatch,
+) error {
+	utxo.ID = id
+	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
+		return err
+	}
+	for i := range utxo.Assets {
+		asset := &utxo.Assets[i]
+		asset.UtxoID = id
+		rows.add(
+			assetShape,
+			asset.Name,
+			asset.PolicyId,
+			asset.Fingerprint,
+			sql.NullInt64{Int64: int64(id), Valid: true},
 			sql.NullString{
 				String: decimalUint64(asset.Amount),
 				Valid:  true,
 			},
 		)
-		if err != nil {
-			return false, err
-		}
-		var assetID uint
-		if err := s.queryRowCached(ctx, db, getAssetIDQuery,
-			id,
-			asset.PolicyId,
-			asset.Name,
-		).Scan(&assetID); err != nil {
-			return false, err
-		}
-		asset.ID = assetID
 	}
-	return inserted, nil
+	return nil
 }
 
 func collateralFeeForTransaction(

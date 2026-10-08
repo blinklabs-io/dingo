@@ -18,12 +18,48 @@ import (
 	"math"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSetBlockNoncesBatchPreservesCheckpointAndLatestNonce(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	hash := []byte{0x01, 0x02, 0x03}
+	err := store.SetBlockNonces(
+		[]models.BlockNonce{
+			{
+				Hash:  hash,
+				Slot:  10,
+				Nonce: []byte{0x01},
+			},
+			{
+				Hash:         hash,
+				Slot:         10,
+				Nonce:        []byte{0x02},
+				IsCheckpoint: true,
+			},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+
+	nonce, err := store.GetBlockNonce(
+		ocommon.Point{Slot: 10, Hash: hash},
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []byte{0x02}, nonce)
+
+	rows, err := store.GetBlockNoncesInSlotRange(10, 11, nil)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.True(t, rows[0].IsCheckpoint)
+}
 
 // TestGetTipRejectsNegativeStoredSlot covers the regression this issue was
 // filed for: SQLite's INTEGER columns are signed, so a tip row corrupted

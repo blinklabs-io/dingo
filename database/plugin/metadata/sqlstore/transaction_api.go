@@ -63,15 +63,14 @@ func (s *Store) applyTransactionMetadataLabels(
 }
 
 func (s *Store) applyTransactionAssetMintBurn(
-	ctx context.Context,
-	db queryer,
 	transaction lcommon.Transaction,
 	hash []byte,
 	slot uint64,
 	index uint32,
-) error {
+	rows *rowBatch,
+) {
 	if s.storageMode != types.StorageModeAPI || !transaction.IsValid() {
-		return nil
+		return
 	}
 	for _, asset := range models.ConvertMintToAssetMintBurnModels(
 		transaction.AssetMint(),
@@ -79,11 +78,8 @@ func (s *Store) applyTransactionAssetMintBurn(
 		slot,
 		index,
 	) {
-		if _, err := db.ExecContext(ctx, `
-INSERT INTO asset_mint_burn (
-    tx_hash, policy_id, name, fingerprint, slot, quantity, tx_index
-) VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (tx_hash, policy_id, name) DO NOTHING`,
+		rows.add(
+			assetMintBurnShape,
 			asset.TxHash,
 			asset.PolicyId,
 			asset.Name,
@@ -91,11 +87,8 @@ ON CONFLICT (tx_hash, policy_id, name) DO NOTHING`,
 			asset.Slot,
 			asset.Quantity,
 			asset.TxIndex,
-		); err != nil {
-			return fmt.Errorf("record asset mint/burn: %w", err)
-		}
+		)
 	}
-	return nil
 }
 
 func (s *Store) applyTransactionAPIDetails(
@@ -112,7 +105,7 @@ func (s *Store) applyTransactionAPIDetails(
 		return nil
 	}
 	hash := transaction.Hash().Bytes()
-	if err := markTransactionUtxoReferences(
+	if err := s.markTransactionUtxoReferences(
 		ctx,
 		db,
 		transaction.Collateral(),
@@ -121,7 +114,7 @@ func (s *Store) applyTransactionAPIDetails(
 	); err != nil {
 		return fmt.Errorf("mark collateral inputs: %w", err)
 	}
-	if err := markTransactionUtxoReferences(
+	if err := s.markTransactionUtxoReferences(
 		ctx,
 		db,
 		transaction.ReferenceInputs(),
@@ -130,7 +123,7 @@ func (s *Store) applyTransactionAPIDetails(
 	); err != nil {
 		return fmt.Errorf("mark reference inputs: %w", err)
 	}
-	if err := indexTransactionAddresses(
+	if err := s.indexTransactionAddresses(
 		ctx,
 		db,
 		rows,
@@ -143,7 +136,7 @@ func (s *Store) applyTransactionAPIDetails(
 	); err != nil {
 		return err
 	}
-	if err := storeTransactionWitnesses(
+	if err := s.storeTransactionWitnesses(
 		ctx,
 		db,
 		rows,
@@ -167,7 +160,21 @@ func (s *Store) applyTransactionAPIDetails(
 	return nil
 }
 
-func markTransactionUtxoReferences(
+func utxoReferenceInsertSQL(associationTable string) string {
+	return `INSERT INTO ` + associationTable + ` (utxo_id, transaction_hash)
+SELECT u.id, ? FROM utxo AS u
+WHERE u.tx_id = ? AND u.output_idx = ?
+  AND NOT EXISTS (
+      SELECT 1 FROM ` + associationTable + ` AS r
+      WHERE r.utxo_id = u.id AND r.transaction_hash = ?
+  )`
+}
+
+func utxoReferenceUpdateSQL(column string) string {
+	return "UPDATE utxo SET " + column + " = ? WHERE tx_id = ? AND output_idx = ?"
+}
+
+func (s *Store) markTransactionUtxoReferences(
 	ctx context.Context,
 	db queryer,
 	inputs []lcommon.TransactionInput,
@@ -183,15 +190,10 @@ func markTransactionUtxoReferences(
 		if column == "referenced_by_tx_id" {
 			associationTable = "utxo_reference_input"
 		}
-		if _, err := db.ExecContext(
+		if _, err := s.execCached(
 			ctx,
-			`INSERT INTO `+associationTable+` (utxo_id, transaction_hash)
-SELECT u.id, ? FROM utxo AS u
-WHERE u.tx_id = ? AND u.output_idx = ?
-  AND NOT EXISTS (
-      SELECT 1 FROM `+associationTable+` AS r
-      WHERE r.utxo_id = u.id AND r.transaction_hash = ?
-  )`,
+			db,
+			utxoReferenceInsertSQL(associationTable),
 			hash,
 			input.Id().Bytes(),
 			input.Index(),
@@ -199,11 +201,10 @@ WHERE u.tx_id = ? AND u.output_idx = ?
 		); err != nil {
 			return err
 		}
-		query := "UPDATE utxo SET " + column +
-			" = ? WHERE tx_id = ? AND output_idx = ?"
-		if _, err := db.ExecContext(
+		if _, err := s.execCached(
 			ctx,
-			query,
+			db,
+			utxoReferenceUpdateSQL(column),
 			hash,
 			input.Id().Bytes(),
 			input.Index(),
@@ -220,7 +221,24 @@ type addressIndexKey struct {
 	staking string
 }
 
-func indexTransactionAddresses(
+const (
+	deleteAddressTransactionSQL    = "DELETE FROM address_transaction WHERE transaction_id = ?"
+	maxCachedAddressInputQuerySize = 32
+)
+
+var cachedAddressInputQuerySizes = [...]int{1, 2, 4, 8, 16, 32}
+
+func addressTransactionInputQuery(size int) string {
+	predicates := make([]string, size)
+	for i := range predicates {
+		predicates[i] = "(tx_id = ? AND output_idx = ?)"
+	}
+	return `
+SELECT tx_id, output_idx, payment_key, credential_tag, staking_key
+FROM utxo WHERE ` + strings.Join(predicates, " OR ")
+}
+
+func (s *Store) indexTransactionAddresses(
 	ctx context.Context,
 	db queryer,
 	rows *rowBatch,
@@ -231,8 +249,7 @@ func indexTransactionAddresses(
 	produced []models.Utxo,
 	parameterLimit int,
 ) error {
-	if _, err := db.ExecContext(ctx, `
-DELETE FROM address_transaction WHERE transaction_id = ?`,
+	if _, err := s.execCached(ctx, db, deleteAddressTransactionSQL,
 		transactionID,
 	); err != nil {
 		return fmt.Errorf("delete existing address transactions: %w", err)
@@ -275,21 +292,21 @@ DELETE FROM address_transaction WHERE transaction_id = ?`,
 		seen[key] = struct{}{}
 		keys = append(keys, key)
 	}
-	if parameterLimit < 2 {
-		parameterLimit = 2
-	}
-	for start := 0; start < len(keys); start += parameterLimit / 2 {
-		end := start + parameterLimit/2
-		end = min(end, len(keys))
-		predicates := make([]string, 0, end-start)
-		args := make([]any, 0, (end-start)*2)
-		for _, key := range keys[start:end] {
-			predicates = append(predicates, "(tx_id = ? AND output_idx = ?)")
-			args = append(args, []byte(key.txID), key.index)
+	inputBatchSize := min(max(1, parameterLimit/2), maxCachedAddressInputQuerySize)
+	for start := 0; start < len(keys); start += inputBatchSize {
+		end := min(start+inputBatchSize, len(keys))
+		querySize := 1
+		for querySize < end-start {
+			querySize *= 2
 		}
-		inputRows, err := db.QueryContext(ctx, `
-SELECT tx_id, output_idx, payment_key, credential_tag, staking_key
-FROM utxo WHERE `+strings.Join(predicates, " OR "), args...)
+		args := make([]any, querySize*2)
+		for i, key := range keys[start:end] {
+			args[i*2] = []byte(key.txID)
+			args[i*2+1] = key.index
+		}
+		inputRows, err := s.queryRowsCached(
+			ctx, db, addressTransactionInputQuery(querySize), args...,
+		)
 		if err != nil {
 			return fmt.Errorf(
 				"lookup input addresses for transaction %d: %w",
@@ -365,7 +382,7 @@ func TransactionWitnessCleanupSQL(table string) string {
 	return "DELETE FROM " + table + " WHERE transaction_id = ?"
 }
 
-func storeTransactionWitnesses(
+func (s *Store) storeTransactionWitnesses(
 	ctx context.Context,
 	db queryer,
 	rows *rowBatch,
@@ -374,10 +391,8 @@ func storeTransactionWitnesses(
 	slot uint64,
 ) error {
 	for _, table := range transactionWitnessTables {
-		if _, err := db.ExecContext(
-			ctx,
-			TransactionWitnessCleanupSQL(table),
-			transactionID,
+		if _, err := s.execCached(
+			ctx, db, TransactionWitnessCleanupSQL(table), transactionID,
 		); err != nil {
 			return fmt.Errorf("delete existing %s rows: %w", table, err)
 		}
