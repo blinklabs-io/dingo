@@ -15,6 +15,8 @@
 package dingo
 
 import (
+	"time"
+
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/prometheus/client_golang/prometheus"
@@ -37,6 +39,7 @@ const (
 type chainSelectionMetrics struct {
 	stalls                *prometheus.CounterVec
 	rollbackRegistrations *prometheus.CounterVec
+	gddDisconnects        prometheus.Counter
 }
 
 // registerChainSelectionMetrics registers the chain-selection counters. It runs
@@ -66,6 +69,12 @@ func (n *Node) registerChainSelectionMetrics(r *promutil.Registration) {
 				Help: "attempts to register a peer into chain selection from a chainsync rollback on an untracked connection, by outcome",
 			},
 			[]string{"outcome"},
+		)),
+		gddDisconnects: promutil.Register(r, prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "dingo_chainselection_gdd_disconnects_total",
+				Help: "peers the Genesis Density Disconnector reported for serving a provably sparser chain, counted whether or not the connection was still open to close",
+			},
 		)),
 	}
 	for _, reason := range []string{
@@ -109,4 +118,62 @@ func (n *Node) recordRollbackRegistration(
 	n.chainSelectionMetrics.rollbackRegistrations.
 		WithLabelValues(string(outcome)).
 		Inc()
+}
+
+// genesisDensityDenyDuration bounds how long a peer disconnected for serving a
+// provably sparser chain stays on the deny list. Density is measured against
+// the current candidates, so the denial is temporary rather than permanent.
+const genesisDensityDenyDuration = 10 * time.Minute
+
+// onGenesisDensityDisconnect acts on a peer the Genesis Density Disconnector
+// found provably sparser: it counts the report, denies the peer for
+// genesisDensityDenyDuration when its connection ID carries a remote address,
+// and closes its connection if it is still open.
+func (n *Node) onGenesisDensityDisconnect(
+	d chainselection.GenesisDensityDisconnect,
+) {
+	if n.chainSelectionMetrics != nil {
+		n.chainSelectionMetrics.gddDisconnects.Inc()
+	}
+	n.networkingCoreMu.Lock()
+	defer n.networkingCoreMu.Unlock()
+	// A connection ID without a remote address cannot be denied, so the log
+	// reports whether the deny happened rather than implying it.
+	denied := false
+	if d.ConnectionId.RemoteAddr != nil {
+		denied = n.denyPeer(
+			d.ConnectionId.RemoteAddr.String(),
+			genesisDensityDenyDuration,
+		)
+	}
+	n.config.logger.Warn(
+		"disconnecting peer serving a provably sparser chain",
+		"connection_id", d.ConnectionId.String(),
+		"dominating_connection_id", d.DominatingConnectionId.String(),
+		"intersection_slot", d.Intersection.Slot,
+		"genesis_window_slots", d.WindowSlots,
+		"dominating_density", d.DominatingDensity,
+		"max_density", d.MaxDensity,
+		"denied", denied,
+		"deny_duration", genesisDensityDenyDuration,
+	)
+	if n.connManager == nil {
+		return
+	}
+	if conn := n.connManager.GetConnectionById(d.ConnectionId); conn != nil {
+		conn.Close()
+	}
+}
+
+// denyPeer applies a denial to the current peer governor. Live database
+// lifecycle operations replace the governor while retaining the selector, so
+// the pointer must remain stable until the denial has been recorded.
+func (n *Node) denyPeer(address string, duration time.Duration) bool {
+	n.peerGovMu.RLock()
+	defer n.peerGovMu.RUnlock()
+	if n.peerGov == nil {
+		return false
+	}
+	n.peerGov.DenyPeer(address, duration)
+	return true
 }
