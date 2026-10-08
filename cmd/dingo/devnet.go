@@ -110,7 +110,13 @@ func devnetRun(cmd *cobra.Command, _ []string) (retErr error) {
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		return fmt.Errorf("creating devnet data directory: %w", err)
 	}
-	releaseStateLock, err := acquireDevnetStateLock(runDir)
+	startTime := time.Now().UTC().Add(devnetGenesisLeadTime).Truncate(time.Second)
+	releaseStateLock, err := prepareLockedDevnetState(
+		runDir,
+		persistent,
+		devnetOptions.reset,
+		startTime,
+	)
 	if err != nil {
 		return err
 	}
@@ -119,15 +125,6 @@ func devnetRun(cmd *cobra.Command, _ []string) (retErr error) {
 			retErr = errors.Join(retErr, fmt.Errorf("releasing devnet state lock: %w", err))
 		}
 	}()
-	startTime := time.Now().UTC().Add(devnetGenesisLeadTime).Truncate(time.Second)
-	if err := prepareDevnetState(
-		runDir,
-		persistent,
-		devnetOptions.reset,
-		startTime,
-	); err != nil {
-		return err
-	}
 	configPath := filepath.Join(runDir, "dingo.yaml")
 
 	executable, err := os.Executable()
@@ -159,8 +156,9 @@ func devnetRun(cmd *cobra.Command, _ []string) (retErr error) {
 			return nil
 		}
 		childSignal := os.Signal(os.Interrupt)
-		var cause devnetSignalCause
-		if errors.As(context.Cause(signalCtx), &cause) {
+		if cause, ok := errors.AsType[devnetSignalCause](
+			context.Cause(signalCtx),
+		); ok {
 			childSignal = cause.signal
 		}
 		err := signalDevnetChild(child.Process, childSignal)
@@ -215,6 +213,29 @@ func devnetRunDirectory(dataDir string) (string, error) {
 	return runDir, nil
 }
 
+func prepareLockedDevnetState(
+	runDir string,
+	persistent, reset bool,
+	startTime time.Time,
+) (func() error, error) {
+	if persistent {
+		if _, err := checkDevnetStateDirectory(runDir, reset); err != nil {
+			return nil, err
+		}
+	}
+	releaseStateLock, err := acquireDevnetStateLock(runDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := prepareDevnetState(runDir, persistent, reset, startTime); err != nil {
+		if releaseErr := releaseStateLock(); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("releasing devnet state lock: %w", releaseErr))
+		}
+		return nil, err
+	}
+	return releaseStateLock, nil
+}
+
 func prepareDevnetState(
 	runDir string,
 	persistent, reset bool,
@@ -229,41 +250,17 @@ func prepareDevnetState(
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		return fmt.Errorf("creating devnet data directory: %w", err)
 	}
-	markerPath := filepath.Join(runDir, devnetStateMarker)
-	marker, err := os.ReadFile(markerPath)
-	switch {
-	case err == nil:
-		if string(marker) != devnetStateVersion {
-			return fmt.Errorf(
-				"%q is not a recognized dingo devnet state directory",
-				runDir,
-			)
-		}
-	case errors.Is(err, fs.ErrNotExist):
-		entries, readErr := os.ReadDir(runDir)
-		if readErr != nil {
-			return fmt.Errorf("reading devnet data directory: %w", readErr)
-		}
-		for i := 0; i < len(entries); i++ {
-			if entries[i].Name() == devnetStateLock {
-				entries = append(entries[:i], entries[i+1:]...)
-				i--
-			}
-		}
-		if len(entries) != 0 {
-			return fmt.Errorf(
-				"refusing to initialize non-empty directory %q without a Dingo devnet marker",
-				runDir,
-			)
-		}
-		if err := createDevnetStateMarker(markerPath); err != nil {
+	hasMarker, err := checkDevnetStateDirectory(runDir, reset)
+	if err != nil {
+		return err
+	}
+	if !hasMarker {
+		if err := createDevnetStateMarker(filepath.Join(runDir, devnetStateMarker)); err != nil {
 			return err
 		}
 		if !reset {
 			return initializeDevnetState(runDir, startTime)
 		}
-	default:
-		return fmt.Errorf("reading devnet state marker: %w", err)
 	}
 	if reset {
 		for _, path := range []string{
@@ -275,21 +272,55 @@ func prepareDevnetState(
 				return fmt.Errorf("resetting devnet state at %q: %w", path, err)
 			}
 		}
-	} else {
+		return initializeDevnetState(runDir, startTime)
+	}
+	return writeLocalDevnetConfig(
+		filepath.Join(runDir, "dingo.yaml"),
+		filepath.Join(runDir, "cardano"),
+		filepath.Join(runDir, "data"),
+	)
+}
+
+func checkDevnetStateDirectory(runDir string, reset bool) (bool, error) {
+	markerPath := filepath.Join(runDir, devnetStateMarker)
+	marker, err := os.ReadFile(markerPath)
+	switch {
+	case err == nil:
+		if string(marker) != devnetStateVersion {
+			return true, fmt.Errorf(
+				"%q is not a recognized dingo devnet state directory",
+				runDir,
+			)
+		}
+		if reset {
+			return true, nil
+		}
 		if err := validateDevnetState(runDir); err != nil {
-			return fmt.Errorf(
+			return true, fmt.Errorf(
 				"devnet state at %q is incomplete; use --reset to recreate it: %w",
 				runDir,
 				err,
 			)
 		}
-		return writeLocalDevnetConfig(
-			filepath.Join(runDir, "dingo.yaml"),
-			filepath.Join(runDir, "cardano"),
-			filepath.Join(runDir, "data"),
-		)
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		entries, readErr := os.ReadDir(runDir)
+		if readErr != nil {
+			return false, fmt.Errorf("reading devnet data directory: %w", readErr)
+		}
+		for _, entry := range entries {
+			if entry.Name() == devnetStateLock {
+				continue
+			}
+			return false, fmt.Errorf(
+				"refusing to initialize non-empty directory %q without a Dingo devnet marker",
+				runDir,
+			)
+		}
+		return false, nil
+	default:
+		return false, fmt.Errorf("reading devnet state marker: %w", err)
 	}
-	return initializeDevnetState(runDir, startTime)
 }
 
 func createDevnetStateMarker(path string) error {
