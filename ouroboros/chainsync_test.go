@@ -3744,6 +3744,7 @@ func TestChainsyncServerFindIntersect_ServedActivityOnlyWhenServed(
 		tooMany[i] = ocommon.NewPointOrigin()
 	}
 	_, _, err := o.chainsyncServerFindIntersect(
+		context.Background(),
 		limiter,
 		ochainsync.CallbackContext{
 			ConnectionId: newTestConnId("127.0.0.1:6000", "1.1.1.1:3001"),
@@ -3755,6 +3756,7 @@ func TestChainsyncServerFindIntersect_ServedActivityOnlyWhenServed(
 
 	// A served intersection is reported.
 	_, _, err = o.chainsyncServerFindIntersect(
+		context.Background(),
 		limiter,
 		ochainsync.CallbackContext{
 			ConnectionId: newTestConnId("127.0.0.1:6000", "1.1.1.2:3001"),
