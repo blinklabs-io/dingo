@@ -246,9 +246,24 @@ func (d *Database) PauseCommitsContext(
 // would deadlock that nested write. Ordinary blob-only transactions do not take
 // either barrier and remain safe for helpers such as deleteUtxoBlobs that open
 // one beneath an existing combined write.
+//
+//nolint:contextcheck // Preserve the public context-free compatibility method.
 func (d *Database) BeginDestructiveTransition() (finish func()) {
-	token := d.destructiveTransitionBarrier.Lock()
-	return func() { d.destructiveTransitionBarrier.Unlock(token) }
+	finish, _ = d.BeginDestructiveTransitionContext(context.Background())
+	return finish
+}
+
+// BeginDestructiveTransitionContext prevents coordinated read and lifecycle
+// snapshots from opening while a destructive update spans multiple physical
+// transactions. ctx can cancel a wait before the transition starts.
+func (d *Database) BeginDestructiveTransitionContext(
+	ctx context.Context,
+) (finish func(), err error) {
+	token, err := d.destructiveTransitionBarrier.LockContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return func() { d.destructiveTransitionBarrier.Unlock(token) }, nil
 }
 
 // Config returns the config object used for the database instance
@@ -310,9 +325,10 @@ func (d *Database) utxoStore() metadata.UtxoStore {
 	return d.metadata
 }
 
-// Transaction starts a new database transaction and returns a handle to it
-func (d *Database) Transaction(readWrite bool) *Txn {
-	return NewTxn(d, readWrite)
+// Transaction starts a new database transaction and returns a handle to it.
+// ctx bounds the metadata transaction's statements.
+func (d *Database) Transaction(ctx context.Context, readWrite bool) *Txn {
+	return NewTxn(ctx, d, readWrite)
 }
 
 // TransactionContext starts a transaction whose metadata queries observe
@@ -329,9 +345,10 @@ func (d *Database) BlobTxn(readWrite bool) *Txn {
 	return NewBlobOnlyTxn(d, readWrite)
 }
 
-// MetadataTxn starts a new metadata-only database transaction and returns a handle to it
-func (d *Database) MetadataTxn(readWrite bool) *Txn {
-	return NewMetadataOnlyTxn(d, readWrite)
+// MetadataTxn starts a new metadata-only database transaction and returns a
+// handle to it. ctx bounds the transaction's statements.
+func (d *Database) MetadataTxn(ctx context.Context, readWrite bool) *Txn {
+	return NewMetadataOnlyTxn(ctx, d, readWrite)
 }
 
 // withMetadataWriteTxn runs fn in txn, or owns a metadata write transaction
@@ -342,13 +359,14 @@ func (d *Database) MetadataTxn(readWrite bool) *Txn {
 // blocks this replaced let the panic propagate past their deferred rollback,
 // so this is a behavior change for every method that adopts it.
 func (d *Database) withMetadataWriteTxn(
+	ctx context.Context,
 	txn *Txn,
 	fn func(*Txn) error,
 ) error {
 	if txn != nil {
 		return fn(txn)
 	}
-	return d.MetadataTxn(true).Do(fn)
+	return d.MetadataTxn(ctx, true).Do(fn)
 }
 
 // Close cleans up the database connections
@@ -363,18 +381,18 @@ func (d *Database) Close() error {
 	return d.closeErr
 }
 
-func (d *Database) init() error {
+func (d *Database) init(ctx context.Context) error {
 	if d.logger == nil {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
 		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	// Check commit timestamp
-	if err := d.checkCommitTimestamp(); err != nil {
+	if err := d.checkCommitTimestamp(ctx); err != nil {
 		return err
 	}
 	// Check immutable settings have not changed since initial sync
-	if err := d.CheckNodeSettings(); err != nil {
+	if err := d.CheckNodeSettings(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -382,7 +400,16 @@ func (d *Database) init() error {
 
 // New creates a database over injected stores. The caller owns the store
 // lifecycle and must keep both stores alive until Database.Close returns.
-func New(config *Config, stores Stores) (*Database, error) {
+//
+//nolint:contextcheck // Preserve the public nil-context compatibility boundary.
+func New(
+	ctx context.Context,
+	config *Config,
+	stores Stores,
+) (*Database, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if config == nil {
 		config = DefaultConfig
 	}
@@ -502,7 +529,7 @@ func New(config *Config, stores Stores) (*Database, error) {
 			}
 		}()
 	}
-	if err := db.init(); err != nil {
+	if err := db.init(ctx); err != nil {
 		// Database is available for recovery, so return it with error
 		return db, err
 	}

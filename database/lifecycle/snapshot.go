@@ -255,12 +255,14 @@ func Snapshot(
 	stateReady := make(chan snapshotState, 1)
 	go func() {
 		var state snapshotState
-		state.tip, state.err = db.GetTip(nil)
+		tipTxn := db.MetadataTxn(backupCtx, false)
+		state.tip, state.err = db.GetTip(tipTxn)
+		tipTxn.Release()
 		if state.err == nil && backupCtx.Err() == nil {
-			state.commitTimestamp, state.err = db.Metadata().GetCommitTimestamp()
+			state.commitTimestamp, state.err = db.Metadata().GetCommitTimestamp(backupCtx)
 		}
 		if state.err == nil && backupCtx.Err() == nil {
-			state.gates, state.err = db.Metadata().GetNodeSettingsGates()
+			state.gates, state.err = db.Metadata().GetNodeSettingsGates(backupCtx)
 		}
 		stateReady <- state
 	}()

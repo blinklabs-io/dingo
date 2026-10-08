@@ -553,7 +553,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 		for _, addr := range addrs {
 			// Ignore error: reaching the peer list cap during gossip
 			// discovery is expected and not actionable here.
-			_ = p.AddPeer(addr, PeerSourceP2PGossip)
+			_ = p.AddPeer(addr, PeerSourceP2PGossip) //nolint:contextcheck // address normalization bounds its own DNS lookup
 		}
 	}
 }

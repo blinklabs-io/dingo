@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -49,12 +50,12 @@ var errRequiredStakeRewardBasisUnavailable = errors.New(
 	"required stake reward basis unavailable",
 )
 
-func (ls *LedgerState) applyStakeRewards(
+func (ls *LedgerState) applyStakeRewards(ctx context.Context,
 	txn *database.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
-	err := ls.applyStakeRewardUpdate(txn, newEpoch, boundarySlot)
+	err := ls.applyStakeRewardUpdate(ctx, txn, newEpoch, boundarySlot)
 	if err == nil || (!errors.Is(err, rewards.ErrNegativeLeaderReward) &&
 		!errors.Is(err, errRequiredStakeRewardBasisUnavailable)) {
 		return err
@@ -88,7 +89,7 @@ func (e *rewardUpdateHaltError) Unwrap() []error {
 	return []error{e.err, errHaltLedgerPipeline}
 }
 
-func (ls *LedgerState) applyStakeRewardUpdate(
+func (ls *LedgerState) applyStakeRewardUpdate(ctx context.Context,
 	txn *database.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
@@ -141,7 +142,7 @@ func (ls *LedgerState) applyStakeRewardUpdate(
 			return nil
 		}
 	}
-	app, ok, err := ls.boundaryStakeRewardApplication(
+	app, ok, err := ls.boundaryStakeRewardApplication(ctx,
 		txn, newEpoch, boundarySlot,
 	)
 	if err != nil {
@@ -158,7 +159,7 @@ func (ls *LedgerState) applyStakeRewardUpdate(
 	if !ok {
 		return nil
 	}
-	return ls.applyStakeRewardApplication(txn, app, boundarySlot)
+	return ls.applyStakeRewardApplication(ctx, txn, app, boundarySlot)
 }
 
 // boundaryStakeRewardApplication resolves the reward round a boundary
@@ -169,7 +170,7 @@ func (ls *LedgerState) applyStakeRewardUpdate(
 // bootstrap rounds and pre-Allegra rounds -- and rounds whose inputs are
 // missing use the single-pass calculation, which also reports a skipped
 // round.
-func (ls *LedgerState) boundaryStakeRewardApplication(
+func (ls *LedgerState) boundaryStakeRewardApplication(ctx context.Context,
 	txn *database.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
@@ -212,7 +213,7 @@ func (ls *LedgerState) boundaryStakeRewardApplication(
 	if cursor != nil {
 		resumedFrom = cursor.CompletedPools
 	}
-	done, err := ls.stakeRewardPrecomputeChunksInTxn(txn, round, 0)
+	done, err := ls.stakeRewardPrecomputeChunksInTxn(ctx, txn, round, 0)
 	if err != nil {
 		return nil, false, err
 	}
@@ -837,7 +838,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	}, true, nil
 }
 
-func (ls *LedgerState) applyStakeRewardApplication(
+func (ls *LedgerState) applyStakeRewardApplication(ctx context.Context,
 	txn *database.Txn,
 	app *stakeRewardApplication,
 	boundarySlot uint64,
@@ -846,7 +847,12 @@ func (ls *LedgerState) applyStakeRewardApplication(
 		return errors.New("missing stake reward application")
 	}
 	if app.deferCredits {
-		return ls.applyDeferredStakeRewardRound(txn, app, boundarySlot)
+		return ls.applyDeferredStakeRewardRound(
+			ctx,
+			txn,
+			app,
+			boundarySlot,
+		)
 	}
 	meta := ls.db.Metadata()
 	metaTxn := txn.Metadata()
@@ -877,7 +883,7 @@ func (ls *LedgerState) applyStakeRewardApplication(
 	// self-corrects a stale guarded=true from a credential that was later
 	// renewed, or from the gate being disabled since the row was last written.
 	if ls.config.DelegatorInactivityEnabled {
-		guarded, err := ls.guardedExpiredRewardCredentials(txn, app)
+		guarded, err := ls.guardedExpiredRewardCredentials(ctx, txn, app)
 		if err != nil {
 			return err
 		}
@@ -926,7 +932,7 @@ func (ls *LedgerState) applyStakeRewardApplication(
 			SourceHash:    stakeRewardSourceHash(app.epochs.snapshot, reward),
 		})
 	}
-	if err := ls.db.AddAccountRewardsByCredential(credits, txn); err != nil {
+	if err := ls.db.AddAccountRewardsByCredential(ctx, credits, txn); err != nil {
 		return fmt.Errorf(
 			"credit stake rewards epoch %d: %w", app.epochs.snapshot, err,
 		)
@@ -1000,6 +1006,7 @@ func negativeLeaderRewardApplicationError(
 // after the boundary commits. The outputs' Guarded flags were set by the
 // chunks from the snapshot's captured slot, which no later block changes.
 func (ls *LedgerState) applyDeferredStakeRewardRound(
+	ctx context.Context,
 	txn *database.Txn,
 	app *stakeRewardApplication,
 	boundarySlot uint64,
@@ -1026,7 +1033,7 @@ func (ls *LedgerState) applyDeferredStakeRewardRound(
 	if err := registerAppliedRewardCreditRound(meta, metaTxn, round); err != nil {
 		return fmt.Errorf("register pending reward credits: %w", err)
 	}
-	txn.AfterCommit(ls.queueRewardCreditCompaction)
+	txn.AfterCommit(func() { ls.queueRewardCreditCompaction(ctx) })
 	ls.config.Logger.Info(
 		"applied stake rewards",
 		"component", "ledger",
@@ -1060,7 +1067,7 @@ func (ls *LedgerState) applyDeferredStakeRewardRound(
 // see historicalExpirationSQL's doc comment
 // (database/plugin/metadata/sqlstore/historical_stake.go) and ARCHITECTURE.md's
 // CIP-0163 section for why that holds today.
-func (ls *LedgerState) guardedExpiredRewardCredentials(
+func (ls *LedgerState) guardedExpiredRewardCredentials(ctx context.Context,
 	txn *database.Txn,
 	app *stakeRewardApplication,
 ) (map[string]struct{}, error) {
@@ -1100,11 +1107,17 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(
 	for _, ref := range refsByKey {
 		refs = append(refs, ref)
 	}
-	accounts, err := ls.db.GetAccountsByCredential(refs, true, txn)
+	accounts, err := ls.db.GetAccountsByCredential(
+		ctx,
+		refs,
+		true,
+		txn,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("load reward account expirations: %w", err)
 	}
 	lastWitness, err := ls.db.AccountLastWitnessSlots(
+		ctx,
 		refs, app.snapshotCapturedSlot, txn,
 	)
 	if err != nil {
@@ -1120,6 +1133,7 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(
 	var activationMembership map[string]struct{}
 	if activationApplies {
 		activationMembership, err = ls.db.AccountInactivityActivationMembership(
+			ctx,
 			refs,
 			txn,
 		)
@@ -2591,7 +2605,7 @@ func (ls *LedgerState) precomputeStakeRewardsAfterEpochTransition(
 		haveEpoch               bool
 		applicationBoundarySlot uint64
 	)
-	epochTxn := ls.db.Transaction(false)
+	epochTxn := ls.db.Transaction(context.Background(), false)
 	if err := epochTxn.Do(func(txn *database.Txn) error {
 		epoch, err := ls.db.Metadata().GetEpoch(evt.NewEpoch, txn.Metadata())
 		if err != nil {
@@ -2641,7 +2655,7 @@ func (ls *LedgerState) precomputeStakeRewardsSinglePass(
 	applicationBoundarySlot uint64,
 ) error {
 	var app *stakeRewardApplication
-	readTxn := ls.db.Transaction(false)
+	readTxn := ls.db.Transaction(context.Background(), false)
 	if err := readTxn.Do(func(txn *database.Txn) error {
 		computed, ok, err := ls.precomputeStakeRewardsCalculate(
 			txn,
@@ -2662,7 +2676,7 @@ func (ls *LedgerState) precomputeStakeRewardsSinglePass(
 	}
 	ls.rewardPrecomputeWriteMu.Lock()
 	defer ls.rewardPrecomputeWriteMu.Unlock()
-	writeTxn := ls.db.Transaction(true)
+	writeTxn := ls.db.Transaction(context.Background(), true)
 	return writeTxn.Do(func(txn *database.Txn) error {
 		meta := ls.db.Metadata()
 		metaTxn := txn.Metadata()

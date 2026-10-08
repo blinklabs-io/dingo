@@ -296,6 +296,7 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 					time.Since(decodeStart).Seconds(),
 				)
 			}
+			// Wrapped with the block type below.
 			return block, err
 		},
 		o.recordBlockDecodeCacheOutcome,
@@ -558,6 +559,7 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 		conn,
 		"StartBatch",
 	); err != nil {
+		// The drain error already names the phase.
 		return err
 	}
 	reachedEnd := false
@@ -671,6 +673,7 @@ Loop:
 				conn,
 				"Block",
 			); err != nil {
+				// The drain error already names the phase.
 				return err
 			}
 			// Make sure we don't hang waiting for the next block if we've already hit the end
@@ -873,6 +876,7 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 ) (uint64, error) {
 	client, err := o.blockfetchConnClient(connId)
 	if err != nil {
+		// blockfetchConnClient names the missing manager or connection.
 		return 0, err
 	}
 	dispatchStart := time.Now()
@@ -900,6 +904,7 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 				false,
 			)
 		}
+		// Callers name the range request in their own wrap or log.
 		return 0, err
 	}
 	// RequestRange returns once the request is on the wire, so a peer that
@@ -1083,6 +1088,7 @@ func (o *Ouroboros) instrumentBlockfetchRequestRange(
 		startTime := time.Now()
 		err := fn(ctx, start, end)
 		o.recordProtocolMessage("blockfetch", err, time.Since(startTime))
+		// The instrumented callback's error passes through unchanged.
 		return err
 	}
 }
@@ -1098,6 +1104,7 @@ func (o *Ouroboros) instrumentBlockfetchBlockRaw(
 		start := time.Now()
 		err := fn(ctx, blockType, blockData)
 		o.recordProtocolMessage("blockfetch", err, time.Since(start))
+		// The instrumented callback's error passes through unchanged.
 		return err
 	}
 }
@@ -1109,6 +1116,7 @@ func (o *Ouroboros) instrumentBlockfetchRangeDone(
 		start := time.Now()
 		err := fn(ctx, rangeErr)
 		o.recordProtocolMessage("blockfetch", err, time.Since(start))
+		// The instrumented callback's error passes through unchanged.
 		return err
 	}
 }

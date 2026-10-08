@@ -558,7 +558,10 @@ func (c *channelSubscriber) Deliver(evt Event) error {
 	if errors.Is(err, errChannelSubscriberClosed) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("deliver to channel subscriber: %w", err)
+	}
+	return nil
 }
 
 // DeliverBlocking is Deliver with the closed-subscriber case surfaced, so
@@ -1178,7 +1181,10 @@ func (e *EventBus) deliverWithTimeout(
 
 	select {
 	case err := <-done:
-		return err
+		if err != nil {
+			return fmt.Errorf("deliver to subscriber: %w", err)
+		}
+		return nil
 	case <-time.After(RemoteDeliverTimeout):
 		if e.metrics != nil {
 			e.metrics.deliveryTimeouts.WithLabelValues(

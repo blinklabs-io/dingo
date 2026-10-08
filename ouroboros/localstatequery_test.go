@@ -708,7 +708,7 @@ func TestLocalstatequeryQueryAnswersFromAcquiredSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, newTip, got, "a re-Acquire must observe the new tip")
 
-	_, err = first.view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err = first.view.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.ErrorIs(
 		t, err, ledger.ErrQueryViewClosed,
 		"a re-Acquire must close the snapshot it replaces",
@@ -867,8 +867,8 @@ func TestLocalstatequeryAcquireRejectsClosedConnection(t *testing.T) {
 	require.False(t, session)
 }
 
-// TestLocalstatequeryFailedReAcquireClosesPreviousSnapshot proves a rejected
-// re-Acquire leaves the session registered with its snapshot closed.
+// TestLocalstatequeryFailedReAcquireForgetsPreviousSnapshot proves a rejected
+// re-Acquire closes and removes the prior session.
 func TestLocalstatequeryFailedReAcquireForgetsPreviousSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -885,7 +885,7 @@ func TestLocalstatequeryFailedReAcquireForgetsPreviousSnapshot(t *testing.T) {
 	)
 	require.ErrorIs(t, err, olocalstatequery.ErrAcquireFailurePointNotOnChain)
 
-	_, err = session.view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err = session.view.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.ErrorIs(t, err, ledger.ErrQueryViewClosed)
 	require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(ctx.ConnectionId))
 }
@@ -906,7 +906,7 @@ func TestLocalstatequeryReleaseClosesSnapshot(t *testing.T) {
 	require.NoError(t, o.localstatequeryServerRelease(ctx))
 
 	require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(ctx.ConnectionId))
-	_, err := session.view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err := session.view.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.ErrorIs(t, err, ledger.ErrQueryViewClosed)
 }
 
@@ -926,12 +926,12 @@ func TestLocalstatequeryDisconnectClosesSnapshot(t *testing.T) {
 	session := acquireSnapshotTestSession(t, o, ctx)
 
 	o.ReleaseLocalStateQueryAcquiredPointOwner(ctx.ConnectionId, stale)
-	_, err := session.view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err := session.view.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.NoError(t, err, "a stale owner must not close the live session")
 
 	o.ReleaseLocalStateQueryAcquiredPointOwner(ctx.ConnectionId, owner)
 	require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(ctx.ConnectionId))
-	_, err = session.view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err = session.view.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.ErrorIs(t, err, ledger.ErrQueryViewClosed)
 }
 
@@ -965,7 +965,7 @@ func TestLocalstatequerySnapshotExpires(t *testing.T) {
 	moveTestTip(t, db, 2)
 
 	testutil.WaitForCondition(t, func() bool {
-		_, err := expired.Query(&olocalstatequery.ChainPointQuery{}, 0)
+		_, err := expired.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
 		return errors.Is(err, ledger.ErrQueryViewClosed)
 	}, testutil.AsyncWait, "the snapshot was never closed")
 	testutil.WaitForCondition(t, func() bool {
@@ -1000,7 +1000,7 @@ func TestLocalstatequerySpecificPointReopensAfterExpiry(t *testing.T) {
 	expired := o.localstatequerySessions[ctx.ConnectionId].view
 	o.localstatequeryAcquireMutex.Unlock()
 	testutil.WaitForCondition(t, func() bool {
-		_, err := expired.Query(&olocalstatequery.ChainPointQuery{}, 0)
+		_, err := expired.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
 		return errors.Is(err, ledger.ErrQueryViewClosed)
 	}, testutil.AsyncWait, "the snapshot was never closed")
 
@@ -1035,10 +1035,11 @@ func TestLocalstatequeryExpiredSnapshotCannotReopenRolledBackPoint(
 	expired := o.localstatequerySessions[ctx.ConnectionId].view
 	o.localstatequeryAcquireMutex.Unlock()
 	testutil.WaitForCondition(t, func() bool {
-		_, err := expired.Query(&olocalstatequery.ChainPointQuery{}, 0)
+		_, err := expired.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
 		return errors.Is(err, ledger.ErrQueryViewClosed)
 	}, testutil.AsyncWait, "the snapshot was never closed")
 	_, _, err := db.TruncateAfterSlot(
+		t.Context(),
 		ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32)), 0, nil,
 	)
 	require.NoError(t, err)
@@ -1105,7 +1106,7 @@ func TestOuroborosCloseClosesLocalStateQuerySnapshots(t *testing.T) {
 	require.NoError(t, o.Close())
 
 	require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(ctx.ConnectionId))
-	_, err := session.view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err := session.view.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.ErrorIs(t, err, ledger.ErrQueryViewClosed)
 }
 
@@ -1245,7 +1246,7 @@ func TestLocalstatequeryProtocol_QueryAfterExpiryKeepsConnection(
 	o.localstatequeryAcquireMutex.Unlock()
 	require.NotNil(t, expiredView)
 	testutil.WaitForCondition(t, func() bool {
-		_, err := expiredView.Query(&olocalstatequery.ChainPointQuery{}, 0)
+		_, err := expiredView.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
 		return errors.Is(err, ledger.ErrQueryViewClosed)
 	}, testutil.AsyncWait, "the view never expired")
 	got, err := client.GetChainPoint()
@@ -1277,6 +1278,7 @@ func TestLocalstatequeryProtocol_QueryAfterRollbackKeepsConnection(
 	point := ocommon.NewPoint(2, bytes.Repeat([]byte{2}, 32))
 	require.NoError(t, client.Acquire(&point))
 	_, _, err := db.TruncateAfterSlot(
+		t.Context(),
 		ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32)), 0, nil,
 	)
 	require.NoError(t, err)
@@ -1292,9 +1294,9 @@ func TestLocalstatequeryProtocol_QueryAfterRollbackKeepsConnection(
 }
 
 // TestLocalstatequeryReopen_CloseDuringReopenLeavesNoView covers a client that
-// disconnects while its expired session is being reopened. The reopen is the
-// connection's in-flight acquisition, so the disconnect cancels it, and it
-// must neither install a view nor leave its pin behind.
+// disconnects while its expired session is being reopened. The reopen runs
+// under the query's request context, which the disconnect cancels, and it must
+// neither install a view nor leave its pin behind.
 func TestLocalstatequeryReopen_CloseDuringReopenLeavesNoView(t *testing.T) {
 	t.Parallel()
 
@@ -1306,7 +1308,7 @@ func TestLocalstatequeryReopen_CloseDuringReopenLeavesNoView(t *testing.T) {
 	session := acquireSnapshotTestSession(t, o, ctx)
 	expired := session.view
 	testutil.WaitForCondition(t, func() bool {
-		_, err := expired.Query(&olocalstatequery.ChainPointQuery{}, 0)
+		_, err := expired.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
 		return errors.Is(err, ledger.ErrQueryViewClosed)
 	}, testutil.AsyncWait, "the snapshot was never closed")
 	o.localstatequeryVerifyHook = func() {

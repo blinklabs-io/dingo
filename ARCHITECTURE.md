@@ -178,25 +178,37 @@ Two gaps in that propagation are deliberate:
   instead, by the PostgreSQL/MySQL providers' statement/lock timeout
   configuration (`StatementTimeout`/`LockTimeout` in
   `database/plugin/metadata/{postgres,mysql}/provider.go`).
-- A handful of methods that take no `txn` parameter at all -- the
-  `SettingsStore` family, `HasDeferredIndexesPending`,
-  `FindUnspentMidnightAssetCreates`/`FindUnspentMidnightRegistrations` --
-  remain on `context.Background()`. Giving them a `ctx` means changing their
-  exported signatures and every external caller (`node.go`,
-  `internal/settingsresolve`, `database/commit_timestamp.go`,
-  `database/lifecycle/snapshot.go`, `bark/blob.go`,
-  `midnight/indexer/indexer.go`), which reaches outside `sqlstore`'s own
-  package boundary.
+- Methods without a transaction or context parameter, including
+  `HasDeferredIndexesPending` and the Midnight indexer find methods, use
+  `context.Background()`. Startup settings and gate methods in `SettingsStore`
+  accept the caller context directly.
 
-`database/txn.go`'s `NewTxn`/`NewMetadataOnlyTxn` are, today, where that
-propagation stops short of `database.Database`'s own callers: both still pass
-`context.Background()` into `Transaction`/`ReadTransaction` rather than a
-caller-supplied `ctx`, so a `ctx` cancellation reaching `database.Database`'s
-facade methods does not yet cancel the metadata-store transaction underneath
-them. Threading a `ctx` through `database.Database`'s own public API and its
-~100 call sites is not yet done; `golangci-lint`'s
-`contextcheck` is disabled repo-wide until then, since it reports at each of
-those callers, not at this boundary itself.
+
+`database.Database`'s own API carries the caller's `ctx` the rest of the way:
+`Transaction(ctx, readWrite)`, `MetadataTxn(ctx, readWrite)`, `NewTxn` and
+`NewMetadataOnlyTxn` carry it into the metadata store's `Transaction`/
+`ReadTransaction`, and context-aware facade methods that can open their own
+metadata transaction (the block lookups such as `BlockByPoint` and
+`BlocksRecent`, and the domain
+methods that open one when called with a nil `txn`) take `ctx` as their first
+parameter. Read transactions follow caller cancellation for their entire
+lifetime. Write transactions forward cancellation until `Txn.Commit` begins;
+an already-canceled caller causes rollback before the blob commit. Commit
+then detaches cancellation so shutdown during blob sync cannot roll back SQL
+after the blob has committed. The cancellation callback and commit transition
+are serialized, and transaction completion releases the context and callback.
+HTTP and RPC adapters pass request contexts into these methods.
+Node listener providers retain the node lifecycle context. Mempool chain workers
+derive a context from startup and cancel it before waiting for shutdown, so
+in-flight validation can release its database transaction. Ratification jobs
+retain caller values without caller cancellation and independently observe
+ledger shutdown. Mandatory recovery
+and after-commit persistence use `context.WithoutCancel` to finish repair after
+the initiating request ends. Blob providers have no context API; batch loops
+check cancellation between operations. `golangci-lint`'s `contextcheck` is enabled for the whole
+module; a function that holds a `ctx` and must still detach from it (a loop
+bound to the node lifecycle, a literal-nil `ctx` fallback) says why in a
+`//nolint:contextcheck` comment.
 
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
@@ -5780,6 +5792,10 @@ to the fast floor. Each provider query and relay-candidate pass is single-flight
 across reconcile and emergency ticks: its generation remains claimed until the
 round completes, errors, is canceled, or panics, so a slow provider cannot
 overlap the next tick or leave an artificial retry delay behind.
+
+Initial hostname normalization during peer admission is bounded by the same
+DNS timeout used for dialing; a resolution error keeps the lowercased hostname
+so an unavailable resolver cannot block admission indefinitely.
 
 Each outbound dial attempt re-resolves a hostname-based peer's address fresh,
 narrows the records to the address families the local host can route to
@@ -16070,3 +16086,11 @@ its own panics per-directory (`Manager.retryMirrorToCloud`) so one
 already-broken snapshot's cloud destination can't abort the scan for other
 directories or, since the scan runs synchronously ahead of the current
 epoch's own handling, block that epoch's own snapshot from ever running.
+
+LocalStateQuery handlers pass a request context through ledger queries and
+UTxO resolution workers. Reads are registered against their serving protocol
+instance before connection liveness is checked; closing that instance cancels
+its requests without canceling a replacement instance for the same connection
+identifier. UTxO RPC stake-distribution queries use their RPC request context.
+UTxO whole-query cancellation stops feeding new resolution work and drains
+in-flight results before releasing worker transactions and returning the error.

@@ -15,6 +15,7 @@
 package chain_test
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -86,7 +87,7 @@ func runDeferredOrderingScenario(
 	eventBus := event.NewEventBus(nil, nil)
 	t.Cleanup(eventBus.Stop)
 
-	cm, err := chain.NewManager(nil, eventBus)
+	cm, err := chain.NewManager(context.Background(), nil, eventBus)
 	require.NoError(t, err)
 	c := cm.PrimaryChain()
 	require.NotNil(t, c)
@@ -105,8 +106,8 @@ func runDeferredOrderingScenario(
 	// Seed the chain up to block B (blocks[1]) BEFORE subscribing, so the
 	// scenario's subscriber records only the add/rollback under test and not
 	// the seed updates.
-	require.NoError(t, c.AddBlock(blocks[0], nil))
-	require.NoError(t, c.AddBlock(blocks[1], nil))
+	require.NoError(t, c.AddBlock(context.Background(), blocks[0], nil))
+	require.NoError(t, c.AddBlock(context.Background(), blocks[1], nil))
 	require.Equal(t, blocks[1].SlotNumber(), c.Tip().Point.Slot)
 
 	// Lossless subscriber with generous buffer: it never drops and preserves
@@ -147,7 +148,7 @@ func runDeferredOrderingScenario(
 	go func() {
 		defer wg.Done()
 		addMutex.Lock()
-		addEvt, addErr := c.AddBlockWithPointDeferred(
+		addEvt, addErr := c.AddBlockWithPointDeferred(context.Background(),
 			blocks[2],
 			pointOf(2),
 			nil,
@@ -177,7 +178,7 @@ func runDeferredOrderingScenario(
 		defer wg.Done()
 		<-addMutated // ensure the add mutated the chain first
 		rollbackMutex.Lock()
-		rbEvts, rbErr := c.RollbackDeferred(pointOf(1))
+		rbEvts, rbErr := c.RollbackDeferred(context.Background(), pointOf(1))
 		rollbackMutex.Unlock()
 		require.NoError(t, rbErr)
 		require.NotEmpty(t, rbEvts)
