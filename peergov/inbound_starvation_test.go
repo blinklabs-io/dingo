@@ -181,6 +181,9 @@ func TestEnforcePeerLimitsNeverPrunesInbound(t *testing.T) {
 		TargetNumberOfActivePeers:      2,
 		TargetNumberOfEstablishedPeers: 3,
 		TargetNumberOfKnownPeers:       500,
+		// Room for every warm inbound peer: this test is about the outbound
+		// targets, not the inbound warm bound.
+		InboundWarmTarget: 100,
 	})
 	const inbound = 30
 	pg.mu.Lock()
@@ -229,6 +232,63 @@ func TestEnforcePeerLimitsNeverPrunesInbound(t *testing.T) {
 	assert.Zero(t, testutil.ToFloat64(
 		pg.metrics.inboundPrunedByReason.WithLabelValues("limit_exceeded"),
 	))
+}
+
+// Warm inbound peers have their own bound, InboundWarmTarget. Past it, the
+// peers that have not consumed from this node most recently are removed
+// first; hot inbound peers are not touched.
+func TestEnforcePeerLimitsBoundsWarmInboundByTarget(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		TargetNumberOfActivePeers:      20,
+		TargetNumberOfEstablishedPeers: 50,
+		TargetNumberOfKnownPeers:       500,
+		InboundWarmTarget:              3,
+	})
+	now := time.Now()
+	pg.mu.Lock()
+	for i := range 2 {
+		pg.peers = append(
+			pg.peers,
+			starvationPeer(i, PeerSourceInboundConn, PeerStateHot, false),
+		)
+	}
+	// Warm inbound peers 2..7; a higher index served more recently, and
+	// peer 2 never served at all.
+	for i := 2; i < 8; i++ {
+		peer := starvationPeer(i, PeerSourceInboundConn, PeerStateWarm, false)
+		if i > 2 {
+			peer.LastServedActivity = now.Add(-time.Duration(10-i) * time.Minute)
+		}
+		pg.peers = append(pg.peers, peer)
+	}
+	removed := 0
+	pg.enforcePeerLimits(&removed)
+	var warm []string
+	hot := 0
+	for _, p := range pg.peers {
+		if p == nil || p.Source != PeerSourceInboundConn {
+			continue
+		}
+		switch p.State {
+		case PeerStateWarm:
+			warm = append(warm, p.Address)
+		case PeerStateHot:
+			hot++
+		}
+	}
+	pg.mu.Unlock()
+
+	assert.ElementsMatch(t,
+		[]string{"10.1.0.6:3001", "10.1.0.7:3001", "10.1.0.8:3001"},
+		warm,
+		"the most recently serving warm inbound peers must be kept",
+	)
+	assert.Equal(t, 2, hot, "hot inbound peers are not bounded here")
+	assert.Equal(t, 3, removed)
+	assert.InDelta(t, 3, testutil.ToFloat64(
+		pg.metrics.inboundPrunedByReason.WithLabelValues("limit_exceeded"),
+	), 0)
 }
 
 // When outbound is over target, only outbound peers are removed.

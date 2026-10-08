@@ -573,6 +573,7 @@ func (p *PeerGovernor) enforcePeerLimits(removedCount *int) []pendingEvent {
 		events = append(events, p.enforceStateLimit(
 			PeerStateHot,
 			p.config.TargetNumberOfActivePeers,
+			false,
 			removedCount,
 		)...)
 	}
@@ -582,6 +583,19 @@ func (p *PeerGovernor) enforcePeerLimits(removedCount *int) []pendingEvent {
 		events = append(events, p.enforceStateLimit(
 			PeerStateWarm,
 			p.config.TargetNumberOfEstablishedPeers,
+			false,
+			removedCount,
+		)...)
+	}
+
+	// Enforce the warm inbound bound. Inbound peers sit outside the
+	// outbound targets above, so they need their own limit; hot inbound
+	// peers are already capped by InboundHotQuota when promoted.
+	if p.config.InboundWarmTarget > 0 {
+		events = append(events, p.enforceStateLimit(
+			PeerStateWarm,
+			p.config.InboundWarmTarget,
+			true,
 			removedCount,
 		)...)
 	}
@@ -591,6 +605,7 @@ func (p *PeerGovernor) enforcePeerLimits(removedCount *int) []pendingEvent {
 		events = append(events, p.enforceStateLimit(
 			PeerStateCold,
 			p.config.TargetNumberOfKnownPeers,
+			false,
 			removedCount,
 		)...)
 	}
@@ -598,12 +613,15 @@ func (p *PeerGovernor) enforcePeerLimits(removedCount *int) []pendingEvent {
 	return events
 }
 
-// enforceStateLimit removes excess peers in a given state.
+// enforceStateLimit removes excess peers in a given state. With inbound set it
+// counts and removes only inbound peers in that state, least recently served
+// first; otherwise inbound peers in a non-cold state are left out entirely.
 // Returns events that should be published after releasing the lock.
 // Must be called with p.mu held.
 func (p *PeerGovernor) enforceStateLimit(
 	state PeerState,
 	limit int,
+	inbound bool,
 	removedCount *int,
 ) []pendingEvent {
 	var events []pendingEvent
@@ -622,10 +640,11 @@ func (p *PeerGovernor) enforceStateLimit(
 		}
 		// Inbound peers chose to sync from this node; they do not count
 		// toward, and are never removed for, the outbound hot/warm
-		// selection targets. Inbound-specific policy (connection limits,
-		// idle/flap pruning, InboundWarmTarget/InboundHotQuota) governs them.
-		if peer.Source == PeerSourceInboundConn &&
-			state != PeerStateCold {
+		// selection targets. The inbound pass bounds them by
+		// InboundWarmTarget instead; idle/flap pruning and InboundHotQuota
+		// also apply.
+		isInbound := peer.Source == PeerSourceInboundConn
+		if inbound != isInbound && (inbound || state != PeerStateCold) {
 			continue
 		}
 		stateCount++
@@ -661,6 +680,15 @@ func (p *PeerGovernor) enforceStateLimit(
 		// First compare by source priority (lower priority = remove first)
 		if a.priority != b.priority {
 			return cmp.Compare(a.priority, b.priority)
+		}
+		// Inbound peers: the one that consumed from us longest ago goes
+		// first.
+		if inbound {
+			if c := a.peer.LastServedActivity.Compare(
+				b.peer.LastServedActivity,
+			); c != 0 {
+				return c
+			}
 		}
 		// Same priority: lower score = remove first
 		return cmp.Compare(

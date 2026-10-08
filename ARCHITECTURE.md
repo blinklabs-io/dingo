@@ -5649,7 +5649,9 @@ Hot and warm selection targets govern outbound peers only. Inbound peers are
 not counted toward, and are never removed by, the `TargetNumberOfActivePeers`
 and `TargetNumberOfEstablishedPeers` limits; only inbound-specific policy
 (connection and per-IP limits, idle/flap pruning, `InboundWarmTarget`,
-`InboundHotQuota`) closes them. The governor owns hot promotion: starting a
+`InboundHotQuota`) closes them. Warm inbound peers beyond `InboundWarmTarget`
+are removed in `enforcePeerLimits`, least recently served first (then lowest
+score); hot inbound peers are bounded at promotion by `InboundHotQuota`. The governor owns hot promotion: starting a
 chainsync client calls `SetPeerHotByConnId`, which leaves the peer warm when
 promotion would exceed the active target, its per-source quota, or the inbound
 hot budget (local roots are exempt). Reconcile promotes it later.
