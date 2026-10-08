@@ -15,6 +15,7 @@
 package storagetest
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -52,22 +53,22 @@ func RunMetadataStoreConformance(
 		require.NoError(t, store.SetCommitTimestamp(555, txn))
 		require.NoError(t, txn.Commit())
 
-		got, err := store.GetCommitTimestamp()
+		got, err := store.GetCommitTimestamp(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, int64(555), got)
 	})
 
 	t.Run("NodeSettingsFirstWriteWins", func(t *testing.T) {
-		require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
+		require.NoError(t, store.SetNodeSettings(context.Background(), &types.NodeSettings{
 			StorageMode: types.StorageModeCore,
 			Network:     "conformance-first",
 		}))
-		require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
+		require.NoError(t, store.SetNodeSettings(context.Background(), &types.NodeSettings{
 			StorageMode: types.StorageModeCore,
 			Network:     "conformance-second",
 		}))
 
-		got, err := store.GetNodeSettings()
+		got, err := store.GetNodeSettings(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, "conformance-first", got.Network)
 	})
@@ -75,9 +76,9 @@ func RunMetadataStoreConformance(
 	t.Run("NodeSettingsGatesRoundTrip", func(t *testing.T) {
 		name := conformanceGateName(t, "gate")
 		gates := nodesettings.Values{name: "enabled"}
-		require.NoError(t, store.SetNodeSettingsGates(gates, 3, 30))
+		require.NoError(t, store.SetNodeSettingsGates(context.Background(), gates, 3, 30))
 
-		got, err := store.GetNodeSettingsGates()
+		got, err := store.GetNodeSettingsGates(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, "enabled", got[name])
 	})
@@ -87,24 +88,24 @@ func RunMetadataStoreConformance(
 		// are documented to overwrite: "a later call overwrites an earlier
 		// value for the same name" (metadata.SettingsStore doc comment).
 		name := conformanceGateName(t, "update-gate")
-		require.NoError(t, store.SetNodeSettingsGates(
+		require.NoError(t, store.SetNodeSettingsGates(context.Background(),
 			nodesettings.Values{name: "first-value"},
 			1,
 			10,
 		))
-		require.NoError(t, store.SetNodeSettingsGates(
+		require.NoError(t, store.SetNodeSettingsGates(context.Background(),
 			nodesettings.Values{name: "second-value"},
 			2,
 			20,
 		))
 
-		got, err := store.GetNodeSettingsGates()
+		got, err := store.GetNodeSettingsGates(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, "second-value", got[name])
 	})
 
 	t.Run("SetNodeSettingsGatesNilIsNoop", func(t *testing.T) {
-		require.NoError(t, store.SetNodeSettingsGates(nil, 0, 0))
+		require.NoError(t, store.SetNodeSettingsGates(context.Background(), nil, 0, 0))
 	})
 
 	t.Run("InsertNodeSettingsGateIfAbsentIsFirstWriteWins", func(t *testing.T) {
@@ -117,7 +118,7 @@ func RunMetadataStoreConformance(
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				ok, err := store.InsertNodeSettingsGateIfAbsent(
+				ok, err := store.InsertNodeSettingsGateIfAbsent(context.Background(),
 					name,
 					fmt.Sprintf("value-%d", i),
 					1,
@@ -137,7 +138,7 @@ func RunMetadataStoreConformance(
 		}
 		require.Equal(t, 1, winners)
 
-		got, err := store.GetNodeSettingsGates()
+		got, err := store.GetNodeSettingsGates(context.Background())
 		require.NoError(t, err)
 		require.Contains(t, got, name)
 	})
@@ -147,20 +148,20 @@ func RunMetadataStoreConformance(
 		require.NoError(t, store.SetCommitTimestamp(777, txn))
 		require.NoError(t, txn.Commit())
 
-		got, err := store.GetCommitTimestamp()
+		got, err := store.GetCommitTimestamp(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, int64(777), got)
 	})
 
 	t.Run("TransactionRollbackDiscardsWrites", func(t *testing.T) {
-		baseline, err := store.GetCommitTimestamp()
+		baseline, err := store.GetCommitTimestamp(context.Background())
 		require.NoError(t, err)
 
 		txn := store.Transaction(t.Context())
 		require.NoError(t, store.SetCommitTimestamp(baseline+1, txn))
 		require.NoError(t, txn.Rollback())
 
-		got, err := store.GetCommitTimestamp()
+		got, err := store.GetCommitTimestamp(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, baseline, got)
 	})
@@ -436,7 +437,7 @@ func RunMetadataStoreConformance(
 		txn := store.Transaction(t.Context())
 		require.NoError(t, store.SetCommitTimestamp(1, txn))
 		require.NoError(t, txn.Commit())
-		_, err := store.GetCommitTimestamp()
+		_, err := store.GetCommitTimestamp(context.Background())
 		require.NoError(t, err)
 
 		require.Less(

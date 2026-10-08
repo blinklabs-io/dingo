@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -37,9 +38,10 @@ func (d *Database) GetMidnightCandidates(
 // Always inserts — never overwrites — so the latest datum is found by
 // querying with ORDER BY block_number DESC.
 func (d *Database) InsertMidnightGovernanceDatum(
+	ctx context.Context,
 	datum *models.MidnightGovernanceDatum,
 ) error {
-	return d.withMetadataWriteTxn(nil, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, nil, func(txn *Txn) error {
 		if err := d.metadata.InsertMidnightGovernanceDatum(
 			txn.Metadata(), datum,
 		); err != nil {
@@ -72,9 +74,10 @@ func (d *Database) GetLatestMidnightAriadneParams() (*models.MidnightAriadnePara
 // the given epoch. If a row for that epoch already exists, its datum is
 // updated with the new value.
 func (d *Database) UpsertMidnightAriadneParams(
+	ctx context.Context,
 	params *models.MidnightAriadneParams,
 ) error {
-	return d.withMetadataWriteTxn(nil, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, nil, func(txn *Txn) error {
 		if err := d.metadata.UpsertMidnightAriadneParams(
 			txn.Metadata(), params,
 		); err != nil {
@@ -114,9 +117,10 @@ func (d *Database) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
 // UpsertMidnightEpochCandidates inserts or replaces the committee-candidate
 // snapshot for the given epoch.
 func (d *Database) UpsertMidnightEpochCandidates(
+	ctx context.Context,
 	ec *models.MidnightEpochCandidates,
 ) error {
-	return d.withMetadataWriteTxn(nil, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, nil, func(txn *Txn) error {
 		if err := d.metadata.UpsertMidnightEpochCandidates(
 			txn.Metadata(), ec,
 		); err != nil {

@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
@@ -37,6 +38,38 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// reloadOnSignal calls reload for every signal received on sigs until ctx is
+// done. A failed reload is logged and ends nothing: the node keeps running on
+// the credentials it already has.
+func reloadOnSignal(
+	ctx context.Context,
+	sigs <-chan os.Signal,
+	reload func() error,
+	logger *slog.Logger,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sig := <-sigs:
+			logger.Info(
+				"reloading block producer credentials",
+				"component", "node",
+				"signal", sig.String(),
+			)
+			if err := reload(); err != nil {
+				logger.Error(
+					"block producer credential reload failed; keeping the loaded credentials",
+					"component",
+					"node",
+					"error",
+					err,
+				)
+			}
+		}
+	}
+}
 
 func waitForSignalOrError(
 	signalCtx context.Context,
@@ -55,6 +88,57 @@ func waitForSignalOrError(
 		}
 		return nil, true
 	}
+}
+
+// waitForStop is waitForSignalOrError plus the remote lifecycle request that
+// ended the run, if any. endRequests closes the node's request intake and
+// returns the accepted request, so a request is either returned here or
+// refused; Bark keeps serving into shutdown, and a request accepted after this
+// point would never be performed. It is called however the run ended: Node.Run
+// returns nil on the cancellation a request causes, which can reach errChan
+// before the cancellation is observed.
+func waitForStop(
+	signalCtx context.Context,
+	errChan <-chan error,
+	endRequests func() (dingo.ShutdownRequest, bool),
+) (*dingo.ShutdownRequest, bool, error) {
+	err, signaled := waitForSignalOrError(signalCtx, errChan)
+	req, ok := endRequests()
+	if !ok {
+		return nil, signaled, err
+	}
+	return &req, signaled, err
+}
+
+// runRequestedShutdown performs a stop or restart accepted over the remote
+// lifecycle service. The graceful shutdown is abandoned once req.Timeout
+// elapses so the request can never leave the process hanging, and a restart
+// re-executes the process even then.
+func runRequestedShutdown(
+	req dingo.ShutdownRequest,
+	causalErr error,
+	shutdown func() error,
+	reExec func() error,
+) error {
+	done := make(chan error, 1)
+	go func() { done <- shutdown() }()
+	remaining := req.Timeout
+	if !req.Deadline.IsZero() {
+		remaining = max(time.Until(req.Deadline), 0)
+	}
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(remaining):
+		err = fmt.Errorf("graceful shutdown exceeded %s", req.Timeout)
+	}
+	if !req.Restart {
+		return errors.Join(causalErr, err)
+	}
+	if reExecErr := reExec(); reExecErr != nil {
+		return errors.Join(causalErr, err, reExecErr)
+	}
+	return errors.Join(causalErr, err)
 }
 
 func gracefulShutdown(
@@ -201,6 +285,17 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 	}
 }
 
+// nodeHealthChecks is the node's contribution to the probes beyond the tip
+// gap: a stopped slot clock fails liveness, and an unavailable database or a
+// block producer that cannot forge holds readiness.
+func nodeHealthChecks(d *dingo.Node) []health.Check {
+	return []health.Check{
+		{Liveness: true, Fn: d.EventLoopResponsive},
+		{Fn: d.DatabaseReady},
+		{Fn: d.BlockProducerReady},
+	}
+}
+
 // NewHealthServer builds the dedicated liveness/readiness listener, or nil
 // when healthPort is 0.
 //
@@ -226,6 +321,7 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 func NewHealthServer(
 	cfg *config.Config,
 	tipGap health.TipGapFunc,
+	checks ...health.Check,
 ) *http.Server {
 	if cfg.HealthPort == 0 {
 		return nil
@@ -241,7 +337,7 @@ func NewHealthServer(
 			cfg.BindAddr,
 			strconv.FormatUint(uint64(cfg.HealthPort), 10),
 		),
-		Handler:           health.NewMux(tipGap, readyTipGapSlots),
+		Handler:           health.NewMux(tipGap, readyTipGapSlots, checks...),
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -473,7 +569,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	// Liveness/readiness listener, on a port of its own so an orchestrator
 	// or load balancer can probe the node without being handed the metrics
 	// or pprof surface. Started for every storage mode.
-	healthServer := NewHealthServer(cfg, d.TipGapSlots)
+	healthServer := NewHealthServer(
+		cfg, d.TipGapSlots, nodeHealthChecks(d)...,
+	)
 	if healthServer != nil {
 		logger.Info(
 			"serving health probes on "+healthServer.Addr,
@@ -487,6 +585,16 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		syscall.SIGTERM,
 	)
 	defer signalCtxStop()
+	// A block producer re-reads its credential files on SIGHUP. Relays leave
+	// the signal at its default so their behaviour is unchanged.
+	if cfg.BlockProducer {
+		reloadSigs := make(chan os.Signal, 1)
+		signal.Notify(reloadSigs, syscall.SIGHUP)
+		defer signal.Stop(reloadSigs)
+		go reloadOnSignal(
+			signalCtx, reloadSigs, d.ReloadBlockProducerCredentials, logger,
+		)
+	}
 
 	// Error channel for the node goroutine. The metrics, pprof debug and
 	// health listeners are non-essential observability endpoints; their
@@ -514,6 +622,15 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			go serveAuxiliaryListenerOn("health", healthServer, listener, logger)
 		}
 	}
+	// A remote stop or restart ends the run exactly like a signal does;
+	// waitForStop then tells them apart.
+	go func() {
+		select {
+		case <-d.ShutdownRequests():
+			signalCtxStop()
+		case <-signalCtx.Done():
+		}
+	}()
 	go func() {
 		//nolint:contextcheck
 		err := d.Run(signalCtx)
@@ -526,19 +643,29 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		}
 	}()
 
-	// Wait for signal or error
-	err, signaled := waitForSignalOrError(signalCtx, errChan)
-	if signaled {
-		logger.Info("signal received, initiating graceful shutdown")
-
-		if err := gracefulShutdown(
+	// Wait for signal, remote request or error
+	req, signaled, err := waitForStop(signalCtx, errChan, d.EndShutdownRequests)
+	shutdown := func() error {
+		return gracefulShutdown(
 			logger,
 			metricsServer,
 			debugServer,
 			healthServer,
 			d,
 			shutdownTimeout,
-		); err != nil {
+		)
+	}
+	if req != nil {
+		logger.Info(
+			"remote lifecycle request received, initiating graceful shutdown",
+			"restart", req.Restart,
+			"timeout", req.Timeout,
+		)
+		return runRequestedShutdown(*req, err, shutdown, dingo.ReExec)
+	}
+	if signaled {
+		logger.Info("signal received, initiating graceful shutdown")
+		if err := shutdown(); err != nil {
 			return err
 		}
 		logger.Info("shutdown complete")
@@ -547,17 +674,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 
 	if err == nil {
 		logger.Info("node stopped")
-		if err := gracefulShutdown(
-			logger,
-			metricsServer,
-			debugServer,
-			healthServer,
-			d,
-			shutdownTimeout,
-		); err != nil {
-			return err
-		}
-		return nil
+		return shutdown()
 	}
 
 	logger.Error("node error", "error", err)
@@ -674,6 +791,10 @@ func buildDingoConfig(
 		dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
+		),
+		dingo.WithBarkLifecycleEnabled(cfg.BarkLifecycleEnabled),
+		dingo.WithBarkLifecycleOperatorCertificateFingerprints(
+			cfg.BarkLifecycleOperatorCertificateFingerprints,
 		),
 		dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 			Enabled:   cfg.HistoryExpiry.Enabled,

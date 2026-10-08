@@ -1117,7 +1117,7 @@ func (m *mockNode) PoolsExtended() (
 	return m.pools, m.poolsErr
 }
 
-func (m *mockNode) PoolsList(
+func (m *mockNode) PoolsList(ctx context.Context,
 	params PaginationParams,
 ) ([]string, int, error) {
 	m.poolsListParams = params
@@ -1136,7 +1136,7 @@ func (m *mockNode) PoolMetadata(
 	return m.poolMetadata, m.poolMetadataErr
 }
 
-func (m *mockNode) PoolDetail(
+func (m *mockNode) PoolDetail(ctx context.Context,
 	_ string,
 ) (PoolDetailInfo, error) {
 	return m.poolDetail, m.poolDetailErr
@@ -1307,7 +1307,7 @@ func (m *mockNode) Account(
 	return m.account, m.accountErr
 }
 
-func (m *mockNode) AccountAssociatedAddresses(
+func (m *mockNode) AccountAssociatedAddresses(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountAssociatedAddressInfo, int, error) {
@@ -1326,7 +1326,7 @@ func (m *mockNode) AccountAssociatedAddresses(
 	return items[start:end], total, m.addressesErr
 }
 
-func (m *mockNode) AccountDelegationHistory(
+func (m *mockNode) AccountDelegationHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountDelegationHistoryInfo, int, error) {
@@ -1345,7 +1345,7 @@ func (m *mockNode) AccountDelegationHistory(
 	return items[start:end], total, m.delegationsErr
 }
 
-func (m *mockNode) AccountRegistrationHistory(
+func (m *mockNode) AccountRegistrationHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountRegistrationHistoryInfo, int, error) {
@@ -1364,7 +1364,7 @@ func (m *mockNode) AccountRegistrationHistory(
 	return items[start:end], total, m.regsErr
 }
 
-func (m *mockNode) AccountRewardHistory(
+func (m *mockNode) AccountRewardHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountRewardHistoryInfo, int, error) {
@@ -1404,7 +1404,7 @@ func mockPage[T any](items []T, order string, page, count int) ([]T, int) {
 	return items[start:end], total
 }
 
-func (m *mockNode) AccountUTXOs(
+func (m *mockNode) AccountUTXOs(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountUTXOInfo, int, error) {
@@ -1414,7 +1414,7 @@ func (m *mockNode) AccountUTXOs(
 	return rows, total, m.accountUTXOsErr
 }
 
-func (m *mockNode) AccountWithdrawals(
+func (m *mockNode) AccountWithdrawals(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountWithdrawalInfo, int, error) {
@@ -1424,7 +1424,7 @@ func (m *mockNode) AccountWithdrawals(
 	return rows, total, m.accountWithdrawalsErr
 }
 
-func (m *mockNode) AccountTransactions(
+func (m *mockNode) AccountTransactions(ctx context.Context,
 	_ string,
 	params AccountTransactionsParams,
 ) ([]AccountTransactionInfo, int, error) {

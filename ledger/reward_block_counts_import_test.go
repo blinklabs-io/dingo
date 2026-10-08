@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -88,7 +89,7 @@ func stakeRewardApplicationForTest(
 		))
 		require.NoError(t, meta.SaveImportedEpochBlockTotal(2, 10, 199, nil))
 	}
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	t.Cleanup(func() { _ = txn.Rollback() })
 	app, ok, err := ls.calculateStakeRewardApplication(
 		txn,

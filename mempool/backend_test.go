@@ -287,7 +287,7 @@ func TestFIFOBackendContract(t *testing.T) {
 			pool.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
 		)
 		validator.removeBaseUtxo(inputKey)
-		require.NoError(t, pool.rebuildOverlay())
+		require.NoError(t, pool.rebuildOverlay(context.Background()))
 		assert.Empty(t, pool.Transactions())
 	})
 }
@@ -314,7 +314,7 @@ func TestDAGBackendContract(t *testing.T) {
 			pool.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
 		)
 		validator.removeBaseUtxo(inputKey)
-		require.NoError(t, pool.rebuildOverlay())
+		require.NoError(t, pool.rebuildOverlay(context.Background()))
 		assert.Empty(t, pool.Transactions())
 		assert.Empty(t, pool.dag.nodes)
 	})

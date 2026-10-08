@@ -14,15 +14,19 @@
 
 package database
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // DeleteNetworkStateAfterSlot removes network state records added
 // after the given slot. This is used during chain rollbacks.
 func (d *Database) DeleteNetworkStateAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.DeleteNetworkStateAfterSlot(
 			slot,
 			txn.Metadata(),
@@ -130,20 +134,4 @@ func (d *Database) ListSyncStateKeysByPrefix(
 		)
 	}
 	return keys, nil
-}
-
-// ClearSyncState removes all sync state entries.
-func (d *Database) ClearSyncState(txn *Txn) error {
-	var err error
-	if txn == nil {
-		err = d.metadata.ClearSyncState(nil)
-	} else {
-		err = d.metadata.ClearSyncState(txn.Metadata())
-	}
-	if err != nil {
-		return fmt.Errorf(
-			"Database.ClearSyncState: %w", err,
-		)
-	}
-	return nil
 }

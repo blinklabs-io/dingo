@@ -63,10 +63,14 @@ func seedStakeCredentialUtxos(
 		stakeKey,
 	)
 	require.NoError(t, err)
-	require.NoError(t, adapter.ledgerState.Database().CreateAccount(
-		nil,
-		&models.Account{StakingKey: stakeKey, Active: true},
-	))
+	require.NoError(
+		t,
+		adapter.ledgerState.Database().CreateAccount(
+			context.Background(),
+			nil,
+			&models.Account{StakingKey: stakeKey, Active: true},
+		),
+	)
 
 	for i := range numUtxos {
 		payment := make([]byte, lcommon.AddressHashSize)
@@ -113,7 +117,7 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 	stakeAddr, _ := seedStakeCredentialUtxos(t, adapter, raw, db, total)
 
 	t.Run("ascending page stops at the requested window", func(t *testing.T) {
-		items, gotTotal, err := adapter.AccountUTXOs(
+		items, gotTotal, err := adapter.AccountUTXOs(context.Background(),
 			stakeAddr,
 			PaginationParams{Count: 10, Page: 3, Order: PaginationOrderAsc},
 		)
@@ -127,7 +131,7 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 	})
 
 	t.Run("descending page returns newest first", func(t *testing.T) {
-		items, gotTotal, err := adapter.AccountUTXOs(
+		items, gotTotal, err := adapter.AccountUTXOs(context.Background(),
 			stakeAddr,
 			PaginationParams{Count: 10, Page: 1, Order: PaginationOrderDesc},
 		)
@@ -141,7 +145,7 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 	t.Run(
 		"a page past the end is empty but reports the real total",
 		func(t *testing.T) {
-			items, gotTotal, err := adapter.AccountUTXOs(
+			items, gotTotal, err := adapter.AccountUTXOs(context.Background(),
 				stakeAddr,
 				PaginationParams{
 					Count: 100,
@@ -158,7 +162,7 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 	t.Run(
 		"a page far beyond the address history is empty, not an error",
 		func(t *testing.T) {
-			items, gotTotal, err := adapter.AccountUTXOs(
+			items, gotTotal, err := adapter.AccountUTXOs(context.Background(),
 				stakeAddr,
 				PaginationParams{
 					Count: MaxPaginationCount,
@@ -181,7 +185,7 @@ func TestNodeAdapterAccountUTXOsEmpty(t *testing.T) {
 	adapter, raw, db := newDBBackedAdapter(t)
 	stakeAddr, _ := seedStakeCredentialUtxos(t, adapter, raw, db, 0)
 
-	items, total, err := adapter.AccountUTXOs(
+	items, total, err := adapter.AccountUTXOs(context.Background(),
 		stakeAddr,
 		PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc},
 	)
@@ -385,6 +389,7 @@ func TestNodeAdapterAssetAddressesHydratesFilteredAssets(t *testing.T) {
 	})
 	storePointerOutputCbor(t, db, txHash, 0, addr, 1_000_000)
 	filtered, err := db.UtxosByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			MatchAllAddresses: true,
 			Limit:             10,
@@ -402,6 +407,7 @@ func TestNodeAdapterAssetAddressesHydratesFilteredAssets(t *testing.T) {
 	assert.Equal(t, assetName, filtered[0].Assets[0].Name)
 	assert.Equal(t, types.Uint64(9), filtered[0].Assets[0].Amount)
 	unfiltered, err := db.UtxosByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			MatchAllAddresses: true,
 			Limit:             10,
@@ -563,7 +569,7 @@ func newDBBackedAdapter(
 	})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	lsConfig := ledger.LedgerStateConfig{
@@ -1117,11 +1123,14 @@ func TestAccountRewardHistoryExcludesNonSpendableReward(t *testing.T) {
 	adapter, _, db := newDBBackedAdapter(t)
 	stakingKey := bytes.Repeat([]byte{0x07}, 28)
 	poolKey := bytes.Repeat([]byte{0xff}, 28)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		CredentialTag: 0,
-		StakingKey:    stakingKey,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			CredentialTag: 0,
+			StakingKey:    stakingKey,
+			Active:        true,
+		}),
+	)
 	require.NoError(
 		t,
 		db.Metadata().SaveRewardAccountOutputs([]*models.RewardAccountOutput{
@@ -1146,7 +1155,7 @@ func TestAccountRewardHistoryExcludesNonSpendableReward(t *testing.T) {
 		}, nil),
 	)
 
-	rows, total, err := adapter.AccountRewardHistory(
+	rows, total, err := adapter.AccountRewardHistory(context.Background(),
 		newRewardHistoryStakeAddress(t, stakingKey),
 		PaginationParams{Count: 100, Page: 1, Order: "asc"},
 	)
@@ -1162,11 +1171,14 @@ func TestAccountRewardHistoryExcludesGuardedReward(t *testing.T) {
 	adapter, _, db := newDBBackedAdapter(t)
 	stakingKey := bytes.Repeat([]byte{0x08}, 28)
 	poolKey := bytes.Repeat([]byte{0xfe}, 28)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		CredentialTag: 0,
-		StakingKey:    stakingKey,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			CredentialTag: 0,
+			StakingKey:    stakingKey,
+			Active:        true,
+		}),
+	)
 	require.NoError(
 		t,
 		db.Metadata().SaveRewardAccountOutputs([]*models.RewardAccountOutput{
@@ -1192,7 +1204,7 @@ func TestAccountRewardHistoryExcludesGuardedReward(t *testing.T) {
 		}, nil),
 	)
 
-	rows, total, err := adapter.AccountRewardHistory(
+	rows, total, err := adapter.AccountRewardHistory(context.Background(),
 		newRewardHistoryStakeAddress(t, stakingKey),
 		PaginationParams{Count: 100, Page: 1, Order: "asc"},
 	)
@@ -1291,4 +1303,22 @@ func TestUtxoDatumAndScriptRefNone(t *testing.T) {
 	inlineDatum, referenceScriptHash := utxoDatumAndScriptRef(output)
 	assert.Nil(t, inlineDatum)
 	assert.Nil(t, referenceScriptHash)
+}
+
+func TestBlockfrostAdaptersHonorCancelledContext(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	stakeAddr, _ := seedStakeCredentialUtxos(t, adapter, raw, db, 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, _, err := adapter.PoolsList(ctx, PaginationParams{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AccountUTXOs(ctx, stakeAddr, PaginationParams{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AccountRewardHistory(ctx, stakeAddr, PaginationParams{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AccountWithdrawals(ctx, stakeAddr, PaginationParams{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AccountTransactions(ctx, stakeAddr, AccountTransactionsParams{})
+	require.ErrorIs(t, err, context.Canceled)
 }

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -92,7 +93,7 @@ func praosPrefersCandidateSibling(
 // It reports whether the block was adopted. Losing chain selection is a normal
 // outcome and returns (false, nil): the rival keeps the slot and the forged
 // block is discarded undiffused.
-func (ls *LedgerState) AdoptLocalForgedSibling(
+func (ls *LedgerState) AdoptLocalForgedSibling(ctx context.Context,
 	block gledger.Block,
 ) (bool, error) {
 	if ls == nil || ls.chain == nil {
@@ -109,7 +110,7 @@ func (ls *LedgerState) AdoptLocalForgedSibling(
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 
-	parent, incumbentTip, ok := ls.chain.TipPredecessor()
+	parent, incumbentTip, ok := ls.chain.TipPredecessor(ctx)
 	if !ok {
 		return false, fmt.Errorf(
 			"%w: chain tip has no resolvable predecessor",
@@ -141,7 +142,7 @@ func (ls *LedgerState) AdoptLocalForgedSibling(
 		BlockNumber: block.BlockNumber(),
 	}
 	candidateView, _ := praos.GetPraosTiebreakerView(block.Header())
-	incumbentView := ls.localTipPraosView(incumbentTip)
+	incumbentView := ls.localTipPraosView(ctx, incumbentTip)
 	if !praosPrefersCandidateSibling(
 		candidateTip,
 		incumbentTip,
@@ -180,14 +181,14 @@ func (ls *LedgerState) AdoptLocalForgedSibling(
 	// sound: a batch tagged with the older generation can only have been
 	// requested for the segment this rollback abandons.
 	ls.blockfetchRollbackGeneration.Add(1)
-	if err := ls.rollbackChainAndStateDeferred(parent, &pending); err != nil {
+	if err := ls.rollbackChainAndStateDeferred(ctx, parent, &pending); err != nil {
 		return false, fmt.Errorf(
 			"roll back to fork point %x for locally forged sibling: %w",
 			parent.Hash,
 			err,
 		)
 	}
-	if _, err := ls.chain.AddLocalBlockDeferred(block); err != nil {
+	if _, err := ls.chain.AddLocalBlockDeferred(ctx, block); err != nil {
 		// The chain is now at the fork point with neither candidate on it.
 		// That is recoverable -- chainsync re-offers the rival's header,
 		// which no longer conflicts with our tip -- but it is not a state

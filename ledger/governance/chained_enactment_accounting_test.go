@@ -152,10 +152,14 @@ func TestProcessEpochChainedEnactmentAccountingAndRollback(t *testing.T) {
 	// Roll back to just before the ENACT boundary.
 	enactBoundary := (stabilityTestEpoch + 1) * 100
 	require.NoError(t, db.DeleteGovernanceProposalsAfterSlot(
-		enactBoundary-1, nil,
+		t.Context(), enactBoundary-1, nil,
 	))
-	require.NoError(t, db.DeleteAccountRewardsAfterSlot(enactBoundary-1, nil))
-	require.NoError(t, db.DeleteNetworkStateAfterSlot(enactBoundary-1, nil))
+	require.NoError(t, db.DeleteAccountRewardsAfterSlot(
+		t.Context(), enactBoundary-1, nil,
+	))
+	require.NoError(t, db.DeleteNetworkStateAfterSlot(
+		t.Context(), enactBoundary-1, nil,
+	))
 	assert.Equal(t, untouched, read())
 	assert.Nil(t, chainTestParameterRoot(t, db))
 	for _, proposal := range []*models.GovernanceProposal{
@@ -174,7 +178,7 @@ func TestProcessEpochChainedEnactmentAccountingAndRollback(t *testing.T) {
 	// Roll back past the RATIFY boundary as well, then replay both
 	// boundaries: the outcome and every lovelace movement repeat exactly.
 	require.NoError(t, db.DeleteGovernanceProposalsAfterSlot(
-		stabilityTestEpoch*100-1, nil,
+		t.Context(), stabilityTestEpoch*100-1, nil,
 	))
 	for _, proposal := range []*models.GovernanceProposal{
 		parent, child, treasury,

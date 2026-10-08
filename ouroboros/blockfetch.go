@@ -296,6 +296,7 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 					time.Since(decodeStart).Seconds(),
 				)
 			}
+			// Wrapped with the block type below.
 			return block, err
 		},
 		o.recordBlockDecodeCacheOutcome,
@@ -331,6 +332,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
+	o.recordServedActivity(ctx.ConnectionId)
 	// Validate that start is not after end
 	if start.Slot > end.Slot {
 		o.config.Logger.Warn(
@@ -353,6 +355,22 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		)
 		return nil
 	}
+	// Reserve range capacity before the first allocation (the chain
+	// iterator below and the sender goroutine). Saturation is answered with
+	// NoBlocks, the only rejection BlockFetch defines for a request.
+	release, admitted := o.blockfetchRangeAdmission.reserve(
+		ctx.ConnectionId,
+		ctx.Server.ProtocolInstance().DoneChan(),
+	)
+	if admitted != blockfetchRangeAdmitted {
+		return o.blockfetchRejectSaturated(ctx, start, admitted)
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 	// The requested slot span is not validated here: on a sparse or
 	// low-active-slot-coefficient network, a valid run of consecutive
 	// blocks can span far more slots than mainnet's stability window.
@@ -460,9 +478,14 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		}
 	}
 	o.blockfetchResetNoBlocks(ctx.ConnectionId)
-	// Start async process to send requested block range
+	// Start async process to send requested block range. The goroutine owns
+	// the reservation from here on.
+	handedOff = true
 	go func() {
-		rawConn, connDone := o.connManager.GetConnectionWithDone(ctx.ConnectionId)
+		defer release()
+		rawConn, connDone := o.connManager.GetConnectionWithDone(
+			ctx.ConnectionId,
+		)
 		if rawConn == nil {
 			chainIter.Cancel()
 			return
@@ -487,6 +510,27 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 			)
 		}
 	}()
+	return nil
+}
+
+// blockfetchRejectSaturated answers a range request that exceeded the
+// per-connection or global admission bound. BlockFetch permits pipelined range
+// requests, so saturation is backpressure and must not feed the stuck-peer
+// valve or disconnect a protocol-compliant peer.
+func (o *Ouroboros) blockfetchRejectSaturated(
+	ctx blockfetch.CallbackContext,
+	start ocommon.Point,
+	result blockfetchRangeAdmitResult,
+) error {
+	o.config.Logger.Debug(
+		"blockfetch: range admission saturated, sending NoBlocks",
+		"connection_id", ctx.ConnectionId.String(),
+		"start_slot", start.Slot,
+		"per_connection", result == blockfetchRangeConnSaturated,
+	)
+	if err := ctx.Server.NoBlocks(); err != nil {
+		return fmt.Errorf("blockfetch NoBlocks after saturation: %w", err)
+	}
 	return nil
 }
 
@@ -516,6 +560,7 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 		conn,
 		"StartBatch",
 	); err != nil {
+		// The drain error already names the phase.
 		return err
 	}
 	reachedEnd := false
@@ -629,6 +674,7 @@ Loop:
 				conn,
 				"Block",
 			); err != nil {
+				// The drain error already names the phase.
 				return err
 			}
 			// Make sure we don't hang waiting for the next block if we've already hit the end
@@ -831,6 +877,7 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 ) (uint64, error) {
 	client, err := o.blockfetchConnClient(connId)
 	if err != nil {
+		// blockfetchConnClient names the missing manager or connection.
 		return 0, err
 	}
 	dispatchStart := time.Now()
@@ -858,6 +905,7 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 				false,
 			)
 		}
+		// Callers name the range request in their own wrap or log.
 		return 0, err
 	}
 	// RequestRange returns once the request is on the wire, so a peer that
@@ -908,6 +956,11 @@ func (o *Ouroboros) blockfetchClientBlock(
 				block.Hash(),
 				delaySeconds,
 				fetchDuration.Seconds(),
+			)
+			o.blockfetchMetrics.recentForks.recordParticipant(
+				block.BlockNumber(),
+				block.SlotNumber(),
+				block.Hash(),
 			)
 			total := o.blockfetchMetrics.totalBlocksFetched.Add(1)
 			// Cumulative CDF buckets: each counter includes all
@@ -1036,6 +1089,7 @@ func (o *Ouroboros) instrumentBlockfetchRequestRange(
 		startTime := time.Now()
 		err := fn(ctx, start, end)
 		o.recordProtocolMessage("blockfetch", err, time.Since(startTime))
+		// The instrumented callback's error passes through unchanged.
 		return err
 	}
 }
@@ -1051,6 +1105,7 @@ func (o *Ouroboros) instrumentBlockfetchBlockRaw(
 		start := time.Now()
 		err := fn(ctx, blockType, blockData)
 		o.recordProtocolMessage("blockfetch", err, time.Since(start))
+		// The instrumented callback's error passes through unchanged.
 		return err
 	}
 }
@@ -1062,6 +1117,7 @@ func (o *Ouroboros) instrumentBlockfetchRangeDone(
 		start := time.Now()
 		err := fn(ctx, rangeErr)
 		o.recordProtocolMessage("blockfetch", err, time.Since(start))
+		// The instrumented callback's error passes through unchanged.
 		return err
 	}
 }

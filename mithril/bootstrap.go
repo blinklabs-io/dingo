@@ -1235,6 +1235,24 @@ func VerifyCertificateChainWithMode(
 	snapshotDigest string,
 	mode VerificationMode,
 ) (*CertificateChainVerificationResult, error) {
+	return verifyCertificateChain(
+		ctx,
+		client,
+		certificateHash,
+		snapshotDigest,
+		mode,
+		newCertificateChainBudget(),
+	)
+}
+
+func verifyCertificateChain(
+	ctx context.Context,
+	client *Client,
+	certificateHash string,
+	snapshotDigest string,
+	mode VerificationMode,
+	budget *certificateChainBudget,
+) (*CertificateChainVerificationResult, error) {
 	if mode == 0 {
 		mode = VerificationModeStructural
 	}
@@ -1248,11 +1266,6 @@ func VerifyCertificateChainWithMode(
 		return nil, errors.New("certificate hash is empty")
 	}
 
-	// Certificate chains on long-lived networks can exceed hundreds
-	// of links; keep a high bound to prevent runaway loops while
-	// allowing normal operation.
-	const maxDepth = 10000
-
 	currentHash := certificateHash
 	seen := make(map[string]bool)
 	isLeaf := true
@@ -1261,7 +1274,10 @@ func VerifyCertificateChainWithMode(
 		SnapshotDigest: snapshotDigest,
 	}
 
-	for range maxDepth {
+	for {
+		if err := budget.chargeCertificate(); err != nil {
+			return nil, err
+		}
 		if seen[currentHash] {
 			return nil, fmt.Errorf(
 				"certificate chain cycle detected at %s",
@@ -1270,10 +1286,31 @@ func VerifyCertificateChainWithMode(
 		}
 		seen[currentHash] = true
 
-		cert, err := client.GetCertificate(ctx, currentHash)
+		cert, size, err := client.getCertificateWithLimit(
+			ctx,
+			currentHash,
+			budget.certificateByteLimit(),
+		)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"fetching certificate %s: %w",
+				currentHash,
+				err,
+			)
+		}
+		budget.chargeBytes(size)
+		if len(cert.Metadata.Signers) > stmMaxSigners {
+			return nil, fmt.Errorf(
+				"%w: certificate %s lists %d signers, limit %d",
+				errCertificateChainBudget,
+				currentHash,
+				len(cert.Metadata.Signers),
+				stmMaxSigners,
+			)
+		}
+		if err := budget.chargeSigners(len(cert.Metadata.Signers)); err != nil {
+			return nil, fmt.Errorf(
+				"certificate %s: %w",
 				currentHash,
 				err,
 			)
@@ -1316,7 +1353,7 @@ func VerifyCertificateChainWithMode(
 			)
 		}
 		if mode == VerificationModeSTM {
-			if err := verifySTMCertificate(cert); err != nil {
+			if err := verifySTMCertificate(cert, budget); err != nil {
 				return nil, fmt.Errorf(
 					"STM verification failed for certificate %s: %w",
 					currentHash,
@@ -1422,11 +1459,6 @@ func VerifyCertificateChainWithMode(
 
 		currentHash = cert.PreviousHash
 	}
-
-	return nil, fmt.Errorf(
-		"certificate chain exceeded maximum depth of %d",
-		maxDepth,
-	)
 }
 
 // chunkDirIn returns rel beneath an already-open, already-vetted base when rel

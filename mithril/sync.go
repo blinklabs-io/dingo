@@ -47,12 +47,13 @@ const (
 )
 
 func setStableMithrilLedgerTip(
+	ctx context.Context,
 	db *database.Database,
 	slot uint64,
 	hash []byte,
 ) error {
 	point := ocommon.NewPoint(slot, hash)
-	block, err := database.BlockByPoint(db, point)
+	block, err := database.BlockByPoint(ctx, db, point)
 	if err != nil {
 		return fmt.Errorf(
 			"stable ledger state point %d.%x is not present in certified ImmutableDB: %w",
@@ -65,10 +66,12 @@ func setStableMithrilLedgerTip(
 	// from the same certified immutable block while keeping the metadata
 	// cursor at the stable point; otherwise envelope validation would compare
 	// the first replayed block against a synthetic block number zero.
-	if err := db.SetTip(ochainsync.Tip{
-		Point:       point,
-		BlockNumber: block.Number,
-	}, nil); err != nil {
+	if err := db.MetadataTxn(ctx, true).Do(func(txn *database.Txn) error {
+		return db.SetTip(ochainsync.Tip{
+			Point:       point,
+			BlockNumber: block.Number,
+		}, txn)
+	}); err != nil {
 		return fmt.Errorf(
 			"recording stable Mithril anchor block number: %w",
 			err,
@@ -105,6 +108,7 @@ func verifyRewardRepairStateNotBehindStablePoint(
 }
 
 func cleanupInvalidRepairStoredGapBeforeImport(
+	ctx context.Context,
 	db *database.Database,
 	certifiedTip ocommon.Point,
 	prepared *preparedLedgerStateImport,
@@ -115,7 +119,7 @@ func cleanupInvalidRepairStoredGapBeforeImport(
 	if stateTip.Slot <= certifiedTip.Slot {
 		return false, nil
 	}
-	recent, err := database.BlocksRecent(db, 1)
+	recent, err := database.BlocksRecent(ctx, db, 1)
 	if err != nil {
 		return false, fmt.Errorf("reading local chain tip for repair gap: %w", err)
 	}
@@ -131,7 +135,7 @@ func cleanupInvalidRepairStoredGapBeforeImport(
 	if err != nil {
 		return false, fmt.Errorf("loading stored repair gap before import: %w", err)
 	}
-	immutableTip, err := database.BlockByPoint(db, certifiedTip)
+	immutableTip, err := database.BlockByPoint(ctx, db, certifiedTip)
 	if err != nil {
 		return false, fmt.Errorf("reading certified tip for repair gap: %w", err)
 	}
@@ -161,6 +165,7 @@ func cleanupInvalidRepairStoredGapBeforeImport(
 		"error", validateErr,
 	)
 	if err := deleteBlobBlocksAboveSlotExcept(
+		ctx,
 		db,
 		certifiedTip.Slot,
 		preservedLocalTail,
@@ -171,6 +176,7 @@ func cleanupInvalidRepairStoredGapBeforeImport(
 }
 
 func verifyRewardRepairLocalTail(
+	ctx context.Context,
 	db *database.Database,
 	localTip models.Block,
 	prepared *preparedLedgerStateImport,
@@ -195,7 +201,7 @@ func verifyRewardRepairLocalTail(
 	var anchorHash []byte
 	if anchorHashText == "" {
 		anchorBlock, found, blockErr := localChainBlockAtSlot(
-			db, localTip, anchorSlot,
+			ctx, db, localTip, anchorSlot,
 		)
 		if blockErr != nil {
 			return nil, fmt.Errorf(
@@ -231,6 +237,7 @@ func verifyRewardRepairLocalTail(
 		)
 	}
 	oldAnchorOnLocalChain, err := localChainDescendsFromPoint(
+		ctx,
 		db,
 		localTip,
 		anchorPoint,
@@ -254,7 +261,7 @@ func verifyRewardRepairLocalTail(
 	}
 	statePoint := ocommon.NewPoint(stateTip.Slot, stateTip.BlockHash)
 	localTail, stateOnLocalChain, err := localChainBlockHashesAfterPoint(
-		db, localTip, statePoint,
+		ctx, db, localTip, statePoint,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("validating reward-repair snapshot ancestry: %w", err)
@@ -296,7 +303,10 @@ const (
 // determineSyncMode classifies the database state for Sync dispatch. It only
 // reads sync_status and whether any blocks are present; it does not contact the
 // aggregator or compare artifacts.
-func determineSyncMode(db *database.Database) (syncMode, error) {
+func determineSyncMode(
+	ctx context.Context,
+	db *database.Database,
+) (syncMode, error) {
 	status, err := db.GetSyncState("sync_status", nil)
 	if err != nil {
 		return syncModeBootstrap, fmt.Errorf("reading sync_status: %w", err)
@@ -306,7 +316,7 @@ func determineSyncMode(db *database.Database) (syncMode, error) {
 	}
 	// sync_status is clear: distinguish a fresh database (no blocks) from a
 	// completed one (has blocks).
-	recent, err := database.BlocksRecent(db, 1)
+	recent, err := database.BlocksRecent(ctx, db, 1)
 	if err != nil {
 		return syncModeBootstrap, fmt.Errorf("reading chain tip: %w", err)
 	}
@@ -733,7 +743,7 @@ func Sync(
 	// reconciliation path over the full artifact range.
 	catchUp := false
 	var catchUpStart uint64
-	mode, modeErr := determineSyncMode(db)
+	mode, modeErr := determineSyncMode(ctx, db)
 	if modeErr != nil {
 		return SyncResult{}, fmt.Errorf("determining sync mode: %w", modeErr)
 	}
@@ -861,7 +871,7 @@ func Sync(
 	// copy that contiguous prefix into the blob store while later chunks are
 	// still downloading. The sequencer drives this from a single in-order
 	// consumer goroutine, so the closure needs no locking.
-	copyCm, err := chain.NewManager(db, nil)
+	copyCm, err := chain.NewManager(ctx, db, nil)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("loading chain manager: %w", err)
 	}
@@ -1094,7 +1104,7 @@ func Sync(
 	// markSyncInProgress so an aborted catch-up does not mark a healthy
 	// database incomplete.
 	if catchUp {
-		recent, recentErr := database.BlocksRecent(db, 1)
+		recent, recentErr := database.BlocksRecent(ctx, db, 1)
 		if recentErr != nil {
 			return SyncResult{}, fmt.Errorf("reading local chain tip: %w", recentErr)
 		}
@@ -1110,6 +1120,7 @@ func Sync(
 		// also continue after a verified local-ahead result, but only after the
 		// selected ledger state passes the trust and ancestry checks below.
 		upToDate, interErr := verifyCatchupBeforeImport(
+			ctx,
 			db, certifiedImmutable, targetImmutable,
 			mode == syncModeResume || cfg.RepairLegacyRewardState,
 			logger,
@@ -1153,7 +1164,7 @@ func Sync(
 			}
 			if localTip.Slot > certifiedTip.Slot {
 				preservedLocalTail, err = verifyRewardRepairLocalTail(
-					db, localTip, preparedRepairImport,
+					ctx, db, localTip, preparedRepairImport,
 				)
 				if err != nil {
 					return SyncResult{}, err
@@ -1175,7 +1186,7 @@ func Sync(
 		// The import is about to mutate the database. Record the catch-up so
 		// an interrupted run resumes with catch-up semantics (reconcile)
 		// instead of a plain bootstrap — a markerless catch-up leaves no
-		// other trace. Wiped by ClearSyncState on completion.
+		// other trace. Deleted by completion cleanup.
 		if err := setCatchUpActive(db); err != nil {
 			return SyncResult{}, err
 		}
@@ -1216,6 +1227,7 @@ func Sync(
 	repairGapCleanedBeforeImport := false
 	if preparedRepairImport != nil {
 		repairGapCleanedBeforeImport, err = cleanupInvalidRepairStoredGapBeforeImport(
+			ctx,
 			db,
 			*certifiedTip,
 			preparedRepairImport,
@@ -1382,6 +1394,7 @@ func Sync(
 			}
 		}
 		if err := db.RollbackMetadataAfterSlot(
+			ctx,
 			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
 			0,
 			nil,
@@ -1434,7 +1447,7 @@ func Sync(
 	// from a prior run when available, from a relay otherwise. Anything past
 	// the imported state's slot is left for ordinary node-startup replay, not
 	// fetched here.
-	recentBlocks, err := database.BlocksRecent(db, 1)
+	recentBlocks, err := database.BlocksRecent(ctx, db, 1)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("reading chain tip: %w", err)
 	}
@@ -1449,14 +1462,14 @@ func Sync(
 		// local chain after that point, including certified blocks, and remove
 		// same-range fork blobs before ordinary ledger replay sees them.
 		if cleanupErr := deleteBlobBlocksAboveSlotExcept(
-			db, ledgerStateSlot, preservedLocalTail,
+			ctx, db, ledgerStateSlot, preservedLocalTail,
 		); cleanupErr != nil {
 			return SyncResult{}, fmt.Errorf(
 				"removing non-canonical blocks above reward-repair state slot %d: %w",
 				ledgerStateSlot, cleanupErr,
 			)
 		}
-		recentBlocks, err = database.BlocksRecent(db, 1)
+		recentBlocks, err = database.BlocksRecent(ctx, db, 1)
 		if err != nil {
 			return SyncResult{}, fmt.Errorf(
 				"reading chain tip after reward-repair tail cleanup: %w",
@@ -1479,6 +1492,7 @@ func Sync(
 			"ledger_state_slot", ledgerStateSlot,
 		)
 		if cleanupErr := deleteBlobBlocksAboveSlotExcept(
+			ctx,
 			db, immutableTipSlot,
 			preservedLocalTail,
 		); cleanupErr != nil {
@@ -1487,7 +1501,7 @@ func Sync(
 				immutableTipSlot, cleanupErr,
 			)
 		}
-		recentBlocks, err = database.BlocksRecent(db, 1)
+		recentBlocks, err = database.BlocksRecent(ctx, db, 1)
 		if err != nil {
 			return SyncResult{}, fmt.Errorf(
 				"reading chain tip after stale volatile cleanup: %w",
@@ -1519,6 +1533,7 @@ func Sync(
 			)
 		}
 		immutableTip, err := database.BlockBeforeSlot(
+			ctx,
 			db,
 			immutableTipSlot+1,
 		)
@@ -1573,6 +1588,7 @@ func Sync(
 			// resurface them as the chain tip after the relay refetch.
 			if !repairGapCleanedBeforeImport {
 				if cleanupErr := deleteBlobBlocksAboveSlotExcept(
+					ctx,
 					db, immutableTipSlot,
 					preservedLocalTail,
 				); cleanupErr != nil {
@@ -1593,6 +1609,7 @@ func Sync(
 					"resume_gap_end_slot", resumeGapEnd,
 				)
 				if cleanupErr := deleteBlobBlocksAboveSlotExcept(
+					ctx,
 					db, resumeGapEnd,
 					preservedLocalTail,
 				); cleanupErr != nil {
@@ -1624,7 +1641,7 @@ func Sync(
 					err,
 				)
 			}
-			recentBlocks, err = database.BlocksRecent(db, 1)
+			recentBlocks, err = database.BlocksRecent(ctx, db, 1)
 			if err != nil {
 				return SyncResult{}, fmt.Errorf(
 					"reading chain tip after gap resume: %w",
@@ -1700,6 +1717,7 @@ func Sync(
 	// case the block was always already present, so moving the call later
 	// changes nothing about when the point becomes visible.
 	if err := setStableMithrilLedgerTip(
+		ctx,
 		db,
 		ledgerStateSlot,
 		ledgerStateHash,
@@ -1708,6 +1726,7 @@ func Sync(
 	}
 	if isAPIMode(cfg.StorageMode) {
 		if err := updateMithrilReadyState(
+			ctx,
 			db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
 			syncStatusBackfill, false,
 		); err != nil {
@@ -1802,6 +1821,7 @@ func Sync(
 	}
 
 	if err := updateMithrilReadyState(
+		ctx,
 		db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
 		"", true,
 	); err != nil {
@@ -1884,7 +1904,7 @@ func NeedsSync(cfg SyncConfig) (bool, error) {
 		// the key) both report "". Distinguish them by chain presence — a
 		// completed sync has stored blocks while a fresh database has none, so
 		// an empty database still needs a sync.
-		recent, err := database.BlocksRecent(db, 1)
+		recent, err := database.BlocksRecent(context.Background(), db, 1)
 		if err != nil {
 			return false, fmt.Errorf("checking chain data: %w", err)
 		}

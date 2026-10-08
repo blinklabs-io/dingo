@@ -504,25 +504,46 @@ func TestHardForkEpoch(t *testing.T) {
 		}
 	})
 
-	t.Run("disabled ignores all epochs", func(t *testing.T) {
-		cfg := &CardanoNodeConfig{
-			ExperimentalHardForksEnabled: new(false),
-			TestShelleyHardForkAtEpoch:   ptrUint64(0),
-			TestConwayHardForkAtEpoch:    ptrUint64(0),
-		}
-		_, ok := cfg.HardForkEpoch("shelley")
-		assert.False(t, ok,
-			"should not report configured when disabled")
-	})
+	// cardano-node's parseHardForkProtocol reads TestShelley..Conway
+	// HardForkAtEpoch unconditionally and only reads the Dijkstra override
+	// when ExperimentalHardForksEnabled is set.
+	for _, flag := range []struct {
+		name string
+		val  *bool
+	}{
+		{"flag unset", nil},
+		{"flag false", new(false)},
+	} {
+		t.Run(flag.name+" still schedules Shelley through Conway", func(t *testing.T) {
+			cfg := &CardanoNodeConfig{
+				ExperimentalHardForksEnabled: flag.val,
+				TestShelleyHardForkAtEpoch:   ptrUint64(1),
+				TestAllegraHardForkAtEpoch:   ptrUint64(2),
+				TestMaryHardForkAtEpoch:      ptrUint64(3),
+				TestAlonzoHardForkAtEpoch:    ptrUint64(4),
+				TestBabbageHardForkAtEpoch:   ptrUint64(5),
+				TestConwayHardForkAtEpoch:    ptrUint64(6),
+			}
+			for want, era := range []string{
+				"shelley", "allegra", "mary",
+				"alonzo", "babbage", "conway",
+			} {
+				epoch, ok := cfg.HardForkEpoch(era)
+				assert.True(t, ok, "era %s should be scheduled", era)
+				assert.Equal(t, uint64(want+1), epoch, "era %s", era)
+			}
+		})
 
-	t.Run("nil flag ignores all epochs", func(t *testing.T) {
-		cfg := &CardanoNodeConfig{
-			TestShelleyHardForkAtEpoch: ptrUint64(0),
-		}
-		_, ok := cfg.HardForkEpoch("shelley")
-		assert.False(t, ok,
-			"should not report configured when flag is nil")
-	})
+		t.Run(flag.name+" does not schedule Dijkstra", func(t *testing.T) {
+			cfg := &CardanoNodeConfig{
+				ExperimentalHardForksEnabled: flag.val,
+				TestDijkstraHardForkAtEpoch:  ptrUint64(0),
+			}
+			_, ok := cfg.HardForkEpoch("dijkstra")
+			assert.False(t, ok,
+				"Dijkstra must require ExperimentalHardForksEnabled")
+		})
+	}
 
 	t.Run("partial configuration", func(t *testing.T) {
 		cfg := &CardanoNodeConfig{
@@ -631,28 +652,38 @@ func TestCanonicalizeByronGenesisJSON(t *testing.T) {
 // TestDeclaredVersusScheduledHardForkEpoch pins the distinction between the two
 // questions the TestXHardForkAtEpoch fields answer.
 //
-// preview ships TestShelleyHardForkAtEpoch: 0 with
-// ExperimentalHardForksEnabled: False, so a caller that needs to know whether
-// the network begins after Byron cannot use HardForkEpoch -- it reports nothing
-// scheduled, correctly, because cardano-node does not honour the override
-// without the flag. DeclaredHardForkEpoch reports what the file says.
+// cardano-node honours TestShelley..ConwayHardForkAtEpoch whatever
+// ExperimentalHardForksEnabled says, so for those eras the declaration is the
+// schedule. Only TestDijkstraHardForkAtEpoch is ignored without the flag, so
+// that is the one field whose declaration and schedule can differ.
 func TestDeclaredVersusScheduledHardForkEpoch(t *testing.T) {
 	t.Parallel()
 
 	t.Run("declared with the flag off", func(t *testing.T) {
 		cfg := &CardanoNodeConfig{
-			TestShelleyHardForkAtEpoch: new(uint64),
+			TestShelleyHardForkAtEpoch:  new(uint64),
+			TestDijkstraHardForkAtEpoch: new(uint64),
 		}
 
 		epoch, declared := cfg.DeclaredHardForkEpoch("shelley")
 		require.True(t, declared, "the declaration must be visible")
 		require.Equal(t, uint64(0), epoch)
 
-		_, scheduled := cfg.HardForkEpoch("shelley")
+		epoch, scheduled := cfg.HardForkEpoch("shelley")
+		require.True(
+			t,
+			scheduled,
+			"Shelley is scheduled without ExperimentalHardForksEnabled",
+		)
+		require.Equal(t, uint64(0), epoch)
+
+		_, declared = cfg.DeclaredHardForkEpoch("dijkstra")
+		require.True(t, declared, "the declaration must be visible")
+		_, scheduled = cfg.HardForkEpoch("dijkstra")
 		require.False(
 			t,
 			scheduled,
-			"nothing is scheduled without ExperimentalHardForksEnabled",
+			"Dijkstra is not scheduled without ExperimentalHardForksEnabled",
 		)
 	})
 
