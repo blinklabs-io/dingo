@@ -24,6 +24,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
+	sync "github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
 )
 
 type fakeDumpHistoryIter struct {
@@ -95,6 +96,7 @@ func TestCollectDumpHistoryPage_FullPageHasNextToken(t *testing.T) {
 		&fakeDumpHistoryIter{queue: queue},
 		2,
 		DefaultMaxHistoryItems,
+		DefaultMaxResponseBytes,
 	)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
@@ -125,6 +127,7 @@ func TestCollectDumpHistoryPage_PartialPageNoNextToken(t *testing.T) {
 		&fakeDumpHistoryIter{queue: queue},
 		10,
 		DefaultMaxHistoryItems,
+		DefaultMaxResponseBytes,
 	)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
@@ -155,6 +158,7 @@ func TestCollectDumpHistoryPage_MaxAllowedZeroReturnsEmpty(t *testing.T) {
 		&fakeDumpHistoryIter{queue: queue},
 		0,
 		0,
+		DefaultMaxResponseBytes,
 	)
 	require.NoError(t, err)
 	require.Empty(t, out)
@@ -177,6 +181,7 @@ func TestCollectDumpHistoryPage_OmittedMaxItemsUsesMaxAllowed(t *testing.T) {
 		&fakeDumpHistoryIter{queue: queue},
 		0,
 		DefaultMaxHistoryItems,
+		DefaultMaxResponseBytes,
 	)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
@@ -207,10 +212,56 @@ func TestCollectDumpHistoryPage_SkipsRollback(t *testing.T) {
 		&fakeDumpHistoryIter{queue: queue},
 		2,
 		DefaultMaxHistoryItems,
+		DefaultMaxResponseBytes,
 	)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
 	require.False(t, hasMore)
+}
+
+func TestCollectDumpHistoryPage_ResponseByteBudget(t *testing.T) {
+	t.Parallel()
+	blocks := loadTestChainBlocks(t, 3)
+	queue := func() []*chain.ChainIteratorResult {
+		ret := make([]*chain.ChainIteratorResult, len(blocks))
+		for i := range blocks {
+			ret[i] = &chain.ChainIteratorResult{Block: blocks[i]}
+		}
+		return ret
+	}
+	collect := func(maxBytes int64) (
+		[]*sync.AnyChainBlock,
+		*models.Block,
+		bool,
+	) {
+		out, last, hasMore, err := collectDumpHistoryPage(
+			context.Background(),
+			&fakeDumpHistoryIter{queue: queue()},
+			3,
+			DefaultMaxHistoryItems,
+			maxBytes,
+		)
+		require.NoError(t, err)
+		return out, last, hasMore
+	}
+
+	twoBlocks := int64(len(blocks[0].Cbor) + len(blocks[1].Cbor))
+	out, last, hasMore := collect(twoBlocks)
+	require.Equal(t, 2, len(out),
+		"the page must stop at its response byte budget")
+	require.True(t, hasMore)
+	require.Equal(t, blocks[1].Hash, last.Hash)
+
+	out, last, hasMore = collect(twoBlocks - 1)
+	require.Equal(t, 1, len(out),
+		"one byte short must exclude the second block")
+	require.True(t, hasMore)
+	require.Equal(t, blocks[0].Hash, last.Hash)
+
+	out, last, hasMore = collect(1)
+	require.Equal(t, 1, len(out), "the first block always makes progress")
+	require.True(t, hasMore)
+	require.Equal(t, blocks[0].Hash, last.Hash)
 }
 
 func TestSyncBlockRefFromModel_CopiesHash(t *testing.T) {

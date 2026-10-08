@@ -49,11 +49,13 @@ func collectDumpHistoryPage(
 	iter dumpHistoryIterator,
 	maxItems uint32,
 	maxAllowed uint32,
+	maxBytes int64,
 ) (out []*sync.AnyChainBlock, lastModel *models.Block, hasMore bool, err error) {
 	maxItems = effectiveDumpHistoryMaxItems(maxItems, maxAllowed)
 	if maxItems == 0 {
 		return nil, nil, false, nil
 	}
+	budget := byteBudget{limit: maxBytes}
 	for len(out) < int(maxItems) {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, false, err
@@ -71,6 +73,10 @@ func collectDumpHistoryPage(
 		if next.Rollback {
 			continue
 		}
+		if !budget.fits(len(next.Block.Cbor)) {
+			return out, lastModel, true, nil
+		}
+		budget.add(len(next.Block.Cbor))
 		acb, err := anyChainBlockFromModel(next.Block)
 		if err != nil {
 			return nil, nil, false, err

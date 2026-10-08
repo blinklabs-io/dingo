@@ -169,6 +169,7 @@ func (s *syncServiceServer) DumpHistory(
 		chainIter,
 		maxItems,
 		maxAllowed,
+		s.utxorpc.config.MaxResponseBytes,
 	)
 	if err != nil {
 		return nil, err
