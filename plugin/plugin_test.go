@@ -370,7 +370,7 @@ func TestApplyEnvironmentReadsFileBackedConfig(t *testing.T) {
 		"DINGO_PLUGINS_API_MCP_CONFIG_PASSWORD_FILE=" + passwordPath,
 	})
 	require.NoError(t, err)
-	// File contents are taken verbatim as a string, never parsed as YAML.
+	// File contents are not parsed as YAML; trailing line endings are stripped.
 	require.Equal(t, "00123:true secret", selection.Config["authToken"])
 	require.Equal(t, "from-file", selection.Config["password"])
 	require.NotContains(t, selection.Config, "authTokenFile")
@@ -395,6 +395,21 @@ func TestApplyEnvironmentRejectsLiteralAndFileForSameField(t *testing.T) {
 		)
 		require.ErrorContains(t, err, "_FILE")
 	}
+}
+
+func TestApplyEnvironmentEmptyFilePathMatchesEmptyLiteral(t *testing.T) {
+	apply := func(entry string) map[string]any {
+		selection := Selection{Config: map[string]any{"password": "yaml"}}
+		require.NoError(t, ApplyEnvironment(
+			CapabilityStorageMetadata,
+			&selection,
+			[]string{entry},
+		))
+		return selection.Config
+	}
+	literal := apply("DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD=")
+	file := apply("DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE=")
+	require.Equal(t, literal, file)
 }
 
 func TestApplyEnvironmentFileErrorNamesVariable(t *testing.T) {

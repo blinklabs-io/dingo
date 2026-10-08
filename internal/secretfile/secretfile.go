@@ -31,10 +31,21 @@ import (
 const MaxBytes = 64 << 10
 
 // Read returns the contents of the file at path with trailing line endings
-// removed. Errors never include the file's contents.
+// removed. The file must be a regular file whose contents are not entirely
+// whitespace. Errors never include the file's contents.
 func Read(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("value file path is empty")
+	}
+	// Stat before opening: opening a FIFO with no writer blocks, which would
+	// hang startup on a mistyped path. Stat follows symlinks, so mounted
+	// secrets that link to a regular file are accepted.
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("stat value file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("value file %s is not a regular file", path)
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -53,7 +64,7 @@ func Read(path string) (string, error) {
 		)
 	}
 	value := strings.TrimRight(string(buf), "\r\n")
-	if value == "" {
+	if strings.TrimSpace(value) == "" {
 		return "", fmt.Errorf("value file %s is empty", path)
 	}
 	return value, nil

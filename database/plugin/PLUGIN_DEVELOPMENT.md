@@ -82,9 +82,11 @@ DINGO_PLUGINS_STORAGE_BLOB_PROVIDER=example
 DINGO_PLUGINS_STORAGE_BLOB_CONFIG_BUCKET=blocks
 ```
 
-A `_FILE` suffix sets the field to the contents of a file instead, read
-verbatim as a string with trailing newlines removed, so a secret such as a
-password need not appear in the environment:
+A `_FILE` suffix sets the field to the contents of a file instead, so a secret
+such as a password need not appear in the environment. The contents are used
+as a plain string, never parsed as YAML, with trailing line endings removed.
+The file must be a regular file of at most 64 KiB whose contents are not
+blank; anything else fails configuration loading:
 
 ```text
 DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE=/run/secrets/db-password

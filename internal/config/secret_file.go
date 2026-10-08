@@ -17,14 +17,18 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/internal/secretfile"
 	"github.com/spf13/pflag"
+	"gopkg.in/yaml.v3"
 )
 
 // secretFileSetting pairs a literal secret with a file holding it. The two
 // are one setting: a source that sets either replaces both from every
 // lower-precedence source, and a single source setting both is an error.
+// Presence counts as set, even with an empty value: a YAML key, a defined
+// environment variable, or a flag passed on the command line.
 type secretFileSetting struct {
 	field, fileField string
 	yaml, fileYAML   string
@@ -45,24 +49,74 @@ var secretFileSettings = []secretFileSetting{
 	},
 }
 
+// checkSecretFileYAML rejects a YAML document that sets both forms of one
+// secret. The decoded Config cannot tell an absent key from an empty one, so
+// it inspects the document itself.
+func checkSecretFileYAML(buf []byte) error {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(buf, &doc); err != nil {
+		return nil //nolint:nilerr // the decoder reports parse errors
+	}
+	if len(doc.Content) == 0 {
+		return nil
+	}
+	root := doc.Content[0]
+	if configNode := mappingValue(root, "config"); configNode != nil {
+		root = configNode
+	}
+	for _, s := range secretFileSettings {
+		if yamlPathSet(root, s.yaml) && yamlPathSet(root, s.fileYAML) {
+			return fmt.Errorf(
+				"%s and %s are both set; set only one",
+				s.yaml,
+				s.fileYAML,
+			)
+		}
+	}
+	return nil
+}
+
+func yamlPathSet(node *yaml.Node, path string) bool {
+	for key := range strings.SplitSeq(path, ".") {
+		if node = mappingValue(node, key); node == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// configEnvSet mirrors envconfig.Process("cardano", ...) for the Config
+// field at dotted path field, tagged envconfig:"name". envconfig reads a
+// prefixed key first, built from CARDANO_ and each enclosing struct field's
+// name (CARDANO_KOIOSPARITY_<name> for KoiosParity.APIKey), then name itself.
+func configEnvSet(field, name string) bool {
+	parts := strings.Split(field, ".")
+	prefixed := append([]string{"CARDANO"}, parts[:len(parts)-1]...)
+	key := strings.ToUpper(strings.Join(append(prefixed, name), "_"))
+	if _, ok := os.LookupEnv(key); ok {
+		return true
+	}
+	_, ok := os.LookupEnv(name)
+	return ok
+}
+
 // applySecretFileEnvironment runs after envconfig has merged the
 // environment over YAML. envconfig sets each variable independently, so an
-// environment value would otherwise sit beside the other form from YAML. An
-// empty variable clears only its own field, as envconfig already did.
+// environment value would otherwise sit beside the other form from YAML.
 func applySecretFileEnvironment(cfg *Config) error {
 	for _, s := range secretFileSettings {
-		value := os.Getenv(s.env)
-		file := os.Getenv(s.fileEnv)
+		valueSet := configEnvSet(s.field, s.env)
+		fileSet := configEnvSet(s.fileField, s.fileEnv)
 		switch {
-		case value != "" && file != "":
+		case valueSet && fileSet:
 			return fmt.Errorf(
 				"%s and %s are both set; set only one",
 				s.env,
 				s.fileEnv,
 			)
-		case file != "":
+		case fileSet:
 			targetValue(cfg, s.field).SetString("")
-		case value != "":
+		case valueSet:
 			targetValue(cfg, s.fileField).SetString("")
 		}
 	}

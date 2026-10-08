@@ -237,3 +237,16 @@ func TestWriteParityReportJoinsWriteAndCloseErrors(t *testing.T) {
 	require.ErrorContains(t, err, "write report")
 	require.ErrorContains(t, err, "close report file")
 }
+
+// TestRunCommandReportOnlyReadsNoSecretFiles: with both phases skipped,
+// nothing uses the API key or the DSN, so their files must not be read.
+func TestRunCommandReportOnlyReadsNoSecretFiles(t *testing.T) {
+	withGlobalFlags(t, "preview", filepath.Join(t.TempDir(), "cache.db"))
+	cmd := newRunTestCmd(t)
+	missing := filepath.Join(t.TempDir(), "missing")
+	require.NoError(t, cmd.Flags().Set("report-dir", t.TempDir()))
+	require.NoError(t, cmd.Flags().Set("api-key-file", missing))
+	require.NoError(t, cmd.Flags().Set("metadata-dsn-file", missing))
+
+	require.NoError(t, runCommand(cmd, nil))
+}

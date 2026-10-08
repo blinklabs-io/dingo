@@ -427,17 +427,21 @@ func addAPIKeyFlags(cmd *cobra.Command) {
 
 // koiosAPIKey returns the Koios Bearer token. Flags win over the
 // environment; within one source, the literal and file forms are exclusive.
+// A passed flag or defined variable counts as set even when empty, and an
+// empty file path selects no token.
 func koiosAPIKey(cmd *cobra.Command) (string, error) {
-	key, _ := cmd.Flags().GetString("api-key")
-	file, _ := cmd.Flags().GetString("api-key-file")
+	flags := cmd.Flags()
+	key, _ := flags.GetString("api-key")
+	file, _ := flags.GetString("api-key-file")
+	keySet, fileSet := flags.Changed("api-key"), flags.Changed("api-key-file")
 	keyName, fileName := "--api-key", "--api-key-file"
-	if key == "" && file == "" {
-		key = os.Getenv("KOIOS_API_KEY")
-		file = os.Getenv("KOIOS_API_KEY_FILE")
+	if !keySet && !fileSet {
+		key, keySet = os.LookupEnv("KOIOS_API_KEY")
+		file, fileSet = os.LookupEnv("KOIOS_API_KEY_FILE")
 		keyName, fileName = "KOIOS_API_KEY", "KOIOS_API_KEY_FILE"
 	}
 	switch {
-	case key != "" && file != "":
+	case keySet && fileSet:
 		return "", fmt.Errorf(
 			"%s and %s are both set; set only one",
 			keyName,
@@ -599,18 +603,21 @@ func addDingoDBFlags(cmd *cobra.Command) {
 func resolveDingoDB(cmd *cobra.Command) (koiosparity.DingoDBConfig, error) {
 	plugin, _ := cmd.Flags().GetString("metadata-plugin")
 	dsn, _ := cmd.Flags().GetString("metadata-dsn")
-	if dsnFile, _ := cmd.Flags().GetString("metadata-dsn-file"); dsnFile != "" {
-		if dsn != "" {
+	if cmd.Flags().Changed("metadata-dsn-file") {
+		if cmd.Flags().Changed("metadata-dsn") {
 			return koiosparity.DingoDBConfig{}, errors.New(
 				"--metadata-dsn and --metadata-dsn-file are both set; set only one",
 			)
 		}
-		var err error
-		if dsn, err = secretfile.Read(dsnFile); err != nil {
-			return koiosparity.DingoDBConfig{}, fmt.Errorf(
-				"--metadata-dsn-file: %w",
-				err,
-			)
+		dsnFile, _ := cmd.Flags().GetString("metadata-dsn-file")
+		if dsnFile != "" {
+			var err error
+			if dsn, err = secretfile.Read(dsnFile); err != nil {
+				return koiosparity.DingoDBConfig{}, fmt.Errorf(
+					"--metadata-dsn-file: %w",
+					err,
+				)
+			}
 		}
 	}
 

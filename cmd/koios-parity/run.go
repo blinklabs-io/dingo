@@ -65,17 +65,26 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	reportDir, _ := cmd.Flags().GetString("report-dir")
-	apiKey, err := koiosAPIKey(cmd)
-	if err != nil {
-		return err
-	}
 
 	logger := slog.Default()
 	ctx := cmd.Context()
 
 	accounts := accountsEnabled(cmd)
 
+	// Resolved once, and only when a phase opens the database, so both
+	// phases see the same DSN and a report-only run reads no secret.
+	var dingoDB koiosparity.DingoDBConfig
+	if (!skipFetch && accounts) || !skipCheck {
+		if dingoDB, err = resolveDingoDB(cmd); err != nil {
+			return err
+		}
+	}
+
 	if !skipFetch {
+		apiKey, err := koiosAPIKey(cmd)
+		if err != nil {
+			return err
+		}
 		var accountsSource koiosparity.RewardParitySource
 		if accounts {
 			// See fetchRun's identical comment: only opened when --accounts
@@ -83,10 +92,6 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 			// call to Dingo's own API. Scoped to the fetch phase itself (not
 			// opened at all for a report-only run with both phases skipped)
 			// — the check phase below opens its own DingoDB when it runs.
-			dingoDB, err := resolveDingoDB(cmd)
-			if err != nil {
-				return err
-			}
 			dingo, dingoErr := koiosparity.OpenDingoDB(dingoDB)
 			if dingoErr != nil {
 				return fmt.Errorf(
@@ -132,10 +137,6 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 
 	if !skipCheck {
 		slog.Info("koios-parity: check phase starting", "network", network)
-		dingoDB, err := resolveDingoDB(cmd)
-		if err != nil {
-			return err
-		}
 		if _, err := koiosparity.Check(ctx, koiosparity.CheckConfig{
 			Network:         network,
 			DingoDB:         dingoDB,

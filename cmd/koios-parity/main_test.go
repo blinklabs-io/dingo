@@ -317,6 +317,28 @@ func TestKoiosAPIKeySources(t *testing.T) {
 			want:  "flag",
 		},
 		{
+			name:  "empty flag file beats env literal",
+			flags: map[string]string{"api-key-file": ""},
+			env:   map[string]string{"KOIOS_API_KEY": "env"},
+			want:  "",
+		},
+		{
+			name: "empty flag literal and file",
+			flags: map[string]string{
+				"api-key":      "",
+				"api-key-file": flagFile,
+			},
+			wantErr: "--api-key-file",
+		},
+		{
+			name: "empty env literal and file",
+			env: map[string]string{
+				"KOIOS_API_KEY":      "",
+				"KOIOS_API_KEY_FILE": envFile,
+			},
+			wantErr: "KOIOS_API_KEY_FILE",
+		},
+		{
 			name: "both flags",
 			flags: map[string]string{
 				"api-key":      "flag",
@@ -341,8 +363,13 @@ func TestKoiosAPIKeySources(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("KOIOS_API_KEY", "")
-			t.Setenv("KOIOS_API_KEY_FILE", "")
+			for _, name := range []string{
+				"KOIOS_API_KEY",
+				"KOIOS_API_KEY_FILE",
+			} {
+				t.Setenv(name, "")
+				require.NoError(t, os.Unsetenv(name))
+			}
 			for name, value := range tc.env {
 				t.Setenv(name, value)
 			}
@@ -396,6 +423,14 @@ func TestResolveDingoDBMetadataDSNFile(t *testing.T) {
 			name: "both",
 			flags: map[string]string{
 				"metadata-dsn":      "postgres://literal",
+				"metadata-dsn-file": dsnFile,
+			},
+			wantErr: "--metadata-dsn-file",
+		},
+		{
+			name: "empty literal and file",
+			flags: map[string]string{
+				"metadata-dsn":      "",
 				"metadata-dsn-file": dsnFile,
 			},
 			wantErr: "--metadata-dsn-file",

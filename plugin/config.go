@@ -41,9 +41,10 @@ func EnvironmentPrefix(capability Capability) string {
 // selection. CLI provider selectors are intentionally applied by composition
 // after this function, giving selector CLI > environment > YAML precedence.
 //
-// A CONFIG_<FIELD>_FILE entry sets <FIELD> to the contents of the named file,
-// taken verbatim as a string, so a secret such as a password need not appear
-// in the environment. Setting both forms of one field is an error.
+// A CONFIG_<FIELD>_FILE entry sets <FIELD> to the contents of the named file
+// (see secretfile.Read), so a secret such as a password need not appear in
+// the environment. The contents are a plain string, never parsed as YAML.
+// Setting both forms of one field is an error.
 func ApplyEnvironment(
 	capability Capability,
 	selection *Selection,
@@ -97,7 +98,9 @@ func ApplyEnvironment(
 			}
 			setBy[field] = name
 			var scalar any
-			if fileBacked {
+			// An empty path is treated like an empty literal, which
+			// clears the field, so presence means the same in both forms.
+			if fileBacked && value != "" {
 				contents, err := secretfile.Read(value)
 				if err != nil {
 					return fmt.Errorf("read %s: %w", name, err)

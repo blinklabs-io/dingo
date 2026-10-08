@@ -26,6 +26,7 @@ import (
 const (
 	koiosAPIKeyEnv     = "DINGO_KOIOS_PARITY_API_KEY"
 	koiosAPIKeyFileEnv = "DINGO_KOIOS_PARITY_API_KEY_FILE"
+	koiosEnvPrefix     = "CARDANO_KOIOSPARITY_"
 )
 
 // resolveKoiosAPIKey runs the cmd/dingo merge order -- YAML, environment,
@@ -39,7 +40,13 @@ func resolveKoiosAPIKey(
 	t.Helper()
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
-	for _, name := range []string{koiosAPIKeyEnv, koiosAPIKeyFileEnv} {
+	// envconfig reads the struct-prefixed spelling before the bare one.
+	for _, name := range []string{
+		koiosAPIKeyEnv,
+		koiosAPIKeyFileEnv,
+		koiosEnvPrefix + koiosAPIKeyEnv,
+		koiosEnvPrefix + koiosAPIKeyFileEnv,
+	} {
 		t.Setenv(name, "")
 		require.NoError(t, os.Unsetenv(name))
 	}
@@ -115,6 +122,49 @@ func TestKoiosParityAPIKeyFilePrecedence(t *testing.T) {
 				koiosAPIKeyFileEnv: envFile,
 			},
 			wantErr: koiosAPIKeyFileEnv,
+		},
+		{
+			name: "prefixed env file replaces yaml literal",
+			yaml: koios("  apiKey: yaml\n"),
+			env: map[string]string{
+				koiosEnvPrefix + koiosAPIKeyFileEnv: envFile,
+			},
+			want: "env-file",
+		},
+		{
+			name: "empty env literal replaces yaml file",
+			yaml: koios("  apiKeyFile: " + yamlFile + "\n"),
+			env:  map[string]string{koiosAPIKeyEnv: ""},
+			want: "",
+		},
+		{
+			name: "empty env literal and file",
+			env: map[string]string{
+				koiosAPIKeyEnv:     "",
+				koiosAPIKeyFileEnv: envFile,
+			},
+			wantErr: koiosAPIKeyFileEnv,
+		},
+		{
+			name: "yaml empty literal and file",
+			yaml: koios(
+				"  apiKey: \"\"\n  apiKeyFile: " + yamlFile + "\n",
+			),
+			wantErr: "koiosParity.apiKeyFile",
+		},
+		{
+			name: "wrapped yaml literal and file",
+			yaml: "config:\n" + "  koiosParity:\n" +
+				"    apiKey: yaml\n    apiKeyFile: " + yamlFile + "\n",
+			wantErr: "koiosParity.apiKeyFile",
+		},
+		{
+			name: "empty flag literal and file",
+			args: []string{
+				"--koios-parity-api-key=",
+				"--koios-parity-api-key-file=" + flagFile,
+			},
+			wantErr: "--koios-parity-api-key-file",
 		},
 		{
 			name: "flag literal replaces env file",

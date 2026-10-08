@@ -62,7 +62,7 @@ func TestReadStripsTrailingLineEndings(t *testing.T) {
 
 func TestReadRejectsEmptyValue(t *testing.T) {
 	t.Parallel()
-	for _, content := range []string{"", "\n", "\r\n"} {
+	for _, content := range []string{"", "\n", "\r\n", " \t \n"} {
 		if _, err := Read(writeFile(t, content)); err == nil {
 			t.Fatalf("Read(%q): expected error for empty value", content)
 		}
@@ -100,5 +100,13 @@ func TestReadRejectsEmptyPathAndMissingFile(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	if _, err := Read(missing); err == nil {
 		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestReadRejectsNonRegularFile(t *testing.T) {
+	t.Parallel()
+	_, err := Read(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("Read(directory) error = %v", err)
 	}
 }

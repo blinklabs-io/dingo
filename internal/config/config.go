@@ -1531,6 +1531,9 @@ func LoadConfig(configFile string) (*Config, error) {
 			return nil, fmt.Errorf("error reading config file: %w", err)
 		}
 		midnightYAMLFields = collectMidnightYAMLFields(buf)
+		if err := checkSecretFileYAML(buf); err != nil {
+			return nil, fmt.Errorf("config file %s: %w", configFile, err)
+		}
 
 		var root map[string]yaml.Node
 		if err := yaml.Unmarshal(buf, &root); err != nil {

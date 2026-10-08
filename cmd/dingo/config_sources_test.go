@@ -27,10 +27,14 @@ import (
 func TestMergeConfigSourcesReadsSecretFiles(t *testing.T) {
 	// Not t.Parallel: LoadConfig and ApplyFlags publish process-global
 	// configuration and t.Setenv changes the environment.
+	previous := config.GetConfig()
+	t.Cleanup(func() { config.PublishConfig(previous) })
 	t.Setenv("HOME", t.TempDir())
 	for _, name := range []string{
 		"DINGO_KOIOS_PARITY_API_KEY",
 		"DINGO_KOIOS_PARITY_API_KEY_FILE",
+		"CARDANO_KOIOSPARITY_DINGO_KOIOS_PARITY_API_KEY",
+		"CARDANO_KOIOSPARITY_DINGO_KOIOS_PARITY_API_KEY_FILE",
 	} {
 		t.Setenv(name, "")
 		require.NoError(t, os.Unsetenv(name))
