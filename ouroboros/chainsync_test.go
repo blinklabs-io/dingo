@@ -3735,7 +3735,11 @@ func TestChainsyncServerFindIntersect_ServedActivityOnlyWhenServed(
 
 	o := newFindIntersectTestOuroboros(t)
 	var reports atomic.Int64
-	o.servedActivityHook = func(ouroboros.ConnectionId) { reports.Add(1) }
+	var reportedConnId ouroboros.ConnectionId
+	o.servedActivityHook = func(connId ouroboros.ConnectionId) {
+		reportedConnId = connId
+		reports.Add(1)
+	}
 	limiter := newChainsyncFindIntersectRateLimiter(200, 1000)
 
 	// Oversized point list: rejected before any lookup.
@@ -3755,16 +3759,18 @@ func TestChainsyncServerFindIntersect_ServedActivityOnlyWhenServed(
 	assert.Zero(t, reports.Load(), "a rejected request is not served activity")
 
 	// A served intersection is reported.
+	servedConnId := newTestConnId("127.0.0.1:6000", "1.1.1.2:3001")
 	_, _, err = o.chainsyncServerFindIntersect(
 		context.Background(),
 		limiter,
 		ochainsync.CallbackContext{
-			ConnectionId: newTestConnId("127.0.0.1:6000", "1.1.1.2:3001"),
+			ConnectionId: servedConnId,
 		},
 		[]ocommon.Point{ocommon.NewPointOrigin()},
 	)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), reports.Load())
+	assert.Equal(t, servedConnId, reportedConnId)
 }
 
 // TestChainsyncServerRequestNext_AddClientFailure verifies RequestNext returns
