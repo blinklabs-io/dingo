@@ -42,6 +42,7 @@ type watchTxLedgerStateProbe struct {
 }
 
 func (p *watchTxLedgerStateProbe) BlockByHash(
+	_ context.Context,
 	hash []byte,
 ) (models.Block, error) {
 	return p.blockByHash(hash)
@@ -124,7 +125,7 @@ func TestConnect_WatchTx_InHistoryRollbackSkipsPersistedFetch(t *testing.T) {
 		UtxorpcLedgerState: h.LS,
 		blockByHash: func(hash []byte) (models.Block, error) {
 			blockReads.Add(1)
-			return h.LS.BlockByHash(hash)
+			return h.LS.BlockByHash(context.Background(), hash)
 		},
 	}
 
@@ -138,13 +139,19 @@ func TestConnect_WatchTx_InHistoryRollbackSkipsPersistedFetch(t *testing.T) {
 		blocks[start].Slot,
 		blocks[start].Hash,
 	)
-	require.NoError(t, h.LS.Chain().Rollback(rollbackPoint))
+	require.NoError(
+		t,
+		h.LS.Chain().Rollback(context.Background(), rollbackPoint),
+	)
 	readded, err := gledger.NewBlockFromCbor(
 		blocks[start+1].Type,
 		blocks[start+1].Cbor,
 	)
 	require.NoError(t, err)
-	require.NoError(t, h.LS.Chain().AddBlock(readded, nil))
+	require.NoError(
+		t,
+		h.LS.Chain().AddBlock(context.Background(), readded, nil),
+	)
 	requireWatchTxIdle(t, stream)
 
 	require.Never(
@@ -218,7 +225,7 @@ func TestConnect_WatchTx_SequentialDeepRollbacksRetainCursor(t *testing.T) {
 			case bytes.Equal(hash, blocks[start-2].Hash):
 				return persistedWithTxPayload(blocks[start-2]), nil
 			default:
-				return h.LS.BlockByHash(hash)
+				return h.LS.BlockByHash(context.Background(), hash)
 			}
 		},
 	}
@@ -228,22 +235,31 @@ func TestConnect_WatchTx_SequentialDeepRollbacksRetainCursor(t *testing.T) {
 	stream := startWatchTxAt(t, ctx, h, blocks[start-1])
 	requireWatchTxIdle(t, stream)
 
-	require.NoError(t, h.LS.Chain().Rollback(ocommon.NewPoint(
-		blocks[start-2].Slot,
-		blocks[start-2].Hash,
-	)))
+	require.NoError(
+		t,
+		h.LS.Chain().Rollback(context.Background(), ocommon.NewPoint(
+			blocks[start-2].Slot,
+			blocks[start-2].Hash,
+		)),
+	)
 	requireWatchTxUndos(t, stream, undoCount)
 
-	require.NoError(t, h.LS.Chain().Rollback(ocommon.NewPoint(
-		blocks[start-3].Slot,
-		blocks[start-3].Hash,
-	)))
+	require.NoError(
+		t,
+		h.LS.Chain().Rollback(context.Background(), ocommon.NewPoint(
+			blocks[start-3].Slot,
+			blocks[start-3].Hash,
+		)),
+	)
 	readded, err := gledger.NewBlockFromCbor(
 		blocks[start-2].Type,
 		blocks[start-2].Cbor,
 	)
 	require.NoError(t, err)
-	require.NoError(t, h.LS.Chain().AddBlock(readded, nil))
+	require.NoError(
+		t,
+		h.LS.Chain().AddBlock(context.Background(), readded, nil),
+	)
 	requireWatchTxUndos(t, stream, undoCount)
 	requireWatchTxIdle(t, stream)
 }
@@ -288,7 +304,10 @@ func runWatchTxRollbackPanicChild(t *testing.T) {
 		blocks[childIdx-2].Slot,
 		blocks[childIdx-2].Hash,
 	)
-	require.NoError(t, h.LS.Chain().Rollback(rollbackPoint))
+	require.NoError(
+		t,
+		h.LS.Chain().Rollback(context.Background(), rollbackPoint),
+	)
 	require.False(t, stream.Receive())
 	require.ErrorContains(
 		t,
@@ -477,7 +496,10 @@ type securityParamProbe struct {
 
 func (p *securityParamProbe) SecurityParam() int { return p.k }
 
-func (p *securityParamProbe) BlockByHash(hash []byte) (models.Block, error) {
+func (p *securityParamProbe) BlockByHash(
+	_ context.Context,
+	hash []byte,
+) (models.Block, error) {
 	p.reads++
 	blk, ok := p.byHash[string(hash)]
 	if !ok {

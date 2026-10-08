@@ -207,6 +207,7 @@ func TestCaptureGenesisSnapshot_PostMithrilSkipsUnsafeExpiryHistory(
 		{stakingKey: expiredCred, utxoAmounts: []types.Uint64{50_000_000}},
 	}, 64800000)
 	require.NoError(t, db.RenewAccountExpirations(
+		context.Background(),
 		[]models.StakeCredentialRef{
 			models.NewStakeCredentialRef(0, expiredCred),
 		},
@@ -335,12 +336,15 @@ func TestCaptureGenesisSnapshot_PostMithrilAutoVoteFlagOnlyOnCurrentEpoch(
 	// Seed an AlwaysAbstain delegation for the pool reward account. The
 	// resolver, if it runs, will produce Abstain. We then verify it only
 	// ran for the currentEpoch row.
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: rewardAccount,
-		DrepType:   models.DrepTypeAlwaysAbstain,
-		AddedSlot:  64800000,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: rewardAccount,
+			DrepType:   models.DrepTypeAlwaysAbstain,
+			AddedSlot:  64800000,
+			Active:     true,
+		}),
+	)
 
 	eventBus := event.NewEventBus(nil, nil)
 	mgr := NewManager(db, eventBus, nil)
@@ -520,6 +524,7 @@ INSERT INTO pool_registration_owner (
 	// Reward balance is part of the historical Mark stake and therefore of
 	// owner stake as well.
 	require.NoError(t, db.AddAccountRewardByCredential(
+		context.Background(),
 		0,
 		[]byte("reward_staking_key_123456789"),
 		7_000_000,
@@ -844,7 +849,7 @@ func TestFallbackAuthoritativeNoopDoesNotRecordSuccessMetrics(t *testing.T) {
 		ProtocolVersion: 8,
 		SnapshotSlot:    431_999,
 	}
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
 		context.Background(),
 		txn,
@@ -895,6 +900,7 @@ func TestHandleEpochTransitionCapturesSelfDelegatedOwnerStake(t *testing.T) {
 	memberKey := bytes.Repeat([]byte{0x33}, 28)
 	rewardAccount := bytes.Repeat([]byte{0x44}, 28)
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{
 			PoolKeyHash: poolHash,
@@ -931,7 +937,10 @@ func TestHandleEpochTransitionCapturesSelfDelegatedOwnerStake(t *testing.T) {
 			Active:     true,
 		},
 	} {
-		require.NoError(t, db.CreateAccount(nil, &account))
+		require.NoError(
+			t,
+			db.CreateAccount(context.Background(), nil, &account),
+		)
 	}
 	for i, utxo := range []models.Utxo{
 		{
@@ -950,7 +959,7 @@ func TestHandleEpochTransitionCapturesSelfDelegatedOwnerStake(t *testing.T) {
 		},
 	} {
 		utxo.OutputIdx = uint32(i)
-		require.NoError(t, db.CreateUtxo(nil, &utxo))
+		require.NoError(t, db.CreateUtxo(context.Background(), nil, &utxo))
 	}
 
 	eventBus := event.NewEventBus(nil, nil)
@@ -1006,6 +1015,7 @@ func TestHandleEpochTransitionDoesNotTreatScriptCredentialAsOwner(
 	ownerHash := bytes.Repeat([]byte{0x22}, 28)
 	rewardAccount := bytes.Repeat([]byte{0x33}, 28)
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{
 			PoolKeyHash: poolHash,
@@ -1028,14 +1038,17 @@ func TestHandleEpochTransitionDoesNotTreatScriptCredentialAsOwner(
 			},
 		},
 	))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		CredentialTag: 1,
-		StakingKey:    ownerHash,
-		Pool:          poolHash,
-		AddedSlot:     500,
-		Active:        true,
-	}))
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			CredentialTag: 1,
+			StakingKey:    ownerHash,
+			Pool:          poolHash,
+			AddedSlot:     500,
+			Active:        true,
+		}),
+	)
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:          bytes.Repeat([]byte{0x55}, 32),
 		OutputIdx:     0,
 		CredentialTag: 1,
@@ -1290,6 +1303,7 @@ func TestRewardInputsRejectInvalidRewardAccountLength(t *testing.T) {
 	stakeKey := bytes.Repeat([]byte{0x31}, len(poolKey))
 
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: poolHash},
 		&models.PoolRegistration{
@@ -1337,6 +1351,7 @@ func TestRewardInputsRejectInvalidRewardAccountCredentialTag(t *testing.T) {
 	rewardAccount := bytes.Repeat([]byte{0x41}, len(poolKey))
 
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: poolHash},
 		&models.PoolRegistration{
@@ -1386,6 +1401,7 @@ func TestRewardInputsRejectMissingPoolMargin(t *testing.T) {
 	rewardAccount := bytes.Repeat([]byte{0x41}, len(poolKey))
 
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: poolHash},
 		&models.PoolRegistration{
@@ -1433,6 +1449,7 @@ func TestRewardInputsRejectInvalidPoolOwnerKeyHashLength(t *testing.T) {
 	rewardAccount := bytes.Repeat([]byte{0x41}, len(poolKey))
 
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: poolHash},
 		&models.PoolRegistration{
@@ -1502,7 +1519,7 @@ func TestHandleEpochTransitionKeepsBoundaryCapturedSnapshot(t *testing.T) {
 		SnapshotSlot:    431999,
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
 		context.Background(),
 		txn,
@@ -1512,7 +1529,7 @@ func TestHandleEpochTransitionKeepsBoundaryCapturedSnapshot(t *testing.T) {
 
 	txId := make([]byte, 32)
 	copy(txId, []byte("late_boundary_utxo_123456789012"))
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       txId,
 		OutputIdx:  0,
 		StakingKey: stakingKey,
@@ -1572,7 +1589,7 @@ func TestHandleEpochTransitionCapturesAfterBoundaryKeptDeferredCapture(
 
 	// The boundary's own capture does not persist, as when it rolls back its
 	// savepoint.
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, mgr.DeferEpochBoundaryCapture(txn, evt))
 	mgr.DiscardEpochBoundaryCapture(evt.NewEpoch)
 	require.NoError(t, txn.Rollback())
@@ -1622,7 +1639,7 @@ func TestHandleEpochTransitionRefreshesProvisionalSlotSnapshot(t *testing.T) {
 
 	txId := make([]byte, 32)
 	copy(txId, []byte("refresh_boundary_utxo_1234567890"))
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       txId,
 		OutputIdx:  0,
 		StakingKey: stakingKey,
@@ -1888,6 +1905,7 @@ func TestHandleEpochTransitionSkipsPoolWithMissingMargin(t *testing.T) {
 	badPoolHash := bytes.Repeat([]byte{0x77}, 28)
 	badStakingKey := bytes.Repeat([]byte{0x88}, 28)
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: badPoolHash},
 		&models.PoolRegistration{
@@ -1897,15 +1915,18 @@ func TestHandleEpochTransitionSkipsPoolWithMissingMargin(t *testing.T) {
 			// Margin intentionally left nil/missing.
 		},
 	))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: badStakingKey,
-		Pool:       badPoolHash,
-		AddedSlot:  500,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: badStakingKey,
+			Pool:       badPoolHash,
+			AddedSlot:  500,
+			Active:     true,
+		}),
+	)
 	badTxId := make([]byte, 32)
 	copy(badTxId, []byte("bad_pool_delegator_utxo_1234567"))
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       badTxId,
 		OutputIdx:  0,
 		StakingKey: badStakingKey,
@@ -1996,6 +2017,7 @@ func TestRewardInputsSkippingDegradedPoolsExcludesOnlyBadPools(t *testing.T) {
 	goodStakeKey := bytes.Repeat([]byte{0x21}, 28)
 	rewardAccount := bytes.Repeat([]byte{0x41}, 28)
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: goodPoolHash},
 		&models.PoolRegistration{
@@ -2015,6 +2037,7 @@ func TestRewardInputsSkippingDegradedPoolsExcludesOnlyBadPools(t *testing.T) {
 	badTagPoolHash := bytes.Repeat([]byte{0x33}, 28)
 	badTagStakeKey := bytes.Repeat([]byte{0x43}, 28)
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: badTagPoolHash},
 		&models.PoolRegistration{
@@ -2157,7 +2180,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		allowAuthoritativeCommit := make(chan struct{})
 		authoritativeDone := make(chan error, 1)
 		go func() {
-			txn := db.Transaction(true)
+			txn := db.Transaction(context.Background(), true)
 			err := mgr.CaptureEpochBoundarySnapshot(
 				context.Background(),
 				txn,
@@ -2256,8 +2279,9 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 			0,
 		)
 		require.NoError(t, err)
-		fallbackTxn := db.Transaction(true)
+		fallbackTxn := db.Transaction(context.Background(), true)
 		require.NoError(t, mgr.saveSnapshotInTxn(
+			context.Background(),
 			fallbackEvt.NewEpoch,
 			"mark",
 			fallbackDistribution,
@@ -2272,7 +2296,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		authoritativeDone := make(chan error, 1)
 		go func() {
 			close(authoritativeStarted)
-			txn := db.Transaction(true)
+			txn := db.Transaction(context.Background(), true)
 			err := mgr.CaptureEpochBoundarySnapshot(
 				context.Background(),
 				txn,

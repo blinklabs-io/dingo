@@ -75,7 +75,7 @@ func TestReviewAuthenticationAttemptsAreLimited(t *testing.T) {
 	}
 	cfg := DefaultProviderConfig()
 	cfg.RateLimit = -1
-	_, _, err := NewMCPServer(cfg, ProviderDependencies{})
+	_, _, err := NewMCPServer(t.Context(), cfg, ProviderDependencies{})
 	require.ErrorContains(t, err, "rateLimit")
 }
 
@@ -337,6 +337,7 @@ func TestReviewStopDefersDatabaseCloseUntilStartCompletes(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 	server, err := NewServer(
+		t.Context(),
 		DefaultProviderConfig(),
 		ProviderDependencies{},
 		apiconfig.EffectiveTLS{},
@@ -358,9 +359,9 @@ func TestReviewStopDefersDatabaseCloseUntilStartCompletes(t *testing.T) {
 		"owned DB closes after start settles",
 	)
 	require.ErrorContains(t, server.Start(t.Context()), "stopped")
-	_, err = OpenReadOnlySQLite(filepath.Join(t.TempDir(), "missing.sqlite"))
+	_, err = OpenReadOnlySQLite(t.Context(), filepath.Join(t.TempDir(), "missing.sqlite"))
 	require.Error(t, err)
-	_, err = OpenReadOnlySQLite(t.TempDir())
+	_, err = OpenReadOnlySQLite(t.Context(), t.TempDir())
 	require.Error(t, err)
 }
 
@@ -483,7 +484,7 @@ func TestReviewResourceDiscoveryUsesDefaultTimeout(t *testing.T) {
 
 	cfg := DefaultProviderConfig()
 	cfg.QueryTimeout = time.Nanosecond
-	server, _, err := NewMCPServer(cfg, ProviderDependencies{SQLDB: db, Network: "preview"})
+	server, _, err := NewMCPServer(t.Context(), cfg, ProviderDependencies{SQLDB: db, Network: "preview"})
 	require.NoError(t, err)
 	cs := reviewSession(t, server)
 
@@ -507,7 +508,7 @@ func TestReviewResourceTimeout(t *testing.T) {
 	require.NoError(t, err)
 	cfg := DefaultProviderConfig()
 	cfg.QueryTimeout = 10 * time.Millisecond
-	server, _, err := NewMCPServer(cfg, ProviderDependencies{SQLDB: db, Network: "preview"})
+	server, _, err := NewMCPServer(t.Context(), cfg, ProviderDependencies{SQLDB: db, Network: "preview"})
 	require.NoError(t, err)
 	cs := reviewSession(t, server)
 	conn, err := db.Conn(t.Context())
@@ -668,6 +669,7 @@ func TestTableResourcesRegisteredWhenEnumerationExceedsQueryTimeout(
 	cfg := DefaultProviderConfig()
 	cfg.QueryTimeout = 10 * time.Millisecond
 	server, _, err := NewMCPServer(
+		t.Context(),
 		cfg,
 		ProviderDependencies{SQLDB: db, Network: "preview"},
 	)
@@ -701,6 +703,7 @@ func TestTableEnumerationFailureLoggedToProviderLogger(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	_, _, err = NewMCPServer(
+		context.Background(),
 		DefaultProviderConfig(),
 		ProviderDependencies{SQLDB: db, Network: "preview", Logger: logger},
 	)
@@ -724,6 +727,7 @@ func TestTableEnumerationKeepsLongerQueryTimeout(t *testing.T) {
 		nil,
 	)
 	registerResources(
+		context.Background(),
 		server,
 		db,
 		nil,

@@ -306,5 +306,5 @@ func applySpendingTransaction(
 	}
 
 	point := ocommon.Point{Slot: slot, Hash: blockHash}
-	return db.SetTransaction(tx, point, 0, 0, nil, nil, offsets, nil)
+	return db.SetTransaction(context.Background(), tx, point, 0, 0, nil, nil, offsets, nil)
 }

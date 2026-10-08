@@ -170,7 +170,7 @@ type waitForTxLedgerStub struct {
 	transactionByHash func([]byte) (*models.Transaction, error)
 }
 
-func (s *waitForTxLedgerStub) TransactionByHash(
+func (s *waitForTxLedgerStub) TransactionByHash(ctx context.Context,
 	hash []byte,
 ) (*models.Transaction, error) {
 	return s.transactionByHash(hash)

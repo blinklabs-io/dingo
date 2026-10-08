@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -976,7 +977,7 @@ func (b *Blockfrost) handleAddressUTXOs(
 		return
 	}
 	address := r.PathValue("address")
-	utxos, total, err := b.node.AddressUTXOs(address, params)
+	utxos, total, err := b.node.AddressUTXOs(r.Context(), address, params)
 	if err != nil {
 		b.logger.Error(
 			"failed to get address utxos",
@@ -2206,7 +2207,7 @@ func handlePaginatedAccountRequest[Item, Response any](
 	b *Blockfrost,
 	w http.ResponseWriter,
 	r *http.Request,
-	fetch func(string, PaginationParams) ([]Item, int, error),
+	fetch func(context.Context, string, PaginationParams) ([]Item, int, error),
 	convert func(Item) Response,
 	errorMessage string,
 ) {
@@ -2214,7 +2215,7 @@ func handlePaginatedAccountRequest[Item, Response any](
 	if !ok {
 		return
 	}
-	items, total, err := fetch(r.PathValue("stake_address"), params)
+	items, total, err := fetch(r.Context(), r.PathValue("stake_address"), params)
 	if err != nil {
 		b.writeAccountError(w, err, errorMessage)
 		return

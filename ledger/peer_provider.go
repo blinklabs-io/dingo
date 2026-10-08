@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -66,7 +67,10 @@ type PoolRelayProvider struct {
 	// stakeByPools returns delegated stake keyed by pool key hash. It is a
 	// field so a test can make the lookup fail, which the database does not
 	// do on demand.
-	stakeByPools func(poolKeyHashes [][]byte) (map[string]uint64, error)
+	stakeByPools func(
+		ctx context.Context,
+		poolKeyHashes [][]byte,
+	) (map[string]uint64, error)
 
 	// Cache for pool relays
 	cacheMu      sync.RWMutex
@@ -96,9 +100,10 @@ func NewPoolRelayProvider(
 		eventBus:    eventBus,
 	}
 	provider.stakeByPools = func(
+		ctx context.Context,
 		poolKeyHashes [][]byte,
 	) (map[string]uint64, error) {
-		stakes, _, err := db.GetStakeByPools(poolKeyHashes, nil)
+		stakes, _, err := db.GetStakeByPools(ctx, poolKeyHashes, nil)
 		return stakes, err
 	}
 	if eventBus != nil {
@@ -124,7 +129,7 @@ func (p *PoolRelayProvider) Close() {
 }
 
 // GetPoolRelays returns all active pool relays from the ledger.
-func (p *PoolRelayProvider) GetPoolRelays() (
+func (p *PoolRelayProvider) GetPoolRelays(ctx context.Context) (
 	[]PoolRelay,
 	error,
 ) {
@@ -139,14 +144,14 @@ func (p *PoolRelayProvider) GetPoolRelays() (
 	p.cacheMu.RUnlock()
 
 	// Cache miss or expired - fetch from database
-	relays, err := p.db.GetActivePoolRelays(nil)
+	relays, err := p.db.GetActivePoolRelays(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("GetActivePoolRelays: fetch relays: %w", err)
 	}
 
 	// Stake only weights peer sampling, so a failed lookup degrades to
 	// unweighted discovery instead of failing it.
-	stakes, err := p.lookupStake(relays)
+	stakes, err := p.lookupStake(ctx, relays)
 	if err != nil {
 		slog.Warn(
 			"failed to fetch pool stake for ledger relays",
@@ -199,6 +204,7 @@ func (p *PoolRelayProvider) GetPoolRelays() (
 // lookupStake batch-fetches the delegated stake of every pool owning one of
 // relays. The returned map is nil on error.
 func (p *PoolRelayProvider) lookupStake(
+	ctx context.Context,
 	relays []models.PoolRegistrationRelay,
 ) (map[string]uint64, error) {
 	seen := make(map[string]struct{}, len(relays))
@@ -217,7 +223,7 @@ func (p *PoolRelayProvider) lookupStake(
 	if len(hashes) == 0 {
 		return nil, nil
 	}
-	return p.stakeByPools(hashes)
+	return p.stakeByPools(ctx, hashes)
 }
 
 // InvalidateCache clears the cached pool relays, forcing the next

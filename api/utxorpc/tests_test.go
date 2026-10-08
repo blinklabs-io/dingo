@@ -871,7 +871,7 @@ func newUtxorpcConnectHarness(
 	apiBus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { apiBus.Stop() })
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
@@ -967,6 +967,7 @@ func indexFixtureTransactionsForReadTx(
 				continue
 			}
 			err := db.SetTransaction(
+				context.Background(),
 				tx,
 				point,
 				uint32(j),
@@ -1543,7 +1544,7 @@ func TestConnect_ReadTx(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, txHash, tx.Hash().Bytes())
-	rec, err := h.LS.TransactionByHash(txHash)
+	rec, err := h.LS.TransactionByHash(context.Background(), txHash)
 	require.NoError(t, err)
 	require.NotNil(t, rec)
 	require.NotNil(t, out.Msg.GetTx().GetBlockRef())
@@ -1839,7 +1840,10 @@ func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
 	require.Len(t, blocks, n)
 	inter := blocks[5]
 	roll := ocommon.NewPoint(inter.Slot, inter.Hash)
-	require.NoError(t, h.LS.Chain().ValidateRollback(roll))
+	require.NoError(
+		t,
+		h.LS.Chain().ValidateRollback(context.Background(), roll),
+	)
 
 	cli := syncconnect.NewSyncServiceClient(
 		h.Client,
@@ -1875,7 +1879,7 @@ func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
 		require.NotNil(t, stream.Msg().GetTip())
 	}
 
-	require.NoError(t, h.LS.Chain().Rollback(roll))
+	require.NoError(t, h.LS.Chain().Rollback(context.Background(), roll))
 
 	require.True(
 		t,
@@ -1967,14 +1971,14 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 		skipIndexTxHash: pendingTx.Hash().Bytes(),
 	})
 	committedHash := committedTx.Hash().Bytes()
-	committedRecord, err := h.LS.TransactionByHash(committedHash)
+	committedRecord, err := h.LS.TransactionByHash(context.Background(), committedHash)
 	require.NoError(t, err)
 	require.NotNil(
 		t,
 		committedRecord,
 		"committed fixture transaction must be indexed",
 	)
-	pendingRecord, err := h.LS.TransactionByHash(pendingTx.Hash().Bytes())
+	pendingRecord, err := h.LS.TransactionByHash(context.Background(), pendingTx.Hash().Bytes())
 	require.NoError(t, err)
 	require.Nil(
 		t,
@@ -2500,6 +2504,7 @@ func (s *tipHeightLedgerStub) GetBlock(
 }
 
 func (s *tipHeightLedgerStub) BlockByHash(
+	context.Context,
 	[]byte,
 ) (models.Block, error) {
 	s.blockLookups++

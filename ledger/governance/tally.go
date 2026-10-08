@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
@@ -103,6 +104,7 @@ type CommitteeVotingState struct {
 // hot-key authorization certificates. Authorizations for removed or
 // expired cold credentials are ignored.
 func LoadCommitteeVotingState(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	currentEpoch uint64,
@@ -110,7 +112,7 @@ func LoadCommitteeVotingState(
 	if db == nil {
 		return nil, errors.New("nil database")
 	}
-	members, err := db.GetCommitteeMembers(txn)
+	members, err := db.GetCommitteeMembers(ctx, txn)
 	if err != nil {
 		return nil, fmt.Errorf("get seated committee members: %w", err)
 	}
@@ -132,7 +134,7 @@ func LoadCommitteeVotingState(
 	// CIP-1694; otherwise they act as implicit No votes because they
 	// cannot cast a vote (no active hot-key authorization) but would
 	// still occupy a slot in ActiveMemberCount.
-	resigned, err := db.GetResignedCommitteeMembers(coldCredentials, txn)
+	resigned, err := db.GetResignedCommitteeMembers(ctx, coldCredentials, txn)
 	if err != nil {
 		return nil, fmt.Errorf("get resigned committee members: %w", err)
 	}
@@ -144,7 +146,7 @@ func LoadCommitteeVotingState(
 		seated[credential.Key()] = struct{}{}
 	}
 
-	authorized, err := db.GetActiveCommitteeMembers(txn)
+	authorized, err := db.GetActiveCommitteeMembers(ctx, txn)
 	if err != nil {
 		return nil, fmt.Errorf("get active cc hot credentials: %w", err)
 	}
@@ -179,10 +181,11 @@ func LoadCommitteeVotingState(
 // DReps, resigned CC members, retired pools) per the "live" view at
 // the time of tallying.
 func TallyProposal(
-	ctx *TallyContext,
+	ctx context.Context,
+	tc *TallyContext,
 	proposal *models.GovernanceProposal,
 ) (*ProposalTally, error) {
-	if ctx == nil || ctx.DB == nil {
+	if tc == nil || tc.DB == nil {
 		return nil, errors.New("nil tally context")
 	}
 	if proposal == nil {
@@ -193,7 +196,7 @@ func TallyProposal(
 		ActionType: proposal.ActionType,
 	}
 
-	votes, err := ctx.DB.GetGovernanceVotes(proposal.ID, ctx.Txn)
+	votes, err := tc.DB.GetGovernanceVotes(ctx, proposal.ID, tc.Txn)
 	if err != nil {
 		return nil, fmt.Errorf("get votes: %w", err)
 	}
@@ -211,13 +214,13 @@ func TallyProposal(
 		}
 	}
 
-	if err := tallyDRepVotes(ctx, drepVotes, tally); err != nil {
+	if err := tallyDRepVotes(ctx, tc, drepVotes, tally); err != nil {
 		return nil, fmt.Errorf("tally drep votes: %w", err)
 	}
-	if err := tallySPOVotes(ctx, spoVotes, tally); err != nil {
+	if err := tallySPOVotes(ctx, tc, spoVotes, tally); err != nil {
 		return nil, fmt.Errorf("tally spo votes: %w", err)
 	}
-	if err := tallyCCVotes(ctx, ccVotes, tally); err != nil {
+	if err := tallyCCVotes(ctx, tc, ccVotes, tally); err != nil {
 		return nil, fmt.Errorf("tally cc votes: %w", err)
 	}
 
@@ -256,17 +259,19 @@ type DRepVotingState struct {
 // nonzero and stale relative to currentEpoch; when false the queries are
 // byte-identical to the pre-CIP behavior (no account is excluded).
 func LoadDRepVotingState(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	currentEpoch uint64,
 	delegatorInactivityOn bool,
 ) (*DRepVotingState, error) {
-	return loadDRepVotingState(
+	return loadDRepVotingState(ctx,
 		db, txn, currentEpoch, currentEpoch, delegatorInactivityOn,
 	)
 }
 
 func loadDRepVotingState(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	currentEpoch uint64,
@@ -283,7 +288,7 @@ func loadDRepVotingState(
 	if delegatorInactivityOn {
 		expiryEpoch = currentEpoch
 	}
-	allDreps, err := db.GetActiveDreps(txn)
+	allDreps, err := db.GetActiveDreps(ctx, txn)
 	if err != nil {
 		return nil, fmt.Errorf("get active dreps: %w", err)
 	}
@@ -312,13 +317,13 @@ func loadDRepVotingState(
 				Key: drep.Credential,
 			}
 		}
-		powers, err = db.GetDRepVotingPowerBatch(creds, expiryEpoch, txn)
+		powers, err = db.GetDRepVotingPowerBatch(ctx, creds, expiryEpoch, txn)
 		if err != nil {
 			return nil, fmt.Errorf("batch drep voting power: %w", err)
 		}
 	}
 
-	virtualPowers, err := db.GetDRepVotingPowerByType(
+	virtualPowers, err := db.GetDRepVotingPowerByType(ctx,
 		[]uint64{
 			models.DrepTypeAlwaysAbstain,
 			models.DrepTypeAlwaysNoConfidence,
@@ -334,7 +339,7 @@ func loadDRepVotingState(
 	// part of the depositor's active voting stake, so it must be folded into
 	// its return account's delegated DRep voting power here (see
 	// ActiveProposalDepositDRepPower's doc comment).
-	drepDepositPower, noConfidenceDepositPower, err := activeProposalDepositDRepPowerAtEpochs(
+	drepDepositPower, noConfidenceDepositPower, err := activeProposalDepositDRepPowerAtEpochs(ctx,
 		db, txn, activeProposalEpoch, expiryEpoch,
 	)
 	if err != nil {
@@ -383,7 +388,7 @@ func addUint64(a, b uint64) (uint64, error) {
 // tallyDRepVotes sums voting power for regular DReps and the predefined
 // AlwaysAbstain / AlwaysNoConfidence DRep options. Non-voting regular
 // DReps are not counted toward any bucket. The proposal-independent
-// voting power is taken from ctx.DRepState when present (precomputed
+// voting power is taken from tc.DRepState when present (precomputed
 // once per epoch by ProcessEpoch); otherwise it is loaded lazily.
 //
 // Every DRepTotalStake addition below runs before the corresponding
@@ -394,20 +399,21 @@ func addUint64(a, b uint64) (uint64, error) {
 // depth against a future reordering of this function, not because they are
 // independently reachable today.
 func tallyDRepVotes(
-	ctx *TallyContext,
+	ctx context.Context,
+	tc *TallyContext,
 	votes []*models.GovernanceVote,
 	tally *ProposalTally,
 ) error {
-	state := ctx.DRepState
+	state := tc.DRepState
 	if state == nil {
 		var err error
-		activeProposalEpoch := ctx.CurrentEpoch
-		if ctx.ActiveProposalEpoch != nil {
-			activeProposalEpoch = *ctx.ActiveProposalEpoch
+		activeProposalEpoch := tc.CurrentEpoch
+		if tc.ActiveProposalEpoch != nil {
+			activeProposalEpoch = *tc.ActiveProposalEpoch
 		}
-		state, err = loadDRepVotingState(
-			ctx.DB, ctx.Txn, ctx.CurrentEpoch, activeProposalEpoch,
-			ctx.DelegatorInactivityOn,
+		state, err = loadDRepVotingState(ctx,
+			tc.DB, tc.Txn, tc.CurrentEpoch, activeProposalEpoch,
+			tc.DelegatorInactivityOn,
 		)
 		if err != nil {
 			return err
@@ -577,6 +583,7 @@ func LoadSPOVotingState(
 }
 
 func includeActiveProposalDepositsInSPOVotingState(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	currentEpoch uint64,
@@ -589,7 +596,7 @@ func includeActiveProposalDepositsInSPOVotingState(
 	if state.proposalDepositsIncluded {
 		return nil
 	}
-	deposits, err := activeProposalDepositsByReturnCredential(
+	deposits, err := activeProposalDepositsByReturnCredential(ctx,
 		db, txn, currentEpoch,
 	)
 	if err != nil {
@@ -599,7 +606,7 @@ func includeActiveProposalDepositsInSPOVotingState(
 		state.proposalDepositsIncluded = true
 		return nil
 	}
-	accounts, err := accountsForProposalDeposits(db, txn, deposits)
+	accounts, err := accountsForProposalDeposits(ctx, db, txn, deposits)
 	if err != nil {
 		return err
 	}
@@ -686,31 +693,32 @@ func includeActiveProposalDepositsInSPOVotingState(
 }
 
 func tallySPOVotes(
-	ctx *TallyContext,
+	ctx context.Context,
+	tc *TallyContext,
 	votes []*models.GovernanceVote,
 	tally *ProposalTally,
 ) error {
-	state := ctx.SPOState
+	state := tc.SPOState
 	if state == nil {
 		var err error
-		state, err = LoadSPOVotingState(ctx.DB, ctx.Txn, ctx.StakeEpoch)
+		state, err = LoadSPOVotingState(tc.DB, tc.Txn, tc.StakeEpoch)
 		if err != nil {
 			return err
 		}
-		ctx.SPOState = state
+		tc.SPOState = state
 	}
-	if ctx.DB != nil {
-		activeProposalEpoch := ctx.CurrentEpoch
-		if ctx.ActiveProposalEpoch != nil {
-			activeProposalEpoch = *ctx.ActiveProposalEpoch
+	if tc.DB != nil {
+		activeProposalEpoch := tc.CurrentEpoch
+		if tc.ActiveProposalEpoch != nil {
+			activeProposalEpoch = *tc.ActiveProposalEpoch
 		}
 		expiryEpoch := uint64(0)
-		if ctx.DelegatorInactivityOn {
-			expiryEpoch = ctx.CurrentEpoch
+		if tc.DelegatorInactivityOn {
+			expiryEpoch = tc.CurrentEpoch
 		}
-		if err := includeActiveProposalDepositsInSPOVotingState(
-			ctx.DB,
-			ctx.Txn,
+		if err := includeActiveProposalDepositsInSPOVotingState(ctx,
+			tc.DB,
+			tc.Txn,
 			activeProposalEpoch,
 			expiryEpoch,
 			state,
@@ -737,7 +745,7 @@ func tallySPOVotes(
 	actionType := lcommon.GovActionType(tally.ActionType)
 	isHardForkInitiation := actionType ==
 		lcommon.GovActionTypeHardForkInitiation
-	inBootstrap := ctx.MajorVersion == bootstrapProtocolVersion
+	inBootstrap := tc.MajorVersion == bootstrapProtocolVersion
 	isNoConfidenceAction := actionType ==
 		lcommon.GovActionTypeNoConfidence
 
@@ -825,15 +833,16 @@ func tallySPOVotes(
 // tallyCCVotes counts per-member votes restricted to currently active,
 // seated, hot-key-authorized CC members.
 func tallyCCVotes(
-	ctx *TallyContext,
+	ctx context.Context,
+	tc *TallyContext,
 	votes []*models.GovernanceVote,
 	tally *ProposalTally,
 ) error {
-	committeeState := ctx.CommitteeState
+	committeeState := tc.CommitteeState
 	if committeeState == nil {
 		var err error
-		committeeState, err = LoadCommitteeVotingState(
-			ctx.DB, ctx.Txn, ctx.CurrentEpoch,
+		committeeState, err = LoadCommitteeVotingState(ctx,
+			tc.DB, tc.Txn, tc.CurrentEpoch,
 		)
 		if err != nil {
 			return err

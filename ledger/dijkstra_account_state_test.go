@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -56,7 +57,7 @@ func TestDijkstraBalanceIntervalsObserveAppliedDirectDeposits(t *testing.T) {
 	db := newTestDB(t)
 	stakeKey := bytes.Repeat([]byte{0x42}, lcommon.AddressHashSize)
 	rewardAccount := cbor.NewByteString(append([]byte{0xe0}, stakeKey...))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey:    stakeKey,
 		CredentialTag: 0,
 		AddedSlot:     1,
@@ -87,7 +88,7 @@ func TestDijkstraBalanceIntervalsObserveAppliedDirectDeposits(t *testing.T) {
 		)
 	}
 	balance := func() dbtypes.Uint64 {
-		account, err := db.GetAccountByCredential(0, stakeKey, false, nil)
+		account, err := db.GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
 		require.NoError(t, err)
 		return account.Reward
 	}
@@ -98,8 +99,8 @@ func TestDijkstraBalanceIntervalsObserveAppliedDirectDeposits(t *testing.T) {
 	require.Equal(t, dbtypes.Uint64(5), balance())
 
 	apply := func() {
-		require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-			return ApplyDijkstraDirectDeposits(db, deposit, 2, txn)
+		require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+			return ApplyDijkstraDirectDeposits(context.Background(), db, deposit, 2, txn)
 		}))
 	}
 	apply()
@@ -107,7 +108,7 @@ func TestDijkstraBalanceIntervalsObserveAppliedDirectDeposits(t *testing.T) {
 	require.NoError(t, validate(observer))
 	require.NoError(t, validate(startingObserver))
 
-	require.NoError(t, db.DeleteAccountRewardsAfterSlot(1, nil))
+	require.NoError(t, db.DeleteAccountRewardsAfterSlot(context.Background(), 1, nil))
 	require.Equal(t, dbtypes.Uint64(5), balance())
 	require.ErrorAs(t, validate(observer), &outside)
 

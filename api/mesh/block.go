@@ -16,6 +16,7 @@ package mesh
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"net/http"
@@ -41,7 +42,7 @@ func (s *Server) handleBlock(
 		return
 	}
 
-	block, meshErr := s.lookupBlock(
+	block, meshErr := s.lookupBlock(r.Context(),
 		req.BlockIdentifier,
 	)
 	if meshErr != nil {
@@ -51,6 +52,7 @@ func (s *Server) handleBlock(
 
 	txs, err := s.config.Database.
 		GetTransactionsByBlockHash(
+			r.Context(),
 			block.Hash,
 		)
 	if err != nil {
@@ -112,7 +114,7 @@ func (s *Server) handleBlockTransaction(
 		return
 	}
 
-	tx, err := s.config.Database.GetTransactionByHash(
+	tx, err := s.config.Database.GetTransactionByHash(r.Context(),
 		hashBytes,
 	)
 	if err != nil {
@@ -157,7 +159,7 @@ func (s *Server) handleBlockTransaction(
 
 // lookupBlock resolves a PartialBlockIdentifier to a
 // database Block by hash or index.
-func (s *Server) lookupBlock(
+func (s *Server) lookupBlock(ctx context.Context,
 	id *PartialBlockIdentifier,
 ) (models.Block, *Error) {
 	var (
@@ -175,7 +177,7 @@ func (s *Server) lookupBlock(
 				ErrInvalidRequest, decErr,
 			)
 		}
-		block, err = s.config.Database.BlockByHash(
+		block, err = s.config.Database.BlockByHash(ctx,
 			hashBytes,
 		)
 	case id.Index != nil:
@@ -183,7 +185,7 @@ func (s *Server) lookupBlock(
 			return block, ErrInvalidRequest
 		}
 		// #nosec G115 -- validated non-negative
-		block, err = s.config.Database.BlockByIndex(
+		block, err = s.config.Database.BlockByIndex(ctx,
 			uint64(*id.Index),
 		)
 	default:

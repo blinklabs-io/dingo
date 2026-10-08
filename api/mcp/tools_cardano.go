@@ -1087,6 +1087,162 @@ func RegisterCardanoTools(
 		}, nil, nil
 	})
 
+	// Tool: evaluate_tx
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "evaluate_tx",
+		Description: "Simulate and evaluate Plutus script execution units (CPU steps, Memory units) and script fees for a transaction before on-chain submission.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input EvaluateTxParams) (*mcp.CallToolResult, any, error) {
+		trimmed := strings.TrimSpace(input.Cbor)
+		if trimmed == "" {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{
+						Text: "Error: Transaction payload is empty. Please provide hex-encoded or base64-encoded transaction CBOR.",
+					},
+				},
+			}, nil, nil
+		}
+
+		var txBytes []byte
+		var decErr error
+		if b, err := hex.DecodeString(trimmed); err == nil {
+			txBytes = b
+		} else if b, err := base64.StdEncoding.DecodeString(trimmed); err == nil {
+			txBytes = b
+		} else {
+			decErr = err
+		}
+
+		if len(txBytes) == 0 {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{
+						Text: fmt.Sprintf(
+							"Error: Failed to decode transaction CBOR: %v. Body must be hex or base64 encoded.",
+							decErr,
+						),
+					},
+				},
+			}, nil, nil
+		}
+
+		var rawCBOR cbor.RawMessage
+		n, err := cbor.Decode(txBytes, &rawCBOR)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid transaction CBOR: %w", err)
+		}
+		if n != len(txBytes) {
+			return nil, nil, errors.New("trailing data after transaction CBOR")
+		}
+		txType, err := gledger.DetermineTransactionType(txBytes)
+		if err != nil {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{
+						Text: fmt.Sprintf(
+							"Error: Invalid transaction CBOR: failed to determine transaction type: %v",
+							err,
+						),
+					},
+				},
+			}, nil, nil
+		}
+
+		tx, err := gledger.NewTransactionFromCbor(txType, txBytes)
+		if err != nil {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{
+						Text: fmt.Sprintf(
+							"Error: Invalid transaction CBOR: failed to decode transaction: %v",
+							err,
+						),
+					},
+				},
+			}, nil, nil
+		}
+
+		if ls == nil {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{
+						Text: "Error: Ledger state is not initialized on this node. Plutus transaction evaluation requires active ledger state and protocol parameters.",
+					},
+				},
+			}, nil, nil
+		}
+
+		evalCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+		defer cancel()
+		result, err := runBoundedEvaluation(
+			evalCtx,
+			evaluationGate,
+			func() (evaluationResult, error) {
+				fee, total, redeemers, err := ls.EvaluateTxContext(evalCtx, tx)
+				return evaluationResult{fee, total, redeemers}, err
+			},
+		)
+		fee, totalExUnits, redeemerExUnits := result.fee, result.total, result.redeemers
+		if err != nil {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{
+						Text: fmt.Sprintf(
+							"### Plutus Transaction Evaluation Failed\n\n"+
+								"The transaction could not be evaluated against current ledger state:\n"+
+								"- **Error**: `%v`\n\n"+
+								"**Troubleshooting Guidance for Developer / AI**:\n"+
+								"1. Verify that all referenced UTxO inputs exist and are unspent.\n"+
+								"2. Confirm that required script witnesses and redeemers are attached.\n"+
+								"3. Ensure required signers in the transaction body match the script expectations.\n"+
+								"4. Ensure script execution units (CPU steps and memory units) are within protocol parameter maximums.",
+							err,
+						),
+					},
+				},
+			}, nil, nil
+		}
+
+		cols := []string{"Purpose", "Index", "CPU Steps", "Memory Units"}
+		var rows [][]string
+		for key, ex := range redeemerExUnits {
+			rows = append(rows, []string{
+				redeemerPurposeString(key.Tag),
+				strconv.FormatUint(uint64(key.Index), 10),
+				strconv.FormatInt(ex.Steps, 10),
+				strconv.FormatInt(ex.Memory, 10),
+			})
+		}
+
+		var redeemerSection string
+		if len(rows) > 0 {
+			redeemerSection = fmt.Sprintf(
+				"#### Redeemers Execution Breakdown\n\n%s\n",
+				FormatMarkdownTable(cols, rows),
+			)
+		} else {
+			redeemerSection = "_No script redeemers found in transaction._\n"
+		}
+
+		md := fmt.Sprintf("### Plutus Transaction Evaluation: SUCCESS\n\n"+
+			"- **Estimated Script Fee**: %d lovelace\n"+
+			"- **Total CPU Steps**: %d units\n"+
+			"- **Total Memory**: %d units\n\n%s",
+			fee, totalExUnits.Steps, totalExUnits.Memory, redeemerSection)
+
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: md},
+			},
+		}, nil, nil
+	})
+
 	// Tool: get_utxos_by_asset
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_utxos_by_asset",

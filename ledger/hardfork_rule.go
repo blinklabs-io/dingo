@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -62,18 +63,19 @@ import (
 //
 // Any future major-version bump that lands without a case here is a
 // no-op, matching the Haskell rule's `otherwise = id` branch.
-func (ls *LedgerState) applyIntraEraHardForkRule(
+func (ls *LedgerState) applyIntraEraHardForkRule(ctx context.Context,
 	txn *database.Txn,
 	newMajor uint,
 	boundarySlot uint64,
 	newEpoch uint64,
 ) error {
 	if txn == nil {
-		return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
-			return ls.applyIntraEraHardForkRule(
-				txn, newMajor, boundarySlot, newEpoch,
-			)
-		})
+		return ls.db.Transaction(ctx, true).
+			Do(func(txn *database.Txn) error {
+				return ls.applyIntraEraHardForkRule(ctx,
+					txn, newMajor, boundarySlot, newEpoch,
+				)
+			})
 	}
 	switch newMajor {
 	case 3:
@@ -86,7 +88,7 @@ func (ls *LedgerState) applyIntraEraHardForkRule(
 			treasury = uint64(state.Treasury)
 			reserves = uint64(state.Reserves)
 		}
-		count, total, err := ls.removeAvvmUtxos(txn, boundarySlot)
+		count, total, err := ls.removeAvvmUtxos(ctx, txn, boundarySlot)
 		if err != nil {
 			return fmt.Errorf(
 				"pv3 remove AVVM UTxOs at slot %d: %w",
@@ -120,7 +122,11 @@ func (ls *LedgerState) applyIntraEraHardForkRule(
 			"component", "ledger",
 		)
 	case 10:
-		n, err := ls.db.ClearDanglingDRepDelegations(boundarySlot, txn)
+		n, err := ls.db.ClearDanglingDRepDelegations(
+			ctx,
+			boundarySlot,
+			txn,
+		)
 		if err != nil {
 			return fmt.Errorf(
 				"pv10 clear dangling DRep delegations at slot %d: %w",

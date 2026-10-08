@@ -107,7 +107,7 @@ func TestImportGovStateRecordsProposalSubmissionOrder(t *testing.T) {
 		require.NotNil(t, stored.TxIndex)
 		require.Equal(t, uint32(position), *stored.TxIndex) //nolint:gosec
 	}
-	active, err := db.GetActiveGovernanceProposals(1277, nil)
+	active, err := db.GetActiveGovernanceProposals(context.Background(), 1277, nil)
 	require.NoError(t, err)
 	require.Len(t, active, 2)
 	require.Equal(t, first, active[0].TxHash)

@@ -224,7 +224,7 @@ func (s *submitServiceServer) waitForTx(
 			if waitCtx.Err() != nil {
 				return waitForTxStopError(ctx, serverTimeout)
 			}
-			txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(r)
+			txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(ctx, r)
 			if err != nil {
 				return fmt.Errorf(
 					"lookup committed transaction %x: %w",

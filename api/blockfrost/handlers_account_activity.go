@@ -83,7 +83,7 @@ func (b *Blockfrost) handleAccountTransactions(
 		return
 	}
 
-	items, total, err := b.node.AccountTransactions(
+	items, total, err := b.node.AccountTransactions(r.Context(),
 		r.PathValue("stake_address"),
 		params,
 	)

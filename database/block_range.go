@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -109,11 +110,12 @@ func ForEachBlockInRange(
 // ForEachBlockInRangeDB is a convenience wrapper that creates a read-only
 // transaction and calls ForEachBlockInRange.
 func ForEachBlockInRangeDB(
+	ctx context.Context,
 	db *Database,
 	startSlot, endSlot uint64,
 	fn func(block models.Block) error,
 ) error {
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	return txn.Do(func(txn *Txn) error {
 		return ForEachBlockInRange(txn, startSlot, endSlot, fn)
 	})

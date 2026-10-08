@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"errors"
@@ -210,6 +211,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := db.UtxosByAddress(
+				context.Background(),
 				[]lcommon.Address{tc.addr},
 				MaxUtxosByAddressResults,
 				nil,
@@ -225,6 +227,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 
 	t.Run("multiple addresses", func(t *testing.T) {
 		got, err := db.UtxosByAddress(
+			context.Background(),
 			[]lcommon.Address{enterprise, base},
 			MaxUtxosByAddressResults,
 			nil,
@@ -247,6 +250,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	pattern, err := models.ExactUtxoAddressPattern(enterprise)
 	require.NoError(t, err)
 	first, err := db.UtxosByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 			Limit:           2,
@@ -260,6 +264,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	})
 
 	second, err := db.UtxosByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 			After: &models.UtxoOrderingCursor{
@@ -276,6 +281,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	assert.Equal(t, byte(0x06), second[0].TxId[0])
 
 	credentialRows, err := db.UtxosByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{{
 				PaymentPart: payment,
@@ -289,6 +295,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	enterpriseBytes, err := enterprise.Bytes()
 	require.NoError(t, err)
 	andMatch, err := db.UtxosByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{{
 				ExactAddress: enterpriseBytes,
@@ -301,6 +308,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	require.Len(t, andMatch, 3)
 
 	andMismatch, err := db.UtxosByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{{
 				ExactAddress: enterpriseBytes,
@@ -315,11 +323,12 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, andMismatch)
 
-	atSlot, err := db.UtxosByAddressAtSlot(enterprise, 6, nil)
+	atSlot, err := db.UtxosByAddressAtSlot(context.Background(), enterprise, 6, nil)
 	require.NoError(t, err)
 	require.Len(t, atSlot, 3)
 
 	enterpriseTxs, err := db.GetTransactionsByAddressWithOrder(
+		context.Background(),
 		enterprise,
 		2,
 		1,
@@ -335,6 +344,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 		enterpriseTxs[1].Hash[0],
 	})
 	enterpriseTxCount, err := db.CountTransactionsByAddress(
+		context.Background(),
 		enterprise,
 		nil,
 		nil,
@@ -342,7 +352,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, 3, enterpriseTxCount)
-	hasEnterpriseTx, err := db.HasTransactionsByAddress(enterprise, nil)
+	hasEnterpriseTx, err := db.HasTransactionsByAddress(context.Background(), enterprise, nil)
 	require.NoError(t, err)
 	assert.True(t, hasEnterpriseTx)
 }
@@ -610,12 +620,13 @@ func TestCountAndPageUtxosByAddressWithOrderingCoarseMatch(t *testing.T) {
 		AddressPatterns: []models.UtxoAddressPattern{{DelegationPart: stake}},
 	}
 
-	count, err := db.CountUtxosByAddressWithOrdering(query, nil)
+	count, err := db.CountUtxosByAddressWithOrdering(context.Background(), query, nil)
 	require.NoError(t, err)
 	assert.Equal(t, total, count)
 
 	t.Run("ascending page stops at the requested window", func(t *testing.T) {
 		page, err := db.UtxosByAddressWithOrdering(
+			context.Background(),
 			&models.UtxoWithOrderingQuery{
 				AddressPatterns: query.AddressPatterns,
 				Limit:           10,
@@ -635,6 +646,7 @@ func TestCountAndPageUtxosByAddressWithOrderingCoarseMatch(t *testing.T) {
 		"descending page returns newest first without a full reverse",
 		func(t *testing.T) {
 			page, err := db.UtxosByAddressWithOrdering(
+				context.Background(),
 				&models.UtxoWithOrderingQuery{
 					AddressPatterns: query.AddressPatterns,
 					Limit:           10,
@@ -651,6 +663,7 @@ func TestCountAndPageUtxosByAddressWithOrderingCoarseMatch(t *testing.T) {
 
 	t.Run("offset past the end returns an empty page", func(t *testing.T) {
 		page, err := db.UtxosByAddressWithOrdering(
+			context.Background(),
 			&models.UtxoWithOrderingQuery{
 				AddressPatterns: query.AddressPatterns,
 				Limit:           10,
@@ -686,6 +699,7 @@ func TestCountUtxosByAddressWithOrderingRejectsExactAddress(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = db.CountUtxosByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 		},
@@ -716,6 +730,7 @@ func TestUtxosByAddressWithOrderingRejectsOffsetOnExactAddress(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = db.UtxosByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 			Limit:           10,
@@ -737,6 +752,7 @@ func TestUtxosByAddressWithOrderingRejectsDescendingKeyset(t *testing.T) {
 	db := openTestDB(t)
 
 	_, err := db.UtxosByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			MatchAllAddresses: true,
 			Descending:        true,
@@ -759,6 +775,7 @@ func TestUtxosByAddressWithOrderingRejectsOffsetKeyset(t *testing.T) {
 	db := openTestDB(t)
 
 	_, err := db.UtxosByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			MatchAllAddresses: true,
 			Offset:            10,
@@ -805,10 +822,10 @@ func TestCountAndFetchShareSnapshotWithinOneTxn(t *testing.T) {
 	// Opens its transaction eagerly (sqlstore.Store.transaction calls
 	// BeginTx before returning), fixing its snapshot right here, before
 	// the extra rows below exist.
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 
-	before, err := db.CountUtxosByAddressWithOrdering(query, txn)
+	before, err := db.CountUtxosByAddressWithOrdering(context.Background(), query, txn)
 	require.NoError(t, err)
 	require.Equal(t, 5, before)
 
@@ -819,18 +836,19 @@ func TestCountAndFetchShareSnapshotWithinOneTxn(t *testing.T) {
 	}
 
 	// A fresh (nil-txn) read observes the new rows...
-	after, err := db.CountUtxosByAddressWithOrdering(query, nil)
+	after, err := db.CountUtxosByAddressWithOrdering(context.Background(), query, nil)
 	require.NoError(t, err)
 	require.Equal(t, 8, after)
 
 	// ...but reusing the original txn still sees only the original
 	// snapshot: the count and the page fetch below cannot disagree about
 	// how many rows exist.
-	stillBefore, err := db.CountUtxosByAddressWithOrdering(query, txn)
+	stillBefore, err := db.CountUtxosByAddressWithOrdering(context.Background(), query, txn)
 	require.NoError(t, err)
 	require.Equal(t, 5, stillBefore)
 
 	rows, err := db.UtxosByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: query.AddressPatterns,
 			Limit:           100,
@@ -884,6 +902,7 @@ func TestMatchingUtxoRefsByAddressWithOrderingExcludesPointerSiblings(
 	pattern, err := models.ExactUtxoAddressPattern(enterprise)
 	require.NoError(t, err)
 	refs, err := db.MatchingUtxoRefsByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 		},
@@ -932,6 +951,7 @@ func TestMatchingUtxoRefsByAddressWithOrderingCrossesBatchBoundary(
 	pattern, err := models.ExactUtxoAddressPattern(addr)
 	require.NoError(t, err)
 	refs, err := db.MatchingUtxoRefsByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 		},
@@ -1031,6 +1051,7 @@ func TestMatchingUtxoRefsByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
 	pattern, err := models.ExactUtxoAddressPattern(addr)
 	require.NoError(t, err)
 	refs, err := db.MatchingUtxoRefsByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 		},
@@ -1130,6 +1151,7 @@ INSERT INTO utxo (
 	pattern, err := models.ExactUtxoAddressPattern(addr)
 	require.NoError(t, err)
 	refs, err := db.MatchingUtxoRefsByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 		},
@@ -1206,6 +1228,7 @@ func TestUtxosByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
 	pattern, err := models.ExactUtxoAddressPattern(target)
 	require.NoError(t, err)
 	got, err := db.UtxosByAddressWithOrdering(
+		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 			Limit:           matchCount,
@@ -1250,7 +1273,7 @@ func TestUtxosByAddressLoadsAssets(t *testing.T) {
 	txHash := bytes.Repeat([]byte{0x99}, 32)
 	policyID := bytes.Repeat([]byte{0x33}, 28)
 	assetName := []byte("asset")
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       txHash,
 		OutputIdx:  0,
 		PaymentKey: addr.PaymentKeyHash().Bytes(),
@@ -1274,6 +1297,7 @@ func TestUtxosByAddressLoadsAssets(t *testing.T) {
 	}))
 
 	got, err := db.UtxosByAddress(
+		context.Background(),
 		[]lcommon.Address{addr},
 		MaxUtxosByAddressResults,
 		nil,
@@ -1358,6 +1382,7 @@ INSERT INTO utxo (
 	}))
 
 	got, err := db.UtxosByAddress(
+		context.Background(),
 		addrs,
 		MaxUtxosByAddressResults,
 		nil,
@@ -1446,6 +1471,7 @@ func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
 
 	want := seedExactAddressUtxo(t, db, raw, addrs[0], 1, 0x42)
 	got, err := db.UtxosByAddress(
+		context.Background(),
 		addrs,
 		MaxUtxosByAddressResults,
 		nil,
@@ -1478,7 +1504,7 @@ func TestResolveUtxoCborWithRecoveryReconstructsMissingBlob(t *testing.T) {
 	// UTxO is live with an offset reference before its blob entry is
 	// deleted below.
 	storeBlockOffsetsOnly(t, db, producer.block)
-	metaTxn := db.MetadataTxn(true)
+	metaTxn := db.MetadataTxn(context.Background(), true)
 	t.Cleanup(metaTxn.Release)
 	require.NoError(
 		t,
@@ -1502,7 +1528,7 @@ func TestResolveUtxoCborWithRecoveryReconstructsMissingBlob(t *testing.T) {
 	// via SetGapBlockTransaction) stays live.
 	blob := db.Blob()
 	require.NotNil(t, blob)
-	writeTxn := db.Transaction(true)
+	writeTxn := db.Transaction(context.Background(), true)
 	t.Cleanup(writeTxn.Release)
 	require.NoError(
 		t,
@@ -1516,7 +1542,7 @@ func TestResolveUtxoCborWithRecoveryReconstructsMissingBlob(t *testing.T) {
 	require.ErrorIs(t, err, types.ErrBlobKeyNotFound,
 		"test setup must reproduce a genuinely missing blob")
 
-	recovered, err := db.ResolveUtxoCborWithRecovery(txId, outputIdx, nil)
+	recovered, err := db.ResolveUtxoCborWithRecovery(context.Background(), txId, outputIdx, nil)
 	require.NoError(t, err, "a missing-but-reconstructable blob must recover")
 	require.NotEmpty(t, recovered)
 
@@ -1551,7 +1577,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 	require.NotEmpty(t, candidate.producers)
 	producer := candidate.producers[0]
 	storeBlockOffsetsOnly(t, db, producer.block)
-	metaTxn := db.MetadataTxn(true)
+	metaTxn := db.MetadataTxn(context.Background(), true)
 	t.Cleanup(metaTxn.Release)
 	require.NoError(
 		t,
@@ -1571,7 +1597,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 
 	blob := db.Blob()
 	require.NotNil(t, blob)
-	writeTxn := db.Transaction(true)
+	writeTxn := db.Transaction(context.Background(), true)
 	t.Cleanup(writeTxn.Release)
 	require.NoError(
 		t,
@@ -1596,6 +1622,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 	)
 
 	recovered, err := db.ResolveUtxoCborWithRecovery(
+		context.Background(),
 		txId, outputIdx, blobOnlyTxn,
 	)
 	require.NoError(
@@ -1627,7 +1654,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery(
 	require.NotEmpty(t, candidate.producers)
 	producer := candidate.producers[0]
 	storeBlockOffsetsOnly(t, db, producer.block)
-	metaTxn := db.MetadataTxn(true)
+	metaTxn := db.MetadataTxn(context.Background(), true)
 	t.Cleanup(metaTxn.Release)
 	require.NoError(
 		t,
@@ -1647,7 +1674,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery(
 
 	blob := db.Blob()
 	require.NotNil(t, blob)
-	writeTxn := db.Transaction(true)
+	writeTxn := db.Transaction(context.Background(), true)
 	t.Cleanup(writeTxn.Release)
 	require.NoError(
 		t,
@@ -1663,7 +1690,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery(
 	)
 	require.NoError(t, writeTxn.Commit())
 
-	metadataOnlyTxn := db.MetadataTxn(false)
+	metadataOnlyTxn := db.MetadataTxn(context.Background(), false)
 	defer metadataOnlyTxn.Release()
 	require.Nil(
 		t, metadataOnlyTxn.Blob(),
@@ -1671,6 +1698,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery(
 	)
 
 	recovered, err := db.ResolveUtxoCborWithRecovery(
+		context.Background(),
 		txId, outputIdx, metadataOnlyTxn,
 	)
 	require.NoError(
@@ -1711,7 +1739,7 @@ func TestResolveUtxoCborWithRecoveryMetadataOnlyWriteCapableCallerPersistsRepair
 	require.NotEmpty(t, candidate.producers)
 	producer := candidate.producers[0]
 	storeBlockOffsetsOnly(t, db, producer.block)
-	metaTxn := db.MetadataTxn(true)
+	metaTxn := db.MetadataTxn(context.Background(), true)
 	t.Cleanup(metaTxn.Release)
 	require.NoError(
 		t,
@@ -1731,7 +1759,7 @@ func TestResolveUtxoCborWithRecoveryMetadataOnlyWriteCapableCallerPersistsRepair
 
 	blob := db.Blob()
 	require.NotNil(t, blob)
-	writeTxn := db.Transaction(true)
+	writeTxn := db.Transaction(context.Background(), true)
 	t.Cleanup(writeTxn.Release)
 	require.NoError(
 		t,
@@ -1745,7 +1773,7 @@ func TestResolveUtxoCborWithRecoveryMetadataOnlyWriteCapableCallerPersistsRepair
 
 	// Write-capable, unlike the sibling upgrade test above -- this is the
 	// caller shape the finding is about.
-	metadataOnlyTxn := db.MetadataTxn(true)
+	metadataOnlyTxn := db.MetadataTxn(context.Background(), true)
 	defer metadataOnlyTxn.Release()
 	require.Nil(
 		t, metadataOnlyTxn.Blob(),
@@ -1756,7 +1784,7 @@ func TestResolveUtxoCborWithRecoveryMetadataOnlyWriteCapableCallerPersistsRepair
 		"test setup must reproduce a genuinely write-capable caller",
 	)
 
-	_, err = db.ResolveUtxoCborWithRecovery(txId, outputIdx, metadataOnlyTxn)
+	_, err = db.ResolveUtxoCborWithRecovery(context.Background(), txId, outputIdx, metadataOnlyTxn)
 	require.NoError(t, err, "UTxO must recover successfully")
 
 	checkTxn := blob.NewTransaction(false)
@@ -1799,7 +1827,7 @@ func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 	require.NotEmpty(t, candidate.producers)
 	producer := candidate.producers[0]
 	storeBlockOffsetsOnly(t, db, producer.block)
-	metaTxn := db.MetadataTxn(true)
+	metaTxn := db.MetadataTxn(context.Background(), true)
 	t.Cleanup(metaTxn.Release)
 	require.NoError(
 		t,
@@ -1819,7 +1847,7 @@ func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 
 	blob := db.Blob()
 	require.NotNil(t, blob)
-	writeTxn := db.Transaction(true)
+	writeTxn := db.Transaction(context.Background(), true)
 	t.Cleanup(writeTxn.Release)
 	require.NoError(
 		t,
@@ -1835,7 +1863,7 @@ func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 	// write txn as A's deletions above, committed together below.
 	txIdB := bytes.Repeat([]byte{0xB2}, 32)
 	const outputIdxB = uint32(0)
-	require.NoError(t, db.CreateUtxo(writeTxn, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), writeTxn, &models.Utxo{
 		TxId:      txIdB,
 		OutputIdx: outputIdxB,
 		AddedSlot: 100,
@@ -1854,10 +1882,11 @@ func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 		"test setup must reproduce a genuinely blob-only txn",
 	)
 
-	_, err = db.ResolveUtxoCborWithRecovery(txIdA, outputIdxA, callerTxn)
+	_, err = db.ResolveUtxoCborWithRecovery(context.Background(), txIdA, outputIdxA, callerTxn)
 	require.NoError(t, err, "UTxO A must recover successfully")
 
 	recoveredB, err := db.ResolveUtxoCborWithRecovery(
+		context.Background(),
 		txIdB, outputIdxB, callerTxn,
 	)
 	require.NoError(
@@ -1896,7 +1925,7 @@ func TestResolveUtxoCborWithRecoverySharedMetadataRollbackDoesNotFinishCallersTx
 	require.NotEmpty(t, candidate.producers)
 	producer := candidate.producers[0]
 	storeBlockOffsetsOnly(t, db, producer.block)
-	metaTxn := db.MetadataTxn(true)
+	metaTxn := db.MetadataTxn(context.Background(), true)
 	t.Cleanup(metaTxn.Release)
 	require.NoError(
 		t,
@@ -1916,7 +1945,7 @@ func TestResolveUtxoCborWithRecoverySharedMetadataRollbackDoesNotFinishCallersTx
 
 	blob := db.Blob()
 	require.NotNil(t, blob)
-	writeTxn := db.Transaction(true)
+	writeTxn := db.Transaction(context.Background(), true)
 	t.Cleanup(writeTxn.Release)
 	require.NoError(
 		t,
@@ -1928,14 +1957,14 @@ func TestResolveUtxoCborWithRecoverySharedMetadataRollbackDoesNotFinishCallersTx
 	)
 	require.NoError(t, writeTxn.Commit())
 
-	metadataOnlyTxn := db.MetadataTxn(false)
+	metadataOnlyTxn := db.MetadataTxn(context.Background(), false)
 	defer metadataOnlyTxn.Release()
 	require.Nil(
 		t, metadataOnlyTxn.Blob(),
 		"test setup must reproduce a genuinely metadata-only txn",
 	)
 
-	_, err = db.ResolveUtxoCborWithRecovery(txId, outputIdx, metadataOnlyTxn)
+	_, err = db.ResolveUtxoCborWithRecovery(context.Background(), txId, outputIdx, metadataOnlyTxn)
 	require.NoError(t, err, "UTxO must recover successfully")
 
 	_, err = db.Metadata().GetTransactionByHash(
@@ -1962,9 +1991,9 @@ func TestResolveUtxoCborWithRecoveryPropagatesUnrecoverable(t *testing.T) {
 
 	txId := make([]byte, 32)
 	txId[0] = 0xEE
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(itxn *Txn) error {
-		return db.CreateUtxo(itxn, &models.Utxo{
+		return db.CreateUtxo(context.Background(), itxn, &models.Utxo{
 			TxId:      txId,
 			OutputIdx: 0,
 			AddedSlot: 1,
@@ -1972,7 +2001,7 @@ func TestResolveUtxoCborWithRecoveryPropagatesUnrecoverable(t *testing.T) {
 	}))
 	txn.Release()
 
-	_, err = db.ResolveUtxoCborWithRecovery(txId, 0, nil)
+	_, err = db.ResolveUtxoCborWithRecovery(context.Background(), txId, 0, nil)
 	require.True(t, errors.Is(err, ErrUtxoCborUnavailable),
 		"a UTxO with no indexed producer block must report unavailable, not succeed silently")
 }
@@ -1995,7 +2024,7 @@ func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 	producer := candidate.producers[0]
 	// Written against the original store, before any swap below.
 	storeBlockOffsetsOnly(t, db, producer.block)
-	metaTxn := db.MetadataTxn(true)
+	metaTxn := db.MetadataTxn(context.Background(), true)
 	t.Cleanup(metaTxn.Release)
 	require.NoError(
 		t,
@@ -2015,7 +2044,7 @@ func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 
 	// Delete just this output's blob entry so the resolve misses and
 	// recovery kicks in, same setup as the sibling recovery tests.
-	writeTxn := db.Transaction(true)
+	writeTxn := db.Transaction(context.Background(), true)
 	t.Cleanup(writeTxn.Release)
 	require.NoError(
 		t,
@@ -2090,6 +2119,7 @@ func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 	require.True(t, originalStore == prev)
 
 	recovered, err := db.ResolveUtxoCborWithRecovery(
+		context.Background(),
 		txId, outputIdx, callerTxn,
 	)
 	require.NoError(
@@ -2142,20 +2172,22 @@ func TestTransactionsByAddressHonorSlotRange(t *testing.T) {
 	from := &models.AddressTransactionPosition{Slot: 3}
 	to := &models.AddressTransactionPosition{Slot: 5, TxIndex: 0}
 	txs, err := db.GetTransactionsByAddressWithOrder(
-		enterprise, 10, 0, "asc", from, to, nil,
+		context.Background(), enterprise, 10, 0, "asc", from, to, nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, txs, 3)
 	assert.Equal(t, []byte{0x03, 0x04, 0x05}, []byte{
 		txs[0].Hash[0], txs[1].Hash[0], txs[2].Hash[0],
 	})
-	count, err := db.CountTransactionsByAddress(enterprise, from, to, nil)
+	count, err := db.CountTransactionsByAddress(
+		context.Background(), enterprise, from, to, nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, 3, count)
 
 	// Bounds apply before the page window.
 	page, err := db.GetTransactionsByAddressWithOrder(
-		enterprise, 1, 1, "desc", from, to, nil,
+		context.Background(), enterprise, 1, 1, "desc", from, to, nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, page, 1)

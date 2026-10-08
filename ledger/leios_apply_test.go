@@ -176,10 +176,11 @@ func leiosApplyTestApplyEndorserBlock(
 ) (int, error) {
 	t.Helper()
 	applied := -1
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
 		var err error
 		applied, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			rbPoint,
 			rbBlockNumber,
@@ -452,7 +453,7 @@ func leiosApplyTestApplyRankingDelta(
 		ebHash,
 	)
 	require.NoError(t, err)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	return txn.Do(func(txn *database.Txn) error {
 		delta := NewLedgerDelta(
 			rbPoint,
@@ -462,7 +463,11 @@ func leiosApplyTestApplyRankingDelta(
 		defer delta.Release()
 		delta.Offsets = offsets
 		delta.addTransaction(tx, 0)
-		return delta.applyWithoutRecordingDonations(ls, txn)
+		return delta.applyWithoutRecordingDonations(
+			context.Background(),
+			ls,
+			txn,
+		)
 	})
 }
 
@@ -571,10 +576,11 @@ func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 	const ebSlot = uint64(200)
 	ebHash := leiosApplyTestEbHash(0x22)
 	applied := -1
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		applied, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x33),
 			1,
@@ -608,10 +614,11 @@ func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 	const ebSlot = uint64(300)
 	ebHash := leiosApplyTestEbHash(0x44)
 	applied := -1
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		applied, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x55),
 			1,
@@ -640,10 +647,11 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 	appliedFirst := -1
 	appliedSameTxnDuplicate := -1
 	appliedSecondUnique := -1
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		appliedFirst, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x81),
 			1,
@@ -655,6 +663,7 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 			return err
 		}
 		appliedSameTxnDuplicate, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x83),
 			2,
@@ -666,6 +675,7 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 			return err
 		}
 		appliedSecondUnique, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x85),
 			3,
@@ -689,10 +699,11 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 	)
 
 	appliedCommittedDuplicate := -1
-	txn = db.Transaction(true)
+	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		appliedCommittedDuplicate, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x87),
 			4,
@@ -721,10 +732,11 @@ func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
 	const ebSlot = uint64(400)
 	ebHash := leiosApplyTestEbHash(0x66)
 	applied := -1
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		applied, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x77),
 			1,
@@ -796,9 +808,10 @@ func TestApplyEndorserBlockHaskellPathProducesUtxo(t *testing.T) {
 	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")
 
 	rbPoint := leiosApplyTestRankingPoint(0x79)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		applied, _, err := ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			rbPoint,
 			1,
@@ -848,9 +861,10 @@ func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
 	rawTx, tx := leiosApplyTestTxWithOutput(t, 0x6c)
 	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(t.Context(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		_, _, err := ls.applyEndorserBlock(
+			t.Context(),
 			txn,
 			leiosApplyTestRankingPoint(0x7a),
 			1,
@@ -884,9 +898,10 @@ func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 	firstPoint := leiosApplyTestRankingPoint(0x91)
 	replayPoint := leiosApplyTestRankingPoint(0x93)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		_, _, err := ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			firstPoint,
 			1,
@@ -897,9 +912,10 @@ func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 		return err
 	}))
 
-	txn = db.Transaction(true)
+	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		_, _, err := ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			replayPoint,
 			2,
@@ -2886,11 +2902,11 @@ func TestApplyEndorserBlockContextFailureRollsBackEffects(t *testing.T) {
 	point := leiosApplyTestRankingPoint(0xA6)
 	point.Slot = 1020
 	apply := func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlockInContext(txn, point, 1, 990, leiosApplyTestEbHash(0xA7), []cbor.RawMessage{closure, second}, &contextSlot)
+		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xA7), []cbor.RawMessage{closure, second}, &contextSlot)
 		return err
 	}
-	require.ErrorContains(t, db.Transaction(true).Do(apply), "injected closure context failure")
-	stored, err := db.GetTransactionByHash(tx.Hash().Bytes(), nil)
+	require.ErrorContains(t, db.Transaction(t.Context(), true).Do(apply), "injected closure context failure")
+	stored, err := db.GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
 	require.NoError(t, err)
 	require.Nil(t, stored)
 	var outputs int
@@ -2901,7 +2917,7 @@ func TestApplyEndorserBlockContextFailureRollsBackEffects(t *testing.T) {
 	require.Zero(t, fees)
 	_, err = raw.Exec(`DROP TRIGGER fail_closure_context`)
 	require.NoError(t, err)
-	require.NoError(t, db.Transaction(true).Do(apply))
+	require.NoError(t, db.Transaction(t.Context(), true).Do(apply))
 	fees, err = db.Metadata().SumTransactionFeesInSlotRange(0, 999, nil)
 	require.NoError(t, err)
 	require.Equal(t, 2*tx.Fee().Uint64(), fees)
@@ -2916,25 +2932,25 @@ func TestUntickedClosureEventsWaitForCertifyingBlockCommit(t *testing.T) {
 	contextSlot := uint64(990)
 	publications := 0
 	ls.beforeTransactionApplyPublish = func() { publications++ }
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlockInContext(txn, point, 1, 990, leiosApplyTestEbHash(0xB3), []cbor.RawMessage{closure}, &contextSlot)
+	require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xB3), []cbor.RawMessage{closure}, &contextSlot)
 		return err
 	}))
 	require.Zero(t, publications, "rollover alone must not publish certifying-block transaction events")
 	apply := func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlock(txn, point, 1, 990, leiosApplyTestEbHash(0xB3), []cbor.RawMessage{closure})
+		_, _, err := ls.applyEndorserBlock(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xB3), []cbor.RawMessage{closure})
 		return err
 	}
-	require.ErrorContains(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+	require.ErrorContains(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
 		if err := apply(txn); err != nil {
 			return err
 		}
 		return errors.New("injected ranking body failure")
 	}), "injected ranking body failure")
 	require.Zero(t, publications)
-	require.NoError(t, db.Transaction(true).Do(apply))
+	require.NoError(t, db.Transaction(t.Context(), true).Do(apply))
 	require.Equal(t, 1, publications, "a retry publishes the closure after the certifying block commits")
-	require.NoError(t, db.Transaction(true).Do(apply))
+	require.NoError(t, db.Transaction(t.Context(), true).Do(apply))
 	require.Equal(t, 1, publications, "replaying the certifier does not publish duplicate closure events")
 }
 
@@ -2948,14 +2964,14 @@ func TestRollbackSameTipRemovesUntickedClosure(t *testing.T) {
 	require.NoError(t, ls.db.SetTip(fixture.ancestorTip, nil))
 	closure, tx := leiosApplyTestProducerTx(t, 0xC1)
 	contextSlot := fixture.ancestorTip.Point.Slot
-	require.NoError(t, ls.db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlockInContext(txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot)
+	require.NoError(t, ls.db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot)
 		return err
 	}))
 	require.NotNil(t, ls.untickedClosure)
-	require.NoError(t, ls.rollbackWithBlocks(fixture.ancestorTip.Point, nil, false))
+	require.NoError(t, ls.rollbackWithBlocks(t.Context(), fixture.ancestorTip.Point, nil, false))
 	require.Nil(t, ls.untickedClosure)
-	stored, err := ls.db.GetTransactionByHash(tx.Hash().Bytes(), nil)
+	stored, err := ls.db.GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
 	require.NoError(t, err)
 	require.Nil(t, stored, "a same-tip rollback must remove closure effects owned by the rejected next block")
 }
@@ -2970,14 +2986,14 @@ func TestRollbackAheadOfParentRemovesUntickedClosure(t *testing.T) {
 	require.NoError(t, ls.db.SetTip(fixture.ancestorTip, nil))
 	closure, tx := leiosApplyTestProducerTx(t, 0xC1)
 	contextSlot := fixture.ancestorTip.Point.Slot
-	require.NoError(t, ls.db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlockInContext(txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot)
+	require.NoError(t, ls.db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot)
 		return err
 	}))
 	require.NotNil(t, ls.untickedClosure)
-	require.NoError(t, ls.rollbackWithBlocks(ocommon.Point{Slot: fixture.ancestorTip.Point.Slot + 1, Hash: fixture.ancestorTip.Point.Hash}, nil, false))
+	require.NoError(t, ls.rollbackWithBlocks(t.Context(), ocommon.Point{Slot: fixture.ancestorTip.Point.Slot + 1, Hash: fixture.ancestorTip.Point.Hash}, nil, false))
 	require.Nil(t, ls.untickedClosure)
-	stored, err := ls.db.GetTransactionByHash(tx.Hash().Bytes(), nil)
+	stored, err := ls.db.GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
 	require.NoError(t, err)
 	require.Nil(t, stored, "rollback before the certifier must remove pending closure effects")
 }
