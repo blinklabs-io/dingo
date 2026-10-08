@@ -4410,11 +4410,20 @@ for snapshot admission, and the Acquire must still own its in-flight token
 before it can install the opened view. A snapshot still held after
 `localStateQueryViewMaxLifetime` (default `5m`, env
 `DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME`) is closed by a per-session timer
-and logged with its age and idle time; the session stays recorded so its next
-query fails with `ledger.ErrQueryViewClosed` -- ending the connection, as any
-query error does -- instead of silently reading live state. Closing a view
-never waits for a query in flight: that query completes against the snapshot
-and the last one out releases it.
+and logged with its age and idle time, freeing the read transaction it held.
+The session stays recorded with the block its view answered for -- the
+acquired point, or for a tip acquire the tip its snapshot held -- and its next
+query reopens a view at that block (`reopenExpiredLocalStateQuerySession`,
+pinned like a specific-point Acquire) and answers from it, so the lifetime
+bounds how long one read transaction lives, not how long a client may stay
+acquired, and the session never reads live state. The LocalStateQuery protocol
+has no reply for a failed query: any error after a successful Acquire ends the
+connection (#4234). A rollback or prune committed after Acquire cannot cause
+one, since every query reads the session's snapshot, so the only remaining case
+is a reopen whose block this node can no longer answer for (rolled back, or
+past a retention floor, while the view was closed); that query fails and is
+logged. Closing a view never waits for a query in flight: that query completes
+against the snapshot and the last one out releases it.
 
 Only some query types honor a pinned point today: `GetPoolDistr2`
 (`PoolStakeDistribution`, resolving the pinned slot to the epoch that
