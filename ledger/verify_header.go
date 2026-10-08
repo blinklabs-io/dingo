@@ -305,9 +305,11 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 		return nil
 	}
 	if peerRelative {
+		snapshot := ls.loadConsensusSnapshot()
 		epochNonce, epoch, fork, err := ls.peerChainSelectionEpochNonce(
 			connId,
 			header,
+			snapshot,
 		)
 		if err != nil {
 			return err
@@ -325,7 +327,7 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 				ls.verifyBlockHeaderStateWithCache(
 					block,
 					epoch.EpochId,
-					ls.epochCacheSnapshot(),
+					snapshot.epochCache,
 					true,
 				),
 			)

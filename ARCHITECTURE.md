@@ -5180,7 +5180,7 @@ it. Dingo implements this as a **corroboration gate**
   from peer-reported headers that had not passed any check. The roll-forward
   handler now verifies a header's VRF/KES cryptography and, once local ledger
   state has caught up, its leader eligibility
-  (`LedgerState.ValidateChainSelectionHeaderCrypto`, gated by
+  (`LedgerState.ValidatePeerChainSelectionHeaderCrypto`, gated by
   `ShouldVerifyChainSelectionHeaderCrypto`) *before* it is observed, for every
   ingress-eligible peer — not only the currently apply-eligible one, since a
   competing candidate's headers never reach the ledger's own chainsync
@@ -5297,7 +5297,9 @@ tokens per second. It follows the reference ChainSync client:
   `ouroboros.chainsyncClientRollForwardAt` charges the peer only up to the
   header's network arrival (`PatienceMessageArrived`) and resumes after the
   callback (`PatienceHeaderAccepted`), so decoding, future-header admission
-  waits, verification and ledger backpressure are not charged. A new bucket starts paused
+  waits, verification and ledger backpressure are not charged. A withheld or
+  rejected ingress-eligible header resumes leakage through
+  `PatienceMessageProcessed` without earning a token. A new bucket starts paused
   until the peer's first accepted header or rollback, because tracked clients
   are registered inside their first callback. Headers from a peer that is
   not ingress-eligible are not verified, so they pause the bucket rather than

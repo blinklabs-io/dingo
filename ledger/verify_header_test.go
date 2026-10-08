@@ -6938,6 +6938,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		ls.peerChainSelectionEpochNonce(
 			ouroboros.ConnectionId{},
 			target.block.Header(),
+			ls.loadConsensusSnapshot(),
 		)
 	require.NoError(t, nonceErr)
 	require.True(t, fork)
@@ -6953,6 +6954,60 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		target.block.Header(),
 	)
 	require.NoError(t, peerErr)
+	require.NoError(t, db.Metadata().DeletePoolStakeSnapshotsForEpoch(
+		4,
+		models.PoolStakeSnapshotTypeMark,
+		nil,
+	))
+	require.NoError(t, ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		target.block.Header(),
+	), "a validated fork prefix should not be verified again")
+	ls.removePeerHeaderHistory(connIdKey(ouroboros.ConnectionId{}))
+	clearedPrefixErr := ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		target.block.Header(),
+	)
+	require.Error(t, clearedPrefixErr)
+	require.True(t, IsHeaderVerificationDeferred(clearedPrefixErr))
+	seedPoolStakeSnapshot(t, db, 4, forkPool[:], 1_000_000_000)
+
+	lateAnchorBlockNumber := anchor.block.BlockNumber() + 1
+	lateAnchor := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{88},
+		sourceNonce,
+		cutoff,
+		cutoff+1,
+		anchorPoint.Hash,
+		&lateAnchorBlockNumber,
+		tamperNone,
+	)
+	require.NoError(t, ls.chain.AddLocalBlock(lateAnchor.block))
+	frozenEpochNonce, err := assembleEpochNonce(
+		localCandidate,
+		ls.epochCache[0].LastEpochBlockNonce,
+		extraEntropy,
+	)
+	require.NoError(t, err)
+	lateTargetBlockNumber := lateAnchorBlockNumber + 1
+	lateTarget := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{89},
+		frozenEpochNonce,
+		targetEpochStart,
+		targetEpochStart+100,
+		lateAnchor.block.Hash().Bytes(),
+		&lateTargetBlockNumber,
+		tamperNone,
+	)
+	seedBlockPoolRegistration(t, db, lateTarget.block)
+	lateTargetPool := lateTarget.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 5, lateTargetPool[:], 1_000_000_000)
+	require.NoError(t, ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		lateTarget.block.Header(),
+	), "a post-cutoff ancestor should use the frozen candidate nonce")
 
 	tamperedTarget := createTestBlockWithNonceAtSlotsAndBlockNumber(
 		t,
@@ -7174,6 +7229,7 @@ func TestPeerChainSelectionEpochNonceUsesSeededShelleyBoundaryNonce(
 	nonce, epoch, candidate, err := ls.peerChainSelectionEpochNonce(
 		ouroboros.ConnectionId{},
 		shelleyBlock.Header(),
+		ls.loadConsensusSnapshot(),
 	)
 	require.NoError(t, err)
 	require.True(t, candidate)

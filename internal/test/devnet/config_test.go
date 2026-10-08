@@ -150,7 +150,7 @@ func launchedTxPumpWindow(t *testing.T, script string, args ...string) uint64 {
 	t.Helper()
 	result := runFakeDevnetScript(t, script, 0, false, map[string]string{
 		"DEVNET_TXPUMP_CONFIRMATION_SLOTS": "999999",
-	}, args...)
+	}, false, args...)
 	require.Equal(t, 0, result.exitCode, result.output)
 	matches := regexp.MustCompile(`(?m)^TXPUMP_WINDOW=(\d+)$`).
 		FindAllStringSubmatch(result.dockerLog, -1)

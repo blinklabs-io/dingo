@@ -1250,7 +1250,8 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// normal shape of a peer legitimately racing ahead of local ledger
 		// application, not a peer fault. Only a definite crypto/eligibility
 		// failure excludes the header from observation and recycles the
-		// connection.
+		// connection. Missing chain-dependent context temporarily withholds
+		// observation without blaming the peer.
 		selectionEligible := ingressEligible
 		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
 			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
