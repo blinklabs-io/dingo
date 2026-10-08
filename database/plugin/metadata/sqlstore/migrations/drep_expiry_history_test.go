@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestDrepExpiryHistoryBackfillDatesCurrentExpiry covers the v35 seed row
+// TestDrepExpiryHistoryBackfillDatesCurrentExpiry covers the v37 seed row
 // each existing DRep gets: its current expiry, dated at the latest event that
 // could have set it.
 func TestDrepExpiryHistoryBackfillDatesCurrentExpiry(t *testing.T) {
@@ -40,7 +40,7 @@ func TestDrepExpiryHistoryBackfillDatesCurrentExpiry(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 37)
+	require.Len(t, registry, 38)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,

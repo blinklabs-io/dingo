@@ -725,6 +725,16 @@ func (ls *LedgerState) queryTip(
 	return ls.db.GetTip(txn)
 }
 
+// queryShelleyLedgerTip answers GetLedgerTip: the acquired point when one is
+// pinned (Query has already verified it is on the chain), otherwise the live
+// tip.
+func (ls *LedgerState) queryShelleyLedgerTip(at QueryPoint) (any, error) {
+	if at.pinned() {
+		return []any{ocommon.NewPoint(at.Slot, at.Hash)}, nil
+	}
+	return []any{cloneTip(ls.loadTipSnapshot().currentTip).Point}, nil
+}
+
 // queryHardFork answers HardFork queries. at is Query's pinned point
 // (unpinned = live); only HardForkCurrentEraQuery honors it --
 // HardForkEraHistoryQuery answers the whole era-boundary table as known up
@@ -1208,21 +1218,29 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // history, proposal lifecycle slots and vote history are removed only by
 // rollback, so none of these needs a retention floor.
 //
+// Also honors at: ShelleyLedgerTipQuery (answers at itself when pinned), and
+// ShelleyProposedProtocolParamsUpdatesQuery (resolves at's era like
+// HardForkCurrentEraQuery: an empty map from Conway on, refused earlier).
+//
 // Intentionally live-only, not a gap: ShelleyGenesisConfigQuery
 // (genesis is an immutable chain-wide constant with no historical variant),
 // ShelleyGetLedgerPeerSnapshotQuery (peer/networking bootstrap data, not
 // ledger state at all).
 //
-// Not point-aware, real gap, out of scope for this pass: every remaining
-// case answers unconditionally from live state regardless of at, because
-// making it historically correct needs storage or reconstruction logic
-// that does not exist yet --
-//   - ShelleyDebugChainDepStateQuery: consensus nonce/opcert state.
-//     computeCandidateNonceAsOf already takes an arbitrary end-slot
-//     internally (a possible future entry point), but OpCertCounters
-//     reads live per-pool operational-certificate counters with no
-//     historical tracking, so the reply as a whole cannot be pinned
-//     without that piece too.
+// Not point-aware, real gaps: ShelleyStakePoolParamsQuery reads live pool
+// registration rows, which carry no per-point history, and
+// ShelleyDebugChainDepStateQuery reads live per-pool operational-certificate
+// counters. computeCandidateNonceAsOf already takes an arbitrary end-slot
+// internally, but the counters have no historical tracking, so the reply as
+// a whole cannot be pinned without that piece too.
+//
+// Not answered, so the call fails with "unsupported query type":
+// ShelleyPoolStateQuery, ShelleyPoolDistrQuery and
+// ShelleyNonMyopicMemberRewardsQuery, whose request filters the pinned
+// gouroboros version cannot decode (the request is rejected before it reaches
+// this switch); ShelleyRewardInfoPoolsQuery, ShelleyRewardProvenanceQuery,
+// ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which need
+// reward-calculation and full epoch state that is not tracked.
 //
 // Not applicable: ShelleyCborQuery (a combinator, not a leaf query --
 // forwards at to whatever it wraps).
@@ -1280,15 +1298,18 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 		return ls.queryShelleyStakeDistribution(ctx, at, txn)
 	case *olocalstatequery.ShelleyUtxoWholeQuery:
 		return ls.queryShelleyUtxoWhole(ctx, at, txn)
+	case *olocalstatequery.ShelleyLedgerTipQuery:
+		return ls.queryShelleyLedgerTip(at)
+	case *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery:
+		return ls.queryShelleyProposedProtocolParamsUpdates(ctx, q, at, txn)
+	case *olocalstatequery.ShelleyStakePoolParamsQuery:
+		return ls.queryShelleyStakePoolParams(ctx, q.PoolIds.Items())
 	// TODO: implement the remaining Shelley ledger queries below.
 	/*
-		case *olocalstatequery.ShelleyLedgerTipQuery:
 		case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
-		case *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery:
 		case *olocalstatequery.ShelleyDebugEpochStateQuery:
 		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
-		case *olocalstatequery.ShelleyStakePoolParamsQuery:
 		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
 		case *olocalstatequery.ShelleyPoolStateQuery:
 		case *olocalstatequery.ShelleyPoolDistrQuery:
@@ -1296,6 +1317,34 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
+}
+
+// queryShelleyProposedProtocolParamsUpdates answers GetProposedPParamsUpdates
+// with an empty map when the acquired point is in Conway or later: Conway
+// replaced update proposals with governance actions, so the ledger holds none
+// to report. Earlier eras do carry proposals, which this query does not read,
+// so a point in one of them is refused.
+func (ls *LedgerState) queryShelleyProposedProtocolParamsUpdates(
+	ctx context.Context,
+	q *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery,
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	eraID, err := ls.queryHardFork(
+		ctx,
+		&olocalstatequery.HardForkQuery{
+			Query: &olocalstatequery.HardForkCurrentEraQuery{},
+		},
+		at,
+		txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if id, ok := eraID.(uint); !ok || id < eras.ConwayEraDesc.Id {
+		return nil, fmt.Errorf("unsupported query type: %T", q)
+	}
+	return []any{map[any]any{}}, nil
 }
 
 // queryShelleyCbor answers the GetCBOR query combinator. It runs the wrapped
@@ -1926,27 +1975,12 @@ func genesisConfigResult(
 			MinPoolCost: int(pp.MinPoolCost),
 		},
 	}
-	initialFunds, err := cbor.Encode([]any{})
-	if err != nil {
-		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
-			"encode compact genesis initial funds: %w", err,
-		)
-	}
-	staking, err := cbor.Encode([]any{[]any{}, map[any]any{}})
-	if err != nil {
-		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
-			"encode compact genesis staking: %w", err,
-		)
-	}
-	// The current ledger compactGenesis erases these two startup-only fields.
-	// Keep the raw values available only through the legacy path.
-	result.InitialFunds = initialFunds
-	result.Staking = staking
-	if genesis.ExtraConfig == nil {
-		result.ExtraConfig, err = cbor.Encode([]any{})
-	} else {
-		result.ExtraConfig, err = cbor.Encode([]any{genesis.ExtraConfig})
-	}
+	// The current ledger compactGenesis erases initial funds and staking to
+	// empty maps: funds is a map, and staking a record of a pools map and a
+	// stake map. The raw values stay available only through the legacy path.
+	result.InitialFunds = cbor.RawMessage{0xa0}
+	result.Staking = cbor.RawMessage{0x82, 0xa0, 0xa0}
+	result.ExtraConfig, err = shelleyExtraConfigCBOR(genesis, networkID)
 	if err != nil {
 		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
 			"encode genesis extra config: %w", err,
