@@ -360,7 +360,11 @@ func (r *DeferredIndexRebuilder) BuildCritical() error {
 	if r == nil || r.manager == nil {
 		return nil
 	}
-	if err := r.manager.BuildCriticalDeferredIndexes(); err != nil {
+	logger := r.logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	if err := ensureCriticalDeferredIndexes(r.manager, logger); err != nil {
 		return fmt.Errorf("rebuilding critical deferred indexes: %w", err)
 	}
 	return nil

@@ -507,8 +507,8 @@ func TestCacheableForDialect(t *testing.T) {
 			"mysql", insertUtxoQuery, false,
 		},
 		{
-			"mysql plain select, no returning",
-			"mysql", getAssetIDQuery, true,
+			"mysql conflict-tolerant asset insert",
+			"mysql", importAssetQuery, true,
 		},
 		{
 			"mysql reward account select, no returning",
@@ -531,7 +531,7 @@ func TestCacheableForDialect(t *testing.T) {
 // counterpart to TestCacheableForDialect: it proves prepareHotStatements
 // itself actually leaves insertUtxoQuery/insertUtxoQueryIgnoreConflict
 // uncached against a MySQL-dialect Store, while a non-RETURNING hot
-// statement (getAssetIDQuery) still gets cached -- i.e. the skip is scoped
+// statement (importAssetQuery) still gets cached -- i.e. the skip is scoped
 // to the unsafe dialect+query-shape combination, not a blanket "MySQL never
 // caches anything".
 //
@@ -566,7 +566,7 @@ func TestPrepareHotStatementsSkipsReturningIDQueryOnMySQL(t *testing.T) {
 		"expected insertUtxoQueryIgnoreConflict to be uncached on MySQL",
 	)
 
-	_, ok = mysqlStore.lookupCachedStmt(getAssetIDQuery)
+	_, ok = mysqlStore.lookupCachedStmt(importAssetQuery)
 	require.True(
 		t,
 		ok,

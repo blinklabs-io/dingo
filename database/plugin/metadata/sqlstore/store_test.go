@@ -856,13 +856,13 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 	retained := retainedTxStmtCount(t, sqlTransaction.tx)
 	require.NoError(t, txn.Commit())
 
-	// insertUtxoModel here consults exactly three distinct cached queries --
-	// insertUtxoQueryIgnoreConflict, importAssetQuery, and getAssetIDQuery --
-	// so 3 is the exact bound, not just an upper one.
-	require.LessOrEqual(
+	// insertUtxoModel here consults exactly two distinct cached queries --
+	// insertUtxoQueryIgnoreConflict and importAssetQuery --
+	// so 2 is the exact bound, not just an upper one.
+	require.Equal(
 		t,
 		retained,
-		3,
+		2,
 		"expected bounded Tx-scoped statement retention for %d outputs, got %d",
 		outputCount,
 		retained,

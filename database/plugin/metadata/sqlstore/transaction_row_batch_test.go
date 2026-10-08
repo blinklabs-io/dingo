@@ -456,7 +456,7 @@ func TestBatchedProducedAssetRowsWaitForFlush(t *testing.T) {
 			lcommon.NewBlake2b224(ref.policyID), ref.name, txn,
 		)
 		require.NoError(t, err)
-		require.NotNil(t, stored)
+		require.NotZero(t, stored.ID)
 		require.Equal(t, types.Uint64(7), stored.Amount)
 	}
 }

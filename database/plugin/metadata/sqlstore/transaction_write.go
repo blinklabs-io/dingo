@@ -1249,24 +1249,6 @@ INSERT INTO asset (
 ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
 `
 
-const importAssetReturningIDQuery = `
-INSERT INTO asset (
-    name, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
-RETURNING id`
-
-// getAssetIDQuery looks up the id of the asset row insertUtxoModel's
-// ImportAsset call just created (or matched via its own ON CONFLICT), so
-// utxo.Assets[i].ID can be populated for the caller. It carries no RETURNING
-// clause, so unlike insertUtxoQuery/insertUtxoQueryIgnoreConflict it needs no
-// dialect-specific handling and is always safe to route through the
-// hot-statement cache.
-const getAssetIDQuery = `
-SELECT id FROM asset
-WHERE utxo_id = ? AND policy_id = ? AND name = ?
-ORDER BY id DESC LIMIT 1`
-
 func (s *Store) insertUtxoModel(
 	ctx context.Context,
 	db queryer,
@@ -1396,8 +1378,8 @@ func (s *Store) persistUtxoRelations(
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
 		asset.UtxoID = id
-		var assetID uint
-		err := s.queryRowCached(ctx, db, importAssetReturningIDQuery,
+		asset.ID = 0
+		if _, err := s.execCached(ctx, db, importAssetQuery,
 			asset.Name,
 			asset.PolicyId,
 			asset.Fingerprint,
@@ -1406,18 +1388,9 @@ func (s *Store) persistUtxoRelations(
 				String: decimalUint64(asset.Amount),
 				Valid:  true,
 			},
-		).Scan(&assetID)
-		if errors.Is(err, sql.ErrNoRows) {
-			err = s.queryRowCached(ctx, db, getAssetIDQuery,
-				id,
-				asset.PolicyId,
-				asset.Name,
-			).Scan(&assetID)
-		}
-		if err != nil {
+		); err != nil {
 			return err
 		}
-		asset.ID = assetID
 	}
 	return nil
 }
@@ -1436,6 +1409,7 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
 		asset.UtxoID = id
+		asset.ID = 0
 		rows.add(
 			assetShape,
 			asset.Name,
