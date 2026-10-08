@@ -447,10 +447,7 @@ func (o *Ouroboros) localstatequeryServerQuery(
 		// ends the connection. A view the lifetime timer closed is reopened
 		// at the same block instead, which answers exactly as the closed one
 		// would have.
-		view, err = o.reopenExpiredLocalStateQuerySession(
-			ctx.ConnectionId,
-			session,
-		)
+		view, err = o.reopenExpiredLocalStateQuerySession(ctx, session)
 		if err != nil {
 			return nil, err
 		}
@@ -542,25 +539,53 @@ func (o *Ouroboros) expireLocalStateQuerySession(
 // stay acquired. A session the client released, or one with no block to
 // pin, is not reopened; nor is a point this node can no longer answer for
 // (rolled back, or past a retention floor), whose error ends the connection.
+//
+// The reopen registers as the connection's in-flight acquisition, as Acquire
+// does, so a disconnect cancels a wait for snapshot admission instead of
+// leaving it to open a view nothing will use.
 func (o *Ouroboros) reopenExpiredLocalStateQuerySession(
-	connId ouroboros.ConnectionId,
+	cbCtx olocalstatequery.CallbackContext,
 	session *localstatequerySession,
 ) (*ledger.QueryView, error) {
-	o.localstatequeryAcquireMutex.Lock()
-	current := o.localstatequerySessions[connId] == session
-	expired, point := session.expired, session.point
-	o.localstatequeryAcquireMutex.Unlock()
-	if !current || !expired || len(point.Hash) == 0 {
-		return nil, ledger.ErrQueryViewClosed
-	}
-	releasePin := o.ledgerState.PinAcquiredPoint(point.Slot)
+	connId := cbCtx.ConnectionId
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		localStateQueryAcquireWait,
 	)
 	defer cancel()
+	acquisition := &localstatequeryAcquisition{
+		owner:  cbCtx.Server,
+		cancel: cancel,
+	}
+	o.localstatequeryAcquireMutex.Lock()
+	current := o.localstatequerySessions[connId] == session
+	expired, point := session.expired, session.point
+	if !current || !expired || len(point.Hash) == 0 ||
+		(cbCtx.Server != nil && cbCtx.Server.IsDone()) {
+		o.localstatequeryAcquireMutex.Unlock()
+		return nil, ledger.ErrQueryViewClosed
+	}
+	if o.localstatequeryAcquisitions == nil {
+		o.localstatequeryAcquisitions = make(
+			map[ouroboros.ConnectionId]*localstatequeryAcquisition,
+		)
+	}
+	o.localstatequeryAcquisitions[connId] = acquisition
+	o.localstatequeryAcquireMutex.Unlock()
+	forget := func() {
+		o.localstatequeryAcquireMutex.Lock()
+		if o.localstatequeryAcquisitions[connId] == acquisition {
+			delete(o.localstatequeryAcquisitions, connId)
+		}
+		o.localstatequeryAcquireMutex.Unlock()
+	}
+	releasePin := o.ledgerState.PinAcquiredPoint(point.Slot)
+	if o.localstatequeryVerifyHook != nil {
+		o.localstatequeryVerifyHook()
+	}
 	view, err := o.ledgerState.AcquireQueryView(ctx, point)
 	if err != nil {
+		forget()
 		releasePin()
 		o.config.Logger.Warn(
 			"local-state-query could not reopen an expired ledger snapshot",
@@ -576,10 +601,18 @@ func (o *Ouroboros) reopenExpiredLocalStateQuerySession(
 		)
 	}
 	o.localstatequeryAcquireMutex.Lock()
-	if o.localstatequerySessions[connId] != session || !session.expired {
+	owned := o.localstatequeryAcquisitions[connId] == acquisition
+	if owned {
+		delete(o.localstatequeryAcquisitions, connId)
+	}
+	if !owned || o.localstatequerySessions[connId] != session ||
+		!session.expired {
 		o.localstatequeryAcquireMutex.Unlock()
 		view.Close()
 		releasePin()
+		if !owned {
+			return nil, errLocalStateQueryConnectionClosed
+		}
 		return nil, ledger.ErrQueryViewClosed
 	}
 	session.view = view

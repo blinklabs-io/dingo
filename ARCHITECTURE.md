@@ -4416,7 +4416,10 @@ acquired point, or for a tip acquire the tip its snapshot held -- and its next
 query reopens a view at that block (`reopenExpiredLocalStateQuerySession`,
 pinned like a specific-point Acquire) and answers from it, so the lifetime
 bounds how long one read transaction lives, not how long a client may stay
-acquired, and the session never reads live state. The LocalStateQuery protocol
+acquired. The reopened read transaction is opened later than the closed one,
+so every point-aware query answers for the same block through the pinned
+point; the query types that are live by design (`GetGenesisConfig`,
+`GetLedgerPeerSnapshot`) stay live, as they are for any session. The LocalStateQuery protocol
 has no reply for a failed query: any error after a successful Acquire ends the
 connection (#4234). A rollback or prune committed after Acquire cannot cause
 one, since every query reads the session's snapshot, so the only remaining case
