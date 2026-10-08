@@ -3984,7 +3984,7 @@ operational-certificate signature checks followed by the stateful ones, with the
 defer switch off, so the stateful genesis-delegate check runs to an authoritative
 accept/reject verdict before the block can be adopted. The deferral moves *when*
 the verdict is computed, not *whether* it is enforced; the marker
-(`deferred_header_validation:<slot>:<hash>`, in memory and in `sync_state`) is
+(in memory and as the `dh` blob key, `DATABASE.md`) is
 what forces that apply-time recheck, so its retention is load-bearing (see the
 retention-floor, eviction-horizon, and marker-restore invariants below and in
 `DATABASE.md`).
@@ -4922,11 +4922,73 @@ corroborated and becomes that connection's own reference, like a known peer's
 previous frontier: its next update is accepted within `securityParam` of its
 claim even when the corroborating frontier sits up to `securityParam` below
 it, and the entry is cleared once the connection is accepted.
-A lone far peer therefore stays rejected, and two connections delivering
-frontiers more than `securityParam` apart do not corroborate each other. The
-check counts connections, not operators, so it is not a Sybil defence;
-acceptance only admits the frontier to chain selection, and the ledger still
-verifies every applied header, completing deferred verification at apply time.
+A lone far peer is also accepted, on its own connected header chain. The
+selector requires more than `securityParam` consecutive delivered headers from
+the connection (`farTipClaim.run`), each naming the previous header's hash as
+its parent (`PeerTipUpdateEvent.ObservedPrevHash`, filled from the header by the
+ChainSync roll-forward handler), exactly one block and a later slot above it,
+with a block number no higher than the local block number plus `securityParam`
+plus the slot distance from the local tip (a chain holds at most one block per
+slot). A Byron epoch boundary block is the one header that adds no block: it
+carries its parent's block number, a later slot, and the epoch's first ordinary
+block may share its slot. The selector sees only the header type the peer sent
+(`PeerTipUpdateEvent.ObservedBoundary`), not an era, so it accepts a boundary
+block only after an ordinary header, at its parent's block number and a later
+slot, and counts it neither as progress nor as a break; two in a row, or one
+with any other block number, break the chain. A boundary-typed header therefore
+never adds height and cannot be repeated to stall a run or to dodge revocation.
+A repeated header neither advances nor resets the run; a regression, a skipped
+block, a different parent, a non-increasing slot or a delivery with no parent
+hash restarts it. Two connections delivering frontiers more than
+`securityParam` apart do not corroborate each other.
+
+The accepted connection keeps its `farTipClaims` entry marked `lone`. A marked
+frontier is excluded from the reference frontier used to admit a new peer; if
+no independently admitted frontier remains, the local tip is the reference.
+The lone peer therefore cannot indirectly admit an unrelated peer, which would
+otherwise retain ordinary standing after the lone frontier was revoked. While
+its frontier stays beyond the catch-up allowance, every delivery must continue
+the frontier it last delivered by the same rules, or the peer is removed from
+the selector (`loneFrontierBrokenLocked`, then `RemovePeer`) and has to build a
+new run from nothing. After a RollBackward to a point inside the retained `k+1`
+delivered-header history, where the block number is known, the next header must
+continue that point's block number by one. A rollback
+to any other point leaves the block number unknown (zero), and an unknown
+height continues nothing: the next delivery, whatever it names and whether
+or not it is within the catch-up allowance, removes the peer, so a peer-chosen
+rollback point cannot carry an accepted frontier or a run to another height.
+The `lone` mark is cleared without removal only when the last delivered height
+is known and both it and the new delivery are within the allowance. The
+boundary-block allowance is not restored by a
+rollback: a rollback to a boundary block followed by a block sharing its slot
+also removes the peer. Removal also happens when the connection closes, which is
+what a header-verification failure at ledger apply ends in: the ledger recycles
+the connection and `ConnectionClosedEvent` calls `RemovePeer`. The selector
+holds this state in memory only, so no persisted state depends on a lone
+frontier.
+
+This is not verification. A header this far ahead of local ledger state has
+passed no signature check: epoch resolution defers before the opcert or KES
+signature, VRF proof or leader-eligibility checks run, and a peer signing with
+its own keys would pass the signature checks that need no ledger state. A lone
+peer can therefore fabricate a connected chain of more than `securityParam`
+headers with a claimed height up to the slot-distance bound and become a
+selectable peer ahead of honest ones. What bounds it: the claimed height is
+capped by the slot distance rather than arbitrary; every later delivery must
+continue the chain or the peer is removed; the ledger verifies every applied
+header, completing deferred verification at apply time, and recycles a
+connection whose header fails; and nothing is persisted from the selector. The
+cost to honest sync is time spent following that peer until the ledger reaches
+the first header that fails. The lone run accepts only a subset of what the
+peer's own previous frontier already allows once it is tracked (each header at
+most `securityParam` above the last): it adds the connected-chain requirement
+to a bound the selector applies to every known peer, and removes the peer when
+that requirement stops holding. The check counts connections, not operators, so
+corroboration is not a Sybil defence; acceptance only admits the frontier to
+chain selection. A rejection log line is still emitted for every header of an
+unaccepted far connection, and for a new peer whose reference sits above the
+local tip, which this path does not touch, so the line volume is not removed.
+
 Genesis exit may consult the advertised slot only through the separately
 documented delivered-frontier gate below. A RollBackward restores the
 delivered frontier from a bounded `k+1` header history; if the point is no longer retained, the
@@ -5728,13 +5790,13 @@ active or while corroboration is incomplete.
 
 #### Header Verification Handoff
 
-When full-block header verification needs an epoch nonce that is not cached yet, blockfetch first flushes already-received predecessor blocks from the pending batch into the primary chain, then `ensureEpochForSlot` may forecast the nonce only within the cache tail's era. A confirmed transition or configured epoch trigger stops that forecast at the hard-fork boundary and defers verification without penalizing the peer; the full ledger rollover remains the only path that publishes successor-era parameters and rotates snapshots. Chainsync-header VRF/KES/opcert crypto verification runs only when the header's epoch nonce is already present in the in-memory epoch cache, so headers beyond that window are queued as unverified until blockfetch. The chain header queue records, per queued header, whether its stateless crypto was verified; blockfetch skips that duplicate stateless work when the fetched block's own queued header, matched by slot and hash, is marked verified. Fetched blocks wait in the pending batch before insertion, so that header is usually queued behind the head, and matching only the head would re-run the crypto for every later block in the batch. The skip is sound because the block hash is the hash of the header bytes, and chain insertion still requires the block to match the queue head. The stateful header checks (registered VRF key binding and Praos leader-stake eligibility) still run on the fetched full block. If those stateful facts are ahead of the ledger apply cursor — for example a pool registration or epoch mark snapshot is in predecessor/endorser data that blockfetch has seen but `ledgerProcessBlock` has not applied yet — blockfetch records that block point for deferred validation rather than recycling the peer. The marker is both in memory and durable in `sync_state` as `deferred_header_validation:<slot>:<hash>` before the block is inserted, so a restart cannot replay the persisted block without the pending stateful check. `ledgerProcessBlock` consults that marker even if normal replay validation is disabled, replays the deferred stateful check strictly after referenced Leios endorser-block metadata is processed and before the ranking block's own transactions are applied, then clears the durable marker in the apply transaction.
+When full-block header verification needs an epoch nonce that is not cached yet, blockfetch first flushes already-received predecessor blocks from the pending batch into the primary chain, then `ensureEpochForSlot` may forecast the nonce only within the cache tail's era. A confirmed transition or configured epoch trigger stops that forecast at the hard-fork boundary and defers verification without penalizing the peer; the full ledger rollover remains the only path that publishes successor-era parameters and rotates snapshots. Chainsync-header VRF/KES/opcert crypto verification runs only when the header's epoch nonce is already present in the in-memory epoch cache, so headers beyond that window are queued as unverified until blockfetch. The chain header queue records, per queued header, whether its stateless crypto was verified; blockfetch skips that duplicate stateless work when the fetched block's own queued header, matched by slot and hash, is marked verified. Fetched blocks wait in the pending batch before insertion, so that header is usually queued behind the head, and matching only the head would re-run the crypto for every later block in the batch. The skip is sound because the block hash is the hash of the header bytes, and chain insertion still requires the block to match the queue head. The stateful header checks (registered VRF key binding and Praos leader-stake eligibility) still run on the fetched full block. If those stateful facts are ahead of the ledger apply cursor — for example a pool registration or epoch mark snapshot is in predecessor/endorser data that blockfetch has seen but `ledgerProcessBlock` has not applied yet — blockfetch records that block point for deferred validation rather than recycling the peer. The marker is both in memory and durable as a `dh` blob key before the block is inserted, so a restart cannot replay the persisted block without the pending stateful check. It is a blob write rather than a `sync_state` row because the blockfetch handler writes it, and a `sync_state` write waits for the single SQLite write connection that a block-apply transaction holds for its whole length. `ledgerProcessBlock` consults that marker, and any legacy `sync_state` marker, even if normal replay validation is disabled, replays the deferred stateful check strictly after referenced Leios endorser-block metadata is processed and before the ranking block's own transactions are applied, then deletes the blob marker once the apply transaction commits, so a rolled-back apply leaves the check pending.
 
 #### Deferred Header Validation Bounds and Attribution
 
 Four rules shape the deferred-header path beyond the marker itself.
 
-- **Bounded set.** The deferred set holds at most `defaultMaxDeferredHeaderMarkers` entries. The rollback-horizon eviction is keyed to the applied tip, so it cannot bound the set while the header chain runs far ahead of a stalled tip; `boundDeferredHeaderValidation` runs after each admission and, once over the cap, evicts the lowest-slot entries and their `sync_state` markers. Concurrent bounds serialize their snapshot, durable floor write, and marker deletion so an older floor cannot overwrite a newer one. Startup restore applies the same cap before returning, persisting the raised floor before deleting excess markers. A non-Mithril block below the floor gets full header verification at apply with or without a marker, so eviction never skips a check. The floor is reloaded at startup.
+- **Bounded set.** The deferred set holds at most `defaultMaxDeferredHeaderMarkers` entries. The rollback-horizon eviction is keyed to the applied tip, so it cannot bound the set while the header chain runs far ahead of a stalled tip; `boundDeferredHeaderValidation` runs after each admission and, once over the cap, evicts the lowest-slot entries and their `dh` blob markers. Concurrent bounds serialize their snapshot, durable floor write, and marker deletion so an older floor cannot overwrite a newer one. Startup restore applies the same cap before returning, persisting the raised floor before deleting excess markers. A non-Mithril block below the floor gets full header verification at apply with or without a marker, so eviction never skips a check. The floor is reloaded at startup.
 - **Size limits at header time.** `verifyHeaderSizeLimits` rejects a Shelley-and-later header declaring a body larger than `maxBlockBodySize` or whose encoding exceeds `maxBlockHeaderSize`, using the applied ledger's parameters. A header from an epoch later than the ledger tip's defers instead of failing, because the parameters may change at the boundary.
 - **Admission-verified replay.** With `BlockPipelineValidateEnabled`, a block whose admission verification completed is recorded in a bounded in-memory set keyed by slot and hash. The pipeline's nonce provider tells the validate stage to skip that slot, and block-pipeline replay accepts the block without the VRF/KES and operational-certificate re-check when the recorded hash matches exactly. A block with no record, a record for another hash at its slot, or a deferred admission is verified in full. The set is not persisted, so blocks admitted before a restart are verified in full.
 - **Peer attribution.** The deferred marker records the connection that supplied the block (not persisted). When apply-time validation rejects the block with a verdict on the block itself, rather than a gap in local state, recovery publishes a `ChainsyncResyncEvent` with reason `deferred header validation failure` for that connection only. The chainsync handler treats it like the other peer-fault reasons: it clears that connection's observed header history, denies the peer in peer governance for the divergent-peer cooldown, and closes the connection.
@@ -13524,7 +13586,7 @@ never run; (2) lowers the delete boundary to the floor
 clamps that boundary up to a hard depth cap (`current - 24`) so a stuck header
 can never pin snapshots without bound. The eviction+floor read is atomic (one
 lock hold), so the boundary is a coherent read of the deferred set. The lock is
-released before `prune` (and before each `DeleteSyncState` in the evicted-marker
+released before `prune` (and before each marker delete in the evicted-marker
 cleanup, whose per-key delete then re-tests membership and re-persists the marker
 for a point re-deferred in that window, so releasing the lock cannot strand a
 live deferred header without its durable marker): `prune` opens the single SQLite
