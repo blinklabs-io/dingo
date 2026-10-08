@@ -55,6 +55,13 @@ type MeshLedgerState interface {
 		addr lcommon.Address,
 		slot uint64,
 	) ([]models.Utxo, error)
+	UtxosByAddressAtSlotBounded(
+		ctx context.Context,
+		addr lcommon.Address,
+		slot uint64,
+		maxResults int,
+		maxCborBytes int,
+	) ([]models.Utxo, error)
 }
 
 // MeshSyncProgress is an optional ledger capability for network/status.

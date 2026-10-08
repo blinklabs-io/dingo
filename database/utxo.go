@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -38,7 +39,18 @@ var ErrUtxoNotFound = types.ErrUtxoNotFound
 // for callers with no more specific limit of their own. It caps how many
 // candidate rows a broad multi-address query (or a single address with an
 // unusually large UTxO set) may force the database layer to materialize.
-const MaxUtxosByAddressResults = 100_000
+const (
+	MaxUtxosByAddressResults = 100_000
+	// DefaultPublicUtxoResultLimit matches the public UTxORPC key-list
+	// limit. It bounds endpoints that must aggregate a complete UTxO set.
+	DefaultPublicUtxoResultLimit = 1000
+	// DefaultPublicUtxoCborBudget allows one current mainnet maximum-size
+	// transaction per result. An output is only one part of that transaction.
+	DefaultPublicUtxoCborBudget = DefaultPublicUtxoResultLimit * (16 << 10)
+	// ExactAddressCandidateScanLimit is the existing cap used when a coarse
+	// credential match must be confirmed from output CBOR.
+	ExactAddressCandidateScanLimit = 10_000
+)
 
 // ErrUtxoCborUnavailable signals that the metadata row for a UTxO
 // exists but its CBOR could not be loaded from the blob store and
@@ -50,7 +62,7 @@ const MaxUtxosByAddressResults = 100_000
 // that only need indexed metadata fields can ignore this error.
 var ErrUtxoCborUnavailable = errors.New("utxo cbor unavailable")
 
-const exactAddressCandidateScanLimit = 10_000
+const exactAddressCandidateScanLimit = ExactAddressCandidateScanLimit
 
 var errExactAddressCandidateScanLimit = errors.New(
 	"exact address candidate scan limit reached",
@@ -866,6 +878,57 @@ func (d *Database) UtxosByAddressAsOf(
 	maxResults int,
 	txn *Txn,
 ) ([]models.Utxo, error) {
+	if ctx == nil {
+		return nil, errors.New("utxos by address as of context is nil")
+	}
+	return d.utxosByAddressAsOf(
+		ctx, addrs, atSlot, maxResults, math.MaxInt, txn,
+	)
+}
+
+// UtxosByAddressAsOfContext is UtxosByAddressAsOf with cancellation checks
+// between blob reads. A blob operation already in progress cannot be canceled.
+func (d *Database) UtxosByAddressAsOfContext(
+	ctx context.Context,
+	addrs []ledger.Address,
+	atSlot uint64,
+	maxResults int,
+	txn *Txn,
+) ([]models.Utxo, error) {
+	if ctx == nil {
+		return nil, errors.New("utxos by address as of context is nil")
+	}
+	return d.utxosByAddressAsOf(
+		ctx, addrs, atSlot, maxResults, math.MaxInt, txn,
+	)
+}
+
+// UtxosByAddressAsOfContextBounded applies cancellation, result-count, and
+// cumulative output-CBOR byte limits while loading historical UTxOs.
+func (d *Database) UtxosByAddressAsOfContextBounded(
+	ctx context.Context,
+	addrs []ledger.Address,
+	atSlot uint64,
+	maxResults int,
+	maxCborBytes int,
+	txn *Txn,
+) ([]models.Utxo, error) {
+	if ctx == nil {
+		return nil, errors.New("utxos by address as of context is nil")
+	}
+	return d.utxosByAddressAsOf(
+		ctx, addrs, atSlot, maxResults, maxCborBytes, txn,
+	)
+}
+
+func (d *Database) utxosByAddressAsOf(
+	ctx context.Context,
+	addrs []ledger.Address,
+	atSlot uint64,
+	maxResults int,
+	maxCborBytes int,
+	txn *Txn,
+) ([]models.Utxo, error) {
 	if len(addrs) == 0 {
 		return nil, nil
 	}
@@ -890,10 +953,21 @@ func (d *Database) UtxosByAddressAsOf(
 	if err != nil {
 		return nil, err
 	}
+	cborBytes := 0
 	for i := range utxos {
-		if err := loadCbor(&utxos[i], txn); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		utxo := utxos[i]
+		if err := loadCbor(&utxo, txn); err != nil {
+			return nil, err
+		}
+		if cborBytes > maxCborBytes ||
+			len(utxo.Cbor) > maxCborBytes-cborBytes {
+			return nil, models.ErrUtxoQueryBudgetExceeded
+		}
+		cborBytes += len(utxo.Cbor)
+		utxos[i] = utxo
 	}
 	return filterUtxosByAddressPatterns(utxos, patterns)
 }
@@ -1260,6 +1334,103 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrdering(
 		}
 	}
 	return refs, nil
+}
+
+// MatchingUtxoRefsByAddressWithOrderingBounded scans exact-address candidates
+// in one transaction until it has q.Limit matches, exhausts the result set, or
+// reaches either work budget. exhausted reports whether the exact total is
+// known from this scan.
+func (d *Database) MatchingUtxoRefsByAddressWithOrderingBounded(
+	ctx context.Context,
+	q *models.UtxoWithOrderingQuery,
+	txn *Txn,
+	maxCandidates int,
+	maxCborBytes int,
+) ([]models.UtxoId, bool, error) {
+	if ctx == nil {
+		return nil, false, errors.New("bounded reference scan context is nil")
+	}
+	if q == nil {
+		return nil, false, models.ErrNilUtxoWithOrderingQuery
+	}
+	if txn == nil || q.Limit <= 0 || maxCandidates <= 0 || maxCborBytes <= 0 ||
+		q.MatchAllAddresses ||
+		!models.RequiresExactAddressFilter(q.AddressPatterns) {
+		return nil, false, errors.New("bounded reference scan requires an exact-address query and transaction")
+	}
+	scanQuery := *q
+	scanQuery.Limit = min(128, maxCandidates)
+	scanQuery.SkipAssets = true
+	scanQuery.Offset = 0
+	scanQuery.Descending = false
+	refs := make([]models.UtxoId, 0, min(q.Limit, maxCandidates))
+	candidates := 0
+	cborBytes := 0
+	for candidates < maxCandidates && len(refs) < q.Limit {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		scanQuery.Limit = min(128, maxCandidates-candidates)
+		batch, err := d.utxoStore().GetUtxosByAddressWithOrdering(
+			&scanQuery,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, false, err
+		}
+		for i := range batch {
+			if err := ctx.Err(); err != nil {
+				return nil, false, err
+			}
+			if err := loadCbor(&batch[i].Utxo, txn); err != nil {
+				return nil, false, err
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, false, err
+			}
+			cborBytes += len(batch[i].Cbor)
+			if cborBytes > maxCborBytes {
+				return nil, false, models.ErrUtxoQueryBudgetExceeded
+			}
+			output, err := batch[i].Decode()
+			if err != nil {
+				return nil, false, fmt.Errorf(
+					"decode UTxO %x#%d for exact address match: %w",
+					batch[i].TxId,
+					batch[i].OutputIdx,
+					err,
+				)
+			}
+			match, err := models.MatchesUtxoAddressPatterns(
+				output.Address(),
+				q.AddressPatterns,
+			)
+			if err != nil {
+				return nil, false, err
+			}
+			candidates++
+			if match {
+				refs = append(refs, models.UtxoId{
+					Hash: batch[i].TxId,
+					Idx:  batch[i].OutputIdx,
+				})
+				if len(refs) == q.Limit {
+					return refs, false, nil
+				}
+			}
+		}
+		if len(batch) < scanQuery.Limit {
+			return refs, true, nil
+		}
+		last := batch[len(batch)-1]
+		scanQuery.After = &models.UtxoOrderingCursor{
+			Slot:       last.TxSlot,
+			BlockIndex: last.TxBlockIndex,
+			OutputIdx:  last.OutputIdx,
+			TxId:       last.TxId,
+		}
+	}
+	return refs, false, nil
 }
 
 // CountUtxosByAddressWithOrdering returns the number of live UTxOs matching

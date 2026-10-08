@@ -1974,6 +1974,11 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 			models.ErrNilUtxoWithOrderingQuery,
 		)
 	}
+	if query.OnlyFilteredAsset && !query.FilterByAsset {
+		return nil, errors.New(
+			"OnlyFilteredAsset requires FilterByAsset",
+		)
+	}
 	if query.After != nil && query.Descending {
 		return nil, fmt.Errorf(
 			"GetUtxosByAddressWithOrdering: %w",
@@ -2077,6 +2082,19 @@ ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir 
 	}
 	for i := range ret {
 		pointers = append(pointers, &ret[i].Utxo)
+	}
+	if query.OnlyFilteredAsset {
+		if err := s.loadUtxoAssetsPointersFiltered(
+			ctx,
+			db,
+			pointers,
+			query.AssetPolicyID,
+			query.AssetName,
+			true,
+		); err != nil {
+			return nil, err
+		}
+		return ret, nil
 	}
 	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
 		return nil, err
@@ -2685,6 +2703,24 @@ func (s *Store) loadUtxoAssetsPointers(
 	db queryer,
 	utxos []*models.Utxo,
 ) error {
+	return s.loadUtxoAssetsPointersFiltered(
+		ctx,
+		db,
+		utxos,
+		nil,
+		nil,
+		false,
+	)
+}
+
+func (s *Store) loadUtxoAssetsPointersFiltered(
+	ctx context.Context,
+	db queryer,
+	utxos []*models.Utxo,
+	policyID []byte,
+	assetName []byte,
+	filtered bool,
+) error {
 	if len(utxos) == 0 {
 		return nil
 	}
@@ -2704,17 +2740,35 @@ func (s *Store) loadUtxoAssetsPointers(
 		}
 		byID[utxo.ID] = append(byID[utxo.ID], utxo)
 	}
-	for start := 0; start < len(ids); start += s.dialect.ParameterLimit() {
-		end := min(start+s.dialect.ParameterLimit(), len(ids))
-		args := make([]any, end-start)
-		for i, id := range ids[start:end] {
-			args[i] = id
+	filterArgs := 0
+	if filtered {
+		filterArgs = 1
+		if assetName != nil {
+			filterArgs++
 		}
-		rows, err := db.QueryContext(ctx, s.dialect.Rebind(
-			"SELECT name, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(
-				end-start,
-			)+") ORDER BY id",
-		), args...)
+	}
+	chunkSize := s.dialect.ParameterLimit() - filterArgs
+	for start := 0; start < len(ids); start += chunkSize {
+		end := min(start+chunkSize, len(ids))
+		args := make([]any, 0, end-start+filterArgs)
+		for _, id := range ids[start:end] {
+			args = append(args, id)
+		}
+		statement := "SELECT name, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN (" + bindPlaceholders(end-start) + ")"
+		if filtered {
+			statement += " AND policy_id = ?"
+			args = append(args, policyID)
+			if assetName != nil {
+				statement += " AND name = ?"
+				args = append(args, assetName)
+			}
+		}
+		statement += " ORDER BY id"
+		rows, err := db.QueryContext(
+			ctx,
+			s.dialect.Rebind(statement),
+			args...,
+		)
 		if err != nil {
 			return err
 		}

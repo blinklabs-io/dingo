@@ -3630,7 +3630,10 @@ skip `Offset` rows within that filtered set, silently returning a page
 shifted by both controls instead of the one either alone describes.
 `SkipAssets` omits a row's native assets from the result, for a candidate
 scan whose rows are discarded or only used to confirm a match and never
-returned to a caller reading `Utxo.Assets`.
+returned to a caller reading `Utxo.Assets`. `OnlyFilteredAsset`, used with
+`FilterByAsset`, hydrates only the selected policy/name rows for matching
+UTxOs. The filtered and ordinary paths share the same ID deduplication,
+dialect-aware parameter chunking, parsing, and fanout implementation.
 
 `CountUtxosByAddressWithOrdering` returns a plain `COUNT(*)` over the coarse
 predicate and is rejected for exact-address patterns, since the coarse
@@ -3639,18 +3642,15 @@ predicate over-counts them. Blockfrost's `AccountUTXOs` adapter
 and this count for a stake credential's UTxOs, since a credential-only
 pattern never needs exact-address filtering.
 
-`AddressUTXOs` (exact address) cannot use `Offset`/`Count`, since an exact
-total requires CBOR-decoding every coarse candidate either way. Instead
-`MatchingUtxoRefsByAddressWithOrdering` scans coarse candidates in keyset
-batches (mirroring `GetUtxosByAddressWithOrdering`'s own exact-filter loop)
-with `SkipAssets` set, CBOR-decodes each only to confirm the match, and
-returns bare `(TxId, OutputIdx)` references rather than full rows — the
-result's length is the accurate total, and the caller slices it for one
-page's worth of references and fetches full rows (with assets) for just
-that page via `GetUtxosByRefs`. This bounds the expensive part (asset
-loading, full-row retention) to one page instead of the address's entire
-live UTxO history, while the CBOR-decode-only candidate scan remains
-unavoidable for the total.
+`AddressUTXOs` (exact address) scans coarse candidates in keyset batches with
+`SkipAssets` set and stops after the requested ascending window plus one match.
+It returns bare `(TxId, OutputIdx)` references and fetches full rows only for
+the requested page. Candidate count and cumulative CBOR bytes have fixed
+budgets, and the request context cancels both SQL and the work between blob
+reads. When the bounded scan reaches the end, the adapter reports an exact
+total. Otherwise it omits total headers rather than decoding the remaining
+candidates. Descending pagination needs the end of the ordered set, so it
+fails when the same budgets cannot prove exhaustion.
 
 Both `AccountUTXOs` and `AddressUTXOs` open one read `Txn`
 (`Database.Transaction(ctx, false)`) and pass it to both their count/scan call

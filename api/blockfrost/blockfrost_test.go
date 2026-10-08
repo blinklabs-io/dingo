@@ -1150,6 +1150,7 @@ func (m *mockNode) Asset(
 }
 
 func (m *mockNode) AssetAddresses(
+	_ context.Context,
 	policyID string,
 	assetName []byte,
 	params PaginationParams,
@@ -1180,7 +1181,8 @@ func (m *mockNode) Address(
 	return m.addressInfo, m.addressInfoErr
 }
 
-func (m *mockNode) AddressUTXOs(ctx context.Context,
+func (m *mockNode) AddressUTXOs(
+	_ context.Context,
 	_ string,
 	_ PaginationParams,
 ) ([]AddressUTXOInfo, int, error) {
@@ -1999,7 +2001,9 @@ func TestAssetHoldersFromUtxosPreservesPointerAddress(t *testing.T) {
 	}
 	outputCbor, err := cbor.Encode(&output)
 	require.NoError(t, err)
-	holders, err := assetHoldersFromUtxos(
+	quantities := make(map[string]uint64)
+	_, err = addAssetHolderQuantities(
+		quantities,
 		policyID,
 		assetName,
 		[]models.Utxo{{
@@ -2012,9 +2016,12 @@ func TestAssetHoldersFromUtxosPreservesPointerAddress(t *testing.T) {
 				Amount:   types.Uint64(7),
 			}},
 		}},
-		PaginationParams{Count: 100, Page: 1, Order: "asc"},
 	)
 	require.NoError(t, err)
+	holders := assetHoldersFromQuantities(
+		quantities,
+		PaginationParams{Count: 100, Page: 1, Order: "asc"},
+	)
 	require.Len(t, holders, 1)
 	assert.Equal(t, addr.String(), holders[0].Address)
 	assert.Equal(t, "7", holders[0].Quantity)
@@ -4616,6 +4623,24 @@ func TestHandleAddressUTXOs(t *testing.T) {
 	assert.Equal(t, "lovelace", resp[0].Amount[0].Unit)
 	assert.Equal(t, "1000", resp[0].Amount[0].Quantity)
 	assert.Equal(t, "blockhash1", resp[0].Block)
+}
+
+func TestHandleAddressUTXOsOmitsUnknownTotals(t *testing.T) {
+	t.Parallel()
+
+	b := newTestBlockfrost(&mockNode{addressUTXOsTotal: -1})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/addr_test1vr8nl4/utxos",
+		nil,
+	)
+	req.SetPathValue("address", "addr_test1vr8nl4")
+	w := httptest.NewRecorder()
+	b.handleAddressUTXOs(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, w.Header().Get("X-Pagination-Count-Total"))
+	assert.Empty(t, w.Header().Get("X-Pagination-Page-Total"))
 }
 
 func TestHandleAddressUTXOsInvalidPagination(t *testing.T) {

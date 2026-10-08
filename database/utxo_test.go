@@ -22,6 +22,7 @@ import (
 	"errors"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -34,6 +35,28 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type cancelAfterContext struct {
+	checks      int
+	cancelAfter int
+	done        chan struct{}
+	canceled    bool
+}
+
+func (c *cancelAfterContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cancelAfterContext) Done() <-chan struct{}       { return c.done }
+func (c *cancelAfterContext) Value(any) any               { return nil }
+func (c *cancelAfterContext) Err() error {
+	c.checks++
+	if c.checks >= c.cancelAfter {
+		if !c.canceled {
+			close(c.done)
+			c.canceled = true
+		}
+		return context.Canceled
+	}
+	return nil
+}
 
 func exactAddressTestPointer(
 	t *testing.T,
@@ -1066,6 +1089,157 @@ func TestMatchingUtxoRefsByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
 		got[string(ref.Hash)] = true
 	}
 	assert.Equal(t, wantHashes, got)
+}
+
+func TestMatchingUtxoRefsByAddressWithOrderingBoundedBudgets(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+	payment := bytes.Repeat([]byte{0x9b}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+	const total = 300
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+		for i := range total {
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+			seedExactAddressImportedUtxo(t, raw, addr, uint64(i)+1, 0, txHash)
+			if err := db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
+	query := &models.UtxoWithOrderingQuery{
+		AddressPatterns: []models.UtxoAddressPattern{pattern},
+		Limit:           total + 1,
+	}
+
+	t.Run("candidate count", func(t *testing.T) {
+		txn := NewTxnContext(t.Context(), db, false)
+		defer txn.Release()
+		refs, exhausted, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
+			t.Context(), query, txn, 2, len(encoded)*total,
+		)
+		require.NoError(t, err)
+		assert.False(t, exhausted)
+		assert.Len(t, refs, 2)
+	})
+
+	t.Run("CBOR bytes", func(t *testing.T) {
+		txn := NewTxnContext(t.Context(), db, false)
+		defer txn.Release()
+		_, _, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
+			t.Context(), query, txn, total, len(encoded),
+		)
+		require.ErrorIs(t, err, models.ErrUtxoQueryBudgetExceeded)
+	})
+
+	t.Run("cancellation after first batch", func(t *testing.T) {
+		txn := NewTxnContext(t.Context(), db, false)
+		defer txn.Release()
+		ctx := &cancelAfterContext{
+			cancelAfter: 259,
+			done:        make(chan struct{}),
+		}
+		_, _, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
+			ctx, query, txn, total, len(encoded)*total,
+		)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Greater(t, ctx.checks, 128*2)
+	})
+
+	t.Run("historical cancellation between CBOR loads", func(t *testing.T) {
+		txn := NewTxnContext(t.Context(), db, false)
+		defer txn.Release()
+		ctx := &cancelAfterContext{
+			cancelAfter: 2,
+			done:        make(chan struct{}),
+		}
+		_, err := db.UtxosByAddressAsOfContext(
+			ctx,
+			[]lcommon.Address{addr},
+			total,
+			total+1,
+			txn,
+		)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, 2, ctx.checks)
+	})
+}
+
+func TestUtxosByAddressAsOfContextStopsAtCborBudget(t *testing.T) {
+	t.Parallel()
+
+	newFixture := func(t *testing.T, outputs int) (*Database, lcommon.Address, []byte) {
+		t.Helper()
+		db := openTestDB(t)
+		raw := rawSQLiteMetadataFixture(t, db)
+		payment := bytes.Repeat([]byte{0x9c}, lcommon.AddressHashSize)
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkTestnet,
+			payment,
+			nil,
+		)
+		require.NoError(t, err)
+		encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+			OutputAddress: addr,
+			OutputAmount:  1_000_000,
+		})
+		require.NoError(t, err)
+		for i := range outputs {
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+			seedExactAddressImportedUtxo(t, raw, addr, uint64(i)+1, 0, txHash)
+			if i < 2 {
+				require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+					return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
+				}))
+			}
+		}
+		return db, addr, encoded
+	}
+
+	t.Run("at limit", func(t *testing.T) {
+		db, addr, encoded := newFixture(t, 2)
+		utxos, err := db.UtxosByAddressAsOfContextBounded(
+			t.Context(),
+			[]lcommon.Address{addr},
+			2,
+			3,
+			len(encoded)*2,
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, utxos, 2)
+	})
+
+	t.Run("first byte overrun stops before later blob", func(t *testing.T) {
+		db, addr, encoded := newFixture(t, 3)
+		_, err := db.UtxosByAddressAsOfContextBounded(
+			t.Context(),
+			[]lcommon.Address{addr},
+			3,
+			4,
+			len(encoded),
+			nil,
+		)
+		require.ErrorIs(t, err, models.ErrUtxoQueryBudgetExceeded)
+	})
 }
 
 // TestMatchingUtxoRefsByAddressWithOrderingExceedsOldCandidateScanLimit

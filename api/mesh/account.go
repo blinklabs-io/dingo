@@ -18,12 +18,15 @@ import (
 	"cmp"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger"
 )
 
@@ -65,7 +68,13 @@ func (s *Server) handleAccountBalance(
 	)
 	if point.historical {
 		utxos, err = s.config.LedgerState.
-			UtxosByAddressAtSlot(addr, point.slot)
+			UtxosByAddressAtSlotBounded(
+				r.Context(),
+				addr,
+				point.slot,
+				database.DefaultPublicUtxoResultLimit,
+				database.DefaultPublicUtxoCborBudget,
+			)
 	} else {
 		utxos, err = s.config.LedgerState.UtxosByAddress(
 			[]ledger.Address{addr},
@@ -80,7 +89,13 @@ func (s *Server) handleAccountBalance(
 			"historical", point.historical,
 			"error", err,
 		)
-		writeError(w, wrapErr(ErrInternal, err))
+		if errors.Is(err, models.ErrUtxoQueryBudgetExceeded) ||
+			errors.Is(err, models.ErrTooManyUtxoResults) ||
+			errors.Is(err, dledger.ErrHistoricalStateUnavailable) {
+			writeError(w, wrapErr(ErrInvalidRequest, err))
+		} else {
+			writeError(w, wrapErr(ErrInternal, err))
+		}
 		return
 	}
 

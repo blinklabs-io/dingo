@@ -1129,6 +1129,7 @@ func (a *NodeAdapter) populateAssetOnchainMetadata(
 
 // AssetAddresses returns paginated addresses currently holding the given asset.
 func (a *NodeAdapter) AssetAddresses(
+	ctx context.Context,
 	policyID string,
 	assetName []byte,
 	params PaginationParams,
@@ -1141,30 +1142,74 @@ func (a *NodeAdapter) AssetAddresses(
 			err,
 		)
 	}
-	utxos, err := a.ledgerState.Database().
-		UtxosByAssets(context.Background(), policyIDBytes, assetName, nil)
-	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"get asset UTxOs for %s%x: %w",
-			policyID,
-			assetName,
-			err,
-		)
+	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
+	defer txn.Release()
+	query := &models.UtxoWithOrderingQuery{
+		MatchAllAddresses: true,
+		FilterByAsset:     true,
+		OnlyFilteredAsset: true,
+		AssetPolicyID:     policyIDBytes,
+		AssetName:         assetName,
 	}
-	holders, err := assetHoldersFromUtxos(
-		policyIDBytes,
-		assetName,
-		utxos,
-		params,
-	)
-	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"build asset holders for %s%x: %w",
-			policyID,
-			assetName,
-			err,
+	quantities := make(map[string]uint64)
+	utxosScanned := 0
+	cborBytes := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		query.Limit = min(
+			128,
+			database.ExactAddressCandidateScanLimit-utxosScanned+1,
 		)
+		ordered, err := db.UtxosByAddressWithOrdering(ctx, query, txn)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"get asset UTxOs for %s%x: %w",
+				policyID,
+				assetName,
+				err,
+			)
+		}
+		if len(ordered) == 0 {
+			break
+		}
+		utxosScanned += len(ordered)
+		if utxosScanned > database.ExactAddressCandidateScanLimit {
+			return nil, 0, models.ErrUtxoQueryBudgetExceeded
+		}
+		utxos := make([]models.Utxo, len(ordered))
+		for i := range ordered {
+			utxos[i] = ordered[i].Utxo
+		}
+		batchCborBytes, err := addAssetHolderQuantities(
+			quantities,
+			policyIDBytes,
+			assetName,
+			utxos,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"build asset holders for %s%x: %w",
+				policyID,
+				assetName,
+				err,
+			)
+		}
+		cborBytes += batchCborBytes
+		if cborBytes > database.DefaultPublicUtxoCborBudget {
+			return nil, 0, models.ErrUtxoQueryBudgetExceeded
+		}
+		last := ordered[len(ordered)-1]
+		query.After = &models.UtxoOrderingCursor{
+			Slot:       last.TxSlot,
+			BlockIndex: last.TxBlockIndex,
+			OutputIdx:  last.OutputIdx,
+			TxId:       last.TxId,
+		}
 	}
+	holders := assetHoldersFromQuantities(quantities, params)
 	if len(holders) == 0 {
 		return nil, 0, fmt.Errorf(
 			"asset %s%x: %w",
@@ -1182,14 +1227,15 @@ type assetHolderQuantity struct {
 	quantity uint64
 }
 
-func assetHoldersFromUtxos(
+func addAssetHolderQuantities(
+	quantities map[string]uint64,
 	policyID []byte,
 	assetName []byte,
 	utxos []models.Utxo,
-	params PaginationParams,
-) ([]AssetHolderInfo, error) {
-	quantities := make(map[string]uint64)
+) (int, error) {
+	cborBytes := 0
 	for _, utxo := range utxos {
+		cborBytes += len(utxo.Cbor)
 		var quantity uint64
 		for _, asset := range utxo.Assets {
 			if bytes.Equal(asset.PolicyId, policyID) &&
@@ -1202,7 +1248,7 @@ func assetHoldersFromUtxos(
 		}
 		output, err := gledger.NewTransactionOutputFromCbor(utxo.Cbor)
 		if err != nil {
-			return nil, fmt.Errorf(
+			return 0, fmt.Errorf(
 				"decode UTxO %x#%d: %w",
 				utxo.TxId,
 				utxo.OutputIdx,
@@ -1211,7 +1257,13 @@ func assetHoldersFromUtxos(
 		}
 		quantities[output.Address().String()] += quantity
 	}
+	return cborBytes, nil
+}
 
+func assetHoldersFromQuantities(
+	quantities map[string]uint64,
+	params PaginationParams,
+) []AssetHolderInfo {
 	rows := make([]assetHolderQuantity, 0, len(quantities))
 	for address, quantity := range quantities {
 		rows = append(rows, assetHolderQuantity{
@@ -1239,7 +1291,7 @@ func assetHoldersFromUtxos(
 			Quantity: strconv.FormatUint(row.quantity, 10),
 		})
 	}
-	return holders, nil
+	return holders
 }
 
 func paginateAssetHolders(
@@ -3477,7 +3529,8 @@ func (a *NodeAdapter) Address(
 	}, nil
 }
 
-func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
+func (a *NodeAdapter) AddressUTXOs(
+	ctx context.Context,
 	address string,
 	params PaginationParams,
 ) ([]AddressUTXOInfo, int, error) {
@@ -3495,27 +3548,29 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 	if err != nil {
 		return nil, 0, err
 	}
-	// Shared between the reference scan and the page fetch below so the
-	// total and the returned page describe the same snapshot: two
-	// separate (nil-txn) calls could otherwise straddle a concurrent
-	// commit and return a page inconsistent with the reported total.
-	txn := a.ledgerState.Database().Transaction(ctx, false)
+	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
-
-	// Exact-address matching requires decoding output CBOR (see
-	// models.RequiresExactAddressFilter), so getting an accurate total
-	// requires visiting every coarse candidate either way. Fetch only
-	// references (no assets, no full rows) for that pass, and materialize
-	// full UTxO data via UtxosByRefs for just the requested page, instead
-	// of loading the address's entire UTxO history in full.
-	refs, err := a.ledgerState.Database().
-		MatchingUtxoRefsByAddressWithOrdering(
-			ctx,
-			&models.UtxoWithOrderingQuery{
-				AddressPatterns: []models.UtxoAddressPattern{pattern},
-			},
-			txn,
-		)
+	offset, ok := paginationOffset(params)
+	if !ok || offset > database.DefaultPublicUtxoResultLimit ||
+		params.Count > database.DefaultPublicUtxoResultLimit-offset {
+		return nil, 0, models.ErrUtxoQueryBudgetExceeded
+	}
+	requestedEnd := offset + params.Count
+	matchLimit := requestedEnd + 1
+	if params.Order == PaginationOrderDesc {
+		matchLimit = database.DefaultPublicUtxoResultLimit + 1
+	}
+	refs, exhausted, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
+		ctx,
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+			Limit:           matchLimit,
+		},
+		txn,
+		database.ExactAddressCandidateScanLimit,
+		database.DefaultPublicUtxoCborBudget,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get address UTxOs for %q: %w",
@@ -3523,19 +3578,15 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 			err,
 		)
 	}
-	total := len(refs)
-	start, end := paginationRange(total, params)
-	var pageRefs []models.UtxoId
-	if params.Order == PaginationOrderDesc {
-		// Page N in descending order is ascending index range
-		// [total-end, total-start), reversed.
-		pageRefs = append(
-			[]models.UtxoId(nil),
-			refs[total-end:total-start]...,
-		)
-		slices.Reverse(pageRefs)
-	} else {
-		pageRefs = refs[start:end]
+	pageRefs, total, err := addressUtxoPageRefs(
+		refs,
+		exhausted,
+		params,
+		offset,
+		requestedEnd,
+	)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	paged, err := a.orderedUtxosByRefs(ctx, pageRefs, txn)
@@ -3596,6 +3647,39 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 		})
 	}
 	return ret, total, nil
+}
+
+func addressUtxoPageRefs(
+	refs []models.UtxoId,
+	exhausted bool,
+	params PaginationParams,
+	offset int,
+	requestedEnd int,
+) ([]models.UtxoId, int, error) {
+	total := -1
+	if params.Order == PaginationOrderDesc {
+		if !exhausted {
+			return nil, 0, models.ErrUtxoQueryBudgetExceeded
+		}
+		total = len(refs)
+		start, end := paginationRange(total, params)
+		pageRefs := append(
+			[]models.UtxoId(nil),
+			refs[total-end:total-start]...,
+		)
+		slices.Reverse(pageRefs)
+		return pageRefs, total, nil
+	} else {
+		if !exhausted && len(refs) < requestedEnd {
+			return nil, 0, models.ErrUtxoQueryBudgetExceeded
+		}
+		if exhausted {
+			total = len(refs)
+		}
+		start := min(offset, len(refs))
+		end := min(requestedEnd, len(refs))
+		return refs[start:end], total, nil
+	}
 }
 
 // orderedUtxosByRefs fetches full UTxO rows (including assets) for refs in

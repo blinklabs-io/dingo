@@ -14108,3 +14108,103 @@ func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
+
+func TestUtxosByAddressAtSlotBoundedRejectsUnverifiableHistory(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	payment := bytes.Repeat([]byte{0x4c}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	t.Run("below consumed UTxO prune floor", func(t *testing.T) {
+		db := newTestDB(t)
+		ls := &LedgerState{db: db}
+		require.NoError(t, db.SetSyncState(
+			database.ConsumedUtxoPruneFloorSyncKey, "400", nil,
+		))
+
+		_, err := ls.UtxosByAddressAtSlotBounded(
+			t.Context(), addr, 399, 10, 1<<20,
+		)
+		require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+	})
+
+	t.Run("unreadable consumed UTxO prune floor", func(t *testing.T) {
+		db := newTestDB(t)
+		ls := &LedgerState{db: db}
+		require.NoError(t, db.SetSyncState(
+			database.ConsumedUtxoPruneFloorSyncKey, "not-a-slot", nil,
+		))
+
+		_, err := ls.UtxosByAddressAtSlotBounded(
+			t.Context(), addr, 399, 10, 1<<20,
+		)
+		require.Error(t, err)
+		require.ErrorContains(
+			t, err, "parse consumed UTxO prune floor marker",
+		)
+	})
+
+	t.Run("API storage ignores stale floor", func(t *testing.T) {
+		db := newTestDBForCleanup(t, types.StorageModeAPI)
+		ls := &LedgerState{db: db}
+		require.NoError(t, db.SetSyncState(
+			database.ConsumedUtxoPruneFloorSyncKey, "400", nil,
+		))
+
+		utxos, err := ls.UtxosByAddressAtSlotBounded(
+			t.Context(), addr, 399, 10, 1<<20,
+		)
+		require.NoError(t, err)
+		require.Empty(t, utxos)
+	})
+}
+
+func TestUtxosByAddressAtSlotBoundedStopsAtCborBudget(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := &LedgerState{db: db}
+	payment := bytes.Repeat([]byte{0x6c}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+
+	for i := range 3 {
+		txID := make([]byte, 32)
+		binary.BigEndian.PutUint32(txID[28:], uint32(i)+1)
+		require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
+			TxId:       txID,
+			OutputIdx:  0,
+			PaymentKey: payment,
+			AddedSlot:  uint64(i) + 1,
+			Amount:     types.Uint64(1_000_000),
+		}))
+		if i < 2 {
+			require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+				return db.Blob().SetUtxo(txn.Blob(), txID, 0, encoded)
+			}))
+		}
+	}
+
+	_, err = ls.UtxosByAddressAtSlotBounded(
+		t.Context(), addr, 3, 4, len(encoded),
+	)
+	require.ErrorIs(t, err, models.ErrUtxoQueryBudgetExceeded)
+}
