@@ -3040,7 +3040,7 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 	// takes the deferred-header mutex only to test membership per key (releasing
 	// it before each DB delete, for the same lock-order reason) so it can skip
 	// any point re-deferred (and re-persisted) since eviction, keeping the
-	// sync_state table free of dead markers without dropping a marker that now
+	// marker store free of dead markers without dropping a marker that now
 	// backs a live pin. A restore failure for a point re-admitted during its
 	// delete is a lost DURABLE pin: it is joined onto the prune result so the
 	// retention guard's caller (cleanupOldSnapshots) surfaces the failed cleanup
