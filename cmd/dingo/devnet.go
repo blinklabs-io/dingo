@@ -159,7 +159,8 @@ func devnetRun(cmd *cobra.Command, _ []string) (retErr error) {
 			return nil
 		}
 		childSignal := os.Signal(os.Interrupt)
-		if cause, ok := context.Cause(signalCtx).(devnetSignalCause); ok {
+		var cause devnetSignalCause
+		if errors.As(context.Cause(signalCtx), &cause) {
 			childSignal = cause.signal
 		}
 		err := signalDevnetChild(child.Process, childSignal)
