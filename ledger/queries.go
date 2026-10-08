@@ -504,19 +504,9 @@ func (ls *LedgerState) checkAnnouncedPruneFloors(
 // When at is pinned, Query first verifies at against this node's current
 // chain (verifyPointOnChain) before dispatching, so every point-sensitive
 // query type below shares one fork-safety check rather than repeating it.
-// at is threaded through only as far as the query types that actually honor
-// it today: stake distribution (queryShelleyStakeDistribution/
-// queryShelleyPoolDistr2, via PoolStakeDistribution's epoch-snapshot
-// lookup and, for circulating supply, GetNetworkStateAsOfSlot), current
-// protocol parameters (queryShelleyCurrentProtocolParams, which answers a
-// pin in the live tip's current epoch from the live snapshot and any other
-// epoch from that epoch's persisted pparams row when one exists, returning
-// ErrHistoricalStateUnavailable only when no such row was ever recorded or
-// it was pruned after a rollback), and epoch number (queryShelleyEpochNo,
-// unconditionally safe). Every other
-// query type ignores at and answers from the current state; every query
-// pinnable at any historical point remains out of scope for what cross-node
-// validation via node-parity actually needs.
+// at reaches every query type that reads ledger or consensus state, each of
+// which answers as of at; queryShelleyLeaf's doc comment audits every case,
+// and only genesis config and the ledger peer snapshot are live by design.
 //
 // Query reads current state on every call, so successive calls may observe
 // different blocks. A session that needs consistent reads across calls uses

@@ -4416,7 +4416,8 @@ query error does -- instead of silently reading live state. Closing a view
 never waits for a query in flight: that query completes against the snapshot
 and the last one out releases it.
 
-Only some query types honor a pinned point today: `GetPoolDistr2`
+Every query type that reads ledger or consensus state honors a pinned point;
+`queryShelleyLeaf` audits each one. The first were `GetPoolDistr2`
 (`PoolStakeDistribution`, resolving the pinned slot to the epoch that
 governed it and reading that epoch's already-persisted mark snapshot --
 rejecting a point outside the pool-snapshot retention window, ahead of the
@@ -4447,9 +4448,9 @@ with the reserves genuinely in effect at that same point, not today's.
 `GetUTxOWhole`
 honors the pin too, through the same `AddedSlot`/`DeletedSlot` predicate
 `GetUTxOByTxIn` uses. `ledger/queries.go`'s
-`queryShelleyLeaf` carries a full audit of every remaining query type,
-classified as intentionally live-only, or a real gap left for a caller that
-needs it.
+`queryShelleyLeaf` carries a full audit of every query type, classified as
+honoring the point or intentionally live-only; none is left answering from the
+live tip.
 
 `HardForkCurrentEraQuery` (`queryHardFork`, dispatched from `queryBlock`
 alongside `ShelleyQuery` rather than through `queryShelleyLeaf`, so it sat
@@ -4628,8 +4629,11 @@ Protocol-parameter rows need no pin; they are only ever deleted on rollback.
 `GetPoolDistr2` therefore logs and omits a pool that holds snapshot stake but
 has no registration to supply a VRF key hash (the unfiltered form covers every
 pool on the chain, so aborting would take `leadership-schedule` down for every
-operator over one bad row), and `GetChainDepState` logs and skips an op-cert
-counter whose issuer key is not a pool key hash. Omitting a pool leaves the
+operator over one bad row). `GetChainDepState` instead fails the query for an
+op-cert counter whose issuer key is not a pool key hash: dropping it would
+report that the chain has accepted no certificate for a cold key it enforces a
+counter against, and padding it would report a counter against a key the row
+did not mean. Omitting a pool leaves the
 reported fractions summing to slightly under one, since its stake stays in
 `TotalActiveStake`; a caller checking its own leadership is unaffected, because
 its own fraction is its stake over that same unchanged total.
@@ -11737,8 +11741,8 @@ current chain (`verifyPointOnChain`, returning `ledger.ErrPointNotOnChain`
 on a mismatch) before dispatching to any handler, so every point-sensitive
 query shares one fork-safety check rather than repeating it.
 `queryShelleyLeaf`'s doc comment carries a full audit of every one of its
-cases, classified as honoring the point today / intentionally live-only /
-not point-aware yet (and why) -- summarized here for the ones that matter
+cases, classified as honoring the point or intentionally live-only --
+summarized here for the ones that matter
 to this comparison:
 `queryShelleyStakeDistribution`/`queryShelleyPoolDistr2` (via
 `ledger.LedgerState.PoolStakeDistribution`, which resolves the pinned slot
