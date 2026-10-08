@@ -107,7 +107,7 @@ func TestDijkstraBootstrapWitnessChainCodeLength(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, fx.startTip, tip)
 				for _, inputId := range fx.inputIds {
-					_, err := fx.db.UtxoByRef(inputId, 0, nil)
+					_, err := fx.db.UtxoByRef(t.Context(), inputId, 0, nil)
 					require.NoError(t, err)
 				}
 			},

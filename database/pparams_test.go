@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -69,7 +70,7 @@ func TestGetPParams_PicksRowMatchingRequestedEra(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 
 	// Step 1: simulate the old era's epoch-rollover write. At the
 	// boundary between Allegra (epoch 1) and Mary (epoch 2), the
@@ -163,7 +164,7 @@ func TestGetPParams_MaryToAlonzo_PicksMaryRow(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 
 	// Mary epoch-rollover write at boundary epoch 2.
 	maryPP := &mary.MaryProtocolParameters{
@@ -244,7 +245,7 @@ func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
 	// Store 3 pparam updates from 3 different genesis keys submitted in
@@ -296,6 +297,7 @@ func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 	// Try to apply with quorum = 5 (only 3 proposals, below
 	// quorum)
 	result, _, err := db.ComputeAndApplyPParamUpdates(
+		context.Background(),
 		400, // slot
 		4,   // epoch
 		2,   // era
@@ -326,7 +328,7 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
 	// Store 5 pparam updates from 5 different genesis keys submitted in
@@ -377,6 +379,7 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 
 	// Apply with quorum = 5 (exactly 5 proposals, meets quorum)
 	_, _, err = db.ComputeAndApplyPParamUpdates(
+		context.Background(),
 		400,
 		4,
 		2,
@@ -431,7 +434,7 @@ func TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten(
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
 	updateCbor, err := cbor.Encode(map[uint64]any{
@@ -473,7 +476,11 @@ func TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten(
 	}
 
 	_, plutusV2CostModelWritten, err := db.ComputeAndApplyPParamUpdates(
-		400, 4, 2, 1,
+		context.Background(),
+		400,
+		4,
+		2,
+		1,
 		currentPParams,
 		decodeFunc,
 		updateFunc,
@@ -499,7 +506,7 @@ func TestComputeAndApplyPParamUpdates_FalseWhenUpdateDoesNotWritePlutusV2CostMod
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
 	minFeeA := uint(100)
@@ -533,7 +540,11 @@ func TestComputeAndApplyPParamUpdates_FalseWhenUpdateDoesNotWritePlutusV2CostMod
 	}
 
 	_, plutusV2CostModelWritten, err := db.ComputeAndApplyPParamUpdates(
-		400, 4, 2, 1,
+		context.Background(),
+		400,
+		4,
+		2,
+		1,
 		currentPParams,
 		decodeFunc,
 		updateFunc,
@@ -587,6 +598,7 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 	}
 
 	result, _, err := db.ComputeAndApplyPParamUpdates(
+		context.Background(),
 		400, 4, 2, 5,
 		currentPParams,
 		decodeFunc, updateFunc,
@@ -660,6 +672,7 @@ func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
 	}
 
 	require.NoError(t, db.ApplyPParamUpdates(
+		context.Background(),
 		400, 4, 2, 5,
 		&currentPParams,
 		decodeFunc, updateFunc,
@@ -699,7 +712,7 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
 	// Enacting for epoch 4 uses proposals submitted in epoch 3. Store 5
@@ -761,6 +774,7 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 	// Quorum = 5: submission epoch 3 has 5 proposals (meets quorum) and is
 	// what enacts for target epoch 4; the epoch-2 decoys are excluded.
 	_, _, err = db.ComputeAndApplyPParamUpdates(
+		context.Background(),
 		400,
 		4,
 		2,
@@ -789,7 +803,7 @@ func TestComputeAndApplyPParamUpdates_NoUpdates(
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
 	currentPParams := &shelley.ShelleyProtocolParameters{
@@ -808,6 +822,7 @@ func TestComputeAndApplyPParamUpdates_NoUpdates(
 	}
 
 	result, _, err := db.ComputeAndApplyPParamUpdates(
+		context.Background(),
 		400, 4, 2, 5,
 		currentPParams,
 		decodeFunc, updateFunc,
@@ -833,7 +848,7 @@ func TestComputeAndApplyPParamUpdates_DuplicateGenesis(
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
 	// Store 5 updates but from only 2 unique genesis keys
@@ -882,6 +897,7 @@ func TestComputeAndApplyPParamUpdates_DuplicateGenesis(
 
 	// Only 2 unique genesis keys, quorum is 5
 	result, _, err := db.ComputeAndApplyPParamUpdates(
+		context.Background(),
 		400, 4, 2, 5,
 		currentPParams,
 		decodeFunc, updateFunc,
@@ -1070,16 +1086,16 @@ func TestPParamEnactmentPendingShortCircuitsTheWriter(t *testing.T) {
 	require.NoError(t, err)
 
 	// Epoch 0 has no submission epoch at all.
-	pending, err := db.pparamEnactmentPending(0, 1)
+	pending, err := db.pparamEnactmentPending(context.Background(), 0, 1)
 	require.NoError(t, err)
 	require.False(t, pending)
 
 	// Nothing recorded for the submission epoch.
-	pending, err = db.pparamEnactmentPending(4, 3)
+	pending, err = db.pparamEnactmentPending(context.Background(), 4, 3)
 	require.NoError(t, err)
 	require.False(t, pending)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	for i, gk := range [][]byte{
 		{0x01, 0x02, 0x03},
 		{0x04, 0x05, 0x06},
@@ -1092,18 +1108,18 @@ func TestPParamEnactmentPendingShortCircuitsTheWriter(t *testing.T) {
 
 	// Two unique proposals against a quorum of three: still nothing to enact,
 	// so the writer must not be taken.
-	pending, err = db.pparamEnactmentPending(4, 3)
+	pending, err = db.pparamEnactmentPending(context.Background(), 4, 3)
 	require.NoError(t, err)
 	require.False(t, pending)
 
-	txn = db.Transaction(true)
+	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, db.SetPParamUpdate(
 		[]byte{0x07, 0x08, 0x09}, updateCbor, 302, 3, txn,
 	))
 	require.NoError(t, txn.Commit())
 
 	// Quorum met: an enactment will be written, so the writer is warranted.
-	pending, err = db.pparamEnactmentPending(4, 3)
+	pending, err = db.pparamEnactmentPending(context.Background(), 4, 3)
 	require.NoError(t, err)
 	require.True(t, pending)
 }

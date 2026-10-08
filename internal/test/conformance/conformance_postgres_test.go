@@ -17,6 +17,7 @@
 package conformance
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -336,17 +337,23 @@ func TestNewDingoMysqlStateManagerRollbackDiscardsWrites(t *testing.T) {
 
 	cred := testHash28(0xb2)
 
-	txn := m.db.Transaction(true)
+	txn := m.db.Transaction(context.Background(), true)
 	defer txn.Release()
 	account := &models.Account{
 		StakingKey:    cred[:],
 		CredentialTag: 0,
 		Active:        true,
 	}
-	require.NoError(t, m.db.CreateAccount(txn, account))
+	require.NoError(t, m.db.CreateAccount(context.Background(), txn, account))
 	require.NoError(t, txn.Rollback())
 
-	got, err := m.db.GetAccountByCredential(0, cred[:], false, nil)
+	got, err := m.db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred[:],
+		false,
+		nil,
+	)
 	require.ErrorIs(t, err, models.ErrAccountNotFound)
 	require.Nil(t, got)
 }
@@ -684,17 +691,23 @@ func TestNewDingoPostgresStateManagerRollbackDiscardsWrites(t *testing.T) {
 
 	cred := testHash28(0xa2)
 
-	txn := m.db.Transaction(true)
+	txn := m.db.Transaction(context.Background(), true)
 	defer txn.Release()
 	account := &models.Account{
 		StakingKey:    cred[:],
 		CredentialTag: 0,
 		Active:        true,
 	}
-	require.NoError(t, m.db.CreateAccount(txn, account))
+	require.NoError(t, m.db.CreateAccount(context.Background(), txn, account))
 	require.NoError(t, txn.Rollback())
 
-	got, err := m.db.GetAccountByCredential(0, cred[:], false, nil)
+	got, err := m.db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred[:],
+		false,
+		nil,
+	)
 	require.ErrorIs(t, err, models.ErrAccountNotFound)
 	require.Nil(t, got)
 }

@@ -97,15 +97,18 @@ func mainnetMIRView(
 		OutputAmount:  mainnetMIRInputAmount,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		if err := db.CreateUtxo(txn, &models.Utxo{
-			TxId:   inputTxId,
-			Amount: types.Uint64(mainnetMIRInputAmount),
-		}); err != nil {
-			return err
-		}
-		return db.Blob().SetUtxo(txn.Blob(), inputTxId, 0, encoded)
-	}))
+	require.NoError(
+		t,
+		db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+			if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
+				TxId:   inputTxId,
+				Amount: types.Uint64(mainnetMIRInputAmount),
+			}); err != nil {
+				return err
+			}
+			return db.Blob().SetUtxo(txn.Blob(), inputTxId, 0, encoded)
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(
 		0, mainnetEpoch209Reserves, 4_492_800, nil,
 	))
@@ -135,7 +138,7 @@ func withMIRView(t *testing.T, ls *LedgerState, fn func(*LedgerView)) {
 	t.Helper()
 	require.NoError(
 		t,
-		ls.db.Transaction(false).Do(func(txn *database.Txn) error {
+		ls.db.Transaction(t.Context(), false).Do(func(txn *database.Txn) error {
 			fn(ls.NewView(txn))
 			return nil
 		}),

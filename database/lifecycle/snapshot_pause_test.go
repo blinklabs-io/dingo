@@ -63,13 +63,13 @@ type hookedMetadataStore struct {
 	hooks *backupHooks
 }
 
-func (s hookedMetadataStore) GetCommitTimestamp() (int64, error) {
+func (s hookedMetadataStore) GetCommitTimestamp(ctx context.Context) (int64, error) {
 	if s.hooks.read != nil {
 		if err := s.hooks.read(); err != nil {
 			return 0, err
 		}
 	}
-	return s.MetadataStore.GetCommitTimestamp()
+	return s.MetadataStore.GetCommitTimestamp(ctx)
 }
 
 func (s hookedMetadataStore) BackupTo(ctx context.Context, dst string) error {
@@ -222,7 +222,7 @@ func TestSnapshotMaxCommitPauseExcludesBarrierWait(t *testing.T) {
 			return os.WriteFile(dst, []byte("metadata"), 0o600)
 		},
 	})
-	writer := database.NewTxn(db, true)
+	writer := database.NewTxn(t.Context(), db, true)
 	rolledBack := false
 	defer func() {
 		if !rolledBack {

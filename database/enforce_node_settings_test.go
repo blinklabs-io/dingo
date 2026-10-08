@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -32,11 +33,11 @@ func TestEnforceNodeSettingsPersistsGenesisHashesOnFirstStart(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.EnforceNodeSettings(nodesettings.Values{
+	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"shelley_genesis_hash": "aaaa",
 		"conway_genesis_hash":  "bbbb",
 	}))
-	gates, err := db.Metadata().GetNodeSettingsGates()
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "aaaa", gates["shelley_genesis_hash"])
 	require.NoError(t, db.Close())
@@ -51,10 +52,10 @@ func TestEnforceNodeSettingsRejectsGenesisHashChange(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.EnforceNodeSettings(nodesettings.Values{
+	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"shelley_genesis_hash": "aaaa",
 	}))
-	enforceErr := db.EnforceNodeSettings(nodesettings.Values{
+	enforceErr := db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"shelley_genesis_hash": "cccc",
 	})
 	var settingsErr NodeSettingsError
@@ -73,13 +74,13 @@ func TestEnforceNodeSettingsFillsHashLearnedLater(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.EnforceNodeSettings(nodesettings.Values{
+	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"dijkstra_genesis_hash": "",
 	}))
-	require.NoError(t, db.EnforceNodeSettings(nodesettings.Values{
+	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"dijkstra_genesis_hash": "dddd",
 	}))
-	gates, err := db.Metadata().GetNodeSettingsGates()
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "dddd", gates["dijkstra_genesis_hash"])
 	require.NoError(t, db.Close())
@@ -95,14 +96,14 @@ func TestEnforceNodeSettingsLedgerGateActivationRecordsEpoch(t *testing.T) {
 	})
 	require.NoError(t, err)
 	off := nodesettings.EncodeLatchBool(false, "")
-	require.NoError(t, db.EnforceNodeSettings(nodesettings.Values{
+	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"pledge_leverage": off,
 	}))
 	on := nodesettings.EncodeLatchBool(true, "3")
-	require.NoError(t, db.EnforceNodeSettings(nodesettings.Values{
+	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"pledge_leverage": on,
 	}))
-	gates, err := db.Metadata().GetNodeSettingsGates()
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, on, gates["pledge_leverage"])
 	require.NoError(t, db.Close())
@@ -117,10 +118,10 @@ func TestEnforceNodeSettingsRecordsValidationTaintOnFirstStart(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.EnforceNodeSettings(nodesettings.Values{
+	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"historical_validation_relaxed": nodesettings.LatchOn,
 	}))
-	gates, err := db.Metadata().GetNodeSettingsGates()
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -141,10 +142,10 @@ func TestEnforceNodeSettingsRejectsRelaxingValidationOnStrictDatabase(
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.EnforceNodeSettings(nodesettings.Values{
+	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"historical_validation_relaxed": nodesettings.LatchOff,
 	}))
-	enforceErr := db.EnforceNodeSettings(nodesettings.Values{
+	enforceErr := db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"historical_validation_relaxed": nodesettings.LatchOn,
 	})
 	var settingsErr NodeSettingsError
@@ -161,14 +162,14 @@ func TestEnforceNodeSettingsKeepsTaintWhenValidationTightens(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.EnforceNodeSettings(nodesettings.Values{
+	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"historical_validation_relaxed": nodesettings.LatchOn,
 	}))
 	// Tightening is allowed and must not clear the record.
-	require.NoError(t, db.EnforceNodeSettings(nodesettings.Values{
+	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"historical_validation_relaxed": nodesettings.LatchOff,
 	}))
-	gates, err := db.Metadata().GetNodeSettingsGates()
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -187,10 +188,10 @@ func TestEnforceNodeSettingsRejectsDisablingLedgerGate(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.EnforceNodeSettings(nodesettings.Values{
+	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"full_pot_rewards": nodesettings.EncodeLatchBool(true, ""),
 	}))
-	enforceErr := db.EnforceNodeSettings(nodesettings.Values{
+	enforceErr := db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"full_pot_rewards": nodesettings.EncodeLatchBool(false, ""),
 	})
 	var settingsErr NodeSettingsError
@@ -223,7 +224,7 @@ func TestEnforceNodeSettingsPhase2GatesDoNotLeakIntoPhase1(t *testing.T) {
 		StrictUtxoValidation: true,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.EnforceNodeSettings(nodesettings.Values{
+	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
 		"history_expiry_active": nodesettings.EncodeLatchBool(true, ""),
 		"historical_validation_relaxed": nodesettings.EncodeLatchBool(
 			false, "",
