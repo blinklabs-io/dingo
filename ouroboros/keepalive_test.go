@@ -305,3 +305,20 @@ func TestKeepaliveServerPingRecordsServedActivity(t *testing.T) {
 	cfg.OnKeepAliveReceived(servedTestConnId(40003), 1)
 	assert.Equal(t, int64(1), reports.Load())
 }
+
+func TestRecordServedActivitySkipsNonTCPConnections(t *testing.T) {
+	t.Parallel()
+	var reports atomic.Int64
+	o := &Ouroboros{servedActivityHook: func(ouroboros.ConnectionId) {
+		reports.Add(1)
+	}}
+	unixConn := ouroboros.ConnectionId{
+		LocalAddr:  &net.UnixAddr{Name: "/run/dingo.socket", Net: "unix"},
+		RemoteAddr: &net.UnixAddr{Name: "@", Net: "unix"},
+	}
+	for range 100 {
+		o.recordServedActivity(unixConn)
+	}
+	assert.Equal(t, int64(0), reports.Load(),
+		"node-to-client unix connections are not reported to the governor")
+}

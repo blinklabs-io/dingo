@@ -136,7 +136,9 @@ func (o *Ouroboros) recordServedActivity(connId connection.ConnectionId) {
 	report := o.reportServedActivity
 	key, ok := servedActivityKeyFor(connId)
 	if !ok {
-		report(connId)
+		// Not TCP: a node-to-client unix-socket connection sharing these
+		// server handlers. The governor tracks no peer for it, and reporting
+		// unthrottled would take the governor lock per served header.
 		return
 	}
 	now := time.Now().UnixNano()
