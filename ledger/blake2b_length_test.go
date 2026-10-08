@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -60,6 +61,7 @@ func TestQueryStakeSnapshotsRejectsWrongLengthPoolKeyHash(t *testing.T) {
 	// An empty pool filter takes the unrestricted path, which builds its
 	// result keys from the stored pool key hashes.
 	result, err := ls.queryShelleyStakeSnapshots(
+		context.Background(),
 		&olocalstatequery.ShelleyStakeSnapshotsQuery{},
 		QueryPoint{},
 		nil,
@@ -100,7 +102,7 @@ func TestQueryDRepStateRejectsWrongLengthCredential(t *testing.T) {
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyDRepState(nil, nil)
+	result, err := ls.queryShelleyDRepState(context.Background(), nil, QueryPoint{}, nil)
 	require.Error(
 		t,
 		err,
@@ -122,7 +124,7 @@ func TestQueryDRepStateAcceptsExactLengthCredential(t *testing.T) {
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyDRepState(nil, nil)
+	result, err := ls.queryShelleyDRepState(context.Background(), nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)
@@ -167,7 +169,7 @@ func TestQueryDRepStateRejectsPartialResultWhenOneCredentialIsCorrupt(
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyDRepState(nil, nil)
+	result, err := ls.queryShelleyDRepState(context.Background(), nil, QueryPoint{}, nil)
 	require.Error(t, err)
 	require.Nil(
 		t,
@@ -221,7 +223,7 @@ func TestGovernanceProposalStateRejectsWrongLengthAnchorHash(t *testing.T) {
 		GovActionCbor: []byte{0x80},
 	}
 	ls := &LedgerState{db: newTestDB(t)}
-	state, err := ls.governanceProposalState(proposal, lcommon.GovActionId{}, nil)
+	state, err := ls.governanceProposalState(context.Background(), proposal, lcommon.GovActionId{}, QueryPoint{}, nil)
 	require.Error(t, err)
 	require.Equal(t, olocalstatequery.GovActionState{}, state)
 	require.Contains(t, err.Error(), "governance proposal anchor")

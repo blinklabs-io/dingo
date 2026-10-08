@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -38,6 +39,7 @@ import (
 // lookupBlockBeforeSlot finds the highest-slot block before slot in
 // the blob store, optionally inside a database transaction.
 func lookupBlockBeforeSlot(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	slot uint64,
@@ -45,7 +47,7 @@ func lookupBlockBeforeSlot(
 	if txn != nil {
 		return database.BlockBeforeSlotTxn(txn, slot)
 	}
-	return database.BlockBeforeSlot(db, slot)
+	return database.BlockBeforeSlot(ctx, db, slot)
 }
 
 // errNoncesMissing is returned by computeCandidateNonceFast when blocks
@@ -101,6 +103,7 @@ var errEpochRangeOverflow = errors.New("epoch slot range overflows uint64")
 //     window cutoff
 //   - evolvingNonce: the evolving nonce after all blocks in the epoch
 func (ls *LedgerState) computeCandidateNonce(
+	ctx context.Context,
 	txn *database.Txn,
 	eraId uint,
 	prevEvolvingNonce []byte,
@@ -109,6 +112,7 @@ func (ls *LedgerState) computeCandidateNonce(
 	epochLengthInSlots uint64,
 ) ([]byte, []byte, error) {
 	return ls.computeCandidateNonceAsOf(
+		ctx,
 		txn,
 		eraId,
 		prevEvolvingNonce,
@@ -134,6 +138,7 @@ func (ls *LedgerState) computeCandidateNonce(
 // short of the cutoff simply means the candidate has not frozen yet and still
 // tracks the evolving nonce.
 func (ls *LedgerState) computeCandidateNonceAsOf(
+	ctx context.Context,
 	txn *database.Txn,
 	eraId uint,
 	prevEvolvingNonce []byte,
@@ -175,6 +180,7 @@ func (ls *LedgerState) computeCandidateNonceAsOf(
 	// retrieve the candidate and end-of-epoch nonces with two
 	// indexed queries instead of re-decoding every block's CBOR.
 	candidateNonce, evolvingNonce, err := ls.computeCandidateNonceFast(
+		ctx,
 		txn,
 		prevEvolvingNonce,
 		prevCandidateNonce,
@@ -197,6 +203,7 @@ func (ls *LedgerState) computeCandidateNonceAsOf(
 	// are not yet stored (e.g., first sync before nonce storage
 	// was introduced).
 	return ls.computeCandidateNonceSlow(
+		ctx,
 		txn,
 		prevEvolvingNonce,
 		prevCandidateNonce,
@@ -217,6 +224,7 @@ func (ls *LedgerState) computeCandidateNonceAsOf(
 // store's last block — which is fully populated by blockfetch before
 // header verification fires — prevents that hazard.
 func (ls *LedgerState) computeCandidateNonceFast(
+	ctx context.Context,
 	txn *database.Txn,
 	prevEvolvingNonce []byte,
 	prevCandidateNonce []byte,
@@ -224,6 +232,10 @@ func (ls *LedgerState) computeCandidateNonceFast(
 	foldEndSlot uint64,
 	candidateBound uint64,
 ) ([]byte, []byte, error) {
+	if txn == nil {
+		txn = ls.db.Transaction(ctx, false)
+		defer txn.Release()
+	}
 	// Identify the actual last block of the FOLD in the blob store -- which is
 	// the epoch's last block only when the fold runs to the epoch's end. The
 	// evolving nonce is the nonce of THIS block, not whatever block_nonce row
@@ -234,7 +246,7 @@ func (ls *LedgerState) computeCandidateNonceFast(
 	// blocks in place until they are overwritten, and a stored fork holds
 	// blocks the chain never adopted, so a caller folding to a tip mid-epoch
 	// would otherwise be handed the nonce of a block it has not applied.
-	lastBlock, blockErr := lookupBlockBeforeSlot(ls.db, txn, foldEndSlot)
+	lastBlock, blockErr := lookupBlockBeforeSlot(ctx, ls.db, txn, foldEndSlot)
 	hasBlocks := blockErr == nil && lastBlock.Slot >= epochStartSlot
 	if blockErr != nil && !errors.Is(blockErr, models.ErrBlockNotFound) {
 		return nil, nil, fmt.Errorf(
@@ -286,6 +298,7 @@ func (ls *LedgerState) computeCandidateNonceFast(
 		copy(candidateNonce, prevCandidateNonce)
 	} else {
 		lastPreCutoff, preErr := lookupBlockBeforeSlot(
+			ctx,
 			ls.db, txn, candidateBound,
 		)
 		hasPreCutoff := preErr == nil &&
@@ -397,6 +410,7 @@ func (ls *LedgerState) foldBlockEtaV(
 // moves the candidate only while it is below candidateBound, which is the
 // earlier of the freeze cutoff and that same fold end.
 func (ls *LedgerState) computeCandidateNonceSlow(
+	ctx context.Context,
 	txn *database.Txn,
 	prevEvolvingNonce []byte,
 	prevCandidateNonce []byte,
@@ -453,6 +467,7 @@ func (ls *LedgerState) computeCandidateNonceSlow(
 		}
 	} else {
 		err := database.ForEachBlockInRangeDB(
+			ctx,
 			ls.db,
 			epochStartSlot,
 			foldEndSlot,

@@ -172,8 +172,8 @@ func newDijkstraCollateralReturnFixture(
 			OutputAmount:  seed.amount,
 		})
 		require.NoError(t, err)
-		require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-			if err := db.CreateUtxo(txn, &models.Utxo{
+		require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+			if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
 				TxId:      seed.id,
 				OutputIdx: 0,
 				AddedSlot: 0,
@@ -344,8 +344,8 @@ func TestDijkstraCollateralReturnPointerRejectedByBlockValidation(t *testing.T) 
 		{
 			name: "imported block transaction validation",
 			run: func(fx *dijkstraCollateralReturnFixture) error {
-				return fx.db.Transaction(true).Do(func(txn *database.Txn) error {
-					_, err := fx.ls.ledgerProcessBlock(
+				return fx.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+					_, err := fx.ls.ledgerProcessBlock(context.Background(),
 						txn,
 						ocommon.NewPoint(dijkstraCollateralReturnTestSlot, fx.block.Hash().Bytes()),
 						fx.block,
@@ -369,7 +369,7 @@ func TestDijkstraCollateralReturnPointerRejectedByBlockValidation(t *testing.T) 
 		{
 			name: "forged block transaction revalidation",
 			run: func(fx *dijkstraCollateralReturnFixture) error {
-				return fx.ls.validateForgedTxs(fx.block)
+				return fx.ls.validateForgedTxs(context.Background(), fx.block)
 			},
 		},
 	}
@@ -380,7 +380,7 @@ func TestDijkstraCollateralReturnPointerRejectedByBlockValidation(t *testing.T) 
 			require.NoError(t, fx.db.SetTip(fx.startTip, nil))
 			initialUtxos := make([]*models.Utxo, 0, len(fx.inputIds))
 			for _, inputId := range fx.inputIds {
-				utxo, err := fx.db.UtxoByRef(inputId, 0, nil)
+				utxo, err := fx.db.UtxoByRef(context.Background(), inputId, 0, nil)
 				require.NoError(t, err)
 				initialUtxos = append(initialUtxos, utxo)
 			}
@@ -398,7 +398,7 @@ func TestDijkstraCollateralReturnPointerRejectedByBlockValidation(t *testing.T) 
 				return tip
 			}())
 			for index, inputId := range fx.inputIds {
-				utxo, err := fx.db.UtxoByRef(inputId, 0, nil)
+				utxo, err := fx.db.UtxoByRef(context.Background(), inputId, 0, nil)
 				require.NoError(t, err)
 				require.Equal(t, initialUtxos[index], utxo)
 			}
@@ -414,7 +414,7 @@ func TestDijkstraCollateralReturnPointerRejectedDuringBlockReplay(t *testing.T) 
 	)
 	initialUtxos := make([]*models.Utxo, 0, len(fx.inputIds))
 	for _, inputId := range fx.inputIds {
-		utxo, err := fx.db.UtxoByRef(inputId, 0, nil)
+		utxo, err := fx.db.UtxoByRef(context.Background(), inputId, 0, nil)
 		require.NoError(t, err)
 		initialUtxos = append(initialUtxos, utxo)
 	}
@@ -429,9 +429,9 @@ func TestDijkstraCollateralReturnPointerRejectedDuringBlockReplay(t *testing.T) 
 		)
 	}
 	replay()
-	require.NoError(t, fx.ls.chain.Rollback(ocommon.Point{}))
+	require.NoError(t, fx.ls.chain.Rollback(context.Background(), ocommon.Point{}))
 	require.Empty(t, fx.ls.chain.Tip().Point.Hash)
-	require.NoError(t, fx.ls.chain.AddRawBlocks([]chain.RawBlock{fx.rawBlock()}))
+	require.NoError(t, fx.ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{fx.rawBlock()}))
 	replay()
 	require.Equal(t, ochainsync.Tip{}, func() ochainsync.Tip {
 		tip, err := fx.db.GetTip(nil)
@@ -439,7 +439,7 @@ func TestDijkstraCollateralReturnPointerRejectedDuringBlockReplay(t *testing.T) 
 		return tip
 	}())
 	for index, inputId := range fx.inputIds {
-		utxo, err := fx.db.UtxoByRef(inputId, 0, nil)
+		utxo, err := fx.db.UtxoByRef(context.Background(), inputId, 0, nil)
 		require.NoError(t, err)
 		require.Equal(t, initialUtxos[index], utxo)
 	}

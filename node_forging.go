@@ -223,8 +223,7 @@ func (n *Node) validateBlockProducerCredentialMaterial(
 ) (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
 	if n.config.shelleyKESAgentSocket != "" {
-		if err := n.loadBlockProducerCredentialsFromAgent(
-			creds,
+		if err := n.loadBlockProducerCredentialsFromAgent(creds,
 			currentSlot,
 		); err != nil {
 			return nil, fmt.Errorf(
@@ -829,6 +828,7 @@ func (n *Node) startBlockProducer(
 	ctx context.Context,
 	started []func(),
 ) ([]func(), error) {
+	//nolint:contextcheck // the KES agent loop is bound to the node lifecycle context, not this call
 	creds, err := n.validateBlockProducerStartup()
 	if err != nil {
 		return started, fmt.Errorf(
@@ -1175,7 +1175,7 @@ type blockBroadcaster struct {
 	logger *slog.Logger
 }
 
-func (b *blockBroadcaster) AddBlock(
+func (b *blockBroadcaster) AddBlock(ctx context.Context,
 	block gledger.Block,
 	_ []byte,
 ) error {
@@ -1185,7 +1185,7 @@ func (b *blockBroadcaster) AddBlock(
 	if b.chain == nil {
 		return errors.New("chain unavailable")
 	}
-	if err := b.chain.AddLocalBlock(block); err != nil {
+	if err := b.chain.AddLocalBlock(ctx, block); err != nil {
 		return fmt.Errorf("chain rejected proposed block: %w", err)
 	}
 
@@ -1219,7 +1219,7 @@ func (a *stakeDistributionAdapter) getStakeDistribution(
 	if db == nil {
 		return nil, errors.New("database unavailable")
 	}
-	txn := db.MetadataTxn(false)
+	txn := db.MetadataTxn(context.Background(), false)
 	if txn == nil {
 		return nil, errors.New("metadata transaction unavailable")
 	}
@@ -1275,7 +1275,7 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 	if db == nil {
 		return 0, 0, errors.New("database unavailable")
 	}
-	txn := db.MetadataTxn(false)
+	txn := db.MetadataTxn(context.Background(), false)
 	if txn == nil {
 		return 0, 0, errors.New("metadata transaction unavailable")
 	}
@@ -1340,8 +1340,11 @@ func (a *epochInfoAdapter) CurrentEpoch() uint64 {
 	return a.ledgerState.CurrentEpoch()
 }
 
-func (a *epochInfoAdapter) EpochNonce(epoch uint64) []byte {
-	return a.ledgerState.EpochNonce(epoch)
+func (a *epochInfoAdapter) EpochNonce(
+	ctx context.Context,
+	epoch uint64,
+) []byte {
+	return a.ledgerState.EpochNonce(ctx, epoch)
 }
 
 func (a *epochInfoAdapter) NextEpochNonceReadyEpoch() (uint64, bool) {
@@ -1503,7 +1506,11 @@ type leiosPipelineAdapter struct {
 
 type leiosParentChain interface {
 	Tip() ochainsync.Tip
-	BlockByPoint(ocommon.Point, *database.Txn) (models.Block, error)
+	BlockByPoint(
+		context.Context,
+		ocommon.Point,
+		*database.Txn,
+	) (models.Block, error)
 }
 
 func (a *leiosPipelineAdapter) MayProduceEndorserBlock(
@@ -1547,7 +1554,7 @@ func (a *leiosPipelineAdapter) MarkEndorserBlockEmbedded(
 	a.mgr.MarkEmbedded(ebSlot, ebHash)
 }
 
-func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
+func (a *leiosPipelineAdapter) ParentLeiosAnnouncement(ctx context.Context) (
 	lcommon.Blake2b256,
 	lcommon.Blake2b256,
 	bool,
@@ -1562,7 +1569,7 @@ func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
 	if len(tip.Point.Hash) == 0 {
 		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, nil
 	}
-	block, err := a.chain.BlockByPoint(tip.Point, nil)
+	block, err := a.chain.BlockByPoint(ctx, tip.Point, nil)
 	if err != nil {
 		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, fmt.Errorf(
 			"resolve parent block: %w",
@@ -1596,8 +1603,8 @@ type forgedBlockValidatorAdapter struct {
 }
 
 type forgedBlockValidationState interface {
-	ValidateForgedBlock(gledger.Block, []byte) error
-	ValidateBlockReferenceScripts(gledger.Block) error
+	ValidateForgedBlock(context.Context, gledger.Block, []byte) error
+	ValidateBlockReferenceScripts(context.Context, gledger.Block) error
 }
 
 func newForgedBlockValidator(
@@ -1610,14 +1617,14 @@ func newForgedBlockValidator(
 	}
 }
 
-func (a *forgedBlockValidatorAdapter) ValidateForgedBlock(
+func (a *forgedBlockValidatorAdapter) ValidateForgedBlock(ctx context.Context,
 	block gledger.Block,
 	blockCbor []byte,
 ) error {
 	if !a.fullValidation {
-		return a.ledgerState.ValidateBlockReferenceScripts(block)
+		return a.ledgerState.ValidateBlockReferenceScripts(ctx, block)
 	}
-	return a.ledgerState.ValidateForgedBlock(block, blockCbor)
+	return a.ledgerState.ValidateForgedBlock(ctx, block, blockCbor)
 }
 
 // epochNonceAdapter adapts ledger.LedgerState to forging.EpochNonceProvider.
@@ -1637,6 +1644,9 @@ func (a *epochNonceAdapter) EpochForSlot(slot uint64) (uint64, error) {
 	return epoch.EpochId, nil
 }
 
-func (a *epochNonceAdapter) EpochNonce(epoch uint64) []byte {
-	return a.ledgerState.EpochNonce(epoch)
+func (a *epochNonceAdapter) EpochNonce(
+	ctx context.Context,
+	epoch uint64,
+) []byte {
+	return a.ledgerState.EpochNonce(ctx, epoch)
 }

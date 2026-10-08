@@ -43,11 +43,11 @@ func initialNodeSettingsGates() nodesettings.Values {
 
 func TestNodeSettingsGatesRoundTrip(t *testing.T) {
 	store := newManagementTestStore(t)
-	gates, err := store.GetNodeSettingsGates()
+	gates, err := store.GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, initialNodeSettingsGates(), gates)
 
-	require.NoError(t, store.SetNodeSettingsGates(
+	require.NoError(t, store.SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{
 			"network_magic": "1",
 			"start_era":     "dijkstra",
@@ -55,7 +55,7 @@ func TestNodeSettingsGatesRoundTrip(t *testing.T) {
 		42, 1000,
 	))
 
-	gates, err = store.GetNodeSettingsGates()
+	gates, err = store.GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "1", gates["network_magic"])
 	require.Equal(t, "dijkstra", gates["start_era"])
@@ -63,21 +63,21 @@ func TestNodeSettingsGatesRoundTrip(t *testing.T) {
 
 func TestNodeSettingsGatesUpsertOverwrites(t *testing.T) {
 	store := newManagementTestStore(t)
-	require.NoError(t, store.SetNodeSettingsGates(
+	require.NoError(t, store.SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{"storage_mode": "api"}, 1, 10,
 	))
-	require.NoError(t, store.SetNodeSettingsGates(
+	require.NoError(t, store.SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{"storage_mode": "core"}, 2, 20,
 	))
-	gates, err := store.GetNodeSettingsGates()
+	gates, err := store.GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "core", gates["storage_mode"])
 }
 
 func TestNodeSettingsGatesEmptyWriteIsNoOp(t *testing.T) {
 	store := newManagementTestStore(t)
-	require.NoError(t, store.SetNodeSettingsGates(nil, 0, 0))
-	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, store.SetNodeSettingsGates(context.Background(), nil, 0, 0))
+	gates, err := store.GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, initialNodeSettingsGates(), gates)
 }
@@ -87,13 +87,13 @@ func TestNodeSettingsGatesEmptyWriteIsNoOp(t *testing.T) {
 // SetNodeSettingsGates's unconditional upsert.
 func TestInsertNodeSettingsGateIfAbsentFirstCallWins(t *testing.T) {
 	store := newManagementTestStore(t)
-	inserted, err := store.InsertNodeSettingsGateIfAbsent(
+	inserted, err := store.InsertNodeSettingsGateIfAbsent(context.Background(),
 		"network_magic", "1", 0, 0,
 	)
 	require.NoError(t, err)
 	require.True(t, inserted)
 
-	gates, err := store.GetNodeSettingsGates()
+	gates, err := store.GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "1", gates["network_magic"])
 }
@@ -105,19 +105,19 @@ func TestInsertNodeSettingsGateIfAbsentFirstCallWins(t *testing.T) {
 // upsert, which always overwrites regardless of what is already there.
 func TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite(t *testing.T) {
 	store := newManagementTestStore(t)
-	inserted, err := store.InsertNodeSettingsGateIfAbsent(
+	inserted, err := store.InsertNodeSettingsGateIfAbsent(context.Background(),
 		"network_magic", "1", 0, 0,
 	)
 	require.NoError(t, err)
 	require.True(t, inserted)
 
-	inserted, err = store.InsertNodeSettingsGateIfAbsent(
+	inserted, err = store.InsertNodeSettingsGateIfAbsent(context.Background(),
 		"network_magic", "2", 10, 100,
 	)
 	require.NoError(t, err)
 	require.False(t, inserted)
 
-	gates, err := store.GetNodeSettingsGates()
+	gates, err := store.GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -145,7 +145,7 @@ func TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins(
 	for i := range attempts {
 		go func(i int) {
 			defer wg.Done()
-			inserted, err := store.InsertNodeSettingsGateIfAbsent(
+			inserted, err := store.InsertNodeSettingsGateIfAbsent(context.Background(),
 				"storage_mode", "core", 0, 0,
 			)
 			errorsByAttempt[i] = err
@@ -180,7 +180,7 @@ func TestInsertNodeSettingsGatesIfAbsentConcurrentSetsAreAtomic(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			inserted[i], errorsByAttempt[i] =
-				store.InsertNodeSettingsGatesIfAbsent(sets[i], 0, 0)
+				store.InsertNodeSettingsGatesIfAbsent(context.Background(), sets[i], 0, 0)
 		}(i)
 	}
 	wg.Wait()
@@ -195,7 +195,7 @@ func TestInsertNodeSettingsGatesIfAbsentConcurrentSetsAreAtomic(t *testing.T) {
 	}
 	require.Equal(t, 1, winners)
 
-	gates, err := store.GetNodeSettingsGates()
+	gates, err := store.GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	winningSet := sets[0]
 	if !inserted[0] {
@@ -226,14 +226,14 @@ func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
 	// otherwise slip past a test that only checks the error return.
 	requireOnlyInitialGates := func(t *testing.T, store *Store) {
 		t.Helper()
-		gates, err := store.GetNodeSettingsGates()
+		gates, err := store.GetNodeSettingsGates(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, initialNodeSettingsGates(), gates)
 	}
 
 	t.Run("SetNodeSettingsGates bad epoch", func(t *testing.T) {
 		store := newManagementTestStore(t)
-		err := store.SetNodeSettingsGates(
+		err := store.SetNodeSettingsGates(context.Background(),
 			nodesettings.Values{"start_era": "byron"},
 			outOfDomain,
 			0,
@@ -244,7 +244,7 @@ func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
 
 	t.Run("SetNodeSettingsGates bad slot", func(t *testing.T) {
 		store := newManagementTestStore(t)
-		err := store.SetNodeSettingsGates(
+		err := store.SetNodeSettingsGates(context.Background(),
 			nodesettings.Values{"start_era": "byron"},
 			0,
 			outOfDomain,
@@ -255,7 +255,7 @@ func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
 
 	t.Run("InsertNodeSettingsGateIfAbsent bad epoch", func(t *testing.T) {
 		store := newManagementTestStore(t)
-		_, err := store.InsertNodeSettingsGateIfAbsent(
+		_, err := store.InsertNodeSettingsGateIfAbsent(context.Background(),
 			"start_era", "byron", outOfDomain, 0,
 		)
 		require.Error(t, err)
@@ -264,7 +264,7 @@ func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
 
 	t.Run("InsertNodeSettingsGateIfAbsent bad slot", func(t *testing.T) {
 		store := newManagementTestStore(t)
-		_, err := store.InsertNodeSettingsGateIfAbsent(
+		_, err := store.InsertNodeSettingsGateIfAbsent(context.Background(),
 			"start_era", "byron", 0, outOfDomain,
 		)
 		require.Error(t, err)
@@ -273,7 +273,7 @@ func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
 
 	t.Run("InsertNodeSettingsGatesIfAbsent bad epoch", func(t *testing.T) {
 		store := newManagementTestStore(t)
-		_, err := store.InsertNodeSettingsGatesIfAbsent(
+		_, err := store.InsertNodeSettingsGatesIfAbsent(context.Background(),
 			nodesettings.Values{"start_era": "byron"}, outOfDomain, 0,
 		)
 		require.Error(t, err)
@@ -282,7 +282,7 @@ func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
 
 	t.Run("InsertNodeSettingsGatesIfAbsent bad slot", func(t *testing.T) {
 		store := newManagementTestStore(t)
-		_, err := store.InsertNodeSettingsGatesIfAbsent(
+		_, err := store.InsertNodeSettingsGatesIfAbsent(context.Background(),
 			nodesettings.Values{"start_era": "byron"}, 0, outOfDomain,
 		)
 		require.Error(t, err)
@@ -985,14 +985,14 @@ func TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistratio
 func TestCommitTimestamp(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
-	timestamp, err := store.GetCommitTimestamp()
+	timestamp, err := store.GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Zero(t, timestamp)
 
 	transaction := store.Transaction(t.Context())
 	require.NoError(t, store.SetCommitTimestamp(1234, transaction))
 	require.NoError(t, transaction.Commit())
-	timestamp, err = store.GetCommitTimestamp()
+	timestamp, err = store.GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, int64(1234), timestamp)
 }
@@ -1000,22 +1000,22 @@ func TestCommitTimestamp(t *testing.T) {
 func TestNodeSettingsAreImmutableWithNetworkBackfill(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
-	settings, err := store.GetNodeSettings()
+	settings, err := store.GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.Nil(t, settings)
 
-	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
+	require.NoError(t, store.SetNodeSettings(context.Background(), &types.NodeSettings{
 		StorageMode: types.StorageModeCore,
 	}))
-	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
+	require.NoError(t, store.SetNodeSettings(context.Background(), &types.NodeSettings{
 		StorageMode: types.StorageModeCore,
 		Network:     "preview",
 	}))
-	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
+	require.NoError(t, store.SetNodeSettings(context.Background(), &types.NodeSettings{
 		StorageMode: types.StorageModeAPI,
 		Network:     "mainnet",
 	}))
-	settings, err = store.GetNodeSettings()
+	settings, err = store.GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, &types.NodeSettings{
 		StorageMode: types.StorageModeCore,
@@ -1080,7 +1080,29 @@ func TestTransactionContextCancellationRollsBackWrites(t *testing.T) {
 
 	// Neither the successful first write nor anything else from the
 	// canceled transaction may be durably visible.
-	persisted, err := store.GetCommitTimestamp()
+	persisted, err := store.GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Zero(t, persisted)
+}
+
+func TestSettingsOperationsHonorCancelledContext(t *testing.T) {
+	t.Parallel()
+	s := newManagementTestStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := s.GetCommitTimestamp(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = s.GetNodeSettings(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = s.GetNodeSettingsGates(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, s.SetNodeSettings(ctx, &types.NodeSettings{}), context.Canceled)
+	require.ErrorIs(t, s.SetNodeSettingsGates(ctx, nodesettings.Values{"cancel_probe": "1"}, 0, 0), context.Canceled)
+	_, err = s.InsertNodeSettingsGateIfAbsent(ctx, "cancel_probe", "1", 0, 0)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = s.InsertNodeSettingsGatesIfAbsent(ctx, nodesettings.Values{"cancel_probe": "1"}, 0, 0)
+	require.ErrorIs(t, err, context.Canceled)
+	gates, err := s.GetNodeSettingsGates(t.Context())
+	require.NoError(t, err)
+	require.NotContains(t, gates, "cancel_probe")
 }
