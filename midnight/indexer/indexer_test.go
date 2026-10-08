@@ -470,6 +470,71 @@ func TestCheckedCnightQuantity_Boundary(t *testing.T) {
 	assert.Contains(t, err.Error(), "does not fit in uint64")
 }
 
+// TestCNightCreate_OutOfDomainQuantityDoesNotAbortBlock verifies that an
+// otherwise valid block continues past a cNIGHT output whose quantity cannot
+// be represented by the signed database column. The backfill entry point is
+// used so the production processBlock path and its checkpoint update are both
+// covered: the invalid output is skipped, the valid companion is persisted and
+// tracked, and the block still advances the checkpoint.
+func TestCNightCreate_OutOfDomainQuantityDoesNotAbortBlock(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupIndexer(t, store)
+
+	invalidHash := pad32("e1000001")
+	validHash := pad32("e1000002")
+	plainHash := pad32("e1000003")
+	txs := []lcommon.Transaction{
+		buildTx(t, invalidHash,
+			[]lcommon.TransactionInput{buildInput(t, pad32("e1000000"), 0)},
+			[]lcommon.TransactionOutput{
+				buildCNightOutput(t, testPolicyID, testAssetNameHex, math.MaxInt64+1),
+			}),
+		buildTx(t, validHash,
+			[]lcommon.TransactionInput{buildInput(t, pad32("e1000010"), 0)},
+			[]lcommon.TransactionOutput{
+				buildCNightOutput(t, testPolicyID, testAssetNameHex, 42),
+			}),
+		buildTx(t, plainHash,
+			[]lcommon.TransactionInput{buildInput(t, pad32("e1000020"), 0)},
+			[]lcommon.TransactionOutput{anyOutput(t)}),
+	}
+	block := testBlock(7, 700, 0xE7)
+	idx.config.BlockIterator = func(startSlot, endSlot uint64, fn func(models.Block) error) error {
+		return fn(block)
+	}
+	idx.config.blockDecoder = func(got models.Block) ([]lcommon.Transaction, error) {
+		require.Equal(t, block.Number, got.Number)
+		return txs, nil
+	}
+
+	require.NoError(t, idx.Backfill())
+
+	creates := allAssetCreates(t, store)
+	require.Len(t, creates, 1, "only the representable cNIGHT output must be indexed")
+	assert.Equal(t, uint64(42), creates[0].Quantity)
+	assert.Equal(t, validHashBytes(t, validHash), creates[0].TxHash)
+
+	idx.mu.RLock()
+	_, invalidTracked := idx.cNightUTxOs[utxoKey{TxHash: invalidHash, Index: 0}]
+	_, validTracked := idx.cNightUTxOs[utxoKey{TxHash: validHash, Index: 0}]
+	idx.mu.RUnlock()
+	assert.False(t, invalidTracked, "out-of-domain cNIGHT UTxO must not be tracked")
+	assert.True(t, validTracked, "valid companion cNIGHT UTxO must remain tracked")
+
+	cp, err := store.GetBackfillCheckpoint(midnightCheckpointPhase, nil)
+	require.NoError(t, err)
+	require.NotNil(t, cp)
+	assert.Equal(t, block.Slot, cp.LastSlot, "successful block processing must advance checkpoint")
+}
+
+func validHashBytes(t *testing.T, hash string) []byte {
+	t.Helper()
+	ret, err := hex.DecodeString(hash)
+	require.NoError(t, err)
+	return ret
+}
+
 // TestCNightSpend_HappyPath verifies that spending a tracked cNIGHT UTxO
 // writes a midnight_asset_spend row and removes it from the in-memory set.
 func TestCNightSpend_HappyPath(t *testing.T) {
