@@ -278,7 +278,7 @@ func TestMempoolSizeCounterMatchesRetainedTransactionBytes(t *testing.T) {
 	pool.RemoveTransaction(hashes[0])
 	check("after removal", 2)
 
-	require.NoError(t, pool.rebuildOverlay())
+	require.NoError(t, pool.rebuildOverlay(context.Background()))
 	check("after revalidation", 2)
 
 	// Overlay entries must not carry a raw copy of the transaction bytes,
@@ -423,7 +423,7 @@ func TestRevalidationKeepsDescendantWhenParentConfirmedMidPass(t *testing.T) {
 			require.NoError(t, pool.AddTransaction(txType, childBytes))
 
 			validator.confirmOnCheck.Store(true)
-			require.NoError(t, pool.rebuildOverlay())
+			require.NoError(t, pool.rebuildOverlay(context.Background()))
 
 			require.EqualValues(t, 2, validator.sessions.Load())
 			txs := pool.Transactions()

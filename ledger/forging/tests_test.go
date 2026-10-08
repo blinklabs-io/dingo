@@ -264,7 +264,7 @@ func TestForgedBlockDiagnosticsLabelsValidBlock(t *testing.T) {
 		Credentials:     creds,
 	})
 	require.NoError(t, err)
-	_, blockCbor, err := builder.BuildBlock(1001, 0)
+	_, blockCbor, err := builder.BuildBlock(context.Background(), 1001, 0)
 	require.NoError(t, err)
 
 	diag := forgedBlockDiagnostics(blockCbor)
@@ -323,7 +323,7 @@ type fenceTestBuilder struct {
 	onCall func()
 }
 
-func (b *fenceTestBuilder) BuildBlock(
+func (b *fenceTestBuilder) BuildBlock(context.Context,
 	uint64,
 	uint64,
 ) (ledger.Block, []byte, error) {
@@ -334,12 +334,12 @@ func (b *fenceTestBuilder) BuildBlock(
 	return b.block, b.cbor, nil
 }
 
-func (b *fenceTestBuilder) BuildBlockWithLeios(
+func (b *fenceTestBuilder) BuildBlockWithLeios(context.Context,
 	uint64,
 	uint64,
 	LeiosBlockData,
 ) (ledger.Block, []byte, error) {
-	return b.BuildBlock(0, 0)
+	return b.BuildBlock(context.Background(), 0, 0)
 }
 
 // newFenceTestForger builds a production forger wired to store, with the
@@ -633,7 +633,7 @@ func newAltTestChainContext(tipSlot uint64) *forgerTestChainContext {
 	}
 }
 
-func (c *forgerTestChainContext) TipPredecessor() (
+func (c *forgerTestChainContext) TipPredecessor(_ context.Context) (
 	ocommon.Point,
 	ochainsync.Tip,
 	bool,
@@ -652,7 +652,7 @@ type forgerTestSiblingAdopter struct {
 	block   ledger.Block
 }
 
-func (a *forgerTestSiblingAdopter) AdoptLocalForgedSibling(
+func (a *forgerTestSiblingAdopter) AdoptLocalForgedSibling(ctx context.Context,
 	block ledger.Block,
 ) (bool, error) {
 	a.calls++
@@ -1125,7 +1125,7 @@ type fallbackTestBuilder struct {
 	emptyErr error
 }
 
-func (b *fallbackTestBuilder) BuildBlock(
+func (b *fallbackTestBuilder) BuildBlock(context.Context,
 	uint64,
 	uint64,
 ) (ledger.Block, []byte, error) {
@@ -1133,7 +1133,7 @@ func (b *fallbackTestBuilder) BuildBlock(
 	return nil, nil, b.selectErr
 }
 
-func (b *fallbackTestBuilder) buildBlockWithCredentialGeneration(
+func (b *fallbackTestBuilder) buildBlockWithCredentialGeneration(ctx context.Context,
 	_ uint64,
 	_ uint64,
 	_ LeiosBlockData,
@@ -1287,7 +1287,7 @@ func TestBuildBlockEmptyBodyConstraintDropsAllTransactions(t *testing.T) {
 
 	generation := builder.creds.acquireCredentialGeneration()
 	defer generation.release()
-	block, _, err := builder.buildBlockWithCredentialGeneration(
+	block, _, err := builder.buildBlockWithCredentialGeneration(context.Background(),
 		1001,
 		0,
 		LeiosBlockData{},
@@ -1318,7 +1318,7 @@ func TestBuildBlockWithNoCandidatesSkipsValidationSession(t *testing.T) {
 		validator,
 	)
 
-	block, _, err := builder.BuildBlock(1001, 0)
+	block, _, err := builder.BuildBlock(context.Background(), 1001, 0)
 	require.NoError(t, err)
 	require.Empty(t, block.Transactions())
 	require.Zero(t, validator.sessions)
@@ -1340,7 +1340,7 @@ func TestBuildBlockEmptyBodySkipsMempoolSnapshot(t *testing.T) {
 
 	generation := builder.creds.acquireCredentialGeneration()
 	defer generation.release()
-	block, _, err := builder.buildBlockWithCredentialGeneration(
+	block, _, err := builder.buildBlockWithCredentialGeneration(context.Background(),
 		1001,
 		0,
 		LeiosBlockData{},
@@ -1368,7 +1368,7 @@ func TestBuildBlockSnapshotsMempoolForNormalBuild(t *testing.T) {
 		&sessionMockTxValidator{},
 	)
 
-	block, _, err := builder.BuildBlock(1001, 0)
+	block, _, err := builder.BuildBlock(context.Background(), 1001, 0)
 	require.NoError(t, err)
 	require.Len(t, block.Transactions(), 3)
 	require.Equal(t, 1, mempool.calls)
@@ -2732,14 +2732,14 @@ type parentSwapBuilder struct {
 	failNonEmpty bool
 }
 
-func (b *parentSwapBuilder) BuildBlock(
+func (b *parentSwapBuilder) BuildBlock(context.Context,
 	uint64,
 	uint64,
 ) (ledger.Block, []byte, error) {
 	return nil, nil, errParentChangedDuringBuild
 }
 
-func (b *parentSwapBuilder) buildBlockWithCredentialGeneration(
+func (b *parentSwapBuilder) buildBlockWithCredentialGeneration(ctx context.Context,
 	_ uint64,
 	_ uint64,
 	leios LeiosBlockData,
@@ -3462,7 +3462,7 @@ type retryTestBuilder struct {
 	err       error
 }
 
-func (b *retryTestBuilder) BuildBlock(
+func (b *retryTestBuilder) BuildBlock(context.Context,
 	uint64,
 	uint64,
 ) (ledger.Block, []byte, error) {
@@ -3861,7 +3861,7 @@ type tipMovingBuilder struct {
 	selectErr  error
 }
 
-func (b *tipMovingBuilder) BuildBlock(
+func (b *tipMovingBuilder) BuildBlock(context.Context,
 	uint64,
 	uint64,
 ) (ledger.Block, []byte, error) {
@@ -3869,7 +3869,7 @@ func (b *tipMovingBuilder) BuildBlock(
 	return nil, nil, b.selectErr
 }
 
-func (b *tipMovingBuilder) buildBlockWithCredentialGeneration(
+func (b *tipMovingBuilder) buildBlockWithCredentialGeneration(ctx context.Context,
 	_ uint64,
 	_ uint64,
 	_ LeiosBlockData,
@@ -4063,6 +4063,7 @@ func TestBuildBlockForSlotReportsBothTheAbortAndTheSupersededSlot(
 
 	leiosState := &forgeLeiosState{}
 	_, _, _, err := forger.buildBlockForSlot(
+		context.Background(),
 		10,
 		0,
 		leiosState,
@@ -4872,7 +4873,7 @@ func TestSelectValidLeiosTransactionsPreservesDependentChain(t *testing.T) {
 		},
 	}
 
-	selected, _, err := selectValidLeiosTransactions(
+	selected, _, err := selectValidLeiosTransactions(context.Background(),
 		txs,
 		&leiosOverlayValidator{
 			base:   map[utxoref.Key]struct{}{baseKey: {}},
@@ -4906,7 +4907,7 @@ func TestSelectValidLeiosTransactionsRejectsInvalidChain(t *testing.T) {
 		},
 	}
 
-	selected, _, err := selectValidLeiosTransactions(
+	selected, _, err := selectValidLeiosTransactions(context.Background(),
 		txs,
 		&leiosOverlayValidator{
 			base: map[utxoref.Key]struct{}{baseKey: {}},
@@ -4932,7 +4933,7 @@ func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(
 	baseInput := parent.Inputs()[0]
 	baseKey := utxoref.ForInput(baseInput)
 
-	selected, _, err := selectValidLeiosTransactions(
+	selected, _, err := selectValidLeiosTransactions(context.Background(),
 		[]MempoolTransaction{
 			{Hash: "not-hex", Cbor: parentCbor, Type: conway.TxTypeConway},
 			{
@@ -5448,7 +5449,7 @@ func TestLeiosEBSelectionStopsAtTheDeadline(t *testing.T) {
 	validator := &sessionMockTxValidator{}
 	validator.onValidate = func(int) { fakeNow = fakeNow.Add(perTxCost) }
 
-	selected, truncated, err := selectValidLeiosTransactions(
+	selected, truncated, err := selectValidLeiosTransactions(context.Background(),
 		leiosCandidateTxs(t, candidates),
 		validator,
 		leiosSelectionLimits{
@@ -5469,7 +5470,7 @@ func TestLeiosEBSelectionStopsAtTheDeadline(t *testing.T) {
 // candidates.
 func TestLeiosEBSelectionCompletesWithinBudget(t *testing.T) {
 	validator := &sessionMockTxValidator{}
-	selected, truncated, err := selectValidLeiosTransactions(
+	selected, truncated, err := selectValidLeiosTransactions(context.Background(),
 		leiosCandidateTxs(t, 5),
 		validator,
 		leiosSelectionLimits{
@@ -5487,7 +5488,7 @@ func TestLeiosEBSelectionCompletesWithinBudget(t *testing.T) {
 // been re-validated, so the whole pass was paid for and then discarded.
 func TestLeiosEBSelectionAbortsWhenSnapshotChanges(t *testing.T) {
 	validator := &sessionMockTxValidator{staleAfterCalls: 1}
-	_, _, err := selectValidLeiosTransactions(
+	_, _, err := selectValidLeiosTransactions(context.Background(),
 		leiosCandidateTxs(t, 10),
 		validator,
 		leiosSelectionLimits{now: time.Now},
@@ -5505,7 +5506,7 @@ func TestLeiosEBSelectionAbortsWhenSnapshotChanges(t *testing.T) {
 // meaning what it did before: no clock, no bound.
 func TestLeiosEBSelectionWithoutDeadlineIsUnbounded(t *testing.T) {
 	validator := &sessionMockTxValidator{}
-	selected, truncated, err := selectValidLeiosTransactions(
+	selected, truncated, err := selectValidLeiosTransactions(context.Background(),
 		leiosCandidateTxs(t, 8),
 		validator,
 		leiosSelectionLimits{},
@@ -6412,7 +6413,7 @@ func TestBuildBlockDoesNotNarrowOpCertCounterAtUint32(t *testing.T) {
 	creds.opCert.IssueNumber = counter
 
 	builder := newTPraosTestBuilder(t, creds)
-	block, _, err := builder.BuildBlock(1001, 0)
+	block, _, err := builder.BuildBlock(context.Background(), 1001, 0)
 	require.NoError(t, err)
 	header, ok := block.Header().(*shelley.ShelleyBlockHeader)
 	require.True(t, ok, "TPraos forge must return a Shelley header")
@@ -6432,7 +6433,7 @@ func TestBuildBlockRejectsOpCertCounterAbovePersistableBound(t *testing.T) {
 	creds.opCert.IssueNumber = eras.MaxPersistableOpCertCounter + 1
 
 	builder := newTPraosTestBuilder(t, creds)
-	_, _, err := builder.BuildBlock(1001, 0)
+	_, _, err := builder.BuildBlock(context.Background(), 1001, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "pool_opcert_sequence")
 	assert.NotContains(t, err.Error(), "exceeds uint32 max")

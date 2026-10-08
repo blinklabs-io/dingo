@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -930,4 +931,38 @@ func TestClient_SignTimeoutBounded(t *testing.T) {
 
 	conn := <-accepted
 	_ = conn.Close()
+}
+
+func TestClientCheckReadyDetectsUnavailableAgentWithoutSigning(t *testing.T) {
+	t.Parallel()
+	ln, sockPath := listenUnix(t)
+	done := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+		sendHello(t, conn, ModeSign)
+		var b [1]byte
+		_, err = conn.Read(b[:])
+		done <- err
+	}()
+	client, err := NewClient(
+		Config{SocketPath: sockPath, Mode: ModeSign, KESVKey: make([]byte, 32)},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+	require.NoError(t, client.CheckReady())
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, io.EOF)
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe connection did not close")
+	}
+	require.NoError(t, ln.Close())
+	require.Error(t, client.CheckReady())
+	require.NoError(t, client.Close())
+	require.ErrorIs(t, client.CheckReady(), ErrClosed)
 }

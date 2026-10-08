@@ -145,7 +145,7 @@ type TxValidator interface {
 // validators used by tests and alternate embeddings may continue to implement
 // only TxValidator.
 type TxValidationSessionProvider interface {
-	WithTxValidationSession(func(
+	WithTxValidationSession(context.Context, func(
 		validate func(
 			tx gledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
@@ -223,6 +223,7 @@ type Mempool struct {
 	// actually timed out rather than whichever caller happens to check it.
 	stopTimeoutErr atomic.Pointer[error]
 
+	workerCancel      context.CancelFunc
 	workerWG          sync.WaitGroup
 	consumersMutex    sync.Mutex
 	relayCacheMutex   sync.Mutex
@@ -754,6 +755,8 @@ func (m *Mempool) Start(ctx context.Context) error {
 		return ErrMempoolStopped
 	}
 	m.startOnce.Do(func() {
+		workerCtx, cancelWorker := context.WithCancel(ctx)
+		m.workerCancel = cancelWorker
 		var (
 			chainUpdateSubId event.EventSubscriberId
 			chainUpdateChan  <-chan event.Event
@@ -769,7 +772,7 @@ func (m *Mempool) Start(ctx context.Context) error {
 		m.workerWG.Add(2)
 		go func() {
 			defer m.workerWG.Done()
-			m.processChainEvents(chainUpdateSubId, chainUpdateChan)
+			m.processChainEvents(workerCtx, chainUpdateSubId, chainUpdateChan)
 		}()
 		go func() {
 			defer m.workerWG.Done()
@@ -853,6 +856,12 @@ func (m *Mempool) releaseRelayCacheBytes(size int64) {
 func (m *Mempool) Stop(ctx context.Context) error {
 	m.logger.Debug("stopping mempool")
 	m.stopOnce.Do(func() {
+		m.Lock()
+		cancelWorker := m.workerCancel
+		m.Unlock()
+		if cancelWorker != nil {
+			cancelWorker()
+		}
 		// Establish a terminal state before waiting for background workers.
 		// Releasing the mutation and pool locks lets in-flight workers finish.
 		m.mutationMutex.Lock()
@@ -1037,6 +1046,7 @@ func registerProvider(
 }
 
 func (m *Mempool) processChainEvents(
+	ctx context.Context,
 	chainUpdateSubId event.EventSubscriberId,
 	chainUpdateChan <-chan event.Event,
 ) {
@@ -1056,6 +1066,8 @@ func (m *Mempool) processChainEvents(
 			}
 		case <-m.done:
 			return
+		case <-ctx.Done():
+			return
 		}
 		// Only purge once every 30 seconds when there are more blocks available
 		if time.Since(lastValidationTime) < 30*time.Second &&
@@ -1066,7 +1078,7 @@ func (m *Mempool) processChainEvents(
 		// a fresh overlay, removing TXs that no longer validate. Log
 		// and continue on error — the next chain update will try
 		// again rather than crashing the node.
-		if err := m.rebuildOverlay(); err != nil {
+		if err := m.rebuildOverlay(ctx); err != nil {
 			m.logger.Error(
 				"mempool overlay rebuild failed",
 				"component", "mempool",
@@ -1121,19 +1133,22 @@ var errRevalidationCatchup = errors.New(
 // in a private overlay. Admissions and removals continue against the live
 // overlay and are replayed from an ordered journal before the candidate is
 // swapped in during a short mutation-lock hold.
-func (m *Mempool) rebuildOverlay() error {
+func (m *Mempool) rebuildOverlay(ctx context.Context) error {
 	if m.validator == nil {
 		return ErrNilValidator
 	}
 	m.rebuildMutex.Lock()
 	defer m.rebuildMutex.Unlock()
-	return m.rebuildOverlayLocked()
+	return m.rebuildOverlayLocked(ctx)
 }
 
 // reconcileOverlay rebuilds the pool for an admission that validated against
 // seen, unless a rebuild has replaced seen since. Without that check every
 // admission that raced the same ledger move would rebuild the whole pool.
-func (m *Mempool) reconcileOverlay(seen *utxoOverlay) error {
+func (m *Mempool) reconcileOverlay(
+	ctx context.Context,
+	seen *utxoOverlay,
+) error {
 	if m.validator == nil {
 		return ErrNilValidator
 	}
@@ -1145,16 +1160,16 @@ func (m *Mempool) reconcileOverlay(seen *utxoOverlay) error {
 	if replaced {
 		return nil
 	}
-	return m.rebuildOverlayLocked()
+	return m.rebuildOverlayLocked(ctx)
 }
 
 // rebuildOverlayLocked runs rebuildOverlay with rebuildMutex held.
-func (m *Mempool) rebuildOverlayLocked() error {
+func (m *Mempool) rebuildOverlayLocked(ctx context.Context) error {
 	// A ledger publication racing the batch invalidates its pinned view. Retry
 	// once from the new live pool; a later chain event provides further retries
 	// without allowing a busy chain to spin here indefinitely.
 	for attempt := range 2 {
-		events, err := m.rebuildOverlayAttempt()
+		events, err := m.rebuildOverlayAttempt(ctx)
 		if errors.Is(err, errValidationSnapshotChanged) && attempt == 0 {
 			continue
 		}
@@ -1176,7 +1191,7 @@ func (m *Mempool) rebuildOverlayLocked() error {
 	return errValidationSnapshotChanged
 }
 
-func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
+func (m *Mempool) rebuildOverlayAttempt(ctx context.Context) ([]event.Event, error) {
 	m.mutationMutex.Lock()
 	m.RLock()
 	if m.stopped {
@@ -1203,7 +1218,7 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 	}
 
 	var events []event.Event
-	err := m.withTxValidationSession(func(
+	err := m.withTxValidationSession(ctx, func(
 		validate func(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
@@ -1473,7 +1488,7 @@ func (m *Mempool) revalidateAppliedTx(
 	candidate.add(at, tx, tmpTx)
 }
 
-func (m *Mempool) withTxValidationSession(
+func (m *Mempool) withTxValidationSession(ctx context.Context,
 	fn func(
 		validate func(
 			gledger.Transaction,
@@ -1486,7 +1501,7 @@ func (m *Mempool) withTxValidationSession(
 	) error,
 ) error {
 	if provider, ok := m.validator.(TxValidationSessionProvider); ok {
-		return provider.WithTxValidationSession(fn)
+		return provider.WithTxValidationSession(ctx, fn)
 	}
 	return fn(
 		m.validator.ValidateTxWithOverlay,
@@ -1641,7 +1656,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	for attempt := 0; ; attempt++ {
 		var seen *utxoOverlay
 		addEvent, evictedEvents, seen, err = m.addTransactionAttempt(
-			txType, txBytes, tmpTx, txHash,
+			context.Background(), txType, txBytes, tmpTx, txHash,
 		)
 		if !errors.Is(err, ErrPendingStateMoved) {
 			break
@@ -1649,7 +1664,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		if attempt == maxAdmissionReconciles {
 			return fmt.Errorf("validate transaction: %w", ErrPendingStateMoved)
 		}
-		if err := m.reconcileOverlay(seen); err != nil {
+		if err := m.reconcileOverlay(context.Background(), seen); err != nil {
 			if errors.Is(err, errValidationSnapshotChanged) {
 				return fmt.Errorf(
 					"reconcile pending transactions: %w: %w",
@@ -1677,6 +1692,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 // addTransactionAttempt validates and admits one transaction. On
 // ErrPendingStateMoved it also returns the overlay it validated against.
 func (m *Mempool) addTransactionAttempt(
+	ctx context.Context,
 	txType uint,
 	txBytes []byte,
 	tmpTx gledger.Transaction,
@@ -1685,7 +1701,7 @@ func (m *Mempool) addTransactionAttempt(
 	var addEvent *event.Event
 	var evictedEvents []event.Event
 	var seen *utxoOverlay
-	err := m.withTxValidationSession(func(
+	err := m.withTxValidationSession(ctx, func(
 		validate func(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},

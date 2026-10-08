@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"context"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -37,8 +39,7 @@ import (
 // at is Query's pinned point (unpinned = live); PoolStakeDistribution
 // resolves it to the historical epoch whose mark snapshot governed that
 // slot.
-func (ls *LedgerState) queryShelleyPoolDistr2(
-	q *olocalstatequery.ShelleyPoolDistr2Query,
+func (ls *LedgerState) queryShelleyPoolDistr2(ctx context.Context, q *olocalstatequery.ShelleyPoolDistr2Query,
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
@@ -57,7 +58,7 @@ func (ls *LedgerState) queryShelleyPoolDistr2(
 		}
 	}
 
-	dist, err := ls.PoolStakeDistribution(poolFilter, at, txn)
+	dist, err := ls.PoolStakeDistribution(ctx, poolFilter, at, txn)
 	if err != nil {
 		return nil, err
 	}

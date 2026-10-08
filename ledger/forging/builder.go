@@ -16,6 +16,7 @@ package forging
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -94,7 +95,7 @@ type EpochNonceProvider interface {
 	// EpochForSlot returns the epoch containing the given slot.
 	EpochForSlot(slot uint64) (uint64, error)
 	// EpochNonce returns the nonce for the given epoch.
-	EpochNonce(epoch uint64) []byte
+	EpochNonce(context.Context, uint64) []byte
 }
 
 // TxValidator re-validates a transaction against the current ledger
@@ -126,7 +127,7 @@ type TxValidationFunc = func(
 // TxValidationSessionProvider pins an ordered validation pass to one ledger
 // publication and repeatable-read transaction. LedgerState implements it.
 type TxValidationSessionProvider interface {
-	WithTxValidationSession(func(
+	WithTxValidationSession(context.Context, func(
 		validate TxValidationFunc,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
@@ -159,12 +160,15 @@ type blockSelectionConstraints struct {
 	deadline time.Time
 }
 
-func withTxValidationSession(
+func withTxValidationSession(ctx context.Context,
 	validator TxValidator,
 	fn func(TxValidationFunc, func() bool) error,
 ) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if provider, ok := validator.(TxValidationSessionProvider); ok {
-		return provider.WithTxValidationSession(func(
+		return provider.WithTxValidationSession(ctx, func(
 			validate TxValidationFunc,
 			stillCurrent func() bool,
 			_ func(func() error) (bool, error),
@@ -241,13 +245,13 @@ func NewDefaultBlockBuilder(
 
 // BuildBlock creates a new block for the given slot, extending the live chain
 // tip. Returns the block and its CBOR encoding.
-func (b *DefaultBlockBuilder) BuildBlock(
+func (b *DefaultBlockBuilder) BuildBlock(ctx context.Context,
 	slot uint64,
 	kesPeriod uint64,
 ) (ledger.Block, []byte, error) {
 	generation := b.creds.acquireCredentialGeneration()
 	defer generation.release()
-	return b.buildBlock(
+	return b.buildBlock(ctx,
 		slot,
 		kesPeriod,
 		LeiosBlockData{},
@@ -264,7 +268,7 @@ func (b *DefaultBlockBuilder) BuildBlock(
 // a non-empty value is rejected rather than carried. The block also carries no
 // mempool transactions, because no validator here can select them against the
 // state at blockCtx.Parent. Both are explained at their guards in buildBlock.
-func (b *DefaultBlockBuilder) BuildBlockOnContext(
+func (b *DefaultBlockBuilder) BuildBlockOnContext(ctx context.Context,
 	slot uint64,
 	kesPeriod uint64,
 	leios LeiosBlockData,
@@ -272,7 +276,7 @@ func (b *DefaultBlockBuilder) BuildBlockOnContext(
 ) (ledger.Block, []byte, error) {
 	generation := b.creds.acquireCredentialGeneration()
 	defer generation.release()
-	return b.buildBlock(
+	return b.buildBlock(ctx,
 		slot,
 		kesPeriod,
 		leios,
@@ -295,14 +299,14 @@ var (
 
 // BuildBlockWithLeios creates a Dijkstra block with Leios prototype
 // announcement or certificate data committed into the block body/header.
-func (b *DefaultBlockBuilder) BuildBlockWithLeios(
+func (b *DefaultBlockBuilder) BuildBlockWithLeios(ctx context.Context,
 	slot uint64,
 	kesPeriod uint64,
 	leios LeiosBlockData,
 ) (ledger.Block, []byte, error) {
 	generation := b.creds.acquireCredentialGeneration()
 	defer generation.release()
-	return b.buildBlock(
+	return b.buildBlock(ctx,
 		slot,
 		kesPeriod,
 		leios,
@@ -313,6 +317,7 @@ func (b *DefaultBlockBuilder) BuildBlockWithLeios(
 }
 
 func (b *DefaultBlockBuilder) buildBlockWithCredentialGeneration(
+	ctx context.Context,
 	slot uint64,
 	kesPeriod uint64,
 	leios LeiosBlockData,
@@ -320,7 +325,7 @@ func (b *DefaultBlockBuilder) buildBlockWithCredentialGeneration(
 	constraints blockSelectionConstraints,
 	blockCtx *BlockContext,
 ) (ledger.Block, []byte, error) {
-	return b.buildBlock(
+	return b.buildBlock(ctx,
 		slot,
 		kesPeriod,
 		leios,
@@ -375,7 +380,7 @@ func pointsEqual(a, b ocommon.Point) bool {
 	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
 }
 
-func (b *DefaultBlockBuilder) buildBlock(
+func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 	slot uint64,
 	kesPeriod uint64,
 	leios LeiosBlockData,
@@ -383,6 +388,9 @@ func (b *DefaultBlockBuilder) buildBlock(
 	constraints blockSelectionConstraints,
 	blockCtx *BlockContext,
 ) (ledger.Block, []byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	// Keep the protocol lifetime guard inside the generation-backed path so
 	// both exported builder entrypoints and BlockForger fail before reading the
 	// mempool, chain state, VRF key, or Leios inputs.
@@ -631,6 +639,9 @@ func (b *DefaultBlockBuilder) buildBlock(
 			dijkstraBodySize = uint64(len(emptyBodyCbor))
 		}
 		for _, mempoolTx := range mempoolTxs {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if !stillCurrent() {
 				// A ledger publication landed mid-pass. Every
 				// transaction validated from here on would be checked
@@ -956,6 +967,9 @@ func (b *DefaultBlockBuilder) buildBlock(
 		// check had already run. Returning the block would ship a
 		// selection from a superseded snapshot and bypass the forge
 		// loop's in-slot retry.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !stillCurrent() {
 			return errTxValidationSnapshotChanged
 		}
@@ -973,7 +987,11 @@ func (b *DefaultBlockBuilder) buildBlock(
 		// on the empty-body fallback path and on genuinely idle
 		// producers.
 	case b.txValidator != nil:
-		selectErr = withTxValidationSession(b.txValidator, selectTransactions)
+		selectErr = withTxValidationSession(
+			ctx,
+			b.txValidator,
+			selectTransactions,
+		)
 	default:
 		// No validator configured: skip ledger re-validation entirely
 		// (unchanged from before), but still run the same selection loop
@@ -1097,7 +1115,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 			err,
 		)
 	}
-	epochNonce := b.epochNonce.EpochNonce(blockEpoch)
+	epochNonce := b.epochNonce.EpochNonce(ctx, blockEpoch)
 	if len(epochNonce) == 0 {
 		return nil, nil, errors.New("epoch nonce not available")
 	}
@@ -1390,6 +1408,9 @@ func (b *DefaultBlockBuilder) buildBlock(
 		)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	return ledgerBlock, blockCbor, nil
 }
 
@@ -1431,17 +1452,27 @@ func (b *DefaultBlockBuilder) checkAppliedTipRelation(
 		return nil
 	}
 	if allowAlternativeParent {
-		parentTip, parentDepth, parentAncestor, err := relationProvider.TipRelation(parentPoint)
+		parentTip, parentDepth, parentAncestor, err := relationProvider.TipRelation(
+			parentPoint,
+		)
 		if err != nil {
-			return fmt.Errorf("check alternative forge parent ancestry: %w", err)
+			return fmt.Errorf(
+				"check alternative forge parent ancestry: %w",
+				err,
+			)
 		}
-		if !tipsEqual(parentTip, currentTip) || !parentAncestor || parentDepth != 1 {
-			return errors.New("alternative forge parent is not the direct chain-tip predecessor")
+		if !tipsEqual(parentTip, currentTip) || !parentAncestor ||
+			parentDepth != 1 {
+			return errors.New(
+				"alternative forge parent is not the direct chain-tip predecessor",
+			)
 		}
 		return nil
 	}
 	if !pointsEqual(parentPoint, appliedTip.Point) {
-		return errors.New("alternative forge parent does not match the applied ledger tip")
+		return errors.New(
+			"alternative forge parent does not match the applied ledger tip",
+		)
 	}
 	return nil
 }

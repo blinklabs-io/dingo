@@ -216,8 +216,8 @@ func newChildProdFixture(
 		require.NoError(t, err)
 		require.NoError(
 			t,
-			db.Transaction(true).Do(func(txn *database.Txn) error {
-				if err := db.CreateUtxo(txn, &models.Utxo{
+			db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+				if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
 					TxId:      seed.id,
 					OutputIdx: 0,
 				}); err != nil {
@@ -290,8 +290,9 @@ func (f *childProdFixture) admit(t *testing.T) error {
 }
 
 func (f *childProdFixture) importBlock() error {
-	return f.db.Transaction(true).Do(func(txn *database.Txn) error {
+	return f.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 		_, err := f.ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.NewPoint(f.block.SlotNumber(), f.block.Hash().Bytes()),
 			f.block,
@@ -621,7 +622,7 @@ func TestDijkstraChildPredicatesRejectedOnEveryProductionPath(t *testing.T) {
 				}
 				err := f.importBlock()
 				require.Truef(t, tc.matches(err), "imported block: %v", err)
-				err = f.ls.validateForgedTxs(f.block)
+				err = f.ls.validateForgedTxs(context.Background(), f.block)
 				require.Truef(t, tc.matches(err), "forged block: %v", err)
 				tip, err := f.db.GetTip(nil)
 				require.NoError(t, err)
@@ -703,7 +704,7 @@ func TestDijkstraChildBatchAcceptedOnEveryProductionPath(t *testing.T) {
 			tx := batch.build(t, keys)
 			f := newChildProdFixture(t, tx, keys)
 			require.NoError(t, f.admit(t))
-			require.NoError(t, f.ls.validateForgedTxs(f.block))
+			require.NoError(t, f.ls.validateForgedTxs(context.Background(), f.block))
 
 			replay := newReplayTestLedger(
 				t, f.db, f.block, uint(gledger.BlockTypeDijkstra),

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -68,7 +69,7 @@ func newPendingAccountsFixtureWithRule(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	key := bytes.Repeat([]byte{0xa1}, lcommon.AddressHashSize)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey: key,
 		Reward:     types.Uint64(balance),
 		Active:     true,
@@ -286,7 +287,7 @@ func TestValidateForgedTxsAccountsForEarlierWithdrawals(t *testing.T) {
 		},
 	}
 
-	err := f.ls.validateForgedTxs(block)
+	err := f.ls.validateForgedTxs(context.Background(), block)
 	var incorrect shelley.IncorrectWithdrawalAmountError
 	require.ErrorAs(
 		t,
@@ -297,7 +298,7 @@ func TestValidateForgedTxsAccountsForEarlierWithdrawals(t *testing.T) {
 	require.Contains(t, err.Error(), "in forged block at slot 10")
 
 	block.txs = block.txs[:1]
-	require.NoError(t, f.ls.validateForgedTxs(block))
+	require.NoError(t, f.ls.validateForgedTxs(context.Background(), block))
 }
 
 const pendingKeyDeposit = 2_000_000
@@ -380,12 +381,12 @@ func TestValidateForgedTxsAcceptsDeregistrationOfEarlierRegistration(
 			}),
 		},
 	}
-	require.NoError(t, f.ls.validateForgedTxs(block))
+	require.NoError(t, f.ls.validateForgedTxs(context.Background(), block))
 
 	block.txs = block.txs[1:]
 	require.Error(
 		t,
-		f.ls.validateForgedTxs(block),
+		f.ls.validateForgedTxs(context.Background(), block),
 		"deregistering a credential no transaction registered must fail",
 	)
 }

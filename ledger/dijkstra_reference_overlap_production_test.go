@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"io"
 	"log/slog"
@@ -77,22 +78,26 @@ func newDijkstraReferenceOverlapFixture(
 		OutputAddress: address,
 		OutputAmount:  value,
 	}
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		if err := db.CreateUtxo(txn, &models.Utxo{
-			TxId:       inputTxID,
-			OutputIdx:  0,
-			PaymentKey: paymentHash.Bytes(),
-			AddedSlot:  1,
-			Amount:     dbtypes.Uint64(value),
-		}); err != nil {
-			return err
-		}
-		encoded, err := cbor.Encode(output)
-		if err != nil {
-			return err
-		}
-		return db.Blob().SetUtxo(txn.Blob(), inputTxID, 0, encoded)
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
+					TxId:       inputTxID,
+					OutputIdx:  0,
+					PaymentKey: paymentHash.Bytes(),
+					AddedSlot:  1,
+					Amount:     dbtypes.Uint64(value),
+				}); err != nil {
+					return err
+				}
+				encoded, err := cbor.Encode(output)
+				if err != nil {
+					return err
+				}
+				return db.Blob().SetUtxo(txn.Blob(), inputTxID, 0, encoded)
+			}),
+	)
 
 	tx := &dijkstra.DijkstraTransaction{
 		Body: dijkstra.DijkstraTransactionBody{
@@ -223,26 +228,28 @@ func applyDijkstraReferenceOverlapBlock(
 		Slot: fixture.block.SlotNumber(),
 		Hash: fixture.block.Hash().Bytes(),
 	}
-	return fixture.db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := fixture.ls.ledgerProcessBlock(
-			txn,
-			point,
-			fixture.block,
-			true,
-			false,
-			false,
-			fixture.originHash,
-			envelopeParent{origin: true},
-			fixture.offsets,
-			eras.DijkstraEraDesc,
-			fixture.pparams,
-			nil,
-			0,
-			0,
-			false,
-		)
-		return err
-	})
+	return fixture.db.Transaction(context.Background(), true).
+		Do(func(txn *database.Txn) error {
+			_, err := fixture.ls.ledgerProcessBlock(
+				context.Background(),
+				txn,
+				point,
+				fixture.block,
+				true,
+				false,
+				false,
+				fixture.originHash,
+				envelopeParent{origin: true},
+				fixture.offsets,
+				eras.DijkstraEraDesc,
+				fixture.pparams,
+				nil,
+				0,
+				0,
+				false,
+			)
+			return err
+		})
 }
 
 func TestDijkstraSpendReferenceOverlapLedgerAdmissionAndForging(t *testing.T) {
@@ -250,7 +257,7 @@ func TestDijkstraSpendReferenceOverlapLedgerAdmissionAndForging(t *testing.T) {
 	fixture := newDijkstraReferenceOverlapFixture(t)
 	require.NoError(t, fixture.ls.ValidateTx(fixture.tx))
 	require.NoError(t, fixture.ls.ValidateTxWithOverlay(fixture.tx, nil, nil, nil))
-	require.NoError(t, fixture.ls.validateForgedTxs(fixture.block))
+	require.NoError(t, fixture.ls.validateForgedTxs(context.Background(), fixture.block))
 }
 
 func TestDijkstraSpendReferenceOverlapLiveApplyAndReplay(t *testing.T) {

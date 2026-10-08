@@ -129,7 +129,10 @@ func (s *stmSingleSignatureWithRegisteredParty) UnmarshalJSON(
 	return nil
 }
 
-func verifySTMCertificate(cert *Certificate) error {
+func verifySTMCertificate(
+	cert *Certificate,
+	budget *certificateChainBudget,
+) error {
 	if cert == nil {
 		return errors.New("certificate is nil")
 	}
@@ -141,6 +144,7 @@ func verifySTMCertificate(cert *Certificate) error {
 		cert.AggregateVerificationKey,
 		cert.MultiSignature,
 		cert.Metadata.Parameters,
+		budget,
 	)
 }
 
@@ -149,6 +153,7 @@ func verifySTMSignature(
 	encodedAVK string,
 	encodedSig string,
 	params ProtocolParameters,
+	budget *certificateChainBudget,
 ) error {
 	avk, err := parseSTMAggregateVerificationKey(encodedAVK)
 	if err != nil {
@@ -157,6 +162,14 @@ func verifySTMSignature(
 	aggrSig, err := parseSTMAggregateSignature(encodedSig)
 	if err != nil {
 		return fmt.Errorf("parsing multi-signature: %w", err)
+	}
+	// Counts and cost are settled before any signature, lottery or Merkle
+	// verification runs.
+	if err := checkSTMAggregateSignatureCounts(aggrSig); err != nil {
+		return err
+	}
+	if err := budget.chargeWork(stmAggregateSignatureWork(aggrSig)); err != nil {
+		return err
 	}
 	return verifySTMConcatenationProof(msg, avk, aggrSig, params)
 }
@@ -171,6 +184,13 @@ func parseSTMAggregateVerificationKey(
 	var ret stmAggregateVerificationKey
 	if err := json.Unmarshal(raw, &ret); err == nil &&
 		len(ret.MTCommitment.Root) > 0 {
+		if len(ret.MTCommitment.Root) != blake2b.Size256 {
+			return nil, fmt.Errorf(
+				"invalid Merkle root length %d, expected %d",
+				len(ret.MTCommitment.Root),
+				blake2b.Size256,
+			)
+		}
 		if ret.MTCommitment.NrLeaves <= 0 {
 			return nil, errors.New("nrLeaves must be positive")
 		}
@@ -181,10 +201,10 @@ func parseSTMAggregateVerificationKey(
 		}
 		return &ret, nil
 	}
-	if len(raw) < 48 {
+	if len(raw) != 8+blake2b.Size256+8 {
 		return nil, fmt.Errorf(
-			"invalid aggregate verification key payload length %d",
-			len(raw),
+			"invalid aggregate verification key payload length %d, expected %d",
+			len(raw), 8+blake2b.Size256+8,
 		)
 	}
 	nrLeaves, err := readUint64BE(raw[0:8])
@@ -223,10 +243,97 @@ func parseSTMAggregateSignature(
 		return nil, errors.New("could not decode multi-signature")
 	}
 	var ret stmAggregateSignature
-	if err := json.Unmarshal(raw, &ret); err == nil && len(ret.Signatures) > 0 {
+	if err := validateSTMAggregateSignatureJSON(raw); err == nil {
+		if err := json.Unmarshal(raw, &ret); err != nil {
+			return nil, err
+		}
+		if len(ret.Signatures) == 0 {
+			return nil, errors.New("aggregate signature has no signatures")
+		}
 		return &ret, nil
+	} else if json.Valid(raw) && len(bytes.TrimSpace(raw)) > 0 &&
+		bytes.TrimSpace(raw)[0] == '{' {
+		return nil, err
 	}
 	return parseSTMAggregateSignatureBytes(raw)
+}
+
+func validateSTMAggregateSignatureJSON(raw []byte) error {
+	var aggregate struct {
+		Signatures json.RawMessage `json:"signatures"`
+		BatchProof json.RawMessage `json:"batch_proof"`
+	}
+	if err := json.Unmarshal(raw, &aggregate); err != nil {
+		return err
+	}
+	remainingIndexes := stmMaxLotteryIndices
+	_, err := walkBoundedJSONArray(
+		aggregate.Signatures,
+		stmMaxSigners,
+		"aggregate signatures",
+		func(rawSignature json.RawMessage) error {
+			var tuple []json.RawMessage
+			if _, err := walkBoundedJSONArray(
+				rawSignature,
+				2,
+				"signature tuple fields",
+				func(field json.RawMessage) error {
+					tuple = append(tuple, field)
+					return nil
+				},
+			); err != nil {
+				return err
+			}
+			if len(tuple) != 2 {
+				return fmt.Errorf(
+					"expected 2-tuple signature/register entry, got %d fields",
+					len(tuple),
+				)
+			}
+			var signature struct {
+				Indexes json.RawMessage `json:"indexes"`
+			}
+			if err := json.Unmarshal(tuple[0], &signature); err != nil {
+				return err
+			}
+			count, err := walkBoundedJSONArray(
+				signature.Indexes,
+				remainingIndexes,
+				"lottery indices",
+				nil,
+			)
+			if err != nil {
+				return err
+			}
+			remainingIndexes -= count
+			return nil
+		},
+	)
+	if err != nil {
+		return err
+	}
+	var proof struct {
+		Values  json.RawMessage `json:"values"`
+		Indices json.RawMessage `json:"indices"`
+	}
+	if err := json.Unmarshal(aggregate.BatchProof, &proof); err != nil {
+		return err
+	}
+	if _, err := walkBoundedJSONArray(
+		proof.Values,
+		stmMaxBatchPathValues,
+		"batch proof values",
+		nil,
+	); err != nil {
+		return err
+	}
+	_, err = walkBoundedJSONArray(
+		proof.Indices,
+		stmMaxSigners,
+		"batch proof indices",
+		nil,
+	)
+	return err
 }
 
 func parseSTMSignerVerificationKey(encoded string) ([]byte, error) {
@@ -281,6 +388,12 @@ func parseSTMAggregateSignatureBytes(
 		return nil, err
 	}
 	offset += 8
+	if totalSigs > stmMaxSigners {
+		return nil, fmt.Errorf(
+			"%w: %d signatures exceed limit %d",
+			errCertificateChainBudget, totalSigs, stmMaxSigners,
+		)
+	}
 	// Cap the pre-allocation against the remaining payload length to
 	// prevent OOM from a malformed totalSigs value.
 	remaining := len(raw) - offset
@@ -296,6 +409,9 @@ func parseSTMAggregateSignatureBytes(
 	ret := &stmAggregateSignature{
 		Signatures: make([]stmSingleSignatureWithRegisteredParty, 0, totalSigs),
 	}
+	// The index cap is aggregate, so each signature may only allocate what
+	// the signatures before it left over.
+	indicesLeft := uint64(stmMaxLotteryIndices)
 	for i := range totalSigs {
 		if offset+8 > len(raw) {
 			return nil, fmt.Errorf(
@@ -317,10 +433,12 @@ func parseSTMAggregateSignatureBytes(
 		sigRegEnd := offset + int(sizeSigReg)
 		sigReg, err := parseSTMSignatureWithRegisteredPartyBytes(
 			raw[offset:sigRegEnd],
+			indicesLeft,
 		)
 		if err != nil {
 			return nil, err
 		}
+		indicesLeft -= uint64(len(sigReg.Sig.Indexes))
 		ret.Signatures = append(ret.Signatures, *sigReg)
 		offset = sigRegEnd
 	}
@@ -334,6 +452,7 @@ func parseSTMAggregateSignatureBytes(
 
 func parseSTMSignatureWithRegisteredPartyBytes(
 	raw []byte,
+	maxIndexes uint64,
 ) (*stmSingleSignatureWithRegisteredParty, error) {
 	if len(raw) < 8 {
 		return nil, fmt.Errorf(
@@ -378,7 +497,7 @@ func parseSTMSignatureWithRegisteredPartyBytes(
 	}
 	//nolint:gosec // bounded by available.
 	sigEnd := sigStart + int(sigSize)
-	sig, err := parseSTMSingleSignatureBytes(raw[sigStart:sigEnd])
+	sig, err := parseSTMSingleSignatureBytes(raw[sigStart:sigEnd], maxIndexes)
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +526,10 @@ func parseSTMClosedRegistrationEntryBytes(
 	}, nil
 }
 
-func parseSTMSingleSignatureBytes(raw []byte) (*stmSingleSignature, error) {
+func parseSTMSingleSignatureBytes(
+	raw []byte,
+	maxIndexes uint64,
+) (*stmSingleSignature, error) {
 	if len(raw) < 8 {
 		return nil, fmt.Errorf(
 			"single signature payload too short: need >= 8, got %d",
@@ -417,6 +539,12 @@ func parseSTMSingleSignatureBytes(raw []byte) (*stmSingleSignature, error) {
 	nrIndexes, err := readUint64BE(raw[0:8])
 	if err != nil {
 		return nil, err
+	}
+	if nrIndexes > maxIndexes {
+		return nil, fmt.Errorf(
+			"%w: lottery indices exceed limit %d",
+			errCertificateChainBudget, stmMaxLotteryIndices,
+		)
 	}
 	// Each index is 8 bytes; cap pre-allocation against remaining payload.
 	//nolint:gosec // non-negative: checked len >= 8.
@@ -465,6 +593,12 @@ func parseSTMMerkleBatchPathBytes(raw []byte) (*stmMerkleBatchPath, error) {
 	lenIndices, err := readUint64BE(raw[8:16])
 	if err != nil {
 		return nil, err
+	}
+	if lenValues > stmMaxBatchPathValues || lenIndices > stmMaxSigners {
+		return nil, fmt.Errorf(
+			"%w: batch proof has %d values and %d indices",
+			errCertificateChainBudget, lenValues, lenIndices,
+		)
 	}
 	// Each value is 32 bytes and each index is 8 bytes; validate that the
 	// claimed counts are consistent with the remaining payload length.

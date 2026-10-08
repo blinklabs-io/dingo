@@ -159,7 +159,7 @@ func TestRevalidationCommitRejectsSupersededLedgerGeneration(t *testing.T) {
 	require.Len(t, pool.Transactions(), 1)
 
 	validator.publishOnCheck.Store(true)
-	require.NoError(t, pool.rebuildOverlay())
+	require.NoError(t, pool.rebuildOverlay(context.Background()))
 	require.Empty(t, pool.Transactions())
 }
 

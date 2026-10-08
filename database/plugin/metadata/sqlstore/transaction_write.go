@@ -61,6 +61,9 @@ type transactionBatchAccumulator struct {
 	// wrapped in countingQueryer and must count itself here to keep
 	// dingo_database_sql_operations_total covering this path too.
 	sqlOperations *prometheus.CounterVec
+	// rows holds API-mode detail rows queued by SetTransactionBatched until
+	// FlushBatch writes them as multi-row inserts.
+	rows rowBatch
 }
 
 const transactionInsertSQL = `
@@ -119,11 +122,16 @@ func (a *transactionBatchAccumulator) insertTransaction(
 	return uint(id), nil
 }
 
-func (a *transactionBatchAccumulator) Reset() {
+func (a *transactionBatchAccumulator) resetStatement() {
 	if a.transactionInsert != nil {
 		_ = a.transactionInsert.Close()
 		a.transactionInsert = nil
 	}
+}
+
+func (a *transactionBatchAccumulator) Reset() {
+	a.resetStatement()
+	a.rows.reset()
 }
 
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
@@ -132,13 +140,31 @@ func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
 
 func (s *Store) FlushBatch(
 	accumulator types.MetadataBatchAccumulator,
-	_ types.Txn,
+	txn types.Txn,
 ) error {
-	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
+	batched, ok := accumulator.(*transactionBatchAccumulator)
+	if !ok {
 		return fmt.Errorf(
 			"sqlstore FlushBatch: wrong accumulator type %T",
 			accumulator,
 		)
+	}
+	if transaction, ok := txn.(*sqlTxn); ok {
+		if err := transaction.bindBatch(batched); err != nil {
+			return err
+		}
+	}
+	if !batched.rows.empty() {
+		if err := s.withWriteTransaction(
+			txn,
+			func(db queryer, ctx context.Context) error {
+				return batched.rows.flush(
+					ctx, db, s.dialect.ParameterLimit(),
+				)
+			},
+		); err != nil {
+			return err
+		}
 	}
 	accumulator.Reset()
 	return nil
@@ -321,7 +347,24 @@ func (s *Store) setTransactionWithAccumulator(
 			return fmt.Errorf("extract transaction metadata: %w", err)
 		}
 	}
-	return s.withWriteTransaction(
+	batchedAccumulator, _ := accumulator.(*transactionBatchAccumulator)
+	if batchedAccumulator != nil && txn == nil {
+		defer batchedAccumulator.resetStatement()
+	}
+	if transaction, ok := txn.(*sqlTxn); ok && batchedAccumulator != nil {
+		if err := transaction.bindBatch(batchedAccumulator); err != nil {
+			return err
+		}
+	}
+	// Detail rows are staged here and reach the accumulator only once the
+	// write succeeds, so a failed write cannot leave rows queued for a
+	// transaction that was rolled back, nor drop the rows an earlier
+	// successful application queued.
+	var (
+		staged        rowBatch
+		transactionID int64
+	)
+	err := s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
 			collateralFee, err := collateralFeeForTransaction(
@@ -332,7 +375,6 @@ func (s *Store) setTransactionWithAccumulator(
 			if err != nil {
 				return err
 			}
-			var transactionID int64
 			if batched, ok := accumulator.(*transactionBatchAccumulator); ok {
 				var id uint
 				id, err = batched.insertTransaction(ctx, db,
@@ -370,15 +412,12 @@ func (s *Store) setTransactionWithAccumulator(
 					return err
 				}
 			}
-			if err := s.applyTransactionMetadataLabels(
-				ctx,
-				db,
+			s.applyTransactionMetadataLabels(
+				&staged,
 				transactionID,
 				point.Slot,
 				metadataLabels,
-			); err != nil {
-				return err
-			}
+			)
 			if err := s.applyTransactionAssetMintBurn(
 				ctx,
 				db,
@@ -477,8 +516,16 @@ func (s *Store) setTransactionWithAccumulator(
 				point.Slot,
 				index,
 				producedModels,
+				&staged,
 			); err != nil {
 				return err
+			}
+			if batchedAccumulator == nil {
+				if err := staged.flush(
+					ctx, db, s.dialect.ParameterLimit(),
+				); err != nil {
+					return err
+				}
 			}
 			// spentRefs holds only the inputs this write actually moved from
 			// live to deleted, and is what the live-stake delta is derived
@@ -631,6 +678,15 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			)
 		},
 	)
+	if err != nil || batchedAccumulator == nil {
+		return err
+	}
+	// The per-transaction cleanup deletes only reach flushed rows, so rows
+	// an earlier application of this transaction queued in the same window
+	// are replaced here.
+	batchedAccumulator.rows.dropTransaction(transactionID)
+	batchedAccumulator.rows.merge(&staged)
+	return nil
 }
 
 func (s *Store) SetGapBlockTransaction(

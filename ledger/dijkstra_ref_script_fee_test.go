@@ -265,11 +265,11 @@ func TestLedgerProcessBlockDijkstraTieredRefScriptFee(t *testing.T) {
 			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-			require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+			require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
 				for _, utxo := range fx.inputs {
 					id := utxo.Id.Id().Bytes()
 					idx := utxo.Id.Index()
-					if err := db.CreateUtxo(txn, &models.Utxo{
+					if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
 						TxId: id, OutputIdx: idx, AddedSlot: 1,
 					}); err != nil {
 						return err
@@ -313,8 +313,9 @@ func TestLedgerProcessBlockDijkstraTieredRefScriptFee(t *testing.T) {
 				txs: []lcommon.Transaction{tx},
 				era: gdijkstra.EraDijkstra,
 			}
-			processErr := db.Transaction(true).Do(func(txn *database.Txn) error {
+			processErr := db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
 				_, err := ls.ledgerProcessBlock(
+					t.Context(),
 					txn,
 					ocommon.NewPoint(10, block.Hash().Bytes()),
 					block,

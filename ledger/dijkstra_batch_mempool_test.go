@@ -84,7 +84,7 @@ func TestDijkstraBatchPendingBalanceAgreesWithAppliedBalance(t *testing.T) {
 	}
 
 	db := newTestDB(t)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey: stakeKey,
 		AddedSlot:  1,
 		Reward:     dbtypes.Uint64(100),

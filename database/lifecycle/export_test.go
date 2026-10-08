@@ -1,5 +1,3 @@
-//go:build windows
-
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,10 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package forging
+package lifecycle
 
-import "os"
+import (
+	"context"
+	"time"
+)
 
-func openSecretKeyFile(path string) (*os.File, error) {
-	return os.Open(path) // #nosec G304 -- operator-configured key path
+// WithSnapshotPauseClockForTest supplies deterministic pause observation
+// seams to external lifecycle tests without exposing them in production.
+func WithSnapshotPauseClockForTest(
+	now func() time.Time,
+	pauseContext func(context.Context) context.Context,
+) ManifestOption {
+	return func(cfg *manifestConfig) {
+		cfg.pauseNow = now
+		cfg.pauseContext = pauseContext
+	}
 }

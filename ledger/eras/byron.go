@@ -18,6 +18,7 @@ import (
 	"crypto/sha3"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"strconv"
 
@@ -85,6 +86,20 @@ type InputSetEmptyByronError struct{}
 
 func (InputSetEmptyByronError) Error() string {
 	return "transaction has no inputs"
+}
+
+// InputIndexByronError is returned when a Byron transaction input carries an
+// output index above the Word16 range the reference TxIn can represent.
+type InputIndexByronError struct {
+	Index uint32
+}
+
+func (e InputIndexByronError) Error() string {
+	return fmt.Sprintf(
+		"input output index %d out of range 0-%d",
+		e.Index,
+		math.MaxUint16,
+	)
 }
 
 // OutputSetEmptyByronError is returned when a Byron transaction
@@ -360,6 +375,7 @@ type byronValidationRuleFunc func(tx lcommon.Transaction) error
 
 var byronValidationRules = []byronValidationRuleFunc{
 	byronValidateInputsNotEmpty,
+	byronValidateInputIndexes,
 	byronValidateOutputsNotEmpty,
 	byronValidateOutputsNonNegative,
 	byronValidateUnknownAttributes,
@@ -383,6 +399,20 @@ func byronValidateInputsNotEmpty(
 ) error {
 	if len(tx.Inputs()) == 0 {
 		return InputSetEmptyByronError{}
+	}
+	return nil
+}
+
+// byronValidateInputIndexes rejects an input index the reference's Word16
+// TxIn cannot represent. Decoding already refuses such an input; this keeps a
+// transaction assembled without the decoder from resolving a wider UTxO.
+func byronValidateInputIndexes(
+	tx lcommon.Transaction,
+) error {
+	for _, input := range tx.Inputs() {
+		if input.Index() > math.MaxUint16 {
+			return InputIndexByronError{Index: input.Index()}
+		}
 	}
 	return nil
 }

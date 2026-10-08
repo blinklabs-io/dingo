@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -101,6 +102,7 @@ func TestDijkstraBatchCertificatesApplyInBatchOrder(t *testing.T) {
 				}, false)
 				require.NoError(t, run(h, t, tx))
 				account, err := h.db.GetAccountByCredential(
+					context.Background(),
 					0,
 					stakeKey,
 					false,

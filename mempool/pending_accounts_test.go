@@ -251,7 +251,7 @@ func TestRevalidationAccountsForPendingWithdrawals(t *testing.T) {
 				"the first withdrawal drains the account the second reads",
 			)
 
-			require.NoError(t, pool.rebuildOverlay())
+			require.NoError(t, pool.rebuildOverlay(context.Background()))
 			require.Len(
 				t,
 				pool.Transactions(),
@@ -292,7 +292,7 @@ func TestPendingStateWorkGrowsLinearlyWithPoolSize(t *testing.T) {
 	)
 
 	validator.reads.Store(0)
-	require.NoError(t, pool.rebuildOverlay())
+	require.NoError(t, pool.rebuildOverlay(context.Background()))
 	require.LessOrEqual(
 		t,
 		validator.reads.Load(),

@@ -155,10 +155,11 @@ func (ls *LedgerState) byronPBFTGenesis() (
 }
 
 func (ls *LedgerState) validateByronPBFTHeader(
+	ctx context.Context,
 	block ledger.Block,
 	delegationState byronconsensus.PBFTDelegationState,
 ) (byronconsensus.PBFTIssuer, error) {
-	if err := ls.validateByronPBFTHeaderCrypto(block); err != nil {
+	if err := ls.validateByronPBFTHeaderCrypto(ctx, block); err != nil {
 		return byronconsensus.PBFTIssuer{}, err
 	}
 	if block.Type() == ledgerbyron.BlockTypeByronEbb {
@@ -189,6 +190,7 @@ func (ls *LedgerState) validateByronPBFTHeader(
 }
 
 func (ls *LedgerState) validateByronPBFTHeaderCrypto(
+	ctx context.Context,
 	block ledger.Block,
 ) error {
 	if block == nil {
@@ -223,7 +225,7 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 	// Every header entry point routes a Byron header here, and an unsigned
 	// epoch-boundary header would otherwise pass on the anchor and slot bound
 	// alone when it extends a post-Byron block.
-	if err := ls.validateHeaderEraOrder(header); err != nil {
+	if err := ls.validateHeaderEraOrder(ctx, header); err != nil {
 		return err
 	}
 	if isEbb {
@@ -552,7 +554,7 @@ func (ls *LedgerState) byronPBFTStateAtTip(
 				err,
 			)
 		}
-		state, err = ls.advanceByronPBFTState(state, block, false)
+		state, err = ls.advanceByronPBFTState(ctx, state, block, false)
 		if err != nil {
 			return byronPBFTState{}, fmt.Errorf(
 				"rebuild Byron PBFT state: apply block at slot %d: %w",
@@ -599,6 +601,7 @@ func newByronPBFTState(
 }
 
 func (ls *LedgerState) advanceByronPBFTState(
+	ctx context.Context,
 	state byronPBFTState,
 	block ledger.Block,
 	shouldValidate bool,
@@ -631,6 +634,7 @@ func (ls *LedgerState) advanceByronPBFTState(
 	}
 	if shouldValidate {
 		issuer, err := ls.validateByronPBFTHeader(
+			ctx,
 			block,
 			state.delegationState,
 		)

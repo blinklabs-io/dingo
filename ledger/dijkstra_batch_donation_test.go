@@ -46,8 +46,9 @@ func (h *stateBatchHarness) processAndApply(
 	h.ls.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	h.ls.config.SkipDijkstraTxValidation = true
 	h.ls.config.CardanoNodeConfig.ShelleyGenesis().NetworkId = "Testnet"
-	return h.db.Transaction(true).Do(func(txn *database.Txn) error {
+	return h.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 		delta, err := h.ls.ledgerProcessBlock(
+			context.Background(),
 			txn, point, block,
 			validate, false, false,
 			nil, envelopeParent{}, offsets,
@@ -58,7 +59,7 @@ func (h *stateBatchHarness) processAndApply(
 			return err
 		}
 		defer delta.Release()
-		return delta.apply(h.ls, txn)
+		return delta.apply(context.Background(), h.ls, txn)
 	})
 }
 
@@ -115,9 +116,9 @@ func TestDijkstraBatchDonationsRecordedOncePerLevelAcrossPaths(t *testing.T) {
 
 			require.NoError(
 				t,
-				h.db.Transaction(true).Do(func(txn *database.Txn) error {
+				h.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 					_, _, err := h.db.TruncateAfterSlot(
-						ocommon.Point{Slot: 1, Hash: parent}, 0, txn,
+						context.Background(), ocommon.Point{Slot: 1, Hash: parent}, 0, txn,
 					)
 					return err
 				}),

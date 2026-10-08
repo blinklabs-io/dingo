@@ -405,7 +405,7 @@ func TestMempoolRevalidationDropsDescendantsOfBatchSpentByBlock(t *testing.T) {
 	validator.mu.Lock()
 	validator.chainUsed[refKey(source)] = struct{}{}
 	validator.mu.Unlock()
-	require.NoError(t, pool.rebuildOverlay())
+	require.NoError(t, pool.rebuildOverlay(context.Background()))
 
 	remaining := pool.Transactions()
 	require.Len(t, remaining, 1)

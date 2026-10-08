@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -118,26 +119,31 @@ func TestLedgerProcessBlockExpandsIndexesAcrossValidatedTransactions(
 			SkipDijkstraTxValidation: true,
 		},
 	}
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
-			txn,
-			point,
-			block,
-			true,
-			false,
-			false,
-			nil,
-			envelopeParent{},
-			offsets,
-			eras.DijkstraEraDesc,
-			pparams,
-			nil,
-			0,
-			0,
-			false,
-		)
-		return err
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				_, err := ls.ledgerProcessBlock(
+					context.Background(),
+					txn,
+					point,
+					block,
+					true,
+					false,
+					false,
+					nil,
+					envelopeParent{},
+					offsets,
+					eras.DijkstraEraDesc,
+					pparams,
+					nil,
+					0,
+					0,
+					false,
+				)
+				return err
+			}),
+	)
 
 	batchSubTx := batch.Body.TxSubTransactions.Items()[0].Body.Id()
 	for _, want := range []struct {
@@ -206,7 +212,7 @@ func TestTxValidationSessionAppliesDijkstraBatchLevels(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	err := ls.withTxValidationSession(nil, nil, true, func(
+	err := ls.withTxValidationSession(context.Background(), nil, nil, true, func(
 		_ func(common.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]common.Utxo, *utxoref.StateOverlay) error,
 		_ func() bool,
 		_ func(func() error) (bool, error),
@@ -279,9 +285,13 @@ func TestDijkstraBatchIndexesAndStoresSubtransactionOutput(t *testing.T) {
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		},
 	}
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		return delta.apply(ls, txn)
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				return delta.apply(context.Background(), ls, txn)
+			}),
+	)
 
 	child, err := db.Metadata().GetTransactionByHash(childHash.Bytes(), nil)
 	require.NoError(t, err)
@@ -388,15 +398,29 @@ func TestDijkstraBatchAppliesSubtransactionGovernance(t *testing.T) {
 	delta.Offsets = offsets
 	delta.addTransaction(tx, 0)
 	t.Cleanup(delta.Release)
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		return delta.apply(ls, txn)
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				return delta.apply(context.Background(), ls, txn)
+			}),
+	)
 
-	got, err := db.GetGovernanceProposal(childHash.Bytes(), 0, nil)
+	got, err := db.GetGovernanceProposal(
+		context.Background(),
+		childHash.Bytes(),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, childHash.Bytes(), got.TxHash)
 	require.Equal(t, uint64(12), got.ProposedEpoch)
-	rootProposal, err := db.GetGovernanceProposal(rootHash.Bytes(), 0, nil)
+	rootProposal, err := db.GetGovernanceProposal(
+		context.Background(),
+		rootHash.Bytes(),
+		0,
+		nil,
+	)
 	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
 	require.Nil(t, rootProposal)
 }
@@ -406,13 +430,16 @@ func TestDijkstraDirectDepositUpdatesRewardAccountBalance(t *testing.T) {
 	db := newTestDB(t)
 	stakeKey := bytes.Repeat([]byte{0x42}, 28)
 	rewardAddress := append([]byte{0xe0}, stakeKey...)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:    stakeKey,
-		CredentialTag: 0,
-		AddedSlot:     1,
-		Reward:        dbtypes.Uint64(5),
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:    stakeKey,
+			CredentialTag: 0,
+			AddedSlot:     1,
+			Reward:        dbtypes.Uint64(5),
+			Active:        true,
+		}),
+	)
 	body, err := cbor.Encode(map[uint]any{
 		0:  []any{},
 		1:  []any{},
@@ -464,23 +491,58 @@ func TestDijkstraDirectDepositUpdatesRewardAccountBalance(t *testing.T) {
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		},
 	}
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		return delta.apply(ls, txn)
-	}))
-	account, err := db.GetAccountByCredential(0, stakeKey, false, nil)
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				return delta.apply(context.Background(), ls, txn)
+			}),
+	)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		stakeKey,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, dbtypes.Uint64(25), account.Reward)
 
 	// Direct-deposit credits use the transaction-body hash as their journal
 	// source, so rollback removes the credit and replay can apply it again.
-	require.NoError(t, db.DeleteAccountRewardsAfterSlot(1, nil))
-	account, err = db.GetAccountByCredential(0, stakeKey, false, nil)
+	require.NoError(
+		t,
+		db.DeleteAccountRewardsAfterSlot(context.Background(), 1, nil),
+	)
+	account, err = db.GetAccountByCredential(
+		context.Background(),
+		0,
+		stakeKey,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, dbtypes.Uint64(5), account.Reward)
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		return ApplyDijkstraDirectDeposits(db, tx, 2, txn)
-	}))
-	account, err = db.GetAccountByCredential(0, stakeKey, false, nil)
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				return ApplyDijkstraDirectDeposits(
+					context.Background(),
+					db,
+					tx,
+					2,
+					txn,
+				)
+			}),
+	)
+	account, err = db.GetAccountByCredential(
+		context.Background(),
+		0,
+		stakeKey,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, dbtypes.Uint64(25), account.Reward)
 }
