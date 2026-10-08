@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -181,6 +182,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 		}
 		if err := chainSelectionHeaderStateError(
 			ls.verifyBlockHeaderStateWithCache(
+				context.Background(),
 				block,
 				sourceEpoch.EpochId,
 				snapshot.epochCache,
@@ -336,6 +338,7 @@ func (ls *LedgerState) verifyByronTransitionAncestry(
 		}
 		if err := chainSelectionHeaderStateError(
 			ls.verifyBlockHeaderStateWithCache(
+				context.Background(),
 				block,
 				targetEpoch.EpochId,
 				epochCache,
@@ -362,10 +365,10 @@ func (ls *LedgerState) peerHeaderForkPath(
 		if len(prevHash) == 0 {
 			return ocommon.Point{}, nil, false, nil
 		}
-		block, err := ls.blockByHash(prevHash)
+		block, err := ls.blockByHash(context.Background(), prevHash)
 		if err == nil {
 			point := ocommon.NewPoint(block.Slot, block.Hash)
-			if ls.chain.HoldsPoint(point) {
+			if ls.chain.HoldsPoint(context.Background(), point) {
 				slices.Reverse(pathReversed)
 				if err := ls.validatePeerHeaderPath(
 					block,

@@ -48,7 +48,7 @@ func newSlotZeroRollbackLedger(
 	t.Helper()
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -56,7 +56,7 @@ func newSlotZeroRollbackLedger(
 	)
 	hash0 := testHashBytes("slot-zero-block")
 	hash1 := testHashBytes("slot-twenty-block")
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
 		{
 			Slot: 0, Hash: hash0, BlockNumber: 0, Type: block0Type,
 			Cbor: []byte{0x80},
@@ -102,7 +102,7 @@ func TestRollbackToSlotZeroBlockKeepsTipNonce(t *testing.T) {
 	ls, tip0, nonce0 := newSlotZeroRollbackLedger(
 		t, conway.BlockTypeConway,
 	)
-	require.NoError(t, ls.rollback(tip0.Point))
+	require.NoError(t, ls.rollback(context.Background(), tip0.Point))
 	require.Equal(t, nonce0, ls.currentTipBlockNonce)
 	require.Equal(t, tip0.Point, ls.currentTip.Point)
 	require.Zero(t, ls.currentTip.BlockNumber)
@@ -113,7 +113,7 @@ func TestRollbackToOriginClearsTipNonce(t *testing.T) {
 	t.Parallel()
 
 	ls, _, _ := newSlotZeroRollbackLedger(t, conway.BlockTypeConway)
-	require.NoError(t, ls.rollback(ocommon.NewPointOrigin()))
+	require.NoError(t, ls.rollback(context.Background(), ocommon.NewPointOrigin()))
 	require.Empty(t, ls.currentTipBlockNonce)
 	require.Empty(t, ls.currentTip.Point.Hash)
 }
@@ -128,7 +128,7 @@ func TestRollbackToByronSlotZeroBlockHasNoTipNonce(t *testing.T) {
 	require.NoError(t, ls.db.DeleteBlockNoncesAfterPoint(
 		ocommon.NewPointOrigin(), nil,
 	))
-	require.NoError(t, ls.rollback(tip0.Point))
+	require.NoError(t, ls.rollback(context.Background(), tip0.Point))
 	require.Empty(t, ls.currentTipBlockNonce)
 	require.Equal(t, tip0.Point, ls.currentTip.Point)
 }
@@ -140,7 +140,7 @@ func TestLoadTipReadsNonceForSlotZeroBlock(t *testing.T) {
 	ls, tip0, nonce0 := newSlotZeroRollbackLedger(t, conway.BlockTypeConway)
 	require.NoError(t, ls.db.SetTip(tip0, nil))
 	ls.currentTipBlockNonce = nil
-	require.NoError(t, ls.loadTip())
+	require.NoError(t, ls.loadTip(context.Background()))
 	require.Equal(t, nonce0, ls.currentTipBlockNonce)
 }
 
@@ -219,7 +219,7 @@ func TestRecoverRollbackIntentSlotZeroBlockOffPrimaryChain(t *testing.T) {
 	tipBefore := ls.currentTip
 	forked := ocommon.NewPoint(0, testHashBytes("forked-slot-zero-block"))
 	require.NoError(t, persistRollbackIntent(ls.db, forked, nil))
-	require.NoError(t, ls.recoverRollbackIntent())
+	require.NoError(t, ls.recoverRollbackIntent(context.Background()))
 	_, _, pending, err := loadRollbackIntent(ls.db)
 	require.NoError(t, err)
 	require.False(t, pending)
@@ -233,7 +233,7 @@ func TestRecoverRollbackIntentSlotZeroBlockOnPrimaryChain(t *testing.T) {
 
 	ls, tip0, nonce0 := newSlotZeroRollbackLedger(t, conway.BlockTypeConway)
 	require.NoError(t, persistRollbackIntent(ls.db, tip0.Point, nil))
-	require.NoError(t, ls.recoverRollbackIntent())
+	require.NoError(t, ls.recoverRollbackIntent(context.Background()))
 	_, _, pending, err := loadRollbackIntent(ls.db)
 	require.NoError(t, err)
 	require.False(t, pending)
@@ -256,7 +256,7 @@ func TestRollbackToSlotZeroBlockReappliesFromItsNonce(t *testing.T) {
 	require.Zero(t, block0.SlotNumber())
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	rawBlocks := make([]chain.RawBlock, 0, len(blocks))
 	for _, blk := range blocks {
@@ -269,7 +269,7 @@ func TestRollbackToSlotZeroBlockReappliesFromItsNonce(t *testing.T) {
 			Cbor:        blk.Cbor(),
 		})
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), rawBlocks))
 
 	pparams := epochBoundaryBenchPParams()
 	pparams.ProtocolVersion.Major = conway.MaxProtocolVersionConway
@@ -326,7 +326,7 @@ func TestRollbackToSlotZeroBlockReappliesFromItsNonce(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, nonce0)
 
-	require.NoError(t, ls.rollback(point0))
+	require.NoError(t, ls.rollback(context.Background(), point0))
 	require.Equal(t, point0, ls.currentTip.Point)
 
 	apply(block1)

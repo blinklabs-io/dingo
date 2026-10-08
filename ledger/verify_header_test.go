@@ -1088,7 +1088,7 @@ func TestVerifyBlockHeaderCrypto_ByronValidated(t *testing.T) {
 		newMockSlotTimeProvider(time.Unix(0, 0), time.Second, 100),
 		DefaultSlotClockConfig(),
 	)
-	err = ls.verifyBlockHeaderCrypto(block)
+	err = ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), block, true, false)
 	assert.NoError(t, err, "valid Byron PBFT headers should pass")
 }
 
@@ -1153,7 +1153,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
 	ls.publishSnapshotsLocked()
 	// Block at slot 2000, which is beyond epoch 0 (ends at slot 1000)
 	block := &mockBabbageBlock{slot: 2000}
-	err := ls.verifyBlockHeaderCrypto(block)
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), block, true, false)
 	assert.Error(
 		t,
 		err,
@@ -1192,11 +1192,11 @@ func TestHeaderVerificationEpochRejectsPastForecastBeforeCacheAdvance(
 	}
 	ls.publishSnapshotsLocked()
 
-	epoch, err := ls.headerVerificationEpoch(horizonSlot-1, true)
+	epoch, err := ls.headerVerificationEpoch(context.Background(), horizonSlot-1, true)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(500), epoch.EpochId)
 
-	_, err = ls.headerVerificationEpoch(horizonSlot, true)
+	_, err = ls.headerVerificationEpoch(context.Background(), horizonSlot, true)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, hardfork.ErrPastHorizon)
 	assert.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
@@ -1254,7 +1254,7 @@ func TestHeaderVerificationEpoch_CachedNonceWithoutForecastConfig(t *testing.T) 
 					}},
 				}
 				ls.publishSnapshotsLocked()
-				epoch, err := ls.headerVerificationEpoch(550, allowAdvance)
+				epoch, err := ls.headerVerificationEpoch(context.Background(), 550, allowAdvance)
 				if len(tc.nonce) == 0 {
 					require.ErrorIs(t, err, errEpochNonceUnavailable,
 						"cached lookup must retain the nonce-availability contract")
@@ -1292,7 +1292,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 	block := &mockBabbageBlock{slot: 500}
-	err := ls.verifyBlockHeaderCrypto(block)
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), block, true, false)
 	require.ErrorIs(t, err, errEpochNonceUnavailable,
 		"missing nonce must be classified before downstream crypto checks")
 }
@@ -1385,7 +1385,7 @@ func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
 
 	// Verify: the epoch-aware lookup should find epoch 0 for this block
 	// and use epoch0Nonce (which matches the block's VRF proof).
-	err = ls.verifyBlockHeaderCrypto(tb.block)
+	err = ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	assert.NoError(
 		t,
 		err,
@@ -1403,7 +1403,7 @@ func TestVerifyBlockHeaderOnlyCryptoSkipsStatefulPoolChecks(t *testing.T) {
 	err := ls.verifyBlockHeaderOnlyCrypto(tb.block.Header())
 	require.NoError(t, err)
 
-	err = ls.verifyBlockHeaderCrypto(tb.block)
+	err = ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, models.ErrPoolNotFound)
 }
@@ -1423,7 +1423,7 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersMissingPoolState(
 	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 	assert.True(t, IsHeaderVerificationDeferred(err))
 
-	err = ls.verifyBlockHeaderCrypto(tb.block)
+	err = ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, models.ErrPoolNotFound)
 }
@@ -1444,7 +1444,7 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersEmptyMarkSnapshot(
 	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 	assert.Contains(t, err.Error(), "leader stake snapshot state")
 
-	err = ls.verifyBlockHeaderCrypto(tb.block)
+	err = ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, errHeaderVerificationDeferred)
 	assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
@@ -1458,7 +1458,7 @@ func TestVerifyDeferredBlockHeaderStateRunsStrictlyAtApply(t *testing.T) {
 	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
 
 	ls.markDeferredHeaderValidation(point)
-	err := ls.verifyDeferredBlockHeaderState(nil, point, tb.block)
+	err := ls.verifyDeferredBlockHeaderState(context.Background(), nil, point, tb.block)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, models.ErrPoolNotFound)
 	assert.False(t, ls.consumeDeferredHeaderValidation(point))
@@ -1468,7 +1468,7 @@ func TestVerifyDeferredBlockHeaderStateRunsStrictlyAtApply(t *testing.T) {
 	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
 
 	ls.markDeferredHeaderValidation(point)
-	err = ls.verifyDeferredBlockHeaderState(nil, point, tb.block)
+	err = ls.verifyDeferredBlockHeaderState(context.Background(), nil, point, tb.block)
 	require.NoError(t, err)
 	assert.False(t, ls.consumeDeferredHeaderValidation(point))
 }
@@ -1487,9 +1487,9 @@ func TestVerifyDeferredBlockHeaderStateSurvivesRestartMarker(
 
 	require.NoError(t, ls.persistDeferredHeaderValidation(point, nil))
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.verifyDeferredBlockHeaderState(txn, point, tb.block)
+		return ls.verifyDeferredBlockHeaderState(context.Background(), txn, point, tb.block)
 	}))
 
 	value, err := db.GetSyncState(
@@ -1541,7 +1541,7 @@ func TestVerifyDeferredBlockHeaderStateRunsFullCryptoAtApply(t *testing.T) {
 				ls.markDeferredHeaderValidation(point)
 			}
 
-			err := ls.verifyDeferredBlockHeaderState(nil, point, tb.block)
+			err := ls.verifyDeferredBlockHeaderState(context.Background(), nil, point, tb.block)
 			require.Error(t, err)
 			var hve *headerValidationError
 			assert.ErrorAs(t, err, &hve)
@@ -1591,7 +1591,7 @@ func TestVerifyDeferredBlockHeaderStateAttributesSourcePeer(t *testing.T) {
 			)
 			tc.mark(ls, point)
 
-			err := ls.verifyDeferredBlockHeaderState(nil, point, tb.block)
+			err := ls.verifyDeferredBlockHeaderState(context.Background(), nil, point, tb.block)
 			var hve *headerValidationError
 			require.ErrorAs(t, err, &hve)
 			assert.Equal(t, tc.want, hve.Source)
@@ -1616,7 +1616,7 @@ func TestVerifyDeferredBlockHeaderStateFailsClosedWithoutEpoch(t *testing.T) {
 	ls.epochCache = nil
 	ls.publishSnapshotsLocked()
 
-	err := ls.verifyDeferredBlockHeaderState(nil, point, tb.block)
+	err := ls.verifyDeferredBlockHeaderState(context.Background(), nil, point, tb.block)
 	require.Error(t, err)
 	var hve *headerValidationError
 	assert.ErrorAs(t, err, &hve)
@@ -1677,7 +1677,7 @@ func TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply(
 		// the gate is explicit; it is not a statement that the block is valid.
 		require.NoError(
 			t,
-			ls.verifyDeferredBlockHeaderState(nil, point, tb.block),
+			ls.verifyDeferredBlockHeaderState(context.Background(), nil, point, tb.block),
 			"no marker: required==false, stateful check skipped (lost-pin bypass)",
 		)
 
@@ -1685,7 +1685,7 @@ func TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply(
 		// apply and rejects the wrong issuer; the block cannot be adopted.
 		require.NoError(t, ls.persistDeferredHeaderValidation(point, nil))
 		ls.markDeferredHeaderValidation(point)
-		err := ls.verifyDeferredBlockHeaderState(nil, point, tb.block)
+		err := ls.verifyDeferredBlockHeaderState(context.Background(), nil, point, tb.block)
 		require.Error(t, err)
 		var hve *headerValidationError
 		require.ErrorAs(t, err, &hve)
@@ -1726,7 +1726,7 @@ func TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply(
 
 		require.NoError(
 			t,
-			ls.verifyDeferredBlockHeaderState(nil, point, tb.block),
+			ls.verifyDeferredBlockHeaderState(context.Background(), nil, point, tb.block),
 			"correct genesis delegate must re-validate at apply",
 		)
 		// Resolved: in-memory entry consumed and the persisted marker cleared.
@@ -1755,7 +1755,7 @@ func TestVerifyBlockHeaderCrypto_RejectsEmptyEpochCache(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 	block := &mockBabbageBlock{slot: 100}
-	err := ls.verifyBlockHeaderCrypto(block)
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), block, true, false)
 	assert.Error(t, err, "should reject with empty epoch cache")
 	assert.Contains(t, err.Error(), "epoch cache is empty")
 }
@@ -1798,7 +1798,7 @@ func TestVerifyBlockHeaderCrypto_WrongNonceFails(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	err := ls.verifyBlockHeaderCrypto(tb.block)
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	assert.Error(
 		t,
 		err,
@@ -2295,7 +2295,8 @@ func TestMalformedVrfKeyMetadataDoesNotBlamePeer(t *testing.T) {
 				},
 			}
 
-			_, _, err = ls.electingVrfKeyHashFromSnapshot(
+			_, _, err = ls.electingVrfKeyHashFromSnapshotWithContext(
+				context.Background(),
 				poolKeyHash,
 				epochCache,
 				snapshot,
@@ -2348,8 +2349,8 @@ func TestMalformedCurrentPoolVrfKeyDoesNotBlamePeer(t *testing.T) {
 				ls.mithrilLedgerSlot = 1_500
 			}
 
-			_, _, err = ls.electingVrfKeyHashFromSnapshot(
-				poolKeyHash, epochCache, snap,
+			_, _, err = ls.electingVrfKeyHashFromSnapshotWithContext(
+				context.Background(), poolKeyHash, epochCache, snap,
 			)
 			require.ErrorIs(t, err, errHeaderStateLookupFailed)
 			assert.False(t, headerFailureBlamesPeer(err))
@@ -3670,7 +3671,7 @@ func TestVerifyBlockHeaderCrypto_SkipLeaderStakeThresholdCheckWarnsAndAccepts(
 	seedPoolStakeSnapshot(t, db, 4, dummyHash, 1_000_000_000_000_000_000)
 	seedBlockPoolRegistration(t, db, tb.block)
 
-	err := ls.verifyBlockHeaderCrypto(tb.block)
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	require.NoError(t, err)
 	logs := logBuf.String()
 	assert.Contains(
@@ -3688,7 +3689,7 @@ func TestVerifyBlockHeaderCrypto_EmptyMarkSnapshotDiagnostic(t *testing.T) {
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	seedBlockPoolRegistration(t, db, tb.block)
 
-	err := ls.verifyBlockHeaderCrypto(tb.block)
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "epoch mark snapshot is empty")
 	assert.Contains(t, err.Error(), "has no stake in epoch")
@@ -4277,7 +4278,7 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersZeroTotalActiveStake(
 	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 	assert.Contains(t, err.Error(), "leader stake snapshot state")
 
-	err = ls.verifyBlockHeaderCrypto(tb.block)
+	err = ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, errHeaderVerificationDeferred)
 	assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
@@ -4843,7 +4844,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock(
 	// Apply-side order: hold the single write connection, THEN take the
 	// deferred-header mutex via consumeDeferredHeaderValidation.
 	go func() {
-		applyTxn := ls.db.Transaction(true) // acquires the single write conn
+		applyTxn := ls.db.Transaction(context.Background(), true) // acquires the single write conn
 		close(connHeld)
 		// Wait until the guard is inside prune (mutex-then-conn on the buggy
 		// path) before contending for the mutex, so the inversion is forced.
@@ -4864,7 +4865,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock(
 				// REAL prune: open the single write connection like production
 				// (cleanupOldSnapshots' prunePoolSnapshots).
 				close(pruneReached)
-				poolTxn := ls.db.Transaction(true) // blocks until apply releases it
+				poolTxn := ls.db.Transaction(context.Background(), true) // blocks until apply releases it
 				defer func() { _ = poolTxn.Rollback() }()
 				return db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(
 					before,
@@ -5068,7 +5069,7 @@ func TestBoundDeferredHeaderValidationWhileAppliedTipStalls(t *testing.T) {
 			ls.deferredHeaderValidationMu.Unlock()
 			require.NoError(t, ls.repopulateDeferredHeaderValidation())
 		}
-		err := ls.verifyDeferredBlockHeaderState(nil, blockPoint, tb.block)
+		err := ls.verifyDeferredBlockHeaderState(context.Background(), nil, blockPoint, tb.block)
 		require.Error(t, err, "restart=%v", restart)
 		var hve *headerValidationError
 		assert.ErrorAs(t, err, &hve)
@@ -5238,7 +5239,7 @@ func TestDeferredHeaderFloorSkipsMithrilCoveredSlots(t *testing.T) {
 	ls.deferredHeaderValidationFloor = tb.block.SlotNumber() + 100
 	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
 
-	require.NoError(t, ls.verifyDeferredBlockHeaderState(nil, point, tb.block))
+	require.NoError(t, ls.verifyDeferredBlockHeaderState(context.Background(), nil, point, tb.block))
 }
 
 // TestRepopulateDeferredHeaderValidation is the restart-durability regression
@@ -5826,7 +5827,7 @@ func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
 	hashAtPostCut := bytes.Repeat([]byte{0x70}, 32)
 	prevHashAtSnap := bytes.Repeat([]byte{0x09}, 32)
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 		if err := db.BlockCreate(models.Block{
 			Slot:     snapTipSlot,
 			Hash:     hashAtSnap,
@@ -5897,13 +5898,13 @@ func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
 
 	// Header verification path.
 	hvNonce, hvEvolving, hvCandidate, hvLab, err :=
-		ls.computeEpochNonceForSlot(epochEnd, prevEpoch)
+		ls.computeEpochNonceForSlot(context.Background(), epochEnd, prevEpoch)
 	require.NoError(t, err)
 
 	// Rollover path, run in a transaction (production behaviour).
 	var rNonce, rEvolving, rCandidate, rLab []byte
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		n, ev, c, lab, err := ls.calculateEpochNonce(
+	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		n, ev, c, lab, err := ls.calculateEpochNonce(context.Background(),
 			txn,
 			epochEnd,
 			eras.ConwayEraDesc,
@@ -6030,7 +6031,7 @@ func TestAdvanceEpochCacheRejectsHardForkBoundary(t *testing.T) {
 				t, lastByronEpoch, tc.transition, tc.configuredBoundary,
 			)
 
-			err := ls.advanceEpochCache()
+			err := ls.advanceEpochCache(context.Background())
 			require.ErrorContains(t, err, "hard-fork boundary")
 			require.ErrorIs(t, err, errEpochCacheForecastBoundary)
 			require.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
@@ -6062,7 +6063,7 @@ func TestAdvanceEpochCachePreservesWithinEraForecast(t *testing.T) {
 		true,
 	)
 
-	require.NoError(t, ls.advanceEpochCache())
+	require.NoError(t, ls.advanceEpochCache(context.Background()))
 	cache := ls.loadConsensusSnapshot().epochCache
 	require.Len(t, cache, 2)
 	forecast := cache[1]
@@ -6092,7 +6093,7 @@ func TestHeaderVerificationEpochDefersAtHardForkBoundary(t *testing.T) {
 		false,
 	)
 
-	_, err := ls.headerVerificationEpoch(
+	_, err := ls.headerVerificationEpoch(context.Background(),
 		lastByronEpoch.StartSlot+uint64(lastByronEpoch.LengthInSlots),
 		true,
 	)
@@ -6145,7 +6146,7 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 	) // last block of the CLOSING epoch
 	prevHashAtPreCut := bytes.Repeat([]byte{0x09}, 32)
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 		if err := db.BlockCreate(models.Block{
 			Slot: preCutSlot, Hash: hashAtPreCut, PrevHash: prevHashAtPreCut,
 			Cbor: []byte{0x80}, Number: 1, Type: conway.BlockTypeConway,
@@ -6190,12 +6191,12 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 	ls.publishSnapshotsLocked()
 
 	hvNonce, _, hvCandidate, hvLab, err :=
-		ls.computeEpochNonceForSlot(epochEnd, prevEpoch)
+		ls.computeEpochNonceForSlot(context.Background(), epochEnd, prevEpoch)
 	require.NoError(t, err)
 
 	var rNonce, rCandidate, rLab []byte
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		n, _, c, lab, err := ls.calculateEpochNonce(
+	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		n, _, c, lab, err := ls.calculateEpochNonce(context.Background(),
 			txn, epochEnd, eras.ConwayEraDesc, prevEpoch,
 			nil,
 		)
@@ -6305,12 +6306,12 @@ func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
 	ls.publishSnapshotsLocked()
 
 	hvNonce, hvEvolving, hvCandidate, hvLab, err :=
-		ls.computeEpochNonceForSlot(500, initialEpoch)
+		ls.computeEpochNonceForSlot(context.Background(), 500, initialEpoch)
 	require.NoError(t, err)
 
 	var rNonce, rEvolving, rCandidate, rLab []byte
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		n, ev, c, lab, err := ls.calculateEpochNonce(
+	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		n, ev, c, lab, err := ls.calculateEpochNonce(context.Background(),
 			txn, 500, eras.ConwayEraDesc, initialEpoch,
 			nil,
 		)
@@ -6394,7 +6395,7 @@ func TestComputeEpochNonceForSlotFoldsExtraEntropy(t *testing.T) {
 	hashAtPostCut := mustDecodeHex(t, mainnetEpoch259Nonce)
 	prevHashAtPreCut := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 		if err := db.BlockCreate(models.Block{
 			Slot: preCutSlot, Hash: hashAtPreCut, PrevHash: prevHashAtPreCut,
 			Cbor: []byte{0x80}, Number: 1, Type: mary.BlockTypeMary,
@@ -6458,7 +6459,7 @@ func TestComputeEpochNonceForSlotFoldsExtraEntropy(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	nonce, _, candidate, _, err := ls.computeEpochNonceForSlot(
+	nonce, _, candidate, _, err := ls.computeEpochNonceForSlot(context.Background(),
 		epochEnd, prevEpoch,
 	)
 	require.NoError(t, err)
@@ -6537,7 +6538,7 @@ func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
 	hashAtPostCut := bytes.Repeat([]byte{0x70}, 32)
 	prevHashPreImp := bytes.Repeat([]byte{0x09}, 32)
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 		// Pre-cutoff block imported as immutable: present in the blob
 		// store, but with NO block_nonce row (importTip only checkpoints
 		// the tip).
@@ -6609,13 +6610,13 @@ func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
 
 	// Header-verification (eager) path.
 	hvNonce, hvEvolving, hvCandidate, hvLab, err :=
-		ls.computeEpochNonceForSlot(epochEnd, prevEpoch)
+		ls.computeEpochNonceForSlot(context.Background(), epochEnd, prevEpoch)
 	require.NoError(t, err)
 
 	// Rollover (authoritative) path.
 	var rNonce, rEvolving, rCandidate, rLab []byte
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		n, ev, c, lab, err := ls.calculateEpochNonce(
+	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		n, ev, c, lab, err := ls.calculateEpochNonce(context.Background(),
 			txn, epochEnd, eras.ConwayEraDesc, prevEpoch,
 			nil,
 		)
@@ -6723,7 +6724,7 @@ func TestHeaderVerificationEpoch_ForecastBuildFailureDeferred(t *testing.T) {
 	require.Error(t, sumErr, "Shelley-only config must not build a shape")
 
 	// A slot past the cached epoch forces the summary path.
-	_, err := ls.headerVerificationEpoch(532_000, false)
+	_, err := ls.headerVerificationEpoch(context.Background(), 532_000, false)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errHeaderVerificationDeferred,
 		"an unbuildable forecast must not be reported as a peer fault")
@@ -6805,9 +6806,9 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
-	require.NoError(t, cm.PrimaryChain().AddLocalBlock(anchor.block))
+	require.NoError(t, cm.PrimaryChain().AddLocalBlock(context.Background(), anchor.block))
 	require.NoError(t, db.SetBlockNonce(
 		anchorPoint.Hash,
 		anchorPoint.Slot,
@@ -6883,7 +6884,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	ls.config.PeerHeaderLookupFunc = peerLookup(forkHeader)
 	ls.slotsPerKESPeriod.Store(anchor.slotsPerKesPeriod)
 	ls.publishSnapshotsLocked()
-	require.True(t, ls.chain.HoldsPoint(anchorPoint))
+	require.True(t, ls.chain.HoldsPoint(context.Background(), anchorPoint))
 	storedAnchorNonce, err := ls.db.GetBlockNonce(anchorPoint, nil)
 	require.NoError(t, err)
 	require.Equal(t, anchorNonce, storedAnchorNonce)
@@ -6983,7 +6984,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		&lateAnchorBlockNumber,
 		tamperNone,
 	)
-	require.NoError(t, ls.chain.AddLocalBlock(lateAnchor.block))
+	require.NoError(t, ls.chain.AddLocalBlock(context.Background(), lateAnchor.block))
 	frozenEpochNonce, err := assembleEpochNonce(
 		localCandidate,
 		ls.epochCache[0].LastEpochBlockNonce,
@@ -7185,9 +7186,9 @@ func TestPeerChainSelectionEpochNonceUsesSeededShelleyBoundaryNonce(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
-	require.NoError(t, cm.PrimaryChain().AddLocalBlock(byronBlock))
+	require.NoError(t, cm.PrimaryChain().AddLocalBlock(context.Background(), byronBlock))
 
 	seededNonce := bytes.Repeat([]byte{0x5c}, lcommon.Blake2b256Size)
 	ls := &LedgerState{
@@ -7450,14 +7451,14 @@ func prunedSnapshotFixture(
 		db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(5, nil),
 	)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	hash := tb.block.Header().Hash().Bytes()
 	if !onChain {
 		// A different block at the same slot: the header is on a fork.
 		hash = append([]byte{0xff}, hash[1:]...)
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{{
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{{
 		Slot:        tb.block.SlotNumber(),
 		Hash:        hash,
 		BlockNumber: 1,

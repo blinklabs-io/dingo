@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -57,12 +58,15 @@ func buildDeepCatchupChain(
 		hash := lcommon.NewBlake2b256(
 			testHashBytes(fmt.Sprintf("deep-catchup-hdr-%d", i)),
 		)
-		require.NoError(t, testChain.AddBlockHeader(mockHeader{
-			hash:        hash,
-			prevHash:    prevHash,
-			blockNumber: uint64(i + 1),
-			slot:        uint64(i + 1),
-		}))
+		require.NoError(
+			t,
+			testChain.AddBlockHeader(context.Background(), mockHeader{
+				hash:        hash,
+				prevHash:    prevHash,
+				blockNumber: uint64(i + 1),
+				slot:        uint64(i + 1),
+			}),
+		)
 		hashes = append(hashes, hash)
 		prevHash = hash
 	}
@@ -821,12 +825,15 @@ func buildPartiallyAppliedCatchupChain(
 		)
 		hashes[i] = hash
 		if i >= firstSlot {
-			require.NoError(t, testChain.AddBlockHeader(mockHeader{
-				hash:        hash,
-				prevHash:    prevHash,
-				blockNumber: uint64(i),
-				slot:        uint64(i),
-			}))
+			require.NoError(
+				t,
+				testChain.AddBlockHeader(context.Background(), mockHeader{
+					hash:        hash,
+					prevHash:    prevHash,
+					blockNumber: uint64(i),
+					slot:        uint64(i),
+				}),
+			)
 		}
 		prevHash = hash
 	}

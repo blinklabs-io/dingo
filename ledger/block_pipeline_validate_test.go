@@ -53,7 +53,7 @@ func TestNewLedgerStateRejectsPipelineValidationWithoutKesConfig(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	_, err = NewLedgerState(LedgerStateConfig{

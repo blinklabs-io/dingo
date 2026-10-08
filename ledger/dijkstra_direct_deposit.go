@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -74,6 +75,7 @@ func DijkstraDirectDepositEffects(
 // by one valid Dijkstra transaction body. The transaction body's hash is the
 // journal source so rollback removes the credit with that body.
 func ApplyDijkstraDirectDeposits(
+	ctx context.Context,
 	db *database.Database,
 	tx common.Transaction,
 	slot uint64,
@@ -89,6 +91,7 @@ func ApplyDijkstraDirectDeposits(
 			return err
 		}
 		if err := db.AddAccountRewardByCredential(
+			ctx,
 			credentialTag,
 			effect.Credential.Credential[:],
 			effect.Amount,

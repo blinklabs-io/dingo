@@ -46,8 +46,12 @@ func sqliteFileURI(databasePath string) string {
 	return (&url.URL{Scheme: "file", Path: path}).String()
 }
 
-// OpenReadOnlySQLite opens a read-only SQLite connection pool with busy timeout and query_only pragma.
-func OpenReadOnlySQLite(databasePath string) (*sql.DB, error) {
+// OpenReadOnlySQLite opens a read-only SQLite connection pool with busy timeout
+// and query_only pragma, using ctx for the initial connection.
+func OpenReadOnlySQLite(
+	ctx context.Context,
+	databasePath string,
+) (*sql.DB, error) {
 	if _, err := os.Stat(databasePath); err != nil {
 		return nil, fmt.Errorf(
 			"database file does not exist at '%s': %w",
@@ -63,7 +67,7 @@ func OpenReadOnlySQLite(databasePath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("open read-only SQLite: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
@@ -74,8 +78,10 @@ func OpenReadOnlySQLite(databasePath string) (*sql.DB, error) {
 	return db, nil
 }
 
-// NewMCPServer constructs and initializes an MCP Server with all Cardano & SQLite tools and resources.
+// NewMCPServer constructs and initializes an MCP Server with all Cardano and
+// SQLite tools and resources, using ctx for startup work.
 func NewMCPServer(
+	ctx context.Context,
 	cfg ProviderConfig,
 	deps ProviderDependencies,
 ) (*mcp.Server, *sql.DB, error) {
@@ -92,7 +98,7 @@ func NewMCPServer(
 		db = deps.SQLDB
 	} else if deps.Database != nil {
 		if provider, ok := deps.Database.Metadata().(interface{ SQLitePath() string }); ok && provider.SQLitePath() != "" {
-			readDB, err := OpenReadOnlySQLite(provider.SQLitePath())
+			readDB, err := OpenReadOnlySQLite(ctx, provider.SQLitePath())
 			if err != nil {
 				return nil, nil, err
 			}
@@ -152,6 +158,7 @@ func NewMCPServer(
 		resourceLogger = slog.Default()
 	}
 	registerResources(
+		ctx,
 		server,
 		db,
 		deps.LedgerState,

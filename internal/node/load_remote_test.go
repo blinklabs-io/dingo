@@ -234,7 +234,7 @@ type remoteLoad struct {
 
 func newRemoteLoad(t *testing.T) *remoteLoad {
 	t.Helper()
-	cm, err := chain.NewManager(newTestDB(t), nil)
+	cm, err := chain.NewManager(context.Background(), newTestDB(t), nil)
 	require.NoError(t, err)
 	limits, err := remoteImmutableLimitsForSlots(4_320, true)
 	require.NoError(t, err)
@@ -283,7 +283,7 @@ func (l *remoteLoad) readyChunks(t *testing.T) []string {
 
 func localBlockCount(t *testing.T, dir string) int {
 	t.Helper()
-	cm, err := chain.NewManager(newTestDB(t), nil)
+	cm, err := chain.NewManager(context.Background(), newTestDB(t), nil)
 	require.NoError(t, err)
 	batches := make(chan []gledger.Block)
 	go func() {

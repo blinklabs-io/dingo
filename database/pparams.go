@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -81,6 +82,7 @@ func (d *Database) SetPParams(
 // selectClassicPParamUpdate), mutating *currentPParams and persisting the
 // result for epoch.
 func (d *Database) ApplyPParamUpdates(
+	ctx context.Context,
 	slot, epoch uint64,
 	era uint,
 	quorum int,
@@ -90,9 +92,10 @@ func (d *Database) ApplyPParamUpdates(
 	txn *Txn,
 ) error {
 	if txn == nil {
-		tmpTxn := d.MetadataTxn(true)
+		tmpTxn := d.MetadataTxn(ctx, true)
 		defer tmpTxn.Release()
 		if err := d.ApplyPParamUpdates(
+			ctx,
 			slot, epoch, era, quorum, currentPParams,
 			decodeFunc, updateFunc, tmpTxn,
 		); err != nil {
@@ -189,6 +192,7 @@ func (d *Database) ApplyPParamUpdates(
 // one occupies the writer for the duration and contends with block
 // processing on SQLite.
 func (d *Database) pparamEnactmentPending(
+	ctx context.Context,
 	epoch uint64,
 	quorum int,
 ) (bool, error) {
@@ -201,7 +205,7 @@ func (d *Database) pparamEnactmentPending(
 		pending     bool
 		uniqueCount int
 	)
-	if err := d.MetadataTxn(false).Do(func(txn *Txn) error {
+	if err := d.MetadataTxn(ctx, false).Do(func(txn *Txn) error {
 		pparamUpdates, err := d.metadata.GetPParamUpdates(
 			submissionEpoch, txn.Metadata(),
 		)
@@ -258,6 +262,7 @@ func (d *Database) pparamEnactmentPending(
 // signal available for this era, e.g. Byron), in which case the returned bool
 // is always false.
 func (d *Database) ComputeAndApplyPParamUpdates(
+	ctx context.Context,
 	slot, epoch uint64,
 	era uint,
 	quorum int,
@@ -278,18 +283,26 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 		// once per epoch for the whole of a rebootstrap backfill, so holding
 		// the writer for the probe costs one writer acquisition per epoch of
 		// chain history to answer a question that is almost always "no".
-		pending, err := d.pparamEnactmentPending(epoch, quorum)
+		pending, err := d.pparamEnactmentPending(ctx, epoch, quorum)
 		if err != nil {
 			return nil, false, err
 		}
 		if !pending {
 			return currentPParams, false, nil
 		}
-		tmpTxn := d.MetadataTxn(true)
+		tmpTxn := d.MetadataTxn(ctx, true)
 		defer tmpTxn.Release()
 		result, plutusV2CostModelWritten, err := d.ComputeAndApplyPParamUpdates(
-			slot, epoch, era, quorum, currentPParams,
-			decodeFunc, updateFunc, hasPlutusV2CostModelFunc, tmpTxn,
+			ctx,
+			slot,
+			epoch,
+			era,
+			quorum,
+			currentPParams,
+			decodeFunc,
+			updateFunc,
+			hasPlutusV2CostModelFunc,
+			tmpTxn,
 		)
 		if err != nil {
 			return nil, false, err
@@ -478,10 +491,11 @@ func (d *Database) ForecastPParamUpdates(
 // DeletePParamsAfterSlot removes protocol parameter records added after
 // the given slot.
 func (d *Database) DeletePParamsAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.DeletePParamsAfterSlot(
 			slot,
 			txn.Metadata(),
@@ -499,10 +513,11 @@ func (d *Database) DeletePParamsAfterSlot(
 // DeletePParamUpdatesAfterSlot removes protocol parameter update records
 // added after the given slot.
 func (d *Database) DeletePParamUpdatesAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.DeletePParamUpdatesAfterSlot(
 			slot,
 			txn.Metadata(),

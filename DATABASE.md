@@ -497,6 +497,13 @@ Migration `v36` (`committee-hot-authorization-prune-order`, integer version
 `certificate_id`. Batched pruning can select superseded rows in order without
 sorting the full authorization history for that credential.
 
+Migration `v37` (`drep-expiry-history`, integer version 37) records DRep expiry
+changes by slot so LocalStateQuery can answer DRep state at an acquired point.
+
+Migration `v38` (`pool-relay-type`, integer version 38) records the relay
+constructor on each pool registration, preserving the distinction between
+single-host and multi-host name relays when returning pool parameters.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
@@ -546,6 +553,11 @@ Use the Go APIs when code runs inside Dingo:
     constitution, and the rollback deletes for those tables.
   - `StakeSnapshotStore` — epoch-boundary pool stake snapshots, the epoch
     summaries computed from them, and historical per-boundary stake.
+
+`SettingsStore` commit-timestamp reads and node settings/gate reads and writes
+accept `context.Context`. Startup, recovery checks, and snapshot callers pass
+that context through to SQL, including conditional gate insertion transactions.
+
 
   Accounts, pools, rewards and live stake, protocol parameters, block nonces,
   datums and scripts, assets, treasury/reserves and donations, Midnight
@@ -1613,7 +1625,7 @@ proposals it depends on were stored, and is derived again.
 | `pool` | `id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `latest_op_cert_sequence`, `pledge`, `cost`, `margin`, `leios_key_public`, `leios_key_possession_proof` | PK `id`; unique `pool_key_hash` | Current pool state. Historical registrations and retirements are separate rows. `reward_account_credential_tag`: 0 key hash, 1 script hash for the pool reward account. `leios_key_public` (96-byte BLS12-381 G2 public key) and `leios_key_possession_proof` (48-byte G1 signature) are the pool's registered Dijkstra/Leios voting key from an on-chain `leios_key` pool-cert field (migration `v2`); both are NULL only when the pool has no `leios_key`. Storage here never checks the proof -- a key with an invalid proof is still written as-is, so a value here means "seen on-chain," not "trusted." Committee verification does not read these mutable columns directly: SNAP copies the effective registration into the epoch's `pool_stake_snapshot`, and `ledger.LedgerView.GetLeiosKeys` reads that historical row. The actual proof-of-possession check happens one layer up, in `ledger/leios`'s `resolveOnChainKeys` (`VerifyLeiosKeyProofOfPossession`), which is allowed to depend on `ledger/leios`'s BLS primitives while this package is not (`internal/architecture/tests_test.go` forbids `database` importing `ledger`). |
 | `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `added_slot`, `deposit_amount`, `deposit_held`, `leios_key_public`, `leios_key_possession_proof`, `leios_key_registration_age_unknown`, `leios_key_registration_epoch` | PK `id`; unique `(pool_id, added_slot)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. `reward_account_credential_tag`: 0 key hash, 1 script hash. `deposit_amount` is the protocol parameter in force for that certificate; nullable `deposit_held` is the amount actually retained for the registration cycle and refunded by POOLREAP. Migration `v12` reconstructs legacy rows from registration, retirement, and epoch history, carries deposits across re-registrations, starts a new cycle after a completed reap, preserves populated values on replay, and fails closed with a resync-required error when a reap cannot be placed safely. Live certificate ingestion cannot fail block application for missing epoch history, so it preserves the pre-migration charged-amount fallback in that case. An unknown retained amount remains NULL; refund queries then use `deposit_amount` as the legacy fallback. `leios_key_public`/`leios_key_possession_proof` mirror `pool`'s columns of the same names for this specific registration (see above). `leios_key_registration_age_unknown` marks Leios key material imported without its on-chain registration slot; the import slot must not restart the protocol TTL. Migration `v27` marks existing imported registrations that have no source certificate (NULL or zero ID) and a nonzero synthetic slot. Genesis staking replay reuses the existing slot-0 row and replaces its owner/relay children from the immutable genesis configuration, making startup repair a partially-written genesis registration instead of inserting children against a missing parent. This behavior is covered by the SQLite metadata contract suite. |
 | `pool_registration_owner` | `id`, `pool_registration_id`, `pool_id`, `key_hash` | PK `id`; indexes `pool_registration_id`, `pool_id` | Owners for a pool registration. Join `pool_registration_id -> pool_registration.id`; `pool_id -> pool.id`. |
-| `pool_registration_relay` | `id`, `pool_registration_id`, `pool_id`, `ipv4`, `ipv6`, `hostname`, `port` | PK `id`; indexes `pool_registration_id`, `pool_id` | Relay addresses for a pool registration. `GetActivePoolRelays` joins `pool` and returns each row with its pool's key hash in the transient `PoolRegistrationRelay.PoolKeyHash` field, which is not a stored column. |
+| `pool_registration_relay` | `id`, `pool_registration_id`, `pool_id`, `relay_type`, `ipv4`, `ipv6`, `hostname`, `port` | PK `id`; indexes `pool_registration_id`, `pool_id` | Relay addresses and their on-chain constructor for a pool registration. `relay_type` is nullable for pre-v38 rows, which retain legacy field-based inference. `GetActivePoolRelays` joins `pool` and returns each row with its pool's key hash in the transient `PoolRegistrationRelay.PoolKeyHash` field, which is not a stored column. |
 | `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. Synthetic retirements written by a Mithril v2 catch-up (reconcile) or by the initial Mithril bootstrap import have `certificate_id = 0` and no `certs` row (`added_slot` is the catch-up or snapshot point; `epoch` is that same point except for the pending-retirement case below, where it is a future epoch); joins on `certificate_id` must be LEFT JOINs to keep them visible, and active-pool queries rank them ahead of certificate-backed rows at the same slot. The bootstrap case covers a pool that appears in the imported active pool distribution (`pool_stake_snapshot` `"actv"`) but is absent from the certified live pool params: it retired at the snapshot's epoch boundary yet still leads the current epoch's already-fixed schedule, so the import synthesizes a `pool`/`pool_registration` pair carrying only its pool key hash and pool-distr `vrf_key_hash` (pledge/cost/margin/reward-account left zero) plus this retirement tombstone. That keeps the producer resolvable via `GetPool(includeInactive=true)` for the header VRF-key binding check while the tombstone excludes it from active-pool and stake queries. Imported reward seeding separately intersects its shared registration fallback with each target snapshot's positive-stake delegated pool keys before the target snapshot's complete parameters overlay it. A synthesized pool that belongs only to another snapshot therefore cannot leak into this epoch's reward inputs, while an actually referenced pool remains subject to the all-or-nothing reconciliation gate if neither source supplies complete economics. This matches how a genesis-synced node retains a retired pool without treating it as active. The bootstrap import writes a second, distinct kind of `certificate_id = 0` row for a pool the snapshot shows as *pending* retirement: the PState `retiring` map schedules a live pool to retire at a later epoch, so the row carries that future `epoch` while the pool keeps its `pool_registration` economics and its `deposit_held`, and continues to earn rewards and lead slots until the boundary refunds it. Dropping these rows leaves the node holding a deposit the network has already refunded to the pool's reward account, so the two ledgers disagree about that account's balance. |
 | `pool_opcert_sequence` | `id`, `pool_key_hash`, `slot`, `sequence` | PK `id`; unique `(pool_key_hash, slot)`; index `slot`; index `(pool_key_hash, sequence)` | Observed operational certificate sequence by slot. Read before write inside the block-apply transaction to enforce inbound opcert counter monotonicity; per-slot rows let rollback drop entries past the rollback slot and recompute `pool.latest_op_cert_sequence`. A Mithril restore imports the certified HeaderState counter map at its trusted tip; validation selects observations strictly after that boundary, falls back to the certified row at the boundary, and ignores stale pre-boundary rows. A pool with neither is absent from the certified map and is validated against a zero baseline, but only when some row exists at the boundary slot (`PoolOpCertSequencesExistAtSlot`): a database restored before the map was persisted has none there, and the read fails with a rebootstrap error rather than treating an unknown counter as zero. Those imported rows are counters, not blocks — a bootstrap applies no block at or below its anchor, and one slot cannot hold a block from every pool — so `CountPoolBlocksInSlotRange` and `GetPoolBlockIssuersInSlotRange`, the two readers that mean "blocks minted", raise their start slot past the recorded `mithril_ledger_slot` before reading. Without that they credit every pool holding a certified counter with a block it never minted and inflate the epoch total by the size of the pool set, which reaches pool reward performance, the `reward_pool_input` counts seeded at the epoch boundary, and Blockfrost `blocks_minted`. `LatestPoolOpCertSequenceAtOrBefore` uses the same rows to provide Leios announcement validation with the highest issuer counter no later than the selected chain's immutable-tip slot; absence by that bound is distinct from counter zero and classifies the dangling announcement as stale. Reward calculation can read the ordered raw issuer rows for an ended epoch and exclude TPraos overlay slots before deriving pool performance. Raising the start slot removes the imported counter rows, but it leaves no blocks at all for an epoch that ended below the anchor; `imported_pool_block_count` is the positive record of what those epochs actually minted. `LatestPoolOpCertSequences` reduces the whole table to one highest `sequence` per `pool_key_hash` (`GROUP BY pool_key_hash`) for the `GetChainDepState` query; because the table is keyed by issuer rather than joined to `pool`, that set includes cold keys whose pool has left the active set, which is what the chain still enforces against. That aggregate has no slot bound available to narrow it — the table takes a row per block minted, is pruned only by rollback, and holds nothing above the tip — so `(pool_key_hash, sequence)` exists to serve it from an index alone: SQLite and PostgreSQL fold it without reading a table row, and MySQL can skip through the index a pool at a time. It is declared by migration `v1alpha1`. The cost is one further index maintained per minted block. `sequence` is a signed engine integer, so the recorded counter domain is `[0, 2^63-1]` even though the reference decodes the operational certificate counter as a full-width `uint64`. That column carries the monotonicity ordering as well as the value -- the `MAX(sequence)` reads above, the `latest_op_cert_sequence < ?` guard on the denormalized `pool` maximum, and the `(pool_key_hash, sequence)` index -- so a counter above the domain would order below every smaller one. `eras.MaxPersistableOpCertCounter` names the bound; block application refuses a higher counter before applying the block, and the Mithril restore path (`ledgerstate.importOpCertCounters`) refuses it before writing the certified baseline, rather than failing this write part-way through. Every row written before that bound was named is inside it: `checkedInt64` has always refused a higher value, so no row needs rewriting. |
 
@@ -1626,6 +1638,7 @@ updates preserve the previous activity and expiry epochs.
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. A DRep vote, registration, or update certificate sets `last_activity_epoch` to the containing epoch and `expiry_epoch` to that epoch plus the active Conway/Dijkstra `dRepInactivityPeriod`; certificate persistence and the activity refresh commit atomically. A Mithril bootstrap carries `expiry_epoch` from the imported snapshot's `DRepState` (`ledgerstate.importDReps`), so an imported DRep expires on the schedule the snapshot recorded. Historical replay at or below the Mithril anchor records activity while preserving the imported expiry, which already includes dormant epochs and proposal-driven bumps. `expiry_epoch = 0` means unset and is exempt from expiry by both `drepActiveAtEpoch` (`ledger/governance/epoch.go`) and the expiry sweep, whose predicate is `expiry_epoch > 0 AND expiry_epoch <= ?`, so failing to carry it holds every imported DRep in `countActiveDReps` for the life of the database and inflates the ratification quorum denominator. `last_activity_epoch` is still not carried by the import (the parsed DRep state has no such field) and imported rows are always written `active = 1`. |
+| `drep_expiry_history` | `id`, `credential_tag`, `credential`, `added_slot`, `last_activity_epoch`, `expiry_epoch` | PK `id`; unique `(credential_tag, credential, added_slot)`; index `added_slot` | Journal of every write to a DRep's `last_activity_epoch`/`expiry_epoch`, keyed by the slot it took effect. `drep` keeps only the latest values, and a vote renews them without a certificate or a `drep.added_slot` change, so this is the only record of the expiry in force at an earlier slot. `UpdateDRepActivity` (votes, registration and update certificates; it takes the activity's slot), `ImportDrep` and `CreateDrep` write a row; a second write at the same slot replaces the first. Historical replay below a Mithril anchor (`RecordDRepActivityEpoch`) leaves expiry alone and writes none. `RestoreDrepStateAtSlot` deletes rows above the rollback slot and restores each affected DRep's activity and expiry from its latest surviving row, revisiting DReps whose only change after the slot is a row here. Without a surviving row the expiry at the slot is unknown: a DRep imported at slot 0, or one whose certificate state is not being rewound (`drep.added_slot` at or before the slot), keeps its current values, and any other is reset to 0. A DRep row the vote path recreated without a registration (`InsertDrepIfAbsent`) and reached only through this table has just its activity and expiry restored, where it used to abort the rollback. Schema v37 seeds one row per existing DRep with its current values, dated at the latest of `drep.added_slot` and the DRep's newest vote, registration or update certificate, the event that set the current expiry; a database upgraded to v37 therefore has no expiry history before each DRep's latest pre-upgrade activity. `GetDrepsAtSlot` reads it. |
 | `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |
@@ -1956,7 +1969,7 @@ The eviction and the floor read happen under one lock hold, so the boundary
 handed to `prune` is a coherent read of the deferred set — never a mix of pre-
 and post-eviction state. The lock is then **released before `prune` runs**, and
 this is a correctness requirement, not just an optimization: `prune` opens the
-single SQLite write connection (`SetMaxOpenConns(1)`) via `Transaction(true)`,
+single SQLite write connection (`SetMaxOpenConns(1)`) via `Transaction(ctx, true)`,
 and block apply holds that connection *before* taking `deferredHeaderValidationMu`
 (`ledgerProcessBlock` → `verifyDeferredBlockHeaderState` →
 `consumeDeferredHeaderValidation`, all inside its write txn). Holding the mutex
@@ -2190,6 +2203,14 @@ span both stores pay the sync; blob-only bulk paths (for example
 `chain.addRawBlocks`, which batches 50 blocks per blob transaction) sync at their
 own barriers, and `Sync` is a store-wide flush, so the next combined commit also
 makes those earlier batches durable.
+
+Metadata operations follow the caller's context until a write transaction
+begins committing. A caller already canceled at that boundary causes rollback
+before any blob commit. Once commit begins, cancellation and deadlines no
+longer abort the metadata transaction: both stores must finish even if the
+caller cancels during blob sync. Provider or sync failures still report the
+existing partial-commit errors and require recovery. Read-only transactions
+remain cancelable throughout their lifetime.
 
 The ordering exists because the two stores fail asymmetrically. SQLite runs
 `journal_mode=WAL` with `synchronous=NORMAL` (WAL is set once at open by
@@ -3620,7 +3641,7 @@ live UTxO history, while the CBOR-decode-only candidate scan remains
 unavoidable for the total.
 
 Both `AccountUTXOs` and `AddressUTXOs` open one read `Txn`
-(`Database.Transaction(false)`) and pass it to both their count/scan call
+(`Database.Transaction(ctx, false)`) and pass it to both their count/scan call
 and their page-fetch call, rather than leaving each to open its own
 (`Transaction`/`ReadTransaction` begin the underlying SQL transaction
 eagerly, so the shared `Txn` fixes a single snapshot at that point). Two
@@ -4264,6 +4285,45 @@ the reconstruction historical stake uses: the live balance less later
 pending round whose `boundary_slot` is at or before `slot`. The same event
 ordering is used by rollback: import baselines win equal-slot ties, while a
 same-slot certificate follows and therefore wins a PV10 clear.
+
+### DRep and governance state at a slot
+
+`GetDrepsAtSlot(refs, slot, txn)` returns the given DReps, or every DRep when
+`refs` is empty, that were registered at `slot`. A `drep` row whose
+`added_slot` is at or before `slot` and that has no `drep_expiry_history` row
+after it is exact there and returned as is; any other is derived by
+`deriveDrepStateAtSlot`, the read-only derivation `RestoreDrepStateAtSlot`
+writes back on rollback: the latest registration, deregistration and update
+certificates at or before `slot` for registration and anchor, and the latest
+`drep_expiry_history` row at or before it for `last_activity_epoch` and
+`expiry_epoch`. Every write to `drep.active` and the anchor stamps `added_slot`
+except the catch-up reconcile's `DeactivateDreps`, which falls below the
+Mithril trust boundary that Acquire refuses. With no expiry history row at or
+before `slot`, the same fallback as rollback applies.
+`GetDrepRegistrationDepositsAtSlot(refs, slot, txn)` returns, for each of
+`refs` (every DRep when empty), the deposit of its latest registration at or
+before `slot`, keyed by `models.DrepDepositKey`, in one query per ref (one in
+all for the unrestricted form). `GetDRepDelegatorsAtSlot(dreps, slot, txn)` returns the stake
+credentials delegating to each of `dreps` (every DRep when empty) at `slot`,
+keyed by the DRep's `StakeCredentialRef.MapKey()` in `(credential_tag,
+staking_key)` order: active accounts with `added_slot` at or before `slot`
+read from their row, and every account written after it derived by
+`deriveAccountStateAtSlot` (see `GetAccountsByCredentialAtSlot`). For named
+DReps (deduplicated) only the accounts written after `slot` that could
+delegate to one of them are derived: those whose row, import baseline, or a
+vote-delegation certificate at or before `slot` names it, the only sources the
+derivation takes a DRep from.
+
+`GetGovernanceProposalSetAtSlot(slot, txn)` is `GetGovernanceProposalSet` at
+`slot`: proposals with `added_slot` at or before it whose `enacted_slot`,
+`governance_proposal_drop.dropped_slot` and `deleted_slot` are null or after
+it, in the same order. `GetGovernanceVotesAtSlot(proposalID, slot, txn)`
+returns the votes with `added_slot` at or before `slot` and `deleted_slot`
+null or after it, each with the `vote` and anchor of its latest
+`governance_vote_history` entry at or before `slot`. A vote with no such entry
+predates the v22 journal: it is returned with its row's values when they took
+effect at or before `slot`, and left out otherwise, since a vote replaced
+before the journal after `slot` has no record of its value there.
 
 ### `GetAccountSumsByCredential`
 

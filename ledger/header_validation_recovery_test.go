@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -123,7 +124,7 @@ func TestHeaderValidationRecoveryRewindsPastRejectedBlock(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	// Required because the underlying chain rollback refuses to run without
 	// the chain manager's K. Note this is not the same K the windowing loop
@@ -159,7 +160,7 @@ func TestHeaderValidationRecoveryRewindsPastRejectedBlock(t *testing.T) {
 	}
 	ls.currentTip = ledgerTip
 	ls.metrics.init(prometheus.NewRegistry())
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 	require.Equal(t, blocks[4].Slot, cm.PrimaryChain().Tip().Point.Slot,
 		"the rejected block and its successor should start on the chain")
 
@@ -220,7 +221,7 @@ func TestLedgerProcessBlocksRecoversReadChainValidationFailure(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
@@ -247,7 +248,7 @@ func TestLedgerProcessBlocksRecoversReadChainValidationFailure(t *testing.T) {
 		},
 	}
 	ls.metrics.init(prometheus.NewRegistry())
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 
 	done := make(chan struct{})
 	results := make(chan readChainResult, 1)
@@ -312,7 +313,7 @@ func TestHeaderValidationRecoveryDeclinesAtOrBehindLedgerTip(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
@@ -337,7 +338,7 @@ func TestHeaderValidationRecoveryDeclinesAtOrBehindLedgerTip(t *testing.T) {
 		},
 	}
 	ls.currentTip = ledgerTip
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 	chainTipBefore := cm.PrimaryChain().Tip().Point.Slot
 
 	for _, name := range []string{"at the tip", "behind the tip"} {
@@ -400,7 +401,7 @@ func TestHeaderValidationRecoveryYieldsWhenChainSelectionMovedOn(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	// K=3 so the setup rollback below (tip slot 5 back to slot 2) is
 	// allowed; the recovery under test never reaches a depth check.
@@ -428,14 +429,14 @@ func TestHeaderValidationRecoveryYieldsWhenChainSelectionMovedOn(t *testing.T) {
 		},
 	}
 	ls.currentTip = ledgerTip
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 
 	// Chain selection abandons the ledger tip: the primary chain drops back
 	// past slot 3, so slot 3's block index now sits ahead of the chain tip
 	// and the chain no longer holds it.
-	require.NoError(t, cm.PrimaryChain().Rollback(makeTestPoint(blocks[1])))
+	require.NoError(t, cm.PrimaryChain().Rollback(context.Background(), makeTestPoint(blocks[1])))
 	require.ErrorIs(t,
-		cm.PrimaryChain().ValidateRollback(makeTestPoint(ledgerTipBlock)),
+		cm.PrimaryChain().ValidateRollback(context.Background(), makeTestPoint(ledgerTipBlock)),
 		chain.ErrRollbackPointNotOnChain,
 		"the setup must leave the ledger tip off the primary chain, or this "+
 			"test is not exercising the race it exists for")
@@ -554,7 +555,7 @@ func TestHeaderValidationRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
@@ -579,7 +580,7 @@ func TestHeaderValidationRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
 	}
 	ls.currentTip = ledgerTip
 	ls.metrics.init(prometheus.NewRegistry())
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 
 	validationErr := &headerValidationError{
 		BlockPoint: makeTestPoint(blocks[3]),
@@ -663,7 +664,7 @@ func newSameSlotRecoveryFixture(t *testing.T) *sameSlotRecoveryFixture {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
@@ -691,7 +692,7 @@ func newSameSlotRecoveryFixture(t *testing.T) *sameSlotRecoveryFixture {
 	}
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.currentTip = ledgerTip
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 	require.Equal(t, blocks[4].Slot, cm.PrimaryChain().Tip().Point.Slot,
 		"the rejected block and its successor start on the chain")
 
@@ -866,7 +867,7 @@ func TestHeaderValidationRecoveryPenalizesOnlyTheResponsiblePeer(t *testing.T) {
 				blocks = append(blocks, block)
 				require.NoError(t, db.BlockCreate(block, nil))
 			}
-			cm, err := chain.NewManager(db, nil)
+			cm, err := chain.NewManager(context.Background(), db, nil)
 			require.NoError(t, err)
 			require.NoError(
 				t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}),
@@ -893,7 +894,7 @@ func TestHeaderValidationRecoveryPenalizesOnlyTheResponsiblePeer(t *testing.T) {
 			}
 			ls.currentTip = ledgerTip
 			ls.metrics.init(prometheus.NewRegistry())
-			require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+			require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 
 			recovered, recoverErr := ls.tryRecoverFromHeaderValidationError(
 				&headerValidationError{
