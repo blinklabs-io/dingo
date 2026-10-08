@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -142,4 +143,45 @@ func testDrepAndGovernanceAtSlot(t *testing.T, store *Store) {
 	drep, err := store.GetDrepByCredential(0, credential, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(21), drep.ExpiryEpoch)
+}
+
+func TestPostgresOpCertSequencesAtSlot(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testOpCertSequencesAtSlot(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLOpCertSequencesAtSlot(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testOpCertSequencesAtSlot(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
+// testOpCertSequencesAtSlot runs LatestPoolOpCertSequencesAtOrBefore's two
+// statements on a backend's own SQL dialect.
+func testOpCertSequencesAtSlot(t *testing.T, store *Store) {
+	t.Helper()
+	pool := func(b byte) lcommon.PoolKeyHash {
+		return lcommon.PoolKeyHash(
+			lcommon.NewBlake2b224(bytes.Repeat([]byte{b}, 28)),
+		)
+	}
+	early, both := pool(0xA4), pool(0xB5)
+	require.NoError(t, store.UpdatePoolOpCertSequence(early, 2, 10, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(both, 1, 15, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(both, 9, 25, nil))
+
+	got, err := store.LatestPoolOpCertSequencesAtOrBefore(20, nil)
+	require.NoError(t, err)
+	require.Equal(t, map[string]uint64{
+		string(early[:]): 2,
+		string(both[:]):  1,
+	}, got)
+	got, err = store.LatestPoolOpCertSequencesAtOrBefore(5, nil)
+	require.NoError(t, err)
+	require.Empty(t, got)
 }
