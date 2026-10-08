@@ -372,10 +372,13 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 			peer.LastActivity = now
 			warmPromotions++
 			activeIncreased++
-			promoted++
+			// Inbound promotions have their own budget and must not use up
+			// the outbound refill slots counted by promoted and hotCount.
 			if peer.Source == PeerSourceInboundConn {
 				inboundHotHeld++
 				p.recordInboundLifecycle("promoted")
+			} else {
+				promoted++
 			}
 			if bootstrapPromotion && candidates[i].diversityGroup != "" {
 				selectedGroups[candidates[i].diversityGroup] = struct{}{}
@@ -434,7 +437,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 					Reason:  "target active peers (score)",
 				},
 			})
-			hotCount++
+			if peer.Source != PeerSourceInboundConn {
+				hotCount++
+			}
 		}
 	}
 

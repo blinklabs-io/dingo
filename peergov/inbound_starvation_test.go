@@ -161,16 +161,27 @@ func TestSetPeerHotByConnIdLocalRootAndInboundIndependence(t *testing.T) {
 		TargetNumberOfActivePeers: 1,
 		ActivePeersGossipQuota:    20,
 	})
+	inbound := starvationPeer(2, PeerSourceInboundConn, PeerStateWarm, true)
+	inbound.PerformanceScore = 1
+	inbound.FirstSeen = time.Now().Add(-time.Hour)
+	inbound.ChainSyncLastUpdate = time.Now()
+	inbound.TipSlotDeltaInit = true
 	pg.mu.Lock()
 	pg.peers = []*Peer{
 		starvationPeer(0, PeerSourceP2PGossip, PeerStateHot, true),
 		starvationPeer(1, PeerSourceTopologyLocalRoot, PeerStateWarm, true),
+		inbound,
 	}
 	pg.mu.Unlock()
 	pg.SetPeerHotByConnId(starvationConnId(1))
+	pg.SetPeerHotByConnId(starvationConnId(2))
 	assert.Equal(
 		t, 1, hotCountBySource(pg, PeerSourceTopologyLocalRoot),
 		"local roots are never held back by the active target",
+	)
+	assert.Equal(
+		t, 1, hotCountBySource(pg, PeerSourceInboundConn),
+		"an eligible inbound peer is promoted while the outbound target is full",
 	)
 }
 
@@ -438,6 +449,49 @@ func TestInboundFlappingIgnoresPeerOnStableSession(t *testing.T) {
 	peers := pg.GetPeers()
 	require.Len(t, peers, 1)
 	assert.Equal(t, "10.1.0.1:3001", peers[0].Address)
+}
+
+// An inbound peer promoted during refill must not use up an outbound slot,
+// even when it ranks ahead of the outbound candidates.
+func TestReconcileRefillInboundPromotionKeepsOutboundSlots(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		TargetNumberOfActivePeers:      2,
+		MinHotPeers:                    2,
+		TargetNumberOfEstablishedPeers: 50,
+		TargetNumberOfKnownPeers:       500,
+		ActivePeersGossipQuota:         20,
+		InboundHotQuota:                2,
+		InboundPruneAfter:              time.Hour,
+		// Refill recomputes scores; keep the inbound peer eligible.
+		InboundHotScoreThreshold: 0.1,
+	})
+	now := time.Now()
+	pg.mu.Lock()
+	// The inbound peer sits in an under-valency group, so it ranks first.
+	inbound := starvationPeer(0, PeerSourceInboundConn, PeerStateWarm, true)
+	inbound.PerformanceScore = 1
+	inbound.FirstSeen = now.Add(-time.Hour)
+	inbound.LastActivity = now
+	inbound.ChainSyncLastUpdate = now
+	inbound.TipSlotDeltaInit = true
+	inbound.GroupID = "group-a"
+	inbound.Valency = 1
+	pg.peers = append(pg.peers, inbound)
+	for i := 1; i <= 3; i++ {
+		p := starvationPeer(i, PeerSourceP2PGossip, PeerStateWarm, true)
+		p.LastActivity = now
+		p.PerformanceScore = 0.9
+		pg.peers = append(pg.peers, p)
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	require.Equal(t, 1, hotCountBySource(pg, PeerSourceInboundConn),
+		"fixture: the inbound peer must be promoted")
+	assert.Equal(t, 2, hotCountBySource(pg, PeerSourceP2PGossip),
+		"outbound refill must still reach the active target")
 }
 
 // Inbound hot peers must not occupy outbound refill slots.
