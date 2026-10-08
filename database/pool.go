@@ -188,6 +188,22 @@ func (d *Database) LatestPoolOpCertSequences(
 	return d.metadata.LatestPoolOpCertSequences(txn.Metadata())
 }
 
+// LatestPoolOpCertSequencesAtOrBefore is LatestPoolOpCertSequences as the
+// counters stood at slot.
+func (d *Database) LatestPoolOpCertSequencesAtOrBefore(
+	slot uint64,
+	txn *Txn,
+) (map[string]uint64, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.LatestPoolOpCertSequencesAtOrBefore(
+		slot,
+		txn.Metadata(),
+	)
+}
+
 // GetPools returns pools by key hash.
 func (d *Database) GetPools(
 	pkhs []lcommon.PoolKeyHash,

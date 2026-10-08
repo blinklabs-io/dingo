@@ -1186,26 +1186,21 @@ func (ls *LedgerState) queryShelley(
 // expiry and deposit they had, from certificates and drep_expiry_history, and
 // their delegators as GetAccountsByCredentialAtSlot reads accounts), and
 // ShelleyGetProposalsQuery (the proposals set at at.Slot from the lifecycle
-// slots, with votes from governance_vote_history). Pool and stake certificate
-// rows, the import baseline, the reward journal, DRep certificates and expiry
-// history, proposal lifecycle slots and vote history are removed only by
-// rollback, so none of these needs a retention floor.
+// slots, with votes from governance_vote_history), and
+// ShelleyDebugChainDepStateQuery (queryShelleyDebugChainDepState: the epoch
+// rows of at's epoch, the nonce fold stopped at at.Slot, the lab from the
+// acquired block's parent hash, and the op-cert counters observed at or
+// before at.Slot). Pool and stake certificate rows, the import baseline, the
+// reward journal, DRep certificates and expiry history, proposal lifecycle
+// slots, vote history, epoch rows and op-cert rows are removed only by
+// rollback, so none of these needs a retention floor; for a point older than
+// the three epochs of block nonce rows kept, the nonce fold recomputes from
+// the stored blocks.
 //
 // Intentionally live-only, not a gap: ShelleyGenesisConfigQuery
 // (genesis is an immutable chain-wide constant with no historical variant),
 // ShelleyGetLedgerPeerSnapshotQuery (peer/networking bootstrap data, not
 // ledger state at all).
-//
-// Not point-aware, real gap, out of scope for this pass: every remaining
-// case answers unconditionally from live state regardless of at, because
-// making it historically correct needs storage or reconstruction logic
-// that does not exist yet --
-//   - ShelleyDebugChainDepStateQuery: consensus nonce/opcert state.
-//     computeCandidateNonceAsOf already takes an arbitrary end-slot
-//     internally (a possible future entry point), but OpCertCounters
-//     reads live per-pool operational-certificate counters with no
-//     historical tracking, so the reply as a whole cannot be pinned
-//     without that piece too.
 //
 // Not applicable: ShelleyCborQuery (a combinator, not a leaf query --
 // forwards at to whatever it wraps).
@@ -1255,7 +1250,7 @@ func (ls *LedgerState) queryShelleyLeaf(
 	case *olocalstatequery.ShelleyGetProposalsQuery:
 		return ls.queryShelleyGetProposals(q.ActionIds.Items(), at, txn)
 	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
-		return ls.queryShelleyDebugChainDepState(txn)
+		return ls.queryShelleyDebugChainDepState(at, txn)
 	case *olocalstatequery.ShelleyPoolDistr2Query:
 		return ls.queryShelleyPoolDistr2(q, at, txn)
 	case *olocalstatequery.ShelleyStakeDistributionQuery:

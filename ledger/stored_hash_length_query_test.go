@@ -326,7 +326,7 @@ func TestChainDepStateRejectsMalformedStoredOpCertIssuer(t *testing.T) {
 	})
 	txn := ls.db.Transaction(false)
 	defer txn.Release()
-	counters, err := ls.chainDepStateOpCertCounters(txn)
+	counters, err := ls.chainDepStateOpCertCounters(txn, QueryPoint{})
 	require.ErrorContains(t, err, "op-cert counter issuer key")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, counters)

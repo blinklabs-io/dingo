@@ -1076,6 +1076,44 @@ func (s *Store) LatestPoolOpCertSequences(
 	return ret, rows.Err()
 }
 
+func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
+	slot uint64,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT pool_key_hash, MAX(sequence)
+FROM pool_opcert_sequence
+WHERE slot <= ?
+GROUP BY pool_key_hash`,
+		slotValue,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := map[string]uint64{}
+	for rows.Next() {
+		var poolKeyHash []byte
+		var sequence int64
+		if err := rows.Scan(&poolKeyHash, &sequence); err != nil {
+			return nil, err
+		}
+		if sequence < 0 {
+			return nil, fmt.Errorf("negative op-cert sequence %d", sequence)
+		}
+		ret[string(poolKeyHash)] = uint64(sequence)
+	}
+	return ret, rows.Err()
+}
+
 // mithrilTrustBoundarySyncKey mirrors database.mithrilLedgerSlotSyncKey and
 // ledgerstate's writer of the same key. It is duplicated here for the reason
 // the database package duplicates it: nothing below the ledger may import the

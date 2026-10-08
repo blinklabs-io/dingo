@@ -1135,3 +1135,124 @@ func TestQueryShelleyDebugChainDepState_HighestCounterPerPool(t *testing.T) {
 	assert.Equal(t, uint64(9), counter,
 		"the counter is the highest accepted, not the most recent")
 }
+
+// TestQueryShelleyDebugChainDepState_PinnedPointAnswersAtThatPoint pins the
+// query to a block in the epoch before the tip's. Every field must describe
+// that block: its slot, its epoch's nonces, the nonces folded up to it, its
+// parent as the lab, and only the op-cert counters observed by then.
+func TestQueryShelleyDebugChainDepState_PinnedPointAnswersAtThatPoint(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	const (
+		pinnedSlot uint64 = 1100
+		lateSlot   uint64 = 1950
+		tipSlot    uint64 = 2100
+	)
+	parentOfPinned := bytes.Repeat([]byte{0x77}, 32)
+	pinnedHash := bytes.Repeat([]byte{0x81}, 32)
+	lateHash := bytes.Repeat([]byte{0x82}, 32)
+	tipHash := bytes.Repeat([]byte{0x83}, 32)
+	pinnedNonce := bytes.Repeat([]byte{0x84}, 32)
+	firstEpochNonce := bytes.Repeat([]byte{0x02}, 32)
+	secondEpochNonce := bytes.Repeat([]byte{0x05}, 32)
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		for _, b := range []struct {
+			slot         uint64
+			hash, parent []byte
+			nonce        []byte
+			number       uint64
+		}{
+			{pinnedSlot, pinnedHash, parentOfPinned, pinnedNonce, 1},
+			{lateSlot, lateHash, pinnedHash, bytes.Repeat([]byte{0x85}, 32), 2},
+			{tipSlot, tipHash, lateHash, bytes.Repeat([]byte{0x86}, 32), 3},
+		} {
+			if err := db.BlockCreate(models.Block{
+				Slot:     b.slot,
+				Hash:     b.hash,
+				PrevHash: b.parent,
+				Cbor:     []byte{0x80},
+				Number:   b.number,
+				Type:     conway.BlockTypeConway,
+			}, txn); err != nil {
+				return err
+			}
+			if err := db.SetBlockNonce(
+				b.hash, b.slot, b.nonce, false, txn,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	for _, e := range []struct {
+		start, id uint64
+		nonce     []byte
+	}{
+		{1000, 1, firstEpochNonce},
+		{2000, 2, secondEpochNonce},
+	} {
+		require.NoError(t, db.Metadata().SetEpoch(
+			e.start,
+			e.id,
+			e.nonce,
+			bytes.Repeat([]byte{0x71}, 32),
+			bytes.Repeat([]byte{0x72}, 32),
+			bytes.Repeat([]byte{0x03}, 32),
+			eras.ConwayEraDesc.Id,
+			1,
+			1000,
+			nil,
+		))
+	}
+	early := lcommon.PoolKeyHash(lcommon.NewBlake2b224(bytes.Repeat([]byte{0x91}, 28)))
+	late := lcommon.PoolKeyHash(lcommon.NewBlake2b224(bytes.Repeat([]byte{0x92}, 28)))
+	require.NoError(t, db.UpdatePoolOpCertSequence(early, 1, pinnedSlot, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(late, 5, lateSlot, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(early, 2, tipSlot, nil))
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, tipHash)},
+		nil,
+	))
+	ls := newChainDepStateLedger(t, db)
+
+	decode := func(at QueryPoint) olocalstatequery.DebugChainDepStateResult {
+		t.Helper()
+		result, err := ls.Query(chainDepStateQuery(), at)
+		require.NoError(t, err)
+		arr, ok := result.([]any)
+		require.True(t, ok)
+		encoded, err := cbor.Encode(arr[0])
+		require.NoError(t, err)
+		var decoded olocalstatequery.DebugChainDepStateResult
+		require.NoError(t, decoded.UnmarshalCBOR(encoded))
+		return decoded
+	}
+	nonce := func(b []byte) lcommon.Nonce {
+		return lcommon.Nonce{Type: lcommon.NonceTypeNonce, Value: [32]byte(b)}
+	}
+
+	pinned := decode(QueryPoint{Slot: pinnedSlot, Hash: pinnedHash})
+	assert.Equal(t, pinnedSlot, pinned.LastSlot.Slot)
+	assert.Equal(t, new(nonce(firstEpochNonce)), pinned.EpochNonce)
+	assert.Equal(t, nonce(pinnedNonce), pinned.EvolvingNonce)
+	assert.Equal(t, nonce(pinnedNonce), pinned.CandidateNonce,
+		"before the freeze cutoff the candidate tracks the evolving nonce")
+	assert.Equal(t, new(nonce(parentOfPinned)), pinned.LabNonce)
+	assert.Equal(t, map[lcommon.Blake2b224]uint64{
+		lcommon.Blake2b224(early): 1,
+	}, pinned.OpCertCounters)
+
+	tip := decode(QueryPoint{})
+	assert.Equal(t, tipSlot, tip.LastSlot.Slot)
+	assert.Equal(t, new(nonce(secondEpochNonce)), tip.EpochNonce)
+	assert.Equal(t, new(nonce(firstEpochNonce)), tip.PreviousEpochNonce)
+	assert.Equal(t, new(nonce(lateHash)), tip.LabNonce)
+	assert.Equal(t, map[lcommon.Blake2b224]uint64{
+		lcommon.Blake2b224(early): 2,
+		lcommon.Blake2b224(late):  5,
+	}, tip.OpCertCounters)
+}

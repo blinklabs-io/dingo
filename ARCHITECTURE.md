@@ -11860,7 +11860,18 @@ row per DRep (see DATABASE.md), so a point before a DRep's latest pre-upgrade
 activity has no recorded expiry: a DRep whose certificate state at that point
 is still its current one (or that was imported at slot 0) reports its current
 expiry, and any other reports 0 (unset). Rollback applies the same rule.
-`DebugChainDepState` still ignores the acquired point.
+
+`DebugChainDepState` (`queryShelleyDebugChainDepState`) describes the
+acquired block instead of the tip: its slot as the last slot, the epoch rows
+of the epoch containing it (era, epoch, previous-epoch and last-epoch-block
+nonces), the evolving and candidate nonces folded by `computeCandidateNonceAsOf`
+up to and including it, the lab nonce from its parent hash, and the op-cert
+counters observed at or before it (`LatestPoolOpCertSequencesAtOrBefore`).
+Epoch rows and `pool_opcert_sequence` rows are removed only by rollback. Block
+nonce rows keep the last three epochs; API storage mode accepts older points,
+and for those the fold recomputes the nonces from the stored blocks. With this,
+every leaf query that reads ledger or consensus state answers at the acquired
+point.
 
 Every pinned query also needs history the node actually holds, so
 `VerifyPointQueryable` refuses a point below the latest Mithril import's
