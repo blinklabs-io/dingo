@@ -45,13 +45,18 @@ import (
 // The rollover stack consumes the application entry points below.
 const stakeRewardSourcePrefix = models.StakeRewardSourcePrefix
 
+var errRequiredStakeRewardBasisUnavailable = errors.New(
+	"required stake reward basis unavailable",
+)
+
 func (ls *LedgerState) applyStakeRewards(
 	txn *database.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
 	err := ls.applyStakeRewardUpdate(txn, newEpoch, boundarySlot)
-	if err == nil || !errors.Is(err, rewards.ErrNegativeLeaderReward) {
+	if err == nil || (!errors.Is(err, rewards.ErrNegativeLeaderReward) &&
+		!errors.Is(err, errRequiredStakeRewardBasisUnavailable)) {
 		return err
 	}
 	// cardano-ledger fails this epoch boundary too, so no replay or retry
@@ -103,6 +108,22 @@ func (ls *LedgerState) applyStakeRewardUpdate(
 	// against performance epoch 0. Guarding on the narrower helper skipped
 	// exactly the rounds this guard exists to catch, and epochs 1 and 2 are
 	// inside the Byron prefix on every network this affects.
+	if newEpoch > 0 {
+		endedEpoch, err := ls.db.Metadata().GetEpoch(
+			newEpoch-1,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"get ended epoch %d for reward application: %w",
+				newEpoch-1,
+				err,
+			)
+		}
+		if endedEpoch != nil && endedEpoch.EraId == eras.ByronEraDesc.Id {
+			return nil
+		}
+	}
 	if rewardEpochs, ok := stakeRewardEpochsForApplication(newEpoch); ok {
 		performanceEpoch, err := ls.db.Metadata().GetEpoch(
 			rewardEpochs.performance,
@@ -124,6 +145,14 @@ func (ls *LedgerState) applyStakeRewardUpdate(
 		txn, newEpoch, boundarySlot,
 	)
 	if err != nil {
+		if errors.Is(err, errRewardStakeInputsUnrecoverable) {
+			epochs, epochsOK := stakeRewardEpochsForApplication(newEpoch)
+			if epochsOK {
+				return ls.classifyRewardStakeInputReconstructionError(
+					true, newEpoch, epochs.snapshot, err,
+				)
+			}
+		}
 		return err
 	}
 	if !ok {
@@ -506,19 +535,16 @@ type rewardPrecomputeRollbackSnapshot struct {
 	reloadFailed bool
 }
 
-// reportSkips distinguishes the authoritative application from the
-// opportunistic precompute that runs the same calculation ahead of it. Only
-// the authoritative caller passes true: a precompute that finds an input
-// missing has not skipped a reward round -- the round has not been applied
-// yet, and the same inputs are read again at the boundary -- so reporting
-// there would count one eventually-successful round as skipped, and count a
-// genuinely skipped one twice.
+// authoritative distinguishes boundary application from the opportunistic
+// precompute that runs the same calculation ahead of it. A precompute that
+// finds an input missing remains retryable because the boundary reads the
+// inputs again.
 func (ls *LedgerState) calculateStakeRewardApplication(
 	txn *database.Txn,
 	newEpoch uint64,
 	capturedSlot uint64,
 	boundarySlot uint64,
-	reportSkips bool,
+	authoritative bool,
 ) (*stakeRewardApplication, bool, error) {
 	rewardInputGeneration := ls.rewardInputGeneration.Load()
 	epochs, ok := stakeRewardEpochsForApplication(newEpoch)
@@ -530,8 +556,13 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	performanceEpoch := epochs.performance
 	potsEpoch := epochs.pots
 	if err := ls.ensureRewardStakeInputsReady(txn, rewardSnapshotEpoch); err != nil {
-		if errors.Is(err, errRewardStakeInputsNotReady) && !reportSkips {
+		if errors.Is(err, errRewardStakeInputsNotReady) && !authoritative {
 			return nil, false, nil
+		}
+		if errors.Is(err, errRewardStakeInputsUnrecoverable) {
+			return nil, false, ls.classifyRewardStakeInputReconstructionError(
+				authoritative, newEpoch, rewardSnapshotEpoch, err,
+			)
 		}
 		return nil, false, err
 	}
@@ -547,15 +578,13 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		)
 	}
 	if pots == nil {
-		if reportSkips {
-			ls.reportSkippedStakeRewards(
-				newEpoch,
-				"missing ADA pots",
-				"pots_epoch",
-				potsEpoch,
-			)
-		}
-		return nil, false, nil
+		return nil, false, ls.requiredStakeRewardBasisUnavailable(
+			authoritative,
+			newEpoch,
+			"missing ADA pots",
+			"pots_epoch",
+			potsEpoch,
+		)
 	}
 
 	rewardSnapshot, err := meta.GetRewardSnapshot(
@@ -568,8 +597,8 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		)
 	}
 	if rewardSnapshot == nil {
-		if reportSkips {
-			reason := "missing reward snapshot"
+		reason := "missing reward snapshot"
+		if authoritative {
 			failure, failureErr := meta.GetRewardSeedFailure(
 				rewardSnapshotEpoch, "mark", metaTxn,
 			)
@@ -583,14 +612,14 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 			if failure != "" {
 				reason = "imported reward basis seeding failed: " + failure
 			}
-			ls.reportSkippedStakeRewards(
-				newEpoch,
-				reason,
-				"reward_snapshot_epoch",
-				rewardSnapshotEpoch,
-			)
 		}
-		return nil, false, nil
+		return nil, false, ls.requiredStakeRewardBasisUnavailable(
+			authoritative,
+			newEpoch,
+			reason,
+			"reward_snapshot_epoch",
+			rewardSnapshotEpoch,
+		)
 	}
 
 	poolInputs, err := meta.GetRewardPoolInputs(
@@ -638,6 +667,11 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 			meta, metaTxn, rewardSnapshotEpoch, rewardSnapshot, poolInputs,
 		)
 		if rebuildErr != nil {
+			if errors.Is(rebuildErr, errRewardStakeInputsUnrecoverable) {
+				return nil, false, ls.classifyRewardStakeInputReconstructionError(
+					authoritative, newEpoch, rewardSnapshotEpoch, rebuildErr,
+				)
+			}
 			return nil, false, fmt.Errorf(
 				"rebuild pruned reward stake inputs for epoch %d: %w",
 				rewardSnapshotEpoch, rebuildErr,
@@ -647,17 +681,15 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		reconstructedStakeInputs = rebuilt
 	}
 	if len(stakeInputs) == 0 && rewardSnapshot.TotalDelegators > 0 {
-		if reportSkips {
-			ls.reportSkippedStakeRewards(
-				newEpoch,
-				"reward stake inputs for the snapshot epoch are no longer retained",
-				"reward_snapshot_epoch",
-				rewardSnapshotEpoch,
-				"snapshot_delegators",
-				rewardSnapshot.TotalDelegators,
-			)
-		}
-		return nil, false, nil
+		return nil, false, ls.requiredStakeRewardBasisUnavailable(
+			authoritative,
+			newEpoch,
+			"reward stake inputs for the snapshot epoch are no longer retained",
+			"reward_snapshot_epoch",
+			rewardSnapshotEpoch,
+			"snapshot_delegators",
+			rewardSnapshot.TotalDelegators,
+		)
 	}
 
 	pparams, params, performanceDecentralization, err := ls.rewardParameters(
@@ -694,16 +726,14 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	// instead, so the shortfall is visible here rather than at the first
 	// withdrawal the node then rejects.
 	if !blockCountsKnown {
-		if reportSkips {
-			ls.reportSkippedStakeRewards(
-				newEpoch,
-				"no block counts for the performance epoch: it ended below the"+
-					" Mithril trust anchor and the snapshot carried none",
-				"performance_epoch",
-				performanceEpoch,
-			)
-		}
-		return nil, false, nil
+		return nil, false, ls.requiredStakeRewardBasisUnavailable(
+			authoritative,
+			newEpoch,
+			"no block counts for the performance epoch: it ended below the"+
+				" Mithril trust anchor and the snapshot carried none",
+			"performance_epoch",
+			performanceEpoch,
+		)
 	}
 	prefilterSlot, err := ls.rewardPrefilterSlot(meta, metaTxn, potsEpoch)
 	if err != nil {
@@ -3123,57 +3153,66 @@ func stakeRewardEpochsForApplication(
 	return stakeRewardEpochsForNewEpoch(newEpoch)
 }
 
-// reportSkippedStakeRewards records a reward round that could not be applied
-// because one of its inputs is absent.
-//
-// This is not a benign "nothing to do". The reference node credits that round
-// regardless, so every skipped round leaves this node's reward balances --
-// and therefore the leadership stake distribution derived from them --
-// permanently short by that epoch's rewards. Nothing backfills it later: the
-// credit is simply never made.
-//
-// A short stake distribution is not a cosmetic difference. Leader eligibility
-// compares a VRF value against a threshold derived from relative stake, so a
-// stake shortfall of eps flips a decision with probability about eps per
-// block, and the flipped decision rejects a canonical block. That was
-// diagnosed on preview: a node whose stake was 0.042% short in
-// sigma rejected a block whose leader value sat between its own threshold and
-// the reference's, and wedged.
-//
-// Both skips used to log at Debug, which is why three separate field reports
-// were investigated without anyone seeing the cause. They are Warn now, and
-// counted, because a node in this state is silently diverging from the
-// network and only says so when it eventually rejects a block.
-//
-// The inputs can be absent after a Mithril bootstrap, but the cause is not
-// necessarily that they predate the import: an imported reward basis can also
-// have failed reconciliation and therefore never been persisted. The warning
-// stays factual and points to the earlier diagnostics rather than guessing.
-func (ls *LedgerState) reportSkippedStakeRewards(
+func (ls *LedgerState) classifyRewardStakeInputReconstructionError(
+	authoritative bool,
+	newEpoch uint64,
+	rewardSnapshotEpoch uint64,
+	err error,
+) error {
+	if !errors.Is(err, errRewardStakeInputsUnrecoverable) {
+		return err
+	}
+	return ls.requiredStakeRewardBasisUnavailable(
+		authoritative,
+		newEpoch,
+		err.Error(),
+		"reward_snapshot_epoch",
+		rewardSnapshotEpoch,
+	)
+}
+
+// requiredStakeRewardBasisUnavailable rejects an authoritative reward round
+// whose required persisted basis is absent. An opportunistic precompute can
+// observe the basis before the boundary transaction writes it, so that path
+// remains retryable.
+func (ls *LedgerState) requiredStakeRewardBasisUnavailable(
+	authoritative bool,
 	newEpoch uint64,
 	reason string,
 	epochKey string,
 	epochValue uint64,
 	extra ...any,
-) {
-	ls.metrics.incSkippedStakeRewardRounds()
-	if ls.config.Logger == nil {
-		return
+) error {
+	if !authoritative {
+		return nil
 	}
-	args := make([]any, 0, 6+len(extra))
-	args = append(args,
-		"component", "ledger",
-		"new_epoch", newEpoch,
-		epochKey, epochValue,
-	)
-	args = append(args, extra...)
-	ls.config.Logger.Warn(
-		"skipping stake rewards: "+reason+
-			"; this epoch's rewards will never be credited, leaving reward"+
-			" balances and the leadership stake distribution permanently"+
-			" short (the required basis was never persisted; inspect earlier"+
-			" bootstrap and ledgerstate import warnings for the cause)",
-		args...,
+	ls.metrics.incSkippedStakeRewardRounds()
+	if ls.config.Logger != nil {
+		args := make([]any, 0, 6+len(extra))
+		args = append(args,
+			"component", "ledger",
+			"new_epoch", newEpoch,
+			epochKey, epochValue,
+		)
+		args = append(args, extra...)
+		ls.config.Logger.Error(
+			"cannot apply stake rewards: "+reason+
+				"; halting before the boundary can commit with reward balances"+
+				" and the leadership stake distribution permanently short"+
+				" (inspect earlier bootstrap and ledgerstate import warnings"+
+				" for the missing basis)",
+			args...,
+		)
+	}
+	return fmt.Errorf(
+		"%w for new epoch %d: %s (%s=%d); recover by re-running Mithril"+
+			" sync or ledger-state import, and see the earlier bootstrap"+
+			" and ledgerstate import warnings",
+		errRequiredStakeRewardBasisUnavailable,
+		newEpoch,
+		reason,
+		epochKey,
+		epochValue,
 	)
 }
 
@@ -3310,7 +3349,8 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 			poolID, err := lcommon.NewBlake2b224Checked(hash)
 			if err != nil {
 				return nil, fmt.Errorf(
-					"reward pool input for epoch %d: %w",
+					"%w: reward pool input for epoch %d: %w",
+					errRewardStakeInputsUnrecoverable,
 					rewardSnapshotEpoch, err,
 				)
 			}

@@ -178,6 +178,7 @@ func TestFilteredDelegationsRejectsMalformedStoredPool(t *testing.T) {
 			Tag:   0,
 			Bytes: lcommon.NewBlake2b224(cred),
 		}},
+		QueryPoint{},
 		nil,
 	)
 	require.ErrorContains(t, err, "delegation pool id")
@@ -204,6 +205,7 @@ func TestGovernanceProposalStateRejectsMalformedStoredSPOVoter(t *testing.T) {
 			GovActionCbor: []byte{0x80},
 		},
 		lcommon.GovActionId{},
+		QueryPoint{},
 		nil,
 	)
 	require.ErrorContains(t, err, "governance vote")

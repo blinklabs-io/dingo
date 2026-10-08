@@ -136,7 +136,7 @@ func queryProposals(
 	ls *LedgerState,
 ) olocalstatequery.ProposalsResult {
 	t.Helper()
-	result, err := ls.queryShelleyGetProposals(nil, nil)
+	result, err := ls.queryShelleyGetProposals(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	wrapped, ok := result.([]any)
 	require.True(t, ok)
@@ -659,6 +659,7 @@ INSERT INTO auth_committee_hot (
 			)
 		},
 	)
+	seedEmptyRewardBasisForRollover(t, db, epoch, pparams)
 	return s
 }
 
@@ -673,6 +674,7 @@ func (s *govDiffScenario) run(
 	dumps := make([]govDiffEpochDump, 0, boundaries)
 	epoch, pparams := s.epoch, s.pparams
 	for range boundaries {
+		seedEmptyRewardBasisForRollover(t, s.db, epoch, pparams)
 		// The reward application reads the performance epoch's parameters
 		// from the table a real node writes every boundary.
 		stored, err := s.db.GetPParams(

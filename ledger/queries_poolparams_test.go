@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"math/big"
 	"net"
 	"strings"
@@ -46,7 +47,7 @@ func hexBytes(t *testing.T, parts ...string) []byte {
 func stakePoolParamsQuery(pools ...[]byte) *olocalstatequery.BlockQuery {
 	ids := make([]ledger.PoolId, 0, len(pools))
 	for _, pool := range pools {
-		ids = append(ids, ledger.PoolId(ledger.NewBlake2b224(pool)))
+		ids = append(ids, ledger.PoolId(pool))
 	}
 	return shelleyBlockQuery(&olocalstatequery.ShelleyStakePoolParamsQuery{
 		Type:    olocalstatequery.QueryTypeShelleyStakePoolParams,
@@ -643,4 +644,91 @@ func TestQueryStakePoolParams_BlsKeyFromProtocolVersion12(t *testing.T) {
 			)
 		}
 	}
+}
+
+func TestQueryStakePoolParams_GenesisRelayWireOrderAndBlsKey(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
+	setStakePoolParamsLiveState(ls, 0, 0, 10)
+	pp := &conway.ConwayProtocolParameters{}
+	pp.ProtocolVersion.Major = 12
+	ls.currentPParams = pp
+	ls.publishSnapshotsLocked()
+
+	poolID := repeatedBytes(28, 0x11)
+	operator := lcommon.PoolKeyHash(poolID)
+	ipv4 := net.IPv4(192, 168, 1, 1)
+	ipv6 := net.ParseIP("2001:db8::1").To16()
+	port := uint32(3001)
+	cert := lcommon.PoolRegistrationCertificate{
+		Operator:      operator,
+		VrfKeyHash:    lcommon.VrfKeyHash(repeatedBytes(32, 0xAA)),
+		LeiosKey:      &lcommon.LeiosKey{PublicKey: repeatedBytes(96, 0x66), PossessionProof: repeatedBytes(48, 0x77)},
+		Margin:        lcommon.GenesisRat{Rat: big.NewRat(0, 1)},
+		RewardAccount: lcommon.AddrKeyHash(repeatedBytes(28, 0x22)),
+		Relays: []lcommon.PoolRelay{{
+			Type: lcommon.PoolRelayTypeSingleHostAddress,
+			Port: &port,
+			Ipv4: &ipv4,
+			Ipv6: &ipv6,
+		}},
+	}
+	require.NoError(t, ls.db.SetGenesisStaking(
+		map[string]lcommon.PoolRegistrationCertificate{"pool": cert},
+		map[string]string{},
+		0,
+		nil,
+		nil,
+	))
+
+	got, err := ls.Query(stakePoolParamsQuery(poolID), QueryPoint{})
+	require.NoError(t, err)
+	gotCbor, err := cbor.Encode(got)
+	require.NoError(t, err)
+	encoded := hex.EncodeToString(gotCbor)
+	require.Contains(t, encoded, "440101a8c0")
+	require.Contains(t, encoded, "50b80d0120000000000000000001000000")
+	require.Contains(
+		t,
+		encoded,
+		"5860"+strings.Repeat("66", 96)+"5830"+strings.Repeat("77", 48),
+	)
+}
+
+func TestInitialPoolsReadsGenesisBlsKeyAlias(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json",
+		"musashi",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	genesis := cfg.ShelleyGenesis()
+	require.NotNil(t, genesis.ExtraConfig)
+	require.NotEmpty(t, genesis.ExtraConfig.StakePools.Data)
+
+	key := &lcommon.LeiosKey{
+		PublicKey:       repeatedBytes(96, 0x66),
+		PossessionProof: repeatedBytes(48, 0x77),
+	}
+	encoded, err := json.Marshal(key)
+	require.NoError(t, err)
+	var poolID string
+	for id, pool := range genesis.ExtraConfig.StakePools.Data {
+		pool.Unknown["blsKey"] = encoded
+		genesis.ExtraConfig.StakePools.Data[id] = pool
+		poolID = id
+		break
+	}
+
+	pools, _, err := initialPools(genesis)
+	require.NoError(t, err)
+	got := pools[poolID].LeiosKey
+	require.NotNil(t, got)
+	require.Equal(t, key.PublicKey, got.PublicKey)
+	require.Equal(t, key.PossessionProof, got.PossessionProof)
 }

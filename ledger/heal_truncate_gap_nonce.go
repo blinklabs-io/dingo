@@ -91,8 +91,9 @@ func (ls *LedgerState) healTruncateGapBlockNonces(ctx context.Context) error {
 	tipNonce := bytes.Clone(ls.currentTipBlockNonce)
 	ls.RUnlock()
 
-	// Genesis has no block and no nonce to reconstruct.
-	if tipPoint.Slot == 0 {
+	// Origin has no block and no nonce to reconstruct. A block at slot 0
+	// is a real tip and is handled below.
+	if tipPoint.Slot == 0 && len(tipPoint.Hash) == 0 {
 		return nil
 	}
 	// A valid tip nonce means either there was never a gap, or a previous

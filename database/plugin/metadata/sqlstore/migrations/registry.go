@@ -28,6 +28,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
 
 // migrationSQL contains immutable, versioned migration resources.
@@ -69,6 +72,8 @@ const (
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
 	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
 	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
+	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
+	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
 	poolRelayTypeSchemaRelease                          = "pool-relay-type"
 )
 
@@ -204,7 +209,14 @@ var schemaVersions = []struct {
 		Dir:     "v33",
 	},
 	{Version: 34, Name: "leios-transaction-ledger-context", Dir: "v34"},
-	{Version: 35, Name: poolRelayTypeSchemaRelease, Dir: "v35"},
+	{Version: 35, Name: accountDRepClearSchemaRelease, Dir: "v35"},
+	{
+		Version: 36,
+		Name:    committeeHotAuthorizationPruneOrderSchemaRelease,
+		Dir:     "v36",
+	},
+	{Version: 37, Name: "drep-expiry-history", Dir: "v37"},
+	{Version: 38, Name: poolRelayTypeSchemaRelease, Dir: "v38"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -329,9 +341,142 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = rewardCreditRoundBackfill
 		}
+		if version.Name == accountDRepClearSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = accountDRepClearBackfill
+		}
 		ret = append(ret, migration)
 	}
 	return ret, nil
+}
+
+func accountDRepClearBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	if batch.Cursor != "" {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT cbor, added_slot FROM pparams
+WHERE era_id = ? ORDER BY added_slot ASC, id ASC`), conway.EraIdConway)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("read Conway protocol parameters: %w", err)
+	}
+	var boundary uint64
+	foundBoundary := false
+	if err := func() error {
+		defer rows.Close()
+		for rows.Next() {
+			var data []byte
+			var addedSlot int64
+			if err := rows.Scan(&data, &addedSlot); err != nil {
+				return err
+			}
+			var fields []cbor.RawMessage
+			if _, err := cbor.Decode(data, &fields); err != nil {
+				return fmt.Errorf(
+					"decode Conway protocol parameters at slot %d: %w",
+					addedSlot,
+					err,
+				)
+			}
+			if len(fields) <= 12 {
+				return fmt.Errorf(
+					"decode Conway protocol parameters at slot %d: missing protocol version",
+					addedSlot,
+				)
+			}
+			var version common.ProtocolParametersProtocolVersion
+			if _, err := cbor.Decode(fields[12], &version); err != nil {
+				return fmt.Errorf(
+					"decode Conway protocol version at slot %d: %w",
+					addedSlot,
+					err,
+				)
+			}
+			if version.Major == 10 {
+				if addedSlot < 0 {
+					return fmt.Errorf(
+						"negative PV10 boundary slot %d", addedSlot,
+					)
+				}
+				boundary = uint64(addedSlot)
+				foundBoundary = true
+				break
+			}
+		}
+		return rows.Err()
+	}(); err != nil {
+		return BatchResult{}, err
+	}
+	if !foundBoundary {
+		return BatchResult{Cursor: "checked", Done: true}, nil
+	}
+
+	var rawBoundary string
+	err = batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT value FROM sync_state WHERE sync_key = ?`),
+		"mithril_ledger_slot").Scan(&rawBoundary)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, errors.New(
+			"PV10 DRep clear history is unavailable; resync is required",
+		)
+	}
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("read Mithril boundary: %w", err)
+	}
+	mithrilBoundary, err := strconv.ParseUint(rawBoundary, 10, 64)
+	if err != nil || mithrilBoundary < boundary {
+		return BatchResult{}, errors.New(
+			"PV10 DRep clear history is unavailable; resync is required",
+		)
+	}
+	var incomplete int64
+	if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+WITH registration_event AS (
+    SELECT credential_tag, staking_key, added_slot FROM stake_registration
+    UNION ALL SELECT credential_tag, staking_key, added_slot
+        FROM stake_registration_delegation
+    UNION ALL SELECT credential_tag, staking_key, added_slot
+        FROM stake_vote_registration_delegation
+    UNION ALL SELECT credential_tag, staking_key, added_slot
+        FROM vote_registration_delegation
+    UNION ALL SELECT credential_tag, staking_key, added_slot FROM registration
+), deregistration_event AS (
+    SELECT credential_tag, staking_key, added_slot FROM stake_deregistration
+    UNION ALL SELECT credential_tag, staking_key, added_slot FROM deregistration
+)
+SELECT COUNT(*) FROM account a
+WHERE a.created_slot <= ?
+  AND NOT EXISTS (
+      SELECT 1 FROM account_import_baseline b
+      WHERE b.credential_tag = a.credential_tag
+        AND b.staking_key = a.staking_key
+        AND b.added_slot = ?
+  )
+  AND (a.active = TRUE OR NOT EXISTS (
+      SELECT 1 FROM deregistration_event d
+      WHERE d.credential_tag = a.credential_tag
+        AND d.staking_key = a.staking_key
+        AND d.added_slot <= ?
+        AND d.added_slot > COALESCE((
+            SELECT MAX(r.added_slot) FROM registration_event r
+            WHERE r.credential_tag = a.credential_tag
+              AND r.staking_key = a.staking_key
+              AND r.added_slot <= ?
+        ), -1)
+  ))`), mithrilBoundary, mithrilBoundary, mithrilBoundary,
+		mithrilBoundary).Scan(&incomplete); err != nil {
+		return BatchResult{}, fmt.Errorf("verify Mithril account baseline: %w", err)
+	}
+	if incomplete != 0 {
+		return BatchResult{}, fmt.Errorf(
+			"mithril account baseline is incomplete for %d credentials; resync is required",
+			incomplete,
+		)
+	}
+	return BatchResult{Cursor: "checked", Done: true}, nil
 }
 
 // rewardCreditRoundBackfill moves the legacy JSON round list into its indexed
@@ -352,11 +497,17 @@ func rewardCreditRoundBackfill(
 		return BatchResult{Done: true}, nil
 	}
 	if err != nil {
-		return BatchResult{}, fmt.Errorf("read legacy reward credit rounds: %w", err)
+		return BatchResult{}, fmt.Errorf(
+			"read legacy reward credit rounds: %w",
+			err,
+		)
 	}
 	rounds := make([]models.RewardCreditRound, 0)
 	if err := json.Unmarshal([]byte(raw), &rounds); err != nil {
-		return BatchResult{}, fmt.Errorf("decode legacy reward credit rounds: %w", err)
+		return BatchResult{}, fmt.Errorf(
+			"decode legacy reward credit rounds: %w",
+			err,
+		)
 	}
 	if rounds == nil {
 		rounds = make([]models.RewardCreditRound, 0)
@@ -374,7 +525,8 @@ func rewardCreditRoundBackfill(
 	}
 	end := min(start+batch.Limit, len(rounds))
 	for _, round := range rounds[start:end] {
-		if round.SnapshotEpoch > uint64(1<<63-1) || round.BoundarySlot > uint64(1<<63-1) {
+		if round.SnapshotEpoch > uint64(1<<63-1) ||
+			round.BoundarySlot > uint64(1<<63-1) {
 			return BatchResult{}, fmt.Errorf(
 				"legacy reward credit round exceeds SQL integer range: epoch %d slot %d",
 				round.SnapshotEpoch,
@@ -387,7 +539,10 @@ func rewardCreditRoundBackfill(
 			int64(round.SnapshotEpoch),
 			int64(round.BoundarySlot),
 		); err != nil {
-			return BatchResult{}, fmt.Errorf("copy legacy reward credit round: %w", err)
+			return BatchResult{}, fmt.Errorf(
+				"copy legacy reward credit round: %w",
+				err,
+			)
 		}
 	}
 	if end == len(rounds) {
@@ -396,9 +551,16 @@ func rewardCreditRoundBackfill(
 			batch.Rebind(`DELETE FROM sync_state WHERE sync_key = ?`),
 			models.PendingRewardCreditRoundsKey,
 		); err != nil {
-			return BatchResult{}, fmt.Errorf("remove legacy reward credit rounds: %w", err)
+			return BatchResult{}, fmt.Errorf(
+				"remove legacy reward credit rounds: %w",
+				err,
+			)
 		}
-		return BatchResult{Cursor: strconv.Itoa(end), Rows: int64(end - start), Done: true}, nil
+		return BatchResult{
+			Cursor: strconv.Itoa(end),
+			Rows:   int64(end - start),
+			Done:   true,
+		}, nil
 	}
 	return BatchResult{Cursor: strconv.Itoa(end), Rows: int64(end - start)}, nil
 }

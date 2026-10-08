@@ -279,7 +279,7 @@ func shelleyExtraConfigCBOR(
 		funds[cbor.NewByteString(addrBytes)] = utxo.Output.Amount().Uint64()
 	}
 
-	certs, delegations, err := injected.InitialPools()
+	certs, delegations, err := initialPools(&injected)
 	if err != nil {
 		return nil, err
 	}
