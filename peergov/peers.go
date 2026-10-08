@@ -1155,6 +1155,23 @@ func (p *PeerGovernor) hotBudgetAllowsLocked(peer *Peer) bool {
 	return quota <= 0 || categoryHot < quota
 }
 
+// RecordServedActivityByConnId records that the peer holding connId is
+// consuming from this node (chainsync or blockfetch server requests, keepalive
+// pings). It refreshes only LastServedActivity, which the inbound idle-prune
+// decision reads; LastActivity, which drives outbound hot and churn decisions,
+// is untouched. Callers on a per-message path should throttle: this takes the
+// governor lock and scans the peer list.
+func (p *PeerGovernor) RecordServedActivityByConnId(
+	connId ouroboros.ConnectionId,
+) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if idx := p.peerIndexByConnId(connId); idx != -1 &&
+		p.peers[idx] != nil {
+		p.peers[idx].LastServedActivity = time.Now()
+	}
+}
+
 func (p *PeerGovernor) TouchPeerByConnId(connId ouroboros.ConnectionId) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

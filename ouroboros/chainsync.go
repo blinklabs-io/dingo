@@ -638,6 +638,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 	points []ocommon.Point,
 ) (ocommon.Point, ochainsync.Tip, error) {
 	var retPoint ocommon.Point
+	o.recordServedActivity(ctx.ConnectionId)
 	o.config.Logger.Debug(
 		"chainsync server: FindIntersect callback entered",
 		"component", "ouroboros",
@@ -738,6 +739,7 @@ func (o *Ouroboros) refreshTip(next *chain.ChainIteratorResult) ochainsync.Tip {
 func (o *Ouroboros) chainsyncServerRequestNext(
 	ctx ochainsync.CallbackContext,
 ) error {
+	o.recordServedActivity(ctx.ConnectionId)
 	// Create/retrieve chainsync state for connection
 	tip := o.ledgerState.Tip()
 	clientState, err := o.chainsyncState.AddClient(
@@ -905,6 +907,9 @@ func (o *Ouroboros) chainsyncServerServeAwaited(
 	next *chain.ChainIteratorResult,
 	nextErr error,
 ) {
+	if nextErr == nil {
+		o.recordServedActivity(ctx.ConnectionId)
+	}
 	if nextErr != nil {
 		if errors.Is(nextErr, context.Canceled) {
 			// The only cancellations of a server client's iterator come from

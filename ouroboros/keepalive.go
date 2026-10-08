@@ -17,6 +17,9 @@ package ouroboros
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -51,6 +54,12 @@ func classifyKeepaliveTimeoutClose(err error) bool {
 
 func (o *Ouroboros) keepaliveConnOpts() []okeepalive.KeepAliveOptionFunc {
 	opts := []okeepalive.KeepAliveOptionFunc{
+		// Server side: a downstream peer pinging us is not idle.
+		okeepalive.WithOnKeepAliveReceived(
+			func(connId connection.ConnectionId, _ uint16) {
+				o.recordServedActivity(connId)
+			},
+		),
 		okeepalive.WithOnKeepAliveResponseReceived(
 			o.instrumentKeepaliveResponse(o.keepaliveClientResponse),
 		),
@@ -95,4 +104,69 @@ func (o *Ouroboros) keepaliveClientResponse(
 		},
 	)
 	o.eventBus.Publish(chainselection.PeerActivityEventType, evt)
+}
+
+// servedActivityReportInterval bounds how often one connection's server-side
+// activity is forwarded to the peer governor. It is far below
+// InboundPruneAfter, and keeps the per-header chainsync path off the governor
+// lock.
+const servedActivityReportInterval = 10 * time.Second
+
+type servedActivityKey struct {
+	local, remote netip.AddrPort
+}
+
+func servedActivityKeyFor(
+	connId connection.ConnectionId,
+) (servedActivityKey, bool) {
+	l, lok := connId.LocalAddr.(*net.TCPAddr)
+	r, rok := connId.RemoteAddr.(*net.TCPAddr)
+	if !lok || !rok || l == nil || r == nil {
+		return servedActivityKey{}, false
+	}
+	return servedActivityKey{local: l.AddrPort(), remote: r.AddrPort()}, true
+}
+
+// recordServedActivity tells the peer governor that the downstream peer on
+// connId is consuming from this node, at most once per
+// servedActivityReportInterval per connection. The hot path is a sync.Map
+// load and an atomic compare-and-swap; it never takes the governor lock
+// between reports.
+func (o *Ouroboros) recordServedActivity(connId connection.ConnectionId) {
+	report := o.reportServedActivity
+	key, ok := servedActivityKeyFor(connId)
+	if !ok {
+		report(connId)
+		return
+	}
+	now := time.Now().UnixNano()
+	v, loaded := o.servedActivityLast.Load(key)
+	if !loaded {
+		v, _ = o.servedActivityLast.LoadOrStore(key, new(atomic.Int64))
+	}
+	last := v.(*atomic.Int64)
+	prev := last.Load()
+	if prev != 0 && now-prev < int64(servedActivityReportInterval) {
+		return
+	}
+	if !last.CompareAndSwap(prev, now) {
+		return // a concurrent caller is reporting
+	}
+	report(connId)
+}
+
+func (o *Ouroboros) reportServedActivity(connId connection.ConnectionId) {
+	if o.servedActivityHook != nil {
+		o.servedActivityHook(connId)
+		return
+	}
+	if o.peerGov != nil {
+		o.peerGov.RecordServedActivityByConnId(connId)
+	}
+}
+
+func (o *Ouroboros) forgetServedActivity(connId connection.ConnectionId) {
+	if key, ok := servedActivityKeyFor(connId); ok {
+		o.servedActivityLast.Delete(key)
+	}
 }

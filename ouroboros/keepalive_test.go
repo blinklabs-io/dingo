@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -263,4 +264,44 @@ func TestHandleConnClosedEventCountsRealKeepaliveTimeout(t *testing.T) {
 		float64(1),
 		testutil.ToFloat64(o.protocolMetrics.keepaliveTimeouts),
 	)
+}
+
+func servedTestConnId(port int) ouroboros.ConnectionId {
+	return ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("192.0.2.7"), Port: port},
+	}
+}
+
+func TestRecordServedActivityIsThrottledPerConnection(t *testing.T) {
+	t.Parallel()
+	var reports atomic.Int64
+	o := &Ouroboros{servedActivityHook: func(ouroboros.ConnectionId) {
+		reports.Add(1)
+	}}
+	a, b := servedTestConnId(40001), servedTestConnId(40002)
+	for range 1000 {
+		o.recordServedActivity(a)
+	}
+	assert.Equal(t, int64(1), reports.Load(),
+		"a burst on one connection reports once")
+	o.recordServedActivity(b)
+	assert.Equal(t, int64(2), reports.Load(),
+		"a different connection reports independently")
+	o.forgetServedActivity(a)
+	o.recordServedActivity(a)
+	assert.Equal(t, int64(3), reports.Load(),
+		"closing a connection clears its throttle state")
+}
+
+func TestKeepaliveServerPingRecordsServedActivity(t *testing.T) {
+	t.Parallel()
+	var reports atomic.Int64
+	o := &Ouroboros{servedActivityHook: func(ouroboros.ConnectionId) {
+		reports.Add(1)
+	}}
+	cfg := okeepalive.NewConfig(o.keepaliveConnOpts()...)
+	require.NotNil(t, cfg.OnKeepAliveReceived)
+	cfg.OnKeepAliveReceived(servedTestConnId(40003), 1)
+	assert.Equal(t, int64(1), reports.Load())
 }

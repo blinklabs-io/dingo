@@ -210,9 +210,12 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 	}
 
 	// Ensure minimum hot peers (simple: promote more warm if needed)
+	// Inbound hot peers have their own budget (InboundHotQuota) and do not
+	// occupy outbound refill slots.
 	hotCount := 0
 	for _, peer := range p.peers {
-		if peer != nil && peer.State == PeerStateHot {
+		if peer != nil && peer.State == PeerStateHot &&
+			peer.Source != PeerSourceInboundConn {
 			hotCount++
 		}
 	}
@@ -850,6 +853,11 @@ func (p *PeerGovernor) inboundPruneDecisionLocked(
 	}
 	if peer.LastBlockFetchTime.After(lastSignal) {
 		lastSignal = peer.LastBlockFetchTime
+	}
+	// A peer consuming our chain is useful even when it never answers our
+	// client-side protocols; idle means idle in both directions.
+	if peer.LastServedActivity.After(lastSignal) {
+		lastSignal = peer.LastServedActivity
 	}
 	if peer.LastInboundDisconnect.After(lastSignal) {
 		lastSignal = peer.LastInboundDisconnect
