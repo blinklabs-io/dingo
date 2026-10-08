@@ -57,6 +57,7 @@ func (n *Node) midnightIndexerConfig() midnightindexer.Config {
 		},
 		BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
 			return database.ForEachBlockInRangeDB(
+				n.ctx,
 				n.db,
 				startSlot,
 				endSlot,

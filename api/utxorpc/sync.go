@@ -215,7 +215,7 @@ func (s *syncServiceServer) FollowTip(
 	}
 
 	// Get our starting point matching our chain
-	point, err := s.utxorpc.config.LedgerState.GetIntersectPoint(points)
+	point, err := s.utxorpc.config.LedgerState.GetIntersectPoint(ctx, points)
 	if err != nil {
 		s.utxorpc.config.Logger.Error(
 			"failed to get points",

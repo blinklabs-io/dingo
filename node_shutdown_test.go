@@ -259,7 +259,7 @@ func (h shutdownTestResourceLogHandler) WithGroup(string) slog.Handler {
 func TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
@@ -340,7 +340,7 @@ func TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 func TestNodeStopClosesLedgerStateWhenPhase1DrainConfirmed(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{

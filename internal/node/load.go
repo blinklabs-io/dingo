@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -645,6 +647,16 @@ func LoadWithDB(
 	immutableDir string,
 	db *database.Database,
 ) error {
+	remoteImmutable, err := classifyRemoteImmutableSource(immutableDir)
+	if err != nil {
+		return err
+	}
+	if remoteImmutable && cfg.DatabasePath == "" {
+		return errors.New(
+			"loading from a remote ImmutableDB requires databasePath " +
+				"for its download cache",
+		)
+	}
 	// Derive default config path from cfg.Network when cfg.CardanoConfig is empty
 	cardanoConfigPath := cfg.CardanoConfig
 	network := cfg.Network
@@ -715,6 +727,7 @@ func LoadWithDB(
 	// Immutable load replays trusted block batches directly into the ledger, so
 	// it does not need the event-driven reread path here.
 	cm, err := chain.NewManager(
+		ctx,
 		db,
 		nil,
 	)
@@ -852,9 +865,48 @@ func LoadWithDB(
 		replayErrCh <- err
 	}()
 
-	blocksCopied, immutableTipSlot, err := copyBlocksDirect(
-		replayCtx, logger, immutableDir, c, replayBatches,
+	var (
+		blocksCopied     int
+		immutableTipSlot uint64
 	)
+	if remoteImmutable {
+		var (
+			regularSlots  uint64
+			canContainEBB bool
+		)
+		if byronGenesis := nodeCfg.ByronGenesis(); byronGenesis != nil {
+			if byronGenesis.ProtocolConsts.K <= 0 ||
+				uint64(byronGenesis.ProtocolConsts.K) > math.MaxUint64/10 {
+				return errors.New(
+					"remote ImmutableDB requires a valid Byron security parameter",
+				)
+			}
+			regularSlots = uint64(byronGenesis.ProtocolConsts.K) * 10 //nolint:gosec
+			canContainEBB = true
+		} else if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil &&
+			shelleyGenesis.EpochLength > 0 {
+			regularSlots = uint64(shelleyGenesis.EpochLength) //nolint:gosec
+		} else {
+			return errors.New(
+				"remote ImmutableDB requires an initial era epoch length",
+			)
+		}
+		limits, limitErr := remoteImmutableLimitsForSlots(
+			regularSlots, canContainEBB,
+		)
+		if limitErr != nil {
+			return limitErr
+		}
+		blocksCopied, immutableTipSlot, err = copyBlocksRemote(
+			replayCtx, logger, immutableDir,
+			filepath.Join(cfg.DatabasePath, remoteImmutableCacheDir),
+			limits, c, replayBatches,
+		)
+	} else {
+		blocksCopied, immutableTipSlot, err = copyBlocksDirect(
+			replayCtx, logger, immutableDir, c, replayBatches,
+		)
+	}
 	close(replayBatches)
 	if err != nil {
 		cancelReplay()
@@ -990,7 +1042,7 @@ func LoadBlobsWithDB(
 		defer WithBulkLoadPragmas(db, logger)()
 	}
 	// Load chain without event bus (no ledger processing)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(ctx, db, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load chain manager: %w", err)
 	}
@@ -1112,7 +1164,7 @@ func copyBlocksDirect(
 				"decoding block CBOR: non-empty batch decoded to no blocks",
 			)
 		}
-		if err := c.AddBlocks(blockBatch); err != nil {
+		if err := c.AddBlocks(ctx, blockBatch); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
 				"failed to import block: %w",
 				err,
@@ -1379,7 +1431,7 @@ func CopyImmutableBlobsBounded(
 			}
 		}
 		if len(blockBatch) > 0 {
-			if err := c.AddRawBlocksWithCallback(blockBatch, callback); err != nil {
+			if err := c.AddRawBlocksWithCallback(ctx, blockBatch, callback); err != nil {
 				return blocksCopied, lastSlot, fmt.Errorf(
 					"failed to import block: %w", err,
 				)
@@ -1527,7 +1579,7 @@ func copyBlocksRawWithCallback(
 		if len(blockBatch) == 0 {
 			break
 		}
-		if err := c.AddRawBlocksWithCallback(blockBatch, callback); err != nil {
+		if err := c.AddRawBlocksWithCallback(ctx, blockBatch, callback); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
 				"failed to import block: %w",
 				err,

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -47,7 +48,7 @@ func startWithUnseededChild(
 		eras.ConwayEraDesc.Id, 1000, 100, nil,
 	))
 	parentIdx := uint32(0)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:          bytes.Repeat([]byte{0x62}, 32),
 		ActionType:      uint8(lcommon.GovActionTypeParameterChange),
 		ProposedEpoch:   purposeRootStartEpoch - 1,
@@ -58,7 +59,7 @@ func startWithUnseededChild(
 		AnchorHash:      make([]byte, 32),
 		AddedSlot:       purposeRootStartEpoch*100 - 1,
 	}, nil))
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
