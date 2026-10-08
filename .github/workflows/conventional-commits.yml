@@ -6,4 +6,4 @@ on:
 
 jobs:
   orchestrate:
-    uses: blinklabs-io/actions/.github/workflows/reuseable-conventional-commits.yml@main
+    uses: blinklabs-io/actions/.github/workflows/reuseable-conventional-commits.yml@d217af3c6b8643dcdfd87bb79fbcf171725e0040 # main 2026-10-07

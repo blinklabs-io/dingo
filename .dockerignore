@@ -14,9 +14,12 @@ internal/test/archive-demo/tmp/
 # (Dockerfile, Dockerfile.txpump, Dockerfile.analysis, devnet/erastest/archive-demo).
 **/testdata/
 
-# Local dev artifacts. Gitignored, so absent in CI, but large in developer
-# trees that build devnet/archive-demo images with the repo root as context.
+# Local dev artifacts can make root-context image builds needlessly large.
 .devnet/
+.validation/
 .tools/
+koios-parity
+leios-db-bench
+node-parity
 *.prof
 *.test

@@ -24,15 +24,23 @@ PROTOC_DIR=$(ROOT_DIR)/.tools/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARC
 PROTOC_ZIP=$(ROOT_DIR)/.tools/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARCH).zip
 PROTOC=$(PROTOC_DIR)/bin/protoc
 SQLC_VERSION=v1.31.1
-SQLC=go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
-# The scanner floats along with the advisory database it reads; a pin parks a
-# new advisory behind a stale version instead of forcing it to be fixed.
-GOVULNCHECK=go run golang.org/x/vuln/cmd/govulncheck@latest
+SQLC_SUM=h1:+V+BjBJfFNPX/RFfL8eiZD9jk9lVJUEGGllWvnYNqbc=
+SQLC_MODULE=github.com/sqlc-dev/sqlc
+SQLC=go run $(SQLC_MODULE)/cmd/sqlc@$(SQLC_VERSION)
+GOVULNCHECK_VERSION=v1.8.0
+GOVULNCHECK_SUM=h1:clG4qBU6zH5VKjti8n5j8BBuYzoSha392xXMkXS351U=
+GOVULNCHECK_MODULE=golang.org/x/vuln
+GOVULNCHECK=go run $(GOVULNCHECK_MODULE)/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 PROTOC_SHA256_osx_aarch_64=a7b51b2113862690fa52c62f8891a6037bafb9db88d4f9924c486de9d9bb89d5
 PROTOC_SHA256_osx_x86_64=f9caa5b4d0b537acffb0ffd7d53225511a5574ef903fca550ea9e7600987f13b
 PROTOC_SHA256_linux_aarch_64=4a802ed23d70f7bad7eb19e5a3e724b3aa967250d572cadfd537c1ba939aee6a
 PROTOC_SHA256_linux_x86_64=e9c129c176bb7df02546c4cd6185126ca53c89e7d2f09511e209319704b5dd7e
 PROTOC_SHA256=$(PROTOC_SHA256_$(PROTOC_OS)_$(PROTOC_ARCH))
+
+define VERIFY_GO_MODULE
+	actual="$$(go mod download -json $(1)@$(2) | sed -n 's/^[[:space:]]*"Sum": "\(.*\)",/\1/p')"; \
+		test "$$actual" = "$(3)"
+endef
 
 # Set version strings: use env vars if set, else git
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
@@ -125,12 +133,14 @@ proto: $(PROTOC) ## Generate Go code from protobuf definitions
 		$(ROOT_DIR)/midnight/proto/midnight_state.proto
 
 sql: ## Generate typed database/sql queries with pinned sqlc
+	$(call VERIFY_GO_MODULE,$(SQLC_MODULE),$(SQLC_VERSION),$(SQLC_SUM))
 	$(SQLC) generate
 
 sql-check: sql ## Run sql, then fail when checked-in sqlc output is stale
 	git diff --exit-code -- database/plugin/metadata/sqlstore/internal/query
 
 govulncheck: ## Fail on known vulnerabilities reachable from source, including the Go toolchain/stdlib
+	$(call VERIFY_GO_MODULE,$(GOVULNCHECK_MODULE),$(GOVULNCHECK_VERSION),$(GOVULNCHECK_SUM))
 	$(GOVULNCHECK) $(GO_TAG_FLAGS) ./...
 
 $(PROTOC):

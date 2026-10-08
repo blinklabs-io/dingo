@@ -117,7 +117,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
-          # This job runs `go run ...@latest`, so third-party code executes in
+          # This job runs a checksum-pinned third-party scanner in
           # the workspace. Do not leave GITHUB_TOKEN in the local git config.
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
@@ -137,10 +137,9 @@ jobs:
         # actually calls, so the unreachable findings it also prints (currently
         # GO-2026-5932, an unmaintained golang.org/x/crypto package with no
         # fixed version) do not fail the job.
-        # Both the toolchain and the scanner float on purpose: a pin on either
-        # one parks a new advisory behind a stale version instead of forcing it
-        # to be fixed. Run through the Makefile so this CI check and
-        # `make govulncheck` cannot drift apart.
+        # The scanner binary is pinned while its vulnerability database remains
+        # live. Run through the Makefile so this CI check and `make
+        # govulncheck` cannot drift apart.
         run: make govulncheck
 
   # Stage 2. The whole suite on SQLite with no race instrumentation and no
@@ -174,9 +173,9 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 https://github.com/actions/setup-node/releases/tag/v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 https://github.com/actions/setup-node/releases/tag/v7.1.0
         with:
-          node-version: '22.x'
+          node-version: '22.18.0'
       - name: npm-test
         run: npm test
       - name: go-build-minimal
@@ -215,7 +214,7 @@ jobs:
     timeout-minutes: 120
     services:
       minio:
-        image: blinklabs/minio:main
+        image: ghcr.io/blinklabs-io/minio:main@sha256:4682bc04bc46ae19aca740dfcdb7341399669fd7fe23f74271e9d09d36a88ada
         options: >-
           --health-cmd "curl localhost:9000"
           --health-interval 10s
@@ -238,8 +237,6 @@ jobs:
       MYSQL_PASSWORD: mysql
       MYSQL_DATABASE: dingo_test
       MYSQL_ROOT_PASSWORD: mysql
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_ENDPOINT: "http://127.0.0.1:9000/"
       AWS_REGION: us-east-1
       DINGO_TEST_S3_BUCKET: dingo-test
@@ -253,7 +250,7 @@ jobs:
             --env POSTGRES_DB=dingo_test \
             --health-cmd pg_isready --health-interval 10s \
             --health-timeout 5s --health-retries 5 \
-            postgres:16 postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
+            postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
           docker run --detach --name "$DINGO_CI_MYSQL_CONTAINER" \
             --publish 3306:3306 \
             --env MYSQL_ROOT_PASSWORD=mysql --env MYSQL_USER=mysql \
@@ -261,7 +258,7 @@ jobs:
             --health-cmd 'mysqladmin ping -h 127.0.0.1 -u root -p"$MYSQL_ROOT_PASSWORD"' \
             --health-interval 10s --health-timeout 5s --health-start-period 10s \
             --health-retries 4 \
-            mysql:8 --innodb-file-per-table=OFF --innodb-flush-log-at-trx-commit=0 \
+            mysql:8@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242 --innodb-file-per-table=OFF --innodb-flush-log-at-trx-commit=0 \
             --sync-binlog=0 --skip-log-bin
           for container in "$DINGO_CI_PG_CONTAINER" "$DINGO_CI_MYSQL_CONTAINER"; do
             for attempt in {1..60}; do
@@ -284,27 +281,38 @@ jobs:
               esac
             done
           done
-      - name: setup-s3-bucket
+      - name: install-aws-cli
         run: |
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            sudo ./aws/install --update
-            aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket "$DINGO_TEST_S3_BUCKET"
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            --output awscliv2.zip \
+            https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.37.3.zip
+          echo "78903b609938e6c06a02bd2c157af3af4fe184868e5507d6ed588cb68a7a2764  awscliv2.zip" \
+            | sha256sum --check --strict -
+          unzip -q awscliv2.zip
+          sudo ./aws/install --update
+          aws --version | grep -F 'aws-cli/2.37.3 '
+          {
+            echo 'AWS_ACCESS_KEY_ID=minioadmin'
+            echo 'AWS_SECRET_ACCESS_KEY=minioadmin'
+          } >> "$GITHUB_ENV"
+      - name: setup-s3-bucket
+        run: aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket "$DINGO_TEST_S3_BUCKET"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-1.26.x-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: install-mariadb-client
@@ -408,7 +416,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -458,16 +466,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/Library/Caches/go-build
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-1.26.x-
       - name: go-build
         run: go build ./...
       - name: go-test
