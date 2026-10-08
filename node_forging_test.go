@@ -16,12 +16,14 @@ package dingo
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -93,14 +95,17 @@ func TestBlockBroadcasterAddsWithoutEventSubscriber(t *testing.T) {
 		1,
 	)
 	require.NoError(t, err)
-	cm, err := chain.NewManager(nil, nil)
+	cm, err := chain.NewManager(context.Background(), nil, nil)
 	require.NoError(t, err)
 	broadcaster := &blockBroadcaster{
 		chain:  cm.PrimaryChain(),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	require.NoError(t, broadcaster.AddBlock(blocks[0], blocks[0].Cbor()))
+	require.NoError(
+		t,
+		broadcaster.AddBlock(context.Background(), blocks[0], blocks[0].Cbor()),
+	)
 	require.Equal(
 		t,
 		blocks[0].Hash().Bytes(),
@@ -123,7 +128,11 @@ func TestBlockBroadcasterRejectsUnavailableChain(t *testing.T) {
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	err = broadcaster.AddBlock(blocks[0], blocks[0].Cbor())
+	err = broadcaster.AddBlock(
+		context.Background(),
+		blocks[0],
+		blocks[0].Cbor(),
+	)
 	require.EqualError(t, err, "chain unavailable")
 }
 
@@ -156,7 +165,7 @@ func newSigmaDenominatorLedger(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -418,7 +427,7 @@ func replaceSigmaSnapshotAtomically(
 	capturedSlot uint64,
 ) {
 	t.Helper()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer func() { require.NoError(t, txn.Rollback()) }()
 
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(
@@ -548,6 +557,24 @@ func TestStakeDistributionAdapterKeepsSigmaConsistentAcrossRecapture(
 // which cannot express a counter gap against an observed on-chain value.
 func opCertFixtureWithCounter(t *testing.T, issueNumber uint64) string {
 	t.Helper()
+	coldVKey, coldSKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate cold key: %v", err)
+	}
+	return opCertFixtureForColdKey(t, coldVKey, coldSKey, issueNumber, nil)
+}
+
+// opCertFixtureForColdKey is opCertFixtureWithCounter for a caller-supplied
+// cold key, so several certificates can belong to one pool. kesPeriod
+// overrides the start period the devnet certificate carries when non-nil.
+func opCertFixtureForColdKey(
+	t *testing.T,
+	coldVKey ed25519.PublicKey,
+	coldSKey ed25519.PrivateKey,
+	issueNumber uint64,
+	kesPeriodOverride *uint64,
+) string {
+	t.Helper()
 	devnetCert, err := bursa.LoadKeyFromFile(
 		filepath.Join(devnetKeysDir, "opcert.cert"),
 	)
@@ -556,11 +583,10 @@ func opCertFixtureWithCounter(t *testing.T, issueNumber uint64) string {
 	}
 	kesVKey := devnetCert.VKey
 	kesPeriod := devnetCert.OpCertKesPeriod
-
-	coldVKey, coldSKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate cold key: %v", err)
+	if kesPeriodOverride != nil {
+		kesPeriod = *kesPeriodOverride
 	}
+
 	// cardano-ledger OCertSignable.getSignableRepresentation:
 	//   KES vkey (32) || issue number (8 BE) || KES period (8 BE)
 	var certBody [48]byte
@@ -720,7 +746,9 @@ func TestValidateBlockProducerLedger_SyncedTipRejectsGap(t *testing.T) {
 // TestValidateBlockProducerLedger_SyncedTipRejectsStaleCounter pins the other
 // half of the rule: a counter below the observed on-chain value is a stale or
 // stolen hot key and refuses startup regardless of era.
-func TestValidateBlockProducerLedger_SyncedTipRejectsStaleCounter(t *testing.T) {
+func TestValidateBlockProducerLedger_SyncedTipRejectsStaleCounter(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	vrf, kes, _ := devnetCredPaths(t)
@@ -1191,6 +1219,7 @@ func (c testLeiosParentChain) Tip() ochainsync.Tip {
 }
 
 func (c testLeiosParentChain) BlockByPoint(
+	context.Context,
 	ocommon.Point,
 	*database.Txn,
 ) (models.Block, error) {
@@ -1220,7 +1249,9 @@ func TestLeiosPipelineAdapterParentAnnouncementUsesHeaderAnnouncement(
 		},
 	}
 
-	gotRbHash, gotHash, ok, err := adapter.ParentLeiosAnnouncement()
+	gotRbHash, gotHash, ok, err := adapter.ParentLeiosAnnouncement(
+		context.Background(),
+	)
 	if err != nil {
 		t.Fatalf("ParentLeiosAnnouncement: %v", err)
 	}
@@ -1460,22 +1491,26 @@ func TestApplyForgeTuningCarriesTheForgingKnobs(t *testing.T) {
 }
 
 type forgedValidationRecorder struct {
+	ctx            context.Context
 	aggregateCalls int
 	fullCalls      int
 	err            error
 }
 
-func (v *forgedValidationRecorder) ValidateForgedBlock(
-	gledger.Block,
-	[]byte,
+func (v *forgedValidationRecorder) ValidateForgedBlock(ctx context.Context,
+	_ gledger.Block,
+	_ []byte,
 ) error {
+	v.ctx = ctx
 	v.fullCalls++
 	return v.err
 }
 
 func (v *forgedValidationRecorder) ValidateBlockReferenceScripts(
-	gledger.Block,
+	ctx context.Context,
+	_ gledger.Block,
 ) error {
+	v.ctx = ctx
 	v.aggregateCalls++
 	return v.err
 }
@@ -1497,13 +1532,21 @@ func TestForgedBlockValidatorDefaultAndFullModes(t *testing.T) {
 			)
 			require.ErrorIs(
 				t,
-				validator.ValidateForgedBlock(&conway.ConwayBlock{}, nil),
+				validator.ValidateForgedBlock(
+					context.Background(),
+					&conway.ConwayBlock{},
+					nil,
+				),
 				failure,
 			)
 			state.err = nil
 			require.NoError(
 				t,
-				validator.ValidateForgedBlock(&conway.ConwayBlock{}, nil),
+				validator.ValidateForgedBlock(
+					context.Background(),
+					&conway.ConwayBlock{},
+					nil,
+				),
 			)
 			if full {
 				require.Equal(t, 2, state.fullCalls)
@@ -1516,6 +1559,24 @@ func TestForgedBlockValidatorDefaultAndFullModes(t *testing.T) {
 				require.Equal(t, 2, state.aggregateCalls)
 				require.Zero(t, state.fullCalls, "default mode must not execute full validation")
 			}
+		})
+	}
+}
+
+func TestForgedBlockValidatorPreservesCallerContext(t *testing.T) {
+	t.Parallel()
+	for _, full := range []bool{false, true} {
+		t.Run(fmt.Sprint(full), func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			state := &forgedValidationRecorder{}
+			validator := newForgedBlockValidator(state, full)
+			require.NoError(
+				t,
+				validator.ValidateForgedBlock(ctx, &conway.ConwayBlock{}, nil),
+			)
+			require.Equal(t, ctx, state.ctx)
 		})
 	}
 }

@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -83,8 +84,16 @@ func seedHardForkInitiationProposal(
 		GovActionCbor: cborBytes,
 		AddedSlot:     addedSlot,
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
-	loaded, err := db.GetGovernanceProposal(proposal.TxHash, 0, nil)
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
+	loaded, err := db.GetGovernanceProposal(
+		context.Background(),
+		proposal.TxHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 	return loaded
@@ -103,19 +112,22 @@ func seedDRepWithStake(
 	drepCred := testBytes(28, stabilityDRepCred)
 	stakeCred := testBytes(28, stabilityStakeCred)
 
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		Credential: drepCred,
 		Active:     true,
 		AddedSlot:  1,
 	}))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: stakeCred,
-		Drep:       drepCred,
-		DrepType:   models.DrepTypeAddrKeyHash,
-		AddedSlot:  1,
-		Active:     true,
-	}))
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: stakeCred,
+			Drep:       drepCred,
+			DrepType:   models.DrepTypeAddrKeyHash,
+			AddedSlot:  1,
+			Active:     true,
+		}),
+	)
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       testBytes(32, 1),
 		OutputIdx:  0,
 		StakingKey: stakeCred,
@@ -134,13 +146,16 @@ func seedDRepYesVote(
 	drepCred []byte,
 ) {
 	t.Helper()
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
-		ProposalID:      proposalID,
-		VoterType:       models.VoterTypeDRep,
-		VoterCredential: drepCred,
-		Vote:            models.VoteYes,
-		AddedSlot:       2,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+			ProposalID:      proposalID,
+			VoterType:       models.VoterTypeDRep,
+			VoterCredential: drepCred,
+			Vote:            models.VoteYes,
+			AddedSlot:       2,
+		}, nil),
+	)
 }
 
 func seedHardForkCommitteeAndSPOVotes(
@@ -152,9 +167,12 @@ func seedHardForkCommitteeAndSPOVotes(
 	t.Helper()
 	coldCred := testBytes(28, 0xD1)
 	hotCred := testBytes(28, 0xD2)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
-		{ColdCredHash: coldCred, ExpiresEpoch: stabilityTestEpoch + 10},
-	}, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
+			{ColdCredHash: coldCred, ExpiresEpoch: stabilityTestEpoch + 10},
+		}, nil),
+	)
 	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: coldCred,
 		HotCredential:  hotCred,
@@ -167,20 +185,26 @@ func seedHardForkCommitteeAndSPOVotes(
 		predictedBoundaryStakeEpochFor(stabilityTestEpoch),
 	)
 	for _, proposal := range proposals {
-		require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
-			ProposalID:      proposal.ID,
-			VoterType:       models.VoterTypeCC,
-			VoterCredential: hotCred,
-			Vote:            models.VoteYes,
-			AddedSlot:       2,
-		}, nil))
-		require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
-			ProposalID:      proposal.ID,
-			VoterType:       models.VoterTypeSPO,
-			VoterCredential: poolCred,
-			Vote:            models.VoteYes,
-			AddedSlot:       2,
-		}, nil))
+		require.NoError(
+			t,
+			db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+				ProposalID:      proposal.ID,
+				VoterType:       models.VoterTypeCC,
+				VoterCredential: hotCred,
+				Vote:            models.VoteYes,
+				AddedSlot:       2,
+			}, nil),
+		)
+		require.NoError(
+			t,
+			db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+				ProposalID:      proposal.ID,
+				VoterType:       models.VoterTypeSPO,
+				VoterCredential: poolCred,
+				Vote:            models.VoteYes,
+				AddedSlot:       2,
+			}, nil),
+		)
 	}
 }
 
@@ -200,7 +224,7 @@ func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(
 		nil,
 		nil,
 	)
-	got, err := EvaluateRatifiableHardForkInitiation(in)
+	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
 	require.NoError(t, err)
 	assert.Nil(t, got, "pre-Conway pparams must short-circuit to nil")
 }
@@ -214,7 +238,7 @@ func TestEvaluateRatifiableHardForkInitiation_NoActiveProposals_ReturnsNil(
 	in := NewStabilityCheckInputs(
 		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
-	got, err := EvaluateRatifiableHardForkInitiation(in)
+	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
 	require.NoError(t, err)
 	assert.Nil(t, got, "empty active proposal set must yield nil")
 }
@@ -231,23 +255,30 @@ func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(
 	otherAction := &lcommon.TreasuryWithdrawalGovAction{}
 	cborBytes, err := cbor.Encode(otherAction)
 	require.NoError(t, err)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        testBytes(32, 0xDD),
-		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
-		ProposedEpoch: stabilityTestEpoch - 1,
-		ExpiresEpoch:  stabilityTestEpoch + 10,
-		Deposit:       1_000,
-		ReturnAddress: testBytes(29, 0),
-		AnchorURL:     "https://example.invalid/anchor",
-		AnchorHash:    testBytes(32, 0xEE),
-		GovActionCbor: cborBytes,
-		AddedSlot:     1,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(
+			context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        testBytes(32, 0xDD),
+				ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+				ProposedEpoch: stabilityTestEpoch - 1,
+				ExpiresEpoch:  stabilityTestEpoch + 10,
+				Deposit:       1_000,
+				ReturnAddress: testBytes(29, 0),
+				AnchorURL:     "https://example.invalid/anchor",
+				AnchorHash:    testBytes(32, 0xEE),
+				GovActionCbor: cborBytes,
+				AddedSlot:     1,
+			},
+			nil,
+		),
+	)
 
 	in := NewStabilityCheckInputs(
 		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
-	got, err := EvaluateRatifiableHardForkInitiation(in)
+	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
 	require.NoError(t, err)
 	assert.Nil(t, got, "non-HardForkInitiation actions must be ignored")
 }
@@ -272,7 +303,7 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapRequiresCommitteeAndSPO(
 	in := NewStabilityCheckInputs(
 		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
-	got, err := EvaluateRatifiableHardForkInitiation(in)
+	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
 	require.NoError(t, err)
 	require.NotNil(t, got, "bootstrap CC + SPO votes must be ratifiable")
 	assert.Equal(t, targetMajor, got.NewMajor,
@@ -299,6 +330,7 @@ func TestEvaluateRatifiableHardForkInitiation_DelegatorInactivityParity(
 		testBytes(28, stabilityStakeCred),
 	)
 	require.NoError(t, db.RenewAccountExpirations(
+		context.Background(),
 		[]models.StakeCredentialRef{rewardCred},
 		stabilityTestEpoch-1,
 		nil,
@@ -313,14 +345,20 @@ func TestEvaluateRatifiableHardForkInitiation_DelegatorInactivityParity(
 		nil,
 		nil,
 	)
-	got, err := EvaluateRatifiableHardForkInitiation(gateOff)
+	got, err := EvaluateRatifiableHardForkInitiation(
+		context.Background(),
+		gateOff,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, got, "gate off must preserve the expired account's vote")
 
 	gateOn := NewStabilityCheckInputs(
 		db, nil, stabilityTestEpoch, true, stabilityConwayPParams(10), nil, nil,
 	)
-	got, err = EvaluateRatifiableHardForkInitiation(gateOn)
+	got, err = EvaluateRatifiableHardForkInitiation(
+		context.Background(),
+		gateOn,
+	)
 	require.NoError(t, err)
 	assert.Nil(
 		t,
@@ -352,7 +390,7 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapDRepOnly_NotRatifiable(
 	in := NewStabilityCheckInputs(
 		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
-	got, err := EvaluateRatifiableHardForkInitiation(in)
+	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
 	require.NoError(t, err)
 	assert.Nil(t, got, "DRep-only vote must not ratify a bootstrap hard fork")
 }
@@ -399,7 +437,7 @@ func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAdde
 		nil,
 		nil,
 	)
-	got, err := EvaluateRatifiableHardForkInitiation(in)
+	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
 	require.NoError(t, err)
 	require.NotNil(t, got, "at least one HFI should be ratifiable")
 	assert.Equal(t, early.ID, got.Proposal.ID,

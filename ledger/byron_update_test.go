@@ -125,21 +125,41 @@ func TestAdvanceByronPBFTStateAppliesUpdatePayload(t *testing.T) {
 	}
 
 	// The real block registers its payload.
-	next, err := ls.advanceByronPBFTState(newState(true), block, true)
+	next, err := ls.advanceByronPBFTState(
+		context.Background(),
+		newState(true),
+		block,
+		true,
+	)
 	require.NoError(t, err)
 	require.True(t, next.update.Complete())
 	require.True(t, next.update.AdoptedParams().Equal(genesisParams))
 
 	invalid := withByronUpdatePayload(t, block, voteForUnregisteredProposal(t))
-	_, err = ls.advanceByronPBFTState(newState(true), invalid, true)
+	_, err = ls.advanceByronPBFTState(
+		context.Background(),
+		newState(true),
+		invalid,
+		true,
+	)
 	var notRegistered byronupdate.VoteProposalNotRegisteredError
 	require.ErrorAs(t, err, &notRegistered)
 
 	// A trusted block, or a state rebuilt from a trusted start, follows the
 	// chain instead.
-	_, err = ls.advanceByronPBFTState(newState(true), invalid, false)
+	_, err = ls.advanceByronPBFTState(
+		context.Background(),
+		newState(true),
+		invalid,
+		false,
+	)
 	require.NoError(t, err)
-	_, err = ls.advanceByronPBFTState(newState(false), invalid, true)
+	_, err = ls.advanceByronPBFTState(
+		context.Background(),
+		newState(false),
+		invalid,
+		true,
+	)
 	require.NoError(t, err)
 }
 
@@ -321,6 +341,7 @@ func TestValidateByronEbbPreviousHashSemantics(t *testing.T) {
 		{"later epoch without the tag", 207, false, false},
 	} {
 		err := ls.validateByronPBFTHeaderCrypto(
+			context.Background(),
 			byronTestEbbHeader(t, test.epoch, test.genesisTag),
 		)
 		if test.rejected {
@@ -445,8 +466,8 @@ func seedByronInputFromWitness(
 	})
 	require.NoError(t, err)
 	input := tx.Inputs()[0]
-	txn := db.Transaction(true)
-	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
 		TxId:      input.Id().Bytes(),
 		OutputIdx: input.Index(),
 		AddedSlot: 0,
@@ -486,16 +507,19 @@ func TestLedgerProcessBlocksFromSourceUsesAdoptedByronParameters(t *testing.T) {
 	}
 	seedByronInputFromWitness(t, db, tx, outputs)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{{
-		Slot:        block.SlotNumber(),
-		Hash:        block.Hash().Bytes(),
-		BlockNumber: block.BlockNumber(),
-		Type:        uint(gledger.BlockTypeByronMain),
-		Cbor:        block.Cbor(),
-	}}))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{{
+			Slot:        block.SlotNumber(),
+			Hash:        block.Hash().Bytes(),
+			BlockNumber: block.BlockNumber(),
+			Type:        uint(gledger.BlockTypeByronMain),
+			Cbor:        block.Cbor(),
+		}}),
+	)
 	require.NoError(t, db.SetEpoch(
 		0, 0, nil, nil, nil, nil, eras.ByronEraDesc.Id, 20_000, 21_600, nil,
 	))

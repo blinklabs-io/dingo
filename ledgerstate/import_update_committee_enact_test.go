@@ -17,6 +17,7 @@ package ledgerstate
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"math/big"
 	"testing"
 
@@ -126,7 +127,7 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 		func(ImportProgress) {},
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(t.Context(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 2)
 	imported := map[string]uint64{}
@@ -148,11 +149,11 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 	require.NotNil(t, row.RatifiedEpoch, "UpdateCommittee must be ratified")
 	require.Equal(t, uint64(500), *row.RatifiedEpoch)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(t.Context(), true)
 	defer txn.Release()
 	pp := &conway.ConwayProtocolParameters{}
 	pp.ProtocolVersion.Major = 10
-	out, err := governance.ProcessEpoch(&governance.EpochInput{
+	out, err := governance.ProcessEpoch(t.Context(), &governance.EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    500,
@@ -169,7 +170,7 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 	require.Equal(t, 1, out.EnactedCount)
 	require.NoError(t, txn.Commit())
 
-	members, err = db.GetCommitteeMembers(nil)
+	members, err = db.GetCommitteeMembers(t.Context(), nil)
 	require.NoError(t, err)
 	got := map[string]bool{}
 	for _, m := range members {
@@ -201,6 +202,7 @@ func TestImportedExpiredUpdateCommitteeAuthorizesSameEpochHotKey(
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 	staleHash := bytes.Repeat([]byte{0x33}, 28)
 	require.NoError(t, db.SetCommitteeMembers(
+		t.Context(),
 		[]*models.CommitteeMember{{
 			ColdCredentialTag: 0,
 			ColdCredHash:      staleHash,
@@ -258,7 +260,7 @@ func TestImportedExpiredUpdateCommitteeAuthorizesSameEpochHotKey(
 		context.Background(), cfg, func(ImportProgress) {},
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(t.Context(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	require.Equal(t, uint8(1), members[0].ColdCredentialTag)
@@ -313,7 +315,7 @@ func TestImportedExpiredUpdateCommitteeAuthorizesSameEpochHotKey(
 	require.Equal(t, uint64(653), *row.EnactedEpoch)
 	require.NotNil(t, row.EnactedSlot)
 	require.Equal(t, uint64(65_300), *row.EnactedSlot)
-	pending, err := db.GetRatifiedGovernanceProposals(nil)
+	pending, err := db.GetRatifiedGovernanceProposals(t.Context(), nil)
 	require.NoError(t, err)
 	require.Empty(t, pending, "the imported action must not enact again")
 }
@@ -350,4 +352,43 @@ func TestImportedExpiredUpdateCommitteeRejectsMixedCommitteeActions(
 		},
 	}, 653)
 	require.ErrorContains(t, err, "ambiguous")
+}
+
+// A snapshot whose ratified action is not a committee action leaves the
+// imported committee authoritative, so the import raises no committee warning.
+func TestImportRatifiedNonCommitteeActionDoesNotWarn(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	txHash := bytes.Repeat([]byte{0x78}, 32)
+	proposal := govActionStateForTest(
+		txHash, 0, govActionTypeParameterChange, nil, 499,
+	)
+	inForce := committeeWithMember(t, bytes.Repeat([]byte{0x42}, 28), 700)
+	govStateData, err := cbor.Encode([]any{
+		[]any{encodeRootsAsAny(t, [4]*ParsedGovActionId{}), []any{proposal}},
+		inForce,
+		constitutionForTest(),
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		drepPulsingStateWithEnactCommittee(t, inForce, proposal),
+	})
+	require.NoError(t, err)
+
+	var logs bytes.Buffer
+	importCfg := govImportConfigForTest(db, govStateData)
+	importCfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	require.NoError(t, importGovState(
+		context.Background(),
+		importCfg,
+		func(ImportProgress) {},
+	))
+	row, err := db.Metadata().GetGovernanceProposal(txHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, row.RatifiedEpoch, "the action must be imported ratified")
+	require.NotContains(t, logs.String(), "level=WARN")
 }

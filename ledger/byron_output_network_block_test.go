@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -298,26 +299,28 @@ func TestLedgerProcessBlockRejectsOutputNetworkMismatch(t *testing.T) {
 		txs:  []lcommon.Transaction{tx},
 	}
 
-	err = db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, procErr := ls.ledgerProcessBlock(
-			txn,
-			ocommon.Point{Slot: 1, Hash: block.Hash().Bytes()},
-			block,
-			true, // shouldValidate: exercises the real per-tx ValidateTxFunc loop
-			false,
-			false,
-			nil,
-			envelopeParent{origin: true},
-			nil,
-			eras.ByronEraDesc,
-			&shelley.ShelleyProtocolParameters{},
-			nil,
-			0,
-			0,
-			false,
-		)
-		return procErr
-	})
+	err = db.Transaction(context.Background(), true).
+		Do(func(txn *database.Txn) error {
+			_, procErr := ls.ledgerProcessBlock(
+				context.Background(),
+				txn,
+				ocommon.Point{Slot: 1, Hash: block.Hash().Bytes()},
+				block,
+				true, // shouldValidate: exercises the real per-tx ValidateTxFunc loop
+				false,
+				false,
+				nil,
+				envelopeParent{origin: true},
+				nil,
+				eras.ByronEraDesc,
+				&shelley.ShelleyProtocolParameters{},
+				nil,
+				0,
+				0,
+				false,
+			)
+			return procErr
+		})
 
 	require.Error(t, err)
 	var mismatch eras.NetworkMagicMismatchByronError

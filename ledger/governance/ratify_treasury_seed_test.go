@@ -43,9 +43,9 @@ func seedTestRunEpoch(
 	donations uint64,
 ) *EpochOutput {
 	t.Helper()
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(t.Context(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(t.Context(), &EpochInput{
 		DB:                       db,
 		Txn:                      txn,
 		PrevEpoch:                newEpoch - 1,
@@ -301,7 +301,7 @@ func TestProcessEpochRatifyTreasuryCompetingWithdrawals(t *testing.T) {
 	}
 	check()
 	require.NoError(t, db.DeleteGovernanceProposalsAfterSlot(
-		stabilityTestEpoch*100-1, nil,
+		t.Context(), stabilityTestEpoch*100-1, nil,
 	))
 	assert.Nil(t, chainTestReload(t, db, first).RatifiedEpoch)
 	check()

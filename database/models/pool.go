@@ -122,8 +122,11 @@ type PoolRegistrationOwner struct {
 }
 
 type PoolRegistrationRelay struct {
-	Ipv4     *net.IP
-	Ipv6     *net.IP
+	Ipv4 *net.IP
+	Ipv6 *net.IP
+	// Type preserves the relay constructor. It is nil for legacy rows written
+	// before the relay-type migration, where callers infer it from the fields.
+	Type     *int
 	Hostname string
 	// PoolKeyHash is the owning pool's key hash. It is filled by
 	// GetActivePoolRelays and is not stored on the relay row.

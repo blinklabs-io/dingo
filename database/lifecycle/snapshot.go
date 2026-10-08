@@ -83,7 +83,7 @@ func Snapshot(
 	if _, err := manifestByteLimit(opts); err != nil {
 		return Manifest{}, err
 	}
-	maxPause, err := commitPauseLimit(opts)
+	maxPause, pauseNow, pauseContext, err := commitPauseConfig(opts)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -209,18 +209,22 @@ func Snapshot(
 	// can block for as long as any currently open write transaction takes
 	// to commit, and this ctx is exactly what a caller cancels to give up
 	// on a Snapshot call that's stuck waiting behind one.
-	resume, err := db.PauseCommitsContext(ctx)
+	pauseCtx := ctx
+	if pauseContext != nil {
+		pauseCtx = pauseContext(ctx)
+	}
+	resume, err := db.PauseCommitsContext(pauseCtx)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("pause commits: %w", err)
 	}
-	pauseStart := time.Now()
+	pauseStart := pauseNow()
 	var pauseDuration time.Duration
 	pauseExceeded := false
 	barrierHeld := true
 	releaseBarrier := func() {
 		if barrierHeld {
 			resume()
-			pauseDuration = time.Since(pauseStart)
+			pauseDuration = pauseNow().Sub(pauseStart)
 			barrierHeld = false
 		}
 	}
@@ -251,12 +255,14 @@ func Snapshot(
 	stateReady := make(chan snapshotState, 1)
 	go func() {
 		var state snapshotState
-		state.tip, state.err = db.GetTip(nil)
+		tipTxn := db.MetadataTxn(backupCtx, false)
+		state.tip, state.err = db.GetTip(tipTxn)
+		tipTxn.Release()
 		if state.err == nil && backupCtx.Err() == nil {
-			state.commitTimestamp, state.err = db.Metadata().GetCommitTimestamp()
+			state.commitTimestamp, state.err = db.Metadata().GetCommitTimestamp(backupCtx)
 		}
 		if state.err == nil && backupCtx.Err() == nil {
-			state.gates, state.err = db.Metadata().GetNodeSettingsGates()
+			state.gates, state.err = db.Metadata().GetNodeSettingsGates(backupCtx)
 		}
 		stateReady <- state
 	}()
@@ -297,7 +303,8 @@ func Snapshot(
 
 	// A provider may return success despite ignoring cancellation. Measure
 	// completion against the deadline rather than relying on its error.
-	pauseExceeded = maxPause > 0 && ctx.Err() == nil && time.Since(pauseStart) >= maxPause
+	pauseExceeded = maxPause > 0 && ctx.Err() == nil &&
+		pauseNow().Sub(pauseStart) >= maxPause
 	cancelBackup()
 	releaseBarrier()
 	if logger != nil {

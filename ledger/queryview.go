@@ -99,7 +99,7 @@ func (ls *LedgerState) AcquireQueryView(
 			}
 			continue
 		}
-		if err := ls.VerifyPointQueryable(txn, at); err != nil {
+		if err := ls.VerifyPointQueryable(ctx, txn, at); err != nil {
 			txn.Release()
 			cancelView()
 			return nil, err
@@ -167,6 +167,7 @@ func (ls *LedgerState) openQueryViewSnapshot(
 // Query answers a decoded LocalStateQuery message from the view's snapshot.
 // It returns ErrQueryViewClosed once the view is closed.
 func (v *QueryView) Query(
+	ctx context.Context,
 	query any,
 	protocolVersion uint16,
 ) (result any, err error) {
@@ -193,7 +194,7 @@ func (v *QueryView) Query(
 			result, err = nil, database.NewTxnPanicError("query view", r)
 		}
 	}()
-	return v.ls.queryInTxn(query, v.at, protocolVersion, v.txn)
+	return v.ls.queryInTxn(ctx, query, v.at, protocolVersion, v.txn)
 }
 
 func (v *QueryView) finishQuery() {
