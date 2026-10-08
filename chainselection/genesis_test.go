@@ -49,15 +49,12 @@ func TestGenesisWindowSlotsForParams(t *testing.T) {
 			big.NewRat(1, 20),
 			math.MaxUint64,
 		},
-		{"zero security param", 0, big.NewRat(1, 20), defaultGenesisWindowSlots},
-		{"nil coefficient", 2160, nil, defaultGenesisWindowSlots},
-		{"zero coefficient", 2160, new(big.Rat), defaultGenesisWindowSlots},
-		{
-			"negative coefficient",
-			2160,
-			big.NewRat(-1, 20),
-			defaultGenesisWindowSlots,
-		},
+		// Without k and a positive f there is no Genesis window: callers
+		// must see 0 rather than a 3k-sized stand-in.
+		{"zero security param", 0, big.NewRat(1, 20), 0},
+		{"nil coefficient", 2160, nil, 0},
+		{"zero coefficient", 2160, new(big.Rat), 0},
+		{"negative coefficient", 2160, big.NewRat(-1, 20), 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,7 +168,7 @@ func TestGenesisSelectionStateFollowsSecurityParamWindow(t *testing.T) {
 
 	active, window := cs.GenesisSelectionState()
 	require.True(t, active)
-	require.Equal(t, defaultGenesisWindowSlots, window)
+	require.Equal(t, DefaultGenesisWindowSlots, window)
 
 	cs.SetSecurityParam(10)
 	require.Equal(
@@ -205,7 +202,7 @@ func TestGenesisSelectionSnapshotPublishedAsOneValue(t *testing.T) {
 	before := cs.genesisSelection.Load()
 	require.NotNil(t, before)
 	require.True(t, before.active)
-	require.Equal(t, defaultGenesisWindowSlots, before.window)
+	require.Equal(t, DefaultGenesisWindowSlots, before.window)
 
 	cs.mutex.Lock()
 	cs.securityParam = 10
@@ -225,7 +222,7 @@ func TestGenesisSelectionSnapshotPublishedAsOneValue(t *testing.T) {
 		before.active,
 		"a published snapshot must stay immutable after a later refresh",
 	)
-	assert.Equal(t, defaultGenesisWindowSlots, before.window)
+	assert.Equal(t, DefaultGenesisWindowSlots, before.window)
 
 	active, window := cs.GenesisSelectionState()
 	assert.False(t, active)
@@ -240,7 +237,7 @@ func TestGenesisSelectionStateZeroValueSelector(t *testing.T) {
 
 	active, window := cs.GenesisSelectionState()
 	assert.False(t, active)
-	assert.Equal(t, defaultGenesisWindowSlots, window)
+	assert.Equal(t, DefaultGenesisWindowSlots, window)
 }
 
 func TestChainSelectorGenesisObservedDensityTracksRollingWindow(t *testing.T) {

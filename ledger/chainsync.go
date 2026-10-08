@@ -6683,7 +6683,7 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 		// stale genesis-config values here would resurrect a pool or
 		// delegation genuinely retired/changed long before the bootstrap
 		// point, the same resurrection bug Mithril bootstrap had for UTxOs.
-		genesisPools, poolDelegators, err := shelleyGenesis.InitialPools()
+		genesisPools, poolDelegators, err := initialPools(shelleyGenesis)
 		if err != nil {
 			return fmt.Errorf("parse genesis staking: %w", err)
 		}

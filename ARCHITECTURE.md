@@ -4347,8 +4347,24 @@ from the persisted action CBOR, return address, deposit, anchor, and votes.
 Supported query leaves also include epoch number, current protocol parameters,
 Shelley genesis configuration, UTxO-by-address/transaction-input lookups,
 the whole live UTxO set (`GetUTxOWhole`), stake-delegation deposits, the
-ledger peer snapshot, stake pools, DRep state, account state, and the
-unfiltered stake distribution (`GetStakeDistribution`). `GetCBOR` is a query
+ledger peer snapshot, stake pools, stake pool parameters
+(`GetStakePoolParams`, the parameters in effect this epoch, so a
+re-registration made during the epoch is not reported until the next one),
+which returns genesis relay addresses in ledger wire order and includes an
+optional BLS key when protocol version 12 or later applies),
+the ledger tip (`GetLedgerTip`), the proposed protocol parameter update map
+(empty when the acquired point is in Conway or later, and refused in earlier
+eras), DRep state,
+account state, and the unfiltered stake distribution
+(`GetStakeDistribution`). Pool state, the version-1 pool distribution,
+non-myopic member rewards, reward info, reward provenance and the debug
+epoch-state queries are not answered, and the failed query ends the client's
+session. At node-to-client version 21 the Shelley genesis configuration
+encodes initial funds as an empty map, staking as a record of an empty pools
+map and an empty stake map, and the genesis injection
+data as the ledger's three-field `ShelleyExtraConfig` record, encoded at the
+Shelley protocol version (pool owners as a plain array) with an absent
+section as `NoInjection`; earlier versions keep the legacy layout. `GetCBOR` is a query
 combinator: it re-runs the wrapped inner query through the same dispatch path
 and returns the result as a tag-24 CBOR-in-CBOR `Serialised` value, matching
 cardano-node. `GetStakeSnapshots`
@@ -4478,7 +4494,10 @@ given -- unlike `GetNetworkState`'s
 always-latest-row read, `GetNetworkStateAsOfSlot` does have a
 historical-by-slot lookup, so a pin pairs a correct historical numerator
 with the reserves genuinely in effect at that same point, not today's.
-`GetUTxOWhole`
+`GetLedgerTip`
+answers the pinned point itself, `GetProposedPParamsUpdates` resolves the
+era of the pinned point, and `GetStakePoolParams` reads live pool
+registrations. `GetUTxOWhole`
 honors the pin too, through the same `AddedSlot`/`DeletedSlot` predicate
 `GetUTxOByTxIn` uses. `ledger/queries.go`'s
 `queryShelleyLeaf` carries a full audit of every query type, classified as
@@ -5036,7 +5055,9 @@ so a from-origin node can prefer the denser (honest) chain before it has the
 history to run the full Praos comparison. The window is derived from Shelley
 genesis params (`GenesisWindowSlotsForParams`) as `ceil(3k/f)` over the exact
 genesis rational, matching the reference node's `computeStabilityWindow`, or
-overridden by `genesisWindowSlots`. Each tracked peer keeps a bounded recent
+overridden by `genesisWindowSlots`. Without k and a positive f,
+`GenesisWindowSlotsForParams` returns 0 and the node falls back to
+`DefaultGenesisWindowSlots` (6480) for density ranking and the exit horizon. Each tracked peer keeps a bounded recent
 frontier of `(slot, hash)` points (`PeerChainTip.observedPoints`, in lockstep with the
 `observedSlots` used for density), trimmed to the window and on rollback.
 That rolling frontier ranks peers before a fork is available locally; it is not
@@ -5110,6 +5131,52 @@ point two fragments share by `(slot, hash)` — the primitive the Limit on
 Eagerness and the Genesis Density Disconnector need to find the intersection
 across candidate fragments and compare per-candidate density there; neither is
 implemented by this type.
+
+**Genesis Density Disconnector** (`chainselection/density_disconnector.go`)
+disconnects peers whose candidate chain is provably sparser than another
+candidate's. It runs only in Genesis mode with `GenesisWindowSlots`
+configured. The selector's own 3k-slot fallback holds about 3kf blocks, few
+enough that an honest short fork can lose a complete-window comparison, so the
+disconnector stays off without a configured window. The node wires the
+disconnector only when the window is operator-configured or derived as 3k/f;
+when it falls back to `DefaultGenesisWindowSlots` for want of k or f, it leaves
+`OnGenesisDensityDisconnect` unset. It runs
+from `EvaluateAndSwitch`, at most
+once per `GenesisDensityEvaluationInterval` (one second, as upstream's
+`gcfGDDRateLimit`), because the pairwise comparison is quadratic in the number
+of tracked peers. For each ordered pair of live, eligible, non-stale
+candidates it takes the `CandidateFragment.Intersect` of the two fragments and
+counts blocks in `(intersection, intersection + window]`, where the window is
+the Genesis window (`3k/f`). Peer B is disconnected when B's head has reached
+the window end, so its window is complete, and the blocks peer A has delivered
+in that window exceed B's. Upstream `densityDisconnect`
+(ouroboros-consensus `Ouroboros/Consensus/Genesis/Governor.hs`) guards on
+`offersMoreThanK || lb0 == ub0`, so it disconnects a peer with an incomplete
+window only for a rival offering more than k headers after the intersection; fragments retain at most k+1 headers and the intersection must
+lie in both, so no rival here can offer that, and a peer whose window is
+incomplete is never disconnected. A peer that has delivered up to its
+advertised tip is incomplete, not complete: that tip can still advance, so an
+honest peer at its own tip on a short fork is kept. The dominating peer
+contributes at most k blocks, so a sparse peer with k or more blocks in its
+window is not detected.
+Pairs with no shared point in the retained fragments, and pairs
+where either peer is a prefix of the other (a peer that is only behind), are
+not decidable and never trigger a disconnect. A peer is reported once, and
+reported peers stop counting as rivals, including peers reported earlier in
+the same pass, so the last remaining candidate is never disconnected even when
+pairwise density comparisons, each taken at its own intersection, form a
+cycle. The selector hands each peer to
+`ChainSelectorConfig.OnGenesisDensityDisconnect`; the node adds the peer's
+remote address to peer governance's deny list for ten minutes (`DenyPeer`),
+closes the connection if it is still open, logs whether the deny was applied,
+and counts the report in `dingo_chainselection_gdd_disconnects_total`, whether
+or not a connection was left to close. Restore and truncate serialize their
+full networking-core replacement with this deny-and-close action, so a report
+that arrives during replacement is applied to the rebuilt governor and
+connection manager. Shutdown does not take that generation lock because it
+stops the retained selector while holding the lifecycle gates.
+The disconnector does not implement the Limit on Eagerness; it only removes
+sparse peers from the candidate set that cap is measured across.
 
 The trust problem Genesis solves for **biased fast-sync sources** — e.g. a
 local shallow peer or the Genesis Sync Accelerator (GSA), which serve blocks
