@@ -333,7 +333,6 @@ func newPathFixture(
 		txCbor, err := cbor.Encode([]any{
 			cbor.RawMessage(bodyCbor),
 			witnesses,
-			true,
 			nil,
 		})
 		require.NoError(t, err)
@@ -543,10 +542,9 @@ func (f *pathFixture) withBodyField(
 	_, err = cbor.Decode(blockBody[0], &txs)
 	require.NoError(f.t, err)
 	// A block carries each transaction as [body, witnesses, auxiliary data,
-	// is_valid], unlike the standalone [body, witnesses, is_valid, auxiliary
-	// data].
+	// is_valid], extending the standalone three-field transaction.
 	txs[index], err = cbor.Encode(
-		[]cbor.RawMessage{parts[0], parts[1], parts[3], parts[2]},
+		[]any{parts[0], parts[1], parts[2], true},
 	)
 	require.NoError(f.t, err)
 	blockBody[0], err = cbor.Encode(txs)

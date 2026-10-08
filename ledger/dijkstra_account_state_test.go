@@ -40,7 +40,7 @@ func dijkstraTxFromBodyFields(
 	fields[2] = uint64(0)
 	body, err := cbor.Encode(fields)
 	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, true, nil})
+	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, nil})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
 	require.NoError(t, err)
