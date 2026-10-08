@@ -62,8 +62,10 @@ func leiosBoundaryTestBlock(
 		var fields []cbor.RawMessage
 		_, err := cbor.Decode(raw, &fields)
 		require.NoError(t, err)
-		require.Len(t, fields, 4)
-		blockTransactions = append(blockTransactions, []cbor.RawMessage{fields[0], fields[1], fields[3], fields[2]})
+		require.Len(t, fields, 3)
+		blockTransactions = append(blockTransactions, []any{
+			fields[0], fields[1], fields[2], true,
+		})
 	}
 	bodyCbor, err := cbor.Encode([]any{blockTransactions, certField, nil})
 	require.NoError(t, err)

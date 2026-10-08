@@ -6012,7 +6012,6 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 			2: uint64(0),
 		},
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
@@ -9973,7 +9972,6 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 			8: invalidBefore,
 		},
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)

@@ -388,7 +388,7 @@ func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
 	})
 	require.NoError(t, err)
 	txCbor, err := cbor.Encode([]any{
-		cbor.RawMessage(rootBody), map[uint]any{}, true, nil,
+		cbor.RawMessage(rootBody), map[uint]any{}, nil,
 	})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
@@ -503,7 +503,7 @@ func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
 	})
 	require.NoError(t, err)
 	txCbor, err := cbor.Encode([]any{
-		cbor.RawMessage(body), map[uint]any{}, true, nil,
+		cbor.RawMessage(body), map[uint]any{}, nil,
 	})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)

@@ -150,6 +150,8 @@ func TestTransactionRejectsTrailingDataInEveryEra(t *testing.T) {
 	require.NoError(t, err)
 	alonzoStyle, err := cbor.Encode([]any{body, map[uint]any{}, true, nil})
 	require.NoError(t, err)
+	dijkstraStyle, err := cbor.Encode([]any{body, map[uint]any{}, nil})
+	require.NoError(t, err)
 
 	for _, tc := range []struct {
 		name   string
@@ -162,7 +164,7 @@ func TestTransactionRejectsTrailingDataInEveryEra(t *testing.T) {
 		{"alonzo", ledger.TxTypeAlonzo, alonzoStyle},
 		{"babbage", ledger.TxTypeBabbage, alonzoStyle},
 		{"conway", ledger.TxTypeConway, alonzoStyle},
-		{"dijkstra", ledger.TxTypeDijkstra, alonzoStyle},
+		{"dijkstra", ledger.TxTypeDijkstra, dijkstraStyle},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

@@ -95,7 +95,6 @@ func leiosApplyTestTxFromBody(
 	txCbor, err := cbor.Encode([]any{
 		cbor.RawMessage(bodyCbor),
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
@@ -500,7 +499,6 @@ func leiosApplyTestTx(
 	txCbor, err := cbor.Encode([]any{
 		cbor.RawMessage(bodyCbor),
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
@@ -774,7 +772,6 @@ func leiosApplyTestTxWithOutput(
 	txCbor, err := cbor.Encode([]any{
 		cbor.RawMessage(bodyCbor),
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
