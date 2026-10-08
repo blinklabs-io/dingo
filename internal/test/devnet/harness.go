@@ -47,6 +47,7 @@ type TestHarness struct {
 	t            *testing.T
 	endpoints    []NodeEndpoint
 	networkMagic uint32
+	observers    *ChainObservers
 }
 
 // NewTestHarness creates a new test harness for the given endpoints.
@@ -96,6 +97,7 @@ func (h *TestHarness) startFailureCapture() {
 	observers := StartObservers(
 		obsCtx, h.endpoints, h.networkMagic, h.t.Logf,
 	)
+	h.observers = observers
 	h.t.Cleanup(func() {
 		// Stop before reading, so no observer goroutine is still
 		// logging once this cleanup returns.
@@ -178,14 +180,28 @@ func (h *TestHarness) ReferenceNode() (NodeEndpoint, bool) {
 	return NodeEndpoint{}, false
 }
 
-// GetChainTip connects to the specified node using the Ouroboros N2N
-// protocol and retrieves the current chain tip via ChainSync.
-// Each call establishes a fresh connection to ensure the returned tip
-// reflects the node's current state (cardano-node does not update
-// the tip on persistent connections).
+// GetChainTip retrieves the specified node's current ChainSync tip. Canonical
+// runs reuse their persistent observer so polling cannot look like inbound
+// peer flapping. Other harness users establish a fresh N2N connection.
 func (h *TestHarness) GetChainTip(
 	endpoint NodeEndpoint,
 ) (ChainTip, error) {
+	if h.observers != nil {
+		chain := h.observers.Chain(endpoint.Name)
+		if chain == nil {
+			return ChainTip{}, fmt.Errorf(
+				"no observer configured for %s", endpoint.Name,
+			)
+		}
+		snapshot := chain.Snapshot()
+		if !snapshot.Connected {
+			return ChainTip{}, fmt.Errorf(
+				"observer for %s is not connected", endpoint.Name,
+			)
+		}
+		return snapshot.ServerTip, nil
+	}
+
 	conn, err := net.DialTimeout("tcp", endpoint.Address, 10*time.Second)
 	if err != nil {
 		return ChainTip{}, fmt.Errorf(
