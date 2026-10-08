@@ -68,11 +68,15 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 	defer cache.Close() //nolint:errcheck
 
 	if live {
+		dingoDB, err := resolveDingoDB(cmd)
+		if err != nil {
+			return err
+		}
 		checkResult, checkErr := koiosparity.Check(
 			cmd.Context(),
 			koiosparity.CheckConfig{
 				Network:         network,
-				DingoDB:         resolveDingoDB(cmd),
+				DingoDB:         dingoDB,
 				CachePath:       cachePath,
 				All:             true,
 				FromEpoch:       epoch,

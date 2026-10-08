@@ -40,6 +40,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
+	"github.com/blinklabs-io/dingo/internal/secretfile"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 )
@@ -76,7 +77,8 @@ Metadata backend resolution (plugin, DSN, data directory) is loaded from
 Dingo's own configuration — the same dingo.yaml/env vars/CARDANO_DATABASE_PATH
 the Dingo process itself resolves — so this tool inspects whichever database
 that node is actually configured for. See --dingo-config, --metadata-plugin,
---metadata-dsn, and --dingo-data to override any part of it explicitly.
+--metadata-dsn (or --metadata-dsn-file), and --dingo-data to override any part
+of it explicitly.
 
 Environment:
   CARDANO_DATABASE_PATH                    Dingo data directory (same var Dingo itself reads)
@@ -84,7 +86,8 @@ Environment:
   DINGO_PLUGINS_STORAGE_METADATA_CONFIG_*  metadata provider config (e.g. _DSN, _HOST, _DATA_DIR)
   DINGO_DATA_DIR                           koios-parity-only override for the data directory
   CARDANO_NETWORK                          cardano network name (preview or preprod)
-  KOIOS_API_KEY                            Koios Bearer token for rate-limited access`,
+  KOIOS_API_KEY                            Koios Bearer token for rate-limited access
+  KOIOS_API_KEY_FILE                       file holding the Koios Bearer token`,
 		RunE: runCommand,
 	}
 
@@ -414,12 +417,40 @@ func resolveGraceHours(cmd *cobra.Command) (int, error) {
 	return graceHours, nil
 }
 
-// koiosAPIKey returns the Koios Bearer token from flag or environment.
-func koiosAPIKey(cmd *cobra.Command) string {
-	if key, _ := cmd.Flags().GetString("api-key"); key != "" {
-		return key
+// addAPIKeyFlags registers --api-key and its file-backed alternative.
+func addAPIKeyFlags(cmd *cobra.Command) {
+	cmd.Flags().String("api-key", "",
+		"Koios Bearer token (or KOIOS_API_KEY)")
+	cmd.Flags().String("api-key-file", "",
+		"file holding the Koios Bearer token (or KOIOS_API_KEY_FILE)")
+}
+
+// koiosAPIKey returns the Koios Bearer token. Flags win over the
+// environment; within one source, the literal and file forms are exclusive.
+func koiosAPIKey(cmd *cobra.Command) (string, error) {
+	key, _ := cmd.Flags().GetString("api-key")
+	file, _ := cmd.Flags().GetString("api-key-file")
+	keyName, fileName := "--api-key", "--api-key-file"
+	if key == "" && file == "" {
+		key = os.Getenv("KOIOS_API_KEY")
+		file = os.Getenv("KOIOS_API_KEY_FILE")
+		keyName, fileName = "KOIOS_API_KEY", "KOIOS_API_KEY_FILE"
 	}
-	return os.Getenv("KOIOS_API_KEY")
+	switch {
+	case key != "" && file != "":
+		return "", fmt.Errorf(
+			"%s and %s are both set; set only one",
+			keyName,
+			fileName,
+		)
+	case file != "":
+		value, err := secretfile.Read(file)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", fileName, err)
+		}
+		return value, nil
+	}
+	return key, nil
 }
 
 // koiosBaseURL returns the Koios v1 API root override from flag or
@@ -541,19 +572,22 @@ func resolveAccountChunkFlags(
 	return size, maxBytes, nil
 }
 
-// addDingoDB registers --metadata-plugin and --metadata-dsn on cmd and
+// addDingoDB registers the --metadata-* flags on cmd and
 // should be called for every subcommand that reads from Dingo's database.
 func addDingoDBFlags(cmd *cobra.Command) {
 	cmd.Flags().String("metadata-plugin", "",
 		"Dingo metadata backend: sqlite (default), postgres, or mysql")
 	cmd.Flags().String("metadata-dsn", "",
 		"connection string for postgres/mysql (unused for sqlite)")
+	cmd.Flags().String("metadata-dsn-file", "",
+		"file holding the --metadata-dsn connection string")
 }
 
 // resolveDingoDB returns the DingoDBConfig for cmd.
 //
 // Priority (highest first):
-//  1. --metadata-plugin / --metadata-dsn flags — explicit overrides for
+//  1. --metadata-plugin / --metadata-dsn / --metadata-dsn-file flags —
+//     explicit overrides for
 //     pointing this tool at a different copy of the database than the one
 //     the live Dingo node itself is configured for.
 //  2. Dingo's own resolved plugins.storage.metadata selection: loaded via
@@ -562,9 +596,23 @@ func addDingoDBFlags(cmd *cobra.Command) {
 //     process does (see internal/config.LoadConfig and plugin.ApplyEnvironment).
 //  3. "sqlite" default, with no DSN (dingo_db.go's OpenDingoDB already
 //     defaults an empty plugin to sqlite; this mirrors that explicitly).
-func resolveDingoDB(cmd *cobra.Command) koiosparity.DingoDBConfig {
+func resolveDingoDB(cmd *cobra.Command) (koiosparity.DingoDBConfig, error) {
 	plugin, _ := cmd.Flags().GetString("metadata-plugin")
 	dsn, _ := cmd.Flags().GetString("metadata-dsn")
+	if dsnFile, _ := cmd.Flags().GetString("metadata-dsn-file"); dsnFile != "" {
+		if dsn != "" {
+			return koiosparity.DingoDBConfig{}, errors.New(
+				"--metadata-dsn and --metadata-dsn-file are both set; set only one",
+			)
+		}
+		var err error
+		if dsn, err = secretfile.Read(dsnFile); err != nil {
+			return koiosparity.DingoDBConfig{}, fmt.Errorf(
+				"--metadata-dsn-file: %w",
+				err,
+			)
+		}
+	}
 
 	var metadataConfig map[string]any
 	if cfg := loadedDingoConfig(); cfg != nil {
@@ -585,5 +633,5 @@ func resolveDingoDB(cmd *cobra.Command) koiosparity.DingoDBConfig {
 		Plugin:  plugin,
 		DataDir: resolveDingoDataDir(),
 		DSN:     dsn,
-	}
+	}, nil
 }

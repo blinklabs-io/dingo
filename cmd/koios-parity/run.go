@@ -28,8 +28,7 @@ import (
 
 func addRunFlags(cmd *cobra.Command) {
 	addDingoDBFlags(cmd)
-	cmd.Flags().String("api-key", "",
-		"Koios Bearer token (or KOIOS_API_KEY)")
+	addAPIKeyFlags(cmd)
 	addKoiosURLFlag(cmd)
 	cmd.Flags().String("report-dir", "",
 		"directory for JSON report (default: {dingo-data}/.koios/)")
@@ -66,6 +65,10 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	reportDir, _ := cmd.Flags().GetString("report-dir")
+	apiKey, err := koiosAPIKey(cmd)
+	if err != nil {
+		return err
+	}
 
 	logger := slog.Default()
 	ctx := cmd.Context()
@@ -80,7 +83,11 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 			// call to Dingo's own API. Scoped to the fetch phase itself (not
 			// opened at all for a report-only run with both phases skipped)
 			// — the check phase below opens its own DingoDB when it runs.
-			dingo, dingoErr := koiosparity.OpenDingoDB(resolveDingoDB(cmd))
+			dingoDB, err := resolveDingoDB(cmd)
+			if err != nil {
+				return err
+			}
+			dingo, dingoErr := koiosparity.OpenDingoDB(dingoDB)
 			if dingoErr != nil {
 				return fmt.Errorf(
 					"open dingo db (required for --accounts): %w",
@@ -94,7 +101,7 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 		slog.Info("koios-parity: fetch phase starting", "network", network)
 		fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
 			Network:               network,
-			APIKey:                koiosAPIKey(cmd),
+			APIKey:                apiKey,
 			BaseURL:               koiosBaseURL(cmd),
 			AllowInsecureHTTP:     koiosAllowInsecureHTTP(cmd),
 			AllowPrivateAddresses: koiosAllowPrivateAddresses(cmd),
@@ -125,9 +132,13 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 
 	if !skipCheck {
 		slog.Info("koios-parity: check phase starting", "network", network)
+		dingoDB, err := resolveDingoDB(cmd)
+		if err != nil {
+			return err
+		}
 		if _, err := koiosparity.Check(ctx, koiosparity.CheckConfig{
 			Network:         network,
-			DingoDB:         resolveDingoDB(cmd),
+			DingoDB:         dingoDB,
 			CachePath:       cachePath,
 			Workers:         workers,
 			All:             all,

@@ -9727,8 +9727,8 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 - **Dingo:** read directly from Dingo's metadata database during the `check`
   phase — no HTTP endpoint on the Dingo node is contacted. Three backends are
   supported (`sqlite`, `postgres`, `mysql`), resolved with the same precedence
-  Dingo's own process uses: `--metadata-plugin`/`--metadata-dsn` (explicit
-  overrides) fall back to Dingo's own resolved `plugins.storage.metadata`
+  Dingo's own process uses: `--metadata-plugin`/`--metadata-dsn` or
+  `--metadata-dsn-file` (explicit overrides) fall back to Dingo's own resolved `plugins.storage.metadata`
   selection — loaded via `internal/config.LoadConfig` (`--dingo-config`, or the
   same `~/.dingo/dingo.yaml`/`/etc/dingo/dingo.yaml` search Dingo itself does),
   which applies `DINGO_PLUGINS_STORAGE_METADATA_PROVIDER`/`_CONFIG_*` the same
@@ -12793,6 +12793,18 @@ The `api.tls` shared defaults (`--api-tls-mode`/`DINGO_API_TLS_MODE`/
 security" under External Interfaces) participate in this same CLI >
 environment > YAML > defaults source precedence like any other `Config` field.
 
+A secret can be supplied from a file instead of a literal value, so it need
+not appear in a process listing or environment. `koiosParity.apiKeyFile`
+(`DINGO_KOIOS_PARITY_API_KEY_FILE`, `--koios-parity-api-key-file`) pairs with
+`koiosParity.apiKey`, and any generic plugin config field accepts a
+`DINGO_PLUGINS_<CAPABILITY>_CONFIG_<FIELD>_FILE` variable, read verbatim as a
+string. A literal and its file form are one setting: a higher-precedence source
+setting either replaces both, and one source setting both fails startup.
+`LoadConfig` reads plugin `_FILE` variables; `Config.ResolveSecretFiles` reads
+the remaining file paths once every source is merged and clears them. The
+`koios-parity` tool offers `--api-key-file`/`KOIOS_API_KEY_FILE` and
+`--metadata-dsn-file` beside its literal forms.
+
 `LoadConfig` (`internal/config`) only parses and merges the YAML and
 environment sources; it makes no semantic judgments about the merged values,
 because CLI flags are a higher-precedence source merged afterwards by
@@ -12806,7 +12818,7 @@ passed. `RecordSourceProvenance` runs as its own step rather than inside
 `*Config` that `LoadConfig` returns against a hand-built struct literal, and
 a literal cannot populate an unexported field.
 
-Immediately after `ApplyFlags`, `cmd/dingo` calls `settingsresolve.Apply(cfg)`
+After `ApplyFlags` and `Config.ResolveSecretFiles`, `cmd/dingo` calls `settingsresolve.Apply(cfg)`
 (`internal/settingsresolve`), which lets a data directory's already-persisted
 node settings supply the effective value for any override-eligible gate
 (`database/nodesettings.Gates`) the operator left at its built-in default —

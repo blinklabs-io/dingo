@@ -82,6 +82,17 @@ DINGO_PLUGINS_STORAGE_BLOB_PROVIDER=example
 DINGO_PLUGINS_STORAGE_BLOB_CONFIG_BUCKET=blocks
 ```
 
+A `_FILE` suffix sets the field to the contents of a file instead, read
+verbatim as a string with trailing newlines removed, so a secret such as a
+password need not appear in the environment:
+
+```text
+DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE=/run/secrets/db-password
+```
+
+Setting both forms of one field is an error. Because the suffix is reserved, a
+provider field whose name ends in `File` cannot be set from the environment.
+
 Precedence is selector CLI flag, generic plugin environment, YAML, then
 provider defaults. There are no provider-specific flags, mutable global option
 destinations, or name-based storage constructors.

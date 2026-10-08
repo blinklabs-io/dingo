@@ -34,7 +34,7 @@ phase then opens Dingo's metadata database read-only (see --metadata-plugin/
 		RunE: fetchRun,
 	}
 
-	cmd.Flags().String("api-key", "", "Koios Bearer token (or KOIOS_API_KEY)")
+	addAPIKeyFlags(cmd)
 	addKoiosURLFlag(cmd)
 	cmd.Flags().Int("concurrency", 5, "parallel fetch workers")
 	cmd.Flags().
@@ -72,6 +72,10 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	apiKey, err := koiosAPIKey(cmd)
+	if err != nil {
+		return err
+	}
 
 	if forceRefresh && !cmd.Flags().Changed("from-epoch") {
 		return errors.New(
@@ -88,7 +92,11 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 		// this is still the same direct, read-only SQL query this tool has
 		// always used for the Dingo side, never an HTTP call to Dingo's own
 		// API.
-		dingo, dingoErr := koiosparity.OpenDingoDB(resolveDingoDB(cmd))
+		dingoDB, err := resolveDingoDB(cmd)
+		if err != nil {
+			return err
+		}
+		dingo, dingoErr := koiosparity.OpenDingoDB(dingoDB)
 		if dingoErr != nil {
 			return fmt.Errorf(
 				"open dingo db (required for --accounts): %w",
@@ -101,7 +109,7 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 
 	result, err := koiosparity.Fetch(cmd.Context(), koiosparity.FetchConfig{
 		Network:               network,
-		APIKey:                koiosAPIKey(cmd),
+		APIKey:                apiKey,
 		BaseURL:               koiosBaseURL(cmd),
 		AllowInsecureHTTP:     koiosAllowInsecureHTTP(cmd),
 		AllowPrivateAddresses: koiosAllowPrivateAddresses(cmd),

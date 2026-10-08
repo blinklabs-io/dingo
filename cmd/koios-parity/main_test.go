@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -274,6 +275,153 @@ func TestSubcommandsRejectNegativeGraceHours(t *testing.T) {
 			err := tt.run(tt.cmd, nil)
 			require.Error(t, err)
 			require.ErrorContains(t, err, "--grace-hours must not be negative")
+		})
+	}
+}
+
+func TestKoiosAPIKeySources(t *testing.T) {
+	// Not t.Parallel: t.Setenv changes the process environment.
+	dir := t.TempDir()
+	flagFile := filepath.Join(dir, "flag")
+	require.NoError(t, os.WriteFile(flagFile, []byte("flag-file\n"), 0o600))
+	envFile := filepath.Join(dir, "env")
+	require.NoError(t, os.WriteFile(envFile, []byte("env-file\n"), 0o600))
+	for _, tc := range []struct {
+		name    string
+		flags   map[string]string
+		env     map[string]string
+		want    string
+		wantErr string
+	}{
+		{name: "unset"},
+		{
+			name:  "flag file",
+			flags: map[string]string{"api-key-file": flagFile},
+			want:  "flag-file",
+		},
+		{
+			name: "env file",
+			env:  map[string]string{"KOIOS_API_KEY_FILE": envFile},
+			want: "env-file",
+		},
+		{
+			name:  "flag file beats env literal",
+			flags: map[string]string{"api-key-file": flagFile},
+			env:   map[string]string{"KOIOS_API_KEY": "env"},
+			want:  "flag-file",
+		},
+		{
+			name:  "flag literal beats env file",
+			flags: map[string]string{"api-key": "flag"},
+			env:   map[string]string{"KOIOS_API_KEY_FILE": envFile},
+			want:  "flag",
+		},
+		{
+			name: "both flags",
+			flags: map[string]string{
+				"api-key":      "flag",
+				"api-key-file": flagFile,
+			},
+			wantErr: "--api-key-file",
+		},
+		{
+			name: "both env",
+			env: map[string]string{
+				"KOIOS_API_KEY":      "env",
+				"KOIOS_API_KEY_FILE": envFile,
+			},
+			wantErr: "KOIOS_API_KEY_FILE",
+		},
+		{
+			name: "missing file",
+			flags: map[string]string{
+				"api-key-file": filepath.Join(dir, "missing"),
+			},
+			wantErr: "--api-key-file",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KOIOS_API_KEY", "")
+			t.Setenv("KOIOS_API_KEY_FILE", "")
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+			cmd := &cobra.Command{}
+			addAPIKeyFlags(cmd)
+			for name, value := range tc.flags {
+				require.NoError(t, cmd.Flags().Set(name, value))
+			}
+			got, err := koiosAPIKey(cmd)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestResolveDingoDBMetadataDSNFile(t *testing.T) {
+	t.Parallel()
+	dsnFile := filepath.Join(t.TempDir(), "dsn")
+	require.NoError(t, os.WriteFile(
+		dsnFile,
+		[]byte("postgres://u:pw@db.example.com/dingo\n"),
+		0o600,
+	))
+	for _, tc := range []struct {
+		name    string
+		flags   map[string]string
+		want    string
+		wantErr string
+	}{
+		{
+			name: "literal",
+			flags: map[string]string{
+				"metadata-plugin": "postgres",
+				"metadata-dsn":    "postgres://literal",
+			},
+			want: "postgres://literal",
+		},
+		{
+			name: "file",
+			flags: map[string]string{
+				"metadata-plugin":   "postgres",
+				"metadata-dsn-file": dsnFile,
+			},
+			want: "postgres://u:pw@db.example.com/dingo",
+		},
+		{
+			name: "both",
+			flags: map[string]string{
+				"metadata-dsn":      "postgres://literal",
+				"metadata-dsn-file": dsnFile,
+			},
+			wantErr: "--metadata-dsn-file",
+		},
+		{
+			name: "missing file",
+			flags: map[string]string{
+				"metadata-dsn-file": filepath.Join(t.TempDir(), "missing"),
+			},
+			wantErr: "--metadata-dsn-file",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := &cobra.Command{}
+			addDingoDBFlags(cmd)
+			for name, value := range tc.flags {
+				require.NoError(t, cmd.Flags().Set(name, value))
+			}
+			got, err := resolveDingoDB(cmd)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got.DSN)
 		})
 	}
 }
