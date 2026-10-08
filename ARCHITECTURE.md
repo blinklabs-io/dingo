@@ -5665,7 +5665,11 @@ and keepalive pings. `ouroboros` reports it through
 `PeerGovernor.RecordServedActivityByConnId`, throttled to once per 10 seconds
 per connection so the per-header path never takes the governor lock. It is kept
 separate from `LastActivity`, which drives outbound hot and churn decisions.
-Flapping cooldown is unaffected.
+Flapping cooldown ignores served activity, but it judges the current session:
+a peer whose live inbound session has lasted past `minStableConnectionDuration`
+(30s) is not flapping, whatever its earlier short sessions were. Without that,
+a warm inbound peer that once reconnected twice in quick succession was cut
+from a stable session and its host was denied for the cooldown.
 
 Peer targets configured directly by Dingo through YAML, environment variables,
 or CLI flags take precedence over the corresponding Cardano configuration.

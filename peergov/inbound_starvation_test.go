@@ -404,6 +404,42 @@ func TestInboundPruneFlappingStillPrunedDespiteServedActivity(t *testing.T) {
 	assert.Equal(t, 1, pruneInbound(pg))
 }
 
+// A peer whose current inbound session has already lasted past
+// minStableConnectionDuration is not flapping now, whatever its earlier short
+// sessions were; one still on a short session is.
+func TestInboundFlappingIgnoresPeerOnStableSession(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		InboundPruneAfter: time.Hour,
+		InboundCooldown:   5 * time.Minute,
+	})
+	now := time.Now()
+	flapper := func(i int, sessionAge time.Duration) *Peer {
+		p := inboundIdlePeer(i, time.Minute)
+		p.InboundShortLivedCount = 2
+		p.LastInboundDisconnect = now.Add(-sessionAge)
+		p.LastInboundSessionDuration = 10 * time.Second
+		p.InboundConnectedAt = now.Add(-sessionAge)
+		return p
+	}
+	pg.mu.Lock()
+	stable := flapper(0, minStableConnectionDuration+time.Minute)
+	fresh := flapper(1, time.Second)
+	pg.peers = []*Peer{stable, fresh}
+	stableFlapping, _ := pg.inboundFlappingStateLocked(stable, now)
+	freshFlapping, _ := pg.inboundFlappingStateLocked(fresh, now)
+	pg.mu.Unlock()
+
+	assert.False(t, stableFlapping,
+		"a peer on a session past the stability threshold is not flapping")
+	assert.True(t, freshFlapping,
+		"a peer still on a short session after short ones is flapping")
+	assert.Equal(t, 1, pruneInbound(pg))
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1)
+	assert.Equal(t, "10.1.0.1:3001", peers[0].Address)
+}
+
 // Inbound hot peers must not occupy outbound refill slots.
 func TestReconcileRefillExcludesInboundHot(t *testing.T) {
 	t.Parallel()
