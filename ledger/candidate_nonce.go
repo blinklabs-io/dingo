@@ -116,6 +116,7 @@ func (ls *LedgerState) computeCandidateNonce(
 		epochStartSlot,
 		epochLengthInSlots,
 		math.MaxUint64, // clamped to the epoch's end by the callee
+		nil,
 	)
 }
 
@@ -133,6 +134,13 @@ func (ls *LedgerState) computeCandidateNonce(
 // where the epoch ends is what fixes it, not how far this call folds. Folding
 // short of the cutoff simply means the candidate has not frozen yet and still
 // tracks the evolving nonce.
+//
+// foldTip, when the caller knows it, is the block the fold ends at: the
+// acquired block or tip of a GetChainDepState reply, whose slot is
+// foldEndSlot-1. The blob store holds blocks rollback abandoned, including a
+// sibling at the same slot, so a lookup by slot alone can name a block this
+// chain never applied; with foldTip the fast path reads that exact block's
+// nonce instead. The boundary computation passes nil.
 func (ls *LedgerState) computeCandidateNonceAsOf(
 	txn *database.Txn,
 	eraId uint,
@@ -141,6 +149,7 @@ func (ls *LedgerState) computeCandidateNonceAsOf(
 	epochStartSlot uint64,
 	epochLengthInSlots uint64,
 	foldEndSlot uint64,
+	foldTip *ocommon.Point,
 ) ([]byte, []byte, error) {
 	stabilityWindow := ls.nonceStabilityWindow(eraId)
 	epochEndSlot, carry := bits.Add64(epochStartSlot, epochLengthInSlots, 0)
@@ -181,6 +190,7 @@ func (ls *LedgerState) computeCandidateNonceAsOf(
 		epochStartSlot,
 		foldEndSlot,
 		candidateBound,
+		foldTip,
 	)
 	if err == nil {
 		return candidateNonce, evolvingNonce, nil
@@ -223,7 +233,17 @@ func (ls *LedgerState) computeCandidateNonceFast(
 	epochStartSlot uint64,
 	foldEndSlot uint64,
 	candidateBound uint64,
+	foldTip *ocommon.Point,
 ) ([]byte, []byte, error) {
+	// The last block before bound. When bound is past foldTip, foldTip is
+	// that block on this chain (nothing lies between it and the fold's end),
+	// so it is used as is rather than searched for by slot.
+	lastBlockBefore := func(bound uint64) (models.Block, error) {
+		if foldTip != nil && bound > foldTip.Slot {
+			return models.Block{Slot: foldTip.Slot, Hash: foldTip.Hash}, nil
+		}
+		return lookupBlockBeforeSlot(ls.db, txn, bound)
+	}
 	// Identify the actual last block of the FOLD in the blob store -- which is
 	// the epoch's last block only when the fold runs to the epoch's end. The
 	// evolving nonce is the nonce of THIS block, not whatever block_nonce row
@@ -234,7 +254,7 @@ func (ls *LedgerState) computeCandidateNonceFast(
 	// blocks in place until they are overwritten, and a stored fork holds
 	// blocks the chain never adopted, so a caller folding to a tip mid-epoch
 	// would otherwise be handed the nonce of a block it has not applied.
-	lastBlock, blockErr := lookupBlockBeforeSlot(ls.db, txn, foldEndSlot)
+	lastBlock, blockErr := lastBlockBefore(foldEndSlot)
 	hasBlocks := blockErr == nil && lastBlock.Slot >= epochStartSlot
 	if blockErr != nil && !errors.Is(blockErr, models.ErrBlockNotFound) {
 		return nil, nil, fmt.Errorf(
@@ -285,9 +305,7 @@ func (ls *LedgerState) computeCandidateNonceFast(
 		candidateNonce = make([]byte, len(prevCandidateNonce))
 		copy(candidateNonce, prevCandidateNonce)
 	} else {
-		lastPreCutoff, preErr := lookupBlockBeforeSlot(
-			ls.db, txn, candidateBound,
-		)
+		lastPreCutoff, preErr := lastBlockBefore(candidateBound)
 		hasPreCutoff := preErr == nil &&
 			lastPreCutoff.Slot >= epochStartSlot
 		if preErr != nil && !errors.Is(preErr, models.ErrBlockNotFound) {

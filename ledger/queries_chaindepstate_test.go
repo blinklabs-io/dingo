@@ -1248,6 +1248,10 @@ func TestQueryShelleyDebugChainDepState_PinnedPointAnswersAtThatPoint(
 
 	tip := decode(QueryPoint{})
 	assert.Equal(t, tipSlot, tip.LastSlot.Slot)
+	assert.Equal(t, nonce(bytes.Repeat([]byte{0x86}, 32)), tip.EvolvingNonce,
+		"the evolving nonce is the tip block's")
+	assert.Equal(t, nonce(bytes.Repeat([]byte{0x86}, 32)), tip.CandidateNonce,
+		"before the freeze cutoff the candidate tracks the evolving nonce")
 	assert.Equal(t, new(nonce(secondEpochNonce)), tip.EpochNonce)
 	assert.Equal(t, new(nonce(firstEpochNonce)), tip.PreviousEpochNonce)
 	assert.Equal(t, new(nonce(lateHash)), tip.LabNonce)
@@ -1255,4 +1259,82 @@ func TestQueryShelleyDebugChainDepState_PinnedPointAnswersAtThatPoint(
 		lcommon.Blake2b224(early): 2,
 		lcommon.Blake2b224(late):  5,
 	}, tip.OpCertCounters)
+}
+
+// TestQueryShelleyDebugChainDepState_NoncesIgnoreAbandonedSibling covers a
+// block a rollback abandoned at the acquired block's own slot. It stays in the
+// blob store with no nonce row, and its key sorts above the acquired block's,
+// so a lookup by slot alone finds it first. The nonces must come from the
+// acquired block itself.
+func TestQueryShelleyDebugChainDepState_NoncesIgnoreAbandonedSibling(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	const (
+		parentSlot uint64 = 1100
+		pinnedSlot uint64 = 1200
+	)
+	parentHash := bytes.Repeat([]byte{0x91}, 32)
+	pinnedHash := bytes.Repeat([]byte{0x92}, 32)
+	abandonedHash := bytes.Repeat([]byte{0xfe}, 32)
+	pinnedNonce := bytes.Repeat([]byte{0x93}, 32)
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		for _, b := range []struct {
+			slot         uint64
+			hash, parent []byte
+			number       uint64
+		}{
+			// The abandoned block is stored first, as it is when a fork
+			// switch replaces it, so the slot index names the adopted one.
+			{parentSlot, parentHash, bytes.Repeat([]byte{0x90}, 32), 1},
+			{pinnedSlot, abandonedHash, parentHash, 2},
+			{pinnedSlot, pinnedHash, parentHash, 2},
+		} {
+			if err := db.BlockCreate(models.Block{
+				Slot:     b.slot,
+				Hash:     b.hash,
+				PrevHash: b.parent,
+				Cbor:     []byte{0x80},
+				Number:   b.number,
+				Type:     conway.BlockTypeConway,
+			}, txn); err != nil {
+				return err
+			}
+		}
+		if err := db.SetBlockNonce(
+			parentHash, parentSlot, bytes.Repeat([]byte{0x94}, 32), false, txn,
+		); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(pinnedHash, pinnedSlot, pinnedNonce, false, txn)
+	}))
+	require.NoError(t, db.Metadata().SetEpoch(
+		1000, 1, bytes.Repeat([]byte{0x02}, 32),
+		bytes.Repeat([]byte{0x71}, 32), bytes.Repeat([]byte{0x72}, 32),
+		bytes.Repeat([]byte{0x03}, 32), eras.ConwayEraDesc.Id, 1, 1000, nil,
+	))
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(pinnedSlot, pinnedHash)},
+		nil,
+	))
+	ls := newChainDepStateLedger(t, db)
+
+	for _, at := range []QueryPoint{{}, {Slot: pinnedSlot, Hash: pinnedHash}} {
+		result, err := ls.Query(chainDepStateQuery(), at)
+		require.NoError(t, err, "pinned=%v", at.pinned())
+		arr, ok := result.([]any)
+		require.True(t, ok)
+		encoded, err := cbor.Encode(arr[0])
+		require.NoError(t, err)
+		var decoded olocalstatequery.DebugChainDepStateResult
+		require.NoError(t, decoded.UnmarshalCBOR(encoded))
+		want := lcommon.Nonce{
+			Type:  lcommon.NonceTypeNonce,
+			Value: [32]byte(pinnedNonce),
+		}
+		assert.Equal(t, want, decoded.EvolvingNonce, "pinned=%v", at.pinned())
+		assert.Equal(t, want, decoded.CandidateNonce, "pinned=%v", at.pinned())
+	}
 }

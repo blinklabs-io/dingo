@@ -229,6 +229,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 			current.StartSlot,
 			uint64(current.LengthInSlots),
 			foldEndSlotForTip(tip.Point.Slot),
+			chainDepStateFoldTip(tip),
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -317,6 +318,16 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 			Inner:   state,
 		},
 	}, nil
+}
+
+// chainDepStateFoldTip is the block a GetChainDepState fold ends at, when the
+// tip names one: the acquired block, or the tip.
+func chainDepStateFoldTip(tip ochainsync.Tip) *ocommon.Point {
+	if len(tip.Point.Hash) != lcommon.Blake2b256Size {
+		return nil
+	}
+	point := tip.Point
+	return &point
 }
 
 // foldEndSlotForTip converts a tip slot into the exclusive end bound that

@@ -1071,10 +1071,32 @@ func (s *Store) LatestPoolOpCertSequences(
 		if err := rows.Scan(&poolKeyHash, &sequence); err != nil {
 			return nil, err
 		}
-		ret[string(poolKeyHash)] = uint64(sequence)
+		value, err := opCertSequenceValue(sequence)
+		if err != nil {
+			return nil, err
+		}
+		ret[string(poolKeyHash)] = value
 	}
 	return ret, rows.Err()
 }
+
+// PoolOpCertSequencesChangedAfterSQL lists the pool of every op-cert row after
+// a slot, read as a range of idx_pool_opcert_sequence_slot. It is not
+// DISTINCT: that lets the planner prefer a full scan of the (pool_key_hash,
+// slot) index to deliver the pools in order, and the caller deduplicates the
+// few rows a recent slot leaves. Exported, like LatestPoolOpCertSequencesSQL,
+// so a test can pin its plan.
+const PoolOpCertSequencesChangedAfterSQL = `
+SELECT pool_key_hash
+FROM pool_opcert_sequence
+WHERE slot > ?`
+
+// PoolOpCertSequenceAtOrBeforeSQL is one pool's highest sequence at or before
+// a slot, read through idx_pool_opcert_sequence_pool_slot.
+const PoolOpCertSequenceAtOrBeforeSQL = `
+SELECT MAX(sequence)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND slot <= ?`
 
 func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
 	slot uint64,
@@ -1084,34 +1106,76 @@ func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
 	if err != nil {
 		return nil, err
 	}
+	// A slot filter cannot use the (pool_key_hash, sequence) index the
+	// unbounded aggregate reads, and filtering the whole table by slot reads
+	// every row at or before it. Rows after a recent slot are few, so the
+	// unbounded result is corrected for just the pools that have one.
+	ret, err := s.LatestPoolOpCertSequences(txn)
+	if err != nil {
+		return nil, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `
-SELECT pool_key_hash, MAX(sequence)
-FROM pool_opcert_sequence
-WHERE slot <= ?
-GROUP BY pool_key_hash`,
+	rows, err := db.QueryContext(
+		ctx,
+		PoolOpCertSequencesChangedAfterSQL,
 		slotValue,
 	)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	ret := map[string]uint64{}
+	var changed [][]byte
+	seen := make(map[string]struct{})
 	for rows.Next() {
 		var poolKeyHash []byte
-		var sequence int64
-		if err := rows.Scan(&poolKeyHash, &sequence); err != nil {
+		if err := rows.Scan(&poolKeyHash); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		if sequence < 0 {
-			return nil, fmt.Errorf("negative op-cert sequence %d", sequence)
+		if _, dup := seen[string(poolKeyHash)]; dup {
+			continue
 		}
-		ret[string(poolKeyHash)] = uint64(sequence)
+		seen[string(poolKeyHash)] = struct{}{}
+		changed = append(changed, poolKeyHash)
 	}
-	return ret, rows.Err()
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, poolKeyHash := range changed {
+		var sequence sql.NullInt64
+		if err := db.QueryRowContext(
+			ctx,
+			PoolOpCertSequenceAtOrBeforeSQL,
+			poolKeyHash,
+			slotValue,
+		).Scan(&sequence); err != nil {
+			return nil, err
+		}
+		if !sequence.Valid {
+			delete(ret, string(poolKeyHash))
+			continue
+		}
+		value, err := opCertSequenceValue(sequence.Int64)
+		if err != nil {
+			return nil, err
+		}
+		ret[string(poolKeyHash)] = value
+	}
+	return ret, nil
+}
+
+// opCertSequenceValue converts a stored op-cert sequence, failing on a
+// negative one rather than wrapping it into a huge counter.
+func opCertSequenceValue(sequence int64) (uint64, error) {
+	if sequence < 0 {
+		return 0, fmt.Errorf("negative op-cert sequence %d", sequence)
+	}
+	return uint64(sequence), nil
 }
 
 // mithrilTrustBoundarySyncKey mirrors database.mithrilLedgerSlotSyncKey and

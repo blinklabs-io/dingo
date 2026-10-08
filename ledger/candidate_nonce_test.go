@@ -135,6 +135,7 @@ func TestComputeCandidateNonceAsOf_SlowPathStopsAtFoldEnd(t *testing.T) {
 			epochStart,
 			epochLength,
 			foldEndSlotForTip(tipSlot),
+			nil,
 		)
 		return err
 	}), "the fold must stop at the tip; reaching the block stored above it "+
@@ -188,7 +189,7 @@ func TestComputeCandidateNonce_RejectsWrappedEpochRange(t *testing.T) {
 							_, _, err = ls.computeCandidateNonceAsOf(
 								txn, eras.ConwayEraDesc.Id,
 								prevEvolving, prevCandidate,
-								tc.start, tc.length, tc.start,
+								tc.start, tc.length, tc.start, nil,
 							)
 						} else {
 							_, _, err = ls.computeCandidateNonce(
@@ -280,7 +281,7 @@ func TestComputeCandidateNonceFastRejectsMalformedNonceRows(t *testing.T) {
 	err := db.Transaction(false).Do(func(txn *database.Txn) error {
 		_, _, err := ls.computeCandidateNonceFast(txn,
 			bytes.Repeat([]byte{0x73}, 32), bytes.Repeat([]byte{0x74}, 32),
-			0, 101, 101)
+			0, 101, 101, nil)
 		return err
 	})
 	require.ErrorIs(t, err, errNoncesMissing)
