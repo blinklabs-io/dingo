@@ -1860,7 +1860,7 @@ func (ls *LedgerState) freshCursorAwaitingHeadersLocked(
 	connId ouroboros.ConnectionId,
 ) bool {
 	req, ok := ls.freshCursorPeers[netAddrString(connId.RemoteAddr)]
-	return ok && time.Since(req.at) < freshCursorPeerRetention
+	return ok && req != nil && time.Since(req.at) < freshCursorPeerRetention
 }
 
 func (ls *LedgerState) logFreshCursorNotRepeatedLocked(
