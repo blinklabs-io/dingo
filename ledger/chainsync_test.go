@@ -4981,7 +4981,7 @@ func observeProcessEpochRolloverCallOrder(
 func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 	t.Parallel()
 
-	const targetFunc = "processEpochRolloverWithClassicPParams"
+	const targetFunc = "processEpochRolloverWithClassicPParamsContext"
 
 	// In source order, the calls that must appear inside processEpochRollover.
 	// Each entry is the trailing identifier of a SelectorExpr (or a bare
@@ -4995,7 +4995,7 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 	// before MIR until the epoch-boundary snapshot semantics were corrected.
 	wantOrder := []string{
 		"applyMIRCerts",                       // (1) Shelley-era INSTANT rule, pre-SNAP
-		"computeClassicPParamUpdates",         // (2) Shelley-style pparam updates
+		"ComputeAndApplyPParamUpdates",        // (2) Shelley-style pparam updates
 		"applyPoolRetirements",                // (3) embedded POOLREAP deposit refunds
 		"activateDelegatorInactivityIfNeeded", // (4) CIP-0163 activation
 		"ProcessEpoch",                        // (5) Conway-style governance enact
@@ -5042,16 +5042,16 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
 	t.Parallel()
 
-	const targetFunc = "processEpochRolloverWithClassicPParams"
+	const targetFunc = "processEpochRolloverWithClassicPParamsContext"
 
 	// In source order: reward application first, then the governance/pparam
 	// core, then the ADA-pot capture last.
 	wantOrder := []string{
-		"applyStakeRewards",           // (1) delayed reward update, pre-governance
-		"computeClassicPParamUpdates", // pparam updates
-		"ProcessEpoch",                // governance enact (reads treasury)
-		"applyIntraEraHardForkRule",   // last treasury/reserves mutation
-		"saveRewardAdaPotsForEpoch",   // (last) post-boundary ADA pot capture
+		"applyStakeRewards",            // (1) delayed reward update, pre-governance
+		"ComputeAndApplyPParamUpdates", // pparam updates
+		"ProcessEpoch",                 // governance enact (reads treasury)
+		"applyIntraEraHardForkRule",    // last treasury/reserves mutation
+		"saveRewardAdaPotsForEpoch",    // (last) post-boundary ADA pot capture
 	}
 
 	seen, observed := observeProcessEpochRolloverCallOrder(
@@ -10824,7 +10824,7 @@ func TestHandleEventChainsyncBlockHeaderRoutesSlotBattleToForkResolution(
 func TestProcessEpochRollover_SnapStakeReadOrdering(t *testing.T) {
 	t.Parallel()
 
-	const targetFunc = "processEpochRolloverWithClassicPParams"
+	const targetFunc = "processEpochRolloverWithClassicPParamsContext"
 
 	wantOrder := []string{
 		"applyStakeRewards",                 // pre-SNAP: delayed reward update
