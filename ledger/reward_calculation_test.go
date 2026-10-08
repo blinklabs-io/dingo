@@ -6486,6 +6486,31 @@ func TestStakeRewardPrecomputeSnapshotGuardRejectsSameSlotContentChange(
 	require.Empty(t, poolOutputs)
 }
 
+func TestRewardCalculationFixtureDrainsCompactionOnCleanup(t *testing.T) {
+	t.Parallel()
+
+	var ls *LedgerState
+	t.Run("fixture", func(t *testing.T) {
+		ls, _ = newRewardCalculationTestLedger(t)
+		ls.rewardPrecomputeWriteMu.Lock()
+		t.Cleanup(ls.rewardPrecomputeWriteMu.Unlock)
+		ls.queueRewardCreditCompaction()
+		ls.rewardPrecomputeMu.Lock()
+		compacting := ls.rewardCreditCompacting
+		ls.rewardPrecomputeMu.Unlock()
+		require.True(t, compacting)
+	})
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+
+	require.True(t, ls.closed.Load(),
+		"fixture must close the ledger before closing storage")
+	ls.rewardPrecomputeMu.Lock()
+	compacting := ls.rewardCreditCompacting
+	ls.rewardPrecomputeMu.Unlock()
+	require.False(t, compacting,
+		"fixture cleanup must drain reward compaction")
+}
+
 func newRewardCalculationTestLedger(
 	t testing.TB,
 ) (*LedgerState, *database.Database) {
@@ -6495,16 +6520,16 @@ func newRewardCalculationTestLedger(
 		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
-
-	return &LedgerState{
+	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ShelleyEraDesc,
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
-	}, db
+	}
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	return ls, db
 }
 
 func seedEmptyRewardBasisForRollover(
