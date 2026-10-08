@@ -59,10 +59,25 @@ jobs:
     outputs:
       run-ci: ${{ steps.detect.outputs.run-ci }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+      - name: checkout-pull-request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+          path: pull-request
+      - name: checkout-trusted-ci
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          path: trusted-ci
+      - id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        working-directory: pull-request
+        run: bash ../trusted-ci/.github/scripts/ci-changes.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: 1.26.x
@@ -72,19 +87,15 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('pull-request/**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-1.26.x-
       - name: docs-parity
+        working-directory: pull-request
         run: make docs-parity
       - name: test-change-selection
+        working-directory: pull-request
         run: python3 .github/scripts/test-ci-changes.py
-      - id: detect
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: bash .github/scripts/ci-changes.sh
 
   # Stage 1. The cheapest signal in the pipeline and the gate for everything
   # below it: golangci-lint typechecks the whole tree, so a change that does

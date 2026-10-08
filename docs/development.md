@@ -31,8 +31,10 @@ paths run the full staged pipeline, including Go package documentation
 (`doc.go`), configuration, fixtures, dependencies, and CI scripts. Mixed
 documentation and code changes also run the full pipeline.
 
-The `changes` job compares the PR merge base with its head using Git, including
-both sides of renames. An empty diff or a failed comparison runs full CI.
+The `changes` job runs the classifier from the workflow commit in a separate
+checkout and compares the PR checkout's merge base with its head using Git,
+including both sides of renames. An empty diff or a failed comparison runs
+full CI.
 Manual CI runs, main-branch publishing, and release tags always run full CI.
 The workflow still starts for documentation-only PRs so existing required job
 checks can report skipped instead of remaining pending. Commit-message checks

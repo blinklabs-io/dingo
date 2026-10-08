@@ -2969,6 +2969,66 @@ func TestPullRequestChangeGateRunsDocsParity(t *testing.T) {
 	t.Errorf("%s changes job does not run make docs-parity", prPipeline)
 }
 
+func TestPullRequestChangeGateUsesTrustedClassifier(t *testing.T) {
+	root := repoRoot(t)
+	jobs := pipelineJobs(t, root, prPipeline)
+	changes, ok := jobs["changes"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s changes job is missing or not a mapping", prPipeline)
+	}
+	steps, ok := changes["steps"].([]any)
+	if !ok {
+		t.Fatalf("%s changes job has no steps", prPipeline)
+	}
+
+	pullRequestCheckout := -1
+	trustedCheckout := -1
+	detect := -1
+	for idx, step := range steps {
+		fields, ok := step.(map[string]any)
+		if !ok {
+			continue
+		}
+		with, _ := fields["with"].(map[string]any)
+		uses, _ := fields["uses"].(string)
+		if strings.HasPrefix(uses, "actions/checkout@") &&
+			with["path"] == "pull-request" && with["fetch-depth"] == 0 {
+			pullRequestCheckout = idx
+		}
+		if strings.HasPrefix(uses, "actions/checkout@") &&
+			with["path"] == "trusted-ci" &&
+			with["ref"] == "${{ github.workflow_sha }}" {
+			trustedCheckout = idx
+		}
+		if fields["id"] == "detect" {
+			detect = idx
+			if fields["working-directory"] != "pull-request" ||
+				fields["run"] != "bash ../trusted-ci/.github/scripts/ci-changes.sh" {
+				t.Errorf("%s change detector must run trusted-ci's classifier against the pull-request checkout", prPipeline)
+			}
+		}
+	}
+	if pullRequestCheckout < 0 {
+		t.Errorf("%s changes job does not check out PR history into pull-request", prPipeline)
+	}
+	if trustedCheckout < 0 {
+		t.Errorf("%s changes job does not check out github.workflow_sha into trusted-ci", prPipeline)
+	}
+	if detect < 0 {
+		t.Errorf("%s changes job has no detect step", prPipeline)
+	} else if pullRequestCheckout > detect || trustedCheckout > detect {
+		t.Errorf("%s changes job runs the classifier before its checkouts", prPipeline)
+	}
+	for _, name := range []string{"docs-parity", "test-change-selection"} {
+		for idx, step := range steps {
+			fields, ok := step.(map[string]any)
+			if ok && fields["name"] == name && idx < detect {
+				t.Errorf("%s changes job runs %s before the trusted classifier", prPipeline, name)
+			}
+		}
+	}
+}
+
 // TestPipelineStagesAreOrdered checks the dependency chain that makes the
 // pipeline cheap before it is expensive: lint gates the quick Linux suite,
 // which gates the platform suites. Without it a stage could be detached
