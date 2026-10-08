@@ -14126,7 +14126,7 @@ func TestEvaluateTxRefusesWhenEvaluationSlotsAreInUse(t *testing.T) {
 
 func TestNewLedgerStateRejectsNegativeEvaluationCapacity(t *testing.T) {
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
 	_, err = NewLedgerState(LedgerStateConfig{
 		Database: db, ChainManager: cm, MaxConcurrentEvaluations: -1,
