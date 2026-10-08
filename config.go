@@ -236,6 +236,8 @@ type Config struct {
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
 	barkOperatorCertificateFingerprints                                                 []string
+	barkLifecycleEnabled                                                                bool
+	barkLifecycleOperatorCertificateFingerprints                                        []string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
 	koiosParity                                                                         KoiosParityConfig
@@ -792,6 +794,10 @@ func (c *Config) syncCompatFields() {
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
 	c.barkOperatorCertificateFingerprints = slices.Clone(
 		c.cfg.BarkOperatorCertificateFingerprints,
+	)
+	c.barkLifecycleEnabled = c.cfg.BarkLifecycleEnabled
+	c.barkLifecycleOperatorCertificateFingerprints = slices.Clone(
+		c.cfg.BarkLifecycleOperatorCertificateFingerprints,
 	)
 	c.databaseLifecycle = c.cfg.DatabaseLifecycle
 	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
@@ -1764,8 +1770,8 @@ func WithBarkHost(host string) ConfigOptionFunc {
 }
 
 // WithBarkClientCAFilePath sets the PEM CA bundle Bark uses to authenticate
-// every DatabaseService caller. Destructive methods additionally require an
-// allowlisted fingerprint set by WithBarkOperatorCertificateFingerprints.
+// every DatabaseService and LifecycleService caller. Destructive methods
+// additionally require their service's operator allowlist.
 func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkClientCAFilePath = path
@@ -1781,6 +1787,26 @@ func WithBarkOperatorCertificateFingerprints(
 	return func(c *Config) {
 		c.cfg.BarkOperatorCertificateFingerprints = slices.Clone(fingerprints)
 		c.barkOperatorCertificateFingerprints = slices.Clone(fingerprints)
+	}
+}
+
+// WithBarkLifecycleEnabled explicitly enables Bark's remote node lifecycle
+// service. It is disabled by default.
+func WithBarkLifecycleEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkLifecycleEnabled = enabled
+		c.barkLifecycleEnabled = enabled
+	}
+}
+
+// WithBarkLifecycleOperatorCertificateFingerprints sets the SHA-256 client
+// certificate fingerprints authorized to invoke Bark Stop and Restart RPCs.
+func WithBarkLifecycleOperatorCertificateFingerprints(
+	fingerprints []string,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkLifecycleOperatorCertificateFingerprints = slices.Clone(fingerprints)
+		c.barkLifecycleOperatorCertificateFingerprints = slices.Clone(fingerprints)
 	}
 }
 
@@ -2099,6 +2125,18 @@ func (c *Config) BarkBlockDownloadHosts() []string {
 // fingerprints authorized to invoke destructive Bark DatabaseService RPCs.
 func (c *Config) BarkOperatorCertificateFingerprints() []string {
 	return slices.Clone(c.cfg.BarkOperatorCertificateFingerprints)
+}
+
+// BarkLifecycleEnabled reports whether Bark's remote node lifecycle service
+// is explicitly enabled.
+func (c *Config) BarkLifecycleEnabled() bool {
+	return c.cfg.BarkLifecycleEnabled
+}
+
+// BarkLifecycleOperatorCertificateFingerprints returns the distinct operator
+// allowlist for Bark Stop and Restart RPCs.
+func (c *Config) BarkLifecycleOperatorCertificateFingerprints() []string {
+	return slices.Clone(c.cfg.BarkLifecycleOperatorCertificateFingerprints)
 }
 
 // TlsCertFilePath returns the path to the TLS certificate for gRPC APIs.
