@@ -113,7 +113,7 @@ func newTestOuroborosWithLeiosDB(t *testing.T) *Ouroboros {
 		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -251,7 +251,10 @@ func TestMergedLeiosRankingBlockCborIsNoopForDijkstra(t *testing.T) {
 	_, blockRaw := testDijkstraBlockRaw(t, 1)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	got, ok, err := o.mergedLeiosRankingBlockCbor(blockRaw)
+	got, ok, err := o.mergedLeiosRankingBlockCbor(
+		context.Background(),
+		blockRaw,
+	)
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Equal(t, []byte(blockRaw), got)
@@ -1769,12 +1772,12 @@ func TestResolveCertifiedEndorserTxsGuards(t *testing.T) {
 	// A non-certifying Dijkstra block is never merged.
 	_, blockRaw := testDijkstraBlockRaw(t, 1)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	_, ok := o.resolveCertifiedEndorserTxs(blockRaw)
+	_, ok := o.resolveCertifiedEndorserTxs(context.Background(), blockRaw)
 	require.False(t, ok)
 
 	// A CertRB with no ledger state (so no parent to resolve) is served raw.
 	certRB := testDijkstraCertRBRaw(t, 2, make([]byte, lcommon.Blake2b256Size))
-	_, ok = o.resolveCertifiedEndorserTxs(certRB)
+	_, ok = o.resolveCertifiedEndorserTxs(context.Background(), certRB)
 	require.False(t, ok)
 }
 
@@ -1785,7 +1788,7 @@ func TestMergedLeiosRankingBlockCborServesRawForCertRBWithoutLedger(
 
 	certRB := testDijkstraCertRBRaw(t, 3, make([]byte, lcommon.Blake2b256Size))
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	got, ok, err := o.mergedLeiosRankingBlockCbor(certRB)
+	got, ok, err := o.mergedLeiosRankingBlockCbor(context.Background(), certRB)
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Equal(t, []byte(certRB), got)
@@ -1798,7 +1801,10 @@ func TestCertifiedEndorserBlockHashTriState(t *testing.T) {
 
 	// A non-certifying Dijkstra block is not a CertRB: certified=false.
 	_, blockRaw := testDijkstraBlockRaw(t, 1)
-	_, _, certified, resolved := o.certifiedEndorserBlockHash(blockRaw)
+	_, _, certified, resolved := o.certifiedEndorserBlockHash(
+		context.Background(),
+		blockRaw,
+	)
 	require.False(t, certified)
 	require.False(t, resolved)
 
@@ -1806,7 +1812,10 @@ func TestCertifiedEndorserBlockHashTriState(t *testing.T) {
 	// must report certified=true, resolved=false so the caller disconnects
 	// instead of downgrading a certified block to the raw serve path.
 	certRB := testDijkstraCertRBRaw(t, 2, make([]byte, lcommon.Blake2b256Size))
-	_, _, certified, resolved = o.certifiedEndorserBlockHash(certRB)
+	_, _, certified, resolved = o.certifiedEndorserBlockHash(
+		context.Background(),
+		certRB,
+	)
 	require.True(t, certified)
 	require.False(t, resolved)
 }
@@ -2235,13 +2244,17 @@ func TestResolveCertifiedEndorserTxsWithholdsUnverifiedSlot(t *testing.T) {
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	o.ledgerState = newTestLedgerState(t)
-	require.NoError(t, o.ledgerState.Chain().AddBlock(parentBlock, nil))
+	require.NoError(
+		t,
+		o.ledgerState.Chain().AddBlock(context.Background(), parentBlock, nil),
+	)
 
 	certRB := testDijkstraCertRBRaw(t, 11, parentBlock.Hash().Bytes())
 
 	// Sanity check: the parent resolves through the real ledger lookup, not
 	// just header decoding.
 	gotHash, gotSlot, certified, resolved := o.certifiedEndorserBlockHash(
+		context.Background(),
 		certRB,
 	)
 	require.True(t, certified)
@@ -2260,20 +2273,23 @@ func TestResolveCertifiedEndorserTxsWithholdsUnverifiedSlot(t *testing.T) {
 	require.True(t, data.completeTxCache())
 	require.False(t, data.slotVerified)
 
-	_, ok = o.resolveCertifiedEndorserTxs(certRB)
+	_, ok = o.resolveCertifiedEndorserTxs(context.Background(), certRB)
 	require.False(
 		t,
 		ok,
 		"a complete but unverified endorser block must not merge into NtC",
 	)
-	merged, mergedOk, err := o.mergedLeiosRankingBlockCbor(certRB)
+	merged, mergedOk, err := o.mergedLeiosRankingBlockCbor(
+		context.Background(),
+		certRB,
+	)
 	require.NoError(t, err)
 	require.False(t, mergedOk)
 	require.Equal(t, []byte(certRB), merged)
 
 	// Once the slot is corroborated, the same closure resolves.
 	o.bindLeiosEndorserBlockSlot(ebHash.Bytes(), manifestPoint.Slot)
-	txs, ok := o.resolveCertifiedEndorserTxs(certRB)
+	txs, ok := o.resolveCertifiedEndorserTxs(context.Background(), certRB)
 	require.True(t, ok)
 	require.Len(t, txs, 1)
 }

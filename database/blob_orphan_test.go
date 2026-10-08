@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -142,7 +143,7 @@ func TestBlobOrphansAreNotCountedUntilMetadataCommits(t *testing.T) {
 			"05:0": errors.New("blob store unavailable"),
 		},
 	})
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	before := BlobOrphanCount()
 
 	err := deleteUtxoBlobs(db, []models.Utxo{
@@ -168,7 +169,7 @@ func TestBlobOrphansAreNotCountedOnRollback(t *testing.T) {
 			string([]byte{0xDD}): errors.New("blob store unavailable"),
 		},
 	})
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	before := BlobOrphanCount()
 
 	err := deleteTxBlobs(db, [][]byte{{0xDD}}, txn)

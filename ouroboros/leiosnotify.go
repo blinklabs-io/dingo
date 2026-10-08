@@ -1429,7 +1429,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 }
 
 func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
-	ctx context.Context,
+	ctx context.Context, //nolint:contextcheck // literal-nil fallback
 	client leiosBlockTxsRequester,
 	point ocommon.Point,
 	txCount int,

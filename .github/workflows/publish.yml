@@ -1037,7 +1037,7 @@ jobs:
               exit 0
             fi
             gh pr create --repo "$TAP_REPO" --base main --head "$RELEASE_BRANCH" \
-              --title "dingo ${RELEASE_TAG}" \
+              --title "chore(dingo): release ${RELEASE_TAG}" \
               --body "Automated formula bump for [dingo ${RELEASE_TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG})."
           else
             echo "Open PR already exists for ${RELEASE_BRANCH}; tap branch is current."

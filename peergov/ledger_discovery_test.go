@@ -1124,7 +1124,7 @@ type slotLedgerPeerProvider struct {
 	calls atomic.Int32
 }
 
-func (p *slotLedgerPeerProvider) GetPoolRelays() ([]PoolRelay, error) {
+func (p *slotLedgerPeerProvider) GetPoolRelays(ctx context.Context) ([]PoolRelay, error) {
 	p.calls.Add(1)
 	return nil, nil
 }

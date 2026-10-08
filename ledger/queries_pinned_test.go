@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -43,7 +44,7 @@ func seedAddressUtxoAt(
 ) []byte {
 	t.Helper()
 	txId := bytes.Repeat([]byte{txIdSeed}, 32)
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
 		TxId:       txId,
 		OutputIdx:  0,
 		PaymentKey: addr.PaymentKeyHash().Bytes(),
@@ -69,7 +70,7 @@ func utxoByAddressAmounts(
 ) []uint64 {
 	t.Helper()
 	result, err := ls.queryShelleyUtxoByAddress(
-		[]ledger.Address{addr}, at, nil,
+		t.Context(), []ledger.Address{addr}, at, nil,
 	)
 	require.NoError(t, err)
 	reply := result.([]any)[0]
@@ -103,11 +104,13 @@ func TestQueryShelleyUtxoByAddress_PinnedPointAnswersAtThatPoint(t *testing.T) {
 	seedAddressUtxoAt(t, db, addr, 0x03, 600, 3_000_000)
 	spentBefore := seedAddressUtxoAt(t, db, addr, 0x04, 100, 4_000_000)
 	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		t.Context(),
 		nil,
 		[]dbtypes.UtxoKey{{TxId: spentLater, OutputIdx: 0}},
 		500,
 	))
 	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		t.Context(),
 		nil,
 		[]dbtypes.UtxoKey{{TxId: spentBefore, OutputIdx: 0}},
 		200,
@@ -147,11 +150,11 @@ func TestQueryShelleyUtxoByAddress_PinnedPastRetentionFloorRejected(
 	require.NoError(t, err)
 
 	_, err = ls.queryShelleyUtxoByAddress(
-		[]ledger.Address{addr}, QueryPoint{Slot: 149_999}, nil,
+		t.Context(), []ledger.Address{addr}, QueryPoint{Slot: 149_999}, nil,
 	)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 	_, err = ls.queryShelleyUtxoByAddress(
-		[]ledger.Address{addr}, QueryPoint{Slot: 150_000}, nil,
+		t.Context(), []ledger.Address{addr}, QueryPoint{Slot: 150_000}, nil,
 	)
 	require.NoError(t, err)
 }
@@ -181,7 +184,7 @@ func TestQueryShelleyAccountState_PinnedPointReadsRowInEffect(t *testing.T) {
 		{QueryPoint{Slot: 500}, 20, 800},
 		{QueryPoint{}, 20, 800},
 	} {
-		result, err := ls.queryShelleyAccountState(tc.at, nil)
+		result, err := ls.queryShelleyAccountState(t.Context(), tc.at, nil)
 		require.NoError(t, err)
 		got := accountState(t, result)
 		require.Equal(t, tc.treasury, got.Treasury, "slot %d", tc.at.Slot)
@@ -196,7 +199,7 @@ func TestQueryShelleyAccountState_PinnedBeforeFirstRowRejected(t *testing.T) {
 	ls := newPoolDistr2Ledger(t, db)
 	require.NoError(t, db.Metadata().SetNetworkState(10, 900, 100, nil))
 
-	_, err := ls.queryShelleyAccountState(QueryPoint{Slot: 99}, nil)
+	_, err := ls.queryShelleyAccountState(t.Context(), QueryPoint{Slot: 99}, nil)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
@@ -290,7 +293,7 @@ func TestQueryShelleyStakeSnapshots_PinnedPointReadsItsEpoch(t *testing.T) {
 		{"live epoch 6", QueryPoint{}, 600, 500, 400},
 	} {
 		result, err := ls.queryShelleyStakeSnapshots(
-			stakeSnapshotsQuery(), tc.at, nil,
+			t.Context(), stakeSnapshotsQuery(), tc.at, nil,
 		)
 		require.NoError(t, err, tc.name)
 		got := stakeSnapshotsResult(t, result)
@@ -315,7 +318,7 @@ func TestQueryShelleyStakeSnapshots_PinnedGoSnapshotPrunedRejected(
 
 	ls := newStakeSnapshotsLedger(t, repeatedBytes(28, 0x22), 10, 10)
 	_, err := ls.queryShelleyStakeSnapshots(
-		stakeSnapshotsQuery(), QueryPoint{Slot: 450}, nil,
+		t.Context(), stakeSnapshotsQuery(), QueryPoint{Slot: 450}, nil,
 	)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
@@ -333,13 +336,13 @@ func TestQueryShelleyStakeSnapshots_PinnedPointUsesItsProtocolVersion(
 	key := lcommon.NewBlake2b224(idle)
 
 	pinned, err := ls.queryShelleyStakeSnapshots(
-		stakeSnapshotsQuery(idle), QueryPoint{Slot: 550}, nil,
+		t.Context(), stakeSnapshotsQuery(idle), QueryPoint{Slot: 550}, nil,
 	)
 	require.NoError(t, err)
 	require.Contains(t, stakeSnapshotsResult(t, pinned).PoolSnapshots, key)
 
 	live, err := ls.queryShelleyStakeSnapshots(
-		stakeSnapshotsQuery(idle), QueryPoint{}, nil,
+		t.Context(), stakeSnapshotsQuery(idle), QueryPoint{}, nil,
 	)
 	require.NoError(t, err)
 	require.NotContains(t, stakeSnapshotsResult(t, live).PoolSnapshots, key)
@@ -377,12 +380,14 @@ func TestQuery_PinnedPointReachesUtxoByAddressAccountStateAndStakeSnapshots(
 	require.NoError(t, err)
 	spent := seedAddressUtxoAt(t, db, addr, 0x05, 100, 5_000_000)
 	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		t.Context(),
 		nil,
 		[]dbtypes.UtxoKey{{TxId: spent, OutputIdx: 0}},
 		600,
 	))
 
 	result, err := ls.Query(
+		t.Context(),
 		shelleyLeafQuery(&olocalstatequery.ShelleyUtxoByAddressQuery{
 			Addrs: []ledger.Address{addr},
 		}),
@@ -395,13 +400,14 @@ func TestQuery_PinnedPointReachesUtxoByAddressAccountStateAndStakeSnapshots(
 	require.Len(t, utxos, 1, "the output spent at 600 was live at 550")
 
 	result, err = ls.Query(
+		t.Context(),
 		shelleyLeafQuery(&olocalstatequery.ShelleyAccountStateQuery{}),
 		at,
 	)
 	require.NoError(t, err)
 	require.Equal(t, int64(10), accountState(t, result).Treasury)
 
-	result, err = ls.Query(shelleyLeafQuery(stakeSnapshotsQuery()), at)
+	result, err = ls.Query(t.Context(), shelleyLeafQuery(stakeSnapshotsQuery()), at)
 	require.NoError(t, err)
 	snapshot := stakeSnapshotsResult(t, result).
 		PoolSnapshots[lcommon.NewBlake2b224(pool)]
@@ -426,11 +432,11 @@ func TestVerifyPointQueryable_RejectsPointWhoseGoSnapshotIsPruned(
 	seedBlockAtSlot(t, ls, 450, pruned)
 	seedBlockAtSlot(t, ls, 550, retained)
 
-	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 450, Hash: pruned})
+	err := ls.VerifyPointQueryable(t.Context(), nil, QueryPoint{Slot: 450, Hash: pruned})
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 	require.NoError(
 		t,
-		ls.VerifyPointQueryable(nil, QueryPoint{Slot: 550, Hash: retained}),
+		ls.VerifyPointQueryable(t.Context(), nil, QueryPoint{Slot: 550, Hash: retained}),
 	)
 }
 
@@ -494,14 +500,14 @@ func TestQueryShelleyStakePools_PinnedPointAnswersAtThatPoint(t *testing.T) {
 
 	ls, early, late := newStakePoolsLedger(t)
 
-	pinned, err := ls.queryShelleyStakePools(QueryPoint{Slot: 300}, nil)
+	pinned, err := ls.queryShelleyStakePools(context.Background(), QueryPoint{Slot: 300}, nil)
 	require.NoError(t, err)
 	require.Equal(
 		t, []ledger.PoolId{poolID(early)}, stakePoolIDs(t, pinned),
 		"the pool registered at slot 600 did not exist at slot 300",
 	)
 
-	live, err := ls.queryShelleyStakePools(QueryPoint{}, nil)
+	live, err := ls.queryShelleyStakePools(context.Background(), QueryPoint{}, nil)
 	require.NoError(t, err)
 	require.ElementsMatch(
 		t, []ledger.PoolId{poolID(early), poolID(late)}, stakePoolIDs(t, live),
@@ -514,7 +520,7 @@ func TestQueryShelleyStakePools_PinnedSlotWithoutEpochDataRejected(
 	t.Parallel()
 
 	ls, _, _ := newStakePoolsLedger(t)
-	_, err := ls.queryShelleyStakePools(QueryPoint{Slot: 5_000}, nil)
+	_, err := ls.queryShelleyStakePools(context.Background(), QueryPoint{Slot: 5_000}, nil)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
@@ -529,6 +535,7 @@ func TestQuery_PinnedPointReachesStakePools(t *testing.T) {
 	seedBlockAtSlot(t, ls, 300, hash)
 
 	result, err := ls.Query(
+		context.Background(),
 		shelleyLeafQuery(&olocalstatequery.ShelleyStakePoolsQuery{}),
 		QueryPoint{Slot: 300, Hash: hash},
 	)
@@ -602,6 +609,7 @@ func seedAccountTxAt(
 	blockHash := make([]byte, 32)
 	copy(blockHash, txId)
 	require.NoError(t, db.SetTransactionMetadataOnly(
+		context.Background(),
 		tx,
 		ocommon.NewPoint(slot, blockHash),
 		0,
@@ -667,7 +675,7 @@ func TestQueryShelleyStakeDelegDeposits_PinnedPointAnswersAtThatPoint(
 			},
 		},
 	} {
-		result, err := ls.queryShelleyStakeDelegDeposits(creds, tc.at, nil)
+		result, err := ls.queryShelleyStakeDelegDeposits(context.Background(), creds, tc.at, nil)
 		require.NoError(t, err, tc.name)
 		require.Equal(t, tc.want, stakeDeposits(t, result), tc.name)
 	}
@@ -693,6 +701,7 @@ func TestQueryShelleyStakeDelegDeposits_PinnedPointSkipsLongHistory(
 	cred := stakeQueryCred(key)
 
 	result, err := ls.queryShelleyStakeDelegDeposits(
+		context.Background(),
 		[]olocalstatequery.StakeCredential{cred},
 		QueryPoint{Slot: 300},
 		nil,
@@ -724,6 +733,7 @@ func TestQuery_PinnedPointReachesStakeDelegDeposits(t *testing.T) {
 	cred := stakeQueryCred(key)
 
 	result, err := ls.Query(
+		context.Background(),
 		shelleyLeafQuery(&olocalstatequery.ShelleyStakeDelegDepositsQuery{
 			Creds: cbor.NewSetType(
 				[]olocalstatequery.StakeCredential{cred}, true,
@@ -767,7 +777,7 @@ func TestQueryShelleyStakeDelegDeposits_ImportedBaseline(t *testing.T) {
 		msg string,
 	) {
 		t.Helper()
-		result, err := ls.queryShelleyStakeDelegDeposits(creds, at, nil)
+		result, err := ls.queryShelleyStakeDelegDeposits(context.Background(), creds, at, nil)
 		require.NoError(t, err, msg)
 		require.Equal(t, want, stakeDeposits(t, result), msg)
 	}
@@ -804,7 +814,7 @@ func TestQueryShelleyStakeDelegDeposits_SameSlotDeregistrationSupersedesBaseline
 	creds := []olocalstatequery.StakeCredential{stakeQueryCred(key)}
 
 	for _, at := range []QueryPoint{{Slot: 200}, {Slot: 300}, {}} {
-		result, err := ls.queryShelleyStakeDelegDeposits(creds, at, nil)
+		result, err := ls.queryShelleyStakeDelegDeposits(context.Background(), creds, at, nil)
 		require.NoError(t, err)
 		require.Empty(t, stakeDeposits(t, result), "slot %d", at.Slot)
 	}
@@ -872,7 +882,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_PinnedPointAnswersAtTha
 	seedStakeCertAt(t, db, left, true, 100, 2_000_000)
 	seedPoolDelegationAt(t, db, moved, firstPool, 200)
 	require.NoError(t, db.AddAccountRewardByCredential(
-		0, moved, 5_000_000, 300, repeatedBytes(32, 0xC1), nil,
+		context.Background(), 0, moved, 5_000_000, 300, repeatedBytes(32, 0xC1), nil,
 	))
 	seedPoolDelegationAt(t, db, moved, secondPool, 400)
 	seedStakeCertAt(t, db, left, false, 450, 2_000_000)
@@ -880,7 +890,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_PinnedPointAnswersAtTha
 		0, moved, 5_000_000, 500, repeatedBytes(32, 0xC3), nil,
 	))
 	require.NoError(t, db.AddAccountRewardByCredential(
-		0, moved, 1_000_000, 600, repeatedBytes(32, 0xC2), nil,
+		context.Background(), 0, moved, 1_000_000, 600, repeatedBytes(32, 0xC2), nil,
 	))
 	movedCred, leftCred := stakeQueryCred(moved), stakeQueryCred(left)
 	creds := []olocalstatequery.StakeCredential{movedCred, leftCred}
@@ -955,6 +965,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_PinnedPointAnswersAtTha
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
+				context.Background(),
 				creds, tc.at, nil,
 			)
 			require.NoError(t, err)
@@ -1032,6 +1043,7 @@ func TestQueryShelleyFilteredVoteDelegatees_PinnedPointAnswersAtThatPoint(
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result, err := ls.queryShelleyFilteredVoteDelegatees(
+				context.Background(),
 				creds, tc.at, nil,
 			)
 			require.NoError(t, err)
@@ -1058,7 +1070,7 @@ func TestQueryShelleyFilteredVoteDelegatees_PinnedPointKeepsPV10Clear(
 	}
 	seedStakeCertAt(t, db, key, true, 100, 2_000_000)
 	seedVoteDelegationAt(t, db, key, drep, 200)
-	cleared, err := db.ClearDanglingDRepDelegations(300, nil)
+	cleared, err := db.ClearDanglingDRepDelegations(context.Background(), 300, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, cleared)
 	seedPoolDelegationAt(t, db, key, repeatedBytes(28, 0xA5), 400)
@@ -1088,6 +1100,7 @@ func TestQueryShelleyFilteredVoteDelegatees_PinnedPointKeepsPV10Clear(
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result, err := ls.queryShelleyFilteredVoteDelegatees(
+				context.Background(),
 				creds, tc.at, nil,
 			)
 			require.NoError(t, err)
@@ -1134,6 +1147,7 @@ func TestQueryShelleyFilteredDelegations_PinnedPointImportedBaseline(
 	cred := stakeQueryCred(key)
 
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
+		context.Background(),
 		[]olocalstatequery.StakeCredential{cred}, QueryPoint{Slot: 300}, nil,
 	)
 	require.NoError(t, err)
@@ -1146,6 +1160,7 @@ func TestQueryShelleyFilteredDelegations_PinnedPointImportedBaseline(
 	}, rewards)
 
 	result, err = ls.queryShelleyFilteredVoteDelegatees(
+		context.Background(),
 		[]lcommon.Credential{stakeKeyCredential(key)}, QueryPoint{Slot: 300}, nil,
 	)
 	require.NoError(t, err)
@@ -1154,6 +1169,7 @@ func TestQueryShelleyFilteredDelegations_PinnedPointImportedBaseline(
 	}, voteDelegatees(t, result))
 
 	result, err = ls.queryShelleyFilteredDelegationAndRewardAccounts(
+		context.Background(),
 		[]olocalstatequery.StakeCredential{cred}, QueryPoint{Slot: 500}, nil,
 	)
 	require.NoError(t, err)
@@ -1188,6 +1204,7 @@ func TestQuery_PinnedPointReachesFilteredDelegationsAndVoteDelegatees(
 	at := QueryPoint{Slot: 300, Hash: hash}
 
 	result, err := ls.Query(
+		context.Background(),
 		shelleyLeafQuery(
 			&olocalstatequery.ShelleyFilteredDelegationAndRewardAccountsQuery{
 				Creds: cbor.NewSetType(
@@ -1203,6 +1220,7 @@ func TestQuery_PinnedPointReachesFilteredDelegationsAndVoteDelegatees(
 	require.Equal(t, map[olocalstatequery.StakeCredential]uint64{cred: 0}, rewards)
 
 	result, err = ls.Query(
+		context.Background(),
 		shelleyLeafQuery(&olocalstatequery.ShelleyFilteredVoteDelegateesQuery{
 			Credentials: cbor.NewSetType(
 				[]lcommon.Credential{stakeKeyCredential(key)}, true,
@@ -1228,15 +1246,15 @@ func TestVerifyPointQueryable_RejectsPointBelowMithrilTrustBoundary(
 	boundary := QueryPoint{Slot: 560, Hash: repeatedBytes(32, 0x64)}
 	seedBlockAtSlot(t, ls, below.Slot, below.Hash)
 	seedBlockAtSlot(t, ls, boundary.Slot, boundary.Hash)
-	require.NoError(t, ls.VerifyPointQueryable(nil, below))
+	require.NoError(t, ls.VerifyPointQueryable(context.Background(), nil, below))
 
 	ls.mithrilLedgerSlot = boundary.Slot
 	require.ErrorIs(
 		t,
-		ls.VerifyPointQueryable(nil, below),
+		ls.VerifyPointQueryable(context.Background(), nil, below),
 		ErrHistoricalStateUnavailable,
 	)
-	require.NoError(t, ls.VerifyPointQueryable(nil, boundary))
+	require.NoError(t, ls.VerifyPointQueryable(context.Background(), nil, boundary))
 }
 
 func seedProposalAt(
@@ -1259,7 +1277,7 @@ func seedProposalAt(
 		GovActionCbor: govAction,
 		AddedSlot:     addedSlot,
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(t, db.SetGovernanceProposal(t.Context(), proposal, nil))
 	return proposal
 }
 
@@ -1271,7 +1289,7 @@ func proposalsAt(
 	at QueryPoint,
 ) map[byte]map[olocalstatequery.StakeCredential]lcommon.Vote {
 	t.Helper()
-	result, err := ls.queryShelleyGetProposals(nil, at, nil)
+	result, err := ls.queryShelleyGetProposals(t.Context(), nil, at, nil)
 	require.NoError(t, err)
 	proposals, ok := result.([]any)[0].(olocalstatequery.ProposalsResult)
 	require.True(t, ok)
@@ -1293,14 +1311,14 @@ func TestQueryShelleyGetProposals_PinnedPointAnswersAtThatPoint(
 	dropped := seedProposalAt(t, db, 0x81, 100)
 	seedProposalAt(t, db, 0x91, 300)
 	voter := repeatedBytes(28, 0x75)
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceVote(t.Context(), &models.GovernanceVote{
 		ProposalID:      enacted.ID,
 		VoterType:       models.VoterTypeDRep,
 		VoterCredential: voter,
 		Vote:            models.VoteYes,
 		AddedSlot:       150,
 	}, nil))
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceVote(t.Context(), &models.GovernanceVote{
 		ProposalID:      enacted.ID,
 		VoterType:       models.VoterTypeDRep,
 		VoterCredential: voter,
@@ -1312,10 +1330,10 @@ func TestQueryShelleyGetProposals_PinnedPointAnswersAtThatPoint(
 	droppedEpoch, droppedSlot := uint64(4), uint64(400)
 	dropped.ExpiredEpoch, dropped.ExpiredSlot = &expiredEpoch, &expiredSlot
 	dropped.DroppedEpoch, dropped.DroppedSlot = &droppedEpoch, &droppedSlot
-	require.NoError(t, db.SetGovernanceProposal(dropped, nil))
+	require.NoError(t, db.SetGovernanceProposal(t.Context(), dropped, nil))
 	enactedEpoch, enactedSlot := uint64(5), uint64(500)
 	enacted.EnactedEpoch, enacted.EnactedSlot = &enactedEpoch, &enactedSlot
-	require.NoError(t, db.SetGovernanceProposal(enacted, nil))
+	require.NoError(t, db.SetGovernanceProposal(t.Context(), enacted, nil))
 
 	cred := olocalstatequery.StakeCredential{
 		Tag:   0,
@@ -1397,7 +1415,7 @@ func seedDRepAt(
 		})
 	switch cert.(type) {
 	case *lcommon.RegistrationDrepCertificate, *lcommon.UpdateDrepCertificate:
-		require.NoError(t, db.UpdateDRepActivity(0, drep, epoch, 20, slot, nil))
+		require.NoError(t, db.UpdateDRepActivity(t.Context(), 0, drep, epoch, 20, slot, nil))
 	}
 }
 
@@ -1453,7 +1471,7 @@ func TestQueryShelleyDRepState_PinnedPointAnswersAtThatPoint(t *testing.T) {
 		DrepCredential: lateCred,
 		Amount:         500_000_000,
 	}, 350, 3, 500_000_000)
-	require.NoError(t, db.UpdateDRepActivity(0, retiring, 4, 20, 400, nil))
+	require.NoError(t, db.UpdateDRepActivity(t.Context(), 0, retiring, 4, 20, 400, nil))
 	seedVoteDelegationAt(t, db, later, drep, 450)
 	seedVoteDelegationAt(
 		t, db, moved, lcommon.Drep{Type: lcommon.DrepTypeAbstain}, 550,
@@ -1463,7 +1481,7 @@ func TestQueryShelleyDRepState_PinnedPointAnswersAtThatPoint(t *testing.T) {
 		Amount:         500_000_000,
 	}, 600, 6, 500_000_000)
 	// A vote renews the second DRep's expiry without touching its row.
-	require.NoError(t, db.UpdateDRepActivity(0, late, 6, 20, 650, nil))
+	require.NoError(t, db.UpdateDRepActivity(t.Context(), 0, late, 6, 20, 650, nil))
 
 	retiringKey := olocalstatequery.StakeCredential{
 		Tag:   0,
@@ -1552,7 +1570,7 @@ func TestQueryShelleyDRepState_PinnedPointAnswersAtThatPoint(t *testing.T) {
 		{name: "unpinned", at: QueryPoint{}, want: tip},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := ls.queryShelleyDRepState(tc.creds, tc.at, nil)
+			result, err := ls.queryShelleyDRepState(t.Context(), tc.creds, tc.at, nil)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, drepStates(t, result))
 		})
@@ -1588,10 +1606,10 @@ func TestRestoreDrepStateAtSlot_RestoresExpiryFromHistory(t *testing.T) {
 			seedDRepAt(t, db, key, &lcommon.UpdateDrepCertificate{
 				DrepCredential: cred,
 			}, 300, 3, 0)
-			require.NoError(t, db.UpdateDRepActivity(0, key, 4, 20, 400, nil))
+			require.NoError(t, db.UpdateDRepActivity(t.Context(), 0, key, 4, 20, 400, nil))
 
-			require.NoError(t, db.RestoreDrepStateAtSlot(tc.rollbackTo, nil))
-			drep, err := db.GetDrepByCredential(0, key, true, nil)
+			require.NoError(t, db.RestoreDrepStateAtSlot(t.Context(), tc.rollbackTo, nil))
+			drep, err := db.GetDrepByCredential(t.Context(), 0, key, true, nil)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, drep.ExpiryEpoch)
 		})
@@ -1620,6 +1638,7 @@ func TestQuery_PinnedPointReachesDRepStateAndProposals(t *testing.T) {
 	at := QueryPoint{Slot: 300, Hash: hash}
 
 	result, err := ls.Query(
+		t.Context(),
 		shelleyLeafQuery(&olocalstatequery.ShelleyDRepStateQuery{
 			Credentials: cbor.NewSetType([]lcommon.Credential{}, true),
 		}),
@@ -1629,6 +1648,7 @@ func TestQuery_PinnedPointReachesDRepStateAndProposals(t *testing.T) {
 	require.Empty(t, drepStates(t, result))
 
 	result, err = ls.Query(
+		t.Context(),
 		shelleyLeafQuery(&olocalstatequery.ShelleyGetProposalsQuery{
 			ActionIds: cbor.NewSetType([]lcommon.GovActionId{}, true),
 		}),

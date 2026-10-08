@@ -178,25 +178,37 @@ Two gaps in that propagation are deliberate:
   instead, by the PostgreSQL/MySQL providers' statement/lock timeout
   configuration (`StatementTimeout`/`LockTimeout` in
   `database/plugin/metadata/{postgres,mysql}/provider.go`).
-- A handful of methods that take no `txn` parameter at all -- the
-  `SettingsStore` family, `HasDeferredIndexesPending`,
-  `FindUnspentMidnightAssetCreates`/`FindUnspentMidnightRegistrations` --
-  remain on `context.Background()`. Giving them a `ctx` means changing their
-  exported signatures and every external caller (`node.go`,
-  `internal/settingsresolve`, `database/commit_timestamp.go`,
-  `database/lifecycle/snapshot.go`, `bark/blob.go`,
-  `midnight/indexer/indexer.go`), which reaches outside `sqlstore`'s own
-  package boundary.
+- Methods without a transaction or context parameter, including
+  `HasDeferredIndexesPending` and the Midnight indexer find methods, use
+  `context.Background()`. Startup settings and gate methods in `SettingsStore`
+  accept the caller context directly.
 
-`database/txn.go`'s `NewTxn`/`NewMetadataOnlyTxn` are, today, where that
-propagation stops short of `database.Database`'s own callers: both still pass
-`context.Background()` into `Transaction`/`ReadTransaction` rather than a
-caller-supplied `ctx`, so a `ctx` cancellation reaching `database.Database`'s
-facade methods does not yet cancel the metadata-store transaction underneath
-them. Threading a `ctx` through `database.Database`'s own public API and its
-~100 call sites is not yet done; `golangci-lint`'s
-`contextcheck` is disabled repo-wide until then, since it reports at each of
-those callers, not at this boundary itself.
+
+`database.Database`'s own API carries the caller's `ctx` the rest of the way:
+`Transaction(ctx, readWrite)`, `MetadataTxn(ctx, readWrite)`, `NewTxn` and
+`NewMetadataOnlyTxn` carry it into the metadata store's `Transaction`/
+`ReadTransaction`, and context-aware facade methods that can open their own
+metadata transaction (the block lookups such as `BlockByPoint` and
+`BlocksRecent`, and the domain
+methods that open one when called with a nil `txn`) take `ctx` as their first
+parameter. Read transactions follow caller cancellation for their entire
+lifetime. Write transactions forward cancellation until `Txn.Commit` begins;
+an already-canceled caller causes rollback before the blob commit. Commit
+then detaches cancellation so shutdown during blob sync cannot roll back SQL
+after the blob has committed. The cancellation callback and commit transition
+are serialized, and transaction completion releases the context and callback.
+HTTP and RPC adapters pass request contexts into these methods.
+Node listener providers retain the node lifecycle context. Mempool chain workers
+derive a context from startup and cancel it before waiting for shutdown, so
+in-flight validation can release its database transaction. Ratification jobs
+retain caller values without caller cancellation and independently observe
+ledger shutdown. Mandatory recovery
+and after-commit persistence use `context.WithoutCancel` to finish repair after
+the initiating request ends. Blob providers have no context API; batch loops
+check cancellation between operations. `golangci-lint`'s `contextcheck` is enabled for the whole
+module; a function that holds a `ctx` and must still detach from it (a loop
+bound to the node lifecycle, a literal-nil `ctx` fallback) says why in a
+`//nolint:contextcheck` comment.
 
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
@@ -515,7 +527,7 @@ sequenceDiagram
     LS->>LS: update UTXO set, process certs & governance
     LS->>LS: compute epoch nonce contributions
     LS->>LS: at an era boundary, enact source-era pparams before hard-fork transitions
-    LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block
+    LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block, never ahead of a configured TriggerAtEpoch
     LS->>LS: on a two-era boundary, defer the mark-snapshot capture until the final era and pparams are persisted
 
     Note over Peer,DB: Stage 4 — Persistence
@@ -1381,6 +1393,7 @@ dingo/
 ├── bark/                # Bark Dingo-to-Dingo C2 and archive protocol
 │   ├── bark.go          # Bark server lifecycle and transport setup
 │   ├── archive.go       # Archive service interface
+│   ├── lifecycle.go     # Remote Stop/Restart/GetStatus service
 │   └── blob.go          # Remote archive blob adapter
 ├── midnight/            # Midnight MidnightState gRPC compatibility surface
 │   ├── midnight_state*.pb.go # Generated google.golang.org/grpc service stubs
@@ -1904,6 +1917,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `peergov.quota_status` | PeerGov | Quota status update |
 | `peergov.bootstrap_exited` | PeerGov | Exited bootstrap mode |
 | `peergov.bootstrap_recovery` | PeerGov | Bootstrap recovery |
+| `node.lifecycle` | Node | Remote stop or restart accepted; carries the graceful timeout and deadline |
 
 **Equivocation detection.** The node subscribes an observer
 (`equivocationDetector`, `node_equivocation.go`) to `chain.update`, detachable
@@ -3847,7 +3861,15 @@ CIP-1694 `HardForkInitiation` governance action, post-voting-deadline only).
 Each era's `NextEraTrigger` kind is exactly one of `TriggerAtEpoch`,
 `TriggerAtVersion`, or `TriggerNotDuringThisExecution` (the final configured
 era), so `evaluateTriggerAtEpoch` and `evaluateProtocolVersionBump` never
-compete for the same era. The classic update-proposal system has a voting
+compete for the same era. `eras.BuildShape` resolves `TriggerAtEpoch` through
+`CardanoNodeConfig.HardForkEpoch`, which, like cardano-node's
+`parseHardForkProtocol`, honours `TestShelleyHardForkAtEpoch` through
+`TestConwayHardForkAtEpoch` whatever `ExperimentalHardForksEnabled` says and
+reads `TestDijkstraHardForkAtEpoch` only when that flag is true. The same
+trigger bounds `boundaryEraForBlock`'s two-era elevation: a boundary block's
+header protocol major is cardano-node's advertised `cardanoProtocolVersion`
+(11, or 12 with the flag), not its era, so it cannot carry the ledger into a
+successor whose configured epoch has not arrived. The classic update-proposal system has a voting
 deadline too: a proposal for the next epoch can be submitted or superseded
 only before `2 * stabilityWindow` before that epoch starts (the Shelley PPUP
 rule). `evaluateProtocolVersionBump` therefore reports the transition only
@@ -5645,6 +5667,35 @@ RFC 3849 `2001:db8::/32`. Operator-configured topology peers intentionally
 retain their separate exemption for private addresses, and an already
 established inbound peer is not reclassified by this admission check.
 
+Hot and warm selection targets govern outbound peers only. Inbound peers are
+not counted toward, and are never removed by, the `TargetNumberOfActivePeers`
+and `TargetNumberOfEstablishedPeers` limits; only inbound-specific policy
+(connection and per-IP limits, idle/flap pruning, `InboundWarmTarget`,
+`InboundHotQuota`) closes them. Warm inbound peers beyond `InboundWarmTarget`
+are removed in `enforcePeerLimits`, least recently served first (then lowest
+score); hot inbound peers are bounded at promotion by `InboundHotQuota`. The governor owns hot promotion: starting a
+chainsync client calls `SetPeerHotByConnId`, which leaves the peer warm when
+promotion would exceed the active target, its per-source quota, or the inbound
+hot budget (local roots are exempt). Reconcile promotes it later.
+Reconcile's hot refill counts outbound hot peers only, and an inbound peer it
+promotes does not use up an outbound refill slot, so inbound hot peers never
+occupy outbound refill slots.
+
+Inbound idle pruning treats a peer as idle only when it is quiet in both
+directions. `Peer.LastServedActivity` records downstream consumption: chainsync
+server FindIntersect/RequestNext/awaited-reply, blockfetch server RequestRange,
+and keepalive pings. FindIntersect counts only when an intersection is
+actually served, so rejected or unmatched requests cannot keep an idle peer.
+`ouroboros` reports it through `PeerGovernor.RecordServedActivityByConnId`,
+throttled to once per 10 seconds per connection (on the monotonic clock) so
+the per-header path never takes the governor lock. It is kept
+separate from `LastActivity`, which drives outbound hot and churn decisions.
+Flapping cooldown ignores served activity, but it judges the current session:
+a peer whose live inbound session has lasted past `minStableConnectionDuration`
+(30s) is not flapping, whatever its earlier short sessions were. Without that,
+a warm inbound peer that once reconnected twice in quick succession was cut
+from a stable session and its host was denied for the cooldown.
+
 Peer targets configured directly by Dingo through YAML, environment variables,
 or CLI flags take precedence over the corresponding Cardano configuration.
 When Dingo's root-peer target is unset, composition applies
@@ -5768,6 +5819,10 @@ to the fast floor. Each provider query and relay-candidate pass is single-flight
 across reconcile and emergency ticks: its generation remains claimed until the
 round completes, errors, is canceled, or panics, so a slow provider cannot
 overlap the next tick or leave an artificial retry delay behind.
+
+Initial hostname normalization during peer admission is bounded by the same
+DNS timeout used for dialing; a resolution error keeps the lowercased hostname
+so an unavailable resolver cannot block admission indefinitely.
 
 Each outbound dial attempt re-resolves a hostname-based peer's address fresh,
 narrows the records to the address families the local host can route to
@@ -12085,6 +12140,44 @@ documented "one operation at a time" invariant (a second call while one is
 running gets `FAILED_PRECONDITION`) and is the backing store for
 `GetOperationHistory` (in-memory only — does not survive a bark restart).
 
+**LifecycleService** (`bark/lifecycle.go`) mounts bark's `LifecycleService`
+(Stop, Restart, GetStatus) when `BarkConfig.Node` is set, which `node.go`'s
+`Run()` does only when `barkLifecycleEnabled` is true. Stop and Restart use
+`barkLifecycleOperatorCertificateFingerprints`, a distinct allowlist from the
+DatabaseService operator policy, so enabling database lifecycle access grants
+no process-control privilege. Bark owns the transport,
+authentication and request validation (a negative `graceful_timeout` is
+`INVALID_ARGUMENT`) and delegates to `bark.NodeControl`, implemented by
+`*dingo.Node` in `node_remote_lifecycle.go`. `Stop` and `Restart` are
+classified destructive and `GetStatus` read-only in
+`newOperatorAuthInterceptor`, so Stop and Restart need an allowlisted operator
+certificate and `GetStatus` only a verified one. `Node.RequestShutdown` accepts
+exactly one request (a later one gets `FAILED_PRECONDITION`), resolves the
+timeout (zero, or anything longer than `shutdownTimeout`, selects
+`shutdownTimeout`, the bound `Node.Stop` enforces), publishes
+`event.NodeLifecycleEvent` on `node.lifecycle`, and signals a `ShutdownRequest`
+on `Node.ShutdownRequests`. `internal/node.Run` ends the run on that signal as
+it would on a signal, then, however the run ended, calls
+`Node.EndShutdownRequests`, which returns the accepted request and closes the
+intake: Bark keeps serving until shutdown phase 1 stops it, so a Stop or
+Restart arriving after a signal or component error gets `FAILED_PRECONDITION`
+instead of being acknowledged and never performed. `runRequestedShutdown`
+bounds the graceful shutdown by the request's deadline and abandons it past
+that deadline. A restart then
+calls `dingo.ReExec`, which `exec`s the same binary and arguments in place
+(Unix only; elsewhere `Restart` is `UNIMPLEMENTED`) so a supervisor sees one
+continuous process, and it does so even after a forced deadline. `GetStatus`
+reports the accepted state and deadline, uptime, version, the health probe's
+readiness and tip gap as health and sync status, and the ledger tip (omitted
+while a live restore or truncate holds `liveLifecycleMu`). Unlike the
+`lifecycle.proto` comment, `GetStatus` does not stay reachable while the
+shutdown drains: `Node.shutdown` stops Bark in phase 1, before phase 2 drains
+connections and phase 3 flushes and closes the database. Keeping it up longer
+would leave DatabaseService reachable while shutdown holds `liveLifecycleMu`,
+where a Restore or Truncate blocks on that gate and Bark's own stop waits for
+it until the shutdown deadline. A caller observes completion by the listener
+closing and, for a restart, by the re-executed process serving again.
+
 **Request bounds.** Every Bark Connect handler, including ArchiveService,
 DatabaseService, health, and reflection, uses per-message 1 MiB read and send
 limits. Connect applies the read limit independently to compressed wire bytes
@@ -12097,8 +12190,9 @@ request read timeout but no write timeout, so slow request bodies are bounded
 without imposing an overall deadline on long-lived server streams.
 
 **Authentication and authorization** (`bark/auth.go`).
-Bind address alone doesn't authenticate a caller. Every DatabaseService RPC
-requires mTLS client-certificate authentication, independent of bind address;
+Bind address alone doesn't authenticate a caller. Every DatabaseService and
+LifecycleService RPC requires mTLS client-certificate authentication,
+independent of bind address;
 the entirely-read-only ArchiveService remains public. `BarkConfig.
 TlsClientCAFilePath` supplies a PEM CA bundle. `startServer` loads it into an
 `x509.CertPool` and sets the listener's `ClientAuth` to
@@ -16058,3 +16152,11 @@ its own panics per-directory (`Manager.retryMirrorToCloud`) so one
 already-broken snapshot's cloud destination can't abort the scan for other
 directories or, since the scan runs synchronously ahead of the current
 epoch's own handling, block that epoch's own snapshot from ever running.
+
+LocalStateQuery handlers pass a request context through ledger queries and
+UTxO resolution workers. Reads are registered against their serving protocol
+instance before connection liveness is checked; closing that instance cancels
+its requests without canceling a replacement instance for the same connection
+identifier. UTxO RPC stake-distribution queries use their RPC request context.
+UTxO whole-query cancellation stops feeding new resolution work and drains
+in-flight results before releasing worker transactions and returning the error.
