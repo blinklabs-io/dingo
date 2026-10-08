@@ -2233,6 +2233,9 @@ func (ls *LedgerState) genesisSelectionState() (bool, uint64) {
 
 func (ls *LedgerState) peerHeaderHistoryLimit() int {
 	limit := maxPeerHeaderHistoryPerConn
+	if ls.chain != nil {
+		limit = max(limit, ls.allowedQueuedHeaders())
+	}
 	active, window := ls.genesisSelectionState()
 	if !active || window <= uint64(limit) {
 		return limit

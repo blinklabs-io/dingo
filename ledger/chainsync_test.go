@@ -2694,6 +2694,64 @@ func TestRecoverPeerHeaderHistoryPathWorkHonorsDepthLimit(t *testing.T) {
 	assert.Equal(t, limit, peerLookupCalls)
 }
 
+func TestPeerHeaderForkPathCoversQueuedCatchupWindow(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.lookupBlockByHash = func(hash []byte) (models.Block, error) {
+		if bytes.Equal(hash, fixture.currentTip.Point.Hash) {
+			return models.Block{
+				Hash:   fixture.currentTip.Point.Hash,
+				Slot:   fixture.currentTip.Point.Slot,
+				Number: fixture.currentTip.BlockNumber,
+				Type:   uint(gledger.BlockTypeBabbage),
+			}, nil
+		}
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	headerCount := fixture.ls.allowedQueuedHeaders()
+	require.Greater(t, headerCount, maxPeerHeaderHistoryPerConn)
+	headers := make([]mockHeader, headerCount)
+	prevHash := fixture.currentTip.Point.Hash
+	for i := range headerCount {
+		headers[i] = mockHeader{
+			hash: lcommon.NewBlake2b256(
+				testHashBytes(fmt.Sprintf("queued-catchup-%d", i)),
+			),
+			prevHash:    lcommon.NewBlake2b256(prevHash),
+			blockNumber: fixture.currentTip.BlockNumber + uint64(i) + 1,
+			slot:        fixture.currentTip.Point.Slot + uint64(i) + 1,
+		}
+		prevHash = headers[i].Hash().Bytes()
+	}
+	byHash := make(map[string]mockHeader, len(headers)-1)
+	for _, header := range headers[:len(headers)-1] {
+		byHash[string(header.Hash().Bytes())] = header
+	}
+	fixture.ls.config.PeerHeaderLookupFunc = func(
+		_ ouroboros.ConnectionId,
+		hash []byte,
+	) (ChainsyncEvent, []byte, bool) {
+		header, ok := byHash[string(hash)]
+		if !ok {
+			return ChainsyncEvent{}, nil, false
+		}
+		return ChainsyncEvent{
+			Point:       ocommon.NewPoint(header.slot, hash),
+			BlockHeader: header,
+		}, header.PrevHash().Bytes(), true
+	}
+
+	ancestor, path, found, err := fixture.ls.peerHeaderForkPath(
+		fixture.connId,
+		headers[len(headers)-1],
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, fixture.currentTip.Point, ancestor)
+	assert.Len(t, path, headerCount)
+}
+
 func TestFindPeerForkPathCachedTreatsMalformedRetainedRecordAsMissing(
 	t *testing.T,
 ) {

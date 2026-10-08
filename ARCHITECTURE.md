@@ -5212,7 +5212,7 @@ it. Dingo implements this as a **corroboration gate**
   `current-3` (`errPoolSnapshotPruned`, non-API storage modes only) is
   deferred rather than rejected, because the node no longer holds the state
   to evaluate it; a pool absent from a populated snapshot still rejects.
-  Only a definite failure excludes the header from observation and publishes
+  A definite failure also excludes the header from observation and publishes
   `ledger.ConnectionRecycleRequestedEventType`
   (`"header_verification_failure"`, translated to a connmanager recycle by
   node composition, the same as the ledger's own header-queue failures).
