@@ -31,12 +31,11 @@ jobs:
           ref: main
           persist-credentials: false
 
-      # Hosted tool caches can lag patch releases; resolve the latest 1.26.x.
+      # Pin the patch because hosted tool caches can lag security releases.
       - name: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.x
-          check-latest: true
+          go-version: '1.26.9'
           cache: false
 
       - name: cache-go-modules
@@ -45,9 +44,9 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.9-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.x-
+            ${{ runner.os }}-go-1.26.9-
 
       # Prepares a linked worktree (sharing the main checkout's `origin`
       # remote; push auth is not persisted in git config -- it is provided by
