@@ -269,7 +269,7 @@ const leiosBackfillAffinityWindow = 2 * time.Minute
 // is tried; the unanswered request leaves that connection's request slot
 // abandoned, so the next request on it is classified dead.
 func (o *Ouroboros) FetchEndorserBlockByPoint(
-	ctx context.Context,
+	ctx context.Context, //nolint:contextcheck // literal-nil fallback
 	ebSlot uint64,
 	ebHash []byte,
 ) error {

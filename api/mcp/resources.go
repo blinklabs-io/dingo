@@ -338,6 +338,7 @@ func RegisterResources(
 		queryTimeout = timeouts[0]
 	}
 	registerResources(
+		context.Background(),
 		server,
 		db,
 		ls,
@@ -349,6 +350,7 @@ func RegisterResources(
 }
 
 func registerResources(
+	ctx context.Context,
 	server *mcp.Server,
 	db *sql.DB,
 	ls *ledger.LedgerState,
@@ -525,7 +527,7 @@ func registerResources(
 		// the server permanently without per-table resources. A longer
 		// configured query timeout still applies.
 		ctx, cancel := context.WithTimeout(
-			context.Background(),
+			ctx,
 			max(queryTimeout, enumerationFloor),
 		)
 		defer cancel()

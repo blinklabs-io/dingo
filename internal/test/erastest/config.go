@@ -57,13 +57,12 @@ type shelleyGenesisOverride struct {
 // config.json overrides). All hard-fork-epoch fields are pointers so the
 // zero value is distinguishable from "configured to fork at epoch 0."
 type nodeConfigOverride struct {
-	ExperimentalHardForksEnabled *bool   `yaml:"ExperimentalHardForksEnabled"`
-	TestShelleyHardForkAtEpoch   *uint64 `yaml:"TestShelleyHardForkAtEpoch"`
-	TestAllegraHardForkAtEpoch   *uint64 `yaml:"TestAllegraHardForkAtEpoch"`
-	TestMaryHardForkAtEpoch      *uint64 `yaml:"TestMaryHardForkAtEpoch"`
-	TestAlonzoHardForkAtEpoch    *uint64 `yaml:"TestAlonzoHardForkAtEpoch"`
-	TestBabbageHardForkAtEpoch   *uint64 `yaml:"TestBabbageHardForkAtEpoch"`
-	TestConwayHardForkAtEpoch    *uint64 `yaml:"TestConwayHardForkAtEpoch"`
+	TestShelleyHardForkAtEpoch *uint64 `yaml:"TestShelleyHardForkAtEpoch"`
+	TestAllegraHardForkAtEpoch *uint64 `yaml:"TestAllegraHardForkAtEpoch"`
+	TestMaryHardForkAtEpoch    *uint64 `yaml:"TestMaryHardForkAtEpoch"`
+	TestAlonzoHardForkAtEpoch  *uint64 `yaml:"TestAlonzoHardForkAtEpoch"`
+	TestBabbageHardForkAtEpoch *uint64 `yaml:"TestBabbageHardForkAtEpoch"`
+	TestConwayHardForkAtEpoch  *uint64 `yaml:"TestConwayHardForkAtEpoch"`
 }
 
 // Config holds the parsed configuration values from the eras testnet.yaml.
@@ -79,9 +78,10 @@ type Config struct {
 	// major=10 → Conway.
 	StartingMajorVersion uint
 	// hardForkEpochs maps successor era ID → scheduled fork epoch from
-	// the Test{Era}HardForkAtEpoch overrides. Populated only when
-	// ExperimentalHardForksEnabled is explicitly true; an absent key
-	// means "no scheduled fork into that era was configured."
+	// the Test{Era}HardForkAtEpoch overrides, which cardano-node honours
+	// for Shelley through Conway whatever ExperimentalHardForksEnabled
+	// says. An absent key means "no scheduled fork into that era was
+	// configured."
 	hardForkEpochs map[uint]uint64
 }
 
@@ -174,9 +174,8 @@ func LoadConfig() (*Config, error) {
 		hardForkEpochs:       map[uint]uint64{},
 	}
 
-	// Document 6 (node config override) is optional but, when present
-	// and ExperimentalHardForksEnabled is true, supplies the scheduled
-	// fork epochs we want to assert against.
+	// Document 6 (node config override) is optional but, when present,
+	// supplies the scheduled fork epochs we want to assert against.
 	if len(docs) >= 7 {
 		var nodeCfg nodeConfigOverride
 		if err := yaml.Unmarshal(docs[6], &nodeCfg); err != nil {
@@ -185,24 +184,20 @@ func LoadConfig() (*Config, error) {
 				err,
 			)
 		}
-		experimental := nodeCfg.ExperimentalHardForksEnabled != nil &&
-			*nodeCfg.ExperimentalHardForksEnabled
-		if experimental {
-			pairs := []struct {
-				era   *eras.EraDesc
-				epoch *uint64
-			}{
-				{&eras.ShelleyEraDesc, nodeCfg.TestShelleyHardForkAtEpoch},
-				{&eras.AllegraEraDesc, nodeCfg.TestAllegraHardForkAtEpoch},
-				{&eras.MaryEraDesc, nodeCfg.TestMaryHardForkAtEpoch},
-				{&eras.AlonzoEraDesc, nodeCfg.TestAlonzoHardForkAtEpoch},
-				{&eras.BabbageEraDesc, nodeCfg.TestBabbageHardForkAtEpoch},
-				{&eras.ConwayEraDesc, nodeCfg.TestConwayHardForkAtEpoch},
-			}
-			for _, p := range pairs {
-				if p.epoch != nil {
-					cfg.hardForkEpochs[p.era.Id] = *p.epoch
-				}
+		pairs := []struct {
+			era   *eras.EraDesc
+			epoch *uint64
+		}{
+			{&eras.ShelleyEraDesc, nodeCfg.TestShelleyHardForkAtEpoch},
+			{&eras.AllegraEraDesc, nodeCfg.TestAllegraHardForkAtEpoch},
+			{&eras.MaryEraDesc, nodeCfg.TestMaryHardForkAtEpoch},
+			{&eras.AlonzoEraDesc, nodeCfg.TestAlonzoHardForkAtEpoch},
+			{&eras.BabbageEraDesc, nodeCfg.TestBabbageHardForkAtEpoch},
+			{&eras.ConwayEraDesc, nodeCfg.TestConwayHardForkAtEpoch},
+		}
+		for _, p := range pairs {
+			if p.epoch != nil {
+				cfg.hardForkEpochs[p.era.Id] = *p.epoch
 			}
 		}
 	}

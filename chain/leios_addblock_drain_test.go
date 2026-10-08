@@ -15,6 +15,7 @@
 package chain_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -47,13 +48,14 @@ func TestStandaloneBlockAddsDrainQueuedHeaderEvents(t *testing.T) {
 		{
 			name: "AddBlock",
 			add: func(t *testing.T, c *chain.Chain, b ledger.Block) {
-				require.NoError(t, c.AddBlock(b, nil))
+				require.NoError(t, c.AddBlock(context.Background(), b, nil))
 			},
 		},
 		{
 			name: "AddBlockWithPoint",
 			add: func(t *testing.T, c *chain.Chain, b ledger.Block) {
 				require.NoError(t, c.AddBlockWithPoint(
+					context.Background(),
 					b,
 					ocommon.Point{
 						Slot: b.SlotNumber(),
@@ -77,17 +79,25 @@ func TestStandaloneBlockAddsDrainQueuedHeaderEvents(t *testing.T) {
 			// block to match the first pending header, and this is the
 			// sequence the finding describes -- an announcing header
 			// admitted, then applied.
-			require.NoError(t, c.AddVerifiedBlockHeader(announcingStreamHeader{
-				headerStreamHeader: headerStreamHeader{
-					hash:        blocks[0].Hash(),
-					prevHash:    blocks[0].PrevHash(),
-					blockNumber: blocks[0].BlockNumber(),
-					slot:        blocks[0].SlotNumber(),
-				},
-				ebHash:    lcommon.NewBlake2b256([]byte("announced-eb")),
-				ebSize:    4096,
-				announces: true,
-			}))
+			require.NoError(
+				t,
+				c.AddVerifiedBlockHeader(
+					context.Background(),
+					announcingStreamHeader{
+						headerStreamHeader: headerStreamHeader{
+							hash:        blocks[0].Hash(),
+							prevHash:    blocks[0].PrevHash(),
+							blockNumber: blocks[0].BlockNumber(),
+							slot:        blocks[0].SlotNumber(),
+						},
+						ebHash: lcommon.NewBlake2b256(
+							[]byte("announced-eb"),
+						),
+						ebSize:    4096,
+						announces: true,
+					},
+				),
+			)
 
 			// Subscribing after the enqueue is deliberate: a deferred event
 			// is delivered on the drain, so a subscriber attached now must
@@ -144,7 +154,13 @@ func TestHeaderAnnouncementRequiresCryptoVerifiedHeader(t *testing.T) {
 		subId, headerCh := bus.Subscribe(chain.ChainHeaderEventType)
 		defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
 
-		require.NoError(t, c.AddBlockHeader(announcing("unverified", 10)))
+		require.NoError(
+			t,
+			c.AddBlockHeader(
+				context.Background(),
+				announcing("unverified", 10),
+			),
+		)
 		c.PublishPendingChainUpdates()
 
 		requireNoAnnouncement(t, headerCh)
@@ -156,7 +172,10 @@ func TestHeaderAnnouncementRequiresCryptoVerifiedHeader(t *testing.T) {
 		defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
 
 		header := announcing("verified", 11)
-		require.NoError(t, c.AddVerifiedBlockHeader(header))
+		require.NoError(
+			t,
+			c.AddVerifiedBlockHeader(context.Background(), header),
+		)
 		c.PublishPendingChainUpdates()
 
 		announcement := nextAnnouncement(t, headerCh)
@@ -177,14 +196,17 @@ func TestHeaderAnnouncementRequiresCryptoVerifiedHeader(t *testing.T) {
 		const localHash = "00000000000000000000000000000000" +
 			"000000000000000000000000000000ff"
 		header := announcing("local-blk", 12)
-		require.NoError(t, c.AddLocalBlock(announcingStreamBlock{
-			MockBlock: &MockBlock{
-				MockBlockNumber: 1,
-				MockSlot:        12,
-				MockHash:        localHash,
-			},
-			header: header,
-		}))
+		require.NoError(
+			t,
+			c.AddLocalBlock(context.Background(), announcingStreamBlock{
+				MockBlock: &MockBlock{
+					MockBlockNumber: 1,
+					MockSlot:        12,
+					MockHash:        localHash,
+				},
+				header: header,
+			}),
+		)
 
 		announcement := nextAnnouncement(t, headerCh)
 		require.Equal(t, uint64(12), announcement.Slot)

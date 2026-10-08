@@ -16,12 +16,14 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -102,7 +104,7 @@ func seedUtxoMetadata(
 	addedSlot, deletedSlot uint64,
 ) {
 	t.Helper()
-	mdTxn := db.MetadataTxn(true)
+	mdTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, mdTxn.Do(func(txn *Txn) error {
 		return db.Metadata().CreateUtxo(txn.Metadata(), &models.Utxo{
 			TxId:        txId,
@@ -150,7 +152,7 @@ func TestPruneBlock_MaterializesLiveUtxoAndTombstonesBlock(t *testing.T) {
 	blobTxn.Release()
 
 	// Prune the block.
-	n, err := db.PruneBlock(slot, hash)
+	n, err := db.PruneBlock(context.Background(), slot, hash)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n, "exactly one live UTxO should be materialized")
 
@@ -219,7 +221,7 @@ func TestPruneBlock_ResolverReadsMaterializedUtxoAfterPrune(t *testing.T) {
 	})
 	seedUtxoMetadata(t, db, txId, 0, slot, 0)
 
-	_, err := db.PruneBlock(slot, hash)
+	_, err := db.PruneBlock(context.Background(), slot, hash)
 	require.NoError(t, err)
 
 	// Snapshot cold-extraction count to prove the resolver does NOT have to
@@ -261,13 +263,13 @@ func TestPruneBlock_LeavesChainIteratorAtHistoryExpired(t *testing.T) {
 	})
 	seedUtxoMetadata(t, db, txId, 0, slot, 0)
 
-	recent, err := BlocksRecent(db, 1)
+	recent, err := BlocksRecent(context.Background(), db, 1)
 	require.NoError(t, err)
 	require.Len(t, recent, 1)
 	blockID := recent[0].ID
 	require.NotZero(t, blockID, "block id must be set before prune")
 
-	_, err = db.PruneBlock(slot, hash)
+	_, err = db.PruneBlock(context.Background(), slot, hash)
 	require.NoError(t, err)
 
 	// BlockByIndex is the path the chain iterator walks. After prune the
@@ -285,7 +287,7 @@ func TestPruneBlock_LeavesChainIteratorAtHistoryExpired(t *testing.T) {
 			"silent chain-tip dead end issue #2104 describes")
 
 	// BlockByHash exercises the parallel hash-keyed path; same handoff.
-	_, err = BlockByHash(db, hash)
+	_, err = BlockByHash(context.Background(), db, hash)
 	assert.ErrorIs(t, err, types.ErrHistoryExpired,
 		"BlockByHash must also reach the history-expired handoff post-prune")
 	assert.NotErrorIs(t, err, models.ErrBlockNotFound)
@@ -322,7 +324,7 @@ func TestPruneBlock_APIModeMaterializesSpentUtxos(t *testing.T) {
 	seedUtxoMetadata(t, db, txId, 0, slot, 0)
 	seedUtxoMetadata(t, db, txId, 1, slot, 150)
 
-	n, err := db.PruneBlock(slot, hash)
+	n, err := db.PruneBlock(context.Background(), slot, hash)
 	require.NoError(t, err)
 	assert.Equal(t, 2, n,
 		"API mode must materialize both live and retained spent UTxOs")
@@ -366,7 +368,7 @@ func TestPruneBlock_CoreModeLeavesSpentUtxos(t *testing.T) {
 	seedUtxoMetadata(t, db, txId, 0, slot, 0)
 	seedUtxoMetadata(t, db, txId, 1, slot, 150)
 
-	n, err := db.PruneBlock(slot, hash)
+	n, err := db.PruneBlock(context.Background(), slot, hash)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n,
 		"core mode must materialize only the live UTxO at the slot")
@@ -401,8 +403,45 @@ func TestPruneBlock_SkipsAlreadyMaterializedUtxo(t *testing.T) {
 	}))
 	seedUtxoMetadata(t, db, txId, 0, slot, 0)
 
-	n, err := db.PruneBlock(slot, hash)
+	n, err := db.PruneBlock(context.Background(), slot, hash)
 	require.NoError(t, err)
 	assert.Equal(t, 0, n,
 		"already-raw UTxO should not be counted as materialized")
+}
+
+type cancelAfterPruneReadStore struct {
+	metadata.MetadataStore
+	cancel context.CancelFunc
+}
+
+func (s cancelAfterPruneReadStore) GetLiveUtxosBySlot(slot uint64, txn types.Txn) ([]models.UtxoId, error) {
+	refs, err := s.MetadataStore.GetLiveUtxosBySlot(slot, txn)
+	if err == nil {
+		s.cancel()
+	}
+	return refs, err
+}
+func TestPruneBlockCancellationAfterMetadataReadPreservesBlob(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	slot := uint64(100)
+	txID := randomHash(t)
+	hash, cbor := seedPrunableBlock(t, db, slot, txID, map[uint32][]byte{0: []byte("live-utxo")})
+	seedUtxoMetadata(t, db, txID, 0, slot, 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	original := db.metadata
+	db.metadata = cancelAfterPruneReadStore{MetadataStore: original, cancel: cancel}
+	n, err := db.PruneBlock(ctx, slot, hash)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, n)
+	txn := db.BlobTxn(false)
+	got, _, err := db.Blob().GetBlock(txn.Blob(), slot, hash)
+	txn.Release()
+	require.NoError(t, err)
+	require.Equal(t, cbor, got)
+	db.metadata = original
+	n, err = db.PruneBlock(t.Context(), slot, hash)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
 }

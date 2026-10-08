@@ -1064,6 +1064,7 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 }
 
 func (ls *LedgerState) verifyDeferredBlockHeaderState(
+	ctx context.Context,
 	txn *database.Txn,
 	point ocommon.Point,
 	block gledger.Block,
@@ -1078,7 +1079,9 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	// Admission deferred this header, so its VRF, KES and operational
 	// certificate signatures were never checked; run the full path before
 	// any block mutation. A nonce that is still unavailable fails closed.
-	if err := ls.verifyBlockHeaderCryptoWithEpochAdvance(block, true, false); err != nil {
+	if err := ls.verifyBlockHeaderCryptoWithEpochAdvance(
+		ctx, block, true, false,
+	); err != nil {
 		// Typed so the pipeline can rewind past this block instead of
 		// restarting onto it forever: the block is already persisted, so
 		// this failure is deterministic rather than transient. The block is
@@ -1860,7 +1863,7 @@ func (ls *LedgerState) freshCursorAwaitingHeadersLocked(
 	connId ouroboros.ConnectionId,
 ) bool {
 	req, ok := ls.freshCursorPeers[netAddrString(connId.RemoteAddr)]
-	return ok && time.Since(req.at) < freshCursorPeerRetention
+	return ok && req != nil && time.Since(req.at) < freshCursorPeerRetention
 }
 
 func (ls *LedgerState) logFreshCursorNotRepeatedLocked(
@@ -2298,7 +2301,7 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	if e.Point.Slot > localTip.Point.Slot {
 		return false
 	}
-	block, err := ls.blockByHash(e.Point.Hash)
+	block, err := ls.blockByHash(ls.lifecycleContext(), e.Point.Hash)
 	if errors.Is(err, models.ErrBlockNotFound) {
 		// Blocks written before the hash index was introduced still have an
 		// exact point key and metadata. Probe that local path without allowing
@@ -2377,7 +2380,7 @@ func (ls *LedgerState) findPeerForkPath(
 		// lock-held walk over mostly-unpersisted peer-header hashes stays cheap
 		// for current stores. Blocks persisted before the hash index was added
 		// may still miss until the operator backfills the index.
-		ancestorBlock, err := ls.blockByHash(prevHash)
+		ancestorBlock, err := ls.blockByHash(ls.lifecycleContext(), prevHash)
 		switch {
 		case err == nil && ancestorBlock.Slot <= localTipSlot:
 			point := ocommon.NewPoint(
@@ -2502,11 +2505,14 @@ func genesisForkPathDensity(
 	)
 }
 
-func (ls *LedgerState) blockByHash(hash []byte) (models.Block, error) {
+func (ls *LedgerState) blockByHash(
+	ctx context.Context,
+	hash []byte,
+) (models.Block, error) {
 	if ls.lookupBlockByHash != nil {
 		return ls.lookupBlockByHash(hash)
 	}
-	return database.BlockByHash(ls.db, hash)
+	return database.BlockByHash(ctx, ls.db, hash)
 }
 
 func netAddrString(addr net.Addr) string {
@@ -3286,7 +3292,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			),
 		)
 	}
-	if err := ls.rollbackChainAndStateDeferred(e.Point, pending); err != nil {
+	if err := ls.rollbackChainAndStateDeferred(ls.lifecycleContext(), e.Point, pending); err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// Missing rollback point can happen when local state and peer
 			// chainsync cursor drift. Recover by forcing re-intersect.
@@ -3507,7 +3513,11 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 	ls.RLock()
 	currentTip := ls.currentTip
 	ls.RUnlock()
-	resolved, err := ls.resolveRollbackTarget(point, currentTip)
+	resolved, err := ls.resolveRollbackTarget(
+		ls.lifecycleContext(),
+		point,
+		currentTip,
+	)
 	if err != nil {
 		return false
 	}
@@ -3523,7 +3533,7 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 	if err != nil || belowPruneFloor {
 		return false
 	}
-	return ls.chain.ValidateRollback(point) == nil
+	return ls.chain.ValidateRollback(ls.lifecycleContext(), point) == nil
 }
 
 // clearRollbackHistoryForPoint removes per-connection loop-detector records
@@ -3588,13 +3598,17 @@ func observedHeaderTip(e ChainsyncEvent) ochainsync.Tip {
 	}
 }
 
-func (ls *LedgerState) localTipPraosView(
+func (ls *LedgerState) localTipPraosView(ctx context.Context,
 	localTip ochainsync.Tip,
 ) praos.PraosTiebreakerView {
 	if ls == nil || ls.db == nil || len(localTip.Point.Hash) == 0 {
 		return praos.PraosTiebreakerView{}
 	}
-	block, err := database.BlockByHash(ls.db, localTip.Point.Hash)
+	block, err := database.BlockByHash(
+		ctx,
+		ls.db,
+		localTip.Point.Hash,
+	)
 	if err != nil {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Debug(
@@ -3641,7 +3655,7 @@ func (ls *LedgerState) compareIncomingHeaderToLocalTip(
 		observedTip,
 		localTip,
 		incomingView,
-		ls.localTipPraosView(localTip),
+		ls.localTipPraosView(ls.lifecycleContext(), localTip),
 	)
 	if result != praos.ChainEqual {
 		return result
@@ -3677,7 +3691,7 @@ func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
 		observedTip,
 		localTip,
 		incomingView,
-		ls.localTipPraosView(localTip),
+		ls.localTipPraosView(ls.lifecycleContext(), localTip),
 	) == praos.ChainABetter
 }
 
@@ -3769,6 +3783,7 @@ func markPeerHeaderHistoryPathUnavailable(
 // the retained history instead of repeatedly walking the same suffix while
 // chainsyncMutex is held.
 func (ls *LedgerState) findPeerForkPathCached(
+	ctx context.Context,
 	e ChainsyncEvent,
 	initialPrevHash []byte,
 	expectedAncestor ocommon.Point,
@@ -3841,7 +3856,7 @@ func (ls *LedgerState) findPeerForkPathCached(
 			return &entry.ancestor, path, nil
 		}
 
-		ancestorBlock, err := ls.blockByHash(prevHash)
+		ancestorBlock, err := ls.blockByHash(ctx, prevHash)
 		switch {
 		case err == nil && ancestorBlock.Slot <= expectedAncestor.Slot:
 			ancestor := ocommon.NewPoint(ancestorBlock.Slot, ancestorBlock.Hash)
@@ -3910,6 +3925,7 @@ func (ls *LedgerState) findPeerForkPathCached(
 }
 
 func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
+	ctx context.Context,
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 ) (int, error) {
@@ -3929,6 +3945,7 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 			continue
 		}
 		ancestorPoint, forkPath, err := ls.findPeerForkPathCached(
+			ctx,
 			recordEvent,
 			record.prevHash,
 			point,
@@ -3958,7 +3975,7 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 			if evt.Point.Slot <= cutoffSlot {
 				continue
 			}
-			if err := ls.chain.AddBlockHeader(evt.BlockHeader); err != nil {
+			if err := ls.chain.AddBlockHeader(ctx, evt.BlockHeader); err != nil {
 				// clearQueuedHeaders (and the headerPipelineConnId write
 				// below) mutate a field every other mutator guards with
 				// chainsyncBlockfetchMutex -- take it here too, scoped
@@ -3989,6 +4006,7 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 // history was replayed and whether connection closure should be skipped because
 // the primary chain tip is already past the completed rollback point.
 func (ls *LedgerState) RecoverAfterLocalRollback(
+	ctx context.Context,
 	connIds []ouroboros.ConnectionId,
 	point ocommon.Point,
 ) LocalRollbackRecoveryResult {
@@ -4045,6 +4063,7 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 
 	for _, connId := range preferredConnIds {
 		headerCount, err := ls.recoverPeerHeaderHistoryFromPointLocked(
+			ctx,
 			connId,
 			point,
 		)
@@ -4242,9 +4261,12 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	)
 	var err error
 	if headerCryptoVerified {
-		err = ls.chain.AddVerifiedBlockHeader(e.BlockHeader)
+		err = ls.chain.AddVerifiedBlockHeader(
+			ls.lifecycleContext(),
+			e.BlockHeader,
+		)
 	} else {
-		err = ls.chain.AddBlockHeader(e.BlockHeader)
+		err = ls.chain.AddBlockHeader(ls.lifecycleContext(), e.BlockHeader)
 	}
 	if err != nil {
 		if notFitErr, ok := errors.AsType[chain.BlockNotFitChainTipError](err); ok {
@@ -4643,9 +4665,12 @@ func (ls *LedgerState) addForkPathHeader(
 ) error {
 	if incomingCryptoVerified &&
 		pointMatches(forkEvent.Point, incomingPoint) {
-		return ls.chain.AddVerifiedBlockHeader(forkEvent.BlockHeader)
+		return ls.chain.AddVerifiedBlockHeader(
+			ls.lifecycleContext(),
+			forkEvent.BlockHeader,
+		)
 	}
-	return ls.chain.AddBlockHeader(forkEvent.BlockHeader)
+	return ls.chain.AddBlockHeader(ls.lifecycleContext(), forkEvent.BlockHeader)
 }
 
 // tryResolveFork attempts to resolve a chain fork when an incoming header
@@ -4764,7 +4789,10 @@ func (ls *LedgerState) tryResolveFork(
 			return false, nil
 		}
 	}
-	ancestorBlock, err := ls.blockByHash(ancestorPoint.Hash)
+	ancestorBlock, err := ls.blockByHash(
+		ls.lifecycleContext(),
+		ancestorPoint.Hash,
+	)
 	if err != nil {
 		return false, fmt.Errorf(
 			"failed to reload common ancestor block %s: %w",
@@ -4840,7 +4868,7 @@ func (ls *LedgerState) tryResolveFork(
 		"connection_id", e.ConnectionId.String(),
 	)
 
-	if err := ls.rollbackChainAndStateDeferred(rollbackPoint, pending); err != nil {
+	if err := ls.rollbackChainAndStateDeferred(ls.lifecycleContext(), rollbackPoint, pending); err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// The ancestor resolved but the chain no longer holds it at that
 			// index, so rolling back would splice a continuation onto a parent
@@ -5120,6 +5148,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			verifyErr = ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
 		} else {
 			verifyErr = ls.verifyBlockHeaderStateWithEpochAdvance(
+				ls.lifecycleContext(),
 				e.Block,
 				true,
 				true,
@@ -6217,6 +6246,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 		// every chain mutation, so no rollback can interleave between the
 		// two.
 		evt, addBlockErr := ls.chain.AddBlockWithPointDeferredIf(
+			ls.lifecycleContext(),
 			pendingEvent.Block,
 			pendingEvent.Point,
 			nil,
@@ -6388,7 +6418,7 @@ func genesisStakeDelegations(
 	return ret, nil
 }
 
-func (ls *LedgerState) createGenesisBlock() error {
+func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 	// Get the Byron genesis hash to use as the synthetic block hash.
 	// This mirrors how the Shelley epoch nonce uses the Shelley genesis hash.
 	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
@@ -6418,7 +6448,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 			// only this branch, so the backfill has to run here too --
 			// a node already synced from genesis is exactly the one
 			// missing its committee rows.
-			if err := ls.ensureGenesisCommittee(nil); err != nil {
+			if err := ls.ensureGenesisCommittee(ctx, nil); err != nil {
 				return err
 			}
 			return ls.ensureGenesisNetworkState()
@@ -6445,7 +6475,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 		)
 	}
 
-	txn := ls.db.Transaction(true)
+	txn := ls.db.Transaction(ctx, true)
 	err = txn.Do(func(txn *database.Txn) error {
 		// Record genesis UTxOs
 		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
@@ -6578,6 +6608,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 		if !bootstrappedFromMithril {
 			for txHashArray, utxos := range txUtxos {
 				if err := ls.db.SetGenesisTransaction(
+					ctx,
 					txHashArray[:],
 					genesisHash[:],
 					utxos,
@@ -6652,7 +6683,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 		// stale genesis-config values here would resurrect a pool or
 		// delegation genuinely retired/changed long before the bootstrap
 		// point, the same resurrection bug Mithril bootstrap had for UTxOs.
-		genesisPools, poolDelegators, err := shelleyGenesis.InitialPools()
+		genesisPools, poolDelegators, err := initialPools(shelleyGenesis)
 		if err != nil {
 			return fmt.Errorf("parse genesis staking: %w", err)
 		}
@@ -6721,7 +6752,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 		// The Conway genesis committee is seated from the Chang hard fork
 		// and any of its members not yet touched by a later UpdateCommittee
 		// action must be recognized for hot-key authorization/resignation.
-		if err := ls.ensureGenesisCommittee(txn); err != nil {
+		if err := ls.ensureGenesisCommittee(ctx, txn); err != nil {
 			return err
 		}
 
@@ -6785,7 +6816,10 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 // before inserting makes this safe to call on every startup: a credential a
 // later UpdateCommittee has since re-elected or removed already has a row, so
 // its real history is left alone instead of being reverted to genesis state.
-func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
+func (ls *LedgerState) ensureGenesisCommittee(
+	ctx context.Context,
+	txn *database.Txn,
+) error {
 	conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
 	if conwayGenesis == nil {
 		// Without the genesis the committee is seeded from nothing, so
@@ -6800,7 +6834,7 @@ func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
 	if len(conwayGenesis.Committee.Members) == 0 {
 		return nil
 	}
-	existing, err := ls.db.GetCommitteeMembersIncludeDeleted(txn)
+	existing, err := ls.db.GetCommitteeMembersIncludeDeleted(ctx, txn)
 	if err != nil {
 		return fmt.Errorf("get existing committee members: %w", err)
 	}
@@ -6857,7 +6891,7 @@ func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
 		}
 		return int(a.ColdCredentialTag) - int(b.ColdCredentialTag)
 	})
-	if err := ls.db.SetCommitteeMembers(newMembers, txn); err != nil {
+	if err := ls.db.SetCommitteeMembers(ctx, newMembers, txn); err != nil {
 		return fmt.Errorf("set genesis committee members: %w", err)
 	}
 	ls.config.Logger.Info(
@@ -7189,7 +7223,7 @@ func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 // The caller must store candidateNonce as the new epoch's CandidateNonce
 // and labNonce as the new epoch's LastEpochBlockNonce so an empty next
 // epoch can carry it forward.
-func (ls *LedgerState) calculateEpochNonce(
+func (ls *LedgerState) calculateEpochNonce(ctx context.Context,
 	txn *database.Txn,
 	epochStartSlot uint64,
 	currentEra eras.EraDesc,
@@ -7334,6 +7368,7 @@ func (ls *LedgerState) calculateEpochNonce(
 	// Praos epoch VRF-failing; the same shape repeats at
 	// Babbage→Conway when this rule is broken.
 	candidateNonce, evolvingNonce, err := ls.computeCandidateNonce(
+		ctx,
 		txn,
 		currentEpoch.EraId,
 		prevEvolvingNonce,
@@ -7363,6 +7398,7 @@ func (ls *LedgerState) calculateEpochNonce(
 	// the epoch being closed (a one-block Praos lag), NOT the last block's own
 	// hash. See epochLabNonce.
 	labNonceToSave, err := ls.epochLabNonce(
+		ctx,
 		txn,
 		currentEpoch.StartSlot,
 		epochEndSlot,
@@ -7566,6 +7602,7 @@ func cloneProtocolParametersForEra(
 // result reports BoundarySnapshotDeferred so exactly one capture is taken —
 // re-running the capture instead would double-write under the savepoint.
 func (ls *LedgerState) processEpochRollover(
+	ctx context.Context,
 	txn *database.Txn,
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
@@ -7612,7 +7649,7 @@ func (ls *LedgerState) processEpochRollover(
 		if err != nil {
 			return nil, fmt.Errorf("calculate epoch length: %w", err)
 		}
-		tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(
+		tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(ctx,
 			txn,
 			0,
 			currentEra,
@@ -7721,7 +7758,7 @@ func (ls *LedgerState) processEpochRollover(
 	// body issues SQL within `txn` that may join against `pparams` rows.
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "ratify_consume", func() error {
-			return ls.consumePendingRatification(txn)
+			return ls.consumePendingRatification(ctx, txn)
 		},
 	); err != nil {
 		return nil, fmt.Errorf("apply pending ratification: %w", err)
@@ -7729,7 +7766,7 @@ func (ls *LedgerState) processEpochRollover(
 
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "reward_apply", func() error {
-			return ls.applyStakeRewards(
+			return ls.applyStakeRewards(ctx,
 				txn, currentEpoch.EpochId+1, epochStartSlot,
 			)
 		},
@@ -7749,7 +7786,7 @@ func (ls *LedgerState) processEpochRollover(
 	// capture below.
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "mir", func() error {
-			return ls.applyMIRCerts(
+			return ls.applyMIRCerts(ctx,
 				txn, currentEpoch.StartSlot, epochStartSlot, currentEpoch.EraId,
 			)
 		},
@@ -7839,6 +7876,7 @@ func (ls *LedgerState) processEpochRollover(
 		currentEpoch.EpochId+1, "pparam_updates", func() error {
 			var err error
 			newPParams, plutusV2CostModelWritten, err = ls.db.ComputeAndApplyPParamUpdates(
+				ctx,
 				epochStartSlot,
 				currentEpoch.EpochId+1, // Target epoch for updates
 				currentEra.Id,
@@ -7878,7 +7916,7 @@ func (ls *LedgerState) processEpochRollover(
 	// governance.ProcessEpoch below.
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "pool_reap", func() error {
-			return ls.applyPoolRetirements(
+			return ls.applyPoolRetirements(ctx,
 				txn, currentEpoch.EpochId+1, epochStartSlot,
 			)
 		},
@@ -7893,7 +7931,7 @@ func (ls *LedgerState) processEpochRollover(
 	// durable marker still commit or roll back atomically with it.
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "inactivity_activation", func() error {
-			return ls.activateDelegatorInactivityIfNeeded(
+			return ls.activateDelegatorInactivityIfNeeded(ctx,
 				txn, currentEpoch.EpochId+1,
 			)
 		},
@@ -7924,7 +7962,7 @@ func (ls *LedgerState) processEpochRollover(
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "governance", func() error {
 			var err error
-			govOut, err = governance.ProcessEpoch(&governance.EpochInput{
+			govOut, err = governance.ProcessEpoch(ctx, &governance.EpochInput{
 				DB:                       ls.db,
 				Txn:                      txn,
 				Logger:                   ls.config.Logger,
@@ -7980,11 +8018,11 @@ func (ls *LedgerState) processEpochRollover(
 							}
 							plan.SetBoundarySPOState(state)
 						}
-						decision, err := plan.Decide(txn)
+						decision, err := plan.Decide(ctx, txn)
 						if err != nil {
 							return err
 						}
-						_, err = plan.Apply(decision, txn)
+						_, err = plan.Apply(ctx, decision, txn)
 						return err
 					}
 					deferredPlan = plan
@@ -8125,7 +8163,7 @@ func (ls *LedgerState) processEpochRollover(
 		if oldVer.Major != newVer.Major {
 			if err := ls.timeRolloverPhase(
 				currentEpoch.EpochId+1, "hardfork", func() error {
-					return ls.applyIntraEraHardForkRule(
+					return ls.applyIntraEraHardForkRule(ctx,
 						txn, newVer.Major, epochStartSlot, currentEpoch.EpochId+1,
 					)
 				},
@@ -8165,7 +8203,7 @@ func (ls *LedgerState) processEpochRollover(
 	// result.NewCurrentPParams above and persisted by the enactment steps that
 	// precede this point. That is the set whose extraEntropy the new epoch's
 	// nonce mixes.
-	tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(
+	tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(ctx,
 		txn,
 		epochStartSlot,
 		currentEra,
@@ -8260,7 +8298,7 @@ func (ls *LedgerState) processEpochRollover(
 	default:
 		if err := ls.timeRolloverPhase(
 			currentEpoch.EpochId+1, "snap_persist", func() error {
-				return ls.captureEpochBoundarySnapshot(
+				return ls.captureEpochBoundarySnapshot(ctx,
 					txn, currentEpoch, result,
 				)
 			},
@@ -8271,7 +8309,7 @@ func (ls *LedgerState) processEpochRollover(
 	if deferredPlan != nil || snapshotEvt != nil {
 		if err := ls.timeRolloverPhase(
 			currentEpoch.EpochId+1, "defer", func() error {
-				return ls.deferBoundaryJob(
+				return ls.deferBoundaryJob(ctx,
 					txn, currentEpoch.EpochId+1, epochStartSlot,
 					deferredPlan, snapshotEvt,
 				)
@@ -8449,7 +8487,7 @@ func (ls *LedgerState) boundarySnapshotEvent(
 	}
 }
 
-func (ls *LedgerState) captureEpochBoundarySnapshot(
+func (ls *LedgerState) captureEpochBoundarySnapshot(ctx context.Context,
 	txn *database.Txn,
 	prevEpoch models.Epoch,
 	result *EpochRolloverResult,
@@ -8475,7 +8513,7 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 	}
 	err := hook(txn, evt)
 	if err == nil {
-		err = ls.takeDeferredRewardStakeInputs(txn)
+		err = ls.takeDeferredRewardStakeInputs(ctx, txn)
 	}
 	if err != nil {
 		ls.discardDeferredRewardStakeInputs(txn)
@@ -8499,7 +8537,10 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 	return nil
 }
 
-func (ls *LedgerState) cleanupBlockNoncesBefore(startSlot uint64) {
+func (ls *LedgerState) cleanupBlockNoncesBefore(
+	ctx context.Context,
+	startSlot uint64,
+) {
 	if startSlot == 0 {
 		return
 	}
@@ -8513,7 +8554,7 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(startSlot uint64) {
 	)
 	ls.Lock()
 	defer ls.Unlock()
-	txn := ls.db.Transaction(true)
+	txn := ls.db.Transaction(ctx, true)
 	if err := txn.Do(func(txn *database.Txn) error {
 		return ls.db.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(startSlot, txn)
 	}); err != nil {

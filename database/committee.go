@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
@@ -25,13 +26,14 @@ import (
 
 // GetCommitteeMember returns a committee member by cold key
 func (d *Database) GetCommitteeMember(
+	ctx context.Context,
 	coldCredentialTag uint8,
 	coldKey []byte,
 	termStartSlot uint64,
 	txn *Txn,
 ) (*models.AuthCommitteeHot, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	ret, err := d.governanceStore().GetCommitteeMember(
@@ -53,11 +55,12 @@ func (d *Database) GetCommitteeMember(
 // latest hot-key authorization when that authorization was recorded at or
 // after minSlot. Seated and unseated cold credentials are both included.
 func (d *Database) GetCommitteeHotAuthorizationsSince(
+	ctx context.Context,
 	minSlot uint64,
 	txn *Txn,
 ) ([]*models.AuthCommitteeHot, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.governanceStore().GetCommitteeHotAuthorizationsSince(
@@ -68,10 +71,11 @@ func (d *Database) GetCommitteeHotAuthorizationsSince(
 
 // GetActiveCommitteeMembers returns all active committee members
 func (d *Database) GetActiveCommitteeMembers(
+	ctx context.Context,
 	txn *Txn,
 ) ([]*models.AuthCommitteeHot, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.governanceStore().GetActiveCommitteeMembers(txn.Metadata())
@@ -79,13 +83,14 @@ func (d *Database) GetActiveCommitteeMembers(
 
 // IsCommitteeMemberResigned checks if a committee member has resigned
 func (d *Database) IsCommitteeMemberResigned(
+	ctx context.Context,
 	coldCredentialTag uint8,
 	coldKey []byte,
 	termStartSlot uint64,
 	txn *Txn,
 ) (bool, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.governanceStore().IsCommitteeMemberResigned(
@@ -99,11 +104,12 @@ func (d *Database) IsCommitteeMemberResigned(
 // GetResignedCommitteeMembers returns cold credentials with a resignation
 // record in each credential's selected membership term.
 func (d *Database) GetResignedCommitteeMembers(
+	ctx context.Context,
 	coldCredentials []models.CommitteeCredential,
 	txn *Txn,
 ) (map[string]bool, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.governanceStore().GetResignedCommitteeMembers(
@@ -116,10 +122,11 @@ func (d *Database) GetResignedCommitteeMembers(
 // committee members that hold a current hot-key authorization. Members
 // without a hot key are not counted and term expiry is not applied.
 func (d *Database) GetCommitteeAuthorizedCount(
+	ctx context.Context,
 	txn *Txn,
 ) (int, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.governanceStore().GetCommitteeAuthorizedCount(txn.Metadata())
@@ -128,10 +135,11 @@ func (d *Database) GetCommitteeAuthorizedCount(
 // SetCommitteeMembers upserts governance-enacted committee members. Used
 // by UpdateCommittee action enactment and snapshot import.
 func (d *Database) SetCommitteeMembers(
+	ctx context.Context,
 	members []*models.CommitteeMember,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().SetCommitteeMembers(
 			members, txn.Metadata(),
 		); err != nil {
@@ -143,6 +151,7 @@ func (d *Database) SetCommitteeMembers(
 
 // SetCommitteeQuorum stores the quorum threshold enacted with a committee.
 func (d *Database) SetCommitteeQuorum(
+	ctx context.Context,
 	quorum *big.Rat,
 	slot uint64,
 	txn *Txn,
@@ -154,7 +163,7 @@ func (d *Database) SetCommitteeQuorum(
 		return errors.New("committee quorum cannot be negative")
 	}
 	stored := &types.Rat{Rat: new(big.Rat).Set(quorum)}
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().SetCommitteeQuorum(
 			stored, slot, txn.Metadata(),
 		); err != nil {
@@ -169,10 +178,11 @@ func (d *Database) SetCommitteeQuorum(
 // GetCommitteeQuorum will return nil until a subsequent
 // SetCommitteeQuorum writes a new threshold.
 func (d *Database) ClearCommitteeQuorum(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().ClearCommitteeQuorum(
 			slot, txn.Metadata(),
 		); err != nil {
@@ -184,10 +194,11 @@ func (d *Database) ClearCommitteeQuorum(
 
 // GetCommitteeQuorum returns the latest enacted committee quorum.
 func (d *Database) GetCommitteeQuorum(
+	ctx context.Context,
 	txn *Txn,
 ) (*big.Rat, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	quorum, err := d.governanceStore().GetCommitteeQuorum(txn.Metadata())
@@ -203,10 +214,11 @@ func (d *Database) GetCommitteeQuorum(
 // GetCommitteeMembers returns all active (non-deleted) governance-enacted
 // committee members.
 func (d *Database) GetCommitteeMembers(
+	ctx context.Context,
 	txn *Txn,
 ) ([]*models.CommitteeMember, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	members, err := d.governanceStore().GetCommitteeMembers(txn.Metadata())
@@ -221,10 +233,11 @@ func (d *Database) GetCommitteeMembers(
 // was ever seated — after a NoConfidence action, GetCommitteeMembers
 // returns no rows, but the committee was seated previously.
 func (d *Database) GetCommitteeMembersIncludeDeleted(
+	ctx context.Context,
 	txn *Txn,
 ) ([]*models.CommitteeMember, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	members, err := d.governanceStore().GetCommitteeMembersIncludeDeleted(
@@ -242,10 +255,11 @@ func (d *Database) GetCommitteeMembersIncludeDeleted(
 // the given slot and clears deleted_slot for any members soft-deleted
 // after that slot. Used during chain rollbacks.
 func (d *Database) DeleteCommitteeMembersAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().DeleteCommitteeMembersAfterSlot(
 			slot, txn.Metadata(),
 		); err != nil {
@@ -262,11 +276,12 @@ func (d *Database) DeleteCommitteeMembersAfterSlot(
 // SoftDeleteCommitteeMembers marks the given cold credential hashes as
 // removed. Used by UpdateCommittee action enactment to remove members.
 func (d *Database) SoftDeleteCommitteeMembers(
+	ctx context.Context,
 	coldCredentials []models.CommitteeCredential,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().SoftDeleteCommitteeMembers(
 			coldCredentials, slot, txn.Metadata(),
 		); err != nil {
@@ -281,10 +296,11 @@ func (d *Database) SoftDeleteCommitteeMembers(
 // SoftDeleteAllCommitteeMembers marks all active committee members as
 // removed. Used by NoConfidence action enactment.
 func (d *Database) SoftDeleteAllCommitteeMembers(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().SoftDeleteAllCommitteeMembers(
 			slot, txn.Metadata(),
 		); err != nil {

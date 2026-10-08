@@ -78,7 +78,12 @@ func (s *govDiffScenario) proposalByMarker(
 	marker byte,
 ) *models.GovernanceProposal {
 	t.Helper()
-	p, err := s.db.GetGovernanceProposal(repeatByte(32, marker), 0, nil)
+	p, err := s.db.GetGovernanceProposal(
+		context.Background(),
+		repeatByte(32, marker),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	return p
 }
@@ -136,7 +141,7 @@ func queryProposals(
 	ls *LedgerState,
 ) olocalstatequery.ProposalsResult {
 	t.Helper()
-	result, err := ls.queryShelleyGetProposals(nil, QueryPoint{}, nil)
+	result, err := ls.queryShelleyGetProposals(context.Background(), nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	wrapped, ok := result.([]any)
 	require.True(t, ok)
@@ -190,7 +195,7 @@ func TestRollbackDiscardsRatificationOfRemovedBoundary(t *testing.T) {
 			s.run(t, 1, func(*LedgerState) {})
 			requireHeld(t, held, 742)
 
-			txn := s.db.Transaction(true)
+			txn := s.db.Transaction(context.Background(), true)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
 				return s.ls.discardPendingRatificationAfterSlot(
 					txn, tc.rollbackTo,
@@ -268,7 +273,7 @@ func TestResumePendingRatificationRewindsOrFails(t *testing.T) {
 			ls := &LedgerState{db: db, config: LedgerStateConfig{
 				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			}}
-			err = ls.resumePendingRatificationIntent()
+			err = ls.resumePendingRatificationIntent(context.Background())
 			if tc.fails {
 				require.ErrorIs(t, err, errRollbackIntentTooLarge)
 				require.ErrorContains(t, err, "resync required")
@@ -320,7 +325,10 @@ func TestLedgerRollbackDiscardsPendingRatification(t *testing.T) {
 			ls.ratificationJob = job
 			ls.ratificationMu.Unlock()
 
-			require.NoError(t, ls.rollback(fixture.ancestorTip.Point))
+			require.NoError(
+				t,
+				ls.rollback(context.Background(), fixture.ancestorTip.Point),
+			)
 
 			stored, err := loadPendingRatification(ls.db, nil)
 			require.NoError(t, err)
@@ -351,7 +359,7 @@ func TestLedgerStateQueryWaitsForBoundaryJob(t *testing.T) {
 
 	answered := make(chan error, 1)
 	go func() {
-		_, err := s.ls.Query(&olocalstatequery.BlockQuery{}, QueryPoint{})
+		_, err := s.ls.Query(t.Context(), &olocalstatequery.BlockQuery{}, QueryPoint{})
 		answered <- err
 	}()
 	require.Never(t, func() bool { return len(answered) > 0 },
@@ -467,22 +475,28 @@ func newGovDiffScenario(t *testing.T) *govDiffScenario {
 		if pool != "" {
 			poolKey = []byte(pool)
 		}
-		require.NoError(t, db.CreateAccount(nil, &models.Account{
-			StakingKey: cred,
-			Drep:       drep,
-			Pool:       poolKey,
-			AddedSlot:  epoch.StartSlot,
-			Active:     true,
-			Reward:     types.Uint64(0),
-		}))
-		if utxo > 0 {
-			require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
-				TxId:       repeatByte(32, marker),
-				OutputIdx:  0,
+		require.NoError(
+			t,
+			db.CreateAccount(context.Background(), nil, &models.Account{
 				StakingKey: cred,
-				Amount:     types.Uint64(utxo),
+				Drep:       drep,
+				Pool:       poolKey,
 				AddedSlot:  epoch.StartSlot,
-			}))
+				Active:     true,
+				Reward:     types.Uint64(0),
+			}),
+		)
+		if utxo > 0 {
+			require.NoError(
+				t,
+				db.CreateUtxo(context.Background(), nil, &models.Utxo{
+					TxId:       repeatByte(32, marker),
+					OutputIdx:  0,
+					StakingKey: cred,
+					Amount:     types.Uint64(utxo),
+					AddedSlot:  epoch.StartSlot,
+				}),
+			)
 		}
 		s.credentials = append(s.credentials, cred)
 		return cred
@@ -499,7 +513,7 @@ func newGovDiffScenario(t *testing.T) *govDiffScenario {
 	}
 
 	s.drep = repeatByte(28, 0xe1)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		Credential:  s.drep,
 		AddedSlot:   epoch.StartSlot,
 		ExpiryEpoch: startEpoch + 100,
@@ -516,12 +530,18 @@ func newGovDiffScenario(t *testing.T) *govDiffScenario {
 
 	coldCredential := repeatByte(28, 0xd1)
 	hotCredential := repeatByte(28, 0xd2)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
-		ColdCredHash: coldCredential,
-		ExpiresEpoch: startEpoch + 100,
-		AddedSlot:    1,
-	}}, nil))
-	require.NoError(t, db.SetCommitteeQuorum(big.NewRat(1, 1), 1, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+			ColdCredHash: coldCredential,
+			ExpiresEpoch: startEpoch + 100,
+			AddedSlot:    1,
+		}}, nil),
+	)
+	require.NoError(
+		t,
+		db.SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil),
+	)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	_, err = raw.Exec(`
@@ -584,8 +604,16 @@ INSERT INTO auth_committee_hot (
 			proposal.ParentTxHash = parent.TxHash
 			proposal.ParentActionIdx = &idx
 		}
-		require.NoError(t, db.SetGovernanceProposal(proposal, nil))
-		loaded, err := db.GetGovernanceProposal(proposal.TxHash, 0, nil)
+		require.NoError(
+			t,
+			db.SetGovernanceProposal(context.Background(), proposal, nil),
+		)
+		loaded, err := db.GetGovernanceProposal(
+			context.Background(),
+			proposal.TxHash,
+			0,
+			nil,
+		)
 		require.NoError(t, err)
 		s.proposals = append(s.proposals, loaded)
 		return loaded
@@ -595,13 +623,16 @@ INSERT INTO auth_committee_hot (
 		voterType uint8,
 		credential []byte,
 	) {
-		require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
-			ProposalID:      p.ID,
-			VoterType:       voterType,
-			VoterCredential: credential,
-			Vote:            models.VoteYes,
-			AddedSlot:       epoch.StartSlot - 5,
-		}, nil))
+		require.NoError(
+			t,
+			db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+				ProposalID:      p.ID,
+				VoterType:       voterType,
+				VoterCredential: credential,
+				Vote:            models.VoteYes,
+				AddedSlot:       epoch.StartSlot - 5,
+			}, nil),
+		)
 	}
 	update := addProposal(0x71, lcommon.GovActionTypeUpdateCommittee,
 		committeeUpdate, startEpoch+10, nil)
@@ -691,10 +722,10 @@ func (s *govDiffScenario) run(
 			))
 		}
 		var result *EpochRolloverResult
-		txn := s.db.Transaction(true)
+		txn := s.db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			var err error
-			result, err = s.ls.processEpochRollover(
+			result, err = s.ls.processEpochRollover(context.Background(),
 				txn, epoch, eras.ConwayEraDesc, pparams, false,
 			)
 			return err
@@ -726,13 +757,24 @@ func (s *govDiffScenario) dump(
 		Mark:      map[string]uint64{},
 	}
 	for _, cred := range s.credentials {
-		account, err := s.db.GetAccountByCredential(0, cred, true, nil)
+		account, err := s.db.GetAccountByCredential(
+			context.Background(),
+			0,
+			cred,
+			true,
+			nil,
+		)
 		require.NoError(t, err)
 		require.NotNil(t, account)
 		d.Rewards[hex.EncodeToString(cred[:4])] = uint64(account.Reward)
 	}
 	for _, p := range s.proposals {
-		loaded, err := s.db.GetGovernanceProposal(p.TxHash, p.ActionIndex, nil)
+		loaded, err := s.db.GetGovernanceProposal(
+			context.Background(),
+			p.TxHash,
+			p.ActionIndex,
+			nil,
+		)
 		require.NoError(t, err)
 		d.Proposals = append(d.Proposals, govDiffProposalDump{
 			ID:           hex.EncodeToString(p.TxHash[:2]),
@@ -747,7 +789,7 @@ func (s *govDiffScenario) dump(
 			DeletedAfter: loaded.DeletedSlot,
 		})
 	}
-	members, err := s.db.GetCommitteeMembers(nil)
+	members, err := s.db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	for _, m := range members {
 		d.Committee[hex.EncodeToString(m.ColdCredHash[:4])] = m.ExpiresEpoch
@@ -780,10 +822,20 @@ func (s *govDiffScenario) dump(
 		)
 	}
 	d.StakeInputs = s.stakeInputRows(t, epoch)
-	d.DRepPower, err = s.db.GetDRepVotingPower(0, s.drep, 0, nil)
+	d.DRepPower, err = s.db.GetDRepVotingPower(
+		context.Background(),
+		0,
+		s.drep,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	deposits, _, err := governance.ActiveProposalDepositDRepPower(
-		s.db, nil, epoch, 0,
+		context.Background(),
+		s.db,
+		nil,
+		epoch,
+		0,
 	)
 	require.NoError(t, err)
 	d.DepositPower = deposits
@@ -798,7 +850,7 @@ func (s *govDiffScenario) seedRetiringPool(t *testing.T, retireEpoch uint64) {
 	pool := repeatByte(28, 0xb1)
 	owner := repeatByte(28, 0xb2)
 	delegator := repeatByte(28, 0xb3)
-	require.NoError(t, s.db.ImportPool(nil, &models.Pool{
+	require.NoError(t, s.db.ImportPool(context.Background(), nil, &models.Pool{
 		PoolKeyHash:   pool,
 		VrfKeyHash:    make([]byte, 32),
 		Pledge:        1_000_000,
@@ -821,10 +873,13 @@ func (s *govDiffScenario) seedRetiringPool(t *testing.T, retireEpoch uint64) {
 	} {
 		account.AddedSlot = s.epoch.StartSlot
 		account.Active = true
-		require.NoError(t, s.db.CreateAccount(nil, account))
+		require.NoError(
+			t,
+			s.db.CreateAccount(context.Background(), nil, account),
+		)
 		s.credentials = append(s.credentials, account.StakingKey)
 	}
-	require.NoError(t, s.db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, s.db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       repeatByte(32, 0xb4),
 		OutputIdx:  0,
 		StakingKey: delegator,
