@@ -5090,7 +5090,11 @@ cycle. The selector hands each peer to
 remote address to peer governance's deny list for ten minutes (`DenyPeer`),
 closes the connection if it is still open, logs whether the deny was applied,
 and counts the report in `dingo_chainselection_gdd_disconnects_total`, whether
-or not a connection was left to close.
+or not a connection was left to close. Restore and truncate serialize their
+full networking-core replacement with this deny-and-close action, so a report
+that arrives during replacement is applied to the rebuilt governor and
+connection manager. Shutdown does not take that generation lock because it
+stops the retained selector while holding the lifecycle gates.
 The disconnector does not implement the Limit on Eagerness; it only removes
 sparse peers from the candidate set that cap is measured across.
 

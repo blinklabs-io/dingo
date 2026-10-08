@@ -1608,6 +1608,8 @@ func (n *Node) Restore(
 ) (lifecycle.Manifest, error) {
 	n.liveLifecycleMu.Lock()
 	defer n.liveLifecycleMu.Unlock()
+	n.networkingCoreMu.Lock()
+	defer n.networkingCoreMu.Unlock()
 	// Excludes a concurrent Snapshot too -- see snapshotMu's doc comment
 	// (node.go) for why Snapshot itself only takes this lock, not
 	// liveLifecycleMu.
@@ -2106,6 +2108,8 @@ func (n *Node) Truncate(
 ) (uint64, error) {
 	n.liveLifecycleMu.Lock()
 	defer n.liveLifecycleMu.Unlock()
+	n.networkingCoreMu.Lock()
+	defer n.networkingCoreMu.Unlock()
 	// Excludes a concurrent Snapshot too -- see snapshotMu's doc comment
 	// (node.go) for why Snapshot itself only takes this lock, not
 	// liveLifecycleMu.

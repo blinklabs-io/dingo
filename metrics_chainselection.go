@@ -135,9 +135,17 @@ func (n *Node) onGenesisDensityDisconnect(
 	if n.chainSelectionMetrics != nil {
 		n.chainSelectionMetrics.gddDisconnects.Inc()
 	}
+	n.networkingCoreMu.Lock()
+	defer n.networkingCoreMu.Unlock()
 	// A connection ID without a remote address cannot be denied, so the log
 	// reports whether the deny happened rather than implying it.
-	denied := n.peerGov != nil && d.ConnectionId.RemoteAddr != nil
+	denied := false
+	if d.ConnectionId.RemoteAddr != nil {
+		denied = n.denyPeer(
+			d.ConnectionId.RemoteAddr.String(),
+			genesisDensityDenyDuration,
+		)
+	}
 	n.config.logger.Warn(
 		"disconnecting peer serving a provably sparser chain",
 		"connection_id", d.ConnectionId.String(),
@@ -149,16 +157,23 @@ func (n *Node) onGenesisDensityDisconnect(
 		"denied", denied,
 		"deny_duration", genesisDensityDenyDuration,
 	)
-	if denied {
-		n.peerGov.DenyPeer(
-			d.ConnectionId.RemoteAddr.String(),
-			genesisDensityDenyDuration,
-		)
-	}
 	if n.connManager == nil {
 		return
 	}
 	if conn := n.connManager.GetConnectionById(d.ConnectionId); conn != nil {
 		conn.Close()
 	}
+}
+
+// denyPeer applies a denial to the current peer governor. Live database
+// lifecycle operations replace the governor while retaining the selector, so
+// the pointer must remain stable until the denial has been recorded.
+func (n *Node) denyPeer(address string, duration time.Duration) bool {
+	n.peerGovMu.RLock()
+	defer n.peerGovMu.RUnlock()
+	if n.peerGov == nil {
+		return false
+	}
+	n.peerGov.DenyPeer(address, duration)
+	return true
 }

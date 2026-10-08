@@ -78,6 +78,12 @@ type Node struct {
 	connManager *connmanager.ConnectionManager
 	peerGovMu   sync.RWMutex
 	peerGov     *peergov.PeerGovernor
+	// networkingCoreMu keeps actions that must use peerGov and connManager as
+	// one generation from landing between live lifecycle quiesce and rebuild.
+	// Restore and Truncate hold it for their complete operation; shutdown does
+	// not, because it stops the retained chain selector while holding its own
+	// lifecycle gates.
+	networkingCoreMu sync.Mutex
 	// poolRelayProvider backs peerGov's LedgerPeerProvider. Tracked here (not
 	// a throwaway local) so quiesceForLiveLifecycleOp can Close it -- it has
 	// no Stop of its own otherwise, so a live database restore/truncate,
@@ -181,7 +187,8 @@ type Node struct {
 	// (node_lifecycle.go) so two can never quiesce/rebuild concurrently.
 	// Shutdown takes this mutex before cancelling components or closing
 	// storage, so it cannot tear down a live operation in progress. The lock
-	// order with snapshotMu is always liveLifecycleMu, then snapshotMu.
+	// order with networkingCoreMu and snapshotMu is always liveLifecycleMu,
+	// then networkingCoreMu, then snapshotMu.
 	// Deliberately NOT held by Snapshot (see snapshotMu): Snapshot never
 	// nils/rebuilds n.ledgerState or n.chainsyncState the way Restore/
 	// Truncate do, so a background reader like the chainsync recycler

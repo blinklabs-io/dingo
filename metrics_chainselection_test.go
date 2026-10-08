@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/promutil"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -410,6 +411,46 @@ func TestBuildChainSelectorConfigWiresGenesisDensityDisconnect(t *testing.T) {
 		),
 	)
 	assert.True(t, n.peerGov.IsDenied(conn.RemoteAddr.String()))
+}
+
+func TestGenesisDensityDisconnectDuringNetworkingCoreReplacement(t *testing.T) {
+	t.Parallel()
+	n, _ := newMetricsTestNode(t)
+	outgoingGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+	currentGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	outgoingManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	currentManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	n.setPeerGovernor(outgoingGov)
+	n.connManager = outgoingManager
+	disconnect := chainselection.GenesisDensityDisconnect{
+		ConnectionId: newNodeTestConnId(3306),
+	}
+
+	n.networkingCoreMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		n.onGenesisDensityDisconnect(disconnect)
+		close(done)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"density action crossed a live networking replacement",
+	)
+	n.setPeerGovernor(currentGov)
+	n.connManager = currentManager
+	n.networkingCoreMu.Unlock()
+	testutil.RequireReceive(t, done, time.Second, "density action completion")
+
+	address := disconnect.ConnectionId.RemoteAddr.String()
+	assert.False(t, outgoingGov.IsDenied(address))
+	assert.True(t, currentGov.IsDenied(address))
 }
 
 // The disconnect log reports whether the peer was actually denied: a
