@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -452,6 +453,61 @@ func dropMysqlDatabase(rootDSN, database string) error {
 	return nil
 }
 
+// TestDeleteMysqlTablesClearsDespiteForeignKeys proves the reset empties a
+// child and its parent in one transaction without ordering the deletes by
+// dependency. The managed table list comes from information_schema in
+// whatever order the server returns it, so a reset that respected foreign
+// keys would fail on the first table that still has referencing rows.
+func TestDeleteMysqlTablesClearsDespiteForeignKeys(t *testing.T) {
+	skipIfMysqlConformanceNotConfigured(t)
+
+	cfg, err := mysqldriver.ParseDSN(mysqlConformanceRootDSN())
+	require.NoError(t, err)
+	cfg.DBName = ""
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	require.NoError(t, err)
+
+	database := "fkreset_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	_, err = db.Exec("CREATE DATABASE " + mysqlQuoteIdentifier(database))
+	require.NoError(t, err)
+	dropAndCloseOnCleanup(
+		t, db, "DROP DATABASE "+mysqlQuoteIdentifier(database),
+	)
+
+	ctx := context.Background()
+	qualify := func(name string) string {
+		return mysqlQuoteIdentifier(database) + "." +
+			mysqlQuoteIdentifier(name)
+	}
+	_, err = db.ExecContext(ctx, "CREATE TABLE "+qualify("parent")+
+		" (id INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, "CREATE TABLE "+qualify("child")+
+		" (id INT AUTO_INCREMENT PRIMARY KEY, parent_id INT, "+
+		"CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES "+
+		qualify("parent")+" (id)) ENGINE=InnoDB")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, "INSERT INTO "+qualify("parent")+
+		" (id) VALUES (1)")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, "INSERT INTO "+qualify("child")+
+		" (parent_id) VALUES (1)")
+	require.NoError(t, err)
+
+	// Parent first: the order a dependency-aware reset could not use.
+	require.NoError(t, deleteMysqlTables(
+		ctx, db, []string{qualify("parent"), qualify("child")},
+	))
+
+	for _, name := range []string{"parent", "child"} {
+		var count int
+		require.NoError(t, db.QueryRowContext(
+			ctx, "SELECT COUNT(*) FROM "+qualify(name),
+		).Scan(&count))
+		require.Zero(t, count, "%s must be empty after reset", name)
+	}
+}
+
 // isPostgresConformanceConfigured checks whether postgres connection info
 // has been supplied via environment variables. Mirrors
 // database/plugin/metadata/postgres's isPostgresConfigured so both suites
@@ -801,4 +857,54 @@ func dropPostgresSchema(dsn, schema string) error {
 		return fmt.Errorf("drop postgres schema %q: %w", schema, err)
 	}
 	return nil
+}
+
+// TestDeletePostgresTablesClearsDespiteForeignKeys proves the reset empties a
+// child and its parent without ordering the deletes by dependency. The
+// managed table list comes from information_schema in whatever order the
+// server returns it, and the conformance schema's foreign keys are NOT
+// DEFERRABLE, so sequential deletes in that order would fail on the first
+// table that still has referencing rows.
+func TestDeletePostgresTablesClearsDespiteForeignKeys(t *testing.T) {
+	skipIfPostgresConformanceNotConfigured(t)
+
+	db, err := sql.Open("pgx", postgresConformanceDSN())
+	require.NoError(t, err)
+
+	schema := "fkreset_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	_, err = db.Exec(`CREATE SCHEMA ` + pgQuoteIdent(schema))
+	require.NoError(t, err)
+	dropAndCloseOnCleanup(
+		t, db, `DROP SCHEMA `+pgQuoteIdent(schema)+` CASCADE`,
+	)
+
+	ctx := context.Background()
+	parent := pgQuoteQualified(schema, "parent")
+	child := pgQuoteQualified(schema, "child")
+	_, err = db.ExecContext(ctx,
+		`CREATE TABLE `+parent+` (id bigserial PRIMARY KEY)`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`CREATE TABLE `+child+` (id bigserial PRIMARY KEY, `+
+			`parent_id bigint REFERENCES `+parent+`(id))`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO `+parent+` DEFAULT VALUES`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO `+child+` (parent_id) SELECT id FROM `+parent)
+	require.NoError(t, err)
+
+	// Parent first: the order a dependency-aware reset could not use.
+	require.NoError(t, deletePostgresTables(
+		ctx, db, schema, []string{parent, child},
+	))
+
+	for _, qualified := range []string{parent, child} {
+		var count int
+		require.NoError(t, db.QueryRowContext(
+			ctx, `SELECT count(*) FROM `+qualified,
+		).Scan(&count))
+		require.Zero(t, count, "%s must be empty after reset", qualified)
+	}
 }
