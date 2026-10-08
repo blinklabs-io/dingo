@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	gosync "sync"
 	"testing"
 	"time"
@@ -36,19 +37,24 @@ import (
 // stalledResponseWriter blocks the first body write until released, standing
 // in for a client that stops reading its response.
 type stalledResponseWriter struct {
-	header  http.Header
-	status  int
-	writing chan struct{}
-	release chan struct{}
-	once    gosync.Once
-	body    bytes.Buffer
+	header          http.Header
+	status          int
+	writing         chan struct{}
+	release         chan struct{}
+	once            gosync.Once
+	body            bytes.Buffer
+	deadlineElapsed chan struct{}
+	deadlineOnce    gosync.Once
+	deadlineMu      gosync.Mutex
+	deadlineTimer   *time.Timer
 }
 
 func newStalledResponseWriter() *stalledResponseWriter {
 	return &stalledResponseWriter{
-		header:  http.Header{},
-		writing: make(chan struct{}),
-		release: make(chan struct{}),
+		header:          http.Header{},
+		writing:         make(chan struct{}),
+		release:         make(chan struct{}),
+		deadlineElapsed: make(chan struct{}),
 	}
 }
 
@@ -58,11 +64,30 @@ func (w *stalledResponseWriter) WriteHeader(status int) { w.status = status }
 
 func (w *stalledResponseWriter) Write(p []byte) (int, error) {
 	w.once.Do(func() { close(w.writing) })
-	<-w.release
-	return w.body.Write(p)
+	select {
+	case <-w.release:
+		return w.body.Write(p)
+	case <-w.deadlineElapsed:
+		return 0, os.ErrDeadlineExceeded
+	}
 }
 
 func (w *stalledResponseWriter) Flush() {}
+
+func (w *stalledResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadlineMu.Lock()
+	defer w.deadlineMu.Unlock()
+	if w.deadlineTimer != nil {
+		w.deadlineTimer.Stop()
+	}
+	if deadline.IsZero() {
+		return nil
+	}
+	w.deadlineTimer = time.AfterFunc(time.Until(deadline), func() {
+		w.deadlineOnce.Do(func() { close(w.deadlineElapsed) })
+	})
+	return nil
+}
 
 // TestBulkSlot_HeldUntilResponseWritten serves ReadMempool through the real
 // routing table to a reader that stalls mid-response, and requires the
@@ -111,6 +136,49 @@ func TestBulkSlot_HeldUntilResponseWritten(t *testing.T) {
 		connect.NewRequest(&submit.ReadMempoolRequest{}),
 	)
 	require.NoError(t, err, "the slot is returned once the write completes")
+}
+
+// TestBulkSlot_WriteDeadlineReleasesStalledResponse requires a client that
+// stops reading to lose its bulk slot after the bounded response write.
+func TestBulkSlot_WriteDeadlineReleasesStalledResponse(t *testing.T) {
+	t.Parallel()
+	u := NewUtxorpc(UtxorpcConfig{
+		Logger:                    discardLogger(),
+		Mempool:                   newBoundsRecordingMempool(3),
+		MaxConcurrentBulkRequests: 1,
+		BulkResponseWriteTimeout:  50 * time.Millisecond,
+	})
+	handler := u.newServeMux()
+	submitSrv := &submitServiceServer{utxorpc: u}
+
+	w := newStalledResponseWriter()
+	var releaseOnce gosync.Once
+	release := func() { releaseOnce.Do(func() { close(w.release) }) }
+	defer release()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/utxorpc.v1alpha.submit.SubmitService/ReadMempool",
+		bytes.NewReader(nil),
+	)
+	req.Header.Set("Content-Type", "application/proto")
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		handler.ServeHTTP(w, req)
+	}()
+	testutil.RequireReceive(
+		t, w.writing, 5*time.Second, "response write started",
+	)
+	testutil.RequireReceive(
+		t, served, 5*time.Second, "response write deadline elapsed",
+	)
+
+	_, err := submitSrv.ReadMempool(
+		context.Background(),
+		connect.NewRequest(&submit.ReadMempoolRequest{}),
+	)
+	require.NoError(t, err,
+		"the slot is returned after a stalled response write times out")
 }
 
 // invalidBulkRequests sends one request per gated handler that fails its

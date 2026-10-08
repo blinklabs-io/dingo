@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	gosync "sync"
+	"time"
 
 	"connectrpc.com/connect"
 )
@@ -34,8 +35,11 @@ type bulkSlotHolderKey struct{}
 // after the handler returns, so a slot released by the handler itself would
 // be free again while a slow reader still pins the response it bounded.
 type bulkSlotHolder struct {
-	mu       gosync.Mutex
-	releases []func()
+	mu                 gosync.Mutex
+	releases           []func()
+	responseController *http.ResponseController
+	writeTimeout       time.Duration
+	writeDeadlineSet   bool
 }
 
 func (h *bulkSlotHolder) add(release func()) {
@@ -44,26 +48,75 @@ func (h *bulkSlotHolder) add(release func()) {
 	h.releases = append(h.releases, release)
 }
 
+func (h *bulkSlotHolder) armWriteDeadline() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.releases) == 0 || h.writeDeadlineSet {
+		return nil
+	}
+	err := h.responseController.SetWriteDeadline(
+		time.Now().Add(h.writeTimeout),
+	)
+	if err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return fmt.Errorf("set bulk response write deadline: %w", err)
+	}
+	h.writeDeadlineSet = err == nil
+	return nil
+}
+
 func (h *bulkSlotHolder) releaseAll() {
 	h.mu.Lock()
 	releases := h.releases
 	h.releases = nil
+	writeDeadlineSet := h.writeDeadlineSet
+	h.writeDeadlineSet = false
 	h.mu.Unlock()
+	if writeDeadlineSet {
+		_ = h.responseController.SetWriteDeadline(time.Time{})
+	}
 	for _, release := range releases {
 		release()
 	}
 }
 
 // holdBulkSlotsUntilWritten keeps every bulk slot acquired while serving a
-// request until next has finished writing the response.
-func holdBulkSlotsUntilWritten(next http.Handler) http.Handler {
+// request until next has finished writing the response. The deadline is armed
+// only if the request acquires a bulk slot, so streaming methods routed through
+// the same service handler remain unbounded.
+func holdBulkSlotsUntilWritten(
+	next http.Handler,
+	writeTimeout time.Duration,
+) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		holder := &bulkSlotHolder{}
+		holder := &bulkSlotHolder{
+			responseController: http.NewResponseController(w),
+			writeTimeout:       writeTimeout,
+		}
 		defer holder.releaseAll()
 		next.ServeHTTP(w, r.WithContext(
 			context.WithValue(r.Context(), bulkSlotHolderKey{}, holder),
 		))
 	})
+}
+
+// bulkResponseWriteDeadlineInterceptor arms the deadline after a bulk unary
+// handler has built its response and immediately before Connect serializes and
+// writes it. Streaming handlers do not run unary interceptors.
+func bulkResponseWriteDeadlineInterceptor(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(
+		ctx context.Context,
+		req connect.AnyRequest,
+	) (connect.AnyResponse, error) {
+		resp, err := next(ctx, req)
+		holder, ok := ctx.Value(bulkSlotHolderKey{}).(*bulkSlotHolder)
+		if !ok {
+			return resp, err
+		}
+		if deadlineErr := holder.armWriteDeadline(); deadlineErr != nil {
+			return nil, connect.NewError(connect.CodeInternal, deadlineErr)
+		}
+		return resp, err
+	}
 }
 
 // acquireBulk reserves one of the MaxConcurrentBulkRequests slots shared by

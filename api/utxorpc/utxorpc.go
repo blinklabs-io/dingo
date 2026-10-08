@@ -69,7 +69,10 @@ const (
 	// DefaultMaxConcurrentBulkRequests caps how many bulk read handlers run
 	// at once; further requests are refused with ResourceExhausted.
 	DefaultMaxConcurrentBulkRequests = 32
-	DefaultServerTimeout             = time.Hour
+	// DefaultBulkResponseWriteTimeout bounds delivery of a bulk unary
+	// response without imposing a deadline on streaming RPCs.
+	DefaultBulkResponseWriteTimeout = 30 * time.Second
+	DefaultServerTimeout            = time.Hour
 	// DefaultShutdownTimeout bounds Stop's graceful http.Server.Shutdown
 	// before it escalates to a hard Close, matching midnight/server's
 	// identical ShutdownTimeout/defaultShutdownTimeout pattern.
@@ -112,6 +115,9 @@ type UtxorpcConfig struct {
 	// MaxConcurrentBulkRequests caps concurrently running bulk read handlers
 	// (0 = use default).
 	MaxConcurrentBulkRequests int
+	// BulkResponseWriteTimeout bounds delivery of a bulk unary response
+	// (0 = use default).
+	BulkResponseWriteTimeout time.Duration
 	// ServerTimeout bounds long-running UTxO RPC handlers server-side
 	// (0 = use default).
 	ServerTimeout time.Duration
@@ -159,6 +165,9 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	}
 	if cfg.MaxConcurrentBulkRequests <= 0 {
 		cfg.MaxConcurrentBulkRequests = DefaultMaxConcurrentBulkRequests
+	}
+	if cfg.BulkResponseWriteTimeout <= 0 {
+		cfg.BulkResponseWriteTimeout = DefaultBulkResponseWriteTimeout
 	}
 	if cfg.ServerTimeout <= 0 {
 		cfg.ServerTimeout = DefaultServerTimeout
@@ -304,6 +313,9 @@ func (u *Utxorpc) newServeMux() *http.ServeMux {
 	compress1KB := connect.WithOptions(
 		connect.WithCompressMinBytes(1024),
 		connect.WithReadMaxBytes(DefaultMaxRequestBody),
+		connect.WithInterceptors(connect.UnaryInterceptorFunc(
+			bulkResponseWriteDeadlineInterceptor,
+		)),
 	)
 	queryPath, queryHandler := queryconnect.NewQueryServiceHandler(
 		&queryServiceServer{utxorpc: u},
@@ -351,13 +363,25 @@ func (u *Utxorpc) newServeMux() *http.ServeMux {
 		betaWatchPath,
 		watchPath,
 	)
-	mux.Handle(queryPath, holdBulkSlotsUntilWritten(queryHandler))
-	mux.Handle(submitPath, holdBulkSlotsUntilWritten(submitHandler))
-	mux.Handle(syncPath, holdBulkSlotsUntilWritten(syncHandler))
+	mux.Handle(queryPath, holdBulkSlotsUntilWritten(
+		queryHandler, u.config.BulkResponseWriteTimeout,
+	))
+	mux.Handle(submitPath, holdBulkSlotsUntilWritten(
+		submitHandler, u.config.BulkResponseWriteTimeout,
+	))
+	mux.Handle(syncPath, holdBulkSlotsUntilWritten(
+		syncHandler, u.config.BulkResponseWriteTimeout,
+	))
 	mux.Handle(watchPath, watchHandler)
-	mux.Handle(betaQueryPath, holdBulkSlotsUntilWritten(betaQueryHandler))
-	mux.Handle(betaSubmitPath, holdBulkSlotsUntilWritten(betaSubmitHandler))
-	mux.Handle(betaSyncPath, holdBulkSlotsUntilWritten(betaSyncHandler))
+	mux.Handle(betaQueryPath, holdBulkSlotsUntilWritten(
+		betaQueryHandler, u.config.BulkResponseWriteTimeout,
+	))
+	mux.Handle(betaSubmitPath, holdBulkSlotsUntilWritten(
+		betaSubmitHandler, u.config.BulkResponseWriteTimeout,
+	))
+	mux.Handle(betaSyncPath, holdBulkSlotsUntilWritten(
+		betaSyncHandler, u.config.BulkResponseWriteTimeout,
+	))
 	mux.Handle(betaWatchPath, betaWatchHandler)
 	// One list drives health checking and both reflection versions so the
 	// served set cannot drift between them. The v1alpha reflection service is
