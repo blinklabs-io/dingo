@@ -4115,6 +4115,17 @@ nonce and only the fold's end keeps a stored block above the tip out of it.
 Folding to the epoch's end collapses both bounds to what the boundary
 computation has always used.
 
+Bounds alone do not keep a fork out below the tip: an abandoned block can sit
+between the candidate bound and the tip's last ancestor before it, and the
+CBOR-decode fallback would fold every stored block in the range. So the query
+also passes the block the fold ends at, and both paths then follow parent links
+back from it (`database.BlockParentPointTxn`, metadata plus the `bh` index, no
+block bodies): the stored-nonce path takes the tip's last ancestor before the
+candidate bound, and the fallback folds exactly the tip's ancestors in the
+epoch. A tip the node holds no metadata for, which is where a
+Mithril-bootstrapped node starts, has no chain to follow, and the fold looks
+blocks up by slot as the boundary computation does.
+
 The previous epoch's last-block hash is resolved through the active chain index
 (`chain.BlockBeforeSlot`), not a raw blob-store slot scan. Blob storage can
 retain synthetic endorser/genesis blobs and fork blobs that are useful for other

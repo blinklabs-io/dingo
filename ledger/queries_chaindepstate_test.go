@@ -1391,3 +1391,98 @@ func TestQueryShelleyDebugChainDepState_NoncesIgnoreAbandonedSibling(
 		assert.Equal(t, want, decoded.CandidateNonce, "pinned=%v", at.pinned())
 	}
 }
+
+// TestQueryShelleyDebugChainDepState_CandidateIgnoresAbandonedPreCutoffBlock
+// acquires a block past the candidate's freeze cutoff while the blob store
+// still holds an abandoned block between the cutoff and that block's last
+// pre-cutoff ancestor. A lookup by slot names the abandoned block, whose nonce
+// row rollback removed, and the fallback then folds every stored block in the
+// range, the abandoned one included. The candidate must come from the
+// acquired block's own ancestor.
+func TestQueryShelleyDebugChainDepState_CandidateIgnoresAbandonedPreCutoffBlock(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	// Conway's window is 4k/f = 60, so the epoch [1000, 2000) freezes its
+	// candidate at 1940: the acquired block is past it, the others before it.
+	const (
+		parentSlot    uint64 = 1100
+		ancestorSlot  uint64 = 1900
+		abandonedSlot uint64 = 1920
+		pinnedSlot    uint64 = 1950
+	)
+	parentHash := bytes.Repeat([]byte{0xa1}, 32)
+	ancestorHash := bytes.Repeat([]byte{0xa2}, 32)
+	abandonedHash := bytes.Repeat([]byte{0xa3}, 32)
+	pinnedHash := bytes.Repeat([]byte{0xa4}, 32)
+	ancestorNonce := bytes.Repeat([]byte{0xb2}, 32)
+	pinnedNonce := bytes.Repeat([]byte{0xb4}, 32)
+	require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+		for _, b := range []struct {
+			slot         uint64
+			hash, parent []byte
+			number       uint64
+		}{
+			{parentSlot, parentHash, bytes.Repeat([]byte{0xa0}, 32), 1},
+			{ancestorSlot, ancestorHash, parentHash, 2},
+			{abandonedSlot, abandonedHash, parentHash, 2},
+			{pinnedSlot, pinnedHash, ancestorHash, 3},
+		} {
+			// The bodies are unreadable, so folding any of them is an error.
+			if err := db.BlockCreate(models.Block{
+				Slot:     b.slot,
+				Hash:     b.hash,
+				PrevHash: b.parent,
+				Cbor:     []byte{0x80},
+				Number:   b.number,
+				Type:     conway.BlockTypeConway,
+			}, txn); err != nil {
+				return err
+			}
+		}
+		for _, n := range []struct {
+			slot        uint64
+			hash, nonce []byte
+		}{
+			{parentSlot, parentHash, bytes.Repeat([]byte{0xb1}, 32)},
+			{ancestorSlot, ancestorHash, ancestorNonce},
+			{pinnedSlot, pinnedHash, pinnedNonce},
+		} {
+			if err := db.SetBlockNonce(n.hash, n.slot, n.nonce, false, txn); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	require.NoError(t, db.Metadata().SetEpoch(
+		1000, 1, bytes.Repeat([]byte{0x02}, 32),
+		bytes.Repeat([]byte{0x71}, 32), bytes.Repeat([]byte{0x72}, 32),
+		bytes.Repeat([]byte{0x03}, 32), eras.ConwayEraDesc.Id, 1, 1000, nil,
+	))
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(pinnedSlot, pinnedHash)},
+		nil,
+	))
+	ls := newChainDepStateLedger(t, db)
+
+	for _, at := range []QueryPoint{{}, {Slot: pinnedSlot, Hash: pinnedHash}} {
+		result, err := ls.Query(t.Context(), chainDepStateQuery(), at)
+		require.NoError(t, err, "pinned=%v", at.pinned())
+		arr, ok := result.([]any)
+		require.True(t, ok)
+		encoded, err := cbor.Encode(arr[0])
+		require.NoError(t, err)
+		var decoded olocalstatequery.DebugChainDepStateResult
+		require.NoError(t, decoded.UnmarshalCBOR(encoded))
+		assert.Equal(t, lcommon.Nonce{
+			Type:  lcommon.NonceTypeNonce,
+			Value: [32]byte(pinnedNonce),
+		}, decoded.EvolvingNonce, "pinned=%v", at.pinned())
+		assert.Equal(t, lcommon.Nonce{
+			Type:  lcommon.NonceTypeNonce,
+			Value: [32]byte(ancestorNonce),
+		}, decoded.CandidateNonce, "pinned=%v", at.pinned())
+	}
+}

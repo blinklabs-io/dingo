@@ -2992,6 +2992,17 @@ matching `bh` entry for each block). The
 `dingo_database_block_hash_index_misses_total` counters expose the hit and
 miss rates so operators can tell whether a backfill is needed.
 
+`BlockParentPointTxn` resolves a block's parent through the same entry: it
+reads the block's metadata for `PrevHash`, then the `bh` entry for the parent's
+`bp` key, which carries the parent's slot. Walking it from a block follows that
+block's own chain, which a slot scan of the `bp` keyspace does not, since the
+store keeps blocks rollback abandoned. A parent the index does not hold is
+`ErrAncestorMissing`, unless no block lies below the child at all (a chain's
+first block names the genesis hash), which ends the walk. On a database whose
+index was never backfilled the walk therefore stops at the first pre-index
+block; its one caller, the `GetChainDepState` nonce fold, walks only within the
+acquired block's epoch.
+
 A caller that already knows the slot as well as the hash — anything holding a
 point, such as the tip — should use `BlockByPointTxn` rather than
 `BlockByHash`. It builds the `bp` key from slot and hash and reads the blob

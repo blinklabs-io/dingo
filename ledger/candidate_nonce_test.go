@@ -36,6 +36,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -160,6 +161,94 @@ func TestComputeCandidateNonceAsOf_SlowPathStopsAtFoldEnd(t *testing.T) {
 			"nonce is the value carried in")
 	assert.Equal(t, prevCandidate, candidate,
 		"and the candidate likewise stays at the value carried in")
+}
+
+// TestComputeCandidateNonceAsOf_SlowPathFoldsOnlyTipChain stores a block on
+// an abandoned fork inside the fold's range. Iterating the range by slot would
+// fold it; with foldTip the slow path folds only foldTip's own ancestors.
+func TestComputeCandidateNonceAsOf_SlowPathFoldsOnlyTipChain(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	const (
+		epochStart    uint64 = 1000
+		epochLength   uint64 = 1000
+		earlySlot     uint64 = 1100
+		abandonedSlot uint64 = 1150
+		tipSlot       uint64 = 1200
+	)
+	earlyHash := bytes.Repeat([]byte{0x63}, 32)
+	tipHash := bytes.Repeat([]byte{0x64}, 32)
+	prevEvolving := bytes.Repeat([]byte{0x61}, 32)
+	prevCandidate := bytes.Repeat([]byte{0x62}, 32)
+
+	require.NoError(
+		t,
+		db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+			// Byron blocks fold to nothing without their bodies being read.
+			for _, blk := range []struct {
+				slot         uint64
+				hash, parent []byte
+				number       uint64
+			}{
+				{earlySlot, earlyHash, bytes.Repeat([]byte{0x65}, 32), 1},
+				{tipSlot, tipHash, earlyHash, 2},
+			} {
+				if err := db.BlockCreate(models.Block{
+					Slot:     blk.slot,
+					Hash:     blk.hash,
+					PrevHash: blk.parent,
+					Cbor:     []byte{0x80},
+					Number:   blk.number,
+					Type:     byron.BlockTypeByronMain,
+				}, txn); err != nil {
+					return err
+				}
+			}
+			// The tripwire: a sibling of the tip with a body the decoder
+			// cannot read, so folding it is a decode error.
+			return db.BlockCreate(models.Block{
+				Slot:     abandonedSlot,
+				Hash:     bytes.Repeat([]byte{0x66}, 32),
+				PrevHash: earlyHash,
+				Cbor:     []byte{0xff, 0xff, 0xff, 0xff},
+				Number:   2,
+				Type:     conway.BlockTypeConway,
+			}, txn)
+		}),
+	)
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newConwayBootstrapStabilityCfg(t),
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	tip := ocommon.Point{Slot: tipSlot, Hash: tipHash}
+	var candidate, evolving []byte
+	require.NoError(
+		t,
+		db.Transaction(t.Context(), false).Do(func(txn *database.Txn) error {
+			var err error
+			candidate, evolving, err = ls.computeCandidateNonceAsOf(
+				t.Context(),
+				txn,
+				eras.ConwayEraDesc.Id,
+				prevEvolving,
+				prevCandidate,
+				epochStart,
+				epochLength,
+				foldEndSlotForTip(tipSlot),
+				&tip,
+			)
+			return err
+		}),
+		"the fold must skip the block on the abandoned fork",
+	)
+	assert.Equal(t, prevEvolving, evolving)
+	assert.Equal(t, prevCandidate, candidate)
 }
 
 // TestComputeCandidateNonce_RejectsWrappedEpochRange covers an epoch whose end
