@@ -16,7 +16,6 @@ package sqlstore
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -29,42 +28,38 @@ import (
 )
 
 func (s *Store) applyTransactionMetadataLabels(
-	ctx context.Context,
-	db queryer,
+	rows *rowBatch,
 	transactionID int64,
 	slot uint64,
 	labels []labelcodec.Entry,
-) error {
+) {
 	if s.storageMode != types.StorageModeAPI {
-		return nil
+		return
 	}
-	for _, label := range labels {
+	// A multi-row upsert may not name one (transaction_id, label) key twice,
+	// so a repeated label keeps only its last value, as one upsert per label
+	// did.
+	last := make(map[uint64]int, len(labels))
+	for i, label := range labels {
+		last[label.Label] = i
+	}
+	for i, label := range labels {
+		if last[label.Label] != i {
+			continue
+		}
 		var jsonValue any
 		if label.JSONError == nil {
 			jsonValue = label.JsonValue
 		}
-		if _, err := db.ExecContext(ctx, `
-INSERT INTO transaction_metadata_label (
-    transaction_id, label, slot, cbor_value, json_value
-) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (transaction_id, label) DO UPDATE SET
-    slot = excluded.slot,
-    cbor_value = excluded.cbor_value,
-    json_value = excluded.json_value`,
+		rows.add(
+			metadataLabelShape,
 			transactionID,
 			decimalUint64(types.Uint64(label.Label)),
 			slot,
 			label.CborValue,
 			jsonValue,
-		); err != nil {
-			return fmt.Errorf(
-				"create transaction metadata label %d: %w",
-				label.Label,
-				err,
-			)
-		}
+		)
 	}
-	return nil
 }
 
 func (s *Store) applyTransactionAssetMintBurn(
@@ -111,6 +106,7 @@ func (s *Store) applyTransactionAPIDetails(
 	slot uint64,
 	index uint32,
 	produced []models.Utxo,
+	rows *rowBatch,
 ) error {
 	if s.storageMode != types.StorageModeAPI {
 		return nil
@@ -137,6 +133,7 @@ func (s *Store) applyTransactionAPIDetails(
 	if err := indexTransactionAddresses(
 		ctx,
 		db,
+		rows,
 		transactionID,
 		transaction,
 		slot,
@@ -149,6 +146,7 @@ func (s *Store) applyTransactionAPIDetails(
 	if err := storeTransactionWitnesses(
 		ctx,
 		db,
+		rows,
 		transactionID,
 		transaction,
 		slot,
@@ -163,7 +161,7 @@ func (s *Store) applyTransactionAPIDetails(
 	); err != nil {
 		return err
 	}
-	if err := storeTransactionDatumIndex(ctx, db, transaction, slot); err != nil {
+	if err := storeTransactionDatumIndex(rows, transaction, slot); err != nil {
 		return err
 	}
 	return nil
@@ -225,6 +223,7 @@ type addressIndexKey struct {
 func indexTransactionAddresses(
 	ctx context.Context,
 	db queryer,
+	rows *rowBatch,
 	transactionID int64,
 	transaction lcommon.Transaction,
 	slot uint64,
@@ -288,7 +287,7 @@ DELETE FROM address_transaction WHERE transaction_id = ?`,
 			predicates = append(predicates, "(tx_id = ? AND output_idx = ?)")
 			args = append(args, []byte(key.txID), key.index)
 		}
-		rows, err := db.QueryContext(ctx, `
+		inputRows, err := db.QueryContext(ctx, `
 SELECT tx_id, output_idx, payment_key, credential_tag, staking_key
 FROM utxo WHERE `+strings.Join(predicates, " OR "), args...)
 		if err != nil {
@@ -300,9 +299,9 @@ FROM utxo WHERE `+strings.Join(predicates, " OR "), args...)
 		}
 		if err := func() (runErr error) {
 			defer func() {
-				runErr = errors.Join(runErr, rows.Close())
+				runErr = errors.Join(runErr, inputRows.Close())
 			}()
-			for rows.Next() {
+			for inputRows.Next() {
 				var (
 					txID    []byte
 					output  uint32
@@ -310,12 +309,12 @@ FROM utxo WHERE `+strings.Join(predicates, " OR "), args...)
 					staking []byte
 					tag     uint8
 				)
-				if err := rows.Scan(&txID, &output, &payment, &tag, &staking); err != nil {
+				if err := inputRows.Scan(&txID, &output, &payment, &tag, &staking); err != nil {
 					return fmt.Errorf("scan input address for transaction %d: %w", transactionID, err)
 				}
 				add(payment, tag, staking)
 			}
-			if err := rows.Err(); err != nil {
+			if err := inputRows.Err(); err != nil {
 				return fmt.Errorf("iterate input addresses for transaction %d: %w", transactionID, err)
 			}
 			return nil
@@ -324,19 +323,15 @@ FROM utxo WHERE `+strings.Join(predicates, " OR "), args...)
 		}
 	}
 	for address := range addresses {
-		if _, err := db.ExecContext(ctx, `
-INSERT INTO address_transaction (
-    payment_key, staking_key, credential_tag, transaction_id, slot, tx_index
-) VALUES (?, ?, ?, ?, ?, ?)`,
+		rows.add(
+			addressTransactionShape,
 			[]byte(address.payment),
 			[]byte(address.staking),
 			address.tag,
 			transactionID,
 			slot,
 			index,
-		); err != nil {
-			return fmt.Errorf("create address transaction: %w", err)
-		}
+		)
 	}
 	return nil
 }
@@ -373,6 +368,7 @@ func TransactionWitnessCleanupSQL(table string) string {
 func storeTransactionWitnesses(
 	ctx context.Context,
 	db queryer,
+	rows *rowBatch,
 	transactionID int64,
 	transaction lcommon.Transaction,
 	slot uint64,
@@ -392,32 +388,22 @@ func storeTransactionWitnesses(
 	// datum indexes consumed by chain-index APIs.
 	if witnesses != nil {
 		for _, witness := range witnesses.Vkey() {
-			if _, err := db.ExecContext(ctx, `
-INSERT INTO key_witness (
-    vkey, signature, transaction_id, type
-) VALUES (?, ?, ?, ?)`,
+			rows.add(vkeyWitnessShape,
 				witness.Vkey,
 				witness.Signature,
 				transactionID,
 				models.KeyWitnessTypeVkey,
-			); err != nil {
-				return fmt.Errorf("create vkey witness: %w", err)
-			}
+			)
 		}
 		for _, witness := range witnesses.Bootstrap() {
-			if _, err := db.ExecContext(ctx, `
-INSERT INTO key_witness (
-    signature, public_key, chain_code, attributes, transaction_id, type
-) VALUES (?, ?, ?, ?, ?, ?)`,
+			rows.add(bootstrapWitnessShape,
 				witness.Signature,
 				witness.PublicKey,
 				witness.ChainCode,
 				witness.Attributes,
 				transactionID,
 				models.KeyWitnessTypeBootstrap,
-			); err != nil {
-				return fmt.Errorf("create bootstrap witness: %w", err)
-			}
+			)
 		}
 	}
 
@@ -427,6 +413,7 @@ INSERT INTO key_witness (
 		if err := storeWitnessScripts(
 			ctx,
 			db,
+			rows,
 			transactionID,
 			uint8(lcommon.ScriptRefTypeNativeScript),
 			witnessSet.NativeScripts(),
@@ -438,6 +425,7 @@ INSERT INTO key_witness (
 		if err := storeWitnessScripts(
 			ctx,
 			db,
+			rows,
 			transactionID,
 			uint8(lcommon.ScriptRefTypePlutusV4),
 			lcommon.PlutusV4ScriptsFromWitnessSet(witnessSet),
@@ -449,6 +437,7 @@ INSERT INTO key_witness (
 		if err := storeWitnessScripts(
 			ctx,
 			db,
+			rows,
 			transactionID,
 			uint8(lcommon.ScriptRefTypePlutusV1),
 			witnessSet.PlutusV1Scripts(),
@@ -460,6 +449,7 @@ INSERT INTO key_witness (
 		if err := storeWitnessScripts(
 			ctx,
 			db,
+			rows,
 			transactionID,
 			uint8(lcommon.ScriptRefTypePlutusV2),
 			witnessSet.PlutusV2Scripts(),
@@ -471,6 +461,7 @@ INSERT INTO key_witness (
 		if err := storeWitnessScripts(
 			ctx,
 			db,
+			rows,
 			transactionID,
 			uint8(lcommon.ScriptRefTypePlutusV3),
 			witnessSet.PlutusV3Scripts(),
@@ -486,30 +477,22 @@ INSERT INTO key_witness (
 				continue
 			}
 			seenData[key] = struct{}{}
-			if _, err := db.ExecContext(ctx, `
-INSERT INTO plutus_data (data, transaction_id) VALUES (?, ?)`,
+			rows.add(plutusDataShape,
 				raw,
 				transactionID,
-			); err != nil {
-				return fmt.Errorf("create Plutus data: %w", err)
-			}
+			)
 		}
 	}
 	if witnesses != nil && witnesses.Redeemers() != nil {
 		for key, value := range witnesses.Redeemers().Iter() {
-			if _, err := db.ExecContext(ctx, `
-INSERT INTO redeemer (
-    data, transaction_id, ex_units_memory, ex_units_cpu, "index", tag
-) VALUES (?, ?, ?, ?, ?, ?)`,
+			rows.add(redeemerShape,
 				value.Data.Cbor(),
 				transactionID,
 				uint64(max(0, value.ExUnits.Memory)),
 				uint64(max(0, value.ExUnits.Steps)),
 				key.Index,
 				uint8(key.Tag),
-			); err != nil {
-				return fmt.Errorf("create redeemer: %w", err)
-			}
+			)
 		}
 	}
 	return nil
@@ -548,6 +531,7 @@ type witnessScriptKey struct {
 func storeWitnessScripts[T lcommon.Script](
 	ctx context.Context,
 	db queryer,
+	rows *rowBatch,
 	transactionID int64,
 	scriptType uint8,
 	scripts []T,
@@ -561,15 +545,11 @@ func storeWitnessScripts[T lcommon.Script](
 			continue
 		}
 		seen[key] = struct{}{}
-		if _, err := db.ExecContext(ctx, `
-INSERT INTO witness_scripts (script_hash, transaction_id, type)
-VALUES (?, ?, ?)`,
+		rows.add(witnessScriptShape,
 			hash.Bytes(),
 			transactionID,
 			scriptType,
-		); err != nil {
-			return fmt.Errorf("create witness script: %w", err)
-		}
+		)
 		if err := storeScriptContent(ctx, db, script, scriptType, slot); err != nil {
 			return err
 		}
@@ -721,8 +701,7 @@ func ledgerScriptType(script lcommon.Script) (uint8, error) {
 }
 
 func storeTransactionDatumIndex(
-	ctx context.Context,
-	db queryer,
+	rows *rowBatch,
 	transaction lcommon.Transaction,
 	slot uint64,
 ) error {
@@ -732,8 +711,7 @@ func storeTransactionDatumIndex(
 			continue
 		}
 		if err := storeDatumIndexRow(
-			ctx,
-			db,
+			rows,
 			output.Output.Datum(),
 			slot,
 			seen,
@@ -745,14 +723,14 @@ func storeTransactionDatumIndex(
 		if output == nil {
 			continue
 		}
-		if err := storeDatumIndexRow(ctx, db, output.Datum(), slot, seen); err != nil {
+		if err := storeDatumIndexRow(rows, output.Datum(), slot, seen); err != nil {
 			return err
 		}
 	}
 	for _, witnesses := range allTransactionWitnessSets(transaction) {
 		for _, datum := range witnesses.PlutusData() {
 			copy := datum
-			if err := storeDatumIndexRow(ctx, db, &copy, slot, seen); err != nil {
+			if err := storeDatumIndexRow(rows, &copy, slot, seen); err != nil {
 				return err
 			}
 		}
@@ -761,8 +739,7 @@ func storeTransactionDatumIndex(
 }
 
 func storeDatumIndexRow(
-	ctx context.Context,
-	db queryer,
+	rows *rowBatch,
 	datum *lcommon.Datum,
 	slot uint64,
 	seen map[lcommon.Blake2b256]struct{},
@@ -786,19 +763,6 @@ func storeDatumIndexRow(
 		return nil
 	}
 	seen[hash] = struct{}{}
-	if _, err := db.ExecContext(ctx, `
-INSERT INTO datum (hash, raw_datum, added_slot)
-VALUES (?, ?, ?)
-ON CONFLICT (hash) DO NOTHING`,
-		hash.Bytes(),
-		raw,
-		slot,
-	); err != nil {
-		return fmt.Errorf(
-			"store datum %s: %w",
-			hex.EncodeToString(hash.Bytes()),
-			err,
-		)
-	}
+	rows.add(datumShape, hash.Bytes(), raw, slot)
 	return nil
 }

@@ -53,7 +53,7 @@ func RegisterSQLiteTools(
 	maxRows int,
 ) {
 	if queryTimeout <= 0 {
-		queryTimeout = 5 * time.Second
+		queryTimeout = defaultQueryTimeout
 	}
 	if maxRows <= 0 {
 		maxRows = 100
@@ -477,10 +477,10 @@ func boundedSQLiteConn(
 		{sqlite3.SQLITE_LIMIT_COLUMN, 128, 0},
 	}
 	applied := 0
-	release := func() {
+	release := func() { //nolint:contextcheck // Cleanup must restore connection state after qCtx cancellation.
 		// Cleanup must survive request cancellation before returning the connection.
 		cleanupCtx, cancel := context.WithTimeout(
-			context.Background(),
+			context.WithoutCancel(ctx),
 			time.Second,
 		)
 		defer cancel()

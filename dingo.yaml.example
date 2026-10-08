@@ -584,6 +584,10 @@
 
 # Path to ImmutableDB for batch import (used when runMode is "load")
 # Can also be provided as argument to 'dingo load' command
+# An https:// value, or http:// on loopback for local development, names a
+# remote ImmutableDB root serving NNNNN.chunk, NNNNN.primary, NNNNN.secondary
+# and tip.json; chunks download into <databasePath>/immutable-download and load
+# as they arrive in order. Non-loopback HTTP is rejected.
 #
 # Can be overridden with the DINGO_IMMUTABLE_DB_PATH environment variable
 # CLI: --immutable-db-path

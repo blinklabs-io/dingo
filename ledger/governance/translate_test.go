@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -57,7 +58,10 @@ func TestTranslateRatifiedGovActions_ConwayToDijkstra(t *testing.T) {
 		AnchorHash:    testBytes(32, 0xE2),
 		ReturnAddress: testBytes(29, 0xE3),
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
 
 	require.NoError(t, TranslateRatifiedGovActions(
 		db,
@@ -66,7 +70,12 @@ func TestTranslateRatifiedGovActions_ConwayToDijkstra(t *testing.T) {
 		gdijkstra.EraIdDijkstra,
 	))
 
-	got, err := db.GetGovernanceProposal(proposal.TxHash, 0, nil)
+	got, err := db.GetGovernanceProposal(
+		context.Background(),
+		proposal.TxHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	var translated gdijkstra.DijkstraParameterChangeGovAction
 	_, err = cbor.Decode(got.GovActionCbor, &translated)

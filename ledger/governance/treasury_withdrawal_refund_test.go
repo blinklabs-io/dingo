@@ -90,7 +90,7 @@ func TestProcessEpochEnactedWithdrawalToReturnAccountRefundsDeposit(
 			)
 			proposal.RatifiedEpoch = &ratifiedEpoch
 			proposal.RatifiedSlot = &ratifiedSlot
-			require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+			require.NoError(t, db.SetGovernanceProposal(t.Context(), proposal, nil))
 
 			assertPots := func(
 				wantTreasury, wantDestination, wantReturn uint64,
@@ -145,9 +145,9 @@ func TestProcessEpochEnactedWithdrawalToReturnAccountRefundsDeposit(
 				test.wantReturnReward,
 			)
 
-			require.NoError(t, db.DeleteGovernanceProposalsAfterSlot(499, nil))
-			require.NoError(t, db.DeleteAccountRewardsAfterSlot(499, nil))
-			require.NoError(t, db.DeleteNetworkStateAfterSlot(499, nil))
+			require.NoError(t, db.DeleteGovernanceProposalsAfterSlot(t.Context(), 499, nil))
+			require.NoError(t, db.DeleteAccountRewardsAfterSlot(t.Context(), 499, nil))
+			require.NoError(t, db.DeleteNetworkStateAfterSlot(t.Context(), 499, nil))
 			assertPots(treasury, 0, 0)
 			restored := chainTestReload(t, db, proposal)
 			assert.Nil(t, restored.EnactedEpoch)

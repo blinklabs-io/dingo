@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -76,7 +77,8 @@ func TestReplayRecoveryRollbackLockOrder(t *testing.T) {
 	var rollbackBody *ast.BlockStmt
 	ast.Inspect(file, func(node ast.Node) bool {
 		function, ok := node.(*ast.FuncDecl)
-		if ok && function.Name.Name == "rollbackPrimaryChainInSecurityParamWindows" {
+		if ok &&
+			function.Name.Name == "rollbackPrimaryChainInSecurityParamWindows" {
 			rollbackBody = function.Body
 			return false
 		}
@@ -172,7 +174,7 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	parentBlock := testRawBlock("recovery-parent", 100, 1, nil)
@@ -197,6 +199,7 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	require.NoError(
 		t,
 		cm.PrimaryChain().AddRawBlocks(
+			context.Background(),
 			[]chain.RawBlock{
 				parentBlock,
 				producerOneBlock,
@@ -301,7 +304,7 @@ func TestFindReplayRecoveryCandidateFallsBackWhenProducerParentIsMissing(
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	anchorBlock := testRawBlock("missing-parent-anchor", 80, 1, nil)
@@ -321,9 +324,14 @@ func TestFindReplayRecoveryCandidateFallsBackWhenProducerParentIsMissing(
 		producerBlock.Hash,
 	)
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(
+		context.Background(),
 		[]chain.RawBlock{anchorBlock, parentBlock, producerBlock, currentBlock},
 	))
-	storedParent, err := database.BlockByHash(db, parentBlock.Hash)
+	storedParent, err := database.BlockByHash(
+		context.Background(),
+		db,
+		parentBlock.Hash,
+	)
 	require.NoError(t, err)
 	txn := db.BlobTxn(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
@@ -389,7 +397,7 @@ func TestFindReplayRecoveryCandidateHandlesPrunedFallbackTail(
 				&database.Config{DataDir: t.TempDir()},
 			)
 			require.NoError(t, err)
-			cm, err := chain.NewManager(db, nil)
+			cm, err := chain.NewManager(context.Background(), db, nil)
 			require.NoError(t, err)
 
 			blocks := []chain.RawBlock{
@@ -402,11 +410,18 @@ func TestFindReplayRecoveryCandidateHandlesPrunedFallbackTail(
 			for i := 1; i < len(blocks); i++ {
 				blocks[i].PrevHash = blocks[i-1].Hash
 			}
-			require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+			require.NoError(
+				t,
+				cm.PrimaryChain().AddRawBlocks(context.Background(), blocks),
+			)
 
 			stored := make([]models.Block, 3)
 			for i := range stored {
-				stored[i], err = database.BlockByHash(db, blocks[i].Hash)
+				stored[i], err = database.BlockByHash(
+					context.Background(),
+					db,
+					blocks[i].Hash,
+				)
 				require.NoError(t, err)
 			}
 			txn := db.BlobTxn(true)
@@ -487,7 +502,7 @@ func TestFindReplayRecoveryCandidateFlagsUnresolvedWithoutLocalFallbackAnchor(
 					&database.Config{DataDir: t.TempDir()},
 				)
 				require.NoError(t, err)
-				cm, err := chain.NewManager(db, nil)
+				cm, err := chain.NewManager(context.Background(), db, nil)
 				require.NoError(t, err)
 
 				blocks := []chain.RawBlock{
@@ -500,13 +515,21 @@ func TestFindReplayRecoveryCandidateFlagsUnresolvedWithoutLocalFallbackAnchor(
 				for i := 1; i < len(blocks); i++ {
 					blocks[i].PrevHash = blocks[i-1].Hash
 				}
-				require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+				require.NoError(
+					t,
+					cm.PrimaryChain().
+						AddRawBlocks(context.Background(), blocks),
+				)
 
 				// Prune the first two blocks, leaving the producer's own parent
 				// retained but every fallback anchor index below the window.
 				pruned := make([]models.Block, 2)
 				for i := range pruned {
-					pruned[i], err = database.BlockByHash(db, blocks[i].Hash)
+					pruned[i], err = database.BlockByHash(
+						context.Background(),
+						db,
+						blocks[i].Hash,
+					)
 					require.NoError(t, err)
 				}
 				txn := db.BlobTxn(true)
@@ -610,7 +633,7 @@ func newPrunedProducerLedger(
 ) ([]chain.RawBlock, *LedgerState) {
 	t.Helper()
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	blocks := []chain.RawBlock{
 		testRawBlock("pruned-producer-one", 80, 1, nil),
@@ -622,15 +645,22 @@ func newPrunedProducerLedger(
 	for i := 1; i < len(blocks); i++ {
 		blocks[i].PrevHash = blocks[i-1].Hash
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), blocks),
+	)
 
-	stored, err := database.BlockByHash(db, blocks[3].Hash)
+	stored, err := database.BlockByHash(
+		context.Background(),
+		db,
+		blocks[3].Hash,
+	)
 	require.NoError(t, err)
 	txn := db.BlobTxn(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return database.BlockDeleteTxn(txn, stored)
 	}))
-	_, err = database.BlockByHash(db, blocks[3].Hash)
+	_, err = database.BlockByHash(context.Background(), db, blocks[3].Hash)
 	require.ErrorIs(
 		t,
 		err,
@@ -725,7 +755,11 @@ func TestFindReplayRecoveryCandidateFallsBackWhenTxBlobBlockIsMissing(
 	}))
 
 	// No transaction metadata row: resolution goes through the tx blob.
-	storedTx, err := db.GetTransactionByHash(producerTxHash, nil)
+	storedTx, err := db.GetTransactionByHash(
+		context.Background(),
+		producerTxHash,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Nil(t, storedTx, "fixture must not seed transaction metadata")
 
@@ -754,7 +788,7 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	parentBlock := testRawBlock("mithril-recovery-parent", 100, 1, nil)
@@ -779,6 +813,7 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	require.NoError(
 		t,
 		cm.PrimaryChain().AddRawBlocks(
+			context.Background(),
 			[]chain.RawBlock{
 				parentBlock,
 				producerBlock,
@@ -898,6 +933,7 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	require.NoError(t, err)
 	assert.Equal(t, boundaryTip, dbTip)
 	_, err = database.BlockByPoint(
+		context.Background(),
 		db,
 		ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
 	)
@@ -936,7 +972,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	parentBlock := testRawBlock("at-tip-parent", 100, 1, nil)
@@ -961,6 +997,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	require.NoError(
 		t,
 		cm.PrimaryChain().AddRawBlocks(
+			context.Background(),
 			[]chain.RawBlock{
 				parentBlock,
 				producerBlock,
@@ -994,13 +1031,14 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	ls.publishSnapshotsLocked()
 
 	producerTxHash := testHashBytes("producer-tx-live")
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:      producerTxHash,
 		OutputIdx: 0,
 		AddedSlot: producerBlock.Slot,
 		Amount:    types.Uint64(100),
 	}))
 	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		context.Background(),
 		nil,
 		[]types.UtxoKey{{TxId: producerTxHash, OutputIdx: 0}},
 		failingBlock.Slot,
@@ -1037,6 +1075,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	assert.Equal(t, ledgerTip, dbTip)
 
 	_, err = database.BlockByPoint(
+		context.Background(),
 		db,
 		ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
 	)
@@ -1091,7 +1130,7 @@ func newAtTipDescentLedger(t *testing.T) (*LedgerState, ochainsync.Tip) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	parentBlock := testRawBlock("descent-parent", 100, 1, nil)
@@ -1104,6 +1143,7 @@ func newAtTipDescentLedger(t *testing.T) (*LedgerState, ochainsync.Tip) {
 	require.NoError(
 		t,
 		cm.PrimaryChain().AddRawBlocks(
+			context.Background(),
 			[]chain.RawBlock{parentBlock, ledgerTipBlock},
 		),
 	)
@@ -1331,7 +1371,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 	})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	parentBlock := testRawBlock("at-tip-mithril-parent", 100, 1, nil)
@@ -1350,6 +1390,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 	require.NoError(
 		t,
 		cm.PrimaryChain().AddRawBlocks(
+			context.Background(),
 			[]chain.RawBlock{
 				parentBlock,
 				ledgerTipBlock,
@@ -1441,6 +1482,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 	require.NoError(t, err)
 	assert.Equal(t, ledgerTip, dbTip)
 	_, err = database.BlockByPoint(
+		context.Background(),
 		db,
 		ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
 	)
@@ -1473,7 +1515,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 	})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	parentBlock := testRawBlock("blob-parent", 200, 1, nil)
@@ -1482,6 +1524,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 	require.NoError(
 		t,
 		cm.PrimaryChain().AddRawBlocks(
+			context.Background(),
 			[]chain.RawBlock{
 				parentBlock,
 				producerBlock,
@@ -1582,7 +1625,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	imm, err := immutable.New("../database/immutable/testdata")
@@ -1626,13 +1669,14 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 	require.Greater(t, currentIdx, producerIdx)
 	require.NoError(
 		t,
-		cm.PrimaryChain().AddRawBlocks(func() []chain.RawBlock {
-			ret := make([]chain.RawBlock, 0, len(chainBlocks))
-			for _, block := range chainBlocks {
-				ret = append(ret, block.raw)
-			}
-			return ret
-		}()),
+		cm.PrimaryChain().
+			AddRawBlocks(context.Background(), func() []chain.RawBlock {
+				ret := make([]chain.RawBlock, 0, len(chainBlocks))
+				for _, block := range chainBlocks {
+					ret = append(ret, block.raw)
+				}
+				return ret
+			}()),
 	)
 
 	parentBlock := chainBlocks[producerIdx-1]
@@ -1721,7 +1765,7 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	imm, err := immutable.New("../database/immutable/testdata")
@@ -1801,13 +1845,14 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	)
 	require.NoError(
 		t,
-		cm.PrimaryChain().AddRawBlocks(func() []chain.RawBlock {
-			ret := make([]chain.RawBlock, 0, len(chainBlocks))
-			for _, block := range chainBlocks {
-				ret = append(ret, block.raw)
-			}
-			return ret
-		}()),
+		cm.PrimaryChain().
+			AddRawBlocks(context.Background(), func() []chain.RawBlock {
+				ret := make([]chain.RawBlock, 0, len(chainBlocks))
+				for _, block := range chainBlocks {
+					ret = append(ret, block.raw)
+				}
+				return ret
+			}()),
 	)
 
 	currentTip := ochainsync.Tip{
@@ -1886,7 +1931,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 
-	cm, err := chain.NewManager(db, bus)
+	cm, err := chain.NewManager(context.Background(), db, bus)
 	require.NoError(t, err)
 
 	blocks := []chain.RawBlock{
@@ -1898,7 +1943,10 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	blocks[1].PrevHash = blocks[0].Hash
 	blocks[2].PrevHash = blocks[1].Hash
 	blocks[3].PrevHash = blocks[2].Hash
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), blocks),
+	)
 
 	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
 	resyncSubId := bus.SubscribeFunc(
@@ -2001,7 +2049,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	require.True(t, recovered)
 	assert.Equal(t, rewindTip, ls.currentTip)
 	assert.Equal(t, rewindTip, ls.chain.Tip())
-	_, err = database.BlockByPoint(db, currentTip.Point)
+	_, err = database.BlockByPoint(context.Background(), db, currentTip.Point)
 	assert.ErrorIs(t, err, models.ErrBlockNotFound)
 
 	resync := testutil.RequireReceive(
@@ -2062,7 +2110,7 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 
-	cm, err := chain.NewManager(db, bus)
+	cm, err := chain.NewManager(context.Background(), db, bus)
 	require.NoError(t, err)
 
 	parentBlock := testRawBlock("nonconverging-parent", 100, 1, nil)
@@ -2087,6 +2135,7 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	require.NoError(
 		t,
 		cm.PrimaryChain().AddRawBlocks(
+			context.Background(),
 			[]chain.RawBlock{
 				parentBlock,
 				replayOneBlock,
@@ -2267,7 +2316,7 @@ func newReplayRecoveryAuditLedger(
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	parentBlock := testRawBlock("audit-parent", 100, 1, nil)
 	replayBlock := testRawBlock("audit-replay", 120, 2, parentBlock.Hash)
@@ -2277,7 +2326,10 @@ func newReplayRecoveryAuditLedger(
 	if primaryAhead {
 		blocks = append(blocks, ledgerTipBlock, failingBlock)
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), blocks),
+	)
 	if !primaryAhead {
 		for _, block := range []chain.RawBlock{ledgerTipBlock, failingBlock} {
 			require.NoError(t, db.BlockCreate(models.Block{
@@ -2557,7 +2609,7 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	// bypassed: a withdrawal one lovelace above the persisted balance stands
 	// in for a balance that changed between validation and apply.
 	credential := bytes.Repeat([]byte{0xAB}, lcommon.Blake2b224Size)
-	require.NoError(t, ls.db.CreateAccount(nil, &models.Account{
+	require.NoError(t, ls.db.CreateAccount(t.Context(), nil, &models.Account{
 		StakingKey:    credential,
 		CredentialTag: 0,
 		Active:        true,
@@ -2631,9 +2683,10 @@ func applyOverBalanceWithdrawal(
 		TxOffsets:   map[[32]byte]database.CborOffset{txHash: {}},
 		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
 	}
-	err = ls.db.Transaction(true).Do(func(txn *database.Txn) error {
-		return delta.apply(ls, txn)
-	})
+	err = ls.db.Transaction(t.Context(), true).
+		Do(func(txn *database.Txn) error {
+			return delta.apply(t.Context(), ls, txn)
+		})
 	require.Error(t, err)
 	validationErr, ok := errors.AsType[*txValidationError](err)
 	require.True(
@@ -3218,7 +3271,7 @@ func TestReplayRecoveryParentPointGenesisPredecessor(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
@@ -3328,7 +3381,7 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 	})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	parentBlock := testRawBlock("resolvable-parent", 100, 1, nil)
@@ -3345,6 +3398,7 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 		producerBlock.Hash,
 	)
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(
+		context.Background(),
 		[]chain.RawBlock{parentBlock, producerBlock, currentBlock},
 	))
 
@@ -3377,7 +3431,7 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 	seedReplayRecoveryTransaction(
 		t, db, producerTxHash, producerBlock.Hash, producerBlock.Slot,
 	)
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:      producerTxHash,
 		OutputIdx: 1,
 		Amount:    types.Uint64(11688720),
@@ -3425,7 +3479,7 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
@@ -3437,7 +3491,7 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	ls.metrics.init(prometheus.NewRegistry())
 
 	presentTx := testHashBytes("present-producer-tx")
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:      presentTx,
 		OutputIdx: 0,
 		Amount:    types.Uint64(1_000_000),
@@ -3728,7 +3782,7 @@ func newTrustWindowLedger(
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	parentBlock := testRawBlock("trust-window-parent", 100, 1, nil)
 	ledgerTipBlock := testRawBlock(
@@ -3743,11 +3797,14 @@ func newTrustWindowLedger(
 		3,
 		ledgerTipBlock.Hash,
 	)
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
-		parentBlock,
-		ledgerTipBlock,
-		failingBlock,
-	}))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
+			parentBlock,
+			ledgerTipBlock,
+			failingBlock,
+		}),
+	)
 
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
@@ -4200,7 +4257,7 @@ func seedTestChain(
 		})
 		prev = h
 	}
-	require.NoError(t, pc.AddRawBlocks(raw))
+	require.NoError(t, pc.AddRawBlocks(context.Background(), raw))
 	return raw
 }
 
@@ -4220,7 +4277,7 @@ func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	// A chain k of 2 against the ledger's much larger window means the
 	// single rewind step is refused on fork depth, which is the refusal the
@@ -4288,7 +4345,7 @@ func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	raw := seedTestChain(t, cm.PrimaryChain(), "halt-budget-reset", 5)
@@ -4357,7 +4414,7 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	// The chain enforces a smaller k than the ledger's rewind window, so every
 	// step the descent computes is refused wherever the tip has moved to.
@@ -4442,7 +4499,7 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 				BlockNumber: prev.BlockNumber + 1,
 			}
 		}
-		require.NoError(t, pc.AddRawBlocks(grow))
+		require.NoError(t, pc.AddRawBlocks(context.Background(), grow))
 	}
 
 	require.True(
@@ -4499,7 +4556,7 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -4536,7 +4593,7 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 	}
 	require.NoError(t, db.BlockCreate(orphan, nil))
 	target := ocommon.NewPoint(orphan.Slot, orphan.Hash)
-	_, err = database.BlockByPoint(db, target)
+	_, err = database.BlockByPoint(context.Background(), db, target)
 	require.NoError(
 		t,
 		err,
@@ -4579,7 +4636,7 @@ func TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -4676,7 +4733,7 @@ func TestAtTipRecoveryPruneFloorBindsAboveMithrilAnchor(t *testing.T) {
 	const mithrilAnchorSlot = pruneFixtureRootSlot
 	f := newPrunedUtxoFixture(t, mithrilAnchorSlot)
 
-	f.ls.cleanupConsumedUtxos()
+	f.ls.cleanupConsumedUtxos(context.Background())
 	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
 	require.NoError(t, err)
 	require.Greater(
