@@ -723,19 +723,33 @@ func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(
 }
 
 // TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd pins that
-// TestShelleyHardForkAtEpoch + ExperimentalHardForksEnabled propagates through
-// to queryHardForkEraHistory as a TransitionKnown end: the open era's EraEnd
-// epoch is the override epoch, not the stale tipSlot + safeZone cap.
+// TestShelleyHardForkAtEpoch propagates through to queryHardForkEraHistory as
+// a TransitionKnown end: the open era's EraEnd epoch is the override epoch,
+// not the stale tipSlot + safeZone cap. cardano-node honours the override
+// whatever ExperimentalHardForksEnabled says, so both settings are covered.
 //
 // Setup: a Byron-only DB with a single epoch 3 occupying slots
-// [epochStart, epochStart+length). TestShelleyHardForkAtEpoch is 5 and
-// ExperimentalHardForksEnabled is true, so Byron's NextEraTrigger resolves to
-// AtEpoch(5). With currentEpoch=3 < 5, evaluateTriggerAtEpoch will set
-// TransitionKnown(5) and the Byron era's End must snap to epoch 5's start.
+// [epochStart, epochStart+length). TestShelleyHardForkAtEpoch is 5, so Byron's
+// NextEraTrigger resolves to AtEpoch(5). With currentEpoch=3 < 5,
+// evaluateTriggerAtEpoch will set TransitionKnown(5) and the Byron era's End
+// must snap to epoch 5's start.
 func TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd(
 	t *testing.T,
 ) {
 	t.Parallel()
+	for _, experimental := range []bool{true, false} {
+		t.Run(fmt.Sprintf("experimental=%t", experimental), func(t *testing.T) {
+			t.Parallel()
+			testQueryHardForkEraHistoryAtEpochOverride(t, experimental)
+		})
+	}
+}
+
+func testQueryHardForkEraHistoryAtEpochOverride(
+	t *testing.T,
+	experimental bool,
+) {
+	t.Helper()
 
 	const (
 		epochId        = uint64(3)
@@ -754,9 +768,11 @@ func TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd(
 	))
 
 	cfg := newTestEraHistoryCfg(t)
-	enabled := true
 	override := uint64(5)
-	cfg.ExperimentalHardForksEnabled = &enabled
+	if experimental {
+		enabled := true
+		cfg.ExperimentalHardForksEnabled = &enabled
+	}
 	cfg.TestShelleyHardForkAtEpoch = &override
 
 	ls := &LedgerState{
