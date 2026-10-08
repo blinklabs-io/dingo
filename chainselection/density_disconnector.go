@@ -40,8 +40,8 @@ type GenesisDensityDisconnect struct {
 	// DominatingDensity is the blocks the dominating peer has delivered in
 	// the window.
 	DominatingDensity uint64
-	// MaxDensity is the most blocks ConnectionId could still have in the
-	// window: what it delivered plus every slot it has not yet covered.
+	// MaxDensity is the blocks ConnectionId has in the window. Its head has
+	// reached the window end, so this is also the most it can ever have.
 	MaxDensity uint64
 	// EagernessStandoff is true when both peers were held at the Limit on
 	// Eagerness and ConnectionId lost the comparison of the blocks each
@@ -84,17 +84,23 @@ func fragmentWindowBounds(
 // GenesisDensityEvaluationInterval, and marks them so they are reported once.
 //
 // For each pair of eligible candidates that fork from a common intersection I,
-// peer B is provably sparser than peer A when the blocks A has delivered in
-// (I, I+window] exceed the most B can ever have there. Candidates that do not
-// intersect within their retained fragments, and pairs where either peer is a
-// prefix of the other (a peer that is merely behind), are undecidable and
-// never disconnected. A peer is only disconnected for a rival that is itself
-// still a candidate, so the last remaining peer is never disconnected.
+// peer B is provably sparser than peer A when B's head has reached I+window
+// and the blocks A has delivered in (I, I+window] exceed B's. Candidates that
+// do not intersect within their retained fragments, pairs where either peer
+// is a prefix of the other (a peer that is merely behind), and peers whose
+// window is incomplete are undecidable and never disconnected. A peer is only
+// disconnected for a rival that is itself still a candidate, so the last
+// remaining peer is never disconnected.
 //
 // Callers must hold cs.mutex.
 func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisconnect {
+	// The 3k-slot fallback in genesisWindowSlotsLocked is not a Genesis
+	// window: it holds about 3kf blocks, few enough that an honest short
+	// fork can lose a complete-window comparison. Only a configured 3k/f
+	// window is meaningful here.
 	if cs.config.OnGenesisDensityDisconnect == nil ||
-		cs.mode != SelectionModeGenesis {
+		cs.mode != SelectionModeGenesis ||
+		cs.config.GenesisWindowSlots == 0 {
 		return nil
 	}
 	now := cs.now()
@@ -145,9 +151,18 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 			dominating, _ := fragmentWindowBounds(
 				a.points, intersection.Slot, windowEnd,
 			)
-			_, maxDensity := fragmentWindowBounds(
+			minDensity, maxDensity := fragmentWindowBounds(
 				b.points, intersection.Slot, windowEnd,
 			)
+			// ouroboros-consensus densityDisconnect lets a peer whose window
+			// is incomplete lose only to a rival offering more than k headers
+			// after the intersection, so honest peers on a short fork near
+			// the tip are kept. A retained fragment holds at most k+1 headers
+			// including the intersection, so no rival here can offer more
+			// than k and only a complete window is decidable.
+			if minDensity != maxDensity {
+				continue
+			}
 			if dominating <= maxDensity {
 				continue
 			}

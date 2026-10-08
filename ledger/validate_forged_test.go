@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -30,7 +31,7 @@ func TestValidateForgedBlockNilBlockReturnsError(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{}
-	err := ls.ValidateForgedBlock(nil, nil)
+	err := ls.ValidateForgedBlock(context.Background(), nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nil block")
 }
@@ -71,7 +72,7 @@ func TestValidateForgedTxsEmptyBlockPasses(t *testing.T) {
 
 	ls := &LedgerState{}
 	block := &stubValidateBlock{slot: 100}
-	err := ls.validateForgedTxs(block)
+	err := ls.validateForgedTxs(context.Background(), block)
 	require.NoError(t, err)
 }
 

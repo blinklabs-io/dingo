@@ -187,9 +187,10 @@ type ChainSelectorConfig struct {
 	// OnGenesisDensityDisconnect is called, outside the selector lock, once
 	// per peer the Genesis Density Disconnector finds provably sparser than
 	// another candidate chain. The composition layer disconnects and denies
-	// the peer. The disconnector is inactive while this is nil or outside
-	// Genesis mode. Evaluation runs at most once per
-	// GenesisDensityEvaluationInterval.
+	// the peer. The disconnector is inactive while this is nil, outside
+	// Genesis mode, or while GenesisWindowSlots is zero: the 3k-slot
+	// fallback is too short to compare densities. Evaluation runs at most
+	// once per GenesisDensityEvaluationInterval.
 	OnGenesisDensityDisconnect func(GenesisDensityDisconnect)
 }
 
@@ -418,7 +419,7 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 // to relevant events.
 func (cs *ChainSelector) Start(ctx context.Context) error {
 	cs.ctx, cs.cancel = context.WithCancel(ctx)
-	go cs.evaluationLoop()
+	go cs.evaluationLoop() //nolint:contextcheck // evaluationLoop observes the stored lifecycle context
 	return nil
 }
 
@@ -439,7 +440,7 @@ func (cs *ChainSelector) genesisWindowSlotsLocked() uint64 {
 			safeAddUint64(cs.securityParam, cs.securityParam),
 		)
 	}
-	return defaultGenesisWindowSlots
+	return DefaultGenesisWindowSlots
 }
 
 // bestKnownGenesisSlotLocked returns the exit horizon: the network tip slot the
@@ -1263,7 +1264,7 @@ func (cs *ChainSelector) GenesisSelectionState() (bool, uint64) {
 		// A ChainSelector that did not come from NewChainSelector has never
 		// published a snapshot. Answer as the pre-cache implementation did
 		// for that zero value: Praos, and the default window.
-		return false, defaultGenesisWindowSlots
+		return false, DefaultGenesisWindowSlots
 	}
 	return snapshot.active, snapshot.window
 }

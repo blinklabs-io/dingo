@@ -19,6 +19,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"sync"
 	"testing"
@@ -29,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/promutil"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -411,6 +413,46 @@ func TestBuildChainSelectorConfigWiresGenesisDensityDisconnect(t *testing.T) {
 	assert.True(t, n.peerGov.IsDenied(conn.RemoteAddr.String()))
 }
 
+func TestGenesisDensityDisconnectDuringNetworkingCoreReplacement(t *testing.T) {
+	t.Parallel()
+	n, _ := newMetricsTestNode(t)
+	outgoingGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+	currentGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	outgoingManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	currentManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	n.setPeerGovernor(outgoingGov)
+	n.connManager = outgoingManager
+	disconnect := chainselection.GenesisDensityDisconnect{
+		ConnectionId: newNodeTestConnId(3306),
+	}
+
+	n.networkingCoreMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		n.onGenesisDensityDisconnect(disconnect)
+		close(done)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"density action crossed a live networking replacement",
+	)
+	n.setPeerGovernor(currentGov)
+	n.connManager = currentManager
+	n.networkingCoreMu.Unlock()
+	testutil.RequireReceive(t, done, time.Second, "density action completion")
+
+	address := disconnect.ConnectionId.RemoteAddr.String()
+	assert.False(t, outgoingGov.IsDenied(address))
+	assert.True(t, currentGov.IsDenied(address))
+}
+
 // The disconnect log reports whether the peer was actually denied: a
 // connection ID with no remote address cannot be put on the deny list, and a
 // log that only carries the deny duration would claim a denial that did not
@@ -436,6 +478,44 @@ func TestGenesisDensityDisconnectLogReportsDenial(t *testing.T) {
 		ConnectionId: noAddr,
 	})
 	require.Contains(t, logs.String(), "denied=false")
+}
+
+// Without k and a positive f the node keeps the selector's long-standing
+// 6480-slot window for the exit horizon but must not run the Genesis Density
+// Disconnector over it.
+func TestChainSelectorGenesisWindow(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		configured uint64
+		k          uint64
+		f          *big.Rat
+		window     uint64
+		gdd        bool
+	}{
+		{"configured", 500, 0, nil, 500, true},
+		{"from params", 0, 2160, big.NewRat(1, 20), 129600, true},
+		{
+			"no active slot coefficient",
+			0, 50000, nil,
+			chainselection.DefaultGenesisWindowSlots, false,
+		},
+		{
+			"no security param",
+			0, 0, big.NewRat(1, 20),
+			chainselection.DefaultGenesisWindowSlots, false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			window, gdd := chainSelectorGenesisWindow(
+				tc.configured, tc.k, tc.f,
+			)
+			assert.Equal(t, tc.window, window)
+			assert.Equal(t, tc.gdd, gdd)
+		})
+	}
 }
 
 func chainSelectionGaugeValue(

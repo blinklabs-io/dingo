@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"fmt"
+	"math/big"
 	"sync"
 	"testing"
 	"time"
@@ -25,9 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// gddFixture drives a Genesis-mode selector with k=40 (window 120 slots) and a
-// fake clock. Peers share a block at slot 10; the window under comparison is
-// therefore (10, 130].
+// gddFixture drives a Genesis-mode selector with k=40, a configured 120-slot
+// window and a fake clock. Peers share a block at slot 10; the window under
+// comparison is therefore (10, 130].
 type gddFixture struct {
 	cs          *ChainSelector
 	mu          sync.Mutex
@@ -37,10 +38,22 @@ type gddFixture struct {
 
 func newGDDFixture(t *testing.T, genesis bool) *gddFixture {
 	t.Helper()
+	return newGDDFixtureWindow(t, genesis, 120)
+}
+
+// newGDDFixtureWindow is newGDDFixture with an explicit GenesisWindowSlots;
+// zero leaves it unset.
+func newGDDFixtureWindow(
+	t *testing.T,
+	genesis bool,
+	windowSlots uint64,
+) *gddFixture {
+	t.Helper()
 	f := &gddFixture{now: time.Unix(1_700_000_000, 0)}
 	f.cs = NewChainSelector(ChainSelectorConfig{
-		GenesisMode:   genesis,
-		SecurityParam: 40,
+		GenesisMode:        genesis,
+		SecurityParam:      40,
+		GenesisWindowSlots: windowSlots,
 		OnGenesisDensityDisconnect: func(d GenesisDensityDisconnect) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
@@ -141,6 +154,86 @@ func TestGDDKeepsPeerWithIncompleteWindow(t *testing.T) {
 	f.evaluate()
 
 	assert.Empty(t, f.disconnected())
+}
+
+// A peer whose window is incomplete is only disconnected for a rival offering
+// more than k headers after the intersection, as in ouroboros-consensus
+// densityDisconnect. Here the slow peer can gain at most 5 more blocks before
+// the window end (130), so the dense peer's 40 exceed its upper bound of 6,
+// but 40 headers is not more than k=40.
+func TestGDDKeepsIncompletePeerAgainstRivalWithinK(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	dense, slow := corrConn(1), corrConn(2)
+	f.deliver(t, dense, 0, append([]uint64{10}, slotRange(11, 50)...)...)
+	f.deliver(t, slow, 0, 10, 125)
+
+	f.evaluate()
+
+	assert.Empty(t, f.disconnected())
+}
+
+// Without a configured window the selector falls back to 3k slots, not 3k/f.
+// At k=40 that window averages 6 honest blocks, so a peer on an honest short
+// fork can show a complete window of 1 block against a rival's 2. Only a real
+// Genesis window makes that comparison meaningful.
+func TestGDDInactiveWithoutConfiguredWindow(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixtureWindow(t, true, 0)
+	rival, peer := corrConn(1), corrConn(2)
+	f.deliver(t, rival, 0, 10, 11, 12)
+	// 1 block in (10,130], head past the window end: complete.
+	f.deliver(t, peer, 0, 10, 60, 200)
+
+	f.evaluate()
+
+	assert.Empty(t, f.disconnected())
+}
+
+// The same 1-versus-2 shape over a full 3k/f window, where the peer's head
+// genuinely passes the window end, is upstream's lb0 == ub0 case and still
+// disconnects.
+func TestGDDDisconnectsCompleteSparsePeerOverGenesisWindow(t *testing.T) {
+	t.Parallel()
+	window := GenesisWindowSlotsForParams(40, big.NewRat(1, 20))
+	require.Equal(t, uint64(2400), window)
+	f := newGDDFixtureWindow(t, true, window)
+	rival, peer := corrConn(1), corrConn(2)
+	f.deliver(t, rival, 0, 10, 11, 12)
+	// 1 block in (10,2410], head past the window end: complete.
+	f.deliver(t, peer, 0, 10, 60, 2500)
+
+	f.evaluate()
+
+	assert.Equal(t, []ouroboros.ConnectionId{peer}, f.disconnected())
+}
+
+// A window derived without k or without a positive f is no Genesis window,
+// so a selector configured from it reports nothing even for a complete
+// sparse peer that a configured window would disconnect.
+func TestGDDInactiveWithoutGenesisParams(t *testing.T) {
+	t.Parallel()
+	for name, window := range map[string]uint64{
+		"zero k":     GenesisWindowSlotsForParams(0, big.NewRat(1, 20)),
+		"nil f":      GenesisWindowSlotsForParams(40, nil),
+		"zero f":     GenesisWindowSlotsForParams(40, new(big.Rat)),
+		"negative f": GenesisWindowSlotsForParams(40, big.NewRat(-1, 20)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newGDDFixtureWindow(t, true, window)
+			dense, sparse := corrConn(1), corrConn(2)
+			f.deliver(
+				t, dense, 0, append([]uint64{10}, slotRange(11, 50)...)...,
+			)
+			// 2 blocks, head past any window up to 6990 slots: complete.
+			f.deliver(t, sparse, 0, 10, 60, 100, 7000)
+
+			f.evaluate()
+
+			assert.Empty(t, f.disconnected())
+		})
+	}
 }
 
 func TestGDDNeverDisconnectsLastPeer(t *testing.T) {

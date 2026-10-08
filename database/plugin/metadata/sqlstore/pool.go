@@ -472,10 +472,11 @@ INSERT INTO pool_registration_owner (
 				relay.PoolRegistrationID = registration.ID
 				relayID, err := queryReturnedID(ctx, db, `
 INSERT INTO pool_registration_relay (
-    ipv4, ipv6, hostname, pool_registration_id, pool_id, port
-) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
+    ipv4, ipv6, relay_type, hostname, pool_registration_id, pool_id, port
+) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 					netIPValue(relay.Ipv4),
 					netIPValue(relay.Ipv6),
+					relay.Type,
 					relay.Hostname,
 					relay.PoolRegistrationID,
 					relay.PoolID,
@@ -2530,7 +2531,7 @@ latest_ret AS (
     LEFT JOIN certs c ON c.id = rt.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
 )
-SELECT relay.ipv4, relay.ipv6, relay.hostname, relay.id,
+SELECT relay.ipv4, relay.ipv6, relay.relay_type, relay.hostname, relay.id,
        relay.pool_registration_id, relay.pool_id, relay.port,
        pool.pool_key_hash
 FROM latest_reg reg
@@ -2563,6 +2564,7 @@ ORDER BY relay.id`,
 		if err := rows.Scan(
 			&ipv4,
 			&ipv6,
+			&relay.Type,
 			&relay.Hostname,
 			&relay.ID,
 			&relay.PoolRegistrationID,
@@ -3458,7 +3460,7 @@ WHERE pool_registration_id = ?`,
 		return err
 	}
 	rows, err = db.QueryContext(ctx, `
-SELECT ipv4, ipv6, hostname, id, pool_registration_id, pool_id, port
+SELECT ipv4, ipv6, relay_type, hostname, id, pool_registration_id, pool_id, port
 FROM pool_registration_relay
 WHERE pool_registration_id = ?`,
 		registration.ID,
@@ -3473,6 +3475,7 @@ WHERE pool_registration_id = ?`,
 		if err := rows.Scan(
 			&ipv4,
 			&ipv6,
+			&relay.Type,
 			&relay.Hostname,
 			&relay.ID,
 			&relay.PoolRegistrationID,
@@ -3540,7 +3543,7 @@ ORDER BY id`, ids[start:end]...)
 			return err
 		}
 		rows, err = db.QueryContext(ctx, `
-SELECT ipv4, ipv6, hostname, id, pool_registration_id, pool_id, port
+SELECT ipv4, ipv6, relay_type, hostname, id, pool_registration_id, pool_id, port
 FROM pool_registration_relay
 WHERE pool_registration_id IN (`+bindPlaceholders(end-start)+`)
 ORDER BY id`, ids[start:end]...)
@@ -3550,7 +3553,7 @@ ORDER BY id`, ids[start:end]...)
 		for rows.Next() {
 			var relay models.PoolRegistrationRelay
 			var ipv4, ipv6 []byte
-			if err := rows.Scan(&ipv4, &ipv6, &relay.Hostname, &relay.ID, &relay.PoolRegistrationID, &relay.PoolID, &relay.Port); err != nil {
+			if err := rows.Scan(&ipv4, &ipv6, &relay.Type, &relay.Hostname, &relay.ID, &relay.PoolRegistrationID, &relay.PoolID, &relay.Port); err != nil {
 				rows.Close()
 				return err
 			}

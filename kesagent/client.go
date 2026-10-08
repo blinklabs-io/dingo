@@ -81,7 +81,8 @@ var (
 // Config configures a Client.
 type Config struct {
 	// SocketPath is the Unix-domain service socket of a running bursa KES
-	// agent (--shelley-kes-agent-socket).
+	// agent (--shelley-kes-agent-socket). NewClient resolves a relative
+	// filesystem path once and reuses that endpoint for every reconnect.
 	SocketPath string
 	// Mode selects ModeServeKey or ModeSign. Empty defaults to ModeServeKey.
 	Mode string
@@ -130,6 +131,11 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.SocketPath == "" {
 		return nil, errors.New("kesagent: socket path is required")
 	}
+	resolvedSocketPath, err := resolveSocketPath(cfg.SocketPath)
+	if err != nil {
+		return nil, err
+	}
+	cfg.SocketPath = resolvedSocketPath
 	// Checked here rather than left to the first dial: an over-long path
 	// fails with a bare "invalid argument" that names neither the length nor
 	// the limit, and block-producer startup is where an operator can still
@@ -165,6 +171,29 @@ func NewClient(cfg Config) (*Client, error) {
 		cfg.Logger = slog.Default()
 	}
 	return &Client{cfg: cfg, logger: cfg.Logger}, nil
+}
+
+// CheckReady verifies the agent is currently serving the configured protocol
+// and mode using a fresh bounded Hello handshake. It never requests a signature
+// or evolves a key, and detects an agent lost while the signing socket was idle.
+func (c *Client) CheckReady() error {
+	c.mu.Lock()
+	closed := c.closed
+	cfg := c.cfg
+	c.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	// A probe must not overwrite the signing connection's metrics or backoff.
+	cfg.Metrics = nil
+	probe, err := NewClient(cfg)
+	if err != nil {
+		return err
+	}
+	defer probe.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.HelloTimeout)
+	defer cancel()
+	return probe.connectLocked(ctx)
 }
 
 // Close closes the current connection, if any, and marks the client closed;

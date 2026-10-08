@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -35,6 +36,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 )
 
@@ -117,6 +119,7 @@ func resetMithrilBackfillCheckpoint(db *database.Database) error {
 }
 
 func updateMithrilReadyState(
+	ctx context.Context,
 	db *database.Database,
 	logger *slog.Logger,
 	loadResult *node.LoadBlobsResult,
@@ -125,7 +128,9 @@ func updateMithrilReadyState(
 	syncStatus string,
 	clearSyncState bool,
 ) error {
-	ledgerTip, err := db.GetTip(nil)
+	tipTxn := db.MetadataTxn(ctx, false)
+	ledgerTip, err := db.GetTip(tipTxn)
+	tipTxn.Release()
 	if err != nil {
 		return fmt.Errorf("reading imported ledger tip: %w", err)
 	}
@@ -150,28 +155,24 @@ func updateMithrilReadyState(
 		"blocks_loaded", blocksCopied,
 	)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(ctx, true)
 	if err := txn.Do(func(txn *database.Txn) error {
 		if clearSyncState {
-			// ClearSyncState removes every row; maintenance state must survive
-			// the transition from bootstrap to serving.
-			keys := []string{deferred.SyncStateKey, metadata.PlannerStatsBackfillSyncKey}
-			values := make([]string, len(keys))
-			for i, key := range keys {
-				value, err := db.GetSyncState(key, txn)
-				if err != nil {
-					return fmt.Errorf("read maintenance marker %s: %w", key, err)
+			// A read-clear-restore cycle can overwrite a newer fence on
+			// backends that allow concurrent writers. Leave persistent rows
+			// untouched so a forger's advancing slot never enters that cycle.
+			keys, err := db.ListSyncStateKeysByPrefix("", txn)
+			if err != nil {
+				return fmt.Errorf("listing sync state: %w", err)
+			}
+			for _, key := range keys {
+				if key == deferred.SyncStateKey ||
+					key == metadata.PlannerStatsBackfillSyncKey ||
+					strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
+					continue
 				}
-				values[i] = value
-			}
-			if err := db.ClearSyncState(txn); err != nil {
-				return fmt.Errorf("cleaning up sync state: %w", err)
-			}
-			for i, key := range keys {
-				if values[i] != "" {
-					if err := db.SetSyncState(key, values[i], txn); err != nil {
-						return fmt.Errorf("restore maintenance marker %s: %w", key, err)
-					}
+				if err := db.DeleteSyncState(key, txn); err != nil {
+					return fmt.Errorf("cleaning up sync state %q: %w", key, err)
 				}
 			}
 		} else if syncStatus != "" {
@@ -410,7 +411,9 @@ func prepareLedgerStateImport(
 	maxTrustedSlot uint64,
 ) (_ *preparedLedgerStateImport, err error) {
 	snapshot, stateDir, signedBy, beyondCertifiedTip, err := selectLedgerStateSnapshot(
-		logger, result, maxTrustedSlot,
+		logger,
+		result,
+		maxTrustedSlot,
 	)
 	if err != nil {
 		return nil, err
