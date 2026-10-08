@@ -332,6 +332,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
+	o.recordServedActivity(ctx.ConnectionId)
 	// Validate that start is not after end
 	if start.Slot > end.Slot {
 		o.config.Logger.Warn(
