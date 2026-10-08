@@ -14189,7 +14189,7 @@ func TestUtxosByAddressAtSlotBoundedStopsAtCborBudget(t *testing.T) {
 	for i := range 3 {
 		txID := make([]byte, 32)
 		binary.BigEndian.PutUint32(txID[28:], uint32(i)+1)
-		require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+		require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
 			TxId:       txID,
 			OutputIdx:  0,
 			PaymentKey: payment,

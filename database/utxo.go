@@ -878,8 +878,11 @@ func (d *Database) UtxosByAddressAsOf(
 	maxResults int,
 	txn *Txn,
 ) ([]models.Utxo, error) {
+	if ctx == nil {
+		return nil, errors.New("utxos by address as of context is nil")
+	}
 	return d.utxosByAddressAsOf(
-		context.Background(), addrs, atSlot, maxResults, math.MaxInt, txn,
+		ctx, addrs, atSlot, maxResults, math.MaxInt, txn,
 	)
 }
 
@@ -893,7 +896,7 @@ func (d *Database) UtxosByAddressAsOfContext(
 	txn *Txn,
 ) ([]models.Utxo, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return nil, errors.New("utxos by address as of context is nil")
 	}
 	return d.utxosByAddressAsOf(
 		ctx, addrs, atSlot, maxResults, math.MaxInt, txn,
@@ -911,7 +914,7 @@ func (d *Database) UtxosByAddressAsOfContextBounded(
 	txn *Txn,
 ) ([]models.Utxo, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return nil, errors.New("utxos by address as of context is nil")
 	}
 	return d.utxosByAddressAsOf(
 		ctx, addrs, atSlot, maxResults, maxCborBytes, txn,
@@ -1345,7 +1348,7 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrderingBounded(
 	maxCborBytes int,
 ) ([]models.UtxoId, bool, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return nil, false, errors.New("bounded reference scan context is nil")
 	}
 	if q == nil {
 		return nil, false, models.ErrNilUtxoWithOrderingQuery
