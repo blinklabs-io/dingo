@@ -36,6 +36,7 @@ var hotStatements = func() []string {
 		insertUtxoQuery,
 		insertUtxoQueryIgnoreConflict,
 		importAssetQuery,
+		getAssetIDQuery,
 		getLiveUtxoByRefQuery,
 		getUtxoIncludingSpentByRefQuery,
 		transactionInsertSQL,

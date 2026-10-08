@@ -26,8 +26,8 @@ import (
 )
 
 // TestInsertUtxoModelCachesAssetInsert proves the conflict-tolerant asset
-// insert is cached and both immediate and staged writes persist the relation
-// without materializing an asset ID in the transient UTxO model.
+// insert is cached, ordinary inserts populate caller-visible asset IDs, and
+// staged replay writes persist the relation without resolving transient IDs.
 func TestInsertUtxoModelCachesAssetInsert(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
@@ -42,7 +42,7 @@ func TestInsertUtxoModelCachesAssetInsert(t *testing.T) {
 		},
 	}
 	insertUtxoInTxn(t, store, utxo, true)
-	require.Zero(t, utxo.Assets[0].ID)
+	require.NotZero(t, utxo.Assets[0].ID)
 	var firstAssetID uint
 	require.NoError(t, store.writeDB.QueryRow(
 		`SELECT id FROM asset WHERE utxo_id = ? AND policy_id = ? AND name = ?`,
@@ -69,7 +69,7 @@ func TestInsertUtxoModelCachesAssetInsert(t *testing.T) {
 		},
 	}
 	insertUtxoInTxn(t, store, utxo2, true)
-	require.Zero(t, utxo2.Assets[0].ID)
+	require.NotZero(t, utxo2.Assets[0].ID)
 	var secondAssetID uint
 	require.NoError(t, store.writeDB.QueryRow(
 		`SELECT id FROM asset WHERE utxo_id = ? AND policy_id = ? AND name = ?`,

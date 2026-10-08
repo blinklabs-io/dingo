@@ -1249,6 +1249,13 @@ INSERT INTO asset (
 ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
 `
 
+// getAssetIDQuery resolves the caller-visible asset row ID after an
+// insert that may have been skipped by its conflict clause.
+const getAssetIDQuery = `
+SELECT id FROM asset
+WHERE utxo_id = ? AND policy_id = ? AND name = ?
+ORDER BY id DESC LIMIT 1`
+
 func (s *Store) insertUtxoModel(
 	ctx context.Context,
 	db queryer,
@@ -1391,6 +1398,15 @@ func (s *Store) persistUtxoRelations(
 		); err != nil {
 			return err
 		}
+		var assetID uint
+		if err := s.queryRowCached(ctx, db, getAssetIDQuery,
+			id,
+			asset.PolicyId,
+			asset.Name,
+		).Scan(&assetID); err != nil {
+			return err
+		}
+		asset.ID = assetID
 	}
 	return nil
 }
