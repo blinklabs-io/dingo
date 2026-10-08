@@ -554,6 +554,11 @@ Use the Go APIs when code runs inside Dingo:
   - `StakeSnapshotStore` — epoch-boundary pool stake snapshots, the epoch
     summaries computed from them, and historical per-boundary stake.
 
+`SettingsStore` commit-timestamp reads and node settings/gate reads and writes
+accept `context.Context`. Startup, recovery checks, and snapshot callers pass
+that context through to SQL, including conditional gate insertion transactions.
+
+
   Accounts, pools, rewards and live stake, protocol parameters, block nonces,
   datums and scripts, assets, treasury/reserves and donations, Midnight
   indexer state, sync state, and backfill checkpoints remain composed while
@@ -1964,7 +1969,7 @@ The eviction and the floor read happen under one lock hold, so the boundary
 handed to `prune` is a coherent read of the deferred set — never a mix of pre-
 and post-eviction state. The lock is then **released before `prune` runs**, and
 this is a correctness requirement, not just an optimization: `prune` opens the
-single SQLite write connection (`SetMaxOpenConns(1)`) via `Transaction(true)`,
+single SQLite write connection (`SetMaxOpenConns(1)`) via `Transaction(ctx, true)`,
 and block apply holds that connection *before* taking `deferredHeaderValidationMu`
 (`ledgerProcessBlock` → `verifyDeferredBlockHeaderState` →
 `consumeDeferredHeaderValidation`, all inside its write txn). Holding the mutex
@@ -2198,6 +2203,14 @@ span both stores pay the sync; blob-only bulk paths (for example
 `chain.addRawBlocks`, which batches 50 blocks per blob transaction) sync at their
 own barriers, and `Sync` is a store-wide flush, so the next combined commit also
 makes those earlier batches durable.
+
+Metadata operations follow the caller's context until a write transaction
+begins committing. A caller already canceled at that boundary causes rollback
+before any blob commit. Once commit begins, cancellation and deadlines no
+longer abort the metadata transaction: both stores must finish even if the
+caller cancels during blob sync. Provider or sync failures still report the
+existing partial-commit errors and require recovery. Read-only transactions
+remain cancelable throughout their lifetime.
 
 The ordering exists because the two stores fail asymmetrically. SQLite runs
 `journal_mode=WAL` with `synchronous=NORMAL` (WAL is set once at open by
@@ -3628,7 +3641,7 @@ live UTxO history, while the CBOR-decode-only candidate scan remains
 unavoidable for the total.
 
 Both `AccountUTXOs` and `AddressUTXOs` open one read `Txn`
-(`Database.Transaction(false)`) and pass it to both their count/scan call
+(`Database.Transaction(ctx, false)`) and pass it to both their count/scan call
 and their page-fetch call, rather than leaving each to open its own
 (`Transaction`/`ReadTransaction` begin the underlying SQL transaction
 eagerly, so the shared `Txn` fixes a single snapshot at that point). Two

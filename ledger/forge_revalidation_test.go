@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"io"
@@ -70,7 +71,7 @@ type forgeRevalidationFixture struct {
 func newForgeRevalidationFixture(t *testing.T) *forgeRevalidationFixture {
 	t.Helper()
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	seed := make([]byte, ed25519.SeedSize)
 	seed[0] = 0x61
@@ -104,7 +105,6 @@ func newForgeRevalidationFixture(t *testing.T) *forgeRevalidationFixture {
 	ls := &LedgerState{
 		db:                db,
 		chain:             cm.PrimaryChain(),
-		mempool:           mempool,
 		activeEras:        []eras.EraDesc{eras.ConwayEraDesc},
 		currentEra:        eras.ConwayEraDesc,
 		currentEpoch:      epoch,
@@ -116,6 +116,7 @@ func newForgeRevalidationFixture(t *testing.T) *forgeRevalidationFixture {
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	ls.SetMempool(mempool)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 	return &forgeRevalidationFixture{
@@ -136,8 +137,8 @@ func (f *forgeRevalidationFixture) seedUtxo(
 		OutputAddress: f.address,
 		OutputAmount:  value,
 	}
-	require.NoError(t, f.db.Transaction(true).Do(func(txn *database.Txn) error {
-		if err := f.db.CreateUtxo(txn, &models.Utxo{
+	require.NoError(t, f.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		if err := f.db.CreateUtxo(context.Background(), txn, &models.Utxo{
 			TxId:       txId,
 			OutputIdx:  0,
 			PaymentKey: f.address.PaymentKeyHash().Bytes(),
@@ -213,7 +214,7 @@ func (f *forgeRevalidationFixture) forge(
 	f.ls.forgeBlock()
 	tip := f.ls.chain.Tip()
 	require.Equal(t, uint64(1), tip.BlockNumber, "a block must be forged")
-	stored, err := f.ls.chain.BlockByPoint(tip.Point, nil)
+	stored, err := f.ls.chain.BlockByPoint(context.Background(), tip.Point, nil)
 	require.NoError(t, err)
 	block, err := conway.NewConwayBlockFromCbor(stored.Cbor)
 	require.NoError(t, err)
@@ -284,6 +285,7 @@ func TestForgeBlockRevalidatesMempoolTransactions(t *testing.T) {
 		in := f.seedUtxo(t, value)
 		queued := f.pendingSpend(t, in, value, fee, f.key)
 		require.NoError(t, f.db.MarkUtxosDeletedAtSlot(
+			context.Background(),
 			nil,
 			[]dbtypes.UtxoKey{{TxId: in.TxId.Bytes(), OutputIdx: 0}},
 			2,

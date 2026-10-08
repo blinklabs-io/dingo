@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -176,7 +177,7 @@ func TestRewardParametersPledgeLeverageSource(t *testing.T) {
 				200, 3, tc.calculation.era.Id, nil,
 			))
 
-			txn := db.Transaction(false)
+			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
 			_, params, _, err := ls.rewardParameters(
 				txn, 2, 3, &models.RewardAdaPots{Reserves: 100_000_000},

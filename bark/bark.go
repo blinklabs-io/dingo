@@ -32,6 +32,7 @@ import (
 	"connectrpc.com/grpcreflect"
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
+	lifecycleconnect "github.com/blinklabs-io/bark/proto/v1alpha1/lifecycle/lifecyclev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
@@ -70,6 +71,9 @@ type Bark struct {
 	// identity must also appear here before a destructive DatabaseService RPC
 	// is authorized.
 	operatorFingerprints map[string]struct{}
+	// lifecycleOperatorFingerprints is immutable after construction and is
+	// used only for LifecycleService Stop and Restart authorization.
+	lifecycleOperatorFingerprints map[string]struct{}
 	// dbGate guards config.DB across a live Restore/Truncate's close-and-
 	// replace window: PauseDB write-locks it before the old database is
 	// closed, ResumeDB publishes the replacement and unlocks it. Acquire
@@ -138,6 +142,10 @@ type BarkConfig struct {
 	Logger    *slog.Logger
 	DB        *database.Database
 	Lifecycle *dblifecycle.Service
+	// Node, if set, mounts the LifecycleService (remote Stop, Restart and
+	// GetStatus). Like Lifecycle it requires TLS and a client CA. Stop and
+	// Restart require LifecycleOperatorCertificateFingerprints.
+	Node NodeControl
 	// SnapshotDir is the base directory the DatabaseService's CreateSnapshot/
 	// Restore RPCs write to and read from — required when Lifecycle is set.
 	// There is no separate snapshot catalog store (see database.go's doc
@@ -180,7 +188,11 @@ type BarkConfig struct {
 	// are matched case-insensitively. Read-only DatabaseService calls require a
 	// verified client certificate but do not require membership in this list.
 	OperatorCertificateFingerprints []string
-	Host                            string
+	// LifecycleOperatorCertificateFingerprints is the independent
+	// authorization policy for LifecycleService Stop and Restart. GetStatus
+	// requires a verified client certificate but not membership in this list.
+	LifecycleOperatorCertificateFingerprints []string
+	Host                                     string
 	// Port is the TCP port to listen on. 0 selects a free port, which Addr
 	// reports once Start has bound it.
 	Port uint
@@ -299,12 +311,22 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 			err,
 		)
 	}
+	lifecycleOperatorFingerprints, err := normalizeOperatorCertificateFingerprints(
+		cfg.LifecycleOperatorCertificateFingerprints,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"bark: invalid lifecycle operator certificate fingerprint: %w",
+			err,
+		)
+	}
 	if cfg.Host == "" {
 		cfg.Host = "0.0.0.0"
 	}
 	return &Bark{
-		config:               cfg,
-		operatorFingerprints: operatorFingerprints,
+		config:                        cfg,
+		operatorFingerprints:          operatorFingerprints,
+		lifecycleOperatorFingerprints: lifecycleOperatorFingerprints,
 	}, nil
 }
 
@@ -330,27 +352,34 @@ func (b *Bark) Start(ctx context.Context) error {
 	// mux/interceptor wiring at all, so requiring TLS/a client CA in the
 	// constructor would reject a composition path that was never actually
 	// exposed over the network in the first place.
-	if b.config.Lifecycle != nil && b.config.TlsClientCAFilePath == "" {
+	authRequired := b.config.Lifecycle != nil || b.config.Node != nil
+	if authRequired && b.config.TlsClientCAFilePath == "" {
 		return errors.New(
-			"bark: TlsClientCAFilePath is required to start with lifecycle set — " +
-				"the DatabaseService's destructive RPCs (CreateSnapshot/" +
-				"DeleteSnapshot/VerifySnapshot/Restore/Truncate/CancelOperation) " +
-				"must not be mounted without a way to authenticate callers",
+			"bark: TlsClientCAFilePath is required to start the authenticated " +
+				"DatabaseService or LifecycleService",
 		)
 	}
-	if b.config.Lifecycle != nil &&
+	if authRequired &&
 		(b.config.TlsCertFilePath == "" || b.config.TlsKeyFilePath == "") {
 		return errors.New(
 			"bark: TlsCertFilePath and TlsKeyFilePath are required to start " +
-				"with lifecycle set — mTLS client-certificate verification has " +
-				"no meaning without the server's own TLS listener",
+				"the authenticated DatabaseService or LifecycleService — mTLS " +
+				"client-certificate verification has no meaning without the " +
+				"server's own TLS listener",
 		)
 	}
 	if b.config.Lifecycle != nil && len(b.operatorFingerprints) == 0 {
 		return errors.New(
 			"bark: at least one OperatorCertificateFingerprint is required to " +
-				"start with lifecycle set — verified client identity alone does " +
-				"not authorize destructive DatabaseService RPCs",
+				"start the authenticated DatabaseService — " +
+				"verified client identity alone does not authorize destructive RPCs",
+		)
+	}
+	if b.config.Node != nil && len(b.lifecycleOperatorFingerprints) == 0 {
+		return errors.New(
+			"bark: at least one LifecycleOperatorCertificateFingerprint is required " +
+				"to start the authenticated LifecycleService — verified client identity " +
+				"alone does not authorize Stop or Restart",
 		)
 	}
 
@@ -384,6 +413,26 @@ func (b *Bark) Start(ctx context.Context) error {
 		)
 		mux.Handle(databasePath, databaseHandler)
 		serviceNames = append(serviceNames, databaseconnect.DatabaseServiceName)
+	}
+
+	if b.config.Node != nil {
+		lifecyclePath, lifecycleHandler := lifecycleconnect.NewLifecycleServiceHandler(
+			&lifecycleServiceHandler{node: b.config.Node},
+			connect.WithOptions(
+				commonHandlerOptions,
+				connect.WithInterceptors(newOperatorAuthInterceptor(
+					b.config.Logger,
+					destructiveLifecycleProcedures,
+					readOnlyLifecycleProcedures,
+					b.lifecycleOperatorFingerprints,
+				)),
+			),
+		)
+		mux.Handle(lifecyclePath, lifecycleHandler)
+		serviceNames = append(
+			serviceNames,
+			lifecycleconnect.LifecycleServiceName,
+		)
 	}
 
 	mux.Handle(

@@ -216,11 +216,15 @@ func TestResolveTargetAcceptsConsistentCombinedFields(t *testing.T) {
 	db, blocks := buildResolveTargetTestChain(t, 5)
 	target := blocks[1] // id=2, slot=20, number=2
 
-	resolved, err := dblifecycle.ResolveTarget(db, dblifecycle.TruncateTarget{
-		Slot:        &target.Slot,
-		Hash:        target.Hash,
-		BlockNumber: &target.Number,
-	})
+	resolved, err := dblifecycle.ResolveTarget(
+		context.Background(),
+		db,
+		dblifecycle.TruncateTarget{
+			Slot:        &target.Slot,
+			Hash:        target.Hash,
+			BlockNumber: &target.Number,
+		},
+	)
 	require.NoError(t, err)
 	require.Equal(t, target.ID, resolved.ID)
 }
@@ -237,18 +241,26 @@ func TestResolveTargetRejectsInconsistentCombinedFields(t *testing.T) {
 	hashOfBlock2 := blocks[1].Hash
 
 	wrongSlot := blocks[2].Slot // slot of block 3, not block 2
-	_, err := dblifecycle.ResolveTarget(db, dblifecycle.TruncateTarget{
-		Hash: hashOfBlock2,
-		Slot: &wrongSlot,
-	})
+	_, err := dblifecycle.ResolveTarget(
+		context.Background(),
+		db,
+		dblifecycle.TruncateTarget{
+			Hash: hashOfBlock2,
+			Slot: &wrongSlot,
+		},
+	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not match")
 
 	wrongNumber := blocks[3].Number // number of block 4, not block 2
-	_, err = dblifecycle.ResolveTarget(db, dblifecycle.TruncateTarget{
-		Hash:        hashOfBlock2,
-		BlockNumber: &wrongNumber,
-	})
+	_, err = dblifecycle.ResolveTarget(
+		context.Background(),
+		db,
+		dblifecycle.TruncateTarget{
+			Hash:        hashOfBlock2,
+			BlockNumber: &wrongNumber,
+		},
+	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not match")
 }

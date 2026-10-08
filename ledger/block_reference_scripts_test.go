@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -129,12 +130,12 @@ func additionalReferenceAdmission(
 	ls, sentinel := additionalReferenceLedger(t, db, block, era, pp)
 	for path, run := range map[string]func() error{
 		"imported": func() error {
-			return db.Transaction(true).Do(func(txn *database.Txn) error {
-				_, err := ls.ledgerProcessBlock(txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, ls.currentEra, pp, nil, 0, 0, false)
+			return db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+				_, err := ls.ledgerProcessBlock(t.Context(), txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, ls.currentEra, pp, nil, 0, 0, false)
 				return err
 			})
 		},
-		"forged": func() error { return ls.validateForgedTxs(block) },
+		"forged": func() error { return ls.validateForgedTxs(context.Background(), block) },
 	} {
 		t.Run(path, func(t *testing.T) {
 			err := run()
@@ -189,12 +190,13 @@ func TestDijkstraBlockReferenceScriptCustomLimitAdmission(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(
 					t,
-					db.Transaction(true).Do(func(txn *database.Txn) error {
-						if err := db.CreateUtxo(txn, &models.Utxo{TxId: id}); err != nil {
-							return err
-						}
-						return db.Blob().SetUtxo(txn.Blob(), id, 0, encoded)
-					}),
+					db.Transaction(context.Background(), true).
+						Do(func(txn *database.Txn) error {
+							if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{TxId: id}); err != nil {
+								return err
+							}
+							return db.Blob().SetUtxo(txn.Blob(), id, 0, encoded)
+						}),
 				)
 				block.BlockBody.Transactions = append(
 					block.BlockBody.Transactions,
@@ -410,16 +412,22 @@ func TestValidateBlockReferenceScriptsEntryControls(t *testing.T) {
 		ls := &LedgerState{}
 		require.ErrorContains(
 			t,
-			ls.ValidateBlockReferenceScripts(nil),
+			ls.ValidateBlockReferenceScripts(context.Background(), nil),
 			"nil block",
 		)
 		require.NoError(
 			t,
-			ls.ValidateBlockReferenceScripts(&conway.ConwayBlock{}),
+			ls.ValidateBlockReferenceScripts(
+				context.Background(),
+				&conway.ConwayBlock{},
+			),
 		)
 		require.NoError(
 			t,
-			ls.ValidateBlockReferenceScripts(&dijkstra.DijkstraBlock{}),
+			ls.ValidateBlockReferenceScripts(
+				context.Background(),
+				&dijkstra.DijkstraBlock{},
+			),
 		)
 	})
 	for _, tc := range []struct {
@@ -479,12 +487,18 @@ func TestValidateBlockReferenceScriptsEntryControls(t *testing.T) {
 				// The active Dijkstra prototype may decode blocks using
 				// the concrete Conway type; its explicit bypass policy
 				// follows the active era rather than that block type.
-				require.NoError(t, ls.ValidateBlockReferenceScripts(block))
+				require.NoError(
+					t,
+					ls.ValidateBlockReferenceScripts(
+						context.Background(),
+						block,
+					),
+				)
 				return
 			}
 			require.ErrorContains(
 				t,
-				ls.ValidateBlockReferenceScripts(block),
+				ls.ValidateBlockReferenceScripts(context.Background(), block),
 				"resolve consumed reference-script input",
 				"Conway input lookup must not bypass aggregate validation or use Dijkstra parameters",
 			)
@@ -508,12 +522,13 @@ func TestBlockReferenceScriptAggregateReusesPrefetchedUtxos(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(
 				t,
-				db.Transaction(true).Do(func(txn *database.Txn) error {
-					if err := db.CreateUtxo(txn, &models.Utxo{TxId: id}); err != nil {
-						return err
-					}
-					return db.Blob().SetUtxo(txn.Blob(), id, 0, encoded)
-				}),
+				db.Transaction(t.Context(), true).
+					Do(func(txn *database.Txn) error {
+						if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{TxId: id}); err != nil {
+							return err
+						}
+						return db.Blob().SetUtxo(txn.Blob(), id, 0, encoded)
+					}),
 			)
 			inputs = append(
 				inputs,
@@ -613,14 +628,28 @@ func TestBlockReferenceScriptAggregateReusesPrefetchedUtxos(t *testing.T) {
 			}
 			ls.activeEras = []eras.EraDesc{ls.currentEra}
 
-			err := db.Transaction(true).Do(func(txn *database.Txn) error {
-				_, err := ls.ledgerProcessBlock(
-					txn, ocommon.NewPoint(1, block.Hash().Bytes()), block,
-					true, false, false, nil, envelopeParent{origin: true}, nil,
-					ls.currentEra, tc.pp, nil, 0, 0, false,
-				)
-				return err
-			})
+			err := db.Transaction(t.Context(), true).
+				Do(func(txn *database.Txn) error {
+					_, err := ls.ledgerProcessBlock(
+						t.Context(),
+						txn,
+						ocommon.NewPoint(1, block.Hash().Bytes()),
+						block,
+						true,
+						false,
+						false,
+						nil,
+						envelopeParent{origin: true},
+						nil,
+						ls.currentEra,
+						tc.pp,
+						nil,
+						0,
+						0,
+						false,
+					)
+					return err
+				})
 			require.ErrorIs(t, err, sentinel)
 			require.Equal(t, len(inputs), resolved)
 			require.Equal(t, uint64(len(inputs)), ls.utxoByRefReads.Load(),
@@ -694,14 +723,17 @@ func TestBlockReferenceScriptsUsePreviousEraParametersOnImport(t *testing.T) {
 	)
 	ls.activeEras = []eras.EraDesc{eras.ConwayEraDesc, ls.currentEra}
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
-			txn, ocommon.NewPoint(1, block.Hash().Bytes()), block,
-			true, false, false, nil, envelopeParent{origin: true}, nil,
-			ls.currentEra, dijkstraPParams, conwayPParams, 0, 0, false,
-		)
-		return err
-	}))
+	require.NoError(
+		t,
+		db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+			_, err := ls.ledgerProcessBlock(t.Context(),
+				txn, ocommon.NewPoint(1, block.Hash().Bytes()), block,
+				true, false, false, nil, envelopeParent{origin: true}, nil,
+				ls.currentEra, dijkstraPParams, conwayPParams, 0, 0, false,
+			)
+			return err
+		}),
+	)
 }
 
 // TestDijkstraBlockReferenceScriptsWithConwayParameters pins the stricter

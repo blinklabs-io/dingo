@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -164,6 +165,7 @@ func rewardAccountAddress(
 //
 // Live-only: pool registrations carry no per-point history to read back.
 func (ls *LedgerState) queryShelleyStakePoolParams(
+	ctx context.Context,
 	poolIds []ledger.PoolId,
 ) (any, error) {
 	if err := checkLocalStateQueryItemLimit(
@@ -176,7 +178,7 @@ func (ls *LedgerState) queryShelleyStakePoolParams(
 	if len(poolIds) == 0 {
 		return []any{result}, nil
 	}
-	txn := ls.db.Transaction(false)
+	txn := ls.db.Transaction(ctx, false)
 	defer txn.Release()
 	networkID := uint8(ls.NewView(txn).NetworkId()) // #nosec G115 -- 0 or 1
 	consensus, tip := ls.loadStateSnapshots()

@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"io"
@@ -57,7 +58,7 @@ func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {
 			),
 		},
 	}
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	state, err := db.Metadata().GetNetworkState(nil)
 	require.NoError(t, err)
@@ -113,12 +114,12 @@ func TestCreateGenesisBlockStoresExactlyOneUtxoPerGenesisOutput(t *testing.T) {
 			),
 		},
 	}
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	for i := range genesisUtxos {
 		txId := genesisUtxos[i].Id.Id()
 		idx := genesisUtxos[i].Id.Index()
-		exists, err := db.UtxoExists(txId[:], idx, nil)
+		exists, err := db.UtxoExists(context.Background(), txId[:], idx, nil)
 		require.NoError(t, err)
 		require.True(
 			t,
@@ -134,7 +135,7 @@ func TestCreateGenesisBlockStoresExactlyOneUtxoPerGenesisOutput(t *testing.T) {
 		// offset collapsed onto the wrong reference.
 		wantCbor, err := cbor.Encode(genesisUtxos[i].Output)
 		require.NoError(t, err)
-		model, err := db.UtxoByRef(txId[:], idx, nil)
+		model, err := db.UtxoByRef(context.Background(), txId[:], idx, nil)
 		require.NoError(t, err)
 		require.Equal(
 			t,
@@ -203,7 +204,7 @@ func TestCreateGenesisBlockRejectsAvvmNonAvvmCollisionBeforeWriting(t *testing.T
 			),
 		},
 	}
-	err = ls.createGenesisBlock()
+	err = ls.createGenesisBlock(context.Background())
 	require.ErrorContains(t, err, "duplicate Byron genesis UTxO reference")
 
 	state, stateErr := db.Metadata().GetNetworkState(nil)
@@ -274,7 +275,7 @@ func TestCreateGenesisBlockPersistsMusashiExtraConfigStaking(t *testing.T) {
 			),
 		},
 	}
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 	expectedDeposit := uint64(
 		nodeCfg.ShelleyGenesis().ProtocolParameters.KeyDeposit,
 	)
@@ -287,7 +288,12 @@ func TestCreateGenesisBlockPersistsMusashiExtraConfigStaking(t *testing.T) {
 	require.NotNil(t, deposit)
 	require.Equal(t, expectedDeposit, *deposit)
 
-	pool, err := db.GetPool(lcommon.PoolKeyHash(poolKeyHash), false, nil)
+	pool, err := db.GetPool(
+		context.Background(),
+		lcommon.PoolKeyHash(poolKeyHash),
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, pool)
 	_, delegatorCount, err := db.Metadata().GetStakeByPool(poolKeyHash, nil)
@@ -348,7 +354,7 @@ func TestCreateGenesisBlockBackfillsMissingNetworkState(t *testing.T) {
 		},
 	}
 	ls.currentTip.Point.Slot = 42
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	state, err := db.Metadata().GetNetworkState(nil)
 	require.NoError(t, err)
@@ -514,7 +520,7 @@ func TestCreateGenesisBlockSeedsEpochZeroRewardAdaPots(t *testing.T) {
 			),
 		},
 	}
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	pots, err := db.Metadata().GetRewardAdaPots(0, nil)
 	require.NoError(t, err)
@@ -570,7 +576,7 @@ func TestCreateGenesisBlockBackfillsMissingEpochZeroRewardAdaPots(
 		},
 	}
 	ls.currentTip.Point.Slot = 42
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	pots, err := db.Metadata().GetRewardAdaPots(0, nil)
 	require.NoError(t, err)
@@ -614,14 +620,14 @@ func TestCreateGenesisBlockStoresCanonicalRelayAddress(t *testing.T) {
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(t.Context()))
 
 	var poolKeyHash []byte
 	for id := range pools {
 		poolKeyHash, err = hex.DecodeString(id)
 		require.NoError(t, err)
 	}
-	pool, err := db.GetPool(lcommon.PoolKeyHash(poolKeyHash), false, nil)
+	pool, err := db.GetPool(t.Context(), lcommon.PoolKeyHash(poolKeyHash), false, nil)
 	require.NoError(t, err)
 	require.Len(t, pool.Registration, 1)
 	require.Len(t, pool.Registration[0].Relays, 1)

@@ -143,7 +143,7 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 		if len(hash) == 0 {
 			return out, nil
 		}
-		block, err := s.utxorpc.config.LedgerState.BlockByHash(hash)
+		block, err := s.utxorpc.config.LedgerState.BlockByHash(ctx, hash)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
 				return out, nil
@@ -243,7 +243,7 @@ func (s *watchServiceServer) WatchTx(
 	}
 
 	// Get our starting point matching our chain
-	point, err := s.utxorpc.config.LedgerState.GetIntersectPoint(points)
+	point, err := s.utxorpc.config.LedgerState.GetIntersectPoint(ctx, points)
 	if err != nil {
 		s.utxorpc.config.Logger.Error(
 			"failed to get points",

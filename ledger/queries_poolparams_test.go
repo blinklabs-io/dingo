@@ -154,6 +154,7 @@ func TestQueryStakePoolParams_WireEncoding(t *testing.T) {
 
 	// 0x77 is not registered and 0x88 is registered but not requested.
 	got, err := ls.Query(
+		t.Context(),
 		stakePoolParamsQuery(repeatedBytes(28, 0x11), repeatedBytes(28, 0x77)),
 		QueryPoint{},
 	)
@@ -196,6 +197,7 @@ func TestQueryStakePoolParams_ScriptRewardAccount(t *testing.T) {
 	seedStakePoolParamsPool(t, ls, repeatedBytes(28, 0x11), 1)
 
 	got, err := ls.Query(
+		t.Context(),
 		stakePoolParamsQuery(repeatedBytes(28, 0x11)),
 		QueryPoint{},
 	)
@@ -220,7 +222,7 @@ func TestQueryStakePoolParams_EmptyFilter(t *testing.T) {
 	setStakePoolParamsLiveState(ls, 0, 0, 10)
 	seedStakePoolParamsPool(t, ls, repeatedBytes(28, 0x11), 0)
 
-	got, err := ls.Query(stakePoolParamsQuery(), QueryPoint{})
+	got, err := ls.Query(t.Context(), stakePoolParamsQuery(), QueryPoint{})
 	require.NoError(t, err)
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
@@ -241,7 +243,7 @@ func TestQueryStakePoolParams_ReregistrationIsFuture(t *testing.T) {
 	seedStakePoolParamsRegistration(t, ls, pool, 0, 5, 1_000_000)
 	seedStakePoolParamsRegistration(t, ls, pool, 0, 150, 2_000_000)
 
-	got, err := ls.Query(stakePoolParamsQuery(pool), QueryPoint{})
+	got, err := ls.Query(t.Context(), stakePoolParamsQuery(pool), QueryPoint{})
 	require.NoError(t, err)
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
@@ -281,7 +283,7 @@ func TestQueryStakePoolParams_PortlessHostnameIsMultiHost(t *testing.T) {
 		nil,
 	))
 
-	got, err := ls.Query(stakePoolParamsQuery(pool), QueryPoint{})
+	got, err := ls.Query(t.Context(), stakePoolParamsQuery(pool), QueryPoint{})
 	require.NoError(t, err)
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
@@ -317,7 +319,7 @@ func TestQueryStakePoolParams_PreservesPortlessSingleHostName(t *testing.T) {
 		nil,
 	))
 
-	got, err := ls.Query(stakePoolParamsQuery(pool), QueryPoint{})
+	got, err := ls.Query(t.Context(), stakePoolParamsQuery(pool), QueryPoint{})
 	require.NoError(t, err)
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
@@ -344,7 +346,7 @@ func TestQueryLedgerTip(t *testing.T) {
 	ls.publishSnapshotsLocked()
 
 	query := shelleyBlockQuery(&olocalstatequery.ShelleyLedgerTipQuery{})
-	live, err := ls.Query(query, QueryPoint{})
+	live, err := ls.Query(t.Context(), query, QueryPoint{})
 	require.NoError(t, err)
 	liveCbor, err := cbor.Encode(live)
 	require.NoError(t, err)
@@ -356,7 +358,7 @@ func TestQueryLedgerTip(t *testing.T) {
 		hex.EncodeToString(liveCbor),
 	)
 
-	pinned, err := ls.Query(query, QueryPoint{Slot: 100, Hash: pinnedHash})
+	pinned, err := ls.Query(t.Context(), query, QueryPoint{Slot: 100, Hash: pinnedHash})
 	require.NoError(t, err)
 	pinnedCbor, err := cbor.Encode(pinned)
 	require.NoError(t, err)
@@ -379,6 +381,7 @@ func TestQueryProposedProtocolParamsUpdates(t *testing.T) {
 	ls.currentEra = eras.ConwayEraDesc
 	ls.publishSnapshotsLocked()
 	got, err := ls.Query(
+		t.Context(),
 		shelleyBlockQuery(
 			&olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery{},
 		),
@@ -414,6 +417,7 @@ func TestQueryProposedProtocolParamsUpdatesBeforeConway(t *testing.T) {
 	ls.currentEra = eras.BabbageEraDesc
 	ls.publishSnapshotsLocked()
 	_, err := ls.Query(
+		t.Context(),
 		shelleyBlockQuery(
 			&olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery{},
 		),
@@ -523,10 +527,10 @@ func TestQueryProposedProtocolParamsUpdatesPinnedBeforeConway(t *testing.T) {
 	}, nil))
 	query := &olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery{}
 
-	_, err := ls.queryShelleyLeaf(query, QueryPoint{Slot: 350}, nil, 0)
+	_, err := ls.queryShelleyLeaf(t.Context(), query, QueryPoint{Slot: 350}, nil, 0)
 	require.Error(t, err)
 
-	got, err := ls.queryShelleyLeaf(query, QueryPoint{Slot: 620}, nil, 0)
+	got, err := ls.queryShelleyLeaf(t.Context(), query, QueryPoint{Slot: 620}, nil, 0)
 	require.NoError(t, err)
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
@@ -631,7 +635,7 @@ func TestQueryStakePoolParams_BlsKeyFromProtocolVersion12(t *testing.T) {
 			nil,
 		))
 
-		got, err := ls.Query(stakePoolParamsQuery(pool), QueryPoint{})
+		got, err := ls.Query(t.Context(), stakePoolParamsQuery(pool), QueryPoint{})
 		require.NoError(t, err)
 		gotCbor, err := cbor.Encode(got)
 		require.NoError(t, err)
@@ -708,7 +712,7 @@ func TestQueryStakePoolParams_GenesisRelayWireOrderAndBlsKey(t *testing.T) {
 
 	poolHash, err := hex.DecodeString(poolID)
 	require.NoError(t, err)
-	got, err := ls.Query(stakePoolParamsQuery(poolHash), QueryPoint{})
+	got, err := ls.Query(t.Context(), stakePoolParamsQuery(poolHash), QueryPoint{})
 	require.NoError(t, err)
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
@@ -745,7 +749,7 @@ func TestQueryStakePoolParams_SnapshotRelayWireOrder(t *testing.T) {
 		nil,
 	))
 
-	got, err := ls.Query(stakePoolParamsQuery(poolID), QueryPoint{})
+	got, err := ls.Query(t.Context(), stakePoolParamsQuery(poolID), QueryPoint{})
 	require.NoError(t, err)
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
