@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -69,7 +70,7 @@ func newBehindPeerFixture(t *testing.T) *behindPeerFixture {
 	t.Helper()
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -92,7 +93,10 @@ func newBehindPeerFixture(t *testing.T) *behindPeerFixture {
 		})
 		prevHash = hash
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), blocks),
+	)
 
 	ls, err := NewLedgerState(
 		LedgerStateConfig{

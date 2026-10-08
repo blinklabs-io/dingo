@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -204,7 +205,7 @@ func TestGetEpochBySlot_IsBoundedQuery(t *testing.T) {
 	db := openTestDB(t)
 
 	const epochCount = 50
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	for i := range uint64(epochCount) {
 		seedEpochTxn(t, db, i, i*100, 100, txn)
 	}

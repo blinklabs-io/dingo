@@ -133,7 +133,7 @@ func TestPrunerSkipsAlreadyExpiredBlocks(t *testing.T) {
 	firstHash := insertTestBlock(t, db, 1, 0x01)
 	secondHash := insertTestBlock(t, db, 2, 0x02)
 
-	_, err := db.PruneBlock(1, firstHash)
+	_, err := db.PruneBlock(context.Background(), 1, firstHash)
 	require.NoError(t, err)
 
 	pruner := NewPruner(PrunerConfig{

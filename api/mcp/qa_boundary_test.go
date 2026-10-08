@@ -234,6 +234,7 @@ func TestQAActualListenerBoundary(t *testing.T) {
 	t.Parallel()
 	for _, addr := range []string{"0.0.0.0:8088", "[::]:8088", ":8088", "192.0.2.1:8088"} {
 		server, err := NewServer(
+			t.Context(),
 			DefaultProviderConfig(),
 			ProviderDependencies{},
 			apiconfig.EffectiveTLS{},

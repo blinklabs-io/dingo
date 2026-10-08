@@ -225,7 +225,7 @@ func (s *DatabaseSource) GetLatestEpoch(ctx context.Context) (uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	txn := s.db.Transaction(false)
+	txn := s.db.Transaction(ctx, false)
 	defer txn.Release()
 	summary, err := s.db.Metadata().GetLatestEpochSummary(txn.Metadata())
 	if err != nil {
@@ -259,7 +259,7 @@ func (s *DatabaseSource) GetEarliestAvailableEpoch(
 	if err := ctx.Err(); err != nil {
 		return 0, false, err
 	}
-	txn := s.db.Transaction(false)
+	txn := s.db.Transaction(ctx, false)
 	defer txn.Release()
 	slot, err := s.db.MithrilTrustBoundarySlotStrict(txn)
 	if err != nil {
@@ -295,7 +295,7 @@ func (s *DatabaseSource) GetEpochData(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(false)
+	txn := s.db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := s.db.Metadata()
 
@@ -349,7 +349,7 @@ func (s *DatabaseSource) GetPoolStakeSnapshotMembers(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(false)
+	txn := s.db.Transaction(ctx, false)
 	defer txn.Release()
 	rows, err := s.db.Metadata().GetPoolStakeSnapshotsByEpoch(
 		epoch,
@@ -388,7 +388,7 @@ func (s *DatabaseSource) GetPoolsRetiredByEpoch(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(false)
+	txn := s.db.Transaction(ctx, false)
 	defer txn.Release()
 	keyHashes, err := s.db.Metadata().GetPoolKeyHashesRetiredByEpoch(
 		epoch,
@@ -423,7 +423,7 @@ func (s *DatabaseSource) GetRewardSnapshot(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(false)
+	txn := s.db.Transaction(ctx, false)
 	defer txn.Release()
 	snapshot, err := s.db.Metadata().GetRewardSnapshot(
 		epoch,
@@ -456,7 +456,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(false)
+	txn := s.db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := s.db.Metadata()
 
@@ -633,7 +633,7 @@ func (s *DatabaseSource) GetProtocolParams(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(false)
+	txn := s.db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := s.db.Metadata()
 
@@ -693,7 +693,7 @@ func (s *DatabaseSource) GetRewardAccountOutputs(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(false)
+	txn := s.db.Transaction(ctx, false)
 	defer txn.Release()
 	rows, err := s.db.Metadata().GetRewardAccountOutputs(epoch, txn.Metadata())
 	if err != nil {
