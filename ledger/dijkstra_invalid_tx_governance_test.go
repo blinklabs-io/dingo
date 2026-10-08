@@ -165,7 +165,7 @@ func addDijkstraFailingScriptSpend(
 		OutputAmount:  10_000_000,
 	})
 	require.NoError(t, err)
-	require.NoError(t, fx.db.Transaction(true).Do(func(txn *database.Txn) error {
+	require.NoError(t, fx.db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
 		return fx.db.Blob().SetUtxo(txn.Blob(), fx.inputIds[0], 0, outputCbor)
 	}))
 
@@ -213,10 +213,12 @@ func addDijkstraFailingScriptSpend(
 // import path with phase-2 evaluation skipped, so the declared validity flag
 // is the only input that changes which rules apply.
 func processDijkstraHardForkBlock(
+	ctx context.Context,
 	fx *dijkstraCollateralReturnFixture,
 ) error {
-	return fx.db.Transaction(true).Do(func(txn *database.Txn) error {
+	return fx.db.Transaction(ctx, true).Do(func(txn *database.Txn) error {
 		_, err := fx.ls.ledgerProcessBlock(
+			ctx,
 			txn,
 			ocommon.NewPoint(
 				dijkstraCollateralReturnTestSlot,
@@ -248,11 +250,11 @@ func newDijkstraHardForkReplayFixture(
 ) *dijkstraCollateralReturnFixture {
 	t.Helper()
 	fx := newDijkstraHardForkFixture(t, valid)
-	cm, err := chain.NewManager(fx.db, nil)
+	cm, err := chain.NewManager(t.Context(), fx.db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{fx.rawBlock()}),
+		cm.PrimaryChain().AddRawBlocks(t.Context(), []chain.RawBlock{fx.rawBlock()}),
 	)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              fx.db,
@@ -303,14 +305,15 @@ func requireDijkstraCollateralOnlyEffect(
 	fx *dijkstraCollateralReturnFixture,
 ) {
 	t.Helper()
-	_, err := fx.db.UtxoByRef(fx.inputIds[0], 0, nil)
+	_, err := fx.db.UtxoByRef(t.Context(), fx.inputIds[0], 0, nil)
 	require.NoError(t, err, "regular input must stay unspent")
-	_, err = fx.db.UtxoByRef(fx.inputIds[1], 0, nil)
+	_, err = fx.db.UtxoByRef(t.Context(), fx.inputIds[1], 0, nil)
 	require.ErrorIs(t, err, database.ErrUtxoNotFound, "collateral input must be spent")
-	collateral, err := fx.db.UtxoByRefIncludingSpent(fx.inputIds[1], 0, nil)
+	collateral, err := fx.db.UtxoByRefIncludingSpent(t.Context(), fx.inputIds[1], 0, nil)
 	require.NoError(t, err)
 	require.NotZero(t, collateral.DeletedSlot)
 	collateralReturn, err := fx.db.UtxoByRef(
+		t.Context(),
 		fx.tx.Hash().Bytes(),
 		uint32(len(fx.tx.Outputs())), // #nosec G115 -- fixture output count
 		nil,
@@ -318,11 +321,12 @@ func requireDijkstraCollateralOnlyEffect(
 	require.NoError(t, err)
 	require.Zero(t, collateralReturn.DeletedSlot)
 	regularOutput, err := fx.db.UtxoByRefIncludingSpent(
+		t.Context(),
 		fx.tx.Hash().Bytes(), 0, nil,
 	)
 	require.NoError(t, err)
 	require.Nil(t, regularOutput, "regular outputs must not be created")
-	_, err = fx.db.GetGovernanceProposal(fx.tx.Hash().Bytes(), 0, nil)
+	_, err = fx.db.GetGovernanceProposal(t.Context(), fx.tx.Hash().Bytes(), 0, nil)
 	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
 }
 
@@ -335,20 +339,20 @@ func TestDijkstraBlockApplicationScopesGovernanceToDeclaredValidity(
 		t.Parallel()
 		valid := newDijkstraHardForkFixture(t, true)
 		var badVersion conway.BadHardForkProtocolVersionError
-		require.ErrorAs(t, processDijkstraHardForkBlock(valid), &badVersion)
+		require.ErrorAs(t, processDijkstraHardForkBlock(t.Context(), valid), &badVersion)
 
 		invalid := newDijkstraHardForkFixture(t, false)
-		require.NoError(t, processDijkstraHardForkBlock(invalid))
+		require.NoError(t, processDijkstraHardForkBlock(t.Context(), invalid))
 	})
 
 	t.Run("forged block revalidation", func(t *testing.T) {
 		t.Parallel()
 		valid := newDijkstraHardForkFixture(t, true)
 		var badVersion conway.BadHardForkProtocolVersionError
-		require.ErrorAs(t, valid.ls.validateForgedTxs(valid.block), &badVersion)
+		require.ErrorAs(t, valid.ls.validateForgedTxs(t.Context(), valid.block), &badVersion)
 
 		invalid := newDijkstraHardForkFixture(t, false)
-		require.NoError(t, invalid.ls.validateForgedTxs(invalid.block))
+		require.NoError(t, invalid.ls.validateForgedTxs(t.Context(), invalid.block))
 	})
 
 	t.Run("mempool validation", func(t *testing.T) {
@@ -392,14 +396,14 @@ func TestDijkstraBlockApplicationScopesGovernanceToDeclaredValidity(
 			currentPParams: invalid.ls.currentPParams,
 			currentEpoch:   invalid.ls.currentEpoch,
 		}
-		require.NoError(t, invalid.ls.chain.Rollback(ocommon.Point{}))
-		require.NoError(t, invalid.ls.rollback(ocommon.Point{}))
+		require.NoError(t, invalid.ls.chain.Rollback(t.Context(), ocommon.Point{}))
+		require.NoError(t, invalid.ls.rollback(t.Context(), ocommon.Point{}))
 		seedDijkstraHardForkLedger(invalid.ls, template)
-		_, err := invalid.db.UtxoByRef(invalid.inputIds[1], 0, nil)
+		_, err := invalid.db.UtxoByRef(t.Context(), invalid.inputIds[1], 0, nil)
 		require.NoError(t, err, "rollback must restore the spent collateral")
 		require.NoError(
 			t,
-			invalid.ls.chain.AddRawBlocks([]chain.RawBlock{invalid.rawBlock()}),
+			invalid.ls.chain.AddRawBlocks(t.Context(), []chain.RawBlock{invalid.rawBlock()}),
 		)
 		require.NoError(t, replayDijkstraHardForkBlock(t, invalid))
 		requireDijkstraCollateralOnlyEffect(t, invalid)

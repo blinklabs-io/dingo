@@ -44,7 +44,7 @@ func TestOpenReadOnlySQLite(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "metadata.sqlite")
 
 	// Missing file returns error
-	_, err := OpenReadOnlySQLite(dbPath)
+	_, err := OpenReadOnlySQLite(t.Context(), dbPath)
 	require.Error(t, err)
 
 	// Create a real SQLite database file
@@ -58,7 +58,7 @@ func TestOpenReadOnlySQLite(t *testing.T) {
 	initDB.Close()
 
 	// Open read-only SQLite connection
-	roDB, err := OpenReadOnlySQLite(dbPath)
+	roDB, err := OpenReadOnlySQLite(t.Context(), dbPath)
 	require.NoError(t, err)
 	defer roDB.Close()
 
@@ -77,6 +77,7 @@ func TestServerStopClosesDB(t *testing.T) {
 	require.NoError(t, err)
 
 	server, err := NewServer(
+		t.Context(),
 		DefaultProviderConfig(),
 		ProviderDependencies{},
 		apiconfig.EffectiveTLS{Enabled: false},
@@ -117,6 +118,7 @@ func TestNewMCPServerUsesActiveSQLiteProvider(t *testing.T) {
 	)
 	require.NoError(t, err)
 	_, ro, err := NewMCPServer(
+		t.Context(),
 		DefaultProviderConfig(),
 		ProviderDependencies{Database: nodeDB},
 	)
@@ -145,7 +147,7 @@ func TestSQLiteConnectionBlocksWritesWithoutValidator(t *testing.T) {
 		"CREATE TABLE item (id INTEGER); INSERT INTO item VALUES (1)",
 	)
 	require.NoError(t, err)
-	reader, err := OpenReadOnlySQLite(path)
+	reader, err := OpenReadOnlySQLite(t.Context(), path)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, reader.Close()) })
 	for _, query := range []string{
@@ -171,7 +173,7 @@ func TestMCPSessionEndToEnd(t *testing.T) {
 	db := newFixtureDB(t)
 
 	cfg := DefaultProviderConfig()
-	server, _, err := NewMCPServer(cfg, ProviderDependencies{
+	server, _, err := NewMCPServer(t.Context(), cfg, ProviderDependencies{
 		SQLDB:   db,
 		Network: "preview",
 	})
@@ -567,6 +569,7 @@ func TestServerHealthEndpoint(t *testing.T) {
 
 	cfg := DefaultProviderConfig()
 	server, err := NewServer(
+		t.Context(),
 		cfg,
 		ProviderDependencies{},
 		apiconfig.EffectiveTLS{},
@@ -597,7 +600,7 @@ func TestServerStartStopLifecycle(t *testing.T) {
 	require.NoError(t, occupied.Close())
 
 	cfg := DefaultProviderConfig()
-	server, err := NewServer(cfg, ProviderDependencies{
+	server, err := NewServer(t.Context(), cfg, ProviderDependencies{
 		SQLDB:   db,
 		Network: "preview",
 	}, apiconfig.EffectiveTLS{}, addr)
@@ -647,6 +650,7 @@ func TestSSESessionSurvivesIdleInterval(t *testing.T) {
 	addr := listener.Addr().String()
 	require.NoError(t, listener.Close())
 	server, err := NewServer(
+		t.Context(),
 		DefaultProviderConfig(),
 		ProviderDependencies{},
 		apiconfig.EffectiveTLS{},

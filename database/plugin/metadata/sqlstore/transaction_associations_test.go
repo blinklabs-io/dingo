@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"path/filepath"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -203,6 +204,103 @@ func collateralProductionFlow(t *testing.T, store *Store, db *sql.DB) {
 	require.NotNil(t, got)
 	require.Len(t, got.Collateral, 1)
 	gone, err := store.GetTransactionByHash(txB.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	require.Nil(t, gone)
+}
+
+// TestCollateralRollbackOrderAcrossRestart rolls back two transactions that
+// share one collateral input, later first, closing and reopening the on-disk
+// store between steps. Each step asserts the association edge of both
+// transactions, so a rollback that removed the shared input's association for
+// every owner, or a restart that lost an edge, is observable.
+func TestCollateralRollbackOrderAcrossRestart(t *testing.T) {
+	t.Parallel()
+
+	dsn := "file:" + filepath.Join(t.TempDir(), "collateral.db") +
+		"?_pragma=synchronous(OFF)&_pragma=journal_mode(MEMORY)"
+	open := func() (*Store, *sql.DB) {
+		db, err := sql.Open("sqlite", dsn)
+		require.NoError(t, err)
+		registry, err := migrations.SQLiteRegistry()
+		require.NoError(t, err)
+		store, err := New(Config{
+			WriteDB:         db,
+			Dialect:         SQLiteDialect(),
+			StorageMode:     types.StorageModeAPI,
+			Migrations:      registry,
+			MigrationLocker: migrations.NewProcessLocker(),
+		})
+		require.NoError(t, err)
+		require.NoError(t, store.Start(t.Context()))
+		return store, db
+	}
+	store, db := open()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	reopen := func() {
+		require.NoError(t, store.Close())
+		require.NoError(t, db.Close())
+		store, db = open()
+	}
+
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{0xaa}, 32), 0,
+	)
+	require.NoError(t, err)
+	_, err = db.Exec(
+		"INSERT INTO utxo (tx_id, output_idx, credential_tag, amount, payment_script) VALUES (?, 0, 0, '1', FALSE)",
+		input.Id().Bytes(),
+	)
+	require.NoError(t, err)
+	makeTx := func(id byte) lcommon.Transaction {
+		builder := mockledger.NewTransactionBuilder()
+		builder.WithId(bytes.Repeat([]byte{id}, 32))
+		builder.WithCollateral(input).WithValid(true)
+		return builder
+	}
+	txA, txB := makeTx(0xbb), makeTx(0xcc)
+	for _, item := range []struct {
+		tx   lcommon.Transaction
+		slot uint64
+	}{{txA, 10}, {txB, 20}} {
+		require.NoError(t, store.SetTransaction(
+			item.tx,
+			ocommon.Point{Slot: item.slot, Hash: item.tx.Hash().Bytes()},
+			0, nil, false, nil,
+		))
+	}
+
+	edges := func(tx lcommon.Transaction) int {
+		var n int
+		require.NoError(t, db.QueryRow(
+			"SELECT COUNT(*) FROM utxo_collateral_input WHERE transaction_hash = ?",
+			tx.Hash().Bytes(),
+		).Scan(&n))
+		return n
+	}
+	requireEdges := func(step string, wantA, wantB int) {
+		t.Helper()
+		require.Equal(t, wantA, edges(txA), "%s: edge of the earlier transaction", step)
+		require.Equal(t, wantB, edges(txB), "%s: edge of the later transaction", step)
+	}
+
+	requireEdges("applied", 1, 1)
+	reopen()
+	requireEdges("reopened after apply", 1, 1)
+
+	require.NoError(t, store.DeleteTransactionsAfterSlot(10, nil))
+	requireEdges("later rolled back", 1, 0)
+	reopen()
+	requireEdges("reopened after later rollback", 1, 0)
+	got, err := store.GetTransactionByHash(txA.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Len(t, got.Collateral, 1)
+
+	require.NoError(t, store.DeleteTransactionsAfterSlot(9, nil))
+	requireEdges("earlier rolled back", 0, 0)
+	reopen()
+	requireEdges("reopened after earlier rollback", 0, 0)
+	gone, err := store.GetTransactionByHash(txA.Hash().Bytes(), nil)
 	require.NoError(t, err)
 	require.Nil(t, gone)
 }

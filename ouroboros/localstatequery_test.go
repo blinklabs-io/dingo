@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -707,7 +708,7 @@ func TestLocalstatequeryQueryAnswersFromAcquiredSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, newTip, got, "a re-Acquire must observe the new tip")
 
-	_, err = first.view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err = first.view.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.ErrorIs(
 		t, err, ledger.ErrQueryViewClosed,
 		"a re-Acquire must close the snapshot it replaces",
@@ -866,8 +867,8 @@ func TestLocalstatequeryAcquireRejectsClosedConnection(t *testing.T) {
 	require.False(t, session)
 }
 
-// TestLocalstatequeryFailedReAcquireClosesPreviousSnapshot proves a rejected
-// re-Acquire leaves the session registered with its snapshot closed.
+// TestLocalstatequeryFailedReAcquireForgetsPreviousSnapshot proves a rejected
+// re-Acquire closes and removes the prior session.
 func TestLocalstatequeryFailedReAcquireForgetsPreviousSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -884,7 +885,7 @@ func TestLocalstatequeryFailedReAcquireForgetsPreviousSnapshot(t *testing.T) {
 	)
 	require.ErrorIs(t, err, olocalstatequery.ErrAcquireFailurePointNotOnChain)
 
-	_, err = session.view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err = session.view.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.ErrorIs(t, err, ledger.ErrQueryViewClosed)
 	require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(ctx.ConnectionId))
 }
@@ -905,7 +906,7 @@ func TestLocalstatequeryReleaseClosesSnapshot(t *testing.T) {
 	require.NoError(t, o.localstatequeryServerRelease(ctx))
 
 	require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(ctx.ConnectionId))
-	_, err := session.view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err := session.view.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.ErrorIs(t, err, ledger.ErrQueryViewClosed)
 }
 
@@ -925,12 +926,12 @@ func TestLocalstatequeryDisconnectClosesSnapshot(t *testing.T) {
 	session := acquireSnapshotTestSession(t, o, ctx)
 
 	o.ReleaseLocalStateQueryAcquiredPointOwner(ctx.ConnectionId, stale)
-	_, err := session.view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err := session.view.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.NoError(t, err, "a stale owner must not close the live session")
 
 	o.ReleaseLocalStateQueryAcquiredPointOwner(ctx.ConnectionId, owner)
 	require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(ctx.ConnectionId))
-	_, err = session.view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err = session.view.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.ErrorIs(t, err, ledger.ErrQueryViewClosed)
 }
 
@@ -949,7 +950,7 @@ func TestLocalstatequerySnapshotExpires(t *testing.T) {
 	session := acquireSnapshotTestSession(t, o, ctx)
 
 	testutil.WaitForCondition(t, func() bool {
-		_, err := session.view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+		_, err := session.view.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
 		return errors.Is(err, ledger.ErrQueryViewClosed)
 	}, testutil.AsyncWait, "the snapshot was never closed")
 	testutil.WaitForCondition(t, func() bool {
@@ -1018,7 +1019,7 @@ func TestOuroborosCloseClosesLocalStateQuerySnapshots(t *testing.T) {
 	require.NoError(t, o.Close())
 
 	require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(ctx.ConnectionId))
-	_, err := session.view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	_, err := session.view.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.ErrorIs(t, err, ledger.ErrQueryViewClosed)
 }
 

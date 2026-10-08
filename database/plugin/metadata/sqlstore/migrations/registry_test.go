@@ -31,11 +31,12 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 36)
+	require.Len(t, registry, 39)
 	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
 	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
 		"CREATE TABLE IF NOT EXISTS `account_drep_clear`")
 	require.NotNil(t, registry[34].Backfill)
+	require.Equal(t, poolRelayTypeSchemaRelease, registry[37].Name)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -263,10 +264,14 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, "leios-transaction-ledger-context", registry[33].Name)
 	require.Contains(t, registry[33].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `leios_transaction_context`")
 	require.Equal(t, 36, registry[35].Version)
-	require.Equal(t, midnightRollbackJournalSchemaRelease, registry[35].Name)
-	require.Len(t, registry[35].SQL["sqlite"].Expand, 3)
-	require.Contains(t, registry[35].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `midnight_candidate_removals`")
-	require.Contains(t, registry[35].SQL["sqlite"].Expand[2], "CREATE TABLE IF NOT EXISTS `midnight_epoch_transitions`")
+	require.Equal(t, committeeHotAuthorizationPruneOrderSchemaRelease, registry[35].Name)
+	require.Len(t, registry[35].SQL["sqlite"].Expand, 1)
+	require.Contains(t, registry[35].SQL["sqlite"].Expand[0], "idx_auth_committee_hot_cold_credential_prune_order")
+	require.Equal(t, 39, registry[38].Version)
+	require.Equal(t, midnightRollbackJournalSchemaRelease, registry[38].Name)
+	require.Len(t, registry[38].SQL["sqlite"].Expand, 3)
+	require.Contains(t, registry[38].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `midnight_candidate_removals`")
+	require.Contains(t, registry[38].SQL["sqlite"].Expand[2], "CREATE TABLE IF NOT EXISTS `midnight_epoch_transitions`")
 }
 
 func TestAccountDRepClearBackfillRequiresCompletePV10History(t *testing.T) {
@@ -488,7 +493,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 36)
+	require.Len(t, registry, 39)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

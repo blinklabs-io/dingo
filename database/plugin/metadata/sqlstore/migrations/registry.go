@@ -73,6 +73,8 @@ const (
 	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
 	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
 	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
+	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
+	poolRelayTypeSchemaRelease                          = "pool-relay-type"
 	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
 )
 
@@ -211,8 +213,15 @@ var schemaVersions = []struct {
 	{Version: 35, Name: accountDRepClearSchemaRelease, Dir: "v35"},
 	{
 		Version: 36,
-		Name:    midnightRollbackJournalSchemaRelease,
+		Name:    committeeHotAuthorizationPruneOrderSchemaRelease,
 		Dir:     "v36",
+	},
+	{Version: 37, Name: "drep-expiry-history", Dir: "v37"},
+	{Version: 38, Name: poolRelayTypeSchemaRelease, Dir: "v38"},
+	{
+		Version: 39,
+		Name:    midnightRollbackJournalSchemaRelease,
+		Dir:     "v39",
 	},
 }
 
@@ -494,11 +503,17 @@ func rewardCreditRoundBackfill(
 		return BatchResult{Done: true}, nil
 	}
 	if err != nil {
-		return BatchResult{}, fmt.Errorf("read legacy reward credit rounds: %w", err)
+		return BatchResult{}, fmt.Errorf(
+			"read legacy reward credit rounds: %w",
+			err,
+		)
 	}
 	rounds := make([]models.RewardCreditRound, 0)
 	if err := json.Unmarshal([]byte(raw), &rounds); err != nil {
-		return BatchResult{}, fmt.Errorf("decode legacy reward credit rounds: %w", err)
+		return BatchResult{}, fmt.Errorf(
+			"decode legacy reward credit rounds: %w",
+			err,
+		)
 	}
 	if rounds == nil {
 		rounds = make([]models.RewardCreditRound, 0)
@@ -516,7 +531,8 @@ func rewardCreditRoundBackfill(
 	}
 	end := min(start+batch.Limit, len(rounds))
 	for _, round := range rounds[start:end] {
-		if round.SnapshotEpoch > uint64(1<<63-1) || round.BoundarySlot > uint64(1<<63-1) {
+		if round.SnapshotEpoch > uint64(1<<63-1) ||
+			round.BoundarySlot > uint64(1<<63-1) {
 			return BatchResult{}, fmt.Errorf(
 				"legacy reward credit round exceeds SQL integer range: epoch %d slot %d",
 				round.SnapshotEpoch,
@@ -529,7 +545,10 @@ func rewardCreditRoundBackfill(
 			int64(round.SnapshotEpoch),
 			int64(round.BoundarySlot),
 		); err != nil {
-			return BatchResult{}, fmt.Errorf("copy legacy reward credit round: %w", err)
+			return BatchResult{}, fmt.Errorf(
+				"copy legacy reward credit round: %w",
+				err,
+			)
 		}
 	}
 	if end == len(rounds) {
@@ -538,9 +557,16 @@ func rewardCreditRoundBackfill(
 			batch.Rebind(`DELETE FROM sync_state WHERE sync_key = ?`),
 			models.PendingRewardCreditRoundsKey,
 		); err != nil {
-			return BatchResult{}, fmt.Errorf("remove legacy reward credit rounds: %w", err)
+			return BatchResult{}, fmt.Errorf(
+				"remove legacy reward credit rounds: %w",
+				err,
+			)
 		}
-		return BatchResult{Cursor: strconv.Itoa(end), Rows: int64(end - start), Done: true}, nil
+		return BatchResult{
+			Cursor: strconv.Itoa(end),
+			Rows:   int64(end - start),
+			Done:   true,
+		}, nil
 	}
 	return BatchResult{Cursor: strconv.Itoa(end), Rows: int64(end - start)}, nil
 }

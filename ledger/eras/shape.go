@@ -190,8 +190,7 @@ func BuildShapeForEras(
 
 	// Resolve each entry's NextEraTrigger. Must happen after the entries are
 	// built because AtVersion defaults to the *next* entry's MinMajorVersion.
-	// TestXHardForkAtEpoch is keyed on the lowercase successor era name and
-	// only honoured when ExperimentalHardForksEnabled is set.
+	// TestXHardForkAtEpoch is keyed on the lowercase successor era name.
 	for i := range entries {
 		if i == len(entries)-1 {
 			entries[i].NextEraTrigger = hardfork.NewTriggerNotDuringThisExecution()
