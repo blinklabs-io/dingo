@@ -154,7 +154,7 @@ func TestEvaluateProtocolVersionBump_DetectsQuorumMetUpdate(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 
 	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State,
 		"quorum-met version-bumping update must set TransitionKnown")
@@ -197,7 +197,7 @@ func TestEvaluateProtocolVersionBump_NoUpdateStaysUnknown(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 
 	require.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"no pending update must leave transitionInfo Unknown")
@@ -300,7 +300,7 @@ func TestHardForkSummary_ProtocolVersionBumpExtendsHorizonPastBoundary(
 
 	// Run the new evaluator: the quorum-met update is detected and
 	// transitionInfo becomes TransitionKnown(1).
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 	ls.publishSnapshotsLocked()
 
 	after, err := ls.HardForkSummary()
@@ -323,7 +323,7 @@ func newVersionBumpChain(
 	count int,
 ) (*chain.Chain, []ochainsync.Tip) {
 	t.Helper()
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
 	testChain := cm.PrimaryChain()
 	blocks, err := fixtures.GenerateBabbageChain(
@@ -336,7 +336,7 @@ func newVersionBumpChain(
 	require.NoError(t, err)
 	tips := make([]ochainsync.Tip, 0, len(blocks))
 	for _, block := range blocks {
-		require.NoError(t, testChain.AddBlock(block, nil))
+		require.NoError(t, testChain.AddBlock(t.Context(), block, nil))
 		tips = append(tips, ochainsync.Tip{
 			Point: ocommon.NewPoint(
 				block.SlotNumber(),
@@ -405,7 +405,7 @@ func TestEvaluateProtocolVersionBump_WaitsForVotingDeadline(t *testing.T) {
 	ls.chain = testChain
 
 	ls.currentTip = tips[0]
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 	require.Equal(
 		t,
 		hardfork.TransitionUnknown,
@@ -414,7 +414,7 @@ func TestEvaluateProtocolVersionBump_WaitsForVotingDeadline(t *testing.T) {
 	)
 
 	ls.currentTip = tips[1]
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
 	require.Equal(t, uint64(1), ls.transitionInfo.KnownEpoch)
 }
@@ -436,7 +436,7 @@ func TestEvaluateProtocolVersionBump_RequiresKBlocksPastDeadline(
 	ls.chain = testChain
 
 	ls.currentTip = tips[1]
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 	require.Equal(
 		t,
 		hardfork.TransitionUnknown,
@@ -445,7 +445,7 @@ func TestEvaluateProtocolVersionBump_RequiresKBlocksPastDeadline(
 	)
 
 	ls.currentTip = tips[2]
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
 	require.Equal(t, uint64(1), ls.transitionInfo.KnownEpoch)
 }
@@ -468,7 +468,7 @@ func TestEvaluateProtocolVersionBump_SupersededBeforeDeadlineNeverKnown(
 	ls.chain = testChain
 
 	ls.currentTip = tips[0]
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 	require.Equal(
 		t,
 		hardfork.TransitionUnknown,
@@ -482,7 +482,7 @@ func TestEvaluateProtocolVersionBump_SupersededBeforeDeadlineNeverKnown(
 		[]byte{0xaa}, nonBumpCbor, 35, 0, nil,
 	))
 	ls.currentTip = tips[1]
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 	require.Equal(
 		t,
 		hardfork.TransitionUnknown,
@@ -509,7 +509,7 @@ func TestEvaluateProtocolVersionBump_PostDeadlineProposalKeepsTransition(
 	ls.chain = testChain
 
 	ls.currentTip = tips[1]
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
 
 	nonBumpCbor, err := cbor.Encode(map[uint64]any{0: uint64(44)})
@@ -519,7 +519,7 @@ func TestEvaluateProtocolVersionBump_PostDeadlineProposalKeepsTransition(
 	))
 	ls.currentTip = tips[2]
 	ls.transitionInfo = hardfork.NewTransitionUnknown()
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
 	require.Equal(t, uint64(1), ls.transitionInfo.KnownEpoch)
 }
@@ -536,7 +536,7 @@ func TestEvaluateProtocolVersionBump_RollbackRecountsFromSurvivingChain(
 
 	cfg := newBabbageQuorum1Cfg(t)
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
@@ -557,6 +557,7 @@ func TestEvaluateProtocolVersionBump_RollbackRecountsFromSurvivingChain(
 		Cbor:        []byte{0x80},
 	}
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(
+		t.Context(),
 		[]chain.RawBlock{preDeadline, pastDeadline},
 	))
 	for _, block := range []chain.RawBlock{preDeadline, pastDeadline} {
@@ -609,7 +610,7 @@ func TestEvaluateProtocolVersionBump_RollbackRecountsFromSurvivingChain(
 	evaluate := func() hardfork.TransitionInfo {
 		ls.Lock()
 		defer ls.Unlock()
-		ls.evaluateProtocolVersionBump()
+		ls.evaluateProtocolVersionBump(t.Context())
 		return ls.transitionInfo
 	}
 
@@ -639,8 +640,8 @@ func TestEvaluateProtocolVersionBump_RollbackRecountsFromSurvivingChain(
 
 	// The chain rolls back first and the ledger follows it, as in chainsync.
 	rollbackPoint := ocommon.NewPoint(preDeadline.Slot, preDeadline.Hash)
-	require.NoError(t, cm.PrimaryChain().Rollback(rollbackPoint))
-	require.NoError(t, ls.rollbackWithBlocks(rollbackPoint, nil, false))
+	require.NoError(t, cm.PrimaryChain().Rollback(t.Context(), rollbackPoint))
+	require.NoError(t, ls.rollbackWithBlocks(t.Context(), rollbackPoint, nil, false))
 	ls.RLock()
 	afterRollback := ls.transitionInfo
 	reloadedEra := ls.currentEra.Id
@@ -673,6 +674,7 @@ func TestEvaluateProtocolVersionBump_RollbackRecountsFromSurvivingChain(
 		Cbor:        []byte{0x80},
 	}
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(
+		t.Context(),
 		[]chain.RawBlock{forkPastDeadline},
 	))
 	ls.Lock()
@@ -703,15 +705,15 @@ func TestBlocksAppliedFromSlot(t *testing.T) {
 		},
 	}
 
-	assert.Equal(t, uint64(2), ls.blocksAppliedFromSlot(40))
+	assert.Equal(t, uint64(2), ls.blocksAppliedFromSlot(t.Context(), 40))
 	assert.Equal(
 		t,
 		uint64(3),
-		ls.blocksAppliedFromSlot(30),
+		ls.blocksAppliedFromSlot(t.Context(), 30),
 		"with no block before the slot every block up to the tip counts",
 	)
 
-	first, err := database.BlockByHash(db, tips[0].Point.Hash)
+	first, err := database.BlockByHash(t.Context(), db, tips[0].Point.Hash)
 	require.NoError(t, err)
 	txn := db.BlobTxn(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
@@ -719,7 +721,7 @@ func TestBlocksAppliedFromSlot(t *testing.T) {
 	}))
 	assert.Zero(
 		t,
-		ls.blocksAppliedFromSlot(40),
+		ls.blocksAppliedFromSlot(t.Context(), 40),
 		"a predecessor that cannot be read must count nothing",
 	)
 }

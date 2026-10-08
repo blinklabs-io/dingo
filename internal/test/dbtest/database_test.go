@@ -15,6 +15,7 @@
 package dbtest
 
 import (
+ "context"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -195,7 +196,7 @@ func TestNewDatabaseWithOptionsInMemoryMetadata(t *testing.T) {
 	}
 	// The in-memory store is migrated in place, so it answers a settings
 	// query that an unmigrated database could not.
-	if _, err := db.Metadata().GetCommitTimestamp(); err != nil {
+	if _, err := db.Metadata().GetCommitTimestamp(context.Background()); err != nil {
 		t.Errorf("GetCommitTimestamp on in-memory store: %v", err)
 	}
 }

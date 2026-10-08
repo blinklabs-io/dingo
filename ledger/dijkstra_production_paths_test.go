@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"maps"
 	"testing"
@@ -206,7 +207,7 @@ func runPathScenario(t *testing.T, sc pathScenario) {
 		require.NoError(t, f.replayBlock())
 		requireRewards(t, f, sc.rewards, sc.scriptRewards)
 		requirePending(t, f, true)
-		require.NoError(t, f.ls.rollback(
+		require.NoError(t, f.ls.rollback(context.Background(),
 			ocommon.Point{Slot: pathOriginSlot, Hash: f.originHash},
 		))
 		requireRewards(t, f, initial, initialScript)

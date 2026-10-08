@@ -113,7 +113,7 @@ func TestBackupToRestoreFromIntegration(t *testing.T) {
 	txn := srcStore.Transaction(t.Context())
 	require.NoError(t, srcStore.SetCommitTimestamp(4242, txn))
 	require.NoError(t, txn.Commit())
-	require.NoError(t, srcStore.SetNodeSettings(&types.NodeSettings{
+	require.NoError(t, srcStore.SetNodeSettings(context.Background(), &types.NodeSettings{
 		StorageMode: types.StorageModeAPI,
 		Network:     "preview",
 	}))
@@ -133,11 +133,11 @@ func TestBackupToRestoreFromIntegration(t *testing.T) {
 	require.NoError(t, dstStore.RestoreFrom(context.Background(), dumpPath))
 	require.NoError(t, dstStore.Start(context.Background()))
 
-	restoredTimestamp, err := dstStore.GetCommitTimestamp()
+	restoredTimestamp, err := dstStore.GetCommitTimestamp(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, int64(4242), restoredTimestamp)
 
-	restoredSettings, err := dstStore.GetNodeSettings()
+	restoredSettings, err := dstStore.GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, types.StorageModeAPI, restoredSettings.StorageMode)
 	require.Equal(t, "preview", restoredSettings.Network)
@@ -232,7 +232,7 @@ func TestResetThenRestoreIntegration(t *testing.T) {
 
 	require.NoError(t, dstStore.RestoreFrom(context.Background(), dumpPath))
 	require.NoError(t, dstStore.Start(context.Background()))
-	restoredTimestamp, err := dstStore.GetCommitTimestamp()
+	restoredTimestamp, err := dstStore.GetCommitTimestamp(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, int64(777), restoredTimestamp)
 }
@@ -260,7 +260,7 @@ func TestResetRefusesWhenTargetHasData(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "already contains data")
 
-	restoredTimestamp, err := store.GetCommitTimestamp()
+	restoredTimestamp, err := store.GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t, int64(999), restoredTimestamp,

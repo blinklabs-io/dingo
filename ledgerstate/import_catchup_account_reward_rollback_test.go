@@ -148,7 +148,7 @@ func applyWithdrawalTransaction(
 	}
 
 	point := ocommon.Point{Slot: slot, Hash: blockHash}
-	return db.SetTransaction(tx, point, 0, 0, nil, nil, offsets, nil)
+	return db.SetTransaction(context.Background(), tx, point, 0, 0, nil, nil, offsets, nil)
 }
 
 // TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit covers
@@ -221,7 +221,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 		context.Background(), newImportConfig(anchorSlot),
 	))
 	acctAfterBootstrap, err := db.GetAccountByCredential(
-		accountCredTagKey, stakingKey, false, nil,
+		context.Background(), accountCredTagKey, stakingKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(
@@ -235,7 +235,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 	const creditSlot = uint64(1_200)
 	creditSourceHash := []byte{0xc1}
 	require.NoError(t, db.AddAccountRewardByCredential(
-		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		context.Background(), accountCredTagKey, stakingKey, creditAmount, creditSlot,
 		creditSourceHash, nil,
 	))
 
@@ -250,7 +250,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 	))
 
 	acctBeforeCatchUp, err := db.GetAccountByCredential(
-		accountCredTagKey, stakingKey, false, nil,
+		context.Background(), accountCredTagKey, stakingKey, false, nil,
 	)
 	require.NoError(t, err)
 	wantLocalReward := anchorReward + creditAmount - withdrawAmount
@@ -268,7 +268,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 	// 5. Replay the credit and the withdrawal, as ordinary chain replay
 	// would after a catch-up import.
 	require.NoError(t, db.AddAccountRewardByCredential(
-		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		context.Background(), accountCredTagKey, stakingKey, creditAmount, creditSlot,
 		creditSourceHash, nil,
 	))
 	require.NoError(t, applyWithdrawalTransaction(
@@ -276,7 +276,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 	))
 
 	acctAfterReplay, err := db.GetAccountByCredential(
-		accountCredTagKey, stakingKey, false, nil,
+		context.Background(), accountCredTagKey, stakingKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(
@@ -358,7 +358,7 @@ func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorAccountRewardCredit
 	const creditSlot = uint64(1_200)
 	creditSourceHash := []byte{0xc2}
 	require.NoError(t, db.AddAccountRewardByCredential(
-		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		context.Background(), accountCredTagKey, stakingKey, creditAmount, creditSlot,
 		creditSourceHash, nil,
 	))
 
@@ -372,7 +372,7 @@ func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorAccountRewardCredit
 
 	wantLocalReward := anchorReward + creditAmount - withdrawAmount
 	acctBeforeCatchUp, err := db.GetAccountByCredential(
-		accountCredTagKey, stakingKey, false, nil,
+		context.Background(), accountCredTagKey, stakingKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(
@@ -387,7 +387,7 @@ func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorAccountRewardCredit
 
 	// 4. Replay the credit and withdrawal.
 	require.NoError(t, db.AddAccountRewardByCredential(
-		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		context.Background(), accountCredTagKey, stakingKey, creditAmount, creditSlot,
 		creditSourceHash, nil,
 	))
 	require.NoError(t, applyWithdrawalTransaction(
@@ -395,7 +395,7 @@ func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorAccountRewardCredit
 	))
 
 	acctAfterReplay, err := db.GetAccountByCredential(
-		accountCredTagKey, stakingKey, false, nil,
+		context.Background(), accountCredTagKey, stakingKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(
@@ -483,12 +483,12 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorPostSnapshotRewardCredit(
 	const refundSlot = uint64(1_200)
 	poolKeyHash := bytes.Repeat([]byte{0xdd}, 28)
 	require.NoError(t, db.AddPostSnapshotAccountRewardByCredential(
-		accountCredTagKey, stakingKey, refundAmount, refundSlot,
+		context.Background(), accountCredTagKey, stakingKey, refundAmount, refundSlot,
 		poolKeyHash, nil,
 	))
 
 	acctBeforeCatchUp, err := db.GetAccountByCredential(
-		accountCredTagKey, stakingKey, false, nil,
+		context.Background(), accountCredTagKey, stakingKey, false, nil,
 	)
 	require.NoError(t, err)
 	wantLocalReward := anchorReward + refundAmount
@@ -506,12 +506,12 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorPostSnapshotRewardCredit(
 	// 4. Replay the refund, as ordinary POOLREAP/treasury-withdrawal
 	// processing would after a catch-up import.
 	require.NoError(t, db.AddPostSnapshotAccountRewardByCredential(
-		accountCredTagKey, stakingKey, refundAmount, refundSlot,
+		context.Background(), accountCredTagKey, stakingKey, refundAmount, refundSlot,
 		poolKeyHash, nil,
 	))
 
 	acctAfterReplay, err := db.GetAccountByCredential(
-		accountCredTagKey, stakingKey, false, nil,
+		context.Background(), accountCredTagKey, stakingKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(
@@ -599,7 +599,7 @@ func TestImportLedgerStateRepairAfterPreFixImportDoesNotUnderflow(
 	// 2. A real post-anchor credit (e.g. a POOLREAP refund) is applied
 	// locally.
 	require.NoError(t, db.AddPostSnapshotAccountRewardByCredential(
-		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		context.Background(), accountCredTagKey, stakingKey, creditAmount, creditSlot,
 		creditSourceHash, nil,
 	))
 
@@ -613,7 +613,7 @@ func TestImportLedgerStateRepairAfterPreFixImportDoesNotUnderflow(
 	)
 	require.NoError(t, err)
 	acctAfterPreFixImport, err := db.GetAccountByCredential(
-		accountCredTagKey, stakingKey, false, nil,
+		context.Background(), accountCredTagKey, stakingKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(
@@ -628,7 +628,7 @@ func TestImportLedgerStateRepairAfterPreFixImportDoesNotUnderflow(
 	// so reversing it by subtraction would underflow.
 	require.NoError(t, ImportLedgerState(context.Background(), newCfg()))
 	acctAfterRepair, err := db.GetAccountByCredential(
-		accountCredTagKey, stakingKey, false, nil,
+		context.Background(), accountCredTagKey, stakingKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(
@@ -642,11 +642,11 @@ func TestImportLedgerStateRepairAfterPreFixImportDoesNotUnderflow(
 	// repair's journal cleanup must have cleared the stale row, or this
 	// insert no-ops against it exactly as it did before the repair.
 	require.NoError(t, db.AddPostSnapshotAccountRewardByCredential(
-		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		context.Background(), accountCredTagKey, stakingKey, creditAmount, creditSlot,
 		creditSourceHash, nil,
 	))
 	acctAfterReplay, err := db.GetAccountByCredential(
-		accountCredTagKey, stakingKey, false, nil,
+		context.Background(), accountCredTagKey, stakingKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(
@@ -717,7 +717,7 @@ func TestImportLedgerStateCatchUpLeavesUncoveredAccountUntouched(t *testing.T) {
 	// the anchor -- the real-chain equivalent of a stake registration
 	// certificate followed by a reward credit, neither of which the
 	// anchor's snapshot can know about.
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey:    uncoveredKey,
 		CredentialTag: accountCredTagKey,
 		Active:        true,
@@ -728,11 +728,11 @@ func TestImportLedgerStateCatchUpLeavesUncoveredAccountUntouched(t *testing.T) {
 	const creditSlot = uint64(1_200)
 	creditSourceHash := []byte{0xc4}
 	require.NoError(t, db.AddAccountRewardByCredential(
-		accountCredTagKey, uncoveredKey, creditAmount, creditSlot,
+		context.Background(), accountCredTagKey, uncoveredKey, creditAmount, creditSlot,
 		creditSourceHash, nil,
 	))
 	uncoveredBeforeCatchUp, err := db.GetAccountByCredential(
-		accountCredTagKey, uncoveredKey, false, nil,
+		context.Background(), accountCredTagKey, uncoveredKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(t, creditAmount, uint64(uncoveredBeforeCatchUp.Reward))
@@ -744,7 +744,7 @@ func TestImportLedgerStateCatchUpLeavesUncoveredAccountUntouched(t *testing.T) {
 	// 4. uncoveredKey's balance must be exactly as it was: nothing
 	// overwrote it, so nothing needed reconciling.
 	uncoveredAfterCatchUp, err := db.GetAccountByCredential(
-		accountCredTagKey, uncoveredKey, false, nil,
+		context.Background(), accountCredTagKey, uncoveredKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(
@@ -758,11 +758,11 @@ func TestImportLedgerStateCatchUpLeavesUncoveredAccountUntouched(t *testing.T) {
 	// uncoveredKey's journal row despite it being absent from the
 	// snapshot, this would incorrectly double the balance.
 	require.NoError(t, db.AddAccountRewardByCredential(
-		accountCredTagKey, uncoveredKey, creditAmount, creditSlot,
+		context.Background(), accountCredTagKey, uncoveredKey, creditAmount, creditSlot,
 		creditSourceHash, nil,
 	))
 	uncoveredAfterReplay, err := db.GetAccountByCredential(
-		accountCredTagKey, uncoveredKey, false, nil,
+		context.Background(), accountCredTagKey, uncoveredKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(
@@ -773,7 +773,7 @@ func TestImportLedgerStateCatchUpLeavesUncoveredAccountUntouched(t *testing.T) {
 
 	// coveredKey must still be correctly reconciled regardless.
 	coveredAfterCatchUp, err := db.GetAccountByCredential(
-		accountCredTagKey, coveredKey, false, nil,
+		context.Background(), accountCredTagKey, coveredKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(t, anchorReward, uint64(coveredAfterCatchUp.Reward))
@@ -854,7 +854,7 @@ func TestImportLedgerStateResumePastCertStateRollsBackJournal(
 
 	// 2. A post-anchor credit is applied locally.
 	require.NoError(t, db.AddAccountRewardByCredential(
-		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		context.Background(), accountCredTagKey, stakingKey, creditAmount, creditSlot,
 		creditSourceHash, nil,
 	))
 
@@ -866,9 +866,9 @@ func TestImportLedgerStateResumePastCertStateRollsBackJournal(
 		context.Background(), cfg, 1_000, func(ImportProgress) {},
 	)
 	require.NoError(t, err)
-	require.NoError(t, setCheckpoint(cfg, models.ImportPhaseCertState))
+	require.NoError(t, setCheckpoint(context.Background(), cfg, models.ImportPhaseCertState))
 	acct, err := db.GetAccountByCredential(
-		accountCredTagKey, stakingKey, false, nil,
+		context.Background(), accountCredTagKey, stakingKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(
@@ -881,11 +881,11 @@ func TestImportLedgerStateResumePastCertStateRollsBackJournal(
 
 	// 5. Replay of the credit must land on top of the anchor value.
 	require.NoError(t, db.AddAccountRewardByCredential(
-		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		context.Background(), accountCredTagKey, stakingKey, creditAmount, creditSlot,
 		creditSourceHash, nil,
 	))
 	acct, err = db.GetAccountByCredential(
-		accountCredTagKey, stakingKey, false, nil,
+		context.Background(), accountCredTagKey, stakingKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(
@@ -925,7 +925,7 @@ func TestImportLedgerStateCompletedCheckpointKeepsJournal(t *testing.T) {
 
 	// 2. The node then applies a post-anchor credit.
 	require.NoError(t, db.AddAccountRewardByCredential(
-		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		context.Background(), accountCredTagKey, stakingKey, creditAmount, creditSlot,
 		creditSourceHash, nil,
 	))
 
@@ -934,11 +934,11 @@ func TestImportLedgerStateCompletedCheckpointKeepsJournal(t *testing.T) {
 
 	// 4. Replay of the credit must no-op against the surviving journal row.
 	require.NoError(t, db.AddAccountRewardByCredential(
-		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		context.Background(), accountCredTagKey, stakingKey, creditAmount, creditSlot,
 		creditSourceHash, nil,
 	))
 	acct, err := db.GetAccountByCredential(
-		accountCredTagKey, stakingKey, false, nil,
+		context.Background(), accountCredTagKey, stakingKey, false, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(

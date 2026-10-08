@@ -16,6 +16,7 @@ package governance
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -51,6 +52,7 @@ func HasDRepActivityCertificates(tx lcommon.Transaction) bool {
 
 // drepActivityWriter records that a DRep was active in an epoch, at slot.
 type drepActivityWriter func(
+	ctx context.Context,
 	credentialTag uint8,
 	credential []byte,
 	epoch uint64,
@@ -64,6 +66,7 @@ func renewDRepExpiry(
 	drepInactivityPeriod uint64,
 ) drepActivityWriter {
 	return func(
+		ctx context.Context,
 		credentialTag uint8,
 		credential []byte,
 		epoch uint64,
@@ -71,6 +74,7 @@ func renewDRepExpiry(
 		txn *database.Txn,
 	) error {
 		return db.UpdateDRepActivity(
+			ctx,
 			credentialTag,
 			credential,
 			epoch,
@@ -88,13 +92,20 @@ func renewDRepExpiry(
 // expiry the snapshot recorded with a stale one.
 func recordDRepActivityEpoch(db *database.Database) drepActivityWriter {
 	return func(
+		ctx context.Context,
 		credentialTag uint8,
 		credential []byte,
 		epoch uint64,
 		_ uint64,
 		txn *database.Txn,
 	) error {
-		return db.RecordDRepActivityEpoch(credentialTag, credential, epoch, txn)
+		return db.RecordDRepActivityEpoch(
+			ctx,
+			credentialTag,
+			credential,
+			epoch,
+			txn,
+		)
 	}
 }
 
@@ -103,6 +114,7 @@ func recordDRepActivityEpoch(db *database.Database) drepActivityWriter {
 // before this function runs, and both writes participate in the same database
 // transaction.
 func ProcessDRepActivityCertificates(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
@@ -111,6 +123,7 @@ func ProcessDRepActivityCertificates(
 	txn *database.Txn,
 ) error {
 	return processDRepActivityCertificates(
+		ctx,
 		tx,
 		point.Slot,
 		currentEpoch,
@@ -123,12 +136,14 @@ func ProcessDRepActivityCertificates(
 // for replay of blocks at or below a Mithril snapshot anchor: it records each
 // DRep's activity epoch and keeps the expiry the snapshot recorded.
 func ProcessHistoricalDRepActivityCertificates(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	currentEpoch uint64,
 	db *database.Database,
 	txn *database.Txn,
 ) error {
 	return processDRepActivityCertificates(
+		ctx,
 		tx,
 		0,
 		currentEpoch,
@@ -138,6 +153,7 @@ func ProcessHistoricalDRepActivityCertificates(
 }
 
 func processDRepActivityCertificates(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	slot uint64,
 	currentEpoch uint64,
@@ -177,6 +193,7 @@ func processDRepActivityCertificates(
 			continue
 		}
 		if err := recordActivity(
+			ctx,
 			credentialTag,
 			credential.Credential[:],
 			currentEpoch,
@@ -203,6 +220,7 @@ func processDRepActivityCertificates(
 // active before expiring. txIndex is the transaction's position in its block;
 // Conway RATIFY orders equal-priority actions by it within a slot.
 func ProcessProposals(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	txIndex uint32,
@@ -212,6 +230,7 @@ func ProcessProposals(
 	txn *database.Txn,
 ) error {
 	return persistGovernanceProposals(
+		ctx,
 		tx,
 		point,
 		txIndex,
@@ -231,6 +250,7 @@ func ProcessProposals(
 // dropped at its own slot, so no later boundary expires, refunds or ratifies
 // it again.
 func ProcessHistoricalProposals(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	txIndex uint32,
@@ -240,6 +260,7 @@ func ProcessHistoricalProposals(
 	txn *database.Txn,
 ) error {
 	return persistGovernanceProposals(
+		ctx,
 		tx,
 		point,
 		txIndex,
@@ -252,6 +273,7 @@ func ProcessHistoricalProposals(
 }
 
 func persistGovernanceProposals(
+	ctx context.Context,
 	tx proposalSource,
 	point ocommon.Point,
 	txIndex uint32,
@@ -349,6 +371,7 @@ func persistGovernanceProposals(
 
 		if settleNew {
 			_, err := db.GetGovernanceProposal(
+				ctx,
 				txHash,
 				uint32(i), //nolint:gosec
 				txn,
@@ -371,7 +394,7 @@ func persistGovernanceProposals(
 			}
 		}
 
-		if err := db.SetGovernanceProposal(govProposal, txn); err != nil {
+		if err := db.SetGovernanceProposal(ctx, govProposal, txn); err != nil {
 			return fmt.Errorf(
 				"set governance proposal %d in tx %s: %w",
 				i,
@@ -391,6 +414,7 @@ func persistGovernanceProposals(
 // When a DRep votes, their activity epoch is updated to the current epoch,
 // which resets their expiry countdown based on the dRepInactivityPeriod.
 func ProcessVotes(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
@@ -399,6 +423,7 @@ func ProcessVotes(
 	txn *database.Txn,
 ) error {
 	return processVotes(
+		ctx,
 		tx,
 		point,
 		currentEpoch,
@@ -414,6 +439,7 @@ func ProcessVotes(
 // epoch, keeps the expiry the snapshot recorded, and settles any proposal it
 // has to rebuild as ProcessHistoricalProposals does.
 func ProcessHistoricalVotes(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
@@ -421,6 +447,7 @@ func ProcessHistoricalVotes(
 	txn *database.Txn,
 ) error {
 	return processVotes(
+		ctx,
 		tx,
 		point,
 		currentEpoch,
@@ -432,6 +459,7 @@ func ProcessHistoricalVotes(
 }
 
 func processVotes(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
@@ -487,6 +515,7 @@ func processVotes(
 			credKey := string([]byte{drepCredTag}) + string(voter.Hash[:])
 			if !drepActivityUpdated[credKey] {
 				err := recordActivity(
+					ctx,
 					drepCredTag,
 					voter.Hash[:],
 					currentEpoch,
@@ -502,6 +531,7 @@ func processVotes(
 					// anchor_hash, active) is preserved and rollback semantics
 					// in RestoreDrepStateAtSlot remain intact.
 					if setErr := db.InsertDrepIfAbsent(
+						ctx,
 						drepCredTag,
 						voter.Hash[:],
 						point.Slot,
@@ -526,6 +556,7 @@ func processVotes(
 						)
 					}
 					err = recordActivity(
+						ctx,
 						drepCredTag,
 						voter.Hash[:],
 						currentEpoch,
@@ -558,6 +589,7 @@ func processVotes(
 			if !ok {
 				var err error
 				proposal, err = db.GetGovernanceProposal(
+					ctx,
 					actionId.TransactionId[:],
 					actionId.GovActionIdx,
 					txn,
@@ -572,6 +604,7 @@ func processVotes(
 					}
 					var repairErr error
 					proposal, repairErr = repairMissingGovernanceProposal(
+						ctx,
 						actionId.TransactionId[:],
 						actionId.GovActionIdx,
 						db,
@@ -622,7 +655,7 @@ func processVotes(
 				vote.AnchorHash = procedure.Anchor.DataHash[:]
 			}
 
-			if err := db.SetGovernanceVote(vote, txn); err != nil {
+			if err := db.SetGovernanceVote(ctx, vote, txn); err != nil {
 				return fmt.Errorf(
 					"set governance vote in tx %s: %w",
 					txHashForLog,
@@ -750,13 +783,14 @@ func (c *proposalRepairCache) govActionValidityPeriod(
 }
 
 func repairMissingGovernanceProposal(
+	ctx context.Context,
 	proposalTxHash []byte,
 	actionIndex uint32,
 	db *database.Database,
 	txn *database.Txn,
 	repairCache *proposalRepairCache,
 ) (*models.GovernanceProposal, error) {
-	txRecord, err := db.GetTransactionByHash(proposalTxHash, txn)
+	txRecord, err := db.GetTransactionByHash(ctx, proposalTxHash, txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"lookup governance proposal tx %s: %w",
@@ -810,6 +844,7 @@ func repairMissingGovernanceProposal(
 		return nil, err
 	}
 	if err := persistGovernanceProposals(
+		ctx,
 		txBody,
 		ocommon.Point{
 			Slot: txRecord.Slot,
@@ -828,7 +863,7 @@ func repairMissingGovernanceProposal(
 			err,
 		)
 	}
-	return db.GetGovernanceProposal(proposalTxHash, actionIndex, txn)
+	return db.GetGovernanceProposal(ctx, proposalTxHash, actionIndex, txn)
 }
 
 func epochContainsSlot(epoch models.Epoch, slot uint64) bool {
