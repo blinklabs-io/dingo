@@ -155,7 +155,7 @@ jobs:
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 https://github.com/actions/setup-node/releases/tag/v7.1.0
         with:
-          node-version: '22.x'
+          node-version: '22.18.0'
       - name: npm-test
         run: npm test
       - name: go-build-minimal
@@ -872,7 +872,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 https://github.com/actions/setup-node/releases/tag/v7.1.0
         with:
-          node-version: '24.x'
+          node-version: '24.21.0'
           registry-url: https://registry.npmjs.org
       - name: Install npm CLI for trusted publishing
         run: npm install --global npm@11.5.1
