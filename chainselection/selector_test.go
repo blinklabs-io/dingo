@@ -5580,14 +5580,12 @@ func TestLoneFarFrontierDoesNotAdmitUnlinkedPeer(t *testing.T) {
 
 	c := newLoneFarChain()
 	cs := c.newSelector(t)
-	stale := newTestConnectionId(1)
 	lone := newTestConnectionId(2)
 	first := c.first()
 	for i := range c.k + 1 {
 		c.deliver(cs, lone, first+i, c.prevHash(first+i))
 	}
 	require.NotNil(t, cs.GetPeerTip(lone))
-	cs.RemovePeer(stale)
 
 	last := c.tip(first + c.k)
 	unlinked := c.tip(last.BlockNumber + 1)
@@ -5609,6 +5607,41 @@ func TestLoneFarFrontierDoesNotAdmitUnlinkedPeer(t *testing.T) {
 		cs, other, advanced, []byte("another-unrelated-parent"), false,
 	))
 	assert.Nil(t, cs.GetPeerTip(other))
+}
+
+// When every delivered frontier is lone, the local tip stays the reference: an
+// unrelated peer is not admitted as though it were the selector's first peer.
+func TestLoneFarFrontierOnlyKeepsLocalReference(t *testing.T) {
+	t.Parallel()
+
+	c := newLoneFarChain()
+	cs := c.newSelector(t)
+	// newTestConnectionId builds fresh address pointers, so the lagging
+	// peer's map key is read back rather than rebuilt.
+	var lagging ouroboros.ConnectionId
+	cs.mutex.RLock()
+	require.Len(t, cs.peerTips, 1)
+	for conn := range cs.peerTips {
+		lagging = conn
+	}
+	cs.mutex.RUnlock()
+
+	lone := newTestConnectionId(2)
+	first := c.first()
+	for i := range c.k + 1 {
+		c.deliver(cs, lone, first+i, c.prevHash(first+i))
+	}
+	require.NotNil(t, cs.GetPeerTip(lone))
+	cs.RemovePeer(lagging)
+	require.Nil(t, cs.GetPeerTip(lagging))
+
+	unlinked := c.tip(first + c.k + 1)
+	other := newTestConnectionId(3)
+	assert.False(t, c.deliverHeader(
+		cs, other, unlinked, []byte("unrelated-parent"), false,
+	))
+	assert.Nil(t, cs.GetPeerTip(other))
+	assert.NotNil(t, cs.GetPeerTip(lone))
 }
 
 // TestLoneFarFrontierFabricatedNumbersStayRejected covers a lone peer that
