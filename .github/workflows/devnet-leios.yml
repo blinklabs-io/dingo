@@ -25,9 +25,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
+      # Hosted tool caches can lag patch releases; resolve the latest 1.26.x.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: 1.26.x
+          check-latest: true
           cache: false
       - name: Run Leios producer-to-peer scenario
         run: ./internal/test/devnet/run-tests.sh --leios
