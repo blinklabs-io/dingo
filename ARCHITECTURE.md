@@ -4317,8 +4317,8 @@ the whole live UTxO set (`GetUTxOWhole`), stake-delegation deposits, the
 ledger peer snapshot, stake pools, stake pool parameters
 (`GetStakePoolParams`, the parameters in effect this epoch, so a
 re-registration made during the epoch is not reported until the next one),
-including genesis registrations with relay addresses converted to ledger wire
-order and an optional BLS key when protocol version 12 or later applies.
+which returns genesis relay addresses in ledger wire order and includes an
+optional BLS key when protocol version 12 or later applies),
 the ledger tip (`GetLedgerTip`), the proposed protocol parameter update map
 (empty when the acquired point is in Conway or later, and refused in earlier
 eras), DRep state,
