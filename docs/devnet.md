@@ -34,7 +34,9 @@ Run the same command again to resume that chain. Reset it with:
 The first run requires an empty directory. Dingo places a marker there before
 creating its database, generated config, and test-key copies. `--reset` only
 recreates those Dingo-managed paths; other files in the directory are kept.
-Stop any running invocation using that directory before resetting it.
+Dingo rejects another invocation using the same directory, including attempts
+to reset it while its node is running. Copied state directories are rebound to
+their new database, config, and key paths when reused.
 These keys and this network are for local testing and must not be used with
 real funds.
 

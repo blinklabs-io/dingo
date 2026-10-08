@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,8 +35,19 @@ import (
 const (
 	devnetGenesisLeadTime = 30 * time.Second
 	devnetStateMarker     = ".dingo-devnet-state"
+	devnetStateLock       = ".dingo-devnet.lock"
 	devnetStateVersion    = "dingo-devnet-state-v1\n"
 )
+
+var errDevnetStateInUse = errors.New("devnet state is already in use")
+
+type devnetSignalCause struct {
+	signal os.Signal
+}
+
+func (cause devnetSignalCause) Error() string {
+	return "received " + cause.signal.String()
+}
 
 var devnetOptions struct {
 	dataDir string
@@ -95,6 +107,18 @@ func devnetRun(cmd *cobra.Command, _ []string) (retErr error) {
 			}
 		}()
 	}
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		return fmt.Errorf("creating devnet data directory: %w", err)
+	}
+	releaseStateLock, err := acquireDevnetStateLock(runDir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := releaseStateLock(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("releasing devnet state lock: %w", err))
+		}
+	}()
 	startTime := time.Now().UTC().Add(devnetGenesisLeadTime).Truncate(time.Second)
 	if err := prepareDevnetState(
 		runDir,
@@ -111,11 +135,18 @@ func devnetRun(cmd *cobra.Command, _ []string) (retErr error) {
 		return fmt.Errorf("locating dingo executable: %w", err)
 	}
 
-	signalCtx, stopSignals := signal.NotifyContext(
-		cmd.Context(),
-		devnetSignals()...,
-	)
-	defer stopSignals()
+	signalCtx, cancelSignal := context.WithCancelCause(cmd.Context())
+	defer cancelSignal(nil)
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, devnetSignals()...)
+	defer signal.Stop(signals)
+	go func() {
+		select {
+		case received := <-signals:
+			cancelSignal(devnetSignalCause{signal: received})
+		case <-signalCtx.Done():
+		}
+	}()
 
 	child := exec.CommandContext(
 		signalCtx,
@@ -127,7 +158,11 @@ func devnetRun(cmd *cobra.Command, _ []string) (retErr error) {
 		if child.Process == nil {
 			return nil
 		}
-		err := child.Process.Signal(os.Interrupt)
+		childSignal := os.Signal(os.Interrupt)
+		if cause, ok := context.Cause(signalCtx).(devnetSignalCause); ok {
+			childSignal = cause.signal
+		}
+		err := signalDevnetChild(child.Process, childSignal)
 		if errors.Is(err, os.ErrProcessDone) {
 			return nil
 		}
@@ -208,6 +243,12 @@ func prepareDevnetState(
 		if readErr != nil {
 			return fmt.Errorf("reading devnet data directory: %w", readErr)
 		}
+		for i := 0; i < len(entries); i++ {
+			if entries[i].Name() == devnetStateLock {
+				entries = append(entries[:i], entries[i+1:]...)
+				i--
+			}
+		}
 		if len(entries) != 0 {
 			return fmt.Errorf(
 				"refusing to initialize non-empty directory %q without a Dingo devnet marker",
@@ -233,14 +274,19 @@ func prepareDevnetState(
 				return fmt.Errorf("resetting devnet state at %q: %w", path, err)
 			}
 		}
-	} else if err := validateDevnetState(runDir); err != nil {
-		return fmt.Errorf(
-			"devnet state at %q is incomplete; use --reset to recreate it: %w",
-			runDir,
-			err,
-		)
 	} else {
-		return nil
+		if err := validateDevnetState(runDir); err != nil {
+			return fmt.Errorf(
+				"devnet state at %q is incomplete; use --reset to recreate it: %w",
+				runDir,
+				err,
+			)
+		}
+		return writeLocalDevnetConfig(
+			filepath.Join(runDir, "dingo.yaml"),
+			filepath.Join(runDir, "cardano"),
+			filepath.Join(runDir, "data"),
+		)
 	}
 	return initializeDevnetState(runDir, startTime)
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build unix
+//go:build !unix && !windows
 
 package main
 
@@ -20,26 +20,21 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"syscall"
+	"path/filepath"
 )
 
-func devnetSignals() []os.Signal {
-	return []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
-}
-
-func prepareDevnetChild(command *exec.Cmd) {
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-}
-
-func signalDevnetChild(process *os.Process, signal os.Signal) error {
-	childSignal, ok := signal.(syscall.Signal)
-	if !ok {
-		return fmt.Errorf("unsupported devnet child signal %q", signal)
+func acquireDevnetStateLock(runDir string) (func() error, error) {
+	path := filepath.Join(runDir, devnetStateLock)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil, fmt.Errorf("%w: %q", errDevnetStateInUse, runDir)
 	}
-	if err := syscall.Kill(-process.Pid, childSignal); errors.Is(err, syscall.ESRCH) {
-		return os.ErrProcessDone
-	} else {
-		return err
+	if err != nil {
+		return nil, fmt.Errorf("creating devnet state lock %q: %w", path, err)
 	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("closing devnet state lock %q: %w", path, err)
+	}
+	return func() error { return os.Remove(path) }, nil
 }

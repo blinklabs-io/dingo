@@ -26,3 +26,7 @@ func devnetSignals() []os.Signal {
 }
 
 func prepareDevnetChild(_ *exec.Cmd) {}
+
+func signalDevnetChild(process *os.Process, _ os.Signal) error {
+	return process.Kill()
+}

@@ -255,7 +255,9 @@ an isolated database and no configured peers. The command forwards shutdown
 signals and removes its temporary directory after the node stops; the npm
 wrapper passes `devnet` through to the same binary command. Supplying
 `--data-dir` keeps the generated configuration and database for the next run;
-`--reset` rebuilds those managed paths with fresh genesis start times.
+`--reset` rebuilds those managed paths with fresh genesis start times. The CLI
+holds an exclusive state-directory lock until the child exits and rewrites the
+path-bearing node configuration when reusing copied state.
 
 Dingo's architecture is built on several key principles:
 
