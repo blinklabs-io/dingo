@@ -53,6 +53,7 @@ func TestCommitteeRenewalTermStartBackfill(t *testing.T) {
 	noConfidenceB := bytes.Repeat([]byte{0xdd}, 28)
 	imported := bytes.Repeat([]byte{0xee}, 28)
 	unenacted := bytes.Repeat([]byte{0xf0}, 28)
+	parameterChange := bytes.Repeat([]byte{0xf1}, 28)
 	cbor := []byte{0x80}
 	proposals := []enactedProposalFixture{
 		{1000, updateCommitteeActionType, cbor},
@@ -64,6 +65,7 @@ func TestCommitteeRenewalTermStartBackfill(t *testing.T) {
 		{6000, updateCommitteeActionType, cbor},
 		// The Mithril import's synthetic committee root.
 		{8000, updateCommitteeActionType, nil},
+		{7500, int64(lcommon.GovActionTypeParameterChange), cbor},
 	}
 	fixtures := []committeeTermFixture{
 		// Two renewals each stamped a fresh term start; both inherit the
@@ -91,6 +93,9 @@ func TestCommitteeRenewalTermStartBackfill(t *testing.T) {
 		// Replacement in place with no enactment behind it is not a renewal.
 		{0, unenacted, 0, deletedAt(7000), 0, 0},
 		{0, unenacted, 7000, sql.NullInt64{}, 7000, 7000},
+		// Only a non-committee action was enacted at the replacement slot.
+		{0, parameterChange, 0, deletedAt(7500), 0, 0},
+		{0, parameterChange, 7500, sql.NullInt64{}, 7500, 7500},
 	}
 
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
