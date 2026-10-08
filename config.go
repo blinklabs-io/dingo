@@ -1739,6 +1739,8 @@ func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
 	}
 }
 
+// WithBarkBlockDownloadHosts configures allowed HTTPS origins for Bark block
+// downloads. Entries without a scheme use HTTPS; ports are matched exactly.
 func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkBlockDownloadHosts = slices.Clone(hosts)
@@ -2088,7 +2090,7 @@ func (c *Config) BarkBaseUrl() string {
 	return c.cfg.BarkBaseUrl
 }
 
-// BarkBlockDownloadHosts returns the list of allowed hosts for block downloads via Bark.
+// BarkBlockDownloadHosts returns the allowed Bark block-download origins.
 func (c *Config) BarkBlockDownloadHosts() []string {
 	return c.cfg.BarkBlockDownloadHosts
 }

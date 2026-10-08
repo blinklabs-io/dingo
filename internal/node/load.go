@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -420,9 +422,8 @@ const criticalIndexRebuildLogThreshold = time.Second
 // The pending marker records that a cycle was interrupted; it does not
 // record which indexes exist, and it is not durable across a Mithril sync:
 // mithril/sync.go rebuilds the critical subset and then calls
-// updateMithrilReadyState, whose db.ClearSyncState is an unqualified
-// DELETE FROM sync_state. Until that clear learned to carry
-// deferred.SyncStateKey across it (mithril/sync_import.go), every completed
+// updateMithrilReadyState, which now leaves deferred.SyncStateKey untouched
+// (mithril/sync_import.go). Before that preservation, every completed
 // Mithril sync erased the marker moments after BuildCritical set it, leaving
 // the database with the critical subset built, the lazy remainder dropped,
 // and nothing recording either — the state two Mithril-bootstrapped preview
@@ -646,6 +647,16 @@ func LoadWithDB(
 	immutableDir string,
 	db *database.Database,
 ) error {
+	remoteImmutable, err := classifyRemoteImmutableSource(immutableDir)
+	if err != nil {
+		return err
+	}
+	if remoteImmutable && cfg.DatabasePath == "" {
+		return errors.New(
+			"loading from a remote ImmutableDB requires databasePath " +
+				"for its download cache",
+		)
+	}
 	// Derive default config path from cfg.Network when cfg.CardanoConfig is empty
 	cardanoConfigPath := cfg.CardanoConfig
 	network := cfg.Network
@@ -854,9 +865,48 @@ func LoadWithDB(
 		replayErrCh <- err
 	}()
 
-	blocksCopied, immutableTipSlot, err := copyBlocksDirect(
-		replayCtx, logger, immutableDir, c, replayBatches,
+	var (
+		blocksCopied     int
+		immutableTipSlot uint64
 	)
+	if remoteImmutable {
+		var (
+			regularSlots  uint64
+			canContainEBB bool
+		)
+		if byronGenesis := nodeCfg.ByronGenesis(); byronGenesis != nil {
+			if byronGenesis.ProtocolConsts.K <= 0 ||
+				uint64(byronGenesis.ProtocolConsts.K) > math.MaxUint64/10 {
+				return errors.New(
+					"remote ImmutableDB requires a valid Byron security parameter",
+				)
+			}
+			regularSlots = uint64(byronGenesis.ProtocolConsts.K) * 10 //nolint:gosec
+			canContainEBB = true
+		} else if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil &&
+			shelleyGenesis.EpochLength > 0 {
+			regularSlots = uint64(shelleyGenesis.EpochLength) //nolint:gosec
+		} else {
+			return errors.New(
+				"remote ImmutableDB requires an initial era epoch length",
+			)
+		}
+		limits, limitErr := remoteImmutableLimitsForSlots(
+			regularSlots, canContainEBB,
+		)
+		if limitErr != nil {
+			return limitErr
+		}
+		blocksCopied, immutableTipSlot, err = copyBlocksRemote(
+			replayCtx, logger, immutableDir,
+			filepath.Join(cfg.DatabasePath, remoteImmutableCacheDir),
+			limits, c, replayBatches,
+		)
+	} else {
+		blocksCopied, immutableTipSlot, err = copyBlocksDirect(
+			replayCtx, logger, immutableDir, c, replayBatches,
+		)
+	}
 	close(replayBatches)
 	if err != nil {
 		cancelReplay()

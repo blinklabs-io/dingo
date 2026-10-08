@@ -318,18 +318,6 @@ func (s *Store) ListSyncStateKeysByPrefix(
 	return keys, nil
 }
 
-func (s *Store) ClearSyncState(txn types.Txn) error {
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return fmt.Errorf("clear sync state: %w", err)
-	}
-	queries := s.operationalQueries(db)
-	if err := queries.ClearSyncState(ctx); err != nil {
-		return fmt.Errorf("clear sync state: %w", err)
-	}
-	return nil
-}
-
 func (s *Store) GetEpoch(
 	epochID uint64,
 	txn types.Txn,

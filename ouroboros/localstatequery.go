@@ -144,6 +144,10 @@ type localstatequerySession struct {
 	acquiredAt time.Time
 	lastQuery  time.Time
 	expiry     *time.Timer
+	// releasePin drops the ledger pin that keeps pruning off a specific
+	// acquired point (ledger.LedgerState.PinAcquiredPoint); nil for a tip
+	// acquire. It is idempotent, and runs wherever the view is closed.
+	releasePin func()
 }
 
 type localstatequeryAcquisition struct {
@@ -242,8 +246,22 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		cancel()
 		return o.mapLocalStateQueryAcquireError(ctx, isSpecific, err)
 	}
+	// Pin before AcquireQueryView verifies the point: a pruning path that
+	// computes its floor after this sees the pin and keeps the point's
+	// state, and one that announced its floor first makes the verify refuse
+	// the point.
+	var releasePin func()
+	if isSpecific {
+		releasePin = o.ledgerState.PinAcquiredPoint(point.Slot)
+	}
+	if o.localstatequeryVerifyHook != nil {
+		o.localstatequeryVerifyHook()
+	}
 	view, err := o.ledgerState.AcquireQueryView(acquireCtx, point)
 	if err != nil {
+		if releasePin != nil {
+			releasePin()
+		}
 		o.localstatequeryAcquireMutex.Lock()
 		if o.localstatequeryAcquisitions[ctx.ConnectionId] == acquisition {
 			delete(o.localstatequeryAcquisitions, ctx.ConnectionId)
@@ -252,16 +270,20 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		cancel()
 		return o.mapLocalStateQueryAcquireError(ctx, isSpecific, err)
 	}
+	if o.localstatequeryVerifiedHook != nil {
+		o.localstatequeryVerifiedHook()
+	}
 	now := time.Now()
 	session := &localstatequerySession{
 		view:       view,
 		acquiredAt: now,
 		lastQuery:  now,
+		releasePin: releasePin,
 	}
 	o.localstatequeryAcquireMutex.Lock()
 	if o.localstatequeryAcquisitions[ctx.ConnectionId] != acquisition {
 		o.localstatequeryAcquireMutex.Unlock()
-		view.Close()
+		session.close()
 		cancel()
 		return errLocalStateQueryConnectionClosed
 	}
@@ -448,6 +470,9 @@ func (s *localstatequerySession) close() {
 		s.expiry.Stop()
 	}
 	s.view.Close()
+	if s.releasePin != nil {
+		s.releasePin()
+	}
 }
 
 // expireLocalStateQuerySession closes a session that outlived the maximum
@@ -466,6 +491,9 @@ func (o *Ouroboros) expireLocalStateQuerySession(
 		return
 	}
 	session.view.Close()
+	if session.releasePin != nil {
+		session.releasePin()
+	}
 	now := time.Now()
 	o.config.Logger.Warn(
 		"local-state-query ledger snapshot expired",

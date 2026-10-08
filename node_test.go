@@ -440,7 +440,7 @@ func TestNodeEventSubscriptionPoliciesAreExplicit(t *testing.T) {
 			},
 			"subscribeChainSelectorEvents": {
 				required:   8,
-				detachable: 1,
+				detachable: 2,
 			},
 		},
 		"node_lifecycle.go": {
@@ -2491,6 +2491,14 @@ func requireGoroutineGone(t *testing.T, marker string) {
 // devnet credential fixtures.
 func newStartupCleanupProducerNode(t *testing.T) *Node {
 	t.Helper()
+	return newStartupCleanupProducerNodeWithGenesisStart(t, nil)
+}
+
+func newStartupCleanupProducerNodeWithGenesisStart(
+	t *testing.T,
+	start *time.Time,
+) *Node {
+	t.Helper()
 	vrf, kes, opcert := devnetCredPaths(t)
 	// The full devnet config, for the Byron genesis and the genesis hashes
 	// LedgerState.Start needs to build the genesis block. Its own Shelley
@@ -2506,6 +2514,10 @@ func newStartupCleanupProducerNode(t *testing.T) *Node {
 	// and the initial funds and protocol params the genesis block needs stay
 	// exactly as shipped.
 	cardanoCfg.ShelleyGenesis().SystemStart = time.Now().Add(-time.Hour)
+	if start != nil {
+		cardanoCfg.ShelleyGenesis().SystemStart = *start
+		cardanoCfg.ByronGenesis().StartTime = int(start.Unix())
+	}
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
@@ -4021,7 +4033,7 @@ func TestNodeEventSubscriptionClassifications(t *testing.T) {
 		expectedRequired[group.function] = group.count
 	}
 	expectedDetachable := map[string]int{
-		"subscribeChainSelectorEvents":  1,
+		"subscribeChainSelectorEvents":  2,
 		"subscribeEquivocationDetector": 1,
 	}
 	expectedPolicies := map[string]string{
@@ -4611,4 +4623,17 @@ VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
 	err = n.backfillRewardLiveStake(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "older accounting")
+}
+
+func TestNewOuroborosConfigAppliesTxSubmissionRateLimit(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: NewConfig()}
+	cfg := n.newOuroborosConfig(false, 0, 0)
+
+	assert.Positive(
+		t,
+		cfg.MaxTxSubmissionsPerSecond,
+		"production ouroboros config must enable the TxSubmission limiter",
+	)
 }

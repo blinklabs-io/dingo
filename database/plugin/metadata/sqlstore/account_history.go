@@ -234,6 +234,52 @@ func (s *Store) GetAccountRegistrationHistoryByCredential(
 		return nil, fmt.Errorf("query account registration history: %w", err)
 	}
 	defer rows.Close()
+	return scanAccountRegistrationHistoryRows(rows, ret)
+}
+
+func (s *Store) GetLatestAccountRegistrationAtOrBefore(
+	credentialTag uint8,
+	stakingKey []byte,
+	slot uint64,
+	txn types.Txn,
+) (*models.AccountRegistrationHistoryRow, error) {
+	if len(stakingKey) == 0 {
+		return nil, nil
+	}
+	sqlSlot, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve read DB for account registration history: %w",
+			err,
+		)
+	}
+	query, args := accountRegistrationHistoryQuery(credentialTag, stakingKey)
+	query = "SELECT added_slot, block_index, cert_index, tx_hash, action, " +
+		"deposit, tx_slot, block_hash FROM (" + query +
+		") registration_history WHERE added_slot <= ? " +
+		"ORDER BY added_slot DESC, block_index DESC, cert_index DESC, " +
+		"tx_hash DESC, action DESC LIMIT 1"
+	args = append(args, sqlSlot)
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query account registration history: %w", err)
+	}
+	defer rows.Close()
+	found, err := scanAccountRegistrationHistoryRows(rows, nil)
+	if err != nil || len(found) == 0 {
+		return nil, err
+	}
+	return &found[0], nil
+}
+
+func scanAccountRegistrationHistoryRows(
+	rows *sql.Rows,
+	ret []models.AccountRegistrationHistoryRow,
+) ([]models.AccountRegistrationHistoryRow, error) {
 	for rows.Next() {
 		var row models.AccountRegistrationHistoryRow
 		var deposit sql.NullString
@@ -249,6 +295,7 @@ func (s *Store) GetAccountRegistrationHistoryByCredential(
 		); err != nil {
 			return nil, err
 		}
+		var err error
 		row.Deposit, err = parseNullableUint64(
 			"account registration deposit",
 			deposit,

@@ -334,6 +334,50 @@ func (lv *LedgerView) MIRDelegState(
 // of a silent runtime no-op for every MIR DELEG predicate that reads it.
 var _ eras.MIRDelegStateProvider = (*LedgerView)(nil)
 
+// PendingInstantaneousRewards returns the instantaneous rewards pending for
+// cred in the pot named by source (0 reserves, 1 treasury): the sum of the
+// distributions committed earlier in the current epoch, or nil when there are
+// none. The gouroboros DELEG rule reads it only from protocol version 5, where
+// repeated distributions add, so the fold is always additive.
+//
+// The range is open-ended because a transaction's certificates are stored
+// only after it validates and a rollback deletes them, so everything stored
+// in the epoch precedes the transaction being validated.
+func (lv *LedgerView) PendingInstantaneousRewards(
+	source uint,
+	cred lcommon.Credential,
+) (*big.Int, error) {
+	effects, err := lv.ls.db.GetMIRCertsInSlotRange(
+		context.Background(), lv.epochStartSlot, math.MaxInt64, lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get MIR certs in slot range: %w", err)
+	}
+	var total *big.Int
+	for _, effect := range effects {
+		if effect.Pot != source || effect.OtherPot > 0 {
+			continue
+		}
+		for _, reward := range effect.Rewards {
+			if reward.Amount == nil ||
+				uint(reward.CredentialTag) != cred.CredType ||
+				!bytes.Equal(reward.Credential, cred.Credential[:]) {
+				continue
+			}
+			if total == nil {
+				total = new(big.Int)
+			}
+			total.Add(total, reward.Amount)
+		}
+	}
+	return total, nil
+}
+
+// The gouroboros DELEG rule discovers this capability with a runtime type
+// assertion and, without it, rejects a negative delta an earlier transaction
+// covers, so signature drift must fail to build.
+var _ lcommon.PendingInstantaneousRewardsState = (*LedgerView)(nil)
+
 // The genesis key delegation predicates discover this capability with a
 // runtime type assertion and skip when it misses, so signature drift would
 // silently disable them rather than fail to build.

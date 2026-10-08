@@ -53,7 +53,7 @@ func RegisterSQLiteTools(
 	maxRows int,
 ) {
 	if queryTimeout <= 0 {
-		queryTimeout = 5 * time.Second
+		queryTimeout = defaultQueryTimeout
 	}
 	if maxRows <= 0 {
 		maxRows = 100

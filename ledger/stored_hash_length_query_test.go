@@ -180,6 +180,7 @@ func TestFilteredDelegationsRejectsMalformedStoredPool(t *testing.T) {
 			Tag:   0,
 			Bytes: lcommon.NewBlake2b224(cred),
 		}},
+		QueryPoint{},
 		nil,
 	)
 	require.ErrorContains(t, err, "delegation pool id")

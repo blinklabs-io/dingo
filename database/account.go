@@ -312,6 +312,26 @@ func (d *Database) GetAccountsByCredential(
 	)
 }
 
+// GetAccountsByCredentialAtSlot returns the given staking credentials'
+// accounts as they stood at slot, keyed by StakeCredentialRef.MapKey(). Only
+// accounts registered at slot are returned.
+func (d *Database) GetAccountsByCredentialAtSlot(
+	ctx context.Context,
+	refs []models.StakeCredentialRef,
+	slot uint64,
+	txn *Txn,
+) (map[string]*models.Account, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	return d.metadata.GetAccountsByCredentialAtSlot(
+		refs,
+		slot,
+		txn.Metadata(),
+	)
+}
+
 // AddAccountRewardByCredential credits the reward balance for a registered
 // account identified by stake credential tag and key. sourceHash uniquely
 // identifies the credit event (refunded proposal identity hash, reaped pool
@@ -425,6 +445,33 @@ func (d *Database) DeleteAccountRewardsAfterSlot(
 		); err != nil {
 			return fmt.Errorf(
 				"failed to delete account reward deltas after slot %d: %w",
+				slot,
+				err,
+			)
+		}
+		return nil
+	})
+}
+
+// DeleteAccountRewardJournalForCredentialsAfterSlot deletes reward journal
+// entries recorded after the given slot for exactly the given credentials,
+// without reversing any balance. Used by ledger-state import; see
+// metadata.MetadataStore.DeleteAccountRewardJournalForCredentialsAfterSlot.
+func (d *Database) DeleteAccountRewardJournalForCredentialsAfterSlot(
+	ctx context.Context,
+	slot uint64,
+	refs []models.StakeCredentialRef,
+	txn *Txn,
+) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		if err := d.metadata.DeleteAccountRewardJournalForCredentialsAfterSlot(
+			slot,
+			refs,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete account reward journal for %d credentials after slot %d: %w",
+				len(refs),
 				slot,
 				err,
 			)

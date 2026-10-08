@@ -120,7 +120,7 @@ func TestPendingRewardRoundReadsMatchCreditedBalances(t *testing.T) {
 		}
 		return nil
 	}))
-	result, err := f.ls.queryShelleyFilteredDelegationAndRewardAccounts(context.Background(), creds, nil)
+	result, err := f.ls.queryShelleyFilteredDelegationAndRewardAccounts(context.Background(), creds, QueryPoint{}, nil)
 	require.NoError(t, err)
 	_, rewardsDuring := unwrapFilteredDelegationResult(t, result)
 	powerDuring := dumpDRepVotingPower(t, f)
@@ -130,7 +130,7 @@ func TestPendingRewardRoundReadsMatchCreditedBalances(t *testing.T) {
 	for key, credit := range credits {
 		require.Equal(t, stored[key]+credit, credited[key])
 	}
-	result, err = f.ls.queryShelleyFilteredDelegationAndRewardAccounts(context.Background(), creds, nil)
+	result, err = f.ls.queryShelleyFilteredDelegationAndRewardAccounts(context.Background(), creds, QueryPoint{}, nil)
 	require.NoError(t, err)
 	_, rewardsAfter := unwrapFilteredDelegationResult(t, result)
 	require.Equal(t, rewardsAfter, rewardsDuring)
@@ -530,5 +530,46 @@ func TestPendingRewardRoundAggregateReadsCountEachCreditOnce(t *testing.T) {
 			"%s: UTxO-only pool stake", name)
 		require.Equal(t, after.controlled, got.controlled,
 			"%s: controlled amount", name)
+	}
+}
+
+// TestPendingRewardRoundPinnedQuery pins the pending round at an acquired
+// point: GetFilteredDelegationsAndRewardAccounts counts its credits from the
+// boundary that applied it, exactly once, and not before.
+func TestPendingRewardRoundPinnedQuery(t *testing.T) {
+	t.Parallel()
+	f := creditedRewardRound(t)
+	credits := rewardedCredentials(t, f)
+	stored := accountRewards(t, f, credits)
+	rounds, err := f.db.Metadata().GetPendingRewardCreditRounds(nil)
+	require.NoError(t, err)
+	require.Len(t, rounds, 1)
+	boundary := rounds[0].BoundarySlot
+	require.Positive(t, boundary)
+
+	creds := make([]olocalstatequery.StakeCredential, 0, len(credits))
+	for key := range credits {
+		var hash lcommon.Blake2b224
+		copy(hash[:], key)
+		creds = append(creds, olocalstatequery.StakeCredential{
+			Tag: 0, Bytes: hash,
+		})
+	}
+	rewardsAt := func(at QueryPoint) map[olocalstatequery.StakeCredential]uint64 {
+		t.Helper()
+		result, err := f.ls.queryShelleyFilteredDelegationAndRewardAccounts(
+			context.Background(), creds, at, nil,
+		)
+		require.NoError(t, err)
+		_, rewards := unwrapFilteredDelegationResult(t, result)
+		return rewards
+	}
+	live := rewardsAt(QueryPoint{})
+	require.Equal(t, live, rewardsAt(QueryPoint{Slot: boundary}))
+	before := rewardsAt(QueryPoint{Slot: boundary - 1})
+	for _, cred := range creds {
+		key := string(cred.Bytes[:])
+		require.Equal(t, stored[key]+credits[key], live[cred])
+		require.Equal(t, stored[key], before[cred])
 	}
 }

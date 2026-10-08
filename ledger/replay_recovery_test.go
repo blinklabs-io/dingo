@@ -3152,6 +3152,17 @@ func TestReplayRecoveryRejectsDeterministicByronUnknownAttributes(
 	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
+func TestIsDeterministicTxValidationErrorClassifiesByronInputIndex(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	assert.True(t, isDeterministicTxValidationError(fmt.Errorf(
+		"byron UTxO rule: %w",
+		eras.InputIndexByronError{Index: 1 << 16},
+	)))
+}
+
 func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {
 	t.Parallel()
 

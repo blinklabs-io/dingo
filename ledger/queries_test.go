@@ -2284,7 +2284,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_EmptyCreds(
 	t.Parallel()
 
 	ls := &LedgerState{}
-	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(context.Background(), nil, nil)
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(context.Background(), nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	dels, rwds := unwrapFilteredDelegationResult(t, result)
 	assert.Empty(t, dels, "delegations map should be empty for empty input")
@@ -2306,6 +2306,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_UnknownCred(
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
 		context.Background(),
 		[]olocalstatequery.StakeCredential{cred},
+		QueryPoint{},
 		nil,
 	)
 	require.NoError(t, err)
@@ -2336,6 +2337,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredUndelegated(
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
 		context.Background(),
 		[]olocalstatequery.StakeCredential{cred},
+		QueryPoint{},
 		nil,
 	)
 	require.NoError(t, err)
@@ -2378,6 +2380,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal(
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
 		context.Background(),
 		[]olocalstatequery.StakeCredential{cred},
+		QueryPoint{},
 		nil,
 	)
 	require.NoError(t, err)
@@ -2412,6 +2415,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredDelegated(
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
 		context.Background(),
 		[]olocalstatequery.StakeCredential{cred},
+		QueryPoint{},
 		nil,
 	)
 	require.NoError(t, err)
@@ -2454,7 +2458,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_Mixed(t *testing.T) {
 		{Tag: 0, Bytes: toBlake2b224(undelegatedKey)},
 		{Tag: 0, Bytes: toBlake2b224(unknownKey)},
 	}
-	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(context.Background(), creds, nil)
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(context.Background(), creds, QueryPoint{}, nil)
 	require.NoError(t, err)
 	dels, rwds := unwrapFilteredDelegationResult(t, result)
 
@@ -2515,6 +2519,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_TagAware(
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
 		context.Background(),
 		[]olocalstatequery.StakeCredential{keyCred, scriptCred},
+		QueryPoint{},
 		nil,
 	)
 	require.NoError(t, err)
@@ -2577,6 +2582,7 @@ func TestQueryShelleyStakeDelegDeposits(t *testing.T) {
 	result, err := ls.queryShelleyStakeDelegDeposits(
 		context.Background(),
 		[]olocalstatequery.StakeCredential{queryCred, unknownCred},
+		QueryPoint{},
 		nil,
 	)
 	require.NoError(t, err)
@@ -2618,6 +2624,7 @@ func TestQueryShelleyFilteredVoteDelegatees(t *testing.T) {
 	result, err := ls.queryShelleyFilteredVoteDelegatees(
 		context.Background(),
 		[]lcommon.Credential{cred},
+		QueryPoint{},
 		nil,
 	)
 	require.NoError(t, err)

@@ -105,6 +105,7 @@ func TestDeferredStakeInputRecoveryPreservesRowsWhenReconstructionIsEmpty(
 	err := txn.Do(func(txn *database.Txn) error {
 		return ls.ensureRewardStakeInputsReady(txn, rewardSnapshotEpoch)
 	})
+	require.ErrorIs(t, err, errRewardStakeInputsUnrecoverable)
 	require.ErrorContains(t, err, "returned no rows")
 
 	inputs, err := meta.GetRewardStakeInputs(rewardSnapshotEpoch, nil)
@@ -114,6 +115,40 @@ func TestDeferredStakeInputRecoveryPreservesRowsWhenReconstructionIsEmpty(
 	pending, err := loadRewardStakeInputsPending(meta, nil)
 	require.NoError(t, err)
 	require.Len(t, pending.Entries, 1, "the snapshot must remain marked incomplete")
+}
+
+func TestApplyStakeRewardsHaltsWhenPendingInputsCannotBeReconstructed(
+	t *testing.T,
+) {
+	t.Parallel()
+	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 1, 1, 7)
+	meta := db.Metadata()
+	const rewardSnapshotEpoch = uint64(1)
+	require.NoError(t, meta.DeleteRewardInputsForEpoch(rewardSnapshotEpoch, nil))
+	require.NoError(t, markRewardStakeInputsPending(
+		meta, nil, rewardSnapshotEpoch, 100,
+	))
+
+	var fatalErr error
+	ls.config.FatalErrorFunc = func(err error) {
+		fatalErr = err
+	}
+	txn := db.Transaction(context.Background(), true)
+	err := txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(
+			context.Background(),
+			txn, survivalNewEpoch, survivalBoundarySlot,
+		)
+	})
+	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+	require.ErrorIs(t, err, errHaltLedgerPipeline)
+	require.ErrorIs(t, fatalErr, errRequiredStakeRewardBasisUnavailable)
+	require.ErrorIs(t, fatalErr, errHaltLedgerPipeline)
+
+	pending, err := loadRewardStakeInputsPending(meta, nil)
+	require.NoError(t, err)
+	require.Len(t, pending.Entries, 1,
+		"the unrecoverable snapshot must remain marked incomplete")
 }
 
 // seedMultiPoolRewardInputs writes seedMultiPoolRewardPrecomputeFixture's

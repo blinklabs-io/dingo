@@ -115,6 +115,17 @@ func snapshotAt(
 	)
 }
 
+type barrierWaitContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (c *barrierWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}
+
 // requireBarrierReleased fails unless a read-write transaction can start,
 // which it cannot while a Snapshot still holds the commit barrier.
 func requireBarrierReleased(t *testing.T, db *database.Database) {
@@ -380,9 +391,34 @@ func TestSnapshotRecordsCommitPauseAndBytesMetrics(t *testing.T) {
 func TestSnapshotCommitPauseMetricExcludesBarrierWait(t *testing.T) {
 	t.Parallel()
 
+	const (
+		barrierWait = 10 * time.Minute
+		backupHold  = 10 * time.Second
+		waitTimeout = 5 * time.Second
+	)
+	type fakeClock struct {
+		sync.Mutex
+		now time.Time
+	}
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	now := func() time.Time {
+		clock.Lock()
+		defer clock.Unlock()
+		return clock.now
+	}
+	advance := func(d time.Duration) {
+		clock.Lock()
+		defer clock.Unlock()
+		clock.now = clock.now.Add(d)
+	}
+
 	reg := prometheus.NewRegistry()
+	backupStarted := make(chan struct{})
+	finishBackup := make(chan struct{})
 	hooks := &backupHooks{
 		blob: func(_ context.Context, w io.Writer) error {
+			close(backupStarted)
+			<-finishBackup
 			_, err := w.Write([]byte("blob"))
 			return err
 		},
@@ -396,20 +432,41 @@ func TestSnapshotCommitPauseMetricExcludesBarrierWait(t *testing.T) {
 	require.NoError(t, err)
 	var resumeOnce sync.Once
 	resumeBarrier := func() { resumeOnce.Do(resume) }
-	started := time.Now()
-	timer := time.AfterFunc(300*time.Millisecond, resumeBarrier)
-	defer func() {
-		timer.Stop()
-		resumeBarrier()
+	defer resumeBarrier()
+	barrierWaiting := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		_, snapshotErr := snapshotAt(
+			t.Context(), db, dir,
+			lifecycle.WithMaxCommitPause(time.Minute),
+			lifecycle.WithSnapshotPauseClockForTest(now, func(
+				ctx context.Context,
+			) context.Context {
+				return &barrierWaitContext{
+					Context: ctx,
+					waiting: barrierWaiting,
+				}
+			}),
+		)
+		result <- snapshotErr
 	}()
 
-	_, err = snapshotAt(
-		t.Context(), db, dir,
-		lifecycle.WithMaxCommitPause(150*time.Millisecond),
+	testutil.RequireReceive(
+		t, barrierWaiting, waitTimeout,
+		"snapshot must wait on the held commit barrier",
 	)
-	elapsed := time.Since(started)
+	advance(barrierWait)
+	resumeBarrier()
+	testutil.RequireReceive(
+		t, backupStarted, waitTimeout,
+		"snapshot backup must start after the barrier is acquired",
+	)
+	advance(backupHold)
+	close(finishBackup)
+	err = testutil.RequireReceive(
+		t, result, waitTimeout, "snapshot completion",
+	)
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, elapsed, 250*time.Millisecond)
 
 	pause := gatherFamily(t, reg, "dingo_snapshot_commit_pause_seconds")
 	require.NotNil(t, pause)
@@ -422,8 +479,7 @@ func TestSnapshotCommitPauseMetricExcludesBarrierWait(t *testing.T) {
 	}
 	require.NotNil(t, success)
 	require.Equal(t, uint64(1), success.GetSampleCount())
-	require.Positive(t, success.GetSampleSum())
-	require.Less(t, success.GetSampleSum(), elapsed.Seconds())
+	require.Equal(t, backupHold.Seconds(), success.GetSampleSum())
 }
 
 func TestSnapshotRecordsPauseResultOnFailure(t *testing.T) {
@@ -495,6 +551,7 @@ func TestSnapshotRejectsSuccessfulBackupAfterPauseDeadline(t *testing.T) {
 func TestSnapshotBoundsBlockedStateRead(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
+	started := make(chan struct{})
 	finished := make(chan struct{})
 	hooks := &backupHooks{}
 	db := newHookedDB(t, nil, hooks)
@@ -503,23 +560,40 @@ func TestSnapshotBoundsBlockedStateRead(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	hooks.read = func() error {
+		close(started)
+		defer close(finished)
 		select {
 		case <-release:
-			close(finished)
 			return nil
 		case <-ctx.Done():
-			close(finished)
 			return ctx.Err()
 		}
 	}
 	dir := filepath.Join(t.TempDir(), "snapshot")
-	_, err := snapshotAt(ctx, db, dir, lifecycle.WithMaxCommitPause(30*time.Millisecond))
-	close(release)
+	result := make(chan error, 1)
+	go func() {
+		_, err := snapshotAt(
+			ctx, db, dir,
+			lifecycle.WithMaxCommitPause(30*time.Millisecond),
+		)
+		result <- err
+	}()
 	select {
-	case <-finished:
-	case <-ctx.Done():
-		t.Fatal("snapshot state reader did not exit")
+	case <-started:
+	case err := <-result:
+		t.Fatalf("snapshot returned before the state reader started: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("snapshot state reader did not start")
 	}
+	err := testutil.RequireReceive(
+		t, result, 5*time.Second,
+		"snapshot must bound the blocked state read",
+	)
+	close(release)
+	testutil.RequireReceive(
+		t, finished, 5*time.Second,
+		"snapshot state reader must exit after release",
+	)
 	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
 	require.NoDirExists(t, dir)
 	requireBarrierReleased(t, db)

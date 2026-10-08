@@ -433,7 +433,7 @@ func TestImportSnapShotsPrefersSnapshotPoolParamsOverRegistrations(
 	noProgress := func(ImportProgress) {}
 	slot := state.Tip.Slot
 
-	_, err = importCertState(ctx, cfg, slot, noProgress)
+	_, _, err = importCertState(ctx, cfg, slot, noProgress)
 	require.NoError(t, err)
 
 	// The pool has to be one the snapshots actually delegate to, or the

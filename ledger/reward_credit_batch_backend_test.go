@@ -427,6 +427,7 @@ func TestAddAccountRewardsByCredentialMatchesOneAtATime(t *testing.T) {
 								0, rewardBatchKey(0x31, i),
 							),
 						},
+						1_000,
 					),
 					)
 				}
@@ -761,7 +762,7 @@ func TestBoundaryRewardApplicationMatchesEagerPathAcrossBackends(t *testing.T) {
 				0, chunkedFixtureCredential(0x60, index),
 			)
 			require.NoError(t, db.Metadata().DeactivateAccounts(
-				nil, []models.StakeCredentialRef{ref},
+				nil, []models.StakeCredentialRef{ref}, 300+uint64(index),
 			))
 			_, err := raw.Exec(backendRebind(backend.name, `
 INSERT INTO deregistration (added_slot, staking_key, credential_tag, amount)

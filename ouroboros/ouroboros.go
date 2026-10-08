@@ -181,9 +181,15 @@ type Ouroboros struct {
 	// localstatequeryRequests holds the reads in flight on each connection,
 	// so closing the connection cancels them. Guarded by
 	// localstatequeryAcquireMutex.
-	localstatequeryRequests     map[ouroboros.ConnectionId][]*localstatequeryRequest
+	localstatequeryRequests map[ouroboros.ConnectionId][]*localstatequeryRequest
+	// localstatequeryVerifyHook and localstatequeryVerifiedHook, when set,
+	// run just before Acquire verifies its point and just after the
+	// verified view opens. Tests use them to act at those exact moments.
+	localstatequeryVerifyHook   func()
+	localstatequeryVerifiedHook func()
 	localstatequeryAcquireMutex sync.Mutex
 	blockfetchNoBlocksCounts    map[ouroboros.ConnectionId]blockfetchNoBlocksState
+	blockfetchRangeAdmission    *blockfetchRangeAdmission
 	// blockfetchRangeBytes returns the expected wire size of a block range
 	// for RangeRequest.ExpectedBytes, or 0 for no estimate. Defaults to the
 	// ledger's queued-header estimate; tests override it.
@@ -380,6 +386,13 @@ type OuroborosConfig struct {
 	// already controls the request pace. A negative value also disables
 	// rate limiting.
 	MaxTxSubmissionsPerSecond int
+	// BlockfetchMaxRangesPerConn and BlockfetchMaxRangesGlobal bound the
+	// BlockFetch ranges the server streams at once, per connection and
+	// across all connections. A request beyond either bound is answered
+	// with NoBlocks before any iterator is created. Values <= 0 select the
+	// defaults.
+	BlockfetchMaxRangesPerConn int
+	BlockfetchMaxRangesGlobal  int
 	// ChainsyncIngressEligible reports whether a peer is allowed to
 	// feed chainsync events into the ledger pipeline. This lets us
 	// keep inbound/public noise out of ledger ingress while still
@@ -505,6 +518,10 @@ type blockfetchMetrics struct {
 	// per-block chart sees every block; blockDelay above keeps only the most
 	// recent one, which a scrape interval longer than the block gap misses.
 	recentDelays *recentBlockDelays
+	// Ring of the distinct blocks observed competing for each of the same
+	// heights tracked by recentDelays, so a dashboard can tell a fork-battle
+	// delay from a genuinely slow fetch. See RecordForkBattleParticipants.
+	recentForks *recentForkBattles
 	// Wall-clock time spent decoding one fetched block's raw CBOR bytes
 	// into a gledger.Block, by stage ("decode"). Only observed on a
 	// decode-cache miss, since a hit reuses another connection's already
@@ -634,6 +651,10 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosAnnouncementSlots:     make(map[string]map[uint64]struct{}),
 		leiosAnnouncementElections: make(map[string]map[string]struct{}),
 	}
+	o.blockfetchRangeAdmission = newBlockfetchRangeAdmission(
+		cfg.BlockfetchMaxRangesPerConn,
+		cfg.BlockfetchMaxRangesGlobal,
+	)
 	o.blockfetchConnClient = o.blockfetchConnClientLive
 	o.blockfetchRangeBytes = func(ocommon.Point, ocommon.Point) uint64 { return 0 }
 	if o.ledgerState != nil {
@@ -681,6 +702,8 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 	)
 	o.blockfetchMetrics.recentDelays = newRecentBlockDelays()
 	o.registerer.MustRegister(o.blockfetchMetrics.recentDelays)
+	o.blockfetchMetrics.recentForks = newRecentForkBattles()
+	o.registerer.MustRegister(o.blockfetchMetrics.recentForks)
 	o.blockfetchMetrics.lateBlocks = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_blockfetchclient_lateblocks",

@@ -1471,6 +1471,17 @@ type CertificateStore interface {
 		types.Txn,
 	) ([]models.AccountRegistrationHistoryRow, error)
 
+	// GetLatestAccountRegistrationAtOrBefore returns the newest registration
+	// history row for a stake credential whose AddedSlot is at or before
+	// slot, ordered as GetAccountRegistrationHistoryByCredential orders them,
+	// or nil when there is none. It does not consult the import baseline.
+	GetLatestAccountRegistrationAtOrBefore(
+		credentialTag uint8,
+		stakingKey []byte,
+		slot uint64,
+		txn types.Txn,
+	) (*models.AccountRegistrationHistoryRow, error)
+
 	// CountAccountRegistrationHistoryByCredential retrieves the total count of
 	// registration history rows for a stake credential tag/hash pair.
 	CountAccountRegistrationHistoryByCredential(
@@ -2176,6 +2187,20 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]*models.Account, error)
 
+	// GetAccountsByCredentialAtSlot is GetAccountsByCredential with
+	// includeInactive false, answered as the accounts stood at slot: the
+	// accounts registered then, with the pool, DRep and reward balance they
+	// held. Pool and DRep come from the live row when it was last written at
+	// or before slot, otherwise from the derivation RestoreAccountStateAtSlot
+	// applies on rollback. Reward is the balance reconstructed from the
+	// account_reward_delta journal, including credits of a pending reward
+	// round applied at or before slot.
+	GetAccountsByCredentialAtSlot(
+		[]models.StakeCredentialRef, // stakeCredentials
+		uint64, // slot
+		types.Txn,
+	) (map[string]*models.Account, error)
+
 	// GetAccountsActiveAtSlot returns the subset of stake credentials that
 	// were registered and not subsequently deregistered at or before the given
 	// slot. The returned map is keyed by StakeCredentialRef.MapKey().
@@ -2251,6 +2276,18 @@ type MetadataStore interface {
 	// after the given slot and deletes their journal entries.
 	DeleteAccountRewardsAfterSlot(uint64, types.Txn) error
 
+	// DeleteAccountRewardJournalForCredentialsAfterSlot deletes reward
+	// journal entries recorded after the given slot for exactly the given
+	// credentials, without reversing any balance. Used by ledger-state
+	// import for credentials an authoritative snapshot re-import has just
+	// overwritten; see the sqlstore implementation for why reversal is
+	// unsafe there.
+	DeleteAccountRewardJournalForCredentialsAfterSlot(
+		uint64, // slot
+		[]models.StakeCredentialRef, // refs
+		types.Txn,
+	) error
+
 	// GetBlockNonce retrieves a block nonce for a given point.
 	GetBlockNonce(
 		ocommon.Point,
@@ -2308,10 +2345,10 @@ type MetadataStore interface {
 	// runs certificates but not POOLREAP or the PV10 HARDFORK rule.
 	RestoreImportedAccountStates(uint64, types.Txn) (int, error)
 
-	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
-	// by Mithril v2 catch-up reconciliation; rows are never deleted, only
-	// tombstoned via the active flag. Credentials that match no row are ignored.
-	DeactivateAccounts(types.Txn, []models.StakeCredentialRef) error
+	// DeactivateAccounts records the imported snapshot's inactive state for the
+	// given accounts at the supplied slot. Used by Mithril v2 catch-up
+	// reconciliation; credentials that match no row are ignored.
+	DeactivateAccounts(types.Txn, []models.StakeCredentialRef, uint64) error
 
 	// DeactivateDreps marks the given DReps inactive (Active=false). Used by
 	// Mithril v2 catch-up reconciliation; rows are never deleted, only
@@ -2915,9 +2952,6 @@ type MetadataStore interface {
 	// the given prefix (used to enumerate the persisted deferred-header
 	// markers so their retention floor survives a restart).
 	ListSyncStateKeysByPrefix(string, types.Txn) ([]string, error)
-
-	// ClearSyncState removes all sync state entries.
-	ClearSyncState(types.Txn) error
 
 	// Backfill checkpoint methods
 

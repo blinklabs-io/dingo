@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"maps"
 	"math/big"
 	"testing"
 	"time"
@@ -211,9 +212,7 @@ func (f *feeProdFixture) spendCbor(t *testing.T, s feeProdSpend) []byte {
 		1: []any{map[uint]any{0: f.keyAddr, 1: uint64(output)}},
 		2: s.fee,
 	}
-	for key, value := range s.extra {
-		body[key] = value
-	}
+	maps.Copy(body, s.extra)
 	witnessSet := map[uint]any{}
 	if s.script != nil {
 		body[13] = set([]any{s.collateral, uint(0)})

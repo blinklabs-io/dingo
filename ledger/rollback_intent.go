@@ -285,7 +285,7 @@ func loadRollbackIntent(
 			errInvalidRollbackIntent,
 		)
 	}
-	if (*intent.Slot == 0) != (*intent.Hash == "") {
+	if *intent.Slot > 0 && *intent.Hash == "" {
 		return ocommon.Point{}, nil, false, fmt.Errorf(
 			"%w: invalid origin point",
 			errInvalidRollbackIntent,
@@ -361,7 +361,7 @@ func (ls *LedgerState) recoverRollbackIntentLocked(ctx context.Context) error {
 		ls.emitRollbackTransactionEvents(ctx, blocks)
 		return ls.finishRollbackIntent(ctx)
 	}
-	if point.Slot > 0 {
+	if point.Slot > 0 || len(point.Hash) > 0 {
 		contains, err := ls.primaryChainContainsPoint(ctx, point)
 		if err != nil {
 			return fmt.Errorf("validate rollback intent point: %w", err)

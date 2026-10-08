@@ -690,6 +690,7 @@ INSERT INTO auth_committee_hot (
 			)
 		},
 	)
+	seedEmptyRewardBasisForRollover(t, db, epoch, pparams)
 	return s
 }
 
@@ -704,6 +705,7 @@ func (s *govDiffScenario) run(
 	dumps := make([]govDiffEpochDump, 0, boundaries)
 	epoch, pparams := s.epoch, s.pparams
 	for range boundaries {
+		seedEmptyRewardBasisForRollover(t, s.db, epoch, pparams)
 		// The reward application reads the performance epoch's parameters
 		// from the table a real node writes every boundary.
 		stored, err := s.db.GetPParams(

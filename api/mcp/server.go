@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/url"
 	"os"
@@ -152,7 +153,20 @@ func NewMCPServer(
 		cfg.QueryTimeout,
 		addressLookup,
 	)
-	RegisterResources(server, db, deps.LedgerState, deps.Network, cfg.QueryTimeout) //nolint:contextcheck // Resource handlers use each request's ctx, not startup ctx.
+	resourceLogger := deps.Logger
+	if resourceLogger == nil {
+		resourceLogger = slog.Default()
+	}
+	registerResources(
+		ctx,
+		server,
+		db,
+		deps.LedgerState,
+		deps.Network,
+		cfg.QueryTimeout,
+		tableEnumerationTimeout,
+		resourceLogger,
+	)
 	RegisterPrompts(server, db, deps.LedgerState, deps.Network)
 
 	return server, openedDB, nil

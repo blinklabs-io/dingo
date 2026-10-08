@@ -175,7 +175,7 @@ func TestImportCertStateRejectsSkippedAccount(t *testing.T) {
 		&RawLedgerState{Epoch: 2, CertStateData: data},
 	)
 
-	_, err = importCertState(
+	_, _, err = importCertState(
 		context.Background(),
 		cfg,
 		100,
