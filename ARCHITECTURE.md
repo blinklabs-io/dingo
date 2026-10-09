@@ -13955,6 +13955,18 @@ changing block or ledger contents while Dingo retries every five minutes. It is
 never treated as a clean bootstrap. Cancelling startup stops the retry without
 changing the pending repair marker.
 
+Treasury donations follow the same pre-anchor rule. Conway's EPOCH rule adds
+`UTxOState.utxosDonation` -- the donations collected this epoch up to and
+including the anchor -- to the treasury at the next boundary and counts it in
+the RATIFY treasury seed, while `applyEpochDonations` and the RATIFY seed read
+`SumNetworkDonationsForEpoch`, which sees only `network_donation` rows. The
+import's pre-phase sweep therefore replaces the anchor epoch's donation rows
+with one row at the anchor slot carrying the snapshot's `utxosDonation` when it
+is nonzero, and no row when it is zero (`seedImportedEpochDonations`). It
+replaces rather than adds because local
+replay before a catch-up import may already hold rows for that epoch, which the
+snapshot total covers.
+
 The per-credential reward basis is seeded from the same import: mark, set and
 go each carry one epoch's per-credential stake and its credential-to-pool
 delegations, and the three of them line up with the three epochs a freshly
