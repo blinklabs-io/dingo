@@ -5525,8 +5525,11 @@ before it is handed to the ledger, the ChainSync roll-forward callback calls
 blocks that peer's callback, which pauses only its header stream: nothing is
 dropped and the peer's cursor does not move, so the header is delivered once
 the limit admits it. The wait re-evaluates every 100ms because the applied
-ledger tip has no change notification, and it returns when the connection's
-ChainSync client stops. While a peer is paused it is never treated as stale and
+ledger tip has no change notification. It returns when the ChainSync client is
+asked to stop or the connection begins shutting down: the callback runs on the
+protocol's receive loop, whose completion the protocol's done signal waits
+for, so the wait observes the stop request and the connection's shutdown
+signal instead. While a peer is paused it is never treated as stale and
 is not removed by stale-peer cleanup: a paused peer sends no tips, and aging it
 out would release the cap with no new evidence. The header's sender
 always counts as a candidate, even when stale, and a header from an untracked

@@ -84,38 +84,39 @@ type scheduledChainsyncResync struct {
 	fired  bool
 }
 
-type chainsyncClientDoneContext struct {
-	done <-chan struct{}
-}
-
-func (c chainsyncClientDoneContext) Deadline() (time.Time, bool) {
-	return time.Time{}, false
-}
-
-func (c chainsyncClientDoneContext) Done() <-chan struct{} {
-	return c.done
-}
-
-func (c chainsyncClientDoneContext) Err() error {
-	select {
-	case <-c.done:
-		return context.Canceled
-	default:
-		return nil
-	}
-}
-
-func (c chainsyncClientDoneContext) Value(any) any {
-	return nil
-}
-
+// chainsyncAdmissionContext returns the context an admission wait inside a
+// chainsync client callback is bounded by, and the function that releases it.
+//
+// The callback runs on the protocol's receive loop, and the protocol's DoneChan
+// closes only after that loop returns, so DoneChan alone can never release a
+// wait that is holding the loop. The context is therefore also cancelled by the
+// protocol's StopChan, which Stop closes before waiting for the loops, and by
+// the owning connection's shutdown signal, which closes before the muxer stops.
 func chainsyncAdmissionContext(
 	ctx ochainsync.CallbackContext,
-) context.Context {
-	if ctx.Client == nil || ctx.Client.ProtocolInstance() == nil {
-		return context.Background()
+) (context.Context, context.CancelFunc) {
+	var stopChan, doneChan <-chan struct{}
+	if ctx.Client != nil {
+		if proto := ctx.Client.ProtocolInstance(); proto != nil {
+			stopChan = proto.StopChan()
+			doneChan = proto.DoneChan()
+		}
 	}
-	return chainsyncClientDoneContext{done: ctx.Client.DoneChan()}
+	connDone := ctx.ConnectionDoneChan
+	if stopChan == nil && doneChan == nil && connDone == nil {
+		return context.Background(), func() {}
+	}
+	admissionCtx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-stopChan:
+		case <-doneChan:
+		case <-connDone:
+		case <-admissionCtx.Done():
+		}
+		cancel()
+	}()
+	return admissionCtx, cancel
 }
 
 func defaultChainsyncScheduleAt(onset time.Time, fn func()) func() {
@@ -1203,10 +1204,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// permitted wait therefore blocks only this peer and never the shared
 		// ledger ChainSync dispatch mutex/goroutine.
 		if ingressEligible && o.chainsyncHeaderAdmission != nil {
+			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 			accepted, err := o.chainsyncHeaderAdmission(
-				chainsyncAdmissionContext(ctx),
+				admissionCtx,
 				chainsyncEvent,
 			)
+			cancelAdmission()
 			if err != nil {
 				o.config.Logger.Warn(
 					"chainsync: future-header admission failed closed",
@@ -1443,12 +1446,15 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			if o.ledgerState != nil {
 				appliedTip = o.ledgerState.Tip
 			}
-			if err := o.config.ChainsyncAwaitEagerness(
-				chainsyncAdmissionContext(ctx),
+			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+			err := o.config.ChainsyncAwaitEagerness(
+				admissionCtx,
 				ctx.ConnectionId,
 				v.BlockNumber(),
 				appliedTip,
-			); err != nil {
+			)
+			cancelAdmission()
+			if err != nil {
 				return fmt.Errorf("wait for eagerness limit: %w", err)
 			}
 		}
