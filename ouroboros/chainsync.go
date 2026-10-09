@@ -1327,6 +1327,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ObservedTip:  observedTip,
 				VRFOutput:    vrfOutput,
 				PraosView:    praosView,
+				// The parent hash is what lets the selector tell a connected
+				// header chain from a sequence of advancing numbers.
+				ObservedPrevHash: v.PrevHash().Bytes(),
+				ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
 			}
 			// If the hook handles it synchronously (Genesis corroboration
 			// active, so the apply gate below must reflect this header), skip
