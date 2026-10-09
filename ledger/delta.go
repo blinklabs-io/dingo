@@ -583,6 +583,18 @@ func (d *LedgerDelta) processGovernance(
 			return fmt.Errorf("process DRep activity certificates: %w", err)
 		}
 	}
+	if governance.HasDRepDeregistrationCertificates(tx) {
+		if err := governance.ProcessDRepDeregistrationEffects(
+			ctx,
+			tx,
+			d.Point,
+			currentEpoch,
+			ls.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("process DRep deregistration effects: %w", err)
+		}
+	}
 
 	return nil
 }
