@@ -42,7 +42,10 @@ WHERE withdrawal = TRUE AND ` + legacyRewardEffectiveSlot + ` ` + op + ` ? AND (
 	ORDER BY credential_tag, staking_key, added_slot, id`
 }
 
-func legacyRewardCreditQuery(includePostSnapshot bool, predicate string) string {
+func legacyRewardCreditQuery(
+	includePostSnapshot bool,
+	predicate string,
+) string {
 	slotPredicate := legacyRewardEffectiveSlot + ` > ?`
 	if includePostSnapshot {
 		slotPredicate = `(` + legacyRewardEffectiveSlot + ` > ? OR (` + legacyRewardEffectiveSlot + ` = ? AND post_snapshot = TRUE))`
@@ -122,22 +125,31 @@ func seedHistoricalRewardDeltas(
 							txID++
 							_, err := store.writeDB.Exec(
 								`INSERT INTO "transaction" (id, hash, slot, block_index) VALUES (?, ?, ?, 0)`,
-								txID, hash, added,
+								txID,
+								hash,
+								added,
 							)
 							require.NoError(t, err)
 							if contextSlot != nil {
 								_, err = store.writeDB.Exec(
 									`INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?)`,
-									txID, contextSlot,
+									txID,
+									contextSlot,
 								)
 								require.NoError(t, err)
 							}
 						}
 						_, err := store.writeDB.Exec(
 							`INSERT INTO account_reward_delta (id, staking_key, credential_tag, tx_hash, amount, previous_reward, added_slot, withdrawal, post_snapshot) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-							deltaID, []byte(key.key), key.tag, hash,
-							fmt.Sprint(deltaID), fmt.Sprint(deltaID*10),
-							added, withdrawal, postSnapshot,
+							deltaID,
+							[]byte(key.key),
+							key.tag,
+							hash,
+							fmt.Sprint(deltaID),
+							fmt.Sprint(deltaID*10),
+							added,
+							withdrawal,
+							postSnapshot,
 						)
 						require.NoError(t, err)
 					}
@@ -163,7 +175,10 @@ func runRewardQuery(
 	args []any,
 ) []rewardQueryRow {
 	t.Helper()
-	rows, err := store.writeDB.QueryContext(context.Background(), query, args...)
+	rows, err := store.writeDB.QueryContext(
+		context.Background(),
+		query,
+		args...)
 	require.NoError(t, err)
 	defer rows.Close()
 	var out []rewardQueryRow
@@ -197,11 +212,14 @@ func TestHistoricalRewardQueriesMatchLegacyRows(t *testing.T) {
 	unknown := historicalRewardKey{tag: 1, key: string([]byte{0x99})}
 
 	keySets := map[string][]historicalRewardKey{
-		"all":         keys,
-		"tag0 only":   keys[:3],
-		"tag1 only":   keys[3:],
-		"single":      keys[1:2],
-		"with absent": append(append([]historicalRewardKey{}, keys...), unknown),
+		"all":       keys,
+		"tag0 only": keys[:3],
+		"tag1 only": keys[3:],
+		"single":    keys[1:2],
+		"with absent": append(
+			append([]historicalRewardKey{}, keys...),
+			unknown,
+		),
 	}
 	for name, set := range keySets {
 		sort.Slice(set, func(i, j int) bool {
@@ -240,13 +258,21 @@ func TestHistoricalRewardQueriesMatchLegacyRows(t *testing.T) {
 					historicalRewardCreditQuery(postSnapshot, newPredicate),
 					append(append([]any{}, creditSlots...), newArgs...))
 				require.NotEmpty(t, want)
-				require.Equal(t, want, got, "credit postSnapshot %v", postSnapshot)
+				require.Equal(
+					t,
+					want,
+					got,
+					"credit postSnapshot %v",
+					postSnapshot,
+				)
 			}
 		})
 	}
 }
 
-func TestHistoricalRewardCreditQueryUsesCredentialIndexWithoutStats(t *testing.T) {
+func TestHistoricalRewardCreditQueryUsesCredentialIndexWithoutStats(
+	t *testing.T,
+) {
 	t.Parallel()
 	store := newHistoricalRewardQueryStore(t)
 	keys := seedHistoricalRewardDeltas(t, store)
@@ -267,7 +293,10 @@ func TestHistoricalRewardCreditQueryUsesCredentialIndexWithoutStats(t *testing.T
 		}
 		args = append(args, predicateArgs...)
 		plan := explainRewardQuery(
-			t, store, historicalRewardCreditQuery(postSnapshot, predicate), args,
+			t,
+			store,
+			historicalRewardCreditQuery(postSnapshot, predicate),
+			args,
 		)
 		require.Contains(
 			t, plan, "idx_account_reward_delta_credential",
