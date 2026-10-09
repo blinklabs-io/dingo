@@ -128,11 +128,14 @@ jobs:
       # reason. govulncheck exits non-zero only for vulnerabilities this module
       # actually calls, so unreachable findings it also prints do not fail the
       # job. GOFLAGS carries the build tags `make govulncheck` passes, which
-      # the action has no input for.
+      # the action has no input for. setup-go forces GOTOOLCHAIN=local, so the
+      # step overrides it to honor go.mod's patched toolchain floor when the
+      # setup-go release manifest lags a Go security release.
       - name: govulncheck
         uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0 https://github.com/golang/govulncheck-action/releases/tag/v1.1.0
         env:
           GOFLAGS: -tags=dingo_extra_plugins
+          GOTOOLCHAIN: auto
         with:
           go-version-input: 1.26.x
           check-latest: true

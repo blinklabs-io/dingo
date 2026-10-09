@@ -3637,6 +3637,13 @@ func TestGovulncheckRunsThroughPinnedAction(t *testing.T) {
 					wantGoflags,
 				)
 			}
+			if got := env["GOTOOLCHAIN"]; got != "auto" {
+				t.Errorf(
+					"%s: govulncheck GOTOOLCHAIN is %v, want auto",
+					workflow,
+					got,
+				)
+			}
 			with, _ := step["with"].(map[string]any)
 			for input, want := range map[string]string{
 				"go-package": "./...",
