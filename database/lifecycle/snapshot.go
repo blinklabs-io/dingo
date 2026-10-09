@@ -364,7 +364,13 @@ func Snapshot(
 			errors.Join(context.DeadlineExceeded, backupErr, metadataErr),
 		)
 	}
-
+	if backupErr != nil && !errors.Is(backupErr, context.Canceled) &&
+		metadataErr != nil && !errors.Is(metadataErr, context.Canceled) {
+		return Manifest{}, errors.Join(
+			fmt.Errorf("backup blob store: %w", backupErr),
+			fmt.Errorf("backup metadata store: %w", metadataErr),
+		)
+	}
 	if backupErr != nil && !errors.Is(backupErr, context.Canceled) {
 		return Manifest{}, fmt.Errorf("backup blob store: %w", backupErr)
 	}
@@ -376,6 +382,9 @@ func Snapshot(
 	}
 	if metadataErr != nil {
 		return Manifest{}, fmt.Errorf("backup metadata store: %w", metadataErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return Manifest{}, err
 	}
 	// Flush after releasing the commit barrier: both backup streams are
 	// complete, so making their files durable needs no further writer pause.
@@ -444,6 +453,9 @@ func Snapshot(
 		DingoVersion:    dingoVersion,
 		BlobBytes:       blobInfo.Size(),
 		MetadataBytes:   metadataInfo.Size(),
+	}
+	if err := ctx.Err(); err != nil {
+		return Manifest{}, err
 	}
 	if err := WriteManifest(dir, manifest, opts...); err != nil {
 		return Manifest{}, err
