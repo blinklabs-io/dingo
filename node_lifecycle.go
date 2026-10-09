@@ -1072,6 +1072,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	ouroborosCfg.ChainsyncState = n.chainsyncState
 	ouroborosCfg.ConnManager = n.connManager
 	ouroborosCfg.PeerGov = n.peerGov
+	//nolint:contextcheck // The replacement owns its Close-bound lifecycle and must outlive this restore operation context.
 	rebuiltOuroboros, err := ouroborosPkg.NewOuroboros(ouroborosCfg)
 	if err != nil {
 		return fmt.Errorf("failed to reconstruct ouroboros: %w", err)

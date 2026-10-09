@@ -125,10 +125,10 @@ func (d *Database) MaxLeiosEBSlot() (uint64, error) {
 // records. Blob iterator operations themselves are controlled by the selected
 // provider, but a canceled caller will not continue scanning later records.
 func (d *Database) MaxLeiosEBSlotContext(
-	ctx context.Context,
+	ctx context.Context, //nolint:contextcheck // Preserve nil-context compatibility, matching other database context methods.
 ) (uint64, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context.Background() //nolint:contextcheck // Preserve literal-nil compatibility for this public context method.
 	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -345,14 +345,14 @@ const leiosEBPruneBatchSize = 1
 // same call is safe after a partial cloud commit. The returned count includes
 // only keys from fully committed transactions; on error it is a lower bound.
 func (d *Database) PruneLeiosEBBeforeSlot(
-	ctx context.Context,
+	ctx context.Context, //nolint:contextcheck // Preserve nil-context compatibility, matching other database context methods.
 	beforeSlot uint64,
 ) (int, error) {
 	if beforeSlot == 0 {
 		return 0, nil
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = context.Background() //nolint:contextcheck // Preserve literal-nil compatibility for this public context method.
 	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
