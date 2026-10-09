@@ -227,7 +227,7 @@ func TestEquivocationSelfPoolIDMatchesCredentialDerivation(t *testing.T) {
 	t.Parallel()
 	privateKeyPath := func(name string) string {
 		t.Helper()
-		raw, err := os.ReadFile(filepath.Join("config", "cardano", "devnet", "keys", name))
+		raw, err := os.ReadFile(filepath.Join("internal", "test", "devnet", "testdata", "keys", name))
 		require.NoError(t, err)
 		path := filepath.Join(t.TempDir(), name)
 		require.NoError(t, os.WriteFile(path, raw, 0o600))

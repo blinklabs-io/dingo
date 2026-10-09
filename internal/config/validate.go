@@ -394,8 +394,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 	// Each entry's host is the bind address the listener actually uses
 	// at runtime: bindAddr for public listeners, privateBindAddr for the
-	// private listener, debugBindAddr for pprof, midnight.host for Midnight,
-	// and BarkHost for bark.
+	// private listener, debugBindAddr for pprof, metricsBindAddr for
+	// Prometheus, midnight.host for Midnight, and BarkHost for bark.
 	ports := []struct {
 		setting  string
 		host     string
@@ -405,7 +405,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}{
 		{"port (relay/NtN)", c.BindAddr, c.RelayPort, serving, serving},
 		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
-		{"metricsPort", c.BindAddr, c.MetricsPort, auxListeners, serving},
+		{
+			"metricsPort",
+			c.MetricsBindAddr,
+			c.MetricsPort,
+			auxListeners,
+			false,
+		},
 		{"debugPort", c.DebugBindAddr, c.DebugPort, auxListeners, false},
 		{"healthPort", c.BindAddr, c.HealthPort, auxListeners, false},
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},

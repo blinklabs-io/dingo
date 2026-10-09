@@ -2596,6 +2596,7 @@ func (n *Node) newTokenRegistrySync() (
 			SourceURL:             n.config.tokenRegistry.SourceURL,
 			Network:               n.config.network,
 			UserAgent:             n.config.tokenRegistry.UserAgent,
+			Headers:               n.config.tokenRegistry.Headers,
 			Interval:              n.config.tokenRegistry.Interval,
 			RequestTimeout:        n.config.tokenRegistry.RequestTimeout,
 			MaxBytes:              n.config.tokenRegistry.MaxBytes,

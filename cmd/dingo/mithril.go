@@ -460,22 +460,21 @@ func runMithrilSyncWithRepair(
 	repairRewardState bool,
 ) (err error) {
 	metrics, metricsHandler := newMithrilSyncMetricsHandler(network)
-	metricsServer, err := startPrometheusMetricsServerWithHandler(
-		logger,
-		cfg.BindAddr,
-		cfg.MetricsPort,
-		"mithril",
-		metricsHandler,
-	)
-	if err != nil {
-		metrics.recordError()
-		logger.Warn(
-			"failed to start prometheus metrics server; continuing",
-			"component", "mithril",
-			"port", cfg.MetricsPort,
-			"error", err,
+	var metricsServer *prometheusMetricsServer
+	if cfg.MetricsPort != 0 {
+		metricsServer, err = startMithrilMetricsServer(
+			logger, cfg, metricsHandler,
 		)
-		err = nil
+		if err != nil {
+			metrics.recordError()
+			logger.Warn(
+				"failed to start prometheus metrics server; continuing",
+				"component", "mithril",
+				"port", cfg.MetricsPort,
+				"error", err,
+			)
+			err = nil
+		}
 	}
 	defer func() {
 		if err != nil {

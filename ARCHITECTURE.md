@@ -2742,6 +2742,19 @@ variables, or `--token-registry-*` CLI flags. An empty source URL selects by
 network: the Cardano Foundation registry for mainnet, the IOG testnet registry
 otherwise.
 
+`tokenRegistry.headerSecrets` adds request headers (for example
+`Authorization`) for an authenticated mirror. It is YAML and environment only,
+is redacted from `Config.LogValue`, and requires HTTPS except for a loopback
+source. The sync removes the headers from a
+redirect that changes scheme or host so a redirect cannot forward the
+credential, including after a custom redirect callback. Header names reserved
+for transport or sync bookkeeping (`Host`, `Content-Length`, `User-Agent`,
+`Accept`, `If-None-Match`) are rejected. Configuration snapshots copy the
+credential map. `DINGO_TOKEN_REGISTRY_HEADER_SECRETS` is parsed by
+`internal/config` rather than envconfig, whose parse errors quote the raw
+value; a malformed item is reported by position only. A public registry needs
+none.
+
 `node.go` composes the sync at the node boundary the same way it composes the
 fetcher, through the shared `newTokenRegistrySync` helper that both the startup
 path and the live storage-restart path in `node_lifecycle.go` call, so the two
@@ -8917,6 +8930,25 @@ respectively to bound stack depth against
 adversarial nesting. `cbor_decode_test.go` proves each of these boundaries is
 accepted exactly at the limit and rejected one past it.
 
+`ImportLedgerState` runs `validateImportState` before the UTxO phase. Preflight
+parses the cert state, stake snapshots, active pool distribution and governance
+state, and checks the tip hash width, the epoch, evolving, candidate and
+last-epoch-block nonce widths, the certified opcert and block-count pool keys,
+UTxO-state fees against the snapshot fee pot, and both current and previous
+protocol parameters, including historical era conversion when the previous
+epoch's era is known. When stake snapshots are present, a previous payload
+whose epoch has no resolvable era is rejected before persistence. Without
+stake snapshots, the parameter importer logs a warning and skips that
+unresolved historical row.
+An existing valid historical parameter row can stand in for an incompatible
+previous payload during catch-up. With stake snapshots present it also runs
+the reward-basis protocol-parameter check for each Mark/Set/Go epoch without
+an authoritative basis. A malformed input therefore fails the import before
+any phase persists. A parse warning
+on the cert state or stake snapshots is a rejection rather than a log line.
+The phases parse again instead of reusing the result, which keeps those
+structures out of memory during the UTxO import.
+
 For Conway governance, ledger-state import persists active proposals, the
 per-purpose previous governance action IDs, and the ratified action IDs from
 `ConwayGovState.cgsDRepPulsingState`'s completed `RatifyState.rsEnacted` list.
@@ -9250,14 +9282,18 @@ Dingo provides four client-facing APIs plus Bark. All are optional and gated by 
 `internal/node.Run` starts three auxiliary HTTP listeners, binding each with
 `bindAuxiliaryListener` and serving it with `serveAuxiliaryListenerOn` (bind
 or serve failures are logged, never fatal):
-Prometheus metrics on `metricsPort`, pprof on `debugPort` when enabled, and
-the health listener on `healthPort` (default `12799`, `0` disables).
+Prometheus metrics on `metricsBindAddr:metricsPort` (loopback by default;
+remote scraping requires setting `metricsBindAddr`, which the container image
+does through `DINGO_METRICS_BIND_ADDR=0.0.0.0` so orchestrator probes and
+scrapers reach it; `metricsPort` `0` disables it here and in `dingo mithril
+sync`), pprof on `debugPort`
+when enabled, and the health listener on `healthPort` (default `12799`, `0` disables).
 
 The health listener is **not** gated on storage mode. The four API
 listeners start only when `storageMode.IsAPI()`, so a probe wired the same
 way would be inert in the default `core` mode — the mode the shipped
 image runs. It binds `bindAddr`, the address the relay/NtN
-and metrics listeners already use, rather than the API listeners' own
+listener already uses, rather than the API listeners' own
 loopback-by-default address: a Docker `HEALTHCHECK` runs inside the
 container and would be satisfied by loopback, but a Kubernetes kubelet probe
 or an ECS/ALB target-group check reaches the container from outside, and
@@ -9416,9 +9452,9 @@ uses the pair directly. They are not promoted to Blockfrost, Kupo, Mesh, or MCP.
 Blockfrost, Kupo, Mesh, and UTxO RPC use the root `bindAddr`, whose default is
 `0.0.0.0`. MCP overrides it with `plugins.api.mcp.config.host`, defaulting to
 `127.0.0.1`; an explicitly empty MCP host falls back to `bindAddr`.
-`debugBindAddr` remains the separate pprof listener setting.
-`corsAllowedOrigins` is shared configuration, but MCP rejects its wildcard
-and applies the origin checks described above.
+`metricsBindAddr` and `debugBindAddr` separately configure Prometheus and pprof;
+both default to loopback. `corsAllowedOrigins` remains a shared root setting,
+but MCP rejects its wildcard and applies the origin checks described above.
 
 ### API listener lifecycle (`internal/apilistener`)
 

@@ -128,6 +128,7 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 		"Plugins.API.Kupo.Config":              {},
 		"Plugins.API.Mesh.Config":              {},
 		"Plugins.API.Utxorpc.Config":           {},
+		"TokenRegistry.HeaderSecrets":          {},
 		"Plugins.API.Mcp.Config":               {},
 		"Midnight.CNightPolicyID":              {},
 		"Midnight.CNightAssetName":             {},
@@ -338,6 +339,53 @@ func TestDebugBindAddressExplicitOverridePrecedence(t *testing.T) {
 	require.NoError(t, ApplyFlags(cmd, cfg))
 	require.Equal(t, "0.0.0.0", cfg.DebugBindAddr)
 	require.Equal(t, "0.0.0.0:6060", cfg.DebugListenAddress())
+}
+
+func TestMetricsBindAddressDefaultsToLoopback(t *testing.T) {
+	resetGlobalConfig()
+	unsetMetricsBindAddrEnv(t)
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+	require.Equal(t, "0.0.0.0", cfg.BindAddr)
+	require.Equal(t, DefaultMetricsBindAddr, cfg.MetricsBindAddr)
+	require.Equal(t, "127.0.0.1:12798", cfg.MetricsListenAddress())
+
+	// A manually built or explicitly empty value must not fall back to the
+	// public wildcard bind.
+	cfg.MetricsBindAddr = ""
+	cfg.ApplyDefaults()
+	require.Equal(t, DefaultMetricsBindAddr, cfg.MetricsBindAddr)
+}
+
+func TestMetricsBindAddressExplicitOverridePrecedence(t *testing.T) {
+	resetGlobalConfig()
+	unsetMetricsBindAddrEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte("metricsBindAddr: 10.0.0.5\nmetricsPort: 9100\n"),
+		0o600,
+	))
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "10.0.0.5:9100", cfg.MetricsListenAddress())
+
+	t.Setenv("DINGO_METRICS_BIND_ADDR", "127.0.0.3")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.3", cfg.MetricsBindAddr)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--metrics-bind-addr=0.0.0.0",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, "0.0.0.0:9100", cfg.MetricsListenAddress())
 }
 
 func TestFullPotRewardsEnvBinding(t *testing.T) {
@@ -1408,5 +1456,71 @@ func TestMinPoolMarginEnvBinding(t *testing.T) {
 			"expected env var to set minPoolMargin=150, got %d",
 			cfg.MinPoolMargin,
 		)
+	}
+}
+
+func TestTokenRegistryHeadersLoadFromYAMLAndEnvironment(t *testing.T) {
+	resetGlobalConfig()
+	unsetEnv(t, "DINGO_TOKEN_REGISTRY_HEADER_SECRETS")
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte(
+			"tokenRegistry:\n  headerSecrets:\n    Authorization: Bearer yaml\n",
+		),
+		0o600,
+	))
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		map[string]string{"Authorization": "Bearer yaml"},
+		cfg.TokenRegistry.HeaderSecrets,
+	)
+
+	t.Setenv("DINGO_TOKEN_REGISTRY_HEADER_SECRETS", "X-Api-Key:from-env")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		map[string]string{"X-Api-Key": "from-env"},
+		cfg.TokenRegistry.HeaderSecrets,
+	)
+}
+
+func TestHeaderSecretsEnvErrorsOmitValues(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte("{}\n"), 0o600))
+
+	// A value may itself contain colons; only the first separates the name.
+	t.Setenv(
+		"DINGO_TOKEN_REGISTRY_HEADER_SECRETS",
+		"Authorization:Basic user:pass,X-Api-Key:k:v",
+	)
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		map[string]string{
+			"Authorization": "Basic user:pass",
+			"X-Api-Key":     "k:v",
+		},
+		cfg.TokenRegistry.HeaderSecrets,
+	)
+
+	for _, value := range []string{
+		"Authorization:Basic s3cr3t,s3cr3t-without-name",
+		":s3cr3t",
+	} {
+		t.Setenv("DINGO_TOKEN_REGISTRY_HEADER_SECRETS", value)
+		_, err = LoadConfig(configFile)
+		require.Error(t, err)
+		require.Contains(
+			t, err.Error(), "DINGO_TOKEN_REGISTRY_HEADER_SECRETS",
+		)
+		require.NotContains(t, err.Error(), "s3cr3t")
 	}
 }

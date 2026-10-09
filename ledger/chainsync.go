@@ -5877,13 +5877,7 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 // an optional test synchronization signal for the prior-request drain.
 func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	connId ouroboros.ConnectionId,
-	//nolint:unparam // pending's only use here was the synchronous NoBlocks
-	// branch this commit removes (NoBlocks now resolves asynchronously, in
-	// handleEventBlockfetchBatchDone). Kept rather than threaded out of every
-	// caller and test helper, since the dispatch-timing rework this function
-	// is meant to support needs it again for its own disruption-path
-	// publishes.
-	pending *pendingPublishes,
+	_ *pendingPublishes,
 	waitStarted chan<- struct{},
 ) error {
 	// The caller owns chainsyncBlockfetchMutex. Keep the reservation and

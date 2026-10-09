@@ -44,6 +44,7 @@ func validTestConfig() *Config {
 		HealthPort:           DefaultHealthPort,
 		HealthReadyGapSlots:  DefaultHealthReadyGapSlots,
 		DebugBindAddr:        DefaultDebugBindAddr,
+		MetricsBindAddr:      DefaultMetricsBindAddr,
 		ShutdownTimeout:      DefaultShutdownTimeout,
 		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
 		Cache:                DefaultCacheConfig(),
@@ -299,9 +300,8 @@ func TestValidate(t *testing.T) {
 			wantErr: "port (relay/NtN) must be set",
 		},
 		{
-			name:    "metrics port set to zero",
-			modify:  func(c *Config) { c.MetricsPort = 0 },
-			wantErr: "metricsPort must be set",
+			name:   "metrics port zero disables the listener",
+			modify: func(c *Config) { c.MetricsPort = 0 },
 		},
 		{
 			name:    "MCP port range in core mode",
@@ -390,6 +390,18 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			// metricsPort binds metricsBindAddr, not bindAddr, so a
+			// loopback metrics listener may share a port with a listener
+			// on a different specific address.
+			name: "metrics bind address distinct from bindAddr may share a port",
+			modify: func(c *Config) {
+				c.BindAddr = "127.0.0.2"
+				c.PrivateBindAddr = "127.0.0.1"
+				c.MetricsBindAddr = "127.0.0.1"
+				c.HealthPort = c.MetricsPort
+			},
+		},
+		{
 			// Two spellings of one IPv6 literal name one listener. A
 			// string comparison lets them past validation, and the
 			// health listener is then one of two servers racing for the
@@ -427,10 +439,11 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
-			name: "mesh shares bind address with metrics for collision checks",
+			name: "mesh and metrics on the same bind address collide",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.BindAddr = "127.0.0.2"
+				c.MetricsBindAddr = "127.0.0.2"
 				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
 			},
 			wantErr: "is assigned to both",
@@ -1641,7 +1654,7 @@ func TestValidateLoweredPrivilegedPortCutoff(t *testing.T) {
 // one-shot sync and mithril invocations neither require the serving
 // listener ports nor an ImmutableDB source, even though the configured
 // runMode is the default serve. Their metrics/debug listeners accept an
-// unset port, which the runtime binds ephemerally.
+// unset port, which disables them.
 func TestValidateUtilityModesRelaxListenerAndSource(t *testing.T) {
 	for _, mode := range []RunMode{RunModeSync, RunModeMithril} {
 		t.Run(string(mode), func(t *testing.T) {
