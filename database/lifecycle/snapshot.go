@@ -277,6 +277,16 @@ func Snapshot(
 		return Manifest{}, backupCtx.Err()
 	}
 	if state.err != nil {
+		if maxPause > 0 && ctx.Err() == nil &&
+			errors.Is(backupCtx.Err(), context.DeadlineExceeded) {
+			pauseExceeded = true
+			return Manifest{}, fmt.Errorf(
+				"read snapshot state: %w (%s): %w",
+				ErrCommitPauseExceeded,
+				maxPause,
+				errors.Join(backupCtx.Err(), state.err),
+			)
+		}
 		return Manifest{}, fmt.Errorf("read snapshot state: %w", state.err)
 	}
 	if err := backupCtx.Err(); err != nil {
