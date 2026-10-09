@@ -28,8 +28,8 @@ import (
 
 // TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows pins the
 // block_nonce, network_state, and network_donation part of
-// ImportLedgerState's post-anchor sweep: rows a local rollover wrote above the
-// anchor are removed, and rows at or below the anchor are kept.
+// ImportLedgerState's post-anchor sweep: rows above the anchor are removed,
+// while anchor-epoch donations are replaced by the snapshot total.
 func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 	t.Parallel()
 

@@ -131,6 +131,12 @@ func TestImportLedgerStateSeedsAnchorEpochDonations(t *testing.T) {
 					BlockHash: make([]byte, 32),
 				},
 			}
+			for i := range state.EraBounds {
+				state.EraBounds[i] = EraBound{
+					Slot:  priorSlot + 500,
+					Epoch: epoch,
+				}
+			}
 			cfg := ImportConfig{
 				Database: db,
 				Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),

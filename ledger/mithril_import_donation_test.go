@@ -48,21 +48,25 @@ func TestMithrilImportedDonationReachesBoundaryTreasuryAndRatify(
 	_, reservesBefore, _ := networkState(t, f.db)
 
 	nonce := make([]byte, 32)
+	eraBounds := make([]ledgerstate.EraBound, ledgerstate.EraConway+1)
+	for i := range eraBounds {
+		eraBounds[i] = ledgerstate.EraBound{
+			Slot:  f.currentEpoch.StartSlot,
+			Epoch: f.currentEpoch.EpochId,
+		}
+	}
 	require.NoError(t, ledgerstate.ImportLedgerState(
 		context.Background(),
 		ledgerstate.ImportConfig{
 			Database: f.db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &ledgerstate.RawLedgerState{
-				Epoch:    f.currentEpoch.EpochId,
-				Treasury: 100 * ada,
-				Reserves: reservesBefore,
-				Donation: 50 * ada,
-				EraIndex: ledgerstate.EraConway,
-				EraBounds: make(
-					[]ledgerstate.EraBound,
-					ledgerstate.EraConway+1,
-				),
+				Epoch:               f.currentEpoch.EpochId,
+				Treasury:            100 * ada,
+				Reserves:            reservesBefore,
+				Donation:            50 * ada,
+				EraIndex:            ledgerstate.EraConway,
+				EraBounds:           eraBounds,
 				EpochNonce:          nonce,
 				EvolvingNonce:       nonce,
 				CandidateNonce:      nonce,
