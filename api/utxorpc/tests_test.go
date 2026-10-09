@@ -747,6 +747,8 @@ type utxorpcHarnessOptions struct {
 	maxHistoryItems int
 	serverTimeout   time.Duration
 	skipIndexTxHash []byte
+	// tune adjusts the server configuration before the server is built.
+	tune func(*UtxorpcConfig)
 }
 
 func newConnectH2CClient() *http.Client {
@@ -906,14 +908,18 @@ func newUtxorpcConnectHarness(
 	if maxHist <= 0 {
 		maxHist = DefaultMaxHistoryItems
 	}
-	u := NewUtxorpc(UtxorpcConfig{
+	cfg := UtxorpcConfig{
 		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:        apiBus,
 		LedgerState:     ls,
 		Mempool:         mp,
 		MaxHistoryItems: maxHist,
 		ServerTimeout:   opts.serverTimeout,
-	})
+	}
+	if opts.tune != nil {
+		opts.tune(&cfg)
+	}
+	u := NewUtxorpc(cfg)
 
 	srv := httptest.NewUnstartedServer(testUtxorpcHTTPHandler(u))
 	srv.Config.Protocols = unencryptedHTTP2Protocols()
@@ -1185,6 +1191,72 @@ func TestConnect_DumpHistory(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, out2.Msg.GetBlock())
 	require.Equal(t, blocks[4].Cbor, out2.Msg.GetBlock()[0].GetNativeBytes())
+}
+
+func TestConnect_DumpHistory_OmittedMaxItemsUsesDefaultPage(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks: 25,
+		tune: func(cfg *UtxorpcConfig) {
+			cfg.HistoryPageItems = 4
+		},
+	})
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	blocks := loadTestChainBlocks(t, 25)
+
+	out, err := cli.DumpHistory(
+		ctx,
+		connect.NewRequest(&sync.DumpHistoryRequest{
+			StartToken: &sync.BlockRef{
+				Slot:   blocks[0].Slot,
+				Hash:   blocks[0].Hash,
+				Height: blocks[0].Number,
+			},
+		}),
+	)
+	require.NoError(t, err)
+	require.Len(t, out.Msg.GetBlock(), 4)
+	require.Equal(t, blocks[4].Hash, out.Msg.GetNextToken().GetHash())
+}
+
+func TestConnect_DumpHistory_ByteBudgetReturnsContinuationToken(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks: 25,
+		tune: func(cfg *UtxorpcConfig) {
+			// Smaller than any one block: each response still carries the
+			// block it started on, then hands back a token.
+			cfg.MaxHistoryBytes = 1
+		},
+	})
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	blocks := loadTestChainBlocks(t, 25)
+
+	out, err := cli.DumpHistory(
+		ctx,
+		connect.NewRequest(&sync.DumpHistoryRequest{
+			StartToken: &sync.BlockRef{
+				Slot:   blocks[0].Slot,
+				Hash:   blocks[0].Hash,
+				Height: blocks[0].Number,
+			},
+			MaxItems: 10,
+		}),
+	)
+	require.NoError(t, err)
+	require.Len(t, out.Msg.GetBlock(), 1)
+	require.Equal(t, blocks[1].Cbor, out.Msg.GetBlock()[0].GetNativeBytes())
+	require.Equal(t, blocks[1].Hash, out.Msg.GetNextToken().GetHash())
 }
 
 func TestConnect_DumpHistory_StartTokenNotOnChain(t *testing.T) {

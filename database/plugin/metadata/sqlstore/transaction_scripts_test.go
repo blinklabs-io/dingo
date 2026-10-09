@@ -89,13 +89,14 @@ func TestStoreTransactionWitnessesIncludesPlutusV4(t *testing.T) {
 
 	const slot = uint64(43)
 	rows := &rowBatch{}
-	require.NoError(t, storeTransactionWitnesses(
+	require.NoError(t, store.storeTransactionWitnesses(
 		t.Context(),
 		store.writeDB,
 		rows,
 		transactionID,
 		tx,
 		slot,
+		false,
 	))
 	require.NoError(t, rows.flush(t.Context(), store.writeDB, 999))
 	var witnessHash []byte
@@ -179,13 +180,14 @@ func TestStoreTransactionWitnessesIncludesDijkstraSubTransactions(
 
 	const slot = uint64(45)
 	rows := &rowBatch{}
-	require.NoError(t, storeTransactionWitnesses(
+	require.NoError(t, store.storeTransactionWitnesses(
 		t.Context(),
 		store.writeDB,
 		rows,
 		transactionID,
 		tx,
 		slot,
+		false,
 	))
 	require.NoError(t, rows.flush(t.Context(), store.writeDB, 999))
 	var witnessScriptCount int

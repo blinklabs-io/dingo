@@ -108,6 +108,23 @@ func newLiveLifecycleTestNodeWithGenesis(
 	workerPoolCfg ledger.DatabaseWorkerPoolConfig,
 ) (*Node, []ocommon.Point) {
 	t.Helper()
+	return newLiveLifecycleTestNodeWithStorageMode(
+		t, numBlocks, cardanoNodeCfgOverride, workerPoolCfg, StorageModeCore,
+	)
+}
+
+// newLiveLifecycleTestNodeWithStorageMode is newLiveLifecycleTestNodeWithGenesis
+// with the storage mode chosen up front. The mode is persisted with the
+// database and a live restore or truncate refuses to reopen it under another,
+// so API-only subsystems need the database created in API mode.
+func newLiveLifecycleTestNodeWithStorageMode(
+	t *testing.T,
+	numBlocks int,
+	cardanoNodeCfgOverride *cardano.CardanoNodeConfig,
+	workerPoolCfg ledger.DatabaseWorkerPoolConfig,
+	storageMode StorageMode,
+) (*Node, []ocommon.Point) {
+	t.Helper()
 
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -122,13 +139,18 @@ func newLiveLifecycleTestNodeWithGenesis(
 		context.Background(),
 		pluginHost,
 		storageSelections,
-		internalplugins.StorageDependencies{DataDir: tmpDir, Logger: logger},
+		internalplugins.StorageDependencies{
+			DataDir:     tmpDir,
+			Logger:      logger,
+			StorageMode: string(storageMode),
+		},
 	)
 	require.NoError(t, err)
 	db, err := database.New(context.Background(), &database.Config{
-		DataDir: tmpDir,
-		Logger:  logger,
-		Network: "preview",
+		DataDir:     tmpDir,
+		Logger:      logger,
+		Network:     "preview",
+		StorageMode: string(storageMode),
 	}, stores)
 	require.NoError(t, err)
 
@@ -166,6 +188,10 @@ func newLiveLifecycleTestNodeWithGenesis(
 			storageSelections.Metadata,
 		),
 		WithDatabaseWorkerPoolConfig(workerPoolCfg),
+		WithStorageMode(storageMode),
+		WithBlockfrostPort(0),
+		WithMeshPort(0),
+		WithUtxorpcPort(0),
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1366,7 +1392,7 @@ func TestLiveTruncateRecoveryRechecksAlonzoPParamsUnit(t *testing.T) {
 		alonzo.EraIdAlonzo,
 		nil,
 	))
-	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(context.Background(), 
+	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
 		},

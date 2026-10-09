@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -26,22 +27,78 @@ import (
 // sumCredentialUtxoStakeQuery's doc comment does, that it is worth the
 // caching mechanism's overhead and that it is safe to prepare once and
 // reuse under this Store's single write connection.
-var hotStatements = []string{
-	sumCredentialUtxoStakeQuery,
-	rewardLiveStakeAccountQuery,
-	rewardLiveStakeUpsertQuery,
-	rewardLiveStakeUtxoStakeQuery,
-	insertUtxoQuery,
-	insertUtxoQueryIgnoreConflict,
-	importAssetQuery,
-	getAssetIDQuery,
-	getLiveUtxoByRefQuery,
-	getUtxoIncludingSpentByRefQuery,
-}
+var hotStatements = func() []string {
+	queries := []string{
+		sumCredentialUtxoStakeQuery,
+		rewardLiveStakeAccountQuery,
+		rewardLiveStakeUpsertQuery,
+		rewardLiveStakeUtxoStakeQuery,
+		insertUtxoQuery,
+		insertUtxoQueryIgnoreConflict,
+		importAssetQuery,
+		getAssetIDQuery,
+		getLiveUtxoByRefQuery,
+		getUtxoIncludingSpentByRefQuery,
+		transactionInsertSQL,
+		consumeUtxoSQL,
+		consumeUtxoSQLiteReturningSQL,
+		poolOpCertSequenceUpsertSQL,
+		poolUpdateLatestOpCertSequenceSQL,
+		transactionCertificateInsertSQL,
+		hasSpecializedCertificatesSQL,
+		deletePoolRegistrationOwnersSQL,
+		deletePoolRegistrationRelaysSQL,
+		deleteMIRRewardsSQL,
+		deleteAddressTransactionSQL,
+		utxoStakeConsumedDeltaQuery(1),
+		utxoStakeConsumedDeltaQuery(2),
+		utxoStakeConsumedDeltaQuery(4),
+		utxoStakeConsumedDeltaQuery(8),
+		utxoStakeConsumedDeltaQuery(16),
+		utxoStakeConsumedDeltaQuery(32),
+		utxoStakeConsumedDeltaQuery(64),
+		utxoStakeConsumedDeltaQuery(128),
+		utxoStakeConsumedDeltaQuery(256),
+		utxoStakeConsumedDeltaQuery(400),
+	}
+	for rowCount := 2; rowCount <= utxoBatchSize; rowCount++ {
+		queries = append(queries,
+			insertUtxoBatchQuery(rowCount),
+			consumeUtxosBatchQuery(rowCount, false),
+			consumeUtxosBatchQuery(rowCount, true),
+		)
+	}
+	for _, table := range transactionWitnessTables {
+		queries = append(queries, TransactionWitnessCleanupSQL(table))
+	}
+	for _, table := range certificateTables {
+		queries = append(queries, certificateTableCleanupSQL(table))
+	}
+	for _, size := range cachedAddressInputQuerySizes {
+		queries = append(queries, addressTransactionInputQuery(size))
+		for _, table := range []string{
+			"utxo_collateral_input",
+			"utxo_reference_input",
+		} {
+			queries = append(queries,
+				utxoReferenceInsertBatchSQL(table, size),
+			)
+		}
+		for _, column := range []string{
+			"collateral_by_tx_id",
+			"referenced_by_tx_id",
+		} {
+			queries = append(queries,
+				utxoReferenceUpdateBatchSQL(column, size),
+			)
+		}
+	}
+	return queries
+}()
 
 // cacheableForDialect reports whether query is safe to serve from the
-// hot-statement cache when running against dialect. The only unsafe
-// combination today is a RETURNING-id query on MySQL: dialectQueryer.
+// hot-statement cache when running against dialect. A RETURNING-id query on
+// MySQL is unsafe: dialectQueryer.
 // QueryRowContext (dialect_queryer.go) special-cases exactly that shape and
 // never calls QueryRowContext with the translated text at all, instead
 // issuing its own ExecContext + LastInsertId (or RowsAffected, for an
@@ -49,9 +106,18 @@ var hotStatements = []string{
 // *sql.Stmt would sit unused by that path regardless of whether one exists,
 // so prepareHotStatements skips creating it. PostgreSQL supports RETURNING
 // natively (dialectQueryer.QueryRowContext takes its ordinary path there,
-// like SQLite), so this only ever excludes the MySQL+RETURNING pair.
+// like SQLite). The multi-row mutation shapes are SQLite-specific and are
+// also excluded from other dialects.
 func cacheableForDialect(dialect, query string) bool {
+	if dialect != "sqlite" && isSQLiteBatchQuery(query) {
+		return false
+	}
 	return dialect != "mysql" || !hasReturningID(query)
+}
+
+func isSQLiteBatchQuery(query string) bool {
+	return strings.Contains(query, "RETURNING id, tx_id, output_idx") ||
+		strings.Contains(query, "AND (tx_id, output_idx) IN (")
 }
 
 // prepareHotStatements prepares every entry in hotStatements once against
@@ -430,4 +496,28 @@ func (s *Store) execCached(
 		return result, err
 	}
 	return db.ExecContext(ctx, query, args...)
+}
+
+func (s *Store) queryRowsCached(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) (*sql.Rows, error) {
+	if cached, ok := s.lookupCachedStmt(query); ok {
+		op, name := classifySQLStatement(query)
+		if s.sqlOperations != nil {
+			s.sqlOperations.WithLabelValues(op).Inc()
+		}
+		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
+		if s.sqlQueryDuration == nil {
+			return stmt.QueryContext(ctx, args...)
+		}
+		start := time.Now()
+		rows, err := stmt.QueryContext(ctx, args...)
+		s.sqlQueryDuration.WithLabelValues(op, name).
+			Observe(time.Since(start).Seconds())
+		return rows, err
+	}
+	return db.QueryContext(ctx, query, args...)
 }

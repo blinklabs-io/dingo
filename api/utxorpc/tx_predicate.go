@@ -72,6 +72,34 @@ func buildTxPredicateNodeFromProto[T txPredicateProto[T, M], M txPatternProto](
 	)
 }
 
+// predicateProtoWithinBudget counts before conversion so an oversized request
+// cannot allocate a tree larger than the configured limit.
+func predicateProtoWithinBudget[T txPredicateProto[T, M], M txPatternProto](
+	p T,
+	isNilPredicate func(T) bool,
+	remaining *int,
+	depth int,
+) bool {
+	if isNilPredicate(p) {
+		return true
+	}
+	*remaining--
+	if *remaining < 0 {
+		return false
+	}
+	if depth >= maxTxPredicateDepth {
+		return true
+	}
+	for _, group := range [][]T{p.GetNot(), p.GetAllOf(), p.GetAnyOf()} {
+		for _, child := range group {
+			if !predicateProtoWithinBudget(child, isNilPredicate, remaining, depth+1) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func buildTxPredicateNodeFromProtoWithDepth[
 	T txPredicateProto[T, M],
 	M txPatternProto,

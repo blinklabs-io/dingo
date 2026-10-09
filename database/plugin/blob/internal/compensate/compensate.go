@@ -29,7 +29,28 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 )
+
+// ApplyOrder returns keys in the order a commit applies them: ascending, except
+// that keys for which last reports true go to the end, still ascending. A
+// commit applies objects one request at a time, so a reader can observe any
+// prefix of this order. Callers pass the keys whose visibility must follow
+// everything else, such as a block's expiry marker, which may only appear once
+// the data that depended on the block has been rewritten.
+func ApplyOrder(keys []string, last func(key string) bool) []string {
+	slices.Sort(keys)
+	ordered := make([]string, 0, len(keys))
+	var tail []string
+	for _, key := range keys {
+		if last(key) {
+			tail = append(tail, key)
+		} else {
+			ordered = append(ordered, key)
+		}
+	}
+	return append(ordered, tail...)
+}
 
 // entry is one recorded pre-commit object state.
 type entry struct {
@@ -123,8 +144,9 @@ func (l *Log) record(key string, length int64) {
 }
 
 // Len returns the number of recorded entries. Entry i corresponds to the i'th
-// key the commit applies, so Undo(i) reverses exactly the changes already made
-// when the i'th key failed.
+// key the commit applies. A commit whose i'th key failed calls Undo(i+1): the
+// failed request may have taken effect before its error was reported, so it is
+// reversed along with the ones that succeeded.
 func (l *Log) Len() int {
 	return len(l.entries)
 }

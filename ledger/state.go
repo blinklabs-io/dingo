@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -663,12 +664,15 @@ type PeerHeaderLookupFunc func(
 type GenesisSelectionStateFunc func() (active bool, window uint64)
 
 type LedgerStateConfig struct {
-	PromRegistry      prometheus.Registerer
-	Logger            *slog.Logger
-	Database          *database.Database
-	ChainManager      *chain.ChainManager
-	EventBus          *event.EventBus
-	CardanoNodeConfig *cardano.CardanoNodeConfig
+	// MaxConcurrentEvaluations bounds transaction evaluations running at
+	// once across every API front end (0 = GOMAXPROCS).
+	MaxConcurrentEvaluations int
+	PromRegistry             prometheus.Registerer
+	Logger                   *slog.Logger
+	Database                 *database.Database
+	ChainManager             *chain.ChainManager
+	EventBus                 *event.EventBus
+	CardanoNodeConfig        *cardano.CardanoNodeConfig
 	// Network is the CLI/YAML/env network selector dingo was started with
 	// (e.g. "mainnet", "preprod", "prime-mainnet"). Shelley genesis alone
 	// cannot distinguish real Cardano mainnet from a foreign chain that
@@ -1030,6 +1034,8 @@ type tipSnapshot struct {
 }
 
 type LedgerState struct {
+	// evalSlots bounds concurrent EvaluateTx calls; nil means unbounded.
+	evalSlots chan struct{}
 	metrics   stateMetrics
 	consensus atomic.Pointer[consensusSnapshot]
 	tip       atomic.Pointer[tipSnapshot]
@@ -1047,6 +1053,12 @@ type LedgerState struct {
 	// take the populated-cache branch on a database that already has epochs,
 	// so without this the operator sees the diagnosis duplicated.
 	preByronPrefixWarned bool
+	// persistedBlockSize caches persistedMaxBlockSize once
+	// persistedBlockSizeLoaded is set; both are guarded by
+	// persistedBlockSizeMu.
+	persistedBlockSizeMu     sync.Mutex
+	persistedBlockSize       uint64
+	persistedBlockSizeLoaded bool
 	// snapshotGeneration is incremented while writers are serialized by Lock.
 	// It lets readers that need both snapshots reject adjacent publications.
 	snapshotGeneration uint64
@@ -1360,6 +1372,11 @@ type LedgerState struct {
 	atTipRecoveryLastFailSlot uint64 // failing slot of the previous distinct at-tip failure
 	atTipRecoveryDescentCount int    // consecutive distinct failures that did not advance
 	atTipRecoveryHolding      bool   // sticky: deep rewinds suppressed until forward progress
+	// Start slot of the epoch whose boundary the final at-tip recovery
+	// attempt has already been allowed to rewind across. Zero means none;
+	// cleared with the descent tracking once the ledger applies past the
+	// failing block.
+	atTipRecoveryCrossedEpochStart uint64
 	// Replay recovery non-convergence tracking. The
 	// unresolved-producer fallback can encounter different, slowly advancing
 	// failing blocks while repeatedly rebuilding to the same applied tip.
@@ -1785,14 +1802,6 @@ type EpochRolloverResult struct {
 	// HardFork is non-nil when a protocol version change
 	// in the updated pparams triggers an era transition.
 	HardFork *HardForkInfo
-	// BoundarySnapshotDeferred is true when the caller asked
-	// processEpochRollover to skip the authoritative mark-snapshot capture and
-	// the rollover reached the point where it would otherwise have captured it.
-	// The caller then owns exactly one capture, taken after the remaining
-	// boundary era transitions have rewritten NewCurrentEra and
-	// NewCurrentPParams. It stays false for the initial-epoch path, which never
-	// captures a mark snapshot.
-	BoundarySnapshotDeferred bool
 	// RealV2CostModelObserved is true when this rollover's enacted governance
 	// ParamUpdate explicitly carried a PlutusV2 cost model
 	// (governance.EnactmentResult.PlutusV2CostModelWritten), not merely
@@ -1807,6 +1816,9 @@ type EpochRolloverResult struct {
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
+	if cfg.MaxConcurrentEvaluations < 0 {
+		return nil, errors.New("MaxConcurrentEvaluations must not be negative")
+	}
 	if cfg.ChainManager == nil {
 		return nil, errors.New("a ChainManager is required")
 	}
@@ -1840,6 +1852,10 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		validationEnabled:  cfg.ValidateHistorical,
 		plutusEvalCtxCache: eras.NewPlutusEvalContextCache(),
 		byronPBFT:          byronPBFT,
+		evalSlots: make(
+			chan struct{},
+			cmp.Or(cfg.MaxConcurrentEvaluations, runtime.GOMAXPROCS(0)),
+		),
 	}
 	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
 	ls.timeConverter = ls.newTimeConverter()
@@ -2203,7 +2219,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Load epoch info from DB
 	//nolint:contextcheck // loadEpochs reads through txn; only the bounded startup lab-nonce heal opens its own transaction
 	err := ls.SubmitAsyncDBTxn(ctx, func(txn *database.Txn) error {
-		return ls.loadEpochs(txn)
+		return ls.loadEpochs(ctx, txn)
 	}, true)
 	if err != nil {
 		return fmt.Errorf("failed to load epoch info: %w", err)
@@ -2300,12 +2316,9 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if ls.startupRewardPrecomputeHook != nil {
 		ls.startupRewardPrecomputeHook()
 	}
-	// Now that both tip and epoch are loaded, check whether the safe zone
-	// already covers the epoch end (TransitionImpossible).  This handles the
-	// case where the node was shut down after the tip advanced past the
-	// stability window but before the next epoch rollover was processed.
-	// First honor any TestXHardForkAtEpoch override (TriggerAtEpoch): this
-	// short-circuits TransitionUnknown/Impossible with a known-in-advance
+	// Now that both tip and epoch are loaded, classify an indefinite final era
+	// as TransitionImpossible. First honor any TestXHardForkAtEpoch override;
+	// this short-circuits TransitionUnknown/Impossible with a known-in-advance
 	// transition epoch, matching the Haskell HFC semantics.
 	ls.evaluateTriggerAtEpoch()
 	ls.evaluateTransitionImpossible()
@@ -5332,6 +5345,7 @@ func (ls *LedgerState) processChainIteratorRollback(
 //
 // Returns the new era and protocol parameters, or an error.
 func (ls *LedgerState) transitionToEra(
+	ctx context.Context,
 	txn *database.Txn,
 	nextEraId uint,
 	startEpoch uint64,
@@ -5339,6 +5353,7 @@ func (ls *LedgerState) transitionToEra(
 	currentPParams lcommon.ProtocolParameters,
 ) (*EraTransitionResult, error) {
 	return ls.transitionToEraFrom(
+		ctx,
 		txn,
 		nextEraId,
 		startEpoch,
@@ -5353,6 +5368,7 @@ func (ls *LedgerState) transitionToEra(
 // epoch boundary: LedgerState.currentEra is intentionally unchanged until
 // the surrounding database transaction commits.
 func (ls *LedgerState) transitionToEraFrom(
+	ctx context.Context,
 	txn *database.Txn,
 	nextEraId uint,
 	startEpoch uint64,
@@ -5415,6 +5431,7 @@ func (ls *LedgerState) transitionToEraFrom(
 			}
 		}
 		if err := governance.TranslateRatifiedGovActions(
+			ctx,
 			ls.db,
 			txn,
 			fromEraId,
@@ -5426,167 +5443,96 @@ func (ls *LedgerState) transitionToEraFrom(
 	return result, nil
 }
 
-// applyBoundaryEraTransitions applies the era transitions a multi-era boundary
-// block requires but the epoch rollover does not perform itself, then takes the
-// mark snapshot the rollover deferred.
-//
-// The rollover has to run first so pending protocol updates are enacted in the
-// source era; applying the transitions before it would let an old-era update
-// overwrite the successor era's parameters. The consequence is that when the
-// rollover would normally capture the mark snapshot, the final era and protocol
-// parameters do not exist yet. So the snapshot is captured here instead, after
-// the transitions and after the new epoch's era and parameters are made durable,
-// which is what makes the snapshot's recorded protocol major agree with the era
-// the epoch actually runs at and with the post-commit EpochTransitionEvent.
-//
-// rolloverResult is updated in place to describe the final era. The returned
-// transition results are in application order, for the caller's in-memory state
-// and hard-fork events.
-func (ls *LedgerState) applyBoundaryEraTransitions(
+func (ls *LedgerState) prepareEraTransitionsForRollover(
+	ctx context.Context,
 	txn *database.Txn,
 	snapshotEpoch models.Epoch,
+	snapshotEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
 	transitionPath []uint,
-	rolloverResult *EpochRolloverResult,
-) ([]*EraTransitionResult, error) {
-	workingPParams := rolloverResult.NewCurrentPParams
-	workingEraId := rolloverResult.NewCurrentEra.Id
-	transitionResults := make([]*EraTransitionResult, 0, len(transitionPath))
+) (
+	lcommon.ProtocolParameters,
+	uint,
+	[]*EraTransitionResult,
+	[]uint,
+	bool,
+	error,
+) {
+	if len(transitionPath) == 0 {
+		return currentPParams, snapshotEra.Id, nil, nil, false, nil
+	}
+	boundarySlot := snapshotEpoch.StartSlot + uint64(snapshotEpoch.LengthInSlots)
+	workingPParams := currentPParams
+	priorVersion, priorVersionErr := GetProtocolVersion(currentPParams)
+	var plutusV2CostModelWritten bool
+	if snapshotEra.Id != eras.ByronEraDesc.Id {
+		ownedPParams, err := cloneProtocolParametersForEra(
+			snapshotEra,
+			currentPParams,
+		)
+		if err != nil {
+			return nil, 0, nil, nil, false, fmt.Errorf(
+				"clone source-era protocol parameters: %w", err,
+			)
+		}
+		if ownedPParams == nil {
+			return nil, 0, nil, nil, false, errors.New(
+				"source-era protocol parameters are nil",
+			)
+		}
+		err = ls.timeRolloverPhase(
+			snapshotEpoch.EpochId+1,
+			"pparam_updates",
+			func() error {
+				var updateErr error
+				workingPParams, plutusV2CostModelWritten, updateErr = ls.computeClassicPParamUpdates(
+					ctx,
+					txn,
+					boundarySlot,
+					snapshotEpoch.EpochId+1,
+					snapshotEra,
+					ownedPParams,
+				)
+				return updateErr
+			},
+		)
+		if err != nil {
+			return nil, 0, nil, nil, false, fmt.Errorf(
+				"apply source-era pparam updates: %w", err,
+			)
+		}
+	}
+	workingEraID := snapshotEra.Id
+	results := make([]*EraTransitionResult, 0, len(transitionPath))
+	var transitionHardForkMajors []uint
 	for _, transitionEraID := range transitionPath {
 		result, err := ls.transitionToEraFrom(
+			ctx,
 			txn,
 			transitionEraID,
-			snapshotEpoch.EpochId,
-			snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots),
+			snapshotEpoch.EpochId+1,
+			boundarySlot,
 			workingPParams,
-			workingEraId,
+			workingEraID,
 		)
 		if err != nil {
-			return nil, err
+			return nil, 0, nil, nil, false, err
+		}
+		newVersion, newVersionErr := GetProtocolVersion(result.NewPParams)
+		if priorVersionErr == nil && newVersionErr == nil &&
+			priorVersion.Major != newVersion.Major {
+			transitionHardForkMajors = append(
+				transitionHardForkMajors,
+				newVersion.Major,
+			)
 		}
 		workingPParams = result.NewPParams
-		workingEraId = result.NewEra.Id
-		transitionResults = append(transitionResults, result)
+		priorVersion, priorVersionErr = newVersion, newVersionErr
+		workingEraID = result.NewEra.Id
+		results = append(results, result)
 	}
-
-	newEpoch := rolloverResult.NewCurrentEpoch
-	finalEra, ok := ls.eraById(workingEraId)
-	if !ok || finalEra == nil {
-		return nil, fmt.Errorf(
-			"unknown transitioned era ID %d", workingEraId,
-		)
-	}
-	slotLength, epochLength, err := finalEra.EpochLengthFunc(
-		ls.config.CardanoNodeConfig,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"resolve transitioned era timing: %w", err,
-		)
-	}
-	newEpoch.EraId = workingEraId
-	newEpoch.SlotLength = slotLength
-	newEpoch.LengthInSlots = epochLength
-	// calculateEpochNonce short-circuits to an all-nil nonce whenever the
-	// ROLLOVER'S SOURCE era is Byron (no Praos nonce there), regardless of
-	// what era this boundary actually transitions into. That is correct
-	// when the new epoch stays in Byron, but here workingEraId has just
-	// been advanced past Byron (that is the only way this function runs),
-	// so the epoch needs a real nonce for header verification in its new
-	// era. Seed it the same way every other from-genesis nonce path does
-	// (computeEpochNonceForSlot, calculateEpochNonce's own no-prior-nonce
-	// branch): the Shelley genesis hash for nonce/evolving/candidate, with
-	// LastEpochBlockNonce left at NeutralNonce (nil) — Without
-	// this, header verification permanently rejects every block in the
-	// new era with "epoch has no nonce for slot" for any Byron-prefixed
-	// network that syncs from genesis instead of a Mithril snapshot.
-	if workingEraId != 0 && len(newEpoch.Nonce) == 0 {
-		if ls.config.CardanoNodeConfig == nil {
-			return nil, errors.New(
-				"seed post-Byron epoch nonce: CardanoNodeConfig is nil",
-			)
-		}
-		if ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
-			return nil, errors.New(
-				"seed post-Byron epoch nonce: could not get Shelley genesis hash",
-			)
-		}
-		genesisHashBytes, err := hex.DecodeString(
-			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"decode Shelley genesis hash for post-Byron epoch nonce: %w",
-				err,
-			)
-		}
-		if len(genesisHashBytes) != lcommon.Blake2b256Size {
-			return nil, fmt.Errorf(
-				"seed post-Byron epoch nonce: Shelley genesis hash is %d bytes, expected %d",
-				len(genesisHashBytes),
-				lcommon.Blake2b256Size,
-			)
-		}
-		newEpoch.Nonce = genesisHashBytes
-		newEpoch.EvolvingNonce = genesisHashBytes
-		newEpoch.CandidateNonce = genesisHashBytes
-		newEpoch.LastEpochBlockNonce = nil
-	}
-	if err := ls.db.SetEpoch(
-		newEpoch.StartSlot,
-		newEpoch.EpochId,
-		newEpoch.Nonce,
-		newEpoch.EvolvingNonce,
-		newEpoch.CandidateNonce,
-		newEpoch.LastEpochBlockNonce,
-		newEpoch.EraId,
-		newEpoch.SlotLength,
-		newEpoch.LengthInSlots,
-		txn,
-	); err != nil {
-		return nil, fmt.Errorf("update transitioned epoch: %w", err)
-	}
-	pparamsCbor, err := cbor.Encode(&workingPParams)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"encode transitioned protocol parameters: %w", err,
-		)
-	}
-	if err := ls.db.SetPParams(
-		pparamsCbor,
-		newEpoch.StartSlot,
-		newEpoch.EpochId,
-		workingEraId,
-		txn,
-	); err != nil {
-		return nil, fmt.Errorf(
-			"persist transitioned protocol parameters: %w", err,
-		)
-	}
-	rolloverResult.NewCurrentEpoch = newEpoch
-	rolloverResult.NewCurrentPParams = workingPParams
-	rolloverResult.NewCurrentEra = *finalEra
-	rolloverResult.SchedulerIntervalMs = slotLength
-	for i := range rolloverResult.NewEpochCache {
-		if rolloverResult.NewEpochCache[i].EpochId == newEpoch.EpochId {
-			rolloverResult.NewEpochCache[i].EraId = workingEraId
-			rolloverResult.NewEpochCache[i].SlotLength = slotLength
-			rolloverResult.NewEpochCache[i].LengthInSlots = epochLength
-			rolloverResult.NewEpochCache[i].Nonce = newEpoch.Nonce
-			rolloverResult.NewEpochCache[i].EvolvingNonce = newEpoch.EvolvingNonce
-			rolloverResult.NewEpochCache[i].CandidateNonce = newEpoch.CandidateNonce
-			rolloverResult.NewEpochCache[i].LastEpochBlockNonce = newEpoch.LastEpochBlockNonce
-		}
-	}
-
-	if rolloverResult.BoundarySnapshotDeferred {
-		if err := ls.captureEpochBoundarySnapshot(ls.lifecycleContext(),
-			txn, snapshotEpoch, rolloverResult,
-		); err != nil {
-			return nil, err
-		}
-		rolloverResult.BoundarySnapshotDeferred = false
-	}
-	return transitionResults, nil
+	return workingPParams, workingEraID, results,
+		transitionHardForkMajors, plutusV2CostModelWritten, nil
 }
 
 // applyEraTransition applies a single era-transition result to the in-memory
@@ -7674,7 +7620,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					}
 				}
 				workingPParams := snapshotPParams
-				workingEraId := snapshotEra.Id
+				var workingEraId uint
 
 				// Honor the era schedule when the boundary-crossing
 				// block did not bump the era itself. The current
@@ -7713,68 +7659,45 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						snapshotEra.Id, nextEpochEraId,
 					)
 				}
-				// Let the epoch rollover enact pending protocol updates in
-				// the source era first. Applying a successor transition before
-				// the rollover would decode an update using the successor's
-				// shape; fields removed by that era (for example Alonzo's
-				// decentralization field in Babbage) then fail to decode.
-				transitionsBeforeRollover,
-					transitionsAfterRollover := splitEraTransitionsForRollover(
+				// Translate into the era that owns the incoming epoch before
+				// running its boundary rules, matching the hard-fork
+				// combinator's extendToSlot-before-TICK ordering.
+				var transitionResults []*EraTransitionResult
+				var transitionHardForkMajors []uint
+				var plutusV2CostModelWritten bool
+				workingPParams, workingEraId, transitionResults,
+					transitionHardForkMajors, plutusV2CostModelWritten, err = ls.prepareEraTransitionsForRollover(
+					ctx,
+					txn,
+					snapshotEpoch,
+					snapshotEra,
+					workingPParams,
 					transitionPath,
 				)
-				for _, transitionEraID := range transitionsBeforeRollover {
-					result, err := ls.transitionToEraFrom(
-						txn,
-						transitionEraID,
-						snapshotEpoch.EpochId,
-						snapshotEpoch.StartSlot+uint64(
-							snapshotEpoch.LengthInSlots,
-						),
-						workingPParams,
-						workingEraId,
-					)
-					if err != nil {
-						return err
-					}
-					workingPParams = result.NewPParams
-					workingEraId = result.NewEra.Id
-					eraTransitions = append(eraTransitions, result)
+				if err != nil {
+					return err
 				}
+				eraTransitions = append(eraTransitions, transitionResults...)
+				classicPParamsApplied := len(transitionPath) > 0
 				// Process epoch rollover
 				workingEraPtr, ok := ls.eraById(workingEraId)
 				if !ok {
 					return fmt.Errorf("unknown era ID %d", workingEraId)
 				}
-				result, err := ls.processEpochRollover(ctx,
+				result, err := ls.processEpochRolloverWithClassicPParamsContext(
+					ctx,
 					txn,
 					snapshotEpoch,
 					*workingEraPtr,
 					workingPParams,
-					len(transitionsAfterRollover) > 0,
+					classicPParamsApplied,
+					plutusV2CostModelWritten,
+					transitionHardForkMajors,
 				)
 				if err != nil {
 					return err
 				}
 				rolloverResult = result
-				if len(transitionsAfterRollover) > 0 {
-					transitionResults, err := ls.applyBoundaryEraTransitions(
-						txn,
-						snapshotEpoch,
-						transitionsAfterRollover,
-						rolloverResult,
-					)
-					if err != nil {
-						return err
-					}
-					// applyBoundaryEraTransitions updated
-					// rolloverResult in place, so the era and
-					// pparams the caller applies after commit
-					// already describe the final era.
-					eraTransitions = append(
-						eraTransitions,
-						transitionResults...,
-					)
-				}
 				return nil
 			})
 			rolloverElapsed := time.Since(rolloverStart)
@@ -8231,6 +8154,11 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// Track pending state changes during transaction
 			var pendingTip ochainsync.Tip
 			var pendingNonce []byte
+			pendingBlockNonces := make(
+				[]models.BlockNonce,
+				0,
+				len(nextBatch[i:end]),
+			)
 			var blocksProcessed int
 			runningNonce := snapshotNonce
 			trackByronPBFT := batchContainsByronBlocks(nextBatch[i:end])
@@ -8580,21 +8508,23 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// Store an applied point for every block. Byron blocks do
 						// not have an evolving nonce, but reconciliation still
 						// needs their durable point to build rollback notifications.
-						err = ls.db.SetBlockNonce(
-							tmpPoint.Hash,
-							tmpPoint.Slot,
-							blockNonce,
-							isCheckpoint,
-							txn,
+						pendingBlockNonces = append(
+							pendingBlockNonces,
+							models.BlockNonce{
+								Hash:         tmpPoint.Hash,
+								Slot:         tmpPoint.Slot,
+								Nonce:        blockNonce,
+								IsCheckpoint: isCheckpoint,
+							},
 						)
-						if err != nil {
-							deltaBatch.Release()
-							return err
-						}
 						if len(blockNonce) > 0 {
 							// Track pending nonce (will be committed after txn succeeds)
 							pendingNonce = blockNonce
 						}
+					}
+					if err := ls.db.SetBlockNonces(pendingBlockNonces, txn); err != nil {
+						deltaBatch.Release()
+						return err
 					}
 					// Apply delta batch
 					applyStart := time.Now()
@@ -8717,11 +8647,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				)
 				// After advancing the tip, first honor any TestXHardForkAtEpoch
 				// override so queries surface the pinned epoch ahead of time;
-				// then check whether the stability window reaches or exceeds
-				// the epoch end, in which case a hard fork cannot happen
-				// within this epoch and TransitionImpossible should be
-				// recorded so queryHardForkEraHistory serves the confirmed
-				// epoch-end slot instead of a stale safeZone cap.
+				// then classify an indefinite final era as
+				// TransitionImpossible.
 				ls.evaluateTriggerAtEpoch()
 				ls.evaluateTransitionImpossible()
 				ls.evaluateProtocolVersionBump(ctx)
@@ -9963,18 +9890,10 @@ func (ls *LedgerState) blocksAppliedFromSlot(ctx context.Context, slot uint64) u
 	return tip.BlockNumber - before.Number
 }
 
-// evaluateTransitionImpossible sets transitionInfo to TransitionImpossible
-// when the safe-zone end for the current era already reaches or exceeds the
-// current epoch's end slot.
-//
-// At that point a hard-fork transition is impossible within this epoch: the
-// stability window has "vouched for" slots up to (and past) the boundary, so
-// no rollover can introduce a new era within the epoch.  Serving the full
-// epoch-end slot as EraEnd is therefore safe and more informative than the
-// stale tipSlot+safeZone cap.
-//
-// The method is a no-op unless transitionInfo.State is TransitionUnknown; it
-// must not override a confirmed TransitionKnown.
+// evaluateTransitionImpossible records that the current era has no transition
+// during this execution and an indefinite safe zone. A finite safe zone means
+// the node must keep forecasting from the tip even when the current era is the
+// last one this binary models.
 //
 // Call under ls.Lock() (runtime tip-update) or without a lock during
 // single-threaded startup (after loadTip).
@@ -9982,23 +9901,14 @@ func (ls *LedgerState) evaluateTransitionImpossible() {
 	if ls.transitionInfo.State != hardfork.TransitionUnknown {
 		return
 	}
-	// Only meaningful when we have a fully-populated epoch.
-	if ls.currentEpoch.LengthInSlots == 0 {
+	shape := ls.eraShape()
+	idx, ok := shape.EraIndex(ls.currentEra.Id)
+	if !ok {
 		return
 	}
-	epochEndSlot, addErr := checkedSlotAdd(
-		ls.currentEpoch.StartSlot,
-		uint64(ls.currentEpoch.LengthInSlots),
-	)
-	if addErr != nil {
-		return
-	}
-	safeZone := ls.calculateStabilityWindowForEra(ls.currentEra.Id)
-	safeEndSlot, addErr := checkedSlotAdd(ls.currentTip.Point.Slot, safeZone)
-	if addErr != nil {
-		return
-	}
-	if safeEndSlot >= epochEndSlot {
+	entry := shape.Eras[idx]
+	if entry.NextEraTrigger.Kind == hardfork.TriggerNotDuringThisExecution &&
+		entry.Params.SafeZoneSlots == 0 {
 		ls.transitionInfo = hardfork.NewTransitionImpossible()
 	}
 }
@@ -10438,28 +10348,28 @@ func (ls *LedgerState) verifyGovernancePurposeRoots(ctx context.Context) error {
 	return governance.VerifyPurposeRoots(ctx, ls.db, nil, epoch)
 }
 
-func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
+func (ls *LedgerState) loadEpochs(ctx context.Context, txn *database.Txn) error {
 	// Load and cache all epochs
 	epochs, err := ls.db.GetEpochs(txn)
 	if err != nil {
 		return err
 	}
-	return ls.setEpochCache(txn, epochs)
+	return ls.setEpochCache(ctx, txn, epochs)
 }
 
 // PrepareEpochCacheForStartup loads epoch metadata before LedgerState.Start().
 // It is startup-only: callers use this when another component needs
 // SlotToEpoch before the ledger processing loop is running.
-func (ls *LedgerState) PrepareEpochCacheForStartup() error {
+func (ls *LedgerState) PrepareEpochCacheForStartup(ctx context.Context) error {
 	if ls.ctx != nil {
 		return errors.New(
 			"PrepareEpochCacheForStartup must be called before LedgerState.Start",
 		)
 	}
-	txn := ls.db.Transaction(context.Background(), true)
+	txn := ls.db.Transaction(ctx, true)
 	defer txn.Release()
 	return txn.Do(func(txn *database.Txn) error {
-		return ls.loadEpochs(txn)
+		return ls.loadEpochs(ctx, txn)
 	})
 }
 
@@ -10534,6 +10444,7 @@ func shelleyDeclaredAtGenesis(cfg *cardano.CardanoNodeConfig) bool {
 }
 
 func (ls *LedgerState) setEpochCache(
+	ctx context.Context,
 	txn *database.Txn,
 	epochs []models.Epoch,
 ) error {
@@ -10546,7 +10457,7 @@ func (ls *LedgerState) setEpochCache(
 	if len(epochs) > 0 {
 		// Recover epoch records whose LastEpochBlockNonce was persisted empty
 		// or stale by pre-fix boundary lookup bugs (see healEmptyLabNonces).
-		ls.healEmptyLabNonces()
+		ls.healEmptyLabNonces(ctx)
 		// Set current epoch and era after healing so currentEpoch reflects
 		// any repaired nonce in epochCache.
 		ls.currentEpoch = ls.epochCache[len(ls.epochCache)-1]
@@ -10602,6 +10513,7 @@ func (ls *LedgerState) setEpochCache(
 	}
 	for nextEraId := ls.currentEra.Id + 1; nextEraId <= startEraId; nextEraId++ {
 		result, err := ls.transitionToEra(
+			ctx,
 			txn,
 			nextEraId,
 			ls.currentEpoch.EpochId,
@@ -10618,12 +10530,11 @@ func (ls *LedgerState) setEpochCache(
 		ls.applyEraTransition(result)
 	}
 	// Generate initial epoch
-	rolloverResult, err := ls.processEpochRollover(context.Background(),
+	rolloverResult, err := ls.processEpochRollover(ctx,
 		txn,
 		ls.currentEpoch,
 		ls.currentEra,
 		ls.currentPParams,
-		false,
 	)
 	if err != nil {
 		return err
@@ -10667,8 +10578,8 @@ func (ls *LedgerState) setEpochCache(
 // pure function of already-stored chain data and is idempotent across restarts.
 // The writer-owned epoch cache must have been replaced with a fresh DB-loaded
 // slice and must not have been published before this in-place repair runs.
-func (ls *LedgerState) healEmptyLabNonces() {
-	if ls.healEmptyLabNoncesInPlace(context.Background(), ls.epochCache) {
+func (ls *LedgerState) healEmptyLabNonces(ctx context.Context) {
+	if ls.healEmptyLabNoncesInPlace(ctx, ls.epochCache) {
 		clear(ls.epochNonceHexCache)
 	}
 }
@@ -12469,6 +12380,92 @@ func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	return ls.loadConsensusSnapshot().currentPParams
 }
 
+// blockFramingAllowance covers the CBOR array headers around a block's header
+// and body sections, which the protocol's header and body size limits do not
+// count.
+const blockFramingAllowance = 64
+
+// MaxBlockSize returns the largest serialized block this chain admits for a
+// stored block of any era: persisted and current header/body limits plus framing,
+// or the Byron genesis block size limit when that is larger. A stored block
+// was admitted under its own era's limits, and Byron main and epoch boundary
+// blocks are bounded by the genesis maxBlockSize rather than the much smaller
+// Shelley-family limits, so the current limits alone would refuse Byron
+// history. It returns 0 when neither limit is known, which callers treat as
+// unknown.
+//
+// The persisted limits are read once. While the ledger runs, a new row is
+// written only by an epoch transition, as the parameters it makes current, so
+// folding in the current limits on each call keeps the bound complete without
+// re-reading the history on every archive download.
+func (ls *LedgerState) MaxBlockSize() uint64 {
+	size := ls.persistedMaxBlockSize()
+	if limits, ok := protocolBlockLimits(ls.GetCurrentPParams()); ok {
+		size = max(size, limits.maxHeaderSize+limits.maxBodySize+blockFramingAllowance)
+	}
+	if nodeConfig := ls.config.CardanoNodeConfig; nodeConfig != nil {
+		if genesis := nodeConfig.ByronGenesis(); genesis != nil &&
+			genesis.BlockVersionData.MaxBlockSize > 0 {
+			size = max(size, uint64(genesis.BlockVersionData.MaxBlockSize))
+		}
+	}
+	return size
+}
+
+// persistedMaxBlockSize returns the largest block limit among the persisted
+// protocol parameters. A failed store read is not remembered, so the next call
+// retries it. Malformed rows are warned about and skipped; a successful scan
+// caches the largest limit it could decode.
+func (ls *LedgerState) persistedMaxBlockSize() uint64 {
+	if ls.db == nil {
+		return 0
+	}
+	ls.persistedBlockSizeMu.Lock()
+	defer ls.persistedBlockSizeMu.Unlock()
+	if ls.persistedBlockSizeLoaded {
+		return ls.persistedBlockSize
+	}
+	var size uint64
+	for _, era := range ls.eraList() {
+		if era.DecodePParamsFunc == nil {
+			continue
+		}
+		rows, err := ls.db.Metadata().ListPParamsForEra(era.Id, nil)
+		if err != nil {
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"failed to read persisted protocol parameters for block size bound",
+					"component", "ledger",
+					"era", era.Name,
+					"error", err,
+				)
+			}
+			return size
+		}
+		for _, row := range rows {
+			params, err := era.DecodePParamsFunc(row.Cbor)
+			if err != nil {
+				if ls.config.Logger != nil {
+					ls.config.Logger.Warn(
+						"failed to decode persisted protocol parameters for block size bound",
+						"component", "ledger",
+						"era", era.Name,
+						"epoch", row.Epoch,
+						"error", err,
+					)
+				}
+				continue
+			}
+			if limits, ok := protocolBlockLimits(params); ok {
+				size = max(size, limits.maxHeaderSize+limits.maxBodySize+blockFramingAllowance)
+			}
+		}
+	}
+	ls.persistedBlockSize = size
+	ls.persistedBlockSizeLoaded = true
+	return size
+}
+
 // PlutusEvalContextCache returns the shared PlutusEvalContextCache script
 // evaluation reuses across every redeemer, transaction, and block this
 // LedgerState validates or evaluates. Returns nil for a bare-constructed
@@ -13315,17 +13312,22 @@ func (ls *LedgerState) GetTransactionsByAddress(
 // GetTransactionsByAddressWithOrder returns transactions
 // involving the given address with explicit ordering.
 func (ls *LedgerState) GetTransactionsByAddressWithOrder(
+	ctx context.Context,
 	addr lcommon.Address,
 	limit int,
 	offset int,
 	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 ) ([]models.Transaction, error) {
 	txs, err := ls.db.GetTransactionsByAddressWithOrder(
-		context.Background(),
+		ctx,
 		addr,
 		limit,
 		offset,
 		order,
+		from,
+		to,
 		nil,
 	)
 	if err != nil {
@@ -13343,11 +13345,16 @@ func (ls *LedgerState) GetTransactionsByAddressWithOrder(
 // CountTransactionsByAddress returns the total number of
 // transactions involving the given address.
 func (ls *LedgerState) CountTransactionsByAddress(
+	ctx context.Context,
 	addr lcommon.Address,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 ) (int, error) {
 	count, err := ls.db.CountTransactionsByAddress(
-		context.Background(),
+		ctx,
 		addr,
+		from,
+		to,
 		nil,
 	)
 	if err != nil {
@@ -13921,6 +13928,11 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 	})
 }
 
+// ErrEvaluationBusy reports that every transaction-evaluation slot is in use.
+// Evaluation runs scripts on the caller's goroutine, so admission is refused
+// outright rather than queued.
+var ErrEvaluationBusy = errors.New("transaction evaluation capacity exhausted")
+
 // EvaluateTx evaluates the scripts in the provided transaction and returns the calculated
 // fee, per-redeemer ExUnits, and total ExUnits.
 //
@@ -13931,14 +13943,22 @@ func (ls *LedgerState) EvaluateTx(
 	return ls.EvaluateTxContext(context.Background(), tx)
 }
 
-// EvaluateTxContext evaluates the scripts in tx and cancels storage work with
-// ctx.
+// EvaluateTxContext evaluates transaction scripts until completion or context
+// cancellation, using ctx to cancel storage work.
 func (ls *LedgerState) EvaluateTxContext(
 	ctx context.Context,
 	tx lcommon.Transaction,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
+	}
+	if ls.evalSlots != nil {
+		select {
+		case ls.evalSlots <- struct{}{}:
+			defer func() { <-ls.evalSlots }()
+		default:
+			return 0, lcommon.ExUnits{}, nil, ErrEvaluationBusy
+		}
 	}
 	// Snapshot mutable state from the lock-free consensus snapshot
 	consensusState := ls.loadConsensusSnapshot()
@@ -13979,6 +13999,7 @@ func (ls *LedgerState) EvaluateTxContext(
 				return err
 			}
 			lv = (&LedgerView{
+				ctx:            ctx,
 				txn:            txn,
 				ls:             ls,
 				epochStartSlot: consensusState.currentEpoch.StartSlot,
@@ -13987,11 +14008,17 @@ func (ls *LedgerState) EvaluateTxContext(
 				pp,
 			).pinSyntheticV2CostModel(synthetic)
 			var err error
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			fee, totalExUnits, redeemerExUnits, err = validationEra.EvaluateTxFunc(
 				tx,
 				lv,
 				pp,
 			)
+			if err == nil {
+				err = ctx.Err()
+			}
 			return err
 		})
 		err = storageFaultOrErr(lv, err)

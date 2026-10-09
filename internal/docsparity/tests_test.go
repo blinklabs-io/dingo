@@ -3854,3 +3854,84 @@ func TestLintGatesNilawayAndModernize(t *testing.T) {
 		}
 	}
 }
+
+// TestGitignoreCoversLocalSecretsAndKeepsTrackedFixtures pins both halves of
+// the secret-file patterns: names that carry local credentials are ignored,
+// and every tracked fixture that matches one of them is un-ignored explicitly,
+// so an intentional fixture is never one `git add -f` away from looking like
+// a leak.
+func TestGitignoreCoversLocalSecretsAndKeepsTrackedFixtures(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+	if err := exec.Command(
+		"git", "-C", root, "rev-parse", "--git-dir",
+	).Run(); err != nil {
+		t.Skip("not a git checkout")
+	}
+
+	for _, name := range []string{
+		".env",
+		"payment.skey",
+		"payment.vkey",
+		"node.key",
+		"tls/server.pem",
+		"credentials.json",
+		"dingo.yaml",
+	} {
+		// --no-index judges the pattern alone, whether or not the path exists
+		// or is tracked.
+		err := exec.Command(
+			"git", "-C", root, "check-ignore", "--no-index", "-q", name,
+		).Run()
+		if err != nil {
+			t.Errorf("%s is not ignored: %v", name, err)
+		}
+	}
+
+	tracked, err := exec.Command(
+		"git", "-C", root, "ls-files", "-ci", "--exclude-standard",
+	).Output()
+	if err != nil {
+		t.Fatalf("listing ignored tracked files: %v", err)
+	}
+	if got := strings.TrimSpace(string(tracked)); got != "" {
+		t.Errorf(
+			"tracked files match an ignore pattern without a negation:\n%s",
+			got,
+		)
+	}
+}
+
+// TestDockerfilesExposingMetricsBindThem keeps an image that publishes the
+// metrics port reachable on it. The binary binds metrics to loopback unless
+// told otherwise, so an image that EXPOSEs 12798 without setting the bind
+// address advertises a port that refuses every connection from outside the
+// container, including an orchestrator's probes and scrapers.
+func TestDockerfilesExposingMetricsBindThem(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+	for _, rel := range dockerfiles(t, root) {
+		var exposes, binds bool
+		for line := range strings.SplitSeq(readRepoFile(t, root, rel), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			switch strings.ToUpper(fields[0]) {
+			case "EXPOSE":
+				exposes = exposes || slices.Contains(fields[1:], "12798")
+			case "ENV":
+				binds = binds ||
+					strings.HasPrefix(fields[1], "DINGO_METRICS_BIND_ADDR=")
+			}
+		}
+		if exposes && !binds {
+			t.Errorf(
+				"%s exposes the metrics port without setting DINGO_METRICS_BIND_ADDR",
+				rel,
+			)
+		}
+	}
+}
