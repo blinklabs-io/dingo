@@ -131,12 +131,15 @@ func (s *Store) applyTransactionCertificates(
 	blockIndex uint32,
 	deposits map[int]uint64,
 	policy depositPolicy,
+	transactionIsNew bool,
 ) ([]models.StakeCredentialRef, error) {
 	if len(certificates) == 0 {
 		return nil, nil
 	}
-	if err := s.deleteSpecializedCertificates(ctx, db, transactionID); err != nil {
-		return nil, err
+	if !transactionIsNew {
+		if err := s.deleteSpecializedCertificates(ctx, db, transactionID); err != nil {
+			return nil, err
+		}
 	}
 	refs := make(map[string]models.StakeCredentialRef)
 	for certIndex, certificate := range certificates {

@@ -163,6 +163,24 @@ ON CONFLICT (hash) DO UPDATE SET
     collateral_fee = excluded.collateral_fee
 RETURNING id`
 
+// The batched path needs to distinguish a fresh ID from a replay so it can
+// skip child-table cleanup only when those rows cannot already exist.
+const transactionBatchInsertSQL = `
+INSERT INTO "transaction" (
+    hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (hash) DO NOTHING
+RETURNING id`
+
+const transactionBatchConflictUpdateSQL = `
+UPDATE "transaction"
+SET block_hash = ?, block_index = ?, slot = ?, collateral_fee = ?
+WHERE hash = ?`
+
+const transactionBatchConflictIDSQL = `
+SELECT id FROM "transaction" WHERE hash = ?`
+
 const consumeUtxoSQL = `
 UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
@@ -321,7 +339,7 @@ func (a *transactionBatchAccumulator) insertTransaction(
 	ctx context.Context,
 	db queryer,
 	args ...any,
-) (uint, error) {
+) (uint, bool, error) {
 	if a.transactionInsert == nil {
 		// unwrapDialectQueryer, not a bare type assertion: whenever
 		// Config.PromRegistry is set, Store.instrumentedQueryer wraps every
@@ -333,32 +351,58 @@ func (a *transactionBatchAccumulator) insertTransaction(
 		if dialect, ok := unwrapDialectQueryer(db); ok {
 			a.mysql = dialect.dialect == "mysql"
 		}
-		stmt, err := db.PrepareContext(ctx, transactionInsertSQL)
+		query := transactionBatchInsertSQL
+		if a.mysql {
+			query = transactionInsertSQL
+		}
+		stmt, err := db.PrepareContext(ctx, query)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		a.transactionInsert = stmt
 	}
 	if a.sqlOperations != nil {
-		op, _ := classifySQLStatement(transactionInsertSQL)
+		op, _ := classifySQLStatement(transactionBatchInsertSQL)
 		a.sqlOperations.WithLabelValues(op).Inc()
 	}
 	if a.mysql {
 		result, err := a.transactionInsert.ExecContext(ctx, args...)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		id, err := result.LastInsertId()
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
-		return uint(id), nil
+		return uint(id), false, nil
 	}
 	var id int64
-	if err := a.transactionInsert.QueryRowContext(ctx, args...).Scan(&id); err != nil {
-		return 0, err
+	if err := a.transactionInsert.QueryRowContext(ctx, args...).Scan(&id); err == nil {
+		return uint(id), true, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, false, err
 	}
-	return uint(id), nil
+	if len(args) != 10 {
+		return 0, false, fmt.Errorf(
+			"update existing transaction: got %d insert arguments, want 10",
+			len(args),
+		)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		transactionBatchConflictUpdateSQL,
+		args[1], args[8], args[3], args[6], args[0],
+	); err != nil {
+		return 0, false, fmt.Errorf("update existing transaction: %w", err)
+	}
+	if err := db.QueryRowContext(
+		ctx,
+		transactionBatchConflictIDSQL,
+		args[0],
+	).Scan(&id); err != nil {
+		return 0, false, fmt.Errorf("find existing transaction: %w", err)
+	}
+	return uint(id), false, nil
 }
 
 func (a *transactionBatchAccumulator) resetStatement() {
@@ -653,8 +697,11 @@ func (s *Store) setTransactionWithAccumulator(
 	// transaction that was rolled back, nor drop the rows an earlier
 	// successful application queued.
 	var (
-		staged             rowBatch
-		transactionID      int64
+		staged        rowBatch
+		transactionID int64
+		// A fresh auto-generated transaction ID cannot have child detail rows.
+		// The API write path uses this to avoid empty replay-cleanup deletes.
+		transactionIsNew   bool
 		batchedStakeDeltas []stakeCredentialDelta
 	)
 	err := s.withWriteTransaction(
@@ -670,7 +717,7 @@ func (s *Store) setTransactionWithAccumulator(
 			}
 			if batched, ok := accumulator.(*transactionBatchAccumulator); ok {
 				var id uint
-				id, err = batched.insertTransaction(ctx, db,
+				id, transactionIsNew, err = batched.insertTransaction(ctx, db,
 					hash,
 					point.Hash,
 					metadataValue,
@@ -744,6 +791,7 @@ func (s *Store) setTransactionWithAccumulator(
 					index,
 					certDeposits,
 					requireKnownDeposits,
+					transactionIsNew,
 				)
 				if err != nil {
 					return err
@@ -813,6 +861,7 @@ func (s *Store) setTransactionWithAccumulator(
 				index,
 				producedModels,
 				&staged,
+				transactionIsNew,
 			); err != nil {
 				return err
 			}
@@ -1083,7 +1132,7 @@ RETURNING id`,
 				var err error
 				certificateRefs, err = s.applyTransactionCertificates(
 					ctx, db, transactionID, transaction.Certificates(),
-					point, index, certDeposits, allowUnknownDeposits,
+					point, index, certDeposits, allowUnknownDeposits, false,
 				)
 				if err != nil {
 					return err

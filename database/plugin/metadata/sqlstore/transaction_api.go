@@ -100,6 +100,7 @@ func (s *Store) applyTransactionAPIDetails(
 	index uint32,
 	produced []models.Utxo,
 	rows *rowBatch,
+	transactionIsNew bool,
 ) error {
 	if s.storageMode != types.StorageModeAPI {
 		return nil
@@ -133,6 +134,7 @@ func (s *Store) applyTransactionAPIDetails(
 		index,
 		produced,
 		s.dialect.ParameterLimit(),
+		transactionIsNew,
 	); err != nil {
 		return err
 	}
@@ -143,6 +145,7 @@ func (s *Store) applyTransactionAPIDetails(
 		transactionID,
 		transaction,
 		slot,
+		transactionIsNew,
 	); err != nil {
 		return err
 	}
@@ -281,11 +284,14 @@ func (s *Store) indexTransactionAddresses(
 	index uint32,
 	produced []models.Utxo,
 	parameterLimit int,
+	transactionIsNew bool,
 ) error {
-	if _, err := s.execCached(ctx, db, deleteAddressTransactionSQL,
-		transactionID,
-	); err != nil {
-		return fmt.Errorf("delete existing address transactions: %w", err)
+	if !transactionIsNew {
+		if _, err := s.execCached(ctx, db, deleteAddressTransactionSQL,
+			transactionID,
+		); err != nil {
+			return fmt.Errorf("delete existing address transactions: %w", err)
+		}
 	}
 	addresses := make(map[addressIndexKey]struct{})
 	add := func(payment []byte, tag uint8, staking []byte) {
@@ -392,9 +398,8 @@ func (s *Store) indexTransactionAddresses(
 }
 
 // transactionWitnessTables are the per-transaction detail tables
-// storeTransactionWitnesses rewrites wholesale. Every SetTransaction clears
-// the rows the previous attempt left behind before re-inserting, so a
-// re-processed block cannot accumulate duplicate witnesses.
+// storeTransactionWitnesses rewrites wholesale on replay. Fresh transaction
+// IDs have no rows to clear.
 var transactionWitnessTables = []string{
 	"key_witness",
 	"witness_scripts",
@@ -408,14 +413,13 @@ func TransactionWitnessTables() []string {
 	return slices.Clone(transactionWitnessTables)
 }
 
-// TransactionWitnessCleanupSQL is the idempotency delete storeTransactionWitnesses
-// runs against one witness table on every API-mode SetTransaction.
+// TransactionWitnessCleanupSQL is the idempotency delete
+// storeTransactionWitnesses runs against one witness table when an API-mode
+// transaction is replayed.
 //
 // Exported so a test can pin its query plan against the statement the store
-// actually runs. The predicate column must stay indexed through bulk load:
-// unindexed, each of these deletes degrades into a full scan of a table that
-// grows with every transaction written, which makes historical backfill
-// quadratic.
+// actually runs. Replay deletes can still scan while their index is deferred;
+// normal import assigns a new transaction ID and skips these deletes.
 func TransactionWitnessCleanupSQL(table string) string {
 	return "DELETE FROM " + table + " WHERE transaction_id = ?"
 }
@@ -427,12 +431,15 @@ func (s *Store) storeTransactionWitnesses(
 	transactionID int64,
 	transaction lcommon.Transaction,
 	slot uint64,
+	transactionIsNew bool,
 ) error {
-	for _, table := range transactionWitnessTables {
-		if _, err := s.execCached(
-			ctx, db, TransactionWitnessCleanupSQL(table), transactionID,
-		); err != nil {
-			return fmt.Errorf("delete existing %s rows: %w", table, err)
+	if !transactionIsNew {
+		for _, table := range transactionWitnessTables {
+			if _, err := s.execCached(
+				ctx, db, TransactionWitnessCleanupSQL(table), transactionID,
+			); err != nil {
+				return fmt.Errorf("delete existing %s rows: %w", table, err)
+			}
 		}
 	}
 	witnesses := transaction.Witnesses()
