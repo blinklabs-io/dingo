@@ -115,6 +115,8 @@ func TestImportLedgerStateSeedsAnchorEpochDonations(t *testing.T) {
 			require.NoError(t, meta.AddNetworkDonation(
 				localSlot, epoch, 22, nil,
 			))
+			raw, err := dbtest.RawSQLiteMetadata(t, db)
+			require.NoError(t, err)
 
 			nonce := make([]byte, 32)
 			state := &RawLedgerState{
@@ -148,6 +150,25 @@ func TestImportLedgerStateSeedsAnchorEpochDonations(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, tc.want, sum,
 					"the anchor epoch's donations must be the snapshot's")
+				var count int
+				require.NoError(t, raw.QueryRow(
+					"SELECT COUNT(*) FROM network_donation WHERE epoch = ?",
+					epoch,
+				).Scan(&count))
+				if tc.want == 0 {
+					require.Zero(t, count,
+						"zero snapshot donations must leave no anchor row")
+				} else {
+					require.Equal(t, 1, count,
+						"the snapshot donation must be stored as one row")
+					var slot, amount int64
+					require.NoError(t, raw.QueryRow(
+						"SELECT slot, amount FROM network_donation WHERE epoch = ?",
+						epoch,
+					).Scan(&slot, &amount))
+					require.Equal(t, int64(anchorSlot), slot)
+					require.Equal(t, int64(tc.want), amount)
+				}
 				prior, err := meta.SumNetworkDonationsForEpoch(
 					epoch-1, nil,
 				)

@@ -13912,8 +13912,9 @@ including the anchor -- to the treasury at the next boundary and counts it in
 the RATIFY treasury seed, while `applyEpochDonations` and the RATIFY seed read
 `SumNetworkDonationsForEpoch`, which sees only `network_donation` rows. The
 import's pre-phase sweep therefore replaces the anchor epoch's donation rows
-with one row at the anchor slot carrying the snapshot's `utxosDonation`
-(`seedImportedEpochDonations`). It replaces rather than adds because local
+with one row at the anchor slot carrying the snapshot's `utxosDonation` when it
+is nonzero, and no row when it is zero (`seedImportedEpochDonations`). It
+replaces rather than adds because local
 replay before a catch-up import may already hold rows for that epoch, which the
 snapshot total covers.
 
