@@ -221,8 +221,16 @@ var mysqlDeferredIndexPrefixColumns = map[string]map[string]bool{
 	"asset": {
 		"policy_id": true,
 	},
-	"certs":           {"block_hash": true},
-	"witness_scripts": {"script_hash": true},
+	"asset_mint_burn": {
+		"policy_id": true, "name": true, "fingerprint": true,
+	},
+	"address_transaction": {
+		"staking_key": true,
+		"payment_key": true,
+	},
+	"certs":                      {"block_hash": true},
+	"witness_scripts":            {"script_hash": true},
+	"transaction_metadata_label": {"label": true},
 }
 
 var mysqlForeignKeyIndexes = map[string]map[string]bool{

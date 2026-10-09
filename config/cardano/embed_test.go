@@ -16,6 +16,8 @@ package cardano
 
 import (
 	"io/fs"
+	"path"
+	"strings"
 	"testing"
 )
 
@@ -262,5 +264,51 @@ func TestEmbeddedConfigPathFallsBackToConfigJSON(t *testing.T) {
 	if got, want := EmbeddedConfigPath("no-such-network"),
 		"no-such-network/config.json"; got != want {
 		t.Errorf("EmbeddedConfigPath = %q, want %q", got, want)
+	}
+}
+
+// TestEmbeddedConfigFSCarriesNoSigningKeys keeps key material out of the
+// binary: everything under an embedded network directory is compiled in, so
+// signing keys belong in a test fixture directory outside it.
+func TestEmbeddedConfigFSCarriesNoSigningKeys(t *testing.T) {
+	t.Parallel()
+
+	err := fs.WalkDir(
+		EmbeddedConfigFS,
+		".",
+		func(name string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if isEmbeddedSigningKey(name) {
+				t.Errorf("embedded config carries signing key %s", name)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("walking the embedded filesystem: %v", err)
+	}
+}
+
+func isEmbeddedSigningKey(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".skey", ".key":
+		return true
+	default:
+		return false
+	}
+}
+func TestEmbeddedSigningKeyGuardMatchesMixedCase(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"producer.skey", "producer.SKEY", "producer.Key", "producer.key"} {
+		if !isEmbeddedSigningKey(name) {
+			t.Errorf("signing key %s bypasses embed guard", name)
+		}
+	}
+	for _, name := range []string{"producer.vkey", "network.json"} {
+		if isEmbeddedSigningKey(name) {
+			t.Errorf("non-signing asset %s rejected", name)
+		}
 	}
 }

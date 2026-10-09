@@ -691,13 +691,20 @@ func processGapBlockTransactions(
 			if !level.IsValid() {
 				continue
 			}
-			hasGovernance := len(level.ProposalProcedures()) > 0 ||
-				len(level.VotingProcedures()) > 0 ||
+			proposalProcedures := level.ProposalProcedures()
+			votingProcedures := level.VotingProcedures()
+			hasGovernance := len(proposalProcedures) > 0 ||
+				len(votingProcedures) > 0 ||
 				governance.HasDRepActivityCertificates(level)
 			if !hasGovernance {
 				continue
 			}
-			if len(level.ProposalProcedures()) > 0 {
+			if conwayPParams == nil && len(votingProcedures) > 0 {
+				return errors.New(
+					"missing Conway protocol parameters for governance gap block processing",
+				)
+			}
+			if len(proposalProcedures) > 0 {
 				if conwayPParams == nil {
 					return errors.New(
 						"missing Conway protocol parameters for governance gap block processing",
@@ -720,7 +727,7 @@ func processGapBlockTransactions(
 					)
 				}
 			}
-			if len(level.VotingProcedures()) > 0 {
+			if len(votingProcedures) > 0 {
 				if conwayPParams == nil {
 					return errors.New(
 						"missing Conway protocol parameters for governance gap block processing",
