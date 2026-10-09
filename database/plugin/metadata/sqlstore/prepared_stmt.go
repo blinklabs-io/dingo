@@ -41,6 +41,7 @@ var hotStatements = func() []string {
 		getUtxoIncludingSpentByRefQuery,
 		transactionInsertSQL,
 		consumeUtxoSQL,
+		consumeUtxoSQLiteReturningSQL,
 		poolOpCertSequenceUpsertSQL,
 		poolUpdateLatestOpCertSequenceSQL,
 		transactionCertificateInsertSQL,
@@ -63,7 +64,8 @@ var hotStatements = func() []string {
 	for rowCount := 2; rowCount <= utxoBatchSize; rowCount++ {
 		queries = append(queries,
 			insertUtxoBatchQuery(rowCount),
-			consumeUtxosBatchQuery(rowCount),
+			consumeUtxosBatchQuery(rowCount, false),
+			consumeUtxosBatchQuery(rowCount, true),
 		)
 	}
 	for _, table := range transactionWitnessTables {

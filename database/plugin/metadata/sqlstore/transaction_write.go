@@ -187,6 +187,13 @@ SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE tx_id = ? AND output_idx = ?
   AND deleted_slot = 0 AND spent_at_tx_id IS NULL`
 
+const consumeUtxoSQLiteReturningSQL = `
+UPDATE utxo
+SET deleted_slot = ?, spent_at_tx_id = ?
+WHERE tx_id = ? AND output_idx = ?
+  AND deleted_slot = 0 AND spent_at_tx_id IS NULL
+RETURNING tx_id, output_idx, credential_tag, staking_key, amount`
+
 func insertUtxoBatchQuery(rowCount int) string {
 	row := "(" + strings.TrimSuffix(strings.Repeat("?,", 15), ",") + ")"
 	values := strings.TrimSuffix(strings.Repeat(row+",", rowCount), ",")
@@ -200,14 +207,64 @@ ON CONFLICT (tx_id, output_idx) DO NOTHING
 RETURNING id, tx_id, output_idx`
 }
 
-func consumeUtxosBatchQuery(rowCount int) string {
+func consumeUtxosBatchQuery(rowCount int, returnStake bool) string {
 	row := "(?,?)"
 	values := strings.TrimSuffix(strings.Repeat(row+",", rowCount), ",")
+	returning := "tx_id, output_idx"
+	if returnStake {
+		returning += ", credential_tag, staking_key, amount"
+	}
 	return `UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL
   AND (tx_id, output_idx) IN (` + values + `)
-RETURNING tx_id, output_idx`
+RETURNING ` + returning
+}
+
+func scanConsumedUtxoRows(
+	rows *sql.Rows,
+	returnStake bool,
+) (map[string]struct{}, []stakeCredentialDelta, error) {
+	updated := make(map[string]struct{})
+	var deltas []stakeCredentialDelta
+	for rows.Next() {
+		var (
+			txID      []byte
+			outputIdx uint32
+			tag       int64
+			key       []byte
+			amount    sql.NullString
+		)
+		if returnStake {
+			if err := rows.Scan(
+				&txID, &outputIdx, &tag, &key, &amount,
+			); err != nil {
+				_ = rows.Close()
+				return nil, nil, err
+			}
+			delta, ok, err := consumedUtxoStakeDelta(tag, key, amount)
+			if err != nil {
+				_ = rows.Close()
+				return nil, nil, err
+			}
+			if ok {
+				deltas = append(deltas, delta)
+			}
+		} else if err := rows.Scan(&txID, &outputIdx); err != nil {
+			_ = rows.Close()
+			return nil, nil, err
+		}
+		updated[utxoIdentityKey(txID, outputIdx)] = struct{}{}
+	}
+	rowsErr := rows.Err()
+	closeErr := rows.Close()
+	if rowsErr != nil {
+		return nil, nil, rowsErr
+	}
+	if closeErr != nil {
+		return nil, nil, closeErr
+	}
+	return updated, deltas, nil
 }
 
 func utxoIdentityKey(txID []byte, outputIdx uint32) string {
@@ -881,8 +938,17 @@ func (s *Store) setTransactionWithAccumulator(
 			// the utxo table, so they contribute no delta; they
 			// are still refreshed at zero delta so the set of credentials this
 			// write touches is unchanged from the full-scan path.
-			spentRefs := make([]models.UtxoId, 0, len(transaction.Consumed()))
+			var spentRefs []models.UtxoId
+			if s.dialect.Name() != "sqlite" && !historicalBackfill {
+				spentRefs = make([]models.UtxoId, 0, len(transaction.Consumed()))
+			}
 			var skippedRefs []models.UtxoId
+			var consumedStakeDeltas []stakeCredentialDelta
+			if !historicalBackfill {
+				consumedStakeDeltas = make(
+					[]stakeCredentialDelta, 0, len(transaction.Consumed()),
+				)
+			}
 			seenConsumed := make(
 				map[string]struct{},
 				len(transaction.Consumed()),
@@ -908,7 +974,9 @@ func (s *Store) setTransactionWithAccumulator(
 				batch := uniqueConsumed[start:end]
 				updated := make(map[string]struct{}, len(batch))
 				if s.dialect.Name() == "sqlite" && len(batch) > 1 {
-					query := consumeUtxosBatchQuery(len(batch))
+					query := consumeUtxosBatchQuery(
+						len(batch), !historicalBackfill,
+					)
 					args := make([]any, 0, 2+len(batch)*2)
 					args = append(args, point.Slot, hash)
 					for _, ref := range batch {
@@ -918,25 +986,30 @@ func (s *Store) setTransactionWithAccumulator(
 					if err != nil {
 						return err
 					}
-					for rows.Next() {
-						var (
-							txID      []byte
-							outputIdx uint32
-						)
-						if err := rows.Scan(&txID, &outputIdx); err != nil {
-							_ = rows.Close()
-							return err
-						}
-						updated[utxoIdentityKey(txID, outputIdx)] = struct{}{}
+					updatedRows, deltas, scanErr := scanConsumedUtxoRows(
+						rows, !historicalBackfill,
+					)
+					if scanErr != nil {
+						return scanErr
 					}
-					rowsErr := rows.Err()
-					closeErr := rows.Close()
-					if rowsErr != nil {
-						return rowsErr
+					updated = updatedRows
+					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
+				} else if s.dialect.Name() == "sqlite" && !historicalBackfill {
+					rows, err := s.queryRowsCached(
+						ctx, db, consumeUtxoSQLiteReturningSQL,
+						point.Slot, hash, batch[0].Hash, batch[0].Idx,
+					)
+					if err != nil {
+						return err
 					}
-					if closeErr != nil {
-						return closeErr
+					updatedRows, deltas, scanErr := scanConsumedUtxoRows(
+						rows, true,
+					)
+					if scanErr != nil {
+						return scanErr
 					}
+					updated = updatedRows
+					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
 				} else {
 					for _, ref := range batch {
 						result, err := s.execCached(
@@ -958,10 +1031,14 @@ func (s *Store) setTransactionWithAccumulator(
 
 				for _, utxoID := range batch {
 					if _, ok := updated[utxoIdentityKey(utxoID.Hash, utxoID.Idx)]; ok {
-						spentRefs = append(spentRefs, utxoID)
+						if s.dialect.Name() != "sqlite" {
+							spentRefs = append(spentRefs, utxoID)
+						}
 						continue
 					}
-					skippedRefs = append(skippedRefs, utxoID)
+					if !historicalBackfill {
+						skippedRefs = append(skippedRefs, utxoID)
+					}
 					var (
 						deletedSlot uint64
 						spentBy     []byte
@@ -1005,13 +1082,15 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			if historicalBackfill {
 				return nil
 			}
-			consumedStakeDeltas, err := s.queryUtxoStakeConsumedDeltas(
-				ctx,
-				db,
-				spentRefs,
-			)
-			if err != nil {
-				return err
+			if s.dialect.Name() != "sqlite" {
+				consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
+					ctx,
+					db,
+					spentRefs,
+				)
+				if err != nil {
+					return err
+				}
 			}
 			// An input this write did not actually spend still names a
 			// credential the full-scan path would have refreshed, so keep it

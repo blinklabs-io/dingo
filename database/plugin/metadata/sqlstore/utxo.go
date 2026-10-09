@@ -894,6 +894,30 @@ func utxoStakeConsumedDeltaQuerySize(n int) int {
 	return utxoStakeConsumedDeltaQuerySizes[len(utxoStakeConsumedDeltaQuerySizes)-1]
 }
 
+func consumedUtxoStakeDelta(
+	tag int64,
+	key []byte,
+	raw sql.NullString,
+) (stakeCredentialDelta, bool, error) {
+	if len(key) == 0 || !raw.Valid || raw.String == "" {
+		return stakeCredentialDelta{}, false, nil
+	}
+	amount, err := parseUint64("consumed UTxO amount", raw.String)
+	if err != nil {
+		return stakeCredentialDelta{}, false, err
+	}
+	if amount > math.MaxInt64 {
+		return stakeCredentialDelta{}, false, fmt.Errorf(
+			"consumed UTxO amount overflow: %d",
+			amount,
+		)
+	}
+	return stakeCredentialDelta{
+		ref:   models.NewStakeCredentialRef(uint8(tag), key),
+		delta: -int64(amount),
+	}, true, nil
+}
+
 // queryUtxoStakeConsumedDeltas is queryUtxoStakeRefs's counterpart for the
 // setTransactionWithAccumulator fast path: alongside each spent input's
 // credential it also reads the row's amount, so the caller can pass
@@ -954,7 +978,7 @@ func (s *Store) queryUtxoStakeConsumedDeltas(
 				); err != nil {
 					return err
 				}
-				if len(key) == 0 || !outputIdx.Valid {
+				if !outputIdx.Valid {
 					continue
 				}
 				outs, ok := wanted[string(txID)]
@@ -964,26 +988,20 @@ func (s *Store) queryUtxoStakeConsumedDeltas(
 				if _, ok := outs[uint32(outputIdx.Int64)]; !ok {
 					continue
 				}
-				if !raw.Valid || raw.String == "" {
-					continue
-				}
-				amount, err := parseUint64("consumed UTxO amount", raw.String)
+				delta, ok, err := consumedUtxoStakeDelta(tag, key, raw)
 				if err != nil {
 					return err
 				}
-				if amount > math.MaxInt64 {
-					return fmt.Errorf(
-						"consumed UTxO amount overflow: %d",
-						amount,
-					)
+				if !ok {
+					continue
 				}
-				ref := models.NewStakeCredentialRef(uint8(tag), key)
+				ref := delta.ref
 				mapKey := ref.MapKey()
 				if _, ok := refs[mapKey]; !ok {
 					order = append(order, mapKey)
 					refs[mapKey] = ref
 				}
-				sums[mapKey] -= int64(amount)
+				sums[mapKey] += delta.delta
 			}
 			return rows.Err()
 		}()

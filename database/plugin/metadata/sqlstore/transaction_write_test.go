@@ -526,6 +526,49 @@ func TestSetTransactionIncrementalDeltaMatchesFullScan(t *testing.T) {
 	require.Equal(t, fx.producedAmount, got)
 }
 
+func TestSetTransactionBatchedInputsReturnConsumedStake(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+	fx := buildSharedCredentialTx(t, 0x31)
+	secondTxID := bytes.Repeat([]byte{0x32}, 32)
+	secondInput, err := mockledger.NewTransactionInputBuilder().
+		WithTxId(secondTxID).
+		WithIndex(0).
+		Build()
+	require.NoError(t, err)
+
+	txID := bytes.Repeat([]byte{0x33}, 32)
+	tx, err := mockledger.NewTransactionBuilder().
+		WithId(txID).
+		WithInputs(fx.tx.Consumed()[0], secondInput).
+		WithOutputs(fx.tx.Produced()[0].Output).
+		WithValid(true).
+		Build()
+	require.NoError(t, err)
+	seedConsumedUtxo(t, store, fx)
+	_, err = store.writeDB.ExecContext(ctx, `
+INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
+VALUES (?, 0, ?, ?, 1, 0, ?)`,
+		secondTxID,
+		fx.ref.Key,
+		int64(fx.ref.Tag),
+		decimalUint64(types.Uint64(7_000_000)),
+	)
+	require.NoError(t, err)
+	establishRunningTotal(t, store, fx.ref, 1)
+	require.Equal(t, uint64(12_000_000), readUtxoStake(t, store, fx.ref))
+
+	point := ocommon.Point{Slot: fx.point.Slot + 1, Hash: txID}
+	require.NoError(t, store.SetTransaction(
+		tx, point, 0, nil, false, nil,
+	))
+	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3_000_000), want)
+	require.Equal(t, want, readUtxoStake(t, store, fx.ref))
+}
+
 // TestSetTransactionReapplyAppliesNoSecondDelta covers the invariant the
 // incremental path rests on: a delta must state the change this write made to
 // the utxo table, not the change the transaction describes. Re-applying an
