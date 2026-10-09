@@ -2594,6 +2594,8 @@ func (n *Node) newTokenRegistrySync() (
 			Store:                 n.db.Metadata(),
 			HTTPClient:            n.config.tokenRegistry.HTTPClient,
 			SourceURL:             n.config.tokenRegistry.SourceURL,
+			ManifestURL:           n.config.tokenRegistry.ManifestURL,
+			TrustedManifestKey:    n.config.tokenRegistry.TrustedManifestKey,
 			Network:               n.config.network,
 			UserAgent:             n.config.tokenRegistry.UserAgent,
 			Interval:              n.config.tokenRegistry.Interval,
@@ -2606,6 +2608,7 @@ func (n *Node) newTokenRegistrySync() (
 			MaxBatchBytes:         n.config.tokenRegistry.MaxBatchBytes,
 			StoreLogos:            n.config.tokenRegistry.StoreLogos,
 			AllowPrivateAddresses: n.config.tokenRegistry.AllowPrivateAddresses,
+			AllowRollback:         n.config.tokenRegistry.AllowRollback,
 		},
 	)
 }

@@ -836,9 +836,12 @@ func buildDingoConfig(
 		),
 		dingo.WithTokenRegistryConfig(
 			dingo.TokenRegistryConfig{
-				Enabled:   cfg.TokenRegistry.Enabled,
-				SourceURL: cfg.TokenRegistry.SourceURL,
-				Interval:  cfg.TokenRegistry.Interval,
+				Enabled:     cfg.TokenRegistry.Enabled,
+				SourceURL:   cfg.TokenRegistry.SourceURL,
+				ManifestURL: cfg.TokenRegistry.ManifestURL,
+				TrustedManifestKey: cfg.TokenRegistry.
+					TrustedManifestKey,
+				Interval: cfg.TokenRegistry.Interval,
 				RequestTimeout: cfg.TokenRegistry.
 					RequestTimeout,
 				UserAgent: cfg.TokenRegistry.UserAgent,
@@ -856,6 +859,7 @@ func buildDingoConfig(
 				StoreLogos: cfg.TokenRegistry.StoreLogos,
 				AllowPrivateAddresses: cfg.TokenRegistry.
 					AllowPrivateAddresses,
+				AllowRollback: cfg.TokenRegistry.AllowRollback,
 			},
 		),
 		dingo.WithMidnightConfig(dingo.MidnightConfig{

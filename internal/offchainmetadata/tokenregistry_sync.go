@@ -18,6 +18,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -42,17 +43,13 @@ const (
 	maxInt64 = int64(^uint64(0) >> 1)
 	// The sync_state keys below describe the snapshot currently *in the
 	// table*, not a per-source cache. There is one token_registry_entry
-	// table, so there is one set of state, and all three move together on a
-	// successful apply.
+	// table, so there is one set of state.
 	//
-	// TokenRegistrySyncStateKey holds that snapshot's HTTP entity tag.
+	// TokenRegistrySyncStateKey holds the signed manifest's HTTP entity tag.
 	TokenRegistrySyncStateKey = "token_registry_etag"
-	// tokenRegistrySnapshotIDKey records which (source, logo mode) pair
-	// produced the snapshot the table holds. A validator is only meaningful
-	// while the table still holds what that source served: moving to another
-	// source and back would otherwise replay the old tag, take a 304, and
-	// leave the intervening source's metadata in place. Same for toggling
-	// logo storage off and on again.
+	// tokenRegistrySnapshotIDKey records which source, manifest, trusted key,
+	// and logo mode produced the snapshot the table holds. A validator is only
+	// meaningful while the table still holds what that configuration served.
 	tokenRegistrySnapshotIDKey = "token_registry_snapshot_id"
 	// tokenRegistryStampKey holds the high-water snapshot stamp. It is
 	// persisted because the in-memory sequence resets on restart, and a
@@ -146,6 +143,14 @@ type TokenRegistryConfig struct {
 	// SourceURL overrides the network-derived registry source, for operators
 	// running a mirror. Empty selects by Network.
 	SourceURL string
+	// ManifestURL identifies the signed manifest that authenticates SourceURL.
+	ManifestURL string
+	// TrustedManifestKey is the hex-encoded Ed25519 public key that must sign
+	// every manifest. The key is an operator trust decision, not remote data.
+	TrustedManifestKey string
+	// AllowRollback permits a correctly signed manifest to move to a lower
+	// sequence. Same-sequence digest changes remain invalid.
+	AllowRollback bool
 	// Network selects the default registry source; anything other than
 	// "mainnet" uses the IOG testnet registry.
 	Network        string
@@ -183,8 +188,12 @@ type TokenRegistrySync struct {
 	store                TokenRegistryStore
 	client               *http.Client
 	sourceURL            string
+	manifestURL          string
+	manifestKey          ed25519.PublicKey
+	allowRollback        bool
 	userAgent            string
 	interval             time.Duration
+	requestTimeout       time.Duration
 	maxBytes             int64
 	maxDecompressedBytes int64
 	maxEntryBytes        int64
@@ -225,6 +234,14 @@ func NewTokenRegistrySync(
 	if sourceURL == "" {
 		sourceURL = defaultTokenRegistryURL(cfg.Network)
 	}
+	manifestURL := strings.TrimSpace(cfg.ManifestURL)
+	if manifestURL == "" {
+		return nil, errors.New("token registry manifest URL is required")
+	}
+	manifestKey, err := parseTokenRegistryManifestKey(cfg.TrustedManifestKey)
+	if err != nil {
+		return nil, err
+	}
 	interval := cfg.Interval
 	if interval <= 0 {
 		interval = defaultTokenRegistryInterval
@@ -243,6 +260,18 @@ func NewTokenRegistrySync(
 	)
 	if err != nil {
 		return nil, err
+	}
+	redirectPolicy := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if redirectPolicy != nil {
+			if err := redirectPolicy(req, via); err != nil {
+				return err
+			}
+		}
+		return validateTokenRegistryHTTPSURL(
+			req.URL.String(),
+			cfg.AllowPrivateAddresses,
+		)
 	}
 	// secureHTTPClient only sets Timeout on a client it constructs itself, so
 	// a caller-supplied client with no Timeout would leave the whole-download
@@ -284,8 +313,12 @@ func NewTokenRegistrySync(
 		store:                cfg.Store,
 		client:               client,
 		sourceURL:            sourceURL,
+		manifestURL:          manifestURL,
+		manifestKey:          manifestKey,
+		allowRollback:        cfg.AllowRollback,
 		userAgent:            userAgent,
 		interval:             interval,
+		requestTimeout:       client.Timeout,
 		maxBytes:             maxBytes,
 		maxDecompressedBytes: maxDecompressedBytes,
 		maxEntryBytes:        maxEntryBytes,
@@ -310,16 +343,37 @@ func defaultTokenRegistryURL(network string) string {
 }
 
 // tokenRegistrySnapshotIdentity fingerprints everything that changes what a
-// snapshot would produce: the source it came from and whether logos were
-// stored. Comparing it against the recorded identity is what tells us whether
-// a stored entity tag still describes the table's contents.
+// snapshot would produce: its source, manifest, trusted key, and whether logos
+// were stored. Comparing it against the recorded identity is what tells us
+// whether a stored manifest entity tag still describes the table's contents.
 //
 // Hashed rather than embedded to keep the value bounded and free of any
 // credentials a mirror URL might carry.
-func tokenRegistrySnapshotIdentity(sourceURL string, storeLogos bool) string {
-	material := sourceURL + "|logos=" + strconv.FormatBool(storeLogos)
+func tokenRegistrySnapshotIdentity(
+	sourceURL string,
+	manifestURL string,
+	manifestKey ed25519.PublicKey,
+	storeLogos bool,
+) string {
+	material := sourceURL + "|manifest=" + manifestURL + "|key=" +
+		hex.EncodeToString(manifestKey) + "|logos=" +
+		strconv.FormatBool(storeLogos)
 	sum := blake2b.Sum256([]byte(material))
 	return hex.EncodeToString(sum[:8])
+}
+
+func validateTokenRegistryHTTPSURL(raw string, allowPrivate bool) error {
+	if err := validateURL(raw, allowPrivate); err != nil {
+		return err
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return errors.New("token registry URLs must use HTTPS")
+	}
+	return nil
 }
 
 // SourceURL returns the resolved registry source.
@@ -463,15 +517,186 @@ func (s *TokenRegistrySync) runOnce(ctx context.Context) {
 	}
 }
 
+func (s *TokenRegistrySync) readManifestState() (uint64, string, error) {
+	rawSequence, err := s.store.GetSyncState(
+		tokenRegistryManifestSequence,
+		nil,
+	)
+	if err != nil {
+		return 0, "", fmt.Errorf("read token registry manifest sequence: %w", err)
+	}
+	rawSequence = strings.TrimSpace(rawSequence)
+	var sequence uint64
+	if rawSequence != "" {
+		sequence, err = strconv.ParseUint(rawSequence, 10, 64)
+		if err != nil || sequence == 0 {
+			return 0, "", errors.New(
+				"stored token registry manifest sequence is invalid",
+			)
+		}
+	}
+	digest, err := s.store.GetSyncState(tokenRegistrySnapshotDigestKey, nil)
+	if err != nil {
+		return 0, "", fmt.Errorf("read token registry snapshot digest: %w", err)
+	}
+	digest = strings.ToLower(strings.TrimSpace(digest))
+	if (sequence == 0) != (digest == "") {
+		return 0, "", errors.New(
+			"stored token registry manifest state is incomplete",
+		)
+	}
+	if digest != "" {
+		decoded, decodeErr := hex.DecodeString(digest)
+		if decodeErr != nil || len(decoded) != 32 {
+			return 0, "", errors.New(
+				"stored token registry snapshot digest is invalid",
+			)
+		}
+	}
+	return sequence, digest, nil
+}
+
+func (s *TokenRegistrySync) fetchManifest(
+	ctx context.Context,
+	previousETag string,
+) (tokenRegistryManifest, string, bool, error) {
+	if err := validateTokenRegistryHTTPSURL(
+		s.manifestURL,
+		s.allowPrivate,
+	); err != nil {
+		return tokenRegistryManifest{}, "", false, &registryRequestError{
+			operation: "validate token registry manifest URL",
+			cause:     err,
+		}
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		s.manifestURL,
+		nil,
+	)
+	if err != nil {
+		return tokenRegistryManifest{}, "", false, &registryRequestError{
+			operation: "build token registry manifest request",
+			cause:     err,
+		}
+	}
+	req.Header.Set("User-Agent", s.userAgent)
+	req.Header.Set("Accept", "application/json")
+	if previousETag != "" {
+		req.Header.Set("If-None-Match", previousETag)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return tokenRegistryManifest{}, "", false, &registryRequestError{
+			operation: "fetch token registry manifest",
+			cause:     err,
+		}
+	}
+	if resp == nil {
+		return tokenRegistryManifest{}, "", false, errors.New(
+			"fetch token registry manifest: nil response",
+		)
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode == http.StatusNotModified {
+		return tokenRegistryManifest{}, "", true, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return tokenRegistryManifest{}, "", false, fmt.Errorf(
+			"fetch token registry manifest: unexpected status %d",
+			resp.StatusCode,
+		)
+	}
+	raw, err := io.ReadAll(io.LimitReader(
+		resp.Body,
+		tokenRegistryManifestMaxBytes+1,
+	))
+	if err != nil {
+		return tokenRegistryManifest{}, "", false, fmt.Errorf(
+			"read token registry manifest: %w",
+			err,
+		)
+	}
+	if len(raw) > tokenRegistryManifestMaxBytes {
+		return tokenRegistryManifest{}, "", false, fmt.Errorf(
+			"token registry manifest exceeds %d bytes",
+			tokenRegistryManifestMaxBytes,
+		)
+	}
+	manifest, err := verifyTokenRegistryManifest(
+		raw,
+		s.manifestKey,
+		s.sourceURL,
+	)
+	if err != nil {
+		return tokenRegistryManifest{}, "", false, err
+	}
+	return manifest, strings.TrimSpace(resp.Header.Get("ETag")), false, nil
+}
+
+func (s *TokenRegistrySync) stageAuthenticatedSnapshot(
+	ctx context.Context,
+	body io.Reader,
+	manifest tokenRegistryManifest,
+) (*tokenRegistryStage, error) {
+	hasher, err := blake2b.New256(nil)
+	if err != nil {
+		return nil, fmt.Errorf("initialize token registry snapshot digest: %w", err)
+	}
+	compressed := &countingReader{reader: io.TeeReader(body, hasher)}
+	stage, err := s.stageSnapshot(ctx, compressed)
+	if err != nil {
+		return nil, err
+	}
+	remaining := s.maxBytes - compressed.read
+	if remaining < 0 {
+		_ = stage.close(s.removeStageFile)
+		return nil, fmt.Errorf(
+			"token registry snapshot exceeds %d bytes",
+			s.maxBytes,
+		)
+	}
+	_, drainErr := io.Copy(io.Discard, limitReaderPast(compressed, remaining))
+	if drainErr != nil {
+		_ = stage.close(s.removeStageFile)
+		return nil, fmt.Errorf("read token registry snapshot: %w", drainErr)
+	}
+	if compressed.read > s.maxBytes {
+		_ = stage.close(s.removeStageFile)
+		return nil, fmt.Errorf(
+			"token registry snapshot exceeds %d bytes",
+			s.maxBytes,
+		)
+	}
+	if compressed.read != manifest.ArchiveBytes {
+		_ = stage.close(s.removeStageFile)
+		return nil, fmt.Errorf(
+			"token registry snapshot is %d bytes, manifest declares %d",
+			compressed.read,
+			manifest.ArchiveBytes,
+		)
+	}
+	actualDigest := hex.EncodeToString(hasher.Sum(nil))
+	if actualDigest != manifest.ArchiveDigest {
+		_ = stage.close(s.removeStageFile)
+		return nil, errors.New("token registry snapshot digest does not match manifest")
+	}
+	return stage, nil
+}
+
 // SyncOnce performs a single registry pull and returns the number of entries
 // written.
 //
 // The mainnet registry is roughly 240MB, so an unconditional download every
-// interval would be indefensible. SyncOnce sends the entity tag recorded by
-// the previous successful sync as If-None-Match; an unchanged registry answers
-// 304 and costs one request with no body. The tag is recorded only after the
-// whole snapshot has been applied, so an interrupted sync retries in full
-// rather than recording progress it did not make.
+// interval would be indefensible. SyncOnce sends the signed manifest's entity
+// tag recorded by the previous successful sync as If-None-Match; an unchanged
+// manifest answers 304 and costs one request with no archive body. The tag is
+// recorded only after the whole snapshot has been applied, so an interrupted
+// sync retries in full rather than recording progress it did not make.
 func (s *TokenRegistrySync) SyncOnce(
 	ctx context.Context,
 ) (written int, retErr error) {
@@ -492,7 +717,12 @@ func (s *TokenRegistrySync) SyncOnce(
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
-	identity := tokenRegistrySnapshotIdentity(s.sourceURL, s.storeLogos)
+	identity := tokenRegistrySnapshotIdentity(
+		s.sourceURL,
+		s.manifestURL,
+		s.manifestKey,
+		s.storeLogos,
+	)
 	storedIdentity, err := s.store.GetSyncState(
 		tokenRegistrySnapshotIDKey,
 		nil,
@@ -500,13 +730,12 @@ func (s *TokenRegistrySync) SyncOnce(
 	if err != nil {
 		return 0, fmt.Errorf("read token registry sync state: %w", err)
 	}
-	// A stored validator only describes the table while the table still
-	// holds what that source served under that logo mode. After a switch
-	// away and back, the tag would still match upstream but the table holds
-	// the intervening snapshot, so a 304 would leave the wrong metadata in
-	// place. Ask unconditionally in that case.
+	storedSequence, storedDigest, err := s.readManifestState()
+	if err != nil {
+		return 0, err
+	}
 	previousETag := ""
-	if storedIdentity == identity {
+	if storedIdentity == identity && storedSequence > 0 {
 		previousETag, err = s.store.GetSyncState(
 			TokenRegistrySyncStateKey,
 			nil,
@@ -519,14 +748,92 @@ func (s *TokenRegistrySync) SyncOnce(
 	if err != nil {
 		return 0, err
 	}
-	if err := validateURL(s.sourceURL, s.allowPrivate); err != nil {
+	if err := validateTokenRegistryHTTPSURL(
+		s.sourceURL,
+		s.allowPrivate,
+	); err != nil {
 		return 0, &registryRequestError{
 			operation: "validate token registry source URL",
 			cause:     err,
 		}
 	}
+	downloadCtx, cancelDownload := context.WithTimeout(ctx, s.requestTimeout)
+	defer cancelDownload()
+	manifest, manifestETag, notModified, err := s.fetchManifest(
+		downloadCtx,
+		previousETag,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if notModified {
+		if previousETag == "" || storedSequence == 0 {
+			return 0, errors.New(
+				"token registry manifest returned not modified without trusted state",
+			)
+		}
+		s.logger.Debug(
+			"token registry unchanged",
+			"url",
+			registryLogURL(s.sourceURL),
+			"etag",
+			previousETag,
+		)
+		return 0, nil
+	}
+	if manifest.Sequence < storedSequence && !s.allowRollback {
+		return 0, fmt.Errorf(
+			"token registry manifest sequence %d is below stored sequence %d",
+			manifest.Sequence,
+			storedSequence,
+		)
+	}
+	if manifest.Sequence < storedSequence {
+		s.logger.Warn(
+			"accepting signed token registry rollback",
+			"stored_sequence",
+			storedSequence,
+			"manifest_sequence",
+			manifest.Sequence,
+		)
+	}
+	if manifest.Sequence == storedSequence && storedSequence > 0 {
+		if manifest.ArchiveDigest != storedDigest {
+			return 0, errors.New(
+				"token registry manifest changes digest at the stored sequence",
+			)
+		}
+		if storedIdentity == identity {
+			txn := s.store.Transaction(ctx)
+			etagCommitted := false
+			defer func() {
+				if !etagCommitted {
+					_ = txn.Rollback()
+				}
+			}()
+			if err := s.store.SetSyncState(
+				TokenRegistrySyncStateKey,
+				manifestETag,
+				txn,
+			); err != nil {
+				_ = txn.Rollback()
+				return 0, fmt.Errorf(
+					"record token registry entity tag: %w",
+					err,
+				)
+			}
+			if err := txn.Commit(); err != nil {
+				return 0, fmt.Errorf(
+					"commit token registry manifest state: %w",
+					err,
+				)
+			}
+			etagCommitted = true
+			return 0, nil
+		}
+	}
 	req, err := http.NewRequestWithContext(
-		ctx,
+		downloadCtx,
 		http.MethodGet,
 		s.sourceURL,
 		nil,
@@ -539,9 +846,6 @@ func (s *TokenRegistrySync) SyncOnce(
 	}
 	req.Header.Set("User-Agent", s.userAgent)
 	req.Header.Set("Accept", "application/gzip")
-	if previousETag != "" {
-		req.Header.Set("If-None-Match", previousETag)
-	}
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return 0, &registryRequestError{
@@ -559,24 +863,24 @@ func (s *TokenRegistrySync) SyncOnce(
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
 	}()
-	if resp.StatusCode == http.StatusNotModified {
-		s.logger.Debug(
-			"token registry unchanged",
-			"url", registryLogURL(s.sourceURL),
-			"etag", previousETag,
-		)
-		return 0, nil
-	}
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf(
 			"fetch token registry: unexpected status %d",
 			resp.StatusCode,
 		)
 	}
-	stage, err := s.stageSnapshot(ctx, resp.Body)
+	if resp.ContentLength >= 0 && resp.ContentLength != manifest.ArchiveBytes {
+		return 0, fmt.Errorf(
+			"token registry snapshot content length is %d, manifest declares %d",
+			resp.ContentLength,
+			manifest.ArchiveBytes,
+		)
+	}
+	stage, err := s.stageAuthenticatedSnapshot(downloadCtx, resp.Body, manifest)
 	if err != nil {
 		return 0, err
 	}
+	cancelDownload()
 	defer func() {
 		cleanupErr := stage.close(s.removeStageFile)
 		if cleanupErr == nil {
@@ -599,7 +903,7 @@ func (s *TokenRegistrySync) SyncOnce(
 	// registry is empty -- it is what an upstream layout change, a
 	// truncated artifact, or a mirror serving the wrong repository looks
 	// like. Pruning against it would reconcile the whole table to nothing,
-	// and recording its ETag would make that stick until the artifact
+	// and recording its manifest ETag would make that stick until the artifact
 	// changed again. Keep what we have, retry next interval, and say so.
 	if stage.mappings == 0 {
 		s.logger.Warn(
@@ -645,27 +949,18 @@ func (s *TokenRegistrySync) SyncOnce(
 	if err != nil {
 		return 0, err
 	}
-	// A skipped mapping is indistinguishable from an absent one at prune
-	// time: neither re-stamps its row. Reconciling anyway would let a
-	// mapping that was valid yesterday and is malformed or oversized today
-	// delete the good metadata still being served for it. Defer instead --
-	// skips are rare (all 7,970 mainnet mappings parse), so a later clean
-	// snapshot reconciles, and the warning makes a persistent one visible
-	// rather than silently destructive.
 	if stage.skipped > 0 {
 		s.logger.Warn(
-			"token registry snapshot had unusable mappings; deferring reconciliation so their stored metadata is not retired",
+			"token registry snapshot had unusable mappings; keeping the previous snapshot",
 			"skipped",
 			stage.skipped,
 			"url",
 			registryLogURL(s.sourceURL),
 		)
-		if err := txn.Commit(); err != nil {
-			return 0, fmt.Errorf("commit token registry snapshot: %w", err)
-		}
-		committed = true
-		s.lastSyncedAt = syncedAt
-		return written, nil
+		return 0, fmt.Errorf(
+			"token registry snapshot rejected: unusable mappings: %d",
+			stage.skipped,
+		)
 	}
 	// The snapshot applied in full and carried something, so it is
 	// authoritative: retire subjects
@@ -684,21 +979,38 @@ func (s *TokenRegistrySync) SyncOnce(
 			err,
 		)
 	}
-	// The snapshot is applied, so the recorded state now describes the
-	// table. All three move together: recording the tag without the identity
-	// would let a later switch-back replay it against the wrong contents.
-	etag := strings.TrimSpace(resp.Header.Get("ETag"))
-	if etag != "" {
-		if err := s.store.SetSyncState(
-			TokenRegistrySyncStateKey,
-			etag,
-			txn,
-		); err != nil {
-			return 0, fmt.Errorf(
-				"record token registry entity tag: %w",
-				err,
-			)
-		}
+	// The authenticated state advances in the same transaction as the rows it
+	// describes. An interrupted apply therefore cannot create a trusted high
+	// water mark for data that never became visible.
+	if err := s.store.SetSyncState(
+		tokenRegistryManifestSequence,
+		strconv.FormatUint(manifest.Sequence, 10),
+		txn,
+	); err != nil {
+		return 0, fmt.Errorf(
+			"record token registry manifest sequence: %w",
+			err,
+		)
+	}
+	if err := s.store.SetSyncState(
+		tokenRegistrySnapshotDigestKey,
+		manifest.ArchiveDigest,
+		txn,
+	); err != nil {
+		return 0, fmt.Errorf(
+			"record token registry snapshot digest: %w",
+			err,
+		)
+	}
+	if err := s.store.SetSyncState(
+		TokenRegistrySyncStateKey,
+		manifestETag,
+		txn,
+	); err != nil {
+		return 0, fmt.Errorf(
+			"record token registry entity tag: %w",
+			err,
+		)
 	}
 	if err := s.store.SetSyncState(
 		tokenRegistrySnapshotIDKey,
@@ -840,8 +1152,9 @@ func (s *tokenRegistryStage) close(remove func(string) error) error {
 // final metadata transaction begins; only parsed entries are staged, and both
 // their count and encoded bytes are bounded.
 //
-// A mapping that fails to parse is skipped rather than failing the snapshot:
-// one bad file out of thousands should not cost the whole sync.
+// Mapping failures are counted while the rest of the archive is inspected.
+// SyncOnce rejects the staged result as a unit when that count is nonzero, so
+// API readers never observe rows from an incomplete authenticated snapshot.
 func (s *TokenRegistrySync) stageSnapshot(
 	ctx context.Context,
 	body io.Reader,

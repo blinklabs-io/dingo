@@ -19,6 +19,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +30,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"os"
 	"strings"
 	"sync"
@@ -37,12 +42,58 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/blake2b"
 )
 
 const (
 	syncSubjectNut  = "00000002df633853f6a47465c9496721d2d5b1291b8398016c0e87ae6e7574636f696e"
 	syncSubjectDjed = "8db269c3ec630e06ae29f74bc39edd1f87c819f1056206e879a1cd61446a65644d6963726f555344"
 )
+
+var testTokenRegistryManifestPrivateKey = ed25519.NewKeyFromSeed(
+	bytes.Repeat([]byte{0x46}, ed25519.SeedSize),
+)
+
+func testTokenRegistryManifestKey() string {
+	return hex.EncodeToString(
+		testTokenRegistryManifestPrivateKey.Public().(ed25519.PublicKey),
+	)
+}
+
+func signedTokenRegistryManifest(
+	t *testing.T,
+	archiveURL string,
+	archive []byte,
+	sequence uint64,
+) []byte {
+	t.Helper()
+	digest := blake2b.Sum256(archive)
+	return signedTokenRegistryManifestValue(t, tokenRegistryManifest{
+		Version:       tokenRegistryManifestVersion,
+		Sequence:      sequence,
+		ArchiveURL:    archiveURL,
+		ArchiveBytes:  int64(len(archive)),
+		ArchiveDigest: hex.EncodeToString(digest[:]),
+	})
+}
+
+func signedTokenRegistryManifestValue(
+	t *testing.T,
+	manifest tokenRegistryManifest,
+) []byte {
+	t.Helper()
+	payload, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	message := append([]byte(tokenRegistryManifestDomain), payload...)
+	envelope, err := json.Marshal(tokenRegistryManifestEnvelope{
+		Payload: base64.RawURLEncoding.EncodeToString(payload),
+		Signature: base64.RawURLEncoding.EncodeToString(
+			ed25519.Sign(testTokenRegistryManifestPrivateKey, message),
+		),
+	})
+	require.NoError(t, err)
+	return envelope
+}
 
 // fakeTokenRegistryStore records what the syncer writes without a database.
 type fakeTokenRegistryStore struct {
@@ -320,26 +371,62 @@ type registryServer struct {
 	etag             string
 	body             []byte
 	status           int
+	sequence         uint64
+	archiveURL       string
 	notModifiedOnTag bool
+	manifestDelay    time.Duration
+	archiveDelay     time.Duration
 }
+
+var testRegistryServers sync.Map
 
 func newRegistryServer(t *testing.T, body []byte) *registryServer {
 	t.Helper()
-	rs := &registryServer{body: body, etag: `"abc123"`, status: http.StatusOK}
-	rs.Server = httptest.NewServer(
+	rs := &registryServer{
+		body: body, etag: `"abc123"`, status: http.StatusOK, sequence: 1,
+	}
+	rs.Server = httptest.NewTLSServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			rs.mu.Lock()
-			rs.requests++
-			rs.lastIfNoneMatch = r.Header.Get("If-None-Match")
-			etag, body, status := rs.etag, rs.body, rs.status
+			etag, body, status, sequence, archiveURL :=
+				rs.etag, rs.body, rs.status, rs.sequence, rs.archiveURL
+			delay := rs.archiveDelay
+			if r.URL.Path == "/manifest" {
+				delay = rs.manifestDelay
+			}
 			conditional := rs.notModifiedOnTag
+			if r.URL.Path == "/manifest" {
+				rs.requests++
+				rs.lastIfNoneMatch = r.Header.Get("If-None-Match")
+			}
 			rs.mu.Unlock()
+			if delay > 0 {
+				timer := time.NewTimer(delay)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			if r.URL.Path == "/manifest" {
+				if etag != "" {
+					w.Header().Set("ETag", etag)
+				}
+				if conditional && r.Header.Get("If-None-Match") == etag {
+					w.WriteHeader(http.StatusNotModified)
+					return
+				}
+				_, _ = w.Write(signedTokenRegistryManifest(
+					t,
+					archiveURL,
+					body,
+					sequence,
+				))
+				return
+			}
 			if etag != "" {
 				w.Header().Set("ETag", etag)
-			}
-			if conditional && r.Header.Get("If-None-Match") == etag {
-				w.WriteHeader(http.StatusNotModified)
-				return
 			}
 			if status != http.StatusOK {
 				w.WriteHeader(status)
@@ -349,7 +436,12 @@ func newRegistryServer(t *testing.T, body []byte) *registryServer {
 			_, _ = w.Write(body)
 		}),
 	)
-	t.Cleanup(rs.Close)
+	rs.archiveURL = rs.URL
+	testRegistryServers.Store(rs.URL, rs)
+	t.Cleanup(func() {
+		testRegistryServers.Delete(rs.URL)
+		rs.Close()
+	})
 	return rs
 }
 
@@ -358,12 +450,22 @@ func (rs *registryServer) setBody(body []byte, etag string) {
 	defer rs.mu.Unlock()
 	rs.body = body
 	rs.etag = etag
+	rs.sequence++
 }
 
 func (rs *registryServer) setStatus(status int) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	rs.status = status
+	rs.sequence++
+	rs.etag = fmt.Sprintf(`"status-%d-%d"`, status, rs.sequence)
+}
+
+func (rs *registryServer) setSequence(sequence uint64) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.sequence = sequence
+	rs.etag = fmt.Sprintf(`"sequence-%d"`, sequence)
 }
 
 func (rs *registryServer) requestCount() int {
@@ -385,12 +487,34 @@ func newTestSync(
 	mutate func(*TokenRegistryConfig),
 ) *TokenRegistrySync {
 	t.Helper()
+	manifestURL := strings.TrimRight(url, "/") + "/manifest"
+	serverURL := url
+	if parsed, err := neturl.Parse(url); err == nil && parsed.Host != "" {
+		serverURL = parsed.Scheme + "://" + parsed.Host
+		parsed.User = nil
+		parsed.Path = "/manifest"
+		parsed.RawPath = ""
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		manifestURL = parsed.String()
+	}
 	cfg := TokenRegistryConfig{
-		Store:     store,
-		SourceURL: url,
-		Network:   "mainnet",
+		Store:       store,
+		SourceURL:   url,
+		ManifestURL: manifestURL,
+		TrustedManifestKey: hex.EncodeToString(
+			testTokenRegistryManifestPrivateKey.Public().(ed25519.PublicKey),
+		),
+		Network: "mainnet",
 		// httptest binds loopback, which the SSRF guard blocks by default.
 		AllowPrivateAddresses: true,
+	}
+	if value, ok := testRegistryServers.Load(serverURL); ok {
+		server := value.(*registryServer)
+		server.mu.Lock()
+		server.archiveURL = url
+		server.mu.Unlock()
+		cfg.HTTPClient = server.Client()
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -431,6 +555,168 @@ func TestTokenRegistrySyncStoresMappings(t *testing.T) {
 	require.Equal(t, "Djed USD", entries[syncSubjectDjed].Name)
 }
 
+func TestTokenRegistryManifestRejectsInvalidSignature(t *testing.T) {
+	t.Parallel()
+	body := []byte("snapshot")
+	raw := signedTokenRegistryManifest(
+		t,
+		"https://registry.example/snapshot.tar.gz",
+		body,
+		1,
+	)
+	var envelope tokenRegistryManifestEnvelope
+	require.NoError(t, json.Unmarshal(raw, &envelope))
+	signature, err := base64.RawURLEncoding.DecodeString(envelope.Signature)
+	require.NoError(t, err)
+	signature[0] ^= 0xff
+	envelope.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	raw, err = json.Marshal(envelope)
+	require.NoError(t, err)
+
+	_, err = verifyTokenRegistryManifest(
+		raw,
+		testTokenRegistryManifestPrivateKey.Public().(ed25519.PublicKey),
+		"https://registry.example/snapshot.tar.gz",
+	)
+	require.ErrorContains(t, err, "invalid signature")
+}
+
+func TestTokenRegistrySyncRejectsHTTPSRedirectToHTTP(t *testing.T) {
+	t.Parallel()
+	plain := httptest.NewServer(http.HandlerFunc(
+		func(http.ResponseWriter, *http.Request) {},
+	))
+	t.Cleanup(plain.Close)
+	secure := httptest.NewTLSServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, plain.URL, http.StatusFound)
+		},
+	))
+	t.Cleanup(secure.Close)
+	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
+		Store:                 newFakeTokenRegistryStore(),
+		SourceURL:             secure.URL + "/snapshot.tar.gz",
+		ManifestURL:           secure.URL + "/manifest",
+		TrustedManifestKey:    testTokenRegistryManifestKey(),
+		HTTPClient:            secure.Client(),
+		AllowPrivateAddresses: true,
+	})
+	require.NoError(t, err)
+
+	_, err = sync.SyncOnce(t.Context())
+	for errors.Unwrap(err) != nil {
+		err = errors.Unwrap(err)
+	}
+	require.EqualError(t, err, "token registry URLs must use HTTPS")
+}
+
+func TestTokenRegistrySnapshotRequiresManifestSizeAndDigest(t *testing.T) {
+	t.Parallel()
+	body := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	})
+	server := newRegistryServer(t, body)
+	sync := newTestSync(t, newFakeTokenRegistryStore(), server.URL, nil)
+	digest := blake2b.Sum256(body)
+	manifest := tokenRegistryManifest{
+		Version:       tokenRegistryManifestVersion,
+		Sequence:      1,
+		ArchiveURL:    server.URL,
+		ArchiveBytes:  int64(len(body)),
+		ArchiveDigest: hex.EncodeToString(digest[:]),
+	}
+
+	wrongSize := manifest
+	wrongSize.ArchiveBytes++
+	_, err := sync.stageAuthenticatedSnapshot(
+		t.Context(),
+		bytes.NewReader(body),
+		wrongSize,
+	)
+	require.ErrorContains(t, err, "manifest declares")
+
+	wrongDigest := manifest
+	wrongDigest.ArchiveDigest = strings.Repeat("0", 64)
+	_, err = sync.stageAuthenticatedSnapshot(
+		t.Context(),
+		bytes.NewReader(body),
+		wrongDigest,
+	)
+	require.ErrorContains(t, err, "digest does not match")
+}
+
+func TestTokenRegistrySnapshotDigestCoversResponseThroughEOF(t *testing.T) {
+	t.Parallel()
+	body := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	})
+	server := newRegistryServer(t, body)
+	sync := newTestSync(t, newFakeTokenRegistryStore(), server.URL, nil)
+	digest := blake2b.Sum256(body)
+	tracked := &completionReadCloser{reader: bytes.NewReader(body)}
+	stage, err := sync.stageAuthenticatedSnapshot(
+		t.Context(),
+		tracked,
+		tokenRegistryManifest{
+			ArchiveBytes:  int64(len(body)),
+			ArchiveDigest: hex.EncodeToString(digest[:]),
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, stage.close(os.Remove)) })
+	require.True(t, tracked.consumed.Load())
+}
+
+func TestTokenRegistryManifestSequencePolicy(t *testing.T) {
+	t.Parallel()
+	body := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	})
+
+	t.Run("lower rejected", func(t *testing.T) {
+		server := newRegistryServer(t, body)
+		store := newFakeTokenRegistryStore()
+		store.syncState[tokenRegistryManifestSequence] = "2"
+		store.syncState[tokenRegistrySnapshotDigestKey] = strings.Repeat("a", 64)
+		sync := newTestSync(t, store, server.URL, nil)
+		_, err := sync.SyncOnce(t.Context())
+		require.ErrorContains(t, err, "below stored sequence")
+		require.Equal(t, "2", store.state(tokenRegistryManifestSequence))
+	})
+
+	t.Run("lower accepted explicitly", func(t *testing.T) {
+		server := newRegistryServer(t, body)
+		store := newFakeTokenRegistryStore()
+		store.syncState[tokenRegistryManifestSequence] = "2"
+		store.syncState[tokenRegistrySnapshotDigestKey] = strings.Repeat("a", 64)
+		sync := newTestSync(t, store, server.URL, func(cfg *TokenRegistryConfig) {
+			cfg.AllowRollback = true
+		})
+		_, err := sync.SyncOnce(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, "1", store.state(tokenRegistryManifestSequence))
+	})
+
+	t.Run("same sequence different digest rejected", func(t *testing.T) {
+		server := newRegistryServer(t, body)
+		store := newFakeTokenRegistryStore()
+		store.syncState[tokenRegistryManifestSequence] = "1"
+		store.syncState[tokenRegistrySnapshotDigestKey] = strings.Repeat("a", 64)
+		sync := newTestSync(t, store, server.URL, func(cfg *TokenRegistryConfig) {
+			cfg.AllowRollback = true
+		})
+		_, err := sync.SyncOnce(t.Context())
+		require.ErrorContains(t, err, "changes digest")
+		require.Equal(t, "1", store.state(tokenRegistryManifestSequence))
+	})
+}
+
 func TestTokenRegistrySyncPersistsAndSendsETag(t *testing.T) {
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
@@ -463,6 +749,32 @@ func TestTokenRegistrySyncPersistsAndSendsETag(t *testing.T) {
 	require.Equal(t, `"abc123"`, server.ifNoneMatch())
 	require.Equal(t, 2, server.requestCount())
 	require.Equal(t, 1, store.upserts, "304 must not write to the store")
+}
+
+func TestTokenRegistrySyncClearsOmittedManifestETag(t *testing.T) {
+	body := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	})
+	server := newRegistryServer(t, body)
+	server.notModifiedOnTag = true
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, `"abc123"`, store.state(TokenRegistrySyncStateKey))
+
+	server.mu.Lock()
+	server.etag = ""
+	server.mu.Unlock()
+	written, err := sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Zero(t, written)
+	require.Empty(t, store.state(TokenRegistrySyncStateKey))
+	require.Equal(t, 1, store.upserts)
 }
 
 func TestTokenRegistrySyncDropsLogosByDefault(t *testing.T) {
@@ -523,7 +835,8 @@ func TestTokenRegistrySyncIgnoresNonMappingFiles(t *testing.T) {
 }
 
 func TestTokenRegistrySyncSkipsMalformedMappings(t *testing.T) {
-	// One unparsable file in a 7,900-file registry must not cost the sync.
+	// A complete authenticated snapshot is applied atomically. Valid rows from
+	// an archive with unusable mappings must not become visible on their own.
 	body := tarballOf(t, map[string]string{
 		"mappings/broken.json":    `{"subject": `,
 		"mappings/nosubject.json": `{"name":{"value":"x"}}`,
@@ -540,9 +853,9 @@ func TestTokenRegistrySyncSkipsMalformedMappings(t *testing.T) {
 
 	written, err := sync.SyncOnce(t.Context())
 
-	require.NoError(t, err)
-	require.Equal(t, 1, written)
-	require.Len(t, store.snapshot(), 1)
+	require.ErrorContains(t, err, "unusable mappings: 2")
+	require.Zero(t, written)
+	require.Empty(t, store.snapshot())
 }
 
 func TestTokenRegistrySyncSkipsSubjectOnlyMappings(t *testing.T) {
@@ -700,8 +1013,8 @@ func TestTokenRegistrySyncBoundsRetainedBatchBytes(t *testing.T) {
 }
 
 // TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit verifies that a
-// retained-batch limit below the default per-entry limit skips only the
-// oversized mapping and defers pruning its previously stored row.
+// retained-batch limit below the default per-entry limit rejects the partial
+// snapshot and keeps the previously stored rows.
 func TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit(t *testing.T) {
 	t.Parallel()
 
@@ -748,7 +1061,7 @@ func TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit(t *testing.T) {
 		"mappings/" + syncSubjectDjed + ".json": oversized,
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
-			"small mapping remains available",
+			"updated mapping must not leak from rejected snapshot",
 			"NUT",
 			"",
 		),
@@ -756,8 +1069,8 @@ func TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit(t *testing.T) {
 
 	written, err = sync.SyncOnce(t.Context())
 
-	require.NoError(t, err)
-	require.Equal(t, 1, written)
+	require.ErrorContains(t, err, "unusable mappings: 1")
+	require.Zero(t, written)
 	require.LessOrEqual(t, store.maxBatchBytes, maxBatchBytes)
 	require.Equal(t, prunesBefore, store.prunes,
 		"a skipped entry must defer reconciliation")
@@ -779,12 +1092,29 @@ func TestTokenRegistrySyncIngestsArtifactBeforeTransaction(t *testing.T) {
 	})
 	tracked := &completionReadCloser{reader: bytes.NewReader(body)}
 	client := &http.Client{Transport: roundTripFunc(func(
-		_ *http.Request,
+		req *http.Request,
 	) (*http.Response, error) {
+		responseBody := io.ReadCloser(tracked)
+		contentType := "application/gzip"
+		if req.URL.Path == "/manifest" {
+			responseBody = io.NopCloser(bytes.NewReader(
+				signedTokenRegistryManifest(
+					t,
+					"https://registry.example.test/archive.tar.gz",
+					body,
+					1,
+				),
+			))
+			contentType = "application/json"
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Header:     http.Header{"ETag": []string{`"etag"`}},
-			Body:       tracked,
+			Header: http.Header{
+				"ETag":         []string{`"etag"`},
+				"Content-Type": []string{contentType},
+			},
+			Body:          responseBody,
+			ContentLength: -1,
 		}, nil
 	})}
 	store := newFakeTokenRegistryStore()
@@ -800,6 +1130,8 @@ func TestTokenRegistrySyncIngestsArtifactBeforeTransaction(t *testing.T) {
 	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
 		Store:                 store,
 		SourceURL:             "https://registry.example.test/archive.tar.gz",
+		ManifestURL:           "https://registry.example.test/manifest",
+		TrustedManifestKey:    testTokenRegistryManifestKey(),
 		HTTPClient:            client,
 		AllowPrivateAddresses: true,
 	})
@@ -836,9 +1168,9 @@ func TestTokenRegistrySyncSkipsOversizedMapping(t *testing.T) {
 
 	written, err := sync.SyncOnce(t.Context())
 
-	require.NoError(t, err)
-	require.Equal(t, 1, written)
-	require.NotContains(t, store.snapshot(), syncSubjectDjed)
+	require.ErrorContains(t, err, "unusable mappings: 1")
+	require.Zero(t, written)
+	require.Empty(t, store.snapshot())
 }
 
 func TestTokenRegistrySyncErrorsOnBadStatus(t *testing.T) {
@@ -871,9 +1203,11 @@ func TestTokenRegistrySyncBlocksPrivateAddressesByDefault(t *testing.T) {
 	server := newRegistryServer(t, nil)
 	store := newFakeTokenRegistryStore()
 	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
-		Store:     store,
-		SourceURL: server.URL,
-		Network:   "mainnet",
+		Store:              store,
+		SourceURL:          server.URL,
+		ManifestURL:        server.URL + "/manifest",
+		TrustedManifestKey: testTokenRegistryManifestKey(),
+		Network:            "mainnet",
 	})
 	require.NoError(t, err)
 
@@ -897,8 +1231,10 @@ func TestNewTokenRegistrySyncResolvesSourceByNetwork(t *testing.T) {
 	} {
 		t.Run(network, func(t *testing.T) {
 			sync, err := NewTokenRegistrySync(TokenRegistryConfig{
-				Store:   newFakeTokenRegistryStore(),
-				Network: network,
+				Store:              newFakeTokenRegistryStore(),
+				Network:            network,
+				ManifestURL:        "https://registry.example.test/manifest",
+				TrustedManifestKey: testTokenRegistryManifestKey(),
 			})
 			require.NoError(t, err)
 			require.Contains(t, sync.SourceURL(), want)
@@ -908,9 +1244,11 @@ func TestNewTokenRegistrySyncResolvesSourceByNetwork(t *testing.T) {
 
 func TestNewTokenRegistrySyncPrefersExplicitSourceURL(t *testing.T) {
 	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
-		Store:     newFakeTokenRegistryStore(),
-		Network:   "mainnet",
-		SourceURL: "https://mirror.example.test/registry.tar.gz",
+		Store:              newFakeTokenRegistryStore(),
+		Network:            "mainnet",
+		SourceURL:          "https://mirror.example.test/registry.tar.gz",
+		ManifestURL:        "https://mirror.example.test/manifest",
+		TrustedManifestKey: testTokenRegistryManifestKey(),
 	})
 
 	require.NoError(t, err)
@@ -955,10 +1293,12 @@ func TestTokenRegistrySyncStartStop(t *testing.T) {
 // past the configured whole-download budget indefinitely.
 func TestNewTokenRegistrySyncBoundsCallerSuppliedClient(t *testing.T) {
 	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
-		Store:          newFakeTokenRegistryStore(),
-		Network:        "mainnet",
-		HTTPClient:     &http.Client{},
-		RequestTimeout: 42 * time.Second,
+		Store:              newFakeTokenRegistryStore(),
+		Network:            "mainnet",
+		ManifestURL:        "https://registry.example.test/manifest",
+		TrustedManifestKey: testTokenRegistryManifestKey(),
+		HTTPClient:         &http.Client{},
+		RequestTimeout:     42 * time.Second,
 	})
 
 	require.NoError(t, err)
@@ -969,10 +1309,12 @@ func TestNewTokenRegistrySyncKeepsStricterCallerTimeout(t *testing.T) {
 	// A caller who asked for something tighter than the configured budget
 	// meant it; do not loosen it.
 	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
-		Store:          newFakeTokenRegistryStore(),
-		Network:        "mainnet",
-		HTTPClient:     &http.Client{Timeout: 5 * time.Second},
-		RequestTimeout: 42 * time.Second,
+		Store:              newFakeTokenRegistryStore(),
+		Network:            "mainnet",
+		ManifestURL:        "https://registry.example.test/manifest",
+		TrustedManifestKey: testTokenRegistryManifestKey(),
+		HTTPClient:         &http.Client{Timeout: 5 * time.Second},
+		RequestTimeout:     42 * time.Second,
 	})
 
 	require.NoError(t, err)
@@ -981,13 +1323,40 @@ func TestNewTokenRegistrySyncKeepsStricterCallerTimeout(t *testing.T) {
 
 func TestNewTokenRegistrySyncBoundsDefaultClient(t *testing.T) {
 	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
-		Store:          newFakeTokenRegistryStore(),
-		Network:        "mainnet",
-		RequestTimeout: 42 * time.Second,
+		Store:              newFakeTokenRegistryStore(),
+		Network:            "mainnet",
+		ManifestURL:        "https://registry.example.test/manifest",
+		TrustedManifestKey: testTokenRegistryManifestKey(),
+		RequestTimeout:     42 * time.Second,
 	})
 
 	require.NoError(t, err)
 	require.Equal(t, 42*time.Second, sync.client.Timeout)
+}
+
+func TestTokenRegistrySyncSharesDownloadTimeout(t *testing.T) {
+	body := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	})
+	server := newRegistryServer(t, body)
+	server.mu.Lock()
+	server.manifestDelay = 100 * time.Millisecond
+	server.archiveDelay = 100 * time.Millisecond
+	server.mu.Unlock()
+	sync := newTestSync(
+		t,
+		newFakeTokenRegistryStore(),
+		server.URL,
+		func(cfg *TokenRegistryConfig) {
+			cfg.RequestTimeout = 150 * time.Millisecond
+		},
+	)
+
+	_, err := sync.SyncOnce(t.Context())
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 // TestTokenRegistrySyncStopWaitsForWorkerAfterContextExpiry is the shutdown
@@ -1140,6 +1509,8 @@ func TestTokenRegistrySyncDoesNotPruneOnFailedSnapshot(t *testing.T) {
 	_, err := sync.SyncOnce(t.Context())
 	require.NoError(t, err)
 	require.Len(t, store.snapshot(), 1)
+	sequenceAfterSuccess := store.state(tokenRegistryManifestSequence)
+	digestAfterSuccess := store.state(tokenRegistrySnapshotDigestKey)
 	// The first, successful sync legitimately reconciles; only the failed one
 	// that follows must not.
 	prunesAfterSuccess := store.prunes
@@ -1156,6 +1527,16 @@ func TestTokenRegistrySyncDoesNotPruneOnFailedSnapshot(t *testing.T) {
 		"a failed snapshot must not prune",
 	)
 	require.Contains(t, store.snapshot(), syncSubjectNut)
+	require.Equal(
+		t,
+		sequenceAfterSuccess,
+		store.state(tokenRegistryManifestSequence),
+	)
+	require.Equal(
+		t,
+		digestAfterSuccess,
+		store.state(tokenRegistrySnapshotDigestKey),
+	)
 }
 
 // TestTokenRegistrySyncDoesNotPruneOnNotModified: a 304 applies no snapshot,
@@ -1530,12 +1911,9 @@ func TestTokenRegistrySyncIgnoresETagFromADifferentSource(t *testing.T) {
 	)
 }
 
-// TestTokenRegistrySyncDefersPruneWhenMappingsSkipped protects metadata that
-// is already being served from a transient parse problem. A mapping that was
-// valid yesterday and is malformed or oversized today is skipped, so it is
-// not re-stamped -- and an unconditional prune would then delete the good row
-// it still has.
-func TestTokenRegistrySyncDefersPruneWhenMappingsSkipped(t *testing.T) {
+// TestTokenRegistrySyncRollsBackWhenMappingsSkipped keeps authenticated state
+// and served rows on the same complete snapshot when one mapping is unusable.
+func TestTokenRegistrySyncRollsBackWhenMappingsSkipped(t *testing.T) {
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -1556,6 +1934,9 @@ func TestTokenRegistrySyncDefersPruneWhenMappingsSkipped(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, store.snapshot(), 2)
 	prunesBefore := store.prunes
+	sequenceBefore := store.state(tokenRegistryManifestSequence)
+	digestBefore := store.state(tokenRegistrySnapshotDigestKey)
+	snapshotBefore := store.snapshot()
 
 	// DJED's mapping goes bad; NUT's is unchanged.
 	server.setBody(tarballOf(t, map[string]string{
@@ -1570,7 +1951,7 @@ func TestTokenRegistrySyncDefersPruneWhenMappingsSkipped(t *testing.T) {
 
 	_, err = sync.SyncOnce(t.Context())
 
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "unusable mappings: 1")
 	require.Equal(
 		t,
 		prunesBefore,
@@ -1582,6 +1963,17 @@ func TestTokenRegistrySyncDefersPruneWhenMappingsSkipped(t *testing.T) {
 		store.snapshot(),
 		syncSubjectDjed,
 		"a subject whose mapping failed to parse must keep its stored metadata",
+	)
+	require.Equal(t, snapshotBefore, store.snapshot())
+	require.Equal(
+		t,
+		sequenceBefore,
+		store.state(tokenRegistryManifestSequence),
+	)
+	require.Equal(
+		t,
+		digestBefore,
+		store.state(tokenRegistrySnapshotDigestKey),
 	)
 }
 
@@ -1827,9 +2219,11 @@ func TestNewTokenRegistrySyncClampsInterval(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			sync, err := NewTokenRegistrySync(TokenRegistryConfig{
-				Store:    newFakeTokenRegistryStore(),
-				Network:  "mainnet",
-				Interval: configured,
+				Store:              newFakeTokenRegistryStore(),
+				Network:            "mainnet",
+				ManifestURL:        "https://registry.example.test/manifest",
+				TrustedManifestKey: testTokenRegistryManifestKey(),
+				Interval:           configured,
 			})
 
 			require.NoError(t, err)
@@ -1845,9 +2239,11 @@ func TestNewTokenRegistrySyncClampsInterval(t *testing.T) {
 
 func TestNewTokenRegistrySyncKeepsIntervalAboveFloor(t *testing.T) {
 	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
-		Store:    newFakeTokenRegistryStore(),
-		Network:  "mainnet",
-		Interval: 90 * time.Minute,
+		Store:              newFakeTokenRegistryStore(),
+		Network:            "mainnet",
+		ManifestURL:        "https://registry.example.test/manifest",
+		TrustedManifestKey: testTokenRegistryManifestKey(),
+		Interval:           90 * time.Minute,
 	})
 
 	require.NoError(t, err)
@@ -1873,6 +2269,7 @@ func TestTokenRegistrySyncForcesFullApplyWhenSwitchingBack(t *testing.T) {
 	sourceA := newRegistryServer(t, bodyA)
 	sourceA.notModifiedOnTag = true
 	sourceB := newRegistryServer(t, bodyB)
+	sourceB.sequence = 2
 	sourceB.etag = `"b-etag"`
 	store := newFakeTokenRegistryStore()
 	clock := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
@@ -1894,6 +2291,7 @@ func TestTokenRegistrySyncForcesFullApplyWhenSwitchingBack(t *testing.T) {
 	require.NotContains(t, entries, syncSubjectNut)
 
 	// 3. Operator repoints back at source A, whose content never changed.
+	sourceA.setSequence(3)
 	syncBack := newTestSync(t, store, sourceA.URL, nil)
 	syncBack.now = func() time.Time { return clock.Add(2 * time.Minute) }
 	written, err := syncBack.SyncOnce(t.Context())

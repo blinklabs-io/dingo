@@ -614,6 +614,9 @@ func TestTokenRegistryAggregateBoundsEnvAndFlags(t *testing.T) {
 	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_ARCHIVE_ENTRIES", "1002")
 	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_ACCEPTED_ENTRIES", "1003")
 	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_BATCH_BYTES", "1004")
+	t.Setenv("DINGO_TOKEN_REGISTRY_MANIFEST_URL", "https://env.example/manifest.json")
+	t.Setenv("DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY", strings.Repeat("ab", 32))
+	t.Setenv("DINGO_TOKEN_REGISTRY_ALLOW_ROLLBACK", "true")
 	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
 	require.NoError(t, os.WriteFile(configFile, nil, 0o600))
 
@@ -623,6 +626,9 @@ func TestTokenRegistryAggregateBoundsEnvAndFlags(t *testing.T) {
 	require.Equal(t, 1002, cfg.TokenRegistry.MaxArchiveEntries)
 	require.Equal(t, 1003, cfg.TokenRegistry.MaxAcceptedEntries)
 	require.Equal(t, int64(1004), cfg.TokenRegistry.MaxBatchBytes)
+	require.Equal(t, "https://env.example/manifest.json", cfg.TokenRegistry.ManifestURL)
+	require.Equal(t, strings.Repeat("ab", 32), cfg.TokenRegistry.TrustedManifestKey)
+	require.True(t, cfg.TokenRegistry.AllowRollback)
 
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
@@ -631,12 +637,18 @@ func TestTokenRegistryAggregateBoundsEnvAndFlags(t *testing.T) {
 		"--token-registry-max-archive-entries=2002",
 		"--token-registry-max-accepted-entries=2003",
 		"--token-registry-max-batch-bytes=2004",
+		"--token-registry-manifest-url=https://flag.example/manifest.json",
+		"--token-registry-trusted-manifest-key=" + strings.Repeat("cd", 32),
+		"--token-registry-allow-rollback=false",
 	}))
 	require.NoError(t, ApplyFlags(cmd, cfg))
 	require.Equal(t, int64(2001), cfg.TokenRegistry.MaxDecompressedBytes)
 	require.Equal(t, 2002, cfg.TokenRegistry.MaxArchiveEntries)
 	require.Equal(t, 2003, cfg.TokenRegistry.MaxAcceptedEntries)
 	require.Equal(t, int64(2004), cfg.TokenRegistry.MaxBatchBytes)
+	require.Equal(t, "https://flag.example/manifest.json", cfg.TokenRegistry.ManifestURL)
+	require.Equal(t, strings.Repeat("cd", 32), cfg.TokenRegistry.TrustedManifestKey)
+	require.False(t, cfg.TokenRegistry.AllowRollback)
 }
 
 func TestTokenRegistryAggregateBoundsYAML(t *testing.T) {
@@ -649,6 +661,9 @@ tokenRegistry:
   maxArchiveEntries: 3002
   maxAcceptedEntries: 3003
   maxBatchBytes: 3004
+  manifestUrl: https://yaml.example/manifest.json
+  trustedManifestKey: `+strings.Repeat("ef", 32)+`
+  allowRollback: true
 `), 0o600))
 
 	cfg, err := LoadConfig(configFile)
@@ -658,6 +673,9 @@ tokenRegistry:
 	require.Equal(t, 3002, cfg.TokenRegistry.MaxArchiveEntries)
 	require.Equal(t, 3003, cfg.TokenRegistry.MaxAcceptedEntries)
 	require.Equal(t, int64(3004), cfg.TokenRegistry.MaxBatchBytes)
+	require.Equal(t, "https://yaml.example/manifest.json", cfg.TokenRegistry.ManifestURL)
+	require.Equal(t, strings.Repeat("ef", 32), cfg.TokenRegistry.TrustedManifestKey)
+	require.True(t, cfg.TokenRegistry.AllowRollback)
 }
 
 func TestMempoolProviderSourcePrecedence(t *testing.T) {

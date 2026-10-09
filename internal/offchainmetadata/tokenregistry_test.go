@@ -92,7 +92,7 @@ func requireRedacted(t *testing.T, rendered, marker string) {
 // so a request to it fails at the transport rather than being answered.
 func deadServerURL(t *testing.T) string {
 	t.Helper()
-	dead := httptest.NewServer(
+	dead := httptest.NewTLSServer(
 		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 	)
 	addr := dead.URL
@@ -276,7 +276,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 
 		_, err := sync.SyncOnce(t.Context())
 
-		require.NoError(t, err)
+		require.ErrorContains(t, err, "unusable mappings: 1")
 		requireRedacted(t, buf.String(), "unusable mappings")
 	})
 
@@ -284,8 +284,8 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 		server := newRegistryServer(t, tarballOf(t, good))
 		source := strings.Replace(
 			withCredentials(server.URL),
-			"http://",
-			"http://"+redactUser+":"+redactPassword+"@",
+			"https://",
+			"https://"+redactUser+":"+redactPassword+"@",
 			1,
 		)
 		sync, buf := captureSync(t, newFakeTokenRegistryStore(), source)
@@ -310,7 +310,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 
 	t.Run("transport error through redirect", func(t *testing.T) {
 		target := deadServerURL(t) + "/?token=" + redactRedirect
-		server := httptest.NewServer(
+		server := httptest.NewTLSServer(
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				http.Redirect(w, r, target, http.StatusFound)
 			}),
@@ -321,6 +321,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 			newFakeTokenRegistryStore(),
 			withCredentials(server.URL),
 		)
+		sync.client.Transport = server.Client().Transport
 
 		sync.runOnce(t.Context())
 
@@ -336,8 +337,8 @@ func TestTokenRegistrySyncRedactsCredentialsFromReturnedError(t *testing.T) {
 		server := newRegistryServer(t, nil)
 		source := strings.Replace(
 			withCredentials(server.URL),
-			"http://",
-			"http://"+redactUser+":"+redactPassword+"@",
+			"https://",
+			"https://"+redactUser+":"+redactPassword+"@",
 			1,
 		)
 		sync := newTestSync(t, newFakeTokenRegistryStore(), source, nil)
@@ -362,7 +363,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromReturnedError(t *testing.T) {
 
 	t.Run("transport error through redirect", func(t *testing.T) {
 		target := deadServerURL(t) + "/?token=" + redactRedirect
-		server := httptest.NewServer(
+		server := httptest.NewTLSServer(
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				http.Redirect(w, r, target, http.StatusFound)
 			}),
@@ -374,11 +375,12 @@ func TestTokenRegistrySyncRedactsCredentialsFromReturnedError(t *testing.T) {
 			withCredentials(server.URL),
 			nil,
 		)
+		sync.client.Transport = server.Client().Transport
 
 		_, err := sync.SyncOnce(t.Context())
 
 		require.Error(t, err)
-		requireRedacted(t, err.Error(), "fetch token registry failed")
+		requireRedacted(t, err.Error(), "fetch token registry manifest failed")
 	})
 }
 
@@ -388,7 +390,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromReturnedError(t *testing.T) {
 func TestTokenRegistrySyncFetchErrorStaysIdentifiable(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	server := httptest.NewServer(
+	server := httptest.NewTLSServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			cancel()
 			<-r.Context().Done()
@@ -401,6 +403,7 @@ func TestTokenRegistrySyncFetchErrorStaysIdentifiable(t *testing.T) {
 		withCredentials(server.URL),
 		nil,
 	)
+	sync.client.Transport = server.Client().Transport
 
 	_, err := sync.SyncOnce(ctx)
 
@@ -408,7 +411,7 @@ func TestTokenRegistrySyncFetchErrorStaysIdentifiable(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	var urlErr *url.Error
 	require.ErrorAs(t, err, &urlErr)
-	requireRedacted(t, err.Error(), "fetch token registry failed")
+	requireRedacted(t, err.Error(), "fetch token registry manifest failed")
 }
 
 // nutcoinSubject is the real registry subject for the nutcoin test asset:

@@ -15,6 +15,7 @@
 package config
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -633,6 +634,47 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.TokenRegistry.MaxBatchBytes,
 			c.TokenRegistry.MaxEntryBytes,
 		))
+	}
+	if c.TokenRegistry.Enabled &&
+		strings.TrimSpace(c.TokenRegistry.ManifestURL) == "" {
+		errs = append(errs, errors.New(
+			"tokenRegistry.manifestUrl is required when token registry sync is enabled",
+		))
+	}
+	if raw := strings.TrimSpace(c.TokenRegistry.ManifestURL); raw != "" {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+			parsed.User != nil {
+			errs = append(errs, errors.New(
+				"tokenRegistry.manifestUrl must be an absolute HTTPS URL",
+			))
+		}
+	}
+	if raw := strings.TrimSpace(c.TokenRegistry.SourceURL); raw != "" {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+			parsed.User != nil {
+			errs = append(errs, errors.New(
+				"tokenRegistry.sourceUrl must be an absolute HTTPS URL",
+			))
+		}
+	}
+	trustedManifestKey := strings.TrimSpace(
+		c.TokenRegistry.TrustedManifestKey,
+	)
+	if c.TokenRegistry.Enabled && trustedManifestKey == "" {
+		errs = append(errs, errors.New(
+			"tokenRegistry.trustedManifestKey is required when token registry sync is enabled",
+		))
+	}
+	if trustedManifestKey != "" {
+		decoded, err := hex.DecodeString(trustedManifestKey)
+		if err != nil || len(decoded) != ed25519.PublicKeySize {
+			errs = append(errs, fmt.Errorf(
+				"tokenRegistry.trustedManifestKey must be a %d-byte Ed25519 public key encoded as hexadecimal",
+				ed25519.PublicKeySize,
+			))
+		}
 	}
 
 	// Block production needs all three credential paths

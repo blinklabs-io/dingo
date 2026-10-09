@@ -123,6 +123,67 @@ func TestValidateTokenRegistryAggregateBounds(t *testing.T) {
 	}
 }
 
+func TestValidateTokenRegistryTrustConfiguration(t *testing.T) {
+	t.Parallel()
+
+	t.Run("enabled requires manifest and key", func(t *testing.T) {
+		t.Parallel()
+		cfg := validTestConfig()
+		cfg.TokenRegistry.Enabled = true
+
+		err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+
+		require.ErrorContains(t, err, "tokenRegistry.manifestUrl")
+		require.ErrorContains(t, err, "tokenRegistry.trustedManifestKey")
+	})
+
+	t.Run("key has Ed25519 width", func(t *testing.T) {
+		t.Parallel()
+		cfg := validTestConfig()
+		cfg.TokenRegistry.TrustedManifestKey = "abcd"
+
+		err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+
+		require.ErrorContains(t, err, "tokenRegistry.trustedManifestKey")
+	})
+
+	t.Run("transport stays HTTPS", func(t *testing.T) {
+		t.Parallel()
+		cfg := validTestConfig()
+		cfg.TokenRegistry.ManifestURL = "http://mirror.example/manifest.json"
+		cfg.TokenRegistry.SourceURL = "http://mirror.example/snapshot.tar.gz"
+
+		err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+
+		require.ErrorContains(t, err, "tokenRegistry.manifestUrl")
+		require.ErrorContains(t, err, "tokenRegistry.sourceUrl")
+	})
+
+	t.Run("URLs reject embedded credentials", func(t *testing.T) {
+		t.Parallel()
+		cfg := validTestConfig()
+		cfg.TokenRegistry.ManifestURL =
+			"https://user:secret@mirror.example/manifest.json"
+		cfg.TokenRegistry.SourceURL =
+			"https://user:secret@mirror.example/snapshot.tar.gz"
+
+		err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+
+		require.ErrorContains(t, err, "tokenRegistry.manifestUrl")
+		require.ErrorContains(t, err, "tokenRegistry.sourceUrl")
+	})
+
+	t.Run("complete trust configuration", func(t *testing.T) {
+		t.Parallel()
+		cfg := validTestConfig()
+		cfg.TokenRegistry.Enabled = true
+		cfg.TokenRegistry.ManifestURL = "https://mirror.example/manifest.json"
+		cfg.TokenRegistry.TrustedManifestKey = strings.Repeat("ab", 32)
+
+		require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+	})
+}
+
 func TestValidatePublicAPIAllowsLoopback(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
