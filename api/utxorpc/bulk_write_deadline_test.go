@@ -41,8 +41,8 @@ func TestBulkSlot_WriteDeadlineOnRealServer(t *testing.T) {
 	for _, useTLS := range []bool{false, true} {
 		t.Run(fmt.Sprintf("tls=%t", useTLS), func(t *testing.T) {
 			t.Parallel()
-			// Incompressible bodies, so response compression cannot shrink
-			// the response below the client's flow-control window.
+			// Incompressible bodies, so the response stays larger than the
+			// client's flow-control window even if compression is negotiated.
 			rng := rand.New(rand.NewPCG(1, 2)) //nolint:gosec
 			mp := newBoundsRecordingMempool(0)
 			for i := range 160 {
@@ -85,10 +85,16 @@ func TestBulkSlot_WriteDeadlineOnRealServer(t *testing.T) {
 			)
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", "application/proto")
-			// The deadline can expire before the response headers are
-			// flushed (marshalling 10 MiB under -race is slow), in which
-			// case the server resets the stream and Do fails. Either outcome
-			// leaves the body unread, which is all this test needs.
+			// Go's transport otherwise asks for gzip, and Connect then
+			// compresses the whole response before its first write. Under
+			// -race on a CI runner that takes several seconds, all of it
+			// before the deadline can fire, so the slot outlives the wait
+			// below for reasons unrelated to the deadline.
+			req.Header.Set("Accept-Encoding", "identity")
+			// On a slow runner the deadline can still expire before the
+			// response headers are flushed, in which case the server resets
+			// the stream and Do fails. Either outcome leaves the body unread,
+			// which is all this test needs.
 			type doResult struct {
 				resp *http.Response
 				err  error
