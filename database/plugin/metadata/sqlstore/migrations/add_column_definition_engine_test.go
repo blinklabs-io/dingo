@@ -20,7 +20,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
@@ -119,9 +118,7 @@ func TestAddColumnReplayVerifiesDefinitionOnPostgres(t *testing.T) {
 				`CREATE TABLE "` + decoy + `".item (id bigint PRIMARY KEY, n ` +
 					tc.declared + `)`,
 			)
-			if !strings.Contains(tc.declared, "UNIQUE") {
-				require.NoError(t, err)
-			}
+			require.NoError(t, err)
 			db, err := sql.Open(
 				"pgx",
 				storagetest.PostgresDSNWithSearchPath(dsn, schema),
@@ -150,13 +147,24 @@ func TestAddColumnReplayVerifiesDefinitionOnMySQL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			database := fmt.Sprintf("dingo_addcol_def_%d", i)
+			decoy := fmt.Sprintf("dingo_addcol_decoy_%d", i)
 			_, err := admin.Exec("DROP DATABASE IF EXISTS `" + database + "`")
 			require.NoError(t, err)
 			_, err = admin.Exec("CREATE DATABASE `" + database + "`")
 			require.NoError(t, err)
+			_, err = admin.Exec("DROP DATABASE IF EXISTS `" + decoy + "`")
+			require.NoError(t, err)
+			_, err = admin.Exec("CREATE DATABASE `" + decoy + "`")
+			require.NoError(t, err)
 			t.Cleanup(func() {
 				_, _ = admin.Exec("DROP DATABASE IF EXISTS `" + database + "`")
+				_, _ = admin.Exec("DROP DATABASE IF EXISTS `" + decoy + "`")
 			})
+			_, err = admin.Exec(
+				"CREATE TABLE `" + decoy + "`.item (id bigint PRIMARY KEY, n " +
+					tc.declared + ")",
+			)
+			require.NoError(t, err)
 			cfg, err := mysqldriver.ParseDSN(rootDSN)
 			require.NoError(t, err)
 			cfg.DBName = database

@@ -208,11 +208,12 @@ authorization cleanup schedule.
 
 The maintenance and VACUUM tickers wait their interval plus up to 10% random
 jitter between runs, so they do not recur at the same offset every day. A run
-that comes due while a connection in the write pool is in use is postponed and
-rechecked after the shorter of the interval and one minute. For PostgreSQL and
-MySQL the read and write handles share one pool, so read traffic can also
-postpone a run. A job postponed ten consecutive times logs a warning naming
-the job.
+that comes due while any connection in the shared SQL pool is in use is
+postponed and rechecked after the shorter of the interval and one minute. For
+PostgreSQL and MySQL, read and write handles share one pool, so read traffic can
+also postpone a run; a bulk-load session that retains a pool connection also
+holds maintenance until that session ends. A job postponed ten consecutive
+times logs a warning naming the job.
 
 Dingo stores chain state in two sibling stores:
 
@@ -3370,9 +3371,10 @@ address to narrow the live set, so both queries start from the policy's `asset`
 rows (`idx_asset_policy_id`), deduplicate their `utxo_id`s, and look the live
 UTxOs up by primary key. Probing `asset` once per live UTxO instead costs the
 same however few UTxOs hold the policy. The cost of the asset-first form scales
-with every `asset` row ever written under the policy, spent or not, so a policy
-whose all-time rows far outnumber the live UTxOs reads more than a live scan
-would. With an address filter the asset filter remains a per-row `EXISTS` over
+with the currently retained `asset` rows under the policy; spent UTxO rows are
+removed during pruning. A policy with many retained asset rows relative to its
+live UTxOs can still read more than a live scan would. With an address filter
+the asset filter remains a per-row `EXISTS` over
 the already narrowed set.
 
 `AddressUTXOs` (exact address) cannot use `Offset`/`Count`, since an exact

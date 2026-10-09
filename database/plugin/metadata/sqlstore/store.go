@@ -680,11 +680,9 @@ func jitteredInterval(every time.Duration) time.Duration {
 // warnings; at the one-minute retry delay it is one warning per ten minutes.
 const postponeWarnEvery = 10
 
-// waitForTick blocks until a periodic job is due and the write pool is
-// quiet, and returns false once ctx ends. A job that comes due while a
-// ledger write holds a write-pool connection is retried after a short
-// delay instead of running on top of that write path or waiting out a full
-// interval.
+// waitForTick blocks until a periodic job is due and the shared pool is
+// quiet, and returns false once ctx ends. Any checked-out connection delays
+// the job, including read and bulk-load connections on shared pools.
 func (s *Store) waitForTick(
 	ctx context.Context,
 	job string,

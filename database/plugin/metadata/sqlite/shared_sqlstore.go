@@ -129,7 +129,10 @@ func vacuumWith(
 		}
 		closeErr := conn.Close()
 		if err != nil {
-			return fmt.Errorf("convert to incremental auto_vacuum: %w", err)
+			return errors.Join(
+				fmt.Errorf("convert to incremental auto_vacuum: %w", err),
+				closeErr,
+			)
 		}
 		if closeErr != nil {
 			return closeErr

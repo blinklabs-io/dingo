@@ -208,6 +208,18 @@ func TestJitteredIntervalStaysWithinBoundsAndVaries(t *testing.T) {
 	require.Greater(t, len(seen), 1, "interval must vary between runs")
 }
 
+func TestJitteredIntervalAtMaximumAcceptedDuration(t *testing.T) {
+	t.Parallel()
+	const maxAcceptedSeconds = uint64(9223372036)
+	every := time.Duration(maxAcceptedSeconds) * time.Second
+	for range 1000 {
+		delay := jitteredInterval(every)
+		require.Greater(t, delay, time.Duration(0))
+		require.GreaterOrEqual(t, delay, every)
+		require.LessOrEqual(t, delay, time.Duration(1<<63-1))
+	}
+}
+
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf strings.Builder

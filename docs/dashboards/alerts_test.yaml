@@ -149,9 +149,8 @@ tests:
               instance: n1:12798
             exp_annotations:
               summary: "Dingo block propagation is delayed on n1:12798"
-              description: "Node n1:12798: a recently fetched block arrived more than 10 seconds after its slot time in the last 5 minutes."
-      # The delay ring drained back to normal; max_over_time's window has
-      # moved past the late block.
+              description: "Node n1:12798: one of the latest 16 fetched blocks arrived more than 10 seconds after its slot time."
+      # The latest value in the delay ring returned to normal.
       - eval_time: 25m
         alertname: DingoBlockfetchDelayHigh
         exp_alerts: []

@@ -61,14 +61,14 @@ groups:
       - alert: DingoBlockfetchDelayHigh
         # The user-visible end of the same stall class: one block arriving
         # late shows in the 16-slot delay ring until newer blocks displace
-        # it, so max_over_time over the ring catches a single late block.
-        expr: max by (job, instance) (max_over_time(dingo_blockfetch_recent_delay_seconds[5m])) > 10
+        # it; report the latest 16 fetched blocks, not a five-minute window.
+        expr: max by (job, instance) (dingo_blockfetch_recent_delay_seconds) > 10
         for: 0m
         labels:
           severity: warning
         annotations:
           summary: "Dingo block propagation is delayed on {{ $labels.instance }}"
-          description: "Node {{ $labels.instance }}: a recently fetched block arrived more than 10 seconds after its slot time in the last 5 minutes."
+          description: "Node {{ $labels.instance }}: one of the latest 16 fetched blocks arrived more than 10 seconds after its slot time."
 
   # node-parity (blinklabs-io/dingo#1900): cross-node ledger-state
   # comparison. check/watch compare against a reference cardano-node;
