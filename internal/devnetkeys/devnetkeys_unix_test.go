@@ -111,3 +111,41 @@ func TestInstallLocalTestKeysCleansTemporaryFileOnRenameError(t *testing.T) {
 	require.Equal(t, "vrf.skey", entries[0].Name())
 	require.True(t, entries[0].IsDir())
 }
+
+func TestOpenVerifiedLocalTestKeyRootRejectsDirectoryReplacement(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "keys")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	expected, err := os.Lstat(dir)
+	require.NoError(t, err)
+	require.NoError(t, os.Rename(dir, dir+".moved"))
+	require.NoError(t, os.Mkdir(dir, 0o700))
+
+	root, err := openVerifiedLocalTestKeyRoot(dir, expected)
+	require.ErrorContains(t, err, "changed while it was opened")
+	require.Nil(t, root)
+}
+
+func TestLocalTestKeyRootStaysBoundAfterPathReplacement(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "keys")
+	moved := filepath.Join(base, "keys.moved")
+	target := filepath.Join(base, "target")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	require.NoError(t, os.Mkdir(target, 0o700))
+	expected, err := os.Lstat(dir)
+	require.NoError(t, err)
+	root, err := openVerifiedLocalTestKeyRoot(dir, expected)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+
+	require.NoError(t, os.Rename(dir, moved))
+	require.NoError(t, os.Symlink(target, dir))
+	require.NoError(t, installLocalTestKey(root, "vrf.skey", []byte("key")))
+
+	data, err := os.ReadFile(filepath.Join(moved, "vrf.skey"))
+	require.NoError(t, err)
+	require.Equal(t, []byte("key"), data)
+	entries, err := os.ReadDir(target)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}

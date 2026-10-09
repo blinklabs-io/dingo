@@ -178,13 +178,24 @@ func (s *waitForTxLedgerStub) TransactionByHash(ctx context.Context,
 
 type blockingWaitForTxLedgerStub struct {
 	UtxorpcLedgerState
+	lookupStarted  chan waitForTxLookupStart
 	lookupReturned chan struct{}
+}
+
+type waitForTxLookupStart struct {
+	deadline    time.Time
+	hasDeadline bool
 }
 
 func (s *blockingWaitForTxLedgerStub) TransactionByHash(
 	ctx context.Context,
 	_ []byte,
 ) (*models.Transaction, error) {
+	deadline, hasDeadline := ctx.Deadline()
+	s.lookupStarted <- waitForTxLookupStart{
+		deadline:    deadline,
+		hasDeadline: hasDeadline,
+	}
 	<-ctx.Done()
 	close(s.lookupReturned)
 	return nil, ctx.Err()
@@ -516,30 +527,45 @@ func TestWaitForTxTimeoutUsesSynchronousUnsubscribe(t *testing.T) {
 	)
 }
 
-func TestWaitForTxTimeoutCancelsCommittedLookupAndUnsubscribes(t *testing.T) {
+func TestWaitForTxTimeoutCancelsCommittedLookupAndUnsubscribes(
+	t *testing.T,
+) {
 	eb := newControlledWaitForTxEventBus()
 	ledgerState := &blockingWaitForTxLedgerStub{
+		lookupStarted:  make(chan waitForTxLookupStart, 1),
 		lookupReturned: make(chan struct{}),
 	}
 	server := &submitServiceServer{
 		utxorpc: NewUtxorpc(UtxorpcConfig{
 			EventBus:      eb,
 			LedgerState:   ledgerState,
-			ServerTimeout: 10 * time.Millisecond,
+			ServerTimeout: 100 * time.Millisecond,
 		}),
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
+	resultCh := make(chan error, 1)
 
-	err := server.waitForTx(
-		ctx,
-		[][]byte{bytes.Repeat([]byte{0xb3}, 32)},
-		func(*submit.WaitForTxResponse) error {
-			t.Fatal("timeout path must not send a response")
-			return nil
-		},
+	go func() {
+		resultCh <- server.waitForTx(
+			t.Context(),
+			[][]byte{bytes.Repeat([]byte{0xb3}, 32)},
+			func(*submit.WaitForTxResponse) error {
+				t.Error("timeout path must not send a response")
+				return nil
+			},
+		)
+	}()
+
+	lookupStart := testutil.RequireReceive(
+		t,
+		ledgerState.lookupStarted,
+		time.Second,
+		"WaitForTx committed lookup start",
 	)
-
+	require.True(t, lookupStart.hasDeadline)
+	require.False(t, lookupStart.deadline.IsZero())
+	err := testutil.RequireReceive(
+		t, resultCh, time.Second, "WaitForTx timeout result",
+	)
 	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
 	testutil.RequireReceive(
 		t,
