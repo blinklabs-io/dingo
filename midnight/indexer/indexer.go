@@ -752,7 +752,9 @@ var errIncompleteRollback = errors.New("midnight indexer: incomplete rollback")
 // restores the in-memory tracking sets to their pre-block state. Every
 // database change runs in one transaction and the in-memory changes are
 // applied only after it commits, so a failure leaves both the database and
-// memory exactly as they were and the rollback can be retried.
+// memory exactly as they were. handleBlockEvent reports the failure through
+// FatalErrorFunc, which stops the node; the consumed undo event is not
+// automatically replayed after restart.
 // Order: undo spends/deregistrations first (restore UTxOs), then undo
 // creates/registrations (remove UTxOs), so a UTxO created and spent within
 // the same block ends up correctly absent from memory after the rollback.

@@ -12586,8 +12586,9 @@ journaled state, and consumes the journals in a single transaction, and applies
 the in-memory changes only after the commit. A database failure rolls the
 transaction back, leaves memory unchanged, and is returned to
 `handleBlockEvent`, which reports it through `FatalErrorFunc`; the journals
-survive, so the rollback can be retried. A block that cannot be decoded cannot
-have its created candidates removed: the remainder commits and the error wraps
+survive, but the node stops and the consumed undo event is not automatically
+replayed after restart. A block that cannot be decoded cannot have its created
+candidates removed: the remainder commits and the error wraps
 `errIncompleteRollback`, which is reported the same way.
 
 **Write atomicity**: `processBlock` opens one write transaction

@@ -875,6 +875,9 @@ DELETE FROM midnight_ariadne_rollbacks WHERE block_number = ?;
 -- name: DeleteMidnightAriadneRollbacksBeforeBlock :exec
 DELETE FROM midnight_ariadne_rollbacks WHERE block_number < ?;
 
+-- name: DeleteMidnightAriadneRollbacksAfterBlock :exec
+DELETE FROM midnight_ariadne_rollbacks WHERE block_number > ?;
+
 -- name: CreateMidnightCandidateRemoval :exec
 INSERT INTO midnight_candidate_removals (
     block_number, tx_hash, output_index, datum
@@ -893,6 +896,9 @@ DELETE FROM midnight_candidate_removals WHERE block_number = ?;
 -- name: DeleteMidnightCandidateRemovalsBeforeBlock :exec
 DELETE FROM midnight_candidate_removals WHERE block_number < ?;
 
+-- name: DeleteMidnightCandidateRemovalsAfterBlock :exec
+DELETE FROM midnight_candidate_removals WHERE block_number > ?;
+
 -- name: UpsertMidnightEpochTransition :exec
 INSERT INTO midnight_epoch_transitions (block_number, previous_epoch, previous_exists)
 VALUES (?, ?, ?)
@@ -908,6 +914,9 @@ DELETE FROM midnight_epoch_transitions WHERE block_number = ?;
 
 -- name: DeleteMidnightEpochTransitionsBeforeBlock :exec
 DELETE FROM midnight_epoch_transitions WHERE block_number < ?;
+
+-- name: DeleteMidnightEpochTransitionsAfterBlock :exec
+DELETE FROM midnight_epoch_transitions WHERE block_number > ?;
 
 -- name: UpsertMidnightEpochCandidates :one
 INSERT INTO midnight_epoch_candidates (epoch, block_number, candidates_cbor)

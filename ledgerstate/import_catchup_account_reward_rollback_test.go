@@ -32,6 +32,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// These imported-state fixtures use epoch 100 at anchor slot 1,000.
+const importTestEpochLength uint = 10
+
 // accountCredTagKey is the stake-credential tag used by every account built
 // in this file: all test accounts are key-hash credentials.
 const accountCredTagKey uint8 = 0
@@ -209,7 +212,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 				},
 			},
 			EpochLength: func(uint) (uint, uint, error) {
-				return 1, 1_000, nil
+				return 1, importTestEpochLength, nil
 			},
 		}
 	}
@@ -342,7 +345,7 @@ func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorAccountRewardCredit
 				},
 			},
 			EpochLength: func(uint) (uint, uint, error) {
-				return 1, 1_000, nil
+				return 1, importTestEpochLength, nil
 			},
 		}
 	}
@@ -459,7 +462,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorPostSnapshotRewardCredit(
 				},
 			},
 			EpochLength: func(uint) (uint, uint, error) {
-				return 1, 1_000, nil
+				return 1, importTestEpochLength, nil
 			},
 		}
 	}
@@ -588,7 +591,9 @@ func TestImportLedgerStateRepairAfterPreFixImportDoesNotUnderflow(
 					BlockHash: make([]byte, 32),
 				},
 			},
-			EpochLength: func(uint) (uint, uint, error) { return 1, 1_000, nil },
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, importTestEpochLength, nil
+			},
 		}
 	}
 
@@ -706,7 +711,9 @@ func TestImportLedgerStateCatchUpLeavesUncoveredAccountUntouched(t *testing.T) {
 					BlockHash: make([]byte, 32),
 				},
 			},
-			EpochLength: func(uint) (uint, uint, error) { return 1, 1_000, nil },
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, importTestEpochLength, nil
+			},
 		}
 	}
 
@@ -820,7 +827,9 @@ func resumeImportConfig(
 				BlockHash: make([]byte, 32),
 			},
 		},
-		EpochLength: func(uint) (uint, uint, error) { return 1, 1_000, nil },
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, importTestEpochLength, nil
+		},
 	}
 }
 

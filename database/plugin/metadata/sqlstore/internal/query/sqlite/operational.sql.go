@@ -718,6 +718,15 @@ func (q *Queries) DeleteMidnightAriadneParamsByEpoch(ctx context.Context, epoch 
 	return err
 }
 
+const deleteMidnightAriadneRollbacksAfterBlock = `-- name: DeleteMidnightAriadneRollbacksAfterBlock :exec
+DELETE FROM midnight_ariadne_rollbacks WHERE block_number > ?
+`
+
+func (q *Queries) DeleteMidnightAriadneRollbacksAfterBlock(ctx context.Context, blockNumber int64) error {
+	_, err := q.db.ExecContext(ctx, deleteMidnightAriadneRollbacksAfterBlock, blockNumber)
+	return err
+}
+
 const deleteMidnightAriadneRollbacksBeforeBlock = `-- name: DeleteMidnightAriadneRollbacksBeforeBlock :exec
 DELETE FROM midnight_ariadne_rollbacks WHERE block_number < ?
 `
@@ -751,6 +760,15 @@ DELETE FROM midnight_asset_spends WHERE block_number = ?
 
 func (q *Queries) DeleteMidnightAssetSpendsByBlock(ctx context.Context, blockNumber int64) error {
 	_, err := q.db.ExecContext(ctx, deleteMidnightAssetSpendsByBlock, blockNumber)
+	return err
+}
+
+const deleteMidnightCandidateRemovalsAfterBlock = `-- name: DeleteMidnightCandidateRemovalsAfterBlock :exec
+DELETE FROM midnight_candidate_removals WHERE block_number > ?
+`
+
+func (q *Queries) DeleteMidnightCandidateRemovalsAfterBlock(ctx context.Context, blockNumber int64) error {
+	_, err := q.db.ExecContext(ctx, deleteMidnightCandidateRemovalsAfterBlock, blockNumber)
 	return err
 }
 
@@ -797,6 +815,15 @@ DELETE FROM midnight_epoch_candidates WHERE block_number = ?
 
 func (q *Queries) DeleteMidnightEpochCandidatesByBlock(ctx context.Context, blockNumber int64) error {
 	_, err := q.db.ExecContext(ctx, deleteMidnightEpochCandidatesByBlock, blockNumber)
+	return err
+}
+
+const deleteMidnightEpochTransitionsAfterBlock = `-- name: DeleteMidnightEpochTransitionsAfterBlock :exec
+DELETE FROM midnight_epoch_transitions WHERE block_number > ?
+`
+
+func (q *Queries) DeleteMidnightEpochTransitionsAfterBlock(ctx context.Context, blockNumber int64) error {
+	_, err := q.db.ExecContext(ctx, deleteMidnightEpochTransitionsAfterBlock, blockNumber)
 	return err
 }
 

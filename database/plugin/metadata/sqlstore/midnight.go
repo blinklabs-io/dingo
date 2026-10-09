@@ -648,6 +648,19 @@ func (s *Store) DeleteMidnightAriadneRollbacksBeforeBlock(
 	)
 }
 
+func (s *Store) DeleteMidnightAriadneRollbacksAfterBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	return s.deleteMidnightByUint64(
+		txn,
+		blockNumber,
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
+			return q.DeleteMidnightAriadneRollbacksAfterBlock(ctx, value)
+		},
+	)
+}
+
 func (s *Store) CreateMidnightCandidateRemoval(
 	txn types.Txn,
 	removal *models.MidnightCandidateRemoval,
@@ -733,6 +746,19 @@ func (s *Store) DeleteMidnightCandidateRemovalsBeforeBlock(
 		blockNumber,
 		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			return q.DeleteMidnightCandidateRemovalsBeforeBlock(ctx, value)
+		},
+	)
+}
+
+func (s *Store) DeleteMidnightCandidateRemovalsAfterBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	return s.deleteMidnightByUint64(
+		txn,
+		blockNumber,
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
+			return q.DeleteMidnightCandidateRemovalsAfterBlock(ctx, value)
 		},
 	)
 }
@@ -831,6 +857,19 @@ func (s *Store) DeleteMidnightEpochTransitionsBeforeBlock(
 		blockNumber,
 		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
 			return q.DeleteMidnightEpochTransitionsBeforeBlock(ctx, value)
+		},
+	)
+}
+
+func (s *Store) DeleteMidnightEpochTransitionsAfterBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	return s.deleteMidnightByUint64(
+		txn,
+		blockNumber,
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
+			return q.DeleteMidnightEpochTransitionsAfterBlock(ctx, value)
 		},
 	)
 }

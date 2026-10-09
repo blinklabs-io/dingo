@@ -44,15 +44,18 @@ type Querier interface {
 	DeleteImportedPoolBlockCountsAfterSlot(ctx context.Context, capturedSlot int64) error
 	DeleteImportedPoolBlockCountsForEpoch(ctx context.Context, epoch int64) error
 	DeleteMidnightAriadneParamsByEpoch(ctx context.Context, epoch int64) error
+	DeleteMidnightAriadneRollbacksAfterBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightAriadneRollbacksBeforeBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightAriadneRollbacksByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightAssetCreatesByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightAssetSpendsByBlock(ctx context.Context, blockNumber int64) error
+	DeleteMidnightCandidateRemovalsAfterBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightCandidateRemovalsBeforeBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightCandidateRemovalsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightCommitteeCandidateRegistrationsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightDeregistrationsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightEpochCandidatesByBlock(ctx context.Context, blockNumber int64) error
+	DeleteMidnightEpochTransitionsAfterBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightEpochTransitionsBeforeBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightEpochTransitionsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightGovernanceDatumsByBlock(ctx context.Context, blockNumber int64) error
