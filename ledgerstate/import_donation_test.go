@@ -85,10 +85,10 @@ func TestImportLedgerStateSeedsAnchorEpochDonations(t *testing.T) {
 	t.Parallel()
 
 	const (
-		epoch      = uint64(317)
+		epoch      = uint64(1)
 		priorSlot  = uint64(300)
-		localSlot  = uint64(900)
-		anchorSlot = uint64(1_000)
+		localSlot  = uint64(1_200)
+		anchorSlot = uint64(1_500)
 		donation   = uint64(6_500_000)
 	)
 	tests := []struct {
@@ -130,12 +130,6 @@ func TestImportLedgerStateSeedsAnchorEpochDonations(t *testing.T) {
 					Slot:      anchorSlot,
 					BlockHash: make([]byte, 32),
 				},
-			}
-			for i := range state.EraBounds {
-				state.EraBounds[i] = EraBound{
-					Slot:  priorSlot + 500,
-					Epoch: epoch,
-				}
 			}
 			cfg := ImportConfig{
 				Database: db,
