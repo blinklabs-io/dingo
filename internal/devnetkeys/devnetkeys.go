@@ -44,8 +44,12 @@ func InstallLocalTestKeys(dir string) error {
 				err,
 			)
 		}
-		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
 			return fmt.Errorf("writing local DevNet key %q: %w", name, err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			return fmt.Errorf("restricting local DevNet key %q: %w", name, err)
 		}
 	}
 	return nil
