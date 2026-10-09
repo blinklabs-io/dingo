@@ -9825,7 +9825,10 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   way the real node does — then default to `sqlite`. The data directory
   likewise falls back through `--dingo-data`/`DINGO_DATA_DIR` (koios-parity-only
   overrides) to Dingo's resolved `DatabasePath` (`CARDANO_DATABASE_PATH` or
-  `dingo.yaml`), then `.dingo`.
+  `dingo.yaml`), then `.dingo`. Dingo's configuration is loaded only when a
+  flag leaves a value unset; if it fails to load (for example a plugin `_FILE`
+  variable naming a missing file), the command fails rather than falling back
+  to defaults, which would inspect a different database.
   - `sqlite`: opens `{data-dir}/metadata.sqlite` in read-only WAL mode
   - `postgres` / `mysql`: a `dsn` config field is used verbatim; otherwise a
     DSN is assembled from discrete host/port/user/password/database/sslMode/
@@ -12913,7 +12916,9 @@ variable, or a flag passed on the command line.
 `LoadConfig` reads plugin `_FILE` variables; `Config.ResolveSecretFiles` reads
 the remaining file paths once every source is merged and clears them. The
 `koios-parity` tool offers `--api-key-file`/`KOIOS_API_KEY_FILE` and
-`--metadata-dsn-file` beside its literal forms.
+`--metadata-dsn-file` beside its literal forms, and `node-parity from-genesis`
+offers `--koios-api-key-file`; both use `secretfile.Resolve` for the same
+both-set rule.
 
 `LoadConfig` (`internal/config`) only parses and merges the YAML and
 environment sources; it makes no semantic judgments about the merged values,

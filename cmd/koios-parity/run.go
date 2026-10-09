@@ -50,7 +50,10 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	cachePath := resolveCachePath()
+	cachePath, err := resolveCachePath()
+	if err != nil {
+		return err
+	}
 	skipFetch, _ := cmd.Flags().GetBool("skip-fetch")
 	skipCheck, _ := cmd.Flags().GetBool("skip-check")
 	all, _ := cmd.Flags().GetBool("all")
@@ -175,7 +178,10 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	// incomplete — an unwritable --report-dir, a report-creation failure, or
 	// a BuildJSONReport/WriteJSONReport failure must never let this function
 	// return nil merely because the check phase itself reported PASS.
-	dir := resolveReportDir(reportDir)
+	dir, err := resolveReportDir(reportDir)
+	if err != nil {
+		return err
+	}
 	reportPath := fmt.Sprintf("%s/report-%s-%s.json",
 		dir, network, time.Now().Format("2006-01-02"))
 	reportErr := writeParityReport(

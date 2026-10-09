@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
@@ -459,4 +460,52 @@ func TestResolveDingoDBMetadataDSNFile(t *testing.T) {
 			require.Equal(t, tc.want, got.DSN)
 		})
 	}
+}
+
+// resetDingoConfigCache clears loadedDingoConfig's memoized result before and
+// after a test, so the test loads Dingo's configuration from its own
+// environment and later tests do not inherit it.
+func resetDingoConfigCache(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		dingoConfigOnce = sync.Once{}
+		dingoConfigCached = nil
+		errDingoConfig = nil
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+func TestDingoConfigLoadErrorFailsClosed(t *testing.T) {
+	// Not t.Parallel: t.Setenv, and loadedDingoConfig memoizes into
+	// package-level state.
+	resetDingoConfigCache(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLUGINS_STORAGE_METADATA_PROVIDER", "postgres")
+	t.Setenv(
+		"DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE",
+		filepath.Join(t.TempDir(), "missing"),
+	)
+	const variable = "DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE"
+
+	cmd := &cobra.Command{}
+	addDingoDBFlags(cmd)
+	_, err := resolveDingoDB(cmd)
+	require.ErrorContains(t, err, variable)
+	_, err = resolveCachePath()
+	require.ErrorContains(t, err, variable)
+
+	// Explicit paths never consult Dingo's configuration.
+	prevData, prevCache := globalFlags.dingoData, globalFlags.cachePath
+	t.Cleanup(func() {
+		globalFlags.dingoData, globalFlags.cachePath = prevData, prevCache
+	})
+	globalFlags.cachePath = filepath.Join(t.TempDir(), "cache.db")
+	got, err := resolveCachePath()
+	require.NoError(t, err)
+	require.Equal(t, globalFlags.cachePath, got)
+	globalFlags.dingoData = t.TempDir()
+	dataDir, err := resolveDingoDataDir()
+	require.NoError(t, err)
+	require.Equal(t, globalFlags.dingoData, dataDir)
 }

@@ -76,6 +76,10 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	cachePath, err := resolveCachePath()
+	if err != nil {
+		return err
+	}
 
 	if forceRefresh && !cmd.Flags().Changed("from-epoch") {
 		return errors.New(
@@ -113,7 +117,7 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 		BaseURL:               koiosBaseURL(cmd),
 		AllowInsecureHTTP:     koiosAllowInsecureHTTP(cmd),
 		AllowPrivateAddresses: koiosAllowPrivateAddresses(cmd),
-		CachePath:             resolveCachePath(),
+		CachePath:             cachePath,
 		Concurrency:           concurrency,
 		FromEpoch:             fromEpoch,
 		ThroughEpoch:          throughEpoch,

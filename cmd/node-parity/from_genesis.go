@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/nodeparity"
+	"github.com/blinklabs-io/dingo/internal/secretfile"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -334,6 +335,10 @@ of re-deriving them from scratch.`,
 		&koiosFlags.apiKey, "koios-api-key", "",
 		"Koios API key (optional; raises the public host's rate limit)",
 	)
+	cmd.Flags().String(
+		"koios-api-key-file", "",
+		"file holding the Koios API key (alternative to --koios-api-key)",
+	)
 	cmd.Flags().StringVar(
 		&koiosFlags.baseURL, "koios-base-url", "",
 		"Koios v1 API root override, e.g. for a self-hosted or mirrored instance (default: the public host for --network)",
@@ -403,6 +408,19 @@ func requireMatchingKoiosSource(
 	return nil
 }
 
+// koiosAPIKey returns the Koios API key from --koios-api-key or the file named
+// by --koios-api-key-file; passing both is an error.
+func koiosAPIKey(cmd *cobra.Command) (string, error) {
+	flags := cmd.Flags()
+	key, _ := flags.GetString("koios-api-key")
+	file, _ := flags.GetString("koios-api-key-file")
+	return secretfile.Resolve(
+		key, flags.Changed("koios-api-key"),
+		file, flags.Changed("koios-api-key-file"),
+		"--koios-api-key", "--koios-api-key-file",
+	)
+}
+
 func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 	network, err := requireNetwork()
 	if err != nil {
@@ -420,8 +438,12 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	apiKey, err := koiosAPIKey(cmd)
+	if err != nil {
+		return err
+	}
 	koios, err := nodeparity.NewKoiosClient(
-		network, koiosFlags.apiKey, koiosFlags.baseURL, koiosFlags.allowInsecureHTTP,
+		network, apiKey, koiosFlags.baseURL, koiosFlags.allowInsecureHTTP,
 		koiosFlags.allowPrivateAddresses,
 	)
 	if err != nil {

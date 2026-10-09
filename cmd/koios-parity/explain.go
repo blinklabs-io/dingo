@@ -59,7 +59,10 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 	poolFilter, _ := cmd.Flags().GetString("pool")
 	live, _ := cmd.Flags().GetBool("live")
 	asJSON, _ := cmd.Flags().GetBool("json")
-	cachePath := resolveCachePath()
+	cachePath, err := resolveCachePath()
+	if err != nil {
+		return err
+	}
 
 	cache, err := koiosparity.OpenCache(cachePath, slog.Default())
 	if err != nil {

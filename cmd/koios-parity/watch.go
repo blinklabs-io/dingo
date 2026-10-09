@@ -55,7 +55,10 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	cachePath := resolveCachePath()
+	cachePath, err := resolveCachePath()
+	if err != nil {
+		return err
+	}
 	dbCfg, err := resolveDingoDB(cmd)
 	if err != nil {
 		return err

@@ -63,11 +63,15 @@ func checkRun(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	cachePath, err := resolveCachePath()
+	if err != nil {
+		return err
+	}
 
 	result, err := koiosparity.Check(cmd.Context(), koiosparity.CheckConfig{
 		Network:         network,
 		DingoDB:         dingoDB,
-		CachePath:       resolveCachePath(),
+		CachePath:       cachePath,
 		Workers:         workers,
 		All:             all,
 		FromEpoch:       fromEpoch,

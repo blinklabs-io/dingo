@@ -129,3 +129,63 @@ func TestReadAcceptsSymlinkToSecureRegularFile(t *testing.T) {
 		t.Fatalf("Read = %q, want %q", got, "s3cret")
 	}
 }
+
+func TestResolve(t *testing.T) {
+	t.Parallel()
+	file := writeFile(t, "from-file\n")
+	for _, tc := range []struct {
+		name     string
+		value    string
+		valueSet bool
+		path     string
+		pathSet  bool
+		want     string
+		wantErr  string
+	}{
+		{name: "neither", want: ""},
+		{name: "literal", value: "lit", valueSet: true, want: "lit"},
+		{name: "file", path: file, pathSet: true, want: "from-file"},
+		{name: "empty path", pathSet: true, want: ""},
+		{
+			name:     "both",
+			value:    "lit",
+			valueSet: true,
+			path:     file,
+			pathSet:  true,
+			wantErr:  "--key and --key-file are both set",
+		},
+		{
+			name:     "both with empty literal",
+			valueSet: true,
+			path:     file,
+			pathSet:  true,
+			wantErr:  "--key and --key-file are both set",
+		},
+		{
+			name:    "missing file",
+			path:    filepath.Join(t.TempDir(), "missing"),
+			pathSet: true,
+			wantErr: "--key-file:",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Resolve(
+				tc.value, tc.valueSet, tc.path, tc.pathSet,
+				"--key", "--key-file",
+			)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Resolve error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("Resolve = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

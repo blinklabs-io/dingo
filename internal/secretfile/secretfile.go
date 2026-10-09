@@ -64,3 +64,33 @@ func Read(path string) (string, error) {
 	}
 	return value, nil
 }
+
+// Resolve returns the value of a setting that has a literal form and a file
+// form, named valueName and fileName in errors. valueSet and pathSet report
+// whether each form was supplied at all, even empty: supplying both is an
+// error, and an empty path selects no value.
+func Resolve(
+	value string,
+	valueSet bool,
+	path string,
+	pathSet bool,
+	valueName, fileName string,
+) (string, error) {
+	switch {
+	case valueSet && pathSet:
+		return "", fmt.Errorf(
+			"%s and %s are both set; set only one",
+			valueName,
+			fileName,
+		)
+	case pathSet && path != "":
+		contents, err := Read(path)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", fileName, err)
+		}
+		return contents, nil
+	case pathSet:
+		return "", nil
+	}
+	return value, nil
+}

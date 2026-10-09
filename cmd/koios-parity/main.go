@@ -30,7 +30,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -126,35 +125,32 @@ Environment:
 	}
 }
 
-// dingoConfigOnce/dingoConfigCached memoize loadedDingoConfig within a single
-// process run: every subcommand resolves the data dir and/or metadata plugin
-// exactly once, so loading (and warning on failure) more than once would just
-// be noisy repetition of the same result.
+// dingoConfigOnce/dingoConfigCached/errDingoConfig memoize loadedDingoConfig
+// within a single process run, so the data dir and metadata plugin resolve
+// from one load.
 var (
 	dingoConfigOnce   sync.Once
 	dingoConfigCached *config.Config
+	errDingoConfig    error
 )
 
 // loadedDingoConfig loads Dingo's own resolved configuration — dingo.yaml
 // (searched the same way Dingo's binary does, or --dingo-config), then
 // CARDANO_*/DINGO_PLUGINS_* environment overlays via config.LoadConfig — so
 // this tool's DB resolution mirrors the real node's instead of guessing from
-// koios-parity-invented env var names that Dingo never reads. Returns nil
-// (logging a warning) if the config can't be loaded; callers fall back to
-// their own defaults in that case.
-func loadedDingoConfig() *config.Config {
+// koios-parity-invented env var names that Dingo never reads. A config that
+// fails to load is an error rather than a fallback to defaults, which would
+// silently inspect a different database than the node uses.
+func loadedDingoConfig() (*config.Config, error) {
 	dingoConfigOnce.Do(func() {
 		cfg, err := config.LoadConfig(globalFlags.dingoConfigFile)
 		if err != nil {
-			slog.Default().Warn(
-				"koios-parity: could not load dingo config; falling back to sqlite/.dingo defaults",
-				"error", err,
-			)
+			errDingoConfig = fmt.Errorf("load dingo config: %w", err)
 			return
 		}
 		dingoConfigCached = cfg
 	})
-	return dingoConfigCached
+	return dingoConfigCached, errDingoConfig
 }
 
 // resolveDingoDataDir returns the Dingo data directory.
@@ -162,23 +158,26 @@ func loadedDingoConfig() *config.Config {
 // for pointing at a separate copy of the database) > the metadata plugin's own
 // dataDir config override > Dingo's resolved DatabasePath (CARDANO_DATABASE_PATH
 // or dingo.yaml's databaseName, same as the real node) > .dingo default.
-func resolveDingoDataDir() string {
+func resolveDingoDataDir() (string, error) {
 	if globalFlags.dingoData != "" {
-		return globalFlags.dingoData
+		return globalFlags.dingoData, nil
 	}
 	if v := os.Getenv("DINGO_DATA_DIR"); v != "" {
-		return v
+		return v, nil
 	}
-	if cfg := loadedDingoConfig(); cfg != nil {
-		if dataDir, ok := stringConfigValue(cfg.Plugins.Storage.Metadata.Config, "dataDir"); ok &&
-			dataDir != "" {
-			return dataDir
-		}
-		if cfg.DatabasePath != "" {
-			return cfg.DatabasePath
-		}
+	cfg, err := loadedDingoConfig()
+	if err != nil {
+		return "", err
 	}
-	return defaultDingoData
+	metadataConfig := cfg.Plugins.Storage.Metadata.Config
+	if dataDir, ok := stringConfigValue(metadataConfig, "dataDir"); ok &&
+		dataDir != "" {
+		return dataDir, nil
+	}
+	if cfg.DatabasePath != "" {
+		return cfg.DatabasePath, nil
+	}
+	return defaultDingoData, nil
 }
 
 // stringConfigValue reads a string field out of a plugin Selection.Config map
@@ -322,19 +321,27 @@ func dsnFromMetadataConfig(plugin string, cfg map[string]any) string {
 
 // resolveCachePath returns the effective cache path.
 // Priority: explicit --cache flag > {dingo-data}/.koios/cache.db.
-func resolveCachePath() string {
+func resolveCachePath() (string, error) {
 	if globalFlags.cachePath != "" {
-		return globalFlags.cachePath
+		return globalFlags.cachePath, nil
 	}
-	return filepath.Join(resolveDingoDataDir(), defaultCacheSubdir)
+	dataDir, err := resolveDingoDataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dataDir, defaultCacheSubdir), nil
 }
 
 // resolveReportDir returns the directory for JSON reports.
-func resolveReportDir(override string) string {
+func resolveReportDir(override string) (string, error) {
 	if override != "" {
-		return override
+		return override, nil
 	}
-	return filepath.Join(resolveDingoDataDir(), ".koios")
+	dataDir, err := resolveDingoDataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dataDir, ".koios"), nil
 }
 
 // requireNetwork returns the network name or an error.
@@ -431,30 +438,19 @@ func addAPIKeyFlags(cmd *cobra.Command) {
 // empty file path selects no token.
 func koiosAPIKey(cmd *cobra.Command) (string, error) {
 	flags := cmd.Flags()
-	key, _ := flags.GetString("api-key")
-	file, _ := flags.GetString("api-key-file")
 	keySet, fileSet := flags.Changed("api-key"), flags.Changed("api-key-file")
-	keyName, fileName := "--api-key", "--api-key-file"
-	if !keySet && !fileSet {
-		key, keySet = os.LookupEnv("KOIOS_API_KEY")
-		file, fileSet = os.LookupEnv("KOIOS_API_KEY_FILE")
-		keyName, fileName = "KOIOS_API_KEY", "KOIOS_API_KEY_FILE"
-	}
-	switch {
-	case keySet && fileSet:
-		return "", fmt.Errorf(
-			"%s and %s are both set; set only one",
-			keyName,
-			fileName,
+	if keySet || fileSet {
+		key, _ := flags.GetString("api-key")
+		file, _ := flags.GetString("api-key-file")
+		return secretfile.Resolve(
+			key, keySet, file, fileSet, "--api-key", "--api-key-file",
 		)
-	case file != "":
-		value, err := secretfile.Read(file)
-		if err != nil {
-			return "", fmt.Errorf("%s: %w", fileName, err)
-		}
-		return value, nil
 	}
-	return key, nil
+	key, keySet := os.LookupEnv("KOIOS_API_KEY")
+	file, fileSet := os.LookupEnv("KOIOS_API_KEY_FILE")
+	return secretfile.Resolve(
+		key, keySet, file, fileSet, "KOIOS_API_KEY", "KOIOS_API_KEY_FILE",
+	)
 }
 
 // koiosBaseURL returns the Koios v1 API root override from flag or
@@ -601,44 +597,47 @@ func addDingoDBFlags(cmd *cobra.Command) {
 //  3. "sqlite" default, with no DSN (dingo_db.go's OpenDingoDB already
 //     defaults an empty plugin to sqlite; this mirrors that explicitly).
 func resolveDingoDB(cmd *cobra.Command) (koiosparity.DingoDBConfig, error) {
-	plugin, _ := cmd.Flags().GetString("metadata-plugin")
-	dsn, _ := cmd.Flags().GetString("metadata-dsn")
-	if cmd.Flags().Changed("metadata-dsn-file") {
-		if cmd.Flags().Changed("metadata-dsn") {
-			return koiosparity.DingoDBConfig{}, errors.New(
-				"--metadata-dsn and --metadata-dsn-file are both set; set only one",
-			)
-		}
-		dsnFile, _ := cmd.Flags().GetString("metadata-dsn-file")
-		if dsnFile != "" {
-			var err error
-			if dsn, err = secretfile.Read(dsnFile); err != nil {
-				return koiosparity.DingoDBConfig{}, fmt.Errorf(
-					"--metadata-dsn-file: %w",
-					err,
-				)
-			}
-		}
+	flags := cmd.Flags()
+	plugin, _ := flags.GetString("metadata-plugin")
+	dsn, _ := flags.GetString("metadata-dsn")
+	dsnFile, _ := flags.GetString("metadata-dsn-file")
+	dsn, err := secretfile.Resolve(
+		dsn, flags.Changed("metadata-dsn"),
+		dsnFile, flags.Changed("metadata-dsn-file"),
+		"--metadata-dsn", "--metadata-dsn-file",
+	)
+	if err != nil {
+		return koiosparity.DingoDBConfig{}, err
 	}
 
-	var metadataConfig map[string]any
-	if cfg := loadedDingoConfig(); cfg != nil {
+	// Dingo's configuration is consulted only for what the flags leave
+	// unset, so explicit flags work even when it cannot be loaded.
+	if plugin == "" || dsn == "" {
+		cfg, err := loadedDingoConfig()
+		if err != nil {
+			return koiosparity.DingoDBConfig{}, err
+		}
 		if plugin == "" {
 			plugin = cfg.Plugins.Storage.Metadata.Provider
 		}
-		metadataConfig = cfg.Plugins.Storage.Metadata.Config
-	}
-	if plugin == "" {
-		plugin = "sqlite"
+		if plugin == "" {
+			plugin = "sqlite"
+		}
+		if dsn == "" {
+			dsn = dsnFromMetadataConfig(
+				plugin,
+				cfg.Plugins.Storage.Metadata.Config,
+			)
+		}
 	}
 
-	if dsn == "" {
-		dsn = dsnFromMetadataConfig(plugin, metadataConfig)
+	dataDir, err := resolveDingoDataDir()
+	if err != nil {
+		return koiosparity.DingoDBConfig{}, err
 	}
-
 	return koiosparity.DingoDBConfig{
 		Plugin:  plugin,
-		DataDir: resolveDingoDataDir(),
+		DataDir: dataDir,
 		DSN:     dsn,
 	}, nil
 }
