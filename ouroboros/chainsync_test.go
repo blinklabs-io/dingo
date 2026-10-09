@@ -349,6 +349,268 @@ func TestChainsyncHeaderAdmissionIsPreObservationAndPeerLocal(t *testing.T) {
 	))
 }
 
+func TestChainsyncHeaderBackpressurePrecedesAdmissionAndCrypto(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	entered := make(chan int, 1)
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	o.chainsyncHeaderBackpressure = func(
+		_ context.Context,
+		admittedHeadroom int,
+	) error {
+		entered <- admittedHeadroom
+		<-release
+		return nil
+	}
+	var admissionCalls atomic.Int32
+	o.chainsyncHeaderAdmission = func(
+		context.Context,
+		ledger.ChainsyncEvent,
+	) (bool, error) {
+		admissionCalls.Add(1)
+		return false, nil
+	}
+	var cryptoCalls atomic.Int32
+	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) error {
+		cryptoCalls.Add(1)
+		return nil
+	}
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	done := make(chan error, 1)
+	go func() {
+		done <- o.chainsyncClientRollForwardAt(
+			ochainsync.CallbackContext{
+				ConnectionId: newTestConnId(
+					"127.0.0.1:6000",
+					"10.0.0.1:3001",
+				),
+			},
+			0,
+			header,
+			ochainsync.Tip{},
+			time.Now(),
+		)
+	}()
+	gotHeadroom := testutil.RequireReceive(
+		t,
+		entered,
+		time.Second,
+		"capacity gate should run before admission",
+	)
+	require.Equal(
+		t,
+		ledger.ChainsyncEventBufferSize+1+defaultMaxChainsyncClients,
+		gotHeadroom,
+	)
+	require.Zero(t, admissionCalls.Load())
+	require.Zero(t, cryptoCalls.Load())
+	close(release)
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		done,
+		time.Second,
+		"roll forward should continue after capacity returns",
+	))
+	require.Equal(t, int32(1), admissionCalls.Load())
+	require.Zero(t, cryptoCalls.Load())
+}
+
+func TestChainsyncHeaderBackpressureUsesCallbackTeardown(t *testing.T) {
+	t.Parallel()
+
+	// Keep an unrelated manager-owned connection at the callback's ID. The
+	// callback teardown signal belongs to this protocol instance and must win
+	// even when a replacement connection has reused the same addresses.
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	t.Cleanup(func() { _ = cm.Stop(context.Background()) })
+	rawConn, err := ouroboros.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { close(rawConn.ErrorChan()) })
+	require.True(t, cm.AddConnection(rawConn, false, "127.0.0.1:1234"))
+	_, managerDone := cm.GetConnectionWithDone(rawConn.Id())
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	o := newOuroboros(OuroborosConfig{
+		EventBus:    bus,
+		ConnManager: cm,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	entered := make(chan struct{})
+	o.chainsyncHeaderBackpressure = func(
+		ctx context.Context,
+		_ int,
+	) error {
+		close(entered)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	connectionDone := make(chan any)
+	done := make(chan error, 1)
+	go func() {
+		done <- o.chainsyncClientRollForwardAt(
+			ochainsync.CallbackContext{
+				ConnectionId:       rawConn.Id(),
+				ConnectionDoneChan: connectionDone,
+			},
+			0,
+			newTestBlockHeader(100, 1, 0xaa),
+			ochainsync.Tip{},
+			time.Now(),
+		)
+	}()
+	testutil.RequireReceive(
+		t,
+		entered,
+		time.Second,
+		"capacity gate did not begin waiting",
+	)
+	close(connectionDone)
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(
+			t,
+			done,
+			time.Second,
+			"callback teardown did not cancel capacity wait",
+		),
+		context.Canceled,
+	)
+	rawConn.ErrorChan() <- nil
+	testutil.RequireReceive(
+		t,
+		managerDone,
+		time.Second,
+		"foreign manager connection did not shut down",
+	)
+}
+
+func TestChainsyncBacklogBoundsConcurrentPeerPublishers(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	handlerEntered := make(chan struct{})
+	var handlerEnteredOnce sync.Once
+	bus.SubscribeFuncWithBufferPolicy(
+		ledger.ChainsyncEventType,
+		ledger.ChainsyncEventBufferSize,
+		event.SubscriberBackpressureBlock,
+		func(event.Event) {
+			handlerEnteredOnce.Do(func() { close(handlerEntered) })
+			<-release
+		},
+	)
+	primer := event.NewEvent(
+		ledger.ChainsyncEventType,
+		ledger.ChainsyncEvent{},
+	)
+	require.NoError(t, bus.PublishBlocking(ledger.ChainsyncEventType, primer))
+	testutil.RequireReceive(
+		t,
+		handlerEntered,
+		time.Second,
+		"chainsync handler should consume the first event",
+	)
+	for range ledger.ChainsyncEventBufferSize {
+		require.NoError(t, bus.PublishBlocking(ledger.ChainsyncEventType, primer))
+	}
+
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	headrooms := make(chan int, defaultMaxChainsyncClients)
+	o.chainsyncHeaderBackpressure = func(
+		_ context.Context,
+		admittedHeadroom int,
+	) error {
+		headrooms <- admittedHeadroom
+		return nil
+	}
+	done := make(chan error, defaultMaxChainsyncClients)
+	for i := range defaultMaxChainsyncClients {
+		header := newTestBlockHeader(
+			uint64(100+i),
+			uint64(i+1),
+			byte(i+1),
+		)
+		go func(peer int) {
+			done <- o.chainsyncClientRollForwardAt(
+				ochainsync.CallbackContext{
+					ConnectionId: newTestConnId(
+						"127.0.0.1:6000",
+						fmt.Sprintf("10.0.0.%d:3001", peer+1),
+					),
+				},
+				0,
+				header,
+				ochainsync.Tip{},
+				time.Now(),
+			)
+		}(i)
+	}
+	for range defaultMaxChainsyncClients {
+		require.Equal(
+			t,
+			ledger.ChainsyncEventBufferSize+1+defaultMaxChainsyncClients,
+			testutil.RequireReceive(
+				t,
+				headrooms,
+				time.Second,
+				"each eligible peer should reach the capacity gate",
+			),
+		)
+	}
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"all concurrent peers should block behind the saturated ledger subscriber",
+	)
+	close(release)
+	for range defaultMaxChainsyncClients {
+		require.NoError(t, testutil.RequireReceive(
+			t,
+			done,
+			time.Second,
+			"draining ledger ingress should release each peer",
+		))
+	}
+}
+
 func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
 	t.Parallel()
 
@@ -3512,6 +3774,8 @@ func TestChainsyncConnOptsUseConfiguredBlockTimeout(t *testing.T) {
 
 	require.Equal(t, blockTimeout, clientCfg.BlockTimeout)
 	require.Equal(t, blockTimeout, serverCfg.BlockTimeout)
+	require.Equal(t, ochainsync.DefaultPipelineLimit, clientCfg.PipelineLimit)
+	require.Equal(t, ochainsync.DefaultRecvQueueSize, clientCfg.RecvQueueSize)
 }
 
 // TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget verifies that

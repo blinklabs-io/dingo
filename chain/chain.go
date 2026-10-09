@@ -50,6 +50,7 @@ type Chain struct {
 	eventBus      *event.EventBus
 	manager       *ChainManager
 	waitingChan   chan struct{}
+	headerChange  chan struct{}
 	headers       []queuedHeader
 	blocks        []ocommon.Point
 	iterators     []*ChainIterator
@@ -154,6 +155,44 @@ type queuedHeader struct {
 	prevHash       []byte
 	blockNumber    uint64
 	cryptoVerified bool
+}
+
+// WaitForHeaderCountBelow blocks until fewer than limit headers remain queued
+// or ctx is canceled. Header consumers signal the waiter directly, avoiding a
+// polling interval between blockfetch progress and ChainSync resuming.
+func (c *Chain) WaitForHeaderCountBelow(
+	ctx context.Context,
+	limit int,
+) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
+	for {
+		c.mutex.Lock()
+		if len(c.headers) < limit {
+			c.mutex.Unlock()
+			return nil
+		}
+		if c.headerChange == nil {
+			c.headerChange = make(chan struct{})
+		}
+		changed := c.headerChange
+		c.mutex.Unlock()
+
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (c *Chain) setHeadersLocked(headers []queuedHeader) {
+	c.headers = headers
+	if c.headerChange != nil {
+		close(c.headerChange)
+		c.headerChange = nil
+	}
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -1110,10 +1149,10 @@ func (c *Chain) addBlockLocked(
 	// Remove matching header entry, if any
 	var discardedHeaders []lcommon.Blake2b256
 	if matchPendingHeader && len(c.headers) > 0 {
-		c.headers = slices.Delete(c.headers, 0, 1)
+		c.setHeadersLocked(slices.Delete(c.headers, 0, 1))
 	} else if !matchPendingHeader {
 		discardedHeaders = c.queuedHeaderHashes()
-		c.headers = c.headers[:0]
+		c.setHeadersLocked(c.headers[:0])
 	}
 	// Update tip
 	c.currentTip = ochainsync.Tip{
@@ -1250,7 +1289,7 @@ func (c *Chain) AddBlocks(ctx context.Context, blocks []ledger.Block) error {
 						c.tipBlockIndex = savedTipBlockIndex
 						c.mutationGeneration = savedGeneration
 						c.headerMutationGeneration = savedHeaderGeneration
-						c.headers = savedHeaders
+						c.setHeadersLocked(savedHeaders)
 						if !c.persistent {
 							c.blocks = savedBlocks
 						}
@@ -1280,7 +1319,7 @@ func (c *Chain) AddBlocks(ctx context.Context, blocks []ledger.Block) error {
 					c.mutationGeneration = savedGeneration
 					if c.headerMutationGeneration == appliedHeaderGeneration {
 						c.headerMutationGeneration = savedHeaderGeneration
-						c.headers = savedHeaders
+						c.setHeadersLocked(savedHeaders)
 					}
 					if !c.persistent {
 						c.blocks = savedBlocks
@@ -1407,7 +1446,7 @@ func (c *Chain) addRawBlockLocked(
 		c.blocks = append(c.blocks, tmpPoint)
 	}
 	if len(c.headers) > 0 {
-		c.headers = slices.Delete(c.headers, 0, 1)
+		c.setHeadersLocked(slices.Delete(c.headers, 0, 1))
 	}
 	c.currentTip = ochainsync.Tip{
 		Point:       tmpPoint,
@@ -1588,7 +1627,7 @@ func (c *Chain) addRawBlocks(
 						c.tipBlockIndex = savedTipBlockIndex
 						c.mutationGeneration = savedGeneration
 						c.headerMutationGeneration = savedHeaderGeneration
-						c.headers = savedHeaders
+						c.setHeadersLocked(savedHeaders)
 						if !c.persistent {
 							c.blocks = savedBlocks
 						}
@@ -1635,7 +1674,7 @@ func (c *Chain) addRawBlocks(
 						c.mutationGeneration = savedGeneration
 						if c.headerMutationGeneration == appliedHeaderGeneration {
 							c.headerMutationGeneration = savedHeaderGeneration
-							c.headers = savedHeaders
+							c.setHeadersLocked(savedHeaders)
 						}
 						if !c.persistent {
 							c.blocks = savedBlocks
@@ -2104,7 +2143,7 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 			// to void it.
 			discarded := c.queuedHeaderHashes()[idx+1:]
 			dropped := len(discarded)
-			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			c.setHeadersLocked(slices.Delete(c.headers, idx+1, len(c.headers)))
 			if dropped > 0 {
 				c.headerMutationGeneration++
 				c.queueDeferredEventLocked(headerInvalidationEvent(
@@ -2150,7 +2189,7 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 			// after it and leave the matched header itself queued.
 			discarded := c.queuedHeaderHashes()[idx+1:]
 			dropped := len(discarded)
-			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			c.setHeadersLocked(slices.Delete(c.headers, idx+1, len(c.headers)))
 			// Those headers never become blocks, so any announcement
 			// they carried is void. This path returns no chain.update
 			// event at all -- no block was removed -- so without this
@@ -2266,7 +2305,7 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 	}
 	// Clear out any headers
 	discardedHeaders := c.queuedHeaderHashes()
-	c.headers = slices.Delete(c.headers, 0, len(c.headers))
+	c.setHeadersLocked(slices.Delete(c.headers, 0, len(c.headers)))
 	// Update tip
 	c.currentTip = ochainsync.Tip{
 		Point:       point,
@@ -2405,7 +2444,7 @@ func (c *Chain) ClearHeaders() {
 	defer c.mutex.Unlock()
 	discarded := c.queuedHeaderHashes()
 	hadHeaders := len(discarded) > 0
-	c.headers = c.headers[:0]
+	c.setHeadersLocked(c.headers[:0])
 	// Discarded headers never become blocks, so any announcement they
 	// carried is void, and no rollback is published for them because no
 	// block was ever added. Everything at or below the block tip survives;

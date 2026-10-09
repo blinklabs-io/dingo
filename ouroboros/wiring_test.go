@@ -183,6 +183,21 @@ func TestNewOuroborosRequiresAnnouncementLedgerWhenLeiosEnabled(t *testing.T) {
 	require.ErrorContains(t, err, "LeiosAnnouncementLedger")
 }
 
+func TestNewOuroborosRejectsChainsyncCapacityOverflow(t *testing.T) {
+	t.Parallel()
+
+	cfg := newWiringTestDeps(t)
+	cfg.ChainsyncState = chainsync.NewStateWithConfig(
+		cfg.EventBus,
+		cfg.LedgerState,
+		chainsync.Config{MaxClients: 8000},
+	)
+
+	o, err := NewOuroboros(cfg)
+	require.Nil(t, o)
+	require.ErrorContains(t, err, "invalid chainsync capacity")
+}
+
 // TestNewOuroborosExposesDependencies checks the happy path, and that the
 // optional Leios handlers start unset.
 func TestNewOuroborosExposesDependencies(t *testing.T) {

@@ -1680,6 +1680,58 @@ func (ls *LedgerState) allowedQueuedHeaders() int {
 	)
 }
 
+// ValidateChainsyncHeaderCapacity checks that admitted ChainSync work fits
+// between the working header target and the chain's minimum queue capacity.
+func ValidateChainsyncHeaderCapacity(admittedHeadroom int) error {
+	workingHeaders := min(
+		BlockfetchBatchSize*4,
+		chain.DefaultMaxQueuedHeaders,
+	)
+	maxHeadroom := chain.DefaultMaxQueuedHeaders - workingHeaders
+	if admittedHeadroom < 0 || admittedHeadroom > maxHeadroom {
+		return fmt.Errorf(
+			"chainsync admitted headroom %d must be between 0 and %d",
+			admittedHeadroom,
+			maxHeadroom,
+		)
+	}
+	return nil
+}
+
+// AwaitChainsyncHeaderCapacity pauses ChainSync before header admission when
+// a running BlockFetch leaves too little room for admitted EventBus work. The
+// initial fill may reach the working header target so BlockFetch can start.
+// Once a fetch is active or pending, the wait resumes after it drains one
+// batch, retaining several ready batches without reaching the hard queue cap.
+func (ls *LedgerState) AwaitChainsyncHeaderCapacity(
+	ctx context.Context,
+	admittedHeadroom int,
+) error {
+	if ls == nil || ls.chain == nil {
+		return nil
+	}
+	if err := ValidateChainsyncHeaderCapacity(admittedHeadroom); err != nil {
+		return err
+	}
+	capacity := ls.allowedQueuedHeaders()
+	ls.chainsyncBlockfetchMutex.Lock()
+	blockfetchStarted := ls.activeBlockfetchRequestDone != nil ||
+		ls.blockfetchContinuationPending
+	ls.chainsyncBlockfetchMutex.Unlock()
+	if !blockfetchStarted && ls.chain.HeaderCount() < capacity {
+		return nil
+	}
+	pauseAt := capacity
+	if blockfetchStarted {
+		pauseAt -= admittedHeadroom
+	}
+	if ls.chain.HeaderCount() < pauseAt {
+		return nil
+	}
+	resumeAt := max(pauseAt-BlockfetchBatchSize, 0)
+	return ls.chain.WaitForHeaderCountBelow(ctx, resumeAt+1)
+}
+
 // blockfetchMinBatchHeaders returns how many headers must be queued before a
 // blockfetch starts while the local header tip is at least
 // blockfetchMinBatchGapSlots behind peerTip. It returns 0 near the peer tip,

@@ -1980,6 +1980,48 @@ func TestHeaderQueueAcceptsWithinLimit(t *testing.T) {
 	}
 }
 
+func TestWaitForHeaderCountBelowWakesOnDrain(t *testing.T) {
+	t.Parallel()
+
+	c := queueTestHeaders(t, makeLinkedHeaders(2, 0, 1, ""))
+	done := make(chan error, 1)
+	go func() {
+		done <- c.WaitForHeaderCountBelow(context.Background(), 2)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"wait should remain blocked at the limit",
+	)
+
+	c.ClearHeaders()
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		done,
+		time.Second,
+		"header drain should wake the waiter",
+	))
+}
+
+func TestWaitForHeaderCountBelowHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	c := queueTestHeaders(t, makeLinkedHeaders(1, 0, 1, ""))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- c.WaitForHeaderCountBelow(ctx, 1)
+	}()
+	cancel()
+	require.ErrorIs(t, testutil.RequireReceive(
+		t,
+		done,
+		time.Second,
+		"cancellation should wake the waiter",
+	), context.Canceled)
+}
+
 func TestChainFromIntersect(t *testing.T) {
 	t.Parallel()
 

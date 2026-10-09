@@ -111,11 +111,22 @@ func (c chainsyncClientDoneContext) Value(any) any {
 
 func chainsyncAdmissionContext(
 	ctx ochainsync.CallbackContext,
-) context.Context {
-	if ctx.Client == nil || ctx.Client.ProtocolInstance() == nil {
-		return context.Background()
+) (context.Context, context.CancelFunc) {
+	if ctx.ConnectionDoneChan != nil {
+		admissionCtx, cancel := context.WithCancel(context.Background())
+		go func() {
+			select {
+			case <-ctx.ConnectionDoneChan:
+				cancel()
+			case <-admissionCtx.Done():
+			}
+		}()
+		return admissionCtx, cancel
 	}
-	return chainsyncClientDoneContext{done: ctx.Client.DoneChan()}
+	if ctx.Client == nil || ctx.Client.ProtocolInstance() == nil {
+		return context.Background(), func() {}
+	}
+	return chainsyncClientDoneContext{done: ctx.Client.DoneChan()}, func() {}
 }
 
 func defaultChainsyncScheduleAt(onset time.Time, fn func()) func() {
@@ -313,14 +324,10 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		ochainsync.WithRollBackwardFunc(
 			o.instrumentChainsyncRollBackward(o.chainsyncClientRollBackward),
 		),
-		// Pipeline enough headers to keep one blockfetch batch (500
-		// blocks) ready while the previous batch processes. A depth
-		// of 10 is sufficient; higher values flood the header queue
-		// and waste CPU parsing headers that are immediately dropped.
-		ochainsync.WithPipelineLimit(10),
-		// Recv queue at 2x pipeline limit to absorb bursts without
-		// blocking the protocol goroutine.
-		ochainsync.WithRecvQueueSize(20),
+		// Keep the request window large enough to cover network latency. The
+		// ledger's header-capacity gate bounds admission and verification work.
+		ochainsync.WithPipelineLimit(ochainsync.DefaultPipelineLimit),
+		ochainsync.WithRecvQueueSize(ochainsync.DefaultRecvQueueSize),
 		// Increase the intersect timeout from the 5s default. The
 		// upstream peer may need time to process FindIntersect when
 		// under load (e.g. fast DevNet block production or initial
@@ -1182,6 +1189,18 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			ctx.ConnectionId,
 			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
 		)
+		admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+		defer cancelAdmission()
+		if ingressEligible && o.chainsyncHeaderBackpressure != nil {
+			admittedHeadroom := ledger.ChainsyncEventBufferSize + 1 +
+				o.maxTrackedChainsyncClients()
+			if err := o.chainsyncHeaderBackpressure(
+				admissionCtx,
+				admittedHeadroom,
+			); err != nil {
+				return fmt.Errorf("chainsync: await header capacity: %w", err)
+			}
+		}
 		o.config.Logger.Debug(
 			"chainsync: header received",
 			"component", "ouroboros",
@@ -1204,7 +1223,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// ledger ChainSync dispatch mutex/goroutine.
 		if ingressEligible && o.chainsyncHeaderAdmission != nil {
 			accepted, err := o.chainsyncHeaderAdmission(
-				chainsyncAdmissionContext(ctx),
+				admissionCtx,
 				chainsyncEvent,
 			)
 			if err != nil {
