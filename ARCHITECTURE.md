@@ -260,17 +260,20 @@ release workflow stamps its version, verifies the finalized release asset and
 publishes it only after release finalization.
 
 `dingo devnet` is a convenience composition around the normal node startup. It
-copies the embedded single-node DevNet configuration and test keys into a
-private temporary directory, refreshes the Byron and Shelley start times, and
-starts the same executable with dev mode and block production enabled. The
-child process runs the ordinary `serveRun` and `internal/node` composition with
-an isolated database and no configured peers. The command forwards shutdown
-signals and removes its temporary directory after the node stops; the npm
-wrapper passes `devnet` through to the same binary command. Supplying
-`--data-dir` keeps the generated configuration and database for the next run;
-`--reset` rebuilds those managed paths with fresh genesis start times. The CLI
-holds an exclusive state-directory lock until the child exits and rewrites the
-path-bearing node configuration when reusing copied state.
+copies the embedded single-node DevNet configuration and installs the
+local-only producer credentials from `internal/devnetkeys` into a private
+temporary directory, refreshes the Byron and Shelley start times, and starts
+the same executable with dev mode and block production enabled. The key bundle
+is separate from embedded network configuration, and normal node key paths
+still come from the operator. The child process runs the ordinary `serveRun`
+and `internal/node` composition with an isolated database and no configured
+peers. The command forwards shutdown signals and removes its temporary
+directory after the node stops; the npm wrapper passes `devnet` through to the
+same binary command. Supplying `--data-dir` keeps the generated configuration
+and database for the next run; `--reset` rebuilds those managed paths with
+fresh genesis start times. The CLI holds an exclusive state-directory lock
+until the child exits and rewrites the path-bearing node configuration when
+reusing copied state.
 
 Dingo's architecture is built on several key principles:
 
