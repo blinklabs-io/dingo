@@ -78,6 +78,11 @@ type stateEntry struct {
 	tx lcommon.Transaction
 }
 
+// ProtocolParametersResolver returns the protocol parameters that apply to tx.
+type ProtocolParametersResolver func(
+	tx lcommon.Transaction,
+) (lcommon.ProtocolParameters, error)
+
 // NewStateOverlay returns an empty overlay.
 func NewStateOverlay() *StateOverlay {
 	return &StateOverlay{}
@@ -170,8 +175,8 @@ func (o *StateOverlay) Moved() bool {
 }
 
 // View returns base with the recorded transactions applied. With nothing
-// recorded it returns base unchanged. pp supplies the key deposit that a
-// pre-Conway stake registration certificate records. generation identifies the
+// recorded it returns base unchanged. resolve supplies the protocol parameters
+// for each recorded transaction. generation identifies the
 // published ledger state base reads, and must differ from every earlier
 // generation of the same ledger, because the folded state caches reads from
 // base and is refolded whenever generation changes.
@@ -180,7 +185,7 @@ func (o *StateOverlay) Moved() bool {
 // the next View refolds from the first transaction.
 func (o *StateOverlay) View(
 	base lcommon.LedgerState,
-	pp lcommon.ProtocolParameters,
+	resolve ProtocolParametersResolver,
 	generation uint64,
 ) (lcommon.LedgerState, error) {
 	if o == nil {
@@ -214,6 +219,18 @@ func (o *StateOverlay) View(
 			if err != nil {
 				o.state = nil
 				return nil, fmt.Errorf("decode pending transaction: %w", err)
+			}
+		}
+		var pp lcommon.ProtocolParameters
+		if resolve != nil {
+			var err error
+			pp, err = resolve(tx)
+			if err != nil {
+				o.state = nil
+				return nil, fmt.Errorf(
+					"resolve pending transaction %s parameters: %w",
+					tx.Hash(), err,
+				)
 			}
 		}
 		if err := o.state.ApplyTransaction(effectsOnly(tx), pp); err != nil {

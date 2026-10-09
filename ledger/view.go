@@ -600,10 +600,10 @@ func (lv *LedgerView) StakeRegistrationByCredential(
 // or the view with the pending transactions' withdrawals, certificates,
 // deposits and proposals applied.
 func (lv *LedgerView) validationState(
-	pp lcommon.ProtocolParameters,
+	resolve utxoref.ProtocolParametersResolver,
 	generation uint64,
 ) (lcommon.LedgerState, error) {
-	return lv.pendingState.View(lv, pp, generation)
+	return lv.pendingState.View(lv, resolve, generation)
 }
 
 // IsStakeCredentialRegistered checks if a stake credential is currently registered

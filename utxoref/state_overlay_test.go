@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/utxoref"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -126,6 +127,57 @@ func TestStateOverlayViewRecordsRegistrationDeposit(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, held, "a pending registration holds its deposit")
 	require.Equal(t, uint64(deposit), *held)
+}
+
+func TestStateOverlayViewUsesEachTransactionEraParameters(t *testing.T) {
+	t.Parallel()
+	const (
+		previousDeposit = 2_000_000
+		currentDeposit  = 5_000_000
+	)
+	base := mockledger.NewLedgerStateBuilder().Build()
+	currentCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.CredentialHash{0xd2},
+	}
+	previousTx := overlayTx(0x02).WithType(babbage.EraIdBabbage).
+		WithCertificates(&lcommon.StakeRegistrationCertificate{
+			StakeCredential: overlayCredential,
+		})
+	currentTx := overlayTx(0x03).WithCertificates(
+		&lcommon.RegistrationCertificate{
+			CertType:        uint(lcommon.CertificateTypeRegistration),
+			StakeCredential: currentCredential,
+			Amount:          currentDeposit,
+		},
+	)
+	overlay := utxoref.NewStateOverlay()
+	overlay.Apply(currentTx)
+	overlay.Apply(previousTx)
+
+	view, err := overlay.View(base, func(
+		tx lcommon.Transaction,
+	) (lcommon.ProtocolParameters, error) {
+		if tx.Type() == babbage.EraIdBabbage {
+			return &babbage.BabbageProtocolParameters{
+				KeyDeposit: previousDeposit,
+			}, nil
+		}
+		return &babbage.BabbageProtocolParameters{
+			KeyDeposit: currentDeposit,
+		}, nil
+	}, 0)
+	require.NoError(t, err)
+	depositState, ok := lcommon.StakeCredentialDepositStateFor(view)
+	require.True(t, ok)
+	held, err := depositState.StakeCredentialDeposit(overlayCredential)
+	require.NoError(t, err)
+	require.NotNil(t, held)
+	require.Equal(t, uint64(previousDeposit), *held)
+	held, err = depositState.StakeCredentialDeposit(currentCredential)
+	require.NoError(t, err)
+	require.NotNil(t, held)
+	require.Equal(t, uint64(currentDeposit), *held)
 }
 
 func TestStateOverlayViewAppliesTransactionsInOrder(t *testing.T) {

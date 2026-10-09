@@ -3653,6 +3653,73 @@ func TestTxValidationCommitExcludesLedgerPublication(t *testing.T) {
 	require.Equal(t, before.generation+1, after.generation)
 }
 
+func TestTxValidationSessionCarriesContextThroughPendingState(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	ls := newFakeEraLedgerState(db, func(
+		_ lcommon.Transaction,
+		_ uint64,
+		state lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) error {
+		view, ok := lcommon.UnwrapLedgerState(state).(*LedgerView)
+		require.True(t, ok)
+		return view.EvaluationContext().Err()
+	}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	overlay := utxoref.NewStateOverlay()
+	overlay.Apply(mockledger.NewTransactionBuilder().WithType(
+		conway.EraIdConway,
+	).WithCertificates(&lcommon.RegistrationCertificate{
+		CertType: uint(lcommon.CertificateTypeRegistration),
+		StakeCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.CredentialHash{0x7d},
+		},
+		Amount: 1,
+	}))
+
+	err = ls.WithTxValidationSession(ctx, func(
+		validate func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+		_ func() bool,
+		_ func(func() error) (bool, error),
+	) error {
+		cancel()
+		return validate(&conway.ConwayTransaction{TxIsValid: true}, nil, nil, overlay)
+	})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestTxValidationCommitRejectsDurableTransitionBeforePublication(
+	t *testing.T,
+) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	ls := newFakeEraLedgerState(db, nil, nil)
+
+	err = ls.WithTxValidationSession(context.Background(), func(
+		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+	) error {
+		finish := ls.beginTxValidationTransition()
+		defer finish()
+		require.False(t, stillCurrent())
+		called := false
+		committed, commitErr := commitIfCurrent(func() error {
+			called = true
+			return nil
+		})
+		require.NoError(t, commitErr)
+		require.False(t, committed)
+		require.False(t, called)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
 func TestTxValidationCommitDoesNotWaitForLedgerWriteLock(t *testing.T) {
 	t.Parallel()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})

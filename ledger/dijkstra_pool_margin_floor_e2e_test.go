@@ -107,7 +107,12 @@ func TestValidateTxDijkstraRejectsBelowFloorPoolMarginWithPendingState(
 	require.Equal(t, 1, pending.Len())
 	pp := dijkstraTestProtocolParameters()
 	lv := &LedgerView{ls: ls, pendingState: pending}
-	state, err := lv.validationState(pp, 1)
+	state, err := lv.validationState(
+		func(lcommon.Transaction) (lcommon.ProtocolParameters, error) {
+			return pp, nil
+		},
+		1,
+	)
 	require.NoError(t, err)
 	_, layered := state.(*LedgerView)
 	require.False(

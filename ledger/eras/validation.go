@@ -46,7 +46,7 @@ type evaluationContextProvider interface {
 }
 
 func evaluationContext(ls lcommon.LedgerState) context.Context {
-	provider, ok := ls.(evaluationContextProvider)
+	provider, ok := stateCapability[evaluationContextProvider](ls)
 	if !ok || provider.EvaluationContext() == nil {
 		return context.Background()
 	}

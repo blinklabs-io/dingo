@@ -1069,6 +1069,7 @@ type LedgerState struct {
 	// there can deadlock with a publisher that holds the write lock and needs a
 	// database connection.
 	txValidationCommitMutex sync.RWMutex
+	txValidationTransitions atomic.Int64
 	// The fields below are writer-owned working state. Lock-free readers use
 	// consensus and tip snapshots; writers update these fields under Lock and
 	// publish a fresh immutable snapshot before unlocking.
@@ -4429,6 +4430,8 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	// CIP-0163 reward-account expiration hooks (ledger-owned, since they
 	// need the epoch schedule) and captures the resulting tip/nonce for
 	// the in-memory cache reload below.
+	finishValidationTransition := ls.beginTxValidationTransition()
+	defer finishValidationTransition()
 	err = ls.SubmitAsyncDBTxn(ctx, func(txn *database.Txn) error {
 		// CIP-0163: capture the reward-account credentials witnessed in the
 		// rolled-away blocks (added_slot > rollback slot) before
@@ -4774,6 +4777,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	ls.updateTipMetrics(newTipDensity)
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
+	finishValidationTransition()
 	// Reconstruct the new tip's block_nonce if TruncateAfterSlot above
 	// allowed this rollback to proceed with an empty nonce: its own row was
 	// pruned by routine 3-epoch retention, but a checkpoint survives below
@@ -7621,6 +7625,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				return ls.SubmitAsyncDBTxn(ctx, op, true)
 			}
 			// Execute transaction WITHOUT holding ls.Lock()
+			finishValidationTransition := ls.beginTxValidationTransition()
 			//nolint:contextcheck // TranslateRatifiedGovActions reads only through txn, which carries ctx
 			err := submitRollover(func(txn *database.Txn) error {
 				if untickedClosure != nil {
@@ -7720,6 +7725,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				)
 			}
 			if err != nil {
+				finishValidationTransition()
 				// This runs on the pass after a boundary-crossing batch
 				// deferred its remainder to cachedNextBatch, which (per the
 				// cachedNextBatch != nil branch below) leaves
@@ -7782,6 +7788,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			ls.evaluateProtocolVersionBump(ctx)
 			ls.publishSnapshotsLocked()
 			ls.Unlock()
+			finishValidationTransition()
 
 			// Update scheduler (thread-safe, no lock needed)
 			if rolloverResult != nil &&
@@ -8252,6 +8259,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				nextBatch[i:end],
 				snapshotEpoch,
 			)
+			finishValidationTransition := ls.beginTxValidationTransition()
 			err = ls.submitBlockApplyDBTxn(
 				ctx,
 				snapshotTip,
@@ -8557,6 +8565,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				},
 			)
 			if err != nil {
+				finishValidationTransition()
 				// Undo events published down this recovery path are
 				// bounded by ls.publishCtx, not this loop's ctx, for the
 				// same reason as the apply path above.
@@ -8681,6 +8690,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					}
 				}
 			}
+			finishValidationTransition()
 			if needsEpochRollover {
 				break
 			}
@@ -13507,6 +13517,29 @@ type txValidationSnapshot struct {
 	syntheticV2CostModelInEffect bool
 }
 
+func (s txValidationSnapshot) validationContext(
+	tx lcommon.Transaction,
+) (eras.EraDesc, lcommon.ProtocolParameters, bool, error) {
+	validationEra, err := resolveValidationEra(tx, s.currentEra, s.eraList)
+	if err != nil {
+		return eras.EraDesc{}, nil, false, err
+	}
+	pp := s.currentPParams
+	isCurrent := true
+	if validationEra.Id != s.currentEra.Id && s.prevEraPParams != nil {
+		pp = s.prevEraPParams
+		isCurrent = false
+	}
+	return validationEra, pp, isCurrent, nil
+}
+
+func (s txValidationSnapshot) protocolParameters(
+	tx lcommon.Transaction,
+) (lcommon.ProtocolParameters, error) {
+	_, pp, _, err := s.validationContext(tx)
+	return pp, err
+}
+
 var ErrLeiosValidationParentUnavailable = errors.New(
 	"leios announcement parent is not the current ledger tip",
 )
@@ -13575,6 +13608,22 @@ type txValidationApplyFunc func(
 	blockNumber uint64,
 ) error
 
+// beginTxValidationTransition excludes validation commits from a durable
+// state transition until its matching snapshots have been published.
+func (ls *LedgerState) beginTxValidationTransition() func() {
+	ls.txValidationCommitMutex.Lock()
+	ls.txValidationTransitions.Add(1)
+	ls.txValidationCommitMutex.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			ls.txValidationCommitMutex.Lock()
+			ls.txValidationTransitions.Add(-1)
+			ls.txValidationCommitMutex.Unlock()
+		})
+	}
+}
+
 func (ls *LedgerState) WithTxValidationSession(ctx context.Context,
 	fn func(
 		validate func(
@@ -13636,11 +13685,7 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
 			accounts *utxoref.StateOverlay,
 		) error {
-			validationEra, err := resolveValidationEra(
-				tx,
-				snapshot.currentEra,
-				snapshot.eraList,
-			)
+			validationEra, pp, isCurrentEraPParams, err := snapshot.validationContext(tx)
 			if err != nil {
 				return err
 			}
@@ -13651,19 +13696,13 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 				ls.skipDijkstraTxValidation(validationEra.Id) {
 				return nil
 			}
-			pp := snapshot.currentPParams
-			isCurrentEraPParams := true
-			if validationEra.Id != snapshot.currentEra.Id &&
-				snapshot.prevEraPParams != nil {
-				pp = snapshot.prevEraPParams
-				isCurrentEraPParams = false
-			}
 			synthetic := syntheticV2CostModelForValidation(
 				pp,
 				isCurrentEraPParams,
 				snapshot.syntheticV2CostModelInEffect,
 			)
 			lv := (&LedgerView{
+				ctx:             ctx,
 				txn:             txn,
 				ls:              ls,
 				intraBlockUtxos: createdUtxos,
@@ -13672,7 +13711,10 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 				epochStartSlot:  snapshot.currentEpochStartSlot,
 			}).pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
-			state, err := lv.validationState(pp, snapshot.generation)
+			state, err := lv.validationState(
+				snapshot.protocolParameters,
+				snapshot.generation,
+			)
 			if err == nil {
 				err = validationEra.ValidateTxFunc(
 					tx,
@@ -13693,7 +13735,8 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 		}
 		stillCurrent := func() bool {
 			currentConsensus, currentTip := ls.loadStateSnapshots()
-			return currentConsensus.generation == snapshot.generation &&
+			return ls.txValidationTransitions.Load() == 0 &&
+				currentConsensus.generation == snapshot.generation &&
 				currentTip.generation == snapshot.generation
 		}
 		commitIfCurrent := func(commit func() error) (bool, error) {
@@ -13885,22 +13928,11 @@ func (ls *LedgerState) validateTxCore(
 ) error {
 	snapshot := ls.txValidationSnapshot()
 
-	validationEra, err := resolveValidationEra(
-		tx,
-		snapshot.currentEra,
-		snapshot.eraList,
-	)
+	validationEra, pp, isCurrentEraPParams, err := snapshot.validationContext(tx)
 	if err != nil {
 		return err
 	}
 	if validationEra.ValidateTxFunc != nil {
-		pp := snapshot.currentPParams
-		isCurrentEraPParams := true
-		if validationEra.Id != snapshot.currentEra.Id &&
-			snapshot.prevEraPParams != nil {
-			pp = snapshot.prevEraPParams
-			isCurrentEraPParams = false
-		}
 		synthetic := syntheticV2CostModelForValidation(
 			pp,
 			isCurrentEraPParams,
@@ -13913,7 +13945,10 @@ func (ls *LedgerState) validateTxCore(
 			lv.epochStartSlot = snapshot.currentEpochStartSlot
 			lv = lv.pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
-			state, err := lv.validationState(pp, snapshot.generation)
+			state, err := lv.validationState(
+				snapshot.protocolParameters,
+				snapshot.generation,
+			)
 			if err != nil {
 				return err
 			}
