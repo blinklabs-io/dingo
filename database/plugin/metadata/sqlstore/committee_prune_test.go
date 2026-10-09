@@ -351,7 +351,7 @@ func applyAuthCertificate(
 		ocommon.Point{Slot: slot, Hash: credentialHash(0x99)},
 		0,
 		nil,
-		requireKnownDeposits, 0,
+		requireKnownDeposits, false, 0,
 	)
 	require.NoError(t, err)
 }
@@ -424,7 +424,7 @@ func TestAuthCommitteeHotTransactionDrainsMultipleBatches(t *testing.T) {
 		newDialectQueryer(store.writeDB, store.dialect.Name()),
 		1, certificates,
 		ocommon.Point{Slot: preprodTipSlot, Hash: credentialHash(0x99)},
-		0, nil, requireKnownDeposits, 0,
+		0, nil, requireKnownDeposits, false, 0,
 	)
 	require.NoError(t, err)
 	// Two certificate calls remove two bounded batches and retain the newest

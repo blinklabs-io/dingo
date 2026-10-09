@@ -383,6 +383,7 @@ INSERT INTO utxo (
 		nil,
 		true,
 		txn,
+		0,
 	))
 	require.NoError(t, txn.Commit())
 
@@ -512,7 +513,7 @@ func TestBatchedProducedAssetRowsWaitForFlush(t *testing.T) {
 	for seed := byte(1); seed <= 3; seed++ {
 		tx, point, policyID, name := assetOutputTx(t, seed)
 		require.NoError(t, store.SetTransactionBatchedHistorical(
-			tx, point, 0, nil, true, true, acc, txn,
+			tx, point, 0, nil, true, true, acc, txn, 0,
 		))
 		assets = append(assets, assetRef{policyID: policyID, name: name})
 	}
@@ -643,6 +644,7 @@ INSERT INTO reward_live_stake (
 			true,
 			acc,
 			txn,
+			0,
 		))
 	}
 
@@ -720,6 +722,7 @@ func TestFlushBatchAppliesCoalescedStakeDeltas(t *testing.T) {
 			true,
 			acc,
 			txn,
+			0,
 		))
 	}
 	batched, ok := acc.(*transactionBatchAccumulator)

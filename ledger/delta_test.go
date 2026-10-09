@@ -215,10 +215,11 @@ func (s *ledgerDeltaBatchStoreRecorder) SetTransactionBatched(
 	skipWithdrawalWitness bool,
 	acc dbtypes.MetadataBatchAccumulator,
 	txn dbtypes.Txn,
+	protocolMajor uint64,
 ) error {
 	s.events = append(s.events, "set-transaction")
 	return s.MetadataStore.SetTransactionBatched(
-		tx, point, index, certDeposits, skipWithdrawalWitness, acc, txn,
+		tx, point, index, certDeposits, skipWithdrawalWitness, acc, txn, protocolMajor,
 	)
 }
 

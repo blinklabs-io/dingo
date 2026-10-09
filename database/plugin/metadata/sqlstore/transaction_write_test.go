@@ -561,7 +561,7 @@ VALUES (?, 0, ?, ?, 1, 0, ?)`,
 
 	point := ocommon.Point{Slot: fx.point.Slot + 1, Hash: txID}
 	require.NoError(t, store.SetTransaction(
-		tx, point, 0, nil, false, nil,
+		tx, point, 0, nil, false, nil, 0,
 	))
 	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
 	require.NoError(t, err)

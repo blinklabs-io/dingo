@@ -78,6 +78,7 @@ const (
 	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
 	poolRelayTypeSchemaRelease                          = "pool-relay-type"
+	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
