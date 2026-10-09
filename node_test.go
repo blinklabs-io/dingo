@@ -3380,43 +3380,17 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 	)
 }
 
-func TestLedgerStateConfigUsesOneDevBlockProducer(t *testing.T) {
+func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name            string
-		runMode         string
-		blockProducer   bool
-		wantLedgerForge bool
-	}{
-		{
-			name:            "dev mode falls back to ledger forge",
-			runMode:         "dev",
-			wantLedgerForge: true,
-		},
-		{
-			name:            "configured block producer owns dev forging",
-			runMode:         "dev",
-			blockProducer:   true,
-			wantLedgerForge: false,
-		},
-		{
-			name:          "serving mode does not enable dev forge",
-			runMode:       "serve",
-			blockProducer: true,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
+	node := &Node{config: NewConfig(
+		WithRunMode("dev"),
+		WithBlockProducer(false),
+	)}
 
-			node := &Node{config: NewConfig(
-				WithRunMode(test.runMode),
-				WithBlockProducer(test.blockProducer),
-			)}
-			assert.Equal(t, test.wantLedgerForge, node.ledgerStateConfig().ForgeBlocks)
-		})
-	}
+	assert.True(t, node.config.blockProducer)
+	assert.Equal(t, StorageModeAPI, node.config.storageMode)
+	assert.False(t, node.ledgerStateConfig().ForgeBlocks)
 }
 
 // The ledger is started, and replays any stored blocks it has not applied,

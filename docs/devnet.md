@@ -14,6 +14,12 @@ The command starts one Dingo node with block production enabled and no outbound
 peers. It uses the bundled DevNet genesis and test keys, so it does not need
 Docker, a Cardano node, or a separate genesis-generation step.
 
+Serving with `runMode: dev` always selects API storage and Dingo's regular
+keyed block producer, regardless of the configured `storageMode` or
+`blockProducer` values. The configuration still needs valid VRF, KES, and
+operational-certificate credentials; `dingo devnet` provisions local test keys
+for that purpose.
+
 By default, configuration, test keys, and the database live in a private
 temporary directory that is removed when the node exits, including after
 Ctrl+C. Each invocation starts a fresh chain and leaves the current directory

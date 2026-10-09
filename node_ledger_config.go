@@ -70,16 +70,13 @@ func (n *Node) chainsyncSyncTarget(
 func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 	healthGeneration := n.health.currentGeneration()
 	return ledger.LedgerStateConfig{
-		ChainManager:      n.chainManager,
-		Database:          n.db,
-		EventBus:          n.eventBus,
-		Logger:            n.config.logger,
-		CardanoNodeConfig: n.config.cardanoNodeConfig,
-		Network:           n.config.network,
-		PromRegistry:      n.config.promRegistry,
-		// The dev-mode ledger forge is a lightweight fallback. When the normal
-		// producer is configured, it owns block production and must not race it.
-		ForgeBlocks:        n.config.isDevMode() && !n.config.blockProducer,
+		ChainManager:       n.chainManager,
+		Database:           n.db,
+		EventBus:           n.eventBus,
+		Logger:             n.config.logger,
+		CardanoNodeConfig:  n.config.cardanoNodeConfig,
+		Network:            n.config.network,
+		PromRegistry:       n.config.promRegistry,
 		ValidateHistorical: n.config.validateHistorical,
 		EnableDijkstra:     n.config.experimentalDijkstraEnabled(),
 		StartInDijkstra:    n.config.startEra.IsDijkstra(),
