@@ -636,6 +636,17 @@
 # CLI: --block-pipeline-validate-enabled
 # blockPipelineValidateEnabled: false
 
+# Prefetch the next block's input UTxOs on a separate goroutine from a
+# read-only transaction while the current block applies (default: false).
+# Not consensus-affecting. Inputs spent by earlier blocks of the same
+# block-apply chunk are never served from the prefetch, and any input it
+# misses is read as without the flag.
+#
+# Can be overridden with the DINGO_LEDGER_PREFETCH_AHEAD_ENABLED
+# environment variable
+# CLI: --ledger-prefetch-ahead-enabled
+# ledgerPrefetchAheadEnabled: false
+
 # Error out (instead of silently skipping) when a consumed UTxO cannot be
 # found or recovered for a block past the recorded Mithril sync boundary.
 # A non-genesis chainsync intersection without a Mithril snapshot may set this

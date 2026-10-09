@@ -3380,6 +3380,17 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 	)
 }
 
+func TestLedgerStateConfigForwardsLedgerPrefetchAheadFlag(t *testing.T) {
+	t.Parallel()
+
+	off := (&Node{config: NewConfig()}).ledgerStateConfig()
+	assert.False(t, off.LedgerPrefetchAheadEnabled)
+	on := (&Node{
+		config: NewConfig(WithLedgerPrefetchAheadEnabled(true)),
+	}).ledgerStateConfig()
+	assert.True(t, on.LedgerPrefetchAheadEnabled)
+}
+
 // The ledger is started, and replays any stored blocks it has not applied,
 // before the node creates Ouroboros networking. ledgerStateConfig therefore
 // hands the ledger callbacks that run while n.ouroboros() is still nil, and

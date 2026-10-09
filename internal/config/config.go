@@ -731,6 +731,10 @@ type Config struct {
 	// before replay reaches this stage. See ARCHITECTURE.md ("Block Processing
 	// Pipeline").
 	BlockPipelineValidateEnabled bool `yaml:"blockPipelineValidateEnabled"        envconfig:"DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED"`
+	// LedgerPrefetchAheadEnabled resolves the next block's input UTxOs on a
+	// separate goroutine while the current block applies. Not
+	// consensus-affecting; off by default.
+	LedgerPrefetchAheadEnabled bool `yaml:"ledgerPrefetchAheadEnabled"          envconfig:"DINGO_LEDGER_PREFETCH_AHEAD_ENABLED"`
 
 	// Peer targets (0 = use default, -1 = unlimited)
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`

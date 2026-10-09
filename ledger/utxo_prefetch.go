@@ -31,7 +31,10 @@ func (ls *LedgerState) prefetchBlockUtxos(
 	ctx context.Context,
 	txn *database.Txn,
 	txs []lcommon.Transaction,
+	have map[utxoref.Key]lcommon.Utxo,
+	skip map[utxoref.Key]struct{},
 ) map[utxoref.Key]lcommon.Utxo {
+	ls.utxoPrefetchAheadServed.Add(uint64(len(have)))
 	produced := make(map[utxoref.Key]struct{})
 	for _, tx := range txs {
 		for _, utxo := range tx.Produced() {
@@ -49,6 +52,12 @@ func (ls *LedgerState) prefetchBlockUtxos(
 			if _, ok := seen[key]; ok {
 				continue
 			}
+			if _, ok := skip[key]; ok {
+				continue
+			}
+			if _, ok := have[key]; ok {
+				continue
+			}
 			seen[key] = in
 			refs = append(refs, models.UtxoId{
 				Hash: in.Id().Bytes(),
@@ -62,7 +71,7 @@ func (ls *LedgerState) prefetchBlockUtxos(
 		add(tx.ReferenceInputs())
 	}
 	if len(refs) == 0 {
-		return nil
+		return have
 	}
 	ls.utxoBatchLookups.Add(1)
 	rows, err := ls.db.UtxosByRefs(ctx, refs, txn)
@@ -75,10 +84,13 @@ func (ls *LedgerState) prefetchBlockUtxos(
 			"component", "ledger",
 			"error", err,
 		)
-		return nil
+		return have
 	}
 	ls.utxoByRefReads.Add(uint64(len(rows)))
-	out := make(map[utxoref.Key]lcommon.Utxo, len(rows))
+	out := have
+	if out == nil {
+		out = make(map[utxoref.Key]lcommon.Utxo, len(rows))
+	}
 	for i := range rows {
 		output, err := rows[i].Decode()
 		if err != nil || output == nil {

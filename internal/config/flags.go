@@ -726,6 +726,11 @@ var flagSpecs = []flagSpec{
 		"block-pipeline-validate-enabled",
 		"also VRF/KES-validate blocks in the block-pipeline replay loop with a parallel worker pool (requires block-pipeline-enabled; default off)",
 	),
+	boolFlag(
+		"LedgerPrefetchAheadEnabled",
+		"ledger-prefetch-ahead-enabled",
+		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies (not consensus-affecting; default off)",
+	),
 
 	// Block production
 	boolFlag("BlockProducer", "block-producer", "enable block production mode"),
