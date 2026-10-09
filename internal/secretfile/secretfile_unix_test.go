@@ -17,12 +17,27 @@
 package secretfile
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/keystore"
 )
+
+func TestReadRejectsInsecurePermissions(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(path, []byte("s3cret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Read(path)
+	if !errors.Is(err, keystore.ErrInsecureFileMode) {
+		t.Fatalf("Read(insecure file) error = %v", err)
+	}
+}
 
 func TestReadRejectsFIFOWithoutBlocking(t *testing.T) {
 	t.Parallel()
@@ -37,10 +52,18 @@ func TestReadRejectsFIFOWithoutBlocking(t *testing.T) {
 	}()
 	select {
 	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		if !errors.Is(err, keystore.ErrNotRegularFile) {
 			t.Fatalf("Read(fifo) error = %v", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Read blocked opening a FIFO with no writer")
+	}
+}
+
+func TestReadRejectsDevice(t *testing.T) {
+	t.Parallel()
+	_, err := Read("/dev/null")
+	if !errors.Is(err, keystore.ErrNotRegularFile) {
+		t.Fatalf("Read(device) error = %v", err)
 	}
 }

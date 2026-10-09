@@ -15,10 +15,13 @@
 package secretfile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/keystore"
 )
 
 func writeFile(t *testing.T, content string) string {
@@ -106,7 +109,23 @@ func TestReadRejectsEmptyPathAndMissingFile(t *testing.T) {
 func TestReadRejectsNonRegularFile(t *testing.T) {
 	t.Parallel()
 	_, err := Read(t.TempDir())
-	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+	if !errors.Is(err, keystore.ErrNotRegularFile) {
 		t.Fatalf("Read(directory) error = %v", err)
+	}
+}
+
+func TestReadAcceptsSymlinkToSecureRegularFile(t *testing.T) {
+	t.Parallel()
+	target := writeFile(t, "s3cret\n")
+	path := filepath.Join(t.TempDir(), "secret-link")
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlink is unavailable: %v", err)
+	}
+	got, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "s3cret" {
+		t.Fatalf("Read = %q, want %q", got, "s3cret")
 	}
 }
