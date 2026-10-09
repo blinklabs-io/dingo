@@ -4470,7 +4470,7 @@ so every point-aware query answers for the same block through the pinned
 point; the query types that are live by design (`GetGenesisConfig`,
 `GetLedgerPeerSnapshot`) stay live, as they are for any session. The LocalStateQuery protocol
 has no reply for a failed query: any error after a successful Acquire ends the
-connection (#4234). A rollback or prune committed after Acquire cannot cause
+connection. A rollback or prune committed after Acquire cannot cause
 one, since every query reads the session's snapshot, so the only remaining case
 is a reopen whose block this node can no longer answer for (rolled back, or
 past a retention floor, while the view was closed); that query fails and is

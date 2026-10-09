@@ -587,6 +587,9 @@ func (o *Ouroboros) reopenExpiredLocalStateQuerySession(
 			err,
 		)
 	}
+	if o.localstatequeryVerifiedHook != nil {
+		o.localstatequeryVerifiedHook()
+	}
 	o.localstatequeryAcquireMutex.Lock()
 	if o.localstatequerySessions[connId] != session || !session.expired ||
 		requestCtx.Err() != nil {
