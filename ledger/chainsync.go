@@ -4489,8 +4489,9 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			// A full queue rejects every header before the fetch decision
 			// below, so if nothing is fetching the queued headers nothing
 			// ever will.
-			ls.ensureBlockfetchDrainingAfterForkQueueFailure(
+			ls.ensureBlockfetchDrainingQueuedHeaders(
 				e.ConnectionId,
+				event.ChainsyncResyncReasonHeaderQueueFullRestartFailed,
 				pending,
 			)
 		}
@@ -5545,7 +5546,9 @@ func (ls *LedgerState) recoverBlockfetchRestartFailureLocked(
 }
 
 // ensureBlockfetchDrainingAfterForkQueueFailure restarts blockfetch for
-// already-queued headers when nothing is currently fetching them. It is
+// already-queued headers when nothing is currently fetching them. The main
+// header path does the same through ensureBlockfetchDrainingQueuedHeaders
+// when it rejects a header with ErrHeaderQueueFull. This entry point is
 // called after tryResolveFork fails to append a fork-resolution header path
 // onto the chain's header queue (most commonly because the queue is already
 // at ErrHeaderQueueFull capacity): the success paths in tryResolveFork
@@ -5571,6 +5574,22 @@ func (ls *LedgerState) ensureBlockfetchDrainingAfterForkQueueFailure(
 	connId ouroboros.ConnectionId,
 	pending *pendingPublishes,
 ) {
+	ls.ensureBlockfetchDrainingQueuedHeaders(
+		connId,
+		event.ChainsyncResyncReasonForkQueueOverflowRestartFailed,
+		pending,
+	)
+}
+
+// ensureBlockfetchDrainingQueuedHeaders is
+// ensureBlockfetchDrainingAfterForkQueueFailure with the re-sync reason
+// supplied by the caller, so a failed restart names the path that hit the
+// full queue.
+func (ls *LedgerState) ensureBlockfetchDrainingQueuedHeaders(
+	connId ouroboros.ConnectionId,
+	resyncReason string,
+	pending *pendingPublishes,
+) {
 	if ls.config.BlockfetchRequestRangeFunc == nil ||
 		ls.chain.HeaderCount() == 0 {
 		return
@@ -5593,11 +5612,12 @@ func (ls *LedgerState) ensureBlockfetchDrainingAfterForkQueueFailure(
 	// still land on a stale peer instead of the one actually now fetching.
 	if err := ls.startQueuedBlockfetchOnLocked(connId, pending); err != nil {
 		ls.config.Logger.Warn(
-			"failed to start blockfetch after fork-resolution queue overflow, "+
-				"dropping queued headers and requesting chainsync re-sync",
+			"failed to start blockfetch for queued headers after header-queue "+
+				"rejection, dropping queued headers and requesting chainsync re-sync",
 			"component", "ledger",
 			"error", err,
 			"connection_id", connId.String(),
+			"reason", resyncReason,
 		)
 		// Nothing else schedules a fetch for these headers once the queue
 		// is full and no blockfetch is in flight (see doc comment above):
@@ -5605,11 +5625,7 @@ func (ls *LedgerState) ensureBlockfetchDrainingAfterForkQueueFailure(
 		// permanently. Clear them and ask for a fresh intersect instead,
 		// matching noteBlockfetchRangeUnavailable's equivalent recovery.
 		ls.clearQueuedHeaders()
-		ls.requestChainsyncResync(
-			connId,
-			event.ChainsyncResyncReasonForkQueueOverflowRestartFailed,
-			pending,
-		)
+		ls.requestChainsyncResync(connId, resyncReason, pending)
 	}
 }
 
