@@ -67,6 +67,7 @@ func stopWithin(t *testing.T, p *utxoPrefetchAhead) {
 func TestUtxoPrefetchAheadServesUnconsumedInputs(t *testing.T) {
 	t.Parallel()
 	fx := loadUtxoMemoPreprodFixture(t)
+	fx.dingoLS.utxoPrefetchAheadAwaitReady = true
 	blocks := []gledger.Block{
 		aheadFixtureBlock(fx),
 		aheadFixtureBlock(fx, fx.tx),
@@ -87,6 +88,7 @@ func TestUtxoPrefetchAheadServesUnconsumedInputs(t *testing.T) {
 func TestUtxoPrefetchAheadExcludesInputsSpentByEarlierBlocks(t *testing.T) {
 	t.Parallel()
 	fx := loadUtxoMemoPreprodFixture(t)
+	fx.dingoLS.utxoPrefetchAheadAwaitReady = true
 	// Block 0 spends every input block 2 names, so a snapshot taken before the
 	// chunk still holds all of them as live.
 	blocks := []gledger.Block{
@@ -151,6 +153,7 @@ func TestCollectConsumedInputsWalksSubTransactions(t *testing.T) {
 func TestUtxoPrefetchAheadStopJoinsAndReleasesReadTxn(t *testing.T) {
 	t.Parallel()
 	fx := loadUtxoMemoPreprodFixture(t)
+	fx.dingoLS.utxoPrefetchAheadAwaitReady = true
 	blocks := []gledger.Block{
 		aheadFixtureBlock(fx),
 		aheadFixtureBlock(fx, fx.tx),
@@ -177,6 +180,83 @@ func TestUtxoPrefetchAheadStopJoinsAndReleasesReadTxn(t *testing.T) {
 		default:
 			t.Fatal("read transaction not released when stop returned")
 		}
+	}
+}
+
+func TestUtxoPrefetchAheadTakeDoesNotWaitForReadPool(t *testing.T) {
+	t.Parallel()
+	fx := loadUtxoMemoPreprodFixture(t)
+	limit := fx.db.Metadata().(interface{ ReadSnapshotLimit() int }).
+		ReadSnapshotLimit()
+	// Hold every read-pool connection, as snapshot opens parked on the
+	// chunk's commit barrier do.
+	held := make([]*database.Txn, 0, limit+1)
+	releaseHeld := func() {
+		for _, h := range held {
+			h.Release()
+		}
+		held = nil
+	}
+	defer releaseHeld()
+	for range limit + 1 {
+		held = append(held, fx.db.Transaction(t.Context(), false))
+	}
+	blocks := []gledger.Block{
+		aheadFixtureBlock(fx),
+		aheadFixtureBlock(fx, fx.tx),
+	}
+	p := fx.dingoLS.startUtxoPrefetchAhead(
+		t.Context(), blocks, []bool{true, true},
+	)
+	defer stopWithin(t, p)
+
+	took := make(chan map[utxoref.Key]lcommon.Utxo, 1)
+	go func() {
+		p.take(0)
+		took <- p.take(1)
+	}()
+	select {
+	case got := <-took:
+		require.Nil(t, got)
+	case <-time.After(10 * time.Second):
+		t.Fatal("take waited for a read-pool connection")
+	}
+	select {
+	case <-p.ready:
+		t.Fatal("the read pool was not saturated")
+	default:
+	}
+
+	// Once a connection is free the goroutine serves blocks again.
+	releaseHeld()
+	select {
+	case <-p.ready:
+	case <-time.After(30 * time.Second):
+		t.Fatal("goroutine did not acquire a freed read connection")
+	}
+	p.ls.utxoPrefetchAheadAwaitReady = true
+	require.NotEmpty(t, p.take(1))
+}
+
+func TestUtxoPrefetchAheadResolvesFirstBlockDuringTakeZero(t *testing.T) {
+	t.Parallel()
+	fx := loadUtxoMemoPreprodFixture(t)
+	blocks := []gledger.Block{
+		aheadFixtureBlock(fx),
+		aheadFixtureBlock(fx, fx.tx),
+	}
+	p := fx.dingoLS.startUtxoPrefetchAhead(
+		t.Context(), blocks, []bool{true, true},
+	)
+	defer stopWithin(t, p)
+
+	require.Nil(t, p.take(0))
+	// Block 1 resolves while block 0 applies; take(1) has not been called.
+	select {
+	case got := <-p.slots[1]:
+		require.NotEmpty(t, got)
+	case <-time.After(30 * time.Second):
+		t.Fatal("block 1 was not resolved after take(0)")
 	}
 }
 
@@ -412,6 +492,7 @@ func newAheadReplayEnv(
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	setReplayTestLedgerOrigin(ls, eras.ConwayEraDesc, pp)
 	require.NoError(t, cm.SetLedger(ls))
+	ls.utxoPrefetchAheadAwaitReady = ahead
 	env.ls = ls
 	return env
 }

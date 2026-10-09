@@ -1109,6 +1109,10 @@ type LedgerState struct {
 	// utxoPrefetchAheadServed counts UTxOs ledgerProcessBlock took from
 	// utxoPrefetchAhead instead of reading them itself. Tests only.
 	utxoPrefetchAheadServed atomic.Uint64
+	// utxoPrefetchAheadAwaitReady makes utxoPrefetchAhead.take wait for the
+	// goroutine's read transaction instead of serving nothing, so tests can
+	// count served UTxOs deterministically. Tests only.
+	utxoPrefetchAheadAwaitReady bool
 	// mempool is installed by SetMempool but read by the forger on its own
 	// goroutine, so it is an atomic pointer: a late or repeated SetMempool
 	// is race-free and the latest provider wins.

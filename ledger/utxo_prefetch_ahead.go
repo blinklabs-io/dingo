@@ -45,7 +45,11 @@ type utxoPrefetchAhead struct {
 	allow  chan int
 	cancel context.CancelFunc
 	done   chan struct{}
-	once   sync.Once
+	// ready is closed once the goroutine holds its read transaction. Until
+	// then take serves nothing: acquiring a read-pool connection can wait on
+	// other holders, and the apply worker must never wait on that.
+	ready chan struct{}
+	once  sync.Once
 	// readTxn is the goroutine's read transaction, kept so tests can check it
 	// is released once done is closed. Production code does not read it.
 	readTxn *database.Txn
@@ -69,6 +73,7 @@ func (ls *LedgerState) startUtxoPrefetchAhead(
 		allow:  make(chan int, len(blocks)+1),
 		cancel: cancel,
 		done:   make(chan struct{}),
+		ready:  make(chan struct{}),
 	}
 	for i := range p.slots {
 		p.slots[i] = make(chan map[utxoref.Key]lcommon.Utxo, 1)
@@ -96,6 +101,14 @@ func (p *utxoPrefetchAhead) run(ctx context.Context) {
 		return
 	}
 	addConsumed(p.blocks[0])
+	wantsAny := false
+	for _, w := range p.wanted[1:] {
+		wantsAny = wantsAny || w
+	}
+	if wantsAny {
+		p.readTxn = p.ls.db.Transaction(ctx, false)
+	}
+	close(p.ready)
 	limit := 0
 	for k := 1; k < len(p.blocks); k++ {
 		// Stay at most one block ahead of the block being applied.
@@ -112,9 +125,6 @@ func (p *utxoPrefetchAhead) run(ctx context.Context) {
 		}
 		var result map[utxoref.Key]lcommon.Utxo
 		if p.wanted[k] {
-			if p.readTxn == nil {
-				p.readTxn = p.ls.db.Transaction(ctx, false)
-			}
 			result = p.ls.prefetchBlockUtxos(
 				ctx,
 				p.readTxn,
@@ -129,19 +139,38 @@ func (p *utxoPrefetchAhead) run(ctx context.Context) {
 }
 
 // take returns block k's prefetched UTxOs, waiting for the goroutine if it is
-// still resolving them. It returns nil when block k was not prefetched, the
-// goroutine stopped first, or p is nil; the caller then reads every input
-// itself.
+// still resolving them from its read transaction. It never waits for that
+// transaction to be acquired: a read-pool connection can be held by callers
+// parked on the commit barrier this chunk's write transaction holds, so the
+// wait could not end until the chunk commits. Before the goroutine is ready it
+// returns nil, as it does when block k was not prefetched, the goroutine
+// stopped first, or p is nil; the caller then reads every input itself.
 func (p *utxoPrefetchAhead) take(
 	k int,
 ) map[utxoref.Key]lcommon.Utxo {
-	if p == nil || k <= 0 || k >= len(p.slots) {
+	if p == nil || k < 0 || k >= len(p.slots) {
 		return nil
 	}
-	// Permit the goroutine to resolve block k+1 while block k applies.
+	// Permit the goroutine to resolve block k+1 while block k applies. Block
+	// 0 is permitted too, so block 1 overlaps it.
 	select {
 	case p.allow <- k + 1:
 	default:
+	}
+	if k == 0 {
+		return nil
+	}
+	select {
+	case <-p.ready:
+	default:
+		if !p.ls.utxoPrefetchAheadAwaitReady {
+			return nil
+		}
+		select {
+		case <-p.ready:
+		case <-p.done:
+			return nil
+		}
 	}
 	select {
 	case m := <-p.slots[k]:
