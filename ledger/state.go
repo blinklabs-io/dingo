@@ -882,8 +882,10 @@ type LedgerStateConfig struct {
 	// separate goroutine, from a read-only transaction, while block k applies
 	// within one block-apply chunk. Inputs consumed by earlier blocks of the
 	// chunk are never served from it, and any input it does not resolve is
-	// read inside the write transaction as without the flag. Not
-	// consensus-affecting; off by default.
+	// read inside the write transaction as without the flag. Only blocks
+	// under normal validation are prefetched; historical, TrustedReplay and
+	// Mithril-covered blocks read no inputs. Not consensus-affecting; off by
+	// default.
 	LedgerPrefetchAheadEnabled bool
 }
 

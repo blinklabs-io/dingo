@@ -3347,7 +3347,9 @@ With `LedgerStateConfig.LedgerPrefetchAheadEnabled` (`ledgerPrefetchAheadEnabled
 default off), the block-apply chunk also resolves block k+1's inputs on a
 separate goroutine (`utxoPrefetchAhead`, `ledger/utxo_prefetch_ahead.go`) from a
 read-pool transaction while block k applies; the chunk's write transaction is
-never shared with it. That snapshot predates the chunk, so each block's result
+never shared with it. Only blocks under normal validation are prefetched:
+historical, `TrustedReplay` and Mithril-covered blocks skip per-block
+validation and read no inputs, so the goroutine resolves nothing for them. That snapshot predates the chunk, so each block's result
 omits every input and collateral input, at every transaction level, of the
 chunk's earlier blocks, derived from the blocks themselves and not from apply
 progress. Outputs created earlier in the chunk are absent from the snapshot, and

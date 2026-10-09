@@ -26,7 +26,10 @@ import (
 // prefetchBlockUtxos resolves every spend, collateral and reference input of
 // txs that no transaction in the block produces, with a single UtxosByRefs
 // query. Rows that fail to decode are left out so the point lookup in
-// LedgerView.UtxoById reports the error as before. A failed batch yields nil.
+// LedgerView.UtxoById reports the error as before. Entries already in have,
+// such as UTxOs utxoPrefetchAhead resolved, are returned with the result; a
+// failed batch returns have unchanged, and every ref it lacks falls back to a
+// point lookup.
 func (ls *LedgerState) prefetchBlockUtxos(
 	ctx context.Context,
 	txn *database.Txn,

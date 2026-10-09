@@ -740,7 +740,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"LedgerPrefetchAheadEnabled",
 		"ledger-prefetch-ahead-enabled",
-		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies (not consensus-affecting; default off)",
+		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies, for validated blocks only (not consensus-affecting; default off)",
 	),
 
 	// Block production

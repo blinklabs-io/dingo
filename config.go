@@ -1737,8 +1737,8 @@ func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 }
 
 // WithLedgerPrefetchAheadEnabled prefetches the next block's input UTxOs from a
-// read-only transaction while the current block applies. Not
-// consensus-affecting; off by default. See
+// read-only transaction while the current block applies, for blocks under
+// normal validation only. Not consensus-affecting; off by default. See
 // LedgerStateConfig.LedgerPrefetchAheadEnabled.
 func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
