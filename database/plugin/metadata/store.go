@@ -57,7 +57,7 @@ type LifecycleStore interface {
 // SettingsStore owns singleton metadata about database and node state.
 type SettingsStore interface {
 	// GetCommitTimestamp retrieves the last commit timestamp from the database.
-	GetCommitTimestamp() (int64, error)
+	GetCommitTimestamp(context.Context) (int64, error)
 
 	// SetCommitTimestamp sets the last commit timestamp in the database.
 	// Parameter order is (timestamp, txn) to match other store methods where
@@ -66,7 +66,7 @@ type SettingsStore interface {
 
 	// GetNodeSettings returns the persisted immutable node settings, or
 	// nil if the database has never been initialised.
-	GetNodeSettings() (*types.NodeSettings, error)
+	GetNodeSettings(ctx context.Context) (*types.NodeSettings, error)
 
 	// SetNodeSettings persists the immutable node settings via an
 	// idempotent insert that succeeds on repeated calls. If the row
@@ -74,21 +74,21 @@ type SettingsStore interface {
 	// fields and should only populate network fields when they are
 	// currently unset so callers like CheckNodeSettings can perform
 	// a one-time network backfill.
-	SetNodeSettings(*types.NodeSettings) error
+	SetNodeSettings(context.Context, *types.NodeSettings) error
 
 	// GetNodeSettingsGates returns the persisted node settings gate
 	// values, keyed by gate name. These are the values enforced on every
 	// startup by database/nodesettings.Evaluate; an empty result means no
 	// gates have been recorded yet, which is normal before the first
 	// successful start.
-	GetNodeSettingsGates() (nodesettings.Values, error)
+	GetNodeSettingsGates(ctx context.Context) (nodesettings.Values, error)
 
 	// SetNodeSettingsGates persists gates, one row per gate, so that a
 	// later call overwrites an earlier value for the same name. The
 	// recorded epoch and slot are stamped on every row written by this
 	// call and are zero when the write happens before the first block
 	// has been processed. A nil or empty gates is a no-op.
-	SetNodeSettingsGates(
+	SetNodeSettingsGates(ctx context.Context,
 		gates nodesettings.Values,
 		recordedEpoch uint64,
 		recordedSlot uint64,
@@ -105,7 +105,7 @@ type SettingsStore interface {
 	// record that a collision happened. A caller that gets inserted=false
 	// lost the race and must re-read what is now actually persisted rather
 	// than assume its own write took effect.
-	InsertNodeSettingsGateIfAbsent(
+	InsertNodeSettingsGateIfAbsent(ctx context.Context,
 		name string,
 		value string,
 		recordedEpoch uint64,
@@ -115,7 +115,7 @@ type SettingsStore interface {
 	// InsertNodeSettingsGatesIfAbsent persists the complete first-fill set in
 	// one metadata transaction. It returns false when another initializer
 	// already claimed any member of the set; no partial set is committed.
-	InsertNodeSettingsGatesIfAbsent(
+	InsertNodeSettingsGatesIfAbsent(ctx context.Context,
 		gates nodesettings.Values,
 		recordedEpoch uint64,
 		recordedSlot uint64,
@@ -202,6 +202,14 @@ type GovernanceStore interface {
 	// proposal not yet enacted, dropped, or soft-deleted. An expired action
 	// stays a member until the boundary that drops it.
 	GetGovernanceProposalSet(
+		types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetGovernanceProposalSetAtSlot is GetGovernanceProposalSet as the set
+	// stood at slot: proposals added at or before it and not yet enacted,
+	// dropped, or soft-deleted by then.
+	GetGovernanceProposalSetAtSlot(
+		uint64, // slot
 		types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
@@ -307,6 +315,15 @@ type GovernanceStore interface {
 	// GetGovernanceVotes retrieves all votes for a governance proposal.
 	GetGovernanceVotes(
 		uint, // proposalID
+		types.Txn,
+	) ([]*models.GovernanceVote, error)
+
+	// GetGovernanceVotesAtSlot is GetGovernanceVotes as the votes stood at
+	// slot: votes cast at or before it and not deleted by then, each with
+	// the value governance_vote_history records in effect at slot.
+	GetGovernanceVotesAtSlot(
+		uint, // proposalID
+		uint64, // slot
 		types.Txn,
 	) ([]*models.GovernanceVote, error)
 
@@ -461,6 +478,37 @@ type GovernanceStore interface {
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
 
+	// GetDRepDelegatorsAtSlot returns, for each of dreps (every DRep when
+	// empty), the stake credentials delegating to it at slot, keyed by the
+	// DRep's StakeCredentialRef.MapKey() and in canonical (tag, hash) order.
+	// Accounts are read as GetAccountsByCredentialAtSlot reads them.
+	GetDRepDelegatorsAtSlot(
+		[]models.StakeCredentialRef, // dreps
+		uint64, // slot
+		types.Txn,
+	) (map[string][]models.StakeCredentialRef, error)
+
+	// GetDrepsAtSlot returns the given DReps (every DRep when refs is
+	// empty) that were registered at slot, with the anchor and expiry they
+	// had there. A row last written at or before slot with no later
+	// drep_expiry_history entry is exact there; any other is derived as
+	// RestoreDrepStateAtSlot derives it on rollback.
+	GetDrepsAtSlot(
+		[]models.StakeCredentialRef, // refs
+		uint64, // slot
+		types.Txn,
+	) ([]*models.Drep, error)
+
+	// GetDrepRegistrationDepositsAtSlot returns the deposit recorded against
+	// the latest registration at or before slot of each of refs (every DRep
+	// when empty), keyed by models.DrepDepositKey. A DRep with no such
+	// registration, or a NULL deposit, is absent.
+	GetDrepRegistrationDepositsAtSlot(
+		[]models.StakeCredentialRef, // refs
+		uint64, // slot
+		types.Txn,
+	) (map[string]uint64, error)
+
 	// GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower.
 	// Returns a StakeCredentialRef.MapKey()-to-power map; credentials with
 	// no delegated stake are omitted. Use StakeCredentialRef to carry both
@@ -487,11 +535,14 @@ type GovernanceStore interface {
 	// UpdateDRepActivity updates the DRep's last activity epoch and
 	// recalculates the expiry epoch. credentialTag distinguishes key (0)
 	// from script (1) DRep credentials that share the same 28-byte hash.
+	// slot is the slot of the activity; the new values are also recorded in
+	// drep_expiry_history at it.
 	UpdateDRepActivity(
 		uint8, // credentialTag
 		[]byte, // drepCredential
 		uint64, // activityEpoch
 		uint64, // inactivityPeriod
+		uint64, // slot
 		types.Txn,
 	) error
 
@@ -971,7 +1022,8 @@ type TransactionStore interface {
 	) ([]models.Transaction, error)
 
 	// GetTransactionsByAddress retrieves transactions involving
-	// the provided payment/staking credential pair with pagination and ordering.
+	// the provided payment/staking credential pair with pagination and ordering,
+	// optionally restricted to an inclusive (slot, block index) range.
 	GetTransactionsByAddress(
 		[]byte, // paymentKey
 		uint8, // credentialTag
@@ -979,6 +1031,8 @@ type TransactionStore interface {
 		int, // limit
 		int, // offset
 		string, // order (asc|desc)
+		*models.AddressTransactionPosition, // from (inclusive, nil = unbounded)
+		*models.AddressTransactionPosition, // to (inclusive, nil = unbounded)
 		types.Txn,
 	) ([]models.Transaction, error)
 
@@ -1917,6 +1971,13 @@ type MetadataStore interface {
 	// accepted issue number for a cold key survives the pool leaving the
 	// active set, and is still enforced against any block claiming that key.
 	LatestPoolOpCertSequences(
+		types.Txn,
+	) (map[string]uint64, error)
+
+	// LatestPoolOpCertSequencesAtOrBefore is LatestPoolOpCertSequences
+	// restricted to rows at or before slot: the counters as they stood there.
+	LatestPoolOpCertSequencesAtOrBefore(
+		uint64, // slot
 		types.Txn,
 	) (map[string]uint64, error)
 
@@ -3007,6 +3068,29 @@ type MetadataStore interface {
 	) ([]models.MidnightAriadneRollback, error)
 	DeleteMidnightAriadneRollbacksByBlock(types.Txn, uint64) error
 	DeleteMidnightAriadneRollbacksBeforeBlock(types.Txn, uint64) error
+	DeleteMidnightAriadneRollbacksAfterBlock(types.Txn, uint64) error
+	CreateMidnightCandidateRemoval(
+		types.Txn,
+		*models.MidnightCandidateRemoval,
+	) error
+	FindMidnightCandidateRemovalsByBlock(
+		types.Txn,
+		uint64,
+	) ([]models.MidnightCandidateRemoval, error)
+	DeleteMidnightCandidateRemovalsByBlock(types.Txn, uint64) error
+	DeleteMidnightCandidateRemovalsBeforeBlock(types.Txn, uint64) error
+	DeleteMidnightCandidateRemovalsAfterBlock(types.Txn, uint64) error
+	UpsertMidnightEpochTransition(
+		types.Txn,
+		*models.MidnightEpochTransition,
+	) error
+	GetMidnightEpochTransitionByBlock(
+		types.Txn,
+		uint64,
+	) (*models.MidnightEpochTransition, error)
+	DeleteMidnightEpochTransitionsByBlock(types.Txn, uint64) error
+	DeleteMidnightEpochTransitionsBeforeBlock(types.Txn, uint64) error
+	DeleteMidnightEpochTransitionsAfterBlock(types.Txn, uint64) error
 	UpsertMidnightEpochCandidates(
 		types.Txn,
 		*models.MidnightEpochCandidates,

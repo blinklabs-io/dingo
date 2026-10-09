@@ -977,6 +977,7 @@ type mockNode struct {
 	transaction                   TransactionInfo
 	transactionSubmitHash         string
 	transactionEvaluation         TransactionEvaluationResponse
+	transactionEvaluationCtx      context.Context
 	transactionEvaluateCbor       []byte
 	transactionCBOR               []byte
 	transactionMetadata           []TransactionMetadataInfo
@@ -1002,7 +1003,8 @@ type mockNode struct {
 	accountUTXOs                  []AccountUTXOInfo
 	accountWithdrawals            []AccountWithdrawalInfo
 	accountTransactions           []AccountTransactionInfo
-	lastAccountTransactionsParams AccountTransactionsParams
+	lastAccountTransactionsParams TransactionRangeParams
+	lastAddressTransactionsParams TransactionRangeParams
 	chainTipErr                   error
 	blockErr                      error
 	blockByIDErr                  error
@@ -1117,7 +1119,7 @@ func (m *mockNode) PoolsExtended() (
 	return m.pools, m.poolsErr
 }
 
-func (m *mockNode) PoolsList(
+func (m *mockNode) PoolsList(ctx context.Context,
 	params PaginationParams,
 ) ([]string, int, error) {
 	m.poolsListParams = params
@@ -1136,7 +1138,7 @@ func (m *mockNode) PoolMetadata(
 	return m.poolMetadata, m.poolMetadataErr
 }
 
-func (m *mockNode) PoolDetail(
+func (m *mockNode) PoolDetail(ctx context.Context,
 	_ string,
 ) (PoolDetailInfo, error) {
 	return m.poolDetail, m.poolDetailErr
@@ -1180,7 +1182,7 @@ func (m *mockNode) Address(
 	return m.addressInfo, m.addressInfoErr
 }
 
-func (m *mockNode) AddressUTXOs(
+func (m *mockNode) AddressUTXOs(ctx context.Context,
 	_ string,
 	_ PaginationParams,
 ) ([]AddressUTXOInfo, int, error) {
@@ -1188,9 +1190,11 @@ func (m *mockNode) AddressUTXOs(
 }
 
 func (m *mockNode) AddressTransactions(
+	_ context.Context,
 	_ string,
-	_ PaginationParams,
+	params TransactionRangeParams,
 ) ([]AddressTransactionInfo, int, error) {
+	m.lastAddressTransactionsParams = params
 	return m.addressTransactions, m.addressTxsTotal, m.addressTransactionsErr
 }
 
@@ -1221,8 +1225,10 @@ func (m *mockNode) TransactionSubmit(
 }
 
 func (m *mockNode) TransactionEvaluate(
+	ctx context.Context,
 	txCbor []byte,
 ) (TransactionEvaluationResponse, error) {
+	m.transactionEvaluationCtx = ctx
 	m.transactionEvaluateCbor = txCbor
 	return m.transactionEvaluation, m.transactionEvaluationErr
 }
@@ -1305,7 +1311,7 @@ func (m *mockNode) Account(
 	return m.account, m.accountErr
 }
 
-func (m *mockNode) AccountAssociatedAddresses(
+func (m *mockNode) AccountAssociatedAddresses(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountAssociatedAddressInfo, int, error) {
@@ -1324,7 +1330,7 @@ func (m *mockNode) AccountAssociatedAddresses(
 	return items[start:end], total, m.addressesErr
 }
 
-func (m *mockNode) AccountDelegationHistory(
+func (m *mockNode) AccountDelegationHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountDelegationHistoryInfo, int, error) {
@@ -1343,7 +1349,7 @@ func (m *mockNode) AccountDelegationHistory(
 	return items[start:end], total, m.delegationsErr
 }
 
-func (m *mockNode) AccountRegistrationHistory(
+func (m *mockNode) AccountRegistrationHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountRegistrationHistoryInfo, int, error) {
@@ -1362,7 +1368,7 @@ func (m *mockNode) AccountRegistrationHistory(
 	return items[start:end], total, m.regsErr
 }
 
-func (m *mockNode) AccountRewardHistory(
+func (m *mockNode) AccountRewardHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountRewardHistoryInfo, int, error) {
@@ -1402,7 +1408,7 @@ func mockPage[T any](items []T, order string, page, count int) ([]T, int) {
 	return items[start:end], total
 }
 
-func (m *mockNode) AccountUTXOs(
+func (m *mockNode) AccountUTXOs(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountUTXOInfo, int, error) {
@@ -1412,7 +1418,7 @@ func (m *mockNode) AccountUTXOs(
 	return rows, total, m.accountUTXOsErr
 }
 
-func (m *mockNode) AccountWithdrawals(
+func (m *mockNode) AccountWithdrawals(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountWithdrawalInfo, int, error) {
@@ -1422,9 +1428,9 @@ func (m *mockNode) AccountWithdrawals(
 	return rows, total, m.accountWithdrawalsErr
 }
 
-func (m *mockNode) AccountTransactions(
+func (m *mockNode) AccountTransactions(ctx context.Context,
 	_ string,
-	params AccountTransactionsParams,
+	params TransactionRangeParams,
 ) ([]AccountTransactionInfo, int, error) {
 	m.lastAccountTransactionsParams = params
 	rows, total := mockPage(
@@ -4822,4 +4828,51 @@ func TestHandleMetadataTransactionsInvalidLabel(t *testing.T) {
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err)
 	assert.Equal(t, "Invalid metadata label.", resp.Message)
+}
+
+func TestHandleAddressTransactionsRange(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/a/transactions?from=100:2&to=200",
+		nil,
+	)
+	req.SetPathValue("address", "a")
+	w := httptest.NewRecorder()
+	b.handleAddressTransactions(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	got := mock.lastAddressTransactionsParams
+	require.NotNil(t, got.From)
+	require.NotNil(t, got.To)
+	assert.EqualValues(t, 100, got.From.Block)
+	require.NotNil(t, got.From.Index)
+	assert.EqualValues(t, 2, *got.From.Index)
+	assert.EqualValues(t, 200, got.To.Block)
+	assert.Nil(t, got.To.Index)
+}
+
+func TestHandleAddressTransactionsRangeRejectsBadBounds(t *testing.T) {
+	t.Parallel()
+
+	for _, query := range []string{
+		"from=abc", "to=1:x", "from=5&to=4", "from=5:3&to=5:2",
+	} {
+		t.Run(query, func(t *testing.T) {
+			t.Parallel()
+			b := newTestBlockfrost(&mockNode{})
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/api/v0/addresses/a/transactions?"+query,
+				nil,
+			)
+			req.SetPathValue("address", "a")
+			w := httptest.NewRecorder()
+			b.handleAddressTransactions(w, req)
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+		})
+	}
 }

@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -146,7 +145,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			Logger:      discard,
 		})
 		require.NoError(t, err)
-		block, err := database.BlockByHash(db, wrongHash)
+		block, err := database.BlockByHash(context.Background(), db, wrongHash)
 		require.NoError(t, err)
 		require.EqualValues(t, 1000, block.Slot)
 		status, err := db.GetSyncState("sync_status", nil)
@@ -219,7 +218,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		pending, err := RewardStateRepairPending(db)
 		require.NoError(t, err)
 		require.False(t, pending)
-		block, err := database.BlockByHash(db, anchorHash)
+		block, err := database.BlockByHash(context.Background(), db, anchorHash)
 		require.NoError(t, err)
 		require.EqualValues(t, 1000, block.Slot,
 			"repair must retain the existing chain anchor")
@@ -310,7 +309,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		pending, err := RewardStateRepairPending(db)
 		require.NoError(t, err)
 		require.False(t, pending)
-		block, err := database.BlockByHash(db, localTailHash)
+		block, err := database.BlockByHash(context.Background(), db, localTailHash)
 		require.NoError(t, err)
 		require.EqualValues(t, 1100, block.Slot,
 			"validated local volatile blocks must remain for ordinary ledger replay")
@@ -318,7 +317,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, err)
 		require.EqualValues(t, 1000, stableTip.Point.Slot)
 		require.Equal(t, anchorHash, stableTip.Point.Hash)
-		recent, err := database.BlocksRecent(db, 1)
+		recent, err := database.BlocksRecent(context.Background(), db, 1)
 		require.NoError(t, err)
 		require.Len(t, recent, 1)
 		require.EqualValues(t, 1100, recent[0].Slot,
@@ -392,7 +391,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		})
 		require.NoError(t, err)
 		for _, hash := range [][]byte{snapshotHash} {
-			_, err := database.BlockByHash(db, hash)
+			_, err := database.BlockByHash(context.Background(), db, hash)
 			require.NoError(t, err, "the database must remain untouched before the trust check")
 		}
 		status, err := db.GetSyncState("sync_status", nil)
@@ -562,7 +561,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		pending, err := RewardStateRepairPending(db)
 		require.NoError(t, err)
 		require.False(t, pending)
-		block, err := database.BlockByHash(db, firstHash)
+		block, err := database.BlockByHash(context.Background(), db, firstHash)
 		require.NoError(t, err)
 		require.EqualValues(t, 999, block.Slot)
 		checkpoint, err := db.Metadata().GetBackfillCheckpoint("metadata", nil)
@@ -637,14 +636,14 @@ func TestSyncRewardRepairKeepsSnapshotUTxOsDuringTailCleanup(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	gapBlocksIdle := false
 	_, err = Sync(ctx, SyncConfig{
 		Network:     "preprod",
 		DataDir:     dataDir,
 		StorageMode: "core",
-		CardanoNodeConfig: &cardano.CardanoNodeConfig{
-			MithrilGenesisVerificationKey:          fixture.genesisVKey,
-			MithrilGenesisAncillaryVerificationKey: fixture.ancillaryVKey,
-		},
+		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
+			t, fixture.genesisVKey, fixture.ancillaryVKey,
+		),
 		Backend:                 BackendV2,
 		PinnedDigest:            "original-bootstrap-pin",
 		VerifyCertChain:         true,
@@ -655,7 +654,14 @@ func TestSyncRewardRepairKeepsSnapshotUTxOsDuringTailCleanup(t *testing.T) {
 		Logger:                  discard,
 		RepairLegacyRewardState: true,
 		OnProgress: func(progress SyncProgress) {
-			if progress.Phase == PhaseGapBlocks && progress.Active {
+			if progress.Phase != PhaseGapBlocks {
+				return
+			}
+			if !progress.Active {
+				gapBlocksIdle = true
+				return
+			}
+			if gapBlocksIdle {
 				cancel()
 			}
 		},
@@ -669,11 +675,11 @@ func TestSyncRewardRepairKeepsSnapshotUTxOsDuringTailCleanup(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
-	exists, err := db.UtxoExists(txID, 0, nil)
+	exists, err := db.UtxoExists(context.Background(), txID, 0, nil)
 	require.NoError(t, err)
 	require.True(t, exists,
 		"post-import cleanup must preserve UTxOs carried by the signed state")
-	_, err = database.BlockByHash(db, staleFork.Hash)
+	_, err = database.BlockByHash(context.Background(), db, staleFork.Hash)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
@@ -753,9 +759,9 @@ func testSyncRewardRepairBelowCertifiedTip(t *testing.T, withLocalTail bool) {
 			require.NoError(t, db.BlockCreate(block, nil))
 		}
 	}
-	utxoTxn := db.Transaction(true)
+	utxoTxn := db.Transaction(t.Context(), true)
 	t.Cleanup(utxoTxn.Release)
-	require.NoError(t, db.CreateUtxo(utxoTxn, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), utxoTxn, &models.Utxo{
 		TxId: txID, AddedSlot: 900, Amount: 42,
 	}))
 	require.NoError(t, db.Metadata().MarkUtxosDeletedAtSlot(
@@ -821,9 +827,9 @@ func testSyncRewardRepairBelowCertifiedTip(t *testing.T, withLocalTail bool) {
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
 	if withLocalTail {
-		_, err = database.BlockByHash(db, staleFork.Hash)
+		_, err = database.BlockByHash(context.Background(), db, staleFork.Hash)
 		require.ErrorIs(t, err, models.ErrBlockNotFound)
-		retained, err := database.BlockByHash(db, block1100.Hash)
+		retained, err := database.BlockByHash(context.Background(), db, block1100.Hash)
 		require.NoError(t, err)
 		require.EqualValues(t, 1100, retained.Slot,
 			"canonical blocks after the selected state must remain for replay")
@@ -888,9 +894,9 @@ func TestSyncRewardRepairUnspendsOutputsSpentAfterSnapshotState(t *testing.T) {
 	} {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
-	utxoTxn := db.Transaction(true)
+	utxoTxn := db.Transaction(t.Context(), true)
 	t.Cleanup(utxoTxn.Release)
-	require.NoError(t, db.CreateUtxo(utxoTxn, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), utxoTxn, &models.Utxo{
 		TxId:      txID,
 		AddedSlot: 1100,
 	}))
@@ -921,10 +927,9 @@ func TestSyncRewardRepairUnspendsOutputsSpentAfterSnapshotState(t *testing.T) {
 		Network:     "preprod",
 		DataDir:     dataDir,
 		StorageMode: "core",
-		CardanoNodeConfig: &cardano.CardanoNodeConfig{
-			MithrilGenesisVerificationKey:          fixture.genesisVKey,
-			MithrilGenesisAncillaryVerificationKey: fixture.ancillaryVKey,
-		},
+		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
+			t, fixture.genesisVKey, fixture.ancillaryVKey,
+		),
 		Backend:                 BackendV2,
 		PinnedDigest:            "original-bootstrap-pin",
 		VerifyCertChain:         true,
@@ -949,7 +954,7 @@ func TestSyncRewardRepairUnspendsOutputsSpentAfterSnapshotState(t *testing.T) {
 	require.NotNil(t, utxo)
 	require.Zero(t, utxo.DeletedSlot,
 		"Sync must restore snapshot-live outputs spent after its ledger state")
-	exists, err := db.UtxoExists(txID, 0, nil)
+	exists, err := db.UtxoExists(context.Background(), txID, 0, nil)
 	require.NoError(t, err)
 	require.True(t, exists,
 		"ordinary replay must see the snapshot output as live")
@@ -978,6 +983,7 @@ func TestVerifyRewardRepairLocalTailResolvesHashlessAnchorOnChain(t *testing.T) 
 	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "1000", nil))
 
 	preserved, err := verifyRewardRepairLocalTail(
+		context.Background(),
 		db,
 		localTip,
 		&preparedLedgerStateImport{state: &ledgerstate.RawLedgerState{
@@ -1116,7 +1122,7 @@ func TestDecideCatchUp(t *testing.T) {
 	}
 	modeOf := func(t *testing.T) syncMode {
 		t.Helper()
-		mode, err := determineSyncMode(db)
+		mode, err := determineSyncMode(context.Background(), db)
 		require.NoError(t, err)
 		return mode
 	}
@@ -1364,7 +1370,7 @@ func TestVerifyCatchupIntersection(t *testing.T) {
 			Type:     6,
 		}, nil))
 		require.NoError(
-			t, verifyCatchupIntersection(db, testImmutable(t), discard),
+			t, verifyCatchupIntersection(context.Background(), db, testImmutable(t), discard),
 		)
 	})
 
@@ -1380,7 +1386,7 @@ func TestVerifyCatchupIntersection(t *testing.T) {
 			Number:   1,
 			Type:     6,
 		}, nil))
-		err := verifyCatchupIntersection(db, testImmutable(t), discard)
+		err := verifyCatchupIntersection(context.Background(), db, testImmutable(t), discard)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "diverges")
 	})
@@ -1440,7 +1446,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 				bytes.Repeat([]byte{0xcd}, 32),
 				99,
 			), nil))
-			err := verifyCatchupIntersection(db, testImmutable(t), discard)
+			err := verifyCatchupIntersection(context.Background(), db, testImmutable(t), discard)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, errCatchUpLocalAhead)
 			require.ErrorContains(t, err, "diverges")
@@ -1455,7 +1461,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 			require.NoError(t, db.BlockCreate(catchupTestBlock(
 				artSlot+5000, aheadHash, wrong, 99,
 			), nil))
-			err := verifyCatchupIntersection(db, testImmutable(t), discard)
+			err := verifyCatchupIntersection(context.Background(), db, testImmutable(t), discard)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, errCatchUpLocalAhead)
 			require.ErrorContains(t, err, "diverges")
@@ -1473,7 +1479,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 			require.NoError(t, db.BlockCreate(catchupTestBlock(
 				artSlot+5000, aheadHash, wrong, 99,
 			), nil))
-			err := verifyCatchupIntersection(db, testImmutable(t), discard)
+			err := verifyCatchupIntersection(context.Background(), db, testImmutable(t), discard)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, errCatchUpLocalAhead)
 			require.ErrorContains(t, err, "diverges")
@@ -1485,7 +1491,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 		require.NoError(t, db.BlockCreate(catchupTestBlock(
 			artSlot+5000, aheadHash, artHash, 99,
 		), nil))
-		err := verifyCatchupIntersection(db, testImmutable(t), discard)
+		err := verifyCatchupIntersection(context.Background(), db, testImmutable(t), discard)
 		require.ErrorIs(t, err, errCatchUpLocalAhead)
 	})
 }
@@ -1509,6 +1515,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 		db := newSyncModeTestDB(t)
 		require.NoError(t, db.BlockCreate(artBlock, nil))
 		upToDate, err := verifyCatchupBeforeImport(
+			context.Background(),
 			db, testImmutable(t), 42, false, discard,
 		)
 		require.NoError(t, err)
@@ -1526,6 +1533,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 				artSlot+5000, aheadHash, artHash, 99,
 			), nil))
 			upToDate, err := verifyCatchupBeforeImport(
+				context.Background(),
 				db, testImmutable(t), 42, false, discard,
 			)
 			require.NoError(t, err)
@@ -1549,6 +1557,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 				artSlot+5000, aheadHash, artHash, 99,
 			), nil))
 			upToDate, err := verifyCatchupBeforeImport(
+				context.Background(),
 				db, testImmutable(t), 43, true, discard,
 			)
 			require.NoError(t, err)
@@ -1572,6 +1581,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 			artSlot, wrong, bytes.Repeat([]byte{0x01}, 32), 98,
 		), nil))
 		_, err := verifyCatchupBeforeImport(
+			context.Background(),
 			db, testImmutable(t), 42, false, discard,
 		)
 		require.Error(t, err)

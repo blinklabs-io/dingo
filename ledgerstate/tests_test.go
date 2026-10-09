@@ -174,7 +174,14 @@ func TestImportSeedsPreAnchorFeesFromStateMinusSnapshotFee(t *testing.T) {
 	snapshots := &ParsedSnapShots{Fee: snapshotFee}
 
 	require.NoError(
-		t, seedImportedRewardBasis(cfg, snapshots, epoch, anchorSlot),
+		t,
+		seedImportedRewardBasis(
+			context.Background(),
+			cfg,
+			snapshots,
+			epoch,
+			anchorSlot,
+		),
 	)
 
 	pots, err := db.Metadata().GetRewardAdaPots(epoch, nil)
@@ -215,7 +222,13 @@ func TestImportRejectsSnapshotWhoseFeesDoNotReconcile(t *testing.T) {
 	}
 	snapshots := &ParsedSnapShots{Fee: snapshotFee}
 
-	err = seedImportedRewardBasis(cfg, snapshots, epoch, anchorSlot)
+	err = seedImportedRewardBasis(
+		context.Background(),
+		cfg,
+		snapshots,
+		epoch,
+		anchorSlot,
+	)
 	require.ErrorContains(t, err, "less than the snapshot fee pot")
 
 	pots, err := db.Metadata().GetRewardAdaPots(epoch, nil)
@@ -539,9 +552,13 @@ func TestPersistImportedCommitteeCertificatesWritesRows(t *testing.T) {
 
 	const slot = uint64(197789347)
 	require.NotPanics(t, func() {
-		require.NoError(t, persistImportedCommitteeCertificates(
-			db, certState, slot, nil,
-		))
+		require.NoError(
+			t,
+			persistImportedCommitteeCertificates(
+				context.Background(),
+				db, certState, slot, nil,
+			),
+		)
 	})
 
 	// The authorization must be readable back by the same cold-credential
@@ -611,10 +628,11 @@ func TestImportTipPersistsSnapshotNetworkState(t *testing.T) {
 			slog.NewTextHandler(io.Discard, nil),
 		),
 		State: &RawLedgerState{
-			Epoch:    12,
-			Treasury: treasury,
-			Reserves: reserves,
-			EraIndex: 6,
+			Epoch:     1_234,
+			Treasury:  treasury,
+			Reserves:  reserves,
+			EraIndex:  EraConway,
+			EraBounds: make([]EraBound, EraConway+1),
 			Tip: &SnapshotTip{
 				Slot:      123_456,
 				BlockHash: make([]byte, 32),
@@ -660,7 +678,11 @@ func TestPersistableOpCertBoundMatchesStore(t *testing.T) {
 	require.NoError(t, db.Metadata().UpdatePoolOpCertSequence(
 		poolKeyHash, eras.MaxPersistableOpCertCounter, 100, nil,
 	))
-	sequence, found, err := db.LatestPoolOpCertSequence(poolKeyHash, nil)
+	sequence, found, err := db.LatestPoolOpCertSequence(
+		context.Background(),
+		poolKeyHash,
+		nil,
+	)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, eras.MaxPersistableOpCertCounter, sequence)
@@ -1229,6 +1251,7 @@ func govImportConfigForTest(
 			GovStateData:  govStateData,
 			Epoch:         500,
 			EraIndex:      EraConway,
+			EraBounds:     make([]EraBound, EraConway+1),
 			EraBoundEpoch: 100,
 			EraBoundSlot:  10_000,
 		},
@@ -1278,7 +1301,7 @@ func TestImportGovStatePreservesScriptCommitteeCredentialTag(t *testing.T) {
 		func(ImportProgress) {},
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, uint8(1), members[0].ColdCredentialTag)
@@ -1385,7 +1408,7 @@ func TestImportGovStateAcceptsCommitteeChangeInRsEnacted(t *testing.T) {
 		func(ImportProgress) {},
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, activeHash, members[0].ColdCredHash)
@@ -1421,7 +1444,7 @@ func TestImportGovStateAcceptsNoConfidenceInRsEnacted(t *testing.T) {
 		func(ImportProgress) {},
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, activeHash, members[0].ColdCredHash)
@@ -1434,11 +1457,11 @@ func TestImportedProposalDepositContributesToDRepVotingPower(t *testing.T) {
 	require.NoError(t, err)
 	drepCredential := bytes.Repeat([]byte{0x91}, 28)
 	returnCredential := bytes.Repeat([]byte{0x92}, 28)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		Credential: drepCredential,
 		Active:     true,
 	}))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey: returnCredential,
 		Drep:       drepCredential,
 		DrepType:   models.DrepTypeAddrKeyHash,
@@ -1488,10 +1511,10 @@ func TestImportedProposalDepositContributesToDRepVotingPower(t *testing.T) {
 		func(ImportProgress) {},
 	))
 
-	imported, err := db.GetGovernanceProposal(proposalTxHash, 0, nil)
+	imported, err := db.GetGovernanceProposal(context.Background(), proposalTxHash, 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), imported.Deposit)
-	state, err := governance.LoadDRepVotingState(db, nil, 500, false)
+	state, err := governance.LoadDRepVotingState(context.Background(), db, nil, 500, false)
 	require.NoError(t, err)
 	ref := models.StakeCredentialRef{Tag: 0, Key: drepCredential}
 	assert.Equal(t, uint64(100), state.Powers[ref.MapKey()])
@@ -1558,11 +1581,10 @@ func TestImportGovStateRejectsAbsentEnactState(t *testing.T) {
 			"state has 0 elements, expected 7")
 }
 
-// TestImportGovStateSkipsParityWhenEnactedTypesUnknown covers an
-// undecidable rsEnacted: with an entry whose action type cannot be
-// recovered, whether a committee action was accepted is unknown, so the
-// corroboration is unavailable rather than failed.
-func TestImportGovStateSkipsParityWhenEnactedTypesUnknown(t *testing.T) {
+// TestImportGovStateRejectsUnknownEnactedActionTypes covers an undecidable
+// rsEnacted: without every action type the importer cannot determine whether
+// the enact-state committee was applied at the imported epoch boundary.
+func TestImportGovStateRejectsUnknownEnactedActionTypes(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	left := committeeWithMember(t, bytes.Repeat([]byte{0x42}, 28), 700)
@@ -1574,11 +1596,13 @@ func TestImportGovStateSkipsParityWhenEnactedTypesUnknown(t *testing.T) {
 			t, right, cbor.RawMessage{0x01},
 		),
 	)
-	require.NoError(t, importGovState(
+	err = importGovState(
 		context.Background(),
 		govImportConfigForTest(db, govStateData),
 		func(ImportProgress) {},
-	))
+	)
+	require.EqualError(t, err,
+		"imported governance state has incomplete rsEnacted action types")
 }
 
 func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
@@ -1708,7 +1732,9 @@ func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
 			// synthetic row for its purpose; that's the lookup
 			// epoch.go performs at every boundary tick.
 			root, err := db.GetLastEnactedGovernanceProposal(
-				c.queryGroup, nil,
+				context.Background(),
+				c.queryGroup,
+				nil,
 			)
 			require.NoError(t, err)
 			require.NotNil(
@@ -1871,7 +1897,11 @@ func TestImportGovStateNoSeedingWhenAllSNothing(t *testing.T) {
 		{govActionTypeNoConfidence, govActionTypeUpdateCommittee},
 		{govActionTypeNewConstitution},
 	} {
-		root, err := db.GetLastEnactedGovernanceProposal(group, nil)
+		root, err := db.GetLastEnactedGovernanceProposal(
+			context.Background(),
+			group,
+			nil,
+		)
 		require.NoError(t, err)
 		require.Nil(t, root, "unexpected synthetic root for %v", group)
 	}

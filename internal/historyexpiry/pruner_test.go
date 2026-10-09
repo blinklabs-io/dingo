@@ -66,7 +66,10 @@ func insertTestBlock(
 ) []byte {
 	t.Helper()
 	hash := bytes.Repeat([]byte{hashByte}, 32)
+	// An explicit ID keeps BlockCreate from reading back the latest block,
+	// which a test that expires blocks before inserting more would trip on.
 	err := db.BlockCreate(models.Block{
+		ID:     slot + 1,
 		Slot:   slot,
 		Hash:   hash,
 		Cbor:   []byte{0x82, hashByte},
@@ -133,7 +136,7 @@ func TestPrunerSkipsAlreadyExpiredBlocks(t *testing.T) {
 	firstHash := insertTestBlock(t, db, 1, 0x01)
 	secondHash := insertTestBlock(t, db, 2, 0x02)
 
-	_, err := db.PruneBlock(1, firstHash)
+	_, err := db.PruneBlock(context.Background(), 1, firstHash)
 	require.NoError(t, err)
 
 	pruner := NewPruner(PrunerConfig{
@@ -219,4 +222,133 @@ func TestPrunerHandlesCurrentSlotError(t *testing.T) {
 	defer txn.Release()
 	_, _, err := db.Blob().GetBlock(txn.Blob(), 1, hash)
 	assert.NoError(t, err)
+}
+
+func newTestPruner(db *database.Database, current, window uint64) *Pruner {
+	return NewPruner(PrunerConfig{
+		LedgerState: testLedgerWindow{
+			currentSlot:     current,
+			stabilityWindow: window,
+		},
+		DB:        db,
+		Frequency: time.Hour,
+	})
+}
+
+func blockIsExpired(
+	t *testing.T,
+	db *database.Database,
+	slot uint64,
+	hash []byte,
+) bool {
+	t.Helper()
+	txn := db.BlobTxn(false)
+	defer txn.Release()
+	//nolint:nilaway // database.New requires a non-nil blob store
+	_, _, err := db.Blob().GetBlock(txn.Blob(), slot, hash)
+	if err != nil {
+		require.ErrorIs(t, err, types.ErrHistoryExpired)
+		return true
+	}
+	return false
+}
+
+// A pruner that restarts resumes from the durable cursor instead of walking
+// the expired history again. An unexpired block planted below the cursor is
+// only reachable by a rescan, so it staying unexpired shows the second round
+// started at the cursor.
+func TestPrunerResumesFromDurableCursorAfterRestart(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	insertTestBlock(t, db, 1, 0x01)
+	insertTestBlock(t, db, 2, 0x02)
+	newTestPruner(db, 10, 5).prune(context.Background())
+
+	// Written below the cursor behind the pruner's back.
+	planted := insertTestBlock(t, db, 0, 0x00)
+	late := insertTestBlock(t, db, 3, 0x03)
+
+	newTestPruner(db, 10, 5).prune(context.Background())
+
+	assert.False(t, blockIsExpired(t, db, 0, planted),
+		"a block below the cursor must not be revisited")
+	assert.True(t, blockIsExpired(t, db, 3, late),
+		"a newly eligible block above the cursor must be expired")
+}
+
+// A block whose expiry fails must stay inside the next round's range even
+// when later blocks succeed.
+func TestPrunerCursorDoesNotPassFailedBlock(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	insertTestBlock(t, db, 1, 0x01)
+	failing := insertTestBlock(t, db, 2, 0x02)
+	insertTestBlock(t, db, 3, 0x03)
+
+	p := newTestPruner(db, 10, 5)
+	realExpire := p.expire
+	p.expire = func(ctx context.Context, b *database.BlobBlockResult) error {
+		if b.Slot == 2 {
+			return errors.New("injected")
+		}
+		return realExpire(ctx, b)
+	}
+	p.prune(context.Background())
+	assert.False(t, blockIsExpired(t, db, 2, failing))
+
+	newTestPruner(db, 10, 5).prune(context.Background())
+	assert.True(t, blockIsExpired(t, db, 2, failing),
+		"the failed block must be retried by the next round")
+}
+
+// TestPrunerRepeatedRoundsSkipTombstonesAndFindNewlyEligible exercises a small
+// initialized database across multiple prune rounds. The first round leaves
+// tombstone keys in place; the second round must tolerate scanning them again,
+// and a block inserted after that round must be discovered by a fresh scan.
+func TestPrunerRepeatedRoundsSkipTombstonesAndFindNewlyEligible(t *testing.T) {
+	db := newTestDB(t)
+	oldHash := insertTestBlock(t, db, 1, 0x01)
+	secondHash := insertTestBlock(t, db, 2, 0x02)
+	newHash := insertTestBlock(t, db, 20, 0x14)
+	pruner := NewPruner(PrunerConfig{
+		LedgerState: testLedgerWindow{currentSlot: 10, stabilityWindow: 5},
+		DB:          db,
+	})
+
+	pruner.prune(context.Background())
+	pruner.prune(context.Background())
+
+	txn := db.BlobTxn(false)
+	defer txn.Release()
+	_, _, err := db.Blob().GetBlock(txn.Blob(), 1, oldHash)
+	require.ErrorIs(t, err, types.ErrHistoryExpired)
+	_, _, err = db.Blob().GetBlock(txn.Blob(), 2, secondHash)
+	require.ErrorIs(t, err, types.ErrHistoryExpired)
+	_, _, err = db.Blob().GetBlock(txn.Blob(), 20, newHash)
+	require.NoError(t, err)
+
+	// A newly eligible block is found by the next independent range scan.
+	thirdHash := insertTestBlock(t, db, 3, 0x03)
+	pruner.prune(context.Background())
+	txn2 := db.BlobTxn(false)
+	defer txn2.Release()
+	_, _, err = db.Blob().GetBlock(txn2.Blob(), 3, thirdHash)
+	require.ErrorIs(t, err, types.ErrHistoryExpired)
+}
+
+func TestPrunerCanceledBeforeScanDoesNotPrune(t *testing.T) {
+	db := newTestDB(t)
+	hash := insertTestBlock(t, db, 1, 0x01)
+	pruner := NewPruner(PrunerConfig{
+		LedgerState: testLedgerWindow{currentSlot: 10, stabilityWindow: 5},
+		DB:          db,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pruner.prune(ctx)
+
+	txn := db.BlobTxn(false)
+	defer txn.Release()
+	_, _, err := db.Blob().GetBlock(txn.Blob(), 1, hash)
+	require.NoError(t, err)
 }

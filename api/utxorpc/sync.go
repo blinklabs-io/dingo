@@ -118,7 +118,10 @@ func (s *syncServiceServer) DumpHistory(
 		)
 	}
 
-	effectiveMax := effectiveDumpHistoryMaxItems(maxItems, maxAllowed)
+	defaultItems := uint32(
+		s.utxorpc.config.HistoryPageItems,
+	) // #nosec G115 -- capped at MaxHistoryItems in NewUtxorpc
+	effectiveMax := effectiveDumpHistoryMaxItems(maxItems, defaultItems)
 	s.utxorpc.config.Logger.Info(
 		fmt.Sprintf(
 			"Got a DumpHistory request with token %v maxItems raw=%d effective=%d fieldMask %v",
@@ -160,7 +163,8 @@ func (s *syncServiceServer) DumpHistory(
 		ctx,
 		chainIter,
 		maxItems,
-		maxAllowed,
+		defaultItems,
+		s.utxorpc.config.MaxHistoryBytes,
 	)
 	if err != nil {
 		return nil, err
@@ -180,6 +184,12 @@ func (s *syncServiceServer) FollowTip(
 	req *connect.Request[sync.FollowTipRequest],
 	stream *connect.ServerStream[sync.FollowTipResponse],
 ) error {
+	release, err := s.utxorpc.admitStream(req.Peer())
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	intersect := req.Msg.GetIntersect() // []*BlockRef
 	if len(intersect) > s.utxorpc.config.MaxBlockRefs {
 		return connect.NewError(
@@ -215,7 +225,7 @@ func (s *syncServiceServer) FollowTip(
 	}
 
 	// Get our starting point matching our chain
-	point, err := s.utxorpc.config.LedgerState.GetIntersectPoint(points)
+	point, err := s.utxorpc.config.LedgerState.GetIntersectPoint(ctx, points)
 	if err != nil {
 		s.utxorpc.config.Logger.Error(
 			"failed to get points",

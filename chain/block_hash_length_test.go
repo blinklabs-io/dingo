@@ -15,6 +15,7 @@
 package chain_test
 
 import (
+	"context"
 	"testing"
 
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
@@ -35,6 +36,7 @@ func TestAddBlockWithPointRejectsWrongLengthHash(t *testing.T) {
 	block := blocks[0]
 
 	err = c.AddBlockWithPoint(
+		context.Background(),
 		block,
 		ocommon.Point{
 			Slot: block.SlotNumber(),
@@ -47,6 +49,7 @@ func TestAddBlockWithPointRejectsWrongLengthHash(t *testing.T) {
 	require.Empty(t, c.Tip().Point.Hash)
 
 	require.NoError(t, c.AddBlockWithPoint(
+		context.Background(),
 		block,
 		ocommon.Point{Slot: block.SlotNumber(), Hash: block.Hash().Bytes()},
 		nil,

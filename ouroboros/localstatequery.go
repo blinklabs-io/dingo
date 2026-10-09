@@ -191,8 +191,8 @@ func (o *Ouroboros) localstatequeryViewMaxLifetime() time.Duration {
 // Acquire forgets the previous session after closing its snapshot: the
 // protocol returns the connection to Idle on failure, with no acquired state.
 //
-// Not every query type honors a pinned point yet -- see
-// ledger.LedgerState.Query's doc comment for which ones do.
+// Every query type that reads ledger or consensus state answers at the
+// acquired point -- see queryShelleyLeaf's doc comment in ledger/queries.go.
 func (o *Ouroboros) localstatequeryServerAcquire(
 	ctx olocalstatequery.CallbackContext,
 	acquireTarget olocalstatequery.AcquireTarget,
@@ -207,8 +207,10 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 	// ErrAcquireFailurePointNotOnChain/PointTooOld into one), but a rejection
 	// surfacing later, from the Query callback, has no such path and tears
 	// down the whole connection instead.
+	requestCtx, cancelRequest := o.localstatequeryRequestContext(ctx)
+	defer cancelRequest()
 	acquireCtx, cancel := context.WithTimeout(
-		context.Background(),
+		requestCtx,
 		localStateQueryAcquireWait,
 	)
 	acquisition := &localstatequeryAcquisition{
@@ -234,7 +236,7 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		previousAcquisition.cancel()
 	}
 	held.close()
-	point, isSpecific, err := o.resolveLocalStateQueryAcquirePoint(acquireTarget)
+	point, isSpecific, err := o.resolveLocalStateQueryAcquirePoint(requestCtx, acquireTarget)
 	if err != nil {
 		o.localstatequeryAcquireMutex.Lock()
 		if o.localstatequeryAcquisitions[ctx.ConnectionId] == acquisition {
@@ -313,6 +315,7 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 }
 
 func (o *Ouroboros) resolveLocalStateQueryAcquirePoint(
+	ctx context.Context,
 	target olocalstatequery.AcquireTarget,
 ) (ledger.QueryPoint, bool, error) {
 	var point ledger.QueryPoint
@@ -332,7 +335,7 @@ func (o *Ouroboros) resolveLocalStateQueryAcquirePoint(
 	case olocalstatequery.AcquireVolatileTip:
 		return ledger.QueryPoint{}, false, nil
 	case olocalstatequery.AcquireImmutableTip:
-		immutable, found, err := o.ledgerState.ImmutablePoint()
+		immutable, found, err := o.ledgerState.ImmutablePoint(ctx)
 		if err != nil {
 			return ledger.QueryPoint{}, true, err
 		}
@@ -410,6 +413,8 @@ func (o *Ouroboros) localstatequeryServerQuery(
 	if o.ledgerState == nil {
 		return nil, errLocalStateQueryLedgerUnavailable
 	}
+	requestCtx, cancelRequest := o.localstatequeryRequestContext(ctx)
+	defer cancelRequest()
 	o.localstatequeryAcquireMutex.Lock()
 	at := o.localstatequeryAcquiredPoints[ctx.ConnectionId]
 	session := o.localstatequerySessions[ctx.ConnectionId]
@@ -424,9 +429,10 @@ func (o *Ouroboros) localstatequeryServerQuery(
 		}
 	}
 	if session != nil {
-		return session.view.Query(query.Query, protocolVersion)
+		return session.view.Query(requestCtx, query.Query, protocolVersion)
 	}
 	return o.ledgerState.QueryWithProtocolVersion(
+		requestCtx,
 		query.Query,
 		at,
 		protocolVersion,
@@ -504,6 +510,7 @@ func (o *Ouroboros) releaseLocalStateQueryAcquiredPointOwner(
 	owner *olocalstatequery.Server,
 ) {
 	o.localstatequeryAcquireMutex.Lock()
+	o.cancelLocalStateQueryRequestsLocked(connId, owner)
 	_, hasPoint := o.localstatequeryAcquiredPoints[connId]
 	_, hasSession := o.localstatequerySessions[connId]
 	currentOwner := o.localstatequeryOwners[connId]
@@ -612,4 +619,76 @@ func (o *Ouroboros) HasLocalStateQueryAcquiredPointForTesting(
 	_, hasPoint := o.localstatequeryAcquiredPoints[connId]
 	_, hasSession := o.localstatequerySessions[connId]
 	return hasPoint || hasSession
+}
+
+// localstatequeryRequest tracks reads that must stop when their serving
+// connection closes, even while its callback prevents the protocol loop exiting.
+type localstatequeryRequest struct {
+	owner  *olocalstatequery.Server
+	cancel context.CancelFunc
+}
+
+func (o *Ouroboros) localstatequeryRequestContext(callback olocalstatequery.CallbackContext) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	request := &localstatequeryRequest{owner: callback.Server, cancel: cancel}
+	o.localstatequeryAcquireMutex.Lock()
+	if o.localstatequeryRequests == nil {
+		o.localstatequeryRequests = make(map[ouroboros.ConnectionId][]*localstatequeryRequest)
+	}
+	o.localstatequeryRequests[callback.ConnectionId] = append(o.localstatequeryRequests[callback.ConnectionId], request)
+	o.localstatequeryAcquireMutex.Unlock()
+	cleanup := func() {
+		cancel()
+		o.localstatequeryAcquireMutex.Lock()
+		defer o.localstatequeryAcquireMutex.Unlock()
+		requests := o.localstatequeryRequests[callback.ConnectionId]
+		for i, current := range requests {
+			if current == request {
+				requests = append(requests[:i], requests[i+1:]...)
+				break
+			}
+		}
+		if len(requests) == 0 {
+			delete(o.localstatequeryRequests, callback.ConnectionId)
+		} else {
+			o.localstatequeryRequests[callback.ConnectionId] = requests
+		}
+	}
+	// Register before checking liveness so a simultaneous connection close
+	// cannot fall between the check and registration and strand the read.
+	if o.connManager != nil {
+		conn := o.connManager.GetConnectionById(callback.ConnectionId)
+		if conn == nil || conn.LocalStateQuery() == nil || conn.LocalStateQuery().Server != callback.Server {
+			cleanup()
+		}
+	}
+	return ctx, cleanup
+}
+
+// cancelLocalStateQueryRequestsLocked cancels and forgets the reads in flight
+// on connId that owner is serving. The caller holds
+// localstatequeryAcquireMutex.
+func (o *Ouroboros) cancelLocalStateQueryRequestsLocked(
+	connId ouroboros.ConnectionId,
+	owner *olocalstatequery.Server,
+) {
+	requests := o.localstatequeryRequests[connId]
+	remaining := make([]*localstatequeryRequest, 0, len(requests))
+	for _, request := range requests {
+		if request == nil {
+			continue
+		}
+		if request.owner == owner {
+			if request.cancel != nil {
+				request.cancel()
+			}
+			continue
+		}
+		remaining = append(remaining, request)
+	}
+	if len(remaining) == 0 {
+		delete(o.localstatequeryRequests, connId)
+	} else {
+		o.localstatequeryRequests[connId] = remaining
+	}
 }

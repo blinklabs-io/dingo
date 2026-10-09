@@ -65,6 +65,16 @@ var (
 		"%w: rollback point is not on this chain",
 		models.ErrBlockNotFound,
 	)
+	// ErrNoBlockBeforeSlot is returned by Chain.BlockBeforeSlot when the
+	// chain holds no block before the requested slot. A block lookup that
+	// fails during the search returns its own error instead, so a caller can
+	// tell an empty prefix from a predecessor it could not read. It wraps
+	// models.ErrBlockNotFound so existing callers still treat both as not
+	// found.
+	ErrNoBlockBeforeSlot = fmt.Errorf(
+		"%w: no block before slot",
+		models.ErrBlockNotFound,
+	)
 	ErrIteratorChainTip = errors.New(
 		"chain iterator is at chain tip",
 	)

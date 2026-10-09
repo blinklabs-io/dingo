@@ -14,7 +14,10 @@
 
 package blockfrost
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+)
 
 // BlockfrostNode is the interface that the Blockfrost API
 // server uses to query the node for blockchain data. This
@@ -64,7 +67,7 @@ type BlockfrostNode interface {
 	// PoolsList returns the paginated list of registered (active,
 	// non-retired) stake pool IDs, along with the total number of
 	// matching results before pagination.
-	PoolsList(PaginationParams) ([]string, int, error)
+	PoolsList(ctx context.Context, params PaginationParams) ([]string, int, error)
 
 	// Address returns summary information for an address,
 	// including balances aggregated across its live UTxOs.
@@ -82,22 +85,24 @@ type BlockfrostNode interface {
 	// pool (bech32 or hex ID), computing epoch-sensitive aggregates
 	// (blocks_epoch, live/active stake, saturation) as of the current
 	// epoch.
-	PoolDetail(poolID string) (PoolDetailInfo, error)
+	PoolDetail(ctx context.Context, poolID string) (PoolDetailInfo, error)
 
 	// AddressUTXOs returns the paginated current UTxOs for
 	// an address along with the total number of matching
 	// results before pagination.
-	AddressUTXOs(
+	AddressUTXOs(ctx context.Context,
 		address string,
 		params PaginationParams,
 	) ([]AddressUTXOInfo, int, error)
 
 	// AddressTransactions returns the paginated transaction
-	// history for an address along with the total number of
-	// matching results before pagination.
+	// history for an address, optionally restricted to an
+	// inclusive from/to block-range position, along with the total
+	// number of matching results before pagination.
 	AddressTransactions(
+		ctx context.Context,
 		address string,
-		params PaginationParams,
+		params TransactionRangeParams,
 	) ([]AddressTransactionInfo, int, error)
 
 	// MetadataTransactions returns the paginated transactions
@@ -122,7 +127,7 @@ type BlockfrostNode interface {
 
 	// TransactionEvaluate evaluates script execution units for raw transaction
 	// CBOR without submitting the transaction.
-	TransactionEvaluate(txCbor []byte) (TransactionEvaluationResponse, error)
+	TransactionEvaluate(context.Context, []byte) (TransactionEvaluationResponse, error)
 
 	// TransactionCBOR returns raw signed transaction CBOR bytes.
 	TransactionCBOR(hash []byte) ([]byte, error)
@@ -193,42 +198,42 @@ type BlockfrostNode interface {
 
 	// AccountAssociatedAddresses returns payment addresses
 	// associated with the requested stake address.
-	AccountAssociatedAddresses(
+	AccountAssociatedAddresses(context.Context,
 		string,
 		PaginationParams,
 	) ([]AccountAssociatedAddressInfo, int, error)
 
 	// AccountDelegationHistory returns delegation history
 	// rows for the requested stake address.
-	AccountDelegationHistory(
+	AccountDelegationHistory(context.Context,
 		string,
 		PaginationParams,
 	) ([]AccountDelegationHistoryInfo, int, error)
 
 	// AccountRegistrationHistory returns registration
 	// history rows for the requested stake address.
-	AccountRegistrationHistory(
+	AccountRegistrationHistory(context.Context,
 		string,
 		PaginationParams,
 	) ([]AccountRegistrationHistoryInfo, int, error)
 
 	// AccountRewardHistory returns reward history rows for
 	// the requested stake address.
-	AccountRewardHistory(
+	AccountRewardHistory(context.Context,
 		string,
 		PaginationParams,
 	) ([]AccountRewardHistoryInfo, int, error)
 
 	// AccountUTXOs returns the current UTxOs controlled by the
 	// stake credential behind the requested stake address.
-	AccountUTXOs(
+	AccountUTXOs(context.Context,
 		string,
 		PaginationParams,
 	) ([]AccountUTXOInfo, int, error)
 
 	// AccountWithdrawals returns withdrawal history rows for
 	// the requested stake address.
-	AccountWithdrawals(
+	AccountWithdrawals(context.Context,
 		string,
 		PaginationParams,
 	) ([]AccountWithdrawalInfo, int, error)
@@ -237,9 +242,9 @@ type BlockfrostNode interface {
 	// addresses controlled by the stake credential behind the
 	// requested stake address, optionally filtered by an
 	// inclusive from/to block-range position.
-	AccountTransactions(
+	AccountTransactions(context.Context,
 		string,
-		AccountTransactionsParams,
+		TransactionRangeParams,
 	) ([]AccountTransactionInfo, int, error)
 }
 
@@ -886,7 +891,7 @@ type AccountWithdrawalInfo struct {
 	BlockHeight int64
 }
 
-// BlockRangePosition holds a parsed Blockfrost account-transactions
+// BlockRangePosition holds a parsed Blockfrost account or address transactions
 // from/to query value: a block number and an optional transaction
 // index within that block (the "block:index" form).
 type BlockRangePosition struct {
@@ -894,10 +899,10 @@ type BlockRangePosition struct {
 	Index *uint32
 }
 
-// AccountTransactionsParams holds query parameters for the account
-// transactions endpoint: standard pagination plus the optional
+// TransactionRangeParams holds query parameters for the account and
+// address transaction endpoints: standard pagination plus the optional
 // inclusive from/to block-range filter.
-type AccountTransactionsParams struct {
+type TransactionRangeParams struct {
 	Pagination PaginationParams
 	From       *BlockRangePosition
 	To         *BlockRangePosition

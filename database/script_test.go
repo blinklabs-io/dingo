@@ -38,16 +38,16 @@ func TestGetScript(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	got, err := db.GetScript(hash[:], nil)
+	got, err := db.GetScript(t.Context(), hash[:], nil)
 	require.NoError(t, err)
 	require.Equal(t, hash[:], got.Hash)
 	require.Equal(t, content, got.Content)
 	require.Equal(t, uint64(42), got.CreatedSlot)
 	require.Equal(t, uint8(2), got.Type)
 
-	_, err = db.GetScript(nil, nil)
+	_, err = db.GetScript(t.Context(), nil, nil)
 	require.ErrorIs(t, err, ErrScriptNotFound)
 	missing := lcommon.NewBlake2b224(bytes.Repeat([]byte{0x46}, 28))
-	_, err = db.GetScript(missing[:], nil)
+	_, err = db.GetScript(t.Context(), missing[:], nil)
 	require.ErrorIs(t, err, ErrScriptNotFound)
 }

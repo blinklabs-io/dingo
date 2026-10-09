@@ -155,7 +155,7 @@ func OpenDatabase(
 		_ = host.Stop(context.WithoutCancel(ctx))
 		return nil, err
 	}
-	db, err := database.New(dbConfig, stores) //nolint:contextcheck
+	db, err := database.New(ctx, dbConfig, stores) //nolint:contextcheck
 	runtime := &DatabaseRuntime{Database: db, Host: host}
 	if db == nil {
 		closeErr := runtime.Close(context.WithoutCancel(ctx))

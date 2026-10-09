@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"maps"
 	"math/big"
 	"testing"
@@ -115,7 +116,7 @@ func runBabbageGuardProposals(
 	for _, mode := range []string{"compute", "forecast", "apply"} {
 		db, err := newTestDatabase(t, &Config{DataDir: ""})
 		require.NoError(t, err)
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		for epoch, start := range map[uint64]uint64{
 			classicTestSubmissionEpoch - 1: classicTestEpochStart - 100,
 			classicTestSubmissionEpoch:     classicTestEpochStart,
@@ -134,6 +135,7 @@ func runBabbageGuardProposals(
 		switch mode {
 		case "compute":
 			result, _, err = db.ComputeAndApplyPParamUpdates(
+				context.Background(),
 				classicTestEpochStart+100, classicTestEnactEpoch, 1, quorum,
 				input, babbageGuardDecode, babbageGuardApply, nil, txn,
 			)
@@ -145,6 +147,7 @@ func runBabbageGuardProposals(
 		case "apply":
 			result = input
 			err = db.ApplyPParamUpdates(
+				context.Background(),
 				classicTestEpochStart+100, classicTestEnactEpoch, 1, quorum,
 				&result, babbageGuardDecode, babbageGuardApply, txn,
 			)
