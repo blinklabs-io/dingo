@@ -221,6 +221,9 @@ var mysqlDeferredIndexPrefixColumns = map[string]map[string]bool{
 	"asset": {
 		"policy_id": true,
 	},
+	"asset_mint_burn": {
+		"policy_id": true, "name": true, "fingerprint": true,
+	},
 	"address_transaction": {
 		"staking_key": true,
 		"payment_key": true,
