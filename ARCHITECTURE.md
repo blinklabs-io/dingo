@@ -258,6 +258,19 @@ command wrapper and package documentation. For stable release tags, the
 release workflow stamps its version, verifies the finalized release asset and
 publishes it only after release finalization.
 
+`dingo devnet` is a convenience composition around the normal node startup. It
+copies the embedded single-node DevNet configuration and test keys into a
+private temporary directory, refreshes the Byron and Shelley start times, and
+starts the same executable with dev mode and block production enabled. The
+child process runs the ordinary `serveRun` and `internal/node` composition with
+an isolated database and no configured peers. The command forwards shutdown
+signals and removes its temporary directory after the node stops; the npm
+wrapper passes `devnet` through to the same binary command. Supplying
+`--data-dir` keeps the generated configuration and database for the next run;
+`--reset` rebuilds those managed paths with fresh genesis start times. The CLI
+holds an exclusive state-directory lock until the child exits and rewrites the
+path-bearing node configuration when reusing copied state.
+
 Dingo's architecture is built on several key principles:
 
 1. Modular component design using dependency injection and composition
@@ -13733,6 +13746,18 @@ the first two epochs of a new era has set or go in the era before it, with a
 different boundary slot and epoch length. An epoch it cannot place at all is
 skipped rather than seeded from a guessed window.
 
+Before any snapshot phase mutates the database, import validates the complete
+era-bound sequence against the node configuration. The sequence must contain
+every era through the snapshot's current era, begin at slot 0 and epoch 0, and
+place each advancing era exactly after the preceding era's configured whole
+epochs. Consecutive zero-duration eras may share the same slot and epoch
+boundary, as they do on preview. Missing bounds, extraction failures, unknown
+era parameters, gaps and overlaps abort the import. The snapshot tip must also
+fall within the half-open slot range of its declared current epoch. Epoch
+history therefore cannot be committed with a later era treated as the chain's
+time origin, with an omitted interval between eras, or with an attacker-sized
+epoch range detached from the tip.
+
 Block counts are seeded, because they cannot be derived. A bootstrap applies no
 block at or below its anchor, so there is no imported chain for
 `rewardBlockCounts` to scan: `CountPoolBlocksInSlotRange` raises its start slot
@@ -15361,6 +15386,13 @@ embedder that builds a `LedgerStateConfig` directly and skips validation.
   defense in depth and adds the `MaxKESEvolutions` expiry check the generic
   stage cannot perform. OpCert counter monotonicity remains a stateful
   read-before-write check in `ledgerProcessBlock`.
+
+The generic stage receives no protocol parameters or ledger state, so
+`blockPipelineVerifyConfig` skips its body-hash, transaction, stake-pool, and
+block-limit checks. The pipeline's decode stage has already checked the body
+hash; the other rules, including the Conway per-block reference-script total,
+run in `ledgerProcessBlock`. Left on, the block-limit
+step rejects every Conway block that carries a transaction.
 
 `NewLedgerState` fails startup when this stage is enabled without a nonzero
 Shelley `slotsPerKESPeriod`; otherwise the generic stage would reject every
