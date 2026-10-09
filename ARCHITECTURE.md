@@ -3296,10 +3296,10 @@ anything the result lacks is read in the write transaction as with the flag off.
 The goroutine runs at most one block ahead (block 1 overlaps block 0) and the
 apply worker never waits for it to acquire its read-pool connection: until the
 read transaction is open every block reads its own inputs, because snapshot
-opens parked on the chunk's commit barrier can hold the pool. It is cancelled and joined, and its read
-transaction released, on every exit from the chunk callback. Dijkstra chunks do
-not use it, because endorser-block application consumes inputs that no
-ranking-block transaction names.
+opens parked on the chunk's commit barrier can hold the pool. It is cancelled
+and joined, and its read transaction released, on every exit from the chunk
+callback. Dijkstra chunks do not use it, because endorser-block application
+consumes inputs that no ranking-block transaction names.
 Forged blocks check a read view of the pre-block state even when full
 self-validation is disabled. Aggregate dispatch rejects missing or typed-nil
 era parameters with an error before the upstream rule dereferences them.
