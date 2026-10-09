@@ -13312,6 +13312,7 @@ func (ls *LedgerState) GetTransactionsByAddress(
 // GetTransactionsByAddressWithOrder returns transactions
 // involving the given address with explicit ordering.
 func (ls *LedgerState) GetTransactionsByAddressWithOrder(
+	ctx context.Context,
 	addr lcommon.Address,
 	limit int,
 	offset int,
@@ -13320,7 +13321,7 @@ func (ls *LedgerState) GetTransactionsByAddressWithOrder(
 	to *models.AddressTransactionPosition,
 ) ([]models.Transaction, error) {
 	txs, err := ls.db.GetTransactionsByAddressWithOrder(
-		context.Background(),
+		ctx,
 		addr,
 		limit,
 		offset,
@@ -13344,12 +13345,13 @@ func (ls *LedgerState) GetTransactionsByAddressWithOrder(
 // CountTransactionsByAddress returns the total number of
 // transactions involving the given address.
 func (ls *LedgerState) CountTransactionsByAddress(
+	ctx context.Context,
 	addr lcommon.Address,
 	from *models.AddressTransactionPosition,
 	to *models.AddressTransactionPosition,
 ) (int, error) {
 	count, err := ls.db.CountTransactionsByAddress(
-		context.Background(),
+		ctx,
 		addr,
 		from,
 		to,

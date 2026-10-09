@@ -1605,11 +1605,12 @@ func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
 // FirstBlockAtOrAfterSlot returns the lowest-slot ranking block whose slot is
 // at or above slotNumber, or models.ErrBlockNotFound when there is none.
 func FirstBlockAtOrAfterSlot(
+	ctx context.Context,
 	db *Database,
 	slotNumber uint64,
 ) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		blobTxn := txn.Blob()
 		if blobTxn == nil {

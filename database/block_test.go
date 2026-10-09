@@ -1031,11 +1031,11 @@ func TestFirstBlockAtOrAfterSlot(t *testing.T) {
 		query uint64
 		want  uint64
 	}{{0, 100}, {100, 100}, {101, 200}, {300, 300}} {
-		blk, err := FirstBlockAtOrAfterSlot(db, tc.query)
+		blk, err := FirstBlockAtOrAfterSlot(t.Context(), db, tc.query)
 		require.NoError(t, err, "query %d", tc.query)
 		require.Equal(t, tc.want, blk.Slot, "query %d", tc.query)
 	}
-	_, err := FirstBlockAtOrAfterSlot(db, 301)
+	_, err := FirstBlockAtOrAfterSlot(t.Context(), db, 301)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 

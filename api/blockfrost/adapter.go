@@ -3733,12 +3733,11 @@ func (a *NodeAdapter) AddressTransactions(
 		return []AddressTransactionInfo{}, 0, nil
 	}
 
-	total, err := a.ledgerState.Database().CountTransactionsByAddress(
+	total, err := a.ledgerState.CountTransactionsByAddress(
 		ctx,
 		addr,
 		from,
 		to,
-		nil,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3748,7 +3747,7 @@ func (a *NodeAdapter) AddressTransactions(
 		)
 	}
 
-	txs, err := a.ledgerState.Database().GetTransactionsByAddressWithOrder(
+	txs, err := a.ledgerState.GetTransactionsByAddressWithOrder(
 		ctx,
 		addr,
 		params.Pagination.Count,
@@ -3756,7 +3755,6 @@ func (a *NodeAdapter) AddressTransactions(
 		params.Pagination.Order,
 		from,
 		to,
-		nil,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
