@@ -8892,18 +8892,16 @@ respectively to bound stack depth against
 adversarial nesting. `cbor_decode_test.go` proves each of these boundaries is
 accepted exactly at the limit and rejected one past it.
 
-`ImportLedgerState` validates the complete era-bound sequence, then runs
-`validateImportState` before the UTxO phase. Preflight parses the cert state,
-stake snapshots, active pool distribution and governance state, and checks the
-tip hash width, the epoch, evolving, candidate and last-epoch-block nonce
-widths, the certified opcert and block-count pool keys, UTxO-state fees against
-the snapshot fee pot, and both
-current and previous protocol parameters, including historical era
-conversion. A previous payload whose epoch has no resolvable era is rejected
-before persistence, regardless of whether stake snapshots are present. The
-lower-level parameter importer can skip an unresolved historical row with a
-warning, but a full snapshot import rejects incomplete era history before it
-can reach that path.
+`ImportLedgerState` runs `validateImportState` before the UTxO phase. Preflight
+parses the cert state, stake snapshots, active pool distribution and governance
+state, and checks the tip hash width, the epoch, evolving, candidate and
+last-epoch-block nonce widths, the certified opcert and block-count pool keys,
+UTxO-state fees against the snapshot fee pot, and both current and previous
+protocol parameters, including historical era conversion when the previous
+epoch's era is known. When stake snapshots are present, a previous payload
+whose epoch has no resolvable era is rejected before persistence. Without
+stake snapshots, the parameter importer logs a warning and skips that
+unresolved historical row.
 An existing valid historical parameter row can stand in for an incompatible
 previous payload during catch-up. With stake snapshots present it also runs
 the reward-basis protocol-parameter check for each Mark/Set/Go epoch without
