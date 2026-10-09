@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
@@ -83,7 +84,37 @@ func TestProcessEpochRolloverRecordsSpan(t *testing.T) {
 		currentEpoch.EraId, currentEpoch.SlotLength, currentEpoch.LengthInSlots,
 		nil,
 	))
+	for epochID := uint64(3); epochID < currentEpoch.EpochId; epochID++ {
+		startSlot := epochID * 100
+		require.NoError(t, db.SetEpoch(
+			startSlot, epochID, nil, nil, nil, nil,
+			currentEpoch.EraId, currentEpoch.SlotLength,
+			currentEpoch.LengthInSlots, nil,
+		))
+	}
+	require.NoError(t, db.Metadata().SaveRewardAdaPots(
+		&models.RewardAdaPots{
+			Epoch:        currentEpoch.EpochId,
+			CapturedSlot: currentEpoch.StartSlot + uint64(currentEpoch.LengthInSlots) - 1,
+		},
+		nil,
+	))
 	pparams := dijkstraRetentionPParams()
+	pparamsCbor, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		pparamsCbor, 400, 4, eras.DijkstraEraDesc.Id, nil,
+	))
+	require.NoError(t, db.Metadata().SaveRewardSnapshot(
+		&models.RewardSnapshot{
+			Epoch:           3,
+			SnapshotType:    "mark",
+			CapturedSlot:    300,
+			BoundarySlot:    399,
+			ProtocolVersion: uint(pparams.ConwayProtocolParameters.ProtocolVersion.Major),
+		},
+		nil,
+	))
 	ls := &LedgerState{
 		db:             db,
 		currentEra:     eras.DijkstraEraDesc,
