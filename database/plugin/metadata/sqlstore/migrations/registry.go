@@ -1330,9 +1330,11 @@ const updateCommitteeActionType = 4
 // UpdateCommittee it records as enacted at the anchor does, so the enactment
 // check alone cannot exclude it. The term start does: enactment runs at the
 // boundary slot and stamped either the proposal's slot or the closing epoch's
-// first slot, both earlier, while the import stamps the anchor itself. A row
-// stamped at its own added_slot is therefore an import row, unless the
-// database never imported a snapshot, where it can only be a renewal that
+// first slot, both earlier, while the import stamps the anchor itself. The
+// anchor is the first slot of the snapshot's epoch, so it never exceeds the
+// mithril_ledger_slot recorded for the latest import. A row stamped at its own
+// added_slot at or below that slot is therefore an import row; above it, or on
+// a database that never imported a snapshot, it can only be a renewal that
 // migration v8 backfilled to its added_slot.
 //
 // The cursor is the last credential processed, so each credential's whole
@@ -1349,7 +1351,7 @@ func committeeRenewalTermStartBackfill(
 	if len(credentials) == 0 {
 		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 	}
-	imported, err := mithrilImportRecorded(ctx, batch)
+	imported, err := readMithrilImportMarker(ctx, batch)
 	if err != nil {
 		return BatchResult{}, err
 	}
@@ -1412,7 +1414,7 @@ func repairCommitteeRenewalTermStart(
 	ctx context.Context,
 	batch Batch,
 	credential committeeColdCredential,
-	imported bool,
+	imported mithrilImportMarker,
 ) (int64, error) {
 	members, err := func() ([]committeeTermRow, error) {
 		rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
@@ -1455,7 +1457,7 @@ ORDER BY cm.added_slot, cm.id`),
 		if !member.enacted ||
 			!prev.deletedSlot.Valid ||
 			prev.deletedSlot.Int64 != member.addedSlot ||
-			(imported && member.termStartSlot >= member.addedSlot) ||
+			imported.covers(member) ||
 			member.termStartSlot == prev.termStartSlot {
 			continue
 		}
@@ -1473,15 +1475,47 @@ WHERE id = ?`),
 	return repaired, nil
 }
 
-func mithrilImportRecorded(ctx context.Context, batch Batch) (bool, error) {
-	var count int64
-	if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
-SELECT COUNT(*) FROM sync_state WHERE sync_key = ?`),
+// mithrilImportMarker is the mithril_ledger_slot sync state: the ledger slot
+// of the latest imported snapshot, when one was imported.
+type mithrilImportMarker struct {
+	recorded bool
+	slot     int64
+}
+
+// covers reports whether member has the shape a Mithril import writes: a term
+// started at its own added_slot, at or below the imported snapshot.
+func (m mithrilImportMarker) covers(member *committeeTermRow) bool {
+	return m.recorded &&
+		member.addedSlot <= m.slot &&
+		member.termStartSlot >= member.addedSlot
+}
+
+func readMithrilImportMarker(
+	ctx context.Context,
+	batch Batch,
+) (mithrilImportMarker, error) {
+	var raw string
+	err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT value FROM sync_state WHERE sync_key = ?`),
 		"mithril_ledger_slot",
-	).Scan(&count); err != nil {
-		return false, fmt.Errorf("read Mithril import marker: %w", err)
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return mithrilImportMarker{}, nil
 	}
-	return count > 0, nil
+	if err != nil {
+		return mithrilImportMarker{}, fmt.Errorf(
+			"read Mithril import marker: %w",
+			err,
+		)
+	}
+	slot, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || slot < 0 {
+		return mithrilImportMarker{}, fmt.Errorf(
+			"parse Mithril import marker %q",
+			raw,
+		)
+	}
+	return mithrilImportMarker{recorded: true, slot: slot}, nil
 }
 
 func formatCommitteeCredentialCursor(

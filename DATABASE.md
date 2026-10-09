@@ -527,10 +527,12 @@ runs over an existing database writes the same replace-in-place shape at the
 snapshot anchor and deliberately starts a fresh term there, sometimes beside an
 imported `UpdateCommittee` it records as enacted at the anchor. Enactment runs
 at the boundary slot and stamped a term start earlier than it, while the import
-stamps the anchor itself, so once a `mithril_ledger_slot` sync state is
-recorded a row whose `term_start_slot` is not below its `added_slot` is left
-alone. Without one the database never imported a snapshot, and such a row is a
-renewal that migration v8 backfilled to its `added_slot`, so it is repaired.
+stamps the anchor itself, which never exceeds the `mithril_ledger_slot`
+recorded for the latest import. A row whose `term_start_slot` is not below its
+`added_slot` and whose `added_slot` is at or below that recorded slot is
+therefore left alone. Above it, or on a database that never imported a
+snapshot, such a row is a renewal that migration v8 backfilled to its
+`added_slot`, so it is repaired.
 Batches page by tagged cold credential so a chain of renewals is never split.
 
 v40 repairs renewals only. Before enactment took the later of the proposal's

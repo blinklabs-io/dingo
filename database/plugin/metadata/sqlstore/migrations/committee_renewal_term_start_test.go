@@ -55,6 +55,7 @@ func TestCommitteeRenewalTermStartBackfill(t *testing.T) {
 	unenacted := bytes.Repeat([]byte{0xf0}, 28)
 	parameterChange := bytes.Repeat([]byte{0xf1}, 28)
 	importedEnactment := bytes.Repeat([]byte{0xf2}, 28)
+	legacyAfterImport := bytes.Repeat([]byte{0xf3}, 28)
 	cbor := []byte{0x80}
 	proposals := []enactedProposalFixture{
 		{1000, updateCommitteeActionType, cbor},
@@ -70,6 +71,7 @@ func TestCommitteeRenewalTermStartBackfill(t *testing.T) {
 		// An imported UpdateCommittee the import records as enacted at its
 		// anchor, with the proposal's action CBOR.
 		{9000, updateCommitteeActionType, cbor},
+		{12000, updateCommitteeActionType, cbor},
 	}
 	fixtures := []committeeTermFixture{
 		// Two renewals each stamped a fresh term start; both inherit the
@@ -101,8 +103,13 @@ func TestCommitteeRenewalTermStartBackfill(t *testing.T) {
 		{0, unenacted, 0, deletedAt(7000), 0, 0},
 		{0, unenacted, 7000, sql.NullInt64{}, 7000, 7000},
 		// Only a non-committee action was enacted at the replacement slot.
+		// The term start is renewal-shaped, so only the action type keeps it.
 		{0, parameterChange, 0, deletedAt(7500), 0, 0},
-		{0, parameterChange, 7500, sql.NullInt64{}, 7500, 7500},
+		{0, parameterChange, 7500, sql.NullInt64{}, 7400, 7400},
+		// A renewal enacted after the snapshot that v8 backfilled to its
+		// added_slot is above the import marker, so it is still repaired.
+		{0, legacyAfterImport, 0, deletedAt(12000), 0, 0},
+		{0, legacyAfterImport, 12000, sql.NullInt64{}, 12000, 0},
 	}
 	runCommitteeRenewalTermStartBackfill(t, proposals, fixtures, true)
 }
