@@ -543,7 +543,7 @@ func parseSTMSingleSignatureBytes(
 	if nrIndexes > maxIndexes {
 		return nil, fmt.Errorf(
 			"%w: lottery indices exceed limit %d",
-			errCertificateChainBudget, stmMaxLotteryIndices,
+			errCertificateChainBudget, maxIndexes,
 		)
 	}
 	// Each index is 8 bytes; cap pre-allocation against remaining payload.

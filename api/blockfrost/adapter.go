@@ -5313,10 +5313,10 @@ func poolRewardAccountCredential(
 	hash := cert.RewardAccount[:]
 	rawCbor := cert.Cbor()
 	if len(rawCbor) > 0 {
-		var raw []cbor.RawMessage
-		if _, err := cbor.Decode(rawCbor, &raw); err == nil && len(raw) > 6 {
-			var rewardAddrBytes []byte
-			if _, err := cbor.Decode(raw[6], &rewardAddrBytes); err == nil &&
+		raw, _, err := safedecode.Cbor[[]cbor.RawMessage](rawCbor)
+		if err == nil && len(raw) > 6 {
+			rewardAddrBytes, _, err := safedecode.Cbor[[]byte](raw[6])
+			if err == nil &&
 				len(rewardAddrBytes) == 29 {
 				if (rewardAddrBytes[0] & 0xF0) == 0xF0 {
 					credType = lcommon.CredentialTypeScriptHash

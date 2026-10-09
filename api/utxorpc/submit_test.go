@@ -176,6 +176,20 @@ func (s *waitForTxLedgerStub) TransactionByHash(ctx context.Context,
 	return s.transactionByHash(hash)
 }
 
+type blockingWaitForTxLedgerStub struct {
+	UtxorpcLedgerState
+	lookupReturned chan struct{}
+}
+
+func (s *blockingWaitForTxLedgerStub) TransactionByHash(
+	ctx context.Context,
+	_ []byte,
+) (*models.Transaction, error) {
+	<-ctx.Done()
+	close(s.lookupReturned)
+	return nil, ctx.Err()
+}
+
 func TestWaitForTxAlreadyCommittedPreservesFirstRequestOrder(t *testing.T) {
 	eb := newControlledWaitForTxEventBus()
 	var txHashA common.Blake2b256
@@ -494,6 +508,45 @@ func TestWaitForTxTimeoutUsesSynchronousUnsubscribe(t *testing.T) {
 		},
 	)
 	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
+	testutil.RequireReceive(
+		t,
+		eb.unsubscribeAndWaitCalled,
+		time.Second,
+		"WaitForTx timeout synchronous unsubscribe",
+	)
+}
+
+func TestWaitForTxTimeoutCancelsCommittedLookupAndUnsubscribes(t *testing.T) {
+	eb := newControlledWaitForTxEventBus()
+	ledgerState := &blockingWaitForTxLedgerStub{
+		lookupReturned: make(chan struct{}),
+	}
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus:      eb,
+			LedgerState:   ledgerState,
+			ServerTimeout: 10 * time.Millisecond,
+		}),
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+
+	err := server.waitForTx(
+		ctx,
+		[][]byte{bytes.Repeat([]byte{0xb3}, 32)},
+		func(*submit.WaitForTxResponse) error {
+			t.Fatal("timeout path must not send a response")
+			return nil
+		},
+	)
+
+	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
+	testutil.RequireReceive(
+		t,
+		ledgerState.lookupReturned,
+		time.Second,
+		"WaitForTx committed lookup cancellation",
+	)
 	testutil.RequireReceive(
 		t,
 		eb.unsubscribeAndWaitCalled,

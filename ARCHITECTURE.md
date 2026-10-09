@@ -9700,13 +9700,12 @@ by stake credential rather than a single address. Account UTxOs reuse the
 UTxO address-pattern query with a delegation-part-only pattern (matching
 every payment address sharing the stake credential) and recover each row's
 exact payment address from decoded output CBOR, the same CBOR-derived
-datum/reference-script recovery `/addresses/{address}/utxos` uses; like
-`/addresses/{address}/utxos`, pagination happens after fetching the
-credential's full live-UTxO set (there is no SQL `LIMIT`), which is an
-existing, accepted characteristic of that query shape rather than something
-introduced for this endpoint. Account withdrawals read the rollback-aware
-`account_reward_delta` withdrawal journal joined to its transaction, with
-`LIMIT`/`OFFSET` applied in SQL.
+datum/reference-script recovery `/addresses/{address}/utxos` uses. The
+account query counts matching live UTxOs and fetches the requested page with
+SQL `LIMIT`/`OFFSET`; the count and page share one read transaction so they
+describe the same database snapshot. Account withdrawals read the
+rollback-aware `account_reward_delta` withdrawal journal joined to its
+transaction, with `LIMIT`/`OFFSET` applied in SQL.
 
 Account and address transaction queries are bounded by the requested page
 size, not by the credential's or address's full transaction history:

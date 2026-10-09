@@ -1977,30 +1977,67 @@ func smallEpochGenesisCfgForLifecycleTest(
 	return cfg
 }
 
-// addBlocksSerially adds each block one at a time, waiting for the
-// ledger's committed tip to actually reach it before adding the next.
+// addBlocksSerially adds each block one at a time and waits for each
+// block-based epoch transition before entering the next epoch.
 //
 // A tight back-to-back loop of AddBlock calls that crosses more than one
 // epoch boundary fires several epoch-transition EventBus events with no
 // synchronization between them, each spawning its own concurrent async
 // handler (reward precompute, stake/reward snapshots, and automatic database
-// lifecycle snapshots). Adding blocks one at a time both keeps this test
-// deterministic and more accurately simulates blocks arriving live instead
-// of as an instantaneous burst.
-func addBlocksSerially(t *testing.T, n *Node, blocks []gledger.Block) {
+// lifecycle snapshots). The transition event is emitted after the rollover
+// transaction commits, so it provides the ordering this test needs without
+// polling the database tip. Adding blocks one at a time also more accurately
+// simulates blocks arriving live instead of as an instantaneous burst.
+func addBlocksSerially(
+	t *testing.T,
+	n *Node,
+	blocks []gledger.Block,
+	epochLength uint64,
+) {
 	t.Helper()
+	subID, epochEvents := n.eventBus.SubscribeWithBuffer(
+		event.EpochTransitionEventType,
+		len(blocks),
+	)
+	require.NotZero(t, subID)
+	require.NotNil(t, epochEvents)
+	defer func() {
+		n.eventBus.Unsubscribe(event.EpochTransitionEventType, subID)
+	}()
+	waitForEpoch := func(targetEpoch uint64) {
+		t.Helper()
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case evt, ok := <-epochEvents:
+				require.True(t, ok, "epoch transition subscription closed")
+				epochEvent, ok := evt.Data.(event.EpochTransitionEvent)
+				if ok && epochEvent.NewEpoch == targetEpoch &&
+					len(epochEvent.EpochNonce) > 0 {
+					return
+				}
+			case <-timer.C:
+				t.Fatalf(
+					"timeout waiting for block-based epoch transition %d",
+					targetEpoch,
+				)
+			}
+		}
+	}
+	currentEpoch := n.ledgerState.Tip().Point.Slot / epochLength
 	for _, b := range blocks {
 		require.NoError(
 			t,
 			n.chainManager.PrimaryChain().
 				AddBlock(context.Background(), b, nil),
 		)
-		targetSlot := b.SlotNumber()
-		require.Eventually(t, func() bool {
-			tip, err := n.db.GetTip(nil)
-			return err == nil && tip.Point.Slot == targetSlot
-		}, 5*time.Second, 10*time.Millisecond,
-			"tip did not advance to slot %d after adding its block", targetSlot)
+		targetEpoch := b.SlotNumber() / epochLength
+		if targetEpoch <= currentEpoch {
+			continue
+		}
+		waitForEpoch(targetEpoch)
+		currentEpoch = targetEpoch
 	}
 }
 
@@ -2019,20 +2056,25 @@ func addBlocksSerially(t *testing.T, n *Node, blocks []gledger.Block) {
 func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 	t.Parallel()
 
-	const numBlocks = 20
+	const (
+		numBlocks   = 21
+		epochLength = 100
+	)
 	n, points := newLiveLifecycleTestNodeWithGenesis(
 		t, numBlocks, smallEpochGenesisCfgForLifecycleTest(t),
 		disabledLiveLifecycleTestWorkerPoolCfg,
 	)
 	// Re-loaded separately (not added to any chain yet) so they can be fed
 	// back in one at a time after each truncate, simulating new blocks
-	// arriving live — reusing the real, already-validated blocks 10-19
+	// arriving live — reusing the real, already-validated blocks 10-20
 	// keeps their prev-hash chain correct without fabricating new ones.
-	tailBlocks := loadRawLiveLifecycleTestBlocks(t, numBlocks)[10:20]
+	tailBlocks := loadRawLiveLifecycleTestBlocks(t, numBlocks)[10:21]
 
-	// First truncate: back to block 9 (slot 180, epoch 1), removing blocks
-	// 10-19. Re-adding them crosses epoch 1->2 (block 10, slot 200) and
-	// epoch 2->3 (block 15, slot 300).
+	// First truncate: back to block 9 (slot 182, epoch 1), removing blocks
+	// 10-20. Re-adding them crosses epoch 1->2 (block 10, slot 202),
+	// epoch 2->3 (block 15, slot 302), and ends by crossing epoch 3->4
+	// (block 20, slot 402), whose block-based epoch event confirms every
+	// preceding block committed.
 	target1 := points[9].Slot
 	_, err := n.Truncate(
 		context.Background(),
@@ -2040,11 +2082,12 @@ func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	addBlocksSerially(t, n, tailBlocks)
+	addBlocksSerially(t, n, tailBlocks, epochLength)
 
-	// Second truncate: back to block 14 (slot 280, epoch 2), removing
-	// blocks 15-19. Re-adding them crosses epoch 2->3 (block 15, slot 300)
-	// again — this time on storage rebuilt by a SECOND live truncate.
+	// Second truncate: back to block 14 (slot 282, epoch 2), removing
+	// blocks 15-20. Re-adding them crosses epoch 2->3 (block 15, slot 302)
+	// and epoch 3->4 (block 20, slot 402) again — this time on storage
+	// rebuilt by a SECOND live truncate.
 	target2 := points[14].Slot
 	_, err = n.Truncate(
 		context.Background(),
@@ -2052,5 +2095,5 @@ func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	addBlocksSerially(t, n, tailBlocks[5:])
+	addBlocksSerially(t, n, tailBlocks[5:], epochLength)
 }

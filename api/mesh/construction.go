@@ -225,11 +225,20 @@ func (s *Server) parseUnsignedTransaction(
 		return
 	}
 
-	var body conway.ConwayTransactionBody
-	if _, err := cbor.Decode(bodyBytes, &body); err != nil {
+	body, consumed, err := safedecode.Cbor[conway.ConwayTransactionBody](
+		bodyBytes,
+	)
+	if err != nil {
 		writeError(w, wrapErr(
 			ErrInvalidTransaction,
 			fmt.Errorf("decode body: %w", err),
+		))
+		return
+	}
+	if consumed != len(bodyBytes) {
+		writeError(w, wrapErr(
+			ErrInvalidTransaction,
+			errors.New("trailing data after transaction body"),
 		))
 		return
 	}
