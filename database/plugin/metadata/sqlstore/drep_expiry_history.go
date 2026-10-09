@@ -80,11 +80,11 @@ FROM drep WHERE active = TRUE AND expiry_epoch > 0`)
 			if err != nil {
 				return fmt.Errorf("read dormant DRep expiries: %w", err)
 			}
+			defer rows.Close()
 			var items []expiryRow
 			for rows.Next() {
 				var item expiryRow
 				if err := rows.Scan(&item.tag, &item.credential, &item.activity, &item.expiry); err != nil {
-					rows.Close()
 					return err
 				}
 				items = append(items, item)
