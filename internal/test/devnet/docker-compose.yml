@@ -485,6 +485,8 @@ services:
       CARDANO_NETWORK: preview
       CARDANO_DATABASE_PATH: /data/db
       DINGO_SOCKET_PATH: /ipc/dingo.socket
+      # Prometheus scrapes this container over the compose network.
+      DINGO_METRICS_BIND_ADDR: 0.0.0.0
       KOIOS_PARITY_ENABLED: "${DEVNET_KOIOS_PARITY_ENABLED:-false}"
       KOIOS_PARITY_BASE_URL: "${DEVNET_KOIOS_PARITY_BASE_URL:-https://preview-koios.tosidrop.me/api/v1}"
     volumes:

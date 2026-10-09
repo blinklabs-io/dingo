@@ -479,10 +479,10 @@ func rowBatchingQueryOne[T any](
 }
 
 // TestApplyRowBatchingSerialEquivalence applies the same unvalidated blocks
-// into two stores, per-row and batched, and requires identical stored state:
-// tip, nonces, UTxOs and their assets, accounts, pools, DReps, governance and
-// every API-mode detail table. The batched run must actually take the batched
-// path, and the per-row run must not.
+// into two stores, with the setting off and on, and requires identical stored
+// state: tip, nonces, UTxOs and their assets, accounts, pools, DReps,
+// governance and every API-mode detail table. In core mode the setting
+// selects the batched path; API mode batches with it off as well.
 func TestApplyRowBatchingSerialEquivalence(t *testing.T) {
 	t.Parallel()
 
@@ -496,8 +496,13 @@ func TestApplyRowBatchingSerialEquivalence(t *testing.T) {
 				on := runRowBatchingScenario(t, blocks, mode, true, batchSize)
 				offAgain := runRowBatchingScenario(t, blocks, mode, false, batchSize)
 
-				require.Zero(t, off.batchedTxs,
-					"flag off must not use the batched path")
+				if mode == types.StorageModeAPI {
+					require.Equal(t, totalTxs, off.batchedTxs,
+						"API mode batches with the flag off")
+				} else {
+					require.Zero(t, off.batchedTxs,
+						"flag off must not use the batched path")
+				}
 				require.Equal(t, totalTxs, on.batchedTxs,
 					"flag on must write every transaction of the "+
 						"unvalidated blocks through the batched path")

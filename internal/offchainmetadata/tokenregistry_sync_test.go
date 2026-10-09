@@ -391,6 +391,9 @@ func newTestSync(
 		Network:   "mainnet",
 		// httptest binds loopback, which the SSRF guard blocks by default.
 		AllowPrivateAddresses: true,
+		// Every sync built here carries a credential header, so each
+		// redaction check also covers it.
+		Headers: map[string]string{"Authorization": "Bearer " + redactHeader},
 	}
 	if mutate != nil {
 		mutate(&cfg)

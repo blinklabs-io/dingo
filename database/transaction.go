@@ -628,13 +628,11 @@ func (d *Database) ensureTransactionConsumedUtxos(
 		return nil
 	}
 
-	// During Mithril historical backfill, immutable blocks are replayed in
-	// slot order against a metadata store being populated from the same
-	// history. Consumed inputs are guaranteed to already exist in the store
-	// from earlier producer transactions, so the per-input recovery checks
-	// are redundant. The in-flight producer lookup optimization (same-batch
-	// provenance) remains valuable and is preserved below.
-	if opts.SkipConsumedInputRecovery {
+	// During Mithril historical backfill or a trusted immutable replay, blocks
+	// are applied in slot order against a store containing the earlier
+	// producers. Consumed inputs are therefore already represented in the
+	// metadata store, so per-input blob recovery is redundant.
+	if opts.SkipConsumedInputRecovery || opts.TrustedImmutableReplay {
 		if opts.Stats != nil {
 			// Count inputs that would have triggered GetUtxoIncludingSpent
 			// lookups. The in-flight check below is cheap and would have

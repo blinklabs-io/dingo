@@ -199,7 +199,7 @@ func TestStartupOpCertCounterUnresolvedEraStillRejectsStaleCounter(
 	require.ErrorIs(t, result.EraUnevaluable, ErrOpCertEraUnevaluable)
 }
 
-// Sample test keys from config/cardano/devnet/keys/
+// Sample test keys from internal/test/devnet/testdata/keys/
 const (
 	testVRFSKeyJSON = `{
     "type": "VrfSigningKey_PraosVRF",

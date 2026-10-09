@@ -5877,13 +5877,7 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 // an optional test synchronization signal for the prior-request drain.
 func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	connId ouroboros.ConnectionId,
-	//nolint:unparam // pending's only use here was the synchronous NoBlocks
-	// branch this commit removes (NoBlocks now resolves asynchronously, in
-	// handleEventBlockfetchBatchDone). Kept rather than threaded out of every
-	// caller and test helper, since the dispatch-timing rework this function
-	// is meant to support needs it again for its own disruption-path
-	// publishes.
-	pending *pendingPublishes,
+	_ *pendingPublishes,
 	waitStarted chan<- struct{},
 ) error {
 	// The caller owns chainsyncBlockfetchMutex. Keep the reservation and
@@ -7329,13 +7323,9 @@ func (ls *LedgerState) calculateEpochNonce(ctx context.Context,
 	currentEpoch models.Epoch,
 	newEpochPParams lcommon.ProtocolParameters,
 ) ([]byte, []byte, []byte, []byte, error) {
-	// No epoch nonce in Byron. NOTE: currentEra is the SOURCE era being
-	// rolled over, not necessarily the era the new epoch will run at — a
-	// rollover whose source era is Byron but whose destination era (per
-	// the caller's later era-transition decision) is Shelley or beyond
-	// still returns nil here. applyBoundaryEraTransitions seeds a real
-	// nonce for that case once the destination era is known; see the
-	// comment there.
+	// No epoch nonce exists in Byron. At a Byron-to-Shelley boundary the caller
+	// applies the transition before rollover, so currentEra is Shelley and the
+	// empty source-epoch nonce takes the genesis-nonce initialization below.
 	if currentEra.Id == 0 {
 		return nil, nil, nil, nil, nil
 	}
@@ -7458,10 +7448,9 @@ func (ls *LedgerState) calculateEpochNonce(ctx context.Context,
 	// (Babbage runs Praos but retains the smaller window for
 	// backwards compatibility); 4k/f kicks in at Conway. The two
 	// formulas only disagree at the Babbage→Conway boundary, but the
-	// source-vs-target distinction matters for every transition: by
-	// the time this code runs, applyHardForkTransition has already
-	// advanced currentEra to the new era, so passing currentEra.Id
-	// here would pick the wrong window for the source epoch's blocks
+	// source-vs-target distinction matters for every transition: currentEra
+	// describes the successor epoch here, so the source epoch ID must come from
+	// currentEpoch.EraId when selecting the nonce window
 	// and produce an epoch nonce that diverges from peers. The
 	// observed symptom at Alonzo→Babbage was every header in the new
 	// Praos epoch VRF-failing; the same shape repeats at
@@ -7683,36 +7672,100 @@ func cloneProtocolParametersForEra(
 	return ret, nil
 }
 
+func (ls *LedgerState) computeClassicPParamUpdates(
+	ctx context.Context,
+	txn *database.Txn,
+	slot uint64,
+	epoch uint64,
+	era eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, bool, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return nil, false, errors.New(
+			"compute classic protocol parameter updates: CardanoNodeConfig is nil",
+		)
+	}
+	updateQuorum := 0
+	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
+		updateQuorum = shelleyGenesis.UpdateQuorum
+	}
+	return ls.db.ComputeAndApplyPParamUpdates(
+		ctx,
+		slot,
+		epoch,
+		era.Id,
+		updateQuorum,
+		currentPParams,
+		era.DecodePParamsUpdateFunc,
+		era.PParamsUpdateFunc,
+		era.ParamUpdateHasPlutusV2CostModelFunc,
+		txn,
+	)
+}
+
 // processEpochRollover returns all computed state without applying it. The
 // caller is responsible for:
 //   - Applying the result to in-memory state after successful commit
 //   - Starting background cleanup goroutines
 //   - Calling Scheduler.ChangeInterval if SchedulerIntervalMs > 0
-//
-// deferBoundarySnapshot suppresses the authoritative mark-snapshot capture so
-// the caller can take it after applying era transitions that this rollover does
-// not perform itself. Only the multi-era boundary path sets it: a boundary block
-// encoded in the era before the era its header announces needs the rollover to
-// enact source-era pparam updates first, so the final era and protocol
-// parameters do not exist yet when the capture would normally run. Capturing
-// then would durably record the source era's protocol major for an epoch that
-// runs at the successor era's, and disagree with the post-commit
-// EpochTransitionEvent. When set and the rollover reaches the capture point, the
-// result reports BoundarySnapshotDeferred so exactly one capture is taken —
-// re-running the capture instead would double-write under the savepoint.
 func (ls *LedgerState) processEpochRollover(
 	ctx context.Context,
 	txn *database.Txn,
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
-	deferBoundarySnapshot bool,
+) (*EpochRolloverResult, error) {
+	return ls.processEpochRolloverWithClassicPParamsContext(
+		ctx,
+		txn,
+		currentEpoch,
+		currentEra,
+		currentPParams,
+		false,
+		false,
+		nil,
+	)
+}
+
+func (ls *LedgerState) applyTransitionHardForkRules(
+	ctx context.Context,
+	txn *database.Txn,
+	majors []uint,
+	boundarySlot uint64,
+	newEpoch uint64,
+) error {
+	for _, major := range majors {
+		if err := ls.applyIntraEraHardForkRule(
+			ctx,
+			txn,
+			major,
+			boundarySlot,
+			newEpoch,
+		); err != nil {
+			return fmt.Errorf(
+				"apply transition major-version HARDFORK %d: %w",
+				major,
+				err,
+			)
+		}
+	}
+	return nil
+}
+
+func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
+	ctx context.Context,
+	txn *database.Txn,
+	currentEpoch models.Epoch,
+	currentEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	classicPParamsApplied bool,
+	plutusV2CostModelWritten bool,
+	transitionHardForkMajors []uint,
 ) (*EpochRolloverResult, error) {
 	// Fail closed at the top of the production rollover path rather than
 	// letting a nil config reach one of the several unchecked
 	// ls.config.CardanoNodeConfig dereferences below (e.g. the
-	// ShelleyGenesis() read further down, or applyBoundaryEraTransitions's
-	// post-Byron nonce seeding) -- any of which would panic instead of
+	// ShelleyGenesis() read further down) -- any of which would panic instead of
 	// returning an error. NewLedgerState does not itself require a non-nil
 	// CardanoNodeConfig, so this is the boundary that must catch it.
 	if ls.config.CardanoNodeConfig == nil {
@@ -7737,6 +7790,7 @@ func (ls *LedgerState) processEpochRollover(
 		CheckpointWrittenForEpoch: false,
 		NewCurrentEra:             currentEra,
 		NewCurrentPParams:         ownedPParams,
+		RealV2CostModelObserved:   plutusV2CostModelWritten,
 	}
 
 	// Create initial epoch
@@ -7911,7 +7965,7 @@ func (ls *LedgerState) processEpochRollover(
 	snapDeferred := ls.deferredBoundarySnapshotHook.Load() != nil &&
 		ls.epochBoundarySnapshotStakeHook() != nil &&
 		ls.epochBoundarySnapshotHook() != nil &&
-		!ls.ratifyAtBoundary && !deferBoundarySnapshot &&
+		!ls.ratifyAtBoundary &&
 		currentEra.Id == eras.ConwayEraDesc.Id &&
 		!ls.config.DelegatorInactivityEnabled
 	if currentEra.Id >= eras.DijkstraEraDesc.Id {
@@ -7965,31 +8019,32 @@ func (ls *LedgerState) processEpochRollover(
 		}
 	}
 
-	updateQuorum := 0
-	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
-		updateQuorum = shelleyGenesis.UpdateQuorum
-	}
-	var newPParams lcommon.ProtocolParameters
-	var plutusV2CostModelWritten bool
-	if err := ls.timeRolloverPhase(
-		currentEpoch.EpochId+1, "pparam_updates", func() error {
-			var err error
-			newPParams, plutusV2CostModelWritten, err = ls.db.ComputeAndApplyPParamUpdates(
-				ctx,
-				epochStartSlot,
-				currentEpoch.EpochId+1, // Target epoch for updates
-				currentEra.Id,
-				updateQuorum,
-				ownedPParams,
-				currentEra.DecodePParamsUpdateFunc,
-				currentEra.PParamsUpdateFunc,
-				currentEra.ParamUpdateHasPlutusV2CostModelFunc,
-				txn,
-			)
-			return err
-		},
-	); err != nil {
-		return nil, fmt.Errorf("apply pparam updates: %w", err)
+	newPParams := ownedPParams
+	if !classicPParamsApplied {
+		updateQuorum := 0
+		if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
+			updateQuorum = shelleyGenesis.UpdateQuorum
+		}
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "pparam_updates", func() error {
+				var err error
+				newPParams, plutusV2CostModelWritten, err = ls.db.ComputeAndApplyPParamUpdates(
+					ctx,
+					epochStartSlot,
+					currentEpoch.EpochId+1, // Target epoch for updates
+					currentEra.Id,
+					updateQuorum,
+					ownedPParams,
+					currentEra.DecodePParamsUpdateFunc,
+					currentEra.PParamsUpdateFunc,
+					currentEra.ParamUpdateHasPlutusV2CostModelFunc,
+					txn,
+				)
+				return err
+			},
+		); err != nil {
+			return nil, fmt.Errorf("apply pparam updates: %w", err)
+		}
 	}
 	if plutusV2CostModelWritten {
 		// The classic Shelley-style update system, not CIP-1694 governance,
@@ -8103,7 +8158,7 @@ func (ls *LedgerState) processEpochRollover(
 		if plan := govOut.Ratification; plan != nil {
 			if err := ls.timeRolloverPhase(
 				currentEpoch.EpochId+1, "ratify", func() error {
-					if ls.ratifyAtBoundary || deferBoundarySnapshot ||
+					if ls.ratifyAtBoundary ||
 						hardForkHere {
 						if currentBoundarySPOState == nil {
 							state, err := ls.currentBoundarySPOStakeState(
@@ -8253,22 +8308,45 @@ func (ls *LedgerState) processEpochRollover(
 				"component", "ledger",
 			)
 		}
-		// Apply cardano-ledger's per-major-version HARDFORK rule. This
-		// runs on ANY major-version bump, including intra-era ones like
-		// Conway pv9→pv10 (Plomin, mainnet January 2025) that do not
-		// trigger an era change, and inter-era ones like Shelley→Allegra
-		// (pv2→pv3) that carry a state rewrite. See cardano-ledger
-		// Conway/Rules/HardFork.hs and Allegra/Translation.hs.
-		if oldVer.Major != newVer.Major {
-			if err := ls.timeRolloverPhase(
-				currentEpoch.EpochId+1, "hardfork", func() error {
-					return ls.applyIntraEraHardForkRule(ctx,
-						txn, newVer.Major, epochStartSlot, currentEpoch.EpochId+1,
-					)
-				},
-			); err != nil {
-				return nil, fmt.Errorf("apply major-version HARDFORK: %w", err)
-			}
+	}
+	// Inter-era transitions were prepared before this rollover so the new
+	// era's epoch rules run with its parameters. Apply their state rewrite at
+	// the HARDFORK point, after reward and governance pot changes, so a later
+	// rule cannot overwrite the transition's reserve or treasury updates.
+	if len(transitionHardForkMajors) > 0 {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1,
+			"hardfork",
+			func() error {
+				return ls.applyTransitionHardForkRules(
+					ctx,
+					txn,
+					transitionHardForkMajors,
+					epochStartSlot,
+					currentEpoch.EpochId+1,
+				)
+			},
+		); err != nil {
+			return nil, err
+		}
+	}
+	// Apply cardano-ledger's per-major-version HARDFORK rule for any pparam
+	// bump enacted by this rollover, including intra-era bumps such as
+	// Conway pv9→pv10. Inter-era transition rules above use the same HARDFORK
+	// point in the EPOCH sequence.
+	if oldErr == nil && newErr == nil && oldVer.Major != newVer.Major {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "hardfork", func() error {
+				return ls.applyIntraEraHardForkRule(
+					ctx,
+					txn,
+					newVer.Major,
+					epochStartSlot,
+					currentEpoch.EpochId+1,
+				)
+			},
+		); err != nil {
+			return nil, fmt.Errorf("apply major-version HARDFORK: %w", err)
 		}
 	}
 
@@ -8384,13 +8462,9 @@ func (ls *LedgerState) processEpochRollover(
 	// SNAP point: capture the authoritative mark snapshot inside this rollover
 	// transaction, now that the new epoch record (and its nonce/boundary slot)
 	// exist. Runs only for the normal N->N+1 rollover; epoch 0 is seeded by
-	// CaptureGenesisSnapshot at startup. A multi-era boundary defers the capture
-	// to the caller, which takes it once the remaining era transitions have
-	// produced the era and protocol parameters the new epoch actually runs at.
+	// CaptureGenesisSnapshot at startup.
 	var snapshotEvt *event.EpochTransitionEvent
 	switch {
-	case deferBoundarySnapshot:
-		result.BoundarySnapshotDeferred = true
 	case snapDeferred:
 		evt := ls.boundarySnapshotEvent(currentEpoch, result)
 		snapshotEvt = &evt
@@ -8421,22 +8495,10 @@ func (ls *LedgerState) processEpochRollover(
 	return result, nil
 }
 
-// splitEraTransitionsForRollover keeps epoch-boundary protocol-parameter
-// enactment in the source era. A proposal submitted in the source era is
-// enacted at the boundary before the successor-era hard fork transforms the
-// protocol parameters. This matters for fields removed by the successor era,
-// such as Alonzo's decentralization parameter, which remains present in the
-// legacy update CBOR but is not a valid Babbage update field.
 func majorVersionChanges(before, after lcommon.ProtocolParameters) bool {
 	oldVer, oldErr := GetProtocolVersion(before)
 	newVer, newErr := GetProtocolVersion(after)
 	return oldErr == nil && newErr == nil && oldVer.Major != newVer.Major
-}
-
-func splitEraTransitionsForRollover(
-	transitionPath []uint,
-) (before, after []uint) {
-	return nil, transitionPath
 }
 
 // epochBoundarySnapshotSlot is the slot a mark snapshot describes: the last slot

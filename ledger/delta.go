@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -161,6 +162,15 @@ func (d *LedgerDelta) applyWithoutRecordingDonations(
 	return d.applyWithDonationRecording(ctx, ls, txn, false, nil)
 }
 
+func (d *LedgerDelta) applyWithAccumulator(
+	ctx context.Context,
+	ls *LedgerState,
+	txn *database.Txn,
+	acc database.BatchAccumulator,
+) error {
+	return d.applyWithDonationRecording(ctx, ls, txn, true, acc)
+}
+
 func (d *LedgerDelta) applyWithDonationRecording(
 	ctx context.Context,
 	ls *LedgerState,
@@ -234,16 +244,13 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			}
 			opts := database.BatchedTxIngestOpts{
 				SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
+				TrustedImmutableReplay:         ls.config.TrustedReplay,
 				LedgerContextSlot:              d.closureContextSlot,
 				StrictAppliedInputConservation: d.strictConsumedInputs,
 				SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
 			}
 			var setErr error
-			// The batched write cannot express the Leios closure variants:
-			// it has no tolerance for an input another certified endorser
-			// block already spent and no ledger-context recording.
-			if acc != nil && !d.skipConsumedInputRecovery &&
-				d.closureContextSlot == nil {
+			if acc != nil {
 				setErr = ls.db.SetTransactionBatchedWithOpts(
 					ctx,
 					level,
@@ -611,36 +618,56 @@ func (b *LedgerDeltaBatch) apply(
 	ls *LedgerState,
 	txn *database.Txn,
 ) error {
-	// Queued detail rows are written by the FlushBatch below, before this
-	// returns, so the validation that follows a flushed batch reads the same
-	// rows the per-row path would have written.
-	var acc database.BatchAccumulator
-	if ls.config.ApplyRowBatchingEnabled {
-		acc = ls.db.NewBatchAccumulator()
+	// API mode always batches. Other storage modes batch only when
+	// ApplyRowBatchingEnabled is set; the stored state is the same either way.
+	if ls.db.StorageMode() != types.StorageModeAPI &&
+		!ls.config.ApplyRowBatchingEnabled {
+		return b.applyUnbatched(ctx, ls, txn)
 	}
+	// The accumulator path does not implement Leios closure context or its
+	// conflict-tolerant input semantics, so keep those batches on the live path.
+	for _, delta := range b.deltas {
+		if delta != nil && (delta.closureContextSlot != nil ||
+			delta.skipConsumedInputRecovery || delta.strictConsumedInputs) {
+			return b.applyUnbatched(ctx, ls, txn)
+		}
+	}
+
+	acc := ls.db.NewBatchAccumulator()
+	if acc == nil {
+		return b.applyUnbatched(ctx, ls, txn)
+	}
+	defer acc.Reset()
 	for _, delta := range b.deltas {
 		if delta == nil {
 			continue // Skip nil deltas (shouldn't happen in normal operation)
 		}
-		var err error
-		if acc == nil {
-			err = delta.apply(ctx, ls, txn)
-		} else {
-			err = delta.applyWithDonationRecording(ctx, ls, txn, true, acc)
-		}
+		err := delta.applyWithAccumulator(ctx, ls, txn, acc)
 		if err != nil {
-			if acc != nil {
-				acc.Reset()
-			}
 			return err
 		}
-	}
-	if acc == nil {
-		return nil
+		if err := ls.db.FlushBatchStakeDeltas(acc, txn); err != nil {
+			return fmt.Errorf("flush ledger delta stake metadata: %w", err)
+		}
 	}
 	if err := ls.db.FlushBatch(acc, txn); err != nil {
-		acc.Reset()
-		return err
+		return fmt.Errorf("flush ledger delta metadata batch: %w", err)
+	}
+	return nil
+}
+
+func (b *LedgerDeltaBatch) applyUnbatched(
+	ctx context.Context,
+	ls *LedgerState,
+	txn *database.Txn,
+) error {
+	for _, delta := range b.deltas {
+		if delta == nil {
+			continue
+		}
+		if err := delta.apply(ctx, ls, txn); err != nil {
+			return err
+		}
 	}
 	return nil
 }

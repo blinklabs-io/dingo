@@ -1110,8 +1110,8 @@ type sqlTxn struct {
 
 	mu              sync.Mutex
 	finished        bool
-	batchBefore     map[*transactionBatchAccumulator]rowBatch
-	batchSavepoints map[string]map[*transactionBatchAccumulator]rowBatch
+	batchBefore     map[*transactionBatchAccumulator]transactionBatchCheckpoint
+	batchSavepoints map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint
 	savepointOrder  []string
 }
 
@@ -1209,11 +1209,11 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 	switch operation {
 	case "SAVEPOINT":
 		if t.batchSavepoints == nil {
-			t.batchSavepoints = make(map[string]map[*transactionBatchAccumulator]rowBatch)
+			t.batchSavepoints = make(map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint)
 		}
-		checkpoint := make(map[*transactionBatchAccumulator]rowBatch)
+		checkpoint := make(map[*transactionBatchAccumulator]transactionBatchCheckpoint)
 		for accumulator := range t.batchBefore {
-			checkpoint[accumulator] = accumulator.rows.clone()
+			checkpoint[accumulator] = accumulator.checkpoint()
 		}
 		t.batchSavepoints[name] = checkpoint
 		t.savepointOrder = append(t.savepointOrder, name)
@@ -1328,22 +1328,23 @@ func (t *sqlTxn) bindBatch(accumulator *transactionBatchAccumulator) error {
 		return types.ErrNilTxn
 	}
 	if t.batchBefore == nil {
-		t.batchBefore = make(map[*transactionBatchAccumulator]rowBatch)
+		t.batchBefore = make(map[*transactionBatchAccumulator]transactionBatchCheckpoint)
 	}
 	if _, exists := t.batchBefore[accumulator]; exists {
 		return nil
 	}
-	t.batchBefore[accumulator] = accumulator.rows.clone()
+	t.batchBefore[accumulator] = accumulator.checkpoint()
 	for _, checkpoint := range t.batchSavepoints {
-		checkpoint[accumulator] = accumulator.rows.clone()
+		checkpoint[accumulator] = accumulator.checkpoint()
 	}
 	return nil
 }
 
-func (t *sqlTxn) restoreBatches(checkpoint map[*transactionBatchAccumulator]rowBatch) {
-	for accumulator, rows := range checkpoint {
-		accumulator.Reset()
-		accumulator.rows = rows.clone()
+func (t *sqlTxn) restoreBatches(
+	checkpoint map[*transactionBatchAccumulator]transactionBatchCheckpoint,
+) {
+	for accumulator, state := range checkpoint {
+		accumulator.restore(state)
 	}
 }
 

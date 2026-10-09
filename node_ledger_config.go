@@ -77,7 +77,6 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		CardanoNodeConfig:  n.config.cardanoNodeConfig,
 		Network:            n.config.network,
 		PromRegistry:       n.config.promRegistry,
-		ForgeBlocks:        n.config.isDevMode(),
 		ValidateHistorical: n.config.validateHistorical,
 		EnableDijkstra:     n.config.experimentalDijkstraEnabled(),
 		StartInDijkstra:    n.config.startEra.IsDijkstra(),
@@ -87,8 +86,8 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// Parallel VRF/KES validate stage for the same pipeline (phase 3).
 		// Off by default; requires BlockPipelineEnabled.
 		BlockPipelineValidateEnabled: n.config.blockPipelineValidateEnabled,
-		// Batched metadata writes for blocks that are not validated. Not
-		// consensus-affecting; off by default.
+		// Core-mode batched metadata writes for blocks that are not
+		// validated. Not consensus-affecting; off by default.
 		ApplyRowBatchingEnabled: n.config.ledgerApplyRowBatchingEnabled,
 		// Supplies fetched Leios endorser-block transactions so the ledger
 		// can apply them when their referencing Dijkstra ranking block is

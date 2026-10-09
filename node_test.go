@@ -3380,6 +3380,19 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 	)
 }
 
+func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
+	t.Parallel()
+
+	node := &Node{config: NewConfig(
+		WithRunMode("dev"),
+		WithBlockProducer(false),
+	)}
+
+	assert.True(t, node.config.blockProducer)
+	assert.Equal(t, StorageModeAPI, node.config.storageMode)
+	assert.False(t, node.ledgerStateConfig().ForgeBlocks)
+}
+
 // The ledger is started, and replays any stored blocks it has not applied,
 // before the node creates Ouroboros networking. ledgerStateConfig therefore
 // hands the ledger callbacks that run while n.ouroboros() is still nil, and
