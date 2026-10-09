@@ -540,9 +540,8 @@ sequenceDiagram
     LS->>LS: validate transactions (Phase 1 + Phase 2)
     LS->>LS: update UTXO set, process certs & governance
     LS->>LS: compute epoch nonce contributions
-    LS->>LS: at an era boundary, enact source-era pparams before hard-fork transitions
+    LS->>LS: at an era boundary, enact source-era pparams, then translate before successor-era epoch rules and SNAP
     LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block, never ahead of a configured TriggerAtEpoch
-    LS->>LS: on a two-era boundary, defer the mark-snapshot capture until the final era and pparams are persisted
 
     Note over Peer,DB: Stage 4 — Persistence
     LS->>ChM: chain.AddBlocks(batch) — 50 blocks max
@@ -14615,6 +14614,16 @@ merge; unit and conformance tests do not exercise full multi-node timing.
 `processEpochRollover` (ledger) applies the Conway-or-later EPOCH rule's state
 changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
 
+At an era boundary, Dingo first enacts any pending classic protocol-parameter
+update with the outgoing era's decoder, translates the resulting state into the
+incoming era, applies any per-major-version HARDFORK state rule selected by the
+translated parameters, and then calls `processEpochRollover` with that era. This
+matches the hard-fork combinator's `extendToSlot`-before-TICK ordering while
+preserving legacy update fields that the translation removes. Intra-era major
+version changes still run HARDFORK after ENACT inside `processEpochRollover`.
+The incoming era therefore owns every EPOCH sub-rule below, including whether
+POOLREAP precedes SNAP.
+
 1. Delayed stake reward application (`applyStakeRewards`): apply the reward
    update derived from the mark snapshot three epochs back — credit spendable
    rewards through `account_reward_delta`, return undistributed rewards to
@@ -14719,6 +14728,9 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    deltas through the boundary slot, so running it below step 5 or step 7
    would tally SPO votes against a mark carrying those steps' credits.
 4. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
+   When the outgoing era supports classic updates, this step was performed
+   immediately before translation with that era's update decoder and is not
+   repeated here.
 5. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
    whose retirement epoch is the new epoch. The refunded amount is the deposit
    the pool's effective registration retains
@@ -14893,9 +14905,9 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    job has not, waiting for the job to decide but never for its write, so the
    boundary holding the writer cannot wait on a transaction that needs it.
    RATIFY stays in the boundary transaction when a major-version change runs
-   HARDFORK after it, when an era transition follows the rollover, and when no
-   in-memory SPO state was resolved, because each would make the committed
-   state differ from what RATIFY reads at its position in the tick. A rollback
+   HARDFORK after it and when no in-memory SPO state was resolved, because each
+   would make the committed state differ from what RATIFY reads at its position
+   in the tick. A rollback
    below the pending boundary discards the decision; start-up with a pending
    record rewinds below its boundary through the rollback intent and fails when
    the rewind exceeds the intent's limits. Transaction validation reads the

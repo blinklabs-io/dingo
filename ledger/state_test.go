@@ -206,7 +206,9 @@ func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
 		EraId:     ^uint(0),
 	}
 
-	err := ls.setEpochCache(&database.Txn{}, []models.Epoch{invalidEpoch})
+	err := ls.setEpochCache(
+		context.Background(), &database.Txn{}, []models.Epoch{invalidEpoch},
+	)
 	require.ErrorContains(t, err, "unknown era ID")
 
 	// The deferred publication must expose the mutation through the atomic
@@ -415,7 +417,6 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		return rolloverErr
 	}))
@@ -483,7 +484,6 @@ func TestProcessEpochRolloverRetainsDijkstraProtocolParameters(t *testing.T) {
 			currentEpoch,
 			eras.DijkstraEraDesc,
 			original,
-			false,
 		)
 		return rolloverErr
 	}))
@@ -3187,6 +3187,7 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
 		result, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.ShelleyEraDesc.Id,
 			0,   // startEpoch
@@ -3290,6 +3291,7 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 
 		// Byron -> Shelley
 		result1, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.ShelleyEraDesc.Id,
 			0,
@@ -3301,6 +3303,7 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 
 		// Shelley -> Allegra
 		result2, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.AllegraEraDesc.Id,
 			1,
@@ -3408,6 +3411,7 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
 		_, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.DijkstraEraDesc.Id,
 			11,
@@ -3505,7 +3509,6 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		require.NoError(t, err)
 
@@ -3627,7 +3630,6 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
-				false,
 			)
 			return err
 		})
@@ -3761,7 +3763,6 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
-				false,
 			)
 			return err
 		})
@@ -3842,7 +3843,7 @@ func TestTransitionToEra_ErrorHandling(t *testing.T) {
 
 		txn := db.Transaction(context.Background(), true)
 		err = txn.Do(func(txn *database.Txn) error {
-			_, err := ls.transitionToEra(txn, 999, 0, 0, nil)
+			_, err := ls.transitionToEra(context.Background(), txn, 999, 0, 0, nil)
 			return err
 		})
 		require.Error(t, err)
@@ -4982,7 +4983,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		})
 		require.NoError(t, err)
-		require.NoError(t, ls.PrepareEpochCacheForStartup())
+		require.NoError(t, ls.PrepareEpochCacheForStartup(context.Background()))
 		return ls
 	}
 
@@ -5064,7 +5065,7 @@ func TestPrepareEpochCacheForStartupUsesEmbeddedMainnetConfig(t *testing.T) {
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	require.NoError(t, ls.PrepareEpochCacheForStartup())
+	require.NoError(t, ls.PrepareEpochCacheForStartup(context.Background()))
 
 	require.Len(t, ls.epochCache, 1)
 	assert.Equal(t, uint64(0), ls.currentEpoch.EpochId)
@@ -7805,7 +7806,7 @@ func TestHealEmptyLabNoncesFoldsExtraEntropy(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	withoutEntropy, err := lcommon.CalculateEpochNonce(
 		candidate, carriedLab, nil,
@@ -8118,12 +8119,8 @@ func newBoundaryRolloverLedger(
 }
 
 // TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion drives a
-// two-era boundary the way ledgerProcessBlocksFromSource does: the rollover
-// runs first so source-era pparam updates are enacted, then the remaining era
-// transitions are applied. The authoritative mark snapshot must be captured
-// once, after those transitions, so its protocol version is the one the new
-// epoch actually runs at. Capturing it at the end of the rollover records the
-// source era's major instead, and that value is durable.
+// two-era boundary in production order: source-era updates, translations, then
+// the incoming era's epoch rules and snapshot capture.
 func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	t *testing.T,
 ) {
@@ -8150,38 +8147,40 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	var result *EpochRolloverResult
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		var err error
-		result, err = ls.processEpochRollover(context.Background(),
-			txn,
-			ls.currentEpoch,
-			ls.currentEra,
-			ls.currentPParams,
-			true,
-		)
-		if err != nil {
-			return err
-		}
-		require.True(t, result.BoundarySnapshotDeferred,
-			"a multi-era boundary must defer the mark snapshot capture")
-		require.Empty(t, captures,
-			"the rollover must not capture the mark snapshot before the "+
-				"boundary's era transitions have run")
-
-		transitions, err := ls.applyBoundaryEraTransitions(
-			txn, ls.currentEpoch, transitionPath, result,
-		)
+		params, eraID, transitions, transitionMajors, v2Written, err :=
+			ls.prepareEraTransitionsForRollover(
+				context.Background(),
+				txn,
+				ls.currentEpoch,
+				ls.currentEra,
+				ls.currentPParams,
+				transitionPath,
+			)
 		if err != nil {
 			return err
 		}
 		require.Len(t, transitions, 2)
-		return nil
+		require.Empty(t, captures,
+			"translation must not capture before incoming-era epoch rules")
+		incomingEra, ok := ls.eraById(eraID)
+		require.True(t, ok)
+		result, err = ls.processEpochRolloverWithClassicPParamsContext(
+			context.Background(),
+			txn,
+			ls.currentEpoch,
+			*incomingEra,
+			params,
+			true,
+			v2Written,
+			transitionMajors,
+		)
+		return err
 	}))
 
 	if result == nil {
 		t.Fatal("epoch rollover returned no result")
 	}
-	require.Len(t, captures, 1,
-		"the deferred capture must run exactly once, not be re-run")
+	require.Len(t, captures, 1)
 	require.Equal(
 		t,
 		uint(mary.MinProtocolVersionMary),
@@ -8191,8 +8190,6 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEra.Id)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEpoch.EraId)
-	require.False(t, result.BoundarySnapshotDeferred,
-		"the deferred capture must be marked as taken")
 
 	// The event the caller publishes after commit is built from the same
 	// result, so the durable row and the event must agree.
@@ -8221,22 +8218,28 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 	var result *EpochRolloverResult
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		var err error
-		result, err = ls.processEpochRollover(context.Background(),
+		params, eraID, _, transitionMajors, v2Written, err := ls.prepareEraTransitionsForRollover(
+			context.Background(),
 			txn,
 			ls.currentEpoch,
 			sourceEra,
 			ls.currentPParams,
-			true,
+			[]uint{eras.AllegraEraDesc.Id},
 		)
 		if err != nil {
 			return err
 		}
-		_, err = ls.applyBoundaryEraTransitions(
+		incomingEra, ok := ls.eraById(eraID)
+		require.True(t, ok)
+		result, err = ls.processEpochRolloverWithClassicPParamsContext(
+			context.Background(),
 			txn,
 			ls.currentEpoch,
-			[]uint{eras.AllegraEraDesc.Id},
-			result,
+			*incomingEra,
+			params,
+			true,
+			v2Written,
+			transitionMajors,
 		)
 		return err
 	}))
@@ -8271,8 +8274,7 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 }
 
 // TestSingleEraBoundaryRolloverCapturesSnapshotInRollover covers the common
-// path: with no era transitions deferred, the rollover still captures the mark
-// snapshot itself, at its own era's protocol version.
+// path at its own era's protocol version.
 func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 	t.Parallel()
 
@@ -8295,7 +8297,6 @@ func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		return err
 	}))
@@ -8303,7 +8304,6 @@ func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 	if result == nil {
 		t.Fatal("epoch rollover returned no result")
 	}
-	require.False(t, result.BoundarySnapshotDeferred)
 	require.Len(t, captures, 1)
 	require.Equal(
 		t,
@@ -8872,7 +8872,6 @@ func (f *hardForkRatifyFixture) rollover(
 			currentEpoch,
 			eras.ConwayEraDesc,
 			pparams,
-			false,
 		)
 		return rolloverErr
 	})
@@ -8987,7 +8986,7 @@ func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	// Epoch 5's lab is recovered from the boundary block's PrevHash.
 	require.Equal(
@@ -9069,7 +9068,7 @@ func TestHealEmptyLabNoncesBoundsToRecentEpochs(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	require.Empty(
 		t,
@@ -9124,7 +9123,7 @@ func TestHealEmptyLabNoncesRepairsOldestInWindowNonce(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	// The oldest in-window epoch is scanned right after the predecessor whose
 	// lab the scan verifies. Its nonce must be recomputed as candidate ⭒ the
@@ -9175,7 +9174,7 @@ func TestHealEmptyLabNoncesLeavesValidRecordsUntouched(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	require.Equal(t, lab, ls.epochCache[0].LastEpochBlockNonce)
 	require.Equal(t, nonce, ls.epochCache[0].Nonce)
@@ -9603,7 +9602,7 @@ func TestLoadEpochsRefreshesCurrentEpochAfterHealing(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.loadEpochs(txn)
+		return ls.loadEpochs(context.Background(), txn)
 	}))
 
 	require.Equal(t, want.Bytes(), ls.epochCache[1].Nonce)
@@ -12758,6 +12757,7 @@ func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
 
 	txn := db.Transaction(context.Background(), true)
 	result, err := ls.transitionToEraFrom(
+		context.Background(),
 		txn,
 		eras.BabbageEraDesc.Id,
 		1,
@@ -12785,6 +12785,7 @@ func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
 	// The same sequence, committed instead, must persist both together.
 	txn = db.Transaction(context.Background(), true)
 	result, err = ls.transitionToEraFrom(
+		context.Background(),
 		txn,
 		eras.BabbageEraDesc.Id,
 		1,

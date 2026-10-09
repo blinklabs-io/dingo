@@ -759,7 +759,7 @@ func (n *Node) reinitializeMidnightIndexer() error {
 	if !midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		return nil
 	}
-	if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
+	if err := n.ledgerState.PrepareEpochCacheForStartup(n.ctx); err != nil {
 		return fmt.Errorf(
 			"load epoch cache before Midnight indexer restart: %w",
 			err,
