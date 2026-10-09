@@ -256,6 +256,14 @@ func (c *ObservedChain) Connected() {
 	c.notify.signal()
 }
 
+// ObserveServerTip records the tip reported with a ChainSync intersection.
+func (c *ObservedChain) ObserveServerTip(tip ChainTip) {
+	c.mu.Lock()
+	c.serverTip = tip
+	c.mu.Unlock()
+	c.notify.signal()
+}
+
 // Disconnected records that the ChainSync session dropped. The observed
 // chain is deliberately preserved so a reconnect resumes from it.
 func (c *ObservedChain) Disconnected(err error) {

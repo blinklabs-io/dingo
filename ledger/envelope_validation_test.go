@@ -800,6 +800,34 @@ func TestValidateBlockOrderByronEbbAfterEbbIncrementsNumberAndSlot(
 	)
 }
 
+func TestValidateBlockOrderRecognizesHeaderOnlyByronEbb(t *testing.T) {
+	t.Parallel()
+
+	parent := envelopeParent{
+		slot:        byron.ByronSlotsPerEpoch - 1,
+		blockNumber: 7,
+		eraId:       byron.EraIdByron,
+		eraKnown:    true,
+	}
+	header := &byron.ByronEpochBoundaryBlockHeader{}
+	header.ConsensusData.Epoch = 1
+	header.ConsensusData.Difficulty.Value = parent.blockNumber
+	block := headerOnlyBlock{header: header, peerRelative: true}
+	require.NoError(t, validateBlockOrder(
+		block,
+		parent,
+		byron.ByronSlotsPerEpoch,
+	))
+	require.True(t, envelopeParentFromBlock(block).byronEbb)
+
+	header.ConsensusData.Difficulty.Value = parent.blockNumber + 1
+	require.ErrorContains(t, validateBlockOrder(
+		block,
+		parent,
+		byron.ByronSlotsPerEpoch,
+	), "does not match expected block number")
+}
+
 // TestValidateByronEbbPlacementRejectsNilHeader ensures malformed Byron EBBs
 // fail before placement or ordering logic reads header consensus data.
 func TestValidateByronEbbPlacementRejectsNilHeader(t *testing.T) {

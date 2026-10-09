@@ -207,6 +207,21 @@ func (s *State) PatienceHeaderAccepted(
 	p.Paused = atTip
 }
 
+// PatienceMessageProcessed resumes leakage after an eligible ChainSync
+// message produced no accepted header. Local processing time is free, and the
+// peer earns no token for a rejected or withheld header.
+func (s *State) PatienceMessageProcessed(connId ouroboros.ConnectionId) {
+	active := s.patienceActive()
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists {
+		return
+	}
+	s.leakPatienceLocked(tc, s.now(), active)
+	tc.Patience.Paused = false
+}
+
 // resumePatienceAfterRollbackLocked restarts the leak after a rollback: the
 // peer has rolled back to point and owes the headers up to its tip.
 // Caller must hold clientConnIdMutex.
