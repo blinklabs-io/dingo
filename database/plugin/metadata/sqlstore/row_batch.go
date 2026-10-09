@@ -121,6 +121,9 @@ func (b *rowBatch) empty() bool {
 
 func (b *rowBatch) add(shape rowShape, row ...any) {
 	i := b.entryIndex(shape)
+	if len(row) != len(b.entries[i].shape.columns) {
+		panic("sqlstore: row width does not match shape")
+	}
 	b.entries[i].rows = append(b.entries[i].rows, row)
 	if col := b.entries[i].txIDCol; col >= 0 {
 		if b.queued == nil {
