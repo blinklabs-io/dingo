@@ -353,6 +353,10 @@ func logStartupConfig(logger *slog.Logger, cfg *config.Config) {
 }
 
 func Run(cfg *config.Config, logger *slog.Logger) error {
+	cfg.ApplyRunModeOverrides(cfg.RunMode)
+	if cfg.RunMode.IsDevMode() {
+		logger.Info("dev mode: forcing API storage and block production")
+	}
 	logStartupConfig(logger, cfg)
 	logger.Debug(
 		fmt.Sprintf("topology: %+v", config.GetTopologyConfig()),
@@ -495,14 +499,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.StorageModeCore,
 			dingo.StorageModeAPI,
 		)
-	}
-	// Dev mode always uses API storage for full transaction metadata
-	if cfg.RunMode.IsDevMode() && !storageMode.IsAPI() {
-		logger.Info(
-			"dev mode: overriding storage mode to api",
-			"previous", string(storageMode),
-		)
-		storageMode = dingo.StorageModeAPI
 	}
 	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
 	kupoPort := config.APIPluginPort(cfg.Plugins.API.Kupo)
