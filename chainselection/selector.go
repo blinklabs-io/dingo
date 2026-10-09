@@ -129,6 +129,20 @@ const (
 	RollbackRegistrationAtCapacity RollbackRegistrationOutcome = "rejected_at_capacity"
 )
 
+// PeerTipRejection says which plausibility bound refused a peer's tip. It is
+// reported to ChainSelectorConfig.OnPeerTipRejected so the composition layer
+// can count rejections without chainselection depending on a metrics library.
+type PeerTipRejection string
+
+const (
+	// PeerTipRejectedObservedFrontier means the peer's delivered frontier
+	// jumped too far ahead of the trusted reference.
+	PeerTipRejectedObservedFrontier PeerTipRejection = "observed_frontier"
+	// PeerTipRejectedAdvertisedTip means the peer's advertised tip exceeded
+	// the bootstrap bound while no local block had been applied.
+	PeerTipRejectedAdvertisedTip PeerTipRejection = "advertised_tip"
+)
+
 // ChainSelectorConfig holds configuration for the ChainSelector.
 type ChainSelectorConfig struct {
 	Logger             *slog.Logger
@@ -168,6 +182,11 @@ type ChainSelectorConfig struct {
 	// an untracked connection. Optional; the composition layer uses it to
 	// export a counter.
 	OnRollbackRegistration func(RollbackRegistrationOutcome)
+	// OnPeerTipRejected is called once for every peer tip refused as
+	// implausible, with the bound that refused it. It runs with the selector
+	// lock held, so it must only do non-blocking work such as incrementing a
+	// counter and must not call back into the selector. Optional.
+	OnPeerTipRejected func(PeerTipRejection)
 	// SwitchBackCooldown bounds the rate of active-connection handoffs
 	// driven by the anti-flap pin's discretionary escapes -- longer-chain
 	// and progress-stall (pinIncumbentDuringCatchUpLocked). Once the active
@@ -919,6 +938,15 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 				"max_plausible_advertised_block",
 				maxPlausibleAdvertisedBlock,
 			)
+			if cs.config.OnPeerTipRejected != nil {
+				// A frontier rejection takes precedence when both bounds
+				// refused the tip.
+				reason := PeerTipRejectedAdvertisedTip
+				if observedReject {
+					reason = PeerTipRejectedObservedFrontier
+				}
+				cs.config.OnPeerTipRejected(reason)
+			}
 			return false
 		}
 		// Accepted: this connection no longer needs to be tracked as a
