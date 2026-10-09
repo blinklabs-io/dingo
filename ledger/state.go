@@ -7584,6 +7584,15 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					if certified, present := certifier.LeiosCertified(); present && certified {
 						if err := ls.ensureReferencedEndorserBlocks(ctx, []ledger.Block{boundary}); err != nil {
 							completeReadResult()
+							recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
+								err,
+							)
+							if recoverErr != nil {
+								return fmt.Errorf("recover rejected Leios certifying block: %w", recoverErr)
+							}
+							if recovered {
+								return errRestartLedgerPipeline
+							}
 							return err
 						}
 						untickedClosure = boundary
@@ -8099,6 +8108,21 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					precheck,
 				); err != nil {
 					completeReadResult()
+					// A block the pre-check rejects is already on the
+					// primary chain, so a plain restart would re-read it.
+					// Rewind past it as a rejected block.
+					recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
+						err,
+					)
+					if recoverErr != nil {
+						return fmt.Errorf(
+							"recover rejected Leios certifying block: %w",
+							recoverErr,
+						)
+					}
+					if recovered {
+						return errRestartLedgerPipeline
+					}
 					return fmt.Errorf(
 						"ensure referenced Leios endorser blocks: %w",
 						err,

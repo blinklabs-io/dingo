@@ -136,7 +136,7 @@ func TestLedgerProcessBlocksDefersLeiosCertificateCheckPastEpochBoundary(
 // shows that deferring the certificate check past the boundary does not
 // accept an invalid certificate: the rollover still happens, the certifying
 // block is checked against its own epoch, and its rejection stops the batch
-// before the block is applied.
+// before the block is applied and drops it from the primary chain.
 func TestLedgerProcessBlocksRejectsInvalidLeiosCertificatePastEpochBoundary(
 	t *testing.T,
 ) {
@@ -160,7 +160,7 @@ func TestLedgerProcessBlocksAppliesCertifiedClosureBeforeEpochSnapshot(t *testin
 
 // runLeiosCertEpochBoundaryCase drives the batch through the ledger. A nil
 // certificateErr makes the certificate validator accept; otherwise it rejects
-// and the batch must fail with that error before the certifying block applies.
+// and the certifying block must be rejected before it applies.
 func runLeiosCertEpochBoundaryCase(
 	t *testing.T,
 	hardFork bool,
@@ -318,8 +318,15 @@ func runLeiosCertEpochBoundaryCase(
 		results,
 	)
 	if certificateErr != nil {
-		require.ErrorIs(t, processErr, certificateErr)
-		require.Equal(t, uint64(1), ls.currentEpoch.EpochId)
+		// The rejected block is dropped from the primary chain and the
+		// pipeline restarts, as for any other block that fails validation.
+		require.ErrorIs(t, processErr, errRestartLedgerPipeline)
+		require.NotEqual(
+			t,
+			certifier.Hash().Bytes(),
+			cm.PrimaryChain().Tip().Point.Hash,
+			"the rejected certifying block must leave the primary chain",
+		)
 		require.Less(
 			t,
 			ls.currentTip.Point.Slot,
@@ -464,4 +471,111 @@ func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
 	require.Len(t, stored.Inputs, 1, "the closure must consume the earlier ranking-block output even in a shared batch")
 	require.Equal(t, certifier.SlotNumber(), stored.Inputs[0].DeletedSlot)
 	require.Equal(t, spender.Hash().Bytes(), []byte(stored.Inputs[0].SpentAtTxId))
+}
+
+// A certifying ranking block whose parent announced no endorser block has
+// nothing to certify, so the reference Forker.applyBlock rejects it as invalid
+// (LeiosCertificateWithoutAnnouncement) rather than waiting for a closure that
+// cannot exist. The pipeline must drop it from the primary chain and restart,
+// not retry it as an unavailable closure until the stuck-pipeline halt.
+func TestLedgerProcessBlocksRejectsCertificateWithoutParentAnnouncement(
+	t *testing.T,
+) {
+	t.Parallel()
+	const epochLength = 1_000
+	parent := leiosBoundaryTestBlock(
+		t, 0, 10, lcommon.Blake2b256{}, false, nil,
+	)
+	certifier := leiosBoundaryTestBlock(
+		t, 1, 20, parent.Hash(), true, nil,
+	)
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	rawBlocks := make([]chain.RawBlock, 0, 2)
+	for _, blk := range []*gdijkstra.DijkstraBlock{parent, certifier} {
+		rawBlocks = append(rawBlocks, chain.RawBlock{
+			Slot:        blk.SlotNumber(),
+			Hash:        blk.Hash().Bytes(),
+			BlockNumber: blk.BlockNumber(),
+			Type:        uint(gledger.BlockTypeDijkstra),
+			PrevHash:    blk.PrevHash().Bytes(),
+			Cbor:        blk.Cbor(),
+		})
+	}
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), rawBlocks),
+	)
+
+	nonce := bytes.Repeat([]byte{0x42}, 32)
+	epoch0 := models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		SlotLength:    1_000,
+		LengthInSlots: epochLength,
+		EraId:         eras.DijkstraEraDesc.Id,
+		Nonce:         nonce,
+		EvolvingNonce: nonce,
+	}
+	require.NoError(t, db.SetEpoch(
+		epoch0.StartSlot, epoch0.EpochId,
+		nonce, nonce, nil, nil,
+		epoch0.EraId, epoch0.SlotLength, epoch0.LengthInSlots,
+		nil,
+	))
+	params := dijkstraTestProtocolParameters()
+	params.MaxBlockBodySize = 2_000_000
+	params.MaxBlockHeaderSize = 100_000
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
+	nodeConfig.ShelleyGenesisHash = strings.Repeat("42", 32)
+	certChecks := 0
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:              db,
+		ChainManager:          cm,
+		CardanoNodeConfig:     nodeConfig,
+		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PromRegistry:          prometheus.NewRegistry(),
+		EnableDijkstra:        true,
+		ManualBlockProcessing: true,
+		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		ValidateLeiosCertificate: func(uint64, []byte, []byte, []byte) error {
+			certChecks++
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	ls.currentEra = eras.DijkstraEraDesc
+	ls.currentPParams = params
+	ls.currentEpoch = epoch0
+	ls.epochCache = []models.Epoch{epoch0}
+	ls.currentTip = ochainsync.Tip{}
+	ls.currentTipBlockNonce = nonce
+	ls.publishSnapshotsLocked()
+	require.NoError(t, cm.SetLedger(ls))
+
+	results := make(chan readChainResult, 2)
+	results <- readChainResult{blocks: []gledger.Block{parent}}
+	results <- readChainResult{blocks: []gledger.Block{certifier}}
+	close(results)
+	processErr := ls.ledgerProcessBlocksFromSource(
+		context.Background(),
+		results,
+	)
+
+	require.ErrorIs(t, processErr, errRestartLedgerPipeline)
+	require.NotErrorIs(t, processErr, errCertifiedEndorserBlockUnavailable)
+	require.Zero(t, certChecks, "there is no announcement to verify against")
+	require.Equal(t, parent.SlotNumber(), ls.currentTip.Point.Slot)
+	require.Equal(
+		t,
+		parent.Hash().Bytes(),
+		cm.PrimaryChain().Tip().Point.Hash,
+		"the certifying block must be dropped from the primary chain",
+	)
 }

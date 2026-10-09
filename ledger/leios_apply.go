@@ -62,6 +62,42 @@ var errCertifiedEndorserBlockUnavailable = errors.New(
 	"certified Leios endorser block unavailable",
 )
 
+// errLeiosCertificateWithoutAnnouncement is the verdict on a certifying ranking
+// block whose parent announced no endorser block: there is nothing for the
+// certificate to certify, so the block is invalid, as in the reference
+// Forker.applyBlock (LeiosCertificateWithoutAnnouncement). It is not
+// errCertifiedEndorserBlockUnavailable, which is retried while a closure that
+// exists is fetched; no closure exists here, so retrying would only hold the
+// pipeline on the block until the stuck-pipeline halt.
+var errLeiosCertificateWithoutAnnouncement = errors.New(
+	"certifying ranking block's parent announced no endorser block",
+)
+
+// errLeiosInvalidCertificate is the verdict on a certifying ranking block whose
+// certificate does not verify against its parent's announcement, as in the
+// reference Forker.applyBlock (LeiosInvalidCertificate).
+var errLeiosInvalidCertificate = errors.New("invalid Leios certificate")
+
+// rejectLeiosCertifyingBlock marks a verdict on a certifying ranking block as a
+// rejected block. The block is already on the primary chain, so a plain error
+// would restart the pipeline onto it until the stuck-pipeline halt; the
+// headerValidationError lets the pipeline rewind past it and re-intersect, the
+// path every other rejected block takes.
+func (ls *LedgerState) rejectLeiosCertifyingBlock(
+	block ledger.Block,
+	cause error,
+) error {
+	point := ocommon.Point{
+		Slot: block.SlotNumber(),
+		Hash: block.Hash().Bytes(),
+	}
+	return &headerValidationError{
+		BlockPoint: point,
+		Cause:      cause,
+		Source:     ls.deferredHeaderSource(point),
+	}
+}
+
 const certifiedEndorserBlockRetryDelay = time.Second
 
 // decodeEndorserTxEnvelope unwraps one endorser-block transaction entry and
@@ -893,21 +929,29 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 		}
 	}
 	if !announced {
-		return fmt.Errorf(
-			"%w: certifying block parent has no endorser-block announcement",
-			errCertifiedEndorserBlockUnavailable,
+		// The parent resolved and announced nothing, which is a verdict on
+		// this block. A parent that does not resolve stays a retry above.
+		return ls.rejectLeiosCertifyingBlock(
+			block,
+			errLeiosCertificateWithoutAnnouncement,
 		)
 	}
 	epochInfo, err := ls.epochForSlot(ebSlot)
 	if err != nil {
 		return fmt.Errorf("resolve certified endorser-block epoch: %w", err)
 	}
-	return ls.config.ValidateLeiosCertificate(
+	if err := ls.config.ValidateLeiosCertificate(
 		epochInfo.EpochId,
 		block.PrevHash().Bytes(),
 		certificate.Signers,
 		certificate.AggregatedSignature,
-	)
+	); err != nil {
+		return ls.rejectLeiosCertifyingBlock(
+			block,
+			fmt.Errorf("%w: %w", errLeiosInvalidCertificate, err),
+		)
+	}
+	return nil
 }
 
 // classifyEndorserBlockFetches decides which endorser blocks to fetch for a
