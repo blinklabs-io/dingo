@@ -262,14 +262,13 @@ const (
 
 var cachedAddressInputQuerySizes = [...]int{1, 2, 4, 8, 16, 32}
 
+// A wide OR of (tx_id, output_idx) pairs can make SQLite abandon
+// tx_id_output_idx. Query by tx_id and filter other outputs in Go.
 func addressTransactionInputQuery(size int) string {
-	predicates := make([]string, size)
-	for i := range predicates {
-		predicates[i] = "(tx_id = ? AND output_idx = ?)"
-	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", size), ",")
 	return `
 SELECT tx_id, output_idx, payment_key, credential_tag, staking_key
-FROM utxo WHERE ` + strings.Join(predicates, " OR ")
+FROM utxo WHERE tx_id IN (` + placeholders + `)`
 }
 
 func (s *Store) indexTransactionAddresses(
@@ -312,31 +311,29 @@ func (s *Store) indexTransactionAddresses(
 	allInputs = append(allInputs, transaction.Inputs()...)
 	allInputs = append(allInputs, transaction.Collateral()...)
 	allInputs = append(allInputs, transaction.ReferenceInputs()...)
-	type inputKey struct {
-		txID  string
-		index uint32
-	}
-	keys := make([]inputKey, 0, len(allInputs))
-	seen := make(map[inputKey]struct{}, len(allInputs))
+	refs := make([]models.UtxoId, 0, len(allInputs))
 	for _, input := range allInputs {
-		key := inputKey{txID: string(input.Id().Bytes()), index: input.Index()}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		keys = append(keys, key)
+		refs = append(refs, models.UtxoId{
+			Hash: input.Id().Bytes(),
+			Idx:  input.Index(),
+		})
 	}
-	inputBatchSize := min(max(1, parameterLimit/2), maxCachedAddressInputQuerySize)
-	for start := 0; start < len(keys); start += inputBatchSize {
-		end := min(start+inputBatchSize, len(keys))
+	txIDs, wanted := distinctUtxoTxIDs(refs)
+	inputBatchSize := 1
+	for inputBatchSize*2 <= parameterLimit &&
+		inputBatchSize*2 <= maxCachedAddressInputQuerySize {
+		inputBatchSize *= 2
+	}
+	for start := 0; start < len(txIDs); start += inputBatchSize {
+		end := min(start+inputBatchSize, len(txIDs))
+		batch := txIDs[start:end]
 		querySize := 1
-		for querySize < end-start {
+		for querySize < len(batch) {
 			querySize *= 2
 		}
-		args := make([]any, querySize*2)
-		for i, key := range keys[start:end] {
-			args[i*2] = []byte(key.txID)
-			args[i*2+1] = key.index
+		args := make([]any, querySize)
+		for i, txID := range batch {
+			args[i] = txID
 		}
 		inputRows, err := s.queryRowsCached(
 			ctx, db, addressTransactionInputQuery(querySize), args...,
@@ -362,6 +359,13 @@ func (s *Store) indexTransactionAddresses(
 				)
 				if err := inputRows.Scan(&txID, &output, &payment, &tag, &staking); err != nil {
 					return fmt.Errorf("scan input address for transaction %d: %w", transactionID, err)
+				}
+				outputs, ok := wanted[string(txID)]
+				if !ok {
+					continue
+				}
+				if _, ok := outputs[output]; !ok {
+					continue
 				}
 				add(payment, tag, staking)
 			}

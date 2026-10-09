@@ -335,6 +335,77 @@ func apiDetailTx(t *testing.T, seed byte) (lcommon.Transaction, ocommon.Point) {
 	return tx, ocommon.Point{Slot: 300 + uint64(seed), Hash: txID}
 }
 
+func TestAddressTransactionIndexUsesOnlyRequestedOutputFromProducer(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	producerID := make([]byte, 32)
+	producerID[0] = 0xaa
+	unrequestedPaymentKey := make([]byte, 28)
+	unrequestedPaymentKey[0] = 0x11
+	requestedPaymentKey := make([]byte, 28)
+	requestedPaymentKey[0] = 0x22
+	for outputIndex, paymentKey := range [][]byte{
+		unrequestedPaymentKey,
+		requestedPaymentKey,
+	} {
+		_, err := store.writeDB.Exec(`
+INSERT INTO utxo (
+    tx_id, output_idx, payment_key, credential_tag, added_slot,
+    deleted_slot, amount, payment_script
+) VALUES (?, ?, ?, 0, 1, 0, '1000000', FALSE)`,
+			producerID, outputIndex, paymentKey,
+		)
+		require.NoError(t, err)
+	}
+	input, err := mockledger.NewSimpleTransactionInput(producerID, 1)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress("addr_test1qz2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp").
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	transactionID := make([]byte, 32)
+	transactionID[0] = 0xbb
+	transaction, err := mockledger.NewTransactionBuilder().
+		WithId(transactionID).
+		WithInputs(input).
+		WithOutputs(output).
+		WithValid(true).
+		Build()
+	require.NoError(t, err)
+
+	txn := store.Transaction(context.Background())
+	defer txn.Rollback()
+	require.NoError(t, store.SetTransaction(
+		transaction,
+		ocommon.Point{Slot: 2, Hash: transactionID},
+		0,
+		nil,
+		true,
+		txn,
+	))
+	require.NoError(t, txn.Commit())
+
+	rows, err := store.writeDB.Query(`
+SELECT a.payment_key
+FROM address_transaction AS a
+JOIN "transaction" AS t ON t.id = a.transaction_id
+WHERE t.hash = ?`,
+		transactionID,
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+	var got [][]byte
+	for rows.Next() {
+		var paymentKey []byte
+		require.NoError(t, rows.Scan(&paymentKey))
+		got = append(got, paymentKey)
+	}
+	require.NoError(t, rows.Err())
+	require.Contains(t, got, requestedPaymentKey)
+	require.NotContains(t, got, unrequestedPaymentKey)
+}
+
 func assetOutputTx(
 	t *testing.T,
 	seed byte,

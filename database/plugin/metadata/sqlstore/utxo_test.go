@@ -235,6 +235,25 @@ func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
 	}
 }
 
+func TestAddressTransactionInputQueryUsesTxIDIndex(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	seedStakeRefLookupUtxos(t, store, 50_000, 256)
+
+	args := make([]any, maxCachedAddressInputQuerySize)
+	for i := range args {
+		args[i] = utxoIDAt(i * 7).Hash
+	}
+	plan := queryPlan(
+		t,
+		store.writeDB,
+		addressTransactionInputQuery(maxCachedAddressInputQuerySize),
+		args...,
+	)
+	require.Contains(t, plan, "tx_id_output_idx")
+	require.NotContains(t, plan, "SCAN utxo")
+}
+
 // TestGetUtxosByRefsReturnsSameRows proves the rewrite returns exactly the
 // rows the legacy OR-predicate implementation did: live rows only, one row
 // per requested ref, absent for a deleted or nonexistent ref, and correct
