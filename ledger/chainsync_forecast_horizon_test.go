@@ -192,8 +192,12 @@ func TestChainsyncHeaderPastForecastHorizonIsNotQueued(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		pastHorizon bool
+		// trusted marks the header as covered by a Mithril snapshot, so it
+		// skips crypto verification; the horizon still applies.
+		trusted bool
 	}{
 		{name: "past the horizon", pastHorizon: true},
+		{name: "trusted header past the horizon", pastHorizon: true, trusted: true},
 		{name: "within the horizon", pastHorizon: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -244,6 +248,9 @@ func TestChainsyncHeaderPastForecastHorizonIsNotQueued(t *testing.T) {
 						return 0, nil
 					},
 				},
+			}
+			if tc.trusted {
+				ls.mithrilLedgerSlot = header.SlotNumber()
 			}
 			ls.publishSnapshotsLocked()
 			t.Cleanup(func() {
@@ -350,6 +357,19 @@ func TestResolveForkAnchor(t *testing.T) {
 		{
 			name:  "an unknown ancestor is unresolved",
 			start: "missing",
+		},
+		{
+			name:   "a header built on origin intersects at slot 0",
+			start:  string(make([]byte, 32)),
+			wantOk: true,
+		},
+		{
+			name: "a delivered chain built on origin intersects at slot 0",
+			peer: map[string]peerRecord{
+				"h1": {100, string(make([]byte, 32))},
+			},
+			start:  "h1",
+			wantOk: true,
 		},
 		{
 			name: "the walk stops at the history limit",

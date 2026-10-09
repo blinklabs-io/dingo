@@ -1933,18 +1933,6 @@ func (c *Chain) rollbackPointBlock(
 //     target that is not a valid rollback point.
 //
 // Callers must hold c.mutex.
-// HoldsQueuedHeader reports whether point is a header queued on this chain
-// ahead of its blocks.
-func (c *Chain) HoldsQueuedHeader(point ocommon.Point) bool {
-	if c == nil {
-		return false
-	}
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-	index, err := c.findQueuedHeader(point)
-	return err == nil && index >= 0
-}
-
 func (c *Chain) findQueuedHeader(point ocommon.Point) (int, error) {
 	for i, header := range slices.Backward(c.headers) {
 		if header.point.Slot > point.Slot {
@@ -1959,6 +1947,18 @@ func (c *Chain) findQueuedHeader(point ocommon.Point) (int, error) {
 		}
 	}
 	return -1, nil
+}
+
+// HoldsQueuedHeader reports whether point is a header queued on this chain
+// ahead of its blocks.
+func (c *Chain) HoldsQueuedHeader(point ocommon.Point) bool {
+	if c == nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	index, err := c.findQueuedHeader(point)
+	return err == nil && index >= 0
 }
 
 // ValidateRollback verifies that Rollback(point) would be accepted without

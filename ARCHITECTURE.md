@@ -15711,7 +15711,11 @@ chain leaves the local chain: a fork that left before the ledger tip gets that
 point's shorter horizon (`chainsyncForkAnchor`, `forecastSummaryFrom`). The
 intersection is resolved from the peer's recorded headers; a header extending
 the local header chain resolves on the first step, and an intersection that
-cannot be resolved falls back to the ledger tip. The wait is not charged to the peer's patience and is not a peer fault.
+cannot be resolved falls back to the ledger tip. The wait is not charged to
+the peer's patience and is not a peer fault, and it ends when the peer's
+chainsync client is stopped or its connection begins shutdown (`StopChan`,
+`ConnectionDoneChan`); the client's `DoneChan` cannot end it, because that
+closes only after the callback returns.
 Should the horizon move back after admission (a ledger rollback),
 chain-selection verification reports `ledger.ErrHeaderBeyondForecastHorizon`:
 the header waits for admission once more, and if it is still out of range it is

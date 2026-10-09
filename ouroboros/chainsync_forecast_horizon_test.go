@@ -178,3 +178,56 @@ func TestChainsyncClientRollForwardRewaitsForecastHorizonBeforeObserving(
 		"a header verified after the re-wait must reach the ledger",
 	)
 }
+
+// A connection that closes while a header waits in admission must end the
+// wait. The client's DoneChan cannot: it closes only after this callback's
+// protocol loop returns.
+func TestChainsyncAdmissionWaitEndsWhenConnectionCloses(t *testing.T) {
+	t.Parallel()
+
+	f := newForecastHorizonFixture(t, "10.0.0.22:3001")
+	waiting := make(chan struct{})
+	f.o.chainsyncHeaderAdmission = func(
+		ctx context.Context,
+		_ ledger.ChainsyncEvent,
+	) (bool, error) {
+		close(waiting)
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+	connDone := make(chan any)
+	header := newTestBlockHeader(400, 1, 0xa3)
+	returned := make(chan error, 1)
+	go func() {
+		returned <- f.o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{
+				ConnectionId:       f.conn,
+				ConnectionDoneChan: connDone,
+			},
+			0,
+			header,
+			ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					header.SlotNumber(),
+					header.Hash().Bytes(),
+				),
+				BlockNumber: header.BlockNumber(),
+			},
+		)
+	}()
+	testutil.RequireReceive(
+		t,
+		waiting,
+		testutil.AsyncWait,
+		"admission did not start waiting",
+	)
+
+	close(connDone)
+	err := testutil.RequireReceive(
+		t,
+		returned,
+		5*time.Second,
+		"closing the connection must end the admission wait",
+	)
+	require.ErrorIs(t, err, context.Canceled)
+}

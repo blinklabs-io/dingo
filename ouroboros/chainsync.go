@@ -84,38 +84,33 @@ type scheduledChainsyncResync struct {
 	fired  bool
 }
 
-type chainsyncClientDoneContext struct {
-	done <-chan struct{}
-}
-
-func (c chainsyncClientDoneContext) Deadline() (time.Time, bool) {
-	return time.Time{}, false
-}
-
-func (c chainsyncClientDoneContext) Done() <-chan struct{} {
-	return c.done
-}
-
-func (c chainsyncClientDoneContext) Err() error {
-	select {
-	case <-c.done:
-		return context.Canceled
-	default:
-		return nil
-	}
-}
-
-func (c chainsyncClientDoneContext) Value(any) any {
-	return nil
-}
-
+// chainsyncAdmissionContext ends when the peer's chainsync client is asked to
+// stop or its connection begins shutdown. It must not use the client's
+// DoneChan: that closes only after the protocol loop running this callback
+// returns, so a wait in the callback could never observe it.
 func chainsyncAdmissionContext(
-	ctx ochainsync.CallbackContext,
-) context.Context {
-	if ctx.Client == nil || ctx.Client.ProtocolInstance() == nil {
-		return context.Background()
+	cb ochainsync.CallbackContext,
+) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var stop <-chan struct{}
+	if cb.Client != nil {
+		if proto := cb.Client.ProtocolInstance(); proto != nil {
+			stop = proto.StopChan()
+		}
 	}
-	return chainsyncClientDoneContext{done: ctx.Client.DoneChan()}
+	connDone := cb.ConnectionDoneChan
+	if stop == nil && connDone == nil {
+		return ctx, cancel
+	}
+	go func() {
+		select {
+		case <-stop:
+		case <-connDone:
+		case <-ctx.Done():
+		}
+		cancel()
+	}()
+	return ctx, cancel
 }
 
 func defaultChainsyncScheduleAt(onset time.Time, fn func()) func() {
@@ -1481,10 +1476,9 @@ func (o *Ouroboros) admitChainsyncHeader(
 	e ledger.ChainsyncEvent,
 ) (bool, error) {
 	blockSlot := e.Point.Slot
-	accepted, err := o.chainsyncHeaderAdmission(
-		chainsyncAdmissionContext(ctx),
-		e,
-	)
+	admissionCtx, cancel := chainsyncAdmissionContext(ctx)
+	defer cancel()
+	accepted, err := o.chainsyncHeaderAdmission(admissionCtx, e)
 	if err != nil {
 		o.config.Logger.Warn(
 			"chainsync: future-header admission failed closed",

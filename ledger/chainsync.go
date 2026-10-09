@@ -4334,9 +4334,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// applied ledger advances, so it must not join the queue blockfetch
 	// drains. Admission holds such headers back; one that still arrives (the
 	// horizon moved back after admission, or an event that bypassed it) is
-	// re-delivered from a fresh intersection instead.
-	if !headerTrusted &&
-		ls.headerBeyondForecastHorizon(ls.lifecycleContext(), e) {
+	// re-delivered from a fresh intersection instead. Passing crypto against
+	// the local epoch data does not exempt it: a fork is forecast from its
+	// intersection, which can end before the tip's horizon does.
+	if ls.headerBeyondForecastHorizon(ls.lifecycleContext(), e) {
 		ls.config.Logger.Debug(
 			"not queueing chainsync header past the forecast horizon",
 			"component", "ledger",
@@ -4676,6 +4677,7 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 		if err := ls.awaitForecastHorizon(ctx, e); err != nil {
 			return false, fmt.Errorf("wait for forecast horizon: %w", err)
 		}
+		slotTime, err = ls.slotClock.SlotToTime(headerSlot)
 	}
 	if err != nil {
 		return false, fmt.Errorf("resolve header slot onset: %w", err)
@@ -4836,7 +4838,9 @@ type forkAnchorLookups struct {
 
 // resolveForkAnchor walks a peer's delivered headers back from prevHash to
 // the first point the local chain holds. A queued header or a block above the
-// ledger tip means the peer's chain contains the tip.
+// ledger tip means the peer's chain contains the tip. A header built on origin
+// carries the zero hash as its parent, which no stored block has: that
+// intersection is slot 0.
 func resolveForkAnchor(
 	prevHash []byte,
 	tipSlot uint64,
@@ -4844,6 +4848,9 @@ func resolveForkAnchor(
 	lookups forkAnchorLookups,
 ) (uint64, bool) {
 	for range limit {
+		if isOriginHash(prevHash) {
+			return localForkAnchor(0, tipSlot)
+		}
 		point, parentHash, found := lookups.peerHeader(prevHash)
 		if !found {
 			point, found = lookups.blockByHash(prevHash)
@@ -4861,6 +4868,10 @@ func resolveForkAnchor(
 		prevHash = parentHash
 	}
 	return 0, false
+}
+
+func isOriginHash(hash []byte) bool {
+	return !slices.ContainsFunc(hash, func(b byte) bool { return b != 0 })
 }
 
 func localForkAnchor(intersectionSlot, tipSlot uint64) (uint64, bool) {
