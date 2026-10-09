@@ -36,7 +36,7 @@ func RegisterProvider(host *plugin.Host) error {
 		func() ProviderConfig {
 			return DefaultProviderConfig()
 		},
-		func(_ context.Context, cfg ProviderConfig, deps ProviderDependencies) (*Server, plugin.Instance, error) {
+		func(ctx context.Context, cfg ProviderConfig, deps ProviderDependencies) (*Server, plugin.Instance, error) {
 			tls, err := cfg.TLS.Resolve("plugins.api.mcp.config.tls")
 			if err != nil {
 				return nil, nil, fmt.Errorf("mcp: %w", err)
@@ -52,7 +52,7 @@ func RegisterProvider(host *plugin.Host) error {
 				listenHost,
 				strconv.FormatUint(uint64(cfg.Port), 10),
 			)
-			server, err := NewServer(cfg, deps, tls, listenAddress)
+			server, err := NewServer(ctx, cfg, deps, tls, listenAddress)
 			if err != nil {
 				return nil, nil, fmt.Errorf("mcp: %w", err)
 			}

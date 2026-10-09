@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -132,7 +133,7 @@ func TestAllDRepDelegatorsRejectsMalformedStoredCredential(t *testing.T) {
 			},
 		}
 	})
-	delegators, err := ls.allDRepDelegators(nil)
+	delegators, err := ls.allDRepDelegators(context.Background(), nil)
 	require.ErrorContains(t, err, "drep delegator")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, delegators)
@@ -149,7 +150,7 @@ func TestDRepDelegatorsRejectsMalformedStoredCredential(t *testing.T) {
 			Key: shortStoredHash(lcommon.Blake2b224Size, 0x73),
 		}}
 	})
-	delegators, err := ls.drepDelegators(&models.Drep{
+	delegators, err := ls.drepDelegators(t.Context(), &models.Drep{
 		Credential: bytes.Repeat([]byte{0x74}, lcommon.Blake2b224Size),
 	}, nil)
 	require.ErrorContains(t, err, "drep delegator")
@@ -174,6 +175,7 @@ func TestFilteredDelegationsRejectsMalformedStoredPool(t *testing.T) {
 		}
 	})
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
+		context.Background(),
 		[]olocalstatequery.StakeCredential{{
 			Tag:   0,
 			Bytes: lcommon.NewBlake2b224(cred),
@@ -197,13 +199,12 @@ func TestGovernanceProposalStateRejectsMalformedStoredSPOVoter(t *testing.T) {
 			VoterCredential: shortStoredHash(lcommon.Blake2b224Size, 0x77),
 		}}
 	})
-	state, err := ls.governanceProposalState(
-		&models.GovernanceProposal{
-			AnchorURL:     "https://example.invalid/proposal.json",
-			AnchorHash:    bytes.Repeat([]byte{0x78}, lcommon.Blake2b256Size),
-			ReturnAddress: append([]byte{0xe0}, make([]byte, 28)...),
-			GovActionCbor: []byte{0x80},
-		},
+	state, err := ls.governanceProposalState(t.Context(), &models.GovernanceProposal{
+		AnchorURL:     "https://example.invalid/proposal.json",
+		AnchorHash:    bytes.Repeat([]byte{0x78}, lcommon.Blake2b256Size),
+		ReturnAddress: append([]byte{0xe0}, make([]byte, 28)...),
+		GovActionCbor: []byte{0x80},
+	},
 		lcommon.GovActionId{},
 		QueryPoint{},
 		nil,
@@ -237,7 +238,7 @@ func seedShortTxIDUtxo(
 	cborBytes, err := cbor.Encode(&out)
 	require.NoError(t, err)
 	shortTxID := shortStoredHash(lcommon.Blake2b256Size, 0x7A)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, db.Blob().SetUtxo(txn.Blob(), shortTxID, 0, cborBytes))
 	require.NoError(t, txn.Commit())
 	paymentKey := addr.PaymentKeyHash()
@@ -257,10 +258,9 @@ func TestQueryUtxoByTxInRejectsMalformedStoredTransactionID(t *testing.T) {
 	) {
 		seedShortTxIDUtxo(t, db, s)
 	})
-	result, err := ls.queryShelleyUtxoByTxIn(
-		[]ledger.ShelleyTransactionInput{
-			{TxId: lcommon.NewBlake2b256(bytes.Repeat([]byte{0x7B}, 32))},
-		},
+	result, err := ls.queryShelleyUtxoByTxIn(t.Context(), []ledger.ShelleyTransactionInput{
+		{TxId: lcommon.NewBlake2b256(bytes.Repeat([]byte{0x7B}, 32))},
+	},
 		QueryPoint{},
 		nil,
 	)
@@ -278,6 +278,7 @@ func TestQueryUtxoByAddressRejectsMalformedStoredTransactionID(t *testing.T) {
 		addr = seedShortTxIDUtxo(t, db, s)
 	})
 	result, err := ls.queryShelleyUtxoByAddress(
+		context.Background(),
 		[]ledger.Address{addr},
 		QueryPoint{},
 		nil,
@@ -305,7 +306,7 @@ func TestQueryPoolDistr2RejectsMalformedSnapshotPoolKey(t *testing.T) {
 	))
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
+	result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
 	require.ErrorContains(t, err, "pool stake distribution snapshot pool key")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, result)
@@ -324,9 +325,9 @@ func TestChainDepStateRejectsMalformedStoredOpCertIssuer(t *testing.T) {
 			string(shortStoredHash(lcommon.Blake2b224Size, 0x7D)): 3,
 		}
 	})
-	txn := ls.db.Transaction(false)
+	txn := ls.db.Transaction(context.Background(), false)
 	defer txn.Release()
-	counters, err := ls.chainDepStateOpCertCounters(txn)
+	counters, err := ls.chainDepStateOpCertCounters(t.Context(), txn, QueryPoint{})
 	require.ErrorContains(t, err, "op-cert counter issuer key")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, counters)

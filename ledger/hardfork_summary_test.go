@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -1192,7 +1193,11 @@ func TestHardForkSummary_RejectsUnavailableShape(t *testing.T) {
 
 			// Drive the consensus caller too: it must reject before attempting
 			// to forecast or mutate another epoch from the incomplete shape.
-			_, err = ls.headerVerificationEpoch(1_000_000, false)
+			_, err = ls.headerVerificationEpoch(
+				context.Background(),
+				1_000_000,
+				false,
+			)
 			require.ErrorContains(t, err, testCase.wantErr)
 			assert.Len(t, ls.loadConsensusSnapshot().epochCache, 1)
 		})
@@ -1799,7 +1804,7 @@ func TestHeaderVerificationEpoch_PastHorizonDeferred(t *testing.T) {
 
 	// The forecast horizon ends at slot 532_000; a header past it must be
 	// classified deferred, and still carry ErrPastHorizon.
-	_, err := ls.headerVerificationEpoch(600_000, false)
+	_, err := ls.headerVerificationEpoch(context.Background(), 600_000, false)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errHeaderVerificationDeferred,
 		"past-horizon header must be deferred, not a peer-fault rejection")
@@ -1937,7 +1942,7 @@ func TestEpochInfoUsesMaterializedEpochPastForecast(t *testing.T) {
 	assert.Equal(t, uint(100), info.LengthInSlots)
 }
 
-func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(
+func TestHardForkSummary_TransitionImpossibleStartsAtEraBoundary(
 	t *testing.T,
 ) {
 	ls := &LedgerState{
@@ -1966,7 +1971,7 @@ func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(
 	assert.Equal(t, hardfork.NewTransitionImpossible(), sum.Transition)
 	require.Len(t, sum.Eras, 1)
 	require.NotNil(t, sum.Eras[0].End)
-	assert.Equal(t, uint64(26_500), sum.Eras[0].End.Slot)
+	assert.Equal(t, uint64(26_000), sum.Eras[0].End.Slot)
 
 	_, err = sum.SlotToEpoch(500)
 	require.NoError(t, err,

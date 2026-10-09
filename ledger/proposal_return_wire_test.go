@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -410,7 +411,7 @@ func TestRejectedProposalReturnAddressPersistsNoGovernanceProposal(
 			require.ErrorContains(
 				t, decodeErr, "invalid account address type", tc.name,
 			)
-			_, err := db.GetGovernanceProposal(proposalID.Bytes(), 0, nil)
+			_, err := db.GetGovernanceProposal(context.Background(), proposalID.Bytes(), 0, nil)
 			require.ErrorIs(
 				t, err, models.ErrGovernanceProposalNotFound, tc.name,
 			)

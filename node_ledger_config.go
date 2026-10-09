@@ -77,7 +77,6 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		CardanoNodeConfig:  n.config.cardanoNodeConfig,
 		Network:            n.config.network,
 		PromRegistry:       n.config.promRegistry,
-		ForgeBlocks:        n.config.isDevMode(),
 		ValidateHistorical: n.config.validateHistorical,
 		EnableDijkstra:     n.config.experimentalDijkstraEnabled(),
 		StartInDijkstra:    n.config.startEra.IsDijkstra(),

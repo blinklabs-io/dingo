@@ -90,6 +90,57 @@ func waitForSignalOrError(
 	}
 }
 
+// waitForStop is waitForSignalOrError plus the remote lifecycle request that
+// ended the run, if any. endRequests closes the node's request intake and
+// returns the accepted request, so a request is either returned here or
+// refused; Bark keeps serving into shutdown, and a request accepted after this
+// point would never be performed. It is called however the run ended: Node.Run
+// returns nil on the cancellation a request causes, which can reach errChan
+// before the cancellation is observed.
+func waitForStop(
+	signalCtx context.Context,
+	errChan <-chan error,
+	endRequests func() (dingo.ShutdownRequest, bool),
+) (*dingo.ShutdownRequest, bool, error) {
+	err, signaled := waitForSignalOrError(signalCtx, errChan)
+	req, ok := endRequests()
+	if !ok {
+		return nil, signaled, err
+	}
+	return &req, signaled, err
+}
+
+// runRequestedShutdown performs a stop or restart accepted over the remote
+// lifecycle service. The graceful shutdown is abandoned once req.Timeout
+// elapses so the request can never leave the process hanging, and a restart
+// re-executes the process even then.
+func runRequestedShutdown(
+	req dingo.ShutdownRequest,
+	causalErr error,
+	shutdown func() error,
+	reExec func() error,
+) error {
+	done := make(chan error, 1)
+	go func() { done <- shutdown() }()
+	remaining := req.Timeout
+	if !req.Deadline.IsZero() {
+		remaining = max(time.Until(req.Deadline), 0)
+	}
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(remaining):
+		err = fmt.Errorf("graceful shutdown exceeded %s", req.Timeout)
+	}
+	if !req.Restart {
+		return errors.Join(causalErr, err)
+	}
+	if reExecErr := reExec(); reExecErr != nil {
+		return errors.Join(causalErr, err, reExecErr)
+	}
+	return errors.Join(causalErr, err)
+}
+
 func gracefulShutdown(
 	logger *slog.Logger,
 	metricsServer *http.Server,
@@ -99,7 +150,7 @@ func gracefulShutdown(
 	timeout time.Duration,
 ) error {
 	shutdownErr := shutdownNodeResources(
-		metricsServer.Shutdown,
+		optionalShutdown(metricsServer),
 		optionalShutdown(debugServer),
 		optionalShutdown(healthServer),
 		d.Stop,
@@ -137,11 +188,13 @@ func shutdownNodeResources(
 	)
 	defer cancel()
 	var err error
-	if shutdownErr := metricsServerShutdown(shutdownCtx); shutdownErr != nil {
-		err = errors.Join(
-			err,
-			fmt.Errorf("metrics server shutdown: %w", shutdownErr),
-		)
+	if metricsServerShutdown != nil {
+		if shutdownErr := metricsServerShutdown(shutdownCtx); shutdownErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("metrics server shutdown: %w", shutdownErr),
+			)
+		}
 	}
 	if debugServerShutdown != nil {
 		if shutdownErr := debugServerShutdown(shutdownCtx); shutdownErr != nil {
@@ -214,6 +267,24 @@ func serveAuxiliaryListenerOn(
 			"addr", srv.Addr,
 			"error", err,
 		)
+	}
+}
+
+// newMetricsServer builds the Prometheus listener on its own dedicated
+// mux so pprof or other handlers registered on DefaultServeMux are never
+// exposed, or returns nil when metricsPort is 0.
+func newMetricsServer(cfg *config.Config) *http.Server {
+	if cfg.MetricsPort == 0 {
+		return nil
+	}
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	return &http.Server{
+		Addr:              cfg.MetricsListenAddress(),
+		Handler:           metricsMux,
+		ReadHeaderTimeout: 60 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 }
 
@@ -302,6 +373,10 @@ func logStartupConfig(logger *slog.Logger, cfg *config.Config) {
 }
 
 func Run(cfg *config.Config, logger *slog.Logger) error {
+	cfg.ApplyRunModeOverrides(cfg.RunMode)
+	if cfg.RunMode.IsDevMode() {
+		logger.Info("dev mode: forcing API storage and block production")
+	}
 	logStartupConfig(logger, cfg)
 	logger.Debug(
 		fmt.Sprintf("topology: %+v", config.GetTopologyConfig()),
@@ -445,14 +520,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.StorageModeAPI,
 		)
 	}
-	// Dev mode always uses API storage for full transaction metadata
-	if cfg.RunMode.IsDevMode() && !storageMode.IsAPI() {
-		logger.Info(
-			"dev mode: overriding storage mode to api",
-			"previous", string(storageMode),
-		)
-		storageMode = dingo.StorageModeAPI
-	}
 	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
 	kupoPort := config.APIPluginPort(cfg.Plugins.API.Kupo)
 	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
@@ -486,25 +553,13 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	// Metrics listener with dedicated mux to avoid exposing
-	// pprof or other handlers registered on DefaultServeMux.
-	metricsMux := http.NewServeMux()
-	metricsMux.Handle("/metrics", promhttp.Handler())
-	metricsAddr := net.JoinHostPort(
-		cfg.BindAddr,
-		strconv.FormatUint(uint64(cfg.MetricsPort), 10),
-	)
-	logger.Info(
-		"serving prometheus metrics on "+metricsAddr,
-		"component",
-		"node",
-	)
-	metricsServer := &http.Server{
-		Addr:              metricsAddr,
-		Handler:           metricsMux,
-		ReadHeaderTimeout: 60 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+	metricsServer := newMetricsServer(cfg)
+	if metricsServer != nil {
+		logger.Info(
+			"serving prometheus metrics on "+metricsServer.Addr,
+			"component",
+			"node",
+		)
 	}
 	// Optional debug listener with pprof handlers, on a separate port from
 	// metrics so monitoring scrapers never see profiling endpoints.
@@ -550,10 +605,14 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	// bind/serve failures are logged but never queued here, so a port
 	// conflict on them cannot take down the node.
 	errChan := make(chan error, 1)
-	if listener := bindAuxiliaryListener(
-		"metrics", metricsServer, logger,
-	); listener != nil {
-		go serveAuxiliaryListenerOn("metrics", metricsServer, listener, logger)
+	if metricsServer != nil {
+		if listener := bindAuxiliaryListener(
+			"metrics", metricsServer, logger,
+		); listener != nil {
+			go serveAuxiliaryListenerOn(
+				"metrics", metricsServer, listener, logger,
+			)
+		}
 	}
 	if debugServer != nil {
 		if listener := bindAuxiliaryListener(
@@ -571,6 +630,15 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			go serveAuxiliaryListenerOn("health", healthServer, listener, logger)
 		}
 	}
+	// A remote stop or restart ends the run exactly like a signal does;
+	// waitForStop then tells them apart.
+	go func() {
+		select {
+		case <-d.ShutdownRequests():
+			signalCtxStop()
+		case <-signalCtx.Done():
+		}
+	}()
 	go func() {
 		//nolint:contextcheck
 		err := d.Run(signalCtx)
@@ -583,19 +651,29 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		}
 	}()
 
-	// Wait for signal or error
-	err, signaled := waitForSignalOrError(signalCtx, errChan)
-	if signaled {
-		logger.Info("signal received, initiating graceful shutdown")
-
-		if err := gracefulShutdown(
+	// Wait for signal, remote request or error
+	req, signaled, err := waitForStop(signalCtx, errChan, d.EndShutdownRequests)
+	shutdown := func() error {
+		return gracefulShutdown(
 			logger,
 			metricsServer,
 			debugServer,
 			healthServer,
 			d,
 			shutdownTimeout,
-		); err != nil {
+		)
+	}
+	if req != nil {
+		logger.Info(
+			"remote lifecycle request received, initiating graceful shutdown",
+			"restart", req.Restart,
+			"timeout", req.Timeout,
+		)
+		return runRequestedShutdown(*req, err, shutdown, dingo.ReExec)
+	}
+	if signaled {
+		logger.Info("signal received, initiating graceful shutdown")
+		if err := shutdown(); err != nil {
 			return err
 		}
 		logger.Info("shutdown complete")
@@ -604,24 +682,14 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 
 	if err == nil {
 		logger.Info("node stopped")
-		if err := gracefulShutdown(
-			logger,
-			metricsServer,
-			debugServer,
-			healthServer,
-			d,
-			shutdownTimeout,
-		); err != nil {
-			return err
-		}
-		return nil
+		return shutdown()
 	}
 
 	logger.Error("node error", "error", err)
 	signalCtxStop()
 
 	cleanupErr := shutdownNodeResources(
-		metricsServer.Shutdown,
+		optionalShutdown(metricsServer),
 		optionalShutdown(debugServer),
 		optionalShutdown(healthServer),
 		d.Stop,
@@ -729,8 +797,15 @@ func buildDingoConfig(
 		dingo.WithBarkPort(cfg.BarkPort),
 		dingo.WithBarkHost(cfg.BarkHost),
 		dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
+		dingo.WithBarkArchiveMaxConcurrentFetches(
+			cfg.BarkArchiveMaxConcurrentFetches,
+		),
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
+		),
+		dingo.WithBarkLifecycleEnabled(cfg.BarkLifecycleEnabled),
+		dingo.WithBarkLifecycleOperatorCertificateFingerprints(
+			cfg.BarkLifecycleOperatorCertificateFingerprints,
 		),
 		dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 			Enabled:   cfg.HistoryExpiry.Enabled,
@@ -778,6 +853,7 @@ func buildDingoConfig(
 				RequestTimeout: cfg.TokenRegistry.
 					RequestTimeout,
 				UserAgent: cfg.TokenRegistry.UserAgent,
+				Headers:   cfg.TokenRegistry.HeaderSecrets,
 				MaxBytes:  cfg.TokenRegistry.MaxBytes,
 				MaxDecompressedBytes: cfg.TokenRegistry.
 					MaxDecompressedBytes,

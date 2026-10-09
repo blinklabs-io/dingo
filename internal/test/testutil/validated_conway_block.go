@@ -98,6 +98,7 @@ func BuildValidatedConwayBlockBytes(
 		slotRangeStart,
 		blockNumber,
 		false,
+		false,
 	)
 }
 
@@ -120,7 +121,61 @@ func BuildValidatedConwayBlockBytesWithInvalidOpCert(
 		slotRangeStart,
 		blockNumber,
 		true,
+		false,
 	)
+}
+
+// BuildValidatedConwayBlockBytesWithTransaction is BuildValidatedConwayBlockBytes
+// with one minimal transaction in the body: a single input, no outputs, and an
+// empty witness set. The header commits to that body's hash and size, so the
+// block decodes and its VRF and KES verify. The transaction itself is not
+// ledger-valid.
+func BuildValidatedConwayBlockBytesWithTransaction(
+	t *testing.T,
+	seed [32]byte,
+	nonceSeed byte,
+	slotRangeStart uint64,
+	blockNumber uint64,
+) ValidatedConwayBlock {
+	return buildValidatedConwayBlockBytes(
+		t,
+		seed,
+		nonceSeed,
+		slotRangeStart,
+		blockNumber,
+		false,
+		true,
+	)
+}
+
+// minimalTransactionBody returns the four body components of a Conway block
+// carrying one transaction, and the body hash and size a header commits to.
+func minimalTransactionBody(
+	t testing.TB,
+) ([]cbor.RawMessage, lcommon.Blake2b256, uint64) {
+	t.Helper()
+	parts := []any{
+		[]any{map[uint64]any{
+			0: cbor.Set{[]any{make([]byte, 32), uint64(0)}},
+			1: []any{},
+			2: uint64(200_000),
+		}},
+		[]any{map[uint64]any{}},
+		map[uint64]any{},
+		[]any{},
+	}
+	comps := make([]cbor.RawMessage, 0, len(parts))
+	var concat []byte
+	var size uint64
+	for _, part := range parts {
+		raw, err := cbor.Encode(part)
+		require.NoError(t, err)
+		comps = append(comps, raw)
+		h := lcommon.Blake2b256Hash(raw)
+		concat = append(concat, h.Bytes()...)
+		size += uint64(len(raw))
+	}
+	return comps, lcommon.Blake2b256Hash(concat), size
 }
 
 func buildValidatedConwayBlockBytes(
@@ -130,6 +185,7 @@ func buildValidatedConwayBlockBytes(
 	slotRangeStart uint64,
 	blockNumber uint64,
 	invalidOpCert bool,
+	withTransaction bool,
 ) ValidatedConwayBlock {
 	t.Helper()
 
@@ -176,6 +232,11 @@ func buildValidatedConwayBlockBytes(
 	}
 
 	bodyHash := ConwayEmptyBodyHash(t)
+	var bodyComps []cbor.RawMessage
+	var bodySize uint64
+	if withTransaction {
+		bodyComps, bodyHash, bodySize = minimalTransactionBody(t)
+	}
 	activeSlotCoeff := big.NewRat(99, 100)
 
 	// currentKesSk/currentKesPeriod track the KES key actually used to
@@ -244,7 +305,7 @@ func buildValidatedConwayBlockBytes(
 				Output: vrfOutput,
 				Proof:  vrfProof,
 			},
-			BlockBodySize: 0,
+			BlockBodySize: bodySize,
 			BlockBodyHash: bodyHash,
 			OpCert: babbage.BabbageOpCert{
 				HotVkey:        kesPk,
@@ -280,7 +341,17 @@ func buildValidatedConwayBlockBytes(
 				},
 			},
 		}
-		raw, encErr := cbor.Encode(block)
+		var raw []byte
+		if withTransaction {
+			parts := make([]any, 1, 1+len(bodyComps))
+			parts[0] = block.BlockHeader
+			for _, comp := range bodyComps {
+				parts = append(parts, comp)
+			}
+			raw, encErr = cbor.Encode(parts)
+		} else {
+			raw, encErr = cbor.Encode(block)
+		}
 		if encErr != nil {
 			continue
 		}

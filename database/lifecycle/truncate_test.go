@@ -54,6 +54,7 @@ func seedCip163Certificate(
 	tx.WithId(txID)
 	tx.WithCertificates(cert)
 	require.NoError(t, db.SetTransactionMetadataOnly(
+		context.Background(),
 		tx,
 		ocommon.NewPoint(slot, txID),
 		0,
@@ -94,14 +95,17 @@ func TestTruncateRecomputesCip163ExpirationForWitnessAfterTruncatePoint(
 
 	cred := bytes.Repeat([]byte{0x07}, 28)
 
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:      cred,
-		CredentialTag:   0,
-		Active:          true,
-		AddedSlot:       50,
-		CreatedSlot:     50,
-		ExpirationEpoch: 1 + inactivity, // as block application would stamp it
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:      cred,
+			CredentialTag:   0,
+			Active:          true,
+			AddedSlot:       50,
+			CreatedSlot:     50,
+			ExpirationEpoch: 1 + inactivity, // as block application would stamp it
+		}),
+	)
 
 	// Surviving registration witness at slot 50 (epoch 0).
 	survivingBlock := testBlock(1, 0xA1)
@@ -145,7 +149,13 @@ func TestTruncateRecomputesCip163ExpirationForWitnessAfterTruncatePoint(
 	)
 	require.NoError(t, err)
 
-	acct, err := db.GetAccountByCredential(0, cred, true, nil)
+	acct, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(
 		t, uint64(0)+inactivity, acct.ExpirationEpoch,
@@ -154,6 +164,87 @@ func TestTruncateRecomputesCip163ExpirationForWitnessAfterTruncatePoint(
 			"witness's stamp (1+inactivity) or the CIP-0163 hooks being "+
 			"skipped entirely (leaving it unchanged)",
 	)
+}
+
+func TestTruncateRemovesMidnightRollbackStateAfterTarget(t *testing.T) {
+	t.Parallel()
+
+	f := buildTestChain(t, 3)
+	store := f.db.Metadata()
+	for _, block := range f.blocks[1:] {
+		require.NoError(t, store.CreateMidnightAriadneRollback(nil,
+			&models.MidnightAriadneRollback{
+				BlockNumber:    block.Number,
+				Epoch:          block.Number,
+				PreviousExists: true,
+				PreviousDatum:  []byte{byte(block.Number)},
+			},
+		))
+		require.NoError(t, store.CreateMidnightCandidateRemoval(nil,
+			&models.MidnightCandidateRemoval{
+				BlockNumber: block.Number,
+				TxHash:      []byte{byte(block.Number)},
+				OutputIndex: 0,
+				Datum:       []byte{byte(block.Number)},
+			},
+		))
+		require.NoError(t, store.UpsertMidnightEpochTransition(nil,
+			&models.MidnightEpochTransition{
+				BlockNumber:    block.Number,
+				PreviousEpoch:  block.Number - 1,
+				PreviousExists: true,
+			},
+		))
+	}
+	require.NoError(t, store.SetBackfillCheckpoint(&models.BackfillCheckpoint{
+		Phase:     "midnight",
+		LastSlot:  f.blocks[2].Slot,
+		Completed: true,
+	}, nil))
+
+	_, err := lifecycle.Truncate(
+		context.Background(), f.db, f.blocks[1], 0, false, 0,
+	)
+	require.NoError(t, err)
+
+	rollbacksAtTarget, err := store.FindMidnightAriadneRollbacksByBlock(
+		nil, f.blocks[1].Number,
+	)
+	require.NoError(t, err)
+	require.Len(t, rollbacksAtTarget, 1)
+	rollbacksAfterTarget, err := store.FindMidnightAriadneRollbacksByBlock(
+		nil, f.blocks[2].Number,
+	)
+	require.NoError(t, err)
+	require.Empty(t, rollbacksAfterTarget)
+
+	candidateRemovalsAtTarget, err := store.FindMidnightCandidateRemovalsByBlock(
+		nil, f.blocks[1].Number,
+	)
+	require.NoError(t, err)
+	require.Len(t, candidateRemovalsAtTarget, 1)
+	candidateRemovalsAfterTarget, err := store.FindMidnightCandidateRemovalsByBlock(
+		nil, f.blocks[2].Number,
+	)
+	require.NoError(t, err)
+	require.Empty(t, candidateRemovalsAfterTarget)
+
+	epochTransitionAtTarget, err := store.GetMidnightEpochTransitionByBlock(
+		nil, f.blocks[1].Number,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, epochTransitionAtTarget)
+	epochTransitionAfterTarget, err := store.GetMidnightEpochTransitionByBlock(
+		nil, f.blocks[2].Number,
+	)
+	require.NoError(t, err)
+	require.Nil(t, epochTransitionAfterTarget)
+
+	checkpoint, err := store.GetBackfillCheckpoint("midnight", nil)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	require.Equal(t, f.blocks[1].Slot, checkpoint.LastSlot)
+	require.False(t, checkpoint.Completed)
 }
 
 // buildTestChain creates n blocks (IDs and Numbers 1..n) and sets the tip
@@ -209,7 +300,11 @@ func TestResolveTargetByHash(t *testing.T) {
 	t.Parallel()
 
 	f := buildTestChain(t, 5)
-	target, err := lifecycle.ResolveTargetByHash(f.db, f.blocks[2].Hash)
+	target, err := lifecycle.ResolveTargetByHash(
+		context.Background(),
+		f.db,
+		f.blocks[2].Hash,
+	)
 	require.NoError(t, err)
 	require.Equal(t, f.blocks[2].ID, target.ID)
 }
@@ -220,7 +315,11 @@ func TestResolveTargetBySlot(t *testing.T) {
 	t.Parallel()
 
 	f := buildTestChain(t, 5)
-	target, err := lifecycle.ResolveTargetBySlot(f.db, f.blocks[2].Slot)
+	target, err := lifecycle.ResolveTargetBySlot(
+		context.Background(),
+		f.db,
+		f.blocks[2].Slot,
+	)
 	require.NoError(t, err)
 	require.Equal(t, f.blocks[2].ID, target.ID)
 }
@@ -234,13 +333,21 @@ func TestResolveTargetBySlotResolvesToNearestAncestor(t *testing.T) {
 
 	f := buildTestChain(t, 5) // blocks[i].Slot == (i+1)*10
 
-	target, err := lifecycle.ResolveTargetBySlot(f.db, f.blocks[2].Slot+5)
+	target, err := lifecycle.ResolveTargetBySlot(
+		context.Background(),
+		f.db,
+		f.blocks[2].Slot+5,
+	)
 	require.NoError(t, err)
 	require.Equal(t, f.blocks[2].ID, target.ID)
 
 	// A slot past the tip resolves to the tip itself (no-op truncate),
 	// rather than erroring — mirrors Truncate's own idempotency at tip.
-	tipTarget, err := lifecycle.ResolveTargetBySlot(f.db, f.blocks[4].Slot+100)
+	tipTarget, err := lifecycle.ResolveTargetBySlot(
+		context.Background(),
+		f.db,
+		f.blocks[4].Slot+100,
+	)
 	require.NoError(t, err)
 	require.Equal(t, f.blocks[4].ID, tipTarget.ID)
 }
@@ -252,7 +359,11 @@ func TestResolveTargetByNumber(t *testing.T) {
 
 	f := buildTestChain(t, 5)
 	for _, b := range f.blocks {
-		target, err := lifecycle.ResolveTargetByNumber(f.db, b.Number)
+		target, err := lifecycle.ResolveTargetByNumber(
+			context.Background(),
+			f.db,
+			b.Number,
+		)
 		require.NoError(t, err)
 		require.Equal(t, b.ID, target.ID)
 	}
@@ -264,7 +375,7 @@ func TestResolveTargetByNumberAheadOfTipErrors(t *testing.T) {
 	t.Parallel()
 
 	f := buildTestChain(t, 5)
-	_, err := lifecycle.ResolveTargetByNumber(f.db, 100)
+	_, err := lifecycle.ResolveTargetByNumber(context.Background(), f.db, 100)
 	require.Error(t, err)
 }
 
@@ -284,7 +395,11 @@ func TestResolveTargetBySlotSkipsSparseIndexGap(t *testing.T) {
 
 	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
 
-	target, err := lifecycle.ResolveTargetBySlot(f.db, f.blocks[1].Slot)
+	target, err := lifecycle.ResolveTargetBySlot(
+		context.Background(),
+		f.db,
+		f.blocks[1].Slot,
+	)
 	require.NoError(t, err)
 	require.Equal(t, f.blocks[1].ID, target.ID)
 }
@@ -300,7 +415,11 @@ func TestResolveTargetBySlotSkipsSparseIndexGapAboveGap(t *testing.T) {
 
 	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
 
-	target, err := lifecycle.ResolveTargetBySlot(f.db, f.blocks[4].Slot)
+	target, err := lifecycle.ResolveTargetBySlot(
+		context.Background(),
+		f.db,
+		f.blocks[4].Slot,
+	)
 	require.NoError(t, err)
 	require.Equal(t, f.blocks[4].ID, target.ID)
 }
@@ -313,7 +432,11 @@ func TestResolveTargetByNumberSkipsSparseIndexGap(t *testing.T) {
 
 	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
 
-	target, err := lifecycle.ResolveTargetByNumber(f.db, f.blocks[1].Number)
+	target, err := lifecycle.ResolveTargetByNumber(
+		context.Background(),
+		f.db,
+		f.blocks[1].Number,
+	)
 	require.NoError(t, err)
 	require.Equal(t, f.blocks[1].ID, target.ID)
 }
@@ -326,7 +449,11 @@ func TestResolveTargetByNumberSkipsSparseIndexGapAboveGap(t *testing.T) {
 
 	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
 
-	target, err := lifecycle.ResolveTargetByNumber(f.db, f.blocks[4].Number)
+	target, err := lifecycle.ResolveTargetByNumber(
+		context.Background(),
+		f.db,
+		f.blocks[4].Number,
+	)
 	require.NoError(t, err)
 	require.Equal(t, f.blocks[4].ID, target.ID)
 }
@@ -404,6 +531,28 @@ func TestTruncateRemovesBlocksAndIsIdempotentAtTip(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Zero(t, blocksRemoved)
+}
+
+// A truncate removes blocks above the target, so a history-expiry cursor past
+// the target is lowered to it.
+func TestTruncateLowersHistoryExpiryCursor(t *testing.T) {
+	t.Parallel()
+
+	f := buildTestChain(t, 5)
+	require.NoError(t, f.db.SetSyncState(
+		database.HistoryExpiryCursorSyncKey,
+		strconv.FormatUint(f.blocks[4].Slot, 10),
+		nil,
+	))
+
+	_, err := lifecycle.Truncate(
+		context.Background(), f.db, f.blocks[2], 0, false, 0,
+	)
+	require.NoError(t, err)
+
+	got, err := f.db.GetSyncState(database.HistoryExpiryCursorSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, strconv.FormatUint(f.blocks[2].Slot, 10), got)
 }
 
 // TestTruncateRemovesBlobTailAheadOfMetadataTip reproduces the live truncate
@@ -670,9 +819,9 @@ func TestTruncateRejectsTargetImmediatelyFollowedBySameSlotBlock(t *testing.T) {
 	require.ErrorContains(t, err, "same slot")
 
 	// Nothing must have been touched: block2 and block3 must still exist.
-	_, err = database.BlockByHash(db, block2.Hash)
+	_, err = database.BlockByHash(context.Background(), db, block2.Hash)
 	require.NoError(t, err, "block2 must survive a rejected truncate")
-	_, err = database.BlockByHash(db, block3.Hash)
+	_, err = database.BlockByHash(context.Background(), db, block3.Hash)
 	require.NoError(t, err, "block3 must survive a rejected truncate")
 
 	// A target with no same-slot successor (block2 itself: block3's slot
@@ -1055,9 +1204,9 @@ func TestTruncateRejectsConsumedUtxoPruneFloorAboveTarget(t *testing.T) {
 	newFixtureWithFloor := func(t *testing.T) *chainFixture {
 		t.Helper()
 		f := buildTestChain(t, 5)
-		txn := f.db.MetadataTxn(true)
+		txn := f.db.MetadataTxn(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return f.db.CreateUtxo(txn, &models.Utxo{
+			return f.db.CreateUtxo(context.Background(), txn, &models.Utxo{
 				TxId:        sweptTxId,
 				OutputIdx:   0,
 				AddedSlot:   10,
@@ -1065,7 +1214,12 @@ func TestTruncateRejectsConsumedUtxoPruneFloorAboveTarget(t *testing.T) {
 				Amount:      types.Uint64(1),
 			})
 		}))
-		pruned, err := f.db.UtxosDeleteConsumed(sweptSlot, 100, nil)
+		pruned, err := f.db.UtxosDeleteConsumed(
+			context.Background(),
+			sweptSlot,
+			100,
+			nil,
+		)
 		require.NoError(t, err)
 		require.Equal(t, 1, pruned)
 		requireSweptUtxoAbsent(t, f)

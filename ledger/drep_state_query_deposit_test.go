@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -56,7 +57,7 @@ func drepStateQueryDeposits(
 	}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyDRepState(creds, QueryPoint{}, nil)
+	result, err := ls.queryShelleyDRepState(context.Background(), creds, QueryPoint{}, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)

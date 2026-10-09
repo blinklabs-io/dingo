@@ -57,7 +57,7 @@ type LifecycleStore interface {
 // SettingsStore owns singleton metadata about database and node state.
 type SettingsStore interface {
 	// GetCommitTimestamp retrieves the last commit timestamp from the database.
-	GetCommitTimestamp() (int64, error)
+	GetCommitTimestamp(context.Context) (int64, error)
 
 	// SetCommitTimestamp sets the last commit timestamp in the database.
 	// Parameter order is (timestamp, txn) to match other store methods where
@@ -66,7 +66,7 @@ type SettingsStore interface {
 
 	// GetNodeSettings returns the persisted immutable node settings, or
 	// nil if the database has never been initialised.
-	GetNodeSettings() (*types.NodeSettings, error)
+	GetNodeSettings(ctx context.Context) (*types.NodeSettings, error)
 
 	// SetNodeSettings persists the immutable node settings via an
 	// idempotent insert that succeeds on repeated calls. If the row
@@ -74,21 +74,21 @@ type SettingsStore interface {
 	// fields and should only populate network fields when they are
 	// currently unset so callers like CheckNodeSettings can perform
 	// a one-time network backfill.
-	SetNodeSettings(*types.NodeSettings) error
+	SetNodeSettings(context.Context, *types.NodeSettings) error
 
 	// GetNodeSettingsGates returns the persisted node settings gate
 	// values, keyed by gate name. These are the values enforced on every
 	// startup by database/nodesettings.Evaluate; an empty result means no
 	// gates have been recorded yet, which is normal before the first
 	// successful start.
-	GetNodeSettingsGates() (nodesettings.Values, error)
+	GetNodeSettingsGates(ctx context.Context) (nodesettings.Values, error)
 
 	// SetNodeSettingsGates persists gates, one row per gate, so that a
 	// later call overwrites an earlier value for the same name. The
 	// recorded epoch and slot are stamped on every row written by this
 	// call and are zero when the write happens before the first block
 	// has been processed. A nil or empty gates is a no-op.
-	SetNodeSettingsGates(
+	SetNodeSettingsGates(ctx context.Context,
 		gates nodesettings.Values,
 		recordedEpoch uint64,
 		recordedSlot uint64,
@@ -105,7 +105,7 @@ type SettingsStore interface {
 	// record that a collision happened. A caller that gets inserted=false
 	// lost the race and must re-read what is now actually persisted rather
 	// than assume its own write took effect.
-	InsertNodeSettingsGateIfAbsent(
+	InsertNodeSettingsGateIfAbsent(ctx context.Context,
 		name string,
 		value string,
 		recordedEpoch uint64,
@@ -115,7 +115,7 @@ type SettingsStore interface {
 	// InsertNodeSettingsGatesIfAbsent persists the complete first-fill set in
 	// one metadata transaction. It returns false when another initializer
 	// already claimed any member of the set; no partial set is committed.
-	InsertNodeSettingsGatesIfAbsent(
+	InsertNodeSettingsGatesIfAbsent(ctx context.Context,
 		gates nodesettings.Values,
 		recordedEpoch uint64,
 		recordedSlot uint64,
@@ -1022,7 +1022,8 @@ type TransactionStore interface {
 	) ([]models.Transaction, error)
 
 	// GetTransactionsByAddress retrieves transactions involving
-	// the provided payment/staking credential pair with pagination and ordering.
+	// the provided payment/staking credential pair with pagination and ordering,
+	// optionally restricted to an inclusive (slot, block index) range.
 	GetTransactionsByAddress(
 		[]byte, // paymentKey
 		uint8, // credentialTag
@@ -1030,6 +1031,8 @@ type TransactionStore interface {
 		int, // limit
 		int, // offset
 		string, // order (asc|desc)
+		*models.AddressTransactionPosition, // from (inclusive, nil = unbounded)
+		*models.AddressTransactionPosition, // to (inclusive, nil = unbounded)
 		types.Txn,
 	) ([]models.Transaction, error)
 
@@ -1968,6 +1971,13 @@ type MetadataStore interface {
 	// accepted issue number for a cold key survives the pool leaving the
 	// active set, and is still enforced against any block claiming that key.
 	LatestPoolOpCertSequences(
+		types.Txn,
+	) (map[string]uint64, error)
+
+	// LatestPoolOpCertSequencesAtOrBefore is LatestPoolOpCertSequences
+	// restricted to rows at or before slot: the counters as they stood there.
+	LatestPoolOpCertSequencesAtOrBefore(
+		uint64, // slot
 		types.Txn,
 	) (map[string]uint64, error)
 
@@ -3058,6 +3068,29 @@ type MetadataStore interface {
 	) ([]models.MidnightAriadneRollback, error)
 	DeleteMidnightAriadneRollbacksByBlock(types.Txn, uint64) error
 	DeleteMidnightAriadneRollbacksBeforeBlock(types.Txn, uint64) error
+	DeleteMidnightAriadneRollbacksAfterBlock(types.Txn, uint64) error
+	CreateMidnightCandidateRemoval(
+		types.Txn,
+		*models.MidnightCandidateRemoval,
+	) error
+	FindMidnightCandidateRemovalsByBlock(
+		types.Txn,
+		uint64,
+	) ([]models.MidnightCandidateRemoval, error)
+	DeleteMidnightCandidateRemovalsByBlock(types.Txn, uint64) error
+	DeleteMidnightCandidateRemovalsBeforeBlock(types.Txn, uint64) error
+	DeleteMidnightCandidateRemovalsAfterBlock(types.Txn, uint64) error
+	UpsertMidnightEpochTransition(
+		types.Txn,
+		*models.MidnightEpochTransition,
+	) error
+	GetMidnightEpochTransitionByBlock(
+		types.Txn,
+		uint64,
+	) (*models.MidnightEpochTransition, error)
+	DeleteMidnightEpochTransitionsByBlock(types.Txn, uint64) error
+	DeleteMidnightEpochTransitionsBeforeBlock(types.Txn, uint64) error
+	DeleteMidnightEpochTransitionsAfterBlock(types.Txn, uint64) error
 	UpsertMidnightEpochCandidates(
 		types.Txn,
 		*models.MidnightEpochCandidates,

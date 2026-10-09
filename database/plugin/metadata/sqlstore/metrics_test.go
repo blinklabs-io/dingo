@@ -341,7 +341,7 @@ func TestBatchInsertTransactionIsCounted(t *testing.T) {
 	require.True(t, ok)
 
 	before := counterValue(t, reg, "insert")
-	_, err = acc.insertTransaction(
+	_, _, err = acc.insertTransaction(
 		dbCtx,
 		db,
 		[]byte{0x20}, []byte{0x21}, nil, 1, 0, "0", "0", "0", 0, true,

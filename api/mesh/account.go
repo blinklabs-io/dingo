@@ -16,6 +16,7 @@ package mesh
 
 import (
 	"cmp"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -42,7 +43,7 @@ func (s *Server) handleAccountBalance(
 	// Resolve the point before touching the ledger: a balance pinned
 	// to a block the node cannot resolve must fail rather than fall
 	// back to another point.
-	point, meshErr := s.resolveBalancePoint(
+	point, meshErr := s.resolveBalancePoint(r.Context(),
 		req.BlockIdentifier,
 	)
 	if meshErr != nil {
@@ -79,7 +80,7 @@ func (s *Server) handleAccountBalance(
 			"historical", point.historical,
 			"error", err,
 		)
-		writeError(w, wrapErr(ErrInternal, err))
+		writeError(w, ErrInternal)
 		return
 	}
 
@@ -120,7 +121,7 @@ func (s *Server) handleAccountCoins(
 			req.AccountIdentifier.Address,
 			"error", err,
 		)
-		writeError(w, wrapErr(ErrInternal, err))
+		writeError(w, ErrInternal)
 		return
 	}
 
@@ -166,6 +167,7 @@ type balancePoint struct {
 // lookup /block uses, so an unknown or rolled-back point fails with
 // block-not-found instead of silently answering from the tip.
 func (s *Server) resolveBalancePoint(
+	ctx context.Context,
 	id *PartialBlockIdentifier,
 ) (balancePoint, *Error) {
 	hasHash := id != nil && id.Hash != nil && *id.Hash != ""
@@ -178,7 +180,7 @@ func (s *Server) resolveBalancePoint(
 		}, nil
 	}
 
-	block, meshErr := s.lookupBlock(id)
+	block, meshErr := s.lookupBlock(ctx, id)
 	if meshErr != nil {
 		return balancePoint{}, meshErr
 	}

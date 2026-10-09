@@ -135,7 +135,9 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 
 	hash := append([]byte(nil), startHash...)
 	out := make([]*watch.WatchTxResponse, 0, 64)
-	const maxWalkBlocks = 2160
+	// A rollback is at most k blocks deep, so the point sits at depth <= k:
+	// k+1 blocks are read counting the tip, and none beyond that.
+	maxWalkBlocks := max(s.utxorpc.config.LedgerState.SecurityParam(), 0) + 1
 	for range maxWalkBlocks {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -143,7 +145,7 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 		if len(hash) == 0 {
 			return out, nil
 		}
-		block, err := s.utxorpc.config.LedgerState.BlockByHash(hash)
+		block, err := s.utxorpc.config.LedgerState.BlockByHash(ctx, hash)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
 				return out, nil
@@ -199,6 +201,12 @@ func (s *watchServiceServer) WatchTx(
 	req *connect.Request[watch.WatchTxRequest],
 	stream *connect.ServerStream[watch.WatchTxResponse],
 ) error {
+	release, err := s.utxorpc.admitStream(req.Peer())
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	predicate := req.Msg.GetPredicate() // Predicate
 	fieldMask := req.Msg.GetFieldMask()
 	intersect := req.Msg.GetIntersect() // []*BlockRef
@@ -224,6 +232,10 @@ func (s *watchServiceServer) WatchTx(
 
 	var predTree *txPredicateNode
 	if predicate != nil {
+		remaining := s.utxorpc.config.MaxPredicateNodes
+		if !predicateProtoWithinBudget(predicate, isNilPtr[watch.TxPredicate], &remaining, 0) {
+			return predicateBudgetError(s.utxorpc.config.MaxPredicateNodes)
+		}
 		predTree = txPredicateFromWatch(predicate)
 	}
 
@@ -243,7 +255,7 @@ func (s *watchServiceServer) WatchTx(
 	}
 
 	// Get our starting point matching our chain
-	point, err := s.utxorpc.config.LedgerState.GetIntersectPoint(points)
+	point, err := s.utxorpc.config.LedgerState.GetIntersectPoint(ctx, points)
 	if err != nil {
 		s.utxorpc.config.Logger.Error(
 			"failed to get points",
@@ -256,6 +268,9 @@ func (s *watchServiceServer) WatchTx(
 			"nil point returned",
 		)
 		return errors.New("nil point returned")
+	}
+	if err := s.utxorpc.checkReplayDistance(*point); err != nil {
+		return err
 	}
 
 	// Create our chain iterator

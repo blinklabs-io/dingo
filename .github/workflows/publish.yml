@@ -87,6 +87,17 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: golangci-lint (root)
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+      # Unpinned like golangci-lint above, so a new analyzer release's findings
+      # are fixed when it lands. Both run through the Makefile so this job and
+      # `make lint` use the same build tags, flags, and package set.
+      - name: install nilaway and modernize
+        run: |
+          go install go.uber.org/nilaway/cmd/nilaway@latest
+          go install golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@latest
+      - name: nilaway
+        run: make nilaway
+      - name: modernize
+        run: make modernize
       - name: config-parity
         run: make config-parity
 
@@ -110,23 +121,25 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
-          # This job runs `go run ...@latest`, so third-party code executes in
-          # the workspace. Do not leave GITHUB_TOKEN in the local git config.
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
-        with:
-          go-version: 1.26.x
-          cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-1.26.x-
+      # The action is pinned; the scanner it installs and the vulnerability
+      # database it reads are not, so a new advisory fails the job instead of
+      # waiting behind a stale scanner. The toolchain floats for the same
+      # reason. govulncheck exits non-zero only for vulnerabilities this module
+      # actually calls, so unreachable findings it also prints do not fail the
+      # job. GOFLAGS carries the build tags `make govulncheck` passes, which
+      # the action has no input for. setup-go forces GOTOOLCHAIN=local, so the
+      # step overrides it to honor go.mod's patched toolchain floor when the
+      # setup-go release manifest lags a Go security release.
       - name: govulncheck
-        run: make govulncheck
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0 https://github.com/golang/govulncheck-action/releases/tag/v1.1.0
+        env:
+          GOFLAGS: -tags=dingo_extra_plugins
+          GOTOOLCHAIN: auto
+        with:
+          go-version-input: 1.26.x
+          check-latest: true
+          repo-checkout: false
 
   # Stage 2. The cheap gate: whole suite on SQLite, no race, no services.
   # Decides whether it is worth spending four runners on the stage below.
@@ -836,11 +849,18 @@ jobs:
               core.setFailed(error.message);
             }
 
-      # This updates the documentation on pkg.go.dev and the latest version available via the Go module proxy
-      ### TODO: this is broken
-      #- name: Pull new module version
-      #  if: startsWith(github.ref, 'refs/tags/')
-      #  uses: andrewslotin/go-proxy-pull-action@e5aea3b8b3478fc5b76befda4390513868ed2dc8 # v1.4.0 https://github.com/andrewslotin/go-proxy-pull-action/releases/tag/v1.4.0
+      # Requesting the tag's .info from the module proxy makes it fetch the new
+      # version, which is also what pkg.go.dev indexes. Bounded and non-fatal:
+      # the release is already published, and the proxy fetches on first use.
+      - name: Refresh Go module proxy
+        if: github.ref_type == 'tag'
+        continue-on-error: true
+        env:
+          TAG: ${{ github.ref_name }}
+        run: >-
+          curl --fail --silent --show-error --max-time 30
+          --retry 3 --retry-max-time 120
+          "https://proxy.golang.org/github.com/blinklabs-io/dingo/@v/${TAG}.info"
 
   npm-release:
     runs-on: ubuntu-latest
@@ -1028,7 +1048,7 @@ jobs:
               exit 0
             fi
             gh pr create --repo "$TAP_REPO" --base main --head "$RELEASE_BRANCH" \
-              --title "dingo ${RELEASE_TAG}" \
+              --title "chore(dingo): release ${RELEASE_TAG}" \
               --body "Automated formula bump for [dingo ${RELEASE_TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG})."
           else
             echo "Open PR already exists for ${RELEASE_BRANCH}; tap branch is current."

@@ -74,6 +74,8 @@ const (
 	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
 	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
+	poolRelayTypeSchemaRelease                          = "pool-relay-type"
+	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -215,6 +217,12 @@ var schemaVersions = []struct {
 		Dir:     "v36",
 	},
 	{Version: 37, Name: "drep-expiry-history", Dir: "v37"},
+	{Version: 38, Name: poolRelayTypeSchemaRelease, Dir: "v38"},
+	{
+		Version: 39,
+		Name:    midnightRollbackJournalSchemaRelease,
+		Dir:     "v39",
+	},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

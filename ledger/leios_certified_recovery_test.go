@@ -62,9 +62,13 @@ func TestValidateDijkstraLeiosCertificateResolvesBatchParent(t *testing.T) {
 			LengthInSlots: 200,
 		}},
 	})
-	err := ls.validateDijkstraLeiosCertificate(certifier, map[string]leiosEbRef{
-		string(parent.Hash().Bytes()): {slot: parent.SlotNumber()},
-	})
+	err := ls.validateDijkstraLeiosCertificate(
+		context.Background(),
+		certifier,
+		map[string]leiosEbRef{
+			string(parent.Hash().Bytes()): {slot: parent.SlotNumber()},
+		},
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(5), gotEpoch)
 	require.Equal(t, parent.Hash().Bytes(), gotParent)

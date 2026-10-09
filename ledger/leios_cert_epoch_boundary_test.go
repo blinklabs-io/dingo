@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -62,8 +63,10 @@ func leiosBoundaryTestBlock(
 		var fields []cbor.RawMessage
 		_, err := cbor.Decode(raw, &fields)
 		require.NoError(t, err)
-		require.Len(t, fields, 4)
-		blockTransactions = append(blockTransactions, []cbor.RawMessage{fields[0], fields[1], fields[3], fields[2]})
+		require.Len(t, fields, 3)
+		blockTransactions = append(blockTransactions, []any{
+			fields[0], fields[1], fields[2], true,
+		})
 	}
 	bodyCbor, err := cbor.Encode([]any{blockTransactions, certField, nil})
 	require.NoError(t, err)
@@ -121,20 +124,49 @@ func TestLedgerProcessBlocksDefersLeiosCertificateCheckPastEpochBoundary(
 
 	t.Run("same era", func(t *testing.T) {
 		t.Parallel()
-		runLeiosCertEpochBoundaryCase(t, false, false)
+		runLeiosCertEpochBoundaryCase(t, false, nil, false)
 	})
 	t.Run("hard fork", func(t *testing.T) {
 		t.Parallel()
-		runLeiosCertEpochBoundaryCase(t, true, false)
+		runLeiosCertEpochBoundaryCase(t, true, nil, false)
+	})
+}
+
+// TestLedgerProcessBlocksRejectsInvalidLeiosCertificatePastEpochBoundary
+// shows that deferring the certificate check past the boundary does not
+// accept an invalid certificate: the rollover still happens, the certifying
+// block is checked against its own epoch, and its rejection stops the batch
+// before the block is applied.
+func TestLedgerProcessBlocksRejectsInvalidLeiosCertificatePastEpochBoundary(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	errInvalidCertificate := errors.New("invalid leios certificate")
+	t.Run("same era", func(t *testing.T) {
+		t.Parallel()
+		runLeiosCertEpochBoundaryCase(t, false, errInvalidCertificate, false)
+	})
+	t.Run("hard fork", func(t *testing.T) {
+		t.Parallel()
+		runLeiosCertEpochBoundaryCase(t, true, errInvalidCertificate, false)
 	})
 }
 
 func TestLedgerProcessBlocksAppliesCertifiedClosureBeforeEpochSnapshot(t *testing.T) {
 	t.Parallel()
-	runLeiosCertEpochBoundaryCase(t, false, true)
+	runLeiosCertEpochBoundaryCase(t, false, nil, true)
 }
 
-func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool, crossingClosure bool) {
+// runLeiosCertEpochBoundaryCase drives the batch through the ledger. A nil
+// certificateErr makes the certificate validator accept; otherwise it rejects
+// and the batch must fail with that error before the certifying block applies.
+func runLeiosCertEpochBoundaryCase(
+	t *testing.T,
+	hardFork bool,
+	certificateErr error,
+	crossingClosure bool,
+) {
 	t.Helper()
 	const epochLength = 1_000
 	ebHash := leiosTestHash(0xE4)
@@ -163,7 +195,7 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool, crossingClosure 
 	blocks = append(blocks, announcer, certifier)
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	rawBlocks := make([]chain.RawBlock, 0, len(blocks))
 	for _, blk := range blocks {
@@ -176,7 +208,7 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool, crossingClosure 
 			Cbor:        blk.Cbor(),
 		})
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), rawBlocks))
 
 	startEra := eras.DijkstraEraDesc
 	params := dijkstraTestProtocolParameters()
@@ -248,7 +280,7 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool, crossingClosure 
 			validatedMu.Lock()
 			defer validatedMu.Unlock()
 			validatedEpochs = append(validatedEpochs, epoch)
-			return nil
+			return certificateErr
 		},
 	})
 	require.NoError(t, err)
@@ -269,7 +301,7 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool, crossingClosure 
 	var closureVisibleAtSnap bool
 	if crossingClosure {
 		ls.SetEpochBoundarySnapshotStakeHook(func(txn *database.Txn, _ event.EpochTransitionEvent) error {
-			tx, err := db.GetTransactionByHash(closureTx.Hash().Bytes(), txn)
+			tx, err := db.GetTransactionByHash(t.Context(), closureTx.Hash().Bytes(), txn)
 			if err != nil {
 				return err
 			}
@@ -281,10 +313,34 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool, crossingClosure 
 	results := make(chan readChainResult, 1)
 	results <- readChainResult{blocks: blocks}
 	close(results)
-	require.NoError(t, ls.ledgerProcessBlocksFromSource(
+	processErr := ls.ledgerProcessBlocksFromSource(
 		context.Background(),
 		results,
-	))
+	)
+	if certificateErr != nil {
+		require.ErrorIs(t, processErr, certificateErr)
+		require.Equal(t, uint64(1), ls.currentEpoch.EpochId)
+		require.Less(
+			t,
+			ls.currentTip.Point.Slot,
+			certifier.SlotNumber(),
+			"the rejected certifying block must not be applied",
+		)
+		validatedMu.Lock()
+		defer validatedMu.Unlock()
+		require.NotEmpty(t, validatedEpochs)
+		for _, epoch := range validatedEpochs {
+			require.Equal(
+				t,
+				uint64(1),
+				epoch,
+				"the certificate must be checked against its own epoch, "+
+					"never a forecast or previous-era one",
+			)
+		}
+		return
+	}
+	require.NoError(t, processErr)
 
 	require.Equal(t, uint64(1), ls.currentEpoch.EpochId)
 	require.Equal(t, eras.DijkstraEraDesc.Id, ls.currentEra.Id)
@@ -300,12 +356,12 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool, crossingClosure 
 		fees, err = db.Metadata().SumTransactionFeesInSlotRange(epochLength, 2*epochLength-1, nil)
 		require.NoError(t, err)
 		require.Zero(t, fees)
-		storedTx, err := db.GetTransactionByHash(closureTx.Hash().Bytes(), nil)
+		storedTx, err := db.GetTransactionByHash(t.Context(), closureTx.Hash().Bytes(), nil)
 		require.NoError(t, err)
 		require.Equal(t, certifier.SlotNumber(), storedTx.Slot, "rollback ownership remains with the certifying ranking block")
-		_, _, err = db.TruncateAfterSlot(ocommon.Point{Slot: announcer.SlotNumber(), Hash: announcer.Hash().Bytes()}, 0, nil)
+		_, _, err = db.TruncateAfterSlot(t.Context(), ocommon.Point{Slot: announcer.SlotNumber(), Hash: announcer.Hash().Bytes()}, 0, nil)
 		require.NoError(t, err)
-		storedTx, err = db.GetTransactionByHash(closureTx.Hash().Bytes(), nil)
+		storedTx, err = db.GetTransactionByHash(t.Context(), closureTx.Hash().Bytes(), nil)
 		require.NoError(t, err)
 		require.Nil(t, storedTx, "rolling back the certifier removes its pre-tick closure")
 		fees, err = db.Metadata().SumTransactionFeesInSlotRange(0, epochLength-1, nil)
@@ -366,10 +422,10 @@ func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
 	announcer := leiosBoundaryTestBlock(t, 0, 10, lcommon.Blake2b256{}, false, ebHash, producerRaw)
 	certifier := leiosBoundaryTestBlock(t, 1, 20, announcer.Hash(), true, nil)
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
 	for _, block := range []gledger.Block{announcer, certifier} {
-		require.NoError(t, cm.PrimaryChain().AddBlock(block, nil))
+		require.NoError(t, cm.PrimaryChain().AddBlock(t.Context(), block, nil))
 	}
 	nonce := bytes.Repeat([]byte{0x42}, 32)
 	epoch := models.Epoch{EpochId: 0, StartSlot: 0, SlotLength: 1000, LengthInSlots: 1000, EraId: eras.DijkstraEraDesc.Id, Nonce: nonce, EvolvingNonce: nonce}
@@ -402,7 +458,7 @@ func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
 	}
 	close(batches)
 	require.NoError(t, ls.ProcessTrustedBlockBatches(t.Context(), batches))
-	stored, err := db.GetTransactionByHash(spender.Hash().Bytes(), nil)
+	stored, err := db.GetTransactionByHash(t.Context(), spender.Hash().Bytes(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	require.Len(t, stored.Inputs, 1, "the closure must consume the earlier ranking-block output even in a shared batch")

@@ -460,6 +460,8 @@ func (s *Store) GetTransactionsByAddress(
 	limit int,
 	offset int,
 	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 	txn types.Txn,
 ) ([]models.Transaction, error) {
 	ret := []models.Transaction{}
@@ -482,9 +484,17 @@ func (s *Store) GetTransactionsByAddress(
 	query := `SELECT ` + sqliteTransactionColumns + `
 FROM "transaction"
 WHERE id IN (
-    SELECT DISTINCT transaction_id FROM address_transaction WHERE ` +
-		predicate + `
-)
+    SELECT DISTINCT transaction_id FROM address_transaction WHERE ` + predicate
+	if from != nil {
+		query += " AND (slot, tx_index) >= (?, ?)"
+		args = append(args, from.Slot, from.TxIndex)
+	}
+	if to != nil {
+		query += " AND (slot, tx_index) <= (?, ?)"
+		args = append(args, to.Slot, to.TxIndex)
+	}
+	query += "\n)"
+	query += `
 ORDER BY slot ` + direction + `, block_index ` + direction + `,
          id ` + direction
 	query, args = appendLimitOffset(query, args, limit, offset)

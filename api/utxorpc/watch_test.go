@@ -42,6 +42,7 @@ type watchTxLedgerStateProbe struct {
 }
 
 func (p *watchTxLedgerStateProbe) BlockByHash(
+	_ context.Context,
 	hash []byte,
 ) (models.Block, error) {
 	return p.blockByHash(hash)
@@ -124,7 +125,7 @@ func TestConnect_WatchTx_InHistoryRollbackSkipsPersistedFetch(t *testing.T) {
 		UtxorpcLedgerState: h.LS,
 		blockByHash: func(hash []byte) (models.Block, error) {
 			blockReads.Add(1)
-			return h.LS.BlockByHash(hash)
+			return h.LS.BlockByHash(context.Background(), hash)
 		},
 	}
 
@@ -138,13 +139,19 @@ func TestConnect_WatchTx_InHistoryRollbackSkipsPersistedFetch(t *testing.T) {
 		blocks[start].Slot,
 		blocks[start].Hash,
 	)
-	require.NoError(t, h.LS.Chain().Rollback(rollbackPoint))
+	require.NoError(
+		t,
+		h.LS.Chain().Rollback(context.Background(), rollbackPoint),
+	)
 	readded, err := gledger.NewBlockFromCbor(
 		blocks[start+1].Type,
 		blocks[start+1].Cbor,
 	)
 	require.NoError(t, err)
-	require.NoError(t, h.LS.Chain().AddBlock(readded, nil))
+	require.NoError(
+		t,
+		h.LS.Chain().AddBlock(context.Background(), readded, nil),
+	)
 	requireWatchTxIdle(t, stream)
 
 	require.Never(
@@ -218,7 +225,7 @@ func TestConnect_WatchTx_SequentialDeepRollbacksRetainCursor(t *testing.T) {
 			case bytes.Equal(hash, blocks[start-2].Hash):
 				return persistedWithTxPayload(blocks[start-2]), nil
 			default:
-				return h.LS.BlockByHash(hash)
+				return h.LS.BlockByHash(context.Background(), hash)
 			}
 		},
 	}
@@ -228,22 +235,31 @@ func TestConnect_WatchTx_SequentialDeepRollbacksRetainCursor(t *testing.T) {
 	stream := startWatchTxAt(t, ctx, h, blocks[start-1])
 	requireWatchTxIdle(t, stream)
 
-	require.NoError(t, h.LS.Chain().Rollback(ocommon.NewPoint(
-		blocks[start-2].Slot,
-		blocks[start-2].Hash,
-	)))
+	require.NoError(
+		t,
+		h.LS.Chain().Rollback(context.Background(), ocommon.NewPoint(
+			blocks[start-2].Slot,
+			blocks[start-2].Hash,
+		)),
+	)
 	requireWatchTxUndos(t, stream, undoCount)
 
-	require.NoError(t, h.LS.Chain().Rollback(ocommon.NewPoint(
-		blocks[start-3].Slot,
-		blocks[start-3].Hash,
-	)))
+	require.NoError(
+		t,
+		h.LS.Chain().Rollback(context.Background(), ocommon.NewPoint(
+			blocks[start-3].Slot,
+			blocks[start-3].Hash,
+		)),
+	)
 	readded, err := gledger.NewBlockFromCbor(
 		blocks[start-2].Type,
 		blocks[start-2].Cbor,
 	)
 	require.NoError(t, err)
-	require.NoError(t, h.LS.Chain().AddBlock(readded, nil))
+	require.NoError(
+		t,
+		h.LS.Chain().AddBlock(context.Background(), readded, nil),
+	)
 	requireWatchTxUndos(t, stream, undoCount)
 	requireWatchTxIdle(t, stream)
 }
@@ -288,7 +304,10 @@ func runWatchTxRollbackPanicChild(t *testing.T) {
 		blocks[childIdx-2].Slot,
 		blocks[childIdx-2].Hash,
 	)
-	require.NoError(t, h.LS.Chain().Rollback(rollbackPoint))
+	require.NoError(
+		t,
+		h.LS.Chain().Rollback(context.Background(), rollbackPoint),
+	)
 	require.False(t, stream.Receive())
 	require.ErrorContains(
 		t,
@@ -464,4 +483,75 @@ func TestPointsEqual(t *testing.T) {
 			ocommon.NewPoint(11, []byte{0xaa, 0xbb}),
 		),
 	)
+}
+
+// securityParamProbe backs a rollback walk over a fixed block list and
+// counts how many blocks the walk reads.
+type securityParamProbe struct {
+	UtxorpcLedgerState
+	k      int
+	byHash map[string]models.Block
+	reads  int
+}
+
+func (p *securityParamProbe) SecurityParam() int { return p.k }
+
+func (p *securityParamProbe) BlockByHash(
+	_ context.Context,
+	hash []byte,
+) (models.Block, error) {
+	p.reads++
+	blk, ok := p.byHash[string(hash)]
+	if !ok {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	return blk, nil
+}
+
+func TestWatchTxRollbackWalkDepthIsSecurityParam(t *testing.T) {
+	t.Parallel()
+
+	const k = 3
+	blocks := loadTestChainBlocks(t, 12)
+	byHash := make(map[string]models.Block, len(blocks))
+	for _, b := range blocks {
+		byHash[string(b.Hash)] = b
+	}
+	tip := len(blocks) - 1
+	pointAt := func(depth int) ocommon.Point {
+		b := blocks[tip-depth]
+		return ocommon.NewPoint(b.Slot, b.Hash)
+	}
+	for _, tc := range []struct {
+		name      string
+		depth     int
+		wantErr   bool
+		wantReads int
+	}{
+		{"one below the depth", k - 1, false, k},
+		{"exactly the depth", k, false, k + 1},
+		{"one past the depth", k + 1, true, k + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			probe := &securityParamProbe{k: k, byHash: byHash}
+			s := &watchServiceServer{
+				utxorpc: NewUtxorpc(UtxorpcConfig{LedgerState: probe}),
+			}
+
+			_, err := s.watchTxFetchRollbackUndoFromBlocks(
+				context.Background(),
+				blocks[tip].Hash,
+				pointAt(tc.depth),
+				func(gledger.Transaction) bool { return true },
+			)
+
+			if tc.wantErr {
+				require.ErrorContains(t, err, "rollback fetch exceeded")
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, tc.wantReads, probe.reads)
+		})
+	}
 }

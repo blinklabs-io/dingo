@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -83,6 +84,12 @@ type BatchedTxIngestOpts struct {
 	// replay paths where producer rows may be absent.
 	SkipConsumedInputRecovery bool
 
+	// TrustedImmutableReplay elides consumed-input blob recovery while
+	// preserving normal transaction conflict validation. Use only when replaying
+	// a complete, trusted immutable history in slot order, so each consumed
+	// output was written by an earlier block in the same replay.
+	TrustedImmutableReplay bool
+
 	// StrictAppliedInputConservation marks the steady-state, at-tip, validated
 	// path. Past the Mithril trust boundary, a missing producer row is recovered
 	// only when the producer block is still on the applied primary chain. This
@@ -145,10 +152,38 @@ type inFlightProducerLookup interface {
 	HasInFlightProducer(txId []byte, outputIdx uint32) bool
 }
 
+type transactionStoreStakeDeltaFlusher interface {
+	FlushBatchStakeDeltas(types.MetadataBatchAccumulator, types.Txn) error
+}
+
+// FlushBatchStakeDeltas applies pending live-stake changes while leaving the
+// accumulator's other batched rows queued for FlushBatch.
+func (d *Database) FlushBatchStakeDeltas(
+	acc BatchAccumulator,
+	txn *Txn,
+) error {
+	if acc == nil {
+		return nil
+	}
+	flusher, ok := d.transactionStore().(transactionStoreStakeDeltaFlusher)
+	if !ok {
+		return nil
+	}
+	var metadataTxn types.Txn
+	if txn != nil {
+		metadataTxn = txn.Metadata()
+		if metadataTxn == nil {
+			return types.ErrNilTxn
+		}
+	}
+	return flusher.FlushBatchStakeDeltas(acc, metadataTxn)
+}
+
 // SetTransactionBatched stores transaction blob offsets and immediate
 // metadata, while accumulating bulk metadata rows into acc for a later
 // FlushBatch.
 func (d *Database) SetTransactionBatched(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
@@ -160,6 +195,7 @@ func (d *Database) SetTransactionBatched(
 	txn *Txn,
 ) (retErr error) {
 	return d.SetTransactionBatchedWithOpts(
+		ctx,
 		tx, point, idx, updateEpoch, pparamUpdates,
 		certDeposits, offsets, acc, txn,
 		BatchedTxIngestOpts{},
@@ -169,6 +205,7 @@ func (d *Database) SetTransactionBatched(
 // SetTransactionBatchedWithOpts is the option-aware form of
 // SetTransactionBatched. See BatchedTxIngestOpts for the available toggles.
 func (d *Database) SetTransactionBatchedWithOpts(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
@@ -188,7 +225,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	}
 	owned := false
 	if txn == nil {
-		txn = d.Transaction(true)
+		txn = d.Transaction(ctx, true)
 		owned = true
 		defer func() {
 			if txn == nil {

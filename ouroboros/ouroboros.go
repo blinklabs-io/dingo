@@ -97,6 +97,18 @@ type Ouroboros struct {
 	// lastOriginOnlyIntersectWarn throttles warnOriginOnlyIntersectRescued.
 	// Unix nanoseconds; 0 means "never warned".
 	lastOriginOnlyIntersectWarn atomic.Int64
+	// servedActivityLast throttles recordServedActivity per connection
+	// (servedActivityKey -> *atomic.Int64 nanoseconds since
+	// servedActivityClockBase of the last report).
+	servedActivityLast sync.Map
+	// servedActivityHook, when non-nil, replaces the peer governor as the
+	// sink for throttled served-activity reports. Test-only seam: the
+	// governor exposes no way to attach a connection to a peer from outside
+	// its package.
+	servedActivityHook func(ouroboros.ConnectionId)
+	// servedActivityInterval overrides servedActivityReportInterval when
+	// non-zero (tests).
+	servedActivityInterval time.Duration
 	// leiosAnnouncementLedger is the narrow synchronous ledger view used by
 	// LeiosNotify. It returns validation facts only; this package owns peer,
 	// publication, and relay semantics.
@@ -178,6 +190,10 @@ type Ouroboros struct {
 	// connection close can cancel it before it installs a session.
 	localstatequerySessions     map[ouroboros.ConnectionId]*localstatequerySession
 	localstatequeryAcquisitions map[ouroboros.ConnectionId]*localstatequeryAcquisition
+	// localstatequeryRequests holds the reads in flight on each connection,
+	// so closing the connection cancels them. Guarded by
+	// localstatequeryAcquireMutex.
+	localstatequeryRequests map[ouroboros.ConnectionId][]*localstatequeryRequest
 	// localstatequeryVerifyHook and localstatequeryVerifiedHook, when set,
 	// run just before Acquire verifies its point and just after the
 	// verified view opens. Tests use them to act at those exact moments.
@@ -324,11 +340,14 @@ type Ouroboros struct {
 	// elides the backfiller's duplicate manifest write, while two live
 	// occurrences of the same hash at different slots persist independently.
 	// Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
-	leiosPersistOnce     sync.Once
-	leiosPersistStopOnce sync.Once
-	leiosPersistStarted  atomic.Bool
-	leiosPersistMu       sync.Mutex
-	leiosPersistPending  map[string]*leiosPersistJob
+	// leiosPersistLifecycleMu keeps each enqueue reservation, copy and signal
+	// in one writer generation while stop and reset hold the exclusive lock.
+	leiosPersistLifecycleMu sync.RWMutex
+	leiosPersistOnce        sync.Once
+	leiosPersistStopOnce    sync.Once
+	leiosPersistStarted     atomic.Bool
+	leiosPersistMu          sync.Mutex
+	leiosPersistPending     map[string]*leiosPersistJob
 	// leiosPersistBytes is the aggregate reserved size of the queue: the sum
 	// of leiosPersistPending's job sizes plus every reservation whose payload
 	// copy is still in flight. leiosPersistReserved counts those in-flight
@@ -808,6 +827,7 @@ func isTrustedNtCListener(l connmanager.ListenerConfig) bool {
 }
 
 func (o *Ouroboros) ConfigureListeners(
+	ctx context.Context,
 	listeners []connmanager.ListenerConfig,
 ) []connmanager.ListenerConfig {
 	tmpListeners := make([]connmanager.ListenerConfig, len(listeners))
@@ -847,7 +867,7 @@ func (o *Ouroboros) ConfigureListeners(
 			l.TrustedLocal = trusted
 			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
-				o.chainsyncConnectionConfigOption(false),
+				o.chainsyncConnectionConfigOption(ctx, false),
 				ouroboros.WithLocalStateQueryConfig(
 					olocalstatequery.NewConfig(
 						o.localstatequeryServerConnOpts(trusted)...,
@@ -908,7 +928,7 @@ func (o *Ouroboros) ConfigureListeners(
 						)...,
 					),
 				),
-				o.chainsyncConnectionConfigOption(true),
+				o.chainsyncConnectionConfigOption(ctx, true),
 				ouroboros.WithBlockFetchConfig(
 					blockfetchConfig(
 						slices.Concat(
@@ -953,7 +973,9 @@ func (o *Ouroboros) ConfigureListeners(
 	return tmpListeners
 }
 
-func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
+func (o *Ouroboros) OutboundConnOpts(
+	ctx context.Context,
+) []ouroboros.ConnectionOptionFunc {
 	opts := []ouroboros.ConnectionOptionFunc{
 		ouroboros.WithNetworkMagic(o.config.NetworkMagic),
 		ouroboros.WithNodeToNode(true),
@@ -974,7 +996,7 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 				)...,
 			),
 		),
-		o.chainsyncConnectionConfigOption(true),
+		o.chainsyncConnectionConfigOption(ctx, true),
 		ouroboros.WithBlockFetchConfig(
 			blockfetchConfig(
 				slices.Concat(
@@ -1028,6 +1050,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	}
 	connId := e.ConnectionId
 	o.cancelFutureHeaderResync(connId)
+	o.forgetServedActivity(connId)
 
 	// Counts keep-alive pong timeouts.
 	if classifyKeepaliveTimeoutClose(e.Error) {
@@ -1087,6 +1110,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.leiosVotes != nil {
 		o.leiosVotes.RemoveConnection(leiosConnectionIdString(connId))
 	}
+	o.dropDeferredLeiosAnnouncements(leiosConnectionIdString(connId))
 	// Drop the per-connection leios-fetch guard. In-flight fetch goroutines
 	// hold their own reference, so they finish safely after this.
 	o.leiosFetchGuards.Delete(connId)

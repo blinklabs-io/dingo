@@ -38,7 +38,7 @@ func (f *hardForkRatifyFixture) reloadProposal(
 	t *testing.T,
 ) *models.GovernanceProposal {
 	t.Helper()
-	loaded, err := f.db.GetGovernanceProposal(
+	loaded, err := f.db.GetGovernanceProposal(context.Background(),
 		f.proposal.TxHash, f.proposal.ActionIndex, nil,
 	)
 	require.NoError(t, err)
@@ -170,12 +170,12 @@ func newHardForkRatifyLiveStakeFixture(
 
 	coldCredential := repeatByte(28, 0xD1)
 	hotCredential := repeatByte(28, 0xD2)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+	require.NoError(t, db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 		ColdCredHash: coldCredential,
 		ExpiresEpoch: 1000,
 		AddedSlot:    1,
 	}}, nil))
-	require.NoError(t, db.SetCommitteeQuorum(big.NewRat(1, 1), 1, nil))
+	require.NoError(t, db.SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil))
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	_, err = raw.Exec(`
@@ -203,19 +203,19 @@ INSERT INTO auth_committee_hot (
 		GovActionCbor: actionCbor,
 		AddedSlot:     1,
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
-	loaded, err := db.GetGovernanceProposal(proposal.TxHash, 0, nil)
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
+	loaded, err := db.GetGovernanceProposal(context.Background(), proposal.TxHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeCC,
 		VoterCredential: hotCredential,
 		Vote:            models.VoteYes,
 		AddedSlot:       2,
 	}, nil))
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeSPO,
 		VoterCredential: []byte(hfrLiveYesPool),
@@ -296,7 +296,7 @@ func seedLiveDelegatedStake(
 	}
 	stakingKey = stakingKey[:28]
 
-	require.NoError(t, db.ImportPool(nil, &models.Pool{
+	require.NoError(t, db.ImportPool(context.Background(), nil, &models.Pool{
 		PoolKeyHash: []byte(poolKeyHash),
 		VrfKeyHash:  make([]byte, 32),
 		Pledge:      1_000_000,
@@ -310,13 +310,13 @@ func seedLiveDelegatedStake(
 		Margin:      &types.Rat{Rat: big.NewRat(1, 100)},
 		VrfKeyHash:  make([]byte, 32),
 	}))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey: stakingKey,
 		Pool:       []byte(poolKeyHash),
 		AddedSlot:  74_100,
 		Active:     true,
 	}))
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       repeatByte(32, poolKeyHash[len(poolKeyHash)-1]),
 		OutputIdx:  0,
 		StakingKey: stakingKey,

@@ -747,6 +747,8 @@ type utxorpcHarnessOptions struct {
 	maxHistoryItems int
 	serverTimeout   time.Duration
 	skipIndexTxHash []byte
+	// tune adjusts the server configuration before the server is built.
+	tune func(*UtxorpcConfig)
 }
 
 func newConnectH2CClient() *http.Client {
@@ -869,7 +871,7 @@ func newUtxorpcConnectHarness(
 	apiBus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { apiBus.Stop() })
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
@@ -906,14 +908,18 @@ func newUtxorpcConnectHarness(
 	if maxHist <= 0 {
 		maxHist = DefaultMaxHistoryItems
 	}
-	u := NewUtxorpc(UtxorpcConfig{
+	cfg := UtxorpcConfig{
 		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:        apiBus,
 		LedgerState:     ls,
 		Mempool:         mp,
 		MaxHistoryItems: maxHist,
 		ServerTimeout:   opts.serverTimeout,
-	})
+	}
+	if opts.tune != nil {
+		opts.tune(&cfg)
+	}
+	u := NewUtxorpc(cfg)
 
 	srv := httptest.NewUnstartedServer(testUtxorpcHTTPHandler(u))
 	srv.Config.Protocols = unencryptedHTTP2Protocols()
@@ -961,6 +967,7 @@ func indexFixtureTransactionsForReadTx(
 				continue
 			}
 			err := db.SetTransaction(
+				context.Background(),
 				tx,
 				point,
 				uint32(j),
@@ -1184,6 +1191,72 @@ func TestConnect_DumpHistory(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, out2.Msg.GetBlock())
 	require.Equal(t, blocks[4].Cbor, out2.Msg.GetBlock()[0].GetNativeBytes())
+}
+
+func TestConnect_DumpHistory_OmittedMaxItemsUsesDefaultPage(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks: 25,
+		tune: func(cfg *UtxorpcConfig) {
+			cfg.HistoryPageItems = 4
+		},
+	})
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	blocks := loadTestChainBlocks(t, 25)
+
+	out, err := cli.DumpHistory(
+		ctx,
+		connect.NewRequest(&sync.DumpHistoryRequest{
+			StartToken: &sync.BlockRef{
+				Slot:   blocks[0].Slot,
+				Hash:   blocks[0].Hash,
+				Height: blocks[0].Number,
+			},
+		}),
+	)
+	require.NoError(t, err)
+	require.Len(t, out.Msg.GetBlock(), 4)
+	require.Equal(t, blocks[4].Hash, out.Msg.GetNextToken().GetHash())
+}
+
+func TestConnect_DumpHistory_ByteBudgetReturnsContinuationToken(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks: 25,
+		tune: func(cfg *UtxorpcConfig) {
+			// Smaller than any one block: each response still carries the
+			// block it started on, then hands back a token.
+			cfg.MaxHistoryBytes = 1
+		},
+	})
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	blocks := loadTestChainBlocks(t, 25)
+
+	out, err := cli.DumpHistory(
+		ctx,
+		connect.NewRequest(&sync.DumpHistoryRequest{
+			StartToken: &sync.BlockRef{
+				Slot:   blocks[0].Slot,
+				Hash:   blocks[0].Hash,
+				Height: blocks[0].Number,
+			},
+			MaxItems: 10,
+		}),
+	)
+	require.NoError(t, err)
+	require.Len(t, out.Msg.GetBlock(), 1)
+	require.Equal(t, blocks[1].Cbor, out.Msg.GetBlock()[0].GetNativeBytes())
+	require.Equal(t, blocks[1].Hash, out.Msg.GetNextToken().GetHash())
 }
 
 func TestConnect_DumpHistory_StartTokenNotOnChain(t *testing.T) {
@@ -1471,7 +1544,7 @@ func TestConnect_ReadTx(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, txHash, tx.Hash().Bytes())
-	rec, err := h.LS.TransactionByHash(txHash)
+	rec, err := h.LS.TransactionByHash(context.Background(), txHash)
 	require.NoError(t, err)
 	require.NotNil(t, rec)
 	require.NotNil(t, out.Msg.GetTx().GetBlockRef())
@@ -1767,7 +1840,10 @@ func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
 	require.Len(t, blocks, n)
 	inter := blocks[5]
 	roll := ocommon.NewPoint(inter.Slot, inter.Hash)
-	require.NoError(t, h.LS.Chain().ValidateRollback(roll))
+	require.NoError(
+		t,
+		h.LS.Chain().ValidateRollback(context.Background(), roll),
+	)
 
 	cli := syncconnect.NewSyncServiceClient(
 		h.Client,
@@ -1803,7 +1879,7 @@ func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
 		require.NotNil(t, stream.Msg().GetTip())
 	}
 
-	require.NoError(t, h.LS.Chain().Rollback(roll))
+	require.NoError(t, h.LS.Chain().Rollback(context.Background(), roll))
 
 	require.True(
 		t,
@@ -1895,14 +1971,14 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 		skipIndexTxHash: pendingTx.Hash().Bytes(),
 	})
 	committedHash := committedTx.Hash().Bytes()
-	committedRecord, err := h.LS.TransactionByHash(committedHash)
+	committedRecord, err := h.LS.TransactionByHash(context.Background(), committedHash)
 	require.NoError(t, err)
 	require.NotNil(
 		t,
 		committedRecord,
 		"committed fixture transaction must be indexed",
 	)
-	pendingRecord, err := h.LS.TransactionByHash(pendingTx.Hash().Bytes())
+	pendingRecord, err := h.LS.TransactionByHash(context.Background(), pendingTx.Hash().Bytes())
 	require.NoError(t, err)
 	require.Nil(
 		t,
@@ -2428,6 +2504,7 @@ func (s *tipHeightLedgerStub) GetBlock(
 }
 
 func (s *tipHeightLedgerStub) BlockByHash(
+	context.Context,
 	[]byte,
 ) (models.Block, error) {
 	s.blockLookups++

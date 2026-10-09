@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"errors"
 	"io"
@@ -177,8 +178,8 @@ func newPathFixture(
 	seed := func(txID []byte, amount uint64, script lcommon.PlutusV4Script) {
 		require.NoError(
 			t,
-			db.Transaction(true).Do(func(txn *database.Txn) error {
-				if err := db.CreateUtxo(txn, &models.Utxo{
+			db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+				if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
 					TxId:       txID,
 					OutputIdx:  0,
 					PaymentKey: paymentHash.Bytes(),
@@ -212,7 +213,7 @@ func newPathFixture(
 		if account.script {
 			tag = 1
 		}
-		require.NoError(t, db.CreateAccount(nil, &models.Account{
+		require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 			StakingKey:    pathStakeKey(account.key),
 			CredentialTag: tag,
 			AddedSlot:     pathOriginSlot,
@@ -284,9 +285,7 @@ func newPathFixture(
 			body[13] = []any{input(seedByte+0x0f, pathCollateralValue)}
 			body[17] = pathCollateralValue
 		}
-		for k, v := range level.fields {
-			body[k] = v
-		}
+		maps.Copy(body, level.fields)
 		return body, witnesses
 	}
 	for index, spec := range append(slices.Clone(blockTxs), pending...) {
@@ -335,7 +334,6 @@ func newPathFixture(
 		txCbor, err := cbor.Encode([]any{
 			cbor.RawMessage(bodyCbor),
 			witnesses,
-			true,
 			nil,
 		})
 		require.NoError(t, err)
@@ -545,10 +543,9 @@ func (f *pathFixture) withBodyField(
 	_, err = cbor.Decode(blockBody[0], &txs)
 	require.NoError(f.t, err)
 	// A block carries each transaction as [body, witnesses, auxiliary data,
-	// is_valid], unlike the standalone [body, witnesses, is_valid, auxiliary
-	// data].
+	// is_valid], extending the standalone three-field transaction.
 	txs[index], err = cbor.Encode(
-		[]cbor.RawMessage{parts[0], parts[1], parts[3], parts[2]},
+		[]any{parts[0], parts[1], parts[2], true},
 	)
 	require.NoError(f.t, err)
 	blockBody[0], err = cbor.Encode(txs)
@@ -562,8 +559,9 @@ func (f *pathFixture) withBodyField(
 
 // applyBlock runs the block through live block processing.
 func (f *pathFixture) applyBlock() error {
-	return f.db.Transaction(true).Do(func(txn *database.Txn) error {
+	return f.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 		_, err := f.ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			f.point(),
 			f.block,
@@ -610,6 +608,7 @@ func (f *pathFixture) reward(key byte) uint64 {
 func (f *pathFixture) rewardOf(tag uint8, key byte) uint64 {
 	f.t.Helper()
 	account, err := f.db.GetAccountByCredential(
+		context.Background(),
 		tag,
 		pathStakeKey(key),
 		false,
@@ -690,6 +689,7 @@ func (f *pathFixture) registeredAccounts(index int) []pathAccountID {
 func (f *pathFixture) accountPresent(id pathAccountID) bool {
 	f.t.Helper()
 	_, err := f.db.GetAccountByCredential(
+		context.Background(),
 		uint8(id.tag), id.hash.Bytes(), false, nil,
 	)
 	if errors.Is(err, models.ErrAccountNotFound) {

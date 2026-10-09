@@ -229,7 +229,7 @@ func testSQLStoreIntegration(
 	require.NoError(t, store.SetCommitTimestamp(42, txn))
 	require.NoError(t, store.SetNetworkState(11, 22, 33, txn))
 	require.NoError(t, txn.Commit())
-	timestamp, err := store.GetCommitTimestamp()
+	timestamp, err := store.GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, int64(42), timestamp)
 	state, err := store.GetNetworkState(nil)
@@ -238,11 +238,11 @@ func testSQLStoreIntegration(
 	require.Equal(t, types.Uint64(22), state.Reserves)
 	require.Equal(t, uint64(33), state.Slot)
 
-	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
+	require.NoError(t, store.SetNodeSettings(context.Background(), &types.NodeSettings{
 		StorageMode: types.StorageModeCore,
 		Network:     "integration",
 	}))
-	settings, err := store.GetNodeSettings()
+	settings, err := store.GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "integration", settings.Network)
 	// Simulate a legacy singleton row whose network was left empty.  The
@@ -252,11 +252,11 @@ func testSQLStoreIntegration(
 		dialect.Rebind("UPDATE node_settings SET network = '' WHERE id = 1"),
 	)
 	require.NoError(t, err)
-	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
+	require.NoError(t, store.SetNodeSettings(context.Background(), &types.NodeSettings{
 		StorageMode: types.StorageModeCore,
 		Network:     "legacy-fixed",
 	}))
-	settings, err = store.GetNodeSettings()
+	settings, err = store.GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "legacy-fixed", settings.Network)
 	checkpoint := &models.BackfillCheckpoint{

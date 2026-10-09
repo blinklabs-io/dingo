@@ -517,7 +517,12 @@ func (s *Store) ReadTransaction(ctx context.Context) types.Txn {
 // transaction begins a transaction bound to ctx. The context.Background()
 // fallback below is for a caller passing a literal nil, not a dropped
 // caller ctx -- there is nothing above to derive from in that case.
-func (s *Store) transaction(ctx context.Context, readOnly bool) types.Txn {
+//
+//nolint:contextcheck // literal-nil fallback, no caller ctx exists
+func (s *Store) transaction(
+	ctx context.Context,
+	readOnly bool,
+) types.Txn {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -935,6 +940,7 @@ func (s *Store) withWriteTransactionContext(
 		if err != nil {
 			return err
 		}
+		//nolint:contextcheck // txnCtx is the caller transaction's own context
 		return fn(db, txnCtx)
 	}
 	sqlTransaction, release, err := s.beginWriteTx(ctx)
@@ -982,6 +988,8 @@ func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, func(), error) {
 // the commit barrier it holds while fixing its two read views. Its lifetime
 // admission cap also leaves one connection outside coordinated snapshots for
 // operational reads during rollback.
+//
+//nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
 func (s *Store) ReserveRead(
 	ctx context.Context,
 ) (types.ReadReservation, error) {
@@ -1102,8 +1110,8 @@ type sqlTxn struct {
 
 	mu              sync.Mutex
 	finished        bool
-	batchBefore     map[*transactionBatchAccumulator]rowBatch
-	batchSavepoints map[string]map[*transactionBatchAccumulator]rowBatch
+	batchBefore     map[*transactionBatchAccumulator]transactionBatchCheckpoint
+	batchSavepoints map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint
 	savepointOrder  []string
 }
 
@@ -1201,11 +1209,11 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 	switch operation {
 	case "SAVEPOINT":
 		if t.batchSavepoints == nil {
-			t.batchSavepoints = make(map[string]map[*transactionBatchAccumulator]rowBatch)
+			t.batchSavepoints = make(map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint)
 		}
-		checkpoint := make(map[*transactionBatchAccumulator]rowBatch)
+		checkpoint := make(map[*transactionBatchAccumulator]transactionBatchCheckpoint)
 		for accumulator := range t.batchBefore {
-			checkpoint[accumulator] = accumulator.rows.clone()
+			checkpoint[accumulator] = accumulator.checkpoint()
 		}
 		t.batchSavepoints[name] = checkpoint
 		t.savepointOrder = append(t.savepointOrder, name)
@@ -1320,22 +1328,23 @@ func (t *sqlTxn) bindBatch(accumulator *transactionBatchAccumulator) error {
 		return types.ErrNilTxn
 	}
 	if t.batchBefore == nil {
-		t.batchBefore = make(map[*transactionBatchAccumulator]rowBatch)
+		t.batchBefore = make(map[*transactionBatchAccumulator]transactionBatchCheckpoint)
 	}
 	if _, exists := t.batchBefore[accumulator]; exists {
 		return nil
 	}
-	t.batchBefore[accumulator] = accumulator.rows.clone()
+	t.batchBefore[accumulator] = accumulator.checkpoint()
 	for _, checkpoint := range t.batchSavepoints {
-		checkpoint[accumulator] = accumulator.rows.clone()
+		checkpoint[accumulator] = accumulator.checkpoint()
 	}
 	return nil
 }
 
-func (t *sqlTxn) restoreBatches(checkpoint map[*transactionBatchAccumulator]rowBatch) {
-	for accumulator, rows := range checkpoint {
-		accumulator.Reset()
-		accumulator.rows = rows.clone()
+func (t *sqlTxn) restoreBatches(
+	checkpoint map[*transactionBatchAccumulator]transactionBatchCheckpoint,
+) {
+	for accumulator, state := range checkpoint {
+		accumulator.restore(state)
 	}
 }
 

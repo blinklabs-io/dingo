@@ -360,7 +360,11 @@ func (r *DeferredIndexRebuilder) BuildCritical() error {
 	if r == nil || r.manager == nil {
 		return nil
 	}
-	if err := r.manager.BuildCriticalDeferredIndexes(); err != nil {
+	logger := r.logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	if err := ensureCriticalDeferredIndexes(r.manager, logger); err != nil {
 		return fmt.Errorf("rebuilding critical deferred indexes: %w", err)
 	}
 	return nil
@@ -724,9 +728,11 @@ func LoadWithDB(
 	defer closeDB()
 	// Enable bulk-load optimizations if the metadata store supports them
 	defer WithBulkLoadPragmas(db, logger)()
+	deferredIndexes := WithDeferredIndexes(db, logger)
 	// Immutable load replays trusted block batches directly into the ledger, so
 	// it does not need the event-driven reread path here.
 	cm, err := chain.NewManager(
+		ctx,
 		db,
 		nil,
 	)
@@ -935,6 +941,9 @@ func LoadWithDB(
 	if err := captureFailures.err(); err != nil {
 		return err
 	}
+	if err := deferredIndexes.BuildCritical(); err != nil {
+		return fmt.Errorf("rebuilding critical metadata indexes after immutable load: %w", err)
+	}
 	return nil
 }
 
@@ -1041,7 +1050,7 @@ func LoadBlobsWithDB(
 		defer WithBulkLoadPragmas(db, logger)()
 	}
 	// Load chain without event bus (no ledger processing)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(ctx, db, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load chain manager: %w", err)
 	}
@@ -1163,7 +1172,7 @@ func copyBlocksDirect(
 				"decoding block CBOR: non-empty batch decoded to no blocks",
 			)
 		}
-		if err := c.AddBlocks(blockBatch); err != nil {
+		if err := c.AddBlocks(ctx, blockBatch); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
 				"failed to import block: %w",
 				err,
@@ -1430,7 +1439,7 @@ func CopyImmutableBlobsBounded(
 			}
 		}
 		if len(blockBatch) > 0 {
-			if err := c.AddRawBlocksWithCallback(blockBatch, callback); err != nil {
+			if err := c.AddRawBlocksWithCallback(ctx, blockBatch, callback); err != nil {
 				return blocksCopied, lastSlot, fmt.Errorf(
 					"failed to import block: %w", err,
 				)
@@ -1578,7 +1587,7 @@ func copyBlocksRawWithCallback(
 		if len(blockBatch) == 0 {
 			break
 		}
-		if err := c.AddRawBlocksWithCallback(blockBatch, callback); err != nil {
+		if err := c.AddRawBlocksWithCallback(ctx, blockBatch, callback); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
 				"failed to import block: %w",
 				err,

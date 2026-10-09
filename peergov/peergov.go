@@ -134,11 +134,10 @@ const (
 	// pool within seconds, slow enough (a handful of reconnects per minute per
 	// peer) to avoid port exhaustion.
 	emergencyReconnectDelay = 5 * time.Second
-	// dialDNSResolveTimeout bounds the fresh per-attempt DNS resolution in
-	// resolveDialAddress. It is intentionally shorter than connmanager's 10s
-	// dial timeout so a hung or slow resolver cannot wedge the outbound-dial
-	// loop; on timeout the attempt falls back to the unresolved address and
-	// the dialer resolves it itself.
+	// dialDNSResolveTimeout bounds peer hostname resolution. It is intentionally
+	// shorter than connmanager's 10s dial timeout so a hung or slow resolver
+	// cannot wedge peer admission or the outbound-dial loop; dial attempts fall
+	// back to the unresolved address on timeout.
 	dialDNSResolveTimeout = 5 * time.Second
 	// dialFamilyCacheTTL limits how long local address-family detection can
 	// remain stale after interface or routing changes while avoiding a

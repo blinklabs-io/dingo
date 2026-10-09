@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -638,6 +639,70 @@ func TestPprofDebugServerUsesDedicatedBindAddress(t *testing.T) {
 	}
 }
 
+func TestMetricsServerUsesDedicatedBindAddress(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		bindAddr string
+		want     string
+	}{
+		{"loopback", "127.0.0.1", "127.0.0.1:12798"},
+		{"default loopback", "", "127.0.0.1:12798"},
+		{"wildcard opt-in", "0.0.0.0", "0.0.0.0:12798"},
+		{"remote address opt-in", "10.0.0.5", "10.0.0.5:12798"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// BindAddr stays wildcard to show the metrics listener does
+			// not inherit it.
+			srv := newMetricsServer(&config.Config{
+				BindAddr:        "0.0.0.0",
+				MetricsBindAddr: tc.bindAddr,
+				MetricsPort:     12798,
+			})
+			if srv.Addr != tc.want {
+				t.Fatalf("metrics address = %q, want %q", srv.Addr, tc.want)
+			}
+		})
+	}
+}
+
+func TestMetricsServerDisabledByZeroPort(t *testing.T) {
+	t.Parallel()
+
+	srv := newMetricsServer(&config.Config{
+		MetricsBindAddr: "0.0.0.0",
+		MetricsPort:     0,
+	})
+	if srv != nil {
+		t.Fatalf("metricsPort 0 must start no listener, got %q", srv.Addr)
+	}
+}
+
+func TestShutdownNodeResourcesSkipsDisabledMetrics(t *testing.T) {
+	t.Parallel()
+
+	stopped := false
+	err := shutdownNodeResources(
+		optionalShutdown(newMetricsServer(&config.Config{})),
+		nil,
+		nil,
+		func() error {
+			stopped = true
+			return nil
+		},
+		time.Second,
+	)
+	if err != nil {
+		t.Fatalf("unexpected shutdown error: %v", err)
+	}
+	if !stopped {
+		t.Fatal("node must stop when metrics are disabled")
+	}
+}
+
 func TestWaitForSignalOrErrorReturnsSignalWithoutQueuedError(t *testing.T) {
 	t.Parallel()
 
@@ -766,8 +831,11 @@ func TestBuildDingoConfigWiresBarkOperatorFingerprints(t *testing.T) {
 		strings.Repeat("ab", 32),
 		strings.Repeat("cd", 32),
 	}
+	wantLifecycle := []string{strings.Repeat("ef", 32)}
 	cfg := &config.Config{
-		BarkOperatorCertificateFingerprints: want,
+		BarkOperatorCertificateFingerprints:          want,
+		BarkLifecycleEnabled:                         true,
+		BarkLifecycleOperatorCertificateFingerprints: wantLifecycle,
 	}
 
 	built := buildDingoConfig(
@@ -788,6 +856,18 @@ func TestBuildDingoConfigWiresBarkOperatorFingerprints(t *testing.T) {
 	) {
 		t.Fatalf(
 			"expected Bark operator fingerprints to flow through, got %v",
+			got,
+		)
+	}
+	if !built.BarkLifecycleEnabled() {
+		t.Fatal("expected Bark lifecycle service to remain enabled")
+	}
+	if got := built.BarkLifecycleOperatorCertificateFingerprints(); !slices.Equal(
+		got,
+		wantLifecycle,
+	) {
+		t.Fatalf(
+			"expected Bark lifecycle operator fingerprints to flow through, got %v",
 			got,
 		)
 	}
@@ -1316,5 +1396,33 @@ func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
 			name,
 			reason,
 		)
+	}
+}
+
+// TestBuildDingoConfigWiresTokenRegistryHeaders pins the composition step a
+// loaded header secret takes on its way to the registry sync.
+func TestBuildDingoConfigWiresTokenRegistryHeaders(t *testing.T) {
+	t.Parallel()
+
+	headers := map[string]string{"Authorization": "Bearer wired"}
+	cfg := &config.Config{
+		TokenRegistry: config.TokenRegistryConfig{HeaderSecrets: headers},
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.TokenRegistry().HeaderSecrets; !maps.Equal(got, headers) {
+		t.Fatalf("token registry headers = %v, want %v", got, headers)
 	}
 }

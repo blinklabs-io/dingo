@@ -595,7 +595,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -615,7 +615,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 		ebbHeader.SlotNumber(),
 		ebbHeader.Hash().Bytes(),
 	)
-	importedEbb, err := cm.BlockByPoint(ebbPoint, nil)
+	importedEbb, err := cm.BlockByPoint(context.Background(), ebbPoint, nil)
 	require.NoError(t, err)
 	require.NotNil(t, importedEbb)
 	assert.Equal(t, ebbPoint.Hash, importedEbb.Hash)
@@ -624,7 +624,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 		nextHeader.SlotNumber(),
 		nextHeader.Hash().Bytes(),
 	)
-	importedNext, err := cm.BlockByPoint(nextPoint, nil)
+	importedNext, err := cm.BlockByPoint(context.Background(), nextPoint, nil)
 	require.NoError(t, err)
 	require.NotNil(t, importedNext)
 	assert.Equal(t, ebbPoint.Hash, importedNext.PrevHash)
@@ -700,7 +700,7 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -739,7 +739,11 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 	assert.Equal(t, expectedPoint.Slot, offset.BlockSlot)
 	assert.Equal(t, expectedPoint.Hash, offset.BlockHash[:])
 
-	storedBlock, err := database.BlockByPoint(db, expectedPoint)
+	storedBlock, err := database.BlockByPoint(
+		context.Background(),
+		db,
+		expectedPoint,
+	)
 	require.NoError(t, err)
 	end := uint64(offset.ByteOffset) + uint64(offset.ByteLength)
 	require.LessOrEqual(t, end, uint64(len(storedBlock.Cbor)))
@@ -818,7 +822,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 		"testdata",
 	)
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -839,7 +843,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 	// for the resume check exercised below. If a future change
 	// makes AddRawBlocks decode the body, swap this for a real
 	// raw block from the immutable testdata directory.
-	err = cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+	err = cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
 		{
 			Slot:        immutableTipSlot + 5,
 			Hash:        bytes.Repeat([]byte{0x42}, 32),
@@ -1014,6 +1018,7 @@ func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 				hookCalled = true
 				rollbackErr = loadConfig.ChainManager.PrimaryChain().
 					ValidateRollback(
+						context.Background(),
 						ocommon.NewPoint(0, nil),
 					)
 				return stopAfterRollbackValidation
@@ -1331,21 +1336,24 @@ func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
 	db := newTestDB(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	currentTip := cm.PrimaryChain().Tip()
 	stubSlot := immutableTip.Slot + 5
 	stubHash := bytes.Repeat([]byte{0xAB}, 32)
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
-		{
-			Slot:        stubSlot,
-			Hash:        stubHash,
-			BlockNumber: currentTip.BlockNumber + 1,
-			Type:        0,
-			PrevHash:    currentTip.Point.Hash,
-			Cbor:        []byte{0x80},
-		},
-	}))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot:        stubSlot,
+				Hash:        stubHash,
+				BlockNumber: currentTip.BlockNumber + 1,
+				Type:        0,
+				PrevHash:    currentTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point:       ocommon.NewPoint(stubSlot, stubHash),
 		BlockNumber: currentTip.BlockNumber + 1,
