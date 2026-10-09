@@ -7995,8 +7995,9 @@ write keeps `sync_status=in_progress`, which selects the resume path on the
 next run. The same context continues into the node runtime, while remote
 lifecycle requests cancel a child of it.
 Database cleanup uses a detached cancellation context so providers can close
-after operation cancellation. The command's HTTP servers shut down with a
-five-second bound before the command returns.
+after operation cancellation. The Mithril operation attempts shutdown of each
+started metrics, health, and debug server with its own detached five-second
+context; each call returns when the server drains or its deadline expires.
 
 When a legacy imported database is marked for reward-state repair, `serve`
 blocks node startup until Mithril v2 reconciles the database against a verified
