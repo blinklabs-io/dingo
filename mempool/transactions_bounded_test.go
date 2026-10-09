@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/event"
@@ -144,8 +145,8 @@ func TestMempool_TransactionsBounded_DAGWalksOnlyPrefix(t *testing.T) {
 	m := newBoundedTestMempool(t, true)
 	txs := addMockTransactions(t, m, 6)
 	m.Lock()
-	for i := len(txs) - 1; i >= 0; i-- {
-		m.dag.add(appliedTx{hash: txs[i].Hash, cbor: txs[i].Cbor})
+	for _, tx := range slices.Backward(txs) {
+		m.dag.add(appliedTx{hash: tx.Hash, cbor: tx.Cbor})
 	}
 	delete(m.txByHash, txs[0].Hash)
 	m.Unlock()
