@@ -32,6 +32,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// These imported-state fixtures use epoch 100 at anchor slot 1,000.
+const importTestEpochLength uint = 1_000
+
 // accountCredTagKey is the stake-credential tag used by every account built
 // in this file: all test accounts are key-hash credentials.
 const accountCredTagKey uint8 = 0
@@ -196,7 +199,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 					[]uint64{5_000_000},
 				),
 				CertStateData:       certData,
-				Epoch:               100,
+				Epoch:               tipSlot / 1_000,
 				EraIndex:            EraConway,
 				EraBounds:           eraBounds,
 				EpochNonce:          nonce,
@@ -209,7 +212,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 				},
 			},
 			EpochLength: func(uint) (uint, uint, error) {
-				return 1, 1_000, nil
+				return 1, importTestEpochLength, nil
 			},
 		}
 	}
@@ -328,8 +331,8 @@ func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorAccountRewardCredit
 					[]uint64{5_000_000},
 				),
 				CertStateData:       certData,
-				GovStateData:        testGovStateData(t, govStateTxHash, 100),
-				Epoch:               100,
+				GovStateData:        testGovStateData(t, govStateTxHash, tipSlot/1_000),
+				Epoch:               tipSlot / 1_000,
 				EraIndex:            EraConway,
 				EraBounds:           eraBounds,
 				EpochNonce:          nonce,
@@ -342,7 +345,7 @@ func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorAccountRewardCredit
 				},
 			},
 			EpochLength: func(uint) (uint, uint, error) {
-				return 1, 1_000, nil
+				return 1, importTestEpochLength, nil
 			},
 		}
 	}
@@ -446,7 +449,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorPostSnapshotRewardCredit(
 					[]uint64{5_000_000},
 				),
 				CertStateData:       certData,
-				Epoch:               100,
+				Epoch:               tipSlot / 1_000,
 				EraIndex:            EraConway,
 				EraBounds:           eraBounds,
 				EpochNonce:          nonce,
@@ -459,7 +462,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorPostSnapshotRewardCredit(
 				},
 			},
 			EpochLength: func(uint) (uint, uint, error) {
-				return 1, 1_000, nil
+				return 1, importTestEpochLength, nil
 			},
 		}
 	}
@@ -588,7 +591,9 @@ func TestImportLedgerStateRepairAfterPreFixImportDoesNotUnderflow(
 					BlockHash: make([]byte, 32),
 				},
 			},
-			EpochLength: func(uint) (uint, uint, error) { return 1, 1_000, nil },
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, importTestEpochLength, nil
+			},
 		}
 	}
 
@@ -706,7 +711,9 @@ func TestImportLedgerStateCatchUpLeavesUncoveredAccountUntouched(t *testing.T) {
 					BlockHash: make([]byte, 32),
 				},
 			},
-			EpochLength: func(uint) (uint, uint, error) { return 1, 1_000, nil },
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, importTestEpochLength, nil
+			},
 		}
 	}
 
@@ -820,7 +827,9 @@ func resumeImportConfig(
 				BlockHash: make([]byte, 32),
 			},
 		},
-		EpochLength: func(uint) (uint, uint, error) { return 1, 1_000, nil },
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, importTestEpochLength, nil
+		},
 	}
 }
 

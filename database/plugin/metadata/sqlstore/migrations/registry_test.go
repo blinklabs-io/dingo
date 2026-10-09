@@ -274,9 +274,11 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, 38, registry[37].Version)
 	require.Equal(t, poolRelayTypeSchemaRelease, registry[37].Name)
 	require.Equal(t, 39, registry[38].Version)
-	require.Equal(t, drepDormancyStateSchemaRelease, registry[38].Name)
+	require.Equal(t, midnightRollbackJournalSchemaRelease, registry[38].Name)
 	require.Equal(t, 40, registry[39].Version)
-	require.Equal(t, drepDelegatorStateSchemaRelease, registry[39].Name)
+	require.Equal(t, drepDormancyStateSchemaRelease, registry[39].Name)
+	require.Equal(t, 41, registry[40].Version)
+	require.Equal(t, drepDelegatorStateSchemaRelease, registry[40].Name)
 }
 
 func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
@@ -294,8 +296,8 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 40)
-			migration := registry[38]
+			require.Len(t, registry, 41)
+			migration := registry[39]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
 			require.Contains(t, seed, "WHERE NOT EXISTS")

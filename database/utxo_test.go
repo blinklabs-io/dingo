@@ -334,6 +334,8 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 		1,
 		"asc",
 		nil,
+		nil,
+		nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, enterpriseTxs, 2)
@@ -341,7 +343,13 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 		enterpriseTxs[0].Hash[0],
 		enterpriseTxs[1].Hash[0],
 	})
-	enterpriseTxCount, err := db.CountTransactionsByAddress(context.Background(), enterprise, nil)
+	enterpriseTxCount, err := db.CountTransactionsByAddress(
+		context.Background(),
+		enterprise,
+		nil,
+		nil,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, 3, enterpriseTxCount)
 	hasEnterpriseTx, err := db.HasTransactionsByAddress(context.Background(), enterprise, nil)
@@ -2141,4 +2149,47 @@ func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 		t, err, types.ErrBlobKeyNotFound,
 		"repair must not write into the newly-installed store",
 	)
+}
+
+func TestTransactionsByAddressHonorSlotRange(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	payment := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	enterprise, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	for slot := uint64(1); slot <= 6; slot++ {
+		seedExactAddressUtxo(t, db, raw, enterprise, slot, byte(slot))
+	}
+
+	from := &models.AddressTransactionPosition{Slot: 3}
+	to := &models.AddressTransactionPosition{Slot: 5, TxIndex: 0}
+	txs, err := db.GetTransactionsByAddressWithOrder(
+		context.Background(), enterprise, 10, 0, "asc", from, to, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, txs, 3)
+	assert.Equal(t, []byte{0x03, 0x04, 0x05}, []byte{
+		txs[0].Hash[0], txs[1].Hash[0], txs[2].Hash[0],
+	})
+	count, err := db.CountTransactionsByAddress(
+		context.Background(), enterprise, from, to, nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, count)
+
+	// Bounds apply before the page window.
+	page, err := db.GetTransactionsByAddressWithOrder(
+		context.Background(), enterprise, 1, 1, "desc", from, to, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, page, 1)
+	assert.Equal(t, byte(0x04), page[0].Hash[0])
 }

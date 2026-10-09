@@ -220,8 +220,9 @@ var schemaVersions = []struct {
 	},
 	{Version: 37, Name: drepExpiryHistorySchemaRelease, Dir: "v37"},
 	{Version: 38, Name: poolRelayTypeSchemaRelease, Dir: "v38"},
-	{Version: 39, Name: drepDormancyStateSchemaRelease, Dir: "v39"},
-	{Version: 40, Name: drepDelegatorStateSchemaRelease, Dir: "v40"},
+	{Version: 39, Name: midnightRollbackJournalSchemaRelease, Dir: "v39"},
+	{Version: 40, Name: drepDormancyStateSchemaRelease, Dir: "v40"},
+	{Version: 41, Name: drepDelegatorStateSchemaRelease, Dir: "v41"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

@@ -18,7 +18,7 @@ Before you begin, make sure you have:
 
 - **Grafana 12+** (tested on 12.4) — [install guide](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
 - **Prometheus** scraping your Dingo node on port `12798` (configured in step 2 below)
-- **Dingo** node with metrics enabled (default port `12798`)
+- **Dingo** node with metrics enabled (default port `12798`, bound to loopback; set `metricsBindAddr` to scrape from another host)
 - **[Business Text plugin](https://grafana.com/grafana/plugins/marcusolsson-dynamictext-panel/)** — required by all dashboards for the header panel
 - **[prometheus-node-exporter](https://github.com/prometheus/node_exporter)** — required only by the Resource Usage dashboard for host-level CPU, memory, and disk metrics
 

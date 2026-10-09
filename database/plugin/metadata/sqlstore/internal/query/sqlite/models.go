@@ -244,6 +244,14 @@ type MidnightAssetSpend struct {
 	BlockTimestampMs int64
 }
 
+type MidnightCandidateRemoval struct {
+	ID          int64
+	BlockNumber int64
+	TxHash      []byte
+	OutputIndex int64
+	Datum       []byte
+}
+
 type MidnightCommitteeCandidateRegistration struct {
 	ID           int64
 	TxHash       []byte
@@ -271,6 +279,12 @@ type MidnightEpochCandidate struct {
 	Epoch          int64
 	BlockNumber    int64
 	CandidatesCbor []byte
+}
+
+type MidnightEpochTransition struct {
+	BlockNumber    int64
+	PreviousEpoch  int64
+	PreviousExists int64
 }
 
 type MidnightGovernanceDatum struct {

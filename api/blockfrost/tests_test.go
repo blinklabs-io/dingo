@@ -957,7 +957,7 @@ func (n *listPaginationNode) AccountWithdrawals(ctx context.Context,
 
 func (n *listPaginationNode) AccountTransactions(ctx context.Context,
 	_ string,
-	params AccountTransactionsParams,
+	params TransactionRangeParams,
 ) ([]AccountTransactionInfo, int, error) {
 	n.calls++
 	n.params = params.Pagination

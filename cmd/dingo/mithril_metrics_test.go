@@ -18,11 +18,13 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"testing"
 	"time"
 
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/mithril"
@@ -303,5 +305,36 @@ func TestMithrilSyncMetricsLedgerStateSlotAbsentUntilRecorded(t *testing.T) {
 			"dingo_mithril_sync_ledger_state_slot",
 			metricFamily.GetName(),
 		)
+	}
+}
+
+func TestMithrilMetricsUsesDedicatedLoopbackBind(t *testing.T) {
+	t.Parallel()
+	for _, host := range []string{"", "127.0.0.1"} {
+		t.Run(host, func(t *testing.T) {
+			t.Parallel()
+			cfg := &config.Config{
+				BindAddr:        "192.0.2.1",
+				MetricsBindAddr: host,
+				MetricsPort:     0,
+			}
+			server, err := startMithrilMetricsServer(
+				slog.New(slog.NewTextHandler(io.Discard, nil)),
+				cfg,
+				http.NotFoundHandler(),
+			)
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(
+					context.Background(),
+					time.Second,
+				)
+				defer cancel()
+				require.NoError(t, server.Shutdown(ctx))
+			})
+			actual, _, err := net.SplitHostPort(server.addr)
+			require.NoError(t, err)
+			require.Equal(t, "127.0.0.1", actual)
+		})
 	}
 }

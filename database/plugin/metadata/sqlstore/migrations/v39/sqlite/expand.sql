@@ -1,23 +1,5 @@
-CREATE TABLE IF NOT EXISTS `drep_expiry_epoch_event` (
-    `added_slot` INTEGER PRIMARY KEY
-);
-
-CREATE TABLE IF NOT EXISTS `drep_dormancy_state` (
-    `id` INTEGER PRIMARY KEY CHECK (`id` = 1),
-    `dormant_epochs` INTEGER NOT NULL
-);
-
-INSERT INTO `drep_dormancy_state` (`id`, `dormant_epochs`)
-SELECT 1, 0
-WHERE NOT EXISTS (
-    SELECT 1 FROM `drep_dormancy_state` WHERE `id` = 1
-);
-
-CREATE TABLE IF NOT EXISTS `drep_dormancy_history` (
-    `id` INTEGER PRIMARY KEY AUTOINCREMENT,
-    `added_slot` INTEGER NOT NULL,
-    `previous_dormant_epochs` INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS `idx_drep_dormancy_history_slot`
-    ON `drep_dormancy_history` (`added_slot`);
+-- Persist the Midnight indexer's candidate-spend and epoch-transition rollback
+-- journals so a rollback after a process restart restores the same state.
+CREATE TABLE IF NOT EXISTS `midnight_candidate_removals` (`id` integer PRIMARY KEY AUTOINCREMENT,`block_number` integer NOT NULL,`tx_hash` blob NOT NULL,`output_index` integer NOT NULL,`datum` blob);
+CREATE UNIQUE INDEX IF NOT EXISTS `idx_midnight_candidate_removals_block_utxo` ON `midnight_candidate_removals`(`block_number`,`tx_hash`,`output_index`);
+CREATE TABLE IF NOT EXISTS `midnight_epoch_transitions` (`block_number` integer PRIMARY KEY,`previous_epoch` integer NOT NULL,`previous_exists` integer NOT NULL);
