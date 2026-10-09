@@ -381,11 +381,47 @@ func buildNestedTelescope(t *testing.T, pastCount int) []byte {
 	// Current era: [tag(0), [bound]]
 	node := []any{uint64(0), []any{bound}}
 	for range pastCount {
-		// Past era: [tag(1), summary, rest], summary = [bound, ...]
-		summary := []any{bound}
+		// Past era: [tag(1), summary, rest]. Its end is the next
+		// era's start, so both bounds are equal in this zero-span fixture.
+		summary := []any{bound, bound}
 		node = []any{uint64(1), summary, node}
 	}
 	return mustEncodeCbor(t, node)
+}
+
+func TestExtractAllEraBoundsRejectsFlatPastEndMismatch(t *testing.T) {
+	t.Parallel()
+
+	start := []any{uint64(0), uint64(0), uint64(0)}
+	declaredEnd := []any{uint64(0), uint64(99), uint64(1)}
+	nextStart := []any{uint64(0), uint64(100), uint64(1)}
+	data := mustEncodeCbor(t, []any{
+		[]any{start, declaredEnd},
+		[]any{nextStart, []any{}},
+	})
+
+	_, err := extractAllEraBounds(data)
+
+	require.ErrorContains(t, err, "ends at slot 99 epoch 1")
+	require.ErrorContains(t, err, "starts at slot 100 epoch 1")
+}
+
+func TestExtractAllEraBoundsRejectsNestedPastEndMismatch(t *testing.T) {
+	t.Parallel()
+
+	start := []any{uint64(0), uint64(0), uint64(0)}
+	declaredEnd := []any{uint64(0), uint64(99), uint64(1)}
+	nextStart := []any{uint64(0), uint64(100), uint64(1)}
+	data := mustEncodeCbor(t, []any{
+		uint64(1),
+		[]any{start, declaredEnd},
+		[]any{uint64(0), []any{nextStart}},
+	})
+
+	_, err := extractAllEraBounds(data)
+
+	require.ErrorContains(t, err, "ends at slot 99 epoch 1")
+	require.ErrorContains(t, err, "starts at slot 100 epoch 1")
 }
 
 func TestExtractAllEraBounds_NestedTelescope_AtMaxDepthAccepted(t *testing.T) {

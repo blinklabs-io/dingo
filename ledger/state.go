@@ -1314,7 +1314,7 @@ type LedgerState struct {
 	// eviction and floor computation without contending the hot header-validation
 	// read path on the main lock. The guard must NOT hold this mutex
 	// across the pool-snapshot prune (nor deletePersistedDeferredMarkers across
-	// DeleteSyncState): those open the single SQLite write connection, and block
+	// its delete): those can open the single SQLite write connection, and block
 	// apply holds that connection before taking this mutex via
 	// consumeDeferredHeaderValidation, so holding it across that write inverts the
 	// lock order and deadlocks the node. The eviction+floor read is
@@ -1914,16 +1914,26 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 				pipeline.WithValidateWorkers(workerCount),
 				pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
 				pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod()),
-				pipeline.WithVerifyConfig(lcommon.VerifyConfig{
-					SkipBodyHashValidation:    true,
-					SkipTransactionValidation: true,
-					SkipStakePoolValidation:   true,
-				}),
+				pipeline.WithVerifyConfig(blockPipelineVerifyConfig()),
 			)
 		}
 		ls.blockPipeline = pipeline.NewBlockPipeline(pipelineOpts...)
 	}
 	return ls, nil
+}
+
+// blockPipelineVerifyConfig scopes gouroboros' generic validate stage to the
+// header crypto. The stage is given no protocol parameters or ledger state,
+// so every body rule it could run -- including the block-wide limits and the
+// Conway reference-script total -- belongs to the ledger apply path, which
+// has both.
+func blockPipelineVerifyConfig() lcommon.VerifyConfig {
+	return lcommon.VerifyConfig{
+		SkipBodyHashValidation:    true,
+		SkipTransactionValidation: true,
+		SkipStakePoolValidation:   true,
+		SkipBlockLimitsValidation: true,
+	}
 }
 
 func cloneSnapshotBytes(value []byte) []byte {

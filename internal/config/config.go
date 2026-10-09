@@ -149,7 +149,8 @@ type RunMode string
 const (
 	RunModeServe RunMode = "serve" // Full node with network connectivity (default)
 	RunModeLoad  RunMode = "load"  // Batch import from ImmutableDB
-	RunModeDev   RunMode = "dev"   // Development mode (isolated, no outbound)
+	// Development mode is isolated and requires API storage and block production.
+	RunModeDev   RunMode = "dev"
 	RunModeLeios RunMode = "leios" // Full node with experimental Leios capabilities
 
 	// RunModeSync, RunModeMithril, and RunModeDatabase are effective run
@@ -192,10 +193,23 @@ func (m RunMode) Valid() bool {
 	}
 }
 
-// IsDevMode returns true if the mode enables development behaviors
-// (forge blocks, disable outbound, skip topology)
+// IsDevMode reports whether this mode enables isolated development behaviors,
+// including regular keyed block production and disabling outbound peers.
 func (m RunMode) IsDevMode() bool {
 	return m == RunModeDev
+}
+
+// ApplyRunModeOverrides applies settings required by a serving dev-mode node.
+// Dev mode always uses API storage and the regular keyed block producer.
+// One-shot commands do not inherit these overrides from a dev-mode config
+// because they do not start a serving node.
+func (c *Config) ApplyRunModeOverrides(effectiveMode RunMode) {
+	if !effectiveMode.RequiresListeners() ||
+		(effectiveMode != RunModeDev && !c.RunMode.IsDevMode()) {
+		return
+	}
+	c.StorageMode = storageModeAPI
+	c.BlockProducer = true
 }
 
 // RequiresListeners reports whether an (effective) run mode runs as a

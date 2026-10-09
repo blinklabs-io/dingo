@@ -191,8 +191,8 @@ func (o *Ouroboros) localstatequeryViewMaxLifetime() time.Duration {
 // Acquire forgets the previous session after closing its snapshot: the
 // protocol returns the connection to Idle on failure, with no acquired state.
 //
-// Not every query type honors a pinned point yet -- see
-// ledger.LedgerState.Query's doc comment for which ones do.
+// Every query type that reads ledger or consensus state answers at the
+// acquired point -- see queryShelleyLeaf's doc comment in ledger/queries.go.
 func (o *Ouroboros) localstatequeryServerAcquire(
 	ctx olocalstatequery.CallbackContext,
 	acquireTarget olocalstatequery.AcquireTarget,
