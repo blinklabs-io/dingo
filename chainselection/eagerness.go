@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"slices"
 	"time"
@@ -180,15 +181,20 @@ func (cs *ChainSelector) eagernessAnchorValue() *eagernessAnchor {
 	return cs.eagernessAnchor
 }
 
-// containsPoint reports whether the fragment retains point.
+// containsPoint reports whether the fragment retains point. Entries are in
+// strictly ascending slot order (recordObservedTipHistory drops any entry at or
+// after a new tip's slot), so a binary search finds the only candidate. The
+// limit is recomputed on every delivered header under the selector lock, and
+// a linear scan of 2k+1 entries per candidate dominated that cost.
 func (f CandidateFragment) containsPoint(point ocommon.Point) bool {
-	for _, entry := range f.entries {
-		if entry.Point.Slot == point.Slot &&
-			bytes.Equal(entry.Point.Hash, point.Hash) {
-			return true
-		}
-	}
-	return false
+	i, found := slices.BinarySearchFunc(
+		f.entries,
+		point.Slot,
+		func(entry ochainsync.Tip, slot uint64) int {
+			return cmp.Compare(entry.Point.Slot, slot)
+		},
+	)
+	return found && bytes.Equal(f.entries[i].Point.Hash, point.Hash)
 }
 
 // SelectedTip returns the tip of the currently selected peer's chain truncated

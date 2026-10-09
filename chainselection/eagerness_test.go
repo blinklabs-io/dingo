@@ -517,3 +517,27 @@ func TestEagernessAnchorIgnoresExcludedRequesterHead(t *testing.T) {
 		"the excluded requester's head became the shared anchor")
 	assert.Equal(t, before.Point, after.Point)
 }
+
+// containsPoint finds a retained point at either end of the fragment and in
+// between, and rejects an absent slot and a same-slot point with another hash.
+func TestCandidateFragmentContainsPoint(t *testing.T) {
+	t.Parallel()
+	var entries []ochainsync.Tip
+	for block := uint64(1); block <= 9; block++ {
+		entries = append(entries, loeTip("c", block))
+	}
+	f := CandidateFragment{entries: entries}
+	for _, block := range []uint64{1, 2, 5, 8, 9} {
+		assert.True(
+			t,
+			f.containsPoint(loeTip("c", block).Point),
+			"block %d",
+			block,
+		)
+	}
+	assert.False(t, f.containsPoint(loeTip("x", 5).Point))
+	assert.False(t, f.containsPoint(loeTip("c", 10).Point))
+	assert.False(t, f.containsPoint(loeTip("c", 0).Point))
+	assert.False(t, f.containsPoint(ocommon.Point{Slot: 450, Hash: []byte("c4")}))
+	assert.False(t, CandidateFragment{}.containsPoint(loeTip("c", 1).Point))
+}
