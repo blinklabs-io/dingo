@@ -155,7 +155,7 @@ func TestApplyIntraEraHardForkRule_Pv10RebuildsDRepDelegators(t *testing.T) {
 				deposits[i] = 500
 			}
 		}
-		txn := db.MetadataTxn(true)
+		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			return db.Metadata().SetTransaction(
@@ -261,38 +261,52 @@ func TestApplyIntraEraHardForkRule_Pv10RebuildsDRepDelegators(t *testing.T) {
 	}, nil))
 
 	ls := newTestLSForHardForkRule(t, db)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyIntraEraHardForkRule(txn, 10, 30, 500)
+		return ls.applyIntraEraHardForkRule(
+			context.Background(), txn, 10, 30, 500,
+		)
 	}))
 
 	deregister(31, 0x7c, drepOne, 10)
 	deregister(32, 0x7d, drepThree, 10)
-	account, err := db.GetAccountByCredential(0, stakeOne, true, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(), 0, stakeOne, true, nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, drepTwo, account.Drep,
 		"deregistering stale D1 state must preserve the PV10 D2 delegation")
-	account, err = db.GetAccountByCredential(0, stakeTwo, true, nil)
+	account, err = db.GetAccountByCredential(
+		context.Background(), 0, stakeTwo, true, nil,
+	)
 	require.NoError(t, err)
 	require.Nil(t, account.Drep,
 		"deregistering D3 must clear its rebuilt reverse membership")
 
-	require.NoError(t, db.RestoreAccountStateAtSlot(29, nil))
-	require.NoError(t, db.RestoreDrepStateAtSlot(29, nil))
-	account, err = db.GetAccountByCredential(0, stakeOne, true, nil)
+	require.NoError(t, db.RestoreAccountStateAtSlot(context.Background(), 29, nil))
+	require.NoError(t, db.RestoreDrepStateAtSlot(context.Background(), 29, nil))
+	account, err = db.GetAccountByCredential(
+		context.Background(), 0, stakeOne, true, nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, drepTwo, account.Drep)
-	account, err = db.GetAccountByCredential(0, stakeTwo, true, nil)
+	account, err = db.GetAccountByCredential(
+		context.Background(), 0, stakeTwo, true, nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, drepThree, account.Drep)
 
 	deregister(31, 0x7e, drepOne, 9)
 	deregister(32, 0x7f, drepThree, 9)
-	account, err = db.GetAccountByCredential(0, stakeOne, true, nil)
+	account, err = db.GetAccountByCredential(
+		context.Background(), 0, stakeOne, true, nil,
+	)
 	require.NoError(t, err)
 	require.Nil(t, account.Drep,
 		"rollback must restore PV9's stale D1 reverse membership")
-	account, err = db.GetAccountByCredential(0, stakeTwo, true, nil)
+	account, err = db.GetAccountByCredential(
+		context.Background(), 0, stakeTwo, true, nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, drepThree, account.Drep,
 		"rollback must restore PV9's missing D3 reverse membership")

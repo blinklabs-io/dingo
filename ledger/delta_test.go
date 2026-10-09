@@ -407,7 +407,7 @@ func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
 		},
 		nil,
 	))
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag: 0,
 		Credential:    drepTwo,
 		AddedSlot:     1,
@@ -443,10 +443,10 @@ func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
 			TxOffsets:   map[[32]byte]database.CborOffset{txHash: {}},
 			UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
 		}
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		defer txn.Release()
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return delta.apply(ls, txn)
+			return delta.apply(context.Background(), ls, txn)
 		}))
 	}
 	delegate := func(id byte, drep []byte) lcommon.Transaction {
@@ -463,7 +463,9 @@ func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
 		return tx
 	}
 	apply(delegate(0x41, drepTwo), 2, 0x42)
-	account, err := db.GetAccountByCredential(0, stakeCredential, true, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(), 0, stakeCredential, true, nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	require.Equal(t, drepTwo, account.Drep,
@@ -485,7 +487,9 @@ func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
 	unregister.WithId(bytes.Repeat([]byte{0x43}, lcommon.Blake2b256Size))
 	unregister.WithValid(true)
 	apply(unregister, 3, 0x44)
-	account, err = db.GetAccountByCredential(0, stakeCredential, true, nil)
+	account, err = db.GetAccountByCredential(
+		context.Background(), 0, stakeCredential, true, nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	require.Nil(t, account.Drep, "PV9 DRep deregistration clears the stale reverse delegation")
@@ -563,17 +567,21 @@ func TestLedgerDeltaResetsDormancyBeforeDRepRegistration(t *testing.T) {
 		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return delta.apply(ls, txn)
+		return delta.apply(context.Background(), ls, txn)
 	}))
-	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	drep, err := db.GetDrepByCredential(
+		context.Background(), 0, drepCredential, true, nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, drep)
 	require.Equal(t, uint64(100), drep.LastActivityEpoch)
 	require.Equal(t, uint64(120), drep.ExpiryEpoch)
-	storedProposal, err := db.GetGovernanceProposal(tx.Hash().Bytes(), 0, nil)
+	storedProposal, err := db.GetGovernanceProposal(
+		context.Background(), tx.Hash().Bytes(), 0, nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, storedProposal)
 	require.Equal(t, uint64(100), storedProposal.ProposedEpoch)
@@ -594,6 +602,7 @@ func TestLedgerDeltaAppliesDRepVoteActivityBeforeRegistrationCertificates(t *tes
 	drepCredential := bytes.Repeat([]byte{0x61}, lcommon.Blake2b224Size)
 	proposalHash := bytes.Repeat([]byte{0x62}, lcommon.Blake2b256Size)
 	require.NoError(t, db.SetGovernanceProposal(
+		context.Background(),
 		&models.GovernanceProposal{
 			TxHash:        proposalHash,
 			ActionIndex:   0,
@@ -671,21 +680,25 @@ func TestLedgerDeltaAppliesDRepVoteActivityBeforeRegistrationCertificates(t *tes
 		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return delta.apply(ls, txn)
+		return delta.apply(context.Background(), ls, txn)
 	}))
 
-	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	drep, err := db.GetDrepByCredential(
+		context.Background(), 0, drepCredential, true, nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, drep)
 	require.Equal(t, uint64(100), drep.LastActivityEpoch)
 	require.Equal(t, uint64(123), drep.ExpiryEpoch,
 		"PV9 registration must include the imported dormant epochs after same-transaction vote activity")
-	proposal, err := db.GetGovernanceProposal(proposalHash, 0, nil)
+	proposal, err := db.GetGovernanceProposal(
+		context.Background(), proposalHash, 0, nil,
+	)
 	require.NoError(t, err)
-	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	require.Equal(t, uint8(models.VoteYes), votes[0].Vote)
@@ -723,8 +736,8 @@ func TestProcessGovernanceAllowsDRepDeregistrationWithoutConwayParameters(
 	)
 	defer delta.Release()
 
-	err = db.Transaction(true).Do(func(txn *database.Txn) error {
-		return delta.processGovernance(ls, tx, 0, txn)
+	err = db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		return delta.processGovernance(context.Background(), ls, tx, 0, txn)
 	})
 	require.NoError(t, err)
 }
@@ -917,13 +930,13 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 	credentialBytes := bytes.Repeat([]byte{0x71}, 28)
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], credentialBytes)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag: 0,
 		Credential:    credentialBytes,
 		AddedSlot:     1,
 		Active:        true,
 	}))
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag: 1,
 		Credential:    credentialBytes,
 		AddedSlot:     1,
@@ -935,7 +948,7 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 		ExpiresEpoch: 200,
 		AddedSlot:    3,
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
 	var actionHash [32]byte
 	copy(actionHash[:], proposalHash)
 	keyVoter := &lcommon.Voter{
@@ -944,7 +957,7 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 	}
 	actionID := &lcommon.GovActionId{TransactionId: actionHash, GovActionIdx: 0}
 	updatedSlot := uint64(10)
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:         proposal.ID,
 		VoterType:          models.VoterTypeDRep,
 		VoterCredentialTag: 0,
@@ -953,7 +966,7 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 		AddedSlot:          updatedSlot,
 		VoteUpdatedSlot:    &updatedSlot,
 	}, nil))
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:         proposal.ID,
 		VoterType:          models.VoterTypeDRep,
 		VoterCredentialTag: 1,
@@ -983,17 +996,19 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 		currentPParams: &pparams,
 	}
 	point := ocommon.Point{Slot: 30, Hash: bytes.Repeat([]byte{0x74}, 32)}
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		if err := db.Metadata().DeactivateDreps(txn.Metadata(), []models.StakeCredentialRef{
 			models.NewStakeCredentialRef(0, credentialBytes),
 		}); err != nil {
 			return err
 		}
-		return (&LedgerDelta{Point: point}).processGovernance(ls, tx, 0, txn)
+		return (&LedgerDelta{Point: point}).processGovernance(
+			context.Background(), ls, tx, 0, txn,
+		)
 	}))
 
-	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	require.Equal(t, uint8(1), votes[0].VoterCredentialTag,
@@ -1009,7 +1024,7 @@ func TestLedgerDeltaDRepDeregistrationPreservesLaterDelegation(t *testing.T) {
 
 	drepCredential := bytes.Repeat([]byte{0x51}, lcommon.Blake2b224Size)
 	stakeCredential := bytes.Repeat([]byte{0x52}, lcommon.Blake2b224Size)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag: 0,
 		Credential:    drepCredential,
 		AddedSlot:     10,
@@ -1068,16 +1083,20 @@ func TestLedgerDeltaDRepDeregistrationPreservesLaterDelegation(t *testing.T) {
 		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return delta.apply(ls, txn)
+		return delta.apply(context.Background(), ls, txn)
 	}))
 
-	account, err := db.GetAccountByCredential(0, stakeCredential, true, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(), 0, stakeCredential, true, nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	require.Equal(t, drepCredential, account.Drep)
-	activeDrep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	activeDrep, err := db.GetDrepByCredential(
+		context.Background(), 0, drepCredential, true, nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, activeDrep)
 }
