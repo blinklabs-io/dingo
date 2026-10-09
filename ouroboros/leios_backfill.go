@@ -303,6 +303,22 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			ledger.ErrEndorserBlockFetchNoPeer,
 		)
 	}
+	return o.fetchEndorserBlockByPointWithConnections(
+		ctx,
+		ebSlot,
+		ebHash,
+		connIds,
+		o.connManager.GetConnectionById,
+	)
+}
+
+func (o *Ouroboros) fetchEndorserBlockByPointWithConnections(
+	ctx context.Context,
+	ebSlot uint64,
+	ebHash []byte,
+	connIds []ouroboros.ConnectionId,
+	getConnection func(ouroboros.ConnectionId) *ouroboros.Connection,
+) error {
 	overall, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
 		overall = time.Now().Add(leiosBackfillTotalBudget)
@@ -324,6 +340,7 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		o.leiosFetchGuardFor,
 	)
 	var lastErr, busyErr error
+	usableConnection := false
 	remainingCandidates := len(order)
 	for _, connId := range order {
 		remainingCandidates--
@@ -333,11 +350,12 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			}
 			break
 		}
-		conn := o.connManager.GetConnectionById(connId)
+		conn := getConnection(connId)
 		if conn == nil || conn.LeiosFetch() == nil ||
 			conn.LeiosFetch().Client == nil {
 			continue
 		}
+		usableConnection = true
 		// now anchors both remaining and attemptDeadline below to a single
 		// clock read, so a last/only candidate's attemptDeadline is computed
 		// as now.Add(overall.Sub(now)) -- algebraically exactly overall, with
@@ -406,6 +424,15 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	}
 	if lastErr == nil {
 		lastErr = busyErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !usableConnection {
+		return fmt.Errorf(
+			"leios backfill: %w",
+			ledger.ErrEndorserBlockFetchNoPeer,
+		)
 	}
 	if lastErr == nil {
 		lastErr = errors.New("leios backfill: fetch failed")
