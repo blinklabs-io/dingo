@@ -229,8 +229,7 @@ func TestSnapshotWithoutMaxCommitPauseIsUnbounded(t *testing.T) {
 }
 
 func TestSnapshotMaxCommitPauseExcludesBarrierWait(t *testing.T) {
-	// Not t.Parallel: successful snapshot publication uses process-global
-	// catalog state shared by the package's other snapshot tests.
+	t.Parallel()
 
 	const (
 		barrierWait = 10 * time.Minute
@@ -454,8 +453,7 @@ func TestSnapshotRecordsCommitPauseAndBytesMetrics(t *testing.T) {
 }
 
 func TestSnapshotCommitPauseMetricExcludesBarrierWait(t *testing.T) {
-	// Not t.Parallel: successful snapshot publication uses process-global
-	// catalog state shared by the package's other snapshot tests.
+	t.Parallel()
 
 	const (
 		barrierWait = 10 * time.Minute
