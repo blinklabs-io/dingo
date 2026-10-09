@@ -739,7 +739,7 @@ func (a *Aggregator) registerSignature(
 	if err != nil {
 		return badRequest("signature is not hex")
 	}
-	sig, err := parseSTMSingleSignatureBytes(raw)
+	sig, err := parseSTMSingleSignatureBytes(raw, stmMaxLotteryIndices)
 	if err != nil || len(encodeSTMSingleSignature(*sig)) != len(raw) {
 		return badRequest("malformed signature")
 	}
@@ -794,7 +794,7 @@ func (a *Aggregator) tryCertify(
 	// verify it, so a defect here fails closed instead of poisoning the chain.
 	if err := verifySTMSignature(
 		[]byte(open.signedMessage), a.sealed.avkEncoded, multiSignature,
-		a.cfg.Parameters,
+		a.cfg.Parameters, newCertificateChainBudget(),
 	); err != nil {
 		return fmt.Errorf("aggregated signature does not verify: %w", err)
 	}

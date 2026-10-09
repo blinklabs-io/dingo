@@ -16,7 +16,6 @@ package mesh
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -87,10 +86,8 @@ func (s *Server) handleMempoolTransaction(
 		mempoolTx.Type, mempoolTx.Cbor,
 	)
 	if err != nil {
-		writeError(w, wrapErr(
-			ErrInternal,
-			fmt.Errorf("decode mempool tx: %w", err),
-		))
+		s.logger.Error("failed to decode mempool transaction", "error", err)
+		writeError(w, ErrInternal)
 		return
 	}
 

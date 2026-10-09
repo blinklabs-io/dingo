@@ -4501,6 +4501,8 @@ type transactionReadStore interface {
 		int,
 		int,
 		string,
+		*models.AddressTransactionPosition,
+		*models.AddressTransactionPosition,
 		types.Txn,
 	) ([]models.Transaction, error)
 	CountTransactionsByAddress(
@@ -4667,6 +4669,8 @@ func exerciseTransactionReadStore(
 		1,
 		0,
 		"desc",
+		nil,
+		nil,
 		nil,
 	)
 	require.NoError(t, err)

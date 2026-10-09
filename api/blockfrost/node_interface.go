@@ -96,11 +96,13 @@ type BlockfrostNode interface {
 	) ([]AddressUTXOInfo, int, error)
 
 	// AddressTransactions returns the paginated transaction
-	// history for an address along with the total number of
-	// matching results before pagination.
+	// history for an address, optionally restricted to an
+	// inclusive from/to block-range position, along with the total
+	// number of matching results before pagination.
 	AddressTransactions(
+		ctx context.Context,
 		address string,
-		params PaginationParams,
+		params TransactionRangeParams,
 	) ([]AddressTransactionInfo, int, error)
 
 	// MetadataTransactions returns the paginated transactions
@@ -125,7 +127,7 @@ type BlockfrostNode interface {
 
 	// TransactionEvaluate evaluates script execution units for raw transaction
 	// CBOR without submitting the transaction.
-	TransactionEvaluate(txCbor []byte) (TransactionEvaluationResponse, error)
+	TransactionEvaluate(context.Context, []byte) (TransactionEvaluationResponse, error)
 
 	// TransactionCBOR returns raw signed transaction CBOR bytes.
 	TransactionCBOR(hash []byte) ([]byte, error)
@@ -242,7 +244,7 @@ type BlockfrostNode interface {
 	// inclusive from/to block-range position.
 	AccountTransactions(context.Context,
 		string,
-		AccountTransactionsParams,
+		TransactionRangeParams,
 	) ([]AccountTransactionInfo, int, error)
 }
 
@@ -889,7 +891,7 @@ type AccountWithdrawalInfo struct {
 	BlockHeight int64
 }
 
-// BlockRangePosition holds a parsed Blockfrost account-transactions
+// BlockRangePosition holds a parsed Blockfrost account or address transactions
 // from/to query value: a block number and an optional transaction
 // index within that block (the "block:index" form).
 type BlockRangePosition struct {
@@ -897,10 +899,10 @@ type BlockRangePosition struct {
 	Index *uint32
 }
 
-// AccountTransactionsParams holds query parameters for the account
-// transactions endpoint: standard pagination plus the optional
+// TransactionRangeParams holds query parameters for the account and
+// address transaction endpoints: standard pagination plus the optional
 // inclusive from/to block-range filter.
-type AccountTransactionsParams struct {
+type TransactionRangeParams struct {
 	Pagination PaginationParams
 	From       *BlockRangePosition
 	To         *BlockRangePosition
