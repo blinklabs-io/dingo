@@ -29,11 +29,17 @@ func TestInstallLocalTestKeysRestrictsExistingPaths(t *testing.T) {
 	require.NoError(t, os.Mkdir(dir, 0o700))
 	require.NoError(t, os.Chmod(dir, 0o777))
 
+	oldFiles := make(map[string]os.FileInfo)
 	for _, name := range []string{"vrf.skey", "kes.skey", "opcert.cert"} {
 		path := filepath.Join(dir, name)
 		require.NoError(t, os.WriteFile(path, []byte("old"), 0o600))
 		require.NoError(t, os.Chmod(path, 0o666))
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		oldFiles[name] = info
 	}
+	hardlink := filepath.Join(t.TempDir(), "vrf.skey")
+	require.NoError(t, os.Link(filepath.Join(dir, "vrf.skey"), hardlink))
 
 	require.NoError(t, InstallLocalTestKeys(dir))
 
@@ -50,5 +56,58 @@ func TestInstallLocalTestKeysRestrictsExistingPaths(t *testing.T) {
 		info, err := os.Stat(path)
 		require.NoError(t, err)
 		require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+		require.False(t, os.SameFile(oldFiles[name], info))
 	}
+	hardlinkData, err := os.ReadFile(hardlink)
+	require.NoError(t, err)
+	require.Equal(t, []byte("old"), hardlinkData)
+}
+
+func TestInstallLocalTestKeysReplacesSymlinkWithoutChangingTarget(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "keys")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	target := filepath.Join(t.TempDir(), "target")
+	require.NoError(t, os.WriteFile(target, []byte("unchanged"), 0o600))
+	require.NoError(t, os.Symlink(target, filepath.Join(dir, "vrf.skey")))
+
+	require.NoError(t, InstallLocalTestKeys(dir))
+
+	targetData, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, []byte("unchanged"), targetData)
+	want, err := localKeys.ReadFile("keys/vrf.skey")
+	require.NoError(t, err)
+	got, err := os.ReadFile(filepath.Join(dir, "vrf.skey"))
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	info, err := os.Lstat(filepath.Join(dir, "vrf.skey"))
+	require.NoError(t, err)
+	require.True(t, info.Mode().IsRegular())
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
+func TestInstallLocalTestKeysRejectsSymlinkDirectory(t *testing.T) {
+	target := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "keys")
+	require.NoError(t, os.Symlink(target, dir))
+
+	err := InstallLocalTestKeys(dir)
+	require.ErrorContains(t, err, "is not a directory")
+	entries, readErr := os.ReadDir(target)
+	require.NoError(t, readErr)
+	require.Empty(t, entries)
+}
+
+func TestInstallLocalTestKeysCleansTemporaryFileOnRenameError(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "keys")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "vrf.skey"), 0o700))
+
+	err := InstallLocalTestKeys(dir)
+	require.ErrorContains(t, err, `installing local DevNet key "vrf.skey"`)
+	entries, readErr := os.ReadDir(dir)
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1)
+	require.Equal(t, "vrf.skey", entries[0].Name())
+	require.True(t, entries[0].IsDir())
 }

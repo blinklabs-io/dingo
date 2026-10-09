@@ -32,6 +32,13 @@ func InstallLocalTestKeys(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating local DevNet key directory: %w", err)
 	}
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("checking local DevNet key directory: %w", err)
+	}
+	if dirInfo.Mode()&os.ModeSymlink != 0 || !dirInfo.IsDir() {
+		return fmt.Errorf("local DevNet key path %q is not a directory", dir)
+	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return fmt.Errorf("restricting local DevNet key directory: %w", err)
 	}
@@ -44,13 +51,37 @@ func InstallLocalTestKeys(dir string) error {
 				err,
 			)
 		}
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, data, 0o600); err != nil {
-			return fmt.Errorf("writing local DevNet key %q: %w", name, err)
+		if err := installLocalTestKey(dir, name, data); err != nil {
+			return err
 		}
-		if err := os.Chmod(path, 0o600); err != nil {
-			return fmt.Errorf("restricting local DevNet key %q: %w", name, err)
+	}
+	return nil
+}
+
+func installLocalTestKey(dir, name string, data []byte) error {
+	tmp, err := os.CreateTemp(dir, ".dingo-devnet-key-*")
+	if err != nil {
+		return fmt.Errorf("creating temporary local DevNet key %q: %w", name, err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if tmp != nil {
+			_ = tmp.Close()
 		}
+		_ = os.Remove(tmpPath)
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return fmt.Errorf("restricting temporary local DevNet key %q: %w", name, err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fmt.Errorf("writing temporary local DevNet key %q: %w", name, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing temporary local DevNet key %q: %w", name, err)
+	}
+	tmp = nil
+	if err := os.Rename(tmpPath, filepath.Join(dir, name)); err != nil {
+		return fmt.Errorf("installing local DevNet key %q: %w", name, err)
 	}
 	return nil
 }
