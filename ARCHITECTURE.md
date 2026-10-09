@@ -15617,7 +15617,9 @@ because the batched write cannot express those variants. The batched path
 does not emit the per-transaction warning for a transaction whose declared
 outputs produced no UTxOs; that is a log line only. Regression tests:
 `TestApplyRowBatchingSerialEquivalence` and
-`TestApplyRowBatchingSameChunkDependencies` (`ledger/apply_row_batching_test.go`).
+`TestApplyRowBatchingSameChunkDependencies` (`ledger/apply_row_batching_test.go`);
+the equivalence scenario populates every queued detail table and pins that a
+datum shared by two transactions of one chunk keeps the earlier slot.
 
 **Phase 5: rollback coordination.** `ledgerReadChainIterator` — the
 pipeline's only submitter — runs on its own goroutine, entirely decoupled

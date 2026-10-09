@@ -72,6 +72,8 @@ func rowBatchingCred(tag byte) []any {
 type rowBatchingTx struct {
 	cbor []byte
 	hash []byte
+	// aux is the encoded auxiliary data, nil when the transaction has none.
+	aux []byte
 }
 
 func newRowBatchingTx(
@@ -79,13 +81,31 @@ func newRowBatchingTx(
 	body map[uint]any,
 ) rowBatchingTx {
 	t.Helper()
+	return newRowBatchingTxWith(t, body, map[uint]any{}, nil)
+}
+
+// newRowBatchingTxWith builds a transaction carrying a witness set and
+// auxiliary data, which in API mode produce the queued detail rows. Nothing
+// is validated, so the witnesses need not verify.
+func newRowBatchingTxWith(
+	t *testing.T,
+	body map[uint]any,
+	witnesses map[uint]any,
+	aux any,
+) rowBatchingTx {
+	t.Helper()
 	txCbor, err := cbor.Encode([]any{
-		body, map[uint]any{}, true, nil,
+		body, witnesses, true, aux,
 	})
 	require.NoError(t, err)
 	tx, err := conway.NewConwayTransactionFromCbor(txCbor)
 	require.NoError(t, err)
-	return rowBatchingTx{cbor: txCbor, hash: tx.Hash().Bytes()}
+	var auxCbor []byte
+	if aux != nil {
+		auxCbor, err = cbor.Encode(aux)
+		require.NoError(t, err)
+	}
+	return rowBatchingTx{cbor: txCbor, hash: tx.Hash().Bytes(), aux: auxCbor}
 }
 
 func rowBatchingBlock(
@@ -117,14 +137,22 @@ func rowBatchingBlock(
 			},
 		},
 	}
-	for _, raw := range txs {
+	auxByIndex := map[uint]cbor.RawMessage{}
+	for i, raw := range txs {
 		tx, err := conway.NewConwayTransactionFromCbor(raw.cbor)
 		require.NoError(t, err)
 		block.TransactionBodies = append(block.TransactionBodies, tx.Body)
 		block.TransactionWitnessSets = append(
 			block.TransactionWitnessSets, tx.WitnessSet,
 		)
+		if raw.aux != nil {
+			auxByIndex[uint(i)] = raw.aux
+		}
 	}
+	// A block carries auxiliary data beside the bodies, keyed by index.
+	auxSet, err := cbor.Encode(auxByIndex)
+	require.NoError(t, err)
+	require.NoError(t, block.TransactionMetadataSet.UnmarshalCBOR(auxSet))
 	// The block body hash covers the four body components, so it is computed
 	// from a first encoding that carries every transaction.
 	first, err := cbor.Encode(block)
@@ -155,6 +183,10 @@ func rowBatchingBlock(
 //	         produced and withdrawing zero rewards from the registered
 //	         account, and a treasury donation.
 //	block 3: a transaction spending an output transaction 2 produced.
+//
+// The spend and chain transactions carry witnesses, a native script and
+// metadata, and both carry the same Plutus datum, so the API-mode detail
+// tables are populated and the shared datum row records the earlier slot.
 //
 // The returned names identify the transactions the assertions refer to.
 func rowBatchingScenario(t *testing.T) (
@@ -241,7 +273,8 @@ func rowBatchingScenario(t *testing.T) (
 			},
 		},
 	})
-	names["spend"] = newRowBatchingTx(t, map[uint]any{
+	sharedDatum := cbor.Tag{Number: 121, Content: []any{uint64(7)}}
+	names["spend"] = newRowBatchingTxWith(t, map[uint]any{
 		0: []any{[]any{registerOut, uint64(0)}},
 		1: []any{
 			map[uint]any{
@@ -258,14 +291,22 @@ func rowBatchingScenario(t *testing.T) (
 			cbor.NewByteString(rowBatchingRewardAccount(stakeKey)): 0,
 		},
 		22: uint64(1_000),
-	})
-	names["chain"] = newRowBatchingTx(t, map[uint]any{
+	}, map[uint]any{
+		0: []any{[]any{
+			bytes.Repeat([]byte{0x66}, 32), bytes.Repeat([]byte{0x67}, 64),
+		}},
+		1: []any{[]any{uint64(0), rowBatchingKey(payKey)}},
+		4: []any{sharedDatum},
+	}, map[uint64]any{674: "spend"})
+	names["chain"] = newRowBatchingTxWith(t, map[uint]any{
 		0: []any{[]any{names["spend"].hash, uint64(1)}},
 		1: []any{map[uint]any{
 			0: rowBatchingBaseAddress(t, payKey, stakeKey), 1: uint64(300_000),
 		}},
 		2: uint64(100_000),
-	})
+	}, map[uint]any{
+		4: []any{sharedDatum},
+	}, map[uint64]any{674: "chain"})
 	b1 := rowBatchingBlock(
 		t, 10, 1, lcommon.Blake2b256{},
 		names["pool"], names["register"], names["drep"],
@@ -460,6 +501,25 @@ func TestApplyRowBatchingSerialEquivalence(t *testing.T) {
 				require.Equal(t, totalTxs, on.batchedTxs,
 					"flag on must write every transaction of the "+
 						"unvalidated blocks through the batched path")
+
+				if mode == types.StorageModeAPI {
+					// The queued tables must be populated, or the digest
+					// comparison below says nothing about the flush.
+					raw, err := dbtest.RawSQLiteMetadata(t, on.db)
+					require.NoError(t, err)
+					for _, table := range []string{
+						"address_transaction", "key_witness",
+						"witness_scripts", "plutus_data", "datum",
+						"transaction_metadata_label",
+					} {
+						require.Positive(t, rowBatchingQueryOne[int](t, raw,
+							`SELECT COUNT(*) FROM "`+table+`"`),
+							"scenario must queue %s rows", table)
+					}
+					require.Equal(t, uint64(20), rowBatchingQueryOne[uint64](
+						t, raw, `SELECT added_slot FROM datum`),
+						"a datum shared within a chunk keeps its first slot")
+				}
 
 				offDigest := rowBatchingDigest(t, off.db)
 				require.Equal(t, offDigest, rowBatchingDigest(t, offAgain.db),
