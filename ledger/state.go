@@ -880,8 +880,9 @@ type LedgerStateConfig struct {
 	BlockPipelineValidateEnabled bool
 	// ApplyRowBatchingEnabled writes the accumulated deltas of blocks that
 	// are not validated through the metadata store's batched path in core
-	// storage mode, as API storage mode always does. Blocks that are
-	// validated keep the per-transaction path. Off by default; the stored
+	// storage mode, as API storage mode already does. Validated blocks, Leios
+	// endorser-block applies, and batches applied with closure context keep
+	// the per-transaction path in every storage mode. Off by default; the stored
 	// state is identical either way. See ARCHITECTURE.md ("Block Processing
 	// Pipeline").
 	ApplyRowBatchingEnabled bool
@@ -9392,6 +9393,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 			return nil, err
 		}
+	}
+	if delta != nil {
+		delta.validated = shouldValidate
 	}
 	return delta, nil
 }

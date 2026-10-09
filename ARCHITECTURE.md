@@ -3186,7 +3186,8 @@ its block deltas and flushes it before the surrounding database transaction
 commits. Core storage mode does the same only when
 `LedgerStateConfig.ApplyRowBatchingEnabled` is set (see "Batched apply for
 unvalidated blocks"). Batches with closure-context, conflict-tolerant, or
-strict consumed-input semantics keep the unbatched write path in every mode. A trusted
+strict consumed-input semantics, and the delta a validated block returns, keep
+the unbatched write path in every mode. A trusted
 immutable replay can omit consumed-input blob recovery because the complete
 history supplies each producer output earlier in slot order; transaction
 conflict checks still run.
@@ -15863,9 +15864,12 @@ upsert, and coalesces each block's live-stake deltas, which
 `FlushBatchStakeDeltas` writes after every delta; `FlushBatch` writes the rest
 before `apply` returns, inside the same database transaction and before the
 next validated block runs, so stored state is identical to the per-row path.
-Validated blocks apply each transaction as it is validated and never use the
-batch. Regression tests: `TestApplyRowBatchingSerialEquivalence` and
-`TestApplyRowBatchingSameChunkDependencies` (`ledger/apply_row_batching_test.go`);
+Validated blocks apply each transaction as it is validated and keep the
+per-transaction path for the donation-only delta they return, as do Leios
+endorser-block applies and closure-context batches, in every storage mode.
+Regression tests: `TestApplyRowBatchingSerialEquivalence`,
+`TestApplyRowBatchingSameChunkDependencies` and
+`TestApplyRowBatchingSkipsValidatedDeltas` (`ledger/apply_row_batching_test.go`);
 the equivalence scenario populates every queued detail table and pins that a
 datum shared by two transactions of one chunk keeps the earlier slot.
 

@@ -36,6 +36,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -594,5 +595,60 @@ func TestApplyRowBatchingSameChunkDependencies(t *testing.T) {
 				`SELECT COUNT(*) FROM governance_proposal`)
 			require.Equal(t, 1, proposals)
 		})
+	}
+}
+
+// TestApplyRowBatchingSkipsValidatedDeltas pins that a delta handed back by a
+// validated block never reaches the batched path, in either storage mode,
+// while the same delta from an unvalidated block does.
+func TestApplyRowBatchingSkipsValidatedDeltas(t *testing.T) {
+	t.Parallel()
+
+	blocks, _ := rowBatchingScenario(t)
+	block := blocks[2]
+	point := ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
+	offsets, err := database.NewBlockIndexer(point.Slot, point.Hash).
+		ComputeOffsets(block.Cbor(), block)
+	require.NoError(t, err)
+	for _, mode := range []string{types.StorageModeCore, types.StorageModeAPI} {
+		for _, validated := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/validated=%t", mode, validated), func(t *testing.T) {
+				t.Parallel()
+				db, err := dbtest.NewDatabase(t, &database.Config{
+					DataDir:     t.TempDir(),
+					StorageMode: mode,
+				})
+				require.NoError(t, err)
+				t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+				ls := &LedgerState{
+					db:     db,
+					config: LedgerStateConfig{ApplyRowBatchingEnabled: true},
+				}
+				var batched atomic.Int64
+				ls.afterBatchedTransactionWrite = func() { batched.Add(1) }
+
+				delta := NewLedgerDelta(point, eras.ConwayEraDesc.Id, 3)
+				delta.Offsets = offsets
+				delta.addTransaction(block.Transactions()[0], 0)
+				delta.validated = validated
+				delta.stageApplyEvents = func([]TransactionEvent) {}
+				batch := NewLedgerDeltaBatch()
+				batch.addDelta(delta)
+				t.Cleanup(batch.Release)
+
+				require.NoError(t, db.Transaction(t.Context(), true).Do(
+					func(txn *database.Txn) error {
+						return batch.apply(t.Context(), ls, txn)
+					},
+				))
+				if validated {
+					require.Zero(t, batched.Load(),
+						"a validated block's delta must keep the per-transaction path")
+				} else {
+					require.Equal(t, int64(1), batched.Load(),
+						"an unvalidated block's delta takes the batched path")
+				}
+			})
+		}
 	}
 }

@@ -88,8 +88,12 @@ type LedgerDelta struct {
 	// context, where every consumed input's producer must already be applied and
 	// live. See BatchedTxIngestOpts.StrictAppliedInputConservation.
 	strictConsumedInputs bool
-	closureContextSlot   *uint64
-	stageApplyEvents     func([]TransactionEvent)
+	// validated marks the delta a validated block hands back after applying
+	// each of its transactions; it carries only the block's donation.
+	// LedgerDeltaBatch.apply keeps such a batch on the per-transaction path.
+	validated          bool
+	closureContextSlot *uint64
+	stageApplyEvents   func([]TransactionEvent)
 }
 
 func NewLedgerDelta(
@@ -106,6 +110,7 @@ func NewLedgerDelta(
 	delta.expandedIndexOffset = 0
 	delta.skipConsumedInputRecovery = false
 	delta.strictConsumedInputs = false
+	delta.validated = false
 	delta.closureContextSlot = nil
 	delta.stageApplyEvents = nil
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
@@ -129,6 +134,7 @@ func (d *LedgerDelta) Release() {
 	d.expandedIndexOffset = 0
 	d.skipConsumedInputRecovery = false
 	d.strictConsumedInputs = false
+	d.validated = false
 	d.closureContextSlot = nil
 	d.stageApplyEvents = nil
 	// Return the delta to the pool
@@ -618,7 +624,7 @@ func (b *LedgerDeltaBatch) apply(
 	ls *LedgerState,
 	txn *database.Txn,
 ) error {
-	// API mode always batches. Other storage modes batch only when
+	// API mode batches without the flag. Other storage modes batch only when
 	// ApplyRowBatchingEnabled is set; the stored state is the same either way.
 	if ls.db.StorageMode() != types.StorageModeAPI &&
 		!ls.config.ApplyRowBatchingEnabled {
@@ -626,9 +632,11 @@ func (b *LedgerDeltaBatch) apply(
 	}
 	// The accumulator path does not implement Leios closure context or its
 	// conflict-tolerant input semantics, so keep those batches on the live path.
+	// Validated blocks are outside the batched scope too.
 	for _, delta := range b.deltas {
 		if delta != nil && (delta.closureContextSlot != nil ||
-			delta.skipConsumedInputRecovery || delta.strictConsumedInputs) {
+			delta.skipConsumedInputRecovery || delta.strictConsumedInputs ||
+			delta.validated) {
 			return b.applyUnbatched(ctx, ls, txn)
 		}
 	}
