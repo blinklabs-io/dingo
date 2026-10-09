@@ -249,15 +249,14 @@ func (m *namedMissingManager) MissingCriticalDeferredIndexes() (
 	return m.missing, nil
 }
 
-// TestEnsureCriticalDeferredIndexesNamesMissingBeforeBuilding pins the
+// TestDeferredIndexRebuilderBuildCriticalNamesMissingBeforeBuilding pins the
 // ordering: the names are logged before the rebuild is entered, not after it
 // returns.
 //
 // A rebuild of one index on a multi-million-row table takes minutes and emits
-// nothing while it runs, which is the silence the reported incident opened
-// with. The assertion reads the log as the rebuild sees it, so a message moved
-// back below the build fails here.
-func TestEnsureCriticalDeferredIndexesNamesMissingBeforeBuilding(
+// nothing while it runs. The assertion reads the log as the rebuild sees it,
+// so a message moved below the build fails here.
+func TestDeferredIndexRebuilderBuildCriticalNamesMissingBeforeBuilding(
 	t *testing.T,
 ) {
 	var buf bytes.Buffer
@@ -267,7 +266,10 @@ func TestEnsureCriticalDeferredIndexesNamesMissingBeforeBuilding(
 		log:     &buf,
 	}
 
-	require.NoError(t, ensureCriticalDeferredIndexes(manager, logger))
+	require.NoError(t, (&DeferredIndexRebuilder{
+		manager: manager,
+		logger:  logger,
+	}).BuildCritical())
 
 	require.Contains(
 		t,

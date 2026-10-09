@@ -49,6 +49,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func testNodeConfigWithMithrilKeys(
+	t *testing.T,
+	genesisVKey string,
+	ancillaryVKey string,
+) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{
+		MithrilGenesisVerificationKey:          genesisVKey,
+		MithrilGenesisAncillaryVerificationKey: ancillaryVKey,
+	}
+	byronGenesis, err := os.ReadFile(
+		filepath.Join("..", "config", "cardano", "devnet", "byron-genesis.json"),
+	)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(bytes.NewReader(byronGenesis)),
+	)
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"epochLength": 2000,
+		"slotLength": 1
+	}`)))
+	return cfg
+}
+
 // buildTarZst builds a zstd-compressed tar archive from the given
 // file map (paths use forward slashes).
 func buildTarZst(t *testing.T, files map[string][]byte) []byte {
@@ -963,10 +988,9 @@ func TestSyncV2SerializesMetadataWriterPhases(t *testing.T) {
 		Network:     "preprod",
 		DataDir:     t.TempDir(),
 		StorageMode: "core",
-		CardanoNodeConfig: &cardano.CardanoNodeConfig{
-			MithrilGenesisVerificationKey:          fixture.genesisVKey,
-			MithrilGenesisAncillaryVerificationKey: fixture.ancillaryVKey,
-		},
+		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
+			t, fixture.genesisVKey, fixture.ancillaryVKey,
+		),
 		Backend:           BackendV2,
 		AggregatorURL:     fixture.server.URL,
 		AllowInsecureHTTP: true,

@@ -2,7 +2,7 @@ module github.com/blinklabs-io/dingo
 
 go 1.26.5
 
-toolchain go1.26.7
+toolchain go1.26.9
 
 require (
 	cloud.google.com/go/storage v1.68.0
@@ -48,7 +48,7 @@ require (
 	go.uber.org/automaxprocs v1.6.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/crypto v0.57.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/time v0.16.0

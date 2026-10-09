@@ -3806,7 +3806,7 @@ func TestLedgerViewTreasuryValueReadsMithrilBootstrapState(t *testing.T) {
 			State: &ledgerstate.RawLedgerState{
 				PParamsData:     paramsData,
 				PrevPParamsData: paramsData,
-				Epoch:           12,
+				Epoch:           1_234,
 				EraIndex:        ledgerstate.EraConway,
 				EraBounds: make(
 					[]ledgerstate.EraBound,
@@ -6963,7 +6963,6 @@ func (f *treasuryRolloverFixture) rollover(
 			currentEpoch,
 			eras.ConwayEraDesc,
 			currentPParams,
-			false,
 		)
 		return rolloverErr
 	})
@@ -7943,7 +7942,6 @@ func TestEpochRolloverUsesEraSpecificEnactmentSnapshot(t *testing.T) {
 					f.currentEpoch,
 					era,
 					params,
-					false,
 				)
 				return err
 			}))

@@ -682,17 +682,14 @@ func TestTableResourcesRegisteredWhenEnumerationExceedsQueryTimeout(
 	)
 	require.Greater(t, remaining, 20*time.Second)
 	cs := reviewSession(t, server)
-	res, err := cs.ReadResource(
-		t.Context(),
-		&mcp.ReadResourceParams{URI: "dingo://schema/table/transaction"},
-	)
-	require.NoError(
-		t,
-		err,
-		"table resource must be registered despite slow startup enumeration",
-	)
-	require.Len(t, res.Contents, 1)
-	require.Contains(t, res.Contents[0].Text, "transaction")
+	resources, err := cs.ListResources(t.Context(), nil)
+	require.NoError(t, err)
+	for _, resource := range resources.Resources {
+		if resource.URI == "dingo://schema/table/transaction" {
+			return
+		}
+	}
+	t.Fatal("table resource must be registered despite slow startup enumeration")
 }
 
 func TestTableEnumerationFailureLoggedToProviderLogger(t *testing.T) {

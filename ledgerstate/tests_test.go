@@ -628,10 +628,11 @@ func TestImportTipPersistsSnapshotNetworkState(t *testing.T) {
 			slog.NewTextHandler(io.Discard, nil),
 		),
 		State: &RawLedgerState{
-			Epoch:    12,
-			Treasury: treasury,
-			Reserves: reserves,
-			EraIndex: 6,
+			Epoch:     1_234,
+			Treasury:  treasury,
+			Reserves:  reserves,
+			EraIndex:  EraConway,
+			EraBounds: make([]EraBound, EraConway+1),
 			Tip: &SnapshotTip{
 				Slot:      123_456,
 				BlockHash: make([]byte, 32),
@@ -1250,6 +1251,7 @@ func govImportConfigForTest(
 			GovStateData:  govStateData,
 			Epoch:         500,
 			EraIndex:      EraConway,
+			EraBounds:     make([]EraBound, EraConway+1),
 			EraBoundEpoch: 100,
 			EraBoundSlot:  10_000,
 		},
@@ -1579,11 +1581,10 @@ func TestImportGovStateRejectsAbsentEnactState(t *testing.T) {
 			"state has 0 elements, expected 7")
 }
 
-// TestImportGovStateSkipsParityWhenEnactedTypesUnknown covers an
-// undecidable rsEnacted: with an entry whose action type cannot be
-// recovered, whether a committee action was accepted is unknown, so the
-// corroboration is unavailable rather than failed.
-func TestImportGovStateSkipsParityWhenEnactedTypesUnknown(t *testing.T) {
+// TestImportGovStateRejectsUnknownEnactedActionTypes covers an undecidable
+// rsEnacted: without every action type the importer cannot determine whether
+// the enact-state committee was applied at the imported epoch boundary.
+func TestImportGovStateRejectsUnknownEnactedActionTypes(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	left := committeeWithMember(t, bytes.Repeat([]byte{0x42}, 28), 700)
@@ -1595,11 +1596,13 @@ func TestImportGovStateSkipsParityWhenEnactedTypesUnknown(t *testing.T) {
 			t, right, cbor.RawMessage{0x01},
 		),
 	)
-	require.NoError(t, importGovState(
+	err = importGovState(
 		context.Background(),
 		govImportConfigForTest(db, govStateData),
 		func(ImportProgress) {},
-	))
+	)
+	require.EqualError(t, err,
+		"imported governance state has incomplete rsEnacted action types")
 }
 
 func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {

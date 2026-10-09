@@ -150,67 +150,33 @@ func (d *gcsDestination) UploadDir(ctx context.Context, localDir string) error {
 	return nil
 }
 
-// DownloadDir downloads every object under the destination's prefix into
-// localDir. Keys containing a further path separator are skipped — a
-// snapshot directory's contents are flat, so any such key wasn't written by
-// UploadDir.
-func (d *gcsDestination) DownloadDir(
+// DownloadFiles downloads exactly the named objects into localDir, never
+// listing the prefix, and stops reading an object that carries more than its
+// MaxBytes.
+func (d *gcsDestination) DownloadFiles(
 	ctx context.Context,
 	localDir string,
+	files []DownloadFile,
 ) error {
-	query := &storage.Query{}
-	if d.prefix != "" {
-		query.Prefix = d.prefix + "/"
-	}
-	it := d.bucket.Objects(ctx, query)
-	for {
-		attrs, err := it.Next()
-		if errors.Is(err, iterator.Done) {
-			break
+	for _, file := range files {
+		if !IsSafeCloudObjectFileName(file.Name) {
+			return fmt.Errorf("unsafe snapshot file name %q", file.Name)
 		}
+		key := d.objectKey(file.Name)
+		r, err := d.bucket.Object(key).NewReader(ctx)
 		if err != nil {
-			return fmt.Errorf("list gcs objects under %q: %w", d.prefix, err)
+			if errors.Is(err, storage.ErrObjectNotExist) {
+				return fmt.Errorf(
+					"open gcs object %q: %w: %w",
+					key, ErrCloudSnapshotNotFound, err,
+				)
+			}
+			return fmt.Errorf("open gcs object %q: %w", key, err)
 		}
-		fileName := attrs.Name
-		if d.prefix != "" {
-			fileName = strings.TrimPrefix(fileName, d.prefix+"/")
-		}
-		if !IsSafeCloudObjectFileName(fileName) {
-			continue
-		}
-		localPath := filepath.Join(localDir, fileName)
-		f, err := os.Create(localPath)
+		err = writeBoundedFile(filepath.Join(localDir, file.Name), r, file)
+		err = errors.Join(err, r.Close())
 		if err != nil {
-			return fmt.Errorf("create %q for download: %w", localPath, err)
-		}
-		r, err := d.bucket.Object(attrs.Name).NewReader(ctx)
-		if err != nil {
-			_ = f.Close()
-			return fmt.Errorf(
-				"open gcs object %q for download: %w",
-				attrs.Name,
-				err,
-			)
-		}
-		_, copyErr := io.Copy(f, r)
-		closeRErr := r.Close()
-		closeFErr := f.Close()
-		if copyErr != nil {
-			return fmt.Errorf("download gcs object %q: %w", attrs.Name, copyErr)
-		}
-		if closeRErr != nil {
-			return fmt.Errorf(
-				"close gcs object %q reader: %w",
-				attrs.Name,
-				closeRErr,
-			)
-		}
-		if closeFErr != nil {
-			return fmt.Errorf(
-				"close %q after download: %w",
-				localPath,
-				closeFErr,
-			)
+			return fmt.Errorf("download gcs object %q: %w", key, err)
 		}
 	}
 	return nil
@@ -223,6 +189,7 @@ func (d *gcsDestination) DownloadDir(
 // manifest.json rather than downloading the whole snapshot.
 func (d *gcsDestination) ListSnapshots(
 	ctx context.Context,
+	opts ...ManifestOption,
 ) ([]SnapshotEntry, error) {
 	listPrefix := ""
 	if d.prefix != "" {
@@ -260,7 +227,9 @@ func (d *gcsDestination) ListSnapshots(
 		if snapshotID == "" {
 			continue
 		}
-		manifest, err := d.fetchManifest(ctx, snapshotID)
+		manifest, err := d.fetchManifestForListing(
+			ctx, snapshotID, opts...,
+		)
 		if err != nil {
 			// A sub-path with no manifest.json object at all
 			// (ErrCloudSnapshotNotFound) is a snapshot still being
@@ -326,13 +295,42 @@ func (d *gcsDestination) FetchManifest(ctx context.Context) (Manifest, error) {
 }
 
 func (d *gcsDestination) FetchManifestWithOptions(ctx context.Context, opts ...ManifestOption) (Manifest, error) {
+	return d.fetchManifestWithOptions(ctx, "", opts...)
+}
+
+func (d *gcsDestination) fetchManifestWithOptions(
+	ctx context.Context,
+	snapshotID string,
+	opts ...ManifestOption,
+) (Manifest, error) {
 	limit, err := manifestByteLimit(opts)
 	if err != nil {
 		return Manifest{}, err
 	}
 	configured := *d
 	configured.maxManifestBytes = limit
-	return configured.FetchManifest(ctx)
+	m, err := configured.fetchManifest(ctx, snapshotID)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if err := m.Authenticate(opts...); err != nil {
+		return Manifest{}, err
+	}
+	return m, nil
+}
+
+func (d *gcsDestination) fetchManifestForListing(
+	ctx context.Context,
+	snapshotID string,
+	opts ...ManifestOption,
+) (Manifest, error) {
+	limit, err := manifestByteLimit(opts)
+	if err != nil {
+		return Manifest{}, err
+	}
+	configured := *d
+	configured.maxManifestBytes = limit
+	return configured.fetchManifest(ctx, snapshotID)
 }
 
 // Delete implements CloudDeleter: it removes every object under this
