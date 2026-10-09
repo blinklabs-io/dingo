@@ -1585,6 +1585,10 @@ type LedgerState struct {
 	// production; tests use it to hold the exact post-commit/pre-publication
 	// window without relying on scheduler timing.
 	beforeTransactionApplyPublish func()
+	// afterBlockApplyCommit is a test-only sequencing hook. Nil in
+	// production; it holds the durable-commit-before-snapshot-publication
+	// window in the normal block-apply path.
+	afterBlockApplyCommit func()
 	// beforeReconciliationUndoSnapshot is a test-only sequencing hook, nil
 	// in production. It runs in reconcilePrimaryChainTipWithLedgerTip right
 	// after the ledgerTip snapshot at the top of that function, so a test
@@ -8622,6 +8626,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 				completeReadResult()
 				return fmt.Errorf("process block batch: %w", err)
+			}
+			if blocksProcessed > 0 && ls.afterBlockApplyCommit != nil {
+				ls.afterBlockApplyCommit()
 			}
 			// Transaction committed successfully - now update in-memory state.
 			// Only update if blocks were actually processed to avoid resetting tip to zero.

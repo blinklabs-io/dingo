@@ -3695,17 +3695,40 @@ func TestTxValidationCommitRejectsDurableTransitionBeforePublication(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
-	ls := newFakeEraLedgerState(db, nil, nil)
+	ls, lastByron, _ := newByronShelleyBoundaryLedger(t)
+	parentTip := ls.currentTip
+	parentTip.Point = ocommon.Point{}
+	parentTip.BlockNumber = 0
+	require.NoError(t, ls.db.DeleteBlockNoncesAfterPoint(parentTip.Point, nil))
+	require.NoError(t, ls.db.SetTip(parentTip, nil))
+	ls.currentTip = parentTip
+	ls.currentTipBlockNonce = nil
+	ls.validationEnabled = false
+	ls.publishSnapshotsLocked()
 
-	err = ls.WithTxValidationSession(context.Background(), func(
+	durableCommit := make(chan struct{})
+	releasePublication := make(chan struct{})
+	ls.afterBlockApplyCommit = func() {
+		close(durableCommit)
+		<-releasePublication
+	}
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{lastByron}}
+	close(results)
+	applyDone := make(chan error, 1)
+
+	err := ls.WithTxValidationSession(context.Background(), func(
 		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
 	) error {
-		finish := ls.beginTxValidationTransition()
-		defer finish()
+		go func() {
+			applyDone <- ls.ledgerProcessBlocksFromSource(
+				context.Background(), results,
+			)
+		}()
+		<-durableCommit
+		defer close(releasePublication)
 		require.False(t, stillCurrent())
 		called := false
 		committed, commitErr := commitIfCurrent(func() error {
@@ -3718,6 +3741,8 @@ func TestTxValidationCommitRejectsDurableTransitionBeforePublication(
 		return nil
 	})
 	require.NoError(t, err)
+	require.NoError(t, <-applyDone)
+	require.Equal(t, lastByron.SlotNumber(), ls.currentTip.Point.Slot)
 }
 
 func TestTxValidationCommitDoesNotWaitForLedgerWriteLock(t *testing.T) {

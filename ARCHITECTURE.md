@@ -13201,6 +13201,17 @@ directly must call `publishSnapshotsLocked()` (or `NewLedgerState` /
 `SetTipForTesting`) themselves before exercising any snapshot-reading path, or
 the read will nil-dereference.
 
+Transaction validation pins one publication generation and a repeatable-read
+database transaction. A block apply, epoch rollover, or rollback commits its
+database changes before it can publish the matching in-memory snapshots. Each
+writer marks a validation transition under `txValidationCommitMutex` before
+starting the durable transaction and clears it only after publication. A
+validation session may continue
+its read-only work during the interval, but `stillCurrent` reports false and
+`commitIfCurrent` rejects its final mempool or forging mutation. Starting a
+transition also waits for any commit callback already holding the mutex, so a
+writer cannot make database state durable midway through that callback.
+
 ## Configuration
 
 Configuration priority (highest to lowest):
