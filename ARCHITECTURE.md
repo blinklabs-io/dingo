@@ -5214,10 +5214,11 @@ the window end, so its window is complete, and the blocks peer A has delivered
 in that window exceed B's. Upstream `densityDisconnect`
 (ouroboros-consensus `Ouroboros/Consensus/Genesis/Governor.hs`) guards on
 `offersMoreThanK || lb0 == ub0`, so it disconnects a peer with an incomplete
-window only for a rival offering more than k headers after the intersection; fragments retain at most k+1 headers and the intersection must
-lie in both, so no rival here can offer that, and a peer whose window is
-incomplete is never disconnected by this comparison; the
-Limit on Eagerness rules below are the exception. A peer that has delivered up to its
+window only for a rival offering more than k headers after the intersection.
+Dingo does not take that branch: a peer whose window is incomplete is never
+disconnected by this comparison, even though a Genesis-mode fragment retains
+`2k+1` points and a rival can therefore offer more than k headers past the
+intersection. The Limit on Eagerness rules below are the exception. A peer that has delivered up to its
 advertised tip is incomplete, not complete: that tip can still advance, so an
 honest peer at its own tip on a short fork is kept. The dominating peer
 contributes at most k blocks, so a sparse peer with k or more blocks in its
@@ -5513,8 +5514,8 @@ While Genesis mode is active a candidate fragment retains `2k+1` delivered
 points instead of `k+1`, so that a fork point more than `k` behind a candidate's
 head is still found. Peers whose block numbers both reach the limit are
 indistinguishable to the length comparison: Genesis density is still compared
-first, and when it is equal the incumbent is kept, then connection priority,
-blockfetch latency, and connection ID break the tie in place of the Praos
+first, and when it is equal connection priority, then the incumbent, then
+blockfetch latency, and then connection ID break the tie in place of the Praos
 comparison. `ChainSelector.SelectedTip` returns the selected
 peer's tip truncated at the limit.
 
@@ -5593,7 +5594,10 @@ exempt from those comparisons, only from the recycler. The Limit on Patience
 is separate: a held header's wait is not charged to it, as above.
 
 The limit is exported as the `dingo_chainselection_loe_block_number` and
-`dingo_chainselection_loe_intersection_slot` gauges (0 while inactive).
+`dingo_chainselection_loe_intersection_slot` gauges (0 while inactive). The
+slot gauge reports the point the limit is measured from: the common point, or
+the last one the candidates shared once they stop overlapping, and 0 while the
+limit is measured from the local tip.
 
 #### Anti-flap incumbent pin
 

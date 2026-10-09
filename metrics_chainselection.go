@@ -104,7 +104,7 @@ func (n *Node) registerChainSelectionMetrics(r *promutil.Registration) {
 	promutil.Register(r, prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "dingo_chainselection_loe_intersection_slot",
-			Help: "slot of the point common to all candidate fragments that anchors the Limit on Eagerness, 0 when inactive or no common point",
+			Help: "slot of the point the Limit on Eagerness is measured from: the point common to all candidate fragments, or the last one they shared once they stop overlapping; 0 when inactive or measured from the local tip",
 		},
 		func() float64 { return n.eagernessLimitGauge(true) },
 	))
@@ -184,7 +184,7 @@ func (n *Node) onGenesisDensityDisconnect(
 	}
 	msg := "disconnecting peer serving a provably sparser chain"
 	if d.EagernessStandoff {
-		msg = "disconnecting the sparser of forks held at the limit on eagerness"
+		msg = "disconnecting peer that lost a standoff at the limit on eagerness"
 	}
 	n.config.logger.Warn(
 		msg,

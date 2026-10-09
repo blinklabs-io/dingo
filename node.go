@@ -1262,12 +1262,14 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		chainSelectorConfig.OnGenesisDensityDisconnect = nil
 	}
 	n.chainSelector = chainselection.NewChainSelector(chainSelectorConfig)
-	n.chainSelectorForGauges.Store(n.chainSelector)
 	// Seed chain selection from the applied ledger tip before peers connect.
 	// Without this initial observation, the plausibility guard treats the
 	// local tip as block zero until the recycler's first tick, leaving a
 	// startup window in which stale peer references cannot enter catch-up mode.
 	n.chainSelector.SetLocalTip(n.ledgerState.Tip())
+	// Published after the seed, so a scrape never reads a limit measured from
+	// block zero.
+	n.chainSelectorForGauges.Store(n.chainSelector)
 	if genesisSelectionMode {
 		n.config.logger.Info(
 			"Genesis chain selection enabled",
