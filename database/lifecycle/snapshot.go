@@ -157,7 +157,7 @@ func Snapshot(
 	// created dir, so nothing else can be concurrently writing into it.
 	defer func() {
 		if err != nil {
-			_ = os.RemoveAll(dir)
+			_ = RemoveSnapshot(dir)
 		}
 	}()
 

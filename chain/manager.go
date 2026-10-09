@@ -592,7 +592,7 @@ func (cm *ChainManager) removeBlockByIndex(
 	}
 	// Remove from database
 	var removedBlock models.Block
-	txn := cm.db.BlobTxn(true)
+	txn := cm.db.BlockBlobTxn()
 	err := txn.Do(func(txn *database.Txn) error {
 		tmpBlock, err := cm.db.BlockByIndex(blockIndex, txn)
 		if err != nil {

@@ -463,6 +463,12 @@ func (b *BlobStoreBark) RemainingTxnEntries(
 	return budget.RemainingTxnEntries(txn, entryBytes)
 }
 
+// DetectsWriteConflicts forwards the upstream transaction capability.
+func (b *BlobStoreBark) DetectsWriteConflicts() bool {
+	detector, ok := b.upstream.(blob.WriteConflictDetector)
+	return ok && detector.DetectsWriteConflicts()
+}
+
 // GetBlockLocal bypasses Bark's archive fallback. Nested wrappers are
 // unwrapped through the same optional interface.
 func (b *BlobStoreBark) GetBlockLocal(

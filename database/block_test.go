@@ -295,7 +295,7 @@ func TestCountBlocksAndOldestSlot_ExcludesTombstonedBlocks(t *testing.T) {
 
 	txn := db.BlobTxn(true)
 	require.NoError(t, txn.Do(func(txn *Txn) error {
-		return db.Blob().TombstoneBlock(txn.Blob(), 100, oldestHash)
+		return db.tombstoneBlockTxn(txn, 100, oldestHash)
 	}))
 
 	count, oldestSlot, err := db.CountBlocksAndOldestSlot(nil)

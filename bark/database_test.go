@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -38,6 +39,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -47,6 +50,44 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+type noDiagnosticIteratorBlobStore struct {
+	blob.BlobStore
+}
+
+type conflictCapabilityBlobStore struct {
+	blob.BlobStore
+	detects bool
+}
+
+func (s conflictCapabilityBlobStore) DetectsWriteConflicts() bool {
+	return s.detects
+}
+
+func (noDiagnosticIteratorBlobStore) NewIterator(
+	types.Txn,
+	types.BlobIteratorOptions,
+) types.BlobIterator {
+	panic("GetDatabaseInfo must not scan the block store")
+}
+
+func TestBlobStoreBarkForwardsWriteConflictDetection(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	wrapped := &BlobStoreBark{upstream: conflictCapabilityBlobStore{
+		BlobStore: db.Blob(),
+		detects:   true,
+	}}
+	require.True(t, wrapped.DetectsWriteConflicts())
+
+	wrapped.upstream = conflictCapabilityBlobStore{
+		BlobStore: db.Blob(),
+		detects:   false,
+	}
+	require.False(t, wrapped.DetectsWriteConflicts())
+	wrapped.upstream = noDiagnosticIteratorBlobStore{BlobStore: db.Blob()}
+	require.False(t, wrapped.DetectsWriteConflicts())
+}
 
 // barkFakeCloudDestination is a minimal stand-in for a real cloud
 // destination (S3/GCS), backed by an ordinary local directory — the same
@@ -1712,6 +1753,22 @@ func TestGetDatabaseInfoReturnsTipSizeBytesAndBlockCount(t *testing.T) {
 	require.Equal(t, db.StorageMode(), resp.Msg.GetTier())
 }
 
+func TestGetDatabaseInfoUsesMaintainedBlockInventory(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	db.SetBlobStore(noDiagnosticIteratorBlobStore{BlobStore: db.Blob()})
+	h := newTestDatabaseServiceHandler(t, db, t.TempDir())
+
+	resp, err := h.GetDatabaseInfo(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), resp.Msg.GetBlockCount())
+	require.Equal(t, uint64(10), resp.Msg.GetOldestSlot())
+}
+
 // TestListSnapshotsReturnsCreatedSnapshotWithLabel verifies that
 // ListSnapshots surfaces a created snapshot's name, description, size, and checksum.
 func TestListSnapshotsReturnsCreatedSnapshotWithLabel(t *testing.T) {
@@ -1794,6 +1851,153 @@ func TestListSnapshotsPaginates(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, page2.Msg.GetSnapshots(), 1)
 	require.Empty(t, page2.Msg.GetNextPageToken())
+}
+
+func TestListSnapshotsRejectsOversizedPage(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	_, err := h.ListSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{
+			PageSize: maxCatalogPageSize + 1,
+		}),
+	)
+	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	_, err = h.ListAvailableSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{
+			PageSize: maxCatalogPageSize + 1,
+		}),
+	)
+	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+}
+
+func TestListSnapshotsBoundsManifestWorkToPage(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	const catalogSize = 128
+	createdAt := time.Unix(1_700_000_000, 0).UTC()
+	for i := range catalogSize {
+		dir := filepath.Join(
+			h.bark.config.SnapshotDir,
+			fmt.Sprintf("snapshot-%03d", i),
+		)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
+			CreatedAt: createdAt.Add(time.Duration(i) * time.Second),
+		}))
+	}
+	for i := range catalogSize - 4 {
+		manifestPath := filepath.Join(
+			h.bark.config.SnapshotDir,
+			fmt.Sprintf("snapshot-%03d", i),
+			lifecycle.ManifestFileName,
+		)
+		require.NoError(t, os.WriteFile(manifestPath, []byte("invalid"), 0o600))
+	}
+	var logs bytes.Buffer
+	h.bark.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+
+	resp, err := h.ListSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{PageSize: 3}),
+	)
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetSnapshots(), 3)
+	require.NotContains(t, logs.String(), "some entries could not be read")
+}
+
+func TestSnapshotCatalogRebuildReportsCorruptEntries(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	goodDir := filepath.Join(base, "good")
+	require.NoError(t, os.Mkdir(goodDir, 0o755))
+	require.NoError(t, lifecycle.WriteManifest(goodDir, lifecycle.Manifest{
+		CreatedAt: time.Unix(1_700_000_000, 0).UTC(),
+	}))
+	corruptDir := filepath.Join(base, "corrupt")
+	require.NoError(t, os.Mkdir(corruptDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(corruptDir, lifecycle.ManifestFileName),
+		[]byte("invalid"),
+		0o600,
+	))
+
+	var logs bytes.Buffer
+	h := newDatabaseServiceHandler(&Bark{config: BarkConfig{
+		SnapshotDir: base,
+		Logger:      slog.New(slog.NewTextHandler(&logs, nil)),
+	}})
+	resp, err := h.ListSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetSnapshots(), 1)
+	require.Equal(t, "good", resp.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.Contains(t, logs.String(), "some entries could not be read")
+}
+
+func TestListSnapshotsContinuesPastPageOfUnreadableEntries(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	base := h.bark.config.SnapshotDir
+	createdAt := time.Unix(1_700_000_000, 0).UTC()
+	for i, id := range []string{"valid", "missing", "corrupt"} {
+		dir := filepath.Join(base, id)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
+			CreatedAt: createdAt.Add(time.Duration(i) * time.Second),
+		}))
+	}
+	require.NoError(t, os.Remove(filepath.Join(
+		base, "missing", lifecycle.ManifestFileName,
+	)))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(base, "corrupt", lifecycle.ManifestFileName),
+		[]byte("invalid"),
+		0o600,
+	))
+
+	first, err := h.ListSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{PageSize: 2}),
+	)
+	require.NoError(t, err)
+	require.Empty(t, first.Msg.GetSnapshots())
+	require.NotEmpty(t, first.Msg.GetNextPageToken())
+
+	second, err := h.ListSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{
+			PageSize:  2,
+			PageToken: first.Msg.GetNextPageToken(),
+		}),
+	)
+	require.NoError(t, err)
+	require.Len(t, second.Msg.GetSnapshots(), 1)
+	require.Equal(t, "valid", second.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.Empty(t, second.Msg.GetNextPageToken())
+}
+
+func TestDatabaseDiagnosticsRejectConcurrentWork(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	h.diagnostic <- struct{}{}
+	t.Cleanup(func() { <-h.diagnostic })
+
+	_, err := h.ListSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{}),
+	)
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+
+	_, err = h.GetDatabaseInfo(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),
+	)
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
 }
 
 // TestListSnapshotsSkipsCorruptedEntryButReturnsOthers verifies that one

@@ -101,9 +101,60 @@ type Txn struct {
 	onFinish      []func()
 	onFinishArmed atomic.Bool
 
+	blockInventoryClaimMu sync.Mutex
+	blockInventoryClaimed bool
+	blockInventoryAdded   map[string]uint64
+
 	// barrierHeld records whether this Txn holds the shared side of
 	// db.commitBarrier (see acquireCommitBarrier). Guarded by lock.
 	barrierHeld bool
+}
+
+type blockMutationMode uint8
+
+const (
+	blockMutationNone blockMutationMode = iota
+	blockMutationSerialized
+	blockMutationConcurrent
+)
+
+func (t *Txn) holdBlockInventory() error {
+	t.blockInventoryClaimMu.Lock()
+	defer t.blockInventoryClaimMu.Unlock()
+	if t.blockInventoryClaimed {
+		return nil
+	}
+	if t.db == nil {
+		return types.ErrNoStoreAvailable
+	}
+	if detector, ok := t.blobStore.(blob.WriteConflictDetector); ok &&
+		detector.DetectsWriteConflicts() {
+		t.blockInventoryClaimed = true
+		return nil
+	}
+	// A caller-supplied transaction has already opened its backend handles.
+	// Waiting here can deadlock with a serialized block transaction that holds
+	// the inventory lock while waiting for a metadata writer held by this
+	// transaction. Production mutation paths acquire the lock before opening
+	// their backend transaction; legacy callers may claim it only when it is
+	// immediately available.
+	if !t.db.blockInventoryMu.TryLock() {
+		return errors.New("block inventory mutation is busy")
+	}
+	t.lock.Lock()
+	finished := t.finished
+	if !finished {
+		t.blockInventoryClaimed = true
+	}
+	t.lock.Unlock()
+	if finished {
+		t.db.blockInventoryMu.Unlock()
+		return errors.New("transaction is already finished")
+	}
+	t.OnFinish(func() {
+		t.db.blockInventoryMu.Unlock()
+	})
+	return nil
 }
 
 // acquireCommitBarrier holds the shared (read) side of db.commitBarrier
@@ -206,12 +257,27 @@ func NewTxn(ctx context.Context, db *Database, readWrite bool) *Txn {
 //
 //nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
 func NewTxnContext(ctx context.Context, db *Database, readWrite bool) *Txn {
+	return newDatabaseTxn(ctx, db, readWrite, blockMutationNone)
+}
+
+func newDatabaseTxn(
+	ctx context.Context,
+	db *Database,
+	readWrite bool,
+	blockMutation blockMutationMode,
+) *Txn {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
+	if blockMutation == blockMutationSerialized {
+		t.acquireBlockInventoryBeforeOpen()
+	}
 	pinBlobStoreForTxn(t, db)
+	if blockMutation == blockMutationConcurrent {
+		t.claimBlockInventoryForBatch()
+	}
 	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(readWrite)
 	}
@@ -335,12 +401,49 @@ func NewReadSnapshotContext(
 }
 
 func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
+	return newBlobOnlyTxn(db, readWrite, blockMutationNone)
+}
+
+func newBlobOnlyTxn(
+	db *Database,
+	readWrite bool,
+	blockMutation blockMutationMode,
+) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
+	if blockMutation == blockMutationSerialized {
+		t.acquireBlockInventoryBeforeOpen()
+	}
 	pinBlobStoreForTxn(t, db)
+	if blockMutation == blockMutationConcurrent {
+		t.claimBlockInventoryForBatch()
+	}
 	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(readWrite)
 	}
 	return t
+}
+
+func (t *Txn) acquireBlockInventoryBeforeOpen() {
+	t.db.blockInventoryMu.Lock()
+	t.blockInventoryClaimed = true
+	t.OnFinish(func() {
+		t.db.blockInventoryMu.Unlock()
+	})
+}
+
+func (t *Txn) claimBlockInventoryByConflict() bool {
+	detector, ok := t.blobStore.(blob.WriteConflictDetector)
+	if !ok || !detector.DetectsWriteConflicts() {
+		return false
+	}
+	t.blockInventoryClaimed = true
+	return true
+}
+
+func (t *Txn) claimBlockInventoryForBatch() {
+	if !t.claimBlockInventoryByConflict() {
+		t.acquireBlockInventoryBeforeOpen()
+	}
 }
 
 //nolint:contextcheck // Preserve the public nil-context compatibility boundary.

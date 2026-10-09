@@ -477,7 +477,10 @@ func (ls *LedgerState) submitBlockApplyDBTxn(
 			}
 			return fmt.Errorf("check block-apply candidate tip: %w", err)
 		}
-		return ls.submitDBTxnOperation(ctx, opFunc, true)
+		return ls.SubmitAsyncDBOperation(func(db *database.Database) error {
+			txn := db.BlockBatchTransaction(ctx)
+			return txn.Do(opFunc)
+		})
 	}()
 	// Partial-commit recovery can itself rewind the primary chain, so it must
 	// run after releasing transactionEventMutex rather than recursively trying
@@ -2678,12 +2681,14 @@ func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
 	}
 
 	// Phase 2: Delete orphaned blocks (read-write transaction)
-	writeTxn := blobStore.NewTransaction(true)
+	writeTxn := ls.db.BlockBlobTxn()
 	defer writeTxn.Rollback() //nolint:errcheck
 	deleted := 0
 
 	for _, orphan := range orphans {
-		if err := blobStore.DeleteBlock(writeTxn, orphan.slot, orphan.hash, orphan.id); err != nil {
+		if err := database.BlockDeleteTxn(writeTxn, models.Block{
+			ID: orphan.id, Slot: orphan.slot, Hash: orphan.hash,
+		}); err != nil {
 			return fmt.Errorf(
 				"delete orphaned block at slot %d (%s): %w",
 				orphan.slot,

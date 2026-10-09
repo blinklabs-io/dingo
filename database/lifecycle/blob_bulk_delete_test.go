@@ -251,7 +251,9 @@ type countingBlobStore struct {
 }
 
 func (c *countingBlobStore) Get(txn types.Txn, key []byte) ([]byte, error) {
-	c.getCalls.Add(1)
+	if bytes.HasPrefix(key, []byte(types.BlockBlobIndexKeyPrefix)) {
+		c.getCalls.Add(1)
+	}
 	return c.BlobStore.Get(txn, key)
 }
 
@@ -259,7 +261,9 @@ func (c *countingBlobStore) NewIterator(
 	txn types.Txn,
 	opts types.BlobIteratorOptions,
 ) types.BlobIterator {
-	c.iteratorCalls.Add(1)
+	if bytes.Equal(opts.Prefix, []byte(types.BlockBlobIndexKeyPrefix)) {
+		c.iteratorCalls.Add(1)
+	}
 	return c.BlobStore.NewIterator(txn, opts)
 }
 
@@ -393,9 +397,9 @@ func (i *erroringIterator) Item() types.BlobItem              { return nil }
 func (i *erroringIterator) Close()                            {}
 func (i *erroringIterator) Err() error                        { return i.err }
 
-// erroringIteratorBlobStore wraps a real blob.BlobStore and replaces every
-// iterator it hands out with erroringIterator, simulating a cloud listing
-// call that failed before yielding a single key.
+// erroringIteratorBlobStore wraps a real blob.BlobStore and replaces block
+// index iterators with erroringIterator, simulating a cloud listing call that
+// failed before yielding a single key.
 type erroringIteratorBlobStore struct {
 	blob.BlobStore
 	err error
@@ -405,6 +409,9 @@ func (e *erroringIteratorBlobStore) NewIterator(
 	txn types.Txn,
 	opts types.BlobIteratorOptions,
 ) types.BlobIterator {
+	if !bytes.Equal(opts.Prefix, []byte(types.BlockBlobIndexKeyPrefix)) {
+		return e.BlobStore.NewIterator(txn, opts)
+	}
 	return &erroringIterator{err: e.err}
 }
 

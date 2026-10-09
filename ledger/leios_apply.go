@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	blobplugin "github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -252,23 +253,31 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 	// Persist the endorser-block blob. Which transaction commits it depends on
 	// the apply path (see DATABASE.md, "Leios endorser-block storage", for the
 	// full rationale):
-	//   - Musashi/no-validation path (LeiosApplyEndorserBlockTxs false): commit
-	//     in its own blob transaction (nil txn) to avoid overflowing the shared
-	//     50-block chunk transaction with ErrTxnTooBig on a dense Leios backlog;
-	//     offset reads use a fresh blob snapshot if the shared LRU misses.
+	//   - Musashi/no-validation path (LeiosApplyEndorserBlockTxs false): on a
+	//     bounded store with optimistic conflict detection, commit in its own
+	//     blob transaction (nil txn) to avoid overflowing the shared 50-block
+	//     chunk transaction with ErrTxnTooBig on a dense Leios backlog; offset
+	//     reads use a fresh blob snapshot if the shared LRU misses. Other stores
+	//     retain the shared transaction so their serialized block batch is not
+	//     nested inside another inventory mutation.
 	//   - CIP/validating path (LeiosApplyEndorserBlockTxs true): keep the blob in
 	//     the shared txn so a later block spending an endorser-produced output can
 	//     resolve it via read-your-writes.
 	blobTxn := txn
 	if !ls.config.LeiosApplyEndorserBlockTxs {
-		blobTxn = nil
+		store := txn.BlobStore()
+		_, bounded := store.(blobplugin.TxnBudget)
+		detector, conflictCapable := store.(blobplugin.WriteConflictDetector)
+		if bounded && conflictCapable && detector.DetectsWriteConflicts() {
+			blobTxn = nil
+		}
 	}
 	if err := ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, blobTxn); err != nil {
 		return 0, 0, &leiosEndorserBlockStorageError{
 			err: fmt.Errorf("store endorser block blob: %w", err),
 		}
 	}
-	if !ls.config.LeiosApplyEndorserBlockTxs {
+	if blobTxn == nil {
 		txn.MarkBlockCborCommittedSeparately(ebSlot, ebHash)
 	}
 

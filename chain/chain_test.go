@@ -4194,11 +4194,22 @@ func (s commitFailingBlobStore) NewTransaction(readWrite bool) dbtypes.Txn {
 	}
 }
 
-// SetBlock is the only store call reached with the wrapped transaction, so it
-// is the only override needed. AddBlocks runs on a blob-only transaction
-// (Database.BlobTxn), and Txn.Commit updates the commit timestamp -- the other
-// call that would receive this transaction -- only when a metadata transaction
-// is present too, so Blob().SetCommitTimestamp is never reached from here.
+func (s commitFailingBlobStore) Get(
+	txn dbtypes.Txn,
+	key []byte,
+) ([]byte, error) {
+	return s.BlobStore.Get(unwrapCommitFailingBlobTxn(txn), key)
+}
+
+func (s commitFailingBlobStore) Set(
+	txn dbtypes.Txn,
+	key []byte,
+	value []byte,
+) error {
+	return s.BlobStore.Set(unwrapCommitFailingBlobTxn(txn), key, value)
+}
+
+// SetBlock unwraps the injected transaction before forwarding the block write.
 func (s commitFailingBlobStore) SetBlock(
 	txn dbtypes.Txn,
 	slot uint64,
@@ -4360,7 +4371,22 @@ func (s rollbackObservingBlobStore) NewTransaction(readWrite bool) dbtypes.Txn {
 	return &rollbackObservingBlobTxn{Txn: txn, observe: s.observe}
 }
 
-// SetBlock unwraps for the same reason commitFailingBlobStore.SetBlock does.
+func (s rollbackObservingBlobStore) Get(
+	txn dbtypes.Txn,
+	key []byte,
+) ([]byte, error) {
+	return s.BlobStore.Get(unwrapRollbackObservingBlobTxn(txn), key)
+}
+
+func (s rollbackObservingBlobStore) Set(
+	txn dbtypes.Txn,
+	key []byte,
+	value []byte,
+) error {
+	return s.BlobStore.Set(unwrapRollbackObservingBlobTxn(txn), key, value)
+}
+
+// SetBlock unwraps the injected transaction before forwarding the block write.
 func (s rollbackObservingBlobStore) SetBlock(
 	txn dbtypes.Txn,
 	slot uint64,

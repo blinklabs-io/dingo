@@ -99,6 +99,11 @@ type Database struct {
 	// directly.
 	blobRef *blobStoreRef
 	blobMu  sync.RWMutex
+	// blockInventoryMu serializes transactions that update the persisted block
+	// inventory. Cloud stores do not provide optimistic write-conflict
+	// detection, so the lock is held until commit or rollback rather than only
+	// around the read-modify-write operation.
+	blockInventoryMu sync.Mutex
 
 	cborCache       *TieredCborCache
 	sizeMetricsStop chan struct{}
@@ -345,6 +350,33 @@ func (d *Database) BlobTxn(readWrite bool) *Txn {
 	return NewBlobOnlyTxn(d, readWrite)
 }
 
+// BlockBlobTxn starts a blob-only write transaction serialized with other
+// block inventory mutations. The lock is acquired before the backend
+// transaction opens so snapshot-based stores cannot observe a stale inventory.
+func (d *Database) BlockBlobTxn() *Txn {
+	return newBlobOnlyTxn(d, true, blockMutationSerialized)
+}
+
+// BlockBatchTxn starts a blob-only block transaction. Stores with optimistic
+// write-conflict detection may overlap; other stores serialize before their
+// transaction opens so each batch sees the latest inventory.
+func (d *Database) BlockBatchTxn() *Txn {
+	return newBlobOnlyTxn(d, true, blockMutationConcurrent)
+}
+
+// BlockTransaction starts a coordinated write transaction serialized with
+// other block inventory mutations. ctx bounds its metadata statements.
+func (d *Database) BlockTransaction(ctx context.Context) *Txn {
+	return newDatabaseTxn(ctx, d, true, blockMutationSerialized)
+}
+
+// BlockBatchTransaction starts a coordinated block transaction. Stores with
+// optimistic write-conflict detection may overlap; other stores serialize
+// before either backend transaction opens.
+func (d *Database) BlockBatchTransaction(ctx context.Context) *Txn {
+	return newDatabaseTxn(ctx, d, true, blockMutationConcurrent)
+}
+
 // MetadataTxn starts a new metadata-only database transaction and returns a
 // handle to it. ctx bounds the transaction's statements.
 func (d *Database) MetadataTxn(ctx context.Context, readWrite bool) *Txn {
@@ -531,6 +563,9 @@ func New(
 	}
 	if err := db.init(ctx); err != nil {
 		// Database is available for recovery, so return it with error
+		return db, err
+	}
+	if err := db.initBlockInventory(); err != nil {
 		return db, err
 	}
 	return db, nil

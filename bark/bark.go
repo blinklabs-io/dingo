@@ -148,10 +148,10 @@ type BarkConfig struct {
 	Node NodeControl
 	// SnapshotDir is the base directory the DatabaseService's CreateSnapshot/
 	// Restore RPCs write to and read from — required when Lifecycle is set.
-	// There is no separate snapshot catalog store (see database.go's doc
-	// comment); ListSnapshots/ListAvailableSnapshots scan this directory
-	// for manifest.json files instead, so each snapshot's generated ID is
-	// also its directory name directly under SnapshotDir.
+	// Each snapshot's generated ID is its directory name directly under
+	// SnapshotDir. DatabaseService maintains a persistent local catalog for
+	// bounded ListSnapshots pages and rebuilds it from these directories when
+	// the handler starts.
 	SnapshotDir string
 	// SnapshotCloudDestination, if set, is the same cloud destination URI
 	// as databaseLifecycle.snapshotCloudDestination — passed through here

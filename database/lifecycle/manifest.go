@@ -424,7 +424,13 @@ func WriteManifest(dir string, m Manifest, opts ...ManifestOption) error {
 	// A file's own fsync does not guarantee its directory entry is
 	// persisted; sync dir itself so the rename above is durable too, not
 	// just atomic.
-	return fsyncdir.Sync(dir)
+	if err := fsyncdir.Sync(dir); err != nil {
+		return err
+	}
+	return updateSnapshotCatalogIfPresent(
+		filepath.Dir(dir),
+		SnapshotEntry{ID: filepath.Base(dir), Manifest: m},
+	)
 }
 
 // ReadManifest reads and validates the manifest at dir/ManifestFileName,

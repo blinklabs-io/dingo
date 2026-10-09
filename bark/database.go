@@ -16,7 +16,9 @@ package bark
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -44,6 +46,7 @@ var _ databaseconnect.DatabaseServiceHandler = &databaseServiceHandler{}
 const (
 	defaultCatalogPageSize = 50
 	defaultHistoryPageSize = 50
+	maxCatalogPageSize     = lifecycle.SnapshotCatalogPageLimit
 )
 
 // streamProgressPollInterval is how often StreamOperationProgress polls
@@ -61,11 +64,10 @@ const streamProgressPollInterval = 250 * time.Millisecond
 // GetOperationHistory, GetDatabaseInfo, and CancelOperation.
 //
 // Snapshots are identified by a generated ID that is also its directory
-// name directly under BarkConfig.SnapshotDir — there is no separate
-// catalog store; ListSnapshots scans that directory for manifest.json
-// files (lifecycle.ListSnapshots), which also means automatic
-// epoch-boundary snapshots (internal/dblifecycle.Manager) show up in the
-// same catalog for free, since they live under the same directory.
+// name directly under BarkConfig.SnapshotDir. ListSnapshots reads bounded
+// newest-first pages from a persistent lifecycle catalog rebuilt from those
+// directories at handler startup. Automatic epoch-boundary snapshots share
+// the same root and update the catalog through lifecycle.WriteManifest.
 // ListAvailableSnapshots (mergedSnapshotCatalogPage) additionally merges
 // in whatever lifecycle.ListCloudSnapshots finds at
 // BarkConfig.SnapshotCloudDestination, deduplicated by ID (local wins) —
@@ -103,12 +105,39 @@ type databaseServiceHandler struct {
 	mu         sync.Mutex
 	operations map[string]*operation
 	busy       bool
+	diagnostic chan struct{}
+	catalogErr error
 }
 
 func newDatabaseServiceHandler(b *Bark) *databaseServiceHandler {
-	return &databaseServiceHandler{
+	h := &databaseServiceHandler{
 		bark:       b,
 		operations: make(map[string]*operation),
+		diagnostic: make(chan struct{}, 1),
+	}
+	if b.config.SnapshotDir != "" {
+		err := lifecycle.EnsureSnapshotCatalog(b.config.SnapshotDir)
+		if errors.Is(err, lifecycle.ErrSnapshotCatalogIncomplete) {
+			b.config.Logger.Warn(
+				"list snapshots: some entries could not be read, omitting them from the catalog",
+				"error", err,
+			)
+		} else {
+			h.catalogErr = err
+		}
+	}
+	return h
+}
+
+func (h *databaseServiceHandler) beginDiagnostic() (func(), error) {
+	select {
+	case h.diagnostic <- struct{}{}:
+		return func() { <-h.diagnostic }, nil
+	default:
+		return nil, connect.NewError(
+			connect.CodeResourceExhausted,
+			errors.New("another database diagnostic is already running"),
+		)
 	}
 }
 
@@ -525,17 +554,94 @@ func decodePageToken(token string) (int, error) {
 	return offset, nil
 }
 
+type snapshotPageToken struct {
+	Generation uint64 `json:"generation"`
+	CreatedSec int64  `json:"createdSec"`
+	CreatedNS  int    `json:"createdNs"`
+	ID         string `json:"id"`
+}
+
+func encodeSnapshotPageToken(
+	cursor *lifecycle.SnapshotCatalogCursor,
+) (string, error) {
+	data, err := json.Marshal(snapshotPageToken{
+		Generation: cursor.Generation,
+		CreatedSec: cursor.CreatedSec,
+		CreatedNS:  cursor.CreatedNS,
+		ID:         cursor.ID,
+	})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(data), nil
+}
+
+func decodeSnapshotPageToken(
+	token string,
+) (*lifecycle.SnapshotCatalogCursor, error) {
+	if token == "" {
+		return nil, nil
+	}
+	data, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return nil, errors.New("invalid snapshot page token")
+	}
+	var decoded snapshotPageToken
+	if err := json.Unmarshal(data, &decoded); err != nil ||
+		decoded.Generation == 0 || decoded.ID == "" ||
+		decoded.CreatedNS < 0 || decoded.CreatedNS >= int(time.Second) {
+		return nil, errors.New("invalid snapshot page token")
+	}
+	return &lifecycle.SnapshotCatalogCursor{
+		Generation: decoded.Generation,
+		CreatedSec: decoded.CreatedSec,
+		CreatedNS:  decoded.CreatedNS,
+		ID:         decoded.ID,
+	}, nil
+}
+
+func boundedCatalogPageSize(pageSize uint32) (int, error) {
+	if pageSize == 0 {
+		return defaultCatalogPageSize, nil
+	}
+	if pageSize > maxCatalogPageSize {
+		return 0, fmt.Errorf(
+			"page_size exceeds maximum %d", maxCatalogPageSize,
+		)
+	}
+	return int(pageSize), nil
+}
+
 // snapshotCatalogPage returns one page of the local snapshot catalog.
 func (h *databaseServiceHandler) snapshotCatalogPage(
 	pageSize uint32,
 	pageToken string,
 ) ([]*databasev1alpha1.SnapshotInfo, string, error) {
-	offset, err := decodePageToken(pageToken)
+	if h.catalogErr != nil {
+		return nil, "", connect.NewError(
+			connect.CodeInternal,
+			fmt.Errorf("initialize snapshot catalog: %w", h.catalogErr),
+		)
+	}
+	cursor, err := decodeSnapshotPageToken(pageToken)
 	if err != nil {
 		return nil, "", connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	entries, err := lifecycle.ListSnapshots(h.bark.config.SnapshotDir)
+	size, err := boundedCatalogPageSize(pageSize)
 	if err != nil {
+		return nil, "", connect.NewError(
+			connect.CodeInvalidArgument, err,
+		)
+	}
+	entries, nextCursor, err := lifecycle.ListSnapshotPage(
+		h.bark.config.SnapshotDir,
+		size,
+		cursor,
+	)
+	if err != nil {
+		if errors.Is(err, lifecycle.ErrSnapshotCatalogChanged) {
+			return nil, "", connect.NewError(connect.CodeAborted, err)
+		}
 		// entries == nil distinguishes a total failure (the catalog root
 		// itself is unreadable) from lifecycle.ListSnapshots' own
 		// per-entry-problem case, where it still returns every
@@ -558,22 +664,15 @@ func (h *databaseServiceHandler) snapshotCatalogPage(
 			err,
 		)
 	}
-	if offset > len(entries) {
-		offset = len(entries)
-	}
-	size := int(pageSize)
-	if size <= 0 {
-		size = defaultCatalogPageSize
-	}
-	end := offset + size
 	var nextToken string
-	if end < len(entries) {
-		nextToken = encodePageToken(end)
-	} else {
-		end = len(entries)
+	if nextCursor != nil {
+		nextToken, err = encodeSnapshotPageToken(nextCursor)
+		if err != nil {
+			return nil, "", connect.NewError(connect.CodeInternal, err)
+		}
 	}
-	infos := make([]*databasev1alpha1.SnapshotInfo, 0, end-offset)
-	for _, e := range entries[offset:end] {
+	infos := make([]*databasev1alpha1.SnapshotInfo, 0, len(entries))
+	for _, e := range entries {
 		infos = append(
 			infos,
 			snapshotInfoFromEntry(
@@ -589,6 +688,11 @@ func (h *databaseServiceHandler) ListSnapshots(
 	_ context.Context,
 	req *connect.Request[databasev1alpha1.ListSnapshotsRequest],
 ) (*connect.Response[databasev1alpha1.ListSnapshotsResponse], error) {
+	release, err := h.beginDiagnostic()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	infos, nextToken, err := h.snapshotCatalogPage(
 		req.Msg.GetPageSize(),
 		req.Msg.GetPageToken(),
@@ -624,6 +728,10 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 	pageToken string,
 ) ([]*databasev1alpha1.SnapshotInfo, string, error) {
 	offset, err := decodePageToken(pageToken)
+	if err != nil {
+		return nil, "", connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	size, err := boundedCatalogPageSize(pageSize)
 	if err != nil {
 		return nil, "", connect.NewError(connect.CodeInvalidArgument, err)
 	}
@@ -706,10 +814,6 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 	if offset > len(items) {
 		offset = len(items)
 	}
-	size := int(pageSize)
-	if size <= 0 {
-		size = defaultCatalogPageSize
-	}
 	end := offset + size
 	var nextToken string
 	if end < len(items) {
@@ -734,6 +838,11 @@ func (h *databaseServiceHandler) ListAvailableSnapshots(
 	ctx context.Context,
 	req *connect.Request[databasev1alpha1.ListAvailableSnapshotsRequest],
 ) (*connect.Response[databasev1alpha1.ListAvailableSnapshotsResponse], error) {
+	release, err := h.beginDiagnostic()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	infos, nextToken, err := h.mergedSnapshotCatalogPage(
 		ctx,
 		req.Msg.GetPageSize(),
@@ -923,7 +1032,7 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 	}
 
 	if localExists {
-		if err := os.RemoveAll(localDir); err != nil {
+		if err := lifecycle.RemoveSnapshot(localDir); err != nil {
 			return nil, connect.NewError(
 				connect.CodeInternal,
 				fmt.Errorf("delete local snapshot %q: %w", snapshotID, err),
@@ -1294,6 +1403,11 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 	_ context.Context,
 	_ *connect.Request[databasev1alpha1.GetDatabaseInfoRequest],
 ) (*connect.Response[databasev1alpha1.GetDatabaseInfoResponse], error) {
+	releaseDiagnostic, err := h.beginDiagnostic()
+	if err != nil {
+		return nil, err
+	}
+	defer releaseDiagnostic()
 	db, release, err := h.bark.Acquire()
 	if err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, err)
@@ -1308,10 +1422,6 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 		)
 	}
 
-	// A full scan of the block-index keyspace (see its doc comment) —
-	// deliberately accepted for this operator-facing diagnostic RPC over
-	// adding a maintained counter, which would touch every block
-	// insert/delete path across the codebase.
 	blockCount, oldestSlot, err := db.CountBlocksAndOldestSlot(nil)
 	if err != nil {
 		return nil, connect.NewError(

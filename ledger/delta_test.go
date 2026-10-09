@@ -57,6 +57,28 @@ func (s commitFailingBlobStore) NewTransaction(readWrite bool) dbtypes.Txn {
 	return &commitFailingBlobTxn{Txn: txn, err: s.err}
 }
 
+func (s commitFailingBlobStore) Get(
+	txn dbtypes.Txn,
+	key []byte,
+) ([]byte, error) {
+	return s.BlobStore.Get(unwrapCommitFailingBlobTxn(txn), key)
+}
+
+func (s commitFailingBlobStore) Set(
+	txn dbtypes.Txn,
+	key []byte,
+	value []byte,
+) error {
+	return s.BlobStore.Set(unwrapCommitFailingBlobTxn(txn), key, value)
+}
+
+func (s commitFailingBlobStore) NewIterator(
+	txn dbtypes.Txn,
+	opts dbtypes.BlobIteratorOptions,
+) dbtypes.BlobIterator {
+	return s.BlobStore.NewIterator(unwrapCommitFailingBlobTxn(txn), opts)
+}
+
 func (s commitFailingBlobStore) SetTx(
 	txn dbtypes.Txn,
 	txHash []byte,
