@@ -3607,9 +3607,10 @@ request, decode-cache reject) therefore run while `n.ouroboros()` is nil. The
 provider answers "not available", the fetcher and range request return
 `errOuroborosNotStarted`, and the reject is a no-op, so a certified closure takes
 the pipeline's normal unavailable/retry path above and is never reported present.
-The retries back off and the pipeline stops as stuck after 50 consecutive
-no-progress restarts, so networking has to come up within a few minutes of the
-replay starting.
+While replay has no connected leios-fetch peer, the fetch uses the no-peer
+retry path and preserves the no-progress count while the ledger tip is
+unchanged. Failures from a connected peer that cannot serve the certified block
+continue through the normal backoff and 50-restart stuck threshold.
 
 The two paths differ in how endorser transactions are validated on apply, not
 whether they are applied. The Musashi prototype's ledger applies a certified
