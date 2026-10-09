@@ -64,6 +64,7 @@ var ErrNotImplemented = errors.New("not implemented")
 var ErrLedgerViewStorageFault = errors.New("ledger view storage fault")
 
 type LedgerView struct {
+	ctx context.Context
 	ls  *LedgerState
 	txn *database.Txn
 	// Committee proposal resolution must use the same immutable consensus
@@ -156,6 +157,14 @@ type LedgerView struct {
 	// first recorded error is kept, matching the single LedgerView built per
 	// ValidateTxFunc/EvaluateTxFunc call. See ErrLedgerViewStorageFault.
 	storageErr error
+}
+
+// EvaluationContext returns the context governing this ledger operation.
+func (lv *LedgerView) EvaluationContext() context.Context {
+	if lv.ctx == nil {
+		return context.Background()
+	}
+	return lv.ctx
 }
 
 // recordStorageErr records the first non-not-found error observed by a

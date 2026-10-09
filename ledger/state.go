@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -663,12 +664,15 @@ type PeerHeaderLookupFunc func(
 type GenesisSelectionStateFunc func() (active bool, window uint64)
 
 type LedgerStateConfig struct {
-	PromRegistry      prometheus.Registerer
-	Logger            *slog.Logger
-	Database          *database.Database
-	ChainManager      *chain.ChainManager
-	EventBus          *event.EventBus
-	CardanoNodeConfig *cardano.CardanoNodeConfig
+	// MaxConcurrentEvaluations bounds transaction evaluations running at
+	// once across every API front end (0 = GOMAXPROCS).
+	MaxConcurrentEvaluations int
+	PromRegistry             prometheus.Registerer
+	Logger                   *slog.Logger
+	Database                 *database.Database
+	ChainManager             *chain.ChainManager
+	EventBus                 *event.EventBus
+	CardanoNodeConfig        *cardano.CardanoNodeConfig
 	// Network is the CLI/YAML/env network selector dingo was started with
 	// (e.g. "mainnet", "preprod", "prime-mainnet"). Shelley genesis alone
 	// cannot distinguish real Cardano mainnet from a foreign chain that
@@ -1039,6 +1043,8 @@ type tipSnapshot struct {
 }
 
 type LedgerState struct {
+	// evalSlots bounds concurrent EvaluateTx calls; nil means unbounded.
+	evalSlots chan struct{}
 	metrics   stateMetrics
 	consensus atomic.Pointer[consensusSnapshot]
 	tip       atomic.Pointer[tipSnapshot]
@@ -1826,6 +1832,9 @@ type EpochRolloverResult struct {
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
+	if cfg.MaxConcurrentEvaluations < 0 {
+		return nil, errors.New("MaxConcurrentEvaluations must not be negative")
+	}
 	if cfg.ChainManager == nil {
 		return nil, errors.New("a ChainManager is required")
 	}
@@ -1859,6 +1868,10 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		validationEnabled:  cfg.ValidateHistorical,
 		plutusEvalCtxCache: eras.NewPlutusEvalContextCache(),
 		byronPBFT:          byronPBFT,
+		evalSlots: make(
+			chan struct{},
+			cmp.Or(cfg.MaxConcurrentEvaluations, runtime.GOMAXPROCS(0)),
+		),
 	}
 	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
 	ls.timeConverter = ls.newTimeConverter()
@@ -13346,17 +13359,22 @@ func (ls *LedgerState) GetTransactionsByAddress(
 // GetTransactionsByAddressWithOrder returns transactions
 // involving the given address with explicit ordering.
 func (ls *LedgerState) GetTransactionsByAddressWithOrder(
+	ctx context.Context,
 	addr lcommon.Address,
 	limit int,
 	offset int,
 	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 ) ([]models.Transaction, error) {
 	txs, err := ls.db.GetTransactionsByAddressWithOrder(
-		context.Background(),
+		ctx,
 		addr,
 		limit,
 		offset,
 		order,
+		from,
+		to,
 		nil,
 	)
 	if err != nil {
@@ -13374,11 +13392,16 @@ func (ls *LedgerState) GetTransactionsByAddressWithOrder(
 // CountTransactionsByAddress returns the total number of
 // transactions involving the given address.
 func (ls *LedgerState) CountTransactionsByAddress(
+	ctx context.Context,
 	addr lcommon.Address,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 ) (int, error) {
 	count, err := ls.db.CountTransactionsByAddress(
-		context.Background(),
+		ctx,
 		addr,
+		from,
+		to,
 		nil,
 	)
 	if err != nil {
@@ -13952,6 +13975,11 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 	})
 }
 
+// ErrEvaluationBusy reports that every transaction-evaluation slot is in use.
+// Evaluation runs scripts on the caller's goroutine, so admission is refused
+// outright rather than queued.
+var ErrEvaluationBusy = errors.New("transaction evaluation capacity exhausted")
+
 // EvaluateTx evaluates the scripts in the provided transaction and returns the calculated
 // fee, per-redeemer ExUnits, and total ExUnits.
 //
@@ -13962,14 +13990,22 @@ func (ls *LedgerState) EvaluateTx(
 	return ls.EvaluateTxContext(context.Background(), tx)
 }
 
-// EvaluateTxContext evaluates the scripts in tx and cancels storage work with
-// ctx.
+// EvaluateTxContext evaluates transaction scripts until completion or context
+// cancellation, using ctx to cancel storage work.
 func (ls *LedgerState) EvaluateTxContext(
 	ctx context.Context,
 	tx lcommon.Transaction,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
+	}
+	if ls.evalSlots != nil {
+		select {
+		case ls.evalSlots <- struct{}{}:
+			defer func() { <-ls.evalSlots }()
+		default:
+			return 0, lcommon.ExUnits{}, nil, ErrEvaluationBusy
+		}
 	}
 	// Snapshot mutable state from the lock-free consensus snapshot
 	consensusState := ls.loadConsensusSnapshot()
@@ -14010,6 +14046,7 @@ func (ls *LedgerState) EvaluateTxContext(
 				return err
 			}
 			lv = (&LedgerView{
+				ctx:            ctx,
 				txn:            txn,
 				ls:             ls,
 				epochStartSlot: consensusState.currentEpoch.StartSlot,
@@ -14018,11 +14055,17 @@ func (ls *LedgerState) EvaluateTxContext(
 				pp,
 			).pinSyntheticV2CostModel(synthetic)
 			var err error
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			fee, totalExUnits, redeemerExUnits, err = validationEra.EvaluateTxFunc(
 				tx,
 				lv,
 				pp,
 			)
+			if err == nil {
+				err = ctx.Err()
+			}
 			return err
 		})
 		err = storageFaultOrErr(lv, err)

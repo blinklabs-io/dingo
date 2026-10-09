@@ -182,7 +182,7 @@ func dijkstraBatchWithSubOutputTx(t *testing.T) *dijkstra.DijkstraTransaction {
 		23: cbor.NewSetType([]cbor.RawMessage{subTransaction}, true),
 	})
 	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, true, nil})
+	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, nil})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
 	require.NoError(t, err)
@@ -446,7 +446,7 @@ func TestDijkstraDirectDepositUpdatesRewardAccountBalance(t *testing.T) {
 		25: map[cbor.ByteString]uint64{cbor.NewByteString(rewardAddress): 20},
 	})
 	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, true, nil})
+	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, nil})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
 	require.NoError(t, err)
