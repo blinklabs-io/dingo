@@ -5626,7 +5626,18 @@ func (ls *LedgerState) ensureBlockfetchDrainingQueuedHeaders(
 		// matching noteBlockfetchRangeUnavailable's equivalent recovery.
 		ls.clearQueuedHeaders()
 		ls.requestChainsyncResync(connId, resyncReason, pending)
+		return
 	}
+	// Logged once per episode: the in-flight guard above suppresses repeat
+	// calls until this batch completes, so a recovered stall stays visible
+	// without flooding the log.
+	ls.config.Logger.Info(
+		"started blockfetch for queued headers after header-queue rejection",
+		"component", "ledger",
+		"connection_id", connId.String(),
+		"reason", resyncReason,
+		"queued_headers", ls.chain.HeaderCount(),
+	)
 }
 
 // blockfetchRangeFailureState counts definitive failures to obtain one
