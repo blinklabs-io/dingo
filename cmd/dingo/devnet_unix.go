@@ -37,6 +37,9 @@ func signalDevnetChild(process *os.Process, signal os.Signal) error {
 	if !ok {
 		return fmt.Errorf("unsupported devnet child signal %q", signal)
 	}
+	if childSignal == syscall.SIGHUP {
+		childSignal = syscall.SIGTERM
+	}
 	if err := syscall.Kill(-process.Pid, childSignal); errors.Is(err, syscall.ESRCH) {
 		return os.ErrProcessDone
 	} else {
