@@ -15593,6 +15593,32 @@ mirror the gouroboros-side cumulative `PipelineStats` counters as gauges
 the cumulative totals, which can only be `Set` from a periodic snapshot,
 not incremented in place from dingo's side.
 
+**Batched apply for unvalidated blocks.**
+`LedgerStateConfig.ApplyRowBatchingEnabled` (config
+`ledgerApplyRowBatchingEnabled` / `DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED` /
+`--ledger-apply-row-batching-enabled`; default off) changes only how
+`LedgerDeltaBatch.apply` (`ledger/delta.go`) writes the deltas that blocks
+which are not validated accumulate during a chunk. With it set, each apply
+creates one `database.BatchAccumulator`, writes every transaction with
+`Database.SetTransactionBatchedWithOpts`, and calls `Database.FlushBatch`
+before returning, so API-mode detail rows (address index, witnesses, scripts,
+datums, metadata labels) reach SQLite as multi-row inserts and the
+transaction-row upsert reuses one prepared statement. The flush happens
+inside the same database transaction and before the next validated block
+runs, so stored state is identical to the per-row path; only statement count
+changes. Everything else a transaction writes (the consumed-input spend
+marking, certificates, withdrawals, produced UTxOs and assets, pparam updates)
+is already executed inline by both paths, and opcert counters, nonces,
+governance and donations are written by the ledger around the call, not by it.
+Validated blocks apply each transaction as it is validated and never use the
+batch, and deltas that carry Leios closure options
+(`skipConsumedInputRecovery`, `closureContextSlot`) keep the per-row path
+because the batched write cannot express those variants. The batched path
+does not emit the per-transaction warning for a transaction whose declared
+outputs produced no UTxOs; that is a log line only. Regression tests:
+`TestApplyRowBatchingSerialEquivalence` and
+`TestApplyRowBatchingSameChunkDependencies` (`ledger/apply_row_batching_test.go`).
+
 **Phase 5: rollback coordination.** `ledgerReadChainIterator` — the
 pipeline's only submitter — runs on its own goroutine, entirely decoupled
 from the goroutine that decides a rollback. That matters because

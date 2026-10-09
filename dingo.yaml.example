@@ -636,6 +636,17 @@
 # CLI: --block-pipeline-validate-enabled
 # blockPipelineValidateEnabled: false
 
+# Write the accumulated deltas of blocks that are not validated with
+# multi-row batched inserts instead of one statement group per row (default:
+# false). Blocks that are validated keep the per-transaction path. Not
+# consensus-affecting -- the stored state is identical either way. See
+# ARCHITECTURE.md ("Block Processing Pipeline").
+#
+# Can be overridden with the DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED
+# environment variable
+# CLI: --ledger-apply-row-batching-enabled
+# ledgerApplyRowBatchingEnabled: false
+
 # Error out (instead of silently skipping) when a consumed UTxO cannot be
 # found or recovered for a block past the recorded Mithril sync boundary.
 # A non-genesis chainsync intersection without a Mithril snapshot may set this

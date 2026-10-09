@@ -277,6 +277,7 @@ type Config struct {
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
+	ledgerApplyRowBatchingEnabled                                                       bool
 	minPoolMargin                                                                       uint
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
@@ -909,6 +910,7 @@ func (c *Config) syncCompatFields() {
 	c.forgeEBSelectionReserve = c.cfg.ForgeEBSelectionReserve
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
+	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
@@ -1726,6 +1728,17 @@ func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
 func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BlockPipelineValidateEnabled = enabled
+	}
+}
+
+// WithLedgerApplyRowBatchingEnabled writes the accumulated deltas of blocks
+// that are not validated through the metadata store's batched path. Blocks
+// that are validated keep the per-transaction path. Off by default; the
+// stored state is identical either way. See
+// LedgerStateConfig.ApplyRowBatchingEnabled.
+func WithLedgerApplyRowBatchingEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerApplyRowBatchingEnabled = enabled
 	}
 }
 
@@ -2582,6 +2595,12 @@ func (c *Config) BlockPipelineEnabled() bool {
 // OpCert validate stage of the block-decode pipeline is enabled.
 func (c *Config) BlockPipelineValidateEnabled() bool {
 	return c.cfg.BlockPipelineValidateEnabled
+}
+
+// LedgerApplyRowBatchingEnabled returns whether blocks that are not validated
+// are applied through the batched metadata write path.
+func (c *Config) LedgerApplyRowBatchingEnabled() bool {
+	return c.cfg.LedgerApplyRowBatchingEnabled
 }
 
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.

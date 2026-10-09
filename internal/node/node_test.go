@@ -1333,3 +1333,29 @@ func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
 		)
 	}
 }
+
+func TestBuildDingoConfigWiresLedgerApplyRowBatching(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	for _, enabled := range []bool{false, true} {
+		built := buildDingoConfig(
+			&config.Config{LedgerApplyRowBatchingEnabled: enabled},
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		)
+		if built.LedgerApplyRowBatchingEnabled() != enabled {
+			t.Fatalf(
+				"LedgerApplyRowBatchingEnabled: want %v, got %v",
+				enabled,
+				built.LedgerApplyRowBatchingEnabled(),
+			)
+		}
+	}
+}

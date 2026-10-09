@@ -878,6 +878,14 @@ type LedgerStateConfig struct {
 	// ARCHITECTURE.md ("Fork-resolution header-queue overflow must still
 	// restart blockfetch") for the fix and the full explanation.
 	BlockPipelineValidateEnabled bool
+	// ApplyRowBatchingEnabled writes the accumulated deltas of blocks that
+	// are not validated through the metadata store's batched path, which
+	// queues API-mode detail rows and writes them as multi-row inserts at the
+	// end of each delta batch, instead of one statement group per row. Blocks
+	// that are validated keep the per-transaction path. Off by default; the
+	// stored state is identical either way. See ARCHITECTURE.md ("Block
+	// Processing Pipeline").
+	ApplyRowBatchingEnabled bool
 }
 
 // EndorserBlockProviderFunc returns the complete set of standalone
@@ -1560,6 +1568,11 @@ type LedgerState struct {
 	// production; tests use it to hold the exact post-commit/pre-publication
 	// window without relying on scheduler timing.
 	beforeTransactionApplyPublish func()
+	// afterBatchedTransactionWrite is a test-only observation hook, nil in
+	// production. LedgerDelta applies call it after each transaction body
+	// they write through the batched metadata path, so a test can tell that
+	// path from the per-row one, which stores the same state.
+	afterBatchedTransactionWrite func()
 	// beforeReconciliationUndoSnapshot is a test-only sequencing hook, nil
 	// in production. It runs in reconcilePrimaryChainTipWithLedgerTip right
 	// after the ledgerTip snapshot at the top of that function, so a test

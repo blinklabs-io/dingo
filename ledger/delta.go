@@ -150,7 +150,7 @@ func (d *LedgerDelta) apply(
 	ls *LedgerState,
 	txn *database.Txn,
 ) error {
-	return d.applyWithDonationRecording(ctx, ls, txn, true)
+	return d.applyWithDonationRecording(ctx, ls, txn, true, nil)
 }
 
 func (d *LedgerDelta) applyWithoutRecordingDonations(
@@ -158,7 +158,7 @@ func (d *LedgerDelta) applyWithoutRecordingDonations(
 	ls *LedgerState,
 	txn *database.Txn,
 ) error {
-	return d.applyWithDonationRecording(ctx, ls, txn, false)
+	return d.applyWithDonationRecording(ctx, ls, txn, false, nil)
 }
 
 func (d *LedgerDelta) applyWithDonationRecording(
@@ -166,6 +166,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	ls *LedgerState,
 	txn *database.Txn,
 	recordDonations bool,
+	acc database.BatchAccumulator,
 ) error {
 	// Keep one immutable protocol-parameter snapshot for every certificate in
 	// this delta. A parameter publication between certificates must not mix
@@ -231,23 +232,48 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				certDepositsMapPool.Put(certDeposits)
 				return err
 			}
-			setErr := ls.db.SetTransactionWithOpts(
-				ctx,
-				level,
-				d.Point,
-				uint32(storageIndex), //nolint:gosec
-				updateEpoch,
-				paramUpdates,
-				certDeposits,
-				d.Offsets,
-				txn,
-				database.BatchedTxIngestOpts{
-					SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
-					LedgerContextSlot:              d.closureContextSlot,
-					StrictAppliedInputConservation: d.strictConsumedInputs,
-					SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
-				},
-			)
+			opts := database.BatchedTxIngestOpts{
+				SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
+				LedgerContextSlot:              d.closureContextSlot,
+				StrictAppliedInputConservation: d.strictConsumedInputs,
+				SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
+			}
+			var setErr error
+			// The batched write cannot express the Leios closure variants:
+			// it has no tolerance for an input another certified endorser
+			// block already spent and no ledger-context recording.
+			if acc != nil && !d.skipConsumedInputRecovery &&
+				d.closureContextSlot == nil {
+				setErr = ls.db.SetTransactionBatchedWithOpts(
+					ctx,
+					level,
+					d.Point,
+					uint32(storageIndex), //nolint:gosec
+					updateEpoch,
+					paramUpdates,
+					certDeposits,
+					d.Offsets,
+					acc,
+					txn,
+					opts,
+				)
+				if setErr == nil && ls.afterBatchedTransactionWrite != nil {
+					ls.afterBatchedTransactionWrite()
+				}
+			} else {
+				setErr = ls.db.SetTransactionWithOpts(
+					ctx,
+					level,
+					d.Point,
+					uint32(storageIndex), //nolint:gosec
+					updateEpoch,
+					paramUpdates,
+					certDeposits,
+					d.Offsets,
+					txn,
+					opts,
+				)
+			}
 			certDepositsMapPool.Put(certDeposits)
 			if setErr != nil {
 				if errors.Is(setErr, models.ErrRewardWithdrawalExceedsBalance) {
@@ -585,14 +611,36 @@ func (b *LedgerDeltaBatch) apply(
 	ls *LedgerState,
 	txn *database.Txn,
 ) error {
+	// Queued detail rows are written by the FlushBatch below, before this
+	// returns, so the validation that follows a flushed batch reads the same
+	// rows the per-row path would have written.
+	var acc database.BatchAccumulator
+	if ls.config.ApplyRowBatchingEnabled {
+		acc = ls.db.NewBatchAccumulator()
+	}
 	for _, delta := range b.deltas {
 		if delta == nil {
 			continue // Skip nil deltas (shouldn't happen in normal operation)
 		}
-		err := delta.apply(ctx, ls, txn)
+		var err error
+		if acc == nil {
+			err = delta.apply(ctx, ls, txn)
+		} else {
+			err = delta.applyWithDonationRecording(ctx, ls, txn, true, acc)
+		}
 		if err != nil {
+			if acc != nil {
+				acc.Reset()
+			}
 			return err
 		}
+	}
+	if acc == nil {
+		return nil
+	}
+	if err := ls.db.FlushBatch(acc, txn); err != nil {
+		acc.Reset()
+		return err
 	}
 	return nil
 }

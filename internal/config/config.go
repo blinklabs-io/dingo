@@ -731,6 +731,13 @@ type Config struct {
 	// before replay reaches this stage. See ARCHITECTURE.md ("Block Processing
 	// Pipeline").
 	BlockPipelineValidateEnabled bool `yaml:"blockPipelineValidateEnabled"        envconfig:"DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED"`
+	// LedgerApplyRowBatchingEnabled writes the accumulated deltas of blocks
+	// that are not validated through the metadata store's batched path instead
+	// of one statement group per row. Blocks that are validated keep the
+	// per-transaction path. The stored state is identical either way, so the
+	// setting is not consensus-affecting; it defaults off until throughput is
+	// proven. See ARCHITECTURE.md ("Block Processing Pipeline").
+	LedgerApplyRowBatchingEnabled bool `yaml:"ledgerApplyRowBatchingEnabled"       envconfig:"DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED"`
 
 	// Peer targets (0 = use default, -1 = unlimited)
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`
