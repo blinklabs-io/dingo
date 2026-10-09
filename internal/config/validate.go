@@ -913,14 +913,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	if dest := c.DatabaseLifecycle.SnapshotCloudDestination; dest != "" {
 		u, err := url.Parse(dest)
 		if err != nil || u.Scheme == "" || u.Host == "" {
-			errs = append(errs, fmt.Errorf(
-				"invalid databaseLifecycle.snapshotCloudDestination %q: must be a URI like s3://bucket/prefix or gcs://bucket/prefix",
-				dest,
+			errs = append(errs, errors.New(
+				"invalid databaseLifecycle.snapshotCloudDestination: must be a URI like s3://bucket/prefix or gcs://bucket/prefix",
 			))
 		} else if !snapshotCloudSchemeSupported(u.Scheme) {
 			errs = append(errs, fmt.Errorf(
-				"invalid databaseLifecycle.snapshotCloudDestination %q: cloud scheme %q is unavailable in this build (s3/gcs require -tags dingo_extra_plugins)",
-				dest,
+				"invalid databaseLifecycle.snapshotCloudDestination: cloud scheme %q is unavailable in this build (s3/gcs require -tags dingo_extra_plugins)",
 				u.Scheme,
 			))
 		}

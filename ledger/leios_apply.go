@@ -841,6 +841,12 @@ func (ls *LedgerState) stageMusashiEndorserBlocks(
 		if _, ok := staged[key]; ok {
 			continue
 		}
+		if ls.config.EndorserBlockProvider == nil {
+			return fmt.Errorf(
+				"%w: no endorser block provider configured",
+				errCertifiedEndorserBlockUnavailable,
+			)
+		}
 		rawTxs, found := ls.config.EndorserBlockProvider(
 			ref.hash.Bytes(), ref.slot,
 		)

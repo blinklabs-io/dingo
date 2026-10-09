@@ -16,6 +16,7 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/url"
@@ -36,6 +37,91 @@ import (
 // ErrCloudSnapshotNotFound) rather than treating every non-nil err the
 // same way.
 var ErrCloudSnapshotNotFound = errors.New("cloud snapshot not found")
+
+func cloudDestinationIdentity(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	uri, err := parseCloudDestinationURL(raw)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256([]byte(uri.String()))
+	return fmt.Sprintf("v1:sha256:%x", digest), nil
+}
+
+// CloudDestinationDisplay returns a credential-free form of a cloud URI for
+// logs, errors, and API responses. Provider calls and source identity checks
+// continue to use the original URI.
+func CloudDestinationDisplay(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "<invalid cloud destination>"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	return u.String()
+}
+
+type sanitizedCloudError struct {
+	message string
+	err     error
+}
+
+func (e sanitizedCloudError) Error() string { return e.message }
+
+func (e sanitizedCloudError) Is(target error) bool {
+	return errors.Is(e.err, target)
+}
+
+func sanitizeCloudError(raw string, err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	u, parseErr := url.Parse(raw)
+	if parseErr != nil {
+		return sanitizedCloudError{
+			message: "cloud destination operation failed",
+			err:     err,
+		}
+	}
+	message = strings.ReplaceAll(message, raw, CloudDestinationDisplay(raw))
+	secrets := []string{
+		u.RawQuery, u.Fragment, u.RawFragment, u.EscapedFragment(),
+	}
+	if u.User != nil {
+		secrets = append(secrets, u.User.String(), u.User.Username())
+		if password, ok := u.User.Password(); ok {
+			secrets = append(secrets, password)
+		}
+	}
+	for _, values := range u.Query() {
+		secrets = append(secrets, values...)
+	}
+	for _, secret := range secrets {
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "[redacted]")
+		}
+	}
+	return sanitizedCloudError{message: message, err: err}
+}
+
+// EffectiveCloudDestination appends the configured per-node prefix before
+// any snapshot ID. Manual snapshots, automatic snapshots, and Bark catalog
+// discovery must all use this same destination.
+func EffectiveCloudDestination(base string, prefix string) string {
+	if base == "" || prefix == "" {
+		return base
+	}
+	return JoinCloudURI(base, prefix)
+}
 
 // orderEntriesManifestLast returns entries reordered so that any entry
 // named ManifestFileName sorts last, with every other entry keeping its
@@ -233,15 +319,9 @@ func ParseCloudDestination(
 	r *DestinationRegistry,
 	uri string,
 ) (CloudDestination, error) {
-	u, err := url.Parse(uri)
+	u, err := parseCloudDestinationURL(uri)
 	if err != nil {
-		return nil, fmt.Errorf("parse cloud destination %q: %w", uri, err)
-	}
-	if u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf(
-			"cloud destination %q must be a URI like s3://bucket/prefix or gcs://bucket/prefix",
-			uri,
-		)
+		return nil, err
 	}
 	var factory CloudDestinationFactory
 	var ok bool
@@ -254,6 +334,23 @@ func ParseCloudDestination(
 		return nil, fmt.Errorf(
 			"unsupported cloud destination scheme %q (was dingo built with -tags dingo_extra_plugins, and was it registered with this component?)",
 			u.Scheme,
+		)
+	}
+	dest, err := factory(u)
+	if err != nil {
+		return nil, sanitizeCloudError(uri, err)
+	}
+	return dest, nil
+}
+
+func parseCloudDestinationURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, errors.New("parse invalid cloud destination")
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return nil, errors.New(
+			"cloud destination must be a URI like s3://bucket/prefix or gcs://bucket/prefix",
 		)
 	}
 	if u.Path != "" {
@@ -273,7 +370,7 @@ func ParseCloudDestination(
 		u.Path = path.Clean(u.Path)
 		u.RawPath = ""
 	}
-	return factory(u)
+	return u, nil
 }
 
 // downloadCloudSnapshot downloads the snapshot at the given cloud URI into
@@ -300,7 +397,8 @@ func downloadCloudSnapshot(
 	if err := dest.DownloadDir(ctx, tempDir); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf(
-			"download snapshot from %q: %w", uri, err,
+			"download snapshot from %q: %w", CloudDestinationDisplay(uri),
+			sanitizeCloudError(uri, err),
 		)
 	}
 	return tempDir, cleanup, nil
@@ -320,6 +418,23 @@ func IsSafeCloudObjectFileName(fileName string) bool {
 		return false
 	}
 	return !strings.ContainsAny(fileName, `/\`)
+}
+
+func fetchCloudSnapshotEntry(
+	ctx context.Context,
+	snapshotID string,
+	fetch func(context.Context, string) (Manifest, error),
+) (SnapshotEntry, error) {
+	if !IsSafeCloudObjectFileName(snapshotID) {
+		return SnapshotEntry{}, fmt.Errorf(
+			"invalid cloud snapshot ID %q", snapshotID,
+		)
+	}
+	manifest, err := fetch(ctx, snapshotID)
+	if err != nil {
+		return SnapshotEntry{}, err
+	}
+	return SnapshotEntry{ID: snapshotID, Manifest: manifest}, nil
 }
 
 // JoinCloudURI appends sub as an additional path segment to base (e.g.
@@ -380,11 +495,94 @@ func ListCloudSnapshots(
 	}
 	entries, err = lister.ListSnapshots(ctx)
 	if err != nil {
-		return nil, true, fmt.Errorf(
-			"list snapshots at %q: %w", cloudDest, err,
+		return entries, true, fmt.Errorf(
+			"list snapshots at %q: %w", CloudDestinationDisplay(cloudDest),
+			sanitizeCloudError(cloudDest, err),
 		)
 	}
 	return entries, true, nil
+}
+
+// RepairSnapshotCatalogContext rebuilds the disposable local and cloud
+// snapshot indexes from their authoritative sources.
+func RepairSnapshotCatalogContext(
+	ctx context.Context,
+	baseDir string,
+	registry *DestinationRegistry,
+	cloudDest string,
+) error {
+	localErr := EnsureSnapshotCatalogContext(ctx, baseDir)
+	if localErr != nil && !errors.Is(localErr, ErrSnapshotCatalogIncomplete) {
+		return localErr
+	}
+	if cloudDest == "" {
+		return localErr
+	}
+	_, cloudErr := ReconcileCloudSnapshotCatalogContext(
+		ctx, baseDir, registry, cloudDest,
+	)
+	return errors.Join(localErr, cloudErr)
+}
+
+// ReconcileCloudSnapshotCatalogContext holds the catalog reconciliation gate
+// across the provider snapshot and its replacement. Incremental mirror and
+// delete mutations therefore run either before the scan or after its rebuild.
+// current is true when the catalog is bound to cloudDest, including a cleared
+// catalog after an unsupported or failed provider listing.
+func ReconcileCloudSnapshotCatalogContext(
+	ctx context.Context,
+	baseDir string,
+	registry *DestinationRegistry,
+	cloudDest string,
+) (current bool, err error) {
+	if cloudDest == "" {
+		if err := lockSnapshotCatalog(ctx); err != nil {
+			return false, err
+		}
+		defer unlockSnapshotCatalog()
+		err := rebuildCloudSnapshotCatalogLocked(ctx, baseDir, "", nil)
+		return err == nil, err
+	}
+	dest, constructErr := ParseCloudDestination(registry, cloudDest)
+	if constructErr != nil {
+		if err := lockSnapshotCatalog(ctx); err != nil {
+			return false, errors.Join(constructErr, err)
+		}
+		defer unlockSnapshotCatalog()
+		clearErr := rebuildCloudSnapshotCatalogLocked(
+			ctx, baseDir, cloudDest, nil,
+		)
+		return clearErr == nil, errors.Join(constructErr, clearErr)
+	}
+	defer closeCloudDestination(dest)
+	lister, ok := dest.(SnapshotLister)
+	if err := lockSnapshotCatalog(ctx); err != nil {
+		return false, err
+	}
+	defer unlockSnapshotCatalog()
+	if !ok {
+		clearErr := rebuildCloudSnapshotCatalogLocked(
+			ctx, baseDir, cloudDest, nil,
+		)
+		unsupportedErr := fmt.Errorf(
+			"%w: cloud destination does not support snapshot listing",
+			ErrSnapshotCatalogIncomplete,
+		)
+		return clearErr == nil, errors.Join(unsupportedErr, clearErr)
+	}
+	entries, listErr := lister.ListSnapshots(ctx)
+	listErr = sanitizeCloudError(cloudDest, listErr)
+	if listErr != nil && entries == nil {
+		clearErr := rebuildCloudSnapshotCatalogLocked(
+			ctx, baseDir, cloudDest, nil,
+		)
+		return clearErr == nil, errors.Join(listErr, clearErr)
+	}
+	rebuildErr := rebuildCloudSnapshotCatalogLocked(
+		ctx, baseDir, cloudDest, entries,
+	)
+	current = rebuildErr == nil || errors.Is(rebuildErr, ErrSnapshotCatalogIncomplete)
+	return current, errors.Join(listErr, rebuildErr)
 }
 
 // FetchCloudManifest resolves the CloudDestination at the given exact
@@ -416,14 +614,14 @@ func FetchCloudManifest(
 			return Manifest{}, true, errors.New("cloud destination does not support manifest options")
 		}
 		m, err = fetcher.FetchManifestWithOptions(ctx, opts...)
-		return m, true, err
+		return m, true, sanitizeCloudError(snapshotURI, err)
 	}
 	fetcher, ok := dest.(CloudManifestFetcher)
 	if !ok {
 		return Manifest{}, false, nil
 	}
 	m, err = fetcher.FetchManifest(ctx)
-	return m, true, err
+	return m, true, sanitizeCloudError(snapshotURI, err)
 }
 
 // DeleteCloudSnapshot resolves the CloudDestination at the given exact
@@ -445,5 +643,5 @@ func DeleteCloudSnapshot(
 	if !ok {
 		return false, nil
 	}
-	return true, deleter.Delete(ctx)
+	return true, sanitizeCloudError(snapshotURI, deleter.Delete(ctx))
 }

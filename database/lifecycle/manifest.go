@@ -70,6 +70,36 @@ type manifestConfig struct {
 	// Snapshot. Production callers cannot construct options that set them.
 	pauseNow     func() time.Time
 	pauseContext func(context.Context) context.Context
+	// catalogRepair rebuilds the disposable snapshot catalog after a
+	// durable manifest write when its incremental update fails. Cloud-aware
+	// callers provide a repair that reads both authoritative sources.
+	catalogRepair func(context.Context, string) error
+}
+
+func withSnapshotCatalogRepair(
+	repair func(context.Context, string) error,
+) ManifestOption {
+	return func(cfg *manifestConfig) { cfg.catalogRepair = repair }
+}
+
+func repairSnapshotCatalog(
+	ctx context.Context,
+	baseDir string,
+	opts []ManifestOption,
+) error {
+	cfg := manifestConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	repair := cfg.catalogRepair
+	if repair == nil {
+		repair = func(ctx context.Context, baseDir string) error {
+			return EnsureSnapshotCatalogContext(ctx, baseDir, opts...)
+		}
+	}
+	return repair(ctx, baseDir)
 }
 
 // WithManifestMaxBytes sets the maximum encoded manifest size. Zero uses
@@ -441,7 +471,17 @@ func writeManifest(
 		filepath.Dir(dir),
 		SnapshotEntry{ID: filepath.Base(dir), Manifest: m},
 	); err != nil {
-		return fmt.Errorf("%w: %w", ErrSnapshotCatalogUpdate, err)
+		if !snapshotCatalogCanRebuild(err) {
+			return fmt.Errorf("%w: %w", ErrSnapshotCatalogUpdate, err)
+		}
+		if repairErr := repairSnapshotCatalog(
+			context.WithoutCancel(ctx), filepath.Dir(dir), opts,
+		); repairErr != nil {
+			return fmt.Errorf(
+				"%w: %w", ErrSnapshotCatalogUpdate,
+				errors.Join(err, repairErr),
+			)
+		}
 	}
 	return nil
 }

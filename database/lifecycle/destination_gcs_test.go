@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"cloud.google.com/go/storage"
@@ -66,4 +68,104 @@ func TestGCSManifestByteLimits(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGCSListSnapshotsRejectsUnsafePrefixBeforeManifestFetch(t *testing.T) {
+	t.Parallel()
+	var manifestFetches atomic.Int32
+	client, err := storage.NewClient(
+		t.Context(),
+		option.WithoutAuthentication(),
+		option.WithHTTPClient(&http.Client{
+			Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Query().Get("delimiter") != "/" {
+					manifestFetches.Add(1)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body: io.NopCloser(strings.NewReader(
+						`{"prefixes":["prefix/../"]}`,
+					)),
+					Header:  make(http.Header),
+					Request: req,
+				}, nil
+			}),
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	d := gcsDestination{
+		client: client, bucket: client.Bucket("test"), prefix: "prefix",
+	}
+
+	entries, err := d.ListSnapshots(t.Context())
+	require.Error(t, err)
+	require.Empty(t, entries)
+	require.Zero(t, manifestFetches.Load())
+}
+
+func TestGCSUploadExcludesAndRemovesCloudMirrorMarker(t *testing.T) {
+	t.Parallel()
+	var methods []string
+	client, err := storage.NewClient(
+		t.Context(), option.WithoutAuthentication(),
+		option.WithHTTPClient(&http.Client{
+			Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+				methods = append(methods, req.Method+" "+req.URL.EscapedPath())
+				return &http.Response{
+					StatusCode: http.StatusNoContent,
+					Body:       io.NopCloser(strings.NewReader("")),
+					Header:     make(http.Header), Request: req,
+				}, nil
+			}),
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, cloudMirrorMarkerName), []byte("legacy secret"), 0o600,
+	))
+	d := gcsDestination{
+		client: client, bucket: client.Bucket("bucket"), prefix: "prefix/snapshot",
+	}
+	require.NoError(t, d.UploadDir(t.Context(), dir))
+	require.Len(t, methods, 1)
+	require.Contains(t, methods[0], "DELETE ")
+	require.Contains(t, methods[0], ".cloud-mirrored")
+	require.NoError(t, os.Remove(filepath.Join(dir, cloudMirrorMarkerName)))
+	methods = nil
+	require.NoError(t, d.UploadDir(t.Context(), dir))
+	require.Len(t, methods, 1)
+	require.Contains(t, methods[0], "DELETE ")
+	require.Contains(t, methods[0], ".cloud-mirrored")
+}
+
+func TestGCSDownloadSkipsCloudMirrorMarker(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	client, err := storage.NewClient(
+		t.Context(), option.WithoutAuthentication(),
+		option.WithHTTPClient(&http.Client{
+			Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+				requests.Add(1)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body: io.NopCloser(strings.NewReader(
+						`{"items":[{"name":"prefix/snapshot/.cloud-mirrored"}]}`,
+					)),
+					Header: make(http.Header), Request: req,
+				}, nil
+			}),
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	d := gcsDestination{
+		client: client, bucket: client.Bucket("bucket"), prefix: "prefix/snapshot",
+	}
+	dir := t.TempDir()
+	require.NoError(t, d.DownloadDir(t.Context(), dir))
+	require.Equal(t, int32(1), requests.Load())
+	require.NoFileExists(t, filepath.Join(dir, cloudMirrorMarkerName))
 }

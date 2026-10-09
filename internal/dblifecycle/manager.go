@@ -275,7 +275,9 @@ func (m *Manager) Start(ctx context.Context) error {
 				"snapshotCloudDestinationPrefix per node sharing a "+
 				"destination",
 			"component", "dblifecycle",
-			"cloud_destination", m.cfg.SnapshotCloudDestination,
+			"cloud_destination", lifecycle.CloudDestinationDisplay(
+				m.cfg.SnapshotCloudDestination,
+			),
 		)
 	}
 
@@ -300,11 +302,7 @@ func (m *Manager) Start(ctx context.Context) error {
 // m.cfg.SnapshotCloudDestination directly, so all of them agree on the
 // same effective location.
 func (m *Manager) effectiveCloudDestination() string {
-	if m.cfg.SnapshotCloudDestination == "" ||
-		m.cfg.SnapshotCloudDestinationPrefix == "" {
-		return m.cfg.SnapshotCloudDestination
-	}
-	return lifecycle.JoinCloudURI(
+	return lifecycle.EffectiveCloudDestination(
 		m.cfg.SnapshotCloudDestination, m.cfg.SnapshotCloudDestinationPrefix,
 	)
 }
@@ -669,6 +667,7 @@ func (m *Manager) pruneOldSnapshots(ctx context.Context) {
 		// would no longer bound cloud storage at all.
 		if cloudDest != "" {
 			cloudURI := lifecycle.JoinCloudURI(cloudDest, epochName)
+			cloudDisplayURI := lifecycle.CloudDestinationDisplay(cloudURI)
 			ok, err := lifecycle.DeleteCloudSnapshot(
 				ctx,
 				m.destinationRegistry,
@@ -679,16 +678,28 @@ func (m *Manager) pruneOldSnapshots(ctx context.Context) {
 					"failed to prune old automatic snapshot's cloud mirror, "+
 						"keeping local copy so a later pruning pass can retry",
 					"component", "dblifecycle",
-					"cloud_uri", cloudURI,
+					"cloud_uri", cloudDisplayURI,
 					"error", err,
 				)
 				continue
 			}
 			if ok {
+				if err := lifecycle.RemoveCloudSnapshotCatalogEntryContext(
+					ctx, m.cfg.SnapshotDir, epochName,
+					m.destinationRegistry, cloudDest,
+				); err != nil {
+					m.logger.Warn(
+						"cloud snapshot was deleted but its catalog could not be reconciled, keeping local copy",
+						"component", "dblifecycle",
+						"cloud_uri", cloudDisplayURI,
+						"error", err,
+					)
+					continue
+				}
 				m.logger.Info(
 					"pruned old automatic database snapshot's cloud mirror",
 					"component", "dblifecycle",
-					"cloud_uri", cloudURI,
+					"cloud_uri", cloudDisplayURI,
 				)
 			}
 		}

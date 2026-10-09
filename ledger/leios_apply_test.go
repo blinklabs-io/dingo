@@ -1014,6 +1014,18 @@ func TestApplyEndorserBlockReusesStagedBlobAtBadgerBudget(t *testing.T) {
 	require.NotErrorIs(t, err, badger.ErrTxnTooBig)
 }
 
+func TestStageMusashiEndorserBlocksRejectsMissingProvider(t *testing.T) {
+	t.Parallel()
+	ls, _, _ := newLeiosApplyTestLedger(t)
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+
+	err := ls.stageMusashiEndorserBlocks(
+		t.Context(), []gledger.Block{parent, certifier},
+	)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+	require.ErrorContains(t, err, "no endorser block provider configured")
+}
+
 func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 	t.Parallel()
 

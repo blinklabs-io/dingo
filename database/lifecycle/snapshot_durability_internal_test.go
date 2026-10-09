@@ -324,7 +324,7 @@ func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 	}
 }
 
-func TestSnapshotKeepsDurableFilesWhenCatalogUpdateFails(t *testing.T) {
+func TestSnapshotRepairsCatalogAfterDurableManifestWrite(t *testing.T) {
 	db := newRestoreInternalTestDB(t)
 	base := t.TempDir()
 	require.NoError(t, EnsureSnapshotCatalog(base))
@@ -336,11 +336,17 @@ func TestSnapshotKeepsDurableFilesWhenCatalogUpdateFails(t *testing.T) {
 	_, err := Snapshot(
 		t.Context(), db, dir, TriggerManual, "test", "badger", "sqlite",
 	)
-	require.ErrorIs(t, err, ErrSnapshotCatalogUpdate)
+	require.NoError(t, err)
 	require.FileExists(t, filepath.Join(dir, BlobBackupFileName))
 	require.FileExists(t, filepath.Join(dir, MetadataBackupFileName))
 	_, readErr := ReadManifest(dir)
 	require.NoError(t, readErr)
+	entries, _, listErr := ListAvailableSnapshotPageContext(
+		t.Context(), base, "", 10, nil,
+	)
+	require.NoError(t, listErr)
+	require.Len(t, entries, 1)
+	require.Equal(t, "complete", entries[0].Entry.ID)
 }
 
 func TestSnapshotDurableAncestors(t *testing.T) {

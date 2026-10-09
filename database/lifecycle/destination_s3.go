@@ -65,10 +65,7 @@ func newS3Destination(uri *url.URL, opts ...ManifestOption) (CloudDestination, e
 	}
 	bucket := uri.Host
 	if bucket == "" {
-		return nil, fmt.Errorf(
-			"s3 cloud destination %q: missing bucket",
-			uri.String(),
-		)
+		return nil, errors.New("s3 cloud destination: missing bucket")
 	}
 	prefix := strings.Trim(uri.Path, "/")
 
@@ -129,7 +126,7 @@ func (d *s3Destination) UploadDir(ctx context.Context, localDir string) error {
 	// API right alongside this package's initial real-cloud test coverage.
 	uploader := manager.NewUploader(d.client) //nolint:staticcheck
 	for _, entry := range orderEntriesManifestLast(entries) {
-		if !entry.Type().IsRegular() {
+		if !entry.Type().IsRegular() || entry.Name() == cloudMirrorMarkerName {
 			continue
 		}
 		localPath := filepath.Join(localDir, entry.Name())
@@ -159,6 +156,13 @@ func (d *s3Destination) UploadDir(ctx context.Context, localDir string) error {
 		if closeErr != nil {
 			return fmt.Errorf("close %q after upload: %w", localPath, closeErr)
 		}
+	}
+	key := d.objectKey(cloudMirrorMarkerName)
+	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: &d.bucket,
+		Key:    &key,
+	}); err != nil && !isS3NotFoundError(err) {
+		return fmt.Errorf("remove legacy cloud mirror marker object %q: %w", key, err)
 	}
 	return nil
 }
@@ -193,7 +197,8 @@ func (d *s3Destination) DownloadDir(
 			if d.prefix == "" {
 				fileName = *obj.Key
 			}
-			if !IsSafeCloudObjectFileName(fileName) {
+			if !IsSafeCloudObjectFileName(fileName) ||
+				fileName == cloudMirrorMarkerName {
 				continue
 			}
 			localPath := filepath.Join(localDir, fileName)
@@ -274,7 +279,9 @@ func (d *s3Destination) ListSnapshots(
 			if snapshotID == "" {
 				continue
 			}
-			manifest, err := d.fetchManifest(ctx, snapshotID)
+			entry, err := fetchCloudSnapshotEntry(
+				ctx, snapshotID, d.fetchManifest,
+			)
 			if err != nil {
 				// A sub-path with no manifest.json object at all
 				// (ErrCloudSnapshotNotFound) is a snapshot still being
@@ -296,10 +303,7 @@ func (d *s3Destination) ListSnapshots(
 				)
 				continue
 			}
-			entries = append(
-				entries,
-				SnapshotEntry{ID: snapshotID, Manifest: manifest},
-			)
+			entries = append(entries, entry)
 		}
 	}
 	return entries, errors.Join(problems...)

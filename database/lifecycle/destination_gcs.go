@@ -67,10 +67,7 @@ func newGCSDestination(uri *url.URL, opts ...ManifestOption) (CloudDestination, 
 	}
 	bucketName := uri.Host
 	if bucketName == "" {
-		return nil, fmt.Errorf(
-			"gcs cloud destination %q: missing bucket",
-			uri.String(),
-		)
+		return nil, errors.New("gcs cloud destination: missing bucket")
 	}
 	prefix := strings.Trim(uri.Path, "/")
 
@@ -115,7 +112,7 @@ func (d *gcsDestination) UploadDir(ctx context.Context, localDir string) error {
 		return fmt.Errorf("read snapshot directory %q: %w", localDir, err)
 	}
 	for _, entry := range orderEntriesManifestLast(entries) {
-		if !entry.Type().IsRegular() {
+		if !entry.Type().IsRegular() || entry.Name() == cloudMirrorMarkerName {
 			continue
 		}
 		localPath := filepath.Join(localDir, entry.Name())
@@ -147,6 +144,11 @@ func (d *gcsDestination) UploadDir(ctx context.Context, localDir string) error {
 			return fmt.Errorf("close %q after upload: %w", localPath, closeFErr)
 		}
 	}
+	key := d.objectKey(cloudMirrorMarkerName)
+	if err := d.bucket.Object(key).Delete(ctx); err != nil &&
+		!errors.Is(err, storage.ErrObjectNotExist) {
+		return fmt.Errorf("remove legacy cloud mirror marker object %q: %w", key, err)
+	}
 	return nil
 }
 
@@ -175,7 +177,8 @@ func (d *gcsDestination) DownloadDir(
 		if d.prefix != "" {
 			fileName = strings.TrimPrefix(fileName, d.prefix+"/")
 		}
-		if !IsSafeCloudObjectFileName(fileName) {
+		if !IsSafeCloudObjectFileName(fileName) ||
+			fileName == cloudMirrorMarkerName {
 			continue
 		}
 		localPath := filepath.Join(localDir, fileName)
@@ -260,7 +263,9 @@ func (d *gcsDestination) ListSnapshots(
 		if snapshotID == "" {
 			continue
 		}
-		manifest, err := d.fetchManifest(ctx, snapshotID)
+		entry, err := fetchCloudSnapshotEntry(
+			ctx, snapshotID, d.fetchManifest,
+		)
 		if err != nil {
 			// A sub-path with no manifest.json object at all
 			// (ErrCloudSnapshotNotFound) is a snapshot still being
@@ -281,10 +286,7 @@ func (d *gcsDestination) ListSnapshots(
 			)
 			continue
 		}
-		entries = append(
-			entries,
-			SnapshotEntry{ID: snapshotID, Manifest: manifest},
-		)
+		entries = append(entries, entry)
 	}
 	return entries, errors.Join(problems...)
 }

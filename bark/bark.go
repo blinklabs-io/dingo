@@ -159,7 +159,9 @@ type BarkConfig struct {
 	// (via database/lifecycle.ListCloudSnapshots), merged with the local
 	// catalog. Empty disables cloud listing; CreateSnapshot's own upload
 	// path doesn't need this field since it goes through Lifecycle, which
-	// already has its own copy of the same config value.
+	// already has its own copy of the same config value. The URI may contain
+	// provider credentials or parameters and must not be returned directly;
+	// SnapshotInfo.location uses a redacted display form.
 	SnapshotCloudDestination string
 	// DestinationRegistry supplies the cloud destination schemes (s3, gcs)
 	// this Bark instance's DatabaseService handler can resolve
