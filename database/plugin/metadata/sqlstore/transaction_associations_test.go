@@ -319,7 +319,13 @@ amount TEXT, output_idx INTEGER, payment_script BOOLEAN)`)
 utxo_id INTEGER NOT NULL, transaction_hash BLOB NOT NULL,
 PRIMARY KEY (utxo_id, transaction_hash))`)
 	require.NoError(t, err)
+	_, err = store.writeDB.Exec(`CREATE TABLE utxo_reference_input (
+utxo_id INTEGER NOT NULL, transaction_hash BLOB NOT NULL,
+PRIMARY KEY (utxo_id, transaction_hash))`)
+	require.NoError(t, err)
 	utxoID, err := hex.DecodeString("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	require.NoError(t, err)
+	secondUtxoID, err := hex.DecodeString("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
 	require.NoError(t, err)
 	ownerA, err := hex.DecodeString("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 	require.NoError(t, err)
@@ -330,33 +336,42 @@ PRIMARY KEY (utxo_id, transaction_hash))`)
 		utxoID,
 	)
 	require.NoError(t, err)
+	_, err = store.writeDB.Exec(
+		"INSERT INTO utxo (tx_id, output_idx, amount, credential_tag, payment_script) VALUES (?, 0, '1', 0, FALSE)",
+		secondUtxoID,
+	)
+	require.NoError(t, err)
 	input, err := mockledger.NewSimpleTransactionInput(utxoID, 0)
 	require.NoError(t, err)
-	require.NoError(t, markTransactionUtxoReferences(
-		t.Context(), store.writeDB, []lcommon.TransactionInput{input},
+	secondInput, err := mockledger.NewSimpleTransactionInput(secondUtxoID, 0)
+	require.NoError(t, err)
+	inputs := []lcommon.TransactionInput{input, secondInput}
+	require.NoError(t, store.markTransactionUtxoReferences(
+		t.Context(), store.writeDB, inputs,
 		"collateral_by_tx_id", ownerA,
 	))
 	// Re-indexing is idempotent, while a second transaction retains its own edge.
-	require.NoError(t, markTransactionUtxoReferences(
-		t.Context(), store.writeDB, []lcommon.TransactionInput{input},
+	require.NoError(t, store.markTransactionUtxoReferences(
+		t.Context(), store.writeDB, inputs,
 		"collateral_by_tx_id", ownerA,
 	))
-	require.NoError(t, markTransactionUtxoReferences(
-		t.Context(), store.writeDB, []lcommon.TransactionInput{input},
+	require.NoError(t, store.markTransactionUtxoReferences(
+		t.Context(), store.writeDB, inputs,
 		"collateral_by_tx_id", ownerB,
 	))
 	got, err := store.collateralInputsBatch(
 		t.Context(), store.writeDB, []any{ownerA, ownerB},
 	)
 	require.NoError(t, err)
-	require.Len(t, got[string(ownerA)], 1)
-	require.Len(t, got[string(ownerB)], 1)
+	require.Len(t, got[string(ownerA)], 2)
+	require.Len(t, got[string(ownerB)], 2)
 	require.Equal(t, got[string(ownerA)][0].ID, got[string(ownerB)][0].ID)
+	require.Equal(t, got[string(ownerA)][1].ID, got[string(ownerB)][1].ID)
 	var count int
 	require.NoError(t, store.writeDB.QueryRow(
 		"SELECT COUNT(*) FROM utxo_collateral_input",
 	).Scan(&count))
-	require.Equal(t, 2, count)
+	require.Equal(t, 4, count)
 	// Rollback cleanup is keyed by transaction, never by the shared UTxO.
 	_, err = store.writeDB.Exec(
 		"DELETE FROM utxo_collateral_input WHERE transaction_hash = ?", ownerA,
@@ -364,7 +379,41 @@ PRIMARY KEY (utxo_id, transaction_hash))`)
 	require.NoError(t, err)
 	got, err = store.collateralInputsBatch(t.Context(), store.writeDB, []any{ownerB})
 	require.NoError(t, err)
-	require.Len(t, got[string(ownerB)], 1)
+	require.Len(t, got[string(ownerB)], 2)
+	require.NoError(t, store.markTransactionUtxoReferences(
+		t.Context(), store.writeDB, inputs,
+		"referenced_by_tx_id", ownerA,
+	))
+	require.NoError(t, store.markTransactionUtxoReferences(
+		t.Context(), store.writeDB, inputs,
+		"referenced_by_tx_id", ownerB,
+	))
+	references, err := store.referenceInputsBatch(
+		t.Context(), store.writeDB, []any{ownerA, ownerB},
+	)
+	require.NoError(t, err)
+	require.Len(t, references[string(ownerA)], 2)
+	require.Len(t, references[string(ownerB)], 2)
+	require.Equal(t, references[string(ownerA)][0].ID, references[string(ownerB)][0].ID)
+	require.Equal(t, references[string(ownerA)][1].ID, references[string(ownerB)][1].ID)
+	rows, err := store.writeDB.Query(
+		"SELECT collateral_by_tx_id, referenced_by_tx_id FROM utxo ORDER BY id",
+	)
+	require.NoError(t, err)
+	for range 2 {
+		require.True(t, rows.Next())
+		var collateralBy, referencedBy []byte
+		require.NoError(t, rows.Scan(&collateralBy, &referencedBy))
+		require.Equal(t, ownerB, collateralBy)
+		require.Equal(t, ownerB, referencedBy)
+	}
+	require.False(t, rows.Next())
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM utxo_reference_input",
+	).Scan(&count))
+	require.Equal(t, 4, count)
 }
 
 func TestLoadUtxoAssetsBatchPreservesGrouping(t *testing.T) {

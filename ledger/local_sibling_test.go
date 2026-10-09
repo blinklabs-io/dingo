@@ -435,6 +435,7 @@ func newSiblingFixture(t *testing.T) *siblingFixture {
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	ls.metrics.init(prometheus.NewRegistry())
 
 	parentTip := ochainsync.Tip{

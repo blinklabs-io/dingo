@@ -17,6 +17,7 @@ package lifecycle_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -31,7 +32,7 @@ import (
 )
 
 // fakeCloudDestination simulates a cloud object store by mirroring
-// UploadDir/DownloadDir onto another local directory, so tests can exercise
+// UploadDir/DownloadFiles onto another local directory, so tests can exercise
 // the registry/parsing/round-trip/listing logic in database/lifecycle
 // without any real network calls or cloud SDKs (those are exercised only
 // by the build-tag-gated destination_s3.go/destination_gcs.go, which need
@@ -47,6 +48,39 @@ import (
 // passing regardless of it.
 type fakeCloudDestination struct {
 	dir string
+}
+
+type unauthenticatedManifestDestination struct {
+	entries []lifecycle.SnapshotEntry
+}
+
+func (*unauthenticatedManifestDestination) UploadDir(context.Context, string) error {
+	return nil
+}
+
+func (*unauthenticatedManifestDestination) DownloadFiles(
+	context.Context,
+	string,
+	[]lifecycle.DownloadFile,
+) error {
+	return nil
+}
+
+func (d *unauthenticatedManifestDestination) ListSnapshots(
+	context.Context,
+	...lifecycle.ManifestOption,
+) ([]lifecycle.SnapshotEntry, error) {
+	if d.entries != nil {
+		return d.entries, nil
+	}
+	return []lifecycle.SnapshotEntry{{ID: "forged"}}, nil
+}
+
+func (*unauthenticatedManifestDestination) FetchManifestWithOptions(
+	context.Context,
+	...lifecycle.ManifestOption,
+) (lifecycle.Manifest, error) {
+	return lifecycle.Manifest{}, nil
 }
 
 func (d *fakeCloudDestination) UploadDir(
@@ -75,23 +109,36 @@ func (d *fakeCloudDestination) UploadDir(
 	return nil
 }
 
-func (d *fakeCloudDestination) DownloadDir(
+// DownloadFiles copies only the named files, rejecting one larger than its
+// MaxBytes, and records every name it was asked for in fetched.
+func (d *fakeCloudDestination) DownloadFiles(
 	_ context.Context,
 	localDir string,
+	files []lifecycle.DownloadFile,
 ) error {
-	entries, err := os.ReadDir(d.dir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.Type().IsRegular() {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(d.dir, entry.Name()))
+	fakeCloudMu.Lock()
+	fakeCloudFetched = append(fakeCloudFetched, files...)
+	fakeCloudMu.Unlock()
+	for _, file := range files {
+		data, err := os.ReadFile(filepath.Join(d.dir, file.Name))
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf(
+					"%s: %w",
+					file.Name,
+					lifecycle.ErrCloudSnapshotNotFound,
+				)
+			}
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(localDir, entry.Name()), data, 0o600); err != nil {
+		if int64(len(data)) > file.MaxBytes {
+			return fmt.Errorf(
+				"%s: %w",
+				file.Name,
+				lifecycle.ErrDownloadTooLarge,
+			)
+		}
+		if err := os.WriteFile(filepath.Join(localDir, file.Name), data, 0o600); err != nil {
 			return err
 		}
 	}
@@ -104,8 +151,9 @@ func (d *fakeCloudDestination) DownloadDir(
 // is exactly the same operation as the local catalog uses.
 func (d *fakeCloudDestination) ListSnapshots(
 	_ context.Context,
+	opts ...lifecycle.ManifestOption,
 ) ([]lifecycle.SnapshotEntry, error) {
-	return lifecycle.ListSnapshots(d.dir)
+	return lifecycle.ListSnapshots(d.dir, opts...)
 }
 
 // FetchManifest/Delete similarly delegate straight to real local-file
@@ -117,14 +165,22 @@ func (d *fakeCloudDestination) FetchManifest(
 	return lifecycle.ReadManifest(d.dir)
 }
 
+func (d *fakeCloudDestination) FetchManifestWithOptions(
+	_ context.Context,
+	opts ...lifecycle.ManifestOption,
+) (lifecycle.Manifest, error) {
+	return lifecycle.ReadManifest(d.dir, opts...)
+}
+
 func (d *fakeCloudDestination) Delete(_ context.Context) error {
 	return os.RemoveAll(d.dir)
 }
 
 var (
-	_ lifecycle.SnapshotLister       = &fakeCloudDestination{}
-	_ lifecycle.CloudManifestFetcher = &fakeCloudDestination{}
-	_ lifecycle.CloudDeleter         = &fakeCloudDestination{}
+	_ lifecycle.SnapshotLister                   = &fakeCloudDestination{}
+	_ lifecycle.CloudManifestFetcher             = &fakeCloudDestination{}
+	_ lifecycle.ConfigurableCloudManifestFetcher = &fakeCloudDestination{}
+	_ lifecycle.CloudDeleter                     = &fakeCloudDestination{}
 )
 
 // fakeCloudBackingDir is set below to the directory the fake scheme's
@@ -134,6 +190,9 @@ var (
 var (
 	fakeCloudMu  sync.Mutex
 	fakeCloudDir string
+	// fakeCloudFetched records every DownloadFile any fake destination was
+	// asked for since the current test took the fixture.
+	fakeCloudFetched []lifecycle.DownloadFile
 	// fakeCloudFixtureMu serializes use of the whole fixture above (not
 	// just each individual read/write of fakeCloudDir, which fakeCloudMu
 	// already does) across an entire test's lifetime: setFakeCloudBackingDir
@@ -191,10 +250,12 @@ func setFakeCloudBackingDir(t *testing.T, dir string) {
 	fakeCloudFixtureMu.Lock()
 	fakeCloudMu.Lock()
 	fakeCloudDir = dir
+	fakeCloudFetched = nil
 	fakeCloudMu.Unlock()
 	t.Cleanup(func() {
 		fakeCloudMu.Lock()
 		fakeCloudDir = ""
+		fakeCloudFetched = nil
 		fakeCloudMu.Unlock()
 		fakeCloudFixtureMu.Unlock()
 	})
@@ -378,6 +439,26 @@ func TestSnapshotToCloudEmptyDestinationIsLocalOnly(t *testing.T) {
 	require.NotZero(t, m.BlobBytes)
 }
 
+// A cloud mirror must not be created without an operator trust root. Reject
+// the request before writing the local snapshot so callers cannot mistake a
+// partial result for a cloud snapshot that can be restored safely.
+func TestSnapshotToCloudRequiresTrustKey(t *testing.T) {
+	t.Parallel()
+
+	setFakeCloudBackingDir(t, t.TempDir())
+	db := newTestDB(t)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	dir := filepath.Join(t.TempDir(), "snap-cloud")
+	_, err := lifecycle.SnapshotToCloud(
+		context.Background(), testDestinationRegistry, db, dir,
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite",
+		"faketest://bucket/prefix", "", "",
+	)
+	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
+	require.NoDirExists(t, dir)
+}
+
 // TestSnapshotToCloudUploadsUnderPerSnapshotSubPath verifies that the
 // cloud copy lands under cloudDest/<snapshotID>, keeping the local copy too.
 func TestSnapshotToCloudUploadsUnderPerSnapshotSubPath(t *testing.T) {
@@ -401,6 +482,7 @@ func TestSnapshotToCloudUploadsUnderPerSnapshotSubPath(t *testing.T) {
 		"sqlite",
 		"faketest://bucket/prefix",
 		"", "",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
 
@@ -486,6 +568,7 @@ func TestRestoreAcceptsCloudURI(t *testing.T) {
 		"sqlite",
 		"faketest://bucket/prefix",
 		"", "",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
 
@@ -498,6 +581,7 @@ func TestRestoreAcceptsCloudURI(t *testing.T) {
 		context.Background(), newTestStorageHost(t), testDestinationRegistry,
 		"faketest://bucket/prefix/snap-src", restoredDir,
 		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
 	require.Equal(t, "badger", m.BlobPlugin)
@@ -527,6 +611,7 @@ func TestListCloudSnapshotsReturnsEveryUploadedSnapshot(t *testing.T) {
 			"sqlite",
 			cloudDest,
 			"", "",
+			lifecycle.WithManifestKey(testTrustKey),
 		)
 		require.NoError(t, err)
 	}
@@ -535,6 +620,7 @@ func TestListCloudSnapshotsReturnsEveryUploadedSnapshot(t *testing.T) {
 		context.Background(),
 		testDestinationRegistry,
 		cloudDest,
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -567,7 +653,52 @@ func TestListCloudSnapshotsInvalidDestReturnsError(t *testing.T) {
 		context.Background(),
 		testDestinationRegistry,
 		"unsupported-scheme://bucket/prefix",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.Error(t, err)
 	require.False(t, ok)
+}
+
+func TestCloudManifestHelpersAuthenticateDestinationResults(t *testing.T) {
+	t.Parallel()
+	manifestDir := t.TempDir()
+	require.NoError(t, lifecycle.WriteManifest(
+		manifestDir,
+		lifecycle.Manifest{Network: "preview"},
+		lifecycle.WithManifestKey(testTrustKey),
+	))
+	validManifest, err := lifecycle.ReadManifest(
+		manifestDir, lifecycle.WithManifestKey(testTrustKey),
+	)
+	require.NoError(t, err)
+	destination := &unauthenticatedManifestDestination{
+		entries: []lifecycle.SnapshotEntry{
+			{ID: "forged"},
+			{ID: "trusted", Manifest: validManifest},
+		},
+	}
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register(
+		"unauthenticated",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			return destination, nil
+		},
+	)
+	opts := []lifecycle.ManifestOption{
+		lifecycle.WithManifestKey(testTrustKey),
+	}
+
+	entries, ok, err := lifecycle.ListCloudSnapshots(
+		context.Background(), registry, "unauthenticated://bucket", opts...,
+	)
+	require.True(t, ok)
+	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
+	require.Len(t, entries, 1)
+	require.Equal(t, []string{"trusted"}, []string{entries[0].ID})
+
+	_, ok, err = lifecycle.FetchCloudManifest(
+		context.Background(), registry, "unauthenticated://bucket/snap", opts...,
+	)
+	require.True(t, ok)
+	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
 }

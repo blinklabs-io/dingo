@@ -46,6 +46,7 @@ func resetGlobalConfig() {
 		HealthPort:                       DefaultHealthPort,
 		HealthReadyGapSlots:              DefaultHealthReadyGapSlots,
 		DebugBindAddr:                    DefaultDebugBindAddr,
+		MetricsBindAddr:                  DefaultMetricsBindAddr,
 		PrivateBindAddr:                  "127.0.0.1",
 		PrivatePort:                      3002,
 		RelayPort:                        3001,
@@ -93,10 +94,20 @@ func resetGlobalConfig() {
 
 func unsetDebugBindAddrEnv(t *testing.T) {
 	t.Helper()
-	// Preserve the caller's environment while ensuring config tests that
-	// exercise defaults or YAML precedence do not inherit this override.
-	t.Setenv("DINGO_DEBUG_BIND_ADDR", "")
-	require.NoError(t, os.Unsetenv("DINGO_DEBUG_BIND_ADDR"))
+	unsetEnv(t, "DINGO_DEBUG_BIND_ADDR")
+}
+
+func unsetMetricsBindAddrEnv(t *testing.T) {
+	t.Helper()
+	unsetEnv(t, "DINGO_METRICS_BIND_ADDR")
+}
+
+// unsetEnv preserves the caller's environment while ensuring config tests
+// that exercise defaults or YAML precedence do not inherit an override.
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	t.Setenv(key, "")
+	require.NoError(t, os.Unsetenv(key))
 }
 
 // unsetForgeGateEnv clears the forge-gate overrides so tests that assert the
@@ -136,6 +147,7 @@ func unsetForgeGateEnv(t *testing.T) {
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetMetricsBindAddrEnv(t)
 	unsetForgeGateEnv(t)
 	yamlContent := `
 plugins:
@@ -231,6 +243,7 @@ mithril:
 		HealthPort:           DefaultHealthPort,
 		HealthReadyGapSlots:  DefaultHealthReadyGapSlots,
 		DebugBindAddr:        DefaultDebugBindAddr,
+		MetricsBindAddr:      DefaultMetricsBindAddr,
 		PrivateBindAddr:      "127.0.0.1",
 		PrivatePort:          8000,
 		RelayPort:            4000,
@@ -336,6 +349,7 @@ func TestLoad_DAGMempoolProvider(t *testing.T) {
 func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetMetricsBindAddrEnv(t)
 	unsetForgeGateEnv(t)
 
 	// Without Config file
@@ -366,6 +380,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		HealthPort:           DefaultHealthPort,
 		HealthReadyGapSlots:  DefaultHealthReadyGapSlots,
 		DebugBindAddr:        DefaultDebugBindAddr,
+		MetricsBindAddr:      DefaultMetricsBindAddr,
 		PrivateBindAddr:      "127.0.0.1",
 		PrivatePort:          3002,
 		RelayPort:            3001,
@@ -2122,6 +2137,28 @@ config:
 	})
 }
 
+func TestConfigSnapshotsDoNotShareRegistryCredentials(t *testing.T) {
+	// Not t.Parallel: replaces the process-global configuration.
+	configMu.Lock()
+	previous := globalConfig
+	globalConfig = cloneConfig(previous)
+	globalConfig.TokenRegistry.HeaderSecrets = map[string]string{
+		"X-API-Key": "original",
+	}
+	configMu.Unlock()
+	t.Cleanup(
+		func() { configMu.Lock(); globalConfig = previous; configMu.Unlock() },
+	)
+	snapshot := GetConfig()
+	snapshot.TokenRegistry.HeaderSecrets["X-API-Key"] = "changed"
+	snapshot.TokenRegistry.HeaderSecrets["new"] = "value"
+	require.Equal(
+		t,
+		map[string]string{"X-API-Key": "original"},
+		GetConfig().TokenRegistry.HeaderSecrets,
+	)
+}
+
 func TestCloneConfigIsolatesMCP(t *testing.T) {
 	t.Parallel()
 	cfg := &Config{Plugins: defaultPluginsConfig()}
@@ -2137,4 +2174,28 @@ func TestCloneConfigIsolatesMCP(t *testing.T) {
 		true,
 		cfg.Plugins.API.Mcp.Config["tls"].(map[string]any)["enabled"],
 	)
+}
+
+// TestDefaultMithrilServerPortIsUnshared guards running `dingo mithril serve`
+// beside a node with default settings: both bind the shared bindAddr, and the
+// two commands are validated separately, so a shared default port would only
+// fail at bind time.
+func TestDefaultMithrilServerPortIsUnshared(t *testing.T) {
+	t.Parallel()
+	cfg := newDefaultConfig()
+	api := cfg.Plugins.API
+	for name, port := range map[string]uint{
+		"relay":      cfg.RelayPort,
+		"private":    cfg.PrivatePort,
+		"metrics":    cfg.MetricsPort,
+		"health":     cfg.HealthPort,
+		"midnight":   cfg.Midnight.Port,
+		"blockfrost": APIPluginPort(api.Blockfrost),
+		"kupo":       APIPluginPort(api.Kupo),
+		"mesh":       APIPluginPort(api.Mesh),
+		"utxorpc":    APIPluginPort(api.Utxorpc),
+		"mcp":        APIPluginPort(api.Mcp),
+	} {
+		assert.NotEqual(t, port, cfg.Mithril.Server.Port, name)
+	}
 }

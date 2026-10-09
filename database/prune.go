@@ -20,10 +20,44 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 )
+
+// HistoryExpiryCursorSyncKey is the sync_state key holding the slot below
+// which every block has already been expired. The history-expiry pruner
+// resumes its scan there, so a round costs the newly eligible blocks rather
+// than every tombstone left by earlier rounds. A rollback or truncate lowers
+// it to the rollback point, the slot above which replay stores new blocks.
+const HistoryExpiryCursorSyncKey = "history_expiry_cursor"
+
+// lowerHistoryExpiryCursor caps the history-expiry cursor at slot. A cursor
+// at or below slot, or an absent one, is left unchanged: blocks at or below
+// the rollback point survive it, so a routine rollback does not send the
+// pruner back over every expired block.
+func (d *Database) lowerHistoryExpiryCursor(slot uint64, txn *Txn) error {
+	raw, err := d.GetSyncState(HistoryExpiryCursorSyncKey, txn)
+	if err != nil {
+		return fmt.Errorf("read history expiry cursor: %w", err)
+	}
+	if raw == "" {
+		return nil
+	}
+	if cursor, err := strconv.ParseUint(raw, 10, 64); err == nil &&
+		cursor <= slot {
+		return nil
+	}
+	if err := d.SetSyncState(
+		HistoryExpiryCursorSyncKey,
+		strconv.FormatUint(slot, 10),
+		txn,
+	); err != nil {
+		return fmt.Errorf("lower history expiry cursor: %w", err)
+	}
+	return nil
+}
 
 // PruneBlock expires the given block's local CBOR in the blob store after
 // materializing any active UTxOs that still reference it. The block's CBOR
@@ -39,7 +73,9 @@ import (
 // block, and rewrites the UTxO blob entry as raw CBOR (which the resolver
 // treats as the legacy non-offset format). The block expiry marker and all
 // UTxO rewrites happen in a single blob transaction, so the block is
-// never expired while live UTxOs still depend on it.
+// never expired while live UTxOs still depend on it. The cloud plugins apply
+// a transaction's objects one request at a time and apply the marker last,
+// so a concurrent reader or snapshot never sees it ahead of the rewrites.
 //
 // In core storage mode only live (deleted_slot = 0) UTxOs at the slot are
 // considered, because spent UTxOs are hard-deleted by the periodic

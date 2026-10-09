@@ -38,7 +38,6 @@ func TestApplyPathStatementsArePreparedOnce(t *testing.T) {
 
 	hot := []struct{ name, query string }{
 		{"transaction insert", transactionInsertSQL},
-		{"mark utxo spent", markUtxoSpentQuery},
 		{"utxo spend state", getUtxoSpendStateQuery},
 		{"pool by key hash", poolByKeyHashQuery},
 		{"account by credential", sqlitequery.GetAccountByCredentialQuery},

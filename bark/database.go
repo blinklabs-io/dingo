@@ -610,6 +610,26 @@ type snapshotCatalogItem struct {
 	entry    lifecycle.SnapshotEntry
 }
 
+func (h *databaseServiceHandler) cloudManifestOptions() (
+	[]lifecycle.ManifestOption,
+	error,
+) {
+	if h.bark.config.Lifecycle == nil {
+		return nil, connect.NewError(
+			connect.CodeFailedPrecondition,
+			errors.New("database lifecycle service is unavailable"),
+		)
+	}
+	opts, err := h.bark.config.Lifecycle.ManifestOptions()
+	if err != nil {
+		return nil, connect.NewError(
+			connect.CodeFailedPrecondition,
+			fmt.Errorf("load snapshot trust key: %w", err),
+		)
+	}
+	return opts, nil
+}
+
 // mergedSnapshotCatalogPage returns one page of the combined local + cloud
 // snapshot catalog, for ListAvailableSnapshots. A cloud entry whose ID
 // already appears in the local catalog is skipped in favor of the local
@@ -659,27 +679,27 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 		})
 	}
 
+	manifestOpts, err := h.cloudManifestOptions()
+	if err != nil {
+		return nil, "", err
+	}
 	cloudEntries, ok, err := lifecycle.ListCloudSnapshots(
 		ctx,
 		h.bark.config.DestinationRegistry,
 		h.bark.config.SnapshotCloudDestination,
+		manifestOpts...,
 	)
 	if err != nil {
-		// A cloud listing failure is typically connectivity/auth (the same
-		// class of failure cloudSnapshotExists/resolveSnapshotSource/
-		// DeleteSnapshot elsewhere in this file report as CodeUnavailable,
-		// not CodeInternal), and the local entries built above are already
-		// known-good -- failing the whole call here would hide real,
-		// currently-available local snapshots from an operator over what
-		// is often just a transient cloud outage. Log and continue with
-		// local-only results instead, the same best-effort convention
-		// Manager.pruneOldSnapshots uses for a cloud-side failure.
+		// A cloud lister can return validated entries alongside errors for
+		// individual snapshots it could not read or authenticate. Keep those
+		// usable entries in the catalog while logging the omissions. A total
+		// listing failure returns no entries, which naturally leaves the
+		// local catalog intact.
 		h.bark.config.Logger.Warn(
-			"list cloud snapshots failed, returning local snapshots only",
+			"cloud snapshot listing omitted entries or was incomplete",
 			"component", "bark",
 			"error", err,
 		)
-		ok = false
 	}
 	if ok {
 		for _, e := range cloudEntries {
@@ -773,10 +793,15 @@ func (h *databaseServiceHandler) cloudSnapshotExists(
 		h.bark.config.SnapshotCloudDestination,
 		snapshotID,
 	)
+	manifestOpts, err := h.cloudManifestOptions()
+	if err != nil {
+		return cloudURI, false, err
+	}
 	_, ok, fetchErr := lifecycle.FetchCloudManifest(
 		ctx,
 		h.bark.config.DestinationRegistry,
 		cloudURI,
+		manifestOpts...,
 	)
 	if !ok {
 		return cloudURI, false, nil
@@ -960,19 +985,33 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 }
 
 // verifySnapshotIntegrity performs a full restore of the snapshot at
-// snapshotDir into a throwaway temporary directory, reusing
+// snapshotDir into a throwaway directory under workParent, reusing
 // lifecycle.Restore's existing validation (manifest checksum, both
 // stores' restore, database.New's startup consistency checks, and a tip
 // comparison) as the actual integrity check, rather than duplicating any
-// of that logic. The temporary directory is always removed before
+// of that logic. The throwaway directory is always removed before
 // returning.
+//
+// A verification restore is as large as the snapshot, so workParent is the
+// snapshot directory rather than the system temp directory. The restore
+// target is a child of the throwaway directory so that its staging, payload
+// and rollback siblings are removed with it; the throwaway directory holds
+// no manifest, so lifecycle.ListSnapshots never reports it.
 func verifySnapshotIntegrity(
 	ctx context.Context,
 	registry *lifecycle.DestinationRegistry,
 	snapshotDir string,
+	workParent string,
 	storageConfig lifecycle.RestoreStorageConfig,
+	manifestOpts []lifecycle.ManifestOption,
 ) error {
-	tempDir, err := os.MkdirTemp("", "dingo-verify-snapshot-*")
+	if err := os.MkdirAll(workParent, 0o755); err != nil {
+		return fmt.Errorf("create verification parent directory: %w", err)
+	}
+	if err := lifecycle.CleanStaleRestoreWorkDirs(workParent); err != nil {
+		return fmt.Errorf("clean stale verification directories: %w", err)
+	}
+	tempDir, err := os.MkdirTemp(workParent, ".dingo-verify-snapshot-*")
 	if err != nil {
 		return fmt.Errorf("create verification directory: %w", err)
 	}
@@ -986,7 +1025,8 @@ func verifySnapshotIntegrity(
 	}
 	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
 	if _, err := lifecycle.Restore(
-		ctx, host, registry, snapshotDir, tempDir, storageConfig,
+		ctx, host, registry, snapshotDir, filepath.Join(tempDir, "data"),
+		storageConfig, manifestOpts...,
 	); err != nil {
 		return fmt.Errorf("verify snapshot: %w", err)
 	}
@@ -1015,6 +1055,11 @@ func (h *databaseServiceHandler) VerifySnapshot(
 		h.finishOperation()
 		return nil, err
 	}
+	manifestOpts, err := h.bark.config.Lifecycle.ManifestOptions()
+	if err != nil {
+		h.finishOperation()
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
 	op, opCtx := h.registerOperation(
 		databasev1alpha1.OperationType_OPERATION_TYPE_VERIFY,
 	)
@@ -1026,7 +1071,9 @@ func (h *databaseServiceHandler) VerifySnapshot(
 				opCtx,
 				h.bark.config.DestinationRegistry,
 				source,
+				h.bark.config.SnapshotDir,
 				h.bark.config.Lifecycle.RestoreStorageConfig(),
+				manifestOpts,
 			)
 		}), 0)
 	}()
