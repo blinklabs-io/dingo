@@ -82,31 +82,48 @@ func TestIsCloudMirroredToDetectsChangedDestination(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
+	backingDir := t.TempDir()
+	setFakeCloudBackingDir(t, backingDir)
+	const cloudDest = "faketest://user:secret@bucket/prefix?token=private#fragment"
+	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{}))
 
 	require.False(
-		t, lifecycle.IsCloudMirroredTo(dir, "managerfaketest://bucket/prefix"),
+		t, lifecycle.IsCloudMirroredTo(dir, cloudDest),
 		"no marker written yet",
 	)
 
-	require.NoError(t, os.WriteFile(
-		lifecycle.CloudMirrorMarkerPath(dir),
-		[]byte("managerfaketest://old-bucket/prefix/"+filepath.Base(dir)+"\n"),
-		0o600,
+	require.NoError(t, lifecycle.MirrorToCloud(
+		t.Context(), testDestinationRegistry, dir, cloudDest,
 	))
+	marker, err := os.ReadFile(lifecycle.CloudMirrorMarkerPath(dir))
+	require.NoError(t, err)
+	require.Contains(t, string(marker), "v1:sha256:")
+	for _, secret := range []string{"user", "secret", "private", "fragment"} {
+		require.NotContains(t, string(marker), secret)
+	}
 
 	require.True(
 		t,
-		lifecycle.IsCloudMirroredTo(dir, "managerfaketest://old-bucket/prefix"),
+		lifecycle.IsCloudMirroredTo(dir, cloudDest),
 		"marker matches the destination it actually names",
 	)
-	require.False(
-		t,
-		lifecycle.IsCloudMirroredTo(dir, "managerfaketest://new-bucket/prefix"),
-		"marker names a since-abandoned destination, not the one configured now",
-	)
+	for _, changed := range []string{
+		"faketest://other:secret@bucket/prefix?token=private#fragment",
+		"faketest://user:secret@bucket/prefix?token=changed#fragment",
+		"faketest://user:secret@bucket/prefix?token=private#changed",
+		"faketest://user:secret@bucket/other?token=private#fragment",
+	} {
+		require.False(t, lifecycle.IsCloudMirroredTo(dir, changed))
+	}
 	require.True(
 		t,
 		lifecycle.IsCloudMirrored(dir),
 		"a stale marker is still a marker -- IsCloudMirrored's plain presence check is unaffected",
 	)
+
+	require.NoError(t, os.WriteFile(
+		lifecycle.CloudMirrorMarkerPath(dir), []byte(cloudDest+"\n"), 0o600,
+	))
+	require.False(t, lifecycle.IsCloudMirroredTo(dir, cloudDest),
+		"legacy raw URI markers force a safe retry")
 }

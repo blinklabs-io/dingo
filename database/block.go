@@ -95,7 +95,7 @@ func BlockByHashStats() (hits, misses uint64) {
 func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	owned := false
 	if txn == nil {
-		txn = d.BlobTxn(true)
+		txn = d.BlockBlobTxn()
 		owned = true
 		defer txn.Rollback() //nolint:errcheck
 	}
@@ -106,6 +106,14 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
+	}
+	if err := txn.holdBlockInventory(); err != nil {
+		return err
+	}
+	blockKey := types.BlockBlobKey(block.Slot, block.Hash)
+	retained, err := retainedBlockExists(blob, blobTxn, blockKey)
+	if err != nil {
+		return err
 	}
 	// Set index if not provided
 	if block.ID == 0 {
@@ -122,6 +130,11 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	// Use the new SetBlock method
 	if err := blob.SetBlock(blobTxn, block.Slot, block.Hash, block.Cbor, block.ID, block.Type, block.Number, block.PrevHash); err != nil {
 		return err
+	}
+	if !retained {
+		if err := addRetainedBlock(blob, txn, block.Slot, block.Hash); err != nil {
+			return err
+		}
 	}
 	if owned {
 		if err := txn.Commit(); err != nil {
@@ -144,7 +157,7 @@ func (d *Database) SetGenesisCbor(
 ) error {
 	owned := false
 	if txn == nil {
-		txn = d.BlobTxn(true)
+		txn = d.BlockBlobTxn()
 		owned = true
 		defer txn.Rollback() //nolint:errcheck
 	}
@@ -156,9 +169,16 @@ func (d *Database) SetGenesisCbor(
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
+	if err := txn.holdBlockInventory(); err != nil {
+		return err
+	}
 	// Store CBOR data at the block key (allows GetBlock to find it)
 	// but don't create an index entry (prevents chain iterator from finding it)
 	key := types.BlockBlobKey(slot, hash)
+	retained, err := retainedBlockExists(blob, blobTxn, key)
+	if err != nil {
+		return err
+	}
 	if err := blob.Set(blobTxn, key, cborData); err != nil {
 		return fmt.Errorf("SetGenesisCbor: failed to set block CBOR: %w", err)
 	}
@@ -180,6 +200,11 @@ func (d *Database) SetGenesisCbor(
 			err,
 		)
 	}
+	if !retained {
+		if err := addRetainedBlock(blob, txn, slot, hash); err != nil {
+			return err
+		}
+	}
 	if owned {
 		if err := txn.Commit(); err != nil {
 			return fmt.Errorf("SetGenesisCbor: failed to commit txn: %w", err)
@@ -193,6 +218,22 @@ func (d *Database) SetGenesisCbor(
 		}
 	}
 	return nil
+}
+
+func retainedBlockExists(
+	store blob.BlobStore,
+	txn types.Txn,
+	key []byte,
+) (bool, error) {
+	_, err := store.Get(txn, key)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, types.ErrBlobKeyNotFound) ||
+		errors.Is(err, types.ErrHistoryExpired) {
+		return false, nil
+	}
+	return false, fmt.Errorf("check existing block for inventory: %w", err)
 }
 
 // HasGenesisCbor checks whether genesis CBOR data exists at the expected
@@ -261,8 +302,56 @@ func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
-	// Use the new DeleteBlock method
-	return blob.DeleteBlock(blobTxn, block.Slot, block.Hash, block.ID)
+	if err := txn.holdBlockInventory(); err != nil {
+		return err
+	}
+	_, existingErr := blob.Get(blobTxn, types.BlockBlobKey(block.Slot, block.Hash))
+	retained := existingErr == nil
+	if existingErr != nil &&
+		!errors.Is(existingErr, types.ErrBlobKeyNotFound) &&
+		!errors.Is(existingErr, types.ErrHistoryExpired) {
+		return fmt.Errorf("check deleted block for inventory: %w", existingErr)
+	}
+	if err := blob.DeleteBlock(blobTxn, block.Slot, block.Hash, block.ID); err != nil {
+		return err
+	}
+	if retained {
+		return removeRetainedBlock(blob, txn, block.Slot, block.Hash)
+	}
+	return nil
+}
+
+// tombstoneBlockTxn expires retained block content and updates the maintained
+// block inventory in the same blob transaction.
+func (d *Database) tombstoneBlockTxn(
+	txn *Txn,
+	slot uint64,
+	hash []byte,
+) error {
+	if txn == nil || txn.Blob() == nil {
+		return types.ErrNilTxn
+	}
+	store := txn.BlobStore()
+	if store == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	if err := txn.holdBlockInventory(); err != nil {
+		return err
+	}
+	_, existingErr := store.Get(txn.Blob(), types.BlockBlobKey(slot, hash))
+	retained := existingErr == nil
+	if existingErr != nil &&
+		!errors.Is(existingErr, types.ErrBlobKeyNotFound) &&
+		!errors.Is(existingErr, types.ErrHistoryExpired) {
+		return fmt.Errorf("check tombstoned block for inventory: %w", existingErr)
+	}
+	if err := store.TombstoneBlock(txn.Blob(), slot, hash); err != nil {
+		return err
+	}
+	if retained {
+		return removeRetainedBlock(store, txn, slot, hash)
+	}
+	return nil
 }
 
 func BlockByPoint(
@@ -1595,92 +1684,12 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 	return ret, nil
 }
 
-// CountBlocksAndOldestSlot iterates every block-content ("bp") key in the
-// blob store once, returning the total count of retained blocks and the
-// smallest slot among them. Block-content keys sort in ascending slot
-// order, so the oldest slot is simply whichever one is seen first — no
-// separate MIN pass is needed. A tombstoned entry (history-expiry pruned
-// its content, keeping only the bp key alive so hash/index lookups still
-// resolve — see TombstoneBlock) is excluded from both: its data isn't
-// actually retained, so counting it would misrepresent both how much
-// history is available and how far back it goes. The blob plugin's own
-// ValueCopy already turns a tombstoned entry's read into
-// types.ErrHistoryExpired (matching GetBlock's convention) rather than
-// handing back the raw marker bytes, so that error — not a hand-rolled
-// magic-byte check — is what this treats as "skip, don't count". Reading
-// each entry's value at all (to tell a tombstone from a real block) is
-// the dominant cost of this scan — negligible if history-expiry is
-// disabled (no block is ever tombstoned), non-trivial on a large chain
-// otherwise.
-//
-// There is no maintained counter for either value, so this is a genuine
-// full scan of the block-index keyspace: appropriate for an
-// operator-facing diagnostic (bark's GetDatabaseInfo RPC) called
-// occasionally, not a hot path.
+// CountBlocksAndOldestSlot returns the maintained count and oldest slot of
+// retained block content without walking the block keyspace.
 func (d *Database) CountBlocksAndOldestSlot(
 	txn *Txn,
 ) (count uint64, oldestSlot uint64, err error) {
-	owned := false
-	if txn == nil {
-		txn = d.BlobTxn(false)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return 0, 0, types.ErrNilTxn
-	}
-	blob := txn.BlobStore()
-	if blob == nil {
-		return 0, 0, types.ErrBlobStoreUnavailable
-	}
-
-	iterOpts := types.BlobIteratorOptions{
-		Prefix: []byte(types.BlockBlobKeyPrefix),
-	}
-	it := blob.NewIterator(blobTxn, iterOpts)
-	if it == nil {
-		return 0, 0, errors.New("blob iterator is nil")
-	}
-	defer it.Close()
-
-	first := true
-	for it.Seek([]byte(types.BlockBlobKeyPrefix)); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
-		item := it.Item()
-		if item == nil {
-			continue
-		}
-		key := item.Key()
-		if key == nil ||
-			strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
-			continue
-		}
-		slot, _, parseErr := types.ParseBlockBlobKey(key)
-		if parseErr != nil {
-			continue
-		}
-		if _, valErr := item.ValueCopy(nil); valErr != nil {
-			if errors.Is(valErr, types.ErrHistoryExpired) {
-				continue
-			}
-			return count, oldestSlot, fmt.Errorf(
-				"read block content for count: %w", valErr,
-			)
-		}
-		count++
-		if first {
-			oldestSlot = slot
-			first = false
-		}
-	}
-	if err := it.Err(); err != nil {
-		return count, oldestSlot, err
-	}
-	return count, oldestSlot, nil
+	return d.blockInventory(txn)
 }
 
 // BlockBlobKeyToPoint extracts slot and hash from a block blob key.

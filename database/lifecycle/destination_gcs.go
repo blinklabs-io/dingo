@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -30,6 +31,8 @@ import (
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	gcsapi "google.golang.org/api/storage/v1"
+	googlehttp "google.golang.org/api/transport/http"
 )
 
 // RegisterGCS registers the "gcs" scheme (gcs://bucket/prefix) on registry
@@ -56,8 +59,59 @@ func RegisterGCS(registry *DestinationRegistry, opts ...ManifestOption) {
 type gcsDestination struct {
 	client           *storage.Client
 	bucket           *storage.BucketHandle
+	bucketName       string
+	catalogPages     gcsCatalogPageLister
+	catalogHTTP      *http.Client
 	prefix           string
 	maxManifestBytes int64
+}
+
+type gcsCatalogPage struct {
+	prefixes      []string
+	objectCount   int
+	nextPageToken string
+}
+
+type gcsCatalogPageLister interface {
+	listCatalogPage(
+		context.Context,
+		string,
+		string,
+		string,
+		int64,
+	) (gcsCatalogPage, error)
+}
+
+type gcsJSONCatalogPageLister struct {
+	service *gcsapi.Service
+}
+
+func (l *gcsJSONCatalogPageLister) listCatalogPage(
+	ctx context.Context,
+	bucket string,
+	prefix string,
+	pageToken string,
+	pageSize int64,
+) (gcsCatalogPage, error) {
+	call := l.service.Objects.List(bucket).
+		Context(ctx).
+		Delimiter("/").
+		MaxResults(pageSize)
+	if prefix != "" {
+		call = call.Prefix(prefix)
+	}
+	if pageToken != "" {
+		call = call.PageToken(pageToken)
+	}
+	result, err := call.Do()
+	if err != nil {
+		return gcsCatalogPage{}, err
+	}
+	return gcsCatalogPage{
+		prefixes:      result.Prefixes,
+		objectCount:   len(result.Items),
+		nextPageToken: result.NextPageToken,
+	}, nil
 }
 
 func newGCSDestination(uri *url.URL, opts ...ManifestOption) (CloudDestination, error) {
@@ -67,10 +121,7 @@ func newGCSDestination(uri *url.URL, opts ...ManifestOption) (CloudDestination, 
 	}
 	bucketName := uri.Host
 	if bucketName == "" {
-		return nil, fmt.Errorf(
-			"gcs cloud destination %q: missing bucket",
-			uri.String(),
-		)
+		return nil, errors.New("gcs cloud destination: missing bucket")
 	}
 	prefix := strings.Trim(uri.Path, "/")
 
@@ -85,18 +136,46 @@ func newGCSDestination(uri *url.URL, opts ...ManifestOption) (CloudDestination, 
 			err,
 		)
 	}
+	catalogHTTP, _, err := googlehttp.NewClient(
+		ctx,
+		option.WithScopes(storage.ScopeReadWrite),
+	)
+	if err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf(
+			"gcs cloud destination: create catalog client: %w",
+			err,
+		)
+	}
+	catalogService, err := gcsapi.NewService(
+		ctx,
+		option.WithHTTPClient(catalogHTTP),
+	)
+	if err != nil {
+		catalogHTTP.CloseIdleConnections()
+		_ = client.Close()
+		return nil, fmt.Errorf(
+			"gcs cloud destination: create catalog service: %w",
+			err,
+		)
+	}
 	return &gcsDestination{
 		client:           client,
 		bucket:           client.Bucket(bucketName),
+		bucketName:       bucketName,
+		catalogPages:     &gcsJSONCatalogPageLister{service: catalogService},
+		catalogHTTP:      catalogHTTP,
 		prefix:           prefix,
 		maxManifestBytes: limit,
 	}, nil
 }
 
 // Close implements CloudDestinationCloser: it releases the gRPC connection
-// storage.NewGRPCClient opened, which client.Bucket's returned handle above
-// doesn't itself own or expose a way to close.
+// and idle catalog HTTP connections owned by this destination.
 func (d *gcsDestination) Close() error {
+	if d.catalogHTTP != nil {
+		d.catalogHTTP.CloseIdleConnections()
+	}
 	return d.client.Close()
 }
 
@@ -115,7 +194,7 @@ func (d *gcsDestination) UploadDir(ctx context.Context, localDir string) error {
 		return fmt.Errorf("read snapshot directory %q: %w", localDir, err)
 	}
 	for _, entry := range orderEntriesManifestLast(entries) {
-		if !entry.Type().IsRegular() {
+		if !entry.Type().IsRegular() || entry.Name() == cloudMirrorMarkerName {
 			continue
 		}
 		localPath := filepath.Join(localDir, entry.Name())
@@ -147,6 +226,11 @@ func (d *gcsDestination) UploadDir(ctx context.Context, localDir string) error {
 			return fmt.Errorf("close %q after upload: %w", localPath, closeFErr)
 		}
 	}
+	key := d.objectKey(cloudMirrorMarkerName)
+	if err := d.bucket.Object(key).Delete(ctx); err != nil &&
+		!errors.Is(err, storage.ErrObjectNotExist) {
+		return fmt.Errorf("remove legacy cloud mirror marker object %q: %w", key, err)
+	}
 	return nil
 }
 
@@ -175,7 +259,8 @@ func (d *gcsDestination) DownloadDir(
 		if d.prefix != "" {
 			fileName = strings.TrimPrefix(fileName, d.prefix+"/")
 		}
-		if !IsSafeCloudObjectFileName(fileName) {
+		if !IsSafeCloudObjectFileName(fileName) ||
+			fileName == cloudMirrorMarkerName {
 			continue
 		}
 		localPath := filepath.Join(localDir, fileName)
@@ -224,69 +309,105 @@ func (d *gcsDestination) DownloadDir(
 func (d *gcsDestination) ListSnapshots(
 	ctx context.Context,
 ) ([]SnapshotEntry, error) {
+	scan, err := newSnapshotCatalogScan(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	return d.listSnapshots(ctx, scan)
+}
+
+// ListSnapshotCatalog lists snapshots within the supplied reconciliation
+// budget. A limit error means the returned entries are incomplete.
+func (d *gcsDestination) ListSnapshotCatalog(
+	ctx context.Context,
+	budget SnapshotCatalogScanBudget,
+) ([]SnapshotEntry, error) {
+	scan, err := newSnapshotCatalogScan(ctx, &budget)
+	if err != nil {
+		return nil, err
+	}
+	return d.listSnapshots(ctx, scan)
+}
+
+func (d *gcsDestination) listSnapshots(
+	ctx context.Context,
+	scan *snapshotCatalogScan,
+) ([]SnapshotEntry, error) {
 	listPrefix := ""
 	if d.prefix != "" {
 		listPrefix = d.prefix + "/"
 	}
-	it := d.bucket.Objects(
-		ctx,
-		&storage.Query{Prefix: listPrefix, Delimiter: "/"},
-	)
-	var entries []SnapshotEntry
-	var problems []error
+	if d.catalogPages == nil {
+		return nil, errors.New("gcs catalog page lister is not configured")
+	}
+	pageToken := ""
 	for {
-		attrs, err := it.Next()
-		if errors.Is(err, iterator.Done) {
-			break
+		if err := scan.consumePage(); err != nil {
+			return scan.result(err)
 		}
+		page, err := d.catalogPages.listCatalogPage(
+			ctx, d.bucketName, listPrefix, pageToken, 100,
+		)
 		if err != nil {
-			return nil, fmt.Errorf(
+			return scan.result(fmt.Errorf(
 				"list gcs objects under %q: %w",
 				d.prefix,
 				err,
+			))
+		}
+		for range page.objectCount {
+			if err := scan.consumePrefix(); err != nil {
+				return scan.result(err)
+			}
+		}
+		for _, prefix := range page.prefixes {
+			if err := scan.consumePrefix(); err != nil {
+				return scan.result(err)
+			}
+			snapshotID := strings.TrimSuffix(
+				strings.TrimPrefix(prefix, listPrefix),
+				"/",
 			)
-		}
-		// With Delimiter set, a synthetic "directory entry" (Prefix set,
-		// every other field empty) represents one sub-path; a real object
-		// (Name set) means something was uploaded directly at this level,
-		// which the nested-per-snapshot layout never does.
-		if attrs.Prefix == "" {
-			continue
-		}
-		snapshotID := strings.TrimSuffix(
-			strings.TrimPrefix(attrs.Prefix, listPrefix),
-			"/",
-		)
-		if snapshotID == "" {
-			continue
-		}
-		manifest, err := d.fetchManifest(ctx, snapshotID)
-		if err != nil {
-			// A sub-path with no manifest.json object at all
-			// (ErrCloudSnapshotNotFound) is a snapshot still being
-			// written — skip it silently, same as the local
-			// lifecycle.ListSnapshots convention. Any other fetch/parse
-			// failure (corrupted manifest, checksum mismatch, a real
-			// storage error) is not that expected case and must not be
-			// swallowed the same way: it's accumulated and returned via
-			// errors.Join alongside whatever entries were found, so a
-			// caller can learn the catalog is missing something instead
-			// of it silently looking one snapshot smaller than it is.
-			if errors.Is(err, ErrCloudSnapshotNotFound) {
+			if snapshotID == "" {
 				continue
 			}
-			problems = append(
-				problems,
-				fmt.Errorf("snapshot %q: %w", snapshotID, err),
+			if err := scan.consumeManifest(); err != nil {
+				return scan.result(err)
+			}
+			entry, err := fetchCloudSnapshotEntry(
+				ctx, snapshotID, d.fetchManifest,
 			)
-			continue
+			if err != nil {
+				// A sub-path with no manifest.json object at all
+				// (ErrCloudSnapshotNotFound) is a snapshot still being
+				// written — skip it silently, same as the local
+				// lifecycle.ListSnapshots convention. Any other fetch/parse
+				// failure (corrupted manifest, checksum mismatch, a real
+				// storage error) is not that expected case and must not be
+				// swallowed the same way: it's accumulated and returned via
+				// errors.Join alongside whatever entries were found, so a
+				// caller can learn the catalog is missing something instead
+				// of it silently looking one snapshot smaller than it is.
+				if errors.Is(err, ErrCloudSnapshotNotFound) {
+					continue
+				}
+				if addErr := scan.addProblem(fmt.Errorf(
+					"snapshot %q: %w", snapshotID, err,
+				)); addErr != nil {
+					return scan.result(addErr)
+				}
+				continue
+			}
+			if err := scan.addEntry(entry); err != nil {
+				return scan.result(err)
+			}
 		}
-		entries = append(
-			entries,
-			SnapshotEntry{ID: snapshotID, Manifest: manifest},
-		)
+		if page.nextPageToken == "" {
+			break
+		}
+		pageToken = page.nextPageToken
 	}
-	return entries, errors.Join(problems...)
+	return scan.result(nil)
 }
 
 // fetchManifest downloads and parses just the manifest.json for

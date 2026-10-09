@@ -1559,7 +1559,10 @@ func (n *Node) Snapshot(
 		dingoversion.GetVersionString(),
 		n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
 		n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
-		n.config.databaseLifecycle.SnapshotCloudDestination,
+		lifecycle.EffectiveCloudDestination(
+			n.config.databaseLifecycle.SnapshotCloudDestination,
+			n.config.databaseLifecycle.SnapshotCloudDestinationPrefix,
+		),
 		name,
 		description,
 		lifecycle.WithMaxCommitPause(

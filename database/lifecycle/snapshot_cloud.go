@@ -16,6 +16,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,14 +26,10 @@ import (
 )
 
 // cloudMirrorMarkerName is a small marker file written inside a local
-// snapshot directory the moment its cloud upload actually succeeds — not
-// before. Its presence is what distinguishes "this snapshot is fully
-// mirrored to cloud" from "the local copy exists but the cloud upload
-// never completed (or failed)", which the snapshot directory's own
-// existence alone cannot tell apart. See MirrorToCloud's doc comment for
-// why this matters: a bare directory-existence check treats both cases
-// identically, permanently skipping (and never retrying) a cloud mirror
-// that failed on an earlier attempt.
+// snapshot directory after its cloud upload and catalog update or repair
+// succeed. It contains only the destination identity digest. Its presence is
+// what distinguishes a complete mirror from a local copy that still needs an
+// upload or catalog repair.
 const cloudMirrorMarkerName = ".cloud-mirrored"
 
 // CloudMirrorMarkerPath returns the marker file path for the local
@@ -67,8 +64,10 @@ func IsCloudMirroredTo(dir string, cloudDest string) bool {
 	if err != nil {
 		return false
 	}
-	want := JoinCloudURI(cloudDest, filepath.Base(dir))
-	return strings.TrimSpace(string(recorded)) == want
+	want, err := cloudDestinationIdentity(
+		JoinCloudURI(cloudDest, filepath.Base(dir)),
+	)
+	return err == nil && strings.TrimSpace(string(recorded)) == want
 }
 
 // MirrorToCloud uploads dir's contents to cloudDest (a base URI like
@@ -76,11 +75,9 @@ func IsCloudMirroredTo(dir string, cloudDest string) bool {
 // nested one level under this snapshot's own ID (dir's base name),
 // mirroring the local SnapshotDir/<snapshotID> layout — see
 // SnapshotToCloud's doc comment for why. Writes CloudMirrorMarkerPath(dir)
-// the moment the upload actually succeeds, so a caller can later tell a
-// fully-mirrored snapshot apart from one whose local copy exists but
-// whose cloud upload never completed, and retry only the upload in that
-// case rather than mistaking the local-only partial success for
-// "already done".
+// after the upload and catalog update or repair succeed, so a caller retries
+// both an incomplete upload and a completed upload whose catalog could not be
+// reconciled.
 //
 // cloudDest == "" is a no-op (success, no marker written): nothing to
 // mirror.
@@ -94,25 +91,50 @@ func MirrorToCloud(
 		return nil
 	}
 	snapshotCloudURI := JoinCloudURI(cloudDest, filepath.Base(dir))
+	markerValue, err := cloudDestinationIdentity(snapshotCloudURI)
+	if err != nil {
+		return err
+	}
 	dest, err := ParseCloudDestination(registry, snapshotCloudURI)
 	if err != nil {
 		return fmt.Errorf(
-			"cloud destination %q is invalid: %w", snapshotCloudURI, err,
+			"cloud destination %q is invalid: %w",
+			CloudDestinationDisplay(snapshotCloudURI), err,
 		)
 	}
 	defer closeCloudDestination(dest)
 	if err := dest.UploadDir(ctx, dir); err != nil {
 		return fmt.Errorf(
-			"upload to %q failed: %w", snapshotCloudURI, err,
+			"upload to %q failed: %w",
+			CloudDestinationDisplay(snapshotCloudURI),
+			sanitizeCloudError(snapshotCloudURI, err),
 		)
 	}
+	manifest, err := ReadManifest(dir)
+	if err != nil {
+		return fmt.Errorf("read mirrored snapshot manifest: %w", err)
+	}
+	if err := updateCloudSnapshotCatalogIfPresent(
+		context.WithoutCancel(ctx),
+		filepath.Dir(dir),
+		SnapshotEntry{ID: filepath.Base(dir), Manifest: manifest},
+		cloudDest,
+	); err != nil {
+		if repairErr := RepairSnapshotCatalogContext(
+			context.WithoutCancel(ctx), filepath.Dir(dir), registry, cloudDest,
+		); repairErr != nil {
+			return fmt.Errorf(
+				"%w: %w", ErrSnapshotCatalogUpdate,
+				errors.Join(err, repairErr),
+			)
+		}
+	}
 	if err := os.WriteFile(
-		CloudMirrorMarkerPath(dir), []byte(snapshotCloudURI+"\n"), 0o600,
+		CloudMirrorMarkerPath(dir), []byte(markerValue+"\n"), 0o600,
 	); err != nil {
 		return fmt.Errorf(
 			"upload to %q succeeded, but recording the cloud-mirrored marker failed: %w",
-			snapshotCloudURI,
-			err,
+			CloudDestinationDisplay(snapshotCloudURI), err,
 		)
 	}
 	return nil
@@ -161,6 +183,15 @@ func SnapshotToCloud(
 	description string,
 	opts ...ManifestOption,
 ) (Manifest, error) {
+	if cloudDest != "" {
+		opts = append(opts, withSnapshotCatalogRepair(
+			func(ctx context.Context, baseDir string) error {
+				return RepairSnapshotCatalogContext(
+					ctx, baseDir, registry, cloudDest,
+				)
+			},
+		))
+	}
 	manifest, err := Snapshot(
 		ctx, db, dir, trigger, dingoVersion, blobPluginName, metadataPluginName,
 		opts...,
@@ -169,7 +200,7 @@ func SnapshotToCloud(
 		return Manifest{}, err
 	}
 	if name != "" || description != "" {
-		if err := LabelSnapshot(dir, name, description, opts...); err != nil {
+		if err := labelSnapshot(ctx, dir, name, description, opts...); err != nil {
 			return manifest, fmt.Errorf(
 				"snapshot written locally to %q, but labeling it failed: %w",
 				dir, err,

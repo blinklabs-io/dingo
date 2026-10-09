@@ -1203,7 +1203,10 @@ func (c *Chain) AddBlocks(ctx context.Context, blocks []ledger.Block) error {
 		err := func() error {
 			c.batchCommitMutex.RLock()
 			defer c.batchCommitMutex.RUnlock()
-			txn := c.manager.db.BlobTxn(true)
+			txn, txnErr := c.manager.db.BlockBatchTxnContext(ctx)
+			if txnErr != nil {
+				return txnErr
+			}
 			var (
 				savedTip                ochainsync.Tip
 				savedTipBlockIndex      uint64
@@ -1534,7 +1537,10 @@ func (c *Chain) addRawBlocks(
 			}
 			c.batchCommitMutex.RLock()
 			defer c.batchCommitMutex.RUnlock()
-			txn := c.manager.db.BlobTxn(true)
+			txn, txnErr := c.manager.db.BlockBatchTxnContext(ctx)
+			if txnErr != nil {
+				return txnErr
+			}
 			// addRawBlockLocked mutates c.currentTip, c.tipBlockIndex,
 			// c.headers, and c.blocks before the txn commits. If a
 			// later block in the batch fails the closure restores the

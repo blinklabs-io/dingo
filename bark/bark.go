@@ -148,10 +148,10 @@ type BarkConfig struct {
 	Node NodeControl
 	// SnapshotDir is the base directory the DatabaseService's CreateSnapshot/
 	// Restore RPCs write to and read from — required when Lifecycle is set.
-	// There is no separate snapshot catalog store (see database.go's doc
-	// comment); ListSnapshots/ListAvailableSnapshots scan this directory
-	// for manifest.json files instead, so each snapshot's generated ID is
-	// also its directory name directly under SnapshotDir.
+	// Each snapshot's generated ID is its directory name directly under
+	// SnapshotDir. DatabaseService maintains a persistent local catalog for
+	// bounded ListSnapshots pages and rebuilds it from these directories when
+	// the handler starts.
 	SnapshotDir string
 	// SnapshotCloudDestination, if set, is the same cloud destination URI
 	// as databaseLifecycle.snapshotCloudDestination — passed through here
@@ -159,7 +159,9 @@ type BarkConfig struct {
 	// (via database/lifecycle.ListCloudSnapshots), merged with the local
 	// catalog. Empty disables cloud listing; CreateSnapshot's own upload
 	// path doesn't need this field since it goes through Lifecycle, which
-	// already has its own copy of the same config value.
+	// already has its own copy of the same config value. The URI may contain
+	// provider credentials or parameters and must not be returned directly;
+	// SnapshotInfo.location uses a redacted display form.
 	SnapshotCloudDestination string
 	// DestinationRegistry supplies the cloud destination schemes (s3, gcs)
 	// this Bark instance's DatabaseService handler can resolve
@@ -400,7 +402,7 @@ func (b *Bark) Start(ctx context.Context) error {
 
 	if b.config.Lifecycle != nil {
 		databasePath, databaseHandler := databaseconnect.NewDatabaseServiceHandler(
-			newDatabaseServiceHandler(b),
+			newDatabaseServiceHandler(ctx, b),
 			connect.WithOptions(
 				commonHandlerOptions,
 				connect.WithInterceptors(newOperatorAuthInterceptor(

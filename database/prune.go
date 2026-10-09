@@ -86,7 +86,7 @@ func (d *Database) PruneBlock(
 		return 0, err
 	}
 	var materialized int
-	blobTxn := d.BlobTxn(true)
+	blobTxn := d.BlockBlobTxn()
 	if err := blobTxn.Do(func(txn *Txn) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -116,7 +116,7 @@ func (d *Database) PruneBlock(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := blobStore.TombstoneBlock(txn.Blob(), slot, hash); err != nil {
+		if err := d.tombstoneBlockTxn(txn, slot, hash); err != nil {
 			return fmt.Errorf(
 				"prune block (slot=%d): expire block: %w",
 				slot,

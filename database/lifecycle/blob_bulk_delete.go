@@ -119,7 +119,7 @@ func DeleteBlocksAfter(
 		end := batchEnd(start, tipID, batchSize)
 		var batchDeleted uint64
 		var batchIsIrreversible bool
-		txn := db.BlobTxn(true)
+		txn := db.BlockBlobTxn()
 		err := txn.Do(func(txn *database.Txn) error {
 			// A store whose Rollback genuinely cannot undo issued writes
 			// still reports it here. The cloud plugins no longer do: they

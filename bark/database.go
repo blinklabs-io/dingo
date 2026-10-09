@@ -16,7 +16,9 @@ package bark
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -44,6 +46,7 @@ var _ databaseconnect.DatabaseServiceHandler = &databaseServiceHandler{}
 const (
 	defaultCatalogPageSize = 50
 	defaultHistoryPageSize = 50
+	maxCatalogPageSize     = lifecycle.SnapshotCatalogPageLimit
 )
 
 // streamProgressPollInterval is how often StreamOperationProgress polls
@@ -61,11 +64,10 @@ const streamProgressPollInterval = 250 * time.Millisecond
 // GetOperationHistory, GetDatabaseInfo, and CancelOperation.
 //
 // Snapshots are identified by a generated ID that is also its directory
-// name directly under BarkConfig.SnapshotDir — there is no separate
-// catalog store; ListSnapshots scans that directory for manifest.json
-// files (lifecycle.ListSnapshots), which also means automatic
-// epoch-boundary snapshots (internal/dblifecycle.Manager) show up in the
-// same catalog for free, since they live under the same directory.
+// name directly under BarkConfig.SnapshotDir. ListSnapshots reads bounded
+// newest-first pages from a persistent lifecycle catalog rebuilt from those
+// directories at handler startup. Automatic epoch-boundary snapshots share
+// the same root and update the catalog through lifecycle.WriteManifest.
 // ListAvailableSnapshots (mergedSnapshotCatalogPage) additionally merges
 // in whatever lifecycle.ListCloudSnapshots finds at
 // BarkConfig.SnapshotCloudDestination, deduplicated by ID (local wins) —
@@ -103,12 +105,74 @@ type databaseServiceHandler struct {
 	mu         sync.Mutex
 	operations map[string]*operation
 	busy       bool
+	diagnostic chan struct{}
+	catalogErr error
+	// catalogCloudDestination is set only after this handler reconciles the
+	// configured provider into the catalog. An empty value restricts available
+	// pages to the local index even if an older cloud source remains on disk.
+	catalogCloudDestination string
 }
 
-func newDatabaseServiceHandler(b *Bark) *databaseServiceHandler {
-	return &databaseServiceHandler{
+func newDatabaseServiceHandler(
+	ctx context.Context,
+	b *Bark,
+) *databaseServiceHandler {
+	h := &databaseServiceHandler{
 		bark:       b,
 		operations: make(map[string]*operation),
+		diagnostic: make(chan struct{}, 1),
+	}
+	h.initializeSnapshotCatalog(ctx)
+	return h
+}
+
+func (h *databaseServiceHandler) initializeSnapshotCatalog(ctx context.Context) {
+	b := h.bark
+	if b.config.SnapshotDir != "" {
+		err := lifecycle.EnsureSnapshotCatalogContext(ctx, b.config.SnapshotDir)
+		if errors.Is(err, lifecycle.ErrSnapshotCatalogIncomplete) {
+			b.config.Logger.Warn(
+				"list snapshots: some entries could not be read, omitting them from the catalog",
+				"error", err,
+			)
+		} else {
+			h.catalogErr = err
+		}
+	}
+	if h.catalogErr != nil || b.config.SnapshotDir == "" {
+		return
+	}
+	current, err := lifecycle.ReconcileCloudSnapshotCatalogContext(
+		ctx, b.config.SnapshotDir, b.config.DestinationRegistry,
+		b.config.SnapshotCloudDestination,
+	)
+	if current {
+		h.catalogCloudDestination = b.config.SnapshotCloudDestination
+	}
+	if err != nil {
+		if errors.Is(err, lifecycle.ErrSnapshotCatalogIncomplete) {
+			b.config.Logger.Warn(
+				"some cloud snapshots could not be indexed",
+				"component", "bark", "error", err,
+			)
+			return
+		}
+		b.config.Logger.Warn(
+			"cloud snapshot catalog reconciliation failed",
+			"component", "bark", "error", err,
+		)
+	}
+}
+
+func (h *databaseServiceHandler) beginDiagnostic() (func(), error) {
+	select {
+	case h.diagnostic <- struct{}{}:
+		return func() { <-h.diagnostic }, nil
+	default:
+		return nil, connect.NewError(
+			connect.CodeResourceExhausted,
+			errors.New("another database diagnostic is already running"),
+		)
 	}
 }
 
@@ -479,7 +543,9 @@ func (h *databaseServiceHandler) GetSnapshotStatus(
 }
 
 // snapshotInfoFromEntry converts a lifecycle.SnapshotEntry into the proto
-// SnapshotInfo shape.
+// SnapshotInfo shape. For remote entries, dir is a redacted display location;
+// snapshot actions use SnapshotId and resolve the configured destination on
+// the server rather than treating Location as an authenticated provider URI.
 func snapshotInfoFromEntry(
 	dir string,
 	e lifecycle.SnapshotEntry,
@@ -525,17 +591,109 @@ func decodePageToken(token string) (int, error) {
 	return offset, nil
 }
 
+type snapshotPageToken struct {
+	Generation uint64 `json:"generation"`
+	CreatedSec int64  `json:"createdSec"`
+	CreatedNS  int    `json:"createdNs"`
+	ID         string `json:"id"`
+}
+
+func encodeSnapshotPageToken(
+	cursor *lifecycle.SnapshotCatalogCursor,
+) (string, error) {
+	data, err := json.Marshal(snapshotPageToken{
+		Generation: cursor.Generation,
+		CreatedSec: cursor.CreatedSec,
+		CreatedNS:  cursor.CreatedNS,
+		ID:         cursor.ID,
+	})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(data), nil
+}
+
+func decodeSnapshotPageToken(
+	token string,
+) (*lifecycle.SnapshotCatalogCursor, error) {
+	if token == "" {
+		return nil, nil
+	}
+	data, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return nil, errors.New("invalid snapshot page token")
+	}
+	var decoded snapshotPageToken
+	if err := json.Unmarshal(data, &decoded); err != nil ||
+		decoded.Generation == 0 || decoded.ID == "" ||
+		decoded.CreatedNS < 0 || decoded.CreatedNS >= int(time.Second) {
+		return nil, errors.New("invalid snapshot page token")
+	}
+	return &lifecycle.SnapshotCatalogCursor{
+		Generation: decoded.Generation,
+		CreatedSec: decoded.CreatedSec,
+		CreatedNS:  decoded.CreatedNS,
+		ID:         decoded.ID,
+	}, nil
+}
+
+func boundedCatalogPageSize(pageSize uint32) (int, error) {
+	if pageSize == 0 {
+		return defaultCatalogPageSize, nil
+	}
+	if pageSize > maxCatalogPageSize {
+		return 0, fmt.Errorf(
+			"page_size exceeds maximum %d", maxCatalogPageSize,
+		)
+	}
+	return int(pageSize), nil
+}
+
+func connectContextError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return connect.NewError(connect.CodeCanceled, err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return connect.NewError(connect.CodeDeadlineExceeded, err)
+	}
+	return nil
+}
+
 // snapshotCatalogPage returns one page of the local snapshot catalog.
 func (h *databaseServiceHandler) snapshotCatalogPage(
+	ctx context.Context,
 	pageSize uint32,
 	pageToken string,
 ) ([]*databasev1alpha1.SnapshotInfo, string, error) {
-	offset, err := decodePageToken(pageToken)
+	if h.catalogErr != nil {
+		return nil, "", connect.NewError(
+			connect.CodeInternal,
+			fmt.Errorf("initialize snapshot catalog: %w", h.catalogErr),
+		)
+	}
+	cursor, err := decodeSnapshotPageToken(pageToken)
 	if err != nil {
 		return nil, "", connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	entries, err := lifecycle.ListSnapshots(h.bark.config.SnapshotDir)
+	size, err := boundedCatalogPageSize(pageSize)
 	if err != nil {
+		return nil, "", connect.NewError(
+			connect.CodeInvalidArgument, err,
+		)
+	}
+	entries, nextCursor, err := lifecycle.ListSnapshotPageContext(
+		ctx,
+		h.bark.config.SnapshotDir,
+		size,
+		cursor,
+	)
+	if err != nil {
+		if ctxErr := connectContextError(err); ctxErr != nil {
+			return nil, "", ctxErr
+		}
+		if errors.Is(err, lifecycle.ErrSnapshotCatalogChanged) {
+			return nil, "", connect.NewError(connect.CodeAborted, err)
+		}
 		// entries == nil distinguishes a total failure (the catalog root
 		// itself is unreadable) from lifecycle.ListSnapshots' own
 		// per-entry-problem case, where it still returns every
@@ -558,22 +716,15 @@ func (h *databaseServiceHandler) snapshotCatalogPage(
 			err,
 		)
 	}
-	if offset > len(entries) {
-		offset = len(entries)
-	}
-	size := int(pageSize)
-	if size <= 0 {
-		size = defaultCatalogPageSize
-	}
-	end := offset + size
 	var nextToken string
-	if end < len(entries) {
-		nextToken = encodePageToken(end)
-	} else {
-		end = len(entries)
+	if nextCursor != nil {
+		nextToken, err = encodeSnapshotPageToken(nextCursor)
+		if err != nil {
+			return nil, "", connect.NewError(connect.CodeInternal, err)
+		}
 	}
-	infos := make([]*databasev1alpha1.SnapshotInfo, 0, end-offset)
-	for _, e := range entries[offset:end] {
+	infos := make([]*databasev1alpha1.SnapshotInfo, 0, len(entries))
+	for _, e := range entries {
 		infos = append(
 			infos,
 			snapshotInfoFromEntry(
@@ -586,10 +737,16 @@ func (h *databaseServiceHandler) snapshotCatalogPage(
 }
 
 func (h *databaseServiceHandler) ListSnapshots(
-	_ context.Context,
+	ctx context.Context,
 	req *connect.Request[databasev1alpha1.ListSnapshotsRequest],
 ) (*connect.Response[databasev1alpha1.ListSnapshotsResponse], error) {
+	release, err := h.beginDiagnostic()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	infos, nextToken, err := h.snapshotCatalogPage(
+		ctx,
 		req.Msg.GetPageSize(),
 		req.Msg.GetPageToken(),
 	)
@@ -602,42 +759,53 @@ func (h *databaseServiceHandler) ListSnapshots(
 	}), nil
 }
 
-// snapshotCatalogItem pairs a snapshot entry with the location string its
-// SnapshotInfo should report — a local path for a locally-known entry, a
-// cloud URI for one only discoverable via ListCloudSnapshots.
-type snapshotCatalogItem struct {
-	location string
-	entry    lifecycle.SnapshotEntry
-}
-
 // mergedSnapshotCatalogPage returns one page of the combined local + cloud
 // snapshot catalog, for ListAvailableSnapshots. A cloud entry whose ID
 // already appears in the local catalog is skipped in favor of the local
 // one (a real, already-open path beats reconstructing a cloud URI for
-// something available locally); a cloud-only entry — its local copy
-// already deleted via DeleteSnapshot, or the local directory pruned, but
-// the cloud mirror still present — is what actually makes this RPC
+// something available locally); a cloud-only entry — its local directory
+// pruned or removed independently while the cloud mirror remains — is what
+// actually makes this RPC
 // discover something ListSnapshots can't.
 func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 	ctx context.Context,
 	pageSize uint32,
 	pageToken string,
 ) ([]*databasev1alpha1.SnapshotInfo, string, error) {
-	offset, err := decodePageToken(pageToken)
+	if h.catalogErr != nil {
+		return nil, "", connect.NewError(
+			connect.CodeInternal,
+			fmt.Errorf("initialize snapshot catalog: %w", h.catalogErr),
+		)
+	}
+	cursor, err := decodeSnapshotPageToken(pageToken)
+	if err != nil {
+		return nil, "", connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	size, err := boundedCatalogPageSize(pageSize)
 	if err != nil {
 		return nil, "", connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
-	localEntries, err := lifecycle.ListSnapshots(h.bark.config.SnapshotDir)
+	items, nextCursor, err := lifecycle.ListAvailableSnapshotPageContext(
+		ctx, h.bark.config.SnapshotDir,
+		h.catalogCloudDestination, size, cursor,
+	)
 	if err != nil {
+		if ctxErr := connectContextError(err); ctxErr != nil {
+			return nil, "", ctxErr
+		}
+		if errors.Is(err, lifecycle.ErrSnapshotCatalogChanged) {
+			return nil, "", connect.NewError(connect.CodeAborted, err)
+		}
 		// See snapshotCatalogPage's identical check: entries == nil means a
 		// total failure (unreadable root), while a non-nil result alongside
 		// an error means only some individual entries were unreadable --
 		// those should be logged and skipped, not hide every valid entry.
-		if localEntries == nil {
+		if items == nil {
 			return nil, "", connect.NewError(
 				connect.CodeInternal,
-				fmt.Errorf("list snapshots: %w", err),
+				fmt.Errorf("list available snapshots: %w", err),
 			)
 		}
 		h.bark.config.Logger.Warn(
@@ -649,77 +817,16 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 		)
 	}
 
-	seen := make(map[string]bool, len(localEntries))
-	items := make([]snapshotCatalogItem, 0, len(localEntries))
-	for _, e := range localEntries {
-		seen[e.ID] = true
-		items = append(items, snapshotCatalogItem{
-			location: filepath.Join(h.bark.config.SnapshotDir, e.ID),
-			entry:    e,
-		})
-	}
-
-	cloudEntries, ok, err := lifecycle.ListCloudSnapshots(
-		ctx,
-		h.bark.config.DestinationRegistry,
-		h.bark.config.SnapshotCloudDestination,
-	)
-	if err != nil {
-		// A cloud listing failure is typically connectivity/auth (the same
-		// class of failure cloudSnapshotExists/resolveSnapshotSource/
-		// DeleteSnapshot elsewhere in this file report as CodeUnavailable,
-		// not CodeInternal), and the local entries built above are already
-		// known-good -- failing the whole call here would hide real,
-		// currently-available local snapshots from an operator over what
-		// is often just a transient cloud outage. Log and continue with
-		// local-only results instead, the same best-effort convention
-		// Manager.pruneOldSnapshots uses for a cloud-side failure.
-		h.bark.config.Logger.Warn(
-			"list cloud snapshots failed, returning local snapshots only",
-			"component", "bark",
-			"error", err,
-		)
-		ok = false
-	}
-	if ok {
-		for _, e := range cloudEntries {
-			if seen[e.ID] {
-				continue
-			}
-			seen[e.ID] = true
-			items = append(items, snapshotCatalogItem{
-				location: lifecycle.JoinCloudURI(
-					h.bark.config.SnapshotCloudDestination,
-					e.ID,
-				),
-				entry: e,
-			})
+	var nextToken string
+	if nextCursor != nil {
+		nextToken, err = encodeSnapshotPageToken(nextCursor)
+		if err != nil {
+			return nil, "", connect.NewError(connect.CodeInternal, err)
 		}
 	}
-
-	sort.Slice(items, func(i, j int) bool {
-		return items[i].entry.Manifest.CreatedAt.After(
-			items[j].entry.Manifest.CreatedAt,
-		)
-	})
-
-	if offset > len(items) {
-		offset = len(items)
-	}
-	size := int(pageSize)
-	if size <= 0 {
-		size = defaultCatalogPageSize
-	}
-	end := offset + size
-	var nextToken string
-	if end < len(items) {
-		nextToken = encodePageToken(end)
-	} else {
-		end = len(items)
-	}
-	infos := make([]*databasev1alpha1.SnapshotInfo, 0, end-offset)
-	for _, item := range items[offset:end] {
-		infos = append(infos, snapshotInfoFromEntry(item.location, item.entry))
+	infos := make([]*databasev1alpha1.SnapshotInfo, 0, len(items))
+	for _, item := range items {
+		infos = append(infos, snapshotInfoFromEntry(item.Location, item.Entry))
 	}
 	return infos, nextToken, nil
 }
@@ -729,11 +836,18 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 // restoration, including ones whose local copy is gone but a cloud
 // mirror still exists. If databaseLifecycle.snapshotCloudDestination
 // isn't configured, or its destination type doesn't support listing,
-// this degrades to exactly ListSnapshots's local-only result.
+// this degrades to exactly ListSnapshots's local-only result. SnapshotInfo's
+// Location is display-only for cloud rows: credentials and provider parameters
+// are removed, and callers restore, verify, or delete using SnapshotId.
 func (h *databaseServiceHandler) ListAvailableSnapshots(
 	ctx context.Context,
 	req *connect.Request[databasev1alpha1.ListAvailableSnapshotsRequest],
 ) (*connect.Response[databasev1alpha1.ListAvailableSnapshotsResponse], error) {
+	release, err := h.beginDiagnostic()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	infos, nextToken, err := h.mergedSnapshotCatalogPage(
 		ctx,
 		req.Msg.GetPageSize(),
@@ -902,6 +1016,9 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 
 	cloudURI, cloudExists, cloudErr := h.cloudSnapshotExists(ctx, snapshotID)
 	if cloudErr != nil {
+		if ctxErr := connectContextError(cloudErr); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, connect.NewError(
 			connect.CodeUnavailable,
 			fmt.Errorf(
@@ -923,7 +1040,10 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 	}
 
 	if localExists {
-		if err := os.RemoveAll(localDir); err != nil {
+		if err := lifecycle.RemoveSnapshotContext(ctx, localDir); err != nil {
+			if ctxErr := connectContextError(err); ctxErr != nil {
+				return nil, ctxErr
+			}
 			return nil, connect.NewError(
 				connect.CodeInternal,
 				fmt.Errorf("delete local snapshot %q: %w", snapshotID, err),
@@ -937,6 +1057,9 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 			cloudURI,
 		)
 		if delErr != nil {
+			if ctxErr := connectContextError(delErr); ctxErr != nil {
+				return nil, ctxErr
+			}
 			return nil, connect.NewError(
 				connect.CodeInternal,
 				fmt.Errorf("delete cloud snapshot %q: %w", snapshotID, delErr),
@@ -946,10 +1069,19 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 			return nil, connect.NewError(
 				connect.CodeUnimplemented,
 				fmt.Errorf(
-					"snapshot %q exists at %q but its destination type doesn't support deletion",
+					"snapshot %q exists in cloud but its destination type doesn't support deletion",
 					snapshotID,
-					cloudURI,
 				),
+			)
+		}
+		if err := lifecycle.RemoveCloudSnapshotCatalogEntryContext(
+			context.WithoutCancel(ctx), h.bark.config.SnapshotDir, snapshotID,
+			h.bark.config.DestinationRegistry,
+			h.bark.config.SnapshotCloudDestination,
+		); err != nil {
+			return nil, connect.NewError(
+				connect.CodeInternal,
+				fmt.Errorf("update snapshot catalog after cloud delete: %w", err),
 			)
 		}
 	}
@@ -1294,6 +1426,11 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 	_ context.Context,
 	_ *connect.Request[databasev1alpha1.GetDatabaseInfoRequest],
 ) (*connect.Response[databasev1alpha1.GetDatabaseInfoResponse], error) {
+	releaseDiagnostic, err := h.beginDiagnostic()
+	if err != nil {
+		return nil, err
+	}
+	defer releaseDiagnostic()
 	db, release, err := h.bark.Acquire()
 	if err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, err)
@@ -1308,10 +1445,6 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 		)
 	}
 
-	// A full scan of the block-index keyspace (see its doc comment) —
-	// deliberately accepted for this operator-facing diagnostic RPC over
-	// adding a maintained counter, which would touch every block
-	// insert/delete path across the codebase.
 	blockCount, oldestSlot, err := db.CountBlocksAndOldestSlot(nil)
 	if err != nil {
 		return nil, connect.NewError(

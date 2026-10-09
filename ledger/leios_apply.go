@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -165,7 +166,20 @@ func (ls *LedgerState) applyEndorserBlock(
 	rawTxs []cbor.RawMessage,
 ) (int, uint64, error) {
 	ls.publishUntickedClosureAfterCommit(ctx, txn, rbPoint)
-	return ls.applyEndorserBlockInContext(ctx, txn, rbPoint, rbBlockNumber, ebSlot, ebHashBytes, rawTxs, nil)
+	return ls.applyEndorserBlockInContext(ctx, txn, rbPoint, rbBlockNumber, ebSlot, ebHashBytes, rawTxs, nil, false)
+}
+
+func (ls *LedgerState) applyStagedEndorserBlock(
+	ctx context.Context,
+	txn *database.Txn,
+	rbPoint ocommon.Point,
+	rbBlockNumber uint64,
+	ebSlot uint64,
+	ebHashBytes []byte,
+	rawTxs []cbor.RawMessage,
+) (int, uint64, error) {
+	ls.publishUntickedClosureAfterCommit(ctx, txn, rbPoint)
+	return ls.applyEndorserBlockInContext(ctx, txn, rbPoint, rbBlockNumber, ebSlot, ebHashBytes, rawTxs, nil, true)
 }
 
 func (ls *LedgerState) applyEndorserBlockInContext(
@@ -177,6 +191,7 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 	ebHashBytes []byte,
 	rawTxs []cbor.RawMessage,
 	contextSlot *uint64,
+	requireStaged bool,
 ) (int, uint64, error) {
 	if len(rawTxs) == 0 {
 		return 0, 0, nil
@@ -191,30 +206,9 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 	var ebHash [lcommon.Blake2b256Size]byte
 	copy(ebHash[:], ebHashBytes)
 
-	// Decode each standalone endorser transaction, capturing its body CBOR
-	// (the first array element) for the transaction-offset entry.
-	txs := make([]lcommon.Transaction, len(rawTxs))
-	bodyCbors := make([][]byte, len(rawTxs))
-	for i, raw := range rawTxs {
-		txCbor, elems, err := decodeEndorserTxEnvelope(raw)
-		if err != nil {
-			return 0, 0, fmt.Errorf("endorser tx %d: %w", i, err)
-		}
-		// An endorser block referenced by a Dijkstra ranking block is
-		// Dijkstra-era, so decode its transactions as Dijkstra directly.
-		// DetermineTransactionType is heuristic and cannot reliably identify a
-		// bare standalone transaction without block/era context (it returns
-		// "unknown transaction type" for these), so it must not be used here.
-		// Peer-supplied transaction bytes, decoded before any storage is
-		// mutated, so the guard cannot convert a crash into a partially
-		// applied endorser block: every return below this loop's decode
-		// failure leaves the ledger untouched.
-		tx, err := safedecode.Transaction(ledger.TxTypeDijkstra, txCbor)
-		if err != nil {
-			return 0, 0, fmt.Errorf("decode endorser tx %d: %w", i, err)
-		}
-		txs[i] = tx
-		bodyCbors[i] = []byte(elems[0])
+	txs, bodyCbors, err := decodeEndorserTransactions(rawTxs)
+	if err != nil {
+		return 0, 0, err
 	}
 
 	// Reject repeated endorser transactions before recording ledger data. The
@@ -249,29 +243,26 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 	if err != nil {
 		return 0, 0, fmt.Errorf("build endorser block blob: %w", err)
 	}
-	// Persist the endorser-block blob. Which transaction commits it depends on
-	// the apply path (see DATABASE.md, "Leios endorser-block storage", for the
-	// full rationale):
-	//   - Musashi/no-validation path (LeiosApplyEndorserBlockTxs false): commit
-	//     in its own blob transaction (nil txn) to avoid overflowing the shared
-	//     50-block chunk transaction with ErrTxnTooBig on a dense Leios backlog;
-	//     offset reads use a fresh blob snapshot if the shared LRU misses.
-	//   - CIP/validating path (LeiosApplyEndorserBlockTxs true): keep the blob in
-	//     the shared txn so a later block spending an endorser-produced output can
-	//     resolve it via read-your-writes.
-	blobTxn := txn
-	if !ls.config.LeiosApplyEndorserBlockTxs {
-		blobTxn = nil
+	// Production Musashi processing stages this blob before opening the enclosing
+	// transaction. Direct callers and the CIP path retain shared-transaction
+	// storage when the blob is absent.
+	present, err := endorserBlockBlobMatches(txn, ebSlot, ebHash[:], blob)
+	if err != nil {
+		return 0, 0, &leiosEndorserBlockStorageError{err: err}
 	}
-	if err := ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, blobTxn); err != nil {
+	if requireStaged && !present {
+		return 0, 0, &leiosEndorserBlockStorageError{err: errors.New(
+			"staged endorser block blob is missing or does not match",
+		)}
+	}
+	if !present {
+		err = ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, txn)
+	}
+	if err != nil {
 		return 0, 0, &leiosEndorserBlockStorageError{
 			err: fmt.Errorf("store endorser block blob: %w", err),
 		}
 	}
-	if !ls.config.LeiosApplyEndorserBlockTxs {
-		txn.MarkBlockCborCommittedSeparately(ebSlot, ebHash)
-	}
-
 	delta := NewLedgerDelta(
 		rbPoint,
 		uint(dijkstra.EraIdDijkstra),
@@ -335,6 +326,51 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 		}
 	}
 	return len(txs), delta.donation, nil
+}
+
+func decodeEndorserTransactions(
+	rawTxs []cbor.RawMessage,
+) ([]lcommon.Transaction, [][]byte, error) {
+	txs := make([]lcommon.Transaction, len(rawTxs))
+	bodyCbors := make([][]byte, len(rawTxs))
+	for i, raw := range rawTxs {
+		txCbor, elems, err := decodeEndorserTxEnvelope(raw)
+		if err != nil {
+			return nil, nil, fmt.Errorf("endorser tx %d: %w", i, err)
+		}
+		tx, err := safedecode.Transaction(ledger.TxTypeDijkstra, txCbor)
+		if err != nil {
+			return nil, nil, fmt.Errorf("decode endorser tx %d: %w", i, err)
+		}
+		txs[i] = tx
+		bodyCbors[i] = []byte(elems[0])
+	}
+	return txs, bodyCbors, nil
+}
+
+func endorserBlockBlobMatches(
+	txn *database.Txn,
+	slot uint64,
+	hash []byte,
+	want []byte,
+) (bool, error) {
+	if txn == nil || txn.Blob() == nil {
+		return false, dbtypes.ErrNilTxn
+	}
+	store := txn.BlobStore()
+	if store == nil {
+		return false, dbtypes.ErrBlobStoreUnavailable
+	}
+	got, metadata, err := store.GetBlock(txn.Blob(), slot, hash)
+	if err == nil {
+		return metadata.ID == 0 && metadata.Type == 0 &&
+			bytes.Equal(got, want), nil
+	}
+	if errors.Is(err, dbtypes.ErrBlobKeyNotFound) ||
+		errors.Is(err, dbtypes.ErrHistoryExpired) {
+		return false, nil
+	}
+	return false, fmt.Errorf("check endorser block blob: %w", err)
 }
 
 func (ls *LedgerState) deduplicateEndorserBlockTransactionIndexes(
@@ -758,6 +794,121 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// restart, or none at all when every connection was unusable.
 	fetchMissingRequired(poll)
 	return ensureRequiredAvailable()
+}
+
+// stageMusashiEndorserBlocks persists certified closure blobs before the
+// coordinated ledger transaction opens. A dense closure can otherwise spend
+// the bounded Badger transaction budget needed by the ranking block itself.
+func (ls *LedgerState) stageMusashiEndorserBlocks(
+	ctx context.Context,
+	blocks []ledger.Block,
+) error {
+	if ls.config.LeiosApplyEndorserBlockTxs {
+		return nil
+	}
+	announcements := make(map[string]leiosEbRef, len(blocks))
+	for _, block := range blocks {
+		if hash, _, ok := leiosAnnouncementFromBlock(block); ok {
+			announcements[string(block.Hash().Bytes())] = leiosEbRef{
+				slot: block.SlotNumber(), hash: hash,
+			}
+		}
+	}
+	staged := make(map[string]struct{})
+	for _, block := range blocks {
+		certifier, ok := block.Header().(leiosEndorserBlockCertifier)
+		if !ok {
+			continue
+		}
+		certified, present := certifier.LeiosCertified()
+		if !present || !certified {
+			continue
+		}
+		ref, ok := announcements[string(block.PrevHash().Bytes())]
+		if !ok {
+			hash, slot, _, referenced, err := ls.leiosCertifiedAnnouncementFromParent(
+				ctx, block.PrevHash().Bytes(),
+			)
+			if err != nil {
+				return err
+			}
+			if !referenced {
+				continue
+			}
+			ref = leiosEbRef{slot: slot, hash: hash}
+		}
+		key := string(dbtypes.BlockBlobKey(ref.slot, ref.hash.Bytes()))
+		if _, ok := staged[key]; ok {
+			continue
+		}
+		if ls.config.EndorserBlockProvider == nil {
+			return fmt.Errorf(
+				"%w: no endorser block provider configured",
+				errCertifiedEndorserBlockUnavailable,
+			)
+		}
+		rawTxs, found := ls.config.EndorserBlockProvider(
+			ref.hash.Bytes(), ref.slot,
+		)
+		if !found {
+			return errCertifiedEndorserBlockUnavailable
+		}
+		if len(rawTxs) == 0 {
+			continue
+		}
+		txs, bodies, err := decodeEndorserTransactions(rawTxs)
+		if err != nil {
+			return err
+		}
+		blob, _, err := buildEndorserBlockBlob(txs, bodies, ref.slot, ref.hash)
+		if err != nil {
+			return fmt.Errorf("build endorser block blob: %w", err)
+		}
+		if err := ls.stageEndorserBlockBlob(ref.slot, ref.hash.Bytes(), blob); err != nil {
+			return fmt.Errorf("stage endorser block blob: %w", err)
+		}
+		staged[key] = struct{}{}
+	}
+	return nil
+}
+
+func (ls *LedgerState) stageEndorserBlockBlob(
+	slot uint64,
+	hash []byte,
+	want []byte,
+) error {
+	txn := ls.db.BlockBlobTxn()
+	defer txn.Rollback() //nolint:errcheck
+	store := txn.BlobStore()
+	if store == nil || txn.Blob() == nil {
+		return dbtypes.ErrBlobStoreUnavailable
+	}
+	got, metadata, err := store.GetBlock(txn.Blob(), slot, hash)
+	if err == nil {
+		if metadata.ID != 0 || metadata.Type != 0 {
+			return errors.New("endorser block key contains a non-synthetic block")
+		}
+		if bytes.Equal(got, want) {
+			return nil
+		}
+	} else if !errors.Is(err, dbtypes.ErrBlobKeyNotFound) &&
+		!errors.Is(err, dbtypes.ErrHistoryExpired) {
+		return fmt.Errorf("verify staged endorser block blob: %w", err)
+	}
+	if err := ls.db.SetGenesisCbor(slot, hash, want, txn); err != nil {
+		return err
+	}
+	return txn.Commit()
+}
+
+func leiosAnnouncementFromBlock(
+	block ledger.Block,
+) (lcommon.Blake2b256, uint64, bool) {
+	ref, ok := block.Header().(leiosEndorserBlockReferencer)
+	if !ok {
+		return lcommon.Blake2b256{}, 0, false
+	}
+	return ref.LeiosAnnouncement()
 }
 
 // leiosApplyReadsOwnAnnouncement reports whether ledger application of a
@@ -1921,7 +2072,7 @@ func (ls *LedgerState) applyUntickedBoundaryClosure(
 		return errCertifiedEndorserBlockUnavailable
 	}
 	point := ocommon.Point{Slot: block.SlotNumber(), Hash: block.Hash().Bytes()}
-	_, donation, err := ls.applyEndorserBlockInContext(ctx, txn, point, block.BlockNumber(), slot, hash.Bytes(), txs, &parentPoint.Slot)
+	_, donation, err := ls.applyEndorserBlockInContext(ctx, txn, point, block.BlockNumber(), slot, hash.Bytes(), txs, &parentPoint.Slot, true)
 	if err != nil {
 		return err
 	}

@@ -23,12 +23,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,6 +40,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -48,6 +52,44 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type noDiagnosticIteratorBlobStore struct {
+	blob.BlobStore
+}
+
+type conflictCapabilityBlobStore struct {
+	blob.BlobStore
+	detects bool
+}
+
+func (s conflictCapabilityBlobStore) DetectsWriteConflicts() bool {
+	return s.detects
+}
+
+func (noDiagnosticIteratorBlobStore) NewIterator(
+	types.Txn,
+	types.BlobIteratorOptions,
+) types.BlobIterator {
+	panic("GetDatabaseInfo must not scan the block store")
+}
+
+func TestBlobStoreBarkForwardsWriteConflictDetection(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	wrapped := &BlobStoreBark{upstream: conflictCapabilityBlobStore{
+		BlobStore: db.Blob(),
+		detects:   true,
+	}}
+	require.True(t, wrapped.DetectsWriteConflicts())
+
+	wrapped.upstream = conflictCapabilityBlobStore{
+		BlobStore: db.Blob(),
+		detects:   false,
+	}
+	require.False(t, wrapped.DetectsWriteConflicts())
+	wrapped.upstream = noDiagnosticIteratorBlobStore{BlobStore: db.Blob()}
+	require.False(t, wrapped.DetectsWriteConflicts())
+}
+
 // barkFakeCloudDestination is a minimal stand-in for a real cloud
 // destination (S3/GCS), backed by an ordinary local directory — the same
 // pattern database/lifecycle/destination_test.go uses, redeclared here
@@ -57,6 +99,37 @@ import (
 type barkFakeCloudDestination struct {
 	dir string
 }
+
+type countingSnapshotListerDestination struct {
+	entries       []lifecycle.SnapshotEntry
+	listCalls     atomic.Int64
+	manifestReads atomic.Int64
+}
+
+func (*countingSnapshotListerDestination) UploadDir(context.Context, string) error {
+	return nil
+}
+
+func (*countingSnapshotListerDestination) DownloadDir(context.Context, string) error {
+	return nil
+}
+
+func (d *countingSnapshotListerDestination) ListSnapshots(
+	context.Context,
+) ([]lifecycle.SnapshotEntry, error) {
+	d.listCalls.Add(1)
+	d.manifestReads.Add(int64(len(d.entries)))
+	return append([]lifecycle.SnapshotEntry(nil), d.entries...), nil
+}
+
+func (d *countingSnapshotListerDestination) ListSnapshotCatalog(
+	ctx context.Context,
+	_ lifecycle.SnapshotCatalogScanBudget,
+) ([]lifecycle.SnapshotEntry, error) {
+	return d.ListSnapshots(ctx)
+}
+
+var _ lifecycle.SnapshotLister = &countingSnapshotListerDestination{}
 
 func (d *barkFakeCloudDestination) UploadDir(
 	_ context.Context,
@@ -111,6 +184,13 @@ func (d *barkFakeCloudDestination) ListSnapshots(
 	_ context.Context,
 ) ([]lifecycle.SnapshotEntry, error) {
 	return lifecycle.ListSnapshots(d.dir)
+}
+
+func (d *barkFakeCloudDestination) ListSnapshotCatalog(
+	ctx context.Context,
+	_ lifecycle.SnapshotCatalogScanBudget,
+) ([]lifecycle.SnapshotEntry, error) {
+	return lifecycle.ListSnapshotsContext(ctx, d.dir)
 }
 
 // FetchManifest mirrors the real S3/GCS destinations' contract: a missing
@@ -213,6 +293,29 @@ func setBarkFakeCloudBackingDir(t *testing.T, dir string) {
 		barkFakeCloudDir = ""
 		barkFakeCloudMu.Unlock()
 	})
+}
+
+func rebuildTestSnapshotCatalog(t *testing.T, h *databaseServiceHandler) {
+	t.Helper()
+	require.NoError(t, lifecycle.EnsureSnapshotCatalogContext(
+		t.Context(), h.bark.config.SnapshotDir,
+	))
+	if h.bark.config.SnapshotCloudDestination == "" {
+		return
+	}
+	entries, ok, err := lifecycle.ListCloudSnapshots(
+		t.Context(), h.bark.config.DestinationRegistry,
+		h.bark.config.SnapshotCloudDestination,
+	)
+	if err != nil && entries == nil {
+		return
+	}
+	require.True(t, ok)
+	require.NoError(t, lifecycle.RebuildCloudSnapshotCatalogContext(
+		t.Context(), h.bark.config.SnapshotDir,
+		h.bark.config.SnapshotCloudDestination, entries,
+	))
+	h.catalogCloudDestination = h.bark.config.SnapshotCloudDestination
 }
 
 // barkFakeCloudDestinationNoDelete is identical to barkFakeCloudDestination
@@ -319,6 +422,13 @@ func (d *barkFakeCloudDestinationCommError) ListSnapshots(
 	return nil, errors.New("simulated cloud communication failure")
 }
 
+func (d *barkFakeCloudDestinationCommError) ListSnapshotCatalog(
+	ctx context.Context,
+	_ lifecycle.SnapshotCatalogScanBudget,
+) ([]lifecycle.SnapshotEntry, error) {
+	return d.ListSnapshots(ctx)
+}
+
 var (
 	_ lifecycle.CloudManifestFetcher = &barkFakeCloudDestinationCommError{}
 	_ lifecycle.SnapshotLister       = &barkFakeCloudDestinationCommError{}
@@ -329,6 +439,78 @@ func init() {
 		"barkfaketest-commerror",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
 			return &barkFakeCloudDestinationCommError{}, nil
+		},
+	)
+}
+
+type barkContextDeleteDestination struct{}
+
+func (*barkContextDeleteDestination) UploadDir(context.Context, string) error {
+	return nil
+}
+
+func (*barkContextDeleteDestination) DownloadDir(context.Context, string) error {
+	return nil
+}
+
+func (*barkContextDeleteDestination) FetchManifest(
+	context.Context,
+) (lifecycle.Manifest, error) {
+	return lifecycle.Manifest{}, nil
+}
+
+func (*barkContextDeleteDestination) Delete(ctx context.Context) error {
+	return ctx.Err()
+}
+
+var (
+	_ lifecycle.CloudManifestFetcher = &barkContextDeleteDestination{}
+	_ lifecycle.CloudDeleter         = &barkContextDeleteDestination{}
+)
+
+type barkRecoveringCatalogDestination struct {
+	dir      string
+	failList *atomic.Bool
+}
+
+func (d *barkRecoveringCatalogDestination) UploadDir(
+	ctx context.Context,
+	localDir string,
+) error {
+	return (&barkFakeCloudDestination{dir: d.dir}).UploadDir(ctx, localDir)
+}
+
+func (d *barkRecoveringCatalogDestination) DownloadDir(
+	ctx context.Context,
+	localDir string,
+) error {
+	return (&barkFakeCloudDestination{dir: d.dir}).DownloadDir(ctx, localDir)
+}
+
+func (d *barkRecoveringCatalogDestination) ListSnapshots(
+	context.Context,
+) ([]lifecycle.SnapshotEntry, error) {
+	if d.failList.Load() {
+		return nil, errors.New("provider unavailable")
+	}
+	return lifecycle.ListSnapshots(d.dir)
+}
+
+func (d *barkRecoveringCatalogDestination) ListSnapshotCatalog(
+	ctx context.Context,
+	_ lifecycle.SnapshotCatalogScanBudget,
+) ([]lifecycle.SnapshotEntry, error) {
+	if d.failList.Load() {
+		return nil, errors.New("provider unavailable")
+	}
+	return lifecycle.ListSnapshotsContext(ctx, d.dir)
+}
+
+func init() {
+	testDestinationRegistry.Register(
+		"barkfaketest-context-delete",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			return &barkContextDeleteDestination{}, nil
 		},
 	)
 }
@@ -404,7 +586,7 @@ func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
 	snapshotDir := t.TempDir()
 	cloudBackingDir := t.TempDir()
 	setBarkFakeCloudBackingDir(t, cloudBackingDir)
-	const cloudDest = "barkfaketest://bucket/prefix"
+	const cloudDest = "barkfaketest://user:secret@bucket/prefix?token=private#fragment"
 
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
@@ -442,6 +624,7 @@ func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	h.bark.config.SnapshotDir = snapshotDir
 	h.bark.config.SnapshotCloudDestination = cloudDest
+	rebuildTestSnapshotCatalog(t, h)
 
 	resp, err := h.ListAvailableSnapshots(
 		context.Background(),
@@ -469,8 +652,14 @@ func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
 		byID["local-and-cloud"].GetLocation(),
 	)
 	// The cloud-only entry has no local directory anymore, so its
-	// Location must be the cloud URI.
-	require.Equal(t, cloudDest+"/cloud-only", byID["cloud-only"].GetLocation())
+	// Location is a redacted display URI; cloud operations use SnapshotId.
+	require.Equal(
+		t, "barkfaketest://bucket/prefix/cloud-only",
+		byID["cloud-only"].GetLocation(),
+	)
+	for _, secret := range []string{"user", "secret", "private", "fragment"} {
+		require.NotContains(t, byID["cloud-only"].GetLocation(), secret)
+	}
 	require.Equal(
 		t,
 		filepath.Join(snapshotDir, "local-only"),
@@ -505,10 +694,21 @@ func TestListAvailableSnapshotsSurvivesCloudListingFailure(t *testing.T) {
 		"sqlite",
 	)
 	require.NoError(t, err)
+	localManifest, err := lifecycle.ReadManifest(
+		filepath.Join(snapshotDir, "local-only"),
+	)
+	require.NoError(t, err)
+	require.NoError(t, lifecycle.EnsureSnapshotCatalog(snapshotDir))
+	require.NoError(t, lifecycle.RebuildCloudSnapshotCatalogContext(
+		t.Context(), snapshotDir,
+		"barkfaketest-commerror://bucket/prefix",
+		[]lifecycle.SnapshotEntry{{ID: "stale-cloud", Manifest: localManifest}},
+	))
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	h.bark.config.SnapshotDir = snapshotDir
 	h.bark.config.SnapshotCloudDestination = "barkfaketest-commerror://bucket/prefix"
+	rebuildTestSnapshotCatalog(t, h)
 
 	resp, err := h.ListAvailableSnapshots(
 		context.Background(),
@@ -536,10 +736,20 @@ func TestListAvailableSnapshotsWithoutCloudDestIsLocalOnly(t *testing.T) {
 		"sqlite",
 	)
 	require.NoError(t, err)
+	localManifest, err := lifecycle.ReadManifest(
+		filepath.Join(snapshotDir, "only-snapshot"),
+	)
+	require.NoError(t, err)
+	require.NoError(t, lifecycle.EnsureSnapshotCatalog(snapshotDir))
+	require.NoError(t, lifecycle.RebuildCloudSnapshotCatalogContext(
+		t.Context(), snapshotDir, "s3://old-bucket/snapshots",
+		[]lifecycle.SnapshotEntry{{ID: "stale-cloud", Manifest: localManifest}},
+	))
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	h.bark.config.SnapshotDir = snapshotDir
 	// SnapshotCloudDestination left empty.
+	rebuildTestSnapshotCatalog(t, h)
 
 	resp, err := h.ListAvailableSnapshots(
 		context.Background(),
@@ -552,6 +762,85 @@ func TestListAvailableSnapshotsWithoutCloudDestIsLocalOnly(t *testing.T) {
 		"only-snapshot",
 		resp.Msg.GetSnapshots()[0].GetSnapshotId(),
 	)
+}
+
+func TestListAvailableSnapshotsKeepsCloudHiddenAfterIncompleteStartupListing(t *testing.T) {
+	snapshotDir := t.TempDir()
+	cloudRoot := t.TempDir()
+	var failList atomic.Bool
+	failList.Store(true)
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register("recoveringcatalog", func(uri *url.URL) (lifecycle.CloudDestination, error) {
+		return &barkRecoveringCatalogDestination{
+			dir:      filepath.Join(cloudRoot, strings.TrimPrefix(uri.Path, "/")),
+			failList: &failList,
+		}, nil
+	})
+	const cloudDest = "recoveringcatalog://bucket/snapshots"
+	b, err := NewBark(BarkConfig{
+		DB: newTestDB(t), Lifecycle: dblifecycle.NewService(&config.Config{}, registry, nil),
+		SnapshotDir: snapshotDir, SnapshotCloudDestination: cloudDest,
+		DestinationRegistry: registry, Port: 1,
+	})
+	require.NoError(t, err)
+	h := newDatabaseServiceHandler(t.Context(), b)
+	require.Empty(t, h.catalogCloudDestination)
+
+	dir := filepath.Join(snapshotDir, "after-recovery")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
+		CreatedAt: time.Unix(10, 0).UTC(), Trigger: lifecycle.TriggerManual,
+	}))
+	require.NoError(t, lifecycle.MirrorToCloud(
+		t.Context(), registry, dir, cloudDest,
+	))
+	require.NoError(t, lifecycle.RemoveSnapshotContext(t.Context(), dir))
+	resp, err := h.ListAvailableSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+	require.Empty(t, resp.Msg.GetSnapshots())
+}
+
+func TestListAvailableSnapshotsKeepsCloudHiddenAfterStartupConstructorFailure(t *testing.T) {
+	snapshotDir := t.TempDir()
+	cloudRoot := t.TempDir()
+	var attempts atomic.Int64
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register("recoveringconstructor", func(uri *url.URL) (lifecycle.CloudDestination, error) {
+		if attempts.Add(1) == 1 {
+			return nil, errors.New("provider initialization failed")
+		}
+		return &barkFakeCloudDestination{
+			dir: filepath.Join(cloudRoot, strings.TrimPrefix(uri.Path, "/")),
+		}, nil
+	})
+	const cloudDest = "recoveringconstructor://bucket/snapshots"
+	b, err := NewBark(BarkConfig{
+		DB: newTestDB(t), Lifecycle: dblifecycle.NewService(&config.Config{}, registry, nil),
+		SnapshotDir: snapshotDir, SnapshotCloudDestination: cloudDest,
+		DestinationRegistry: registry, Port: 1,
+	})
+	require.NoError(t, err)
+	h := newDatabaseServiceHandler(t.Context(), b)
+	require.Empty(t, h.catalogCloudDestination)
+
+	dir := filepath.Join(snapshotDir, "after-constructor-recovery")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
+		CreatedAt: time.Unix(10, 0).UTC(), Trigger: lifecycle.TriggerManual,
+	}))
+	require.NoError(t, lifecycle.MirrorToCloud(
+		t.Context(), registry, dir, cloudDest,
+	))
+	require.NoError(t, lifecycle.RemoveSnapshotContext(t.Context(), dir))
+	resp, err := h.ListAvailableSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+	require.Empty(t, resp.Msg.GetSnapshots())
 }
 
 // ── Restore/VerifySnapshot/DeleteSnapshot cloud-fallback ──────────────────
@@ -876,6 +1165,82 @@ func TestDeleteSnapshotRemovesBothLocalAndCloudCopies(t *testing.T) {
 	require.Error(t, err, "cloud copy must actually be gone after delete")
 }
 
+func TestDeleteSnapshotMapsContextErrorsBeforeDeletion(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	dir := filepath.Join(h.bark.config.SnapshotDir, "keep")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
+		CreatedAt: time.Now().UTC(),
+	}))
+
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	deadline, deadlineCancel := context.WithDeadline(
+		t.Context(), time.Now().Add(-time.Second),
+	)
+	defer deadlineCancel()
+
+	for _, test := range []struct {
+		name string
+		ctx  context.Context
+		code connect.Code
+	}{
+		{name: "canceled", ctx: canceled, code: connect.CodeCanceled},
+		{name: "deadline", ctx: deadline, code: connect.CodeDeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := h.DeleteSnapshot(
+				test.ctx,
+				connect.NewRequest(&databasev1alpha1.DeleteSnapshotRequest{
+					SnapshotId: "keep",
+				}),
+			)
+			require.Equal(t, test.code, connect.CodeOf(err))
+			require.DirExists(t, dir)
+			entries, _, listErr := lifecycle.ListSnapshotPage(
+				h.bark.config.SnapshotDir, 1, nil,
+			)
+			require.NoError(t, listErr)
+			require.Len(t, entries, 1)
+			require.Equal(t, "keep", entries[0].ID)
+		})
+	}
+}
+
+func TestDeleteSnapshotMapsCloudDeleteContextErrors(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	h.bark.config.SnapshotCloudDestination =
+		"barkfaketest-context-delete://bucket/prefix"
+
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	deadline, deadlineCancel := context.WithDeadline(
+		t.Context(), time.Now().Add(-time.Second),
+	)
+	defer deadlineCancel()
+
+	for _, test := range []struct {
+		name string
+		ctx  context.Context
+		code connect.Code
+	}{
+		{name: "canceled", ctx: canceled, code: connect.CodeCanceled},
+		{name: "deadline", ctx: deadline, code: connect.CodeDeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := h.DeleteSnapshot(
+				test.ctx,
+				connect.NewRequest(&databasev1alpha1.DeleteSnapshotRequest{
+					SnapshotId: "cloud-only",
+				}),
+			)
+			require.Equal(t, test.code, connect.CodeOf(err))
+		})
+	}
+}
+
 func TestDeleteSnapshotNeitherLocalNorCloudReturnsNotFound(t *testing.T) {
 	setBarkFakeCloudBackingDir(t, t.TempDir())
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
@@ -934,7 +1299,7 @@ func TestDeleteSnapshotCloudDestinationWithoutDeleteSupportReturnsUnimplemented(
 	snapshotDir := t.TempDir()
 	cloudBackingDir := t.TempDir()
 	setBarkFakeCloudNoDeleteBackingDir(t, cloudBackingDir)
-	const cloudDest = "barkfaketest-nodelete://bucket/prefix"
+	const cloudDest = "barkfaketest-nodelete://user:secret@bucket/prefix?token=private#fragment"
 
 	localDir := filepath.Join(snapshotDir, "no-delete-support")
 	_, err := lifecycle.SnapshotToCloud(
@@ -959,6 +1324,9 @@ func TestDeleteSnapshotCloudDestinationWithoutDeleteSupportReturnsUnimplemented(
 	)
 	require.Error(t, err)
 	require.Equal(t, connect.CodeUnimplemented, connect.CodeOf(err))
+	for _, secret := range []string{"user", "secret", "private", "fragment"} {
+		require.NotContains(t, err.Error(), secret)
+	}
 }
 
 // TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud seeds two
@@ -1006,6 +1374,7 @@ func TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud(t *testing.T) {
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	h.bark.config.SnapshotDir = snapshotDir
 	h.bark.config.SnapshotCloudDestination = cloudDest
+	rebuildTestSnapshotCatalog(t, h)
 
 	seen := make(map[string]bool)
 	pageToken := ""
@@ -1051,6 +1420,157 @@ func TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud(t *testing.T) {
 		[]string{"local-a", "local-b", "cloud-a", "cloud-b"},
 		ids,
 	)
+}
+
+func TestListAvailableSnapshotsPagesWithoutProviderRescan(t *testing.T) {
+	const cloudCount = 240
+	snapshotDir := t.TempDir()
+	manifestDir := t.TempDir()
+	provider := &countingSnapshotListerDestination{
+		entries: make([]lifecycle.SnapshotEntry, 0, cloudCount),
+	}
+	manifest := lifecycle.Manifest{
+		CreatedAt: time.Unix(1, 0).UTC(),
+		Trigger:   lifecycle.TriggerManual,
+	}
+	require.NoError(t, lifecycle.WriteManifest(manifestDir, manifest))
+	manifest, err := lifecycle.ReadManifest(manifestDir)
+	require.NoError(t, err)
+	for i := range cloudCount {
+		id := fmt.Sprintf("cloud-%03d", i)
+		provider.entries = append(provider.entries, lifecycle.SnapshotEntry{
+			ID: id, Manifest: manifest,
+		})
+	}
+
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register("counting", func(*url.URL) (lifecycle.CloudDestination, error) {
+		return provider, nil
+	})
+	dataDir := t.TempDir()
+	svc := dblifecycle.NewService(&config.Config{
+		DatabasePath: dataDir,
+		Plugins: config.PluginsConfig{Storage: config.StoragePluginsConfig{
+			Blob:     plugin.Selection{Provider: "badger"},
+			Metadata: plugin.Selection{Provider: "sqlite"},
+		}},
+	}, registry, nil)
+	b, err := NewBark(BarkConfig{
+		DB:                       newTestDB(t),
+		Lifecycle:                svc,
+		SnapshotDir:              snapshotDir,
+		SnapshotCloudDestination: "counting://bucket/snapshots",
+		DestinationRegistry:      registry,
+		Port:                     1,
+	})
+	require.NoError(t, err)
+	h := newDatabaseServiceHandler(t.Context(), b)
+	rebuildLists := provider.listCalls.Load()
+	rebuildManifests := provider.manifestReads.Load()
+
+	seen := make(map[string]bool)
+	token := ""
+	for range 3 {
+		resp, err := h.ListAvailableSnapshots(
+			t.Context(),
+			connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{
+				PageSize:  7,
+				PageToken: token,
+			}),
+		)
+		require.NoError(t, err)
+		require.Len(t, resp.Msg.GetSnapshots(), 7)
+		for _, snapshot := range resp.Msg.GetSnapshots() {
+			require.False(t, seen[snapshot.GetSnapshotId()])
+			seen[snapshot.GetSnapshotId()] = true
+		}
+		token = resp.Msg.GetNextPageToken()
+		require.NotEmpty(t, token)
+	}
+	require.Equal(t, rebuildLists, provider.listCalls.Load(),
+		"page requests must not relist the provider")
+	require.Equal(t, rebuildManifests, provider.manifestReads.Load(),
+		"page requests must not refetch provider manifests")
+}
+
+func TestListAvailableSnapshotsRejectsStaleCatalogToken(t *testing.T) {
+	snapshotDir := t.TempDir()
+	write := func(id string, second int64) {
+		dir := filepath.Join(snapshotDir, id)
+		require.NoError(t, os.Mkdir(dir, 0o755))
+		require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
+			CreatedAt: time.Unix(second, 0).UTC(),
+			Trigger:   lifecycle.TriggerManual,
+		}))
+	}
+	write("first", 1)
+	write("second", 2)
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	h.bark.config.SnapshotDir = snapshotDir
+	rebuildTestSnapshotCatalog(t, h)
+	first, err := h.ListAvailableSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{
+			PageSize: 1,
+		}),
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, first.Msg.GetNextPageToken())
+
+	write("third", 3)
+	_, err = h.ListAvailableSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{
+			PageSize:  1,
+			PageToken: first.Msg.GetNextPageToken(),
+		}),
+	)
+	require.Equal(t, connect.CodeAborted, connect.CodeOf(err))
+}
+
+func TestListAvailableSnapshotsDoesNotPublishIncompleteCloudCatalog(t *testing.T) {
+	snapshotDir := t.TempDir()
+	localDir := filepath.Join(snapshotDir, "local")
+	require.NoError(t, os.Mkdir(localDir, 0o755))
+	require.NoError(t, lifecycle.WriteManifest(localDir, lifecycle.Manifest{
+		CreatedAt: time.Unix(1, 0).UTC(), Trigger: lifecycle.TriggerManual,
+	}))
+	manifestDir := t.TempDir()
+	require.NoError(t, lifecycle.WriteManifest(manifestDir, lifecycle.Manifest{
+		CreatedAt: time.Unix(2, 0).UTC(), Trigger: lifecycle.TriggerManual,
+	}))
+	valid, err := lifecycle.ReadManifest(manifestDir)
+	require.NoError(t, err)
+	provider := &countingSnapshotListerDestination{entries: []lifecycle.SnapshotEntry{
+		{ID: "cloud-valid", Manifest: valid},
+		{ID: "../escape", Manifest: valid},
+		{ID: "cloud-invalid-manifest", Manifest: lifecycle.Manifest{}},
+	}}
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register("invalidrecords", func(*url.URL) (lifecycle.CloudDestination, error) {
+		return provider, nil
+	})
+	b, err := NewBark(BarkConfig{
+		DB:                       newTestDB(t),
+		Lifecycle:                dblifecycle.NewService(&config.Config{}, registry, nil),
+		SnapshotDir:              snapshotDir,
+		SnapshotCloudDestination: "invalidrecords://bucket/snapshots",
+		DestinationRegistry:      registry,
+		Port:                     1,
+	})
+	require.NoError(t, err)
+	h := newDatabaseServiceHandler(t.Context(), b)
+	require.NoError(t, h.catalogErr)
+	resp, err := h.ListAvailableSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+	ids := make([]string, 0, len(resp.Msg.GetSnapshots()))
+	for _, snapshot := range resp.Msg.GetSnapshots() {
+		ids = append(ids, snapshot.GetSnapshotId())
+	}
+	require.Equal(t, []string{"local"}, ids)
 }
 
 func TestSnapshotRPCManifestByteLimit(t *testing.T) {
@@ -1174,7 +1694,7 @@ func newTestDatabaseServiceHandler(
 		DestinationRegistry: testDestinationRegistry,
 	})
 	require.NoError(t, err)
-	return newDatabaseServiceHandler(b)
+	return newDatabaseServiceHandler(t.Context(), b)
 }
 
 func testBlock(id uint64, hashByte byte) models.Block {
@@ -1712,6 +2232,22 @@ func TestGetDatabaseInfoReturnsTipSizeBytesAndBlockCount(t *testing.T) {
 	require.Equal(t, db.StorageMode(), resp.Msg.GetTier())
 }
 
+func TestGetDatabaseInfoUsesMaintainedBlockInventory(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	db.SetBlobStore(noDiagnosticIteratorBlobStore{BlobStore: db.Blob()})
+	h := newTestDatabaseServiceHandler(t, db, t.TempDir())
+
+	resp, err := h.GetDatabaseInfo(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), resp.Msg.GetBlockCount())
+	require.Equal(t, uint64(10), resp.Msg.GetOldestSlot())
+}
+
 // TestListSnapshotsReturnsCreatedSnapshotWithLabel verifies that
 // ListSnapshots surfaces a created snapshot's name, description, size, and checksum.
 func TestListSnapshotsReturnsCreatedSnapshotWithLabel(t *testing.T) {
@@ -1794,6 +2330,189 @@ func TestListSnapshotsPaginates(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, page2.Msg.GetSnapshots(), 1)
 	require.Empty(t, page2.Msg.GetNextPageToken())
+}
+
+func TestListSnapshotsRejectsOversizedPage(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	_, err := h.ListSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{
+			PageSize: maxCatalogPageSize + 1,
+		}),
+	)
+	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+
+	_, err = h.ListAvailableSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{
+			PageSize: maxCatalogPageSize + 1,
+		}),
+	)
+	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+}
+
+func TestListSnapshotsBoundsManifestWorkToPage(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	const catalogSize = 128
+	createdAt := time.Unix(1_700_000_000, 0).UTC()
+	for i := range catalogSize {
+		dir := filepath.Join(
+			h.bark.config.SnapshotDir,
+			fmt.Sprintf("snapshot-%03d", i),
+		)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
+			CreatedAt: createdAt.Add(time.Duration(i) * time.Second),
+		}))
+	}
+	for i := range catalogSize - 4 {
+		manifestPath := filepath.Join(
+			h.bark.config.SnapshotDir,
+			fmt.Sprintf("snapshot-%03d", i),
+			lifecycle.ManifestFileName,
+		)
+		require.NoError(t, os.WriteFile(manifestPath, []byte("invalid"), 0o600))
+	}
+	var logs bytes.Buffer
+	h.bark.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+
+	resp, err := h.ListSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{PageSize: 3}),
+	)
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetSnapshots(), 3)
+	require.NotContains(t, logs.String(), "some entries could not be read")
+}
+
+func TestSnapshotCatalogRebuildReportsCorruptEntries(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	goodDir := filepath.Join(base, "good")
+	require.NoError(t, os.Mkdir(goodDir, 0o755))
+	require.NoError(t, lifecycle.WriteManifest(goodDir, lifecycle.Manifest{
+		CreatedAt: time.Unix(1_700_000_000, 0).UTC(),
+	}))
+	corruptDir := filepath.Join(base, "corrupt")
+	require.NoError(t, os.Mkdir(corruptDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(corruptDir, lifecycle.ManifestFileName),
+		[]byte("invalid"),
+		0o600,
+	))
+
+	var logs bytes.Buffer
+	h := newDatabaseServiceHandler(t.Context(), &Bark{config: BarkConfig{
+		SnapshotDir: base,
+		Logger:      slog.New(slog.NewTextHandler(&logs, nil)),
+	}})
+	resp, err := h.ListSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetSnapshots(), 1)
+	require.Equal(t, "good", resp.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.Contains(t, logs.String(), "some entries could not be read")
+}
+
+func TestListSnapshotsContinuesPastPageOfUnreadableEntries(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	base := h.bark.config.SnapshotDir
+	createdAt := time.Unix(1_700_000_000, 0).UTC()
+	for i, id := range []string{"valid", "missing", "corrupt"} {
+		dir := filepath.Join(base, id)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
+			CreatedAt: createdAt.Add(time.Duration(i) * time.Second),
+		}))
+	}
+	require.NoError(t, os.Remove(filepath.Join(
+		base, "missing", lifecycle.ManifestFileName,
+	)))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(base, "corrupt", lifecycle.ManifestFileName),
+		[]byte("invalid"),
+		0o600,
+	))
+
+	first, err := h.ListSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{PageSize: 2}),
+	)
+	require.NoError(t, err)
+	require.Empty(t, first.Msg.GetSnapshots())
+	require.NotEmpty(t, first.Msg.GetNextPageToken())
+
+	second, err := h.ListSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{
+			PageSize:  2,
+			PageToken: first.Msg.GetNextPageToken(),
+		}),
+	)
+	require.NoError(t, err)
+	require.Len(t, second.Msg.GetSnapshots(), 1)
+	require.Equal(t, "valid", second.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.Empty(t, second.Msg.GetNextPageToken())
+}
+
+func TestSnapshotListingsMapContextErrors(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	deadline, deadlineCancel := context.WithDeadline(
+		t.Context(), time.Now().Add(-time.Second),
+	)
+	defer deadlineCancel()
+
+	for _, test := range []struct {
+		name string
+		ctx  context.Context
+		code connect.Code
+	}{
+		{name: "canceled", ctx: canceled, code: connect.CodeCanceled},
+		{name: "deadline", ctx: deadline, code: connect.CodeDeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := h.ListSnapshots(
+				test.ctx,
+				connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{}),
+			)
+			require.Equal(t, test.code, connect.CodeOf(err))
+			_, err = h.ListAvailableSnapshots(
+				test.ctx,
+				connect.NewRequest(
+					&databasev1alpha1.ListAvailableSnapshotsRequest{},
+				),
+			)
+			require.Equal(t, test.code, connect.CodeOf(err))
+		})
+	}
+}
+
+func TestDatabaseDiagnosticsRejectConcurrentWork(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	h.diagnostic <- struct{}{}
+	t.Cleanup(func() { <-h.diagnostic })
+
+	_, err := h.ListSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{}),
+	)
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+
+	_, err = h.GetDatabaseInfo(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),
+	)
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
 }
 
 // TestListSnapshotsSkipsCorruptedEntryButReturnsOthers verifies that one

@@ -187,7 +187,10 @@ func (s *Service) Snapshot(
 		version.GetVersionString(),
 		s.cfg.Plugins.Storage.Blob.Provider,
 		s.cfg.Plugins.Storage.Metadata.Provider,
-		s.cfg.DatabaseLifecycle.SnapshotCloudDestination,
+		lifecycle.EffectiveCloudDestination(
+			s.cfg.DatabaseLifecycle.SnapshotCloudDestination,
+			s.cfg.DatabaseLifecycle.SnapshotCloudDestinationPrefix,
+		),
 		name,
 		description,
 		lifecycle.WithMaxCommitPause(

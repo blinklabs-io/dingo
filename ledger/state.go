@@ -477,7 +477,13 @@ func (ls *LedgerState) submitBlockApplyDBTxn(
 			}
 			return fmt.Errorf("check block-apply candidate tip: %w", err)
 		}
-		return ls.submitDBTxnOperation(ctx, opFunc, true)
+		return ls.SubmitAsyncDBOperation(func(db *database.Database) error {
+			txn, err := db.BlockBatchTransactionContext(ctx)
+			if err != nil {
+				return err
+			}
+			return txn.Do(opFunc)
+		})
 	}()
 	// Partial-commit recovery can itself rewind the primary chain, so it must
 	// run after releasing transactionEventMutex rather than recursively trying
@@ -2479,6 +2485,9 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 	ctx context.Context,
 ) error {
 	var committedRollbackErr error
+	if err := ls.db.EnsureBlockInventory(); err != nil {
+		return fmt.Errorf("initialize block inventory for recovery: %w", err)
+	}
 	// Load current ledger tip
 	tmpTip, err := ls.db.GetTip(nil)
 	if err != nil {
@@ -2661,13 +2670,12 @@ type orphanedBlock struct {
 // This handles the case where blob committed successfully but metadata failed,
 // leaving orphaned blocks in the blob store.
 func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
-	// Pin rather than reading the installed store: this runs a scan, a
-	// separate write transaction, and a commit against one store, so it has
-	// to keep that store alive for the whole operation rather than sample
-	// whichever is installed at each step.
-	blobStore, releaseBlob := ls.db.PinBlob()
-	defer releaseBlob()
-	if blobStore == nil {
+	// Open the write transaction before scanning so its pin keeps both phases
+	// on one store even when SetBlobStore replaces the installed reference.
+	writeTxn := ls.db.BlockBlobTxn()
+	defer writeTxn.Rollback() //nolint:errcheck
+	blobStore := writeTxn.BlobStore()
+	if blobStore == nil || writeTxn.Blob() == nil {
 		return nil // No blob store configured
 	}
 
@@ -2676,8 +2684,12 @@ func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
 		"tip_slot", tipSlot,
 	)
 
-	// Phase 1: Scan for orphaned blocks (read-only transaction)
-	orphans, err := ls.scanOrphanedBlobs(blobStore, tipSlot)
+	// Phase 1: Scan for orphaned blocks in the write transaction's snapshot.
+	orphans, err := ls.scanOrphanedBlobs(
+		blobStore,
+		writeTxn.Blob(),
+		tipSlot,
+	)
 	if err != nil {
 		return err
 	}
@@ -2687,13 +2699,13 @@ func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
 		return nil
 	}
 
-	// Phase 2: Delete orphaned blocks (read-write transaction)
-	writeTxn := blobStore.NewTransaction(true)
-	defer writeTxn.Rollback() //nolint:errcheck
+	// Phase 2: Delete orphaned blocks in the same pinned transaction.
 	deleted := 0
 
 	for _, orphan := range orphans {
-		if err := blobStore.DeleteBlock(writeTxn, orphan.slot, orphan.hash, orphan.id); err != nil {
+		if err := database.BlockDeleteTxn(writeTxn, models.Block{
+			ID: orphan.id, Slot: orphan.slot, Hash: orphan.hash,
+		}); err != nil {
 			return fmt.Errorf(
 				"delete orphaned block at slot %d (%s): %w",
 				orphan.slot,
@@ -2720,16 +2732,13 @@ func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
 // Returns a slice of orphaned blocks that should be deleted.
 func (ls *LedgerState) scanOrphanedBlobs(
 	blobStore interface {
-		NewTransaction(readWrite bool) types.Txn
 		NewIterator(txn types.Txn, opts types.BlobIteratorOptions) types.BlobIterator
 		GetBlock(txn types.Txn, slot uint64, hash []byte) ([]byte, types.BlockMetadata, error)
 	},
+	readTxn types.Txn,
 	tipSlot uint64,
 ) ([]orphanedBlock, error) {
 	var orphans []orphanedBlock
-
-	readTxn := blobStore.NewTransaction(false)
-	defer readTxn.Rollback() //nolint:errcheck
 
 	iterOpts := types.BlobIteratorOptions{
 		Prefix: []byte(types.BlockBlobKeyPrefix),
@@ -7649,6 +7658,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							completeReadResult()
 							return err
 						}
+						if err := ls.stageMusashiEndorserBlocks(ctx, []ledger.Block{boundary}); err != nil {
+							completeReadResult()
+							return err
+						}
 						untickedClosure = boundary
 					}
 				}
@@ -8187,6 +8200,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					completeReadResult()
 					return fmt.Errorf(
 						"ensure referenced Leios endorser blocks: %w",
+						err,
+					)
+				}
+				if err := ls.stageMusashiEndorserBlocks(ctx, precheck); err != nil {
+					completeReadResult()
+					return fmt.Errorf(
+						"stage referenced Leios endorser blocks: %w",
 						err,
 					)
 				}
@@ -9053,14 +9073,13 @@ func (ls *LedgerState) ledgerProcessBlock(
 				)
 				if ok {
 					var donation uint64
-					applied, donation, err := ls.applyEndorserBlock(
-						ctx,
-						txn,
-						point,
-						block.BlockNumber(),
-						ebSlot,
-						ebHash.Bytes(),
-						ebTxs,
+					apply := ls.applyEndorserBlock
+					if !ls.config.LeiosApplyEndorserBlockTxs {
+						apply = ls.applyStagedEndorserBlock
+					}
+					applied, donation, err := apply(
+						ctx, txn, point, block.BlockNumber(), ebSlot,
+						ebHash.Bytes(), ebTxs,
 					)
 					var storageErr *leiosEndorserBlockStorageError
 					switch {

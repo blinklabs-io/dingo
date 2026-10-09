@@ -772,7 +772,7 @@ func TestTxnDoCommitPanicReleasesLockAndBarrier(t *testing.T) {
 		metadataTxn: backend,
 		readWrite:   true,
 	}
-	acquireCommitBarrier(txn, true)
+	acquireCommitBarrier(t.Context(), txn, true)
 
 	err := txn.Do(func(*Txn) error { return nil })
 	require.ErrorIs(t, err, ErrTxnPanic,
@@ -799,7 +799,7 @@ func TestTxnDoCommitPanicReleasesLockAndBarrier(t *testing.T) {
 	go func() {
 		defer close(writerDone)
 		next := &Txn{db: db, readWrite: true}
-		acquireCommitBarrier(next, true)
+		acquireCommitBarrier(t.Context(), next, true)
 		close(writerOpened)
 		<-writerRelease
 		_ = next.Rollback()
@@ -872,7 +872,7 @@ func TestTxnDoCommitAndRollbackBothPanicReturnsErrorAndReleasesBarrier(
 		metadataTxn: &panicCommitAndRollbackTxn{},
 		readWrite:   true,
 	}
-	acquireCommitBarrier(txn, true)
+	acquireCommitBarrier(t.Context(), txn, true)
 
 	var err error
 	require.NotPanics(t, func() {
@@ -900,7 +900,7 @@ func TestTxnDoCommitAndRollbackBothPanicReturnsErrorAndReleasesBarrier(
 	go func() {
 		defer close(writerDone)
 		next := &Txn{db: db, readWrite: true}
-		acquireCommitBarrier(next, true)
+		acquireCommitBarrier(t.Context(), next, true)
 		close(writerOpened)
 		_ = next.Rollback()
 	}()

@@ -25,6 +25,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -116,4 +118,178 @@ func TestS3ManifestByteLimits(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestS3ListSnapshotsRejectsUnsafePrefixBeforeManifestFetch(t *testing.T) {
+	t.Parallel()
+	var manifestFetches atomic.Int32
+	client := s3.NewFromConfig(aws.Config{
+		Region: "test", Credentials: aws.AnonymousCredentials{},
+		BaseEndpoint: aws.String("https://example.test"),
+		HTTPClient: &http.Client{Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			body := ""
+			if req.URL.Query().Get("list-type") == "2" {
+				body = `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><IsTruncated>false</IsTruncated><CommonPrefixes><Prefix>prefix/../</Prefix></CommonPrefixes></ListBucketResult>`
+			} else {
+				manifestFetches.Add(1)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})},
+	}, func(options *s3.Options) { options.UsePathStyle = true })
+	d := s3Destination{client: client, bucket: "test", prefix: "prefix"}
+
+	entries, err := d.ListSnapshots(t.Context())
+	require.Error(t, err)
+	require.Empty(t, entries)
+	require.Zero(t, manifestFetches.Load())
+}
+
+func TestS3SnapshotCatalogStopsAtPrefixBudget(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, WriteManifest(dir, Manifest{Network: "preview"}))
+	manifest, err := os.ReadFile(filepath.Join(dir, ManifestFileName))
+	require.NoError(t, err)
+	var manifestFetches atomic.Int32
+	client := s3.NewFromConfig(aws.Config{
+		Region: "test", Credentials: aws.AnonymousCredentials{},
+		BaseEndpoint: aws.String("https://example.test"),
+		HTTPClient: &http.Client{Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			body := manifest
+			if req.URL.Query().Get("list-type") == "2" {
+				body = []byte(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><IsTruncated>false</IsTruncated><CommonPrefixes><Prefix>prefix/one/</Prefix></CommonPrefixes><CommonPrefixes><Prefix>prefix/two/</Prefix></CommonPrefixes><CommonPrefixes><Prefix>prefix/three/</Prefix></CommonPrefixes></ListBucketResult>`)
+			} else {
+				manifestFetches.Add(1)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
+				ContentLength: int64(len(body)), Header: make(http.Header), Request: req,
+			}, nil
+		})},
+	}, func(options *s3.Options) { options.UsePathStyle = true })
+	d := s3Destination{client: client, bucket: "test", prefix: "prefix"}
+
+	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{
+		MaxPages: 2, MaxPrefixes: 2, MaxManifests: 2, MaxEntries: 2, MaxProblems: 2,
+	})
+	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
+	require.Len(t, entries, 2)
+	require.Equal(t, int32(2), manifestFetches.Load())
+}
+
+func TestS3SnapshotCatalogCountsNonPrefixListResults(t *testing.T) {
+	t.Parallel()
+	client := s3.NewFromConfig(aws.Config{
+		Region: "test", Credentials: aws.AnonymousCredentials{},
+		BaseEndpoint: aws.String("https://example.test"),
+		HTTPClient: &http.Client{Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			body := []byte(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>prefix/a</Key></Contents><Contents><Key>prefix/b</Key></Contents><Contents><Key>prefix/c</Key></Contents></ListBucketResult>`)
+			return &http.Response{
+				StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
+				ContentLength: int64(len(body)), Header: make(http.Header), Request: req,
+			}, nil
+		})},
+	}, func(options *s3.Options) { options.UsePathStyle = true })
+	d := s3Destination{client: client, bucket: "test", prefix: "prefix"}
+
+	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{
+		MaxPages: 2, MaxPrefixes: 2, MaxManifests: 2, MaxEntries: 2, MaxProblems: 2,
+	})
+	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
+	require.Empty(t, entries)
+}
+
+func TestS3SnapshotCatalogStopsBeforePageRequestLimit(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	client := s3.NewFromConfig(aws.Config{
+		Region: "test", Credentials: aws.AnonymousCredentials{},
+		BaseEndpoint: aws.String("https://example.test"),
+		HTTPClient: &http.Client{Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			request := requests.Add(1)
+			if request > 2 {
+				return nil, errors.New("unexpected provider page request")
+			}
+			body := []byte(fmt.Sprintf(
+				`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>page-%d</NextContinuationToken></ListBucketResult>`,
+				request,
+			))
+			return &http.Response{
+				StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
+				ContentLength: int64(len(body)), Header: make(http.Header), Request: req,
+			}, nil
+		})},
+	}, func(options *s3.Options) { options.UsePathStyle = true })
+	d := s3Destination{client: client, bucket: "test", prefix: "prefix"}
+
+	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{
+		MaxPages: 2, MaxPrefixes: 1000, MaxManifests: 1000,
+		MaxEntries: 1000, MaxProblems: 2,
+	})
+	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
+	require.Empty(t, entries)
+	require.Equal(t, int32(2), requests.Load())
+}
+
+func TestS3UploadExcludesAndRemovesCloudMirrorMarker(t *testing.T) {
+	t.Parallel()
+	var methods []string
+	client := s3.NewFromConfig(aws.Config{
+		Region: "test", Credentials: aws.AnonymousCredentials{},
+		BaseEndpoint: aws.String("https://example.test"),
+		HTTPClient: &http.Client{Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			methods = append(methods, req.Method+" "+req.URL.EscapedPath())
+			return &http.Response{
+				StatusCode: http.StatusNoContent,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     make(http.Header), Request: req,
+			}, nil
+		})},
+	})
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, cloudMirrorMarkerName), []byte("legacy secret"), 0o600,
+	))
+	d := s3Destination{client: client, bucket: "bucket", prefix: "prefix/snapshot"}
+	require.NoError(t, d.UploadDir(t.Context(), dir))
+	require.Equal(t, []string{
+		"DELETE /prefix/snapshot/.cloud-mirrored",
+	}, methods)
+	require.NoError(t, os.Remove(filepath.Join(dir, cloudMirrorMarkerName)))
+	methods = nil
+	require.NoError(t, d.UploadDir(t.Context(), dir))
+	require.Equal(t, []string{
+		"DELETE /prefix/snapshot/.cloud-mirrored",
+	}, methods, "every successful upload removes a remote legacy marker")
+}
+
+func TestS3DownloadSkipsCloudMirrorMarker(t *testing.T) {
+	t.Parallel()
+	var objectFetches atomic.Int32
+	client := s3.NewFromConfig(aws.Config{
+		Region: "test", Credentials: aws.AnonymousCredentials{},
+		BaseEndpoint: aws.String("https://example.test"),
+		HTTPClient: &http.Client{Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			body := `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>prefix/snapshot/.cloud-mirrored</Key></Contents></ListBucketResult>`
+			if req.URL.Query().Get("list-type") != "2" {
+				objectFetches.Add(1)
+				body = "legacy secret"
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header), Request: req,
+			}, nil
+		})},
+	}, func(options *s3.Options) { options.UsePathStyle = true })
+	d := s3Destination{client: client, bucket: "bucket", prefix: "prefix/snapshot"}
+	dir := t.TempDir()
+	require.NoError(t, d.DownloadDir(t.Context(), dir))
+	require.Zero(t, objectFetches.Load())
+	require.NoFileExists(t, filepath.Join(dir, cloudMirrorMarkerName))
 }

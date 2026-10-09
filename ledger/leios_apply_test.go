@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -41,6 +43,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -840,11 +843,8 @@ SELECT added_slot, deleted_slot FROM utxo WHERE tx_id = ?`,
 	require.Equal(t, uint64(0), utxo.DeletedSlot)
 }
 
-// The Haskell-conformant path commits the endorser-block blob in its own blob
-// transaction, which the shared batch transaction's snapshot predates. Reading
-// an endorser-produced output back through that batch after the shared block
-// cache has evicted the blob must therefore use a fresh snapshot, which only
-// applyEndorserBlock's separate-commit mark enables.
+// A directly applied Haskell-conformant block still supports shared-transaction
+// storage when no production pre-stage has populated its blob.
 func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
 	t *testing.T,
 ) {
@@ -864,7 +864,7 @@ func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
 	rawTx, tx := leiosApplyTestTxWithOutput(t, 0x6c)
 	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")
 
-	txn := db.Transaction(t.Context(), true)
+	txn := db.BlockBatchTransaction(t.Context())
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		_, _, err := ls.applyEndorserBlock(
 			t.Context(),
@@ -884,13 +884,146 @@ func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
 			431,
 			leiosApplyTestEbHash(0x6e),
 			[]byte{0x01},
-			nil,
+			txn,
 		))
 		got, err := db.CborCache().ResolveUtxoCbor(tx.Hash().Bytes(), 0, txn)
 		require.NoError(t, err)
 		require.Equal(t, tx.Produced()[0].Output.Cbor(), got)
 		return nil
 	}))
+	count, oldest, err := db.CountBlocksAndOldestSlot(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), count)
+	require.Equal(t, uint64(430), oldest)
+}
+
+func TestApplyEndorserBlockReusesStagedBlobAtBadgerBudget(t *testing.T) {
+	t.Parallel()
+	ls, db, _ := newLeiosApplyTestLedger(t)
+	const txCount = 64
+	rawTxs := make([]cbor.RawMessage, 0, txCount)
+	for i := range txCount {
+		raw, _ := leiosApplyTestProducerTx(t, byte(i+1))
+		rawTxs = append(rawTxs, raw)
+	}
+	hashBytes := leiosApplyTestEbHash(0xd1)
+	hash := lcommon.NewBlake2b256(hashBytes)
+	parent1 := leiosWaitTestAnnouncingBlock(t, 1, 700, hash)
+	parent2 := leiosWaitTestAnnouncingBlock(t, 3, 701, hash)
+	parent1.BlockHeader.SetCbor([]byte{0x81, 0x01})
+	parent2.BlockHeader.SetCbor([]byte{0x81, 0x02})
+	certifier := func(number, slot uint64, parent *dijkstra.DijkstraBlock) *dijkstra.DijkstraBlock {
+		return &dijkstra.DijkstraBlock{BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{Body: babbage.BabbageBlockHeaderBody{
+				BlockNumber: number, Slot: slot, PrevHash: parent.Hash(),
+			}},
+			LeiosHeaderExtension: []cbor.RawMessage{leiosTestRaw(t, true), {0xf6}},
+		}}
+	}
+	cert1 := certifier(2, 720, parent1)
+	cert2 := certifier(4, 721, parent2)
+	ls.config.EndorserBlockProvider = func(got []byte, slot uint64) ([]cbor.RawMessage, bool) {
+		return rawTxs, bytes.Equal(got, hashBytes) && (slot == 700 || slot == 701)
+	}
+	blocks := []gledger.Block{parent1, cert1, parent2, cert2}
+	require.NoError(t, ls.stageMusashiEndorserBlocks(t.Context(), blocks))
+
+	txs, bodies, err := decodeEndorserTransactions(rawTxs)
+	require.NoError(t, err)
+	want, _, err := buildEndorserBlockBlob(txs, bodies, 700, hash)
+	require.NoError(t, err)
+	read := db.BlobTxn(false)
+	for _, slot := range []uint64{700, 701} {
+		got, metadata, err := read.BlobStore().GetBlock(read.Blob(), slot, hashBytes)
+		require.NoError(t, err)
+		require.Zero(t, metadata.ID)
+		require.Zero(t, metadata.Type)
+		require.Equal(t, want, got)
+	}
+	require.NoError(t, read.Rollback())
+
+	// An exact staged record is reused; mismatched content and a missing
+	// metadata half are repaired under the serialized blob transaction.
+	require.NoError(t, db.SetGenesisCbor(700, hashBytes, []byte{0x01}, nil))
+	partial := db.BlockBlobTxn()
+	require.NoError(t, partial.BlobStore().Delete(
+		partial.Blob(),
+		types.BlockBlobMetadataKey(types.BlockBlobKey(701, hashBytes)),
+	))
+	require.NoError(t, partial.Commit())
+	require.NoError(t, ls.stageMusashiEndorserBlocks(t.Context(), blocks))
+	repaired := db.BlobTxn(false)
+	for _, slot := range []uint64{700, 701} {
+		got, metadata, err := repaired.BlobStore().GetBlock(
+			repaired.Blob(), slot, hashBytes,
+		)
+		require.NoError(t, err)
+		require.Zero(t, metadata.ID)
+		require.Zero(t, metadata.Type)
+		require.Equal(t, want, got)
+	}
+	require.NoError(t, repaired.Rollback())
+
+	first := db.BlockBatchTransaction(t.Context())
+	require.NoError(t, first.Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyStagedEndorserBlock(
+			t.Context(), txn, leiosApplyTestRankingPoint(0xd2), 1,
+			700, hashBytes, rawTxs,
+		)
+		return err
+	}))
+
+	fillBudget := func(txn *database.Txn) {
+		budget, ok := txn.BlobStore().(blob.TxnBudget)
+		require.True(t, ok)
+		remaining, ok := budget.RemainingTxnEntries(txn.Blob(), 33)
+		require.True(t, ok)
+		require.Greater(t, remaining, 1)
+		for i := range remaining - 1 {
+			key := make([]byte, 33)
+			key[0] = 'z'
+			binary.BigEndian.PutUint32(key[1:5], uint32(i)) //nolint:gosec
+			require.NoError(t, txn.BlobStore().Delete(txn.Blob(), key))
+		}
+	}
+	outer := db.BlockBatchTransaction(t.Context())
+	fillBudget(outer)
+	require.NoError(t, outer.Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyStagedEndorserBlock(
+			t.Context(), txn, leiosApplyTestRankingPoint(0xd3), 2,
+			700, hashBytes, rawTxs,
+		)
+		return err
+	}))
+
+	deleted := db.BlockBlobTxn()
+	require.NoError(t, database.BlockDeleteTxn(deleted, models.Block{
+		Slot: 701, Hash: hashBytes,
+	}))
+	require.NoError(t, deleted.Commit())
+	missing := db.BlockBatchTransaction(t.Context())
+	fillBudget(missing)
+	err = missing.Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyStagedEndorserBlock(
+			t.Context(), txn, leiosApplyTestRankingPoint(0xd4), 3,
+			701, hashBytes, rawTxs,
+		)
+		return err
+	})
+	require.ErrorContains(t, err, "staged endorser block blob is missing")
+	require.NotErrorIs(t, err, badger.ErrTxnTooBig)
+}
+
+func TestStageMusashiEndorserBlocksRejectsMissingProvider(t *testing.T) {
+	t.Parallel()
+	ls, _, _ := newLeiosApplyTestLedger(t)
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+
+	err := ls.stageMusashiEndorserBlocks(
+		t.Context(), []gledger.Block{parent, certifier},
+	)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+	require.ErrorContains(t, err, "no endorser block provider configured")
 }
 
 func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
@@ -2905,7 +3038,7 @@ func TestApplyEndorserBlockContextFailureRollsBackEffects(t *testing.T) {
 	point := leiosApplyTestRankingPoint(0xA6)
 	point.Slot = 1020
 	apply := func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xA7), []cbor.RawMessage{closure, second}, &contextSlot)
+		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xA7), []cbor.RawMessage{closure, second}, &contextSlot, false)
 		return err
 	}
 	require.ErrorContains(t, db.Transaction(t.Context(), true).Do(apply), "injected closure context failure")
@@ -2936,7 +3069,7 @@ func TestUntickedClosureEventsWaitForCertifyingBlockCommit(t *testing.T) {
 	publications := 0
 	ls.beforeTransactionApplyPublish = func() { publications++ }
 	require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xB3), []cbor.RawMessage{closure}, &contextSlot)
+		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xB3), []cbor.RawMessage{closure}, &contextSlot, false)
 		return err
 	}))
 	require.Zero(t, publications, "rollover alone must not publish certifying-block transaction events")
@@ -2968,7 +3101,7 @@ func TestRollbackSameTipRemovesUntickedClosure(t *testing.T) {
 	closure, tx := leiosApplyTestProducerTx(t, 0xC1)
 	contextSlot := fixture.ancestorTip.Point.Slot
 	require.NoError(t, ls.db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot)
+		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot, false)
 		return err
 	}))
 	require.NotNil(t, ls.untickedClosure)
@@ -2990,7 +3123,7 @@ func TestRollbackAheadOfParentRemovesUntickedClosure(t *testing.T) {
 	closure, tx := leiosApplyTestProducerTx(t, 0xC1)
 	contextSlot := fixture.ancestorTip.Point.Slot
 	require.NoError(t, ls.db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot)
+		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot, false)
 		return err
 	}))
 	require.NotNil(t, ls.untickedClosure)

@@ -16,13 +16,134 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+type credentialEchoDestination struct{ message string }
+
+type credentialBearingProviderError struct {
+	message string
+	cause   error
+}
+
+func (e *credentialBearingProviderError) Error() string { return e.message }
+func (e *credentialBearingProviderError) Unwrap() error { return e.cause }
+
+func (d credentialEchoDestination) UploadDir(context.Context, string) error {
+	return errors.New(d.message)
+}
+func (d credentialEchoDestination) DownloadDir(context.Context, string) error {
+	return errors.New(d.message)
+}
+func (d credentialEchoDestination) ListSnapshots(context.Context) ([]SnapshotEntry, error) {
+	return nil, errors.New(d.message)
+}
+func (d credentialEchoDestination) FetchManifest(context.Context) (Manifest, error) {
+	return Manifest{}, errors.New(d.message)
+}
+func (d credentialEchoDestination) Delete(context.Context) error {
+	return errors.New(d.message)
+}
+
+func TestCloudDestinationDisplayAndErrorsHideCredentials(t *testing.T) {
+	t.Parallel()
+	const raw = "leaky://user:secret@bucket/prefix?token=private#fragment"
+	require.Equal(t, "leaky://bucket/prefix", CloudDestinationDisplay(raw))
+	assertSafe := func(err error) {
+		t.Helper()
+		require.Error(t, err)
+		for _, secret := range []string{"user", "secret", "private", "fragment"} {
+			require.NotContains(t, err.Error(), secret)
+		}
+	}
+
+	factoryRegistry := NewDestinationRegistry()
+	factoryRegistry.Register("leaky", func(uri *url.URL) (CloudDestination, error) {
+		return nil, errors.New(uri.String())
+	})
+	_, err := ParseCloudDestination(factoryRegistry, raw)
+	assertSafe(err)
+	encodedFragmentRegistry := NewDestinationRegistry()
+	encodedFragmentRegistry.Register("encoded", func(uri *url.URL) (CloudDestination, error) {
+		return nil, errors.New(uri.EscapedFragment())
+	})
+	_, err = ParseCloudDestination(
+		encodedFragmentRegistry,
+		"encoded://bucket/prefix#encoded%2Fsecret",
+	)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "encoded%2Fsecret")
+	require.NotContains(t, err.Error(), "encoded/secret")
+	require.NotContains(t, err.Error(), "secret")
+
+	registry := NewDestinationRegistry()
+	registry.Register("leaky", func(uri *url.URL) (CloudDestination, error) {
+		return credentialEchoDestination{message: uri.String()}, nil
+	})
+	_, _, err = ListCloudSnapshots(t.Context(), registry, raw)
+	assertSafe(err)
+	_, _, err = FetchCloudManifest(t.Context(), registry, raw)
+	assertSafe(err)
+	_, err = DeleteCloudSnapshot(t.Context(), registry, raw)
+	assertSafe(err)
+	_, cleanup, err := downloadCloudSnapshot(t.Context(), registry, raw)
+	if cleanup != nil {
+		cleanup()
+	}
+	assertSafe(err)
+	_, err = parseCloudDestinationURL("%zz-secret")
+	assertSafe(err)
+}
+
+func TestSanitizedCloudErrorDoesNotExposeProviderError(t *testing.T) {
+	t.Parallel()
+	const raw = "leaky://user:secret@bucket/prefix?token=private#fragment"
+	providerSentinel := errors.New("provider sentinel")
+	providerErr := &credentialBearingProviderError{
+		message: raw,
+		cause:   errors.Join(providerSentinel, context.Canceled),
+	}
+	err := sanitizeCloudError(raw, providerErr)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "user")
+	require.NotContains(t, err.Error(), "secret")
+	require.NotContains(t, err.Error(), "private")
+	require.NotContains(t, err.Error(), "fragment")
+	require.Nil(t, errors.Unwrap(err))
+	var recovered *credentialBearingProviderError
+	require.False(t, errors.As(err, &recovered))
+	require.Nil(t, recovered)
+	require.ErrorIs(t, err, providerSentinel)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestCloudDestinationIdentityDistinguishesProviderVisibleComponents(t *testing.T) {
+	t.Parallel()
+	base := "s3://user:secret@bucket/prefix?region=us-east-1#one"
+	got, err := cloudDestinationIdentity(base)
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(got, "v1:sha256:"))
+	require.NotContains(t, got, "user")
+	require.NotContains(t, got, "secret")
+	for _, distinct := range []string{
+		"s3://other:secret@bucket/prefix?region=us-east-1#one",
+		"s3://user:secret@bucket/prefix?region=us-west-2#one",
+		"s3://user:secret@bucket/prefix?region=us-east-1#two",
+		"s3://user:secret@bucket/other?region=us-east-1#one",
+	} {
+		identity, err := cloudDestinationIdentity(distinct)
+		require.NoError(t, err)
+		require.NotEqual(t, got, identity, distinct)
+	}
+}
 
 // TestOrderEntriesManifestLastSortsManifestToEnd guards against a real
 // invariant: a snapshot's manifest.json must never upload before every
@@ -102,6 +223,35 @@ func TestJoinCloudURIPreservesQueryAndFragment(t *testing.T) {
 	// Trailing slash on base is trimmed before joining, same as before.
 	got = JoinCloudURI("s3://bucket/prefix/", "abc123")
 	require.Equal(t, "s3://bucket/prefix/abc123", got)
+}
+
+func TestFetchCloudSnapshotEntryRejectsUnsafeIDBeforeFetch(t *testing.T) {
+	t.Parallel()
+	for _, id := range []string{"", ".", "..", "../escape", `..\escape`, "a/b"} {
+		fetches := 0
+		_, err := fetchCloudSnapshotEntry(
+			t.Context(), id,
+			func(context.Context, string) (Manifest, error) {
+				fetches++
+				return Manifest{}, nil
+			},
+		)
+		require.Error(t, err, id)
+		require.Zero(t, fetches, "unsafe ID %q reached manifest fetch", id)
+	}
+
+	fetches := 0
+	entry, err := fetchCloudSnapshotEntry(
+		t.Context(), "safe-id",
+		func(_ context.Context, id string) (Manifest, error) {
+			fetches++
+			require.Equal(t, "safe-id", id)
+			return Manifest{CreatedAt: time.Unix(1, 0)}, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, fetches)
+	require.Equal(t, "safe-id", entry.ID)
 }
 
 // TestParseCloudDestinationCleansNoncanonicalPath guards against a real

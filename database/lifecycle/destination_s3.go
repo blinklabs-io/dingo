@@ -65,10 +65,7 @@ func newS3Destination(uri *url.URL, opts ...ManifestOption) (CloudDestination, e
 	}
 	bucket := uri.Host
 	if bucket == "" {
-		return nil, fmt.Errorf(
-			"s3 cloud destination %q: missing bucket",
-			uri.String(),
-		)
+		return nil, errors.New("s3 cloud destination: missing bucket")
 	}
 	prefix := strings.Trim(uri.Path, "/")
 
@@ -129,7 +126,7 @@ func (d *s3Destination) UploadDir(ctx context.Context, localDir string) error {
 	// API right alongside this package's initial real-cloud test coverage.
 	uploader := manager.NewUploader(d.client) //nolint:staticcheck
 	for _, entry := range orderEntriesManifestLast(entries) {
-		if !entry.Type().IsRegular() {
+		if !entry.Type().IsRegular() || entry.Name() == cloudMirrorMarkerName {
 			continue
 		}
 		localPath := filepath.Join(localDir, entry.Name())
@@ -159,6 +156,13 @@ func (d *s3Destination) UploadDir(ctx context.Context, localDir string) error {
 		if closeErr != nil {
 			return fmt.Errorf("close %q after upload: %w", localPath, closeErr)
 		}
+	}
+	key := d.objectKey(cloudMirrorMarkerName)
+	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: &d.bucket,
+		Key:    &key,
+	}); err != nil && !isS3NotFoundError(err) {
+		return fmt.Errorf("remove legacy cloud mirror marker object %q: %w", key, err)
 	}
 	return nil
 }
@@ -193,7 +197,8 @@ func (d *s3Destination) DownloadDir(
 			if d.prefix == "" {
 				fileName = *obj.Key
 			}
-			if !IsSafeCloudObjectFileName(fileName) {
+			if !IsSafeCloudObjectFileName(fileName) ||
+				fileName == cloudMirrorMarkerName {
 				continue
 			}
 			localPath := filepath.Join(localDir, fileName)
@@ -238,6 +243,30 @@ func (d *s3Destination) DownloadDir(
 func (d *s3Destination) ListSnapshots(
 	ctx context.Context,
 ) ([]SnapshotEntry, error) {
+	scan, err := newSnapshotCatalogScan(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	return d.listSnapshots(ctx, scan)
+}
+
+// ListSnapshotCatalog lists snapshots within the supplied reconciliation
+// budget. A limit error means the returned entries are incomplete.
+func (d *s3Destination) ListSnapshotCatalog(
+	ctx context.Context,
+	budget SnapshotCatalogScanBudget,
+) ([]SnapshotEntry, error) {
+	scan, err := newSnapshotCatalogScan(ctx, &budget)
+	if err != nil {
+		return nil, err
+	}
+	return d.listSnapshots(ctx, scan)
+}
+
+func (d *s3Destination) listSnapshots(
+	ctx context.Context,
+	scan *snapshotCatalogScan,
+) ([]SnapshotEntry, error) {
 	listPrefix := ""
 	if d.prefix != "" {
 		listPrefix = d.prefix + "/"
@@ -251,19 +280,28 @@ func (d *s3Destination) ListSnapshots(
 		input.Prefix = &listPrefix
 	}
 	paginator := s3.NewListObjectsV2Paginator(d.client, input)
-	var entries []SnapshotEntry
-	var problems []error
 	for paginator.HasMorePages() {
+		if err := scan.consumePage(); err != nil {
+			return scan.result(err)
+		}
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf(
+			return scan.result(fmt.Errorf(
 				"list s3://%s/%s: %w",
 				d.bucket,
 				d.prefix,
 				err,
-			)
+			))
+		}
+		for range page.Contents {
+			if err := scan.consumePrefix(); err != nil {
+				return scan.result(err)
+			}
 		}
 		for _, cp := range page.CommonPrefixes {
+			if err := scan.consumePrefix(); err != nil {
+				return scan.result(err)
+			}
 			if cp.Prefix == nil {
 				continue
 			}
@@ -274,7 +312,12 @@ func (d *s3Destination) ListSnapshots(
 			if snapshotID == "" {
 				continue
 			}
-			manifest, err := d.fetchManifest(ctx, snapshotID)
+			if err := scan.consumeManifest(); err != nil {
+				return scan.result(err)
+			}
+			entry, err := fetchCloudSnapshotEntry(
+				ctx, snapshotID, d.fetchManifest,
+			)
 			if err != nil {
 				// A sub-path with no manifest.json object at all
 				// (ErrCloudSnapshotNotFound) is a snapshot still being
@@ -290,19 +333,19 @@ func (d *s3Destination) ListSnapshots(
 				if errors.Is(err, ErrCloudSnapshotNotFound) {
 					continue
 				}
-				problems = append(
-					problems,
-					fmt.Errorf("snapshot %q: %w", snapshotID, err),
-				)
+				if addErr := scan.addProblem(fmt.Errorf(
+					"snapshot %q: %w", snapshotID, err,
+				)); addErr != nil {
+					return scan.result(addErr)
+				}
 				continue
 			}
-			entries = append(
-				entries,
-				SnapshotEntry{ID: snapshotID, Manifest: manifest},
-			)
+			if err := scan.addEntry(entry); err != nil {
+				return scan.result(err)
+			}
 		}
 	}
-	return entries, errors.Join(problems...)
+	return scan.result(nil)
 }
 
 // isS3NotFoundError reports whether err represents a confirmed-absent S3

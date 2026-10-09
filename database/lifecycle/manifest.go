@@ -70,6 +70,36 @@ type manifestConfig struct {
 	// Snapshot. Production callers cannot construct options that set them.
 	pauseNow     func() time.Time
 	pauseContext func(context.Context) context.Context
+	// catalogRepair rebuilds the disposable snapshot catalog after a
+	// durable manifest write when its incremental update fails. Cloud-aware
+	// callers provide a repair that reads both authoritative sources.
+	catalogRepair func(context.Context, string) error
+}
+
+func withSnapshotCatalogRepair(
+	repair func(context.Context, string) error,
+) ManifestOption {
+	return func(cfg *manifestConfig) { cfg.catalogRepair = repair }
+}
+
+func repairSnapshotCatalog(
+	ctx context.Context,
+	baseDir string,
+	opts []ManifestOption,
+) error {
+	cfg := manifestConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	repair := cfg.catalogRepair
+	if repair == nil {
+		repair = func(ctx context.Context, baseDir string) error {
+			return EnsureSnapshotCatalogContext(ctx, baseDir, opts...)
+		}
+	}
+	return repair(ctx, baseDir)
 }
 
 // WithManifestMaxBytes sets the maximum encoded manifest size. Zero uses
@@ -368,6 +398,15 @@ func (m Manifest) CheckCompatibility(
 // observes either the complete old manifest or the complete new one,
 // never a partial one.
 func WriteManifest(dir string, m Manifest, opts ...ManifestOption) error {
+	return writeManifest(context.Background(), dir, m, opts...)
+}
+
+func writeManifest(
+	ctx context.Context,
+	dir string,
+	m Manifest,
+	opts ...ManifestOption,
+) error {
 	limit, err := manifestByteLimit(opts)
 	if err != nil {
 		return err
@@ -424,7 +463,27 @@ func WriteManifest(dir string, m Manifest, opts ...ManifestOption) error {
 	// A file's own fsync does not guarantee its directory entry is
 	// persisted; sync dir itself so the rename above is durable too, not
 	// just atomic.
-	return fsyncdir.Sync(dir)
+	if err := fsyncdir.Sync(dir); err != nil {
+		return err
+	}
+	if err := updateSnapshotCatalogIfPresent(
+		ctx,
+		filepath.Dir(dir),
+		SnapshotEntry{ID: filepath.Base(dir), Manifest: m},
+	); err != nil {
+		if !snapshotCatalogCanRebuild(err) {
+			return fmt.Errorf("%w: %w", ErrSnapshotCatalogUpdate, err)
+		}
+		if repairErr := repairSnapshotCatalog(
+			context.WithoutCancel(ctx), filepath.Dir(dir), opts,
+		); repairErr != nil {
+			return fmt.Errorf(
+				"%w: %w", ErrSnapshotCatalogUpdate,
+				errors.Join(err, repairErr),
+			)
+		}
+	}
+	return nil
 }
 
 // ReadManifest reads and validates the manifest at dir/ManifestFileName,
@@ -496,11 +555,23 @@ func ParseManifest(data []byte, opts ...ManifestOption) (Manifest, error) {
 // CreateSnapshot RPC receives name/description in the same request but
 // Snapshot itself has no such parameters).
 func LabelSnapshot(dir string, name string, description string, opts ...ManifestOption) error {
+	return labelSnapshot(
+		context.Background(), dir, name, description, opts...,
+	)
+}
+
+func labelSnapshot(
+	ctx context.Context,
+	dir string,
+	name string,
+	description string,
+	opts ...ManifestOption,
+) error {
 	m, err := ReadManifest(dir, opts...)
 	if err != nil {
 		return err
 	}
 	m.Name = name
 	m.Description = description
-	return WriteManifest(dir, m, opts...)
+	return writeManifest(ctx, dir, m, opts...)
 }

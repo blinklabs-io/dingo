@@ -1562,7 +1562,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			dbLifecycleService.SetLiveNode(n)
 			barkConfig.Lifecycle = dbLifecycleService
 			barkConfig.SnapshotDir = n.config.databaseLifecycle.SnapshotDir
-			barkConfig.SnapshotCloudDestination = n.config.databaseLifecycle.SnapshotCloudDestination
+			barkConfig.SnapshotCloudDestination = lifecycle.EffectiveCloudDestination(
+				n.config.databaseLifecycle.SnapshotCloudDestination,
+				n.config.databaseLifecycle.SnapshotCloudDestinationPrefix,
+			)
 		}
 		var err error
 		n.bark, err = bark.NewBark(barkConfig)
