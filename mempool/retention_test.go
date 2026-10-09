@@ -183,9 +183,6 @@ func TestMempoolDuplicateAtCapacityRetainsNothingNew(t *testing.T) {
 	)
 }
 
-// retainedTxBytes measures what the pool retains for its transactions: each
-// entry's CBOR plus the CBOR of every decoded output the UTxO overlay keeps
-// for it.
 // TestMempoolDuplicateOfExpiredTransactionIsChargedAgain resubmits a
 // transaction after expiry removed it. Expiry must leave nothing a duplicate
 // could refresh, so the resubmission is a new admission held to capacity.
@@ -223,6 +220,9 @@ func TestMempoolDuplicateOfExpiredTransactionIsChargedAgain(t *testing.T) {
 	require.Len(t, pool.Transactions(), 1)
 }
 
+// retainedTxBytes measures what the pool retains for its transactions: each
+// entry's CBOR plus the CBOR of every decoded output the UTxO overlay keeps
+// for it.
 func retainedTxBytes(pool *Mempool) (int64, int) {
 	pool.RLock()
 	defer pool.RUnlock()
