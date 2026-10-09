@@ -7987,6 +7987,17 @@ the later `serve` command run as one tracked direct child: the handler forwards
 the same signal to the active child, waits for it, and exits with its status.
 Successful bootstrap clears the tracked PID before the entrypoint hands off to
 `serve`, so the same lifecycle contract applies on both sides of startup.
+The root CLI derives one operation context from SIGINT and SIGTERM. Explicit
+Mithril sync, `load`, and `serve` repair and resume work all receive that
+context, so cancellation reaches downloads, archive extraction, immutable
+copy, ledger-state import, and pre-startup database repair. An interrupted
+write keeps `sync_status=in_progress`, which selects the resume path on the
+next run. The same context continues into the node runtime, while remote
+lifecycle requests cancel a child of it.
+Database cleanup uses a detached cancellation context so providers can close
+after operation cancellation. The Mithril operation attempts shutdown of each
+started metrics, health, and debug server with its own detached five-second
+context; each call returns when the server drains or its deadline expires.
 
 When a legacy imported database is marked for reward-state repair, `serve`
 blocks node startup until Mithril v2 reconciles the database against a verified

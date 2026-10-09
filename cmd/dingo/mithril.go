@@ -365,6 +365,8 @@ This is the fastest way to bootstrap a new node.`,
 	return cmd
 }
 
+var runMithrilSyncForCommand = runMithrilSync
+
 // mithrilSyncRunE is the shared RunE for both the "mithril sync"
 // subcommand and the "sync --mithril" convenience command.
 func mithrilSyncRunE(
@@ -401,7 +403,9 @@ func mithrilSyncRunE(
 			"error", healthErr,
 		)
 	}
-	return runMithrilSync(cmd.Context(), cfg, logger, network, healthProbe)
+	return runMithrilSyncForCommand(
+		cmd.Context(), cfg, logger, network, healthProbe,
+	)
 }
 
 // errMithrilInactivityIncompatible reports why Mithril bootstrap and the

@@ -153,7 +153,7 @@ func TestServeCoreModeRepairsMissingCascadeIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, dbtest.CloseDatabase(db))
 
-	require.NoError(t, repairDeferredIndexes(cfg, logger))
+	require.NoError(t, repairDeferredIndexes(t.Context(), cfg, logger))
 
 	var count int
 	require.NoError(t, raw.QueryRow(

@@ -16,6 +16,7 @@ package node
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"io"
 	"log/slog"
@@ -25,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -34,6 +36,13 @@ import (
 // rollbackCascadeIndex is the child index for fk_transaction_outputs, the
 // foreign key the rollback's DELETE FROM "transaction" cascades through.
 const rollbackCascadeIndex = "idx_utxo_transaction_id"
+
+func cancelDeferredIndexRepairContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	return ctx
+}
 
 // seedClearedMarkerWithMissingCriticalIndex leaves the database in the state
 // two Mithril-bootstrapped preview nodes were found in: a critical manifest
@@ -86,7 +95,7 @@ func TestRepairDeferredIndexesRestoresCriticalIndexWithoutMarker(
 	raw := seedClearedMarkerWithMissingCriticalIndex(t, db)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	require.NoError(t, RepairDeferredIndexes(db, logger))
+	require.NoError(t, RepairDeferredIndexes(t.Context(), db, logger))
 
 	require.True(
 		t,
@@ -108,7 +117,7 @@ func TestRepairCriticalDeferredIndexesRestoresCriticalIndexWithoutMarker(
 	raw := seedClearedMarkerWithMissingCriticalIndex(t, db)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	require.NoError(t, RepairCriticalDeferredIndexes(db, logger))
+	require.NoError(t, RepairCriticalDeferredIndexes(t.Context(), db, logger))
 
 	require.True(
 		t,
@@ -117,6 +126,83 @@ func TestRepairCriticalDeferredIndexesRestoresCriticalIndexWithoutMarker(
 		rollbackCascadeIndex,
 	)
 	requireNoPendingMarker(t, raw)
+}
+
+func TestCoreStartupDeferredIndexRepairHonoursCancellation(t *testing.T) {
+	db := newFileTestDB(t)
+	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
+	require.True(t, ok)
+	require.NoError(t, manager.DropDeferredIndexes())
+
+	err := RepairDeferredIndexes(
+		cancelDeferredIndexRepairContext(t),
+		db,
+		slog.New(slog.DiscardHandler),
+	)
+	require.ErrorIs(t, err, context.Canceled)
+
+	pending, err := manager.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(t, pending, "a cancelled full rebuild must remain resumable")
+}
+
+func TestCriticalStartupDeferredIndexRepairHonoursCancellation(
+	t *testing.T,
+) {
+	db := newFileTestDB(t)
+	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
+	require.True(t, ok)
+	require.NoError(t, manager.DropDeferredIndexes())
+
+	err := RepairCriticalDeferredIndexes(
+		cancelDeferredIndexRepairContext(t),
+		db,
+		slog.New(slog.DiscardHandler),
+	)
+	require.ErrorIs(t, err, context.Canceled)
+
+	missing, err := manager.(metadata.MissingCriticalDeferredIndexLister).
+		MissingCriticalDeferredIndexes()
+	require.NoError(t, err)
+	require.NotEmpty(t, missing, "a cancelled critical rebuild must do no DDL")
+}
+
+func TestDeferredIndexRebuilderCriticalBuildHonoursCancellation(
+	t *testing.T,
+) {
+	db := newFileTestDB(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	rebuilder := WithDeferredIndexes(
+		ctx,
+		db,
+		slog.New(slog.DiscardHandler),
+	)
+	cancel()
+
+	require.ErrorIs(t, rebuilder.BuildCritical(), context.Canceled)
+	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
+	require.True(t, ok)
+	missing, err := manager.(metadata.MissingCriticalDeferredIndexLister).
+		MissingCriticalDeferredIndexes()
+	require.NoError(t, err)
+	require.NotEmpty(t, missing)
+}
+
+func TestWithDeferredIndexesHonoursCancellationBeforeDrop(t *testing.T) {
+	db := newFileTestDB(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	WithDeferredIndexes(ctx, db, slog.New(slog.DiscardHandler))
+
+	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
+	require.True(t, ok)
+	pending, err := manager.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.False(t, pending)
+	missing, err := manager.(metadata.MissingDeferredIndexLister).
+		MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.Empty(t, missing)
 }
 
 // TestRepairDeferredIndexesRestoresLazyIndexWithoutMarker covers a restored
@@ -134,6 +220,7 @@ func TestRepairDeferredIndexesRestoresLazyIndexWithoutMarker(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, RepairDeferredIndexes(
+		t.Context(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
@@ -160,6 +247,7 @@ func TestRepairCriticalDeferredIndexesRestoresLazyIndexWithoutMarker(
 	require.NoError(t, err)
 
 	require.NoError(t, RepairCriticalDeferredIndexes(
+		t.Context(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
@@ -207,6 +295,7 @@ func TestRepairDeferredIndexesFinishesPendingCycle(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, RepairDeferredIndexes(
+		t.Context(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
@@ -267,7 +356,9 @@ func TestEnsureCriticalDeferredIndexesNamesMissingBeforeBuilding(
 		log:     &buf,
 	}
 
-	require.NoError(t, ensureCriticalDeferredIndexes(manager, logger))
+	require.NoError(t, ensureCriticalDeferredIndexes(
+		t.Context(), manager, logger,
+	))
 
 	require.Contains(
 		t,
@@ -301,7 +392,9 @@ func TestEnsureCriticalDeferredIndexesQuietWhenManifestComplete(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	manager := &namedMissingManager{log: &buf}
 
-	require.NoError(t, ensureCriticalDeferredIndexes(manager, logger))
+	require.NoError(t, ensureCriticalDeferredIndexes(
+		t.Context(), manager, logger,
+	))
 
 	require.Empty(t, buf.String())
 }
@@ -315,7 +408,7 @@ func TestRepairDeferredIndexesNamesMissingIndexAgainstRealStore(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
-	require.NoError(t, RepairDeferredIndexes(db, logger))
+	require.NoError(t, RepairDeferredIndexes(t.Context(), db, logger))
 
 	require.True(t, dbtest.MetadataIndexExists(t, raw, rollbackCascadeIndex))
 	require.Contains(
@@ -371,7 +464,7 @@ func TestEnsureAllDeferredIndexesNamesMissingBeforeBuilding(t *testing.T) {
 		log:     &buf,
 	}
 
-	require.NoError(t, ensureAllDeferredIndexes(manager, logger))
+	require.NoError(t, ensureAllDeferredIndexes(t.Context(), manager, logger))
 
 	require.Contains(
 		t,
@@ -396,7 +489,7 @@ func TestEnsureAllDeferredIndexesQuietWhenManifestComplete(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	manager := &namedMissingAllManager{log: &buf}
 
-	require.NoError(t, ensureAllDeferredIndexes(manager, logger))
+	require.NoError(t, ensureAllDeferredIndexes(t.Context(), manager, logger))
 
 	require.Empty(t, buf.String())
 }
@@ -418,6 +511,7 @@ func TestRepairDeferredIndexesAnnouncesLazyRebuild(t *testing.T) {
 
 	var buf bytes.Buffer
 	require.NoError(t, RepairDeferredIndexes(
+		t.Context(),
 		db,
 		slog.New(slog.NewTextHandler(&buf, nil)),
 	))

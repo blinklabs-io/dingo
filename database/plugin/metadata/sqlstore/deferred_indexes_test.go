@@ -58,6 +58,47 @@ func TestBuildDeferredIndexesContextHonoursCancellation(t *testing.T) {
 	require.NotEmpty(t, deferred.Manifest)
 }
 
+func TestDropDeferredIndexesContextCancelsWhileWriteLocked(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	store.writeDB.SetMaxOpenConns(1)
+
+	holder, err := store.writeDB.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	_, err = holder.ExecContext(
+		t.Context(),
+		`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`,
+		"deferred-index-drop-lock",
+		"held",
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Rollback() })
+	forceRelease := time.AfterFunc(time.Second, func() { _ = holder.Rollback() })
+	defer forceRelease.Stop()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = store.DropDeferredIndexesContext(ctx)
+	elapsed := time.Since(start)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(
+		t,
+		elapsed,
+		2*time.Second,
+		"drop must return on cancellation instead of waiting out busy_timeout",
+	)
+
+	forceRelease.Stop()
+	require.NoError(t, holder.Rollback())
+	pending, err := store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.False(t, pending)
+	missing, err := store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.Empty(t, missing)
+}
+
 // TestMissingDeferredIndexesNamesDroppedEntries covers the full-manifest
 // lister the repair paths use to announce a rebuild before it starts.
 func TestMissingDeferredIndexesNamesDroppedEntries(t *testing.T) {

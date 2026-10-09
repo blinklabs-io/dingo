@@ -18,8 +18,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os/signal"
-	"syscall"
 
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -76,25 +74,7 @@ func databaseSnapshotCommand() *cobra.Command {
 				logger,
 			)
 
-			// Snapshot can run for a long time against a large database,
-			// and Cobra's default cmd.Context() is a plain
-			// context.Background() with no signal handling wired in
-			// anywhere above this command -- without this, an operator's
-			// Ctrl+C (SIGINT) or a SIGTERM would not cancel ctx at all,
-			// so Snapshot would have no way to notice the interrupt and
-			// unwind its own failure cleanup (e.g. removing an
-			// incomplete destDir); the process would just be killed
-			// outright mid-backup, leaving destDir existing-but-
-			// incomplete so a retry with the same --dir fails as
-			// already existing instead of cleanly resuming. See
-			// databaseRestoreCommand/databaseTruncateCommand below for
-			// the same reasoning.
-			ctx, stop := signal.NotifyContext(
-				cmd.Context(), syscall.SIGINT, syscall.SIGTERM,
-			)
-			defer stop()
-
-			manifest, err := svc.Snapshot(ctx, destDir, "", "")
+			manifest, err := svc.Snapshot(cmd.Context(), destDir, "", "")
 			if err != nil {
 				return fmt.Errorf("snapshot: %w", err)
 			}
@@ -136,27 +116,7 @@ func databaseRestoreCommand() *cobra.Command {
 				logger,
 			)
 
-			// Restore can run for a long time against a large database,
-			// and Cobra's default cmd.Context() is a plain
-			// context.Background() with no signal handling wired in
-			// anywhere above this command -- without this, an operator's
-			// Ctrl+C (SIGINT) or a SIGTERM would not cancel ctx at all,
-			// leaving Restore no way to notice the interrupt and return
-			// cleanly (only the default Go runtime behavior of killing
-			// the process outright, skipping every deferred cleanup).
-			// database/lifecycle.RestoreValidated's staging-directory-
-			// plus-atomic-rename design already ensures the configured
-			// data directory itself is left untouched either way, but a
-			// signal-aware context here is what lets a well-behaved
-			// interrupt (this one) actually be observed by Restore and
-			// fail fast, matching how internal/node/node.go's serve path
-			// installs the same signal handling for the live node.
-			ctx, stop := signal.NotifyContext(
-				cmd.Context(), syscall.SIGINT, syscall.SIGTERM,
-			)
-			defer stop()
-
-			manifest, err := svc.Restore(ctx, args[0])
+			manifest, err := svc.Restore(cmd.Context(), args[0])
 			if err != nil {
 				return fmt.Errorf("restore: %w", err)
 			}
@@ -226,22 +186,7 @@ path, not a shallower local target.`,
 			// comment.
 			svc := dblifecycle.NewService(cfg, nil, logger)
 
-			// Truncate can run for a long time against a large database,
-			// and Cobra's default cmd.Context() is a plain
-			// context.Background() with no signal handling wired in
-			// anywhere above this command -- without this, an operator's
-			// Ctrl+C (SIGINT) or a SIGTERM would not cancel ctx at all,
-			// leaving Truncate no way to notice the interrupt and return
-			// cleanly (only the default Go runtime behavior of killing
-			// the process outright mid-DeleteBlocksAfter, skipping every
-			// deferred cleanup). See databaseRestoreCommand above for the
-			// same reasoning.
-			ctx, stop := signal.NotifyContext(
-				cmd.Context(), syscall.SIGINT, syscall.SIGTERM,
-			)
-			defer stop()
-
-			blocksRemoved, err := svc.Truncate(ctx, target)
+			blocksRemoved, err := svc.Truncate(cmd.Context(), target)
 			if err != nil {
 				return fmt.Errorf("truncate: %w", err)
 			}

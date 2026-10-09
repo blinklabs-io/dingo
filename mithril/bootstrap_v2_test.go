@@ -39,6 +39,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
@@ -173,6 +175,17 @@ func validImmutableFiles(
 
 func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
 	return minimalLedgerStateWithUTxOMap(t, slot, hash, nil)
+}
+
+func singleUTxOMap(t *testing.T) cbor.RawMessage {
+	t.Helper()
+	txIn := append(bytes.Repeat([]byte{0x40}, 32), 0, 0)
+	key, err := cbor.Encode(txIn)
+	require.NoError(t, err)
+	address := append([]byte{0x60}, bytes.Repeat([]byte{0x11}, 28)...)
+	value, err := cbor.Encode([]any{address, uint64(1_000_000)})
+	require.NoError(t, err)
+	return append(append(cbor.RawMessage{0xa1}, key...), value...)
 }
 
 func minimalLedgerStateWithUTxOMap(
@@ -1019,6 +1032,76 @@ func TestSyncV2SerializesMetadataWriterPhases(t *testing.T) {
 		"ledger import and immutable copy must not write metadata concurrently")
 	require.Positive(t, immutableBlocksCopied.Load(),
 		"verified bootstrap must copy immutable blocks before importing the tip")
+}
+
+func TestSyncV2CancellationDuringLedgerImportResumes(t *testing.T) {
+	_, certifiedHash := validImmutableFiles(t, 1000)
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		validImmutable: true,
+		ancillaryLedgerState: minimalLedgerStateWithUTxOMap(
+			t, 1000, certifiedHash, singleUTxOMap(t),
+		),
+		ancillaryLedgerSlot: 1000,
+	})
+	dataDir := t.TempDir()
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	baseConfig := SyncConfig{
+		Network:     "preprod",
+		DataDir:     dataDir,
+		StorageMode: "core",
+		CardanoNodeConfig: &cardano.CardanoNodeConfig{
+			MithrilGenesisVerificationKey:          fixture.genesisVKey,
+			MithrilGenesisAncillaryVerificationKey: fixture.ancillaryVKey,
+		},
+		Backend:           BackendV2,
+		AggregatorURL:     fixture.server.URL,
+		AllowInsecureHTTP: true,
+		VerifyCertChain:   true,
+		CleanupAfterLoad:  false,
+		StoragePlugins:    testStoragePlugins(),
+		DatabaseWorkers:   1,
+		Logger:            discard,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelled := false
+	interruptedConfig := baseConfig
+	interruptedConfig.OnProgress = func(progress SyncProgress) {
+		if !cancelled && progress.Phase == PhaseLedgerImport &&
+			progress.Active && progress.Description == "utxo" &&
+			progress.Count > 0 {
+			cancelled = true
+			cancel()
+		}
+	}
+	_, err := Sync(ctx, interruptedConfig)
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, cancelled, "sync must reach ledger import before cancellation")
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: dataDir, StorageMode: "core", Logger: discard,
+	})
+	require.NoError(t, err)
+	status, err := db.GetSyncState("sync_status", nil)
+	require.NoError(t, err)
+	require.Equal(t, syncStatusInProgress, status)
+	mode, err := determineSyncMode(t.Context(), db)
+	require.NoError(t, err)
+	require.Equal(t, syncModeResume, mode)
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	result, err := Sync(context.Background(), baseConfig)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1000), result.LedgerSlot)
+
+	db, err = dbtest.NewDatabase(t, &database.Config{
+		DataDir: dataDir, StorageMode: "core", Logger: discard,
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+	status, err = db.GetSyncState("sync_status", nil)
+	require.NoError(t, err)
+	require.Empty(t, status)
 }
 
 func TestBootstrapV2DigestsAggregatorFallback(t *testing.T) {
