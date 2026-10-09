@@ -19,12 +19,63 @@ import (
 	"math"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSetBlockNoncesBatchPreservesCheckpointAndLatestNonce(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	rowByRow := newManagementTestStore(t)
+	hash := []byte{0x01, 0x02, 0x03}
+	nonces := []models.BlockNonce{
+		{
+			Hash:         hash,
+			Slot:         10,
+			Nonce:        []byte{0x01},
+			IsCheckpoint: true,
+		},
+		{
+			Hash:  hash,
+			Slot:  10,
+			Nonce: []byte{0x02},
+		},
+	}
+	err := store.SetBlockNonces(nonces, nil)
+	require.NoError(t, err)
+	for _, nonce := range nonces {
+		require.NoError(t, rowByRow.SetBlockNonce(
+			nonce.Hash,
+			nonce.Slot,
+			nonce.Nonce,
+			nonce.IsCheckpoint,
+			nil,
+		))
+	}
+
+	nonce, err := store.GetBlockNonce(
+		ocommon.Point{Slot: 10, Hash: hash},
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []byte{0x02}, nonce)
+
+	rows, err := store.GetBlockNoncesInSlotRange(10, 11, nil)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.True(t, rows[0].IsCheckpoint)
+	assert.Equal(t, []byte{0x02}, rows[0].Nonce)
+
+	rowByRowRows, err := rowByRow.GetBlockNoncesInSlotRange(10, 11, nil)
+	require.NoError(t, err)
+	require.Len(t, rowByRowRows, 1)
+	assert.Equal(t, rowByRowRows[0].Nonce, rows[0].Nonce)
+	assert.Equal(t, rowByRowRows[0].IsCheckpoint, rows[0].IsCheckpoint)
+}
 
 // TestGetTipRejectsNegativeStoredSlot covers the regression this issue was
 // filed for: SQLite's INTEGER columns are signed, so a tip row corrupted

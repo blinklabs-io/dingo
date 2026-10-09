@@ -3177,6 +3177,19 @@ failed commit restores its initial queue, and savepoint rollback restores the
 queue at that savepoint. Transaction-scoped insert statements close when their
 SQL transaction finishes, including the implicit transaction path.
 
+In API storage mode, `LedgerDeltaBatch.apply` carries one accumulator across
+its block deltas and flushes it before the surrounding database transaction
+commits. Core storage mode and batches with closure-context, conflict-tolerant,
+or strict consumed-input semantics keep the unbatched write path. A trusted
+immutable replay can omit consumed-input blob recovery because the complete
+history supplies each producer output earlier in slot order; transaction
+conflict checks still run.
+
+Ledger apply collects block-nonce rows for its database batch and persists them
+through the optional `metadata.BlockNonceBatchStore` capability in the same
+transaction. SQLStore uses bounded multi-row SQLite upserts; other metadata
+backends retain the per-row fallback.
+
 
 Key models in `database/models/`:
 
@@ -8031,6 +8044,11 @@ is a metadata writer even though its bulk payload belongs to the blob store.
 Ordering the two resumable phases keeps their SQLite write transactions from
 contending during bootstrap. A later import failure resumes against the already
 copied immutable data.
+
+`dingo load` uses the bulk-load pragma and deferred-index path as well. Before
+it returns successfully, it rebuilds the critical deferred indexes needed for
+startup queries; the existing recovery path completes an interrupted index
+cycle on the next open.
 
 The container entrypoint installs its SIGINT/SIGTERM handlers before deciding
 whether to run a first or resumed Mithril sync. Both that bootstrap command and
