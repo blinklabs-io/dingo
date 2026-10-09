@@ -1410,14 +1410,7 @@ func (s *Store) getUtxo(
 	if includeSpent {
 		query = getUtxoIncludingSpentByRefQuery
 	}
-	queryerCanUseWriteCache := true
-	if s.readDB != s.writeDB {
-		if txn == nil {
-			queryerCanUseWriteCache = false
-		} else if sqlTxn, ok := txn.(*sqlTxn); ok && sqlTxn.readOnly {
-			queryerCanUseWriteCache = false
-		}
-	}
+	queryerCanUseWriteCache := s.readCanUseWriteCache(txn)
 	args := []any{txID, sql.NullInt64{Int64: int64(index), Valid: true}}
 	var sqlRow *sql.Row
 	if queryerCanUseWriteCache {

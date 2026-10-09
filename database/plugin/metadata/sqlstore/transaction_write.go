@@ -66,6 +66,19 @@ type transactionBatchAccumulator struct {
 	rows rowBatch
 }
 
+// markUtxoSpentQuery and getUtxoSpendStateQuery are the per-input statements
+// setTransactionWithAccumulator issues for every consumed input.
+const (
+	markUtxoSpentQuery = `
+UPDATE utxo
+SET deleted_slot = ?, spent_at_tx_id = ?
+WHERE tx_id = ? AND output_idx = ?
+  AND deleted_slot = 0 AND spent_at_tx_id IS NULL`
+	getUtxoSpendStateQuery = `
+SELECT deleted_slot, spent_at_tx_id
+FROM utxo WHERE tx_id = ? AND output_idx = ?`
+)
+
 const transactionInsertSQL = `
 INSERT INTO "transaction" (
     hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
@@ -391,7 +404,7 @@ func (s *Store) setTransactionWithAccumulator(
 				)
 				transactionID = int64(id)
 			} else {
-				transactionID, err = queryReturnedID(ctx, db, transactionInsertSQL,
+				err = s.queryRowCached(ctx, db, transactionInsertSQL,
 					hash,
 					point.Hash,
 					metadataValue,
@@ -402,7 +415,7 @@ func (s *Store) setTransactionWithAccumulator(
 					decimalUint64(types.Uint64(transaction.TTL())),
 					index,
 					transaction.IsValid(),
-				)
+				).Scan(&transactionID)
 			}
 			if err != nil {
 				return fmt.Errorf("create transaction %x: %w", hash, err)
@@ -556,11 +569,7 @@ func (s *Store) setTransactionWithAccumulator(
 					Hash: input.Id().Bytes(),
 					Idx:  input.Index(),
 				}
-				result, err := db.ExecContext(ctx, `
-UPDATE utxo
-SET deleted_slot = ?, spent_at_tx_id = ?
-WHERE tx_id = ? AND output_idx = ?
-  AND deleted_slot = 0 AND spent_at_tx_id IS NULL`,
+				result, err := s.execCached(ctx, db, markUtxoSpentQuery,
 					point.Slot,
 					hash,
 					input.Id().Bytes(),
@@ -582,9 +591,7 @@ WHERE tx_id = ? AND output_idx = ?
 					deletedSlot uint64
 					spentBy     []byte
 				)
-				err = db.QueryRowContext(ctx, `
-SELECT deleted_slot, spent_at_tx_id
-FROM utxo WHERE tx_id = ? AND output_idx = ?`,
+				err = s.queryRowCached(ctx, db, getUtxoSpendStateQuery,
 					input.Id().Bytes(),
 					input.Index(),
 				).Scan(&deletedSlot, &spentBy)

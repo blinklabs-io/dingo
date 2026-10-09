@@ -501,7 +501,14 @@ func (s *Store) GetPool(
 	if err != nil {
 		return nil, err
 	}
-	pool, err := queryPool(ctx, db, "pool_key_hash = ?", poolKeyHash.Bytes())
+	var pool *models.Pool
+	if s.readCanUseWriteCache(txn) {
+		pool, err = scanPoolOrNil(scanPool(s.queryRowCached(
+			ctx, db, poolByKeyHashQuery, poolKeyHash.Bytes(),
+		)))
+	} else {
+		pool, err = queryPool(ctx, db, "pool_key_hash = ?", poolKeyHash.Bytes())
+	}
 	if err != nil || pool == nil {
 		return pool, err
 	}
@@ -3136,20 +3143,29 @@ func ledgerPoolRelay(
 	return ret, nil
 }
 
+const poolSelectPrefix = `
+SELECT margin, pool_key_hash, vrf_key_hash, reward_account,
+       latest_op_cert_sequence, reward_account_credential_tag, id,
+       pledge, cost, leios_key_public, leios_key_possession_proof
+FROM pool WHERE `
+
+// poolByKeyHashQuery is the pool lookup GetPool issues, and the text queryPool
+// builds for the "pool_key_hash = ?" predicate.
+const poolByKeyHashQuery = poolSelectPrefix + "pool_key_hash = ? LIMIT 1"
+
 func queryPool(
 	ctx context.Context,
 	db queryer,
 	predicate string,
 	args ...any,
 ) (*models.Pool, error) {
-	row := db.QueryRowContext(ctx, `
-SELECT margin, pool_key_hash, vrf_key_hash, reward_account,
-       latest_op_cert_sequence, reward_account_credential_tag, id,
-       pledge, cost, leios_key_public, leios_key_possession_proof
-FROM pool WHERE `+predicate+` LIMIT 1`,
-		args...,
-	)
-	pool, err := scanPool(row)
+	return scanPoolOrNil(scanPool(db.QueryRowContext(
+		ctx, poolSelectPrefix+predicate+" LIMIT 1", args...,
+	)))
+}
+
+// scanPoolOrNil maps sql.ErrNoRows from scanPool to a nil pool.
+func scanPoolOrNil(pool *models.Pool, err error) (*models.Pool, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
