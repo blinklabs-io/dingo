@@ -26,10 +26,12 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -977,6 +979,64 @@ func TestLocalstatequerySnapshotExpires(t *testing.T) {
 	require.Equal(t, acquiredTip, got,
 		"the reopened snapshot must answer for the block acquired, not the new tip")
 	require.Contains(t, logs.String(), "reopened an expired ledger snapshot")
+}
+
+// TestLocalstatequeryTipReopenChainDepStateAnswersAtAcquiredTip covers the
+// consensus state after a tip session reopens: DebugChainDepState must report
+// the block the session acquired, as GetChainPoint does, not the newer tip
+// the reopened snapshot holds.
+func TestLocalstatequeryTipReopenChainDepStateAnswersAtAcquiredTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
+		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
+	})
+	prepareReopenableChain(t, db)
+	// The session acquires block 2, whose metadata names its parent, so the
+	// lab nonce needs no body decode; block 3 is the newer tip.
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:       3,
+		Slot:     3,
+		Number:   3,
+		Hash:     bytes.Repeat([]byte{3}, 32),
+		PrevHash: bytes.Repeat([]byte{2}, 32),
+		Type:     1,
+		Cbor:     []byte{0x80},
+	}, nil))
+	acquiredTip := moveTestTip(t, db, 2)
+	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
+	expired := acquireSnapshotTestSession(t, o, ctx).view
+	moveTestTip(t, db, 3)
+	testutil.WaitForCondition(t, func() bool {
+		_, err := expired.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
+		return errors.Is(err, ledger.ErrQueryViewClosed)
+	}, testutil.AsyncWait, "the snapshot was never closed")
+
+	result, err := o.localstatequeryServerQuery(ctx, olocalstatequery.QueryWrapper{
+		Query: &olocalstatequery.BlockQuery{
+			Query: &olocalstatequery.ShelleyQuery{
+				Query: &olocalstatequery.ShelleyDebugChainDepStateQuery{},
+			},
+		},
+	})
+	require.NoError(t, err)
+	arr, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, arr, 1)
+	encoded, err := cbor.Encode(arr[0])
+	require.NoError(t, err)
+	var state olocalstatequery.DebugChainDepStateResult
+	require.NoError(t, state.UnmarshalCBOR(encoded))
+	require.Equal(t,
+		olocalstatequery.WithOriginSlot{HasSlot: true, Slot: acquiredTip.Slot},
+		state.LastSlot,
+		"the reopened session must report the consensus state it acquired")
+
+	got, err := queryChainPoint(t, o, ctx)
+	require.NoError(t, err)
+	require.Equal(t, acquiredTip, got)
 }
 
 // TestLocalstatequerySpecificPointReopensAfterExpiry is the same for a
