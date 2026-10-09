@@ -507,6 +507,10 @@ func TestCacheableForDialect(t *testing.T) {
 			"mysql", insertUtxoQuery, false,
 		},
 		{
+			"mysql conflict-tolerant asset insert",
+			"mysql", importAssetQuery, true,
+		},
+		{
 			"mysql plain select, no returning",
 			"mysql", getAssetIDQuery, true,
 		},

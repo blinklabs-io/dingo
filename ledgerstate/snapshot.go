@@ -376,9 +376,8 @@ func parseSnapshotData(data []byte) (*RawLedgerState, error) {
 	var boundsWarning error
 	eraBounds, boundsErr := extractAllEraBounds(telescopeData)
 	if boundsErr != nil {
-		// Non-fatal: era bounds extraction can fail for older
-		// snapshot formats. Epoch generation will fall back to
-		// the single-epoch path.
+		// Preserve the parsing failure so import can reject the snapshot
+		// before mutating the database.
 		boundsWarning = boundsErr
 		eraBounds = nil
 	}
