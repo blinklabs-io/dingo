@@ -3435,6 +3435,10 @@ WHERE atx.payment_key = decode($1, 'hex')
   AND atx.staking_key = decode($3, 'hex');
 ```
 
+The optional inclusive range (`from`/`to` as `(slot, tx_index)`) filters
+`address_transaction` rows before selecting distinct transaction IDs. This
+prunes the exact-address candidate scan before counting or paging.
+
 Payment-only Byron-style or enterprise-style lookups use the same condition Dingo uses:
 
 ```sql

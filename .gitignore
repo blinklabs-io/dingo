@@ -57,4 +57,4 @@ dingo.yaml
 !/config/cardano/*/*.vkey
 !/internal/test/devnet/.env
 !/internal/test/devnet/testdata/*.skey
-!/internal/test/devnet/testdata/keys/*
+!/internal/devnetkeys/keys/*

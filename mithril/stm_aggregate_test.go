@@ -244,19 +244,28 @@ func TestAggregatedSTMSignatureVerifies(t *testing.T) {
 
 	avk, sig, err := aggregateForTest(t, signers, params, msg)
 	require.NoError(t, err)
-	require.NoError(t, verifySTMSignature(msg, avk, sig, params))
+	require.NoError(
+		t,
+		verifySTMSignature(msg, avk, sig, params, newCertificateChainBudget()),
+	)
 
 	t.Run("other message", func(t *testing.T) {
 		t.Parallel()
 		require.Error(
-			t, verifySTMSignature([]byte("other"), avk, sig, params),
+			t,
+			verifySTMSignature(
+				[]byte("other"), avk, sig, params, newCertificateChainBudget(),
+			),
 		)
 	})
 	t.Run("higher quorum", func(t *testing.T) {
 		t.Parallel()
 		higher := params
 		higher.K = 1000
-		require.Error(t, verifySTMSignature(msg, avk, sig, higher))
+		require.Error(
+			t,
+			verifySTMSignature(msg, avk, sig, higher, newCertificateChainBudget()),
+		)
 	})
 }
 

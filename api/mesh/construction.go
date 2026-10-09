@@ -101,10 +101,8 @@ func (s *Server) handleConstructionDerive(
 		nil,
 	)
 	if err != nil {
-		writeError(w, wrapErr(
-			ErrInternal,
-			fmt.Errorf("build address: %w", err),
-		))
+		s.logger.Error("failed to build address", "error", err)
+		writeError(w, ErrInternal)
 		return
 	}
 
@@ -343,12 +341,8 @@ func (s *Server) handleConstructionMetadata(
 
 	pp, err := pparams.Utxorpc()
 	if err != nil {
-		writeError(w, wrapErr(
-			ErrInternal,
-			fmt.Errorf(
-				"convert protocol params: %w", err,
-			),
-		))
+		s.logger.Error("failed to convert protocol parameters", "error", err)
+		writeError(w, ErrInternal)
 		return
 	}
 	if pp == nil {
@@ -682,10 +676,8 @@ func (s *Server) handleConstructionPayloads(
 
 	bodyCbor, err := cbor.Encode(&body)
 	if err != nil {
-		writeError(w, wrapErr(
-			ErrInternal,
-			fmt.Errorf("encode body: %w", err),
-		))
+		s.logger.Error("failed to encode transaction body", "error", err)
+		writeError(w, ErrInternal)
 		return
 	}
 
@@ -729,9 +721,12 @@ func (s *Server) handleConstructionPayloads(
 				keyHash[:], nil,
 			)
 			if addrErr != nil {
-				writeError(w, wrapErr(
-					ErrInternal, addrErr,
-				))
+				s.logger.Error(
+					"failed to build signer address",
+					"error",
+					addrErr,
+				)
+				writeError(w, ErrInternal)
 				return
 			}
 			payloads = append(payloads,
@@ -878,12 +873,8 @@ func (s *Server) handleConstructionCombine(
 
 	signedCbor, err := cbor.Encode(signedTx)
 	if err != nil {
-		writeError(w, wrapErr(
-			ErrInternal,
-			fmt.Errorf(
-				"encode signed tx: %w", err,
-			),
-		))
+		s.logger.Error("failed to encode signed transaction", "error", err)
+		writeError(w, ErrInternal)
 		return
 	}
 

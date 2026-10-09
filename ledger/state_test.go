@@ -5906,7 +5906,6 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 			2: uint64(0),
 		},
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
@@ -10005,7 +10004,6 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 			8: invalidBefore,
 		},
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
@@ -14000,6 +13998,33 @@ func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
 	err := ls.VerifyPointQueryable(t.Context(), nil, QueryPoint{Slot: 350, Hash: hash})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
+func TestEvaluateTxRefusesWhenEvaluationSlotsAreInUse(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{evalSlots: make(chan struct{}, 2)}
+	ls.evalSlots <- struct{}{}
+	ls.evalSlots <- struct{}{}
+
+	// The refusal happens before the transaction is looked at.
+	var err error
+	require.NotPanics(t, func() {
+		_, _, _, err = ls.EvaluateTx(nil)
+	}, "admission must be checked before any evaluation work starts")
+
+	require.ErrorIs(t, err, ErrEvaluationBusy)
+	require.Len(t, ls.evalSlots, 2, "a refused call must not take a slot")
+}
+
+func TestNewLedgerStateRejectsNegativeEvaluationCapacity(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	_, err = NewLedgerState(LedgerStateConfig{
+		Database: db, ChainManager: cm, MaxConcurrentEvaluations: -1,
+	})
+	require.ErrorContains(t, err, "MaxConcurrentEvaluations must not be negative")
 }
 
 // TestAtTipRecoveryRewindKeepsRolloverBeforeFirstEpochBlock covers a failure in

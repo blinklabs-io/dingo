@@ -718,6 +718,33 @@ func TestBlockAtOrAfterIndexSkipsInvalidIndexMappings(t *testing.T) {
 	require.Equal(t, nextBlock.Hash, block.Hash)
 }
 
+func TestBlockAtOrBeforeIndexSkipsSparseAndInvalidMappings(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	first := testIndexedBlock(10, 1, 0x01)
+	last := testIndexedBlock(30, 300, 0x03)
+	require.NoError(t, db.BlockCreate(first, nil))
+	require.NoError(t, db.BlockCreate(last, nil))
+
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *Txn) error {
+		if err := db.Blob().Set(txn.Blob(), types.BlockBlobIndexKey(100),
+			types.BlockBlobKey(last.Slot, last.Hash)); err != nil {
+			return err
+		}
+		return db.Blob().Set(txn.Blob(), types.BlockBlobIndexKey(200),
+			types.BlockBlobKey(20, bytes.Repeat([]byte{0x02}, 32)))
+	}))
+
+	block, err := db.BlockAtOrBeforeIndex(context.Background(), 299, nil)
+	require.NoError(t, err)
+	require.Equal(t, first.ID, block.ID)
+	require.Equal(t, first.Hash, block.Hash)
+
+	_, err = db.BlockAtOrBeforeIndex(context.Background(), 0, nil)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
 // TestBlockBeforeSlotSkipsSyntheticBlobs verifies BlockBeforeSlot returns the
 // highest real ranking block before a slot and skips synthetic blobs. Genesis
 // CBOR and Leios endorser blocks are persisted at block-blob keys via
@@ -1004,11 +1031,11 @@ func TestFirstBlockAtOrAfterSlot(t *testing.T) {
 		query uint64
 		want  uint64
 	}{{0, 100}, {100, 100}, {101, 200}, {300, 300}} {
-		blk, err := FirstBlockAtOrAfterSlot(db, tc.query)
+		blk, err := FirstBlockAtOrAfterSlot(t.Context(), db, tc.query)
 		require.NoError(t, err, "query %d", tc.query)
 		require.Equal(t, tc.want, blk.Slot, "query %d", tc.query)
 	}
-	_, err := FirstBlockAtOrAfterSlot(db, 301)
+	_, err := FirstBlockAtOrAfterSlot(t.Context(), db, 301)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 

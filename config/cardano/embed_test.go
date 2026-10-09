@@ -267,9 +267,9 @@ func TestEmbeddedConfigPathFallsBackToConfigJSON(t *testing.T) {
 	}
 }
 
-// TestEmbeddedConfigFSCarriesNoSigningKeys keeps key material out of the
-// binary: everything under an embedded network directory is compiled in, so
-// signing keys belong in a test fixture directory outside it.
+// TestEmbeddedConfigFSCarriesNoSigningKeys keeps signing material out of the
+// embedded network configuration. Local DevNet test keys live in a separate
+// explicit bundle used only by the development-network command.
 func TestEmbeddedConfigFSCarriesNoSigningKeys(t *testing.T) {
 	t.Parallel()
 
