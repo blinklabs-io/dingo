@@ -668,10 +668,6 @@ func processGapBlockTransactions(
 			)
 		}
 		storageIndexOffset += childCount
-		protocolMajor := uint64(0)
-		if versioned, ok := pparams.(lcommon.PoolRuleProtocolParameters); ok {
-			protocolMajor = uint64(versioned.ProtocolMajorVersion())
-		}
 		for levelIndex, level := range levels {
 			if err := db.SetGapBlockTransaction(
 				ctx,
@@ -681,7 +677,6 @@ func processGapBlockTransactions(
 				gapCertDeposits(logger, level, point, eraId, pparams),
 				offsets,
 				txn,
-				protocolMajor,
 			); err != nil {
 				return fmt.Errorf(
 					"storing transaction body %d: %w",

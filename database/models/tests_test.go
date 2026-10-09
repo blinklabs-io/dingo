@@ -511,3 +511,47 @@ func TestNewUpdateCommitteeGovActionQuorum(t *testing.T) {
 		require.NoError(t, err, tc.name)
 	}
 }
+
+// TestDRepUnknownDiscriminatorIsNotShapeError keeps the two rejection classes
+// apart: an unknown discriminator names the type, and a malformed shape of a
+// known type never reports an unknown type.
+func TestDRepUnknownDiscriminatorIsNotShapeError(t *testing.T) {
+	t.Parallel()
+	decode := func(drep any) error {
+		raw, err := cbor.Encode(drep)
+		require.NoError(t, err)
+		var d lcommon.Drep
+		return d.UnmarshalCBOR(raw)
+	}
+	for _, tc := range []struct {
+		name string
+		drep any
+	}{
+		{"type 4 bare", []any{4}},
+		{"type 4 with hash", []any{4, shapeHash(28, 0x44)}},
+		{"type 255", []any{255}},
+	} {
+		t.Run("unknown/"+tc.name, func(t *testing.T) {
+			err := decode(tc.drep)
+			require.ErrorContains(t, err, "unknown drep type")
+			require.NotContains(t, err.Error(), "exactly")
+			require.NotContains(t, err.Error(), "drep credential")
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		drep any
+	}{
+		{"short key hash", []any{0, shapeHash(27, 0x44)}},
+		{"long script hash", []any{1, shapeHash(29, 0x44)}},
+		{"key hash missing", []any{0}},
+		{"abstain extra payload", []any{2, shapeHash(28, 0x44)}},
+		{"no confidence extra payload", []any{3, uint64(1)}},
+	} {
+		t.Run("malformed/"+tc.name, func(t *testing.T) {
+			err := decode(tc.drep)
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "unknown drep type")
+		})
+	}
+}
