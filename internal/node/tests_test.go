@@ -463,6 +463,24 @@ func TestBuildDingoConfigWiresForgeEBCaps(t *testing.T) {
 	}
 }
 
+func TestBuildDingoConfigWiresLeiosPersistenceRetention(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	built := buildDingoConfig(
+		&config.Config{LeiosPersistenceRetentionSlots: 12345},
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+	require.Equal(t, uint64(12345), built.LeiosPersistenceRetentionSlots())
+}
+
 // TestBuildDingoConfigWiresLocalStateQueryViewMaxLifetime follows the
 // composition path for the LocalStateQuery snapshot lifetime: a missing
 // With... call would drop the operator's value and leave the default.

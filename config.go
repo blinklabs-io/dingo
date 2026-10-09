@@ -283,6 +283,7 @@ type Config struct {
 	fullPotRewardsEnabled, unsafeFullPotRewardsOnStandardNetworks                       bool
 	delegatorInactivityEnabled                                                          bool
 	delegatorInactivity                                                                 uint64
+	leiosPersistenceRetentionSlots                                                      uint64
 	leiosVoteSigningKeyFile                                                             string
 	midnight                                                                            MidnightConfig
 	chainsyncMaxClients                                                                 int
@@ -913,6 +914,7 @@ func (c *Config) syncCompatFields() {
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
+	c.leiosPersistenceRetentionSlots = c.cfg.LeiosPersistenceRetentionSlots
 	c.leiosVoteSigningKeyFile = c.cfg.LeiosVoteSigningKeyFile
 	c.cacheBlockLRUEntries, c.cacheHotUtxoEntries, c.cacheHotTxEntries, c.cacheHotTxMaxBytes = c.cfg.Cache.BlockLRUEntries, c.cfg.Cache.HotUtxoEntries, c.cfg.Cache.HotTxEntries, c.cfg.Cache.HotTxMaxBytes
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
@@ -1605,6 +1607,15 @@ func WithShelleyKESAgentSignTimeout(timeout time.Duration) ConfigOptionFunc {
 func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LeiosVoteSigningKeyFile = path
+	}
+}
+
+// WithLeiosPersistenceRetentionSlots sets the number of slots of persisted
+// Leios endorser-block history retained for historical serving. Zero keeps all
+// persisted history.
+func WithLeiosPersistenceRetentionSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LeiosPersistenceRetentionSlots = slots
 	}
 }
 
@@ -2588,6 +2599,12 @@ func (c *Config) BlockPipelineValidateEnabled() bool {
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.
 func (c *Config) LeiosVoteSigningKeyFile() string {
 	return c.cfg.LeiosVoteSigningKeyFile
+}
+
+// LeiosPersistenceRetentionSlots returns the configured Leios historical-
+// serving retention window. Zero means keep all history.
+func (c *Config) LeiosPersistenceRetentionSlots() uint64 {
+	return c.cfg.LeiosPersistenceRetentionSlots
 }
 
 // PeerSharing returns the peer sharing configuration.

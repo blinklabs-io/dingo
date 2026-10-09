@@ -19,6 +19,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/stretchr/testify/require"
@@ -206,4 +207,221 @@ func TestMaxLeiosEBSlotReadsCurrentAndLegacyRecords(t *testing.T) {
 	got, err = d.MaxLeiosEBSlot()
 	require.NoError(t, err)
 	require.Equal(t, uint64(900), got)
+}
+
+func TestPruneLeiosEBBeforeSlotRetainsBoundaryAndUnknownLegacySlots(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	d := newTestDB(t)
+	txs := []cbor.RawMessage{mustCborForLeiosTest(t, "tx")}
+	oldCurrent := randomHash(t)
+	boundaryCurrent := randomHash(t)
+	newCurrent := randomHash(t)
+	for _, record := range []struct {
+		slot uint64
+		hash []byte
+	}{
+		{slot: 10, hash: oldCurrent},
+		{slot: 20, hash: boundaryCurrent},
+		{slot: 30, hash: newCurrent},
+	} {
+		require.NoError(t, d.SetLeiosEB(
+			record.slot,
+			record.hash,
+			[]byte("manifest"),
+			txs,
+		))
+	}
+
+	oldLegacy := randomHash(t)
+	newLegacy := randomHash(t)
+	malformedLegacy := randomHash(t)
+	writeLegacyLeiosEB(t, d, 19, oldLegacy, []byte("old"), txs)
+	writeLegacyLeiosEB(t, d, 21, newLegacy, []byte("new"), txs)
+
+	// An unreadable legacy manifest has no safe retention slot. Its paired
+	// transaction list must be preserved with it rather than treated as an
+	// orphan.
+	blob := d.Blob()
+	malformedTxn := d.BlobTxn(true)
+	defer malformedTxn.Rollback() //nolint:errcheck
+	malformedTxs, err := cbor.Encode(txs)
+	require.NoError(t, err)
+	require.NoError(t, blob.Set(
+		malformedTxn.Blob(),
+		types.LegacyLeiosEBManifestKey(malformedLegacy),
+		[]byte{1, 2, 3},
+	))
+	require.NoError(t, blob.Set(
+		malformedTxn.Blob(),
+		types.LegacyLeiosEBTxsKey(malformedLegacy),
+		malformedTxs,
+	))
+	require.NoError(t, malformedTxn.Commit())
+
+	// Legacy transaction bodies with no manifest are safe to remove as an
+	// orphan.
+	orphanLegacy := randomHash(t)
+	orphanTxn := d.BlobTxn(true)
+	defer orphanTxn.Rollback() //nolint:errcheck
+	require.NoError(t, blob.Set(
+		orphanTxn.Blob(),
+		types.LegacyLeiosEBTxsKey(orphanLegacy),
+		malformedTxs,
+	))
+	require.NoError(t, orphanTxn.Commit())
+
+	deleted, err := d.PruneLeiosEBBeforeSlot(t.Context(), 20)
+	require.NoError(t, err)
+	require.Equal(t, 5, deleted)
+
+	for _, record := range []struct {
+		slot uint64
+		hash []byte
+	}{
+		{slot: 10, hash: oldCurrent},
+		{slot: 19, hash: oldLegacy},
+	} {
+		_, err := d.GetLeiosEBManifest(record.hash, record.slot)
+		require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+		_, err = d.GetLeiosEBTxs(record.hash, record.slot)
+		require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+	}
+	for _, record := range []struct {
+		slot uint64
+		hash []byte
+	}{
+		{slot: 20, hash: boundaryCurrent},
+		{slot: 30, hash: newCurrent},
+		{slot: 21, hash: newLegacy},
+	} {
+		_, err := d.GetLeiosEBManifest(record.hash, record.slot)
+		require.NoError(t, err)
+		_, err = d.GetLeiosEBTxs(record.hash, record.slot)
+		require.NoError(t, err)
+	}
+
+	readTxn := d.BlobTxn(false)
+	defer readTxn.Release()
+	_, err = blob.Get(
+		readTxn.Blob(),
+		types.LegacyLeiosEBTxsKey(malformedLegacy),
+	)
+	require.NoError(t, err)
+	_, err = blob.Get(readTxn.Blob(), types.LegacyLeiosEBTxsKey(orphanLegacy))
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+
+	// The same cutoff is safe to apply repeatedly after its first sweep.
+	deleted, err = d.PruneLeiosEBBeforeSlot(t.Context(), 20)
+	require.NoError(t, err)
+	require.Zero(t, deleted)
+}
+
+type leiosPruneBatch struct {
+	keyCount   int
+	valueBytes int
+}
+
+type leiosPruneTrackingStore struct {
+	blob.BlobStore
+	valueSizes map[string]int
+	batches    []leiosPruneBatch
+}
+
+type leiosPruneTrackingTxn struct {
+	types.Txn
+	store      *leiosPruneTrackingStore
+	readWrite  bool
+	keyCount   int
+	valueBytes int
+}
+
+func (s *leiosPruneTrackingStore) NewTransaction(
+	readWrite bool,
+) types.Txn {
+	return &leiosPruneTrackingTxn{
+		Txn:       s.BlobStore.NewTransaction(readWrite),
+		store:     s,
+		readWrite: readWrite,
+	}
+}
+
+func (s *leiosPruneTrackingStore) NewIterator(
+	txn types.Txn,
+	opts types.BlobIteratorOptions,
+) types.BlobIterator {
+	trackedTxn := txn.(*leiosPruneTrackingTxn)
+	return s.BlobStore.NewIterator(trackedTxn.Txn, opts)
+}
+
+func (s *leiosPruneTrackingStore) Delete(
+	txn types.Txn,
+	key []byte,
+) error {
+	trackedTxn := txn.(*leiosPruneTrackingTxn)
+	if err := s.BlobStore.Delete(trackedTxn.Txn, key); err != nil {
+		return err
+	}
+	trackedTxn.keyCount++
+	trackedTxn.valueBytes += s.valueSizes[string(key)]
+	return nil
+}
+
+func (t *leiosPruneTrackingTxn) Commit() error {
+	if err := t.Txn.Commit(); err != nil {
+		return err
+	}
+	if t.readWrite {
+		t.store.batches = append(t.store.batches, leiosPruneBatch{
+			keyCount:   t.keyCount,
+			valueBytes: t.valueBytes,
+		})
+	}
+	return nil
+}
+
+func (t *leiosPruneTrackingTxn) Rollback() error {
+	return t.Txn.Rollback()
+}
+
+func TestPruneLeiosEBBeforeSlotBoundsCloudCompensationBatchSize(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	d := newTestDB(t)
+	originalStore := d.Blob()
+	const valueSize = 512 << 10
+	manifest := make([]byte, valueSize)
+	valueSizes := make(map[string]int)
+	for slot := uint64(1); slot <= 4; slot++ {
+		hash := randomHash(t)
+		require.NoError(t, d.SetLeiosEBManifest(slot, hash, manifest))
+		valueSizes[string(types.LeiosEBManifestKey(hash, slot))] = len(manifest)
+	}
+
+	trackingStore := &leiosPruneTrackingStore{
+		BlobStore:  originalStore,
+		valueSizes: valueSizes,
+	}
+	_, drain := d.SetBlobStore(trackingStore)
+	defer func() {
+		drain()
+		_, restoreDrain := d.SetBlobStore(originalStore)
+		restoreDrain()
+	}()
+
+	deleted, err := d.PruneLeiosEBBeforeSlot(t.Context(), 5)
+	require.NoError(t, err)
+	require.Equal(t, 4, deleted)
+	// The four 512 KiB objects would stage 2 MiB of prior values in one cloud
+	// compensation log with the former 256-key batch. A singleton transaction
+	// keeps each log to one actual object value.
+	require.Len(t, trackingStore.batches, 4)
+	for _, batch := range trackingStore.batches {
+		require.Equal(t, 1, batch.keyCount)
+		require.LessOrEqual(t, batch.valueBytes, valueSize)
+	}
 }

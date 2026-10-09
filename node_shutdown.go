@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
@@ -126,6 +127,18 @@ func (n *Node) configuredShutdownTimeout() time.Duration {
 		n.config.logger.Warn("invalid shutdown timeout, using default", "value", n.config.ShutdownTimeout(), "error", err)
 	}
 	return 30 * time.Second
+}
+
+var closeOuroborosInstance = func(ouro *ouroborosPkg.Ouroboros) error {
+	return ouro.Close()
+}
+
+var closeOuroborosForShutdown = func(ouro *ouroborosPkg.Ouroboros) error {
+	err := closeOuroborosInstance(ouro)
+	if errors.Is(err, ouroborosPkg.ErrLeiosPersistDrainUnconfirmed) {
+		return errors.Join(errStorageDrainUnconfirmed, err)
+	}
+	return err
 }
 
 // shutdownPhase1ComponentStops is every phase-1 component whose Stop cancels
@@ -412,15 +425,20 @@ func (n *Node) shutdown() error {
 		"elapsed", time.Since(phase2Start).Round(time.Millisecond),
 	)
 
-	// Acquired LocalStateQuery snapshots are read transactions on the
-	// database phase 3 closes; release them first. Close waits on Leios
-	// validation and EventBus handlers with no deadline of its own, so it is
-	// bounded like a phase-1 stop and skipped when phase 2 already abandoned
-	// a handler: phase 3 then leaves the database open and the snapshots with
-	// it. Close is idempotent, so Run's deferred call is then a no-op.
+	// This is the only shutdown close of Ouroboros. Acquired LocalStateQuery
+	// snapshots are read transactions on the database phase 3 closes, and an
+	// NtC client can acquire one until its connection drains, so the close
+	// runs after phase 2 rather than in phase 1. It also drains the Leios
+	// persistence writer and retention GC, which write to the database. Close
+	// waits on Leios validation and EventBus handlers with no deadline of its
+	// own, so it is bounded like a phase-1 stop, and skipped when phase 2
+	// already abandoned a handler: phase 3 then leaves the database open and
+	// the snapshots with it. An unconfirmed persistence drain likewise leaves
+	// phase 3 skipping the storage closes.
 	if ouro := n.ouroboros(); ouro != nil && storageDrainConfirmed {
 		if stopErr := stopWithDeadline(
-			max(time.Until(deadline), 0), "ouroboros", ouro.Close,
+			max(time.Until(deadline), 0), "ouroboros",
+			func() error { return closeOuroborosForShutdown(ouro) },
 		); stopErr != nil {
 			if errors.Is(stopErr, errStorageDrainUnconfirmed) {
 				storageDrainConfirmed = false
@@ -492,12 +510,12 @@ func (n *Node) shutdown() error {
 	if n.db != nil {
 		if !storageDrainConfirmed {
 			n.config.logger.Error(
-				"skipping database close because ledger state drain was not confirmed",
+				"skipping database close because a storage user drain was not confirmed",
 			)
 			err = errors.Join(
 				err,
 				errors.New(
-					"database close skipped: ledger state drain unconfirmed",
+					"database close skipped: storage-user drain unconfirmed",
 				),
 			)
 		} else {
@@ -518,7 +536,7 @@ func (n *Node) shutdown() error {
 	if n.pluginHost != nil {
 		if !storageDrainConfirmed {
 			n.config.logger.Error(
-				"skipping plugin host shutdown because ledger state drain was not confirmed",
+				"skipping plugin host shutdown because a storage user drain was not confirmed",
 			)
 		} else if stopErr := n.pluginHost.Stop(ctx); stopErr != nil {
 			err = errors.Join(

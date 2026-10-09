@@ -1249,7 +1249,7 @@ func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
 	require.ErrorContains(
 		t,
 		shutdownErr,
-		"database close skipped: ledger state drain unconfirmed",
+		"database close skipped: storage-user drain unconfirmed",
 	)
 
 	// The node must have been brought down for a supervised restart, not
