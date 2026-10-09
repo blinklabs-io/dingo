@@ -27,8 +27,8 @@ SQLC_VERSION=v1.31.1
 SQLC=go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
 # The scanner floats along with the advisory database it reads; a pin parks a
 # new advisory behind a stale version instead of forcing it to be fixed.
-# CI installs a floating Go patch but sets GOTOOLCHAIN=local. Use auto here so
-# the module's newer toolchain requirement is honored when that patch lags.
+# Use automatic toolchain selection so the module's newer toolchain
+# requirement is honored when the installed Go patch lags.
 GOVULNCHECK=go run golang.org/x/vuln/cmd/govulncheck@latest
 PROTOC_SHA256_osx_aarch_64=a7b51b2113862690fa52c62f8891a6037bafb9db88d4f9924c486de9d9bb89d5
 PROTOC_SHA256_osx_x86_64=f9caa5b4d0b537acffb0ffd7d53225511a5574ef903fca550ea9e7600987f13b
