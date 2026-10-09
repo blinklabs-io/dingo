@@ -122,6 +122,13 @@ func (d *countingSnapshotListerDestination) ListSnapshots(
 	return append([]lifecycle.SnapshotEntry(nil), d.entries...), nil
 }
 
+func (d *countingSnapshotListerDestination) ListSnapshotCatalog(
+	ctx context.Context,
+	_ lifecycle.SnapshotCatalogScanBudget,
+) ([]lifecycle.SnapshotEntry, error) {
+	return d.ListSnapshots(ctx)
+}
+
 var _ lifecycle.SnapshotLister = &countingSnapshotListerDestination{}
 
 func (d *barkFakeCloudDestination) UploadDir(
@@ -177,6 +184,13 @@ func (d *barkFakeCloudDestination) ListSnapshots(
 	_ context.Context,
 ) ([]lifecycle.SnapshotEntry, error) {
 	return lifecycle.ListSnapshots(d.dir)
+}
+
+func (d *barkFakeCloudDestination) ListSnapshotCatalog(
+	ctx context.Context,
+	_ lifecycle.SnapshotCatalogScanBudget,
+) ([]lifecycle.SnapshotEntry, error) {
+	return lifecycle.ListSnapshotsContext(ctx, d.dir)
 }
 
 // FetchManifest mirrors the real S3/GCS destinations' contract: a missing
@@ -408,6 +422,13 @@ func (d *barkFakeCloudDestinationCommError) ListSnapshots(
 	return nil, errors.New("simulated cloud communication failure")
 }
 
+func (d *barkFakeCloudDestinationCommError) ListSnapshotCatalog(
+	ctx context.Context,
+	_ lifecycle.SnapshotCatalogScanBudget,
+) ([]lifecycle.SnapshotEntry, error) {
+	return d.ListSnapshots(ctx)
+}
+
 var (
 	_ lifecycle.CloudManifestFetcher = &barkFakeCloudDestinationCommError{}
 	_ lifecycle.SnapshotLister       = &barkFakeCloudDestinationCommError{}
@@ -473,6 +494,16 @@ func (d *barkRecoveringCatalogDestination) ListSnapshots(
 		return nil, errors.New("provider unavailable")
 	}
 	return lifecycle.ListSnapshots(d.dir)
+}
+
+func (d *barkRecoveringCatalogDestination) ListSnapshotCatalog(
+	ctx context.Context,
+	_ lifecycle.SnapshotCatalogScanBudget,
+) ([]lifecycle.SnapshotEntry, error) {
+	if d.failList.Load() {
+		return nil, errors.New("provider unavailable")
+	}
+	return lifecycle.ListSnapshotsContext(ctx, d.dir)
 }
 
 func init() {
@@ -733,7 +764,7 @@ func TestListAvailableSnapshotsWithoutCloudDestIsLocalOnly(t *testing.T) {
 	)
 }
 
-func TestListAvailableSnapshotsSeesMirrorAfterStartupListingRecovery(t *testing.T) {
+func TestListAvailableSnapshotsKeepsCloudHiddenAfterIncompleteStartupListing(t *testing.T) {
 	snapshotDir := t.TempDir()
 	cloudRoot := t.TempDir()
 	var failList atomic.Bool
@@ -753,7 +784,7 @@ func TestListAvailableSnapshotsSeesMirrorAfterStartupListingRecovery(t *testing.
 	})
 	require.NoError(t, err)
 	h := newDatabaseServiceHandler(t.Context(), b)
-	require.Equal(t, cloudDest, h.catalogCloudDestination)
+	require.Empty(t, h.catalogCloudDestination)
 
 	dir := filepath.Join(snapshotDir, "after-recovery")
 	require.NoError(t, os.Mkdir(dir, 0o755))
@@ -769,11 +800,10 @@ func TestListAvailableSnapshotsSeesMirrorAfterStartupListingRecovery(t *testing.
 		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
 	)
 	require.NoError(t, err)
-	require.Len(t, resp.Msg.GetSnapshots(), 1)
-	require.Equal(t, "after-recovery", resp.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.Empty(t, resp.Msg.GetSnapshots())
 }
 
-func TestListAvailableSnapshotsSeesMirrorAfterStartupConstructorRecovery(t *testing.T) {
+func TestListAvailableSnapshotsKeepsCloudHiddenAfterStartupConstructorFailure(t *testing.T) {
 	snapshotDir := t.TempDir()
 	cloudRoot := t.TempDir()
 	var attempts atomic.Int64
@@ -794,7 +824,7 @@ func TestListAvailableSnapshotsSeesMirrorAfterStartupConstructorRecovery(t *test
 	})
 	require.NoError(t, err)
 	h := newDatabaseServiceHandler(t.Context(), b)
-	require.Equal(t, cloudDest, h.catalogCloudDestination)
+	require.Empty(t, h.catalogCloudDestination)
 
 	dir := filepath.Join(snapshotDir, "after-constructor-recovery")
 	require.NoError(t, os.Mkdir(dir, 0o755))
@@ -810,12 +840,7 @@ func TestListAvailableSnapshotsSeesMirrorAfterStartupConstructorRecovery(t *test
 		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
 	)
 	require.NoError(t, err)
-	require.Len(t, resp.Msg.GetSnapshots(), 1)
-	require.Equal(
-		t,
-		"after-constructor-recovery",
-		resp.Msg.GetSnapshots()[0].GetSnapshotId(),
-	)
+	require.Empty(t, resp.Msg.GetSnapshots())
 }
 
 // ── Restore/VerifySnapshot/DeleteSnapshot cloud-fallback ──────────────────
@@ -1503,7 +1528,7 @@ func TestListAvailableSnapshotsRejectsStaleCatalogToken(t *testing.T) {
 	require.Equal(t, connect.CodeAborted, connect.CodeOf(err))
 }
 
-func TestListAvailableSnapshotsSkipsInvalidCloudCatalogRecords(t *testing.T) {
+func TestListAvailableSnapshotsDoesNotPublishIncompleteCloudCatalog(t *testing.T) {
 	snapshotDir := t.TempDir()
 	localDir := filepath.Join(snapshotDir, "local")
 	require.NoError(t, os.Mkdir(localDir, 0o755))
@@ -1545,7 +1570,7 @@ func TestListAvailableSnapshotsSkipsInvalidCloudCatalogRecords(t *testing.T) {
 	for _, snapshot := range resp.Msg.GetSnapshots() {
 		ids = append(ids, snapshot.GetSnapshotId())
 	}
-	require.ElementsMatch(t, []string{"local", "cloud-valid"}, ids)
+	require.Equal(t, []string{"local"}, ids)
 }
 
 func TestSnapshotRPCManifestByteLimit(t *testing.T) {

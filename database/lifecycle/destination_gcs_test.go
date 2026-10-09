@@ -104,6 +104,71 @@ func TestGCSListSnapshotsRejectsUnsafePrefixBeforeManifestFetch(t *testing.T) {
 	require.Zero(t, manifestFetches.Load())
 }
 
+func TestGCSSnapshotCatalogStopsAtPrefixBudget(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, WriteManifest(dir, Manifest{Network: "preview"}))
+	manifest, err := os.ReadFile(filepath.Join(dir, ManifestFileName))
+	require.NoError(t, err)
+	var manifestFetches atomic.Int32
+	client, err := storage.NewClient(
+		t.Context(), option.WithoutAuthentication(),
+		option.WithHTTPClient(&http.Client{
+			Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+				body := manifest
+				if req.URL.Query().Get("delimiter") == "/" {
+					body = []byte(`{"prefixes":["prefix/one/","prefix/two/","prefix/three/"]}`)
+				} else {
+					manifestFetches.Add(1)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
+					ContentLength: int64(len(body)), Header: make(http.Header), Request: req,
+				}, nil
+			}),
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	d := gcsDestination{
+		client: client, bucket: client.Bucket("test"), prefix: "prefix",
+	}
+
+	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{
+		MaxPrefixes: 2, MaxManifests: 2, MaxEntries: 2, MaxProblems: 2,
+	})
+	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
+	require.Len(t, entries, 2)
+	require.Equal(t, int32(2), manifestFetches.Load())
+}
+
+func TestGCSSnapshotCatalogCountsNonPrefixListResults(t *testing.T) {
+	t.Parallel()
+	client, err := storage.NewClient(
+		t.Context(), option.WithoutAuthentication(),
+		option.WithHTTPClient(&http.Client{
+			Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+				body := []byte(`{"items":[{"name":"prefix/a"},{"name":"prefix/b"},{"name":"prefix/c"}]}`)
+				return &http.Response{
+					StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
+					ContentLength: int64(len(body)), Header: make(http.Header), Request: req,
+				}, nil
+			}),
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	d := gcsDestination{
+		client: client, bucket: client.Bucket("test"), prefix: "prefix",
+	}
+
+	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{
+		MaxPrefixes: 2, MaxManifests: 2, MaxEntries: 2, MaxProblems: 2,
+	})
+	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
+	require.Empty(t, entries)
+}
+
 func TestGCSUploadExcludesAndRemovesCloudMirrorMarker(t *testing.T) {
 	t.Parallel()
 	var methods []string

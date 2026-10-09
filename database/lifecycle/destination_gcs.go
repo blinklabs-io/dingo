@@ -227,6 +227,30 @@ func (d *gcsDestination) DownloadDir(
 func (d *gcsDestination) ListSnapshots(
 	ctx context.Context,
 ) ([]SnapshotEntry, error) {
+	scan, err := newSnapshotCatalogScan(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	return d.listSnapshots(ctx, scan)
+}
+
+// ListSnapshotCatalog lists snapshots within the supplied reconciliation
+// budget. A limit error means the returned entries are incomplete.
+func (d *gcsDestination) ListSnapshotCatalog(
+	ctx context.Context,
+	budget SnapshotCatalogScanBudget,
+) ([]SnapshotEntry, error) {
+	scan, err := newSnapshotCatalogScan(ctx, &budget)
+	if err != nil {
+		return nil, err
+	}
+	return d.listSnapshots(ctx, scan)
+}
+
+func (d *gcsDestination) listSnapshots(
+	ctx context.Context,
+	scan *snapshotCatalogScan,
+) ([]SnapshotEntry, error) {
 	listPrefix := ""
 	if d.prefix != "" {
 		listPrefix = d.prefix + "/"
@@ -235,19 +259,20 @@ func (d *gcsDestination) ListSnapshots(
 		ctx,
 		&storage.Query{Prefix: listPrefix, Delimiter: "/"},
 	)
-	var entries []SnapshotEntry
-	var problems []error
 	for {
 		attrs, err := it.Next()
 		if errors.Is(err, iterator.Done) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf(
+			return scan.result(fmt.Errorf(
 				"list gcs objects under %q: %w",
 				d.prefix,
 				err,
-			)
+			))
+		}
+		if err := scan.consumePrefix(); err != nil {
+			return scan.result(err)
 		}
 		// With Delimiter set, a synthetic "directory entry" (Prefix set,
 		// every other field empty) represents one sub-path; a real object
@@ -262,6 +287,9 @@ func (d *gcsDestination) ListSnapshots(
 		)
 		if snapshotID == "" {
 			continue
+		}
+		if err := scan.consumeManifest(); err != nil {
+			return scan.result(err)
 		}
 		entry, err := fetchCloudSnapshotEntry(
 			ctx, snapshotID, d.fetchManifest,
@@ -280,15 +308,18 @@ func (d *gcsDestination) ListSnapshots(
 			if errors.Is(err, ErrCloudSnapshotNotFound) {
 				continue
 			}
-			problems = append(
-				problems,
-				fmt.Errorf("snapshot %q: %w", snapshotID, err),
-			)
+			if addErr := scan.addProblem(fmt.Errorf(
+				"snapshot %q: %w", snapshotID, err,
+			)); addErr != nil {
+				return scan.result(addErr)
+			}
 			continue
 		}
-		entries = append(entries, entry)
+		if err := scan.addEntry(entry); err != nil {
+			return scan.result(err)
+		}
 	}
-	return entries, errors.Join(problems...)
+	return scan.result(nil)
 }
 
 // fetchManifest downloads and parses just the manifest.json for

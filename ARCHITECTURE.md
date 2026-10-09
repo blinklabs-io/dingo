@@ -12314,11 +12314,13 @@ provider factory. The versioned digest covers every URL component without
 persisting credentials in the catalog. Provider construction finishes before
 the catalog gate is acquired; the provider scan and catalog replacement then
 share the same gate as incremental mirror and delete updates, so a concurrent
-completed mirror cannot be erased by an older startup scan. An empty, changed,
-unsupported, or unavailable source clears the old cloud set and leaves local
-pages usable; after a failed provider scan, later successful mirrors become
-visible immediately under the current source. The Bark v1alpha1
-`SnapshotInfo.location` field is a display location. Cloud values omit
+completed mirror cannot be erased by an older startup scan. Reconciliation caps
+provider prefixes, manifest fetches, retained entries, and reported problems;
+cancellation or any incomplete scan leaves the prior disposable cloud set
+unchanged and keeps it unpublished for that Bark instance. An explicitly empty
+source clears the cloud set. After a failed scan, a later complete
+reconciliation or Bark restart can make the current source visible. The Bark
+v1alpha1 `SnapshotInfo.location` field is a display location. Cloud values omit
 userinfo, query parameters, and fragments and therefore are not authenticated
 or directly usable provider URIs; restore, verify, and delete consumers use
 `snapshot_id`, and the only workspace CLI consumer prints `location` without

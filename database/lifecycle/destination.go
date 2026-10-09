@@ -38,6 +38,117 @@ import (
 // same way.
 var ErrCloudSnapshotNotFound = errors.New("cloud snapshot not found")
 
+// ErrSnapshotCatalogScanLimit marks an incomplete provider scan stopped at a
+// configured resource bound. Callers must not publish entries returned with
+// this error as a complete replacement catalog.
+var ErrSnapshotCatalogScanLimit = errors.New(
+	"cloud snapshot catalog scan limit exceeded",
+)
+
+// SnapshotCatalogScanBudget bounds provider work performed while rebuilding
+// the persistent snapshot catalog.
+type SnapshotCatalogScanBudget struct {
+	// MaxPrefixes bounds provider list results inspected, including objects
+	// that are not snapshot prefixes.
+	MaxPrefixes  int
+	MaxManifests int
+	MaxEntries   int
+	MaxProblems  int
+}
+
+func defaultSnapshotCatalogScanBudget() SnapshotCatalogScanBudget {
+	return SnapshotCatalogScanBudget{
+		MaxPrefixes:  1000,
+		MaxManifests: 1000,
+		MaxEntries:   1000,
+		MaxProblems:  64,
+	}
+}
+
+func (b SnapshotCatalogScanBudget) validate() error {
+	if b.MaxPrefixes <= 0 || b.MaxManifests <= 0 ||
+		b.MaxEntries <= 0 || b.MaxProblems <= 0 {
+		return errors.New("snapshot catalog scan limits must be positive")
+	}
+	return nil
+}
+
+type snapshotCatalogScan struct {
+	ctx       context.Context
+	budget    *SnapshotCatalogScanBudget
+	prefixes  int
+	manifests int
+	entries   []SnapshotEntry
+	problems  []error
+}
+
+func newSnapshotCatalogScan(
+	ctx context.Context,
+	budget *SnapshotCatalogScanBudget,
+) (*snapshotCatalogScan, error) {
+	if budget != nil {
+		if err := budget.validate(); err != nil {
+			return nil, err
+		}
+		budgetCopy := *budget
+		budget = &budgetCopy
+	}
+	return &snapshotCatalogScan{ctx: ctx, budget: budget}, nil
+}
+
+func (s *snapshotCatalogScan) consume(kind string, count *int, limit int) error {
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
+	if s.budget != nil && *count >= limit {
+		return fmt.Errorf("%w: maximum %s is %d", ErrSnapshotCatalogScanLimit, kind, limit)
+	}
+	*count++
+	return nil
+}
+
+func (s *snapshotCatalogScan) consumePrefix() error {
+	limit := 0
+	if s.budget != nil {
+		limit = s.budget.MaxPrefixes
+	}
+	return s.consume("prefixes", &s.prefixes, limit)
+}
+
+func (s *snapshotCatalogScan) consumeManifest() error {
+	limit := 0
+	if s.budget != nil {
+		limit = s.budget.MaxManifests
+	}
+	return s.consume("manifest fetches", &s.manifests, limit)
+}
+
+func (s *snapshotCatalogScan) addEntry(entry SnapshotEntry) error {
+	if s.budget != nil && len(s.entries) >= s.budget.MaxEntries {
+		return fmt.Errorf(
+			"%w: maximum catalog entries is %d",
+			ErrSnapshotCatalogScanLimit, s.budget.MaxEntries,
+		)
+	}
+	s.entries = append(s.entries, entry)
+	return nil
+}
+
+func (s *snapshotCatalogScan) addProblem(err error) error {
+	if s.budget != nil && len(s.problems) >= s.budget.MaxProblems {
+		return fmt.Errorf(
+			"%w: maximum reported problems is %d",
+			ErrSnapshotCatalogScanLimit, s.budget.MaxProblems,
+		)
+	}
+	s.problems = append(s.problems, err)
+	return nil
+}
+
+func (s *snapshotCatalogScan) result(terminal error) ([]SnapshotEntry, error) {
+	return s.entries, errors.Join(errors.Join(s.problems...), terminal)
+}
+
 func cloudDestinationIdentity(raw string) (string, error) {
 	if raw == "" {
 		return "", nil
@@ -183,6 +294,17 @@ type SnapshotLister interface {
 	// ListSnapshots returns one entry per snapshot found under this
 	// destination, each with its manifest already fetched and validated.
 	ListSnapshots(ctx context.Context) ([]SnapshotEntry, error)
+}
+
+// SnapshotCatalogLister performs the same provider discovery as
+// SnapshotLister while enforcing the supplied reconciliation budget. Returning
+// entries with an error means the scan is incomplete; callers must not publish
+// those entries as a replacement catalog.
+type SnapshotCatalogLister interface {
+	ListSnapshotCatalog(
+		context.Context,
+		SnapshotCatalogScanBudget,
+	) ([]SnapshotEntry, error)
 }
 
 // CloudManifestFetcher is optionally implemented by a CloudDestination to
@@ -527,8 +649,8 @@ func RepairSnapshotCatalogContext(
 // ReconcileCloudSnapshotCatalogContext holds the catalog reconciliation gate
 // across the provider snapshot and its replacement. Incremental mirror and
 // delete mutations therefore run either before the scan or after its rebuild.
-// current is true when the catalog is bound to cloudDest, including a cleared
-// catalog after an unsupported or failed provider listing.
+// current is true only when the catalog was completely reconciled with
+// cloudDest. An incomplete scan leaves the previous cloud set unchanged.
 func ReconcileCloudSnapshotCatalogContext(
 	ctx context.Context,
 	baseDir string,
@@ -545,43 +667,31 @@ func ReconcileCloudSnapshotCatalogContext(
 	}
 	dest, constructErr := ParseCloudDestination(registry, cloudDest)
 	if constructErr != nil {
-		if err := lockSnapshotCatalog(ctx); err != nil {
-			return false, errors.Join(constructErr, err)
-		}
-		defer unlockSnapshotCatalog()
-		clearErr := rebuildCloudSnapshotCatalogLocked(
-			ctx, baseDir, cloudDest, nil,
-		)
-		return clearErr == nil, errors.Join(constructErr, clearErr)
+		return false, constructErr
 	}
 	defer closeCloudDestination(dest)
-	lister, ok := dest.(SnapshotLister)
+	lister, ok := dest.(SnapshotCatalogLister)
 	if err := lockSnapshotCatalog(ctx); err != nil {
 		return false, err
 	}
 	defer unlockSnapshotCatalog()
 	if !ok {
-		clearErr := rebuildCloudSnapshotCatalogLocked(
-			ctx, baseDir, cloudDest, nil,
-		)
-		unsupportedErr := fmt.Errorf(
+		return false, fmt.Errorf(
 			"%w: cloud destination does not support snapshot listing",
 			ErrSnapshotCatalogIncomplete,
 		)
-		return clearErr == nil, errors.Join(unsupportedErr, clearErr)
 	}
-	entries, listErr := lister.ListSnapshots(ctx)
+	entries, listErr := lister.ListSnapshotCatalog(
+		ctx, defaultSnapshotCatalogScanBudget(),
+	)
 	listErr = sanitizeCloudError(cloudDest, listErr)
-	if listErr != nil && entries == nil {
-		clearErr := rebuildCloudSnapshotCatalogLocked(
-			ctx, baseDir, cloudDest, nil,
-		)
-		return clearErr == nil, errors.Join(listErr, clearErr)
+	if listErr != nil {
+		return false, listErr
 	}
 	rebuildErr := rebuildCloudSnapshotCatalogLocked(
 		ctx, baseDir, cloudDest, entries,
 	)
-	current = rebuildErr == nil || errors.Is(rebuildErr, ErrSnapshotCatalogIncomplete)
+	current = rebuildErr == nil
 	return current, errors.Join(listErr, rebuildErr)
 }
 

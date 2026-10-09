@@ -37,6 +37,7 @@ type catalogRepairDestination struct {
 type catalogScriptedLister struct {
 	entries []SnapshotEntry
 	err     error
+	budget  *SnapshotCatalogScanBudget
 }
 
 func (*catalogScriptedLister) UploadDir(context.Context, string) error { return nil }
@@ -44,6 +45,13 @@ func (*catalogScriptedLister) DownloadDir(context.Context, string) error {
 	return nil
 }
 func (d *catalogScriptedLister) ListSnapshots(context.Context) ([]SnapshotEntry, error) {
+	return d.entries, d.err
+}
+func (d *catalogScriptedLister) ListSnapshotCatalog(
+	_ context.Context,
+	budget SnapshotCatalogScanBudget,
+) ([]SnapshotEntry, error) {
+	d.budget = &budget
 	return d.entries, d.err
 }
 
@@ -73,6 +81,12 @@ func (d *blockingCatalogLister) ListSnapshots(ctx context.Context) ([]SnapshotEn
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+func (d *blockingCatalogLister) ListSnapshotCatalog(
+	ctx context.Context,
+	_ SnapshotCatalogScanBudget,
+) ([]SnapshotEntry, error) {
+	return d.ListSnapshots(ctx)
 }
 
 func (d *catalogRepairDestination) UploadDir(_ context.Context, localDir string) error {
@@ -104,6 +118,12 @@ func (*catalogRepairDestination) DownloadDir(context.Context, string) error {
 
 func (d *catalogRepairDestination) ListSnapshots(context.Context) ([]SnapshotEntry, error) {
 	return ListSnapshots(d.dir)
+}
+func (d *catalogRepairDestination) ListSnapshotCatalog(
+	ctx context.Context,
+	_ SnapshotCatalogScanBudget,
+) ([]SnapshotEntry, error) {
+	return ListSnapshotsContext(ctx, d.dir)
 }
 
 func (d *catalogRepairDestination) Delete(context.Context) error {
@@ -827,7 +847,7 @@ WHERE type = 'index' AND name = 'cloud_snapshots_created'`).Scan(&legacyIndex))
 	}
 }
 
-func TestRepairSnapshotCatalogPreservesPartialErrorsAndClearsStaleRows(
+func TestRepairSnapshotCatalogPreservesPartialErrorsWithoutPublishingRows(
 	t *testing.T,
 ) {
 	base := t.TempDir()
@@ -860,8 +880,7 @@ func TestRepairSnapshotCatalogPreservesPartialErrorsAndClearsStaleRows(
 		t.Context(), base, cloudDest, 10, nil,
 	)
 	require.NoError(t, listErr)
-	require.Len(t, entries, 1)
-	require.Equal(t, "cloud-valid", entries[0].Entry.ID)
+	require.Empty(t, entries)
 
 	registry.Register("unsupportedcatalog", func(*url.URL) (CloudDestination, error) {
 		return &catalogUnsupportedDestination{}, nil
@@ -878,7 +897,7 @@ func TestRepairSnapshotCatalogPreservesPartialErrorsAndClearsStaleRows(
 	require.Empty(t, entries)
 }
 
-func TestRepairSnapshotCatalogTotalListFailureClearsStaleRows(t *testing.T) {
+func TestRepairSnapshotCatalogTotalListFailureRetainsStaleRows(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
 	require.NoError(t, EnsureSnapshotCatalog(base))
@@ -905,7 +924,8 @@ func TestRepairSnapshotCatalogTotalListFailureClearsStaleRows(t *testing.T) {
 		t.Context(), base, cloudDest, 10, nil,
 	)
 	require.NoError(t, listErr)
-	require.Empty(t, entries)
+	require.Len(t, entries, 1)
+	require.Equal(t, "stale", entries[0].Entry.ID)
 }
 
 func TestCloudCatalogRecoversAfterStartupConstructorFailure(t *testing.T) {
@@ -929,8 +949,7 @@ func TestCloudCatalogRecoversAfterStartupConstructorFailure(t *testing.T) {
 		t.Context(), base, registry, cloudDest,
 	)
 	require.ErrorContains(t, err, "provider initialization failed")
-	require.True(t, current,
-		"successful clear must bind the catalog to the configured source")
+	require.False(t, current)
 
 	snapshotDir := filepath.Join(base, "mirrored")
 	require.NoError(t, os.Mkdir(snapshotDir, 0o755))
@@ -1029,4 +1048,68 @@ func TestCloudReconciliationConstructsProviderBeforeGate(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.True(t, current)
+}
+
+func TestCloudReconciliationDoesNotPublishTruncatedScan(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	require.NoError(t, EnsureSnapshotCatalog(base))
+	manifestAt := func(second int64) Manifest {
+		dir := t.TempDir()
+		require.NoError(t, WriteManifest(dir, Manifest{
+			CreatedAt: time.Unix(second, 0).UTC(), Trigger: TriggerManual,
+		}))
+		manifest, err := ReadManifest(dir)
+		require.NoError(t, err)
+		return manifest
+	}
+	const cloudDest = "boundedcatalog://bucket/snapshots"
+	require.NoError(t, RebuildCloudSnapshotCatalogContext(
+		t.Context(), base, cloudDest,
+		[]SnapshotEntry{{ID: "previous", Manifest: manifestAt(1)}},
+	))
+	lister := &catalogScriptedLister{
+		entries: []SnapshotEntry{{ID: "partial", Manifest: manifestAt(2)}},
+		err: fmt.Errorf(
+			"%w: maximum prefixes is 1000", ErrSnapshotCatalogScanLimit,
+		),
+	}
+	registry := NewDestinationRegistry()
+	registry.Register("boundedcatalog", func(*url.URL) (CloudDestination, error) {
+		return lister, nil
+	})
+
+	current, err := ReconcileCloudSnapshotCatalogContext(
+		t.Context(), base, registry, cloudDest,
+	)
+	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
+	require.False(t, current)
+	require.NotNil(t, lister.budget)
+	require.Positive(t, lister.budget.MaxPrefixes)
+	require.Positive(t, lister.budget.MaxManifests)
+	require.Positive(t, lister.budget.MaxEntries)
+	require.Positive(t, lister.budget.MaxProblems)
+
+	entries, _, listErr := ListAvailableSnapshotPageContext(
+		t.Context(), base, cloudDest, 10, nil,
+	)
+	require.NoError(t, listErr)
+	require.Len(t, entries, 1)
+	require.Equal(t, "previous", entries[0].Entry.ID)
+}
+
+func TestSnapshotCatalogScanCapsReportedProblems(t *testing.T) {
+	t.Parallel()
+	scan, err := newSnapshotCatalogScan(t.Context(), &SnapshotCatalogScanBudget{
+		MaxPrefixes: 1, MaxManifests: 1, MaxEntries: 1, MaxProblems: 2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, scan.addProblem(errors.New("first provider problem")))
+	require.NoError(t, scan.addProblem(errors.New("second provider problem")))
+	err = scan.addProblem(errors.New("unreported provider problem"))
+	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
+	_, resultErr := scan.result(err)
+	require.ErrorContains(t, resultErr, "first provider problem")
+	require.ErrorContains(t, resultErr, "second provider problem")
+	require.NotContains(t, resultErr.Error(), "unreported provider problem")
 }
