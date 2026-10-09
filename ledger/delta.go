@@ -640,6 +640,9 @@ func (b *LedgerDeltaBatch) apply(
 		if err != nil {
 			return err
 		}
+		if err := ls.db.FlushBatchStakeDeltas(acc, txn); err != nil {
+			return fmt.Errorf("flush ledger delta stake metadata: %w", err)
+		}
 	}
 	if err := ls.db.FlushBatch(acc, txn); err != nil {
 		return fmt.Errorf("flush ledger delta metadata batch: %w", err)

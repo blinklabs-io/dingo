@@ -65,6 +65,90 @@ type transactionBatchAccumulator struct {
 	// rows holds API-mode detail rows queued by SetTransactionBatched until
 	// FlushBatch writes them as multi-row inserts.
 	rows rowBatch
+	// stakeDeltas coalesces changes through one ledger delta and is flushed
+	// before the next delta reads reward state.
+	stakeDeltas     map[string]pendingStakeCredentialDelta
+	stakeDeltaOrder []string
+}
+
+type pendingStakeCredentialDelta struct {
+	ref   models.StakeCredentialRef
+	delta int64
+	slot  uint64
+}
+
+type transactionBatchCheckpoint struct {
+	rows            rowBatch
+	stakeDeltas     map[string]pendingStakeCredentialDelta
+	stakeDeltaOrder []string
+}
+
+func (a *transactionBatchAccumulator) addStakeDeltas(
+	deltas []stakeCredentialDelta,
+	slot uint64,
+) error {
+	for _, delta := range deltas {
+		if len(delta.ref.Key) == 0 {
+			continue
+		}
+		key := delta.ref.MapKey()
+		pending, exists := a.stakeDeltas[key]
+		if !exists {
+			if a.stakeDeltas == nil {
+				a.stakeDeltas = make(map[string]pendingStakeCredentialDelta)
+			}
+			pending = pendingStakeCredentialDelta{
+				ref: models.NewStakeCredentialRef(
+					delta.ref.Tag, append([]byte(nil), delta.ref.Key...),
+				),
+				slot: slot,
+			}
+			a.stakeDeltaOrder = append(a.stakeDeltaOrder, key)
+		} else if (delta.delta > 0 && pending.delta > math.MaxInt64-delta.delta) ||
+			(delta.delta < 0 && pending.delta < math.MinInt64-delta.delta) {
+			return errors.New("reward live stake delta overflow")
+		}
+		pending.delta += delta.delta
+		if slot > pending.slot {
+			pending.slot = slot
+		}
+		a.stakeDeltas[key] = pending
+	}
+	return nil
+}
+
+func (a *transactionBatchAccumulator) checkpoint() transactionBatchCheckpoint {
+	checkpoint := transactionBatchCheckpoint{
+		rows:            a.rows.clone(),
+		stakeDeltaOrder: append([]string(nil), a.stakeDeltaOrder...),
+	}
+	if len(a.stakeDeltas) > 0 {
+		checkpoint.stakeDeltas = make(
+			map[string]pendingStakeCredentialDelta,
+			len(a.stakeDeltas),
+		)
+		for key, delta := range a.stakeDeltas {
+			checkpoint.stakeDeltas[key] = delta
+		}
+	}
+	return checkpoint
+}
+
+func (a *transactionBatchAccumulator) restore(
+	checkpoint transactionBatchCheckpoint,
+) {
+	a.Reset()
+	a.rows = checkpoint.rows.clone()
+	a.stakeDeltaOrder = append([]string(nil), checkpoint.stakeDeltaOrder...)
+	if len(checkpoint.stakeDeltas) > 0 {
+		a.stakeDeltas = make(
+			map[string]pendingStakeCredentialDelta,
+			len(checkpoint.stakeDeltas),
+		)
+		for key, delta := range checkpoint.stakeDeltas {
+			a.stakeDeltas[key] = delta
+		}
+	}
 }
 
 const transactionInsertSQL = `
@@ -287,6 +371,8 @@ func (a *transactionBatchAccumulator) resetStatement() {
 func (a *transactionBatchAccumulator) Reset() {
 	a.resetStatement()
 	a.rows.reset()
+	a.stakeDeltas = nil
+	a.stakeDeltaOrder = nil
 }
 
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
@@ -309,19 +395,70 @@ func (s *Store) FlushBatch(
 			return err
 		}
 	}
-	if !batched.rows.empty() {
+	if !batched.rows.empty() || len(batched.stakeDeltaOrder) > 0 {
 		if err := s.withWriteTransaction(
 			txn,
 			func(db queryer, ctx context.Context) error {
-				return batched.rows.flush(
+				if err := batched.rows.flush(
 					ctx, db, s.dialect.ParameterLimit(),
-				)
+				); err != nil {
+					return err
+				}
+				for _, key := range batched.stakeDeltaOrder {
+					pending := batched.stakeDeltas[key]
+					if err := s.refreshRewardLiveStakeAggregateDelta(
+						ctx, db, pending.ref, pending.slot, pending.delta,
+					); err != nil {
+						return err
+					}
+				}
+				return nil
 			},
 		); err != nil {
 			return err
 		}
 	}
 	accumulator.Reset()
+	return nil
+}
+
+func (s *Store) FlushBatchStakeDeltas(
+	accumulator types.MetadataBatchAccumulator,
+	txn types.Txn,
+) error {
+	batched, ok := accumulator.(*transactionBatchAccumulator)
+	if !ok {
+		return fmt.Errorf(
+			"sqlstore FlushBatchStakeDeltas: wrong accumulator type %T",
+			accumulator,
+		)
+	}
+	if len(batched.stakeDeltaOrder) == 0 {
+		return nil
+	}
+	if transaction, ok := txn.(*sqlTxn); ok {
+		if err := transaction.bindBatch(batched); err != nil {
+			return err
+		}
+	}
+	if err := s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			for _, key := range batched.stakeDeltaOrder {
+				pending := batched.stakeDeltas[key]
+				if err := s.refreshRewardLiveStakeAggregateDelta(
+					ctx, db, pending.ref, pending.slot, pending.delta,
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	); err != nil {
+		return err
+	}
+	batched.stakeDeltas = nil
+	batched.stakeDeltaOrder = nil
 	return nil
 }
 
@@ -516,8 +653,9 @@ func (s *Store) setTransactionWithAccumulator(
 	// transaction that was rolled back, nor drop the rows an earlier
 	// successful application queued.
 	var (
-		staged        rowBatch
-		transactionID int64
+		staged             rowBatch
+		transactionID      int64
+		batchedStakeDeltas []stakeCredentialDelta
 	)
 	err := s.withWriteTransaction(
 		txn,
@@ -855,20 +993,26 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			// after all of this transaction's mutations would find (see
 			// TestSetTransactionRefreshesSharedCredentialOnce and
 			// TestSetTransactionIncrementalDeltaMatchesFullScan).
+			batchedStakeDeltas = mergeStakeCredentialDeltas(
+				refsToStakeCredentialDeltas(certificateRefs),
+				consumedStakeDeltas,
+				skippedStakeDeltas,
+				producedStakeDeltas,
+			)
+			if batchedAccumulator != nil {
+				return nil
+			}
 			return s.refreshRewardLiveStakeDeltas(
-				ctx,
-				db,
-				mergeStakeCredentialDeltas(
-					refsToStakeCredentialDeltas(certificateRefs),
-					consumedStakeDeltas,
-					skippedStakeDeltas,
-					producedStakeDeltas,
-				),
-				point.Slot,
+				ctx, db, batchedStakeDeltas, point.Slot,
 			)
 		},
 	)
 	if err != nil || batchedAccumulator == nil {
+		return err
+	}
+	if err := batchedAccumulator.addStakeDeltas(
+		batchedStakeDeltas, point.Slot,
+	); err != nil {
 		return err
 	}
 	// The per-transaction cleanup deletes only reach flushed rows, so rows

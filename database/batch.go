@@ -152,6 +152,33 @@ type inFlightProducerLookup interface {
 	HasInFlightProducer(txId []byte, outputIdx uint32) bool
 }
 
+type transactionStoreStakeDeltaFlusher interface {
+	FlushBatchStakeDeltas(types.MetadataBatchAccumulator, types.Txn) error
+}
+
+// FlushBatchStakeDeltas applies pending live-stake changes while leaving the
+// accumulator's other batched rows queued for FlushBatch.
+func (d *Database) FlushBatchStakeDeltas(
+	acc BatchAccumulator,
+	txn *Txn,
+) error {
+	if acc == nil {
+		return nil
+	}
+	flusher, ok := d.transactionStore().(transactionStoreStakeDeltaFlusher)
+	if !ok {
+		return nil
+	}
+	var metadataTxn types.Txn
+	if txn != nil {
+		metadataTxn = txn.Metadata()
+		if metadataTxn == nil {
+			return types.ErrNilTxn
+		}
+	}
+	return flusher.FlushBatchStakeDeltas(acc, metadataTxn)
+}
+
 // SetTransactionBatched stores transaction blob offsets and immediate
 // metadata, while accumulating bulk metadata rows into acc for a later
 // FlushBatch.

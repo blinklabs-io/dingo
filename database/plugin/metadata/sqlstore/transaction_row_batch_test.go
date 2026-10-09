@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -459,6 +460,180 @@ func TestBatchedProducedAssetRowsWaitForFlush(t *testing.T) {
 		require.NotZero(t, stored.ID)
 		require.Equal(t, types.Uint64(7), stored.Amount)
 	}
+}
+
+func TestBatchedStakeDeltasCoalesceUntilFlush(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	credential := models.NewStakeCredentialRef(0, []byte("stake-key"))
+	for i, row := range []struct {
+		amount      string
+		deletedSlot int64
+	}{
+		{amount: "5000000"},
+		{amount: "3000000"},
+		{amount: "2000000"},
+		{amount: "2000000", deletedSlot: 200},
+	} {
+		txID := make([]byte, 32)
+		txID[0] = byte(i + 1)
+		_, err := store.writeDB.ExecContext(t.Context(), `
+INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
+VALUES (?, 0, ?, ?, 1, ?, ?)`,
+			txID, credential.Key, int64(credential.Tag), row.deletedSlot, row.amount,
+		)
+		require.NoError(t, err)
+	}
+	_, err := store.writeDB.ExecContext(t.Context(), `
+INSERT INTO reward_live_stake (
+    credential_tag, staking_key, utxo_stake, reward_stake, total_stake,
+    registered, updated_slot, calculation_version
+) VALUES (?, ?, '5000000', '0', '5000000', FALSE, 50, ?)`,
+		int64(credential.Tag), credential.Key, models.RewardStakeCalculationVersion,
+	)
+	require.NoError(t, err)
+
+	txn := store.Transaction(t.Context())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	acc, ok := store.NewBatchAccumulator().(*transactionBatchAccumulator)
+	require.True(t, ok)
+	defer acc.Reset()
+	require.NoError(t, acc.addStakeDeltas(
+		[]stakeCredentialDelta{{ref: credential, delta: 3_000_000}}, 100,
+	))
+	require.NoError(t, acc.addStakeDeltas(
+		[]stakeCredentialDelta{
+			{ref: credential, delta: 2_000_000},
+			{ref: credential, delta: -2_000_000},
+		},
+		200,
+	))
+	require.Len(t, acc.stakeDeltas, 1)
+	require.Equal(t, int64(3_000_000), acc.stakeDeltas[credential.MapKey()].delta)
+
+	require.NoError(t, store.FlushBatch(acc, txn))
+	db, ctx, err := store.dbFromTxn(txn)
+	require.NoError(t, err)
+	var utxoStake string
+	var updatedSlot int64
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT utxo_stake, updated_slot FROM reward_live_stake
+WHERE credential_tag = ? AND staking_key = ?`,
+		int64(credential.Tag), credential.Key,
+	).Scan(&utxoStake, &updatedSlot))
+	require.Equal(t, "8000000", utxoStake)
+	require.Equal(t, int64(200), updatedSlot)
+}
+
+func TestSetTransactionBatchedCoalescesStakeDeltas(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	acc := store.NewBatchAccumulator()
+	defer acc.Reset()
+
+	stakingKey := lcommon.NewBlake2b224([]byte("stake-key"))
+	paymentKey := lcommon.NewBlake2b224([]byte("payment-key"))
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		paymentKey.Bytes(),
+		stakingKey.Bytes(),
+	)
+	require.NoError(t, err)
+	credential := models.NewStakeCredentialRef(0, stakingKey.Bytes())
+	_, err = store.writeDB.ExecContext(t.Context(), `
+INSERT INTO reward_live_stake (
+    credential_tag, staking_key, utxo_stake, reward_stake, total_stake,
+    registered, updated_slot, calculation_version
+) VALUES (?, ?, '0', '0', '0', FALSE, 0, ?)`,
+		int64(credential.Tag), credential.Key, models.RewardStakeCalculationVersion,
+	)
+	require.NoError(t, err)
+	txn := store.Transaction(t.Context())
+	t.Cleanup(func() { _ = txn.Rollback() })
+
+	for i, amount := range []uint64{3_000_000, 2_000_000} {
+		txID := make([]byte, 32)
+		txID[0] = byte(i + 1)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress(address.String()).
+			WithLovelace(amount).
+			Build()
+		require.NoError(t, err)
+		tx := mockledger.NewTransactionBuilder()
+		tx.WithId(txID)
+		tx.WithOutputs(output)
+		tx.WithValid(true)
+		require.NoError(t, store.SetTransactionBatched(
+			tx,
+			ocommon.Point{Slot: uint64(100 + i), Hash: txID},
+			0,
+			nil,
+			true,
+			acc,
+			txn,
+		))
+	}
+
+	batched, ok := acc.(*transactionBatchAccumulator)
+	require.True(t, ok)
+	require.Len(t, batched.stakeDeltas, 1)
+	require.Equal(t, int64(5_000_000), batched.stakeDeltas[credential.MapKey()].delta)
+	db, ctx, err := store.dbFromTxn(txn)
+	require.NoError(t, err)
+	var utxoStake string
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT utxo_stake FROM reward_live_stake
+WHERE credential_tag = ? AND staking_key = ?`,
+		int64(credential.Tag), credential.Key,
+	).Scan(&utxoStake))
+	require.Equal(t, "0", utxoStake)
+
+	require.NoError(t, store.FlushBatchStakeDeltas(acc, txn))
+	require.Empty(t, batched.stakeDeltas)
+	require.False(t, batched.rows.empty())
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT utxo_stake FROM reward_live_stake
+WHERE credential_tag = ? AND staking_key = ?`,
+		int64(credential.Tag), credential.Key,
+	).Scan(&utxoStake))
+	require.Equal(t, "5000000", utxoStake)
+
+	require.NoError(t, store.FlushBatch(acc, txn))
+	var updatedSlot int64
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT utxo_stake, updated_slot FROM reward_live_stake
+WHERE credential_tag = ? AND staking_key = ?`,
+		int64(credential.Tag), credential.Key,
+	).Scan(&utxoStake, &updatedSlot))
+	require.Equal(t, "5000000", utxoStake)
+	require.Equal(t, int64(101), updatedSlot)
+}
+
+func TestBatchedStakeDeltasRestoreOnSavepointRollback(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	acc, ok := store.NewBatchAccumulator().(*transactionBatchAccumulator)
+	require.True(t, ok)
+	defer acc.Reset()
+	txn := store.Transaction(t.Context())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	sqlTxn := txn.(*sqlTxn)
+	credential := models.NewStakeCredentialRef(0, []byte("stake-key"))
+	require.NoError(t, acc.addStakeDeltas(
+		[]stakeCredentialDelta{{ref: credential, delta: 3_000_000}}, 100,
+	))
+	require.NoError(t, sqlTxn.bindBatch(acc))
+	require.NoError(t, sqlTxn.SavePoint("stake_checkpoint"))
+	require.NoError(t, acc.addStakeDeltas(
+		[]stakeCredentialDelta{{ref: credential, delta: -2_000_000}}, 200,
+	))
+	require.NoError(t, sqlTxn.RollbackTo("stake_checkpoint"))
+	require.Equal(
+		t,
+		pendingStakeCredentialDelta{ref: credential, delta: 3_000_000, slot: 100},
+		acc.stakeDeltas[credential.MapKey()],
+	)
 }
 
 // TestBatchedRowsOfFailedWriteAreNotQueued applies a transaction whose write
