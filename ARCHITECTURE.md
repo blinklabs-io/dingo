@@ -4130,6 +4130,17 @@ nonce and only the fold's end keeps a stored block above the tip out of it.
 Folding to the epoch's end collapses both bounds to what the boundary
 computation has always used.
 
+Bounds alone do not keep a fork out below the tip: an abandoned block can sit
+between the candidate bound and the tip's last ancestor before it, and the
+CBOR-decode fallback would fold every stored block in the range. So the query
+also passes the block the fold ends at, and both paths then follow parent links
+back from it (`database.BlockParentPointTxn`, metadata plus the `bh` index, no
+block bodies): the stored-nonce path takes the tip's last ancestor before the
+candidate bound, and the fallback folds exactly the tip's ancestors in the
+epoch. A tip the node holds no metadata for, which is where a
+Mithril-bootstrapped node starts, has no chain to follow, and the fold looks
+blocks up by slot as the boundary computation does.
+
 The previous epoch's last-block hash is resolved through the active chain index
 (`chain.BlockBeforeSlot`), not a raw blob-store slot scan. Blob storage can
 retain synthetic endorser/genesis blobs and fork blobs that are useful for other
@@ -4467,7 +4478,8 @@ query error does -- instead of silently reading live state. Closing a view
 never waits for a query in flight: that query completes against the snapshot
 and the last one out releases it.
 
-Only some query types honor a pinned point today: `GetPoolDistr2`
+Every query type that reads ledger or consensus state honors a pinned point;
+`queryShelleyLeaf` audits each one. The first were `GetPoolDistr2`
 (`PoolStakeDistribution`, resolving the pinned slot to the epoch that
 governed it and reading that epoch's already-persisted mark snapshot --
 rejecting a point outside the pool-snapshot retention window, ahead of the
@@ -4501,9 +4513,9 @@ era of the pinned point, and `GetStakePoolParams` reads live pool
 registrations. `GetUTxOWhole`
 honors the pin too, through the same `AddedSlot`/`DeletedSlot` predicate
 `GetUTxOByTxIn` uses. `ledger/queries.go`'s
-`queryShelleyLeaf` carries a full audit of every remaining query type,
-classified as intentionally live-only, or a real gap left for a caller that
-needs it.
+`queryShelleyLeaf` carries a full audit of every query type, classified as
+honoring the point or intentionally live-only; none is left answering from the
+live tip.
 
 `HardForkCurrentEraQuery` (`queryHardFork`, dispatched from `queryBlock`
 alongside `ShelleyQuery` rather than through `queryShelleyLeaf`, so it sat
@@ -4682,8 +4694,11 @@ Protocol-parameter rows need no pin; they are only ever deleted on rollback.
 `GetPoolDistr2` therefore logs and omits a pool that holds snapshot stake but
 has no registration to supply a VRF key hash (the unfiltered form covers every
 pool on the chain, so aborting would take `leadership-schedule` down for every
-operator over one bad row), and `GetChainDepState` logs and skips an op-cert
-counter whose issuer key is not a pool key hash. Omitting a pool leaves the
+operator over one bad row). `GetChainDepState` instead fails the query for an
+op-cert counter whose issuer key is not a pool key hash: dropping it would
+report that the chain has accepted no certificate for a cold key it enforces a
+counter against, and padding it would report a counter against a key the row
+did not mean. Omitting a pool leaves the
 reported fractions summing to slightly under one, since its stake stays in
 `TotalActiveStake`; a caller checking its own leadership is unaffected, because
 its own fraction is its stake over that same unchanged total.
@@ -11934,8 +11949,8 @@ current chain (`verifyPointOnChain`, returning `ledger.ErrPointNotOnChain`
 on a mismatch) before dispatching to any handler, so every point-sensitive
 query shares one fork-safety check rather than repeating it.
 `queryShelleyLeaf`'s doc comment carries a full audit of every one of its
-cases, classified as honoring the point today / intentionally live-only /
-not point-aware yet (and why) -- summarized here for the ones that matter
+cases, classified as honoring the point or intentionally live-only --
+summarized here for the ones that matter
 to this comparison:
 `queryShelleyStakeDistribution`/`queryShelleyPoolDistr2` (via
 `ledger.LedgerState.PoolStakeDistribution`, which resolves the pinned slot
@@ -12057,7 +12072,22 @@ row per DRep (see DATABASE.md), so a point before a DRep's latest pre-upgrade
 activity has no recorded expiry: a DRep whose certificate state at that point
 is still its current one (or that was imported at slot 0) reports its current
 expiry, and any other reports 0 (unset). Rollback applies the same rule.
-`DebugChainDepState` still ignores the acquired point.
+
+`DebugChainDepState` (`queryShelleyDebugChainDepState`) describes the
+acquired block instead of the tip: its slot as the last slot, the epoch rows
+of the epoch containing it (era, epoch, previous-epoch and last-epoch-block
+nonces), the evolving and candidate nonces folded by `computeCandidateNonceAsOf`
+up to and including it, the lab nonce from its parent hash, and the op-cert
+counters observed at or before it (`LatestPoolOpCertSequencesAtOrBefore`).
+The fold takes the acquired block's own nonce rather than searching the blob
+store by slot, which can hold a block a rollback abandoned at that slot. Epoch
+rows and `pool_opcert_sequence` rows are removed only by rollback.
+Non-checkpoint block nonce rows are pruned below the last three epochs, while
+checkpoint rows are kept; API storage mode accepts older points, and for those
+the fold recomputes the nonces from the stored blocks. With this, every
+implemented leaf query that reads ledger or consensus state answers at the
+acquired point; leaves not yet implemented (#394) are refused as unsupported
+rather than answered from the tip. `queryShelleyLeaf`'s audit lists each.
 
 Every pinned query also needs history the node actually holds, so
 `VerifyPointQueryable` refuses a point below the latest Mithril import's
@@ -13703,6 +13733,18 @@ the current one: mark, set and go span three epochs, so an import landing in
 the first two epochs of a new era has set or go in the era before it, with a
 different boundary slot and epoch length. An epoch it cannot place at all is
 skipped rather than seeded from a guessed window.
+
+Before any snapshot phase mutates the database, import validates the complete
+era-bound sequence against the node configuration. The sequence must contain
+every era through the snapshot's current era, begin at slot 0 and epoch 0, and
+place each advancing era exactly after the preceding era's configured whole
+epochs. Consecutive zero-duration eras may share the same slot and epoch
+boundary, as they do on preview. Missing bounds, extraction failures, unknown
+era parameters, gaps and overlaps abort the import. The snapshot tip must also
+fall within the half-open slot range of its declared current epoch. Epoch
+history therefore cannot be committed with a later era treated as the chain's
+time origin, with an omitted interval between eras, or with an attacker-sized
+epoch range detached from the tip.
 
 Block counts are seeded, because they cannot be derived. A bootstrap applies no
 block at or below its anchor, so there is no imported chain for
