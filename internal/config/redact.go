@@ -61,6 +61,8 @@ const (
 var logSecretConfigFields = []string{
 	// Koios Bearer token.
 	"KoiosParity.APIKey",
+	// Outbound registry headers, typically Authorization.
+	"TokenRegistry.HeaderSecrets",
 }
 
 // logURIConfigFields are Config field paths holding a URI that an operator
@@ -73,6 +75,9 @@ var logURIConfigFields = []string{
 	"DatabaseLifecycle.SnapshotCloudDestination",
 	"KoiosParity.BaseURL",
 	"Mithril.AggregatorURL",
+	"Mithril.Server.ArtifactStore",
+	"Mithril.Server.PublicBaseURL",
+	"Mithril.Server.RedirectBaseURL",
 	"OffchainMetadata.IPFSGatewayURL",
 	"TokenRegistry.SourceURL",
 }
@@ -194,6 +199,7 @@ var logPlainConfigFields = []string{
 	"MaxTrustedLocalNtCConns",
 	"MaxNtCConnectionsPerIP",
 	"MaxKESEvolutions",
+	"MetricsBindAddr",
 	"MetricsPort",
 	"Midnight.AuthTokenAssetName",
 	"Midnight.AuthTokenPolicyID",
@@ -222,6 +228,17 @@ var logPlainConfigFields = []string{
 	"Mithril.DownloadMaxIdleRetries",
 	"Mithril.Enabled",
 	"Mithril.PinnedDigest",
+	"Mithril.Server.Aggregator.Enabled",
+	"Mithril.Server.Aggregator.Epoch",
+	"Mithril.Server.Aggregator.GenesisSigningKeyFile",
+	"Mithril.Server.Aggregator.K",
+	"Mithril.Server.Aggregator.M",
+	"Mithril.Server.Aggregator.PhiF",
+	"Mithril.Server.Aggregator.OperatorTokenFile",
+	"Mithril.Server.AncillarySigningKeyFile",
+	"Mithril.Server.KeepSnapshots",
+	"Mithril.Server.Port",
+	"Mithril.Server.TLSEnabled",
 	"Mithril.VerifyCertificates",
 	"Network",
 	"NetworkMagic",

@@ -2303,9 +2303,9 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 // electingPoolParamsCutoffSlot reports the slot up to which pool registrations
 // were in force in the snapshot that elected this block's producer.
 //
-// Which slot that is depends on the era in force during the epoch the snapshot
-// was captured in, because the two rules involved run in the opposite order on
-// either side of the Dijkstra hard fork. The merge of psFutureStakePoolParams
+// Which slot that is depends on the era whose EPOCH rule produced the snapshot,
+// because the two rules involved run in the opposite order on either side of
+// the Dijkstra hard fork. The merge of psFutureStakePoolParams
 // into psStakePools -- where a re-registration submitted during the epoch
 // waits -- lives in cardano-ledger's POOLREAP rule; SNAP is what freezes the
 // snapshot. The EPOCH rule sequences them:
@@ -2387,7 +2387,17 @@ func (ls *LedgerState) electingPoolParamsCutoffSlotFromSnapshot(
 		// exists.
 		return 0, 0, false, nil //nolint:nilerr // unplaceable capture is "unavailable", not an error
 	}
-	if poolParamsMergedBeforeSnapshot(capturedEpoch.EraId) {
+	var snapshotEpoch *models.Epoch
+	for i := range epochCache {
+		if epochCache[i].EpochId == snap.epoch {
+			snapshotEpoch = &epochCache[i]
+			break
+		}
+	}
+	if snapshotEpoch == nil {
+		return 0, 0, false, nil
+	}
+	if poolParamsMergedBeforeSnapshot(snapshotEpoch.EraId) {
 		// POOLREAP ran before SNAP, so the capture already carries every
 		// registration accepted through the end of the captured epoch.
 		// Returning the capture slot for both values also makes the
@@ -2405,15 +2415,13 @@ func (ls *LedgerState) electingPoolParamsCutoffSlotFromSnapshot(
 	return capturedEpoch.StartSlot - 1, snapshot.CapturedSlot, true, nil
 }
 
-// poolParamsMergedBeforeSnapshot reports whether the EPOCH rule in force
-// during the epoch a stake snapshot was captured in merges
+// poolParamsMergedBeforeSnapshot reports whether the EPOCH rule that produced
+// a stake snapshot merges
 // psFutureStakePoolParams into psStakePools before SNAP freezes the snapshot.
 //
-// The era to ask about is the captured epoch's own, not the validated block's:
-// the EPOCH transition out of epoch N runs under the protocol version in force
-// during N, and HARDFORK is a sub-rule of that same transition. A block two
-// epochs after a hard fork into Dijkstra can therefore be elected by a
-// snapshot that Conway's ordering froze.
+// The hard-fork combinator translates the state at the era bound before TICK,
+// so a snapshot made at a transition boundary follows the incoming epoch's
+// EPOCH rule even though its CapturedSlot is the outgoing epoch's final slot.
 func poolParamsMergedBeforeSnapshot(eraId uint) bool {
 	return eraId >= dijkstra.EraIdDijkstra
 }

@@ -20,7 +20,7 @@ current branch.
 | What does a Go package or exported symbol do? | [Go code reference](code-reference.md), package `doc.go` files, and `go doc` |
 | How do I add a compiled-in provider? | [Plugin development](../database/plugin/PLUGIN_DEVELOPMENT.md) |
 | How do I run the multi-node DevNet test harness? | [DevNet harness](../internal/test/devnet/README.md) |
-| How do I run Dingo locally against a single-node devnet? | [Local DevNet helper](devnet.md) |
+| How do I run Dingo locally against a single-node devnet? | [Single-node local DevNet](devnet.md) |
 | How do I run benchmarks or collect profiles? | [Benchmarks and profiling](benchmarks.md) |
 | How do I run conformance tests? | [Conformance tests](../internal/test/conformance/README.md) |
 | How do I exercise archive and history-expiry behavior? | [Dingo archive node demo](https://github.com/blinklabs-io/cardano-compose-stacks/tree/main/dingo-archive-demo) |

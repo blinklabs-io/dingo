@@ -881,6 +881,43 @@ func utxoStakeConsumedDeltaQuery(n int) string {
 		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
 }
 
+var utxoStakeConsumedDeltaQuerySizes = [...]int{
+	1, 2, 4, 8, 16, 32, 64, 128, 256, 400,
+}
+
+func utxoStakeConsumedDeltaQuerySize(n int) int {
+	for _, size := range utxoStakeConsumedDeltaQuerySizes {
+		if n <= size {
+			return size
+		}
+	}
+	return utxoStakeConsumedDeltaQuerySizes[len(utxoStakeConsumedDeltaQuerySizes)-1]
+}
+
+func consumedUtxoStakeDelta(
+	tag int64,
+	key []byte,
+	raw sql.NullString,
+) (stakeCredentialDelta, bool, error) {
+	if len(key) == 0 || !raw.Valid || raw.String == "" {
+		return stakeCredentialDelta{}, false, nil
+	}
+	amount, err := parseUint64("consumed UTxO amount", raw.String)
+	if err != nil {
+		return stakeCredentialDelta{}, false, err
+	}
+	if amount > math.MaxInt64 {
+		return stakeCredentialDelta{}, false, fmt.Errorf(
+			"consumed UTxO amount overflow: %d",
+			amount,
+		)
+	}
+	return stakeCredentialDelta{
+		ref:   models.NewStakeCredentialRef(uint8(tag), key),
+		delta: -int64(amount),
+	}, true, nil
+}
+
 // queryUtxoStakeConsumedDeltas is queryUtxoStakeRefs's counterpart for the
 // setTransactionWithAccumulator fast path: alongside each spent input's
 // credential it also reads the row's amount, so the caller can pass
@@ -901,7 +938,7 @@ func utxoStakeConsumedDeltaQuery(n int) string {
 // transaction just spent, by (tx_id, output_idx), so the deleted_slot value
 // (already set to this transaction's slot by the caller) does not change
 // which row answers the lookup.
-func queryUtxoStakeConsumedDeltas(
+func (s *Store) queryUtxoStakeConsumedDeltas(
 	ctx context.Context,
 	db queryer,
 	ids []models.UtxoId,
@@ -920,8 +957,11 @@ func queryUtxoStakeConsumedDeltas(
 		for i, txID := range batch {
 			args[i] = txID
 		}
-		query := utxoStakeConsumedDeltaQuery(len(batch))
-		rows, err := db.QueryContext(ctx, query, args...)
+		querySize := utxoStakeConsumedDeltaQuerySize(len(batch))
+		query := utxoStakeConsumedDeltaQuery(querySize)
+		queryArgs := make([]any, querySize)
+		copy(queryArgs, args)
+		rows, err := s.queryRowsCached(ctx, db, query, queryArgs...)
 		if err != nil {
 			return nil, err
 		}
@@ -938,7 +978,7 @@ func queryUtxoStakeConsumedDeltas(
 				); err != nil {
 					return err
 				}
-				if len(key) == 0 || !outputIdx.Valid {
+				if !outputIdx.Valid {
 					continue
 				}
 				outs, ok := wanted[string(txID)]
@@ -948,26 +988,20 @@ func queryUtxoStakeConsumedDeltas(
 				if _, ok := outs[uint32(outputIdx.Int64)]; !ok {
 					continue
 				}
-				if !raw.Valid || raw.String == "" {
-					continue
-				}
-				amount, err := parseUint64("consumed UTxO amount", raw.String)
+				delta, ok, err := consumedUtxoStakeDelta(tag, key, raw)
 				if err != nil {
 					return err
 				}
-				if amount > math.MaxInt64 {
-					return fmt.Errorf(
-						"consumed UTxO amount overflow: %d",
-						amount,
-					)
+				if !ok {
+					continue
 				}
-				ref := models.NewStakeCredentialRef(uint8(tag), key)
+				ref := delta.ref
 				mapKey := ref.MapKey()
 				if _, ok := refs[mapKey]; !ok {
 					order = append(order, mapKey)
 					refs[mapKey] = ref
 				}
-				sums[mapKey] -= int64(amount)
+				sums[mapKey] += delta.delta
 			}
 			return rows.Err()
 		}()

@@ -438,20 +438,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	n.mempool = nil
 	if n.connManager != nil {
 		if stopErr := n.connManager.Stop(ctx); stopErr != nil {
-			// errStorageDrainUnconfirmed, not a bare join: connManager.Stop
-			// returning an error means its own bounded wait (connection
-			// close, then goroutineWg) gave up before confirming every
-			// connection/listener goroutine actually exited -- exactly the
-			// precondition PauseLeiosPersistWriterForLiveLifecycleOp below
-			// depends on ("no more inbound Leios fetch traffic") to safely
-			// reset the persist writer's start-once guard. Escalating here,
-			// the same way an unconfirmed leios persist drain itself does,
-			// means Restore/Truncate call n.cancel() for a full supervised
-			// restart instead of reinitializeAndResume -- so a straggling
-			// connection's Leios fetch racing that reset (see
-			// PauseLeiosPersistWriterForLiveLifecycleOp's doc comment) can
-			// no longer happen: the node never reaches reinitializeAndResume
-			// in that case at all.
+			// Unconfirmed connection shutdown leaves traffic able to restart the
+			// persistence writer, so storage replacement requires a full restart.
 			err = errors.Join(
 				err,
 				errStorageDrainUnconfirmed,
@@ -508,18 +496,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		n.leiosVoteReceivedSubId = 0
 	}
 
-	// Last, now that connManager.Stop above has closed every connection —
-	// so no more inbound Leios fetch traffic can call enqueueLeiosPersist
-	// concurrently with the reset this performs (see
-	// PauseLeiosPersistWriterForLiveLifecycleOp's own doc comment for why
-	// that ordering matters, and this file's top doc comment for why
-	// n.ouroboros needs this one exception at all).
-	//
-	// errStorageDrainUnconfirmed, not a bare join: an unconfirmed leios
-	// persist drain means that writer goroutine may still be running
-	// against the about-to-close database, exactly the same danger
-	// errStorageDrainUnconfirmed already makes Restore/Truncate fail
-	// closed on rather than attempt reinitializeAndResume.
+	// Drain persistence while storage is open. An unconfirmed drain requires
+	// a supervised restart because the writer may still access that storage.
 	if n.ouroboros() != nil {
 		if pauseErr := n.ouroboros().PauseLeiosPersistWriterForLiveLifecycleOp(); pauseErr != nil {
 			err = errors.Join(
@@ -782,7 +760,7 @@ func (n *Node) reinitializeMidnightIndexer() error {
 	if !midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		return nil
 	}
-	if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
+	if err := n.ledgerState.PrepareEpochCacheForStartup(n.ctx); err != nil {
 		return fmt.Errorf(
 			"load epoch cache before Midnight indexer restart: %w",
 			err,

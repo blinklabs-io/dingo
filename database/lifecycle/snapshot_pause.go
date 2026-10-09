@@ -34,14 +34,13 @@ var ErrCommitPauseExceeded = errors.New(
 )
 
 // WithMaxCommitPause bounds how long Snapshot may hold the commit barrier
-// once it has acquired it, including snapshot-state reads. When work remains at the limit
-// backups are cancelled, the barrier is released, the partial snapshot is
-// removed, and Snapshot returns ErrCommitPauseExceeded. The barrier is
-// released once the cancelled backups return, so the hold can exceed the
-// limit by however long a backup takes to observe cancellation. Time spent
-// waiting to acquire the barrier is not counted: that wait is bounded by the
-// caller's context. Zero (the default) means no limit; negative values are
-// rejected before any I/O.
+// once it has acquired it, including snapshot-state reads. When work remains
+// at the limit, backups are cancelled and the barrier is released. Snapshot
+// waits for both providers to stop before removing partial files and returning
+// ErrCommitPauseExceeded, so its total call duration can exceed the barrier
+// limit. Time spent waiting to acquire the barrier is not counted: that wait
+// is bounded by the caller's context. Zero means no limit; negative values
+// are rejected before any I/O.
 func WithMaxCommitPause(limit time.Duration) ManifestOption {
 	return func(cfg *manifestConfig) { cfg.maxPause = limit }
 }

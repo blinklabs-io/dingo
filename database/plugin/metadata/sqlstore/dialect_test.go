@@ -125,6 +125,17 @@ func TestMySQLDeferredIndexDDLUsesPrefixes(t *testing.T) {
 	dialect := MySQLDialect()
 	require.Equal(
 		t,
+		"CREATE INDEX `idx_addr_tx_stake_position` ON `address_transaction` (`credential_tag`, `staking_key`(255), `slot`, `tx_index`, `payment_key`(255))",
+		dialect.CreateIndexSQL(
+			"idx_addr_tx_stake_position",
+			"address_transaction",
+			[]string{
+				"credential_tag", "staking_key", "slot", "tx_index", "payment_key",
+			},
+		),
+	)
+	require.Equal(
+		t,
 		"CREATE INDEX `idx_utxo_deleted_payment_script` ON `utxo` (`deleted_slot`, `payment_script`, `amount`(255))",
 		dialect.CreateIndexSQL(
 			"idx_utxo_deleted_payment_script",
@@ -135,6 +146,33 @@ func TestMySQLDeferredIndexDDLUsesPrefixes(t *testing.T) {
 	require.Equal(t,
 		"DROP INDEX `idx_utxo_deleted_payment_script` ON `utxo`",
 		dialect.DropIndexSQL("idx_utxo_deleted_payment_script", "utxo"),
+	)
+	require.Equal(
+		t,
+		"CREATE INDEX `idx_asset_mint_burn_lookup` ON `asset_mint_burn` (`policy_id`(255), `name`(255), `slot`)",
+		dialect.CreateIndexSQL(
+			"idx_asset_mint_burn_lookup",
+			"asset_mint_burn",
+			[]string{"policy_id", "name", "slot"},
+		),
+	)
+	require.Equal(
+		t,
+		"CREATE INDEX `idx_asset_mint_burn_fingerprint` ON `asset_mint_burn` (`fingerprint`(255))",
+		dialect.CreateIndexSQL(
+			"idx_asset_mint_burn_fingerprint",
+			"asset_mint_burn",
+			[]string{"fingerprint"},
+		),
+	)
+	require.Equal(
+		t,
+		"CREATE INDEX `idx_transaction_metadata_label_label` ON `transaction_metadata_label` (`label`(255))",
+		dialect.CreateIndexSQL(
+			"idx_transaction_metadata_label_label",
+			"transaction_metadata_label",
+			[]string{"label"},
+		),
 	)
 	require.False(t, dialect.CanDropIndex("idx_utxo_spent_at_tx_id", "utxo"))
 	require.True(t, dialect.CanDropIndex("idx_utxo_payment_key", "utxo"))

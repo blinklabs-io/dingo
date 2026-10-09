@@ -1,6 +1,12 @@
 # Example config file for dingo
 # No settings are required. Uncomment a setting only to override its in-code
 # default.
+#
+# Keep a local copy that holds credentials (token registry headers, API keys)
+# outside the repository, or name it dingo.yaml, which git ignores. Key files
+# (*.skey, *.key, *.pem), .env and credentials.json are ignored too. Production
+# key paths are never embedded in the binary; set them with shelleyVrfKey,
+# shelleyKesKey and shelleyOperationalCertificate.
 
 # Public bind address for the Dingo server
 # CLI: --bind-addr
@@ -164,12 +170,20 @@
 # Path to the topology configuration file for Cardano node
 # topology: ""
 
-# TCP port to bind for Prometheus metrics endpoint
+# TCP port to bind for Prometheus metrics endpoint. 0 disables the listener.
 # CLI: --metrics-port
 # metricsPort: 12798
 
+# Address for the unauthenticated Prometheus listener. This is deliberately
+# independent of bindAddr and stays on loopback by default. Set a wildcard or
+# remote-reachable address only when scrapers need it and an external network
+# control protects the endpoint. The container image sets
+# DINGO_METRICS_BIND_ADDR=0.0.0.0, which takes precedence over this setting.
+# CLI: --metrics-bind-addr  Env: DINGO_METRICS_BIND_ADDR
+# metricsBindAddr: "127.0.0.1"
+
 # TCP port for the liveness/readiness probe listener. 0 disables it.
-# Binds bindAddr, like the relay and metrics listeners: a kubelet or
+# Binds bindAddr, like the relay listener: a kubelet or
 # load-balancer probe reaches the container from
 # outside, so loopback would fail those closed.
 #
@@ -382,6 +396,15 @@
   # Can be overridden with DINGO_TOKEN_REGISTRY_USER_AGENT
   # CLI: --token-registry-user-agent
   # userAgent: ""
+  # Extra HTTP headers sent with every registry request, for a mirror that
+  # needs authentication. The values are credentials: they are redacted from
+  # logged configuration, require HTTPS except on loopback, and are not sent
+  # to another origin after a redirect.
+  # There is no CLI flag, since arguments are visible in the process list.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_HEADER_SECRETS
+  # (comma-separated name:value pairs, split at the first colon)
+  # headerSecrets:
+  #   Authorization: "Bearer <token>"
   # Cap on the compressed registry download. 0 uses the default (768MB).
   # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_BYTES
   # CLI: --token-registry-max-bytes
@@ -900,6 +923,60 @@
   # selected Cardano network config. Set false only for an unverified bootstrap.
   # Default: true
   # verifyCertificates: true
+  # Snapshot production and serving: 'dingo mithril snapshot create --db-dir
+  # <cardano-node db>' writes a Mithril snapshot artifact to artifactStore, and
+  # 'dingo mithril serve' serves those artifacts on bindAddr and server.port.
+  # Artifact reads are public. Aggregator registration and registration closure
+  # require a bearer token; non-loopback aggregator binds require TLS.
+  # A public origin is required by 'dingo mithril serve' and is embedded in
+  # snapshot download locations. Use HTTPS except for an HTTP loopback origin.
+  # server:
+    # Port for 'dingo mithril serve' (default: 8081)
+    # CLI: --mithril-server-port
+    # port: 8081
+    # Public HTTPS origin used in snapshot download locations. Plain HTTP is
+    # accepted only for loopback. Forwarded headers are not used to build URLs.
+    # CLI: --mithril-server-public-base-url
+    # Env: DINGO_MITHRIL_SERVER_PUBLIC_BASE_URL
+    # publicBaseUrl: "https://snapshots.example.org"
+    # Where artifacts are kept and served from: a directory, or s3://bucket/prefix
+    # or gcs://bucket/prefix (requires a build with dingo_extra_plugins)
+    # CLI: --mithril-server-artifact-store
+    # artifactStore: ""
+    # Redirect archive requests to this base URL (plus the object key) instead of
+    # streaming them; for a remote store whose objects are publicly readable
+    # CLI: --mithril-server-redirect-base-url
+    # redirectBaseUrl: ""
+    # Newest snapshots kept after 'snapshot create' (0 keeps all)
+    # CLI: --mithril-server-keep-snapshots
+    # keepSnapshots: 0
+    # Ed25519 key (Mithril JSON-hex format) signing the ancillary manifest
+    # CLI: --mithril-server-ancillary-signing-key-file
+    # ancillarySigningKeyFile: ""
+    # Serve HTTPS with the shared tlsCertFilePath and tlsKeyFilePath (default: false)
+    # CLI: --mithril-server-tls-enabled
+    # tlsEnabled: false
+    # Aggregator: certify stored snapshots from registered signers' signatures.
+    # 'dingo mithril serve' mounts the registration and signature endpoints.
+    # aggregator:
+      # Mount the aggregator endpoints (default: false)
+      # CLI: --mithril-aggregator-enabled
+      # enabled: false
+      # Epoch signers register for; the genesis certificate is issued at epoch-1
+      # CLI: --mithril-aggregator-epoch
+      # epoch: 0
+      # STM parameters: quorum of lottery indices, lottery size, win probability
+      # CLI: --mithril-aggregator-k, --mithril-aggregator-m, --mithril-aggregator-phi-f
+      # k: 0
+      # m: 0
+      # phiF: 0
+      # Ed25519 genesis signing key file (Mithril JSON-hex format)
+      # CLI: --mithril-aggregator-genesis-signing-key-file
+      # genesisSigningKeyFile: ""
+      # File containing at least 32 random bytes for signer registration and
+      # registration closure.
+      # CLI: --mithril-aggregator-operator-token-file
+      # operatorTokenFile: ""
 
 # ---
 # CIP-23 minimum pool margin / minimum variable fee (experimental, consensus-affecting)

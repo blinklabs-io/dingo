@@ -44,6 +44,7 @@ func validTestConfig() *Config {
 		HealthPort:           DefaultHealthPort,
 		HealthReadyGapSlots:  DefaultHealthReadyGapSlots,
 		DebugBindAddr:        DefaultDebugBindAddr,
+		MetricsBindAddr:      DefaultMetricsBindAddr,
 		ShutdownTimeout:      DefaultShutdownTimeout,
 		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
 		Cache:                DefaultCacheConfig(),
@@ -70,6 +71,41 @@ func setMempoolSetting(c *Config, name string, value any) {
 func TestValidateDefaultsPass(t *testing.T) {
 	cfg := validTestConfig()
 	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
+func TestValidateDevModeForcesStandardProductionAndAPIStorage(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RunMode = RunModeDev
+	cfg.StorageMode = storageModeCore
+	cfg.BlockProducer = false
+	cfg.ShelleyVRFKey = "vrf.skey"
+	cfg.ShelleyKESKey = "kes.skey"
+	cfg.ShelleyOperationalCertificate = "opcert.cert"
+
+	require.NoError(t, cfg.Validate(RunModeServe))
+	assert.Equal(t, storageModeAPI, cfg.StorageMode)
+	assert.True(t, cfg.BlockProducer)
+}
+
+func TestValidateDevModeRequiresBlockProducerCredentials(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RunMode = RunModeDev
+	cfg.BlockProducer = false
+
+	err := cfg.Validate(RunModeDev)
+	require.ErrorContains(t, err, "blockProducer enabled but missing required key paths")
+	assert.True(t, cfg.BlockProducer)
+}
+
+func TestValidateOneShotCommandLeavesConfiguredDevModeAlone(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RunMode = RunModeDev
+	cfg.StorageMode = storageModeCore
+	cfg.BlockProducer = false
+
+	require.NoError(t, cfg.Validate(RunModeDatabase))
+	assert.Equal(t, storageModeCore, cfg.StorageMode)
+	assert.False(t, cfg.BlockProducer)
 }
 
 func TestValidateTokenRegistryAggregateBounds(t *testing.T) {
@@ -129,6 +165,55 @@ func TestValidatePublicAPIAllowsLoopback(t *testing.T) {
 	cfg.BindAddr = "127.0.0.1"
 
 	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
+func TestValidateMithrilPublicBaseURL(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "https", value: "https://snapshots.example.org"},
+		{name: "https with port", value: "https://snapshots.example.org:8443"},
+		{name: "localhost HTTP", value: "http://localhost:8080"},
+		{name: "IPv4 loopback HTTP", value: "http://127.0.0.1:8080"},
+		{name: "IPv6 loopback HTTP", value: "http://[::1]:8080"},
+		{
+			name: "remote HTTP", value: "http://snapshots.example.org",
+			wantErr: true,
+		},
+		{
+			name: "unsupported scheme", value: "ftp://snapshots.example.org",
+			wantErr: true,
+		},
+		{
+			name: "userinfo", value: "https://user@snapshots.example.org",
+			wantErr: true,
+		},
+		{
+			name: "path", value: "https://snapshots.example.org/path",
+			wantErr: true,
+		},
+		{
+			name: "query", value: "https://snapshots.example.org?query=1",
+			wantErr: true,
+		},
+		{
+			name: "fragment", value: "https://snapshots.example.org#fragment",
+			wantErr: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateMithrilPublicBaseURL(test.value)
+			if test.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestValidate(t *testing.T) {
@@ -215,9 +300,8 @@ func TestValidate(t *testing.T) {
 			wantErr: "port (relay/NtN) must be set",
 		},
 		{
-			name:    "metrics port set to zero",
-			modify:  func(c *Config) { c.MetricsPort = 0 },
-			wantErr: "metricsPort must be set",
+			name:   "metrics port zero disables the listener",
+			modify: func(c *Config) { c.MetricsPort = 0 },
 		},
 		{
 			name:    "MCP port range in core mode",
@@ -306,6 +390,18 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			// metricsPort binds metricsBindAddr, not bindAddr, so a
+			// loopback metrics listener may share a port with a listener
+			// on a different specific address.
+			name: "metrics bind address distinct from bindAddr may share a port",
+			modify: func(c *Config) {
+				c.BindAddr = "127.0.0.2"
+				c.PrivateBindAddr = "127.0.0.1"
+				c.MetricsBindAddr = "127.0.0.1"
+				c.HealthPort = c.MetricsPort
+			},
+		},
+		{
 			// Two spellings of one IPv6 literal name one listener. A
 			// string comparison lets them past validation, and the
 			// health listener is then one of two servers racing for the
@@ -343,10 +439,11 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
-			name: "mesh shares bind address with metrics for collision checks",
+			name: "mesh and metrics on the same bind address collide",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.BindAddr = "127.0.0.2"
+				c.MetricsBindAddr = "127.0.0.2"
 				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
 			},
 			wantErr: "is assigned to both",
@@ -669,6 +766,13 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid mithril.downloadIdleTimeout",
 		},
 		{
+			name: "negative mithril server retention",
+			modify: func(c *Config) {
+				c.Mithril.Server.KeepSnapshots = -1
+			},
+			wantErr: "invalid mithril.server.keepSnapshots",
+		},
+		{
 			name: "negative mithril download limit",
 			modify: func(c *Config) {
 				c.Mithril.DownloadMaxBytes = -1
@@ -729,6 +833,165 @@ func TestValidate(t *testing.T) {
 			}
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateMithrilServer covers the settings only `dingo mithril serve`
+// uses, so they are validated in that effective mode.
+func TestValidateMithrilServer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		modify  func(*Config)
+		wantErr string
+	}{
+		{
+			name: "mithril server port above range",
+			modify: func(c *Config) {
+				c.Mithril.Server.Port = 70000
+			},
+			wantErr: "invalid mithril.server.port",
+		},
+		{
+			name: "mithril server public HTTP base URL is not loopback",
+			modify: func(c *Config) {
+				c.Mithril.Server.PublicBaseURL = "http://snapshots.example.org"
+			},
+			wantErr: "invalid mithril.server.publicBaseUrl",
+		},
+		{
+			name: "enabled mithril aggregator needs an epoch",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.Epoch = 0
+			},
+			wantErr: "invalid mithril.server.aggregator.epoch",
+		},
+		{
+			name: "enabled mithril aggregator needs positive k and m",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.K = 0
+			},
+			wantErr: "mithril.server.aggregator.k and",
+		},
+		{
+			name: "enabled mithril aggregator needs positive m",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.M = 0
+			},
+			wantErr: "mithril.server.aggregator.k and",
+		},
+		{
+			name: "enabled mithril aggregator k above m",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.K = 41
+			},
+			wantErr: "k must not exceed m",
+		},
+		{
+			name: "mithril server privileged port",
+			modify: func(c *Config) {
+				c.Mithril.Server.Port = 443
+			},
+			wantErr: "invalid mithril.server.port",
+		},
+		{
+			name: "enabled mithril aggregator phiF above one",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.PhiF = 1.5
+			},
+			wantErr: "invalid mithril.server.aggregator.phiF",
+		},
+		{
+			name: "enabled mithril aggregator needs a genesis key",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.GenesisSigningKeyFile = ""
+			},
+			wantErr: "mithril.server.aggregator.genesisSigningKeyFile",
+		},
+		{
+			name: "enabled mithril aggregator needs an operator token file",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.OperatorTokenFile = ""
+				c.BindAddr = "127.0.0.1"
+			},
+			wantErr: "mithril.server.aggregator.operatorTokenFile",
+		},
+		{
+			name: "public mithril aggregator requires tls",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+			},
+			wantErr: "mithril.server.tlsEnabled is required",
+		},
+		{
+			name: "enabled mithril aggregator fully configured",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.BindAddr = "127.0.0.1"
+			},
+		},
+		{
+			name: "public mithril aggregator with tls",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.TLSEnabled = true
+				c.TlsCertFilePath = "server.crt"
+				c.TlsKeyFilePath = "server.key"
+			},
+		},
+		{
+			name: "disabled mithril aggregator is not validated",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator.PhiF = 7
+			},
+		},
+		{
+			name: "mithril server retention and port in range",
+			modify: func(c *Config) {
+				c.Mithril.Server.KeepSnapshots = 3
+				c.Mithril.Server.Port = 8081
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tt.modify(cfg)
+			err := cfg.validate(RunModeMithrilServe, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateMithrilServerSettingsOnlyForMithrilServe guards the other
+// commands sharing a configuration file: a server port this process may not
+// bind, or an aggregator that is unusable as configured, must not stop a
+// command that never starts the Mithril server.
+func TestValidateMithrilServerSettingsOnlyForMithrilServe(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []RunMode{
+		RunModeServe, RunModeSync, RunModeMithril, RunModeDatabase,
+	} {
+		t.Run(string(mode), func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.Mithril.Server.Port = 443
+			cfg.Mithril.Server.PublicBaseURL = "http://snapshots.example.org"
+			cfg.Mithril.Server.Aggregator = validMithrilAggregator()
+			cfg.Mithril.Server.Aggregator.K = 41
+			assert.NoError(t, cfg.validate(mode, minUnprivilegedPort))
 		})
 	}
 }
@@ -1403,7 +1666,7 @@ func TestValidateLoweredPrivilegedPortCutoff(t *testing.T) {
 // one-shot sync and mithril invocations neither require the serving
 // listener ports nor an ImmutableDB source, even though the configured
 // runMode is the default serve. Their metrics/debug listeners accept an
-// unset port, which the runtime binds ephemerally.
+// unset port, which disables them.
 func TestValidateUtilityModesRelaxListenerAndSource(t *testing.T) {
 	for _, mode := range []RunMode{RunModeSync, RunModeMithril} {
 		t.Run(string(mode), func(t *testing.T) {
@@ -1564,6 +1827,18 @@ func TestValidateMinPoolMargin(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
+	}
+}
+
+func validMithrilAggregator() MithrilAggregatorConfig {
+	return MithrilAggregatorConfig{
+		Enabled:               true,
+		Epoch:                 10,
+		K:                     5,
+		M:                     40,
+		PhiF:                  0.5,
+		GenesisSigningKeyFile: "genesis.skey",
+		OperatorTokenFile:     "operator.token",
 	}
 }
 

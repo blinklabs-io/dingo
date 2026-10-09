@@ -209,6 +209,146 @@ func TestSnapshotMaxCommitPauseAbortsAndReleasesBarrier(t *testing.T) {
 	requireBarrierReleased(t, db)
 }
 
+func TestSnapshotMaxCommitPauseReleasesBarrierBeforeBackupStops(t *testing.T) {
+	t.Parallel()
+
+	backupStarted := make(chan struct{})
+	finishBackup := make(chan struct{})
+	releaseBackup := sync.OnceFunc(func() { close(finishBackup) })
+	defer releaseBackup()
+	hooks := &backupHooks{
+		blob: func(_ context.Context, w io.Writer) error {
+			close(backupStarted)
+			<-finishBackup
+			_, err := io.WriteString(w, "blob")
+			return err
+		},
+	}
+	db := newHookedDB(t, nil, hooks)
+	dir := filepath.Join(t.TempDir(), "snap")
+	finished := make(chan error, 1)
+	go func() {
+		_, err := snapshotAt(
+			t.Context(), db, dir,
+			lifecycle.WithMaxCommitPause(time.Second),
+		)
+		finished <- err
+	}()
+
+	select {
+	case <-backupStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("blob backup did not start")
+	}
+	requireBarrierReleased(t, db)
+	select {
+	case err := <-finished:
+		t.Fatalf("snapshot returned before its backup stopped: %v", err)
+	default:
+	}
+
+	releaseBackup()
+	select {
+	case err := <-finished:
+		require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
+	case <-time.After(5 * time.Second):
+		t.Fatal("snapshot did not return after the backup stopped")
+	}
+	require.NoDirExists(t, dir)
+}
+
+func TestSnapshotBackupFailureCancelsPeerAndReleasesBarrier(t *testing.T) {
+	t.Parallel()
+
+	peerCancelled := make(chan struct{})
+	hooks := &backupHooks{
+		blob: func(ctx context.Context, _ io.Writer) error {
+			<-ctx.Done()
+			close(peerCancelled)
+			return ctx.Err()
+		},
+		metadata: func(context.Context, string) error {
+			return errInjectedBackup
+		},
+	}
+	db := newHookedDB(t, nil, hooks)
+	dir := filepath.Join(t.TempDir(), "snap")
+	_, err := snapshotAt(
+		t.Context(), db, dir,
+		lifecycle.WithMaxCommitPause(5*time.Second),
+	)
+	require.ErrorIs(t, err, errInjectedBackup)
+	select {
+	case <-peerCancelled:
+	default:
+		t.Fatal("failed metadata backup did not cancel the blob backup")
+	}
+	require.NoDirExists(t, dir)
+	requireBarrierReleased(t, db)
+}
+
+func TestSnapshotCallerCancellationDoesNotPublishSuccessfulBackups(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 2)
+	hooks := &backupHooks{
+		blob: func(ctx context.Context, w io.Writer) error {
+			started <- struct{}{}
+			<-ctx.Done()
+			_, err := io.WriteString(w, "blob")
+			return err
+		},
+		metadata: func(ctx context.Context, dst string) error {
+			started <- struct{}{}
+			<-ctx.Done()
+			return os.WriteFile(dst, []byte("metadata"), 0o600)
+		},
+	}
+	db := newHookedDB(t, nil, hooks)
+	dir := filepath.Join(t.TempDir(), "snap")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() {
+		_, err := snapshotAt(ctx, db, dir)
+		finished <- err
+	}()
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("both snapshot backups did not start")
+		}
+	}
+	cancel()
+	select {
+	case err := <-finished:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("snapshot did not return after cancellation")
+	}
+	require.NoDirExists(t, dir)
+	requireBarrierReleased(t, db)
+}
+
+func TestSnapshotReturnsBothBackupFailures(t *testing.T) {
+	t.Parallel()
+
+	errBlobBackup := errors.New("injected blob backup failure")
+	errMetadataBackup := errors.New("injected metadata backup failure")
+	db := newHookedDB(t, nil, &backupHooks{
+		blob: func(context.Context, io.Writer) error {
+			return errBlobBackup
+		},
+		metadata: func(context.Context, string) error {
+			return errMetadataBackup
+		},
+	})
+	_, err := snapshotAt(t.Context(), db, filepath.Join(t.TempDir(), "snap"))
+	require.ErrorIs(t, err, errBlobBackup)
+	require.ErrorIs(t, err, errMetadataBackup)
+}
+
 func TestSnapshotWithoutMaxCommitPauseIsUnbounded(t *testing.T) {
 	t.Parallel()
 
