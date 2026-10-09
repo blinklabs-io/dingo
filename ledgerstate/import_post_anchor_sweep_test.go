@@ -84,7 +84,7 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 				},
 			},
 			EpochLength: func(uint) (uint, uint, error) {
-				return 1, 1_000, nil
+				return 1, importTestEpochLength, nil
 			},
 		},
 	))
@@ -167,7 +167,7 @@ func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
 			},
 		},
 		EpochLength: func(uint) (uint, uint, error) {
-			return 1, 1_000, nil
+			return 1, importTestEpochLength, nil
 		},
 	})
 	require.ErrorContains(t, err, "deleting post-anchor network donations")

@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
@@ -282,4 +283,33 @@ func TestCheckedUint8(t *testing.T) {
 
 	_, err = checkedUint8(-1)
 	require.Error(t, err)
+}
+
+func TestMidnightJournalRejectsInvalidStoredIntegers(t *testing.T) {
+	t.Parallel()
+	for _, value := range []int64{-1, math.MaxUint32 + 1} {
+		t.Run(fmt.Sprint(value), func(t *testing.T) {
+			t.Parallel()
+			store := newManagementTestStore(t)
+			_, err := store.writeDB.Exec(
+				"INSERT INTO midnight_candidate_removals (block_number, tx_hash, output_index, datum) VALUES (1, ?, ?, ?)",
+				[]byte{1},
+				value,
+				[]byte{2},
+			)
+			require.NoError(t, err)
+			_, err = store.FindMidnightCandidateRemovalsByBlock(nil, 1)
+			require.ErrorContains(t, err, "output index")
+		})
+	}
+	t.Run("negative epoch", func(t *testing.T) {
+		t.Parallel()
+		store := newManagementTestStore(t)
+		_, err := store.writeDB.Exec(
+			"INSERT INTO midnight_epoch_transitions (block_number, previous_epoch, previous_exists) VALUES (1, -1, 1)",
+		)
+		require.NoError(t, err)
+		_, err = store.GetMidnightEpochTransitionByBlock(nil, 1)
+		require.Error(t, err)
+	})
 }
