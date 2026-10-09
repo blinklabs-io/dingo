@@ -162,9 +162,11 @@ func (n *Node) recordRollbackRegistration(
 const genesisDensityDenyDuration = 10 * time.Minute
 
 // onGenesisDensityDisconnect acts on a peer the Genesis Density Disconnector
-// found provably sparser: it counts the report, denies the peer for
-// genesisDensityDenyDuration when its connection ID carries a remote address,
-// and closes its connection if it is still open.
+// reported: it counts the report, denies the peer for
+// genesisDensityDenyDuration when the report is the provable comparison and its
+// connection ID carries a remote address, and closes its connection if it is
+// still open. A Limit on Eagerness standoff loss is not denied: that rule is a
+// heuristic an honest fork can lose, so the peer must stay redialable.
 func (n *Node) onGenesisDensityDisconnect(
 	d chainselection.GenesisDensityDisconnect,
 ) {
@@ -176,7 +178,7 @@ func (n *Node) onGenesisDensityDisconnect(
 	// A connection ID without a remote address cannot be denied, so the log
 	// reports whether the deny happened rather than implying it.
 	denied := false
-	if d.ConnectionId.RemoteAddr != nil {
+	if !d.EagernessStandoff && d.ConnectionId.RemoteAddr != nil {
 		denied = n.denyPeer(
 			d.ConnectionId.RemoteAddr.String(),
 			genesisDensityDenyDuration,

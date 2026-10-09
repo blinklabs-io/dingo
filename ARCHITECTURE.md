@@ -5242,8 +5242,9 @@ the same pass, so the last remaining candidate is never disconnected even when
 pairwise density comparisons, each taken at its own intersection, form a
 cycle. The selector hands each peer to
 `ChainSelectorConfig.OnGenesisDensityDisconnect`; the node adds the peer's
-remote address to peer governance's deny list for ten minutes (`DenyPeer`),
-closes the connection if it is still open, logs whether the deny was applied,
+remote address to peer governance's deny list for ten minutes (`DenyPeer`)
+unless the report is a Limit on Eagerness standoff (below), closes the
+connection if it is still open, logs whether the deny was applied,
 and counts the report in `dingo_chainselection_gdd_disconnects_total`, whether
 or not a connection was left to close. Restore and truncate serialize their
 full networking-core replacement with this deny-and-close action, so a report
@@ -5572,7 +5573,8 @@ prefix of another is not a fork and decides nothing.
   slots. Unlike the provable comparison above this is a statistical heuristic,
   not a proof: it exists because Dingo stops header download at `k` blocks
   rather than at the forecast horizon, and a temporarily sparse honest fork can
-  lose it.
+  lose it. Standoff losers are therefore disconnected but not deny-listed, so
+  an honest fork that lost can be redialed at once.
 - A held peer against an idle one: a peer that has delivered every header up
   to the tip it advertises is idle. The idle peer may be a fork or a prefix of
   the held chain, such as a peer that stopped at an older tip. Keepalive traffic refreshes an idle peer's

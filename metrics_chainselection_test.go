@@ -480,6 +480,34 @@ func TestGenesisDensityDisconnectLogReportsDenial(t *testing.T) {
 	require.Contains(t, logs.String(), "denied=false")
 }
 
+// A Limit on Eagerness standoff loss is a heuristic verdict, not a proof that
+// the peer serves a sparser chain, so the peer is disconnected but not put on
+// the deny list: an honest fork that lost it must be redialable.
+func TestGenesisDensityDisconnectStandoffDoesNotDenyPeer(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	n, registry := newMetricsTestNode(t)
+	n.config.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	n.peerGov = peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+
+	conn := newNodeTestConnId(3307)
+	n.onGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
+		ConnectionId:      conn,
+		EagernessStandoff: true,
+	})
+	assert.False(t, n.peerGov.IsDenied(conn.RemoteAddr.String()))
+	assert.Contains(t, logs.String(), "denied=false")
+	assert.Equal(
+		t,
+		map[string]float64{"": 1},
+		counterValues(
+			t,
+			registry,
+			"dingo_chainselection_gdd_disconnects_total",
+		),
+	)
+}
+
 // Without k and a positive f the node keeps the selector's long-standing
 // 6480-slot window for the exit horizon but must not run the Genesis Density
 // Disconnector over it.
