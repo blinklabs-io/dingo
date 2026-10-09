@@ -15,6 +15,8 @@
 package dingo
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -26,6 +28,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -287,4 +291,105 @@ func TestWaitChainsyncStallRecyclerIsSafeWithoutRecycler(t *testing.T) {
 	}
 	// A node that failed before wiring the recycler must still shut down.
 	n.waitChainsyncStallRecycler()
+}
+
+func TestChainsyncAwaitEagernessDelegatesToChainSelector(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{}
+	require.NoError(
+		t,
+		n.chainsyncAwaitEagerness(t.Context(), newNodeTestConnId(1), 99, nil),
+		"without a chain selector no limit applies",
+	)
+
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:   true,
+			SecurityParam: 5,
+		},
+	)
+	tipAt := func(prefix string, block uint64) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				block*100,
+				[]byte(fmt.Sprintf("%s%d", prefix, block)),
+			),
+			BlockNumber: block,
+		}
+	}
+	a := newNodeTestConnId(1)
+	b := newNodeTestConnId(2)
+	for block := uint64(1); block <= 20; block++ {
+		n.chainSelector.UpdatePeerTip(a, tipAt("c", block), nil)
+	}
+	for block := uint64(1); block <= 12; block++ {
+		n.chainSelector.UpdatePeerTip(b, tipAt("c", block), nil)
+	}
+	n.chainSelector.SetLocalTip(tipAt("c", 10))
+
+	require.NoError(
+		t,
+		n.chainsyncAwaitEagerness(t.Context(), a, 17, nil),
+		"a header within k of the shared point is admitted",
+	)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(
+		t,
+		n.chainsyncAwaitEagerness(ctx, a, 18, nil),
+		context.Canceled,
+		"a header past the limit waits and honors cancellation",
+	)
+}
+
+// The Limit on Eagerness gates a header on a limit that must already include
+// that header's tip, and it treats a peer the selector does not track as one
+// it declined. So while the cap is active (Genesis mode), the tip and rollback
+// hooks must observe synchronously even with corroboration disabled;
+// otherwise a new peer's first headers pass before its asynchronous tip event
+// registers it.
+func TestChainsyncObserveHooksAreSynchronousInGenesisModeWithoutCorroboration(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, genesis := range []bool{true, false} {
+		n := &Node{}
+		n.chainSelector = chainselection.NewChainSelector(
+			chainselection.ChainSelectorConfig{
+				GenesisMode:   genesis,
+				SecurityParam: 5,
+			},
+		)
+		conn := newNodeTestConnId(1)
+		tip := ochainsync.Tip{
+			Point:       ocommon.NewPoint(100, []byte("h1")),
+			BlockNumber: 1,
+		}
+		observed := n.chainsyncObservePeerTip(
+			chainselection.PeerTipUpdateEvent{
+				ConnectionId: conn,
+				Tip:          tip,
+				ObservedTip:  tip,
+			},
+		)
+		rolledBack := n.chainsyncObservePeerRollback(
+			chainselection.PeerRollbackEvent{
+				ConnectionId: conn,
+				Point:        tip.Point,
+				Tip:          tip,
+			},
+		)
+		if !genesis {
+			assert.False(t, observed, "Praos mode keeps the async path")
+			assert.False(t, rolledBack, "Praos mode keeps the async path")
+			assert.Equal(t, 0, n.chainSelector.PeerCount())
+			continue
+		}
+		assert.True(t, observed, "tip observation must be synchronous")
+		assert.True(t, rolledBack, "rollback observation must be synchronous")
+		assert.Equal(t, 1, n.chainSelector.PeerCount(),
+			"the peer must be tracked before the eagerness wait")
+	}
 }

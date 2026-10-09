@@ -422,14 +422,28 @@ type OuroborosConfig struct {
 	// is observed but cannot steer the ledger. When nil, every ingress-
 	// eligible peer is apply-eligible (no behavior change).
 	ChainsyncApplyEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncAwaitEagerness blocks until a header numbered blockNumber from
+	// connId is within the Limit on Eagerness, and returns an error if ctx is
+	// cancelled first. The roll-forward callback blocks on it after the header's
+	// tip has been observed and before the header is handed to the ledger, so a
+	// peer running past the limit is paused rather than having headers dropped.
+	// appliedTip, when non-nil, reads the live applied ledger tip. When the
+	// hook is nil, no limit applies.
+	ChainsyncAwaitEagerness func(
+		ctx context.Context,
+		connId ouroboros.ConnectionId,
+		blockNumber uint64,
+		appliedTip func() ochainsync.Tip,
+	) error
 	// ChainsyncObservePeerTip observes a peer tip update. It returns true if it
 	// handled the observation synchronously, in which case the caller MUST NOT
 	// also publish the async PeerTipUpdateEvent (avoids a double update). This
 	// lets the node update chain-selection state synchronously before the
-	// ChainsyncApplyEligible gate runs, so an apply decision reflects the header
-	// currently being admitted (closing the race where an async tip update that
-	// revokes corroboration is not yet processed). Returning false (or nil hook)
-	// falls back to the async PeerTipUpdateEvent path.
+	// ChainsyncApplyEligible gate and the ChainsyncAwaitEagerness wait run, so
+	// both reflect the header currently being admitted (closing the race where
+	// an async tip update that revokes corroboration, or that first registers
+	// the peer with the Limit on Eagerness, is not yet processed). Returning
+	// false (or nil hook) falls back to the async PeerTipUpdateEvent path.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
 	// ChainsyncSyncTarget snapshots the policy-bounded target for one observed
 	// peer-tip event. Its result is carried with that event into ledger

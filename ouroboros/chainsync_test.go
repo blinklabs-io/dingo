@@ -2017,6 +2017,34 @@ func TestRollForwardChargesPatienceOnlyUntilArrival(t *testing.T) {
 	require.InDelta(t, 61, tc.Patience.Tokens, 1e-9)
 }
 
+// A header held at the Limit on Eagerness waits inside the callback, after
+// the peer was charged up to the header's arrival. The wait is this node's
+// own, so an hour of it must not drain the bucket.
+func TestRollForwardEagernessWaitIsNotChargedToPatience(t *testing.T) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, true)
+	waited := false
+	f.o.config.ChainsyncAwaitEagerness = func(
+		context.Context,
+		ouroboros.ConnectionId,
+		uint64,
+		func() ochainsync.Tip,
+	) error {
+		waited = true
+		f.now = f.now.Add(time.Hour)
+		return nil
+	}
+
+	f.now = f.now.Add(40 * time.Second)
+	f.rollForward(t, newTestBlockHeader(100, 1, 0xaa))
+
+	require.True(t, waited, "the eagerness wait must be consulted")
+	tc := f.state.GetTrackedClient(f.conn)
+	require.NotNil(t, tc)
+	require.False(t, tc.Patience.Exhausted)
+	require.InDelta(t, 61, tc.Patience.Tokens, 1e-9)
+}
+
 func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 	t.Parallel()
 	t.Run("verification failure", func(t *testing.T) {
@@ -5564,6 +5592,154 @@ func TestChainsyncClientRollBackwardUpdatesTrackedClient(t *testing.T) {
 			require.Nil(t, state.GetTrackedClient(connID))
 		})
 	}
+}
+
+// A header past the Limit on Eagerness is held in the roll-forward callback
+// (the peer is paused) and reaches the ledger once the limit admits it. Its
+// tip is observed for chain selection before the wait, so the limit is
+// computed with the header included.
+func TestChainsyncClientRollForwardWaitsForEagernessLimitBeforeLedger(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
+	state := dchainsync.NewState(bus, nil)
+	conn := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	require.True(t, state.AddClientConnId(conn))
+
+	release := make(chan struct{})
+	entered := make(chan uint64, 1)
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncAwaitEagerness: func(
+			ctx context.Context,
+			connId ouroboros.ConnectionId,
+			blockNumber uint64,
+			_ func() ochainsync.Tip,
+		) error {
+			require.Equal(t, conn, connId)
+			entered <- blockNumber
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
+	o.chainsyncState = state
+	o.eventBus = bus
+
+	header := newTestBlockHeader(100, 7, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 7,
+	}
+	returned := make(chan error, 1)
+	go func() {
+		returned <- o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{ConnectionId: conn},
+			0,
+			header,
+			tip,
+		)
+	}()
+
+	select {
+	case block := <-entered:
+		require.Equal(t, uint64(7), block)
+	case <-time.After(10 * time.Second):
+		t.Fatal("eagerness wait was not consulted for the header")
+	}
+	select {
+	case <-tipCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("tip must be observed before the eagerness wait")
+	}
+	select {
+	case <-returned:
+		t.Fatal("callback returned while the header is past the limit")
+	case <-ledgerCh:
+		t.Fatal("header reached the ledger while past the limit")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-returned:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("callback did not return after the limit admitted the header")
+	}
+	select {
+	case evt := <-ledgerCh:
+		data, ok := evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, conn, data.ConnectionId)
+	case <-time.After(10 * time.Second):
+		t.Fatal("header must reach the ledger once admitted")
+	}
+}
+
+// A wait that fails (the connection closed) must fail the callback without
+// handing the header to the ledger.
+func TestChainsyncClientRollForwardEagernessWaitErrorWithholdsHeader(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	state := dchainsync.NewState(bus, nil)
+	conn := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	require.True(t, state.AddClientConnId(conn))
+
+	waitErr := errors.New("connection closed")
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncAwaitEagerness: func(
+			context.Context,
+			ouroboros.ConnectionId,
+			uint64,
+			func() ochainsync.Tip,
+		) error {
+			return waitErr
+		},
+	})
+	o.chainsyncState = state
+	o.eventBus = bus
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+	err := o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: conn},
+		0,
+		header,
+		tip,
+	)
+	require.ErrorIs(t, err, waitErr)
+	testutil.RequireNoReceive(
+		t,
+		ledgerCh,
+		200*time.Millisecond,
+		"header must not reach the ledger when the eagerness wait fails",
+	)
 }
 
 // TestSubscribeChainsyncResyncPenalizesOnlyTheResponsibleDeferredHeaderPeer

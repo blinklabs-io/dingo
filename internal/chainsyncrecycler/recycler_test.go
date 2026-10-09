@@ -15,6 +15,7 @@
 package chainsyncrecycler
 
 import (
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -603,6 +604,70 @@ func TestTickRecyclesStalledActiveConnection(t *testing.T) {
 	)
 	assert.NotContains(t, st.recycleAt, connId.String())
 	assert.Contains(t, st.lastRecycled, connId.String())
+}
+
+// A peer held at the Limit on Eagerness sends no headers because the selector
+// paused it, so its silence is not a stall. Recycling the primary for it would
+// release the other fork by role instead of density. The control case, the
+// same stalled client without the hold, is recycled.
+func TestTickDoesNotRecycleStalledClientHeldAtEagernessLimit(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		active  uint
+		held    bool
+		wantEvt string
+	}{
+		{"held primary", 1, true, ""},
+		{"held non-primary", 2, true, ""},
+		{"unheld primary", 1, false, "stalled_active_connection"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			connId := testConnId(1)
+			other := testConnId(2)
+			active := testConnId(tc.active)
+			ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
+			state := &fakeChainsyncState{
+				tracked: []chainsync.TrackedClient{
+					stalledClient(connId, false),
+					stalledClient(other, false),
+				},
+				activeConn: &active,
+			}
+			sel := &fakeChainSelector{paused: map[string]bool{}}
+			if tc.held {
+				sel.paused[connId.String()] = true
+			}
+			pub := newFakePublisher()
+			r, _ := newTestRecycler(t, ledger, state, sel, pub, Config{})
+
+			now := time.Now()
+			st := newTestTickState(100, now)
+			st.recycleAt[connId.String()] = now.Add(-time.Second)
+
+			runTickWith(r, st, LiveComponents{
+				Ledger:         ledger,
+				ChainsyncState: state,
+				ChainSelector:  sel,
+			}, now, 100)
+
+			recycled := pub.byType(
+				connmanager.ConnectionRecycleRequestedEventType,
+			)
+			removed := pub.byType(chainsync.ClientRemoveRequestedEventType)
+			if tc.wantEvt == "" {
+				assert.Empty(t, recycled, "a held client must not be recycled")
+				assert.Empty(t, removed, "a held client must not be removed")
+				assert.NotContains(t, st.recycleAt, connId.String())
+				return
+			}
+			require.Len(t, recycled, 1)
+			evt, ok := recycled[0].evt.Data.(connmanager.ConnectionRecycleRequestedEvent)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantEvt, evt.Reason)
+		})
+	}
 }
 
 func TestTickRemovesStalledNonPrimaryConnection(t *testing.T) {
@@ -2002,4 +2067,84 @@ func TestTickSkipsSecurityParamWhenUnset(t *testing.T) {
 
 	_, _, sets := selector.observed()
 	assert.Equal(t, 0, sets)
+}
+
+// A primary the selector holds at the Limit on Eagerness is the reason the
+// local tip is not moving, so the plateau watchdog must not resync it: the
+// selector resolves the hold by density. The unheld control is resynced.
+func TestTickPlateauDoesNotResyncPrimaryHeldAtEagernessLimit(t *testing.T) {
+	t.Parallel()
+	for _, held := range []bool{true, false} {
+		t.Run(fmt.Sprintf("held=%v", held), func(t *testing.T) {
+			t.Parallel()
+			connId := testConnId(3)
+			active := connId
+			ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
+			stalled := stalledClient(connId, false)
+			state := &fakeChainsyncState{
+				tracked:    []chainsync.TrackedClient{stalled},
+				activeConn: &active,
+			}
+			selector := plateauSelector(connId, 500)
+			selector.paused = map[string]bool{connId.String(): held}
+			pub := newFakePublisher()
+			r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+			now := time.Now()
+			st := newTestTickState(100, now.Add(-25*time.Minute))
+			runTickWith(r, st, LiveComponents{
+				Ledger:         ledger,
+				ChainsyncState: state,
+				ChainSelector:  selector,
+			}, now, 100)
+
+			events := pub.byType(event.ChainsyncResyncEventType)
+			if !held {
+				require.Len(t, events, 1)
+				return
+			}
+			assert.Empty(t, events, "a held primary must not be resynced")
+			assert.Empty(t, pub.byType(
+				connmanager.ConnectionRecycleRequestedEventType,
+			))
+			assert.Equal(t, now, st.lastProgressAt,
+				"the plateau window restarts instead of re-firing each tick")
+		})
+	}
+}
+
+// A plateau resync of an unheld primary does not realign a peer the selector
+// holds at the limit: that peer's cursor is where the hold stopped it.
+func TestTickRealignSkipsPeerHeldAtEagernessLimit(t *testing.T) {
+	t.Parallel()
+	connId := testConnId(3)
+	heldPeer := testConnId(4)
+	aheadPeer := testConnId(5)
+	active := connId
+	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
+	state := &fakeChainsyncState{
+		tracked: []chainsync.TrackedClient{
+			activeClient(connId, 100),
+			activeClient(heldPeer, 400),
+			activeClient(aheadPeer, 400),
+		},
+		activeConn: &active,
+	}
+	selector := plateauSelector(connId, 500)
+	selector.paused = map[string]bool{heldPeer.String(): true}
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+	now := time.Now()
+	st := newTestTickState(100, now.Add(-25*time.Minute))
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, 100)
+
+	events := pub.byType(event.ChainsyncResyncEventType)
+	require.Len(t, events, 2, "plateau resync plus one realign")
+	realign := events[1].evt.Data.(event.ChainsyncResyncEvent)
+	assert.Equal(t, aheadPeer, realign.ConnectionId)
 }

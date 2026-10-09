@@ -40,9 +40,19 @@ type GenesisDensityDisconnect struct {
 	// DominatingDensity is the blocks the dominating peer has delivered in
 	// the window.
 	DominatingDensity uint64
-	// MaxDensity is the blocks ConnectionId has in the window. Its head has
-	// reached the window end, so this is also the most it can ever have.
+	// MaxDensity is the blocks ConnectionId has in the window. In the provable
+	// comparison its head has reached the window end, so this is also the most
+	// it can ever have; see EagernessStandoff for the standoff rules.
 	MaxDensity uint64
+	// EagernessStandoff is true when ConnectionId was removed by a Limit on
+	// Eagerness standoff rule rather than by the provable comparison. Either
+	// both peers were held at the limit and ConnectionId delivered fewer
+	// blocks in (Intersection, min(head slots)], with WindowSlots that span;
+	// or ConnectionId was idle and the held DominatingConnectionId has at
+	// least as many blocks in the Genesis window. MaxDensity is then the
+	// blocks ConnectionId delivered in that span, which is exact: every header
+	// up to its head was delivered, and an idle peer advertises no more.
+	EagernessStandoff bool
 }
 
 // fragmentWindowBounds returns the lower and upper bound on the number of
@@ -54,8 +64,8 @@ type GenesisDensityDisconnect struct {
 // slots: its tip can move forward, so an honest peer sitting at its own tip on
 // a short fork is not complete. ouroboros-consensus densityDisconnect only
 // disconnects such a peer for a rival offering more than k blocks after the
-// anchor, which a k+1 header fragment that still holds the intersection can
-// never show.
+// anchor; idlePeerDisconnectLocked applies that rule to a rival held at the
+// Limit on Eagerness, which is the one case a header fragment can show it.
 func fragmentWindowBounds(
 	points []ocommon.Point,
 	after uint64,
@@ -106,12 +116,7 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 	cs.lastGenesisDensityEval = now
 
 	window := cs.genesisWindowSlotsLocked()
-	type candidate struct {
-		connId   ouroboros.ConnectionId
-		fragment CandidateFragment
-		points   []ocommon.Point
-	}
-	candidates := make([]candidate, 0, len(cs.peerTips))
+	candidates := make([]densityCandidate, 0, len(cs.peerTips))
 	for connId, peerTip := range cs.peerTips {
 		if _, done := cs.genesisDensityDisconnected[connId]; done ||
 			!cs.peerCanCorroborateLocked(connId, peerTip) {
@@ -121,10 +126,12 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 		if fragment.Len() == 0 {
 			continue
 		}
-		candidates = append(candidates, candidate{
+		candidates = append(candidates, densityCandidate{
 			connId:   connId,
 			fragment: fragment,
 			points:   fragment.Points(),
+			held:     peerTip.eagernessPaused > 0,
+			idle:     peerTip.deliveredAdvertisedTip(),
 		})
 	}
 
@@ -185,5 +192,179 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 			break
 		}
 	}
+	return append(
+		out,
+		cs.eagernessStandoffDisconnectsLocked(candidates, window)...,
+	)
+}
+
+// densityCandidate is one live candidate's fragment as the disconnector
+// compares it.
+type densityCandidate struct {
+	connId   ouroboros.ConnectionId
+	fragment CandidateFragment
+	points   []ocommon.Point
+	// held is true while the peer's header stream is paused at the Limit on
+	// Eagerness.
+	held bool
+	// idle is true when the peer has delivered every header up to the tip it
+	// advertises, so it has nothing more to send until it extends its chain.
+	idle bool
+}
+
+// eagernessStandoffDisconnectsLocked resolves forks that are all held at the
+// Limit on Eagerness. A held peer delivers no further headers, so two forks
+// that both run more than k past their fork point can never show the
+// window-wide density the provable comparison above needs, and the limit would
+// stay put until something unrelated dropped one of them.
+//
+// Upstream densityDisconnect settles this by removing the losing peer, which
+// moves the Limit on Eagerness fragment. Here the loser is the fork with fewer
+// blocks in the slots both have delivered, (intersection, min(head slots)]:
+// every header up to a head is delivered, so that count is exact for both. The
+// same count decides which fork the selector prefers, and equal counts fall to
+// the selector's transport order, so the survivor is the peer chain selection
+// already favours rather than whichever the stall recycler reaches first.
+// Only forks are compared; a held peer that is a prefix of another is merely
+// behind. A fork that is still streaming is not held and decides nothing.
+//
+// A held peer also removes an idle one, fork or prefix; see
+// idlePeerDisconnectLocked.
+func (cs *ChainSelector) eagernessStandoffDisconnectsLocked(
+	candidates []densityCandidate,
+	window uint64,
+) []GenesisDensityDisconnect {
+	var out []GenesisDensityDisconnect
+	for i := range candidates {
+		for j := i + 1; j < len(candidates); j++ {
+			a, b := candidates[i], candidates[j]
+			if !a.held && !b.held {
+				continue
+			}
+			if _, done := cs.genesisDensityDisconnected[a.connId]; done {
+				continue
+			}
+			if _, done := cs.genesisDensityDisconnected[b.connId]; done {
+				continue
+			}
+			intersection, ok := a.fragment.Intersect(b.fragment)
+			if !ok {
+				continue
+			}
+			// Checked before the prefix skip: an idle peer that stopped on
+			// the held peer's own chain pins the limit at its tip just as an
+			// idle fork does.
+			if !a.held || !b.held {
+				if d, ok := cs.idlePeerDisconnectLocked(
+					a, b, intersection, window,
+				); ok {
+					out = append(out, d)
+				}
+				continue
+			}
+			if intersection.Slot == a.fragment.HeadPoint().Slot ||
+				intersection.Slot == b.fragment.HeadPoint().Slot {
+				continue
+			}
+			compared := min(
+				a.fragment.HeadPoint().Slot,
+				b.fragment.HeadPoint().Slot,
+			)
+			countA, _ := fragmentWindowBounds(
+				a.points, intersection.Slot, compared,
+			)
+			countB, _ := fragmentWindowBounds(
+				b.points, intersection.Slot, compared,
+			)
+			winner, loser := a, b
+			winnerCount, loserCount := countA, countB
+			switch {
+			case countB > countA:
+				winner, loser = b, a
+				winnerCount, loserCount = countB, countA
+			case countA == countB &&
+				cs.compareTransportLocked(a.connId, b.connId, true) ==
+					ChainBBetter:
+				winner, loser = b, a
+			}
+			cs.markDensityDisconnectedLocked(loser.connId)
+			out = append(out, GenesisDensityDisconnect{
+				ConnectionId:           loser.connId,
+				DominatingConnectionId: winner.connId,
+				Intersection:           intersection,
+				WindowSlots:            compared - intersection.Slot,
+				DominatingDensity:      winnerCount,
+				MaxDensity:             loserCount,
+				EagernessStandoff:      true,
+			})
+		}
+	}
 	return out
+}
+
+func (cs *ChainSelector) markDensityDisconnectedLocked(
+	connId ouroboros.ConnectionId,
+) {
+	if cs.genesisDensityDisconnected == nil {
+		cs.genesisDensityDisconnected = make(
+			map[ouroboros.ConnectionId]struct{},
+		)
+	}
+	cs.genesisDensityDisconnected[connId] = struct{}{}
+}
+
+// idlePeerDisconnectLocked applies upstream's idling rule to a fork held at
+// the Limit on Eagerness against one that has gone idle: an idling peer loses
+// to a rival that offers more than k blocks past the intersection and has at
+// least as many blocks in the Genesis window. A held peer has been offered a
+// header beyond the limit, so it offers more than k blocks. The window counts
+// are compared here: the provable comparison skips a held fork whose window is
+// still incomplete, so it cannot be relied on to have removed a held peer with
+// fewer window blocks than the idle one. An idle peer has delivered every
+// header up to the tip it advertises, so its count is exact rather than a lower
+// bound.
+//
+// The idle peer may also be a prefix of the held one: a peer that stopped at
+// an older tip on the same chain. Upstream removes it as well, since it offers
+// no blocks past the intersection, and it would otherwise hold the limit at
+// its own tip.
+//
+// An idle peer is not aged out, because keepalive traffic refreshes its
+// liveness, and its trailing slots keep the provable comparison from
+// excluding it. Left alone it would hold the limit at its fork point until
+// the stall recycler happened to remove it. The advertised tip is the peer's
+// own claim, so a peer can only make itself look idle, never another.
+func (cs *ChainSelector) idlePeerDisconnectLocked(
+	a, b densityCandidate,
+	intersection ocommon.Point,
+	window uint64,
+) (GenesisDensityDisconnect, bool) {
+	held, idle := a, b
+	if b.held {
+		held, idle = b, a
+	}
+	if held.held == idle.held || !idle.idle ||
+		held.fragment.HeadPoint().Slot == intersection.Slot {
+		return GenesisDensityDisconnect{}, false
+	}
+	windowEnd := safeAddUint64(intersection.Slot, window)
+	heldBlocks, _ := fragmentWindowBounds(
+		held.points, intersection.Slot, windowEnd,
+	)
+	idleBlocks, _ := fragmentWindowBounds(
+		idle.points, intersection.Slot, windowEnd,
+	)
+	if heldBlocks < idleBlocks {
+		return GenesisDensityDisconnect{}, false
+	}
+	cs.markDensityDisconnectedLocked(idle.connId)
+	return GenesisDensityDisconnect{
+		ConnectionId:           idle.connId,
+		DominatingConnectionId: held.connId,
+		Intersection:           intersection,
+		WindowSlots:            window,
+		DominatingDensity:      heldBlocks,
+		MaxDensity:             idleBlocks,
+		EagernessStandoff:      true,
+	}, true
 }

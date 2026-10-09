@@ -480,6 +480,34 @@ func TestGenesisDensityDisconnectLogReportsDenial(t *testing.T) {
 	require.Contains(t, logs.String(), "denied=false")
 }
 
+// A Limit on Eagerness standoff loss is a heuristic verdict, not a proof that
+// the peer serves a sparser chain, so the peer is disconnected but not put on
+// the deny list: an honest fork that lost it must be redialable.
+func TestGenesisDensityDisconnectStandoffDoesNotDenyPeer(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	n, registry := newMetricsTestNode(t)
+	n.config.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	n.peerGov = peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+
+	conn := newNodeTestConnId(3307)
+	n.onGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
+		ConnectionId:      conn,
+		EagernessStandoff: true,
+	})
+	assert.False(t, n.peerGov.IsDenied(conn.RemoteAddr.String()))
+	assert.Contains(t, logs.String(), "denied=false")
+	assert.Equal(
+		t,
+		map[string]float64{"": 1},
+		counterValues(
+			t,
+			registry,
+			"dingo_chainselection_gdd_disconnects_total",
+		),
+	)
+}
+
 // Without k and a positive f the node keeps the selector's long-standing
 // 6480-slot window for the exit horizon but must not run the Genesis Density
 // Disconnector over it.
@@ -516,4 +544,48 @@ func TestChainSelectorGenesisWindow(t *testing.T) {
 			assert.Equal(t, tc.gdd, gdd)
 		})
 	}
+}
+
+func chainSelectionGaugeValue(
+	t *testing.T,
+	registry *prometheus.Registry,
+	name string,
+) float64 {
+	t.Helper()
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() == name {
+			require.Len(t, family.GetMetric(), 1)
+			return family.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+	t.Fatalf("metric %s not registered", name)
+	return 0
+}
+
+// The Limit on Eagerness gauges are registered before the selector exists, so
+// they read 0 until Run publishes it, then follow the selector's limit.
+func TestLimitOnEagernessGauges(t *testing.T) {
+	t.Parallel()
+	n, registry := newMetricsTestNode(t)
+	const blockGauge = "dingo_chainselection_loe_block_number"
+	const slotGauge = "dingo_chainselection_loe_intersection_slot"
+	assert.Zero(t, chainSelectionGaugeValue(t, registry, blockGauge))
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:   true,
+			SecurityParam: 5,
+		},
+	)
+	selector.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1000, Hash: []byte("local")},
+		BlockNumber: 10,
+	})
+	n.chainSelectorForGauges.Store(selector)
+
+	assert.Equal(t, 15.0, chainSelectionGaugeValue(t, registry, blockGauge))
+	assert.Zero(t, chainSelectionGaugeValue(t, registry, slotGauge),
+		"no candidate has delivered a header, so there is no intersection")
 }

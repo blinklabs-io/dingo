@@ -84,38 +84,39 @@ type scheduledChainsyncResync struct {
 	fired  bool
 }
 
-type chainsyncClientDoneContext struct {
-	done <-chan struct{}
-}
-
-func (c chainsyncClientDoneContext) Deadline() (time.Time, bool) {
-	return time.Time{}, false
-}
-
-func (c chainsyncClientDoneContext) Done() <-chan struct{} {
-	return c.done
-}
-
-func (c chainsyncClientDoneContext) Err() error {
-	select {
-	case <-c.done:
-		return context.Canceled
-	default:
-		return nil
-	}
-}
-
-func (c chainsyncClientDoneContext) Value(any) any {
-	return nil
-}
-
+// chainsyncAdmissionContext returns the context an admission wait inside a
+// chainsync client callback is bounded by, and the function that releases it.
+//
+// The callback runs on the protocol's receive loop, and the protocol's DoneChan
+// closes only after that loop returns, so DoneChan alone can never release a
+// wait that is holding the loop. The context is therefore also cancelled by the
+// protocol's StopChan, which Stop closes before waiting for the loops, and by
+// the owning connection's shutdown signal, which closes before the muxer stops.
 func chainsyncAdmissionContext(
 	ctx ochainsync.CallbackContext,
-) context.Context {
-	if ctx.Client == nil || ctx.Client.ProtocolInstance() == nil {
-		return context.Background()
+) (context.Context, context.CancelFunc) {
+	var stopChan, doneChan <-chan struct{}
+	if ctx.Client != nil {
+		if proto := ctx.Client.ProtocolInstance(); proto != nil {
+			stopChan = proto.StopChan()
+			doneChan = proto.DoneChan()
+		}
 	}
-	return chainsyncClientDoneContext{done: ctx.Client.DoneChan()}
+	connDone := ctx.ConnectionDoneChan
+	if stopChan == nil && doneChan == nil && connDone == nil {
+		return context.Background(), func() {}
+	}
+	admissionCtx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-stopChan:
+		case <-doneChan:
+		case <-connDone:
+		case <-admissionCtx.Done():
+		}
+		cancel()
+	}()
+	return admissionCtx, cancel
 }
 
 func defaultChainsyncScheduleAt(onset time.Time, fn func()) func() {
@@ -1080,7 +1081,7 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	// Observe the rollback for chain selection FIRST — it trims the peer's
 	// observed frontier (ApplyRollback), which can change its corroboration
 	// status, so the apply gate below must reflect it. If the hook handles it
-	// synchronously (Genesis corroboration active), skip the async publish to
+	// synchronously (Genesis selection mode), skip the async publish to
 	// avoid a double update; otherwise publish for the async subscriber. This
 	// mirrors the roll-forward ChainsyncObservePeerTip ordering.
 	rollbackEvent := chainselection.PeerRollbackEvent{
@@ -1203,10 +1204,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// permitted wait therefore blocks only this peer and never the shared
 		// ledger ChainSync dispatch mutex/goroutine.
 		if ingressEligible && o.chainsyncHeaderAdmission != nil {
+			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 			accepted, err := o.chainsyncHeaderAdmission(
-				chainsyncAdmissionContext(ctx),
+				admissionCtx,
 				chainsyncEvent,
 			)
+			cancelAdmission()
 			if err != nil {
 				o.config.Logger.Warn(
 					"chainsync: future-header admission failed closed",
@@ -1332,8 +1335,8 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ObservedPrevHash: v.PrevHash().Bytes(),
 				ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
 			}
-			// If the hook handles it synchronously (Genesis corroboration
-			// active, so the apply gate below must reflect this header), skip
+			// If the hook handles it synchronously (Genesis selection mode,
+			// so the apply and eagerness gates below reflect this header), skip
 			// the async publish to avoid a double update; otherwise publish for
 			// the async chain-selection and peergov subscribers.
 			observedSync := false
@@ -1433,6 +1436,27 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			)
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
+		}
+		// Limit on Eagerness: the tip was observed above, so the limit already
+		// accounts for this header. Waiting here pauses only this peer and
+		// leaves its cursor in place, so the header is delivered, not lost,
+		// once the limit admits it.
+		if o.config.ChainsyncAwaitEagerness != nil {
+			var appliedTip func() ochainsync.Tip
+			if o.ledgerState != nil {
+				appliedTip = o.ledgerState.Tip
+			}
+			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+			err := o.config.ChainsyncAwaitEagerness(
+				admissionCtx,
+				ctx.ConnectionId,
+				v.BlockNumber(),
+				appliedTip,
+			)
+			cancelAdmission()
+			if err != nil {
+				return fmt.Errorf("wait for eagerness limit: %w", err)
+			}
 		}
 		// The only target ledger may later publish is paired with this exact
 		// delivered header and its apply-eligibility decision. Do not make

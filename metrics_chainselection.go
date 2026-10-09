@@ -92,6 +92,42 @@ func (n *Node) registerChainSelectionMetrics(r *promutil.Registration) {
 		metrics.rollbackRegistrations.WithLabelValues(string(outcome))
 	}
 	n.chainSelectionMetrics = metrics
+	// Both read 0 while the cap is inactive (caught up) so a scrape never
+	// reports a stale limit.
+	promutil.Register(r, prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_chainselection_loe_block_number",
+			Help: "highest block number chain selection may reach under the Limit on Eagerness, 0 when the cap is inactive",
+		},
+		func() float64 { return n.eagernessLimitGauge(false) },
+	))
+	promutil.Register(r, prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_chainselection_loe_intersection_slot",
+			Help: "slot of the point the Limit on Eagerness is measured from: the point common to all candidate fragments, or the last one they shared once they stop overlapping; 0 when inactive or measured from the local tip",
+		},
+		func() float64 { return n.eagernessLimitGauge(true) },
+	))
+}
+
+// eagernessLimitGauge reads the current Limit on Eagerness at scrape time:
+// the intersection slot when slot is true, the block-number limit otherwise.
+// It reads chainSelectorForGauges rather than chainSelector because the gauges
+// are registered in New, before Run creates the selector, and a scrape may
+// race that assignment.
+func (n *Node) eagernessLimitGauge(slot bool) float64 {
+	selector := n.chainSelectorForGauges.Load()
+	if selector == nil {
+		return 0
+	}
+	limit := selector.EagernessLimit()
+	if !limit.Active {
+		return 0
+	}
+	if slot {
+		return float64(limit.Point.Slot)
+	}
+	return float64(limit.BlockNumber)
 }
 
 // recordChainSelectionStall counts one selected-to-none transition. Safe to
@@ -126,9 +162,11 @@ func (n *Node) recordRollbackRegistration(
 const genesisDensityDenyDuration = 10 * time.Minute
 
 // onGenesisDensityDisconnect acts on a peer the Genesis Density Disconnector
-// found provably sparser: it counts the report, denies the peer for
-// genesisDensityDenyDuration when its connection ID carries a remote address,
-// and closes its connection if it is still open.
+// reported: it counts the report, denies the peer for
+// genesisDensityDenyDuration when the report is the provable comparison and its
+// connection ID carries a remote address, and closes its connection if it is
+// still open. A Limit on Eagerness standoff loss is not denied: that rule is a
+// heuristic an honest fork can lose, so the peer must stay redialable.
 func (n *Node) onGenesisDensityDisconnect(
 	d chainselection.GenesisDensityDisconnect,
 ) {
@@ -140,14 +178,18 @@ func (n *Node) onGenesisDensityDisconnect(
 	// A connection ID without a remote address cannot be denied, so the log
 	// reports whether the deny happened rather than implying it.
 	denied := false
-	if d.ConnectionId.RemoteAddr != nil {
+	if !d.EagernessStandoff && d.ConnectionId.RemoteAddr != nil {
 		denied = n.denyPeer(
 			d.ConnectionId.RemoteAddr.String(),
 			genesisDensityDenyDuration,
 		)
 	}
+	msg := "disconnecting peer serving a provably sparser chain"
+	if d.EagernessStandoff {
+		msg = "disconnecting peer that lost a standoff at the limit on eagerness"
+	}
 	n.config.logger.Warn(
-		"disconnecting peer serving a provably sparser chain",
+		msg,
 		"connection_id", d.ConnectionId.String(),
 		"dominating_connection_id", d.DominatingConnectionId.String(),
 		"intersection_slot", d.Intersection.Slot,
