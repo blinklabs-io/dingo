@@ -699,6 +699,11 @@ func processGapBlockTransactions(
 			if !hasGovernance {
 				continue
 			}
+			if conwayPParams == nil && len(votingProcedures) > 0 {
+				return errors.New(
+					"missing Conway protocol parameters for governance gap block processing",
+				)
+			}
 			if len(proposalProcedures) > 0 {
 				if conwayPParams == nil {
 					return errors.New(
