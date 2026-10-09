@@ -55,6 +55,9 @@ func TestBulkSlot_WriteDeadlineOnRealServer(t *testing.T) {
 					Cbor: body,
 				})
 			}
+			// Buffered so the probe that finally gets a slot does not block.
+			mp.entered = make(chan struct{}, 2)
+			mp.release = make(chan struct{})
 			u := NewUtxorpc(UtxorpcConfig{
 				Logger:                    discardLogger(),
 				Mempool:                   mp,
@@ -82,18 +85,41 @@ func TestBulkSlot_WriteDeadlineOnRealServer(t *testing.T) {
 			)
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", "application/proto")
-			resp, err := client.Do(req)
-			require.NoError(t, err)
-			defer resp.Body.Close()
-			require.Equal(t, 2, resp.ProtoMajor, "served over HTTP/2")
+			// The deadline can expire before the response headers are
+			// flushed (marshalling 10 MiB under -race is slow), in which
+			// case the server resets the stream and Do fails. Either outcome
+			// leaves the body unread, which is all this test needs.
+			type doResult struct {
+				resp *http.Response
+				err  error
+			}
+			done := make(chan doResult, 1)
+			go func() {
+				resp, err := client.Do(req)
+				done <- doResult{resp, err}
+			}()
+			t.Cleanup(func() {
+				// Drop the connections, rather than Close, which waits for a
+				// handler that may still be blocked writing, so a Do still
+				// waiting on headers returns.
+				srv.CloseClientConnections()
+				if r := <-done; r.err == nil {
+					r.resp.Body.Close()
+				}
+			})
 
+			// The handler is parked inside the mempool read, so the slot is
+			// provably held before the probe.
+			testutil.RequireReceive(t, mp.entered, 5*time.Second,
+				"ReadMempool reached the mempool")
 			submitSrv := &submitServiceServer{utxorpc: u}
 			_, err = submitSrv.ReadMempool(
 				context.Background(),
 				connect.NewRequest(&submit.ReadMempoolRequest{}),
 			)
 			require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err),
-				"the unread response still holds its slot")
+				"the in-flight request holds its slot")
+			close(mp.release)
 			testutil.WaitForCondition(t, func() bool {
 				_, err := submitSrv.ReadMempool(
 					context.Background(),
