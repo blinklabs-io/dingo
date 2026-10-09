@@ -647,7 +647,7 @@ func (s *Store) setTransactionBatched(
 }
 
 // SetTransactionLeiosClosure records a transaction on the Leios endorser-block
-// closure path (the Musashi/Haskell-conformant ValidateNone apply). It behaves
+// closure path (the certified-closure ValidateNone apply). It behaves
 // like SetTransaction except that a consumed input already spent by a
 // *different* transaction is treated as a no-op instead of ErrUtxoConflict,
 // matching the reference ledger's applyLeiosClosure: two certified endorser
