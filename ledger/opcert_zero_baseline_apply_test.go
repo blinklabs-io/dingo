@@ -294,6 +294,7 @@ func TestLedgerProcessBlockOpCertRejectsBoundaryCounterConflict(t *testing.T) {
 	ls := newOpCertBaselineLedgerState(t, boundarySlot)
 	poolKeyHash := lcommon.PoolKeyHash(opCertBaselineIssuer().Hash())
 	require.NoError(t, ls.db.UpdatePoolOpCertSequence(
+		context.Background(),
 		poolKeyHash,
 		0,
 		boundarySlot,

@@ -472,10 +472,11 @@ INSERT INTO pool_registration_owner (
 				relay.PoolRegistrationID = registration.ID
 				relayID, err := queryReturnedID(ctx, db, `
 INSERT INTO pool_registration_relay (
-    ipv4, ipv6, hostname, pool_registration_id, pool_id, port
-) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
+    ipv4, ipv6, relay_type, hostname, pool_registration_id, pool_id, port
+) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 					netIPValue(relay.Ipv4),
 					netIPValue(relay.Ipv6),
+					relay.Type,
 					relay.Hostname,
 					relay.PoolRegistrationID,
 					relay.PoolID,
@@ -898,10 +899,7 @@ func (s *Store) UpdatePoolOpCertSequence(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			result, err := db.ExecContext(ctx, `
-INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
-VALUES (?, ?, ?)
-ON CONFLICT (pool_key_hash, slot) DO NOTHING`,
+			result, err := s.execCached(ctx, db, poolOpCertSequenceUpsertSQL,
 				poolKeyHash.Bytes(),
 				slotValue,
 				sequenceValue,
@@ -918,32 +916,23 @@ ON CONFLICT (pool_key_hash, slot) DO NOTHING`,
 				if err := db.QueryRowContext(ctx, `
 SELECT sequence FROM pool_opcert_sequence
 WHERE pool_key_hash = ? AND slot = ?`,
-					poolKeyHash.Bytes(),
-					slotValue,
+					poolKeyHash.Bytes(), slotValue,
 				).Scan(&storedSequence); err != nil {
 					return err
 				}
 				if storedSequence != sequenceValue {
 					return fmt.Errorf(
 						"opcert counter conflict for pool %x at slot %d: existing %d, candidate %d",
-						poolKeyHash.Bytes(),
-						slot,
-						storedSequence,
-						sequence,
+						poolKeyHash.Bytes(), slot, storedSequence, sequence,
 					)
 				}
 			} else if inserted != 1 {
 				return fmt.Errorf(
 					"insert opcert counter for pool %x at slot %d affected %d rows",
-					poolKeyHash.Bytes(),
-					slot,
-					inserted,
+					poolKeyHash.Bytes(), slot, inserted,
 				)
 			}
-			_, err = db.ExecContext(ctx, `
-UPDATE pool SET latest_op_cert_sequence = ?
-WHERE pool_key_hash = ?
-  AND latest_op_cert_sequence < ?`,
+			_, err = s.execCached(ctx, db, poolUpdateLatestOpCertSequenceSQL,
 				sequenceValue,
 				poolKeyHash.Bytes(),
 				sequenceValue,
@@ -952,6 +941,16 @@ WHERE pool_key_hash = ?
 		},
 	)
 }
+
+const poolOpCertSequenceUpsertSQL = `
+INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
+VALUES (?, ?, ?)
+ON CONFLICT (pool_key_hash, slot) DO NOTHING`
+
+const poolUpdateLatestOpCertSequenceSQL = `
+UPDATE pool SET latest_op_cert_sequence = ?
+WHERE pool_key_hash = ?
+  AND latest_op_cert_sequence < ?`
 
 func (s *Store) LatestPoolOpCertSequence(
 	poolKeyHash lcommon.PoolKeyHash,
@@ -1102,9 +1101,111 @@ func (s *Store) LatestPoolOpCertSequences(
 		if err := rows.Scan(&poolKeyHash, &sequence); err != nil {
 			return nil, err
 		}
-		ret[string(poolKeyHash)] = uint64(sequence)
+		value, err := opCertSequenceValue(sequence)
+		if err != nil {
+			return nil, err
+		}
+		ret[string(poolKeyHash)] = value
 	}
 	return ret, rows.Err()
+}
+
+// PoolOpCertSequencesChangedAfterSQL lists the pool of every op-cert row after
+// a slot, read as a range of idx_pool_opcert_sequence_slot. It is not
+// DISTINCT: that lets the planner prefer a full scan of the (pool_key_hash,
+// slot) index to deliver the pools in order, and the caller deduplicates the
+// few rows a recent slot leaves. Exported, like LatestPoolOpCertSequencesSQL,
+// so a test can pin its plan.
+const PoolOpCertSequencesChangedAfterSQL = `
+SELECT pool_key_hash
+FROM pool_opcert_sequence
+WHERE slot > ?`
+
+// PoolOpCertSequenceAtOrBeforeSQL is one pool's highest sequence at or before
+// a slot, read through idx_pool_opcert_sequence_pool_slot.
+const PoolOpCertSequenceAtOrBeforeSQL = `
+SELECT MAX(sequence)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND slot <= ?`
+
+func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
+	slot uint64,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	// A slot filter cannot use the (pool_key_hash, sequence) index the
+	// unbounded aggregate reads, and filtering the whole table by slot reads
+	// every row at or before it. Rows after a recent slot are few, so the
+	// unbounded result is corrected for just the pools that have one.
+	ret, err := s.LatestPoolOpCertSequences(txn)
+	if err != nil {
+		return nil, err
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		PoolOpCertSequencesChangedAfterSQL,
+		slotValue,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var changed [][]byte
+	seen := make(map[string]struct{})
+	for rows.Next() {
+		var poolKeyHash []byte
+		if err := rows.Scan(&poolKeyHash); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if _, dup := seen[string(poolKeyHash)]; dup {
+			continue
+		}
+		seen[string(poolKeyHash)] = struct{}{}
+		changed = append(changed, poolKeyHash)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, poolKeyHash := range changed {
+		var sequence sql.NullInt64
+		if err := db.QueryRowContext(
+			ctx,
+			PoolOpCertSequenceAtOrBeforeSQL,
+			poolKeyHash,
+			slotValue,
+		).Scan(&sequence); err != nil {
+			return nil, err
+		}
+		if !sequence.Valid {
+			delete(ret, string(poolKeyHash))
+			continue
+		}
+		value, err := opCertSequenceValue(sequence.Int64)
+		if err != nil {
+			return nil, err
+		}
+		ret[string(poolKeyHash)] = value
+	}
+	return ret, nil
+}
+
+// opCertSequenceValue converts a stored op-cert sequence, failing on a
+// negative one rather than wrapping it into a huge counter.
+func opCertSequenceValue(sequence int64) (uint64, error) {
+	if sequence < 0 {
+		return 0, fmt.Errorf("negative op-cert sequence %d", sequence)
+	}
+	return uint64(sequence), nil
 }
 
 // mithrilTrustBoundarySyncKey mirrors database.mithrilLedgerSlotSyncKey and
@@ -2561,7 +2662,7 @@ latest_ret AS (
     LEFT JOIN certs c ON c.id = rt.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
 )
-SELECT relay.ipv4, relay.ipv6, relay.hostname, relay.id,
+SELECT relay.ipv4, relay.ipv6, relay.relay_type, relay.hostname, relay.id,
        relay.pool_registration_id, relay.pool_id, relay.port,
        pool.pool_key_hash
 FROM latest_reg reg
@@ -2594,6 +2695,7 @@ ORDER BY relay.id`,
 		if err := rows.Scan(
 			&ipv4,
 			&ipv6,
+			&relay.Type,
 			&relay.Hostname,
 			&relay.ID,
 			&relay.PoolRegistrationID,
@@ -3489,7 +3591,7 @@ WHERE pool_registration_id = ?`,
 		return err
 	}
 	rows, err = db.QueryContext(ctx, `
-SELECT ipv4, ipv6, hostname, id, pool_registration_id, pool_id, port
+SELECT ipv4, ipv6, relay_type, hostname, id, pool_registration_id, pool_id, port
 FROM pool_registration_relay
 WHERE pool_registration_id = ?`,
 		registration.ID,
@@ -3504,6 +3606,7 @@ WHERE pool_registration_id = ?`,
 		if err := rows.Scan(
 			&ipv4,
 			&ipv6,
+			&relay.Type,
 			&relay.Hostname,
 			&relay.ID,
 			&relay.PoolRegistrationID,
@@ -3571,7 +3674,7 @@ ORDER BY id`, ids[start:end]...)
 			return err
 		}
 		rows, err = db.QueryContext(ctx, `
-SELECT ipv4, ipv6, hostname, id, pool_registration_id, pool_id, port
+SELECT ipv4, ipv6, relay_type, hostname, id, pool_registration_id, pool_id, port
 FROM pool_registration_relay
 WHERE pool_registration_id IN (`+bindPlaceholders(end-start)+`)
 ORDER BY id`, ids[start:end]...)
@@ -3581,7 +3684,7 @@ ORDER BY id`, ids[start:end]...)
 		for rows.Next() {
 			var relay models.PoolRegistrationRelay
 			var ipv4, ipv6 []byte
-			if err := rows.Scan(&ipv4, &ipv6, &relay.Hostname, &relay.ID, &relay.PoolRegistrationID, &relay.PoolID, &relay.Port); err != nil {
+			if err := rows.Scan(&ipv4, &ipv6, &relay.Type, &relay.Hostname, &relay.ID, &relay.PoolRegistrationID, &relay.PoolID, &relay.Port); err != nil {
 				rows.Close()
 				return err
 			}
