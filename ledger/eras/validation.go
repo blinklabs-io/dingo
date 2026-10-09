@@ -15,6 +15,7 @@
 package eras
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -38,6 +39,22 @@ var ErrExUnitsOverflow = errors.New(
 
 type phase2ValidationSkipper interface {
 	SkipPhase2Validation() bool
+}
+
+type evaluationContextProvider interface {
+	EvaluationContext() context.Context
+}
+
+func evaluationContext(ls lcommon.LedgerState) context.Context {
+	provider, ok := ls.(evaluationContextProvider)
+	if !ok || provider.EvaluationContext() == nil {
+		return context.Background()
+	}
+	return provider.EvaluationContext()
+}
+
+func checkEvaluationCanceled(ls lcommon.LedgerState) error {
+	return evaluationContext(ls).Err()
 }
 
 // MinPoolMarginProvider is satisfied by the dingo ledger state to expose the
@@ -324,15 +341,17 @@ func validateUnknownVoters(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
+	// Votes belong to the GOV state transition, which a phase-2-invalid
+	// transaction does not apply. This must precede the upstream Dijkstra
+	// call, which resolves protocol parameters and ledger-state levels before
+	// it reaches any validity check.
+	if !tx.IsValid() {
+		return nil
+	}
 	if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
 		if err := gdijkstra.UtxoValidateUnknownVoters(tx, slot, ls, pp); err != nil {
 			return err
 		}
-	}
-	// Votes belong to the GOV state transition, which a phase-2-invalid
-	// transaction does not apply.
-	if !tx.IsValid() {
-		return nil
 	}
 	state, ok := ls.(CommitteeCredentialState)
 	if !ok {
@@ -645,6 +664,17 @@ func resolveUtxoValidationSkipIndex(
 		))
 	}
 	return found
+}
+
+// remainingExUnits returns the part of limit not yet consumed, floored at zero
+// in each dimension. Evaluating each redeemer against it keeps the
+// transaction's total work within the limit instead of granting every
+// redeemer the whole limit.
+func remainingExUnits(limit, used lcommon.ExUnits) lcommon.ExUnits {
+	return lcommon.ExUnits{
+		Memory: max(limit.Memory-used.Memory, 0),
+		Steps:  max(limit.Steps-used.Steps, 0),
+	}
 }
 
 // SafeAddExUnits adds two ExUnits values with
@@ -983,6 +1013,10 @@ func ceilRatToUint64(val *big.Rat) uint64 {
 	)
 	if r.Sign() > 0 {
 		q.Add(q, big.NewInt(1))
+	}
+	// Only overflow saturates: a negative result is not the largest value.
+	if q.Sign() < 0 {
+		return 0
 	}
 	if !q.IsUint64() {
 		return math.MaxUint64

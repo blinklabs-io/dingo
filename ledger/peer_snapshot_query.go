@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -23,6 +24,7 @@ import (
 	"net"
 	"sort"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -51,16 +53,16 @@ var bigLedgerPeerQuota = big.NewRat(9, 10)
 // which is exactly the data a dmq-node-compatible client needs for ledger
 // peer discovery.
 //
-// Point-in-time behavior: LocalStateQuery Acquire/Release are still no-ops
-// pending ViewManager snapshot isolation, so the snapshot reflects the
-// current chain tip rather than the acquired point. The reported slot is the
-// current tip slot. When that isolation lands, only the data-sourcing here
-// needs to observe the acquired view; the query surface stays the same.
+// Point-in-time behavior: the snapshot reads through txn, so inside a
+// QueryView it describes the tip the view was acquired at; without one it
+// describes the current tip. The reported slot is that tip's slot.
 func (ls *LedgerState) queryLedgerPeerSnapshot(
+	ctx context.Context,
 	peerKind olocalstatequery.LedgerPeerKind,
+	txn *database.Txn,
 ) (any, error) {
-	txn := ls.db.Transaction(false)
-	defer txn.Release()
+	txn, release := ls.readTxn(ctx, txn)
+	defer release()
 
 	// Read the tip from the same read transaction as the pool/stake data so
 	// the reported snapshot slot describes the exact point the relays and
@@ -102,7 +104,7 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 	if err != nil {
 		return nil, err
 	}
-	pools, err := ls.db.GetPools(pkhs, txn)
+	pools, err := ls.db.GetPools(ctx, pkhs, txn)
 	if err != nil {
 		return nil, fmt.Errorf("GetLedgerPeerSnapshot: get pools: %w", err)
 	}

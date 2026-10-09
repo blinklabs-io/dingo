@@ -63,6 +63,123 @@ func inlineUTxOMap(
 	return cbor.RawMessage(body)
 }
 
+func TestImportLedgerStateRejectsIncompleteEraHistoryBeforeMutation(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		bounds    []EraBound
+		boundsErr error
+		tipSlot   uint64
+		params    EpochLengthFunc
+		wantErr   string
+	}{
+		{
+			name:    "missing bounds",
+			wantErr: "era bounds are required",
+		},
+		{
+			name:      "bounds extraction failure",
+			boundsErr: errors.New("invalid hard-fork telescope"),
+			wantErr:   "extracting era bounds",
+		},
+		{
+			name: "missing parameters for zero-span era",
+			bounds: []EraBound{
+				{Slot: 0, Epoch: 0},
+				{Slot: 0, Epoch: 0},
+			},
+			params: func(era uint) (uint, uint, error) {
+				if era == EraByron {
+					return 0, 0, errors.New("Byron genesis unavailable")
+				}
+				return 1, 100, nil
+			},
+			wantErr: "resolving Byron era parameters",
+		},
+		{
+			name: "zero parameters for zero-span era",
+			bounds: []EraBound{
+				{Slot: 0, Epoch: 0},
+				{Slot: 0, Epoch: 0},
+			},
+			params: func(era uint) (uint, uint, error) {
+				if era == EraByron {
+					return 0, 0, nil
+				}
+				return 1, 100, nil
+			},
+			wantErr: "invalid Byron era parameters",
+		},
+		{
+			name: "gap between eras",
+			bounds: []EraBound{
+				{Slot: 0, Epoch: 0},
+				{Slot: 101, Epoch: 1},
+			},
+			wantErr: "era history is not contiguous",
+		},
+		{
+			name: "tip outside declared epoch",
+			bounds: []EraBound{
+				{Slot: 0, Epoch: 0},
+				{Slot: 100, Epoch: 1},
+			},
+			// Epoch 1 covers [100, 200); the exact end belongs to epoch 2.
+			tipSlot: 200,
+			wantErr: "outside current epoch",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			db, err := dbtest.NewDatabase(
+				t,
+				&database.Config{DataDir: t.TempDir()},
+			)
+			require.NoError(t, err)
+			t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+			progressed := false
+			tipSlot := test.tipSlot
+			if tipSlot == 0 {
+				tipSlot = 150
+			}
+			params := test.params
+			if params == nil {
+				params = func(uint) (uint, uint, error) {
+					return 1, 100, nil
+				}
+			}
+			err = ImportLedgerState(context.Background(), ImportConfig{
+				Database: db,
+				Logger: slog.New(
+					slog.NewTextHandler(io.Discard, nil),
+				),
+				State: &RawLedgerState{
+					EraIndex:         EraShelley,
+					Epoch:            1,
+					EraBounds:        test.bounds,
+					EraBoundsWarning: test.boundsErr,
+					Tip: &SnapshotTip{
+						Slot:      tipSlot,
+						BlockHash: make([]byte, 32),
+					},
+				},
+				EpochLength: params,
+				OnProgress:  func(ImportProgress) { progressed = true },
+			})
+			require.ErrorContains(t, err, test.wantErr)
+			require.False(t, progressed)
+			epochs, err := db.Metadata().GetEpochs(nil)
+			require.NoError(t, err)
+			require.Empty(t, epochs)
+		})
+	}
+}
+
 // TestImportLedgerStateRebuildsDeferredRewardLiveStake covers the invariant
 // the deferred per-batch refresh depends on: importUTxOs skips the aggregate
 // refresh on every batch, so ImportLedgerState's own
@@ -104,7 +221,7 @@ func TestImportLedgerStateRebuildsDeferredRewardLiveStake(t *testing.T) {
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
 				UTxOData:            inlineUTxOMap(t, addr, []uint64{1_000_000, 2_000_000}),
-				Epoch:               100,
+				Epoch:               1,
 				EraIndex:            EraConway,
 				EraBounds:           eraBounds,
 				EpochNonce:          nonce,
@@ -230,7 +347,13 @@ func TestImportDRepsCarriesExpiryEpoch(t *testing.T) {
 		tag, err := models.CredentialTagFromUint(uint(tc.cred.Type))
 		require.NoError(t, err, tc.name)
 
-		got, err := db.GetDrepByCredential(tag, tc.cred.Hash, true, nil)
+		got, err := db.GetDrepByCredential(
+			context.Background(),
+			tag,
+			tc.cred.Hash,
+			true,
+			nil,
+		)
 		require.NoError(t, err, tc.name)
 		require.NotNil(t, got, tc.name)
 		require.Equal(
@@ -300,11 +423,10 @@ func TestImportedEpochStartSlotUsesTheEpochsOwnEra(t *testing.T) {
 	}
 }
 
-// With no era bounds to consult, the current era's boundary is all there is.
-// It stays a usable window edge -- registrations before it fall on the
-// pre-epoch side, where the most recent wins -- but it is a fallback, not the
-// epoch's real start, so it must not be reached when bounds are available.
-func TestImportedEpochStartSlotFallsBackWithoutEraBounds(t *testing.T) {
+// Missing era bounds cannot place any reward-input window. Import rejects this
+// state before reaching snapshot seeding; this lower-level helper also remains
+// fail closed when exercised directly.
+func TestImportedEpochStartSlotRequiresEraBounds(t *testing.T) {
 	t.Parallel()
 
 	cfg := ImportConfig{
@@ -319,23 +441,8 @@ func TestImportedEpochStartSlotFallsBackWithoutEraBounds(t *testing.T) {
 			return 1, 500, nil
 		},
 	}
-	for _, c := range []struct {
-		epoch uint64
-		want  uint64
-	}{
-		{11, 1500},
-		{10, 1000},
-	} {
-		got, ok := importedEpochStartSlot(cfg, c.epoch)
-		require.True(t, ok)
-		require.Equal(t, c.want, got)
-	}
-	// Epoch 9 began before this era did, and without bounds there is nothing
-	// describing where. The era boundary is not a stand-in: it follows the
-	// epoch, so every registration made during it would count as pre-epoch.
-	_, ok := importedEpochStartSlot(cfg, 9)
-	require.False(t, ok,
-		"an epoch the current era's arithmetic cannot reach has no window")
+	_, ok := importedEpochStartSlot(cfg, 11)
+	require.False(t, ok, "missing bounds must not produce a guessed window")
 }
 
 // Bounds that do not reach back to genesis leave an epoch with no era to
@@ -532,7 +639,9 @@ func TestImportPParamsDowngradesTranslatedCrossEraHistory(t *testing.T) {
 	require.Equal(t, current, currentRows[0].Cbor)
 }
 
-func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(t *testing.T) {
+func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -562,7 +671,7 @@ func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(t *testing.T) 
 		},
 	}
 	noProgress := func(ImportProgress) {}
-	_, err = importCertState(
+	_, _, err = importCertState(
 		context.Background(), cfg, state.Tip.Slot, noProgress,
 	)
 	require.NoError(t, err)
@@ -650,7 +759,7 @@ func TestImportSnapShotsPreservesAuthoritativeRewardBasis(t *testing.T) {
 		},
 	}
 	noProgress := func(ImportProgress) {}
-	_, err = importCertState(
+	_, _, err = importCertState(
 		context.Background(), cfg, state.Tip.Slot, noProgress,
 	)
 	require.NoError(t, err)
@@ -795,7 +904,7 @@ func TestImportSnapShotsSeedsRewardInputs(t *testing.T) {
 	// populates the pool registrations the seeding takes its parameters from.
 	// If this ever stops running before the snapshots, the seeding silently
 	// finds no parameters and writes nothing.
-	poolsImported, err := importCertState(ctx, cfg, slot, noProgress)
+	poolsImported, _, err := importCertState(ctx, cfg, slot, noProgress)
 	require.NoError(t, err)
 	require.Positive(t, poolsImported,
 		"the fixture must import pools, or the seeding below would be "+
@@ -1017,7 +1126,7 @@ func TestImportOpCertCountersStoresCertifiedBaseline(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := bytes.Repeat([]byte{0x77}, 28)
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, importOpCertCounters(
 		db.Metadata(),
 		map[string]uint64{string(poolKeyHash): 490},
@@ -1028,6 +1137,7 @@ func TestImportOpCertCountersStoresCertifiedBaseline(t *testing.T) {
 	txn.Release()
 
 	sequence, found, err := db.LatestPoolOpCertSequence(
+		context.Background(),
 		testPoolKeyHash(poolKeyHash), nil,
 	)
 	require.NoError(t, err)
@@ -1048,7 +1158,7 @@ func TestImportOpCertCountersRefusesUnpersistableCounter(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := bytes.Repeat([]byte{0x78}, 28)
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	err = importOpCertCounters(
 		db.Metadata(),
 		map[string]uint64{
@@ -1065,6 +1175,7 @@ func TestImportOpCertCountersRefusesUnpersistableCounter(t *testing.T) {
 	txn.Release()
 
 	sequence, found, err := db.LatestPoolOpCertSequence(
+		context.Background(),
 		testPoolKeyHash(poolKeyHash), nil,
 	)
 	require.NoError(t, err)
@@ -1081,7 +1192,7 @@ func TestImportOpCertCountersStoresCounterAtBound(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := bytes.Repeat([]byte{0x79}, 28)
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, importOpCertCounters(
 		db.Metadata(),
 		map[string]uint64{
@@ -1094,6 +1205,7 @@ func TestImportOpCertCountersStoresCounterAtBound(t *testing.T) {
 	txn.Release()
 
 	sequence, found, err := db.LatestPoolOpCertSequence(
+		context.Background(),
 		testPoolKeyHash(poolKeyHash), nil,
 	)
 	require.NoError(t, err)
@@ -1195,7 +1307,7 @@ func TestImportSnapShotsPreservesBoundaryCaptureProvenance(t *testing.T) {
 	}
 	ctx := context.Background()
 	progress := func(ImportProgress) {}
-	_, err = importCertState(ctx, cfg, state.Tip.Slot, progress)
+	_, _, err = importCertState(ctx, cfg, state.Tip.Slot, progress)
 	require.NoError(t, err)
 	require.NoError(t, importSnapShots(
 		ctx,
@@ -1418,6 +1530,7 @@ func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
 	require.NoError(t, store.SaveEpochSummary(existingSummary, nil))
 
 	err = persistImportedSnapshot(
+		context.Background(),
 		ImportConfig{
 			Database: db,
 			State: &RawLedgerState{
@@ -1482,13 +1595,17 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 		127178646,
 	)
 
-	require.NoError(t, persistImportedActivePoolDistribution(
-		ImportConfig{
-			Database: db,
-			State:    &RawLedgerState{Epoch: 298},
-		},
-		rows,
-	))
+	require.NoError(
+		t,
+		persistImportedActivePoolDistribution(
+			context.Background(),
+			ImportConfig{
+				Database: db,
+				State:    &RawLedgerState{Epoch: 298},
+			},
+			rows,
+		),
+	)
 
 	stored, err := db.Metadata().GetPoolStakeSnapshot(
 		298,
@@ -1528,6 +1645,7 @@ func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
 		LeiosKeyPossessionProof: possessionProof,
 	}}
 	require.NoError(t, persistImportedSnapshot(
+		context.Background(),
 		ImportConfig{
 			Database: db,
 			State:    &RawLedgerState{Epoch: 102},
@@ -1643,6 +1761,7 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := persistImportedSnapshot(
+				context.Background(),
 				ImportConfig{
 					Database: db,
 					State: &RawLedgerState{
@@ -1705,6 +1824,7 @@ func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 	}
 
 	err = persistImportedSnapshot(
+		context.Background(),
 		ImportConfig{
 			Database: db,
 			State: &RawLedgerState{
@@ -1832,6 +1952,7 @@ func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
 				CapturedSlot:   55,
 			}}
 			require.NoError(t, persistImportedSnapshot(
+				context.Background(),
 				ImportConfig{
 					Database: db,
 					State: &RawLedgerState{
@@ -1906,6 +2027,7 @@ func TestPersistImportedSnapshotHistoricalLeftUnresolved(t *testing.T) {
 		CapturedSlot:   55,
 	}}
 	err = persistImportedSnapshot(
+		context.Background(),
 		ImportConfig{
 			Database: db,
 			State: &RawLedgerState{
@@ -2097,6 +2219,7 @@ func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
 		CapturedSlot:   999,
 	}}
 	require.NoError(t, persistImportedSnapshot(
+		context.Background(),
 		ImportConfig{
 			Database: db,
 			State: &RawLedgerState{
@@ -2222,12 +2345,24 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 		123,
 	))
 
-	keyAcct, err := db.GetAccountByCredential(0, stakeKey, true, nil)
+	keyAcct, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		stakeKey,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint8(0), keyAcct.CredentialTag)
 	require.Equal(t, types.Uint64(1), keyAcct.Reward)
 
-	scriptAcct, err := db.GetAccountByCredential(1, stakeKey, true, nil)
+	scriptAcct, err := db.GetAccountByCredential(
+		context.Background(),
+		1,
+		stakeKey,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint8(1), scriptAcct.CredentialTag)
 	require.Equal(t, types.Uint64(2), scriptAcct.Reward)
@@ -2242,6 +2377,7 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 	} {
 		t.Run(tc.name+" registration deposit", func(t *testing.T) {
 			registration, err := db.GetAccountImportRegistrationByCredential(
+				context.Background(),
 				tc.tag,
 				stakeKey,
 				nil,
@@ -2255,6 +2391,7 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 	}
 
 	zeroRegistration, err := db.GetAccountImportRegistrationByCredential(
+		context.Background(),
 		0,
 		bytes.Repeat([]byte{0xA5}, 28),
 		nil,
@@ -2265,6 +2402,7 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 	require.Zero(t, *zeroRegistration.Deposit)
 
 	unknownRegistration, err := db.GetAccountImportRegistrationByCredential(
+		context.Background(),
 		0,
 		bytes.Repeat([]byte{0xA6}, 28),
 		nil,
@@ -2366,7 +2504,12 @@ func TestImportPoolsWritesPendingRetirementForBothQueries(t *testing.T) {
 	require.Equal(t, poolKeyHash, retiring[0].PoolKeyHash)
 	require.Equal(t, uint64(656), retiring[0].Epoch)
 
-	refunds, err := db.GetPoolsRetiringAtEpoch(656, 11, nil)
+	refunds, err := db.GetPoolsRetiringAtEpoch(
+		context.Background(),
+		656,
+		11,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, refunds, 1)
 	require.Equal(t, poolKeyHash, refunds[0].PoolKeyHash)
@@ -2406,7 +2549,12 @@ func TestImportPoolsRejectsUnmatchedRetirementBeforeWritingRows(t *testing.T) {
 	retiring, err := db.Metadata().GetRetiringPools(650, nil)
 	require.NoError(t, err)
 	require.Empty(t, retiring)
-	refunds, err := db.GetPoolsRetiringAtEpoch(656, 11, nil)
+	refunds, err := db.GetPoolsRetiringAtEpoch(
+		context.Background(),
+		656,
+		11,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Empty(t, refunds)
 }
@@ -2486,7 +2634,7 @@ func TestIndefiniteUTxOMapPartialCommitIsSafeToRetry(t *testing.T) {
 		for i := range batch {
 			utxos = append(utxos, UTxOToModel(&batch[i], slot))
 		}
-		txn := db.MetadataTxn(true)
+		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		if err := store.ImportUtxos(utxos, txn.Metadata()); err != nil {
 			return err
@@ -2844,4 +2992,280 @@ func testGovStateData(
 	data, err := cbor.Encode(govState)
 	require.NoError(t, err)
 	return data
+}
+
+// partialCertStateData returns the fixture's cert state with a DState whose
+// only credential entry has an undecodable account payload, so ParseCertState
+// returns a result together with a warning.
+func partialCertStateData(
+	t *testing.T,
+	fixture *RawLedgerState,
+) cbor.RawMessage {
+	t.Helper()
+
+	parts, err := decodeRawArray(fixture.CertStateData)
+	require.NoError(t, err)
+	require.Len(t, parts, 3)
+	credential, err := cbor.Encode([]any{uint64(0), make([]byte, 28)})
+	require.NoError(t, err)
+	// map(1) { credential: 5 }, where an account payload must be an array.
+	credentialMap := append([]byte{0xa1}, credential...)
+	credentialMap = append(credentialMap, 0x05)
+	dstate, err := cbor.Encode([]cbor.RawMessage{credentialMap})
+	require.NoError(t, err)
+	data, err := cbor.Encode([]cbor.RawMessage{parts[0], parts[1], dstate})
+	require.NoError(t, err)
+
+	parsed, parseErr := ParseCertState(data)
+	require.NotNil(t, parsed)
+	require.Error(t, parseErr, "the fixture must be a partial parse")
+	return data
+}
+
+// TestImportLedgerStateRejectsMalformedInputBeforePersisting gives an
+// otherwise valid state one malformed consensus input and requires the import
+// to fail with nothing persisted. The UTxO phase runs first, so an input that
+// is only checked by a later phase leaves imported UTxOs behind.
+func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
+	t.Parallel()
+
+	fixture, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	garbage := cbor.RawMessage{0xff}
+	partialCertState := partialCertStateData(t, fixture)
+	snapshotParts, err := decodeRawArray(fixture.SnapShotsData)
+	require.NoError(t, err)
+	snapshotsWithFee, err := cbor.Encode([]any{
+		cbor.RawMessage(snapshotParts[0]),
+		cbor.RawMessage(snapshotParts[1]),
+		cbor.RawMessage(snapshotParts[2]),
+		uint64(1),
+	})
+	require.NoError(t, err)
+	currentPParams, previousPParams := distinctConwayPParams(t)
+
+	tests := []struct {
+		name    string
+		mutate  func(*RawLedgerState)
+		wantErr string
+		wantLog string
+	}{
+		{name: "valid input imports"},
+		{
+			name:    "cert state",
+			mutate:  func(s *RawLedgerState) { s.CertStateData = garbage },
+			wantErr: "parsing cert state",
+		},
+		{
+			name: "partially parsed cert state",
+			mutate: func(s *RawLedgerState) {
+				s.CertStateData = partialCertState
+			},
+			wantErr: "parsing cert state",
+		},
+		{
+			name: "stake snapshots",
+			mutate: func(s *RawLedgerState) {
+				s.SnapShotsData = garbage
+			},
+			wantErr: "parsing stake snapshots",
+		},
+		{
+			name: "active pool distribution",
+			mutate: func(s *RawLedgerState) {
+				s.SnapShotsData = fixture.SnapShotsData
+				s.PoolDistrData = garbage
+			},
+			wantErr: "parsing active pool distribution",
+		},
+		{
+			name:    "governance state",
+			mutate:  func(s *RawLedgerState) { s.GovStateData = garbage },
+			wantErr: "parsing governance state",
+		},
+		{
+			name:    "protocol parameters",
+			mutate:  func(s *RawLedgerState) { s.PParamsData = garbage },
+			wantErr: "validating protocol parameters",
+		},
+		{
+			name:    "previous protocol parameters",
+			mutate:  func(s *RawLedgerState) { s.PrevPParamsData = garbage },
+			wantErr: "validating previous protocol parameters",
+		},
+		{
+			name: "fees below snapshot fee pot",
+			mutate: func(s *RawLedgerState) {
+				s.SnapShotsData = snapshotsWithFee
+				s.Fees = 0
+			},
+			wantErr: "less than the snapshot fee pot",
+		},
+		{
+			name: "previous parameters era unknown with snapshots",
+			mutate: func(s *RawLedgerState) {
+				s.SnapShotsData = fixture.SnapShotsData
+				s.Fees = fixture.Fees
+				s.PParamsData = currentPParams
+				s.PrevPParamsData = previousPParams
+				s.EraBounds = nil
+				s.EraBoundEpoch = s.Epoch
+			},
+			wantErr: "validating imported era history: era bounds are required " +
+				"from genesis through Conway: got 0, want 7",
+		},
+		{
+			name: "previous parameters era unknown without snapshots",
+			mutate: func(s *RawLedgerState) {
+				s.PParamsData = currentPParams
+				s.PrevPParamsData = previousPParams
+				s.EraBounds = nil
+				s.EraBoundEpoch = s.Epoch
+			},
+			wantErr: "validating imported era history: era bounds are required " +
+				"from genesis through Conway: got 0, want 7",
+		},
+		{
+			name: "go snapshot without historical parameters",
+			mutate: func(s *RawLedgerState) {
+				s.SnapShotsData = fixture.SnapShotsData
+				s.Fees = fixture.Fees
+				s.PParamsData = currentPParams
+				s.Epoch = 100
+				s.Tip.Slot = 100_000
+			},
+			wantErr: "historical protocol parameters for epoch 99 are unavailable",
+		},
+		{
+			name: "opcert counter key",
+			mutate: func(s *RawLedgerState) {
+				s.OpCertCounters = map[string]uint64{"short": 1}
+			},
+			wantErr: "opcert pool key has length 5",
+		},
+		{
+			name: "block count key",
+			mutate: func(s *RawLedgerState) {
+				s.BlocksCur = map[string]uint64{"short": 1}
+			},
+			wantErr: "block count pool key has length 5",
+		},
+		{
+			name: "tip hash",
+			mutate: func(s *RawLedgerState) {
+				s.Tip.BlockHash = []byte{0x01}
+			},
+			wantErr: "tip hash has 1 bytes",
+		},
+		{
+			name: "evolving nonce",
+			mutate: func(s *RawLedgerState) {
+				s.EvolvingNonce = []byte{0x01}
+			},
+			wantErr: "invalid evolving nonce length 1",
+		},
+		{
+			name: "epoch nonce",
+			mutate: func(s *RawLedgerState) {
+				s.EpochNonce = []byte{0x01}
+			},
+			wantErr: "invalid epoch nonce length 1",
+		},
+		{
+			name: "candidate nonce",
+			mutate: func(s *RawLedgerState) {
+				s.CandidateNonce = []byte{0x01}
+			},
+			wantErr: "invalid candidate nonce length 1",
+		},
+		{
+			name: "last epoch block nonce",
+			mutate: func(s *RawLedgerState) {
+				s.LastEpochBlockNonce = []byte{0x01}
+			},
+			wantErr: "invalid last epoch block nonce length 1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			db, err := dbtest.NewDatabase(
+				t, &database.Config{DataDir: t.TempDir()},
+			)
+			require.NoError(t, err)
+			t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+			addr := buildShelleyAddr(
+				0, 1, bytes.Repeat([]byte{0x11}, 28),
+				bytes.Repeat([]byte{0x22}, 28),
+			)
+			nonce := make([]byte, 32)
+			state := &RawLedgerState{
+				UTxOData: inlineUTxOMap(
+					t,
+					addr,
+					[]uint64{1_000_000},
+				),
+				Epoch:               1,
+				EraIndex:            EraConway,
+				EraBounds:           make([]EraBound, EraConway+1),
+				EpochNonce:          nonce,
+				EvolvingNonce:       nonce,
+				CandidateNonce:      nonce,
+				LastEpochBlockNonce: nonce,
+				Tip: &SnapshotTip{
+					Slot:      1_000,
+					BlockHash: make([]byte, 32),
+				},
+			}
+			if tt.mutate != nil {
+				tt.mutate(state)
+			}
+
+			var logOutput bytes.Buffer
+			err = ImportLedgerState(context.Background(), ImportConfig{
+				Database: db,
+				Logger:   slog.New(slog.NewTextHandler(&logOutput, nil)),
+				State:    state,
+				EpochLength: func(uint) (uint, uint, error) {
+					return 1, 1_000, nil
+				},
+			})
+
+			raw, rawErr := dbtest.RawSQLiteMetadata(t, db)
+			require.NoError(t, rawErr)
+			var utxos int
+			require.NoError(t, raw.QueryRow(
+				"SELECT COUNT(*) FROM utxo",
+			).Scan(&utxos))
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				require.Equal(t, 1, utxos)
+				if tt.wantLog != "" {
+					require.Contains(t, logOutput.String(), tt.wantLog)
+				}
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+			require.Zero(t, utxos, "a failed import must persist no UTxOs")
+		})
+	}
+}
+
+func TestValidateImportStateRetainsStoredPreviousParameters(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	current, previous := distinctConwayPParams(t)
+	cfg := previewPParamsImportConfig(db, current, previous)
+	cfg.State.Tip = &SnapshotTip{BlockHash: make([]byte, 32)}
+	require.NoError(t, importPParams(t.Context(), cfg))
+	cfg.State.PrevPParamsData = cbor.RawMessage{0xff}
+	require.NoError(
+		t,
+		validateImportState(cfg),
+		"valid stored previous parameters must support catch-up reentry",
+	)
 }

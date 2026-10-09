@@ -50,9 +50,9 @@ func newReplayTestLedger(
 	pparams lcommon.ProtocolParameters,
 ) *LedgerState {
 	t.Helper()
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{{
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{{
 		Slot:        block.SlotNumber(),
 		Hash:        block.Hash().Bytes(),
 		BlockNumber: block.BlockNumber(),
@@ -74,6 +74,17 @@ func newReplayTestLedger(
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	setReplayTestLedgerOrigin(ls, era, pparams)
+	require.NoError(t, cm.SetLedger(ls))
+	return ls
+}
+
+// setReplayTestLedgerOrigin places ls at an empty tip in epoch 0 of era.
+func setReplayTestLedgerOrigin(
+	ls *LedgerState,
+	era eras.EraDesc,
+	pparams lcommon.ProtocolParameters,
+) {
 	ls.currentEra = era
 	ls.currentPParams = pparams
 	ls.currentEpoch = models.Epoch{
@@ -86,8 +97,6 @@ func newReplayTestLedger(
 	// The rolling nonce of a block that applies is derived from its parent's.
 	ls.currentTipBlockNonce = make([]byte, 32)
 	ls.publishSnapshotsLocked()
-	require.NoError(t, cm.SetLedger(ls))
-	return ls
 }
 
 func replayTestBlock(ls *LedgerState, block gledger.Block) error {
@@ -268,7 +277,7 @@ func TestLedgerReplayRejectsMissingRequiredSpendingDatumBeforeStateMutation(
 				inputIds := [][]byte{f.spendTxId, f.collateralTxId}
 				before := make([]*models.Utxo, 0, len(inputIds))
 				for _, id := range inputIds {
-					utxo, err := f.db.UtxoByRef(id, 0, nil)
+					utxo, err := f.db.UtxoByRef(context.Background(), id, 0, nil)
 					require.NoError(t, err)
 					before = append(before, utxo)
 				}
@@ -279,7 +288,7 @@ func TestLedgerReplayRejectsMissingRequiredSpendingDatumBeforeStateMutation(
 				if tc.witnessDatum {
 					require.NoError(t, err)
 					require.Equal(t, block.Hash().Bytes(), tip.Point.Hash)
-					_, err = f.db.UtxoByRef(f.spendTxId, 0, nil)
+					_, err = f.db.UtxoByRef(context.Background(), f.spendTxId, 0, nil)
 					require.ErrorIs(t, err, types.ErrUtxoNotFound)
 					return
 				}
@@ -288,7 +297,7 @@ func TestLedgerReplayRejectsMissingRequiredSpendingDatumBeforeStateMutation(
 				require.Equal(t, f.script.Hash(), missing.ScriptHash)
 				require.Equal(t, ochainsync.Tip{}, tip)
 				for i, id := range inputIds {
-					utxo, err := f.db.UtxoByRef(id, 0, nil)
+					utxo, err := f.db.UtxoByRef(context.Background(), id, 0, nil)
 					require.NoError(t, err)
 					require.Equal(t, before[i], utxo)
 				}

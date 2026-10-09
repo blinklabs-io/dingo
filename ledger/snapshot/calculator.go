@@ -129,7 +129,7 @@ func (c *Calculator) CalculateStakeDistribution(
 ) (dist *StakeDistribution, err error) {
 	// Read-only transaction so the entire calculation observes a
 	// consistent database snapshot.
-	txn := c.db.Transaction(false)
+	txn := c.db.Transaction(ctx, false)
 	defer func() {
 		if commitErr := txn.Commit(); commitErr != nil {
 			if err != nil {
@@ -346,7 +346,13 @@ func (c *Calculator) calculateAdjustedLiveStakeDistributionInTxn(
 	}
 	meta := c.db.Metadata()
 	metaTxn := (*txn).Metadata()
-	pools, err := c.getActivePoolsAtSlot(ctx, meta, metaTxn, slot)
+	pools, err := c.getActivePoolsAtBoundary(
+		ctx,
+		meta,
+		metaTxn,
+		slot,
+		boundarySlot,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("get active pools: %w", err)
 	}
@@ -492,7 +498,13 @@ func (c *Calculator) rewardStakeInputsInTxn(
 
 	// Get all active pools at the given slot.
 	// Returns types.ErrNoEpochData (wrapped) if epoch data is not yet synced.
-	pools, err := c.getActivePoolsAtSlot(ctx, meta, metaTxn, slot)
+	pools, err := c.getActivePoolsAtBoundary(
+		ctx,
+		meta,
+		metaTxn,
+		slot,
+		boundarySlot,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("get active pools: %w", err)
 	}
@@ -572,7 +584,13 @@ func (c *Calculator) calculateFromHistoricalStake(
 	meta := c.db.Metadata()
 	metaTxn := (*txn).Metadata()
 
-	pools, err := c.getActivePoolsAtSlot(ctx, meta, metaTxn, slot)
+	pools, err := c.getActivePoolsAtBoundary(
+		ctx,
+		meta,
+		metaTxn,
+		slot,
+		boundarySlot,
+	)
 	if err != nil {
 		return fmt.Errorf("get active pools: %w", err)
 	}
@@ -610,17 +628,22 @@ func (c *Calculator) calculateFromHistoricalStake(
 	return nil
 }
 
-// getActivePoolsAtSlot returns all pool key hashes that were active at the slot.
+// getActivePoolsAtBoundary resolves pool retirement at the era's SNAP point.
 // A pool is active if it has a registration with added_slot <= slot and either
 // no retirement or retirement.epoch > epoch at slot.
-func (c *Calculator) getActivePoolsAtSlot(
+func (c *Calculator) getActivePoolsAtBoundary(
 	_ context.Context,
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
 	slot uint64,
+	boundarySlot uint64,
 ) ([]lcommon.PoolKeyHash, error) {
 	// Query active pool key hashes at the given slot from the metadata store
-	poolKeyHashBytes, err := meta.GetActivePoolKeyHashesAtSlot(slot, metaTxn)
+	poolKeyHashBytes, err := meta.GetEpochBoundaryActivePoolKeyHashes(
+		slot,
+		boundarySlot,
+		metaTxn,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("get active pool key hashes at slot: %w", err)
 	}

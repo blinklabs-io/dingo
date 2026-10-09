@@ -567,7 +567,7 @@ func TestNormalizeColumnDefaultPreservesPostgresStringLiteral(t *testing.T) {
 func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 	t.Parallel()
 	// v2 adds four columns, v5 adds two, and later migrations add fifteen.
-	const shippedAddColumns = 21
+	const shippedAddColumns = 22
 	// The replay guard compares the type the statement declares with the type
 	// the live schema reports, so every shipped ADD COLUMN has to declare a
 	// type whose two spellings are already known to agree after

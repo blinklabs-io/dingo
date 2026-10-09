@@ -440,7 +440,7 @@ func TestNodeEventSubscriptionPoliciesAreExplicit(t *testing.T) {
 			},
 			"subscribeChainSelectorEvents": {
 				required:   8,
-				detachable: 1,
+				detachable: 2,
 			},
 		},
 		"node_lifecycle.go": {
@@ -1353,7 +1353,7 @@ func newHandleConnManagerClosedOwnerConn(
 	o *ouroborosPkg.Ouroboros,
 ) *ouroboros.Connection {
 	t.Helper()
-	listener := o.ConfigureListeners([]connmanager.ListenerConfig{{UseNtC: true}})[0]
+	listener := o.ConfigureListeners(context.Background(), []connmanager.ListenerConfig{{UseNtC: true}})[0]
 	localWire, peerWire := newLeiosNotifyTestConnPair(
 		&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
 		&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
@@ -1542,7 +1542,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -1626,7 +1626,7 @@ func TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -2491,6 +2491,14 @@ func requireGoroutineGone(t *testing.T, marker string) {
 // devnet credential fixtures.
 func newStartupCleanupProducerNode(t *testing.T) *Node {
 	t.Helper()
+	return newStartupCleanupProducerNodeWithGenesisStart(t, nil)
+}
+
+func newStartupCleanupProducerNodeWithGenesisStart(
+	t *testing.T,
+	start *time.Time,
+) *Node {
+	t.Helper()
 	vrf, kes, opcert := devnetCredPaths(t)
 	// The full devnet config, for the Byron genesis and the genesis hashes
 	// LedgerState.Start needs to build the genesis block. Its own Shelley
@@ -2506,13 +2514,17 @@ func newStartupCleanupProducerNode(t *testing.T) *Node {
 	// and the initial funds and protocol params the genesis block needs stay
 	// exactly as shipped.
 	cardanoCfg.ShelleyGenesis().SystemStart = time.Now().Add(-time.Hour)
+	if start != nil {
+		cardanoCfg.ShelleyGenesis().SystemStart = *start
+		cardanoCfg.ByronGenesis().StartTime = int(start.Unix())
+	}
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	eventBus := event.NewEventBus(nil, logger)
 	t.Cleanup(eventBus.Close)
-	chainManager, err := chain.NewManager(db, eventBus)
+	chainManager, err := chain.NewManager(context.Background(), db, eventBus)
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
@@ -2779,7 +2791,7 @@ VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
-	require.NoError(t, n.backfillRewardLiveStake())
+	require.NoError(t, n.backfillRewardLiveStake(context.Background()))
 
 	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
 	require.NoError(t, err)
@@ -3366,6 +3378,19 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 			"pipeline's parallel VRF/KES validate stage never activates "+
 			"otherwise",
 	)
+}
+
+func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
+	t.Parallel()
+
+	node := &Node{config: NewConfig(
+		WithRunMode("dev"),
+		WithBlockProducer(false),
+	)}
+
+	assert.True(t, node.config.blockProducer)
+	assert.Equal(t, StorageModeAPI, node.config.storageMode)
+	assert.False(t, node.ledgerStateConfig().ForgeBlocks)
 }
 
 // The ledger is started, and replays any stored blocks it has not applied,
@@ -4021,7 +4046,8 @@ func TestNodeEventSubscriptionClassifications(t *testing.T) {
 		expectedRequired[group.function] = group.count
 	}
 	expectedDetachable := map[string]int{
-		"subscribeChainSelectorEvents": 1,
+		"subscribeChainSelectorEvents":  2,
+		"subscribeEquivocationDetector": 1,
 	}
 	expectedPolicies := map[string]string{
 		"subscribeRequiredEvent":                      "SubscriberBackpressureBlock",
@@ -4568,7 +4594,7 @@ func TestBackfillRewardLiveStakeSkipsScanWhenConfigured(t *testing.T) {
 			skipRewardLiveStakeBackfillCheck: true,
 		},
 	}
-	require.NoError(t, n.backfillRewardLiveStake())
+	require.NoError(t, n.backfillRewardLiveStake(context.Background()))
 
 	// Still needed: the scan was skipped, so no rebuild happened.
 	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
@@ -4607,7 +4633,20 @@ VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
 			skipRewardLiveStakeBackfillCheck: true,
 		},
 	}
-	err = n.backfillRewardLiveStake()
+	err = n.backfillRewardLiveStake(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "older accounting")
+}
+
+func TestNewOuroborosConfigAppliesTxSubmissionRateLimit(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: NewConfig()}
+	cfg := n.newOuroborosConfig(false, 0, 0)
+
+	assert.Positive(
+		t,
+		cfg.MaxTxSubmissionsPerSecond,
+		"production ouroboros config must enable the TxSubmission limiter",
+	)
 }

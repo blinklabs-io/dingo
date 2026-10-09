@@ -152,6 +152,7 @@ type TokenRegistryConfig struct {
 	HTTPClient            *http.Client
 	SourceURL             string
 	UserAgent             string
+	Headers               map[string]string
 	Interval              time.Duration
 	RequestTimeout        time.Duration
 	MaxBytes              int64
@@ -215,6 +216,9 @@ type Config struct {
 	tokenRegistry TokenRegistryConfig
 	// Parsed duration for chainsync stall timeout (runtime convenience)
 	chainsyncStallTimeout time.Duration
+	// Parsed duration for the LocalStateQuery snapshot lifetime; zero selects
+	// the ouroboros package default.
+	localStateQueryViewMaxLifetime time.Duration
 	// Compatibility mirrors used by the composition layer. cfg remains the
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
 	dataDir                         string
@@ -232,7 +236,10 @@ type Config struct {
 	barkBlockDownloadHosts                                                              []string
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
+	barkArchiveMaxConcurrentFetches                                                     int
 	barkOperatorCertificateFingerprints                                                 []string
+	barkLifecycleEnabled                                                                bool
+	barkLifecycleOperatorCertificateFingerprints                                        []string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
 	koiosParity                                                                         KoiosParityConfig
@@ -780,6 +787,7 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 }
 
 func (c *Config) syncCompatFields() {
+	c.cfg.ApplyRunModeOverrides(c.cfg.RunMode)
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
@@ -787,8 +795,13 @@ func (c *Config) syncCompatFields() {
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
+	c.barkArchiveMaxConcurrentFetches = c.cfg.BarkArchiveMaxConcurrentFetches
 	c.barkOperatorCertificateFingerprints = slices.Clone(
 		c.cfg.BarkOperatorCertificateFingerprints,
+	)
+	c.barkLifecycleEnabled = c.cfg.BarkLifecycleEnabled
+	c.barkLifecycleOperatorCertificateFingerprints = slices.Clone(
+		c.cfg.BarkLifecycleOperatorCertificateFingerprints,
 	)
 	c.databaseLifecycle = c.cfg.DatabaseLifecycle
 	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
@@ -839,6 +852,7 @@ func (c *Config) syncCompatFields() {
 		HTTPClient:            c.tokenRegistry.HTTPClient,
 		SourceURL:             c.cfg.TokenRegistry.SourceURL,
 		UserAgent:             c.cfg.TokenRegistry.UserAgent,
+		Headers:               c.cfg.TokenRegistry.HeaderSecrets,
 		Interval:              c.cfg.TokenRegistry.Interval,
 		RequestTimeout:        c.cfg.TokenRegistry.RequestTimeout,
 		MaxBytes:              c.cfg.TokenRegistry.MaxBytes,
@@ -1090,8 +1104,8 @@ func WithCardanoNodeConfig(
 	}
 }
 
-// WithBindAddr specifies the IP address used by relay, metrics, and public
-// Blockfrost, Kupo, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
+// WithBindAddr specifies the IP address used by relay and public Blockfrost,
+// Kupo, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
@@ -1736,6 +1750,8 @@ func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
 	}
 }
 
+// WithBarkBlockDownloadHosts configures allowed HTTPS origins for Bark block
+// downloads. Entries without a scheme use HTTPS; ports are matched exactly.
 func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkBlockDownloadHosts = slices.Clone(hosts)
@@ -1759,12 +1775,21 @@ func WithBarkHost(host string) ConfigOptionFunc {
 }
 
 // WithBarkClientCAFilePath sets the PEM CA bundle Bark uses to authenticate
-// every DatabaseService caller. Destructive methods additionally require an
-// allowlisted fingerprint set by WithBarkOperatorCertificateFingerprints.
+// every DatabaseService and LifecycleService caller. Destructive methods
+// additionally require their service's operator allowlist.
 func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkClientCAFilePath = path
 		c.barkClientCAFilePath = path
+	}
+}
+
+// WithBarkArchiveMaxConcurrentFetches bounds how many Bark ArchiveService
+// FetchBlock requests are served at once. Zero selects Bark's default.
+func WithBarkArchiveMaxConcurrentFetches(limit int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkArchiveMaxConcurrentFetches = limit
+		c.barkArchiveMaxConcurrentFetches = limit
 	}
 }
 
@@ -1776,6 +1801,26 @@ func WithBarkOperatorCertificateFingerprints(
 	return func(c *Config) {
 		c.cfg.BarkOperatorCertificateFingerprints = slices.Clone(fingerprints)
 		c.barkOperatorCertificateFingerprints = slices.Clone(fingerprints)
+	}
+}
+
+// WithBarkLifecycleEnabled explicitly enables Bark's remote node lifecycle
+// service. It is disabled by default.
+func WithBarkLifecycleEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkLifecycleEnabled = enabled
+		c.barkLifecycleEnabled = enabled
+	}
+}
+
+// WithBarkLifecycleOperatorCertificateFingerprints sets the SHA-256 client
+// certificate fingerprints authorized to invoke Bark Stop and Restart RPCs.
+func WithBarkLifecycleOperatorCertificateFingerprints(
+	fingerprints []string,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkLifecycleOperatorCertificateFingerprints = slices.Clone(fingerprints)
+		c.barkLifecycleOperatorCertificateFingerprints = slices.Clone(fingerprints)
 	}
 }
 
@@ -1863,6 +1908,7 @@ func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
 			Interval:              cfg.Interval,
 			RequestTimeout:        cfg.RequestTimeout,
 			UserAgent:             cfg.UserAgent,
+			HeaderSecrets:         cfg.Headers,
 			MaxBytes:              cfg.MaxBytes,
 			MaxDecompressedBytes:  cfg.MaxDecompressedBytes,
 			MaxEntryBytes:         cfg.MaxEntryBytes,
@@ -1910,6 +1956,18 @@ func WithChainsyncMaxClients(
 ) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Chainsync.MaxClients = maxClients
+	}
+}
+
+// WithLocalStateQueryViewMaxLifetime specifies how long a node-to-client
+// LocalStateQuery session may hold one acquired ledger snapshot before the
+// node closes it. Default is 5 minutes.
+func WithLocalStateQueryViewMaxLifetime(
+	lifetime time.Duration,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LocalStateQueryViewMaxLifetime = lifetime.String()
+		c.localStateQueryViewMaxLifetime = lifetime
 	}
 }
 
@@ -2018,7 +2076,7 @@ func (c *Config) MetadataPlugin() string {
 	return c.cfg.Plugins.Storage.Metadata.Provider
 }
 
-// BindAddr returns the IP address for relay and metrics listeners.
+// BindAddr returns the IP address for relay and public API listeners.
 func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
 }
@@ -2073,7 +2131,7 @@ func (c *Config) BarkBaseUrl() string {
 	return c.cfg.BarkBaseUrl
 }
 
-// BarkBlockDownloadHosts returns the list of allowed hosts for block downloads via Bark.
+// BarkBlockDownloadHosts returns the allowed Bark block-download origins.
 func (c *Config) BarkBlockDownloadHosts() []string {
 	return c.cfg.BarkBlockDownloadHosts
 }
@@ -2082,6 +2140,18 @@ func (c *Config) BarkBlockDownloadHosts() []string {
 // fingerprints authorized to invoke destructive Bark DatabaseService RPCs.
 func (c *Config) BarkOperatorCertificateFingerprints() []string {
 	return slices.Clone(c.cfg.BarkOperatorCertificateFingerprints)
+}
+
+// BarkLifecycleEnabled reports whether Bark's remote node lifecycle service
+// is explicitly enabled.
+func (c *Config) BarkLifecycleEnabled() bool {
+	return c.cfg.BarkLifecycleEnabled
+}
+
+// BarkLifecycleOperatorCertificateFingerprints returns the distinct operator
+// allowlist for Bark Stop and Restart RPCs.
+func (c *Config) BarkLifecycleOperatorCertificateFingerprints() []string {
+	return slices.Clone(c.cfg.BarkLifecycleOperatorCertificateFingerprints)
 }
 
 // TlsCertFilePath returns the path to the TLS certificate for gRPC APIs.
@@ -2378,6 +2448,20 @@ func (c *Config) ChainsyncStallTimeoutDuration() time.Duration {
 	return 2 * time.Minute
 }
 
+// LocalStateQueryViewMaxLifetimeDuration returns the parsed LocalStateQuery
+// snapshot lifetime, or zero when it is unset or unparsable so the consumer
+// applies its own default.
+func (c *Config) LocalStateQueryViewMaxLifetimeDuration() time.Duration {
+	if c.localStateQueryViewMaxLifetime != 0 {
+		return c.localStateQueryViewMaxLifetime
+	}
+	d, err := time.ParseDuration(c.cfg.LocalStateQueryViewMaxLifetime)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
 // GenesisBootstrap returns the Genesis bootstrap configuration.
 func (c *Config) GenesisBootstrap() internalconfig.GenesisBootstrapConfig {
 	return c.cfg.GenesisBootstrap
@@ -2499,7 +2583,7 @@ func (c *Config) ForgeStaleGapThresholdSlots() uint64 {
 }
 
 // ValidateForgedBlock returns whether to self-validate forged blocks.
-func (c *Config) ValidateForgedBlock() bool {
+func (c *Config) ValidateForgedBlock(ctx context.Context) bool {
 	return c.cfg.ValidateForgedBlock
 }
 

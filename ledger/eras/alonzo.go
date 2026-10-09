@@ -205,23 +205,8 @@ func ValidateTxAlonzo(
 	if err = ValidateTxSize(tx, tmpPparams.MaxTxSize); err != nil {
 		return err
 	}
-	// Validate fee covers base cost + execution unit prices
-	var pricesMem, pricesSteps *big.Rat
-	if tmpPparams.ExecutionCosts.MemPrice != nil {
-		pricesMem = tmpPparams.ExecutionCosts.MemPrice.ToBigRat()
-	}
-	if tmpPparams.ExecutionCosts.StepPrice != nil {
-		pricesSteps = tmpPparams.ExecutionCosts.StepPrice.ToBigRat()
-	}
-	if err = ValidateTxFee(
-		tx,
-		tmpPparams.MinFeeA,
-		tmpPparams.MinFeeB,
-		pricesMem,
-		pricesSteps,
-	); err != nil {
-		return err
-	}
+	// The fee minimum, including declared execution units, is enforced by
+	// alonzo.UtxoValidationRules (FeeTooSmall); do not price it again here.
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
@@ -377,6 +362,9 @@ func EvaluateTxAlonzo(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	if err := checkEvaluationCanceled(ls); err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
 	tmpPparams, ok := pp.(*alonzo.AlonzoProtocolParameters)
 	if !ok {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
@@ -384,6 +372,9 @@ func EvaluateTxAlonzo(
 	// Resolve inputs
 	resolvedInputs := []lcommon.Utxo{}
 	for _, tmpInput := range tx.Inputs() {
+		if err := checkEvaluationCanceled(ls); err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 		tmpUtxo, err := ls.UtxoById(tmpInput)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
@@ -396,6 +387,9 @@ func EvaluateTxAlonzo(
 	// Resolve reference inputs
 	resolvedRefInputs := []lcommon.Utxo{}
 	for _, tmpRefInput := range tx.ReferenceInputs() {
+		if err := checkEvaluationCanceled(ls); err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 		tmpUtxo, err := ls.UtxoById(tmpRefInput)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
@@ -440,6 +434,9 @@ func EvaluateTxAlonzo(
 		}
 	}
 	for _, redeemerPair := range txInfoV1.Redeemers {
+		if err := checkEvaluationCanceled(ls); err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 		purpose := redeemerPair.Key
 		if purpose == nil {
 			return 0, lcommon.ExUnits{}, nil, errors.New(
@@ -479,13 +476,17 @@ func EvaluateTxAlonzo(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 			}
-			usedBudget, err := s.Evaluate(
+			usedBudget, err := s.EvaluateContext(
+				evaluationContext(ls),
 				datum,
 				redeemer.Data,
 				sc.ToPlutusData(),
-				tmpPparams.MaxTxExUnits,
+				remainingExUnits(tmpPparams.MaxTxExUnits, retTotalExUnits),
 				evalContext,
 			)
+			if cancelErr := checkEvaluationCanceled(ls); cancelErr != nil {
+				return 0, lcommon.ExUnits{}, nil, cancelErr
+			}
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}

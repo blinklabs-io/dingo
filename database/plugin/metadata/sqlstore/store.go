@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"regexp"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -147,25 +148,30 @@ type Store struct {
 	// boundaries without a production-sized fixture.
 	rewardLiveStakeBatchSize int
 
-	// committeeAuthImmutableSlot and committeeAuthImmutableSlotKnown cache
-	// the live rollback-safe immutable slot (tip depth securityParam blocks
-	// back), pushed in by SetCommitteeAuthImmutableSlot from outside the
-	// package -- sqlstore cannot import chain (chain already imports
-	// database) to compute it directly. committeeAuthImmutableSlotEverSet
-	// distinguishes "no live syncer has ever been wired for this Store"
+	// committeeAuthImmutableSlot caches the live rollback-safe immutable slot
+	// (tip depth securityParam blocks back), pushed in by
+	// SetCommitteeAuthImmutableSlot from outside the package -- sqlstore cannot
+	// import chain (chain already imports database) to compute it directly. Its
+	// everSet bit distinguishes "no live syncer has ever been wired for this Store"
 	// (committeeAuthHorizon falls back to the slot-window assumption, the
 	// pre-live-sync behavior every existing caller and test still gets)
 	// from "a live syncer is wired but has no current value" (bootstrap
 	// before the first successful resolution, or invalidated by a rollback
 	// in DeleteCertificatesAfterSlot -- pruning suspends rather than fall
 	// back to an assumption a sparse or recently-reorganized chain can
-	// violate). Read through committeeAuthHorizon(). Plain atomics, not a
-	// mutex: the setter runs from an independent periodic sync goroutine
-	// while readers run inline in the certificate write path and the
-	// maintenance sweep, and none of them may block on each other.
-	committeeAuthImmutableSlot        atomic.Uint64
-	committeeAuthImmutableSlotKnown   atomic.Bool
-	committeeAuthImmutableSlotEverSet atomic.Bool
+	// violate). The mutex keeps the three state fields coherent and, while a
+	// prune delete holds its read side, orders rollback invalidation before or
+	// after that delete. Production prune callers already own the single write
+	// connection: block application supplies its transaction, and maintenance
+	// opens one before calling the pruning helper. This matches rollback's
+	// connection-then-mutex order and closes the gap where invalidation could
+	// otherwise race between choosing a horizon and deleting rollback-required
+	// history.
+	committeeAuthImmutableSlotMu sync.RWMutex
+	committeeAuthImmutableSlot   committeeAuthImmutableSlotState
+	// Test hook runs after a prune has selected its horizon. Production leaves
+	// it nil.
+	committeeAuthPruneLocked func()
 
 	migrations        []migrations.Migration
 	migrationLocker   migrations.Locker
@@ -204,6 +210,15 @@ type Store struct {
 	bulkMu           sync.RWMutex
 	bulkConnMu       sync.Mutex
 	bulkConn         *sql.Conn
+	// scheduledWorkMu keeps a scheduled checkpoint from crossing the bulk-mode
+	// transition. bulkMode and bulkRestorePending are protected by it. A Mithril
+	// import can keep bulk mode active for hours; checkpointing the same SQLite
+	// database during that interval adds lock traffic without improving recovery,
+	// because the import is explicitly incomplete until its final ready-state
+	// transaction commits.
+	scheduledWorkMu    sync.Mutex
+	bulkMode           bool
+	bulkRestorePending bool
 
 	closeOnce sync.Once
 	closeDone chan struct{}
@@ -508,7 +523,12 @@ func (s *Store) ReadTransaction(ctx context.Context) types.Txn {
 // transaction begins a transaction bound to ctx. The context.Background()
 // fallback below is for a caller passing a literal nil, not a dropped
 // caller ctx -- there is nothing above to derive from in that case.
-func (s *Store) transaction(ctx context.Context, readOnly bool) types.Txn {
+//
+//nolint:contextcheck // literal-nil fallback, no caller ctx exists
+func (s *Store) transaction(
+	ctx context.Context,
+	readOnly bool,
+) types.Txn {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -819,7 +839,7 @@ func (s *Store) startCheckpointTicker() {
 					return
 				}
 				started := time.Now()
-				err := s.checkpoint(ctx)
+				err := s.runCheckpoint(ctx)
 				s.checkpointState.CompareAndSwap(1, 0)
 				if err != nil {
 					if ctx.Err() == nil {
@@ -842,6 +862,22 @@ func (s *Store) startCheckpointTicker() {
 			}
 		}
 	}()
+}
+
+func (s *Store) runCheckpoint(ctx context.Context) error {
+	s.scheduledWorkMu.Lock()
+	defer s.scheduledWorkMu.Unlock()
+	if s.bulkMode {
+		if !s.bulkRestorePending {
+			return nil
+		}
+		if err := s.restoreNormalPragmas(ctx); err != nil {
+			return fmt.Errorf("restoring normal pragmas: %w", err)
+		}
+		s.bulkMode = false
+		s.bulkRestorePending = false
+	}
+	return s.checkpoint(ctx)
 }
 
 func (s *Store) closeCheckpointAdmission() {
@@ -938,6 +974,7 @@ func (s *Store) withWriteTransactionContext(
 		if err != nil {
 			return err
 		}
+		//nolint:contextcheck // txnCtx is the caller transaction's own context
 		return fn(db, txnCtx)
 	}
 	sqlTransaction, release, err := s.beginWriteTx(ctx)
@@ -985,6 +1022,8 @@ func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, func(), error) {
 // the commit barrier it holds while fixing its two read views. Its lifetime
 // admission cap also leaves one connection outside coordinated snapshots for
 // operational reads during rollback.
+//
+//nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
 func (s *Store) ReserveRead(
 	ctx context.Context,
 ) (types.ReadReservation, error) {
@@ -1103,8 +1142,11 @@ type sqlTxn struct {
 	release  func()
 	beginErr error
 
-	mu       sync.Mutex
-	finished bool
+	mu              sync.Mutex
+	finished        bool
+	batchBefore     map[*transactionBatchAccumulator]transactionBatchCheckpoint
+	batchSavepoints map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint
+	savepointOrder  []string
 }
 
 func (t *sqlTxn) Commit() error {
@@ -1121,7 +1163,16 @@ func (t *sqlTxn) Commit() error {
 	if t.tx == nil {
 		return nil
 	}
-	return t.tx.Commit()
+	err := t.tx.Commit()
+	if err != nil {
+		t.restoreBatches(t.batchBefore)
+	}
+	for accumulator := range t.batchBefore {
+		accumulator.resetStatement()
+	}
+	t.batchBefore = nil
+	t.batchSavepoints = nil
+	return err
 }
 
 func (t *sqlTxn) Rollback() error {
@@ -1135,6 +1186,9 @@ func (t *sqlTxn) Rollback() error {
 	}
 	t.finished = true
 	defer t.releaseConnection()
+	t.restoreBatches(t.batchBefore)
+	t.batchBefore = nil
+	t.batchSavepoints = nil
 	if t.tx == nil {
 		return nil
 	}
@@ -1186,11 +1240,37 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 	if _, err := t.tx.ExecContext(context.Background(), statement); err != nil {
 		return fmt.Errorf("%s: %w", operation, err)
 	}
+	switch operation {
+	case "SAVEPOINT":
+		if t.batchSavepoints == nil {
+			t.batchSavepoints = make(map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint)
+		}
+		checkpoint := make(map[*transactionBatchAccumulator]transactionBatchCheckpoint)
+		for accumulator := range t.batchBefore {
+			checkpoint[accumulator] = accumulator.checkpoint()
+		}
+		t.batchSavepoints[name] = checkpoint
+		t.savepointOrder = append(t.savepointOrder, name)
+	case "ROLLBACK TO SAVEPOINT":
+		t.restoreBatches(t.batchSavepoints[name])
+		for i, savepointName := range slices.Backward(t.savepointOrder) {
+			if savepointName == name {
+				t.savepointOrder = t.savepointOrder[:i+1]
+				break
+			}
+			delete(t.batchSavepoints, savepointName)
+		}
+	}
 	return nil
 }
 
 // SetBulkLoadPragmas enables backend-specific session tuning.
 func (s *Store) SetBulkLoadPragmas() error {
+	// Take this gate before startMu. CloseContext needs startMu to cancel an
+	// in-flight checkpoint, which lets that callback release this gate instead
+	// of deadlocking a concurrent bulk-mode transition.
+	s.scheduledWorkMu.Lock()
+	defer s.scheduledWorkMu.Unlock()
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
 	if s.closed.Load() {
@@ -1199,10 +1279,17 @@ func (s *Store) SetBulkLoadPragmas() error {
 	s.bulkMu.Lock()
 	defer s.bulkMu.Unlock()
 	if s.bulkConn != nil {
+		s.bulkMode = true
+		s.bulkRestorePending = false
 		return nil
 	}
 	if s.dialect.Name() == "sqlite" {
-		return s.dialect.SetBulkMode(context.Background(), s.writeDB)
+		if err := s.dialect.SetBulkMode(context.Background(), s.writeDB); err != nil {
+			return err
+		}
+		s.bulkMode = true
+		s.bulkRestorePending = false
+		return nil
 	}
 	conn, err := s.writeDB.Conn(context.Background())
 	if err != nil {
@@ -1217,14 +1304,25 @@ func (s *Store) SetBulkLoadPragmas() error {
 		return errors.Join(err, restoreErr, closeErr)
 	}
 	s.bulkConn = conn
+	s.bulkMode = true
+	s.bulkRestorePending = false
 	return nil
 }
 
 // RestoreNormalPragmas restores safe backend defaults.
 func (s *Store) RestoreNormalPragmas() error {
+	s.scheduledWorkMu.Lock()
+	defer s.scheduledWorkMu.Unlock()
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
-	return s.restoreNormalPragmas(context.Background())
+	err := s.restoreNormalPragmas(context.Background())
+	if err == nil {
+		s.bulkMode = false
+		s.bulkRestorePending = false
+	} else {
+		s.bulkRestorePending = true
+	}
+	return err
 }
 
 func (s *Store) restoreNormalPragmas(ctx context.Context) error {
@@ -1255,6 +1353,33 @@ func (s *Store) UpdatePlannerStatsContext(ctx context.Context) error {
 	s.bulkConnMu.Lock()
 	defer s.bulkConnMu.Unlock()
 	return s.dialect.UpdatePlannerStats(ctx, s.bulkConn)
+}
+
+func (t *sqlTxn) bindBatch(accumulator *transactionBatchAccumulator) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.finished {
+		return types.ErrNilTxn
+	}
+	if t.batchBefore == nil {
+		t.batchBefore = make(map[*transactionBatchAccumulator]transactionBatchCheckpoint)
+	}
+	if _, exists := t.batchBefore[accumulator]; exists {
+		return nil
+	}
+	t.batchBefore[accumulator] = accumulator.checkpoint()
+	for _, checkpoint := range t.batchSavepoints {
+		checkpoint[accumulator] = accumulator.checkpoint()
+	}
+	return nil
+}
+
+func (t *sqlTxn) restoreBatches(
+	checkpoint map[*transactionBatchAccumulator]transactionBatchCheckpoint,
+) {
+	for accumulator, state := range checkpoint {
+		accumulator.restore(state)
+	}
 }
 
 // SQLitePath returns the active provider's on-disk SQLite location, if any.

@@ -15,9 +15,13 @@
 package migrations
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -27,7 +31,12 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 33)
+	require.Len(t, registry, 39)
+	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
+	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
+		"CREATE TABLE IF NOT EXISTS `account_drep_clear`")
+	require.NotNil(t, registry[34].Backfill)
+	require.Equal(t, poolRelayTypeSchemaRelease, registry[37].Name)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -251,6 +260,114 @@ func TestSQLiteRegistry(t *testing.T) {
 		registry[32].SQL["sqlite"].Expand[0],
 		"CREATE TABLE IF NOT EXISTS `governance_proposal_order`",
 	)
+	require.Equal(t, 34, registry[33].Version)
+	require.Equal(t, "leios-transaction-ledger-context", registry[33].Name)
+	require.Contains(t, registry[33].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `leios_transaction_context`")
+	require.Equal(t, 36, registry[35].Version)
+	require.Equal(t, committeeHotAuthorizationPruneOrderSchemaRelease, registry[35].Name)
+	require.Len(t, registry[35].SQL["sqlite"].Expand, 1)
+	require.Contains(t, registry[35].SQL["sqlite"].Expand[0], "idx_auth_committee_hot_cold_credential_prune_order")
+	require.Equal(t, 39, registry[38].Version)
+	require.Equal(t, midnightRollbackJournalSchemaRelease, registry[38].Name)
+	require.Len(t, registry[38].SQL["sqlite"].Expand, 3)
+	require.Contains(t, registry[38].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `midnight_candidate_removals`")
+	require.Contains(t, registry[38].SQL["sqlite"].Expand[2], "CREATE TABLE IF NOT EXISTS `midnight_epoch_transitions`")
+}
+
+func TestAccountDRepClearBackfillRequiresCompletePV10History(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	_, err = db.Exec(`
+CREATE TABLE pparams (id integer, cbor blob, added_slot integer, era_id integer);
+CREATE TABLE sync_state (sync_key text PRIMARY KEY, value text);
+CREATE TABLE account (
+    credential_tag integer, staking_key blob, created_slot integer,
+    active numeric
+);
+CREATE TABLE account_import_baseline (
+    credential_tag integer, staking_key blob, added_slot integer
+);
+CREATE TABLE stake_registration (credential_tag integer, staking_key blob, added_slot integer);
+CREATE TABLE stake_registration_delegation (credential_tag integer, staking_key blob, added_slot integer);
+CREATE TABLE stake_vote_registration_delegation (credential_tag integer, staking_key blob, added_slot integer);
+CREATE TABLE vote_registration_delegation (credential_tag integer, staking_key blob, added_slot integer);
+CREATE TABLE registration (credential_tag integer, staking_key blob, added_slot integer);
+CREATE TABLE stake_deregistration (credential_tag integer, staking_key blob, added_slot integer);
+CREATE TABLE deregistration (credential_tag integer, staking_key blob, added_slot integer);`)
+	require.NoError(t, err)
+	fields := make([]any, 13)
+	fields[12] = common.ProtocolParametersProtocolVersion{Major: 11}
+	data, err := cbor.Encode(fields)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO pparams VALUES (1, ?, 50, ?)`,
+		data, conway.EraIdConway)
+	require.NoError(t, err)
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	result, err := accountDRepClearBackfill(t.Context(), Batch{
+		Tx: tx, Rebind: func(query string) string { return query },
+	})
+	require.NoError(t, err)
+	require.True(t, result.Done)
+	require.Equal(t, "checked", result.Cursor)
+	require.NoError(t, tx.Rollback())
+
+	fields[12] = common.ProtocolParametersProtocolVersion{Major: 10}
+	data, err = cbor.Encode(fields)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO pparams VALUES (1, ?, 100, ?)`,
+		data, conway.EraIdConway)
+	require.NoError(t, err)
+
+	tx, err = db.Begin()
+	require.NoError(t, err)
+	_, err = accountDRepClearBackfill(t.Context(), Batch{
+		Tx: tx, Rebind: func(query string) string { return query },
+	})
+	require.ErrorContains(t, err, "resync is required")
+	require.NoError(t, tx.Rollback())
+
+	_, err = db.Exec(`INSERT INTO sync_state VALUES ('mithril_ledger_slot', '200')`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO account VALUES (0, X'AA', 50, TRUE)`)
+	require.NoError(t, err)
+	tx, err = db.Begin()
+	require.NoError(t, err)
+	_, err = accountDRepClearBackfill(t.Context(), Batch{
+		Tx: tx, Rebind: func(query string) string { return query },
+	})
+	require.ErrorContains(t, err, "baseline is incomplete")
+	require.NoError(t, tx.Rollback())
+
+	_, err = db.Exec(`INSERT INTO account_import_baseline VALUES (0, X'AA', 200)`)
+	require.NoError(t, err)
+	tx, err = db.Begin()
+	require.NoError(t, err)
+	result, err = accountDRepClearBackfill(t.Context(), Batch{
+		Tx: tx, Rebind: func(query string) string { return query },
+	})
+	require.NoError(t, err)
+	require.True(t, result.Done)
+	require.Equal(t, "checked", result.Cursor)
+	require.NoError(t, tx.Rollback())
+}
+
+func TestAccountDRepClearSchemaTranslatesAllDialects(t *testing.T) {
+	t.Parallel()
+	for _, dialect := range []string{"sqlite", "postgres", "mysql"} {
+		t.Run(dialect, func(t *testing.T) {
+			t.Parallel()
+			registry, err := registryForDialect(dialect)
+			require.NoError(t, err)
+			migration := registry[34]
+			require.Equal(t, accountDRepClearSchemaRelease, migration.Name)
+			sql := strings.Join(migration.SQL[dialect].Expand, "\n")
+			require.Contains(t, sql, "account_drep_clear")
+			require.Contains(t, sql, "idx_account_drep_clear_added_slot")
+		})
+	}
 }
 
 // TestPointerStakeMigrationTranslatesForProviders pins the postgres and mysql
@@ -376,7 +493,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 33)
+	require.Len(t, registry, 39)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

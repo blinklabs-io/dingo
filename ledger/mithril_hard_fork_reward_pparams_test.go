@@ -189,14 +189,13 @@ func runHardForkRewardRound(
 	ls.currentEra = eras.ConwayEraDesc
 	ls.currentPParams = currentParams
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		rollover, rolloverErr := ls.processEpochRollover(
+		rollover, rolloverErr := ls.processEpochRollover(context.Background(),
 			txn,
 			*currentEpoch,
 			eras.ConwayEraDesc,
 			currentParams,
-			false,
 		)
 		if rolloverErr == nil {
 			require.NotNil(t, rollover)
@@ -244,7 +243,7 @@ func rewardParamsFor(
 ) rewardParamsView {
 	t.Helper()
 	var view rewardParamsView
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		_, params, _, err := ls.rewardParameters(
 			txn, performanceEpoch, calculationEpoch, pots,

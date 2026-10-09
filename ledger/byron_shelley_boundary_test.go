@@ -321,7 +321,7 @@ func newByronShelleyBoundaryLedger(
 	))
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{
 		securityParam: 2,
@@ -352,7 +352,10 @@ func newByronShelleyBoundaryLedger(
 		PrevHash:    firstShelley.PrevHash().Bytes(),
 		Cbor:        firstShelley.Cbor(),
 	})
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), rawBlocks),
+	)
 
 	const (
 		byronEpoch       = uint64(207)
@@ -635,14 +638,13 @@ func TestByronShelleyBoundaryClosesReadResultDoneOnEpochRolloverFailure(
 // TestByronShelleyBoundarySeedsEpochNonceOnProductionPath pins the multi-era
 // epoch-nonce seeding fix through the same production path as
 // TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams: without the
-// post-Byron nonce seeding in applyBoundaryEraTransitions (ledger/state.go),
-// calculateEpochNonce returns a nil nonce for any rollover whose source era is
-// Byron, regardless of the destination era, and the transitioned epoch is
-// persisted with no nonce at all. That existing test only asserts on era,
-// pparams, and tip, so it still passes with the nonce-seeding block deleted;
-// this test asserts on the nonce itself, in all three places a caller can
-// observe it — the in-memory current epoch, the epoch cache, and the persisted
-// database row — and fails without the fix.
+// pre-rollover Byron-to-Shelley translation, calculateEpochNonce sees Byron
+// and returns a nil nonce instead of seeding the Shelley genesis hash, and the
+// transitioned epoch is persisted with no nonce at all. That existing test
+// only asserts on era, pparams, and tip, so it still passes with the
+// nonce-seeding block deleted; this test asserts on the nonce itself, in all
+// three places a caller can observe it — the in-memory current epoch, the epoch
+// cache, and the persisted database row — and fails without the fix.
 func TestByronShelleyBoundarySeedsEpochNonceOnProductionPath(t *testing.T) {
 	t.Parallel()
 
@@ -787,7 +789,7 @@ func TestRollbackChainAndStateClearsShelleyPParamsInsideByronPrefix(
 		lastByron.SlotNumber(),
 		lastByron.Hash().Bytes(),
 	)
-	require.NoError(t, ls.rollbackChainAndStateDeferred(byronPoint, nil))
+	require.NoError(t, ls.rollbackChainAndStateDeferred(context.Background(), byronPoint, nil))
 
 	assert.Equal(t, byronPoint, ls.currentTip.Point)
 	assert.Equal(t, eras.ByronEraDesc.Id, ls.currentEra.Id)

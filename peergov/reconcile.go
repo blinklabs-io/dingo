@@ -41,7 +41,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 	// Cleanup expired deny list entries
 	p.cleanupDenyList()
+	p.cleanupInboundFlapHistoryLocked(now)
 	p.cleanupNetworkMismatchDenyList()
+	events = p.syncUpstreamWithholdLocked(events)
 
 	// Reconcile ledger-derived address bookkeeping against currently
 	// retained peers so addresses from peers that left the peer list (deny,
@@ -208,9 +210,12 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 	}
 
 	// Ensure minimum hot peers (simple: promote more warm if needed)
+	// Inbound hot peers have their own budget (InboundHotQuota) and do not
+	// occupy outbound refill slots.
 	hotCount := 0
 	for _, peer := range p.peers {
-		if peer != nil && peer.State == PeerStateHot {
+		if peer != nil && peer.State == PeerStateHot &&
+			peer.Source != PeerSourceInboundConn {
 			hotCount++
 		}
 	}
@@ -232,7 +237,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 		candidates := make([]promotionCandidate, 0, len(p.peers))
 		for _, peer := range p.peers {
 			if peer != nil && peer.State == PeerStateWarm &&
-				peer.hasClientConnection() {
+				p.usableClientLocked(peer) {
 				// Skip bootstrap peers if bootstrap has been exited
 				if p.isBootstrapPeer(peer) && !p.canPromoteBootstrapPeer() {
 					continue
@@ -367,10 +372,13 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 			peer.LastActivity = now
 			warmPromotions++
 			activeIncreased++
-			promoted++
+			// Inbound promotions have their own budget and must not use up
+			// the outbound refill slots counted by promoted and hotCount.
 			if peer.Source == PeerSourceInboundConn {
 				inboundHotHeld++
 				p.recordInboundLifecycle("promoted")
+			} else {
+				promoted++
 			}
 			if bootstrapPromotion && candidates[i].diversityGroup != "" {
 				selectedGroups[candidates[i].diversityGroup] = struct{}{}
@@ -429,7 +437,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 					Reason:  "target active peers (score)",
 				},
 			})
-			hotCount++
+			if peer.Source != PeerSourceInboundConn {
+				hotCount++
+			}
 		}
 	}
 
@@ -551,7 +561,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 		for _, addr := range addrs {
 			// Ignore error: reaching the peer list cap during gossip
 			// discovery is expected and not actionable here.
-			_ = p.AddPeer(addr, PeerSourceP2PGossip)
+			_ = p.AddPeer(addr, PeerSourceP2PGossip) //nolint:contextcheck // address normalization bounds its own DNS lookup
 		}
 	}
 }
@@ -568,6 +578,7 @@ func (p *PeerGovernor) enforcePeerLimits(removedCount *int) []pendingEvent {
 		events = append(events, p.enforceStateLimit(
 			PeerStateHot,
 			p.config.TargetNumberOfActivePeers,
+			false,
 			removedCount,
 		)...)
 	}
@@ -577,6 +588,19 @@ func (p *PeerGovernor) enforcePeerLimits(removedCount *int) []pendingEvent {
 		events = append(events, p.enforceStateLimit(
 			PeerStateWarm,
 			p.config.TargetNumberOfEstablishedPeers,
+			false,
+			removedCount,
+		)...)
+	}
+
+	// Enforce the warm inbound bound. Inbound peers sit outside the
+	// outbound targets above, so they need their own limit; hot inbound
+	// peers are already capped by InboundHotQuota when promoted.
+	if p.config.InboundWarmTarget > 0 {
+		events = append(events, p.enforceStateLimit(
+			PeerStateWarm,
+			p.config.InboundWarmTarget,
+			true,
 			removedCount,
 		)...)
 	}
@@ -586,6 +610,7 @@ func (p *PeerGovernor) enforcePeerLimits(removedCount *int) []pendingEvent {
 		events = append(events, p.enforceStateLimit(
 			PeerStateCold,
 			p.config.TargetNumberOfKnownPeers,
+			false,
 			removedCount,
 		)...)
 	}
@@ -593,12 +618,15 @@ func (p *PeerGovernor) enforcePeerLimits(removedCount *int) []pendingEvent {
 	return events
 }
 
-// enforceStateLimit removes excess peers in a given state.
+// enforceStateLimit removes excess peers in a given state. With inbound set it
+// counts and removes only inbound peers in that state, least recently served
+// first; otherwise inbound peers in a non-cold state are left out entirely.
 // Returns events that should be published after releasing the lock.
 // Must be called with p.mu held.
 func (p *PeerGovernor) enforceStateLimit(
 	state PeerState,
 	limit int,
+	inbound bool,
 	removedCount *int,
 ) []pendingEvent {
 	var events []pendingEvent
@@ -613,6 +641,15 @@ func (p *PeerGovernor) enforceStateLimit(
 	candidates := make([]removalCandidate, 0, len(p.peers))
 	for idx, peer := range p.peers {
 		if peer == nil || peer.State != state {
+			continue
+		}
+		// Inbound peers chose to sync from this node; they do not count
+		// toward, and are never removed for, the outbound hot/warm
+		// selection targets. The inbound pass bounds them by
+		// InboundWarmTarget instead; idle/flap pruning and InboundHotQuota
+		// also apply.
+		isInbound := peer.Source == PeerSourceInboundConn
+		if inbound != isInbound && (inbound || state != PeerStateCold) {
 			continue
 		}
 		stateCount++
@@ -648,6 +685,15 @@ func (p *PeerGovernor) enforceStateLimit(
 		// First compare by source priority (lower priority = remove first)
 		if a.priority != b.priority {
 			return cmp.Compare(a.priority, b.priority)
+		}
+		// Inbound peers: the one that consumed from us longest ago goes
+		// first.
+		if inbound {
+			if c := a.peer.LastServedActivity.Compare(
+				b.peer.LastServedActivity,
+			); c != 0 {
+				return c
+			}
 		}
 		// Same priority: lower score = remove first
 		return cmp.Compare(
@@ -766,6 +812,7 @@ func (p *PeerGovernor) pruneInboundWarmPeersLocked(
 		}
 		if applyCooldown {
 			p.denyList[peer.NormalizedAddress] = now.Add(cooldownDuration)
+			p.rememberInboundFlapLocked(peer, now, cooldownDuration)
 			p.recordInboundLifecycle("cooled-down")
 		}
 		p.config.Logger.Info(
@@ -839,6 +886,11 @@ func (p *PeerGovernor) inboundPruneDecisionLocked(
 	}
 	if peer.LastBlockFetchTime.After(lastSignal) {
 		lastSignal = peer.LastBlockFetchTime
+	}
+	// A peer consuming our chain is useful even when it never answers our
+	// client-side protocols; idle means idle in both directions.
+	if peer.LastServedActivity.After(lastSignal) {
+		lastSignal = peer.LastServedActivity
 	}
 	if peer.LastInboundDisconnect.After(lastSignal) {
 		lastSignal = peer.LastInboundDisconnect

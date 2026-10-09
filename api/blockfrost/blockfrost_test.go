@@ -833,6 +833,110 @@ func TestMetadataTransactionsCollisionKeepsLabelAndRawCBOR(t *testing.T) {
 	require.Equal(t, "a20163696e7461316474657874", transactionCBOR[0].CBORMetadata)
 }
 
+// TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders stores pairs of
+// equivalent metadata under different top-level and nested key orders. One
+// pair also distinguishes integer key 1 from text key "1". It checks that
+// every metadata endpoint returns the same label set, JSON availability and
+// per-label CBOR on every call. The vectors and expectations are written out
+// by hand from the CBOR bytes.
+func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
+	t.Parallel()
+	adapter, raw, _ := newDBBackedAdapter(t)
+
+	const (
+		collideIntFirst  = "a20163696e7461316474657874"
+		collideTextFirst = "a2613164746578740163696e74"
+	)
+	type metaTx struct {
+		hashByte byte
+		metadata string
+		label721 string
+	}
+	txs := []metaTx{
+		{0x51, "a21902d1" + collideIntFirst + "016161", collideIntFirst},
+		{0x52, "a2016161" + "1902d1" + collideIntFirst, collideIntFirst},
+		{0x53, "a21902d1" + collideTextFirst + "016161", collideTextFirst},
+		{0x54, "a2016161" + "1902d1" + collideTextFirst, collideTextFirst},
+	}
+	for i, mt := range txs {
+		metadataCbor, err := hex.DecodeString(mt.metadata)
+		require.NoError(t, err)
+		label721, err := hex.DecodeString(mt.label721)
+		require.NoError(t, err)
+		tx := &models.Transaction{
+			Hash:     bytes.Repeat([]byte{mt.hashByte}, 32),
+			Metadata: metadataCbor,
+		}
+		insertAdapterTransaction(t, raw, tx)
+		_, err = raw.Exec(`INSERT INTO transaction_metadata_label (transaction_id, label, slot, cbor_value, json_value) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)`,
+			tx.ID, "1", i+1, []byte{0x61, 0x61}, `"a"`,
+			tx.ID, "721", i+1, label721, nil)
+		require.NoError(t, err)
+	}
+
+	for pass := range 16 {
+		for i, mt := range txs {
+			hash := bytes.Repeat([]byte{mt.hashByte}, 32)
+
+			jsonLabels, err := adapter.TransactionMetadata(hash)
+			require.NoError(t, err, "pass %d tx %d", pass, i)
+			require.Len(t, jsonLabels, 2)
+			require.Equal(t, "1", jsonLabels[0].Label)
+			require.Equal(t, `"a"`, string(jsonLabels[0].JSONMetadata))
+			require.Equal(t, "721", jsonLabels[1].Label)
+			require.Empty(t, jsonLabels[1].JSONMetadata, "pass %d tx %d", pass, i)
+
+			cborLabels, err := adapter.TransactionMetadataCBOR(hash)
+			require.NoError(t, err)
+			require.Len(t, cborLabels, 2)
+			require.Equal(t, "1", cborLabels[0].Label)
+			require.Equal(t, "6161", cborLabels[0].CBORMetadata)
+			require.Equal(t, "721", cborLabels[1].Label)
+			require.Equal(t, mt.label721, cborLabels[1].CBORMetadata)
+		}
+
+		params := PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc}
+		jsonRows, total, err := adapter.MetadataTransactions(721, params)
+		require.NoError(t, err)
+		require.Equal(t, len(txs), total)
+		require.Len(t, jsonRows, len(txs))
+		cborRows, cborTotal, err := adapter.MetadataTransactionsCBOR(721, params)
+		require.NoError(t, err)
+		require.Equal(t, len(txs), cborTotal)
+		require.Len(t, cborRows, len(txs))
+		for i, mt := range txs {
+			require.Equal(t, hex.EncodeToString(bytes.Repeat([]byte{mt.hashByte}, 32)), jsonRows[i].TxHash)
+			require.Nil(t, jsonRows[i].JSONMetadata, "pass %d row %d", pass, i)
+			require.Equal(t, jsonRows[i].TxHash, cborRows[i].TxHash)
+			require.Equal(t, mt.label721, cborRows[i].Metadata)
+		}
+
+		// Representable label stays available alongside the colliding one.
+		oneRows, oneTotal, err := adapter.MetadataTransactions(1, params)
+		require.NoError(t, err)
+		require.Equal(t, len(txs), oneTotal)
+		require.Len(t, oneRows, len(txs))
+		for _, row := range oneRows {
+			require.Equal(t, `"a"`, string(row.JSONMetadata))
+		}
+
+		// Pagination does not drop or repeat the unavailable-JSON rows.
+		var seen []string
+		for page := 1; page <= len(txs); page++ {
+			rows, _, err := adapter.MetadataTransactions(721, PaginationParams{Count: 1, Page: page, Order: PaginationOrderAsc})
+			require.NoError(t, err)
+			require.Len(t, rows, 1)
+			seen = append(seen, rows[0].TxHash)
+		}
+		require.Equal(t, []string{
+			hex.EncodeToString(bytes.Repeat([]byte{0x51}, 32)),
+			hex.EncodeToString(bytes.Repeat([]byte{0x52}, 32)),
+			hex.EncodeToString(bytes.Repeat([]byte{0x53}, 32)),
+			hex.EncodeToString(bytes.Repeat([]byte{0x54}, 32)),
+		}, seen)
+	}
+}
+
 // mockNode implements BlockfrostNode for testing.
 type mockNode struct {
 	chainTip                      ChainTipInfo
@@ -873,6 +977,7 @@ type mockNode struct {
 	transaction                   TransactionInfo
 	transactionSubmitHash         string
 	transactionEvaluation         TransactionEvaluationResponse
+	transactionEvaluationCtx      context.Context
 	transactionEvaluateCbor       []byte
 	transactionCBOR               []byte
 	transactionMetadata           []TransactionMetadataInfo
@@ -898,7 +1003,8 @@ type mockNode struct {
 	accountUTXOs                  []AccountUTXOInfo
 	accountWithdrawals            []AccountWithdrawalInfo
 	accountTransactions           []AccountTransactionInfo
-	lastAccountTransactionsParams AccountTransactionsParams
+	lastAccountTransactionsParams TransactionRangeParams
+	lastAddressTransactionsParams TransactionRangeParams
 	chainTipErr                   error
 	blockErr                      error
 	blockByIDErr                  error
@@ -1013,7 +1119,7 @@ func (m *mockNode) PoolsExtended() (
 	return m.pools, m.poolsErr
 }
 
-func (m *mockNode) PoolsList(
+func (m *mockNode) PoolsList(ctx context.Context,
 	params PaginationParams,
 ) ([]string, int, error) {
 	m.poolsListParams = params
@@ -1032,7 +1138,7 @@ func (m *mockNode) PoolMetadata(
 	return m.poolMetadata, m.poolMetadataErr
 }
 
-func (m *mockNode) PoolDetail(
+func (m *mockNode) PoolDetail(ctx context.Context,
 	_ string,
 ) (PoolDetailInfo, error) {
 	return m.poolDetail, m.poolDetailErr
@@ -1076,7 +1182,7 @@ func (m *mockNode) Address(
 	return m.addressInfo, m.addressInfoErr
 }
 
-func (m *mockNode) AddressUTXOs(
+func (m *mockNode) AddressUTXOs(ctx context.Context,
 	_ string,
 	_ PaginationParams,
 ) ([]AddressUTXOInfo, int, error) {
@@ -1084,9 +1190,11 @@ func (m *mockNode) AddressUTXOs(
 }
 
 func (m *mockNode) AddressTransactions(
+	_ context.Context,
 	_ string,
-	_ PaginationParams,
+	params TransactionRangeParams,
 ) ([]AddressTransactionInfo, int, error) {
+	m.lastAddressTransactionsParams = params
 	return m.addressTransactions, m.addressTxsTotal, m.addressTransactionsErr
 }
 
@@ -1117,8 +1225,10 @@ func (m *mockNode) TransactionSubmit(
 }
 
 func (m *mockNode) TransactionEvaluate(
+	ctx context.Context,
 	txCbor []byte,
 ) (TransactionEvaluationResponse, error) {
+	m.transactionEvaluationCtx = ctx
 	m.transactionEvaluateCbor = txCbor
 	return m.transactionEvaluation, m.transactionEvaluationErr
 }
@@ -1201,7 +1311,7 @@ func (m *mockNode) Account(
 	return m.account, m.accountErr
 }
 
-func (m *mockNode) AccountAssociatedAddresses(
+func (m *mockNode) AccountAssociatedAddresses(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountAssociatedAddressInfo, int, error) {
@@ -1220,7 +1330,7 @@ func (m *mockNode) AccountAssociatedAddresses(
 	return items[start:end], total, m.addressesErr
 }
 
-func (m *mockNode) AccountDelegationHistory(
+func (m *mockNode) AccountDelegationHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountDelegationHistoryInfo, int, error) {
@@ -1239,7 +1349,7 @@ func (m *mockNode) AccountDelegationHistory(
 	return items[start:end], total, m.delegationsErr
 }
 
-func (m *mockNode) AccountRegistrationHistory(
+func (m *mockNode) AccountRegistrationHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountRegistrationHistoryInfo, int, error) {
@@ -1258,7 +1368,7 @@ func (m *mockNode) AccountRegistrationHistory(
 	return items[start:end], total, m.regsErr
 }
 
-func (m *mockNode) AccountRewardHistory(
+func (m *mockNode) AccountRewardHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountRewardHistoryInfo, int, error) {
@@ -1298,7 +1408,7 @@ func mockPage[T any](items []T, order string, page, count int) ([]T, int) {
 	return items[start:end], total
 }
 
-func (m *mockNode) AccountUTXOs(
+func (m *mockNode) AccountUTXOs(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountUTXOInfo, int, error) {
@@ -1308,7 +1418,7 @@ func (m *mockNode) AccountUTXOs(
 	return rows, total, m.accountUTXOsErr
 }
 
-func (m *mockNode) AccountWithdrawals(
+func (m *mockNode) AccountWithdrawals(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountWithdrawalInfo, int, error) {
@@ -1318,9 +1428,9 @@ func (m *mockNode) AccountWithdrawals(
 	return rows, total, m.accountWithdrawalsErr
 }
 
-func (m *mockNode) AccountTransactions(
+func (m *mockNode) AccountTransactions(ctx context.Context,
 	_ string,
-	params AccountTransactionsParams,
+	params TransactionRangeParams,
 ) ([]AccountTransactionInfo, int, error) {
 	m.lastAccountTransactionsParams = params
 	rows, total := mockPage(
@@ -1442,21 +1552,19 @@ func TestRouterRootServesRootDocument(t *testing.T) {
 	assert.Equal(t, "0.1.0", resp.Version)
 }
 
-func TestRouterUnimplementedRouteReturns404(t *testing.T) {
+func TestRouterUnknownRouteReturns404(t *testing.T) {
 	t.Parallel()
 
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 	handler := b.handler()
 
-	// "/api/v0/pools" used to belong here as an unimplemented route. It is
-	// now registered, so it no longer falls through to the
-	// catch-all. The remaining entries still cover that path.
 	paths := []string{
-		"/api/v0/",
-		"/api/v0/scripts",
 		"/does-not-exist",
+		"/api/v0/not-an-operation",
+		"/api/v0/scripts/hash/unknown",
 	}
+
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -4720,4 +4828,51 @@ func TestHandleMetadataTransactionsInvalidLabel(t *testing.T) {
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err)
 	assert.Equal(t, "Invalid metadata label.", resp.Message)
+}
+
+func TestHandleAddressTransactionsRange(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/a/transactions?from=100:2&to=200",
+		nil,
+	)
+	req.SetPathValue("address", "a")
+	w := httptest.NewRecorder()
+	b.handleAddressTransactions(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	got := mock.lastAddressTransactionsParams
+	require.NotNil(t, got.From)
+	require.NotNil(t, got.To)
+	assert.EqualValues(t, 100, got.From.Block)
+	require.NotNil(t, got.From.Index)
+	assert.EqualValues(t, 2, *got.From.Index)
+	assert.EqualValues(t, 200, got.To.Block)
+	assert.Nil(t, got.To.Index)
+}
+
+func TestHandleAddressTransactionsRangeRejectsBadBounds(t *testing.T) {
+	t.Parallel()
+
+	for _, query := range []string{
+		"from=abc", "to=1:x", "from=5&to=4", "from=5:3&to=5:2",
+	} {
+		t.Run(query, func(t *testing.T) {
+			t.Parallel()
+			b := newTestBlockfrost(&mockNode{})
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/api/v0/addresses/a/transactions?"+query,
+				nil,
+			)
+			req.SetPathValue("address", "a")
+			w := httptest.NewRecorder()
+			b.handleAddressTransactions(w, req)
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+		})
+	}
 }

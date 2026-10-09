@@ -17,8 +17,10 @@ package dblifecycle_test
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -91,6 +93,71 @@ func TestServiceSnapshotAndRestore(t *testing.T) {
 	restoredManifest, err := restoreSvc.Restore(context.Background(), snapDir)
 	require.NoError(t, err)
 	require.Equal(t, m.CommitTimestamp, restoredManifest.CommitTimestamp)
+}
+
+// TestServiceSignsAndVerifiesSnapshotsWithTrustKey verifies that the
+// configured trust key file reaches both Service.Snapshot, which signs with
+// it, and Service.Restore, which refuses a snapshot signed under another key.
+func TestServiceSignsAndVerifiesSnapshotsWithTrustKey(t *testing.T) {
+	t.Parallel()
+
+	writeKey := func(secret string) string {
+		path := filepath.Join(t.TempDir(), "trust.key")
+		require.NoError(t, os.WriteFile(path, []byte(secret), 0o600))
+		return path
+	}
+	srcDir := filepath.Join(t.TempDir(), "src")
+	srcCfg := testConfig(srcDir)
+	srcCfg.DatabaseLifecycle.SnapshotTrustKeyFile = writeKey(
+		"operator-trust-root-0123456789ab",
+	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: srcDir})
+	require.NoError(t, err)
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	snapDir := filepath.Join(t.TempDir(), "snap")
+	m, err := dblifecycle.NewService(srcCfg, nil, nil).Snapshot(
+		context.Background(), snapDir, "", "",
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, m.Authentication)
+
+	wrongCfg := testConfig(filepath.Join(t.TempDir(), "restored-wrong"))
+	wrongCfg.DatabaseLifecycle.SnapshotTrustKeyFile = writeKey(
+		"some-other-trust-root-0123456789",
+	)
+	_, err = dblifecycle.NewService(wrongCfg, nil, nil).Restore(
+		context.Background(), snapDir,
+	)
+	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
+
+	rightCfg := testConfig(filepath.Join(t.TempDir(), "restored"))
+	rightCfg.DatabaseLifecycle.SnapshotTrustKeyFile = srcCfg.DatabaseLifecycle.SnapshotTrustKeyFile
+	_, err = dblifecycle.NewService(rightCfg, nil, nil).Restore(
+		context.Background(), snapDir,
+	)
+	require.NoError(t, err)
+}
+
+// TestServiceSnapshotAppliesMaxCommitPause verifies the offline path passes
+// databaseLifecycle.snapshotMaxCommitPause to lifecycle.Snapshot. A
+// nanosecond bound has always elapsed by the time the state reads finish.
+func TestServiceSnapshotAppliesMaxCommitPause(t *testing.T) {
+	t.Parallel()
+
+	srcDir := filepath.Join(t.TempDir(), "src")
+	cfg := testConfig(srcDir)
+	cfg.DatabaseLifecycle.SnapshotMaxCommitPause = time.Nanosecond
+	svc := dblifecycle.NewService(cfg, nil, nil)
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: srcDir})
+	require.NoError(t, err)
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	snapDir := filepath.Join(t.TempDir(), "snap")
+	_, err = svc.Snapshot(context.Background(), snapDir, "", "")
+	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
+	require.NoDirExists(t, snapDir)
 }
 
 // TestServiceRestoreRejectsIncompatibleTarget verifies that Service.
@@ -194,11 +261,15 @@ func TestResolveTargetAcceptsConsistentCombinedFields(t *testing.T) {
 	db, blocks := buildResolveTargetTestChain(t, 5)
 	target := blocks[1] // id=2, slot=20, number=2
 
-	resolved, err := dblifecycle.ResolveTarget(db, dblifecycle.TruncateTarget{
-		Slot:        &target.Slot,
-		Hash:        target.Hash,
-		BlockNumber: &target.Number,
-	})
+	resolved, err := dblifecycle.ResolveTarget(
+		context.Background(),
+		db,
+		dblifecycle.TruncateTarget{
+			Slot:        &target.Slot,
+			Hash:        target.Hash,
+			BlockNumber: &target.Number,
+		},
+	)
 	require.NoError(t, err)
 	require.Equal(t, target.ID, resolved.ID)
 }
@@ -215,18 +286,26 @@ func TestResolveTargetRejectsInconsistentCombinedFields(t *testing.T) {
 	hashOfBlock2 := blocks[1].Hash
 
 	wrongSlot := blocks[2].Slot // slot of block 3, not block 2
-	_, err := dblifecycle.ResolveTarget(db, dblifecycle.TruncateTarget{
-		Hash: hashOfBlock2,
-		Slot: &wrongSlot,
-	})
+	_, err := dblifecycle.ResolveTarget(
+		context.Background(),
+		db,
+		dblifecycle.TruncateTarget{
+			Hash: hashOfBlock2,
+			Slot: &wrongSlot,
+		},
+	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not match")
 
 	wrongNumber := blocks[3].Number // number of block 4, not block 2
-	_, err = dblifecycle.ResolveTarget(db, dblifecycle.TruncateTarget{
-		Hash:        hashOfBlock2,
-		BlockNumber: &wrongNumber,
-	})
+	_, err = dblifecycle.ResolveTarget(
+		context.Background(),
+		db,
+		dblifecycle.TruncateTarget{
+			Hash:        hashOfBlock2,
+			BlockNumber: &wrongNumber,
+		},
+	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not match")
 }

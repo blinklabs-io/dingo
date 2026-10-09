@@ -149,6 +149,14 @@ func (n *Node) quiesceComponentStops() []namedStop {
 			stop: n.leaderElection.Stop,
 		})
 	}
+	// After the forger, the agent client and the election: they all read or
+	// install key material, which this wipes.
+	if n.blockProducerCreds.Load() != nil {
+		stops = append(stops, namedStop{
+			name: "block producer credentials",
+			stop: func() error { n.closeBlockProducerCredentials(); return nil },
+		})
+	}
 	if n.leiosPipelineManager != nil {
 		stops = append(stops, namedStop{
 			name: "leios pipeline manager",
@@ -251,6 +259,10 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// back to a direct Stop would drop out of it.
 	stopTimeout := n.configuredShutdownTimeout()
 	for _, cs := range componentStopsForQuiesce(n) {
+		if cs.name == "block producer credentials" &&
+			errors.Is(err, errStorageDrainUnconfirmed) {
+			continue
+		}
 		if stopErr := stopWithDeadline(
 			stopTimeout, cs.name, cs.stop,
 		); stopErr != nil {
@@ -426,20 +438,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	n.mempool = nil
 	if n.connManager != nil {
 		if stopErr := n.connManager.Stop(ctx); stopErr != nil {
-			// errStorageDrainUnconfirmed, not a bare join: connManager.Stop
-			// returning an error means its own bounded wait (connection
-			// close, then goroutineWg) gave up before confirming every
-			// connection/listener goroutine actually exited -- exactly the
-			// precondition PauseLeiosPersistWriterForLiveLifecycleOp below
-			// depends on ("no more inbound Leios fetch traffic") to safely
-			// reset the persist writer's start-once guard. Escalating here,
-			// the same way an unconfirmed leios persist drain itself does,
-			// means Restore/Truncate call n.cancel() for a full supervised
-			// restart instead of reinitializeAndResume -- so a straggling
-			// connection's Leios fetch racing that reset (see
-			// PauseLeiosPersistWriterForLiveLifecycleOp's doc comment) can
-			// no longer happen: the node never reaches reinitializeAndResume
-			// in that case at all.
+			// Unconfirmed connection shutdown leaves traffic able to restart the
+			// persistence writer, so storage replacement requires a full restart.
 			err = errors.Join(
 				err,
 				errStorageDrainUnconfirmed,
@@ -496,18 +496,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		n.leiosVoteReceivedSubId = 0
 	}
 
-	// Last, now that connManager.Stop above has closed every connection —
-	// so no more inbound Leios fetch traffic can call enqueueLeiosPersist
-	// concurrently with the reset this performs (see
-	// PauseLeiosPersistWriterForLiveLifecycleOp's own doc comment for why
-	// that ordering matters, and this file's top doc comment for why
-	// n.ouroboros needs this one exception at all).
-	//
-	// errStorageDrainUnconfirmed, not a bare join: an unconfirmed leios
-	// persist drain means that writer goroutine may still be running
-	// against the about-to-close database, exactly the same danger
-	// errStorageDrainUnconfirmed already makes Restore/Truncate fail
-	// closed on rather than attempt reinitializeAndResume.
+	// Drain persistence while storage is open. An unconfirmed drain requires
+	// a supervised restart because the writer may still access that storage.
 	if n.ouroboros() != nil {
 		if pauseErr := n.ouroboros().PauseLeiosPersistWriterForLiveLifecycleOp(); pauseErr != nil {
 			err = errors.Join(
@@ -647,7 +637,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to reopen storage: %w", err)
 	}
-	db, err := database.New(n.databaseConfig(), stores)
+	db, err := database.New(ctx, n.databaseConfig(), stores)
 	if db == nil {
 		if err != nil {
 			return fmt.Errorf("failed to reopen database: %w", err)
@@ -667,7 +657,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		dbNeedsRecovery = true
 	}
 
-	cm, err := chain.NewManager(n.db, n.eventBus, n.config.promRegistry)
+	cm, err := chain.NewManager(ctx, n.db, n.eventBus, n.config.promRegistry)
 	if err != nil {
 		return fmt.Errorf("failed to reload chain manager: %w", err)
 	}
@@ -697,6 +687,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		barkBlobStore, err := bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
 			BaseUrl:                   n.config.barkBaseUrl,
 			BlockDownloadAllowedHosts: n.config.barkBlockDownloadHosts,
+			MaxBlockSize:              state.MaxBlockSize,
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},
@@ -714,10 +705,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	// Recovery changes both the ledger tip and blob contents. Complete it
 	// before starting background maintenance that reads or prunes either store.
 	if dbNeedsRecovery {
-		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
+		if err := n.ledgerState.RecoverCommitTimestampConflict(ctx); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
 		}
-		if err := n.enforceRecoveredNodeSettings(); err != nil {
+		if err := n.enforceRecoveredNodeSettings(ctx); err != nil {
 			return err
 		}
 	}
@@ -753,7 +744,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		)
 	}
 
-	if err := n.backfillRewardLiveStake(); err != nil {
+	if err := n.backfillRewardLiveStake(ctx); err != nil {
 		return err
 	}
 
@@ -769,7 +760,7 @@ func (n *Node) reinitializeMidnightIndexer() error {
 	if !midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		return nil
 	}
-	if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
+	if err := n.ledgerState.PrepareEpochCacheForStartup(n.ctx); err != nil {
 		return fmt.Errorf(
 			"load epoch cache before Midnight indexer restart: %w",
 			err,
@@ -972,11 +963,11 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			Logger:   n.config.logger,
 			EventBus: n.eventBus,
 			ListenersProvider: func() []connmanager.ListenerConfig {
-				return n.ouroboros().ConfigureListeners(n.config.listeners)
+				return n.ouroboros().ConfigureListeners(n.ctx, n.config.listeners)
 			},
 			OutboundSourcePort: n.config.outboundSourcePort,
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
-				return n.ouroboros().OutboundConnOpts()
+				return n.ouroboros().OutboundConnOpts(n.ctx)
 			},
 			PromRegistry:            n.config.promRegistry,
 			MaxConnectionsPerIP:     n.config.maxConnectionsPerIP,
@@ -1034,7 +1025,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
 	}
 	applyPeerTargets(n.config, &peerGovConfig)
-	n.peerGov = peergov.NewPeerGovernor(peerGovConfig)
+	n.setPeerGovernor(peergov.NewPeerGovernor(peerGovConfig))
 	// Replace ouroboros. It takes its dependencies at construction and never
 	// reassigns them, so rebuilding those dependencies means rebuilding it
 	// too. Closing the old instance first is required, not merely tidy: it
@@ -1092,14 +1083,14 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		if usePeerSnapshot {
 			topologyConfig = topologyConfig.WithoutBootstrapPeers()
 		}
-		n.peerGov.LoadTopologyConfig(topologyConfig)
+		n.peerGov.LoadTopologyConfig(topologyConfig) //nolint:contextcheck // address normalization bounds its own DNS lookup
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
 				ctx,
 				n.config.topologyConfig.PeerSnapshot,
 			)
 			if added == 0 {
-				n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
+				n.peerGov.LoadTopologyConfig(n.config.topologyConfig) //nolint:contextcheck // address normalization bounds its own DNS lookup
 			}
 		}
 	}
@@ -1170,7 +1161,11 @@ func (n *Node) reinitializeAPIServers() error {
 				Logger:   n.config.logger,
 				Metadata: n.db.Metadata(),
 				BlockNumberByHash: func(hash []byte) (uint64, bool, error) {
-					block, err := database.BlockByHash(n.db, hash)
+					block, err := database.BlockByHash(
+						n.ctx,
+						n.db,
+						hash,
+					)
 					if err != nil {
 						if errors.Is(err, models.ErrBlockNotFound) {
 							return 0, false, nil
@@ -1373,6 +1368,10 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 	if err != nil {
 		return fmt.Errorf("block producer startup validation failed: %w", err)
 	}
+	// If teardown could not confirm the old consumers stopped, intentionally
+	// retain their credentials without closing them: they may still use the keys.
+	n.blockProducerCreds.Store(creds)
+	n.setEquivocationSelfPoolID(creds)
 	// validateBlockProducerStartup may have dialled a KES agent and started
 	// its serve-key loop. Unlike Run's failure path this one leaves the node
 	// running, so a failure below would otherwise leave that loop installing
@@ -1381,6 +1380,7 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 	defer func() {
 		if retErr != nil {
 			n.closeKESAgentClient()
+			n.closeBlockProducerCredentials()
 		}
 	}()
 	if err := n.validateBlockProducerLedger(creds); err != nil {
@@ -1529,6 +1529,11 @@ func (n *Node) Snapshot(
 			"node database is not open",
 		)
 	}
+	manifestOpts, err := dblifecycle.ManifestOptions(n.config.databaseLifecycle)
+	if err != nil {
+		return lifecycle.Manifest{}, err
+	}
+	manifestOpts = append(manifestOpts, lifecycle.WithMaxCommitPause(n.config.databaseLifecycle.SnapshotMaxCommitPause))
 	return lifecycle.SnapshotToCloud(
 		ctx,
 		n.destinationRegistry,
@@ -1541,6 +1546,7 @@ func (n *Node) Snapshot(
 		n.config.databaseLifecycle.SnapshotCloudDestination,
 		name,
 		description,
+		manifestOpts...,
 	)
 }
 
@@ -1588,11 +1594,20 @@ func (n *Node) Restore(
 ) (lifecycle.Manifest, error) {
 	n.liveLifecycleMu.Lock()
 	defer n.liveLifecycleMu.Unlock()
+	n.networkingCoreMu.Lock()
+	defer n.networkingCoreMu.Unlock()
 	// Excludes a concurrent Snapshot too -- see snapshotMu's doc comment
 	// (node.go) for why Snapshot itself only takes this lock, not
 	// liveLifecycleMu.
 	n.snapshotMu.Lock()
 	defer n.snapshotMu.Unlock()
+
+	// Resolved before anything is quiesced so an unusable trust key refuses
+	// the restore while the node is still serving.
+	manifestOpts, err := dblifecycle.ManifestOptions(n.config.databaseLifecycle)
+	if err != nil {
+		return lifecycle.Manifest{}, err
+	}
 
 	stagingDir := n.config.dataDir + restoreStagingSuffix
 	if err := os.RemoveAll(stagingDir); err != nil {
@@ -1738,6 +1753,7 @@ func (n *Node) Restore(
 				n.config.cardanoNodeConfig, "", n.config.network,
 			),
 		},
+		manifestOpts...,
 	)
 	if err != nil {
 		_ = os.RemoveAll(stagingDir)
@@ -2086,6 +2102,8 @@ func (n *Node) Truncate(
 ) (uint64, error) {
 	n.liveLifecycleMu.Lock()
 	defer n.liveLifecycleMu.Unlock()
+	n.networkingCoreMu.Lock()
+	defer n.networkingCoreMu.Unlock()
 	// Excludes a concurrent Snapshot too -- see snapshotMu's doc comment
 	// (node.go) for why Snapshot itself only takes this lock, not
 	// liveLifecycleMu.
@@ -2195,7 +2213,7 @@ func (n *Node) Truncate(
 			)
 		}
 
-		block, err := dblifecycle.ResolveTarget(tmpDB, target)
+		block, err := dblifecycle.ResolveTarget(ctx, tmpDB, target)
 		if err != nil {
 			return 0, fmt.Errorf(
 				"%w: %w", lifecycle.ErrTruncateNotStarted, err,

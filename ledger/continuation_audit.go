@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"strconv"
@@ -459,7 +460,7 @@ func (w *continuationAuditWindow) producersAtOrBelow(
 // instead of publishing. The prior window's producers may still be on the
 // chain, and a window published without them reports a later spend of their
 // outputs as a missing producer at ERROR on a node where nothing is wrong.
-func (ls *LedgerState) armContinuationAudit(
+func (ls *LedgerState) armContinuationAudit(ctx context.Context,
 	point ocommon.Point,
 	reason string,
 ) {
@@ -484,7 +485,7 @@ func (ls *LedgerState) armContinuationAudit(
 	ls.continuationAuditMutex.Lock()
 	defer ls.continuationAuditMutex.Unlock()
 	if prior := ls.continuationAudit.Load(); prior != nil {
-		if err := ls.carryForwardWindow(prior, next, point); err != nil {
+		if err := ls.carryForwardWindow(ctx, prior, next, point); err != nil {
 			ls.disarmContinuationAuditUnverified(prior.forkPoint, err)
 			return
 		}
@@ -545,13 +546,13 @@ func (ls *LedgerState) disarmContinuationAuditUnverified(
 
 // continuationAuditOnPrimaryChain is the primary-chain membership read every
 // audit decision about a producer rests on. See primaryChainContainsPoint.
-func (ls *LedgerState) continuationAuditOnPrimaryChain(
+func (ls *LedgerState) continuationAuditOnPrimaryChain(ctx context.Context,
 	point ocommon.Point,
 ) (bool, error) {
 	if ls.continuationAuditContainsPoint != nil {
 		return ls.continuationAuditContainsPoint(point)
 	}
-	return ls.primaryChainContainsPoint(point)
+	return ls.primaryChainContainsPoint(ctx, point)
 }
 
 // carryForwardWindow moves what prior knows about blocks this rollback did not
@@ -585,12 +586,12 @@ func (ls *LedgerState) continuationAuditOnPrimaryChain(
 //
 // It returns the membership read's error, having carried nothing. next is then
 // not fit to publish: see armContinuationAudit.
-func (ls *LedgerState) carryForwardWindow(
+func (ls *LedgerState) carryForwardWindow(ctx context.Context,
 	prior *continuationAuditWindow,
 	next *continuationAuditWindow,
 	point ocommon.Point,
 ) error {
-	onChain, err := ls.continuationAuditOnPrimaryChain(prior.forkPoint)
+	onChain, err := ls.continuationAuditOnPrimaryChain(ctx, prior.forkPoint)
 	if err != nil {
 		return err
 	}
@@ -805,7 +806,7 @@ func (ls *LedgerState) recordLateProducers(
 	window *continuationAuditWindow,
 	e BlockfetchEvent,
 ) {
-	onChain, err := ls.continuationAuditOnPrimaryChain(e.Point)
+	onChain, err := ls.continuationAuditOnPrimaryChain(ls.lifecycleContext(), e.Point)
 	if err != nil {
 		ls.continuationAuditMutex.Lock()
 		defer ls.continuationAuditMutex.Unlock()
@@ -876,7 +877,7 @@ func (ls *LedgerState) commitContinuationAuditBody(
 		return false
 	}
 	if published != window {
-		onChain, err := ls.continuationAuditOnPrimaryChain(e.Point)
+		onChain, err := ls.continuationAuditOnPrimaryChain(ls.lifecycleContext(), e.Point)
 		switch {
 		case err != nil:
 			ls.disarmContinuationAuditUnverified(e.Point, err)
@@ -923,14 +924,23 @@ func (ls *LedgerState) continuationInputHasProducer(
 	if window.hasProducer(string(producerId)) {
 		return true, nil
 	}
-	utxo, err := ls.db.UtxoByRef(producerId, input.Index(), nil)
+	utxo, err := ls.db.UtxoByRef(
+		ls.lifecycleContext(),
+		producerId,
+		input.Index(),
+		nil,
+	)
 	if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
 		return false, err
 	}
 	if utxo != nil {
 		return true, nil
 	}
-	producerTx, err := ls.db.GetTransactionByHash(producerId, nil)
+	producerTx, err := ls.db.GetTransactionByHash(
+		ls.lifecycleContext(),
+		producerId,
+		nil,
+	)
 	if err != nil {
 		return false, err
 	}
@@ -1168,6 +1178,7 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 		window.endorserResolutions++
 		if !ref.resolved {
 			ebHash, ebSlot, _, announced, err := ls.leiosCertifiedAnnouncementFromParent(
+				ls.lifecycleContext(),
 				ref.certParentHash,
 			)
 			switch {

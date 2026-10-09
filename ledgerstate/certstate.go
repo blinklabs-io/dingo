@@ -2326,6 +2326,11 @@ type ParsedGovProposal struct {
 type ParsedGovActionId struct {
 	TxHash      []byte // 32 bytes
 	ActionIndex uint32
+	// ActionType and ExpiresAfter are populated for IDs decoded from
+	// RatifyState.rsEnacted. Per-purpose roots carry only identity.
+	ActionType    uint8
+	ActionTypeSet bool
+	ExpiresAfter  uint64
 }
 
 // ParsedPrevGovActionIds holds the per-purpose chain roots from
@@ -2909,8 +2914,11 @@ func parseDRepPulsingState(
 			result.EnactedCommitteeChange = true
 		}
 		ratifiedIds = append(ratifiedIds, ParsedGovActionId{
-			TxHash:      append([]byte(nil), prop.TxHash...),
-			ActionIndex: prop.ActionIndex,
+			TxHash:        append([]byte(nil), prop.TxHash...),
+			ActionIndex:   prop.ActionIndex,
+			ActionType:    prop.ActionType,
+			ActionTypeSet: true,
+			ExpiresAfter:  prop.ExpiresAfter,
 		})
 	}
 	result.RatifiedGovActionIds = ratifiedIds

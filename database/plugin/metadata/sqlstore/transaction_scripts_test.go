@@ -88,13 +88,17 @@ func TestStoreTransactionWitnessesIncludesPlutusV4(t *testing.T) {
 	}
 
 	const slot = uint64(43)
-	require.NoError(t, storeTransactionWitnesses(
+	rows := &rowBatch{}
+	require.NoError(t, store.storeTransactionWitnesses(
 		t.Context(),
 		store.writeDB,
+		rows,
 		transactionID,
 		tx,
 		slot,
+		false,
 	))
+	require.NoError(t, rows.flush(t.Context(), store.writeDB, 999))
 	var witnessHash []byte
 	var witnessType int64
 	require.NoError(t, store.writeDB.QueryRowContext(
@@ -175,13 +179,17 @@ func TestStoreTransactionWitnessesIncludesDijkstraSubTransactions(
 	}
 
 	const slot = uint64(45)
-	require.NoError(t, storeTransactionWitnesses(
+	rows := &rowBatch{}
+	require.NoError(t, store.storeTransactionWitnesses(
 		t.Context(),
 		store.writeDB,
+		rows,
 		transactionID,
 		tx,
 		slot,
+		false,
 	))
+	require.NoError(t, rows.flush(t.Context(), store.writeDB, 999))
 	var witnessScriptCount int
 	require.NoError(t, store.writeDB.QueryRowContext(
 		t.Context(),
@@ -203,12 +211,13 @@ func TestStoreTransactionWitnessesIncludesDijkstraSubTransactions(
 	require.Equal(t, nestedScript.RawScriptBytes(), gotScript.Content)
 	require.Equal(t, uint8(lcommon.ScriptRefTypePlutusV4), gotScript.Type)
 
+	rows = &rowBatch{}
 	require.NoError(t, storeTransactionDatumIndex(
-		t.Context(),
-		store.writeDB,
+		rows,
 		tx,
 		slot,
 	))
+	require.NoError(t, rows.flush(t.Context(), store.writeDB, 999))
 	gotDatum, err := store.GetDatum(
 		lcommon.Blake2b256Hash(nestedDatumRaw),
 		nil,
@@ -268,12 +277,13 @@ func TestStoreTransactionIndexesDijkstraSubTransactionOutputs(t *testing.T) {
 	require.Equal(t, script.RawScriptBytes(), gotScript.Content)
 	require.Equal(t, uint8(lcommon.ScriptRefTypePlutusV4), gotScript.Type)
 
+	rows := &rowBatch{}
 	require.NoError(t, storeTransactionDatumIndex(
-		t.Context(),
-		store.writeDB,
+		rows,
 		tx,
 		slot,
 	))
+	require.NoError(t, rows.flush(t.Context(), store.writeDB, 999))
 	gotDatum, err := store.GetDatum(lcommon.Blake2b256Hash(datumRaw), nil)
 	require.NoError(t, err)
 	require.NotNil(t, gotDatum)
@@ -297,12 +307,13 @@ func TestStoreTransactionDatumIndexIncludesInvalidWitnesses(t *testing.T) {
 	}
 
 	const slot = uint64(44)
+	rows := &rowBatch{}
 	require.NoError(t, storeTransactionDatumIndex(
-		t.Context(),
-		store.writeDB,
+		rows,
 		tx,
 		slot,
 	))
+	require.NoError(t, rows.flush(t.Context(), store.writeDB, 999))
 	got, err := store.GetDatum(lcommon.Blake2b256Hash(raw), nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)

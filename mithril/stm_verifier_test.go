@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"math/big"
 	"testing"
 
@@ -165,6 +166,7 @@ func TestVerifySTMSignatureGolden(t *testing.T) {
 		encodedAVK,
 		encodedSig,
 		ProtocolParameters{K: 5, M: 10, PhiF: 0.8},
+		newCertificateChainBudget(),
 	)
 	require.NoError(t, err)
 }
@@ -183,6 +185,7 @@ func TestVerifySTMSignatureRejectsWrongMessage(t *testing.T) {
 		encodedAVK,
 		encodedSig,
 		ProtocolParameters{K: 5, M: 10, PhiF: 0.8},
+		newCertificateChainBudget(),
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "lottery lost")
@@ -211,6 +214,7 @@ func TestVerifySTMSignatureRejectsTamperedBatchProof(t *testing.T) {
 		encodedAVK,
 		encodedSig,
 		ProtocolParameters{K: 5, M: 10, PhiF: 0.8},
+		newCertificateChainBudget(),
 	)
 	require.Error(t, err)
 	require.Contains(
@@ -235,6 +239,7 @@ func TestVerifySTMSignatureRejectsZeroK(t *testing.T) {
 		encodedAVK,
 		encodedSig,
 		ProtocolParameters{K: 0, M: 10, PhiF: 0.8},
+		newCertificateChainBudget(),
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "K=0")
@@ -254,6 +259,170 @@ func TestParseSTMAggregateVerificationKeyRejectsZeroLeaves(t *testing.T) {
 	_, err := parseSTMAggregateVerificationKey(encoded)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "nrLeaves must be positive")
+}
+
+func stmTestLeaf(b byte) stmClosedRegistrationEntry {
+	return stmClosedRegistrationEntry{
+		VerificationKey: bytes.Repeat([]byte{b}, 96),
+		Stake:           uint64(b),
+	}
+}
+
+func stmTestLeafHash(b byte) []byte {
+	return stmBlake2b256(stmMerkleLeafBytes(stmTestLeaf(b)))
+}
+
+func stmTestNode(left, right []byte) []byte {
+	return stmBlake2b256(bytes.Join([][]byte{left, right}, nil))
+}
+
+func TestSTMVerifyLeavesMembershipFromBatchPath(t *testing.T) {
+	t.Parallel()
+
+	h1, h2, h3 := stmTestLeafHash(1), stmTestLeafHash(2), stmTestLeafHash(3)
+	node01 := stmTestNode(h1, h2)
+	// A three-leaf tree pads to four, so the missing fourth leaf's parent
+	// pairs the last leaf with the hash of a zero byte.
+	node2 := stmTestNode(h3, stmBlake2b256([]byte{0}))
+	root3 := stmTestNode(node01, node2)
+
+	for _, tc := range []struct {
+		name    string
+		leaves  int
+		root    []byte
+		leaf    byte
+		path    stmMerkleBatchPath
+		wantErr string
+		wantIs  error
+	}{
+		{
+			name: "single leaf tree", leaves: 1, root: h1, leaf: 1,
+			path: stmMerkleBatchPath{Indices: []int{0}},
+		},
+		{
+			name: "two leaf tree", leaves: 2, root: node01, leaf: 1,
+			path: stmMerkleBatchPath{
+				Indices: []int{0}, Values: [][]byte{h2},
+			},
+		},
+		{
+			name: "padded tree, last leaf", leaves: 3, root: root3, leaf: 3,
+			path: stmMerkleBatchPath{
+				Indices: []int{2}, Values: [][]byte{node01},
+			},
+		},
+		{
+			name: "truncated path", leaves: 3, root: root3, leaf: 3,
+			path:    stmMerkleBatchPath{Indices: []int{2}},
+			wantErr: "ran out of sibling values",
+		},
+		{
+			name: "trailing path values", leaves: 2, root: node01, leaf: 1,
+			path: stmMerkleBatchPath{
+				Indices: []int{0}, Values: [][]byte{h2, h2},
+			},
+			wantErr: "unused sibling values",
+		},
+		{
+			name: "no leaves", leaves: 2, root: node01,
+			path:    stmMerkleBatchPath{},
+			wantErr: "no leaves",
+		},
+		{
+			// Unsupported tree dimensions fail before any membership walk.
+			name: "max int leaf count", leaves: math.MaxInt, root: h1, leaf: 1,
+			path:   stmMerkleBatchPath{Indices: []int{0}},
+			wantIs: errSTMUnsupportedTreeSize,
+		},
+		{
+			name: "just past supported leaf count", leaves: stmMaxMerkleLeaves + 1,
+			root: h1, leaf: 1,
+			path:   stmMerkleBatchPath{Indices: []int{0}},
+			wantIs: errSTMUnsupportedTreeSize,
+		},
+		{
+			name: "zero leaf count", leaves: 0, root: h1, leaf: 1,
+			path:   stmMerkleBatchPath{Indices: []int{0}},
+			wantIs: errSTMUnsupportedTreeSize,
+		},
+		{
+			name: "negative leaf count", leaves: -1, root: h1, leaf: 1,
+			path:   stmMerkleBatchPath{Indices: []int{0}},
+			wantIs: errSTMUnsupportedTreeSize,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			avk := &stmAggregateVerificationKey{
+				MTCommitment: stmMerkleTreeBatchCommitment{
+					Root: tc.root, NrLeaves: tc.leaves,
+				},
+			}
+			var leaves []stmClosedRegistrationEntry
+			if len(tc.path.Indices) > 0 {
+				leaves = append(leaves, stmTestLeaf(tc.leaf))
+			}
+			var err error
+			require.NotPanics(t, func() {
+				err = stmVerifyLeavesMembershipFromBatchPath(
+					avk, leaves, &tc.path,
+				)
+			})
+			switch {
+			case tc.wantIs != nil:
+				require.ErrorIs(t, err, tc.wantIs)
+			case tc.wantErr != "":
+				require.ErrorContains(t, err, tc.wantErr)
+			default:
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestParseSTMAggregateVerificationKeyBoundsLeafCount(t *testing.T) {
+	t.Parallel()
+
+	binaryKey := func(nrLeaves uint64) string {
+		var buf [48]byte
+		binary.BigEndian.PutUint64(buf[:8], nrLeaves)
+		buf[8] = 0xAB
+		buf[47] = 1
+		return hex.EncodeToString(buf[:])
+	}
+	jsonKey := func(nrLeaves int) string {
+		raw, err := json.Marshal(map[string]any{
+			"mt_commitment": map[string]any{
+				"root":      bytes.Repeat([]byte{1}, 32),
+				"nr_leaves": nrLeaves,
+			},
+			"total_stake": 1,
+		})
+		require.NoError(t, err)
+		return hex.EncodeToString(raw)
+	}
+	for _, tc := range []struct {
+		name    string
+		encoded string
+		wantErr bool
+	}{
+		{"binary at limit", binaryKey(stmMaxMerkleLeaves), false},
+		{"binary past limit", binaryKey(stmMaxMerkleLeaves + 1), true},
+		{"binary max int", binaryKey(math.MaxInt64), true},
+		{"json at limit", jsonKey(stmMaxMerkleLeaves), false},
+		{"json past limit", jsonKey(stmMaxMerkleLeaves + 1), true},
+		{"json max int", jsonKey(math.MaxInt), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := parseSTMAggregateVerificationKey(tc.encoded)
+			if tc.wantErr {
+				require.ErrorIs(t, err, errSTMUnsupportedTreeSize)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 // A payload of totalSigs entries needs at least minSigSize

@@ -116,7 +116,11 @@ func seedPoolAndDelegationsWithRewardAccount(
 		VrfKeyHash:    make([]byte, 32),
 		RewardAccount: regRewardAccount,
 	}
-	require.NoError(t, db.ImportPool(nil, pool, reg), "import pool")
+	require.NoError(
+		t,
+		db.ImportPool(context.Background(), nil, pool, reg),
+		"import pool",
+	)
 
 	for i, d := range delegations {
 		account := models.Account{
@@ -127,7 +131,7 @@ func seedPoolAndDelegationsWithRewardAccount(
 		}
 		require.NoError(
 			t,
-			db.CreateAccount(nil, &account),
+			db.CreateAccount(context.Background(), nil, &account),
 			"create account %d",
 			i,
 		)
@@ -147,7 +151,11 @@ func seedPoolAndDelegationsWithRewardAccount(
 				Amount:     amount,
 				AddedSlot:  slot,
 			}
-			require.NoError(t, db.CreateUtxo(nil, &utxo), "create utxo")
+			require.NoError(
+				t,
+				db.CreateUtxo(context.Background(), nil, &utxo),
+				"create utxo",
+			)
 		}
 	}
 }
@@ -495,19 +503,23 @@ func TestCalculateStakeDistribution_UsesHistoricalDelegationAndRegistration(
 		CertificateID: reregCertID,
 	})
 
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       []byte("tx_hist_123456789012345678901234"),
 		OutputIdx:  0,
 		StakingKey: stakeKey,
 		Amount:     10000000,
 		AddedSlot:  100,
 	}), "create delegated utxo")
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: stakeKey,
-		Pool:       poolBHash,
-		AddedSlot:  600,
-		Active:     true,
-	}), "create current account row")
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: stakeKey,
+			Pool:       poolBHash,
+			AddedSlot:  600,
+			Active:     true,
+		}),
+		"create current account row",
+	)
 
 	// A bootstrap/imported-style account: it has registration certificate
 	// history but no delegation certificate at all, only a denormalized
@@ -529,13 +541,17 @@ func TestCalculateStakeDistribution_UsesHistoricalDelegationAndRegistration(
 		AddedSlot:     610,
 		CertificateID: bootstrapRegCertID,
 	})
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: bootstrapKey,
-		Pool:       poolBHash,
-		AddedSlot:  610,
-		Active:     true,
-	}), "create bootstrap current account row")
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: bootstrapKey,
+			Pool:       poolBHash,
+			AddedSlot:  610,
+			Active:     true,
+		}),
+		"create bootstrap current account row",
+	)
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       []byte("tx_boot_123456789012345678901234"),
 		OutputIdx:  0,
 		StakingKey: bootstrapKey,
@@ -585,16 +601,19 @@ func TestCalculateStakeDistribution_HistoricalUtxoLiveness(t *testing.T) {
 
 	seedPoolAndDelegations(t, db, poolHash, nil, 100)
 
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: stakeKey,
-		Pool:       poolHash,
-		AddedSlot:  100,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: stakeKey,
+			Pool:       poolHash,
+			AddedSlot:  100,
+			Active:     true,
+		}),
+	)
 
 	// Create one live UTxO (5 ADA), one UTxO spent after the earlier
 	// snapshot slot (10 ADA), and one UTxO created after that slot (20 ADA).
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:        []byte("tx_live_34567890123456789012345678901234"),
 		OutputIdx:   0,
 		StakingKey:  stakeKey,
@@ -603,7 +622,7 @@ func TestCalculateStakeDistribution_HistoricalUtxoLiveness(t *testing.T) {
 		DeletedSlot: 0, // live
 	}))
 
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:        []byte("tx_spent_4567890123456789012345678901234"),
 		OutputIdx:   0,
 		StakingKey:  stakeKey,
@@ -612,7 +631,7 @@ func TestCalculateStakeDistribution_HistoricalUtxoLiveness(t *testing.T) {
 		DeletedSlot: 500, // spent at slot 500
 	}))
 
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:        []byte("tx_late_4567890123456789012345678901234"),
 		OutputIdx:   0,
 		StakingKey:  stakeKey,
@@ -661,10 +680,13 @@ func TestCalculateStakeDistribution_InactiveAccountsExcluded(t *testing.T) {
 	seedPoolAndDelegations(t, db, poolHash, nil, 100)
 
 	// Active account with 7 ADA UTxO
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: activeKey, Pool: poolHash, AddedSlot: 100, Active: true,
-	}))
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: activeKey, Pool: poolHash, AddedSlot: 100, Active: true,
+		}),
+	)
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:      []byte("tx_activ_567890123456789012345678901234"),
 		OutputIdx: 0, StakingKey: activeKey,
 		Amount: 7000000, AddedSlot: 100,
@@ -675,13 +697,16 @@ func TestCalculateStakeDistribution_InactiveAccountsExcluded(t *testing.T) {
 	inactiveAcct := models.Account{
 		StakingKey: inactiveKey, Pool: poolHash, AddedSlot: 100, Active: true,
 	}
-	require.NoError(t, db.CreateAccount(nil, &inactiveAcct))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &inactiveAcct),
+	)
 	_, err := raw.Exec(
 		"UPDATE account SET active = FALSE WHERE id = ?",
 		inactiveAcct.ID,
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:      []byte("tx_inact_567890123456789012345678901234"),
 		OutputIdx: 0, StakingKey: inactiveKey,
 		Amount: 15000000, AddedSlot: 100,
@@ -722,14 +747,17 @@ func TestCalculateStakeDistribution_SpentUtxosExcluded(t *testing.T) {
 		AddedSlot:  100,
 		Active:     true,
 	}
-	require.NoError(t, db.CreateAccount(nil, &account))
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &account))
 	zeroStakeAccount := models.Account{
 		StakingKey: zeroStakeKey,
 		Pool:       poolHash,
 		AddedSlot:  100,
 		Active:     true,
 	}
-	require.NoError(t, db.CreateAccount(nil, &zeroStakeAccount))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &zeroStakeAccount),
+	)
 
 	// Create one live UTxO (5 ADA) and one spent UTxO (10 ADA)
 	liveUtxo := models.Utxo{
@@ -740,7 +768,7 @@ func TestCalculateStakeDistribution_SpentUtxosExcluded(t *testing.T) {
 		AddedSlot:   100,
 		DeletedSlot: 0, // live
 	}
-	require.NoError(t, db.CreateUtxo(nil, &liveUtxo))
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &liveUtxo))
 
 	spentUtxo := models.Utxo{
 		TxId:        []byte("tx_spent_4567890123456789012345678901234"),
@@ -750,7 +778,7 @@ func TestCalculateStakeDistribution_SpentUtxosExcluded(t *testing.T) {
 		AddedSlot:   100,
 		DeletedSlot: 500, // spent at slot 500
 	}
-	require.NoError(t, db.CreateUtxo(nil, &spentUtxo))
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &spentUtxo))
 
 	calc := NewCalculator(db)
 	var poolKey lcommon.PoolKeyHash
@@ -834,7 +862,7 @@ func TestCalculateEpochBoundaryStakeLivePathExcludesExpiredAccount(
 	poolHash, expiredKey := seedBoundaryPathFixture(t, db)
 
 	calc := NewCalculator(db)
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateStakeDistributionInTxn(
 		context.Background(), txn, 100, 0, 3,
@@ -882,7 +910,7 @@ func TestCalculateEpochBoundaryStakePathsAgree(t *testing.T) {
 				},
 				BlockNumber: 1,
 			}, nil))
-			liveTxn := db.Transaction(false)
+			liveTxn := db.Transaction(context.Background(), false)
 			live, err := calc.calculateBoundaryStakeDistributionInTxn(
 				context.Background(),
 				liveTxn,
@@ -901,7 +929,7 @@ func TestCalculateEpochBoundaryStakePathsAgree(t *testing.T) {
 				},
 				BlockNumber: 2,
 			}, nil))
-			historicalTxn := db.Transaction(false)
+			historicalTxn := db.Transaction(context.Background(), false)
 			historical, err := calc.calculateBoundaryStakeDistributionInTxn(
 				context.Background(),
 				historicalTxn,
@@ -961,7 +989,7 @@ func TestCalculateEpochBoundaryStakeUsesLiveAggregate(t *testing.T) {
 	}, nil))
 
 	calc := NewCalculator(db)
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateBoundaryStakeDistributionInTxn(
 		context.Background(), txn, 100, 0, 0, 0,
@@ -1032,7 +1060,7 @@ func TestCalculateEpochBoundaryStakeUsesHistoricalFallback(t *testing.T) {
 			}
 
 			calc := NewCalculator(db)
-			txn := db.Transaction(false)
+			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Commit() }()
 			dist, err := calc.calculateBoundaryStakeDistributionInTxn(
 				context.Background(), txn, 100, 0, 0, 0,
@@ -1081,7 +1109,7 @@ func TestCalculateStakeDistributionRejectsPoolStakeOverflow(t *testing.T) {
 	})
 
 	calc := NewCalculator(db)
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateStakeDistributionInTxn(
 		context.Background(),
@@ -1128,7 +1156,7 @@ func TestCalculateStakeDistributionRejectsTotalStakeOverflow(t *testing.T) {
 	})
 
 	calc := NewCalculator(db)
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateStakeDistributionInTxn(
 		context.Background(),
@@ -1190,4 +1218,99 @@ func TestDedupeStakeInputsTieBreaks(t *testing.T) {
 		require.Equal(t, poolB, got[0].PoolKeyHash)
 		require.Equal(t, uint64(70), got[0].Stake)
 	})
+}
+
+func TestHistoricalBoundaryStakeIncludesUntickedClosure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name             string
+		collateralReturn bool
+	}{{"output", false}, {"collateral return", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runHistoricalBoundaryStakeIncludesUntickedClosure(t, tc.collateralReturn)
+		})
+	}
+}
+
+func runHistoricalBoundaryStakeIncludesUntickedClosure(t *testing.T, collateralReturn bool) {
+	t.Helper()
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{{EpochId: 0, StartSlot: 0, LengthInSlots: 1000}})
+	poolHash := bytes.Repeat([]byte{0x81}, 28)
+	key := bytes.Repeat([]byte{0x82}, 28)
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{{stakingKey: key, utxoAmounts: []types.Uint64{1_000_000}}}, 900)
+	raw := snapshotSQLDB(t, db)
+	closureHash := bytes.Repeat([]byte{0x83}, 32)
+	rankingHash := bytes.Repeat([]byte{0x84}, 32)
+	for _, hash := range [][]byte{closureHash, rankingHash} {
+		_, err := raw.Exec(`INSERT INTO "transaction" (hash, slot, fee, collateral_fee, valid, block_index) VALUES (?, 1020, '200000', '0', TRUE, 0)`, hash)
+		require.NoError(t, err)
+	}
+	_, err := raw.Exec(`INSERT INTO leios_transaction_context (transaction_id, slot) SELECT id, 990 FROM "transaction" WHERE hash = ?`, closureHash)
+	require.NoError(t, err)
+	_, err = raw.Exec(`UPDATE utxo SET deleted_slot = 1020, spent_at_tx_id = ? WHERE staking_key = ?`, closureHash, key)
+	require.NoError(t, err)
+	for i, hash := range [][]byte{closureHash, rankingHash} {
+		var id uint
+		require.NoError(t, raw.QueryRow(`SELECT id FROM "transaction" WHERE hash = ?`, hash).Scan(&id))
+		output := &models.Utxo{
+			TransactionID: &id, TxId: hash, StakingKey: key,
+			AddedSlot: 1020, Amount: types.Uint64(2_000_000 + i*1_000_000),
+		}
+		if i == 0 && collateralReturn {
+			output.TransactionID = nil
+			output.CollateralReturnForTxID = &id
+			_, err := raw.Exec(`UPDATE "transaction" SET valid = FALSE WHERE id = ?`, id)
+			require.NoError(t, err)
+		}
+		require.NoError(t, db.CreateUtxo(t.Context(), nil, output))
+	}
+	calc := NewCalculator(db)
+	txn := db.Transaction(t.Context(), false)
+	defer txn.Rollback() //nolint:errcheck
+	dist, err := calc.calculateHistoricalBoundaryStakeDistributionInTxn(context.Background(), txn, 999, 1000, 0, 0)
+	require.NoError(t, err)
+	var pool lcommon.PoolKeyHash
+	copy(pool[:], poolHash)
+	require.Equal(t, uint64(2_000_000), dist.PoolStakes[pool], "SNAP includes closure outputs and spent inputs, before the ranking body's effects")
+	require.Equal(t, uint64(2_000_000), dist.TotalStake)
+	require.Len(t, dist.StakeInputs, 1)
+	require.Equal(t, uint64(2_000_000), uint64(dist.StakeInputs[0].Stake))
+}
+
+func TestUntickedPoolRegistrationUsesContextAtBoundary(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{{EpochId: 0, StartSlot: 0, LengthInSlots: 1000}})
+	poolHash := bytes.Repeat([]byte{0x91}, 28)
+	seedPoolAndDelegations(t, db, poolHash, nil, 1020)
+	raw := snapshotSQLDB(t, db)
+	hash := bytes.Repeat([]byte{0x92}, 32)
+	_, err := raw.Exec(`INSERT INTO "transaction" (hash, slot, valid, block_index) VALUES (?, 1020, TRUE, 0)`, hash)
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO leios_transaction_context (transaction_id, slot) SELECT id, 990 FROM "transaction" WHERE hash = ?`, hash)
+	require.NoError(t, err)
+	result, err := raw.Exec(`INSERT INTO certs (transaction_id, slot, cert_type, cert_index) SELECT id, 1020, 3, 0 FROM "transaction" WHERE hash = ?`, hash)
+	require.NoError(t, err)
+	certificateID, err := result.LastInsertId()
+	require.NoError(t, err)
+	_, err = raw.Exec(`UPDATE pool_registration SET certificate_id = ? WHERE pool_key_hash = ?`, certificateID, poolHash)
+	require.NoError(t, err)
+	keys, err := db.Metadata().GetActivePoolKeyHashesAtSlot(999, nil)
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{poolHash}, keys)
+	var pool lcommon.PoolKeyHash
+	copy(pool[:], poolHash)
+	registrations, err := db.Metadata().GetPoolRegistrationsEffectiveForEpoch([]lcommon.PoolKeyHash{pool}, 0, 0, 999, nil)
+	require.NoError(t, err)
+	require.Len(t, registrations, 1)
+	require.Equal(t, uint64(990), registrations[0].AddedSlot, "key age resolves in the unticked epoch")
+	registrations, err = db.Metadata().GetPoolRegistrationsAtSlot([]lcommon.PoolKeyHash{pool}, 999, nil)
+	require.NoError(t, err)
+	require.Len(t, registrations, 1)
+	require.Equal(t, uint64(990), registrations[0].AddedSlot)
 }

@@ -97,7 +97,7 @@ func seedDatabase(t *testing.T, gates map[string]string) string {
 		_ = store.Close()
 	})
 
-	require.NoError(t, store.SetNodeSettingsGates(
+	require.NoError(t, store.SetNodeSettingsGates(context.Background(),
 		nodesettings.Values(gates), 0, 0,
 	))
 	require.NoError(t, dbinfo.Write(dir, dbinfo.Info{

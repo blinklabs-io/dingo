@@ -21,6 +21,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/plutusv4script"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -28,137 +29,10 @@ import (
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
-	"github.com/blinklabs-io/plutigo/builtin"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/blinklabs-io/plutigo/lang"
-	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/stretchr/testify/require"
 )
-
-type v4Term = syn.Term[syn.DeBruijn]
-
-func v4Apply(fn builtin.DefaultFunction, args ...v4Term) v4Term {
-	var term v4Term = &syn.Builtin{DefaultFunction: fn}
-	forces := 0
-	switch fn {
-	case builtin.SndPair, builtin.FstPair:
-		forces = 2
-	case builtin.HeadList, builtin.TailList, builtin.IfThenElse:
-		forces = 1
-	}
-	for range forces {
-		term = &syn.Force[syn.DeBruijn]{Term: term}
-	}
-	for _, arg := range args {
-		term = &syn.Apply[syn.DeBruijn]{Function: term, Argument: arg}
-	}
-	return term
-}
-
-func v4Field(list v4Term, index int) v4Term {
-	for range index {
-		list = v4Apply(builtin.TailList, list)
-	}
-	return v4Apply(builtin.HeadList, list)
-}
-
-func v4ConstrFields(term v4Term) v4Term {
-	return v4Apply(builtin.SndPair, v4Apply(builtin.UnConstrData, term))
-}
-
-// v4ContextScript builds a PlutusV4 script that succeeds only when cond,
-// evaluated against the ScriptContext, is true.
-func v4ContextScript(
-	t *testing.T,
-	cond func(ctx v4Term) v4Term,
-) lcommon.PlutusV4Script {
-	t.Helper()
-	ctx := v4Term(&syn.Var[syn.DeBruijn]{Name: 1})
-	body := &syn.Force[syn.DeBruijn]{Term: v4Apply(
-		builtin.IfThenElse,
-		cond(ctx),
-		&syn.Delay[syn.DeBruijn]{Term: &syn.Constant{Con: &syn.Unit{}}},
-		&syn.Delay[syn.DeBruijn]{Term: &syn.Error{}},
-	)}
-	flat, err := syn.Encode(&syn.Program[syn.DeBruijn]{
-		Version: lang.LanguageVersion{1, 1, 0},
-		Term:    &syn.Lambda[syn.DeBruijn]{Body: body},
-	})
-	require.NoError(t, err)
-	wrapper, err := cbor.Encode(flat)
-	require.NoError(t, err)
-	return lcommon.PlutusV4Script(wrapper)
-}
-
-// v4MaybeScript succeeds when the Maybe selected by sel has the given
-// constructor tag: 0 is Just, 1 is Nothing. It compares the tag rather than
-// the whole value, because Just carries a field and so never equals a bare
-// Constr 0.
-func v4MaybeScript(
-	t *testing.T,
-	sel func(ctx v4Term) v4Term,
-	tag int64,
-) lcommon.PlutusV4Script {
-	t.Helper()
-	return v4ContextScript(t, func(ctx v4Term) v4Term {
-		return v4Apply(
-			builtin.EqualsInteger,
-			v4Apply(builtin.FstPair, v4Apply(builtin.UnConstrData, sel(ctx))),
-			&syn.Constant{Con: &syn.Integer{Inner: big.NewInt(tag)}},
-		)
-	})
-}
-
-func v4TxInfoSubTxIx(ctx v4Term) v4Term {
-	txInfo := v4Field(v4ConstrFields(ctx), 0)
-	return v4Field(v4ConstrFields(txInfo), 1)
-}
-
-func v4GuardingTopTxInfo(ctx v4Term) v4Term {
-	scriptInfo := v4Field(v4ConstrFields(ctx), 2)
-	return v4Field(v4ConstrFields(scriptInfo), 1)
-}
-
-// v4RequiredGuardsOrderScript succeeds only when the script-visible
-// required-guards map lists a script credential (Constr 1) first and a key
-// credential (Constr 0) second. The reference orders script entries before
-// key entries, which is the reverse of the credential type numbers.
-func v4RequiredGuardsOrderScript(t *testing.T) lcommon.PlutusV4Script {
-	t.Helper()
-	return v4ContextScript(t, func(ctx v4Term) v4Term {
-		txInfo := v4Field(v4ConstrFields(ctx), 0)
-		guards := v4Field(v4ConstrFields(txInfo), 12)
-		entries := v4Apply(builtin.UnMapData, guards)
-		tagIs := func(entry v4Term, tag int64) v4Term {
-			credential := v4Apply(builtin.FstPair, entry)
-			return v4Apply(
-				builtin.EqualsInteger,
-				v4Apply(
-					builtin.FstPair,
-					v4Apply(builtin.UnConstrData, credential),
-				),
-				&syn.Constant{Con: &syn.Integer{Inner: big.NewInt(tag)}},
-			)
-		}
-		return &syn.Force[syn.DeBruijn]{Term: v4Apply(
-			builtin.IfThenElse,
-			tagIs(v4Apply(builtin.HeadList, entries), 1),
-			&syn.Delay[syn.DeBruijn]{Term: tagIs(v4Field(entries, 1), 0)},
-			&syn.Delay[syn.DeBruijn]{Term: v4BoolConstant(false)},
-		)}
-	})
-}
-
-func v4BoolConstant(b bool) v4Term {
-	return &syn.Constant{Con: &syn.Bool{Inner: b}}
-}
-
-func v4ScriptCredential(s lcommon.Script) lcommon.Credential {
-	return lcommon.Credential{
-		CredType:   lcommon.CredentialTypeScriptHash,
-		Credential: lcommon.Blake2b224(s.Hash()),
-	}
-}
 
 type v4ContextFixture struct {
 	tx     *gdijkstra.DijkstraTransaction
@@ -310,7 +184,7 @@ func newV4ContextFixture(
 	}
 	guards := append([]lcommon.Credential(nil), spec.topGuards...)
 	if spec.topScript != nil {
-		guards = append(guards, v4ScriptCredential(spec.topScript))
+		guards = append(guards, plutusv4script.ScriptCredential(spec.topScript))
 		wits, hash := v4GuardingWitnesses(
 			t,
 			params,
@@ -352,7 +226,7 @@ func newV4ContextFixture(
 				),
 				TxGuards: &gdijkstra.DijkstraGuards{
 					Credentials: []lcommon.Credential{
-						v4ScriptCredential(script),
+						plutusv4script.ScriptCredential(script),
 					},
 				},
 			},
@@ -424,14 +298,16 @@ func TestValidateTxDijkstraPlutusV4TopLevelContextOmitsSubTxIxAndTopTxInfo(
 	t.Parallel()
 	for _, test := range []struct {
 		name string
-		sel  func(ctx v4Term) v4Term
+		sel  func(ctx plutusv4script.Term) plutusv4script.Term
 	}{
-		{"txInfoSubTxIx", v4TxInfoSubTxIx},
-		{"guarding TopTxInfo", v4GuardingTopTxInfo},
+		{"txInfoSubTxIx", plutusv4script.TxInfoSubTxIx},
+		{"guarding TopTxInfo", plutusv4script.GuardingTopTxInfo},
 	} {
 		t.Run(test.name+" is Nothing", func(t *testing.T) {
 			t.Parallel()
-			spec := v4ContextSpec{topScript: v4MaybeScript(t, test.sel, 1)}
+			spec := v4ContextSpec{
+				topScript: plutusv4script.MaybeScript(t, test.sel, 1),
+			}
 			fixture := newV4ContextFixture(t, spec)
 			tx := fixture.wire(t, spec)
 			require.NoError(
@@ -441,7 +317,9 @@ func TestValidateTxDijkstraPlutusV4TopLevelContextOmitsSubTxIxAndTopTxInfo(
 		})
 		t.Run(test.name+" is not Just", func(t *testing.T) {
 			t.Parallel()
-			spec := v4ContextSpec{topScript: v4MaybeScript(t, test.sel, 0)}
+			spec := v4ContextSpec{
+				topScript: plutusv4script.MaybeScript(t, test.sel, 0),
+			}
 			fixture := newV4ContextFixture(t, spec)
 			tx := fixture.wire(t, spec)
 			requireV4ScriptFailure(
@@ -458,14 +336,14 @@ func TestValidateTxDijkstraPlutusV4ChildContextOmitsSubTxIxAndTopTxInfo(
 	t.Parallel()
 	for _, test := range []struct {
 		name string
-		sel  func(ctx v4Term) v4Term
+		sel  func(ctx plutusv4script.Term) plutusv4script.Term
 	}{
-		{"txInfoSubTxIx", v4TxInfoSubTxIx},
-		{"guarding TopTxInfo", v4GuardingTopTxInfo},
+		{"txInfoSubTxIx", plutusv4script.TxInfoSubTxIx},
+		{"guarding TopTxInfo", plutusv4script.GuardingTopTxInfo},
 	} {
 		t.Run(test.name+" is Nothing for every child", func(t *testing.T) {
 			t.Parallel()
-			nothing := v4MaybeScript(t, test.sel, 1)
+			nothing := plutusv4script.MaybeScript(t, test.sel, 1)
 			spec := v4ContextSpec{
 				childScripts: []lcommon.PlutusV4Script{nothing},
 			}
@@ -480,7 +358,7 @@ func TestValidateTxDijkstraPlutusV4ChildContextOmitsSubTxIxAndTopTxInfo(
 			t.Parallel()
 			spec := v4ContextSpec{
 				childScripts: []lcommon.PlutusV4Script{
-					v4MaybeScript(t, test.sel, 0),
+					plutusv4script.MaybeScript(t, test.sel, 0),
 				},
 			}
 			fixture := newV4ContextFixture(t, spec)
@@ -521,7 +399,7 @@ func v4RequiredGuards(
 	key := v4KeyCredential(ed25519.NewKeyFromSeed(
 		bytes.Repeat([]byte{0x77}, ed25519.SeedSize),
 	))
-	scriptCredential := v4ScriptCredential(script)
+	scriptCredential := plutusv4script.ScriptCredential(script)
 	return gdijkstra.DijkstraRequiredTopLevelGuards{
 		&key:              nil,
 		&scriptCredential: {Data: data.NewInteger(big.NewInt(7))},
@@ -530,7 +408,9 @@ func v4RequiredGuards(
 
 func TestValidateTxDijkstraRequiredTopLevelGuardsTopLevelBody(t *testing.T) {
 	t.Parallel()
-	script := v4RequiredGuardsOrderScript(t)
+	script := plutusv4script.MapOrderScript(
+		t, plutusv4script.RequiredGuardsField,
+	)
 	required, key := v4RequiredGuards(script)
 
 	t.Run(
@@ -565,7 +445,11 @@ func TestValidateTxDijkstraRequiredTopLevelGuardsTopLevelBody(t *testing.T) {
 
 func TestValidateTxDijkstraRequiredTopLevelGuardsChildBody(t *testing.T) {
 	t.Parallel()
-	childScript := v4MaybeScript(t, v4TxInfoSubTxIx, 1)
+	childScript := plutusv4script.MaybeScript(
+		t,
+		plutusv4script.TxInfoSubTxIx,
+		1,
+	)
 	_, key := v4RequiredGuards(childScript)
 	required := gdijkstra.DijkstraRequiredTopLevelGuards{&key: nil}
 

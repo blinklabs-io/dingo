@@ -206,7 +206,9 @@ func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
 		EraId:     ^uint(0),
 	}
 
-	err := ls.setEpochCache(&database.Txn{}, []models.Epoch{invalidEpoch})
+	err := ls.setEpochCache(
+		context.Background(), &database.Txn{}, []models.Epoch{invalidEpoch},
+	)
 	require.ErrorContains(t, err, "unknown era ID")
 
 	// The deferred publication must expose the mutation through the atomic
@@ -250,7 +252,7 @@ func TestAdvanceEpochCachePreservesPublishedSnapshot(t *testing.T) {
 
 	// Exercise the real header-verification writer rather than reproducing its
 	// copy-on-write logic inside this test.
-	require.NoError(t, ls.advanceEpochCache())
+	require.NoError(t, ls.advanceEpochCache(context.Background()))
 
 	// The current view must advance, while the retained view must remain on the
 	// original cache and epoch values.
@@ -382,6 +384,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 	rat := func() *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(1, 2)} }
 	original := &shelley.ShelleyProtocolParameters{
 		MinFeeA:          44,
+		NOpt:             1,
 		A0:               rat(),
 		Rho:              rat(),
 		Tau:              rat(),
@@ -401,19 +404,19 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	seedEmptyRewardBasisForRollover(t, db, currentEpoch, original)
 	ls.publishSnapshotsLocked()
 	oldConsensus := ls.consensus.Load()
 
 	var result *EpochRolloverResult
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
-		result, rolloverErr = ls.processEpochRollover(
+		result, rolloverErr = ls.processEpochRollover(context.Background(),
 			txn,
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		return rolloverErr
 	}))
@@ -470,17 +473,17 @@ func TestProcessEpochRolloverRetainsDijkstraProtocolParameters(t *testing.T) {
 			),
 		},
 	}
+	seedEmptyRewardBasisForRollover(t, db, currentEpoch, original)
 
 	var result *EpochRolloverResult
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
-		result, rolloverErr = ls.processEpochRollover(
+		result, rolloverErr = ls.processEpochRollover(context.Background(),
 			txn,
 			currentEpoch,
 			eras.DijkstraEraDesc,
 			original,
-			false,
 		)
 		return rolloverErr
 	}))
@@ -896,7 +899,7 @@ func TestHandleSlotTicksReportsTipGap(t *testing.T) {
 
 			done := make(chan struct{})
 			go func() {
-				ls.handleSlotTicks()
+				ls.handleSlotTicks(context.Background())
 				close(done)
 			}()
 
@@ -934,7 +937,7 @@ func TestHandleSlotTicksToleratesNilTipGapReporter(t *testing.T) {
 	ls, ticks, _ := newTipGapTestLedgerState(t, 100, nil)
 	done := make(chan struct{})
 	go func() {
-		ls.handleSlotTicks()
+		ls.handleSlotTicks(context.Background())
 		close(done)
 	}()
 	ticks <- SlotTick{Slot: 200}
@@ -971,6 +974,22 @@ func TestHandleBehindHorizonPublishesGaugesButNotReadiness(t *testing.T) {
 		t.Fatalf("ReportTipGapFunc called during catch-up with gap %d", gap)
 	default:
 	}
+}
+
+// A paused slot clock is still running, so handleBehindHorizon reports it
+// alive; otherwise a node whose tip fell behind the era-history horizon after
+// it had ticked would read as a stopped clock and fail liveness.
+func TestHandleBehindHorizonReportsTheSlotClockAlive(t *testing.T) {
+	t.Parallel()
+
+	ls, _, _ := newTipGapTestLedgerState(t, 100, nil)
+	alive := 0
+	ls.config.ReportSlotClockAliveFunc = func() { alive++ }
+
+	ls.handleBehindHorizon(1_000)
+	ls.handleBehindHorizon(1_001)
+
+	assert.Equal(t, 2, alive)
 }
 
 // An epoch length that is not yet known is left unset rather than
@@ -2265,7 +2284,7 @@ func TestComputeNextEpochNonceUsesImportedTipAnchor(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	got := ls.computeNextEpochNonce(ls.currentEpoch, ls.currentEra)
+	got := ls.computeNextEpochNonce(context.Background(), ls.currentEpoch, ls.currentEra)
 	require.Equal(t, candidateNonce, got)
 	require.NotEqual(t, tipNonce, got)
 }
@@ -2350,7 +2369,7 @@ func TestEmitNextEpochNonceReadyRequiresLedgerTipAtCutoff(t *testing.T) {
 	_, evtCh := eventBus.Subscribe(event.EpochNonceReadyEventType)
 	ls := newNonceReadyTestLedgerState(t, eventBus, 1085)
 
-	ls.emitNextEpochNonceReady(
+	ls.emitNextEpochNonceReady(context.Background(),
 		slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		SlotTick{Slot: 1095, Epoch: 10},
 		ls.currentEpoch,
@@ -2378,7 +2397,7 @@ func TestResetNextEpochNonceReadyAllowsReEmit(t *testing.T) {
 	ls.nextNonceReadyEpoch.Store(11)
 	ls.resetNextEpochNonceReady()
 
-	ls.emitNextEpochNonceReady(
+	ls.emitNextEpochNonceReady(context.Background(),
 		slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		SlotTick{Slot: 1095, Epoch: 10},
 		ls.currentEpoch,
@@ -3165,9 +3184,10 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 	originalPParams := ls.currentPParams
 
 	// Execute transition in a transaction
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
 		result, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.ShelleyEraDesc.Id,
 			0,   // startEpoch
@@ -3264,13 +3284,14 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 	}
 
 	// Chain transitions from Byron -> Shelley -> Allegra
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
 		// Track working state as we chain transitions
 		workingPParams := ls.currentPParams
 
 		// Byron -> Shelley
 		result1, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.ShelleyEraDesc.Id,
 			0,
@@ -3282,6 +3303,7 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 
 		// Shelley -> Allegra
 		result2, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.AllegraEraDesc.Id,
 			1,
@@ -3335,7 +3357,7 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 		AnchorHash:    bytes.Repeat([]byte{0xe2}, 32),
 		ReturnAddress: bytes.Repeat([]byte{0xe3}, 29),
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
 
 	newCborRat := func(num, denom int64) *cbor.Rat {
 		return &cbor.Rat{Rat: big.NewRat(num, denom)}
@@ -3386,9 +3408,10 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 		},
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
 		_, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.DijkstraEraDesc.Id,
 			11,
@@ -3399,7 +3422,7 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 	})
 	require.NoError(t, err)
 
-	got, err := db.GetGovernanceProposal(proposal.TxHash, 0, nil)
+	got, err := db.GetGovernanceProposal(context.Background(), proposal.TxHash, 0, nil)
 	require.NoError(t, err)
 	var translated dijkstra.DijkstraParameterChangeGovAction
 	_, err = cbor.Decode(got.GovActionCbor, &translated)
@@ -3479,14 +3502,13 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 	}
 
 	// Execute epoch rollover for initial epoch
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
-		result, err := ls.processEpochRollover(
+		result, err := ls.processEpochRollover(context.Background(),
 			txn,
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		require.NoError(t, err)
 
@@ -3600,15 +3622,14 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 
 		// Step 2: Execute transaction WITHOUT holding lock
 		var result *EpochRolloverResult
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		err := txn.Do(func(txn *database.Txn) error {
 			var err error
-			result, err = ls.processEpochRollover(
+			result, err = ls.processEpochRollover(context.Background(),
 				txn,
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
-				false,
 			)
 			return err
 		})
@@ -3728,7 +3749,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 
 		// Execute transaction (simulates DB work)
 		var result *EpochRolloverResult
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		err := txn.Do(func(txn *database.Txn) error {
 			close(txnStarted)
 			// Hold the transaction open until each reader has observed the
@@ -3737,12 +3758,11 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 				<-readersFinished
 			}
 			var err error
-			result, err = ls.processEpochRollover(
+			result, err = ls.processEpochRollover(context.Background(),
 				txn,
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
-				false,
 			)
 			return err
 		})
@@ -3821,9 +3841,9 @@ func TestTransitionToEra_ErrorHandling(t *testing.T) {
 			},
 		}
 
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		err = txn.Do(func(txn *database.Txn) error {
-			_, err := ls.transitionToEra(txn, 999, 0, 0, nil)
+			_, err := ls.transitionToEra(context.Background(), txn, 999, 0, 0, nil)
 			return err
 		})
 		require.Error(t, err)
@@ -3911,7 +3931,7 @@ func TestCleanupOrphanedBlobs_NoOrphans(t *testing.T) {
 	// Verify all blocks still exist
 	for slot := uint64(1); slot <= 3; slot++ {
 		block := makeTestBlock(slot, slot)
-		_, err := database.BlockByPoint(db, makeTestPoint(block))
+		_, err := database.BlockByPoint(context.Background(), db, makeTestPoint(block))
 		assert.NoError(t, err, "block at slot %d should still exist", slot)
 	}
 }
@@ -3946,14 +3966,14 @@ func TestCleanupOrphanedBlobs_WithOrphans(t *testing.T) {
 	// Verify blocks at slots 1-3 still exist
 	for slot := uint64(1); slot <= 3; slot++ {
 		block := makeTestBlock(slot, slot)
-		_, err := database.BlockByPoint(db, makeTestPoint(block))
+		_, err := database.BlockByPoint(context.Background(), db, makeTestPoint(block))
 		assert.NoError(t, err, "block at slot %d should still exist", slot)
 	}
 
 	// Verify blocks at slots 4-5 were deleted
 	for slot := uint64(4); slot <= 5; slot++ {
 		block := makeTestBlock(slot, slot)
-		_, err := database.BlockByPoint(db, makeTestPoint(block))
+		_, err := database.BlockByPoint(context.Background(), db, makeTestPoint(block))
 		assert.Error(t, err, "block at slot %d should be deleted", slot)
 	}
 }
@@ -3984,7 +4004,7 @@ func TestCleanupOrphanedBlobs_SlotZero(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify block at slot 1 was deleted
-	_, err = database.BlockByPoint(db, makeTestPoint(block))
+	_, err = database.BlockByPoint(context.Background(), db, makeTestPoint(block))
 	assert.Error(t, err, "block at slot 1 should be deleted")
 }
 
@@ -3994,7 +4014,7 @@ func TestIntersectPointsReturnsNoPointsWhenLedgerTipIsEmpty(
 	t.Parallel()
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	txn := db.BlobTxn(true)
 	err = txn.Do(func(txn *database.Txn) error {
@@ -4011,7 +4031,7 @@ func TestIntersectPointsReturnsNoPointsWhenLedgerTipIsEmpty(
 		chain: cm.PrimaryChain(),
 	}
 
-	points, err := ls.IntersectPoints(4)
+	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
 	assert.Nil(t, points)
 }
@@ -4157,7 +4177,7 @@ func TestLedgerStateStartFailsOnMalformedMithrilTrustBoundary(t *testing.T) {
 
 	db := newTestDB(t)
 	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "x", nil))
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
@@ -4189,7 +4209,7 @@ func TestIntersectPointsIncludesPersistedMithrilBoundaryWhenRecentPointsEmpty(
 		mithrilLedgerHash: boundaryHash,
 	}
 
-	points, err := ls.IntersectPoints(4)
+	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
 	require.Len(t, points, 1)
 	assert.Equal(t, uint64(42), points[0].Slot)
@@ -4213,7 +4233,7 @@ func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	ledgerTipBlock := blocks[2]
@@ -4229,7 +4249,7 @@ func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
 	}
 	ls.currentTip = ledgerTip
 
-	points, err := ls.IntersectPoints(3)
+	points, err := ls.IntersectPoints(context.Background(), 3)
 	require.NoError(t, err)
 	require.Len(t, points, 3)
 	assert.Equal(t, blocks[4].Slot, points[0].Slot)
@@ -4267,7 +4287,7 @@ func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
 		},
 	}
 
-	points, err := ls.IntersectPoints(40)
+	points, err := ls.IntersectPoints(context.Background(), 40)
 	require.NoError(t, err)
 	require.Greater(t, len(points), ledgerIntersectDenseCount)
 	assert.Equal(t, ledgerTipBlock.Slot, points[0].Slot)
@@ -4311,7 +4331,7 @@ func TestIntersectPointsIncludesMithrilTrustBoundary(t *testing.T) {
 		mithrilLedgerSlot: 173,
 	}
 
-	points, err := ls.IntersectPoints(40)
+	points, err := ls.IntersectPoints(context.Background(), 40)
 	require.NoError(t, err)
 
 	boundarySlot := uint64(173)
@@ -4352,7 +4372,7 @@ func TestIntersectPointsSkipsZeroMithrilTrustBoundary(t *testing.T) {
 		mithrilLedgerSlot: 0,
 	}
 
-	points, err := ls.IntersectPoints(4)
+	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
 	require.NotEmpty(t, points)
 	assertNoIntersectPointAtSlot(t, points, 0)
@@ -4384,7 +4404,7 @@ func TestIntersectPointsSkipsFutureMithrilTrustBoundary(t *testing.T) {
 		mithrilLedgerSlot: boundarySlot,
 	}
 
-	points, err := ls.IntersectPoints(4)
+	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
 	require.NotEmpty(t, points)
 	assertNoIntersectPointAtSlot(t, points, boundarySlot)
@@ -4422,7 +4442,7 @@ func TestIntersectPointsSkipsMissingMithrilTrustBoundaryBlock(
 		mithrilLedgerSlot: boundarySlot,
 	}
 
-	points, err := ls.IntersectPoints(4)
+	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
 	require.NotEmpty(t, points)
 	assertNoIntersectPointAtSlot(t, points, boundarySlot)
@@ -4465,7 +4485,7 @@ func TestIntersectPointsSkipsMithrilTrustBoundaryOnLookupError(
 		mithrilLedgerSlot: boundarySlot,
 	}
 
-	points, err := ls.IntersectPoints(4)
+	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
 	require.NotEmpty(t, points)
 	assertNoIntersectPointAtSlot(t, points, boundarySlot)
@@ -4496,7 +4516,7 @@ func TestIntersectPointsUsesCanonicalMithrilTrustBoundary(t *testing.T) {
 	)
 	require.NoError(t, db.BlockCreate(nonCanonicalBoundaryBlock, nil))
 
-	rawBoundaryBlock, err := database.BlockBeforeSlot(
+	rawBoundaryBlock, err := database.BlockBeforeSlot(context.Background(),
 		db,
 		boundarySlot+1,
 	)
@@ -4513,7 +4533,7 @@ func TestIntersectPointsUsesCanonicalMithrilTrustBoundary(t *testing.T) {
 		mithrilLedgerSlot: boundarySlot,
 	}
 
-	points, err := ls.IntersectPoints(40)
+	points, err := ls.IntersectPoints(context.Background(), 40)
 	require.NoError(t, err)
 
 	var boundaryPoint *ocommon.Point
@@ -4556,7 +4576,7 @@ func TestAuthoritativeLedgerBlockAtSlotDoesNotRequireMonotonicBlockIDs(
 	ledgerTipBlock := blocks[len(blocks)-1]
 	ls := &LedgerState{db: db}
 
-	block, err := ls.authoritativeLedgerBlockAtSlot(
+	block, err := ls.authoritativeLedgerBlockAtSlot(context.Background(),
 		20,
 		makeTestPoint(ledgerTipBlock),
 	)
@@ -4592,7 +4612,7 @@ func TestIntersectPointsKeepsMithrilTrustBoundaryWhenPointListIsFull(
 		mithrilLedgerSlot: 5,
 	}
 
-	points, err := ls.IntersectPoints(4)
+	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
 	require.Len(t, points, 4)
 	assert.Equal(t, uint64(10), points[0].Slot)
@@ -4651,7 +4671,7 @@ func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
 		},
 	}
 
-	points, err := ls.IntersectPoints(40)
+	points, err := ls.IntersectPoints(context.Background(), 40)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(points), ledgerIntersectDenseCount)
 
@@ -4707,7 +4727,7 @@ func TestChainDensityUsesCardanoNodeFragment(t *testing.T) {
 	}
 	ls.metrics.init(prometheus.NewRegistry())
 
-	density := ls.chainFragmentDensity(ls.currentTip, ls.SecurityParam())
+	density := ls.chainFragmentDensity(context.Background(), ls.currentTip, ls.SecurityParam())
 	ls.Lock()
 	ls.updateTipMetrics(density)
 	ls.Unlock()
@@ -4770,7 +4790,7 @@ func TestLoadTipSeedsChainDensityFromPersistedFragment(t *testing.T) {
 	}
 	ls.metrics.init(prometheus.NewRegistry())
 
-	require.NoError(t, ls.loadTip())
+	require.NoError(t, ls.loadTip(context.Background()))
 
 	assert.InDelta(
 		t,
@@ -4805,7 +4825,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	ledgerTipBlock := blocks[2]
@@ -4824,7 +4844,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
 		},
 	}
 	ls.currentTip = ledgerTip
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 
 	chainTip := cm.PrimaryChain().Tip()
 	assert.Equal(t, blocks[len(blocks)-1].Slot, chainTip.Point.Slot)
@@ -4833,7 +4853,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
 	assert.Equal(t, ledgerTip, ls.currentTip)
 
 	for _, block := range blocks {
-		_, err := database.BlockByPoint(db, makeTestPoint(block))
+		_, err := database.BlockByPoint(context.Background(), db, makeTestPoint(block))
 		assert.NoError(
 			t,
 			err,
@@ -4876,7 +4896,7 @@ func TestNewLedgerStateHardForkTransitionUsesConfiguredEraList(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			db := newTestDB(t)
-			cm, err := chain.NewManager(db, nil)
+			cm, err := chain.NewManager(context.Background(), db, nil)
 			require.NoError(t, err)
 			ls, err := NewLedgerState(LedgerStateConfig{
 				Database:       db,
@@ -4946,8 +4966,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 		))
 		if explicitShelleyHardFork {
 			// ExperimentalHardForksEnabled is set independently: preview ships
-			// TestShelleyHardForkAtEpoch with the flag false, and
-			// CardanoNodeConfig.HardForkEpoch reports nothing in that case.
+			// TestShelleyHardForkAtEpoch with the flag false.
 			if experimentalHardForks {
 				cfg.ExperimentalHardForksEnabled = new(true)
 			}
@@ -4955,7 +4974,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 		}
 
 		db := newTestDB(t)
-		cm, err := chain.NewManager(db, nil)
+		cm, err := chain.NewManager(context.Background(), db, nil)
 		require.NoError(t, err)
 		ls, err := NewLedgerState(LedgerStateConfig{
 			Database:          db,
@@ -4964,7 +4983,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		})
 		require.NoError(t, err)
-		require.NoError(t, ls.PrepareEpochCacheForStartup())
+		require.NoError(t, ls.PrepareEpochCacheForStartup(context.Background()))
 		return ls
 	}
 
@@ -4992,12 +5011,10 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 	)
 
 	// preview's shipped shape: TestShelleyHardForkAtEpoch: 0 with
-	// ExperimentalHardForksEnabled: False. Reading the declaration through
-	// CardanoNodeConfig.HardForkEpoch hides it, because that accessor returns
-	// (0, false) unless the experimental flag is set -- which forced a node
-	// back to Byron on a network with no Byron prefix and left currentPParams
-	// nil for every GetCurrentPParams consumer (api/utxorpc ReadParams
-	// returned "current protocol parameters empty").
+	// ExperimentalHardForksEnabled: False. Ignoring the declaration when the
+	// flag is off forced a node back to Byron on a network with no Byron
+	// prefix and left currentPParams nil for every GetCurrentPParams consumer
+	// (api/utxorpc ReadParams returned "current protocol parameters empty").
 	t.Run(
 		"explicit hard fork without experimental flag starts in Shelley",
 		func(t *testing.T) {
@@ -5039,7 +5056,7 @@ func TestPrepareEpochCacheForStartupUsesEmbeddedMainnetConfig(t *testing.T) {
 	require.NotNil(t, cardanoConfig.ShelleyGenesis())
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
@@ -5048,7 +5065,7 @@ func TestPrepareEpochCacheForStartupUsesEmbeddedMainnetConfig(t *testing.T) {
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	require.NoError(t, ls.PrepareEpochCacheForStartup())
+	require.NoError(t, ls.PrepareEpochCacheForStartup(context.Background()))
 
 	require.Len(t, ls.epochCache, 1)
 	assert.Equal(t, uint64(0), ls.currentEpoch.EpochId)
@@ -5076,130 +5093,68 @@ func newTestEpoch(
 // evaluateTransitionImpossible tests
 // ---------------------------------------------------------------------------
 
-// TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd verifies
-// that TransitionImpossible is set when tipSlot + safeZone >= epochEndSlot.
-//
-// Using Shelley-era parameters from newTestEraHistoryCfg:
-//
-//	securityParam=432, activeSlotsCoeff=0.05
-//	safeZone = ceil(3*432/0.05) = 25_920
-//	epoch: startSlot=100_000, length=432_000, end=532_000
-//	tipSlot = 532_000 - 25_920 = 506_080 → safeEnd = 532_000 = epochEnd → Impossible
-func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(
+func TestEvaluateTransitionImpossible_FiniteSafeZoneRemainsUnknown(
 	t *testing.T,
 ) {
 	t.Parallel()
 
-	const (
-		epochStart = uint64(100_000)
-		epochLen   = uint(432_000)
-		epochEnd   = uint64(532_000)
-		safeZone   = uint64(25_920)
-		// tipSlot such that tipSlot + safeZone == epochEnd (boundary case)
-		tipSlot = epochEnd - safeZone // 506_080
-	)
-
-	cfg := newTestEraHistoryCfg(t)
+	shape := hardfork.Shape{Eras: []hardfork.ShapeEntry{{
+		EraID:          eras.ConwayEraDesc.Id,
+		Params:         hardfork.EraParams{SafeZoneSlots: 25_920},
+		NextEraTrigger: hardfork.NewTriggerNotDuringThisExecution(),
+	}}}
 	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			epochStart,
-			epochLen,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
+		currentEra:     eras.ConwayEraDesc,
 		transitionInfo: hardfork.NewTransitionUnknown(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
 	}
+	ls.cachedShape.Store(&shape)
 
 	ls.evaluateTransitionImpossible()
 
-	assert.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State,
-		"when safeEndSlot == epochEndSlot, TransitionImpossible must be set")
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
 }
 
-// TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd verifies
-// that TransitionImpossible is set when safeEndSlot > epochEndSlot.
-func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(
-	t *testing.T,
-) {
+func TestEvaluateTransitionImpossible_SuccessorRemainsUnknown(t *testing.T) {
 	t.Parallel()
 
-	const (
-		epochStart = uint64(100_000)
-		epochLen   = uint(432_000)
-		epochEnd   = uint64(532_000)
-		// tipSlot well past the safe-zone boundary
-		tipSlot = uint64(520_000)
-	)
-
-	cfg := newTestEraHistoryCfg(t)
+	shape := hardfork.Shape{Eras: []hardfork.ShapeEntry{
+		{
+			EraID:          eras.ConwayEraDesc.Id,
+			Params:         hardfork.EraParams{SafeZoneSlots: 25_920},
+			NextEraTrigger: hardfork.NewTriggerAtVersion(12),
+		},
+		{
+			EraID:          eras.DijkstraEraDesc.Id,
+			NextEraTrigger: hardfork.NewTriggerNotDuringThisExecution(),
+		},
+	}}
 	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			epochStart,
-			epochLen,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
+		currentEra:     eras.ConwayEraDesc,
 		transitionInfo: hardfork.NewTransitionUnknown(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
 	}
+	ls.cachedShape.Store(&shape)
+
+	ls.evaluateTransitionImpossible()
+
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
+}
+
+func TestEvaluateTransitionImpossible_IndefiniteFinalEra(t *testing.T) {
+	t.Parallel()
+
+	shape := hardfork.Shape{Eras: []hardfork.ShapeEntry{{
+		EraID:          eras.ConwayEraDesc.Id,
+		NextEraTrigger: hardfork.NewTriggerNotDuringThisExecution(),
+	}}}
+	ls := &LedgerState{
+		currentEra:     eras.ConwayEraDesc,
+		transitionInfo: hardfork.NewTransitionUnknown(),
+	}
+	ls.cachedShape.Store(&shape)
 
 	ls.evaluateTransitionImpossible()
 
 	assert.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State)
-}
-
-// TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch verifies
-// that TransitionImpossible is NOT set when safeEndSlot < epochEndSlot.
-func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	const (
-		epochStart = uint64(100_000)
-		epochLen   = uint(432_000)
-		// tipSlot one slot before the boundary: safeEnd = epochEnd - 1
-		tipSlot = uint64(506_079) // 532_000 - 25_920 - 1
-	)
-
-	cfg := newTestEraHistoryCfg(t)
-	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			epochStart,
-			epochLen,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
-		transitionInfo: hardfork.NewTransitionUnknown(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	ls.evaluateTransitionImpossible()
-
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"safeEndSlot < epochEndSlot: TransitionImpossible must NOT be set")
 }
 
 // TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown verifies that
@@ -5209,17 +5164,7 @@ func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			100_000,
-			432_000,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			// tipSlot past the safe-zone boundary → would normally trigger Impossible
-			Point: ocommon.NewPoint(520_000, []byte("tip")),
-		},
+		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		transitionInfo: hardfork.NewTransitionKnown(501),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
@@ -5241,16 +5186,7 @@ func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			100_000,
-			432_000,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(520_000, []byte("tip")),
-		},
+		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		transitionInfo: hardfork.NewTransitionImpossible(),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
@@ -5261,31 +5197,6 @@ func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 	ls.evaluateTransitionImpossible()
 
 	assert.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State)
-}
-
-// TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero verifies that a
-// zero LengthInSlots (uninitialized epoch) is skipped safely.
-func TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero(t *testing.T) {
-	t.Parallel()
-
-	cfg := newTestEraHistoryCfg(t)
-	ls := &LedgerState{
-		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: models.Epoch{EpochId: 0, LengthInSlots: 0},
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(999_999, []byte("tip")),
-		},
-		transitionInfo: hardfork.NewTransitionUnknown(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	ls.evaluateTransitionImpossible()
-
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"zero-length epoch must not trigger TransitionImpossible")
 }
 
 // ---------------------------------------------------------------------------
@@ -5354,20 +5265,24 @@ func TestEvaluateTriggerAtEpoch_SetsTransitionKnown(t *testing.T) {
 	assert.Equal(t, target, ls.transitionInfo.KnownEpoch)
 }
 
-// Without ExperimentalHardForksEnabled, the override is inert.
-func TestEvaluateTriggerAtEpoch_InertWithoutExperimentalFlag(t *testing.T) {
+// Without ExperimentalHardForksEnabled the override still applies, matching
+// cardano-node: a devnet with TestBabbageHardForkAtEpoch: 2 and the flag unset
+// enters Babbage at epoch 2, so an Alonzo ledger in epoch 1 must publish
+// TransitionKnown(2).
+func TestEvaluateTriggerAtEpoch_AppliesWithoutExperimentalFlag(t *testing.T) {
 	t.Parallel()
 
-	target := uint64(5)
+	target := uint64(2)
 	ls := newTestLedgerStateWithTrigger(
 		t,
-		eras.ByronEraDesc.Id, 3,
+		eras.AlonzoEraDesc.Id, 1,
 		hardfork.NewTransitionUnknown(),
-		"shelley", &target, false,
+		"babbage", &target, false,
 	)
 	ls.evaluateTriggerAtEpoch()
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"override must be ignored without ExperimentalHardForksEnabled")
+	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State,
+		"override must apply without ExperimentalHardForksEnabled")
+	assert.Equal(t, target, ls.transitionInfo.KnownEpoch)
 }
 
 // When currentEpoch.EpochId >= target epoch, the trigger is not applied
@@ -5404,9 +5319,8 @@ func TestEvaluateTriggerAtEpoch_NoOpOnFinalEra(t *testing.T) {
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
 }
 
-// AtEpoch override supersedes a prior TransitionImpossible: AtEpoch is
-// authoritative info about a known upcoming transition and must override the
-// safe-zone-derived "no transition in this epoch" verdict.
+// AtEpoch override supersedes a prior TransitionImpossible because it carries
+// the exact upcoming transition epoch.
 func TestEvaluateTriggerAtEpoch_OverridesTransitionImpossible(t *testing.T) {
 	t.Parallel()
 
@@ -5480,8 +5394,7 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 	ls := &LedgerState{
 		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentPParams: babbagePParams(9),
-		// Simulate state at end of epoch 500: TransitionImpossible was set
-		// because the tip's safe zone reached the epoch end.
+		// Simulate a stale TransitionImpossible state at epoch rollover.
 		transitionInfo: hardfork.NewTransitionImpossible(),
 	}
 
@@ -5820,16 +5733,16 @@ func TestLatestOpCertSequenceTracksHighestObservedAndRollback(t *testing.T) {
 	require.False(t, found)
 	require.Equal(t, uint64(0), sequence)
 
-	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 3, 10, nil))
-	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 7, 20, nil))
-	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 5, 30, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(context.Background(), pkh, 3, 10, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(context.Background(), pkh, 7, 20, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(context.Background(), pkh, 5, 30, nil))
 
 	sequence, found, err = ls.LatestOpCertSequence(poolID)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, uint64(7), sequence)
 
-	require.NoError(t, db.RestorePoolStateAtSlot(15, nil))
+	require.NoError(t, db.RestorePoolStateAtSlot(context.Background(), 15, nil))
 	sequence, found, err = ls.LatestOpCertSequence(poolID)
 	require.NoError(t, err)
 	require.True(t, found)
@@ -5874,8 +5787,8 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
+	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(context.Background(),
 			txn,
 			ocommon.Point{Slot: 10},
 			block,
@@ -5952,8 +5865,8 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 		},
 	}
 
-	err = db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
+	err = db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(context.Background(),
 			txn,
 			ocommon.Point{Slot: block.SlotNumber()},
 			block,
@@ -5993,7 +5906,6 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 			2: uint64(0),
 		},
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
@@ -6046,8 +5958,8 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 		},
 	}
 
-	err = db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
+	err = db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(context.Background(),
 			txn,
 			ocommon.Point{Slot: 10, Hash: []byte("dijkstra-validation")},
 			block,
@@ -6240,7 +6152,7 @@ func TestLeiosValidationSessionRollsBackStagedCertificateWrites(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.withTxValidationSession(nil, nil, true, func(
+	err = ls.withTxValidationSession(context.Background(), nil, nil, true, func(
 		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error,
 		_ func() bool,
 		applyTx txValidationApplyFunc,
@@ -6255,7 +6167,7 @@ func TestLeiosValidationSessionRollsBackStagedCertificateWrites(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = db.GetDrepByCredential(0, credential, true, nil)
+	_, err = db.GetDrepByCredential(context.Background(), 0, credential, true, nil)
 	require.ErrorIs(t, err, models.ErrDrepNotFound)
 }
 
@@ -7001,8 +6913,8 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(
 					t,
-					db.Transaction(true).Do(func(txn *database.Txn) error {
-						if err := db.CreateUtxo(txn, &models.Utxo{TxId: txID, OutputIdx: 0, AddedSlot: 0}); err != nil {
+					db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+						if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{TxId: txID, OutputIdx: 0, AddedSlot: 0}); err != nil {
 							return err
 						}
 						return db.Blob().SetUtxo(txn.Blob(), txID, 0, encoded)
@@ -7064,18 +6976,18 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 						MaxRefScriptSizePerBlock: 1,
 					}
 					currentParams.ProtocolVersion.Major = dijkstra.MinProtocolVersionDijkstra
-					return db.Transaction(true).Do(func(txn *database.Txn) error {
-						_, err := ls.ledgerProcessBlock(txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, eras.DijkstraEraDesc, currentParams, pp, 0, 0, false)
+					return db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+						_, err := ls.ledgerProcessBlock(context.Background(), txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, eras.DijkstraEraDesc, currentParams, pp, 0, 0, false)
 						return err
 					})
 				},
 				"imported": func() error {
-					return db.Transaction(true).Do(func(txn *database.Txn) error {
-						_, err := ls.ledgerProcessBlock(txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, era, pp, nil, 0, 0, false)
+					return db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+						_, err := ls.ledgerProcessBlock(context.Background(), txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, era, pp, nil, 0, 0, false)
 						return err
 					})
 				},
-				"forged": func() error { return ls.validateForgedTxs(block) },
+				"forged": func() error { return ls.validateForgedTxs(context.Background(), block) },
 			} {
 				t.Run(path, func(t *testing.T) {
 					err := run()
@@ -7180,8 +7092,8 @@ func TestLedgerProcessBlockAllowsSyntheticByronBlocksWithPlaceholderCbor(
 		cbor: []byte{0x82, 0x80, 0x80},
 	}
 
-	err := db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
+	err := db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(context.Background(),
 			txn,
 			ocommon.Point{Slot: 1, Hash: block.Hash().Bytes()},
 			block,
@@ -7259,7 +7171,7 @@ func TestCleanupConsumedUtxos_TimerStopsOnClose(t *testing.T) {
 	hook, fires := newCleanupTimerFireSignal()
 	ls.cleanupConsumedUtxosTimerFiredHook = hook
 
-	ls.scheduleCleanupConsumedUtxos()
+	ls.scheduleCleanupConsumedUtxos(context.Background())
 	// Two fires prove the callback re-armed itself at least once, so the
 	// absence check below is measuring a stopped timer rather than one that
 	// simply never started.
@@ -7308,7 +7220,7 @@ func TestCleanupConsumedUtxos_CloseWaitsForActiveCallback(t *testing.T) {
 		})
 	}
 
-	ls.scheduleCleanupConsumedUtxos()
+	ls.scheduleCleanupConsumedUtxos(context.Background())
 	testutil.RequireReceive(
 		t, entered, testutil.AsyncWait,
 		"cleanup timer callback must start before Close is called",
@@ -7354,7 +7266,7 @@ func TestCleanupConsumedUtxos_NoDatabaseWorkAfterClose(t *testing.T) {
 	ls := newLedgerStateForCleanup(db, tipSlot)
 	require.NoError(t, ls.Close())
 
-	ls.cleanupConsumedUtxos()
+	ls.cleanupConsumedUtxos(context.Background())
 
 	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
 	require.NoError(t, err)
@@ -7376,7 +7288,7 @@ func TestCleanupConsumedUtxos_RepeatedCloseIsSafe(t *testing.T) {
 	hook, fires := newCleanupTimerFireSignal()
 	ls.cleanupConsumedUtxosTimerFiredHook = hook
 
-	ls.scheduleCleanupConsumedUtxos()
+	ls.scheduleCleanupConsumedUtxos(context.Background())
 	testutil.RequireReceive(
 		t, fires, testutil.AsyncWait,
 		"cleanup timer must fire while the ledger state is open",
@@ -7405,7 +7317,7 @@ func TestCleanupConsumedUtxos_ScheduleAfterCloseDoesNotArm(t *testing.T) {
 	ls.cleanupConsumedUtxosTimerFiredHook = hook
 
 	require.NoError(t, ls.Close())
-	ls.scheduleCleanupConsumedUtxos()
+	ls.scheduleCleanupConsumedUtxos(context.Background())
 
 	testutil.RequireNoReceive(
 		t, fires, 200*time.Millisecond,
@@ -7437,9 +7349,9 @@ func seedSpentUtxoForCleanup(
 	addedSlot, deletedSlot uint64,
 ) {
 	t.Helper()
-	mdTxn := db.MetadataTxn(true)
+	mdTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
-		return db.CreateUtxo(txn, &models.Utxo{
+		return db.CreateUtxo(context.Background(), txn, &models.Utxo{
 			TxId:        txId,
 			OutputIdx:   outputIdx,
 			AddedSlot:   addedSlot,
@@ -7497,7 +7409,7 @@ func TestCleanupConsumedUtxos_CoreModePrunes(t *testing.T) {
 	require.NotNil(t, pre, "seed must succeed before cleanup")
 
 	ls := newLedgerStateForCleanup(db, tipSlot)
-	ls.cleanupConsumedUtxos()
+	ls.cleanupConsumedUtxos(context.Background())
 
 	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
 	require.NoError(t, err)
@@ -7527,7 +7439,7 @@ func TestCleanupConsumedUtxos_PersistsPruneFloor(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, before, "no floor before cleanup has ever run")
 
-	ls.cleanupConsumedUtxos()
+	ls.cleanupConsumedUtxos(context.Background())
 
 	after, err := ls.readConsumedUtxoPruneFloor(nil)
 	require.NoError(t, err)
@@ -7547,7 +7459,7 @@ func TestCleanupConsumedUtxos_DoesNotWaitForChainsyncMutex(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		ls.cleanupConsumedUtxos()
+		ls.cleanupConsumedUtxos(context.Background())
 		close(done)
 	}()
 	testutil.RequireReceive(
@@ -7595,7 +7507,7 @@ func TestCleanupConsumedUtxos_SkipsDeleteWhenPruneFloorPersistFails(
 	require.NoError(t, err)
 
 	ls := newLedgerStateForCleanup(db, tipSlot)
-	ls.cleanupConsumedUtxos()
+	ls.cleanupConsumedUtxos(context.Background())
 
 	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
 	require.NoError(t, err)
@@ -7611,12 +7523,12 @@ func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDBForCleanup(t, types.StorageModeCore)
-	mdTxn := db.MetadataTxn(true)
+	mdTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
 		for idx := 0; idx <= cleanupConsumedUtxoBatchSize; idx++ {
 			txID := bytes.Repeat([]byte{0}, 32)
 			binary.BigEndian.PutUint32(txID[:4], uint32(idx+1))
-			if err := db.CreateUtxo(txn, &models.Utxo{
+			if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
 				TxId:        txID,
 				OutputIdx:   0,
 				AddedSlot:   1_000,
@@ -7630,7 +7542,7 @@ func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
 	}))
 
 	ls := newLedgerStateForCleanup(db, 100_000)
-	ls.cleanupConsumedUtxos()
+	ls.cleanupConsumedUtxos(context.Background())
 
 	remaining, err := db.Metadata().GetUtxosDeletedBeforeSlot(
 		50_000,
@@ -7640,7 +7552,7 @@ func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, remaining, 1, "one eligible row must remain for a later run")
 
-	ls.cleanupConsumedUtxos()
+	ls.cleanupConsumedUtxos(context.Background())
 	remaining, err = db.Metadata().GetUtxosDeletedBeforeSlot(
 		50_000,
 		cleanupConsumedUtxoBatchSize+1,
@@ -7665,7 +7577,7 @@ func TestCleanupConsumedUtxos_DefersDuringCatchup(t *testing.T) {
 
 	ls := newLedgerStateForCleanup(db, tipSlot)
 	ls.syncUpstreamTipSlot.Store(upstreamTip)
-	ls.cleanupConsumedUtxos()
+	ls.cleanupConsumedUtxos(context.Background())
 
 	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
 	require.NoError(t, err)
@@ -7701,7 +7613,7 @@ func TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip(t *testing.T) {
 	ls := newLedgerStateForCleanup(db, tipSlot)
 	// No peer has ever reported a tip.
 	ls.syncUpstreamTipSlot.Store(0)
-	ls.cleanupConsumedUtxos()
+	ls.cleanupConsumedUtxos(context.Background())
 
 	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
 	require.NoError(t, err)
@@ -7730,7 +7642,7 @@ func TestCleanupConsumedUtxos_APIModeRetains(t *testing.T) {
 	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
 
 	ls := newLedgerStateForCleanup(db, tipSlot)
-	ls.cleanupConsumedUtxos()
+	ls.cleanupConsumedUtxos(context.Background())
 
 	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
 	require.NoError(t, err)
@@ -7893,7 +7805,7 @@ func TestHealEmptyLabNoncesFoldsExtraEntropy(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	withoutEntropy, err := lcommon.CalculateEpochNonce(
 		candidate, carriedLab, nil,
@@ -7946,12 +7858,17 @@ func TestEraTransitionPathRejectsLargerJump(t *testing.T) {
 func TestBoundaryEraForBlockUsesSuccessorHeaderEra(t *testing.T) {
 	t.Parallel()
 
-	ls := &LedgerState{}
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
 	target, allowTwoTransitions := ls.boundaryEraForBlock(
 		eras.MaryEraDesc.Id,
 		eras.AlonzoEraDesc.Id,
 		7,
 		true,
+		0,
 	)
 	require.Equal(t, eras.BabbageEraDesc.Id, target)
 	require.True(t, allowTwoTransitions)
@@ -7966,6 +7883,7 @@ func TestBoundaryEraForBlockDoesNotAdvanceFromHeaderAlone(t *testing.T) {
 		eras.AlonzoEraDesc.Id,
 		eras.BabbageEraDesc.MinMajorVersion,
 		true,
+		0,
 	)
 	require.Equal(
 		t,
@@ -7985,9 +7903,105 @@ func TestBoundaryEraForBlockRejectsNonAdjacentHeaderEra(t *testing.T) {
 		eras.AlonzoEraDesc.Id,
 		eras.ConwayEraDesc.MinMajorVersion,
 		true,
+		0,
 	)
 	require.Equal(t, eras.AlonzoEraDesc.Id, target)
 	require.False(t, allowTwoTransitions)
+}
+
+// TestBoundaryEraForBlockHonoursScheduledEpoch pins that a configured
+// TestXHardForkAtEpoch is authoritative over the boundary block's header
+// protocol major. cardano-node stamps every header with its own
+// cardanoProtocolVersion (11 without ExperimentalHardForksEnabled, 12 with
+// it), not with the block's era, so on a devnet with Babbage at epoch 4 and
+// Conway at epoch 5 the first Babbage block carries major 11. Read as an
+// announced era, that took the ledger Alonzo -> Babbage -> Conway at epoch 4,
+// and the node then forged Conway blocks cardano-node rejected.
+func TestBoundaryEraForBlockHonoursScheduledEpoch(t *testing.T) {
+	t.Parallel()
+
+	newLedger := func(t *testing.T) *LedgerState {
+		t.Helper()
+		cfg := newTestEraHistoryCfg(t)
+		babbage, conway := uint64(4), uint64(5)
+		cfg.TestBabbageHardForkAtEpoch = &babbage
+		cfg.TestConwayHardForkAtEpoch = &conway
+		return &LedgerState{
+			config: LedgerStateConfig{CardanoNodeConfig: cfg},
+		}
+	}
+
+	t.Run("before the successor's epoch", func(t *testing.T) {
+		t.Parallel()
+		target, allowTwoTransitions := newLedger(t).boundaryEraForBlock(
+			eras.AlonzoEraDesc.Id,
+			eras.BabbageEraDesc.Id,
+			11,
+			true,
+			4,
+		)
+		require.Equal(t, eras.BabbageEraDesc.Id, target,
+			"Conway is scheduled for epoch 5, so epoch 4 stays in Babbage")
+		require.False(t, allowTwoTransitions)
+	})
+
+	t.Run("at the successor's epoch", func(t *testing.T) {
+		t.Parallel()
+		target, allowTwoTransitions := newLedger(t).boundaryEraForBlock(
+			eras.AlonzoEraDesc.Id,
+			eras.BabbageEraDesc.Id,
+			11,
+			true,
+			5,
+		)
+		require.Equal(t, eras.ConwayEraDesc.Id, target)
+		require.True(t, allowTwoTransitions)
+	})
+}
+
+// TestBoundaryEraForBlockRefusesElevationWithoutShape pins the guard as
+// fail-closed. Without a resolvable hard-fork shape the configured
+// TriggerAtEpoch cannot be checked, so the header must not elevate the
+// ledger past the body era, even on a boundary that would otherwise qualify.
+func TestBoundaryEraForBlockRefusesElevationWithoutShape(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	_, shapeErr := ls.eraShapeWithError()
+	require.Error(t, shapeErr, "the premise: no shape can be built")
+
+	target, allowTwoTransitions := ls.boundaryEraForBlock(
+		eras.MaryEraDesc.Id,
+		eras.AlonzoEraDesc.Id,
+		7,
+		true,
+		10,
+	)
+	require.Equal(t, eras.AlonzoEraDesc.Id, target)
+	require.False(t, allowTwoTransitions)
+}
+
+// TestBoundaryEraForBlockVersionTriggerKeepsHeaderElevation pins that the
+// scheduled-epoch guard leaves version-triggered networks alone: with no
+// TestXHardForkAtEpoch override, Prime-mainnet's Mary -> Alonzo -> Babbage
+// boundary still resolves from the Alonzo body's header major 7.
+func TestBoundaryEraForBlockVersionTriggerKeepsHeaderElevation(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
+	target, allowTwoTransitions := ls.boundaryEraForBlock(
+		eras.MaryEraDesc.Id,
+		eras.AlonzoEraDesc.Id,
+		7,
+		true,
+		10,
+	)
+	require.Equal(t, eras.BabbageEraDesc.Id, target)
+	require.True(t, allowTwoTransitions)
 }
 
 func TestEraAdvancementRejectsRawTwoStepBodyJumpWithoutHeaderElevation(
@@ -8001,6 +8015,7 @@ func TestEraAdvancementRejectsRawTwoStepBodyJumpWithoutHeaderElevation(
 		eras.BabbageEraDesc.Id,
 		eras.BabbageEraDesc.MinMajorVersion,
 		true,
+		0,
 	)
 	require.Equal(t, eras.BabbageEraDesc.Id, target)
 	require.False(t, allowTwoTransitions)
@@ -8087,6 +8102,7 @@ func newBoundaryRolloverLedger(
 		currentPParams: &shelley.ShelleyProtocolParameters{
 			ProtocolMajor:    shelley.MinProtocolVersionShelley,
 			MinFeeA:          44,
+			NOpt:             1,
 			A0:               rat(),
 			Rho:              rat(),
 			Tau:              rat(),
@@ -8097,16 +8113,13 @@ func newBoundaryRolloverLedger(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	seedEmptyRewardBasisForRollover(t, db, currentEpoch, ls.currentPParams)
 	return ls, db
 }
 
 // TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion drives a
-// two-era boundary the way ledgerProcessBlocksFromSource does: the rollover
-// runs first so source-era pparam updates are enacted, then the remaining era
-// transitions are applied. The authoritative mark snapshot must be captured
-// once, after those transitions, so its protocol version is the one the new
-// epoch actually runs at. Capturing it at the end of the rollover records the
-// source era's major instead, and that value is durable.
+// two-era boundary in production order: source-era updates, translations, then
+// the incoming era's epoch rules and snapshot capture.
 func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	t *testing.T,
 ) {
@@ -8131,40 +8144,42 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	require.Len(t, transitionPath, 2)
 
 	var result *EpochRolloverResult
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		var err error
-		result, err = ls.processEpochRollover(
-			txn,
-			ls.currentEpoch,
-			ls.currentEra,
-			ls.currentPParams,
-			true,
-		)
-		if err != nil {
-			return err
-		}
-		require.True(t, result.BoundarySnapshotDeferred,
-			"a multi-era boundary must defer the mark snapshot capture")
-		require.Empty(t, captures,
-			"the rollover must not capture the mark snapshot before the "+
-				"boundary's era transitions have run")
-
-		transitions, err := ls.applyBoundaryEraTransitions(
-			txn, ls.currentEpoch, transitionPath, result,
-		)
+		params, eraID, transitions, transitionMajors, v2Written, err :=
+			ls.prepareEraTransitionsForRollover(
+				context.Background(),
+				txn,
+				ls.currentEpoch,
+				ls.currentEra,
+				ls.currentPParams,
+				transitionPath,
+			)
 		if err != nil {
 			return err
 		}
 		require.Len(t, transitions, 2)
-		return nil
+		require.Empty(t, captures,
+			"translation must not capture before incoming-era epoch rules")
+		incomingEra, ok := ls.eraById(eraID)
+		require.True(t, ok)
+		result, err = ls.processEpochRolloverWithClassicPParamsContext(
+			context.Background(),
+			txn,
+			ls.currentEpoch,
+			*incomingEra,
+			params,
+			true,
+			v2Written,
+			transitionMajors,
+		)
+		return err
 	}))
 
 	if result == nil {
 		t.Fatal("epoch rollover returned no result")
 	}
-	require.Len(t, captures, 1,
-		"the deferred capture must run exactly once, not be re-run")
+	require.Len(t, captures, 1)
 	require.Equal(
 		t,
 		uint(mary.MinProtocolVersionMary),
@@ -8174,8 +8189,6 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEra.Id)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEpoch.EraId)
-	require.False(t, result.BoundarySnapshotDeferred,
-		"the deferred capture must be marked as taken")
 
 	// The event the caller publishes after commit is built from the same
 	// result, so the durable row and the event must agree.
@@ -8202,24 +8215,30 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 	ls.currentEra = sourceEra
 
 	var result *EpochRolloverResult
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		var err error
-		result, err = ls.processEpochRollover(
+		params, eraID, _, transitionMajors, v2Written, err := ls.prepareEraTransitionsForRollover(
+			context.Background(),
 			txn,
 			ls.currentEpoch,
 			sourceEra,
 			ls.currentPParams,
-			true,
+			[]uint{eras.AllegraEraDesc.Id},
 		)
 		if err != nil {
 			return err
 		}
-		_, err = ls.applyBoundaryEraTransitions(
+		incomingEra, ok := ls.eraById(eraID)
+		require.True(t, ok)
+		result, err = ls.processEpochRolloverWithClassicPParamsContext(
+			context.Background(),
 			txn,
 			ls.currentEpoch,
-			[]uint{eras.AllegraEraDesc.Id},
-			result,
+			*incomingEra,
+			params,
+			true,
+			v2Written,
+			transitionMajors,
 		)
 		return err
 	}))
@@ -8254,8 +8273,7 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 }
 
 // TestSingleEraBoundaryRolloverCapturesSnapshotInRollover covers the common
-// path: with no era transitions deferred, the rollover still captures the mark
-// snapshot itself, at its own era's protocol version.
+// path at its own era's protocol version.
 func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 	t.Parallel()
 
@@ -8270,15 +8288,14 @@ func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 	)
 
 	var result *EpochRolloverResult
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		result, err = ls.processEpochRollover(
+		result, err = ls.processEpochRollover(context.Background(),
 			txn,
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		return err
 	}))
@@ -8286,7 +8303,6 @@ func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 	if result == nil {
 		t.Fatal("epoch rollover returned no result")
 	}
-	require.False(t, result.BoundarySnapshotDeferred)
 	require.Len(t, captures, 1)
 	require.Equal(
 		t,
@@ -8492,12 +8508,49 @@ func TestConsensusModeForEpoch_UnresolvableShapeFailsClosed(t *testing.T) {
 		"a future-epoch consensus mode must fail closed without a shape")
 }
 
+// TestConsensusModeForEpoch_AtEpochOverrideWithoutExperimentalFlag is the
+// forging-side half of the TestBabbageHardForkAtEpoch scenario: with the flag
+// unset, an Alonzo ledger in epoch 1 must forecast Babbage's CPraos for epoch
+// 2, or a producer would forge Alonzo blocks that cardano-node rejects.
+func TestConsensusModeForEpoch_AtEpochOverrideWithoutExperimentalFlag(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := newTestEraHistoryCfg(t)
+	babbage := uint64(2)
+	cfg.TestBabbageHardForkAtEpoch = &babbage
+	epoch := models.Epoch{
+		EpochId:       1,
+		StartSlot:     432_000,
+		SlotLength:    1_000,
+		LengthInSlots: 432_000,
+		EraId:         eras.AlonzoEraDesc.Id,
+	}
+	ls := &LedgerState{
+		epochCache:   []models.Epoch{epoch},
+		currentEra:   eras.AlonzoEraDesc,
+		currentEpoch: epoch,
+		config:       LedgerStateConfig{CardanoNodeConfig: cfg},
+	}
+	ls.publishSnapshotsLocked()
+
+	mode, err := ls.ConsensusModeForEpoch(1)
+	require.NoError(t, err)
+	assert.Equal(t, consensus.ConsensusModeTPraos, mode)
+
+	mode, err = ls.ConsensusModeForEpoch(2)
+	require.NoError(t, err)
+	assert.Equal(t, consensus.ConsensusModeCPraos, mode,
+		"the configured Babbage fork must apply without the experimental flag")
+}
+
 func TestEmptyGenesisCommitteeValidation(t *testing.T) {
 	t.Parallel()
 
 	ls, db := genesisConstitutionTestState(t)
 	ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members = map[string]int{}
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 	require.Zero(t, committeeMemberRowCount(t, db))
 	pp := &conway.ConwayProtocolParameters{}
 	ls.currentPParams = pp
@@ -8623,7 +8676,7 @@ func TestEmptyGenesisCommitteeReferenceResignation(t *testing.T) {
 
 	ls, _ := genesisConstitutionTestState(t)
 	ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members = map[string]int{}
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 	ls.currentPParams = pp
 	ls.currentEpoch = models.Epoch{EpochId: initial.CurrentEpoch}
 	ls.publishSnapshotsLocked()
@@ -8725,12 +8778,12 @@ func newHardForkRatifyFixture(t *testing.T) *hardForkRatifyFixture {
 	// maps it to ... the CC yes ratio is 1/1").
 	coldCredential := repeatByte(28, 0xC1)
 	hotCredential := repeatByte(28, 0xC2)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+	require.NoError(t, db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 		ColdCredHash: coldCredential,
 		ExpiresEpoch: 1000,
 		AddedSlot:    1,
 	}}, nil))
-	require.NoError(t, db.SetCommitteeQuorum(big.NewRat(1, 1), 1, nil))
+	require.NoError(t, db.SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil))
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	_, err = raw.Exec(`
@@ -8761,19 +8814,19 @@ INSERT INTO auth_committee_hot (
 		GovActionCbor: actionCbor,
 		AddedSlot:     1,
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
-	loaded, err := db.GetGovernanceProposal(proposal.TxHash, 0, nil)
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
+	loaded, err := db.GetGovernanceProposal(context.Background(), proposal.TxHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeCC,
 		VoterCredential: hotCredential,
 		Vote:            models.VoteYes,
 		AddedSlot:       2,
 	}, nil))
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeSPO,
 		VoterCredential: []byte(hfrYesPool),
@@ -8793,6 +8846,7 @@ INSERT INTO auth_committee_hot (
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	seedEmptyRewardBasisForRollover(t, db, currentEpoch, pparams)
 	return &hardForkRatifyFixture{
 		ls:       ls,
 		db:       db,
@@ -8807,16 +8861,16 @@ func (f *hardForkRatifyFixture) rollover(
 	pparams lcommon.ProtocolParameters,
 ) *EpochRolloverResult {
 	t.Helper()
+	seedEmptyRewardBasisForRollover(t, f.db, currentEpoch, pparams)
 	var result *EpochRolloverResult
-	txn := f.db.Transaction(true)
+	txn := f.db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
-		result, rolloverErr = f.ls.processEpochRollover(
+		result, rolloverErr = f.ls.processEpochRollover(context.Background(),
 			txn,
 			currentEpoch,
 			eras.ConwayEraDesc,
 			pparams,
-			false,
 		)
 		return rolloverErr
 	})
@@ -8931,7 +8985,7 @@ func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	// Epoch 5's lab is recovered from the boundary block's PrevHash.
 	require.Equal(
@@ -9013,7 +9067,7 @@ func TestHealEmptyLabNoncesBoundsToRecentEpochs(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	require.Empty(
 		t,
@@ -9068,7 +9122,7 @@ func TestHealEmptyLabNoncesRepairsOldestInWindowNonce(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	// The oldest in-window epoch is scanned right after the predecessor whose
 	// lab the scan verifies. Its nonce must be recomputed as candidate ⭒ the
@@ -9119,7 +9173,7 @@ func TestHealEmptyLabNoncesLeavesValidRecordsUntouched(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	require.Equal(t, lab, ls.epochCache[0].LastEpochBlockNonce)
 	require.Equal(t, nonce, ls.epochCache[0].Nonce)
@@ -9164,7 +9218,7 @@ func TestHealEmptyLabNoncesLeavesParentHashLabUntouched(t *testing.T) {
 		},
 	}
 
-	repaired := ls.healEmptyLabNoncesInPlace(epochs)
+	repaired := ls.healEmptyLabNoncesInPlace(context.Background(), epochs)
 
 	require.False(t, repaired)
 	require.Equal(t, boundaryPrevHash, epochs[0].LastEpochBlockNonce)
@@ -9217,7 +9271,7 @@ func TestHealEmptyLabNoncesRepairsLabWhenCandidateMissing(t *testing.T) {
 		},
 	}
 
-	repaired := ls.healEmptyLabNoncesInPlace(epochs)
+	repaired := ls.healEmptyLabNoncesInPlace(context.Background(), epochs)
 
 	require.True(t, repaired)
 	require.Equal(t, boundaryPrevHash, epochs[0].LastEpochBlockNonce,
@@ -9266,7 +9320,7 @@ func TestHealEmptyLabNoncesRepairsEmptyLabWithoutCandidate(t *testing.T) {
 		},
 	}
 
-	repaired := ls.healEmptyLabNoncesInPlace(epochs)
+	repaired := ls.healEmptyLabNoncesInPlace(context.Background(), epochs)
 
 	require.True(t, repaired)
 	require.Equal(t, boundaryPrevHash, epochs[0].LastEpochBlockNonce,
@@ -9299,7 +9353,7 @@ func TestHealEmptyLabNoncesSkipsMissingCandidateBeforeBoundaryLookup(
 	}
 
 	require.NotPanics(t, func() {
-		repaired := ls.healEmptyLabNoncesInPlace(epochs)
+		repaired := ls.healEmptyLabNoncesInPlace(context.Background(), epochs)
 		require.False(t, repaired)
 	})
 	require.Equal(t, oldLab, epochs[0].LastEpochBlockNonce)
@@ -9357,7 +9411,7 @@ func TestHealEmptyLabNoncesLeavesFirstPraosEpochLabNeutral(t *testing.T) {
 		},
 	}
 
-	repaired := ls.healEmptyLabNoncesInPlace(epochs)
+	repaired := ls.healEmptyLabNoncesInPlace(context.Background(), epochs)
 
 	require.False(t, repaired)
 	require.Empty(t, epochs[0].LastEpochBlockNonce)
@@ -9406,7 +9460,7 @@ func TestHealEmptyLabNoncesTrustsMithrilCoveredEpoch(t *testing.T) {
 		},
 	}
 
-	repaired := ls.healEmptyLabNoncesInPlace(epochs)
+	repaired := ls.healEmptyLabNoncesInPlace(context.Background(), epochs)
 
 	require.False(t, repaired)
 	require.Equal(t, importedLab, epochs[0].LastEpochBlockNonce)
@@ -9462,7 +9516,7 @@ func TestHealEmptyLabNoncesInPlaceRepairsReloadedEpochs(t *testing.T) {
 		},
 	}
 
-	repaired := ls.healEmptyLabNoncesInPlace(epochs)
+	repaired := ls.healEmptyLabNoncesInPlace(context.Background(), epochs)
 
 	want, err := lcommon.CalculateEpochNonce(candidate, carriedLab, nil)
 	require.NoError(t, err)
@@ -9544,16 +9598,16 @@ func TestLoadEpochsRefreshesCurrentEpochAfterHealing(t *testing.T) {
 		},
 	}
 	ls.metrics.init(prometheus.NewRegistry())
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.loadEpochs(txn)
+		return ls.loadEpochs(context.Background(), txn)
 	}))
 
 	require.Equal(t, want.Bytes(), ls.epochCache[1].Nonce)
 	require.Equal(t, want.Bytes(), ls.currentEpoch.Nonce)
-	require.Equal(t, want.Bytes(), ls.EpochNonce(6))
-	require.NotEqual(t, candidate, ls.EpochNonce(6))
+	require.Equal(t, want.Bytes(), ls.EpochNonce(context.Background(), 6))
+	require.NotEqual(t, candidate, ls.EpochNonce(context.Background(), 6))
 }
 
 // rollbackWindowFixture reproduces the state a node holds while a rollback's
@@ -9587,7 +9641,7 @@ func newRollbackWindowFixture(t *testing.T) *rollbackWindowFixture {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 5}))
 
@@ -9611,7 +9665,7 @@ func newRollbackWindowFixture(t *testing.T) *rollbackWindowFixture {
 	// deliberately do NOT run ls.rollback: this is the in-flight-truncation
 	// window.
 	rollbackTo := blocks[2]
-	require.NoError(t, ls.chain.Rollback(makeTestPoint(rollbackTo)))
+	require.NoError(t, ls.chain.Rollback(context.Background(), makeTestPoint(rollbackTo)))
 
 	return &rollbackWindowFixture{
 		ls:          ls,
@@ -9640,12 +9694,12 @@ func TestRollbackWindowPreconditions(t *testing.T) {
 
 	// The ledger tip's block row is gone, which is what makes
 	// authoritativeRecentChainPoints bail out.
-	_, err := database.BlockByPoint(f.ls.db, ledgerTip.Point)
+	_, err := database.BlockByPoint(context.Background(), f.ls.db, ledgerTip.Point)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 
 	// And the "chain is usable" guard is false, so IntersectPoints takes the
 	// authoritative path rather than the chain path.
-	require.False(t, f.ls.primaryChainTipAtOrAheadOfLedgerTip())
+	require.False(t, f.ls.primaryChainTipAtOrAheadOfLedgerTip(context.Background()))
 }
 
 // TestAuthoritativeRecentChainPointsFallsBackToChainTipWhenLedgerTipMissing
@@ -9658,7 +9712,7 @@ func TestAuthoritativeRecentChainPointsFallsBackToChainTipWhenLedgerTipMissing(
 ) {
 	f := newRollbackWindowFixture(t)
 
-	points, err := f.ls.authoritativeRecentChainPoints(4)
+	points, err := f.ls.authoritativeRecentChainPoints(context.Background(), 4)
 	require.NoError(t, err)
 	require.NotEmpty(
 		t,
@@ -9696,7 +9750,7 @@ func TestIntersectPointsDoesNotCollapseToEmptyDuringRollbackWindow(
 ) {
 	f := newRollbackWindowFixture(t)
 
-	points, err := f.ls.IntersectPoints(4)
+	points, err := f.ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
 	require.NotEmpty(
 		t,
@@ -9714,7 +9768,7 @@ func TestIntersectPointsDoesNotCollapseToEmptyDuringRollbackWindow(
 func TestIntersectPointsStillEmptyAtOriginWithNoChain(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 5}))
 	ls := &LedgerState{
@@ -9725,7 +9779,7 @@ func TestIntersectPointsStillEmptyAtOriginWithNoChain(t *testing.T) {
 		},
 	}
 
-	points, err := ls.IntersectPoints(4)
+	points, err := ls.IntersectPoints(context.Background(), 4)
 	require.NoError(t, err)
 	assert.Empty(t, points)
 }
@@ -9745,7 +9799,7 @@ func TestAuthoritativeRecentChainPointsIgnoresChainTipAheadOfLedgerTip(
 	// Extend the rewound chain past the (missing) ledger tip with a fork
 	// block, so the chain tip is now ahead of the ledger tip.
 	forkHash := bytes.Repeat([]byte{0xfe}, 32)
-	require.NoError(t, f.ls.chain.AddRawBlocks([]chain.RawBlock{
+	require.NoError(t, f.ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{
 		{
 			Slot:        f.staleLedger.Point.Slot + 5,
 			Hash:        forkHash,
@@ -9761,7 +9815,7 @@ func TestAuthoritativeRecentChainPointsIgnoresChainTipAheadOfLedgerTip(
 		f.staleLedger.Point.Slot,
 	)
 
-	points, err := f.ls.authoritativeRecentChainPoints(4)
+	points, err := f.ls.authoritativeRecentChainPoints(context.Background(), 4)
 	require.NoError(t, err)
 	assert.Empty(
 		t,
@@ -9802,14 +9856,14 @@ func TestRecentChainPointsFallbackAnchorPropagatesStorageError(t *testing.T) {
 	f := newRollbackWindowFixture(t)
 
 	// Sanity: the anchor resolves while the database is healthy.
-	block, ok, err := f.ls.recentChainPointsFallbackAnchor(f.staleLedger)
+	block, ok, err := f.ls.recentChainPointsFallbackAnchor(context.Background(), f.staleLedger)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, f.rollbackTo.Slot, block.Slot)
 
 	require.NoError(t, dbtest.CloseDatabase(f.ls.db))
 
-	_, ok, err = f.ls.recentChainPointsFallbackAnchor(f.staleLedger)
+	_, ok, err = f.ls.recentChainPointsFallbackAnchor(context.Background(), f.staleLedger)
 	require.Error(t, err, "storage failure must not be swallowed")
 	assert.False(t, ok)
 	assert.NotErrorIs(
@@ -9828,7 +9882,7 @@ func TestAuthoritativeRecentChainPointsPropagatesAnchorStorageError(
 	f := newRollbackWindowFixture(t)
 	require.NoError(t, dbtest.CloseDatabase(f.ls.db))
 
-	points, err := f.ls.authoritativeRecentChainPoints(4)
+	points, err := f.ls.authoritativeRecentChainPoints(context.Background(), 4)
 	require.Error(t, err)
 	assert.Nil(t, points)
 }
@@ -9849,7 +9903,7 @@ func TestIntersectAnchorFallbackWarnIsThrottled(t *testing.T) {
 	})
 
 	for range 50 {
-		points, err := f.ls.authoritativeRecentChainPoints(4)
+		points, err := f.ls.authoritativeRecentChainPoints(context.Background(), 4)
 		require.NoError(t, err)
 		require.NotEmpty(t, points)
 	}
@@ -9868,7 +9922,7 @@ func TestIntersectAnchorFallbackWarnIsThrottled(t *testing.T) {
 func TestRollbackWindowIntersectAnchorReportsRollbackPoint(t *testing.T) {
 	f := newRollbackWindowFixture(t)
 
-	point, ok, err := f.ls.RollbackWindowIntersectAnchor()
+	point, ok, err := f.ls.RollbackWindowIntersectAnchor(context.Background())
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, f.rollbackTo.Slot, point.Slot)
@@ -9889,7 +9943,7 @@ func TestRollbackWindowIntersectAnchorAbsentWhenLedgerTipPresent(t *testing.T) {
 	}
 	f.ls.Unlock()
 
-	_, ok, err := f.ls.RollbackWindowIntersectAnchor()
+	_, ok, err := f.ls.RollbackWindowIntersectAnchor(context.Background())
 	require.NoError(t, err)
 	assert.False(t, ok)
 }
@@ -9950,7 +10004,6 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 			8: invalidBefore,
 		},
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
@@ -10007,8 +10060,8 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 		},
 	}
 
-	err = db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
+	err = db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(context.Background(),
 			txn,
 			ocommon.Point{Slot: blockSlot, Hash: []byte("phase-1-invalid-tx")},
 			block,
@@ -10360,8 +10413,24 @@ func TestProtocolParamsForSlot_ForecastsBumpAtBoundarySlot(t *testing.T) {
 // resolved from the complete era history. Dividing an absolute slot by the
 // current era's epoch length loses the epochs occupied by a Byron prefix and
 // can therefore miss a scheduled fork at the first future Shelley boundary.
+// cardano-node honours TestAllegraHardForkAtEpoch whatever
+// ExperimentalHardForksEnabled says, so the forger must forecast the fork with
+// the flag unset too.
 func TestProtocolParamsForSlot_UsesMultiEraEpochs(t *testing.T) {
 	t.Parallel()
+	for _, experimental := range []bool{true, false} {
+		t.Run(fmt.Sprintf("experimental=%t", experimental), func(t *testing.T) {
+			t.Parallel()
+			testProtocolParamsForSlotUsesMultiEraEpochs(t, experimental)
+		})
+	}
+}
+
+func testProtocolParamsForSlotUsesMultiEraEpochs(
+	t *testing.T,
+	experimental bool,
+) {
+	t.Helper()
 
 	const (
 		byronEpochs       = 2
@@ -10376,6 +10445,9 @@ func TestProtocolParamsForSlot_UsesMultiEraEpochs(t *testing.T) {
 	)
 
 	cfg := newMultiEraForecastCfg(t, shelleyEpoch+1)
+	if !experimental {
+		cfg.ExperimentalHardForksEnabled = nil
+	}
 	epochCache := make([]models.Epoch, 0, int(shelleyEpoch)+1)
 	for epoch := range uint64(byronEpochs) {
 		epochCache = append(epochCache, models.Epoch{
@@ -11564,7 +11636,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -11620,7 +11692,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 			PrevHash:    tip.Point.Hash,
 			Cbor:        []byte{0x80},
 		}
-		require.NoError(t, pc.AddRawBlocks([]chain.RawBlock{next}))
+		require.NoError(t, pc.AddRawBlocks(context.Background(), []chain.RawBlock{next}))
 	}
 
 	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
@@ -11703,7 +11775,7 @@ func TestRollbackRequeuesRewardPrecompute(t *testing.T) {
 				cutoffSlot: 100,
 			}
 
-			require.NoError(t, ls.rollbackWithBlocks(
+			require.NoError(t, ls.rollbackWithBlocks(context.Background(),
 				fixture.ancestorTip.Point, nil, false,
 			))
 
@@ -11758,7 +11830,7 @@ func TestRollbackTransactionFailureRestoresRewardPrecompute(t *testing.T) {
 	transactionErr := errors.New("injected rollback transaction failure")
 	failLedgerRollbackAfterChainTruncation(t, ls, transactionErr)
 
-	err = ls.rollbackWithBlocks(fixture.ancestorTip.Point, nil, false)
+	err = ls.rollbackWithBlocks(context.Background(), fixture.ancestorTip.Point, nil, false)
 
 	require.ErrorIs(t, err, transactionErr)
 	ls.rewardPrecomputeMu.Lock()
@@ -11789,7 +11861,7 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 		t.Run(fmt.Sprintf("protocol %d", protocolMajor), func(t *testing.T) {
 			t.Parallel()
 			seed, db := seedRewardPrecomputeTimingState(t, protocolMajor)
-			cm, err := chain.NewManager(db, nil)
+			cm, err := chain.NewManager(context.Background(), db, nil)
 			require.NoError(t, err)
 			require.NoError(
 				t,
@@ -11818,7 +11890,7 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 				PrevHash:    ancestor.Hash,
 				BlockNumber: 2, Type: 1, Cbor: []byte{0x80},
 			}
-			require.NoError(t, cm.PrimaryChain().AddRawBlocks(
+			require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(),
 				[]chain.RawBlock{ancestor, current},
 			))
 			for _, block := range []chain.RawBlock{ancestor, current} {
@@ -11832,7 +11904,7 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 			}
 			require.NoError(t, db.SetTip(ls.currentTip, nil))
 
-			require.NoError(t, ls.rollbackWithBlocks(
+			require.NoError(t, ls.rollbackWithBlocks(context.Background(),
 				ocommon.NewPoint(ancestor.Slot, ancestor.Hash), nil, false,
 			))
 			ls.rewardPrecomputeWG.Wait()
@@ -11843,7 +11915,7 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 				"rollback must replace discarded work before the next boundary")
 			require.Equal(t, ancestor.Slot, outputs[0].CapturedSlot)
 			require.Equal(t, uint64(1_200), outputs[0].BoundarySlot)
-			txn := db.Transaction(false)
+			txn := db.Transaction(context.Background(), false)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
 				app, ok, err := ls.precomputedStakeRewardApplication(
 					txn,
@@ -11881,7 +11953,7 @@ func TestRollbackDoesNotRestartRewardsWithoutRestoredState(t *testing.T) {
 				point = fixture.currentTip.Point
 			}
 
-			err := ls.rollbackWithBlocks(point, nil, false)
+			err := ls.rollbackWithBlocks(context.Background(), point, nil, false)
 			if noop {
 				require.NoError(t, err)
 				require.Same(t, pending, ls.rewardPrecomputePending)
@@ -11925,7 +11997,7 @@ func TestCommittedRollbackWithFloorFailureRequeuesRewardPrecompute(
 	ls.rewardPrecomputePending = &event.EpochTransitionEvent{NewEpoch: 4}
 	floorErr := errors.New("injected durable floor lookup failure")
 	base := ls.db
-	failing, err := database.New(
+	failing, err := database.New(context.Background(),
 		base.Config(),
 		database.Stores{
 			Blob: base.Blob(),
@@ -11939,7 +12011,7 @@ func TestCommittedRollbackWithFloorFailureRequeuesRewardPrecompute(
 	t.Cleanup(func() { require.NoError(t, failing.Close()) })
 	ls.db = failing
 
-	err = ls.rollbackWithBlocks(fixture.ancestorTip.Point, nil, false)
+	err = ls.rollbackWithBlocks(context.Background(), fixture.ancestorTip.Point, nil, false)
 
 	require.ErrorIs(t, err, floorErr)
 	_, committed := errors.AsType[*rollbackCommittedError](err)
@@ -11991,7 +12063,7 @@ func TestRollbackFailureDuringCloseDoesNotRestoreRewardPrecompute(
 		return ochainsync.Tip{}, nil, injected
 	}
 
-	err := ls.rollbackWithBlocks(fixture.ancestorTip.Point, nil, false)
+	err := ls.rollbackWithBlocks(context.Background(), fixture.ancestorTip.Point, nil, false)
 
 	require.ErrorIs(t, err, injected)
 	ls.rewardPrecomputeMu.Lock()
@@ -12006,7 +12078,7 @@ func TestLedgerStateStartQueuesStartupRewardPrecompute(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
@@ -12102,7 +12174,7 @@ func newSameSlotCompetitorFixtureOpts(
 	t.Helper()
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -12121,7 +12193,7 @@ func newSameSlotCompetitorFixtureOpts(
 	// applied floor while currentTip names the same-slot competitor.
 	require.NoError(
 		t,
-		cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+		cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
 			{
 				Slot:        sameSlotAncestorSlot,
 				Hash:        ancestorHash,
@@ -12206,9 +12278,9 @@ func newSameSlotCompetitorFixtureOpts(
 	// leaves it: the row survives, soft-deleted with deleted_slot set to the
 	// consuming block's slot.
 	spentTxId := testHashBytes("3678-utxo-producer")
-	mdTxn := db.MetadataTxn(true)
+	mdTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
-		return db.CreateUtxo(txn, &models.Utxo{
+		return db.CreateUtxo(context.Background(), txn, &models.Utxo{
 			TxId:        spentTxId,
 			OutputIdx:   0,
 			AddedSlot:   sameSlotAncestorSlot,
@@ -12245,9 +12317,9 @@ func (f *sameSlotCompetitorFixture) inputInLiveSet(t *testing.T) bool {
 	t.Helper()
 
 	var live bool
-	txn := f.db.Transaction(false)
+	txn := f.db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		_, err := f.db.UtxoByRef(f.spentTxId, 0, txn)
+		_, err := f.db.UtxoByRef(context.Background(), f.spentTxId, 0, txn)
 		switch {
 		case err == nil,
 			errors.Is(err, database.ErrUtxoCborUnavailable):
@@ -12299,7 +12371,7 @@ func TestRollbackSameSlotCompetitorRestoresConsumedUtxo(t *testing.T) {
 
 	require.NoError(
 		t,
-		fixture.ls.rollback(
+		fixture.ls.rollback(context.Background(),
 			ocommon.NewPoint(
 				sameSlotContestedSlot,
 				fixture.survivingHash,
@@ -12336,7 +12408,7 @@ func TestRollbackSameSlotCompetitorWithoutAncestorFailsLoudly(t *testing.T) {
 	// No ancestor nonce, so no applied block exists below the contested slot.
 	fixture := newSameSlotCompetitorFixtureOpts(t, false)
 
-	err := fixture.ls.rollback(
+	err := fixture.ls.rollback(context.Background(),
 		ocommon.NewPoint(sameSlotContestedSlot, fixture.survivingHash),
 	)
 	require.ErrorIs(t, err, ErrNoAppliedAncestorBelowContestedSlot)
@@ -12563,7 +12635,7 @@ func TestMarkRealV2CostModelObserved_KeepsEarliestConfirmationAcrossMultipleUpda
 	ls, db := newExpiryRollbackTestLedger(t, false, 0)
 
 	// First real update confirmed at epoch 5 (slot 500).
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.markRealV2CostModelObserved(5, txn)
 	}))
@@ -12571,7 +12643,7 @@ func TestMarkRealV2CostModelObserved_KeepsEarliestConfirmationAcrossMultipleUpda
 	// A second real update (e.g. a later governance-enacted cost-model
 	// change) confirmed at epoch 10 (slot 1000) must not overwrite the
 	// epoch-5 confirmation.
-	txn = db.Transaction(true)
+	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.markRealV2CostModelObserved(10, txn)
 	}))
@@ -12681,8 +12753,9 @@ func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
 		CostModels: map[uint][]int64{0: {1, 2, 3}},
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	result, err := ls.transitionToEraFrom(
+		context.Background(),
 		txn,
 		eras.BabbageEraDesc.Id,
 		1,
@@ -12708,8 +12781,9 @@ func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
 		"a rolled-back transaction must not leave the pparams write persisted")
 
 	// The same sequence, committed instead, must persist both together.
-	txn = db.Transaction(true)
+	txn = db.Transaction(context.Background(), true)
 	result, err = ls.transitionToEraFrom(
+		context.Background(),
 		txn,
 		eras.BabbageEraDesc.Id,
 		1,
@@ -12849,33 +12923,33 @@ func seedRatifiableBootstrapHardForkInitiation(
 		GovActionCbor: cborBytes,
 		AddedSlot:     1,
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
-	loaded, err := db.GetGovernanceProposal(proposal.TxHash, 0, nil)
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
+	loaded, err := db.GetGovernanceProposal(context.Background(), proposal.TxHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 
 	drepCred := repeatByte(28, 0xBB)
 	stakeCred := repeatByte(28, 0xCC)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		Credential: drepCred,
 		Active:     true,
 		AddedSlot:  1,
 	}))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey: stakeCred,
 		Drep:       drepCred,
 		DrepType:   models.DrepTypeAddrKeyHash,
 		AddedSlot:  1,
 		Active:     true,
 	}))
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       repeatByte(32, 0x01),
 		OutputIdx:  0,
 		StakingKey: stakeCred,
 		AddedSlot:  1,
 		Amount:     types.Uint64(1_000),
 	}))
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeDRep,
 		VoterCredential: drepCred,
@@ -12884,7 +12958,7 @@ func seedRatifiableBootstrapHardForkInitiation(
 	}, nil))
 	coldCred := repeatByte(28, 0xCE)
 	hotCred := repeatByte(28, 0xCF)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
+	require.NoError(t, db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
 		{ColdCredHash: coldCred, ExpiresEpoch: currentEpoch + 10},
 	}, nil))
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
@@ -12894,7 +12968,7 @@ INSERT INTO auth_committee_hot (
     cold_credential, host_credential, certificate_id, added_slot
 ) VALUES (?, ?, ?, ?)`, coldCred, hotCred, 1, 1)
 	require.NoError(t, err)
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeCC,
 		VoterCredential: hotCred,
@@ -12917,7 +12991,7 @@ INSERT INTO auth_committee_hot (
 		},
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      loaded.ID,
 		VoterType:       models.VoterTypeSPO,
 		VoterCredential: poolCred,
@@ -12950,7 +13024,7 @@ func TestEvaluateHardForkInitiationStability_PreDeadline_NoChange(
 		),
 	}
 
-	ls.evaluateHardForkInitiationStability()
+	ls.evaluateHardForkInitiationStability(context.Background())
 
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"pre-deadline must not promote to TransitionKnown")
@@ -12973,7 +13047,7 @@ func TestEvaluateHardForkInitiationStability_PostDeadline_Ratifiable_SetsKnown(
 		Point: ocommon.NewPoint(stabilityFixtureVotingDeadline, []byte("tip")),
 	}
 
-	ls.evaluateHardForkInitiationStability()
+	ls.evaluateHardForkInitiationStability(context.Background())
 
 	got := awaitTransitionInfo(t, ls, hardfork.TransitionKnown)
 	assert.Equal(t, stabilityFixtureEpochID+1, got.KnownEpoch,
@@ -12996,7 +13070,7 @@ func TestEvaluateHardForkInitiationStability_PostDeadline_NotRatifiable_NoChange
 		),
 	}
 
-	ls.evaluateHardForkInitiationStability()
+	ls.evaluateHardForkInitiationStability(context.Background())
 
 	awaitHFIEvalIdle(t, ls)
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
@@ -13027,7 +13101,7 @@ func TestEvaluateHardForkInitiationStability_PreConwayPParams_NoOp(
 		),
 	}
 
-	ls.evaluateHardForkInitiationStability()
+	ls.evaluateHardForkInitiationStability(context.Background())
 
 	awaitHFIEvalIdle(t, ls)
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
@@ -13056,7 +13130,7 @@ func TestEvaluateHardForkInitiationStability_AlreadyKnownForSameEpoch_Idempotent
 	}
 	ls.transitionInfo = hardfork.NewTransitionKnown(stabilityFixtureEpochID + 1)
 
-	ls.evaluateHardForkInitiationStability()
+	ls.evaluateHardForkInitiationStability(context.Background())
 
 	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
 	assert.Equal(t, stabilityFixtureEpochID+1, ls.transitionInfo.KnownEpoch)
@@ -13087,7 +13161,7 @@ func TestEvaluateHardForkInitiationStability_PreservesKnownFromOtherSource(
 	const externalTargetEpoch = stabilityFixtureEpochID + 7
 	ls.transitionInfo = hardfork.NewTransitionKnown(externalTargetEpoch)
 
-	ls.evaluateHardForkInitiationStability()
+	ls.evaluateHardForkInitiationStability(context.Background())
 
 	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
 	assert.Equal(
@@ -13129,7 +13203,7 @@ func TestEvaluateHardForkInitiationStability_IntraEraHFI_DoesNotSetKnown(
 		),
 	}
 
-	ls.evaluateHardForkInitiationStability()
+	ls.evaluateHardForkInitiationStability(context.Background())
 
 	awaitHFIEvalIdle(t, ls)
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
@@ -13138,9 +13212,9 @@ func TestEvaluateHardForkInitiationStability_IntraEraHFI_DoesNotSetKnown(
 
 // TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown pins
 // the priority order: TransitionKnown is strictly more informative than
-// TransitionImpossible (the latter only says "no transition this epoch
-// before safe-zone end", the former says "transition will happen at
-// epoch+1"). When both could apply, Known wins.
+// TransitionImpossible (the latter carries no transition epoch, while the
+// former says "transition will happen at epoch+1"). When both could apply,
+// Known wins.
 func TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown(
 	t *testing.T,
 ) {
@@ -13158,7 +13232,7 @@ func TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown(
 	}
 	ls.transitionInfo = hardfork.NewTransitionImpossible()
 
-	ls.evaluateHardForkInitiationStability()
+	ls.evaluateHardForkInitiationStability(context.Background())
 
 	got := awaitTransitionInfo(t, ls, hardfork.TransitionKnown)
 	assert.Equal(t, stabilityFixtureEpochID+1, got.KnownEpoch)
@@ -13202,7 +13276,7 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 	t.Helper()
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -13237,7 +13311,7 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 			Cbor:        []byte{0x80},
 		})
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), rawBlocks))
 
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
@@ -13298,9 +13372,9 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 		retainedTxId: testHashBytes("3766-utxo-retained"),
 	}
 	seed := func(txId []byte, addedSlot, deletedSlot uint64) {
-		mdTxn := db.MetadataTxn(true)
+		mdTxn := db.MetadataTxn(context.Background(), true)
 		require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
-			return db.CreateUtxo(txn, &models.Utxo{
+			return db.CreateUtxo(context.Background(), txn, &models.Utxo{
 				TxId:        txId,
 				OutputIdx:   0,
 				AddedSlot:   addedSlot,
@@ -13314,6 +13388,22 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 	return f
 }
 
+func TestPrunedUtxoFixtureClosesLedgerStateOnCleanup(t *testing.T) {
+	t.Parallel()
+
+	var ls *LedgerState
+	t.Run("fixture", func(t *testing.T) {
+		ls = newPrunedUtxoFixture(t, 0).ls
+		require.False(t, ls.closed.Load())
+	})
+	require.NotNil(t, ls, "fixture must initialize before cleanup assertions")
+	require.True(
+		t,
+		ls.closed.Load(),
+		"fixture cleanup must close the ledger state before the database is torn down",
+	)
+}
+
 // inLiveSet mirrors the probe used by the rollback tests: it asks
 // the database.UtxoByRef lookup that LedgerView.UtxoById delegates to, so it
 // exercises the deleted_slot filter that decides Conway bad-inputs and, through
@@ -13323,9 +13413,9 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 func (f *prunedUtxoFixture) inLiveSet(t *testing.T, txId []byte) bool {
 	t.Helper()
 	var live bool
-	txn := f.db.Transaction(false)
+	txn := f.db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		_, err := f.db.UtxoByRef(txId, 0, txn)
+		_, err := f.db.UtxoByRef(context.Background(), txId, 0, txn)
 		switch {
 		case err == nil, errors.Is(err, database.ErrUtxoCborUnavailable):
 			live = true
@@ -13432,7 +13522,7 @@ func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
 	)
 
 	// Production consumed-UTxO sweep at the highest tip the node reached.
-	f.ls.cleanupConsumedUtxos()
+	f.ls.cleanupConsumedUtxos(context.Background())
 	require.False(
 		t,
 		f.inLiveSet(t, f.prunedTxId),
@@ -13473,10 +13563,10 @@ func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
 // rather than move the tip and report a repair it cannot perform.
 func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
 	f := newPrunedUtxoFixture(t, 0)
-	f.ls.cleanupConsumedUtxos()
+	f.ls.cleanupConsumedUtxos(context.Background())
 	tipBefore := f.ls.currentTip
 
-	err := f.ls.rollback(
+	err := f.ls.rollback(context.Background(),
 		ocommon.NewPoint(
 			pruneFixtureDeepRewindSlot,
 			testHashBytes("3766-deep"),
@@ -13494,7 +13584,7 @@ func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
 	// rewinds it cannot restore, not every rewind.
 	require.NoError(
 		t,
-		f.ls.rollback(
+		f.ls.rollback(context.Background(),
 			ocommon.NewPoint(
 				pruneFixtureFloorSlot,
 				testHashBytes("3766-floor"),
@@ -13525,7 +13615,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, floor, "nothing has been swept yet")
 
-	f.ls.cleanupConsumedUtxos()
+	f.ls.cleanupConsumedUtxos(context.Background())
 
 	floor, err = f.db.ConsumedUtxoPruneFloor(nil)
 	require.NoError(t, err)
@@ -13560,7 +13650,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(
 		t,
-		f.ls.rollback(
+		f.ls.rollback(context.Background(),
 			ocommon.NewPoint(
 				pruneFixtureDeepRewindSlot,
 				testHashBytes("3766-deep"),
@@ -13581,7 +13671,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 // ledger.
 func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
 	f := newPrunedUtxoFixture(t, 0)
-	f.ls.cleanupConsumedUtxos()
+	f.ls.cleanupConsumedUtxos(context.Background())
 
 	// Put the applied ledger tip on a same-slot competitor at the floor, with
 	// a recorded nonce so the redirect treats it as genuinely applied.
@@ -13609,7 +13699,7 @@ func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
 		pruneFixtureFloorSlot,
 		testHashBytes("3766-floor"),
 	)
-	resolved, err := f.ls.resolveRollbackTarget(target, competitorTip)
+	resolved, err := f.ls.resolveRollbackTarget(context.Background(), target, competitorTip)
 	require.NoError(t, err)
 	require.Less(
 		t,
@@ -13620,7 +13710,7 @@ func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
 
 	require.ErrorIs(
 		t,
-		f.ls.rollbackChainAndStateDeferred(target, nil),
+		f.ls.rollbackChainAndStateDeferred(context.Background(), target, nil),
 		ErrRollbackBelowUtxoPruneFloor,
 	)
 	require.Equal(
@@ -13905,7 +13995,194 @@ func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
 	}, nil))
 	require.NoError(t, ls.persistConsumedUtxoPruneFloor(400, nil))
 
-	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
+	err := ls.VerifyPointQueryable(t.Context(), nil, QueryPoint{Slot: 350, Hash: hash})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
+func TestEvaluateTxRefusesWhenEvaluationSlotsAreInUse(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{evalSlots: make(chan struct{}, 2)}
+	ls.evalSlots <- struct{}{}
+	ls.evalSlots <- struct{}{}
+
+	// The refusal happens before the transaction is looked at.
+	var err error
+	require.NotPanics(t, func() {
+		_, _, _, err = ls.EvaluateTx(nil)
+	}, "admission must be checked before any evaluation work starts")
+
+	require.ErrorIs(t, err, ErrEvaluationBusy)
+	require.Len(t, ls.evalSlots, 2, "a refused call must not take a slot")
+}
+
+func TestNewLedgerStateRejectsNegativeEvaluationCapacity(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	_, err = NewLedgerState(LedgerStateConfig{
+		Database: db, ChainManager: cm, MaxConcurrentEvaluations: -1,
+	})
+	require.ErrorContains(t, err, "MaxConcurrentEvaluations must not be negative")
+}
+
+// TestAtTipRecoveryRewindKeepsRolloverBeforeFirstEpochBlock covers a failure in
+// the first block of an epoch. The rollover commits before that block applies,
+// so the ledger tip is still in the previous epoch while the current epoch
+// already starts at the failing block. A deep rewind would discard the rollover
+// just as it does when the tip is inside the epoch.
+func TestAtTipRecoveryRewindKeepsRolloverBeforeFirstEpochBlock(t *testing.T) {
+	t.Parallel()
+	const boundarySlot = pruneFixtureTipSlot + 1
+	f := newPrunedUtxoFixture(t, 0)
+	completeRollover := func() {
+		require.NoError(t, f.db.SetEpoch(
+			boundarySlot, 1,
+			[]byte("nonce-first-block"), []byte("evolving-first-block"),
+			[]byte("candidate-first-block"), []byte("last-first-block"),
+			eras.ConwayEraDesc.Id, 1, 1_000_000, nil,
+		))
+		f.ls.currentEpoch = models.Epoch{
+			EpochId:   1,
+			StartSlot: boundarySlot,
+			EraId:     eras.ConwayEraDesc.Id,
+		}
+	}
+	completeRollover()
+	f.driveAtTipRecovery(t, 1)
+	// Re-delivery of the failing block recomputes the rollover the first
+	// attempt's same-tip repair discarded.
+	completeRollover()
+	f.driveAtTipRecovery(t, 1)
+
+	require.Equal(
+		t,
+		uint64(pruneFixtureTipSlot),
+		f.ls.currentTip.Point.Slot,
+		"recovery rewound below the tip that precedes the completed rollover",
+	)
+	require.Equal(
+		t,
+		1.0,
+		promtestutil.ToFloat64(f.ls.metrics.atTipRecoveryEpochBoundaryClamped),
+	)
+}
+
+// TestAtTipRecoveryRewindKeepsCompletedEpochBoundary ensures recovery retains
+// an epoch rollover that completed before the failing block was applied.
+func TestAtTipRecoveryRewindKeepsCompletedEpochBoundary(t *testing.T) {
+	t.Parallel()
+	const boundarySlot = 120_000
+	f := newPrunedUtxoFixture(t, 0)
+	require.NoError(t, f.db.SetEpoch(
+		boundarySlot, 1,
+		[]byte("nonce-4577"), []byte("evolving-4577"),
+		[]byte("candidate-4577"), []byte("last-4577"),
+		eras.ConwayEraDesc.Id, 1, 1_000_000, nil,
+	))
+	f.ls.currentEpoch = models.Epoch{
+		EpochId:   1,
+		StartSlot: boundarySlot,
+		EraId:     eras.ConwayEraDesc.Id,
+	}
+
+	f.driveAtTipRecovery(t, 2)
+
+	require.GreaterOrEqual(
+		t,
+		f.ls.currentTip.Point.Slot,
+		uint64(boundarySlot),
+		"recovery rewound below an already completed epoch boundary",
+	)
+	require.Equal(
+		t,
+		1.0,
+		promtestutil.ToFloat64(f.ls.metrics.atTipRecoveryEpochBoundaryClamped),
+	)
+}
+
+// TestAtTipRecoveryFinalAttemptCrossesEpochBoundaryOnce verifies that the
+// deepest scheduled attempt may cross a boundary once for an epoch only.
+func TestAtTipRecoveryFinalAttemptCrossesEpochBoundaryOnce(t *testing.T) {
+	t.Parallel()
+	const boundarySlot = 120_000
+	f := newPrunedUtxoFixture(t, 0)
+	f.ls.currentEpoch = models.Epoch{
+		EpochId:   1,
+		StartSlot: boundarySlot,
+		EraId:     eras.ConwayEraDesc.Id,
+	}
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			pruneFixtureTipSlot+1,
+			testHashBytes("4577-f"),
+		),
+	}
+	tip := ocommon.NewPoint(pruneFixtureTipSlot, testHashBytes("3766-tip"))
+	deep := ocommon.NewPoint(pruneFixtureFloorSlot, testHashBytes("3766-floor"))
+	crossed := f.ls.metrics.atTipRecoveryEpochBoundaryClamped
+
+	got := f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts-1,
+	)
+	require.Equal(t, tip, got)
+	require.Equal(t, 1.0, promtestutil.ToFloat64(crossed))
+
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, deep, got, "final attempt should cross once")
+
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, tip, got, "the same epoch boundary must not be crossed twice")
+	require.Equal(t, 2.0, promtestutil.ToFloat64(crossed))
+}
+
+// TestAtTipRecoveryForwardProgressRestoresEpochBoundaryCrossing verifies that
+// the once-per-epoch crossing is scoped to one failing region: once the ledger
+// applies past the failure, a later failure in the same epoch gets its own
+// deepest rewind instead of being clamped for the rest of the epoch.
+func TestAtTipRecoveryForwardProgressRestoresEpochBoundaryCrossing(
+	t *testing.T,
+) {
+	t.Parallel()
+	const boundarySlot = 120_000
+	f := newPrunedUtxoFixture(t, 0)
+	f.ls.currentEpoch = models.Epoch{
+		EpochId:   1,
+		StartSlot: boundarySlot,
+		EraId:     eras.ConwayEraDesc.Id,
+	}
+	failSlot := uint64(pruneFixtureTipSlot + 1)
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(failSlot, testHashBytes("crossing-reset")),
+	}
+	tip := ocommon.NewPoint(pruneFixtureTipSlot, testHashBytes("3766-tip"))
+	deep := ocommon.NewPoint(pruneFixtureFloorSlot, testHashBytes("3766-floor"))
+	f.ls.atTipRecoveryLastFailSlot = failSlot
+
+	got := f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, deep, got, "final attempt should cross once")
+
+	// Re-applying up to the failing block is not progress past it.
+	f.ls.resetAtTipRecoveryDescent(failSlot)
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, tip, got, "crossing must stay spent until the failure is passed")
+
+	f.ls.atTipRecoveryLastFailSlot = failSlot
+	f.ls.resetAtTipRecoveryDescent(failSlot + 1)
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(
+		t, deep, got,
+		"a failure after forward progress should get its own crossing",
+	)
 }

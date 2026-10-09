@@ -45,8 +45,10 @@ import (
 // fakeRemoteKESSigner is a minimal RemoteKESSigner for exercising the
 // agent-backed kesSign/updateKESPeriod paths without a real kesagent.Client.
 type fakeRemoteKESSigner struct {
-	signFunc func(period uint64, message []byte) ([]byte, error)
-	calls    []uint64
+	signFunc      func(period uint64, message []byte) ([]byte, error)
+	calls         []uint64
+	readinessErr  error
+	readinessFunc func() error
 }
 
 func (f *fakeRemoteKESSigner) Sign(
@@ -58,6 +60,69 @@ func (f *fakeRemoteKESSigner) Sign(
 		return f.signFunc(period, message)
 	}
 	return append([]byte(nil), message...), nil
+}
+
+func (f *fakeRemoteKESSigner) CheckReady() error {
+	if f.readinessFunc != nil {
+		return f.readinessFunc()
+	}
+	return f.readinessErr
+}
+
+func TestRemoteCredentialsReadinessDetectsAgentLoss(t *testing.T) {
+	t.Parallel()
+	vrfPath, _, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+	t.Cleanup(pc.Close)
+	signer := &fakeRemoteKESSigner{}
+	require.NoError(t, pc.LoadFromAgentSign(vrfPath, opCertPath, signer))
+	require.NoError(t, pc.ValidateOpCert())
+	require.NoError(
+		t,
+		pc.ValidateKESPeriod(
+			synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+			0,
+		),
+	)
+	require.NoError(t, pc.usableAtKESPeriod(0))
+	signer.readinessErr = errors.New("agent is unavailable")
+	require.ErrorIs(t, pc.usableAtKESPeriod(0), signer.readinessErr)
+	require.Empty(t, signer.calls, "readiness must not sign")
+}
+
+func TestRemoteReadinessDoesNotBlockKESEvolution(t *testing.T) {
+	t.Parallel()
+	vrfPath, _, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+	t.Cleanup(pc.Close)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	signer := &fakeRemoteKESSigner{readinessFunc: func() error {
+		close(entered)
+		<-release
+		return nil
+	}}
+	require.NoError(t, pc.LoadFromAgentSign(vrfPath, opCertPath, signer))
+	require.NoError(t, pc.ValidateOpCert())
+	require.NoError(t, pc.ValidateKESPeriod(
+		synthGenesis(1, 3, time.Second, time.Unix(0, 0)), 0,
+	))
+	snapshot := pc.acquireCredentialGeneration()
+	defer snapshot.release()
+	ready := make(chan error, 1)
+	go func() { ready <- pc.usableAtKESPeriod(0) }()
+	defer func() {
+		close(release)
+		require.NoError(t, dingotestutil.RequireReceive(t, ready, 5*time.Second, "readiness completes after release"))
+	}()
+	dingotestutil.RequireReceive(t, entered, 5*time.Second, "readiness handshake entered")
+	evolved := make(chan error, 1)
+	go func() {
+		evolved <- pc.updateKESPeriodForGeneration(
+			snapshot.id, snapshot.materialRevision, 1,
+		)
+	}()
+	require.NoError(t, dingotestutil.RequireReceive(t, evolved, time.Second, "KES evolution must not wait for readiness I/O"))
 }
 
 // TestCredentialGenerationKesSignRejectsExpiredPeriod proves the
@@ -554,7 +619,13 @@ func TestForgeProceedsWithinBlockAndSlotBounds(t *testing.T) {
 // parameter cannot widen the local transaction-state safety limit.
 func TestForgeRejectsLocalBlockGapAboveSmallBound(t *testing.T) {
 	var logs bytes.Buffer
-	forger, builder, broadcaster := newStaleTipTestForger(t, 200, 100, 183, &logs)
+	forger, builder, broadcaster := newStaleTipTestForger(
+		t,
+		200,
+		100,
+		183,
+		&logs,
+	)
 	forger.slotClock = forgerTestSlotClock{
 		currentSlot:           200,
 		chainTipSlot:          100,
@@ -583,7 +654,13 @@ func TestForgeRejectsLocalBlockGapAboveSmallBound(t *testing.T) {
 
 func TestForgeRejectsLocalSlotGapBeyondPrefilter(t *testing.T) {
 	var logs bytes.Buffer
-	forger, builder, broadcaster := newStaleTipTestForger(t, 200, 49, 150, &logs)
+	forger, builder, broadcaster := newStaleTipTestForger(
+		t,
+		200,
+		49,
+		150,
+		&logs,
+	)
 	forger.slotClock = forgerTestSlotClock{
 		currentSlot:           200,
 		chainTipSlot:          49,
@@ -1484,7 +1561,10 @@ func TestForgeDoesNotTreatUnknownUpstreamAsStalenessEvidence(t *testing.T) {
 						slotsPerKESPeriod:  100,
 					}
 
-					require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+					require.NoError(
+						t,
+						forger.checkAndForgeProduction(context.Background()),
+					)
 					require.Equal(t, 1, builder.calls)
 					require.Equal(
 						t,
@@ -1493,9 +1573,15 @@ func TestForgeDoesNotTreatUnknownUpstreamAsStalenessEvidence(t *testing.T) {
 					)
 					require.Zero(
 						t,
-						testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
+						testutil.ToFloat64(
+							forger.metrics.forgeStaleTipSkipAppliedStale,
+						),
 					)
-					require.NotContains(t, logs.String(), `"stale_source":"wall_clock"`)
+					require.NotContains(
+						t,
+						logs.String(),
+						`"stale_source":"wall_clock"`,
+					)
 				})
 			}
 		}
@@ -2142,6 +2228,71 @@ func (l *forgerCountingLeader) callCount() int {
 	return l.calls
 }
 
+// forgerNotLeader counts slot checks and never wins one, so every cycle of
+// the producer loop reaches the leader check and moves the count. When
+// cancelAt is set it calls cancel from inside that check, so the
+// cancellation lands at a known point in the loop.
+type forgerNotLeader struct {
+	forgerCountingLeader
+	cancelAt int
+	cancel   context.CancelFunc
+}
+
+func (l *forgerNotLeader) ShouldProduceBlock(slot uint64) bool {
+	l.forgerCountingLeader.ShouldProduceBlock(slot)
+	if l.cancelAt > 0 && l.callCount() == l.cancelAt {
+		l.cancel()
+	}
+	return false
+}
+
+// forgerFastSlotClock ends each slot a few milliseconds ahead so the
+// slot-aligned loop cycles quickly.
+type forgerFastSlotClock struct {
+	forgerTestSlotClock
+}
+
+func (forgerFastSlotClock) NextSlotTime() (time.Time, error) {
+	return time.Now().Add(5 * time.Millisecond), nil
+}
+
+// A fatal component error, such as a ledger rollover that cannot apply its
+// reward update, cancels the node context the producer loop runs under. The
+// loop must then exit and check no further slots, so the node stops forging
+// on a ledger that halted.
+func TestForgerStopsCheckingSlotsWhenItsContextIsCancelled(t *testing.T) {
+	t.Parallel()
+
+	// No deferred Stop: Stop waits for the loop, so on the failure this test
+	// exists to catch it would hang the package instead of failing the test.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	leader := &forgerNotLeader{cancelAt: 2, cancel: cancel}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    leader,
+		BlockBuilder:     &forgerTestBuilder{},
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgerFastSlotClock{forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+		}},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, forger.Start(ctx))
+
+	require.Eventually(t, func() bool {
+		return !forger.IsRunning()
+	}, 5*time.Second, time.Millisecond,
+		"producer loop kept running after its context was cancelled")
+	require.Equal(t, 2, leader.callCount(),
+		"producer loop checked a slot after its context was cancelled")
+}
+
 type forgerTestSlotClock struct {
 	currentSlot         uint64
 	chainTipSlot        uint64
@@ -2623,7 +2774,7 @@ type forgerReentrantBuilder struct {
 	calls       int
 }
 
-func (b *forgerReentrantBuilder) BuildBlock(
+func (b *forgerReentrantBuilder) BuildBlock(ctx context.Context,
 	_ uint64,
 	_ uint64,
 ) (ledger.Block, []byte, error) {
@@ -2885,7 +3036,7 @@ func (b *forgerTestBuilder) noteBuild() {
 	}
 }
 
-func (b *forgerTestBuilder) BuildBlock(
+func (b *forgerTestBuilder) BuildBlock(context.Context,
 	uint64,
 	uint64,
 ) (ledger.Block, []byte, error) {
@@ -2894,7 +3045,7 @@ func (b *forgerTestBuilder) BuildBlock(
 	return b.block, b.cbor, nil
 }
 
-func (b *forgerTestBuilder) BuildBlockWithLeios(
+func (b *forgerTestBuilder) BuildBlockWithLeios(ctx context.Context,
 	_ uint64,
 	_ uint64,
 	leiosData LeiosBlockData,
@@ -2909,7 +3060,7 @@ func (b *forgerTestBuilder) BuildBlockWithLeios(
 // tests can wire the equal-slot alternative path. It records the context it
 // was handed; the forger only reaches it when a test also supplies a
 // ChainContext and a SiblingAdopter.
-func (b *forgerTestBuilder) BuildBlockOnContext(
+func (b *forgerTestBuilder) BuildBlockOnContext(ctx context.Context,
 	_ uint64,
 	_ uint64,
 	leiosData LeiosBlockData,
@@ -2928,7 +3079,7 @@ type forgerTestBroadcaster struct {
 	calls int
 }
 
-func (b *forgerTestBroadcaster) AddBlock(
+func (b *forgerTestBroadcaster) AddBlock(context.Context,
 	ledger.Block,
 	[]byte,
 ) error {
@@ -3228,7 +3379,7 @@ type forgerTestLeiosParentAnnouncement struct {
 	rbHashAfterFirst *lcommon.Blake2b256
 }
 
-func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement() (
+func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement(ctx context.Context) (
 	lcommon.Blake2b256,
 	lcommon.Blake2b256,
 	bool,
@@ -3943,7 +4094,7 @@ type forgerTestValidator struct {
 	calls int
 }
 
-func (v *forgerTestValidator) ValidateForgedBlock(ledger.Block, []byte) error {
+func (v *forgerTestValidator) ValidateForgedBlock(context.Context, ledger.Block, []byte) error {
 	v.calls++
 	if v.panic {
 		panic("validator panic")
@@ -4131,9 +4282,9 @@ type trackingBroadcaster struct {
 	onAdd func()
 }
 
-func (b *trackingBroadcaster) AddBlock(block ledger.Block, cbor []byte) error {
+func (b *trackingBroadcaster) AddBlock(ctx context.Context, block ledger.Block, cbor []byte) error {
 	b.onAdd()
-	return b.inner.AddBlock(block, cbor)
+	return b.inner.AddBlock(context.Background(), block, cbor)
 }
 
 // trackingBlockValidator calls a hook on ValidateForgedBlock.
@@ -4141,9 +4292,35 @@ type trackingBlockValidator struct {
 	onValidate func() error
 }
 
-func (v *trackingBlockValidator) ValidateForgedBlock(
+func (v *trackingBlockValidator) ValidateForgedBlock(context.Context,
 	ledger.Block,
 	[]byte,
 ) error {
 	return v.onValidate()
+}
+
+// A forge already in progress when the node context is cancelled must not
+// adopt or announce its block: cancellation is how a halted ledger stops the
+// node, and a block built on that ledger must not enter the local chain.
+func TestForgeDoesNotAdoptBlockWhenContextCancelledMidForge(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	forger, builder, broadcaster := newStaleTipTestForger(
+		t, 200, 199, 199, &logs,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	builder.onBuild = cancel
+	forged := 0
+	forger.blockForged = func(ledger.Block, []byte, time.Duration) {
+		forged++
+	}
+
+	err := forger.checkAndForgeProduction(ctx)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, builder.calls, "the forge must have reached the build")
+	require.Zero(t, broadcaster.calls, "a block was adopted after cancellation")
+	require.Zero(t, forged, "a block was announced after cancellation")
 }

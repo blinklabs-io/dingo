@@ -20,6 +20,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,14 +36,10 @@ const defaultMinPeerListCap = 200
 // the peer list has reached its hard capacity limit.
 var ErrPeerListFull = errors.New("peer list at capacity")
 
-var lookupIP = net.LookupIP
-
 // lookupIPAddr resolves a hostname to its IP records while honoring the
 // provided context, so a hung or slow resolver cannot block the caller past
-// the context deadline or a governor shutdown. Unlike the bare net.LookupIP
-// used by resolveAddress, this path runs on the hot outbound-dial loop and
-// must never wedge the peer governor. It is a package var so tests can inject
-// a deterministic, host-independent resolver.
+// the context deadline or a governor shutdown. It is a package var so tests
+// can inject a deterministic, host-independent resolver.
 var lookupIPAddr = func(ctx context.Context, host string) ([]net.IP, error) {
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
@@ -53,6 +50,105 @@ var lookupIPAddr = func(ctx context.Context, host string) ([]net.IP, error) {
 		ips[i] = addrs[i].IP
 	}
 	return ips, nil
+}
+
+// lookupSRV resolves the SRV records published at exactly the given name.
+// Like lookupIPAddr it honors the context and is a package var so tests can
+// inject a deterministic resolver.
+var lookupSRV = func(ctx context.Context, name string) ([]*net.SRV, error) {
+	// An empty service and protocol query the name verbatim; the caller
+	// supplies any _service._proto labels.
+	_, records, err := net.DefaultResolver.LookupSRV(ctx, "", "", name)
+	return records, err
+}
+
+// cardanoSRVPrefix is prepended to a MultiHostName relay's ledger domain to
+// form its SRV query name, per CIP-0155. The ledger carries the bare domain.
+const cardanoSRVPrefix = "_cardano._tcp."
+
+// maxSRVTargets bounds how many SRV targets are resolved for one relay, so a
+// record set padded by its operator cannot multiply discovery-time lookups.
+const maxSRVTargets = 3
+
+// resolveMultiHost resolves a MultiHostName relay: SRV first, taking the
+// target and port from the first record whose target resolves, then A/AAAA
+// with the default port. When nothing resolves it returns the lowercased
+// hostname with the default port and resolved=false. lookup resolves a
+// target's address records; filter narrows them to the dialable families.
+// It must NOT be called while holding p.mu.
+func (p *PeerGovernor) resolveMultiHost(
+	ctx context.Context,
+	host string,
+	lookup func(context.Context, string) ([]net.IP, error),
+	filter bool,
+) (string, bool) {
+	pickIP := func(ips []net.IP) net.IP {
+		if !filter {
+			if len(ips) > 0 {
+				return ips[0]
+			}
+			return nil
+		}
+		hasV4, hasV6 := p.supportedDialFamilies()
+		for _, ip := range ips {
+			if !IsRoutableIP(ip) {
+				continue
+			}
+			if hasV4 || hasV6 {
+				isV4 := ip.To4() != nil
+				if (isV4 && !hasV4) || (!isV4 && !hasV6) {
+					continue
+				}
+			}
+			return ip
+		}
+		return nil
+	}
+	records, err := lookupSRV(ctx, cardanoSRVPrefix+host)
+	if err == nil {
+		for i, record := range records {
+			if i >= maxSRVTargets {
+				break
+			}
+			if record == nil || record.Port == 0 {
+				continue
+			}
+			target := record.Target
+			if target == "" || target == "." {
+				continue
+			}
+			ips, err := lookup(ctx, target)
+			if err != nil || len(ips) == 0 {
+				continue
+			}
+			ip := pickIP(ips)
+			if ip == nil {
+				continue
+			}
+			return net.JoinHostPort(
+				ip.String(),
+				strconv.FormatUint(uint64(record.Port), 10),
+			), true
+		}
+	}
+	ips, err := lookup(ctx, host)
+	if err != nil || len(ips) == 0 {
+		return net.JoinHostPort(
+			strings.ToLower(host),
+			defaultCardanoPort,
+		), false
+	}
+	ip := pickIP(ips)
+	if ip == nil {
+		return net.JoinHostPort(
+			strings.ToLower(host),
+			defaultCardanoPort,
+		), false
+	}
+	return net.JoinHostPort(
+		ip.String(),
+		defaultCardanoPort,
+	), true
 }
 
 // maxPeerListSize returns the hard cap for the total number of peers.
@@ -343,8 +439,8 @@ func (p *PeerGovernor) normalizeAddress(address string) string {
 }
 
 // resolveAddress resolves a hostname in an address to its IP and returns
-// the normalized address. This function performs blocking DNS lookups and
-// must NOT be called while holding locks.
+// the normalized address. DNS lookups are bounded and this function must NOT
+// be called while holding locks.
 // If the address is already an IP, it returns the normalized IP address.
 // If DNS resolution fails, it returns the lowercased hostname address.
 func (p *PeerGovernor) resolveAddress(address string) string {
@@ -360,8 +456,36 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 		return net.JoinHostPort(ip.String(), port)
 	}
 
+	// Port 0 marks a MultiHostName relay, whose port lives in an SRV record.
+	if port == multiHostPort {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			dialDNSResolveTimeout,
+		)
+		defer cancel()
+		resolved, ok := p.resolveMultiHost(
+			ctx,
+			host,
+			lookupIPAddr,
+			false,
+		)
+		if !ok {
+			p.config.Logger.Warn(
+				"failed to resolve peer hostname",
+				"address", address,
+				"host", host,
+			)
+		}
+		return resolved
+	}
+
 	// It's a hostname - try to resolve it
-	ips, err := lookupIP(host)
+	lookupCtx, cancel := context.WithTimeout(
+		context.Background(),
+		dialDNSResolveTimeout,
+	)
+	defer cancel()
+	ips, err := lookupIPAddr(lookupCtx, host)
 	if err != nil || len(ips) == 0 {
 		p.config.Logger.Warn(
 			"failed to resolve peer hostname",
@@ -411,6 +535,12 @@ func (p *PeerGovernor) resolveLedgerDiscoveryAddress(
 	}
 
 	lowerHost := strings.ToLower(host)
+	// A MultiHostName relay carries port 0 until SRV resolution picks one;
+	// every fallback below must dial the default port, never port 0.
+	multiHost := port == multiHostPort
+	if multiHost {
+		port = defaultCardanoPort
+	}
 	// A hostname that just failed to resolve is not retried until its
 	// negative-cache entry expires. Discovery re-offers the whole relay set
 	// every round, so without this a dead hostname costs a lookup (and, for
@@ -422,6 +552,18 @@ func (p *PeerGovernor) resolveLedgerDiscoveryAddress(
 
 	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
 	defer cancel()
+	if multiHost {
+		resolved, ok := p.resolveMultiHost(
+			lookupCtx,
+			host,
+			lookupIPAddr,
+			true,
+		)
+		if !ok && ctx.Err() == nil {
+			p.recordNegativeDNS(lowerHost)
+		}
+		return resolved
+	}
 	ips, err := lookupIPAddr(lookupCtx, host)
 	if err != nil || len(ips) == 0 {
 		// Debug, not Warn: a pool publishing a dead relay hostname is a fact
@@ -535,6 +677,12 @@ func (p *PeerGovernor) resolveDialAddress(
 	if net.ParseIP(host) != nil {
 		return address
 	}
+	if port == multiHostPort {
+		resolveCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
+		defer cancel()
+		target, _ := p.resolveMultiHost(resolveCtx, host, lookupIPAddr, false)
+		return target
+	}
 	// Bound the fresh resolution so a hung or slow resolver cannot wedge the
 	// dial loop, and cancel it if the governor is shutting down.
 	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
@@ -603,23 +751,40 @@ func (p *PeerGovernor) resolveLedgerDialTarget(
 	// hung or slow resolver cannot wedge the dial loop.
 	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
 	defer cancel()
-	ips, err := lookupIPAddr(lookupCtx, host)
-	if err != nil {
-		return "", err
-	}
-	if len(ips) == 0 {
-		return "", errors.New("no addresses returned for ledger relay hostname")
-	}
-	// Filter to the address families this host can actually dial before
-	// picking the one record that gets locked in forever; an unfiltered
-	// pick could permanently pin the peer to an unreachable family (e.g. an
-	// AAAA record on a v4-only host), which resolveDialAddress's per-attempt
-	// re-resolution would otherwise self-correct on the next try.
-	hasV4, hasV6 := p.supportedDialFamilies()
-	ips = filterDialFamilies(ips, hasV4, hasV6)
-	resolved := net.JoinHostPort(ips[0].String(), port)
-	if !isRoutableAddr(resolved) {
-		return "", ErrUnroutableAddress
+	var resolved string
+	originalHost, originalPort, originalErr := net.SplitHostPort(peer.Address)
+	if originalErr == nil && originalPort == multiHostPort {
+		var ok bool
+		resolved, ok = p.resolveMultiHost(
+			lookupCtx,
+			originalHost,
+			lookupIPAddr,
+			true,
+		)
+		if !ok {
+			return "", errors.New(
+				"no usable addresses returned for MultiHost ledger relay",
+			)
+		}
+	} else {
+		ips, err := lookupIPAddr(lookupCtx, host)
+		if err != nil {
+			return "", err
+		}
+		if len(ips) == 0 {
+			return "", errors.New("no addresses returned for ledger relay hostname")
+		}
+		// Filter to the address families this host can actually dial before
+		// picking the one record that gets locked in forever; an unfiltered
+		// pick could permanently pin the peer to an unreachable family (e.g. an
+		// AAAA record on a v4-only host), which resolveDialAddress's per-attempt
+		// re-resolution would otherwise self-correct on the next try.
+		hasV4, hasV6 := p.supportedDialFamilies()
+		ips = filterDialFamilies(ips, hasV4, hasV6)
+		resolved = net.JoinHostPort(ips[0].String(), port)
+		if !isRoutableAddr(resolved) {
+			return "", ErrUnroutableAddress
+		}
 	}
 
 	p.mu.Lock()
@@ -803,16 +968,22 @@ func addressHost(address string) string {
 //     peer has a NormalizedAddress whose host portion equals the
 //     inbound's host portion. Supports the operator pattern where a
 //     configured topology peer dials us from an ephemeral source port.
-//     When two or more topology peers share the host we refuse to
-//     guess, because merging distinct configured identities would
-//     silently violate operator intent.
+//     When two or more topology peers share the host we decline topology
+//     attribution and continue to rule 3 rather than guessing.
 //
-//  3. No match: caller creates a fresh PeerSourceInboundConn entry.
+//  3. Disconnected inbound entry from the same host: an earlier inbound
+//     entry with no live connection is reused, so a peer reconnecting from
+//     a new source port keeps its short-session history and cooldown state
+//     instead of starting from a fresh record. An entry that still holds a
+//     connection is never reused: concurrent connections from one host stay
+//     separate because protocol ownership is per connection.
+//
+//  4. No match: caller creates a fresh PeerSourceInboundConn entry.
 //
 // Rule 2 only consults topology peers; gossip/ledger/other inbound
-// entries never widen their identity, because the affordance granted
-// by a topology match (trust, valency) is specific to operator-declared
-// peers.
+// entries never widen their identity to a topology peer, because the
+// affordance granted by a topology match (trust, valency) is specific to
+// operator-declared peers.
 //
 // The second return value is the GroupID of the matched peer when that
 // peer is topology-sourced — regardless of whether the match came from
@@ -852,15 +1023,25 @@ func (p *PeerGovernor) resolveInboundIdentity(
 		if candidateIdx != -1 {
 			// More than one topology peer shares this host. Refuse to
 			// guess which configured identity the inbound is; the
-			// caller will create a new inbound entry.
-			return -1, ""
+			// caller will not attribute the arrival to a topology peer.
+			candidateIdx = -1
+			break
 		}
 		candidateIdx = i
 	}
-	if candidateIdx == -1 {
-		return -1, ""
+	if candidateIdx != -1 {
+		return candidateIdx, p.peers[candidateIdx].GroupID
 	}
-	return candidateIdx, p.peers[candidateIdx].GroupID
+	// Rule 3: a disconnected inbound entry from the same host.
+	for i, peer := range p.peers {
+		if peer != nil &&
+			peer.Source == PeerSourceInboundConn &&
+			peer.Connection == nil &&
+			addressHost(peer.NormalizedAddress) == inboundHost {
+			return i, ""
+		}
+	}
+	return -1, ""
 }
 
 // topologyGroupIDForPeer returns the matched peer's GroupID when the
@@ -898,15 +1079,97 @@ func sameConnectionId(a, b ouroboros.ConnectionId) bool {
 		sameNetAddr(a.RemoteAddr, b.RemoteAddr)
 }
 
+// SetPeerHotByConnId marks the peer holding connId hot when the governor's
+// hot budgets allow it. Starting a chainsync client does not by itself entitle
+// a peer to a hot slot: the peer stays in its current state (warm) when
+// promotion would exceed TargetNumberOfActivePeers, the peer's per-source
+// active quota, or InboundHotQuota (plus the inbound hot eligibility rules).
+// Local roots are never held back. The chainsync client keeps running on a
+// warm peer; the reconcile loop owns later promotion.
 func (p *PeerGovernor) SetPeerHotByConnId(connId ouroboros.ConnectionId) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	peerIdx := p.peerIndexByConnId(connId)
-	if peerIdx != -1 && p.peers[peerIdx] != nil {
-		p.recordPeerStateChange(p.peers[peerIdx].State, PeerStateHot)
-		p.peers[peerIdx].State = PeerStateHot
-		p.peers[peerIdx].LastActivity = time.Now()
-		p.updatePeerMetrics()
+	if peerIdx == -1 || p.peers[peerIdx] == nil ||
+		p.upstreamWithheldLocked(p.peers[peerIdx]) {
+		return
+	}
+	peer := p.peers[peerIdx]
+	if peer.State != PeerStateHot && !p.hotBudgetAllowsLocked(peer) {
+		peer.LastActivity = time.Now()
+		return
+	}
+	p.recordPeerStateChange(peer.State, PeerStateHot)
+	peer.State = PeerStateHot
+	peer.LastActivity = time.Now()
+	p.updatePeerMetrics()
+}
+
+// hotBudgetAllowsLocked reports whether promoting peer to hot keeps the hot
+// counts within TargetNumberOfActivePeers, the peer's per-source quota, and
+// the inbound hot budget. Inbound peers are budgeted separately from outbound
+// selection: they neither consume nor are limited by the outbound active
+// target. Must be called with p.mu held.
+func (p *PeerGovernor) hotBudgetAllowsLocked(peer *Peer) bool {
+	if peer.Source == PeerSourceTopologyLocalRoot {
+		return true
+	}
+	if peer.Source == PeerSourceInboundConn {
+		if !p.isInboundEligibleForHot(peer) {
+			return false
+		}
+		inboundHot := 0
+		for _, other := range p.peers {
+			if other != nil && other.Source == PeerSourceInboundConn &&
+				other.State == PeerStateHot {
+				inboundHot++
+			}
+		}
+		return inboundHot < p.config.InboundHotQuota
+	}
+	outboundHot := 0
+	categoryHot := 0
+	category := p.getSourceCategory(peer.Source)
+	for _, other := range p.peers {
+		if other == nil || other.State != PeerStateHot ||
+			other.Source == PeerSourceInboundConn {
+			continue
+		}
+		outboundHot++
+		if p.getSourceCategory(other.Source) == category {
+			categoryHot++
+		}
+	}
+	if p.config.TargetNumberOfActivePeers > 0 &&
+		outboundHot >= p.config.TargetNumberOfActivePeers {
+		return false
+	}
+	quota := 0
+	switch category {
+	case "gossip":
+		quota = p.config.ActivePeersGossipQuota
+	case "ledger":
+		quota = p.config.ActivePeersLedgerQuota
+	case "topology":
+		quota = p.config.ActivePeersTopologyQuota
+	}
+	return quota <= 0 || categoryHot < quota
+}
+
+// RecordServedActivityByConnId records that the peer holding connId is
+// consuming from this node (chainsync or blockfetch server requests, keepalive
+// pings). It refreshes only LastServedActivity, which the inbound idle-prune
+// decision reads; LastActivity, which drives outbound hot and churn decisions,
+// is untouched. Callers on a per-message path should throttle: this takes the
+// governor lock and scans the peer list.
+func (p *PeerGovernor) RecordServedActivityByConnId(
+	connId ouroboros.ConnectionId,
+) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if idx := p.peerIndexByConnId(connId); idx != -1 &&
+		p.peers[idx] != nil {
+		p.peers[idx].LastServedActivity = time.Now()
 	}
 }
 
@@ -917,6 +1180,19 @@ func (p *PeerGovernor) TouchPeerByConnId(connId ouroboros.ConnectionId) {
 	if peerIdx != -1 && p.peers[peerIdx] != nil {
 		p.peers[peerIdx].LastActivity = time.Now()
 	}
+}
+
+// DiversityGroupByConnId returns the diversity group of the peer holding
+// connId, or "" when no tracked peer holds it.
+func (p *PeerGovernor) DiversityGroupByConnId(
+	connId ouroboros.ConnectionId,
+) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if peerIdx := p.peerIndexByConnId(connId); peerIdx != -1 {
+		return p.peerDiversityGroup(p.peers[peerIdx])
+	}
+	return ""
 }
 
 func (p *PeerGovernor) IsChainSelectionEligible(
@@ -931,8 +1207,96 @@ func (p *PeerGovernor) IsChainSelectionEligible(
 	return chainSelectionState(
 		p.bootstrapExited,
 		p.peers[peerIdx].Source,
-		p.peers[peerIdx].Connection,
+		p.selectionConnLocked(p.peers[peerIdx]),
 	).eligible
+}
+
+// IsConfiguredRootConnection reports whether connId is a live client
+// connection to an operator-configured local or public root. Roots are the
+// operator's known honest network, so chainsync client slots favor them over
+// discovered peers.
+func (p *PeerGovernor) IsConfiguredRootConnection(
+	connId ouroboros.ConnectionId,
+) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	peerIdx := p.peerIndexByConnId(connId)
+	if peerIdx == -1 || p.peers[peerIdx] == nil {
+		return false
+	}
+	peer := p.peers[peerIdx]
+	return (peer.Source == PeerSourceTopologyLocalRoot ||
+		peer.Source == PeerSourceTopologyPublicRoot) &&
+		chainSelectionEligible(peer.Source, p.selectionConnLocked(peer))
+}
+
+// withholdDeniedUpstreamLocked keeps the peer's new inbound connection open
+// but out of chain selection while the peer is denied. A denial on a stable
+// identity (a diverged topology peer reconnecting from a new source port) is
+// a verdict on the peer as an upstream; closing the connection would also cut
+// off a full-duplex peer that only consumes from this node. Must be called
+// with p.mu held.
+func (p *PeerGovernor) withholdDeniedUpstreamLocked(peer *Peer) {
+	if peer == nil || peer.Connection == nil ||
+		peer.Source == PeerSourceInboundConn {
+		return
+	}
+	peer.Connection.UpstreamWithheld = p.isPeerDeniedLocked(peer)
+}
+
+// upstreamWithheldLocked reports whether peer's open connection is denied
+// for upstream use right now. Eligibility follows the live denial state even
+// before syncUpstreamWithholdLocked updates the stored transition flag. Must
+// be called with p.mu held.
+func (p *PeerGovernor) upstreamWithheldLocked(peer *Peer) bool {
+	return peer != nil && peer.Connection != nil && p.isPeerDeniedLocked(peer)
+}
+
+// usableClientLocked reports whether peer has a client-capable connection
+// that may serve as an upstream. Must be called with p.mu held.
+func (p *PeerGovernor) usableClientLocked(peer *Peer) bool {
+	return peer.hasClientConnection() && !p.upstreamWithheldLocked(peer)
+}
+
+// selectionConnLocked returns peer's connection with the withhold resolved
+// against the current denial state, for chain selection decisions. Must be
+// called with p.mu held.
+func (p *PeerGovernor) selectionConnLocked(peer *Peer) *PeerConnection {
+	if peer == nil || peer.Connection == nil {
+		return nil
+	}
+	conn := *peer.Connection
+	conn.UpstreamWithheld = p.upstreamWithheldLocked(peer)
+	return &conn
+}
+
+// syncUpstreamWithholdLocked aligns each open connection's withhold with the
+// current denial state and appends the resulting chain selection events. A
+// denial that starts or expires while a connection is open changes whether
+// that connection may feed chainsync. Must be called with p.mu held.
+func (p *PeerGovernor) syncUpstreamWithholdLocked(
+	events []pendingEvent,
+) []pendingEvent {
+	for _, peer := range p.peers {
+		if peer == nil || peer.Connection == nil ||
+			peer.Source == PeerSourceInboundConn {
+			continue
+		}
+		denied := p.isPeerDeniedLocked(peer)
+		if denied == peer.Connection.UpstreamWithheld {
+			continue
+		}
+		oldConn := clonePeerConnection(peer.Connection)
+		peer.Connection.UpstreamWithheld = denied
+		events = p.appendChainSelectionEventsLocked(
+			events,
+			p.bootstrapExited,
+			peer.Source,
+			oldConn,
+			peer,
+		)
+	}
+	return events
 }
 
 func clonePeerConnection(conn *PeerConnection) *PeerConnection {
@@ -944,7 +1308,7 @@ func clonePeerConnection(conn *PeerConnection) *PeerConnection {
 }
 
 func chainSelectionEligible(source PeerSource, conn *PeerConnection) bool {
-	if conn == nil || !conn.IsClient {
+	if conn == nil || !conn.IsClient || conn.UpstreamWithheld {
 		return false
 	}
 	// A peer whose only record comes from an unsolicited inbound

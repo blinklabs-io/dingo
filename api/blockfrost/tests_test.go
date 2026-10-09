@@ -794,24 +794,34 @@ func TestPredefinedDRepAmountIncludesActiveProposalDeposit(t *testing.T) {
 	adapter, _, db := newDBBackedAdapter(t)
 	returnStakeCred := []byte{4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4}
 
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: returnStakeCred,
-		DrepType:   models.DrepTypeAlwaysNoConfidence,
-		AddedSlot:  1,
-		Active:     true,
-	}))
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        []byte("proposal-tx-hash-32-bytes-long2"),
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
-		ProposedEpoch: 0,
-		ExpiresEpoch:  100,
-		Deposit:       75,
-		ReturnAddress: depositReturnAddress(t, returnStakeCred),
-		AnchorURL:     "https://example.invalid/deposit",
-		AnchorHash:    []byte("anchor-hash-32-bytes-long-valu2"),
-		AddedSlot:     1,
-	}, nil))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: returnStakeCred,
+			DrepType:   models.DrepTypeAlwaysNoConfidence,
+			AddedSlot:  1,
+			Active:     true,
+		}),
+	)
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(
+			context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        []byte("proposal-tx-hash-32-bytes-long2"),
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+				ProposedEpoch: 0,
+				ExpiresEpoch:  100,
+				Deposit:       75,
+				ReturnAddress: depositReturnAddress(t, returnStakeCred),
+				AnchorURL:     "https://example.invalid/deposit",
+				AnchorHash:    []byte("anchor-hash-32-bytes-long-valu2"),
+				AddedSlot:     1,
+			},
+			nil,
+		),
+	)
 
 	drepType := models.DrepTypeAlwaysNoConfidence
 	info, err := adapter.DRep(DRepCredential{
@@ -832,30 +842,40 @@ func TestDRepsListAmountsIncludeActiveProposalDeposit(t *testing.T) {
 	drepCred := []byte{5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5}
 	returnStakeCred := []byte{6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6}
 
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		Credential: drepCred,
 		Active:     true,
 		AddedSlot:  1,
 	}))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: returnStakeCred,
-		Drep:       drepCred,
-		DrepType:   models.DrepTypeAddrKeyHash,
-		AddedSlot:  1,
-		Active:     true,
-	}))
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        []byte("proposal-tx-hash-32-bytes-long3"),
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
-		ProposedEpoch: 0,
-		ExpiresEpoch:  100,
-		Deposit:       30,
-		ReturnAddress: depositReturnAddress(t, returnStakeCred),
-		AnchorURL:     "https://example.invalid/deposit",
-		AnchorHash:    []byte("anchor-hash-32-bytes-long-valu3"),
-		AddedSlot:     1,
-	}, nil))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: returnStakeCred,
+			Drep:       drepCred,
+			DrepType:   models.DrepTypeAddrKeyHash,
+			AddedSlot:  1,
+			Active:     true,
+		}),
+	)
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(
+			context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        []byte("proposal-tx-hash-32-bytes-long3"),
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+				ProposedEpoch: 0,
+				ExpiresEpoch:  100,
+				Deposit:       30,
+				ReturnAddress: depositReturnAddress(t, returnStakeCred),
+				AnchorURL:     "https://example.invalid/deposit",
+				AnchorHash:    []byte("anchor-hash-32-bytes-long-valu3"),
+				AddedSlot:     1,
+			},
+			nil,
+		),
+	)
 
 	items, total, err := adapter.DReps(DRepListParams{
 		Pagination: PaginationParams{
@@ -881,7 +901,7 @@ func (n *listPaginationNode) PoolsExtended() ([]PoolExtendedInfo, error) {
 	return []PoolExtendedInfo{}, nil
 }
 
-func (n *listPaginationNode) AccountAssociatedAddresses(
+func (n *listPaginationNode) AccountAssociatedAddresses(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountAssociatedAddressInfo, int, error) {
@@ -890,7 +910,7 @@ func (n *listPaginationNode) AccountAssociatedAddresses(
 	return []AccountAssociatedAddressInfo{}, 0, nil
 }
 
-func (n *listPaginationNode) AccountDelegationHistory(
+func (n *listPaginationNode) AccountDelegationHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountDelegationHistoryInfo, int, error) {
@@ -899,7 +919,7 @@ func (n *listPaginationNode) AccountDelegationHistory(
 	return []AccountDelegationHistoryInfo{}, 0, nil
 }
 
-func (n *listPaginationNode) AccountRegistrationHistory(
+func (n *listPaginationNode) AccountRegistrationHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountRegistrationHistoryInfo, int, error) {
@@ -908,7 +928,7 @@ func (n *listPaginationNode) AccountRegistrationHistory(
 	return []AccountRegistrationHistoryInfo{}, 0, nil
 }
 
-func (n *listPaginationNode) AccountRewardHistory(
+func (n *listPaginationNode) AccountRewardHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountRewardHistoryInfo, int, error) {
@@ -917,7 +937,7 @@ func (n *listPaginationNode) AccountRewardHistory(
 	return []AccountRewardHistoryInfo{}, 0, nil
 }
 
-func (n *listPaginationNode) AccountUTXOs(
+func (n *listPaginationNode) AccountUTXOs(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountUTXOInfo, int, error) {
@@ -926,7 +946,7 @@ func (n *listPaginationNode) AccountUTXOs(
 	return []AccountUTXOInfo{}, 0, nil
 }
 
-func (n *listPaginationNode) AccountWithdrawals(
+func (n *listPaginationNode) AccountWithdrawals(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountWithdrawalInfo, int, error) {
@@ -935,9 +955,9 @@ func (n *listPaginationNode) AccountWithdrawals(
 	return []AccountWithdrawalInfo{}, 0, nil
 }
 
-func (n *listPaginationNode) AccountTransactions(
+func (n *listPaginationNode) AccountTransactions(ctx context.Context,
 	_ string,
-	params AccountTransactionsParams,
+	params TransactionRangeParams,
 ) ([]AccountTransactionInfo, int, error) {
 	n.calls++
 	n.params = params.Pagination

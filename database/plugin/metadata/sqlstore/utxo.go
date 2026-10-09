@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -880,6 +881,43 @@ func utxoStakeConsumedDeltaQuery(n int) string {
 		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
 }
 
+var utxoStakeConsumedDeltaQuerySizes = [...]int{
+	1, 2, 4, 8, 16, 32, 64, 128, 256, 400,
+}
+
+func utxoStakeConsumedDeltaQuerySize(n int) int {
+	for _, size := range utxoStakeConsumedDeltaQuerySizes {
+		if n <= size {
+			return size
+		}
+	}
+	return utxoStakeConsumedDeltaQuerySizes[len(utxoStakeConsumedDeltaQuerySizes)-1]
+}
+
+func consumedUtxoStakeDelta(
+	tag int64,
+	key []byte,
+	raw sql.NullString,
+) (stakeCredentialDelta, bool, error) {
+	if len(key) == 0 || !raw.Valid || raw.String == "" {
+		return stakeCredentialDelta{}, false, nil
+	}
+	amount, err := parseUint64("consumed UTxO amount", raw.String)
+	if err != nil {
+		return stakeCredentialDelta{}, false, err
+	}
+	if amount > math.MaxInt64 {
+		return stakeCredentialDelta{}, false, fmt.Errorf(
+			"consumed UTxO amount overflow: %d",
+			amount,
+		)
+	}
+	return stakeCredentialDelta{
+		ref:   models.NewStakeCredentialRef(uint8(tag), key),
+		delta: -int64(amount),
+	}, true, nil
+}
+
 // queryUtxoStakeConsumedDeltas is queryUtxoStakeRefs's counterpart for the
 // setTransactionWithAccumulator fast path: alongside each spent input's
 // credential it also reads the row's amount, so the caller can pass
@@ -900,7 +938,7 @@ func utxoStakeConsumedDeltaQuery(n int) string {
 // transaction just spent, by (tx_id, output_idx), so the deleted_slot value
 // (already set to this transaction's slot by the caller) does not change
 // which row answers the lookup.
-func queryUtxoStakeConsumedDeltas(
+func (s *Store) queryUtxoStakeConsumedDeltas(
 	ctx context.Context,
 	db queryer,
 	ids []models.UtxoId,
@@ -919,8 +957,11 @@ func queryUtxoStakeConsumedDeltas(
 		for i, txID := range batch {
 			args[i] = txID
 		}
-		query := utxoStakeConsumedDeltaQuery(len(batch))
-		rows, err := db.QueryContext(ctx, query, args...)
+		querySize := utxoStakeConsumedDeltaQuerySize(len(batch))
+		query := utxoStakeConsumedDeltaQuery(querySize)
+		queryArgs := make([]any, querySize)
+		copy(queryArgs, args)
+		rows, err := s.queryRowsCached(ctx, db, query, queryArgs...)
 		if err != nil {
 			return nil, err
 		}
@@ -937,7 +978,7 @@ func queryUtxoStakeConsumedDeltas(
 				); err != nil {
 					return err
 				}
-				if len(key) == 0 || !outputIdx.Valid {
+				if !outputIdx.Valid {
 					continue
 				}
 				outs, ok := wanted[string(txID)]
@@ -947,26 +988,20 @@ func queryUtxoStakeConsumedDeltas(
 				if _, ok := outs[uint32(outputIdx.Int64)]; !ok {
 					continue
 				}
-				if !raw.Valid || raw.String == "" {
-					continue
-				}
-				amount, err := parseUint64("consumed UTxO amount", raw.String)
+				delta, ok, err := consumedUtxoStakeDelta(tag, key, raw)
 				if err != nil {
 					return err
 				}
-				if amount > math.MaxInt64 {
-					return fmt.Errorf(
-						"consumed UTxO amount overflow: %d",
-						amount,
-					)
+				if !ok {
+					continue
 				}
-				ref := models.NewStakeCredentialRef(uint8(tag), key)
+				ref := delta.ref
 				mapKey := ref.MapKey()
 				if _, ok := refs[mapKey]; !ok {
 					order = append(order, mapKey)
 					refs[mapKey] = ref
 				}
-				sums[mapKey] -= int64(amount)
+				sums[mapKey] += delta.delta
 			}
 			return rows.Err()
 		}()
@@ -1747,12 +1782,57 @@ func (s *Store) GetUtxosByAddress(
 	maxResults int,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
+	return s.utxosByAddressPatterns(
+		"GetUtxosByAddress",
+		patterns,
+		"utxo.deleted_slot = 0",
+		nil,
+		maxResults,
+		txn,
+	)
+}
+
+func (s *Store) GetUtxosByAddressAsOf(
+	patterns []models.UtxoAddressPattern,
+	atSlot uint64,
+	maxResults int,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	sqlSlot, err := checkedInt64(atSlot)
+	if err != nil {
+		return nil, err
+	}
+	return s.utxosByAddressPatterns(
+		"GetUtxosByAddressAsOf",
+		patterns,
+		"utxo.added_slot <= ? AND "+
+			"(utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)",
+		[]any{sqlSlot, sqlSlot},
+		maxResults,
+		txn,
+	)
+}
+
+// utxosByAddressPatterns runs the chunked, bounded address lookup shared by
+// GetUtxosByAddress and GetUtxosByAddressAsOf. liveness selects which rows
+// count as unspent and is ANDed ahead of every chunk's address branches;
+// livenessArgs are its bind parameters and count against each chunk's
+// parameter budget.
+func (s *Store) utxosByAddressPatterns(
+	name string,
+	patterns []models.UtxoAddressPattern,
+	liveness string,
+	livenessArgs []any,
+	maxResults int,
+	txn types.Txn,
+) ([]models.Utxo, error) {
 	if len(patterns) == 0 {
 		return nil, nil
 	}
 	if maxResults <= 0 {
 		return nil, fmt.Errorf(
-			"GetUtxosByAddress: maxResults must be positive, got %d",
+			"%s: maxResults must be positive, got %d",
+			name,
 			maxResults,
 		)
 	}
@@ -1787,9 +1867,9 @@ func (s *Store) GetUtxosByAddress(
 	// too, or a chunk that fills exactly to paramLimit on WHERE-clause
 	// args alone produces a statement with paramLimit+1 total parameters,
 	// which the dialect may reject.
-	limitParamReserve := 0
+	limitParamReserve := len(livenessArgs)
 	if chunkQueryLimit > 0 {
-		limitParamReserve = 1
+		limitParamReserve++
 	}
 	type utxoKey struct {
 		txId string
@@ -1805,8 +1885,8 @@ func (s *Store) GetUtxosByAddress(
 		}
 		utxos, err := s.queryUtxos(
 			txn,
-			"utxo.deleted_slot = 0 AND ("+strings.Join(branches, " OR ")+")",
-			args,
+			liveness+" AND ("+strings.Join(branches, " OR ")+")",
+			append(slices.Clone(livenessArgs), args...),
 			"",
 			chunkQueryLimit,
 		)
@@ -1822,7 +1902,8 @@ func (s *Store) GetUtxosByAddress(
 			ret = append(ret, utxos[i])
 			if len(ret) > maxResults {
 				return fmt.Errorf(
-					"GetUtxosByAddress: %w (maxResults=%d)",
+					"%s: %w (maxResults=%d)",
+					name,
 					models.ErrTooManyUtxoResults,
 					maxResults,
 				)

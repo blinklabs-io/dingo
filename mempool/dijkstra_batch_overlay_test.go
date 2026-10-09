@@ -108,7 +108,7 @@ func buildDijkstraBatch(
 	body, err := cbor.Encode(bodyMap)
 	require.NoError(t, err)
 	txCbor, err := cbor.Encode([]any{
-		cbor.RawMessage(body), map[uint]any{}, true, nil,
+		cbor.RawMessage(body), map[uint]any{}, nil,
 	})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
@@ -404,7 +404,7 @@ func TestMempoolRevalidationDropsDescendantsOfBatchSpentByBlock(t *testing.T) {
 	validator.mu.Lock()
 	validator.chainUsed[refKey(source)] = struct{}{}
 	validator.mu.Unlock()
-	require.NoError(t, pool.rebuildOverlay())
+	require.NoError(t, pool.rebuildOverlay(context.Background()))
 
 	remaining := pool.Transactions()
 	require.Len(t, remaining, 1)

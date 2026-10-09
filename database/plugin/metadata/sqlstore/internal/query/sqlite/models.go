@@ -123,6 +123,15 @@ type Drep struct {
 	Active            sql.NullBool
 }
 
+type DrepExpiryHistory struct {
+	ID                int64
+	CredentialTag     int64
+	Credential        []byte
+	AddedSlot         int64
+	LastActivityEpoch int64
+	ExpiryEpoch       int64
+}
+
 type Epoch struct {
 	Nonce               []byte
 	EvolvingNonce       []byte
@@ -166,6 +175,11 @@ type ImportedPoolBlockCount struct {
 	CapturedSlot   int64
 }
 
+type LeiosTransactionContext struct {
+	TransactionID int64
+	Slot          int64
+}
+
 type MidnightAriadneParam struct {
 	ID    int64
 	Epoch int64
@@ -205,6 +219,14 @@ type MidnightAssetSpend struct {
 	BlockTimestampMs int64
 }
 
+type MidnightCandidateRemoval struct {
+	ID          int64
+	BlockNumber int64
+	TxHash      []byte
+	OutputIndex int64
+	Datum       []byte
+}
+
 type MidnightCommitteeCandidateRegistration struct {
 	ID           int64
 	TxHash       []byte
@@ -232,6 +254,12 @@ type MidnightEpochCandidate struct {
 	Epoch          int64
 	BlockNumber    int64
 	CandidatesCbor []byte
+}
+
+type MidnightEpochTransition struct {
+	BlockNumber    int64
+	PreviousEpoch  int64
+	PreviousExists int64
 }
 
 type MidnightGovernanceDatum struct {

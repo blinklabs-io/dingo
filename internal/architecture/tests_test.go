@@ -406,6 +406,16 @@ var importBoundaryRules = []importBoundaryRule{
 			"ledger/dijkstra_collateral_return_production_test.go": {
 				"mempool",
 			},
+			// Submits Dijkstra transactions through mempool admission, then
+			// through block application, replay and rollback.
+			"ledger/dijkstra_production_paths_fixture_test.go": {
+				"mempool",
+			},
+			// Requires the same minimum-fee decision from mempool admission
+			// as from block validation and replay.
+			"ledger/fee_deposit_production_test.go": {
+				"mempool",
+			},
 		},
 	},
 	{

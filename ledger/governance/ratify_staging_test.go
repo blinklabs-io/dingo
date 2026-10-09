@@ -188,7 +188,7 @@ func TestProcessEpochImportedParameterChangeChain(t *testing.T) {
 				ReturnAddress: make([]byte, 29),
 				AnchorHash:    make([]byte, 32),
 			}
-			require.NoError(t, db.SetGovernanceProposal(seededRoot, nil))
+			require.NoError(t, db.SetGovernanceProposal(t.Context(), seededRoot, nil))
 			anchorSlot := (stabilityTestEpoch - 2) * 100
 			parent := chainTestProposal(
 				lcommon.GovActionTypeParameterChange, testBytes(32, 0xF2),

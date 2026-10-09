@@ -89,7 +89,7 @@ func TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo(t *testing.T) {
 					addr,
 					[]uint64{5_000_000},
 				),
-				Epoch:               100,
+				Epoch:               1,
 				EraIndex:            EraConway,
 				EraBounds:           eraBounds,
 				EpochNonce:          nonce,
@@ -191,7 +191,7 @@ func TestImportLedgerStateReconcileCatchUpRestoresPostAnchorSpentUtxo(
 				),
 				CertStateData:       minimalCertStateData(t),
 				GovStateData:        testGovStateData(t, govStateTxHash, 100),
-				Epoch:               100,
+				Epoch:               1,
 				EraIndex:            EraConway,
 				EraBounds:           eraBounds,
 				EpochNonce:          nonce,
@@ -306,5 +306,5 @@ func applySpendingTransaction(
 	}
 
 	point := ocommon.Point{Slot: slot, Hash: blockHash}
-	return db.SetTransaction(tx, point, 0, 0, nil, nil, offsets, nil)
+	return db.SetTransaction(context.Background(), tx, point, 0, 0, nil, nil, offsets, nil)
 }

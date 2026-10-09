@@ -40,8 +40,8 @@ const rollbackCascadeIndex = "idx_utxo_transaction_id"
 // index absent, and no pending marker to say so.
 //
 // Mithril sync produced it: BuildCritical leaves the marker set for the lazy
-// remainder, and updateMithrilReadyState then runs ClearSyncState, an
-// unqualified DELETE FROM sync_state, which removes it (fixed for new syncs in
+// remainder, and updateMithrilReadyState previously deleted that marker
+// during sync-state cleanup (fixed for new syncs in
 // mithril/sync_import.go; databases bootstrapped before that fix stay in this
 // state). The migration that created the index is recorded complete, so its
 // CREATE INDEX IF NOT EXISTS never runs again. Dropping the index directly is
@@ -249,15 +249,14 @@ func (m *namedMissingManager) MissingCriticalDeferredIndexes() (
 	return m.missing, nil
 }
 
-// TestEnsureCriticalDeferredIndexesNamesMissingBeforeBuilding pins the
+// TestDeferredIndexRebuilderBuildCriticalNamesMissingBeforeBuilding pins the
 // ordering: the names are logged before the rebuild is entered, not after it
 // returns.
 //
 // A rebuild of one index on a multi-million-row table takes minutes and emits
-// nothing while it runs, which is the silence the reported incident opened
-// with. The assertion reads the log as the rebuild sees it, so a message moved
-// back below the build fails here.
-func TestEnsureCriticalDeferredIndexesNamesMissingBeforeBuilding(
+// nothing while it runs. The assertion reads the log as the rebuild sees it,
+// so a message moved below the build fails here.
+func TestDeferredIndexRebuilderBuildCriticalNamesMissingBeforeBuilding(
 	t *testing.T,
 ) {
 	var buf bytes.Buffer
@@ -267,7 +266,10 @@ func TestEnsureCriticalDeferredIndexesNamesMissingBeforeBuilding(
 		log:     &buf,
 	}
 
-	require.NoError(t, ensureCriticalDeferredIndexes(manager, logger))
+	require.NoError(t, (&DeferredIndexRebuilder{
+		manager: manager,
+		logger:  logger,
+	}).BuildCritical())
 
 	require.Contains(
 		t,
@@ -461,6 +463,34 @@ func TestBuildDingoConfigWiresForgeEBCaps(t *testing.T) {
 	if got := built.ForgeEBMaxBytes(); got == nil || *got != 567890 {
 		t.Fatalf("expected forgeEbMaxBytes 567890 to flow through, got %v", got)
 	}
+}
+
+// TestBuildDingoConfigWiresLocalStateQueryViewMaxLifetime follows the
+// composition path for the LocalStateQuery snapshot lifetime: a missing
+// With... call would drop the operator's value and leave the default.
+func TestBuildDingoConfigWiresLocalStateQueryViewMaxLifetime(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{LocalStateQueryViewMaxLifetime: "7m"}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	require.Equal(
+		t,
+		7*time.Minute,
+		built.LocalStateQueryViewMaxLifetimeDuration(),
+	)
 }
 
 // TestBuildDingoConfigPreservesExplicitZeroForgeEBCaps carries the

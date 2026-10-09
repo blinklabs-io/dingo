@@ -20,10 +20,10 @@ current branch.
 | What does a Go package or exported symbol do? | [Go code reference](code-reference.md), package `doc.go` files, and `go doc` |
 | How do I add a compiled-in provider? | [Plugin development](../database/plugin/PLUGIN_DEVELOPMENT.md) |
 | How do I run the multi-node DevNet test harness? | [DevNet harness](../internal/test/devnet/README.md) |
-| How do I run Dingo locally against a single-node devnet? | [Local DevNet helper](devnet.md) |
+| How do I run Dingo locally against a single-node devnet? | [Single-node local DevNet](devnet.md) |
 | How do I run benchmarks or collect profiles? | [Benchmarks and profiling](benchmarks.md) |
 | How do I run conformance tests? | [Conformance tests](../internal/test/conformance/README.md) |
-| How do I exercise archive and history-expiry behavior? | [Archive node demo](../internal/test/archive-demo/README.md) |
+| How do I exercise archive and history-expiry behavior? | [Dingo archive node demo](https://github.com/blinklabs-io/cardano-compose-stacks/tree/main/dingo-archive-demo) |
 | How do I connect AI assistants (Claude, Cursor, Codex) to Dingo via MCP? | [MCP Guide](mcp/README.md) |
 | How do natural-language questions map to MCP tools & requests? | [MCP Tool Intent Mapping](mcp/README.md#4-semantic-architecture--intent-mapping-taxonomy) |
 | How is the MCP server structured? | [MCP Architecture Manual](mcp/architecture.md) |

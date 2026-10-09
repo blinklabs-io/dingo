@@ -307,6 +307,7 @@ func openRemoteIntegrationDatabase(
 	)
 	require.NoError(t, err)
 	db, err := database.New(
+		context.Background(),
 		&database.Config{
 			DataDir:        t.TempDir(),
 			StorageMode:    types.StorageModeCore,
@@ -345,11 +346,11 @@ func captureRemoteIntegrationState(
 	t.Helper()
 	tip, err := db.GetTip(nil)
 	require.NoError(t, err)
-	commitTimestamp, err := db.Metadata().GetCommitTimestamp()
+	commitTimestamp, err := db.Metadata().GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
-	settings, err := db.Metadata().GetNodeSettings()
+	settings, err := db.Metadata().GetNodeSettings(context.Background())
 	require.NoError(t, err)
-	gates, err := db.Metadata().GetNodeSettingsGates()
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	syncMarker, err := db.GetSyncState("integration-marker", nil)
 	require.NoError(t, err)
@@ -370,7 +371,7 @@ func populateRemoteIntegrationDatabase(
 	marker string,
 ) {
 	t.Helper()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Rollback() //nolint:errcheck
 	block := testBlock(1, hashByte)
 	require.NoError(t, db.BlockCreate(block, txn))
@@ -477,7 +478,7 @@ func TestLiveRemoteRestorePostgresS3PreservesOrSwitchesBothStores(
 			prepare: func(t *testing.T, dir string) {
 				corruptRemoteIntegrationBlobBackup(t, dir, true)
 			},
-			wantError:         "unexpected EOF",
+			wantError:         lifecycle.ErrSnapshotPayloadMismatch.Error(),
 			wantPreflightOnly: true,
 		},
 		{
@@ -485,7 +486,7 @@ func TestLiveRemoteRestorePostgresS3PreservesOrSwitchesBothStores(
 			prepare: func(t *testing.T, dir string) {
 				corruptRemoteIntegrationBlobBackup(t, dir, false)
 			},
-			wantError:         "corrupted",
+			wantError:         lifecycle.ErrSnapshotPayloadMismatch.Error(),
 			wantPreflightOnly: true,
 		},
 		{

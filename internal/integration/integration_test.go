@@ -116,7 +116,7 @@ func TestStorageBackends(t *testing.T) {
 			blocks, err := loadBlockData(10)
 			require.NoError(t, err)
 			for i := range 10 {
-				txn := runtime.Database.Transaction(true)
+				txn := runtime.Database.Transaction(context.Background(), true)
 				key := fmt.Appendf(nil, "block-%d", i)
 				require.NoError(
 					t,

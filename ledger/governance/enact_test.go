@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -98,7 +99,7 @@ func TestEnactProposal_DijkstraParameterChange(t *testing.T) {
 		Deposit:       0,
 	}
 
-	result, err := EnactProposal(&EnactmentContext{
+	result, err := EnactProposal(context.Background(), &EnactmentContext{
 		DB:       db,
 		Slot:     2000,
 		Epoch:    42,
@@ -110,6 +111,69 @@ func TestEnactProposal_DijkstraParameterChange(t *testing.T) {
 	require.Equal(t, uint(1234), pparams.MinFeeA)
 	require.False(t, result.PlutusV2CostModelWritten,
 		"this update never touched CostModels[1]")
+}
+
+// TestEnactProposal_DijkstraParameterChangeMaxPledgeLeverage enacts stored
+// parameter changes whose tag 38 is null or a ratio. Null clears an existing
+// maximum pledge leverage, including beside another field, and a ratio replaces
+// it; an update that omits tag 38 leaves it alone.
+func TestEnactProposal_DijkstraParameterChangeMaxPledgeLeverage(t *testing.T) {
+	t.Parallel()
+
+	existing := big.NewRat(3, 1)
+	for _, tc := range []struct {
+		name         string
+		update       map[uint]any
+		wantMinFee   uint
+		wantLeverage *big.Rat
+	}{
+		{"null clears", map[uint]any{38: nil}, 1, nil},
+		{"null beside another field", map[uint]any{0: uint64(44), 38: nil}, 44, nil},
+		{"ratio replaces", map[uint]any{38: cbor.Rat{Rat: big.NewRat(5, 2)}}, 1, big.NewRat(5, 2)},
+		{"absent keeps", map[uint]any{0: uint64(44)}, 44, existing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db, _ := newTallyTestDB(t)
+			encoded, err := cbor.Encode([]any{uint64(0), nil, tc.update, nil})
+			require.NoError(t, err)
+			pparams := &gdijkstra.DijkstraProtocolParameters{
+				ConwayProtocolParameters: conway.ConwayProtocolParameters{
+					MinFeeA: 1,
+				},
+				MaxPledgeLeverage: &cbor.Rat{
+					Rat: new(big.Rat).Set(existing),
+				},
+			}
+			result, err := EnactProposal(t.Context(), &EnactmentContext{
+				DB:       db,
+				Slot:     2000,
+				Epoch:    42,
+				PParams:  pparams,
+				UpdateFn: eras.PParamsUpdateDijkstra,
+			}, &models.GovernanceProposal{
+				TxHash:        testBytes(32, 0xD4),
+				ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+				GovActionCbor: encoded,
+				AddedSlot:     500,
+				ExpiresEpoch:  100,
+				AnchorURL:     "https://example.invalid/dijkstra-pledge",
+				AnchorHash:    testBytes(32, 0xD5),
+				ReturnAddress: testBytes(29, 0xD6),
+			})
+			require.NoError(t, err)
+			require.True(t, result.PParamsChanged)
+			updated, ok := result.UpdatedPParams.(*gdijkstra.DijkstraProtocolParameters)
+			require.True(t, ok)
+			require.Equal(t, tc.wantMinFee, updated.MinFeeA)
+			if tc.wantLeverage == nil {
+				require.Nil(t, updated.MaxPledgeLeverage)
+				return
+			}
+			require.NotNil(t, updated.MaxPledgeLeverage)
+			require.Zero(t, tc.wantLeverage.Cmp(updated.MaxPledgeLeverage.Rat))
+		})
+	}
 }
 
 // TestEnactProposal_ConwayParameterChangeWritesPlutusV2CostModel and
@@ -162,7 +226,7 @@ func TestEnactProposal_ConwayParameterChangeDoesNotWritePlutusV2CostModel(
 		Deposit:       0,
 	}
 
-	result, err := EnactProposal(&EnactmentContext{
+	result, err := EnactProposal(context.Background(), &EnactmentContext{
 		DB:       db,
 		Slot:     2000,
 		Epoch:    42,
@@ -213,7 +277,7 @@ func TestEnactProposal_ConwayParameterChangeWritesPlutusV2CostModel(
 		Deposit:       0,
 	}
 
-	result, err := EnactProposal(&EnactmentContext{
+	result, err := EnactProposal(context.Background(), &EnactmentContext{
 		DB:       db,
 		Slot:     2000,
 		Epoch:    42,
@@ -265,7 +329,7 @@ func TestEnactProposal_DijkstraParameterChangeWritesPlutusV2CostModel(
 		Deposit:       0,
 	}
 
-	result, err := EnactProposal(&EnactmentContext{
+	result, err := EnactProposal(context.Background(), &EnactmentContext{
 		DB:       db,
 		Slot:     2000,
 		Epoch:    42,
@@ -476,7 +540,7 @@ func TestEnactProposal_DijkstraHardForkPreservesPParams(t *testing.T) {
 		ReturnAddress: testBytes(29, 0xD6),
 	}
 
-	result, err := EnactProposal(&EnactmentContext{
+	result, err := EnactProposal(context.Background(), &EnactmentContext{
 		DB:      db,
 		Slot:    2_000,
 		Epoch:   42,
@@ -523,7 +587,7 @@ func TestEnactProposalHardForkRejectsTypedNilDijkstraPParams(t *testing.T) {
 	encoded, err := cbor.Encode(action)
 	require.NoError(t, err)
 
-	_, err = EnactProposal(&EnactmentContext{
+	_, err = EnactProposal(context.Background(), &EnactmentContext{
 		DB:      db,
 		PParams: (*gdijkstra.DijkstraProtocolParameters)(nil),
 	}, &models.GovernanceProposal{
@@ -609,17 +673,23 @@ func TestEnactProposalHardForkReturnsMutationIsolatedPParams(t *testing.T) {
 				extraBefore = test.extra(pparams)
 			}
 
-			result, err := EnactProposal(&EnactmentContext{
-				DB:      db,
-				PParams: pparams,
-			}, &models.GovernanceProposal{
-				TxHash:        testBytes(32, 0xE2),
-				ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
-				GovActionCbor: encoded,
-				AnchorURL:     "https://example.invalid/mutation-isolation",
-				AnchorHash:    testBytes(32, 0xE3),
-				ReturnAddress: testBytes(29, 0xE4),
-			})
+			result, err := EnactProposal(
+				context.Background(),
+				&EnactmentContext{
+					DB:      db,
+					PParams: pparams,
+				},
+				&models.GovernanceProposal{
+					TxHash: testBytes(32, 0xE2),
+					ActionType: uint8(
+						lcommon.GovActionTypeHardForkInitiation,
+					),
+					GovActionCbor: encoded,
+					AnchorURL:     "https://example.invalid/mutation-isolation",
+					AnchorHash:    testBytes(32, 0xE3),
+					ReturnAddress: testBytes(29, 0xE4),
+				},
+			)
 			require.NoError(t, err)
 			test.mutate(t, result.UpdatedPParams)
 
@@ -757,14 +827,14 @@ func TestApplyUpdateCommittee_PersistsEnactedQuorum(t *testing.T) {
 		CredEpochs:  map[*lcommon.Credential]uint64{},
 		Quorum:      cbor.Rat{Rat: big.NewRat(3, 5)},
 	}
-	err := applyUpdateCommittee(
+	err := applyUpdateCommittee(context.Background(),
 		&EnactmentContext{DB: db, Slot: 4242},
 		action,
 		4000,
 	)
 	require.NoError(t, err)
 
-	got, err := db.GetCommitteeQuorum(nil)
+	got, err := db.GetCommitteeQuorum(context.Background(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, 0, got.Cmp(big.NewRat(3, 5)))
@@ -779,10 +849,10 @@ func TestApplyUpdateCommittee_PersistsZeroQuorum(t *testing.T) {
 		CredEpochs:  map[*lcommon.Credential]uint64{},
 		Quorum:      cbor.Rat{Rat: big.NewRat(0, 1)},
 	}
-	require.NoError(t, applyUpdateCommittee(
+	require.NoError(t, applyUpdateCommittee(context.Background(),
 		&EnactmentContext{DB: db, Slot: 4242}, action, 4000,
 	))
-	got, err := db.GetCommitteeQuorum(nil)
+	got, err := db.GetCommitteeQuorum(context.Background(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, 0, got.Cmp(big.NewRat(0, 1)))
@@ -823,7 +893,7 @@ func TestApplyUpdateCommittee_ReelectionStartsFreshCredentialTerm(
 		AddedSlot:      30,
 	})
 
-	require.NoError(t, applyUpdateCommittee(
+	require.NoError(t, applyUpdateCommittee(context.Background(),
 		&EnactmentContext{DB: db, Slot: 40},
 		&lcommon.UpdateCommitteeGovAction{
 			Credentials: []lcommon.Credential{*coldCredential},
@@ -837,7 +907,7 @@ func TestApplyUpdateCommittee_ReelectionStartsFreshCredentialTerm(
 		CertificateID:  3,
 		AddedSlot:      60,
 	})
-	require.NoError(t, applyUpdateCommittee(
+	require.NoError(t, applyUpdateCommittee(context.Background(),
 		&EnactmentContext{DB: db, Slot: 70},
 		&lcommon.UpdateCommitteeGovAction{
 			CredEpochs: map[*lcommon.Credential]uint64{
@@ -848,33 +918,42 @@ func TestApplyUpdateCommittee_ReelectionStartsFreshCredentialTerm(
 		50,
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, uint64(50), members[0].TermStartSlot)
 	assert.Equal(t, uint64(70), members[0].AddedSlot)
 	resigned, err := db.IsCommitteeMemberResigned(
+		context.Background(),
 		uint8(coldCredential.CredType), coldHash, 50, nil,
 	)
 	require.NoError(t, err)
 	assert.False(t, resigned)
 	authorization, err := db.GetCommitteeMember(
+		context.Background(),
 		uint8(coldCredential.CredType), coldHash, 50, nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, newHotHash, authorization.HotCredential)
 
-	require.NoError(t, db.DeleteCommitteeMembersAfterSlot(65, nil))
-	members, err = db.GetCommitteeMembers(nil)
+	require.NoError(
+		t,
+		db.DeleteCommitteeMembersAfterSlot(context.Background(), 65, nil),
+	)
+	members, err = db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Empty(t, members)
 
-	require.NoError(t, db.DeleteCommitteeMembersAfterSlot(35, nil))
-	members, err = db.GetCommitteeMembers(nil)
+	require.NoError(
+		t,
+		db.DeleteCommitteeMembersAfterSlot(context.Background(), 35, nil),
+	)
+	members, err = db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, uint64(10), members[0].TermStartSlot)
 	resigned, err = db.IsCommitteeMemberResigned(
+		context.Background(),
 		uint8(coldCredential.CredType), coldHash, 10, nil,
 	)
 	require.NoError(t, err)
@@ -928,7 +1007,7 @@ func TestApplyUpdateCommittee_ContinuingMemberKeepsAuthorizationAcrossTermRenewa
 	// without ever removing it: a term renewal for a continuing member, with
 	// no new AuthCommitteeHot or ResignCommitteeCold certificate. The
 	// action's own termStartSlot (40) must not be stamped onto it.
-	require.NoError(t, applyUpdateCommittee(
+	require.NoError(t, applyUpdateCommittee(context.Background(),
 		&EnactmentContext{DB: db, Slot: 40},
 		&lcommon.UpdateCommitteeGovAction{
 			CredEpochs: map[*lcommon.Credential]uint64{
@@ -939,7 +1018,7 @@ func TestApplyUpdateCommittee_ContinuingMemberKeepsAuthorizationAcrossTermRenewa
 		40,
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(
@@ -950,7 +1029,7 @@ func TestApplyUpdateCommittee_ContinuingMemberKeepsAuthorizationAcrossTermRenewa
 	)
 	assert.Equal(t, uint64(80), members[0].ExpiresEpoch)
 
-	active, err := db.GetActiveCommitteeMembers(nil)
+	active, err := db.GetActiveCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(
 		t,
@@ -961,6 +1040,7 @@ func TestApplyUpdateCommittee_ContinuingMemberKeepsAuthorizationAcrossTermRenewa
 	assert.Equal(t, hotHash, active[0].HotCredential)
 
 	resigned, err := db.IsCommitteeMemberResigned(
+		context.Background(),
 		uint8(coldCredential.CredType),
 		coldHash,
 		members[0].TermStartSlot,
@@ -974,6 +1054,7 @@ func TestApplyUpdateCommittee_ContinuingMemberKeepsAuthorizationAcrossTermRenewa
 	// was gated by term and
 	// the other was not).
 	resignedSet, err := db.GetResignedCommitteeMembers(
+		context.Background(),
 		[]models.CommitteeCredential{{
 			CredentialTag: uint8(coldCredential.CredType),
 			Credential:    coldHash,
@@ -1025,7 +1106,7 @@ func TestApplyUpdateCommittee_ReelectionAfterRemovalExcludesStaleAuthorization(
 		AddedSlot:      20,
 	})
 
-	require.NoError(t, applyUpdateCommittee(
+	require.NoError(t, applyUpdateCommittee(context.Background(),
 		&EnactmentContext{DB: db, Slot: 40},
 		&lcommon.UpdateCommitteeGovAction{
 			Credentials: []lcommon.Credential{*coldCredential},
@@ -1033,13 +1114,16 @@ func TestApplyUpdateCommittee_ReelectionAfterRemovalExcludesStaleAuthorization(
 		},
 		40,
 	))
-	membersAfterRemoval, err := db.GetCommitteeMembers(nil)
+	membersAfterRemoval, err := db.GetCommitteeMembers(
+		context.Background(),
+		nil,
+	)
 	require.NoError(t, err)
 	require.Empty(t, membersAfterRemoval)
 
 	// Re-election: a later UpdateCommittee action re-elects the same cold
 	// credential. No new AuthCommitteeHot certificate has been submitted.
-	require.NoError(t, applyUpdateCommittee(
+	require.NoError(t, applyUpdateCommittee(context.Background(),
 		&EnactmentContext{DB: db, Slot: 90},
 		&lcommon.UpdateCommitteeGovAction{
 			CredEpochs: map[*lcommon.Credential]uint64{
@@ -1050,7 +1134,7 @@ func TestApplyUpdateCommittee_ReelectionAfterRemovalExcludesStaleAuthorization(
 		90,
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(
@@ -1060,7 +1144,7 @@ func TestApplyUpdateCommittee_ReelectionAfterRemovalExcludesStaleAuthorization(
 		"a credential rejoining after removal must get a fresh term start",
 	)
 
-	active, err := db.GetActiveCommitteeMembers(nil)
+	active, err := db.GetActiveCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Empty(
 		t,
@@ -1069,6 +1153,7 @@ func TestApplyUpdateCommittee_ReelectionAfterRemovalExcludesStaleAuthorization(
 	)
 
 	_, err = db.GetCommitteeMember(
+		context.Background(),
 		uint8(coldCredential.CredType),
 		coldHash,
 		members[0].TermStartSlot,
@@ -1112,12 +1197,16 @@ func TestApplyUpdateCommittee_ReelectionAfterResignationClearsResignedFlag(
 	})
 
 	resignedBeforeRemoval, err := db.IsCommitteeMemberResigned(
-		uint8(coldCredential.CredType), coldHash, 10, nil,
+		context.Background(),
+		uint8(coldCredential.CredType),
+		coldHash,
+		10,
+		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, resignedBeforeRemoval)
 
-	require.NoError(t, applyUpdateCommittee(
+	require.NoError(t, applyUpdateCommittee(context.Background(),
 		&EnactmentContext{DB: db, Slot: 40},
 		&lcommon.UpdateCommitteeGovAction{
 			Credentials: []lcommon.Credential{*coldCredential},
@@ -1127,7 +1216,7 @@ func TestApplyUpdateCommittee_ReelectionAfterResignationClearsResignedFlag(
 	))
 
 	// Re-election, no new certificate submitted of either kind.
-	require.NoError(t, applyUpdateCommittee(
+	require.NoError(t, applyUpdateCommittee(context.Background(),
 		&EnactmentContext{DB: db, Slot: 90},
 		&lcommon.UpdateCommitteeGovAction{
 			CredEpochs: map[*lcommon.Credential]uint64{
@@ -1138,12 +1227,13 @@ func TestApplyUpdateCommittee_ReelectionAfterResignationClearsResignedFlag(
 		90,
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, uint64(90), members[0].TermStartSlot)
 
 	resigned, err := db.IsCommitteeMemberResigned(
+		context.Background(),
 		uint8(coldCredential.CredType),
 		coldHash,
 		members[0].TermStartSlot,
@@ -1158,6 +1248,7 @@ func TestApplyUpdateCommittee_ReelectionAfterResignationClearsResignedFlag(
 
 	// GetResignedCommitteeMembers must agree.
 	resignedSet, err := db.GetResignedCommitteeMembers(
+		context.Background(),
 		[]models.CommitteeCredential{{
 			CredentialTag: uint8(coldCredential.CredType),
 			Credential:    coldHash,
@@ -1183,7 +1274,12 @@ func TestEnactProposal_NoConfidence_ClearsCommitteeQuorum(
 	// Seed an enacted quorum from a prior UpdateCommittee.
 	require.NoError(
 		t,
-		db.SetCommitteeQuorum(big.NewRat(3, 5), 1000, nil),
+		db.SetCommitteeQuorum(
+			context.Background(),
+			big.NewRat(3, 5),
+			1000,
+			nil,
+		),
 	)
 
 	// Build a NoConfidence proposal with a zero deposit so the
@@ -1208,13 +1304,13 @@ func TestEnactProposal_NoConfidence_ClearsCommitteeQuorum(
 		Deposit: 0,
 	}
 
-	_, err = EnactProposal(
+	_, err = EnactProposal(context.Background(),
 		&EnactmentContext{DB: db, Slot: 2000, Epoch: 42},
 		proposal,
 	)
 	require.NoError(t, err)
 
-	got, err := db.GetCommitteeQuorum(nil)
+	got, err := db.GetCommitteeQuorum(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Nil(t, got, "NoConfidence should clear the enacted quorum")
 }
@@ -1227,7 +1323,7 @@ func TestApplyUpdateCommitteePreservesZeroTermStartSlot(t *testing.T) {
 		CredType:   lcommon.CredentialTypeAddrKeyHash,
 		Credential: lcommon.NewBlake2b224(testBytes(28, 0x7a)),
 	}
-	require.NoError(t, applyUpdateCommittee(
+	require.NoError(t, applyUpdateCommittee(context.Background(),
 		&EnactmentContext{DB: db, Slot: 50},
 		&lcommon.UpdateCommitteeGovAction{
 			CredEpochs: map[*lcommon.Credential]uint64{credential: 20},
@@ -1236,7 +1332,7 @@ func TestApplyUpdateCommitteePreservesZeroTermStartSlot(t *testing.T) {
 		0,
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	require.Zero(
@@ -1270,7 +1366,7 @@ func TestApplyTreasuryWithdrawal_CreditsRewardsAndDebitsTreasury(
 	a := &lcommon.TreasuryWithdrawalGovAction{
 		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 7},
 	}
-	err = applyTreasuryWithdrawal(&EnactmentContext{
+	err = applyTreasuryWithdrawal(context.Background(), &EnactmentContext{
 		DB:   db,
 		Slot: 123,
 	}, a, &models.GovernanceProposal{TxHash: testBytes(32, 0xA0)})
@@ -1312,14 +1408,14 @@ func TestApplyTreasuryWithdrawal_DistinguishesSameTxActionIndex(
 	txHash := testBytes(32, 0x22)
 	first := &models.GovernanceProposal{TxHash: txHash, ActionIndex: 0}
 	second := &models.GovernanceProposal{TxHash: txHash, ActionIndex: 1}
-	require.NoError(t, applyTreasuryWithdrawal(
+	require.NoError(t, applyTreasuryWithdrawal(context.Background(),
 		ctx,
 		&lcommon.TreasuryWithdrawalGovAction{
 			Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 7},
 		},
 		first,
 	))
-	require.NoError(t, applyTreasuryWithdrawal(
+	require.NoError(t, applyTreasuryWithdrawal(context.Background(),
 		ctx,
 		&lcommon.TreasuryWithdrawalGovAction{
 			Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 11},
@@ -1411,7 +1507,7 @@ func TestApplyTreasuryWithdrawal_RejectsOverdrawnTreasury(
 	a := &lcommon.TreasuryWithdrawalGovAction{
 		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 7},
 	}
-	err = applyTreasuryWithdrawal(&EnactmentContext{
+	err = applyTreasuryWithdrawal(context.Background(), &EnactmentContext{
 		DB:   db,
 		Slot: 123,
 	}, a, &models.GovernanceProposal{TxHash: testBytes(32, 0xA1)})
@@ -1451,7 +1547,7 @@ func TestApplyTreasuryWithdrawal_LeavesMissingRewardAccountInTreasury(
 	a := &lcommon.TreasuryWithdrawalGovAction{
 		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 7},
 	}
-	err = applyTreasuryWithdrawal(&EnactmentContext{
+	err = applyTreasuryWithdrawal(context.Background(), &EnactmentContext{
 		DB:   db,
 		Slot: 123,
 	}, a, &models.GovernanceProposal{TxHash: testBytes(32, 0xA2)})
@@ -1499,7 +1595,7 @@ func TestApplyTreasuryWithdrawal_LeavesInactiveRewardAccountInTreasury(
 	a := &lcommon.TreasuryWithdrawalGovAction{
 		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 7},
 	}
-	err = applyTreasuryWithdrawal(&EnactmentContext{
+	err = applyTreasuryWithdrawal(context.Background(), &EnactmentContext{
 		DB:   db,
 		Slot: 123,
 	}, a, &models.GovernanceProposal{TxHash: testBytes(32, 0xA3)})
@@ -1543,7 +1639,7 @@ func TestApplyTreasuryWithdrawal_UnclaimedStillCountsAgainstCapacity(
 	first := &lcommon.TreasuryWithdrawalGovAction{
 		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 70},
 	}
-	require.NoError(t, applyTreasuryWithdrawal(
+	require.NoError(t, applyTreasuryWithdrawal(context.Background(),
 		ctx,
 		first,
 		&models.GovernanceProposal{TxHash: testBytes(32, 70)},
@@ -1558,7 +1654,7 @@ func TestApplyTreasuryWithdrawal_UnclaimedStillCountsAgainstCapacity(
 	second := &lcommon.TreasuryWithdrawalGovAction{
 		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 40},
 	}
-	err = applyTreasuryWithdrawal(
+	err = applyTreasuryWithdrawal(context.Background(),
 		ctx,
 		second,
 		&models.GovernanceProposal{TxHash: testBytes(32, 40)},

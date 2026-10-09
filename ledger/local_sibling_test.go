@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -143,7 +144,7 @@ func TestStaleBlockfetchBatchIsDiscardedAfterLocalSiblingAdoption(
 
 		// Lower VRF output wins, so the alternative replaces the rival.
 		ours := f.newSibling(t, siblingRivalVrfSeed-1)
-		adopted, err := f.ls.AdoptLocalForgedSibling(ours)
+		adopted, err := f.ls.AdoptLocalForgedSibling(context.Background(), ours)
 		require.NoError(t, err)
 		require.True(t, adopted)
 		require.Greater(
@@ -196,7 +197,7 @@ func TestStaleBlockfetchBatchIsDiscardedAfterLocalSiblingAdoption(
 		before := f.ls.blockfetchRollbackGeneration.Load()
 
 		ours := f.newSibling(t, siblingRivalVrfSeed-1)
-		adopted, err := f.ls.AdoptLocalForgedSibling(ours)
+		adopted, err := f.ls.AdoptLocalForgedSibling(context.Background(), ours)
 		require.ErrorIs(t, err, ErrRollbackExceedsMithrilBoundary)
 		require.False(t, adopted)
 		require.Greater(
@@ -268,6 +269,7 @@ func TestStaleBlockfetchBatchIsDiscardedAfterLocalSiblingAdoption(
 			f.ls.chain.Tip().Point.Hash,
 		)
 		_, err := f.ls.chain.AddBlockWithPointDeferredIf(
+			context.Background(),
 			continuation,
 			point,
 			nil,
@@ -295,7 +297,7 @@ func TestStaleBlockfetchBatchIsDiscardedAfterLocalSiblingAdoption(
 
 		// Higher VRF output loses.
 		ours := f.newSibling(t, siblingRivalVrfSeed+1)
-		adopted, err := f.ls.AdoptLocalForgedSibling(ours)
+		adopted, err := f.ls.AdoptLocalForgedSibling(context.Background(), ours)
 		require.NoError(t, err)
 		require.False(t, adopted)
 		require.Equal(
@@ -404,7 +406,7 @@ const (
 func newSiblingFixture(t *testing.T) *siblingFixture {
 	t.Helper()
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -417,8 +419,14 @@ func newSiblingFixture(t *testing.T) *siblingFixture {
 	rival := newSiblingTestBlock(
 		t, 2, siblingSlot, parent.Hash(), 0x22, siblingRivalVrfSeed, 1,
 	)
-	require.NoError(t, cm.PrimaryChain().AddBlock(parent, nil))
-	require.NoError(t, cm.PrimaryChain().AddBlock(rival, nil))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddBlock(context.Background(), parent, nil),
+	)
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddBlock(context.Background(), rival, nil),
+	)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
@@ -427,6 +435,7 @@ func newSiblingFixture(t *testing.T) *siblingFixture {
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	ls.metrics.init(prometheus.NewRegistry())
 
 	parentTip := ochainsync.Tip{
@@ -489,7 +498,7 @@ func TestAdoptLocalForgedSiblingAdoptsTheWinnerOfChainSelection(
 		// Lower VRF output wins.
 		ours := f.newSibling(t, siblingRivalVrfSeed-1)
 
-		adopted, err := f.ls.AdoptLocalForgedSibling(ours)
+		adopted, err := f.ls.AdoptLocalForgedSibling(context.Background(), ours)
 		require.NoError(t, err)
 		require.True(t, adopted, "lower VRF output must win the tiebreak")
 
@@ -499,7 +508,7 @@ func TestAdoptLocalForgedSiblingAdoptsTheWinnerOfChainSelection(
 		assert.Equal(t, f.rival.SlotNumber(), tip.Point.Slot)
 		// The rollback was exactly one block deep: the fork point is still
 		// on the chain and is our block's parent.
-		parent, _, ok := f.ls.chain.TipPredecessor()
+		parent, _, ok := f.ls.chain.TipPredecessor(context.Background())
 		require.True(t, ok)
 		assert.Equal(t, f.parent.Hash().Bytes(), parent.Hash)
 	})
@@ -509,7 +518,7 @@ func TestAdoptLocalForgedSiblingAdoptsTheWinnerOfChainSelection(
 		// Higher VRF output loses.
 		ours := f.newSibling(t, siblingRivalVrfSeed+1)
 
-		adopted, err := f.ls.AdoptLocalForgedSibling(ours)
+		adopted, err := f.ls.AdoptLocalForgedSibling(context.Background(), ours)
 		require.NoError(t, err)
 		require.False(t, adopted, "higher VRF output must lose the tiebreak")
 
@@ -529,7 +538,7 @@ func TestAdoptLocalForgedSiblingAdoptsTheWinnerOfChainSelection(
 		// would adopt here.
 		ours := f.newSibling(t, siblingRivalVrfSeed)
 
-		adopted, err := f.ls.AdoptLocalForgedSibling(ours)
+		adopted, err := f.ls.AdoptLocalForgedSibling(context.Background(), ours)
 		require.NoError(t, err)
 		require.False(t, adopted)
 		assert.Equal(t, f.rival.Hash().Bytes(), f.ls.chain.Tip().Point.Hash)
@@ -546,7 +555,7 @@ func TestAdoptLocalForgedSiblingRejectsNonSiblings(t *testing.T) {
 			t, f.rival.BlockNumber()+1, f.rival.SlotNumber()+1,
 			f.rival.Hash(), 0x33, 0x33, 1,
 		)
-		adopted, err := f.ls.AdoptLocalForgedSibling(extension)
+		adopted, err := f.ls.AdoptLocalForgedSibling(context.Background(), extension)
 		require.ErrorIs(t, err, ErrNotChainTipSibling)
 		assert.False(t, adopted)
 	})
@@ -557,7 +566,7 @@ func TestAdoptLocalForgedSiblingRejectsNonSiblings(t *testing.T) {
 			t, f.rival.BlockNumber()+1, f.rival.SlotNumber(),
 			f.parent.Hash(), 0x33, 0x33, 1,
 		)
-		adopted, err := f.ls.AdoptLocalForgedSibling(wrong)
+		adopted, err := f.ls.AdoptLocalForgedSibling(context.Background(), wrong)
 		require.ErrorIs(t, err, ErrNotChainTipSibling)
 		assert.False(t, adopted)
 	})
@@ -568,7 +577,7 @@ func TestAdoptLocalForgedSiblingRejectsNonSiblings(t *testing.T) {
 			t, f.rival.BlockNumber(), siblingParentSlot,
 			f.parent.Hash(), 0x33, 0x33, 1,
 		)
-		adopted, err := f.ls.AdoptLocalForgedSibling(wrong)
+		adopted, err := f.ls.AdoptLocalForgedSibling(context.Background(), wrong)
 		require.ErrorIs(t, err, ErrNotChainTipSibling)
 		assert.False(t, adopted)
 	})
@@ -586,7 +595,7 @@ func TestAdoptLocalForgedSiblingRejectsNonSiblings(t *testing.T) {
 			f.parent.Hash(), 0x33, 0x33, 1,
 		)
 		require.Greater(t, offSlot.SlotNumber(), siblingParentSlot)
-		adopted, err := f.ls.AdoptLocalForgedSibling(offSlot)
+		adopted, err := f.ls.AdoptLocalForgedSibling(context.Background(), offSlot)
 		require.ErrorIs(t, err, ErrNotChainTipSibling)
 		require.ErrorContains(t, err, "is not the chain tip's slot")
 		assert.False(t, adopted)
@@ -594,7 +603,7 @@ func TestAdoptLocalForgedSiblingRejectsNonSiblings(t *testing.T) {
 
 	t.Run("the block already at the tip", func(t *testing.T) {
 		f := newSiblingFixture(t)
-		adopted, err := f.ls.AdoptLocalForgedSibling(f.rival)
+		adopted, err := f.ls.AdoptLocalForgedSibling(context.Background(), f.rival)
 		require.ErrorIs(t, err, ErrNotChainTipSibling)
 		assert.False(t, adopted)
 	})

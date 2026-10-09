@@ -156,12 +156,27 @@ func endorserBlockTxIds(rawTxs []cbor.RawMessage) ([][]byte, error) {
 // leiosEndorserBlockStorageError so callers can abort the outer transaction
 // instead of committing a partial endorser-block application.
 func (ls *LedgerState) applyEndorserBlock(
+	ctx context.Context,
 	txn *database.Txn,
 	rbPoint ocommon.Point,
 	rbBlockNumber uint64,
 	ebSlot uint64,
 	ebHashBytes []byte,
 	rawTxs []cbor.RawMessage,
+) (int, uint64, error) {
+	ls.publishUntickedClosureAfterCommit(ctx, txn, rbPoint)
+	return ls.applyEndorserBlockInContext(ctx, txn, rbPoint, rbBlockNumber, ebSlot, ebHashBytes, rawTxs, nil)
+}
+
+func (ls *LedgerState) applyEndorserBlockInContext(
+	ctx context.Context,
+	txn *database.Txn,
+	rbPoint ocommon.Point,
+	rbBlockNumber uint64,
+	ebSlot uint64,
+	ebHashBytes []byte,
+	rawTxs []cbor.RawMessage,
+	contextSlot *uint64,
 ) (int, uint64, error) {
 	if len(rawTxs) == 0 {
 		return 0, 0, nil
@@ -206,7 +221,11 @@ func (ls *LedgerState) applyEndorserBlock(
 	// CIP path compacts the block to transactions that still need UTxO apply;
 	// the Musashi path keeps the blob intact for serving while using the indexes
 	// to suppress duplicate ledger effects.
-	keepIndexes, err := ls.deduplicateEndorserBlockTransactionIndexes(txs, txn)
+	keepIndexes, err := ls.deduplicateEndorserBlockTransactionIndexes(
+		ctx,
+		txs,
+		txn,
+	)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -260,6 +279,13 @@ func (ls *LedgerState) applyEndorserBlock(
 	)
 	defer delta.Release()
 	delta.Offsets = offsets
+	delta.closureContextSlot = contextSlot
+	if contextSlot != nil {
+		delta.stageApplyEvents = func(events []TransactionEvent) {
+			pending := &pendingLeiosClosure{point: ocommon.Point{Slot: rbPoint.Slot, Hash: bytes.Clone(rbPoint.Hash)}, events: events}
+			txn.AfterCommit(func() { ls.Lock(); ls.untickedClosure = pending; ls.Unlock() })
+		}
+	}
 	if ls.config.LeiosApplyEndorserBlockTxs {
 		for i, tx := range txs {
 			delta.addTransaction(tx, i)
@@ -289,7 +315,7 @@ func (ls *LedgerState) applyEndorserBlock(
 	// block removes these effects.
 	if !ls.config.LeiosApplyEndorserBlockTxs {
 		delta.skipConsumedInputRecovery = true
-		if err := delta.applyWithoutRecordingDonations(ls, txn); err != nil {
+		if err := delta.applyWithoutRecordingDonations(ctx, ls, txn); err != nil {
 			return 0, 0, &leiosEndorserBlockStorageError{
 				err: fmt.Errorf(
 					"apply endorser block transactions: %w",
@@ -303,7 +329,7 @@ func (ls *LedgerState) applyEndorserBlock(
 	// CIP-conformant path: apply the endorser transactions as a delta recorded
 	// under the ranking block's point (so a rollback removes them), with offsets
 	// pointing into the endorser-block blob.
-	if err := delta.applyWithoutRecordingDonations(ls, txn); err != nil {
+	if err := delta.applyWithoutRecordingDonations(ctx, ls, txn); err != nil {
 		return 0, 0, &leiosEndorserBlockStorageError{
 			err: fmt.Errorf("apply endorser block transactions: %w", err),
 		}
@@ -312,6 +338,7 @@ func (ls *LedgerState) applyEndorserBlock(
 }
 
 func (ls *LedgerState) deduplicateEndorserBlockTransactionIndexes(
+	ctx context.Context,
 	txs []lcommon.Transaction,
 	txn *database.Txn,
 ) ([]int, error) {
@@ -322,7 +349,7 @@ func (ls *LedgerState) deduplicateEndorserBlockTransactionIndexes(
 	for i, tx := range txs {
 		hashes[i] = tx.Hash().Bytes()
 	}
-	existing, err := ls.db.GetTransactionsByHashes(hashes, txn)
+	existing, err := ls.db.GetTransactionsByHashes(ctx, hashes, txn)
 	if err != nil {
 		return nil, fmt.Errorf("dedup endorser transactions: %w", err)
 	}
@@ -504,7 +531,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// trigger certified endorser-block work, including during replay. Resolve a
 	// parent announcement from this batch before falling back to persisted data.
 	for _, block := range blocks {
-		if err := ls.validateDijkstraLeiosCertificate(block, annByHash); err != nil {
+		if err := ls.validateDijkstraLeiosCertificate(ctx, block, annByHash); err != nil {
 			return fmt.Errorf("validate Dijkstra Leios certificate: %w", err)
 		}
 	}
@@ -526,7 +553,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			if ls.db == nil {
 				continue
 			}
-			parent, err := ls.BlockByHash([]byte(info.prevHash))
+			parent, err := ls.BlockByHash(ctx, []byte(info.prevHash))
 			if err != nil {
 				continue
 			}
@@ -1146,6 +1173,7 @@ func leiosBlockInfoFrom(blk ledger.Block) leiosBlockInfo {
 }
 
 func (ls *LedgerState) validateDijkstraLeiosCertificate(
+	ctx context.Context,
 	block ledger.Block,
 	batchAnnouncements map[string]leiosEbRef,
 ) error {
@@ -1187,6 +1215,7 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 		ebSlot, announced = batchAnnouncement.slot, true
 	} else {
 		_, ebSlot, _, announced, err = ls.leiosCertifiedAnnouncementFromParent(
+			ctx,
 			block.PrevHash().Bytes(),
 		)
 		if err != nil {
@@ -1347,6 +1376,7 @@ func leiosAnnouncementFromBlockCbor(
 // content-addressed and the same hash can legitimately recur at a different
 // slot.
 func (ls *LedgerState) leiosEndorserBlockForApply(
+	ctx context.Context,
 	block ledger.Block,
 ) (hash lcommon.Blake2b256, expectedSlot, size uint64, announced bool, err error) {
 	if ls.config.LeiosApplyEndorserBlockTxs {
@@ -1365,7 +1395,10 @@ func (ls *LedgerState) leiosEndorserBlockForApply(
 	if !present || !certified {
 		return lcommon.Blake2b256{}, 0, 0, false, nil
 	}
-	return ls.leiosCertifiedAnnouncementFromParent(block.PrevHash().Bytes())
+	return ls.leiosCertifiedAnnouncementFromParent(
+		ctx,
+		block.PrevHash().Bytes(),
+	)
 }
 
 // leiosCertifiedAnnouncementFromParent resolves the endorser block a certifying
@@ -1374,6 +1407,7 @@ func (ls *LedgerState) leiosEndorserBlockForApply(
 // the same reference from a retained parent hash alone, without holding the
 // certifying block, and cannot drift from what apply selects.
 func (ls *LedgerState) leiosCertifiedAnnouncementFromParent(
+	ctx context.Context,
 	prevHash []byte,
 ) (hash lcommon.Blake2b256, expectedSlot, size uint64, announced bool, err error) {
 	if ls.db == nil {
@@ -1381,7 +1415,7 @@ func (ls *LedgerState) leiosCertifiedAnnouncementFromParent(
 			"resolve certifying block parent: database unavailable",
 		)
 	}
-	parent, perr := ls.BlockByHash(prevHash)
+	parent, perr := ls.BlockByHash(ctx, prevHash)
 	if perr != nil {
 		return lcommon.Blake2b256{}, 0, 0, false, fmt.Errorf(
 			"resolve certifying block parent: %w",
@@ -1853,4 +1887,82 @@ func (b *leiosBackfiller) awaitFetch(
 		case <-ticker.C:
 		}
 	}
+}
+
+// applyUntickedBoundaryClosure folds a prototype closure onto the parent's
+// ledger before NEWEPOCH, retaining the certifying RB point for rollback.
+func (ls *LedgerState) applyUntickedBoundaryClosure(
+	ctx context.Context,
+	txn *database.Txn,
+	block ledger.Block,
+	parentPoint ocommon.Point,
+) error {
+	if err := ls.validateBlockCheckpoint(block); err != nil {
+		return err
+	}
+	if !bytes.Equal(block.PrevHash().Bytes(), parentPoint.Hash) {
+		return fmt.Errorf("%w: boundary closure does not extend the ledger tip", errStaleChainIterator)
+	}
+	if err := ls.validateDijkstraLeiosCertificate(ctx, block, nil); err != nil {
+		return err
+	}
+	hash, slot, _, referenced, err := ls.leiosEndorserBlockForApply(ctx, block)
+	if err != nil {
+		return err
+	}
+	if !referenced {
+		return nil
+	}
+	if ls.config.EndorserBlockProvider == nil {
+		return errCertifiedEndorserBlockUnavailable
+	}
+	txs, found := ls.config.EndorserBlockProvider(hash.Bytes(), slot)
+	if !found {
+		return errCertifiedEndorserBlockUnavailable
+	}
+	point := ocommon.Point{Slot: block.SlotNumber(), Hash: block.Hash().Bytes()}
+	_, donation, err := ls.applyEndorserBlockInContext(ctx, txn, point, block.BlockNumber(), slot, hash.Bytes(), txs, &parentPoint.Slot)
+	if err != nil {
+		return err
+	}
+	if donation > 0 {
+		ls.RLock()
+		epoch := ls.currentEpoch.EpochId
+		ls.RUnlock()
+		if err := ls.db.Metadata().AddNetworkDonation(point.Slot, epoch, donation, txn.Metadata()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type pendingLeiosClosure struct {
+	point  ocommon.Point
+	events []TransactionEvent
+}
+
+// publishUntickedClosureAfterCommit keeps transaction Apply notifications with
+// the certifying RB's commit, including when a failed body is retried.
+func (ls *LedgerState) publishUntickedClosureAfterCommit(ctx context.Context, txn *database.Txn, point ocommon.Point) {
+	ls.RLock()
+	pending := ls.untickedClosure
+	ls.RUnlock()
+	if pending == nil || !pointMatches(pending.point, point) {
+		return
+	}
+	txn.AfterCommit(func() {
+		ls.Lock()
+		if ls.untickedClosure != pending {
+			ls.Unlock()
+			return
+		}
+		ls.untickedClosure = nil
+		ls.Unlock()
+		if ls.beforeTransactionApplyPublish != nil {
+			ls.beforeTransactionApplyPublish()
+		}
+		for _, evt := range pending.events {
+			ls.publishTransactionEvent(ctx, evt)
+		}
+	})
 }

@@ -16,6 +16,7 @@ package node
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -62,7 +63,9 @@ func backfillTestBatch(
 		23: cbor.NewSetType([]cbor.RawMessage{child}, true),
 	})
 	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, true, nil})
+	txCbor, err := cbor.Encode(
+		[]any{cbor.RawMessage(body), map[uint]any{}, nil},
+	)
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
 	require.NoError(t, err)
@@ -86,9 +89,9 @@ func TestBackfillDijkstraBatchUtxoEffects(t *testing.T) {
 			db := newTestDB(t)
 			backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			childIn, topIn, collateral := backfillTestRef(0xe1), backfillTestRef(0xe2), backfillTestRef(0xe3)
-			require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+			require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 				for _, id := range [][]byte{childIn, topIn, collateral} {
-					if err := db.CreateUtxo(txn, &models.Utxo{
+					if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
 						TxId:       id,
 						OutputIdx:  0,
 						PaymentKey: bytes.Repeat([]byte{0x42}, 28),
@@ -142,8 +145,8 @@ func TestBackfillDijkstraBatchUtxoEffects(t *testing.T) {
 			}
 
 			acc := db.NewBatchAccumulator()
-			require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-				if err := backfill.processBlockTxsBatched(
+			require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+				if err := backfill.processBlockTxsBatched(context.Background(),
 					[]lcommon.Transaction{tx},
 					point,
 					12,

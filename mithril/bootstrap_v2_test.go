@@ -38,6 +38,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
@@ -47,6 +48,31 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func testNodeConfigWithMithrilKeys(
+	t *testing.T,
+	genesisVKey string,
+	ancillaryVKey string,
+) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{
+		MithrilGenesisVerificationKey:          genesisVKey,
+		MithrilGenesisAncillaryVerificationKey: ancillaryVKey,
+	}
+	byronGenesis, err := os.ReadFile(
+		filepath.Join("..", "config", "cardano", "devnet", "byron-genesis.json"),
+	)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cfg.LoadByronGenesisFromReader(bytes.NewReader(byronGenesis)),
+	)
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"epochLength": 2000,
+		"slotLength": 1
+	}`)))
+	return cfg
+}
 
 // buildTarZst builds a zstd-compressed tar archive from the given
 // file map (paths use forward slashes).
@@ -321,6 +347,10 @@ type v2Fixture struct {
 	ancillaryVKey        string
 	genesisVKey          string
 	immutableHits        atomic.Int32
+	// immutableGate, when set, runs on each immutable archive request before
+	// the response is written. Set it before the first request.
+	immutableGate func()
+
 	// ancillaryServed, when set, replaces ancillaryArchive on the wire.
 	ancillaryServed atomic.Pointer[[]byte]
 }
@@ -697,6 +727,9 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 					return
 				}
 				fixture.immutableHits.Add(1)
+				if fixture.immutableGate != nil {
+					fixture.immutableGate()
+				}
 				_, _ = w.Write(archive)
 			case strings.HasPrefix(p, "/certificate/"):
 				hash := strings.TrimPrefix(p, "/certificate/")
@@ -937,6 +970,55 @@ func TestSyncV2NoCertVerificationUsesExtractDirLedgerState(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1000), result.LedgerSlot)
+}
+
+func TestSyncV2SerializesMetadataWriterPhases(t *testing.T) {
+	_, certifiedHash := validImmutableFiles(t, 1000)
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		validImmutable:       true,
+		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
+		ancillaryLedgerSlot:  1000,
+	})
+	var ledgerImportActive atomic.Bool
+	var immutableCopyActive atomic.Bool
+	var metadataWritersOverlapped atomic.Bool
+	var immutableBlocksCopied atomic.Int64
+
+	_, err := Sync(context.Background(), SyncConfig{
+		Network:     "preprod",
+		DataDir:     t.TempDir(),
+		StorageMode: "core",
+		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
+			t, fixture.genesisVKey, fixture.ancillaryVKey,
+		),
+		Backend:           BackendV2,
+		AggregatorURL:     fixture.server.URL,
+		AllowInsecureHTTP: true,
+		VerifyCertChain:   true,
+		CleanupAfterLoad:  false,
+		OnProgress: func(progress SyncProgress) {
+			switch progress.Phase {
+			case PhaseLedgerImport:
+				ledgerImportActive.Store(progress.Active)
+				if progress.Active && immutableCopyActive.Load() {
+					metadataWritersOverlapped.Store(true)
+				}
+			case PhaseImmutableCopy:
+				immutableCopyActive.Store(progress.Active)
+				if progress.Active && ledgerImportActive.Load() {
+					metadataWritersOverlapped.Store(true)
+				}
+				if progress.Active && progress.Count > 0 {
+					immutableBlocksCopied.Store(int64(progress.Count))
+				}
+			}
+		},
+	})
+	require.NoError(t, err)
+	require.False(t, metadataWritersOverlapped.Load(),
+		"ledger import and immutable copy must not write metadata concurrently")
+	require.Positive(t, immutableBlocksCopied.Load(),
+		"verified bootstrap must copy immutable blocks before importing the tip")
 }
 
 func TestBootstrapV2DigestsAggregatorFallback(t *testing.T) {

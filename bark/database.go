@@ -122,15 +122,16 @@ type operation struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	mu              sync.Mutex
-	status          databasev1alpha1.OperationStatus
-	message         string
-	updatedAt       time.Time
-	completedAt     time.Time
-	hasCompleted    bool
-	cancelRequested bool
-	snapshotID      string // CreateSnapshot only
-	blocksRemoved   uint64 // Truncate only
+	mu                 sync.Mutex
+	status             databasev1alpha1.OperationStatus
+	message            string
+	updatedAt          time.Time
+	completedAt        time.Time
+	hasCompleted       bool
+	completionReserved bool
+	cancelRequested    bool
+	snapshotID         string // CreateSnapshot only
+	blocksRemoved      uint64 // Truncate only
 }
 
 func (o *operation) setRunning() {
@@ -175,11 +176,19 @@ func (o *operation) complete(err error, blocksRemoved uint64) {
 func (o *operation) requestCancel() databasev1alpha1.OperationStatus {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if !o.hasCompleted {
+	if !o.hasCompleted && !o.completionReserved {
 		o.cancelRequested = true
 		o.cancel()
 	}
 	return o.status
+}
+
+// reserveCompletion freezes cancellation before the service releases its busy
+// flag, while leaving terminal status unpublished until the next operation can start.
+func (o *operation) reserveCompletion() {
+	o.mu.Lock()
+	o.completionReserved = true
+	o.mu.Unlock()
 }
 
 func (o *operation) progress() *databasev1alpha1.OperationProgress {
@@ -348,6 +357,20 @@ func (h *databaseServiceHandler) finishOperation() {
 	h.mu.Unlock()
 }
 
+// completeOperation releases the busy flag and then publishes op's terminal
+// status. The order matters: a client that observes a terminal status must be
+// able to start the next operation, so the flag cannot still be held when the
+// status becomes visible.
+func (h *databaseServiceHandler) completeOperation(
+	op *operation,
+	err error,
+	blocksRemoved uint64,
+) {
+	op.reserveCompletion()
+	h.finishOperation()
+	op.complete(err, blocksRemoved)
+}
+
 func (h *databaseServiceHandler) lookupOperation(
 	id string,
 ) (*operation, error) {
@@ -423,9 +446,8 @@ func (h *databaseServiceHandler) CreateSnapshot(
 	description := req.Msg.GetDescription()
 
 	go func() {
-		defer h.finishOperation()
 		op.setRunning()
-		op.complete(runProtected(func() error {
+		h.completeOperation(op, runProtected(func() error {
 			_, snapErr := h.bark.config.Lifecycle.Snapshot(
 				ctx, destDir, name, description,
 			)
@@ -588,6 +610,26 @@ type snapshotCatalogItem struct {
 	entry    lifecycle.SnapshotEntry
 }
 
+func (h *databaseServiceHandler) cloudManifestOptions() (
+	[]lifecycle.ManifestOption,
+	error,
+) {
+	if h.bark.config.Lifecycle == nil {
+		return nil, connect.NewError(
+			connect.CodeFailedPrecondition,
+			errors.New("database lifecycle service is unavailable"),
+		)
+	}
+	opts, err := h.bark.config.Lifecycle.ManifestOptions()
+	if err != nil {
+		return nil, connect.NewError(
+			connect.CodeFailedPrecondition,
+			fmt.Errorf("load snapshot trust key: %w", err),
+		)
+	}
+	return opts, nil
+}
+
 // mergedSnapshotCatalogPage returns one page of the combined local + cloud
 // snapshot catalog, for ListAvailableSnapshots. A cloud entry whose ID
 // already appears in the local catalog is skipped in favor of the local
@@ -637,27 +679,27 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 		})
 	}
 
+	manifestOpts, err := h.cloudManifestOptions()
+	if err != nil {
+		return nil, "", err
+	}
 	cloudEntries, ok, err := lifecycle.ListCloudSnapshots(
 		ctx,
 		h.bark.config.DestinationRegistry,
 		h.bark.config.SnapshotCloudDestination,
+		manifestOpts...,
 	)
 	if err != nil {
-		// A cloud listing failure is typically connectivity/auth (the same
-		// class of failure cloudSnapshotExists/resolveSnapshotSource/
-		// DeleteSnapshot elsewhere in this file report as CodeUnavailable,
-		// not CodeInternal), and the local entries built above are already
-		// known-good -- failing the whole call here would hide real,
-		// currently-available local snapshots from an operator over what
-		// is often just a transient cloud outage. Log and continue with
-		// local-only results instead, the same best-effort convention
-		// Manager.pruneOldSnapshots uses for a cloud-side failure.
+		// A cloud lister can return validated entries alongside errors for
+		// individual snapshots it could not read or authenticate. Keep those
+		// usable entries in the catalog while logging the omissions. A total
+		// listing failure returns no entries, which naturally leaves the
+		// local catalog intact.
 		h.bark.config.Logger.Warn(
-			"list cloud snapshots failed, returning local snapshots only",
+			"cloud snapshot listing omitted entries or was incomplete",
 			"component", "bark",
 			"error", err,
 		)
-		ok = false
 	}
 	if ok {
 		for _, e := range cloudEntries {
@@ -751,10 +793,15 @@ func (h *databaseServiceHandler) cloudSnapshotExists(
 		h.bark.config.SnapshotCloudDestination,
 		snapshotID,
 	)
+	manifestOpts, err := h.cloudManifestOptions()
+	if err != nil {
+		return cloudURI, false, err
+	}
 	_, ok, fetchErr := lifecycle.FetchCloudManifest(
 		ctx,
 		h.bark.config.DestinationRegistry,
 		cloudURI,
+		manifestOpts...,
 	)
 	if !ok {
 		return cloudURI, false, nil
@@ -790,7 +837,11 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 	if errors.Is(localErr, lifecycle.ErrManifestTooLarge) {
 		return "", connect.NewError(
 			connect.CodeResourceExhausted,
-			fmt.Errorf("snapshot %q manifest exceeds size limit: %w", snapshotID, localErr),
+			fmt.Errorf(
+				"snapshot %q manifest exceeds size limit: %w",
+				snapshotID,
+				localErr,
+			),
 		)
 	}
 	// A corrupted/hand-edited manifest means the snapshot IS there, just
@@ -934,19 +985,33 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 }
 
 // verifySnapshotIntegrity performs a full restore of the snapshot at
-// snapshotDir into a throwaway temporary directory, reusing
+// snapshotDir into a throwaway directory under workParent, reusing
 // lifecycle.Restore's existing validation (manifest checksum, both
 // stores' restore, database.New's startup consistency checks, and a tip
 // comparison) as the actual integrity check, rather than duplicating any
-// of that logic. The temporary directory is always removed before
+// of that logic. The throwaway directory is always removed before
 // returning.
+//
+// A verification restore is as large as the snapshot, so workParent is the
+// snapshot directory rather than the system temp directory. The restore
+// target is a child of the throwaway directory so that its staging, payload
+// and rollback siblings are removed with it; the throwaway directory holds
+// no manifest, so lifecycle.ListSnapshots never reports it.
 func verifySnapshotIntegrity(
 	ctx context.Context,
 	registry *lifecycle.DestinationRegistry,
 	snapshotDir string,
+	workParent string,
 	storageConfig lifecycle.RestoreStorageConfig,
+	manifestOpts []lifecycle.ManifestOption,
 ) error {
-	tempDir, err := os.MkdirTemp("", "dingo-verify-snapshot-*")
+	if err := os.MkdirAll(workParent, 0o755); err != nil {
+		return fmt.Errorf("create verification parent directory: %w", err)
+	}
+	if err := lifecycle.CleanStaleRestoreWorkDirs(workParent); err != nil {
+		return fmt.Errorf("clean stale verification directories: %w", err)
+	}
+	tempDir, err := os.MkdirTemp(workParent, ".dingo-verify-snapshot-*")
 	if err != nil {
 		return fmt.Errorf("create verification directory: %w", err)
 	}
@@ -960,7 +1025,8 @@ func verifySnapshotIntegrity(
 	}
 	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
 	if _, err := lifecycle.Restore(
-		ctx, host, registry, snapshotDir, tempDir, storageConfig,
+		ctx, host, registry, snapshotDir, filepath.Join(tempDir, "data"),
+		storageConfig, manifestOpts...,
 	); err != nil {
 		return fmt.Errorf("verify snapshot: %w", err)
 	}
@@ -989,19 +1055,25 @@ func (h *databaseServiceHandler) VerifySnapshot(
 		h.finishOperation()
 		return nil, err
 	}
+	manifestOpts, err := h.bark.config.Lifecycle.ManifestOptions()
+	if err != nil {
+		h.finishOperation()
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
 	op, opCtx := h.registerOperation(
 		databasev1alpha1.OperationType_OPERATION_TYPE_VERIFY,
 	)
 
 	go func() {
-		defer h.finishOperation()
 		op.setRunning()
-		op.complete(runProtected(func() error {
+		h.completeOperation(op, runProtected(func() error {
 			return verifySnapshotIntegrity(
 				opCtx,
 				h.bark.config.DestinationRegistry,
 				source,
+				h.bark.config.SnapshotDir,
 				h.bark.config.Lifecycle.RestoreStorageConfig(),
+				manifestOpts,
 			)
 		}), 0)
 	}()
@@ -1042,9 +1114,8 @@ func (h *databaseServiceHandler) Restore(
 	)
 
 	go func() {
-		defer h.finishOperation()
 		op.setRunning()
-		op.complete(runProtected(func() error {
+		h.completeOperation(op, runProtected(func() error {
 			_, restoreErr := h.bark.config.Lifecycle.Restore(opCtx, source)
 			return restoreErr
 		}), 0)
@@ -1136,7 +1207,6 @@ func (h *databaseServiceHandler) Truncate(
 	}
 
 	go func() {
-		defer h.finishOperation()
 		op.setRunning()
 		var blocksRemoved uint64
 		err := runProtected(func() error {
@@ -1147,7 +1217,7 @@ func (h *databaseServiceHandler) Truncate(
 			)
 			return truncErr
 		})
-		op.complete(err, blocksRemoved)
+		h.completeOperation(op, err, blocksRemoved)
 	}()
 
 	return connect.NewResponse(&databasev1alpha1.TruncateResponse{

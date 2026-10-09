@@ -197,3 +197,13 @@ func paginationOffset(params PaginationParams) (int, bool) {
 	}
 	return (params.Page - 1) * params.Count, true
 }
+
+// paginateSlice returns the page of items selected by params, or an empty
+// non-nil slice when the page lies beyond the end.
+func paginateSlice[T any](items []T, params PaginationParams) []T {
+	offset, ok := paginationOffset(params)
+	if !ok || offset >= len(items) {
+		return []T{}
+	}
+	return items[offset:min(offset+params.Count, len(items))]
+}

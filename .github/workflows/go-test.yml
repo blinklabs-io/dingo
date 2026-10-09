@@ -8,6 +8,7 @@ name: ci
 #
 #   lint, govulncheck                     2 runners, ~3 min
 #     -> go-test (Linux, quick)           1 runner,  ~8 min
+#       -> devnet (block pipeline)        1 runner, PR pipeline only
 #       -> go-test (Linux)                    services, no race
 #          go-test (Linux, race)              race, no services
 #          go-test (macOS)               3 runners, 5-35 min
@@ -87,10 +88,17 @@ jobs:
       # are written out by hand.
       - name: golangci-lint (root)
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-      - name: golangci-lint (internal/test/antithesis)
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-        with:
-          working-directory: internal/test/antithesis
+      # Unpinned like golangci-lint above, so a new analyzer release's findings
+      # are fixed when it lands. Both run through the Makefile so this job and
+      # `make lint` use the same build tags, flags, and package set.
+      - name: install nilaway and modernize
+        run: |
+          go install go.uber.org/nilaway/cmd/nilaway@latest
+          go install golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@latest
+      - name: nilaway
+        run: make nilaway
+      - name: modernize
+        run: make modernize
       # Folded in from the retired config-parity.yml pull-request job. The
       # network configs under config/cardano/ exist twice: embedded in the
       # binary here (config/cardano/embed.go), and in
@@ -121,31 +129,47 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
-          # This job runs `go run ...@latest`, so third-party code executes in
-          # the workspace. Do not leave GITHUB_TOKEN in the local git config.
+          persist-credentials: false
+      # The action is pinned; the scanner it installs and the vulnerability
+      # database it reads are not, so a new advisory fails the job instead of
+      # waiting behind a stale scanner. The toolchain floats for the same
+      # reason. govulncheck exits non-zero only for vulnerabilities this module
+      # actually calls, so unreachable findings it also prints do not fail the
+      # job. GOFLAGS carries the build tags `make govulncheck` passes, which
+      # the action has no input for. setup-go forces GOTOOLCHAIN=local, so the
+      # step overrides it to honor go.mod's patched toolchain floor when the
+      # setup-go release manifest lags a Go security release.
+      - name: govulncheck
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0 https://github.com/golang/govulncheck-action/releases/tag/v1.1.0
+        env:
+          GOFLAGS: -tags=dingo_extra_plugins
+          GOTOOLCHAIN: auto
+        with:
+          go-version-input: 1.26.x
+          check-latest: true
+          repo-checkout: false
+
+  # The accelerated all-Dingo DevNet with the block pipeline and its parallel
+  # validate stage on, the only end-to-end run of that stage. Both flags
+  # default off in production and in the other DevNet runs. Not a dependency of
+  # anything and not shared with publish.yml.
+  devnet:
+    name: devnet (block pipeline)
+    needs: [go-test-linux-quick]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: 1.26.x
-          cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-1.26.x-
-      - name: govulncheck
-        # govulncheck exits non-zero only for vulnerabilities this module
-        # actually calls, so the unreachable findings it also prints (currently
-        # GO-2026-5932, an unmaintained golang.org/x/crypto package with no
-        # fixed version) do not fail the job.
-        # Both the toolchain and the scanner float on purpose: a pin on either
-        # one parks a new advisory behind a stale version instead of forcing it
-        # to be fixed. Run through the Makefile so this CI check and
-        # `make govulncheck` cannot drift apart.
-        run: make govulncheck
+      - name: DevNet (accelerated)
+        env:
+          DEVNET_BLOCK_PIPELINE_ENABLED: "true"
+          DEVNET_BLOCK_PIPELINE_VALIDATE_ENABLED: "true"
+        run: ./internal/test/devnet/run-tests.sh --accelerated
 
   # Stage 2. The whole suite on SQLite with no race instrumentation and no
   # service containers -- the same command the macOS job runs, which completes
@@ -178,6 +202,11 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 https://github.com/actions/setup-node/releases/tag/v4.4.0
+        with:
+          node-version: '22.x'
+      - name: npm-test
+        run: npm test
       - name: go-build-minimal
         # The default build has no plugin build tags, so a change that only
         # compiles with dingo_extra_plugins breaks the released binary. Cheap
@@ -213,47 +242,6 @@ jobs:
     # live-lifecycle (20m) and go-test (60m) all precede each other.
     timeout-minutes: 120
     services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: dingo_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        # Discarded with the job, so durability buys nothing and every
-        # commit's fsync is cost: the conformance replays commit per statement.
-        command: >-
-          postgres
-          -c fsync=off
-          -c synchronous_commit=off
-          -c full_page_writes=off
-        ports:
-          - 5432:5432
-      mysql:
-        image: mysql:8
-        env:
-          MYSQL_ROOT_PASSWORD: mysql
-          MYSQL_USER: mysql
-          MYSQL_PASSWORD: mysql
-          MYSQL_DATABASE: dingo_test
-        options: >-
-          --health-cmd "sh -c 'mysqladmin ping -h 127.0.0.1 -u root -p$MYSQL_ROOT_PASSWORD'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        # Discarded with the job, so durability buys nothing and every
-        # commit's fsync is cost: the conformance replays commit per statement.
-        command: >-
-          --innodb-file-per-table=OFF
-          --innodb-flush-log-at-trx-commit=0
-          --sync-binlog=0
-          --skip-log-bin
-        ports:
-          - 3306:3306
       minio:
         image: blinklabs/minio:main
         options: >-
@@ -265,6 +253,8 @@ jobs:
           - 9000:9000
           - 9001:9001
     env:
+      DINGO_CI_PG_CONTAINER: dingo-ci-postgres-${{ github.run_id }}-${{ github.run_attempt }}-go-test-linux-${{ matrix.go-version }}
+      DINGO_CI_MYSQL_CONTAINER: dingo-ci-mysql-${{ github.run_id }}-${{ github.run_attempt }}-go-test-linux-${{ matrix.go-version }}
       POSTGRES_HOST: localhost
       POSTGRES_PORT: '5432'
       POSTGRES_USER: postgres
@@ -282,6 +272,46 @@ jobs:
       AWS_REGION: us-east-1
       DINGO_TEST_S3_BUCKET: dingo-test
     steps:
+      - name: start-test-databases
+        run: |
+          set -euo pipefail
+          docker run --detach --name "$DINGO_CI_PG_CONTAINER" \
+            --publish 5432:5432 \
+            --env POSTGRES_USER=postgres --env POSTGRES_PASSWORD=postgres \
+            --env POSTGRES_DB=dingo_test \
+            --health-cmd pg_isready --health-interval 10s \
+            --health-timeout 5s --health-retries 5 \
+            postgres:16 postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
+          docker run --detach --name "$DINGO_CI_MYSQL_CONTAINER" \
+            --publish 3306:3306 \
+            --env MYSQL_ROOT_PASSWORD=mysql --env MYSQL_USER=mysql \
+            --env MYSQL_PASSWORD=mysql --env MYSQL_DATABASE=dingo_test \
+            --health-cmd 'mysqladmin ping -h 127.0.0.1 -u root -p"$MYSQL_ROOT_PASSWORD"' \
+            --health-interval 10s --health-timeout 5s --health-start-period 10s \
+            --health-retries 4 \
+            mysql:8 --innodb-file-per-table=OFF --innodb-flush-log-at-trx-commit=0 \
+            --sync-binlog=0 --skip-log-bin
+          for container in "$DINGO_CI_PG_CONTAINER" "$DINGO_CI_MYSQL_CONTAINER"; do
+            for attempt in {1..60}; do
+              if ! status="$(docker inspect --format '{{.State.Status}} {{.State.Health.Status}}' "$container")"; then
+                echo "Cannot inspect database container $container" >&2
+                docker logs "$container"
+                exit 1
+              fi
+              case "$status" in
+                'running healthy') break ;;
+                'running starting')
+                  if (( attempt == 60 )); then
+                    echo "Database container $container did not become healthy" >&2
+                    docker logs "$container"
+                    exit 1
+                  fi
+                  sleep 1
+                  ;;
+                *) docker logs "$container"; exit 1 ;;
+              esac
+            done
+          done
       - name: setup-s3-bucket
         run: |
             curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
@@ -330,6 +360,7 @@ jobs:
           ./database/plugin/metadata/sqlstore
           ./database/plugin/metadata/postgres
           ./database/plugin/metadata/mysql
+          ./internal/node
           -timeout 10m
       - name: go-test-live-lifecycle
         # These two-node tests exercise live Truncate/Restore while a real
@@ -354,6 +385,19 @@ jobs:
         # job's serialized 10m + 20m + 60m; internal/docsparity's
         # TestPackageTimeoutsStayUnderJobBackstops keeps that ordering.
         run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 60m ./...
+      - name: stop-test-databases
+        if: always()
+        run: |
+          set -euo pipefail
+          names="$(docker ps --all --format '{{.Names}}')"
+          for container in "$DINGO_CI_PG_CONTAINER" "$DINGO_CI_MYSQL_CONTAINER"; do
+            while IFS= read -r name; do
+              if [ "$name" = "$container" ]; then
+                docker rm --force "$container"
+              fi
+            done <<< "$names"
+          done
+
 
   # Stage 3. Race detection on every pull request, not only on a release tag.
   # The release-only arrangement is what abandoned v0.70.3: a genuine
@@ -518,7 +562,7 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: build
         env:
-          BUILD_TARGETS: darwin/arm64
+          BUILD_TARGETS: darwin/amd64 darwin/arm64
         run: .github/scripts/build-targets.sh
 
   # Stage 4. Folded in from the retired ci-docker.yml.

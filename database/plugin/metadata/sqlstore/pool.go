@@ -158,6 +158,7 @@ func poolRegistrationDepositHeld(
 	poolID int64,
 	at poolCertPosition,
 	charged *uint64,
+	executionSlot uint64,
 ) (*uint64, error) {
 	previous, found, err := latestPoolRegistrationBefore(ctx, db, poolID, at)
 	if err != nil {
@@ -182,7 +183,7 @@ func poolRegistrationDepositHeld(
 		// says the pool is gone.
 		return previous.held, nil
 	}
-	epoch, resolved, err := epochAtSlot(ctx, db, at.slot)
+	epoch, resolved, err := epochAtSlot(ctx, db, executionSlot)
 	if err != nil {
 		return nil, err
 	}
@@ -421,8 +422,8 @@ RETURNING id`,
 				decimalUint64(registration.DepositAmount),
 				// An import's recorded deposit is the amount the source says
 				// the pool is holding: `ledgerstate` reads it out of the
-				// snapshot's PState deposit map, and the genesis and
-				// reconcile-tombstone paths record none. Charged and held are
+				// snapshot's PState deposit map, genesis uses poolDeposit,
+				// and reconcile tombstones record none. Charged and held are
 				// therefore the same figure here -- there is no earlier
 				// registration in this database to carry a held amount forward
 				// from, because an import writes no certificate history.
@@ -471,10 +472,11 @@ INSERT INTO pool_registration_owner (
 				relay.PoolRegistrationID = registration.ID
 				relayID, err := queryReturnedID(ctx, db, `
 INSERT INTO pool_registration_relay (
-    ipv4, ipv6, hostname, pool_registration_id, pool_id, port
-) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
+    ipv4, ipv6, relay_type, hostname, pool_registration_id, pool_id, port
+) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 					netIPValue(relay.Ipv4),
 					netIPValue(relay.Ipv6),
+					relay.Type,
 					relay.Hostname,
 					relay.PoolRegistrationID,
 					relay.PoolID,
@@ -897,21 +899,14 @@ func (s *Store) UpdatePoolOpCertSequence(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			if _, err := db.ExecContext(ctx, `
-INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
-VALUES (?, ?, ?)
-ON CONFLICT (pool_key_hash, slot) DO UPDATE
-SET sequence = excluded.sequence`,
+			if _, err := s.execCached(ctx, db, poolOpCertSequenceUpsertSQL,
 				poolKeyHash.Bytes(),
 				slotValue,
 				sequenceValue,
 			); err != nil {
 				return err
 			}
-			_, err := db.ExecContext(ctx, `
-UPDATE pool SET latest_op_cert_sequence = ?
-WHERE pool_key_hash = ?
-  AND latest_op_cert_sequence < ?`,
+			_, err := s.execCached(ctx, db, poolUpdateLatestOpCertSequenceSQL,
 				sequenceValue,
 				poolKeyHash.Bytes(),
 				sequenceValue,
@@ -920,6 +915,17 @@ WHERE pool_key_hash = ?
 		},
 	)
 }
+
+const poolOpCertSequenceUpsertSQL = `
+INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
+VALUES (?, ?, ?)
+ON CONFLICT (pool_key_hash, slot) DO UPDATE
+SET sequence = excluded.sequence`
+
+const poolUpdateLatestOpCertSequenceSQL = `
+UPDATE pool SET latest_op_cert_sequence = ?
+WHERE pool_key_hash = ?
+  AND latest_op_cert_sequence < ?`
 
 func (s *Store) LatestPoolOpCertSequence(
 	poolKeyHash lcommon.PoolKeyHash,
@@ -1070,9 +1076,111 @@ func (s *Store) LatestPoolOpCertSequences(
 		if err := rows.Scan(&poolKeyHash, &sequence); err != nil {
 			return nil, err
 		}
-		ret[string(poolKeyHash)] = uint64(sequence)
+		value, err := opCertSequenceValue(sequence)
+		if err != nil {
+			return nil, err
+		}
+		ret[string(poolKeyHash)] = value
 	}
 	return ret, rows.Err()
+}
+
+// PoolOpCertSequencesChangedAfterSQL lists the pool of every op-cert row after
+// a slot, read as a range of idx_pool_opcert_sequence_slot. It is not
+// DISTINCT: that lets the planner prefer a full scan of the (pool_key_hash,
+// slot) index to deliver the pools in order, and the caller deduplicates the
+// few rows a recent slot leaves. Exported, like LatestPoolOpCertSequencesSQL,
+// so a test can pin its plan.
+const PoolOpCertSequencesChangedAfterSQL = `
+SELECT pool_key_hash
+FROM pool_opcert_sequence
+WHERE slot > ?`
+
+// PoolOpCertSequenceAtOrBeforeSQL is one pool's highest sequence at or before
+// a slot, read through idx_pool_opcert_sequence_pool_slot.
+const PoolOpCertSequenceAtOrBeforeSQL = `
+SELECT MAX(sequence)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND slot <= ?`
+
+func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
+	slot uint64,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	// A slot filter cannot use the (pool_key_hash, sequence) index the
+	// unbounded aggregate reads, and filtering the whole table by slot reads
+	// every row at or before it. Rows after a recent slot are few, so the
+	// unbounded result is corrected for just the pools that have one.
+	ret, err := s.LatestPoolOpCertSequences(txn)
+	if err != nil {
+		return nil, err
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		PoolOpCertSequencesChangedAfterSQL,
+		slotValue,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var changed [][]byte
+	seen := make(map[string]struct{})
+	for rows.Next() {
+		var poolKeyHash []byte
+		if err := rows.Scan(&poolKeyHash); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if _, dup := seen[string(poolKeyHash)]; dup {
+			continue
+		}
+		seen[string(poolKeyHash)] = struct{}{}
+		changed = append(changed, poolKeyHash)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, poolKeyHash := range changed {
+		var sequence sql.NullInt64
+		if err := db.QueryRowContext(
+			ctx,
+			PoolOpCertSequenceAtOrBeforeSQL,
+			poolKeyHash,
+			slotValue,
+		).Scan(&sequence); err != nil {
+			return nil, err
+		}
+		if !sequence.Valid {
+			delete(ret, string(poolKeyHash))
+			continue
+		}
+		value, err := opCertSequenceValue(sequence.Int64)
+		if err != nil {
+			return nil, err
+		}
+		ret[string(poolKeyHash)] = value
+	}
+	return ret, nil
+}
+
+// opCertSequenceValue converts a stored op-cert sequence, failing on a
+// negative one rather than wrapping it into a huge counter.
+func opCertSequenceValue(sequence int64) (uint64, error) {
+	if sequence < 0 {
+		return 0, fmt.Errorf("negative op-cert sequence %d", sequence)
+	}
+	return uint64(sequence), nil
 }
 
 // mithrilTrustBoundarySyncKey mirrors database.mithrilLedgerSlotSyncKey and
@@ -1478,32 +1586,32 @@ LIMIT 1`,
 	}
 	rows, err := db.QueryContext(ctx, `
 WITH reg_ranked AS (
-    SELECT pr.pool_id, pr.added_slot,
+    SELECT pr.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) AS added_slot, pr.added_slot AS ownership_slot,
            COALESCE(t.block_index, 0) AS blk_idx,
            COALESCE(c.cert_index, 0) AS cert_idx,
            ROW_NUMBER() OVER (
                PARTITION BY pr.pool_id
-               ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) DESC, pr.added_slot DESC, COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
            ) AS rn_latest,
            ROW_NUMBER() OVER (
                PARTITION BY pr.pool_id
-               ORDER BY pr.added_slot ASC, COALESCE(t.block_index, 0) ASC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) ASC, pr.added_slot ASC, COALESCE(t.block_index, 0) ASC,
                         COALESCE(c.cert_index, 0) ASC
            ) AS rn_first
     FROM pool_registration pr
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    WHERE pr.added_slot <= ?
+    WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) <= ?
 ),
 latest_ret AS (
-    SELECT rt.pool_id, rt.added_slot, rt.epoch,
+    SELECT rt.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), rt.added_slot) AS added_slot, rt.added_slot AS ownership_slot, rt.epoch,
            CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
            COALESCE(t.block_index, 0) AS blk_idx,
            COALESCE(c.cert_index, 0) AS cert_idx,
            ROW_NUMBER() OVER (
                PARTITION BY rt.pool_id
-               ORDER BY rt.added_slot DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), rt.added_slot) DESC, rt.added_slot DESC,
                         CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
@@ -1511,7 +1619,7 @@ latest_ret AS (
     FROM pool_retirement rt
     LEFT JOIN certs c ON c.id = rt.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    WHERE rt.added_slot <= ?
+    WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = rt.certificate_id), rt.added_slot) <= ?
 )
 SELECT p.pool_key_hash
 FROM pool p
@@ -1520,9 +1628,10 @@ JOIN reg_ranked fr ON fr.pool_id = p.id AND fr.rn_first = 1
 LEFT JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
 WHERE lrt.pool_id IS NULL
    OR lrt.added_slot < lr.added_slot
-   OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0
+   OR (lrt.added_slot = lr.added_slot AND lrt.ownership_slot < lr.ownership_slot)
+   OR (lrt.added_slot = lr.added_slot AND lrt.ownership_slot = lr.ownership_slot AND lrt.synthetic_ret = 0
        AND lrt.blk_idx < lr.blk_idx)
-   OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0
+   OR (lrt.added_slot = lr.added_slot AND lrt.ownership_slot = lr.ownership_slot AND lrt.synthetic_ret = 0
        AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
    OR lrt.epoch > ?
 ORDER BY fr.added_slot ASC, fr.blk_idx ASC, fr.cert_idx ASC,
@@ -1717,6 +1826,32 @@ func (s *Store) GetActivePoolKeyHashesAtSlot(
 	slot uint64,
 	txn types.Txn,
 ) ([][]byte, error) {
+	return s.getActivePoolKeyHashesAtSlots(slot, slot, txn)
+}
+
+func (s *Store) GetEpochBoundaryActivePoolKeyHashes(
+	slot, boundarySlot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	afterEnactment, err := boundarySnapshotAfterEnactment(ctx, db, boundarySlot)
+	if err != nil {
+		return nil, err
+	}
+	epochSlot := slot
+	if afterEnactment {
+		epochSlot = boundarySlot
+	}
+	return s.getActivePoolKeyHashesAtSlots(slot, epochSlot, txn)
+}
+
+func (s *Store) getActivePoolKeyHashesAtSlots(
+	slot, epochSlot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -1733,7 +1868,7 @@ FROM epoch
 WHERE start_slot <= ?
 ORDER BY start_slot DESC
 LIMIT 1`,
-		slot,
+		epochSlot,
 	).Scan(&epochID, &startSlot, &length)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf(
@@ -1744,8 +1879,12 @@ LIMIT 1`,
 	if err != nil {
 		return nil, err
 	}
-	if !epochID.Valid || !startSlot.Valid || !length.Valid ||
-		slot >= uint64(startSlot.Int64+length.Int64) {
+	if epochID.Valid && startSlot.Valid && length.Valid && epochSlot != slot &&
+		epochSlot == uint64(startSlot.Int64+length.Int64) {
+		// The new epoch row is written after EPOCH's SNAP read.
+		epochID.Int64++
+	} else if !epochID.Valid || !startSlot.Valid || !length.Valid ||
+		epochSlot >= uint64(startSlot.Int64+length.Int64) {
 		return nil, fmt.Errorf(
 			"GetActivePoolKeyHashesAtSlot: %w",
 			types.ErrNoEpochData,
@@ -1753,28 +1892,28 @@ LIMIT 1`,
 	}
 	rows, err := db.QueryContext(ctx, `
 WITH latest_reg AS (
-    SELECT pr.pool_id, pr.added_slot,
+    SELECT pr.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) AS added_slot, pr.added_slot AS ownership_slot,
            COALESCE(t.block_index, 0) blk_idx,
            COALESCE(c.cert_index, 0) cert_idx,
            ROW_NUMBER() OVER (
                PARTITION BY pr.pool_id
-               ORDER BY pr.added_slot DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) DESC, pr.added_slot DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
            ) rn
     FROM pool_registration pr
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    WHERE pr.added_slot <= ?
+    WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) <= ?
 ),
 latest_ret AS (
-    SELECT rt.pool_id, rt.added_slot, rt.epoch,
+    SELECT rt.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), rt.added_slot) AS added_slot, rt.added_slot AS ownership_slot, rt.epoch,
            CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
            COALESCE(t.block_index, 0) blk_idx,
            COALESCE(c.cert_index, 0) cert_idx,
            ROW_NUMBER() OVER (
                PARTITION BY rt.pool_id
-               ORDER BY rt.added_slot DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), rt.added_slot) DESC, rt.added_slot DESC,
                         CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
@@ -1782,7 +1921,7 @@ latest_ret AS (
     FROM pool_retirement rt
     LEFT JOIN certs c ON c.id = rt.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    WHERE rt.added_slot <= ?
+    WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = rt.certificate_id), rt.added_slot) <= ?
 )
 SELECT p.pool_key_hash
 FROM pool p
@@ -1790,9 +1929,10 @@ JOIN latest_reg lr ON lr.pool_id = p.id AND lr.rn = 1
 LEFT JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
 WHERE lrt.pool_id IS NULL
    OR lrt.added_slot < lr.added_slot
-   OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0
+   OR (lrt.added_slot = lr.added_slot AND lrt.ownership_slot < lr.ownership_slot)
+   OR (lrt.added_slot = lr.added_slot AND lrt.ownership_slot = lr.ownership_slot AND lrt.synthetic_ret = 0
        AND lrt.blk_idx < lr.blk_idx)
-   OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0
+   OR (lrt.added_slot = lr.added_slot AND lrt.ownership_slot = lr.ownership_slot AND lrt.synthetic_ret = 0
        AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
    OR lrt.epoch > ?`,
 		slot,
@@ -2060,7 +2200,7 @@ WITH ranked AS (
     SELECT pr.id,
            ROW_NUMBER() OVER (
                PARTITION BY pr.pool_key_hash
-               ORDER BY pr.added_slot DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) DESC, pr.added_slot DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC,
                         pr.id DESC
@@ -2069,12 +2209,12 @@ WITH ranked AS (
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
     WHERE pr.pool_key_hash IN (`+
-			bindPlaceholders(end-start)+`) AND pr.added_slot <= ?
+			bindPlaceholders(end-start)+`) AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) <= ?
 )
 SELECT pr.margin, pr.metadata_url, pr.vrf_key_hash, pr.pool_key_hash,
        pr.reward_account, pr.reward_account_credential_tag, pr.metadata_hash,
        pr.pledge, pr.cost, pr.certificate_id, pr.id, pr.pool_id,
-       pr.added_slot, pr.deposit_amount, pr.leios_key_public,
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot), pr.deposit_amount, pr.leios_key_public,
        pr.leios_key_possession_proof,
        pr.leios_key_registration_age_unknown,
        pr.leios_key_registration_epoch
@@ -2155,7 +2295,7 @@ WITH events AS (
     LEFT JOIN "transaction" tx ON tx.id = certs.transaction_id
     WHERE registration.pool_key_hash IN (`+
 			bindPlaceholders(len(hashes))+`)
-      AND registration.added_slot < ?
+      AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = registration.certificate_id), registration.added_slot) < ?
     UNION ALL
     SELECT retirement.pool_key_hash, 0, 1, retirement.added_slot,
            COALESCE(tx.block_index, 0),
@@ -2165,7 +2305,7 @@ WITH events AS (
     LEFT JOIN "transaction" tx ON tx.id = certs.transaction_id
     WHERE retirement.pool_key_hash IN (`+
 			bindPlaceholders(len(hashes))+`)
-      AND retirement.added_slot < ? AND retirement.epoch <= ?
+      AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = retirement.certificate_id), retirement.added_slot) < ? AND retirement.epoch <= ?
 ),
 ranked AS (
     SELECT pool_key_hash, registration_id, is_retirement,
@@ -2244,8 +2384,8 @@ WITH ranked AS (
     LEFT JOIN "transaction" tx ON tx.id = certs.transaction_id
     WHERE registration.pool_key_hash IN (`+
 			bindPlaceholders(end-start)+`)
-      AND registration.added_slot >= ?
-      AND registration.added_slot <= ?
+      AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = registration.certificate_id), registration.added_slot) >= ?
+      AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = registration.certificate_id), registration.added_slot) <= ?
 )
 SELECT id FROM ranked WHERE rn = 1`,
 			args...,
@@ -2284,7 +2424,7 @@ SELECT id FROM ranked WHERE rn = 1`,
 		rows, err := db.QueryContext(ctx, `
 SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
        p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
-       p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
+       p.certificate_id, p.id, p.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = p.certificate_id), p.added_slot), p.deposit_amount,
        p.leios_key_public, p.leios_key_possession_proof,
        p.leios_key_registration_age_unknown,
        p.leios_key_registration_epoch
@@ -2497,11 +2637,13 @@ latest_ret AS (
     LEFT JOIN certs c ON c.id = rt.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
 )
-SELECT relay.ipv4, relay.ipv6, relay.hostname, relay.id,
-       relay.pool_registration_id, relay.pool_id, relay.port
+SELECT relay.ipv4, relay.ipv6, relay.relay_type, relay.hostname, relay.id,
+       relay.pool_registration_id, relay.pool_id, relay.port,
+       pool.pool_key_hash
 FROM latest_reg reg
 LEFT JOIN latest_ret ret ON ret.pool_id = reg.pool_id AND ret.rn = 1
 JOIN pool_registration_relay relay ON relay.pool_registration_id = reg.id
+JOIN pool ON pool.id = reg.pool_id
 WHERE reg.rn = 1
   AND (
       ret.pool_id IS NULL
@@ -2528,11 +2670,13 @@ ORDER BY relay.id`,
 		if err := rows.Scan(
 			&ipv4,
 			&ipv6,
+			&relay.Type,
 			&relay.Hostname,
 			&relay.ID,
 			&relay.PoolRegistrationID,
 			&relay.PoolID,
 			&relay.Port,
+			&relay.PoolKeyHash,
 		); err != nil {
 			return nil, err
 		}
@@ -2557,30 +2701,30 @@ func (s *Store) GetPoolsRetiringAtEpoch(
 	}
 	rows, err := db.QueryContext(ctx, `
 WITH latest_reg AS (
-    SELECT pr.pool_id, pr.added_slot, pr.reward_account,
+    SELECT pr.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) AS added_slot, pr.added_slot AS ownership_slot, pr.reward_account,
            pr.reward_account_credential_tag,
            COALESCE(pr.deposit_held, pr.deposit_amount) deposit_held,
            COALESCE(t.block_index, 0) block_index,
            COALESCE(c.cert_index, 0) cert_index,
            ROW_NUMBER() OVER (
                PARTITION BY pr.pool_id
-               ORDER BY pr.added_slot DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) DESC, pr.added_slot DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
            ) rn
     FROM pool_registration pr
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    WHERE pr.added_slot < ?
+    WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) < ?
 ),
 latest_ret AS (
-    SELECT rt.pool_id, rt.added_slot, rt.epoch,
+    SELECT rt.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), rt.added_slot) AS added_slot, rt.added_slot AS ownership_slot, rt.epoch,
            CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
            COALESCE(t.block_index, 0) block_index,
            COALESCE(c.cert_index, 0) cert_index,
            ROW_NUMBER() OVER (
                PARTITION BY rt.pool_id
-               ORDER BY rt.added_slot DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), rt.added_slot) DESC, rt.added_slot DESC,
                         CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
@@ -2588,7 +2732,7 @@ latest_ret AS (
     FROM pool_retirement rt
     LEFT JOIN certs c ON c.id = rt.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    WHERE rt.added_slot < ?
+    WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = rt.certificate_id), rt.added_slot) < ?
 )
 SELECT p.pool_key_hash, reg.reward_account,
        reg.reward_account_credential_tag, reg.deposit_held
@@ -2598,9 +2742,10 @@ JOIN latest_ret ret ON ret.pool_id = p.id AND ret.rn = 1
 WHERE ret.epoch = ?
   AND NOT (
       ret.added_slot < reg.added_slot
-      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
+      OR (ret.added_slot = reg.added_slot AND ret.ownership_slot < reg.ownership_slot)
+      OR (ret.added_slot = reg.added_slot AND ret.ownership_slot = reg.ownership_slot AND ret.synthetic_ret = 0
           AND ret.block_index < reg.block_index)
-      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
+      OR (ret.added_slot = reg.added_slot AND ret.ownership_slot = reg.ownership_slot AND ret.synthetic_ret = 0
           AND ret.block_index = reg.block_index
           AND ret.cert_index < reg.cert_index)
   )`,
@@ -3421,7 +3566,7 @@ WHERE pool_registration_id = ?`,
 		return err
 	}
 	rows, err = db.QueryContext(ctx, `
-SELECT ipv4, ipv6, hostname, id, pool_registration_id, pool_id, port
+SELECT ipv4, ipv6, relay_type, hostname, id, pool_registration_id, pool_id, port
 FROM pool_registration_relay
 WHERE pool_registration_id = ?`,
 		registration.ID,
@@ -3436,6 +3581,7 @@ WHERE pool_registration_id = ?`,
 		if err := rows.Scan(
 			&ipv4,
 			&ipv6,
+			&relay.Type,
 			&relay.Hostname,
 			&relay.ID,
 			&relay.PoolRegistrationID,
@@ -3503,7 +3649,7 @@ ORDER BY id`, ids[start:end]...)
 			return err
 		}
 		rows, err = db.QueryContext(ctx, `
-SELECT ipv4, ipv6, hostname, id, pool_registration_id, pool_id, port
+SELECT ipv4, ipv6, relay_type, hostname, id, pool_registration_id, pool_id, port
 FROM pool_registration_relay
 WHERE pool_registration_id IN (`+bindPlaceholders(end-start)+`)
 ORDER BY id`, ids[start:end]...)
@@ -3513,7 +3659,7 @@ ORDER BY id`, ids[start:end]...)
 		for rows.Next() {
 			var relay models.PoolRegistrationRelay
 			var ipv4, ipv6 []byte
-			if err := rows.Scan(&ipv4, &ipv6, &relay.Hostname, &relay.ID, &relay.PoolRegistrationID, &relay.PoolID, &relay.Port); err != nil {
+			if err := rows.Scan(&ipv4, &ipv6, &relay.Type, &relay.Hostname, &relay.ID, &relay.PoolRegistrationID, &relay.PoolID, &relay.Port); err != nil {
 				rows.Close()
 				return err
 			}

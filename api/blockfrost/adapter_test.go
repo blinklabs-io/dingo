@@ -16,6 +16,7 @@ package blockfrost
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
@@ -37,6 +38,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -62,10 +64,14 @@ func seedStakeCredentialUtxos(
 		stakeKey,
 	)
 	require.NoError(t, err)
-	require.NoError(t, adapter.ledgerState.Database().CreateAccount(
-		nil,
-		&models.Account{StakingKey: stakeKey, Active: true},
-	))
+	require.NoError(
+		t,
+		adapter.ledgerState.Database().CreateAccount(
+			context.Background(),
+			nil,
+			&models.Account{StakingKey: stakeKey, Active: true},
+		),
+	)
 
 	for i := range numUtxos {
 		payment := make([]byte, lcommon.AddressHashSize)
@@ -112,7 +118,7 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 	stakeAddr, _ := seedStakeCredentialUtxos(t, adapter, raw, db, total)
 
 	t.Run("ascending page stops at the requested window", func(t *testing.T) {
-		items, gotTotal, err := adapter.AccountUTXOs(
+		items, gotTotal, err := adapter.AccountUTXOs(context.Background(),
 			stakeAddr,
 			PaginationParams{Count: 10, Page: 3, Order: PaginationOrderAsc},
 		)
@@ -126,7 +132,7 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 	})
 
 	t.Run("descending page returns newest first", func(t *testing.T) {
-		items, gotTotal, err := adapter.AccountUTXOs(
+		items, gotTotal, err := adapter.AccountUTXOs(context.Background(),
 			stakeAddr,
 			PaginationParams{Count: 10, Page: 1, Order: PaginationOrderDesc},
 		)
@@ -140,7 +146,7 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 	t.Run(
 		"a page past the end is empty but reports the real total",
 		func(t *testing.T) {
-			items, gotTotal, err := adapter.AccountUTXOs(
+			items, gotTotal, err := adapter.AccountUTXOs(context.Background(),
 				stakeAddr,
 				PaginationParams{
 					Count: 100,
@@ -157,7 +163,7 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 	t.Run(
 		"a page far beyond the address history is empty, not an error",
 		func(t *testing.T) {
-			items, gotTotal, err := adapter.AccountUTXOs(
+			items, gotTotal, err := adapter.AccountUTXOs(context.Background(),
 				stakeAddr,
 				PaginationParams{
 					Count: MaxPaginationCount,
@@ -180,7 +186,7 @@ func TestNodeAdapterAccountUTXOsEmpty(t *testing.T) {
 	adapter, raw, db := newDBBackedAdapter(t)
 	stakeAddr, _ := seedStakeCredentialUtxos(t, adapter, raw, db, 0)
 
-	items, total, err := adapter.AccountUTXOs(
+	items, total, err := adapter.AccountUTXOs(context.Background(),
 		stakeAddr,
 		PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc},
 	)
@@ -232,7 +238,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	}
 
 	t.Run("ascending page stops at the requested window", func(t *testing.T) {
-		items, total, err := adapter.AddressUTXOs(
+		items, total, err := adapter.AddressUTXOs(context.Background(),
 			addr.String(),
 			PaginationParams{Count: 10, Page: 3, Order: PaginationOrderAsc},
 		)
@@ -244,7 +250,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	})
 
 	t.Run("descending page matches a full-history reverse", func(t *testing.T) {
-		items, total, err := adapter.AddressUTXOs(
+		items, total, err := adapter.AddressUTXOs(context.Background(),
 			addr.String(),
 			PaginationParams{Count: 10, Page: 5, Order: PaginationOrderDesc},
 		)
@@ -258,7 +264,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	})
 
 	t.Run("descending page past the end is empty", func(t *testing.T) {
-		items, total, err := adapter.AddressUTXOs(
+		items, total, err := adapter.AddressUTXOs(context.Background(),
 			addr.String(),
 			PaginationParams{Count: 10, Page: 26, Order: PaginationOrderDesc},
 		)
@@ -308,7 +314,7 @@ func TestNodeAdapterAddressUTXOsAssetsSurviveRefFetch(t *testing.T) {
 	})
 	storePointerOutputCbor(t, db, txHash, 0, addr, 1_000_000)
 
-	items, total, err := adapter.AddressUTXOs(
+	items, total, err := adapter.AddressUTXOs(context.Background(),
 		addr.String(),
 		PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
 	)
@@ -339,7 +345,7 @@ func newDBBackedAdapter(
 	})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	lsConfig := ledger.LedgerStateConfig{
@@ -644,7 +650,7 @@ func TestNodeAdapterEnterpriseAddressExcludesPointerUtxos(t *testing.T) {
 	require.Len(t, info.Amount, 1)
 	assert.Equal(t, "1000000", info.Amount[0].Quantity)
 
-	utxos, total, err := adapter.AddressUTXOs(
+	utxos, total, err := adapter.AddressUTXOs(context.Background(),
 		enterprise.String(),
 		PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc},
 	)
@@ -812,6 +818,124 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 	assert.Nil(t, next)
 }
 
+func TestResolveBlockRangeUpperBoundInSparseChain(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	for _, block := range []struct{ height, slot uint64 }{{1, 10}, {3, 30}} {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Hash: fill32(byte(block.height)), Slot: block.slot,
+			Number: block.height, ID: block.height + database.BlockInitialIndex,
+			Type: 0, Cbor: []byte{byte(block.height)},
+		}, nil))
+	}
+	require.NoError(t, db.SetTip(ochainsync.Tip{BlockNumber: 3}, nil))
+
+	bound, ok, err := adapter.resolveBlockRangeBound(
+		context.Background(), &BlockRangePosition{Block: 2}, false,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotNil(t, bound)
+	require.Equal(t, uint64(10), bound.Slot)
+	require.Equal(t, uint32(math.MaxUint32), bound.TxIndex)
+
+	bound, ok, err = adapter.resolveBlockRangeBound(
+		context.Background(), &BlockRangePosition{Block: 0}, false,
+	)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Nil(t, bound)
+}
+
+func TestAddressTransactionsApplyResolvedBoundsToCountAndPage(t *testing.T) {
+	t.Parallel()
+
+	nodeConfig, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		cardano.EmbeddedConfigPath("mainnet"),
+	)
+	require.NoError(t, err)
+	adapter, raw, db := newDBBackedAdapter(t, nodeConfig)
+	payment := bytes.Repeat([]byte{0x31}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	blocks := []struct {
+		height uint64
+		slot   uint64
+		hash   []byte
+		txHash []byte
+	}{
+		{height: 1, slot: 10, hash: fill32(0x41), txHash: fill32(0x51)},
+		{height: 3, slot: 30, hash: fill32(0x43), txHash: fill32(0x53)},
+	}
+	for i, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Hash: block.hash, Slot: block.slot, Number: block.height,
+			ID:   block.height + database.BlockInitialIndex,
+			Type: 0, Cbor: []byte{byte(block.height)},
+		}, nil))
+		// The association row below supplies the chain slot used for range
+		// filtering; slot zero keeps unrelated time conversion at genesis.
+		tx := &models.Transaction{
+			Hash: block.txHash, BlockHash: block.hash, Slot: 0,
+			BlockIndex: 0, Valid: true,
+			Outputs: []models.Utxo{{
+				TxId: block.txHash, OutputIdx: 0, PaymentKey: payment,
+				AddedSlot: block.slot, Amount: types.Uint64(1_000_000),
+			}},
+		}
+		insertAdapterTransaction(t, raw, tx)
+		storePointerOutputCbor(t, db, block.txHash, 0, addr, 1_000_000)
+		_, err := raw.Exec(`
+INSERT INTO address_transaction (
+    payment_key, staking_key, credential_tag, transaction_id, slot, tx_index
+) VALUES (?, NULL, 0, ?, ?, 0)`, payment, tx.ID, block.slot)
+		require.NoError(t, err)
+		if i == len(blocks)-1 {
+			require.NoError(t, db.SetTip(
+				ochainsync.Tip{BlockNumber: block.height}, nil,
+			))
+		}
+	}
+
+	rows, total, err := adapter.AddressTransactions(
+		context.Background(),
+		addr.String(),
+		TransactionRangeParams{
+			Pagination: PaginationParams{
+				Count: 10, Page: 1, Order: PaginationOrderAsc,
+			},
+			From: &BlockRangePosition{Block: 1},
+			To:   &BlockRangePosition{Block: 2},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, rows, 1)
+	assert.Equal(t, hex.EncodeToString(blocks[0].txHash), rows[0].TxHash)
+	assert.Equal(t, uint64(1), rows[0].BlockHeight)
+
+	rows, total, err = adapter.AddressTransactions(
+		context.Background(),
+		addr.String(),
+		TransactionRangeParams{
+			Pagination: PaginationParams{
+				Count: 10, Page: 1, Order: PaginationOrderAsc,
+			},
+			To: &BlockRangePosition{Block: 999},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	require.Len(t, rows, 2)
+}
+
 // TestNodeAdapterPoolMetadataOffchainStoreError guards the error path at the
 // PoolMetadata boundary: a failing off-chain metadata store query must
 // propagate as an error rather than degrade into a successful URL/hash-only
@@ -892,11 +1016,14 @@ func TestAccountRewardHistoryExcludesNonSpendableReward(t *testing.T) {
 	adapter, _, db := newDBBackedAdapter(t)
 	stakingKey := bytes.Repeat([]byte{0x07}, 28)
 	poolKey := bytes.Repeat([]byte{0xff}, 28)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		CredentialTag: 0,
-		StakingKey:    stakingKey,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			CredentialTag: 0,
+			StakingKey:    stakingKey,
+			Active:        true,
+		}),
+	)
 	require.NoError(
 		t,
 		db.Metadata().SaveRewardAccountOutputs([]*models.RewardAccountOutput{
@@ -921,7 +1048,7 @@ func TestAccountRewardHistoryExcludesNonSpendableReward(t *testing.T) {
 		}, nil),
 	)
 
-	rows, total, err := adapter.AccountRewardHistory(
+	rows, total, err := adapter.AccountRewardHistory(context.Background(),
 		newRewardHistoryStakeAddress(t, stakingKey),
 		PaginationParams{Count: 100, Page: 1, Order: "asc"},
 	)
@@ -937,11 +1064,14 @@ func TestAccountRewardHistoryExcludesGuardedReward(t *testing.T) {
 	adapter, _, db := newDBBackedAdapter(t)
 	stakingKey := bytes.Repeat([]byte{0x08}, 28)
 	poolKey := bytes.Repeat([]byte{0xfe}, 28)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		CredentialTag: 0,
-		StakingKey:    stakingKey,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			CredentialTag: 0,
+			StakingKey:    stakingKey,
+			Active:        true,
+		}),
+	)
 	require.NoError(
 		t,
 		db.Metadata().SaveRewardAccountOutputs([]*models.RewardAccountOutput{
@@ -967,7 +1097,7 @@ func TestAccountRewardHistoryExcludesGuardedReward(t *testing.T) {
 		}, nil),
 	)
 
-	rows, total, err := adapter.AccountRewardHistory(
+	rows, total, err := adapter.AccountRewardHistory(context.Background(),
 		newRewardHistoryStakeAddress(t, stakingKey),
 		PaginationParams{Count: 100, Page: 1, Order: "asc"},
 	)
@@ -1066,4 +1196,22 @@ func TestUtxoDatumAndScriptRefNone(t *testing.T) {
 	inlineDatum, referenceScriptHash := utxoDatumAndScriptRef(output)
 	assert.Nil(t, inlineDatum)
 	assert.Nil(t, referenceScriptHash)
+}
+
+func TestBlockfrostAdaptersHonorCancelledContext(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	stakeAddr, _ := seedStakeCredentialUtxos(t, adapter, raw, db, 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, _, err := adapter.PoolsList(ctx, PaginationParams{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AccountUTXOs(ctx, stakeAddr, PaginationParams{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AccountRewardHistory(ctx, stakeAddr, PaginationParams{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AccountWithdrawals(ctx, stakeAddr, PaginationParams{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AccountTransactions(ctx, stakeAddr, TransactionRangeParams{})
+	require.ErrorIs(t, err, context.Canceled)
 }
