@@ -20,7 +20,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"slices"
+	"syscall"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -365,6 +367,8 @@ This is the fastest way to bootstrap a new node.`,
 	return cmd
 }
 
+var runMithrilSyncForCommand = runMithrilSync
+
 // mithrilSyncRunE is the shared RunE for both the "mithril sync"
 // subcommand and the "sync --mithril" convenience command.
 func mithrilSyncRunE(
@@ -401,7 +405,13 @@ func mithrilSyncRunE(
 			"error", healthErr,
 		)
 	}
-	return runMithrilSync(cmd.Context(), cfg, logger, network, healthProbe)
+	ctx, stop := signal.NotifyContext(
+		cmd.Context(), syscall.SIGINT, syscall.SIGTERM,
+	)
+	defer stop()
+	return runMithrilSyncForCommand(
+		ctx, cfg, logger, network, healthProbe,
+	)
 }
 
 // errMithrilInactivityIncompatible reports why Mithril bootstrap and the

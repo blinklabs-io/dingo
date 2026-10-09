@@ -7987,6 +7987,13 @@ the later `serve` command run as one tracked direct child: the handler forwards
 the same signal to the active child, waits for it, and exits with its status.
 Successful bootstrap clears the tracked PID before the entrypoint hands off to
 `serve`, so the same lifecycle contract applies on both sides of startup.
+The `dingo mithril sync` command also derives its operation context directly
+from SIGINT and SIGTERM, so cancellation reaches downloads, archive extraction,
+immutable copy, and ledger-state import. An interrupted write keeps
+`sync_status=in_progress`, which selects the resume path on the next run.
+Database providers and the command's HTTP servers receive cleanup contexts that
+remain usable after operation cancellation, so deferred cleanup completes before
+the command returns.
 
 When a legacy imported database is marked for reward-state repair, `serve`
 blocks node startup until Mithril v2 reconciles the database against a verified
