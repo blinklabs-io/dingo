@@ -226,19 +226,19 @@ var Manifest = []Index{
 		Name:    "idx_datum_added_slot",
 		Table:   "datum",
 		Columns: []string{"added_slot"},
-		Notes:   "Datum rollback scan", Critical: true,
+		Notes:   "Datum rollback scan",
 	},
 	{
 		Name:    "idx_certs_block_hash",
 		Table:   "certs",
 		Columns: []string{"block_hash"},
-		Notes:   "Block certificate lookup", Critical: true,
+		Notes:   "Block certificate lookup",
 	},
 	{
 		Name:    "idx_certs_certificate_id",
 		Table:   "certs",
 		Columns: []string{"certificate_id"},
-		Notes:   "Certificate reverse lookup", Critical: true,
+		Notes:   "Certificate reverse lookup",
 	},
 	{
 		Name: "idx_certs_slot", Table: "certs", Columns: []string{"slot"},
@@ -248,7 +248,7 @@ var Manifest = []Index{
 		Name:    "idx_certs_cert_type",
 		Table:   "certs",
 		Columns: []string{"cert_type"},
-		Notes:   "Certificate type filter", Critical: true,
+		Notes:   "Certificate type filter",
 	},
 	// These indexes only serve API queries, rollback, or replay cleanup. The
 	// batched import skips replay cleanup for fresh IDs and restores critical
@@ -284,36 +284,6 @@ var Manifest = []Index{
 		Name: "idx_asset_mint_burn_lookup", Table: "asset_mint_burn",
 		Columns: []string{"policy_id", "name", "slot"},
 		Notes:   "Mint/burn history query", Critical: true,
-	},
-	{
-		Name:  "idx_address_transaction_transaction_id",
-		Table: "address_transaction", Columns: []string{"transaction_id"},
-		Notes: "API address history and replay cleanup", Critical: true,
-	},
-	{
-		Name:  "idx_certs_transaction_id",
-		Table: "certs", Columns: []string{"transaction_id"},
-		Notes: "Certificate API lookup, rollback, and replay cleanup", Critical: true,
-	},
-	{
-		Name:  "idx_key_witness_transaction_id",
-		Table: "key_witness", Columns: []string{"transaction_id"},
-		Notes: "Witness API lookup and replay cleanup", Critical: true,
-	},
-	{
-		Name:  "idx_witness_scripts_transaction_id",
-		Table: "witness_scripts", Columns: []string{"transaction_id"},
-		Notes: "Script API lookup and replay cleanup", Critical: true,
-	},
-	{
-		Name:  "idx_redeemer_transaction_id",
-		Table: "redeemer", Columns: []string{"transaction_id"},
-		Notes: "Redeemer API lookup and replay cleanup", Critical: true,
-	},
-	{
-		Name:  "idx_plutus_data_transaction_id",
-		Table: "plutus_data", Columns: []string{"transaction_id"},
-		Notes: "Datum API lookup and replay cleanup", Critical: true,
 	},
 	{
 		Name:    "idx_redeemer_index",
@@ -394,5 +364,43 @@ var Retained = []Index{
 			"amount",
 		},
 		Notes: "Per-batch live-stake SUM during API-mode backfill",
+	},
+	// SetTransaction clears these tables by transaction_id on each write, so
+	// their lookup indexes must remain resident while API backfill grows them.
+	{
+		Name:    "idx_key_witness_transaction_id",
+		Table:   "key_witness",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction witness cleanup",
+	},
+	{
+		Name:    "idx_witness_scripts_transaction_id",
+		Table:   "witness_scripts",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction witness cleanup",
+	},
+	{
+		Name:    "idx_redeemer_transaction_id",
+		Table:   "redeemer",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction witness cleanup",
+	},
+	{
+		Name:    "idx_plutus_data_transaction_id",
+		Table:   "plutus_data",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction witness cleanup",
+	},
+	{
+		Name:    "idx_address_transaction_transaction_id",
+		Table:   "address_transaction",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction address cleanup",
+	},
+	{
+		Name:    "idx_certs_transaction_id",
+		Table:   "certs",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction certificate cleanup",
 	},
 }
