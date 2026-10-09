@@ -12316,10 +12316,11 @@ the catalog gate is acquired; the provider scan and catalog replacement then
 share the same gate as incremental mirror and delete updates, so a concurrent
 completed mirror cannot be erased by an older startup scan. Reconciliation caps
 provider page requests, listed prefixes and objects, manifest fetches, retained
-entries, and reported problems;
-cancellation or any incomplete scan leaves the prior disposable cloud set
-unchanged and keeps it unpublished for that Bark instance. An explicitly empty
-source clears the cloud set. After a failed scan, a later complete
+entries, and reported problems. GCS catalog discovery uses one explicit JSON
+list request per charged page while snapshot data operations retain the gRPC
+client. Cancellation or any incomplete scan leaves the prior disposable cloud
+set unchanged and keeps it unpublished for that Bark instance. An explicitly
+empty source clears the cloud set. After a failed scan, a later complete
 reconciliation or Bark restart can make the current source visible. The Bark
 v1alpha1 `SnapshotInfo.location` field is a display location. Cloud values omit
 userinfo, query parameters, and fragments and therefore are not authenticated

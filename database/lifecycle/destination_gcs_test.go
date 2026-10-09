@@ -31,7 +31,21 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/option"
+	gcsapi "google.golang.org/api/storage/v1"
 )
+
+func newTestGCSCatalogPageLister(
+	t *testing.T,
+	client *http.Client,
+) gcsCatalogPageLister {
+	t.Helper()
+	service, err := gcsapi.NewService(
+		t.Context(),
+		option.WithHTTPClient(client),
+	)
+	require.NoError(t, err)
+	return &gcsJSONCatalogPageLister{service: service}
+}
 
 // Exercise the destination through a real GCS SDK reader with an in-memory
 // HTTP transport. Production uses the SDK's gRPC transport; this does not
@@ -73,29 +87,31 @@ func TestGCSManifestByteLimits(t *testing.T) {
 func TestGCSListSnapshotsRejectsUnsafePrefixBeforeManifestFetch(t *testing.T) {
 	t.Parallel()
 	var manifestFetches atomic.Int32
+	httpClient := &http.Client{
+		Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Query().Get("delimiter") != "/" {
+				manifestFetches.Add(1)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(
+					`{"prefixes":["prefix/../"]}`,
+				)),
+				Header:  make(http.Header),
+				Request: req,
+			}, nil
+		}),
+	}
 	client, err := storage.NewClient(
 		t.Context(),
 		option.WithoutAuthentication(),
-		option.WithHTTPClient(&http.Client{
-			Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
-				if req.URL.Query().Get("delimiter") != "/" {
-					manifestFetches.Add(1)
-				}
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body: io.NopCloser(strings.NewReader(
-						`{"prefixes":["prefix/../"]}`,
-					)),
-					Header:  make(http.Header),
-					Request: req,
-				}, nil
-			}),
-		}),
+		option.WithHTTPClient(httpClient),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
 	d := gcsDestination{
-		client: client, bucket: client.Bucket("test"), prefix: "prefix",
+		client: client, bucket: client.Bucket("test"), bucketName: "test",
+		catalogPages: newTestGCSCatalogPageLister(t, httpClient), prefix: "prefix",
 	}
 
 	entries, err := d.ListSnapshots(t.Context())
@@ -111,27 +127,29 @@ func TestGCSSnapshotCatalogStopsAtPrefixBudget(t *testing.T) {
 	manifest, err := os.ReadFile(filepath.Join(dir, ManifestFileName))
 	require.NoError(t, err)
 	var manifestFetches atomic.Int32
+	httpClient := &http.Client{
+		Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			body := manifest
+			if req.URL.Query().Get("delimiter") == "/" {
+				body = []byte(`{"prefixes":["prefix/one/","prefix/two/","prefix/three/"]}`)
+			} else {
+				manifestFetches.Add(1)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
+				ContentLength: int64(len(body)), Header: make(http.Header), Request: req,
+			}, nil
+		}),
+	}
 	client, err := storage.NewClient(
 		t.Context(), option.WithoutAuthentication(),
-		option.WithHTTPClient(&http.Client{
-			Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
-				body := manifest
-				if req.URL.Query().Get("delimiter") == "/" {
-					body = []byte(`{"prefixes":["prefix/one/","prefix/two/","prefix/three/"]}`)
-				} else {
-					manifestFetches.Add(1)
-				}
-				return &http.Response{
-					StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
-					ContentLength: int64(len(body)), Header: make(http.Header), Request: req,
-				}, nil
-			}),
-		}),
+		option.WithHTTPClient(httpClient),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
 	d := gcsDestination{
-		client: client, bucket: client.Bucket("test"), prefix: "prefix",
+		client: client, bucket: client.Bucket("test"), bucketName: "test",
+		catalogPages: newTestGCSCatalogPageLister(t, httpClient), prefix: "prefix",
 	}
 
 	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{
@@ -144,22 +162,24 @@ func TestGCSSnapshotCatalogStopsAtPrefixBudget(t *testing.T) {
 
 func TestGCSSnapshotCatalogCountsNonPrefixListResults(t *testing.T) {
 	t.Parallel()
+	httpClient := &http.Client{
+		Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			body := []byte(`{"items":[{"name":"prefix/a"},{"name":"prefix/b"},{"name":"prefix/c"}]}`)
+			return &http.Response{
+				StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
+				ContentLength: int64(len(body)), Header: make(http.Header), Request: req,
+			}, nil
+		}),
+	}
 	client, err := storage.NewClient(
 		t.Context(), option.WithoutAuthentication(),
-		option.WithHTTPClient(&http.Client{
-			Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
-				body := []byte(`{"items":[{"name":"prefix/a"},{"name":"prefix/b"},{"name":"prefix/c"}]}`)
-				return &http.Response{
-					StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
-					ContentLength: int64(len(body)), Header: make(http.Header), Request: req,
-				}, nil
-			}),
-		}),
+		option.WithHTTPClient(httpClient),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
 	d := gcsDestination{
-		client: client, bucket: client.Bucket("test"), prefix: "prefix",
+		client: client, bucket: client.Bucket("test"), bucketName: "test",
+		catalogPages: newTestGCSCatalogPageLister(t, httpClient), prefix: "prefix",
 	}
 
 	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{
@@ -172,34 +192,35 @@ func TestGCSSnapshotCatalogCountsNonPrefixListResults(t *testing.T) {
 func TestGCSSnapshotCatalogStopsBeforePageRequestLimit(t *testing.T) {
 	t.Parallel()
 	var requests atomic.Int32
-	items := strings.Repeat(`{"name":"prefix/noise"},`, 99) +
-		`{"name":"prefix/noise"}`
+	httpClient := &http.Client{
+		Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			request := requests.Add(1)
+			var body []byte
+			switch request {
+			case 1:
+				body = []byte(`{"nextPageToken":"page-1"}`)
+			case 2:
+				body = []byte(`{"items":[{"name":"prefix/noise"}],"nextPageToken":"page-2"}`)
+			default:
+				return nil, fmt.Errorf(
+					"unexpected provider page request %d", request,
+				)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
+				ContentLength: int64(len(body)), Header: make(http.Header), Request: req,
+			}, nil
+		}),
+	}
 	client, err := storage.NewClient(
 		t.Context(), option.WithoutAuthentication(),
-		option.WithHTTPClient(&http.Client{
-			Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
-				request := requests.Add(1)
-				if request > 2 {
-					return nil, fmt.Errorf(
-						"unexpected provider page request %d", request,
-					)
-				}
-				body := []byte(fmt.Sprintf(
-					`{"items":[%s],"nextPageToken":"page-%d"}`,
-					items,
-					request,
-				))
-				return &http.Response{
-					StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
-					ContentLength: int64(len(body)), Header: make(http.Header), Request: req,
-				}, nil
-			}),
-		}),
+		option.WithHTTPClient(httpClient),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
 	d := gcsDestination{
-		client: client, bucket: client.Bucket("test"), prefix: "prefix",
+		client: client, bucket: client.Bucket("test"), bucketName: "test",
+		catalogPages: newTestGCSCatalogPageLister(t, httpClient), prefix: "prefix",
 	}
 
 	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{

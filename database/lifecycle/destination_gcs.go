@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -30,6 +31,8 @@ import (
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	gcsapi "google.golang.org/api/storage/v1"
+	googlehttp "google.golang.org/api/transport/http"
 )
 
 // RegisterGCS registers the "gcs" scheme (gcs://bucket/prefix) on registry
@@ -56,8 +59,59 @@ func RegisterGCS(registry *DestinationRegistry, opts ...ManifestOption) {
 type gcsDestination struct {
 	client           *storage.Client
 	bucket           *storage.BucketHandle
+	bucketName       string
+	catalogPages     gcsCatalogPageLister
+	catalogHTTP      *http.Client
 	prefix           string
 	maxManifestBytes int64
+}
+
+type gcsCatalogPage struct {
+	prefixes      []string
+	objectCount   int
+	nextPageToken string
+}
+
+type gcsCatalogPageLister interface {
+	listCatalogPage(
+		context.Context,
+		string,
+		string,
+		string,
+		int64,
+	) (gcsCatalogPage, error)
+}
+
+type gcsJSONCatalogPageLister struct {
+	service *gcsapi.Service
+}
+
+func (l *gcsJSONCatalogPageLister) listCatalogPage(
+	ctx context.Context,
+	bucket string,
+	prefix string,
+	pageToken string,
+	pageSize int64,
+) (gcsCatalogPage, error) {
+	call := l.service.Objects.List(bucket).
+		Context(ctx).
+		Delimiter("/").
+		MaxResults(pageSize)
+	if prefix != "" {
+		call = call.Prefix(prefix)
+	}
+	if pageToken != "" {
+		call = call.PageToken(pageToken)
+	}
+	result, err := call.Do()
+	if err != nil {
+		return gcsCatalogPage{}, err
+	}
+	return gcsCatalogPage{
+		prefixes:      result.Prefixes,
+		objectCount:   len(result.Items),
+		nextPageToken: result.NextPageToken,
+	}, nil
 }
 
 func newGCSDestination(uri *url.URL, opts ...ManifestOption) (CloudDestination, error) {
@@ -82,18 +136,46 @@ func newGCSDestination(uri *url.URL, opts ...ManifestOption) (CloudDestination, 
 			err,
 		)
 	}
+	catalogHTTP, _, err := googlehttp.NewClient(
+		ctx,
+		option.WithScopes(storage.ScopeReadWrite),
+	)
+	if err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf(
+			"gcs cloud destination: create catalog client: %w",
+			err,
+		)
+	}
+	catalogService, err := gcsapi.NewService(
+		ctx,
+		option.WithHTTPClient(catalogHTTP),
+	)
+	if err != nil {
+		catalogHTTP.CloseIdleConnections()
+		_ = client.Close()
+		return nil, fmt.Errorf(
+			"gcs cloud destination: create catalog service: %w",
+			err,
+		)
+	}
 	return &gcsDestination{
 		client:           client,
 		bucket:           client.Bucket(bucketName),
+		bucketName:       bucketName,
+		catalogPages:     &gcsJSONCatalogPageLister{service: catalogService},
+		catalogHTTP:      catalogHTTP,
 		prefix:           prefix,
 		maxManifestBytes: limit,
 	}, nil
 }
 
 // Close implements CloudDestinationCloser: it releases the gRPC connection
-// storage.NewGRPCClient opened, which client.Bucket's returned handle above
-// doesn't itself own or expose a way to close.
+// and idle catalog HTTP connections owned by this destination.
 func (d *gcsDestination) Close() error {
+	if d.catalogHTTP != nil {
+		d.catalogHTTP.CloseIdleConnections()
+	}
 	return d.client.Close()
 }
 
@@ -255,17 +337,17 @@ func (d *gcsDestination) listSnapshots(
 	if d.prefix != "" {
 		listPrefix = d.prefix + "/"
 	}
-	it := d.bucket.Objects(
-		ctx,
-		&storage.Query{Prefix: listPrefix, Delimiter: "/"},
-	)
-	pager := iterator.NewPager(it, 100, "")
+	if d.catalogPages == nil {
+		return nil, errors.New("gcs catalog page lister is not configured")
+	}
+	pageToken := ""
 	for {
 		if err := scan.consumePage(); err != nil {
 			return scan.result(err)
 		}
-		var page []*storage.ObjectAttrs
-		nextPageToken, err := pager.NextPage(&page)
+		page, err := d.catalogPages.listCatalogPage(
+			ctx, d.bucketName, listPrefix, pageToken, 100,
+		)
 		if err != nil {
 			return scan.result(fmt.Errorf(
 				"list gcs objects under %q: %w",
@@ -273,19 +355,17 @@ func (d *gcsDestination) listSnapshots(
 				err,
 			))
 		}
-		for _, attrs := range page {
+		for range page.objectCount {
 			if err := scan.consumePrefix(); err != nil {
 				return scan.result(err)
 			}
-			// With Delimiter set, a synthetic "directory entry" (Prefix set,
-			// every other field empty) represents one sub-path; a real object
-			// (Name set) means something was uploaded directly at this level,
-			// which the nested-per-snapshot layout never does.
-			if attrs.Prefix == "" {
-				continue
+		}
+		for _, prefix := range page.prefixes {
+			if err := scan.consumePrefix(); err != nil {
+				return scan.result(err)
 			}
 			snapshotID := strings.TrimSuffix(
-				strings.TrimPrefix(attrs.Prefix, listPrefix),
+				strings.TrimPrefix(prefix, listPrefix),
 				"/",
 			)
 			if snapshotID == "" {
@@ -322,9 +402,10 @@ func (d *gcsDestination) listSnapshots(
 				return scan.result(err)
 			}
 		}
-		if nextPageToken == "" {
+		if page.nextPageToken == "" {
 			break
 		}
+		pageToken = page.nextPageToken
 	}
 	return scan.result(nil)
 }
