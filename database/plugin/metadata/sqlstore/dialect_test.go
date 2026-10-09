@@ -165,6 +165,15 @@ func TestMySQLDeferredIndexDDLUsesPrefixes(t *testing.T) {
 			[]string{"fingerprint"},
 		),
 	)
+	require.Equal(
+		t,
+		"CREATE INDEX `idx_transaction_metadata_label_label` ON `transaction_metadata_label` (`label`(255))",
+		dialect.CreateIndexSQL(
+			"idx_transaction_metadata_label_label",
+			"transaction_metadata_label",
+			[]string{"label"},
+		),
+	)
 	require.False(t, dialect.CanDropIndex("idx_utxo_spent_at_tx_id", "utxo"))
 	require.True(t, dialect.CanDropIndex("idx_utxo_payment_key", "utxo"))
 }
