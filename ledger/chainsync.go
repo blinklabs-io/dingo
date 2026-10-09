@@ -6574,7 +6574,10 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 		)
 	}
 
-	txn := ls.db.BlockBatchTransaction(ctx)
+	txn, err := ls.db.BlockBatchTransactionContext(ctx)
+	if err != nil {
+		return err
+	}
 	err = txn.Do(func(txn *database.Txn) error {
 		// Record genesis UTxOs
 		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()

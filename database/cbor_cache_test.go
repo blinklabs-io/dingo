@@ -945,7 +945,7 @@ func TestSetGenesisCborWarmsCacheForOpenBatchTransaction(t *testing.T) {
 	require.NoError(t, chunkTxn.Commit())
 }
 
-func TestResolveUtxoCborUsesFreshSnapshotAfterLRUEviction(t *testing.T) {
+func TestResolveUtxoCborUsesBatchWritesAfterLRUEviction(t *testing.T) {
 	t.Parallel()
 
 	db, err := newTestDatabase(t, &Config{
@@ -979,14 +979,17 @@ func TestResolveUtxoCborUsesFreshSnapshotAfterLRUEviction(t *testing.T) {
 		0,
 		EncodeUtxoOffset(offset),
 	))
-	require.NoError(t, db.SetGenesisCbor(blockSlot, blockHash[:], blockCbor, nil))
-	chunkTxn.MarkBlockCborCommittedSeparately(blockSlot, blockHash)
+	require.NoError(t, db.SetGenesisCbor(
+		blockSlot,
+		blockHash[:],
+		blockCbor,
+		chunkTxn,
+	))
 
-	// A fresh blob snapshot must resolve this after the shared LRU evicts it.
+	// Read-your-writes must resolve this after the shared LRU evicts it.
 	var otherHash [32]byte
 	otherHash[0] = 3
 	db.CborCache().blockLRU.Put(blockSlot+1, otherHash, newCachedBlock([]byte{0x01}))
-	blockCbor[1] = 0xff
 	_, ok := db.CborCache().blockLRU.Get(blockSlot, blockHash)
 	require.False(t, ok)
 
@@ -997,7 +1000,6 @@ func TestResolveUtxoCborUsesFreshSnapshotAfterLRUEviction(t *testing.T) {
 	_, ok = db.CborCache().hotUtxo.Get(makeUtxoKey(txID[:], 0))
 	require.False(t, ok)
 	require.NoError(t, chunkTxn.Commit())
-	require.Empty(t, chunkTxn.separatelyCommittedBlocks)
 }
 
 func TestResolveUtxoCborDoesNotCacheRolledBackUtxo(t *testing.T) {

@@ -244,7 +244,7 @@ func oldestIndexedBlockSlot(
 }
 
 func (d *Database) initBlockInventory() error {
-	txn := d.BlobTxn(true)
+	txn := d.BlockBlobTxn()
 	defer txn.Rollback() //nolint:errcheck
 	store := txn.BlobStore()
 	if store == nil || txn.Blob() == nil {
@@ -272,6 +272,13 @@ func (d *Database) initBlockInventory() error {
 		return fmt.Errorf("sync block inventory: %w", err)
 	}
 	return nil
+}
+
+// EnsureBlockInventory creates the retained-block inventory when it is absent.
+// It is safe to call during commit-timestamp recovery and is a no-op after the
+// inventory has been initialized.
+func (d *Database) EnsureBlockInventory() error {
+	return d.initBlockInventory()
 }
 
 func (d *Database) blockInventory(

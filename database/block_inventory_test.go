@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"encoding/binary"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,6 +40,22 @@ type noWriteConflictBlobStore struct {
 type observedTransactionBlobStore struct {
 	blob.BlobStore
 	opened chan struct{}
+}
+
+type doneObservedContext struct {
+	context.Context
+	entered chan struct{}
+	once    sync.Once
+}
+
+type txnConstructionResult struct {
+	txn *Txn
+	err error
+}
+
+func (c *doneObservedContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.entered) })
+	return c.Context.Done()
 }
 
 func (s observedTransactionBlobStore) NewTransaction(
@@ -254,7 +272,7 @@ func TestBlockInventoryCallerTransactionDoesNotWaitBehindMutation(t *testing.T) 
 	require.ErrorContains(t, err, "block inventory mutation is busy")
 }
 
-func TestBlockInventoryCallerUsesOptimisticConflictDetection(t *testing.T) {
+func TestBlockInventoryCallerDoesNotBypassGateOnBadger(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	holder := db.BlockBlobTxn()
@@ -262,12 +280,13 @@ func TestBlockInventoryCallerUsesOptimisticConflictDetection(t *testing.T) {
 
 	callerTxn := db.BlobTxn(true)
 	defer callerTxn.Rollback() //nolint:errcheck
-	require.NoError(t, db.BlockCreate(models.Block{
+	err := db.BlockCreate(models.Block{
 		ID: 1, Slot: 1, Hash: randomHash(t), Cbor: []byte{0x80},
-	}, callerTxn))
+	}, callerTxn)
+	require.ErrorContains(t, err, "block inventory mutation is busy")
 }
 
-func TestBlockBatchTxnUsesOptimisticInventoryConflicts(t *testing.T) {
+func TestBlockBatchTxnSerializesInventoryOnBadger(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	first := db.BlockBatchTxn()
@@ -276,24 +295,81 @@ func TestBlockBatchTxnUsesOptimisticInventoryConflicts(t *testing.T) {
 		ID: 1, Slot: 1, Hash: randomHash(t), Cbor: []byte{0x80},
 	}, first))
 
+	secondStarted := make(chan struct{})
 	secondDone := make(chan error, 1)
 	go func() {
-		secondDone <- db.BlockCreate(models.Block{
+		close(secondStarted)
+		second := db.BlockBatchTxn()
+		defer second.Rollback() //nolint:errcheck
+		if err := db.BlockCreate(models.Block{
 			ID: 2, Slot: 2, Hash: randomHash(t), Cbor: []byte{0x80},
-		}, nil)
+		}, second); err != nil {
+			secondDone <- err
+			return
+		}
+		secondDone <- second.Commit()
 	}()
+	<-secondStarted
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second batch completed before first: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	require.NoError(t, first.Commit())
 	select {
 	case err := <-secondDone:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("overlapping Badger inventory mutation did not complete")
+		t.Fatal("second Badger inventory batch did not complete")
 	}
-	require.Error(t, first.Commit())
 
 	count, oldest, err := db.CountBlocksAndOldestSlot(nil)
 	require.NoError(t, err)
-	require.Equal(t, uint64(1), count)
-	require.Equal(t, uint64(2), oldest)
+	require.Equal(t, uint64(2), count)
+	require.Equal(t, uint64(1), oldest)
+}
+
+func TestBlockBatchTransactionSerializesInventoryOnBadger(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	first := db.BlockBatchTransaction(t.Context())
+	defer first.Rollback() //nolint:errcheck
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID: 1, Slot: 1, Hash: randomHash(t), Cbor: []byte{0x80},
+	}, first))
+
+	secondStarted := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		close(secondStarted)
+		second := db.BlockBatchTransaction(t.Context())
+		defer second.Rollback() //nolint:errcheck
+		if err := db.BlockCreate(models.Block{
+			ID: 2, Slot: 2, Hash: randomHash(t), Cbor: []byte{0x80},
+		}, second); err != nil {
+			secondDone <- err
+			return
+		}
+		secondDone <- second.Commit()
+	}()
+	<-secondStarted
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second coordinated batch completed before first: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	require.NoError(t, first.Commit())
+	select {
+	case err := <-secondDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("second coordinated Badger batch did not complete")
+	}
+
+	count, oldest, err := db.CountBlocksAndOldestSlot(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), count)
+	require.Equal(t, uint64(1), oldest)
 }
 
 func TestBlockBatchTxnSerializesStoreWithoutConflictDetection(t *testing.T) {
@@ -368,29 +444,184 @@ func TestBlockBatchTransactionSerializesStoreWithoutConflictDetection(
 	}
 }
 
-func TestBlockBatchTransactionAllowsBoundedNestedSyntheticCommit(t *testing.T) {
+func TestBlockBatchTransactionContextCancelsInventoryAdmission(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newTestDB(t)
+	opened := make(chan struct{}, 2)
+	db.SetBlobStore(observedTransactionBlobStore{
+		BlobStore: db.Blob(),
+		opened:    opened,
+	})
+	first, err := db.BlockBatchTransactionContext(t.Context())
+	require.NoError(t, err)
+	defer first.Rollback() //nolint:errcheck
+	testutil.RequireReceive(
+		t,
+		opened,
+		time.Second,
+		"first transaction must open its blob handle",
+	)
+
+	baseCtx, cancel := context.WithCancel(t.Context())
+	ctx := &doneObservedContext{
+		Context: baseCtx,
+		entered: make(chan struct{}),
+	}
+	resultCh := make(chan txnConstructionResult, 1)
+	go func() {
+		txn, err := db.BlockBatchTransactionContext(ctx)
+		resultCh <- txnConstructionResult{txn: txn, err: err}
+	}()
+	testutil.RequireReceive(
+		t,
+		ctx.entered,
+		time.Second,
+		"transaction construction must enter the inventory gate wait",
+	)
+	cancel()
+	got := testutil.RequireReceive(
+		t,
+		resultCh,
+		time.Second,
+		"cancelled transaction construction must return",
+	)
+	require.Nil(t, got.txn)
+	require.ErrorIs(t, got.err, context.Canceled)
+	require.ErrorContains(t, got.err, "acquire block inventory mutation gate")
+	select {
+	case <-opened:
+		t.Fatal("cancelled construction opened a backend transaction")
+	default:
+	}
+	require.NoError(t, first.Rollback())
+
+	pauseCtx, pauseCancel := context.WithTimeout(t.Context(), time.Second)
+	defer pauseCancel()
+	resume, err := db.PauseCommitsContext(pauseCtx)
+	require.NoError(t, err, "cancelled waiter must release the commit barrier")
+	resume()
+
+	third, err := db.BlockBatchTxnContext(t.Context())
+	require.NoError(t, err, "cancelled waiter must not retain the inventory gate")
+	t.Cleanup(third.Release)
+	require.NoError(t, third.Rollback())
+}
+
+func TestBlockBatchTxnContextCancelsInventoryAdmission(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	first, err := db.BlockBatchTxnContext(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(first.Release)
+
+	baseCtx, cancel := context.WithCancel(t.Context())
+	ctx := &doneObservedContext{
+		Context: baseCtx,
+		entered: make(chan struct{}),
+	}
+	resultCh := make(chan txnConstructionResult, 1)
+	go func() {
+		txn, err := db.BlockBatchTxnContext(ctx)
+		resultCh <- txnConstructionResult{txn: txn, err: err}
+	}()
+	testutil.RequireReceive(
+		t,
+		ctx.entered,
+		time.Second,
+		"blob transaction construction must enter the inventory gate wait",
+	)
+	cancel()
+	got := testutil.RequireReceive(
+		t,
+		resultCh,
+		time.Second,
+		"cancelled blob transaction construction must return",
+	)
+	require.Nil(t, got.txn)
+	require.ErrorIs(t, got.err, context.Canceled)
+	require.ErrorContains(t, got.err, "acquire block inventory mutation gate")
+	require.NoError(t, first.Rollback())
+
+	next, err := db.BlockBatchTxnContext(t.Context())
+	require.NoError(t, err, "cancelled waiter must not retain the inventory gate")
+	t.Cleanup(next.Release)
+	require.NoError(t, next.Rollback())
+}
+
+func TestBlockBatchTransactionIncludesSyntheticBlockInventory(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	outer := db.BlockBatchTransaction(t.Context())
 	defer outer.Rollback() //nolint:errcheck
 	hash := randomHash(t)
 
-	done := make(chan error, 1)
-	go func() {
-		done <- db.SetGenesisCbor(1, hash, []byte{0x80}, nil)
-	}()
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("nested synthetic block commit did not complete")
-	}
-	require.NoError(t, outer.Rollback())
+	require.NoError(t, db.SetGenesisCbor(1, hash, []byte{0x80}, outer))
+	require.NoError(t, outer.Commit())
 
 	count, oldest, err := db.CountBlocksAndOldestSlot(nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), count)
 	require.Equal(t, uint64(1), oldest)
+}
+
+func TestBlockBatchTransactionComposesWithGenericWriterAndPause(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	holder := db.BlockBlobTxn()
+	defer holder.Rollback() //nolint:errcheck
+
+	ctx, cancel := context.WithCancel(t.Context())
+	generic := db.TransactionContext(ctx, true)
+	defer generic.Rollback() //nolint:errcheck
+
+	batchReady := make(chan *Txn, 1)
+	go func() { batchReady <- db.BlockBatchTransaction(t.Context()) }()
+	require.Eventually(t, func() bool {
+		db.commitBarrier.mu.Lock()
+		defer db.commitBarrier.mu.Unlock()
+		return db.commitBarrier.readers == 2
+	}, 5*time.Second, time.Millisecond)
+
+	paused := make(chan func(), 1)
+	go func() { paused <- db.PauseCommits() }()
+	require.Eventually(t, func() bool {
+		db.commitBarrier.mu.Lock()
+		defer db.commitBarrier.mu.Unlock()
+		return db.commitBarrier.writerWaiting
+	}, 5*time.Second, time.Millisecond)
+
+	cancel()
+	err := generic.Do(func(txn *Txn) error {
+		return db.BlockCreate(models.Block{
+			ID: 1, Slot: 1, Hash: randomHash(t), Cbor: []byte{0x80},
+		}, txn)
+	})
+	require.ErrorContains(t, err, "block inventory mutation is busy")
+
+	require.NoError(t, holder.Rollback())
+	var batch *Txn
+	select {
+	case batch = <-batchReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("block batch remained blocked after inventory release")
+	}
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID: 2, Slot: 2, Hash: randomHash(t), Cbor: []byte{0x80},
+	}, batch))
+	require.NoError(t, batch.Commit())
+
+	select {
+	case resume := <-paused:
+		resume()
+	case <-time.After(5 * time.Second):
+		t.Fatal("PauseCommits remained blocked after both writers finished")
+	}
+	count, oldest, err := db.CountBlocksAndOldestSlot(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), count)
+	require.Equal(t, uint64(2), oldest)
 }
 
 func TestBlockInventoryBoundsSequentialOldestRemovalWork(t *testing.T) {

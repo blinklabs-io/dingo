@@ -340,18 +340,8 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	c.metrics.IncBlockLRUMiss()
 
 	// Fetch block from blob store
-	blockTxn := txn
-	if callerTxn != nil && callerTxn.blockCborCommittedSeparately(
-		offset.BlockSlot,
-		offset.BlockHash,
-	) {
-		// The open batch transaction predates this block commit. A fresh read
-		// transaction sees the block without adding it to the batch read set.
-		blockTxn = blob.NewTransaction(false)
-		defer blockTxn.Rollback() //nolint:errcheck
-	}
 	blockCbor, _, err := blob.GetBlock(
-		blockTxn,
+		txn,
 		offset.BlockSlot,
 		offset.BlockHash[:],
 	)

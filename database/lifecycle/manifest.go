@@ -436,11 +436,14 @@ func writeManifest(
 	if err := fsyncdir.Sync(dir); err != nil {
 		return err
 	}
-	return updateSnapshotCatalogIfPresent(
+	if err := updateSnapshotCatalogIfPresent(
 		ctx,
 		filepath.Dir(dir),
 		SnapshotEntry{ID: filepath.Base(dir), Manifest: m},
-	)
+	); err != nil {
+		return fmt.Errorf("%w: %w", ErrSnapshotCatalogUpdate, err)
+	}
+	return nil
 }
 
 // ReadManifest reads and validates the manifest at dir/ManifestFileName,

@@ -16,20 +16,25 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
+	"net/url"
 	"os"
 	"path/filepath"
-	"sync"
+	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	driversqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 const (
 	snapshotCatalogFileName = ".dingo-snapshot-catalog-v1.sqlite"
+	snapshotCatalogBusyMS   = 5000
 	// SnapshotCatalogPageLimit bounds index rows and manifests materialized by
 	// one page request.
 	SnapshotCatalogPageLimit = 100
@@ -44,7 +49,7 @@ ORDER BY created_sec DESC, created_ns DESC, id DESC LIMIT ?`
 )
 
 var (
-	snapshotCatalogMu sync.Mutex
+	snapshotCatalogMu = make(chan struct{}, 1)
 	// ErrSnapshotCatalogChanged means a page token names a prior catalog
 	// generation. The caller must restart pagination from the first page.
 	ErrSnapshotCatalogChanged = errors.New("snapshot catalog changed")
@@ -54,6 +59,9 @@ var (
 	// ErrSnapshotCatalogCorrupt means the persistent catalog contains data
 	// that cannot represent a snapshot below its configured root.
 	ErrSnapshotCatalogCorrupt = errors.New("snapshot catalog corrupt")
+	// ErrSnapshotCatalogUpdate means the durable snapshot was written but its
+	// repairable catalog index could not be updated.
+	ErrSnapshotCatalogUpdate = errors.New("snapshot catalog update failed")
 )
 
 // SnapshotCatalogCursor identifies the last row in one immutable catalog
@@ -76,17 +84,86 @@ func validateSnapshotCatalogID(id string) error {
 	return nil
 }
 
-func openSnapshotCatalog(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+func lockSnapshotCatalog(ctx context.Context) error {
+	select {
+	case snapshotCatalogMu <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func unlockSnapshotCatalog() {
+	<-snapshotCatalogMu
+}
+
+func snapshotCatalogDSN(path string, create bool) string {
+	if path == ":memory:" {
+		return "file::memory:?cache=private&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	}
+	values := url.Values{}
+	if create {
+		values.Set("mode", "rwc")
+	} else {
+		values.Set("mode", "rw")
+	}
+	values.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", snapshotCatalogBusyMS))
+	values.Add("_pragma", "journal_mode(WAL)")
+	return (&url.URL{
+		Scheme:   "file",
+		Path:     filepath.ToSlash(path),
+		RawQuery: values.Encode(),
+	}).String()
+}
+
+func openSnapshotCatalog(
+	ctx context.Context,
+	path string,
+	create bool,
+) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", snapshotCatalogDSN(path, create))
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return db, nil
+}
+
+func snapshotCatalogCanRebuild(err error) bool {
+	if errors.Is(err, ErrSnapshotCatalogCorrupt) {
+		return true
+	}
+	var sqliteErr *driversqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	baseCode := sqliteErr.Code() & 0xff
+	if baseCode == sqlite3.SQLITE_CORRUPT || baseCode == sqlite3.SQLITE_NOTADB {
+		return true
+	}
+	if baseCode != sqlite3.SQLITE_ERROR {
+		return false
+	}
+	// These messages come from the fixed generation query and identify a
+	// structurally valid SQLite database with the wrong catalog schema.
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no such table") ||
+		strings.Contains(message, "no such column") ||
+		strings.Contains(message, "has no column named")
+}
+
+type snapshotCatalogGenerationSource func() (int64, error)
+
+func randomSnapshotCatalogGeneration() (int64, error) {
+	value, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64-1))
+	if err != nil {
+		return 0, err
+	}
+	return value.Int64() + 2, nil
 }
 
 func createSnapshotCatalogSchema(db *sql.DB) error {
@@ -114,15 +191,26 @@ func readCatalogGeneration(
 	ctx context.Context,
 	query catalogQuerier,
 ) (uint64, error) {
-	var generation int64
+	var value any
 	if err := query.QueryRowContext(
 		ctx,
 		"SELECT generation FROM catalog_meta WHERE singleton = 1",
-	).Scan(&generation); err != nil {
+	).Scan(&value); err != nil {
+		if errors.Is(err, sql.ErrNoRows) || snapshotCatalogCanRebuild(err) {
+			return 0, fmt.Errorf("%w: invalid catalog metadata: %w", ErrSnapshotCatalogCorrupt, err)
+		}
 		return 0, err
 	}
+	generation, ok := value.(int64)
+	if !ok {
+		return 0, fmt.Errorf(
+			"%w: generation has type %T", ErrSnapshotCatalogCorrupt, value,
+		)
+	}
 	if generation <= 0 {
-		return 0, errors.New("invalid snapshot catalog generation")
+		return 0, fmt.Errorf(
+			"%w: invalid generation %d", ErrSnapshotCatalogCorrupt, generation,
+		)
 	}
 	return uint64(generation), nil
 }
@@ -144,8 +232,21 @@ func EnsureSnapshotCatalogContext(
 	baseDir string,
 	opts ...ManifestOption,
 ) error {
-	snapshotCatalogMu.Lock()
-	defer snapshotCatalogMu.Unlock()
+	return ensureSnapshotCatalogContext(
+		ctx, baseDir, randomSnapshotCatalogGeneration, opts...,
+	)
+}
+
+func ensureSnapshotCatalogContext(
+	ctx context.Context,
+	baseDir string,
+	generationSource snapshotCatalogGenerationSource,
+	opts ...ManifestOption,
+) error {
+	if err := lockSnapshotCatalog(ctx); err != nil {
+		return err
+	}
+	defer unlockSnapshotCatalog()
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		return fmt.Errorf("create snapshot catalog directory: %w", err)
 	}
@@ -154,26 +255,45 @@ func EnsureSnapshotCatalogContext(
 		return listErr
 	}
 	generation := uint64(1)
+	needsFreshGeneration := false
 	catalogPath := snapshotCatalogPath(baseDir)
 	if _, err := os.Stat(catalogPath); err == nil {
-		current, err := openSnapshotCatalog(catalogPath)
+		current, err := openSnapshotCatalog(ctx, catalogPath, false)
 		if err != nil {
-			return fmt.Errorf("open existing snapshot catalog: %w", err)
+			if !snapshotCatalogCanRebuild(err) {
+				return fmt.Errorf("open existing snapshot catalog: %w", err)
+			}
+			needsFreshGeneration = true
+		} else {
+			oldGeneration, generationErr := readCatalogGeneration(ctx, current)
+			closeErr := current.Close()
+			if generationErr == nil {
+				if closeErr != nil {
+					return closeErr
+				}
+				if oldGeneration == math.MaxInt64 {
+					return errors.New("snapshot catalog generation overflow")
+				}
+				generation = oldGeneration + 1
+			} else {
+				if !snapshotCatalogCanRebuild(generationErr) {
+					return fmt.Errorf("read existing snapshot catalog: %w", generationErr)
+				}
+				needsFreshGeneration = true
+			}
 		}
-		oldGeneration, err := readCatalogGeneration(ctx, current)
-		closeErr := current.Close()
-		if err != nil {
-			return fmt.Errorf("read existing snapshot catalog: %w", err)
-		}
-		if closeErr != nil {
-			return closeErr
-		}
-		if oldGeneration == math.MaxInt64 {
-			return errors.New("snapshot catalog generation overflow")
-		}
-		generation = oldGeneration + 1
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	if needsFreshGeneration {
+		freshGeneration, err := generationSource()
+		if err != nil {
+			return fmt.Errorf("create snapshot catalog generation: %w", err)
+		}
+		if freshGeneration <= 1 {
+			return errors.New("snapshot catalog recovery generation must be greater than one")
+		}
+		generation = uint64(freshGeneration)
 	}
 	tmp, err := os.CreateTemp(baseDir, snapshotCatalogFileName+".tmp-*")
 	if err != nil {
@@ -185,7 +305,7 @@ func EnsureSnapshotCatalogContext(
 		return err
 	}
 	defer os.Remove(tmpPath) //nolint:errcheck
-	db, err := openSnapshotCatalog(tmpPath)
+	db, err := openSnapshotCatalog(ctx, tmpPath, true)
 	if err != nil {
 		return err
 	}
@@ -226,6 +346,10 @@ func EnsureSnapshotCatalogContext(
 		_ = db.Close()
 		return err
 	}
+	if _, err := db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		_ = db.Close()
+		return err
+	}
 	if err := db.Close(); err != nil {
 		return err
 	}
@@ -246,15 +370,17 @@ func mutateSnapshotCatalog(
 	baseDir string,
 	mutate func(*sql.Tx) (bool, error),
 ) error {
-	snapshotCatalogMu.Lock()
-	defer snapshotCatalogMu.Unlock()
+	if err := lockSnapshotCatalog(ctx); err != nil {
+		return err
+	}
+	defer unlockSnapshotCatalog()
 	catalogPath := snapshotCatalogPath(baseDir)
 	if _, err := os.Stat(catalogPath); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	db, err := openSnapshotCatalog(catalogPath)
+	db, err := openSnapshotCatalog(ctx, catalogPath, false)
 	if err != nil {
 		return err
 	}
@@ -346,16 +472,39 @@ func removeSnapshotContext(
 	dir string,
 	remove func(string) error,
 ) error {
+	return removeSnapshotContextWithGenerationSource(
+		ctx, dir, remove, randomSnapshotCatalogGeneration,
+	)
+}
+
+func removeSnapshotContextWithGenerationSource(
+	ctx context.Context,
+	dir string,
+	remove func(string) error,
+	generationSource snapshotCatalogGenerationSource,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := remove(dir); err != nil {
 		return err
 	}
-	return removeSnapshotCatalogEntryIfPresent(
+	err := removeSnapshotCatalogEntryIfPresent(
 		context.WithoutCancel(ctx),
 		filepath.Dir(dir), filepath.Base(dir),
 	)
+	if err == nil {
+		return nil
+	}
+	// The snapshot directory is authoritative. Rebuild the disposable index
+	// immediately so a failed delete mutation cannot leave a stale row until
+	// the service restarts.
+	if repairErr := ensureSnapshotCatalogContext(
+		context.WithoutCancel(ctx), filepath.Dir(dir), generationSource,
+	); repairErr != nil {
+		return errors.Join(err, repairErr)
+	}
+	return nil
 }
 
 // ListSnapshotPage reads at most pageSize+1 index rows and pageSize manifests.
@@ -382,7 +531,16 @@ func ListSnapshotPageContext(
 	if pageSize <= 0 || pageSize > SnapshotCatalogPageLimit {
 		return nil, nil, fmt.Errorf("invalid snapshot page size %d", pageSize)
 	}
-	db, err := openSnapshotCatalog(snapshotCatalogPath(baseDir))
+	if err := lockSnapshotCatalog(ctx); err != nil {
+		return nil, nil, err
+	}
+	locked := true
+	defer func() {
+		if locked {
+			unlockSnapshotCatalog()
+		}
+	}()
+	db, err := openSnapshotCatalog(ctx, snapshotCatalogPath(baseDir), false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -439,6 +597,9 @@ func ListSnapshotPageContext(
 	// been copied. Release it before filesystem manifest reads so catalog
 	// mutations do not wait on page processing.
 	_ = txn.Rollback()
+	_ = db.Close()
+	unlockSnapshotCatalog()
+	locked = false
 	if len(rowsRead) > pageSize {
 		last := rowsRead[pageSize-1]
 		next = &SnapshotCatalogCursor{

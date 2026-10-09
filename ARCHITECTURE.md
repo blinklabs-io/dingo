@@ -12417,7 +12417,17 @@ uses it for bounded `ListSnapshots` pages. The catalog is initialized from
 `lifecycle.ListSnapshots` before Bark accepts requests, so automatic
 epoch-boundary snapshots (`internal/dblifecycle.Manager`) and directories
 copied in while Bark was stopped are included. Snapshot manifest writes and
-deletes update the live catalog. `ListAvailableSnapshots`
+deletes update the live catalog. Snapshot directories remain authoritative:
+the WAL-backed catalog is rebuilt when its schema or file is corrupt, a failed
+post-publication index update never removes a complete snapshot, and a failed
+post-deletion index update triggers an immediate rebuild. A corruption rebuild
+starts a fresh random positive generation, making collision with a retained
+token negligible; a retained current token is rejected when the generation
+changes. SQLite corruption and invalid catalog schemas authorize replacement,
+while operational SQLite and filesystem errors remain fatal to the operation.
+Page reads require an existing catalog and cannot create an empty one before
+initialization.
+`ListAvailableSnapshots`
 (`mergedSnapshotCatalogPage`) additionally merges in whatever
 `lifecycle.ListCloudSnapshots` finds at `BarkConfig.SnapshotCloudDestination`
 (the same URI `databaseLifecycle.snapshotCloudDestination` configures),

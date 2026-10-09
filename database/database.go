@@ -102,8 +102,9 @@ type Database struct {
 	// blockInventoryMu serializes transactions that update the persisted block
 	// inventory. Cloud stores do not provide optimistic write-conflict
 	// detection, so the lock is held until commit or rollback rather than only
-	// around the read-modify-write operation.
-	blockInventoryMu sync.Mutex
+	// around the read-modify-write operation. Its context-aware acquire keeps a
+	// cancelled caller from remaining stuck behind a long-running batch.
+	blockInventoryMu cancellableMutex
 
 	cborCache       *TieredCborCache
 	sizeMetricsStop chan struct{}
@@ -357,11 +358,18 @@ func (d *Database) BlockBlobTxn() *Txn {
 	return newBlobOnlyTxn(d, true, blockMutationSerialized)
 }
 
-// BlockBatchTxn starts a blob-only block transaction. Stores with optimistic
-// write-conflict detection may overlap; other stores serialize before their
-// transaction opens so each batch sees the latest inventory.
+// BlockBatchTxn starts a blob-only block transaction serialized with other
+// block inventory mutations. A batch updates one shared inventory record, so
+// it must see the preceding batch's committed value regardless of whether the
+// backend detects write conflicts.
 func (d *Database) BlockBatchTxn() *Txn {
-	return newBlobOnlyTxn(d, true, blockMutationConcurrent)
+	return newBlobOnlyTxn(d, true, blockMutationSerialized)
+}
+
+// BlockBatchTxnContext starts a serialized blob-only block transaction. ctx
+// can cancel inventory admission before the backend transaction opens.
+func (d *Database) BlockBatchTxnContext(ctx context.Context) (*Txn, error) {
+	return newBlobOnlyTxnContext(ctx, d, true, blockMutationSerialized)
 }
 
 // BlockTransaction starts a coordinated write transaction serialized with
@@ -370,11 +378,27 @@ func (d *Database) BlockTransaction(ctx context.Context) *Txn {
 	return newDatabaseTxn(ctx, d, true, blockMutationSerialized)
 }
 
-// BlockBatchTransaction starts a coordinated block transaction. Stores with
-// optimistic write-conflict detection may overlap; other stores serialize
-// before either backend transaction opens.
+// BlockBatchTransaction starts a coordinated block transaction serialized
+// with other block inventory mutations. The lock is acquired before either
+// backend transaction opens so the batch reads the latest inventory value.
 func (d *Database) BlockBatchTransaction(ctx context.Context) *Txn {
-	return newDatabaseTxn(ctx, d, true, blockMutationConcurrent)
+	return newDatabaseTxn(ctx, d, true, blockMutationSerialized)
+}
+
+// BlockBatchTransactionContext starts a serialized coordinated block
+// transaction. ctx can cancel commit-barrier or inventory admission before
+// either backend transaction opens.
+func (d *Database) BlockBatchTransactionContext(
+	ctx context.Context,
+) (*Txn, error) {
+	ctx = nonNilContext(ctx)
+	return newDatabaseTxnContext(
+		ctx,
+		ctx,
+		d,
+		true,
+		blockMutationSerialized,
+	)
 }
 
 // MetadataTxn starts a new metadata-only database transaction and returns a
@@ -561,7 +585,7 @@ func New(
 		// Database is available for recovery, so return it with error
 		return db, err
 	}
-	if err := db.initBlockInventory(); err != nil {
+	if err := db.EnsureBlockInventory(); err != nil {
 		return db, err
 	}
 	return db, nil

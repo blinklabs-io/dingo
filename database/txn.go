@@ -85,9 +85,6 @@ type Txn struct {
 	readWrite      bool
 	afterCommit    []func()
 	dispatching    bool
-	// separatelyCommittedBlocks lets blob reads bypass this transaction's stale
-	// snapshot; it is guarded by lock.
-	separatelyCommittedBlocks map[blockKey]struct{}
 	// readSnapshotAdmissionHeld keeps one coordinated snapshot slot for this
 	// transaction's lifetime. Releasing only after the read transaction ends
 	// caps established snapshots as well as callers waiting to construct one.
@@ -115,8 +112,64 @@ type blockMutationMode uint8
 const (
 	blockMutationNone blockMutationMode = iota
 	blockMutationSerialized
-	blockMutationConcurrent
 )
+
+// cancellableMutex is a context-aware capacity-one gate. Its zero value is
+// ready for use, matching sync.Mutex, while TryLock preserves the legacy
+// caller-supplied transaction path that must never wait after backend handles
+// are already open.
+type cancellableMutex struct {
+	once  sync.Once
+	token chan struct{}
+}
+
+func (m *cancellableMutex) init() {
+	m.once.Do(func() {
+		m.token = make(chan struct{}, 1)
+		m.token <- struct{}{}
+	})
+}
+
+func (m *cancellableMutex) LockContext(ctx context.Context) error {
+	m.init()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-m.token:
+		if err := ctx.Err(); err != nil {
+			m.Unlock()
+			return err
+		}
+		return nil
+	}
+}
+
+func (m *cancellableMutex) Lock() {
+	m.init()
+	<-m.token
+}
+
+func (m *cancellableMutex) TryLock() bool {
+	m.init()
+	select {
+	case <-m.token:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *cancellableMutex) Unlock() {
+	m.init()
+	select {
+	case m.token <- struct{}{}:
+	default:
+		panic("cancellableMutex: unlock of unlocked mutex")
+	}
+}
 
 func (t *Txn) holdBlockInventory() error {
 	t.blockInventoryClaimMu.Lock()
@@ -126,11 +179,6 @@ func (t *Txn) holdBlockInventory() error {
 	}
 	if t.db == nil {
 		return types.ErrNoStoreAvailable
-	}
-	if detector, ok := t.blobStore.(blob.WriteConflictDetector); ok &&
-		detector.DetectsWriteConflicts() {
-		t.blockInventoryClaimed = true
-		return nil
 	}
 	// A caller-supplied transaction has already opened its backend handles.
 	// Waiting here can deadlock with a serialized block transaction that holds
@@ -193,17 +241,14 @@ func acquireCommitBarrier(
 	ctx context.Context,
 	t *Txn,
 	hasMetadataWrite bool,
-) {
+) error {
 	if t.readWrite && hasMetadataWrite && t.db != nil {
-		// Transaction construction has always waited for PauseCommits even
-		// after caller cancellation. Keep that ordering invariant while
-		// deriving the wait context from the caller.
-		err := t.db.commitBarrier.RLockContext(context.WithoutCancel(ctx))
-		if err != nil {
-			panic("uncancelled commit-barrier context returned an error")
+		if err := t.db.commitBarrier.RLockContext(ctx); err != nil {
+			return fmt.Errorf("acquire commit barrier: %w", err)
 		}
 		t.barrierHeld = true
 	}
+	return nil
 }
 
 // releaseCommitBarrierLocked releases the barrier acquired by
@@ -232,7 +277,6 @@ func (t *Txn) finishLocked() {
 	if t.writeContext != nil {
 		t.writeContext.release()
 	}
-	t.separatelyCommittedBlocks = nil
 	t.releaseCommitBarrierLocked()
 	t.releaseBlobPinLocked()
 	if t.readSnapshotAdmissionHeld {
@@ -282,15 +326,38 @@ func newDatabaseTxn(
 	blockMutation blockMutationMode,
 ) *Txn {
 	ctx = nonNilContext(ctx)
+	t, err := newDatabaseTxnContext(
+		ctx,
+		context.WithoutCancel(ctx),
+		db,
+		readWrite,
+		blockMutation,
+	)
+	if err != nil {
+		panic("uncancelled transaction construction returned an error")
+	}
+	return t
+}
+
+func newDatabaseTxnContext(
+	ctx context.Context,
+	acquireCtx context.Context,
+	db *Database,
+	readWrite bool,
+	blockMutation blockMutationMode,
+) (*Txn, error) {
 	t := &Txn{db: db, readWrite: readWrite}
-	acquireCommitBarrier(ctx, t, db.Metadata() != nil)
+	if err := acquireCommitBarrier(acquireCtx, t, db.Metadata() != nil); err != nil {
+		_ = t.Rollback()
+		return nil, err
+	}
 	if blockMutation == blockMutationSerialized {
-		t.acquireBlockInventoryBeforeOpen()
+		if err := t.acquireBlockInventoryBeforeOpenContext(acquireCtx); err != nil {
+			_ = t.Rollback()
+			return nil, err
+		}
 	}
 	pinBlobStoreForTxn(t, db)
-	if blockMutation == blockMutationConcurrent {
-		t.claimBlockInventoryForBatch()
-	}
 	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(readWrite)
 	}
@@ -310,7 +377,7 @@ func newDatabaseTxn(
 			)
 		}
 	}
-	return t
+	return t, nil
 }
 
 // NewReadSnapshotContext creates a coordinated read transaction and returns
@@ -423,36 +490,50 @@ func newBlobOnlyTxn(
 		t.acquireBlockInventoryBeforeOpen()
 	}
 	pinBlobStoreForTxn(t, db)
-	if blockMutation == blockMutationConcurrent {
-		t.claimBlockInventoryForBatch()
-	}
 	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(readWrite)
 	}
 	return t
 }
 
-func (t *Txn) acquireBlockInventoryBeforeOpen() {
-	t.db.blockInventoryMu.Lock()
+func newBlobOnlyTxnContext(
+	ctx context.Context,
+	db *Database,
+	readWrite bool,
+	blockMutation blockMutationMode,
+) (*Txn, error) {
+	ctx = nonNilContext(ctx)
+	t := &Txn{db: db, readWrite: readWrite}
+	if blockMutation == blockMutationSerialized {
+		if err := t.acquireBlockInventoryBeforeOpenContext(ctx); err != nil {
+			return nil, err
+		}
+	}
+	pinBlobStoreForTxn(t, db)
+	if bs := t.blobStore; bs != nil {
+		t.blobTxn = bs.NewTransaction(readWrite)
+	}
+	return t, nil
+}
+
+func (t *Txn) registerBlockInventoryRelease() {
 	t.blockInventoryClaimed = true
 	t.OnFinish(func() {
 		t.db.blockInventoryMu.Unlock()
 	})
 }
 
-func (t *Txn) claimBlockInventoryByConflict() bool {
-	detector, ok := t.blobStore.(blob.WriteConflictDetector)
-	if !ok || !detector.DetectsWriteConflicts() {
-		return false
-	}
-	t.blockInventoryClaimed = true
-	return true
+func (t *Txn) acquireBlockInventoryBeforeOpen() {
+	t.db.blockInventoryMu.Lock()
+	t.registerBlockInventoryRelease()
 }
 
-func (t *Txn) claimBlockInventoryForBatch() {
-	if !t.claimBlockInventoryByConflict() {
-		t.acquireBlockInventoryBeforeOpen()
+func (t *Txn) acquireBlockInventoryBeforeOpenContext(ctx context.Context) error {
+	if err := t.db.blockInventoryMu.LockContext(ctx); err != nil {
+		return fmt.Errorf("acquire block inventory mutation gate: %w", err)
 	}
+	t.registerBlockInventoryRelease()
+	return nil
 }
 
 func NewMetadataOnlyTxn(
@@ -462,7 +543,13 @@ func NewMetadataOnlyTxn(
 ) *Txn {
 	ctx = nonNilContext(ctx)
 	t := &Txn{db: db, readWrite: readWrite}
-	acquireCommitBarrier(ctx, t, db.Metadata() != nil)
+	if err := acquireCommitBarrier(
+		context.WithoutCancel(ctx),
+		t,
+		db.Metadata() != nil,
+	); err != nil {
+		panic("uncancelled commit-barrier context returned an error")
+	}
 	// A metadata-only transaction opens no blob transaction, but it still
 	// pins: BlobStore has to answer for it too, because helpers that take a
 	// *Txn (recordBlobOrphansOnCommit and the blob-delete paths it counts
@@ -652,36 +739,6 @@ func (t *Txn) IsCommitted() bool {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 	return t.committed
-}
-
-// MarkBlockCborCommittedSeparately marks a block written outside this
-// transaction so reads can use a fresh blob snapshot if the shared cache misses.
-func (t *Txn) MarkBlockCborCommittedSeparately(slot uint64, hash [32]byte) {
-	if t == nil {
-		return
-	}
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	if t.finished {
-		return
-	}
-	if t.separatelyCommittedBlocks == nil {
-		t.separatelyCommittedBlocks = make(map[blockKey]struct{})
-	}
-	t.separatelyCommittedBlocks[blockKey{slot: slot, hash: hash}] = struct{}{}
-}
-
-func (t *Txn) blockCborCommittedSeparately(slot uint64, hash [32]byte) bool {
-	if t == nil {
-		return false
-	}
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	if t.finished {
-		return false
-	}
-	_, ok := t.separatelyCommittedBlocks[blockKey{slot: slot, hash: hash}]
-	return ok
 }
 
 // AfterCommit registers fn to run after this transaction commits durably.

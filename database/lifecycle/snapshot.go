@@ -156,7 +156,7 @@ func Snapshot(
 	// this point on: the Mkdir above guarantees this call exclusively
 	// created dir, so nothing else can be concurrently writing into it.
 	defer func() {
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrSnapshotCatalogUpdate) {
 			_ = RemoveSnapshotContext(context.WithoutCancel(ctx), dir)
 		}
 	}()
