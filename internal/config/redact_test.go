@@ -132,6 +132,7 @@ var sentinelSecrets = []string{
 	"SENTINEL-UNKNOWN-PROVIDER-KEY",
 	"SENTINEL-NESTED-PROVIDER-SECRET",
 	"SENTINEL-MEMPOOL-LIST-SECRET",
+	"SENTINEL-ARTIFACT-STORE-PASSWORD",
 	// An AWS access key ID is half of a credential pair, and
 	// "accessKeyId" is exactly the spelling a left-anchored
 	// access[-_]?key pattern cannot reach past the "Id" suffix.
@@ -163,6 +164,10 @@ func sentinelSecretConfig() *Config {
 		Mithril: MithrilConfig{
 			AggregatorURL: "https://aggregator.example/aggregator" +
 				"?apiKey='prefix'SENTINEL-MITHRIL-KEY&network=preview",
+			Server: MithrilServerConfig{
+				ArtifactStore: "s3://producer:SENTINEL-ARTIFACT-STORE-PASSWORD" +
+					"@snapshots.example/dingo?network=preview",
+			},
 		},
 		TokenRegistry: TokenRegistryConfig{
 			SourceURL: "https://reg:SENTINEL-TOKEN-REGISTRY-PASSWORD" +
@@ -285,6 +290,7 @@ func TestConfigLogValueRedactsSentinelSecrets(t *testing.T) {
 				"dingo",
 				"require",
 				"aggregator.example",
+				"snapshots.example",
 				"registry.example",
 				"blocks.example",
 				"plain.example",

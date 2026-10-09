@@ -97,6 +97,7 @@ const (
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
 	DefaultHealthPort                  = 12799
+	DefaultMithrilServerPort           = 8081
 	// DefaultHealthReadyGapSlots matches
 	// DefaultForgeStaleGapThresholdSlots: both answer "has this node
 	// stopped following the chain?", and a readiness probe that flapped
@@ -153,23 +154,27 @@ const (
 	RunModeDev   RunMode = "dev"
 	RunModeLeios RunMode = "leios" // Full node with experimental Leios capabilities
 
-	// RunModeSync, RunModeMithril, and RunModeDatabase are effective run
-	// modes used only for validation, not configurable runMode values
-	// (RunMode.Valid rejects them); cmd/dingo passes the one matching the
-	// invoked command to Config.Validate. None of them starts the
-	// relay/private serving listeners or the API listeners. They differ
-	// in their auxiliary-listener surface: RunModeSync is the Mithril
-	// snapshot sync operation (via `dingo sync --mithril` or `dingo
-	// mithril sync`), which starts a Prometheus metrics listener and an
-	// optional pprof debug listener; RunModeMithril is the read-only
-	// Mithril query subcommands (`list`, `show`, and bare `mithril`),
-	// which start no listeners at all; RunModeDatabase is the offline
+	// RunModeSync, RunModeMithril, RunModeMithrilServe, and
+	// RunModeDatabase are effective run modes used only for validation,
+	// not configurable runMode values (RunMode.Valid rejects them);
+	// cmd/dingo passes the one matching the invoked command to
+	// Config.Validate. None of them starts the relay/private serving
+	// listeners or the API listeners. They differ in their
+	// auxiliary-listener surface: RunModeSync is the Mithril snapshot sync
+	// operation (via `dingo sync --mithril` or `dingo mithril sync`),
+	// which starts a Prometheus metrics listener and an optional pprof
+	// debug listener; RunModeMithril is the Mithril query and snapshot
+	// production subcommands (`list`, `show`, `snapshot create`, and bare
+	// `mithril`), which start no listeners at all; RunModeMithrilServe is
+	// `dingo mithril serve`, which starts only the artifact server on
+	// mithril.server.port; RunModeDatabase is the offline
 	// `dingo database snapshot|restore|truncate` maintenance commands,
 	// which also start no listeners. Keeping them distinct lets Validate
 	// check exactly the ports each invocation binds.
-	RunModeSync     RunMode = "sync"
-	RunModeMithril  RunMode = "mithril"
-	RunModeDatabase RunMode = "database"
+	RunModeSync         RunMode = "sync"
+	RunModeMithril      RunMode = "mithril"
+	RunModeMithrilServe RunMode = "mithril-serve"
+	RunModeDatabase     RunMode = "database"
 )
 
 // StartEra controls experimental direct startup in a later ledger era.
@@ -185,7 +190,7 @@ func (m RunMode) Valid() bool {
 	switch m {
 	case RunModeServe, RunModeLoad, RunModeDev, RunModeLeios, "":
 		return true
-	case RunModeSync, RunModeMithril, RunModeDatabase:
+	case RunModeSync, RunModeMithril, RunModeMithrilServe, RunModeDatabase:
 		// Effective-only modes used for validation; never configurable runModes.
 		return false
 	default:
@@ -223,7 +228,8 @@ func (m RunMode) RequiresListeners() bool {
 	switch m {
 	case RunModeServe, RunModeDev, RunModeLeios, "":
 		return true
-	case RunModeLoad, RunModeSync, RunModeMithril, RunModeDatabase:
+	case RunModeLoad, RunModeSync, RunModeMithril, RunModeMithrilServe,
+		RunModeDatabase:
 		return false
 	default:
 		return false
@@ -1204,6 +1210,63 @@ type MithrilConfig struct {
 	// pinned Mithril genesis verification key and verifies the chain back to it.
 	// False explicitly selects the unverified bootstrap flow.
 	VerifyCertificates bool `yaml:"verifyCertificates"     envconfig:"DINGO_MITHRIL_VERIFY_CERTS"`
+	// Server configures snapshot production and serving
+	// (`dingo mithril snapshot create` and `dingo mithril serve`).
+	Server MithrilServerConfig `yaml:"server"`
+}
+
+// MithrilServerConfig holds configuration for producing Mithril snapshot
+// artifacts and serving them over HTTP. Artifact reads are public; aggregator
+// signer registration and registration closure require operator credentials.
+type MithrilServerConfig struct {
+	// Port is the TCP port `dingo mithril serve` listens on.
+	Port uint `yaml:"port"                    envconfig:"DINGO_MITHRIL_SERVER_PORT"`
+	// PublicBaseURL is the public HTTPS origin used in snapshot download
+	// locations. Plain HTTP is accepted only for a loopback origin.
+	PublicBaseURL string `yaml:"publicBaseUrl"           envconfig:"DINGO_MITHRIL_SERVER_PUBLIC_BASE_URL"`
+	// ArtifactStore is where produced artifacts are kept and served from: a
+	// filesystem directory, or an s3://bucket/prefix or gcs://bucket/prefix
+	// URI (binaries built with dingo_extra_plugins).
+	ArtifactStore string `yaml:"artifactStore"           envconfig:"DINGO_MITHRIL_SERVER_ARTIFACT_STORE"`
+	// RedirectBaseURL, when set, makes the server answer archive requests
+	// with a redirect to this base URL plus the object key instead of
+	// streaming the object itself. Use it with a remote ArtifactStore whose
+	// objects are publicly readable at that URL.
+	RedirectBaseURL string `yaml:"redirectBaseUrl"         envconfig:"DINGO_MITHRIL_SERVER_REDIRECT_BASE_URL"`
+	// KeepSnapshots is how many of the newest snapshots to retain after
+	// `dingo mithril snapshot create` writes a new one. Zero keeps all.
+	KeepSnapshots int `yaml:"keepSnapshots"           envconfig:"DINGO_MITHRIL_SERVER_KEEP_SNAPSHOTS"`
+	// AncillarySigningKeyFile is the Ed25519 key that signs the ancillary
+	// manifest of produced snapshots, in the Mithril JSON-hex key format.
+	AncillarySigningKeyFile string `yaml:"ancillarySigningKeyFile" envconfig:"DINGO_MITHRIL_SERVER_ANCILLARY_SIGNING_KEY_FILE"`
+	// TLSEnabled serves HTTPS using the shared tlsCertFilePath and
+	// tlsKeyFilePath. It is off by default; aggregator-enabled servers bound
+	// outside loopback require it to protect the operator bearer token.
+	TLSEnabled bool `yaml:"tlsEnabled"              envconfig:"DINGO_MITHRIL_SERVER_TLS_ENABLED"`
+	// Aggregator configures certificate production for the stored snapshots.
+	Aggregator MithrilAggregatorConfig `yaml:"aggregator"`
+}
+
+// MithrilAggregatorConfig configures the aggregator that collects signer
+// registrations and signatures and certifies stored snapshots. It runs on the
+// `dingo mithril serve` listener.
+type MithrilAggregatorConfig struct {
+	// Enabled mounts the signer registration and signature endpoints.
+	Enabled bool `yaml:"enabled"               envconfig:"DINGO_MITHRIL_AGGREGATOR_ENABLED"`
+	// Epoch is the epoch signers register for; the genesis certificate is
+	// issued at the epoch before it, so it must be at least 1.
+	Epoch uint64 `yaml:"epoch"                 envconfig:"DINGO_MITHRIL_AGGREGATOR_EPOCH"`
+	// K, M and PhiF are the STM protocol parameters: the quorum of lottery
+	// indices, the lottery size and the lottery win probability.
+	K    uint64  `yaml:"k"                     envconfig:"DINGO_MITHRIL_AGGREGATOR_K"`
+	M    uint64  `yaml:"m"                     envconfig:"DINGO_MITHRIL_AGGREGATOR_M"`
+	PhiF float64 `yaml:"phiF"                  envconfig:"DINGO_MITHRIL_AGGREGATOR_PHI_F"`
+	// GenesisSigningKeyFile holds the Ed25519 genesis signing key, in the
+	// Mithril JSON-hex key format, that signs the genesis certificate.
+	GenesisSigningKeyFile string `yaml:"genesisSigningKeyFile" envconfig:"DINGO_MITHRIL_AGGREGATOR_GENESIS_SIGNING_KEY_FILE"`
+	// OperatorTokenFile holds the bearer token for signer registration and
+	// registration closure. Use a file containing at least 32 random bytes.
+	OperatorTokenFile string `yaml:"operatorTokenFile" envconfig:"DINGO_MITHRIL_AGGREGATOR_OPERATOR_TOKEN_FILE"`
 }
 
 // DatabaseLifecycleConfig holds configuration for automatic epoch-boundary
@@ -1354,6 +1417,9 @@ func newDefaultConfig() *Config {
 			Backend:            "v2",
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
+			Server: MithrilServerConfig{
+				Port: DefaultMithrilServerPort,
+			},
 		},
 		// Database lifecycle defaults
 		DatabaseLifecycle: DatabaseLifecycleConfig{

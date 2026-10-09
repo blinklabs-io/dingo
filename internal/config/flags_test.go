@@ -205,6 +205,56 @@ func TestPledgeLeverageEnvBinding(t *testing.T) {
 	}
 }
 
+func TestMithrilAggregatorOperatorTokenFileEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(
+		"DINGO_MITHRIL_AGGREGATOR_OPERATOR_TOKEN_FILE",
+		"/run/secrets/mithril-operator-token",
+	)
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		"/run/secrets/mithril-operator-token",
+		cfg.Mithril.Server.Aggregator.OperatorTokenFile,
+	)
+}
+
+func TestMithrilServerPublicBaseURLBindings(t *testing.T) {
+	t.Run("environment", func(t *testing.T) {
+		resetGlobalConfig()
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv(
+			"DINGO_MITHRIL_SERVER_PUBLIC_BASE_URL",
+			"https://snapshots.example.org",
+		)
+
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+		require.Equal(
+			t, "https://snapshots.example.org", cfg.Mithril.Server.PublicBaseURL,
+		)
+	})
+
+	t.Run("flag", func(t *testing.T) {
+		resetGlobalConfig()
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+
+		cmd := &cobra.Command{Use: "dingo"}
+		RegisterFlags(cmd)
+		require.NoError(t, cmd.ParseFlags([]string{
+			"--mithril-server-public-base-url=https://snapshots.example.org",
+		}))
+		require.NoError(t, ApplyFlags(cmd, cfg))
+		require.Equal(
+			t, "https://snapshots.example.org", cfg.Mithril.Server.PublicBaseURL,
+		)
+	})
+}
+
 func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)

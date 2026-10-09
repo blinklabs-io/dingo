@@ -234,6 +234,7 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
   - [DMQ Message Authentication](#dmq-message-authentication)
 - [Block Production](#block-production)
 - [Mithril Bootstrap](#mithril-bootstrap)
+- [Mithril Snapshot Production and Serving](#mithril-snapshot-production-and-serving)
 - [External Interfaces](#external-interfaces)
 - [Architectural Boundaries](#architectural-boundaries)
 - [Design Patterns](#design-patterns)
@@ -1415,10 +1416,15 @@ dingo/
 │       ├── server.go    # Serves the MidnightState gRPC compatibility surface
 │       ├── service.go   # Governance/parameters/block/epoch/stability RPC handlers
 │       └── adapter.go   # *database.Database -> MidnightDatabase interface adapter
-├── mithril/             # Mithril snapshot bootstrap
+├── mithril/             # Mithril snapshot bootstrap, production and serving
 │   ├── bootstrap.go     # Bootstrap orchestration
 │   ├── client.go        # Mithril aggregator client
-│   └── download.go      # Snapshot download and extraction
+│   ├── download.go      # Snapshot download and extraction
+│   ├── snapshot_create.go # Deterministic artifact production, retention
+│   ├── artifact_store*.go # Local, S3 and GCS artifact stores
+│   ├── server.go        # Aggregator-compatible artifact HTTP handler
+│   ├── aggregator.go    # Signer registration, signature collection, certificates
+│   └── stm_aggregate.go # STM registration commitment and signature aggregation
 ├── keystore/            # Key management
 │   ├── keystore.go      # Key store interface
 │   ├── keyfile.go       # Key file parsing
@@ -9093,6 +9099,114 @@ re-runs. On MySQL, InnoDB
 requires indexes supporting foreign-key child columns, so the dialect leaves
 those indexes in place while deferring the remaining manifest entries.
 
+## Mithril Snapshot Production and Serving
+
+`dingo mithril snapshot create` and `dingo mithril serve` are the reverse of
+bootstrap: they produce the artifact format `dingo mithril sync` consumes (a
+Mithril Cardano database, v2) and serve it through the aggregator artifact API.
+Neither starts the node; both read the `mithril.server` configuration, and the
+server binds the shared `bindAddr`. Artifact reads are public. When the
+aggregator is enabled, signer registration and registration closure require an
+operator bearer token; non-loopback binds require TLS.
+
+**Production** (`mithril.CreateSnapshot`) takes a sealed cardano-node database
+directory. Immutable file numbers must be contiguous from 0 with a chunk,
+primary and secondary file each. Production digests every file with SHA-256,
+derives the digest-list merkle root and artifact hash with the same
+`computeMMRRoot`/`ComputeHash` the client verifies against, then writes one
+`NNNNN.tar.zst` per file trio, `digests.tar.zst`, and `ancillary.tar.zst` holding
+the newest ledger state and an Ed25519-signed manifest
+(`mithril.server.ancillarySigningKeyFile`). The beacon epoch is the epoch of
+that ledger state. The archives are re-hashed as they are written, so a file
+rewritten after its digest was taken fails the run. `artifact.json` is written
+last and is the completion marker: a snapshot without it is not listed and not
+pruned, so a run that fails or is interrupted before writing it deletes the
+objects under the hash, unless a concurrent run has published the snapshot
+with every archive. The store has no transactions, so every writer of
+`artifact.json` (a producer run or the aggregator) reads each archive back
+after writing it and removes it again when one is missing or cannot be
+confirmed, and every removal
+reads `artifact.json` back after deleting the archives and removes it again
+unless every archive has been rewritten. Whichever side of a race reads last
+sees the other's write, so no interleaving of producers, retention and the
+aggregator leaves a listed snapshot without its archives; the losing producer
+fails instead. Archives are a function of the directory and the
+ancillary key (sorted entries, zero timestamps and owners, single-threaded
+zstd), and the artifact hash covers only the epoch and digest merkle root, so a
+second run reproduces the same archives and hash; `artifact.json` also records
+a `created_at` time of the run. `certificate_hash` is empty until the
+aggregator certifies the snapshot.
+A run whose hash is already complete in the store writes nothing and returns
+the stored snapshot, so a certificate attached to it is kept. If the stored
+snapshot is missing an archive, the run unlists it, rebuilds the archives and
+republishes its stored metadata with the certificate.
+
+**Storage** is the `ArtifactStore` interface (`Put`, `Open`, `Subdirs`,
+`DeletePrefix`) selected by `mithril.server.artifactStore`: a directory, or an
+`s3://` / `gcs://` URI in builds with `dingo_extra_plugins`. Remote stores read
+credentials from the SDK default chain (`AWS_ENDPOINT` selects an
+S3-compatible endpoint) and serve ranged reads by lazy ranged GETs.
+Archive confirmation and snapshot listing keep up to 16 store requests in
+flight rather than one per archive or snapshot in turn, since the aggregator
+runs both while holding its mutex; a cancelled confirmation fails rather than
+reporting the archives present.
+When `mithril.server.keepSnapshots` is a positive N, `snapshot create` prunes
+all but the newest N complete snapshots, removing each one's metadata object
+first; 0 keeps every snapshot. A run that reproduces a stored snapshot older
+than the newest N fails, since retention has removed it.
+
+**Serving** (`mithril.NewServerHandler`) answers `GET /artifact/cardano-database`,
+`/artifact/cardano-database/{hash}`, `/download/{hash}/{name}` and
+`/certificate/{hash}` (a stored `certificates/{hash}.json`, if present).
+`mithril.server.publicBaseUrl` is the absolute origin used in artifact download
+locations; it must use HTTPS except for a loopback HTTP origin. Request Host and
+forwarded headers do not affect generated links. Archive downloads use
+`http.ServeContent`, giving range and HEAD support; with
+`mithril.server.redirectBaseUrl` set they instead redirect to that base URL plus
+the object key. Path segments reaching the store are matched against a
+64-hex-digit hash and a fixed archive-name pattern first. With the aggregator
+mounted, the list omits snapshots that carry no certificate yet, since a
+verifying client bootstraps from the newest listed one.
+
+All public artifact reads, including pending-certificate and stake-distribution
+reads, and public signature submissions share an admission bound of
+`2 * (immutableDownloadWorkers + 1)` (34) requests, enough for two v2
+bootstraps each running its 16 immutable downloads beside the ancillary one, and
+return `503 Service Unavailable` with `Retry-After: 1` when it is full. A
+15-second request-body read deadline is armed before decoding a signature
+submission. Each response write refreshes a separate 15-second progress
+deadline, so an active large snapshot transfer has no absolute duration limit
+while a stalled reader cannot retain its request slot indefinitely.
+
+**Aggregator** (`mithril.Aggregator`, enabled by `mithril.server.aggregator`)
+is mounted on the same handler and certifies the stored snapshots of the
+configured network. `POST /register-signer` and
+`POST /close-registrations` require the bearer token in the
+`Authorization` header, loaded from
+`mithril.server.aggregator.operatorTokenFile`; the token must contain at least
+32 random bytes, and a non-loopback bind requires server TLS. Pending reads and
+signature submissions do not close registration. The operator closes it only
+after a snapshot awaits a certificate and at least one signer has registered;
+the aggregator then orders the signers as the reference key registry does,
+builds the registration Merkle commitment and aggregate verification key, and
+issues a genesis certificate at `epoch-1` signed with the genesis key. The
+pending message binds the oldest uncertified snapshot's digest Merkle root; if
+retention prunes that snapshot while it is open, signing moves on to the next
+one rather than certifying it; a removal that lands after that check makes the
+certifying signature submission answer `409 Conflict`, with the certificate
+left in the chain and the snapshot unlisted. Each
+`POST /register-signatures` single signature is verified (key, lottery wins,
+signer index) before it counts; once the signatures cover `k` distinct lottery
+indices the aggregator selects them as the reference does, builds the batch
+Merkle path, checks the multi-signature with the same verifier clients use, and
+publishes the certificate chained to the previous one. The certified Mithril
+stake distribution is served at `/artifact/mithril-stake-distributions`, which
+certificate-chain verification of a Cardano database artifact reads. The closed
+signer set and chain head are stored in `aggregator.json` and restored on
+start; changing the epoch or parameters afterwards is refused. Signing itself is
+not part of the aggregator, and certificates carry no KES operational
+certificates. The operator supplies and authorizes the epoch's signer stakes.
+
 After a completed metadata backfill, `internal/node.FinalizeBackfillPlannerStats`
 refreshes planner statistics after critical index repair and before either
 Mithril sync or `serve` clears import readiness state. It records a checkpoint
@@ -9106,7 +9220,6 @@ estimates from driving expensive query plans on the completed database.
 MCP node status inspects SQLite's index catalog and sync state to distinguish
 critical index readiness from pending background maintenance. Neither a complete
 index catalog nor a recorded statistics refresh establishes ledger readiness.
-
 ## External Interfaces
 
 Dingo provides four client-facing APIs plus Bark. All are optional and gated by port configuration. UTxO RPC, Blockfrost, Kupo, and Mesh are general-purpose external APIs and require `storageMode: api`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API. The health probes below are not an application API at all: they are operational surface for a container runtime or orchestrator, and are the one HTTP interface here that is available in every storage mode.
@@ -13062,7 +13175,10 @@ storage or a configured `dev` run mode — which forces `api` storage — the
 UTxORPC/Blockfrost/Mesh listeners and an explicitly enabled Midnight listener);
 the Mithril snapshot
 sync (`dingo sync --mithril` or `dingo mithril sync`) starts only the metrics
-and debug listeners; the read-only `mithril list`/`show` and `load` start none.
+and debug listeners; `mithril serve` starts only the artifact server, and only
+that command validates the `mithril.server` port, public URL and aggregator
+settings; `mithril list`/`show`, `mithril snapshot create` and `load` start
+none.
 A port configured for an inactive listener cannot bind, so it is neither
 range-checked nor counted toward a collision; two active listeners are only
 reported as colliding when their bind addresses overlap (equal, or either
