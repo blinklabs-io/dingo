@@ -61,8 +61,10 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 	)
 	require.NoError(t, meta.SetNetworkState(1, 2, belowSlot, nil))
 	require.NoError(t, meta.SetNetworkState(3, 4, aboveSlot, nil))
-	require.NoError(t, meta.AddNetworkDonation(belowSlot, 100, 7, nil))
-	require.NoError(t, meta.AddNetworkDonation(anchorSlot, 100, 8, nil))
+	// Tagged with the epoch before the anchor's: the import replaces the
+	// anchor epoch's own rows with the snapshot's donation total.
+	require.NoError(t, meta.AddNetworkDonation(belowSlot, 99, 7, nil))
+	require.NoError(t, meta.AddNetworkDonation(anchorSlot, 99, 8, nil))
 	require.NoError(t, meta.AddNetworkDonation(aboveSlot, 101, 9, nil))
 
 	require.NoError(t, ImportLedgerState(
