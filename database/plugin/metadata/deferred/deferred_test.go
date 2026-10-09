@@ -78,7 +78,7 @@ func TestCriticalManifestNotEmpty(t *testing.T) {
 	// idx_utxo_transaction_id joined the critical subset: the rollback's
 	// DELETE FROM "transaction" cascades through it, and a rollback can
 	// run as soon as the database is marked ready.
-	const wantCritical = 19
+	const wantCritical = 35
 	if len(critical) != wantCritical {
 		t.Errorf(
 			"CriticalManifest: got %d entries, want %d — update this constant if the classification changed intentionally",
@@ -112,27 +112,48 @@ func TestSyncStateConstants(t *testing.T) {
 	}
 }
 
-// TestManifestDefersNewTransactionDetailIndexes pins the indexes whose
-// idempotency deletes are skipped for a fresh transaction ID during batched
-// replay. Existing transaction replays still run those deletes.
-func TestManifestDefersNewTransactionDetailIndexes(t *testing.T) {
-	want := map[string]string{
-		"idx_key_witness_transaction_id":         "key_witness",
-		"idx_witness_scripts_transaction_id":     "witness_scripts",
-		"idx_redeemer_transaction_id":            "redeemer",
-		"idx_plutus_data_transaction_id":         "plutus_data",
-		"idx_address_transaction_transaction_id": "address_transaction",
-		"idx_certs_transaction_id":               "certs",
+// TestManifestDefersAPIWriteIndexes pins indexes that bulk API replay does not
+// need for per-row writes but must restore before their query or rollback use.
+func TestManifestDefersAPIWriteIndexes(t *testing.T) {
+	type expectation struct {
+		table    string
+		critical bool
+	}
+	want := map[string]expectation{
+		"idx_key_witness_transaction_id":         {"key_witness", true},
+		"idx_witness_scripts_transaction_id":     {"witness_scripts", true},
+		"idx_redeemer_transaction_id":            {"redeemer", true},
+		"idx_plutus_data_transaction_id":         {"plutus_data", true},
+		"idx_address_transaction_transaction_id": {"address_transaction", true},
+		"idx_certs_transaction_id":               {"certs", true},
+		"idx_address_transaction_slot":           {"address_transaction", true},
+		"idx_addr_tx_stake_position":             {"address_transaction", true},
+		"idx_addr_tx_payment":                    {"address_transaction", true},
+		"idx_asset_mint_burn_slot":               {"asset_mint_burn", true},
+		"idx_asset_mint_burn_fingerprint":        {"asset_mint_burn", false},
+		"idx_asset_mint_burn_lookup":             {"asset_mint_burn", true},
+		"idx_datum_added_slot":                   {"datum", true},
+		"idx_certs_block_hash":                   {"certs", true},
+		"idx_certs_certificate_id":               {"certs", true},
+		"idx_certs_cert_type":                    {"certs", true},
+		"idx_key_witness_type":                   {"key_witness", true},
+		"idx_redeemer_index":                     {"redeemer", true},
+		"idx_redeemer_tag":                       {"redeemer", true},
+		"idx_witness_scripts_script_hash":        {"witness_scripts", true},
+		"idx_witness_scripts_type":               {"witness_scripts", true},
+		"idx_transaction_metadata_label_slot":    {"transaction_metadata_label", true},
+		"idx_transaction_metadata_label_label":   {"transaction_metadata_label", true},
+		"idx_script_type":                        {"script", false},
 	}
 	found := make(map[string]bool, len(want))
 	for _, idx := range Manifest {
-		if table, ok := want[idx.Name]; ok {
+		if expected, ok := want[idx.Name]; ok {
 			found[idx.Name] = true
-			if idx.Table != table {
-				t.Errorf("%s table = %q, want %q", idx.Name, idx.Table, table)
+			if idx.Table != expected.table {
+				t.Errorf("%s table = %q, want %q", idx.Name, idx.Table, expected.table)
 			}
-			if !idx.Critical {
-				t.Errorf("%s must be rebuilt before API and rollback traffic", idx.Name)
+			if idx.Critical != expected.critical {
+				t.Errorf("%s critical = %t, want %t", idx.Name, idx.Critical, expected.critical)
 			}
 		}
 	}

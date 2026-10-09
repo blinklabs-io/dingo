@@ -37,9 +37,9 @@ package deferred
 //     (import_checkpoint.import_key, backfill_checkpoint.phase).
 //   - The utxo (tx_id, output_idx) lookup index, required to
 //     resolve transaction inputs during backfill UTxO spending.
-	//   - Indexes used by per-row import predicates. Replay cleanup indexes
-	//     can be deferred only when fresh transaction IDs skip cleanup and
-	//     the indexes are restored before rollback/API traffic.
+//   - Indexes used by per-row import predicates. Replay cleanup indexes
+//     can be deferred only when fresh transaction IDs skip cleanup and
+//     the indexes are restored before rollback/API traffic.
 //   - Cross-row uniqueness constraints used by ledger-state import
 //     (pool_stake_snapshot, reward_snapshot, reward_pool_input,
 //     network_state, account.staking_key, drep.credential, etc.).
@@ -47,13 +47,13 @@ package deferred
 // Adding a new index to the versioned metadata schema requires deciding its
 // bulk-load behavior at the same time:
 //
-	//  1. Does any import path (ledger-state import, immutable blob
-	//     load, backfill block replay) rely on the index for an ON
-	//     CONFLICT target, FK enforcement, constraint lookup, or a
-	//     per-row predicate that runs on every inserted row? If yes,
-	//     leave it out of the manifest. Replay cleanup may be deferred
-	//     only when fresh IDs skip it and the index is restored before
-	//     rollback/API traffic.
+//  1. Does any import path (ledger-state import, immutable blob
+//     load, backfill block replay) rely on the index for an ON
+//     CONFLICT target, FK enforcement, constraint lookup, or a
+//     per-row predicate that runs on every inserted row? If yes,
+//     leave it out of the manifest. Replay cleanup may be deferred
+//     only when fresh IDs skip it and the index is restored before
+//     rollback/API traffic.
 //  2. Does the index only serve API/query/rollback paths that do
 //     not run during bulk import or trusted immutable replay? If yes, add it here.
 //  3. Composite indexes share state with their constituent columns. If a field
@@ -226,19 +226,19 @@ var Manifest = []Index{
 		Name:    "idx_datum_added_slot",
 		Table:   "datum",
 		Columns: []string{"added_slot"},
-		Notes:   "Datum rollback scan",
+		Notes:   "Datum rollback scan", Critical: true,
 	},
 	{
 		Name:    "idx_certs_block_hash",
 		Table:   "certs",
 		Columns: []string{"block_hash"},
-		Notes:   "Block certificate lookup",
+		Notes:   "Block certificate lookup", Critical: true,
 	},
 	{
 		Name:    "idx_certs_certificate_id",
 		Table:   "certs",
 		Columns: []string{"certificate_id"},
-		Notes:   "Certificate reverse lookup",
+		Notes:   "Certificate reverse lookup", Critical: true,
 	},
 	{
 		Name: "idx_certs_slot", Table: "certs", Columns: []string{"slot"},
@@ -248,11 +248,43 @@ var Manifest = []Index{
 		Name:    "idx_certs_cert_type",
 		Table:   "certs",
 		Columns: []string{"cert_type"},
-		Notes:   "Certificate type filter",
+		Notes:   "Certificate type filter", Critical: true,
 	},
-	// Fresh transaction IDs cannot already have API detail rows, so the
-	// batched path skips idempotency deletes on first insertion. Replays keep
-	// the deletes; these indexes are rebuilt before API and rollback traffic.
+	// These indexes only serve API queries, rollback, or replay cleanup. The
+	// batched import skips replay cleanup for fresh IDs and restores critical
+	// indexes before the database accepts API or rollback traffic.
+	{
+		Name: "idx_address_transaction_slot", Table: "address_transaction",
+		Columns: []string{"slot"},
+		Notes:   "Address history rollback and slot lookup", Critical: true,
+	},
+	{
+		Name: "idx_addr_tx_stake_position", Table: "address_transaction",
+		Columns: []string{
+			"credential_tag", "staking_key", "slot", "tx_index", "payment_key",
+		},
+		Notes: "Stake-credential address history lookup", Critical: true,
+	},
+	{
+		Name: "idx_addr_tx_payment", Table: "address_transaction",
+		Columns: []string{"payment_key"},
+		Notes:   "Payment-credential address history lookup", Critical: true,
+	},
+	{
+		Name: "idx_asset_mint_burn_slot", Table: "asset_mint_burn",
+		Columns: []string{"slot"},
+		Notes:   "Mint/burn history rollback", Critical: true,
+	},
+	{
+		Name: "idx_asset_mint_burn_fingerprint", Table: "asset_mint_burn",
+		Columns: []string{"fingerprint"},
+		Notes:   "Mint/burn fingerprint index",
+	},
+	{
+		Name: "idx_asset_mint_burn_lookup", Table: "asset_mint_burn",
+		Columns: []string{"policy_id", "name", "slot"},
+		Notes:   "Mint/burn history query", Critical: true,
+	},
 	{
 		Name:  "idx_address_transaction_transaction_id",
 		Table: "address_transaction", Columns: []string{"transaction_id"},
@@ -287,31 +319,49 @@ var Manifest = []Index{
 		Name:    "idx_redeemer_index",
 		Table:   "redeemer",
 		Columns: []string{"index"},
-		Notes:   "Redeemer index lookup",
+		Notes:   "Redeemer index lookup", Critical: true,
 	},
 	{
 		Name:    "idx_redeemer_tag",
 		Table:   "redeemer",
 		Columns: []string{"tag"},
-		Notes:   "Redeemer tag filter",
+		Notes:   "Redeemer tag filter", Critical: true,
 	},
 	{
 		Name:    "idx_key_witness_type",
 		Table:   "key_witness",
 		Columns: []string{"type"},
-		Notes:   "Witness type filter",
+		Notes:   "Witness type filter", Critical: true,
 	},
 	{
 		Name:    "idx_witness_scripts_script_hash",
 		Table:   "witness_scripts",
 		Columns: []string{"script_hash"},
-		Notes:   "Script hash lookup",
+		Notes:   "Script hash lookup", Critical: true,
 	},
 	{
 		Name:    "idx_witness_scripts_type",
 		Table:   "witness_scripts",
 		Columns: []string{"type"},
-		Notes:   "Script type filter",
+		Notes:   "Script type filter", Critical: true,
+	},
+	{
+		Name:    "idx_transaction_metadata_label_slot",
+		Table:   "transaction_metadata_label",
+		Columns: []string{"slot"},
+		Notes:   "Metadata label rollback", Critical: true,
+	},
+	{
+		Name:    "idx_transaction_metadata_label_label",
+		Table:   "transaction_metadata_label",
+		Columns: []string{"label"},
+		Notes:   "Metadata label query", Critical: true,
+	},
+	{
+		Name:    "idx_script_type",
+		Table:   "script",
+		Columns: []string{"type"},
+		Notes:   "Script type index",
 	},
 }
 
