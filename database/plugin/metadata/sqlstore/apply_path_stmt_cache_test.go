@@ -100,3 +100,43 @@ func TestApplyPathStatementsArePreparedOnce(t *testing.T) {
 		)
 	}
 }
+
+// TestCachedStatementsFallBackWhenTxScopedStmtClosed closes the
+// transaction-scoped statements txScopedStmt memoized for an exec (set tip)
+// and a single-row query (pool by key hash) while their transaction is still
+// open. database/sql closes them this way when the transaction's context is
+// cancelled, and the asynchronous rollback that follows makes that path
+// timing-dependent to reach; closing them directly reaches it every run.
+func TestCachedStatementsFallBackWhenTxScopedStmtClosed(t *testing.T) {
+	t.Parallel()
+	store, _ := newRecordingSQLiteStore(t)
+	txn := store.Transaction(t.Context())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	tip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1, Hash: []byte{0x01}},
+		BlockNumber: 1,
+	}
+	require.NoError(t, store.SetTip(tip, txn))
+	pool, err := store.GetPool(lcommon.PoolKeyHash{0x01}, true, txn)
+	require.NoError(t, err)
+	require.Nil(t, pool)
+
+	sqlTransaction, ok := txn.(*sqlTxn)
+	require.True(t, ok)
+	for _, query := range []string{
+		sqlitequery.SetTipQuery,
+		poolByKeyHashQuery,
+	} {
+		cached, ok := store.lookupCachedStmt(query)
+		require.True(t, ok)
+		require.NoError(t, store.txScopedStmt(
+			t.Context(), sqlTransaction.tx, cached,
+		).Close())
+	}
+
+	require.NoError(t, store.SetTip(tip, txn))
+	pool, err = store.GetPool(lcommon.PoolKeyHash{0x01}, true, txn)
+	require.NoError(t, err)
+	require.Nil(t, pool)
+	require.NoError(t, txn.Commit())
+}
