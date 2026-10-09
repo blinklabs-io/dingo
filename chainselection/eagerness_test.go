@@ -470,3 +470,50 @@ func installFakeClock2(cs *ChainSelector, now func() time.Time) {
 	cs.nowFn = now
 	cs.mutex.Unlock()
 }
+
+// A requester that the selection view excludes still counts for its own
+// header, but its fragment is not one the live candidates share. When it is
+// the only fragment, its head must not become the recorded anchor, or live
+// candidates that later stop overlapping fall back to a point they never
+// shared.
+func TestEagernessAnchorIgnoresExcludedRequesterHead(t *testing.T) {
+	t.Parallel()
+	var liveForks atomic.Bool
+	liveForks.Store(true)
+	var requesterLive atomic.Bool
+	requesterLive.Store(true)
+	requester := newTestConnectionId(3)
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+		ConnectionLive: func(connId ouroboros.ConnectionId) bool {
+			if connId == requester {
+				return requesterLive.Load()
+			}
+			return liveForks.Load()
+		},
+	})
+	feedLoEChain(cs, requester, "s", 1, 30)
+	requesterLive.Store(false)
+	a := newTestConnectionId(1)
+	b := newTestConnectionId(2)
+	feedLoEChain(cs, a, "c", 1, 10)
+	feedLoEChain(cs, b, "c", 1, 10)
+	feedLoEChain(cs, a, "a", 11, 40)
+	feedLoEChain(cs, b, "b", 11, 12)
+	cs.SetLocalTip(loeTip("c", 10))
+	before := cs.EagernessLimit()
+	require.True(t, before.Active)
+	require.False(t, before.Intersected)
+	require.Equal(t, uint64(10+loeTestK), before.BlockNumber)
+
+	liveForks.Store(false)
+	require.True(t, cs.withinEagernessLimit(requester, 30, nil),
+		"the excluded requester is its own candidate")
+	liveForks.Store(true)
+
+	after := cs.EagernessLimit()
+	assert.Equal(t, before.BlockNumber, after.BlockNumber,
+		"the excluded requester's head became the shared anchor")
+	assert.Equal(t, before.Point, after.Point)
+}

@@ -93,14 +93,21 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 		),
 	}
 	var fragments []CandidateFragment
+	// forced is set when include admits a peer the selection view excludes.
+	// Such a view is the requester's alone, so it does not record the anchor:
+	// the anchor is the last point the live candidates shared, and a forced
+	// lone fragment's head was never shared with any of them.
+	forced := false
 	for connId, peerTip := range cs.peerTips {
 		if peerTip.awaitingFirstHeader ||
 			len(peerTip.observedTipHistory) == 0 {
 			continue
 		}
-		if (include == nil || *include != connId) &&
-			!cs.peerLiveEligibleNonStaleLocked(connId, peerTip) {
-			continue
+		if !cs.peerLiveEligibleNonStaleLocked(connId, peerTip) {
+			if include == nil || *include != connId {
+				continue
+			}
+			forced = true
 		}
 		// A read-only view: it is never returned or retained.
 		fragments = append(
@@ -149,10 +156,12 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 			return fallback()
 		}
 	}
-	cs.setEagernessAnchor(&eagernessAnchor{
-		point:       clonePoint(common.Point),
-		blockNumber: common.BlockNumber,
-	})
+	if !forced {
+		cs.setEagernessAnchor(&eagernessAnchor{
+			point:       clonePoint(common.Point),
+			blockNumber: common.BlockNumber,
+		})
+	}
 	limit.Intersected = true
 	limit.Point = clonePoint(common.Point)
 	limit.BlockNumber = safeAddUint64(common.BlockNumber, cs.securityParam)
