@@ -652,6 +652,10 @@ func processGapBlockTransactions(
 ) error {
 	txn := db.Transaction(ctx, true)
 	defer txn.Release()
+	protocolMajor := uint64(0)
+	if versioned, ok := pparams.(lcommon.PoolRuleProtocolParameters); ok {
+		protocolMajor = uint64(versioned.ProtocolMajorVersion())
+	}
 	var storageIndexOffset uint64
 	for i, tx := range txs {
 		// Gap blocks are already reflected in the Mithril snapshot's
@@ -677,6 +681,7 @@ func processGapBlockTransactions(
 				gapCertDeposits(logger, level, point, eraId, pparams),
 				offsets,
 				txn,
+				protocolMajor,
 			); err != nil {
 				return fmt.Errorf(
 					"storing transaction body %d: %w",
