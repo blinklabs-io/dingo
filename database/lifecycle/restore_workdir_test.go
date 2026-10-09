@@ -86,7 +86,18 @@ func TestRestoreLocalPayloadCopiesStayBesideTarget(t *testing.T) {
 		lifecycle.TriggerManual, "test", "badger", "sqlite",
 	)
 	require.NoError(t, err)
-	target := filepath.Join(t.TempDir(), "restored")
+	workParent := t.TempDir()
+	target := filepath.Join(workParent, "restored")
+	for _, name := range []string{
+		".dingo-restore-payloads-stale",
+		".dingo-cloud-snapshot-stale",
+		".dingo-verify-snapshot-stale",
+	} {
+		stale := filepath.Join(workParent, name)
+		require.NoError(t, os.Mkdir(stale, 0o700))
+		old := time.Now().Add(-8 * 24 * time.Hour)
+		require.NoError(t, os.Chtimes(stale, old, old))
+	}
 	unusableSystemTempDir(t)
 
 	_, err = lifecycle.Restore(

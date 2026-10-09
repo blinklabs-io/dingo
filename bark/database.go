@@ -690,21 +690,16 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 		manifestOpts...,
 	)
 	if err != nil {
-		// A cloud listing failure is typically connectivity/auth (the same
-		// class of failure cloudSnapshotExists/resolveSnapshotSource/
-		// DeleteSnapshot elsewhere in this file report as CodeUnavailable,
-		// not CodeInternal), and the local entries built above are already
-		// known-good -- failing the whole call here would hide real,
-		// currently-available local snapshots from an operator over what
-		// is often just a transient cloud outage. Log and continue with
-		// local-only results instead, the same best-effort convention
-		// Manager.pruneOldSnapshots uses for a cloud-side failure.
+		// A cloud lister can return validated entries alongside errors for
+		// individual snapshots it could not read or authenticate. Keep those
+		// usable entries in the catalog while logging the omissions. A total
+		// listing failure returns no entries, which naturally leaves the
+		// local catalog intact.
 		h.bark.config.Logger.Warn(
-			"list cloud snapshots failed, returning local snapshots only",
+			"cloud snapshot listing omitted entries or was incomplete",
 			"component", "bark",
 			"error", err,
 		)
-		ok = false
 	}
 	if ok {
 		for _, e := range cloudEntries {

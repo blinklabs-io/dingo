@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	databasev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/database"
@@ -39,6 +40,12 @@ func TestVerifySnapshotRestoresUnderSnapshotDir(t *testing.T) {
 	created := createAndAwaitSnapshot(
 		t, h, &databasev1alpha1.CreateSnapshotRequest{},
 	)
+	stale := filepath.Join(
+		h.bark.config.SnapshotDir, ".dingo-verify-snapshot-stale",
+	)
+	require.NoError(t, os.Mkdir(stale, 0o700))
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	require.NoError(t, os.Chtimes(stale, old, old))
 	missing := filepath.Join(t.TempDir(), "no-such-tmp")
 	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
 		t.Setenv(name, missing)
@@ -87,4 +94,6 @@ func TestVerifySnapshotRestoresUnderSnapshotDir(t *testing.T) {
 		names = append(names, e.Name())
 	}
 	require.Equal(t, []string{created.GetSnapshotId()}, names)
+	_, err = os.Stat(stale)
+	require.ErrorIs(t, err, os.ErrNotExist)
 }

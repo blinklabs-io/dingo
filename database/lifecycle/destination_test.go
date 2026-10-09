@@ -50,7 +50,9 @@ type fakeCloudDestination struct {
 	dir string
 }
 
-type unauthenticatedManifestDestination struct{}
+type unauthenticatedManifestDestination struct {
+	entries []lifecycle.SnapshotEntry
+}
 
 func (*unauthenticatedManifestDestination) UploadDir(context.Context, string) error {
 	return nil
@@ -64,10 +66,13 @@ func (*unauthenticatedManifestDestination) DownloadFiles(
 	return nil
 }
 
-func (*unauthenticatedManifestDestination) ListSnapshots(
+func (d *unauthenticatedManifestDestination) ListSnapshots(
 	context.Context,
 	...lifecycle.ManifestOption,
 ) ([]lifecycle.SnapshotEntry, error) {
+	if d.entries != nil {
+		return d.entries, nil
+	}
 	return []lifecycle.SnapshotEntry{{ID: "forged"}}, nil
 }
 
@@ -656,22 +661,40 @@ func TestListCloudSnapshotsInvalidDestReturnsError(t *testing.T) {
 
 func TestCloudManifestHelpersAuthenticateDestinationResults(t *testing.T) {
 	t.Parallel()
+	manifestDir := t.TempDir()
+	require.NoError(t, lifecycle.WriteManifest(
+		manifestDir,
+		lifecycle.Manifest{Network: "preview"},
+		lifecycle.WithManifestKey(testTrustKey),
+	))
+	validManifest, err := lifecycle.ReadManifest(
+		manifestDir, lifecycle.WithManifestKey(testTrustKey),
+	)
+	require.NoError(t, err)
+	destination := &unauthenticatedManifestDestination{
+		entries: []lifecycle.SnapshotEntry{
+			{ID: "forged"},
+			{ID: "trusted", Manifest: validManifest},
+		},
+	}
 	registry := lifecycle.NewDestinationRegistry()
 	registry.Register(
 		"unauthenticated",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
-			return &unauthenticatedManifestDestination{}, nil
+			return destination, nil
 		},
 	)
 	opts := []lifecycle.ManifestOption{
 		lifecycle.WithManifestKey(testTrustKey),
 	}
 
-	_, ok, err := lifecycle.ListCloudSnapshots(
+	entries, ok, err := lifecycle.ListCloudSnapshots(
 		context.Background(), registry, "unauthenticated://bucket", opts...,
 	)
 	require.True(t, ok)
 	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
+	require.Len(t, entries, 1)
+	require.Equal(t, []string{"trusted"}, []string{entries[0].ID})
 
 	_, ok, err = lifecycle.FetchCloudManifest(
 		context.Background(), registry, "unauthenticated://bucket/snap", opts...,

@@ -177,6 +177,43 @@ func TestMaxBlockSizeReadsPersistedLimitsOnce(t *testing.T) {
 	require.Equal(t, lists, store.lists.Load())
 }
 
+func TestMaxBlockSizeCachesPartialHistoryAfterMalformedRow(t *testing.T) {
+	t.Parallel()
+	store := &pparamsListingStore{}
+	db, err := dbtest.NewDatabaseWithMetadataWrapper(
+		t,
+		dbtest.Options{Config: &database.Config{DataDir: ""}},
+		func(inner metadata.MetadataStore) metadata.MetadataStore {
+			store.MetadataStore = inner
+			return store
+		},
+	)
+	require.NoError(t, err)
+	historical := mithrilRewardConwayPParams()
+	historical.MaxBlockBodySize = 4000000
+	historical.MaxBlockHeaderSize = 1100
+	encoded, err := cbor.Encode(historical)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(encoded, 100, 1, gledger.EraIdConway, nil))
+	require.NoError(t, db.SetPParams([]byte{0xff}, 101, 1, gledger.EraIdConway, nil))
+
+	ls := &LedgerState{
+		db: db,
+		currentPParams: &conway.ConwayProtocolParameters{
+			MaxBlockBodySize: 90112, MaxBlockHeaderSize: 1100,
+		},
+	}
+	ls.publishSnapshotsLocked()
+	want := uint64(4000000 + 1100 + blockFramingAllowance)
+	require.Equal(t, want, ls.MaxBlockSize())
+	lists := store.lists.Load()
+	require.Positive(t, lists)
+	for range 3 {
+		require.Equal(t, want, ls.MaxBlockSize())
+	}
+	require.Equal(t, lists, store.lists.Load())
+}
+
 // A metadata failure must not drop the bound to zero, which archive callers
 // read as unknown and replace with a default far below the current limits.
 func TestMaxBlockSizeKeepsCurrentLimitsWhenMetadataFails(t *testing.T) {

@@ -1844,9 +1844,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	return n.waitForShutdown()
 }
 
-// cleanupFailedStartup completes a failed startup while Run owns the startup
-// lifecycle gate. The gate is released only after every started component has
-// stopped, so shutdown cannot overlap the LIFO rollback on a startup signal.
 // barkLifecycleService builds the DatabaseService Bark mounts. Its operations
 // delegate to n, but manifest verification reads the trust key from the
 // configuration it is given, so it must carry n's lifecycle configuration for
@@ -1861,6 +1858,9 @@ func (n *Node) barkLifecycleService() *dblifecycle.Service {
 	return svc
 }
 
+// cleanupFailedStartup completes a failed startup while Run owns the startup
+// lifecycle gate. The gate is released only after every started component has
+// stopped, so shutdown cannot overlap the LIFO rollback on a startup signal.
 func (n *Node) cleanupFailedStartup(started []func()) {
 	defer n.startupLifecycleMu.Unlock()
 	if n.cancel != nil {

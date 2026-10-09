@@ -161,8 +161,9 @@ type CloudDestinationFactory func(uri *url.URL) (CloudDestination, error)
 // each snapshot lives one level under that base, mirroring the local
 // SnapshotDir/<snapshotID> layout (see SnapshotToCloud).
 type SnapshotLister interface {
-	// ListSnapshots returns one entry per snapshot found under this
-	// destination, each with its manifest already fetched and validated.
+	// ListSnapshots returns parsed manifests for snapshots found under this
+	// destination. ListCloudSnapshots applies the configured trust key before
+	// exposing any entries to its caller.
 	ListSnapshots(
 		ctx context.Context,
 		opts ...ManifestOption,
@@ -426,7 +427,9 @@ func JoinCloudURI(base string, sub string) string {
 // destination type doesn't implement SnapshotLister, which callers like
 // ListAvailableSnapshots should treat as "nothing to add," not a failure
 // — cloud listing is an optional capability, not every CloudDestination
-// implementation provides it.
+// implementation provides it. Invalid or unauthenticated entries are omitted;
+// valid entries may be returned alongside an error describing omitted entries
+// or an incomplete listing.
 func ListCloudSnapshots(
 	ctx context.Context,
 	registry *DestinationRegistry,
@@ -448,20 +451,24 @@ func ListCloudSnapshots(
 	if !ok {
 		return nil, false, nil
 	}
-	entries, err = lister.ListSnapshots(ctx, opts...)
-	if err != nil {
-		return nil, true, fmt.Errorf(
-			"list snapshots at %q: %w", cloudDest, err,
-		)
+	entries, listErr := lister.ListSnapshots(ctx, opts...)
+	var problems []error
+	if listErr != nil {
+		problems = append(problems, fmt.Errorf(
+			"list snapshots at %q: %w", cloudDest, listErr,
+		))
 	}
+	validated := make([]SnapshotEntry, 0, len(entries))
 	for _, entry := range entries {
 		if err := entry.Manifest.Authenticate(opts...); err != nil {
-			return nil, true, fmt.Errorf(
+			problems = append(problems, fmt.Errorf(
 				"authenticate cloud snapshot %q: %w", entry.ID, err,
-			)
+			))
+			continue
 		}
+		validated = append(validated, entry)
 	}
-	return entries, true, nil
+	return validated, true, errors.Join(problems...)
 }
 
 // FetchCloudManifest resolves the CloudDestination at the given exact

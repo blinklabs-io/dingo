@@ -75,7 +75,7 @@ func TestSnapshotToCloudLabelsBeforeMirroring(t *testing.T) {
 	require.Equal(t, "my-description", cloudManifest.Description)
 }
 
-func TestMirrorToCloudRejectsUnauthenticatedSnapshot(t *testing.T) {
+func TestMirrorToCloudRejectsIncompleteLegacySnapshot(t *testing.T) {
 	backingDir := t.TempDir()
 	setFakeCloudBackingDir(t, backingDir)
 	dir := filepath.Join(t.TempDir(), "unsigned")
@@ -89,8 +89,50 @@ func TestMirrorToCloudRejectsUnauthenticatedSnapshot(t *testing.T) {
 		"faketest://bucket/prefix",
 		lifecycle.WithManifestKey(testTrustKey),
 	)
-	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
+	require.Error(t, err)
 	require.NoDirExists(t, filepath.Join(backingDir, "prefix", "unsigned"))
+}
+
+func TestMirrorToCloudAuthenticatesLegacySnapshot(t *testing.T) {
+	t.Parallel()
+
+	backingDir := t.TempDir()
+	setFakeCloudBackingDir(t, backingDir)
+	db := newTestDB(t)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	dir := filepath.Join(t.TempDir(), "epoch-legacy")
+	_, err := lifecycle.Snapshot(
+		context.Background(), db, dir,
+		lifecycle.TriggerEpochBoundary, "test", "badger", "sqlite",
+	)
+	require.NoError(t, err)
+
+	manifest, err := lifecycle.ReadManifest(dir)
+	require.NoError(t, err)
+	manifest.BlobSHA256 = ""
+	manifest.MetadataSHA256 = ""
+	require.NoError(t, lifecycle.WriteManifest(dir, manifest))
+
+	err = lifecycle.MirrorToCloud(
+		context.Background(), testDestinationRegistry, dir,
+		"faketest://bucket/prefix",
+		lifecycle.WithManifestKey(testTrustKey),
+	)
+	require.NoError(t, err)
+
+	local, err := lifecycle.ReadManifest(
+		dir, lifecycle.WithManifestKey(testTrustKey),
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, local.BlobSHA256)
+	require.NotEmpty(t, local.MetadataSHA256)
+	require.NoError(t, local.Authenticate(lifecycle.WithManifestKey(testTrustKey)))
+	cloud, err := lifecycle.ReadManifest(
+		filepath.Join(backingDir, "prefix", "epoch-legacy"),
+		lifecycle.WithManifestKey(testTrustKey),
+	)
+	require.NoError(t, err)
+	require.Equal(t, local.Authentication, cloud.Authentication)
 }
 
 // TestIsCloudMirroredToDetectsChangedDestination guards the gap a bare

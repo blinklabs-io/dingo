@@ -632,14 +632,24 @@ func TestRollbackAfterSlotLowersHistoryExpiryCursor(t *testing.T) {
 		{
 			name: "TruncateAfterSlot",
 			rollback: func(db *Database, point ocommon.Point) error {
-				_, _, err := db.TruncateAfterSlot(point, 0, nil)
+				_, _, err := db.TruncateAfterSlot(
+					context.Background(),
+					point,
+					0,
+					nil,
+				)
 				return err
 			},
 		},
 		{
 			name: "RollbackMetadataAfterSlot",
 			rollback: func(db *Database, point ocommon.Point) error {
-				return db.RollbackMetadataAfterSlot(point, 0, nil)
+				return db.RollbackMetadataAfterSlot(
+					context.Background(),
+					point,
+					0,
+					nil,
+				)
 			},
 		},
 	}

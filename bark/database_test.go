@@ -482,6 +482,13 @@ func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, os.RemoveAll(cloudOnlyDir))
+	untrustedDir := filepath.Join(cloudBackingDir, "prefix", "untrusted")
+	require.NoError(t, os.MkdirAll(untrustedDir, 0o755))
+	require.NoError(t, lifecycle.WriteManifest(
+		untrustedDir,
+		lifecycle.Manifest{Network: "preview"},
+		lifecycle.WithManifestKey([]byte("different-trust-root-012345")),
+	))
 
 	localOnlyDir := filepath.Join(snapshotDir, "local-only")
 	_, err = lifecycle.Snapshot(
@@ -516,6 +523,7 @@ func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
 	require.Contains(t, byID, "local-and-cloud")
 	require.Contains(t, byID, "cloud-only")
 	require.Contains(t, byID, "local-only")
+	require.NotContains(t, byID, "untrusted")
 
 	// Deduped entry must report its real local path, not a reconstructed
 	// cloud URI.

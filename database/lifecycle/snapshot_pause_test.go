@@ -29,8 +29,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
@@ -43,7 +45,7 @@ var errInjectedBackup = errors.New("injected backup failure")
 type backupHooks struct {
 	blob     func(ctx context.Context, w io.Writer) error
 	metadata func(ctx context.Context, dstPath string) error
-	read     func() error
+	getTip   func() error
 }
 
 type hookedBlobStore struct {
@@ -63,13 +65,13 @@ type hookedMetadataStore struct {
 	hooks *backupHooks
 }
 
-func (s hookedMetadataStore) GetCommitTimestamp(ctx context.Context) (int64, error) {
-	if s.hooks.read != nil {
-		if err := s.hooks.read(); err != nil {
-			return 0, err
+func (s hookedMetadataStore) GetTip(txn types.Txn) (ochainsync.Tip, error) {
+	if s.hooks.getTip != nil {
+		if err := s.hooks.getTip(); err != nil {
+			return ochainsync.Tip{}, err
 		}
 	}
-	return s.MetadataStore.GetCommitTimestamp(ctx)
+	return s.MetadataStore.GetTip(txn)
 }
 
 func (s hookedMetadataStore) BackupTo(ctx context.Context, dst string) error {
@@ -534,32 +536,58 @@ func TestSnapshotReusesMetricsForWrappedRegistry(t *testing.T) {
 }
 
 func TestSnapshotRejectsSuccessfulBackupAfterPauseDeadline(t *testing.T) {
-	t.Parallel()
-	db := newHookedDB(t, nil, &backupHooks{blob: func(ctx context.Context, _ io.Writer) error {
+	backupStarted := make(chan struct{}, 2)
+	finishAfterDeadline := func(ctx context.Context) error {
+		backupStarted <- struct{}{}
 		<-ctx.Done()
 		return nil
-	}})
+	}
+	db := newHookedDB(t, nil, &backupHooks{
+		blob: func(ctx context.Context, _ io.Writer) error {
+			return finishAfterDeadline(ctx)
+		},
+		metadata: func(ctx context.Context, _ string) error {
+			return finishAfterDeadline(ctx)
+		},
+	})
 	dir := filepath.Join(t.TempDir(), "snapshot")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	_, err := snapshotAt(ctx, db, dir, lifecycle.WithMaxCommitPause(30*time.Millisecond))
+	result := make(chan error, 1)
+	go func() {
+		_, err := snapshotAt(ctx, db, dir, lifecycle.WithMaxCommitPause(30*time.Millisecond))
+		result <- err
+	}()
+	for range 2 {
+		select {
+		case <-backupStarted:
+		case err := <-result:
+			t.Fatalf("snapshot returned before both backups started: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("snapshot backups did not start")
+		}
+	}
+	err := testutil.RequireReceive(
+		t,
+		result,
+		5*time.Second,
+		"snapshot must return after the pause deadline",
+	)
 	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
 	require.NoDirExists(t, dir)
 	requireBarrierReleased(t, db)
 }
 
 func TestSnapshotBoundsBlockedStateRead(t *testing.T) {
-	t.Parallel()
 	release := make(chan struct{})
 	started := make(chan struct{})
 	finished := make(chan struct{})
 	hooks := &backupHooks{}
 	db := newHookedDB(t, nil, hooks)
-	// The deadline starts after setup: opening the database under a loaded
-	// -race run can outlast it, leaving the read hook never entered.
+	// Database setup must finish before the snapshot operation deadline starts.
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	hooks.read = func() error {
+	hooks.getTip = func() error {
 		close(started)
 		defer close(finished)
 		select {

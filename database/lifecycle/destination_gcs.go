@@ -227,7 +227,7 @@ func (d *gcsDestination) ListSnapshots(
 		if snapshotID == "" {
 			continue
 		}
-		manifest, err := d.fetchManifestWithOptions(
+		manifest, err := d.fetchManifestForListing(
 			ctx, snapshotID, opts...,
 		)
 		if err != nil {
@@ -317,6 +317,20 @@ func (d *gcsDestination) fetchManifestWithOptions(
 		return Manifest{}, err
 	}
 	return m, nil
+}
+
+func (d *gcsDestination) fetchManifestForListing(
+	ctx context.Context,
+	snapshotID string,
+	opts ...ManifestOption,
+) (Manifest, error) {
+	limit, err := manifestByteLimit(opts)
+	if err != nil {
+		return Manifest{}, err
+	}
+	configured := *d
+	configured.maxManifestBytes = limit
+	return configured.fetchManifest(ctx, snapshotID)
 }
 
 // Delete implements CloudDeleter: it removes every object under this

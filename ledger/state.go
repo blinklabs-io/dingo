@@ -12498,8 +12498,9 @@ func (ls *LedgerState) MaxBlockSize() uint64 {
 }
 
 // persistedMaxBlockSize returns the largest block limit among the persisted
-// protocol parameters. A failed read is not remembered, so the next call
-// retries it.
+// protocol parameters. A failed store read is not remembered, so the next call
+// retries it. Malformed rows are warned about and skipped; a successful scan
+// caches the largest limit it could decode.
 func (ls *LedgerState) persistedMaxBlockSize() uint64 {
 	if ls.db == nil {
 		return 0
@@ -12538,7 +12539,7 @@ func (ls *LedgerState) persistedMaxBlockSize() uint64 {
 						"error", err,
 					)
 				}
-				return size
+				continue
 			}
 			if limits, ok := protocolBlockLimits(params); ok {
 				size = max(size, limits.maxHeaderSize+limits.maxBodySize+blockFramingAllowance)
