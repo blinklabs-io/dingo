@@ -8,6 +8,7 @@ name: ci
 #
 #   lint, govulncheck                     2 runners, ~3 min
 #     -> go-test (Linux, quick)           1 runner,  ~8 min
+#       -> devnet (block pipeline)        1 runner, PR pipeline only
 #       -> go-test (Linux)                    services, no race
 #          go-test (Linux, race)              race, no services
 #          go-test (macOS)               3 runners, 5-35 min
@@ -63,19 +64,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
-      # Pin the patch because hosted tool caches can lag security releases.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: '1.26.9'
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.9-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.9-
+            ${{ runner.os }}-go-1.26.x-
       # One step per Go module.
       #
       # These are steps of a single `lint` job rather than a matrix on
@@ -88,6 +88,17 @@ jobs:
       # are written out by hand.
       - name: golangci-lint (root)
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
+      # Unpinned like golangci-lint above, so a new analyzer release's findings
+      # are fixed when it lands. Both run through the Makefile so this job and
+      # `make lint` use the same build tags, flags, and package set.
+      - name: install nilaway and modernize
+        run: |
+          go install go.uber.org/nilaway/cmd/nilaway@latest
+          go install golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@latest
+      - name: nilaway
+        run: make nilaway
+      - name: modernize
+        run: make modernize
       # Folded in from the retired config-parity.yml pull-request job. The
       # network configs under config/cardano/ exist twice: embedded in the
       # binary here (config/cardano/embed.go), and in
@@ -118,31 +129,47 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
-          # This job runs `go run ...@latest`, so third-party code executes in
-          # the workspace. Do not leave GITHUB_TOKEN in the local git config.
+          persist-credentials: false
+      # The action is pinned; the scanner it installs and the vulnerability
+      # database it reads are not, so a new advisory fails the job instead of
+      # waiting behind a stale scanner. The toolchain floats for the same
+      # reason. govulncheck exits non-zero only for vulnerabilities this module
+      # actually calls, so unreachable findings it also prints do not fail the
+      # job. GOFLAGS carries the build tags `make govulncheck` passes, which
+      # the action has no input for. setup-go forces GOTOOLCHAIN=local, so the
+      # step overrides it to honor go.mod's patched toolchain floor when the
+      # setup-go release manifest lags a Go security release.
+      - name: govulncheck
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0 https://github.com/golang/govulncheck-action/releases/tag/v1.1.0
+        env:
+          GOFLAGS: -tags=dingo_extra_plugins
+          GOTOOLCHAIN: auto
+        with:
+          go-version-input: 1.26.x
+          check-latest: true
+          repo-checkout: false
+
+  # The accelerated all-Dingo DevNet with the block pipeline and its parallel
+  # validate stage on, the only end-to-end run of that stage. Both flags
+  # default off in production and in the other DevNet runs. Not a dependency of
+  # anything and not shared with publish.yml.
+  devnet:
+    name: devnet (block pipeline)
+    needs: [go-test-linux-quick]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: '1.26.9'
-          cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.9-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-1.26.9-
-      - name: govulncheck
-        # govulncheck exits non-zero only for vulnerabilities this module
-        # actually calls, so the unreachable findings it also prints (currently
-        # GO-2026-5932, an unmaintained golang.org/x/crypto package with no
-        # fixed version) do not fail the job.
-        # Both the toolchain and the scanner float on purpose: a pin on either
-        # one parks a new advisory behind a stale version instead of forcing it
-        # to be fixed. Run through the Makefile so this CI check and
-        # `make govulncheck` cannot drift apart.
-        run: make govulncheck
+          go-version: 1.26.x
+      - name: DevNet (accelerated)
+        env:
+          DEVNET_BLOCK_PIPELINE_ENABLED: "true"
+          DEVNET_BLOCK_PIPELINE_VALIDATE_ENABLED: "true"
+        run: ./internal/test/devnet/run-tests.sh --accelerated
 
   # Stage 2. The whole suite on SQLite with no race instrumentation and no
   # service containers -- the same command the macOS job runs, which completes
@@ -163,16 +190,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: '1.26.9'
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.9-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.9-
+            ${{ runner.os }}-go-1.26.x-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 https://github.com/actions/setup-node/releases/tag/v4.4.0
@@ -207,7 +234,6 @@ jobs:
     needs: [go-test-linux-quick]
     strategy:
       matrix:
-        # Keep the required-check label stable; setup-go pins 1.26.9 below.
         go-version: [1.26.x]
     runs-on: ubuntu-latest
     # Backstop only, replacing GitHub's 360-minute default; the per-step
@@ -297,16 +323,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: '1.26.9'
+          go-version: ${{ matrix.go-version }}
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.9-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.9-
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: install-mariadb-client
@@ -397,7 +423,6 @@ jobs:
     needs: [go-test-linux-quick]
     strategy:
       matrix:
-        # Keep the required-check label stable; setup-go pins 1.26.9 below.
         go-version: [1.26.x]
     runs-on: ubuntu-latest
     # Only a backstop against a wedged runner, replacing GitHub's 360-minute
@@ -411,7 +436,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: '1.26.9'
+          go-version: ${{ matrix.go-version }}
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -421,9 +446,9 @@ jobs:
           # Race-instrumented objects are a separate build-cache population
           # from the plain ones, so this job keys its own entry rather than
           # thrashing go-test (Linux)'s.
-          key: ${{ runner.os }}-go-race-1.26.9-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-race-1.26.9-
+            ${{ runner.os }}-go-race-${{ matrix.go-version }}-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: go-test-race
@@ -445,7 +470,6 @@ jobs:
     needs: [go-test-linux-quick]
     strategy:
       matrix:
-        # Keep the required-check label stable; setup-go pins 1.26.9 below.
         go-version: [1.26.x]
     runs-on: macos-latest
     # macOS is the cheapest platform by a wide margin -- the suite ran 4m07s in
@@ -462,16 +486,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: '1.26.9'
+          go-version: ${{ matrix.go-version }}
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/Library/Caches/go-build
-          key: ${{ runner.os }}-go-1.26.9-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.9-
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
       - name: go-build
         run: go build ./...
       - name: go-test
@@ -498,16 +522,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: '1.26.9'
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.9-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.9-
+            ${{ runner.os }}-go-1.26.x-
       - name: build
         env:
           BUILD_TARGETS: linux/amd64 linux/arm64 freebsd/amd64 freebsd/arm64
@@ -526,16 +550,16 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: '1.26.9'
+          go-version: 1.26.x
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/Library/Caches/go-build
-          key: ${{ runner.os }}-go-1.26.9-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.9-
+            ${{ runner.os }}-go-1.26.x-
       - name: build
         env:
           BUILD_TARGETS: darwin/amd64 darwin/arm64
