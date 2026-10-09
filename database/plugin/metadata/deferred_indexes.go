@@ -54,6 +54,12 @@ type DeferredIndexManager interface {
 	HasDeferredIndexesPending() (bool, error)
 }
 
+// ContextDeferredIndexDropper is the cancellable form of the deferred-index
+// drop used by bulk-load operations.
+type ContextDeferredIndexDropper interface {
+	DropDeferredIndexesContext(ctx context.Context) error
+}
+
 // MissingCriticalDeferredIndexLister is an optional companion to
 // DeferredIndexManager: it answers which critical manifest entries are absent
 // without building anything.
@@ -68,6 +74,14 @@ type MissingCriticalDeferredIndexLister interface {
 	// MissingCriticalDeferredIndexes returns the names of missing
 	// Critical=true manifest entries, in manifest order. It performs no DDL.
 	MissingCriticalDeferredIndexes() ([]string, error)
+}
+
+// ContextMissingCriticalDeferredIndexLister is the cancellable form of
+// MissingCriticalDeferredIndexLister for startup and restore operations.
+type ContextMissingCriticalDeferredIndexLister interface {
+	MissingCriticalDeferredIndexesContext(
+		ctx context.Context,
+	) ([]string, error)
 }
 
 // MissingDeferredIndexLister lists missing entries in the complete deferred
@@ -95,6 +109,12 @@ type ContextMissingDeferredIndexLister interface {
 type ContextDeferredIndexBuilder interface {
 	// BuildDeferredIndexesContext is BuildDeferredIndexes bound to ctx.
 	BuildDeferredIndexesContext(ctx context.Context) error
+}
+
+// ContextCriticalDeferredIndexBuilder rebuilds the startup-critical subset
+// using the caller's cancellation context.
+type ContextCriticalDeferredIndexBuilder interface {
+	BuildCriticalDeferredIndexesContext(ctx context.Context) error
 }
 
 // DeferredIndexProgressBuilder is an optional companion used by restore

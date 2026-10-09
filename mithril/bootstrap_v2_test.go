@@ -152,6 +152,17 @@ func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
 	return minimalLedgerStateWithUTxOMap(t, slot, hash, nil)
 }
 
+func singleUTxOMap(t *testing.T) cbor.RawMessage {
+	t.Helper()
+	txIn := append(bytes.Repeat([]byte{0x40}, 32), 0, 0)
+	key, err := cbor.Encode(txIn)
+	require.NoError(t, err)
+	address := append([]byte{0x60}, bytes.Repeat([]byte{0x11}, 28)...)
+	value, err := cbor.Encode([]any{address, uint64(1_000_000)})
+	require.NoError(t, err)
+	return append(append(cbor.RawMessage{0xa1}, key...), value...)
+}
+
 func minimalLedgerStateWithUTxOMap(
 	t *testing.T,
 	slot uint64,
@@ -1002,9 +1013,11 @@ func TestSyncV2SerializesMetadataWriterPhases(t *testing.T) {
 func TestSyncV2CancellationDuringLedgerImportResumes(t *testing.T) {
 	_, certifiedHash := validImmutableFiles(t, 1000)
 	fixture := newV2Fixture(t, v2FixtureOptions{
-		validImmutable:       true,
-		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
-		ancillaryLedgerSlot:  1000,
+		validImmutable: true,
+		ancillaryLedgerState: minimalLedgerStateWithUTxOMap(
+			t, 1000, certifiedHash, singleUTxOMap(t),
+		),
+		ancillaryLedgerSlot: 1000,
 	})
 	dataDir := t.TempDir()
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -1030,7 +1043,9 @@ func TestSyncV2CancellationDuringLedgerImportResumes(t *testing.T) {
 	cancelled := false
 	interruptedConfig := baseConfig
 	interruptedConfig.OnProgress = func(progress SyncProgress) {
-		if !cancelled && progress.Phase == PhaseLedgerImport && progress.Active {
+		if !cancelled && progress.Phase == PhaseLedgerImport &&
+			progress.Active && progress.Description == "utxo" &&
+			progress.Count > 0 {
 			cancelled = true
 			cancel()
 		}

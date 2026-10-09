@@ -117,7 +117,8 @@ func runMithrilSignalHelper(t *testing.T) {
 	cfg := &config.Config{
 		Network: "preprod",
 	}
-	cmd := &cobra.Command{}
+	cmd := &cobra.Command{Use: "mithril-signal-helper", RunE: mithrilSyncRunE}
+	cmd.SetArgs([]string{})
 	cmd.SetContext(config.WithContext(context.Background(), cfg))
-	require.ErrorIs(t, mithrilSyncRunE(cmd, nil), context.Canceled)
+	require.ErrorIs(t, executeWithSignalContext(cmd), context.Canceled)
 }

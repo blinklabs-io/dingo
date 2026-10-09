@@ -1246,7 +1246,7 @@ func Sync(
 	// clears sync_status — so a crash between drop and rebuild
 	// leaves sync_status set and triggers the recovery path on
 	// the next startup.
-	deferredIndexes := node.WithDeferredIndexes(db, logger)
+	deferredIndexes := node.WithDeferredIndexes(ctx, db, logger)
 
 	// The Mithril certificate commits to ImmutableDB content. Ancillary ledger
 	// states can be newer than that certified point because they come from the

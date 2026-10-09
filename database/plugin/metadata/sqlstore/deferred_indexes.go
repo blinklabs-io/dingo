@@ -27,14 +27,17 @@ import (
 )
 
 var (
-	_ metadata.DeferredIndexManager               = (*Store)(nil)
-	_ metadata.MissingCriticalDeferredIndexLister = (*Store)(nil)
-	_ metadata.MissingDeferredIndexLister         = (*Store)(nil)
-	_ metadata.ContextDeferredIndexBuilder        = (*Store)(nil)
-	_ metadata.DeferredIndexProgressBuilder       = (*Store)(nil)
+	_ metadata.DeferredIndexManager                      = (*Store)(nil)
+	_ metadata.ContextDeferredIndexDropper               = (*Store)(nil)
+	_ metadata.MissingCriticalDeferredIndexLister        = (*Store)(nil)
+	_ metadata.ContextMissingCriticalDeferredIndexLister = (*Store)(nil)
+	_ metadata.MissingDeferredIndexLister                = (*Store)(nil)
+	_ metadata.ContextDeferredIndexBuilder               = (*Store)(nil)
+	_ metadata.ContextCriticalDeferredIndexBuilder       = (*Store)(nil)
+	_ metadata.DeferredIndexProgressBuilder              = (*Store)(nil)
 )
 
-// withDeferredIndexWrite runs fn in one write transaction, with every
+// withDeferredIndexWriteContext runs fn in one write transaction, with every
 // deferred.Retained index guaranteed resident before fn sees the database.
 //
 // Every entry point in this file returns with the store able to serve writes,
@@ -44,15 +47,6 @@ var (
 // recorded complete, so restoring it here is its only way back. Enforcing that
 // once, on the path every drop and rebuild takes, is what keeps a rebuild path
 // from being added without it.
-func (s *Store) withDeferredIndexWrite(
-	fn func(db queryer, ctx context.Context) error,
-) error {
-	return s.withDeferredIndexWriteContext(context.Background(), fn)
-}
-
-// withDeferredIndexWriteContext is withDeferredIndexWrite bound to a
-// caller-owned context, so a cancelled caller interrupts the DDL rather than
-// waiting out a multi-million-row index build.
 func (s *Store) withDeferredIndexWriteContext(
 	ctx context.Context,
 	fn func(db queryer, ctx context.Context) error,
@@ -75,7 +69,13 @@ func (s *Store) withDeferredIndexWriteContext(
 // DropDeferredIndexes records the durable recovery marker and drops the
 // manifest in one SQLite transaction.
 func (s *Store) DropDeferredIndexes() error {
-	return s.withDeferredIndexWrite(
+	return s.DropDeferredIndexesContext(context.Background())
+}
+
+// DropDeferredIndexesContext is DropDeferredIndexes bound to ctx.
+func (s *Store) DropDeferredIndexesContext(ctx context.Context) error {
+	return s.withDeferredIndexWriteContext(
+		ctx,
 		func(db queryer, ctx context.Context) error {
 			if _, err := db.ExecContext(
 				ctx,
@@ -141,11 +141,15 @@ func isMySQLForeignKeyIndexError(err error) bool {
 // rollback traffic begins. The recovery marker stays set until the full
 // manifest is restored.
 func (s *Store) BuildCriticalDeferredIndexes() error {
-	return s.buildDeferredIndexes(
-		context.Background(),
-		deferred.CriticalManifest(),
-		false,
-	)
+	return s.BuildCriticalDeferredIndexesContext(context.Background())
+}
+
+// BuildCriticalDeferredIndexesContext is BuildCriticalDeferredIndexes bound
+// to ctx for cancellable startup repair.
+func (s *Store) BuildCriticalDeferredIndexesContext(
+	ctx context.Context,
+) error {
+	return s.buildDeferredIndexes(ctx, deferred.CriticalManifest(), false)
 }
 
 // BuildDeferredIndexes restores the full manifest and clears the durable
@@ -321,10 +325,17 @@ WHERE type = 'index' AND name = ? LIMIT 1`
 // DDL. Callers use it to name the indexes a rebuild is about to build before
 // the rebuild starts.
 func (s *Store) MissingCriticalDeferredIndexes() ([]string, error) {
+	return s.MissingCriticalDeferredIndexesContext(context.Background())
+}
+
+// MissingCriticalDeferredIndexesContext reports absent critical entries using
+// the caller's cancellation context and no DDL.
+func (s *Store) MissingCriticalDeferredIndexesContext(
+	ctx context.Context,
+) ([]string, error) {
 	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}
-	ctx := context.Background()
 	db := s.instrumentedQueryer(s.readDB)
 	var missing []string
 	for _, index := range deferred.CriticalManifest() {

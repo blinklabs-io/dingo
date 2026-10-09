@@ -20,9 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
 	"slices"
-	"syscall"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -405,12 +403,8 @@ func mithrilSyncRunE(
 			"error", healthErr,
 		)
 	}
-	ctx, stop := signal.NotifyContext(
-		cmd.Context(), syscall.SIGINT, syscall.SIGTERM,
-	)
-	defer stop()
 	return runMithrilSyncForCommand(
-		ctx, cfg, logger, network, healthProbe,
+		cmd.Context(), cfg, logger, network, healthProbe,
 	)
 }
 
