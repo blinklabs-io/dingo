@@ -965,7 +965,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// and storage mode alone is no longer sufficient to start it (an api-mode
 	// deployment may not want Midnight indexing at all).
 	if midnightIndexerActive(n.config.storageMode, n.config.midnight) {
-		if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
+		if err := n.ledgerState.PrepareEpochCacheForStartup(ctx); err != nil {
 			return fmt.Errorf(
 				"load epoch cache before Midnight indexer start: %w",
 				err,
@@ -2596,6 +2596,7 @@ func (n *Node) newTokenRegistrySync() (
 			SourceURL:             n.config.tokenRegistry.SourceURL,
 			Network:               n.config.network,
 			UserAgent:             n.config.tokenRegistry.UserAgent,
+			Headers:               n.config.tokenRegistry.Headers,
 			Interval:              n.config.tokenRegistry.Interval,
 			RequestTimeout:        n.config.tokenRegistry.RequestTimeout,
 			MaxBytes:              n.config.tokenRegistry.MaxBytes,

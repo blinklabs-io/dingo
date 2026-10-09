@@ -55,6 +55,14 @@ dingo_only=(
 # These files are shipped by cardano-configs but are intentionally not embedded
 # by dingo. Keep the allowlist explicit so any new upstream file still fails.
 upstream_only=(
+	# Devnet credentials stay outside the embedded binary.
+	"devnet/keys/byron-delegate.key"
+	"devnet/keys/byron-delegation.cert"
+	"devnet/keys/faucet.skey"
+	"devnet/keys/faucet.vkey"
+	"devnet/keys/kes.skey"
+	"devnet/keys/opcert.cert"
+	"devnet/keys/vrf.skey"
 	"preview/db-sync-config.json"
 	"preview/tracer-config.json"
 	"mainnet/db-sync-config.json"
