@@ -15,6 +15,7 @@
 package mesh
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1606,4 +1607,52 @@ func TestConstructionInputIndexBounds(t *testing.T) {
 			require.Equal(t, uint32(index), body.Inputs()[0].Index())
 		})
 	}
+}
+
+func TestConstructionSubmitRejectsTrailingBytes(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	h := newTestHandler(t, deps)
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x26), nil,
+	)
+	txCbor, _ := testSimpleSignedTx(t, addr)
+
+	for name, padded := range map[string][]byte{
+		"one byte":       append(bytes.Clone(txCbor), 0x00),
+		"second payload": append(bytes.Clone(txCbor), txCbor...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := postJSON(
+				t, h, "/construction/submit",
+				submitRequest(hexString(padded)),
+			)
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			require.Empty(t, deps.mempool.submissions())
+		})
+	}
+}
+
+func TestConstructionSubmitDuplicateSubmitsSameBytes(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	h := newTestHandler(t, deps)
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x26), nil,
+	)
+	txCbor, tx := testSimpleSignedTx(t, addr)
+
+	for range 2 {
+		rec := postJSON(
+			t, h, "/construction/submit", submitRequest(hexString(txCbor)),
+		)
+		resp := decodeResponse[ConstructionSubmitResponse](t, rec)
+		require.Equal(t, tx.Hash().String(), resp.TransactionIdentifier.Hash)
+	}
+	subs := deps.mempool.submissions()
+	require.Len(t, subs, 2)
+	require.Equal(t, txCbor, subs[0].txBytes)
+	require.Equal(t, subs[0].txBytes, subs[1].txBytes)
 }

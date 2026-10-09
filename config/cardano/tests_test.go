@@ -333,15 +333,14 @@ var pinnedEmbeddedGenesisHashes = map[string]embeddedGenesisHashes{
 // unpinnableEmbeddedNetworks lists embedded networks that deliberately ship no
 // genesis hash and cannot be pinned here.
 //
-// devnet is the only one. devmode.sh rewrites config/cardano/devnet's Byron
-// startTime and Shelley systemStart in place on every start, so its genesis
-// bytes are different on a developer's machine from one run to the next. A
-// declared hash in devnet/config.json would refuse to start the bundled
-// devnet, and a pinned hash here would fail as soon as anyone ran it. Devnet
-// genesis is guarded by its parameter values instead -- see
-// TestDevnetGenesisIsUsable and TestDevnetCostModelsCoverEveryPricedParameter.
+// devnet is the only one. `dingo devnet` changes Byron startTime and Shelley
+// systemStart in its private runtime copy, so the generated genesis bytes vary
+// on a fresh initialization or reset. Its embedded config intentionally omits
+// genesis hashes; the static parameter values are guarded by
+// TestDevnetGenesisIsUsable and
+// TestDevnetCostModelsCoverEveryPricedParameter.
 var unpinnableEmbeddedNetworks = map[string]string{
-	"devnet": "devmode.sh rewrites its Byron startTime and Shelley systemStart in place",
+	"devnet": "dingo devnet updates start times in its runtime copy",
 }
 
 func (h embeddedGenesisHashes) byEra() map[string]string {

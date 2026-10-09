@@ -343,11 +343,14 @@ type Ouroboros struct {
 	// elides the backfiller's duplicate manifest write, while two live
 	// occurrences of the same hash at different slots persist independently.
 	// Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
-	leiosPersistOnce     sync.Once
-	leiosPersistStopOnce sync.Once
-	leiosPersistStarted  atomic.Bool
-	leiosPersistMu       sync.Mutex
-	leiosPersistPending  map[string]*leiosPersistJob
+	// leiosPersistLifecycleMu keeps each enqueue reservation, copy and signal
+	// in one writer generation while stop and reset hold the exclusive lock.
+	leiosPersistLifecycleMu sync.RWMutex
+	leiosPersistOnce        sync.Once
+	leiosPersistStopOnce    sync.Once
+	leiosPersistStarted     atomic.Bool
+	leiosPersistMu          sync.Mutex
+	leiosPersistPending     map[string]*leiosPersistJob
 	// leiosPersistBytes is the aggregate reserved size of the queue: the sum
 	// of leiosPersistPending's job sizes plus every reservation whose payload
 	// copy is still in flight. leiosPersistReserved counts those in-flight
@@ -1110,6 +1113,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.leiosVotes != nil {
 		o.leiosVotes.RemoveConnection(leiosConnectionIdString(connId))
 	}
+	o.dropDeferredLeiosAnnouncements(leiosConnectionIdString(connId))
 	// Drop the per-connection leios-fetch guard. In-flight fetch goroutines
 	// hold their own reference, so they finish safely after this.
 	o.leiosFetchGuards.Delete(connId)

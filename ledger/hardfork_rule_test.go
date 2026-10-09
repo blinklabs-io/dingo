@@ -30,6 +30,9 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+
+	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
 // plominFixtureKeys holds the staking keys seeded by
@@ -346,6 +349,81 @@ func TestApplyIntraEraHardForkRule_Pv3_CreditsAvvmToReserves(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(6_000), uint64(state.Reserves))
+}
+
+func TestPrepareEraTransitionsDefersPv3RuleUntilAfterRolloverRewards(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	avvmTxId, pubkeyTxId := seedByronAvvmFixtures(t, db)
+	const (
+		initialReserves = uint64(5_000)
+		boundarySlot    = uint64(4_492_800)
+	)
+	require.NoError(t, db.Metadata().SetNetworkState(
+		7_000, initialReserves, 100, nil,
+	))
+
+	cfg := newAllegraAtEpoch1Cfg(t)
+	epoch := models.Epoch{
+		EpochId:       207,
+		StartSlot:     boundarySlot - 75,
+		LengthInSlots: 75,
+		SlotLength:    1,
+		EraId:         eras.ShelleyEraDesc.Id,
+	}
+	ls := &LedgerState{
+		db:         db,
+		activeEras: eras.ErasWithDijkstra,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	var newPParams lcommon.ProtocolParameters
+	var transitionHardForkMajors []uint
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		newPParams, _, _, transitionHardForkMajors, _, err = ls.prepareEraTransitionsForRollover(
+			context.Background(),
+			txn,
+			epoch,
+			eras.ShelleyEraDesc,
+			&shelley.ShelleyProtocolParameters{ProtocolMajor: 2},
+			[]uint{eras.AllegraEraDesc.Id},
+		)
+		return err
+	}))
+	newVersion, err := GetProtocolVersion(newPParams)
+	require.NoError(t, err)
+	assert.Equal(t, uint(3), newVersion.Major)
+	assert.Equal(t, []uint{3}, transitionHardForkMajors)
+
+	_, err = db.UtxoByRef(context.Background(), avvmTxId, 0, nil)
+	assert.NoError(t, err,
+		"era translation must leave the AVVM rewrite for the rollover HARDFORK point")
+	state, err := db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, initialReserves, uint64(state.Reserves))
+
+	// Model the reward update that runs before HARDFORK and prove the deferred
+	// AVVM credit is applied to the settled reserve value instead of being
+	// overwritten by it.
+	require.NoError(t, db.Metadata().SetNetworkState(
+		7_000, initialReserves+500, boundarySlot-1, nil,
+	))
+	require.NoError(t, ls.applyTransitionHardForkRules(
+		context.Background(), nil, transitionHardForkMajors, boundarySlot, 208,
+	))
+	state, err = db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, initialReserves+1_500, uint64(state.Reserves))
+	pubkey, err := db.UtxoByRef(context.Background(), pubkeyTxId, 0, nil)
+	require.NoError(t, err)
+	assert.NotNil(t, pubkey)
 }
 
 func TestApplyIntraEraHardForkRule_Pv3_CreditsOnlyAvvmValue(t *testing.T) {

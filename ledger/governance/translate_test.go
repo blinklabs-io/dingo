@@ -64,6 +64,7 @@ func TestTranslateRatifiedGovActions_ConwayToDijkstra(t *testing.T) {
 	)
 
 	require.NoError(t, TranslateRatifiedGovActions(
+		context.Background(),
 		db,
 		nil,
 		conway.EraIdConway,

@@ -29,6 +29,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/big"
 	"net"
 	"os"
 	"strconv"
@@ -56,6 +57,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	byronconsensus "github.com/blinklabs-io/gouroboros/consensus/byron"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -5037,7 +5039,7 @@ func observeProcessEpochRolloverCallOrder(
 func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 	t.Parallel()
 
-	const targetFunc = "processEpochRollover"
+	const targetFunc = "processEpochRolloverWithClassicPParamsContext"
 
 	// In source order, the calls that must appear inside processEpochRollover.
 	// Each entry is the trailing identifier of a SelectorExpr (or a bare
@@ -5057,7 +5059,8 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 		"ProcessEpoch",                        // (5) Conway-style governance enact
 		"SetPParams",                          // (6) persist enacted pparams
 		"isHardForkTransition",                // (7) inter-era boundary detection
-		"applyIntraEraHardForkRule",           // (8) per-major-version HARDFORK rule
+		"applyTransitionHardForkRules",        // (8) inter-era HARDFORK state rewrites
+		"applyIntraEraHardForkRule",           // (9) per-major-version pparam rule
 	}
 
 	seen, observed := observeProcessEpochRolloverCallOrder(
@@ -5098,7 +5101,7 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
 	t.Parallel()
 
-	const targetFunc = "processEpochRollover"
+	const targetFunc = "processEpochRolloverWithClassicPParamsContext"
 
 	// In source order: reward application first, then the governance/pparam
 	// core, then the ADA-pot capture last.
@@ -5106,7 +5109,8 @@ func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
 		"applyStakeRewards",            // (1) delayed reward update, pre-governance
 		"ComputeAndApplyPParamUpdates", // pparam updates
 		"ProcessEpoch",                 // governance enact (reads treasury)
-		"applyIntraEraHardForkRule",    // last treasury/reserves mutation
+		"applyTransitionHardForkRules", // inter-era state rewrite after rewards
+		"applyIntraEraHardForkRule",    // pparam state rewrite after rewards
 		"saveRewardAdaPotsForEpoch",    // (last) post-boundary ADA pot capture
 	}
 
@@ -10880,7 +10884,7 @@ func TestHandleEventChainsyncBlockHeaderRoutesSlotBattleToForkResolution(
 func TestProcessEpochRollover_SnapStakeReadOrdering(t *testing.T) {
 	t.Parallel()
 
-	const targetFunc = "processEpochRollover"
+	const targetFunc = "processEpochRolloverWithClassicPParamsContext"
 
 	wantOrder := []string{
 		"applyStakeRewards",                 // pre-SNAP: delayed reward update
@@ -16824,16 +16828,111 @@ func TestCalculateEpochNonceNeutralLabMixesExtraEntropy(t *testing.T) {
 	require.Equal(t, want.Bytes(), nonce)
 }
 
-func TestEraTransitionsRunAfterSourceEraPParamEnactment(t *testing.T) {
+func TestPrepareEraTransitionsEnactsClassicUpdateWithSourceDecoder(
+	t *testing.T,
+) {
 	t.Parallel()
 
-	path := []uint{eras.BabbageEraDesc.Id}
-	before, after := splitEraTransitionsForRollover(path)
+	db := newTestDB(t)
+	cfg := newAlonzoBabbageAtEpoch1Cfg(t)
+	epoch := models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		LengthInSlots: 75,
+		SlotLength:    1_000,
+		EraId:         eras.AlonzoEraDesc.Id,
+	}
+	require.NoError(t, db.SetEpoch(
+		epoch.StartSlot,
+		epoch.EpochId,
+		nil,
+		nil,
+		nil,
+		nil,
+		epoch.EraId,
+		epoch.SlotLength,
+		epoch.LengthInSlots,
+		nil,
+	))
 
-	require.Empty(t, before,
-		"successor transitions must not replace the source era before rollover")
-	require.Equal(t, path, after,
-		"the successor transition must run after source-era pparam enactment")
+	minFeeA := uint(99)
+	updateCbor, err := cbor.Encode(map[uint64]any{
+		0:  minFeeA,
+		12: &cbor.Rat{Rat: big.NewRat(0, 1)},
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParamUpdate(
+		[]byte{0x01}, updateCbor, 50, epoch.EpochId, nil,
+	))
+
+	rat := func() *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(1, 2)} }
+	params := &alonzo.AlonzoProtocolParameters{
+		MinFeeA:            44,
+		MaxBlockBodySize:   65_536,
+		MaxTxSize:          16_384,
+		MaxBlockHeaderSize: 1_100,
+		A0:                 rat(),
+		Rho:                rat(),
+		Tau:                rat(),
+		Decentralization:   rat(),
+		ProtocolMajor:      eras.AlonzoEraDesc.MaxMajorVersion,
+	}
+	var logs bytes.Buffer
+	ls := &LedgerState{
+		db:         db,
+		activeEras: eras.ErasWithDijkstra,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger: slog.New(slog.NewJSONHandler(
+				&logs,
+				&slog.HandlerOptions{Level: slog.LevelDebug},
+			)),
+		},
+	}
+
+	var got lcommon.ProtocolParameters
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var transitionErr error
+		got, _, _, _, _, transitionErr = ls.prepareEraTransitionsForRollover(
+			context.Background(),
+			txn,
+			epoch,
+			eras.AlonzoEraDesc,
+			params,
+			[]uint{eras.BabbageEraDesc.Id},
+		)
+		return transitionErr
+	}))
+
+	babbageParams, ok := got.(*babbage.BabbageProtocolParameters)
+	require.True(t, ok)
+	require.Equal(t, minFeeA, babbageParams.MinFeeA,
+		"the legacy update must enact before its removed field is translated")
+	stored, err := db.GetPParams(
+		epoch.EpochId+1,
+		eras.BabbageEraDesc.Id,
+		eras.DecodePParamsBabbage,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored,
+		"the translated parameters belong to the incoming epoch")
+	storedBabbageParams, ok := stored.(*babbage.BabbageProtocolParameters)
+	require.True(t, ok)
+	require.Equal(t, minFeeA, storedBabbageParams.MinFeeA,
+		"the persisted translation must retain the enacted update")
+	require.Contains(t, logs.String(), `"phase":"pparam_updates"`,
+		"source-era update work must remain visible in rollover telemetry")
+	storedAtSourceEpoch, err := db.GetPParams(
+		epoch.EpochId,
+		eras.BabbageEraDesc.Id,
+		eras.DecodePParamsBabbage,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Nil(t, storedAtSourceEpoch,
+		"the translated parameters must not be backdated to the ended epoch")
 }
 
 // TestCreateGenesisBlockFileBackedNoFKError drives the real genesis sync path
@@ -17858,7 +17957,6 @@ END`)
 			f.currentEpoch,
 			eras.ConwayEraDesc,
 			f.currentPParams,
-			false,
 		)
 		return rolloverErr
 	})
@@ -17997,7 +18095,6 @@ func TestProcessEpochRolloverReplayEnactmentFailureRemainsFatal(
 			f.currentEpoch,
 			eras.ConwayEraDesc,
 			f.currentPParams,
-			false,
 		)
 		return rolloverErr
 	})

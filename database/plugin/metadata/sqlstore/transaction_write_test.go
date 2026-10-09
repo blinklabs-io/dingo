@@ -526,6 +526,49 @@ func TestSetTransactionIncrementalDeltaMatchesFullScan(t *testing.T) {
 	require.Equal(t, fx.producedAmount, got)
 }
 
+func TestSetTransactionBatchedInputsReturnConsumedStake(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+	fx := buildSharedCredentialTx(t, 0x31)
+	secondTxID := bytes.Repeat([]byte{0x32}, 32)
+	secondInput, err := mockledger.NewTransactionInputBuilder().
+		WithTxId(secondTxID).
+		WithIndex(0).
+		Build()
+	require.NoError(t, err)
+
+	txID := bytes.Repeat([]byte{0x33}, 32)
+	tx, err := mockledger.NewTransactionBuilder().
+		WithId(txID).
+		WithInputs(fx.tx.Consumed()[0], secondInput).
+		WithOutputs(fx.tx.Produced()[0].Output).
+		WithValid(true).
+		Build()
+	require.NoError(t, err)
+	seedConsumedUtxo(t, store, fx)
+	_, err = store.writeDB.ExecContext(ctx, `
+INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
+VALUES (?, 0, ?, ?, 1, 0, ?)`,
+		secondTxID,
+		fx.ref.Key,
+		int64(fx.ref.Tag),
+		decimalUint64(types.Uint64(7_000_000)),
+	)
+	require.NoError(t, err)
+	establishRunningTotal(t, store, fx.ref, 1)
+	require.Equal(t, uint64(12_000_000), readUtxoStake(t, store, fx.ref))
+
+	point := ocommon.Point{Slot: fx.point.Slot + 1, Hash: txID}
+	require.NoError(t, store.SetTransaction(
+		tx, point, 0, nil, false, nil,
+	))
+	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3_000_000), want)
+	require.Equal(t, want, readUtxoStake(t, store, fx.ref))
+}
+
 // TestSetTransactionReapplyAppliesNoSecondDelta covers the invariant the
 // incremental path rests on: a delta must state the change this write made to
 // the utxo table, not the change the transaction describes. Re-applying an
@@ -674,13 +717,58 @@ func TestInsertTransactionDetectsMySQLThroughCountingQueryer(t *testing.T) {
 	wrapped := countingQueryer{queryer: inner, counter: nil}
 
 	acc := &transactionBatchAccumulator{}
-	_, err := acc.insertTransaction(context.Background(), wrapped)
+	_, _, err := acc.insertTransaction(context.Background(), wrapped)
 	require.ErrorIs(t, err, prepareErr)
 	require.True(
 		t,
 		acc.mysql,
 		"expected insertTransaction to detect the mysql dialect through countingQueryer",
 	)
+}
+
+func TestInsertTransactionReportsFreshAndReplayedRows(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	txn := store.Transaction(context.Background())
+	db, ctx, err := store.dbFromTxn(txn)
+	require.NoError(t, err)
+	acc := &transactionBatchAccumulator{}
+	defer acc.Reset()
+
+	args := []any{
+		[]byte{0x10}, []byte{0x20}, []byte{0x30}, 1, 2,
+		"3", "4", "5", 6, true,
+	}
+	id, isNew, err := acc.insertTransaction(ctx, db, args...)
+	require.NoError(t, err)
+	require.True(t, isNew)
+	require.NotZero(t, id)
+
+	replayArgs := append([]any(nil), args...)
+	replayArgs[1] = []byte{0x21}
+	replayArgs[3] = uint64(7)
+	replayArgs[6] = "8"
+	replayArgs[8] = uint32(9)
+	replayID, isNew, err := acc.insertTransaction(ctx, db, replayArgs...)
+	require.NoError(t, err)
+	require.False(t, isNew)
+	require.Equal(t, id, replayID)
+
+	var (
+		blockHash  []byte
+		slot       uint64
+		collateral string
+		blockIndex uint32
+	)
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT block_hash, slot, collateral_fee, block_index
+		 FROM "transaction" WHERE id = ?`, id,
+	).Scan(&blockHash, &slot, &collateral, &blockIndex))
+	require.Equal(t, []byte{0x21}, blockHash)
+	require.Equal(t, uint64(7), slot)
+	require.Equal(t, "8", collateral)
+	require.Equal(t, uint32(9), blockIndex)
+	require.NoError(t, txn.Rollback())
 }
 
 func TestTransactionBatchAccumulatorResetClosesStatement(t *testing.T) {
@@ -694,7 +782,7 @@ func TestTransactionBatchAccumulatorResetClosesStatement(t *testing.T) {
 		[]byte{0x01}, []byte{0x02}, nil, 1, 0,
 		"0", "0", "0", 0, true,
 	}
-	_, err = acc.insertTransaction(ctx, db, oldStmtArgs...)
+	_, _, err = acc.insertTransaction(ctx, db, oldStmtArgs...)
 	require.NoError(t, err)
 	stmt := acc.transactionInsert
 	require.NotNil(t, stmt)

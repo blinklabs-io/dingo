@@ -127,12 +127,12 @@ github.com/blinklabs-io/bursa v0.17.1 h1:f8KkpggbAgrOwTb3PZkgPK4GMZL4AKE+mIqI7md
 github.com/blinklabs-io/bursa v0.17.1/go.mod h1:8PP8LVyh8OD+oK1RVxcrHGU/Rif0im6h3rQpuVccuOs=
 github.com/blinklabs-io/go-bip39 v0.2.0 h1:rHYih+JzqaFVuP+UfvByKTAdJPeYtlvZu49yUGrZUk8=
 github.com/blinklabs-io/go-bip39 v0.2.0/go.mod h1:9Bp7a+XDc/KTPOqNnS7T/v1vH2lDXpmjM0GArwvOQL4=
-github.com/blinklabs-io/gouroboros v0.210.0 h1:SOcgIBuXfQGF1mtHGEIQofgNzjq82neNR3owlqDqN0c=
-github.com/blinklabs-io/gouroboros v0.210.0/go.mod h1:zuVj7giKCn0X9a9ulXuWGUgArsSYaFdMju6THxZRn04=
+github.com/blinklabs-io/gouroboros v0.212.0 h1:MangVO1BXJEl+mvBc/WGdOJNA+zU+O4deYfvP+iUCxM=
+github.com/blinklabs-io/gouroboros v0.212.0/go.mod h1:GBhv+ArBl7EebHvt8zXsOYMiqDxCEd/gTTY1Z3ZcVk0=
 github.com/blinklabs-io/ouroboros-mock v0.20.5-0.20261002194245-6bfd701ae86c h1:csayGXo+Bg3mwU01A7B1fLVLTBwI5RLJa2DaMREPDrY=
 github.com/blinklabs-io/ouroboros-mock v0.20.5-0.20261002194245-6bfd701ae86c/go.mod h1:fJ7lMj3O9W0oCKdTD14eFyKTlIOsDwBREqSS7lRJ6II=
-github.com/blinklabs-io/plutigo v0.8.0 h1:s/wwXkHptYndfsgRkzwtC+RqmxSqFVaHUOaJqnldUbU=
-github.com/blinklabs-io/plutigo v0.8.0/go.mod h1:vVFey4OnERG6kVXZFadUvikf7i01rhQ8+HFc1RdvyX4=
+github.com/blinklabs-io/plutigo v0.8.1 h1:64ckiRXEPtNge2ymiIDnYIuwXx9k3fr9IuayzcmVRS4=
+github.com/blinklabs-io/plutigo v0.8.1/go.mod h1:vVFey4OnERG6kVXZFadUvikf7i01rhQ8+HFc1RdvyX4=
 github.com/blockfrost/blockfrost-go v0.5.0 h1:I+qEQw5Re9UHolKZGJE0FtuQL3a7L0WqEYkEO4GisIw=
 github.com/blockfrost/blockfrost-go v0.5.0/go.mod h1:XdD+mryM/Rd/MqW1MfSQ0+Xfu2YnOGuwqMpLQa0jHvM=
 github.com/btcsuite/btcd/btcec/v2 v2.5.0 h1:KioMXOWa76b86sTZZOmbzv/ldaQCmB8KFAyn5PbB8E8=
@@ -543,8 +543,8 @@ golang.org/x/net v0.0.0-20201010224723-4f7140c49acb/go.mod h1:sp8m0HH+o8qH0wwXwY
 golang.org/x/net v0.0.0-20210226172049-e18ecbb05110/go.mod h1:m0MpNAwzfU5UDzcl9v0D8zg8gWTRqZa9RBIspLL5mdg=
 golang.org/x/net v0.0.0-20211112202133-69e39bad7dc2/go.mod h1:9nx3DQGgdP8bBQD5qxJ1jj9UTztislL4KSBs9R2vV5Y=
 golang.org/x/net v0.0.0-20220722155237-a158d28d115b/go.mod h1:XRhObCWvk6IyKnWLug+ECip1KBveYUHfp+8e9klMJ9c=
-golang.org/x/net v0.59.0 h1:5zfYln+w5XCxwrnMMJPufRgNoXEaGxl0wo5GqPXyues=
-golang.org/x/net v0.59.0/go.mod h1:2DA/G1UfVbCpQPeWTmMPGY7Cs2PkBkwu743bVX5PIVg=
+golang.org/x/net v0.60.0 h1:79p50tfZlm0J9YfoDsSi639qSXNGVwEzOPLCxM2FsYU=
+golang.org/x/net v0.60.0/go.mod h1:2DA/G1UfVbCpQPeWTmMPGY7Cs2PkBkwu743bVX5PIVg=
 golang.org/x/oauth2 v0.0.0-20180821212333-d2e6202438be/go.mod h1:N/0e6XlmueqKjAGxoOufVs8QHGRruUQn6yWY3a++T0U=
 golang.org/x/oauth2 v0.37.0 h1:JUlcxA8oAtauLfiH8FX2/FkAWHAdi0QtGCGc+hofE98=
 golang.org/x/oauth2 v0.37.0/go.mod h1:IxwZNxUULJmpBFf9K/9NTMSIfZZuvuTy1gGxhigP/58=
