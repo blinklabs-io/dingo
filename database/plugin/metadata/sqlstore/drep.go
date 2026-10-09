@@ -1441,11 +1441,21 @@ func (s *Store) ClearDanglingDRepDelegations(
         AND drep.credential = account.drep
         AND drep.active = TRUE
   )`
-		if _, err := db.ExecContext(ctx, `
+		insertClear := `
 INSERT INTO account_drep_clear (credential_tag, staking_key, added_slot)
 SELECT credential_tag, staking_key, ? FROM account
-WHERE `+predicate+`
-ON CONFLICT (credential_tag, staking_key, added_slot) DO NOTHING`, slot); err != nil {
+WHERE ` + predicate
+		if wrapped, ok := unwrapDialectQueryer(db); ok && wrapped.dialect == "mysql" {
+			insertClear = strings.Replace(
+				insertClear,
+				"INSERT INTO",
+				"INSERT IGNORE INTO",
+				1,
+			)
+		} else {
+			insertClear += "\nON CONFLICT (credential_tag, staking_key, added_slot) DO NOTHING"
+		}
+		if _, err := db.ExecContext(ctx, insertClear, slot); err != nil {
 			return fmt.Errorf("record dangling DRep delegation clears: %w", err)
 		}
 		result, err := db.ExecContext(ctx, `

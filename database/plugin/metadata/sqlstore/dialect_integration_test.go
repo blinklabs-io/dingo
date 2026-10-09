@@ -101,6 +101,46 @@ func TestMySQLRewardLiveStakeBatchBoundaries(t *testing.T) {
 	)
 }
 
+func TestMySQLClearDanglingDRepDelegations(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	store := newIntegrationSQLStore(t, "mysql", dsn, "mysql", database)
+	drep := bytes.Repeat([]byte{0xD1}, 28)
+	stake := bytes.Repeat([]byte{0xD2}, 28)
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    drep,
+		AddedSlot:     10,
+		Active:        false,
+	}))
+	require.NoError(t, store.ImportAccount(&models.Account{
+		StakingKey:    stake,
+		CredentialTag: 0,
+		Drep:          drep,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     10,
+		CreatedSlot:   10,
+		Active:        true,
+	}, nil))
+
+	cleared, err := store.ClearDanglingDRepDelegations(20, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, cleared)
+	account, err := store.GetAccountByCredential(0, stake, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Empty(t, account.Drep)
+
+	db, ctx, err := store.dbFromTxn(nil)
+	require.NoError(t, err)
+	var clearCount int
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT count(*) FROM account_drep_clear
+WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?`,
+		0, stake, 20,
+	).Scan(&clearCount))
+	require.Equal(t, 1, clearCount)
+}
+
 // newMySQLIntegrationDatabase creates a throwaway database and returns a DSN
 // that selects it.
 func newMySQLIntegrationDatabase(t *testing.T) (string, string) {
