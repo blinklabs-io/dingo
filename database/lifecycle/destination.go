@@ -48,6 +48,8 @@ var ErrSnapshotCatalogScanLimit = errors.New(
 // SnapshotCatalogScanBudget bounds provider work performed while rebuilding
 // the persistent snapshot catalog.
 type SnapshotCatalogScanBudget struct {
+	// MaxPages bounds provider list requests.
+	MaxPages int
 	// MaxPrefixes bounds provider list results inspected, including objects
 	// that are not snapshot prefixes.
 	MaxPrefixes  int
@@ -58,6 +60,7 @@ type SnapshotCatalogScanBudget struct {
 
 func defaultSnapshotCatalogScanBudget() SnapshotCatalogScanBudget {
 	return SnapshotCatalogScanBudget{
+		MaxPages:     10,
 		MaxPrefixes:  1000,
 		MaxManifests: 1000,
 		MaxEntries:   1000,
@@ -66,7 +69,7 @@ func defaultSnapshotCatalogScanBudget() SnapshotCatalogScanBudget {
 }
 
 func (b SnapshotCatalogScanBudget) validate() error {
-	if b.MaxPrefixes <= 0 || b.MaxManifests <= 0 ||
+	if b.MaxPages <= 0 || b.MaxPrefixes <= 0 || b.MaxManifests <= 0 ||
 		b.MaxEntries <= 0 || b.MaxProblems <= 0 {
 		return errors.New("snapshot catalog scan limits must be positive")
 	}
@@ -76,6 +79,7 @@ func (b SnapshotCatalogScanBudget) validate() error {
 type snapshotCatalogScan struct {
 	ctx       context.Context
 	budget    *SnapshotCatalogScanBudget
+	pages     int
 	prefixes  int
 	manifests int
 	entries   []SnapshotEntry
@@ -113,6 +117,14 @@ func (s *snapshotCatalogScan) consumePrefix() error {
 		limit = s.budget.MaxPrefixes
 	}
 	return s.consume("prefixes", &s.prefixes, limit)
+}
+
+func (s *snapshotCatalogScan) consumePage() error {
+	limit := 0
+	if s.budget != nil {
+		limit = s.budget.MaxPages
+	}
+	return s.consume("provider page requests", &s.pages, limit)
 }
 
 func (s *snapshotCatalogScan) consumeManifest() error {

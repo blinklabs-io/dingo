@@ -135,7 +135,7 @@ func TestGCSSnapshotCatalogStopsAtPrefixBudget(t *testing.T) {
 	}
 
 	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{
-		MaxPrefixes: 2, MaxManifests: 2, MaxEntries: 2, MaxProblems: 2,
+		MaxPages: 2, MaxPrefixes: 2, MaxManifests: 2, MaxEntries: 2, MaxProblems: 2,
 	})
 	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
 	require.Len(t, entries, 2)
@@ -163,10 +163,52 @@ func TestGCSSnapshotCatalogCountsNonPrefixListResults(t *testing.T) {
 	}
 
 	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{
-		MaxPrefixes: 2, MaxManifests: 2, MaxEntries: 2, MaxProblems: 2,
+		MaxPages: 2, MaxPrefixes: 2, MaxManifests: 2, MaxEntries: 2, MaxProblems: 2,
 	})
 	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
 	require.Empty(t, entries)
+}
+
+func TestGCSSnapshotCatalogStopsBeforePageRequestLimit(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	items := strings.Repeat(`{"name":"prefix/noise"},`, 99) +
+		`{"name":"prefix/noise"}`
+	client, err := storage.NewClient(
+		t.Context(), option.WithoutAuthentication(),
+		option.WithHTTPClient(&http.Client{
+			Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+				request := requests.Add(1)
+				if request > 2 {
+					return nil, fmt.Errorf(
+						"unexpected provider page request %d", request,
+					)
+				}
+				body := []byte(fmt.Sprintf(
+					`{"items":[%s],"nextPageToken":"page-%d"}`,
+					items,
+					request,
+				))
+				return &http.Response{
+					StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
+					ContentLength: int64(len(body)), Header: make(http.Header), Request: req,
+				}, nil
+			}),
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	d := gcsDestination{
+		client: client, bucket: client.Bucket("test"), prefix: "prefix",
+	}
+
+	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{
+		MaxPages: 2, MaxPrefixes: 1000, MaxManifests: 1000,
+		MaxEntries: 1000, MaxProblems: 2,
+	})
+	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
+	require.Empty(t, entries)
+	require.Equal(t, int32(2), requests.Load())
 }
 
 func TestGCSUploadExcludesAndRemovesCloudMirrorMarker(t *testing.T) {

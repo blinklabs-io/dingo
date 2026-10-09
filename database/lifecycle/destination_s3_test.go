@@ -175,7 +175,7 @@ func TestS3SnapshotCatalogStopsAtPrefixBudget(t *testing.T) {
 	d := s3Destination{client: client, bucket: "test", prefix: "prefix"}
 
 	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{
-		MaxPrefixes: 2, MaxManifests: 2, MaxEntries: 2, MaxProblems: 2,
+		MaxPages: 2, MaxPrefixes: 2, MaxManifests: 2, MaxEntries: 2, MaxProblems: 2,
 	})
 	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
 	require.Len(t, entries, 2)
@@ -198,10 +198,42 @@ func TestS3SnapshotCatalogCountsNonPrefixListResults(t *testing.T) {
 	d := s3Destination{client: client, bucket: "test", prefix: "prefix"}
 
 	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{
-		MaxPrefixes: 2, MaxManifests: 2, MaxEntries: 2, MaxProblems: 2,
+		MaxPages: 2, MaxPrefixes: 2, MaxManifests: 2, MaxEntries: 2, MaxProblems: 2,
 	})
 	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
 	require.Empty(t, entries)
+}
+
+func TestS3SnapshotCatalogStopsBeforePageRequestLimit(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	client := s3.NewFromConfig(aws.Config{
+		Region: "test", Credentials: aws.AnonymousCredentials{},
+		BaseEndpoint: aws.String("https://example.test"),
+		HTTPClient: &http.Client{Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			request := requests.Add(1)
+			if request > 2 {
+				return nil, errors.New("unexpected provider page request")
+			}
+			body := []byte(fmt.Sprintf(
+				`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>page-%d</NextContinuationToken></ListBucketResult>`,
+				request,
+			))
+			return &http.Response{
+				StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
+				ContentLength: int64(len(body)), Header: make(http.Header), Request: req,
+			}, nil
+		})},
+	}, func(options *s3.Options) { options.UsePathStyle = true })
+	d := s3Destination{client: client, bucket: "test", prefix: "prefix"}
+
+	entries, err := d.ListSnapshotCatalog(t.Context(), SnapshotCatalogScanBudget{
+		MaxPages: 2, MaxPrefixes: 1000, MaxManifests: 1000,
+		MaxEntries: 1000, MaxProblems: 2,
+	})
+	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
+	require.Empty(t, entries)
+	require.Equal(t, int32(2), requests.Load())
 }
 
 func TestS3UploadExcludesAndRemovesCloudMirrorMarker(t *testing.T) {

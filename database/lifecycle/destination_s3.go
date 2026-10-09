@@ -281,6 +281,9 @@ func (d *s3Destination) listSnapshots(
 	}
 	paginator := s3.NewListObjectsV2Paginator(d.client, input)
 	for paginator.HasMorePages() {
+		if err := scan.consumePage(); err != nil {
+			return scan.result(err)
+		}
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
 			return scan.result(fmt.Errorf(

@@ -1085,6 +1085,7 @@ func TestCloudReconciliationDoesNotPublishTruncatedScan(t *testing.T) {
 	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
 	require.False(t, current)
 	require.NotNil(t, lister.budget)
+	require.Positive(t, lister.budget.MaxPages)
 	require.Positive(t, lister.budget.MaxPrefixes)
 	require.Positive(t, lister.budget.MaxManifests)
 	require.Positive(t, lister.budget.MaxEntries)
@@ -1101,7 +1102,7 @@ func TestCloudReconciliationDoesNotPublishTruncatedScan(t *testing.T) {
 func TestSnapshotCatalogScanCapsReportedProblems(t *testing.T) {
 	t.Parallel()
 	scan, err := newSnapshotCatalogScan(t.Context(), &SnapshotCatalogScanBudget{
-		MaxPrefixes: 1, MaxManifests: 1, MaxEntries: 1, MaxProblems: 2,
+		MaxPages: 1, MaxPrefixes: 1, MaxManifests: 1, MaxEntries: 1, MaxProblems: 2,
 	})
 	require.NoError(t, err)
 	require.NoError(t, scan.addProblem(errors.New("first provider problem")))

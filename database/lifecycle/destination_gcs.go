@@ -259,11 +259,13 @@ func (d *gcsDestination) listSnapshots(
 		ctx,
 		&storage.Query{Prefix: listPrefix, Delimiter: "/"},
 	)
+	pager := iterator.NewPager(it, 100, "")
 	for {
-		attrs, err := it.Next()
-		if errors.Is(err, iterator.Done) {
-			break
+		if err := scan.consumePage(); err != nil {
+			return scan.result(err)
 		}
+		var page []*storage.ObjectAttrs
+		nextPageToken, err := pager.NextPage(&page)
 		if err != nil {
 			return scan.result(fmt.Errorf(
 				"list gcs objects under %q: %w",
@@ -271,52 +273,57 @@ func (d *gcsDestination) listSnapshots(
 				err,
 			))
 		}
-		if err := scan.consumePrefix(); err != nil {
-			return scan.result(err)
-		}
-		// With Delimiter set, a synthetic "directory entry" (Prefix set,
-		// every other field empty) represents one sub-path; a real object
-		// (Name set) means something was uploaded directly at this level,
-		// which the nested-per-snapshot layout never does.
-		if attrs.Prefix == "" {
-			continue
-		}
-		snapshotID := strings.TrimSuffix(
-			strings.TrimPrefix(attrs.Prefix, listPrefix),
-			"/",
-		)
-		if snapshotID == "" {
-			continue
-		}
-		if err := scan.consumeManifest(); err != nil {
-			return scan.result(err)
-		}
-		entry, err := fetchCloudSnapshotEntry(
-			ctx, snapshotID, d.fetchManifest,
-		)
-		if err != nil {
-			// A sub-path with no manifest.json object at all
-			// (ErrCloudSnapshotNotFound) is a snapshot still being
-			// written — skip it silently, same as the local
-			// lifecycle.ListSnapshots convention. Any other fetch/parse
-			// failure (corrupted manifest, checksum mismatch, a real
-			// storage error) is not that expected case and must not be
-			// swallowed the same way: it's accumulated and returned via
-			// errors.Join alongside whatever entries were found, so a
-			// caller can learn the catalog is missing something instead
-			// of it silently looking one snapshot smaller than it is.
-			if errors.Is(err, ErrCloudSnapshotNotFound) {
+		for _, attrs := range page {
+			if err := scan.consumePrefix(); err != nil {
+				return scan.result(err)
+			}
+			// With Delimiter set, a synthetic "directory entry" (Prefix set,
+			// every other field empty) represents one sub-path; a real object
+			// (Name set) means something was uploaded directly at this level,
+			// which the nested-per-snapshot layout never does.
+			if attrs.Prefix == "" {
 				continue
 			}
-			if addErr := scan.addProblem(fmt.Errorf(
-				"snapshot %q: %w", snapshotID, err,
-			)); addErr != nil {
-				return scan.result(addErr)
+			snapshotID := strings.TrimSuffix(
+				strings.TrimPrefix(attrs.Prefix, listPrefix),
+				"/",
+			)
+			if snapshotID == "" {
+				continue
 			}
-			continue
+			if err := scan.consumeManifest(); err != nil {
+				return scan.result(err)
+			}
+			entry, err := fetchCloudSnapshotEntry(
+				ctx, snapshotID, d.fetchManifest,
+			)
+			if err != nil {
+				// A sub-path with no manifest.json object at all
+				// (ErrCloudSnapshotNotFound) is a snapshot still being
+				// written — skip it silently, same as the local
+				// lifecycle.ListSnapshots convention. Any other fetch/parse
+				// failure (corrupted manifest, checksum mismatch, a real
+				// storage error) is not that expected case and must not be
+				// swallowed the same way: it's accumulated and returned via
+				// errors.Join alongside whatever entries were found, so a
+				// caller can learn the catalog is missing something instead
+				// of it silently looking one snapshot smaller than it is.
+				if errors.Is(err, ErrCloudSnapshotNotFound) {
+					continue
+				}
+				if addErr := scan.addProblem(fmt.Errorf(
+					"snapshot %q: %w", snapshotID, err,
+				)); addErr != nil {
+					return scan.result(addErr)
+				}
+				continue
+			}
+			if err := scan.addEntry(entry); err != nil {
+				return scan.result(err)
+			}
 		}
-		if err := scan.addEntry(entry); err != nil {
-			return scan.result(err)
+		if nextPageToken == "" {
+			break
 		}
 	}
 	return scan.result(nil)
