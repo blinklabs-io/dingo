@@ -1384,6 +1384,68 @@ func (d *Database) BlockAtOrAfterIndex(
 	return models.Block{}, models.ErrBlockNotFound
 }
 
+// BlockAtOrBeforeIndex returns the last indexed block at or before blockIndex.
+// It binary-searches forward index seeks so object-store backends do not need
+// to enumerate the entire block index for a reverse seek.
+func (d *Database) BlockAtOrBeforeIndex(
+	ctx context.Context,
+	blockIndex uint64,
+	txn *Txn,
+) (models.Block, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Rollback() //nolint:errcheck
+	}
+	if err := ctx.Err(); err != nil {
+		return models.Block{}, err
+	}
+	block, err := d.BlockByIndex(blockIndex, txn)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return models.Block{}, ctxErr
+	}
+	if err == nil {
+		return block, nil
+	}
+	if !errors.Is(err, models.ErrBlockNotFound) {
+		return models.Block{}, err
+	}
+
+	low := BlockInitialIndex
+	high := blockIndex
+	found := false
+	var previous models.Block
+	for low <= high {
+		if err := ctx.Err(); err != nil {
+			return models.Block{}, err
+		}
+		mid := low + (high-low)/2
+		candidate, err := d.BlockAtOrAfterIndex(mid, txn)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return models.Block{}, ctxErr
+		}
+		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
+			return models.Block{}, err
+		}
+		if err == nil && candidate.ID <= blockIndex {
+			previous = candidate
+			found = true
+			if candidate.ID == blockIndex {
+				return candidate, nil
+			}
+			low = mid + 1
+			continue
+		}
+		if mid == 0 {
+			break
+		}
+		high = mid - 1
+	}
+	if !found {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	return previous, nil
+}
+
 func BlocksRecent(
 	ctx context.Context,
 	db *Database,
@@ -1543,11 +1605,12 @@ func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
 // FirstBlockAtOrAfterSlot returns the lowest-slot ranking block whose slot is
 // at or above slotNumber, or models.ErrBlockNotFound when there is none.
 func FirstBlockAtOrAfterSlot(
+	ctx context.Context,
 	db *Database,
 	slotNumber uint64,
 ) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(context.Background(), false)
+	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		blobTxn := txn.Blob()
 		if blobTxn == nil {

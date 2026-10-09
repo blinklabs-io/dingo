@@ -15,6 +15,7 @@
 package eras
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -38,6 +39,22 @@ var ErrExUnitsOverflow = errors.New(
 
 type phase2ValidationSkipper interface {
 	SkipPhase2Validation() bool
+}
+
+type evaluationContextProvider interface {
+	EvaluationContext() context.Context
+}
+
+func evaluationContext(ls lcommon.LedgerState) context.Context {
+	provider, ok := ls.(evaluationContextProvider)
+	if !ok || provider.EvaluationContext() == nil {
+		return context.Background()
+	}
+	return provider.EvaluationContext()
+}
+
+func checkEvaluationCanceled(ls lcommon.LedgerState) error {
+	return evaluationContext(ls).Err()
 }
 
 // MinPoolMarginProvider is satisfied by the dingo ledger state to expose the
@@ -647,6 +664,17 @@ func resolveUtxoValidationSkipIndex(
 		))
 	}
 	return found
+}
+
+// remainingExUnits returns the part of limit not yet consumed, floored at zero
+// in each dimension. Evaluating each redeemer against it keeps the
+// transaction's total work within the limit instead of granting every
+// redeemer the whole limit.
+func remainingExUnits(limit, used lcommon.ExUnits) lcommon.ExUnits {
+	return lcommon.ExUnits{
+		Memory: max(limit.Memory-used.Memory, 0),
+		Steps:  max(limit.Steps-used.Steps, 0),
+	}
 }
 
 // SafeAddExUnits adds two ExUnits values with

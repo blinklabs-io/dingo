@@ -3730,6 +3730,15 @@ trailing slippage batch that the Haskell CEK machine spends on a successful
 return; omitting that batch under-reports script cost and can admit a
 transaction the reference node rejects.
 
+Public Blockfrost and UTxO RPC evaluation passes the request context through
+`LedgerState.EvaluateTxContext` into the evaluation's `LedgerView`. Era
+evaluation checks cancellation before input reads and each redeemer, and Plutigo
+checks each CEK step, so abandoned requests stop further database and script work
+and release their shared evaluation admission slot. The original `EvaluateTx`
+entry point uses a background context for internal callers that have no request
+lifetime. Plutigo checks that context at each CEK step, so cancellation stops an
+already-running script at its next evaluation step.
+
 Where Phase 2 does run, the Plutus script context (`TxInfo`) is constructed only for transactions that carry at least one redeemer (`txHasRedeemers`, `ledger/eras/validation.go`); `ValidateTxAlonzo`, `ValidateTxBabbage`, `EvaluateTxAlonzo`, `EvaluateTxBabbage`, and `EvaluateTxConway` skip the build for the rest. Redeemers are what drive Phase 2, so a transaction without any runs no Plutus script, and the context is not merely unused work for it: the context embeds the transaction's validity interval translated to wall-clock time, so building it converts the transaction's TTL through the bounded HFC forecast horizon (see "Header Forecast Horizon") and returns `hardfork.ErrPastHorizon` for a TTL past that horizon. A script-free transaction was therefore rejected during replay whenever its TTL reached past the current era's safe zone, and the tx-validation recovery path read that as inconsistent local ledger state. cardano-ledger performs the translation only while assembling the context for the Plutus scripts a transaction actually needs (`collectPlutusScriptsWithContext`). The horizon itself is unchanged: a transaction that does carry redeemers still translates its validity interval per redeemer language and still fails past the horizon, matching cardano-ledger's `TimeTranslationPastHorizon`.
 
 What that horizon is measured *from* is where Dingo had to change. `LedgerState.HardForkSummary` anchors the safe zone at the published tip, which only advances once a whole block batch commits, while cardano-node ticks from the applied block's immediate predecessor (`epochInfoLedger` on the state that predecessor left). `applySafeZone` snaps the bound up to an epoch boundary, so the difference is not proportional to the lag: on Preview a tip trailing by one block (slot 3516450 instead of 3516496) put the horizon a whole epoch earlier, at slot 3542400 instead of 3628800, and refused a canonical Plutus transaction whose `invalidHereafter` was 3593399. Its outputs were never created, the next block that spent them tripped missing-input recovery, and the replay wedged. `LedgerView` therefore carries a `horizonAnchorSlot`; `ledgerProcessBlock` sets it to the applied block's parent slot (`envelopeParent`), and `LedgerView.SlotToTime` routes through `SlotTimeConverter.SlotToTimeWithHorizonFrom`, which builds the summary with the safe zone measured from `max(published tip, anchor)` and keeps the bound. Views built without an applied block (mempool validation, standalone evaluation) leave the anchor at zero and stay on the published tip. Unlike the operational slot clock, this path never extrapolates in-era past its bound: a bound past the anchored horizon is a translation failure, and converting it anyway would accept blocks the network rejects.
@@ -9439,10 +9448,13 @@ single supplied CBOR value. Credential presence follows address payload types,
 including all-zero hashes; raw Bech32 credentials require the expected prefix
 and an exact 28-byte payload.
 
-`evaluate_tx` admits at most one ledger evaluation per MCP server. Cancellation
-or the configured query timeout releases the request, but the non-interruptible
-ledger call retains that admission slot until it finishes. Further evaluations
-receive a busy error, preventing canceled requests from accumulating workers.
+`evaluate_tx` admits at most one ledger evaluation per MCP server and passes the
+request context, bounded by the configured query timeout, to
+`LedgerState.EvaluateTxContext`. Cancellation or the timeout releases the
+request at once; the ledger call stops at its next cancellation check, including
+during CEK execution. The admission slot is held until the ledger call returns,
+so further evaluations receive a busy error and
+canceled requests cannot accumulate workers.
 Arbitrary SQLite queries borrow one connection, enable `query_only`, and apply
 SQLite size limits before execution. The original settings are restored before
 the connection returns to an injected pool.
@@ -9680,6 +9692,8 @@ shared strict pagination parser (count 1–100, page 1–21474836).
 The root document is served only at the literal `/` path (`GET /{$}`).
 Documented operations without a handler return `501`; unknown paths fall
 through to a catch-all `404` handler instead of the root document.
+`GET /addresses/{address}/transactions` honors the inclusive `from`/`to` block
+range through the same parser as the account endpoint.
 
 The account UTxOs, withdrawals, and transactions endpoints resolve everything
 by stake credential rather than a single address. Account UTxOs reuse the
@@ -9694,8 +9708,9 @@ introduced for this endpoint. Account withdrawals read the rollback-aware
 `account_reward_delta` withdrawal journal joined to its transaction, with
 `LIMIT`/`OFFSET` applied in SQL.
 
-Account transactions is bounded by the requested page size, not by the
-credential's full transaction history: `address_transaction` already carries
+Account and address transaction queries are bounded by the requested page
+size, not by the credential's or address's full transaction history:
+`address_transaction` already carries
 one row per (payment address, transaction) association with its own
 `slot`/`tx_index` columns (populated by the same indexing step that fans a
 transaction's inputs/collateral/reference-inputs/outputs/collateral-return
@@ -9703,11 +9718,13 @@ out into that table), so the query pages directly against it with SQL
 `ORDER BY`/`LIMIT`/`OFFSET` and an inclusive `(slot, tx_index)` range
 predicate for `from`/`to` — no application-level fan-out or filtering
 happens after the query returns. A block number in `from`/`to` is resolved
-to its slot via two bounded index lookups (`Database.BlockByIndex`,
-`Database.BlockAtOrAfterIndex`) rather than a scan: an unresolvable `from`
-(beyond every known block) makes the range unsatisfiable and short-circuits
-to an empty result; an unresolvable `to` degrades to unconstrained on that
-side rather than guessing at a boundary that cannot be looked up backward.
+with bounded index lookups (`Database.BlockByIndex` and, when the exact
+block is absent, `Database.BlockAtOrAfterIndex` for `from` or
+`Database.BlockAtOrBeforeIndex` for `to`) rather than a scan. In an import
+gap, `from` resolves to the next existing block and `to` resolves to the
+preceding existing block. If the needed boundary does not exist, the range
+is empty; a `to` beyond the latest block resolves to the latest block. An
+explicit transaction index applies only when the exact block exists.
 The payment-credential script/key bit needed to reconstruct each row's
 exact address, and the block height/time needed for its response fields,
 are then resolved only for the page's own (<= page size) distinct payment
@@ -9897,6 +9914,23 @@ retract a confirmation already sent.
 applies before logging, point allocation, or ledger lookup, including duplicate
 references. Empty lists retain the current-tip fallback.
 
+`WaitForTx` rejects more than `MaxTxRefs` (default 1000) references
+before subscribing or reading the ledger, and one `ServerTimeout` deadline
+covers the durable lookups as well as the wait. `FollowTip`, `WatchTx`,
+`WatchMempool`, and `WaitForTx` take a slot from a shared limiter
+(`MaxStreams` process-wide, `MaxStreamsPerClient` per remote host) and answer
+`ResourceExhausted` when
+none is free. `WatchTx` and `WatchMempool` reject a predicate with more than
+`MaxPredicateNodes` nodes, and `WatchTx` rejects an intersect more than
+`MaxReplayBlocks` blocks behind the tip, all before subscribing or reading
+history. `WatchMempool`'s event callback only decodes, matches and offers to a
+bounded queue; the request goroutine is the only sender, and a client that
+fills the queue is cut off with `ResourceExhausted`. `DumpHistory` uses
+`HistoryPageItems` (default 100) when `max_items` is omitted, and stops a page
+at `MaxHistoryBytes` of serialized blocks with a `next_token`. A single block
+larger than the byte cap is returned whole; at tip that response has no
+`next_token` because no further block exists.
+
 `FollowTip` populates `Timestamp` on a `Reset` block reference and on every
 response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3
 `uint64` with the same "unknown" ambiguity `height` has (see the UTxO RPC
@@ -9911,7 +9945,22 @@ rollback within that history builds its `Undo` responses without reading
 persisted blocks. A deeper rollback walks persisted predecessors synchronously
 inside the stream handler, keeping cancellation and conversion errors in the
 request lifecycle; an unexpected persisted-block conversion failure is
-returned as a stream error.
+returned as a stream error. That walk reads at most the ledger's security
+parameter plus one blocks, the deepest rollback a follower can need.
+
+Transaction evaluation (`LedgerState.EvaluateTx`, shared by the Blockfrost and
+UTxO RPC front ends) admits at most `LedgerStateConfig.MaxConcurrentEvaluations`
+(default `GOMAXPROCS`) calls at once and returns `ErrEvaluationBusy` instead of
+queuing; Blockfrost reports it as `429` and UTxO RPC as `ResourceExhausted`.
+Each redeemer is evaluated against the part of `MaxTxExUnits` the earlier
+redeemers have not used, so a transaction's total work stays within the
+protocol limit. `safedecode.Transaction` rejects bytes after the single
+transaction, so the bytes hashed, validated and relayed are the bytes that
+decoded. Its callers are the Mesh, Blockfrost and UTxO RPC
+submit and evaluate paths, mempool admission and re-validation (and so
+node-to-node and node-to-client submissions), and endorser-block transaction
+decoding. Mesh
+`details.error` is omitted for internal errors; the cause goes to the log.
 
 ### Blockfrost unsupported operations
 

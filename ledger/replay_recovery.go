@@ -2016,7 +2016,9 @@ func (ls *LedgerState) clampRecoveryRewindToEpochBoundary(
 		return rewindPoint
 	}
 	clamped := ledgerTip
-	block, err := database.FirstBlockAtOrAfterSlot(ls.db, boundary)
+	block, err := database.FirstBlockAtOrAfterSlot(
+		ls.lifecycleContext(), ls.db, boundary,
+	)
 	if err == nil && block.Slot <= ledgerTip.Slot {
 		clamped = ocommon.Point{Slot: block.Slot, Hash: block.Hash}
 	} else if err != nil {
