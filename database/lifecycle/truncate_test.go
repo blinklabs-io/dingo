@@ -166,6 +166,87 @@ func TestTruncateRecomputesCip163ExpirationForWitnessAfterTruncatePoint(
 	)
 }
 
+func TestTruncateRemovesMidnightRollbackStateAfterTarget(t *testing.T) {
+	t.Parallel()
+
+	f := buildTestChain(t, 3)
+	store := f.db.Metadata()
+	for _, block := range f.blocks[1:] {
+		require.NoError(t, store.CreateMidnightAriadneRollback(nil,
+			&models.MidnightAriadneRollback{
+				BlockNumber:    block.Number,
+				Epoch:          block.Number,
+				PreviousExists: true,
+				PreviousDatum:  []byte{byte(block.Number)},
+			},
+		))
+		require.NoError(t, store.CreateMidnightCandidateRemoval(nil,
+			&models.MidnightCandidateRemoval{
+				BlockNumber: block.Number,
+				TxHash:      []byte{byte(block.Number)},
+				OutputIndex: 0,
+				Datum:       []byte{byte(block.Number)},
+			},
+		))
+		require.NoError(t, store.UpsertMidnightEpochTransition(nil,
+			&models.MidnightEpochTransition{
+				BlockNumber:    block.Number,
+				PreviousEpoch:  block.Number - 1,
+				PreviousExists: true,
+			},
+		))
+	}
+	require.NoError(t, store.SetBackfillCheckpoint(&models.BackfillCheckpoint{
+		Phase:     "midnight",
+		LastSlot:  f.blocks[2].Slot,
+		Completed: true,
+	}, nil))
+
+	_, err := lifecycle.Truncate(
+		context.Background(), f.db, f.blocks[1], 0, false, 0,
+	)
+	require.NoError(t, err)
+
+	rollbacksAtTarget, err := store.FindMidnightAriadneRollbacksByBlock(
+		nil, f.blocks[1].Number,
+	)
+	require.NoError(t, err)
+	require.Len(t, rollbacksAtTarget, 1)
+	rollbacksAfterTarget, err := store.FindMidnightAriadneRollbacksByBlock(
+		nil, f.blocks[2].Number,
+	)
+	require.NoError(t, err)
+	require.Empty(t, rollbacksAfterTarget)
+
+	candidateRemovalsAtTarget, err := store.FindMidnightCandidateRemovalsByBlock(
+		nil, f.blocks[1].Number,
+	)
+	require.NoError(t, err)
+	require.Len(t, candidateRemovalsAtTarget, 1)
+	candidateRemovalsAfterTarget, err := store.FindMidnightCandidateRemovalsByBlock(
+		nil, f.blocks[2].Number,
+	)
+	require.NoError(t, err)
+	require.Empty(t, candidateRemovalsAfterTarget)
+
+	epochTransitionAtTarget, err := store.GetMidnightEpochTransitionByBlock(
+		nil, f.blocks[1].Number,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, epochTransitionAtTarget)
+	epochTransitionAfterTarget, err := store.GetMidnightEpochTransitionByBlock(
+		nil, f.blocks[2].Number,
+	)
+	require.NoError(t, err)
+	require.Nil(t, epochTransitionAfterTarget)
+
+	checkpoint, err := store.GetBackfillCheckpoint("midnight", nil)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	require.Equal(t, f.blocks[1].Slot, checkpoint.LastSlot)
+	require.False(t, checkpoint.Completed)
+}
+
 // buildTestChain creates n blocks (IDs and Numbers 1..n) and sets the tip
 // to the last one.
 func buildTestChain(t *testing.T, n uint64) *chainFixture {

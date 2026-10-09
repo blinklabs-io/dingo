@@ -504,19 +504,9 @@ func (ls *LedgerState) checkAnnouncedPruneFloors(
 // When at is pinned, Query first verifies at against this node's current
 // chain (verifyPointOnChain) before dispatching, so every point-sensitive
 // query type below shares one fork-safety check rather than repeating it.
-// at is threaded through only as far as the query types that actually honor
-// it today: stake distribution (queryShelleyStakeDistribution/
-// queryShelleyPoolDistr2, via PoolStakeDistribution's epoch-snapshot
-// lookup and, for circulating supply, GetNetworkStateAsOfSlot), current
-// protocol parameters (queryShelleyCurrentProtocolParams, which answers a
-// pin in the live tip's current epoch from the live snapshot and any other
-// epoch from that epoch's persisted pparams row when one exists, returning
-// ErrHistoricalStateUnavailable only when no such row was ever recorded or
-// it was pruned after a rollback), and epoch number (queryShelleyEpochNo,
-// unconditionally safe). Every other
-// query type ignores at and answers from the current state; every query
-// pinnable at any historical point remains out of scope for what cross-node
-// validation via node-parity actually needs.
+// at reaches every query type that reads ledger or consensus state, each of
+// which answers as of at; queryShelleyLeaf's doc comment audits every case,
+// and only genesis config and the ledger peer snapshot are live by design.
 //
 // Query reads current state on every call, so successive calls may observe
 // different blocks. A session that needs consistent reads across calls uses
@@ -608,6 +598,17 @@ func (ls *LedgerState) queryInTxn(
 	protocolVersion uint16,
 	txn *database.Txn,
 ) (any, error) {
+	return ls.queryInTxnWithTransition(ctx, query, at, protocolVersion, txn, nil)
+}
+
+func (ls *LedgerState) queryInTxnWithTransition(
+	ctx context.Context,
+	query any,
+	at QueryPoint,
+	protocolVersion uint16,
+	txn *database.Txn,
+	transitionInfo *hardfork.TransitionInfo,
+) (any, error) {
 	if at.pinned() {
 		var release func()
 		txn, release = ls.readTxn(ctx, txn)
@@ -618,7 +619,7 @@ func (ls *LedgerState) queryInTxn(
 	}
 	switch q := query.(type) {
 	case *olocalstatequery.BlockQuery:
-		return ls.queryBlock(ctx, q, at, txn, protocolVersion)
+		return ls.queryBlock(ctx, q, at, txn, protocolVersion, transitionInfo)
 	case *olocalstatequery.SystemStartQuery:
 		return ls.querySystemStart(ctx)
 	case *olocalstatequery.ChainBlockNoQuery:
@@ -634,10 +635,11 @@ func (ls *LedgerState) queryBlock(ctx context.Context, query *olocalstatequery.B
 	at QueryPoint,
 	txn *database.Txn,
 	protocolVersion uint16,
+	transitionInfo *hardfork.TransitionInfo,
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkQuery:
-		return ls.queryHardFork(ctx, q, at, txn)
+		return ls.queryHardForkWithTransition(ctx, q, at, txn, transitionInfo)
 	case *olocalstatequery.ShelleyQuery:
 		return ls.queryShelley(ctx, q, at, txn, protocolVersion)
 	default:
@@ -762,6 +764,16 @@ func (ls *LedgerState) queryHardFork(ctx context.Context, query *olocalstatequer
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
+	return ls.queryHardForkWithTransition(ctx, query, at, txn, nil)
+}
+
+func (ls *LedgerState) queryHardForkWithTransition(
+	ctx context.Context,
+	query *olocalstatequery.HardForkQuery,
+	at QueryPoint,
+	txn *database.Txn,
+	transitionInfo *hardfork.TransitionInfo,
+) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
 		if !at.pinned() {
@@ -817,6 +829,9 @@ func (ls *LedgerState) queryHardFork(ctx context.Context, query *olocalstatequer
 	case *olocalstatequery.HardForkEraHistoryQuery:
 		// The held snapshot answers pinned and unpinned queries alike, so the
 		// table does not change within an acquired session.
+		if transitionInfo != nil {
+			return ls.queryHardForkEraHistory(ctx, txn, *transitionInfo)
+		}
 		return ls.queryHardForkEraHistory(ctx, txn)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
@@ -862,12 +877,15 @@ func checkedSlotAdd(
 type eraBoundData struct {
 	epochs []models.Epoch
 	start  []any // [picosecondsBigInt, slot, epoch] or nil if era is empty
-	end    []any // same shape; nil for empty eras and populated current era
+	// end is either a bound tuple or nil for HFC EraUnbounded, which CBOR
+	// encodes as null. An empty era is identified by a nil start instead.
+	end any
 }
 
 func (ls *LedgerState) queryHardForkEraHistory(
 	ctx context.Context,
 	txn *database.Txn,
+	acquiredTransition ...hardfork.TransitionInfo,
 ) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -880,9 +898,12 @@ func (ls *LedgerState) queryHardForkEraHistory(
 	tipSlot := tipState.currentTip.Point.Slot
 	currentEraId := consensusState.currentEra.Id
 	transitionInfo := consensusState.transitionInfo
+	if len(acquiredTransition) > 0 {
+		transitionInfo = acquiredTransition[0]
+	}
 	if txn != nil {
 		// A QueryView describes the tip and era it froze. The transition
-		// forecast stays live: it is predicted state with no stored form.
+		// forecast is captured by QueryView because it has no stored form.
 		tip, err := ls.db.GetTip(txn)
 		if err != nil {
 			return nil, err
@@ -909,11 +930,23 @@ func (ls *LedgerState) queryHardForkEraHistory(
 		)
 	}
 
-	perEra := make([]eraBoundData, len(shape.Eras))
+	currentIdx, ok := shape.EraIndex(currentEraId)
+	if !ok {
+		return nil, fmt.Errorf(
+			"era history: current era %d is absent from shape",
+			currentEraId,
+		)
+	}
+	hasKnownSuccessor := transitionInfo.State == hardfork.TransitionKnown &&
+		currentIdx+1 < len(shape.Eras)
+	perEraLen := currentIdx + 1
+	if hasKnownSuccessor {
+		perEraLen++
+	}
+	perEra := make([]eraBoundData, perEraLen)
 	timespan := big.NewInt(0)
-	currentIdx := -1
 
-	for i, entry := range shape.Eras {
+	for i, entry := range shape.Eras[:currentIdx+1] {
 		eraDesc := activeEras[i]
 		epochs, dbErr := ls.db.GetEpochsByEra(entry.EraID, txn)
 		if dbErr != nil {
@@ -937,9 +970,8 @@ func (ls *LedgerState) queryHardForkEraHistory(
 			)
 		}
 
-		if entry.EraID == currentEraId {
+		if i == currentIdx {
 			// Defer End to the BuildSummary step below.
-			currentIdx = i
 			continue
 		}
 
@@ -1004,7 +1036,7 @@ func (ls *LedgerState) queryHardForkEraHistory(
 
 	// Compute the current era's End via hardfork.BuildSummary, mirroring the
 	// Haskell HFC TransitionKnown/Unknown/Impossible semantics.
-	if currentIdx >= 0 {
+	if perEra[currentIdx].start != nil {
 		end, err := ls.currentEraEnd(
 			shape, perEra[currentIdx], currentIdx, tipSlot, transitionInfo,
 		)
@@ -1012,39 +1044,47 @@ func (ls *LedgerState) queryHardForkEraHistory(
 			return nil, err
 		}
 		perEra[currentIdx].end = end
+
+		if hasKnownSuccessor {
+			boundedEnd, ok := end.([]any)
+			if !ok {
+				return nil, errors.New(
+					"hardfork: known transition has unbounded current era",
+				)
+			}
+			successor, err := eraHistorySuccessor(
+				shape, currentIdx+1, boundedEnd, tipSlot,
+			)
+			if err != nil {
+				return nil, err
+			}
+			perEra[currentIdx+1] = successor
+		}
 	}
 
-	retData := make([]any, 0, len(shape.Eras))
-	for i, entry := range shape.Eras {
+	retData := make([]any, 0, len(perEra))
+	for i, data := range perEra {
+		entry := shape.Eras[i]
 		tmpParams := eraParamsCBOR(entry.Params)
-		if perEra[i].start == nil || perEra[i].end == nil {
-			retData = append(retData, []any{
-				[]any{0, 0, 0},
-				[]any{0, 0, 0},
-				tmpParams,
-			})
+		if data.start == nil {
 			continue
 		}
 		retData = append(retData, []any{
-			perEra[i].start, perEra[i].end, tmpParams,
+			data.start, data.end, tmpParams,
 		})
 	}
 	return cbor.IndefLengthList(retData), nil
 }
 
 // currentEraEnd computes the open era's End tuple (picosecondRelTime, slot,
-// epoch) from the HFC Summary, with a pre-check that falls back to
-// TransitionUnknown when TransitionKnown's KnownEpoch is missing from the DB
-// (e.g. a race or rollback). Without the fallback, serving the
-// BuildSummary-computed boundary would over-claim certainty about an epoch
-// the node hasn't actually seen.
+// epoch) from the HFC Summary.
 func (ls *LedgerState) currentEraEnd(
 	shape hardfork.Shape,
 	era eraBoundData,
 	idx int,
 	tipSlot uint64,
 	ti hardfork.TransitionInfo,
-) ([]any, error) {
+) (any, error) {
 	firstEp := era.epochs[0]
 	startRel, ok := era.start[0].(*big.Int)
 	if !ok {
@@ -1052,15 +1092,11 @@ func (ls *LedgerState) currentEraEnd(
 			"current era start[0] has unexpected type %T", era.start[0],
 		)
 	}
-
-	// dingo sets TransitionImpossible when evaluateTransitionImpossible has
-	// confirmed the current epoch's end is within the safe-zone horizon
-	// (safeEndSlot >= epochEndSlot). The intended answer is the current
-	// epoch end. BuildSummary's TransitionImpossible branch, however,
-	// applies the safe zone from current.Start (= the *first* epoch of
-	// the era) and can return an EraEnd behind the tip for a long-running
-	// era. Serve the confirmed epoch-end directly instead.
-	if ti.State == hardfork.TransitionImpossible {
+	// BuildSummary cannot bound a TransitionImpossible era whose final
+	// safe zone is zero. The confirmed epoch history still supplies a finite
+	// end for the era reached so far.
+	if ti.State == hardfork.TransitionImpossible &&
+		shape.Eras[idx].Params.SafeZoneSlots == 0 {
 		endRel := new(big.Int).Set(startRel)
 		for _, ep := range era.epochs {
 			endRel.Add(
@@ -1079,26 +1115,7 @@ func (ls *LedgerState) currentEraEnd(
 				lastEp.EpochId, lastEp.StartSlot, lastEp.LengthInSlots, err,
 			)
 		}
-		return []any{
-			endRel,
-			endSlot,
-			lastEp.EpochId + 1,
-		}, nil
-	}
-
-	effectiveTI := ti
-	if ti.State == hardfork.TransitionKnown {
-		found := false
-		for _, ep := range era.epochs {
-			if ep.EpochId == ti.KnownEpoch &&
-				ep.EpochId > firstEp.EpochId {
-				found = true
-				break
-			}
-		}
-		if !found {
-			effectiveTI = hardfork.NewTransitionUnknown()
-		}
+		return []any{endRel, endSlot, lastEp.EpochId + 1}, nil
 	}
 
 	curr := hardfork.EraSummary{
@@ -1110,20 +1127,70 @@ func (ls *LedgerState) currentEraEnd(
 		},
 		Params: shape.Eras[idx].Params,
 	}
-	summ, err := hardfork.BuildSummary(shape, nil, curr, tipSlot, effectiveTI)
+	summ, err := hardfork.BuildSummary(shape, nil, curr, tipSlot, ti)
 	if err != nil {
 		return nil, err
 	}
 	endBound := summ.Eras[0].End
 	if endBound == nil {
-		return nil, errors.New(
-			"hardfork: current era End unbounded (SafeZoneSlots==0)",
-		)
+		return nil, nil
 	}
 	return []any{
 		durationToPicoseconds(endBound.RelativeTime),
 		endBound.Slot,
 		endBound.Epoch,
+	}, nil
+}
+
+func eraHistorySuccessor(
+	shape hardfork.Shape,
+	idx int,
+	start []any,
+	tipSlot uint64,
+) (eraBoundData, error) {
+	startRel, ok := start[0].(*big.Int)
+	if !ok {
+		return eraBoundData{}, fmt.Errorf(
+			"successor era start[0] has unexpected type %T", start[0],
+		)
+	}
+	startSlot, ok := start[1].(uint64)
+	if !ok {
+		return eraBoundData{}, fmt.Errorf(
+			"successor era start[1] has unexpected type %T", start[1],
+		)
+	}
+	startEpoch, ok := start[2].(uint64)
+	if !ok {
+		return eraBoundData{}, fmt.Errorf(
+			"successor era start[2] has unexpected type %T", start[2],
+		)
+	}
+	entry := shape.Eras[idx]
+	startBound := hardfork.Bound{
+		RelativeTime: picosecondsToDuration(startRel),
+		Slot:         startSlot,
+		Epoch:        startEpoch,
+	}
+	successor := hardfork.SuccessorEra(
+		startBound,
+		entry.EraID,
+		entry.Params,
+		tipSlot,
+	)
+	end := successor.End
+	if end == nil {
+		return eraBoundData{
+			start: []any{new(big.Int).Set(startRel), startSlot, startEpoch},
+		}, nil
+	}
+	return eraBoundData{
+		start: []any{new(big.Int).Set(startRel), startSlot, startEpoch},
+		end: []any{
+			durationToPicoseconds(end.RelativeTime),
+			end.Slot,
+			end.Epoch,
+		},
 	}, nil
 }
 
@@ -1213,10 +1280,16 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // expiry and deposit they had, from certificates and drep_expiry_history, and
 // their delegators as GetAccountsByCredentialAtSlot reads accounts), and
 // ShelleyGetProposalsQuery (the proposals set at at.Slot from the lifecycle
-// slots, with votes from governance_vote_history). Pool and stake certificate
-// rows, the import baseline, the reward journal, DRep certificates and expiry
-// history, proposal lifecycle slots and vote history are removed only by
-// rollback, so none of these needs a retention floor.
+// slots, with votes from governance_vote_history), and
+// ShelleyDebugChainDepStateQuery (queryShelleyDebugChainDepState: the epoch
+// rows of at's epoch, the nonce fold stopped at at.Slot, the lab from the
+// acquired block's parent hash, and the op-cert counters observed at or
+// before at.Slot). Pool and stake certificate rows, the import baseline, the
+// reward journal, DRep certificates and expiry history, proposal lifecycle
+// slots, vote history, epoch rows and op-cert rows are removed only by
+// rollback, so none of these needs a retention floor; for a point older than
+// the three epochs of block nonce rows kept, the nonce fold recomputes from
+// the stored blocks.
 //
 // Also honors at: ShelleyLedgerTipQuery (answers at itself when pinned), and
 // ShelleyProposedProtocolParamsUpdatesQuery (resolves at's era like
@@ -1227,12 +1300,8 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // ShelleyGetLedgerPeerSnapshotQuery (peer/networking bootstrap data, not
 // ledger state at all).
 //
-// Not point-aware, real gaps: ShelleyStakePoolParamsQuery reads live pool
-// registration rows, which carry no per-point history, and
-// ShelleyDebugChainDepStateQuery reads live per-pool operational-certificate
-// counters. computeCandidateNonceAsOf already takes an arbitrary end-slot
-// internally, but the counters have no historical tracking, so the reply as
-// a whole cannot be pinned without that piece too.
+// Not point-aware, real gap: ShelleyStakePoolParamsQuery reads live pool
+// registration rows, which carry no per-point history.
 //
 // Not answered, so the call fails with "unsupported query type":
 // ShelleyPoolStateQuery, ShelleyPoolDistrQuery and
@@ -1291,7 +1360,7 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	case *olocalstatequery.ShelleyGetProposalsQuery:
 		return ls.queryShelleyGetProposals(ctx, q.ActionIds.Items(), at, txn)
 	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
-		return ls.queryShelleyDebugChainDepState(ctx, txn)
+		return ls.queryShelleyDebugChainDepState(ctx, at, txn)
 	case *olocalstatequery.ShelleyPoolDistr2Query:
 		return ls.queryShelleyPoolDistr2(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyStakeDistributionQuery:

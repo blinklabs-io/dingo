@@ -76,6 +76,7 @@ const (
 	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
 	poolRelayTypeSchemaRelease                          = "pool-relay-type"
+	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
 	committeeRenewalTermStartSchemaRelease              = "committee-renewal-term-start-repair"
 )
 
@@ -221,8 +222,13 @@ var schemaVersions = []struct {
 	{Version: 38, Name: poolRelayTypeSchemaRelease, Dir: "v38"},
 	{
 		Version: 39,
-		Name:    committeeRenewalTermStartSchemaRelease,
+		Name:    midnightRollbackJournalSchemaRelease,
 		Dir:     "v39",
+	},
+	{
+		Version: 40,
+		Name:    committeeRenewalTermStartSchemaRelease,
+		Dir:     "v40",
 	},
 }
 

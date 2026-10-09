@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/big"
 	"net/http"
 	"slices"
 	"strconv"
@@ -77,6 +78,12 @@ type Node struct {
 	connManager *connmanager.ConnectionManager
 	peerGovMu   sync.RWMutex
 	peerGov     *peergov.PeerGovernor
+	// networkingCoreMu keeps actions that must use peerGov and connManager as
+	// one generation from landing between live lifecycle quiesce and rebuild.
+	// Restore and Truncate hold it for their complete operation; shutdown does
+	// not, because it stops the retained chain selector while holding its own
+	// lifecycle gates.
+	networkingCoreMu sync.Mutex
 	// poolRelayProvider backs peerGov's LedgerPeerProvider. Tracked here (not
 	// a throwaway local) so quiesceForLiveLifecycleOp can Close it -- it has
 	// no Stop of its own otherwise, so a live database restore/truncate,
@@ -182,7 +189,8 @@ type Node struct {
 	// (node_lifecycle.go) so two can never quiesce/rebuild concurrently.
 	// Shutdown takes this mutex before cancelling components or closing
 	// storage, so it cannot tear down a live operation in progress. The lock
-	// order with snapshotMu is always liveLifecycleMu, then snapshotMu.
+	// order with networkingCoreMu and snapshotMu is always liveLifecycleMu,
+	// then networkingCoreMu, then snapshotMu.
 	// Deliberately NOT held by Snapshot (see snapshotMu): Snapshot never
 	// nils/rebuilds n.ledgerState or n.chainsyncState the way Restore/
 	// Truncate do, so a background reader like the chainsync recycler
@@ -957,7 +965,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// and storage mode alone is no longer sufficient to start it (an api-mode
 	// deployment may not want Midnight indexing at all).
 	if midnightIndexerActive(n.config.storageMode, n.config.midnight) {
-		if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
+		if err := n.ledgerState.PrepareEpochCacheForStartup(ctx); err != nil {
 			return fmt.Errorf(
 				"load epoch cache before Midnight indexer start: %w",
 				err,
@@ -1235,23 +1243,23 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if k := n.ledgerState.SecurityParam(); k > 0 {
 		chainSelectorSecurityParam = uint64(k) //nolint:gosec
 	}
-	genesisWindowSlots := n.config.genesisWindowSlots
-	if genesisWindowSlots == 0 {
-		genesisWindowSlots = chainselection.GenesisWindowSlotsForParams(
-			chainSelectorSecurityParam,
-			n.ledgerState.ActiveSlotCoeffRat(),
-		)
-	}
+	genesisWindowSlots, genesisDensityDisconnect := chainSelectorGenesisWindow(
+		n.config.genesisWindowSlots,
+		chainSelectorSecurityParam,
+		n.ledgerState.ActiveSlotCoeffRat(),
+	)
 	genesisSelectionMode := n.config.genesisBootstrap &&
 		!n.config.intersectTip &&
 		len(n.config.intersectPoints) == 0
-	n.chainSelector = chainselection.NewChainSelector(
-		n.buildChainSelectorConfig(
-			chainSelectorSecurityParam,
-			genesisSelectionMode,
-			genesisWindowSlots,
-		),
+	chainSelectorConfig := n.buildChainSelectorConfig(
+		chainSelectorSecurityParam,
+		genesisSelectionMode,
+		genesisWindowSlots,
 	)
+	if !genesisDensityDisconnect {
+		chainSelectorConfig.OnGenesisDensityDisconnect = nil
+	}
+	n.chainSelector = chainselection.NewChainSelector(chainSelectorConfig)
 	// Seed chain selection from the applied ledger tip before peers connect.
 	// Without this initial observation, the plausibility guard treats the
 	// local tip as block zero until the recycler's first tick, leaving a
@@ -2117,6 +2125,30 @@ func (n *Node) subscribeConnectionEvents() {
 	)
 }
 
+// chainSelectorGenesisWindow returns the Genesis window to give the chain
+// selector and whether the Genesis Density Disconnector may run over it. A
+// configured window, or ceil(3k/f) from the genesis parameters, is a Genesis
+// window. Without either, DefaultGenesisWindowSlots keeps the selector's exit
+// horizon unchanged, but density compared over that stand-in can disconnect
+// honest peers, so the disconnector stays off.
+func chainSelectorGenesisWindow(
+	configured uint64,
+	securityParam uint64,
+	activeSlotsCoeff *big.Rat,
+) (uint64, bool) {
+	if configured > 0 {
+		return configured, true
+	}
+	window := chainselection.GenesisWindowSlotsForParams(
+		securityParam,
+		activeSlotsCoeff,
+	)
+	if window > 0 {
+		return window, true
+	}
+	return chainselection.DefaultGenesisWindowSlots, false
+}
+
 // buildChainSelectorConfig assembles the ChainSelectorConfig this node passes
 // to chainselection.NewChainSelector. It is the single composition site for
 // the selector's callbacks, so a hook that is not set here is silently absent
@@ -2146,7 +2178,8 @@ func (n *Node) buildChainSelectorConfig(
 			}
 			return n.chainsyncState.BlockfetchLatency(connId)
 		},
-		OnRollbackRegistration: n.recordRollbackRegistration,
+		OnRollbackRegistration:     n.recordRollbackRegistration,
+		OnGenesisDensityDisconnect: n.onGenesisDensityDisconnect,
 	}
 }
 
@@ -2563,6 +2596,7 @@ func (n *Node) newTokenRegistrySync() (
 			SourceURL:             n.config.tokenRegistry.SourceURL,
 			Network:               n.config.network,
 			UserAgent:             n.config.tokenRegistry.UserAgent,
+			Headers:               n.config.tokenRegistry.Headers,
 			Interval:              n.config.tokenRegistry.Interval,
 			RequestTimeout:        n.config.tokenRegistry.RequestTimeout,
 			MaxBytes:              n.config.tokenRegistry.MaxBytes,

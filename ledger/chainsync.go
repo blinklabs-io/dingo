@@ -765,7 +765,7 @@ func (ls *LedgerState) evictStaleDeferredHeadersLocked(
 	return evicted
 }
 
-// deletePersistedDeferredMarkers removes the sync_state markers for a set of
+// deletePersistedDeferredMarkers removes the persisted markers for a set of
 // evicted deferred-header map keys. It runs after the in-memory eviction has
 // already released the retention pin, so a delete failure only leaves a dead
 // marker row to be re-cleaned on a later pass.
@@ -788,16 +788,17 @@ func (ls *LedgerState) evictStaleDeferredHeadersLocked(
 // still outstanding. So the delete is made effectively conditional by
 // re-testing membership AFTER it and RE-PERSISTING the marker for any key that
 // came back, rather than by holding the lock across the delete. Re-persisting
-// is idempotent (SetSyncState of the same key/value) and runs with no lock
+// is idempotent (SetDeferredHeaderMarker of the same key) and runs with no lock
 // held, so it closes the window without reintroducing the lock inversion.
 func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) error {
-	if len(mapKeys) == 0 || ls.db == nil || ls.db.Metadata() == nil {
+	if len(mapKeys) == 0 || ls.db == nil {
 		return nil
 	}
 	// The membership test is taken under the lock, but the lock is RELEASED
-	// before DeleteSyncState: that delete opens the single sqlite write
-	// connection (nil txn -> Transaction(true)), and block apply holds that
-	// connection before taking this mutex via consumeDeferredHeaderValidation.
+	// before the delete: removing a legacy sync_state row opens the single
+	// sqlite write connection (nil txn -> Transaction(true)), and block apply
+	// holds that connection before taking this mutex via
+	// consumeDeferredHeaderValidation.
 	// Holding the mutex across the delete inverts the lock order (mutex->write-
 	// conn here vs. write-conn->mutex on apply) and deadlocks the node on the
 	// single write connection -- the same inversion as the prune path. A point
@@ -833,7 +834,7 @@ func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) error {
 
 // afterDeferredMarkerDeleteHook is a test seam. It is nil in production (a
 // single nil-check, zero cost) and, when set, runs inside
-// deleteDeferredMarkerUnlessReadmitted immediately AFTER DeleteSyncState returns
+// deleteDeferredMarkerUnlessReadmitted immediately AFTER the delete returns
 // and BEFORE the membership re-test. It lets a test inject a re-admission
 // (markDeferredHeaderValidation) that lands DURING the delete window rather than
 // before the call, so the TOCTOU restore path is actually exercised: an
@@ -863,7 +864,7 @@ const deferredMarkerRestoreMaxAttempts = 3
 // verifyDeferredBlockHeaderState skips the stateful check for a header that is
 // still outstanding.
 //
-// A failed DeleteSyncState leaves the durable marker in place, so the retention
+// A failed delete leaves the durable marker in place, so the retention
 // pin is NOT lost — the stale row is simply re-cleaned on a later pass — and is
 // logged best-effort. A failed RESTORE is different: it drops the durable pin
 // for a header that is live again in the in-memory set, so after a restart the
@@ -874,7 +875,7 @@ const deferredMarkerRestoreMaxAttempts = 3
 // fails the cleanup rather than continuing toward a restart that would lose it.
 func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 	syncKey := deferredHeaderValidationSyncStatePrefix + k
-	if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
+	if err := ls.deleteDeferredMarkerByKey(k); err != nil {
 		ls.config.Logger.Warn(
 			"failed to delete stale deferred-header marker",
 			"key", syncKey,
@@ -894,11 +895,7 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 	}
 	var restoreErr error
 	for attempt := 1; attempt <= deferredMarkerRestoreMaxAttempts; attempt++ {
-		restoreErr = ls.db.SetSyncState(
-			syncKey,
-			deferredHeaderValidationSyncStateValue,
-			nil,
-		)
+		restoreErr = ls.db.SetDeferredHeaderMarker(k)
 		if restoreErr == nil {
 			return nil
 		}
@@ -916,6 +913,28 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 		deferredMarkerRestoreMaxAttempts,
 		restoreErr,
 	)
+}
+
+// deleteDeferredMarkerByKey removes, when a read shows one, the sync_state row
+// an earlier version wrote for a map key, and then the blob marker.
+//
+// The blob marker goes last so that any error leaves it in place: the caller
+// treats a failed delete as harmless only because the durable marker survives
+// it, and skips the readmission re-test on that basis.
+func (ls *LedgerState) deleteDeferredMarkerByKey(k string) error {
+	if ls.db.Metadata() != nil {
+		syncKey := deferredHeaderValidationSyncStatePrefix + k
+		value, err := ls.db.GetSyncState(syncKey, nil)
+		if err != nil {
+			return err
+		}
+		if value != "" {
+			if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
+				return err
+			}
+		}
+	}
+	return ls.db.DeleteDeferredHeaderMarker(k)
 }
 
 // repopulateDeferredHeaderValidation rebuilds the in-memory deferred-header set
@@ -938,37 +957,57 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 // retries rather than running with an unpinned retention floor; a swallowed
 // marker-scan failure would reopen the pruned-snapshot bug.
 func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
-	if ls.db == nil || ls.db.Metadata() == nil {
+	if ls.db == nil {
 		return nil
 	}
-	keys, err := ls.db.ListSyncStateKeysByPrefix(
-		deferredHeaderValidationSyncStatePrefix,
-		nil,
-	)
+	keys, err := ls.db.ListDeferredHeaderMarkers()
 	if err != nil {
 		return fmt.Errorf(
 			"repopulate deferred-header set from persisted markers: %w",
 			err,
 		)
 	}
-	floorValue, err := ls.db.GetSyncState(
-		deferredHeaderValidationFloorSyncStateKey,
-		nil,
-	)
-	if err != nil {
-		return fmt.Errorf("read deferred header floor: %w", err)
-	}
-	if floorValue != "" {
-		floor, err := strconv.ParseUint(floorValue, 10, 64)
-		if err != nil {
-			return fmt.Errorf("parse deferred header floor: %w", err)
-		}
-		ls.deferredHeaderValidationMu.Lock()
-		ls.deferredHeaderValidationFloor = max(
-			ls.deferredHeaderValidationFloor,
-			floor,
+	// Markers and the eviction floor an earlier version wrote to sync_state
+	// are still honoured.
+	if ls.db.Metadata() != nil {
+		legacy, err := ls.db.ListSyncStateKeysByPrefix(
+			deferredHeaderValidationSyncStatePrefix,
+			nil,
 		)
-		ls.deferredHeaderValidationMu.Unlock()
+		if err != nil {
+			return fmt.Errorf(
+				"repopulate deferred-header set from persisted markers: %w",
+				err,
+			)
+		}
+		for _, syncKey := range legacy {
+			keys = append(
+				keys,
+				strings.TrimPrefix(
+					syncKey,
+					deferredHeaderValidationSyncStatePrefix,
+				),
+			)
+		}
+		floorValue, err := ls.db.GetSyncState(
+			deferredHeaderValidationFloorSyncStateKey,
+			nil,
+		)
+		if err != nil {
+			return fmt.Errorf("read deferred header floor: %w", err)
+		}
+		if floorValue != "" {
+			floor, err := strconv.ParseUint(floorValue, 10, 64)
+			if err != nil {
+				return fmt.Errorf("parse deferred header floor: %w", err)
+			}
+			ls.deferredHeaderValidationMu.Lock()
+			ls.deferredHeaderValidationFloor = max(
+				ls.deferredHeaderValidationFloor,
+				floor,
+			)
+			ls.deferredHeaderValidationMu.Unlock()
+		}
 	}
 	ls.deferredHeaderValidationMu.Lock()
 	if len(keys) > 0 && ls.deferredHeaderValidation == nil {
@@ -977,12 +1016,8 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 		)
 	}
 	restored := 0
-	for _, syncKey := range keys {
-		mapKey := strings.TrimPrefix(
-			syncKey,
-			deferredHeaderValidationSyncStatePrefix,
-		)
-		if mapKey == "" || mapKey == syncKey {
+	for _, mapKey := range keys {
+		if mapKey == "" {
 			continue
 		}
 		// A restored marker has no known source: connection identifiers do
@@ -1001,34 +1036,87 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 	return ls.boundDeferredHeaderValidation()
 }
 
+// persistDeferredHeaderValidation durably records the deferred-header marker
+// for point in the blob store. It deliberately does not use sync_state: this
+// runs on the blockfetch handler, and a sync_state write needs the single
+// SQLite write connection, which a block-apply transaction holds for its whole
+// length. A handler parked there stops block intake for the duration of an
+// epoch-rollover snapshot.
 func (ls *LedgerState) persistDeferredHeaderValidation(
 	point ocommon.Point,
-	txn *database.Txn,
 ) error {
-	if ls.db == nil || ls.db.Metadata() == nil {
+	if ls.db == nil {
 		return nil
 	}
-	if err := ls.db.SetSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		deferredHeaderValidationSyncStateValue,
-		txn,
+	if err := ls.db.SetDeferredHeaderMarker(
+		headerValidationPointKey(point),
 	); err != nil {
 		return fmt.Errorf("set deferred header validation marker: %w", err)
 	}
 	return nil
 }
 
+// clearPersistentDeferredHeaderValidation removes both forms of the marker:
+// the blob record, and the sync_state row a node running an earlier version
+// may have written.
+//
+// With a transaction the blob record is removed only once that transaction
+// commits. Deleting it earlier would let a crash between the blob commit and
+// the metadata commit leave the block unapplied with no marker, so its
+// stateful check would be skipped on replay. A marker that outlives a crash
+// is harmless: the retention guard evicts it.
 func (ls *LedgerState) clearPersistentDeferredHeaderValidation(
 	point ocommon.Point,
 	txn *database.Txn,
 ) error {
-	if ls.db == nil || ls.db.Metadata() == nil {
+	if ls.db == nil {
 		return nil
 	}
-	if err := ls.db.DeleteSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		txn,
-	); err != nil {
+	key := headerValidationPointKey(point)
+	if err := ls.deleteLegacyDeferredMarker(point, txn); err != nil {
+		return err
+	}
+	if txn == nil {
+		if err := ls.db.DeleteDeferredHeaderMarker(key); err != nil {
+			return fmt.Errorf(
+				"delete deferred header validation marker: %w",
+				err,
+			)
+		}
+		return nil
+	}
+	txn.AfterCommit(func() {
+		if err := ls.db.DeleteDeferredHeaderMarker(key); err != nil {
+			ls.config.Logger.Warn(
+				"failed to delete resolved deferred-header marker",
+				"key", key,
+				"error", err,
+				"component", "ledger",
+			)
+		}
+	})
+	return nil
+}
+
+// deleteLegacyDeferredMarker removes the sync_state form of the marker. The
+// row is only deleted when a read shows it, so a node with no pre-upgrade
+// markers never takes the write connection here.
+func (ls *LedgerState) deleteLegacyDeferredMarker(
+	point ocommon.Point,
+	txn *database.Txn,
+) error {
+	if ls.db.Metadata() == nil {
+		return nil
+	}
+	syncKey := deferredHeaderValidationSyncStateKey(point)
+	value, err := ls.db.GetSyncState(syncKey, txn)
+	if err != nil {
+		return fmt.Errorf("read deferred header validation marker: %w", err)
+	}
+	if value == "" {
+		return nil
+	}
+	if err := ls.db.DeleteSyncState(syncKey, txn); err != nil {
 		return fmt.Errorf("delete deferred header validation marker: %w", err)
 	}
 	return nil
@@ -1045,8 +1133,20 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 	// Below the floor the marker may have been evicted. Mithril-covered slots
 	// were never verified at admission and have no nonce to verify against.
 	required = required || (belowFloor && !ls.slotCoveredByMithril(point.Slot))
-	if ls.db == nil || ls.db.Metadata() == nil {
+	if ls.db == nil {
 		return required, source, nil
+	}
+	persisted, err := ls.db.HasDeferredHeaderMarker(
+		headerValidationPointKey(point),
+	)
+	if err != nil {
+		return false, source, fmt.Errorf(
+			"read deferred header validation marker: %w",
+			err,
+		)
+	}
+	if ls.db.Metadata() == nil {
+		return required || persisted, source, nil
 	}
 	value, err := ls.db.GetSyncState(
 		deferredHeaderValidationSyncStateKey(point),
@@ -1058,9 +1158,8 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 			err,
 		)
 	}
-	return required || value == deferredHeaderValidationSyncStateValue,
-		source,
-		nil
+	legacy := value == deferredHeaderValidationSyncStateValue
+	return required || persisted || legacy, source, nil
 }
 
 func (ls *LedgerState) verifyDeferredBlockHeaderState(
@@ -5166,7 +5265,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 				ls.markDeferredHeaderValidationFrom(e.Point, e.ConnectionId)
 				persist := func() error {
 					if err := ls.persistDeferredHeaderValidation(
-						e.Point, nil,
+						e.Point,
 					); err != nil {
 						return err
 					}
@@ -5193,7 +5292,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 				}
 				if blockfetchMutexHeld && !ls.blockfetchEventCurrent(e) {
 					ls.clearDeferredHeaderValidation(e.Point)
-					if ls.db != nil && ls.db.Metadata() != nil {
+					if ls.db != nil {
 						if err := ls.withBlockfetchMutexReleased(
 							func() error {
 								return ls.deleteDeferredMarkerUnlessReadmitted(
@@ -5778,13 +5877,7 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 // an optional test synchronization signal for the prior-request drain.
 func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	connId ouroboros.ConnectionId,
-	//nolint:unparam // pending's only use here was the synchronous NoBlocks
-	// branch this commit removes (NoBlocks now resolves asynchronously, in
-	// handleEventBlockfetchBatchDone). Kept rather than threaded out of every
-	// caller and test helper, since the dispatch-timing rework this function
-	// is meant to support needs it again for its own disruption-path
-	// publishes.
-	pending *pendingPublishes,
+	_ *pendingPublishes,
 	waitStarted chan<- struct{},
 ) error {
 	// The caller owns chainsyncBlockfetchMutex. Keep the reservation and
@@ -7230,13 +7323,9 @@ func (ls *LedgerState) calculateEpochNonce(ctx context.Context,
 	currentEpoch models.Epoch,
 	newEpochPParams lcommon.ProtocolParameters,
 ) ([]byte, []byte, []byte, []byte, error) {
-	// No epoch nonce in Byron. NOTE: currentEra is the SOURCE era being
-	// rolled over, not necessarily the era the new epoch will run at — a
-	// rollover whose source era is Byron but whose destination era (per
-	// the caller's later era-transition decision) is Shelley or beyond
-	// still returns nil here. applyBoundaryEraTransitions seeds a real
-	// nonce for that case once the destination era is known; see the
-	// comment there.
+	// No epoch nonce exists in Byron. At a Byron-to-Shelley boundary the caller
+	// applies the transition before rollover, so currentEra is Shelley and the
+	// empty source-epoch nonce takes the genesis-nonce initialization below.
 	if currentEra.Id == 0 {
 		return nil, nil, nil, nil, nil
 	}
@@ -7359,10 +7448,9 @@ func (ls *LedgerState) calculateEpochNonce(ctx context.Context,
 	// (Babbage runs Praos but retains the smaller window for
 	// backwards compatibility); 4k/f kicks in at Conway. The two
 	// formulas only disagree at the Babbage→Conway boundary, but the
-	// source-vs-target distinction matters for every transition: by
-	// the time this code runs, applyHardForkTransition has already
-	// advanced currentEra to the new era, so passing currentEra.Id
-	// here would pick the wrong window for the source epoch's blocks
+	// source-vs-target distinction matters for every transition: currentEra
+	// describes the successor epoch here, so the source epoch ID must come from
+	// currentEpoch.EraId when selecting the nonce window
 	// and produce an epoch nonce that diverges from peers. The
 	// observed symptom at Alonzo→Babbage was every header in the new
 	// Praos epoch VRF-failing; the same shape repeats at
@@ -7584,36 +7672,100 @@ func cloneProtocolParametersForEra(
 	return ret, nil
 }
 
+func (ls *LedgerState) computeClassicPParamUpdates(
+	ctx context.Context,
+	txn *database.Txn,
+	slot uint64,
+	epoch uint64,
+	era eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, bool, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return nil, false, errors.New(
+			"compute classic protocol parameter updates: CardanoNodeConfig is nil",
+		)
+	}
+	updateQuorum := 0
+	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
+		updateQuorum = shelleyGenesis.UpdateQuorum
+	}
+	return ls.db.ComputeAndApplyPParamUpdates(
+		ctx,
+		slot,
+		epoch,
+		era.Id,
+		updateQuorum,
+		currentPParams,
+		era.DecodePParamsUpdateFunc,
+		era.PParamsUpdateFunc,
+		era.ParamUpdateHasPlutusV2CostModelFunc,
+		txn,
+	)
+}
+
 // processEpochRollover returns all computed state without applying it. The
 // caller is responsible for:
 //   - Applying the result to in-memory state after successful commit
 //   - Starting background cleanup goroutines
 //   - Calling Scheduler.ChangeInterval if SchedulerIntervalMs > 0
-//
-// deferBoundarySnapshot suppresses the authoritative mark-snapshot capture so
-// the caller can take it after applying era transitions that this rollover does
-// not perform itself. Only the multi-era boundary path sets it: a boundary block
-// encoded in the era before the era its header announces needs the rollover to
-// enact source-era pparam updates first, so the final era and protocol
-// parameters do not exist yet when the capture would normally run. Capturing
-// then would durably record the source era's protocol major for an epoch that
-// runs at the successor era's, and disagree with the post-commit
-// EpochTransitionEvent. When set and the rollover reaches the capture point, the
-// result reports BoundarySnapshotDeferred so exactly one capture is taken —
-// re-running the capture instead would double-write under the savepoint.
 func (ls *LedgerState) processEpochRollover(
 	ctx context.Context,
 	txn *database.Txn,
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
-	deferBoundarySnapshot bool,
+) (*EpochRolloverResult, error) {
+	return ls.processEpochRolloverWithClassicPParamsContext(
+		ctx,
+		txn,
+		currentEpoch,
+		currentEra,
+		currentPParams,
+		false,
+		false,
+		nil,
+	)
+}
+
+func (ls *LedgerState) applyTransitionHardForkRules(
+	ctx context.Context,
+	txn *database.Txn,
+	majors []uint,
+	boundarySlot uint64,
+	newEpoch uint64,
+) error {
+	for _, major := range majors {
+		if err := ls.applyIntraEraHardForkRule(
+			ctx,
+			txn,
+			major,
+			boundarySlot,
+			newEpoch,
+		); err != nil {
+			return fmt.Errorf(
+				"apply transition major-version HARDFORK %d: %w",
+				major,
+				err,
+			)
+		}
+	}
+	return nil
+}
+
+func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
+	ctx context.Context,
+	txn *database.Txn,
+	currentEpoch models.Epoch,
+	currentEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	classicPParamsApplied bool,
+	plutusV2CostModelWritten bool,
+	transitionHardForkMajors []uint,
 ) (*EpochRolloverResult, error) {
 	// Fail closed at the top of the production rollover path rather than
 	// letting a nil config reach one of the several unchecked
 	// ls.config.CardanoNodeConfig dereferences below (e.g. the
-	// ShelleyGenesis() read further down, or applyBoundaryEraTransitions's
-	// post-Byron nonce seeding) -- any of which would panic instead of
+	// ShelleyGenesis() read further down) -- any of which would panic instead of
 	// returning an error. NewLedgerState does not itself require a non-nil
 	// CardanoNodeConfig, so this is the boundary that must catch it.
 	if ls.config.CardanoNodeConfig == nil {
@@ -7638,6 +7790,7 @@ func (ls *LedgerState) processEpochRollover(
 		CheckpointWrittenForEpoch: false,
 		NewCurrentEra:             currentEra,
 		NewCurrentPParams:         ownedPParams,
+		RealV2CostModelObserved:   plutusV2CostModelWritten,
 	}
 
 	// Create initial epoch
@@ -7812,7 +7965,7 @@ func (ls *LedgerState) processEpochRollover(
 	snapDeferred := ls.deferredBoundarySnapshotHook.Load() != nil &&
 		ls.epochBoundarySnapshotStakeHook() != nil &&
 		ls.epochBoundarySnapshotHook() != nil &&
-		!ls.ratifyAtBoundary && !deferBoundarySnapshot &&
+		!ls.ratifyAtBoundary &&
 		currentEra.Id == eras.ConwayEraDesc.Id &&
 		!ls.config.DelegatorInactivityEnabled
 	if currentEra.Id >= eras.DijkstraEraDesc.Id {
@@ -7866,31 +8019,32 @@ func (ls *LedgerState) processEpochRollover(
 		}
 	}
 
-	updateQuorum := 0
-	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
-		updateQuorum = shelleyGenesis.UpdateQuorum
-	}
-	var newPParams lcommon.ProtocolParameters
-	var plutusV2CostModelWritten bool
-	if err := ls.timeRolloverPhase(
-		currentEpoch.EpochId+1, "pparam_updates", func() error {
-			var err error
-			newPParams, plutusV2CostModelWritten, err = ls.db.ComputeAndApplyPParamUpdates(
-				ctx,
-				epochStartSlot,
-				currentEpoch.EpochId+1, // Target epoch for updates
-				currentEra.Id,
-				updateQuorum,
-				ownedPParams,
-				currentEra.DecodePParamsUpdateFunc,
-				currentEra.PParamsUpdateFunc,
-				currentEra.ParamUpdateHasPlutusV2CostModelFunc,
-				txn,
-			)
-			return err
-		},
-	); err != nil {
-		return nil, fmt.Errorf("apply pparam updates: %w", err)
+	newPParams := ownedPParams
+	if !classicPParamsApplied {
+		updateQuorum := 0
+		if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
+			updateQuorum = shelleyGenesis.UpdateQuorum
+		}
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "pparam_updates", func() error {
+				var err error
+				newPParams, plutusV2CostModelWritten, err = ls.db.ComputeAndApplyPParamUpdates(
+					ctx,
+					epochStartSlot,
+					currentEpoch.EpochId+1, // Target epoch for updates
+					currentEra.Id,
+					updateQuorum,
+					ownedPParams,
+					currentEra.DecodePParamsUpdateFunc,
+					currentEra.PParamsUpdateFunc,
+					currentEra.ParamUpdateHasPlutusV2CostModelFunc,
+					txn,
+				)
+				return err
+			},
+		); err != nil {
+			return nil, fmt.Errorf("apply pparam updates: %w", err)
+		}
 	}
 	if plutusV2CostModelWritten {
 		// The classic Shelley-style update system, not CIP-1694 governance,
@@ -8004,7 +8158,7 @@ func (ls *LedgerState) processEpochRollover(
 		if plan := govOut.Ratification; plan != nil {
 			if err := ls.timeRolloverPhase(
 				currentEpoch.EpochId+1, "ratify", func() error {
-					if ls.ratifyAtBoundary || deferBoundarySnapshot ||
+					if ls.ratifyAtBoundary ||
 						hardForkHere {
 						if currentBoundarySPOState == nil {
 							state, err := ls.currentBoundarySPOStakeState(
@@ -8154,22 +8308,45 @@ func (ls *LedgerState) processEpochRollover(
 				"component", "ledger",
 			)
 		}
-		// Apply cardano-ledger's per-major-version HARDFORK rule. This
-		// runs on ANY major-version bump, including intra-era ones like
-		// Conway pv9→pv10 (Plomin, mainnet January 2025) that do not
-		// trigger an era change, and inter-era ones like Shelley→Allegra
-		// (pv2→pv3) that carry a state rewrite. See cardano-ledger
-		// Conway/Rules/HardFork.hs and Allegra/Translation.hs.
-		if oldVer.Major != newVer.Major {
-			if err := ls.timeRolloverPhase(
-				currentEpoch.EpochId+1, "hardfork", func() error {
-					return ls.applyIntraEraHardForkRule(ctx,
-						txn, newVer.Major, epochStartSlot, currentEpoch.EpochId+1,
-					)
-				},
-			); err != nil {
-				return nil, fmt.Errorf("apply major-version HARDFORK: %w", err)
-			}
+	}
+	// Inter-era transitions were prepared before this rollover so the new
+	// era's epoch rules run with its parameters. Apply their state rewrite at
+	// the HARDFORK point, after reward and governance pot changes, so a later
+	// rule cannot overwrite the transition's reserve or treasury updates.
+	if len(transitionHardForkMajors) > 0 {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1,
+			"hardfork",
+			func() error {
+				return ls.applyTransitionHardForkRules(
+					ctx,
+					txn,
+					transitionHardForkMajors,
+					epochStartSlot,
+					currentEpoch.EpochId+1,
+				)
+			},
+		); err != nil {
+			return nil, err
+		}
+	}
+	// Apply cardano-ledger's per-major-version HARDFORK rule for any pparam
+	// bump enacted by this rollover, including intra-era bumps such as
+	// Conway pv9→pv10. Inter-era transition rules above use the same HARDFORK
+	// point in the EPOCH sequence.
+	if oldErr == nil && newErr == nil && oldVer.Major != newVer.Major {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "hardfork", func() error {
+				return ls.applyIntraEraHardForkRule(
+					ctx,
+					txn,
+					newVer.Major,
+					epochStartSlot,
+					currentEpoch.EpochId+1,
+				)
+			},
+		); err != nil {
+			return nil, fmt.Errorf("apply major-version HARDFORK: %w", err)
 		}
 	}
 
@@ -8285,13 +8462,9 @@ func (ls *LedgerState) processEpochRollover(
 	// SNAP point: capture the authoritative mark snapshot inside this rollover
 	// transaction, now that the new epoch record (and its nonce/boundary slot)
 	// exist. Runs only for the normal N->N+1 rollover; epoch 0 is seeded by
-	// CaptureGenesisSnapshot at startup. A multi-era boundary defers the capture
-	// to the caller, which takes it once the remaining era transitions have
-	// produced the era and protocol parameters the new epoch actually runs at.
+	// CaptureGenesisSnapshot at startup.
 	var snapshotEvt *event.EpochTransitionEvent
 	switch {
-	case deferBoundarySnapshot:
-		result.BoundarySnapshotDeferred = true
 	case snapDeferred:
 		evt := ls.boundarySnapshotEvent(currentEpoch, result)
 		snapshotEvt = &evt
@@ -8322,22 +8495,10 @@ func (ls *LedgerState) processEpochRollover(
 	return result, nil
 }
 
-// splitEraTransitionsForRollover keeps epoch-boundary protocol-parameter
-// enactment in the source era. A proposal submitted in the source era is
-// enacted at the boundary before the successor-era hard fork transforms the
-// protocol parameters. This matters for fields removed by the successor era,
-// such as Alonzo's decentralization parameter, which remains present in the
-// legacy update CBOR but is not a valid Babbage update field.
 func majorVersionChanges(before, after lcommon.ProtocolParameters) bool {
 	oldVer, oldErr := GetProtocolVersion(before)
 	newVer, newErr := GetProtocolVersion(after)
 	return oldErr == nil && newErr == nil && oldVer.Major != newVer.Major
-}
-
-func splitEraTransitionsForRollover(
-	transitionPath []uint,
-) (before, after []uint) {
-	return nil, transitionPath
 }
 
 // epochBoundarySnapshotSlot is the slot a mark snapshot describes: the last slot

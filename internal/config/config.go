@@ -91,12 +91,14 @@ func FromContext(ctx context.Context) *Config {
 const (
 	DefaultBlobPlugin                  = "badger"
 	DefaultDebugBindAddr               = "127.0.0.1"
+	DefaultMetricsBindAddr             = "127.0.0.1"
 	DefaultMetadataPlugin              = "sqlite"
 	DefaultEvictionWatermark           = 0.0
 	DefaultRejectionWatermark          = 1.0
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
 	DefaultHealthPort                  = 12799
+	DefaultMithrilServerPort           = 8081
 	// DefaultHealthReadyGapSlots matches
 	// DefaultForgeStaleGapThresholdSlots: both answer "has this node
 	// stopped following the chain?", and a readiness probe that flapped
@@ -149,26 +151,31 @@ type RunMode string
 const (
 	RunModeServe RunMode = "serve" // Full node with network connectivity (default)
 	RunModeLoad  RunMode = "load"  // Batch import from ImmutableDB
-	RunModeDev   RunMode = "dev"   // Development mode (isolated, no outbound)
+	// Development mode is isolated and requires API storage and block production.
+	RunModeDev   RunMode = "dev"
 	RunModeLeios RunMode = "leios" // Full node with experimental Leios capabilities
 
-	// RunModeSync, RunModeMithril, and RunModeDatabase are effective run
-	// modes used only for validation, not configurable runMode values
-	// (RunMode.Valid rejects them); cmd/dingo passes the one matching the
-	// invoked command to Config.Validate. None of them starts the
-	// relay/private serving listeners or the API listeners. They differ
-	// in their auxiliary-listener surface: RunModeSync is the Mithril
-	// snapshot sync operation (via `dingo sync --mithril` or `dingo
-	// mithril sync`), which starts a Prometheus metrics listener and an
-	// optional pprof debug listener; RunModeMithril is the read-only
-	// Mithril query subcommands (`list`, `show`, and bare `mithril`),
-	// which start no listeners at all; RunModeDatabase is the offline
+	// RunModeSync, RunModeMithril, RunModeMithrilServe, and
+	// RunModeDatabase are effective run modes used only for validation,
+	// not configurable runMode values (RunMode.Valid rejects them);
+	// cmd/dingo passes the one matching the invoked command to
+	// Config.Validate. None of them starts the relay/private serving
+	// listeners or the API listeners. They differ in their
+	// auxiliary-listener surface: RunModeSync is the Mithril snapshot sync
+	// operation (via `dingo sync --mithril` or `dingo mithril sync`),
+	// which starts a Prometheus metrics listener and an optional pprof
+	// debug listener; RunModeMithril is the Mithril query and snapshot
+	// production subcommands (`list`, `show`, `snapshot create`, and bare
+	// `mithril`), which start no listeners at all; RunModeMithrilServe is
+	// `dingo mithril serve`, which starts only the artifact server on
+	// mithril.server.port; RunModeDatabase is the offline
 	// `dingo database snapshot|restore|truncate` maintenance commands,
 	// which also start no listeners. Keeping them distinct lets Validate
 	// check exactly the ports each invocation binds.
-	RunModeSync     RunMode = "sync"
-	RunModeMithril  RunMode = "mithril"
-	RunModeDatabase RunMode = "database"
+	RunModeSync         RunMode = "sync"
+	RunModeMithril      RunMode = "mithril"
+	RunModeMithrilServe RunMode = "mithril-serve"
+	RunModeDatabase     RunMode = "database"
 )
 
 // StartEra controls experimental direct startup in a later ledger era.
@@ -184,7 +191,7 @@ func (m RunMode) Valid() bool {
 	switch m {
 	case RunModeServe, RunModeLoad, RunModeDev, RunModeLeios, "":
 		return true
-	case RunModeSync, RunModeMithril, RunModeDatabase:
+	case RunModeSync, RunModeMithril, RunModeMithrilServe, RunModeDatabase:
 		// Effective-only modes used for validation; never configurable runModes.
 		return false
 	default:
@@ -192,10 +199,23 @@ func (m RunMode) Valid() bool {
 	}
 }
 
-// IsDevMode returns true if the mode enables development behaviors
-// (forge blocks, disable outbound, skip topology)
+// IsDevMode reports whether this mode enables isolated development behaviors,
+// including regular keyed block production and disabling outbound peers.
 func (m RunMode) IsDevMode() bool {
 	return m == RunModeDev
+}
+
+// ApplyRunModeOverrides applies settings required by a serving dev-mode node.
+// Dev mode always uses API storage and the regular keyed block producer.
+// One-shot commands do not inherit these overrides from a dev-mode config
+// because they do not start a serving node.
+func (c *Config) ApplyRunModeOverrides(effectiveMode RunMode) {
+	if !effectiveMode.RequiresListeners() ||
+		(effectiveMode != RunModeDev && !c.RunMode.IsDevMode()) {
+		return
+	}
+	c.StorageMode = storageModeAPI
+	c.BlockProducer = true
 }
 
 // RequiresListeners reports whether an (effective) run mode runs as a
@@ -209,7 +229,8 @@ func (m RunMode) RequiresListeners() bool {
 	switch m {
 	case RunModeServe, RunModeDev, RunModeLeios, "":
 		return true
-	case RunModeLoad, RunModeSync, RunModeMithril, RunModeDatabase:
+	case RunModeLoad, RunModeSync, RunModeMithril, RunModeMithrilServe,
+		RunModeDatabase:
 		return false
 	default:
 		return false
@@ -460,6 +481,14 @@ type TokenRegistryConfig struct {
 	RequestTimeout time.Duration `yaml:"requestTimeout"        envconfig:"DINGO_TOKEN_REGISTRY_REQUEST_TIMEOUT"`
 	// UserAgent is sent with the registry request.
 	UserAgent string `yaml:"userAgent"             envconfig:"DINGO_TOKEN_REGISTRY_USER_AGENT"`
+	// HeaderSecrets are sent as headers with every registry request, for
+	// mirrors that need authentication (for example Authorization). They are
+	// credentials: they are redacted from rendered configuration, dropped from
+	// a redirect to another origin, and have no CLI flag, which would expose
+	// them in the process list. The environment form is comma-separated
+	// name:value pairs split at the first colon, so a value may contain
+	// colons but not commas.
+	HeaderSecrets map[string]string `yaml:"headerSecrets"         envconfig:"DINGO_TOKEN_REGISTRY_HEADER_SECRETS"          ignored:"true"`
 	// MaxBytes bounds the compressed registry download.
 	MaxBytes int64 `yaml:"maxBytes"              envconfig:"DINGO_TOKEN_REGISTRY_MAX_BYTES"`
 	// MaxDecompressedBytes bounds all expanded tar content.
@@ -652,7 +681,12 @@ type Config struct {
 	// certificate verified through BarkClientCAFilePath.
 	BarkLifecycleOperatorCertificateFingerprints []string `yaml:"barkLifecycleOperatorCertificateFingerprints" envconfig:"DINGO_BARK_LIFECYCLE_OPERATOR_CERTIFICATE_FINGERPRINTS"`
 	CORSAllowedOrigins                           []string `yaml:"corsAllowedOrigins"                  envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort                                  uint     `yaml:"metricsPort"                                                                                  split_words:"true"`
+	// MetricsBindAddr is the interface used by the unauthenticated
+	// Prometheus listener. It defaults to loopback independently of
+	// BindAddr; operators must set this field explicitly to expose
+	// metrics on a wildcard or remote-scrape address.
+	MetricsBindAddr string `yaml:"metricsBindAddr" envconfig:"DINGO_METRICS_BIND_ADDR"`
+	MetricsPort     uint   `yaml:"metricsPort"    split_words:"true"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
@@ -663,7 +697,7 @@ type Config struct {
 	// (/readyz) probes on a listener of their own, so an operator can
 	// expose them to an orchestrator or load balancer without also
 	// exposing Prometheus metrics, pprof, or any API. It binds BindAddr,
-	// the same address the relay and metrics listeners use and distinct
+	// the same address the relay listener uses and distinct
 	// from the API listeners' own bind address: a probe is operational
 	// surface, not API surface. 0 disables the listener.
 	HealthPort uint `yaml:"healthPort"                          envconfig:"DINGO_HEALTH_PORT"`
@@ -963,7 +997,7 @@ type APIPluginsConfig struct {
 //
 // bindAddr, debugBindAddr, and corsAllowedOrigins deliberately
 // stay at the Config root rather than moving under this section: bindAddr is
-// not API-specific (the relay/NtN and metrics listeners use it too),
+// not API-specific (the relay/NtN listener uses it too),
 // debugBindAddr controls the separate pprof listener, and corsAllowedOrigins
 // already applies uniformly to all four API providers, so
 // duplicating any of them here would only add a second source of truth for no
@@ -1190,6 +1224,63 @@ type MithrilConfig struct {
 	// pinned Mithril genesis verification key and verifies the chain back to it.
 	// False explicitly selects the unverified bootstrap flow.
 	VerifyCertificates bool `yaml:"verifyCertificates"     envconfig:"DINGO_MITHRIL_VERIFY_CERTS"`
+	// Server configures snapshot production and serving
+	// (`dingo mithril snapshot create` and `dingo mithril serve`).
+	Server MithrilServerConfig `yaml:"server"`
+}
+
+// MithrilServerConfig holds configuration for producing Mithril snapshot
+// artifacts and serving them over HTTP. Artifact reads are public; aggregator
+// signer registration and registration closure require operator credentials.
+type MithrilServerConfig struct {
+	// Port is the TCP port `dingo mithril serve` listens on.
+	Port uint `yaml:"port"                    envconfig:"DINGO_MITHRIL_SERVER_PORT"`
+	// PublicBaseURL is the public HTTPS origin used in snapshot download
+	// locations. Plain HTTP is accepted only for a loopback origin.
+	PublicBaseURL string `yaml:"publicBaseUrl"           envconfig:"DINGO_MITHRIL_SERVER_PUBLIC_BASE_URL"`
+	// ArtifactStore is where produced artifacts are kept and served from: a
+	// filesystem directory, or an s3://bucket/prefix or gcs://bucket/prefix
+	// URI (binaries built with dingo_extra_plugins).
+	ArtifactStore string `yaml:"artifactStore"           envconfig:"DINGO_MITHRIL_SERVER_ARTIFACT_STORE"`
+	// RedirectBaseURL, when set, makes the server answer archive requests
+	// with a redirect to this base URL plus the object key instead of
+	// streaming the object itself. Use it with a remote ArtifactStore whose
+	// objects are publicly readable at that URL.
+	RedirectBaseURL string `yaml:"redirectBaseUrl"         envconfig:"DINGO_MITHRIL_SERVER_REDIRECT_BASE_URL"`
+	// KeepSnapshots is how many of the newest snapshots to retain after
+	// `dingo mithril snapshot create` writes a new one. Zero keeps all.
+	KeepSnapshots int `yaml:"keepSnapshots"           envconfig:"DINGO_MITHRIL_SERVER_KEEP_SNAPSHOTS"`
+	// AncillarySigningKeyFile is the Ed25519 key that signs the ancillary
+	// manifest of produced snapshots, in the Mithril JSON-hex key format.
+	AncillarySigningKeyFile string `yaml:"ancillarySigningKeyFile" envconfig:"DINGO_MITHRIL_SERVER_ANCILLARY_SIGNING_KEY_FILE"`
+	// TLSEnabled serves HTTPS using the shared tlsCertFilePath and
+	// tlsKeyFilePath. It is off by default; aggregator-enabled servers bound
+	// outside loopback require it to protect the operator bearer token.
+	TLSEnabled bool `yaml:"tlsEnabled"              envconfig:"DINGO_MITHRIL_SERVER_TLS_ENABLED"`
+	// Aggregator configures certificate production for the stored snapshots.
+	Aggregator MithrilAggregatorConfig `yaml:"aggregator"`
+}
+
+// MithrilAggregatorConfig configures the aggregator that collects signer
+// registrations and signatures and certifies stored snapshots. It runs on the
+// `dingo mithril serve` listener.
+type MithrilAggregatorConfig struct {
+	// Enabled mounts the signer registration and signature endpoints.
+	Enabled bool `yaml:"enabled"               envconfig:"DINGO_MITHRIL_AGGREGATOR_ENABLED"`
+	// Epoch is the epoch signers register for; the genesis certificate is
+	// issued at the epoch before it, so it must be at least 1.
+	Epoch uint64 `yaml:"epoch"                 envconfig:"DINGO_MITHRIL_AGGREGATOR_EPOCH"`
+	// K, M and PhiF are the STM protocol parameters: the quorum of lottery
+	// indices, the lottery size and the lottery win probability.
+	K    uint64  `yaml:"k"                     envconfig:"DINGO_MITHRIL_AGGREGATOR_K"`
+	M    uint64  `yaml:"m"                     envconfig:"DINGO_MITHRIL_AGGREGATOR_M"`
+	PhiF float64 `yaml:"phiF"                  envconfig:"DINGO_MITHRIL_AGGREGATOR_PHI_F"`
+	// GenesisSigningKeyFile holds the Ed25519 genesis signing key, in the
+	// Mithril JSON-hex key format, that signs the genesis certificate.
+	GenesisSigningKeyFile string `yaml:"genesisSigningKeyFile" envconfig:"DINGO_MITHRIL_AGGREGATOR_GENESIS_SIGNING_KEY_FILE"`
+	// OperatorTokenFile holds the bearer token for signer registration and
+	// registration closure. Use a file containing at least 32 random bytes.
+	OperatorTokenFile string `yaml:"operatorTokenFile" envconfig:"DINGO_MITHRIL_AGGREGATOR_OPERATOR_TOKEN_FILE"`
 }
 
 // DatabaseLifecycleConfig holds configuration for automatic epoch-boundary
@@ -1287,6 +1378,7 @@ func newDefaultConfig() *Config {
 		NetworkMagic:                        0,
 		MetricsPort:                         12798,
 		DebugBindAddr:                       DefaultDebugBindAddr,
+		MetricsBindAddr:                     DefaultMetricsBindAddr,
 		DebugPort:                           0,
 		HealthPort:                          DefaultHealthPort,
 		HealthReadyGapSlots:                 DefaultHealthReadyGapSlots,
@@ -1340,6 +1432,9 @@ func newDefaultConfig() *Config {
 			Backend:            "v2",
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
+			Server: MithrilServerConfig{
+				Port: DefaultMithrilServerPort,
+			},
 		},
 		// Database lifecycle defaults
 		DatabaseLifecycle: DatabaseLifecycleConfig{
@@ -1439,6 +1534,7 @@ func cloneConfig(cfg *Config) *Config {
 		return nil
 	}
 	clone := *cfg
+	clone.TokenRegistry.HeaderSecrets = maps.Clone(cfg.TokenRegistry.HeaderSecrets)
 	clone.BarkBlockDownloadHosts = append(
 		[]string(nil),
 		cfg.BarkBlockDownloadHosts...,
@@ -1570,6 +1666,9 @@ func LoadConfig(configFile string) (*Config, error) {
 	err := envconfig.Process("cardano", cfg)
 	if err != nil {
 		return nil, fmt.Errorf("error processing environment: %+w", err)
+	}
+	if err := applyTokenRegistryHeaderSecretsEnvironment(cfg); err != nil {
+		return nil, err
 	}
 	pluginEnviron := os.Environ()
 	applyMCPAuthCompatibilityEnvironment(cfg, pluginEnviron)
@@ -1704,6 +1803,9 @@ func (c *Config) ApplyDefaults() {
 	if c.DebugBindAddr == "" {
 		c.DebugBindAddr = DefaultDebugBindAddr
 	}
+	if c.MetricsBindAddr == "" {
+		c.MetricsBindAddr = DefaultMetricsBindAddr
+	}
 	if c.ShelleyKESAgentSocket != "" && c.ShelleyKESAgentMode == "" {
 		c.ShelleyKESAgentMode = "serve-key"
 	}
@@ -1790,6 +1892,18 @@ func (c *Config) DebugListenAddress() string {
 	return net.JoinHostPort(
 		host,
 		strconv.FormatUint(uint64(c.DebugPort), 10),
+	)
+}
+
+// MetricsListenAddress returns the Prometheus TCP listen address.
+func (c *Config) MetricsListenAddress() string {
+	host := c.MetricsBindAddr
+	if host == "" {
+		host = DefaultMetricsBindAddr
+	}
+	return net.JoinHostPort(
+		host,
+		strconv.FormatUint(uint64(c.MetricsPort), 10),
 	)
 }
 
@@ -1944,6 +2058,32 @@ func embeddedTopologyFileMissing(file string) bool {
 
 func GetTopologyConfig() *topology.TopologyConfig {
 	return globalTopologyConfig
+}
+
+// applyTokenRegistryHeaderSecretsEnvironment parses the registry header
+// secrets itself because envconfig quotes the whole raw value into its parse
+// errors, which would put the credentials in the startup error. Errors here
+// name only the variable and the item position.
+func applyTokenRegistryHeaderSecretsEnvironment(cfg *Config) error {
+	const name = "DINGO_TOKEN_REGISTRY_HEADER_SECRETS"
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return nil
+	}
+	headers := make(map[string]string)
+	if value != "" {
+		for i, item := range strings.Split(value, ",") {
+			header, secret, found := strings.Cut(item, ":")
+			if !found || header == "" {
+				return fmt.Errorf(
+					"%s item %d is not a name:value pair", name, i+1,
+				)
+			}
+			headers[header] = secret
+		}
+	}
+	cfg.TokenRegistry.HeaderSecrets = headers
+	return nil
 }
 
 func applyMCPAuthCompatibilityEnvironment(cfg *Config, environ []string) {

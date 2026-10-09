@@ -150,7 +150,7 @@ func gracefulShutdown(
 	timeout time.Duration,
 ) error {
 	shutdownErr := shutdownNodeResources(
-		metricsServer.Shutdown,
+		optionalShutdown(metricsServer),
 		optionalShutdown(debugServer),
 		optionalShutdown(healthServer),
 		d.Stop,
@@ -188,11 +188,13 @@ func shutdownNodeResources(
 	)
 	defer cancel()
 	var err error
-	if shutdownErr := metricsServerShutdown(shutdownCtx); shutdownErr != nil {
-		err = errors.Join(
-			err,
-			fmt.Errorf("metrics server shutdown: %w", shutdownErr),
-		)
+	if metricsServerShutdown != nil {
+		if shutdownErr := metricsServerShutdown(shutdownCtx); shutdownErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("metrics server shutdown: %w", shutdownErr),
+			)
+		}
 	}
 	if debugServerShutdown != nil {
 		if shutdownErr := debugServerShutdown(shutdownCtx); shutdownErr != nil {
@@ -265,6 +267,24 @@ func serveAuxiliaryListenerOn(
 			"addr", srv.Addr,
 			"error", err,
 		)
+	}
+}
+
+// newMetricsServer builds the Prometheus listener on its own dedicated
+// mux so pprof or other handlers registered on DefaultServeMux are never
+// exposed, or returns nil when metricsPort is 0.
+func newMetricsServer(cfg *config.Config) *http.Server {
+	if cfg.MetricsPort == 0 {
+		return nil
+	}
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	return &http.Server{
+		Addr:              cfg.MetricsListenAddress(),
+		Handler:           metricsMux,
+		ReadHeaderTimeout: 60 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 }
 
@@ -353,6 +373,10 @@ func logStartupConfig(logger *slog.Logger, cfg *config.Config) {
 }
 
 func Run(cfg *config.Config, logger *slog.Logger) error {
+	cfg.ApplyRunModeOverrides(cfg.RunMode)
+	if cfg.RunMode.IsDevMode() {
+		logger.Info("dev mode: forcing API storage and block production")
+	}
 	logStartupConfig(logger, cfg)
 	logger.Debug(
 		fmt.Sprintf("topology: %+v", config.GetTopologyConfig()),
@@ -496,14 +520,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.StorageModeAPI,
 		)
 	}
-	// Dev mode always uses API storage for full transaction metadata
-	if cfg.RunMode.IsDevMode() && !storageMode.IsAPI() {
-		logger.Info(
-			"dev mode: overriding storage mode to api",
-			"previous", string(storageMode),
-		)
-		storageMode = dingo.StorageModeAPI
-	}
 	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
 	kupoPort := config.APIPluginPort(cfg.Plugins.API.Kupo)
 	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
@@ -537,25 +553,13 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	// Metrics listener with dedicated mux to avoid exposing
-	// pprof or other handlers registered on DefaultServeMux.
-	metricsMux := http.NewServeMux()
-	metricsMux.Handle("/metrics", promhttp.Handler())
-	metricsAddr := net.JoinHostPort(
-		cfg.BindAddr,
-		strconv.FormatUint(uint64(cfg.MetricsPort), 10),
-	)
-	logger.Info(
-		"serving prometheus metrics on "+metricsAddr,
-		"component",
-		"node",
-	)
-	metricsServer := &http.Server{
-		Addr:              metricsAddr,
-		Handler:           metricsMux,
-		ReadHeaderTimeout: 60 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+	metricsServer := newMetricsServer(cfg)
+	if metricsServer != nil {
+		logger.Info(
+			"serving prometheus metrics on "+metricsServer.Addr,
+			"component",
+			"node",
+		)
 	}
 	// Optional debug listener with pprof handlers, on a separate port from
 	// metrics so monitoring scrapers never see profiling endpoints.
@@ -601,10 +605,14 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	// bind/serve failures are logged but never queued here, so a port
 	// conflict on them cannot take down the node.
 	errChan := make(chan error, 1)
-	if listener := bindAuxiliaryListener(
-		"metrics", metricsServer, logger,
-	); listener != nil {
-		go serveAuxiliaryListenerOn("metrics", metricsServer, listener, logger)
+	if metricsServer != nil {
+		if listener := bindAuxiliaryListener(
+			"metrics", metricsServer, logger,
+		); listener != nil {
+			go serveAuxiliaryListenerOn(
+				"metrics", metricsServer, listener, logger,
+			)
+		}
 	}
 	if debugServer != nil {
 		if listener := bindAuxiliaryListener(
@@ -681,7 +689,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	signalCtxStop()
 
 	cleanupErr := shutdownNodeResources(
-		metricsServer.Shutdown,
+		optionalShutdown(metricsServer),
 		optionalShutdown(debugServer),
 		optionalShutdown(healthServer),
 		d.Stop,
@@ -842,6 +850,7 @@ func buildDingoConfig(
 				RequestTimeout: cfg.TokenRegistry.
 					RequestTimeout,
 				UserAgent: cfg.TokenRegistry.UserAgent,
+				Headers:   cfg.TokenRegistry.HeaderSecrets,
 				MaxBytes:  cfg.TokenRegistry.MaxBytes,
 				MaxDecompressedBytes: cfg.TokenRegistry.
 					MaxDecompressedBytes,
