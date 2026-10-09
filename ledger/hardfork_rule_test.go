@@ -351,7 +351,7 @@ func TestApplyIntraEraHardForkRule_Pv3_CreditsAvvmToReserves(t *testing.T) {
 	assert.Equal(t, uint64(6_000), uint64(state.Reserves))
 }
 
-func TestPrepareEraTransitionsAppliesPv3HardForkRule(t *testing.T) {
+func TestPrepareEraTransitionsDefersPv3RuleUntilAfterRolloverRewards(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
@@ -381,10 +381,11 @@ func TestPrepareEraTransitionsAppliesPv3HardForkRule(t *testing.T) {
 		},
 	}
 	var newPParams lcommon.ProtocolParameters
+	var transitionHardForkMajors []uint
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		newPParams, _, _, _, err = ls.prepareEraTransitionsForRollover(
+		newPParams, _, _, transitionHardForkMajors, _, err = ls.prepareEraTransitionsForRollover(
 			context.Background(),
 			txn,
 			epoch,
@@ -397,14 +398,29 @@ func TestPrepareEraTransitionsAppliesPv3HardForkRule(t *testing.T) {
 	newVersion, err := GetProtocolVersion(newPParams)
 	require.NoError(t, err)
 	assert.Equal(t, uint(3), newVersion.Major)
+	assert.Equal(t, []uint{3}, transitionHardForkMajors)
 
 	_, err = db.UtxoByRef(context.Background(), avvmTxId, 0, nil)
-	assert.ErrorIs(t, err, database.ErrUtxoNotFound,
-		"the era-transition path must apply the pv3 AVVM return")
+	assert.NoError(t, err,
+		"era translation must leave the AVVM rewrite for the rollover HARDFORK point")
 	state, err := db.Metadata().GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
-	assert.Equal(t, initialReserves+1_000, uint64(state.Reserves))
+	assert.Equal(t, initialReserves, uint64(state.Reserves))
+
+	// Model the reward update that runs before HARDFORK and prove the deferred
+	// AVVM credit is applied to the settled reserve value instead of being
+	// overwritten by it.
+	require.NoError(t, db.Metadata().SetNetworkState(
+		7_000, initialReserves+500, boundarySlot-1, nil,
+	))
+	require.NoError(t, ls.applyTransitionHardForkRules(
+		context.Background(), nil, transitionHardForkMajors, boundarySlot, 208,
+	))
+	state, err = db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, initialReserves+1_500, uint64(state.Reserves))
 	pubkey, err := db.UtxoByRef(context.Background(), pubkeyTxId, 0, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, pubkey)

@@ -7720,7 +7720,6 @@ func (ls *LedgerState) processEpochRollover(
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
-	deferBoundarySnapshot bool,
 ) (*EpochRolloverResult, error) {
 	return ls.processEpochRolloverWithClassicPParamsContext(
 		ctx,
@@ -7730,28 +7729,33 @@ func (ls *LedgerState) processEpochRollover(
 		currentPParams,
 		false,
 		false,
-		deferBoundarySnapshot,
+		nil,
 	)
 }
 
-func (ls *LedgerState) processEpochRolloverWithClassicPParams(
+func (ls *LedgerState) applyTransitionHardForkRules(
+	ctx context.Context,
 	txn *database.Txn,
-	currentEpoch models.Epoch,
-	currentEra eras.EraDesc,
-	currentPParams lcommon.ProtocolParameters,
-	classicPParamsApplied bool,
-	plutusV2CostModelWritten bool,
-) (*EpochRolloverResult, error) {
-	return ls.processEpochRolloverWithClassicPParamsContext(
-		context.Background(),
-		txn,
-		currentEpoch,
-		currentEra,
-		currentPParams,
-		classicPParamsApplied,
-		plutusV2CostModelWritten,
-		false,
-	)
+	majors []uint,
+	boundarySlot uint64,
+	newEpoch uint64,
+) error {
+	for _, major := range majors {
+		if err := ls.applyIntraEraHardForkRule(
+			ctx,
+			txn,
+			major,
+			boundarySlot,
+			newEpoch,
+		); err != nil {
+			return fmt.Errorf(
+				"apply transition major-version HARDFORK %d: %w",
+				major,
+				err,
+			)
+		}
+	}
+	return nil
 }
 
 func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
@@ -7762,7 +7766,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	currentPParams lcommon.ProtocolParameters,
 	classicPParamsApplied bool,
 	plutusV2CostModelWritten bool,
-	deferBoundarySnapshot bool,
+	transitionHardForkMajors []uint,
 ) (*EpochRolloverResult, error) {
 	// Fail closed at the top of the production rollover path rather than
 	// letting a nil config reach one of the several unchecked
@@ -8310,22 +8314,45 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 				"component", "ledger",
 			)
 		}
-		// Apply cardano-ledger's per-major-version HARDFORK rule. This
-		// runs on ANY major-version bump, including intra-era ones like
-		// Conway pv9→pv10 (Plomin, mainnet January 2025) that do not
-		// trigger an era change, and inter-era ones like Shelley→Allegra
-		// (pv2→pv3) that carry a state rewrite. See cardano-ledger
-		// Conway/Rules/HardFork.hs and Allegra/Translation.hs.
-		if oldVer.Major != newVer.Major {
-			if err := ls.timeRolloverPhase(
-				currentEpoch.EpochId+1, "hardfork", func() error {
-					return ls.applyIntraEraHardForkRule(ctx,
-						txn, newVer.Major, epochStartSlot, currentEpoch.EpochId+1,
-					)
-				},
-			); err != nil {
-				return nil, fmt.Errorf("apply major-version HARDFORK: %w", err)
-			}
+	}
+	// Inter-era transitions were prepared before this rollover so the new
+	// era's epoch rules run with its parameters. Apply their state rewrite at
+	// the HARDFORK point, after reward and governance pot changes, so a later
+	// rule cannot overwrite the transition's reserve or treasury updates.
+	if len(transitionHardForkMajors) > 0 {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1,
+			"hardfork",
+			func() error {
+				return ls.applyTransitionHardForkRules(
+					ctx,
+					txn,
+					transitionHardForkMajors,
+					epochStartSlot,
+					currentEpoch.EpochId+1,
+				)
+			},
+		); err != nil {
+			return nil, err
+		}
+	}
+	// Apply cardano-ledger's per-major-version HARDFORK rule for any pparam
+	// bump enacted by this rollover, including intra-era bumps such as
+	// Conway pv9→pv10. Inter-era transition rules above use the same HARDFORK
+	// point in the EPOCH sequence.
+	if oldErr == nil && newErr == nil && oldVer.Major != newVer.Major {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "hardfork", func() error {
+				return ls.applyIntraEraHardForkRule(
+					ctx,
+					txn,
+					newVer.Major,
+					epochStartSlot,
+					currentEpoch.EpochId+1,
+				)
+			},
+		); err != nil {
+			return nil, fmt.Errorf("apply major-version HARDFORK: %w", err)
 		}
 	}
 

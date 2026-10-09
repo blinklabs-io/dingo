@@ -5001,7 +5001,8 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 		"ProcessEpoch",                        // (5) Conway-style governance enact
 		"SetPParams",                          // (6) persist enacted pparams
 		"isHardForkTransition",                // (7) inter-era boundary detection
-		"applyIntraEraHardForkRule",           // (8) per-major-version HARDFORK rule
+		"applyTransitionHardForkRules",        // (8) inter-era HARDFORK state rewrites
+		"applyIntraEraHardForkRule",           // (9) per-major-version pparam rule
 	}
 
 	seen, observed := observeProcessEpochRolloverCallOrder(
@@ -5050,7 +5051,8 @@ func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
 		"applyStakeRewards",            // (1) delayed reward update, pre-governance
 		"ComputeAndApplyPParamUpdates", // pparam updates
 		"ProcessEpoch",                 // governance enact (reads treasury)
-		"applyIntraEraHardForkRule",    // last treasury/reserves mutation
+		"applyTransitionHardForkRules", // inter-era state rewrite after rewards
+		"applyIntraEraHardForkRule",    // pparam state rewrite after rewards
 		"saveRewardAdaPotsForEpoch",    // (last) post-boundary ADA pot capture
 	}
 
@@ -16821,7 +16823,7 @@ func TestPrepareEraTransitionsEnactsClassicUpdateWithSourceDecoder(
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var transitionErr error
-		got, _, _, _, transitionErr = ls.prepareEraTransitionsForRollover(
+		got, _, _, _, _, transitionErr = ls.prepareEraTransitionsForRollover(
 			context.Background(),
 			txn,
 			epoch,
@@ -17884,7 +17886,6 @@ END`)
 			f.currentEpoch,
 			eras.ConwayEraDesc,
 			f.currentPParams,
-			false,
 		)
 		return rolloverErr
 	})
@@ -18023,7 +18024,6 @@ func TestProcessEpochRolloverReplayEnactmentFailureRemainsFatal(
 			f.currentEpoch,
 			eras.ConwayEraDesc,
 			f.currentPParams,
-			false,
 		)
 		return rolloverErr
 	})

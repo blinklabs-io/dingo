@@ -206,7 +206,9 @@ func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
 		EraId:     ^uint(0),
 	}
 
-	err := ls.setEpochCache(&database.Txn{}, []models.Epoch{invalidEpoch})
+	err := ls.setEpochCache(
+		context.Background(), &database.Txn{}, []models.Epoch{invalidEpoch},
+	)
 	require.ErrorContains(t, err, "unknown era ID")
 
 	// The deferred publication must expose the mutation through the atomic
@@ -415,7 +417,6 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		return rolloverErr
 	}))
@@ -483,7 +484,6 @@ func TestProcessEpochRolloverRetainsDijkstraProtocolParameters(t *testing.T) {
 			currentEpoch,
 			eras.DijkstraEraDesc,
 			original,
-			false,
 		)
 		return rolloverErr
 	}))
@@ -3187,6 +3187,7 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
 		result, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.ShelleyEraDesc.Id,
 			0,   // startEpoch
@@ -3290,6 +3291,7 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 
 		// Byron -> Shelley
 		result1, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.ShelleyEraDesc.Id,
 			0,
@@ -3301,6 +3303,7 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 
 		// Shelley -> Allegra
 		result2, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.AllegraEraDesc.Id,
 			1,
@@ -3408,6 +3411,7 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
 		_, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.DijkstraEraDesc.Id,
 			11,
@@ -3505,7 +3509,6 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		require.NoError(t, err)
 
@@ -3627,7 +3630,6 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
-				false,
 			)
 			return err
 		})
@@ -3761,7 +3763,6 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
-				false,
 			)
 			return err
 		})
@@ -3842,7 +3843,7 @@ func TestTransitionToEra_ErrorHandling(t *testing.T) {
 
 		txn := db.Transaction(context.Background(), true)
 		err = txn.Do(func(txn *database.Txn) error {
-			_, err := ls.transitionToEra(txn, 999, 0, 0, nil)
+			_, err := ls.transitionToEra(context.Background(), txn, 999, 0, 0, nil)
 			return err
 		})
 		require.Error(t, err)
@@ -4982,7 +4983,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		})
 		require.NoError(t, err)
-		require.NoError(t, ls.PrepareEpochCacheForStartup())
+		require.NoError(t, ls.PrepareEpochCacheForStartup(context.Background()))
 		return ls
 	}
 
@@ -5064,7 +5065,7 @@ func TestPrepareEpochCacheForStartupUsesEmbeddedMainnetConfig(t *testing.T) {
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	require.NoError(t, ls.PrepareEpochCacheForStartup())
+	require.NoError(t, ls.PrepareEpochCacheForStartup(context.Background()))
 
 	require.Len(t, ls.epochCache, 1)
 	assert.Equal(t, uint64(0), ls.currentEpoch.EpochId)
@@ -7913,7 +7914,7 @@ func TestHealEmptyLabNoncesFoldsExtraEntropy(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	withoutEntropy, err := lcommon.CalculateEpochNonce(
 		candidate, carriedLab, nil,
@@ -8254,7 +8255,7 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	var result *EpochRolloverResult
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		params, eraID, transitions, v2Written, err :=
+		params, eraID, transitions, transitionMajors, v2Written, err :=
 			ls.prepareEraTransitionsForRollover(
 				context.Background(),
 				txn,
@@ -8279,7 +8280,7 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 			params,
 			true,
 			v2Written,
-			false,
+			transitionMajors,
 		)
 		return err
 	}))
@@ -8325,7 +8326,7 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 	var result *EpochRolloverResult
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		params, eraID, _, v2Written, err := ls.prepareEraTransitionsForRollover(
+		params, eraID, _, transitionMajors, v2Written, err := ls.prepareEraTransitionsForRollover(
 			context.Background(),
 			txn,
 			ls.currentEpoch,
@@ -8346,7 +8347,7 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 			params,
 			true,
 			v2Written,
-			false,
+			transitionMajors,
 		)
 		return err
 	}))
@@ -8404,7 +8405,6 @@ func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		return err
 	}))
@@ -8980,7 +8980,6 @@ func (f *hardForkRatifyFixture) rollover(
 			currentEpoch,
 			eras.ConwayEraDesc,
 			pparams,
-			false,
 		)
 		return rolloverErr
 	})
@@ -9095,7 +9094,7 @@ func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	// Epoch 5's lab is recovered from the boundary block's PrevHash.
 	require.Equal(
@@ -9177,7 +9176,7 @@ func TestHealEmptyLabNoncesBoundsToRecentEpochs(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	require.Empty(
 		t,
@@ -9232,7 +9231,7 @@ func TestHealEmptyLabNoncesRepairsOldestInWindowNonce(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	// The oldest in-window epoch is scanned right after the predecessor whose
 	// lab the scan verifies. Its nonce must be recomputed as candidate ⭒ the
@@ -9283,7 +9282,7 @@ func TestHealEmptyLabNoncesLeavesValidRecordsUntouched(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	require.Equal(t, lab, ls.epochCache[0].LastEpochBlockNonce)
 	require.Equal(t, nonce, ls.epochCache[0].Nonce)
@@ -9711,7 +9710,7 @@ func TestLoadEpochsRefreshesCurrentEpochAfterHealing(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.loadEpochs(txn)
+		return ls.loadEpochs(context.Background(), txn)
 	}))
 
 	require.Equal(t, want.Bytes(), ls.epochCache[1].Nonce)
@@ -12866,6 +12865,7 @@ func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
 
 	txn := db.Transaction(context.Background(), true)
 	result, err := ls.transitionToEraFrom(
+		context.Background(),
 		txn,
 		eras.BabbageEraDesc.Id,
 		1,
@@ -12893,6 +12893,7 @@ func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
 	// The same sequence, committed instead, must persist both together.
 	txn = db.Transaction(context.Background(), true)
 	result, err = ls.transitionToEraFrom(
+		context.Background(),
 		txn,
 		eras.BabbageEraDesc.Id,
 		1,
