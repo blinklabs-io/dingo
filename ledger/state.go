@@ -2124,6 +2124,90 @@ func (ls *LedgerState) boundaryEraForBlock(
 	return headerEraID, len(path) == 2
 }
 
+// errBoundaryEraNotAuthorized marks an epoch-boundary block encoded in an era
+// the ledger has not moved into.
+var errBoundaryEraNotAuthorized = errors.New(
+	"boundary block era not authorized by the ledger",
+)
+
+// authorizedBoundaryEra returns the era a validated boundary may move into, or
+// refuses the boundary block. The era is decided by the ledger state: the
+// protocol version of the parameters after the epoch's updates were enacted,
+// or a configured TriggerAtEpoch for the era. A block whose body is encoded in
+// an era beyond that is rejected, as the reference HFC does with
+// HardForkLedgerErrorWrongEra (Shelley/ShelleyHFC.hs shelleyTransition decides
+// the era end from the updated pparams).
+//
+// targetEraID is the era boundaryEraForBlock chose, which may sit one era past
+// the body when the header protocol major elevates it. A header major is not
+// an era signal: cardano-node stamps its own protocol version, and outside
+// mainnet the header major is not bounded below major 12. So an elevation past
+// the authorized era is capped at that era rather than rejecting a block whose
+// body era the ledger did authorize.
+//
+// newPParams must be the parameters after the boundary's enactment. Byron is
+// exempt: it carries no protocol version, and validateByronShelleyTransition
+// gates that boundary. A parameter set that yields no version cannot be judged
+// and leaves targetEraID unchanged.
+func (ls *LedgerState) authorizedBoundaryEra(
+	sourceEraID, bodyEraID, targetEraID uint,
+	newPParams lcommon.ProtocolParameters,
+	newEpochID uint64,
+) (uint, error) {
+	if sourceEraID == targetEraID || sourceEraID == byron.EraIdByron {
+		return targetEraID, nil
+	}
+	version, err := GetProtocolVersion(newPParams)
+	if err != nil {
+		return targetEraID, nil //nolint:nilerr // no version, nothing to compare against
+	}
+	eraList := ls.eraList()
+	indexOf := func(eraID uint) int {
+		for i := range eraList {
+			if eraList[i].Id == eraID {
+				return i
+			}
+		}
+		return -1
+	}
+	sourceIndex := indexOf(sourceEraID)
+	bodyIndex := indexOf(bodyEraID)
+	targetIndex := indexOf(targetEraID)
+	if sourceIndex < 0 || bodyIndex < 0 || targetIndex < 0 {
+		return targetEraID, nil
+	}
+	allowedIndex := sourceIndex
+	if eraID, ok := ls.eraForVersion(version.Major); ok {
+		allowedIndex = max(allowedIndex, indexOf(eraID))
+	}
+	shape := ls.eraShape()
+	for allowedIndex+1 < len(eraList) {
+		entry, ok := shape.EraForID(eraList[allowedIndex].Id)
+		if !ok ||
+			entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch ||
+			entry.NextEraTrigger.Epoch > newEpochID {
+			break
+		}
+		allowedIndex++
+	}
+	// The second condition refuses an advancement the ledger did not
+	// authorize at all, which a capped elevation must not turn into a
+	// boundary with no transition.
+	if bodyIndex > allowedIndex || allowedIndex == sourceIndex {
+		return 0, fmt.Errorf(
+			"%w: epoch %d block is in era %d but protocol version %d.%d "+
+				"keeps the ledger at or below era %d",
+			errBoundaryEraNotAuthorized,
+			newEpochID,
+			bodyEraID,
+			version.Major,
+			version.Minor,
+			eraList[allowedIndex].Id,
+		)
+	}
+	return eraList[min(targetIndex, allowedIndex)].Id, nil
+}
+
 func (ls *LedgerState) isHardForkTransition(
 	oldVersion, newVersion ProtocolVersion,
 ) bool {
@@ -7558,8 +7642,12 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 	var nextEpochEraId uint
 	var allowTwoEraBoundaryTransition bool
 	// boundaryShouldValidate is whether the block that opens the next epoch
-	// is validated, which decides whether the Byron-to-Shelley gate runs.
+	// is validated, which decides whether the Byron-to-Shelley gate and the
+	// boundary era authorization run.
 	var boundaryShouldValidate bool
+	// boundaryBodyEraId is the era the boundary block's body is encoded in,
+	// before header elevation or a configured trigger epoch moves the target.
+	var boundaryBodyEraId uint
 	var needsEpochRollover bool
 	var end, i int
 	var err error
@@ -7593,40 +7681,45 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			var rolloverResult *EpochRolloverResult
 			var eraTransitions []*EraTransitionResult
 
+			// rejectBoundaryBlock refuses the block waiting in cachedNextBatch.
+			// The verdict is deterministic and the block is already on the
+			// primary chain, so a plain restart would re-read it and fail
+			// again. Rewind past it as a rejected header.
+			rejectBoundaryBlock := func(cause error, label string) error { //nolint:contextcheck
+				// The boundary block waits in cachedNextBatch, so the
+				// reader is still blocked on this read result.
+				if len(cachedNextBatch) == 0 {
+					completeReadResult()
+					return fmt.Errorf("%s: %w", label, cause)
+				}
+				boundary := cachedNextBatch[0]
+				rejected := &headerValidationError{
+					BlockPoint: ocommon.Point{
+						Slot: boundary.SlotNumber(),
+						Hash: boundary.Hash().Bytes(),
+					},
+					Cause: cause,
+				}
+				recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
+					rejected,
+				)
+				completeReadResult()
+				if recoverErr != nil {
+					return fmt.Errorf("%s: %w", label, recoverErr)
+				}
+				if recovered {
+					return errRestartLedgerPipeline
+				}
+				return fmt.Errorf("%s: %w", label, rejected)
+			}
+
 			if snapshotEra.Id == byron.EraIdByron && boundaryShouldValidate {
 				if err := ls.validateByronShelleyTransition(
 					ctx,
 					snapshotEpoch.EpochId+1,
 					nextEpochEraId,
 				); err != nil {
-					// The boundary block waits in cachedNextBatch, so the
-					// reader is still blocked on this read result.
-					if len(cachedNextBatch) == 0 {
-						completeReadResult()
-						return fmt.Errorf("byron transition: %w", err)
-					}
-					// The verdict is deterministic and the block is already
-					// on the primary chain, so a plain restart would re-read
-					// it and fail again. Rewind past it as a rejected header.
-					boundary := cachedNextBatch[0]
-					err = &headerValidationError{
-						BlockPoint: ocommon.Point{
-							Slot: boundary.SlotNumber(),
-							Hash: boundary.Hash().Bytes(),
-						},
-						Cause: err,
-					}
-					recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
-						err,
-					)
-					completeReadResult()
-					if recoverErr != nil {
-						return fmt.Errorf("byron transition: %w", recoverErr)
-					}
-					if recovered {
-						return errRestartLedgerPipeline
-					}
-					return fmt.Errorf("byron transition: %w", err)
+					return rejectBoundaryBlock(err, "byron transition")
 				}
 			}
 
@@ -7746,6 +7839,32 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					return err
 				}
 				rolloverResult = result
+				if boundaryShouldValidate {
+					authorizedEraID, err := ls.authorizedBoundaryEra(
+						snapshotEra.Id,
+						boundaryBodyEraId,
+						nextEpochEraId,
+						result.NewCurrentPParams,
+						newEpochId,
+					)
+					if err != nil {
+						return err
+					}
+					if authorizedEraID != nextEpochEraId {
+						last := slices.Index(
+							transitionsAfterRollover,
+							authorizedEraID,
+						)
+						if last < 0 {
+							return fmt.Errorf(
+								"authorized era %d is not on the boundary transition path %v",
+								authorizedEraID,
+								transitionsAfterRollover,
+							)
+						}
+						transitionsAfterRollover = transitionsAfterRollover[:last+1]
+					}
+				}
 				if len(transitionsAfterRollover) > 0 {
 					transitionResults, err := ls.applyBoundaryEraTransitions(
 						txn,
@@ -7776,6 +7895,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				ls.metrics.epochRolloverDuration.Observe(
 					rolloverElapsed.Seconds(),
 				)
+			}
+			if errors.Is(err, errBoundaryEraNotAuthorized) {
+				return rejectBoundaryBlock(err, "process epoch rollover")
 			}
 			if err != nil {
 				// This runs on the pass after a boundary-crossing batch
@@ -8328,6 +8450,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 								cutoffSlot,
 								snapshotMithrilSlot,
 							)
+							boundaryBodyEraId = uint(next.Era().Id)
 							headerMajor, headerMajorKnown := HeaderProtocolMajor(
 								next.Header(),
 							)
