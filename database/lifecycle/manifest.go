@@ -68,10 +68,12 @@ type manifestConfig struct {
 	key      []byte
 	// maxPause is consumed only by Snapshot and SnapshotToCloud.
 	maxPause time.Duration
-	// pauseNow and pauseContext are per-call test seams consumed only by
-	// Snapshot. Production callers cannot construct options that set them.
-	pauseNow     func() time.Time
-	pauseContext func(context.Context) context.Context
+	// pauseNow, pauseContext, and pauseDeadline are per-call test seams
+	// consumed only by Snapshot. Production callers cannot construct options
+	// that set them.
+	pauseNow      func() time.Time
+	pauseContext  func(context.Context) context.Context
+	pauseDeadline func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 }
 
 // WithManifestKey sets the operator trust root: a shared secret that

@@ -582,6 +582,8 @@ func TestSnapshotBoundsBlockedStateRead(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
 	finished := make(chan struct{})
+	deadlineCreated := make(chan time.Duration, 1)
+	var expireDeadline context.CancelFunc
 	hooks := &backupHooks{}
 	db := newHookedDB(t, nil, hooks)
 	// Database setup must finish before the snapshot operation deadline starts.
@@ -603,9 +605,22 @@ func TestSnapshotBoundsBlockedStateRead(t *testing.T) {
 		_, err := snapshotAt(
 			ctx, db, dir,
 			lifecycle.WithMaxCommitPause(30*time.Millisecond),
+			lifecycle.WithSnapshotPauseDeadlineForTest(func(
+				parent context.Context,
+				limit time.Duration,
+			) (context.Context, context.CancelFunc) {
+				deadlineCtx, cancelDeadline := context.WithCancel(parent)
+				expireDeadline = cancelDeadline
+				deadlineCreated <- limit
+				return deadlineCtx, cancelDeadline
+			}),
 		)
 		result <- err
 	}()
+	require.Equal(
+		t, 30*time.Millisecond,
+		testutil.RequireReceive(t, deadlineCreated, 5*time.Second, "snapshot deadline creation"),
+	)
 	select {
 	case <-started:
 	case err := <-result:
@@ -613,6 +628,7 @@ func TestSnapshotBoundsBlockedStateRead(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("snapshot state reader did not start")
 	}
+	expireDeadline()
 	err := testutil.RequireReceive(
 		t, result, 5*time.Second,
 		"snapshot must bound the blocked state read",

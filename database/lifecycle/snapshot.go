@@ -83,7 +83,7 @@ func Snapshot(
 	if _, err := manifestByteLimit(opts); err != nil {
 		return Manifest{}, err
 	}
-	maxPause, pauseNow, pauseContext, err := commitPauseConfig(opts)
+	maxPause, pauseNow, pauseContext, pauseDeadline, err := commitPauseConfig(opts)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -243,7 +243,7 @@ func Snapshot(
 	// the caller's ctx as well, so cancellation behaves as before.
 	backupCtx, cancelBackup := ctx, context.CancelFunc(func() {})
 	if maxPause > 0 {
-		backupCtx, cancelBackup = context.WithTimeout(ctx, maxPause)
+		backupCtx, cancelBackup = pauseDeadline(ctx, maxPause)
 	}
 	defer cancelBackup()
 	type snapshotState struct {
