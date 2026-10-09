@@ -92,9 +92,10 @@ func boolGauge(b bool) float64 {
 }
 
 // registerSyncGauges registers the header-queue and blockfetch-scheduler
-// gauges. The header-queue gauges read the chain at scrape time, which takes
-// only the chain's own lock and holds nothing else. None of the series is
-// labelled by connection or peer.
+// gauges. The header-queue gauges read the chain at scrape time: the length
+// takes only the chain's lock and the capacity only the chain manager's, and
+// neither is held across the other or across any ledger lock. None of the
+// series is labelled by connection or peer.
 func (ls *LedgerState) registerSyncGauges(registerer prometheus.Registerer) {
 	factory := promauto.With(registerer)
 	m := &ls.metrics

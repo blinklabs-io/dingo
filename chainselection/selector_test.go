@@ -6394,7 +6394,10 @@ func TestHandlePeerRollbackReportsAdvertisedTipRejection(t *testing.T) {
 		newTestConnectionId(2),
 		ocommon.Point{Slot: 100, Hash: []byte("bootstrap")},
 		ochainsync.Tip{
-			Point:       ocommon.Point{Slot: 9_000_000, Hash: []byte("inflated")},
+			Point: ocommon.Point{
+				Slot: 9_000_000,
+				Hash: []byte("inflated"),
+			},
 			BlockNumber: 9_000_000,
 		},
 	))

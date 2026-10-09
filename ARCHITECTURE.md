@@ -943,7 +943,8 @@ these series carries a connection or peer label.
 
 - `dingo_chain_header_queue_length` and `dingo_chain_header_queue_capacity`
   read `Chain.HeaderCount` and `Chain.MaxQueuedHeaders` at scrape time, taking
-  only the chain's own lock. `dingo_chain_header_queue_full_total` counts
+  only the chain's lock and the chain manager's lock respectively, never a
+  ledger or scheduler lock. `dingo_chain_header_queue_full_total` counts
   headers rejected with `ErrHeaderQueueFull`; the ledger installs
   `ChainManager.SetHeaderQueueFullObserver`, and `Chain.addBlockHeader` calls
   it under the chain lock, so the observer only increments the counter.

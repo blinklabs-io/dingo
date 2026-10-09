@@ -908,15 +908,15 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 		// Callers name the range request in their own wrap or log.
 		return 0, err
 	}
+	if o.blockfetchMetrics != nil {
+		o.blockfetchMetrics.requestsIssued.Inc()
+		o.blockfetchMetrics.lastRequestUnixNano.Store(time.Now().UnixNano())
+	}
 	// RequestRange returns once the request is on the wire, so a peer that
 	// replies immediately can drive blockfetchClientRangeDone to completion
 	// on the protocol's receive goroutine before this insert runs. Recording
 	// the start time anyway would leave an entry whose only deleter has
 	// already fired, so consume the marker it left instead.
-	if o.blockfetchMetrics != nil {
-		o.blockfetchMetrics.requestsIssued.Inc()
-		o.blockfetchMetrics.lastRequestUnixNano.Store(time.Now().UnixNano())
-	}
 	key := blockFetchKey{connId: connId, requestId: requestId}
 	o.blockFetchMutex.Lock()
 	if _, doneEarly := o.blockFetchDoneEarly[key]; doneEarly {
