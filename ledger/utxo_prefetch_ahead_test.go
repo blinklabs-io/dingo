@@ -163,9 +163,22 @@ func TestUtxoPrefetchAheadStopJoinsAndReleasesReadTxn(t *testing.T) {
 		p := fx.dingoLS.startUtxoPrefetchAhead(
 			t.Context(), blocks, []bool{true, true, true},
 		)
-		// Block 1 is resolved, so the goroutine holds its read transaction
-		// and then waits for permission to run block 2.
-		require.NotEmpty(t, p.take(1))
+		// take(0) permits block 1 only. Receiving block 1's slot directly,
+		// rather than through take(1), withholds permission for block 2, so
+		// the goroutine stays idle holding its read transaction and only
+		// cancellation can end it.
+		require.Nil(t, p.take(0))
+		select {
+		case got := <-p.slots[1]:
+			require.NotEmpty(t, got)
+		case <-time.After(10 * time.Second):
+			t.Fatal("block 1 was not prefetched")
+		}
+		select {
+		case <-p.done:
+			t.Fatal("the goroutine exited without permission for block 2")
+		default:
+		}
 		stopWithin(t, p)
 		select {
 		case <-p.done:
