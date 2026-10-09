@@ -5437,7 +5437,11 @@ it. Dingo implements this as a **corroboration gate**
   already covers, the same exemption the ledger's own header-queue path
   applies; a result showing local state has not caught up to
   the header's slot (`IsHeaderVerificationDeferred`) still leaves the header
-  eligible — both preserve legitimate catch-up behavior. A header whose
+  eligible — both preserve legitimate catch-up behavior. The exception is a
+  header past the forecast horizon (`ledger.ErrHeaderBeyondForecastHorizon`),
+  which ChainSync admission holds back until the ledger can forecast its slot,
+  so it never counts for selection, Genesis density, or corroboration before
+  it can be validated. A header whose
   point (slot and hash) is on the chain (`Chain.HoldsPoint`) at or below the
   ledger tip returns success without re-verification: it was fully verified
   when applied, and re-judging it against pool snapshots the 3-epoch
@@ -15708,10 +15712,28 @@ the node cannot distinguish peer skew from a slow local clock. One coalesced
 timer per connection re-intersects the mini-protocol at the earliest dropped
 header's onset so the remote cursor cannot strand the accepted chain; later
 headers from that peer remain withheld until the old mini-protocol has stopped
-and the re-intersection can replay from ledger-accepted points. A slot
-past the hard-fork forecast is deferred to the normal header-verification path,
-which already treats `ErrPastHorizon` as unavailable state rather than peer
-fault. Judging the recorded arrival rather than the later handler time means
+and the re-intersection can replay from ledger-accepted points. A header
+whose slot is past the hard-fork forecast horizon cannot be validated, so
+admission holds it on that peer's callback until a ledger snapshot publication
+brings the slot into range (`awaitForecastHorizon`), then applies the onset
+check; until then it neither extends the peer's candidate nor reaches the
+header queue, matching the reference ChainSync client's `OutsideForecastRange`
+wait. As in the reference, the forecast is measured from where the peer's
+chain leaves the local chain: a fork that left before the ledger tip gets that
+point's shorter horizon (`chainsyncForkAnchor`, `forecastSummaryFrom`). The
+intersection is resolved from the peer's recorded headers; a header extending
+the local header chain resolves on the first step, and an intersection that
+cannot be resolved falls back to the ledger tip. The wait is not charged to
+the peer's patience and is not a peer fault, and it ends when the peer's
+chainsync client is stopped or its connection begins shutdown (`StopChan`,
+`ConnectionDoneChan`); the client's `DoneChan` cannot end it, because that
+closes only after the callback returns.
+Should the horizon move back after admission (a ledger rollback),
+chain-selection verification reports `ledger.ErrHeaderBeyondForecastHorizon`:
+the header waits for admission once more, and if it is still out of range it is
+withheld and the connection re-intersects. The ledger header handler likewise
+refuses to queue an unverified header past the horizon and requests a
+re-intersection. Judging the recorded arrival rather than the later handler time means
 local decode, EventBus, or scheduler delay cannot make an invalid early header
 appear timely.
 

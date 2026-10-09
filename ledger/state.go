@@ -1039,6 +1039,10 @@ type LedgerState struct {
 	metrics   stateMetrics
 	consensus atomic.Pointer[consensusSnapshot]
 	tip       atomic.Pointer[tipSnapshot]
+	// snapshotPublished is closed and replaced after every snapshot
+	// publication, so a reader waiting for the ledger to advance can block
+	// until the published state changes instead of polling it.
+	snapshotPublished atomic.Pointer[chan struct{}]
 	// timeConverter owns slot/wall-clock time conversion (SlotToTime,
 	// TimeToSlot, SlotToEpoch, EpochInfo) and the operational near-now
 	// fallbacks used while the applied ledger is behind the wall clock.
@@ -2006,6 +2010,32 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 		currentTip:           cloneTip(ls.currentTip),
 		currentTipBlockNonce: cloneSnapshotBytes(ls.currentTipBlockNonce),
 	})
+	ls.notifySnapshotPublished()
+}
+
+// snapshotPublishedChan returns a channel closed by the next snapshot
+// publication. A waiter must obtain it before reading the state it waits on:
+// a publication between that read and the wait then closes the channel it
+// holds, so the wakeup cannot be missed.
+func (ls *LedgerState) snapshotPublishedChan() <-chan struct{} {
+	for {
+		if ch := ls.snapshotPublished.Load(); ch != nil {
+			return *ch
+		}
+		ch := make(chan struct{})
+		if ls.snapshotPublished.CompareAndSwap(nil, &ch) {
+			return ch
+		}
+	}
+}
+
+// notifySnapshotPublished wakes every snapshotPublishedChan waiter. It must
+// run after the snapshots are stored, so a woken waiter reads the new state.
+func (ls *LedgerState) notifySnapshotPublished() {
+	next := make(chan struct{})
+	if prev := ls.snapshotPublished.Swap(&next); prev != nil {
+		close(*prev)
+	}
 }
 
 // loadStateSnapshots returns consensus and tip state from the same publication
