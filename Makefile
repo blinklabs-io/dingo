@@ -49,14 +49,22 @@ GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' 
 BUILD_TAGS ?= dingo_extra_plugins
 CGO_ENABLED ?= 0
 GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
+# nilaway and modernize accept -tags but ignore it ("no effect"); their package
+# loader reads build tags from GOFLAGS only, so pass them there or every
+# BUILD_TAGS-gated file goes unanalyzed.
+comma := ,
+empty :=
+space := $(empty) $(empty)
+ANALYZER_GOFLAGS=$(strip $(GOFLAGS) $(if $(strip $(BUILD_TAGS)),-tags=$(subst $(space),$(comma),$(strip $(BUILD_TAGS))),))
 # Cover all blinklabs-io modules dingo depends on (gouroboros, plutigo, bursa,
 # bark, ouroboros-mock, ...) without descending into third-party/stdlib deps.
 NILAWAY_FLAGS ?= -include-pkgs=github.com/blinklabs-io
 # Generated sqlc and protobuf packages are validated by their generators;
 # run modernize only against hand-written packages to avoid generator drift.
+MODERNIZE_FLAGS ?=
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity config-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-storage-scale bench-ci bench-leios-db bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint nilaway modernize import-boundaries docs-parity config-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-storage-scale bench-ci bench-leios-db bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -99,10 +107,21 @@ lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and mo
 		echo "golangci-lint run ./... ($$dir)"; \
 		(cd $$dir && golangci-lint run ./...) || exit 1; \
 	done
+	$(MAKE) nilaway modernize
+
+# CI runs these same targets in the lint job.
+#
+# nilaway's live heap on this tree is about 12 GB, and without a limit its peak
+# passes the 16 GB of a hosted runner and the runner is killed. GOMEMLIMIT
+# makes the collector hold it near the floor at the cost of run time.
+nilaway: export GOMEMLIMIT ?= 10GiB
+nilaway: ## Fail on NilAway findings in production code
 	# Test fixtures establish preconditions with testify assertions that nilaway
 	# cannot track across calls; analyze production code here.
-	nilaway $(GO_TAG_FLAGS) $(NILAWAY_FLAGS) -exclude-test-files ./...
-	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
+	GOFLAGS="$(ANALYZER_GOFLAGS)" nilaway $(NILAWAY_FLAGS) -exclude-test-files ./...
+
+modernize: ## Fail on modernize findings in hand-written packages
+	GOFLAGS="$(ANALYZER_GOFLAGS)" modernize $(MODERNIZE_FLAGS) $(MODERNIZE_PACKAGES)
 
 import-boundaries: ## Check reviewed package import boundaries
 	go test ./internal/architecture
