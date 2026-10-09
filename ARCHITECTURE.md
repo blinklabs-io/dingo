@@ -8892,13 +8892,18 @@ respectively to bound stack depth against
 adversarial nesting. `cbor_decode_test.go` proves each of these boundaries is
 accepted exactly at the limit and rejected one past it.
 
-`ImportLedgerState` runs `validateImportState` before the UTxO phase. It
-parses the cert state, stake snapshots, active pool distribution and
-governance state, and checks the tip hash width, the epoch, evolving,
-candidate and last-epoch-block nonce widths, the certified opcert and
-block-count pool keys, UTxO-state fees against the snapshot fee pot, and both
+`ImportLedgerState` validates the complete era-bound sequence, then runs
+`validateImportState` before the UTxO phase. Preflight parses the cert state,
+stake snapshots, active pool distribution and governance state, and checks the
+tip hash width, the epoch, evolving, candidate and last-epoch-block nonce
+widths, the certified opcert and block-count pool keys, UTxO-state fees against
+the snapshot fee pot, and both
 current and previous protocol parameters, including historical era
-conversion; a previous payload whose epoch has no resolvable era is refused.
+conversion. A previous payload whose epoch has no resolvable era is rejected
+before persistence, regardless of whether stake snapshots are present. The
+lower-level parameter importer can skip an unresolved historical row with a
+warning, but a full snapshot import rejects incomplete era history before it
+can reach that path.
 An existing valid historical parameter row can stand in for an incompatible
 previous payload during catch-up. With stake snapshots present it also runs
 the reward-basis protocol-parameter check for each Mark/Set/Go epoch without
@@ -13754,6 +13759,18 @@ the first two epochs of a new era has set or go in the era before it, with a
 different boundary slot and epoch length. An epoch it cannot place at all is
 skipped rather than seeded from a guessed window.
 
+Before any snapshot phase mutates the database, import validates the complete
+era-bound sequence against the node configuration. The sequence must contain
+every era through the snapshot's current era, begin at slot 0 and epoch 0, and
+place each advancing era exactly after the preceding era's configured whole
+epochs. Consecutive zero-duration eras may share the same slot and epoch
+boundary, as they do on preview. Missing bounds, extraction failures, unknown
+era parameters, gaps and overlaps abort the import. The snapshot tip must also
+fall within the half-open slot range of its declared current epoch. Epoch
+history therefore cannot be committed with a later era treated as the chain's
+time origin, with an omitted interval between eras, or with an attacker-sized
+epoch range detached from the tip.
+
 Block counts are seeded, because they cannot be derived. A bootstrap applies no
 block at or below its anchor, so there is no imported chain for
 `rewardBlockCounts` to scan: `CountPoolBlocksInSlotRange` raises its start slot
@@ -15382,6 +15399,13 @@ embedder that builds a `LedgerStateConfig` directly and skips validation.
   defense in depth and adds the `MaxKESEvolutions` expiry check the generic
   stage cannot perform. OpCert counter monotonicity remains a stateful
   read-before-write check in `ledgerProcessBlock`.
+
+The generic stage receives no protocol parameters or ledger state, so
+`blockPipelineVerifyConfig` skips its body-hash, transaction, stake-pool, and
+block-limit checks. The pipeline's decode stage has already checked the body
+hash; the other rules, including the Conway per-block reference-script total,
+run in `ledgerProcessBlock`. Left on, the block-limit
+step rejects every Conway block that carries a transaction.
 
 `NewLedgerState` fails startup when this stage is enabled without a nonzero
 Shelley `slotsPerKESPeriod`; otherwise the generic stage would reject every

@@ -63,6 +63,123 @@ func inlineUTxOMap(
 	return cbor.RawMessage(body)
 }
 
+func TestImportLedgerStateRejectsIncompleteEraHistoryBeforeMutation(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		bounds    []EraBound
+		boundsErr error
+		tipSlot   uint64
+		params    EpochLengthFunc
+		wantErr   string
+	}{
+		{
+			name:    "missing bounds",
+			wantErr: "era bounds are required",
+		},
+		{
+			name:      "bounds extraction failure",
+			boundsErr: errors.New("invalid hard-fork telescope"),
+			wantErr:   "extracting era bounds",
+		},
+		{
+			name: "missing parameters for zero-span era",
+			bounds: []EraBound{
+				{Slot: 0, Epoch: 0},
+				{Slot: 0, Epoch: 0},
+			},
+			params: func(era uint) (uint, uint, error) {
+				if era == EraByron {
+					return 0, 0, errors.New("Byron genesis unavailable")
+				}
+				return 1, 100, nil
+			},
+			wantErr: "resolving Byron era parameters",
+		},
+		{
+			name: "zero parameters for zero-span era",
+			bounds: []EraBound{
+				{Slot: 0, Epoch: 0},
+				{Slot: 0, Epoch: 0},
+			},
+			params: func(era uint) (uint, uint, error) {
+				if era == EraByron {
+					return 0, 0, nil
+				}
+				return 1, 100, nil
+			},
+			wantErr: "invalid Byron era parameters",
+		},
+		{
+			name: "gap between eras",
+			bounds: []EraBound{
+				{Slot: 0, Epoch: 0},
+				{Slot: 101, Epoch: 1},
+			},
+			wantErr: "era history is not contiguous",
+		},
+		{
+			name: "tip outside declared epoch",
+			bounds: []EraBound{
+				{Slot: 0, Epoch: 0},
+				{Slot: 100, Epoch: 1},
+			},
+			// Epoch 1 covers [100, 200); the exact end belongs to epoch 2.
+			tipSlot: 200,
+			wantErr: "outside current epoch",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			db, err := dbtest.NewDatabase(
+				t,
+				&database.Config{DataDir: t.TempDir()},
+			)
+			require.NoError(t, err)
+			t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+			progressed := false
+			tipSlot := test.tipSlot
+			if tipSlot == 0 {
+				tipSlot = 150
+			}
+			params := test.params
+			if params == nil {
+				params = func(uint) (uint, uint, error) {
+					return 1, 100, nil
+				}
+			}
+			err = ImportLedgerState(context.Background(), ImportConfig{
+				Database: db,
+				Logger: slog.New(
+					slog.NewTextHandler(io.Discard, nil),
+				),
+				State: &RawLedgerState{
+					EraIndex:         EraShelley,
+					Epoch:            1,
+					EraBounds:        test.bounds,
+					EraBoundsWarning: test.boundsErr,
+					Tip: &SnapshotTip{
+						Slot:      tipSlot,
+						BlockHash: make([]byte, 32),
+					},
+				},
+				EpochLength: params,
+				OnProgress:  func(ImportProgress) { progressed = true },
+			})
+			require.ErrorContains(t, err, test.wantErr)
+			require.False(t, progressed)
+			epochs, err := db.Metadata().GetEpochs(nil)
+			require.NoError(t, err)
+			require.Empty(t, epochs)
+		})
+	}
+}
+
 // TestImportLedgerStateRebuildsDeferredRewardLiveStake covers the invariant
 // the deferred per-batch refresh depends on: importUTxOs skips the aggregate
 // refresh on every batch, so ImportLedgerState's own
@@ -103,12 +220,8 @@ func TestImportLedgerStateRebuildsDeferredRewardLiveStake(t *testing.T) {
 			Database: db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
-				UTxOData: inlineUTxOMap(
-					t,
-					addr,
-					[]uint64{1_000_000, 2_000_000},
-				),
-				Epoch:               100,
+				UTxOData:            inlineUTxOMap(t, addr, []uint64{1_000_000, 2_000_000}),
+				Epoch:               1,
 				EraIndex:            EraConway,
 				EraBounds:           eraBounds,
 				EpochNonce:          nonce,
@@ -310,11 +423,10 @@ func TestImportedEpochStartSlotUsesTheEpochsOwnEra(t *testing.T) {
 	}
 }
 
-// With no era bounds to consult, the current era's boundary is all there is.
-// It stays a usable window edge -- registrations before it fall on the
-// pre-epoch side, where the most recent wins -- but it is a fallback, not the
-// epoch's real start, so it must not be reached when bounds are available.
-func TestImportedEpochStartSlotFallsBackWithoutEraBounds(t *testing.T) {
+// Missing era bounds cannot place any reward-input window. Import rejects this
+// state before reaching snapshot seeding; this lower-level helper also remains
+// fail closed when exercised directly.
+func TestImportedEpochStartSlotRequiresEraBounds(t *testing.T) {
 	t.Parallel()
 
 	cfg := ImportConfig{
@@ -329,23 +441,8 @@ func TestImportedEpochStartSlotFallsBackWithoutEraBounds(t *testing.T) {
 			return 1, 500, nil
 		},
 	}
-	for _, c := range []struct {
-		epoch uint64
-		want  uint64
-	}{
-		{11, 1500},
-		{10, 1000},
-	} {
-		got, ok := importedEpochStartSlot(cfg, c.epoch)
-		require.True(t, ok)
-		require.Equal(t, c.want, got)
-	}
-	// Epoch 9 began before this era did, and without bounds there is nothing
-	// describing where. The era boundary is not a stand-in: it follows the
-	// epoch, so every registration made during it would count as pre-epoch.
-	_, ok := importedEpochStartSlot(cfg, 9)
-	require.False(t, ok,
-		"an epoch the current era's arithmetic cannot reach has no window")
+	_, ok := importedEpochStartSlot(cfg, 11)
+	require.False(t, ok, "missing bounds must not produce a guessed window")
 }
 
 // Bounds that do not reach back to genesis leave an epoch with no era to
@@ -3005,7 +3102,7 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 			wantErr: "less than the snapshot fee pot",
 		},
 		{
-			name: "previous parameters era unknown",
+			name: "previous parameters era unknown with snapshots",
 			mutate: func(s *RawLedgerState) {
 				s.SnapShotsData = fixture.SnapShotsData
 				s.Fees = fixture.Fees
@@ -3014,7 +3111,8 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 				s.EraBounds = nil
 				s.EraBoundEpoch = s.Epoch
 			},
-			wantErr: "previous protocol parameters for epoch 99: era cannot be determined",
+			wantErr: "validating imported era history: era bounds are required " +
+				"from genesis through Conway: got 0, want 7",
 		},
 		{
 			name: "previous parameters era unknown without snapshots",
@@ -3024,7 +3122,8 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 				s.EraBounds = nil
 				s.EraBoundEpoch = s.Epoch
 			},
-			wantLog: "not importing historical protocol parameters from snapshot because the epoch's era cannot be determined",
+			wantErr: "validating imported era history: era bounds are required " +
+				"from genesis through Conway: got 0, want 7",
 		},
 		{
 			name: "go snapshot without historical parameters",
@@ -3032,6 +3131,8 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 				s.SnapShotsData = fixture.SnapShotsData
 				s.Fees = fixture.Fees
 				s.PParamsData = currentPParams
+				s.Epoch = 100
+				s.Tip.Slot = 100_000
 			},
 			wantErr: "historical protocol parameters for epoch 99 are unavailable",
 		},
@@ -3106,7 +3207,7 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 					addr,
 					[]uint64{1_000_000},
 				),
-				Epoch:               100,
+				Epoch:               1,
 				EraIndex:            EraConway,
 				EraBounds:           make([]EraBound, EraConway+1),
 				EpochNonce:          nonce,

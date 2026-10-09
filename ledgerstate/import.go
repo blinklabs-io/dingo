@@ -131,9 +131,9 @@ type RawLedgerState struct {
 	// counter state from the Praos HeaderState. Keys are 28-byte pool cold-key
 	// hashes encoded as strings so they remain comparable.
 	OpCertCounters map[string]uint64
-	// EraBoundsWarning holds a non-fatal error from era bounds
-	// extraction. When set, epoch generation falls back to
-	// the single-epoch path.
+	// EraBoundsWarning holds an error from era bounds extraction.
+	// Import rejects the snapshot when this is set because a
+	// contiguous epoch history cannot be reconstructed.
 	EraBoundsWarning error
 	// UTxOTablePath is the path to the UTxO table file (UTxO-HD
 	// format). When set, UTxOs are streamed from this file instead
@@ -407,8 +407,6 @@ type ImportConfig struct {
 	Logger     *slog.Logger
 	OnProgress func(ImportProgress)
 	// EpochLength resolves era parameters from the node config.
-	// If nil, epoch generation falls back to computing from
-	// era bounds.
 	EpochLength EpochLengthFunc
 	// ImportKey identifies this import for resume tracking.
 	// Format: "{digest}:{slot}". If empty, resume is disabled.
@@ -431,6 +429,134 @@ type deferredRewardLiveStakeImporter interface {
 	ImportUtxosDeferredRewardLiveStakeRefresh([]models.Utxo, types.Txn) error
 }
 
+func requiredImportEraParams(
+	cfg ImportConfig,
+	eraIndex int,
+) (uint, uint, error) {
+	if cfg.EpochLength == nil {
+		return 0, 0, errors.New("era parameter resolver is nil")
+	}
+	// #nosec G115 -- callers validate eraIndex against the era-bound slice.
+	slotLength, epochLength, err := cfg.EpochLength(uint(eraIndex))
+	if err != nil {
+		return 0, 0, fmt.Errorf(
+			"resolving %s era parameters: %w",
+			EraName(eraIndex), err,
+		)
+	}
+	if slotLength == 0 || epochLength == 0 {
+		return 0, 0, fmt.Errorf(
+			"invalid %s era parameters: slot length %d, epoch length %d",
+			EraName(eraIndex), slotLength, epochLength,
+		)
+	}
+	return slotLength, epochLength, nil
+}
+
+func validateImportEraHistory(cfg ImportConfig) error {
+	state := cfg.State
+	if state.Tip == nil {
+		return errors.New("snapshot tip is nil")
+	}
+	if state.EraBoundsWarning != nil {
+		return fmt.Errorf(
+			"extracting era bounds: %w",
+			state.EraBoundsWarning,
+		)
+	}
+	if state.EraIndex < 0 {
+		return fmt.Errorf("invalid current era index %d", state.EraIndex)
+	}
+	bounds := state.EraBounds
+	expectedBounds := state.EraIndex + 1
+	if len(bounds) != expectedBounds {
+		return fmt.Errorf(
+			"era bounds are required from genesis through %s: got %d, want %d",
+			EraName(state.EraIndex), len(bounds), expectedBounds,
+		)
+	}
+	if bounds[0] != (EraBound{}) {
+		return fmt.Errorf(
+			"era history must start at slot 0 epoch 0: got slot %d epoch %d",
+			bounds[0].Slot, bounds[0].Epoch,
+		)
+	}
+	var currentEpochLength uint
+	for eraIndex, start := range bounds {
+		if eraIndex+1 == len(bounds) {
+			_, epochLength, err := requiredImportEraParams(cfg, eraIndex)
+			if err != nil {
+				return err
+			}
+			currentEpochLength = epochLength
+			continue
+		}
+
+		end := bounds[eraIndex+1]
+		_, epochLength, err := requiredImportEraParams(cfg, eraIndex)
+		if err != nil {
+			return err
+		}
+		if end.Epoch < start.Epoch {
+			return fmt.Errorf(
+				"era history epoch decreases from %d to %d between %s and %s",
+				start.Epoch, end.Epoch,
+				EraName(eraIndex), EraName(eraIndex+1),
+			)
+		}
+		epochSpan := end.Epoch - start.Epoch
+		if epochSpan == 0 {
+			if end.Slot != start.Slot {
+				return fmt.Errorf(
+					"era history is not contiguous between %s and %s: got slot %d, want %d",
+					EraName(eraIndex), EraName(eraIndex+1),
+					end.Slot, start.Slot,
+				)
+			}
+			continue
+		}
+		length := uint64(epochLength)
+		if epochSpan > (^uint64(0)-start.Slot)/length {
+			return fmt.Errorf(
+				"era history slot overflows between %s and %s",
+				EraName(eraIndex), EraName(eraIndex+1),
+			)
+		}
+		expectedSlot := start.Slot + epochSpan*length
+		if end.Slot != expectedSlot {
+			return fmt.Errorf(
+				"era history is not contiguous between %s and %s: got slot %d, want %d",
+				EraName(eraIndex), EraName(eraIndex+1),
+				end.Slot, expectedSlot,
+			)
+		}
+	}
+	lastBound := bounds[len(bounds)-1]
+	if state.Epoch < lastBound.Epoch {
+		return fmt.Errorf(
+			"snapshot epoch %d precedes current-era bound epoch %d",
+			state.Epoch, lastBound.Epoch,
+		)
+	}
+	epochSpan := state.Epoch - lastBound.Epoch
+	length := uint64(currentEpochLength)
+	if epochSpan > (^uint64(0)-lastBound.Slot)/length {
+		return errors.New("current epoch start slot overflows")
+	}
+	epochStart := lastBound.Slot + epochSpan*length
+	if epochStart > ^uint64(0)-length {
+		return errors.New("current epoch end slot overflows")
+	}
+	epochEnd := epochStart + length
+	if state.Tip.Slot < epochStart || state.Tip.Slot >= epochEnd {
+		return fmt.Errorf(
+			"snapshot tip slot %d is outside current epoch %d range [%d, %d)",
+			state.Tip.Slot, state.Epoch, epochStart, epochEnd,
+		)
+	}
+	return nil
+}
+
 // ImportLedgerState orchestrates the full import of parsed ledger
 // state data into Dingo's metadata store. If ImportKey is set,
 // completed phases are checkpointed so a failed import can resume
@@ -450,6 +576,9 @@ func ImportLedgerState(
 	}
 	if cfg.State.Tip == nil {
 		return errors.New("snapshot tip is nil")
+	}
+	if err := validateImportEraHistory(cfg); err != nil {
+		return fmt.Errorf("validating imported era history: %w", err)
 	}
 	slot := cfg.State.Tip.Slot
 	if cfg.Reconcile {
@@ -3133,14 +3262,7 @@ func importOpCertCounters(
 // on the parsed state are available, and are the same source
 // generateAndSaveEpochs derives its epoch start slots from.
 //
-// The bool reports whether a window could be placed at all. Neither
-// available guess is safe when it cannot: the current era's boundary sits
-// after such an epoch, so every registration made during it counts as
-// pre-epoch and the newest wins, while widening to zero makes them all look
-// in-epoch, so the pool's earliest registration wins and a re-registration
-// before the target epoch is ignored. Both seed rewards from parameters that
-// were not in force, in opposite directions, so the caller skips the epoch
-// instead -- the same conservative direction the rest of this seeding takes.
+// The bool reports whether the validated history covers the requested epoch.
 //
 // The epoch is resolved against its own era, not the current one. mark, set
 // and go span three epochs, so an import landing in the first two epochs of a
@@ -3150,11 +3272,6 @@ func importOpCertCounters(
 // during one would then count as pre-epoch -- so the most recent would win and
 // the epoch would be seeded with parameters that only took effect afterwards,
 // which is the one-epoch-early error the lookup exists to avoid.
-//
-// Only when there are no era bounds to consult does the current era's
-// boundary stand in. It is still a usable window edge -- registrations before
-// it fall on the pre-epoch side, where the most recent wins -- but it is not
-// the epoch's real start.
 func importedEpochStartSlot(
 	cfg ImportConfig,
 	epoch uint64,
@@ -3165,7 +3282,7 @@ func importedEpochStartSlot(
 	// how preview encodes several eras all starting at epoch 0.
 	// An epoch before the first bound has no era to measure from. Reaching
 	// this means era-bound extraction did not go back to genesis.
-	if len(bounds) > 0 && epoch < bounds[0].Epoch {
+	if len(bounds) == 0 || epoch < bounds[0].Epoch {
 		return 0, false
 	}
 	era := -1
@@ -3174,37 +3291,19 @@ func importedEpochStartSlot(
 			era = i
 		}
 	}
-	if era >= 0 {
-		var endBound EraBound
-		if era+1 < len(bounds) {
-			endBound = bounds[era+1]
-		}
-		// #nosec G115 -- era index is bounded by the era count
-		_, epochLength := resolveEraParams(
-			cfg, uint(era), bounds[era], endBound,
-		)
-		if epochLength > 0 {
-			return bounds[era].Slot +
-				(epoch-bounds[era].Epoch)*uint64(epochLength), true
-		}
-	}
-
-	var lengthInSlots uint
-	if cfg.EpochLength != nil {
-		// #nosec G115 -- era index is small and non-negative
-		if _, length, err := cfg.EpochLength(
-			uint(cfg.State.EraIndex),
-		); err == nil {
-			lengthInSlots = length
-		}
-	}
-	// Without bounds the current era's own arithmetic is all there is, and
-	// it only reaches epochs at or after that era began.
-	if lengthInSlots == 0 || epoch < cfg.State.EraBoundEpoch {
+	if era < 0 {
 		return 0, false
 	}
-	return cfg.State.EraBoundSlot +
-		(epoch-cfg.State.EraBoundEpoch)*uint64(lengthInSlots), true
+	_, epochLength, err := requiredImportEraParams(cfg, era)
+	if err != nil {
+		return 0, false
+	}
+	epochSpan := epoch - bounds[era].Epoch
+	length := uint64(epochLength)
+	if epochSpan > (^uint64(0)-bounds[era].Slot)/length {
+		return 0, false
+	}
+	return bounds[era].Slot + epochSpan*length, true
 }
 
 // importedSnapshotCaptureSlot returns the semantic slot represented by one
@@ -3238,6 +3337,9 @@ func generateAndSaveEpochs(
 	cfg ImportConfig,
 	txn *database.Txn,
 ) (int, error) {
+	if err := validateImportEraHistory(cfg); err != nil {
+		return 0, fmt.Errorf("validating imported era history: %w", err)
+	}
 	store := cfg.Database.Metadata()
 	metaTxn := txn.Metadata()
 	totalEpochs := 0
@@ -3247,57 +3349,6 @@ func generateAndSaveEpochs(
 	// safe: existing epochs are updated rather than duplicated.
 
 	bounds := cfg.State.EraBounds
-	if cfg.State.EraBoundsWarning != nil {
-		cfg.Logger.Warn(
-			"era bounds extraction failed; "+
-				"falling back to single-epoch",
-			"component", "ledgerstate",
-			"error", cfg.State.EraBoundsWarning,
-		)
-	}
-	if len(bounds) == 0 {
-		// Fallback: no era bounds available, just save
-		// the current epoch as before.
-		var slotLength, lengthInSlots uint
-		if cfg.EpochLength != nil {
-			// #nosec G115
-			sl, el, err := cfg.EpochLength(
-				uint(cfg.State.EraIndex),
-			)
-			if err == nil {
-				slotLength = sl
-				lengthInSlots = el
-			}
-		}
-		epochStartSlot := cfg.State.EraBoundSlot
-		if lengthInSlots > 0 &&
-			cfg.State.Epoch >= cfg.State.EraBoundEpoch {
-			epochsSinceBound := cfg.State.Epoch -
-				cfg.State.EraBoundEpoch
-			epochStartSlot = cfg.State.EraBoundSlot +
-				epochsSinceBound*uint64(lengthInSlots)
-		}
-		// NOTE: cfg.State.EvolvingNonce is the tip-time value, which
-		// may be mid-epoch. This is the best available seed at import
-		// time. The first full epoch rollover (processEpochRollover)
-		// will recompute and store the correct end-of-epoch value.
-		// #nosec G115
-		if err := store.SetEpoch(
-			epochStartSlot,
-			cfg.State.Epoch,
-			cfg.State.EpochNonce,
-			cfg.State.EvolvingNonce,
-			cfg.State.CandidateNonce,
-			cfg.State.LastEpochBlockNonce,
-			uint(cfg.State.EraIndex),
-			slotLength,
-			lengthInSlots,
-			metaTxn,
-		); err != nil {
-			return 0, fmt.Errorf("setting epoch: %w", err)
-		}
-		return 1, nil
-	}
 
 	// Generate epochs for each era defined by consecutive bounds.
 	for i := 0; i < len(bounds)-1; i++ {
@@ -3317,17 +3368,9 @@ func generateAndSaveEpochs(
 
 		// #nosec G115
 		eraId := uint(i)
-		slotLength, epochLength := resolveEraParams(
-			cfg, eraId, startBound, endBound,
-		)
-		if epochLength == 0 {
-			cfg.Logger.Warn(
-				"skipping epoch generation for era "+
-					"with unknown epoch length",
-				"era", EraName(int(eraId)), //nolint:gosec
-				"component", "ledgerstate",
-			)
-			continue
+		slotLength, epochLength, err := requiredImportEraParams(cfg, i)
+		if err != nil {
+			return totalEpochs, err
 		}
 
 		for e := startBound.Epoch; e < endBound.Epoch; e++ {
@@ -3375,17 +3418,12 @@ func generateAndSaveEpochs(
 	// #nosec G115
 	currentEraId := uint(len(bounds) - 1)
 
-	slotLength, epochLength := resolveEraParams(
-		cfg, currentEraId, lastBound, EraBound{},
+	slotLength, epochLength, err := requiredImportEraParams(
+		cfg,
+		len(bounds)-1,
 	)
-	if epochLength == 0 {
-		cfg.Logger.Warn(
-			"skipping epoch generation for current era "+
-				"with unknown epoch length",
-			"era", EraName(int(currentEraId)), //nolint:gosec
-			"component", "ledgerstate",
-		)
-		return totalEpochs, nil
+	if err != nil {
+		return totalEpochs, err
 	}
 
 	for e := lastBound.Epoch; e <= cfg.State.Epoch; e++ {
@@ -3441,59 +3479,6 @@ func generateAndSaveEpochs(
 	)
 
 	return totalEpochs, nil
-}
-
-// resolveEraParams returns the slot length (ms) and epoch length
-// (in slots) for an era. It tries the genesis config first, then
-// falls back to computing from era bounds.
-func resolveEraParams(
-	cfg ImportConfig,
-	eraId uint,
-	startBound, endBound EraBound,
-) (slotLength, epochLength uint) {
-	if cfg.EpochLength != nil {
-		sl, el, err := cfg.EpochLength(eraId)
-		if err == nil {
-			return sl, el
-		}
-	}
-
-	// Fallback: compute from bounds if we have both start and end.
-	if endBound.Epoch <= startBound.Epoch {
-		cfg.Logger.Warn(
-			"cannot compute epoch length from era bounds "+
-				"(no valid end bound)",
-			"component", "ledgerstate",
-			"era_id", eraId,
-			"start_epoch", startBound.Epoch,
-			"end_epoch", endBound.Epoch,
-		)
-		return 0, 0
-	}
-	if endBound.Slot < startBound.Slot {
-		cfg.Logger.Warn(
-			"cannot compute epoch length from era bounds "+
-				"(end slot before start slot)",
-			"component", "ledgerstate",
-			"era_id", eraId,
-			"start_slot", startBound.Slot,
-			"end_slot", endBound.Slot,
-		)
-		return 0, 0
-	}
-	epochSpan := endBound.Epoch - startBound.Epoch
-	slotSpan := endBound.Slot - startBound.Slot
-	epochLength = uint(
-		slotSpan / epochSpan,
-	) // #nosec G115 -- epoch length fits in uint
-	cfg.Logger.Warn(
-		"slot length unavailable from era bounds fallback; "+
-			"slot-to-wall-clock-time mapping may be inaccurate",
-		"component", "ledgerstate",
-		"era_id", eraId,
-		"epoch_length", epochLength,
-	)
-	return 0, epochLength
 }
 
 // validateImportedRewardPParams checks the parameter rows that will be read
