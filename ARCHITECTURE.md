@@ -13720,6 +13720,18 @@ the first two epochs of a new era has set or go in the era before it, with a
 different boundary slot and epoch length. An epoch it cannot place at all is
 skipped rather than seeded from a guessed window.
 
+Before any snapshot phase mutates the database, import validates the complete
+era-bound sequence against the node configuration. The sequence must contain
+every era through the snapshot's current era, begin at slot 0 and epoch 0, and
+place each advancing era exactly after the preceding era's configured whole
+epochs. Consecutive zero-duration eras may share the same slot and epoch
+boundary, as they do on preview. Missing bounds, extraction failures, unknown
+era parameters, gaps and overlaps abort the import. The snapshot tip must also
+fall within the half-open slot range of its declared current epoch. Epoch
+history therefore cannot be committed with a later era treated as the chain's
+time origin, with an omitted interval between eras, or with an attacker-sized
+epoch range detached from the tip.
+
 Block counts are seeded, because they cannot be derived. A bootstrap applies no
 block at or below its anchor, so there is no imported chain for
 `rewardBlockCounts` to scan: `CountPoolBlocksInSlotRange` raises its start slot
@@ -15361,6 +15373,13 @@ embedder that builds a `LedgerStateConfig` directly and skips validation.
   defense in depth and adds the `MaxKESEvolutions` expiry check the generic
   stage cannot perform. OpCert counter monotonicity remains a stateful
   read-before-write check in `ledgerProcessBlock`.
+
+The generic stage receives no protocol parameters or ledger state, so
+`blockPipelineVerifyConfig` skips its body-hash, transaction, stake-pool, and
+block-limit checks. The pipeline's decode stage has already checked the body
+hash; the other rules, including the Conway per-block reference-script total,
+run in `ledgerProcessBlock`. Left on, the block-limit
+step rejects every Conway block that carries a transaction.
 
 `NewLedgerState` fails startup when this stage is enabled without a nonzero
 Shelley `slotsPerKESPeriod`; otherwise the generic stage would reject every

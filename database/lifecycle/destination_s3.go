@@ -318,9 +318,14 @@ func (d *s3Destination) ListSnapshots(
 func isS3NotFoundError(err error) bool {
 	var noSuchKey *s3types.NoSuchKey
 	var notFound *s3types.NotFound
+	if errors.As(err, &noSuchKey) || errors.As(err, &notFound) {
+		return true
+	}
 	var apiErr smithy.APIError
-	return errors.As(err, &noSuchKey) || errors.As(err, &notFound) ||
-		(errors.As(err, &apiErr) && apiErr.ErrorCode() == "NotFound")
+	if !errors.As(err, &apiErr) || apiErr == nil {
+		return false
+	}
+	return apiErr.ErrorCode() == "NotFound"
 }
 
 // fetchManifest downloads and parses just the manifest.json for
