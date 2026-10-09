@@ -99,7 +99,9 @@ func PParamsUpdateConway(
 	// guards an already-stored malformed proposal that reaches enactment some
 	// other way (e.g. replay of pre-fix data).
 	conwayPParamsUpdate.ProtocolVersion = nil
-	conwayPParams.Update(&conwayPParamsUpdate)
+	if err := conwayPParams.ApplyUpdate(&conwayPParamsUpdate); err != nil {
+		return nil, err
+	}
 	return conwayPParams, nil
 }
 

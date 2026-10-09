@@ -177,6 +177,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	appliedTxs := make([]bool, len(d.Transactions))
 	storageIndexOffset := d.expandedIndexOffset
 	for i, tr := range d.Transactions {
+		var proposalsValidated bool
 		if tr.Index < 0 || tr.Index > math.MaxUint32 {
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)
 		}
@@ -276,6 +277,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 					level,
 					uint32(storageIndex), //nolint:gosec
 					txn,
+					&proposalsValidated,
 				); err != nil {
 					return fmt.Errorf("process transaction body %d governance: %w", levelIndex, err)
 				}
@@ -462,6 +464,7 @@ func (d *LedgerDelta) processGovernance(
 	tx lcommon.Transaction,
 	txIndex uint32,
 	txn *database.Txn,
+	validated *bool,
 ) error {
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
@@ -472,13 +475,31 @@ func (d *LedgerDelta) processGovernance(
 		return nil
 	}
 
-	// Determine current epoch and Conway protocol parameters.
+	// Determine the block epoch and Conway protocol parameters.
 	// These are needed for both proposals (govActionLifetime) and
 	// votes (dRepInactivityPeriod for activity tracking).
-	ls.RLock()
-	currentEpoch := ls.currentEpoch.EpochId
-	pparams := ls.currentPParams
-	ls.RUnlock()
+	snapshot := ls.loadConsensusSnapshot()
+	if snapshot == nil {
+		return errors.New("governance consensus snapshot not yet published")
+	}
+	blockEpoch, err := epochForSlotInCache(
+		snapshot.epochCache,
+		d.Point.Slot,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"resolve governance block epoch at slot %d: %w",
+			d.Point.Slot,
+			err,
+		)
+	}
+	pparams := protocolParametersForBlockEra(
+		d.BlockEraId,
+		snapshot.currentEra,
+		ls.eraList(),
+		snapshot.currentPParams,
+		snapshot.prevEraPParams,
+	)
 
 	conwayPParams := conwayProtocolParameters(pparams)
 	if conwayPParams == nil {
@@ -495,10 +516,12 @@ func (d *LedgerDelta) processGovernance(
 			tx,
 			d.Point,
 			txIndex,
-			currentEpoch,
+			blockEpoch.EpochId,
 			conwayPParams.GovActionValidityPeriod,
+			pparams,
 			ls.db,
 			txn,
+			validated,
 		); err != nil {
 			return fmt.Errorf("process governance proposals: %w", err)
 		}
@@ -510,7 +533,7 @@ func (d *LedgerDelta) processGovernance(
 			ctx,
 			tx,
 			d.Point,
-			currentEpoch,
+			blockEpoch.EpochId,
 			conwayPParams.DRepInactivityPeriod,
 			ls.db,
 			txn,
@@ -524,7 +547,7 @@ func (d *LedgerDelta) processGovernance(
 			ctx,
 			tx,
 			d.Point,
-			currentEpoch,
+			blockEpoch.EpochId,
 			conwayPParams.DRepInactivityPeriod,
 			ls.db,
 			txn,

@@ -571,30 +571,20 @@ func processGapBlocks(
 				err,
 			)
 		}
-		blockPParams, cached := pparamsCache[epoch.EpochId]
-		if !cached {
-			// Byron has no protocol-parameter record and no decode
-			// function; leaving blockPParams nil is correct there, and
-			// it also carries no deposit-bearing certificates.
-			if era := eras.GetEraById(epoch.EraId); era != nil &&
-				era.DecodePParamsFunc != nil {
-				pparams, err := db.GetPParams(
-					epoch.EpochId,
-					era.Id,
-					era.DecodePParamsFunc,
-					nil,
-				)
-				if err != nil {
-					return fmt.Errorf(
-						"loading protocol parameters for gap block at slot %d (epoch %d): %w",
-						block.Slot,
-						epoch.EpochId,
-						err,
-					)
-				}
-				blockPParams = pparams
-			}
-			pparamsCache[epoch.EpochId] = blockPParams
+		paramsEpoch, blockPParams, err := gapBlockParams(
+			db,
+			epochs,
+			epoch,
+			uint(parsedBlock.Era().Id),
+			pparamsCache,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"loading protocol parameters for gap block at slot %d (epoch %d): %w",
+				block.Slot,
+				paramsEpoch.EpochId,
+				err,
+			)
 		}
 		blockConwayPParams := (*conway.ConwayProtocolParameters)(nil)
 		switch params := blockPParams.(type) {
@@ -606,7 +596,7 @@ func processGapBlocks(
 			}
 		case nil:
 		default:
-			if epoch.EraId >= conway.EraIdConway {
+			if paramsEpoch.EraId >= conway.EraIdConway {
 				return fmt.Errorf(
 					"unexpected protocol params %T for gap block at slot %d (epoch %d)",
 					blockPParams,
@@ -623,7 +613,7 @@ func processGapBlocks(
 			txs,
 			offsets,
 			epoch.EpochId,
-			epoch.EraId,
+			paramsEpoch.EraId,
 			blockPParams,
 			blockConwayPParams,
 		); err != nil {
@@ -642,6 +632,44 @@ func processGapBlocks(
 	return nil
 }
 
+// gapBlockParams returns the epoch whose protocol parameters apply to a gap
+// block of blockEraID in epoch, and those parameters. A block of the previous
+// era in an epoch recorded with its successor takes its own era's last epoch,
+// as transaction validation does. Parameters are loaded once per epoch into
+// cache; Byron has no parameter record and decode function, so it yields nil.
+func gapBlockParams(
+	db *database.Database,
+	epochs []models.Epoch,
+	epoch models.Epoch,
+	blockEraID uint,
+	cache map[uint64]lcommon.ProtocolParameters,
+) (models.Epoch, lcommon.ProtocolParameters, error) {
+	if prev, ok := dledger.PreviousEraEpoch(
+		epochs, epoch.EpochId, epoch.EraId, blockEraID,
+	); ok {
+		epoch = prev
+	}
+	if pparams, cached := cache[epoch.EpochId]; cached {
+		return epoch, pparams, nil
+	}
+	var pparams lcommon.ProtocolParameters
+	if era := eras.GetEraById(epoch.EraId); era != nil &&
+		era.DecodePParamsFunc != nil {
+		var err error
+		pparams, err = db.GetPParams(
+			epoch.EpochId,
+			era.Id,
+			era.DecodePParamsFunc,
+			nil,
+		)
+		if err != nil {
+			return epoch, nil, err
+		}
+	}
+	cache[epoch.EpochId] = pparams
+	return epoch, pparams, nil
+}
+
 func processGapBlockTransactions(
 	ctx context.Context,
 	db *database.Database,
@@ -658,6 +686,7 @@ func processGapBlockTransactions(
 	defer txn.Release()
 	var storageIndexOffset uint64
 	for i, tx := range txs {
+		var proposalsValidated bool
 		// Gap blocks are already reflected in the Mithril snapshot's
 		// UTxO set, so input UTxOs are already consumed. Store the TX
 		// record and blob offsets without re-consuming inputs.
@@ -715,8 +744,10 @@ func processGapBlockTransactions(
 					uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec
 					epochId,
 					conwayPParams.GovActionValidityPeriod,
+					pparams,
 					db,
 					txn,
+					&proposalsValidated,
 				); err != nil {
 					return fmt.Errorf(
 						"processing body %d governance proposals: %w",

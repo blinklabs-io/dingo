@@ -406,6 +406,11 @@ var importBoundaryRules = []importBoundaryRule{
 			"ledger/dijkstra_collateral_return_production_test.go": {
 				"mempool",
 			},
+			// Drives a ParameterChange proposal through mempool admission,
+			// live block application, and replay to compare their decisions.
+			"ledger/parameter_change_decisions_test.go": {
+				"mempool",
+			},
 			// Submits Dijkstra transactions through mempool admission, then
 			// through block application, replay and rollback.
 			"ledger/dijkstra_production_paths_fixture_test.go": {

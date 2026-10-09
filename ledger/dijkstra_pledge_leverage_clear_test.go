@@ -189,8 +189,10 @@ func TestDijkstraPledgeLeverageClearProposalThroughProduction(t *testing.T) {
 						0,
 						0,
 						pp.GovActionValidityPeriod,
+						pp,
 						fx.db,
 						txn,
+						nil,
 					)
 				}
 				apply := applyBlock

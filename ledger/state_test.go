@@ -6150,7 +6150,7 @@ func TestLeiosValidationSessionRollsBackStagedCertificateWrites(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
-	ls.publishSnapshotsLocked()
+	publishGovernanceTestEpoch(ls, 0, eras.ConwayEraDesc)
 
 	err = ls.withTxValidationSession(context.Background(), nil, nil, true, func(
 		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error,

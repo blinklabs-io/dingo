@@ -380,15 +380,13 @@ func TestDijkstraBatchAppliesSubtransactionGovernance(t *testing.T) {
 		},
 	}
 	ls := &LedgerState{
-		db: db,
-		currentEpoch: models.Epoch{
-			EpochId: 12,
-		},
+		db:             db,
 		currentPParams: pparams,
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		},
 	}
+	publishGovernanceTestEpoch(ls, 12, eras.DijkstraEraDesc)
 	delta := NewLedgerDelta(
 		ocommon.Point{Slot: 1, Hash: blockHash},
 		uint(dijkstra.EraIdDijkstra),

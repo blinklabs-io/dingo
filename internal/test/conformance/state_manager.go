@@ -950,6 +950,7 @@ func (m *DingoStateManager) ApplyTransaction(
 		drepInactivityPeriod = conwayPP.DRepInactivityPeriod
 	}
 
+	var proposalsValidated bool
 	for levelIndex, level := range levels {
 		storageIndex := idx + uint32(levelIndex) //nolint:gosec
 		if err := m.spendUtxos(txn, level.Inputs(), slot); err != nil {
@@ -1023,8 +1024,10 @@ func (m *DingoStateManager) ApplyTransaction(
 				storageIndex,
 				m.currentEpoch,
 				govActionLifetime,
+				m.protocolParams,
 				m.db,
 				txn,
+				&proposalsValidated,
 			); err != nil {
 				return fmt.Errorf(
 					"process transaction body %d proposals: %w",
