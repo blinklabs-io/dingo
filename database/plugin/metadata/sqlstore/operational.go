@@ -617,10 +617,7 @@ func (s *Store) SetBlockNonces(
 	if err != nil {
 		return err
 	}
-	batchSize := s.dialect.ParameterLimit() / 4
-	if batchSize < 1 {
-		batchSize = 1
-	}
+	batchSize := max(s.dialect.ParameterLimit()/4, 1)
 	for start := 0; start < len(nonces); start += batchSize {
 		end := min(start+batchSize, len(nonces))
 		values := make([]string, end-start)

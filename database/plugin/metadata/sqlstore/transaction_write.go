@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strconv"
 	"strings"
@@ -126,9 +127,7 @@ func (a *transactionBatchAccumulator) checkpoint() transactionBatchCheckpoint {
 			map[string]pendingStakeCredentialDelta,
 			len(a.stakeDeltas),
 		)
-		for key, delta := range a.stakeDeltas {
-			checkpoint.stakeDeltas[key] = delta
-		}
+		maps.Copy(checkpoint.stakeDeltas, a.stakeDeltas)
 	}
 	return checkpoint
 }
@@ -144,9 +143,7 @@ func (a *transactionBatchAccumulator) restore(
 			map[string]pendingStakeCredentialDelta,
 			len(checkpoint.stakeDeltas),
 		)
-		for key, delta := range checkpoint.stakeDeltas {
-			a.stakeDeltas[key] = delta
-		}
+		maps.Copy(a.stakeDeltas, checkpoint.stakeDeltas)
 	}
 }
 
