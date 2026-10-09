@@ -2,7 +2,7 @@ module github.com/blinklabs-io/dingo
 
 go 1.26.5
 
-toolchain go1.26.7
+toolchain go1.26.9
 
 require (
 	cloud.google.com/go/storage v1.68.0
