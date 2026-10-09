@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -40,6 +41,8 @@ type chainSelectionMetrics struct {
 	stalls                *prometheus.CounterVec
 	rollbackRegistrations *prometheus.CounterVec
 	gddDisconnects        prometheus.Counter
+	peerTipRejections     *prometheus.CounterVec
+	plateauDecisions      *prometheus.CounterVec
 }
 
 // registerChainSelectionMetrics registers the chain-selection counters. It runs
@@ -76,6 +79,20 @@ func (n *Node) registerChainSelectionMetrics(r *promutil.Registration) {
 				Help: "peers the Genesis Density Disconnector reported for serving a provably sparser chain, counted whether or not the connection was still open to close",
 			},
 		)),
+		peerTipRejections: promutil.Register(r, prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "dingo_chainselection_peer_tip_rejections_total",
+				Help: "peer tips refused by chain selection as implausible, by the bound that refused them: observed_frontier (delivered frontier too far ahead of the trusted reference) or advertised_tip (advertised tip beyond the bootstrap bound)",
+			},
+			[]string{"reason"},
+		)),
+		plateauDecisions: promutil.Register(r, prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "dingo_chainsync_plateau_decisions_total",
+				Help: "local-tip plateau watchdog decisions, by outcome: reconciled (ledger reconcile repaired the plateau), backlog_not_recycled (ledger-application backlog, chainsync left running) or resync (chainsync client resync requested)",
+			},
+			[]string{"outcome"},
+		)),
 	}
 	for _, reason := range []string{
 		chainSelectionStallNoSelectablePeer,
@@ -91,7 +108,46 @@ func (n *Node) registerChainSelectionMetrics(r *promutil.Registration) {
 	} {
 		metrics.rollbackRegistrations.WithLabelValues(string(outcome))
 	}
+	for _, reason := range []chainselection.PeerTipRejection{
+		chainselection.PeerTipRejectedObservedFrontier,
+		chainselection.PeerTipRejectedAdvertisedTip,
+	} {
+		metrics.peerTipRejections.WithLabelValues(string(reason))
+	}
+	for _, outcome := range []chainsyncrecycler.PlateauOutcome{
+		chainsyncrecycler.PlateauOutcomeReconciled,
+		chainsyncrecycler.PlateauOutcomeBacklogNotRecycled,
+		chainsyncrecycler.PlateauOutcomeResync,
+	} {
+		metrics.plateauDecisions.WithLabelValues(string(outcome))
+	}
 	n.chainSelectionMetrics = metrics
+}
+
+// recordPeerTipRejection counts one peer tip refused as implausible. Safe to
+// call when metrics are disabled.
+func (n *Node) recordPeerTipRejection(
+	reason chainselection.PeerTipRejection,
+) {
+	if n.chainSelectionMetrics == nil {
+		return
+	}
+	n.chainSelectionMetrics.peerTipRejections.
+		WithLabelValues(string(reason)).
+		Inc()
+}
+
+// recordPlateauDecision counts one local-tip plateau watchdog decision. Safe
+// to call when metrics are disabled.
+func (n *Node) recordPlateauDecision(
+	outcome chainsyncrecycler.PlateauOutcome,
+) {
+	if n.chainSelectionMetrics == nil {
+		return
+	}
+	n.chainSelectionMetrics.plateauDecisions.
+		WithLabelValues(string(outcome)).
+		Inc()
 }
 
 // recordChainSelectionStall counts one selected-to-none transition. Safe to

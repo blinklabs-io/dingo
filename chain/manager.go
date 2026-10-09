@@ -69,6 +69,31 @@ type ChainManager struct {
 	// is atomic because a chain stamps under its own c.mutex, not under
 	// cm.mutex.
 	headerSeq atomic.Uint64
+	// headerQueueFullObserver, when set, is called for every header a chain
+	// rejects with ErrHeaderQueueFull.
+	headerQueueFullObserver atomic.Pointer[func()]
+}
+
+// SetHeaderQueueFullObserver installs fn to be called once for every header
+// any chain of this manager rejects with ErrHeaderQueueFull, replacing a
+// previous observer; nil removes it. The call is made with the chain's lock
+// held, so fn must not block or call back into a chain.
+func (cm *ChainManager) SetHeaderQueueFullObserver(fn func()) {
+	if fn == nil {
+		cm.headerQueueFullObserver.Store(nil)
+		return
+	}
+	cm.headerQueueFullObserver.Store(&fn)
+}
+
+// notifyHeaderQueueFull reports one ErrHeaderQueueFull rejection.
+func (cm *ChainManager) notifyHeaderQueueFull() {
+	if cm == nil {
+		return
+	}
+	if fn := cm.headerQueueFullObserver.Load(); fn != nil {
+		(*fn)()
+	}
 }
 
 // nextHeaderSeq stamps the next chain-mutation sequence number shared by every

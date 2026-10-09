@@ -7668,3 +7668,36 @@ func TestMaxQueuedHeadersConcurrentWithSetLedger(t *testing.T) {
 		t.Fatalf("MaxQueuedHeaders() = %d, want %d", got, want)
 	}
 }
+
+func TestHeaderQueueFullObserverCountsRejections(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	mustSetLedger(t, cm, 1)
+	var rejected atomic.Int64
+	cm.SetHeaderQueueFullObserver(func() { rejected.Add(1) })
+	c := cm.PrimaryChain()
+	limit := chain.DefaultMaxQueuedHeaders
+	headers := makeLinkedHeaders(limit+2, 0, 1, "")
+
+	for i := range limit {
+		require.NoError(
+			t,
+			c.AddBlockHeader(context.Background(), headers[i]),
+		)
+	}
+	require.Zero(t, rejected.Load(), "accepted headers must not be counted")
+
+	err = c.AddBlockHeader(context.Background(), headers[limit])
+	require.ErrorIs(t, err, chain.ErrHeaderQueueFull)
+	require.Equal(t, int64(1), rejected.Load())
+	err = c.AddVerifiedBlockHeader(context.Background(), headers[limit+1])
+	require.ErrorIs(t, err, chain.ErrHeaderQueueFull)
+	require.Equal(t, int64(2), rejected.Load())
+
+	cm.SetHeaderQueueFullObserver(nil)
+	err = c.AddBlockHeader(context.Background(), headers[limit])
+	require.ErrorIs(t, err, chain.ErrHeaderQueueFull)
+	require.Equal(t, int64(2), rejected.Load())
+}

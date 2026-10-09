@@ -28,24 +28,30 @@ import (
 )
 
 type stateMetrics struct {
-	blockfetchEventMu     sync.Mutex
-	blockfetchEventStarts map[uint64]time.Time
-	blockfetchEventNextID uint64
-	blockNum              prometheus.Gauge
-	density               prometheus.Gauge
-	epochNum              prometheus.Gauge
-	slotInEpoch           prometheus.Gauge
-	slotNum               prometheus.Gauge
-	forks                 prometheus.Gauge
-	slotClockFallbacks    prometheus.Counter
-	blocksForgedTotal     prometheus.Counter
-	blockForgingLatency   prometheus.Histogram
-	forgingEnabled        prometheus.Gauge
-	nodeStartTime         prometheus.Gauge
-	tipGapSlots           prometheus.Gauge
-	shelleyStartTime      prometheus.Gauge
-	epochLengthSlots      prometheus.Gauge
-	shadowGateDecisions   *prometheus.CounterVec
+	// Sync-progress state; see metrics_sync.go.
+	blockfetchBatchInFlight       atomic.Bool
+	blockfetchContinuationPending atomic.Bool
+	blockfetchConnSelected        atomic.Bool
+	lastBlockAddedUnixNano        atomic.Int64
+	headerQueueFull               prometheus.Counter
+	blockfetchEventMu             sync.Mutex
+	blockfetchEventStarts         map[uint64]time.Time
+	blockfetchEventNextID         uint64
+	blockNum                      prometheus.Gauge
+	density                       prometheus.Gauge
+	epochNum                      prometheus.Gauge
+	slotInEpoch                   prometheus.Gauge
+	slotNum                       prometheus.Gauge
+	forks                         prometheus.Gauge
+	slotClockFallbacks            prometheus.Counter
+	blocksForgedTotal             prometheus.Counter
+	blockForgingLatency           prometheus.Histogram
+	forgingEnabled                prometheus.Gauge
+	nodeStartTime                 prometheus.Gauge
+	tipGapSlots                   prometheus.Gauge
+	shelleyStartTime              prometheus.Gauge
+	epochLengthSlots              prometheus.Gauge
+	shadowGateDecisions           *prometheus.CounterVec
 	// Wall-clock time the ledger apply path spent waiting for a referenced
 	// Leios endorser block, by outcome ("arrived", "timeout", "cancelled" or
 	// "unavailable"). It covers both waits the apply path can take: the
@@ -905,6 +911,10 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		},
 		m.blockfetchEventInProgressSeconds,
 	)
+	m.headerQueueFull = promautoFactory.NewCounter(prometheus.CounterOpts{
+		Name: "dingo_chain_header_queue_full_total",
+		Help: "headers rejected because the chain's header queue was at capacity",
+	})
 	m.blockNum = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_blockNum_int",
 		Help: "current block number",

@@ -913,6 +913,10 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 	// on the protocol's receive goroutine before this insert runs. Recording
 	// the start time anyway would leave an entry whose only deleter has
 	// already fired, so consume the marker it left instead.
+	if o.blockfetchMetrics != nil {
+		o.blockfetchMetrics.requestsIssued.Inc()
+		o.blockfetchMetrics.lastRequestUnixNano.Store(time.Now().UnixNano())
+	}
 	key := blockFetchKey{connId: connId, requestId: requestId}
 	o.blockFetchMutex.Lock()
 	if _, doneEarly := o.blockFetchDoneEarly[key]; doneEarly {
@@ -1051,6 +1055,13 @@ func (o *Ouroboros) blockfetchClientRangeDone(
 		o.blockFetchDoneEarly[key] = struct{}{}
 	}
 	o.blockFetchMutex.Unlock()
+	if o.blockfetchMetrics != nil {
+		if rangeErr == nil {
+			o.blockfetchMetrics.requestsCompletedOK.Inc()
+		} else {
+			o.blockfetchMetrics.requestsCompletedErr.Inc()
+		}
+	}
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
 		// Same per-connection queue as the blocks, so this BatchDone reaches

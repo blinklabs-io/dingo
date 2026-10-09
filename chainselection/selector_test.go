@@ -6326,3 +6326,82 @@ func TestChainSelectorStaleBestPeerReportsRollbackPoint(t *testing.T) {
 	assert.Equal(t, uint64(2), switchEvt.RollbackPoint.Slot)
 	assert.Equal(t, []byte("c2"), switchEvt.RollbackPoint.Hash)
 }
+
+func TestUpdatePeerTipReportsObservedFrontierRejection(t *testing.T) {
+	t.Parallel()
+	var reasons []PeerTipRejection
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+		OnPeerTipRejected: func(r PeerTipRejection) {
+			reasons = append(reasons, r)
+		},
+	})
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
+		BlockNumber: 50000,
+	})
+	require.True(t, cs.UpdatePeerTip(
+		newTestConnectionId(2),
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 100500, Hash: []byte("ok")},
+			BlockNumber: 50500,
+		},
+		nil,
+	))
+	assert.Empty(t, reasons, "an accepted tip must not be reported")
+
+	accepted := cs.UpdatePeerTip(
+		newTestConnectionId(1),
+		ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: math.MaxUint64,
+				Hash: []byte("spoof"),
+			},
+			BlockNumber: math.MaxUint64,
+		},
+		nil,
+	)
+
+	require.False(t, accepted)
+	assert.Equal(
+		t,
+		[]PeerTipRejection{PeerTipRejectedObservedFrontier},
+		reasons,
+	)
+}
+
+func TestHandlePeerRollbackReportsAdvertisedTipRejection(t *testing.T) {
+	t.Parallel()
+	var reasons []PeerTipRejection
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             10,
+		DisableEventSubscriptions: true,
+		OnPeerTipRejected: func(r PeerTipRejection) {
+			reasons = append(reasons, r)
+		},
+	})
+	require.True(t, cs.UpdatePeerTip(
+		newTestConnectionId(1),
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 100, Hash: []byte("bootstrap")},
+			BlockNumber: 100,
+		},
+		nil,
+	))
+
+	cs.HandlePeerRollbackEvent(newRollbackEvent(
+		newTestConnectionId(2),
+		ocommon.Point{Slot: 100, Hash: []byte("bootstrap")},
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 9_000_000, Hash: []byte("inflated")},
+			BlockNumber: 9_000_000,
+		},
+	))
+
+	assert.Equal(
+		t,
+		[]PeerTipRejection{PeerTipRejectedAdvertisedTip},
+		reasons,
+	)
+}

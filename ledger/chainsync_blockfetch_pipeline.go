@@ -233,6 +233,7 @@ func (ls *LedgerState) tryPromoteQueuedBlockfetchLocked() bool {
 		close(ls.chainsyncBlockfetchReadyChan)
 	}
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.metrics.setBatchInFlight(true)
 	ls.chainsyncBlockfetchReadyMutex.Unlock()
 	ls.activeBlockfetchConnId = next.connId
 	ls.activeBlockfetchRequestDone = next.done

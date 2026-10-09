@@ -16,6 +16,7 @@ package chainsyncrecycler
 
 import (
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -2002,4 +2003,154 @@ func TestTickSkipsSecurityParamWhenUnset(t *testing.T) {
 
 	_, _, sets := selector.observed()
 	assert.Equal(t, 0, sets)
+}
+
+// plateauOutcomeRecorder collects the outcomes the watchdog reports.
+type plateauOutcomeRecorder struct {
+	mu       sync.Mutex
+	outcomes []PlateauOutcome
+}
+
+func (p *plateauOutcomeRecorder) record(outcome PlateauOutcome) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.outcomes = append(p.outcomes, outcome)
+}
+
+func (p *plateauOutcomeRecorder) all() []PlateauOutcome {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]PlateauOutcome(nil), p.outcomes...)
+}
+
+func TestTickReportsPlateauOutcomeBacklogNotRecycled(t *testing.T) {
+	t.Parallel()
+	connId := testConnId(8)
+	active := connId
+	ledger := &fakeLedger{
+		tip:                 testTip(100, 50),
+		primaryChainTipSlot: 500,
+		atTip:               true,
+	}
+	state := &fakeChainsyncState{
+		tracked:    []chainsync.TrackedClient{activeClient(connId, 500)},
+		activeConn: &active,
+	}
+	selector := plateauSelector(connId, 500)
+	peerTip := selector.peerTips[connId.String()]
+	require.NotNil(t, peerTip)
+	peerTip.Tip = testTip(^uint64(0), ^uint64(0))
+	peerTip.ObservedTip = testTip(500, 250)
+	rec := &plateauOutcomeRecorder{}
+	r, _ := newTestRecycler(
+		t, ledger, state, selector, newFakePublisher(),
+		Config{OnPlateauDecision: rec.record},
+	)
+	now := time.Now()
+	st := newTestTickState(100, now.Add(-25*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, 100)
+
+	assert.Equal(
+		t,
+		[]PlateauOutcome{PlateauOutcomeBacklogNotRecycled},
+		rec.all(),
+	)
+}
+
+func TestTickReportsPlateauOutcomeResync(t *testing.T) {
+	t.Parallel()
+	connId := testConnId(8)
+	active := connId
+	ledger := &fakeLedger{
+		tip:                 testTip(100, 50),
+		primaryChainTipSlot: 100,
+		atTip:               true,
+	}
+	state := &fakeChainsyncState{
+		tracked:    []chainsync.TrackedClient{activeClient(connId, 100)},
+		activeConn: &active,
+	}
+	selector := plateauSelector(connId, 500)
+	pub := newFakePublisher()
+	rec := &plateauOutcomeRecorder{}
+	r, _ := newTestRecycler(
+		t, ledger, state, selector, pub,
+		Config{OnPlateauDecision: rec.record},
+	)
+	now := time.Now()
+	st := newTestTickState(100, now.Add(-25*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, 100)
+
+	require.Len(t, pub.byType(event.ChainsyncResyncEventType), 1)
+	assert.Equal(t, []PlateauOutcome{PlateauOutcomeResync}, rec.all())
+}
+
+func TestTickReportsPlateauOutcomeReconciled(t *testing.T) {
+	t.Parallel()
+	connId := testConnId(8)
+	active := connId
+	ledger := &fakeLedger{
+		tip:        testTip(100, 50),
+		atTip:      true,
+		reconciled: true,
+	}
+	state := &fakeChainsyncState{
+		tracked:    []chainsync.TrackedClient{activeClient(connId, 100)},
+		activeConn: &active,
+	}
+	selector := plateauSelector(connId, 500)
+	rec := &plateauOutcomeRecorder{}
+	r, _ := newTestRecycler(
+		t, ledger, state, selector, newFakePublisher(),
+		Config{OnPlateauDecision: rec.record},
+	)
+	now := time.Now()
+	st := newTestTickState(100, now.Add(-25*time.Minute))
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, 100)
+
+	assert.Equal(t, []PlateauOutcome{PlateauOutcomeReconciled}, rec.all())
+}
+
+func TestTickReportsNoPlateauOutcomeBeforeThreshold(t *testing.T) {
+	t.Parallel()
+	connId := testConnId(8)
+	active := connId
+	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
+	state := &fakeChainsyncState{
+		tracked:    []chainsync.TrackedClient{activeClient(connId, 100)},
+		activeConn: &active,
+	}
+	selector := plateauSelector(connId, 500)
+	rec := &plateauOutcomeRecorder{}
+	r, _ := newTestRecycler(
+		t, ledger, state, selector, newFakePublisher(),
+		Config{OnPlateauDecision: rec.record},
+	)
+	now := time.Now()
+	st := newTestTickState(100, now.Add(-time.Second))
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, 100)
+
+	assert.Empty(t, rec.all())
 }

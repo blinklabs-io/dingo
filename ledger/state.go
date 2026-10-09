@@ -1872,6 +1872,8 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	// not-started LedgerState would otherwise nil-deref on the metrics
 	// counters.
 	ls.metrics.init(cfg.PromRegistry)
+	ls.registerSyncGauges(cfg.PromRegistry)
+	cfg.ChainManager.SetHeaderQueueFullObserver(ls.metrics.incHeaderQueueFull)
 	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
 	if cfg.BlockPipelineEnabled && cfg.BlockPipelineValidateEnabled &&
 		!cfg.ManualBlockProcessing && ls.SlotsPerKESPeriod() == 0 {

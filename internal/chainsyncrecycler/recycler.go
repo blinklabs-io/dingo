@@ -104,6 +104,23 @@ type ComponentProvider interface {
 	WithLiveComponents(fn func(LiveComponents)) bool
 }
 
+// PlateauOutcome names what the local-tip plateau watchdog did when it fired.
+// The values are bounded so the composition layer can use them as a metric
+// label.
+type PlateauOutcome string
+
+const (
+	// PlateauOutcomeReconciled means the local ledger reconcile repaired a
+	// primary-chain/ledger divergence and the connection was left alone.
+	PlateauOutcomeReconciled PlateauOutcome = "reconciled"
+	// PlateauOutcomeBacklogNotRecycled means the plateau was classified as a
+	// ledger-application backlog and the chainsync stream was left running.
+	PlateauOutcomeBacklogNotRecycled PlateauOutcome = "backlog_not_recycled"
+	// PlateauOutcomeResync means the watchdog requested a chainsync resync of
+	// the selected connection.
+	PlateauOutcomeResync PlateauOutcome = "resync"
+)
+
 // Config holds the recycler's dependencies and timing policy.
 type Config struct {
 	// Components supplies the live node components each tick reads.
@@ -119,6 +136,10 @@ type Config struct {
 	Grace time.Duration
 	// Cooldown is the minimum spacing between recycles of one connection.
 	Cooldown time.Duration
+	// OnPlateauDecision, when set, is called once for every plateau the
+	// watchdog acts on, with what it did. It runs on the tick goroutine and
+	// must not block or call back into the recycler.
+	OnPlateauDecision func(PlateauOutcome)
 }
 
 // Recycler is the chainsync stall recycler background component.
@@ -405,6 +426,13 @@ func isLedgerApplicationBacklog(
 	return applyBacklog >= headerGap
 }
 
+// notePlateauDecision reports a plateau outcome to the configured hook.
+func (r *Recycler) notePlateauDecision(outcome PlateauOutcome) {
+	if r.config.OnPlateauDecision != nil {
+		r.config.OnPlateauDecision(outcome)
+	}
+}
+
 // tick runs one stall check against the live components.
 func (r *Recycler) tick(
 	now time.Time,
@@ -615,6 +643,7 @@ func (r *Recycler) checkLocalTipPlateau(
 		// next tick before forward application has had a chance to advance the
 		// ledger.
 		st.lastProgressAt = now
+		r.notePlateauDecision(PlateauOutcomeReconciled)
 		st.lastRecycled[connKey] = now
 		// Reconciliation reset the plateau clock and recorded cooldown above.
 		// Give ledger replay a chance to resume from the repaired tip before
@@ -658,6 +687,7 @@ func (r *Recycler) checkLocalTipPlateau(
 		// drains.
 		st.lastProgressAt = now
 		delete(st.recycleAt, connKey)
+		r.notePlateauDecision(PlateauOutcomeBacklogNotRecycled)
 		return
 	}
 	// The local reconcile found nothing to repair (or failed), so the stall is
@@ -707,6 +737,7 @@ func (r *Recycler) checkLocalTipPlateau(
 	delete(st.recycleAt, connKey)
 	st.lastRecycled[connKey] = now
 	st.lastProgressAt = now
+	r.notePlateauDecision(PlateauOutcomeResync)
 }
 
 // scheduleStalledRecycles gives every newly stalled client a guarded recycle
