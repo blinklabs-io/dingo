@@ -1547,7 +1547,7 @@ func FirstBlockAtOrAfterSlot(
 	slotNumber uint64,
 ) (models.Block, error) {
 	var ret models.Block
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	err := txn.Do(func(txn *Txn) error {
 		blobTxn := txn.Blob()
 		if blobTxn == nil {

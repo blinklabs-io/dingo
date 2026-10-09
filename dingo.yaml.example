@@ -1130,6 +1130,6 @@
   # snapshotTrustKeyFile: ""
   # Cancel a snapshot (manual or automatic) still holding the commit
   # barrier after this long; commits resume and the partial snapshot is
-  # removed. 0 means no bound
+  # removed. Default: 30s. Set to 0s for no bound.
   # CLI: --db-snapshot-max-commit-pause
-  # snapshotMaxCommitPause: 0s
+  # snapshotMaxCommitPause: 30s

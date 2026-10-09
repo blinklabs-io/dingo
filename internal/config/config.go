@@ -1360,9 +1360,11 @@ type DatabaseLifecycleConfig struct {
 	// SnapshotMaxCommitPause bounds how long a snapshot (manual or
 	// automatic) may hold the commit barrier once acquired. A snapshot still
 	// running at the bound is cancelled and removed, and commits resume.
-	// Zero means no bound.
+	// Zero disables the bound; the default is 30 seconds.
 	SnapshotMaxCommitPause time.Duration `yaml:"snapshotMaxCommitPause"         envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_MAX_COMMIT_PAUSE"`
 }
+
+const defaultSnapshotMaxCommitPause = 30 * time.Second
 
 var configMu sync.RWMutex
 
@@ -1454,7 +1456,8 @@ func newDefaultConfig() *Config {
 		},
 		// Database lifecycle defaults
 		DatabaseLifecycle: DatabaseLifecycleConfig{
-			SnapshotEveryNEpochs: 1,
+			SnapshotEveryNEpochs:   1,
+			SnapshotMaxCommitPause: defaultSnapshotMaxCommitPause,
 		},
 		// Forging defaults
 		ForgeSyncToleranceSlots:          DefaultForgeSyncToleranceSlots,
