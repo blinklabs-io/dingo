@@ -112,7 +112,7 @@ func TestOpCertFromHeader_NonPraosReturnsFalse(t *testing.T) {
 // TestVerifyOpCertColdSignature_RealCardanoCliCert is a known-answer test that
 // pins the opcert signable representation to real cardano output. The values
 // are taken from a real cardano-cli NodeOperationalCertificate
-// (internal/test/devnet/testdata/keys/opcert.cert). The signature verifies only under
+// (internal/devnetkeys/keys/opcert.cert). The signature verifies only under
 // the raw 48-byte OCertSignable representation (KES vkey || counter || period),
 // which is what verifyOpCertColdSignature now verifies by delegating directly
 // to gouroboros' ledger.VerifyOpCertSignature. If this test ever fails, either

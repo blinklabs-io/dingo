@@ -317,6 +317,14 @@
 # CLI: --bark-client-ca-file-path
 # barkClientCaFilePath: ""
 
+# Maximum ArchiveService FetchBlock requests Bark serves at once. ArchiveService
+# takes no client credentials, so this and the per-request reference cap bound
+# the storage work anyone who can reach the listener can cause; a request over
+# the limit is refused rather than queued. 0 selects the default of 16.
+# Can be overridden with DINGO_BARK_ARCHIVE_MAX_CONCURRENT_FETCHES
+# CLI: --bark-archive-max-concurrent-fetches
+# barkArchiveMaxConcurrentFetches: 0
+
 # SHA-256 fingerprints of client certificate DER bytes authorized to invoke
 # destructive DatabaseService RPCs (CreateSnapshot, DeleteSnapshot,
 # VerifySnapshot, Restore, Truncate, CancelOperation). Hex is matched
@@ -1113,8 +1121,18 @@
   # every single one
   # CLI: --db-snapshot-every-n-epochs
   # snapshotEveryNEpochs: 1
+  # File holding a shared secret (at least 16 bytes) that authenticates
+  # snapshot manifests. Snapshots are signed with it and a restore refuses a
+  # manifest that does not verify, so someone who can write to the cloud
+  # destination cannot substitute payloads. It is required when a cloud
+  # destination is configured, and every node that restores another node's
+  # snapshots must use the same secret. Local-only snapshots and restores
+  # may use the unkeyed checksum only when this setting is unset.
+  # Can be overridden with DINGO_DB_LIFECYCLE_SNAPSHOT_TRUST_KEY_FILE
+  # CLI: --db-snapshot-trust-key-file
+  # snapshotTrustKeyFile: ""
   # Cancel a snapshot (manual or automatic) still holding the commit
   # barrier after this long; commits resume and the partial snapshot is
-  # removed. 0 means no bound
+  # removed. Default: 30s. Set to 0s for no bound.
   # CLI: --db-snapshot-max-commit-pause
-  # snapshotMaxCommitPause: 0s
+  # snapshotMaxCommitPause: 30s

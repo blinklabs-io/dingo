@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -663,12 +664,15 @@ type PeerHeaderLookupFunc func(
 type GenesisSelectionStateFunc func() (active bool, window uint64)
 
 type LedgerStateConfig struct {
-	PromRegistry      prometheus.Registerer
-	Logger            *slog.Logger
-	Database          *database.Database
-	ChainManager      *chain.ChainManager
-	EventBus          *event.EventBus
-	CardanoNodeConfig *cardano.CardanoNodeConfig
+	// MaxConcurrentEvaluations bounds transaction evaluations running at
+	// once across every API front end (0 = GOMAXPROCS).
+	MaxConcurrentEvaluations int
+	PromRegistry             prometheus.Registerer
+	Logger                   *slog.Logger
+	Database                 *database.Database
+	ChainManager             *chain.ChainManager
+	EventBus                 *event.EventBus
+	CardanoNodeConfig        *cardano.CardanoNodeConfig
 	// Network is the CLI/YAML/env network selector dingo was started with
 	// (e.g. "mainnet", "preprod", "prime-mainnet"). Shelley genesis alone
 	// cannot distinguish real Cardano mainnet from a foreign chain that
@@ -1030,6 +1034,8 @@ type tipSnapshot struct {
 }
 
 type LedgerState struct {
+	// evalSlots bounds concurrent EvaluateTx calls; nil means unbounded.
+	evalSlots chan struct{}
 	metrics   stateMetrics
 	consensus atomic.Pointer[consensusSnapshot]
 	tip       atomic.Pointer[tipSnapshot]
@@ -1047,6 +1053,12 @@ type LedgerState struct {
 	// take the populated-cache branch on a database that already has epochs,
 	// so without this the operator sees the diagnosis duplicated.
 	preByronPrefixWarned bool
+	// persistedBlockSize caches persistedMaxBlockSize once
+	// persistedBlockSizeLoaded is set; both are guarded by
+	// persistedBlockSizeMu.
+	persistedBlockSizeMu     sync.Mutex
+	persistedBlockSize       uint64
+	persistedBlockSizeLoaded bool
 	// snapshotGeneration is incremented while writers are serialized by Lock.
 	// It lets readers that need both snapshots reject adjacent publications.
 	snapshotGeneration uint64
@@ -1804,6 +1816,9 @@ type EpochRolloverResult struct {
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
+	if cfg.MaxConcurrentEvaluations < 0 {
+		return nil, errors.New("MaxConcurrentEvaluations must not be negative")
+	}
 	if cfg.ChainManager == nil {
 		return nil, errors.New("a ChainManager is required")
 	}
@@ -1837,6 +1852,10 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		validationEnabled:  cfg.ValidateHistorical,
 		plutusEvalCtxCache: eras.NewPlutusEvalContextCache(),
 		byronPBFT:          byronPBFT,
+		evalSlots: make(
+			chan struct{},
+			cmp.Or(cfg.MaxConcurrentEvaluations, runtime.GOMAXPROCS(0)),
+		),
 	}
 	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
 	ls.timeConverter = ls.newTimeConverter()
@@ -8135,6 +8154,11 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// Track pending state changes during transaction
 			var pendingTip ochainsync.Tip
 			var pendingNonce []byte
+			pendingBlockNonces := make(
+				[]models.BlockNonce,
+				0,
+				len(nextBatch[i:end]),
+			)
 			var blocksProcessed int
 			runningNonce := snapshotNonce
 			trackByronPBFT := batchContainsByronBlocks(nextBatch[i:end])
@@ -8484,21 +8508,23 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// Store an applied point for every block. Byron blocks do
 						// not have an evolving nonce, but reconciliation still
 						// needs their durable point to build rollback notifications.
-						err = ls.db.SetBlockNonce(
-							tmpPoint.Hash,
-							tmpPoint.Slot,
-							blockNonce,
-							isCheckpoint,
-							txn,
+						pendingBlockNonces = append(
+							pendingBlockNonces,
+							models.BlockNonce{
+								Hash:         tmpPoint.Hash,
+								Slot:         tmpPoint.Slot,
+								Nonce:        blockNonce,
+								IsCheckpoint: isCheckpoint,
+							},
 						)
-						if err != nil {
-							deltaBatch.Release()
-							return err
-						}
 						if len(blockNonce) > 0 {
 							// Track pending nonce (will be committed after txn succeeds)
 							pendingNonce = blockNonce
 						}
+					}
+					if err := ls.db.SetBlockNonces(pendingBlockNonces, txn); err != nil {
+						deltaBatch.Release()
+						return err
 					}
 					// Apply delta batch
 					applyStart := time.Now()
@@ -12354,6 +12380,92 @@ func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	return ls.loadConsensusSnapshot().currentPParams
 }
 
+// blockFramingAllowance covers the CBOR array headers around a block's header
+// and body sections, which the protocol's header and body size limits do not
+// count.
+const blockFramingAllowance = 64
+
+// MaxBlockSize returns the largest serialized block this chain admits for a
+// stored block of any era: persisted and current header/body limits plus framing,
+// or the Byron genesis block size limit when that is larger. A stored block
+// was admitted under its own era's limits, and Byron main and epoch boundary
+// blocks are bounded by the genesis maxBlockSize rather than the much smaller
+// Shelley-family limits, so the current limits alone would refuse Byron
+// history. It returns 0 when neither limit is known, which callers treat as
+// unknown.
+//
+// The persisted limits are read once. While the ledger runs, a new row is
+// written only by an epoch transition, as the parameters it makes current, so
+// folding in the current limits on each call keeps the bound complete without
+// re-reading the history on every archive download.
+func (ls *LedgerState) MaxBlockSize() uint64 {
+	size := ls.persistedMaxBlockSize()
+	if limits, ok := protocolBlockLimits(ls.GetCurrentPParams()); ok {
+		size = max(size, limits.maxHeaderSize+limits.maxBodySize+blockFramingAllowance)
+	}
+	if nodeConfig := ls.config.CardanoNodeConfig; nodeConfig != nil {
+		if genesis := nodeConfig.ByronGenesis(); genesis != nil &&
+			genesis.BlockVersionData.MaxBlockSize > 0 {
+			size = max(size, uint64(genesis.BlockVersionData.MaxBlockSize))
+		}
+	}
+	return size
+}
+
+// persistedMaxBlockSize returns the largest block limit among the persisted
+// protocol parameters. A failed store read is not remembered, so the next call
+// retries it. Malformed rows are warned about and skipped; a successful scan
+// caches the largest limit it could decode.
+func (ls *LedgerState) persistedMaxBlockSize() uint64 {
+	if ls.db == nil {
+		return 0
+	}
+	ls.persistedBlockSizeMu.Lock()
+	defer ls.persistedBlockSizeMu.Unlock()
+	if ls.persistedBlockSizeLoaded {
+		return ls.persistedBlockSize
+	}
+	var size uint64
+	for _, era := range ls.eraList() {
+		if era.DecodePParamsFunc == nil {
+			continue
+		}
+		rows, err := ls.db.Metadata().ListPParamsForEra(era.Id, nil)
+		if err != nil {
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"failed to read persisted protocol parameters for block size bound",
+					"component", "ledger",
+					"era", era.Name,
+					"error", err,
+				)
+			}
+			return size
+		}
+		for _, row := range rows {
+			params, err := era.DecodePParamsFunc(row.Cbor)
+			if err != nil {
+				if ls.config.Logger != nil {
+					ls.config.Logger.Warn(
+						"failed to decode persisted protocol parameters for block size bound",
+						"component", "ledger",
+						"era", era.Name,
+						"epoch", row.Epoch,
+						"error", err,
+					)
+				}
+				continue
+			}
+			if limits, ok := protocolBlockLimits(params); ok {
+				size = max(size, limits.maxHeaderSize+limits.maxBodySize+blockFramingAllowance)
+			}
+		}
+	}
+	ls.persistedBlockSize = size
+	ls.persistedBlockSizeLoaded = true
+	return size
+}
+
 // PlutusEvalContextCache returns the shared PlutusEvalContextCache script
 // evaluation reuses across every redeemer, transaction, and block this
 // LedgerState validates or evaluates. Returns nil for a bare-constructed
@@ -13200,17 +13312,22 @@ func (ls *LedgerState) GetTransactionsByAddress(
 // GetTransactionsByAddressWithOrder returns transactions
 // involving the given address with explicit ordering.
 func (ls *LedgerState) GetTransactionsByAddressWithOrder(
+	ctx context.Context,
 	addr lcommon.Address,
 	limit int,
 	offset int,
 	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 ) ([]models.Transaction, error) {
 	txs, err := ls.db.GetTransactionsByAddressWithOrder(
-		context.Background(),
+		ctx,
 		addr,
 		limit,
 		offset,
 		order,
+		from,
+		to,
 		nil,
 	)
 	if err != nil {
@@ -13228,11 +13345,16 @@ func (ls *LedgerState) GetTransactionsByAddressWithOrder(
 // CountTransactionsByAddress returns the total number of
 // transactions involving the given address.
 func (ls *LedgerState) CountTransactionsByAddress(
+	ctx context.Context,
 	addr lcommon.Address,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 ) (int, error) {
 	count, err := ls.db.CountTransactionsByAddress(
-		context.Background(),
+		ctx,
 		addr,
+		from,
+		to,
 		nil,
 	)
 	if err != nil {
@@ -13806,6 +13928,11 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 	})
 }
 
+// ErrEvaluationBusy reports that every transaction-evaluation slot is in use.
+// Evaluation runs scripts on the caller's goroutine, so admission is refused
+// outright rather than queued.
+var ErrEvaluationBusy = errors.New("transaction evaluation capacity exhausted")
+
 // EvaluateTx evaluates the scripts in the provided transaction and returns the calculated
 // fee, per-redeemer ExUnits, and total ExUnits.
 //
@@ -13816,14 +13943,22 @@ func (ls *LedgerState) EvaluateTx(
 	return ls.EvaluateTxContext(context.Background(), tx)
 }
 
-// EvaluateTxContext evaluates the scripts in tx and cancels storage work with
-// ctx.
+// EvaluateTxContext evaluates transaction scripts until completion or context
+// cancellation, using ctx to cancel storage work.
 func (ls *LedgerState) EvaluateTxContext(
 	ctx context.Context,
 	tx lcommon.Transaction,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
+	}
+	if ls.evalSlots != nil {
+		select {
+		case ls.evalSlots <- struct{}{}:
+			defer func() { <-ls.evalSlots }()
+		default:
+			return 0, lcommon.ExUnits{}, nil, ErrEvaluationBusy
+		}
 	}
 	// Snapshot mutable state from the lock-free consensus snapshot
 	consensusState := ls.loadConsensusSnapshot()
@@ -13864,6 +13999,7 @@ func (ls *LedgerState) EvaluateTxContext(
 				return err
 			}
 			lv = (&LedgerView{
+				ctx:            ctx,
 				txn:            txn,
 				ls:             ls,
 				epochStartSlot: consensusState.currentEpoch.StartSlot,
@@ -13872,11 +14008,17 @@ func (ls *LedgerState) EvaluateTxContext(
 				pp,
 			).pinSyntheticV2CostModel(synthetic)
 			var err error
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			fee, totalExUnits, redeemerExUnits, err = validationEra.EvaluateTxFunc(
 				tx,
 				lv,
 				pp,
 			)
+			if err == nil {
+				err = ctx.Err()
+			}
 			return err
 		})
 		err = storageFaultOrErr(lv, err)

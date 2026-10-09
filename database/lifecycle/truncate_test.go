@@ -533,6 +533,28 @@ func TestTruncateRemovesBlocksAndIsIdempotentAtTip(t *testing.T) {
 	require.Zero(t, blocksRemoved)
 }
 
+// A truncate removes blocks above the target, so a history-expiry cursor past
+// the target is lowered to it.
+func TestTruncateLowersHistoryExpiryCursor(t *testing.T) {
+	t.Parallel()
+
+	f := buildTestChain(t, 5)
+	require.NoError(t, f.db.SetSyncState(
+		database.HistoryExpiryCursorSyncKey,
+		strconv.FormatUint(f.blocks[4].Slot, 10),
+		nil,
+	))
+
+	_, err := lifecycle.Truncate(
+		context.Background(), f.db, f.blocks[2], 0, false, 0,
+	)
+	require.NoError(t, err)
+
+	got, err := f.db.GetSyncState(database.HistoryExpiryCursorSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, strconv.FormatUint(f.blocks[2].Slot, 10), got)
+}
+
 // TestTruncateRemovesBlobTailAheadOfMetadataTip reproduces the live truncate
 // state where blockfetch has persisted blocks beyond the last block applied to
 // ledger metadata. The operator target can equal the metadata tip while the

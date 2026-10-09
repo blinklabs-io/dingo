@@ -51,6 +51,7 @@ func commitPauseConfig(
 	time.Duration,
 	func() time.Time,
 	func(context.Context) context.Context,
+	func(context.Context, time.Duration) (context.Context, context.CancelFunc),
 	error,
 ) {
 	cfg := manifestConfig{}
@@ -60,12 +61,15 @@ func commitPauseConfig(
 		}
 	}
 	if cfg.maxPause < 0 {
-		return 0, nil, nil, errors.New("maximum commit pause must be >= 0")
+		return 0, nil, nil, nil, errors.New("maximum commit pause must be >= 0")
 	}
 	if cfg.pauseNow == nil {
 		cfg.pauseNow = time.Now
 	}
-	return cfg.maxPause, cfg.pauseNow, cfg.pauseContext, nil
+	if cfg.pauseDeadline == nil {
+		cfg.pauseDeadline = context.WithTimeout
+	}
+	return cfg.maxPause, cfg.pauseNow, cfg.pauseContext, cfg.pauseDeadline, nil
 }
 
 // Snapshot outcomes recorded in the commit-pause histogram's result label.

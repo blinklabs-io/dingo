@@ -661,7 +661,7 @@ func TestAggregatorSignatureValidation(t *testing.T) {
 	// under another party's registration in the aggregate.
 	decoded, err := hex.DecodeString(good.Signature)
 	require.NoError(t, err)
-	claimed, err := parseSTMSingleSignatureBytes(decoded)
+	claimed, err := parseSTMSingleSignatureBytes(decoded, stmMaxLotteryIndices)
 	require.NoError(t, err)
 	claimed.SignerIndex++
 	misindexed := mutate(func(r *registerSignatureRequest) {

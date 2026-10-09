@@ -687,6 +687,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		barkBlobStore, err := bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
 			BaseUrl:                   n.config.barkBaseUrl,
 			BlockDownloadAllowedHosts: n.config.barkBlockDownloadHosts,
+			MaxBlockSize:              state.MaxBlockSize,
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},
@@ -1528,6 +1529,11 @@ func (n *Node) Snapshot(
 			"node database is not open",
 		)
 	}
+	manifestOpts, err := dblifecycle.ManifestOptions(n.config.databaseLifecycle)
+	if err != nil {
+		return lifecycle.Manifest{}, err
+	}
+	manifestOpts = append(manifestOpts, lifecycle.WithMaxCommitPause(n.config.databaseLifecycle.SnapshotMaxCommitPause))
 	return lifecycle.SnapshotToCloud(
 		ctx,
 		n.destinationRegistry,
@@ -1540,9 +1546,7 @@ func (n *Node) Snapshot(
 		n.config.databaseLifecycle.SnapshotCloudDestination,
 		name,
 		description,
-		lifecycle.WithMaxCommitPause(
-			n.config.databaseLifecycle.SnapshotMaxCommitPause,
-		),
+		manifestOpts...,
 	)
 }
 
@@ -1597,6 +1601,13 @@ func (n *Node) Restore(
 	// liveLifecycleMu.
 	n.snapshotMu.Lock()
 	defer n.snapshotMu.Unlock()
+
+	// Resolved before anything is quiesced so an unusable trust key refuses
+	// the restore while the node is still serving.
+	manifestOpts, err := dblifecycle.ManifestOptions(n.config.databaseLifecycle)
+	if err != nil {
+		return lifecycle.Manifest{}, err
+	}
 
 	stagingDir := n.config.dataDir + restoreStagingSuffix
 	if err := os.RemoveAll(stagingDir); err != nil {
@@ -1742,6 +1753,7 @@ func (n *Node) Restore(
 				n.config.cardanoNodeConfig, "", n.config.network,
 			),
 		},
+		manifestOpts...,
 	)
 	if err != nil {
 		_ = os.RemoveAll(stagingDir)
