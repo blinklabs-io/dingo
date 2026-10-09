@@ -443,7 +443,7 @@ func (o *Ouroboros) localstatequeryServerQuery(
 			protocolVersion, _ = conn.ProtocolVersion()
 		}
 	}
-	if session != nil {
+	if session != nil && view != nil {
 		result, err := view.Query(requestCtx, query.Query, protocolVersion)
 		if !errors.Is(err, ledger.ErrQueryViewClosed) {
 			return result, err
