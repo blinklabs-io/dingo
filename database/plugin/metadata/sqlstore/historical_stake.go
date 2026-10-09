@@ -190,6 +190,10 @@ func historicalRewardsBatch(
 	}
 	base := make(map[historicalRewardKey]uint64)
 	predicate, predicateArgs := historicalRewardCredentialPredicate(selected)
+	deltaPredicate, deltaPredicateArgs := historicalRewardCredentialPredicateFor(
+		selected,
+		"d",
+	)
 	rows, err := db.QueryContext(
 		ctx,
 		"SELECT credential_tag, staking_key, reward FROM account WHERE "+predicate,
@@ -235,13 +239,11 @@ func historicalRewardsBatch(
 	if boundarySlot > 0 {
 		withdrawalOp = ">="
 	}
-	withdrawalArgs := append([]any{withdrawalValue}, predicateArgs...)
-	rows, err = db.QueryContext(ctx, `
-SELECT credential_tag, staking_key, id,
-       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = account_reward_delta.tx_hash), added_slot), previous_reward
-FROM account_reward_delta
-WHERE withdrawal = TRUE AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = account_reward_delta.tx_hash), added_slot) `+withdrawalOp+` ? AND (`+predicate+`)
-	ORDER BY credential_tag, staking_key, added_slot, id`, withdrawalArgs...)
+	withdrawalArgs := append([]any{withdrawalValue}, deltaPredicateArgs...)
+	rows, err = db.QueryContext(
+		ctx,
+		historicalRewardWithdrawalQuery(withdrawalOp, deltaPredicate),
+		withdrawalArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -285,15 +287,14 @@ WHERE withdrawal = TRUE AND COALESCE((SELECT lc.slot FROM leios_transaction_cont
 
 	total := make(map[historicalRewardKey]uint64)
 	beforeWithdrawal := make(map[historicalRewardKey]uint64)
-	futureRewardPredicate := `COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = account_reward_delta.tx_hash), added_slot) > ?`
-	creditArgs := make([]any, 0, 1+len(predicateArgs))
+	includePostSnapshot := false
+	creditArgs := make([]any, 0, 2+len(deltaPredicateArgs))
 	creditArgs = append(creditArgs, slotValue)
 	if boundarySlot > 0 {
 		boundaryValue, boundaryErr := checkedInt64(boundarySlot)
 		if boundaryErr != nil {
 			return nil, boundaryErr
 		}
-		futureRewardPredicate = `(COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = account_reward_delta.tx_hash), added_slot) > ? OR (COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = account_reward_delta.tx_hash), added_slot) = ? AND post_snapshot = TRUE))`
 		afterEnactment, err := boundarySnapshotAfterEnactment(
 			ctx,
 			db,
@@ -303,18 +304,17 @@ WHERE withdrawal = TRUE AND COALESCE((SELECT lc.slot FROM leios_transaction_cont
 			return nil, err
 		}
 		if afterEnactment {
-			futureRewardPredicate = `COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = account_reward_delta.tx_hash), added_slot) > ?`
 			creditArgs = []any{boundaryValue}
 		} else {
+			includePostSnapshot = true
 			creditArgs = []any{boundaryValue, boundaryValue}
 		}
 	}
-	creditArgs = append(creditArgs, predicateArgs...)
-	rows, err = db.QueryContext(ctx, `
-SELECT credential_tag, staking_key, id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = account_reward_delta.tx_hash), added_slot), amount
-FROM account_reward_delta
-WHERE withdrawal = FALSE AND `+futureRewardPredicate+` AND (`+predicate+`)
-	ORDER BY credential_tag, staking_key, added_slot, id`, creditArgs...)
+	creditArgs = append(creditArgs, deltaPredicateArgs...)
+	rows, err = db.QueryContext(
+		ctx,
+		historicalRewardCreditQuery(includePostSnapshot, deltaPredicate),
+		creditArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -384,6 +384,58 @@ WHERE withdrawal = FALSE AND `+futureRewardPredicate+` AND (`+predicate+`)
 	return ret, nil
 }
 
+// historicalRewardEffectiveSlot is the slot a reward delta counts at: the
+// Leios transaction context slot when one exists, else the delta's own slot.
+// The LEFT JOINs in the queries below supply lc and tx. The transaction hash
+// index is unique and leios_transaction_context is keyed by transaction_id, so
+// each delta row joins at most one context row.
+const historicalRewardEffectiveSlot = "COALESCE(lc.slot, d.added_slot)"
+
+const historicalRewardDeltaJoins = `
+FROM account_reward_delta d
+LEFT JOIN "transaction" tx ON tx.hash = d.tx_hash
+LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id`
+
+// historicalRewardCreditQuery selects the credits that land after the
+// snapshot slot. The first argument is the slot, repeated a second time when
+// includePostSnapshot is set, followed by the credential predicate arguments.
+//
+// "NOT d.withdrawal" is deliberate: SQLite never uses an index for a negated
+// boolean column, so the planner drives from the credential index without
+// depending on sqlite_stat1, which a from-genesis sync never populates.
+// Rewriting it as "withdrawal = FALSE" lets the planner pick the withdrawal
+// index, which matches nearly every row.
+func historicalRewardCreditQuery(
+	includePostSnapshot bool,
+	credentialPredicate string,
+) string {
+	slotPredicate := historicalRewardEffectiveSlot + " > ?"
+	if includePostSnapshot {
+		slotPredicate = "(" + historicalRewardEffectiveSlot + " > ? OR (" +
+			historicalRewardEffectiveSlot +
+			" = ? AND d.post_snapshot = TRUE))"
+	}
+	return `
+SELECT d.credential_tag, d.staking_key, d.id, ` + historicalRewardEffectiveSlot + `, d.amount` +
+		historicalRewardDeltaJoins + `
+WHERE NOT d.withdrawal AND ` + slotPredicate + ` AND (` + credentialPredicate + `)
+ORDER BY d.credential_tag, d.staking_key, d.added_slot, d.id`
+}
+
+// historicalRewardWithdrawalQuery selects withdrawals at or after the slot.
+// operator is ">" or ">=". withdrawal = TRUE stays an index driver here
+// because only a small fraction of deltas are withdrawals.
+func historicalRewardWithdrawalQuery(
+	operator string,
+	credentialPredicate string,
+) string {
+	return `
+SELECT d.credential_tag, d.staking_key, d.id, ` + historicalRewardEffectiveSlot + `, d.previous_reward` +
+		historicalRewardDeltaJoins + `
+WHERE d.withdrawal = TRUE AND ` + historicalRewardEffectiveSlot + ` ` + operator + ` ? AND (` + credentialPredicate + `)
+ORDER BY d.credential_tag, d.staking_key, d.added_slot, d.id`
+}
+
 // historicalRewardCredentialPredicate builds a bounded, deterministic filter
 // for the credentials participating in one historical stake request.  Reward
 // reconstruction used to scan every account and reward delta in the database,
@@ -392,8 +444,24 @@ WHERE withdrawal = FALSE AND `+futureRewardPredicate+` AND (`+predicate+`)
 func historicalRewardCredentialPredicate(
 	selected map[historicalRewardKey]struct{},
 ) (string, []any) {
+	return historicalRewardCredentialPredicateFor(selected, "")
+}
+
+// historicalRewardCredentialPredicateFor is
+// historicalRewardCredentialPredicate with the columns qualified by alias.
+// Keys are grouped per credential tag into one IN list, so SQLite can search
+// the (credential_tag, staking_key) index per group instead of evaluating a
+// long OR of conjunctions against every row of a different index.
+func historicalRewardCredentialPredicateFor(
+	selected map[historicalRewardKey]struct{},
+	alias string,
+) (string, []any) {
 	if len(selected) == 0 {
 		return "1 = 0", nil
+	}
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
 	}
 	keys := make([]historicalRewardKey, 0, len(selected))
 	for key := range selected {
@@ -405,11 +473,24 @@ func historicalRewardCredentialPredicate(
 		}
 		return keys[i].key < keys[j].key
 	})
-	parts := make([]string, 0, len(keys))
-	args := make([]any, 0, len(keys)*2)
-	for _, key := range keys {
-		parts = append(parts, "(credential_tag = ? AND staking_key = ?)")
-		args = append(args, key.tag, []byte(key.key))
+	var parts []string
+	args := make([]any, 0, len(keys)+2)
+	for start := 0; start < len(keys); {
+		end := start
+		for end < len(keys) && keys[end].tag == keys[start].tag {
+			end++
+		}
+		parts = append(parts, fmt.Sprintf(
+			"(%scredential_tag = ? AND %sstaking_key IN (%s))",
+			prefix,
+			prefix,
+			strings.TrimSuffix(strings.Repeat("?,", end-start), ","),
+		))
+		args = append(args, keys[start].tag)
+		for _, key := range keys[start:end] {
+			args = append(args, []byte(key.key))
+		}
+		start = end
 	}
 	return strings.Join(parts, " OR "), args
 }
