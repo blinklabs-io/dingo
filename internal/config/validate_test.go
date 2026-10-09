@@ -72,6 +72,41 @@ func TestValidateDefaultsPass(t *testing.T) {
 	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
+func TestValidateDevModeForcesStandardProductionAndAPIStorage(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RunMode = RunModeDev
+	cfg.StorageMode = storageModeCore
+	cfg.BlockProducer = false
+	cfg.ShelleyVRFKey = "vrf.skey"
+	cfg.ShelleyKESKey = "kes.skey"
+	cfg.ShelleyOperationalCertificate = "opcert.cert"
+
+	require.NoError(t, cfg.Validate(RunModeServe))
+	assert.Equal(t, storageModeAPI, cfg.StorageMode)
+	assert.True(t, cfg.BlockProducer)
+}
+
+func TestValidateDevModeRequiresBlockProducerCredentials(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RunMode = RunModeDev
+	cfg.BlockProducer = false
+
+	err := cfg.Validate(RunModeDev)
+	require.ErrorContains(t, err, "blockProducer enabled but missing required key paths")
+	assert.True(t, cfg.BlockProducer)
+}
+
+func TestValidateOneShotCommandLeavesConfiguredDevModeAlone(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RunMode = RunModeDev
+	cfg.StorageMode = storageModeCore
+	cfg.BlockProducer = false
+
+	require.NoError(t, cfg.Validate(RunModeDatabase))
+	assert.Equal(t, storageModeCore, cfg.StorageMode)
+	assert.False(t, cfg.BlockProducer)
+}
+
 func TestValidateTokenRegistryAggregateBounds(t *testing.T) {
 	t.Parallel()
 	tests := map[string]struct {

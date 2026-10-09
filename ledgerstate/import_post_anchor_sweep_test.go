@@ -38,9 +38,9 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 
 	const (
-		belowSlot  = uint64(500)
-		anchorSlot = uint64(1_000)
-		aboveSlot  = uint64(1_500)
+		belowSlot  = uint64(99_500)
+		anchorSlot = uint64(100_000)
+		aboveSlot  = uint64(101_000)
 	)
 	tipHash := make([]byte, 32)
 	otherHash := bytes.Repeat([]byte{0x5a}, 32)
@@ -61,7 +61,7 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 	)
 	require.NoError(t, meta.SetNetworkState(1, 2, belowSlot, nil))
 	require.NoError(t, meta.SetNetworkState(3, 4, aboveSlot, nil))
-	require.NoError(t, meta.AddNetworkDonation(belowSlot, 100, 7, nil))
+	require.NoError(t, meta.AddNetworkDonation(belowSlot, 99, 7, nil))
 	require.NoError(t, meta.AddNetworkDonation(anchorSlot, 100, 8, nil))
 	require.NoError(t, meta.AddNetworkDonation(aboveSlot, 101, 9, nil))
 
@@ -71,7 +71,7 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 			Database: db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
-				Epoch:               100,
+				Epoch:               anchorSlot / 1_000,
 				EraIndex:            EraConway,
 				EraBounds:           make([]EraBound, EraConway+1),
 				EpochNonce:          nonce,
@@ -132,8 +132,8 @@ func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 
 	const (
-		anchorSlot = uint64(1_000)
-		aboveSlot  = uint64(1_500)
+		anchorSlot = uint64(100_000)
+		aboveSlot  = uint64(101_000)
 	)
 	tipHash := make([]byte, 32)
 	nonce := make([]byte, 32)
@@ -154,7 +154,7 @@ func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State: &RawLedgerState{
-			Epoch:               100,
+			Epoch:               anchorSlot / 1_000,
 			EraIndex:            EraConway,
 			EraBounds:           make([]EraBound, EraConway+1),
 			EpochNonce:          nonce,

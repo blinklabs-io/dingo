@@ -258,6 +258,19 @@ command wrapper and package documentation. For stable release tags, the
 release workflow stamps its version, verifies the finalized release asset and
 publishes it only after release finalization.
 
+`dingo devnet` is a convenience composition around the normal node startup. It
+copies the embedded single-node DevNet configuration and test keys into a
+private temporary directory, refreshes the Byron and Shelley start times, and
+starts the same executable with dev mode and block production enabled. The
+child process runs the ordinary `serveRun` and `internal/node` composition with
+an isolated database and no configured peers. The command forwards shutdown
+signals and removes its temporary directory after the node stops; the npm
+wrapper passes `devnet` through to the same binary command. Supplying
+`--data-dir` keeps the generated configuration and database for the next run;
+`--reset` rebuilds those managed paths with fresh genesis start times. The CLI
+holds an exclusive state-directory lock until the child exits and rewrites the
+path-bearing node configuration when reusing copied state.
+
 Dingo's architecture is built on several key principles:
 
 1. Modular component design using dependency injection and composition
@@ -2918,7 +2931,7 @@ Interfaces:
 
 `database/lifecycle/` implements point-in-time database snapshots, restore from a snapshot, and truncation to an earlier chain point (see `DATABASE.md` for the manifest format, plugin-interface, and cloud-destination details). It is a pure library over `*database.Database` with no node-composition knowledge; `internal/dblifecycle` supplies the node-facing orchestration. Every snapshot is always written locally; if `databaseLifecycle.snapshotCloudDestination` is set (an `s3://` or `gcs://` URI), `lifecycle.SnapshotToCloud` additionally mirrors it there via a build-tag-gated (`dingo_extra_plugins`) `CloudDestination` implementation, and `lifecycle.Restore` accepts that same URI as its source, downloading into a temp directory first — this is also how a snapshot taken on one node can be restored onto another without sharing a filesystem.
 
-`lifecycle.WithMaxCommitPause` bounds how long `Snapshot` holds the commit barrier. The deadline starts after the barrier is acquired and covers the snapshot-state reads and both backups. A stalled state read releases the barrier at cancellation, and its read goroutine finishes independently. A cancelled backup keeps the barrier until both providers return, so cross-store consistency holds even when a provider observes cancellation late. `databaseLifecycle.snapshotMaxCommitPause` sets the bound for the CLI, Bark and automatic snapshots; zero is unbounded. `dingo_snapshot_commit_pause_seconds{result}` and `dingo_snapshot_bytes_written_total{store}` record the hold and the bytes each backup wrote.
+`lifecycle.WithMaxCommitPause` bounds how long `Snapshot` holds the commit barrier. The deadline starts after the barrier is acquired and covers the snapshot-state reads and both backups. A stalled state read releases the barrier at cancellation, and its read goroutine finishes independently. On cancellation, the barrier is released immediately and the operation waits for both providers to stop before discarding partial output; no manifest is published. A backup failure cancels its peer and also releases the barrier before that cleanup wait. `databaseLifecycle.snapshotMaxCommitPause` sets the bound for the CLI, Bark and automatic snapshots; zero is unbounded. `dingo_snapshot_commit_pause_seconds{result}` and `dingo_snapshot_bytes_written_total{store}` record the hold and the bytes each backup wrote.
 
 #### Recoverable remote live restore
 
@@ -2950,7 +2963,7 @@ reinitialization, then calls `Commit`; a later swap failure can still call
 `Rollback` and restore the external pair before the node resumes.
 
 - `dblifecycle.Service` is the single entry point the `dingo database snapshot|restore|truncate` CLI commands (`cmd/dingo/database.go`) call. By default it opens its own `*database.Database` against the configured data directory the same way `load`/`mithril` do (offline mode) — this must not run against a data directory a `dingo serve` process currently has open. `Service.SetLiveNode` (`internal/dblifecycle/service.go`) optionally binds it to a running `*dingo.Node` instead (see below), for restore/truncate against a live node.
-- `dblifecycle.Manager` (constructed in `node.go` alongside, and distinct from, the stake-snapshot `snapshot.Manager`) captures automatic snapshots at epoch boundaries when `databaseLifecycle.snapshotEnabled` is configured. It subscribes to `epoch.transition` on the EventBus rather than the ledger's synchronous epoch-boundary hook, since a multi-gigabyte backup must never run inside the ledger's write transaction; both Badger's backup and SQLite's `VACUUM INTO` are non-blocking for concurrent writers, so no node quiesce is needed for a snapshot. The two backup calls are not, however, atomic with respect to each other: each is independently MVCC-consistent as of whenever it runs, but a commit landing between the blob backup and the metadata backup would write its commit timestamp to one store's backup and not the other's, and the restored copy would fail `Database.checkCommitTimestamp`'s cross-store validation. `lifecycle.Snapshot` runs the two backup calls concurrently (in separate goroutines, joined via a `sync.WaitGroup`), not sequentially, bounding the pause below by the slower call rather than their sum. `database.Database.PauseCommitsContext` closes the consistency window — every read-write `Txn` that opens a metadata write transaction holds the shared side from construction through `Commit`/`Rollback`/`Release` (not just around `Commit`: the metadata plugin's single-connection write pool means an open-but-uncommitted transaction already holds the resource `Snapshot`'s `VACUUM INTO` needs, so guarding only `Commit` could let `PauseCommitsContext` acquire its lock mid-transaction and deadlock), `Snapshot` takes the exclusive side around both concurrent backup calls — pausing new such read-write transactions (not reads, and not a quiesce: nothing is torn down or disconnected) for that span. A blob-only `Txn` (`NewBlobOnlyTxn`) deliberately does not participate: unlike SQLite, Badger natively supports concurrent read-write access, so a blob-only `Txn` never holds the single metadata connection the barrier protects and never writes the commit timestamp it keeps consistent, and it can still mutate the blob store while a `Snapshot`'s pause is in effect — safe because badger's own `Backup` is independently MVCC-consistent as of whenever it runs, so it does not depend on blob writes being paused the way the cross-store commit-timestamp check depends on metadata writes being paused. `PauseCommitsContext`, not the older non-cancellable `PauseCommits`, is what `Snapshot` calls, so a caller can give up on a snapshot stuck waiting behind a long-running write transaction instead of blocking indefinitely. S3 and GCS blob providers have no equivalent version-capture primitive: their backup path walks remote objects, so the manager rejects `snapshotEnabled` with either as the primary blob provider rather than allowing an automatic epoch transition to hold the commit barrier for an unbounded time. Badger's native backup API likewise has no public split between capturing an MVCC read version and streaming that version, so the manager rejects `snapshotEnabled` for a Badger primary provider too; manual CLI/Bark snapshots remain available for an operator who explicitly accepts the full backup duration. This does not change the manual CLI/Bark snapshot path, whose caller explicitly chooses that operation. `pruneOldSnapshots` checks `lifecycle.IsCloudMirroredTo` before deleting a local directory past retention when a cloud destination is configured: a snapshot whose upload never actually succeeded (no valid `.cloud-mirrored` marker for the currently configured destination) is left in place for a later retry scan to heal, rather than deleted alongside a same-named remote object that was never actually written — retention no longer strictly bounds local disk for a never-mirrored snapshot, a deliberate tradeoff against silently losing its only copy. `databaseLifecycle.snapshotCloudDestinationPrefix` (optional) is joined onto `snapshotCloudDestination` for every automatic-snapshot cloud operation via `Manager.effectiveCloudDestination`; it must be one safe path segment (not `.`, `..`, or a value containing `/` or `\`) so it cannot escape to a sibling location. Multiple nodes sharing one configured cloud destination without distinct prefixes would otherwise upload the same epoch-N object concurrently, risking one node's manifest paired with another's blob/metadata backup — `Start` logs a warning when a cloud destination is configured with no prefix set.
+- `dblifecycle.Manager` (constructed in `node.go` alongside, and distinct from, the stake-snapshot `snapshot.Manager`) captures automatic snapshots at epoch boundaries when `databaseLifecycle.snapshotEnabled` is configured. It subscribes to `epoch.transition` on the EventBus rather than the ledger's synchronous epoch-boundary hook, since a multi-gigabyte backup must never run inside the ledger's write transaction; both Badger's backup and SQLite's `VACUUM INTO` are non-blocking for concurrent writers, so no node quiesce is needed for a snapshot. The two backup calls are not, however, atomic with respect to each other: each is independently MVCC-consistent as of whenever it runs, but a commit landing between the blob backup and the metadata backup would write its commit timestamp to one store's backup and not the other's, and the restored copy would fail `Database.checkCommitTimestamp`'s cross-store validation. `lifecycle.Snapshot` runs the two backup calls concurrently (in separate goroutines, collecting results through a tagged result channel), not sequentially; a successful snapshot holds the commit barrier through the slower backup, while failure or cancellation releases it before waiting for provider cleanup. `database.Database.PauseCommitsContext` closes the consistency window — every read-write `Txn` that opens a metadata write transaction holds the shared side from construction through `Commit`/`Rollback`/`Release` (not just around `Commit`: the metadata plugin's single-connection write pool means an open-but-uncommitted transaction already holds the resource `Snapshot`'s `VACUUM INTO` needs, so guarding only `Commit` could let `PauseCommitsContext` acquire its lock mid-transaction and deadlock), `Snapshot` takes the exclusive side around both concurrent backup calls — pausing new such read-write transactions (not reads, and not a quiesce: nothing is torn down or disconnected) for that span. A blob-only `Txn` (`NewBlobOnlyTxn`) deliberately does not participate: unlike SQLite, Badger natively supports concurrent read-write access, so a blob-only `Txn` never holds the single metadata connection the barrier protects and never writes the commit timestamp it keeps consistent, and it can still mutate the blob store while a `Snapshot`'s pause is in effect — safe because badger's own `Backup` is independently MVCC-consistent as of whenever it runs, so it does not depend on blob writes being paused the way the cross-store commit-timestamp check depends on metadata writes being paused. `PauseCommitsContext`, not the older non-cancellable `PauseCommits`, is what `Snapshot` calls, so a caller can give up on a snapshot stuck waiting behind a long-running write transaction instead of blocking indefinitely. S3 and GCS blob providers have no equivalent version-capture primitive: their backup path walks remote objects, so the manager rejects `snapshotEnabled` with either as the primary blob provider rather than allowing an automatic epoch transition to hold the commit barrier for an unbounded time. Badger's native backup API likewise has no public split between capturing an MVCC read version and streaming that version, so the manager rejects `snapshotEnabled` for a Badger primary provider too; manual CLI/Bark snapshots remain available for an operator who explicitly accepts the full backup duration. This does not change the manual CLI/Bark snapshot path, whose caller explicitly chooses that operation. `pruneOldSnapshots` checks `lifecycle.IsCloudMirroredTo` before deleting a local directory past retention when a cloud destination is configured: a snapshot whose upload never actually succeeded (no valid `.cloud-mirrored` marker for the currently configured destination) is left in place for a later retry scan to heal, rather than deleted alongside a same-named remote object that was never actually written — retention no longer strictly bounds local disk for a never-mirrored snapshot, a deliberate tradeoff against silently losing its only copy. `databaseLifecycle.snapshotCloudDestinationPrefix` (optional) is joined onto `snapshotCloudDestination` for every automatic-snapshot cloud operation via `Manager.effectiveCloudDestination`; it must be one safe path segment (not `.`, `..`, or a value containing `/` or `\`) so it cannot escape to a sibling location. Multiple nodes sharing one configured cloud destination without distinct prefixes would otherwise upload the same epoch-N object concurrently, risking one node's manifest paired with another's blob/metadata backup — `Start` logs a warning when a cloud destination is configured with no prefix set.
 
 `Txn.Commit` owns its transaction lock and shared barrier hold through one
 function-scope cleanup. A storage-provider panic releases both before `Txn.Do`
@@ -3809,17 +3822,15 @@ every source it reads is local, so a header rejection there would recycle the
 honest peer that served the header rather than re-verifying it once the
 parameters resolve.
 The in-memory summary reads the same configured era safe zone and
-`TransitionInfo` as the NtC era-history query, but the two horizons are not
-interchangeable: the NtC query answers a point in time, while the live summary
-must stay ahead of header processing. An unknown transition is bounded in both
+`TransitionInfo` as the NtC era-history query. An unknown transition is bounded
 from the applied tip by the era's stability window (`3k/f` for Shelley and
-later). An impossible transition diverges — the NtC query reports the confirmed
-current-epoch end measured from the era start, whereas the live summary treats
-it as unknown and rolls the safe zone forward from the tip, so live slot
-processing can cross a confirmed same-era epoch boundary. A known transition is
-bounded at the announced era boundary for the NtC query, while the live summary
-additionally appends the successor era starting at that boundary so the header
-horizon reaches past the transition. This is required for liveness: the rollover
+later). Reaching an epoch's final stability window does not make a transition
+impossible; the bound continues through the next epoch when the safe zone
+crosses the boundary. `TransitionImpossible` is reserved for a final era with
+an indefinite safe zone, or for an unreached future era while reconstructing a
+known transition. A known transition bounds the current era at the announced
+boundary and appends the successor era starting there so the header horizon
+reaches past the transition. This is required for liveness: the rollover
 into the first post-boundary epoch is deterministic within the stability window,
 so its header can be verified, and without the extra epoch the gate would reject
 that first header and the node could never apply the block that consumes the
@@ -3844,13 +3855,11 @@ finite, a header past it fails with
 `hardfork.ErrPastHorizon` before `ensureEpochForSlot` can extend the forecasted
 epoch/nonce cache.
 
-A known transition (`TransitionKnown`) is set by one of four
+A known transition (`TransitionKnown`) is set by one of three
 `ls.evaluateXXX` methods, run in this order at every block-apply tip update,
 startup, and (a rollback-surviving subset of them) rollback:
 `evaluateTriggerAtEpoch` (the `TestXHardForkAtEpoch` config override, for the
-era's `TriggerAtEpoch` kind), `evaluateTransitionImpossible` (promotes to
-`TransitionImpossible` once the ordinary safe zone already reaches the
-current epoch's end), `evaluateProtocolVersionBump` (the era's
+era's `TriggerAtEpoch` kind), `evaluateProtocolVersionBump` (the era's
 `TriggerAtVersion` kind: every historical Cardano hard fork before Conway's
 CIP-1694 governance, detected by peeking -- via
 `Database.ForecastPParamUpdates`, read-only, no enactment -- whether a
@@ -3858,6 +3867,8 @@ protocol-parameter update already meeting the configured genesis-key quorum
 would bump the protocol major version into a later era at the next epoch
 boundary), and `evaluateHardForkInitiationStability` (the Conway+
 CIP-1694 `HardForkInitiation` governance action, post-voting-deadline only).
+`evaluateTransitionImpossible` separately recognizes only a final era whose
+safe zone is indefinite.
 Each era's `NextEraTrigger` kind is exactly one of `TriggerAtEpoch`,
 `TriggerAtVersion`, or `TriggerNotDuringThisExecution` (the final configured
 era), so `evaluateTriggerAtEpoch` and `evaluateProtocolVersionBump` never
@@ -13834,6 +13845,18 @@ the first two epochs of a new era has set or go in the era before it, with a
 different boundary slot and epoch length. An epoch it cannot place at all is
 skipped rather than seeded from a guessed window.
 
+Before any snapshot phase mutates the database, import validates the complete
+era-bound sequence against the node configuration. The sequence must contain
+every era through the snapshot's current era, begin at slot 0 and epoch 0, and
+place each advancing era exactly after the preceding era's configured whole
+epochs. Consecutive zero-duration eras may share the same slot and epoch
+boundary, as they do on preview. Missing bounds, extraction failures, unknown
+era parameters, gaps and overlaps abort the import. The snapshot tip must also
+fall within the half-open slot range of its declared current epoch. Epoch
+history therefore cannot be committed with a later era treated as the chain's
+time origin, with an omitted interval between eras, or with an attacker-sized
+epoch range detached from the tip.
+
 Block counts are seeded, because they cannot be derived. A bootstrap applies no
 block at or below its anchor, so there is no imported chain for
 `rewardBlockCounts` to scan: `CountPoolBlocksInSlotRange` raises its start slot
@@ -15462,6 +15485,13 @@ embedder that builds a `LedgerStateConfig` directly and skips validation.
   defense in depth and adds the `MaxKESEvolutions` expiry check the generic
   stage cannot perform. OpCert counter monotonicity remains a stateful
   read-before-write check in `ledgerProcessBlock`.
+
+The generic stage receives no protocol parameters or ledger state, so
+`blockPipelineVerifyConfig` skips its body-hash, transaction, stake-pool, and
+block-limit checks. The pipeline's decode stage has already checked the body
+hash; the other rules, including the Conway per-block reference-script total,
+run in `ledgerProcessBlock`. Left on, the block-limit
+step rejects every Conway block that carries a transaction.
 
 `NewLedgerState` fails startup when this stage is enabled without a nonzero
 Shelley `slotsPerKESPeriod`; otherwise the generic stage would reject every

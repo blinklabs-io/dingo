@@ -205,6 +205,7 @@ func MusashiPrototypeNetwork(network string, networkMagic uint32) bool {
 // the configured runMode, so cmd/dingo passes the mode reflecting what
 // the command does. It governs which listeners and sources are required.
 func (c *Config) Validate(effectiveMode RunMode) error {
+	c.ApplyRunModeOverrides(effectiveMode)
 	return c.validate(effectiveMode, minBindablePort())
 }
 
@@ -336,10 +337,10 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	//     has the container replaced mid-download;
 	//   - bark: serving modes only (not storage-gated);
 	//   - UTxORPC, Blockfrost, Kupo, Mesh, Midnight: serving modes under API
-	//     storage. Dev mode forces API storage on at startup, and node.Run
-	//     keys that off the *configured* runMode — `dingo serve` with
-	//     runMode "dev" still runs dev — so the configured mode is
-	//     consulted alongside the effective one.
+	//     storage. ApplyRunModeOverrides forces API storage for a serving
+	//     dev-mode config before validation; `dingo serve` with runMode "dev"
+	//     still runs dev, so the configured mode is consulted alongside the
+	//     effective one.
 	// The load and read-only Mithril invocations start no listeners, so
 	// their ports may be unset (0) and are not checked.
 	serving := effectiveMode.RequiresListeners()

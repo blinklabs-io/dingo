@@ -785,6 +785,7 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 }
 
 func (c *Config) syncCompatFields() {
+	c.cfg.ApplyRunModeOverrides(c.cfg.RunMode)
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath

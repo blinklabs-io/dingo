@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/settingsresolve"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"go.uber.org/automaxprocs/maxprocs"
 )
 
@@ -258,6 +259,27 @@ func closeProfileFile(stderr io.Writer, f *os.File, kind string) {
 	}
 }
 
+func rejectUnsupportedDevnetRootFlags(cmd *cobra.Command) error {
+	var unsupported []string
+	rootFlags := cmd.Root().PersistentFlags()
+	// Devnet-local flags can shadow root flags with the same name, such as --data-dir.
+	localFlags := cmd.LocalNonPersistentFlags()
+	rootFlags.VisitAll(func(flag *pflag.Flag) {
+		if flag.Name != "debug" &&
+			localFlags.Lookup(flag.Name) == nil &&
+			cmd.Flags().Changed(flag.Name) {
+			unsupported = append(unsupported, "--"+flag.Name)
+		}
+	})
+	if len(unsupported) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"dingo devnet does not support root flags: %s",
+		strings.Join(unsupported, ", "),
+	)
+}
+
 func main() {
 	// run's body executes as a normal function return -- not os.Exit --
 	// specifically so its deferred CPU-profile cleanup always runs before
@@ -416,6 +438,12 @@ Database Workers:
 		if isInformationalCommand(top) {
 			return nil
 		}
+		// The devnet command builds an isolated runtime config and invokes this
+		// binary again. Loading the caller's config here would make that shortcut
+		// depend on whatever node configuration happens to be in the working dir.
+		if top != nil && top.Name() == "devnet" {
+			return rejectUnsupportedDevnetRootFlags(cmd)
+		}
 
 		cfg, err := config.LoadConfig(configFile)
 		if err != nil {
@@ -485,6 +513,7 @@ Database Workers:
 	rootCmd.AddCommand(loadCommand())
 	rootCmd.AddCommand(listCommand())
 	rootCmd.AddCommand(versionCommand())
+	rootCmd.AddCommand(devnetCommand())
 	rootCmd.AddCommand(mithrilCommand())
 	rootCmd.AddCommand(syncCommand())
 	rootCmd.AddCommand(databaseCommand())
