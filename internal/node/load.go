@@ -776,6 +776,8 @@ func LoadWithDB(
 			// must match serve mode (node.go) on replay of the same DB.
 			DelegatorInactivityEnabled: cfg.DelegatorInactivityEnabled,
 			DelegatorInactivity:        cfg.DelegatorInactivity,
+			// Load replays unvalidated blocks, the path this setting batches.
+			ApplyRowBatchingEnabled: cfg.LedgerApplyRowBatchingEnabled,
 			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
 				WorkerPoolSize: cfg.DatabaseWorkers,
 				TaskQueueSize:  cfg.DatabaseQueueSize,

@@ -15596,7 +15596,8 @@ not incremented in place from dingo's side.
 **Batched apply for unvalidated blocks.**
 `LedgerStateConfig.ApplyRowBatchingEnabled` (config
 `ledgerApplyRowBatchingEnabled` / `DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED` /
-`--ledger-apply-row-batching-enabled`; default off) changes only how
+`--ledger-apply-row-batching-enabled`; default off; honoured by serve mode
+and by `dingo load`) changes only how
 `LedgerDeltaBatch.apply` (`ledger/delta.go`) writes the deltas that blocks
 which are not validated accumulate during a chunk. With it set, each apply
 creates one `database.BatchAccumulator`, writes every transaction with
