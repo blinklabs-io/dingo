@@ -437,8 +437,9 @@ func (s *Store) evictTxStmts(tx *sql.Tx) {
 // closed by database/sql itself when the transaction's context is cancelled,
 // before Commit or Rollback evicts it, so a later call through the memoized
 // statement fails with this error instead of the transaction's own
-// (context.Canceled or sql.ErrTxDone). queryRowCached and execCached retry
-// uncached in that case so callers see the same error an uncached call gives.
+// (context.Canceled or sql.ErrTxDone). queryRowCached, execCached and
+// queryRowsCached retry uncached in that case so callers see the same error
+// an uncached call gives.
 func isClosedStmtErr(err error) bool {
 	return err != nil && err.Error() == "sql: statement is closed"
 }
@@ -584,14 +585,15 @@ func (s *Store) queryRowsCached(
 			s.sqlOperations.WithLabelValues(op).Inc()
 		}
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
-		if s.sqlQueryDuration == nil {
-			return stmt.QueryContext(ctx, args...)
-		}
 		start := time.Now()
 		rows, err := stmt.QueryContext(ctx, args...)
-		s.sqlQueryDuration.WithLabelValues(op, name).
-			Observe(time.Since(start).Seconds())
-		return rows, err
+		if s.sqlQueryDuration != nil {
+			s.sqlQueryDuration.WithLabelValues(op, name).
+				Observe(time.Since(start).Seconds())
+		}
+		if !isClosedStmtErr(err) {
+			return rows, err
+		}
 	}
 	return db.QueryContext(ctx, query, args...)
 }

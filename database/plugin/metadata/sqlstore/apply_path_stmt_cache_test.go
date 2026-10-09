@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"context"
 	"testing"
 
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
@@ -137,5 +138,44 @@ func TestCachedStatementsFallBackWhenTxScopedStmtClosed(t *testing.T) {
 	pool, err = store.GetPool(lcommon.PoolKeyHash{0x01}, true, txn)
 	require.NoError(t, err)
 	require.Nil(t, pool)
+	require.NoError(t, txn.Commit())
+}
+
+// TestQueryRowsCachedFallsBackWhenTxScopedStmtClosed is the multi-row
+// counterpart: queryRowsCached serves the batched UTxO consume and address
+// input queries, and must also retry uncached once the transaction-scoped
+// statement it memoized has been closed.
+func TestQueryRowsCachedFallsBackWhenTxScopedStmtClosed(t *testing.T) {
+	t.Parallel()
+	store, _ := newRecordingSQLiteStore(t)
+	txn := store.Transaction(t.Context())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	sqlTransaction, ok := txn.(*sqlTxn)
+	require.True(t, ok)
+	cached, ok := store.lookupCachedStmt(getUtxoSpendStateQuery)
+	require.True(t, ok)
+
+	query := func() error {
+		return store.withWriteTransaction(
+			txn,
+			func(db queryer, ctx context.Context) error {
+				rows, err := store.queryRowsCached(
+					ctx, db, getUtxoSpendStateQuery, []byte{0x01}, 0,
+				)
+				if err != nil {
+					return err
+				}
+				defer rows.Close()
+				for rows.Next() {
+				}
+				return rows.Err()
+			},
+		)
+	}
+	require.NoError(t, query())
+	require.NoError(t, store.txScopedStmt(
+		t.Context(), sqlTransaction.tx, cached,
+	).Close())
+	require.NoError(t, query())
 	require.NoError(t, txn.Commit())
 }
