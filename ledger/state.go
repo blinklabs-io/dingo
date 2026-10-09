@@ -2124,6 +2124,80 @@ func (ls *LedgerState) boundaryEraForBlock(
 	return headerEraID, len(path) == 2
 }
 
+// errBoundaryEraNotAuthorized marks an epoch-boundary block encoded in an era
+// the ledger has not moved into.
+var errBoundaryEraNotAuthorized = errors.New(
+	"boundary block era not authorized by the ledger",
+)
+
+// checkBoundaryEraAuthorized refuses an era advancement the ledger did not
+// authorize. The era a boundary moves into is decided by the ledger state: the
+// protocol version of the parameters after the epoch's updates were enacted, or
+// a configured TriggerAtEpoch for the era. The era a block is encoded in does
+// not decide it, so a block from an era beyond that is rejected, as the
+// reference HFC does with HardForkLedgerErrorWrongEra
+// (Shelley/ShelleyHFC.hs shelleyTransition decides the era end from the
+// updated pparams).
+//
+// newPParams must be the parameters after the boundary's enactment. Byron is
+// exempt: it carries no protocol version, and validateByronShelleyTransition
+// gates that boundary. A parameter set that yields no version cannot be judged
+// and is not refused.
+func (ls *LedgerState) checkBoundaryEraAuthorized(
+	sourceEraID, targetEraID uint,
+	newPParams lcommon.ProtocolParameters,
+	newEpochID uint64,
+) error {
+	if sourceEraID == targetEraID || sourceEraID == byron.EraIdByron {
+		return nil
+	}
+	version, err := GetProtocolVersion(newPParams)
+	if err != nil {
+		return nil //nolint:nilerr // no version, nothing to compare against
+	}
+	eraList := ls.eraList()
+	indexOf := func(eraID uint) int {
+		for i := range eraList {
+			if eraList[i].Id == eraID {
+				return i
+			}
+		}
+		return -1
+	}
+	sourceIndex := indexOf(sourceEraID)
+	targetIndex := indexOf(targetEraID)
+	if sourceIndex < 0 || targetIndex < 0 {
+		return nil
+	}
+	allowedIndex := sourceIndex
+	if eraID, ok := ls.eraForVersion(version.Major); ok {
+		allowedIndex = max(allowedIndex, indexOf(eraID))
+	}
+	shape := ls.eraShape()
+	for allowedIndex+1 < len(eraList) {
+		entry, ok := shape.EraForID(eraList[allowedIndex].Id)
+		if !ok ||
+			entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch ||
+			entry.NextEraTrigger.Epoch > newEpochID {
+			break
+		}
+		allowedIndex++
+	}
+	if targetIndex <= allowedIndex {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: epoch %d block is in era %d but protocol version %d.%d "+
+			"keeps the ledger at or below era %d",
+		errBoundaryEraNotAuthorized,
+		newEpochID,
+		targetEraID,
+		version.Major,
+		version.Minor,
+		eraList[allowedIndex].Id,
+	)
+}
+
 func (ls *LedgerState) isHardForkTransition(
 	oldVersion, newVersion ProtocolVersion,
 ) bool {
@@ -7593,40 +7667,45 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			var rolloverResult *EpochRolloverResult
 			var eraTransitions []*EraTransitionResult
 
+			// rejectBoundaryBlock refuses the block waiting in cachedNextBatch.
+			// The verdict is deterministic and the block is already on the
+			// primary chain, so a plain restart would re-read it and fail
+			// again. Rewind past it as a rejected header.
+			rejectBoundaryBlock := func(cause error, label string) error { //nolint:contextcheck
+				// The boundary block waits in cachedNextBatch, so the
+				// reader is still blocked on this read result.
+				if len(cachedNextBatch) == 0 {
+					completeReadResult()
+					return fmt.Errorf("%s: %w", label, cause)
+				}
+				boundary := cachedNextBatch[0]
+				rejected := &headerValidationError{
+					BlockPoint: ocommon.Point{
+						Slot: boundary.SlotNumber(),
+						Hash: boundary.Hash().Bytes(),
+					},
+					Cause: cause,
+				}
+				recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
+					rejected,
+				)
+				completeReadResult()
+				if recoverErr != nil {
+					return fmt.Errorf("%s: %w", label, recoverErr)
+				}
+				if recovered {
+					return errRestartLedgerPipeline
+				}
+				return fmt.Errorf("%s: %w", label, rejected)
+			}
+
 			if snapshotEra.Id == byron.EraIdByron && boundaryShouldValidate {
 				if err := ls.validateByronShelleyTransition(
 					ctx,
 					snapshotEpoch.EpochId+1,
 					nextEpochEraId,
 				); err != nil {
-					// The boundary block waits in cachedNextBatch, so the
-					// reader is still blocked on this read result.
-					if len(cachedNextBatch) == 0 {
-						completeReadResult()
-						return fmt.Errorf("byron transition: %w", err)
-					}
-					// The verdict is deterministic and the block is already
-					// on the primary chain, so a plain restart would re-read
-					// it and fail again. Rewind past it as a rejected header.
-					boundary := cachedNextBatch[0]
-					err = &headerValidationError{
-						BlockPoint: ocommon.Point{
-							Slot: boundary.SlotNumber(),
-							Hash: boundary.Hash().Bytes(),
-						},
-						Cause: err,
-					}
-					recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
-						err,
-					)
-					completeReadResult()
-					if recoverErr != nil {
-						return fmt.Errorf("byron transition: %w", recoverErr)
-					}
-					if recovered {
-						return errRestartLedgerPipeline
-					}
-					return fmt.Errorf("byron transition: %w", err)
+					return rejectBoundaryBlock(err, "byron transition")
 				}
 			}
 
@@ -7746,6 +7825,16 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					return err
 				}
 				rolloverResult = result
+				if boundaryShouldValidate {
+					if err := ls.checkBoundaryEraAuthorized(
+						snapshotEra.Id,
+						nextEpochEraId,
+						result.NewCurrentPParams,
+						newEpochId,
+					); err != nil {
+						return err
+					}
+				}
 				if len(transitionsAfterRollover) > 0 {
 					transitionResults, err := ls.applyBoundaryEraTransitions(
 						txn,
@@ -7776,6 +7865,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				ls.metrics.epochRolloverDuration.Observe(
 					rolloverElapsed.Seconds(),
 				)
+			}
+			if errors.Is(err, errBoundaryEraNotAuthorized) {
+				return rejectBoundaryBlock(err, "process epoch rollover")
 			}
 			if err != nil {
 				// This runs on the pass after a boundary-crossing batch
