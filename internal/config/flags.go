@@ -1050,7 +1050,7 @@ var flagSpecs = []flagSpec{
 	durationFlag(
 		"DatabaseLifecycle.SnapshotMaxCommitPause",
 		"db-snapshot-max-commit-pause",
-		"cancel a snapshot still holding the commit barrier after this long (0 = no bound)",
+		"cancel a snapshot still holding the commit barrier after this long (default 30s; 0 = no bound)",
 	),
 }
 
