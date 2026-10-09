@@ -49,10 +49,6 @@ var hotStatements = func() []string {
 		deletePoolRegistrationRelaysSQL,
 		deleteMIRRewardsSQL,
 		deleteAddressTransactionSQL,
-		utxoReferenceInsertSQL("utxo_collateral_input"),
-		utxoReferenceInsertSQL("utxo_reference_input"),
-		utxoReferenceUpdateSQL("collateral_by_tx_id"),
-		utxoReferenceUpdateSQL("referenced_by_tx_id"),
 		utxoStakeConsumedDeltaQuery(1),
 		utxoStakeConsumedDeltaQuery(2),
 		utxoStakeConsumedDeltaQuery(4),
@@ -78,6 +74,22 @@ var hotStatements = func() []string {
 	}
 	for _, size := range cachedAddressInputQuerySizes {
 		queries = append(queries, addressTransactionInputQuery(size))
+		for _, table := range []string{
+			"utxo_collateral_input",
+			"utxo_reference_input",
+		} {
+			queries = append(queries,
+				utxoReferenceInsertBatchSQL(table, size),
+			)
+		}
+		for _, column := range []string{
+			"collateral_by_tx_id",
+			"referenced_by_tx_id",
+		} {
+			queries = append(queries,
+				utxoReferenceUpdateBatchSQL(column, size),
+			)
+		}
 	}
 	return queries
 }()

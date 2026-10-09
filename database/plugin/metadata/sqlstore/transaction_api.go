@@ -160,18 +160,41 @@ func (s *Store) applyTransactionAPIDetails(
 	return nil
 }
 
-func utxoReferenceInsertSQL(associationTable string) string {
+func utxoReferencePredicate(inputCount int, alias string) string {
+	predicates := make([]string, inputCount)
+	for i := range predicates {
+		predicates[i] = "(" + alias + "tx_id = ? AND " + alias + "output_idx = ?)"
+	}
+	return strings.Join(predicates, " OR ")
+}
+
+func utxoReferenceInsertBatchSQL(associationTable string, inputCount int) string {
 	return `INSERT INTO ` + associationTable + ` (utxo_id, transaction_hash)
 SELECT u.id, ? FROM utxo AS u
-WHERE u.tx_id = ? AND u.output_idx = ?
+WHERE (` + utxoReferencePredicate(inputCount, "u.") + `)
   AND NOT EXISTS (
       SELECT 1 FROM ` + associationTable + ` AS r
       WHERE r.utxo_id = u.id AND r.transaction_hash = ?
   )`
 }
 
-func utxoReferenceUpdateSQL(column string) string {
-	return "UPDATE utxo SET " + column + " = ? WHERE tx_id = ? AND output_idx = ?"
+func utxoReferenceUpdateBatchSQL(column string, inputCount int) string {
+	return "UPDATE utxo SET " + column + " = ? WHERE (" +
+		utxoReferencePredicate(inputCount, "") + ")"
+}
+
+func appendUtxoReferenceArgs(
+	args []any,
+	inputs []lcommon.TransactionInput,
+	querySize int,
+) []any {
+	for _, input := range inputs {
+		args = append(args, input.Id().Bytes(), input.Index())
+	}
+	for padding := len(inputs); padding < querySize; padding++ {
+		args = append(args, nil, uint32(0))
+	}
+	return args
 }
 
 func (s *Store) markTransactionUtxoReferences(
@@ -185,29 +208,40 @@ func (s *Store) markTransactionUtxoReferences(
 		column != "referenced_by_tx_id" {
 		return fmt.Errorf("unsupported UTxO reference column %q", column)
 	}
-	for _, input := range inputs {
-		associationTable := "utxo_collateral_input"
-		if column == "referenced_by_tx_id" {
-			associationTable = "utxo_reference_input"
+	associationTable := "utxo_collateral_input"
+	if column == "referenced_by_tx_id" {
+		associationTable = "utxo_reference_input"
+	}
+	batchSize := min(
+		max(1, (s.dialect.ParameterLimit()-2)/2),
+		maxCachedAddressInputQuerySize,
+	)
+	for start := 0; start < len(inputs); start += batchSize {
+		end := min(start+batchSize, len(inputs))
+		batch := inputs[start:end]
+		querySize := 1
+		for querySize < len(batch) {
+			querySize *= 2
 		}
+		args := make([]any, 0, querySize*2+2)
+		args = append(args, hash)
+		args = appendUtxoReferenceArgs(args, batch, querySize)
+		args = append(args, hash)
 		if _, err := s.execCached(
-			ctx,
-			db,
-			utxoReferenceInsertSQL(associationTable),
-			hash,
-			input.Id().Bytes(),
-			input.Index(),
-			hash,
+			ctx, db,
+			utxoReferenceInsertBatchSQL(associationTable, querySize),
+			args...,
 		); err != nil {
 			return err
 		}
+
+		args = make([]any, 0, querySize*2+1)
+		args = append(args, hash)
+		args = appendUtxoReferenceArgs(args, batch, querySize)
 		if _, err := s.execCached(
-			ctx,
-			db,
-			utxoReferenceUpdateSQL(column),
-			hash,
-			input.Id().Bytes(),
-			input.Index(),
+			ctx, db,
+			utxoReferenceUpdateBatchSQL(column, querySize),
+			args...,
 		); err != nil {
 			return err
 		}
