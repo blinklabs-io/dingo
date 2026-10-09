@@ -443,7 +443,7 @@ func restoreValidated(
 	// store is touched, so a payload that does not match its manifest is
 	// refused with the target and every external store still as they were.
 	if err := manifest.verifyPayloads(
-		snapshotDir, len(manifestKey(opts)) > 0,
+		ctx, snapshotDir, len(manifestKey(opts)) > 0,
 	); err != nil {
 		return Manifest{}, err
 	}

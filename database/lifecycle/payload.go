@@ -62,12 +62,6 @@ func (m Manifest) payloadDownloads() []DownloadFile {
 	return downloads
 }
 
-// hashFile returns the hex SHA-256 digest of the file at path and the number
-// of bytes read.
-func hashFile(path string) (digest string, size int64, err error) {
-	return hashFileContext(context.Background(), path)
-}
-
 func hashFileContext(ctx context.Context, path string) (digest string, size int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -87,7 +81,11 @@ func hashFileContext(ctx context.Context, path string) (digest string, size int6
 // how a trust-keyed restore refuses a manifest that cannot vouch for its
 // payloads. A declared digest is checked against the bytes actually read, so
 // the size check needs no separate stat.
-func (m Manifest) verifyPayloads(dir string, requireDigests bool) error {
+func (m Manifest) verifyPayloads(
+	ctx context.Context,
+	dir string,
+	requireDigests bool,
+) error {
 	for _, f := range m.payloadFiles() {
 		path := filepath.Join(dir, f.name)
 		if f.sha256 == "" {
@@ -109,7 +107,7 @@ func (m Manifest) verifyPayloads(dir string, requireDigests bool) error {
 			}
 			continue
 		}
-		got, size, err := hashFile(path)
+		got, size, err := hashFileContext(ctx, path)
 		if err != nil {
 			return fmt.Errorf("hash snapshot payload %q: %w", f.name, err)
 		}
