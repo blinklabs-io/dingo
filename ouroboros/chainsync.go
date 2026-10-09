@@ -1081,7 +1081,7 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	// Observe the rollback for chain selection FIRST — it trims the peer's
 	// observed frontier (ApplyRollback), which can change its corroboration
 	// status, so the apply gate below must reflect it. If the hook handles it
-	// synchronously (Genesis corroboration active), skip the async publish to
+	// synchronously (Genesis selection mode), skip the async publish to
 	// avoid a double update; otherwise publish for the async subscriber. This
 	// mirrors the roll-forward ChainsyncObservePeerTip ordering.
 	rollbackEvent := chainselection.PeerRollbackEvent{
@@ -1335,8 +1335,8 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ObservedPrevHash: v.PrevHash().Bytes(),
 				ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
 			}
-			// If the hook handles it synchronously (Genesis corroboration
-			// active, so the apply gate below must reflect this header), skip
+			// If the hook handles it synchronously (Genesis selection mode,
+			// so the apply and eagerness gates below reflect this header), skip
 			// the async publish to avoid a double update; otherwise publish for
 			// the async chain-selection and peergov subscribers.
 			observedSync := false

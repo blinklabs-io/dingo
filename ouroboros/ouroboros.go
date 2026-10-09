@@ -436,10 +436,11 @@ type OuroborosConfig struct {
 	// handled the observation synchronously, in which case the caller MUST NOT
 	// also publish the async PeerTipUpdateEvent (avoids a double update). This
 	// lets the node update chain-selection state synchronously before the
-	// ChainsyncApplyEligible gate runs, so an apply decision reflects the header
-	// currently being admitted (closing the race where an async tip update that
-	// revokes corroboration is not yet processed). Returning false (or nil hook)
-	// falls back to the async PeerTipUpdateEvent path.
+	// ChainsyncApplyEligible gate and the ChainsyncAwaitEagerness wait run, so
+	// both reflect the header currently being admitted (closing the race where
+	// an async tip update that revokes corroboration, or that first registers
+	// the peer with the Limit on Eagerness, is not yet processed). Returning
+	// false (or nil hook) falls back to the async PeerTipUpdateEvent path.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
 	// ChainsyncSyncTarget snapshots the policy-bounded target for one observed
 	// peer-tip event. Its result is carried with that event into ledger

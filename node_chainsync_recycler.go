@@ -32,22 +32,34 @@ const (
 	chainSelectedNoneMaxRetryInterval     = time.Second
 )
 
+// chainsyncObserveSynchronously reports whether peer tip and rollback
+// observations must reach chain selection before the roll-forward or
+// roll-backward handler continues. That holds in Genesis selection mode, where
+// two gates read selector state the current header must already be part of:
+// the corroboration apply gate (ChainsyncApplyEligible), and the Limit on
+// Eagerness wait (ChainsyncAwaitEagerness), which admits a header from a peer
+// the selector does not track. With asynchronous delivery a new peer's first
+// headers would pass that wait before its tip event registered it. Both
+// observations switch together so a rollback is never applied after the
+// roll-forwards that follow it.
+func (n *Node) chainsyncObserveSynchronously() bool {
+	return n.chainSelector != nil &&
+		n.chainSelector.SelectionMode() == chainselection.SelectionModeGenesis
+}
+
 // chainsyncObservePeerTip synchronously feeds a peer tip update into chain
-// selection (and peergov) when the Genesis corroboration gate is active, so the
-// ChainsyncApplyEligible check that immediately follows in the roll-forward
-// handler reflects the header currently being admitted. This closes the race
-// where the apply gate would otherwise read corroboration state that predates
-// this header (the tip update is normally delivered asynchronously). It returns
-// true when it handled the observation synchronously, so the ouroboros layer
-// skips the async PeerTipUpdateEvent publish to avoid a double update.
+// selection (and peergov) in Genesis selection mode (see
+// chainsyncObserveSynchronously), so the apply and eagerness gates that follow
+// in the roll-forward handler reflect the header currently being admitted. It
+// returns true when it handled the observation synchronously, so the ouroboros
+// layer skips the async PeerTipUpdateEvent publish to avoid a double update.
 //
-// When corroboration is inactive the async path is used unchanged (returns
-// false), so normal high-throughput sync keeps its parallelism.
+// Outside Genesis mode the async path is used unchanged (returns false), so
+// caught-up operation keeps its parallelism.
 func (n *Node) chainsyncObservePeerTip(
 	e chainselection.PeerTipUpdateEvent,
 ) bool {
-	if n.chainSelector == nil ||
-		!n.chainSelector.GenesisCorroborationActive() {
+	if n.chainSelector == nil || !n.chainsyncObserveSynchronously() {
 		return false
 	}
 	n.chainSelector.HandlePeerTipUpdateEvent(
@@ -58,24 +70,22 @@ func (n *Node) chainsyncObservePeerTip(
 }
 
 // chainsyncObservePeerRollback synchronously applies a peer rollback into chain
-// selection when the Genesis corroboration gate is active, so the
-// ChainsyncApplyEligible check that immediately follows in the roll-backward
-// handler reflects the post-rollback corroboration state. A rollback trims the
-// peer's observed frontier (ApplyRollback), which can change its corroboration
-// status; delivering that observation asynchronously would let the apply gate
-// read pre-trim state and forward a rollback for a peer that the rollback has
-// just made uncorroborated. It returns true when handled
+// selection in Genesis selection mode (see chainsyncObserveSynchronously), so
+// the ChainsyncApplyEligible check that immediately follows in the
+// roll-backward handler reflects the post-rollback corroboration state. A
+// rollback trims the peer's observed frontier (ApplyRollback), which can change
+// its corroboration status; delivering that observation asynchronously would
+// let the apply gate read pre-trim state and forward a rollback for a peer that
+// the rollback has just made uncorroborated. It returns true when handled
 // synchronously, so the ouroboros layer skips the async PeerRollbackEvent
 // publish to avoid a double update. Unlike chainsyncObservePeerTip there is no
 // peergov touch: only the chain selector subscribes to PeerRollbackEvent.
 //
-// When corroboration is inactive the async path is used unchanged (returns
-// false).
+// Outside Genesis mode the async path is used unchanged (returns false).
 func (n *Node) chainsyncObservePeerRollback(
 	e chainselection.PeerRollbackEvent,
 ) bool {
-	if n.chainSelector == nil ||
-		!n.chainSelector.GenesisCorroborationActive() {
+	if n.chainSelector == nil || !n.chainsyncObserveSynchronously() {
 		return false
 	}
 	n.chainSelector.HandlePeerRollbackEvent(

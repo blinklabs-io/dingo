@@ -343,3 +343,53 @@ func TestChainsyncAwaitEagernessDelegatesToChainSelector(t *testing.T) {
 		"a header past the limit waits and honors cancellation",
 	)
 }
+
+// The Limit on Eagerness gates a header on a limit that must already include
+// that header's tip, and it treats a peer the selector does not track as one
+// it declined. So while the cap is active (Genesis mode), the tip and rollback
+// hooks must observe synchronously even with corroboration disabled;
+// otherwise a new peer's first headers pass before its asynchronous tip event
+// registers it.
+func TestChainsyncObserveHooksAreSynchronousInGenesisModeWithoutCorroboration(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, genesis := range []bool{true, false} {
+		n := &Node{}
+		n.chainSelector = chainselection.NewChainSelector(
+			chainselection.ChainSelectorConfig{
+				GenesisMode:   genesis,
+				SecurityParam: 5,
+			},
+		)
+		conn := newNodeTestConnId(1)
+		tip := ochainsync.Tip{
+			Point:       ocommon.NewPoint(100, []byte("h1")),
+			BlockNumber: 1,
+		}
+		observed := n.chainsyncObservePeerTip(
+			chainselection.PeerTipUpdateEvent{
+				ConnectionId: conn,
+				Tip:          tip,
+				ObservedTip:  tip,
+			},
+		)
+		rolledBack := n.chainsyncObservePeerRollback(
+			chainselection.PeerRollbackEvent{
+				ConnectionId: conn,
+				Point:        tip.Point,
+				Tip:          tip,
+			},
+		)
+		if !genesis {
+			assert.False(t, observed, "Praos mode keeps the async path")
+			assert.False(t, rolledBack, "Praos mode keeps the async path")
+			assert.Equal(t, 0, n.chainSelector.PeerCount())
+			continue
+		}
+		assert.True(t, observed, "tip observation must be synchronous")
+		assert.True(t, rolledBack, "rollback observation must be synchronous")
+		assert.Equal(t, 1, n.chainSelector.PeerCount(),
+			"the peer must be tracked before the eagerness wait")
+	}
+}
