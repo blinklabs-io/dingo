@@ -71,7 +71,7 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 			Database: db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
-				Epoch:               100,
+				Epoch:               anchorSlot / 1_000,
 				EraIndex:            EraConway,
 				EraBounds:           make([]EraBound, EraConway+1),
 				EpochNonce:          nonce,
@@ -154,7 +154,7 @@ func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State: &RawLedgerState{
-			Epoch:               100,
+			Epoch:               anchorSlot / 1_000,
 			EraIndex:            EraConway,
 			EraBounds:           make([]EraBound, EraConway+1),
 			EpochNonce:          nonce,
