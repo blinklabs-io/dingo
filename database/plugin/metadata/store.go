@@ -1022,7 +1022,8 @@ type TransactionStore interface {
 	) ([]models.Transaction, error)
 
 	// GetTransactionsByAddress retrieves transactions involving
-	// the provided payment/staking credential pair with pagination and ordering.
+	// the provided payment/staking credential pair with pagination and ordering,
+	// optionally restricted to an inclusive (slot, block index) range.
 	GetTransactionsByAddress(
 		[]byte, // paymentKey
 		uint8, // credentialTag
@@ -1030,6 +1031,8 @@ type TransactionStore interface {
 		int, // limit
 		int, // offset
 		string, // order (asc|desc)
+		*models.AddressTransactionPosition, // from (inclusive, nil = unbounded)
+		*models.AddressTransactionPosition, // to (inclusive, nil = unbounded)
 		types.Txn,
 	) ([]models.Transaction, error)
 
@@ -3065,6 +3068,29 @@ type MetadataStore interface {
 	) ([]models.MidnightAriadneRollback, error)
 	DeleteMidnightAriadneRollbacksByBlock(types.Txn, uint64) error
 	DeleteMidnightAriadneRollbacksBeforeBlock(types.Txn, uint64) error
+	DeleteMidnightAriadneRollbacksAfterBlock(types.Txn, uint64) error
+	CreateMidnightCandidateRemoval(
+		types.Txn,
+		*models.MidnightCandidateRemoval,
+	) error
+	FindMidnightCandidateRemovalsByBlock(
+		types.Txn,
+		uint64,
+	) ([]models.MidnightCandidateRemoval, error)
+	DeleteMidnightCandidateRemovalsByBlock(types.Txn, uint64) error
+	DeleteMidnightCandidateRemovalsBeforeBlock(types.Txn, uint64) error
+	DeleteMidnightCandidateRemovalsAfterBlock(types.Txn, uint64) error
+	UpsertMidnightEpochTransition(
+		types.Txn,
+		*models.MidnightEpochTransition,
+	) error
+	GetMidnightEpochTransitionByBlock(
+		types.Txn,
+		uint64,
+	) (*models.MidnightEpochTransition, error)
+	DeleteMidnightEpochTransitionsByBlock(types.Txn, uint64) error
+	DeleteMidnightEpochTransitionsBeforeBlock(types.Txn, uint64) error
+	DeleteMidnightEpochTransitionsAfterBlock(types.Txn, uint64) error
 	UpsertMidnightEpochCandidates(
 		types.Txn,
 		*models.MidnightEpochCandidates,

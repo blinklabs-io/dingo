@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -69,6 +70,9 @@ type signedURLBlobStore struct {
 	unsignable map[string]struct{}
 	// counts, when non-nil, records the blob operations a request causes.
 	counts *blobOpCounts
+	// onGetBlockURL, when non-nil, runs at the start of every GetBlockURL, so
+	// a test can hold a request inside the handler.
+	onGetBlockURL func()
 }
 
 // blobOpCounts records the blob operations that matter to the cost of a
@@ -141,6 +145,9 @@ func (s *signedURLBlobStore) GetBlockURL(
 	txn types.Txn,
 	point ocommon.Point,
 ) (types.SignedURL, types.BlockMetadata, error) {
+	if s.onGetBlockURL != nil {
+		s.onGetBlockURL()
+	}
 	if _, ok := s.unsignable[hex.EncodeToString(point.Hash)]; ok {
 		return types.SignedURL{}, types.BlockMetadata{}, fmt.Errorf(
 			"metadata object for block [%d, %s] is missing: %w",
@@ -174,6 +181,11 @@ type signedURLBlobConfig struct{}
 type archiveTestOptions struct {
 	// unsignable holds hex block hashes GetBlockURL must refuse to sign.
 	unsignable map[string]struct{}
+	// maxConcurrentFetches is BarkConfig.ArchiveMaxConcurrentFetches.
+	maxConcurrentFetches int
+	// onGetBlockURL, when non-nil, runs at the start of every GetBlockURL, so
+	// a test can hold a request inside the handler.
+	onGetBlockURL func()
 	// counts, when non-nil, records the blob operations requests cause.
 	counts *blobOpCounts
 }
@@ -215,6 +227,8 @@ func registerSignedURLBlobProvider(
 				BlobStore:  store,
 				unsignable: opts.unsignable,
 				counts:     opts.counts,
+
+				onGetBlockURL: opts.onGetBlockURL,
 			}
 			return signing,
 				hostplugin.Lifecycle{
@@ -275,7 +289,11 @@ func newArchiveTestHandlerWithOptions(
 		require.NoError(t, db.BlockCreate(block, nil))
 		blocks = append(blocks, block)
 	}
-	b, err := NewBark(BarkConfig{DB: db, Port: 1})
+	b, err := NewBark(BarkConfig{
+		DB:                          db,
+		Port:                        1,
+		ArchiveMaxConcurrentFetches: opts.maxConcurrentFetches,
+	})
 	require.NoError(t, err)
 	return &archiveServiceHandler{bark: b}, blocks
 }
@@ -464,18 +482,19 @@ func TestArchiveFetchBlockRejectsMissingMetadata(t *testing.T) {
 // of a height-only batch.
 //
 // Height is the one identifier nothing is keyed by, so resolving one is a
-// binary search bounded above by the highest indexed block. Reading that
-// bound is a reverse iteration over the block-index prefix, and on s3 and
-// gcs -- the only backends that sign URLs, so the only ones this handler
-// runs on -- a reverse iterator lists every block-index object in the
-// bucket with no early break. ArchiveService takes no operator
-// credentials, so resolving the bound once per reference let a single
-// anonymous request carrying DefaultMaxFetchBlockRefs height-only
-// references cost that many full-bucket enumerations.
+// binary search bounded above by the highest indexed block. Resolving that
+// bound is a fixed number of bounded forward probes into the block-index
+// prefix, never a reverse iteration: on s3 and gcs a reverse iterator lists
+// every block-index object in the bucket. ArchiveService takes no operator
+// credentials, so resolving the bound once per reference would let a single
+// anonymous request carrying DefaultMaxFetchBlockRefs height-only references
+// repeat that probing that many times.
 //
-// The counts are asserted exactly rather than as an upper bound. Badger
-// answers every one of these cheaply and locally, so a regression costs no
-// measurable time here and would surface only as cloud-storage load.
+// The cost of a 16-reference batch is compared with a one-reference batch
+// rather than asserted as a count: resolving the bound per reference would
+// make the batch cost about 16 times the single one. Badger answers every
+// probe cheaply and locally, so a regression costs no measurable time here
+// and would surface only as cloud-storage load.
 func TestArchiveFetchBlockResolvesHeightBoundOncePerBatch(t *testing.T) {
 	t.Parallel()
 
@@ -499,14 +518,25 @@ func TestArchiveFetchBlockResolvesHeightBoundOncePerBatch(t *testing.T) {
 	}
 
 	counts.reset()
-	msg := fetchBlocks(t, handler, heightRefs...)
+	msg := fetchBlocks(t, handler, heightRefs[:1]...)
+	require.Len(t, msg.GetBlocks(), 1)
+	singleScans := counts.forwardIndexScans.Load()
+	require.Positive(t, singleScans)
+
+	counts.reset()
+	msg = fetchBlocks(t, handler, heightRefs...)
 	require.Len(t, msg.GetBlocks(), blockCount)
 	require.Empty(t, msg.GetNotFound())
 
-	require.Equal(
+	require.Zero(
 		t,
-		int64(1),
 		counts.reverseIndexScans.Load(),
+		"the highest indexed block must not be found by a reverse iteration over the index",
+	)
+	require.Less(
+		t,
+		counts.forwardIndexScans.Load(),
+		4*singleScans,
 		"the highest indexed block must be resolved once for the batch, not once per reference",
 	)
 	require.Equal(
@@ -529,6 +559,88 @@ func TestArchiveFetchBlockResolvesHeightBoundOncePerBatch(t *testing.T) {
 	require.Empty(t, msg.GetNotFound())
 	require.Zero(t, counts.reverseIndexScans.Load())
 	require.Zero(t, counts.forwardIndexScans.Load())
+}
+
+// TestArchiveFetchBlockRefusesRequestsBeyondTheConcurrencyLimit pins that the
+// unauthenticated ArchiveService does a bounded amount of work at once: a
+// request that arrives while the configured number are in flight is refused
+// at once rather than queued, and a finished request frees its slot.
+func TestArchiveFetchBlockRefusesRequestsBeyondTheConcurrencyLimit(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	entered := make(chan struct{}, 1)
+	releaseCh := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCh) }) }
+	defer release()
+	var first atomic.Bool
+	handler, blocks := newArchiveTestHandlerWithOptions(
+		t,
+		2,
+		archiveTestOptions{
+			maxConcurrentFetches: 1,
+			onGetBlockURL: func() {
+				if first.CompareAndSwap(false, true) {
+					entered <- struct{}{}
+					<-releaseCh
+				}
+			},
+		},
+	)
+	ref := &archive.BlockRef{
+		Hash: new(hex.EncodeToString(blocks[0].Hash)),
+		Slot: new(blocks[0].Slot),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := handler.FetchBlock(
+			context.Background(),
+			connect.NewRequest(
+				&archive.FetchBlockRequest{Blocks: []*archive.BlockRef{ref}},
+			),
+		)
+		done <- err
+	}()
+	testutil.RequireReceive(
+		t,
+		entered,
+		5*time.Second,
+		"first request never reached the handler",
+	)
+
+	_, err := handler.FetchBlock(
+		t.Context(),
+		connect.NewRequest(
+			&archive.FetchBlockRequest{Blocks: []*archive.BlockRef{ref}},
+		),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+
+	release()
+	require.NoError(
+		t,
+		testutil.RequireReceive(
+			t,
+			done,
+			5*time.Second,
+			"first request never finished",
+		),
+	)
+
+	msg := fetchBlocks(t, handler, ref)
+	require.Len(t, msg.GetBlocks(), 1)
+}
+
+func TestNewBarkRejectsNegativeArchiveConcurrencyLimit(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	_, err := NewBark(BarkConfig{DB: db, ArchiveMaxConcurrentFetches: -1})
+	require.ErrorContains(t, err, "ArchiveMaxConcurrentFetches")
 }
 
 // TestArchiveFetchBlockTreatsInconsistentReferenceAsNotFound covers a

@@ -298,7 +298,11 @@ func TestReviewEvaluationCancellationRetainsGate(t *testing.T) {
 		_, err := runBoundedEvaluation(
 			ctx,
 			gate,
-			func() (evaluationResult, error) { close(entered); <-finish; return evaluationResult{}, nil },
+			func(context.Context) (evaluationResult, error) {
+				close(entered)
+				<-finish
+				return evaluationResult{}, nil
+			},
 		)
 		done <- err
 	}()
@@ -312,7 +316,10 @@ func TestReviewEvaluationCancellationRetainsGate(t *testing.T) {
 	_, err := runBoundedEvaluation(
 		t.Context(),
 		gate,
-		func() (evaluationResult, error) { t.Error("second evaluation started"); return evaluationResult{}, nil },
+		func(context.Context) (evaluationResult, error) {
+			t.Error("second evaluation started")
+			return evaluationResult{}, nil
+		},
 	)
 	require.ErrorContains(t, err, "busy")
 	close(finish)
@@ -406,13 +413,13 @@ func TestReviewEvaluationPanicReleasesGate(t *testing.T) {
 	_, err := runBoundedEvaluation(
 		t.Context(),
 		gate,
-		func() (evaluationResult, error) { panic("bad transaction") },
+		func(context.Context) (evaluationResult, error) { panic("bad transaction") },
 	)
 	require.ErrorContains(t, err, "bad transaction")
 	result, err := runBoundedEvaluation(
 		t.Context(),
 		gate,
-		func() (evaluationResult, error) { return evaluationResult{fee: 42}, nil },
+		func(context.Context) (evaluationResult, error) { return evaluationResult{fee: 42}, nil },
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(42), result.fee)
@@ -554,6 +561,102 @@ func TestReviewGovernanceQueryFailure(t *testing.T) {
 	require.NotContains(t, result, "**Active Registered DReps**: 0")
 }
 
+func TestReviewEvaluationReceivesRequestCancellation(t *testing.T) {
+	t.Parallel()
+	gate := make(chan struct{}, 1)
+	entered := make(chan struct{})
+	observed := make(chan error, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := runBoundedEvaluation(
+			ctx,
+			gate,
+			func(evalCtx context.Context) (evaluationResult, error) {
+				close(entered)
+				select {
+				case <-evalCtx.Done():
+					observed <- evalCtx.Err()
+				case <-time.After(5 * time.Second):
+					observed <- nil
+				}
+				return evaluationResult{}, evalCtx.Err()
+			},
+		)
+		done <- err
+	}()
+	testutil.RequireReceive(t, entered, time.Second, "evaluation start")
+	cancel()
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(t, done, time.Second, "canceled evaluation"),
+		context.Canceled,
+	)
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(t, observed, 10*time.Second, "evaluator cancellation"),
+		context.Canceled,
+	)
+	testutil.WaitForCondition(
+		t,
+		func() bool { return len(gate) == 0 },
+		time.Second,
+		"evaluation gate release",
+	)
+}
+
+type deadlineObservingEvaluator struct {
+	observed chan error
+}
+
+func (e *deadlineObservingEvaluator) EvaluateTxContext(
+	ctx context.Context,
+	_ lcommon.Transaction,
+) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	select {
+	case <-ctx.Done():
+		e.observed <- ctx.Err()
+	case <-time.After(5 * time.Second):
+		e.observed <- nil
+	}
+	return 0, lcommon.ExUnits{}, nil, ctx.Err()
+}
+
+func TestReviewEvaluateTxToolPassesQueryTimeoutToLedger(t *testing.T) {
+	t.Parallel()
+	server := mcp.NewServer(
+		&mcp.Implementation{Name: "test", Version: "1"},
+		nil,
+	)
+	evaluator := &deadlineObservingEvaluator{observed: make(chan error, 1)}
+	registerEvaluateTxTool(server, evaluator, 50*time.Millisecond)
+	cs := reviewSession(t, server)
+	txHex := "84a700818258200c07395aed88bdddc6de0518d1462dd0ec7e52e1" +
+		"e3a53599f7cdb24dc80237f8010181a20058390073a817bb425cbe179af824529d96ce" +
+		"b93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e391" +
+		"4f5bcca3a793011a02dc6c00021a001e84800b5820192d0c0c2c2320e843e080b5f91a" +
+		"9ca35155bc50f3ef3bfdbc72c1711b86367e0d818258203af629a5cd75f76d0cc21172" +
+		"e1193b85f199ca78e837c3965d77d7d6bc90206b0010a20058390073a817bb425cbe17" +
+		"9af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebee" +
+		"f022245944e3914f5bcca3a793011a006acfc0111a002dc6c0a40081825820" +
+		"25fcacade3fffc096b53bdaf4c7d012bded303c9edbee686d24b372dae60aa1b58409d" +
+		"a928a064ff9f795110bdcb8ab05d2a7a023dd15ebc42044f102ce366c0c9077024c795" +
+		"1c2d63584b7d2eea7bf1da4a7453bde4c99dd083889c1e2e2e3db804048119077a0581" +
+		"840000187b820a0a06814746010000222601f4f6"
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "evaluate_tx",
+		Arguments: map[string]any{"cbor": txHex},
+	})
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(t, evaluator.observed, 10*time.Second, "ledger evaluation"),
+		context.DeadlineExceeded,
+	)
+}
+
 func TestTableResourcesRegisteredWhenEnumerationExceedsQueryTimeout(
 	t *testing.T,
 ) {
@@ -586,7 +689,7 @@ func TestTableResourcesRegisteredWhenEnumerationExceedsQueryTimeout(
 			return
 		}
 	}
-	t.Fatal("table schema resource was omitted during server setup")
+	t.Fatal("table resource must be registered despite slow startup enumeration")
 }
 
 func TestTableEnumerationFailureLoggedToProviderLogger(t *testing.T) {

@@ -345,6 +345,7 @@ func retryTxsubmissionAdmission(
 
 func (o *Ouroboros) txsubmissionServerConnOpts() []txsubmission.TxSubmissionOptionFunc {
 	return []txsubmission.TxSubmissionOptionFunc{
+		//nolint:staticcheck // WithOnInit omits the required CallbackContext.
 		txsubmission.WithInitFunc(
 			o.instrumentTxsubmissionInit(o.txsubmissionServerInit),
 		),

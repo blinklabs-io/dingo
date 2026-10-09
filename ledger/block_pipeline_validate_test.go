@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
@@ -36,14 +35,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// productionValidateVerifyConfig mirrors the generic header-crypto portion of
+// productionValidateVerifyConfig is the generic header-crypto portion of
 // NewLedgerState's pipeline wiring. Dingo adds OpCert KES-period expiry after
 // the generic VRF/KES/OpCert-signature stage succeeds.
-var productionValidateVerifyConfig = lcommon.VerifyConfig{
-	SkipBodyHashValidation:    true,
-	SkipTransactionValidation: true,
-	SkipStakePoolValidation:   true,
-}
+var productionValidateVerifyConfig = blockPipelineVerifyConfig()
 
 func TestNewLedgerStateRejectsPipelineValidationWithoutKesConfig(
 	t *testing.T,

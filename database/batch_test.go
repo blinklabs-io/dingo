@@ -429,6 +429,65 @@ func TestSetTransactionBatchedWithOpts_SkipConsumedInputRecovery(t *testing.T) {
 	)
 }
 
+func TestSetTransactionBatchedWithOpts_TrustedImmutableReplaySkipsInputRecovery(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	candidate := findBatchedCrossBlockSpendCandidate(t)
+	storeBlockOffsetsOnly(t, db, candidate.producerBlock)
+
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
+		candidate.producerTx,
+		candidate.producerPoint,
+		candidate.producerIdx,
+		0,
+		nil,
+		nil,
+		mustBlockOffsets(t, candidate.producerBlock),
+		acc,
+		txn,
+		BatchedTxIngestOpts{},
+	))
+	require.NoError(t, db.FlushBatch(acc, txn))
+	require.NoError(t, txn.Commit())
+	txn.Release()
+
+	storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
+	var stats types.BackfillHotPathStats
+	consumerAcc := db.NewBatchAccumulator()
+	consumerTxn := db.Transaction(context.Background(), true)
+	defer consumerTxn.Release()
+	defer consumerTxn.Rollback() //nolint:errcheck
+
+	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
+		candidate.consumerTx,
+		candidate.consumerPoint,
+		candidate.consumerIdx,
+		0,
+		nil,
+		nil,
+		mustBlockOffsets(t, candidate.consumerBlock),
+		consumerAcc,
+		consumerTxn,
+		BatchedTxIngestOpts{
+			TrustedImmutableReplay: true,
+			Stats:                  &stats,
+		},
+	))
+	require.NoError(t, db.FlushBatch(consumerAcc, consumerTxn))
+	require.NoError(t, consumerTxn.Commit())
+
+	consumed := candidate.consumerTx.Consumed()
+	require.NotEmpty(t, consumed)
+	require.Equal(t, uint64(len(consumed)), stats.SkippedInputRecovery)
+}
+
 // TestSetTransactionBatchedWithOpts_DefaultDoesNotSkipInputRecovery confirms
 // that when SkipConsumedInputRecovery is false (default), the recovery path
 // is still executed and the counter remains zero.

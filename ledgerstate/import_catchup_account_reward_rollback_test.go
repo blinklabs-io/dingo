@@ -32,6 +32,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// These imported-state fixtures use epoch 100 at anchor slot 1,000.
+const importTestEpochLength uint = 1_000
+
 // accountCredTagKey is the stake-credential tag used by every account built
 // in this file: all test accounts are key-hash credentials.
 const accountCredTagKey uint8 = 0
@@ -196,7 +199,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 					[]uint64{5_000_000},
 				),
 				CertStateData:       certData,
-				Epoch:               100,
+				Epoch:               tipSlot / 1_000,
 				EraIndex:            EraConway,
 				EraBounds:           eraBounds,
 				EpochNonce:          nonce,
@@ -209,14 +212,14 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 				},
 			},
 			EpochLength: func(uint) (uint, uint, error) {
-				return 1, 1_000, nil
+				return 1, importTestEpochLength, nil
 			},
 		}
 	}
 
-	// 1. Bootstrap: the account is live at anchor slot 1000 with the
+	// 1. Bootstrap: the account is live at anchor slot 100000 with the
 	// snapshot's reward balance.
-	const anchorSlot = 1_000
+	const anchorSlot = 100_000
 	require.NoError(t, ImportLedgerState(
 		context.Background(), newImportConfig(anchorSlot),
 	))
@@ -232,7 +235,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 	// 2. A real post-anchor epoch boundary credits the account (ordinary
 	// delegator reward).
 	const creditAmount = uint64(300_000)
-	const creditSlot = uint64(1_200)
+	const creditSlot = uint64(100_200)
 	creditSourceHash := []byte{0xc1}
 	require.NoError(t, db.AddAccountRewardByCredential(
 		context.Background(), accountCredTagKey, stakingKey, creditAmount, creditSlot,
@@ -242,7 +245,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 	// 3. A real post-anchor transaction withdraws part of the reward
 	// balance.
 	const withdrawAmount = uint64(200_000)
-	const withdrawSlot = uint64(1_500)
+	const withdrawSlot = uint64(100_500)
 	rewardAddr := rewardAddressFromStakingKey(t, stakingKey)
 	const txSeed = 0x51
 	require.NoError(t, applyWithdrawalTransaction(
@@ -328,8 +331,8 @@ func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorAccountRewardCredit
 					[]uint64{5_000_000},
 				),
 				CertStateData:       certData,
-				GovStateData:        testGovStateData(t, govStateTxHash, 100),
-				Epoch:               100,
+				GovStateData:        testGovStateData(t, govStateTxHash, tipSlot/1_000),
+				Epoch:               tipSlot / 1_000,
 				EraIndex:            EraConway,
 				EraBounds:           eraBounds,
 				EpochNonce:          nonce,
@@ -342,20 +345,20 @@ func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorAccountRewardCredit
 				},
 			},
 			EpochLength: func(uint) (uint, uint, error) {
-				return 1, 1_000, nil
+				return 1, importTestEpochLength, nil
 			},
 		}
 	}
 
 	// 1. Bootstrap (Reconcile: false).
-	const anchorSlot = 1_000
+	const anchorSlot = 100_000
 	require.NoError(t, ImportLedgerState(
 		context.Background(), newImportConfig(anchorSlot, false),
 	))
 
 	// 2. A real post-anchor credit and withdrawal, as above.
 	const creditAmount = uint64(500_000)
-	const creditSlot = uint64(1_200)
+	const creditSlot = uint64(100_200)
 	creditSourceHash := []byte{0xc2}
 	require.NoError(t, db.AddAccountRewardByCredential(
 		context.Background(), accountCredTagKey, stakingKey, creditAmount, creditSlot,
@@ -363,7 +366,7 @@ func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorAccountRewardCredit
 	))
 
 	const withdrawAmount = uint64(100_000)
-	const withdrawSlot = uint64(1_500)
+	const withdrawSlot = uint64(100_500)
 	rewardAddr := rewardAddressFromStakingKey(t, stakingKey)
 	const txSeed = 0x53
 	require.NoError(t, applyWithdrawalTransaction(
@@ -446,7 +449,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorPostSnapshotRewardCredit(
 					[]uint64{5_000_000},
 				),
 				CertStateData:       certData,
-				Epoch:               100,
+				Epoch:               tipSlot / 1_000,
 				EraIndex:            EraConway,
 				EraBounds:           eraBounds,
 				EpochNonce:          nonce,
@@ -459,14 +462,14 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorPostSnapshotRewardCredit(
 				},
 			},
 			EpochLength: func(uint) (uint, uint, error) {
-				return 1, 1_000, nil
+				return 1, importTestEpochLength, nil
 			},
 		}
 	}
 
-	// 1. Bootstrap: the account is live at anchor slot 1000 with the
+	// 1. Bootstrap: the account is live at anchor slot 100000 with the
 	// snapshot's reward balance.
-	const anchorSlot = 1_000
+	const anchorSlot = 100_000
 	require.NoError(t, ImportLedgerState(
 		context.Background(), newImportConfig(anchorSlot),
 	))
@@ -480,7 +483,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorPostSnapshotRewardCredit(
 	// wrong-order mutation into an observably wrong balance instead of an
 	// underflow error masking the same defect.
 	const refundAmount = uint64(500_000)
-	const refundSlot = uint64(1_200)
+	const refundSlot = uint64(100_200)
 	poolKeyHash := bytes.Repeat([]byte{0xdd}, 28)
 	require.NoError(t, db.AddPostSnapshotAccountRewardByCredential(
 		context.Background(), accountCredTagKey, stakingKey, refundAmount, refundSlot,
@@ -560,7 +563,7 @@ func TestImportLedgerStateRepairAfterPreFixImportDoesNotUnderflow(
 	// account happened to hold at the snapshot's anchor.
 	const anchorReward = uint64(100_000)
 	const creditAmount = uint64(500_000)
-	const creditSlot = uint64(1_200)
+	const creditSlot = uint64(100_200)
 	certData := accountCertStateData(t, stakingKey, anchorReward, 2_000_000)
 	creditSourceHash := []byte{0xc3}
 
@@ -584,11 +587,13 @@ func TestImportLedgerStateRepairAfterPreFixImportDoesNotUnderflow(
 				CandidateNonce:      nonce,
 				LastEpochBlockNonce: nonce,
 				Tip: &SnapshotTip{
-					Slot:      1_000,
+					Slot:      100_000,
 					BlockHash: make([]byte, 32),
 				},
 			},
-			EpochLength: func(uint) (uint, uint, error) { return 1, 1_000, nil },
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, importTestEpochLength, nil
+			},
 		}
 	}
 
@@ -609,7 +614,7 @@ func TestImportLedgerStateRepairAfterPreFixImportDoesNotUnderflow(
 	// ImportLedgerState's wrapper around it.
 	preFixCfg := newCfg()
 	_, _, err = importCertState(
-		context.Background(), preFixCfg, 1_000, func(ImportProgress) {},
+		context.Background(), preFixCfg, 100_000, func(ImportProgress) {},
 	)
 	require.NoError(t, err)
 	acctAfterPreFixImport, err := db.GetAccountByCredential(
@@ -702,11 +707,13 @@ func TestImportLedgerStateCatchUpLeavesUncoveredAccountUntouched(t *testing.T) {
 				CandidateNonce:      nonce,
 				LastEpochBlockNonce: nonce,
 				Tip: &SnapshotTip{
-					Slot:      1_000,
+					Slot:      100_000,
 					BlockHash: make([]byte, 32),
 				},
 			},
-			EpochLength: func(uint) (uint, uint, error) { return 1, 1_000, nil },
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, importTestEpochLength, nil
+			},
 		}
 	}
 
@@ -722,10 +729,10 @@ func TestImportLedgerStateCatchUpLeavesUncoveredAccountUntouched(t *testing.T) {
 		CredentialTag: accountCredTagKey,
 		Active:        true,
 		Reward:        types.Uint64(0),
-		AddedSlot:     1_100,
+		AddedSlot:     100_100,
 	}))
 	const creditAmount = uint64(300_000)
-	const creditSlot = uint64(1_200)
+	const creditSlot = uint64(100_200)
 	creditSourceHash := []byte{0xc4}
 	require.NoError(t, db.AddAccountRewardByCredential(
 		context.Background(), accountCredTagKey, uncoveredKey, creditAmount, creditSlot,
@@ -780,7 +787,7 @@ func TestImportLedgerStateCatchUpLeavesUncoveredAccountUntouched(t *testing.T) {
 }
 
 // resumeImportConfig builds an ImportConfig for a one-account snapshot
-// anchored at slot 1000, with resume tracking under importKey.
+// anchored at slot 100000, with resume tracking under importKey.
 func resumeImportConfig(
 	t *testing.T,
 	db *database.Database,
@@ -816,11 +823,13 @@ func resumeImportConfig(
 			CandidateNonce:      nonce,
 			LastEpochBlockNonce: nonce,
 			Tip: &SnapshotTip{
-				Slot:      1_000,
+				Slot:      100_000,
 				BlockHash: make([]byte, 32),
 			},
 		},
-		EpochLength: func(uint) (uint, uint, error) { return 1, 1_000, nil },
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, importTestEpochLength, nil
+		},
 	}
 }
 
@@ -842,9 +851,9 @@ func TestImportLedgerStateResumePastCertStateRollsBackJournal(
 	stakingKey := bytes.Repeat([]byte{0xd1}, 28)
 	const anchorReward = uint64(1_000_000)
 	const creditAmount = uint64(300_000)
-	const creditSlot = uint64(1_200)
+	const creditSlot = uint64(100_200)
 	creditSourceHash := []byte{0xc5}
-	const importKey = "resume:1000"
+	const importKey = "resume:100000"
 
 	// 1. Bootstrap without resume tracking.
 	require.NoError(t, ImportLedgerState(
@@ -863,7 +872,7 @@ func TestImportLedgerStateResumePastCertStateRollsBackJournal(
 	// before failing in a later phase.
 	cfg := resumeImportConfig(t, db, 0x8b, stakingKey, anchorReward, importKey)
 	_, _, err = importCertState(
-		context.Background(), cfg, 1_000, func(ImportProgress) {},
+		context.Background(), cfg, 100_000, func(ImportProgress) {},
 	)
 	require.NoError(t, err)
 	require.NoError(t, setCheckpoint(context.Background(), cfg, models.ImportPhaseCertState))
@@ -910,10 +919,10 @@ func TestImportLedgerStateCompletedCheckpointKeepsJournal(t *testing.T) {
 	stakingKey := bytes.Repeat([]byte{0xd2}, 28)
 	const anchorReward = uint64(1_000_000)
 	const creditAmount = uint64(300_000)
-	const creditSlot = uint64(1_200)
+	const creditSlot = uint64(100_200)
 	creditSourceHash := []byte{0xc6}
 	cfg := resumeImportConfig(
-		t, db, 0x8d, stakingKey, anchorReward, "completed:1000",
+		t, db, 0x8d, stakingKey, anchorReward, "completed:100000",
 	)
 
 	// 1. A completed import leaves its checkpoint at tip.
