@@ -109,14 +109,17 @@ type databaseServiceHandler struct {
 	catalogErr error
 }
 
-func newDatabaseServiceHandler(b *Bark) *databaseServiceHandler {
+func newDatabaseServiceHandler(
+	ctx context.Context,
+	b *Bark,
+) *databaseServiceHandler {
 	h := &databaseServiceHandler{
 		bark:       b,
 		operations: make(map[string]*operation),
 		diagnostic: make(chan struct{}, 1),
 	}
 	if b.config.SnapshotDir != "" {
-		err := lifecycle.EnsureSnapshotCatalog(b.config.SnapshotDir)
+		err := lifecycle.EnsureSnapshotCatalogContext(ctx, b.config.SnapshotDir)
 		if errors.Is(err, lifecycle.ErrSnapshotCatalogIncomplete) {
 			b.config.Logger.Warn(
 				"list snapshots: some entries could not be read, omitting them from the catalog",
@@ -612,8 +615,19 @@ func boundedCatalogPageSize(pageSize uint32) (int, error) {
 	return int(pageSize), nil
 }
 
+func connectContextError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return connect.NewError(connect.CodeCanceled, err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return connect.NewError(connect.CodeDeadlineExceeded, err)
+	}
+	return nil
+}
+
 // snapshotCatalogPage returns one page of the local snapshot catalog.
 func (h *databaseServiceHandler) snapshotCatalogPage(
+	ctx context.Context,
 	pageSize uint32,
 	pageToken string,
 ) ([]*databasev1alpha1.SnapshotInfo, string, error) {
@@ -633,12 +647,16 @@ func (h *databaseServiceHandler) snapshotCatalogPage(
 			connect.CodeInvalidArgument, err,
 		)
 	}
-	entries, nextCursor, err := lifecycle.ListSnapshotPage(
+	entries, nextCursor, err := lifecycle.ListSnapshotPageContext(
+		ctx,
 		h.bark.config.SnapshotDir,
 		size,
 		cursor,
 	)
 	if err != nil {
+		if ctxErr := connectContextError(err); ctxErr != nil {
+			return nil, "", ctxErr
+		}
 		if errors.Is(err, lifecycle.ErrSnapshotCatalogChanged) {
 			return nil, "", connect.NewError(connect.CodeAborted, err)
 		}
@@ -685,7 +703,7 @@ func (h *databaseServiceHandler) snapshotCatalogPage(
 }
 
 func (h *databaseServiceHandler) ListSnapshots(
-	_ context.Context,
+	ctx context.Context,
 	req *connect.Request[databasev1alpha1.ListSnapshotsRequest],
 ) (*connect.Response[databasev1alpha1.ListSnapshotsResponse], error) {
 	release, err := h.beginDiagnostic()
@@ -694,6 +712,7 @@ func (h *databaseServiceHandler) ListSnapshots(
 	}
 	defer release()
 	infos, nextToken, err := h.snapshotCatalogPage(
+		ctx,
 		req.Msg.GetPageSize(),
 		req.Msg.GetPageToken(),
 	)
@@ -736,8 +755,13 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 		return nil, "", connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
-	localEntries, err := lifecycle.ListSnapshots(h.bark.config.SnapshotDir)
+	localEntries, err := lifecycle.ListSnapshotsContext(
+		ctx, h.bark.config.SnapshotDir,
+	)
 	if err != nil {
+		if ctxErr := connectContextError(err); ctxErr != nil {
+			return nil, "", ctxErr
+		}
 		// See snapshotCatalogPage's identical check: entries == nil means a
 		// total failure (unreadable root), while a non-nil result alongside
 		// an error means only some individual entries were unreadable --
@@ -1011,6 +1035,9 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 
 	cloudURI, cloudExists, cloudErr := h.cloudSnapshotExists(ctx, snapshotID)
 	if cloudErr != nil {
+		if ctxErr := connectContextError(cloudErr); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, connect.NewError(
 			connect.CodeUnavailable,
 			fmt.Errorf(
@@ -1032,7 +1059,10 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 	}
 
 	if localExists {
-		if err := lifecycle.RemoveSnapshot(localDir); err != nil {
+		if err := lifecycle.RemoveSnapshotContext(ctx, localDir); err != nil {
+			if ctxErr := connectContextError(err); ctxErr != nil {
+				return nil, ctxErr
+			}
 			return nil, connect.NewError(
 				connect.CodeInternal,
 				fmt.Errorf("delete local snapshot %q: %w", snapshotID, err),
@@ -1046,6 +1076,9 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 			cloudURI,
 		)
 		if delErr != nil {
+			if ctxErr := connectContextError(delErr); ctxErr != nil {
+				return nil, ctxErr
+			}
 			return nil, connect.NewError(
 				connect.CodeInternal,
 				fmt.Errorf("delete cloud snapshot %q: %w", snapshotID, delErr),

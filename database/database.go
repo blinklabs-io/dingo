@@ -432,16 +432,12 @@ func (d *Database) init(ctx context.Context) error {
 
 // New creates a database over injected stores. The caller owns the store
 // lifecycle and must keep both stores alive until Database.Close returns.
-//
-//nolint:contextcheck // Preserve the public nil-context compatibility boundary.
 func New(
 	ctx context.Context,
 	config *Config,
 	stores Stores,
 ) (*Database, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = nonNilContext(ctx)
 	if config == nil {
 		config = DefaultConfig
 	}

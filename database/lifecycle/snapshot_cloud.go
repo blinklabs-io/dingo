@@ -169,7 +169,7 @@ func SnapshotToCloud(
 		return Manifest{}, err
 	}
 	if name != "" || description != "" {
-		if err := LabelSnapshot(dir, name, description, opts...); err != nil {
+		if err := labelSnapshot(ctx, dir, name, description, opts...); err != nil {
 			return manifest, fmt.Errorf(
 				"snapshot written locally to %q, but labeling it failed: %w",
 				dir, err,

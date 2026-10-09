@@ -189,9 +189,19 @@ func (t *Txn) holdBlockInventory() error {
 // blocks too, and the outer Txn can never reach Commit/Rollback to
 // release the first RLock. Skipping the barrier for blob-only Txns
 // avoids that self-deadlock entirely rather than trying to detect it.
-func acquireCommitBarrier(t *Txn, hasMetadataWrite bool) {
+func acquireCommitBarrier(
+	ctx context.Context,
+	t *Txn,
+	hasMetadataWrite bool,
+) {
 	if t.readWrite && hasMetadataWrite && t.db != nil {
-		t.db.commitBarrier.RLock()
+		// Transaction construction has always waited for PauseCommits even
+		// after caller cancellation. Keep that ordering invariant while
+		// deriving the wait context from the caller.
+		err := t.db.commitBarrier.RLockContext(context.WithoutCancel(ctx))
+		if err != nil {
+			panic("uncancelled commit-barrier context returned an error")
+		}
 		t.barrierHeld = true
 	}
 }
@@ -250,12 +260,17 @@ func NewTxn(ctx context.Context, db *Database, readWrite bool) *Txn {
 	return NewTxnContext(ctx, db, readWrite)
 }
 
+func nonNilContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
 // NewTxnContext creates a coordinated transaction whose metadata operations
 // are canceled with ctx until Commit begins. Commit then completes independently
 // of caller cancellation. Blob operations do not accept contexts, so callers
 // doing long mixed-store scans must also check ctx between blob reads.
-//
-//nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
 func NewTxnContext(ctx context.Context, db *Database, readWrite bool) *Txn {
 	return newDatabaseTxn(ctx, db, readWrite, blockMutationNone)
 }
@@ -266,11 +281,9 @@ func newDatabaseTxn(
 	readWrite bool,
 	blockMutation blockMutationMode,
 ) *Txn {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = nonNilContext(ctx)
 	t := &Txn{db: db, readWrite: readWrite}
-	acquireCommitBarrier(t, db.Metadata() != nil)
+	acquireCommitBarrier(ctx, t, db.Metadata() != nil)
 	if blockMutation == blockMutationSerialized {
 		t.acquireBlockInventoryBeforeOpen()
 	}
@@ -318,15 +331,11 @@ func newDatabaseTxn(
 // transaction is still BEGUN inside the barrier, so the commit boundary the
 // two views share is unchanged; a store that does not implement ReadReserver
 // keeps the previous behavior exactly.
-//
-//nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
 func NewReadSnapshotContext(
 	ctx context.Context,
 	db *Database,
 ) (*Txn, ochainsync.Tip, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = nonNilContext(ctx)
 	ms := db.Metadata()
 	var reservation types.ReadReservation
 	admissionHeld := false
@@ -446,17 +455,14 @@ func (t *Txn) claimBlockInventoryForBatch() {
 	}
 }
 
-//nolint:contextcheck // Preserve the public nil-context compatibility boundary.
 func NewMetadataOnlyTxn(
 	ctx context.Context,
 	db *Database,
 	readWrite bool,
 ) *Txn {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = nonNilContext(ctx)
 	t := &Txn{db: db, readWrite: readWrite}
-	acquireCommitBarrier(t, db.Metadata() != nil)
+	acquireCommitBarrier(ctx, t, db.Metadata() != nil)
 	// A metadata-only transaction opens no blob transaction, but it still
 	// pins: BlobStore has to answer for it too, because helpers that take a
 	// *Txn (recordBlobOrphansOnCommit and the blob-delete paths it counts
@@ -515,14 +521,10 @@ func (t *Txn) DB() *Database {
 // opened here, not the borrowed blob handle -- t (or whatever constructed
 // it) still owns that and keeps using it afterward. Only valid for a
 // read-only t; the only current caller's t is always BlobTxn(false).
-//
-//nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
 func (t *Txn) withMetadataForRecovery(
 	ctx context.Context,
 ) (*Txn, func(), error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = nonNilContext(ctx)
 	aug := &Txn{
 		db: t.db,
 		// readWrite carried over from t, not defaulted to false: it is

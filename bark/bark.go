@@ -400,7 +400,7 @@ func (b *Bark) Start(ctx context.Context) error {
 
 	if b.config.Lifecycle != nil {
 		databasePath, databaseHandler := databaseconnect.NewDatabaseServiceHandler(
-			newDatabaseServiceHandler(b),
+			newDatabaseServiceHandler(ctx, b),
 			connect.WithOptions(
 				commonHandlerOptions,
 				connect.WithInterceptors(newOperatorAuthInterceptor(

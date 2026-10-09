@@ -374,6 +374,40 @@ func init() {
 	)
 }
 
+type barkContextDeleteDestination struct{}
+
+func (*barkContextDeleteDestination) UploadDir(context.Context, string) error {
+	return nil
+}
+
+func (*barkContextDeleteDestination) DownloadDir(context.Context, string) error {
+	return nil
+}
+
+func (*barkContextDeleteDestination) FetchManifest(
+	context.Context,
+) (lifecycle.Manifest, error) {
+	return lifecycle.Manifest{}, nil
+}
+
+func (*barkContextDeleteDestination) Delete(ctx context.Context) error {
+	return ctx.Err()
+}
+
+var (
+	_ lifecycle.CloudManifestFetcher = &barkContextDeleteDestination{}
+	_ lifecycle.CloudDeleter         = &barkContextDeleteDestination{}
+)
+
+func init() {
+	testDestinationRegistry.Register(
+		"barkfaketest-context-delete",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			return &barkContextDeleteDestination{}, nil
+		},
+	)
+}
+
 // TestBarkFakeCloudBackingDirsResetBetweenTests guards against a leaked
 // global: setBarkFakeCloudBackingDir/
 // setBarkFakeCloudNoDeleteBackingDir used to set their package-level
@@ -917,6 +951,82 @@ func TestDeleteSnapshotRemovesBothLocalAndCloudCopies(t *testing.T) {
 	require.Error(t, err, "cloud copy must actually be gone after delete")
 }
 
+func TestDeleteSnapshotMapsContextErrorsBeforeDeletion(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	dir := filepath.Join(h.bark.config.SnapshotDir, "keep")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
+		CreatedAt: time.Now().UTC(),
+	}))
+
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	deadline, deadlineCancel := context.WithDeadline(
+		t.Context(), time.Now().Add(-time.Second),
+	)
+	defer deadlineCancel()
+
+	for _, test := range []struct {
+		name string
+		ctx  context.Context
+		code connect.Code
+	}{
+		{name: "canceled", ctx: canceled, code: connect.CodeCanceled},
+		{name: "deadline", ctx: deadline, code: connect.CodeDeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := h.DeleteSnapshot(
+				test.ctx,
+				connect.NewRequest(&databasev1alpha1.DeleteSnapshotRequest{
+					SnapshotId: "keep",
+				}),
+			)
+			require.Equal(t, test.code, connect.CodeOf(err))
+			require.DirExists(t, dir)
+			entries, _, listErr := lifecycle.ListSnapshotPage(
+				h.bark.config.SnapshotDir, 1, nil,
+			)
+			require.NoError(t, listErr)
+			require.Len(t, entries, 1)
+			require.Equal(t, "keep", entries[0].ID)
+		})
+	}
+}
+
+func TestDeleteSnapshotMapsCloudDeleteContextErrors(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	h.bark.config.SnapshotCloudDestination =
+		"barkfaketest-context-delete://bucket/prefix"
+
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	deadline, deadlineCancel := context.WithDeadline(
+		t.Context(), time.Now().Add(-time.Second),
+	)
+	defer deadlineCancel()
+
+	for _, test := range []struct {
+		name string
+		ctx  context.Context
+		code connect.Code
+	}{
+		{name: "canceled", ctx: canceled, code: connect.CodeCanceled},
+		{name: "deadline", ctx: deadline, code: connect.CodeDeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := h.DeleteSnapshot(
+				test.ctx,
+				connect.NewRequest(&databasev1alpha1.DeleteSnapshotRequest{
+					SnapshotId: "cloud-only",
+				}),
+			)
+			require.Equal(t, test.code, connect.CodeOf(err))
+		})
+	}
+}
+
 func TestDeleteSnapshotNeitherLocalNorCloudReturnsNotFound(t *testing.T) {
 	setBarkFakeCloudBackingDir(t, t.TempDir())
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
@@ -1215,7 +1325,7 @@ func newTestDatabaseServiceHandler(
 		DestinationRegistry: testDestinationRegistry,
 	})
 	require.NoError(t, err)
-	return newDatabaseServiceHandler(b)
+	return newDatabaseServiceHandler(t.Context(), b)
 }
 
 func testBlock(id uint64, hashByte byte) models.Block {
@@ -1925,7 +2035,7 @@ func TestSnapshotCatalogRebuildReportsCorruptEntries(t *testing.T) {
 	))
 
 	var logs bytes.Buffer
-	h := newDatabaseServiceHandler(&Bark{config: BarkConfig{
+	h := newDatabaseServiceHandler(t.Context(), &Bark{config: BarkConfig{
 		SnapshotDir: base,
 		Logger:      slog.New(slog.NewTextHandler(&logs, nil)),
 	}})
@@ -1979,6 +2089,42 @@ func TestListSnapshotsContinuesPastPageOfUnreadableEntries(t *testing.T) {
 	require.Len(t, second.Msg.GetSnapshots(), 1)
 	require.Equal(t, "valid", second.Msg.GetSnapshots()[0].GetSnapshotId())
 	require.Empty(t, second.Msg.GetNextPageToken())
+}
+
+func TestSnapshotListingsMapContextErrors(t *testing.T) {
+	t.Parallel()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	deadline, deadlineCancel := context.WithDeadline(
+		t.Context(), time.Now().Add(-time.Second),
+	)
+	defer deadlineCancel()
+
+	for _, test := range []struct {
+		name string
+		ctx  context.Context
+		code connect.Code
+	}{
+		{name: "canceled", ctx: canceled, code: connect.CodeCanceled},
+		{name: "deadline", ctx: deadline, code: connect.CodeDeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := h.ListSnapshots(
+				test.ctx,
+				connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{}),
+			)
+			require.Equal(t, test.code, connect.CodeOf(err))
+			_, err = h.ListAvailableSnapshots(
+				test.ctx,
+				connect.NewRequest(
+					&databasev1alpha1.ListAvailableSnapshotsRequest{},
+				),
+			)
+			require.Equal(t, test.code, connect.CodeOf(err))
+		})
+	}
 }
 
 func TestDatabaseDiagnosticsRejectConcurrentWork(t *testing.T) {

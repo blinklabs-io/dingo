@@ -15,6 +15,7 @@
 package lifecycle
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,8 +85,46 @@ func TestSnapshotCatalogRejectsTraversalRowBeforeManifestRead(t *testing.T) {
 
 func TestSnapshotCatalogRejectsTraversalInsertion(t *testing.T) {
 	t.Parallel()
-	err := updateSnapshotCatalogIfPresent(t.TempDir(), SnapshotEntry{
+	err := updateSnapshotCatalogIfPresent(t.Context(), t.TempDir(), SnapshotEntry{
 		ID: filepath.Join("..", "outside"),
 	})
 	require.ErrorIs(t, err, ErrSnapshotCatalogCorrupt)
+}
+
+func TestRemoveSnapshotFinalizesCatalogAfterDeletionStarts(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	olderDir := filepath.Join(base, "older")
+	newerDir := filepath.Join(base, "newer")
+	require.NoError(t, os.Mkdir(olderDir, 0o755))
+	require.NoError(t, os.Mkdir(newerDir, 0o755))
+	require.NoError(t, WriteManifest(olderDir, Manifest{
+		CreatedAt: time.Unix(1_700_000_000, 0).UTC(),
+	}))
+	require.NoError(t, WriteManifest(newerDir, Manifest{
+		CreatedAt: time.Unix(1_700_000_001, 0).UTC(),
+	}))
+	require.NoError(t, EnsureSnapshotCatalog(base))
+	_, cursor, err := ListSnapshotPage(base, 1, nil)
+	require.NoError(t, err)
+	require.NotNil(t, cursor)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	require.NoError(t, removeSnapshotContext(
+		ctx,
+		newerDir,
+		func(path string) error {
+			err := os.RemoveAll(path)
+			cancel()
+			return err
+		},
+	))
+	require.NoDirExists(t, newerDir)
+	_, _, err = ListSnapshotPage(base, 1, cursor)
+	require.ErrorIs(t, err, ErrSnapshotCatalogChanged)
+	entries, next, err := ListSnapshotPage(base, 1, nil)
+	require.NoError(t, err)
+	require.Nil(t, next)
+	require.Len(t, entries, 1)
+	require.Equal(t, "older", entries[0].ID)
 }

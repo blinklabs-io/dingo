@@ -368,6 +368,15 @@ func (m Manifest) CheckCompatibility(
 // observes either the complete old manifest or the complete new one,
 // never a partial one.
 func WriteManifest(dir string, m Manifest, opts ...ManifestOption) error {
+	return writeManifest(context.Background(), dir, m, opts...)
+}
+
+func writeManifest(
+	ctx context.Context,
+	dir string,
+	m Manifest,
+	opts ...ManifestOption,
+) error {
 	limit, err := manifestByteLimit(opts)
 	if err != nil {
 		return err
@@ -428,6 +437,7 @@ func WriteManifest(dir string, m Manifest, opts ...ManifestOption) error {
 		return err
 	}
 	return updateSnapshotCatalogIfPresent(
+		ctx,
 		filepath.Dir(dir),
 		SnapshotEntry{ID: filepath.Base(dir), Manifest: m},
 	)
@@ -502,11 +512,23 @@ func ParseManifest(data []byte, opts ...ManifestOption) (Manifest, error) {
 // CreateSnapshot RPC receives name/description in the same request but
 // Snapshot itself has no such parameters).
 func LabelSnapshot(dir string, name string, description string, opts ...ManifestOption) error {
+	return labelSnapshot(
+		context.Background(), dir, name, description, opts...,
+	)
+}
+
+func labelSnapshot(
+	ctx context.Context,
+	dir string,
+	name string,
+	description string,
+	opts ...ManifestOption,
+) error {
 	m, err := ReadManifest(dir, opts...)
 	if err != nil {
 		return err
 	}
 	m.Name = name
 	m.Description = description
-	return WriteManifest(dir, m, opts...)
+	return writeManifest(ctx, dir, m, opts...)
 }

@@ -157,7 +157,7 @@ func Snapshot(
 	// created dir, so nothing else can be concurrently writing into it.
 	defer func() {
 		if err != nil {
-			_ = RemoveSnapshot(dir)
+			_ = RemoveSnapshotContext(context.WithoutCancel(ctx), dir)
 		}
 	}()
 
@@ -398,7 +398,7 @@ func Snapshot(
 		BlobBytes:       blobInfo.Size(),
 		MetadataBytes:   metadataInfo.Size(),
 	}
-	if err := WriteManifest(dir, manifest, opts...); err != nil {
+	if err := writeManifest(ctx, dir, manifest, opts...); err != nil {
 		return Manifest{}, err
 	}
 	// WriteManifest computes the checksum (and fills in FormatVersion) on

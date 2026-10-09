@@ -152,7 +152,13 @@ func scanBlockInventory(
 }
 
 func blockInventoryIndexKey(slot uint64, hash []byte) ([]byte, error) {
+	if hash == nil {
+		return nil, errors.New("build block inventory index key: nil block hash")
+	}
 	blockKey := types.BlockBlobKey(slot, hash)
+	if blockKey == nil {
+		return nil, errors.New("build block inventory index key: empty block key")
+	}
 	if _, _, err := types.ParseBlockBlobKey(blockKey); err != nil {
 		return nil, fmt.Errorf("build block inventory index key: %w", err)
 	}

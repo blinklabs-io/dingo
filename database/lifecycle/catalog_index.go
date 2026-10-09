@@ -110,10 +110,13 @@ type catalogQuerier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func readCatalogGeneration(query catalogQuerier) (uint64, error) {
+func readCatalogGeneration(
+	ctx context.Context,
+	query catalogQuerier,
+) (uint64, error) {
 	var generation int64
 	if err := query.QueryRowContext(
-		context.Background(),
+		ctx,
 		"SELECT generation FROM catalog_meta WHERE singleton = 1",
 	).Scan(&generation); err != nil {
 		return 0, err
@@ -129,12 +132,24 @@ func readCatalogGeneration(query catalogQuerier) (uint64, error) {
 // handling. It imports snapshot directories created while the service was not
 // running.
 func EnsureSnapshotCatalog(baseDir string, opts ...ManifestOption) error {
+	return EnsureSnapshotCatalogContext(
+		context.Background(), baseDir, opts...,
+	)
+}
+
+// EnsureSnapshotCatalogContext atomically rebuilds the persistent local
+// snapshot index using ctx for catalog operations.
+func EnsureSnapshotCatalogContext(
+	ctx context.Context,
+	baseDir string,
+	opts ...ManifestOption,
+) error {
 	snapshotCatalogMu.Lock()
 	defer snapshotCatalogMu.Unlock()
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		return fmt.Errorf("create snapshot catalog directory: %w", err)
 	}
-	entries, listErr := ListSnapshots(baseDir, opts...)
+	entries, listErr := ListSnapshotsContext(ctx, baseDir, opts...)
 	if listErr != nil && entries == nil {
 		return listErr
 	}
@@ -145,7 +160,7 @@ func EnsureSnapshotCatalog(baseDir string, opts ...ManifestOption) error {
 		if err != nil {
 			return fmt.Errorf("open existing snapshot catalog: %w", err)
 		}
-		oldGeneration, err := readCatalogGeneration(current)
+		oldGeneration, err := readCatalogGeneration(ctx, current)
 		closeErr := current.Close()
 		if err != nil {
 			return fmt.Errorf("read existing snapshot catalog: %w", err)
@@ -178,13 +193,14 @@ func EnsureSnapshotCatalog(baseDir string, opts ...ManifestOption) error {
 		_ = db.Close()
 		return err
 	}
-	txn, err := db.Begin()
+	txn, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		_ = db.Close()
 		return err
 	}
 	defer txn.Rollback() //nolint:errcheck
-	if _, err := txn.Exec(
+	if _, err := txn.ExecContext(
+		ctx,
 		"INSERT INTO catalog_meta(singleton, generation) VALUES (1, ?)",
 		generation,
 	); err != nil {
@@ -196,7 +212,8 @@ func EnsureSnapshotCatalog(baseDir string, opts ...ManifestOption) error {
 			_ = db.Close()
 			return err
 		}
-		if _, err := txn.Exec(
+		if _, err := txn.ExecContext(
+			ctx,
 			"INSERT INTO snapshots(id, created_sec, created_ns) VALUES (?, ?, ?)",
 			entry.ID, entry.Manifest.CreatedAt.Unix(),
 			entry.Manifest.CreatedAt.Nanosecond(),
@@ -219,12 +236,13 @@ func EnsureSnapshotCatalog(baseDir string, opts ...ManifestOption) error {
 		return err
 	}
 	if listErr != nil {
-		return fmt.Errorf("%w: %v", ErrSnapshotCatalogIncomplete, listErr)
+		return fmt.Errorf("%w: %w", ErrSnapshotCatalogIncomplete, listErr)
 	}
 	return nil
 }
 
 func mutateSnapshotCatalog(
+	ctx context.Context,
 	baseDir string,
 	mutate func(*sql.Tx) (bool, error),
 ) error {
@@ -241,7 +259,7 @@ func mutateSnapshotCatalog(
 		return err
 	}
 	defer db.Close() //nolint:errcheck
-	txn, err := db.Begin()
+	txn, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -253,14 +271,15 @@ func mutateSnapshotCatalog(
 	if !changed {
 		return nil
 	}
-	generation, err := readCatalogGeneration(txn)
+	generation, err := readCatalogGeneration(ctx, txn)
 	if err != nil {
 		return err
 	}
 	if generation == math.MaxInt64 {
 		return errors.New("snapshot catalog generation overflow")
 	}
-	if _, err := txn.Exec(
+	if _, err := txn.ExecContext(
+		ctx,
 		"UPDATE catalog_meta SET generation = ? WHERE singleton = 1",
 		generation+1,
 	); err != nil {
@@ -269,12 +288,16 @@ func mutateSnapshotCatalog(
 	return txn.Commit()
 }
 
-func updateSnapshotCatalogIfPresent(baseDir string, entry SnapshotEntry) error {
+func updateSnapshotCatalogIfPresent(
+	ctx context.Context,
+	baseDir string,
+	entry SnapshotEntry,
+) error {
 	if err := validateSnapshotCatalogID(entry.ID); err != nil {
 		return err
 	}
-	return mutateSnapshotCatalog(baseDir, func(txn *sql.Tx) (bool, error) {
-		_, err := txn.Exec(`
+	return mutateSnapshotCatalog(ctx, baseDir, func(txn *sql.Tx) (bool, error) {
+		_, err := txn.ExecContext(ctx, `
 INSERT INTO snapshots(id, created_sec, created_ns) VALUES (?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     created_sec = excluded.created_sec,
@@ -286,12 +309,18 @@ ON CONFLICT(id) DO UPDATE SET
 	})
 }
 
-func removeSnapshotCatalogEntryIfPresent(baseDir, id string) error {
+func removeSnapshotCatalogEntryIfPresent(
+	ctx context.Context,
+	baseDir string,
+	id string,
+) error {
 	if err := validateSnapshotCatalogID(id); err != nil {
 		return err
 	}
-	return mutateSnapshotCatalog(baseDir, func(txn *sql.Tx) (bool, error) {
-		result, err := txn.Exec("DELETE FROM snapshots WHERE id = ?", id)
+	return mutateSnapshotCatalog(ctx, baseDir, func(txn *sql.Tx) (bool, error) {
+		result, err := txn.ExecContext(
+			ctx, "DELETE FROM snapshots WHERE id = ?", id,
+		)
 		if err != nil {
 			return false, err
 		}
@@ -303,10 +332,28 @@ func removeSnapshotCatalogEntryIfPresent(baseDir, id string) error {
 // RemoveSnapshot removes a local snapshot directory and its persistent
 // catalog entry.
 func RemoveSnapshot(dir string) error {
-	if err := os.RemoveAll(dir); err != nil {
+	return RemoveSnapshotContext(context.Background(), dir)
+}
+
+// RemoveSnapshotContext removes a local snapshot directory and its persistent
+// catalog entry, using ctx for catalog operations.
+func RemoveSnapshotContext(ctx context.Context, dir string) error {
+	return removeSnapshotContext(ctx, dir, os.RemoveAll)
+}
+
+func removeSnapshotContext(
+	ctx context.Context,
+	dir string,
+	remove func(string) error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := remove(dir); err != nil {
 		return err
 	}
 	return removeSnapshotCatalogEntryIfPresent(
+		context.WithoutCancel(ctx),
 		filepath.Dir(dir), filepath.Base(dir),
 	)
 }
@@ -314,6 +361,19 @@ func RemoveSnapshot(dir string) error {
 // ListSnapshotPage reads at most pageSize+1 index rows and pageSize manifests.
 // Entries preserve ListSnapshots' newest-first ordering.
 func ListSnapshotPage(
+	baseDir string,
+	pageSize int,
+	cursor *SnapshotCatalogCursor,
+	opts ...ManifestOption,
+) (entries []SnapshotEntry, next *SnapshotCatalogCursor, err error) {
+	return ListSnapshotPageContext(
+		context.Background(), baseDir, pageSize, cursor, opts...,
+	)
+}
+
+// ListSnapshotPageContext reads one bounded snapshot catalog page using ctx.
+func ListSnapshotPageContext(
+	ctx context.Context,
 	baseDir string,
 	pageSize int,
 	cursor *SnapshotCatalogCursor,
@@ -327,12 +387,12 @@ func ListSnapshotPage(
 		return nil, nil, err
 	}
 	defer db.Close() //nolint:errcheck
-	txn, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	txn, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, nil, err
 	}
 	defer txn.Rollback() //nolint:errcheck
-	generation, err := readCatalogGeneration(txn)
+	generation, err := readCatalogGeneration(ctx, txn)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -351,7 +411,7 @@ func ListSnapshotPage(
 			pageSize + 1,
 		}
 	}
-	rows, err := txn.Query(query, args...)
+	rows, err := txn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -392,6 +452,9 @@ func ListSnapshotPage(
 	entries = make([]SnapshotEntry, 0, len(rowsRead))
 	var problems []error
 	for _, row := range rowsRead {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		manifest, readErr := ReadManifest(filepath.Join(baseDir, row.id), opts...)
 		if readErr != nil {
 			problems = append(problems, fmt.Errorf(

@@ -693,7 +693,7 @@ func (m *Manager) pruneOldSnapshots(ctx context.Context) {
 			}
 		}
 
-		if err := lifecycle.RemoveSnapshot(dir); err != nil {
+		if err := lifecycle.RemoveSnapshotContext(ctx, dir); err != nil {
 			m.logger.Warn(
 				"failed to prune old automatic snapshot",
 				"component", "dblifecycle",
