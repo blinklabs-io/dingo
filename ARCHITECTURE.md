@@ -567,15 +567,17 @@ the rule, since the EBB's own queueing event is delivered asynchronously.
 
 The ChainSync client uses gouroboros's default 75-request pipeline and receive
 queue to cover network latency. Before future-header admission or header
-cryptography, an eligible peer waits when queued headers plus admitted ledger
-events reach the working bound (`min(4 * BlockfetchBatchSize,
-MaxQueuedHeaders)`). The lossless `ledger.chainsync` subscriber holds one
-protocol window; headroom also covers its active handler and one blocked
-publisher per configured ChainSync client. A client count that consumes the
-whole working bound is rejected instead of weakening the limit. BlockFetch
-draining one batch releases the event-driven wait; connection cancellation
-releases it immediately. This keeps several batches ready without admitting
-and verifying headers up to the chain's larger emergency capacity.
+cryptography, an eligible peer applies backpressure once BlockFetch is active
+or pending and queued headers plus admitted ledger events reach the working
+bound (`min(4 * BlockfetchBatchSize, MaxQueuedHeaders)`). The initial fill may
+reach that bound so the far-behind path can start BlockFetch. The lossless
+`ledger.chainsync` subscriber holds one protocol window; headroom also covers
+its active handler and one blocked publisher per configured ChainSync client.
+Startup rejects a client count whose admitted headroom would exceed the
+chain's minimum queue capacity. BlockFetch draining one batch releases the
+event-driven wait; connection teardown releases it immediately. This keeps
+several batches ready without admitting and verifying headers up to the
+chain's larger emergency capacity.
 
 While the local header tip is at least `blockfetchMinBatchGapSlots` behind the
 peer tip, BlockFetch starts only once `blockfetchMinBatchHeaders` headers are

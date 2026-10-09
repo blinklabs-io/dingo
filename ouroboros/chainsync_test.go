@@ -432,6 +432,81 @@ func TestChainsyncHeaderBackpressurePrecedesAdmissionAndCrypto(t *testing.T) {
 	require.Zero(t, cryptoCalls.Load())
 }
 
+func TestChainsyncHeaderBackpressureUsesCallbackTeardown(t *testing.T) {
+	t.Parallel()
+
+	// Keep an unrelated manager-owned connection at the callback's ID. The
+	// callback teardown signal belongs to this protocol instance and must win
+	// even when a replacement connection has reused the same addresses.
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	t.Cleanup(func() { _ = cm.Stop(context.Background()) })
+	rawConn, err := ouroboros.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { close(rawConn.ErrorChan()) })
+	require.True(t, cm.AddConnection(rawConn, false, "127.0.0.1:1234"))
+	_, managerDone := cm.GetConnectionWithDone(rawConn.Id())
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	o := newOuroboros(OuroborosConfig{
+		EventBus:    bus,
+		ConnManager: cm,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	entered := make(chan struct{})
+	o.chainsyncHeaderBackpressure = func(
+		ctx context.Context,
+		_ int,
+	) error {
+		close(entered)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	connectionDone := make(chan any)
+	done := make(chan error, 1)
+	go func() {
+		done <- o.chainsyncClientRollForwardAt(
+			ochainsync.CallbackContext{
+				ConnectionId:       rawConn.Id(),
+				ConnectionDoneChan: connectionDone,
+			},
+			0,
+			newTestBlockHeader(100, 1, 0xaa),
+			ochainsync.Tip{},
+			time.Now(),
+		)
+	}()
+	testutil.RequireReceive(
+		t,
+		entered,
+		time.Second,
+		"capacity gate did not begin waiting",
+	)
+	close(connectionDone)
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(
+			t,
+			done,
+			time.Second,
+			"callback teardown did not cancel capacity wait",
+		),
+		context.Canceled,
+	)
+	rawConn.ErrorChan() <- nil
+	testutil.RequireReceive(
+		t,
+		managerDone,
+		time.Second,
+		"foreign manager connection did not shut down",
+	)
+}
+
 func TestChainsyncBacklogBoundsConcurrentPeerPublishers(t *testing.T) {
 	t.Parallel()
 

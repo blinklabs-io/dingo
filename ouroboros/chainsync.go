@@ -111,11 +111,22 @@ func (c chainsyncClientDoneContext) Value(any) any {
 
 func chainsyncAdmissionContext(
 	ctx ochainsync.CallbackContext,
-) context.Context {
-	if ctx.Client == nil || ctx.Client.ProtocolInstance() == nil {
-		return context.Background()
+) (context.Context, context.CancelFunc) {
+	if ctx.ConnectionDoneChan != nil {
+		admissionCtx, cancel := context.WithCancel(context.Background())
+		go func() {
+			select {
+			case <-ctx.ConnectionDoneChan:
+				cancel()
+			case <-admissionCtx.Done():
+			}
+		}()
+		return admissionCtx, cancel
 	}
-	return chainsyncClientDoneContext{done: ctx.Client.DoneChan()}
+	if ctx.Client == nil || ctx.Client.ProtocolInstance() == nil {
+		return context.Background(), func() {}
+	}
+	return chainsyncClientDoneContext{done: ctx.Client.DoneChan()}, func() {}
 }
 
 func defaultChainsyncScheduleAt(onset time.Time, fn func()) func() {
@@ -1178,11 +1189,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			ctx.ConnectionId,
 			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
 		)
+		admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+		defer cancelAdmission()
 		if ingressEligible && o.chainsyncHeaderBackpressure != nil {
 			admittedHeadroom := ledger.ChainsyncEventBufferSize + 1 +
 				o.maxTrackedChainsyncClients()
 			if err := o.chainsyncHeaderBackpressure(
-				chainsyncAdmissionContext(ctx),
+				admissionCtx,
 				admittedHeadroom,
 			); err != nil {
 				return fmt.Errorf("chainsync: await header capacity: %w", err)
@@ -1210,7 +1223,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// ledger ChainSync dispatch mutex/goroutine.
 		if ingressEligible && o.chainsyncHeaderAdmission != nil {
 			accepted, err := o.chainsyncHeaderAdmission(
-				chainsyncAdmissionContext(ctx),
+				admissionCtx,
 				chainsyncEvent,
 			)
 			if err != nil {

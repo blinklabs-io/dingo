@@ -581,6 +581,11 @@ func NewOuroboros(cfg OuroborosConfig) (*Ouroboros, error) {
 	if err := cfg.validateDependencies(); err != nil {
 		return nil, err
 	}
+	maxClients := cfg.ChainsyncState.MaxClients()
+	admittedHeadroom := ledger.ChainsyncEventBufferSize + 1 + maxClients
+	if err := ledger.ValidateChainsyncHeaderCapacity(admittedHeadroom); err != nil {
+		return nil, fmt.Errorf("invalid chainsync capacity: %w", err)
+	}
 	return newOuroboros(cfg), nil
 }
 

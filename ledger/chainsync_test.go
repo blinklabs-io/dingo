@@ -85,19 +85,6 @@ type bodySizedMockHeader struct {
 
 func (h bodySizedMockHeader) BlockBodySize() uint64 { return h.bodySize }
 
-type chainsyncCapacityTestBlock struct {
-	bodySizedMockHeader
-}
-
-func (b *chainsyncCapacityTestBlock) Header() lcommon.BlockHeader { return b }
-func (b *chainsyncCapacityTestBlock) Type() int                   { return 0 }
-func (b *chainsyncCapacityTestBlock) Transactions() []lcommon.Transaction {
-	return nil
-}
-func (b *chainsyncCapacityTestBlock) Utxorpc() (*utxorpc.Block, error) {
-	return nil, nil
-}
-
 func buildBodySizedChain(
 	t *testing.T,
 	headerCount int,
@@ -132,40 +119,30 @@ func TestAwaitChainsyncHeaderCapacityBoundsAdmittedWork(t *testing.T) {
 
 	const admittedHeadroom = ChainsyncEventBufferSize + 1 +
 		dchainsync.DefaultMaxClients
-	pauseAt := BlockfetchBatchSize*4 - admittedHeadroom
+	capacity := BlockfetchBatchSize * 4
 	belowLimit := &LedgerState{
-		chain: buildBodySizedChain(t, pauseAt-1, 1),
+		chain: buildBodySizedChain(t, capacity-1, 1),
 	}
+	initialFillCtx, cancelInitialFill := context.WithTimeout(
+		t.Context(),
+		time.Second,
+	)
+	defer cancelInitialFill()
 	require.NoError(t, belowLimit.AwaitChainsyncHeaderCapacity(
-		context.Background(),
+		initialFillCtx,
 		admittedHeadroom,
 	))
 
 	chainManager, err := chain.NewManager(context.Background(), nil, nil)
 	require.NoError(t, err)
 	atLimitChain := chainManager.PrimaryChain()
-	blocks := make([]*chainsyncCapacityTestBlock, pauseAt)
-	prevHash := lcommon.NewBlake2b256(nil)
-	for i := range pauseAt {
-		hash := lcommon.NewBlake2b256(
-			testHashBytes(fmt.Sprintf("capacity-header-%d", i)),
-		)
-		blocks[i] = &chainsyncCapacityTestBlock{
-			bodySizedMockHeader: bodySizedMockHeader{
-				mockHeader: mockHeader{
-					hash:        hash,
-					prevHash:    prevHash,
-					blockNumber: uint64(i + 1),
-					slot:        uint64(i + 1),
-				},
-				bodySize: 1,
-			},
-		}
+	blocks, err := testfixtures.GenerateConwayChain(capacity)
+	require.NoError(t, err)
+	for _, block := range blocks {
 		require.NoError(t, atLimitChain.AddBlockHeader(
 			context.Background(),
-			blocks[i],
+			block.Header(),
 		))
-		prevHash = hash
 	}
 	atLimit := &LedgerState{chain: atLimitChain}
 	done := make(chan error, 1)
@@ -181,6 +158,9 @@ func TestAwaitChainsyncHeaderCapacityBoundsAdmittedWork(t *testing.T) {
 		50*time.Millisecond,
 		"capacity gate should stop work at the bounded threshold",
 	)
+	atLimit.chainsyncBlockfetchMutex.Lock()
+	atLimit.activeBlockfetchRequestDone = make(chan struct{})
+	atLimit.chainsyncBlockfetchMutex.Unlock()
 	for i := range BlockfetchBatchSize - 1 {
 		require.NoError(t, atLimitChain.AddBlock(
 			context.Background(),
@@ -211,14 +191,14 @@ func TestAwaitChainsyncHeaderCapacityRejectsExhaustedBudget(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{chain: &chain.Chain{}}
-	capacity := ls.allowedQueuedHeaders()
+	capacity := chain.DefaultMaxQueuedHeaders - BlockfetchBatchSize*4
 	require.ErrorContains(t, ls.AwaitChainsyncHeaderCapacity(
 		context.Background(),
-		capacity,
+		capacity+1,
 	), "must be between 0")
 	require.NoError(t, ls.AwaitChainsyncHeaderCapacity(
 		context.Background(),
-		capacity-1,
+		capacity,
 	))
 }
 
