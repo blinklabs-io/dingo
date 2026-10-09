@@ -669,8 +669,9 @@
 
 # In core storage mode, write the accumulated deltas of blocks that are not
 # validated with multi-row batched inserts instead of one statement group per
-# row (default: false); API storage mode always does. Blocks that are
-# validated keep the per-transaction path. Not
+# row (default: false), as API storage mode already does. Validated blocks,
+# Leios endorser-block applies, and batches applied with closure context keep
+# the per-transaction path in every storage mode. Not
 # consensus-affecting -- the stored state is identical either way. See
 # ARCHITECTURE.md ("Block Processing Pipeline").
 #

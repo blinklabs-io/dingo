@@ -1738,9 +1738,10 @@ func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 
 // WithLedgerApplyRowBatchingEnabled writes the accumulated deltas of blocks
 // that are not validated through the metadata store's batched path in core
-// storage mode; API storage mode always does. Blocks that are validated keep
-// the per-transaction path. Off by default; the
-// stored state is identical either way. See
+// storage mode, as API storage mode already does. Validated blocks, Leios
+// endorser-block applies, and batches applied with closure context keep the
+// per-transaction path in every storage mode, API mode included. Off by
+// default; the stored state is identical either way. See
 // LedgerStateConfig.ApplyRowBatchingEnabled.
 func WithLedgerApplyRowBatchingEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
