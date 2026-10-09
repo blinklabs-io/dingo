@@ -125,6 +125,7 @@ func TestBlockInventoryTracksCommittedMutations(t *testing.T) {
 	require.Equal(t, uint64(100), oldest)
 
 	txn := db.BlobTxn(true)
+	t.Cleanup(txn.Release)
 	require.NoError(t, BlockDeleteTxn(txn, first))
 	require.NoError(t, txn.Commit())
 	count, oldest, err = db.CountBlocksAndOldestSlot(nil)
@@ -133,6 +134,7 @@ func TestBlockInventoryTracksCommittedMutations(t *testing.T) {
 	require.Equal(t, uint64(200), oldest)
 
 	txn = db.BlobTxn(true)
+	t.Cleanup(txn.Release)
 	require.NoError(t, db.tombstoneBlockTxn(txn, second.Slot, second.Hash))
 	require.NoError(t, txn.Commit())
 	count, oldest, err = db.CountBlocksAndOldestSlot(nil)
@@ -162,6 +164,7 @@ func TestBlockInventoryRollsBackWithBlockWrite(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	txn := db.BlobTxn(true)
+	t.Cleanup(txn.Release)
 	require.NoError(t, db.BlockCreate(models.Block{
 		ID: 1, Slot: 100, Hash: randomHash(t), Cbor: []byte{0x80},
 	}, txn))
@@ -182,6 +185,7 @@ func TestBlockInventoryInitializesLegacyStoreBeforeQueries(t *testing.T) {
 	insertTestBlock(t, db, 200, secondHash, []byte{0x80})
 
 	txn := db.BlobTxn(true)
+	t.Cleanup(txn.Release)
 	require.NoError(t, txn.BlobStore().Delete(txn.Blob(), blockInventoryKey))
 	require.NoError(t, txn.Commit())
 	require.NoError(t, db.initBlockInventory())
@@ -192,6 +196,7 @@ func TestBlockInventoryInitializesLegacyStoreBeforeQueries(t *testing.T) {
 	require.Equal(t, uint64(100), oldest)
 
 	txn = db.BlockBlobTxn()
+	t.Cleanup(txn.Release)
 	require.NoError(t, BlockDeleteTxn(txn, models.Block{
 		ID: 1, Slot: 100, Hash: firstHash,
 	}))
@@ -218,6 +223,7 @@ func TestBlockInventoryRejectsCorruption(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	txn := db.BlobTxn(true)
+	t.Cleanup(txn.Release)
 	require.NoError(t, txn.BlobStore().Set(
 		txn.Blob(), blockInventoryKey, []byte("corrupt"),
 	))
@@ -262,10 +268,10 @@ func TestBlockInventoryCallerTransactionDoesNotWaitBehindMutation(t *testing.T) 
 	db := newTestDB(t)
 	db.SetBlobStore(noWriteConflictBlobStore{BlobStore: db.Blob()})
 	holder := db.BlockBlobTxn()
-	defer holder.Rollback() //nolint:errcheck
+	t.Cleanup(holder.Release)
 
 	callerTxn := db.BlobTxn(true)
-	defer callerTxn.Rollback() //nolint:errcheck
+	t.Cleanup(callerTxn.Release)
 	err := db.BlockCreate(models.Block{
 		ID: 1, Slot: 1, Hash: randomHash(t), Cbor: []byte{0x80},
 	}, callerTxn)
@@ -276,10 +282,10 @@ func TestBlockInventoryCallerDoesNotBypassGateOnBadger(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	holder := db.BlockBlobTxn()
-	defer holder.Rollback() //nolint:errcheck
+	t.Cleanup(holder.Release)
 
 	callerTxn := db.BlobTxn(true)
-	defer callerTxn.Rollback() //nolint:errcheck
+	t.Cleanup(callerTxn.Release)
 	err := db.BlockCreate(models.Block{
 		ID: 1, Slot: 1, Hash: randomHash(t), Cbor: []byte{0x80},
 	}, callerTxn)
@@ -290,7 +296,7 @@ func TestBlockBatchTxnSerializesInventoryOnBadger(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	first := db.BlockBatchTxn()
-	defer first.Rollback() //nolint:errcheck
+	t.Cleanup(first.Release)
 	require.NoError(t, db.BlockCreate(models.Block{
 		ID: 1, Slot: 1, Hash: randomHash(t), Cbor: []byte{0x80},
 	}, first))
@@ -333,7 +339,7 @@ func TestBlockBatchTransactionSerializesInventoryOnBadger(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	first := db.BlockBatchTransaction(t.Context())
-	defer first.Rollback() //nolint:errcheck
+	t.Cleanup(first.Release)
 	require.NoError(t, db.BlockCreate(models.Block{
 		ID: 1, Slot: 1, Hash: randomHash(t), Cbor: []byte{0x80},
 	}, first))
@@ -381,7 +387,7 @@ func TestBlockBatchTxnSerializesStoreWithoutConflictDetection(t *testing.T) {
 		opened:    opened,
 	})
 	first := db.BlockBatchTxn()
-	defer first.Rollback() //nolint:errcheck
+	t.Cleanup(first.Release)
 	<-opened
 
 	secondDone := make(chan *Txn, 1)
@@ -401,6 +407,7 @@ func TestBlockBatchTxnSerializesStoreWithoutConflictDetection(t *testing.T) {
 	}
 	select {
 	case second := <-secondDone:
+		t.Cleanup(second.Release)
 		require.NoError(t, second.Rollback())
 	case <-time.After(5 * time.Second):
 		t.Fatal("serialized block transaction construction did not return")
@@ -418,7 +425,7 @@ func TestBlockBatchTransactionSerializesStoreWithoutConflictDetection(
 		opened:    opened,
 	})
 	first := db.BlockBatchTransaction(t.Context())
-	defer first.Rollback() //nolint:errcheck
+	t.Cleanup(first.Release)
 	<-opened
 
 	secondDone := make(chan *Txn, 1)
@@ -438,6 +445,7 @@ func TestBlockBatchTransactionSerializesStoreWithoutConflictDetection(
 	}
 	select {
 	case second := <-secondDone:
+		t.Cleanup(second.Release)
 		require.NoError(t, second.Rollback())
 	case <-time.After(5 * time.Second):
 		t.Fatal("serialized coordinated transaction construction did not return")
@@ -456,7 +464,7 @@ func TestBlockBatchTransactionContextCancelsInventoryAdmission(
 	})
 	first, err := db.BlockBatchTransactionContext(t.Context())
 	require.NoError(t, err)
-	defer first.Rollback() //nolint:errcheck
+	t.Cleanup(first.Release)
 	testutil.RequireReceive(
 		t,
 		opened,
@@ -554,7 +562,7 @@ func TestBlockBatchTransactionIncludesSyntheticBlockInventory(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	outer := db.BlockBatchTransaction(t.Context())
-	defer outer.Rollback() //nolint:errcheck
+	t.Cleanup(outer.Release)
 	hash := randomHash(t)
 
 	require.NoError(t, db.SetGenesisCbor(1, hash, []byte{0x80}, outer))
@@ -570,11 +578,11 @@ func TestBlockBatchTransactionComposesWithGenericWriterAndPause(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	holder := db.BlockBlobTxn()
-	defer holder.Rollback() //nolint:errcheck
+	t.Cleanup(holder.Release)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	generic := db.TransactionContext(ctx, true)
-	defer generic.Rollback() //nolint:errcheck
+	t.Cleanup(generic.Release)
 
 	batchReady := make(chan *Txn, 1)
 	go func() { batchReady <- db.BlockBatchTransaction(t.Context()) }()
@@ -604,6 +612,7 @@ func TestBlockBatchTransactionComposesWithGenericWriterAndPause(t *testing.T) {
 	var batch *Txn
 	select {
 	case batch = <-batchReady:
+		t.Cleanup(batch.Release)
 	case <-time.After(5 * time.Second):
 		t.Fatal("block batch remained blocked after inventory release")
 	}
@@ -649,6 +658,7 @@ func TestBlockInventoryBoundsSequentialOldestRemovalWork(t *testing.T) {
 	})
 	for i, block := range blocks {
 		txn := db.BlockBlobTxn()
+		t.Cleanup(txn.Release)
 		if i%2 == 0 {
 			require.NoError(t, db.tombstoneBlockTxn(txn, block.Slot, block.Hash))
 		} else {

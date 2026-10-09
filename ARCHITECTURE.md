@@ -12304,7 +12304,8 @@ The read-only diagnostic RPCs `ListSnapshots`, `ListAvailableSnapshots`, and
 `ListSnapshots` preserves manifest `CreatedAt` newest-first order through the
 persistent local catalog described in `DATABASE.md`; page size is capped at
 100, each page uses a generation-bound keyset cursor, and the handler reads
-only that page's index rows and manifests. `ListAvailableSnapshots` streams the
+`pageSize+1` index rows and at most `pageSize` manifests.
+`ListAvailableSnapshots` streams the
 materialized one-row-per-ID available index with the same cursor; local rows win on a
 duplicate ID. Cloud providers are scanned once while Bark initializes the
 disposable catalog, not during page requests. Cloud rows are exposed only when

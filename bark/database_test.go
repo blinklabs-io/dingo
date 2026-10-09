@@ -1411,7 +1411,7 @@ func TestListAvailableSnapshotsPagesWithoutProviderRescan(t *testing.T) {
 	require.NoError(t, lifecycle.WriteManifest(manifestDir, manifest))
 	manifest, err := lifecycle.ReadManifest(manifestDir)
 	require.NoError(t, err)
-	for i := 0; i < cloudCount; i++ {
+	for i := range cloudCount {
 		id := fmt.Sprintf("cloud-%03d", i)
 		provider.entries = append(provider.entries, lifecycle.SnapshotEntry{
 			ID: id, Manifest: manifest,
@@ -1445,7 +1445,7 @@ func TestListAvailableSnapshotsPagesWithoutProviderRescan(t *testing.T) {
 
 	seen := make(map[string]bool)
 	token := ""
-	for page := 0; page < 3; page++ {
+	for range 3 {
 		resp, err := h.ListAvailableSnapshots(
 			t.Context(),
 			connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{
