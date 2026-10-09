@@ -407,9 +407,7 @@ func TestAccountBalanceHistoricalLedgerError(t *testing.T) {
 	got := requireMeshError(
 		t, rec, ErrInternal, http.StatusInternalServerError,
 	)
-	require.Equal(
-		t, "historical read failed", got.Details["error"],
-	)
+	require.Nil(t, got.Details)
 }
 
 func TestAccountBalanceInvalidAccount(t *testing.T) {
@@ -460,7 +458,7 @@ func TestAccountBalanceLedgerError(t *testing.T) {
 	got := requireMeshError(
 		t, rec, ErrInternal, http.StatusInternalServerError,
 	)
-	require.Equal(t, "ledger unavailable", got.Details["error"])
+	require.Nil(t, got.Details)
 }
 
 func TestAccountCoins(t *testing.T) {

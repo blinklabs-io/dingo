@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	sync "github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
+	"google.golang.org/protobuf/proto"
 )
 
 // dumpHistoryIterator is implemented by *chain.ChainIterator and by test fakes
@@ -30,32 +31,38 @@ type dumpHistoryIterator interface {
 }
 
 // effectiveDumpHistoryMaxItems maps DumpHistoryRequest.max_items to a page size.
-// Protobuf uses 0 when the client omits the field; that is treated as maxAllowed
-// (the server-configured cap). If maxAllowed is 0, the result is 0 (empty page).
-func effectiveDumpHistoryMaxItems(requested, maxAllowed uint32) uint32 {
+// Protobuf uses 0 when the client omits the field; that is treated as
+// defaultItems, the page size for requests that did not choose one. If
+// defaultItems is 0, the result is 0 (empty page).
+func effectiveDumpHistoryMaxItems(requested, defaultItems uint32) uint32 {
 	if requested != 0 {
 		return requested
 	}
-	return maxAllowed
+	return defaultItems
 }
 
 // collectDumpHistoryPage reads up to maxItems forward blocks from the iterator
 // using non-blocking Next. Skips rollback markers. If the page is full, peeks
 // one more forward block to set hasMore (without including that block in out).
-// Pass requested maxItems and maxAllowed; unset (0) is resolved via
+// Pass requested maxItems and defaultItems; unset (0) is resolved via
 // effectiveDumpHistoryMaxItems.
+//
+// Collection also stops once the serialized blocks reach maxBytes. A block that
+// would cross the budget is left out, so the page never exceeds it, except that
+// a first block larger than maxBytes is still returned: the continuation token
+// must advance.
 func collectDumpHistoryPage(
 	ctx context.Context,
 	iter dumpHistoryIterator,
 	maxItems uint32,
-	maxAllowed uint32,
-	maxBytes int64,
+	defaultItems uint32,
+	maxBytes int,
 ) (out []*sync.AnyChainBlock, lastModel *models.Block, hasMore bool, err error) {
-	maxItems = effectiveDumpHistoryMaxItems(maxItems, maxAllowed)
+	maxItems = effectiveDumpHistoryMaxItems(maxItems, defaultItems)
 	if maxItems == 0 {
 		return nil, nil, false, nil
 	}
-	budget := byteBudget{limit: maxBytes}
+	pageBytes := 0
 	for len(out) < int(maxItems) {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, false, err
@@ -73,13 +80,13 @@ func collectDumpHistoryPage(
 		if next.Rollback {
 			continue
 		}
-		if !budget.fits(len(next.Block.Cbor)) {
-			return out, lastModel, true, nil
-		}
-		budget.add(len(next.Block.Cbor))
 		acb, err := anyChainBlockFromModel(next.Block)
 		if err != nil {
 			return nil, nil, false, err
+		}
+		pageBytes += proto.Size(acb)
+		if len(out) > 0 && pageBytes > maxBytes {
+			return out, lastModel, true, nil
 		}
 		out = append(out, acb)
 		lm := next.Block

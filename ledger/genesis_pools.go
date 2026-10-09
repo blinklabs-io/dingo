@@ -15,10 +15,6 @@
 package ledger
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gshelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
@@ -26,49 +22,5 @@ import (
 func initialPools(
 	genesis *gshelley.ShelleyGenesis,
 ) (map[string]lcommon.PoolRegistrationCertificate, map[string][]lcommon.Address, error) {
-	pools, delegations, err := genesis.InitialPools()
-	if err != nil {
-		return nil, nil, err
-	}
-	if genesis.ExtraConfig == nil {
-		return pools, delegations, nil
-	}
-	for poolID, extraPool := range genesis.ExtraConfig.StakePools.Data {
-		rawKey, ok := extraPool.Unknown["blsKey"]
-		if !ok || len(bytes.TrimSpace(rawKey)) == 0 {
-			continue
-		}
-		var alias *lcommon.LeiosKey
-		if err := json.Unmarshal(rawKey, &alias); err != nil {
-			return nil, nil, fmt.Errorf(
-				"decode genesis pool %s blsKey: %w",
-				poolID,
-				err,
-			)
-		}
-		if alias == nil {
-			continue
-		}
-		certificate, ok := pools[poolID]
-		if !ok {
-			return nil, nil, fmt.Errorf(
-				"genesis pool %s has blsKey but no registration",
-				poolID,
-			)
-		}
-		if certificate.LeiosKey != nil &&
-			(!bytes.Equal(certificate.LeiosKey.PublicKey, alias.PublicKey) ||
-				!bytes.Equal(
-					certificate.LeiosKey.PossessionProof,
-					alias.PossessionProof,
-				)) {
-			return nil, nil, fmt.Errorf(
-				"genesis pool %s declares different blsKey and leiosKey values",
-				poolID,
-			)
-		}
-		certificate.LeiosKey = alias
-		pools[poolID] = certificate
-	}
-	return pools, delegations, nil
+	return genesis.InitialPools()
 }

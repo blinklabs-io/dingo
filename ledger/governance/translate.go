@@ -28,6 +28,7 @@ import (
 // TranslateRatifiedGovActions rewrites ratified-but-not-yet-enacted governance
 // actions that must survive an era boundary in the target era's CBOR shape.
 func TranslateRatifiedGovActions(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	fromEraId uint,
@@ -38,7 +39,7 @@ func TranslateRatifiedGovActions(
 		return nil
 	}
 	proposals, err := db.GetRatifiedGovernanceProposals(
-		context.Background(),
+		ctx,
 		txn,
 	)
 	if err != nil {
@@ -61,7 +62,7 @@ func TranslateRatifiedGovActions(
 			)
 		}
 		proposal.GovActionCbor = translated
-		if err := db.SetGovernanceProposal(context.Background(), proposal, txn); err != nil {
+		if err := db.SetGovernanceProposal(ctx, proposal, txn); err != nil {
 			return fmt.Errorf(
 				"persist translated governance proposal %x#%d: %w",
 				proposal.TxHash,

@@ -206,7 +206,9 @@ func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
 		EraId:     ^uint(0),
 	}
 
-	err := ls.setEpochCache(&database.Txn{}, []models.Epoch{invalidEpoch})
+	err := ls.setEpochCache(
+		context.Background(), &database.Txn{}, []models.Epoch{invalidEpoch},
+	)
 	require.ErrorContains(t, err, "unknown era ID")
 
 	// The deferred publication must expose the mutation through the atomic
@@ -415,7 +417,6 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		return rolloverErr
 	}))
@@ -483,7 +484,6 @@ func TestProcessEpochRolloverRetainsDijkstraProtocolParameters(t *testing.T) {
 			currentEpoch,
 			eras.DijkstraEraDesc,
 			original,
-			false,
 		)
 		return rolloverErr
 	}))
@@ -3187,6 +3187,7 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
 		result, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.ShelleyEraDesc.Id,
 			0,   // startEpoch
@@ -3290,6 +3291,7 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 
 		// Byron -> Shelley
 		result1, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.ShelleyEraDesc.Id,
 			0,
@@ -3301,6 +3303,7 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 
 		// Shelley -> Allegra
 		result2, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.AllegraEraDesc.Id,
 			1,
@@ -3408,6 +3411,7 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
 		_, err := ls.transitionToEra(
+			context.Background(),
 			txn,
 			eras.DijkstraEraDesc.Id,
 			11,
@@ -3505,7 +3509,6 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		require.NoError(t, err)
 
@@ -3627,7 +3630,6 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
-				false,
 			)
 			return err
 		})
@@ -3761,7 +3763,6 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
-				false,
 			)
 			return err
 		})
@@ -3842,7 +3843,7 @@ func TestTransitionToEra_ErrorHandling(t *testing.T) {
 
 		txn := db.Transaction(context.Background(), true)
 		err = txn.Do(func(txn *database.Txn) error {
-			_, err := ls.transitionToEra(txn, 999, 0, 0, nil)
+			_, err := ls.transitionToEra(context.Background(), txn, 999, 0, 0, nil)
 			return err
 		})
 		require.Error(t, err)
@@ -4982,7 +4983,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		})
 		require.NoError(t, err)
-		require.NoError(t, ls.PrepareEpochCacheForStartup())
+		require.NoError(t, ls.PrepareEpochCacheForStartup(context.Background()))
 		return ls
 	}
 
@@ -5064,7 +5065,7 @@ func TestPrepareEpochCacheForStartupUsesEmbeddedMainnetConfig(t *testing.T) {
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	require.NoError(t, ls.PrepareEpochCacheForStartup())
+	require.NoError(t, ls.PrepareEpochCacheForStartup(context.Background()))
 
 	require.Len(t, ls.epochCache, 1)
 	assert.Equal(t, uint64(0), ls.currentEpoch.EpochId)
@@ -5092,130 +5093,68 @@ func newTestEpoch(
 // evaluateTransitionImpossible tests
 // ---------------------------------------------------------------------------
 
-// TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd verifies
-// that TransitionImpossible is set when tipSlot + safeZone >= epochEndSlot.
-//
-// Using Shelley-era parameters from newTestEraHistoryCfg:
-//
-//	securityParam=432, activeSlotsCoeff=0.05
-//	safeZone = ceil(3*432/0.05) = 25_920
-//	epoch: startSlot=100_000, length=432_000, end=532_000
-//	tipSlot = 532_000 - 25_920 = 506_080 → safeEnd = 532_000 = epochEnd → Impossible
-func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(
+func TestEvaluateTransitionImpossible_FiniteSafeZoneRemainsUnknown(
 	t *testing.T,
 ) {
 	t.Parallel()
 
-	const (
-		epochStart = uint64(100_000)
-		epochLen   = uint(432_000)
-		epochEnd   = uint64(532_000)
-		safeZone   = uint64(25_920)
-		// tipSlot such that tipSlot + safeZone == epochEnd (boundary case)
-		tipSlot = epochEnd - safeZone // 506_080
-	)
-
-	cfg := newTestEraHistoryCfg(t)
+	shape := hardfork.Shape{Eras: []hardfork.ShapeEntry{{
+		EraID:          eras.ConwayEraDesc.Id,
+		Params:         hardfork.EraParams{SafeZoneSlots: 25_920},
+		NextEraTrigger: hardfork.NewTriggerNotDuringThisExecution(),
+	}}}
 	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			epochStart,
-			epochLen,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
+		currentEra:     eras.ConwayEraDesc,
 		transitionInfo: hardfork.NewTransitionUnknown(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
 	}
+	ls.cachedShape.Store(&shape)
 
 	ls.evaluateTransitionImpossible()
 
-	assert.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State,
-		"when safeEndSlot == epochEndSlot, TransitionImpossible must be set")
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
 }
 
-// TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd verifies
-// that TransitionImpossible is set when safeEndSlot > epochEndSlot.
-func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(
-	t *testing.T,
-) {
+func TestEvaluateTransitionImpossible_SuccessorRemainsUnknown(t *testing.T) {
 	t.Parallel()
 
-	const (
-		epochStart = uint64(100_000)
-		epochLen   = uint(432_000)
-		epochEnd   = uint64(532_000)
-		// tipSlot well past the safe-zone boundary
-		tipSlot = uint64(520_000)
-	)
-
-	cfg := newTestEraHistoryCfg(t)
+	shape := hardfork.Shape{Eras: []hardfork.ShapeEntry{
+		{
+			EraID:          eras.ConwayEraDesc.Id,
+			Params:         hardfork.EraParams{SafeZoneSlots: 25_920},
+			NextEraTrigger: hardfork.NewTriggerAtVersion(12),
+		},
+		{
+			EraID:          eras.DijkstraEraDesc.Id,
+			NextEraTrigger: hardfork.NewTriggerNotDuringThisExecution(),
+		},
+	}}
 	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			epochStart,
-			epochLen,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
+		currentEra:     eras.ConwayEraDesc,
 		transitionInfo: hardfork.NewTransitionUnknown(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
 	}
+	ls.cachedShape.Store(&shape)
+
+	ls.evaluateTransitionImpossible()
+
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
+}
+
+func TestEvaluateTransitionImpossible_IndefiniteFinalEra(t *testing.T) {
+	t.Parallel()
+
+	shape := hardfork.Shape{Eras: []hardfork.ShapeEntry{{
+		EraID:          eras.ConwayEraDesc.Id,
+		NextEraTrigger: hardfork.NewTriggerNotDuringThisExecution(),
+	}}}
+	ls := &LedgerState{
+		currentEra:     eras.ConwayEraDesc,
+		transitionInfo: hardfork.NewTransitionUnknown(),
+	}
+	ls.cachedShape.Store(&shape)
 
 	ls.evaluateTransitionImpossible()
 
 	assert.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State)
-}
-
-// TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch verifies
-// that TransitionImpossible is NOT set when safeEndSlot < epochEndSlot.
-func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	const (
-		epochStart = uint64(100_000)
-		epochLen   = uint(432_000)
-		// tipSlot one slot before the boundary: safeEnd = epochEnd - 1
-		tipSlot = uint64(506_079) // 532_000 - 25_920 - 1
-	)
-
-	cfg := newTestEraHistoryCfg(t)
-	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			epochStart,
-			epochLen,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
-		transitionInfo: hardfork.NewTransitionUnknown(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	ls.evaluateTransitionImpossible()
-
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"safeEndSlot < epochEndSlot: TransitionImpossible must NOT be set")
 }
 
 // TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown verifies that
@@ -5225,17 +5164,7 @@ func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			100_000,
-			432_000,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			// tipSlot past the safe-zone boundary → would normally trigger Impossible
-			Point: ocommon.NewPoint(520_000, []byte("tip")),
-		},
+		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		transitionInfo: hardfork.NewTransitionKnown(501),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
@@ -5257,16 +5186,7 @@ func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			100_000,
-			432_000,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(520_000, []byte("tip")),
-		},
+		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		transitionInfo: hardfork.NewTransitionImpossible(),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
@@ -5277,31 +5197,6 @@ func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 	ls.evaluateTransitionImpossible()
 
 	assert.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State)
-}
-
-// TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero verifies that a
-// zero LengthInSlots (uninitialized epoch) is skipped safely.
-func TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero(t *testing.T) {
-	t.Parallel()
-
-	cfg := newTestEraHistoryCfg(t)
-	ls := &LedgerState{
-		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: models.Epoch{EpochId: 0, LengthInSlots: 0},
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(999_999, []byte("tip")),
-		},
-		transitionInfo: hardfork.NewTransitionUnknown(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	ls.evaluateTransitionImpossible()
-
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"zero-length epoch must not trigger TransitionImpossible")
 }
 
 // ---------------------------------------------------------------------------
@@ -5424,9 +5319,8 @@ func TestEvaluateTriggerAtEpoch_NoOpOnFinalEra(t *testing.T) {
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
 }
 
-// AtEpoch override supersedes a prior TransitionImpossible: AtEpoch is
-// authoritative info about a known upcoming transition and must override the
-// safe-zone-derived "no transition in this epoch" verdict.
+// AtEpoch override supersedes a prior TransitionImpossible because it carries
+// the exact upcoming transition epoch.
 func TestEvaluateTriggerAtEpoch_OverridesTransitionImpossible(t *testing.T) {
 	t.Parallel()
 
@@ -5500,8 +5394,7 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 	ls := &LedgerState{
 		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentPParams: babbagePParams(9),
-		// Simulate state at end of epoch 500: TransitionImpossible was set
-		// because the tip's safe zone reached the epoch end.
+		// Simulate a stale TransitionImpossible state at epoch rollover.
 		transitionInfo: hardfork.NewTransitionImpossible(),
 	}
 
@@ -6013,7 +5906,6 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 			2: uint64(0),
 		},
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
@@ -7913,7 +7805,7 @@ func TestHealEmptyLabNoncesFoldsExtraEntropy(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	withoutEntropy, err := lcommon.CalculateEpochNonce(
 		candidate, carriedLab, nil,
@@ -8226,12 +8118,8 @@ func newBoundaryRolloverLedger(
 }
 
 // TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion drives a
-// two-era boundary the way ledgerProcessBlocksFromSource does: the rollover
-// runs first so source-era pparam updates are enacted, then the remaining era
-// transitions are applied. The authoritative mark snapshot must be captured
-// once, after those transitions, so its protocol version is the one the new
-// epoch actually runs at. Capturing it at the end of the rollover records the
-// source era's major instead, and that value is durable.
+// two-era boundary in production order: source-era updates, translations, then
+// the incoming era's epoch rules and snapshot capture.
 func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	t *testing.T,
 ) {
@@ -8258,38 +8146,40 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	var result *EpochRolloverResult
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		var err error
-		result, err = ls.processEpochRollover(context.Background(),
-			txn,
-			ls.currentEpoch,
-			ls.currentEra,
-			ls.currentPParams,
-			true,
-		)
-		if err != nil {
-			return err
-		}
-		require.True(t, result.BoundarySnapshotDeferred,
-			"a multi-era boundary must defer the mark snapshot capture")
-		require.Empty(t, captures,
-			"the rollover must not capture the mark snapshot before the "+
-				"boundary's era transitions have run")
-
-		transitions, err := ls.applyBoundaryEraTransitions(
-			txn, ls.currentEpoch, transitionPath, result,
-		)
+		params, eraID, transitions, transitionMajors, v2Written, err :=
+			ls.prepareEraTransitionsForRollover(
+				context.Background(),
+				txn,
+				ls.currentEpoch,
+				ls.currentEra,
+				ls.currentPParams,
+				transitionPath,
+			)
 		if err != nil {
 			return err
 		}
 		require.Len(t, transitions, 2)
-		return nil
+		require.Empty(t, captures,
+			"translation must not capture before incoming-era epoch rules")
+		incomingEra, ok := ls.eraById(eraID)
+		require.True(t, ok)
+		result, err = ls.processEpochRolloverWithClassicPParamsContext(
+			context.Background(),
+			txn,
+			ls.currentEpoch,
+			*incomingEra,
+			params,
+			true,
+			v2Written,
+			transitionMajors,
+		)
+		return err
 	}))
 
 	if result == nil {
 		t.Fatal("epoch rollover returned no result")
 	}
-	require.Len(t, captures, 1,
-		"the deferred capture must run exactly once, not be re-run")
+	require.Len(t, captures, 1)
 	require.Equal(
 		t,
 		uint(mary.MinProtocolVersionMary),
@@ -8299,8 +8189,6 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEra.Id)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEpoch.EraId)
-	require.False(t, result.BoundarySnapshotDeferred,
-		"the deferred capture must be marked as taken")
 
 	// The event the caller publishes after commit is built from the same
 	// result, so the durable row and the event must agree.
@@ -8329,22 +8217,28 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 	var result *EpochRolloverResult
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		var err error
-		result, err = ls.processEpochRollover(context.Background(),
+		params, eraID, _, transitionMajors, v2Written, err := ls.prepareEraTransitionsForRollover(
+			context.Background(),
 			txn,
 			ls.currentEpoch,
 			sourceEra,
 			ls.currentPParams,
-			true,
+			[]uint{eras.AllegraEraDesc.Id},
 		)
 		if err != nil {
 			return err
 		}
-		_, err = ls.applyBoundaryEraTransitions(
+		incomingEra, ok := ls.eraById(eraID)
+		require.True(t, ok)
+		result, err = ls.processEpochRolloverWithClassicPParamsContext(
+			context.Background(),
 			txn,
 			ls.currentEpoch,
-			[]uint{eras.AllegraEraDesc.Id},
-			result,
+			*incomingEra,
+			params,
+			true,
+			v2Written,
+			transitionMajors,
 		)
 		return err
 	}))
@@ -8379,8 +8273,7 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 }
 
 // TestSingleEraBoundaryRolloverCapturesSnapshotInRollover covers the common
-// path: with no era transitions deferred, the rollover still captures the mark
-// snapshot itself, at its own era's protocol version.
+// path at its own era's protocol version.
 func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 	t.Parallel()
 
@@ -8403,7 +8296,6 @@ func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		return err
 	}))
@@ -8411,7 +8303,6 @@ func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 	if result == nil {
 		t.Fatal("epoch rollover returned no result")
 	}
-	require.False(t, result.BoundarySnapshotDeferred)
 	require.Len(t, captures, 1)
 	require.Equal(
 		t,
@@ -8980,7 +8871,6 @@ func (f *hardForkRatifyFixture) rollover(
 			currentEpoch,
 			eras.ConwayEraDesc,
 			pparams,
-			false,
 		)
 		return rolloverErr
 	})
@@ -9095,7 +8985,7 @@ func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	// Epoch 5's lab is recovered from the boundary block's PrevHash.
 	require.Equal(
@@ -9177,7 +9067,7 @@ func TestHealEmptyLabNoncesBoundsToRecentEpochs(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	require.Empty(
 		t,
@@ -9232,7 +9122,7 @@ func TestHealEmptyLabNoncesRepairsOldestInWindowNonce(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	// The oldest in-window epoch is scanned right after the predecessor whose
 	// lab the scan verifies. Its nonce must be recomputed as candidate ⭒ the
@@ -9283,7 +9173,7 @@ func TestHealEmptyLabNoncesLeavesValidRecordsUntouched(t *testing.T) {
 		},
 	}
 
-	ls.healEmptyLabNonces()
+	ls.healEmptyLabNonces(context.Background())
 
 	require.Equal(t, lab, ls.epochCache[0].LastEpochBlockNonce)
 	require.Equal(t, nonce, ls.epochCache[0].Nonce)
@@ -9711,7 +9601,7 @@ func TestLoadEpochsRefreshesCurrentEpochAfterHealing(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.loadEpochs(txn)
+		return ls.loadEpochs(context.Background(), txn)
 	}))
 
 	require.Equal(t, want.Bytes(), ls.epochCache[1].Nonce)
@@ -10114,7 +10004,6 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 			8: invalidBefore,
 		},
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
@@ -12866,6 +12755,7 @@ func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
 
 	txn := db.Transaction(context.Background(), true)
 	result, err := ls.transitionToEraFrom(
+		context.Background(),
 		txn,
 		eras.BabbageEraDesc.Id,
 		1,
@@ -12893,6 +12783,7 @@ func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
 	// The same sequence, committed instead, must persist both together.
 	txn = db.Transaction(context.Background(), true)
 	result, err = ls.transitionToEraFrom(
+		context.Background(),
 		txn,
 		eras.BabbageEraDesc.Id,
 		1,
@@ -13321,9 +13212,9 @@ func TestEvaluateHardForkInitiationStability_IntraEraHFI_DoesNotSetKnown(
 
 // TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown pins
 // the priority order: TransitionKnown is strictly more informative than
-// TransitionImpossible (the latter only says "no transition this epoch
-// before safe-zone end", the former says "transition will happen at
-// epoch+1"). When both could apply, Known wins.
+// TransitionImpossible (the latter carries no transition epoch, while the
+// former says "transition will happen at epoch+1"). When both could apply,
+// Known wins.
 func TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown(
 	t *testing.T,
 ) {
@@ -14107,4 +13998,191 @@ func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
 	err := ls.VerifyPointQueryable(t.Context(), nil, QueryPoint{Slot: 350, Hash: hash})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
+func TestEvaluateTxRefusesWhenEvaluationSlotsAreInUse(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{evalSlots: make(chan struct{}, 2)}
+	ls.evalSlots <- struct{}{}
+	ls.evalSlots <- struct{}{}
+
+	// The refusal happens before the transaction is looked at.
+	var err error
+	require.NotPanics(t, func() {
+		_, _, _, err = ls.EvaluateTx(nil)
+	}, "admission must be checked before any evaluation work starts")
+
+	require.ErrorIs(t, err, ErrEvaluationBusy)
+	require.Len(t, ls.evalSlots, 2, "a refused call must not take a slot")
+}
+
+func TestNewLedgerStateRejectsNegativeEvaluationCapacity(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	_, err = NewLedgerState(LedgerStateConfig{
+		Database: db, ChainManager: cm, MaxConcurrentEvaluations: -1,
+	})
+	require.ErrorContains(t, err, "MaxConcurrentEvaluations must not be negative")
+}
+
+// TestAtTipRecoveryRewindKeepsRolloverBeforeFirstEpochBlock covers a failure in
+// the first block of an epoch. The rollover commits before that block applies,
+// so the ledger tip is still in the previous epoch while the current epoch
+// already starts at the failing block. A deep rewind would discard the rollover
+// just as it does when the tip is inside the epoch.
+func TestAtTipRecoveryRewindKeepsRolloverBeforeFirstEpochBlock(t *testing.T) {
+	t.Parallel()
+	const boundarySlot = pruneFixtureTipSlot + 1
+	f := newPrunedUtxoFixture(t, 0)
+	completeRollover := func() {
+		require.NoError(t, f.db.SetEpoch(
+			boundarySlot, 1,
+			[]byte("nonce-first-block"), []byte("evolving-first-block"),
+			[]byte("candidate-first-block"), []byte("last-first-block"),
+			eras.ConwayEraDesc.Id, 1, 1_000_000, nil,
+		))
+		f.ls.currentEpoch = models.Epoch{
+			EpochId:   1,
+			StartSlot: boundarySlot,
+			EraId:     eras.ConwayEraDesc.Id,
+		}
+	}
+	completeRollover()
+	f.driveAtTipRecovery(t, 1)
+	// Re-delivery of the failing block recomputes the rollover the first
+	// attempt's same-tip repair discarded.
+	completeRollover()
+	f.driveAtTipRecovery(t, 1)
+
+	require.Equal(
+		t,
+		uint64(pruneFixtureTipSlot),
+		f.ls.currentTip.Point.Slot,
+		"recovery rewound below the tip that precedes the completed rollover",
+	)
+	require.Equal(
+		t,
+		1.0,
+		promtestutil.ToFloat64(f.ls.metrics.atTipRecoveryEpochBoundaryClamped),
+	)
+}
+
+// TestAtTipRecoveryRewindKeepsCompletedEpochBoundary ensures recovery retains
+// an epoch rollover that completed before the failing block was applied.
+func TestAtTipRecoveryRewindKeepsCompletedEpochBoundary(t *testing.T) {
+	t.Parallel()
+	const boundarySlot = 120_000
+	f := newPrunedUtxoFixture(t, 0)
+	require.NoError(t, f.db.SetEpoch(
+		boundarySlot, 1,
+		[]byte("nonce-4577"), []byte("evolving-4577"),
+		[]byte("candidate-4577"), []byte("last-4577"),
+		eras.ConwayEraDesc.Id, 1, 1_000_000, nil,
+	))
+	f.ls.currentEpoch = models.Epoch{
+		EpochId:   1,
+		StartSlot: boundarySlot,
+		EraId:     eras.ConwayEraDesc.Id,
+	}
+
+	f.driveAtTipRecovery(t, 2)
+
+	require.GreaterOrEqual(
+		t,
+		f.ls.currentTip.Point.Slot,
+		uint64(boundarySlot),
+		"recovery rewound below an already completed epoch boundary",
+	)
+	require.Equal(
+		t,
+		1.0,
+		promtestutil.ToFloat64(f.ls.metrics.atTipRecoveryEpochBoundaryClamped),
+	)
+}
+
+// TestAtTipRecoveryFinalAttemptCrossesEpochBoundaryOnce verifies that the
+// deepest scheduled attempt may cross a boundary once for an epoch only.
+func TestAtTipRecoveryFinalAttemptCrossesEpochBoundaryOnce(t *testing.T) {
+	t.Parallel()
+	const boundarySlot = 120_000
+	f := newPrunedUtxoFixture(t, 0)
+	f.ls.currentEpoch = models.Epoch{
+		EpochId:   1,
+		StartSlot: boundarySlot,
+		EraId:     eras.ConwayEraDesc.Id,
+	}
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			pruneFixtureTipSlot+1,
+			testHashBytes("4577-f"),
+		),
+	}
+	tip := ocommon.NewPoint(pruneFixtureTipSlot, testHashBytes("3766-tip"))
+	deep := ocommon.NewPoint(pruneFixtureFloorSlot, testHashBytes("3766-floor"))
+	crossed := f.ls.metrics.atTipRecoveryEpochBoundaryClamped
+
+	got := f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts-1,
+	)
+	require.Equal(t, tip, got)
+	require.Equal(t, 1.0, promtestutil.ToFloat64(crossed))
+
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, deep, got, "final attempt should cross once")
+
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, tip, got, "the same epoch boundary must not be crossed twice")
+	require.Equal(t, 2.0, promtestutil.ToFloat64(crossed))
+}
+
+// TestAtTipRecoveryForwardProgressRestoresEpochBoundaryCrossing verifies that
+// the once-per-epoch crossing is scoped to one failing region: once the ledger
+// applies past the failure, a later failure in the same epoch gets its own
+// deepest rewind instead of being clamped for the rest of the epoch.
+func TestAtTipRecoveryForwardProgressRestoresEpochBoundaryCrossing(
+	t *testing.T,
+) {
+	t.Parallel()
+	const boundarySlot = 120_000
+	f := newPrunedUtxoFixture(t, 0)
+	f.ls.currentEpoch = models.Epoch{
+		EpochId:   1,
+		StartSlot: boundarySlot,
+		EraId:     eras.ConwayEraDesc.Id,
+	}
+	failSlot := uint64(pruneFixtureTipSlot + 1)
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(failSlot, testHashBytes("crossing-reset")),
+	}
+	tip := ocommon.NewPoint(pruneFixtureTipSlot, testHashBytes("3766-tip"))
+	deep := ocommon.NewPoint(pruneFixtureFloorSlot, testHashBytes("3766-floor"))
+	f.ls.atTipRecoveryLastFailSlot = failSlot
+
+	got := f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, deep, got, "final attempt should cross once")
+
+	// Re-applying up to the failing block is not progress past it.
+	f.ls.resetAtTipRecoveryDescent(failSlot)
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, tip, got, "crossing must stay spent until the failure is passed")
+
+	f.ls.atTipRecoveryLastFailSlot = failSlot
+	f.ls.resetAtTipRecoveryDescent(failSlot + 1)
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(
+		t, deep, got,
+		"a failure after forward progress should get its own crossing",
+	)
 }

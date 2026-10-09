@@ -70,6 +70,9 @@ type UtxorpcLedgerState interface {
 		at ledger.QueryPoint,
 		txn *database.Txn,
 	) (*ledger.PoolStakeDistribution, error)
+	// SecurityParam is the configured security parameter k, the deepest
+	// rollback a chain follower can be asked to undo.
+	SecurityParam() int
 	SlotToTime(slot uint64) (time.Time, error)
 	SystemStart() (time.Time, error)
 	Tip() ochainsync.Tip

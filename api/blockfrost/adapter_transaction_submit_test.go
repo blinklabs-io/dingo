@@ -496,3 +496,35 @@ func TestHandleTransactionEvaluateLogsFailureAtDebug(t *testing.T) {
 	require.True(t, ok, "the evaluation failure is still recorded")
 	assert.Equal(t, slog.LevelDebug, level)
 }
+
+func TestTransactionSubmitRejectsTrailingBytes(t *testing.T) {
+	t.Parallel()
+
+	for name, trailer := range map[string][]byte{
+		"one byte":       {0x00},
+		"second payload": submitTestTxCbor(t),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			submitter := &stubSubmitter{}
+			adapter := &NodeAdapter{submitter: submitter}
+			padded := append(submitTestTxCbor(t), trailer...)
+
+			_, err := adapter.TransactionSubmit(padded)
+
+			require.ErrorIs(t, err, ErrInvalidTransaction)
+			assert.Zero(t, submitter.calls)
+		})
+	}
+}
+
+func TestTransactionEvaluateRejectsTrailingBytes(t *testing.T) {
+	t.Parallel()
+
+	adapter := &NodeAdapter{}
+	padded := append(submitTestTxCbor(t), 0x00)
+
+	_, err := adapter.TransactionEvaluate(t.Context(), padded)
+
+	require.ErrorIs(t, err, ErrInvalidTransaction)
+}

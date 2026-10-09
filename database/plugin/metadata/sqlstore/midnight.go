@@ -19,6 +19,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"math"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -642,6 +644,232 @@ func (s *Store) DeleteMidnightAriadneRollbacksBeforeBlock(
 				ctx,
 				value,
 			)
+		},
+	)
+}
+
+func (s *Store) DeleteMidnightAriadneRollbacksAfterBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	return s.deleteMidnightByUint64(
+		txn,
+		blockNumber,
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
+			return q.DeleteMidnightAriadneRollbacksAfterBlock(ctx, value)
+		},
+	)
+}
+
+func (s *Store) CreateMidnightCandidateRemoval(
+	txn types.Txn,
+	removal *models.MidnightCandidateRemoval,
+) error {
+	if removal == nil {
+		return errors.New("create Midnight candidate removal: row is nil")
+	}
+	db, ctx, blockNumber, err := s.midnightWriteDB(txn, removal.BlockNumber)
+	if err != nil {
+		return err
+	}
+	return s.operationalQueries(db).CreateMidnightCandidateRemoval(
+		ctx,
+		sqlitequery.CreateMidnightCandidateRemovalParams{
+			BlockNumber: blockNumber,
+			TxHash:      removal.TxHash,
+			OutputIndex: int64(removal.OutputIndex),
+			Datum:       removal.Datum,
+		},
+	)
+}
+
+func (s *Store) FindMidnightCandidateRemovalsByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) ([]models.MidnightCandidateRemoval, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlBlock, err := checkedInt64(blockNumber)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.operationalQueries(db).FindMidnightCandidateRemovalsByBlock(
+		ctx,
+		sqlBlock,
+	)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]models.MidnightCandidateRemoval, 0, len(rows))
+	for _, row := range rows {
+		storedBlock, err := checkedUint64(row.BlockNumber)
+		if err != nil {
+			return nil, err
+		}
+		if row.OutputIndex < 0 || row.OutputIndex > math.MaxUint32 {
+			return nil, fmt.Errorf(
+				"invalid Midnight candidate output index: %d",
+				row.OutputIndex,
+			)
+		}
+		ret = append(ret, models.MidnightCandidateRemoval{
+			BlockNumber: storedBlock,
+			TxHash:      row.TxHash,
+			OutputIndex: uint32(row.OutputIndex), //nolint:gosec
+			Datum:       row.Datum,
+		})
+	}
+	return ret, nil
+}
+
+func (s *Store) DeleteMidnightCandidateRemovalsByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	return s.deleteMidnightByUint64(
+		txn,
+		blockNumber,
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
+			return q.DeleteMidnightCandidateRemovalsByBlock(ctx, value)
+		},
+	)
+}
+
+func (s *Store) DeleteMidnightCandidateRemovalsBeforeBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	return s.deleteMidnightByUint64(
+		txn,
+		blockNumber,
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
+			return q.DeleteMidnightCandidateRemovalsBeforeBlock(ctx, value)
+		},
+	)
+}
+
+func (s *Store) DeleteMidnightCandidateRemovalsAfterBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	return s.deleteMidnightByUint64(
+		txn,
+		blockNumber,
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
+			return q.DeleteMidnightCandidateRemovalsAfterBlock(ctx, value)
+		},
+	)
+}
+
+func (s *Store) UpsertMidnightEpochTransition(
+	txn types.Txn,
+	transition *models.MidnightEpochTransition,
+) error {
+	if transition == nil {
+		return errors.New("upsert Midnight epoch transition: row is nil")
+	}
+	db, ctx, blockNumber, err := s.midnightWriteDB(txn, transition.BlockNumber)
+	if err != nil {
+		return err
+	}
+	previousEpoch, err := checkedInt64(transition.PreviousEpoch)
+	if err != nil {
+		return err
+	}
+	previousExists := int64(0)
+	if transition.PreviousExists {
+		previousExists = 1
+	}
+	return s.operationalQueries(db).UpsertMidnightEpochTransition(
+		ctx,
+		sqlitequery.UpsertMidnightEpochTransitionParams{
+			BlockNumber:    blockNumber,
+			PreviousEpoch:  previousEpoch,
+			PreviousExists: previousExists,
+		},
+	)
+}
+
+func (s *Store) GetMidnightEpochTransitionByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) (*models.MidnightEpochTransition, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlBlock, err := checkedInt64(blockNumber)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.operationalQueries(db).GetMidnightEpochTransitionByBlock(
+		ctx,
+		sqlBlock,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	storedBlock, err := checkedUint64(row.BlockNumber)
+	if err != nil {
+		return nil, err
+	}
+	previousEpoch, err := checkedUint64(row.PreviousEpoch)
+	if err != nil {
+		return nil, err
+	}
+	if row.PreviousExists != 0 && row.PreviousExists != 1 {
+		return nil, fmt.Errorf(
+			"invalid Midnight previous epoch presence: %d",
+			row.PreviousExists,
+		)
+	}
+	return &models.MidnightEpochTransition{
+		BlockNumber:    storedBlock,
+		PreviousEpoch:  previousEpoch,
+		PreviousExists: row.PreviousExists != 0,
+	}, nil
+}
+
+func (s *Store) DeleteMidnightEpochTransitionsByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	return s.deleteMidnightByUint64(
+		txn,
+		blockNumber,
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
+			return q.DeleteMidnightEpochTransitionsByBlock(ctx, value)
+		},
+	)
+}
+
+func (s *Store) DeleteMidnightEpochTransitionsBeforeBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	return s.deleteMidnightByUint64(
+		txn,
+		blockNumber,
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
+			return q.DeleteMidnightEpochTransitionsBeforeBlock(ctx, value)
+		},
+	)
+}
+
+func (s *Store) DeleteMidnightEpochTransitionsAfterBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	return s.deleteMidnightByUint64(
+		txn,
+		blockNumber,
+		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
+			return q.DeleteMidnightEpochTransitionsAfterBlock(ctx, value)
 		},
 	)
 }

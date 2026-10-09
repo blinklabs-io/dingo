@@ -356,22 +356,12 @@ func (ls *LedgerState) buildHardForkSummary(
 		)
 	}
 
-	effectiveTransition := transitionInfo
-	if transitionInfo.State == hardfork.TransitionImpossible {
-		// queryHardForkEraHistory can stop at the confirmed current epoch
-		// boundary because it serves a point-in-time answer. Live slot and
-		// header processing must remain able to cross that boundary in the
-		// same era. Apply the rolling safe zone from the tip while preserving
-		// TransitionImpossible on the returned Summary.
-		effectiveTransition = hardfork.NewTransitionUnknown()
-	}
-
 	summary, err := hardfork.BuildSummary(
 		hardfork.Shape{SystemStart: systemStart},
 		past,
 		current,
 		tipSlot,
-		effectiveTransition,
+		transitionInfo,
 	)
 	if err != nil {
 		return nil, err

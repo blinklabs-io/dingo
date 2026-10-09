@@ -879,6 +879,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		barkBlobStore, err := bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
 			BaseUrl:                   n.config.barkBaseUrl,
 			BlockDownloadAllowedHosts: n.config.barkBlockDownloadHosts,
+			MaxBlockSize:              state.MaxBlockSize,
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},
@@ -965,7 +966,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// and storage mode alone is no longer sufficient to start it (an api-mode
 	// deployment may not want Midnight indexing at all).
 	if midnightIndexerActive(n.config.storageMode, n.config.midnight) {
-		if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
+		if err := n.ledgerState.PrepareEpochCacheForStartup(ctx); err != nil {
 			return fmt.Errorf(
 				"load epoch cache before Midnight indexer start: %w",
 				err,
@@ -1542,6 +1543,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			Port:                                     n.config.barkPort,
 			CORSAllowedOrigins:                       n.config.corsAllowedOrigins,
 			DestinationRegistry:                      n.destinationRegistry,
+			ArchiveMaxConcurrentFetches:              n.config.barkArchiveMaxConcurrentFetches,
 		}
 		if remoteLifecycleEnabled {
 			barkConfig.Node = n
@@ -1551,16 +1553,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		// an operator who enabled bark only for its Archive service
 		// shouldn't get a DatabaseService that fails on first call.
 		if lifecycleEnabled {
-			// cfg is never read: SetLiveNode below makes every Service
-			// method delegate straight to n's own Restore/Truncate/
-			// Snapshot rather than the offline path that would use it.
-			dbLifecycleService := dblifecycle.NewService(
-				&internalconfig.Config{},
-				n.destinationRegistry,
-				n.config.logger,
-			)
-			dbLifecycleService.SetLiveNode(n)
-			barkConfig.Lifecycle = dbLifecycleService
+			barkConfig.Lifecycle = n.barkLifecycleService()
 			barkConfig.SnapshotDir = n.config.databaseLifecycle.SnapshotDir
 			barkConfig.SnapshotCloudDestination = n.config.databaseLifecycle.SnapshotCloudDestination
 		}
@@ -1849,6 +1842,20 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	n.removeConfirmedRestoreBackup()
 
 	return n.waitForShutdown()
+}
+
+// barkLifecycleService builds the DatabaseService Bark mounts. Its operations
+// delegate to n, but manifest verification reads the trust key from the
+// configuration it is given, so it must carry n's lifecycle configuration for
+// VerifySnapshot to check the same key Node.Snapshot signs with.
+func (n *Node) barkLifecycleService() *dblifecycle.Service {
+	svc := dblifecycle.NewService(
+		&internalconfig.Config{DatabaseLifecycle: n.config.databaseLifecycle},
+		n.destinationRegistry,
+		n.config.logger,
+	)
+	svc.SetLiveNode(n)
+	return svc
 }
 
 // cleanupFailedStartup completes a failed startup while Run owns the startup
@@ -2596,6 +2603,7 @@ func (n *Node) newTokenRegistrySync() (
 			SourceURL:             n.config.tokenRegistry.SourceURL,
 			Network:               n.config.network,
 			UserAgent:             n.config.tokenRegistry.UserAgent,
+			Headers:               n.config.tokenRegistry.Headers,
 			Interval:              n.config.tokenRegistry.Interval,
 			RequestTimeout:        n.config.tokenRegistry.RequestTimeout,
 			MaxBytes:              n.config.tokenRegistry.MaxBytes,

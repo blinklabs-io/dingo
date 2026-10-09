@@ -124,7 +124,10 @@ func (s *syncServiceServer) DumpHistory(
 		)
 	}
 
-	effectiveMax := effectiveDumpHistoryMaxItems(maxItems, maxAllowed)
+	defaultItems := uint32(
+		s.utxorpc.config.HistoryPageItems,
+	) // #nosec G115 -- capped at MaxHistoryItems in NewUtxorpc
+	effectiveMax := effectiveDumpHistoryMaxItems(maxItems, defaultItems)
 	s.utxorpc.config.Logger.Info(
 		"Got a DumpHistory request",
 		"has_start_token", startToken != nil,
@@ -168,8 +171,8 @@ func (s *syncServiceServer) DumpHistory(
 		ctx,
 		chainIter,
 		maxItems,
-		maxAllowed,
-		s.utxorpc.config.MaxResponseBytes,
+		defaultItems,
+		s.utxorpc.config.MaxHistoryBytes,
 	)
 	if err != nil {
 		return nil, err
@@ -189,6 +192,12 @@ func (s *syncServiceServer) FollowTip(
 	req *connect.Request[sync.FollowTipRequest],
 	stream *connect.ServerStream[sync.FollowTipResponse],
 ) error {
+	release, err := s.utxorpc.admitStream(req.Peer())
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	intersect := req.Msg.GetIntersect() // []*BlockRef
 	if len(intersect) > s.utxorpc.config.MaxBlockRefs {
 		return connect.NewError(
