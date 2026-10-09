@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/internal/devnetkeys"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -427,6 +428,11 @@ func materializeDevnetConfig(destination string, startTime time.Time) error {
 		return nil
 	}); err != nil {
 		return fmt.Errorf("materializing embedded devnet config: %w", err)
+	}
+	if err := devnetkeys.InstallLocalTestKeys(
+		filepath.Join(destination, "keys"),
+	); err != nil {
+		return fmt.Errorf("materializing local DevNet keys: %w", err)
 	}
 	return nil
 }
