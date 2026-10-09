@@ -2808,7 +2808,9 @@ fallback:
   `not_found` without discarding the rest of the batch.
 - A node with `historyExpiry.enabled` keeps its local blob plugin and starts
   `internal/historyexpiry.Pruner`. The worker derives its safety window from
-  `LedgerState.StabilityWindow()` and scans only blocks older than that window.
+  `LedgerState.StabilityWindow()` and scans only blocks older than that window,
+  starting from a durable cursor in `sync_state` so each round costs the newly
+  eligible blocks rather than every earlier tombstone.
   `Database.PruneBlock` materializes any UTxO CBOR still stored as block
   offsets before replacing the block CBOR value with an expired-history marker,
   leaving block indexes and metadata intact.
@@ -2822,7 +2824,9 @@ fallback:
   corresponding HTTPS download origin. The same check runs on redirects,
   and every resolved address is rejected if it is private or special-use before
   dialing. The client ignores ambient proxy settings, and response bodies are
-  capped before buffering.
+  capped before buffering at the largest block the chain admits for any era
+  (`LedgerState.MaxBlockSize`: the live header and body limits, or the Byron
+  genesis block size when larger; a 128 KiB default when neither is known).
   This wrapper can be used with or without local History Expiry. It is
   installed by replacing the database's blob-store reference
   (`Database.SetBlobStore`) after `database.New` has returned, on both the
@@ -2958,7 +2962,7 @@ Interfaces:
 
 ### Database Lifecycle (Snapshot, Restore, Truncate)
 
-`database/lifecycle/` implements point-in-time database snapshots, restore from a snapshot, and truncation to an earlier chain point (see `DATABASE.md` for the manifest format, plugin-interface, and cloud-destination details). It is a pure library over `*database.Database` with no node-composition knowledge; `internal/dblifecycle` supplies the node-facing orchestration. Every snapshot is always written locally; if `databaseLifecycle.snapshotCloudDestination` is set (an `s3://` or `gcs://` URI), `lifecycle.SnapshotToCloud` additionally mirrors it there via a build-tag-gated (`dingo_extra_plugins`) `CloudDestination` implementation, and `lifecycle.Restore` accepts that same URI as its source, downloading into a temp directory first — this is also how a snapshot taken on one node can be restored onto another without sharing a filesystem.
+`database/lifecycle/` implements point-in-time database snapshots, restore from a snapshot, and truncation to an earlier chain point (see `DATABASE.md` for the manifest format, plugin-interface, and cloud-destination details). It is a pure library over `*database.Database` with no node-composition knowledge; `internal/dblifecycle` supplies the node-facing orchestration. Every snapshot is always written locally; if `databaseLifecycle.snapshotCloudDestination` is set (an `s3://` or `gcs://` URI), `snapshotTrustKeyFile` is required and `lifecycle.SnapshotToCloud` additionally mirrors the authenticated snapshot there via a build-tag-gated (`dingo_extra_plugins`) `CloudDestination` implementation. `lifecycle.Restore` accepts that same URI as its source, authenticates the manifest before downloading its bounded payloads into a temporary directory beside the restore target, and rejects cloud sources when no trust key is supplied. This is also how a snapshot taken on one node can be restored onto another without sharing a filesystem.
 
 `lifecycle.WithMaxCommitPause` bounds how long `Snapshot` holds the commit barrier. The deadline starts after the barrier is acquired and covers the snapshot-state reads and both backups. A stalled state read releases the barrier at cancellation, and its read goroutine finishes independently. On cancellation, the barrier is released immediately and the operation waits for both providers to stop before discarding partial output; no manifest is published. A backup failure cancels its peer and also releases the barrier before that cleanup wait. `databaseLifecycle.snapshotMaxCommitPause` sets the bound for the CLI, Bark and automatic snapshots; zero is unbounded. `dingo_snapshot_commit_pause_seconds{result}` and `dingo_snapshot_bytes_written_total{store}` record the hold and the bytes each backup wrote.
 
@@ -12383,6 +12387,12 @@ of both `--mode=full` and `--mode=incremental`.
 
 ### Bark (`bark/`)
 
+Bark's lifecycle service receives the node's lifecycle configuration even when
+snapshot and restore operations delegate to the live node. Manifest verification
+therefore uses the same trust key as snapshot creation. Archive size bounds
+include persisted protocol-parameter history across eras, so lowering a current
+block-size limit does not reject valid earlier blocks.
+
 Bark is Dingo's own protocol for Dingo-to-Dingo control-plane and archive
 services. It exposes archive access over Connect/gRPC and supplies the remote
 archive adapter used by nodes that want historical fallback.
@@ -12405,15 +12415,16 @@ Because the point is built from the identifiers the client supplied, hash and
 slot agree with the answer by construction; height is checked against the block
 metadata afterwards.
 
-That binary search is bounded above by the highest indexed block, and reading
-that bound is a reverse iteration over the block index, which `s3` and `gcs`
-answer by listing every block-index object in the bucket. `ArchiveService` is
-registered without the operator auth interceptor, so `FetchBlock` resolves the
-bound once for the whole batch and only when the batch actually contains a
-height-only reference — resolving it per reference would let one anonymous
-request carrying `DefaultMaxFetchBlockRefs` height-only references cost that
-many full-bucket enumerations. A batch of hash+slot references touches no index
-at all.
+That binary search is bounded above by the highest indexed block. Finding it
+takes at most 64 forward probes of the block index (`database.ResolveBlockNumberBound`),
+each a bounded listing on `s3` and `gcs`, so the cost does not grow with the
+archive; a reverse iteration would list every block-index object in the bucket.
+`ArchiveService` is registered without the operator auth interceptor, so
+`FetchBlock` resolves the bound once for the whole batch and only when the batch
+actually contains a height-only reference — resolving it per reference would let
+one anonymous request carrying `DefaultMaxFetchBlockRefs` height-only references
+repeat those probes that many times. A batch of hash+slot references touches no
+index at all.
 
 The batch is answered as a whole. A reference that names no stored block --
 absent, or carrying a height belonging to a different block -- is returned in
@@ -12543,7 +12554,13 @@ and the decompressed message before unary decoding reaches an interceptor; the
 send limit is also per message, so `StreamOperationProgress` can remain open
 across arbitrarily many bounded updates. Archive `FetchBlock` additionally
 requires 1–100 block references before it acquires the database, bounding URL
-signing/storage work and response growth. The HTTP server applies a 60-second
+signing/storage work and response growth, and takes one of
+`BarkConfig.ArchiveMaxConcurrentFetches` slots (`barkArchiveMaxConcurrentFetches`,
+default 16, negative rejected) before touching storage. A request that finds no
+free slot is refused with `RESOURCE_EXHAUSTED` rather than queued, so the work an
+unauthenticated caller can have in flight is bounded by configuration, and every
+height lookup is a bounded probe rather than a scan of the index; there is no
+setting that leaves an unbounded cloud scan reachable from ArchiveService. The HTTP server applies a 60-second
 request read timeout but no write timeout, so slow request bodies are bounded
 without imposing an overall deadline on long-lived server streams.
 
@@ -12622,7 +12639,9 @@ doesn't implement `SnapshotLister`, this degrades to exactly
 `/`, no `..`) before joining it under `SnapshotDir` — a path-traversal guard
 that also covers `Restore`, which takes the same untrusted `snapshot_id`
 input over the network. `VerifySnapshot` reuses `lifecycle.Restore` itself,
-restoring into a throwaway temp directory and deleting it afterward, rather
+restoring into a throwaway directory under `SnapshotDir` (never the system
+temp directory, since the restore is as large as the snapshot) and deleting
+it afterward, rather
 than duplicating the manifest-checksum/consistency validation `Restore`
 already does.
 

@@ -667,6 +667,12 @@ type Config struct {
 	// operator fingerprint match. Also requires
 	// TlsCertFilePath/TlsKeyFilePath to be set.
 	BarkClientCAFilePath string `yaml:"barkClientCaFilePath"                envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
+	// BarkArchiveMaxConcurrentFetches bounds how many ArchiveService
+	// FetchBlock requests Bark serves at once; a request over the limit is
+	// refused rather than queued. ArchiveService takes no client credentials,
+	// so this is what bounds the storage work an anonymous caller can cause.
+	// Zero selects Bark's default (16); a negative value is rejected.
+	BarkArchiveMaxConcurrentFetches int `yaml:"barkArchiveMaxConcurrentFetches"     envconfig:"DINGO_BARK_ARCHIVE_MAX_CONCURRENT_FETCHES"`
 	// BarkOperatorCertificateFingerprints is the explicit operator allowlist
 	// for destructive DatabaseService RPCs. Every DatabaseService caller must
 	// authenticate with BarkClientCAFilePath; only these SHA-256 certificate
@@ -1305,8 +1311,9 @@ type DatabaseLifecycleConfig struct {
 	// SnapshotDir, as a URI: s3://<bucket>/<prefix> or
 	// gcs://<bucket>/<prefix> (matching the scheme
 	// database/plugin/blob/gcs already uses, not gs://). Requires dingo to
-	// be built with the dingo_extra_plugins tag. Empty disables cloud
-	// upload. Credentials are resolved from the ambient AWS/GCS SDK
+	// be built with the dingo_extra_plugins tag and SnapshotTrustKeyFile to
+	// be configured. Empty disables cloud upload. Credentials are resolved
+	// from the ambient AWS/GCS SDK
 	// credential chain (env vars, IAM role, ADC, etc.) — there is no
 	// separate credential config here, matching how the existing s3/gcs
 	// blob store plugins work.
@@ -1341,6 +1348,15 @@ type DatabaseLifecycleConfig struct {
 	// SnapshotEveryNEpochs captures an automatic snapshot every N epoch
 	// boundaries instead of every single one.
 	SnapshotEveryNEpochs int `yaml:"snapshotEveryNEpochs"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_EVERY_N_EPOCHS"`
+	// SnapshotTrustKeyFile is the path to a file holding the shared secret
+	// that authenticates snapshot manifests. When set, every snapshot's
+	// manifest is signed with it and a restore refuses a manifest that does
+	// not verify, so a writer to the cloud destination cannot substitute
+	// payloads. It is required for cloud snapshot creation and restore.
+	// Local-only snapshots and restores may use the unkeyed checksum only
+	// when this is unset. Every node that restores another's snapshots must
+	// hold the same secret.
+	SnapshotTrustKeyFile string `yaml:"snapshotTrustKeyFile"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_TRUST_KEY_FILE"`
 	// SnapshotMaxCommitPause bounds how long a snapshot (manual or
 	// automatic) may hold the commit barrier once acquired. A snapshot still
 	// running at the bound is cancelled and removed, and commits resume.

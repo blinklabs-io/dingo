@@ -1047,6 +1047,12 @@ type LedgerState struct {
 	// take the populated-cache branch on a database that already has epochs,
 	// so without this the operator sees the diagnosis duplicated.
 	preByronPrefixWarned bool
+	// persistedBlockSize caches persistedMaxBlockSize once
+	// persistedBlockSizeLoaded is set; both are guarded by
+	// persistedBlockSizeMu.
+	persistedBlockSizeMu     sync.Mutex
+	persistedBlockSize       uint64
+	persistedBlockSizeLoaded bool
 	// snapshotGeneration is incremented while writers are serialized by Lock.
 	// It lets readers that need both snapshots reject adjacent publications.
 	snapshotGeneration uint64
@@ -12359,6 +12365,92 @@ func (ls *LedgerState) publishAdmittedUpstreamTarget(e ChainsyncEvent) {
 // GetCurrentPParams returns the currentPParams value
 func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	return ls.loadConsensusSnapshot().currentPParams
+}
+
+// blockFramingAllowance covers the CBOR array headers around a block's header
+// and body sections, which the protocol's header and body size limits do not
+// count.
+const blockFramingAllowance = 64
+
+// MaxBlockSize returns the largest serialized block this chain admits for a
+// stored block of any era: persisted and current header/body limits plus framing,
+// or the Byron genesis block size limit when that is larger. A stored block
+// was admitted under its own era's limits, and Byron main and epoch boundary
+// blocks are bounded by the genesis maxBlockSize rather than the much smaller
+// Shelley-family limits, so the current limits alone would refuse Byron
+// history. It returns 0 when neither limit is known, which callers treat as
+// unknown.
+//
+// The persisted limits are read once. While the ledger runs, a new row is
+// written only by an epoch transition, as the parameters it makes current, so
+// folding in the current limits on each call keeps the bound complete without
+// re-reading the history on every archive download.
+func (ls *LedgerState) MaxBlockSize() uint64 {
+	size := ls.persistedMaxBlockSize()
+	if limits, ok := protocolBlockLimits(ls.GetCurrentPParams()); ok {
+		size = max(size, limits.maxHeaderSize+limits.maxBodySize+blockFramingAllowance)
+	}
+	if nodeConfig := ls.config.CardanoNodeConfig; nodeConfig != nil {
+		if genesis := nodeConfig.ByronGenesis(); genesis != nil &&
+			genesis.BlockVersionData.MaxBlockSize > 0 {
+			size = max(size, uint64(genesis.BlockVersionData.MaxBlockSize))
+		}
+	}
+	return size
+}
+
+// persistedMaxBlockSize returns the largest block limit among the persisted
+// protocol parameters. A failed store read is not remembered, so the next call
+// retries it. Malformed rows are warned about and skipped; a successful scan
+// caches the largest limit it could decode.
+func (ls *LedgerState) persistedMaxBlockSize() uint64 {
+	if ls.db == nil {
+		return 0
+	}
+	ls.persistedBlockSizeMu.Lock()
+	defer ls.persistedBlockSizeMu.Unlock()
+	if ls.persistedBlockSizeLoaded {
+		return ls.persistedBlockSize
+	}
+	var size uint64
+	for _, era := range ls.eraList() {
+		if era.DecodePParamsFunc == nil {
+			continue
+		}
+		rows, err := ls.db.Metadata().ListPParamsForEra(era.Id, nil)
+		if err != nil {
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"failed to read persisted protocol parameters for block size bound",
+					"component", "ledger",
+					"era", era.Name,
+					"error", err,
+				)
+			}
+			return size
+		}
+		for _, row := range rows {
+			params, err := era.DecodePParamsFunc(row.Cbor)
+			if err != nil {
+				if ls.config.Logger != nil {
+					ls.config.Logger.Warn(
+						"failed to decode persisted protocol parameters for block size bound",
+						"component", "ledger",
+						"era", era.Name,
+						"epoch", row.Epoch,
+						"error", err,
+					)
+				}
+				continue
+			}
+			if limits, ok := protocolBlockLimits(params); ok {
+				size = max(size, limits.maxHeaderSize+limits.maxBodySize+blockFramingAllowance)
+			}
+		}
+	}
+	ls.persistedBlockSize = size
+	ls.persistedBlockSizeLoaded = true
+	return size
 }
 
 // PlutusEvalContextCache returns the shared PlutusEvalContextCache script

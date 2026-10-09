@@ -236,6 +236,7 @@ type Config struct {
 	barkBlockDownloadHosts                                                              []string
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
+	barkArchiveMaxConcurrentFetches                                                     int
 	barkOperatorCertificateFingerprints                                                 []string
 	barkLifecycleEnabled                                                                bool
 	barkLifecycleOperatorCertificateFingerprints                                        []string
@@ -794,6 +795,7 @@ func (c *Config) syncCompatFields() {
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
+	c.barkArchiveMaxConcurrentFetches = c.cfg.BarkArchiveMaxConcurrentFetches
 	c.barkOperatorCertificateFingerprints = slices.Clone(
 		c.cfg.BarkOperatorCertificateFingerprints,
 	)
@@ -1779,6 +1781,15 @@ func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkClientCAFilePath = path
 		c.barkClientCAFilePath = path
+	}
+}
+
+// WithBarkArchiveMaxConcurrentFetches bounds how many Bark ArchiveService
+// FetchBlock requests are served at once. Zero selects Bark's default.
+func WithBarkArchiveMaxConcurrentFetches(limit int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkArchiveMaxConcurrentFetches = limit
+		c.barkArchiveMaxConcurrentFetches = limit
 	}
 }
 

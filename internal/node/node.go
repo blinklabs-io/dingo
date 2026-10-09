@@ -797,6 +797,9 @@ func buildDingoConfig(
 		dingo.WithBarkPort(cfg.BarkPort),
 		dingo.WithBarkHost(cfg.BarkHost),
 		dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
+		dingo.WithBarkArchiveMaxConcurrentFetches(
+			cfg.BarkArchiveMaxConcurrentFetches,
+		),
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
 		),

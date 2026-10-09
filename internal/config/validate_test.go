@@ -1336,6 +1336,10 @@ func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validTestConfig()
 			cfg.DatabaseLifecycle.SnapshotCloudDestination = tt.dest
+			if tt.dest != "" {
+				cfg.DatabaseLifecycle.SnapshotTrustKeyFile =
+					"snapshot-trust.key"
+			}
 			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			if tt.wantErr == "" {
 				assert.NoError(t, err)
@@ -1345,6 +1349,14 @@ func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestValidateDatabaseLifecycleCloudDestinationRequiresTrustKey(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.DatabaseLifecycle.SnapshotCloudDestination = "s3://bucket/prefix"
+
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.ErrorContains(t, err, "snapshotTrustKeyFile is required")
 }
 
 func TestValidateDatabaseLifecycleSnapshotMaxCommitPause(t *testing.T) {
