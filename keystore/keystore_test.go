@@ -37,7 +37,7 @@ func isWindows() bool {
 	return runtime.GOOS == "windows"
 }
 
-// Sample test keys from internal/test/devnet/testdata/keys/
+// Sample test keys from internal/devnetkeys/keys/
 const (
 	testVRFSKeyJSON = `{
     "type": "VrfSigningKey_PraosVRF",

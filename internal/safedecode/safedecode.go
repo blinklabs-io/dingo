@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 )
 
@@ -74,10 +75,29 @@ func TransactionType(txCbor []byte) (uint, error) {
 	})
 }
 
+// ErrTrailingData reports CBOR bytes after the single transaction a caller
+// supplied.
+var ErrTrailingData = errors.New("trailing data after transaction")
+
 // Transaction decodes one transaction body from CBOR, containing decoder
-// panics as Guard describes.
+// panics as Guard describes. The decoder reads one item and ignores whatever
+// follows it, so input that is not exactly that one item is rejected: the
+// bytes a caller hashes, validates and relays must be the bytes that decoded.
+//
+// The boundary comes from a structural scan of the input, not from the
+// decoded value: some era constructors keep the caller's whole slice as the
+// transaction's CBOR, so the stored length cannot reveal trailing bytes. The
+// scan is cheaper than the typed decode and refuses padded input before it.
 func Transaction(txType uint, txCbor []byte) (ledger.Transaction, error) {
 	return Guard(func() (ledger.Transaction, error) {
+		var item cbor.RawMessage
+		consumed, err := cbor.Decode(txCbor, &item)
+		if err != nil {
+			return nil, err
+		}
+		if consumed != len(txCbor) {
+			return nil, ErrTrailingData
+		}
 		return ledger.NewTransactionFromCbor(txType, txCbor)
 	})
 }

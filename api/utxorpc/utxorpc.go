@@ -50,7 +50,15 @@ const (
 	DefaultMaxBlockRefs    = 100
 	DefaultMaxUtxoKeys     = 1000
 	DefaultMaxHistoryItems = 10000
+	// DefaultHistoryPageItems is the DumpHistory page size when the request
+	// omits max_items; it stays well below DefaultMaxHistoryItems so an
+	// anonymous request without a limit cannot buffer the full maximum.
+	DefaultHistoryPageItems = 100
+	// DefaultMaxHistoryBytes bounds the serialized block data collected for
+	// one DumpHistory response.
+	DefaultMaxHistoryBytes = 8 << 20
 	DefaultMaxDataKeys     = 1000
+	DefaultMaxTxRefs       = 1000
 	// DefaultMaxRequestBody bounds each Connect message before it is decoded.
 	// Connect applies the same limit to the compressed wire
 	// message and to its decompressed form, preventing a small compressed body
@@ -74,6 +82,7 @@ type Utxorpc struct {
 	// internal/apilistener.
 	listener *apilistener.Listener
 	config   UtxorpcConfig
+	streams  *streamLimiter
 }
 
 type UtxorpcConfig struct {
@@ -91,7 +100,28 @@ type UtxorpcConfig struct {
 	// MaxHistoryItems caps DumpHistory and SearchUtxos page size; omitted
 	// max_items uses this cap.
 	MaxHistoryItems int
+	// HistoryPageItems is the DumpHistory page size used when max_items is
+	// omitted (0 = use default, capped at MaxHistoryItems).
+	HistoryPageItems int
+	// MaxHistoryBytes caps the serialized block bytes in one DumpHistory
+	// response; a longer page is cut short and continues from next_token
+	// (0 = use default).
+	MaxHistoryBytes int
 	MaxDataKeys     int
+	// MaxTxRefs caps the transaction references in one WaitForTx
+	// request (0 = use default).
+	MaxTxRefs int
+	// MaxStreams caps concurrent FollowTip, WatchTx, WatchMempool and WaitForTx streams
+	// across all clients; MaxStreamsPerClient caps them per remote host
+	// (0 = use default).
+	MaxStreams          int
+	MaxStreamsPerClient int
+	// MaxPredicateNodes caps the total nodes of a watch predicate
+	// (0 = use default).
+	MaxPredicateNodes int
+	// MaxReplayBlocks caps how far behind the tip a WatchTx intersect may
+	// start, in blocks (0 = use default).
+	MaxReplayBlocks int
 	// MaxPoolFilter caps ReadState's pool_keyhashes filter length.
 	MaxPoolFilter int
 	// ServerTimeout bounds long-running UTxO RPC handlers server-side
@@ -127,8 +157,30 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	if cfg.MaxHistoryItems <= 0 {
 		cfg.MaxHistoryItems = DefaultMaxHistoryItems
 	}
+	if cfg.HistoryPageItems <= 0 {
+		cfg.HistoryPageItems = DefaultHistoryPageItems
+	}
+	cfg.HistoryPageItems = min(cfg.HistoryPageItems, cfg.MaxHistoryItems)
+	if cfg.MaxHistoryBytes <= 0 {
+		cfg.MaxHistoryBytes = DefaultMaxHistoryBytes
+	}
 	if cfg.MaxDataKeys <= 0 {
 		cfg.MaxDataKeys = DefaultMaxDataKeys
+	}
+	if cfg.MaxTxRefs <= 0 {
+		cfg.MaxTxRefs = DefaultMaxTxRefs
+	}
+	if cfg.MaxStreams <= 0 {
+		cfg.MaxStreams = DefaultMaxStreams
+	}
+	if cfg.MaxStreamsPerClient <= 0 {
+		cfg.MaxStreamsPerClient = DefaultMaxStreamsPerClient
+	}
+	if cfg.MaxPredicateNodes <= 0 {
+		cfg.MaxPredicateNodes = DefaultMaxPredicateNodes
+	}
+	if cfg.MaxReplayBlocks <= 0 {
+		cfg.MaxReplayBlocks = DefaultMaxReplayBlocks
 	}
 	if cfg.MaxPoolFilter <= 0 {
 		cfg.MaxPoolFilter = DefaultMaxPoolFilter
@@ -140,7 +192,8 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 		cfg.ShutdownTimeout = DefaultShutdownTimeout
 	}
 	return &Utxorpc{
-		config: cfg,
+		config:  cfg,
+		streams: newStreamLimiter(cfg.MaxStreams, cfg.MaxStreamsPerClient),
 		listener: apilistener.New(
 			"utxorpc gRPC", cfg.Logger,
 		),

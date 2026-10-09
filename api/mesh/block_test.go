@@ -315,7 +315,7 @@ func TestBlockDatabaseErrors(t *testing.T) {
 			t, rec, ErrInternal,
 			http.StatusInternalServerError,
 		)
-		require.Equal(t, "disk on fire", got.Details["error"])
+		require.Nil(t, got.Details)
 	})
 
 	t.Run("transaction lookup fails", func(t *testing.T) {

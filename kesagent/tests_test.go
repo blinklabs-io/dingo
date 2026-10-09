@@ -27,7 +27,7 @@ import (
 
 // testKESSKeyJSON/testOpCertJSON are the same devnet fixture pair
 // ledger/forging/keys_test.go uses
-// (internal/test/devnet/testdata/keys/{kes,opcert}),
+// (internal/devnetkeys/keys/{kes,opcert}),
 // so a real, already-validated KES key and operational certificate back
 // these tests rather than synthetic bytes.
 const (
