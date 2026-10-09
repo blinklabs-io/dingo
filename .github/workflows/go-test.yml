@@ -122,26 +122,24 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.x
-          check-latest: true
+          go-version: 1.26.9
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.9-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.x-
+            ${{ runner.os }}-go-1.26.9-
       - name: govulncheck
         # govulncheck exits non-zero only for vulnerabilities this module
         # actually calls, so the unreachable findings it also prints (currently
         # GO-2026-5932, an unmaintained golang.org/x/crypto package with no
         # fixed version) do not fail the job.
-        # Both the toolchain and the scanner float on purpose: a pin on either
-        # one parks a new advisory behind a stale version instead of forcing it
-        # to be fixed. Run through the Makefile so this CI check and
-        # `make govulncheck` cannot drift apart.
+        # Match the Go patch version in go.mod so the scanner analyzes the
+        # standard library version this module selects. Run through the Makefile so
+        # this CI check and `make govulncheck` cannot drift apart.
         run: make govulncheck
 
   # Stage 2. The whole suite on SQLite with no race instrumentation and no
