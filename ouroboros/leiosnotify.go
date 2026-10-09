@@ -72,6 +72,10 @@ type leiosForgedEBEntry struct {
 	announcement []byte
 }
 
+func (e leiosForgedEBEntry) isEndorserBlockOffer() bool {
+	return e.point != nil || e.txOffer != nil
+}
+
 // prototype-2026w31 accepts announcements for up to ten minutes, and only
 // relays them while they are at most five minutes old. The reference node
 // measures these bounds from the announced slot's wall-clock onset. Dingo
@@ -196,8 +200,13 @@ type leiosDeliveryReservation struct {
 	retry bool
 }
 
-// leiosForgedEBLog is an append-only log of endorser-block offers with
-// per-connection cursors owned by the log itself.
+type leiosForgedEBLogItem struct {
+	index int
+	entry leiosForgedEBEntry
+}
+
+// leiosForgedEBLog assigns monotonic logical indexes to offers and retains a
+// bounded set of entries with per-connection cursors owned by the log itself.
 //
 // Head entries are pruned whenever every registered connection's cursor
 // has advanced past them, so memory scales with the largest per-connection
@@ -210,8 +219,9 @@ type leiosDeliveryReservation struct {
 // goroutines waiting for new entries unblock at once.
 type leiosForgedEBLog struct {
 	mu      sync.Mutex
-	items   []leiosForgedEBEntry
-	base    int            // logical index of items[0]
+	items   []leiosForgedEBLogItem
+	base    int            // oldest retained logical index
+	tail    int            // logical index assigned to the next append
 	cursors map[string]int // connKey → next logical index to serve
 	// owners distinguish connection lifetimes that reuse an address pair.
 	owners map[string]*oleiosnotify.Server
@@ -244,7 +254,16 @@ func newLeiosForgedEBLog() *leiosForgedEBLog {
 // signals all server goroutines waiting for new entries to wake and retry.
 func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
 	l.mu.Lock()
-	l.items = append(l.items, entry)
+	l.pruneLocked()
+	if !entry.isEndorserBlockOffer() &&
+		l.transientEntriesLocked() >= leiosEBLogMaxTransientEntries {
+		l.evictOldestTransientLocked()
+	}
+	l.items = append(l.items, leiosForgedEBLogItem{
+		index: l.tail,
+		entry: entry,
+	})
+	l.tail++
 	// A caught-up origin already has the entry, so do not retain it waiting
 	// for that connection to issue another RequestNext. Origins that are
 	// behind advance across the exclusion when their preceding delivery is
@@ -257,6 +276,69 @@ func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
 	l.wakeCh = make(chan struct{})
 	l.mu.Unlock()
 	close(wake)
+}
+
+// transientEntriesLocked counts vote and ranking-block announcements that
+// have not yet left the bounded delivery log. Endorser-block offers are
+// recoverable only while their separately bounded cache entry remains, so
+// transient traffic must not consume their retention budget.
+func (l *leiosForgedEBLog) transientEntriesLocked() int {
+	count := 0
+	for _, item := range l.items {
+		if !item.entry.isEndorserBlockOffer() {
+			count++
+		}
+	}
+	return count
+}
+
+// evictOldestTransientLocked removes one vote or ranking-block announcement
+// without disturbing retained endorser-block offers. Logical indexes remain
+// stable; lagging cursors skip the resulting gap while caught-up cursors still
+// observe the next append.
+func (l *leiosForgedEBLog) evictOldestTransientLocked() {
+	for i, item := range l.items {
+		if item.entry.isEndorserBlockOffer() {
+			continue
+		}
+		l.removeItemLocked(i, item.index)
+		return
+	}
+}
+
+func (l *leiosForgedEBLog) removeItemLocked(offset, index int) {
+	clear(l.items[offset : offset+1])
+	l.items = append(l.items[:offset], l.items[offset+1:]...)
+	delete(l.retries, index)
+	for connKey, reservation := range l.reservations {
+		if reservation.index == index {
+			delete(l.reservations, connKey)
+		}
+	}
+	for connKey, retry := range l.retryCursors {
+		if retry == index {
+			l.advanceRetryCursorLocked(connKey, index+1)
+		}
+	}
+	l.updateBaseLocked()
+}
+
+func (l *leiosForgedEBLog) updateBaseLocked() {
+	l.base = l.tail
+	if len(l.items) > 0 {
+		l.base = l.items[0].index
+	}
+}
+
+func (l *leiosForgedEBLog) itemAtOrAfterLocked(
+	index int,
+) (leiosForgedEBLogItem, bool) {
+	for _, item := range l.items {
+		if item.index >= index {
+			return item, true
+		}
+	}
+	return leiosForgedEBLogItem{}, false
 }
 
 // nextWhileConnected reserves the next unserved entry and returns the wake
@@ -281,32 +363,32 @@ func (l *leiosForgedEBLog) nextWhileConnected(
 		l.owners[connKey] = owner
 	}
 	if reserved, ok := l.reservations[connKey]; ok {
-		idx := reserved.index - l.base
-		if idx >= 0 && idx < len(l.items) {
-			entry := l.items[idx]
-			return &entry, l.wakeCh
+		if item, found := l.itemAtOrAfterLocked(reserved.index); found &&
+			item.index == reserved.index {
+			return &item.entry, l.wakeCh
 		}
 		delete(l.reservations, connKey)
 	}
 	if _, exists := l.cursors[connKey]; !exists {
 		// New connection: start at the current tail.
-		l.cursors[connKey] = l.base + len(l.items)
+		l.cursors[connKey] = l.tail
 	}
 	if l.skipExcludedLocked(connKey) {
 		l.pruneLocked()
 	}
 	cursor := l.cursors[connKey]
-	idx := cursor - l.base
-	if idx < len(l.items) {
-		entry := l.items[idx]
+	if item, found := l.itemAtOrAfterLocked(cursor); found {
+		cursor = item.index
+		l.cursors[connKey] = cursor
 		retryIndex, retry := l.retryCursors[connKey]
 		retry = retry && retryIndex == cursor
 		l.reservations[connKey] = leiosDeliveryReservation{
 			index: cursor,
 			retry: retry,
 		}
-		return &entry, l.wakeCh
+		return &item.entry, l.wakeCh
 	}
+	l.cursors[connKey] = l.tail
 	return nil, l.wakeCh
 }
 
@@ -364,12 +446,16 @@ func (l *leiosForgedEBLog) skipExcludedLocked(connKey string) bool {
 	}
 	advanced := false
 	for {
-		idx := cursor - l.base
-		if idx < 0 || idx >= len(l.items) ||
-			l.items[idx].excludeConnKey != connKey {
+		item, found := l.itemAtOrAfterLocked(cursor)
+		if !found {
+			cursor = l.tail
 			break
 		}
-		cursor++
+		cursor = item.index
+		if item.entry.excludeConnKey != connKey {
+			break
+		}
+		cursor = item.index + 1
 		advanced = true
 	}
 	if advanced {
@@ -407,13 +493,12 @@ func (l *leiosForgedEBLog) nextRetryLocked(
 	connKey string,
 	cursor int,
 ) (int, bool) {
-	nextRetry := l.base + len(l.items)
+	nextRetry := l.tail
 	found := false
 	for retry := range l.retries {
-		idx := retry - l.base
-		if retry >= cursor && retry < nextRetry && idx >= 0 &&
-			idx < len(l.items) &&
-			l.items[idx].excludeConnKey != connKey {
+		item, retained := l.itemAtOrAfterLocked(retry)
+		if retry >= cursor && retry < nextRetry && retained &&
+			item.index == retry && item.entry.excludeConnKey != connKey {
 			nextRetry = retry
 			found = true
 		}
@@ -468,7 +553,7 @@ func (l *leiosForgedEBLog) registerConn(
 		l.removeConnLocked(connKey)
 	}
 	if _, exists := l.cursors[connKey]; !exists {
-		cursor := l.base + len(l.items)
+		cursor := l.tail
 		if retry, found := l.nextRetryLocked(connKey, l.base); found {
 			cursor = retry
 		}
@@ -487,24 +572,31 @@ func (l *leiosForgedEBLog) registerConn(
 	close(wake)
 }
 
-// leiosEBLogMaxEntries is the maximum number of forged-EB entries the log
-// retains. When the log grows beyond this limit, the oldest entries are
-// evicted and any lagging cursors are advanced to the new base. This
-// bounds memory even when a pre-registered or slow peer never calls next.
-const leiosEBLogMaxEntries = 64
+const (
+	// leiosEBLogMaxTransientEntries bounds votes and ranking-block
+	// announcements retained for a slow peer.
+	leiosEBLogMaxTransientEntries = 64
+	// Each cached endorser block can produce a manifest and transaction offer.
+	// Keeping that complete bounded horizon prevents transient traffic from
+	// displacing a historical offer while its bodies remain serveable.
+	leiosEBLogMaxEntries = 2*leiosEndorserBlockCacheMaxEntries +
+		leiosEBLogMaxTransientEntries
+)
 
 // pruneLocked drops head entries whose logical index falls below every
 // registered connection's cursor and every failed-delivery retry. When no
 // connections or retries remain, the entire log is pruned. If the log still
-// exceeds leiosEBLogMaxEntries after cursor-based pruning, the oldest entries
-// are evicted and lagging cursors are advanced to the new base.
+// exceeds leiosEBLogMaxEntries after cursor-based pruning, entries older than
+// the endorser-block cache's complete offer horizon are evicted and lagging
+// cursors are advanced to the new base.
 // Callers must hold l.mu.
 func (l *leiosForgedEBLog) pruneLocked() {
 	if len(l.items) == 0 {
+		l.base = l.tail
 		return
 	}
 	// Start at the tail: if no cursors constrain it, prune the full log.
-	minCursor := l.base + len(l.items)
+	minCursor := l.tail
 	for _, c := range l.cursors {
 		if c < minCursor {
 			minCursor = c
@@ -515,14 +607,20 @@ func (l *leiosForgedEBLog) pruneLocked() {
 			minCursor = retry
 		}
 	}
-	prunable := minCursor - l.base
+	prunable := 0
+	for prunable < len(l.items) && l.items[prunable].index < minCursor {
+		prunable++
+	}
 	// Size cap: if the log still exceeds leiosEBLogMaxEntries after
 	// cursor-based pruning, evict the excess from the head. Any cursor
 	// that falls behind the new base (e.g. a pre-registered idle peer)
 	// is advanced to the new base so it does not pin future entries.
 	if capped := len(l.items) - prunable - leiosEBLogMaxEntries; capped > 0 {
 		prunable += capped
-		newBase := l.base + prunable
+		newBase := l.tail
+		if prunable < len(l.items) {
+			newBase = l.items[prunable].index
+		}
 		for k, c := range l.cursors {
 			if c < newBase {
 				l.cursors[k] = newBase
@@ -536,7 +634,7 @@ func (l *leiosForgedEBLog) pruneLocked() {
 	// backing arrays before the backing slice is eventually reallocated.
 	clear(l.items[:prunable])
 	l.items = l.items[prunable:]
-	l.base += prunable
+	l.updateBaseLocked()
 	for retry := range l.retries {
 		if retry < l.base {
 			delete(l.retries, retry)
@@ -892,9 +990,19 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				"role", "client",
 				"connection_id", connId,
 			)
+			o.recordLeiosBackfillSource(
+				point,
+				ctx.ConnectionId,
+				ctx.Client,
+			)
 		})
 	case *oleiosnotify.MsgBlockTxsOffer:
 		o.markLeiosEndorserBlockRelayOffer(m.Point)
+		o.recordLeiosBackfillSource(
+			m.Point,
+			ctx.ConnectionId,
+			ctx.Client,
+		)
 		// The peer is offering the transactions for this endorser block. Fetch
 		// them over leios-fetch (off the handler, serialized per connection, and
 		// deduped across connections) so the EB becomes complete and its outputs

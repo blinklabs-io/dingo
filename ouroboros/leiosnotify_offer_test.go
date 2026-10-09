@@ -85,7 +85,9 @@ func TestLeiosRelayForwardsVerifiedManifestAndCompleteTransactionsOnce(t *testin
 	announceTestEndorserBlock(t, o, point.Slot, ebHash, len(ebRaw))
 	manifest, _ := o.leiosEBLog.next("downstream")
 	require.NotNil(t, manifest)
-	manifestMessage, ok := leiosForgedEBOffer(manifest).(*oleiosnotify.MsgBlockOffer)
+	manifestMessage, ok := leiosForgedEBOffer(
+		manifest,
+	).(*oleiosnotify.MsgBlockOffer)
 	require.True(t, ok)
 	require.Equal(t, point, manifestMessage.Point)
 	o.leiosEBLog.complete("downstream", nil, true)
@@ -99,7 +101,9 @@ func TestLeiosRelayForwardsVerifiedManifestAndCompleteTransactionsOnce(t *testin
 	))
 	transactions, _ := o.leiosEBLog.next("downstream")
 	require.NotNil(t, transactions)
-	transactionMessage, ok := leiosForgedEBOffer(transactions).(*oleiosnotify.MsgBlockTxsOffer)
+	transactionMessage, ok := leiosForgedEBOffer(
+		transactions,
+	).(*oleiosnotify.MsgBlockTxsOffer)
 	require.True(t, ok)
 	require.Equal(t, point, transactionMessage.Point)
 	o.leiosEBLog.complete("downstream", nil, true)
@@ -109,6 +113,90 @@ func TestLeiosRelayForwardsVerifiedManifestAndCompleteTransactionsOnce(t *testin
 	))
 	entry, _ = o.leiosEBLog.next("downstream")
 	require.Nil(t, entry, "repeated peer offers must not be re-enqueued")
+}
+
+func TestLeiosRelayForwardsCompletedBackfillOnce(t *testing.T) {
+	t.Parallel()
+
+	txRaw, err := cbor.Encode([]cbor.RawMessage{mustCbor(t, "tx-body")})
+	require.NoError(t, err)
+	ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(txRaw),
+			TransactionSize: uint16(len(txRaw)), //nolint:gosec // short test transaction
+		}},
+	})
+	require.NoError(t, err)
+	ebHash := lcommon.Blake2b256Hash(ebRaw)
+	point := ocommon.NewPoint(42, ebHash.Bytes())
+	txsRaw := []cbor.RawMessage{cbor.RawMessage(txRaw)}
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	o.leiosEBLog.registerConn("downstream", nil, nil)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point, ebRaw, txsRaw, leiosStoreBackfill,
+	))
+
+	manifest, _ := o.leiosEBLog.next("downstream")
+	require.NotNil(t, manifest)
+	manifestMessage, ok := leiosForgedEBOffer(
+		manifest,
+	).(*oleiosnotify.MsgBlockOffer)
+	require.True(t, ok)
+	require.Equal(t, point, manifestMessage.Point)
+	o.leiosEBLog.complete("downstream", nil, true)
+
+	transactions, _ := o.leiosEBLog.next("downstream")
+	require.NotNil(t, transactions)
+	transactionMessage, ok := leiosForgedEBOffer(
+		transactions,
+	).(*oleiosnotify.MsgBlockTxsOffer)
+	require.True(t, ok)
+	require.Equal(t, point, transactionMessage.Point)
+	o.leiosEBLog.complete("downstream", nil, true)
+
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point, ebRaw, txsRaw, leiosStoreBackfill,
+	))
+	entry, _ := o.leiosEBLog.next("downstream")
+	require.Nil(t, entry, "repeated backfill must not duplicate offers")
+}
+
+func TestLeiosRelayBackfillSurvivesTransientNotificationBurst(t *testing.T) {
+	t.Parallel()
+
+	point := ocommon.NewPoint(42, []byte("historical-eb"))
+	log := newLeiosForgedEBLog()
+	log.registerConn("slow-downstream", nil, nil)
+	log.append(leiosForgedEBEntry{point: &point, size: 1234})
+	log.append(leiosForgedEBEntry{txOffer: &point})
+	for i := range leiosEBLogMaxTransientEntries {
+		log.append(leiosForgedEBEntry{announcement: []byte{byte(i)}})
+	}
+	log.registerConn("caught-up-downstream", nil, nil)
+	log.append(leiosForgedEBEntry{announcement: []byte{0xff}})
+
+	newest, _ := log.next("caught-up-downstream")
+	require.NotNil(t, newest, "a slow peer must not suppress new announcements")
+	require.Equal(t, []byte{0xff}, newest.announcement)
+	log.mu.Lock()
+	transientEntries := log.transientEntriesLocked()
+	log.mu.Unlock()
+	require.Equal(t, leiosEBLogMaxTransientEntries, transientEntries)
+
+	manifest, _ := log.next("slow-downstream")
+	require.NotNil(t, manifest)
+	manifestMessage, ok := leiosForgedEBOffer(manifest).(*oleiosnotify.MsgBlockOffer)
+	require.True(t, ok, "transient traffic displaced the backfill manifest")
+	require.Equal(t, point, manifestMessage.Point)
+	log.complete("slow-downstream", nil, true)
+
+	transactions, _ := log.next("slow-downstream")
+	require.NotNil(t, transactions)
+	transactionMessage, ok := leiosForgedEBOffer(transactions).(*oleiosnotify.MsgBlockTxsOffer)
+	require.True(t, ok, "transient traffic displaced the backfill transactions")
+	require.Equal(t, point, transactionMessage.Point)
 }
 
 func TestLeiosRelayOffersExistingCompleteCacheOnPeerOffer(t *testing.T) {

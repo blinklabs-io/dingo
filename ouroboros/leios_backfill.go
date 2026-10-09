@@ -313,28 +313,32 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	// partition kept in round-robin order so concurrent backfills still spread. A
 	// cooled or dead connection is still eventually tried, so a transiently-flaky
 	// one is skipped, not starved.
-	order := leiosBackfillConnOrder(
+	candidates := o.leiosBackfillConnCandidatesForPoint(
 		connIds,
 		start,
+		point,
 		time.Now(),
-		leiosBackfillAffinityWindow,
-		o.leiosFetchGuardFor,
 	)
 	var lastErr, busyErr error
-	remainingCandidates := len(order)
-	for _, connId := range order {
-		remainingCandidates--
+	remainingCandidates := len(connIds)
+	var preferredConn *ouroboros.Connection
+	if len(candidates) > 0 {
+		preferredConn = candidates[0].conn
+	}
+	for _, candidate := range candidates {
+		connId := candidate.connId
 		if err := ctx.Err(); err != nil {
 			if lastErr == nil {
 				lastErr = err
 			}
 			break
 		}
-		conn := o.connManager.GetConnectionById(connId)
+		conn := o.leiosBackfillCandidateConn(candidate, preferredConn)
 		if conn == nil || conn.LeiosFetch() == nil ||
 			conn.LeiosFetch().Client == nil {
 			continue
 		}
+		remainingCandidates--
 		// now anchors both remaining and attemptDeadline below to a single
 		// clock read, so a last/only candidate's attemptDeadline is computed
 		// as now.Add(overall.Sub(now)) -- algebraically exactly overall, with
@@ -543,7 +547,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 			point,
 			blk.BlockRaw,
 			nil,
-			leiosStoreAuthoritative,
+			leiosStoreBackfill,
 		); err != nil {
 			return fmt.Errorf("store manifest: %w", err)
 		}
@@ -596,7 +600,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		point,
 		data.blockRaw,
 		txs,
-		leiosStoreAuthoritative,
+		leiosStoreBackfill,
 	); err != nil {
 		return fmt.Errorf("store txs: %w", err)
 	}
@@ -653,4 +657,61 @@ func leiosBackfillConnOrder(
 	order = append(order, cooled...)
 	order = append(order, dead...)
 	return order
+}
+
+type leiosBackfillConnCandidate struct {
+	connId ouroboros.ConnectionId
+	conn   *ouroboros.Connection
+}
+
+func (o *Ouroboros) leiosBackfillCandidateConn(
+	candidate leiosBackfillConnCandidate,
+	preferred *ouroboros.Connection,
+) *ouroboros.Connection {
+	if candidate.conn != nil {
+		if o.connManager.GetConnectionById(candidate.connId) != candidate.conn {
+			return nil
+		}
+		return candidate.conn
+	}
+	conn := o.connManager.GetConnectionById(candidate.connId)
+	if conn == preferred {
+		return nil
+	}
+	return conn
+}
+
+func (o *Ouroboros) leiosBackfillConnCandidatesForPoint(
+	connIds []ouroboros.ConnectionId,
+	start int,
+	point ocommon.Point,
+	now time.Time,
+) []leiosBackfillConnCandidate {
+	order := leiosBackfillConnOrder(
+		connIds,
+		start,
+		now,
+		leiosBackfillAffinityWindow,
+		o.leiosFetchGuardFor,
+	)
+	candidates := make([]leiosBackfillConnCandidate, 0, len(order)+1)
+	if len(order) > 0 && o.chainsyncState != nil {
+		active := o.chainsyncState.GetClientConnId()
+		if active != nil {
+			activeConn := o.leiosBackfillSourceConn(point, *active)
+			if activeConn != nil {
+				g := o.leiosFetchGuardFor(*active)
+				if !g.isProtocolDead() && !g.inCooldown(now) {
+					candidates = append(candidates, leiosBackfillConnCandidate{
+						connId: *active,
+						conn:   activeConn,
+					})
+				}
+			}
+		}
+	}
+	for _, connId := range order {
+		candidates = append(candidates, leiosBackfillConnCandidate{connId: connId})
+	}
+	return candidates
 }
