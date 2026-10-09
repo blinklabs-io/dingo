@@ -40,13 +40,18 @@ type GenesisDensityDisconnect struct {
 	// DominatingDensity is the blocks the dominating peer has delivered in
 	// the window.
 	DominatingDensity uint64
-	// MaxDensity is the blocks ConnectionId has in the window. Its head has
-	// reached the window end, so this is also the most it can ever have.
+	// MaxDensity is the blocks ConnectionId has in the window. In the provable
+	// comparison its head has reached the window end, so this is also the most
+	// it can ever have; see EagernessStandoff for the standoff rules.
 	MaxDensity uint64
-	// EagernessStandoff is true when both peers were held at the Limit on
-	// Eagerness and ConnectionId lost the comparison of the blocks each
-	// delivered after Intersection. DominatingDensity and MaxDensity are then
-	// those block counts, and WindowSlots is the span they were counted over.
+	// EagernessStandoff is true when ConnectionId was removed by a Limit on
+	// Eagerness standoff rule rather than by the provable comparison. Either
+	// both peers were held at the limit and ConnectionId delivered fewer
+	// blocks in (Intersection, min(head slots)], with WindowSlots that span;
+	// or ConnectionId was idle and the held DominatingConnectionId has at
+	// least as many blocks in the Genesis window. MaxDensity is then the
+	// blocks ConnectionId delivered in that span, which is exact: every header
+	// up to its head was delivered, and an idle peer advertises no more.
 	EagernessStandoff bool
 }
 
@@ -312,11 +317,12 @@ func (cs *ChainSelector) markDensityDisconnectedLocked(
 // the Limit on Eagerness against one that has gone idle: an idling peer loses
 // to a rival that offers more than k blocks past the intersection and has at
 // least as many blocks in the Genesis window. A held peer has been offered a
-// header beyond the limit, so it offers more than k blocks. The second
-// condition needs no check here: the held peer's headers reach the same limit
-// as any other candidate's, and when its window count is lower the provable
-// comparison has already removed it, so a held peer that reaches this rule has
-// at least as many blocks as the idle one.
+// header beyond the limit, so it offers more than k blocks. The window counts
+// are compared here: the provable comparison skips a held fork whose window is
+// still incomplete, so it cannot be relied on to have removed a held peer with
+// fewer window blocks than the idle one. An idle peer has delivered every
+// header up to the tip it advertises, so its count is exact rather than a lower
+// bound.
 //
 // The idle peer may also be a prefix of the held one: a peer that stopped at
 // an older tip on the same chain. Upstream removes it as well, since it offers
@@ -348,6 +354,9 @@ func (cs *ChainSelector) idlePeerDisconnectLocked(
 	idleBlocks, _ := fragmentWindowBounds(
 		idle.points, intersection.Slot, windowEnd,
 	)
+	if heldBlocks < idleBlocks {
+		return GenesisDensityDisconnect{}, false
+	}
 	cs.markDensityDisconnectedLocked(idle.connId)
 	return GenesisDensityDisconnect{
 		ConnectionId:           idle.connId,

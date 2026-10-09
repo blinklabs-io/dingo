@@ -5570,8 +5570,11 @@ prefix of another is not a fork and decides nothing.
   idling rule: an idling peer loses to a rival that offers more than `k`
   blocks past the intersection and has at least as many blocks in the Genesis
   window. A held peer was offered a header beyond the limit, so it offers more
-  than `k`; a held peer with fewer window blocks has already been removed by
-  the provable comparison. Only a peer's own advertised tip can mark it idle,
+  than `k`. The window counts are compared directly: the provable comparison
+  skips a held fork whose window is still incomplete, so an idle peer with more
+  window blocks than the held one is kept. An idle peer's count is exact,
+  since it has delivered every header it advertises. Only a peer's own
+  advertised tip can mark it idle,
   so a peer can make only itself look idle. A fork still streaming (advertised
   tip ahead of its delivered one) is not idle and decides nothing.
 

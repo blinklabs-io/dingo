@@ -395,3 +395,69 @@ func TestLimitOnEagernessStreamingPrefixPeerIsNotRemovedByHeldPeer(
 
 	assert.Empty(t, f.evaluate())
 }
+
+// The idling rule removes an idle peer only for a rival with at least as many
+// blocks in the Genesis window. A held fork whose window is still incomplete
+// is skipped by the provable comparison, so the idle rule must compare the
+// counts itself: here the idle fork has 8 window blocks and the held fork 6,
+// spanning 600 of the 1000 window slots.
+func TestLimitOnEagernessIdleDenserForkIsKeptWhenHeldWindowIncomplete(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newStandoffFixture()
+	idle := newTestConnectionId(1)
+	held := newTestConnectionId(2)
+	feedStandoff(f.cs, idle, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, idle, "d", 11, 18, denseSlot)
+	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, held, "s", 11, 16, sparseSlot)
+	hold(t, f.cs, held)
+
+	assert.Empty(t, f.evaluate(),
+		"the denser idle fork was removed by a sparser held fork")
+}
+
+// The same incomplete-window shape with the counts reversed still removes the
+// idle peer: the held fork has at least as many window blocks.
+func TestLimitOnEagernessSparserIdleForkIsRemovedWhenHeldWindowIncomplete(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newStandoffFixture()
+	idle := newTestConnectionId(1)
+	held := newTestConnectionId(2)
+	feedStandoff(f.cs, idle, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, idle, "d", 11, 14, sparseSlot)
+	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, held, "h", 11, 16, sparseSlot)
+	hold(t, f.cs, held)
+
+	got := f.evaluate()
+	require.Len(t, got, 1)
+	assert.Equal(t, idle, got[0].ConnectionId)
+	assert.Equal(t, held, got[0].DominatingConnectionId)
+	assert.True(t, got[0].EagernessStandoff)
+	assert.Equal(t, uint64(6), got[0].DominatingDensity)
+	assert.Equal(t, uint64(4), got[0].MaxDensity)
+}
+
+// Equal window counts satisfy "at least as many", so the idle peer goes.
+func TestLimitOnEagernessEquallyDenseIdleForkIsRemovedWhenHeldWindowIncomplete(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newStandoffFixture()
+	idle := newTestConnectionId(1)
+	held := newTestConnectionId(2)
+	feedStandoff(f.cs, idle, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, idle, "d", 11, 16, denseSlot)
+	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, held, "h", 11, 16, sparseSlot)
+	hold(t, f.cs, held)
+
+	got := f.evaluate()
+	require.Len(t, got, 1)
+	assert.Equal(t, idle, got[0].ConnectionId)
+	assert.Equal(t, got[0].DominatingDensity, got[0].MaxDensity)
+}
