@@ -681,6 +681,70 @@ WHERE credential_tag = ? AND staking_key = ?`,
 	require.Equal(t, int64(101), updatedSlot)
 }
 
+func TestFlushBatchAppliesCoalescedStakeDeltas(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	acc := store.NewBatchAccumulator()
+	defer acc.Reset()
+	txn := store.Transaction(t.Context())
+	t.Cleanup(func() { _ = txn.Rollback() })
+
+	stakingKey := lcommon.NewBlake2b224([]byte("batch-stake-key"))
+	paymentKey := lcommon.NewBlake2b224([]byte("batch-payment-key"))
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		paymentKey.Bytes(),
+		stakingKey.Bytes(),
+	)
+	require.NoError(t, err)
+	credential := models.NewStakeCredentialRef(0, stakingKey.Bytes())
+
+	for i, amount := range []uint64{3_000_000, 2_000_000} {
+		txID := make([]byte, 32)
+		txID[0] = byte(i + 1)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress(address.String()).
+			WithLovelace(amount).
+			Build()
+		require.NoError(t, err)
+		tx := mockledger.NewTransactionBuilder()
+		tx.WithId(txID)
+		tx.WithOutputs(output)
+		tx.WithValid(true)
+		require.NoError(t, store.SetTransactionBatched(
+			tx,
+			ocommon.Point{Slot: uint64(100 + i), Hash: txID},
+			0,
+			nil,
+			true,
+			acc,
+			txn,
+		))
+	}
+	batched, ok := acc.(*transactionBatchAccumulator)
+	require.True(t, ok)
+	require.Len(t, batched.stakeDeltas, 1)
+	db, ctx, err := store.dbFromTxn(txn)
+	require.NoError(t, err)
+	var rowCount int
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM reward_live_stake`,
+	).Scan(&rowCount))
+	require.Zero(t, rowCount)
+
+	require.NoError(t, store.FlushBatch(acc, txn))
+	var utxoStake string
+	var updatedSlot int64
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT utxo_stake, updated_slot FROM reward_live_stake
+WHERE credential_tag = ? AND staking_key = ?`,
+		int64(credential.Tag), credential.Key,
+	).Scan(&utxoStake, &updatedSlot))
+	require.Equal(t, "5000000", utxoStake)
+	require.Equal(t, int64(101), updatedSlot)
+}
+
 func TestBatchedStakeDeltasRestoreOnSavepointRollback(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)

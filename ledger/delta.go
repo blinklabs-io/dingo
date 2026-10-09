@@ -640,10 +640,10 @@ func (b *LedgerDeltaBatch) apply(
 		if err != nil {
 			return err
 		}
-		if err := ls.db.FlushBatchStakeDeltas(acc, txn); err != nil {
-			return fmt.Errorf("flush ledger delta stake metadata: %w", err)
-		}
 	}
+	// Every delta in this batch commits in the same transaction, and the
+	// block reader splits batches at epoch boundaries. No snapshot can observe
+	// intermediate reward_live_stake rows, so apply their net changes once.
 	if err := ls.db.FlushBatch(acc, txn); err != nil {
 		return fmt.Errorf("flush ledger delta metadata batch: %w", err)
 	}

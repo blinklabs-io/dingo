@@ -65,8 +65,7 @@ type transactionBatchAccumulator struct {
 	// rows holds API-mode detail rows queued by SetTransactionBatched until
 	// FlushBatch writes them as multi-row inserts.
 	rows rowBatch
-	// stakeDeltas coalesces changes through one ledger delta and is flushed
-	// before the next delta reads reward state.
+	// stakeDeltas coalesces credential changes until the batch is flushed.
 	stakeDeltas     map[string]pendingStakeCredentialDelta
 	stakeDeltaOrder []string
 }
