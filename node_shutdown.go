@@ -278,6 +278,15 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.dmqStack != nil {
+		if stopErr := n.dmqStack.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("dmq stack shutdown: %w", stopErr),
+			)
+		}
+	}
+
 	if n.midnightServer != nil {
 		if stopErr := n.midnightServer.Stop(ctx); stopErr != nil {
 			err = errors.Join(

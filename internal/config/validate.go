@@ -863,6 +863,46 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"midnight.reflectionEnabled requires midnight.serverEnabled",
 		))
 	}
+	if c.DMQ.Enabled {
+		if c.DMQ.Topic == "" {
+			errs = append(errs, errors.New("dmq.topic must be set"))
+		}
+		switch {
+		case c.DMQ.SocketPath == "":
+			errs = append(errs, errors.New("dmq.socketPath must be set"))
+		case sameSocketPath(c.DMQ.SocketPath, c.SocketPath):
+			errs = append(errs, errors.New(
+				"dmq.socketPath must differ from socketPath",
+			))
+		}
+		// Both are scaled into int64 quantities: seconds to a Duration and
+		// megabytes to bytes.
+		const maxMessageTTL = uint64(math.MaxInt64) / uint64(time.Second)
+		const maxMempoolSize = math.MaxInt64 >> 20
+		switch {
+		case c.DMQ.MessageTTL == 0:
+			errs = append(errs, errors.New(
+				"dmq.messageTtl must be positive",
+			))
+		case uint64(c.DMQ.MessageTTL) > maxMessageTTL:
+			errs = append(errs, fmt.Errorf(
+				"dmq.messageTtl must be at most %d seconds",
+				maxMessageTTL,
+			))
+		}
+		// The pool reads a zero capacity as unbounded.
+		switch {
+		case c.DMQ.MaxMempoolSize == 0:
+			errs = append(errs, errors.New(
+				"dmq.maxMempoolSize must be positive",
+			))
+		case uint64(c.DMQ.MaxMempoolSize) > maxMempoolSize:
+			errs = append(errs, fmt.Errorf(
+				"dmq.maxMempoolSize must be at most %d megabytes",
+				maxMempoolSize,
+			))
+		}
+	}
 	if c.DatabaseLifecycle.SnapshotEnabled &&
 		c.DatabaseLifecycle.SnapshotDir == "" {
 		errs = append(errs, errors.New(
@@ -1109,4 +1149,18 @@ func validatePathNoTraversal(setting, path string) error {
 		}
 	}
 	return nil
+}
+
+// sameSocketPath reports whether two Unix socket paths name the same file,
+// comparing them resolved against the working directory.
+func sameSocketPath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return absA == absB
 }

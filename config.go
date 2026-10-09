@@ -721,6 +721,7 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			KoiosParity:         internalconfig.DefaultKoiosParityConfig(),
 			Logging:             internalconfig.DefaultLoggingConfig(),
 			Midnight:            internalconfig.DefaultMidnightConfig(),
+			DMQ:                 internalconfig.DefaultDMQConfig(),
 			CORSAllowedOrigins:  []string{"*"},
 			Plugins: internalconfig.PluginsConfig{
 				Storage: internalconfig.StoragePluginsConfig{
@@ -1934,6 +1935,20 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 	}
 }
 
+// DMQConfig configures the CIP-0137 Decentralized Message Queue stack.
+type DMQConfig = internalconfig.DMQConfig
+
+// WithDMQConfig configures the DMQ stack that runs alongside the Cardano
+// stack when enabled.
+func WithDMQConfig(cfg DMQConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.cfg.DMQ = cfg
+	}
+}
+
 // WithChainsyncMaxClients specifies the maximum number of
 // concurrent chainsync client connections. Default is 3.
 func WithChainsyncMaxClients(
@@ -2475,6 +2490,11 @@ func (c *Config) Logging() internalconfig.LoggingConfig {
 // Midnight returns the Midnight indexer configuration.
 func (c *Config) Midnight() internalconfig.MidnightConfig {
 	return c.cfg.Midnight
+}
+
+// DMQ returns the DMQ stack configuration.
+func (c *Config) DMQ() internalconfig.DMQConfig {
+	return c.cfg.DMQ
 }
 
 // CORSAllowedOrigins returns the CORS allowed origins list.
