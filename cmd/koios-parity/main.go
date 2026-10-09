@@ -150,7 +150,13 @@ func loadedDingoConfig() (*config.Config, error) {
 		}
 		dingoConfigCached = cfg
 	})
-	return dingoConfigCached, errDingoConfig
+	if errDingoConfig != nil {
+		return nil, errDingoConfig
+	}
+	if dingoConfigCached == nil {
+		return nil, errors.New("load dingo config: no configuration loaded")
+	}
+	return dingoConfigCached, nil
 }
 
 // resolveDingoDataDir returns the Dingo data directory.
