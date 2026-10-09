@@ -522,12 +522,16 @@ the row was written by a renewal and takes the predecessor's (already
 repaired) term start. Among enactments the shape is unambiguous: one action
 cannot both remove and re-add a credential, and committee enactments delay any
 further enactment in the same epoch. A row added after a gap followed a
-removal or `NoConfidence` and keeps its own term start. The enactment check
-leaves rows from a Mithril import that ran over an existing database, which
-writes the same replace-in-place shape but deliberately starts a fresh term at
-the snapshot anchor; its synthetic committee root has an `enacted_slot` at the
-anchor and no `gov_action_cbor`. Batches page by tagged cold credential so a
-chain of renewals is never split.
+removal or `NoConfidence` and keeps its own term start. A Mithril import that
+runs over an existing database writes the same replace-in-place shape at the
+snapshot anchor and deliberately starts a fresh term there, sometimes beside an
+imported `UpdateCommittee` it records as enacted at the anchor. Enactment runs
+at the boundary slot and stamped a term start earlier than it, while the import
+stamps the anchor itself, so once a `mithril_ledger_slot` sync state is
+recorded a row whose `term_start_slot` is not below its `added_slot` is left
+alone. Without one the database never imported a snapshot, and such a row is a
+renewal that migration v8 backfilled to its `added_slot`, so it is repaired.
+Batches page by tagged cold credential so a chain of renewals is never split.
 
 v40 repairs renewals only. Before enactment took the later of the proposal's
 slot and the closing epoch's first slot, a credential new to the committee or

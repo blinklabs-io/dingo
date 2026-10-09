@@ -1324,11 +1324,16 @@ const updateCommitteeActionType = 4
 // delay further enactment, so a removal and a re-election never share a slot.
 // A row added after a gap followed a removal and keeps its own term start.
 //
-// The enactment check excludes the Mithril import, which writes the same
-// replace-in-place shape when it runs over an existing database and
-// deliberately starts a fresh term at the snapshot anchor. Its synthetic
-// committee root carries an enacted_slot at that anchor but no action CBOR,
-// which every enacted proposal has.
+// A Mithril import that runs over an existing database writes the same
+// replace-in-place shape at the snapshot anchor and deliberately starts a fresh
+// term there. Its synthetic committee root has no action CBOR, but an imported
+// UpdateCommittee it records as enacted at the anchor does, so the enactment
+// check alone cannot exclude it. The term start does: enactment runs at the
+// boundary slot and stamped either the proposal's slot or the closing epoch's
+// first slot, both earlier, while the import stamps the anchor itself. A row
+// stamped at its own added_slot is therefore an import row, unless the
+// database never imported a snapshot, where it can only be a renewal that
+// migration v8 backfilled to its added_slot.
 //
 // The cursor is the last credential processed, so each credential's whole
 // history is walked in one batch: a chain of renewals must carry the oldest
@@ -1344,10 +1349,14 @@ func committeeRenewalTermStartBackfill(
 	if len(credentials) == 0 {
 		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 	}
+	imported, err := mithrilImportRecorded(ctx, batch)
+	if err != nil {
+		return BatchResult{}, err
+	}
 	var repaired int64
 	for _, credential := range credentials {
 		count, err := repairCommitteeRenewalTermStart(
-			ctx, batch, credential,
+			ctx, batch, credential, imported,
 		)
 		if err != nil {
 			return BatchResult{}, err
@@ -1403,6 +1412,7 @@ func repairCommitteeRenewalTermStart(
 	ctx context.Context,
 	batch Batch,
 	credential committeeColdCredential,
+	imported bool,
 ) (int64, error) {
 	members, err := func() ([]committeeTermRow, error) {
 		rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
@@ -1445,6 +1455,7 @@ ORDER BY cm.added_slot, cm.id`),
 		if !member.enacted ||
 			!prev.deletedSlot.Valid ||
 			prev.deletedSlot.Int64 != member.addedSlot ||
+			(imported && member.termStartSlot >= member.addedSlot) ||
 			member.termStartSlot == prev.termStartSlot {
 			continue
 		}
@@ -1460,6 +1471,17 @@ WHERE id = ?`),
 		repaired++
 	}
 	return repaired, nil
+}
+
+func mithrilImportRecorded(ctx context.Context, batch Batch) (bool, error) {
+	var count int64
+	if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT COUNT(*) FROM sync_state WHERE sync_key = ?`),
+		"mithril_ledger_slot",
+	).Scan(&count); err != nil {
+		return false, fmt.Errorf("read Mithril import marker: %w", err)
+	}
+	return count > 0, nil
 }
 
 func formatCommitteeCredentialCursor(

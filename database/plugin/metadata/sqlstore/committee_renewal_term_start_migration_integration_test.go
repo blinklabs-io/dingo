@@ -90,6 +90,7 @@ func exerciseCommitteeRenewalTermStartUpgrade(
 	noConfidenceMember := bytes.Repeat([]byte{0xcc}, 28)
 	imported := bytes.Repeat([]byte{0xee}, 28)
 	parameterChangeMember := bytes.Repeat([]byte{0xf1}, 28)
+	importedEnactment := bytes.Repeat([]byte{0xf2}, 28)
 	deleted := func(slot int64) sql.NullInt64 {
 		return sql.NullInt64{Int64: slot, Valid: true}
 	}
@@ -110,6 +111,7 @@ func exerciseCommitteeRenewalTermStartUpgrade(
 		{5000, updateCommittee, cbor},
 		{8000, updateCommittee, nil},
 		{7500, parameterChange, cbor},
+		{9000, updateCommittee, cbor},
 	}
 	fixtures := []struct {
 		tag           int64
@@ -123,7 +125,7 @@ func exerciseCommitteeRenewalTermStartUpgrade(
 		{0, renewed, 1000, deleted(5000), 900, 0},
 		{0, renewed, 5000, sql.NullInt64{}, 4800, 0},
 		{1, renewed, 200, deleted(1000), 50, 50},
-		{1, renewed, 1000, sql.NullInt64{}, 1000, 50},
+		{1, renewed, 1000, sql.NullInt64{}, 950, 50},
 		{0, reelected, 100, deleted(2000), 100, 100},
 		{0, reelected, 3000, sql.NullInt64{}, 2900, 2900},
 		{0, noConfidenceMember, 0, deleted(4000), 0, 0},
@@ -132,7 +134,14 @@ func exerciseCommitteeRenewalTermStartUpgrade(
 		{0, imported, 8000, sql.NullInt64{}, 8000, 8000},
 		{0, parameterChangeMember, 0, deleted(7500), 0, 0},
 		{0, parameterChangeMember, 7500, sql.NullInt64{}, 7500, 7500},
+		{0, importedEnactment, 0, deleted(9000), 0, 0},
+		{0, importedEnactment, 9000, sql.NullInt64{}, 9000, 9000},
 	}
+	_, err = db.Exec(dialect.Rebind(
+		`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`),
+		"mithril_ledger_slot", "9000",
+	)
+	require.NoError(t, err)
 	for i, proposal := range proposals {
 		_, err := db.Exec(dialect.Rebind(`
 INSERT INTO governance_proposal (

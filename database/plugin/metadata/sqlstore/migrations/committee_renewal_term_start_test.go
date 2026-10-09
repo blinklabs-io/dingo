@@ -51,9 +51,10 @@ func TestCommitteeRenewalTermStartBackfill(t *testing.T) {
 	reelected := bytes.Repeat([]byte{0xbb}, 28)
 	noConfidenceA := bytes.Repeat([]byte{0xcc}, 28)
 	noConfidenceB := bytes.Repeat([]byte{0xdd}, 28)
-	imported := bytes.Repeat([]byte{0xee}, 28)
+	importedRoot := bytes.Repeat([]byte{0xee}, 28)
 	unenacted := bytes.Repeat([]byte{0xf0}, 28)
 	parameterChange := bytes.Repeat([]byte{0xf1}, 28)
+	importedEnactment := bytes.Repeat([]byte{0xf2}, 28)
 	cbor := []byte{0x80}
 	proposals := []enactedProposalFixture{
 		{1000, updateCommitteeActionType, cbor},
@@ -63,9 +64,12 @@ func TestCommitteeRenewalTermStartBackfill(t *testing.T) {
 		{4500, updateCommitteeActionType, cbor},
 		{5000, updateCommitteeActionType, cbor},
 		{6000, updateCommitteeActionType, cbor},
+		{7500, int64(lcommon.GovActionTypeParameterChange), cbor},
 		// The Mithril import's synthetic committee root.
 		{8000, updateCommitteeActionType, nil},
-		{7500, int64(lcommon.GovActionTypeParameterChange), cbor},
+		// An imported UpdateCommittee the import records as enacted at its
+		// anchor, with the proposal's action CBOR.
+		{9000, updateCommitteeActionType, cbor},
 	}
 	fixtures := []committeeTermFixture{
 		// Two renewals each stamped a fresh term start; both inherit the
@@ -75,7 +79,7 @@ func TestCommitteeRenewalTermStartBackfill(t *testing.T) {
 		{0, renewed, 5000, sql.NullInt64{}, 4800, 0},
 		// A script credential sharing the hash bytes has its own history.
 		{1, renewed, 200, deletedAt(1000), 50, 50},
-		{1, renewed, 1000, sql.NullInt64{}, 1000, 50},
+		{1, renewed, 1000, sql.NullInt64{}, 950, 50},
 		// Removal at 2000 and re-election at 3000 starts a new term, which a
 		// later renewal then carries forward.
 		{0, reelected, 100, deletedAt(2000), 100, 100},
@@ -87,9 +91,12 @@ func TestCommitteeRenewalTermStartBackfill(t *testing.T) {
 		{0, noConfidenceA, 4500, sql.NullInt64{}, 4400, 4400},
 		{0, noConfidenceB, 0, deletedAt(4000), 0, 0},
 		{0, noConfidenceB, 4500, sql.NullInt64{}, 4400, 4400},
-		// A Mithril catch-up import restamps at its anchor on purpose.
-		{0, imported, 0, deletedAt(8000), 0, 0},
-		{0, imported, 8000, sql.NullInt64{}, 8000, 8000},
+		// A Mithril catch-up import restamps at its anchor on purpose, both
+		// beside its synthetic root and beside an imported enactment.
+		{0, importedRoot, 0, deletedAt(8000), 0, 0},
+		{0, importedRoot, 8000, sql.NullInt64{}, 8000, 8000},
+		{0, importedEnactment, 0, deletedAt(9000), 0, 0},
+		{0, importedEnactment, 9000, sql.NullInt64{}, 9000, 9000},
 		// Replacement in place with no enactment behind it is not a renewal.
 		{0, unenacted, 0, deletedAt(7000), 0, 0},
 		{0, unenacted, 7000, sql.NullInt64{}, 7000, 7000},
@@ -97,7 +104,33 @@ func TestCommitteeRenewalTermStartBackfill(t *testing.T) {
 		{0, parameterChange, 0, deletedAt(7500), 0, 0},
 		{0, parameterChange, 7500, sql.NullInt64{}, 7500, 7500},
 	}
+	runCommitteeRenewalTermStartBackfill(t, proposals, fixtures, true)
+}
 
+// Migration v8 backfilled term_start_slot from added_slot, so a renewal
+// enacted before it carries a term start equal to its added_slot, the shape
+// an import writes. A database that never imported a snapshot cannot hold an
+// import row, so such a renewal is still repaired there.
+func TestCommitteeRenewalTermStartBackfillRepairsLegacyRenewal(t *testing.T) {
+	t.Parallel()
+	renewed := bytes.Repeat([]byte{0xaa}, 28)
+	proposals := []enactedProposalFixture{
+		{1000, updateCommitteeActionType, []byte{0x80}},
+	}
+	fixtures := []committeeTermFixture{
+		{0, renewed, 0, deletedAt(1000), 0, 0},
+		{0, renewed, 1000, sql.NullInt64{}, 1000, 0},
+	}
+	runCommitteeRenewalTermStartBackfill(t, proposals, fixtures, false)
+}
+
+func runCommitteeRenewalTermStartBackfill(
+	t *testing.T,
+	proposals []enactedProposalFixture,
+	fixtures []committeeTermFixture,
+	mithrilImported bool,
+) {
+	t.Helper()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
@@ -122,6 +155,13 @@ func TestCommitteeRenewalTermStartBackfill(t *testing.T) {
 	}
 	runTo(registry[:index])
 
+	if mithrilImported {
+		_, err := db.Exec(
+			`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`,
+			"mithril_ledger_slot", "9000",
+		)
+		require.NoError(t, err)
+	}
 	for i, proposal := range proposals {
 		_, err := db.Exec(`
 INSERT INTO governance_proposal (

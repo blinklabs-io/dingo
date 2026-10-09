@@ -29,7 +29,8 @@ import (
 
 // TestCommitteeRenewalTermStartUpgradeRestoresHotKey writes a renewal the way
 // enactment did before renewals preserved the term start, and a Mithril
-// catch-up import over an existing member, both through the store's own
+// catch-up import over an existing member that records the imported
+// UpdateCommittee as enacted at its anchor, both through the store's own
 // writers. The renewed member's hot-key authorization predates the stamped
 // term start and stays hidden until the v38 upgrade repairs it; the imported
 // member's fresh anchor term is left in place.
@@ -110,8 +111,8 @@ INSERT INTO auth_committee_hot (
 		nil,
 	))
 	setEnactedUpdateCommittee(t, store, 1, renewalSlot, []byte{0x80})
-	// A catch-up import restamps the member at the snapshot anchor and seeds
-	// a synthetic committee root without action CBOR.
+	// A catch-up import restamps the member at the snapshot anchor and marks
+	// the imported UpdateCommittee, with its action CBOR, enacted there.
 	require.NoError(t, store.SetCommitteeMembers(
 		[]*models.CommitteeMember{{
 			ColdCredHash:     imported,
@@ -122,7 +123,10 @@ INSERT INTO auth_committee_hot (
 		}},
 		nil,
 	))
-	setEnactedUpdateCommittee(t, store, 2, anchorSlot, nil)
+	setEnactedUpdateCommittee(t, store, 2, anchorSlot, []byte{0x80})
+	require.NoError(t, store.SetSyncState(
+		"mithril_ledger_slot", "8000", nil,
+	))
 	require.Empty(
 		t,
 		activeColdCredentials(store),
