@@ -199,7 +199,7 @@ func TestStartupOpCertCounterUnresolvedEraStillRejectsStaleCounter(
 	require.ErrorIs(t, result.EraUnevaluable, ErrOpCertEraUnevaluable)
 }
 
-// Sample test keys from internal/test/devnet/testdata/keys/
+// Sample test keys from internal/devnetkeys/keys/
 const (
 	testVRFSKeyJSON = `{
     "type": "VrfSigningKey_PraosVRF",
