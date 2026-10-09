@@ -2130,30 +2130,36 @@ var errBoundaryEraNotAuthorized = errors.New(
 	"boundary block era not authorized by the ledger",
 )
 
-// checkBoundaryEraAuthorized refuses an era advancement the ledger did not
-// authorize. The era a boundary moves into is decided by the ledger state: the
-// protocol version of the parameters after the epoch's updates were enacted, or
-// a configured TriggerAtEpoch for the era. The era a block is encoded in does
-// not decide it, so a block from an era beyond that is rejected, as the
-// reference HFC does with HardForkLedgerErrorWrongEra
-// (Shelley/ShelleyHFC.hs shelleyTransition decides the era end from the
-// updated pparams).
+// authorizedBoundaryEra returns the era a validated boundary may move into, or
+// refuses the boundary block. The era is decided by the ledger state: the
+// protocol version of the parameters after the epoch's updates were enacted,
+// or a configured TriggerAtEpoch for the era. A block whose body is encoded in
+// an era beyond that is rejected, as the reference HFC does with
+// HardForkLedgerErrorWrongEra (Shelley/ShelleyHFC.hs shelleyTransition decides
+// the era end from the updated pparams).
+//
+// targetEraID is the era boundaryEraForBlock chose, which may sit one era past
+// the body when the header protocol major elevates it. A header major is not
+// an era signal: cardano-node stamps its own protocol version, and outside
+// mainnet the header major is not bounded below major 12. So an elevation past
+// the authorized era is capped at that era rather than rejecting a block whose
+// body era the ledger did authorize.
 //
 // newPParams must be the parameters after the boundary's enactment. Byron is
 // exempt: it carries no protocol version, and validateByronShelleyTransition
 // gates that boundary. A parameter set that yields no version cannot be judged
-// and is not refused.
-func (ls *LedgerState) checkBoundaryEraAuthorized(
-	sourceEraID, targetEraID uint,
+// and leaves targetEraID unchanged.
+func (ls *LedgerState) authorizedBoundaryEra(
+	sourceEraID, bodyEraID, targetEraID uint,
 	newPParams lcommon.ProtocolParameters,
 	newEpochID uint64,
-) error {
+) (uint, error) {
 	if sourceEraID == targetEraID || sourceEraID == byron.EraIdByron {
-		return nil
+		return targetEraID, nil
 	}
 	version, err := GetProtocolVersion(newPParams)
 	if err != nil {
-		return nil //nolint:nilerr // no version, nothing to compare against
+		return targetEraID, nil //nolint:nilerr // no version, nothing to compare against
 	}
 	eraList := ls.eraList()
 	indexOf := func(eraID uint) int {
@@ -2165,9 +2171,10 @@ func (ls *LedgerState) checkBoundaryEraAuthorized(
 		return -1
 	}
 	sourceIndex := indexOf(sourceEraID)
+	bodyIndex := indexOf(bodyEraID)
 	targetIndex := indexOf(targetEraID)
-	if sourceIndex < 0 || targetIndex < 0 {
-		return nil
+	if sourceIndex < 0 || bodyIndex < 0 || targetIndex < 0 {
+		return targetEraID, nil
 	}
 	allowedIndex := sourceIndex
 	if eraID, ok := ls.eraForVersion(version.Major); ok {
@@ -2183,19 +2190,22 @@ func (ls *LedgerState) checkBoundaryEraAuthorized(
 		}
 		allowedIndex++
 	}
-	if targetIndex <= allowedIndex {
-		return nil
+	// The second condition refuses an advancement the ledger did not
+	// authorize at all, which a capped elevation must not turn into a
+	// boundary with no transition.
+	if bodyIndex > allowedIndex || allowedIndex == sourceIndex {
+		return 0, fmt.Errorf(
+			"%w: epoch %d block is in era %d but protocol version %d.%d "+
+				"keeps the ledger at or below era %d",
+			errBoundaryEraNotAuthorized,
+			newEpochID,
+			bodyEraID,
+			version.Major,
+			version.Minor,
+			eraList[allowedIndex].Id,
+		)
 	}
-	return fmt.Errorf(
-		"%w: epoch %d block is in era %d but protocol version %d.%d "+
-			"keeps the ledger at or below era %d",
-		errBoundaryEraNotAuthorized,
-		newEpochID,
-		targetEraID,
-		version.Major,
-		version.Minor,
-		eraList[allowedIndex].Id,
-	)
+	return eraList[min(targetIndex, allowedIndex)].Id, nil
 }
 
 func (ls *LedgerState) isHardForkTransition(
@@ -7632,8 +7642,12 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 	var nextEpochEraId uint
 	var allowTwoEraBoundaryTransition bool
 	// boundaryShouldValidate is whether the block that opens the next epoch
-	// is validated, which decides whether the Byron-to-Shelley gate runs.
+	// is validated, which decides whether the Byron-to-Shelley gate and the
+	// boundary era authorization run.
 	var boundaryShouldValidate bool
+	// boundaryBodyEraId is the era the boundary block's body is encoded in,
+	// before header elevation or a configured trigger epoch moves the target.
+	var boundaryBodyEraId uint
 	var needsEpochRollover bool
 	var end, i int
 	var err error
@@ -7826,13 +7840,29 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 				rolloverResult = result
 				if boundaryShouldValidate {
-					if err := ls.checkBoundaryEraAuthorized(
+					authorizedEraID, err := ls.authorizedBoundaryEra(
 						snapshotEra.Id,
+						boundaryBodyEraId,
 						nextEpochEraId,
 						result.NewCurrentPParams,
 						newEpochId,
-					); err != nil {
+					)
+					if err != nil {
 						return err
+					}
+					if authorizedEraID != nextEpochEraId {
+						last := slices.Index(
+							transitionsAfterRollover,
+							authorizedEraID,
+						)
+						if last < 0 {
+							return fmt.Errorf(
+								"authorized era %d is not on the boundary transition path %v",
+								authorizedEraID,
+								transitionsAfterRollover,
+							)
+						}
+						transitionsAfterRollover = transitionsAfterRollover[:last+1]
 					}
 				}
 				if len(transitionsAfterRollover) > 0 {
@@ -8420,6 +8450,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 								cutoffSlot,
 								snapshotMithrilSlot,
 							)
+							boundaryBodyEraId = uint(next.Era().Id)
 							headerMajor, headerMajorKnown := HeaderProtocolMajor(
 								next.Header(),
 							)

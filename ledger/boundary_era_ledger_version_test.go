@@ -92,17 +92,34 @@ func boundaryEraConwayBlock(
 	return block
 }
 
-// runBoundaryEraCase starts a Babbage ledger whose protocol parameters carry
-// pparamsMajor in epoch 0, then feeds it one Conway-encoded block that opens
-// epoch 1. configure may schedule a hard fork with a TestXHardForkAtEpoch
-// override. It returns the ledger and the pipeline's result.
+// boundaryEraCase describes a Babbage ledger at the end of epoch 0 and the
+// Conway-encoded block that opens epoch 1.
+type boundaryEraCase struct {
+	// pparamsMajor is the protocol major of the epoch 0 parameters.
+	pparamsMajor uint
+	// headerMajor is the protocol major the boundary block header carries;
+	// zero means Conway's.
+	headerMajor uint
+	// enableDijkstra makes Dijkstra a known era, so a header major of 12
+	// names one.
+	enableDijkstra bool
+	// configure may schedule a hard fork with a TestXHardForkAtEpoch
+	// override.
+	configure func(cfg *cardano.CardanoNodeConfig)
+}
+
+// runBoundaryEraCase runs the boundary block through the pipeline and returns
+// the ledger and the pipeline's result.
 func runBoundaryEraCase(
 	t *testing.T,
-	pparamsMajor uint,
-	configure func(cfg *cardano.CardanoNodeConfig),
+	tc boundaryEraCase,
 ) (*LedgerState, error) {
 	t.Helper()
-	block := boundaryEraConwayBlock(t, conway.MinProtocolVersionConway)
+	headerMajor := tc.headerMajor
+	if headerMajor == 0 {
+		headerMajor = conway.MinProtocolVersionConway
+	}
+	block := boundaryEraConwayBlock(t, headerMajor)
 
 	db := newTestDB(t)
 	cm, err := chain.NewManager(context.Background(), db, nil)
@@ -126,8 +143,8 @@ func runBoundaryEraCase(
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conwayGenesis.Close() })
 	require.NoError(t, nodeConfig.LoadConwayGenesisFromReader(conwayGenesis))
-	if configure != nil {
-		configure(nodeConfig)
+	if tc.configure != nil {
+		tc.configure(nodeConfig)
 	}
 
 	nonce := bytes.Repeat([]byte{0x42}, 32)
@@ -154,10 +171,11 @@ func runBoundaryEraCase(
 		PromRegistry:          prometheus.NewRegistry(),
 		ManualBlockProcessing: true,
 		ValidateHistorical:    true,
+		EnableDijkstra:        tc.enableDijkstra,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
-	pparams := boundaryEraBabbagePParams(pparamsMajor)
+	pparams := boundaryEraBabbagePParams(tc.pparamsMajor)
 	ls.currentEra = eras.BabbageEraDesc
 	ls.currentPParams = pparams
 	ls.currentEpoch = epoch0
@@ -196,6 +214,10 @@ func TestBoundaryBlockEraMustMatchLedgerProtocolVersion(t *testing.T) {
 		require.NoError(t, verErr)
 		assert.Equal(t, uint(8), ver.Major)
 		assert.Equal(t, uint64(0), ls.currentEpoch.EpochId)
+		assert.Equal(t, uint64(0), ls.currentTip.Point.Slot)
+		assert.Equal(t, uint64(0),
+			ls.config.ChainManager.PrimaryChain().Tip().Point.Slot,
+			"the refused block must leave the primary chain")
 	}
 	requireBecomesConway := func(t *testing.T, ls *LedgerState, err error) {
 		t.Helper()
@@ -209,30 +231,48 @@ func TestBoundaryBlockEraMustMatchLedgerProtocolVersion(t *testing.T) {
 
 	t.Run("conway block without a ratified major bump is rejected", func(t *testing.T) {
 		t.Parallel()
-		ls, err := runBoundaryEraCase(t, 8, nil)
+		ls, err := runBoundaryEraCase(t, boundaryEraCase{pparamsMajor: 8})
 		requireStaysBabbage(t, ls, err)
 	})
 	t.Run("conway block before the configured trigger epoch is rejected", func(t *testing.T) {
 		t.Parallel()
-		ls, err := runBoundaryEraCase(t, 8, conwayAt(5))
+		ls, err := runBoundaryEraCase(t, boundaryEraCase{
+			pparamsMajor: 8,
+			configure:    conwayAt(5),
+		})
 		requireStaysBabbage(t, ls, err)
 	})
 	t.Run("major bump to conway transitions", func(t *testing.T) {
 		t.Parallel()
-		ls, err := runBoundaryEraCase(t, 9, nil)
+		ls, err := runBoundaryEraCase(t, boundaryEraCase{pparamsMajor: 9})
 		requireBecomesConway(t, ls, err)
 	})
 	t.Run("configured trigger epoch transitions", func(t *testing.T) {
 		t.Parallel()
-		ls, err := runBoundaryEraCase(t, 8, conwayAt(1))
+		ls, err := runBoundaryEraCase(t, boundaryEraCase{
+			pparamsMajor: 8,
+			configure:    conwayAt(1),
+		})
+		requireBecomesConway(t, ls, err)
+	})
+	// A header major of 12 elevates the Conway body to Dijkstra, which the
+	// major-9 parameters do not authorize. The body era is authorized, so the
+	// block is accepted and the ledger stops at Conway.
+	t.Run("header elevation past the authorized era stops at it", func(t *testing.T) {
+		t.Parallel()
+		ls, err := runBoundaryEraCase(t, boundaryEraCase{
+			pparamsMajor:   9,
+			headerMajor:    12,
+			enableDijkstra: true,
+		})
 		requireBecomesConway(t, ls, err)
 	})
 }
 
-// TestCheckBoundaryEraAuthorized covers the era gate directly for the
-// transitions the pipeline test cannot reach cheaply: two consecutive hard
-// forks at one boundary and Byron.
-func TestCheckBoundaryEraAuthorized(t *testing.T) {
+// TestAuthorizedBoundaryEra covers the era gate directly for the transitions
+// the pipeline test cannot reach cheaply: two consecutive hard forks at one
+// boundary and Byron.
+func TestAuthorizedBoundaryEra(t *testing.T) {
 	t.Parallel()
 
 	newLedger := func(t *testing.T) *LedgerState {
@@ -250,34 +290,61 @@ func TestCheckBoundaryEraAuthorized(t *testing.T) {
 	t.Run("two consecutive transitions need the successor major", func(t *testing.T) {
 		t.Parallel()
 		ls := newLedger(t)
-		require.NoError(t, ls.checkBoundaryEraAuthorized(
-			eras.MaryEraDesc.Id, eras.BabbageEraDesc.Id, pparams(7), 10,
-		))
-		err := ls.checkBoundaryEraAuthorized(
-			eras.MaryEraDesc.Id, eras.BabbageEraDesc.Id, pparams(5), 10,
+		era, err := ls.authorizedBoundaryEra(
+			eras.MaryEraDesc.Id, eras.AlonzoEraDesc.Id,
+			eras.BabbageEraDesc.Id, pparams(7), 10,
 		)
-		require.ErrorIs(t, err, errBoundaryEraNotAuthorized)
+		require.NoError(t, err)
+		assert.Equal(t, eras.BabbageEraDesc.Id, era)
+	})
+	t.Run("an elevation the major does not reach stops at the body era", func(t *testing.T) {
+		t.Parallel()
+		era, err := newLedger(t).authorizedBoundaryEra(
+			eras.MaryEraDesc.Id, eras.AlonzoEraDesc.Id,
+			eras.BabbageEraDesc.Id, pparams(5), 10,
+		)
+		require.NoError(t, err)
+		assert.Equal(t, eras.AlonzoEraDesc.Id, era)
 	})
 	t.Run("a single transition needs its own major", func(t *testing.T) {
 		t.Parallel()
 		ls := newLedger(t)
-		require.NoError(t, ls.checkBoundaryEraAuthorized(
-			eras.MaryEraDesc.Id, eras.AlonzoEraDesc.Id, pparams(5), 10,
-		))
-		require.ErrorIs(t, ls.checkBoundaryEraAuthorized(
-			eras.MaryEraDesc.Id, eras.AlonzoEraDesc.Id, pparams(4), 10,
-		), errBoundaryEraNotAuthorized)
+		era, err := ls.authorizedBoundaryEra(
+			eras.MaryEraDesc.Id, eras.AlonzoEraDesc.Id,
+			eras.AlonzoEraDesc.Id, pparams(5), 10,
+		)
+		require.NoError(t, err)
+		assert.Equal(t, eras.AlonzoEraDesc.Id, era)
+		_, err = ls.authorizedBoundaryEra(
+			eras.MaryEraDesc.Id, eras.AlonzoEraDesc.Id,
+			eras.AlonzoEraDesc.Id, pparams(4), 10,
+		)
+		require.ErrorIs(t, err, errBoundaryEraNotAuthorized)
+	})
+	t.Run("an elevated body the major does not reach is refused", func(t *testing.T) {
+		t.Parallel()
+		_, err := newLedger(t).authorizedBoundaryEra(
+			eras.MaryEraDesc.Id, eras.AlonzoEraDesc.Id,
+			eras.BabbageEraDesc.Id, pparams(4), 10,
+		)
+		require.ErrorIs(t, err, errBoundaryEraNotAuthorized)
 	})
 	t.Run("an unchanged era is never refused", func(t *testing.T) {
 		t.Parallel()
-		require.NoError(t, newLedger(t).checkBoundaryEraAuthorized(
-			eras.BabbageEraDesc.Id, eras.BabbageEraDesc.Id, pparams(8), 10,
-		))
+		era, err := newLedger(t).authorizedBoundaryEra(
+			eras.BabbageEraDesc.Id, eras.BabbageEraDesc.Id,
+			eras.BabbageEraDesc.Id, pparams(8), 10,
+		)
+		require.NoError(t, err)
+		assert.Equal(t, eras.BabbageEraDesc.Id, era)
 	})
 	t.Run("byron has no version to compare", func(t *testing.T) {
 		t.Parallel()
-		require.NoError(t, newLedger(t).checkBoundaryEraAuthorized(
-			eras.ByronEraDesc.Id, eras.ShelleyEraDesc.Id, nil, 10,
-		))
+		era, err := newLedger(t).authorizedBoundaryEra(
+			eras.ByronEraDesc.Id, eras.ShelleyEraDesc.Id,
+			eras.ShelleyEraDesc.Id, nil, 10,
+		)
+		require.NoError(t, err)
+		assert.Equal(t, eras.ShelleyEraDesc.Id, era)
 	})
 }
