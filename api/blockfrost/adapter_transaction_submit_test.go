@@ -62,11 +62,36 @@ func submitTestTxCbor(t *testing.T) []byte {
 type stubSubmitter struct {
 	err   error
 	calls int
+	ctx   context.Context
 }
 
-func (s *stubSubmitter) AddTransaction(txType uint, txBytes []byte) error {
+func (s *stubSubmitter) AddTransaction(ctx context.Context, txType uint, txBytes []byte) error {
 	s.calls++
+	s.ctx = ctx
 	return s.err
+}
+
+// TestHandleTransactionSubmitPassesRequestContext pins that mempool admission
+// runs under the request context, so its span joins the request's trace.
+func TestHandleTransactionSubmitPassesRequestContext(t *testing.T) {
+	t.Parallel()
+
+	type requestKey struct{}
+	submitter := &stubSubmitter{}
+	b := newTestBlockfrost(&NodeAdapter{submitter: submitter})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		bytes.NewReader(submitTestTxCbor(t)),
+	)
+	req = req.WithContext(
+		context.WithValue(req.Context(), requestKey{}, "request"),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	b.handleTransactionSubmit(httptest.NewRecorder(), req)
+
+	require.Equal(t, 1, submitter.calls)
+	require.Equal(t, "request", submitter.ctx.Value(requestKey{}))
 }
 
 // TestTransactionSubmitUnavailableMempoolIsNotARejection pins that the two
@@ -92,7 +117,7 @@ func TestTransactionSubmitUnavailableMempoolIsNotARejection(t *testing.T) {
 			submitter := &stubSubmitter{err: submitErr}
 			adapter := &NodeAdapter{submitter: submitter}
 
-			hash, err := adapter.TransactionSubmit(submitTestTxCbor(t))
+			hash, err := adapter.TransactionSubmit(context.Background(), submitTestTxCbor(t))
 
 			require.Error(t, err)
 			assert.Empty(t, hash)
@@ -127,7 +152,7 @@ func TestTransactionSubmitRejectionStaysARejection(t *testing.T) {
 	submitter := &stubSubmitter{err: submitErr}
 	adapter := &NodeAdapter{submitter: submitter}
 
-	hash, err := adapter.TransactionSubmit(submitTestTxCbor(t))
+	hash, err := adapter.TransactionSubmit(context.Background(), submitTestTxCbor(t))
 
 	require.Error(t, err)
 	assert.Empty(t, hash)
@@ -149,7 +174,7 @@ func TestTransactionSubmitAcceptedReturnsHash(t *testing.T) {
 	submitter := &stubSubmitter{}
 	adapter := &NodeAdapter{submitter: submitter}
 
-	hash, err := adapter.TransactionSubmit(submitTestTxCbor(t))
+	hash, err := adapter.TransactionSubmit(context.Background(), submitTestTxCbor(t))
 
 	require.NoError(t, err)
 	assert.NotEmpty(t, hash)
@@ -247,7 +272,7 @@ func TestTransactionSubmitStorageFailureIsNotARejection(t *testing.T) {
 			submitter := &stubSubmitter{err: submitErr}
 			adapter := &NodeAdapter{submitter: submitter}
 
-			hash, err := adapter.TransactionSubmit(submitTestTxCbor(t))
+			hash, err := adapter.TransactionSubmit(context.Background(), submitTestTxCbor(t))
 
 			require.Error(t, err)
 			assert.Empty(t, hash)
@@ -282,7 +307,7 @@ func TestTransactionSubmitUnresolvableInputStaysARejection(t *testing.T) {
 	submitter := &stubSubmitter{err: submitErr}
 	adapter := &NodeAdapter{submitter: submitter}
 
-	_, err := adapter.TransactionSubmit(submitTestTxCbor(t))
+	_, err := adapter.TransactionSubmit(context.Background(), submitTestTxCbor(t))
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrTransactionRejected)

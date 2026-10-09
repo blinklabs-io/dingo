@@ -84,7 +84,7 @@ type UtxorpcLedgerState interface {
 // UtxorpcMempool is the subset of mempool.Mempool needed by the UTxO RPC
 // server.
 type UtxorpcMempool interface {
-	AddTransaction(txType uint, txBytes []byte) error
+	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 	Transactions() []mempool.MempoolTransaction
 }
 

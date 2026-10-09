@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -719,6 +720,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 						err = retryTxsubmissionAdmission(
 							func() error {
 								return o.mempool.AddTransaction(
+									context.Background(),
 									uint(txBody.EraId),
 									txBody.TxBody,
 								)
@@ -733,6 +735,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 						)
 					} else {
 						err = o.mempool.AddTransaction(
+							context.Background(),
 							uint(txBody.EraId),
 							txBody.TxBody,
 						)

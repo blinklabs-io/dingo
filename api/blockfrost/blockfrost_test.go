@@ -1215,6 +1215,7 @@ func (m *mockNode) Transaction(
 }
 
 func (m *mockNode) TransactionSubmit(
+	_ context.Context,
 	_ []byte,
 ) (string, error) {
 	return m.transactionSubmitHash, m.transactionSubmitErr

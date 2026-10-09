@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -25,11 +26,13 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // blockfetchMetricsCdfUpdateInterval controls how often CDF metrics are
@@ -277,7 +280,15 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 	ctx blockfetch.CallbackContext,
 	blockType uint,
 	blockData []byte,
-) error {
+) (err error) {
+	// The span covers the decode, so a delivery that fails to decode is still
+	// traced; the block's own attributes are added once it has decoded.
+	_, span := tracing.Start(
+		context.Background(),
+		"blockfetch.block",
+		attribute.String("connection.id", ctx.ConnectionId.String()),
+	)
+	defer func() { tracing.End(span, err) }()
 	key := hashDecodeInput(blockType, blockData)
 	cacheBytes := decodeCacheChargeForRaw(len(blockData))
 	if !hasCborArrayEnvelope(blockData) {
@@ -318,6 +329,7 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 			blockType,
 		)
 	}
+	span.SetAttributes(blockSpanAttributes(block)...)
 	return o.blockfetchClientBlock(ctx, blockType, block)
 }
 
@@ -924,12 +936,24 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 	return requestId, nil
 }
 
+// blockSpanAttributes describes a decoded block on its blockfetch span.
+func blockSpanAttributes(block gledger.Block) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		tracing.Uint64("block.slot", block.SlotNumber()),
+		attribute.String(
+			"block.hash",
+			hex.EncodeToString(block.Hash().Bytes()),
+		),
+	}
+}
+
+// blockfetchClientBlock updates metrics and peer scoring for a decoded block
+// and forwards it to the shared block handler. The caller owns the span.
 func (o *Ouroboros) blockfetchClientBlock(
 	ctx blockfetch.CallbackContext,
 	blockType uint,
 	block gledger.Block,
 ) error {
-	// Update metrics and peer scoring
 	key := blockFetchKey{connId: ctx.ConnectionId, requestId: ctx.RequestId}
 	o.blockFetchMutex.Lock()
 	startTime, exists := o.blockFetchStarts[key]

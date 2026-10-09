@@ -299,6 +299,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if !(c.TracingSampleRatio >= 0 && c.TracingSampleRatio <= 1) {
+		errs = append(errs, fmt.Errorf(
+			"invalid tracingSampleRatio: %v (must be between 0 and 1)",
+			c.TracingSampleRatio,
+		))
+	}
+
 	// SQLite without a data directory is a shared-cache in-memory store whose
 	// table locks block the ledger's writes while any read transaction is
 	// open, which an acquired LocalStateQuery snapshot always holds.

@@ -207,6 +207,9 @@ type Config struct {
 	// Programmatic API-only fields (not in YAML/env):
 	tracing             bool
 	tracingStdout       bool
+	tracingEndpoint     string
+	tracingServiceName  string
+	tracingSampleRatio  float64
 	ledgerPeerTarget    int
 	leiosPipelineTiming *leios.PipelineTiming
 	// Runtime-only, programmatic offchain metadata config (preserves HTTPClient)
@@ -707,6 +710,8 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			RunMode:              internalconfig.RunModeServe,
 			ValidateHistorical:   true,
 			StrictUtxoValidation: true,
+			TracingServiceName:   "dingo",
+			TracingSampleRatio:   1,
 			// Fail closed: self-validate locally-forged blocks before
 			// adoption and diffusion unless an operator explicitly opts
 			// out. Mirrors internalconfig's own package-level default
@@ -774,7 +779,9 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		},
 		// Default logger will throw away logs
 		// We do this so we don't have to add guards around every log operation
-		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		tracingServiceName: "dingo",
+		tracingSampleRatio: 1,
 	}
 	// Apply options
 	for _, opt := range opts {
@@ -785,6 +792,11 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 }
 
 func (c *Config) syncCompatFields() {
+	// A collector endpoint turns tracing on. The tracing flag alone still
+	// enables it with the OTEL_EXPORTER_OTLP_* destination.
+	if c.tracingEndpoint != "" {
+		c.tracing = true
+	}
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
@@ -1084,6 +1096,9 @@ func NewConfigFromInternal(
 		chainsyncStallTimeout: chainsyncDur,
 		tracing:               cfg.Tracing,
 		tracingStdout:         cfg.TracingStdout,
+		tracingEndpoint:       cfg.TracingEndpoint,
+		tracingServiceName:    cfg.TracingServiceName,
+		tracingSampleRatio:    cfg.TracingSampleRatio,
 	}
 	c.syncCompatFields()
 	return c, nil
@@ -1238,6 +1253,27 @@ func WithTopologyConfig(
 func WithTracing(tracing bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tracing = tracing
+	}
+}
+
+// WithTracingEndpoint sets the OTLP HTTP collector URL and enables tracing. Empty leaves tracing to WithTracing and the destination to the OTEL_EXPORTER_OTLP_* env vars.
+func WithTracingEndpoint(endpoint string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tracingEndpoint = endpoint
+	}
+}
+
+// WithTracingServiceName sets the service.name resource attribute on exported spans.
+func WithTracingServiceName(name string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tracingServiceName = name
+	}
+}
+
+// WithTracingSampleRatio sets the fraction of new traces sampled, from 0 to 1.
+func WithTracingSampleRatio(ratio float64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tracingSampleRatio = ratio
 	}
 }
 
@@ -2637,6 +2673,22 @@ func (c *Config) Tracing() bool {
 // TracingStdout returns whether tracing output goes to stdout.
 func (c *Config) TracingStdout() bool {
 	return c.tracingStdout
+}
+
+// TracingEndpoint returns the OTLP HTTP collector URL, or empty to use the
+// OTEL_EXPORTER_OTLP_* env vars.
+func (c *Config) TracingEndpoint() string {
+	return c.tracingEndpoint
+}
+
+// TracingServiceName returns the service.name resource attribute on spans.
+func (c *Config) TracingServiceName() string {
+	return c.tracingServiceName
+}
+
+// TracingSampleRatio returns the fraction of new traces sampled.
+func (c *Config) TracingSampleRatio() float64 {
+	return c.tracingSampleRatio
 }
 
 // LedgerPeerTarget returns the target number of ledger peers.

@@ -230,6 +230,20 @@
 # CLI: --tracing-stdout  Env: DINGO_TRACING_STDOUT
 # tracingStdout: false
 
+# OTLP HTTP collector URL for spans, for example http://localhost:4318.
+# Setting it enables tracing. Empty leaves tracing to the tracing setting and
+# the destination to the OTEL_EXPORTER_OTLP_* env vars.
+# CLI: --tracing-endpoint  Env: DINGO_TRACING_ENDPOINT
+# tracingEndpoint: ""
+
+# service.name resource attribute on exported spans.
+# CLI: --tracing-service-name  Env: DINGO_TRACING_SERVICE_NAME
+# tracingServiceName: dingo
+
+# Fraction of new traces sampled, from 0 to 1.
+# CLI: --tracing-sample-ratio  Env: DINGO_TRACING_SAMPLE_RATIO
+# tracingSampleRatio: 1
+
 # Internal/private address to bind for listening for Ouroboros NtC
 # privateBindAddr: "127.0.0.1"
 

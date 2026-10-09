@@ -993,6 +993,7 @@ type fakeMempool struct {
 }
 
 func (f *fakeMempool) AddTransaction(
+	ctx context.Context,
 	txType uint,
 	txBytes []byte,
 ) error {

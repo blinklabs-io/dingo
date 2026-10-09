@@ -886,6 +886,9 @@ func buildDingoConfig(
 		dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 		dingo.WithTracing(cfg.Tracing),
 		dingo.WithTracingStdout(cfg.TracingStdout),
+		dingo.WithTracingEndpoint(cfg.TracingEndpoint),
+		dingo.WithTracingServiceName(cfg.TracingServiceName),
+		dingo.WithTracingSampleRatio(cfg.TracingSampleRatio),
 		dingo.WithTopologyConfig(config.GetTopologyConfig()),
 		dingo.WithDatabaseWorkerPoolConfig(ledger.DatabaseWorkerPoolConfig{
 			WorkerPoolSize: cfg.DatabaseWorkers,

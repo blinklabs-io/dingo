@@ -485,7 +485,7 @@ func (f *pathFixture) mempoolAddRaw(txCbor []byte) error {
 		MempoolCapacity: 1024 * 1024,
 	})
 	require.NoError(f.t, err)
-	return pool.AddTransaction(uint(gledger.TxTypeDijkstra), txCbor)
+	return pool.AddTransaction(context.Background(), uint(gledger.TxTypeDijkstra), txCbor)
 }
 
 // withBodyField returns the transaction at index, and the block carrying it,

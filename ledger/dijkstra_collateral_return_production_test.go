@@ -318,7 +318,7 @@ func TestDijkstraCollateralReturnPointerThroughLedgerAndMempool(t *testing.T) {
 		pool := newDijkstraTestMempool(t, fx.ls)
 		assertDijkstraPointerReturnFailure(
 			t,
-			pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), fx.txCbor),
+			pool.AddTransaction(context.Background(), uint(gdijkstra.TxTypeDijkstra), fx.txCbor),
 		)
 		require.Empty(t, pool.Transactions())
 	})
@@ -329,7 +329,7 @@ func TestDijkstraCollateralReturnPointerThroughLedgerAndMempool(t *testing.T) {
 		require.NoError(t, fx.ls.ValidateTx(fx.tx))
 
 		pool := newDijkstraTestMempool(t, fx.ls)
-		require.NoError(t, pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), fx.txCbor))
+		require.NoError(t, pool.AddTransaction(context.Background(), uint(gdijkstra.TxTypeDijkstra), fx.txCbor))
 		require.Len(t, pool.Transactions(), 1)
 	})
 }

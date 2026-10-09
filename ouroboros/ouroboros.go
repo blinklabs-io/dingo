@@ -60,7 +60,7 @@ const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 // Mempool is the protocol-facing subset of the backend-neutral mempool. Keeping
 // this interface local prevents networking from depending on FIFO internals.
 type Mempool interface {
-	AddTransaction(txType uint, txBytes []byte) error
+	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 	Transactions() []mempool.MempoolTransaction
 	CapacityBytes() int64
 	AddConsumer(connId ouroboros.ConnectionId) mempool.RelayConsumer

@@ -1270,7 +1270,7 @@ func (b *Blockfrost) handleTransactionSubmit(
 		return
 	}
 
-	hash, err := b.node.TransactionSubmit(txCbor)
+	hash, err := b.node.TransactionSubmit(r.Context(), txCbor)
 	if err != nil {
 		// Classify node conditions before the rejection: admission runs
 		// ledger validation against storage, so a storage fault arrives on
