@@ -4485,6 +4485,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			}
 			return nil
 		}
+		if errors.Is(err, chain.ErrHeaderQueueFull) {
+			// A full queue rejects every header before the fetch decision
+			// below, so if nothing is fetching the queued headers nothing
+			// ever will.
+			ls.ensureBlockfetchDrainingAfterForkQueueFailure(
+				e.ConnectionId,
+				pending,
+			)
+		}
 		return fmt.Errorf("failed adding chain block header: %w", err)
 	}
 	// Reset mismatch counter on successful header addition
