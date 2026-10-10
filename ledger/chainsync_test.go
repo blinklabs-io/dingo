@@ -6590,7 +6590,6 @@ func TestFlushPendingBlockfetchNonExtendingFloodRecyclesConnection(
 	}
 	ls.pendingBlockfetchEvents = events
 
-
 	err := ls.flushPendingBlockfetchBlocksDeferred(nil)
 	require.NoError(
 		t,
