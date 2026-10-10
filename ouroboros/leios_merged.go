@@ -866,12 +866,20 @@ func (o *Ouroboros) validateLeiosEndorserBlock(
 	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(
 		data.announcementHeaderRaw,
 	)
+	if err != nil {
+		err = fmt.Errorf(
+			"%w: decode Leios announcing header: %w",
+			ledger.ErrInvalidLeiosEndorserBlockTransactions,
+			err,
+		)
+	}
 	if err == nil {
 		announcedHash, _, ok := header.LeiosAnnouncement()
 		if !ok || header.SlotNumber() != data.point.Slot ||
 			!slices.Equal(announcedHash.Bytes(), data.point.Hash) {
-			err = errors.New(
-				"leios announcing header does not bind the cached endorser block",
+			err = fmt.Errorf(
+				"%w: leios announcing header does not bind the cached endorser block",
+				ledger.ErrInvalidLeiosEndorserBlockTransactions,
 			)
 		}
 	}
@@ -881,7 +889,12 @@ func (o *Ouroboros) validateLeiosEndorserBlock(
 		for i, raw := range data.txsRaw {
 			txCbors[i], err = leiosEndorserBlockTxCbor(raw)
 			if err != nil {
-				err = fmt.Errorf("decode endorser transaction %d: %w", i, err)
+				err = fmt.Errorf(
+					"%w: decode endorser transaction %d: %w",
+					ledger.ErrInvalidLeiosEndorserBlockTransactions,
+					i,
+					err,
+				)
 				break
 			}
 		}
@@ -896,17 +909,26 @@ func (o *Ouroboros) validateLeiosEndorserBlock(
 	if o.leiosValidationCtx.Err() != nil {
 		err = o.leiosValidationCtx.Err()
 	}
-	status := leiosEBValidationInvalid
+	status := leiosEBValidationUnknown
 	switch {
 	case err == nil:
 		status = leiosEBValidationValid
+	case errors.Is(err, ledger.ErrInvalidLeiosEndorserBlockTransactions):
+		status = leiosEBValidationInvalid
+		o.config.Logger.Debug(
+			"rejecting semantically invalid Leios endorser block",
+			"slot", data.point.Slot,
+			"hash", hex.EncodeToString(data.point.Hash),
+			"error", err,
+		)
 	case errors.Is(err, ledger.ErrLeiosValidationParentUnavailable),
+		errors.Is(err, ledger.ErrLeiosValidationParentSuperseded),
 		errors.Is(err, context.Canceled),
 		errors.Is(err, context.DeadlineExceeded):
 		status = leiosEBValidationUnknown
 	default:
 		o.config.Logger.Debug(
-			"rejecting semantically invalid Leios endorser block",
+			"deferring Leios endorser block validation after local failure",
 			"slot", data.point.Slot,
 			"hash", hex.EncodeToString(data.point.Hash),
 			"error", err,

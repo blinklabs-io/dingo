@@ -44,6 +44,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -13596,6 +13597,20 @@ var ErrLeiosValidationParentSuperseded = errors.New(
 	"leios announcing parent is no longer the current ledger tip",
 )
 
+// ErrInvalidLeiosEndorserBlockTransactions marks a deterministic transaction
+// verdict for an endorser block. Other validation errors describe local state
+// or storage failures and remain retryable.
+var ErrInvalidLeiosEndorserBlockTransactions = errors.New(
+	"invalid leios endorser block transactions",
+)
+
+type semanticTxValidationError struct {
+	err error
+}
+
+func (e *semanticTxValidationError) Error() string { return e.err.Error() }
+func (e *semanticTxValidationError) Unwrap() error { return e.err }
+
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 	consensusState, tipState := ls.loadStateSnapshots()
 	tipSlot := tipState.currentTip.Point.Slot
@@ -13666,7 +13681,7 @@ func (ls *LedgerState) WithTxValidationSession(ctx context.Context,
 		stillCurrent func() bool,
 	) error,
 ) error {
-	return ls.withTxValidationSession(ctx, nil, nil, false, func(
+	return ls.withTxValidationSession(ctx, nil, nil, false, false, func(
 		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error,
 		stillCurrent func() bool,
 		_ txValidationApplyFunc,
@@ -13679,6 +13694,7 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 	expectedParentHash []byte,
 	referenceSlot *uint64,
 	readWrite bool,
+	leiosClosureSemantics bool,
 	fn func(
 		validate func(
 			tx ledger.Transaction,
@@ -13711,13 +13727,24 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 			consumedUtxos map[utxoref.Key]struct{},
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
 		) error {
+			if leiosClosureSemantics {
+				if err := ls.loadLeiosSpentInputs(
+					ctx,
+					txn,
+					tx,
+					consumedUtxos,
+					createdUtxos,
+				); err != nil {
+					return fmt.Errorf("load TX input state: %w", err)
+				}
+			}
 			validationEra, err := resolveValidationEra(
 				tx,
 				snapshot.currentEra,
 				snapshot.eraList,
 			)
 			if err != nil {
-				return err
+				return &semanticTxValidationError{err: err}
 			}
 			if validationEra.ValidateTxFunc == nil {
 				return nil
@@ -13752,13 +13779,15 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 				lv,
 				pp,
 			)
-			err = storageFaultOrErr(lv, err)
+			if faultErr := storageFaultOrErr(lv, nil); faultErr != nil {
+				return fmt.Errorf("read TX validation state: %w", faultErr)
+			}
 			if err != nil {
-				return fmt.Errorf(
+				return &semanticTxValidationError{err: fmt.Errorf(
 					"TX %s failed validation: %w",
 					tx.Hash(),
 					err,
-				)
+				)}
 			}
 			return nil
 		}
@@ -13775,6 +13804,7 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 			blockNumber uint64,
 		) error {
 			delta := NewLedgerDelta(point, eraID, blockNumber)
+			delta.skipConsumedInputRecovery = leiosClosureSemantics
 			delta.addTransaction(tx, index)
 			defer delta.Release()
 			offset := database.CborOffset{BlockSlot: point.Slot}
@@ -13830,16 +13860,24 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 		return errors.New("nil Leios announcing header")
 	}
 	if len(txs) == 0 {
-		return errors.New("leios endorser block has no transactions")
+		return fmt.Errorf(
+			"%w: leios endorser block has no transactions",
+			ErrInvalidLeiosEndorserBlockTransactions,
+		)
 	}
 	var totalBytes uint64
 	for i, txCbor := range txs {
 		if len(txCbor) == 0 {
-			return fmt.Errorf("leios endorser transaction %d is empty", i)
+			return fmt.Errorf(
+				"%w: leios endorser transaction %d is empty",
+				ErrInvalidLeiosEndorserBlockTransactions,
+				i,
+			)
 		}
 		if uint64(len(txCbor)) > (16<<20)-totalBytes {
-			return errors.New(
-				"leios endorser block exceeds validation byte limit",
+			return fmt.Errorf(
+				"%w: leios endorser block exceeds validation byte limit",
+				ErrInvalidLeiosEndorserBlockTransactions,
 			)
 		}
 		totalBytes += uint64(len(txCbor))
@@ -13856,6 +13894,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 	return ls.withTxValidationSession(ctx,
 		parentHash,
 		&slot,
+		true,
 		true,
 		func(
 			validate func(
@@ -13878,18 +13917,29 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 					}
 					return ErrLeiosValidationParentUnavailable
 				}
-				tx, err := ledger.NewTransactionFromCbor(
+				tx, err := safedecode.Transaction(
 					ledger.TxTypeDijkstra,
 					txCbor,
 				)
 				if err != nil {
 					return fmt.Errorf(
-						"decode leios endorser transaction %d: %w",
+						"%w: decode leios endorser transaction %d: %w",
+						ErrInvalidLeiosEndorserBlockTransactions,
 						i,
 						err,
 					)
 				}
 				if err := validate(tx, consumed, created); err != nil {
+					var semanticErr *semanticTxValidationError
+					if errors.As(err, &semanticErr) {
+						return fmt.Errorf(
+							"%w: leios endorser transaction %d at slot %d: %w",
+							ErrInvalidLeiosEndorserBlockTransactions,
+							i,
+							slot,
+							err,
+						)
+					}
 					return fmt.Errorf(
 						"leios endorser transaction %d at slot %d: %w",
 						i,

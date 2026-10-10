@@ -2849,8 +2849,8 @@ transactions' metadata rows are recorded under the certifying ranking block's
 point, so a rollback of that block removes them (the orphaned endorser-block
 blob is harmless and re-created on reprocess). The endorser transactions are
 fully validated in manifest order against the closure state, including an
-overlay of earlier transactions' produced and consumed UTxOs, before any
-closure data is written. They are then applied with their full effects —
+overlay of earlier transactions' produced and consumed UTxOs, before their
+ledger effects are written. They are then applied with their full effects —
 UTxO/input rows and certificate/governance rows — while consumed-input recovery
 remains disabled because validation already established input availability. A
 consumed input absent from the store is left as a no-op instead of driving blob
@@ -2861,7 +2861,9 @@ spent by a *different* certified endorser transaction is likewise a no-op:
 `TransactionStore.SetTransactionLeiosClosure`, which skips only that input and
 still writes the transaction's produced outputs and its remaining spends. Two
 certified endorser blocks can name the same input across blocks; returning
-`ErrUtxoConflict` there wedged block application instead.
+`ErrUtxoConflict` there wedged block application instead. Validation resolves
+that prior consumed input from spent history, while the current closure's
+consumed overlay still rejects a repeated spend within one closure.
 Ranking-block application keeps the hard `ErrUtxoConflict` check, so a real
 double-spend is still rejected.
 Applying the outputs keeps the UTxO set — and the stake distribution derived

@@ -34,12 +34,14 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -234,6 +236,7 @@ func TestApplyEndorserBlockHaskellPathToleratesCrossEndorserDoubleConsume(
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
+	enableLeiosApplyInputValidation(ls)
 	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xa1)
 	require.Len(t, producerTx.Produced(), 2)
 	producerHash := producerTx.Hash().Bytes()
@@ -302,6 +305,102 @@ SELECT added_slot FROM utxo WHERE tx_id = ? AND output_idx = 0`,
 		secondTx.Hash().Bytes(),
 	).Scan(&addedSlot))
 	require.Equal(t, secondPoint.Slot, addedSlot)
+}
+
+func enableLeiosApplyInputValidation(ls *LedgerState) {
+	validateInputs := func(
+		tx lcommon.Transaction,
+		_ uint64,
+		state lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) error {
+		for _, input := range tx.Consumed() {
+			if _, err := state.UtxoById(input); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	ls.currentEra.ValidateTxFunc = validateInputs
+	ls.activeEras[0].ValidateTxFunc = validateInputs
+	ls.publishSnapshotsLocked()
+}
+
+func TestApplyEndorserBlockRejectsSameClosureDoubleConsume(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newLeiosApplyTestLedger(t)
+	enableLeiosApplyInputValidation(ls)
+	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xc1)
+	producerHash := producerTx.Hash().Bytes()
+	rawFirst, firstTx := leiosApplyTestSpendingTx(t, 0xc2, producerHash, 0)
+	rawSecond, secondTx := leiosApplyTestSpendingTx(t, 0xc3, producerHash, 0)
+
+	_, err := leiosApplyTestApplyEndorserBlock(
+		t, ls, db, leiosApplyTestRankingPoint(0x21), 1, 910,
+		leiosApplyTestEbHash(0xc4), rawProducer,
+	)
+	require.NoError(t, err)
+	_, err = leiosApplyTestApplyEndorserBlock(
+		t, ls, db, leiosApplyTestRankingPoint(0x22), 2, 911,
+		leiosApplyTestEbHash(0xc5), rawFirst, rawSecond,
+	)
+	var validationErr *leiosEndorserBlockValidationError
+	require.ErrorAs(t, err, &validationErr)
+	spentBy, deletedSlot := leiosApplyTestUtxoState(t, gdb, producerHash, 0)
+	require.Empty(t, spentBy)
+	require.Zero(t, deletedSlot)
+	for _, tx := range []lcommon.Transaction{firstTx, secondTx} {
+		stored, getErr := db.GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
+		require.NoError(t, getErr)
+		require.Nil(t, stored)
+	}
+}
+
+func TestLeiosAnnouncementValidationAcceptsPriorClosureConsume(t *testing.T) {
+	t.Parallel()
+
+	ls, db, _ := newLeiosApplyTestLedger(t)
+	enableLeiosApplyInputValidation(ls)
+	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xd1)
+	producerHash := producerTx.Hash().Bytes()
+	rawFirst, _ := leiosApplyTestSpendingTx(t, 0xd2, producerHash, 0)
+	rawSecond, _ := leiosApplyTestSpendingTx(t, 0xd3, producerHash, 0)
+
+	_, err := leiosApplyTestApplyEndorserBlock(
+		t, ls, db, leiosApplyTestRankingPoint(0x31), 1, 920,
+		leiosApplyTestEbHash(0xd4), rawProducer,
+	)
+	require.NoError(t, err)
+	_, err = leiosApplyTestApplyEndorserBlock(
+		t, ls, db, leiosApplyTestRankingPoint(0x32), 2, 921,
+		leiosApplyTestEbHash(0xd5), rawFirst,
+	)
+	require.NoError(t, err)
+
+	parentHash := bytes.Repeat([]byte{0xd6}, lcommon.Blake2b256Size)
+	ls.currentTip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(922, parentHash),
+		BlockNumber: 3,
+	}
+	ls.publishSnapshotsLocked()
+	header := &dijkstra.DijkstraBlockHeader{
+		BabbageBlockHeader: babbage.BabbageBlockHeader{
+			Body: babbage.BabbageBlockHeaderBody{
+				BlockNumber: 4,
+				Slot:        923,
+				PrevHash:    lcommon.NewBlake2b256(parentHash),
+				ProtoVersion: babbage.BabbageProtoVersion{
+					Major: dijkstra.MinProtocolVersionDijkstra,
+				},
+			},
+		},
+	}
+	require.NoError(t, ls.ValidateLeiosEndorserBlockTransactions(
+		t.Context(),
+		header,
+		[][]byte{rawSecond},
+	))
 }
 
 // A ranking block's own transactions are applied by a delta with the closure
@@ -431,7 +530,22 @@ func newLeiosApplyTestLedger(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	initializeLeiosApplyTestState(ls)
 	return ls, db, raw
+}
+
+func initializeLeiosApplyTestState(ls *LedgerState) {
+	ls.activeEras = []eras.EraDesc{{Id: dijkstra.EraIdDijkstra}}
+	ls.currentEra = eras.EraDesc{Id: dijkstra.EraIdDijkstra}
+	ls.currentEpoch = models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		SlotLength:    1,
+		LengthInSlots: 20_000,
+		EraId:         dijkstra.EraIdDijkstra,
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.publishSnapshotsLocked()
 }
 
 func leiosApplyTestTx(
@@ -802,6 +916,7 @@ func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	initializeLeiosApplyTestState(ls)
 	rawTx, tx := leiosApplyTestTxWithOutput(t, 0x6c)
 	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")
 

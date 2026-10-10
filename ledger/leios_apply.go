@@ -168,10 +168,9 @@ func endorserBlockTxIds(rawTxs []cbor.RawMessage) ([][]byte, error) {
 }
 
 // applyEndorserBlock decodes a certified Leios endorser block's standalone
-// transactions, validates them against the closure state, persists them as a
-// standalone blob, and applies them to the ledger ahead of the certifying
-// ranking block's own transactions, with full effects but without
-// consumed-input recovery.
+// transactions, prepares their standalone blob, validates and applies them in
+// order ahead of the certifying ranking block's own transactions, then persists
+// the blob, with full effects but without consumed-input recovery.
 // It returns the number of transactions applied to the UTxO (or zero when every
 // transaction was already applied).
 //
@@ -263,20 +262,25 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 	if err != nil {
 		return 0, 0, err
 	}
-	if err := ls.validateEndorserBlockTransactions(
-		txn,
-		ebSlot,
-		txs,
-		keepIndexes,
-	); err != nil {
-		return 0, 0, err
-	}
-
 	// Build the endorser-block blob and its offsets, then persist the blob
 	// under (ebSlot, ebHash) so cold-extract can resolve the DOFF refs.
 	blob, offsets, err := buildEndorserBlockBlob(txs, bodyCbors, ebSlot, ebHash)
 	if err != nil {
 		return 0, 0, fmt.Errorf("build endorser block blob: %w", err)
+	}
+	applied, donation, err := ls.validateAndApplyEndorserBlockTransactions(
+		ctx,
+		txn,
+		rbPoint,
+		rbBlockNumber,
+		ebSlot,
+		contextSlot,
+		offsets,
+		txs,
+		keepIndexes,
+	)
+	if err != nil {
+		return 0, 0, err
 	}
 	// The blob commits in its own blob transaction (nil txn) so a dense Leios
 	// backlog cannot overflow the shared 50-block chunk transaction with
@@ -288,44 +292,7 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 		}
 	}
 	txn.MarkBlockCborCommittedSeparately(ebSlot, ebHash)
-
-	delta := NewLedgerDelta(
-		rbPoint,
-		uint(dijkstra.EraIdDijkstra),
-		rbBlockNumber,
-	)
-	defer delta.Release()
-	delta.Offsets = offsets
-	delta.closureContextSlot = contextSlot
-	if contextSlot != nil {
-		delta.stageApplyEvents = func(events []TransactionEvent) {
-			pending := &pendingLeiosClosure{point: ocommon.Point{Slot: rbPoint.Slot, Hash: bytes.Clone(rbPoint.Hash)}, events: events}
-			txn.AfterCommit(func() { ls.Lock(); ls.untickedClosure = pending; ls.Unlock() })
-		}
-	}
-	for _, idx := range keepIndexes {
-		delta.addTransaction(txs[idx], idx)
-	}
-
-	// Validation above uses an ordered overlay of produced and consumed UTxOs.
-	// Applying the certified closure records its full effects -- produced
-	// outputs, consumed inputs, certificates and governance -- while leaving
-	// consumed-input recovery disabled because validation already established
-	// the closure's input availability.
-	// Omitting the produced outputs would leave the UTxO set, and the stake
-	// distribution derived from it, short of what the reference holds. The delta
-	// is recorded under the ranking block's point, so a rollback of the ranking
-	// block removes these effects.
-	delta.skipConsumedInputRecovery = true
-	if err := delta.applyWithoutRecordingDonations(ctx, ls, txn); err != nil {
-		return 0, 0, &leiosEndorserBlockStorageError{
-			err: fmt.Errorf(
-				"apply endorser block transactions: %w",
-				err,
-			),
-		}
-	}
-	return len(delta.Transactions), delta.donation, nil
+	return applied, donation, nil
 }
 
 type leiosEndorserBlockValidationError struct {
@@ -340,24 +307,47 @@ func (e *leiosEndorserBlockValidationError) Unwrap() error {
 	return e.err
 }
 
-func (ls *LedgerState) validateEndorserBlockTransactions(
+func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
+	ctx context.Context,
 	txn *database.Txn,
+	rbPoint ocommon.Point,
+	rbBlockNumber uint64,
 	referenceSlot uint64,
+	contextSlot *uint64,
+	offsets *database.BlockIngestionResult,
 	txs []lcommon.Transaction,
 	indexes []int,
-) error {
+) (int, uint64, error) {
 	snapshot := ls.txValidationSnapshot()
 	created := make(map[utxoref.Key]lcommon.Utxo, len(indexes)*2)
 	consumed := make(map[utxoref.Key]struct{}, len(indexes)*2)
+	applyEvents := make([]TransactionEvent, 0, len(indexes))
+	var (
+		donation            uint64
+		expandedIndexOffset uint64
+	)
 	for _, idx := range indexes {
 		tx := txs[idx]
+		if err := ls.loadLeiosSpentInputs(
+			ctx,
+			txn,
+			tx,
+			consumed,
+			created,
+		); err != nil {
+			return 0, 0, fmt.Errorf(
+				"load endorser tx %d input state: %w",
+				idx,
+				err,
+			)
+		}
 		validationEra, err := resolveValidationEra(
 			tx,
 			snapshot.currentEra,
 			snapshot.eraList,
 		)
 		if err != nil {
-			return &leiosEndorserBlockValidationError{err: err}
+			return 0, 0, &leiosEndorserBlockValidationError{err: err}
 		}
 		if validationEra.ValidateTxFunc != nil {
 			pp := snapshot.currentPParams
@@ -388,26 +378,119 @@ func (ls *LedgerState) validateEndorserBlockTransactions(
 				pp,
 			)
 			if faultErr := storageFaultOrErr(lv, nil); faultErr != nil {
-				return fmt.Errorf(
+				return 0, 0, fmt.Errorf(
 					"validate endorser tx %d storage state: %w",
 					idx,
 					faultErr,
 				)
 			}
 			if err != nil {
-				return &leiosEndorserBlockValidationError{err: fmt.Errorf(
+				return 0, 0, &leiosEndorserBlockValidationError{err: fmt.Errorf(
 					"endorser tx %d failed validation: %w",
 					idx,
 					err,
 				)}
 			}
 		}
+
+		delta := NewLedgerDelta(
+			rbPoint,
+			uint(dijkstra.EraIdDijkstra),
+			rbBlockNumber,
+		)
+		delta.Offsets = offsets
+		delta.expandedIndexOffset = expandedIndexOffset
+		delta.closureContextSlot = contextSlot
+		delta.skipConsumedInputRecovery = true
+		delta.stageApplyEvents = func(events []TransactionEvent) {
+			applyEvents = append(applyEvents, events...)
+		}
+		delta.addTransaction(tx, idx)
+		err = delta.applyWithoutRecordingDonations(ctx, ls, txn)
+		if err == nil {
+			donation, err = addUint64(donation, delta.donation)
+		}
+		delta.Release()
+		if err != nil {
+			return 0, 0, &leiosEndorserBlockStorageError{err: fmt.Errorf(
+				"apply endorser block transaction %d: %w",
+				idx,
+				err,
+			)}
+		}
+		levels := TransactionLevelsForApply(tx)
+		// Every transaction has its enclosing top-level body.
+		expandedIndexOffset += uint64(len(levels) - 1) //nolint:gosec
 		for _, utxo := range tx.Produced() {
 			created[utxoref.ForUtxo(utxo)] = utxo
 		}
 		for _, input := range tx.Consumed() {
 			consumed[utxoref.ForInput(input)] = struct{}{}
 		}
+	}
+	if len(applyEvents) > 0 {
+		if contextSlot != nil {
+			pending := &pendingLeiosClosure{
+				point: ocommon.Point{
+					Slot: rbPoint.Slot,
+					Hash: bytes.Clone(rbPoint.Hash),
+				},
+				events: applyEvents,
+			}
+			txn.AfterCommit(func() {
+				ls.Lock()
+				ls.untickedClosure = pending
+				ls.Unlock()
+			})
+		} else {
+			txn.AfterCommit(func() {
+				if ls.beforeTransactionApplyPublish != nil {
+					ls.beforeTransactionApplyPublish()
+				}
+				for _, event := range applyEvents {
+					ls.publishTransactionEvent(ctx, event)
+				}
+			})
+		}
+	}
+	return len(indexes), donation, nil
+}
+
+func (ls *LedgerState) loadLeiosSpentInputs(
+	ctx context.Context,
+	txn *database.Txn,
+	tx lcommon.Transaction,
+	consumed map[utxoref.Key]struct{},
+	created map[utxoref.Key]lcommon.Utxo,
+) error {
+	for _, input := range tx.Consumed() {
+		key := utxoref.ForInput(input)
+		if _, alreadyConsumed := consumed[key]; alreadyConsumed {
+			continue
+		}
+		if _, alreadyLoaded := created[key]; alreadyLoaded {
+			continue
+		}
+		stored, err := ls.db.UtxoByRefIncludingSpent(
+			ctx,
+			input.Id().Bytes(),
+			input.Index(),
+			txn,
+		)
+		if err != nil {
+			return err
+		}
+		if stored == nil {
+			continue
+		}
+		output, err := stored.Decode()
+		if err != nil {
+			return fmt.Errorf("decode input state: %w", err)
+		}
+		if output == nil {
+			return errors.New("decode input state: nil output")
+		}
+		created[key] = lcommon.Utxo{Id: input, Output: output}
 	}
 	return nil
 }

@@ -1052,8 +1052,9 @@ func TestPeerOfferedLedgerInvalidEndorserBlockIsNotVoted(t *testing.T) {
 	require.NoError(t, err)
 	point := ocommon.NewPoint(41, lcommon.Blake2b256Hash(blockRaw).Bytes())
 	ledger := &fakeLeiosAnnouncementLedger{
-		txValidationErr: errors.New(
-			"ledger-invalid endorser-block transaction",
+		txValidationErr: fmt.Errorf(
+			"%w: ledger-invalid endorser-block transaction",
+			dledger.ErrInvalidLeiosEndorserBlockTransactions,
 		),
 	}
 	o := newOuroboros(OuroborosConfig{
@@ -1100,6 +1101,59 @@ func TestPeerOfferedLedgerInvalidEndorserBlockIsNotVoted(t *testing.T) {
 		votes.ebs,
 		"a hash- and size-valid endorser block with a ledger-invalid transaction must not be voted on",
 	)
+}
+
+func TestPeerOfferedEndorserBlockLocalValidationFailureRemainsRetryable(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	ref := lcommon.LeiosTransactionReference{
+		TransactionHash: lcommon.Blake2b256Hash(txRaw),
+		TransactionSize: uint16(len(txRaw)),
+	}
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(42, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	ledger := &fakeLeiosAnnouncementLedger{
+		txValidationErr: errors.New("read validation snapshot: database unavailable"),
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: ledger,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	o.leiosVotes = &fakeLeiosVoteHandler{}
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		nil,
+		leiosStorePeerOffered,
+	))
+	announceTestEndorserBlock(
+		t,
+		o,
+		point.Slot,
+		testEbHash(point),
+		len(blockRaw),
+	)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStorePeerOffered,
+	))
+	o.leiosValidationWG.Wait()
+	require.Equal(
+		t,
+		dledger.EndorserBlockValidationUnknown,
+		o.EndorserBlockValidation(point.Hash, point.Slot),
+	)
+	_, providerOK := o.EndorserBlockTxsByHash(point.Hash, point.Slot)
+	require.True(t, providerOK)
 }
 
 // TestPeerOfferedStoreUnderFabricatedSlotStaysPermanentlyUnverified is the

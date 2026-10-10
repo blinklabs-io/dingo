@@ -71,20 +71,37 @@ func newLeiosCertApplyFixtureWith(
 	t *testing.T,
 	txSpec pathTx,
 ) *leiosCertApplyFixture {
+	return newLeiosCertApplyFixtureWithTransactions(
+		t,
+		[]pathAccount{{key: 0x42, reward: leiosCertApplyInitialReward}},
+		0x42,
+		[]pathTx{txSpec},
+	)
+}
+
+func newLeiosCertApplyFixtureWithTransactions(
+	t *testing.T,
+	accounts []pathAccount,
+	stakeKey byte,
+	txSpecs []pathTx,
+) *leiosCertApplyFixture {
 	t.Helper()
 	path := newPathFixture(
 		t,
-		[]pathAccount{{key: 0x42, reward: leiosCertApplyInitialReward}},
+		accounts,
 		nil,
-		txSpec,
+		txSpecs...,
 	)
 	f := &leiosCertApplyFixture{
 		pathFixture: path,
-		stakeKey:    pathStakeKey(0x42),
+		stakeKey:    pathStakeKey(stakeKey),
 		ebAvailable: true,
 	}
 	f.ebTx = path.txs[0]
-	f.ebTxs = []cbor.RawMessage{bytes.Clone(f.ebTx.Cbor())}
+	f.ebTxs = make([]cbor.RawMessage, 0, len(path.txs))
+	for _, tx := range path.txs {
+		f.ebTxs = append(f.ebTxs, bytes.Clone(tx.Cbor()))
+	}
 	f.ebHash = lcommon.NewBlake2b256(leiosTestHash(0xEB))
 	f.ls.config.EndorserBlockProvider = func(
 		hash []byte,
@@ -397,6 +414,44 @@ func TestLeiosCertifiedRankingBlockAppliesParentEndorserBlock(t *testing.T) {
 	require.Equal(t, parent.Hash().Bytes(), f.certAnnHash)
 }
 
+func TestLeiosCertifiedClosureAppliesStateBeforeValidatingNextTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newLeiosCertApplyFixtureWithTransactions(
+		t,
+		nil,
+		pathSignerKey,
+		[]pathTx{
+			{top: pathLevel{fields: map[uint]any{
+				4: []any{pathRegistration(pathSignerKey)},
+			}}},
+			{top: pathLevel{
+				fields: pathDeposits(map[cbor.ByteString]uint64{
+					pathKeyAccount(pathSignerKey): leiosCertApplyDeposit,
+				}),
+				funds: leiosCertApplyDeposit,
+			}},
+		},
+	)
+	parent := f.announce()
+	certifier, offsets, envParent := f.certifyingChild(parent)
+	require.NoError(t, f.ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{certifier},
+	))
+	require.NoError(t, f.process(certifier, offsets, envParent))
+	account, err := f.db.GetAccountByCredential(
+		t.Context(),
+		0,
+		pathStakeKey(pathSignerKey),
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, leiosCertApplyDeposit, uint64(account.Reward))
+}
+
 func TestLeiosCertifiedClosureRejectsMissingWitness(t *testing.T) {
 	t.Parallel()
 	f := newLeiosCertApplyFixture(t)
@@ -409,6 +464,27 @@ func TestLeiosCertifiedClosureRejectsInvalidWitness(t *testing.T) {
 	f := newLeiosCertApplyFixture(t)
 	f.corruptEndorserWitness()
 	requireRejectedEndorserClosure(t, f)
+}
+
+func TestLeiosAnnouncementValidationMarksInvalidWitnessDeterministic(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	f.corruptEndorserWitness()
+	announcer, _ := f.block(
+		1,
+		leiosCertApplyAnnouncingSlot,
+		f.originHash,
+		false,
+		true,
+	)
+	err := f.ls.ValidateLeiosEndorserBlockTransactions(
+		t.Context(),
+		announcer.Header(),
+		[][]byte{f.ebTx.Cbor()},
+	)
+	require.ErrorIs(t, err, ErrInvalidLeiosEndorserBlockTransactions)
 }
 
 func TestLeiosCertifiedClosureRejectsValueCreation(t *testing.T) {
