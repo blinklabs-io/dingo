@@ -140,7 +140,7 @@ tests:
             exp_annotations:
               summary: "Dingo SQLite WAL is oversized on n1:12798"
               description: "Node n1:12798: the metadata WAL file has stayed above 500 MiB for 1 minute. A bulk rewrite such as VACUUM, or a checkpoint blocked by a long-lived reader, is in progress."
-      - eval_time: 14m
+      - eval_time: 13m
         alertname: DingoBlockfetchDelayHigh
         exp_alerts:
           - exp_labels:

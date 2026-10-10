@@ -17,6 +17,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -161,4 +162,41 @@ INSERT INTO vacuum_writes SELECT zeroblob(8192) FROM n`,
 	require.GreaterOrEqual(t, free, 1)
 	require.Greater(t, chunks, 3, "reclaim must proceed in several steps")
 	require.Zero(t, pragmaInt(t, readDB, "freelist_count"))
+}
+
+func TestSQLiteVacuumStopsWhenWritesReplenishFreelist(t *testing.T) {
+	t.Parallel()
+	_, writeDB, readDB := newVacuumFixture(t)
+	// Convert once so the test exercises only the incremental loop.
+	require.NoError(t, vacuumWith(t.Context(), writeDB, 1<<20, nil))
+	for _, statement := range []string{
+		"CREATE TABLE vacuum_replenish (payload BLOB)",
+		`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200)
+INSERT INTO vacuum_replenish SELECT zeroblob(8192) FROM n`,
+		"DELETE FROM vacuum_replenish",
+	} {
+		_, err := writeDB.ExecContext(t.Context(), statement)
+		require.NoError(t, err)
+	}
+	free := pragmaInt(t, readDB, "freelist_count")
+	require.Positive(t, free)
+
+	chunks := 0
+	err := vacuumWith(t.Context(), writeDB, free, func() {
+		if chunks > 0 {
+			return
+		}
+		chunks++
+		_, err := writeDB.ExecContext(
+			t.Context(),
+			fmt.Sprintf(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < %d)
+INSERT INTO vacuum_replenish SELECT zeroblob(8192) FROM n`, free+1),
+		)
+		require.NoError(t, err)
+		_, err = writeDB.ExecContext(t.Context(), "DELETE FROM vacuum_replenish")
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, pragmaInt(t, readDB, "freelist_count"), free)
+	})
+	require.ErrorContains(t, err, "incremental vacuum made no progress")
+	require.Equal(t, 1, chunks)
 }

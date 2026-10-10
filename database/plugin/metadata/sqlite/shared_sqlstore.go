@@ -138,6 +138,7 @@ func vacuumWith(
 			return closeErr
 		}
 	}
+	previousFree := -1
 	for {
 		var free int
 		if err := writeDB.QueryRowContext(
@@ -149,6 +150,14 @@ func vacuumWith(
 		if free == 0 {
 			return nil
 		}
+		if previousFree >= 0 && free >= previousFree {
+			return fmt.Errorf(
+				"incremental vacuum made no progress: freelist_count was %d and is now %d",
+				previousFree,
+				free,
+			)
+		}
+		previousFree = free
 		if _, err := writeDB.ExecContext(
 			ctx,
 			fmt.Sprintf("PRAGMA incremental_vacuum(%d)", chunkPages),
