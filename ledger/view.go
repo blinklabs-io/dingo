@@ -1722,15 +1722,15 @@ func (lv *LedgerView) decodeStoredCommitteeCredential(
 ) (lcommon.Credential, error) {
 	if _, err := models.CredentialTagFromUint(uint(tag)); err != nil {
 		return lcommon.Credential{}, lv.storageFault(
-			"decode stored committee credential: %w",
-			fmt.Errorf("%s credential tag: %w", role, err),
+			"decode stored committee "+role+" credential: %w",
+			fmt.Errorf("credential tag: %w", err),
 		)
 	}
 	checked, err := lcommon.NewBlake2b224Checked(hash)
 	if err != nil {
 		return lcommon.Credential{}, lv.storageFault(
-			"decode stored committee credential: %w",
-			fmt.Errorf("%s credential hash: %w", role, err),
+			"decode stored committee "+role+" credential: %w",
+			fmt.Errorf("credential hash: %w", err),
 		)
 	}
 	return lcommon.Credential{
@@ -2272,7 +2272,7 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 		credential, err := lcommon.NewBlake2b224Checked(drep.Credential)
 		if err != nil {
 			return nil, lv.storageFault(
-				"decode stored DRep credential: %w", err,
+				"decode stored DRep registrations credential: %w", err,
 			)
 		}
 		deposit, ok := deposits[models.DrepDepositKey(
