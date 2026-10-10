@@ -15870,6 +15870,14 @@ re-intersection. Judging the recorded arrival rather than the later handler time
 local decode, EventBus, or scheduler delay cannot make an invalid early header
 appear timely.
 
+This admission rule includes Byron main headers and epoch-boundary headers;
+its two-second allowance is measured in wall-clock time even for Byron's
+20-second slots. The subsequent PBFT guard compares slot onset directly with
+wall-clock time and requires the slot to have begun. It does not add the
+allowance a second time at application, and rejects even the epoch-zero EBB
+before system start. Historical Byron validation therefore needs only the
+header's known slot onset, not a forecast of the present wall-clock slot.
+
 While the header is far from the peer tip (beyond the stability window),
 blockfetch normally starts only once `allowedQueuedHeaders()` headers are
 queued. After a forecast-horizon release the headers arrive at the pipeline
@@ -15880,16 +15888,10 @@ far-from-tip gate to one blockfetch range (`BlockfetchBatchSize`,
 `farFromTipHeaderGate`). `allowedQueuedHeaders()` still bounds the queue, and
 the existing guards are unchanged: no new batch while a request or continuation
 is pending, and the batch starts through `startQueuedBlockfetchLocked` from the
-header pipeline owner. The option is a ledger setting only; no CLI or config
-file key sets it.
-
-This admission rule includes Byron main headers and epoch-boundary headers;
-its two-second allowance is measured in wall-clock time even for Byron's
-20-second slots. The subsequent PBFT guard compares slot onset directly with
-wall-clock time and requires the slot to have begun. It does not add the
-allowance a second time at application, and rejects even the epoch-zero EBB
-before system start. Historical Byron validation therefore needs only the
-header's known slot onset, not a forecast of the present wall-clock slot.
+header pipeline owner. The node sets it from the
+`blockfetchLowWatermarkEnabled` config key, the
+`DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED` environment variable, or the
+`--blockfetch-low-watermark-enabled` flag.
 
 `blockPipelineEta0Provider` reads the immutable epoch-cache snapshot directly;
 it does not forecast, mutate the cache, or rebuild `HardForkSummary` per

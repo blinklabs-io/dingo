@@ -843,11 +843,6 @@ type LedgerStateConfig struct {
 	// applied after the rollback. See ARCHITECTURE.md ("Phase 5: rollback
 	// coordination").
 	BlockPipelineEnabled bool
-	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
-	// range of headers is queued while the node is far from the peer tip,
-	// instead of waiting for allowedQueuedHeaders. allowedQueuedHeaders still
-	// bounds the queue. Off by default.
-	BlockfetchLowWatermarkEnabled bool
 	// BlockPipelineValidateEnabled adds parallel header-crypto validation to the
 	// decode pipeline. The generic stage covers VRF, KES,
 	// and the OpCert cold-key signature; Dingo's supplement re-runs that
@@ -904,6 +899,11 @@ type LedgerStateConfig struct {
 	// state is identical either way. See ARCHITECTURE.md ("Block Processing
 	// Pipeline").
 	ApplyRowBatchingEnabled bool
+	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
+	// range of headers is queued while the node is far from the peer tip,
+	// instead of waiting for allowedQueuedHeaders. allowedQueuedHeaders still
+	// bounds the queue. Off by default.
+	BlockfetchLowWatermarkEnabled bool
 }
 
 // EndorserBlockProviderFunc returns the complete set of standalone

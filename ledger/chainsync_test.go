@@ -2208,6 +2208,136 @@ func TestForkRestartDropsAbandonedBodyArrivingAfterRestart(t *testing.T) {
 	require.Equal(t, point, f.ls.pendingBlockfetchEvents[0].Point)
 }
 
+// With the far-from-tip low watermark a range is requested about three ranges
+// of headers earlier than the queue allowance would, so a rollback more often
+// lands while that request is in flight. The rollback must discard the queued
+// headers and the bodies the abandoned request already buffered, and bodies it
+// delivers afterwards must not reach the chain or the ledger.
+//
+// The rollback target is the current chain tip, so the abandoned bodies still
+// fit the chain by parent hash; only the rollback generation check stops them.
+func TestFarFromTipLowWatermarkRollbackDiscardsInFlightBatch(t *testing.T) {
+	f := newBlockfetchRollbackFixture(t)
+	f.ls.config.BlockfetchLowWatermarkEnabled = true
+
+	farTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100_000_000, []byte("far-tip")),
+		BlockNumber: 10_000_000,
+	}
+	prev := lcommon.NewBlake2b256(f.currentTip.Point.Hash)
+	blocks := make([]*blockfetchTestBlock, 0, BlockfetchBatchSize)
+	for i := range BlockfetchBatchSize {
+		hash := lcommon.NewBlake2b256(
+			testHashBytes(fmt.Sprintf("far-lowmark-%d", i)),
+		)
+		block := &blockfetchTestBlock{
+			hash:        hash,
+			prevHash:    prev,
+			slot:        f.currentTip.Point.Slot + uint64(i) + 1,
+			blockNumber: f.currentTip.BlockNumber + uint64(i) + 1,
+		}
+		blocks = append(blocks, block)
+		prev = hash
+		if i == BlockfetchBatchSize-1 {
+			require.Empty(
+				t,
+				f.requests,
+				"no request may start before one range of headers is queued",
+			)
+		}
+		require.NoError(t, f.ls.handleEventChainsyncBlockHeader(
+			ChainsyncEvent{
+				ConnectionId: f.connId,
+				BlockHeader: mockHeader{
+					hash:        block.hash,
+					prevHash:    block.prevHash,
+					blockNumber: block.blockNumber,
+					slot:        block.slot,
+				},
+				Point: ocommon.NewPoint(block.slot, block.hash.Bytes()),
+				Tip:   farTip,
+			},
+		))
+	}
+	require.Len(
+		t,
+		f.requests,
+		1,
+		"the low watermark must start the first range at one range of headers",
+	)
+	require.Equal(
+		t,
+		ocommon.NewPoint(blocks[0].slot, blocks[0].hash.Bytes()),
+		f.requests[0],
+	)
+	require.Equal(t, BlockfetchBatchSize, f.ls.chain.HeaderCount())
+
+	blockEvent := func(b *blockfetchTestBlock) event.Event {
+		return event.NewEvent(
+			BlockfetchEventType,
+			BlockfetchEvent{
+				ConnectionId: f.connId,
+				Point:        ocommon.NewPoint(b.slot, b.hash.Bytes()),
+				Type:         1,
+				Block:        b,
+			},
+		)
+	}
+	f.ls.handleEventBlockfetch(blockEvent(blocks[0]))
+	require.Len(
+		t,
+		f.ls.pendingBlockfetchEvents,
+		1,
+		"the first body of the in-flight range must be buffered",
+	)
+
+	f.ls.chainsyncMutex.Lock()
+	var pending pendingPublishes
+	err := f.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: f.connId,
+			Rollback:     true,
+			Point:        f.currentTip.Point,
+		},
+		&pending,
+	)
+	f.ls.chainsyncMutex.Unlock()
+	pending.flush()
+	require.NoError(t, err)
+	require.Equal(t, f.currentTip.Point, f.ls.chain.Tip().Point)
+	require.Zero(
+		t,
+		f.ls.chain.HeaderCount(),
+		"the rollback must discard the headers the in-flight range was for",
+	)
+
+	// The request cannot be cancelled: its remaining bodies and BatchDone
+	// still arrive after the rollback.
+	f.ls.handleEventBlockfetch(blockEvent(blocks[1]))
+	f.ls.handleEventBlockfetch(event.NewEvent(
+		BlockfetchEventType,
+		BlockfetchEvent{ConnectionId: f.connId, BatchDone: true},
+	))
+
+	assert.Empty(
+		t,
+		f.ls.pendingBlockfetchEvents,
+		"no body of the abandoned range may stay buffered",
+	)
+	assert.Equal(
+		t,
+		f.currentTip.Point,
+		f.ls.chain.Tip().Point,
+		"no block past the rollback point may reach the chain",
+	)
+	assert.LessOrEqual(
+		t,
+		f.ls.currentTip.Point.Slot,
+		f.currentTip.Point.Slot,
+		"no block past the rollback point may be applied to the ledger",
+	)
+}
+
 // The bounded-recovery case: a batch that delivered bodies but
 // extended nothing, while headers stayed queued, must feed the same
 // same-range failure streak a NoBlocks reply feeds, so the range is dropped
@@ -6459,6 +6589,7 @@ func TestFlushPendingBlockfetchNonExtendingFloodRecyclesConnection(
 		})
 	}
 	ls.pendingBlockfetchEvents = events
+
 
 	err := ls.flushPendingBlockfetchBlocksDeferred(nil)
 	require.NoError(

@@ -785,6 +785,12 @@ type Config struct {
 	// proven. See ARCHITECTURE.md ("Block Processing Pipeline").
 	LedgerApplyRowBatchingEnabled bool `yaml:"ledgerApplyRowBatchingEnabled"       envconfig:"DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED"`
 
+	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
+	// range of headers is queued while far from the peer tip, instead of
+	// waiting for the full queue allowance. Not consensus-affecting; off by
+	// default.
+	BlockfetchLowWatermarkEnabled bool `yaml:"blockfetchLowWatermarkEnabled"          envconfig:"DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED"`
+
 	// Peer targets (0 = use default, -1 = unlimited)
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`
 	TargetNumberOfEstablishedPeers int `yaml:"targetNumberOfEstablishedPeers" envconfig:"DINGO_TARGET_ESTABLISHED_PEERS"`

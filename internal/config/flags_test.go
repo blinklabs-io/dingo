@@ -1564,3 +1564,23 @@ func TestHeaderSecretsEnvErrorsOmitValues(t *testing.T) {
 		require.NotContains(t, err.Error(), "s3cr3t")
 	}
 }
+
+func TestBlockfetchLowWatermarkEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.BlockfetchLowWatermarkEnabled {
+		t.Fatal("expected env var to enable the blockfetch low watermark")
+	}
+}

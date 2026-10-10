@@ -123,6 +123,7 @@ var logPlainConfigFields = []string{
 	"BlockPipelineEnabled",
 	"BlockPipelineValidateEnabled",
 	"BlockProducer",
+	"BlockfetchLowWatermarkEnabled",
 	"CORSAllowedOrigins",
 	"Cache.BlockLRUEntries",
 	"Cache.HotTxEntries",
