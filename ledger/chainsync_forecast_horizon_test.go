@@ -85,6 +85,23 @@ func TestAwaitChainsyncHeaderAdmissionHoldsHeaderPastForecastHorizon(
 	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	arrival := systemStart.Add(100 * time.Second)
 	ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	ls.chain = cm.PrimaryChain()
+	parentHash := lcommon.Blake2b256Hash([]byte("queued parent"))
+	require.NoError(t, ls.chain.AddBlockHeader(context.Background(), mockHeader{
+		hash:        parentHash,
+		prevHash:    lcommon.Blake2b256{},
+		blockNumber: 1,
+		slot:        50,
+	}))
+	require.NoError(t, ls.chain.AddBlockHeader(context.Background(), mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("queued head")),
+		prevHash:    parentHash,
+		blockNumber: 2,
+		slot:        60,
+	}))
+	ls.publishSnapshotsLocked()
 	covered := &atomic.Bool{}
 	ls.slotClock.provider = gatedHorizonSlotTimeProvider{
 		SlotTimeProvider: ls.slotClock.provider,
@@ -92,11 +109,14 @@ func TestAwaitChainsyncHeaderAdmissionHoldsHeaderPastForecastHorizon(
 		covered:          covered,
 	}
 
-	results := awaitAdmissionAsync(
-		t.Context(),
-		ls,
-		futureHeaderEvent(90, arrival),
-	)
+	e := futureHeaderEvent(90, arrival)
+	e.BlockHeader = mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("future header")),
+		prevHash:    parentHash,
+		blockNumber: 2,
+		slot:        90,
+	}
+	results := awaitAdmissionAsync(t.Context(), ls, e)
 	testutil.RequireNoReceive(
 		t,
 		results,
@@ -123,6 +143,54 @@ func TestAwaitChainsyncHeaderAdmissionHoldsHeaderPastForecastHorizon(
 	require.NoError(t, got.err)
 	require.True(t, got.accepted)
 	require.Empty(t, *waits, "a historical header has no slot onset to wait for")
+}
+
+func TestAwaitChainsyncHeaderAdmissionResyncsUnresolvableFarAheadParent(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+	const epochLength = uint64(21_600)
+	const lastEpochSlot = epochLength - 1
+	const headerSlot = lastEpochSlot + 200_000
+	ls.slotClock.provider = pastHorizonSlotTimeProvider{
+		SlotTimeProvider: newMockSlotTimeProvider(
+			systemStart,
+			time.Second,
+			uint(epochLength),
+		),
+		rejectedSlot: headerSlot,
+	}
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	ls.chain = cm.PrimaryChain()
+	ls.currentTip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(lastEpochSlot, []byte("applied tip")),
+		BlockNumber: 10,
+	}
+	ls.publishSnapshotsLocked()
+	require.Zero(t, ls.chain.HeaderCount(), "the header queue must be empty")
+
+	e := futureHeaderEvent(headerSlot, arrival)
+	e.BlockHeader = mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("future header")),
+		prevHash:    lcommon.Blake2b256Hash([]byte("unknown parent")),
+		blockNumber: 1,
+		slot:        headerSlot,
+	}
+
+	results := awaitAdmissionAsync(t.Context(), ls, e)
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"an unresolvable far-ahead parent must return without waiting for a snapshot",
+	)
+	require.ErrorIs(t, got.err, ErrChainsyncHeaderParentUnresolvable)
+	require.False(t, got.accepted)
 }
 
 func TestAwaitChainsyncHeaderAdmissionPastForecastHorizonHonorsCancellation(
@@ -307,15 +375,16 @@ func TestResolveForkAnchor(t *testing.T) {
 		parent string
 	}
 	for _, tc := range []struct {
-		name     string
-		peer     map[string]peerRecord
-		queued   map[string]bool
-		held     map[string]bool
-		blocks   map[string]uint64
-		limit    int
-		start    string
-		wantSlot uint64
-		wantOk   bool
+		name                 string
+		peer                 map[string]peerRecord
+		queued               map[string]bool
+		held                 map[string]bool
+		blocks               map[string]uint64
+		limit                int
+		start                string
+		wantSlot             uint64
+		wantOk               bool
+		wantParentResolvable bool
 	}{
 		{
 			name: "fork resolves at the session intersection block",
@@ -323,31 +392,35 @@ func TestResolveForkAnchor(t *testing.T) {
 				"h3": {300, "h2"},
 				"h2": {200, "b1"},
 			},
-			held:     map[string]bool{"b1": true},
-			blocks:   map[string]uint64{"b1": 100},
-			start:    "h3",
-			wantSlot: 100,
-			wantOk:   true,
+			held:                 map[string]bool{"b1": true},
+			blocks:               map[string]uint64{"b1": 100},
+			start:                "h3",
+			wantSlot:             100,
+			wantOk:               true,
+			wantParentResolvable: true,
 		},
 		{
-			name:     "fork resolves at a delivered header the local chain holds",
-			peer:     map[string]peerRecord{"h2": {250, "b1"}, "b1": {150, "b0"}},
-			held:     map[string]bool{"b1": true},
-			start:    "h2",
-			wantSlot: 150,
-			wantOk:   true,
+			name:                 "fork resolves at a delivered header the local chain holds",
+			peer:                 map[string]peerRecord{"h2": {250, "b1"}, "b1": {150, "b0"}},
+			held:                 map[string]bool{"b1": true},
+			start:                "h2",
+			wantSlot:             150,
+			wantOk:               true,
+			wantParentResolvable: true,
 		},
 		{
-			name:   "a queued local header means the peer extends the tip",
-			peer:   map[string]peerRecord{"q1": {600, "b9"}},
-			queued: map[string]bool{"q1": true},
-			start:  "q1",
+			name:                 "a queued local header means the peer extends the tip",
+			peer:                 map[string]peerRecord{"q1": {600, "b9"}},
+			queued:               map[string]bool{"q1": true},
+			start:                "q1",
+			wantParentResolvable: true,
 		},
 		{
-			name:   "a held block above the ledger tip means the peer extends the tip",
-			held:   map[string]bool{"b6": true},
-			blocks: map[string]uint64{"b6": 600},
-			start:  "b6",
+			name:                 "a held block above the ledger tip means the peer extends the tip",
+			held:                 map[string]bool{"b6": true},
+			blocks:               map[string]uint64{"b6": 600},
+			start:                "b6",
+			wantParentResolvable: true,
 		},
 		{
 			name:   "a stored block off the local chain is unresolved",
@@ -359,17 +432,19 @@ func TestResolveForkAnchor(t *testing.T) {
 			start: "missing",
 		},
 		{
-			name:   "a header built on origin intersects at slot 0",
-			start:  string(make([]byte, 32)),
-			wantOk: true,
+			name:                 "a header built on origin intersects at slot 0",
+			start:                string(make([]byte, 32)),
+			wantOk:               true,
+			wantParentResolvable: true,
 		},
 		{
 			name: "a delivered chain built on origin intersects at slot 0",
 			peer: map[string]peerRecord{
 				"h1": {100, string(make([]byte, 32))},
 			},
-			start:  "h1",
-			wantOk: true,
+			start:                "h1",
+			wantOk:               true,
+			wantParentResolvable: true,
 		},
 		{
 			name: "the walk stops at the history limit",
@@ -389,7 +464,7 @@ func TestResolveForkAnchor(t *testing.T) {
 			if limit == 0 {
 				limit = 16
 			}
-			slot, ok := resolveForkAnchor(
+			slot, ok, parentResolvable := resolveForkAnchor(
 				hash(tc.start),
 				tipSlot,
 				limit,
@@ -416,6 +491,7 @@ func TestResolveForkAnchor(t *testing.T) {
 			)
 			require.Equal(t, tc.wantOk, ok)
 			require.Equal(t, tc.wantSlot, slot)
+			require.Equal(t, tc.wantParentResolvable, parentResolvable)
 		})
 	}
 }

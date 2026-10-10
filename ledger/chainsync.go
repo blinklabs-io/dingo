@@ -4645,6 +4645,14 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	return nil
 }
 
+// ErrChainsyncHeaderParentUnresolvable marks a header past the forecast horizon
+// whose parent cannot be connected to the local or queued chain. Waiting for a
+// ledger snapshot cannot make that parent resolvable, so the caller must
+// re-intersect instead.
+var ErrChainsyncHeaderParentUnresolvable = errors.New(
+	"ledger: chainsync header parent is unresolvable",
+)
+
 // AwaitChainsyncHeaderAdmission enforces the Ouroboros ChainSync future-header
 // rule against the timestamp recorded at network ingress. It must run from the
 // per-peer ChainSync callback before the header updates observed-tip, dedup, or
@@ -4658,10 +4666,13 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 // validated, so it waits until the applied ledger advances far enough to
 // forecast its slot before the onset check runs, as the reference ChainSync
 // client does for OutsideForecastRange; until then it must not influence chain
-// selection or reach blockfetch. Other conversion failures fail closed. A zero
-// timestamp is retained for compatibility with synthetic/internal events that
-// never crossed the network ingress path. As with other Go APIs that accept a
-// context, ctx must not be nil.
+// selection or reach blockfetch. If the peer header's parent cannot be
+// connected to the local or queued chain, admission returns
+// ErrChainsyncHeaderParentUnresolvable instead of waiting for an impossible
+// snapshot. Other conversion failures fail closed. A zero timestamp is retained
+// for compatibility with synthetic/internal events that never crossed the
+// network ingress path. As with other Go APIs that accept a context, ctx must
+// not be nil.
 func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	ctx context.Context,
 	e ChainsyncEvent,
@@ -4677,18 +4688,28 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 				"chainsync header admission context is nil",
 			)
 		}
+		if !ls.chainsyncHeaderParentResolvable(ctx, e) {
+			return false, ErrChainsyncHeaderParentUnresolvable
+		}
 		if err := ls.awaitForecastHorizon(ctx, e); err != nil {
 			return false, fmt.Errorf("wait for forecast horizon: %w", err)
 		}
 		slotTime, err = ls.slotClock.SlotToTime(headerSlot)
-	} else if err == nil && ls.headerBeyondForecastHorizon(ctx, e) {
-		// The slot is in range from the local tip, but the peer's chain
-		// leaves the local chain earlier, and is forecast from there.
-		if err := ls.awaitForecastHorizon(ctx, e); err != nil {
-			return false, fmt.Errorf("wait for forecast horizon: %w", err)
+	} else if err == nil {
+		pastHorizon, parentResolvable := ls.headerForecastStatus(ctx, e)
+		if pastHorizon {
+			if !parentResolvable {
+				return false, ErrChainsyncHeaderParentUnresolvable
+			}
+			// The slot is in range from the local tip, but the peer's chain
+			// leaves the local chain earlier, and is forecast from there.
+			if err := ls.awaitForecastHorizon(ctx, e); err != nil {
+				return false, fmt.Errorf("wait for forecast horizon: %w", err)
+			}
+			slotTime, err = ls.slotClock.SlotToTime(headerSlot)
 		}
-		slotTime, err = ls.slotClock.SlotToTime(headerSlot)
 	}
+
 	if err != nil {
 		return false, fmt.Errorf("resolve header slot onset: %w", err)
 	}
@@ -4735,7 +4756,11 @@ func (ls *LedgerState) awaitForecastHorizon(
 	logged := false
 	for {
 		published := ls.snapshotPublishedChan()
-		if !ls.headerBeyondForecastHorizon(ctx, e) {
+		pastHorizon, parentResolvable := ls.headerForecastStatus(ctx, e)
+		if !parentResolvable {
+			return ErrChainsyncHeaderParentUnresolvable
+		}
+		if !pastHorizon {
 			return nil
 		}
 		if !logged && ls.config.Logger != nil {
@@ -4763,44 +4788,75 @@ func (ls *LedgerState) headerBeyondForecastHorizon(
 	ctx context.Context,
 	e ChainsyncEvent,
 ) bool {
+	pastHorizon, _ := ls.headerForecastStatus(ctx, e)
+	return pastHorizon
+}
+
+func (ls *LedgerState) headerForecastStatus(
+	ctx context.Context,
+	e ChainsyncEvent,
+) (pastHorizon bool, parentResolvable bool) {
 	if ls.slotClock == nil || e.BlockHeader == nil {
-		return false
+		return false, true
 	}
 	slot := e.BlockHeader.SlotNumber()
 	if _, err := ls.slotClock.SlotToTime(slot); err != nil {
-		return errors.Is(err, hardfork.ErrPastHorizon)
+		if errors.Is(err, hardfork.ErrPastHorizon) {
+			return true, ls.chainsyncHeaderParentResolvable(ctx, e)
+		}
+		return false, true
 	}
-	anchor, ok := ls.chainsyncForkAnchor(ctx, e)
+	anchor, ok, parentResolvable := ls.chainsyncForkAnchor(ctx, e)
+	if !parentResolvable {
+		if ls.chain != nil && ls.chain.HoldsQueuedHeaderHash(
+			e.BlockHeader.PrevHash().Bytes(),
+		) {
+			return false, true
+		}
+		return false, false
+	}
 	if !ok {
-		return false
+		return false, true
 	}
 	summary, err := ls.forecastSummaryFrom(anchor)
 	if err != nil {
-		return false
+		return false, true
 	}
 	_, err = summary.SlotToEpoch(slot)
-	return errors.Is(err, hardfork.ErrPastHorizon)
+	return errors.Is(err, hardfork.ErrPastHorizon), true
 }
 
-// chainsyncForkAnchor returns the slot at which the peer chain delivering e
-// leaves the local chain, when that is below the ledger tip. ok is false when
-// the peer's chain contains the ledger tip, which is then the forecast anchor,
-// and when the intersection cannot be resolved from recorded peer headers.
+func (ls *LedgerState) chainsyncHeaderParentResolvable(
+	ctx context.Context,
+	e ChainsyncEvent,
+) bool {
+	if ls.chain != nil && ls.chain.HoldsQueuedHeaderHash(
+		e.BlockHeader.PrevHash().Bytes(),
+	) {
+		return true
+	}
+	_, _, ok := ls.chainsyncForkAnchor(ctx, e)
+	return ok
+}
+
+// chainsyncForkAnchor returns the fork slot, whether it is before the ledger
+// tip, and whether the peer history reaches an applied or queued local point.
+// An unresolved parent cannot make progress through snapshot publication.
 func (ls *LedgerState) chainsyncForkAnchor(
 	ctx context.Context,
 	e ChainsyncEvent,
-) (uint64, bool) {
+) (uint64, bool, bool) {
 	if ls.chain == nil {
-		return 0, false
+		return 0, false, true
 	}
 	tip := ls.loadTipSnapshot()
 	if tip == nil {
-		return 0, false
+		return 0, false, true
 	}
 	prevHash := e.BlockHeader.PrevHash().Bytes()
 	if bytes.Equal(prevHash, ls.chain.HeaderTip().Point.Hash) ||
 		bytes.Equal(prevHash, ls.chain.Tip().Point.Hash) {
-		return 0, false
+		return 0, false, true
 	}
 	return resolveForkAnchor(
 		prevHash,
@@ -4850,34 +4906,38 @@ type forkAnchorLookups struct {
 // the first point the local chain holds. A queued header or a block above the
 // ledger tip means the peer's chain contains the tip. A header built on origin
 // carries the zero hash as its parent, which no stored block has: that
-// intersection is slot 0.
+// intersection is slot 0. The third result is false when the walk cannot
+// connect the peer's parent to an applied or queued local point.
 func resolveForkAnchor(
 	prevHash []byte,
 	tipSlot uint64,
 	limit int,
 	lookups forkAnchorLookups,
-) (uint64, bool) {
+) (uint64, bool, bool) {
 	for range limit {
 		if isOriginHash(prevHash) {
-			return localForkAnchor(0, tipSlot)
+			anchor, ok := localForkAnchor(0, tipSlot)
+			return anchor, ok, true
 		}
 		point, parentHash, found := lookups.peerHeader(prevHash)
 		if !found {
 			point, found = lookups.blockByHash(prevHash)
 			if !found || !lookups.heldBlock(point) {
-				return 0, false
+				return 0, false, false
 			}
-			return localForkAnchor(point.Slot, tipSlot)
+			anchor, ok := localForkAnchor(point.Slot, tipSlot)
+			return anchor, ok, true
 		}
 		if lookups.queuedHeader(point) {
-			return 0, false
+			return 0, false, true
 		}
 		if lookups.heldBlock(point) {
-			return localForkAnchor(point.Slot, tipSlot)
+			anchor, ok := localForkAnchor(point.Slot, tipSlot)
+			return anchor, ok, true
 		}
 		prevHash = parentHash
 	}
-	return 0, false
+	return 0, false, false
 }
 
 func isOriginHash(hash []byte) bool {

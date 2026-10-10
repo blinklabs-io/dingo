@@ -1480,6 +1480,34 @@ func (o *Ouroboros) admitChainsyncHeader(
 	defer cancel()
 	accepted, err := o.chainsyncHeaderAdmission(admissionCtx, e)
 	if err != nil {
+		if errors.Is(err, ledger.ErrChainsyncHeaderParentUnresolvable) {
+			if o.eventBus == nil {
+				return false, fmt.Errorf(
+					"chainsync: request fresh intersection for unresolved future header: %w",
+					err,
+				)
+			}
+			if o.config.Logger != nil {
+				o.config.Logger.Info(
+					"chainsync: requesting fresh intersection for unresolved future header",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+				)
+			}
+			o.eventBus.Publish(
+				event.ChainsyncResyncEventType,
+				event.NewEvent(
+					event.ChainsyncResyncEventType,
+					event.ChainsyncResyncEvent{
+						ConnectionId: ctx.ConnectionId,
+						Reason:       event.ChainsyncResyncReasonUnresolvableFutureHeader,
+						Point:        e.Point,
+					},
+				),
+			)
+			return false, nil
+		}
 		o.config.Logger.Warn(
 			"chainsync: future-header admission failed closed",
 			"component", "ouroboros",

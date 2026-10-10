@@ -57,6 +57,9 @@ const (
 	// outside the permitted clock-skew window. It is not a peer-fault signal and
 	// does not impose a peer cooldown.
 	ChainsyncResyncReasonFutureHeaderAdmissionRecovery = "future header admission recovery"
+	// ChainsyncResyncReasonUnresolvableFutureHeader re-intersects when a header
+	// past the forecast horizon has no parent in the local or queued chain.
+	ChainsyncResyncReasonUnresolvableFutureHeader = "unresolvable future header"
 )
 
 // ChainsyncResyncEvent carries the connection ID that should

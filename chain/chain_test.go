@@ -66,6 +66,14 @@ func queueTestHeaders(t *testing.T, headers []*MockBlock) *chain.Chain {
 	return c
 }
 
+func TestChainHoldsQueuedHeaderHash(t *testing.T) {
+	t.Parallel()
+
+	c := queueTestHeaders(t, testBlocks[3:5])
+	require.True(t, c.HoldsQueuedHeaderHash(testBlocks[3].Hash().Bytes()))
+	require.False(t, c.HoldsQueuedHeaderHash([]byte("unknown header hash")))
+}
+
 // TestChainHeaderRangeAfterSkipZeroMatchesHeaderRange pins skip==0 as
 // identical to HeaderRange for every count, since HeaderRangeAfter's window
 // is meant to be a strict generalization of HeaderRange rather than a
