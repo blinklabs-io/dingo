@@ -472,12 +472,6 @@ func TestTxScopedStmtDoesNotLeakAcrossConcurrentEviction(t *testing.T) {
 	)
 }
 
-// TestCacheableForDialect is a table-driven unit test of the pure predicate
-// prepareHotStatements now consults before caching a hot statement. The only
-// case that must come back false is a RETURNING-id query on MySQL (see
-// insertUtxoQuery's doc comment); every other dialect/query combination,
-// including a RETURNING-id query on PostgreSQL (which supports RETURNING
-// natively) and a non-RETURNING query on MySQL, must come back true.
 func TestCacheableForDialect(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -531,6 +525,26 @@ func TestCacheableForDialect(t *testing.T) {
 	}
 }
 
+func TestCacheableConsumeUtxosForDialect(t *testing.T) {
+	t.Parallel()
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			t.Parallel()
+			require.True(t, cacheableForDialect(dialect, consumeUtxoSQL))
+			for rowCount := 2; rowCount <= utxoBatchSize; rowCount++ {
+				for _, returnStake := range []bool{false, true} {
+					require.Equal(t, dialect == "sqlite",
+						cacheableForDialect(dialect,
+							consumeUtxosBatchQuery(rowCount, returnStake)),
+						"batch size %d, return stake %t", rowCount, returnStake)
+				}
+			}
+			require.Equal(t, dialect == "sqlite",
+				cacheableForDialect(dialect, consumeUtxoSQLiteReturningSQL))
+		})
+	}
+}
+
 // TestPrepareHotStatementsSkipsReturningIDQueryOnMySQL is the end-to-end
 // counterpart to TestCacheableForDialect: it proves prepareHotStatements
 // itself actually leaves insertUtxoQuery/insertUtxoQueryIgnoreConflict
@@ -569,6 +583,19 @@ func TestPrepareHotStatementsSkipsReturningIDQueryOnMySQL(t *testing.T) {
 		ok,
 		"expected insertUtxoQueryIgnoreConflict to be uncached on MySQL",
 	)
+
+	for _, query := range []string{
+		consumeUtxoSQLiteReturningSQL,
+		consumeUtxosBatchQuery(2, false),
+		consumeUtxosBatchQuery(2, true),
+	} {
+		_, cached := mysqlStore.lookupCachedStmt(query)
+		require.False(
+			t,
+			cached,
+			"SQLite consume query must be uncached on MySQL",
+		)
+	}
 
 	_, ok = mysqlStore.lookupCachedStmt(getAssetIDQuery)
 	require.True(

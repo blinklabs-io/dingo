@@ -117,6 +117,7 @@ func cacheableForDialect(dialect, query string) bool {
 
 func isSQLiteBatchQuery(query string) bool {
 	return strings.Contains(query, "RETURNING id, tx_id, output_idx") ||
+		strings.Contains(query, "RETURNING tx_id, output_idx") ||
 		strings.Contains(query, "AND (tx_id, output_idx) IN (")
 }
 
