@@ -3444,6 +3444,7 @@ func TestLedgerStateConfigCallbacksTolerateMissingOuroboros(t *testing.T) {
 			)
 		})
 		assert.ErrorIs(t, err, errOuroborosNotStarted)
+		assert.ErrorIs(t, err, ledger.ErrEndorserBlockFetchNoPeer)
 	})
 
 	t.Run("blockfetch range request returns an error", func(t *testing.T) {
@@ -4659,5 +4660,19 @@ func TestNewOuroborosConfigAppliesTxSubmissionRateLimit(t *testing.T) {
 		t,
 		cfg.MaxTxSubmissionsPerSecond,
 		"production ouroboros config must enable the TxSubmission limiter",
+	)
+}
+
+func TestLedgerStateConfigForwardsApplyRowBatching(t *testing.T) {
+	t.Parallel()
+
+	off := &Node{config: NewConfig()}
+	assert.False(t, off.ledgerStateConfig().ApplyRowBatchingEnabled)
+
+	on := &Node{config: NewConfig(WithLedgerApplyRowBatchingEnabled(true))}
+	assert.True(
+		t,
+		on.ledgerStateConfig().ApplyRowBatchingEnabled,
+		"the option never reaches the ledger without this hop",
 	)
 }

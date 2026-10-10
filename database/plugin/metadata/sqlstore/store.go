@@ -1041,11 +1041,15 @@ func (r *readReservation) Begin() types.Txn {
 		r.releaseConn()
 		return &sqlTxn{owner: r.owner, ctx: r.ctx, beginErr: err}
 	}
+	// readOnly marks tx as running on the read pool, which
+	// readCanUseWriteCache relies on: statements prepared on the write pool
+	// cannot be derived into it.
 	return &sqlTxn{
-		owner:   r.owner,
-		tx:      tx,
-		ctx:     r.ctx,
-		release: r.releaseConn,
+		owner:    r.owner,
+		tx:       tx,
+		ctx:      r.ctx,
+		readOnly: true,
+		release:  r.releaseConn,
 	}
 }
 

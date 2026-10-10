@@ -68,6 +68,12 @@ func TestNewUtxorpc_DefaultLimits(t *testing.T) {
 		u.config.ServerTimeout,
 		"ServerTimeout should default",
 	)
+	require.Equal(
+		t,
+		DefaultBulkResponseWriteTimeout,
+		u.config.BulkResponseWriteTimeout,
+		"BulkResponseWriteTimeout should default",
+	)
 }
 
 func TestRewriteVersionHandler(t *testing.T) {
@@ -90,18 +96,20 @@ func TestRewriteVersionHandler(t *testing.T) {
 
 func TestNewUtxorpc_CustomLimits(t *testing.T) {
 	u := NewUtxorpc(UtxorpcConfig{
-		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:        event.NewEventBus(nil, nil),
-		MaxBlockRefs:    50,
-		MaxUtxoKeys:     500,
-		MaxHistoryItems: 5000,
-		MaxDataKeys:     200,
-		ServerTimeout:   10 * time.Second,
+		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:                 event.NewEventBus(nil, nil),
+		MaxBlockRefs:             50,
+		MaxUtxoKeys:              500,
+		MaxHistoryItems:          5000,
+		MaxDataKeys:              200,
+		BulkResponseWriteTimeout: 10 * time.Second,
+		ServerTimeout:            10 * time.Second,
 	})
 	require.Equal(t, 50, u.config.MaxBlockRefs)
 	require.Equal(t, 500, u.config.MaxUtxoKeys)
 	require.Equal(t, 5000, u.config.MaxHistoryItems)
 	require.Equal(t, 200, u.config.MaxDataKeys)
+	require.Equal(t, 10*time.Second, u.config.BulkResponseWriteTimeout)
 	require.Equal(t, 10*time.Second, u.config.ServerTimeout)
 }
 
@@ -112,6 +120,7 @@ func TestRequestLimitConstants(t *testing.T) {
 	require.Equal(t, 1000, DefaultMaxUtxoKeys)
 	require.Equal(t, 10000, DefaultMaxHistoryItems)
 	require.Equal(t, 1000, DefaultMaxDataKeys)
+	require.Equal(t, 30*time.Second, DefaultBulkResponseWriteTimeout)
 	require.Equal(t, time.Hour, DefaultServerTimeout)
 }
 

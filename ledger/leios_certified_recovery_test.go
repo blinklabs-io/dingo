@@ -17,10 +17,12 @@ package ledger
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -28,6 +30,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -268,6 +271,27 @@ func TestEnsureReferencedEndorserBlocksBoundsCertifiedRetry(t *testing.T) {
 	)
 }
 
+// TestEnsureReferencedEndorserBlocksKeepsNoPeerCause verifies a certified
+// fetch that failed for want of any connection reaches the pipeline still
+// marked as such, since that is what keeps it out of the halt count.
+func TestEnsureReferencedEndorserBlocksKeepsNoPeerCause(t *testing.T) {
+	t.Parallel()
+
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+	probe := &leiosRecoveryProbe{
+		err: fmt.Errorf("leios backfill: %w", ErrEndorserBlockFetchNoPeer),
+	}
+	ls := newLeiosRecoveryLedgerState(probe)
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
+
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+	require.ErrorIs(t, err, ErrEndorserBlockFetchNoPeer)
+}
+
 // TestEnsureReferencedEndorserBlocksCertifiedRetryHonoursContext verifies the
 // bounded retry stops when its caller's context ends, so a shutdown or a
 // pipeline restart is not delayed by a fetch loop.
@@ -385,4 +409,132 @@ func TestCertifiedEndorserBlockRetryDelayEscalates(t *testing.T) {
 		certifiedEndorserBlockPipelineRetryDelay(noProgressStuckThreshold),
 		certifiedEndorserBlockRetryDelay,
 	)
+}
+
+func certifiedEndorserBlockFetchFailure(cause error) error {
+	return fmt.Errorf(
+		"ensure referenced Leios endorser blocks: %w: slot 7, EB ab: last fetch attempt: %w",
+		errCertifiedEndorserBlockUnavailable,
+		cause,
+	)
+}
+
+var (
+	errNoFetchPeerForTest = fmt.Errorf(
+		"leios backfill: %w",
+		ErrEndorserBlockFetchNoPeer,
+	)
+	errFetchDeclinedForTest = errors.New(
+		"leios backfill: endorser block declined by every leios-fetch peer",
+	)
+)
+
+// TestLedgerProcessBlocksWaitsOutLeiosFetchPeerGap covers dingo#5026: while no
+// leios-fetch connection exists, every certified endorser block fetch fails at
+// once. Those restarts must not count toward the deterministic-halt threshold,
+// or a few minutes without a peer stops the pipeline and it never resumes when
+// peers return.
+func TestLedgerProcessBlocksWaitsOutLeiosFetchPeerGap(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ls := newPipelineLoopLedger(t)
+		peerGap := 3 * noProgressStuckThreshold
+		attempts := 0
+		var last time.Time
+		start := time.Now()
+		ls.ledgerProcessBlocksWithAttempt(
+			t.Context(),
+			func(context.Context) error {
+				attempts++
+				if attempts > 1 {
+					require.GreaterOrEqual(
+						t,
+						time.Since(last),
+						certifiedEndorserBlockRetryDelay,
+						"a peer gap must not respin the pipeline faster than the endorser-block retry floor",
+					)
+				}
+				last = time.Now()
+				if attempts <= peerGap {
+					return certifiedEndorserBlockFetchFailure(
+						errNoFetchPeerForTest,
+					)
+				}
+				// A connection is back and the endorser block applies.
+				return nil
+			},
+		)
+		require.Equal(
+			t,
+			peerGap+1,
+			attempts,
+			"the pipeline must keep retrying through a peer gap and resume when a connection appears",
+		)
+		require.Zero(
+			t,
+			promtestutil.ToFloat64(ls.metrics.pipelineHalted),
+			"a peer gap must not halt the pipeline",
+		)
+		require.LessOrEqual(
+			t,
+			time.Since(start),
+			time.Duration(peerGap)*noProgressBackoffMax,
+			"retries during a peer gap stay bounded by the transient backoff cap",
+		)
+	})
+}
+
+// TestLedgerProcessBlocksHaltsOnUnavailableEndorserBlockAcrossPeerGap is the
+// guard on the other side: a certified endorser block that connected peers do
+// not serve still halts the pipeline at the threshold, and a peer gap in the
+// middle neither resets nor adds to that count.
+func TestLedgerProcessBlocksHaltsOnUnavailableEndorserBlockAcrossPeerGap(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		before int
+		gap    int
+	}{
+		{name: "no gap", before: 0, gap: 0},
+		{name: "gap mid-count", before: 30, gap: 2 * noProgressStuckThreshold},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				ls := newPipelineLoopLedger(t)
+				attempts := 0
+				ls.ledgerProcessBlocksWithAttempt(
+					t.Context(),
+					func(context.Context) error {
+						attempts++
+						if attempts > tc.before &&
+							attempts <= tc.before+tc.gap {
+							return certifiedEndorserBlockFetchFailure(
+								errNoFetchPeerForTest,
+							)
+						}
+						return certifiedEndorserBlockFetchFailure(
+							errFetchDeclinedForTest,
+						)
+					},
+				)
+				// The first attempt only records the tip; each later
+				// counted one adds one to the no-progress count.
+				require.Equal(
+					t,
+					noProgressStuckThreshold+1+tc.gap,
+					attempts,
+					"only failures with a peer to ask may count toward the halt",
+				)
+				require.Equal(
+					t,
+					1.0,
+					promtestutil.ToFloat64(ls.metrics.pipelineHalted),
+					"an endorser block connected peers do not serve must still halt the pipeline",
+				)
+			})
+		})
+	}
 }

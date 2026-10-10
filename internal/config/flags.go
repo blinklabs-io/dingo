@@ -743,6 +743,12 @@ var flagSpecs = []flagSpec{
 		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies, for validated blocks only (not consensus-affecting; default off)",
 	),
 
+	boolFlag(
+		"LedgerApplyRowBatchingEnabled",
+		"ledger-apply-row-batching-enabled",
+		"in core storage mode, write the deltas of blocks that are not validated with multi-row batched inserts instead of per-row statements, as API mode always does (not consensus-affecting; default off)",
+	),
+
 	// Block production
 	boolFlag("BlockProducer", "block-producer", "enable block production mode"),
 	stringFlag(
