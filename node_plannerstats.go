@@ -27,7 +27,7 @@ import (
 // the metadata store has no incremental form. A restore or truncate replaces
 // the handle, so the manager is rebuilt with it rather than reused.
 func (n *Node) newPlannerStatsManager() *plannerstats.Manager {
-	if !n.config.plannerStatsRefreshEnabled() || n.db == nil {
+	if !n.config.PlannerStatsRefreshEnabled() || n.db == nil {
 		return nil
 	}
 	updater, ok := n.db.Metadata().(metadata.IncrementalPlannerStatsUpdater)
@@ -47,7 +47,8 @@ func (n *Node) runPlannerStatsStartup(ctx context.Context) {
 	}
 	n.config.logger.Info(
 		"optimizing planner statistics (a first run on a large database can take minutes)",
-		"component", "plannerstats",
+		"component",
+		"plannerstats",
 	)
 	if _, err := n.plannerStatsMgr.RunStartup(ctx); err != nil &&
 		!errors.Is(err, context.Canceled) {

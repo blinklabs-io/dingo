@@ -1221,10 +1221,10 @@ func TestWithTokenRegistryConfigPreservesHTTPClient(t *testing.T) {
 func TestNewConfigPlannerStatsRefreshDefaultsOnAndCanBeDisabled(t *testing.T) {
 	t.Parallel()
 	cfg := NewConfig()
-	assert.True(t, cfg.plannerStatsRefreshEnabled())
+	assert.True(t, cfg.PlannerStatsRefreshEnabled())
 	off := NewConfig(WithPlannerStatsRefresh(false))
-	assert.False(t, off.plannerStatsRefreshEnabled())
+	assert.False(t, off.PlannerStatsRefreshEnabled())
 	// A hand-built Config has no internal config and must not start the
 	// refresh.
-	assert.False(t, (&Config{}).plannerStatsRefreshEnabled())
+	assert.False(t, (&Config{}).PlannerStatsRefreshEnabled())
 }

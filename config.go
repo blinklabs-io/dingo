@@ -1729,10 +1729,10 @@ func WithPlannerStatsRefresh(enabled bool) ConfigOptionFunc {
 	}
 }
 
-// plannerStatsRefreshEnabled reports whether planner-statistics maintenance
-// is on. A Config without an internal config, as hand-built test configs
-// are, leaves it off.
-func (c *Config) plannerStatsRefreshEnabled() bool {
+// PlannerStatsRefreshEnabled reports whether SQLite planner-statistics
+// maintenance is on. A Config without an internal config, as hand-built test
+// configs are, leaves it off.
+func (c *Config) PlannerStatsRefreshEnabled() bool {
 	return c.cfg != nil && c.cfg.PlannerStatsRefreshEnabled
 }
 
