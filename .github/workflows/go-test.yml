@@ -6,7 +6,8 @@ name: ci
 #
 # Shape:
 #
-#   lint, govulncheck                     2 runners, ~3 min
+#   changes                             documentation-only PRs stop here
+#     -> lint, govulncheck                2 runners, ~3 min
 #     -> go-test (Linux, quick)           1 runner,  ~8 min
 #       -> devnet (block pipeline)        1 runner, PR pipeline only
 #       -> go-test (Linux)                    services, no race
@@ -52,11 +53,58 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run-ci: ${{ steps.detect.outputs.run-ci }}
+    steps:
+      - name: checkout-pull-request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          path: pull-request
+      - name: checkout-trusted-ci
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          path: trusted-ci
+      - id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        working-directory: pull-request
+        run: bash ../trusted-ci/.github/scripts/ci-changes.sh
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('pull-request/**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.26.x-
+      - name: docs-parity
+        working-directory: pull-request
+        run: make docs-parity
+      - name: test-change-selection
+        working-directory: pull-request
+        run: python3 .github/scripts/test-ci-changes.py
+
   # Stage 1. The cheapest signal in the pipeline and the gate for everything
   # below it: golangci-lint typechecks the whole tree, so a change that does
   # not compile is rejected here for ~3 runner-minutes rather than after four
   # platform jobs have each spent twenty.
   lint:
+    needs: [changes]
+    if: ${{ !cancelled() && needs.changes.outputs.run-ci != 'false' }}
     name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -123,6 +171,8 @@ jobs:
   # while it is triaged. It still fails the run, which is the same standing it
   # had as a job of the old go-test workflow.
   govulncheck:
+    needs: [changes]
+    if: ${{ !cancelled() && needs.changes.outputs.run-ci != 'false' }}
     name: govulncheck
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -572,7 +622,8 @@ jobs:
   # ledger, database, api, chain, mempool and the rest -- so a change confined
   # to those never built an image until publish.yml did it on main, after
   # merge. The job is ~3 minutes (run 33526005799), which is not worth a
-  # filter to maintain.
+  # filter to maintain. Documentation-only changes skip it through the
+  # upstream CI gate.
   docker:
     name: docker
     needs: [go-test-linux, go-test-linux-race]
