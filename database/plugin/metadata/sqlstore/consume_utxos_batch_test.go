@@ -130,27 +130,55 @@ func TestConsumeUtxosBatchQueryPlansOnTxIDOutputIdx(t *testing.T) {
 	conn, err := store.writeDB.Conn(ctx)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, conn.Close()) }()
-	exec := func(stmt string) {
+	exec := func(stmt string) int64 {
 		t.Helper()
-		_, err := conn.ExecContext(ctx, stmt)
+		res, err := conn.ExecContext(ctx, stmt)
 		require.NoError(t, err, stmt)
+		n, err := res.RowsAffected()
+		require.NoError(t, err, stmt)
+		return n
+	}
+	statRows := func(table string) int {
+		t.Helper()
+		var n int
+		require.NoError(t, conn.QueryRowContext(
+			ctx, "SELECT count(*) FROM "+table,
+		).Scan(&n))
+		return n
 	}
 
 	stages := []struct {
 		name  string
 		setup func()
 	}{
-		{"no_stats", func() {}},
-		{"stat1_and_stat4", func() { exec("ANALYZE") }},
+		{"no_stats", func() {
+			var n int
+			require.NoError(t, conn.QueryRowContext(
+				ctx,
+				"SELECT count(*) FROM sqlite_master WHERE name = 'sqlite_stat1'",
+			).Scan(&n))
+			require.Zero(t, n, "fixture must start without sqlite_stat1")
+		}},
+		{"stat1_and_stat4", func() {
+			exec("ANALYZE")
+			require.Positive(t, statRows("sqlite_stat1"))
+			require.Positive(t, statRows("sqlite_stat4"))
+		}},
 		{"stat1_only", func() {
 			exec("DELETE FROM sqlite_stat4")
 			exec("ANALYZE sqlite_master")
+			require.Positive(t, statRows("sqlite_stat1"))
+			require.Zero(t, statRows("sqlite_stat4"))
 		}},
 		{"preview_stat1", func() {
-			exec("UPDATE sqlite_stat1 SET stat = '24389401 12 7 2' " +
-				"WHERE idx = 'idx_utxo_deleted_payment_script'")
-			exec("UPDATE sqlite_stat1 SET stat = '24389401 4 1' " +
-				"WHERE idx = 'tx_id_output_idx'")
+			require.EqualValues(t, 1, exec(
+				"UPDATE sqlite_stat1 SET stat = '24389401 12 7 2' "+
+					"WHERE idx = 'idx_utxo_deleted_payment_script'",
+			))
+			require.EqualValues(t, 1, exec(
+				"UPDATE sqlite_stat1 SET stat = '24389401 4 1' "+
+					"WHERE idx = 'tx_id_output_idx'",
+			))
 			exec("ANALYZE sqlite_master")
 		}},
 	}
@@ -201,6 +229,7 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 	// Rows with i%10 == 0 are live and the rest spent. Row 7 is made
 	// deleted with a NULL spent_at_tx_id, and row 9 not deleted but with a
 	// spent_at_tx_id: each satisfies only one of the two liveness predicates.
+	// Row 19 is already spent by the spending transaction itself.
 	_, err := store.writeDB.Exec(
 		"UPDATE utxo SET spent_at_tx_id = NULL WHERE added_slot = 7",
 	)
@@ -209,6 +238,13 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 		"UPDATE utxo SET deleted_slot = 0, spent_at_tx_id = ? "+
 			"WHERE added_slot = 9",
 		skewedUtxoTxID(9),
+	)
+	require.NoError(t, err)
+
+	_, err = store.writeDB.Exec(
+		"UPDATE utxo SET deleted_slot = 77, spent_at_tx_id = ? "+
+			"WHERE added_slot = 19",
+		skewedUtxoTxID(5_000_000),
 	)
 	require.NoError(t, err)
 
@@ -227,7 +263,7 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 		"wrong_output_idx_of_live_tx": {live(8), {skewedUtxoTxID(80), 3}},
 		"none_live": {
 			{skewedUtxoTxID(1), 1}, {skewedUtxoTxID(2), 2},
-			{skewedUtxoTxID(999_998), 0},
+			{skewedUtxoTxID(19), 3}, {skewedUtxoTxID(999_998), 0},
 		},
 	}
 	run := func(query string, returnStake bool, in []input) (
@@ -261,7 +297,11 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 		require.NoError(t, rows.Close())
 		slices.SortFunc(got, func(a, b consumedRow) int {
 			return strings.Compare(
-				fmt.Sprint(a.txID, a.outputIdx), fmt.Sprint(b.txID, b.outputIdx),
+				fmt.Sprint(
+					a.txID,
+					a.outputIdx,
+				),
+				fmt.Sprint(b.txID, b.outputIdx),
 			)
 		})
 
@@ -275,7 +315,10 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 			var txID, spentBy []byte
 			var idx, deleted int64
 			require.NoError(t, srows.Scan(&txID, &idx, &deleted, &spentBy))
-			state = append(state, fmt.Sprintf("%x:%d:%d:%x", txID, idx, deleted, spentBy))
+			state = append(
+				state,
+				fmt.Sprintf("%x:%d:%d:%x", txID, idx, deleted, spentBy),
+			)
 		}
 		require.NoError(t, srows.Err())
 		require.NoError(t, srows.Close())
@@ -284,18 +327,21 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 
 	for name, in := range cases {
 		for _, returnStake := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/stake=%v", name, returnStake), func(t *testing.T) {
-				wantRows, wantState := run(
-					legacyConsumeUtxosBatchQuery(len(in), returnStake),
-					returnStake, in,
-				)
-				gotRows, gotState := run(
-					consumeUtxosBatchQuery(len(in), returnStake),
-					returnStake, in,
-				)
-				require.Equal(t, wantRows, gotRows)
-				require.Equal(t, wantState, gotState)
-			})
+			t.Run(
+				fmt.Sprintf("%s/stake=%v", name, returnStake),
+				func(t *testing.T) {
+					wantRows, wantState := run(
+						legacyConsumeUtxosBatchQuery(len(in), returnStake),
+						returnStake, in,
+					)
+					gotRows, gotState := run(
+						consumeUtxosBatchQuery(len(in), returnStake),
+						returnStake, in,
+					)
+					require.Equal(t, wantRows, gotRows)
+					require.Equal(t, wantState, gotState)
+				},
+			)
 		}
 	}
 
