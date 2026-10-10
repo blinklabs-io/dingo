@@ -236,6 +236,7 @@ type Store struct {
 
 	// sqlOperations and sqlQueryDuration are nil when Config.PromRegistry
 	// was nil; see instrumentedQueryer and metrics.go.
+	plannerStats     sqlitePlannerStatsMetrics
 	sqlOperations    *prometheus.CounterVec
 	sqlQueryDuration *prometheus.HistogramVec
 
@@ -310,12 +311,16 @@ func New(config Config) (*Store, error) {
 		reset:                       config.Reset,
 		validateBackup:              config.ValidateBackup,
 		closeDone:                   make(chan struct{}),
+		plannerStats:                newPlannerStatsMetrics(config.PromRegistry),
 		sqlOperations: newSQLOperationsCounter(
 			config.PromRegistry,
 		),
 		sqlQueryDuration: newSQLQueryDurationHistogram(
 			config.PromRegistry,
 		),
+	}
+	if store.readDB != store.writeDB {
+		store.readDB.SetConnMaxLifetime(readConnMaxLifetime)
 	}
 	// Registered against store.WritePoolStats/ReadPoolStats (not
 	// config.WriteDB.Stats/config.ReadDB.Stats directly) so every backend

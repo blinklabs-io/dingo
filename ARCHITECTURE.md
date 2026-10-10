@@ -1487,6 +1487,7 @@ type Node struct {
     ledgerState    *ledger.LedgerState            // UTXO/state tracking
     snapshotMgr    *snapshot.Manager              // Stake snapshot capture
     dbLifecycleMgr *dblifecycle.Manager           // Automatic epoch-boundary DB snapshots
+    plannerStatsMgr *plannerstats.Manager        // SQLite planner statistics maintenance
     utxorpc        *utxorpc.Utxorpc               // UTxO RPC server
     bark           *bark.Bark                     // Bark C2/archive server
     historyExpiry  *historyexpiry.Pruner          // Local block history expiry
@@ -1628,6 +1629,15 @@ When `Node.Run()` is called, components are initialized in this order:
     transaction — and captures a point-in-time database snapshot
     (`database/lifecycle.Snapshot`) at epoch boundaries when
     `databaseLifecycle.snapshotEnabled` is configured.
+    Planner statistics manager (`internal/plannerstats.Manager`): the startup
+    `PRAGMA optimize` pass runs right after the database opens, before the chain
+    manager or ledger exists, so no block batch plans against missing
+    statistics; the manager is then started and subscribes to `epoch.transition`
+    (events without an epoch nonce, the slot clock's duplicate, are ignored).
+    A one-slot pending signal coalesces transitions arriving during a run into
+    at most one follow-up, and the run executes on its own worker after the
+    rollover transaction has committed, never inside it. `Stop` cancels a run in
+    flight. SQLite only; disabled by `plannerStatsRefreshEnabled: false`.
 12. Mempool setup and injection into LedgerState
 13. ChainsyncState (multi-client tracking, stall detection)
 14. ChainSelector (genesis/Praos comparison) start
@@ -4634,11 +4644,11 @@ multi-index OR optimization, but only once `sqlite_stat1` exists. With the
 `idx_account_active_pool_staking_key (active=?)` and evaluates the whole OR
 chain per row, so each chunk costs `O(active rows × refs)` and the
 "batched" read becomes slower than the per-item loop it replaced as the
-account table grows. `ANALYZE` runs at Mithril sync and around metadata backfill,
-never as the table grows during a genesis sync,
-so that no-statistics state is what a long-running genesis-synced node is
-actually in — and even with statistics present, the grouped-IN form is
-still measurably cheaper. `GetStakeSnapshots`' pool-side primitive
+account table grows. Outside Mithril sync and metadata backfill, SQLite
+statistics come from `internal/plannerstats.Manager`'s incremental
+`PRAGMA optimize` at startup and after each epoch rollover (see DATABASE.md),
+so a genesis-synced node has them once its first run completes — and even with
+statistics present, the grouped-IN form is still measurably cheaper. `GetStakeSnapshots`' pool-side primitive
 (`GetPoolStakeSnapshotsForPools`) does not share this hazard: a
 single-column `pool_key_hash IN (...)` against a matching unique index
 needs no statistics to plan well, which is the real distinction between the

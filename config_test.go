@@ -1217,3 +1217,14 @@ func TestWithTokenRegistryConfigPreservesHTTPClient(t *testing.T) {
 	require.Equal(t, 34, cfg.TokenRegistry().MaxAcceptedEntries)
 	require.Equal(t, int64(89), cfg.TokenRegistry().MaxBatchBytes)
 }
+
+func TestNewConfigPlannerStatsRefreshDefaultsOnAndCanBeDisabled(t *testing.T) {
+	t.Parallel()
+	cfg := NewConfig()
+	assert.True(t, cfg.plannerStatsRefreshEnabled())
+	off := NewConfig(WithPlannerStatsRefresh(false))
+	assert.False(t, off.plannerStatsRefreshEnabled())
+	// A hand-built Config has no internal config and must not start the
+	// refresh.
+	assert.False(t, (&Config{}).plannerStatsRefreshEnabled())
+}
