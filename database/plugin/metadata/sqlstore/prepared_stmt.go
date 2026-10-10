@@ -19,6 +19,9 @@ import (
 	"database/sql"
 	"strings"
 	"time"
+
+	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // hotStatements is the fixed, exhaustive list of query texts Start prepares
@@ -42,6 +45,7 @@ var hotStatements = func() []string {
 		transactionInsertSQL,
 		consumeUtxoSQL,
 		consumeUtxoSQLiteReturningSQL,
+		getUtxoSpendStateQuery,
 		poolOpCertSequenceUpsertSQL,
 		poolUpdateLatestOpCertSequenceSQL,
 		transactionCertificateInsertSQL,
@@ -50,6 +54,11 @@ var hotStatements = func() []string {
 		deletePoolRegistrationRelaysSQL,
 		deleteMIRRewardsSQL,
 		deleteAddressTransactionSQL,
+		poolByKeyHashQuery,
+		sqlitequery.GetAccountByCredentialQuery,
+		sqlitequery.GetActiveAccountByCredentialQuery,
+		sqlitequery.SetTipQuery,
+		sqlitequery.SetBlockNonceQuery,
 		utxoStakeConsumedDeltaQuery(1),
 		utxoStakeConsumedDeltaQuery(2),
 		utxoStakeConsumedDeltaQuery(4),
@@ -117,6 +126,7 @@ func cacheableForDialect(dialect, query string) bool {
 
 func isSQLiteBatchQuery(query string) bool {
 	return strings.Contains(query, "RETURNING id, tx_id, output_idx") ||
+		strings.Contains(query, "RETURNING tx_id, output_idx") ||
 		strings.Contains(query, "AND (tx_id, output_idx) IN (")
 }
 
@@ -423,6 +433,18 @@ func (s *Store) evictTxStmts(tx *sql.Tx) {
 	s.txStmtMu.Unlock()
 }
 
+// isClosedStmtErr reports database/sql's "statement is closed" error, which
+// is unexported. A transaction-scoped statement memoized by txScopedStmt is
+// closed by database/sql itself when the transaction's context is cancelled,
+// before Commit or Rollback evicts it, so a later call through the memoized
+// statement fails with this error instead of the transaction's own
+// (context.Canceled or sql.ErrTxDone). queryRowCached, execCached and
+// queryRowsCached retry uncached in that case so callers see the same error
+// an uncached call gives.
+func isClosedStmtErr(err error) bool {
+	return err != nil && err.Error() == "sql: statement is closed"
+}
+
 // queryRowCached and execCached are the shared cache-or-fallback dance
 // sumCredentialUtxoStake originally inlined by hand: use the hot-statement
 // cache when query has an entry, and fall back to a plain one-shot call
@@ -457,14 +479,15 @@ func (s *Store) queryRowCached(
 		// returned below defers running Scan against it until the caller
 		// invokes Scan.
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
-		if s.sqlQueryDuration == nil {
-			return stmt.QueryRowContext(ctx, args...)
-		}
 		start := time.Now()
 		row := stmt.QueryRowContext(ctx, args...)
-		s.sqlQueryDuration.WithLabelValues(op, name).
-			Observe(time.Since(start).Seconds())
-		return row
+		if s.sqlQueryDuration != nil {
+			s.sqlQueryDuration.WithLabelValues(op, name).
+				Observe(time.Since(start).Seconds())
+		}
+		if !isClosedStmtErr(row.Err()) {
+			return row
+		}
 	}
 	return db.QueryRowContext(ctx, query, args...)
 }
@@ -486,16 +509,69 @@ func (s *Store) execCached(
 		// the transaction ends, so there is nothing for this function to
 		// close.
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
-		if s.sqlQueryDuration == nil {
-			return stmt.ExecContext(ctx, args...)
-		}
 		start := time.Now()
 		result, err := stmt.ExecContext(ctx, args...)
-		s.sqlQueryDuration.WithLabelValues(op, name).
-			Observe(time.Since(start).Seconds())
-		return result, err
+		if s.sqlQueryDuration != nil {
+			s.sqlQueryDuration.WithLabelValues(op, name).
+				Observe(time.Since(start).Seconds())
+		}
+		if !isClosedStmtErr(err) {
+			return result, err
+		}
 	}
 	return db.ExecContext(ctx, query, args...)
+}
+
+// cachedDBTX hands sqlc-generated queries the hot-statement cache: a query
+// whose text is in hotStatements runs on its cached statement, any other text
+// takes the plain dialect-aware queryer. db must be the dialect-translated
+// queryer (newDialectQueryer's result), so a cache miss still gets dialect
+// translation and stmtForQueryer can unwrap it to find a *sql.Tx.
+type cachedDBTX struct {
+	sqlitequery.DBTX
+	s  *Store
+	db queryer
+}
+
+func (c cachedDBTX) ExecContext(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (sql.Result, error) {
+	return c.s.execCached(ctx, c.db, query, args...)
+}
+
+func (c cachedDBTX) QueryRowContext(
+	ctx context.Context,
+	query string,
+	args ...any,
+) *sql.Row {
+	return c.s.queryRowCached(ctx, c.db, query, args...)
+}
+
+// operationalQueriesCached is operationalQueries for callers that run on the
+// write pool or a write transaction, where the hot-statement cache is usable.
+// Use operationalQueries for reads that may run on a separate read pool.
+func (s *Store) operationalQueriesCached(db queryer) *sqlitequery.Queries {
+	translated := newDialectQueryer(db, s.dialect.Name())
+	return sqlitequery.New(cachedDBTX{DBTX: translated, s: s, db: translated})
+}
+
+// readCanUseWriteCache reports whether a read issued through readDBFromTxn(txn)
+// runs on a handle the write-pool hot-statement cache is valid for. A file-
+// backed SQLite store has a distinct read-only pool, whose reads cannot use
+// statements prepared against writeDB.
+func (s *Store) readCanUseWriteCache(txn types.Txn) bool {
+	if s.readDB == s.writeDB {
+		return true
+	}
+	if txn == nil {
+		return false
+	}
+	if sqlTxn, ok := txn.(*sqlTxn); ok && sqlTxn.readOnly {
+		return false
+	}
+	return true
 }
 
 func (s *Store) queryRowsCached(
@@ -510,14 +586,15 @@ func (s *Store) queryRowsCached(
 			s.sqlOperations.WithLabelValues(op).Inc()
 		}
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
-		if s.sqlQueryDuration == nil {
-			return stmt.QueryContext(ctx, args...)
-		}
 		start := time.Now()
 		rows, err := stmt.QueryContext(ctx, args...)
-		s.sqlQueryDuration.WithLabelValues(op, name).
-			Observe(time.Since(start).Seconds())
-		return rows, err
+		if s.sqlQueryDuration != nil {
+			s.sqlQueryDuration.WithLabelValues(op, name).
+				Observe(time.Since(start).Seconds())
+		}
+		if !isClosedStmtErr(err) {
+			return rows, err
+		}
 	}
 	return db.QueryContext(ctx, query, args...)
 }

@@ -148,9 +148,12 @@ func (d *transactionDAG) rebuild(applied []appliedTx) {
 
 // topologicalOrder returns the cached stable ordering maintained at mutation
 // time. A count mismatch is an internal index failure, not a representable
-// partial answer: callers must diagnose it and use a complete fallback.
+// partial answer: callers must diagnose it and use a complete fallback. The
+// slice is the DAG's own, not a copy, so a bounded read pays only for the
+// prefix it walks; callers read it under the state lock and never retain or
+// modify it.
 func (d *transactionDAG) topologicalOrder() ([]string, error) {
-	ret := slices.Clone(d.order)
+	ret := d.order
 	if len(ret) != len(d.nodes) {
 		return ret, fmt.Errorf(
 			"DAG index inconsistent: %d of %d transactions ordered",

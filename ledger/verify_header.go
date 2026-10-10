@@ -133,6 +133,16 @@ var (
 	)
 )
 
+// ErrHeaderBeyondForecastHorizon marks a header whose slot lies past the
+// ledger's forecast horizon. Such an error also satisfies
+// IsHeaderVerificationDeferred, but unlike the other deferred causes the
+// header cannot be validated at all until the applied ledger advances, so it
+// must not count for chain selection or reach blockfetch before then
+// (ouroboros-consensus ChainSync.Client, OutsideForecastRange).
+var ErrHeaderBeyondForecastHorizon = errors.New(
+	"header beyond the ledger forecast horizon",
+)
+
 // headerStateLookupErr marks err, a failure reading local state, with
 // errHeaderStateLookupFailed. models.ErrPoolNotFound is an answer rather than a
 // failure and is returned unchanged.
@@ -597,11 +607,13 @@ func (ls *LedgerState) headerVerificationEpoch(
 				// peer. Recycling on past-horizon starves the peer pool the
 				// block and Leios endorser-block fetch depend on and deadlocks
 				// catch-up at epoch boundaries; the chainsync recycle paths skip
-				// deferred errors.
+				// deferred errors. ErrHeaderBeyondForecastHorizon lets
+				// chainsync tell this cause apart and hold the header back.
 				return models.Epoch{}, fmt.Errorf(
-					"%w: block header verification deferred past era horizon "+
-						"at slot %d: %w",
+					"%w: %w: block header verification deferred past era "+
+						"horizon at slot %d: %w",
 					errHeaderVerificationDeferred,
+					ErrHeaderBeyondForecastHorizon,
 					blockSlot,
 					err,
 				)

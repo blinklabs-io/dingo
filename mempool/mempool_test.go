@@ -71,10 +71,23 @@ type blockingSessionValidator struct {
 	started   chan struct{}
 	release   chan struct{}
 	startOnce sync.Once
+	blockNext atomic.Bool
 }
 
 type changingSessionValidator struct {
 	sessions atomic.Int32
+	stale    atomic.Bool
+}
+
+func testCommitIfCurrent(
+	stillCurrent func() bool,
+) func(func() error) (bool, error) {
+	return func(commit func() error) (bool, error) {
+		if !stillCurrent() {
+			return false, nil
+		}
+		return true, commit()
+	}
 }
 
 func (v *changingSessionValidator) ValidateTx(gledger.Transaction) error {
@@ -85,6 +98,7 @@ func (v *changingSessionValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
 ) error {
 	return nil
 }
@@ -95,20 +109,28 @@ func (v *changingSessionValidator) WithTxValidationSession(ctx context.Context,
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
 		) error,
 		func() bool,
+		func(func() error) (bool, error),
 	) error,
 ) error {
-	v.sessions.Add(1)
+	stale := v.stale.Load()
+	if stale {
+		v.sessions.Add(1)
+	}
+	stillCurrent := func() bool { return !stale }
 	return fn(
 		func(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
 		) error {
 			return nil
 		},
-		func() bool { return false },
+		stillCurrent,
+		testCommitIfCurrent(stillCurrent),
 	)
 }
 
@@ -127,6 +149,7 @@ func (v *blockingSessionValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
 ) error {
 	return nil
 }
@@ -137,20 +160,33 @@ func (v *blockingSessionValidator) WithTxValidationSession(ctx context.Context,
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
 		) error,
 		func() bool,
+		func(func() error) (bool, error),
 	) error,
 ) error {
-	v.startOnce.Do(func() { close(v.started) })
+	block := v.blockNext.CompareAndSwap(true, false)
+	if block {
+		v.startOnce.Do(func() { close(v.started) })
+	}
 	validate := func(
 		gledger.Transaction,
 		map[utxoref.Key]struct{},
 		map[utxoref.Key]lcommon.Utxo,
+		*utxoref.StateOverlay,
 	) error {
-		<-v.release
+		if block {
+			<-v.release
+		}
 		return nil
 	}
-	return fn(validate, func() bool { return true })
+	stillCurrent := func() bool { return true }
+	return fn(validate, stillCurrent, testCommitIfCurrent(stillCurrent))
+}
+
+func (v *blockingSessionValidator) blockNextSession() {
+	v.blockNext.Store(true)
 }
 
 func newBlockingOverlayValidator() *blockingOverlayValidator {
@@ -168,6 +204,7 @@ func (v *blockingOverlayValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
 ) error {
 	if v.shouldBlock.Load() {
 		v.startOnce.Do(func() { close(v.started) })
@@ -192,6 +229,7 @@ func (v *mockValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.StateOverlay,
 ) error {
 	return v.ValidateTx(tx)
 }
@@ -319,7 +357,7 @@ func TestUtxoOverlayUsesConsensusConsumedInputsForInvalidTx(t *testing.T) {
 	require.NotEmpty(t, tx.Inputs())
 	require.NotEmpty(t, tx.Collateral())
 	overlay := newUtxoOverlay()
-	overlay.applyTx(tx.Hash().String(), uint(conway.EraIdConway), tx.Cbor(), tx)
+	overlay.applyTx(tx.Hash().String(), uint(conway.EraIdConway), tx, nil)
 	for _, input := range tx.Inputs() {
 		key := utxoref.ForInput(input)
 		assert.NotContains(t, overlay.consumed, key,
@@ -3495,6 +3533,7 @@ func TestMempool_AdmissionContinuesDuringRevalidation(t *testing.T) {
 		t,
 		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
+	validator.blockNextSession()
 	rebuildDone := make(chan error, 1)
 	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
@@ -3567,6 +3606,7 @@ func TestMempool_RemovalsContinueDuringRevalidation(t *testing.T) {
 			)
 			hash := m.Transactions()[0].Hash
 
+			validator.blockNextSession()
 			rebuildDone := make(chan error, 1)
 			go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 			dingotestutil.RequireReceive(
@@ -3633,7 +3673,7 @@ func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 	firstTx := getTestTxBytes(t)
 	secondTx, err := hex.DecodeString(testTxWithValidityStartHex)
 	require.NoError(t, err)
-	totalSize := len(firstTx) + len(secondTx)
+	totalSize := retainedSize(t, firstTx) + retainedSize(t, secondTx)
 	capacity := int64(float64(totalSize)/0.925) + 1
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -3650,6 +3690,7 @@ func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 	require.NoError(t, m.AddTransaction(uint(conway.EraIdConway), firstTx))
 	firstHash := m.Transactions()[0].Hash
 
+	validator.blockNextSession()
 	rebuildDone := make(chan error, 1)
 	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
@@ -3698,6 +3739,7 @@ func TestMempool_RevalidationStopsAfterBoundedGenerationRetries(t *testing.T) {
 		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 
+	validator.stale.Store(true)
 	err := m.rebuildOverlay(context.Background())
 	require.ErrorIs(t, err, errValidationSnapshotChanged)
 	assert.Equal(t, int32(2), validator.sessions.Load())
@@ -3723,6 +3765,7 @@ func TestMempool_RevalidationJournalOverflowLeavesLiveStateUntouched(
 	firstHash := m.Transactions()[0].Hash
 	m.revalidationJournalCap = 1
 
+	validator.blockNextSession()
 	rebuildDone := make(chan error, 1)
 	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
@@ -3762,6 +3805,7 @@ func TestMempool_StopContinuesDuringRevalidation(t *testing.T) {
 		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 
+	validator.blockNextSession()
 	rebuildDone := make(chan error, 1)
 	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
@@ -3992,13 +4036,14 @@ func newOverlayValidator(
 func (v *overlayValidator) ValidateTx(
 	tx gledger.Transaction,
 ) error {
-	return v.ValidateTxWithOverlay(tx, nil, nil)
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
 }
 
 func (v *overlayValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	consumedUtxos map[utxoref.Key]struct{},
 	createdUtxos map[utxoref.Key]lcommon.Utxo,
+	accounts *utxoref.StateOverlay,
 ) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -4110,11 +4155,11 @@ func TestOverlayDoubleSpendRejection(t *testing.T) {
 		[]lcommon.TransactionInput{sharedInput},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 900000)},
 	)
-	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created)
+	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created, overlay.accounts)
 	require.NoError(t, err, "TX-A should pass overlay validation")
 
 	// Apply TX-A to the overlay
-	overlay.applyTx(txA.Hash().String(), 0, nil, txA)
+	overlay.applyTx(txA.Hash().String(), 0, txA, nil)
 
 	// Verify input is now consumed
 	_, consumed := overlay.consumed[utxoKey]
@@ -4127,7 +4172,7 @@ func TestOverlayDoubleSpendRejection(t *testing.T) {
 		[]lcommon.TransactionInput{sharedInput},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 900000)},
 	)
-	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created)
+	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created, overlay.accounts)
 	require.Error(t, err, "TX-B should be rejected (double-spend)")
 	assert.Contains(t, err.Error(), "already consumed")
 }
@@ -4155,9 +4200,9 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 		[]lcommon.TransactionInput{baseInput},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 1800000)},
 	)
-	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created)
+	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created, overlay.accounts)
 	require.NoError(t, err, "TX-A should pass")
-	overlay.applyTx(txA.Hash().String(), 0, nil, txA)
+	overlay.applyTx(txA.Hash().String(), 0, txA, nil)
 
 	// Verify TX-A's output is in the overlay created set
 	inputFromA := buildMockInput(t, txHashA, 0)
@@ -4172,13 +4217,13 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 		[]lcommon.TransactionInput{inputFromA},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 1600000)},
 	)
-	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created)
+	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created, overlay.accounts)
 	require.NoError(
 		t,
 		err,
 		"TX-B should pass (spends TX-A output from overlay)",
 	)
-	overlay.applyTx(txB.Hash().String(), 0, nil, txB)
+	overlay.applyTx(txB.Hash().String(), 0, txB, nil)
 
 	// Verify both TXs are tracked
 	assert.Len(t, overlay.applied, 2)
@@ -4195,7 +4240,7 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 		[]lcommon.TransactionInput{unknownInput},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 500000)},
 	)
-	err = v.ValidateTxWithOverlay(txC, overlay.consumed, overlay.created)
+	err = v.ValidateTxWithOverlay(txC, overlay.consumed, overlay.created, overlay.accounts)
 	require.Error(t, err, "TX-C should fail (input not found)")
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -4561,6 +4606,7 @@ func (v *blockingRejectingValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
 ) error {
 	return nil
 }
@@ -4571,8 +4617,10 @@ func (v *blockingRejectingValidator) WithTxValidationSession(ctx context.Context
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
 		) error,
 		func() bool,
+		func(func() error) (bool, error),
 	) error,
 ) error {
 	v.startOnce.Do(func() { close(v.started) })
@@ -4580,6 +4628,7 @@ func (v *blockingRejectingValidator) WithTxValidationSession(ctx context.Context
 		tx gledger.Transaction,
 		_ map[utxoref.Key]struct{},
 		_ map[utxoref.Key]lcommon.Utxo,
+		_ *utxoref.StateOverlay,
 	) error {
 		<-v.release
 		if tx != nil && tx.Hash().String() == v.rejectHash {
@@ -4587,7 +4636,8 @@ func (v *blockingRejectingValidator) WithTxValidationSession(ctx context.Context
 		}
 		return nil
 	}
-	return fn(validate, func() bool { return true })
+	stillCurrent := func() bool { return true }
+	return fn(validate, stillCurrent, testCommitIfCurrent(stillCurrent))
 }
 
 // TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget covers the

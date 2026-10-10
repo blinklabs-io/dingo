@@ -44,6 +44,9 @@
 //   - RejectionWatermark — above this fill level, new submissions are
 //     rejected outright
 //
+// Fill level charges each pending transaction its CBOR plus the CBOR of the
+// decoded outputs the UTxO overlay keeps for it, since decoding copies them.
+//
 // When eviction is enabled, it is FIFO/oldest-first rather than priority-
 // based. With the default configuration, Dingo instead applies backpressure at
 // full mempool capacity and removes transactions only when they are confirmed,

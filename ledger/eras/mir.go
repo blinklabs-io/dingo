@@ -212,7 +212,7 @@ func newMIRDeleg(
 		slot:            slot,
 		transferAllowed: lcommon.MirTransferAllowed(major),
 	}
-	provider, ok := ls.(MIRDelegStateProvider)
+	provider, ok := stateCapability[MIRDelegStateProvider](ls)
 	if !ok {
 		return ret, nil
 	}

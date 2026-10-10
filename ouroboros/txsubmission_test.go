@@ -229,6 +229,7 @@ func (txsubmissionTestValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
 ) error {
 	return nil
 }
@@ -252,6 +253,7 @@ func (v txsubmissionSelectiveRejectingValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.StateOverlay,
 ) error {
 	return v.ValidateTx(tx)
 }
@@ -349,7 +351,8 @@ func TestRetryTxsubmissionAdmissionBoundsContention(t *testing.T) {
 			addCalls++
 			return fullErr
 		},
-		func() bool {
+		func(need int64) bool {
+			require.Equal(t, int64(fullErr.TxSize), need)
 			waitCalls++
 			return true
 		},
@@ -379,7 +382,7 @@ func TestRetryTxsubmissionAdmissionSucceedsAfterContention(t *testing.T) {
 			}
 			return nil
 		},
-		func() bool {
+		func(int64) bool {
 			waitCalls++
 			return true
 		},
@@ -864,6 +867,19 @@ func txsubmissionTestFixtures(t *testing.T) []txsubmissionTestFixture {
 	return ret
 }
 
+// txsubmissionRetainedSize is what a mempool charges for admitting body: its
+// CBOR plus the CBOR of the decoded outputs the pool keeps.
+func txsubmissionRetainedSize(t *testing.T, body []byte) int64 {
+	t.Helper()
+	tx, err := gledger.NewTransactionFromCbor(txsubmissionRelayTestEraId, body)
+	require.NoError(t, err)
+	size := int64(len(body))
+	for _, utxo := range tx.Produced() {
+		size += int64(len(utxo.Output.Cbor()))
+	}
+	return size
+}
+
 func TestValidateTxsubmissionReply(t *testing.T) {
 	t.Parallel()
 
@@ -1175,6 +1191,8 @@ type txSubmissionRelayHarnessOpts struct {
 	// promRegistryA installs protocol metrics on node A, whose
 	// txsubmission server runs the relay pull loop under test.
 	promRegistryA prometheus.Registerer
+	// rateLimiterA is node A's per-peer TxSubmission rate limiter.
+	rateLimiterA *txSubmissionRateLimiter
 }
 
 func newTxSubmissionRelayHarnessWithOpts(
@@ -1251,6 +1269,7 @@ func newTxSubmissionRelayHarnessWithOpts(
 		PromRegistry: opts.promRegistryA,
 	})
 	nodeA.mempool = nodeAMempool
+	nodeA.txSubmissionRateLimiter = opts.rateLimiterA
 	nodeB := newOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
 	nodeBMempool := mempool.Service(&mempool.FIFO{Mempool: mB})
 	if opts.corruptOfferHash != "" || opts.omitOfferHash != "" ||
@@ -1515,8 +1534,9 @@ func TestTxSubmissionDAGBackpressureResumesAfterRemoval(t *testing.T) {
 	fixtures := txsubmissionTestFixtures(t)
 	seed := fixtures[2]
 	offered := fixtures[0]
-	capacity := int64(len(seed.body))
-	for int64(len(seed.body)) >
+	seedSize := txsubmissionRetainedSize(t, seed.body)
+	capacity := seedSize
+	for seedSize >
 		int64(float64(capacity)*mempool.DefaultRejectionWatermark) {
 		capacity++
 	}
@@ -1546,6 +1566,96 @@ func TestTxSubmissionDAGBackpressureResumesAfterRemoval(t *testing.T) {
 		_, ok := h.mA.GetTransaction(offered.hash)
 		return ok
 	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// TestTxSubmissionDuplicateOfferIsChargedToPeer offers a transaction the
+// mempool already holds. The duplicate only refreshes the pending entry, but
+// the offer still spends the peer's rate-limit budget, so resubmitting
+// known transactions cannot bypass the per-peer limit.
+func TestTxSubmissionDuplicateOfferIsChargedToPeer(t *testing.T) {
+	t.Parallel()
+
+	offered := txsubmissionTestFixtures(t)[0]
+	// One token, refilled far slower than the test runs.
+	limiter := newTxSubmissionRateLimiter(0.001, 1)
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		rateLimiterA: limiter,
+	})
+	defer h.close(t)
+
+	require.NoError(
+		t,
+		h.mA.AddTransaction(txsubmissionRelayTestEraId, offered.body),
+	)
+	before, ok := h.mA.GetTransaction(offered.hash)
+	require.True(t, ok)
+	require.Zero(t, limiter.WaitDuration(h.connA.Id(), 1))
+	require.NoError(
+		t,
+		h.mB.AddTransaction(txsubmissionRelayTestEraId, offered.body),
+	)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(t, func() bool {
+		current, ok := h.mA.GetTransaction(offered.hash)
+		return ok && current.LastSeen.After(before.LastSeen)
+	}, 5*time.Second, 10*time.Millisecond,
+		"the duplicate offer reaches the mempool and refreshes the entry")
+	require.Len(t, h.mA.Transactions(), 1)
+	require.Positive(
+		t,
+		limiter.WaitDuration(h.connA.Id(), 1),
+		"the duplicate offer spent the peer's token",
+	)
+}
+
+// TestTxSubmissionAdmissionWaitsForRetainedSize offers a transaction whose
+// wire size fits the free headroom while the bytes the pool retains for it do
+// not. Intake must wait for that retained size, not drop the offer after
+// retrying against headroom it can never use.
+func TestTxSubmissionAdmissionWaitsForRetainedSize(t *testing.T) {
+	t.Parallel()
+
+	fixtures := txsubmissionTestFixtures(t)
+	seed := fixtures[2]
+	offered := fixtures[0]
+	offeredSize := txsubmissionRetainedSize(t, offered.body)
+	// Free headroom is enough for the advertised size and its tolerance, and
+	// one byte short of the retained size.
+	headroom := offeredSize - 1
+	require.GreaterOrEqual(
+		t,
+		headroom,
+		int64(len(offered.body))+int64(txsubmissionMaxSizeDiscrepancy),
+	)
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		capacityA: txsubmissionRetainedSize(t, seed.body) + headroom,
+		dagA:      true,
+	})
+	defer h.close(t)
+
+	require.NoError(
+		t,
+		h.mA.AddTransaction(txsubmissionRelayTestEraId, seed.body),
+	)
+	require.Equal(t, headroom, h.mA.AdmissionHeadroomBytes())
+	require.NoError(
+		t,
+		h.mB.AddTransaction(txsubmissionRelayTestEraId, offered.body),
+	)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Never(t, func() bool {
+		_, ok := h.mA.GetTransaction(offered.hash)
+		return ok
+	}, 200*time.Millisecond, 10*time.Millisecond)
+
+	h.mA.RemoveTxsByHash([]string{seed.hash})
+	require.Eventually(t, func() bool {
+		_, ok := h.mA.GetTransaction(offered.hash)
+		return ok
+	}, 5*time.Second, 10*time.Millisecond,
+		"the offer must wait for its retained size rather than be dropped")
 }
 
 // TestTxSubmissionServerInitExitsCleanlyOnPeerDisconnect verifies the

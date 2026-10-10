@@ -46,7 +46,7 @@ type evaluationContextProvider interface {
 }
 
 func evaluationContext(ls lcommon.LedgerState) context.Context {
-	provider, ok := ls.(evaluationContextProvider)
+	provider, ok := stateCapability[evaluationContextProvider](ls)
 	if !ok || provider.EvaluationContext() == nil {
 		return context.Background()
 	}
@@ -89,10 +89,23 @@ type CommitteeCredentialState interface {
 	) (*lcommon.CommitteeMember, error)
 }
 
+// stateCapability returns ls as T, or else the provider beneath ls's
+// validation adapters as T. An adapter such as the state that layers pending
+// transactions over a ledger view exposes the LedgerState methods but not the
+// view's optional capabilities, so asserting on ls alone reads a capability
+// the ledger has as absent.
+func stateCapability[T any](ls lcommon.LedgerState) (T, bool) {
+	if capability, ok := ls.(T); ok {
+		return capability, true
+	}
+	capability, ok := lcommon.UnwrapLedgerState(ls).(T)
+	return capability, ok
+}
+
 // minPoolMarginFromLedgerState returns the CIP-23 minimum pool margin the ledger
 // state enforces, or nil when the state does not provide one (feature disabled).
 func minPoolMarginFromLedgerState(ls lcommon.LedgerState) *big.Rat {
-	provider, ok := ls.(MinPoolMarginProvider)
+	provider, ok := stateCapability[MinPoolMarginProvider](ls)
 	if !ok {
 		return nil
 	}
@@ -148,7 +161,7 @@ const (
 func shouldSkipPhase2Validation(
 	ls lcommon.LedgerState,
 ) bool {
-	skipper, ok := ls.(phase2ValidationSkipper)
+	skipper, ok := stateCapability[phase2ValidationSkipper](ls)
 	return ok && skipper.SkipPhase2Validation()
 }
 
@@ -223,7 +236,7 @@ func validateCommitteeCertificates(
 			return err
 		}
 	}
-	state, ok := ls.(CommitteeCredentialState)
+	state, ok := stateCapability[CommitteeCredentialState](ls)
 	if !ok {
 		return conway.UtxoValidateCommitteeCertificates(tx, slot, ls, pp)
 	}
@@ -353,7 +366,7 @@ func validateUnknownVoters(
 			return err
 		}
 	}
-	state, ok := ls.(CommitteeCredentialState)
+	state, ok := stateCapability[CommitteeCredentialState](ls)
 	if !ok {
 		if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
 			return nil

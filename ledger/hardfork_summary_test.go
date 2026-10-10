@@ -1809,6 +1809,15 @@ func TestHeaderVerificationEpoch_PastHorizonDeferred(t *testing.T) {
 	require.ErrorIs(t, err, errHeaderVerificationDeferred,
 		"past-horizon header must be deferred, not a peer-fault rejection")
 	require.ErrorIs(t, err, hardfork.ErrPastHorizon)
+	require.ErrorIs(t, err, ErrHeaderBeyondForecastHorizon,
+		"chainsync must be able to tell past-horizon apart from other deferrals")
+	require.True(t, IsHeaderVerificationDeferred(err))
+
+	// A slot inside the horizon whose epoch has no nonce yet is deferred for
+	// a different reason and must not be held back as past-horizon.
+	_, err = ls.headerVerificationEpoch(context.Background(), 450_000, false)
+	require.True(t, IsHeaderVerificationDeferred(err))
+	require.NotErrorIs(t, err, ErrHeaderBeyondForecastHorizon)
 }
 
 func TestHardForkSummary_MainnetForecastBoundary(t *testing.T) {

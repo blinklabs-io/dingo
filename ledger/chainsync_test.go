@@ -4565,22 +4565,6 @@ func TestAwaitChainsyncHeaderAdmissionBoundaries(t *testing.T) {
 		},
 	)
 
-	t.Run("slot past the forecast horizon is deferred", func(t *testing.T) {
-		arrival := systemStart.Add(100 * time.Second)
-		ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
-		ls.slotClock.provider = pastHorizonSlotTimeProvider{
-			SlotTimeProvider: ls.slotClock.provider,
-			rejectedSlot:     10_000,
-		}
-
-		accepted, err := ls.AwaitChainsyncHeaderAdmission(t.Context(),
-			futureHeaderEvent(10_000, arrival),
-		)
-		require.NoError(t, err)
-		require.True(t, accepted)
-		require.Empty(t, *waits)
-	})
-
 	t.Run(
 		"processing delay does not change arrival judgment",
 		func(t *testing.T) {
