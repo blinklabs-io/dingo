@@ -25,16 +25,16 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/devnet"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
 // TestLeiosEndorserBlockProducerToPeer verifies the producer-to-peer path on
-// a private Dijkstra network: a producer offers an EB over LeiosNotify, the
-// non-forging relay serves its manifest and complete transaction bodies over
-// LeiosFetch, a ranking-block header observed from that relay references the
-// same EB, and at least one EB transaction output is present in the relay's
-// queried ledger state.
+// a private Dijkstra network: a producer offers an EB over LeiosNotify and
+// diffuses a validated vote after on-chain voting registration becomes usable;
+// the relay observes the exact announcing and certifying ranking blocks,
+// serves the EB over LeiosFetch, and applies at least one EB transaction output.
 func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 	if os.Getenv("DEVNET_LEIOS_ENABLED") != "1" {
 		t.Skip("requires run-tests.sh --leios")
@@ -124,89 +124,120 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 	require.NoError(t, err, "could not observe producer LeiosNotify offers")
 	defer monitor.Stop()
 
-	for {
-		select {
-		case <-ctx.Done():
-			require.NoError(t, ctx.Err(),
-				"no producer EB was certified, referenced, fetched, and applied")
-		case err := <-monitor.Errors:
-			require.NoError(t, err, "producer LeiosNotify connection failed")
-		case point := <-monitor.Offers:
-			t.Logf("producer %s offered EB %x at slot %d", producer.Name, point.Hash, point.Slot)
-			var referencingHeader devnet.ObservedHeader
-			err := group.Await(ctx,
-				fmt.Sprintf("relay references announced EB %x at slot %d",
-					point.Hash, point.Slot),
-				func(snapshots []devnet.ChainSnapshot) bool {
-					for _, snapshot := range snapshots {
-						if snapshot.Node != relay.Name {
-							continue
-						}
-						for _, header := range snapshot.Headers {
-							if header.Slot == point.Slot && bytes.Equal(
-								header.LeiosAnnouncementHash,
-								point.Hash,
-							) {
-								referencingHeader = header
-								return true
-							}
-						}
+	vote, err := awaitLeiosPrototypeVote(
+		ctx,
+		monitor.PrototypeVotes,
+		monitor.Errors,
+	)
+	require.NoError(t, err,
+		"producer did not diffuse a vote after voting registration became usable")
+
+	var announcingHeader devnet.ObservedHeader
+	err = group.Await(ctx,
+		fmt.Sprintf("relay adopts voted announcing ranking block %x",
+			vote.AnnouncingRbHash.Bytes()),
+		func(snapshots []devnet.ChainSnapshot) bool {
+			for _, snapshot := range snapshots {
+				if snapshot.Node != relay.Name {
+					continue
+				}
+				for _, header := range snapshot.Headers {
+					if bytes.Equal(header.Hash, vote.AnnouncingRbHash.Bytes()) &&
+						len(header.LeiosAnnouncementHash) > 0 {
+						announcingHeader = header
+						return true
 					}
-					return false
-				})
-			require.NoError(t, err,
-				"relay never selected a ranking block referencing the offered EB")
-			require.Positive(t, referencingHeader.LeiosAnnouncementSize,
-				"ranking header must carry a sized Leios announcement")
-			t.Logf("relay selected ranking block %x at slot %d for EB %x", referencingHeader.Hash, referencingHeader.Slot, point.Hash)
-
-			txOfferCtx, cancelTxOffer := context.WithTimeout(ctx, 2*time.Minute)
-			err = awaitLeiosTransactionOffer(
-				txOfferCtx,
-				transactions.TransactionOffers,
-				transactions.Errors,
-				point,
-			)
-			cancelTxOffer()
-			require.NoError(t, err,
-				"relay did not offer the EB transactions before the fetch request")
-			t.Logf("relay offered transactions for EB %x", point.Hash)
-
-			bodies, err := devnet.FetchLeiosEndorserBlock(
-				ctx,
-				relay.Address,
-				cfg.NetworkMagic,
-				point,
-			)
-			require.NoError(t, err,
-				"relay did not serve the announced EB manifest and bodies")
-			require.NotEmpty(t, bodies,
-				"relay served an EB without transaction bodies")
-			t.Logf("relay served %d verified EB transaction bodies", len(bodies))
-
-			applyCtx, cancelApply := context.WithTimeout(ctx, 2*time.Minute)
-			err = awaitLeiosTransactionOutputsApplied(
-				applyCtx,
-				relayNtcAddr,
-				cfg.NetworkMagic,
-				bodies,
-			)
-			cancelApply()
-			require.NoError(t, err,
-				"relay did not apply any fetched EB transaction output")
-			t.Logf(
-				"producer %s offered EB %x at slot %d; relay %s served %d bodies and applied their outputs in ranking block %x at slot %d",
-				producer.Name,
-				point.Hash,
-				point.Slot,
-				relay.Name,
-				len(bodies),
-				referencingHeader.Hash,
-				referencingHeader.Slot,
-			)
-			return
-		}
+				}
+			}
+			return false
+		})
+	require.NoError(t, err,
+		"relay never adopted the ranking block named by the producer vote")
+	require.Positive(t, announcingHeader.LeiosAnnouncementSize,
+		"announcing ranking header must carry a sized Leios announcement")
+	point := pcommon.Point{
+		Slot: announcingHeader.Slot,
+		Hash: append([]byte(nil), announcingHeader.LeiosAnnouncementHash...),
 	}
+
+	offerCtx, cancelOffer := context.WithTimeout(ctx, 2*time.Minute)
+	err = awaitLeiosTransactionOffer(
+		offerCtx,
+		monitor.Offers,
+		monitor.Errors,
+		point,
+	)
+	cancelOffer()
+	require.NoError(t, err,
+		"producer did not offer the endorser block named by its voted ranking block")
+	t.Logf("producer %s offered voted EB %x at slot %d", producer.Name, point.Hash, point.Slot)
+
+	txOfferCtx, cancelTxOffer := context.WithTimeout(ctx, 2*time.Minute)
+	err = awaitLeiosTransactionOffer(
+		txOfferCtx,
+		transactions.TransactionOffers,
+		transactions.Errors,
+		point,
+	)
+	cancelTxOffer()
+	require.NoError(t, err,
+		"relay did not offer the EB transactions before the fetch request")
+
+	bodies, err := devnet.FetchLeiosEndorserBlock(
+		ctx,
+		relay.Address,
+		cfg.NetworkMagic,
+		point,
+	)
+	require.NoError(t, err,
+		"relay did not serve the announced EB manifest and bodies")
+	require.NotEmpty(t, bodies,
+		"relay served an EB without transaction bodies")
+
+	var certifyingHeader devnet.ObservedHeader
+	err = group.Await(ctx,
+		fmt.Sprintf("relay adopts CertRB extending announcing ranking block %x",
+			announcingHeader.Hash),
+		func(snapshots []devnet.ChainSnapshot) bool {
+			for _, snapshot := range snapshots {
+				if snapshot.Node != relay.Name {
+					continue
+				}
+				for _, header := range snapshot.Headers {
+					if header.LeiosCertified && bytes.Equal(
+						header.PrevHash,
+						announcingHeader.Hash,
+					) {
+						certifyingHeader = header
+						return true
+					}
+				}
+			}
+			return false
+		})
+	require.NoError(t, err,
+		"relay never adopted a CertRB for the voted announcing ranking block")
+
+	applyCtx, cancelApply := context.WithTimeout(ctx, 2*time.Minute)
+	err = awaitLeiosTransactionOutputsApplied(
+		applyCtx,
+		relayNtcAddr,
+		cfg.NetworkMagic,
+		bodies,
+	)
+	cancelApply()
+	require.NoError(t, err,
+		"relay did not apply any certified EB transaction output")
+	t.Logf(
+		"producer %s offered EB %x at slot %d; relay %s certified it in ranking block %x at slot %d, served %d bodies, and applied their outputs",
+		producer.Name,
+		point.Hash,
+		point.Slot,
+		relay.Name,
+		certifyingHeader.Hash,
+		certifyingHeader.Slot,
+		len(bodies),
+	)
 }
 
 func awaitLeiosTransactionOutputsApplied(
@@ -256,6 +287,25 @@ func awaitLeiosTransactionOffer(
 			}
 		case <-ctx.Done():
 			return ctx.Err()
+		}
+	}
+}
+
+func awaitLeiosPrototypeVote(
+	ctx context.Context,
+	votes <-chan lcommon.LeiosPrototypeVote,
+	errors <-chan error,
+) (lcommon.LeiosPrototypeVote, error) {
+	for {
+		select {
+		case vote := <-votes:
+			return vote, nil
+		case err := <-errors:
+			if err != nil {
+				return lcommon.LeiosPrototypeVote{}, err
+			}
+		case <-ctx.Done():
+			return lcommon.LeiosPrototypeVote{}, ctx.Err()
 		}
 	}
 }

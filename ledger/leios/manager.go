@@ -305,13 +305,14 @@ type VoteManagerConfig struct {
 
 // storedVote is one retained vote with its serving metadata.
 type storedVote struct {
-	vote       lcommon.LeiosVote
-	raw        cbor.RawMessage
-	originConn string // empty for locally emitted votes
-	verified   bool
-	seq        uint64
-	epoch      uint64
-	insertedAt time.Time
+	vote             lcommon.LeiosVote
+	raw              cbor.RawMessage
+	originConn       string // empty for locally emitted votes
+	announcingRbHash lcommon.Blake2b256
+	verified         bool
+	seq              uint64
+	epoch            uint64
+	insertedAt       time.Time
 }
 
 // voteRecord is the authoritative dedup and tally-accounting entry for
@@ -2294,13 +2295,14 @@ func (m *VoteManager) insertVote(
 	}
 	m.updateRecordsGaugeLocked()
 	stored := &storedVote{
-		vote:       vote,
-		raw:        raw,
-		originConn: originConn,
-		verified:   verified,
-		seq:        m.nextSeq,
-		epoch:      epoch,
-		insertedAt: now,
+		vote:             vote,
+		raw:              raw,
+		originConn:       originConn,
+		announcingRbHash: announcingRbHash,
+		verified:         verified,
+		seq:              m.nextSeq,
+		epoch:            epoch,
+		insertedAt:       now,
 	}
 	m.nextSeq++
 	m.votesById[voteId] = stored
@@ -2549,6 +2551,13 @@ func (m *VoteManager) NextVotes(
 		for _, sv := range m.voteLog[startIdx:] {
 			cursor = sv.seq + 1
 			if sv.originConn == connKey {
+				continue
+			}
+			// Prototype votes sign the announcing ranking-block hash and are
+			// diffused inline over leios-notify. Protocol 20 carries the legacy
+			// slot-plus-EB-hash domain, so serving a prototype signature there
+			// guarantees that an honest peer rejects it.
+			if sv.announcingRbHash != (lcommon.Blake2b256{}) {
 				continue
 			}
 			collected = append(collected, sv.vote)

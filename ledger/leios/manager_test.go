@@ -3528,18 +3528,55 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	)
 	assert.Len(t, raws, 1)
 
-	// The local vote is served to peers
+	// Prototype votes are diffused over leios-notify and must not be served
+	// through protocol 20, whose signature domain is slot plus EB hash.
 	done := make(chan struct{})
-	defer close(done)
-	result := testutil.RequireReceive(
+	resultCh := startNextVotes(fixture, done, "conn-b", 1)
+	testutil.RequireNoReceive(
 		t,
-		startNextVotes(fixture, done, "conn-b", 1),
-		testutil.AsyncWait,
-		"own vote served to peers",
+		resultCh,
+		300*time.Millisecond,
+		"local prototype vote must stay off the legacy protocol",
 	)
+	close(done)
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait, "aborted NextVotes returns",
+	)
+	assert.Error(t, result.err)
+}
+
+func TestVoteManagerNextVotesExcludesReceivedPrototypeVotes(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t)
+	rbHash := lcommon.NewBlake2b256([]byte("prototype-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("prototype-eb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	received := fixture.makePrototypeVote(t, 3, rbHash)
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", received))
+
+	done := make(chan struct{})
+	resultCh := startNextVotes(fixture, done, "conn-b", 1)
+	testutil.RequireNoReceive(
+		t,
+		resultCh,
+		300*time.Millisecond,
+		"received prototype vote must stay off the legacy protocol",
+	)
+
+	legacy := fixture.makeVote(
+		t,
+		4,
+		578,
+		lcommon.NewBlake2b256([]byte("legacy-eb")),
+	)
+	require.NoError(t, fixture.mgr.HandleVote("conn-a", legacy))
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait, "legacy vote served after prototype",
+	)
+	close(done)
 	require.NoError(t, result.err)
-	require.Len(t, result.votes, 1)
-	assert.Equal(t, uint64(3), result.votes[0].VoterId)
+	require.Equal(t, []lcommon.LeiosVote{legacy}, result.votes)
 }
 
 func TestVoteManagerDoesNotEmitVoteAfterVotingReconfiguredDuringSigning(

@@ -4651,3 +4651,13 @@ func TestNewOuroborosConfigAppliesTxSubmissionRateLimit(t *testing.T) {
 		"production ouroboros config must enable the TxSubmission limiter",
 	)
 }
+
+func TestNewOuroborosConfigDoesNotInitiateLegacyLeiosVotes(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: NewConfig()}
+	cfg := n.newOuroborosConfig(true, 0, 0)
+
+	assert.False(t, cfg.EnableLeiosVotes,
+		"prototype nodes must diffuse votes over leios-notify")
+}
