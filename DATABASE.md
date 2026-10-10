@@ -502,13 +502,22 @@ Migration `v37` (`drep-expiry-history`, integer version 37) records DRep expiry 
 
 Migration `v38` (`pool-relay-type`, integer version 38) records the relay constructor on each pool registration, preserving the distinction between single-host and multi-host name relays when returning pool parameters.
 
-Migration `v39` (`drep-dormancy-state`, integer version 39) adds the idempotence marker for dormant-expiry boundaries and a singleton counter/history for consecutive no-proposal epochs. Boundary increments and proposal-driven resets are journaled for rollback; proposal-driven resets run before certificate processing, and snapshot import initializes the counter from parsed ledger state.
-
-Migration `v40` (`drep-delegator-state`, integer version 40) adds `drep_delegator`, a rollbackable reverse index of stake credentials recorded in each active DRep’s ledger delegator set. Its backfill and PV10 transition follow the ledger’s active account delegation rules, and the schema preserves reverse delegators imported from cert-state snapshots.
-
 Migration `v39` (`midnight-rollback-journal`, integer version 39) adds the
 `midnight_candidate_removals` and `midnight_epoch_transitions` rollback
 journals.
+
+Migration `v40` (`drep-dormancy-state`, integer version 40) adds the
+idempotence marker for dormant-expiry boundaries and a singleton
+counter/history for consecutive no-proposal epochs. Boundary increments and
+proposal-driven resets are journaled for rollback; proposal-driven resets run
+before certificate processing, and snapshot import initializes the counter
+from parsed ledger state.
+
+Migration `v41` (`drep-delegator-state`, integer version 41) adds
+`drep_delegator`, a rollbackable reverse index of stake credentials recorded
+in each active DRep’s ledger delegator set. Its backfill and PV10 transition
+follow the ledger’s active account delegation rules, and the schema preserves
+reverse delegators imported from cert-state snapshots.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
