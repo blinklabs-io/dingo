@@ -143,6 +143,18 @@ WHERE added_slot <= ?
 ORDER BY cold_credential_tag, cold_credential
 LIMIT ?`
 
+const committeeHotAuthSupersededIDsQuery = `
+SELECT id
+FROM auth_committee_hot
+WHERE cold_credential_tag = ?
+  AND cold_credential = ?
+  AND added_slot <= ?
+ORDER BY added_slot DESC, certificate_id DESC
+LIMIT ? OFFSET 1`
+
+const deleteCommitteeHotAuthorizationByIDSQL = `
+DELETE FROM auth_committee_hot WHERE id = ?`
+
 type committeeAuthIdentity struct {
 	tag        uint8
 	credential []byte
@@ -254,24 +266,7 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 	if s.committeeAuthPruneLocked != nil {
 		s.committeeAuthPruneLocked()
 	}
-	// The inner ORDER BY ... LIMIT ? OFFSET 1 is the rule: skip the single
-	// newest row at or below the horizon, take up to a batch of the rest. The
-	// extra SELECT wrapper materializes a derived table, which MySQL requires
-	// both to reference the table being deleted from and to allow LIMIT
-	// inside an IN subquery.
-	result, err := db.ExecContext(ctx, `
-DELETE FROM auth_committee_hot
-WHERE id IN (
-    SELECT id FROM (
-        SELECT id
-        FROM auth_committee_hot
-        WHERE cold_credential_tag = ?
-          AND cold_credential = ?
-          AND added_slot <= ?
-        ORDER BY added_slot DESC, certificate_id DESC
-        LIMIT ? OFFSET 1
-    ) superseded
-)`,
+	rows, err := db.QueryContext(ctx, committeeHotAuthSupersededIDsQuery,
 		coldCredentialTag,
 		coldCredential,
 		horizon,
@@ -279,16 +274,65 @@ WHERE id IN (
 	)
 	if err != nil {
 		return 0, fmt.Errorf(
-			"prune superseded committee hot authorizations: %w",
+			"select superseded committee hot authorizations: %w",
 			err,
 		)
 	}
-	pruned, err := result.RowsAffected()
-	if err != nil {
+	ids := make([]int64, 0, committeeAuthPruneBatch)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf(
+				"read superseded committee hot authorization id: %w",
+				err,
+			)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return 0, fmt.Errorf(
-			"prune superseded committee hot authorizations: row count: %w",
+			"read superseded committee hot authorization ids: %w",
 			err,
 		)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf(
+			"close superseded committee hot authorization rows: %w",
+			err,
+		)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	// A DELETE ... IN (subquery) can scan the full table when SQLite has stale
+	// statistics during a bulk import. Point deletes keep work bounded by the
+	// indexed candidate selection above.
+	var pruned int64
+	for _, id := range ids {
+		result, err := s.execCached(
+			ctx,
+			db,
+			deleteCommitteeHotAuthorizationByIDSQL,
+			id,
+		)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"prune committee hot authorization %d: %w",
+				id,
+				err,
+			)
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf(
+				"prune committee hot authorization %d: row count: %w",
+				id,
+				err,
+			)
+		}
+		pruned += count
 	}
 	return pruned, nil
 }

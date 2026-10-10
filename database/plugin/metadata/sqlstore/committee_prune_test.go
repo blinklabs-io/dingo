@@ -535,6 +535,29 @@ func TestCommitteeHotPruningBoundsEachDeleteCall(t *testing.T) {
 	)
 }
 
+func TestCommitteeHotAuthorizationDeleteUsesPrimaryKeyLookup(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	rows, err := store.writeDB.Query(
+		"EXPLAIN QUERY PLAN "+deleteCommitteeHotAuthorizationByIDSQL,
+		int64(1),
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	usesPrimaryKey := false
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
+		require.NotContains(t, detail, "SCAN auth_committee_hot")
+		usesPrimaryKey = usesPrimaryKey ||
+			strings.Contains(detail, "USING INTEGER PRIMARY KEY")
+	}
+	require.NoError(t, rows.Err())
+	require.True(t, usesPrimaryKey)
+}
+
 // TestAuthCommitteeHotMaintenanceKeepsTallyAndYieldsWriterAtPreprodScale uses
 // scaled Preprod history to check pruning preserves committee reads and lets a
 // waiting writer acquire the single SQLite connection between delete batches.
