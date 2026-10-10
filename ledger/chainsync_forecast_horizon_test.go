@@ -586,3 +586,82 @@ func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
 	)
 	require.ErrorIs(t, got.err, context.Canceled)
 }
+
+// Headers queued behind a far-from-tip batch are what advance the ledger, and
+// the ledger is what moves the forecast horizon. Admission must therefore
+// start blockfetch for the headers already queued instead of waiting for the
+// next header to complete the batch, which it is itself withholding.
+func TestAwaitChainsyncHeaderAdmissionStartsBlockfetchForQueuedHeaders(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	testChain := cm.PrimaryChain()
+	queued := mockHeader{slot: 10, blockNumber: 1}
+	require.NoError(t, testChain.AddBlockHeader(context.Background(), queued))
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	covered := &atomic.Bool{}
+	ranges := make(chan ocommon.Point, 4)
+	ls := &LedgerState{
+		chain: testChain,
+		ctx:   t.Context(),
+		slotClock: NewSlotClock(
+			gatedHorizonSlotTimeProvider{
+				SlotTimeProvider: newMockSlotTimeProvider(
+					systemStart,
+					time.Second,
+					100,
+				),
+				slot:    90,
+				covered: covered,
+			},
+			DefaultSlotClockConfig(),
+		),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				_ ouroboros.ConnectionId,
+				start ocommon.Point,
+				_ ocommon.Point,
+			) (uint64, error) {
+				ranges <- start
+				return 0, nil
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+	t.Cleanup(func() {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		}
+	})
+
+	e := futureHeaderEvent(90, arrival)
+	e.ConnectionId = testRecycleConnId()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	results := awaitAdmissionAsync(ctx, ls, e)
+
+	start := testutil.RequireReceive(
+		t,
+		ranges,
+		testutil.AsyncWait,
+		"a header held past the forecast horizon must not strand the queued headers that advance the ledger",
+	)
+	require.Equal(t, queued.SlotNumber(), start.Slot)
+
+	covered.Store(true)
+	ls.notifySnapshotPublished()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not resume once the ledger could forecast the slot",
+	)
+	require.NoError(t, got.err)
+	require.True(t, got.accepted)
+}
