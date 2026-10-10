@@ -1657,6 +1657,41 @@ journal and replayed in bounded batches before the candidate is published. A
 busy pass that cannot catch up leaves the live pool unchanged and is retried
 after a later chain update; it is not a failed admission or a partial swap.
 
+Mempool admission, revalidation, block-candidate selection and forged-block
+validation each validate a transaction against the UTxO overlay and a state
+overlay (`utxoref.StateOverlay`) holding the earlier pending or selected
+transactions that change ledger state beyond UTxOs: reward withdrawals,
+certificates, direct deposits and governance proposals. The overlay layers
+them over the ledger view with gouroboros `BlockLedgerState`, so a transaction
+is checked against the balances, registrations and deposits those leave rather
+than the stored ones. The layered state does not itself carry the view's
+optional validation capabilities, such as the minimum pool margin, committee
+state and the phase-2 skip, so era validation looks each one up on the state
+it is given and then on the provider beneath its validation adapters. The overlay folds each recorded transaction once, on the
+next validation, so a pool of k such transactions costs k applications in total
+and a pool rebuild costs k, not k per validation. The folded state caches
+what it read from the ledger, so it is keyed to the ledger snapshot
+publication generation (which an epoch rollover advances without moving the
+tip) and a validation at another generation folds again from the first
+transaction. A refold cannot tell whether the new ledger state already contains
+some of the recorded transactions, so the overlay reports that its base moved
+and the mempool, which holds transactions that peers' blocks can confirm,
+rebuilds the pool before judging an admission;
+admissions that raced the same move share one rebuild. Block builders hold only
+transactions not yet in any block and ignore the report. It
+tracks no UTxOs: spent and created outputs come from the UTxO overlay, which covers every
+pending transaction. The pool records a state-changing transaction as its own
+retained CBOR slice, shared with the pool entry and counted once by the pool's
+byte counter; the transaction is decoded only while it is folded. The byte
+counter charges each pending transaction its CBOR plus the CBOR carried by the
+decoded outputs the UTxO overlay keeps for it, which decoding copies out of the
+transaction. Capacity, both watermarks, eviction and admission headroom use
+that figure, and TxSubmission intake that loses a headroom race waits for it
+rather than for the advertised size, which it can exceed. The overlay
+cannot drop a transaction, so a removal rebuilds it from the survivors, except
+that removing transactions with no state effects keeps the folded state. A
+UTxO-only transaction is not recorded.
+
 ### Ouroboros Dependency Wiring
 
 Three components consume callbacks from `ouroboros.Ouroboros`, which makes it
@@ -6912,6 +6947,13 @@ right now rather than that it judged a transaction and declined it, so
 and answers 503 — the same answer its missing-submitter branch already gave —
 instead of reporting the transaction itself as rejected with a 400.
 
+An admission whose ledger publication moves again after each pool rebuild
+stops after a fixed number of reconciles and returns
+`mempool.ErrPendingStateMoved`: no verdict was reached, so the same
+transaction may be admitted once the ledger settles. `api/blockfrost` answers
+it with `ErrMempoolUnavailable`, and LocalTxSubmission reports it as
+unavailability rather than as a ledger failure.
+
 Admission also runs ledger validation, which resolves the transaction's inputs
 through the database, so a storage fault returns from `AddTransaction` on the
 same path as a rule violation. `api/blockfrost` classifies the sentinels the
@@ -6944,18 +6986,26 @@ cursors and swaps the candidate overlay, ordered transaction slice, hash index,
 and byte totals; DAG additionally rebuilds and swaps its dependency graph. Its
 work is independent of total pool occupancy. Shutdown terminates an in-flight
 rebuild, and bounded ledger-generation retries prevent chain activity from
-creating a busy loop. If an overlay entry is unexpectedly missing from the
-transaction hash index, both FIFO and DAG reject its dependent transaction cone
-rather than retaining descendants whose parent body cannot be revalidated.
+creating a busy loop. A transaction that fails revalidation leaves the
+candidate overlay, but its descendants are still validated rather than dropped
+with it: a parent fails as readily because a block confirmed it as because it
+became invalid, and only the ledger tells the two apart, by holding the
+parent's outputs or not. A descendant of a confirmed parent therefore stays,
+and one of an invalid parent fails on its missing input. An overlay entry
+unexpectedly missing from the transaction hash index is rejected the same
+way, and its descendants are judged against the ledger without its outputs.
 
 `LedgerState.WithTxValidationSession` is the narrow boundary for every backend
 rebuild. It pins one published ledger generation (tip, era, and protocol
 parameters), one validation reference slot, and one repeatable-read
-metadata/blob transaction for every transaction in the batch. The mempool
-verifies that generation again immediately before the swap; if a block or
-rollback published a newer one, the candidate is discarded and retried from
-the live pool. This prevents one FIFO or DAG candidate from mixing transaction
-results from different ledger or database views.
+metadata/blob transaction for every transaction in the batch.
+The session's commit callback adds the mempool commit boundary: the ledger
+publication read lock covers the final generation check and only the admission
+or candidate swap that follows it. A block or rollback therefore publishes
+either before the check, causing the admission or candidate to retry, or after
+the mempool commit, when its chain update can revalidate that committed state.
+This prevents an admission or FIFO or DAG candidate from surviving with a
+verdict from an older ledger or database view.
 
 CBOR decoding and ledger validation run without the primary pool RW lock or
 consumer lock. `Transactions` likewise snapshots transaction values under the
@@ -13171,6 +13221,17 @@ snapshots are never nil. White-box test fixtures that construct `LedgerState{}`
 directly must call `publishSnapshotsLocked()` (or `NewLedgerState` /
 `SetTipForTesting`) themselves before exercising any snapshot-reading path, or
 the read will nil-dereference.
+
+Transaction validation pins one publication generation and a repeatable-read
+database transaction. A block apply, epoch rollover, or rollback commits its
+database changes before it can publish the matching in-memory snapshots. Each
+writer marks a validation transition under `txValidationCommitMutex` before
+starting the durable transaction and clears it only after publication. A
+validation session may continue
+its read-only work during the interval, but `stillCurrent` reports false and
+`commitIfCurrent` rejects its final mempool or forging mutation. Starting a
+transition also waits for any commit callback already holding the mutex, so a
+writer cannot make database state durable midway through that callback.
 
 ## Configuration
 

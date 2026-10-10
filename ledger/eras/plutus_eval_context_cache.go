@@ -207,7 +207,7 @@ func plutusEvalContext(
 	costModelParams []int64,
 	syntheticV2 bool,
 ) (*cek.EvalContext, error) {
-	if provider, ok := ls.(PlutusEvalContextCacheProvider); ok {
+	if provider, ok := stateCapability[PlutusEvalContextCacheProvider](ls); ok {
 		if cache := provider.PlutusEvalContextCache(); cache != nil {
 			return cache.get(
 				version,

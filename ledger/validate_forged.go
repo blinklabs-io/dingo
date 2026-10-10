@@ -129,9 +129,21 @@ func (ls *LedgerState) validateForgedTxs(
 	// persistent UTxO set.
 	return ls.WithTxValidationSession(
 		ctx,
-		func(validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error, stillCurrent func() bool) error {
+		func(
+			validate func(
+				ledger.Transaction,
+				map[utxoref.Key]struct{},
+				map[utxoref.Key]lcommon.Utxo,
+				*utxoref.StateOverlay,
+			) error,
+			stillCurrent func() bool,
+			_ func(func() error) (bool, error),
+		) error {
 			consumedUtxos := make(map[utxoref.Key]struct{}, len(txs)*2)
 			createdUtxos := make(map[utxoref.Key]lcommon.Utxo, len(txs)*4)
+			// pendingAccounts: reward-account effects of earlier transactions in
+			// this block, so a later withdrawal sees the balance they leave.
+			pendingAccounts := utxoref.NewStateOverlay()
 
 			for _, tx := range txs {
 				if err := ctx.Err(); err != nil {
@@ -142,7 +154,12 @@ func (ls *LedgerState) validateForgedTxs(
 						"ledger state changed during forged transaction validation",
 					)
 				}
-				if err := validate(tx, consumedUtxos, createdUtxos); err != nil {
+				if err := validate(
+					tx,
+					consumedUtxos,
+					createdUtxos,
+					pendingAccounts,
+				); err != nil {
 					return fmt.Errorf(
 						"tx %s in forged block at slot %d: %w",
 						tx.Hash(),
@@ -162,6 +179,7 @@ func (ls *LedgerState) validateForgedTxs(
 				for _, input := range tx.Consumed() {
 					consumedUtxos[utxoref.ForInput(input)] = struct{}{}
 				}
+				pendingAccounts.Apply(tx)
 			}
 
 			return nil

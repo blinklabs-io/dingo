@@ -71,7 +71,9 @@
     # "default" remains a compatibility alias for "fifo".
     # provider: "fifo"
     # config:
-      # Mempool capacity in bytes. Left commented out so the run-mode default
+      # Mempool capacity in bytes. A pending transaction counts its CBOR plus
+      # the CBOR of the decoded outputs the pool keeps for it. Left commented
+      # out so the run-mode default
       # applies: 1048576 (1 MiB) for standard modes, 26214400 (25 MiB) for the
       # leios run mode. An explicit value here overrides both defaults, so a
       # leios node would silently run with the smaller capacity — uncomment

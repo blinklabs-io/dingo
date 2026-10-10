@@ -2017,8 +2017,6 @@ func addBlocksSerially(t *testing.T, n *Node, blocks []gledger.Block) {
 // (epochLength=100, real testdata blocks are 20 slots apart), and confirms
 // the tip actually advances again after each one, not just the first.
 func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
-	t.Parallel()
-
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNodeWithGenesis(
 		t, numBlocks, smallEpochGenesisCfgForLifecycleTest(t),
