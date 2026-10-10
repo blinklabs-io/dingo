@@ -4102,6 +4102,10 @@ the verdict is computed, not *whether* it is enforced; the marker
 what forces that apply-time recheck, so its retention is load-bearing (see the
 retention-floor, eviction-horizon, and marker-restore invariants below and in
 `DATABASE.md`).
+The persisted marker also carries the supplying peer's remote address. Startup
+restores that address for the chainsync deny cooldown, but cannot reconstruct
+the original connection lifetime or its local address; only live in-memory
+attribution can target that exact connection's history and closure.
 
 The concrete acceptance case the defer *does* exist for is a genesis-delegate
 **reassignment** that the apply cursor has not reached yet. A
@@ -5938,7 +5942,7 @@ Four rules shape the deferred-header path beyond the marker itself.
 - **Bounded set.** The deferred set holds at most `defaultMaxDeferredHeaderMarkers` entries. The rollback-horizon eviction is keyed to the applied tip, so it cannot bound the set while the header chain runs far ahead of a stalled tip; `boundDeferredHeaderValidation` runs after each admission and, once over the cap, evicts the lowest-slot entries and their `dh` blob markers. Concurrent bounds serialize their snapshot, durable floor write, and marker deletion so an older floor cannot overwrite a newer one. Startup restore applies the same cap before returning, persisting the raised floor before deleting excess markers. A non-Mithril block below the floor gets full header verification at apply with or without a marker, so eviction never skips a check. The floor is reloaded at startup.
 - **Size limits at header time.** `verifyHeaderSizeLimits` rejects a Shelley-and-later header declaring a body larger than `maxBlockBodySize` or whose encoding exceeds `maxBlockHeaderSize`, using the applied ledger's parameters. A header from an epoch later than the ledger tip's defers instead of failing, because the parameters may change at the boundary.
 - **Admission-verified replay.** With `BlockPipelineValidateEnabled`, a block whose admission verification completed is recorded in a bounded in-memory set keyed by slot and hash. The pipeline's nonce provider tells the validate stage to skip that slot, and block-pipeline replay accepts the block without the VRF/KES and operational-certificate re-check when the recorded hash matches exactly. A block with no record, a record for another hash at its slot, or a deferred admission is verified in full. The set is not persisted, so blocks admitted before a restart are verified in full.
-- **Peer attribution.** The deferred marker records the connection that supplied the block (not persisted). When apply-time validation rejects the block with a verdict on the block itself, rather than a gap in local state, recovery publishes a `ChainsyncResyncEvent` with reason `deferred header validation failure` for that connection only. The chainsync handler treats it like the other peer-fault reasons: it clears that connection's observed header history, denies the peer in peer governance for the divergent-peer cooldown, and closes the connection.
+- **Peer attribution.** The deferred marker records the connection that supplied the block; persistence retains only its remote address. When apply-time validation rejects the block with a verdict on the block itself, rather than a gap in local state, recovery publishes a `ChainsyncResyncEvent` with reason `deferred header validation failure`. Live in-memory attribution lets the chainsync handler clear and close that exact connection as well as deny its remote address for the divergent-peer cooldown. After restart, the restored remote address still supports the cooldown, but does not identify the original connection lifetime for targeted history cleanup or closure.
 
 Header state verification resolves the producing pool's electing stake snapshot row once per header (`resolveElectingSnapshot`) for both the VRF-key cutoff and the leader stake.
 

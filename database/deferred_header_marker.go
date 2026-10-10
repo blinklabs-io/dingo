@@ -36,6 +36,20 @@ func deferredHeaderMarkerBlobKey(key string) []byte {
 // SetDeferredHeaderMarker durably records that the block named by key
 // (`<slot>:<hash hex>`) has deferred header checks outstanding.
 func (d *Database) SetDeferredHeaderMarker(key string) error {
+	return d.SetDeferredHeaderMarkerWithValue(key, []byte{1})
+}
+
+// SetDeferredHeaderMarkerWithValue records an opaque marker payload with the
+// same durability and isolation as SetDeferredHeaderMarker. The one-byte
+// payload used by SetDeferredHeaderMarker remains the legacy unattributed
+// encoding.
+func (d *Database) SetDeferredHeaderMarkerWithValue(
+	key string,
+	value []byte,
+) error {
+	if len(value) == 0 {
+		return errors.New("deferred header marker value is empty")
+	}
 	txn := d.BlobTxn(true)
 	defer txn.Rollback() //nolint:errcheck
 	store := txn.BlobStore()
@@ -49,7 +63,7 @@ func (d *Database) SetDeferredHeaderMarker(key string) error {
 	if err := store.Set(
 		blobTxn,
 		deferredHeaderMarkerBlobKey(key),
-		[]byte{1},
+		value,
 	); err != nil {
 		return fmt.Errorf("SetDeferredHeaderMarker(%q): %w", key, err)
 	}
@@ -59,27 +73,38 @@ func (d *Database) SetDeferredHeaderMarker(key string) error {
 	return nil
 }
 
-// HasDeferredHeaderMarker reports whether a marker exists for key. A database
-// without a blob store has no markers.
-func (d *Database) HasDeferredHeaderMarker(key string) (bool, error) {
+// GetDeferredHeaderMarkerValue returns a copy of a marker's opaque payload.
+// found is false when no marker exists for key.
+func (d *Database) GetDeferredHeaderMarkerValue(
+	key string,
+) (value []byte, found bool, err error) {
 	txn := d.BlobTxn(false)
 	defer txn.Rollback() //nolint:errcheck
 	store := txn.BlobStore()
 	if store == nil {
-		return false, nil
+		return nil, false, nil
 	}
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
-		return false, types.ErrNilTxn
+		return nil, false, types.ErrNilTxn
 	}
-	_, err := store.Get(blobTxn, deferredHeaderMarkerBlobKey(key))
+	value, err = store.Get(blobTxn, deferredHeaderMarkerBlobKey(key))
 	if err != nil {
 		if errors.Is(err, types.ErrBlobKeyNotFound) {
-			return false, nil
+			return nil, false, nil
 		}
-		return false, fmt.Errorf("HasDeferredHeaderMarker(%q): %w", key, err)
+		return nil, false, fmt.Errorf(
+			"GetDeferredHeaderMarkerValue(%q): %w", key, err,
+		)
 	}
-	return true, nil
+	return append([]byte(nil), value...), true, nil
+}
+
+// HasDeferredHeaderMarker reports whether a marker exists for key. A database
+// without a blob store has no markers.
+func (d *Database) HasDeferredHeaderMarker(key string) (bool, error) {
+	_, found, err := d.GetDeferredHeaderMarkerValue(key)
+	return found, err
 }
 
 // DeleteDeferredHeaderMarker removes the marker for key. Deleting an absent
@@ -111,6 +136,30 @@ func (d *Database) DeleteDeferredHeaderMarker(key string) error {
 
 // ListDeferredHeaderMarkers returns the key of every persisted marker.
 func (d *Database) ListDeferredHeaderMarkers() ([]string, error) {
+	markers, err := d.ListDeferredHeaderMarkerValues()
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(markers))
+	for _, marker := range markers {
+		keys = append(keys, marker.Key)
+	}
+	return keys, nil
+}
+
+// DeferredHeaderMarker is one persisted deferred-header marker and its opaque
+// payload. The payload is byte{1} for a legacy unattributed marker.
+type DeferredHeaderMarker struct {
+	Key   string
+	Value []byte
+}
+
+// ListDeferredHeaderMarkerValues returns every persisted marker and payload in
+// one blob-store read transaction.
+func (d *Database) ListDeferredHeaderMarkerValues() (
+	[]DeferredHeaderMarker,
+	error,
+) {
 	txn := d.BlobTxn(false)
 	defer txn.Rollback() //nolint:errcheck
 	store := txn.BlobStore()
@@ -130,16 +179,25 @@ func (d *Database) ListDeferredHeaderMarkers() ([]string, error) {
 		return nil, types.ErrBlobStoreUnavailable
 	}
 	defer it.Close()
-	var keys []string
+	var markers []DeferredHeaderMarker
 	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 		item := it.Item()
 		if item == nil {
 			continue
 		}
-		keys = append(keys, string(item.Key()[len(prefix):]))
+		value, err := item.ValueCopy(nil)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"ListDeferredHeaderMarkerValues: copy value: %w", err,
+			)
+		}
+		markers = append(markers, DeferredHeaderMarker{
+			Key:   string(item.Key()[len(prefix):]),
+			Value: value,
+		})
 	}
 	if err := it.Err(); err != nil {
-		return nil, fmt.Errorf("ListDeferredHeaderMarkers: %w", err)
+		return nil, fmt.Errorf("ListDeferredHeaderMarkerValues: %w", err)
 	}
-	return keys, nil
+	return markers, nil
 }

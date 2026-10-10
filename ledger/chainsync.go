@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -147,6 +148,9 @@ const (
 
 	deferredHeaderValidationSyncStatePrefix = "deferred_header_validation:"
 	deferredHeaderValidationSyncStateValue  = "true"
+	// deferredHeaderMarkerSourceSeparator splits the marker from the address
+	// of the peer that supplied the block.
+	deferredHeaderMarkerSourceSeparator = "@"
 	// deferredHeaderValidationFloorSyncStateKey must not start with
 	// deferredHeaderValidationSyncStatePrefix, which marker scans match.
 	deferredHeaderValidationFloorSyncStateKey = "deferred_header_validation_floor"
@@ -895,7 +899,13 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 	}
 	var restoreErr error
 	for attempt := 1; attempt <= deferredMarkerRestoreMaxAttempts; attempt++ {
-		restoreErr = ls.db.SetDeferredHeaderMarker(k)
+		ls.deferredHeaderValidationMu.Lock()
+		source := ls.deferredHeaderValidation[k]
+		ls.deferredHeaderValidationMu.Unlock()
+		restoreErr = ls.db.SetDeferredHeaderMarkerWithValue(
+			k,
+			deferredHeaderMarkerBlobValue(source),
+		)
 		if restoreErr == nil {
 			return nil
 		}
@@ -942,8 +952,7 @@ func (ls *LedgerState) deleteDeferredMarkerByKey(k string) error {
 // snapshot retention floor (PrunePoolSnapshotsWithRetentionFloor) covers
 // headers still awaiting apply from before the restart -- otherwise the first
 // post-restart epoch cleanup could prune a pool-stake snapshot such a header
-// needs. Abandoned markers loaded here are harmless: the retention guard evicts
-// any whose slot the apply cursor has already passed on its next run.
+// needs.
 //
 // This MUST fail closed. A scan failure that is swallowed leaves the in-memory
 // set empty, so the retention floor does not cover pre-restart deferred headers
@@ -960,13 +969,20 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 	if ls.db == nil {
 		return nil
 	}
-	keys, err := ls.db.ListDeferredHeaderMarkers()
+	markers, err := ls.db.ListDeferredHeaderMarkerValues()
 	if err != nil {
 		return fmt.Errorf(
 			"repopulate deferred-header set from persisted markers: %w",
 			err,
 		)
 	}
+	keys := make([]string, 0, len(markers))
+	blobValues := make(map[string][]byte, len(markers))
+	for _, marker := range markers {
+		keys = append(keys, marker.Key)
+		blobValues[marker.Key] = marker.Value
+	}
+	legacyKeys := make(map[string]struct{})
 	// Markers and the eviction floor an earlier version wrote to sync_state
 	// are still honoured.
 	if ls.db.Metadata() != nil {
@@ -981,13 +997,12 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 			)
 		}
 		for _, syncKey := range legacy {
-			keys = append(
-				keys,
-				strings.TrimPrefix(
-					syncKey,
-					deferredHeaderValidationSyncStatePrefix,
-				),
+			mapKey := strings.TrimPrefix(
+				syncKey,
+				deferredHeaderValidationSyncStatePrefix,
 			)
+			keys = append(keys, mapKey)
+			legacyKeys[mapKey] = struct{}{}
 		}
 		floorValue, err := ls.db.GetSyncState(
 			deferredHeaderValidationFloorSyncStateKey,
@@ -1009,23 +1024,62 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 			ls.deferredHeaderValidationMu.Unlock()
 		}
 	}
-	ls.deferredHeaderValidationMu.Lock()
-	if len(keys) > 0 && ls.deferredHeaderValidation == nil {
-		ls.deferredHeaderValidation = make(
-			map[string]ouroboros.ConnectionId, len(keys),
-		)
-	}
-	restored := 0
+	slices.Sort(keys)
+	keys = slices.Compact(keys)
+	restoredSources := make(map[string]ouroboros.ConnectionId, len(keys))
 	for _, mapKey := range keys {
 		if mapKey == "" {
 			continue
 		}
-		// A restored marker has no known source: connection identifiers do
-		// not survive a restart.
-		ls.deferredHeaderValidation[mapKey] = ouroboros.ConnectionId{}
-		restored++
+		payload, persisted := blobValues[mapKey]
+		var source ouroboros.ConnectionId
+		if persisted {
+			source, err = deferredHeaderMarkerBlobSource(payload)
+			if err != nil {
+				return fmt.Errorf(
+					"decode deferred-header marker %q: %w", mapKey, err,
+				)
+			}
+		}
+		if _, isLegacy := legacyKeys[mapKey]; isLegacy {
+			syncKey := deferredHeaderValidationSyncStatePrefix + mapKey
+			value, err := ls.db.GetSyncState(syncKey, nil)
+			if err != nil {
+				return fmt.Errorf(
+					"read deferred-header marker %q: %w", syncKey, err,
+				)
+			}
+			if value != "" {
+				legacySource, err := deferredHeaderMarkerSource(value)
+				if err != nil {
+					return fmt.Errorf(
+						"decode deferred-header marker %q: %w", syncKey, err,
+					)
+				}
+				if source.RemoteAddr == nil {
+					source = legacySource
+				} else if legacySource.RemoteAddr != nil &&
+					source.RemoteAddr.String() != legacySource.RemoteAddr.String() {
+					return fmt.Errorf(
+						"deferred-header marker %q has conflicting peer addresses",
+						mapKey,
+					)
+				}
+			}
+		}
+		restoredSources[mapKey] = source
+	}
+	ls.deferredHeaderValidationMu.Lock()
+	if len(restoredSources) > 0 && ls.deferredHeaderValidation == nil {
+		ls.deferredHeaderValidation = make(
+			map[string]ouroboros.ConnectionId, len(restoredSources),
+		)
+	}
+	for mapKey, source := range restoredSources {
+		ls.deferredHeaderValidation[mapKey] = source
 	}
 	ls.deferredHeaderValidationMu.Unlock()
+	restored := len(restoredSources)
 	if restored > 0 {
 		ls.config.Logger.Info(
 			"repopulated deferred-header set from persisted markers",
@@ -1048,8 +1102,9 @@ func (ls *LedgerState) persistDeferredHeaderValidation(
 	if ls.db == nil {
 		return nil
 	}
-	if err := ls.db.SetDeferredHeaderMarker(
+	if err := ls.db.SetDeferredHeaderMarkerWithValue(
 		headerValidationPointKey(point),
+		deferredHeaderMarkerBlobValue(ls.deferredHeaderSource(point)),
 	); err != nil {
 		return fmt.Errorf("set deferred header validation marker: %w", err)
 	}
@@ -1136,7 +1191,7 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 	if ls.db == nil {
 		return required, source, nil
 	}
-	persisted, err := ls.db.HasDeferredHeaderMarker(
+	payload, persisted, err := ls.db.GetDeferredHeaderMarkerValue(
 		headerValidationPointKey(point),
 	)
 	if err != nil {
@@ -1144,6 +1199,22 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 			"read deferred header validation marker: %w",
 			err,
 		)
+	}
+	if persisted {
+		persistedSource, err := deferredHeaderMarkerBlobSource(payload)
+		if err != nil {
+			return false, source, fmt.Errorf(
+				"decode deferred header validation marker: %w", err,
+			)
+		}
+		if source.RemoteAddr == nil {
+			source = persistedSource
+		} else if persistedSource.RemoteAddr != nil &&
+			source.RemoteAddr.String() != persistedSource.RemoteAddr.String() {
+			return false, source, errors.New(
+				"deferred header validation markers have conflicting peer addresses",
+			)
+		}
 	}
 	if ls.db.Metadata() == nil {
 		return required || persisted, source, nil
@@ -1158,8 +1229,80 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 			err,
 		)
 	}
-	legacy := value == deferredHeaderValidationSyncStateValue
-	return required || persisted || legacy, source, nil
+	marked := value != ""
+	if marked {
+		persistedSource, err := deferredHeaderMarkerSource(value)
+		if err != nil {
+			return false, source, fmt.Errorf(
+				"decode deferred header validation marker: %w",
+				err,
+			)
+		}
+		if source == (ouroboros.ConnectionId{}) {
+			source = persistedSource
+		}
+	}
+	return required || persisted || marked, source, nil
+}
+
+// deferredHeaderMarkerValue encodes a persisted deferred marker. The value is
+// the bare marker for an unattributed block, and the marker followed by the
+// supplying peer's remote address otherwise, so a reader that only checks the
+// prefix still recognizes it.
+func deferredHeaderMarkerValue(source ouroboros.ConnectionId) string {
+	if source.RemoteAddr == nil {
+		return deferredHeaderValidationSyncStateValue
+	}
+	value := deferredHeaderValidationSyncStateValue +
+		deferredHeaderMarkerSourceSeparator +
+		source.RemoteAddr.String()
+	if _, err := deferredHeaderMarkerSource(value); err != nil {
+		return deferredHeaderValidationSyncStateValue
+	}
+	return value
+}
+
+func deferredHeaderMarkerBlobValue(source ouroboros.ConnectionId) []byte {
+	value := deferredHeaderMarkerValue(source)
+	if value == deferredHeaderValidationSyncStateValue {
+		return []byte{1}
+	}
+	return []byte(value)
+}
+
+func deferredHeaderMarkerBlobSource(
+	value []byte,
+) (ouroboros.ConnectionId, error) {
+	if bytes.Equal(value, []byte{1}) {
+		return ouroboros.ConnectionId{}, nil
+	}
+	return deferredHeaderMarkerSource(string(value))
+}
+
+// deferredHeaderMarkerSource decodes the peer address stored by
+// deferredHeaderMarkerValue. The exact bare value is the unattributed legacy
+// encoding; every other value must be a valid attributed marker.
+func deferredHeaderMarkerSource(value string) (ouroboros.ConnectionId, error) {
+	if value == deferredHeaderValidationSyncStateValue {
+		return ouroboros.ConnectionId{}, nil
+	}
+	prefix := deferredHeaderValidationSyncStateValue +
+		deferredHeaderMarkerSourceSeparator
+	addr, found := strings.CutPrefix(value, prefix)
+	if !found || addr == "" {
+		return ouroboros.ConnectionId{}, fmt.Errorf("invalid marker value %q", value)
+	}
+	addrPort, err := netip.ParseAddrPort(addr)
+	if err != nil {
+		return ouroboros.ConnectionId{}, fmt.Errorf(
+			"parse marker peer address %q: %w",
+			addr,
+			err,
+		)
+	}
+	return ouroboros.ConnectionId{
+		RemoteAddr: net.TCPAddrFromAddrPort(addrPort),
+	}, nil
 }
 
 func (ls *LedgerState) verifyDeferredBlockHeaderState(

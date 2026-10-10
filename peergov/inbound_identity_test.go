@@ -70,6 +70,26 @@ func deniedInboundCount(pg *PeerGovernor) float64 {
 	)
 }
 
+func connectInboundIdentityPeer(
+	pg *PeerGovernor,
+	idx int,
+	remoteIP net.IP,
+	remotePort int,
+) ouroboros.ConnectionId {
+	connId := ouroboros.ConnectionId{
+		LocalAddr: &net.TCPAddr{
+			IP:   net.IPv4(44, 0, 0, 9),
+			Port: 3001,
+		},
+		RemoteAddr: &net.TCPAddr{IP: remoteIP, Port: remotePort},
+	}
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	pg.peers[idx].Connection = &PeerConnection{Id: connId, IsClient: true}
+	pg.withholdDeniedUpstreamLocked(pg.peers[idx])
+	return connId
+}
+
 // Denying an inbound peer must not turn its host away: the peer may be a
 // downstream consumer that dials us from a fresh source port, and refusing
 // the connection cuts it off. Inbound-only records are never a chain
@@ -324,4 +344,91 @@ func TestInboundTopologyDenialDoesNotRefuseArrival(t *testing.T) {
 
 	assert.Equal(t, float64(0), deniedInboundCount(pg))
 	assert.False(t, pg.GetPeers()[0].InboundConnectedAt.IsZero())
+}
+
+// A peer denied for a deferred-header verdict stays out of chain selection
+// when it reconnects from a new source port, and the honest peer is never
+// affected, so selection recovers on the other peer.
+func TestDeniedPeerStaysWithheldAcrossSourcePorts(t *testing.T) {
+	t.Parallel()
+	pg := newInboundIdentityGovernor(t)
+	seedTopologyPeer(
+		pg, "44.0.0.1:3001", "44.0.0.1:3001",
+		"bad-root", PeerSourceTopologyPublicRoot,
+	)
+	seedTopologyPeer(
+		pg, "44.0.0.2:3001", "44.0.0.2:3001",
+		"honest-root", PeerSourceTopologyPublicRoot,
+	)
+	badId := connectInboundIdentityPeer(
+		pg, 0, net.IPv4(44, 0, 0, 1), 51000,
+	)
+	honestId := connectInboundIdentityPeer(
+		pg, 1, net.IPv4(44, 0, 0, 2), 3001,
+	)
+	require.True(t, pg.IsChainSelectionEligible(badId), "control")
+	require.True(t, pg.IsChainSelectionEligible(honestId), "control")
+
+	for port := 51001; port < 51004; port++ {
+		reconnectId := connectInboundIdentityPeer(
+			pg, 0, net.IPv4(44, 0, 0, 1), port,
+		)
+		if port == 51001 {
+			pg.DenyPeer(badId.RemoteAddr.String(), time.Minute)
+		}
+		assert.False(
+			t,
+			pg.IsChainSelectionEligible(reconnectId),
+			"denied peer must stay withheld from source port %d",
+			port,
+		)
+		assert.True(
+			t,
+			pg.IsChainSelectionEligible(honestId),
+			"the honest peer remains the eligible upstream",
+		)
+	}
+}
+
+func TestStalePortDenialDoesNotCollapseSharedTopologyHost(t *testing.T) {
+	t.Parallel()
+	pg := newInboundIdentityGovernor(t)
+	seedTopologyPeer(
+		pg, "44.0.0.1:3001", "44.0.0.1:3001",
+		"first-root", PeerSourceTopologyPublicRoot,
+	)
+	seedTopologyPeer(
+		pg, "44.0.0.1:3002", "44.0.0.1:3002",
+		"second-root", PeerSourceTopologyPublicRoot,
+	)
+	first := connectInboundIdentityPeer(pg, 0, net.IPv4(44, 0, 0, 1), 51001)
+	second := connectInboundIdentityPeer(pg, 1, net.IPv4(44, 0, 0, 1), 51002)
+
+	pg.DenyPeer("44.0.0.1:51000", time.Minute)
+
+	assert.True(t, pg.IsChainSelectionEligible(first))
+	assert.True(t, pg.IsChainSelectionEligible(second))
+}
+
+func TestStalePortDenialDoesNotDenyUnrelatedPeerOnSharedHost(t *testing.T) {
+	t.Parallel()
+	pg := newInboundIdentityGovernor(t)
+	seedTopologyPeer(
+		pg, "44.0.0.1:3001", "44.0.0.1:3001",
+		"bad-root", PeerSourceTopologyPublicRoot,
+	)
+	pg.peers = append(pg.peers, &Peer{
+		Address:           "44.0.0.1:3002",
+		NormalizedAddress: "44.0.0.1:3002",
+		Source:            PeerSourceP2PGossip,
+	})
+	bad := connectInboundIdentityPeer(pg, 0, net.IPv4(44, 0, 0, 1), 51001)
+	unrelated := connectInboundIdentityPeer(
+		pg, 1, net.IPv4(44, 0, 0, 1), 51002,
+	)
+
+	pg.DenyPeer("44.0.0.1:51000", time.Minute)
+
+	assert.False(t, pg.IsChainSelectionEligible(bad))
+	assert.True(t, pg.IsChainSelectionEligible(unrelated))
 }

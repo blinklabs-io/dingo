@@ -45,6 +45,7 @@ import (
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -6010,6 +6011,15 @@ func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	require.Len(t, ls.pendingBlockfetchEvents, 1)
 	assert.True(t, ls.consumeDeferredHeaderValidation(point))
 	assert.True(t, deferredMarkerPersisted(t, ls, point))
+	payload, found, err := ls.db.GetDeferredHeaderMarkerValue(
+		headerValidationPointKey(point),
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	source, err := deferredHeaderMarkerBlobSource(payload)
+	require.NoError(t, err)
+	require.NotNil(t, source.RemoteAddr)
+	assert.Equal(t, "127.0.0.1:3001", source.RemoteAddr.String())
 }
 
 // TestBlockfetchSkipsHeaderCryptoForVerifiedNonHeadQueuedHeader pins the
@@ -19018,6 +19028,265 @@ func TestRequestChainsyncResyncCoalescesPerConnectionWithinWindow(
 	fixture.ls.resyncCoalesceMutex.Unlock()
 	fixture.ls.requestChainsyncResync(fixture.connId, "next episode", nil)
 	waitFor(4, "a request after the window must be published")
+}
+
+// A deferred marker restored after a restart keeps the address of the peer
+// that supplied the block, so a later apply-time failure still names it.
+func TestDeferredHeaderSourceSurvivesRestart(t *testing.T) {
+	t.Parallel()
+
+	connId := testRecycleConnId()
+	tb := createTestBlock(t, [32]byte{48}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.validationEnabled = true
+	ls.activeBlockfetchConnId = connId
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.chain = &chain.Chain{}
+
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	require.NoError(t, handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
+		ConnectionId: connId,
+		Block:        tb.block,
+		Point:        point,
+	}, nil))
+
+	restarted := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	require.NoError(t, restarted.repopulateDeferredHeaderValidation())
+
+	// The block pipeline reads the in-memory map only, with no database
+	// fallback, so the restore itself must carry the source. Read it before
+	// deferredHeaderValidationRequired, which consumes the entry.
+	inMemory := restarted.deferredHeaderSource(point)
+	require.NotNil(t, inMemory.RemoteAddr, "repopulate dropped the source")
+	assert.Equal(t, connId.RemoteAddr.String(), inMemory.RemoteAddr.String())
+
+	required, source, err := restarted.deferredHeaderValidationRequired(
+		point,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, required)
+	require.NotNil(t, source.RemoteAddr, "restored marker lost its source")
+	assert.Equal(t, connId.RemoteAddr.String(), source.RemoteAddr.String())
+}
+
+func TestDeferredHeaderMarkerDoesNotPersistUnparseableSource(t *testing.T) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{53}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	ls.markDeferredHeaderValidationFrom(point, ouroboros.ConnectionId{
+		RemoteAddr: &net.TCPAddr{Port: 8080},
+	})
+	require.NoError(t, ls.persistDeferredHeaderValidation(point))
+
+	value, found, err := db.GetDeferredHeaderMarkerValue(
+		headerValidationPointKey(point),
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, []byte{1}, value)
+
+	restarted := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	require.NoError(t, restarted.repopulateDeferredHeaderValidation())
+	assert.Equal(
+		t,
+		ouroboros.ConnectionId{},
+		restarted.deferredHeaderSource(point),
+	)
+}
+
+// A marker rewritten because its point was re-deferred during the stale delete
+// keeps the supplying peer's address.
+// Not t.Parallel: swaps the package-level afterDeferredMarkerDeleteHook seam.
+func TestDeferredMarkerRestoreKeepsSource(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{50}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	connId := testRecycleConnId()
+	point := ocommon.Point{Slot: 1_170, Hash: []byte{0x13}}
+	require.NoError(t, ls.persistDeferredHeaderValidation(point))
+
+	t.Cleanup(func() { afterDeferredMarkerDeleteHook = nil })
+	afterDeferredMarkerDeleteHook = func() {
+		ls.markDeferredHeaderValidationFrom(point, connId)
+	}
+	require.NoError(t, ls.deleteDeferredMarkerUnlessReadmitted(
+		headerValidationPointKey(point),
+	))
+
+	value, found, err := db.GetDeferredHeaderMarkerValue(
+		headerValidationPointKey(point),
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	decoded, err := deferredHeaderMarkerBlobSource(value)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		connId.RemoteAddr.String(),
+		decoded.RemoteAddr.String(),
+		"restored marker lost the supplying peer",
+	)
+}
+
+// A marker written by an earlier release carries no source and still restores.
+func TestDeferredHeaderLegacyMarkerRestoresWithoutSource(t *testing.T) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{49}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	require.NoError(t, db.SetSyncState(
+		deferredHeaderValidationSyncStateKey(point),
+		deferredHeaderValidationSyncStateValue,
+		nil,
+	))
+	require.NoError(t, ls.repopulateDeferredHeaderValidation())
+
+	required, source, err := ls.deferredHeaderValidationRequired(point, nil)
+	require.NoError(t, err)
+	assert.True(t, required)
+	assert.Equal(t, ouroboros.ConnectionId{}, source)
+}
+
+// A persisted key with a malformed value cannot silently restore without its
+// peer attribution. Startup must stop so the source cannot evade the cooldown
+// through damaged marker state.
+func TestDeferredHeaderMalformedMarkerFailsStartup(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{
+		"true@",
+		"true@not-an-address",
+		"truejunk",
+	} {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			tb := createTestBlock(t, [32]byte{52}, 0, tamperNone)
+			ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+			point := ocommon.NewPoint(
+				tb.block.SlotNumber(),
+				tb.block.Hash().Bytes(),
+			)
+			require.NoError(t, db.SetSyncState(
+				deferredHeaderValidationSyncStateKey(point),
+				value,
+				nil,
+			))
+
+			err := ls.repopulateDeferredHeaderValidation()
+			require.ErrorContains(t, err, "decode deferred-header marker")
+			assert.Equal(t, ouroboros.ConnectionId{}, ls.deferredHeaderSource(point))
+		})
+	}
+}
+
+func TestDeferredHeaderMalformedBlobMarkerFailsStartup(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{
+		"true@",
+		"true@not-an-address",
+		"truejunk",
+	} {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			tb := createTestBlock(t, [32]byte{54}, 0, tamperNone)
+			ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+			point := ocommon.NewPoint(
+				tb.block.SlotNumber(),
+				tb.block.Hash().Bytes(),
+			)
+			require.NoError(t, db.SetDeferredHeaderMarkerWithValue(
+				headerValidationPointKey(point), []byte(value),
+			))
+
+			err := ls.repopulateDeferredHeaderValidation()
+			require.ErrorContains(t, err, "decode deferred-header marker")
+			assert.Equal(t, ouroboros.ConnectionId{}, ls.deferredHeaderSource(point))
+		})
+	}
+}
+
+func TestDeferredHeaderMarkerReadFailureFailsStartup(t *testing.T) {
+	t.Parallel()
+
+	readErr := errors.New("deferred marker read failed")
+	point := ocommon.Point{Slot: 1_171, Hash: []byte{0x14}}
+	key := deferredHeaderValidationSyncStateKey(point)
+	db, err := dbtest.NewDatabaseWithMetadataWrapper(
+		t,
+		dbtest.Options{},
+		func(store metadata.MetadataStore) metadata.MetadataStore {
+			return syncStateReadFailingMetadataStore{
+				MetadataStore: store,
+				key:           key,
+				err:           readErr,
+			}
+		},
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.SetSyncState(
+		key,
+		deferredHeaderValidationSyncStateValue,
+		nil,
+	))
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	err = ls.repopulateDeferredHeaderValidation()
+	require.ErrorIs(t, err, readErr)
+	assert.Equal(t, ouroboros.ConnectionId{}, ls.deferredHeaderSource(point))
+}
+
+// An attributed marker with no in-memory entry, as on an apply retry after the
+// entry was consumed, still forces the apply-time check and names its peer.
+func TestDeferredHeaderAttributedMarkerReadFromDatabase(t *testing.T) {
+	t.Parallel()
+
+	for _, remote := range []string{"10.0.0.1:3001", "[2001:db8::1]:3001"} {
+		t.Run(remote, func(t *testing.T) {
+			t.Parallel()
+			tb := createTestBlock(t, [32]byte{51}, 0, tamperNone)
+			ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+			addr, err := net.ResolveTCPAddr("tcp", remote)
+			require.NoError(t, err)
+			point := ocommon.NewPoint(
+				tb.block.SlotNumber(),
+				tb.block.Hash().Bytes(),
+			)
+			require.NoError(t, db.SetDeferredHeaderMarkerWithValue(
+				headerValidationPointKey(point),
+				deferredHeaderMarkerBlobValue(
+					ouroboros.ConnectionId{RemoteAddr: addr},
+				),
+			))
+
+			required, source, err := ls.deferredHeaderValidationRequired(
+				point,
+				nil,
+			)
+			require.NoError(t, err)
+			assert.True(t, required, "attributed marker not recognized")
+			require.NotNil(t, source.RemoteAddr, "marker source not read")
+			assert.Equal(t, addr.String(), source.RemoteAddr.String())
+		})
+	}
 }
 
 // TestEnsureGenesisCommitteeWarnsWithoutConwayGenesis proves a node with no

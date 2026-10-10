@@ -1125,8 +1125,21 @@ func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
 	); idx != -1 && p.peers[idx] != nil {
 		p.addPeerDenyKeysLocked(p.peers[idx], expiry, normalized, hostnameNormalized)
 	} else {
-		p.denyList[normalized] = expiry
-		p.denyList[hostnameNormalized] = expiry
+		// A deferred verdict can arrive after a topology peer reconnects
+		// inbound from a new source port. Reuse the same unambiguous host
+		// identity as inbound admission so the stale transport address still
+		// denies that configured peer without broadening the denial to the
+		// whole host.
+		idx, _ := p.resolveInboundIdentity(address, hostnameNormalized)
+		if idx != -1 && p.peers[idx] != nil &&
+			p.isTopologyPeer(p.peers[idx].Source) {
+			p.addPeerDenyKeysLocked(
+				p.peers[idx], expiry, normalized, hostnameNormalized,
+			)
+		} else {
+			p.denyList[normalized] = expiry
+			p.denyList[hostnameNormalized] = expiry
+		}
 	}
 	selectionEvents := p.syncUpstreamWithholdLocked(nil)
 	p.mu.Unlock()
