@@ -1113,6 +1113,9 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.dropDeferredLeiosAnnouncements(leiosConnectionIdString(connId))
 	// Drop the per-connection leios-fetch guard. In-flight fetch goroutines
 	// hold their own reference, so they finish safely after this.
+	if guard, ok := o.leiosFetchGuards.Load(connId); ok {
+		guard.(*leiosFetchGuard).cancelPendingLeiosFetches()
+	}
 	o.leiosFetchGuards.Delete(connId)
 }
 

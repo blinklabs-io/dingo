@@ -143,7 +143,7 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 							continue
 						}
 						for _, header := range snapshot.Headers {
-							if bytes.Equal(
+							if header.Slot == point.Slot && bytes.Equal(
 								header.LeiosAnnouncementHash,
 								point.Hash,
 							) {
