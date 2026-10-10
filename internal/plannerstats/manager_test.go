@@ -144,7 +144,11 @@ func TestEpochTransitionPublishedOnBusTriggersRun(t *testing.T) {
 	defer func() { require.NoError(t, m.Stop()) }()
 
 	bus.Publish(event.EpochTransitionEventType, epochEvent([]byte{9}))
-	require.Equal(t, "epoch", receive(t, u.entered, "run triggered through the bus"))
+	require.Equal(
+		t,
+		"epoch",
+		receive(t, u.entered, "run triggered through the bus"),
+	)
 }
 
 func TestStopInterruptsRunInFlight(t *testing.T) {
@@ -158,8 +162,16 @@ func TestStopInterruptsRunInFlight(t *testing.T) {
 	receive(t, u.entered, "run in flight")
 	stopped := make(chan error, 1)
 	go func() { stopped <- m.Stop() }()
-	require.NoError(t, receive(t, stopped, "Stop to return with the run still blocked"))
-	require.Equal(t, int64(0), u.active.Load(), "the run must have observed cancellation")
+	require.NoError(
+		t,
+		receive(t, stopped, "Stop to return with the run still blocked"),
+	)
+	require.Equal(
+		t,
+		int64(0),
+		u.active.Load(),
+		"the run must have observed cancellation",
+	)
 }
 
 func TestRunStartupReportsResultAndError(t *testing.T) {
@@ -175,7 +187,10 @@ func TestRunStartupReportsResultAndError(t *testing.T) {
 	failing := newFakeUpdater()
 	close(failing.release)
 	failing.err = errors.New("boom")
-	_, err = newTestManager(failing, event.NewEventBus(nil, nil)).RunStartup(t.Context())
+	_, err = newTestManager(
+		failing,
+		event.NewEventBus(nil, nil),
+	).RunStartup(t.Context())
 	require.ErrorContains(t, err, "boom")
 }
 

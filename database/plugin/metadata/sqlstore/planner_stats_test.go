@@ -166,7 +166,12 @@ func TestOptimizePlannerStatsRefreshesPooledReadConnections(t *testing.T) {
 	// schema state.
 	stale := poolPlans(t, store.readDB, 4)
 	for _, plan := range stale {
-		require.Contains(t, plan, "idx_utxo_deleted", "fixture must show the trap")
+		require.Contains(
+			t,
+			plan,
+			"idx_utxo_deleted",
+			"fixture must show the trap",
+		)
 	}
 
 	result, err := store.OptimizePlannerStatsContext(
@@ -176,8 +181,21 @@ func TestOptimizePlannerStatsRefreshesPooledReadConnections(t *testing.T) {
 	require.True(t, result.Changed)
 
 	for i, plan := range poolPlans(t, store.readDB, 4) {
-		require.Contains(t, plan, "tx_id_output_idx", "read connection %d: %s", i, plan)
-		require.NotContains(t, plan, "idx_utxo_deleted", "read connection %d", i)
+		require.Contains(
+			t,
+			plan,
+			"tx_id_output_idx",
+			"read connection %d: %s",
+			i,
+			plan,
+		)
+		require.NotContains(
+			t,
+			plan,
+			"idx_utxo_deleted",
+			"read connection %d",
+			i,
+		)
 	}
 }
 
@@ -211,7 +229,14 @@ func TestOptimizePlannerStatsRefreshesAfterUpdateOnlyRun(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, second.Changed, "growth must change the statistics")
 	for i, plan := range poolPlans(t, store.readDB, 4) {
-		require.Contains(t, plan, "tx_id_output_idx", "read connection %d: %s", i, plan)
+		require.Contains(
+			t,
+			plan,
+			"tx_id_output_idx",
+			"read connection %d: %s",
+			i,
+			plan,
+		)
 	}
 }
 
@@ -235,7 +260,14 @@ func TestOptimizePlannerStatsReloadsSharedCacheStatistics(t *testing.T) {
 	require.True(t, result.Changed)
 
 	for i, plan := range poolPlans(t, store.writeDB, 2) {
-		require.Contains(t, plan, "tx_id_output_idx", "connection %d: %s", i, plan)
+		require.Contains(
+			t,
+			plan,
+			"tx_id_output_idx",
+			"connection %d: %s",
+			i,
+			plan,
+		)
 	}
 	// The in-memory database dies with its last connection, so the refresh
 	// must not have dropped them all.
@@ -261,7 +293,12 @@ func TestOptimizePlannerStatsRepreparesHotStatements(t *testing.T) {
 	require.True(t, changed.Changed)
 	after, ok := store.lookupCachedStmt(query)
 	require.True(t, ok, "cache must be repopulated, not left empty")
-	require.NotSame(t, before, after, "changed statistics must replace the cached statement")
+	require.NotSame(
+		t,
+		before,
+		after,
+		"changed statistics must replace the cached statement",
+	)
 
 	unchanged, err := store.OptimizePlannerStatsContext(
 		context.Background(), PlannerStatsTriggerEpoch,
@@ -270,7 +307,12 @@ func TestOptimizePlannerStatsRepreparesHotStatements(t *testing.T) {
 	require.False(t, unchanged.Changed)
 	same, ok := store.lookupCachedStmt(query)
 	require.True(t, ok)
-	require.Same(t, after, same, "an unchanged run must keep the cached statement")
+	require.Same(
+		t,
+		after,
+		same,
+		"an unchanged run must keep the cached statement",
+	)
 }
 
 var plannerProbeSequence atomic.Int64
@@ -342,7 +384,10 @@ func TestOptimizePlannerStatsMetrics(t *testing.T) {
 	for _, trigger := range []string{
 		PlannerStatsTriggerStartup, PlannerStatsTriggerEpoch,
 	} {
-		_, err := store.OptimizePlannerStatsContext(context.Background(), trigger)
+		_, err := store.OptimizePlannerStatsContext(
+			context.Background(),
+			trigger,
+		)
 		require.NoError(t, err)
 	}
 	families, err := reg.Gather()
@@ -386,7 +431,10 @@ func TestNonSQLiteDialectsAreLeftUntouchedByOptimize(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			exec := &recordingExecer{}
-			supported, err := dialect.OptimizePlannerStats(context.Background(), exec)
+			supported, err := dialect.OptimizePlannerStats(
+				context.Background(),
+				exec,
+			)
 			require.NoError(t, err)
 			require.False(t, supported)
 			require.Empty(t, exec.statements, "no statement may be issued")
@@ -401,12 +449,21 @@ func TestNonSQLiteDialectsAreLeftUntouchedByOptimize(t *testing.T) {
 
 	// The full-ANALYZE path Mithril and backfill use is unchanged.
 	pg := &recordingExecer{}
-	require.NoError(t, PostgresDialect().UpdatePlannerStats(context.Background(), pg))
+	require.NoError(
+		t,
+		PostgresDialect().UpdatePlannerStats(context.Background(), pg),
+	)
 	require.Equal(t, []string{"ANALYZE"}, pg.statements)
 	my := &recordingExecer{}
-	require.NoError(t, MySQLDialect().UpdatePlannerStats(context.Background(), my))
+	require.NoError(
+		t,
+		MySQLDialect().UpdatePlannerStats(context.Background(), my),
+	)
 	require.Empty(t, my.statements)
 	lite := &recordingExecer{}
-	require.NoError(t, SQLiteDialect().UpdatePlannerStats(context.Background(), lite))
+	require.NoError(
+		t,
+		SQLiteDialect().UpdatePlannerStats(context.Background(), lite),
+	)
 	require.Equal(t, []string{"ANALYZE"}, lite.statements)
 }

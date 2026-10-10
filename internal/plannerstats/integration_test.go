@@ -45,8 +45,11 @@ func TestEpochTransitionCreatesStat1OnGenesisStyleDatabase(t *testing.T) {
 	require.NoError(t, store.Start(t.Context()))
 	defer func() { require.NoError(t, store.Close()) }()
 
-	probe, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "metadata.sqlite")+
-		"?_pragma=busy_timeout(30000)&_pragma=synchronous(OFF)")
+	probe, err := sql.Open(
+		"sqlite",
+		"file:"+filepath.Join(dataDir, "metadata.sqlite")+
+			"?_pragma=busy_timeout(30000)&_pragma=synchronous(OFF)",
+	)
 	require.NoError(t, err)
 	defer probe.Close()
 	_, err = probe.Exec(

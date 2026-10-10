@@ -48,7 +48,9 @@ type sqlitePlannerStatsMetrics struct {
 	errors   prometheus.Counter
 }
 
-func newPlannerStatsMetrics(reg prometheus.Registerer) sqlitePlannerStatsMetrics {
+func newPlannerStatsMetrics(
+	reg prometheus.Registerer,
+) sqlitePlannerStatsMetrics {
 	if reg == nil {
 		return sqlitePlannerStatsMetrics{}
 	}
