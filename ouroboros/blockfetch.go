@@ -916,15 +916,20 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 	// replies immediately can drive blockfetchClientRangeDone to completion
 	// on the protocol's receive goroutine before this insert runs. Recording
 	// the start time anyway would leave an entry whose only deleter has
-	// already fired, so consume the marker it left instead.
+	// already fired, so consume the marker it left instead, and count the
+	// completion it deferred now that the request is counted as issued.
 	key := blockFetchKey{connId: connId, requestId: requestId}
 	o.blockFetchMutex.Lock()
-	if _, doneEarly := o.blockFetchDoneEarly[key]; doneEarly {
+	rangeErr, doneEarly := o.blockFetchDoneEarly[key]
+	if doneEarly {
 		delete(o.blockFetchDoneEarly, key)
 	} else {
 		o.blockFetchStarts[key] = dispatchStart
 	}
 	o.blockFetchMutex.Unlock()
+	if doneEarly {
+		o.countBlockfetchRequestCompleted(rangeErr)
+	}
 	return requestId, nil
 }
 
@@ -1047,20 +1052,24 @@ func (o *Ouroboros) blockfetchClientRangeDone(
 	// dispatching BlockfetchClientRequestRange to the map, so leave a marker
 	// for it to consume rather than letting it insert an entry that no
 	// further callback will ever remove.
+	//
+	// The completion is counted only for a request already counted as
+	// issued. A marked one is counted by the dispatching call once
+	// RequestRange succeeds; if it fails instead (gouroboros can drain a
+	// queued request during protocol shutdown while its send is still
+	// failing), the request was never counted as issued and its completion
+	// is dropped with the marker, so completed never exceeds issued.
 	key := blockFetchKey{connId: ctx.ConnectionId, requestId: ctx.RequestId}
 	o.blockFetchMutex.Lock()
-	if _, started := o.blockFetchStarts[key]; started {
+	_, started := o.blockFetchStarts[key]
+	if started {
 		delete(o.blockFetchStarts, key)
 	} else {
-		o.blockFetchDoneEarly[key] = struct{}{}
+		o.blockFetchDoneEarly[key] = rangeErr
 	}
 	o.blockFetchMutex.Unlock()
-	if o.blockfetchMetrics != nil {
-		if rangeErr == nil {
-			o.blockfetchMetrics.requestsCompletedOK.Inc()
-		} else {
-			o.blockfetchMetrics.requestsCompletedErr.Inc()
-		}
+	if started {
+		o.countBlockfetchRequestCompleted(rangeErr)
 	}
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
@@ -1130,5 +1139,18 @@ func (o *Ouroboros) instrumentBlockfetchRangeDone(
 		o.recordProtocolMessage("blockfetch", err, time.Since(start))
 		// The instrumented callback's error passes through unchanged.
 		return err
+	}
+}
+
+// countBlockfetchRequestCompleted counts one terminal outcome of a request
+// already counted in requestsIssued.
+func (o *Ouroboros) countBlockfetchRequestCompleted(rangeErr error) {
+	if o.blockfetchMetrics == nil {
+		return
+	}
+	if rangeErr == nil {
+		o.blockfetchMetrics.requestsCompletedOK.Inc()
+	} else {
+		o.blockfetchMetrics.requestsCompletedErr.Inc()
 	}
 }

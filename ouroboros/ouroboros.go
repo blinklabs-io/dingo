@@ -150,8 +150,10 @@ type Ouroboros struct {
 	// receive goroutine while the requester is still between that return and
 	// its blockFetchStarts insert. The insert consumes the marker instead of
 	// adding an entry that nothing would ever delete, since the request's
-	// one and only terminal callback has already run.
-	blockFetchDoneEarly map[blockFetchKey]struct{}
+	// one and only terminal callback has already run. The value is the
+	// terminal result, which the insert counts in
+	// dingo_blockfetch_requests_completed_total.
+	blockFetchDoneEarly map[blockFetchKey]error
 	blockFetchMutex     sync.Mutex
 	// blockfetchForward holds, per connection, the blockfetch events
 	// received but not yet published to the ledger; see
@@ -565,7 +567,8 @@ type blockfetchMetrics struct {
 	forwardOverflows prometheus.Counter
 	// requestsIssued counts range requests accepted by a peer's blockfetch
 	// client, and requestsCompleted the terminal outcomes reported through
-	// RangeDoneFunc, by result ("ok" or "error"). Neither is labelled by
+	// RangeDoneFunc for those requests only, by result ("ok" or "error"), so
+	// completed never exceeds issued. Neither is labelled by
 	// connection: those series would grow without bound with reconnects.
 	// Together with lastRequestUnixNano they tell a node that is fetching
 	// from one that has headers queued and is not.
@@ -630,7 +633,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncState:          cfg.ChainsyncState,
 		peerGov:                 cfg.PeerGov,
 		blockFetchStarts:        make(map[blockFetchKey]time.Time),
-		blockFetchDoneEarly:     make(map[blockFetchKey]struct{}),
+		blockFetchDoneEarly:     make(map[blockFetchKey]error),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),
@@ -794,13 +797,13 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 	o.blockfetchMetrics.requestsIssued = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_blockfetch_requests_issued_total",
-			Help: "blockfetch range requests accepted by a peer's blockfetch client; flat while headers are queued means nothing is being fetched",
+			Help: "blockfetch range requests accepted by a peer's blockfetch client; flat while headers are queued means no new request is being accepted, though one already accepted may still be delivering (compare dingo_blockfetch_requests_completed_total)",
 		},
 	)
 	requestsCompleted := promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_blockfetch_requests_completed_total",
-			Help: "blockfetch range requests that reached a terminal outcome, by result: ok, or error (NoBlocks or any transport or protocol failure)",
+			Help: "blockfetch range requests counted in dingo_blockfetch_requests_issued_total that reached a terminal outcome, by result: ok, or error (NoBlocks or any transport or protocol failure); never exceeds the issued count",
 		},
 		[]string{"result"},
 	)
