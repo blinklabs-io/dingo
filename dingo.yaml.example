@@ -669,6 +669,17 @@
 # CLI: --block-pipeline-validate-enabled
 # blockPipelineValidateEnabled: false
 
+# Prefetch the next block's input UTxOs on a separate goroutine from a
+# read-only transaction while the current block applies (default: false).
+# Not consensus-affecting. Inputs spent by earlier blocks of the same
+# block-apply chunk are never served from the prefetch, and any input it
+# misses is read as without the flag.
+#
+# Can be overridden with the DINGO_LEDGER_PREFETCH_AHEAD_ENABLED
+# environment variable
+# CLI: --ledger-prefetch-ahead-enabled
+# ledgerPrefetchAheadEnabled: false
+
 # In core storage mode, write the accumulated deltas of blocks that are not
 # validated with multi-row batched inserts instead of one statement group per
 # row (default: false), as API storage mode already does. Validated blocks,

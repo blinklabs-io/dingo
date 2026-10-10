@@ -882,6 +882,15 @@ type LedgerStateConfig struct {
 	// ARCHITECTURE.md ("Fork-resolution header-queue overflow must still
 	// restart blockfetch") for the fix and the full explanation.
 	BlockPipelineValidateEnabled bool
+	// LedgerPrefetchAheadEnabled resolves the input UTxOs of block k+1 on a
+	// separate goroutine, from a read-only transaction, while block k applies
+	// within one block-apply chunk. Inputs consumed by earlier blocks of the
+	// chunk are never served from it, and any input it does not resolve is
+	// read inside the write transaction as without the flag. Only blocks
+	// under normal validation are prefetched; historical, TrustedReplay and
+	// Mithril-covered blocks read no inputs. Not consensus-affecting; off by
+	// default.
+	LedgerPrefetchAheadEnabled bool
 	// ApplyRowBatchingEnabled writes the accumulated deltas of blocks that
 	// are not validated through the metadata store's batched path in core
 	// storage mode, as API storage mode already does. Validated blocks, Leios
@@ -1140,6 +1149,13 @@ type LedgerState struct {
 	// utxoBatchLookups counts per-block UtxosByRefs prefetch queries made by
 	// ledgerProcessBlock. Tests only.
 	utxoBatchLookups atomic.Uint64
+	// utxoPrefetchAheadServed counts UTxOs ledgerProcessBlock took from
+	// utxoPrefetchAhead instead of reading them itself. Tests only.
+	utxoPrefetchAheadServed atomic.Uint64
+	// utxoPrefetchAheadAwaitReady makes utxoPrefetchAhead.take wait for the
+	// goroutine's read transaction instead of serving nothing, so tests can
+	// count served UTxOs deterministically. Tests only.
+	utxoPrefetchAheadAwaitReady bool
 	// mempool is installed by SetMempool but read by the forger on its own
 	// goroutine, so it is an atomic pointer: a late or repeated SetMempool
 	// is race-free and the latest provider wins.
@@ -8359,6 +8375,35 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				candidateTip,
 				func(txn *database.Txn) error { //nolint:contextcheck
 					deltaBatch = NewLedgerDeltaBatch()
+					var aheadPrefetch *utxoPrefetchAhead
+					// Era Dijkstra applies endorser-block transactions inside
+					// ledgerProcessBlock, consuming UTxOs no ranking-block
+					// transaction names, so the read-only snapshot cannot be
+					// filtered from the blocks alone.
+					if ls.config.LedgerPrefetchAheadEnabled &&
+						!dijkstraEraGate(snapshotEra) &&
+						end-i > 1 {
+						epochEndSlot := snapshotEpoch.StartSlot +
+							uint64(snapshotEpoch.LengthInSlots)
+						chunk := nextBatch[i:end]
+						wanted := make([]bool, len(chunk))
+						for k, blk := range chunk {
+							shouldValidateBlock, _ := historicalBlockValidationDecision(
+								snapshotValidationEnabled,
+								ls.config.TrustedReplay,
+								snapshotChainsyncState,
+								blk.SlotNumber(),
+								cutoffSlot,
+								snapshotMithrilSlot,
+							)
+							wanted[k] = shouldValidateBlock &&
+								blk.SlotNumber() < epochEndSlot
+						}
+						aheadPrefetch = ls.startUtxoPrefetchAhead(
+							ctx, chunk, wanted,
+						)
+						defer aheadPrefetch.stop()
+					}
 					for offset, next := range nextBatch[i:end] {
 						tmpPoint := ocommon.Point{
 							Slot: next.SlotNumber(),
@@ -8526,7 +8571,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							)
 						}
 						delta, err = ls.ledgerProcessBlock(
-							ctx,
+							withAheadUtxos(ctx, aheadPrefetch.take(offset)),
 							txn,
 							tmpPoint,
 							next,
@@ -9181,7 +9226,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// endorser transactions have applied and before this block's own mutations.
 	var prefetchedUtxos map[utxoref.Key]lcommon.Utxo
 	if shouldValidate {
-		prefetchedUtxos = ls.prefetchBlockUtxos(ctx, txn, block.Transactions())
+		prefetchedUtxos = ls.prefetchBlockUtxos(
+			ctx, txn, block.Transactions(), aheadUtxosFrom(ctx), nil,
+		)
 	}
 	// Check the ranking block after any applicable endorser transactions,
 	// using their resulting state but before its own transaction mutations.
