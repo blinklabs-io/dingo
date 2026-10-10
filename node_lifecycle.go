@@ -127,8 +127,9 @@ type namedStop struct {
 // Ordering is preserved from the inline calls it replaced: the Leios pipeline
 // manager stops before the vote manager because it consumes that manager's
 // EbQuorumEvent, matching the dependency order Run()'s startup-failure cleanup
-// stack already uses (see node.go). The database lifecycle manager stops last,
-// as it did inline, after the koios parity observer.
+// stack already uses (see node.go). The database lifecycle manager stops after
+// the koios parity observer, as it did inline, and the planner statistics
+// manager stops last.
 func (n *Node) quiesceComponentStops() []namedStop {
 	var stops []namedStop
 	if n.blockForger != nil {
@@ -899,8 +900,10 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		)
 	}
 	// The database handle was replaced, so the previous manager's updater is
-	// closed; build a new one rather than restarting it.
-	n.plannerStatsMgr = nil
+	// closed; build a new one rather than restarting it, and run its startup
+	// pass now: the replacement may never have been analyzed, and the epoch
+	// trigger would leave it without statistics until the next rollover.
+	n.runPlannerStatsStartup(ctx)
 	if err := n.startPlannerStatsManager(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to restart planner statistics manager: %w", err)
 	}

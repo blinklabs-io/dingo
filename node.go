@@ -810,10 +810,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			pending.TargetID,
 		)
 	}
-	// Statistics must exist before the first block batch: a database that has
-	// never been analyzed plans the batched UTxO spend as a scan of every
-	// live output.
-	n.runPlannerStatsStartup(ctx)
 	// Load chain manager
 	cm, err := chain.NewManager(
 		ctx,
@@ -913,6 +909,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			)
 		}
 	}
+	// Statistics should exist before the first block batch: a database that
+	// has never been analyzed plans the batched UTxO spend as a scan of every
+	// live output. After recovery, which can roll metadata back, so the
+	// statistics describe the tables blocks are applied to.
+	n.runPlannerStatsStartup(ctx)
 
 	if n.config.historyExpiry.Enabled {
 		prunerFreq := n.config.historyExpiry.Frequency

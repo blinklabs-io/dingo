@@ -1639,11 +1639,14 @@ When `Node.Run()` is called, components are initialized in this order:
     (`database/lifecycle.Snapshot`) at epoch boundaries when
     `databaseLifecycle.snapshotEnabled` is configured.
     Planner statistics manager (`internal/plannerstats.Manager`): the startup
-    `PRAGMA optimize` pass runs right after the database opens, before the chain
-    manager or ledger exists, so no block batch plans against missing
-    statistics; the manager is then started and subscribes to `epoch.transition`
-    (a post-Byron event without an epoch nonce, the slot clock's duplicate, is
-    ignored; Byron rollovers carry no nonce and still trigger a run).
+    `PRAGMA optimize` pass runs after any commit-timestamp recovery and before
+    the ledger starts processing blocks, to populate statistics before the first
+    block batch; a failed pass is logged and the node continues with the
+    statistics it had. A live restore or truncate runs the pass again on the
+    replacement database. The manager is then started and subscribes to
+    `epoch.transition` (a post-Byron event without an epoch nonce, the slot
+    clock's duplicate, is ignored; Byron rollovers carry no nonce and still
+    trigger a run).
     A one-slot pending signal coalesces transitions arriving during a run into
     at most one follow-up, and the run executes on its own worker after the
     rollover transaction has committed, never inside it. `Stop` cancels a run in
