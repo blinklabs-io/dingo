@@ -131,7 +131,7 @@ func isSQLiteBatchQuery(query string) bool {
 }
 
 // prepareHotStatements prepares every entry in hotStatements once against
-// s.writeDB and installs the result in the cache, so a later lookupCachedStmt
+// s.writeDB and installs the result in the cache, so a later borrowCachedStmt
 // for one of these queries is a plain map read rather than a fresh
 // PrepareContext call. This exists because modernc.org/sqlite (the SQLite
 // driver dingo now uses directly, see the "switch from glebarez/go-sqlite to
@@ -231,25 +231,17 @@ func (s *Store) buildHotStatements(ctx context.Context) map[string]*sql.Stmt {
 	return prepared
 }
 
-// lookupCachedStmt returns the statement prepareHotStatements installed for
-// query, if any. It never prepares one itself -- see prepareHotStatements
-// for why a lazy Prepare against s.writeDB here would risk deadlocking
-// against a caller's own open write transaction. A caller must handle the
-// !ok case with a plain, uncached call against its own queryer (which needs
-// no extra connection and so can never deadlock this way) rather than treat
-// a miss as an error: after Reset/RestoreFrom invalidate the cache, absence
-// is an expected, correct state, not a bug. A caller that executes the
-// statement uses borrowCachedStmt instead, so a concurrent retirement cannot
-// close it first.
-func (s *Store) lookupCachedStmt(query string) (*sql.Stmt, bool) {
-	s.stmtMu.Lock()
-	defer s.stmtMu.Unlock()
-	stmt, ok := s.stmts[query]
-	return stmt, ok
-}
-
-// borrowCachedStmt is lookupCachedStmt for a caller about to execute the
-// statement. The caller must call release once the call on the statement has
+// borrowCachedStmt returns the statement prepareHotStatements installed for
+// query, if any, to a caller about to execute it. It never prepares one
+// itself -- see prepareHotStatements for why a lazy Prepare against
+// s.writeDB here would risk deadlocking against a caller's own open write
+// transaction. A caller must handle the !ok case with a plain, uncached call
+// against its own queryer (which needs no extra connection and so can never
+// deadlock this way) rather than treat a miss as an error: after
+// Reset/RestoreFrom invalidate the cache, absence is an expected, correct
+// state, not a bug.
+//
+// The caller must call release once the call on the statement has
 // returned. A statement retired while borrowed (by reprepareHotStatements or
 // closePreparedStatements) stays open until its last borrow is released:
 // lookup and execution are not atomic, and database/sql fails a call on a
