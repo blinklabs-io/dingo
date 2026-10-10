@@ -4589,60 +4589,81 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		"connection_id", initialConnId.String(),
 		"header_count", ls.chain.HeaderCount(),
 	)
-	err = ls.startQueuedBlockfetchLocked(initialConnId, pending)
-	if err != nil {
-		// The chosen connection's blockfetch protocol may have shut
-		// down. Try the header source connection if it's different;
-		// otherwise try the active best peer before giving up.
-		if !sameConnectionId(e.ConnectionId, initialConnId) {
-			ls.config.Logger.Warn(
-				"blockfetch start failed, retrying on header source connection",
-				"component", "ledger",
-				"failed_connection_id", initialConnId.String(),
-				"retry_connection_id", e.ConnectionId.String(),
-				"error", err,
-			)
-			if retryErr := ls.startQueuedBlockfetchLocked(e.ConnectionId, pending); retryErr == nil {
-				return nil
-			}
-		}
-		// Header source also failed (or was the same connection).
-		// Try the current active best peer as a last resort before
-		// clearing state — otherwise every subsequent header will
-		// fail the same stale lookup.
-		if ls.config.GetActiveConnectionFunc != nil {
-			if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil &&
-				!sameConnectionId(*activeConnId, initialConnId) &&
-				!sameConnectionId(*activeConnId, e.ConnectionId) {
-				ls.config.Logger.Info(
-					"blockfetch connections unavailable, retrying with active best peer",
-					"component",
-					"ledger",
-					"failed_connection_id",
-					initialConnId.String(),
-					"active_connection_id",
-					activeConnId.String(),
-					"error",
-					err,
-				)
-				ls.selectedBlockfetchConnId = *activeConnId
-				if retryErr := ls.startQueuedBlockfetchLocked(*activeConnId, pending); retryErr == nil {
-					return nil
-				}
-			}
-		}
-		// All fallbacks exhausted. Clear stale state so the next
-		// header can start a fresh blockfetch attempt.
-		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
-		ls.clearQueuedHeaders()
-		ls.requestChainsyncResync(
-			initialConnId,
-			fmt.Sprintf("blockfetch start failed: %v", err),
-			pending,
-		)
-		return nil
-	}
+	ls.startQueuedBlockfetchWithFallbackLocked(
+		initialConnId,
+		e.ConnectionId,
+		pending,
+	)
 	return nil
+}
+
+// startQueuedBlockfetchWithFallbackLocked starts blockfetch for the queued
+// headers on initialConnId. If that fails it retries on sourceConnId, the
+// connection that delivered the headers, and then on the active best peer.
+// When every attempt fails it clears the queue and requests a re-sync, since
+// leaving the headers queued with nothing fetching them strands them: each
+// later header repeats the same failed lookup, and a header held at the
+// forecast horizon waits for blocks only this fetch can apply. The caller
+// holds chainsyncMutex and chainsyncBlockfetchMutex, and has set
+// selectedBlockfetchConnId.
+func (ls *LedgerState) startQueuedBlockfetchWithFallbackLocked(
+	initialConnId ouroboros.ConnectionId,
+	sourceConnId ouroboros.ConnectionId,
+	pending *pendingPublishes,
+) {
+	err := ls.startQueuedBlockfetchLocked(initialConnId, pending)
+	if err == nil {
+		return
+	}
+	// The chosen connection's blockfetch protocol may have shut
+	// down. Try the header source connection if it's different;
+	// otherwise try the active best peer before giving up.
+	if !sameConnectionId(sourceConnId, initialConnId) {
+		ls.config.Logger.Warn(
+			"blockfetch start failed, retrying on header source connection",
+			"component", "ledger",
+			"failed_connection_id", initialConnId.String(),
+			"retry_connection_id", sourceConnId.String(),
+			"error", err,
+		)
+		if retryErr := ls.startQueuedBlockfetchLocked(sourceConnId, pending); retryErr == nil {
+			return
+		}
+	}
+	// Header source also failed (or was the same connection).
+	// Try the current active best peer as a last resort before
+	// clearing state — otherwise every subsequent header will
+	// fail the same stale lookup.
+	if ls.config.GetActiveConnectionFunc != nil {
+		if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil &&
+			!sameConnectionId(*activeConnId, initialConnId) &&
+			!sameConnectionId(*activeConnId, sourceConnId) {
+			ls.config.Logger.Info(
+				"blockfetch connections unavailable, retrying with active best peer",
+				"component",
+				"ledger",
+				"failed_connection_id",
+				initialConnId.String(),
+				"active_connection_id",
+				activeConnId.String(),
+				"error",
+				err,
+			)
+			ls.selectedBlockfetchConnId = *activeConnId
+			if retryErr := ls.startQueuedBlockfetchLocked(*activeConnId, pending); retryErr == nil {
+				return
+			}
+		}
+	}
+	// All fallbacks exhausted. Clear stale state so the next
+	// header can start a fresh blockfetch attempt.
+	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.clearQueuedHeaders()
+	ls.requestChainsyncResync(
+		initialConnId,
+		fmt.Sprintf("blockfetch start failed: %v", err),
+		pending,
+	)
 }
 
 // AwaitChainsyncHeaderAdmission enforces the Ouroboros ChainSync future-header
@@ -4770,14 +4791,7 @@ func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
 		"connection_id", initialConnId.String(),
 		"header_count", ls.chain.HeaderCount(),
 	)
-	if err := ls.startQueuedBlockfetchLocked(initialConnId, &pending); err != nil {
-		ls.config.Logger.Warn(
-			"failed to start blockfetch for queued headers",
-			"component", "ledger",
-			"connection_id", initialConnId.String(),
-			"error", err,
-		)
-	}
+	ls.startQueuedBlockfetchWithFallbackLocked(initialConnId, connId, &pending)
 }
 
 // awaitForecastHorizon blocks until the published ledger state can forecast

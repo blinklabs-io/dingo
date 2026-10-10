@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -747,7 +748,12 @@ func TestAwaitChainsyncHeaderAdmissionFlushFetchesFromPipelineOwner(
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	got := <-awaitAdmissionAsync(ctx, ls, e)
+	got := testutil.RequireReceive(
+		t,
+		awaitAdmissionAsync(ctx, ls, e),
+		testutil.AsyncWait,
+		"canceled admission did not return",
+	)
 	require.ErrorIs(t, got.err, context.Canceled)
 
 	req := testutil.RequireReceive(
@@ -784,9 +790,124 @@ func TestAwaitChainsyncHeaderAdmissionFlushSkipsClosedConnection(
 	e.ConnectionId = testRecycleConnId()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	got := <-awaitAdmissionAsync(ctx, ls, e)
+	got := testutil.RequireReceive(
+		t,
+		awaitAdmissionAsync(ctx, ls, e),
+		testutil.AsyncWait,
+		"canceled admission did not return",
+	)
 	require.ErrorIs(t, got.err, context.Canceled)
 
 	require.Empty(t, requests, "blockfetch started on a closed connection")
 	require.Empty(t, connIdKey(ls.selectedBlockfetchConnId))
+}
+
+// A horizon flush whose blockfetch cannot be dispatched must not leave the
+// queued headers stranded behind a wait only their application can end: like
+// the header-driven start, it falls back to the active best peer.
+func TestAwaitChainsyncHeaderAdmissionFlushFallsBackToActivePeer(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _ := newHorizonFlushTestLedger(t, nil)
+	owner := testRecycleConnId()
+	active := ouroboros.ConnectionId{
+		LocalAddr:  owner.LocalAddr,
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3003},
+	}
+	ls.headerPipelineConnId = owner
+	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &active
+	}
+	requests := make(chan ouroboros.ConnectionId, 4)
+	ls.config.BlockfetchRequestRangeFunc = func(
+		connId ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ ocommon.Point,
+	) (uint64, error) {
+		if sameConnectionId(connId, owner) {
+			return 0, errors.New("simulated blockfetch request failure")
+		}
+		requests <- connId
+		return 0, nil
+	}
+	e := futureHeaderEvent(
+		90,
+		time.Date(2026, time.August, 22, 12, 1, 40, 0, time.UTC),
+	)
+	e.ConnectionId = owner
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	got := testutil.RequireReceive(
+		t,
+		awaitAdmissionAsync(ctx, ls, e),
+		testutil.AsyncWait,
+		"canceled admission did not return",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+
+	connId := testutil.RequireReceive(
+		t,
+		requests,
+		testutil.AsyncWait,
+		"a failed horizon flush did not fall back to the active best peer",
+	)
+	require.True(t, sameConnectionId(active, connId))
+	require.True(t, sameConnectionId(active, ls.selectedBlockfetchConnId))
+}
+
+// When no connection can take the queued range, the horizon flush drops the
+// queue and requests a re-sync, as the header-driven start does, rather than
+// returning to a wait that nothing can now release.
+func TestAwaitChainsyncHeaderAdmissionFlushFailureRequestsResync(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _ := newHorizonFlushTestLedger(t, nil)
+	owner := testRecycleConnId()
+	ls.headerPipelineConnId = owner
+	ls.config.BlockfetchRequestRangeFunc = func(
+		_ ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ ocommon.Point,
+	) (uint64, error) {
+		return 0, errors.New("simulated blockfetch request failure")
+	}
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	resyncSubID, resyncCh := bus.SubscribeWithBuffer(
+		event.ChainsyncResyncEventType,
+		4,
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, resyncSubID)
+	})
+	e := futureHeaderEvent(
+		90,
+		time.Date(2026, time.August, 22, 12, 1, 40, 0, time.UTC),
+	)
+	e.ConnectionId = owner
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	got := testutil.RequireReceive(
+		t,
+		awaitAdmissionAsync(ctx, ls, e),
+		testutil.AsyncWait,
+		"canceled admission did not return",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+
+	resyncEvt := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"a failed horizon flush must request a re-sync",
+	)
+	data, ok := resyncEvt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok, "unexpected event payload %T", resyncEvt.Data)
+	require.True(t, sameConnectionId(owner, data.ConnectionId))
+	require.Zero(t, ls.chain.HeaderCount())
 }
