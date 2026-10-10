@@ -2961,6 +2961,11 @@ type MetadataStore interface {
 	// after the given slot. This is used during chain rollbacks.
 	DeleteNetworkDonationsAfterSlot(uint64, types.Txn) error
 
+	// DeleteNetworkDonationsForEpoch removes every donation record tagged
+	// with the given epoch. A ledger-state import uses it to replace the
+	// anchor epoch's local rows with the snapshot's own total.
+	DeleteNetworkDonationsForEpoch(epoch uint64, txn types.Txn) error
+
 	// State rollback methods
 
 	// RestoreAccountStateAtSlot reverts account delegation state to the given

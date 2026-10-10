@@ -4330,6 +4330,27 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		}
 	}
 
+	// A header past the forecast horizon cannot be validated until the
+	// applied ledger advances, so it must not join the queue blockfetch
+	// drains. Admission holds such headers back; one that still arrives (the
+	// horizon moved back after admission, or an event that bypassed it) is
+	// re-delivered from a fresh intersection instead. Passing crypto against
+	// the local epoch data does not exempt it: a fork is forecast from its
+	// intersection, which can end before the tip's horizon does.
+	if ls.headerBeyondForecastHorizon(ls.lifecycleContext(), e) {
+		ls.config.Logger.Debug(
+			"not queueing chainsync header past the forecast horizon",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"connection_id", e.ConnectionId.String(),
+		)
+		ls.requestChainsyncResync(
+			e.ConnectionId,
+			"header past forecast horizon",
+			pending,
+		)
+		return nil
+	}
 	if ls.setChainsyncState(SyncingChainsyncState) == RollbackChainsyncState {
 		ls.config.Logger.Info(
 			fmt.Sprintf(
@@ -4623,12 +4644,14 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 // A header received no more than defaultHeaderClockSkew before its slot waits
 // for slot onset and is accepted. A header received earlier is deliberately
 // dropped by returning (false, nil): local clock skew cannot by itself justify
-// penalizing the peer. ErrPastHorizon is also accepted as a deferred decision,
-// matching headerVerificationEpoch; without a forecast the header cannot be
-// proven future. Other conversion failures fail closed. A zero timestamp is
-// retained for compatibility with synthetic/internal events that never crossed
-// the network ingress path. As with other Go APIs that accept a context, ctx
-// must not be nil.
+// penalizing the peer. A header past the ledger's forecast horizon cannot be
+// validated, so it waits until the applied ledger advances far enough to
+// forecast its slot before the onset check runs, as the reference ChainSync
+// client does for OutsideForecastRange; until then it must not influence chain
+// selection or reach blockfetch. Other conversion failures fail closed. A zero
+// timestamp is retained for compatibility with synthetic/internal events that
+// never crossed the network ingress path. As with other Go APIs that accept a
+// context, ctx must not be nil.
 func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	ctx context.Context,
 	e ChainsyncEvent,
@@ -4638,10 +4661,25 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	}
 	headerSlot := e.BlockHeader.SlotNumber()
 	slotTime, err := ls.slotClock.SlotToTime(headerSlot)
-	if err != nil {
-		if errors.Is(err, hardfork.ErrPastHorizon) {
-			return true, nil
+	if errors.Is(err, hardfork.ErrPastHorizon) {
+		if ctx == nil {
+			return false, errors.New(
+				"chainsync header admission context is nil",
+			)
 		}
+		if err := ls.awaitForecastHorizon(ctx, e); err != nil {
+			return false, fmt.Errorf("wait for forecast horizon: %w", err)
+		}
+		slotTime, err = ls.slotClock.SlotToTime(headerSlot)
+	} else if err == nil && ls.headerBeyondForecastHorizon(ctx, e) {
+		// The slot is in range from the local tip, but the peer's chain
+		// leaves the local chain earlier, and is forecast from there.
+		if err := ls.awaitForecastHorizon(ctx, e); err != nil {
+			return false, fmt.Errorf("wait for forecast horizon: %w", err)
+		}
+		slotTime, err = ls.slotClock.SlotToTime(headerSlot)
+	}
+	if err != nil {
 		return false, fmt.Errorf("resolve header slot onset: %w", err)
 	}
 	earlyBy := slotTime.Sub(e.ArrivalTime)
@@ -4675,6 +4713,172 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 		return false, fmt.Errorf("wait for header slot onset: %w", err)
 	}
 	return true, nil
+}
+
+// awaitForecastHorizon blocks until the published ledger state can forecast
+// e's slot, or ctx ends. The horizon only moves when a snapshot is published,
+// so it waits for publication rather than polling.
+func (ls *LedgerState) awaitForecastHorizon(
+	ctx context.Context,
+	e ChainsyncEvent,
+) error {
+	logged := false
+	for {
+		published := ls.snapshotPublishedChan()
+		if !ls.headerBeyondForecastHorizon(ctx, e) {
+			return nil
+		}
+		if !logged && ls.config.Logger != nil {
+			ls.config.Logger.Debug(
+				"holding chainsync header past the forecast horizon",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+			)
+			logged = true
+		}
+		select {
+		case <-published:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// headerBeyondForecastHorizon reports whether e's header lies past the
+// horizon its chain can be forecast to. Like the reference ChainSync client,
+// the forecast is measured from the peer chain's intersection with the local
+// chain, so a fork that left the local chain before the ledger tip has a
+// shorter horizon than the tip's.
+func (ls *LedgerState) headerBeyondForecastHorizon(
+	ctx context.Context,
+	e ChainsyncEvent,
+) bool {
+	if ls.slotClock == nil || e.BlockHeader == nil {
+		return false
+	}
+	slot := e.BlockHeader.SlotNumber()
+	if _, err := ls.slotClock.SlotToTime(slot); err != nil {
+		return errors.Is(err, hardfork.ErrPastHorizon)
+	}
+	anchor, ok := ls.chainsyncForkAnchor(ctx, e)
+	if !ok {
+		return false
+	}
+	summary, err := ls.forecastSummaryFrom(anchor)
+	if err != nil {
+		return false
+	}
+	_, err = summary.SlotToEpoch(slot)
+	return errors.Is(err, hardfork.ErrPastHorizon)
+}
+
+// chainsyncForkAnchor returns the slot at which the peer chain delivering e
+// leaves the local chain, when that is below the ledger tip. ok is false when
+// the peer's chain contains the ledger tip, which is then the forecast anchor,
+// and when the intersection cannot be resolved from recorded peer headers.
+func (ls *LedgerState) chainsyncForkAnchor(
+	ctx context.Context,
+	e ChainsyncEvent,
+) (uint64, bool) {
+	if ls.chain == nil {
+		return 0, false
+	}
+	tip := ls.loadTipSnapshot()
+	if tip == nil {
+		return 0, false
+	}
+	prevHash := e.BlockHeader.PrevHash().Bytes()
+	if bytes.Equal(prevHash, ls.chain.HeaderTip().Point.Hash) ||
+		bytes.Equal(prevHash, ls.chain.Tip().Point.Hash) {
+		return 0, false
+	}
+	return resolveForkAnchor(
+		prevHash,
+		tip.currentTip.Point.Slot,
+		ls.peerHeaderHistoryLimit(),
+		forkAnchorLookups{
+			peerHeader: func(hash []byte) (ocommon.Point, []byte, bool) {
+				if ls.config.PeerHeaderLookupFunc == nil {
+					return ocommon.Point{}, nil, false
+				}
+				ancestor, parentHash, found := ls.config.PeerHeaderLookupFunc(
+					e.ConnectionId,
+					hash,
+				)
+				return ancestor.Point, parentHash, found
+			},
+			queuedHeader: ls.chain.HoldsQueuedHeader,
+			heldBlock: func(point ocommon.Point) bool {
+				return ls.chain.HoldsPoint(ctx, point)
+			},
+			blockByHash: func(hash []byte) (ocommon.Point, bool) {
+				if ls.db == nil && ls.lookupBlockByHash == nil {
+					return ocommon.Point{}, false
+				}
+				block, err := ls.blockByHash(ctx, hash)
+				if err != nil {
+					return ocommon.Point{}, false
+				}
+				return ocommon.NewPoint(block.Slot, block.Hash), true
+			},
+		},
+	)
+}
+
+type forkAnchorLookups struct {
+	// peerHeader resolves a header the peer delivered, with its parent hash.
+	peerHeader func(hash []byte) (ocommon.Point, []byte, bool)
+	// queuedHeader and heldBlock report membership of the local chain.
+	queuedHeader func(point ocommon.Point) bool
+	heldBlock    func(point ocommon.Point) bool
+	// blockByHash resolves a stored block the peer did not deliver, such as
+	// the point its chainsync session intersected at.
+	blockByHash func(hash []byte) (ocommon.Point, bool)
+}
+
+// resolveForkAnchor walks a peer's delivered headers back from prevHash to
+// the first point the local chain holds. A queued header or a block above the
+// ledger tip means the peer's chain contains the tip. A header built on origin
+// carries the zero hash as its parent, which no stored block has: that
+// intersection is slot 0.
+func resolveForkAnchor(
+	prevHash []byte,
+	tipSlot uint64,
+	limit int,
+	lookups forkAnchorLookups,
+) (uint64, bool) {
+	for range limit {
+		if isOriginHash(prevHash) {
+			return localForkAnchor(0, tipSlot)
+		}
+		point, parentHash, found := lookups.peerHeader(prevHash)
+		if !found {
+			point, found = lookups.blockByHash(prevHash)
+			if !found || !lookups.heldBlock(point) {
+				return 0, false
+			}
+			return localForkAnchor(point.Slot, tipSlot)
+		}
+		if lookups.queuedHeader(point) {
+			return 0, false
+		}
+		if lookups.heldBlock(point) {
+			return localForkAnchor(point.Slot, tipSlot)
+		}
+		prevHash = parentHash
+	}
+	return 0, false
+}
+
+func isOriginHash(hash []byte) bool {
+	return !slices.ContainsFunc(hash, func(b byte) bool { return b != 0 })
+}
+
+func localForkAnchor(intersectionSlot, tipSlot uint64) (uint64, bool) {
+	if intersectionSlot >= tipSlot {
+		return 0, false
+	}
+	return intersectionSlot, true
 }
 
 // chainsyncHeaderCryptoPolicy distinguishes headers trusted by Mithril

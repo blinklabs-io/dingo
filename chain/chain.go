@@ -1949,6 +1949,18 @@ func (c *Chain) findQueuedHeader(point ocommon.Point) (int, error) {
 	return -1, nil
 }
 
+// HoldsQueuedHeader reports whether point is a header queued on this chain
+// ahead of its blocks.
+func (c *Chain) HoldsQueuedHeader(point ocommon.Point) bool {
+	if c == nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	index, err := c.findQueuedHeader(point)
+	return err == nil && index >= 0
+}
+
 // ValidateRollback verifies that Rollback(point) would be accepted without
 // mutating chain state. Callers can use this to avoid applying external
 // side effects before the chain's rollback pre-checks have run.

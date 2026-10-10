@@ -1343,6 +1343,29 @@ func (s *Store) DeleteNetworkDonationsAfterSlot(
 	return nil
 }
 
+func (s *Store) DeleteNetworkDonationsForEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return fmt.Errorf("delete network donations for epoch: %w", err)
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
+DELETE FROM network_donation WHERE epoch = ?`), sqlEpoch); err != nil {
+		return fmt.Errorf(
+			"delete network donations for epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	return nil
+}
+
 func (s *Store) GetImportCheckpoint(
 	importKey string,
 	txn types.Txn,

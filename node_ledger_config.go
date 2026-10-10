@@ -17,6 +17,7 @@ package dingo
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -115,7 +116,11 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		) error {
 			o := n.ouroboros()
 			if o == nil {
-				return errOuroborosNotStarted
+				return fmt.Errorf(
+					"%w: %w",
+					ledger.ErrEndorserBlockFetchNoPeer,
+					errOuroborosNotStarted,
+				)
 			}
 			return o.FetchEndorserBlockByPoint(
 				ctx,
