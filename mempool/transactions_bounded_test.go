@@ -92,7 +92,7 @@ func TestMempool_TransactionsBounded_RetainsOnlyResult(t *testing.T) {
 			if useDAG {
 				m.Lock()
 				for _, tx := range txs {
-					m.dag.add(appliedTx{hash: tx.Hash, cbor: tx.Cbor})
+					m.dag.add(appliedTx{hash: tx.Hash})
 				}
 				order, err := m.dag.topologicalOrder()
 				m.Unlock()
@@ -146,7 +146,7 @@ func TestMempool_TransactionsBounded_DAGWalksOnlyPrefix(t *testing.T) {
 	txs := addMockTransactions(t, m, 6)
 	m.Lock()
 	for _, tx := range slices.Backward(txs) {
-		m.dag.add(appliedTx{hash: tx.Hash, cbor: tx.Cbor})
+		m.dag.add(appliedTx{hash: tx.Hash})
 	}
 	delete(m.txByHash, txs[0].Hash)
 	m.Unlock()

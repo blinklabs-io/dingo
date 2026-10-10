@@ -76,6 +76,10 @@ type LedgerView struct {
 	intraBlockUtxos map[utxoref.Key]lcommon.Utxo
 	// consumedUtxos tracks inputs consumed by pending mempool transactions.
 	consumedUtxos map[utxoref.Key]struct{}
+	// pendingState holds the pending or already selected transactions that
+	// change ledger state beyond the UTxO set. validationState layers them
+	// over this view; the view's own reads never consult it.
+	pendingState *utxoref.StateOverlay
 	// utxoMemoMu guards utxoMemo. Production views are built per transaction
 	// or query and used from one goroutine; the lock keeps a future shared
 	// view safe at negligible cost next to the database read it saves.
@@ -590,6 +594,16 @@ func (lv *LedgerView) StakeRegistrationByCredential(
 		cred.Credential[:],
 		lv.txn,
 	)
+}
+
+// validationState returns the state an era validator reads: the view itself,
+// or the view with the pending transactions' withdrawals, certificates,
+// deposits and proposals applied.
+func (lv *LedgerView) validationState(
+	resolve utxoref.ProtocolParametersResolver,
+	generation uint64,
+) (lcommon.LedgerState, error) {
+	return lv.pendingState.View(lv, resolve, generation)
 }
 
 // IsStakeCredentialRegistered checks if a stake credential is currently registered

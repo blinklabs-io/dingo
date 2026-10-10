@@ -87,6 +87,9 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// Parallel VRF/KES validate stage for the same pipeline (phase 3).
 		// Off by default; requires BlockPipelineEnabled.
 		BlockPipelineValidateEnabled: n.config.blockPipelineValidateEnabled,
+		// Prefetch the next block's input UTxOs while the current block
+		// applies. Not consensus-affecting; off by default.
+		LedgerPrefetchAheadEnabled: n.config.ledgerPrefetchAheadEnabled,
 		// Core-mode batched metadata writes for blocks that are not
 		// validated. Not consensus-affecting; off by default.
 		ApplyRowBatchingEnabled: n.config.ledgerApplyRowBatchingEnabled,

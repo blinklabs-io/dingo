@@ -3351,6 +3351,7 @@ func (v *mockTxValidator) ValidateTxWithOverlay(
 	tx ledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.StateOverlay,
 ) error {
 	return v.ValidateTx(tx)
 }
@@ -4377,7 +4378,7 @@ type sessionMockTxValidator struct {
 }
 
 func (v *sessionMockTxValidator) ValidateTx(tx ledger.Transaction) error {
-	return v.ValidateTxWithOverlay(tx, nil, nil)
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
 }
 
 // ValidateTxWithOverlay is only reached if the builder fails to discover the
@@ -4388,6 +4389,7 @@ func (v *sessionMockTxValidator) ValidateTxWithOverlay(
 	_ ledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.StateOverlay,
 ) error {
 	return nil
 }
@@ -4398,8 +4400,10 @@ func (v *sessionMockTxValidator) WithTxValidationSession(ctx context.Context,
 			tx ledger.Transaction,
 			consumed map[utxoref.Key]struct{},
 			created map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
+		_ func(func() error) (bool, error),
 	) error,
 ) error {
 	v.sessionContext = ctx
@@ -4409,6 +4413,7 @@ func (v *sessionMockTxValidator) WithTxValidationSession(ctx context.Context,
 		tx ledger.Transaction,
 		_ map[utxoref.Key]struct{},
 		_ map[utxoref.Key]lcommon.Utxo,
+		_ *utxoref.StateOverlay,
 	) error {
 		v.validateCalls++
 		if v.onValidate != nil {
@@ -4429,7 +4434,13 @@ func (v *sessionMockTxValidator) WithTxValidationSession(ctx context.Context,
 		return nil
 	}
 	stillCurrent := func() bool { return !stale }
-	return fn(validate, stillCurrent)
+	commitIfCurrent := func(commit func() error) (bool, error) {
+		if !stillCurrent() {
+			return false, nil
+		}
+		return true, commit()
+	}
+	return fn(validate, stillCurrent, commitIfCurrent)
 }
 
 var (

@@ -789,7 +789,7 @@ func (f *gapDepositFixture) applyLive(
 		0,
 		deposits,
 		false,
-		nil,
+		nil, 0,
 	))
 }
 
@@ -812,7 +812,7 @@ func (f *gapDepositFixture) applyGap(
 		ocommon.Point{Slot: slot, Hash: bytes.Repeat([]byte{0xb2}, 32)},
 		0,
 		deposits,
-		nil,
+		nil, 0,
 	))
 }
 
@@ -1585,7 +1585,7 @@ func (f *pointerStakeFixture) apply(
 		blockIndex,
 		deposits,
 		false,
-		nil,
+		nil, 0,
 	))
 }
 
@@ -1612,7 +1612,7 @@ func (f *pointerStakeFixture) applyGap(
 		ocommon.Point{Slot: slot, Hash: bytes.Repeat([]byte{0xc3}, 32)},
 		blockIndex,
 		deposits,
-		nil,
+		nil, 0,
 	))
 }
 
@@ -1636,7 +1636,7 @@ func (f *pointerStakeFixture) spend(
 		0,
 		nil,
 		false,
-		nil,
+		nil, 0,
 	))
 }
 

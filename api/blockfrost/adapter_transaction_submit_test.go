@@ -72,8 +72,9 @@ func (s *stubSubmitter) AddTransaction(txType uint, txBytes []byte) error {
 // TestTransactionSubmitUnavailableMempoolIsNotARejection pins that the two
 // conditions meaning "the mempool cannot accept anything right now" are
 // reported as ErrMempoolUnavailable, the same class the nil-submitter branch
-// reports, rather than as a rejection of the caller's transaction. Both are
-// members: a mempool stopped by shutdown, and one built without a validator.
+// reports, rather than as a rejection of the caller's transaction. Members: a
+// mempool stopped by shutdown, one built without a validator, and an
+// admission that could not reach a verdict because the ledger kept moving.
 func TestTransactionSubmitUnavailableMempoolIsNotARejection(t *testing.T) {
 	t.Parallel()
 
@@ -86,6 +87,10 @@ func TestTransactionSubmitUnavailableMempoolIsNotARejection(t *testing.T) {
 		"nil validator": fmt.Errorf(
 			"%w in AddTransaction",
 			mempool.ErrNilValidator,
+		),
+		"ledger unsettled": fmt.Errorf(
+			"validate transaction: %w",
+			mempool.ErrPendingStateMoved,
 		),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -169,6 +174,10 @@ func TestHandleTransactionSubmitStoppedMempoolReturns503(t *testing.T) {
 		"nil validator": fmt.Errorf(
 			"%w in AddTransaction",
 			mempool.ErrNilValidator,
+		),
+		"ledger unsettled": fmt.Errorf(
+			"validate transaction: %w",
+			mempool.ErrPendingStateMoved,
 		),
 	} {
 		t.Run(name, func(t *testing.T) {

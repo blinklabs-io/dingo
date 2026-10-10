@@ -1019,6 +1019,7 @@ func buildDingoConfig(
 		dingo.WithBlockPipelineValidateEnabled(
 			cfg.BlockPipelineValidateEnabled,
 		),
+		dingo.WithLedgerPrefetchAheadEnabled(cfg.LedgerPrefetchAheadEnabled),
 		dingo.WithLedgerApplyRowBatchingEnabled(
 			cfg.LedgerApplyRowBatchingEnabled,
 		),

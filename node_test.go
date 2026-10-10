@@ -3380,6 +3380,17 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 	)
 }
 
+func TestLedgerStateConfigForwardsLedgerPrefetchAheadFlag(t *testing.T) {
+	t.Parallel()
+
+	off := (&Node{config: NewConfig()}).ledgerStateConfig()
+	assert.False(t, off.LedgerPrefetchAheadEnabled)
+	on := (&Node{
+		config: NewConfig(WithLedgerPrefetchAheadEnabled(true)),
+	}).ledgerStateConfig()
+	assert.True(t, on.LedgerPrefetchAheadEnabled)
+}
+
 func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
 	t.Parallel()
 

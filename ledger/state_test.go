@@ -6153,8 +6153,9 @@ func TestLeiosValidationSessionRollsBackStagedCertificateWrites(t *testing.T) {
 	ls.publishSnapshotsLocked()
 
 	err = ls.withTxValidationSession(context.Background(), nil, nil, true, func(
-		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error,
+		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 		_ func() bool,
+		_ func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
 	) error {
 		return applyTx(
