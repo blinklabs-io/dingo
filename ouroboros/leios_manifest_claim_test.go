@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -948,6 +949,138 @@ func TestLeiosTxsOfferOwnerDisconnectHandsOffToWaiter(t *testing.T) {
 		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 		return ok && data.completeTxCache()
 	}, 5*time.Second, "owner disconnect did not hand off to the healthy waiter")
+}
+
+func TestLeiosTxsOfferQueuedOwnerDisconnectPromotesWaiterImmediately(t *testing.T) {
+	t.Parallel()
+	o, point, txs := testLeiosTxOfferDeadlineFixture(t, 467)
+	ownerGuard := &leiosFetchGuard{}
+	waiterGuard := &leiosFetchGuard{}
+	ownerGuard.inflight.Store(1)
+	waiterGuard.inflight.Store(1)
+	ownerGuard.mu.Lock()
+	defer ownerGuard.mu.Unlock()
+	waiterGuard.mu.Lock()
+	defer waiterGuard.mu.Unlock()
+	ownerDone := make(chan any)
+	o.dispatchLeiosTxOfferFetch(
+		ownerGuard, &leiosTxOfferTestRequester{txs: txs},
+		namedConnId("queued-owner"), "queued-owner", point, ownerDone,
+	)
+	o.dispatchLeiosTxOfferFetch(
+		waiterGuard, &leiosTxOfferTestRequester{txs: txs},
+		namedConnId("queued-waiter"), "queued-waiter", point, nil,
+	)
+	close(ownerDone)
+	require.Eventually(t, func() bool {
+		o.leiosTxFetchClaimsMu.Lock()
+		defer o.leiosTxFetchClaimsMu.Unlock()
+		claim := o.leiosTxFetchClaims[leiosBlockKey(point.Slot, point.Hash)]
+		return claim != nil && claim.owner.connKey == "queued-waiter"
+	}, 500*time.Millisecond, 10*time.Millisecond,
+		"canceled queued owner did not immediately relinquish the claim")
+}
+
+func TestLeiosTxsOfferQueuedOwnerDeadlinePromotesWaiter(t *testing.T) {
+	t.Parallel()
+	o, point, txs := testLeiosTxOfferDeadlineFixture(t, 468)
+	o.leiosTxFetchAttemptTimeoutOverride = 40 * time.Millisecond
+	ownerGuard := &leiosFetchGuard{}
+	waiterGuard := &leiosFetchGuard{}
+	ownerGuard.inflight.Store(1)
+	waiterGuard.inflight.Store(1)
+	ownerGuard.mu.Lock()
+	defer ownerGuard.mu.Unlock()
+	waiterGuard.mu.Lock()
+	defer waiterGuard.mu.Unlock()
+	o.dispatchLeiosTxOfferFetch(
+		ownerGuard, &leiosTxOfferTestRequester{txs: txs},
+		namedConnId("deadline-owner"), "deadline-owner", point, nil,
+	)
+	o.dispatchLeiosTxOfferFetch(
+		waiterGuard, &leiosTxOfferTestRequester{txs: txs},
+		namedConnId("deadline-waiter"), "deadline-waiter", point, nil,
+	)
+	require.Eventually(t, func() bool {
+		o.leiosTxFetchClaimsMu.Lock()
+		defer o.leiosTxFetchClaimsMu.Unlock()
+		claim := o.leiosTxFetchClaims[leiosBlockKey(point.Slot, point.Hash)]
+		return claim != nil && claim.owner.connKey == "deadline-waiter"
+	}, 500*time.Millisecond, 10*time.Millisecond,
+		"queued time did not consume the owner's fixed attempt budget")
+}
+
+func TestLeiosTxsOfferTransferredOwnerCannotFetchWhenDequeued(t *testing.T) {
+	t.Parallel()
+	o, point, txs := testLeiosTxOfferDeadlineFixture(t, 469)
+	stale := &leiosTxOfferTestRequester{txs: txs}
+	healthy := &leiosTxOfferTestRequester{txs: txs}
+	ownerGuard := &leiosFetchGuard{}
+	waiterGuard := &leiosFetchGuard{}
+	ownerGuard.inflight.Store(1)
+	waiterGuard.inflight.Store(1)
+	ownerGuard.mu.Lock()
+	ownerDone := make(chan any)
+	o.dispatchLeiosTxOfferFetch(
+		ownerGuard, stale, namedConnId("stale-owner"),
+		"stale-owner", point, ownerDone,
+	)
+	o.dispatchLeiosTxOfferFetch(
+		waiterGuard, healthy, namedConnId("stale-waiter"),
+		"stale-waiter", point, nil,
+	)
+	close(ownerDone)
+	require.Eventually(t, func() bool {
+		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		return ok && data.completeTxCache()
+	}, 2*time.Second, 10*time.Millisecond)
+	ownerGuard.mu.Unlock()
+	require.Eventually(t, func() bool {
+		return ownerGuard.inflight.Load() == 0
+	}, 2*time.Second, 10*time.Millisecond)
+	require.Zero(t, stale.requests,
+		"a callback dequeued after ownership transfer must not fetch")
+	require.Equal(t, 1, healthy.requests)
+}
+
+func TestLeiosTxsOfferOtherPathCompletionRelaysTransactionsOnce(t *testing.T) {
+	t.Parallel()
+	tx, ref := testLeiosManifestTx(t, 0x61)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(470, lcommon.Blake2b256Hash(manifestRaw).Bytes())
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios: true, EnableLeiosTxFetch: true,
+	})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	o.leiosEBLog.registerConn("observer", nil, nil)
+	guard := &leiosFetchGuard{}
+	guard.inflight.Store(1)
+	guard.mu.Lock()
+	o.dispatchLeiosTxOfferFetch(
+		guard, &leiosTxOfferTestRequester{txs: []cbor.RawMessage{tx}},
+		namedConnId("alternate-completion"), "alternate-completion", point, nil,
+	)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point, manifestRaw, []cbor.RawMessage{tx}, leiosStoreAuthoritative,
+	))
+	guard.mu.Unlock()
+	require.Eventually(t, func() bool {
+		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		return ok && data.relayTransactionsOffered && guard.inflight.Load() == 0
+	}, 2*time.Second, 10*time.Millisecond)
+	o.leiosEBLog.mu.Lock()
+	defer o.leiosEBLog.mu.Unlock()
+	txOffers := 0
+	for _, entry := range o.leiosEBLog.items {
+		if entry.txOffer != nil && entry.txOffer.Slot == point.Slot &&
+			bytes.Equal(entry.txOffer.Hash, point.Hash) {
+			txOffers++
+		}
+	}
+	require.Equal(t, 1, txOffers)
 }
 
 func TestLeiosTxsOfferDisconnectedWaiterIsRemoved(t *testing.T) {

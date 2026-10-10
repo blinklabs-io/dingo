@@ -803,6 +803,7 @@ func (o *Ouroboros) dispatchLeiosTxOfferFetch(
 	if claim == nil {
 		claim = &leiosTxFetchClaim{owner: candidate}
 		o.leiosTxFetchClaims[key] = claim
+		o.startLeiosTxFetchAttempt(candidate)
 		o.leiosTxFetchClaimsMu.Unlock()
 		o.watchLeiosTxFetchCandidate(key, candidate)
 		o.launchLeiosTxFetchOwner(key, candidate)
@@ -837,6 +838,22 @@ func (o *Ouroboros) watchLeiosTxFetchCandidate(
 	}()
 }
 
+func (o *Ouroboros) startLeiosTxFetchAttempt(
+	candidate *leiosTxFetchCandidate,
+) {
+	candidate.attemptCtx, candidate.attemptDone = context.WithTimeout(
+		candidate.ctx,
+		o.leiosTxFetchAttemptTimeout(),
+	)
+	go func() {
+		<-candidate.attemptCtx.Done()
+		o.cancelLeiosTxFetchCandidate(
+			leiosBlockKey(candidate.point.Slot, candidate.point.Hash),
+			candidate,
+		)
+	}()
+}
+
 func (o *Ouroboros) launchLeiosTxFetchOwner(
 	key string,
 	candidate *leiosTxFetchCandidate,
@@ -851,20 +868,33 @@ func (o *Ouroboros) launchLeiosTxFetchOwner(
 		return
 	}
 	o.dispatchLeiosFetchReserved(candidate.guard, func() {
-		attemptCtx, cancel := context.WithTimeout(
-			candidate.ctx,
-			o.leiosTxFetchAttemptTimeout(),
-		)
+		defer candidate.attemptDone()
+		defer candidate.cancel()
+		if !o.leiosTxFetchOwnerActive(key, candidate) {
+			return
+		}
 		success := o.fetchLeiosTxOffer(
-			attemptCtx,
+			candidate.attemptCtx,
 			candidate.client,
 			candidate.connKey,
 			candidate.point,
 		)
-		cancel()
+		if success {
+			o.markLeiosEndorserBlockRelayOffer(candidate.point)
+		}
 		o.finishLeiosTxFetch(key, candidate, success)
-		candidate.cancel()
 	})
+}
+
+func (o *Ouroboros) leiosTxFetchOwnerActive(
+	key string,
+	candidate *leiosTxFetchCandidate,
+) bool {
+	o.leiosTxFetchClaimsMu.Lock()
+	defer o.leiosTxFetchClaimsMu.Unlock()
+	claim := o.leiosTxFetchClaims[key]
+	return claim != nil && claim.owner == candidate &&
+		candidate.attemptCtx.Err() == nil
 }
 
 func (o *Ouroboros) leiosTxFetchAttemptTimeout() time.Duration {
@@ -892,19 +922,12 @@ func (o *Ouroboros) finishLeiosTxFetch(
 		delete(o.leiosTxFetchClaims, key)
 		release = claim.waiters
 	} else {
-		for len(claim.waiters) > 0 {
-			next = claim.waiters[0]
-			claim.waiters = claim.waiters[1:]
-			if next.ctx.Err() == nil {
-				break
-			}
-			release = append(release, next)
-			next = nil
-		}
+		next, release = nextLeiosTxFetchOwner(claim)
 		if next == nil {
 			delete(o.leiosTxFetchClaims, key)
 		} else {
 			claim.owner = next
+			o.startLeiosTxFetchAttempt(next)
 		}
 	}
 	o.leiosTxFetchClaimsMu.Unlock()
@@ -921,24 +944,52 @@ func (o *Ouroboros) cancelLeiosTxFetchCandidate(
 	key string,
 	candidate *leiosTxFetchCandidate,
 ) {
-	release := false
+	var next *leiosTxFetchCandidate
+	var release []*leiosTxFetchCandidate
 	o.leiosTxFetchClaimsMu.Lock()
 	claim := o.leiosTxFetchClaims[key]
-	if claim != nil && claim.owner != candidate {
+	if claim != nil && claim.owner == candidate {
+		next, release = nextLeiosTxFetchOwner(claim)
+		if next == nil {
+			delete(o.leiosTxFetchClaims, key)
+		} else {
+			claim.owner = next
+			o.startLeiosTxFetchAttempt(next)
+		}
+	} else if claim != nil {
 		for idx, waiter := range claim.waiters {
 			if waiter == candidate {
 				claim.waiters = append(
 					claim.waiters[:idx], claim.waiters[idx+1:]...,
 				)
-				release = true
+				release = append(release, candidate)
 				break
 			}
 		}
 	}
 	o.leiosTxFetchClaimsMu.Unlock()
-	if release {
-		o.releaseLeiosFetch(candidate.guard)
+	for _, waiter := range release {
+		waiter.cancel()
+		o.releaseLeiosFetch(waiter.guard)
 	}
+	if next != nil {
+		o.launchLeiosTxFetchOwner(key, next)
+	}
+}
+
+func nextLeiosTxFetchOwner(
+	claim *leiosTxFetchClaim,
+) (*leiosTxFetchCandidate, []*leiosTxFetchCandidate) {
+	var release []*leiosTxFetchCandidate
+	for len(claim.waiters) > 0 {
+		next := claim.waiters[0]
+		claim.waiters = claim.waiters[1:]
+		if next.ctx.Err() == nil {
+			return next, release
+		}
+		release = append(release, next)
+	}
+	return nil, release
 }
 
 func (o *Ouroboros) cancelLeiosTxFetchWaiters(
@@ -1421,13 +1472,15 @@ type leiosPendingFetch struct {
 }
 
 type leiosTxFetchCandidate struct {
-	connId  ouroboros.ConnectionId
-	connKey string
-	guard   *leiosFetchGuard
-	client  leiosTxOfferRequester
-	point   ocommon.Point
-	ctx     context.Context
-	cancel  context.CancelFunc
+	connId      ouroboros.ConnectionId
+	connKey     string
+	guard       *leiosFetchGuard
+	client      leiosTxOfferRequester
+	point       ocommon.Point
+	ctx         context.Context
+	cancel      context.CancelFunc
+	attemptCtx  context.Context
+	attemptDone context.CancelFunc
 }
 
 type leiosTxFetchClaim struct {
