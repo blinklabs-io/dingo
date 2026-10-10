@@ -123,20 +123,21 @@ func (m *Manager) Stop() error {
 	if m == nil {
 		return nil
 	}
+	// mu is held until the worker has exited: a Start that took it earlier
+	// would launch a worker this Stop never canceled and then waits on.
+	// Neither the event handler nor the worker takes mu.
 	m.mu.Lock()
-	cancel := m.cancel
-	subscriptionID := m.subscriptionID
-	m.cancel = nil
-	m.subscriptionID = 0
-	m.mu.Unlock()
-	if cancel == nil {
+	defer m.mu.Unlock()
+	if m.cancel == nil {
 		return nil
 	}
-	cancel()
+	m.cancel()
+	m.cancel = nil
 	m.eventBus.UnsubscribeAndWait(
 		event.EpochTransitionEventType,
-		subscriptionID,
+		m.subscriptionID,
 	)
+	m.subscriptionID = 0
 	m.wg.Wait()
 	return nil
 }

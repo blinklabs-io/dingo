@@ -228,3 +228,62 @@ func TestByronEpochTransitionWithoutNonceTriggersRun(t *testing.T) {
 	))
 	receive(t, u.entered, "run for a Byron rollover")
 }
+
+// startOnCancelUpdater calls Start on its manager when a run is canceled, so
+// the call lands while Stop is draining the worker.
+type startOnCancelUpdater struct {
+	m       *Manager
+	entered chan struct{}
+	started chan error
+	once    sync.Once
+}
+
+func (u *startOnCancelUpdater) OptimizePlannerStatsContext(
+	ctx context.Context,
+	_ string,
+) (types.PlannerStatsResult, error) {
+	u.entered <- struct{}{}
+	<-ctx.Done()
+	u.once.Do(func() {
+		go func() { u.started <- u.m.Start(context.Background()) }()
+		// Give the concurrent Start time to take effect before this worker
+		// exits; a Start serialized behind Stop stays blocked.
+		select {
+		case <-u.started:
+			u.started <- nil
+		case <-time.After(200 * time.Millisecond):
+		}
+	})
+	return types.PlannerStatsResult{Supported: true}, ctx.Err()
+}
+
+// A Start arriving while Stop drains the worker must not launch a worker Stop
+// then waits on forever.
+func TestStartDuringStopDoesNotHangStop(t *testing.T) {
+	t.Parallel()
+	u := &startOnCancelUpdater{
+		entered: make(chan struct{}, 1),
+		started: make(chan error, 1),
+	}
+	m := NewManager(
+		u,
+		event.NewEventBus(nil, nil),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	u.m = m
+	require.NoError(t, m.Start(t.Context()))
+	m.handleEpochTransition(epochEvent([]byte{1}))
+	receive(t, u.entered, "run in flight")
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- m.Stop() }()
+	require.NoError(t, receive(t, stopped, "Stop to return"))
+	require.NoError(t, receive(t, u.started, "the concurrent Start"))
+	require.NoError(t, receive(t, asyncStop(m), "the restarted manager to stop"))
+}
+
+func asyncStop(m *Manager) <-chan error {
+	ch := make(chan error, 1)
+	go func() { ch <- m.Stop() }()
+	return ch
+}

@@ -47,7 +47,9 @@ func TestEpochTransitionCreatesStat1OnGenesisStyleDatabase(t *testing.T) {
 
 	probe, err := sql.Open(
 		"sqlite",
-		"file:"+filepath.Join(dataDir, "metadata.sqlite")+
+		// A plain path rather than a file: URI, which would need the
+		// Windows drive-letter handling the store applies to its own DSN.
+		filepath.Join(dataDir, "metadata.sqlite")+
 			"?_pragma=busy_timeout(30000)&_pragma=synchronous(OFF)",
 	)
 	require.NoError(t, err)
