@@ -568,6 +568,7 @@ func TestLeiosTxsOfferHealthyPeerIsNotSuppressedByFailingPeer(t *testing.T) {
 	))
 	require.Equal(t, int32(1), healthyGuard.inflight.Load(),
 		"a first peer's claim must not suppress a healthy peer")
+	requireLeiosTxFetchClaim(t, o, point, first.Id(), healthy.Id())
 
 	unlockFirst()
 	requireLeiosFetchConversationDone(t, firstDone)
@@ -580,6 +581,293 @@ func TestLeiosTxsOfferHealthyPeerIsNotSuppressedByFailingPeer(t *testing.T) {
 		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 		return ok && data.completeTxCache()
 	}, 5*time.Second, "healthy peer did not complete the transaction cache")
+}
+
+func requireLeiosTxFetchClaim(
+	t *testing.T,
+	o *Ouroboros,
+	point ocommon.Point,
+	owner gouroboros.ConnectionId,
+	waiters ...gouroboros.ConnectionId,
+) {
+	t.Helper()
+	o.leiosTxFetchClaimsMu.Lock()
+	defer o.leiosTxFetchClaimsMu.Unlock()
+	claim := o.leiosTxFetchClaims[leiosBlockKey(point.Slot, point.Hash)]
+	require.NotNil(t, claim)
+	require.Equal(t, owner, claim.owner.connId)
+	require.Len(t, claim.waiters, len(waiters))
+	for idx, waiter := range waiters {
+		require.Equal(t, waiter, claim.waiters[idx].connId)
+	}
+}
+
+func TestLeiosTxsOfferHandsOffAcrossMultipleFailingPeers(t *testing.T) {
+	t.Parallel()
+	tx, ref := testLeiosManifestTx(t, 0x47)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(
+		461,
+		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
+	)
+	bitmap := map[uint16]uint64{0: 1 << 63}
+	newPeer := func(txs []cbor.RawMessage) (*gouroboros.Connection, <-chan error) {
+		return newLeiosFetchConversation(t, append(
+			leiosFetchHandshake(),
+			ouroboros_mock.ConversationEntryInput{
+				ProtocolId:  leiosfetch.ProtocolId,
+				MessageType: leiosfetch.MessageTypeBlockTxsRequest,
+			},
+			ouroboros_mock.ConversationEntryOutput{
+				ProtocolId: leiosfetch.ProtocolId,
+				IsResponse: true,
+				Messages: []protocol.Message{
+					leiosfetch.NewMsgBlockTxsFull(point, bitmap, txs),
+				},
+			},
+		))
+	}
+	first, firstDone := newPeer(nil)
+	second, secondDone := newPeer(nil)
+	healthy, healthyDone := newPeer([]cbor.RawMessage{tx})
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	for idx, conn := range []*gouroboros.Connection{first, second, healthy} {
+		require.True(t, cm.AddConnection(conn, false, fmt.Sprintf("peer-%d", idx)))
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm, EnableLeios: true, EnableLeiosTxFetch: true,
+	})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point, manifestRaw, nil, leiosStoreAuthoritative,
+	))
+	guards := []*leiosFetchGuard{
+		o.leiosFetchGuardFor(first.Id()),
+		o.leiosFetchGuardFor(second.Id()),
+		o.leiosFetchGuardFor(healthy.Id()),
+	}
+	for _, guard := range guards {
+		guard.mu.Lock()
+	}
+	var unlock [3]sync.Once
+	for idx, guard := range guards {
+		idx, guard := idx, guard
+		t.Cleanup(func() { unlock[idx].Do(guard.mu.Unlock) })
+	}
+	offer := oleiosnotify.NewMsgBlockTxsOffer(point)
+	for _, conn := range []*gouroboros.Connection{first, second, healthy} {
+		require.NoError(t, o.leiosnotifyClientNotification(
+			oleiosnotify.CallbackContext{ConnectionId: conn.Id()}, offer,
+		))
+	}
+	requireLeiosTxFetchClaim(
+		t, o, point, first.Id(), second.Id(), healthy.Id(),
+	)
+
+	unlock[0].Do(guards[0].mu.Unlock)
+	requireLeiosFetchConversationDone(t, firstDone)
+	testutil.WaitForCondition(t, func() bool {
+		o.leiosTxFetchClaimsMu.Lock()
+		defer o.leiosTxFetchClaimsMu.Unlock()
+		claim := o.leiosTxFetchClaims[leiosBlockKey(point.Slot, point.Hash)]
+		return claim != nil && claim.owner.connId == second.Id()
+	}, 5*time.Second, "first failure did not hand off to the second peer")
+	unlock[1].Do(guards[1].mu.Unlock)
+	requireLeiosFetchConversationDone(t, secondDone)
+	testutil.WaitForCondition(t, func() bool {
+		o.leiosTxFetchClaimsMu.Lock()
+		defer o.leiosTxFetchClaimsMu.Unlock()
+		claim := o.leiosTxFetchClaims[leiosBlockKey(point.Slot, point.Hash)]
+		return claim != nil && claim.owner.connId == healthy.Id()
+	}, 5*time.Second, "second failure did not hand off to the healthy peer")
+	unlock[2].Do(guards[2].mu.Unlock)
+	requireLeiosFetchConversationDone(t, healthyDone)
+	testutil.WaitForCondition(t, func() bool {
+		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		return ok && data.completeTxCache()
+	}, 5*time.Second, "healthy third peer did not complete the transaction cache")
+}
+
+func TestLeiosTxsOfferCancellationBeforeWorkerLaunch(t *testing.T) {
+	t.Parallel()
+	conn, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
+	t.Cleanup(func() { _ = conn.Close() })
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	require.True(t, cm.AddConnection(conn, false, "peer"))
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm, EnableLeios: true, EnableLeiosTxFetch: true,
+	})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	o.leiosTxFetchBeforeLaunch = func() {
+		close(entered)
+		<-release
+	}
+	point := ocommon.NewPoint(462, []byte{0x46, 0x47})
+	done := make(chan any)
+	result := make(chan error, 1)
+	go func() {
+		result <- o.leiosnotifyClientNotification(
+			oleiosnotify.CallbackContext{
+				ConnectionId: conn.Id(), ConnectionDoneChan: done,
+			},
+			oleiosnotify.NewMsgBlockTxsOffer(point),
+		)
+	}()
+	<-entered
+	close(done)
+	close(release)
+	require.NoError(t, <-result)
+	guard := o.leiosFetchGuardFor(conn.Id())
+	testutil.WaitForCondition(t, func() bool {
+		o.leiosTxFetchClaimsMu.Lock()
+		defer o.leiosTxFetchClaimsMu.Unlock()
+		return guard.inflight.Load() == 0 &&
+			o.leiosTxFetchClaims[leiosBlockKey(point.Slot, point.Hash)] == nil
+	}, 5*time.Second, "canceled owner launched or retained its fetch claim")
+}
+
+func TestLeiosTxsOfferOwnerDisconnectHandsOffToWaiter(t *testing.T) {
+	t.Parallel()
+	tx, ref := testLeiosManifestTx(t, 0x48)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(
+		464,
+		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
+	)
+	bitmap := map[uint16]uint64{0: 1 << 63}
+	owner, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
+	healthy, healthyDone := newLeiosFetchConversation(t, append(
+		leiosFetchHandshake(),
+		ouroboros_mock.ConversationEntryInput{
+			ProtocolId:  leiosfetch.ProtocolId,
+			MessageType: leiosfetch.MessageTypeBlockTxsRequest,
+		},
+		ouroboros_mock.ConversationEntryOutput{
+			ProtocolId: leiosfetch.ProtocolId,
+			IsResponse: true,
+			Messages: []protocol.Message{
+				leiosfetch.NewMsgBlockTxsFull(
+					point, bitmap, []cbor.RawMessage{tx},
+				),
+			},
+		},
+	))
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	require.True(t, cm.AddConnection(owner, false, "owner"))
+	require.True(t, cm.AddConnection(healthy, false, "healthy"))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm, EnableLeios: true, EnableLeiosTxFetch: true,
+	})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point, manifestRaw, nil, leiosStoreAuthoritative,
+	))
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	o.leiosTxFetchBeforeLaunch = func() {
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+	}
+	ownerDone := make(chan any)
+	result := make(chan error, 1)
+	go func() {
+		result <- o.leiosnotifyClientNotification(
+			oleiosnotify.CallbackContext{
+				ConnectionId: owner.Id(), ConnectionDoneChan: ownerDone,
+			},
+			oleiosnotify.NewMsgBlockTxsOffer(point),
+		)
+	}()
+	<-entered
+	require.NoError(t, o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{ConnectionId: healthy.Id()},
+		oleiosnotify.NewMsgBlockTxsOffer(point),
+	))
+	requireLeiosTxFetchClaim(t, o, point, owner.Id(), healthy.Id())
+	close(ownerDone)
+	close(release)
+	require.NoError(t, <-result)
+	requireLeiosFetchConversationDone(t, healthyDone)
+	testutil.WaitForCondition(t, func() bool {
+		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		return ok && data.completeTxCache()
+	}, 5*time.Second, "owner disconnect did not hand off to the healthy waiter")
+}
+
+func TestLeiosTxsOfferDisconnectedWaiterIsRemoved(t *testing.T) {
+	t.Parallel()
+	first, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
+	second, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
+	t.Cleanup(func() { _ = first.Close() })
+	t.Cleanup(func() { _ = second.Close() })
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	require.True(t, cm.AddConnection(first, false, "first"))
+	require.True(t, cm.AddConnection(second, false, "second"))
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm, EnableLeios: true, EnableLeiosTxFetch: true,
+	})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	o.leiosTxFetchBeforeLaunch = func() {
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+	}
+	point := ocommon.NewPoint(463, []byte{0x47, 0x48})
+	firstDone := make(chan any)
+	secondDone := make(chan any)
+	result := make(chan error, 1)
+	go func() {
+		result <- o.leiosnotifyClientNotification(
+			oleiosnotify.CallbackContext{
+				ConnectionId: first.Id(), ConnectionDoneChan: firstDone,
+			},
+			oleiosnotify.NewMsgBlockTxsOffer(point),
+		)
+	}()
+	<-entered
+	require.NoError(t, o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{
+			ConnectionId: second.Id(), ConnectionDoneChan: secondDone,
+		},
+		oleiosnotify.NewMsgBlockTxsOffer(point),
+	))
+	requireLeiosTxFetchClaim(t, o, point, first.Id(), second.Id())
+	close(secondDone)
+	testutil.WaitForCondition(t, func() bool {
+		o.leiosTxFetchClaimsMu.Lock()
+		defer o.leiosTxFetchClaimsMu.Unlock()
+		claim := o.leiosTxFetchClaims[leiosBlockKey(point.Slot, point.Hash)]
+		return claim != nil && len(claim.waiters) == 0 &&
+			o.leiosFetchGuardFor(second.Id()).inflight.Load() == 0
+	}, 5*time.Second, "disconnected waiter remained eligible for handoff")
+	close(firstDone)
+	close(release)
+	require.NoError(t, <-result)
 }
 
 func TestLeiosManifestOfferClaimContentionReleasesAdmission(t *testing.T) {

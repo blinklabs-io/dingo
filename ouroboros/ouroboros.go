@@ -283,7 +283,12 @@ type Ouroboros struct {
 	// serialized; running them off the leios-notify handler keeps a
 	// multi-second EB fetch from head-of-line blocking every later offer on
 	// the connection.
-	leiosFetchGuards sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
+	leiosFetchGuards     sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
+	leiosTxFetchClaimsMu sync.Mutex
+	leiosTxFetchClaims   map[string]*leiosTxFetchClaim
+	// leiosTxFetchBeforeLaunch is an instance-local test seam for the
+	// owner-selection to worker-launch cancellation boundary.
+	leiosTxFetchBeforeLaunch func()
 	// Manifest offers have their own claim: a pending manifest fetch must not
 	// suppress a transaction offer needed to complete the same occurrence.
 	leiosManifestFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
@@ -1109,6 +1114,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if guard, ok := o.leiosFetchGuards.Load(connId); ok {
 		guard.(*leiosFetchGuard).cancelPendingLeiosFetches()
 	}
+	o.cancelLeiosTxFetchWaiters(connId)
 	o.leiosFetchGuards.Delete(connId)
 }
 

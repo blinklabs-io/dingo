@@ -2794,6 +2794,17 @@ func (p *haskellBlockTxsPeer) BlockTxsRequest(
 	return leiosfetch.NewMsgFromCbor(leiosfetch.MessageTypeBlockTxs, raw)
 }
 
+func (o *Ouroboros) fetchLeiosEbTxsBatched(
+	client leiosBlockTxsRequester,
+	point ocommon.Point,
+	txCount int,
+	manifestRaw []byte,
+) ([]cbor.RawMessage, error) {
+	return o.fetchLeiosEbTxsBatchedUntil(
+		context.Background(), client, point, txCount, manifestRaw, time.Time{},
+	)
+}
+
 // TestLeiosFetchHaskellEncodedBlockTxsIsConsumed is an interoperability
 // regression for the Haskell reference node's leios-fetch encoding.
 // The endorser block has 70 transactions, so the fetch spans two 64-tx bitmap
