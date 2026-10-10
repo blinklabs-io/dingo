@@ -866,6 +866,15 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("failed to load state database: %w", err)
 	}
 	n.ledgerState = state
+	started = append(started, func() {
+		// Start can fail after launching database workers. Drain even a
+		// partially started ledger before the earlier storage cleanup runs.
+		if err := n.ledgerState.Close(); err != nil {
+			ledgerStateDrainConfirmed = false
+			runErr = errors.Join(runErr, errStorageDrainUnconfirmed, err)
+			n.config.logger.Error("ledger startup rollback did not drain; preserving storage", "error", err)
+		}
+	})
 	// n.ouroboros is constructed once every dependency exists; see the
 	// NewOuroboros call below.
 	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
@@ -983,6 +992,17 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err := n.midnightIndexer.Start(); err != nil {
 			return fmt.Errorf("starting midnight indexer: %w", err)
 		}
+		started = append(started, func() {
+			stopCtx, cancel := context.WithTimeout(
+				context.Background(), n.configuredShutdownTimeout(),
+			)
+			defer cancel()
+			if err := n.midnightIndexer.Stop(stopCtx); err != nil {
+				ledgerStateDrainConfirmed = false
+				runErr = errors.Join(runErr, errStorageDrainUnconfirmed, err)
+				n.config.logger.Error("midnight indexer startup rollback did not drain; preserving storage", "error", err)
+			}
+		})
 	}
 
 	// Initialize snapshot manager for stake snapshot capture and wire the
@@ -1104,40 +1124,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Start ledger.
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
-	}
-	started = append(started, func() {
-		// Close returns a non-nil error only when a bounded wait
-		// (rollback-event goroutines, dbWorkerPool shutdown) could not
-		// confirm every background goroutine had actually exited before
-		// giving up -- unlike an ordinary cleanup failure, that means a
-		// goroutine may still be reading or writing n.db. Setting
-		// ledgerStateDrainConfirmed false makes the earlier-registered (so
-		// later-run) db.Close LIFO stop skip closing it out from under that
-		// goroutine, the same guard node_shutdown.go's shutdown() applies
-		// on the normal signal-driven path.
-		if err := n.ledgerState.Close(); err != nil {
-			ledgerStateDrainConfirmed = false
-			n.config.logger.Error(
-				"ledger state did not fully shut down; skipping database close because a background goroutine may still be using it",
-				"error",
-				err,
-			)
-		}
-	})
-	// Register midnight indexer cleanup after LedgerState so it is torn down
-	// first (reverse order): midnight.Stop() → ledgerState.Close().
-	if n.midnightIndexer != nil {
-		started = append(started, func() {
-			stopCtx, cancel := context.WithTimeout(
-				context.Background(), n.configuredShutdownTimeout(),
-			)
-			defer cancel()
-			if err := n.midnightIndexer.Stop(stopCtx); err != nil {
-				ledgerStateDrainConfirmed = false
-				runErr = errors.Join(runErr, errStorageDrainUnconfirmed, err)
-				n.config.logger.Error("midnight indexer startup rollback did not drain; preserving storage", "error", err)
-			}
-		})
 	}
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {

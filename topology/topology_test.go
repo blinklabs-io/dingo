@@ -571,7 +571,9 @@ func TestNewTopologyConfigFromReader_RejectsWarmValencyBelowValency(t *testing.T
 	require.ErrorContains(t, err, "warmValency must be >= valency")
 }
 
-func TestNewTopologyConfigFromReader_RejectsWarmValencyAboveValency(t *testing.T) {
+func TestNewTopologyConfigFromReader_RejectsWarmValencyAboveAccessPointCount(
+	t *testing.T,
+) {
 	jsonData := `{
 	"localRoots": [
 		{

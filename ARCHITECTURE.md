@@ -3152,6 +3152,10 @@ The same rollback also constrains *where* a stop is registered, not just
 what it does: `cleanupFailedStartup` cancels `n.ctx` but joins only the
 stops already on `started`, so a component's stop belongs immediately
 after its start returns, ahead of anything else that can fail.
+The ledger close is registered immediately after construction because
+`LedgerState.Start` can fail after creating database workers. The Midnight
+indexer stop is registered immediately after it subscribes, before ledger
+startup; reverse-order rollback drains that subscriber before the ledger.
 `Run()`'s block-producer step uses `startBlockProducer` from
 `node_forging.go`. Its stop is registered immediately after credential
 validation, which may start the KES agent loop, and before ledger checks,
