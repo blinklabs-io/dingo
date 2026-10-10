@@ -15370,7 +15370,7 @@ func newChainUpdateEvent() event.Event {
 func TestBlockfetchDrainDefersChainUpdatePastLedgerMutex(t *testing.T) {
 	t.Parallel()
 
-	eventBus := newTestEventBus(t, nil)
+	eventBus := event.NewEventBus(nil, nil)
 	// Stop releases the goroutines parked on the stalled subscriber / full
 	// lane at the end of the test. Run it under a bounded wait: if Stop's
 	// shutdown path ever regresses and fails to release those parked
