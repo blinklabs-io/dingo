@@ -1288,6 +1288,7 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 		},
 	)
 	require.Error(t, err)
+	require.True(t, IsSemanticRuleValidationError(err))
 
 	var plutusErr conway.PlutusScriptFailedError
 	require.ErrorAs(t, err, &plutusErr)
@@ -1351,8 +1352,41 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 			)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "missing PlutusV1 cost model")
+			assert.False(t, IsSemanticRuleValidationError(err))
 		},
 	)
+
+	t.Run("evaluation context failure stays local", func(t *testing.T) {
+		orig := newEvalContextFunc
+		t.Cleanup(func() { newEvalContextFunc = orig })
+		evalErr := errors.New("evaluation context unavailable")
+		newEvalContextFunc = func(
+			lang.LanguageVersion,
+			cek.ProtoVersion,
+			[]int64,
+		) (*cek.EvalContext, error) {
+			return nil, evalErr
+		}
+		err := ValidateTxConway(
+			tx,
+			0,
+			newMockLedgerState(),
+			&conway.ConwayProtocolParameters{
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: 9,
+				},
+				MaxTxExUnits: lcommon.ExUnits{
+					Steps:  1_000_000,
+					Memory: 1_000_000,
+				},
+				CostModels: map[uint][]int64{
+					0: defaultMachineCostModel(t, lang.LanguageVersionV1),
+				},
+			},
+		)
+		require.ErrorIs(t, err, evalErr)
+		require.False(t, IsSemanticRuleValidationError(err))
+	})
 }
 
 type mockProducedValidityTx struct {

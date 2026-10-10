@@ -3712,14 +3712,13 @@ func TestWithTxValidationSessionClassifiesOnlyKnownSemanticVerdicts(
 			),
 		},
 		{
-			name: "known transaction verdict",
+			name: "injected transaction-shaped failure",
 			validationErr: lcommon.NewValidationError(
 				lcommon.ValidationErrorTypeTransaction,
 				"invalid witness",
 				nil,
 				nil,
 			),
-			wantSemantic: true,
 		},
 	}
 	for _, tc := range tests {

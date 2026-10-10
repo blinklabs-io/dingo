@@ -13620,12 +13620,8 @@ func (e *localTxValidationError) Unwrap() error { return e.err }
 
 func isSemanticTxValidationError(err error) bool {
 	var eraMismatch *ledger.EraMismatch
-	if errors.As(err, &eraMismatch) || isDeterministicTxValidationError(err) {
-		return true
-	}
-	var validationErr *lcommon.ValidationError
-	return errors.As(err, &validationErr) &&
-		validationErr.Type == lcommon.ValidationErrorTypeTransaction
+	return errors.As(err, &eraMismatch) ||
+		eras.IsSemanticRuleValidationError(err)
 }
 
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
