@@ -238,6 +238,35 @@ func TestResetRefusesWhenTargetHasData(t *testing.T) {
 	)
 }
 
+func TestResetRefusesWhenDormantDRepStateIsPopulated(t *testing.T) {
+	baseDSN := mysqlIntegrationDSN(t)
+	dsn := createIsolatedDatabase(t, baseDSN, "mysqlbackup_dormancy")
+	store, err := openStore(
+		context.Background(),
+		Config{DSN: dsn},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	require.NoError(t, store.Start(context.Background()))
+
+	admin, err := sql.Open("mysql", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	_, err = admin.Exec(
+		"UPDATE drep_dormancy_state SET dormant_epochs = 1 WHERE id = 1",
+	)
+	require.NoError(t, err)
+	parsed, err := mysqldriver.ParseDSN(dsn)
+	require.NoError(t, err)
+
+	err = refuseIfTargetHasData(
+		context.Background(), admin, parsed.DBName,
+		[]string{drepDormancyStateTableName},
+	)
+	require.ErrorContains(t, err, "already contains data")
+}
+
 // TestResetToleratesView guards a real gap: databaseIsEmpty/resetDatabase
 // originally counted every information_schema.tables row as a base
 // table, so a view sitting alongside dingo's own tables (something an

@@ -552,13 +552,9 @@ func TestPersistImportedCommitteeCertificatesWritesRows(t *testing.T) {
 
 	const slot = uint64(197789347)
 	require.NotPanics(t, func() {
-		require.NoError(
-			t,
-			persistImportedCommitteeCertificates(
-				context.Background(),
-				db, certState, slot, nil,
-			),
-		)
+		require.NoError(t, persistImportedCommitteeCertificates(
+			context.Background(), db, certState, slot, nil, 0,
+		))
 	})
 
 	// The authorization must be readable back by the same cold-credential

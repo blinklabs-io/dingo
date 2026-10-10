@@ -862,17 +862,14 @@ func TestSetGapBlockTransactionPersistsPositionedCertificates(t *testing.T) {
 	// must come from persisted transaction/certificate positions, not insertion
 	// order or SQLite row IDs.
 	require.NoError(t, db.SetGapBlockTransaction(
-		context.Background(),
-		late, point, 5, nil, gapOffsets(late), nil,
+		context.Background(), late, point, 5, nil, gapOffsets(late), nil, 0,
 	))
 	require.NoError(t, db.SetGapBlockTransaction(
-		context.Background(),
-		early, point, 2, nil, gapOffsets(early), nil,
+		context.Background(), early, point, 2, nil, gapOffsets(early), nil, 0,
 	))
 	// Reprocessing the same gap transaction must not duplicate its certificate.
 	require.NoError(t, db.SetGapBlockTransaction(
-		context.Background(),
-		late, point, 5, nil, gapOffsets(late), nil,
+		context.Background(), late, point, 5, nil, gapOffsets(late), nil, 0,
 	))
 
 	gotTx, err := db.Metadata().GetTransactionByHash(late.Hash().Bytes(), nil)
@@ -976,7 +973,7 @@ func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 			0,
 			certificateDeposits,
 			mustBlockOffsets(t, candidate.consumerBlock),
-			nil,
+			nil, 0,
 		),
 	)
 
@@ -1061,7 +1058,7 @@ func TestSetTransactionRecoversMissingConsumedInputsFromBlob(
 			nil,
 			nil,
 			mustBlockOffsets(t, candidate.consumerBlock),
-			nil,
+			nil, 0,
 		),
 	)
 
@@ -1121,7 +1118,7 @@ func TestSetTransactionBatchedSpendsPreviousBlockOutputInSameBatch(
 			nil,
 			mustBlockOffsets(t, candidate.producerBlock),
 			acc,
-			txn,
+			txn, 0,
 		),
 	)
 	require.NoError(
@@ -1136,7 +1133,7 @@ func TestSetTransactionBatchedSpendsPreviousBlockOutputInSameBatch(
 			nil,
 			mustBlockOffsets(t, candidate.consumerBlock),
 			acc,
-			txn,
+			txn, 0,
 		),
 	)
 	require.NoError(t, db.FlushBatch(acc, txn))
@@ -1764,7 +1761,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 				0,
 				nil,
 				mustBlockOffsets(t, producer.block),
-				nil,
+				nil, 0,
 			),
 		)
 	}
@@ -1808,7 +1805,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 			0,
 			certificateDeposits,
 			mustBlockOffsets(t, candidate.consumerBlock),
-			nil,
+			nil, 0,
 		),
 	)
 
@@ -2324,7 +2321,7 @@ func TestSetTransactionStoresEpochZeroProposals(t *testing.T) {
 			updates,
 			nil,
 			mustBlockOffsets(t, candidate.consumerBlock),
-			nil,
+			nil, 0,
 		))
 		requireStored(t, db)
 	})
@@ -2821,6 +2818,7 @@ func (e *erroringMetadata) SetTransaction(
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	return e.injectErr
 }
@@ -2832,6 +2830,7 @@ func (e *erroringMetadata) SetTransactionLeiosClosure(
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	return e.injectErr
 }
@@ -2844,6 +2843,7 @@ func (e *erroringMetadata) SetTransactionBatched(
 	skipWithdrawalWitness bool,
 	acc types.MetadataBatchAccumulator,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	return e.injectErr
 }
@@ -2918,7 +2918,7 @@ func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 		nil, // certDeposits
 		mustBlockOffsets(t, candidate.producerBlock),
 		acc,
-		txn,
+		txn, 0,
 	)
 	_ = txn.Rollback()
 	txn.Release()
@@ -2945,7 +2945,7 @@ func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 		nil, // pparamUpdates
 		nil, // certDeposits
 		mustBlockOffsets(t, candidate.producerBlock),
-		txn2,
+		txn2, 0,
 	)
 	_ = txn2.Rollback()
 	txn2.Release()
@@ -2969,7 +2969,7 @@ func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 		candidate.producerPoint,
 		candidate.producerIdx,
 		nil, // certDeposits
-		txn3,
+		txn3, 0,
 	)
 	_ = txn3.Rollback()
 	txn3.Release()
@@ -3157,7 +3157,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 					producer.point,
 					0,
 					nil,
-					txn.Metadata(),
+					txn.Metadata(), 0,
 				)
 			}))
 			metaTxn.Release()

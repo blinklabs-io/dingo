@@ -105,6 +105,26 @@ type certificateAccountState struct {
 	drepType uint64
 }
 
+func validateDRepDelegationProtocolMajor(
+	certificates []lcommon.Certificate,
+	protocolMajor uint64,
+) error {
+	for _, certificate := range certificates {
+		switch certificate.(type) {
+		case *lcommon.StakeVoteDelegationCertificate,
+			*lcommon.StakeVoteRegistrationDelegationCertificate,
+			*lcommon.VoteRegistrationDelegationCertificate,
+			*lcommon.VoteDelegationCertificate:
+			if protocolMajor == 0 {
+				return errors.New(
+					"protocol major is required for certificates that change DRep delegations",
+				)
+			}
+		}
+	}
+	return nil
+}
+
 // depositPolicy decides what applyTransactionCertificates does with a
 // deposit-bearing certificate when the caller supplied no deposit map at all.
 // It is a distinct non-boolean type so a call site cannot pass the polarity as
@@ -132,9 +152,13 @@ func (s *Store) applyTransactionCertificates(
 	deposits map[int]uint64,
 	policy depositPolicy,
 	transactionIsNew bool,
+	protocolMajor uint64,
 ) ([]models.StakeCredentialRef, error) {
 	if len(certificates) == 0 {
 		return nil, nil
+	}
+	if err := validateDRepDelegationProtocolMajor(certificates, protocolMajor); err != nil {
+		return nil, err
 	}
 	if !transactionIsNew {
 		if err := s.deleteSpecializedCertificates(ctx, db, transactionID); err != nil {
@@ -195,6 +219,7 @@ func (s *Store) applyTransactionCertificates(
 			blockIndex,
 			uint(certIndex),
 			deposit,
+			protocolMajor,
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -338,6 +363,7 @@ func (s *Store) applySpecializedCertificate(
 	blockIndex uint32,
 	certIndex uint,
 	deposit *uint64,
+	protocolMajor uint64,
 ) (uint, *models.StakeCredentialRef, error) {
 	switch cert := certificate.(type) {
 	case *lcommon.PoolRegistrationCertificate:
@@ -503,6 +529,7 @@ RETURNING id`,
 		certificateID,
 		slot,
 		deposit,
+		protocolMajor,
 	)
 }
 
@@ -526,6 +553,7 @@ func applyAccountCertificate(
 	certificateID uint,
 	slot uint64,
 	deposit *uint64,
+	protocolMajor uint64,
 ) (uint, *models.StakeCredentialRef, error) {
 	var (
 		stakeCredential lcommon.Credential
@@ -628,8 +656,79 @@ func applyAccountCertificate(
 		return 0, nil, err
 	}
 	key := stakeCredential.Credential[:]
+	changesDrepDelegation := false
+	newDrepCredential := state.drep
+	newDrepType := state.drepType
+	switch certificate.(type) {
+	case *lcommon.StakeDeregistrationCertificate,
+		*lcommon.DeregistrationCertificate,
+		*lcommon.StakeVoteDelegationCertificate,
+		*lcommon.StakeVoteRegistrationDelegationCertificate,
+		*lcommon.VoteRegistrationDelegationCertificate,
+		*lcommon.VoteDelegationCertificate:
+		changesDrepDelegation = true
+	}
+	var oldDrepCredential []byte
+	var oldDrepType uint64
+	if changesDrepDelegation {
+		err := db.QueryRowContext(ctx, `
+SELECT drep, drep_type FROM account
+WHERE credential_tag = ? AND staking_key = ?`, tag, key).Scan(
+			&oldDrepCredential,
+			&oldDrepType,
+		)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, nil, fmt.Errorf("read prior account DRep delegation: %w", err)
+		}
+	}
 	if err := updateCertificateAccount(ctx, db, tag, key, slot, state); err != nil {
 		return 0, nil, err
+	}
+	if changesDrepDelegation {
+		removeOld := shouldRemovePriorDrepDelegation(
+			protocolMajor,
+			oldDrepType,
+			len(oldDrepCredential) > 0,
+			newDrepType,
+			len(newDrepCredential) > 0,
+		)
+		if removeOld {
+			if err := removeDrepDelegator(
+				ctx,
+				db,
+				uint8(oldDrepType),
+				oldDrepCredential,
+				tag,
+				key,
+				slot,
+			); err != nil {
+				return 0, nil, fmt.Errorf("remove prior reverse DRep delegation: %w", err)
+			}
+		}
+		if len(newDrepCredential) > 0 &&
+			newDrepType <= models.DrepTypeScriptHash {
+			var registered bool
+			if err := db.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM drep
+    WHERE credential_tag = ? AND credential = ? AND active = TRUE
+)`, newDrepType, newDrepCredential).Scan(&registered); err != nil {
+				return 0, nil, fmt.Errorf("check delegated DRep registration: %w", err)
+			}
+			if registered {
+				if err := addDrepDelegator(
+					ctx,
+					db,
+					uint8(newDrepType),
+					newDrepCredential,
+					tag,
+					key,
+					slot,
+				); err != nil {
+					return 0, nil, fmt.Errorf("add reverse DRep delegation: %w", err)
+				}
+			}
+		}
 	}
 	switch cert := certificate.(type) {
 	case *lcommon.StakeRegistrationCertificate,
@@ -660,6 +759,22 @@ func applyAccountCertificate(
 	)
 	ref := models.NewStakeCredentialRef(tag, key)
 	return id, &ref, err
+}
+
+func shouldRemovePriorDrepDelegation(
+	protocolMajor uint64,
+	oldDrepType uint64,
+	hasOldCredential bool,
+	newDrepType uint64,
+	hasNewCredential bool,
+) bool {
+	if !hasOldCredential || oldDrepType > models.DrepTypeScriptHash {
+		return false
+	}
+	if protocolMajor >= 10 {
+		return true
+	}
+	return newDrepType > models.DrepTypeScriptHash || !hasNewCredential
 }
 
 func updateCertificateAccount(
@@ -1018,6 +1133,15 @@ func applyDrepDeregistrationCertificate(
 	); err != nil {
 		return 0, err
 	}
+	if err := removeAllDrepDelegators(
+		ctx,
+		db,
+		tag,
+		cert.DrepCredential.Credential[:],
+		slot,
+	); err != nil {
+		return 0, fmt.Errorf("clear delegations for DRep deregistration: %w", err)
+	}
 	return insertCertificateRow(ctx, db, `
 INSERT INTO deregistration_drep (
     drep_credential, certificate_id, credential_tag, added_slot,
@@ -1090,14 +1214,19 @@ func setDrepCertificateState(
 	active bool,
 	requireExisting bool,
 ) error {
-	var exists bool
-	if err := db.QueryRowContext(ctx, `
+	query := `
 SELECT EXISTS (
     SELECT 1 FROM drep WHERE credential_tag = ? AND credential = ?
-)`,
-		tag,
-		credential,
-	).Scan(&exists); err != nil {
+)`
+	if requireExisting {
+		query = `
+SELECT EXISTS (
+    SELECT 1 FROM drep
+    WHERE credential_tag = ? AND credential = ? AND active = TRUE
+)`
+	}
+	var exists bool
+	if err := db.QueryRowContext(ctx, query, tag, credential).Scan(&exists); err != nil {
 		return err
 	}
 	if requireExisting && !exists {

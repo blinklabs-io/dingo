@@ -172,7 +172,7 @@ func TestSetTransactionRefreshesSharedCredentialOnce(t *testing.T) {
 		0,
 		fx.certDeposits,
 		false,
-		nil,
+		nil, 0,
 	))
 	got := store.sumCredentialUtxoStakeCalls.Load() - before
 	require.Equal(
@@ -254,7 +254,7 @@ func TestSetTransactionSharedOuterTxnKeepsCredentialsIndependent(t *testing.T) {
 
 	before := store.sumCredentialUtxoStakeCalls.Load()
 	require.NoError(t, store.SetTransaction(
-		fx1.tx, fx1.point, 0, fx1.certDeposits, false, txn,
+		fx1.tx, fx1.point, 0, fx1.certDeposits, false, txn, 0,
 	))
 	afterFirst := store.sumCredentialUtxoStakeCalls.Load()
 	require.Equal(
@@ -265,7 +265,7 @@ func TestSetTransactionSharedOuterTxnKeepsCredentialsIndependent(t *testing.T) {
 	)
 
 	require.NoError(t, store.SetTransaction(
-		fx2.tx, fx2.point, 0, fx2.certDeposits, false, txn,
+		fx2.tx, fx2.point, 0, fx2.certDeposits, false, txn, 0,
 	))
 	afterSecond := store.sumCredentialUtxoStakeCalls.Load()
 	require.Equal(
@@ -322,7 +322,7 @@ func TestSetGapBlockTransactionRefreshesSharedCredentialOnce(t *testing.T) {
 
 	before := store.sumCredentialUtxoStakeCalls.Load()
 	require.NoError(t, store.SetGapBlockTransaction(
-		fx.tx, fx.point, 0, fx.certDeposits, nil,
+		fx.tx, fx.point, 0, fx.certDeposits, nil, 0,
 	))
 	got := store.sumCredentialUtxoStakeCalls.Load() - before
 	require.Equal(
@@ -509,7 +509,7 @@ func TestSetTransactionIncrementalDeltaMatchesFullScan(t *testing.T) {
 
 	before := store.sumCredentialUtxoStakeCalls.Load()
 	require.NoError(t, store.SetTransaction(
-		fx.tx, fx.point, 0, fx.certDeposits, false, nil,
+		fx.tx, fx.point, 0, fx.certDeposits, false, nil, 0,
 	))
 	require.Equal(
 		t,
@@ -561,7 +561,7 @@ VALUES (?, 0, ?, ?, 1, 0, ?)`,
 
 	point := ocommon.Point{Slot: fx.point.Slot + 1, Hash: txID}
 	require.NoError(t, store.SetTransaction(
-		tx, point, 0, nil, false, nil,
+		tx, point, 0, nil, false, nil, 0,
 	))
 	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
 	require.NoError(t, err)
@@ -591,12 +591,12 @@ func TestSetTransactionReapplyAppliesNoSecondDelta(t *testing.T) {
 	establishRunningTotal(t, store, fx.ref, 1)
 
 	require.NoError(t, store.SetTransaction(
-		fx.tx, fx.point, 0, fx.certDeposits, false, nil,
+		fx.tx, fx.point, 0, fx.certDeposits, false, nil, 0,
 	))
 	require.Equal(t, fx.producedAmount, readUtxoStake(t, store, fx.ref))
 
 	require.NoError(t, store.SetTransaction(
-		fx.tx, fx.point, 0, fx.certDeposits, false, nil,
+		fx.tx, fx.point, 0, fx.certDeposits, false, nil, 0,
 	))
 	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
 	require.NoError(t, err)
@@ -645,7 +645,7 @@ WHERE tx_id = ? AND output_idx = 0`, otherSpender, fx.consumedTxID)
 	require.Equal(t, uint64(retained), readUtxoStake(t, store, fx.ref))
 
 	require.NoError(t, store.SetTransactionLeiosClosure(
-		fx.tx, fx.point, 0, fx.certDeposits, false, nil,
+		fx.tx, fx.point, 0, fx.certDeposits, false, nil, 0,
 	))
 	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
 	require.NoError(t, err)
@@ -670,13 +670,13 @@ func TestSetGapBlockTransactionReapplyAppliesNoSecondDelta(t *testing.T) {
 	fx := buildSharedCredentialTx(t, 0x44)
 
 	require.NoError(t, store.SetGapBlockTransaction(
-		fx.tx, fx.point, 0, fx.certDeposits, nil,
+		fx.tx, fx.point, 0, fx.certDeposits, nil, 0,
 	))
 	first := readUtxoStake(t, store, fx.ref)
 	require.Equal(t, fx.producedAmount, first)
 
 	require.NoError(t, store.SetGapBlockTransaction(
-		fx.tx, fx.point, 0, fx.certDeposits, nil,
+		fx.tx, fx.point, 0, fx.certDeposits, nil, 0,
 	))
 	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
 	require.NoError(t, err)

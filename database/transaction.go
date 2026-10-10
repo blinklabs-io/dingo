@@ -237,6 +237,7 @@ func (d *Database) SetTransaction(
 	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
 	txn *Txn,
+	protocolMajor uint64,
 ) error {
 	return d.SetTransactionWithOpts(
 		ctx,
@@ -248,7 +249,7 @@ func (d *Database) SetTransaction(
 		certDeposits,
 		offsets,
 		txn,
-		BatchedTxIngestOpts{},
+		BatchedTxIngestOpts{ProtocolMajor: protocolMajor},
 	)
 }
 
@@ -399,19 +400,22 @@ func (d *Database) SetTransactionWithOpts(
 		if !opts.SkipConsumedInputRecovery {
 			return errors.New("ledger context requires a prototype closure")
 		}
-		setTxErr = d.transactionStore().SetTransactionLeiosClosureInContext(tx, point, idx, certDeposits, opts.SkipWithdrawalWitnessWrite, *opts.LedgerContextSlot, txn.Metadata())
+		setTxErr = d.transactionStore().SetTransactionLeiosClosureInContext(
+			tx, point, idx, certDeposits,
+			opts.SkipWithdrawalWitnessWrite, *opts.LedgerContextSlot,
+			txn.Metadata(), opts.ProtocolMajor,
+		)
 	} else if opts.SkipConsumedInputRecovery {
 		setTxErr = d.transactionStore().SetTransactionLeiosClosure(
 			tx, point, idx, certDeposits,
-			opts.SkipWithdrawalWitnessWrite,
-			txn.Metadata(),
+			opts.SkipWithdrawalWitnessWrite, txn.Metadata(),
+			opts.ProtocolMajor,
 		)
 	} else {
 		setTxErr = d.transactionStore().SetTransaction(
 			tx, point, idx, certDeposits,
-			opts.SkipWithdrawalWitnessWrite,
-			txn.Metadata(),
-		)
+			opts.SkipWithdrawalWitnessWrite, txn.Metadata(),
+			opts.ProtocolMajor)
 	}
 	if setTxErr != nil {
 		return fmt.Errorf(
@@ -453,6 +457,7 @@ func (d *Database) SetTransactionMetadataOnly(
 	idx uint32,
 	certDeposits map[int]uint64,
 	txn *Txn,
+	protocolMajor uint64,
 ) error {
 	owned := false
 	if txn == nil {
@@ -476,7 +481,7 @@ func (d *Database) SetTransactionMetadataOnly(
 		// instead of implying real gate logic applies here.
 		false,
 		metadataTxn,
-	); err != nil {
+		protocolMajor); err != nil {
 		return fmt.Errorf(
 			"set transaction metadata only for tx %s (block idx %d, slot %d): %w",
 			tx.Hash(),
@@ -506,6 +511,7 @@ func (d *Database) SetGapBlockTransaction(
 	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
 	txn *Txn,
+	protocolMajor uint64,
 ) error {
 	owned := false
 	if txn == nil {
@@ -577,7 +583,7 @@ func (d *Database) SetGapBlockTransaction(
 	}
 
 	if err := d.transactionStore().SetGapBlockTransaction(
-		tx, point, idx, certDeposits, txn.Metadata(),
+		tx, point, idx, certDeposits, txn.Metadata(), protocolMajor,
 	); err != nil {
 		return fmt.Errorf(
 			"set gap block transaction metadata: %w", err,
