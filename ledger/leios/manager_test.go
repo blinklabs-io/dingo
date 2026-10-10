@@ -2637,35 +2637,35 @@ func TestVoteManagerValidatesDijkstraCertificateStrictly(t *testing.T) {
 		message,
 	))
 
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers,
 		aggregatedSignature,
 		[]byte("wrong message"),
-	))
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	), ErrInvalidCertificate)
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers[:1],
 		aggregatedSignature,
 		message,
-	))
+	), ErrInvalidCertificate)
 
 	wrongSizeAggregate := make([]byte, lcommon.LeiosBlsSignatureSize)
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers,
 		wrongSizeAggregate,
 		message,
-	))
+	), ErrInvalidCertificate)
 
 	highBits := append([]byte(nil), signers...)
 	highBits[len(highBits)-1] |= 1
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		highBits,
 		aggregatedSignature,
 		message,
-	))
+	), ErrInvalidCertificate)
 
 	belowQuorum := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
 	belowQuorum[1] = 1 << 6 // only voter 9, with 10 of 550 active stake
@@ -2679,6 +2679,12 @@ func TestVoteManagerValidatesDijkstraCertificateStrictly(t *testing.T) {
 		belowQuorumAggregate,
 		message,
 	), ErrQuorumNotMet)
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
+		5,
+		belowQuorum,
+		belowQuorumAggregate,
+		message,
+	), ErrInvalidCertificate)
 }
 
 func TestVoteManagerRejectsKeylessDijkstraCertificateSigner(t *testing.T) {
@@ -2709,12 +2715,70 @@ func TestVoteManagerRejectsKeylessDijkstraCertificateSigner(t *testing.T) {
 	}
 	aggregatedSignature, err := AggregateSignatures(signatures)
 	require.NoError(t, err)
-	require.ErrorContains(t, fixture.mgr.ValidateDijkstraCertificate(
+	err = fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers,
 		aggregatedSignature,
 		message,
-	), "no usable key")
+	)
+	require.ErrorContains(t, err, "no usable key")
+	require.ErrorIs(t, err, ErrInvalidCertificate)
+}
+
+// A committee that cannot be resolved, including from an empty stake
+// snapshot, means the certificate was never checked. Neither may read as a
+// verdict, which would reject a certifying block that may be valid.
+func TestVoteManagerDijkstraCertificateLocalFailureIsNotVerdict(t *testing.T) {
+	t.Parallel()
+	message := []byte("certificate message")
+	signers := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
+	signers[0] = 0x80
+	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 1))
+	require.NoError(t, err)
+	aggregatedSignature, err := SignVote(key, message)
+	require.NoError(t, err)
+
+	t.Run("stake snapshot unavailable", func(t *testing.T) {
+		t.Parallel()
+		fixture := newManagerFixture(t)
+		readErr := errors.New("stake snapshot read failed")
+		fixture.stake.setError(readErr)
+		err := fixture.mgr.ValidateDijkstraCertificate(
+			5, signers, aggregatedSignature, message,
+		)
+		require.ErrorIs(t, err, readErr)
+		require.NotErrorIs(t, err, ErrInvalidCertificate)
+	})
+	t.Run("leios keys unavailable", func(t *testing.T) {
+		t.Parallel()
+		readErr := errors.New("leios key read failed")
+		fixture := newManagerFixture(
+			t,
+			func(_ *managerFixture, cfg *VoteManagerConfig) {
+				cfg.KeyProvider = &fakeLeiosKeyProvider{err: readErr}
+			},
+		)
+		err := fixture.mgr.ValidateDijkstraCertificate(
+			5, signers, aggregatedSignature, message,
+		)
+		require.ErrorIs(t, err, readErr)
+		require.NotErrorIs(t, err, ErrInvalidCertificate)
+	})
+	t.Run("empty stake snapshot", func(t *testing.T) {
+		t.Parallel()
+		fixture := newManagerFixture(
+			t,
+			func(f *managerFixture, _ *VoteManagerConfig) {
+				f.stake.pools = map[string]uint64{}
+				f.stake.total = 0
+			},
+		)
+		err := fixture.mgr.ValidateDijkstraCertificate(
+			5, nil, aggregatedSignature, message,
+		)
+		require.ErrorContains(t, err, "empty stake distribution")
+		require.NotErrorIs(t, err, ErrInvalidCertificate)
+	})
 }
 
 type nextVotesResult struct {

@@ -1254,6 +1254,8 @@ func (m *VoteManager) CommitteeForEpoch(epoch uint64) (*Committee, error) {
 // ValidateDijkstraCertificate verifies a Dijkstra certificate against the
 // historical committee and keys resolved for epoch. Unlike vote admission,
 // block admission is strict: every selected signer must have a verified key.
+// A verdict on the certificate wraps ErrInvalidCertificate; an error that does
+// not means the committee, its keys, or its threshold could not be resolved.
 func (m *VoteManager) ValidateDijkstraCertificate(
 	epoch uint64,
 	signers []byte,
@@ -1268,10 +1270,10 @@ func (m *VoteManager) ValidateDijkstraCertificate(
 		"Dijkstra Leios certificate aggregated signature",
 		aggregatedSignature,
 	); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrInvalidCertificate, err)
 	}
 	if err := lcommon.ValidateLeiosSignerBitfield(signers, entry.committee.Size()); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrInvalidCertificate, err)
 	}
 	var signerStake uint64
 	signerPubs := make([]*bls12381.G2Affine, 0, len(entry.committee.Members))
@@ -1281,8 +1283,15 @@ func (m *VoteManager) ValidateDijkstraCertificate(
 		}
 		pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash)
 		if !ok {
-			return fmt.Errorf("leios certificate signer %d has no usable key", member.VoterId)
+			return fmt.Errorf(
+				"%w: signer %d has no usable key",
+				ErrInvalidCertificate,
+				member.VoterId,
+			)
 		}
+		// Member stakes sum to at most the snapshot's total stake, itself a
+		// uint64, so overflow means inconsistent local snapshot data rather
+		// than anything about the certificate.
 		if ^uint64(0)-signerStake < member.Stake {
 			return errors.New("leios certificate signer stake overflows uint64")
 		}
@@ -1298,10 +1307,14 @@ func (m *VoteManager) ValidateDijkstraCertificate(
 		return err
 	}
 	if !quorumMet {
-		return ErrQuorumNotMet
+		return fmt.Errorf("%w: %w", ErrInvalidCertificate, ErrQuorumNotMet)
 	}
 	if err := VerifyAggregateSignature(signerPubs, message, aggregatedSignature); err != nil {
-		return fmt.Errorf("verify Leios certificate aggregate signature: %w", err)
+		return fmt.Errorf(
+			"%w: verify aggregate signature: %w",
+			ErrInvalidCertificate,
+			err,
+		)
 	}
 	return nil
 }

@@ -154,12 +154,20 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			message := leios.PrototypeVoteMessageBytes(
 				lcommon.Blake2b256(announcingBlockHash),
 			)
-			return n.leiosVoteManager.ValidateDijkstraCertificate(
+			err := n.leiosVoteManager.ValidateDijkstraCertificate(
 				epoch,
 				signers,
 				aggregatedSignature,
 				message,
 			)
+			if errors.Is(err, leios.ErrInvalidCertificate) {
+				return fmt.Errorf(
+					"%w: %w",
+					ledger.ErrLeiosInvalidCertificate,
+					err,
+				)
+			}
+			return err
 		},
 		// The leadership stake includes reward-account balances; see
 		// LedgerStateConfig.SkipLeaderStakeThresholdCheck. The check

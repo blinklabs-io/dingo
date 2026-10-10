@@ -49,14 +49,15 @@ import (
 // has no producer on the local applied chain.
 //
 // Leios caveat. "A block was fetched, so its transactions are in hand" is true
-// of every pre-Leios block and false on the Leios cert-driven path, where a
-// certifying ranking block's body is empty: its transactions are the certified
-// endorser block's, which arrives over leios-fetch as a separate artifact and
-// is applied by LedgerState.applyEndorserBlock at ledger-apply time. The audit
-// runs at blockfetch time, so with the ledger pipeline behind the blockfetch
-// queue — the normal condition during an endorser-block backlog, and precisely
-// the condition a rollback arms the audit in — neither the UTxO nor the
-// transaction-metadata fallback can see an endorser-resident producer either.
+// of every pre-Leios block and false on the Leios cert-driven path: the
+// transactions a certifying ranking block certifies are not in its body but in
+// the certified endorser block, which arrives over leios-fetch as a separate
+// artifact and is applied by LedgerState.applyEndorserBlock at ledger-apply
+// time. The audit runs at blockfetch time, so with the ledger pipeline behind
+// the blockfetch queue — the normal condition during an endorser-block
+// backlog, and precisely the condition a rollback arms the audit in — neither
+// the UTxO nor the transaction-metadata fallback can see an endorser-resident
+// producer either.
 // The window therefore resolves each audited block's endorser block the same
 // way apply does (leiosEndorserBlockForApply plus EndorserBlockProvider) and
 // records its transaction ids as producers. When that endorser block has not
