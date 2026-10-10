@@ -173,6 +173,8 @@ jobs:
         run: npm test
       - name: go-build-minimal
         run: go build ./cmd/dingo
+      - name: go-vet-386
+        run: GOARCH=386 go vet -tags dingo_extra_plugins ./...
       - name: sqlc-generation-drift
         run: make sql-check
       - name: go-test

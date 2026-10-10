@@ -188,11 +188,12 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	appliedTxs := make([]bool, len(d.Transactions))
 	storageIndexOffset := d.expandedIndexOffset
 	for i, tr := range d.Transactions {
-		if tr.Index < 0 || tr.Index > math.MaxUint32 {
+		if !fitsUint32(tr.Index) {
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)
 		}
 		levels := TransactionLevelsForApply(tr.Tx)
 		childCount := uint64(len(levels)) - 1
+		// #nosec G115 -- the transaction index is checked against uint32 above.
 		storageBaseIndex := uint64(tr.Index) + storageIndexOffset
 		storageParentIndex := storageBaseIndex + childCount
 		if storageParentIndex > math.MaxUint32 {

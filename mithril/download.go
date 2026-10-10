@@ -1197,12 +1197,12 @@ const (
 	// maxExtractFileSize is the maximum allowed size for a single
 	// extracted file (8 GiB). Must be large enough for mainnet
 	// ancillary ledger state files (UTxO tables can be multi-GB).
-	maxExtractFileSize = 8 << 30
+	maxExtractFileSize int64 = 8 << 30
 
 	// maxTotalExtractSize is the maximum cumulative bytes that may
 	// be extracted from a single archive (1 TiB). Prevents
 	// runaway decompression from filling the disk.
-	maxTotalExtractSize = 1 << 40
+	maxTotalExtractSize int64 = 1 << 40
 )
 
 // expansionReader fails once the stream has produced more bytes than the
