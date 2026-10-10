@@ -213,15 +213,20 @@ func TestSnapshotMaxCommitPauseReleasesBarrierBeforeBackupStops(t *testing.T) {
 	t.Parallel()
 
 	backupStarted := make(chan struct{})
+	backupStopped := make(chan struct{})
 	finishBackup := make(chan struct{})
 	releaseBackup := sync.OnceFunc(func() { close(finishBackup) })
 	defer releaseBackup()
 	hooks := &backupHooks{
 		blob: func(_ context.Context, w io.Writer) error {
+			defer close(backupStopped)
 			close(backupStarted)
 			<-finishBackup
 			_, err := io.WriteString(w, "blob")
 			return err
+		},
+		metadata: func(_ context.Context, dst string) error {
+			return os.WriteFile(dst, []byte("metadata"), 0o600)
 		},
 	}
 	db := newHookedDB(t, nil, hooks)
@@ -248,10 +253,17 @@ func TestSnapshotMaxCommitPauseReleasesBarrierBeforeBackupStops(t *testing.T) {
 	}
 
 	releaseBackup()
+	completionDeadline := time.NewTimer(5 * time.Second)
+	defer completionDeadline.Stop()
+	select {
+	case <-backupStopped:
+	case <-completionDeadline.C:
+		t.Fatal("blob backup did not stop after it was released")
+	}
 	select {
 	case err := <-finished:
 		require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
-	case <-time.After(5 * time.Second):
+	case <-completionDeadline.C:
 		t.Fatal("snapshot did not return after the backup stopped")
 	}
 	require.NoDirExists(t, dir)
