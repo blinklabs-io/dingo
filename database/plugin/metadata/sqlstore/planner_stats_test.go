@@ -89,13 +89,24 @@ func stat1Rows(tb testing.TB, db *sql.DB) (int, bool) {
 	return rows, true
 }
 
-// consumeBatchPlan returns the plan consumeUtxosBatchQuery gets on conn.
+// statsSensitiveSpendSQL is the row-value form of the batched spend UPDATE.
+// Its plan depends on planner statistics: without them SQLite drives it from
+// a deleted_slot-leading index, with them from tx_id_output_idx. It is kept
+// here as a fixed probe so these tests keep observing the statistics refresh
+// whatever shape the production query takes.
+const statsSensitiveSpendSQL = `UPDATE utxo
+SET deleted_slot = ?, spent_at_tx_id = ?
+WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL
+  AND (tx_id, output_idx) IN ((?,?),(?,?))
+RETURNING tx_id, output_idx`
+
+// consumeBatchPlan returns the plan statsSensitiveSpendSQL gets on conn.
 func consumeBatchPlan(tb testing.TB, conn *sql.Conn) string {
 	tb.Helper()
 	zero := make([]byte, 32)
 	rows, err := conn.QueryContext(
 		context.Background(),
-		"EXPLAIN QUERY PLAN "+consumeUtxosBatchQuery(2, false),
+		"EXPLAIN QUERY PLAN "+statsSensitiveSpendSQL,
 		int64(1), zero, zero, 0, zero, 1,
 	)
 	require.NoError(tb, err)
