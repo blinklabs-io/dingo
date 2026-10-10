@@ -607,9 +607,10 @@ func resolveDingoDB(cmd *cobra.Command) (koiosparity.DingoDBConfig, error) {
 	plugin, _ := flags.GetString("metadata-plugin")
 	dsn, _ := flags.GetString("metadata-dsn")
 	dsnFile, _ := flags.GetString("metadata-dsn-file")
+	dsnSet := flags.Changed("metadata-dsn")
+	dsnFileSet := flags.Changed("metadata-dsn-file")
 	dsn, err := secretfile.Resolve(
-		dsn, flags.Changed("metadata-dsn"),
-		dsnFile, flags.Changed("metadata-dsn-file"),
+		dsn, dsnSet, dsnFile, dsnFileSet,
 		"--metadata-dsn", "--metadata-dsn-file",
 	)
 	if err != nil {
@@ -617,8 +618,10 @@ func resolveDingoDB(cmd *cobra.Command) (koiosparity.DingoDBConfig, error) {
 	}
 
 	// Dingo's configuration is consulted only for what the flags leave
-	// unset, so explicit flags work even when it cannot be loaded.
-	if plugin == "" || dsn == "" {
+	// unset, so explicit flags work even when it cannot be loaded. A DSN
+	// flag passed empty is still set and clears the configured DSN.
+	dsnFromFlags := dsnSet || dsnFileSet
+	if plugin == "" || !dsnFromFlags {
 		cfg, err := loadedDingoConfig()
 		if err != nil {
 			return koiosparity.DingoDBConfig{}, err
@@ -629,7 +632,7 @@ func resolveDingoDB(cmd *cobra.Command) (koiosparity.DingoDBConfig, error) {
 		if plugin == "" {
 			plugin = "sqlite"
 		}
-		if dsn == "" {
+		if !dsnFromFlags {
 			dsn = dsnFromMetadataConfig(
 				plugin,
 				cfg.Plugins.Storage.Metadata.Config,

@@ -509,3 +509,39 @@ func TestDingoConfigLoadErrorFailsClosed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, globalFlags.dingoData, dataDir)
 }
+
+func TestResolveDingoDBExplicitEmptyDSNOverridesConfig(t *testing.T) {
+	// Not t.Parallel: t.Setenv, and loadedDingoConfig memoizes into
+	// package-level state.
+	resetDingoConfigCache(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLUGINS_STORAGE_METADATA_PROVIDER", "postgres")
+	t.Setenv(
+		"DINGO_PLUGINS_STORAGE_METADATA_CONFIG_DSN",
+		"postgres://config.example.com/dingo",
+	)
+	for _, tc := range []struct {
+		name  string
+		flags map[string]string
+		want  string
+	}{
+		{name: "no flag", want: "postgres://config.example.com/dingo"},
+		{name: "empty literal", flags: map[string]string{"metadata-dsn": ""}},
+		{
+			name:  "empty file",
+			flags: map[string]string{"metadata-dsn-file": ""},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			addDingoDBFlags(cmd)
+			for name, value := range tc.flags {
+				require.NoError(t, cmd.Flags().Set(name, value))
+			}
+			got, err := resolveDingoDB(cmd)
+			require.NoError(t, err)
+			require.Equal(t, "postgres", got.Plugin)
+			require.Equal(t, tc.want, got.DSN)
+		})
+	}
+}
