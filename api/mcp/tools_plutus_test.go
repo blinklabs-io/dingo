@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -439,6 +440,50 @@ func TestEvaluateTxInvalidInputs(t *testing.T) {
 	)
 }
 
+func TestDecodeEvaluateTransactionRejectsUnsafeCBOR(t *testing.T) {
+	t.Parallel()
+
+	body := map[uint]any{
+		0: []any{[]any{make([]byte, 32), uint64(0)}},
+		1: []any{
+			[]any{
+				append([]byte{0x61}, make([]byte, 28)...),
+				uint64(1_000_000),
+			},
+		},
+		2: uint64(200_000),
+		3: uint64(100),
+	}
+	valid, err := cbor.Encode([]any{body, map[uint]any{}, true, nil})
+	require.NoError(t, err)
+
+	_, err = decodeEvaluateTransaction([]byte{0xff})
+	require.Error(t, err)
+
+	_, err = decodeEvaluateTransaction(append(valid, 0))
+	require.ErrorIs(t, err, safedecode.ErrTrailingData)
+	classifierCalls := 0
+	_, err = decodeEvaluateTransactionWith(
+		append(valid, 0),
+		func([]byte) (uint, error) {
+			classifierCalls++
+			return 0, nil
+		},
+		safedecode.Transaction,
+	)
+	require.ErrorIs(t, err, safedecode.ErrTrailingData)
+	require.Zero(t, classifierCalls)
+
+	_, err = decodeEvaluateTransactionWith(
+		valid,
+		func([]byte) (uint, error) {
+			panic("adversarial transaction decoder input")
+		},
+		safedecode.Transaction,
+	)
+	require.ErrorIs(t, err, safedecode.ErrDecodePanic)
+}
+
 func TestPlutusDataAndScriptParsing(t *testing.T) {
 	t.Parallel()
 
@@ -477,6 +522,8 @@ func TestPlutusDataAndScriptParsing(t *testing.T) {
 	pretty, err := cborToPrettyJSON(mapCbor)
 	require.NoError(t, err)
 	assert.Contains(t, pretty, "dead")
+	_, err = cborToPrettyJSON(append(mapCbor, 0))
+	require.ErrorContains(t, err, "trailing data")
 
 	// Corrupted CBOR
 	_, err = cborToPrettyJSON([]byte{0xff})

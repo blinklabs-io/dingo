@@ -30,8 +30,9 @@ type Config struct {
 	// DataDir overrides the application-wide database path for this provider.
 	// An empty value uses ProviderDependencies.DataDir.
 	DataDir string `yaml:"dataDir"`
-	// VacuumIntervalSeconds enables periodic full VACUUM when positive. Zero
-	// disables it because SQLite VACUUM holds a database-wide writer lock.
+	// VacuumIntervalSeconds enables periodic space reclaim when positive. Zero
+	// disables it because the first run needs a full VACUUM, which holds the
+	// write pool and SQLite's database-wide writer lock for the whole rewrite.
 	VacuumIntervalSeconds uint64 `yaml:"vacuumIntervalSeconds"`
 	MaxConnections        int    `yaml:"maxConnections"`
 }

@@ -178,8 +178,8 @@ type SlotRangeStore interface {
 // stay on MetadataStore despite sitting among the governance sections
 // there: they are ledger economics read by reward calculation, not
 // governance state. ImportDrep likewise stays with the snapshot bulk-import
-// cluster, and ClearDanglingDRepDelegations mutates the account table
-// rather than the drep table.
+// cluster, and ClearDanglingDRepDelegations is a hardfork transition that
+// updates both account state and the reverse delegator index.
 type GovernanceStore interface {
 	// Proposal and vote methods
 
@@ -332,6 +332,16 @@ type GovernanceStore interface {
 		*models.GovernanceVote,
 		types.Txn,
 	) error
+
+	// DeleteGovernanceVotesForDrep removes current votes for one tagged DRep
+	// from proposals active in the supplied epoch during deregistration.
+	DeleteGovernanceVotesForDrep(
+		uint8,
+		[]byte,
+		uint64,
+		uint64,
+		types.Txn,
+	) (int, error)
 
 	// Committee methods
 
@@ -545,6 +555,22 @@ type GovernanceStore interface {
 		uint64, // slot
 		types.Txn,
 	) error
+
+	// BumpDormantDRepExpiries extends registered DRep expiries by one epoch
+	// after a Conway epoch with no live governance proposals. The write is
+	// recorded for rollback by RestoreDrepStateAtSlot.
+	BumpDormantDRepExpiries(uint64, types.Txn) (int, error)
+
+	// GetDormantDRepEpochs returns the consecutive no-proposal epoch count.
+	GetDormantDRepEpochs(types.Txn) (uint64, error)
+
+	// ResetDormantDRepEpochs clears the counter when a governance proposal is
+	// processed and records the change for rollback.
+	ResetDormantDRepEpochs(uint64, types.Txn) error
+
+	// SetImportedDormantDRepEpochs initializes the counter from imported ledger
+	// state at its anchor.
+	SetImportedDormantDRepEpochs(uint64, types.Txn) error
 
 	// RecordDRepActivityEpoch updates only the DRep's last activity epoch,
 	// for historical replay below a snapshot anchor whose recorded expiry
@@ -1126,6 +1152,7 @@ type TransactionStore interface {
 		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); an absent key means the deposit is unknown and is stored as NULL, not zero
 		bool, // skipWithdrawalWitness: elide the CIP-0163 account_withdrawal_witness insert (see BatchedTxIngestOpts.SkipWithdrawalWitnessWrite)
 		types.Txn,
+		uint64, // protocol major version
 	) error
 
 	// SetTransactionLeiosClosure stores a transaction on the Leios
@@ -1141,11 +1168,21 @@ type TransactionStore interface {
 		map[int]uint64, // certDeposits
 		bool, // skipWithdrawalWitness
 		types.Txn,
+		uint64, // protocol major version
 	) error
 
 	// SetTransactionLeiosClosureInContext applies a closure using the parent's
 	// unticked slot while retaining point as its rollback owner.
-	SetTransactionLeiosClosureInContext(lcommon.Transaction, ocommon.Point, uint32, map[int]uint64, bool, uint64, types.Txn) error
+	SetTransactionLeiosClosureInContext(
+		lcommon.Transaction,
+		ocommon.Point,
+		uint32, // idx
+		map[int]uint64, // certDeposits
+		bool, // skipWithdrawalWitness
+		uint64, // ledger context slot
+		types.Txn,
+		uint64, // protocol major version
+	) error
 
 	// NewBatchAccumulator creates a metadata-plugin-specific accumulator
 	// for batched transaction ingestion.
@@ -1167,6 +1204,7 @@ type TransactionStore interface {
 		bool, // skipWithdrawalWitness: see SetTransaction
 		types.MetadataBatchAccumulator,
 		types.Txn,
+		uint64, // protocol major version
 	) error
 
 	// SetGapBlockTransaction stores a transaction record and its
@@ -1179,6 +1217,7 @@ type TransactionStore interface {
 		uint32, // idx
 		map[int]uint64, // certDeposits; see SetTransaction
 		types.Txn,
+		uint64, // protocol major version
 	) error
 
 	// RecomputeGapCollateralFee recomputes and persists the collateral fee
@@ -2980,18 +3019,11 @@ type MetadataStore interface {
 	// before the slot.
 	RestorePoolStateAtSlot(uint64, types.Txn) error
 
-	// ClearDanglingDRepDelegations implements the cardano-ledger Conway
-	// HARDFORK STS rule for protocol major version 10 (Plomin, mainnet
-	// January 2025, Cardano/Conway/Rules/HardFork.hs updateDRepDelegations).
-	// For each account with a credential-backed DRep delegation
-	// (DrepType 0 or 1), if the target DRep credential is not currently
-	// registered as an active DRep, clear the delegation. Pseudo-DRep
-	// delegations (AlwaysAbstain, AlwaysNoConfidence) are preserved.
-	// Updates Account.AddedSlot to atSlot on every row it modifies so the
-	// rewritten row is excluded from a subsequent rollback restore
-	// targeting any slot before atSlot (the restore filters on
-	// `added_slot <= targetSlot` and falls back to prior certificate
-	// history). Returns the number of accounts updated.
+	// ClearDanglingDRepDelegations applies the Conway PV10 HARDFORK transition.
+	// It clears credential-backed delegations to inactive DReps, then
+	// rebuilds the reverse delegator index from active account state. Both
+	// writes use atSlot history so rollback restores the pre-transition links.
+	// Pseudo-DRep delegations are preserved. Returns the cleared account count.
 	ClearDanglingDRepDelegations(atSlot uint64, txn types.Txn) (int, error)
 
 	// DeletePParamsAfterSlot removes protocol parameter records added after
