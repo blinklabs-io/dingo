@@ -21,6 +21,7 @@ import (
 	"math"
 	"math/big"
 
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -67,7 +68,8 @@ func semanticRuleValidationErrorFor(err error) error {
 	var localErr *localRuleValidationError
 	if errors.As(err, &localErr) ||
 		errors.Is(err, context.Canceled) ||
-		errors.Is(err, context.DeadlineExceeded) {
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, hardfork.ErrPastHorizon) {
 		return err
 	}
 	var validationErr *lcommon.ValidationError

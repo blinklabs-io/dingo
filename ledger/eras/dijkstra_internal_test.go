@@ -30,6 +30,7 @@ import (
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/plutigo/cek"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/stretchr/testify/require"
@@ -345,6 +346,33 @@ func TestValidateTxDijkstraDoesNotTreatPhase1FailureAsPhase2Failure(
 		dijkstraValidityOutcomePParams(t),
 	)
 	require.ErrorIs(t, err, phase1Sentinel)
+}
+
+func TestValidateTxDijkstraKeepsEvalContextFailuresLocal(t *testing.T) {
+	disablePhase1RulesForTest(t)
+	original := pooledDijkstraEvalContext
+	t.Cleanup(func() { pooledDijkstraEvalContext = original })
+	evalErr := errors.New("Dijkstra evaluation context unavailable")
+	pooledDijkstraEvalContext = func(
+		version lang.LanguageVersion,
+		_ uint,
+		_ []int64,
+	) (*cek.EvalContext, error) {
+		require.Equal(t, lang.LanguageVersionV3, version)
+		return nil, evalErr
+	}
+	tx := newDijkstraGuardingValidityOutcomeTx(
+		t,
+		true,
+		lang.LanguageVersionV3,
+		false,
+		lcommon.ExUnits{Steps: 1, Memory: 1},
+	)
+	pp := dijkstraValidityOutcomePParams(t)
+	pp.CostModels = map[uint][]int64{2: pp.CostModels[2]}
+	err := ValidateTxDijkstra(tx, 0, newMockLedgerState(), pp)
+	require.ErrorIs(t, err, evalErr)
+	require.False(t, IsSemanticRuleValidationError(err))
 }
 
 // TestValidateTxDijkstraSkipPhase2StillValidatesRequiredRedeemers pins the

@@ -29,7 +29,10 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/plutigo/lang"
 )
+
+var pooledDijkstraEvalContext = lcommon.PooledEvalContext
 
 var DijkstraEraDesc = EraDesc{
 	Id:                      gdijkstra.EraIdDijkstra,
@@ -321,6 +324,9 @@ func ValidateTxDijkstra(
 	if err != nil {
 		return semanticRuleValidationErrorFor(err)
 	}
+	if err := validateDijkstraEvalContexts(phase2Tx, tmpPparams); err != nil {
+		return localRuleValidationErrorFor(err)
+	}
 	if err := validateDijkstraPlutusV4ReferenceInputOverlap(phase2Tx, ls); err != nil {
 		return semanticRuleValidationErrorFor(err)
 	}
@@ -331,6 +337,61 @@ func ValidateTxDijkstra(
 		tmpPparams,
 	)
 	return semanticRuleValidationErrorFor(validatePlutusOutcome(tx, phase2Err))
+}
+
+func validateDijkstraEvalContexts(
+	tx *gdijkstra.DijkstraTransaction,
+	pp *gdijkstra.DijkstraProtocolParameters,
+) error {
+	hasRedeemers := func(redeemers lcommon.TransactionWitnessRedeemers) bool {
+		if redeemers == nil {
+			return false
+		}
+		for range redeemers.Iter() {
+			return true
+		}
+		return false
+	}
+	witnesses := tx.Witnesses()
+	needsContext := witnesses != nil && hasRedeemers(witnesses.Redeemers())
+	if !needsContext {
+		for _, subTx := range tx.Body.TxSubTransactions.Items() {
+			if hasRedeemers(subTx.WitnessSet.Redeemers()) {
+				needsContext = true
+				break
+			}
+		}
+	}
+	if !needsContext {
+		return nil
+	}
+	versions := []struct {
+		key      uint
+		language lang.LanguageVersion
+	}{
+		{key: 0, language: lang.LanguageVersionV1},
+		{key: 1, language: lang.LanguageVersionV2},
+		{key: 2, language: lang.LanguageVersionV3},
+		{key: 3, language: lang.LanguageVersionV4},
+	}
+	for _, version := range versions {
+		model, ok := pp.CostModels[version.key]
+		if !ok || len(model) == 0 {
+			continue
+		}
+		if _, err := pooledDijkstraEvalContext(
+			version.language,
+			pp.ProtocolVersion.Major,
+			model,
+		); err != nil {
+			return fmt.Errorf(
+				"build Plutus V%d evaluation context: %w",
+				version.key+1,
+				err,
+			)
+		}
+	}
+	return nil
 }
 
 // dijkstraSyntheticV2CostModelGuard rejects a transaction that uses --
