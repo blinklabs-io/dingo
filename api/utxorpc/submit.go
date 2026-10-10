@@ -414,15 +414,33 @@ func (s *submitServiceServer) EvalTx(
 	return connect.NewResponse(resp), nil
 }
 
-// ReadMempool
+// ReadMempool returns a bounded prefix of the mempool snapshot. The request
+// carries no cursor, so the result is capped at MaxMempoolItems transactions
+// and MaxResponseBytes of CBOR rather than refused; the prefix keeps the
+// mempool's own ordering, so a dependent transaction is never returned without
+// its parents.
 func (s *submitServiceServer) ReadMempool(
 	ctx context.Context,
 	req *connect.Request[submit.ReadMempoolRequest],
 ) (*connect.Response[submit.ReadMempoolResponse], error) {
-	s.utxorpc.config.Logger.Info("Got a ReadMempool request")
+	release, err := s.utxorpc.acquireBulk(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	resp := &submit.ReadMempoolResponse{}
 
-	txs := s.utxorpc.config.Mempool.Transactions()
+	txs, total := s.utxorpc.config.Mempool.TransactionsBounded(
+		s.utxorpc.config.MaxMempoolItems,
+		s.utxorpc.config.MaxResponseBytes,
+	)
+	s.utxorpc.config.Logger.Info(
+		"Got a ReadMempool request",
+		"returned", len(txs),
+		"pool_size", total,
+		"truncated", len(txs) < total,
+	)
 	mempoolItems := make([]*submit.TxInMempool, 0, len(txs))
 	for _, tx := range txs {
 		record := &submit.TxInMempool{
@@ -459,11 +477,9 @@ func (s *submitServiceServer) WatchMempool(
 	fieldMask := req.Msg.GetFieldMask()
 
 	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf(
-			"Got a WatchMempool request with predicate %v and fieldMask %v",
-			predicate,
-			fieldMask,
-		),
+		"Got a WatchMempool request",
+		"has_predicate", predicate != nil,
+		"field_mask_paths", len(fieldMask.GetPaths()),
 	)
 
 	var predTree *txPredicateNode
