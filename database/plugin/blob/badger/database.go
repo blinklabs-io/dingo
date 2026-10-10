@@ -342,6 +342,8 @@ type BlobStoreBadger struct {
 	compressionEnabled   bool
 	compressionLevel     int
 	gcEnabled            bool
+	gcInterval           time.Duration
+	gcDiscardRatio       float64
 	deferOpen            bool // when true, Badger is opened in Start() not New()
 }
 
@@ -359,10 +361,29 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 		valueLogFileSize:   int64(DefaultValueLogFileSize),
 		memTableSize:       int64(DefaultMemTableSize),
 		valueThreshold:     int64(DefaultValueThreshold),
+		gcInterval:         DefaultGCInterval,
+		gcDiscardRatio:     DefaultGCDiscardRatio,
 		closeDone:          make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(db)
+	}
+	if db.gcInterval == 0 {
+		db.gcInterval = DefaultGCInterval
+	}
+	if db.gcInterval < 0 {
+		return nil, fmt.Errorf(
+			"badger gc interval must not be negative: %s",
+			db.gcInterval,
+		)
+	}
+	// Badger rejects a discard ratio outside (0, 1), and NaN fails both
+	// comparisons.
+	if !(db.gcDiscardRatio > 0 && db.gcDiscardRatio < 1) {
+		return nil, fmt.Errorf(
+			"badger gc discard ratio must be between 0 and 1 exclusive: %v",
+			db.gcDiscardRatio,
+		)
 	}
 
 	if db.deferOpen {
@@ -464,7 +485,7 @@ func (d *BlobStoreBadger) init() error {
 	}
 	// Configure GC
 	if d.gcEnabled {
-		d.gcTicker = time.NewTicker(5 * time.Minute)
+		d.gcTicker = time.NewTicker(d.gcInterval)
 		d.gcStopCh = make(chan struct{})
 		d.gcWg.Add(1)
 		go d.blobGc(d.gcTicker.C, d.gcStopCh)
@@ -485,14 +506,20 @@ func (d *BlobStoreBadger) blobGc(
 				return
 			default:
 			}
+			if d.gcMetrics != nil {
+				d.gcMetrics.consecutive.Set(0)
+				d.gcMetrics.reclaimedBytes.Set(0)
+			}
 			for {
-				var beforeLSM, beforeVlog int64
+				var beforeSize int64
+				sizeKnown := false
 				if d.gcMetrics != nil {
 					d.gcMetrics.attempts.Inc()
-					beforeLSM, beforeVlog = d.DB().Size()
+					lsm, vlog, sizeErr := d.onDiskSize()
+					beforeSize, sizeKnown = lsm+vlog, sizeErr == nil
 				}
 				gcStarted := time.Now()
-				err := d.runValueLogGC(0.5)
+				err := d.runValueLogGC(d.gcDiscardRatio)
 				if d.gcMetrics != nil {
 					d.gcMetrics.duration.Observe(
 						time.Since(gcStarted).Seconds(),
@@ -505,7 +532,6 @@ func (d *BlobStoreBadger) blobGc(
 						} else {
 							d.gcMetrics.errors.Inc()
 						}
-						d.gcMetrics.consecutive.Set(0)
 					}
 					// Log any actual errors
 					if !errors.Is(err, badger.ErrNoRewrite) {
@@ -518,18 +544,18 @@ func (d *BlobStoreBadger) blobGc(
 				}
 				if d.gcMetrics != nil {
 					d.gcMetrics.successes.Inc()
-					afterLSM, afterVlog := d.DB().Size()
-					d.gcMetrics.lsmBytes.Set(float64(afterLSM))
-					d.gcMetrics.vlogBytes.Set(float64(afterVlog))
-					beforeSize := beforeLSM + beforeVlog
-					afterSize := afterLSM + afterVlog
-					if beforeSize > afterSize {
-						d.gcMetrics.reclaimedBytes.Set(
-							float64(beforeSize - afterSize),
-						)
-					} else {
-						d.gcMetrics.reclaimedBytes.Set(0)
+					afterLSM, afterVlog, sizeErr := d.onDiskSize()
+					if sizeErr == nil {
+						d.gcMetrics.lsmBytes.Set(float64(afterLSM))
+						d.gcMetrics.vlogBytes.Set(float64(afterVlog))
 					}
+					afterSize := afterLSM + afterVlog
+					addReclaimedBytes(
+						d.gcMetrics.reclaimedBytes,
+						beforeSize,
+						afterSize,
+						sizeKnown && sizeErr == nil,
+					)
 					d.gcMetrics.consecutive.Inc()
 					d.gcMetrics.lastSuccess.SetToCurrentTime()
 				}
@@ -545,6 +571,16 @@ func (d *BlobStoreBadger) blobGc(
 		case <-stop:
 			return
 		}
+	}
+}
+
+func addReclaimedBytes(
+	gauge prometheus.Gauge,
+	before, after int64,
+	sizesKnown bool,
+) {
+	if sizesKnown && before > after {
+		gauge.Add(float64(before - after))
 	}
 }
 
@@ -645,6 +681,39 @@ func (d *BlobStoreBadger) DiskSize() (int64, error) {
 	}
 	lsm, vlog := db.Size()
 	return lsm + vlog, nil
+}
+
+// onDiskSize sums the LSM table and value-log files in the Badger directory.
+// DB.Size reads counters Badger refreshes only at open and once a minute, so
+// it cannot show what a single GC rewrite freed. In-memory stores report 0.
+func (d *BlobStoreBadger) onDiskSize() (lsm, vlog int64, err error) {
+	if d.dataDir == "" {
+		return 0, 0, nil
+	}
+	entries, err := os.ReadDir(filepath.Join(d.dataDir, "blob"))
+	if err != nil {
+		return 0, 0, fmt.Errorf("read badger dir: %w", err)
+	}
+	for _, entry := range entries {
+		ext := filepath.Ext(entry.Name())
+		if ext != ".sst" && ext != ".vlog" {
+			continue
+		}
+		info, err := entry.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			// GC or compaction removed the file after ReadDir listed it.
+			continue
+		}
+		if err != nil {
+			return 0, 0, fmt.Errorf("stat badger file: %w", err)
+		}
+		if ext == ".sst" {
+			lsm += info.Size()
+		} else {
+			vlog += info.Size()
+		}
+	}
+	return lsm, vlog, nil
 }
 
 // Sync flushes committed writes to disk. Badger is opened with its default

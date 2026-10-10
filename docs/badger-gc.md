@@ -1,7 +1,11 @@
 # Badger value-log GC
 
 Dingo's Badger blob store runs value-log GC every five minutes with a discard
-ratio of `0.5`. This is separate from Badger's automatic LSM compaction. The
+ratio of `0.5`. Both values are configurable through the Badger provider
+options `gcInterval` (a duration such as `10m`; zero keeps the default) and
+`gcDiscardRatio` (greater than 0 and less than 1). Invalid values are rejected
+at startup. Keep the defaults unless measurements on your workload show a
+better tradeoff. This is separate from Badger's automatic LSM compaction. The
 default remains this conservative policy until production measurements show a
 better tradeoff; disabling LSM compaction is not part of the policy options.
 
@@ -15,8 +19,24 @@ GOWORK=off GOCACHE=/tmp/dingo-gc-cache \\
   -run '^$' -bench '^BenchmarkValueLogGC$' -benchmem -count=5
 ```
 
-The benchmark compares discard ratios `0.25`, `0.50`, and `0.75` with the
-background ticker disabled. Record `ns/op`, allocations, and the GC metrics
+`BenchmarkValueLogGCPolicy` runs the production GC worker, so the configured
+interval and discard ratio are the ones measured, over the same fixture. It
+reports `rewrites`, `bytes_reclaimed`, and `drain_ms` (time from enabling the
+worker until it reports no further rewrite) for each interval and ratio pair,
+with `bytes_reclaimed` taken from the on-disk file sizes at the drain;
+its `ns/op` includes fixture load and should be ignored.
+
+Run the production-worker benchmark separately:
+
+```sh
+GOWORK=off GOCACHE=/tmp/dingo-gc-cache \\
+  go test ./database/plugin/blob/badger \\
+  -run '^$' -bench '^BenchmarkValueLogGCPolicy$' -benchtime=1x -count=1
+```
+
+The direct-GC benchmark (`BenchmarkValueLogGC`) compares discard ratios `0.25`,
+`0.50`, and `0.75` with the background ticker disabled. Record `ns/op`,
+allocations, and the GC metrics
 from a registry-enabled store. For production-shaped evidence, repeat the
 same comparison while loading a fixed dataset for each workload: from-genesis
 sync, Mithril/bootstrap load, API backfill, history expiry/tombstones, and
@@ -30,8 +50,8 @@ Compare these policies:
 | --- | --- |
 | `5m / 0.50` | Current default baseline |
 | GC disabled during load, enabled afterward | Bulk-load control |
-| Longer interval | Lower steady-state GC interference |
-| `0.25` or `0.75` discard ratio | Reclaim-efficiency sensitivity |
+| Longer interval (`gcInterval`) | Lower steady-state GC interference |
+| `0.25` or `0.75` discard ratio (`gcDiscardRatio`) | Reclaim-efficiency sensitivity |
 | Adaptive interval/ratio | Candidate only if measurements justify its complexity |
 
 The default decision is to retain `5m / 0.50` until every workload has a
@@ -49,8 +69,12 @@ When Prometheus metrics are configured, inspect:
 - `database_blob_gc_duration_seconds` (time spent inside the Badger
   `RunValueLogGC` call, excluding the pre-GC size snapshot);
 - `database_blob_gc_lsm_bytes`, `..._vlog_bytes`, and
-  `..._reclaimed_bytes`;
-- `database_blob_gc_consecutive_successes` and
+  `..._reclaimed_bytes`, read from the `.sst` and `.vlog` file sizes on disk
+  around each rewrite, because Badger's own size counters refresh only once a
+  minute. Positive per-rewrite reductions accumulate through the current GC
+  cycle and retain the last completed total while idle;
+- `database_blob_gc_consecutive_successes` (the number of rewrites in the
+  current GC cycle, retaining the last completed count while idle) and
   `database_blob_gc_last_success_timestamp_seconds`.
 
 ## Shutdown behavior

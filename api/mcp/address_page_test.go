@@ -302,12 +302,12 @@ func TestExactAddressDeadlineInterruptsSQL(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	// A fixture view makes candidate sorting expensive inside SQLite itself.
-	// Cancellation must reach that statement, before any blob is loaded.
+	// A bounded fixture view makes candidate sorting expensive inside SQLite
+	// itself. Cancellation must reach that statement before any blob is loaded.
 	_, err = raw.Exec(`ALTER TABLE utxo RENAME TO stored_utxo;
  CREATE VIEW utxo AS
  WITH RECURSIVE candidates(n) AS (
-  VALUES(1) UNION ALL SELECT n+1 FROM candidates WHERE n<1000000000
+  VALUES(1) UNION ALL SELECT n+1 FROM candidates WHERE n<100000
  )
  SELECT stored_utxo.*, candidates.n AS candidate FROM stored_utxo CROSS JOIN candidates;`)
 	require.NoError(t, err)

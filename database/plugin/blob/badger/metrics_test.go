@@ -16,6 +16,7 @@ package badger
 
 import (
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -73,4 +74,76 @@ func TestRegisterBlobMetricsRemovesClosedStoreSeries(t *testing.T) {
 		"database_blob_gc_attempts_total")
 	require.NoError(t, err)
 	require.Equal(t, 0, count)
+}
+
+func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	store, err := New(
+		WithDataDir(t.TempDir()),
+		WithGc(false),
+		WithPromRegistry(registry),
+		WithValueThreshold(1),
+		WithValueLogFileSize(1<<20),
+		WithMemTableSize(1<<20),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	populateGCFixture(t, store)
+	runValueLogGC := store.runValueLogGC
+	var wantReclaimed float64
+	store.runValueLogGC = func(ratio float64) error {
+		beforeLSM, beforeVlog, err := store.onDiskSize()
+		if err != nil {
+			return err
+		}
+		gcErr := runValueLogGC(ratio)
+		afterLSM, afterVlog, sizeErr := store.onDiskSize()
+		if sizeErr != nil {
+			return sizeErr
+		}
+		before := beforeLSM + beforeVlog
+		after := afterLSM + afterVlog
+		if gcErr == nil && before > after {
+			wantReclaimed += float64(before - after)
+		}
+		return gcErr
+	}
+
+	ticks := make(chan time.Time, 1)
+	stop := make(chan struct{})
+	store.gcWg.Add(1)
+	go store.blobGc(ticks, stop)
+	ticks <- time.Time{}
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(store.gcMetrics.noRewrite) > 0
+	}, time.Minute, 10*time.Millisecond)
+	close(stop)
+	store.gcWg.Wait()
+
+	require.Positive(t, testutil.ToFloat64(store.gcMetrics.successes))
+	require.Positive(t, testutil.ToFloat64(store.gcMetrics.consecutive))
+	require.Equal(
+		t,
+		wantReclaimed,
+		testutil.ToFloat64(store.gcMetrics.reclaimedBytes),
+	)
+	_, vlog, err := store.onDiskSize()
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		float64(vlog),
+		testutil.ToFloat64(store.gcMetrics.vlogBytes),
+	)
+}
+
+func TestReclaimedBytesAccumulateWithinCycle(t *testing.T) {
+	t.Parallel()
+	gauge := prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_reclaimed"})
+
+	addReclaimedBytes(gauge, 300, 200, true)
+	addReclaimedBytes(gauge, 200, 200, true)
+	addReclaimedBytes(gauge, 200, 150, true)
+	addReclaimedBytes(gauge, 150, 100, false)
+
+	require.Equal(t, float64(150), testutil.ToFloat64(gauge))
 }
