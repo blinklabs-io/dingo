@@ -65,8 +65,8 @@ func (m *stateMetrics) markBlockAdded() {
 	m.lastBlockAddedUnixNano.Store(time.Now().UnixNano())
 }
 
-// incHeaderQueueFull counts one header rejected because the chain's header
-// queue was full.
+// incHeaderQueueFull counts one header rejected because the primary chain's
+// header queue was full.
 func (m *stateMetrics) incHeaderQueueFull() {
 	if m == nil || m.headerQueueFull == nil {
 		return

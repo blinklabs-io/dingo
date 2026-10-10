@@ -913,7 +913,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	)
 	m.headerQueueFull = promautoFactory.NewCounter(prometheus.CounterOpts{
 		Name: "dingo_chain_header_queue_full_total",
-		Help: "headers rejected because the chain's header queue was at capacity",
+		Help: "headers rejected because the primary chain's header queue was at capacity",
 	})
 	m.blockNum = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_blockNum_int",
