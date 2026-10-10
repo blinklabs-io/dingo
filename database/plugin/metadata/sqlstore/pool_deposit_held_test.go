@@ -560,6 +560,103 @@ func TestPoolDepositHeldSameBlockRetirementsOrderByBlockIndex(t *testing.T) {
 	)
 }
 
+func TestLatestPoolRegistrationBeforeUsesTransactionPrimaryKey(t *testing.T) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	ctx := context.Background()
+	pool := depositHeldPoolKey(0xac)
+	tx, err := store.writeDB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO pool (pool_key_hash) VALUES (?)`,
+		pool.Bytes(),
+	)
+	require.NoError(t, err)
+	poolID, err := result.LastInsertId()
+	require.NoError(t, err)
+	for slot := int64(1); slot <= 1_024; slot++ {
+		result, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, ?, 0)`,
+			[]byte(fmt.Sprintf("transaction-%04d", slot)),
+			slot,
+		)
+		require.NoError(t, err)
+		transactionID, err := result.LastInsertId()
+		require.NoError(t, err)
+		result, err = tx.ExecContext(
+			ctx,
+			`INSERT INTO certs (transaction_id, slot, cert_index) VALUES (?, ?, 0)`,
+			transactionID,
+			slot,
+		)
+		require.NoError(t, err)
+		certificateID, err := result.LastInsertId()
+		require.NoError(t, err)
+		if slot <= 512 {
+			_, err = tx.ExecContext(
+				ctx,
+				`INSERT INTO pool_registration (pool_id, pool_key_hash, certificate_id, added_slot) VALUES (?, ?, ?, ?)`,
+				poolID,
+				pool.Bytes(),
+				certificateID,
+				slot,
+			)
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, tx.Commit())
+
+	_, err = store.writeDB.ExecContext(ctx, "ANALYZE")
+	require.NoError(t, err)
+	result, err = store.writeDB.ExecContext(
+		ctx,
+		`UPDATE sqlite_stat1 SET stat = '1 1' WHERE tbl = 'transaction' AND idx = 'idx_transaction_hash'`,
+	)
+	require.NoError(t, err)
+	rowsChanged, err := result.RowsAffected()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, rowsChanged)
+	_, err = store.writeDB.ExecContext(
+		ctx,
+		`UPDATE sqlite_stat1 SET stat = '1 1' WHERE tbl = 'certs' AND idx = 'idx_certs_transaction_id'`,
+	)
+	require.NoError(t, err)
+	_, err = store.writeDB.ExecContext(
+		ctx,
+		`UPDATE sqlite_stat1 SET stat = '1 1 1' WHERE tbl = 'certs' AND idx = 'uniq_tx_cert'`,
+	)
+	require.NoError(t, err)
+	_, err = store.writeDB.ExecContext(ctx, "ANALYZE sqlite_schema")
+	require.NoError(t, err)
+
+	query, args := latestPoolRegistrationBeforeQuery(
+		poolID,
+		poolCertPosition{slot: 513},
+	)
+	rows, err := store.writeDB.QueryContext(
+		ctx,
+		"EXPLAIN QUERY PLAN "+query,
+		args...,
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+	var details []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+		details = append(details, detail)
+	}
+	require.NoError(t, rows.Err())
+	plan := strings.Join(details, " | ")
+	require.Contains(t, plan, "CORRELATED SCALAR SUBQUERY")
+	require.Contains(t, plan, "SEARCH tx USING INTEGER PRIMARY KEY")
+}
+
 // poolMetricValue returns the value reported for metric name under
 // pool="write"|"read", or -1 if no such series has been registered/gathered
 // yet. It reads whichever of GetGauge/GetCounter the family actually

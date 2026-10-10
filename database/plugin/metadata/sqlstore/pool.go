@@ -98,11 +98,12 @@ func (p poolCertPosition) before(other poolCertPosition) bool {
 }
 
 // poolPositionPredicate matches the pool certificate rows strictly before a
-// position, and returns the bind arguments for it. The joined block and
-// certificate indexes are NULL for a synthesized row with no certs row, which
-// is why both sides COALESCE to zero.
+// position and returns the bind arguments for it. The block-index expression
+// may be a join or a correlated lookup; both it and the certificate index are
+// NULL for synthesized rows without a certs row, so both are coalesced to zero.
 func poolPositionPredicate(
 	table string,
+	blockIndexExpression string,
 	at poolCertPosition,
 ) (string, []any) {
 	args := []any{
@@ -113,9 +114,9 @@ func poolPositionPredicate(
 	return `(
       ` + table + `.added_slot < ?
       OR (` + table + `.added_slot = ?
-          AND COALESCE(t.block_index, 0) < ?)
+          AND COALESCE(` + blockIndexExpression + `, 0) < ?)
       OR (` + table + `.added_slot = ?
-          AND COALESCE(t.block_index, 0) = ?
+          AND COALESCE(` + blockIndexExpression + `, 0) = ?
           AND COALESCE(c.cert_index, 0) < ?)
   )`, args
 }
@@ -216,7 +217,7 @@ func latestPoolRegistrationBefore(
 	poolID int64,
 	at poolCertPosition,
 ) (poolRegistrationDepositRow, bool, error) {
-	predicate, args := poolPositionPredicate("pr", at)
+	query, args := latestPoolRegistrationBeforeQuery(poolID, at)
 	var (
 		row       poolRegistrationDepositRow
 		held      sql.NullString
@@ -225,18 +226,8 @@ func latestPoolRegistrationBefore(
 		certIdx   int64
 		addedSlot int64
 	)
-	err := db.QueryRowContext(ctx, `
-SELECT pr.deposit_held, pr.deposit_amount, pr.added_slot,
-       COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0)
-FROM pool_registration pr
-LEFT JOIN certs c ON c.id = pr.certificate_id
-LEFT JOIN "transaction" t ON t.id = c.transaction_id
-WHERE pr.pool_id = ?
-  AND `+predicate+`
-ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC,
-         COALESCE(c.cert_index, 0) DESC
-LIMIT 1`,
-		append([]any{poolID}, args...)...,
+	err := db.QueryRowContext(ctx, query,
+		args...,
 	).Scan(&held, &charged, &addedSlot, &blockIdx, &certIdx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return row, false, nil
@@ -268,6 +259,29 @@ LIMIT 1`,
 	return row, true, nil
 }
 
+func latestPoolRegistrationBeforeQuery(
+	poolID int64,
+	at poolCertPosition,
+) (string, []any) {
+	// Resolve block indexes by transaction primary key so stale planner
+	// statistics do not turn this lookup into a scan of the transaction table.
+	blockIndexExpression := `(SELECT tx.block_index
+                            FROM "transaction" tx
+                            WHERE tx.id = c.transaction_id)`
+	predicate, args := poolPositionPredicate("pr", blockIndexExpression, at)
+	query := `
+SELECT pr.deposit_held, pr.deposit_amount, pr.added_slot,
+       COALESCE(` + blockIndexExpression + `, 0), COALESCE(c.cert_index, 0)
+FROM pool_registration pr
+LEFT JOIN certs c ON c.id = pr.certificate_id
+WHERE pr.pool_id = ?
+  AND ` + predicate + `
+ORDER BY pr.added_slot DESC, COALESCE(` + blockIndexExpression + `, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC
+LIMIT 1`
+	return query, append([]any{poolID}, args...)
+}
+
 type poolRetirementPositionRow struct {
 	position poolCertPosition
 	epoch    uint64
@@ -279,7 +293,7 @@ func latestPoolRetirementBefore(
 	poolID int64,
 	at poolCertPosition,
 ) (poolRetirementPositionRow, bool, error) {
-	predicate, args := poolPositionPredicate("rt", at)
+	predicate, args := poolPositionPredicate("rt", "t.block_index", at)
 	var (
 		row       poolRetirementPositionRow
 		epoch     int64
