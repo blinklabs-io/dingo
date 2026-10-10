@@ -1143,18 +1143,25 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	return nil
 }
 
-// chainsyncHeaderFarBehindLocalTip reports whether a header with the given
-// block number trails the local tip by more than the security parameter. A
-// rollback or fork within k is ordinary and is never reported. Without a
-// ledger the answer is false.
-func (o *Ouroboros) chainsyncHeaderFarBehindLocalTip(
+// chainsyncCursorFarBehindLocalTip reports whether a header with the given
+// block number trails the local tip by more than the security parameter while
+// the peer's advertised tip does not. Only that shape is a stale cursor that
+// re-intersecting can repair. A rollback or fork within k is ordinary, and a
+// peer whose own tip is that far behind is merely lagging on the chain: it is
+// kept attached and left unselected until it catches up. Without a ledger the
+// answer is false.
+func (o *Ouroboros) chainsyncCursorFarBehindLocalTip(
 	headerBlockNumber uint64,
+	peerTipBlockNumber uint64,
 ) bool {
 	if o.chainsyncLocalTipBlock == nil {
 		return false
 	}
 	tipBlock, k := o.chainsyncLocalTipBlock()
-	return tipBlock > headerBlockNumber && tipBlock-headerBlockNumber > k
+	farBehind := func(blockNumber uint64) bool {
+		return tipBlock > blockNumber && tipBlock-blockNumber > k
+	}
+	return farBehind(headerBlockNumber) && !farBehind(peerTipBlockNumber)
 }
 
 func (o *Ouroboros) chainsyncClientRollForwardAt(
@@ -1222,19 +1229,21 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			BlockHeader:  v,
 			Tip:          tip,
 		}
-		// An ingress-eligible connection whose headers trail the local tip by
-		// more than k can never contribute: the ledger drops them as stale and
-		// chain selection skips the peer, while the connection holds an
-		// eligible slot a peer at the tip could use. This also covers an
-		// observer promoted just above with a cursor left far behind.
-		if ingressEligible && o.chainsyncHeaderFarBehindLocalTip(
+		// An ingress-eligible connection whose cursor trails the local tip by
+		// more than k while its peer is near the tip can never contribute: the
+		// ledger drops its headers as stale and chain selection skips the
+		// peer, while the connection holds an eligible slot. This also covers
+		// an observer promoted just above with a cursor left far behind.
+		if ingressEligible && o.chainsyncCursorFarBehindLocalTip(
 			v.BlockNumber(),
+			tip.BlockNumber,
 		) {
 			o.config.Logger.Debug(
-				"chainsync: header far behind the local tip",
+				"chainsync: cursor far behind the local tip",
 				"component", "ouroboros",
 				"slot", blockSlot,
 				"block_number", v.BlockNumber(),
+				"peer_tip_block_number", tip.BlockNumber,
 				"connection_id", ctx.ConnectionId.String(),
 			)
 			o.scheduleHeaderResync(

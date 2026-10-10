@@ -87,17 +87,27 @@ func (f forecastHorizonFixture) rollForward(
 	header gledger.BlockHeader,
 ) {
 	t.Helper()
+	f.rollForwardWithTip(t, header, ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+		BlockNumber: header.BlockNumber(),
+	})
+}
+
+// rollForwardWithTip delivers header with the peer advertising tip.
+func (f forecastHorizonFixture) rollForwardWithTip(
+	t *testing.T,
+	header gledger.BlockHeader,
+	tip ochainsync.Tip,
+) {
+	t.Helper()
 	require.NoError(t, f.o.chainsyncClientRollForward(
 		ochainsync.CallbackContext{ConnectionId: f.conn},
 		0,
 		header,
-		ochainsync.Tip{
-			Point: ocommon.NewPoint(
-				header.SlotNumber(),
-				header.Hash().Bytes(),
-			),
-			BlockNumber: header.BlockNumber(),
-		},
+		tip,
 	))
 }
 
@@ -302,6 +312,14 @@ func (f forecastHorizonFixture) setLocalTip(tipBlock, k uint64) {
 	}
 }
 
+// peerTipAt is a peer tip at block number blockNumber.
+func peerTipAt(blockNumber uint64) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       ocommon.NewPoint(blockNumber, []byte{0xee}),
+		BlockNumber: blockNumber,
+	}
+}
+
 func requireBehindTipResync(
 	t *testing.T,
 	f forecastHorizonFixture,
@@ -336,9 +354,9 @@ func TestChainsyncClientRollForwardResyncsEligibleClientFarBehindTip(
 	f.setLocalTip(1000, 10)
 
 	// k+1 blocks behind the tip is the smallest distance that is resynced.
-	f.rollForward(t, newTestBlockHeader(400, 989, 0xa5))
+	f.rollForwardWithTip(t, newTestBlockHeader(400, 989, 0xa5), peerTipAt(1000))
 	requireBehindTipResync(t, f, resyncCh)
-	f.rollForward(t, newTestBlockHeader(401, 500, 0xa6))
+	f.rollForwardWithTip(t, newTestBlockHeader(401, 500, 0xa6), peerTipAt(1000))
 
 	testutil.RequireNoReceive(
 		t,
@@ -378,7 +396,7 @@ func TestChainsyncClientRollForwardResyncsPromotedObserverFarBehindTip(
 	f.setLocalTip(1000, 10)
 	require.True(t, f.o.chainsyncState.SetClientObservabilityOnly(f.conn, true))
 
-	f.rollForward(t, newTestBlockHeader(400, 500, 0xa7))
+	f.rollForwardWithTip(t, newTestBlockHeader(400, 500, 0xa7), peerTipAt(1000))
 
 	requireBehindTipResync(t, f, resyncCh)
 	observabilityOnly, exists := f.o.chainsyncState.ClientObservabilityOnly(
@@ -401,7 +419,7 @@ func TestChainsyncClientRollForwardKeepsEligibleClientWithinKOfTip(
 	f.setLocalTip(1000, 10)
 
 	// Exactly k behind is within bounds.
-	f.rollForward(t, newTestBlockHeader(990, 990, 0xa8))
+	f.rollForwardWithTip(t, newTestBlockHeader(990, 990, 0xa8), peerTipAt(1000))
 
 	testutil.RequireReceive(
 		t,
@@ -414,5 +432,34 @@ func TestChainsyncClientRollForwardKeepsEligibleClientWithinKOfTip(
 		resyncCh,
 		200*time.Millisecond,
 		"a header within k of the local tip must not request a resync",
+	)
+}
+
+// A peer whose own tip trails the local tip by more than k is behind on the
+// chain, not holding a stale cursor: re-intersecting cannot move it closer to
+// the tip, and replacing its connection on every header would cut off a
+// lagging upstream that is catching up. Its connection is kept.
+func TestChainsyncClientRollForwardKeepsEligibleClientWhosePeerTipIsFarBehind(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newForecastHorizonFixture(t, "10.0.0.27:3001")
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
+	f.setLocalTip(1000, 10)
+
+	f.rollForwardWithTip(t, newTestBlockHeader(400, 500, 0xa9), peerTipAt(500))
+
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		200*time.Millisecond,
+		"a peer whose own tip is far behind must not be resynced",
+	)
+	testutil.RequireReceive(
+		t,
+		f.tipCh,
+		testutil.AsyncWait,
+		"a header from a peer behind on the chain still reaches chain selection",
 	)
 }
