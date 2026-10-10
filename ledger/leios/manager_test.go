@@ -2637,26 +2637,29 @@ func TestVoteManagerValidatesDijkstraCertificateStrictly(t *testing.T) {
 		message,
 	))
 
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	err = fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers,
 		aggregatedSignature,
 		[]byte("wrong message"),
-	))
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	)
+	require.ErrorIs(t, err, ErrInvalidDijkstraCertificate)
+	err = fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers[:1],
 		aggregatedSignature,
 		message,
-	))
+	)
+	require.ErrorIs(t, err, ErrInvalidDijkstraCertificate)
 
 	wrongSizeAggregate := make([]byte, lcommon.LeiosBlsSignatureSize)
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	err = fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers,
 		wrongSizeAggregate,
 		message,
-	))
+	)
+	require.ErrorIs(t, err, ErrInvalidDijkstraCertificate)
 
 	highBits := append([]byte(nil), signers...)
 	highBits[len(highBits)-1] |= 1

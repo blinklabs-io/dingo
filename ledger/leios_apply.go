@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	leiosledger "github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -946,6 +947,9 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 		certificate.Signers,
 		certificate.AggregatedSignature,
 	); err != nil {
+		if !errors.Is(err, leiosledger.ErrInvalidDijkstraCertificate) {
+			return fmt.Errorf("validate Leios certificate: %w", err)
+		}
 		return ls.rejectLeiosCertifyingBlock(
 			block,
 			fmt.Errorf("%w: %w", errLeiosInvalidCertificate, err),

@@ -18,11 +18,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	leiosledger "github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -324,7 +326,10 @@ func TestLeiosInvalidCertificateRejectsRankingBlock(t *testing.T) {
 	t.Parallel()
 	f := newLeiosCertApplyFixture(t)
 	parent := f.announce()
-	f.certErr = errors.New("certificate signature does not verify")
+	f.certErr = fmt.Errorf(
+		"%w: certificate signature does not verify",
+		leiosledger.ErrInvalidDijkstraCertificate,
+	)
 
 	certifier, offsets, envParent := f.certifyingChild(parent)
 	err := f.ls.ensureReferencedEndorserBlocks(
@@ -335,6 +340,27 @@ func TestLeiosInvalidCertificateRejectsRankingBlock(t *testing.T) {
 	err = f.process(certifier, offsets, envParent)
 	require.ErrorIs(t, err, f.certErr)
 	require.NotErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+	f.requireEndorserEffects(false)
+}
+
+func TestLeiosCertificateLocalFailureDoesNotRejectRankingBlock(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	parent := f.announce()
+	f.certErr = errors.New("committee snapshot unavailable")
+
+	certifier, offsets, envParent := f.certifyingChild(parent)
+	err := f.ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{certifier},
+	)
+	require.ErrorIs(t, err, f.certErr)
+	var validationErr *headerValidationError
+	require.False(t, errors.As(err, &validationErr))
+
+	err = f.process(certifier, offsets, envParent)
+	require.ErrorIs(t, err, f.certErr)
+	require.False(t, errors.As(err, &validationErr))
 	f.requireEndorserEffects(false)
 }
 

@@ -727,7 +727,10 @@ type LedgerStateConfig struct {
 	// certified closure.
 	EndorserBlockWaitSlots uint64
 	// ValidateLeiosCertificate verifies a Dijkstra certificate before any
-	// certified endorser-block transactions are fetched or applied.
+	// certified endorser-block transactions are fetched or applied. A
+	// deterministic invalid-certificate verdict wraps
+	// leios.ErrInvalidDijkstraCertificate; other errors are local failures and
+	// remain retryable.
 	ValidateLeiosCertificate func(
 		epoch uint64,
 		announcingBlockHash []byte,
