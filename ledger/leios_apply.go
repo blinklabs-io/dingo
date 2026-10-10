@@ -347,10 +347,10 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 			snapshot.eraList,
 		)
 		if err != nil {
-			if isLocalTxValidationError(err) {
-				return 0, 0, err
+			if isSemanticTxValidationError(err) {
+				return 0, 0, &leiosEndorserBlockValidationError{err: err}
 			}
-			return 0, 0, &leiosEndorserBlockValidationError{err: err}
+			return 0, 0, err
 		}
 		if validationEra.ValidateTxFunc != nil {
 			pp := snapshot.currentPParams
@@ -392,18 +392,18 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				)
 			}
 			if err != nil {
-				if isLocalTxValidationError(err) {
-					return 0, 0, fmt.Errorf(
-						"validate endorser tx %d: %w",
+				if isSemanticTxValidationError(err) {
+					return 0, 0, &leiosEndorserBlockValidationError{err: fmt.Errorf(
+						"endorser tx %d failed validation: %w",
 						idx,
 						err,
-					)
+					)}
 				}
-				return 0, 0, &leiosEndorserBlockValidationError{err: fmt.Errorf(
-					"endorser tx %d failed validation: %w",
+				return 0, 0, fmt.Errorf(
+					"validate endorser tx %d: %w",
 					idx,
 					err,
-				)}
+				)
 			}
 		}
 

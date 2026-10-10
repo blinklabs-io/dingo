@@ -13618,14 +13618,14 @@ type localTxValidationError struct {
 func (e *localTxValidationError) Error() string { return e.err.Error() }
 func (e *localTxValidationError) Unwrap() error { return e.err }
 
-func isLocalTxValidationError(err error) bool {
-	var localErr *localTxValidationError
-	return errors.As(err, &localErr) ||
-		errors.Is(err, context.Canceled) ||
-		errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, eras.ErrIncompatibleProtocolParams) ||
-		errors.Is(err, ErrLedgerViewStorageFault) ||
-		errors.Is(err, hardfork.ErrPastHorizon)
+func isSemanticTxValidationError(err error) bool {
+	var eraMismatch *ledger.EraMismatch
+	if errors.As(err, &eraMismatch) || isDeterministicTxValidationError(err) {
+		return true
+	}
+	var validationErr *lcommon.ValidationError
+	return errors.As(err, &validationErr) &&
+		validationErr.Type == lcommon.ValidationErrorTypeTransaction
 }
 
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
@@ -13761,10 +13761,10 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 				snapshot.eraList,
 			)
 			if err != nil {
-				if isLocalTxValidationError(err) {
-					return err
+				if isSemanticTxValidationError(err) {
+					return &semanticTxValidationError{err: err}
 				}
-				return &semanticTxValidationError{err: err}
+				return err
 			}
 			if validationEra.ValidateTxFunc == nil {
 				return nil
@@ -13812,10 +13812,10 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 					tx.Hash(),
 					err,
 				)
-				if isLocalTxValidationError(err) {
-					return validationErr
+				if isSemanticTxValidationError(err) {
+					return &semanticTxValidationError{err: validationErr}
 				}
-				return &semanticTxValidationError{err: validationErr}
+				return validationErr
 			}
 			return nil
 		}

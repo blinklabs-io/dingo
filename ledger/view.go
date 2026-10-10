@@ -991,8 +991,8 @@ func (lv *LedgerView) IsVrfKeyInUse(
 	}
 	poolKeyHash, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
 	if err != nil {
-		return false, lcommon.PoolKeyHash{}, fmt.Errorf(
-			"VRF key owner pool key hash: %w",
+		return false, lcommon.PoolKeyHash{}, lv.storageFault(
+			"decode stored VRF key owner pool key hash: %w",
 			err,
 		)
 	}
@@ -2344,21 +2344,57 @@ func (lv *LedgerView) DRepDelegation(
 	if account == nil {
 		return nil, nil
 	}
-	// No DRep delegation: an empty credential together with the default
-	// key-hash type. An always-abstain / always-no-confidence delegation
-	// carries no credential but a non-default type, so it is a delegation.
-	if len(account.Drep) == 0 &&
-		account.DrepType == models.DrepTypeAddrKeyHash {
-		return nil, nil
+	var (
+		drepType   int
+		credential []byte
+	)
+	switch account.DrepType {
+	case models.DrepTypeAddrKeyHash:
+		if len(account.Drep) == 0 {
+			return nil, nil
+		}
+		drepType = lcommon.DrepTypeAddrKeyHash
+		credential = account.Drep
+	case models.DrepTypeScriptHash:
+		if len(account.Drep) == 0 {
+			return nil, lv.storageFault(
+				"decode stored DRep delegation credential: %w",
+				errors.New("script credential is empty"),
+			)
+		}
+		drepType = lcommon.DrepTypeScriptHash
+		credential = account.Drep
+	case models.DrepTypeAlwaysAbstain,
+		models.DrepTypeAlwaysNoConfidence:
+		if len(account.Drep) != 0 {
+			return nil, lv.storageFault(
+				"decode stored DRep delegation: %w",
+				fmt.Errorf("type %d carries a credential", account.DrepType),
+			)
+		}
+		if account.DrepType == models.DrepTypeAlwaysAbstain {
+			drepType = lcommon.DrepTypeAbstain
+		} else {
+			drepType = lcommon.DrepTypeNoConfidence
+		}
+	default:
+		return nil, lv.storageFault(
+			"decode stored DRep delegation: %w",
+			fmt.Errorf("unknown type %d", account.DrepType),
+		)
 	}
-	// DrepType is a small ledger enum (0-3); guard the narrowing conversion
-	// so an out-of-range value degrades to "no DRep" rather than wrapping.
-	if account.DrepType > uint64(math.MaxInt) {
-		return nil, nil
+	if credential != nil {
+		checked, err := lcommon.NewBlake2b224Checked(credential)
+		if err != nil {
+			return nil, lv.storageFault(
+				"decode stored DRep delegation credential: %w", err,
+			)
+		}
+		credential = checked[:]
 	}
 	return &lcommon.Drep{
-		Type:       int(account.DrepType),
-		Credential: account.Drep,
+		Type:       drepType,
+		Credential: credential,
 	}, nil
 }
 
