@@ -1977,17 +1977,10 @@ func smallEpochGenesisCfgForLifecycleTest(
 	return cfg
 }
 
-// addBlocksSerially adds each block one at a time and waits for each
-// block-based epoch transition before entering the next epoch.
-//
-// A tight back-to-back loop of AddBlock calls that crosses more than one
-// epoch boundary fires several epoch-transition EventBus events with no
-// synchronization between them, each spawning its own concurrent async
-// handler (reward precompute, stake/reward snapshots, and automatic database
-// lifecycle snapshots). The transition event is emitted after the rollover
-// transaction commits, so it provides the ordering this test needs without
-// polling the database tip. Adding blocks one at a time also more accurately
-// simulates blocks arriving live instead of as an instantaneous burst.
+// addBlocksSerially waits for each block-based epoch transition to commit
+// before entering the next epoch. This orders ledger commits only; snapshot
+// events run in their own serial loop and reward precomputation coalesces
+// pending epochs independently.
 func addBlocksSerially(
 	t *testing.T,
 	n *Node,

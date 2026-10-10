@@ -27,7 +27,8 @@ import (
 var localKeys embed.FS
 
 // InstallLocalTestKeys copies the local DevNet producer credentials into dir
-// with owner-only permissions.
+// with owner-only permissions. Replacement is atomic on Unix; Windows uses
+// os.Root.Rename and does not guarantee atomic replacement.
 func InstallLocalTestKeys(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating local DevNet key directory: %w", err)

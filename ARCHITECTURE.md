@@ -262,10 +262,12 @@ publishes it only after release finalization.
 `dingo devnet` is a convenience composition around the normal node startup. It
 copies the embedded single-node DevNet configuration and installs the
 local-only producer credentials from `internal/devnetkeys` into a private
-temporary directory, refreshes the Byron and Shelley start times, and starts
-the same executable with dev mode and block production enabled. The key bundle
-is separate from embedded network configuration, and normal node key paths
-still come from the operator. The child process runs the ordinary `serveRun`
+temporary directory. Key replacement is atomic on Unix; Windows replacement
+uses `os.Root.Rename` without an atomicity guarantee. Both platforms restrict
+key access to the owner. The command refreshes the Byron and Shelley start
+times and starts the same executable with dev mode and block production
+enabled. The key bundle is separate from embedded network configuration, and
+normal node key paths still come from the operator. The child process runs the ordinary `serveRun`
 and `internal/node` composition with an isolated database and no configured
 peers. The command forwards shutdown signals and removes its temporary
 directory after the node stops; the npm wrapper passes `devnet` through to the

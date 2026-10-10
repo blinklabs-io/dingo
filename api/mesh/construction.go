@@ -867,6 +867,24 @@ func (s *Server) handleConstructionCombine(
 		)
 	}
 
+	_, consumed, err := safedecode.Cbor[conway.ConwayTransactionBody](
+		bodyBytes,
+	)
+	if err != nil {
+		writeError(w, wrapErr(
+			ErrInvalidTransaction,
+			fmt.Errorf("decode body: %w", err),
+		))
+		return
+	}
+	if consumed != len(bodyBytes) {
+		writeError(w, wrapErr(
+			ErrInvalidTransaction,
+			errors.New("trailing data after transaction body"),
+		))
+		return
+	}
+
 	// Build signed TX as CBOR 4-element array:
 	// [body, witness_set, is_valid, auxiliary_data]
 	// Use RawMessage for body to preserve exact bytes.
