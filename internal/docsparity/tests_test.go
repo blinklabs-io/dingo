@@ -3044,16 +3044,13 @@ func TestImageManifestRunsAfterMainBuilds(t *testing.T) {
 			publishPipeline,
 		)
 	}
-	if !strings.Contains(condition, "always()") ||
-		!strings.Contains(
-			condition,
-			"needs.build-images.result == 'success'",
-		) {
+	const expected = "always() && needs.build-images.result == 'success'"
+	if condition != expected {
 		t.Errorf(
-			"%s: build-image-manifest condition %q does not override a skipped "+
-				"release dependency while requiring successful image builds",
+			"%s: build-image-manifest condition %q, want %q",
 			publishPipeline,
 			condition,
+			expected,
 		)
 	}
 }
