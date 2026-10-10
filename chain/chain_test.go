@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -4722,11 +4721,10 @@ func waitUntilParkedIn(t *testing.T, symbol string) {
 
 func waitUntilParkedInFrom(t *testing.T, symbol, caller string) {
 	t.Helper()
-	buf := make([]byte, 1<<20)
 	testutil.WaitForConditionWithInterval(
 		t,
 		func() bool {
-			dump := string(buf[:runtime.Stack(buf, true)])
+			dump := testutil.AllGoroutineStacks()
 			for g := range strings.SplitSeq(dump, "\n\ngoroutine ") {
 				if strings.Contains(g, semaphoreFrame) &&
 					strings.Contains(g, symbol) &&
@@ -4746,11 +4744,10 @@ func waitUntilParkedInFrom(t *testing.T, symbol, caller string) {
 // waits on channels rather than only sync locks.
 func waitUntilGoroutineIn(t *testing.T, symbol string) {
 	t.Helper()
-	buf := make([]byte, 1<<20)
 	testutil.WaitForConditionWithInterval(
 		t,
 		func() bool {
-			dump := string(buf[:runtime.Stack(buf, true)])
+			dump := testutil.AllGoroutineStacks()
 			return strings.Contains(dump, symbol)
 		},
 		5*time.Second,

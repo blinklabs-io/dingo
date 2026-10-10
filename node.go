@@ -602,7 +602,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	n.startupLifecycleMu.Lock()
 	startupGateHeld := true
 	var started []func()
-	// Set to false by the ledgerState.Close LIFO stop if it cannot confirm
+	// Set to false by a storage-using component's LIFO stop if it cannot confirm
 	// every background goroutine has exited. The db.Close and pluginHost.Stop
 	// LIFO stops registered below then skip closing storage a still-running
 	// goroutine may be using -- mirrors node_shutdown.go's shutdown()
@@ -1127,7 +1127,17 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Register midnight indexer cleanup after LedgerState so it is torn down
 	// first (reverse order): midnight.Stop() → ledgerState.Close().
 	if n.midnightIndexer != nil {
-		started = append(started, func() { n.midnightIndexer.Stop() })
+		started = append(started, func() {
+			stopCtx, cancel := context.WithTimeout(
+				context.Background(), n.configuredShutdownTimeout(),
+			)
+			defer cancel()
+			if err := n.midnightIndexer.Stop(stopCtx); err != nil {
+				ledgerStateDrainConfirmed = false
+				runErr = errors.Join(runErr, errStorageDrainUnconfirmed, err)
+				n.config.logger.Error("midnight indexer startup rollback did not drain; preserving storage", "error", err)
+			}
+		})
 	}
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
@@ -1411,9 +1421,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		usePeerSnapshot := genesisSelectionMode &&
 			topologyConfig.PeerSnapshot != nil &&
 			topologyConfig.PeerSnapshot.HasRelays()
-		if usePeerSnapshot {
-			topologyConfig = topologyConfig.WithoutBootstrapPeers()
-		}
 		n.peerGov.LoadTopologyConfig(topologyConfig)
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
@@ -1421,13 +1428,14 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				n.config.topologyConfig.PeerSnapshot,
 			)
 			if added > 0 {
+				n.peerGov.PreferPeerSnapshot()
 				n.config.logger.Info(
 					"using peer snapshot for Genesis bootstrap",
 					"snapshot_slot",
 					n.config.topologyConfig.PeerSnapshot.Point.BlockPointSlot,
 					"snapshot_peers_added",
 					added,
-					"bootstrap_peers_omitted",
+					"bootstrap_peers_reserved",
 					len(n.config.topologyConfig.BootstrapPeers),
 				)
 			} else {
@@ -1436,7 +1444,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 					"snapshot_slot",
 					n.config.topologyConfig.PeerSnapshot.Point.BlockPointSlot,
 				)
-				n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
 			}
 		}
 	}

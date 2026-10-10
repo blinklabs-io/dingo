@@ -18,12 +18,15 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -31,6 +34,65 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
+
+type genesisReadFailureStore struct {
+	blob.BlobStore
+	err error
+}
+
+func (s genesisReadFailureStore) Get(types.Txn, []byte) ([]byte, error) {
+	return nil, s.err
+}
+
+func TestCreateGenesisBlockPropagatesReadFailure(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json", "musashi", cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	ls := &LedgerState{db: db, config: LedgerStateConfig{
+		Database: db, CardanoNodeConfig: nodeCfg,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}}
+	ls.currentTip.Point.Slot = 42
+	base := db.Blob()
+	failure := errors.New("genesis read failed")
+	db.SetBlobStore(genesisReadFailureStore{BlobStore: base, err: failure})
+	err = ls.createGenesisBlock(t.Context())
+	db.SetBlobStore(base)
+	require.ErrorIs(t, err, failure)
+	state, err := db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	require.Nil(t, state)
+	require.NoError(t, ls.createGenesisBlock(t.Context()))
+	state, err = db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+}
+
+func TestCreateGenesisBlockRejectsDifferentSyntheticGenesis(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json", "musashi", cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	ls := &LedgerState{db: db, config: LedgerStateConfig{
+		Database: db, CardanoNodeConfig: nodeCfg,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}}
+	ls.currentTip.Point.Slot = 42
+	require.NoError(t, db.SetGenesisCbor(0, make([]byte, 32), []byte{1}, nil))
+	require.ErrorContains(t, ls.createGenesisBlock(t.Context()), "stored synthetic genesis does not match")
+	state, err := db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	require.Nil(t, state)
+}
 
 func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {
 	t.Parallel()
@@ -221,9 +283,11 @@ func TestCreateGenesisBlockRejectsAvvmNonAvvmCollisionBeforeWriting(t *testing.T
 		pots,
 		"epoch-0 reserves/ada-pots row must not be written when validation fails",
 	)
+	hasGenesis, genesisErr := db.HasGenesisCbor(0, genesisHash[:])
+	require.NoError(t, genesisErr)
 	require.False(
 		t,
-		db.HasGenesisCbor(0, genesisHash[:]),
+		hasGenesis,
 		"synthetic genesis CBOR must not be committed when validation fails",
 	)
 }

@@ -9846,6 +9846,10 @@ upstream target. Missing or unknown progress reports false. This is not a
 peer-freshness or node-readiness check; the response retains its current block
 identifier independently of the applied-ledger progress.
 
+Mesh block and network-status timestamps come from the ledger's era-aware
+slot conversion. A conversion failure returns the existing internal-error
+response; the API never substitutes a fixed slot duration.
+
 Request bodies are bounded in two dimensions, because either bound alone
 leaves a handler goroutine reachable indefinitely. `maxRequestBody` (1 MiB)
 caps how many bytes a client may send; `defaultRequestBodyTimeout` (30s),
@@ -12782,6 +12786,15 @@ explicitly, or the indexer silently stops running on upgrade even though
 storage mode has not changed. `Config.Validate` rejects the reverse
 mistake (`midnight.enabled: true` with a non-api storage mode) at startup
 with a message naming both settings.
+
+Backfill and live indexing resolve timestamps before writing block data or
+advancing the checkpoint. Decode and timestamp errors stop backfill or reach
+the live fatal-error callback, preserving the last successful checkpoint.
+After a fatal indexing error, queued events cannot advance the index; restart
+constructs a fresh indexer from the persisted checkpoint.
+Stopping the indexer drains its subscription within the caller's context.
+Live restore/truncate bounds all subscription drains by the shutdown budget;
+an unfinished drain requires a supervised restart before storage can reopen.
 
 Once eligible to run, it subscribes to `ledger.block`
 (`ledger.BlockEventType`) and for each applied block scans every transaction:

@@ -6773,7 +6773,11 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 		// If genesis CBOR exists in the blob store with the expected hash,
 		// the database was created with a matching genesis. Older databases
 		// may still be missing the slot-0 network-state baseline.
-		if ls.db.HasGenesisCbor(0, genesisHash[:]) {
+		hasGenesis, err := ls.db.HasGenesisCbor(0, genesisHash[:])
+		if err != nil {
+			return fmt.Errorf("checking genesis CBOR: %w", err)
+		}
+		if hasGenesis {
 			if err := ls.ensureGenesisConstitution(nil); err != nil {
 				return err
 			}
@@ -6789,12 +6793,13 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 		// Check if genesis CBOR exists but with a different hash.
 		// This indicates the database was created for a different
 		// network (e.g., mainnet DB with preview config) — fail fast.
-		if ls.db.HasAnyGenesisCbor(0) {
-			ls.config.Logger.Warn(
-				"slot-0 CBOR exists but does not match synthetic genesis hash, creating genesis block",
-				"component",
-				"ledger",
-				"expected_hash",
+		hasAnyGenesis, err := ls.db.HasAnyGenesisCbor(0)
+		if err != nil {
+			return fmt.Errorf("checking existing genesis CBOR: %w", err)
+		}
+		if hasAnyGenesis {
+			return fmt.Errorf(
+				"stored synthetic genesis does not match configured genesis hash %s",
 				hex.EncodeToString(genesisHash[:]),
 			)
 		}

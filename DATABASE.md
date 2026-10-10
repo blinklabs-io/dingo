@@ -532,6 +532,14 @@ The Go model `models.Block` has `TableName() == "block"`, but it is not migrated
 
 ## API Surface
 
+Genesis CBOR presence queries return `(bool, error)`: only a missing key or an
+exhausted, error-free iterator means absence. Backend errors reach ledger
+startup instead of triggering genesis creation.
+Synthetic genesis is identified by its ID-zero metadata, not merely its slot:
+genuine Byron slot-zero blocks are not a network mismatch. A different stored
+synthetic genesis hash rejects startup rather than creating a second baseline.
+Block-range backfill rejects invalid iterator items instead of skipping data.
+
 Use the Go APIs when code runs inside Dingo:
 
 - `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `PinBlob()`, `SetBlobStore()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`. `Blob()`, `PinBlob()`, and `SetBlobStore()` are the only readers and writer of the installed blob store; see "Storage provider ownership" for the pin/drain rules that make replacement safe.
@@ -1409,6 +1417,12 @@ subset — and reports the elapsed time afterwards, because the build itself
 emits nothing while it runs.
 
 ### Midnight Indexer
+
+Block timestamps are resolved before indexing or checkpoint advancement.
+A missing slot timer, conversion error, or negative timestamp fails the
+block; backfill also fails on undecodable block data. The checkpoint remains
+at the last successfully indexed block so restart can retry the failed block.
+Synthetic storage blobs with ID zero are excluded from the chain-block scan.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|

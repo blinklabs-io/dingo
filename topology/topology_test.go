@@ -123,8 +123,9 @@ var topologyTests = []topologyTestDefinition{
 							Port:    3001,
 						},
 					},
-					Advertise: false,
-					Valency:   1,
+					Advertise:   false,
+					Valency:     1,
+					WarmValency: 1,
 				},
 			},
 			PublicRoots: []topology.TopologyConfigP2PPublicRoot{
@@ -198,9 +199,10 @@ var topologyTests = []topologyTestDefinition{
 							Port:    3001,
 						},
 					},
-					Advertise: false,
-					Trustable: false,
-					Valency:   1,
+					Advertise:   false,
+					Trustable:   false,
+					Valency:     1,
+					WarmValency: 1,
 				},
 			},
 			PublicRoots: []topology.TopologyConfigP2PPublicRoot{
@@ -437,7 +439,7 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
     }
   ]
 }`,
-			wantErr: "localRoots[0].warmValency must be <= localRoots[0].valency",
+			wantErr: "localRoots[0].warmValency must be <= len(localRoots[0].accessPoints)",
 		},
 		{
 			name: "local root valency exceeds access points",
@@ -486,7 +488,7 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
     }
   ]
 }`,
-			wantErr: "publicRoots[0].warmValency must be <= publicRoots[0].valency",
+			wantErr: "publicRoots[0].warmValency must be <= len(publicRoots[0].accessPoints)",
 		},
 		{
 			name: "public root valency exceeds access points",
@@ -551,7 +553,7 @@ func TestNewTopologyConfigFromReader_AllowsEmptyAccessPointsWithValency(t *testi
 	require.NoError(t, err)
 }
 
-func TestNewTopologyConfigFromReader_AllowsWarmValencyBelowValency(t *testing.T) {
+func TestNewTopologyConfigFromReader_RejectsWarmValencyBelowValency(t *testing.T) {
 	jsonData := `{
 	"localRoots": [
 		{
@@ -566,7 +568,7 @@ func TestNewTopologyConfigFromReader_AllowsWarmValencyBelowValency(t *testing.T)
 }`
 
 	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "warmValency must be >= valency")
 }
 
 func TestNewTopologyConfigFromReader_RejectsWarmValencyAboveValency(t *testing.T) {
@@ -584,7 +586,7 @@ func TestNewTopologyConfigFromReader_RejectsWarmValencyAboveValency(t *testing.T
 
 	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "localRoots[0].warmValency must be <= localRoots[0].valency")
+	require.Contains(t, err.Error(), "localRoots[0].warmValency must be <= len(localRoots[0].accessPoints)")
 }
 
 func TestNewPeerSnapshotConfigFromReader_ParsesButValidateRejectsMissingRelayPort(

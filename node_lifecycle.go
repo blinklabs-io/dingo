@@ -245,6 +245,18 @@ func stopWithDeadline(
 
 func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	var err error
+	ctx, cancel := context.WithTimeout(ctx, n.configuredShutdownTimeout())
+	defer cancel()
+	drainSubscription := func(topic event.EventType, id *event.EventSubscriberId) {
+		if *id == 0 {
+			return
+		}
+		if stopErr := n.eventBus.UnsubscribeAndWaitContext(ctx, topic, *id); stopErr != nil {
+			err = errors.Join(err, errStorageDrainUnconfirmed,
+				fmt.Errorf("%s subscription shutdown: %w", topic, stopErr))
+		}
+		*id = 0
+	}
 
 	// Every component whose Stop cancels its own context and then waits on a
 	// WaitGroup with no deadline of its own is bounded here -- see
@@ -257,14 +269,14 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// visible in one place and testable as a set: quiesceComponentStops is
 	// what a quiesce-level test asserts against, and a call site that went
 	// back to a direct Stop would drop out of it.
-	stopTimeout := n.configuredShutdownTimeout()
+	deadline, _ := ctx.Deadline()
 	for _, cs := range componentStopsForQuiesce(n) {
 		if cs.name == "block producer credentials" &&
 			errors.Is(err, errStorageDrainUnconfirmed) {
 			continue
 		}
 		if stopErr := stopWithDeadline(
-			stopTimeout, cs.name, cs.stop,
+			max(time.Until(deadline), 0), cs.name, cs.stop,
 		); stopErr != nil {
 			err = errors.Join(err, stopErr)
 		}
@@ -313,13 +325,7 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		}
 		n.koiosParityObserver = nil
 	}
-	if n.koiosParitySubId != 0 {
-		n.eventBus.UnsubscribeAndWait(
-			event.EpochTransitionEventType,
-			n.koiosParitySubId,
-		)
-		n.koiosParitySubId = 0
-	}
+	drainSubscription(event.EpochTransitionEventType, &n.koiosParitySubId)
 	// API services, including MCP in either storage mode, are owned by the
 	// plugin host. Unresolved capabilities need no shutdown.
 	if n.pluginHost != nil {
@@ -417,14 +423,13 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		// rather than restarting an instance bound to the closed store.
 		n.tokenRegistrySync = nil
 	}
-	// midnightIndexer and chainManager/chainsyncState have no corresponding
-	// stop call in node_shutdown.go's shutdown() — production shutdown
-	// relies on process exit to clean them up. That's not available here
-	// since the process keeps running, so midnightIndexer is stopped
-	// explicitly; chainManager/chainsyncState have no Stop method at all
-	// and are simply discarded/replaced in reinitializeStorage.
+	// The indexer must drain before storage replacement. Chain manager and
+	// chainsync state have no Stop method and are replaced during reinitialization.
 	if n.midnightIndexer != nil {
-		n.midnightIndexer.Stop()
+		if stopErr := n.midnightIndexer.Stop(ctx); stopErr != nil {
+			err = errors.Join(err, errStorageDrainUnconfirmed,
+				fmt.Errorf("midnight indexer shutdown: %w", stopErr))
+		}
 	}
 	// mempool is a plugin-capability provider with no Stop method of its
 	// own (see node.go's Run()) -- it is stopped/discarded via the host.
@@ -460,20 +465,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// Unsubscribe only stops future deliveries, so a handler goroutine
 	// already dispatched before this loop runs could still be reading
 	// those fields concurrently with that teardown.
-	if n.chainsyncClientRemoveSubId != 0 {
-		n.eventBus.UnsubscribeAndWait(
-			chainsync.ClientRemoveRequestedEventType,
-			n.chainsyncClientRemoveSubId,
-		)
-		n.chainsyncClientRemoveSubId = 0
-	}
-	if n.connManagerRecycleSubId != 0 {
-		n.eventBus.UnsubscribeAndWait(
-			connmanager.ConnectionRecycleRequestedEventType,
-			n.connManagerRecycleSubId,
-		)
-		n.connManagerRecycleSubId = 0
-	}
+	drainSubscription(chainsync.ClientRemoveRequestedEventType, &n.chainsyncClientRemoveSubId)
+	drainSubscription(connmanager.ConnectionRecycleRequestedEventType, &n.connManagerRecycleSubId)
 	// leiosVoteManager is stopped above and rebuilt by initLeiosVoteManager
 	// (called again for a Dijkstra/Leios-enabled node during reinit), which
 	// re-subscribes a fresh handler -- without unsubscribing the old one
@@ -481,20 +474,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// accumulate one extra permanently-active subscription per live
 	// restore/truncate cycle, and a single emitted vote would be enqueued
 	// (and diffused to peers) once per accumulated subscription.
-	if n.leiosVoteEmittedSubId != 0 {
-		n.eventBus.UnsubscribeAndWait(
-			leios.VoteEmittedEventType,
-			n.leiosVoteEmittedSubId,
-		)
-		n.leiosVoteEmittedSubId = 0
-	}
-	if n.leiosVoteReceivedSubId != 0 {
-		n.eventBus.UnsubscribeAndWait(
-			leios.VoteReceivedEventType,
-			n.leiosVoteReceivedSubId,
-		)
-		n.leiosVoteReceivedSubId = 0
-	}
+	drainSubscription(leios.VoteEmittedEventType, &n.leiosVoteEmittedSubId)
+	drainSubscription(leios.VoteReceivedEventType, &n.leiosVoteReceivedSubId)
 
 	// Drain persistence while storage is open. An unconfirmed drain requires
 	// a supervised restart because the writer may still access that storage.
@@ -506,6 +487,9 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 				fmt.Errorf("leios persist writer pause: %w", pauseErr),
 			)
 		}
+	}
+	if ctx.Err() != nil && err != nil {
+		err = errors.Join(err, errStorageDrainUnconfirmed)
 	}
 
 	return err
@@ -1080,17 +1064,14 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		usePeerSnapshot := genesisSelectionMode &&
 			topologyConfig.PeerSnapshot != nil &&
 			topologyConfig.PeerSnapshot.HasRelays()
-		if usePeerSnapshot {
-			topologyConfig = topologyConfig.WithoutBootstrapPeers()
-		}
 		n.peerGov.LoadTopologyConfig(topologyConfig) //nolint:contextcheck // address normalization bounds its own DNS lookup
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
 				ctx,
 				n.config.topologyConfig.PeerSnapshot,
 			)
-			if added == 0 {
-				n.peerGov.LoadTopologyConfig(n.config.topologyConfig) //nolint:contextcheck // address normalization bounds its own DNS lookup
+			if added > 0 {
+				n.peerGov.PreferPeerSnapshot()
 			}
 		}
 	}
