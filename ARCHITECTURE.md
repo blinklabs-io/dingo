@@ -15870,6 +15870,21 @@ prevent — merely logging and returning does not. Regression tests:
 `TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails`
 (`ledger/chainsync_test.go`).
 
+**The main header path needs the same restart.** The full, idle queue is
+also reachable without a fork: `handleBlockfetchTimeoutLocked` clears the
+timed-out batch and keeps the queued headers when its retry fails and
+`nextBlockfetchConnIdExcept` finds no alternate connection. Every later
+header is then rejected by `chain.AddBlockHeader`'s capacity check, before
+`handleEventChainsyncBlockHeaderWithPending` reaches its fetch decision. The
+rejection is logged at `DEBUG`, a reconnect does not clear the queue unless
+the closed connection is `headerPipelineConnId`, and the await-reply flush
+only runs once the peer is at its tip, so a node syncing far behind stops
+extending its chain while headers keep arriving. The main path therefore
+calls `ensureBlockfetchDrainingQueuedHeaders` on `ErrHeaderQueueFull`, with
+the same in-flight guard; a failed restart requests a re-sync with
+`ChainsyncResyncReasonHeaderQueueFullRestartFailed`. Regression tests are in
+`ledger/chainsync_header_queue_full_test.go`.
+
 **The success path's own blockfetch restart had the same gap.** The "ancestor
 is the local tip, extend without rollback" branch of `tryResolveFork` queues
 the fork-path headers successfully and then calls
