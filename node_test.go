@@ -3433,6 +3433,7 @@ func TestLedgerStateConfigCallbacksTolerateMissingOuroboros(t *testing.T) {
 			)
 		})
 		assert.ErrorIs(t, err, errOuroborosNotStarted)
+		assert.ErrorIs(t, err, ledger.ErrEndorserBlockFetchNoPeer)
 	})
 
 	t.Run("blockfetch range request returns an error", func(t *testing.T) {
