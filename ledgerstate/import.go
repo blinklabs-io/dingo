@@ -68,6 +68,11 @@ type RawLedgerState struct {
 	// for "the current epoch so far" in isolation. Fees minus ssFee is the
 	// epoch's pre-anchor fee pot; see seedImportedRewardBasis.
 	Fees uint64
+	// Donation is UTxOState.utxosDonation: the treasury donations collected
+	// in Epoch up to and including the anchor block, which the next epoch
+	// boundary moves into the treasury. ImportLedgerState records it as the
+	// epoch's network donations.
+	Donation uint64
 	// UTxOData is the deferred CBOR for the UTxO map.
 	UTxOData cbor.RawMessage
 	// CertStateData is the deferred CBOR for [VState, PState, DState].
@@ -674,6 +679,9 @@ func ImportLedgerState(
 		); err != nil {
 			return fmt.Errorf("deleting post-anchor network donations: %w", err)
 		}
+		if err := seedImportedEpochDonations(cfg, slot, txn); err != nil {
+			return err
+		}
 		return nil
 	}); err != nil {
 		return err
@@ -1223,6 +1231,41 @@ func setCheckpoint(ctx context.Context, cfg ImportConfig, phase string) error {
 		"phase", phase,
 		"import_key", cfg.ImportKey,
 	)
+	return nil
+}
+
+// seedImportedEpochDonations records the snapshot's utxosDonation as the
+// anchor epoch's network donations. The boundary out of that epoch credits
+// the treasury, and seeds RATIFY, from SumNetworkDonationsForEpoch, which
+// otherwise sees only donations this node applied after the anchor.
+//
+// The snapshot total covers every block of the epoch up to the anchor, so it
+// replaces rather than adds to any rows local replay wrote for that epoch
+// before a catch-up import; the post-anchor sweep has already removed the
+// rest.
+func seedImportedEpochDonations(
+	cfg ImportConfig,
+	slot uint64,
+	txn *database.Txn,
+) error {
+	meta := cfg.Database.Metadata()
+	if err := meta.DeleteNetworkDonationsForEpoch(
+		cfg.State.Epoch,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("replacing imported epoch donations: %w", err)
+	}
+	if cfg.State.Donation == 0 {
+		return nil
+	}
+	if err := meta.AddNetworkDonation(
+		slot,
+		cfg.State.Epoch,
+		cfg.State.Donation,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("seeding imported epoch donations: %w", err)
+	}
 	return nil
 }
 
