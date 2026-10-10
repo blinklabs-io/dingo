@@ -739,7 +739,9 @@ func (lv *LedgerView) PoolCurrentState(
 		var err error
 		currentReg, err = poolRegistrationCertificate(pool, reg)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, lv.storageFault(
+				"decode stored pool registration: %w", err,
+			)
 		}
 	}
 	// pendingEpoch reports the target epoch of the pool's latest retirement
@@ -2158,9 +2160,12 @@ func (lv *LedgerView) DRepRegistration(
 	}
 	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
-			return nil, fmt.Errorf(
-				"invalid DRep anchor hash length: expected 32, got %d",
-				len(drep.AnchorHash),
+			return nil, lv.storageFault(
+				"decode stored DRep anchor: %w",
+				fmt.Errorf(
+					"hash length %d, want 32",
+					len(drep.AnchorHash),
+				),
 			)
 		}
 		var dataHash [32]byte
@@ -2203,7 +2208,9 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	for _, drep := range dreps {
 		credential, err := lcommon.NewBlake2b224Checked(drep.Credential)
 		if err != nil {
-			return nil, fmt.Errorf("DRep registrations credential: %w", err)
+			return nil, lv.storageFault(
+				"decode stored DRep credential: %w", err,
+			)
 		}
 		deposit, ok := deposits[models.DrepDepositKey(
 			drep.CredentialTag,
@@ -2225,9 +2232,12 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {
-				return nil, fmt.Errorf(
-					"invalid DRep anchor hash length: expected 32, got %d",
-					len(drep.AnchorHash),
+				return nil, lv.storageFault(
+					"decode stored DRep anchor: %w",
+					fmt.Errorf(
+						"hash length %d, want 32",
+						len(drep.AnchorHash),
+					),
 				)
 			}
 			var dataHash [32]byte
@@ -2302,7 +2312,11 @@ func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {
 	if err != nil {
 		return nil, lv.storageFault("get constitution: %w", err)
 	}
-	return governance.ConstitutionFromModel(constitution)
+	ret, err := governance.ConstitutionFromModel(constitution)
+	if err != nil {
+		return nil, lv.storageFault("decode stored constitution: %w", err)
+	}
+	return ret, nil
 }
 
 // TreasuryValue returns the treasury value visible to this ledger view. A view
@@ -2329,7 +2343,10 @@ func (lv *LedgerView) TreasuryValue() (uint64, error) {
 		return 0, lv.storageFault("get treasury network state: %w", err)
 	}
 	if state == nil {
-		return 0, errors.New("treasury network state is unavailable")
+		return 0, lv.storageFault(
+			"get treasury network state: %w",
+			errors.New("network state is unavailable"),
+		)
 	}
 	return uint64(state.Treasury), nil
 }
@@ -2383,7 +2400,9 @@ func (lv *LedgerView) GovActionById(
 		lv.ls.GetCurrentPParams(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("decode governance proposal action: %w", err)
+		return nil, lv.storageFault(
+			"decode stored governance proposal action: %w", err,
+		)
 	}
 	var expirySlot uint64
 	if proposal.EnactedEpoch == nil {
@@ -2514,9 +2533,13 @@ func (lv *LedgerView) governancePurposeRoot(
 		return nil, nil
 	}
 	if len(proposal.TxHash) != len(lcommon.Blake2b256{}) {
-		return nil, fmt.Errorf(
-			"invalid governance proposal transaction hash length: %d",
-			len(proposal.TxHash),
+		return nil, lv.storageFault(
+			"decode stored governance proposal root: %w",
+			fmt.Errorf(
+				"transaction hash length %d, want %d",
+				len(proposal.TxHash),
+				len(lcommon.Blake2b256{}),
+			),
 		)
 	}
 	var transactionID lcommon.Blake2b256
@@ -2532,10 +2555,13 @@ func (lv *LedgerView) governanceProposalExpirySlot(
 	txn *database.Txn,
 ) (uint64, error) {
 	if proposal.ExpiresEpoch < proposal.ProposedEpoch {
-		return 0, fmt.Errorf(
-			"governance proposal expiry epoch %d precedes proposed epoch %d",
-			proposal.ExpiresEpoch,
-			proposal.ProposedEpoch,
+		return 0, lv.storageFault(
+			"decode stored governance proposal expiry: %w",
+			fmt.Errorf(
+				"expiry epoch %d precedes proposed epoch %d",
+				proposal.ExpiresEpoch,
+				proposal.ProposedEpoch,
+			),
 		)
 	}
 	epoch, err := lv.ls.db.GetEpoch(proposal.ProposedEpoch, txn)
@@ -2546,29 +2572,38 @@ func (lv *LedgerView) governanceProposalExpirySlot(
 		)
 	}
 	if epoch == nil {
-		return 0, fmt.Errorf(
-			"governance proposal epoch %d not found",
-			proposal.ProposedEpoch,
+		return 0, lv.storageFault(
+			"decode stored governance proposal expiry: %w",
+			fmt.Errorf("epoch %d not found", proposal.ProposedEpoch),
 		)
 	}
 	if epoch.LengthInSlots == 0 {
-		return 0, fmt.Errorf(
-			"governance proposal epoch %d has zero length",
-			proposal.ProposedEpoch,
+		return 0, lv.storageFault(
+			"decode stored governance proposal expiry: %w",
+			fmt.Errorf("epoch %d has zero length", proposal.ProposedEpoch),
 		)
 	}
 	epochDelta := proposal.ExpiresEpoch - proposal.ProposedEpoch
 	if epochDelta == math.MaxUint64 {
-		return 0, errors.New("governance proposal expiry slot overflows")
+		return 0, lv.storageFault(
+			"decode stored governance proposal expiry: %w",
+			errors.New("expiry slot overflows"),
+		)
 	}
 	epochCount := epochDelta + 1
 	epochLength := uint64(epoch.LengthInSlots)
 	if epochCount > math.MaxUint64/epochLength {
-		return 0, errors.New("governance proposal expiry slot overflows")
+		return 0, lv.storageFault(
+			"decode stored governance proposal expiry: %w",
+			errors.New("expiry slot overflows"),
+		)
 	}
 	span := epochCount * epochLength
 	if epoch.StartSlot > math.MaxUint64-(span-1) {
-		return 0, errors.New("governance proposal expiry slot overflows")
+		return 0, lv.storageFault(
+			"decode stored governance proposal expiry: %w",
+			errors.New("expiry slot overflows"),
+		)
 	}
 	return epoch.StartSlot + span - 1, nil
 }

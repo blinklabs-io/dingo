@@ -3687,6 +3687,103 @@ func TestWithTxValidationSessionKeepsUnavailableUtxoCborRetryable(
 	require.False(t, errors.As(err, &semanticErr))
 }
 
+func TestDijkstraValidationKeepsMissingProviderStateRetryable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		setup    func(*testing.T, *database.Database)
+		validate func(lcommon.LedgerState) error
+	}{
+		{
+			name: "constitution",
+			validate: func(state lcommon.LedgerState) error {
+				provider, ok := state.(interface {
+					Constitution() (*lcommon.Constitution, error)
+				})
+				if !ok {
+					return errors.New("constitution provider unavailable")
+				}
+				_, err := provider.Constitution()
+				return err
+			},
+		},
+		{
+			name: "malformed constitution",
+			setup: func(t *testing.T, db *database.Database) {
+				require.NoError(t, db.SetConstitution(&models.Constitution{
+					AnchorURL:  "https://example.invalid/malformed",
+					AnchorHash: []byte{0x01},
+					AddedSlot:  1,
+				}, nil))
+			},
+			validate: func(state lcommon.LedgerState) error {
+				provider, ok := state.(interface {
+					Constitution() (*lcommon.Constitution, error)
+				})
+				if !ok {
+					return errors.New("constitution provider unavailable")
+				}
+				_, err := provider.Constitution()
+				return err
+			},
+		},
+		{
+			name: "treasury",
+			validate: func(state lcommon.LedgerState) error {
+				provider, ok := state.(interface {
+					TreasuryValue() (uint64, error)
+				})
+				if !ok {
+					return errors.New("treasury provider unavailable")
+				}
+				_, err := provider.TreasuryValue()
+				return err
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+			if tc.setup != nil {
+				tc.setup(t, db)
+			}
+			ls := newFakeEraLedgerState(db, nil, nil)
+			era := eras.DijkstraEraDesc
+			era.ValidateTxFunc = func(
+				_ lcommon.Transaction,
+				_ uint64,
+				state lcommon.LedgerState,
+				_ lcommon.ProtocolParameters,
+			) error {
+				return tc.validate(state)
+			}
+			ls.currentEra = era
+			ls.activeEras = []eras.EraDesc{era}
+			ls.currentPParams = &dijkstra.DijkstraProtocolParameters{}
+			ls.publishSnapshotsLocked()
+
+			err := ls.WithTxValidationSession(t.Context(), func(
+				validate func(
+					lcommon.Transaction,
+					map[utxoref.Key]struct{},
+					map[utxoref.Key]lcommon.Utxo,
+				) error,
+				_ func() bool,
+			) error {
+				return validate(
+					&dijkstra.DijkstraTransaction{TxIsValid: true}, nil, nil,
+				)
+			})
+
+			require.ErrorIs(t, err, ErrLedgerViewStorageFault)
+			var semanticErr *semanticTxValidationError
+			require.False(t, errors.As(err, &semanticErr))
+		})
+	}
+}
+
 // TestLedgerProcessBlockSurfacesStorageFaultOverRuleVerdict drives the
 // chain-sync block-application call site in ledgerProcessBlock. A storage
 // fault recorded by a LedgerView predicate must surface as
@@ -6336,6 +6433,28 @@ func TestDRepRegistrationReportsNilForUnregisteredCredential(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, regs, 1)
 	require.Nil(t, regs[0].Deposit)
+}
+
+func TestDRepRegistrationRecordsMalformedStoredAnchor(t *testing.T) {
+	t.Parallel()
+
+	lv, db := newStakeRefundTestView(t)
+	cred := drepRefundTestCredential(0xd5)
+	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
+	require.NoError(t, err)
+	require.NoError(t, db.CreateDrep(t.Context(), nil, &models.Drep{
+		CredentialTag: tag,
+		Credential:    append([]byte(nil), cred.Credential[:]...),
+		AnchorURL:     "https://example.invalid/malformed",
+		AnchorHash:    []byte{0x01},
+		AddedSlot:     100,
+		Active:        true,
+	}))
+
+	reg, err := lv.DRepRegistration(cred)
+	require.Error(t, err)
+	require.Nil(t, reg)
+	require.ErrorIs(t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault)
 }
 
 // inconsistentDepositSubstring is the message
