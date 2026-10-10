@@ -3610,6 +3610,83 @@ func TestWithTxValidationSessionSurfacesStorageFaultOverNilVerdict(
 	require.ErrorIs(t, err, ErrLedgerViewStorageFault)
 }
 
+func TestWithTxValidationSessionKeepsCommitteeStorageFaultRetryable(
+	t *testing.T,
+) {
+	t.Parallel()
+	stubErr := errors.New("synthetic committee lookup fault")
+	db := newStorageFaultTestDB(t, errInjectingMetadataStore{
+		getCommitteeMembersErr: stubErr,
+	})
+	ls := newFakeEraLedgerState(db, func(
+		_ lcommon.Transaction,
+		_ uint64,
+		view lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) error {
+		provider, ok := view.(interface {
+			CommitteeStateAvailable() (bool, error)
+		})
+		require.True(t, ok)
+		_, err := provider.CommitteeStateAvailable()
+		return err
+	}, nil)
+
+	err := ls.WithTxValidationSession(t.Context(), func(
+		validate func(
+			lcommon.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+		) error,
+		_ func() bool,
+	) error {
+		return validate(&conway.ConwayTransaction{TxIsValid: true}, nil, nil)
+	})
+
+	require.ErrorIs(t, err, stubErr)
+	require.ErrorIs(t, err, ErrLedgerViewStorageFault)
+	var semanticErr *semanticTxValidationError
+	require.False(t, errors.As(err, &semanticErr))
+}
+
+func TestWithTxValidationSessionKeepsUnavailableUtxoCborRetryable(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+	input := shelley.NewShelleyTransactionInput(strings.Repeat("a9", 32), 0)
+	require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
+		TxId:      input.Id().Bytes(),
+		OutputIdx: input.Index(),
+		AddedSlot: 1,
+	}))
+	ls := newFakeEraLedgerState(db, func(
+		_ lcommon.Transaction,
+		_ uint64,
+		view lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) error {
+		_, err := view.UtxoById(input)
+		return err
+	}, nil)
+
+	err := ls.WithTxValidationSession(t.Context(), func(
+		validate func(
+			lcommon.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+		) error,
+		_ func() bool,
+	) error {
+		return validate(&conway.ConwayTransaction{TxIsValid: true}, nil, nil)
+	})
+
+	require.ErrorIs(t, err, database.ErrUtxoCborUnavailable)
+	require.ErrorIs(t, err, ErrLedgerViewStorageFault)
+	var semanticErr *semanticTxValidationError
+	require.False(t, errors.As(err, &semanticErr))
+}
+
 // TestLedgerProcessBlockSurfacesStorageFaultOverRuleVerdict drives the
 // chain-sync block-application call site in ledgerProcessBlock. A storage
 // fault recorded by a LedgerView predicate must surface as
