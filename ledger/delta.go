@@ -516,8 +516,7 @@ func (d *LedgerDelta) processGovernance(
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
 	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
-	hasDRepDeregistrationCerts :=
-		governance.HasDRepDeregistrationCertificates(tx)
+	hasDRepDeregistrationCerts := governance.HasDRepDeregistrationCertificates(tx)
 	requiresConwayParameters := governance.TransactionRequiresConwayParameters(tx)
 
 	if !requiresConwayParameters && !hasDRepDeregistrationCerts {
@@ -532,57 +531,59 @@ func (d *LedgerDelta) processGovernance(
 	pparams := ls.currentPParams
 	ls.RUnlock()
 
-	conwayPParams := conwayProtocolParameters(pparams)
-	if requiresConwayParameters && conwayPParams == nil {
-		return fmt.Errorf(
-			"governance requires Conway protocol parameters, got %T",
-			pparams,
-		)
-	}
-
-	// Process governance proposals
-	if len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			ctx,
-			tx,
-			d.Point,
-			txIndex,
-			currentEpoch,
-			conwayPParams.GovActionValidityPeriod,
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process governance proposals: %w", err)
+	if requiresConwayParameters {
+		conwayPParams := conwayProtocolParameters(pparams)
+		if conwayPParams == nil {
+			return fmt.Errorf(
+				"governance requires Conway protocol parameters, got %T",
+				pparams,
+			)
 		}
-	}
 
-	// Process governance votes
-	if len(votes) > 0 {
-		if err := governance.ProcessVotes(
-			ctx,
-			tx,
-			d.Point,
-			currentEpoch,
-			conwayPParams.DRepInactivityPeriod,
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process governance votes: %w", err)
+		// Process governance proposals
+		if len(proposals) > 0 {
+			if err := governance.ProcessProposals(
+				ctx,
+				tx,
+				d.Point,
+				txIndex,
+				currentEpoch,
+				conwayPParams.GovActionValidityPeriod,
+				ls.db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("process governance proposals: %w", err)
+			}
 		}
-	}
 
-	if hasDRepActivityCerts {
-		if err := governance.ProcessDRepActivityCertificates(
-			ctx,
-			tx,
-			d.Point,
-			currentEpoch,
-			conwayPParams.DRepInactivityPeriod,
-			uint64(conwayPParams.ProtocolVersion.Major),
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process DRep activity certificates: %w", err)
+		// Process governance votes
+		if len(votes) > 0 {
+			if err := governance.ProcessVotes(
+				ctx,
+				tx,
+				d.Point,
+				currentEpoch,
+				conwayPParams.DRepInactivityPeriod,
+				ls.db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("process governance votes: %w", err)
+			}
+		}
+
+		if hasDRepActivityCerts {
+			if err := governance.ProcessDRepActivityCertificates(
+				ctx,
+				tx,
+				d.Point,
+				currentEpoch,
+				conwayPParams.DRepInactivityPeriod,
+				uint64(conwayPParams.ProtocolVersion.Major),
+				ls.db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("process DRep activity certificates: %w", err)
+			}
 		}
 	}
 	if hasDRepDeregistrationCerts {
