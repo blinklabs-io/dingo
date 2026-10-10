@@ -1135,7 +1135,10 @@ func (lv *LedgerView) RewardAccountBalance(
 	}
 	balance, overflow := addRewardUint64(uint64(account.Reward), pending)
 	if overflow {
-		return nil, errors.New("reward account balance overflow")
+		return nil, lv.storageFault(
+			"decode stored reward account balance: %w",
+			errors.New("balance overflows uint64"),
+		)
 	}
 	return &balance, nil
 }
@@ -1559,9 +1562,8 @@ func (lv *LedgerView) populateCommitteeMemberStatus(
 			authorization.HotCredential,
 		)
 		if err != nil {
-			return fmt.Errorf(
-				"invalid committee hot credential in authorization: %w",
-				err,
+			return lv.storageFault(
+				"decode stored committee hot credential: %w", err,
 			)
 		}
 		member.HotKey = &hotKey
@@ -1600,7 +1602,9 @@ func (lv *LedgerView) proposedCommitteeMember(
 		proposals, root, coldCredential, pparams,
 	)
 	if err != nil {
-		return nil, err
+		return nil, lv.storageFault(
+			"decode stored committee proposal: %w", err,
+		)
 	}
 	if member != nil {
 		// A credential that is not seated holds committee state only for the
@@ -1727,9 +1731,8 @@ func (lv *LedgerView) committeeHotAuthorizations(
 	) (lcommon.Credential, error) {
 		hash, err := lcommon.NewBlake2b224Checked(authorization.ColdCredential)
 		if err != nil {
-			return lcommon.Credential{}, fmt.Errorf(
-				"invalid committee cold credential in authorization: %w",
-				err,
+			return lcommon.Credential{}, lv.storageFault(
+				"decode stored committee cold credential: %w", err,
 			)
 		}
 		return lcommon.Credential{
@@ -1790,9 +1793,8 @@ func (lv *LedgerView) committeeHotAuthorizations(
 		}
 		hash, err := lcommon.NewBlake2b224Checked(member.ColdCredHash)
 		if err != nil {
-			return nil, fmt.Errorf(
-				"invalid seated committee cold credential: %w",
-				err,
+			return nil, lv.storageFault(
+				"decode stored seated committee cold credential: %w", err,
 			)
 		}
 		seatedColds[coldKey{
@@ -1959,7 +1961,9 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 		// under both tags is dropped silently instead of failing.
 		coldHash, err := lcommon.NewBlake2b224Checked(found.ColdCredHash)
 		if err != nil {
-			return nil, fmt.Errorf("committee cold credential: %w", err)
+			return nil, lv.storageFault(
+				"decode stored committee cold credential: %w", err,
+			)
 		}
 		// The legacy list shape cannot carry a credential tag, so a hash
 		// seated under both tags stays ambiguous and is omitted rather than
@@ -2008,7 +2012,9 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 				authorization.HotCredential,
 			)
 			if err != nil {
-				return nil, fmt.Errorf("committee hot credential: %w", err)
+				return nil, lv.storageFault(
+					"decode stored committee hot credential: %w", err,
+				)
 			}
 			member.HotKey = &hotKey
 		}

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"strings"
 	"testing"
@@ -4441,6 +4442,35 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 	require.NotNil(t, got)
 	require.Zero(t, *got)
 
+	overflow := bytes.Repeat([]byte{0xa5}, lcommon.AddressHashSize)
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+		StakingKey: overflow,
+		Reward:     types.Uint64(math.MaxUint64),
+		Active:     true,
+	}))
+	require.NoError(t, db.Metadata().SetPendingRewardCreditRounds(
+		[]models.RewardCreditRound{{SnapshotEpoch: 8, BoundarySlot: 50}},
+		nil,
+	))
+	require.NoError(t, db.Metadata().SaveRewardAccountOutputs(
+		[]*models.RewardAccountOutput{{
+			StakingKey:    overflow,
+			PoolKeyHash:   bytes.Repeat([]byte{0xa6}, lcommon.Blake2b224Size),
+			RewardType:    "member",
+			Epoch:         8,
+			CredentialTag: 0,
+			Amount:        1,
+			Spendable:     true,
+			CapturedSlot:  40,
+			BoundarySlot:  50,
+		}},
+		nil,
+	))
+	got, err = lv.RewardAccountBalance(credential(0, overflow))
+	require.Error(t, err)
+	require.Nil(t, got)
+	require.ErrorIs(t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault)
+
 	_, err = lv.RewardAccountBalance(lcommon.Credential{CredType: 2})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "unsupported stake credential tag")
@@ -6199,6 +6229,9 @@ func TestLedgerViewCommitteeHotAuthorizationRejectsMalformedSeatedColdHash(
 			member, err := lv.CommitteeHotCredentialMember(hot)
 			require.Nil(t, member)
 			require.ErrorContains(t, err, "invalid blake2b-224 hash")
+			require.ErrorIs(
+				t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault,
+			)
 			coldCredentials, err := lv.CommitteeHotCredentialColdCredentials(
 				hot,
 			)
@@ -6215,6 +6248,32 @@ func TestLedgerViewCommitteeHotAuthorizationRejectsMalformedSeatedColdHash(
 			require.ErrorContains(t, err, "invalid blake2b-224 hash")
 		})
 	}
+}
+
+func TestLedgerViewCommitteeProposalDecodeRecordsStorageFault(t *testing.T) {
+	t.Parallel()
+
+	pparams := committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin)
+	lv, db := committeeTestView(t, pparams)
+	cold := committeeTestCredential(0x94)
+	require.NoError(t, db.SetGovernanceProposal(
+		context.Background(),
+		&models.GovernanceProposal{
+			TxHash:        governanceTestHash(0x95),
+			ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
+			ProposedEpoch: 0,
+			ExpiresEpoch:  100,
+			AnchorHash:    make([]byte, 32),
+			ReturnAddress: make([]byte, 29),
+			GovActionCbor: []byte{0xff},
+		},
+		nil,
+	))
+
+	member, err := lv.CommitteeCredentialMember(cold)
+	require.Error(t, err)
+	require.Nil(t, member)
+	require.ErrorIs(t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault)
 }
 
 // incorrectRefundSubstring is the message
