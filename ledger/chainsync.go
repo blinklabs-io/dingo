@@ -4721,8 +4721,15 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 // fetching, but the held header is the one that would complete it, and only
 // applying the queued blocks moves the horizon that releases it. It is a no-op
 // when a fetch is already running or nothing is queued.
+//
+// The fetch origin is the header pipeline owner, which delivered the queued
+// headers, rather than waitingConnId: peer selection treats the origin as a
+// holder of the range, and the waiting peer may be on a fork that leaves the
+// local chain below the queued headers. waitingConnId is the origin only when
+// no owner is recorded. A closed origin starts nothing, since its close may
+// already have been processed and must not be undone here.
 func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
-	connId ouroboros.ConnectionId,
+	waitingConnId ouroboros.ConnectionId,
 ) {
 	if ls.chain == nil || ls.chain.HeaderCount() == 0 {
 		return
@@ -4736,6 +4743,13 @@ func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
 	if ls.chainsyncBlockfetchReadyChan != nil ||
 		ls.blockfetchContinuationPending ||
 		ls.chain.HeaderCount() == 0 {
+		return
+	}
+	connId := ls.headerPipelineConnId
+	if connIdKey(connId) == "" {
+		connId = waitingConnId
+	}
+	if !ls.isConnectionLive(connId) {
 		return
 	}
 	ls.selectedBlockfetchConnId = connId
