@@ -87,6 +87,9 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// Parallel VRF/KES validate stage for the same pipeline (phase 3).
 		// Off by default; requires BlockPipelineEnabled.
 		BlockPipelineValidateEnabled: n.config.blockPipelineValidateEnabled,
+		// Core-mode batched metadata writes for blocks that are not
+		// validated. Not consensus-affecting; off by default.
+		ApplyRowBatchingEnabled: n.config.ledgerApplyRowBatchingEnabled,
 		// Supplies fetched Leios endorser-block transactions so the ledger
 		// can apply them when their referencing Dijkstra ranking block is
 		// processed (completing the UTxO set for endorser-resident outputs).

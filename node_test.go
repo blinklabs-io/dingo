@@ -4651,3 +4651,17 @@ func TestNewOuroborosConfigAppliesTxSubmissionRateLimit(t *testing.T) {
 		"production ouroboros config must enable the TxSubmission limiter",
 	)
 }
+
+func TestLedgerStateConfigForwardsApplyRowBatching(t *testing.T) {
+	t.Parallel()
+
+	off := &Node{config: NewConfig()}
+	assert.False(t, off.ledgerStateConfig().ApplyRowBatchingEnabled)
+
+	on := &Node{config: NewConfig(WithLedgerApplyRowBatchingEnabled(true))}
+	assert.True(
+		t,
+		on.ledgerStateConfig().ApplyRowBatchingEnabled,
+		"the option never reaches the ledger without this hop",
+	)
+}

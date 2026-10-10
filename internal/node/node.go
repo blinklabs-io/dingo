@@ -1019,6 +1019,9 @@ func buildDingoConfig(
 		dingo.WithBlockPipelineValidateEnabled(
 			cfg.BlockPipelineValidateEnabled,
 		),
+		dingo.WithLedgerApplyRowBatchingEnabled(
+			cfg.LedgerApplyRowBatchingEnabled,
+		),
 		// CIP-0163 reward-account inactivity expiry (consensus-affecting)
 		dingo.WithDelegatorInactivity(
 			cfg.DelegatorInactivityEnabled,

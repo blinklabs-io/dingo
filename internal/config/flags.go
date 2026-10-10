@@ -738,6 +738,12 @@ var flagSpecs = []flagSpec{
 		"also VRF/KES-validate blocks in the block-pipeline replay loop with a parallel worker pool (requires block-pipeline-enabled; default off)",
 	),
 
+	boolFlag(
+		"LedgerApplyRowBatchingEnabled",
+		"ledger-apply-row-batching-enabled",
+		"in core storage mode, write the deltas of blocks that are not validated with multi-row batched inserts instead of per-row statements, as API mode always does (not consensus-affecting; default off)",
+	),
+
 	// Block production
 	boolFlag("BlockProducer", "block-producer", "enable block production mode"),
 	stringFlag(
