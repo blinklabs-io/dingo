@@ -26,10 +26,12 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -935,30 +937,175 @@ func TestLocalstatequeryDisconnectClosesSnapshot(t *testing.T) {
 	require.ErrorIs(t, err, ledger.ErrQueryViewClosed)
 }
 
+// prepareReopenableChain gives the snapshot fixture the epoch and network
+// state rows a pinned point needs to pass Acquire's checks, which a view
+// reopened at that point runs again.
+func prepareReopenableChain(t *testing.T, db *database.Database) {
+	t.Helper()
+	require.NoError(t, db.SetEpoch(
+		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
+	))
+	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+}
+
 // TestLocalstatequerySnapshotExpires proves a snapshot held past the
-// configured lifetime is closed and logged, and that the session then fails
-// its queries rather than silently answering from live state.
+// configured lifetime is closed and logged, and that the session's next query
+// reopens one at the same block (#4234): it keeps answering for the block it
+// acquired, not the newer tip, and its connection is not ended.
 func TestLocalstatequerySnapshotExpires(t *testing.T) {
 	t.Parallel()
 
 	logs := &lockedBuffer{}
-	o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
+	o, db, acquiredTip := newSnapshotTestOuroboros(t, OuroborosConfig{
 		Logger:                         slog.New(slog.NewJSONHandler(logs, nil)),
-		LocalStateQueryViewMaxLifetime: 20 * time.Millisecond,
+		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
 	})
+	prepareReopenableChain(t, db)
 	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
 	session := acquireSnapshotTestSession(t, o, ctx)
+	expired := session.view
+	moveTestTip(t, db, 2)
 
 	testutil.WaitForCondition(t, func() bool {
-		_, err := session.view.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
+		_, err := expired.Query(context.Background(), &olocalstatequery.ChainPointQuery{}, 0)
 		return errors.Is(err, ledger.ErrQueryViewClosed)
 	}, testutil.AsyncWait, "the snapshot was never closed")
 	testutil.WaitForCondition(t, func() bool {
 		return strings.Contains(logs.String(), "ledger snapshot expired")
 	}, testutil.AsyncWait, "the expiry was never logged")
 
-	_, err := queryChainPoint(t, o, ctx)
-	require.ErrorIs(t, err, ledger.ErrQueryViewClosed)
+	got, err := queryChainPoint(t, o, ctx)
+	require.NoError(t, err, "a query after expiry must not end the connection")
+	require.Equal(t, acquiredTip, got,
+		"the reopened snapshot must answer for the block acquired, not the new tip")
+	require.Contains(t, logs.String(), "reopened an expired ledger snapshot")
+}
+
+// TestLocalstatequeryTipReopenChainDepStateAnswersAtAcquiredTip covers the
+// consensus state after a tip session reopens: DebugChainDepState must report
+// the block the session acquired, as GetChainPoint does, not the newer tip
+// the reopened snapshot holds.
+func TestLocalstatequeryTipReopenChainDepStateAnswersAtAcquiredTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
+		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
+	})
+	prepareReopenableChain(t, db)
+	// The session acquires block 2, whose metadata names its parent, so the
+	// lab nonce needs no body decode; block 3 is the newer tip.
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:       3,
+		Slot:     3,
+		Number:   3,
+		Hash:     bytes.Repeat([]byte{3}, 32),
+		PrevHash: bytes.Repeat([]byte{2}, 32),
+		Type:     1,
+		Cbor:     []byte{0x80},
+	}, nil))
+	acquiredTip := moveTestTip(t, db, 2)
+	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
+	expired := acquireSnapshotTestSession(t, o, ctx).view
+	moveTestTip(t, db, 3)
+	testutil.WaitForCondition(t, func() bool {
+		_, err := expired.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
+		return errors.Is(err, ledger.ErrQueryViewClosed)
+	}, testutil.AsyncWait, "the snapshot was never closed")
+
+	result, err := o.localstatequeryServerQuery(ctx, olocalstatequery.QueryWrapper{
+		Query: &olocalstatequery.BlockQuery{
+			Query: &olocalstatequery.ShelleyQuery{
+				Query: &olocalstatequery.ShelleyDebugChainDepStateQuery{},
+			},
+		},
+	})
+	require.NoError(t, err)
+	arr, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, arr, 1)
+	encoded, err := cbor.Encode(arr[0])
+	require.NoError(t, err)
+	var state olocalstatequery.DebugChainDepStateResult
+	require.NoError(t, state.UnmarshalCBOR(encoded))
+	require.Equal(t,
+		olocalstatequery.WithOriginSlot{HasSlot: true, Slot: acquiredTip.Slot},
+		state.LastSlot,
+		"the reopened session must report the consensus state it acquired")
+
+	got, err := queryChainPoint(t, o, ctx)
+	require.NoError(t, err)
+	require.Equal(t, acquiredTip, got)
+}
+
+// TestLocalstatequerySpecificPointReopensAfterExpiry is the same for a
+// specific-point acquire: the reopened view answers for that point.
+func TestLocalstatequerySpecificPointReopensAfterExpiry(t *testing.T) {
+	t.Parallel()
+
+	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
+		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
+	})
+	moveTestTip(t, db, 2)
+	prepareReopenableChain(t, db)
+	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
+	point := ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32))
+	require.NoError(t, o.localstatequeryServerAcquire(
+		ctx,
+		olocalstatequery.AcquireSpecificPoint{Point: point},
+		false,
+	))
+	o.localstatequeryAcquireMutex.Lock()
+	expired := o.localstatequerySessions[ctx.ConnectionId].view
+	o.localstatequeryAcquireMutex.Unlock()
+	testutil.WaitForCondition(t, func() bool {
+		_, err := expired.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
+		return errors.Is(err, ledger.ErrQueryViewClosed)
+	}, testutil.AsyncWait, "the snapshot was never closed")
+
+	got, err := queryChainPoint(t, o, ctx)
+	require.NoError(t, err)
+	require.Equal(t, point, got)
+}
+
+// TestLocalstatequeryExpiredSnapshotCannotReopenRolledBackPoint covers the one
+// case a reopen cannot serve: the block was rolled back while the view was
+// closed. The query fails, which ends the connection, since the protocol has
+// no reply for a failed query and answering for another block would be wrong.
+func TestLocalstatequeryExpiredSnapshotCannotReopenRolledBackPoint(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
+		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
+	})
+	moveTestTip(t, db, 2)
+	prepareReopenableChain(t, db)
+	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
+	require.NoError(t, o.localstatequeryServerAcquire(
+		ctx,
+		olocalstatequery.AcquireSpecificPoint{
+			Point: ocommon.NewPoint(2, bytes.Repeat([]byte{2}, 32)),
+		},
+		false,
+	))
+	o.localstatequeryAcquireMutex.Lock()
+	expired := o.localstatequerySessions[ctx.ConnectionId].view
+	o.localstatequeryAcquireMutex.Unlock()
+	testutil.WaitForCondition(t, func() bool {
+		_, err := expired.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
+		return errors.Is(err, ledger.ErrQueryViewClosed)
+	}, testutil.AsyncWait, "the snapshot was never closed")
+	_, _, err := db.TruncateAfterSlot(
+		t.Context(),
+		ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32)), 0, nil,
+	)
+	require.NoError(t, err)
+
+	_, err = queryChainPoint(t, o, ctx)
+	require.ErrorIs(t, err, ledger.ErrPointNotOnChain)
 }
 
 // TestLocalstatequeryReleaseCancelsExpiry proves a released session is not
@@ -1128,4 +1275,202 @@ func newNtCTestClientConn(
 	require.NoError(t, srv.err)
 	t.Cleanup(func() { _ = srv.conn.Close() })
 	return cliConn
+}
+
+// TestLocalstatequeryProtocol_QueryAfterExpiryKeepsConnection is the #4234
+// regression at the protocol level. The wire protocol has no reply for a
+// failed query, so a query error after a successful Acquire ends the
+// connection; a view expiring must not produce one. The query is followed by a
+// fresh Acquire on the same connection, which fails if it was torn down.
+func TestLocalstatequeryProtocol_QueryAfterExpiryKeepsConnection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o, db, acquiredTip := newSnapshotTestOuroboros(t, OuroborosConfig{
+		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
+	})
+	prepareReopenableChain(t, db)
+	client := newLocalStateQueryTestClient(t, o)
+
+	require.NoError(t, client.AcquireVolatileTip())
+	moveTestTip(t, db, 2)
+	// The expiry flag is set before the view is closed, so wait on the view
+	// itself: a query that slipped in between would be answered by the old
+	// view and never reach the reopen.
+	var expiredView *ledger.QueryView
+	o.localstatequeryAcquireMutex.Lock()
+	for _, session := range o.localstatequerySessions {
+		expiredView = session.view
+	}
+	o.localstatequeryAcquireMutex.Unlock()
+	require.NotNil(t, expiredView)
+	testutil.WaitForCondition(t, func() bool {
+		_, err := expiredView.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
+		return errors.Is(err, ledger.ErrQueryViewClosed)
+	}, testutil.AsyncWait, "the view never expired")
+	got, err := client.GetChainPoint()
+	require.NoError(t, err, "a query after expiry must not end the connection")
+	require.Equal(t, acquiredTip, *got,
+		"the reopened view answers for the block acquired")
+	require.NoError(t, client.Release())
+
+	require.NoError(t, client.AcquireVolatileTip(),
+		"the connection must still be usable")
+	require.NoError(t, client.Release())
+}
+
+// TestLocalstatequeryProtocol_QueryAfterRollbackKeepsConnection is the
+// rollback half of #4234 at the protocol level: a rollback committed after
+// Acquire removes the acquired block, and the session's query still answers
+// from its snapshot. The view lifetime is the default, so this exercises the
+// snapshot and not a reopen.
+func TestLocalstatequeryProtocol_QueryAfterRollbackKeepsConnection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	moveTestTip(t, db, 2)
+	prepareReopenableChain(t, db)
+	client := newLocalStateQueryTestClient(t, o)
+
+	point := ocommon.NewPoint(2, bytes.Repeat([]byte{2}, 32))
+	require.NoError(t, client.Acquire(&point))
+	_, _, err := db.TruncateAfterSlot(
+		t.Context(),
+		ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32)), 0, nil,
+	)
+	require.NoError(t, err)
+	got, err := client.GetChainPoint()
+	require.NoError(t, err,
+		"a rollback after Acquire must not end the connection")
+	require.Equal(t, point, *got)
+	require.NoError(t, client.Release())
+
+	require.NoError(t, client.AcquireVolatileTip(),
+		"the connection must still be usable")
+	require.NoError(t, client.Release())
+}
+
+// TestLocalstatequeryReopen_PinsReopenedView proves a reopened view holds a
+// pruning pin, as a specific-point Acquire's does, and that Release drops it.
+// A tip session holds no pin before it expires, so its reopen is where the pin
+// first appears.
+func TestLocalstatequeryReopen_PinsReopenedView(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		acquire olocalstatequery.AcquireTarget
+	}{
+		{"tip", olocalstatequery.AcquireVolatileTip{}},
+		{"specific point", olocalstatequery.AcquireSpecificPoint{
+			Point: ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32)),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
+				LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
+			})
+			prepareReopenableChain(t, db)
+			ctx := olocalstatequery.CallbackContext{
+				ConnectionId: ouroboros.ConnectionId{},
+			}
+			require.NoError(t, o.localstatequeryServerAcquire(ctx, tc.acquire, false))
+			o.localstatequeryAcquireMutex.Lock()
+			expired := o.localstatequerySessions[ctx.ConnectionId].view
+			o.localstatequeryAcquireMutex.Unlock()
+			testutil.WaitForCondition(t, func() bool {
+				_, err := expired.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
+				return errors.Is(err, ledger.ErrQueryViewClosed)
+			}, testutil.AsyncWait, "the snapshot was never closed")
+			require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
+				"expiry releases the session's pin")
+
+			_, err := queryChainPoint(t, o, ctx)
+			require.NoError(t, err)
+			require.Equal(t, 1, o.ledgerState.AcquiredPointPinCountForTesting(),
+				"the reopened view must be pinned")
+
+			require.NoError(t, o.localstatequeryServerRelease(ctx))
+			require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
+				"Release must drop the reopened view's pin")
+		})
+	}
+}
+
+// TestLocalstatequeryReopen_CloseAfterOpenReleasesPin covers a disconnect that
+// lands after the reopened view has opened but before it is installed: the
+// view is closed and its pin released rather than left on a dead session.
+func TestLocalstatequeryReopen_CloseAfterOpenReleasesPin(t *testing.T) {
+	t.Parallel()
+
+	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
+		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
+	})
+	prepareReopenableChain(t, db)
+	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
+	expired := acquireSnapshotTestSession(t, o, ctx).view
+	testutil.WaitForCondition(t, func() bool {
+		_, err := expired.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
+		return errors.Is(err, ledger.ErrQueryViewClosed)
+	}, testutil.AsyncWait, "the snapshot was never closed")
+	opened := false
+	o.localstatequeryVerifiedHook = func() {
+		opened = true
+		o.ReleaseLocalStateQueryAcquiredPointOwner(ctx.ConnectionId, nil)
+	}
+
+	_, err := queryChainPoint(t, o, ctx)
+	require.True(t, opened, "the disconnect must land after the view opened")
+	require.True(t,
+		errors.Is(err, errLocalStateQueryConnectionClosed) ||
+			errors.Is(err, context.Canceled),
+		"the disconnect must fail the reopen, got: %v", err)
+	require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
+		"a view opened for a dead connection must release its pin")
+	o.localstatequeryAcquireMutex.Lock()
+	_, hasSession := o.localstatequerySessions[ctx.ConnectionId]
+	o.localstatequeryAcquireMutex.Unlock()
+	require.False(t, hasSession, "nor leave a session for the dead connection")
+}
+
+// TestLocalstatequeryReopen_CloseDuringReopenLeavesNoView covers a client that
+// disconnects while its expired session is being reopened. The reopen runs
+// under the query's request context, which the disconnect cancels, and it must
+// neither install a view nor leave its pin behind.
+func TestLocalstatequeryReopen_CloseDuringReopenLeavesNoView(t *testing.T) {
+	t.Parallel()
+
+	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{
+		LocalStateQueryViewMaxLifetime: 200 * time.Millisecond,
+	})
+	prepareReopenableChain(t, db)
+	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
+	session := acquireSnapshotTestSession(t, o, ctx)
+	expired := session.view
+	testutil.WaitForCondition(t, func() bool {
+		_, err := expired.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
+		return errors.Is(err, ledger.ErrQueryViewClosed)
+	}, testutil.AsyncWait, "the snapshot was never closed")
+	o.localstatequeryVerifyHook = func() {
+		o.ReleaseLocalStateQueryAcquiredPointOwner(ctx.ConnectionId, nil)
+	}
+
+	_, err := queryChainPoint(t, o, ctx)
+	require.True(t,
+		errors.Is(err, errLocalStateQueryConnectionClosed) ||
+			errors.Is(err, context.Canceled),
+		"the disconnect must cancel the reopen, got: %v", err)
+	require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
+		"a reopen cancelled by a disconnect must not leave a pin behind")
+	o.localstatequeryAcquireMutex.Lock()
+	_, hasSession := o.localstatequerySessions[ctx.ConnectionId]
+	_, hasAcquisition := o.localstatequeryAcquisitions[ctx.ConnectionId]
+	o.localstatequeryAcquireMutex.Unlock()
+	require.False(t, hasSession, "nor a session for the dead connection")
+	require.False(t, hasAcquisition, "nor its in-flight acquisition")
 }

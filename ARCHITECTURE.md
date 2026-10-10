@@ -4542,11 +4542,23 @@ for snapshot admission, and the Acquire must still own its in-flight token
 before it can install the opened view. A snapshot still held after
 `localStateQueryViewMaxLifetime` (default `5m`, env
 `DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME`) is closed by a per-session timer
-and logged with its age and idle time; the session stays recorded so its next
-query fails with `ledger.ErrQueryViewClosed` -- ending the connection, as any
-query error does -- instead of silently reading live state. Closing a view
-never waits for a query in flight: that query completes against the snapshot
-and the last one out releases it.
+and logged with its age and idle time, freeing the read transaction it held.
+The session stays recorded with the block its view answered for -- the
+acquired point, or for a tip acquire the tip its snapshot held -- and its next
+query reopens a view at that block (`reopenExpiredLocalStateQuerySession`,
+pinned like a specific-point Acquire) and answers from it, so the lifetime
+bounds how long one read transaction lives, not how long a client may stay
+acquired. The reopened read transaction is opened later than the closed one,
+so every point-aware query answers for the same block through the pinned
+point; the query types that are live by design (`GetGenesisConfig`,
+`GetLedgerPeerSnapshot`) stay live, as they are for any session. The LocalStateQuery protocol
+has no reply for a failed query: any error after a successful Acquire ends the
+connection. A rollback or prune committed after Acquire cannot cause
+one, since every query reads the session's snapshot, so the only remaining case
+is a reopen whose block this node can no longer answer for (rolled back, or
+past a retention floor, while the view was closed); that query fails and is
+logged. Closing a view never waits for a query in flight: that query completes
+against the snapshot and the last one out releases it.
 
 Every query type that reads ledger or consensus state honors a pinned point;
 `queryShelleyLeaf` audits each one. The first were `GetPoolDistr2`

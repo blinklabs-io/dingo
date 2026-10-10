@@ -195,8 +195,8 @@ type Ouroboros struct {
 	// localstatequeryAcquireMutex.
 	localstatequeryRequests map[ouroboros.ConnectionId][]*localstatequeryRequest
 	// localstatequeryVerifyHook and localstatequeryVerifiedHook, when set,
-	// run just before Acquire verifies its point and just after the
-	// verified view opens. Tests use them to act at those exact moments.
+	// run just before Acquire or a reopen verifies its point and just after
+	// the verified view opens. Tests use them to act at those exact moments.
 	localstatequeryVerifyHook   func()
 	localstatequeryVerifiedHook func()
 	localstatequeryAcquireMutex sync.Mutex
