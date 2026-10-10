@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gconnection "github.com/blinklabs-io/gouroboros/connection"
@@ -263,6 +264,7 @@ type replayAdapter struct {
 	conns      map[uint64]ouroboros.ConnectionId
 	capture    *format.ConsensusCapture
 	tipCh      <-chan event.Event
+	ledgerCh   <-chan event.Event
 	switchCh   <-chan event.Event
 	switches   []format.SwitchEvent
 	downstream []format.ServedMessage
@@ -301,6 +303,10 @@ func newReplayAdapter(
 	_, tipCh := bus.SubscribeWithBuffer(
 		chainselection.PeerTipUpdateEventType, tipEventBuffer,
 	)
+	_, ledgerCh := bus.SubscribeWithBuffer(
+		ledger.ChainsyncEventType,
+		tipEventBuffer,
+	)
 	_, switchCh := bus.SubscribeWithBuffer(
 		chainselection.ChainSwitchEventType, switchEventBuffer,
 	)
@@ -312,6 +318,22 @@ func newReplayAdapter(
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
+		ChainsyncObservePeerTip: func(
+			update chainselection.PeerTipUpdateEvent,
+		) bool {
+			cs.PreparePeerTipAdmission(update)
+			return true
+		},
+		ChainsyncResolvePeerTip: func(
+			update chainselection.PeerTipUpdateEvent,
+			admitted bool,
+		) {
+			if admitted {
+				cs.CommitPeerTipAdmission(update)
+				return
+			}
+			cs.RejectPeerTipAdmission(update)
+		},
 	})
 	o.eventBus = bus
 	return &replayAdapter{
@@ -322,6 +344,7 @@ func newReplayAdapter(
 		conns:    make(map[uint64]ouroboros.ConnectionId),
 		capture:  capture,
 		tipCh:    tipCh,
+		ledgerCh: ledgerCh,
 		switchCh: switchCh,
 	}
 }
@@ -338,6 +361,27 @@ func (a *replayAdapter) RollForward(
 		era, hdr, toGouroborosTip(tip),
 	); err != nil {
 		return err
+	}
+	ledgerEvent := testutil.RequireReceive(
+		a.t,
+		a.ledgerCh,
+		time.Second,
+		"ledger header event",
+	)
+	chainsyncEvent, ok := ledgerEvent.Data.(ledger.ChainsyncEvent)
+	if !ok {
+		return fmt.Errorf("unexpected ledger event data %T", ledgerEvent.Data)
+	}
+	if chainsyncEvent.PeerTipAdmission != nil {
+		chainsyncEvent.PeerTipAdmission(true)
+	}
+	if chainsyncEvent.PeerTipUpdate != nil {
+		update := *chainsyncEvent.PeerTipUpdate
+		update.Admitted = true
+		a.bus.Publish(
+			chainselection.PeerTipUpdateEventType,
+			event.NewEvent(chainselection.PeerTipUpdateEventType, update),
+		)
 	}
 	a.headersFed++
 	return nil
@@ -356,6 +400,12 @@ func (a *replayAdapter) RollBackward(
 	); err != nil {
 		return err
 	}
+	testutil.RequireReceive(
+		a.t,
+		a.ledgerCh,
+		time.Second,
+		"ledger rollback event",
+	)
 	a.cs.HandlePeerRollbackEvent(event.NewEvent(
 		chainselection.PeerRollbackEventType,
 		chainselection.PeerRollbackEvent{
@@ -369,15 +419,13 @@ func (a *replayAdapter) RollBackward(
 
 func (a *replayAdapter) Stabilize() {
 	a.t.Helper()
-	// Drain queued peer-tip updates into the selector, force a synchronous
-	// evaluation, then collect any switch decisions it emitted. No sleeps
-	// and no polling.
+	// Drain accepted peer-tip updates into the selector, force a synchronous
+	// evaluation, then collect any switch decisions it emitted. No sleeps and
+	// no polling.
 	//
-	// chainselection.peer_tip_update is still published inline, on this
-	// goroutine, by chainsyncClientRollForward, so every tip update is
-	// already queued by the time Stabilize runs and a non-blocking drain
-	// sees all of them. Chain switches are not: they go through an ordered
-	// lane, so they need the barrier below.
+	// The adapter simulates ledger acceptance for each captured header and
+	// publishes the resulting tip update inline before Stabilize runs.
+	// Chain switches use an ordered lane, so they need the barrier below.
 	drainEvents(a.tipCh, func(evt event.Event) {
 		a.tipEventsSeen++
 		a.cs.HandlePeerTipUpdateEvent(evt)

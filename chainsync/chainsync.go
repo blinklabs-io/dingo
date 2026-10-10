@@ -152,6 +152,8 @@ type TrackedClient struct {
 	StartedAsOutbound bool
 	LastActivity      time.Time
 	HeadersRecv       uint64
+	deliveryWatermark ocommon.Point
+	deliverySeen      bool
 	// TODO: BytesRecv needs to be wired to the underlying
 	// connection's byte counter. Currently unused.
 	BytesRecv uint64
@@ -649,6 +651,14 @@ func pointAheadOf(a, b ocommon.Point) bool {
 	return !bytes.Equal(a.Hash, b.Hash)
 }
 
+func setDeliveryWatermark(tc *TrackedClient, point ocommon.Point) {
+	tc.deliveryWatermark = ocommon.Point{
+		Slot: point.Slot,
+		Hash: cloneBytes(point.Hash),
+	}
+	tc.deliverySeen = true
+}
+
 // HandleClientRemoveRequestedEvent removes a tracked client when
 // a component publishes a client removal request event.
 func (s *State) HandleClientRemoveRequestedEvent(evt event.Event) {
@@ -1005,19 +1015,43 @@ func (s *State) UpdateClientTip(
 	return s.RecordHeaderForDedup(connId, point)
 }
 
-// UpdateClientTipWithoutDedup updates the cursor, tip, and
-// activity tracking for a tracked client without recording the header in the
-// shared dedup cache. The Ouroboros ingress path uses this before synchronous
-// chain selection so a switch event can verify that the client has delivered a
-// tip. It records the header for deduplication separately, and only when the
-// post-selection apply gate admits it. It reports whether the client was still
-// tracked and updated.
+// UpdateClientTipWithoutDedup updates the cursor, tip, and activity tracking
+// for a tracked client without recording the header in the shared dedup cache.
+// The Ouroboros ingress path calls it after ledger admission so selection
+// handoffs only observe a cursor backed by an accepted header. It reports
+// whether the client was still tracked and updated.
 func (s *State) UpdateClientTipWithoutDedup(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) bool {
 	return s.updateTrackedClientTip(connId, point, tip)
+}
+
+// RecordClientDelivery counts a suppressed header delivered by a tracked
+// client without moving its admitted cursor or tip. A delivery refreshes the
+// stall clock only when it advances the client's delivery watermark, so replay
+// of one valid header cannot keep an otherwise stalled client eligible.
+func (s *State) RecordClientDelivery(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists {
+		return false
+	}
+	tc.HeadersRecv++
+	if tc.deliverySeen && point.Slot <= tc.deliveryWatermark.Slot {
+		return true
+	}
+	setDeliveryWatermark(tc, point)
+	tc.LastActivity = s.now()
+	if tc.Status == ClientStatusStalled {
+		tc.Status = ClientStatusSyncing
+	}
+	return true
 }
 
 // UpdateClientRollback updates an existing client's cursor, advertised tip,
@@ -1044,6 +1078,7 @@ func (s *State) UpdateClientRollback(
 	tip.Point.Hash = cloneBytes(tip.Point.Hash)
 	tc.Cursor = point
 	tc.Tip = tip
+	setDeliveryWatermark(tc, point)
 	if !noOp {
 		tc.LastActivity = s.now()
 		tc.Status = ClientStatusSyncing
@@ -1089,6 +1124,9 @@ func (s *State) RewindTrackedClientsTo(
 	defer s.clientConnIdMutex.Unlock()
 	var ret []ouroboros.ConnectionId
 	for connId, tc := range s.trackedClients {
+		if tc.deliverySeen && pointAheadOf(tc.deliveryWatermark, point) {
+			setDeliveryWatermark(tc, point)
+		}
 		if !pointAheadOf(tc.Cursor, point) {
 			continue
 		}
@@ -1218,6 +1256,7 @@ func (s *State) updateTrackedClientTip(
 	}
 	tc.Cursor = point
 	tc.Tip = tip
+	setDeliveryWatermark(tc, point)
 	tc.LastActivity = s.now()
 	tc.HeadersRecv++
 	if tc.Status == ClientStatusStalled {
@@ -1419,6 +1458,7 @@ func (s *State) GetTrackedClient(
 	result := *tc
 	result.Cursor.Hash = cloneBytes(tc.Cursor.Hash)
 	result.Tip.Point.Hash = cloneBytes(tc.Tip.Point.Hash)
+	result.deliveryWatermark.Hash = cloneBytes(tc.deliveryWatermark.Hash)
 	return &result
 }
 
@@ -1432,6 +1472,7 @@ func (s *State) GetTrackedClients() []TrackedClient {
 		cpy := *tc
 		cpy.Cursor.Hash = cloneBytes(tc.Cursor.Hash)
 		cpy.Tip.Point.Hash = cloneBytes(tc.Tip.Point.Hash)
+		cpy.deliveryWatermark.Hash = cloneBytes(tc.deliveryWatermark.Hash)
 		result = append(result, cpy)
 	}
 	return result

@@ -20,6 +20,7 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestAwaitingFirstHeaderAfterPostIntersectRollback covers the state a peer is
@@ -134,4 +135,32 @@ func TestAwaitingFirstHeaderClearsOnDeliveredHeader(t *testing.T) {
 func TestAwaitingFirstHeaderNilReceiver(t *testing.T) {
 	var pt *PeerChainTip
 	assert.False(t, pt.AwaitingFirstHeader())
+}
+
+func TestApplyRollbackTrimsAdmittedTipHistory(t *testing.T) {
+	pt := &PeerChainTip{}
+	first := ocommon.Point{Slot: 10, Hash: []byte("first")}
+	intersection := ocommon.Point{Slot: 20, Hash: []byte("intersection")}
+	pt.recordAdmittedTipPoint(first, 10)
+	pt.recordAdmittedTipPoint(intersection, 10)
+	pt.recordAdmittedTipPoint(
+		ocommon.Point{Slot: 30, Hash: []byte("orphaned")},
+		10,
+	)
+
+	pt.ApplyRollback(
+		intersection,
+		ochainsync.Tip{Point: ocommon.Point{Slot: 40, Hash: []byte("network")}},
+	)
+
+	require.Len(t, pt.admittedTipHistory, 2)
+	assert.Equal(t, first, pt.admittedTipHistory[0])
+	assert.Equal(t, intersection, pt.admittedTipHistory[1])
+
+	pt.ApplyRollback(
+		ocommon.Point{Slot: 15, Hash: []byte("outside-history")},
+		ochainsync.Tip{Point: ocommon.Point{Slot: 40, Hash: []byte("network")}},
+	)
+	assert.Empty(t, pt.admittedTipHistory,
+		"an unverified rollback intersection cannot retain admission evidence")
 }

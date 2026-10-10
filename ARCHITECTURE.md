@@ -5057,73 +5057,24 @@ corroborated and becomes that connection's own reference, like a known peer's
 previous frontier: its next update is accepted within `securityParam` of its
 claim even when the corroborating frontier sits up to `securityParam` below
 it, and the entry is cleared once the connection is accepted.
-A lone far peer is also accepted, on its own connected header chain. The
-selector requires more than `securityParam` consecutive delivered headers from
-the connection (`farTipClaim.run`), each naming the previous header's hash as
-its parent (`PeerTipUpdateEvent.ObservedPrevHash`, filled from the header by the
-ChainSync roll-forward handler), exactly one block and a later slot above it,
-with a block number no higher than the local block number plus `securityParam`
-plus the slot distance from the local tip (a chain holds at most one block per
-slot). A Byron epoch boundary block is the one header that adds no block: it
-carries its parent's block number, a later slot, and the epoch's first ordinary
-block may share its slot. The selector sees only the header type the peer sent
-(`PeerTipUpdateEvent.ObservedBoundary`), not an era, so it accepts a boundary
-block only after an ordinary header, at its parent's block number and a later
-slot, and counts it neither as progress nor as a break; two in a row, or one
-with any other block number, break the chain. A boundary-typed header therefore
-never adds height and cannot be repeated to stall a run or to dodge revocation.
-A repeated header neither advances nor resets the run; a regression, a skipped
-block, a different parent, a non-increasing slot or a delivery with no parent
-hash restarts it. Two connections delivering frontiers more than
-`securityParam` apart do not corroborate each other.
+A delivered frontier beyond the catch-up allowance is not rejected outright.
+`checkPeerTipPlausibleLocked` holds bounded far-tip evidence per connection. A
+far frontier is supported by another distinct connection within
+`securityParam`, or by more than `securityParam` consecutive connected headers.
+The connected-header check uses the delivered parent hash, block number, slot,
+and Byron boundary marker; a lone accepted frontier must continue that chain
+or the peer is removed. A lone frontier is not independent evidence for a new
+peer, and the check counts connections rather than operators.
 
-The accepted connection keeps its `farTipClaims` entry marked `lone`. A marked
-frontier is excluded from the reference frontier used to admit a new peer; if
-no independently admitted frontier remains, the local tip is the reference.
-The lone peer therefore cannot indirectly admit an unrelated peer, which would
-otherwise retain ordinary standing after the lone frontier was revoked. While
-its frontier stays beyond the catch-up allowance, every delivery must continue
-the frontier it last delivered by the same rules, or the peer is removed from
-the selector (`loneFrontierBrokenLocked`, then `RemovePeer`) and has to build a
-new run from nothing. After a RollBackward to a point inside the retained `k+1`
-delivered-header history, where the block number is known, the next header must
-continue that point's block number by one. A rollback
-to any other point leaves the block number unknown (zero), and an unknown
-height continues nothing: the next delivery, whatever it names and whether
-or not it is within the catch-up allowance, removes the peer, so a peer-chosen
-rollback point cannot carry an accepted frontier or a run to another height.
-The `lone` mark is cleared without removal only when the last delivered height
-is known and both it and the new delivery are within the allowance. The
-boundary-block allowance is not restored by a
-rollback: a rollback to a boundary block followed by a block sharing its slot
-also removes the peer. Removal also happens when the connection closes, which is
-what a header-verification failure at ledger apply ends in: the ledger recycles
-the connection and `ConnectionClosedEvent` calls `RemovePeer`. The selector
-holds this state in memory only, so no persisted state depends on a lone
-frontier.
-
-This is not verification. A header this far ahead of local ledger state has
-passed no signature check: epoch resolution defers before the opcert or KES
-signature, VRF proof or leader-eligibility checks run, and a peer signing with
-its own keys would pass the signature checks that need no ledger state. A lone
-peer can therefore fabricate a connected chain of more than `securityParam`
-headers with a claimed height up to the slot-distance bound and become a
-selectable peer ahead of honest ones. What bounds it: the claimed height is
-capped by the slot distance rather than arbitrary; every later delivery must
-continue the chain or the peer is removed; the ledger verifies every applied
-header, completing deferred verification at apply time, and recycles a
-connection whose header fails; and nothing is persisted from the selector. The
-cost to honest sync is time spent following that peer until the ledger reaches
-the first header that fails. The lone run accepts only a subset of what the
-peer's own previous frontier already allows once it is tracked (each header at
-most `securityParam` above the last): it adds the connected-chain requirement
-to a bound the selector applies to every known peer, and removes the peer when
-that requirement stops holding. The check counts connections, not operators, so
-corroboration is not a Sybil defence; acceptance only admits the frontier to
-chain selection. A rejection log line is still emitted for every header of an
-unaccepted far connection, and for a new peer whose reference sits above the
-local tip, which this path does not touch, so the line volume is not removed.
-
+Chainsync observations carry an admission ID and remain staged until the
+ledger admits the matching header. Far-tip claims and corroboration gathered
+while admission is pending stay in a bounded provisional view. Only commit
+after ledger admission may move the peer frontier into `peerTips`, evaluate
+selection, or emit a chain switch. Rejection, rollback, peer removal, and
+resynchronization discard affected provisional evidence and rebuild it from
+committed state, so an unadmitted header cannot corroborate a later selection.
+The ledger still verifies every applied header, completing deferred
+verification at apply time.
 Genesis exit may consult the advertised slot only through the separately
 documented delivered-frontier gate below. A RollBackward restores the
 delivered frontier from a bounded `k+1` header history; if the point is no longer retained, the
@@ -5478,17 +5429,42 @@ it. Dingo implements this as a **corroboration gate**
   ledger genuinely stalls. Observation happening before the apply gate is what
   avoids a deadlock (a peer must be observed to become corroborated). While the
   gate is active the observation is made **synchronously** with the gate
-  (`OuroborosConfig.ChainsyncObservePeerTip`, wired to update chain selection in
-  the roll-forward handler, skipping the async `PeerTipUpdateEvent`), so the
-  apply decision reflects the header currently being admitted rather than a tip
-  update that has not been processed yet — an async observation could otherwise
-  let a header slip through in the window before it revoked corroboration. The
+  (`OuroborosConfig.ChainsyncObservePeerTip`, wired to stage chain-selection
+  state in the roll-forward handler), so the apply decision reflects the header
+  currently being admitted rather than a tip update that has not been processed
+  yet — an async observation could otherwise let a header slip through in the
+  window before it revoked corroboration. A staged candidate cannot become a
+  selectable peer frontier until the ledger accepts a header at its point, but
+  it does count as corroboration evidence before admission: the gate checks the
+  applicant's own staged frontier and counts every other connection's staged
+  frontier, so connections from distinct hosts that stage the same points
+  open the apply gate for each other even when no peer has been admitted yet.
+  Staged peers share the selector's tracked-peer limit, with at most 256
+  pending header observations per peer. A staged candidate resolves with its
+  point rather than with the connection that delivered it, because a header
+  delivered by several connections is published to the ledger once. Admitting
+  the point promotes every staged candidate at that point, including the
+  copies whose publish was suppressed as duplicates and the copies of
+  apply-denied peers, each advancing its peer's frontier to that header only;
+  earlier withheld observations do not enter the committed frontier. Rejecting
+  the point removes the candidate at that point and everything staged after it
+  on every connection, since later headers depend on the rejected prefix, and
+  reevaluates selection before the rejection callback returns. Apply-denied
+  headers that are neither admitted nor rejected stay corroboration evidence
+  without steering selection. Ledger admission advances the tracked ChainSync
+  cursor and publishes the accepted peer-tip event. A delivery suppressed as a
+  duplicate, from a non-driver peer, or withheld by the apply gate counts as
+  client activity without moving the cursor, so the stall checker does not
+  recycle a peer that is following the chain. This staged
+  admission path applies when Genesis corroboration is disabled too, so a
+  rejected or discarded header cannot advance the selector frontier. The
   roll-**backward** path does the same via `OuroborosConfig.ChainsyncObserveRollback`
   (wired to apply the rollback into chain selection, skipping the async
   `PeerRollbackEvent`): a rollback trims the peer's observed frontier and can
   change its corroboration status, so the rollback apply decision must reflect
   the post-rollback state rather than pre-trim corroboration. With the gate
-  disabled both paths use the async path unchanged.
+  disabled, rollback keeps its existing async observation path; roll-forward
+  still stages and resolves tips around ledger admission.
 - The gate **denies application but does not disconnect** the fast source. Genesis
   wants the fast source kept connected so it can serve blocks as soon as
   corroboration arrives; demoting or dropping it would defeat the accelerator.
@@ -5598,9 +5574,13 @@ candidate, but does not independently corroborate that suffix.
 
 #### Genesis Limit on Patience
 
-The stall watchdog (`chainsync.CheckStalledClients`) only detects a silent
-peer: any header refreshes `LastActivity`, so a peer that advertises a far
-better tip and drips one valid header per 110 seconds never stalls, keeps a
+The stall watchdog (`chainsync.CheckStalledClients`) tracks forward delivery
+progress. An admitted header or a distinct forward header suppressed by
+cross-peer deduplication or an ingress gate refreshes `LastActivity`; replaying
+the same or an older suppressed point does not. A bounded per-client delivery
+watermark records that progress independently of the admitted cursor and
+rewinds with peer and local rollbacks. A peer that advertises a far better tip
+and drips one new valid header per 110 seconds still never stalls, keeps a
 ChainSync client slot, and keeps its misleading candidate in consideration.
 The Limit on Patience (LoP) bounds the delivery *rate* instead. Each tracked,
 non-observability client carries a leaky token bucket
