@@ -31,7 +31,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 39)
+	require.Len(t, registry, 40)
 	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
 	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
 		"CREATE TABLE IF NOT EXISTS `account_drep_clear`")
@@ -272,6 +272,11 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Len(t, registry[38].SQL["sqlite"].Expand, 3)
 	require.Contains(t, registry[38].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `midnight_candidate_removals`")
 	require.Contains(t, registry[38].SQL["sqlite"].Expand[2], "CREATE TABLE IF NOT EXISTS `midnight_epoch_transitions`")
+	require.Equal(t, 40, registry[39].Version)
+	require.Equal(t, committeeRenewalTermStartSchemaRelease, registry[39].Name)
+	require.Empty(t, registry[39].SQL["sqlite"].Expand)
+	require.NotNil(t, registry[39].Backfill)
+	require.Equal(t, "1", registry[39].BackfillRevision)
 }
 
 func TestAccountDRepClearBackfillRequiresCompletePV10History(t *testing.T) {
@@ -493,7 +498,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 39)
+	require.Len(t, registry, 40)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

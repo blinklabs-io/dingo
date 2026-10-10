@@ -508,6 +508,39 @@ Migration `v39` (`midnight-rollback-journal`, integer version 39) adds the
 `midnight_candidate_removals` and `midnight_epoch_transitions` rollback
 journals.
 
+Migration `v40` (`committee-renewal-term-start-repair`, integer version 40)
+changes no schema. Its backfill repairs `committee_member.term_start_slot` on
+rows written by an `UpdateCommittee` enactment that renewed a seated member
+before enactment preserved that member's term start; the fresh stamp hid the
+member's still-valid hot-key authorization, and such rows are normally beyond
+the rollback window. For each tagged cold credential, rows are walked in
+`added_slot` order. A row whose `added_slot` equals its predecessor's
+`deleted_slot` replaced a seated member in place, because `SetCommitteeMembers`
+soft-deletes the live row at the new row's `added_slot`. When an
+`UpdateCommittee` proposal with stored action CBOR was enacted at that slot,
+the row was written by a renewal and takes the predecessor's (already
+repaired) term start. Among enactments the shape is unambiguous: one action
+cannot both remove and re-add a credential, and committee enactments delay any
+further enactment in the same epoch. A row added after a gap followed a
+removal or `NoConfidence` and keeps its own term start. A Mithril import that
+runs over an existing database writes the same replace-in-place shape at the
+snapshot anchor and deliberately starts a fresh term there, sometimes beside an
+imported `UpdateCommittee` it records as enacted at the anchor. Enactment runs
+at the boundary slot and stamped a term start earlier than it, while the import
+stamps the anchor itself, which never exceeds the `mithril_ledger_slot`
+recorded for the latest import. A row whose `term_start_slot` is not below its
+`added_slot` and whose `added_slot` is at or below that recorded slot is
+therefore left alone. Above it, or on a database that never imported a
+snapshot, such a row is a renewal that migration v8 backfilled to its
+`added_slot`, so it is repaired.
+Batches page by tagged cold credential so a chain of renewals is never split.
+
+v40 repairs renewals only. Before enactment took the later of the proposal's
+slot and the closing epoch's first slot, a credential new to the committee or
+rejoining was stamped with the proposal's `added_slot` alone. v40 does not
+repair those rows, and a renewal chain it repairs inherits that start, so such
+terms still differ from a replay until the database is resynced.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
@@ -1707,7 +1740,7 @@ updates preserve the previous activity and expiry epochs.
 | `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. `SetGovernanceVote` upserts by the unique voter/proposal key, so a replaced vote overwrites `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` in place; `governance_vote_history` is what lets rollback recover the value that predated a replacement. |
 | `governance_vote_history` | `id`, `vote_id`, `transition_slot`, `vote`, `anchor_url`, `anchor_hash` | PK `id`; indexes `transition_slot`, `(vote_id, transition_slot, id)` | Rollback journal for vote replacement, mirroring `governance_proposal_ratification_history`'s pattern. `SetGovernanceVote` appends a row here whenever the effective `vote`/`anchor_url`/`anchor_hash` changes, including a voter's first cast, keyed by the slot the new value took effect (`vote_updated_slot`, falling back to `added_slot` on a first cast). FK `vote_id` references `governance_vote.id` with cascade deletion, so a vote created after the rollback target is removed along with its own history. For a vote that existed before the rollback target but was later replaced, rollback restores `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` from the latest surviving history entry (`transition_slot` at or before the target) rather than deleting the row outright -- the prior behavior lost the vote entirely when a rollback landed between two replacements, since the row itself carries only the current value. Migration `v22` backfills one history row per pre-existing vote from its current value; a replacement that happened before the upgrade cannot be reconstructed, matching `v6`'s ratification-history backfill limitation. A vote whose only surviving history is that single backfilled row, if a rollback deletes it, has no history left to restore from; rollback falls back to deleting that vote outright (the pre-history behavior) instead of writing `NULL` into `vote`'s `NOT NULL` column. |
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
-| `committee_member` | `id`, `cold_credential_tag`, `cold_cred_hash`, `expires_epoch`, `term_start_slot`, `term_start_slot_set`, `added_slot`, `deleted_slot` | PK `id`; unique `(cold_credential_tag, cold_cred_hash, added_slot)`; indexes `added_slot`, `deleted_slot` | Snapshot-imported and enacted committee state. Credential tag 0 is a key hash and 1 is a script hash. `term_start_slot` bounds the authorization and resignation certificates that apply to this membership term; `term_start_slot_set` preserves an explicit slot-zero start. An `UpdateCommittee` enactment preserves the existing `term_start_slot` of a credential that is already a seated member and stamps a fresh one only for a credential new to the committee or rejoining after removal: the later of the proposal's `added_slot` and the first slot of the epoch the enactment boundary closes, because cardano-ledger drops a non-member's committee state at each epoch boundary. Rows written before this rule keep the proposal's slot until the database is resynced. Re-election creates a new historical row; soft deletion and rollback match the full tagged identity and mutation slot. |
+| `committee_member` | `id`, `cold_credential_tag`, `cold_cred_hash`, `expires_epoch`, `term_start_slot`, `term_start_slot_set`, `added_slot`, `deleted_slot` | PK `id`; unique `(cold_credential_tag, cold_cred_hash, added_slot)`; indexes `added_slot`, `deleted_slot` | Snapshot-imported and enacted committee state. Credential tag 0 is a key hash and 1 is a script hash. `term_start_slot` bounds the authorization and resignation certificates that apply to this membership term; `term_start_slot_set` preserves an explicit slot-zero start. An `UpdateCommittee` enactment preserves the existing `term_start_slot` of a credential that is already a seated member and stamps a fresh one only for a credential new to the committee or rejoining after removal: the later of the proposal's `added_slot` and the first slot of the epoch the enactment boundary closes, because cardano-ledger drops a non-member's committee state at each epoch boundary. Migration v40 repairs renewal rows written before this rule; a new or rejoining member's term written before the epoch-boundary rule still needs a resync. Re-election creates a new historical row; soft deletion and rollback match the full tagged identity and mutation slot. |
 | `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`; zero is a valid threshold, while SQL NULL marks a cleared quorum. Migration v23 converts legacy zero clear markers to NULL. |
 | `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity and newest-first prune order, tagged hot identity, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. For a cold credential that is not seated, `GetCommitteeHotAuthorizationsSince` returns its latest authorization only when that row is at or after the given slot; the ledger passes the current epoch's first slot and suppresses the authorization after a later resignation. Superseded rows older than the rollback window are pruned on write; see Committee Hot-Key Authorization Retention. |
 | `resign_committee_cold` | `id`, `cold_credential_tag`, `cold_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity, `certificate_id`, `added_slot` | Committee cold-credential resignation certificate. A resignation is authoritative even when no earlier authorization row exists and is permanent for that membership term. Removal followed by re-election starts a new term; historical rows remain available for rollback. |

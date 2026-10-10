@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,6 +77,7 @@ const (
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
 	poolRelayTypeSchemaRelease                          = "pool-relay-type"
 	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
+	committeeRenewalTermStartSchemaRelease              = "committee-renewal-term-start-repair"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -223,6 +225,11 @@ var schemaVersions = []struct {
 		Name:    midnightRollbackJournalSchemaRelease,
 		Dir:     "v39",
 	},
+	{
+		Version: 40,
+		Name:    committeeRenewalTermStartSchemaRelease,
+		Dir:     "v40",
+	},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -350,6 +357,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == accountDRepClearSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = accountDRepClearBackfill
+		}
+		if version.Name == committeeRenewalTermStartSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = committeeRenewalTermStartBackfill
 		}
 		ret = append(ret, migration)
 	}
@@ -1277,6 +1288,257 @@ func committeeTermStartBackfill(
 		Cursor: strconv.FormatInt(ids[len(ids)-1], 10),
 		Rows:   int64(len(ids)),
 	}, nil
+}
+
+type committeeColdCredential struct {
+	tag  int64
+	hash []byte
+}
+
+type committeeTermRow struct {
+	id            int64
+	termStartSlot int64
+	addedSlot     int64
+	deletedSlot   sql.NullInt64
+	enacted       bool
+}
+
+// updateCommitteeActionType is the governance_proposal.action_type the ledger
+// writes for an UpdateCommittee action: gouroboros' GovActionTypeUpdateCommittee,
+// which is the CIP-1694 gov_action tag 4. It is a copy for the same reason as
+// alonzoEraID, and a test pins it to the gouroboros value.
+const updateCommitteeActionType = 4
+
+// committeeRenewalTermStartBackfill repairs committee_member rows that an
+// UpdateCommittee enactment renewed while it still stamped a fresh
+// term_start_slot on continuing members. That stamp hides the member's
+// still-valid hot-key authorization, and the row is normally beyond the
+// rollback window, so nothing else rewrites it.
+//
+// SetCommitteeMembers soft-deletes the live row at the new row's added_slot, so
+// a row whose added_slot equals its predecessor's deleted_slot replaced a seated
+// member in place, and inherits the predecessor's term start when an
+// UpdateCommittee was enacted at that slot. Among enactments the shape is
+// unambiguous: one action cannot both remove and re-add a credential (Conway
+// GOV ConflictingCommitteeUpdate), and NoConfidence and UpdateCommittee both
+// delay further enactment, so a removal and a re-election never share a slot.
+// A row added after a gap followed a removal and keeps its own term start.
+//
+// A Mithril import that runs over an existing database writes the same
+// replace-in-place shape at the snapshot anchor and deliberately starts a fresh
+// term there. Its synthetic committee root has no action CBOR, but an imported
+// UpdateCommittee it records as enacted at the anchor does, so the enactment
+// check alone cannot exclude it. The term start does: enactment runs at the
+// boundary slot and stamped either the proposal's slot or the closing epoch's
+// first slot, both earlier, while the import stamps the anchor itself. The
+// anchor is the first slot of the snapshot's epoch, so it never exceeds the
+// mithril_ledger_slot recorded for the latest import. A row stamped at its own
+// added_slot at or below that slot is therefore an import row; above it, or on
+// a database that never imported a snapshot, it can only be a renewal that
+// migration v8 backfilled to its added_slot.
+//
+// The cursor is the last credential processed, so each credential's whole
+// history is walked in one batch: a chain of renewals must carry the oldest
+// term start forward through rows already repaired.
+func committeeRenewalTermStartBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	credentials, err := committeeCredentialsAfter(ctx, batch)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	if len(credentials) == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	imported, err := readMithrilImportMarker(ctx, batch)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	var repaired int64
+	for _, credential := range credentials {
+		count, err := repairCommitteeRenewalTermStart(
+			ctx, batch, credential, imported,
+		)
+		if err != nil {
+			return BatchResult{}, err
+		}
+		repaired += count
+	}
+	last := credentials[len(credentials)-1]
+	return BatchResult{
+		Cursor: formatCommitteeCredentialCursor(last),
+		Rows:   repaired,
+		Done:   len(credentials) < batch.Limit,
+	}, nil
+}
+
+func committeeCredentialsAfter(
+	ctx context.Context,
+	batch Batch,
+) ([]committeeColdCredential, error) {
+	query := `SELECT DISTINCT cold_credential_tag, cold_cred_hash
+FROM committee_member`
+	args := []any{}
+	if batch.Cursor != "" {
+		tag, hash, err := parseCommitteeCredentialCursor(batch.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		query += `
+WHERE cold_credential_tag > ?
+   OR (cold_credential_tag = ? AND cold_cred_hash > ?)`
+		args = append(args, tag, tag, hash)
+	}
+	query += `
+ORDER BY cold_credential_tag, cold_cred_hash
+LIMIT ?`
+	args = append(args, batch.Limit)
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(query), args...)
+	if err != nil {
+		return nil, fmt.Errorf("read committee credentials: %w", err)
+	}
+	defer rows.Close()
+	var ret []committeeColdCredential
+	for rows.Next() {
+		var credential committeeColdCredential
+		if err := rows.Scan(&credential.tag, &credential.hash); err != nil {
+			return nil, err
+		}
+		ret = append(ret, credential)
+	}
+	return ret, rows.Err()
+}
+
+func repairCommitteeRenewalTermStart(
+	ctx context.Context,
+	batch Batch,
+	credential committeeColdCredential,
+	imported mithrilImportMarker,
+) (int64, error) {
+	members, err := func() ([]committeeTermRow, error) {
+		rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT cm.id, cm.term_start_slot, cm.added_slot, cm.deleted_slot,
+    EXISTS (
+        SELECT 1 FROM governance_proposal gp
+        WHERE gp.enacted_slot = cm.added_slot
+          AND gp.action_type = ?
+          AND gp.gov_action_cbor IS NOT NULL
+    )
+FROM committee_member cm
+WHERE cm.cold_credential_tag = ? AND cm.cold_cred_hash = ?
+ORDER BY cm.added_slot, cm.id`),
+			updateCommitteeActionType, credential.tag, credential.hash,
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var ret []committeeTermRow
+		for rows.Next() {
+			var row committeeTermRow
+			if err := rows.Scan(
+				&row.id, &row.termStartSlot, &row.addedSlot, &row.deletedSlot,
+				&row.enacted,
+			); err != nil {
+				return nil, err
+			}
+			ret = append(ret, row)
+		}
+		return ret, rows.Err()
+	}()
+	if err != nil {
+		return 0, fmt.Errorf("read committee member history: %w", err)
+	}
+	var repaired int64
+	for i := 1; i < len(members); i++ {
+		prev := &members[i-1]
+		member := &members[i]
+		if !member.enacted ||
+			!prev.deletedSlot.Valid ||
+			prev.deletedSlot.Int64 != member.addedSlot ||
+			imported.covers(member) ||
+			member.termStartSlot == prev.termStartSlot {
+			continue
+		}
+		member.termStartSlot = prev.termStartSlot
+		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
+UPDATE committee_member
+SET term_start_slot = ?, term_start_slot_set = TRUE
+WHERE id = ?`),
+			member.termStartSlot, member.id,
+		); err != nil {
+			return 0, fmt.Errorf("repair committee member term start: %w", err)
+		}
+		repaired++
+	}
+	return repaired, nil
+}
+
+// mithrilImportMarker is the mithril_ledger_slot sync state: the ledger slot
+// of the latest imported snapshot, when one was imported.
+type mithrilImportMarker struct {
+	recorded bool
+	slot     int64
+}
+
+// covers reports whether member has the shape a Mithril import writes: a term
+// started at its own added_slot, at or below the imported snapshot.
+func (m mithrilImportMarker) covers(member *committeeTermRow) bool {
+	return m.recorded &&
+		member.addedSlot <= m.slot &&
+		member.termStartSlot >= member.addedSlot
+}
+
+func readMithrilImportMarker(
+	ctx context.Context,
+	batch Batch,
+) (mithrilImportMarker, error) {
+	var raw string
+	err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT value FROM sync_state WHERE sync_key = ?`),
+		"mithril_ledger_slot",
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return mithrilImportMarker{}, nil
+	}
+	if err != nil {
+		return mithrilImportMarker{}, fmt.Errorf(
+			"read Mithril import marker: %w",
+			err,
+		)
+	}
+	slot, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || slot < 0 {
+		return mithrilImportMarker{}, fmt.Errorf(
+			"parse Mithril import marker %q",
+			raw,
+		)
+	}
+	return mithrilImportMarker{recorded: true, slot: slot}, nil
+}
+
+func formatCommitteeCredentialCursor(
+	credential committeeColdCredential,
+) string {
+	return strconv.FormatInt(credential.tag, 10) + ":" +
+		hex.EncodeToString(credential.hash)
+}
+
+func parseCommitteeCredentialCursor(cursor string) (int64, []byte, error) {
+	rawTag, rawHash, ok := strings.Cut(cursor, ":")
+	if !ok {
+		return 0, nil, fmt.Errorf("committee credential cursor %q is malformed", cursor)
+	}
+	tag, err := strconv.ParseInt(rawTag, 10, 64)
+	if err != nil {
+		return 0, nil, fmt.Errorf("parse committee credential cursor tag: %w", err)
+	}
+	hash, err := hex.DecodeString(rawHash)
+	if err != nil {
+		return 0, nil, fmt.Errorf("parse committee credential cursor hash: %w", err)
+	}
+	return tag, hash, nil
 }
 
 const (
