@@ -13954,8 +13954,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 					)
 				}
 				if err := validate(tx, consumed, created); err != nil {
-					var semanticErr *semanticTxValidationError
-					if errors.As(err, &semanticErr) {
+					if _, ok := errors.AsType[*semanticTxValidationError](err); ok {
 						return fmt.Errorf(
 							"%w: leios endorser transaction %d at slot %d: %w",
 							ErrInvalidLeiosEndorserBlockTransactions,

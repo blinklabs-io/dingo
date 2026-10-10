@@ -1824,8 +1824,7 @@ func (ls *LedgerState) applyUntickedBoundaryClosure(
 	point := ocommon.Point{Slot: block.SlotNumber(), Hash: block.Hash().Bytes()}
 	_, donation, err := ls.applyEndorserBlockInContext(ctx, txn, point, block.BlockNumber(), slot, hash.Bytes(), txs, &parentPoint.Slot)
 	if err != nil {
-		var validationErr *leiosEndorserBlockValidationError
-		if errors.As(err, &validationErr) {
+		if validationErr, ok := errors.AsType[*leiosEndorserBlockValidationError](err); ok {
 			return ls.rejectLeiosCertifyingBlock(block, validationErr)
 		}
 		return err
