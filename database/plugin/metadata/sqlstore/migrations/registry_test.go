@@ -31,7 +31,8 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 39)
+	require.Len(t, registry, 41)
+
 	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
 	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
 		"CREATE TABLE IF NOT EXISTS `account_drep_clear`")
@@ -267,11 +268,42 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, committeeHotAuthorizationPruneOrderSchemaRelease, registry[35].Name)
 	require.Len(t, registry[35].SQL["sqlite"].Expand, 1)
 	require.Contains(t, registry[35].SQL["sqlite"].Expand[0], "idx_auth_committee_hot_cold_credential_prune_order")
+	require.Equal(t, 37, registry[36].Version)
+	require.Equal(t, drepExpiryHistorySchemaRelease, registry[36].Name)
+	require.Contains(t, strings.Join(registry[36].SQL["sqlite"].Expand, "\n"), "drep_expiry_history")
+	require.Equal(t, 38, registry[37].Version)
+	require.Equal(t, poolRelayTypeSchemaRelease, registry[37].Name)
 	require.Equal(t, 39, registry[38].Version)
 	require.Equal(t, midnightRollbackJournalSchemaRelease, registry[38].Name)
-	require.Len(t, registry[38].SQL["sqlite"].Expand, 3)
-	require.Contains(t, registry[38].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `midnight_candidate_removals`")
-	require.Contains(t, registry[38].SQL["sqlite"].Expand[2], "CREATE TABLE IF NOT EXISTS `midnight_epoch_transitions`")
+	require.Equal(t, 40, registry[39].Version)
+	require.Equal(t, drepDormancyStateSchemaRelease, registry[39].Name)
+	require.Equal(t, 41, registry[40].Version)
+	require.Equal(t, drepDelegatorStateSchemaRelease, registry[40].Name)
+}
+
+func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		registry func() ([]Migration, error)
+		dialect  string
+	}{
+		{name: "sqlite", registry: SQLiteRegistry, dialect: "sqlite"},
+		{name: "postgres", registry: PostgresRegistry, dialect: "postgres"},
+		{name: "mysql", registry: MySQLRegistry, dialect: "mysql"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry, err := tc.registry()
+			require.NoError(t, err)
+			require.NoError(t, validateRegistry(registry, tc.dialect))
+			require.Len(t, registry, 41)
+			migration := registry[39]
+			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
+			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
+			require.Contains(t, seed, "WHERE NOT EXISTS")
+			require.NotContains(t, strings.ToUpper(seed), "ON CONFLICT")
+		})
+	}
 }
 
 func TestAccountDRepClearBackfillRequiresCompletePV10History(t *testing.T) {
@@ -493,7 +525,8 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 39)
+	require.Len(t, registry, 41)
+
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

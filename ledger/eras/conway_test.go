@@ -38,6 +38,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/blinklabs-io/plutigo/builtin"
 	"github.com/blinklabs-io/plutigo/cek"
 	"github.com/blinklabs-io/plutigo/data"
@@ -4371,8 +4372,20 @@ func TestEvaluateTxConwayStopsAfterCanceledInputLookup(t *testing.T) {
 		ctx:                       ctx,
 		cancel:                    cancel,
 	}
+	pending := lcommon.NewBlockLedgerState(ls)
+	predecessor := mockledger.NewTransactionBuilder().WithType(
+		conway.EraIdConway,
+	).WithCertificates(&lcommon.RegistrationCertificate{
+		CertType: uint(lcommon.CertificateTypeRegistration),
+		StakeCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.CredentialHash{0x7f},
+		},
+		Amount: 1,
+	})
+	require.NoError(t, pending.ApplyTransaction(predecessor, pp))
 
-	_, _, _, err = EvaluateTxConway(tx, ls, pp)
+	_, _, _, err = EvaluateTxConway(tx, pending, pp)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, 1, ls.reads)
 }
@@ -4429,8 +4442,20 @@ func TestEvaluateTxConwayCancelsActivePlutusMachine(t *testing.T) {
 			Steps:  100_000_000,
 		},
 	}
+	pending := lcommon.NewBlockLedgerState(ls)
+	predecessor := mockledger.NewTransactionBuilder().WithType(
+		conway.EraIdConway,
+	).WithCertificates(&lcommon.RegistrationCertificate{
+		CertType: uint(lcommon.CertificateTypeRegistration),
+		StakeCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.CredentialHash{0x7e},
+		},
+		Amount: 1,
+	})
+	require.NoError(t, pending.ApplyTransaction(predecessor, pp))
 
-	_, _, _, err = EvaluateTxConway(tx, ls, pp)
+	_, _, _, err = EvaluateTxConway(tx, pending, pp)
 	require.ErrorIs(t, err, context.Canceled)
 	require.GreaterOrEqual(t, ctx.checks, ctx.limit)
 }
