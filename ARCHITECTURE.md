@@ -10177,15 +10177,19 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 - **Dingo:** read directly from Dingo's metadata database during the `check`
   phase — no HTTP endpoint on the Dingo node is contacted. Three backends are
   supported (`sqlite`, `postgres`, `mysql`), resolved with the same precedence
-  Dingo's own process uses: `--metadata-plugin`/`--metadata-dsn` (explicit
-  overrides) fall back to Dingo's own resolved `plugins.storage.metadata`
+  Dingo's own process uses: `--metadata-plugin`/`--metadata-dsn` or
+  `--metadata-dsn-file` (explicit overrides) fall back to Dingo's own resolved `plugins.storage.metadata`
   selection — loaded via `internal/config.LoadConfig` (`--dingo-config`, or the
   same `~/.dingo/dingo.yaml`/`/etc/dingo/dingo.yaml` search Dingo itself does),
   which applies `DINGO_PLUGINS_STORAGE_METADATA_PROVIDER`/`_CONFIG_*` the same
   way the real node does — then default to `sqlite`. The data directory
   likewise falls back through `--dingo-data`/`DINGO_DATA_DIR` (koios-parity-only
   overrides) to Dingo's resolved `DatabasePath` (`CARDANO_DATABASE_PATH` or
-  `dingo.yaml`), then `.dingo`.
+  `dingo.yaml`), then `.dingo`. Dingo's configuration is loaded only when a
+  flag leaves a value unset; a DSN flag passed empty still counts as set and
+  clears the configured DSN. If the configuration fails to load (for example a plugin `_FILE`
+  variable naming a missing file), the command fails rather than falling back
+  to defaults, which would inspect a different database.
   - `sqlite`: opens `{data-dir}/metadata.sqlite` in read-only WAL mode
   - `postgres` / `mysql`: a `dsn` config field is used verbatim; otherwise a
     DSN is assembled from discrete host/port/user/password/database/sslMode/
@@ -13299,6 +13303,25 @@ The `api.tls` shared defaults (`--api-tls-mode`/`DINGO_API_TLS_MODE`/
 security" under External Interfaces) participate in this same CLI >
 environment > YAML > defaults source precedence like any other `Config` field.
 
+A secret can be supplied from a file instead of a literal value, so it need
+not appear in a process listing or environment. `koiosParity.apiKeyFile`
+(`DINGO_KOIOS_PARITY_API_KEY_FILE`, `--koios-parity-api-key-file`) pairs with
+`koiosParity.apiKey`, and any generic plugin config field accepts a
+`DINGO_PLUGINS_<CAPABILITY>_CONFIG_<FIELD>_FILE` variable. The file must be a
+regular file accessible only to its owner, of at most 64 KiB, whose contents
+are not blank; its contents are used as a plain string, never parsed as YAML,
+with trailing line endings removed. A literal and its file form are one
+setting: a higher-precedence source setting either replaces both, and one
+source setting both fails startup.
+Presence counts as set, even when empty: a YAML key, a defined environment
+variable, or a flag passed on the command line.
+`LoadConfig` reads plugin `_FILE` variables; `Config.ResolveSecretFiles` reads
+the remaining file paths once every source is merged and clears them. The
+`koios-parity` tool offers `--api-key-file`/`KOIOS_API_KEY_FILE` and
+`--metadata-dsn-file` beside its literal forms, and `node-parity from-genesis`
+offers `--koios-api-key-file`; both use `secretfile.Resolve` for the same
+both-set rule.
+
 `LoadConfig` (`internal/config`) only parses and merges the YAML and
 environment sources; it makes no semantic judgments about the merged values,
 because CLI flags are a higher-precedence source merged afterwards by
@@ -13312,7 +13335,7 @@ passed. `RecordSourceProvenance` runs as its own step rather than inside
 `*Config` that `LoadConfig` returns against a hand-built struct literal, and
 a literal cannot populate an unexported field.
 
-Immediately after `ApplyFlags`, `cmd/dingo` calls `settingsresolve.Apply(cfg)`
+After `ApplyFlags` and `Config.ResolveSecretFiles`, `cmd/dingo` calls `settingsresolve.Apply(cfg)`
 (`internal/settingsresolve`), which lets a data directory's already-persisted
 node settings supply the effective value for any override-eligible gate
 (`database/nodesettings.Gates`) the operator left at its built-in default —

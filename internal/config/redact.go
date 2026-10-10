@@ -183,6 +183,7 @@ var logPlainConfigFields = []string{
 	"KoiosParity.Accounts",
 	"KoiosParity.AllowInsecureHTTP",
 	"KoiosParity.AllowPrivateAddresses",
+	"KoiosParity.APIKeyFile",
 	"KoiosParity.CachePath",
 	"KoiosParity.Enabled",
 	"KoiosParity.GraceHours",

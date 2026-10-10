@@ -18,6 +18,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -668,4 +669,58 @@ func TestRequireMatchingKoiosSource(t *testing.T) {
 			requireMatchingKoiosSource(cache, newClient(t, ""), network),
 		)
 	})
+}
+
+func TestFromGenesisKoiosAPIKeySources(t *testing.T) {
+	// Not t.Parallel: fromGenesisCommand binds its flags to the
+	// package-level koiosFlags.
+	keyFile := filepath.Join(t.TempDir(), "key")
+	require.NoError(t, os.WriteFile(keyFile, []byte("from-file\n"), 0o600))
+	for _, tc := range []struct {
+		name    string
+		flags   map[string]string
+		want    string
+		wantErr string
+	}{
+		{name: "unset"},
+		{
+			name:  "literal",
+			flags: map[string]string{"koios-api-key": "lit"},
+			want:  "lit",
+		},
+		{
+			name:  "file",
+			flags: map[string]string{"koios-api-key-file": keyFile},
+			want:  "from-file",
+		},
+		{
+			name: "both",
+			flags: map[string]string{
+				"koios-api-key":      "lit",
+				"koios-api-key-file": keyFile,
+			},
+			wantErr: "--koios-api-key-file",
+		},
+		{
+			name: "missing file",
+			flags: map[string]string{
+				"koios-api-key-file": filepath.Join(t.TempDir(), "missing"),
+			},
+			wantErr: "--koios-api-key-file",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := fromGenesisCommand()
+			for name, value := range tc.flags {
+				require.NoError(t, cmd.Flags().Set(name, value))
+			}
+			got, err := koiosAPIKey(cmd)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
 }

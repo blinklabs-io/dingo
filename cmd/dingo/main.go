@@ -262,6 +262,30 @@ func closeProfileFile(stderr io.Writer, f *os.File, kind string) {
 	}
 }
 
+// mergeConfigSources merges YAML, environment and CLI flags, in rising
+// precedence, then reads file-backed secrets from the merged result.
+func mergeConfigSources(
+	cmd *cobra.Command,
+	configFile string,
+) (*config.Config, error) {
+	cfg, err := config.LoadConfig(configFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+	// Provenance is deliberately not populated by LoadConfig: an
+	// in-package test DeepEquals the whole struct it returns.
+	if err := cfg.RecordSourceProvenance(configFile); err != nil {
+		return nil, fmt.Errorf("recording config provenance: %w", err)
+	}
+	if err := config.ApplyFlags(cmd, cfg); err != nil {
+		return nil, fmt.Errorf("applying CLI flags: %w", err)
+	}
+	if err := cfg.ResolveSecretFiles(); err != nil {
+		return nil, fmt.Errorf("reading secret files: %w", err)
+	}
+	return cfg, nil
+}
+
 func rejectUnsupportedDevnetRootFlags(cmd *cobra.Command) error {
 	var unsupported []string
 	rootFlags := cmd.Root().PersistentFlags()
@@ -448,19 +472,9 @@ Database Workers:
 			return rejectUnsupportedDevnetRootFlags(cmd)
 		}
 
-		cfg, err := config.LoadConfig(configFile)
+		cfg, err := mergeConfigSources(cmd, configFile)
 		if err != nil {
-			return fmt.Errorf("failed to load config: %w", err)
-		}
-
-		// Provenance is deliberately not populated by LoadConfig: an
-		// in-package test DeepEquals the whole struct it returns.
-		if err := cfg.RecordSourceProvenance(configFile); err != nil {
-			return fmt.Errorf("recording config provenance: %w", err)
-		}
-
-		if err := config.ApplyFlags(cmd, cfg); err != nil {
-			return fmt.Errorf("applying CLI flags: %w", err)
+			return err
 		}
 
 		// Gated settings persisted in the database supply defaults, so a

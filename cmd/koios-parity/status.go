@@ -40,7 +40,10 @@ func statusRun(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	cachePath := resolveCachePath()
+	cachePath, err := resolveCachePath()
+	if err != nil {
+		return err
+	}
 	if _, statErr := os.Stat(cachePath); statErr != nil {
 		if os.IsNotExist(statErr) {
 			return fmt.Errorf(

@@ -468,6 +468,13 @@
   # Can be overridden with DINGO_KOIOS_PARITY_API_KEY
   # CLI: --koios-parity-api-key
   # apiKey: ""
+  # File holding the API key, read at startup with trailing line endings
+  # removed. Must be a regular file accessible only to its owner, at most
+  # 64 KiB, and not blank. Set
+  # apiKey or apiKeyFile, not both.
+  # Can be overridden with DINGO_KOIOS_PARITY_API_KEY_FILE
+  # CLI: --koios-parity-api-key-file
+  # apiKeyFile: ""
   # Koios v1 API root override, for a self-hosted or mirrored instance.
   # Empty selects the public host for the network above. A custom host is not
   # subject to the public tier's burst cap, since that ceiling describes

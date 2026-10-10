@@ -377,6 +377,10 @@ type KoiosParityConfig struct {
 	// APIKey is the Koios Bearer token for higher-rate-limit access. Empty
 	// uses Koios's unauthenticated rate limit.
 	APIKey string `yaml:"apiKey"               envconfig:"DINGO_KOIOS_PARITY_API_KEY"`
+	// APIKeyFile names a file holding APIKey, so the token need not appear
+	// in a command line or environment. ResolveSecretFiles reads it into
+	// APIKey; setting both in one configuration source is an error.
+	APIKeyFile string `yaml:"apiKeyFile"           envconfig:"DINGO_KOIOS_PARITY_API_KEY_FILE"`
 	// BaseURL overrides the public koios.rest host for the network, for a
 	// self-hosted or mirrored Koios instance. Full v1 API root, e.g.
 	// "https://preview-koios.example.com/api/v1". Empty selects the public
@@ -1655,6 +1659,9 @@ func LoadConfig(configFile string) (*Config, error) {
 			return nil, fmt.Errorf("error reading config file: %w", err)
 		}
 		midnightYAMLFields = collectMidnightYAMLFields(buf)
+		if err := checkSecretFileYAML(buf); err != nil {
+			return nil, fmt.Errorf("config file %s: %w", configFile, err)
+		}
 
 		var root map[string]yaml.Node
 		if err := yaml.Unmarshal(buf, &root); err != nil {
@@ -1704,6 +1711,9 @@ func LoadConfig(configFile string) (*Config, error) {
 	}
 	pluginEnviron := os.Environ()
 	applyMCPAuthCompatibilityEnvironment(cfg, pluginEnviron)
+	if err := applySecretFileEnvironment(cfg); err != nil {
+		return nil, err
+	}
 	if err := applyAPIPortCompatibilityEnvironment(
 		cfg,
 		pluginEnviron,

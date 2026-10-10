@@ -35,7 +35,7 @@ Does not replace manual 'run --all' after a ledger replay.`,
 		RunE: watchRun,
 	}
 
-	cmd.Flags().String("api-key", "", "Koios Bearer token (or KOIOS_API_KEY)")
+	addAPIKeyFlags(cmd)
 	addKoiosURLFlag(cmd)
 	cmd.Flags().Duration("interval", 15*time.Minute, "poll interval")
 	cmd.Flags().Int("concurrency", 5, "Koios fetch workers")
@@ -55,8 +55,14 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	cachePath := resolveCachePath()
-	dbCfg := resolveDingoDB(cmd)
+	cachePath, err := resolveCachePath()
+	if err != nil {
+		return err
+	}
+	dbCfg, err := resolveDingoDB(cmd)
+	if err != nil {
+		return err
+	}
 	interval, _ := cmd.Flags().GetDuration("interval")
 	if interval <= 0 {
 		return errors.New("--interval must be positive")
@@ -71,7 +77,10 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	apiKey := koiosAPIKey(cmd)
+	apiKey, err := koiosAPIKey(cmd)
+	if err != nil {
+		return err
+	}
 	baseURL := koiosBaseURL(cmd)
 	allowInsecure := koiosAllowInsecureHTTP(cmd)
 	allowPrivate := koiosAllowPrivateAddresses(cmd)
