@@ -2363,7 +2363,7 @@ func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
 func TestEmitNextEpochNonceReadyRequiresLedgerTipAtCutoff(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	_, evtCh := eventBus.Subscribe(event.EpochNonceReadyEventType)
@@ -2389,7 +2389,7 @@ func TestEmitNextEpochNonceReadyRequiresLedgerTipAtCutoff(t *testing.T) {
 func TestResetNextEpochNonceReadyAllowsReEmit(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	_, evtCh := eventBus.Subscribe(event.EpochNonceReadyEventType)
@@ -11635,7 +11635,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 	pc := cm.PrimaryChain()
 	raw := seedTestChain(t, pc, "windowed-race", blockCount)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	ls, err := NewLedgerState(LedgerStateConfig{

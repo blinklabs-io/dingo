@@ -104,7 +104,7 @@ func newTransactionEventTestLedger(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	subID, events := bus.SubscribeWithBuffer(TransactionEventType, 16)
 	require.NotEqual(t, event.EventSubscriberId(0), subID)
@@ -250,7 +250,7 @@ func TestLedgerDeltaBatchFlushesStakeBetweenDeltas(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls := &LedgerState{
 		db: db,
@@ -285,7 +285,7 @@ func TestLedgerDeltaBatchAPIStorageFlushesTransactionMetadata(t *testing.T) {
 		StorageMode: dbtypes.StorageModeAPI,
 	})
 	require.NoError(t, err)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls := &LedgerState{
 		db: db,
