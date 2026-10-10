@@ -882,6 +882,14 @@ type LedgerStateConfig struct {
 	// ARCHITECTURE.md ("Fork-resolution header-queue overflow must still
 	// restart blockfetch") for the fix and the full explanation.
 	BlockPipelineValidateEnabled bool
+	// ApplyRowBatchingEnabled writes the accumulated deltas of blocks that
+	// are not validated through the metadata store's batched path in core
+	// storage mode, as API storage mode already does. Validated blocks, Leios
+	// endorser-block applies, and batches applied with closure context keep
+	// the per-transaction path in every storage mode. Off by default; the stored
+	// state is identical either way. See ARCHITECTURE.md ("Block Processing
+	// Pipeline").
+	ApplyRowBatchingEnabled bool
 }
 
 // EndorserBlockProviderFunc returns the complete set of standalone
@@ -903,8 +911,9 @@ type EndorserBlockProviderFunc func(
 // (ebSlot, ebHash) over leios-fetch (manifest plus all transaction bodies) and
 // caches it so a subsequent EndorserBlockProviderFunc call returns it. It
 // returns an error when no fetch connection is available or the relay does not
-// serve the block. The endorser block shares the slot of the ranking block that
-// references it (they are co-produced), so ebSlot is the ranking block's slot.
+// serve the block; the former must wrap ErrEndorserBlockFetchNoPeer. The
+// endorser block shares the slot of the ranking block that references it (they
+// are co-produced), so ebSlot is the ranking block's slot.
 //
 // ctx bounds the whole fetch, including its per-connection failover. The caller
 // owns the budget: block application waits for this fetch, so an implementation
@@ -914,6 +923,14 @@ type EndorserBlockFetcherFunc func(
 	ebSlot uint64,
 	ebHash []byte,
 ) error
+
+// ErrEndorserBlockFetchNoPeer reports that an EndorserBlockFetcherFunc had no
+// connection to ask. It says nothing about whether any peer holds the endorser
+// block, so the ledger pipeline does not count it toward its deterministic-halt
+// threshold.
+var ErrEndorserBlockFetchNoPeer = errors.New(
+	"no leios-fetch connection available",
+)
 
 // BlockfetchRequestRangeFunc describes a callback function used to start a
 // blockfetch request for a range of blocks. It returns the request ID the
@@ -1039,6 +1056,10 @@ type LedgerState struct {
 	metrics   stateMetrics
 	consensus atomic.Pointer[consensusSnapshot]
 	tip       atomic.Pointer[tipSnapshot]
+	// snapshotPublished is closed and replaced after every snapshot
+	// publication, so a reader waiting for the ledger to advance can block
+	// until the published state changes instead of polling it.
+	snapshotPublished atomic.Pointer[chan struct{}]
 	// timeConverter owns slot/wall-clock time conversion (SlotToTime,
 	// TimeToSlot, SlotToEpoch, EpochInfo) and the operational near-now
 	// fallbacks used while the applied ledger is behind the wall clock.
@@ -1589,6 +1610,12 @@ type LedgerState struct {
 	// production; it holds the durable-commit-before-snapshot-publication
 	// window in the normal block-apply path.
 	afterBlockApplyCommit func()
+
+	// afterBatchedTransactionWrite is a test-only observation hook, nil in
+	// production. LedgerDelta applies call it after each transaction body
+	// they write through the batched metadata path, so a test can tell that
+	// path from the per-row one, which stores the same state.
+	afterBatchedTransactionWrite func()
 	// beforeReconciliationUndoSnapshot is a test-only sequencing hook, nil
 	// in production. It runs in reconcilePrimaryChainTipWithLedgerTip right
 	// after the ledgerTip snapshot at the top of that function, so a test
@@ -2020,6 +2047,32 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 		currentTip:           cloneTip(ls.currentTip),
 		currentTipBlockNonce: cloneSnapshotBytes(ls.currentTipBlockNonce),
 	})
+	ls.notifySnapshotPublished()
+}
+
+// snapshotPublishedChan returns a channel closed by the next snapshot
+// publication. A waiter must obtain it before reading the state it waits on:
+// a publication between that read and the wait then closes the channel it
+// holds, so the wakeup cannot be missed.
+func (ls *LedgerState) snapshotPublishedChan() <-chan struct{} {
+	for {
+		if ch := ls.snapshotPublished.Load(); ch != nil {
+			return *ch
+		}
+		ch := make(chan struct{})
+		if ls.snapshotPublished.CompareAndSwap(nil, &ch) {
+			return ch
+		}
+	}
+}
+
+// notifySnapshotPublished wakes every snapshotPublishedChan waiter. It must
+// run after the snapshots are stored, so a woken waiter reads the new state.
+func (ls *LedgerState) notifySnapshotPublished() {
+	next := make(chan struct{})
+	if prev := ls.snapshotPublished.Swap(&next); prev != nil {
+		close(*prev)
+	}
 }
 
 // loadStateSnapshots returns consensus and tip state from the same publication
@@ -7277,6 +7330,21 @@ func (ls *LedgerState) trackPipelineProgress(
 	return p
 }
 
+// holdPipelineProgress records the tip like trackPipelineProgress, so a tip
+// that moved still resets the count, but never increments it. It is for a
+// restart that is no evidence either way about whether the failure is
+// deterministic.
+func (ls *LedgerState) holdPipelineProgress(
+	p pipelineProgress,
+) pipelineProgress {
+	next := ls.trackPipelineProgress(p)
+	next.consecutiveNoProgress = min(
+		next.consecutiveNoProgress,
+		p.consecutiveNoProgress,
+	)
+	return next
+}
+
 // ledgerProcessBlocks drives ledgerProcessBlocksFromSource against a fresh
 // chain-reader goroutine on each attempt (via runLedgerReadChainAttempt),
 // restarting whenever that attempt returns a recoverable error (see
@@ -7326,6 +7394,10 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 		ls.metrics.setPipelineNoProgress(0, false)
 	}()
 	var progress pipelineProgress
+	// noPeerWaits counts consecutive restarts whose endorser block could not
+	// be fetched because no peer was connected. It paces those restarts
+	// without feeding the halt threshold.
+	noPeerWaits := 0
 	for {
 		err := attempt(ctx)
 		if err == nil || ctx.Err() != nil {
@@ -7361,7 +7433,25 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 			// available wedged the pipeline without ever raising the stuck
 			// signal. Count it like any other failure to advance; the
 			// bespoke delay below still governs its pacing.
-			progress = ls.trackPipelineProgress(progress)
+			//
+			// The exception is a fetch that had no connection to ask: no
+			// peer has said it lacks the block, so the restart neither
+			// counts toward the halt nor resets the count, and a peer gap of
+			// any length waits for a connection instead of stopping the
+			// pipeline for good.
+			var retryCount int
+			if errors.Is(err, ErrEndorserBlockFetchNoPeer) {
+				progress = ls.holdPipelineProgress(progress)
+				noPeerWaits++
+				retryCount = min(
+					progress.consecutiveNoProgress+noPeerWaits,
+					noProgressStuckThreshold-1,
+				)
+			} else {
+				progress = ls.trackPipelineProgress(progress)
+				noPeerWaits = 0
+				retryCount = progress.consecutiveNoProgress
+			}
 			endorserStuck := progress.stuck()
 			ls.metrics.setPipelineNoProgress(
 				progress.consecutiveNoProgress,
@@ -7374,9 +7464,7 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 				return
 			}
 			timer := time.NewTimer(
-				certifiedEndorserBlockPipelineRetryDelay(
-					progress.consecutiveNoProgress,
-				),
+				certifiedEndorserBlockPipelineRetryDelay(retryCount),
 			)
 			select {
 			case <-ctx.Done():
@@ -7388,6 +7476,7 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 		}
 
 		progress = ls.trackPipelineProgress(progress)
+		noPeerWaits = 0
 		tipSlot := progress.lastTipSlot
 		if errors.Is(err, errRestartLedgerPipeline) {
 			// The no-progress Warn below fires only at 10 and every 100
@@ -9419,6 +9508,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 			return nil, err
 		}
+	}
+	if delta != nil {
+		delta.validated = shouldValidate
 	}
 	return delta, nil
 }
