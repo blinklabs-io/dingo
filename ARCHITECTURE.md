@@ -15726,7 +15726,12 @@ admission holds it on that peer's callback until a ledger snapshot publication
 brings the slot into range (`awaitForecastHorizon`), then applies the onset
 check; until then it neither extends the peer's candidate nor reaches the
 header queue, matching the reference ChainSync client's `OutsideForecastRange`
-wait. As in the reference, the forecast is measured from where the peer's
+wait. While it waits, admission starts blockfetch for headers already queued
+when no fetch is running (`flushQueuedHeadersForHorizonWait`): far from the
+peer tip the header handler otherwise waits for a full batch that the held
+header would complete, and only applying the queued blocks moves the horizon.
+The range is fetched from the header pipeline owner that delivered it, and a
+closed connection starts nothing. As in the reference, the forecast is measured from where the peer's
 chain leaves the local chain: a fork that left before the ledger tip gets that
 point's shorter horizon (`chainsyncForkAnchor`, `forecastSummaryFrom`). The
 intersection is resolved from the peer's recorded headers; a header extending
