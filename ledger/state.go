@@ -13556,11 +13556,11 @@ func resolveValidationEra(
 	}
 	txEra := eras.GetEraByIdIn(eraList, txEraId)
 	if txEra == nil {
-		return eras.EraDesc{}, fmt.Errorf(
+		return eras.EraDesc{}, &localTxValidationError{err: fmt.Errorf(
 			"TX %s era %d not found in era registry",
 			tx.Hash(),
 			txEraId,
-		)
+		)}
 	}
 	return *txEra, nil
 }
@@ -13610,6 +13610,23 @@ type semanticTxValidationError struct {
 
 func (e *semanticTxValidationError) Error() string { return e.err.Error() }
 func (e *semanticTxValidationError) Unwrap() error { return e.err }
+
+type localTxValidationError struct {
+	err error
+}
+
+func (e *localTxValidationError) Error() string { return e.err.Error() }
+func (e *localTxValidationError) Unwrap() error { return e.err }
+
+func isLocalTxValidationError(err error) bool {
+	var localErr *localTxValidationError
+	return errors.As(err, &localErr) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, eras.ErrIncompatibleProtocolParams) ||
+		errors.Is(err, ErrLedgerViewStorageFault) ||
+		errors.Is(err, hardfork.ErrPastHorizon)
+}
 
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 	consensusState, tipState := ls.loadStateSnapshots()
@@ -13744,6 +13761,9 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 				snapshot.eraList,
 			)
 			if err != nil {
+				if isLocalTxValidationError(err) {
+					return err
+				}
 				return &semanticTxValidationError{err: err}
 			}
 			if validationEra.ValidateTxFunc == nil {
@@ -13766,6 +13786,7 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 				snapshot.syntheticV2CostModelInEffect,
 			)
 			lv := (&LedgerView{
+				ctx:             ctx,
 				txn:             txn,
 				ls:              ls,
 				intraBlockUtxos: createdUtxos,
@@ -13779,15 +13800,22 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 				lv,
 				pp,
 			)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			if faultErr := storageFaultOrErr(lv, nil); faultErr != nil {
 				return fmt.Errorf("read TX validation state: %w", faultErr)
 			}
 			if err != nil {
-				return &semanticTxValidationError{err: fmt.Errorf(
+				validationErr := fmt.Errorf(
 					"TX %s failed validation: %w",
 					tx.Hash(),
 					err,
-				)}
+				)
+				if isLocalTxValidationError(err) {
+					return validationErr
+				}
+				return &semanticTxValidationError{err: validationErr}
 			}
 			return nil
 		}

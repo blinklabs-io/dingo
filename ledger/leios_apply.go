@@ -347,6 +347,9 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 			snapshot.eraList,
 		)
 		if err != nil {
+			if isLocalTxValidationError(err) {
+				return 0, 0, err
+			}
 			return 0, 0, &leiosEndorserBlockValidationError{err: err}
 		}
 		if validationEra.ValidateTxFunc != nil {
@@ -363,6 +366,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				snapshot.syntheticV2CostModelInEffect,
 			)
 			lv := (&LedgerView{
+				ctx:               ctx,
 				txn:               txn,
 				ls:                ls,
 				intraBlockUtxos:   created,
@@ -377,6 +381,9 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				lv,
 				pp,
 			)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return 0, 0, ctxErr
+			}
 			if faultErr := storageFaultOrErr(lv, nil); faultErr != nil {
 				return 0, 0, fmt.Errorf(
 					"validate endorser tx %d storage state: %w",
@@ -385,6 +392,13 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				)
 			}
 			if err != nil {
+				if isLocalTxValidationError(err) {
+					return 0, 0, fmt.Errorf(
+						"validate endorser tx %d: %w",
+						idx,
+						err,
+					)
+				}
 				return 0, 0, &leiosEndorserBlockValidationError{err: fmt.Errorf(
 					"endorser tx %d failed validation: %w",
 					idx,

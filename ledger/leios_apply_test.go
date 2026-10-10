@@ -39,6 +39,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -401,6 +402,25 @@ func TestLeiosAnnouncementValidationAcceptsPriorClosureConsume(t *testing.T) {
 		header,
 		[][]byte{rawSecond},
 	))
+}
+
+func TestApplyEndorserBlockKeepsProtocolParamFaultRetryable(t *testing.T) {
+	t.Parallel()
+
+	ls, db, _ := newLeiosApplyTestLedger(t)
+	ls.currentEra = eras.DijkstraEraDesc
+	ls.activeEras = []eras.EraDesc{eras.DijkstraEraDesc}
+	ls.currentPParams = &conway.ConwayProtocolParameters{}
+	ls.publishSnapshotsLocked()
+	rawTx, _ := leiosApplyTestProducerTx(t, 0xe1)
+
+	_, err := leiosApplyTestApplyEndorserBlock(
+		t, ls, db, leiosApplyTestRankingPoint(0x41), 1, 930,
+		leiosApplyTestEbHash(0xe2), rawTx,
+	)
+	require.ErrorIs(t, err, eras.ErrIncompatibleProtocolParams)
+	var validationErr *leiosEndorserBlockValidationError
+	require.NotErrorAs(t, err, &validationErr)
 }
 
 // A ranking block's own transactions are applied by a delta with the closure

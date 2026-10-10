@@ -29,6 +29,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -485,6 +486,78 @@ func TestLeiosAnnouncementValidationMarksInvalidWitnessDeterministic(
 		[][]byte{f.ebTx.Cbor()},
 	)
 	require.ErrorIs(t, err, ErrInvalidLeiosEndorserBlockTransactions)
+}
+
+func TestLeiosAnnouncementValidationKeepsProtocolParamFaultRetryable(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		pparams lcommon.ProtocolParameters
+	}{
+		{name: "wrong type", pparams: &conway.ConwayProtocolParameters{}},
+		{name: "typed nil", pparams: (*dijkstra.DijkstraProtocolParameters)(nil)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLeiosCertApplyFixture(t)
+			f.ls.currentPParams = tc.pparams
+			f.ls.publishSnapshotsLocked()
+			announcer, _ := f.block(
+				1,
+				leiosCertApplyAnnouncingSlot,
+				f.originHash,
+				false,
+				true,
+			)
+			err := f.ls.ValidateLeiosEndorserBlockTransactions(
+				t.Context(),
+				announcer.Header(),
+				[][]byte{f.ebTx.Cbor()},
+			)
+			require.ErrorIs(t, err, eras.ErrIncompatibleProtocolParams)
+			require.NotErrorIs(t, err, ErrInvalidLeiosEndorserBlockTransactions)
+		})
+	}
+}
+
+func TestLeiosAnnouncementValidationPropagatesCancellation(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	era := eras.DijkstraEraDesc
+	era.ValidateTxFunc = func(
+		_ lcommon.Transaction,
+		_ uint64,
+		state lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) error {
+		cancel()
+		provider, ok := state.(interface{ EvaluationContext() context.Context })
+		require.True(t, ok)
+		require.ErrorIs(t, provider.EvaluationContext().Err(), context.Canceled)
+		return errors.New("deterministic verdict after cancellation")
+	}
+	f.ls.currentEra = era
+	f.ls.activeEras = []eras.EraDesc{era}
+	f.ls.publishSnapshotsLocked()
+	announcer, _ := f.block(
+		1,
+		leiosCertApplyAnnouncingSlot,
+		f.originHash,
+		false,
+		true,
+	)
+	err := f.ls.ValidateLeiosEndorserBlockTransactions(
+		ctx,
+		announcer.Header(),
+		[][]byte{f.ebTx.Cbor()},
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotErrorIs(t, err, ErrInvalidLeiosEndorserBlockTransactions)
 }
 
 func TestLeiosCertifiedClosureRejectsValueCreation(t *testing.T) {

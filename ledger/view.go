@@ -529,26 +529,32 @@ func (lv *LedgerView) UtxoById(
 
 	lv.ls.utxoByRefReads.Add(1)
 	utxo, err := lv.ls.db.UtxoByRef(
-		context.Background(),
+		lv.EvaluationContext(),
 		utxoId.Id().Bytes(),
 		utxoId.Index(),
 		lv.txn,
 	)
 	if err != nil {
+		if !errors.Is(err, database.ErrUtxoNotFound) {
+			lv.recordStorageErr(err)
+		}
 		// Not memoized: a ref that is missing now may resolve later.
 		return lcommon.Utxo{}, err
 	}
 	tmpOutput, err := utxo.Decode()
 	if err != nil {
+		lv.recordStorageErr(err)
 		return lcommon.Utxo{}, err
 	}
 	if tmpOutput == nil {
-		return lcommon.Utxo{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"decoded output is nil for utxo %s#%d: %w",
 			utxoId.Id().String(),
 			utxoId.Index(),
 			ErrNilDecodedOutput,
 		)
+		lv.recordStorageErr(err)
+		return lcommon.Utxo{}, err
 	}
 	result := lcommon.Utxo{
 		Id:     utxoId,
