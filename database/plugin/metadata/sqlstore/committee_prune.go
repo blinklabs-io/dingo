@@ -266,42 +266,41 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 	if s.committeeAuthPruneLocked != nil {
 		s.committeeAuthPruneLocked()
 	}
-	rows, err := db.QueryContext(ctx, committeeHotAuthSupersededIDsQuery,
-		coldCredentialTag,
-		coldCredential,
-		horizon,
-		committeeAuthPruneBatch,
-	)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"select superseded committee hot authorizations: %w",
-			err,
+	ids, err := func() (ids []int64, err error) {
+		rows, err := db.QueryContext(ctx, committeeHotAuthSupersededIDsQuery,
+			coldCredentialTag,
+			coldCredential,
+			horizon,
+			committeeAuthPruneBatch,
 		)
-	}
-	ids := make([]int64, 0, committeeAuthPruneBatch)
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return 0, fmt.Errorf(
-				"read superseded committee hot authorization id: %w",
+		if err != nil {
+			return nil, fmt.Errorf(
+				"select superseded committee hot authorizations: %w",
 				err,
 			)
 		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return 0, fmt.Errorf(
-			"read superseded committee hot authorization ids: %w",
-			err,
-		)
-	}
-	if err := rows.Close(); err != nil {
-		return 0, fmt.Errorf(
-			"close superseded committee hot authorization rows: %w",
-			err,
-		)
+		defer rows.Close()
+		ids = make([]int64, 0, committeeAuthPruneBatch)
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return nil, fmt.Errorf(
+					"read superseded committee hot authorization id: %w",
+					err,
+				)
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf(
+				"read superseded committee hot authorization ids: %w",
+				err,
+			)
+		}
+		return ids, nil
+	}()
+	if err != nil {
+		return 0, err
 	}
 	if len(ids) == 0 {
 		return 0, nil
