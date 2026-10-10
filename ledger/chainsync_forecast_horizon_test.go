@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync/atomic"
@@ -585,4 +586,89 @@ func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
 		"admission did not return after its context ended",
 	)
 	require.ErrorIs(t, got.err, context.Canceled)
+}
+
+func TestFarFromTipBlockfetchLowWatermark(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		lowMark   bool
+		headers   int
+		wantFetch bool
+	}{
+		{name: "default holds below the queue bound", headers: 600},
+		{name: "low watermark starts at one range", lowMark: true, headers: BlockfetchBatchSize, wantFetch: true},
+		{name: "low watermark waits below one range", lowMark: true, headers: BlockfetchBatchSize - 1},
+		{name: "default starts at the queue bound", headers: BlockfetchBatchSize * 4, wantFetch: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cm, err := chain.NewManager(context.Background(), nil, nil)
+			require.NoError(t, err)
+			requests := make(chan [2]ocommon.Point, 8)
+			ls := &LedgerState{
+				chain: cm.PrimaryChain(),
+				config: LedgerStateConfig{
+					Logger:                        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+					BlockfetchLowWatermarkEnabled: tc.lowMark,
+					BlockfetchRequestRangeFunc: func(
+						_ ouroboros.ConnectionId,
+						start ocommon.Point,
+						end ocommon.Point,
+					) (uint64, error) {
+						requests <- [2]ocommon.Point{start, end}
+						return 1, nil
+					},
+				},
+			}
+			ls.publishSnapshotsLocked()
+			t.Cleanup(func() {
+				if ls.chainsyncBlockfetchTimeoutTimer != nil {
+					ls.chainsyncBlockfetchTimeoutTimer.Stop()
+				}
+			})
+			connId := testRecycleConnId()
+			tip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(100_000_000, []byte("tip")),
+				BlockNumber: 10_000_000,
+			}
+
+			prev := lcommon.NewBlake2b256(nil)
+			for i := 1; i <= tc.headers; i++ {
+				hash := lcommon.NewBlake2b256(testHashBytes(fmt.Sprintf("lowmark-%d", i)))
+				header := mockHeader{
+					hash:        hash,
+					prevHash:    prev,
+					blockNumber: uint64(i),
+					slot:        uint64(i),
+				}
+				prev = hash
+				require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+					ConnectionId: connId,
+					BlockHeader:  header,
+					Point:        ocommon.NewPoint(header.SlotNumber(), hash.Bytes()),
+					Tip:          tip,
+				}))
+			}
+
+			if !tc.wantFetch {
+				testutil.RequireNoReceive(
+					t,
+					requests,
+					100*time.Millisecond,
+					"blockfetch must wait for the configured header count",
+				)
+				return
+			}
+			testutil.RequireReceive(
+				t,
+				requests,
+				testutil.AsyncWait,
+				"blockfetch must start once the gate is met",
+			)
+			require.Less(t, ls.chain.HeaderCount(), ls.allowedQueuedHeaders()+1)
+		})
+	}
 }

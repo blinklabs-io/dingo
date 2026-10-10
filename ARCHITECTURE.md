@@ -15870,6 +15870,19 @@ re-intersection. Judging the recorded arrival rather than the later handler time
 local decode, EventBus, or scheduler delay cannot make an invalid early header
 appear timely.
 
+While the header is far from the peer tip (beyond the stability window),
+blockfetch normally starts only once `allowedQueuedHeaders()` headers are
+queued. After a forecast-horizon release the headers arrive at the pipeline
+rate, so that fill time can exceed the ledger's remaining backlog and leave it
+waiting for the first block of the next batch.
+`LedgerStateConfig.BlockfetchLowWatermarkEnabled` (off by default) lowers the
+far-from-tip gate to one blockfetch range (`BlockfetchBatchSize`,
+`farFromTipHeaderGate`). `allowedQueuedHeaders()` still bounds the queue, and
+the existing guards are unchanged: no new batch while a request or continuation
+is pending, and the batch starts through `startQueuedBlockfetchLocked` from the
+header pipeline owner. The option is a ledger setting only; no CLI or config
+file key sets it.
+
 This admission rule includes Byron main headers and epoch-boundary headers;
 its two-second allowance is measured in wall-clock time even for Byron's
 20-second slots. The subsequent PBFT guard compares slot onset directly with
