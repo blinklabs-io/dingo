@@ -17,7 +17,7 @@ package ledger
 import (
 	"bytes"
 	"context"
-	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	leiosledger "github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -142,7 +143,10 @@ func TestLedgerProcessBlocksRejectsInvalidLeiosCertificatePastEpochBoundary(
 ) {
 	t.Parallel()
 
-	errInvalidCertificate := errors.New("invalid leios certificate")
+	errInvalidCertificate := fmt.Errorf(
+		"%w: invalid leios certificate",
+		leiosledger.ErrInvalidDijkstraCertificate,
+	)
 	t.Run("same era", func(t *testing.T) {
 		t.Parallel()
 		runLeiosCertEpochBoundaryCase(t, false, errInvalidCertificate, false)
@@ -249,7 +253,20 @@ func runLeiosCertEpochBoundaryCase(
 	var closureRaw cbor.RawMessage
 	var closureTx lcommon.Transaction
 	if crossingClosure {
-		closureRaw, closureTx = leiosApplyTestProducerTx(t, 0xA1)
+		const closureInputAmount = uint64(4_000_000)
+		closureInput := leiosApplyTestSeedKeyUtxo(
+			t,
+			db,
+			0xA0,
+			closureInputAmount,
+		)
+		closureRaw, closureTx = leiosApplyTestSignedSpendingTx(
+			t,
+			0xA1,
+			closureInput,
+			0,
+			closureInputAmount,
+		)
 	}
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
@@ -423,12 +440,32 @@ func TestLedgerProcessBlocksAppliesRankingTransactionsBeforeNextClosure(t *testi
 
 func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
 	t.Helper()
-	producerRaw, producer := leiosApplyTestProducerTx(t, 0xB1)
-	spenderRaw, spender := leiosApplyTestSpendingTx(t, 0xB2, producer.Hash().Bytes(), 0)
 	ebHash := leiosTestHash(0xE5)
+	db := newTestDB(t)
+	const producerInputAmount = uint64(4_000_000)
+	producerInput := leiosApplyTestSeedKeyUtxo(
+		t,
+		db,
+		0xB0,
+		producerInputAmount,
+	)
+	producerRaw, producer := leiosApplyTestSignedSpendingTx(
+		t,
+		0xB1,
+		producerInput,
+		0,
+		producerInputAmount,
+	)
+	producerOutputAmount := producerInputAmount - producer.Fee().Uint64()
+	spenderRaw, spender := leiosApplyTestSignedSpendingTx(
+		t,
+		0xB2,
+		producer.Hash().Bytes(),
+		0,
+		producerOutputAmount,
+	)
 	announcer := leiosBoundaryTestBlock(t, 0, 10, lcommon.Blake2b256{}, false, ebHash, producerRaw)
 	certifier := leiosBoundaryTestBlock(t, 1, 20, announcer.Hash(), true, nil)
-	db := newTestDB(t)
 	cm, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
 	for _, block := range []gledger.Block{announcer, certifier} {

@@ -90,6 +90,63 @@ func leiosApplyTestSpendingTx(
 	return leiosApplyTestTxFromBody(t, bodyCbor)
 }
 
+func leiosApplyTestSeedKeyUtxo(
+	t *testing.T,
+	db *database.Database,
+	seed byte,
+	amount uint64,
+) []byte {
+	t.Helper()
+	txID := bytes.Repeat([]byte{seed}, lcommon.Blake2b256Size)
+	address := append([]byte{0x60}, pathSignerHash()...)
+	outputCbor, err := cbor.Encode(map[uint]any{
+		0: address,
+		1: amount,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+		if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
+			TxId:       txID,
+			OutputIdx:  0,
+			PaymentKey: pathSignerHash(),
+			AddedSlot:  1,
+			Amount:     types.Uint64(amount),
+		}); err != nil {
+			return err
+		}
+		return db.Blob().SetUtxo(txn.Blob(), txID, 0, outputCbor)
+	}))
+	return txID
+}
+
+func leiosApplyTestSignedSpendingTx(
+	t *testing.T,
+	seed byte,
+	inTxID []byte,
+	inIdx uint64,
+	inAmount uint64,
+) (cbor.RawMessage, lcommon.Transaction) {
+	t.Helper()
+	fee := uint64(200_000) + uint64(seed)
+	require.Greater(t, inAmount, fee)
+	address := append([]byte{0x60}, pathSignerHash()...)
+	bodyCbor, err := cbor.Encode(map[uint]any{
+		0: cbor.Tag{Number: 258, Content: []any{[]any{inTxID, inIdx}}},
+		1: []any{map[uint]any{0: address, 1: inAmount - fee}},
+		2: fee,
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(bodyCbor),
+		pathSignedWitnesses(pathSigner(), lcommon.Blake2b256Hash(bodyCbor)),
+		nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	return cbor.RawMessage(txCbor), tx
+}
+
 func leiosApplyTestTxFromBody(
 	t *testing.T,
 	bodyCbor []byte,
@@ -346,8 +403,8 @@ func TestApplyEndorserBlockRejectsSameClosureDoubleConsume(t *testing.T) {
 		t, ls, db, leiosApplyTestRankingPoint(0x22), 2, 911,
 		leiosApplyTestEbHash(0xc5), rawFirst, rawSecond,
 	)
-	var validationErr *leiosEndorserBlockValidationError
-	require.ErrorAs(t, err, &validationErr)
+	require.ErrorIs(t, err, ErrUtxoAlreadyConsumed)
+	require.NotErrorIs(t, err, ErrInvalidLeiosEndorserBlockTransactions)
 	spentBy, deletedSlot := leiosApplyTestUtxoState(t, gdb, producerHash, 0)
 	require.Empty(t, spentBy)
 	require.Zero(t, deletedSlot)
@@ -2470,6 +2527,7 @@ func TestRollbackSameTipRemovesUntickedClosure(t *testing.T) {
 	t.Parallel()
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
+	initializeLeiosApplyTestState(ls)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	ls.currentTip = fixture.ancestorTip
 	ls.publishSnapshotsLocked()
@@ -2492,6 +2550,7 @@ func TestRollbackAheadOfParentRemovesUntickedClosure(t *testing.T) {
 	t.Parallel()
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
+	initializeLeiosApplyTestState(ls)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	ls.currentTip = fixture.ancestorTip
 	ls.publishSnapshotsLocked()
