@@ -113,6 +113,7 @@ type TxValidator interface {
 		tx ledger.Transaction,
 		consumedUtxos map[utxoref.Key]struct{},
 		createdUtxos map[utxoref.Key]lcommon.Utxo,
+		accounts *utxoref.StateOverlay,
 	) error
 }
 
@@ -120,6 +121,7 @@ type TxValidationFunc = func(
 	tx ledger.Transaction,
 	consumedUtxos map[utxoref.Key]struct{},
 	createdUtxos map[utxoref.Key]lcommon.Utxo,
+	accounts *utxoref.StateOverlay,
 ) error
 
 // TxValidationSessionProvider pins an ordered validation pass to one ledger
@@ -128,6 +130,7 @@ type TxValidationSessionProvider interface {
 	WithTxValidationSession(context.Context, func(
 		validate TxValidationFunc,
 		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
 	) error) error
 }
 
@@ -165,7 +168,13 @@ func withTxValidationSession(ctx context.Context,
 		return err
 	}
 	if provider, ok := validator.(TxValidationSessionProvider); ok {
-		return provider.WithTxValidationSession(ctx, fn)
+		return provider.WithTxValidationSession(ctx, func(
+			validate TxValidationFunc,
+			stillCurrent func() bool,
+			_ func(func() error) (bool, error),
+		) error {
+			return fn(validate, stillCurrent)
+		})
 	}
 	return fn(validator.ValidateTxWithOverlay, func() bool { return true })
 }
@@ -587,6 +596,9 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 	// Passed to ValidateTxWithOverlay so later transactions in the
 	// same block can spend outputs from earlier intra-block txs.
 	createdOutputs := make(map[utxoref.Key]lcommon.Utxo)
+	// Track reward-account effects of already-selected transactions so a
+	// later transaction is validated against the balances they leave.
+	pendingAccounts := utxoref.NewStateOverlay()
 
 	// selectTransactions iterates mempoolTxs and adds them to the block
 	// candidate lists (closed over below) until a limit is hit. It runs
@@ -760,7 +772,12 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 			// withTxValidationSession above/below), so every
 			// transaction in this candidate is checked against the
 			// same UTxO set and protocol parameters.
-			if err := validate(fullTx, consumedInputs, createdOutputs); err != nil {
+			if err := validate(
+				fullTx,
+				consumedInputs,
+				createdOutputs,
+				pendingAccounts,
+			); err != nil {
 				b.logger.Debug(
 					"skipping transaction - failed re-validation",
 					"component", "forging",
@@ -932,6 +949,7 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 			for _, utxo := range fullTx.Produced() {
 				createdOutputs[utxoref.ForUtxo(utxo)] = utxo
 			}
+			pendingAccounts.Apply(fullTx)
 
 			b.logger.Debug(
 				"added transaction to block candidate lists",
@@ -984,6 +1002,7 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 				_ ledger.Transaction,
 				_ map[utxoref.Key]struct{},
 				_ map[utxoref.Key]lcommon.Utxo,
+				_ *utxoref.StateOverlay,
 			) error {
 				return nil
 			},

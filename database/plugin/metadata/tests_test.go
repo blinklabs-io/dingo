@@ -38,8 +38,8 @@ import (
 //
 //   - ImportDrep: belongs to the snapshot bulk-import cluster alongside
 //     ImportAccount and ImportPool, which migrates as its own domain.
-//   - ClearDanglingDRepDelegations: mutates the account table (it clears an
-//     account's DRep delegation), not the drep table.
+//   - ClearDanglingDRepDelegations: is a hardfork transition across account
+//     state and the reverse DRep delegator index.
 //   - SetNetworkState / GetNetworkState / DeleteNetworkStateAfterSlot and the
 //     network-donation methods: treasury and reserves are ledger economics
 //     consumed by reward calculation, not governance state, even though they
@@ -63,6 +63,7 @@ var governanceStoreMethods = []string{
 	"GetGovernanceVotes",
 	"GetGovernanceVotesAtSlot",
 	"SetGovernanceVote",
+	"DeleteGovernanceVotesForDrep",
 	"DeleteGovernanceProposalsAfterSlot",
 	"DeleteGovernanceVotesAfterSlot",
 
@@ -101,7 +102,11 @@ var governanceStoreMethods = []string{
 	"GetDrepRegistrationDepositsAtSlot",
 	"GetDRepVotingPowerBatch",
 	"GetDRepVotingPowerByType",
+	"GetDormantDRepEpochs",
 	"UpdateDRepActivity",
+	"BumpDormantDRepExpiries",
+	"ResetDormantDRepEpochs",
+	"SetImportedDormantDRepEpochs",
 	"RecordDRepActivityEpoch",
 	"GetExpiredDReps",
 	"RestoreDrepStateAtSlot",

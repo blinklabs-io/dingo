@@ -4723,18 +4723,17 @@ func waitUntilParkedIn(t *testing.T, symbol string) {
 func waitUntilParkedInFrom(t *testing.T, symbol, caller string) {
 	t.Helper()
 	buf := make([]byte, 1<<20)
+	required := [][]byte{
+		[]byte(semaphoreFrame),
+		[]byte(symbol),
+	}
+	if caller != "" {
+		required = append(required, []byte(caller))
+	}
 	testutil.WaitForConditionWithInterval(
 		t,
 		func() bool {
-			dump := string(buf[:runtime.Stack(buf, true)])
-			for g := range strings.SplitSeq(dump, "\n\ngoroutine ") {
-				if strings.Contains(g, semaphoreFrame) &&
-					strings.Contains(g, symbol) &&
-					(caller == "" || strings.Contains(g, caller)) {
-					return true
-				}
-			}
-			return false
+			return runtimeStackContains(&buf, required...)
 		},
 		5*time.Second,
 		time.Millisecond,
@@ -4749,14 +4748,46 @@ func waitUntilGoroutineIn(t *testing.T, symbol string) {
 	buf := make([]byte, 1<<20)
 	testutil.WaitForConditionWithInterval(
 		t,
-		func() bool {
-			dump := string(buf[:runtime.Stack(buf, true)])
-			return strings.Contains(dump, symbol)
-		},
+		func() bool { return runtimeStackContains(&buf, []byte(symbol)) },
 		5*time.Second,
 		time.Millisecond,
 		"no goroutine reached "+symbol,
 	)
+}
+
+func runtimeStackContains(buf *[]byte, required ...[]byte) bool {
+	for {
+		n := runtime.Stack(*buf, true)
+		if n < len(*buf) {
+			return goroutineStackContains((*buf)[:n], required...)
+		}
+		*buf = make([]byte, len(*buf)*2)
+	}
+}
+
+func goroutineStackContains(dump []byte, required ...[]byte) bool {
+	for len(dump) > 0 {
+		next := bytes.Index(dump, []byte("\n\ngoroutine "))
+		goroutine := dump
+		if next >= 0 {
+			goroutine = dump[:next]
+		}
+		matches := true
+		for _, frame := range required {
+			if !bytes.Contains(goroutine, frame) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return true
+		}
+		if next < 0 {
+			return false
+		}
+		dump = dump[next+2:]
+	}
+	return false
 }
 
 func TestRollbackDeferredThenExcludesPersistentAdds(t *testing.T) {

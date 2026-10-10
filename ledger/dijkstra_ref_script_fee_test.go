@@ -231,17 +231,17 @@ func TestLedgerStateValidateTxDijkstraTieredRefScriptFee(t *testing.T) {
 
 	require.NoError(
 		t,
-		ls.ValidateTxWithOverlay(fx.tx(t, fx.minFee), nil, created),
+		ls.ValidateTxWithOverlay(fx.tx(t, fx.minFee), nil, created, nil),
 		"exactly paid fee must be accepted",
 	)
 	requireDijkstraFeeTooSmall(
 		t,
-		ls.ValidateTxWithOverlay(fx.tx(t, fx.minFee-1), nil, created),
+		ls.ValidateTxWithOverlay(fx.tx(t, fx.minFee-1), nil, created, nil),
 	)
 	requireDijkstraFeeTooSmall(
 		t,
 		ls.ValidateTxWithOverlay(
-			fx.tx(t, uint64(dijkstraRefFeeBase)+fx.refSize), nil, created,
+			fx.tx(t, uint64(dijkstraRefFeeBase)+fx.refSize), nil, created, nil,
 		),
 	)
 }

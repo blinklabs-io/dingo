@@ -746,8 +746,12 @@ var columnTypeAliases = map[string]string{
 
 var columnTypeArgsPattern = regexp.MustCompile(`\s*\([^)]*\)`)
 
-func declaredColumnType(definition string) string {
-	fields := strings.Fields(definition)
+var sqlFieldPattern = regexp.MustCompile(
+	`[^\s'"]*(?:'(?:''|[^'])*'|"(?:""|[^"])*")[^\s'"]*|[^\s]+`,
+)
+
+func splitColumnDefinition(definition string) (string, []string) {
+	fields := splitSQLFields(definition)
 	end := len(fields)
 	for index, field := range fields {
 		name, _, _ := strings.Cut(field, "(")
@@ -756,7 +760,127 @@ func declaredColumnType(definition string) string {
 			break
 		}
 	}
-	return strings.Join(fields[:end], " ")
+	return strings.Join(fields[:end], " "), fields[end:]
+}
+
+// splitSQLFields splits a column definition on whitespace outside quoted SQL
+// literals. The replay guard only needs individual constraint tokens, but a
+// DEFAULT string remains one value even when it contains spaces.
+func splitSQLFields(value string) []string {
+	fields := sqlFieldPattern.FindAllString(value, -1)
+	if fields == nil {
+		return []string{}
+	}
+	return fields
+}
+
+func declaredColumnType(definition string) string {
+	declared, _ := splitColumnDefinition(definition)
+	return declared
+}
+
+// declaredColumnConstraints reads the nullability and default out of a column
+// definition. It reports false for any other constraint (UNIQUE, CHECK,
+// REFERENCES, ...), which the catalog queries here cannot read back, so a
+// definition carrying one is never accepted as already applied.
+func declaredColumnConstraints(
+	definition string,
+) (notNull bool, dflt string, hasDefault bool, ok bool) {
+	_, tokens := splitColumnDefinition(definition)
+	for i := 0; i < len(tokens); i++ {
+		switch strings.ToLower(tokens[i]) {
+		case "null":
+		case "not":
+			if i+1 >= len(tokens) || !strings.EqualFold(tokens[i+1], "null") {
+				return false, "", false, false
+			}
+			notNull = true
+			i++
+		case "default":
+			if i+1 >= len(tokens) {
+				return false, "", false, false
+			}
+			if !sqlQuotesBalanced(tokens[i+1]) {
+				return false, "", false, false
+			}
+			dflt, hasDefault = tokens[i+1], true
+			i++
+		default:
+			return false, "", false, false
+		}
+	}
+	return notNull, dflt, hasDefault, true
+}
+
+func findOutsideSQLQuotes(value, target string) (int, bool) {
+	var quote byte
+	for index := 0; index < len(value); index++ {
+		current := value[index]
+		if quote != 0 {
+			if current == quote {
+				if index+1 < len(value) && value[index+1] == quote {
+					index++
+				} else {
+					quote = 0
+				}
+			}
+			continue
+		}
+		if current == '\'' || current == '"' {
+			quote = current
+			continue
+		}
+		if strings.HasPrefix(value[index:], target) {
+			return index, true
+		}
+	}
+	return -1, quote == 0
+}
+
+func sqlQuotesBalanced(value string) bool {
+	_, balanced := findOutsideSQLQuotes(value, "\x00")
+	return balanced
+}
+
+// normalizeColumnDefault reduces the spellings the three catalogs report for
+// one default ('x'::text, "false", 0) to a comparable form.
+func normalizeColumnDefault(value string) string {
+	value = strings.TrimSpace(value)
+	if cast, _ := findOutsideSQLQuotes(value, "::"); cast >= 0 {
+		value = value[:cast]
+	}
+	value = strings.Trim(value, "()")
+	if len(value) >= 2 &&
+		((value[0] == '\'' && value[len(value)-1] == '\'') ||
+			(value[0] == '"' && value[len(value)-1] == '"')) {
+		return value[1 : len(value)-1]
+	}
+	switch strings.ToLower(value) {
+	case "true":
+		return "1"
+	case "false":
+		return "0"
+	case "null", "current_date", "current_time", "current_timestamp":
+		return strings.ToLower(value)
+	}
+	return value
+}
+
+// addColumnConstraintsMatch reports whether an existing column's reported
+// nullability and default agree with the ADD COLUMN definition.
+func addColumnConstraintsMatch(
+	reportedNotNull bool,
+	reportedDefault sql.NullString,
+	definition string,
+) bool {
+	notNull, dflt, hasDefault, ok := declaredColumnConstraints(definition)
+	if !ok || notNull != reportedNotNull ||
+		hasDefault != reportedDefault.Valid {
+		return false
+	}
+	return !hasDefault ||
+		normalizeColumnDefault(dflt) ==
+			normalizeColumnDefault(reportedDefault.String)
 }
 
 func normalizeColumnType(value string) string {
@@ -786,6 +910,28 @@ func mysqlColumnTypeMatches(reported sql.NullString, definition string) bool {
 		declared = "tinyint"
 	}
 	return actual == declared
+}
+
+// mysqlColumnAlreadyPresent confirms the column an ADD COLUMN statement names
+// exists in the current schema with the declared definition before the
+// duplicate-column error is treated as an idempotent replay.
+func mysqlColumnAlreadyPresent(
+	ctx context.Context,
+	conn ddlExecer,
+	statement string,
+) bool {
+	table, column, definition, ok := parseAddColumnStatement(statement)
+	if !ok {
+		return false
+	}
+	var reported, nullable, dflt sql.NullString
+	return conn.QueryRowContext(ctx, `
+SELECT data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
+LIMIT 1`, table, column).Scan(&reported, &nullable, &dflt) == nil &&
+		mysqlColumnTypeMatches(reported, definition) &&
+		addColumnConstraintsMatch(nullable.String == "NO", dflt, definition)
 }
 
 // isPostgresDDLAlreadyAppliedOnConn reports whether an ADD COLUMN statement
@@ -821,19 +967,21 @@ func isPostgresDDLAlreadyAppliedOnConn(
 	if !ok {
 		return false
 	}
-	var reported sql.NullString
+	var reported, nullable, dflt sql.NullString
 	if queryErr := conn.QueryRowContext(
 		ctx,
 		postgresColumnTypeQuery,
 		table,
 		column,
-	).Scan(&reported); queryErr != nil {
+	).Scan(&reported, &nullable, &dflt); queryErr != nil {
 		return false
 	}
-	return addColumnTypeMatches(reported, definition)
+	return addColumnTypeMatches(reported, definition) &&
+		addColumnConstraintsMatch(nullable.String == "NO", dflt, definition)
 }
 
-// postgresColumnTypeQuery reports an existing column's declared type, scoped
+// postgresColumnTypeQuery reports an existing column's declared type,
+// nullability and default, scoped
 // to the one relation the migration's own unqualified DDL resolved against.
 //
 // to_regclass applies the connection's search_path exactly as the ALTER TABLE
@@ -847,7 +995,7 @@ func isPostgresDDLAlreadyAppliedOnConn(
 // schema_migrations exemption is keyed on (schema, name) rather than on name
 // alone. Resolving to NULL yields no rows, which each caller treats as "not
 // determinable" rather than as a confirmed answer.
-const postgresColumnTypeQuery = `SELECT c.data_type
+const postgresColumnTypeQuery = `SELECT c.data_type, c.is_nullable, c.column_default
 FROM pg_class rel
 JOIN pg_namespace ns ON ns.oid = rel.relnamespace
 JOIN information_schema.columns c
@@ -890,16 +1038,18 @@ func isSQLiteDDLAlreadyAppliedOnConn(
 	if !ok {
 		return false
 	}
-	var reported sql.NullString
+	var reported, dflt sql.NullString
+	var notNull bool
 	if queryErr := conn.QueryRowContext(
 		ctx,
-		"SELECT type FROM pragma_table_info(?) WHERE name = ?",
+		`SELECT type, "notnull", dflt_value FROM pragma_table_info(?) WHERE name = ?`,
 		table,
 		column,
-	).Scan(&reported); queryErr != nil {
+	).Scan(&reported, &notNull, &dflt); queryErr != nil {
 		return false
 	}
-	return addColumnTypeMatches(reported, definition)
+	return addColumnTypeMatches(reported, definition) &&
+		addColumnConstraintsMatch(notNull, dflt, definition)
 }
 
 // parseDropColumnStatement extracts the table and column named by an
