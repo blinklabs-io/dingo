@@ -522,7 +522,9 @@ func TestCommitteeHotPruningBoundsEachDeleteCall(t *testing.T) {
 		)
 	}
 
-	queryer := newDialectQueryer(store.writeDB, store.dialect.Name())
+	queryer := &committeePruneRecordingQueryer{
+		queryer: newDialectQueryer(store.writeDB, store.dialect.Name()),
+	}
 	pruned, err := store.pruneCommitteeHotAuthorizations(
 		context.Background(), queryer, coldTag, cold, preprodTipSlot,
 	)
@@ -533,6 +535,69 @@ func TestCommitteeHotPruningBoundsEachDeleteCall(t *testing.T) {
 		committeeAuthPruneBatch,
 		authRowCountFor(t, store, coldTag, cold),
 	)
+	require.Equal(t, []string{
+		committeeHotAuthorizationDeleteIDsQuery(committeeAuthPruneBatch),
+	}, queryer.statements)
+}
+
+type committeePruneRecordingQueryer struct {
+	queryer
+	statements []string
+}
+
+func (q *committeePruneRecordingQueryer) ExecContext(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (sql.Result, error) {
+	q.statements = append(q.statements, query)
+	return q.queryer.ExecContext(ctx, query, args...)
+}
+
+func TestCommitteeHotAuthorizationBatchDeleteUsesPrimaryKeyLookup(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	args := make([]any, committeeAuthPruneBatch)
+	for i := range args {
+		args[i] = int64(i + 1)
+	}
+	rows, err := store.writeDB.Query(
+		"EXPLAIN QUERY PLAN "+committeeHotAuthorizationDeleteIDsQuery(committeeAuthPruneBatch),
+		args...,
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	usesPrimaryKey := false
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
+		require.NotContains(t, detail, "SCAN auth_committee_hot")
+		usesPrimaryKey = usesPrimaryKey ||
+			strings.Contains(detail, "USING INTEGER PRIMARY KEY")
+	}
+	require.NoError(t, rows.Err())
+	require.True(t, usesPrimaryKey)
+}
+
+func TestCommitteeHotAuthorizationBatchDeleteRebindsForSQLProviders(t *testing.T) {
+	t.Parallel()
+	args := []any{int64(1), int64(2)}
+	query := committeeHotAuthorizationDeleteIDsQuery(len(args))
+	for dialect, want := range map[string]string{
+		"postgres": "DELETE FROM auth_committee_hot WHERE id IN ($1,$2)",
+		"mysql":    "DELETE FROM auth_committee_hot WHERE id IN (?,?)",
+	} {
+		t.Run(dialect, func(t *testing.T) {
+			t.Parallel()
+			recorder := &recordingQueryer{}
+			queryer := newDialectQueryer(recorder, dialect)
+			_, err := queryer.ExecContext(context.Background(), query, args...)
+			require.NoError(t, err)
+			require.Equal(t, []string{want}, recorder.statements)
+		})
+	}
 }
 
 // TestAuthCommitteeHotMaintenanceKeepsTallyAndYieldsWriterAtPreprodScale uses
