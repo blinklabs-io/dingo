@@ -53,7 +53,6 @@ var hotStatements = func() []string {
 		deletePoolRegistrationOwnersSQL,
 		deletePoolRegistrationRelaysSQL,
 		deleteMIRRewardsSQL,
-		deleteCommitteeHotAuthorizationByIDSQL,
 		deleteAddressTransactionSQL,
 		poolByKeyHashQuery,
 		sqlitequery.GetAccountByCredentialQuery,

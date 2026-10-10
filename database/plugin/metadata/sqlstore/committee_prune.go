@@ -152,8 +152,10 @@ WHERE cold_credential_tag = ?
 ORDER BY added_slot DESC, certificate_id DESC
 LIMIT ? OFFSET 1`
 
-const deleteCommitteeHotAuthorizationByIDSQL = `
-DELETE FROM auth_committee_hot WHERE id = ?`
+func committeeHotAuthorizationDeleteIDsQuery(count int) string {
+	return "DELETE FROM auth_committee_hot WHERE id IN (" +
+		bindPlaceholders(count) + ")"
+}
 
 type committeeAuthIdentity struct {
 	tag        uint8
@@ -305,33 +307,24 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	// A DELETE ... IN (subquery) can scan the full table when SQLite has stale
-	// statistics during a bulk import. Point deletes keep work bounded by the
-	// indexed candidate selection above.
-	var pruned int64
-	for _, id := range ids {
-		result, err := s.execCached(
-			ctx,
-			db,
-			deleteCommitteeHotAuthorizationByIDSQL,
-			id,
-		)
-		if err != nil {
-			return 0, fmt.Errorf(
-				"prune committee hot authorization %d: %w",
-				id,
-				err,
-			)
-		}
-		count, err := result.RowsAffected()
-		if err != nil {
-			return 0, fmt.Errorf(
-				"prune committee hot authorization %d: row count: %w",
-				id,
-				err,
-			)
-		}
-		pruned += count
+	// Binding the bounded ID set turns the indexed candidates into one DELETE
+	// statement without returning to the stale-statistics-sensitive subquery.
+	deleteArgs := make([]any, len(ids))
+	for i, id := range ids {
+		deleteArgs[i] = id
+	}
+	result, err := s.execCached(
+		ctx,
+		db,
+		committeeHotAuthorizationDeleteIDsQuery(len(ids)),
+		deleteArgs...,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("prune superseded committee hot authorizations: %w", err)
+	}
+	pruned, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("prune superseded committee hot authorizations: row count: %w", err)
 	}
 	return pruned, nil
 }
