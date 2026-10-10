@@ -207,8 +207,10 @@ first run on a database whose `auto_vacuum` mode is not `INCREMENTAL` sets that
 mode and performs one full `VACUUM`, which holds the pool for the whole rewrite
 (minutes on a large database). Every later run releases free pages with
 `PRAGMA incremental_vacuum` in steps of 1000 pages and returns the connection
-to the pool between steps, so queued writes run between steps. Incremental
-vacuum returns free pages to the filesystem; it does not defragment the file.
+to the pool between steps, so queued writes run between steps. If a step does
+not reduce `freelist_count`, the run stops with an error instead of continuing
+without progress. Incremental vacuum returns free pages to the filesystem; it
+does not defragment the file.
 The job runs on its own ticker and does not change the separate daily committee
 authorization cleanup schedule.
 
