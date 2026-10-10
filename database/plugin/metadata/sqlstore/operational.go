@@ -68,7 +68,7 @@ func (s *Store) SetTip(tip ochainsync.Tip, txn types.Txn) error {
 	if err != nil {
 		return err
 	}
-	queries := s.operationalQueries(db)
+	queries := s.operationalQueriesCached(db)
 	slot, err := checkedInt64(tip.Point.Slot)
 	if err != nil {
 		return fmt.Errorf("set tip slot: %w", err)
@@ -572,7 +572,7 @@ func (s *Store) SetBlockNonce(
 	if err != nil {
 		return err
 	}
-	queries := s.operationalQueries(db)
+	queries := s.operationalQueriesCached(db)
 	slot, err := checkedInt64(slotNumber)
 	if err != nil {
 		return err

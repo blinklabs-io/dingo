@@ -147,6 +147,12 @@ func (a *transactionBatchAccumulator) restore(
 	}
 }
 
+// getUtxoSpendStateQuery reads back a consumed input that the spend UPDATE
+// did not mark, to tell an already-spent input from a missing one.
+const getUtxoSpendStateQuery = `
+SELECT deleted_slot, spent_at_tx_id
+FROM utxo WHERE tx_id = ? AND output_idx = ?`
+
 const transactionInsertSQL = `
 INSERT INTO "transaction" (
     hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
@@ -1058,9 +1064,7 @@ func (s *Store) setTransactionWithAccumulator(
 						deletedSlot uint64
 						spentBy     []byte
 					)
-					err = db.QueryRowContext(ctx, `
-SELECT deleted_slot, spent_at_tx_id
-FROM utxo WHERE tx_id = ? AND output_idx = ?`,
+					err = s.queryRowCached(ctx, db, getUtxoSpendStateQuery,
 						utxoID.Hash,
 						utxoID.Idx,
 					).Scan(&deletedSlot, &spentBy)
