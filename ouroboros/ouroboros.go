@@ -215,6 +215,9 @@ type Ouroboros struct {
 	// the connection; one earliest-onset timer is retained per connection.
 	chainsyncHeaderAdmission chainsyncHeaderAdmissionFunc
 	chainsyncHeaderSlotTime  func(uint64) (time.Time, error)
+	// chainsyncLocalTipBlock returns the local tip's block number and the
+	// security parameter k. Tests override it without a LedgerState.
+	chainsyncLocalTipBlock func() (tipBlock, k uint64)
 	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
 	// gate whether a peer-reported header may influence Genesis chain-selection
 	// density or corroboration before its VRF/KES cryptography (and, once local
@@ -676,6 +679,13 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.blockfetchRangeBytes = o.ledgerState.BlockfetchRangeExpectedBytes
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
+		o.chainsyncLocalTipBlock = func() (uint64, uint64) {
+			k := o.ledgerState.SecurityParam()
+			if k < 0 {
+				k = 0
+			}
+			return o.ledgerState.Tip().BlockNumber, uint64(k)
+		}
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
 		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCrypto
 	}

@@ -64,6 +64,12 @@ const (
 	// restarts from fresh intersect points. It is not a peer-fault signal and
 	// does not impose a peer cooldown.
 	ChainsyncResyncReasonDisconnectedHeaderAdmission = "disconnected header admission"
+	// ChainsyncResyncReasonBehindLocalTip re-intersects an ingress-eligible
+	// ChainSync connection whose delivered header trails the local tip by more
+	// than the security parameter. Its headers cannot extend the local chain,
+	// so the connection restarts from fresh intersect points. It is not a
+	// peer-fault signal and does not impose a peer cooldown.
+	ChainsyncResyncReasonBehindLocalTip = "behind local tip"
 )
 
 // ChainsyncResyncEvent carries the connection ID that should

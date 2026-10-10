@@ -288,3 +288,131 @@ func TestChainsyncClientRollForwardResyncsDisconnectedHeader(t *testing.T) {
 		"a disconnected header is not a peer fault",
 	)
 }
+
+// setLocalTip stubs the local tip block number and the security parameter k.
+//
+// It also lets header verification pass, so a header that is not resynced
+// proceeds to chain selection instead of reaching an unset seam.
+func (f forecastHorizonFixture) setLocalTip(tipBlock, k uint64) {
+	f.o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) error {
+		return nil
+	}
+	f.o.chainsyncLocalTipBlock = func() (uint64, uint64) {
+		return tipBlock, k
+	}
+}
+
+func requireBehindTipResync(
+	t *testing.T,
+	f forecastHorizonFixture,
+	resyncCh <-chan event.Event,
+) {
+	t.Helper()
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"a header far behind the local tip must request a re-intersection",
+	)
+	data, ok := resync.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, f.conn, data.ConnectionId)
+	require.Equal(t, event.ChainsyncResyncReasonBehindLocalTip, data.Reason)
+	require.False(t, chainsyncResyncDeniesPeer(data.Reason))
+}
+
+// An ingress-eligible connection whose cursor trails the local tip by more
+// than k can never contribute, so it re-intersects from the local chain. The
+// header does not extend the peer's candidate or reach the ledger, a second
+// far-behind header on the same connection does not request a second resync,
+// and the peer is not penalized.
+func TestChainsyncClientRollForwardResyncsEligibleClientFarBehindTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newForecastHorizonFixture(t, "10.0.0.24:3001")
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
+	f.setLocalTip(1000, 10)
+
+	// k+1 blocks behind the tip is the smallest distance that is resynced.
+	f.rollForward(t, newTestBlockHeader(400, 989, 0xa5))
+	requireBehindTipResync(t, f, resyncCh)
+	f.rollForward(t, newTestBlockHeader(401, 500, 0xa6))
+
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		200*time.Millisecond,
+		"a second far-behind header must not request a second resync",
+	)
+	testutil.RequireNoReceive(
+		t,
+		f.tipCh,
+		200*time.Millisecond,
+		"a far-behind header must not extend the peer's candidate",
+	)
+	testutil.RequireNoReceive(
+		t,
+		f.ledgerCh,
+		200*time.Millisecond,
+		"a far-behind header must not be queued for blockfetch",
+	)
+	testutil.RequireNoReceive(
+		t,
+		f.recycle,
+		200*time.Millisecond,
+		"a far-behind header is not a peer fault",
+	)
+}
+
+// An observer promoted into an ingress slot with a cursor left far behind the
+// local tip re-intersects at the moment it is promoted.
+func TestChainsyncClientRollForwardResyncsPromotedObserverFarBehindTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newForecastHorizonFixture(t, "10.0.0.25:3001")
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
+	f.setLocalTip(1000, 10)
+	require.True(t, f.o.chainsyncState.SetClientObservabilityOnly(f.conn, true))
+
+	f.rollForward(t, newTestBlockHeader(400, 500, 0xa7))
+
+	requireBehindTipResync(t, f, resyncCh)
+	observabilityOnly, exists := f.o.chainsyncState.ClientObservabilityOnly(
+		f.conn,
+	)
+	require.True(t, exists)
+	require.False(t, observabilityOnly, "the observer must have been promoted")
+}
+
+// A fork or rollback within k is ordinary: the header is behind the local tip
+// but not by more than k blocks, so the connection is not resynced and the
+// header still reaches chain selection.
+func TestChainsyncClientRollForwardKeepsEligibleClientWithinKOfTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newForecastHorizonFixture(t, "10.0.0.26:3001")
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
+	f.setLocalTip(1000, 10)
+
+	// Exactly k behind is within bounds.
+	f.rollForward(t, newTestBlockHeader(990, 990, 0xa8))
+
+	testutil.RequireReceive(
+		t,
+		f.tipCh,
+		testutil.AsyncWait,
+		"a header within k of the local tip must reach chain selection",
+	)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		200*time.Millisecond,
+		"a header within k of the local tip must not request a resync",
+	)
+}

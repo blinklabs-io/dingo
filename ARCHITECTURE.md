@@ -15871,6 +15871,16 @@ without waiting (`chainsyncHeaderDisconnected`). The callback returns and the
 connection re-intersects from the local chain with
 `ChainsyncResyncReasonDisconnectedHeaderAdmission`, which does not penalize
 the peer.
+An ingress-eligible connection whose roll-forward header trails the local tip
+by more than the security parameter `k` in block number is resynced the same
+way, with `ChainsyncResyncReasonBehindLocalTip` and no peer denial. Such a
+connection can never contribute: the ledger discards its headers as stale and
+chain selection skips the peer, while it holds an ingress slot that a peer at
+the tip could use. The check runs in the callback after
+`reconcileChainsyncIngressAdmission`, so an observer promoted with a cursor
+left far behind is resynced on its first header. The shared per-connection
+timer marker allows one resync per connection until it reconnects, and a
+header within `k` of the tip (a normal rollback or fork) is not affected.
 Should the horizon move back after admission (a ledger rollback),
 chain-selection verification reports `ledger.ErrHeaderBeyondForecastHorizon`:
 the header waits for admission once more, and if it is still out of range it is

@@ -1143,6 +1143,20 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	return nil
 }
 
+// chainsyncHeaderFarBehindLocalTip reports whether a header with the given
+// block number trails the local tip by more than the security parameter. A
+// rollback or fork within k is ordinary and is never reported. Without a
+// ledger the answer is false.
+func (o *Ouroboros) chainsyncHeaderFarBehindLocalTip(
+	headerBlockNumber uint64,
+) bool {
+	if o.chainsyncLocalTipBlock == nil {
+		return false
+	}
+	tipBlock, k := o.chainsyncLocalTipBlock()
+	return tipBlock > headerBlockNumber && tipBlock-headerBlockNumber > k
+}
+
 func (o *Ouroboros) chainsyncClientRollForwardAt(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
@@ -1207,6 +1221,28 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			Type:         blockType,
 			BlockHeader:  v,
 			Tip:          tip,
+		}
+		// An ingress-eligible connection whose headers trail the local tip by
+		// more than k can never contribute: the ledger drops them as stale and
+		// chain selection skips the peer, while the connection holds an
+		// eligible slot a peer at the tip could use. This also covers an
+		// observer promoted just above with a cursor left far behind.
+		if ingressEligible && o.chainsyncHeaderFarBehindLocalTip(
+			v.BlockNumber(),
+		) {
+			o.config.Logger.Debug(
+				"chainsync: header far behind the local tip",
+				"component", "ouroboros",
+				"slot", blockSlot,
+				"block_number", v.BlockNumber(),
+				"connection_id", ctx.ConnectionId.String(),
+			)
+			o.scheduleHeaderResync(
+				ctx.ConnectionId,
+				time.Now(),
+				event.ChainsyncResyncReasonBehindLocalTip,
+			)
+			return nil
 		}
 		// Enforce the future-header boundary on this peer's protocol callback,
 		// before any observed-tip, cursor, dedup, or ledger mutation. A
