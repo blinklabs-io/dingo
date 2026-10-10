@@ -543,7 +543,8 @@ const sqliteDiskSizeQueryTimeout = 5 * time.Second
 // against writeDB or readDB. This mirrors checkpointWAL's own dedicated
 // connection above. An earlier version queried readDB directly: one gauge
 // read left a connection idled back into that shared pool indefinitely
-// (neither pool sets SetConnMaxIdleTime/SetConnMaxLifetime), confirmed by
+// (no idle timeout on either pool; the read pool's five-minute lifetime still
+// outlasts a gauge interval), confirmed by
 // inspecting readDB's own sql.DB.Stats().OpenConnections after a single
 // DiskSize() call (see TestDiskSizeDoesNotLeaveReadDBConnectionOpen). Against
 // live containers running the perf branch,
