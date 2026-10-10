@@ -4725,6 +4725,61 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	return true, nil
 }
 
+// flushQueuedHeadersForHorizonWait starts blockfetch for headers already
+// queued while admission holds the next header past the forecast horizon.
+// Far from the peer tip the header handler waits for a full batch before
+// fetching, but the held header is the one that would complete it, and only
+// applying the queued blocks moves the horizon that releases it. It is a no-op
+// when a fetch is already running or nothing is queued.
+//
+// The fetch origin is the header pipeline owner, which delivered the queued
+// headers, rather than waitingConnId: peer selection treats the origin as a
+// holder of the range, and the waiting peer may be on a fork that leaves the
+// local chain below the queued headers. waitingConnId is the origin only when
+// no owner is recorded. A closed origin starts nothing, since its close may
+// already have been processed and must not be undone here.
+func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
+	waitingConnId ouroboros.ConnectionId,
+) {
+	if ls.chain == nil || ls.chain.HeaderCount() == 0 {
+		return
+	}
+	var pending pendingPublishes
+	defer pending.flush()
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	if ls.chainsyncBlockfetchReadyChan != nil ||
+		ls.blockfetchContinuationPending ||
+		ls.chain.HeaderCount() == 0 {
+		return
+	}
+	connId := ls.headerPipelineConnId
+	if connIdKey(connId) == "" {
+		connId = waitingConnId
+	}
+	if !ls.isConnectionLive(connId) {
+		return
+	}
+	ls.selectedBlockfetchConnId = connId
+	initialConnId := ls.selectInitialBlockfetchConn(connId)
+	ls.config.Logger.Debug(
+		"starting blockfetch for queued headers while a header awaits the forecast horizon",
+		"component", "ledger",
+		"connection_id", initialConnId.String(),
+		"header_count", ls.chain.HeaderCount(),
+	)
+	if err := ls.startQueuedBlockfetchLocked(initialConnId, &pending); err != nil {
+		ls.config.Logger.Warn(
+			"failed to start blockfetch for queued headers",
+			"component", "ledger",
+			"connection_id", initialConnId.String(),
+			"error", err,
+		)
+	}
+}
+
 // awaitForecastHorizon blocks until the published ledger state can forecast
 // e's slot, or ctx ends. The horizon only moves when a snapshot is published,
 // so it waits for publication rather than polling.
@@ -4746,6 +4801,7 @@ func (ls *LedgerState) awaitForecastHorizon(
 			)
 			logged = true
 		}
+		ls.flushQueuedHeadersForHorizonWait(e.ConnectionId)
 		select {
 		case <-published:
 		case <-ctx.Done():

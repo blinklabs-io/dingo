@@ -18,6 +18,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -585,4 +586,207 @@ func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
 		"admission did not return after its context ended",
 	)
 	require.ErrorIs(t, got.err, context.Canceled)
+}
+
+// Headers queued behind a far-from-tip batch are what advance the ledger, and
+// the ledger is what moves the forecast horizon. Admission must therefore
+// start blockfetch for the headers already queued instead of waiting for the
+// next header to complete the batch, which it is itself withholding.
+func TestAwaitChainsyncHeaderAdmissionStartsBlockfetchForQueuedHeaders(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	testChain := cm.PrimaryChain()
+	queued := mockHeader{slot: 10, blockNumber: 1}
+	require.NoError(t, testChain.AddBlockHeader(context.Background(), queued))
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	covered := &atomic.Bool{}
+	ranges := make(chan ocommon.Point, 4)
+	ls := &LedgerState{
+		chain: testChain,
+		ctx:   t.Context(),
+		slotClock: NewSlotClock(
+			gatedHorizonSlotTimeProvider{
+				SlotTimeProvider: newMockSlotTimeProvider(
+					systemStart,
+					time.Second,
+					100,
+				),
+				slot:    90,
+				covered: covered,
+			},
+			DefaultSlotClockConfig(),
+		),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				_ ouroboros.ConnectionId,
+				start ocommon.Point,
+				_ ocommon.Point,
+			) (uint64, error) {
+				ranges <- start
+				return 0, nil
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+	t.Cleanup(func() {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		}
+	})
+
+	e := futureHeaderEvent(90, arrival)
+	e.ConnectionId = testRecycleConnId()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	results := awaitAdmissionAsync(ctx, ls, e)
+
+	start := testutil.RequireReceive(
+		t,
+		ranges,
+		testutil.AsyncWait,
+		"a header held past the forecast horizon must not strand the queued headers that advance the ledger",
+	)
+	require.Equal(t, queued.SlotNumber(), start.Slot)
+
+	covered.Store(true)
+	ls.notifySnapshotPublished()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not resume once the ledger could forecast the slot",
+	)
+	require.NoError(t, got.err)
+	require.True(t, got.accepted)
+}
+
+type horizonFlushRequest struct {
+	connId ouroboros.ConnectionId
+	start  ocommon.Point
+}
+
+// newHorizonFlushTestLedger returns a ledger holding one queued header with
+// slot 90 past the forecast horizon, recording every blockfetch range request.
+func newHorizonFlushTestLedger(
+	t *testing.T,
+	live func(ouroboros.ConnectionId) bool,
+) (*LedgerState, <-chan horizonFlushRequest) {
+	t.Helper()
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	testChain := cm.PrimaryChain()
+	require.NoError(t, testChain.AddBlockHeader(
+		context.Background(),
+		mockHeader{slot: 10, blockNumber: 1},
+	))
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	requests := make(chan horizonFlushRequest, 4)
+	ls := &LedgerState{
+		chain: testChain,
+		ctx:   t.Context(),
+		slotClock: NewSlotClock(
+			gatedHorizonSlotTimeProvider{
+				SlotTimeProvider: newMockSlotTimeProvider(
+					systemStart,
+					time.Second,
+					100,
+				),
+				slot:    90,
+				covered: &atomic.Bool{},
+			},
+			DefaultSlotClockConfig(),
+		),
+		config: LedgerStateConfig{
+			Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+			ConnectionLiveFunc: live,
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				start ocommon.Point,
+				_ ocommon.Point,
+			) (uint64, error) {
+				requests <- horizonFlushRequest{connId: connId, start: start}
+				return 0, nil
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+	t.Cleanup(func() {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		}
+	})
+	return ls, requests
+}
+
+// The queued headers were delivered by the header pipeline owner, so that is
+// the connection that holds them. A different peer held at the horizon, such
+// as one whose chain forks below the ledger tip, must not become the fetch
+// origin for a range it never announced.
+func TestAwaitChainsyncHeaderAdmissionFlushFetchesFromPipelineOwner(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, requests := newHorizonFlushTestLedger(t, nil)
+	owner := testRecycleConnId()
+	ls.headerPipelineConnId = owner
+	e := futureHeaderEvent(
+		90,
+		time.Date(2026, time.August, 22, 12, 1, 40, 0, time.UTC),
+	)
+	e.ConnectionId = ouroboros.ConnectionId{
+		LocalAddr:  owner.LocalAddr,
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	got := <-awaitAdmissionAsync(ctx, ls, e)
+	require.ErrorIs(t, got.err, context.Canceled)
+
+	req := testutil.RequireReceive(
+		t,
+		requests,
+		testutil.AsyncWait,
+		"queued headers were not flushed while a header awaited the horizon",
+	)
+	require.True(
+		t,
+		sameConnectionId(owner, req.connId),
+		"queued range requested from %s, not pipeline owner %s",
+		req.connId.String(),
+		owner.String(),
+	)
+	require.True(t, sameConnectionId(owner, ls.selectedBlockfetchConnId))
+}
+
+// A connection whose close was already processed must not be made the
+// blockfetch origin or selected connection by a horizon wait it left behind.
+func TestAwaitChainsyncHeaderAdmissionFlushSkipsClosedConnection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, requests := newHorizonFlushTestLedger(
+		t,
+		func(ouroboros.ConnectionId) bool { return false },
+	)
+	e := futureHeaderEvent(
+		90,
+		time.Date(2026, time.August, 22, 12, 1, 40, 0, time.UTC),
+	)
+	e.ConnectionId = testRecycleConnId()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	got := <-awaitAdmissionAsync(ctx, ls, e)
+	require.ErrorIs(t, got.err, context.Canceled)
+
+	require.Empty(t, requests, "blockfetch started on a closed connection")
+	require.Empty(t, connIdKey(ls.selectedBlockfetchConnId))
 }
