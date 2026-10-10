@@ -3023,6 +3023,13 @@ func protocolParamsInfoFromNative(
 		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolVersion.Major, pp.ProtocolVersion.Minor)
 		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs, pp.CostModels)
 		fillConwayPParamsInfo(&info, pp)
+	case *dijkstra.DijkstraProtocolParameters:
+		// Blockfrost's epoch parameters carry no Dijkstra-only field, so the
+		// embedded Conway parameters (with every cost model) are the view.
+		return protocolParamsInfoFromNative(
+			&pp.ConwayProtocolParameters,
+			epoch,
+		)
 	default:
 		return ProtocolParamsInfo{}, fmt.Errorf(
 			"unsupported protocol parameters type: %T",

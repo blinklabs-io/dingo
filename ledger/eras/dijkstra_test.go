@@ -15,11 +15,13 @@
 package eras_test
 
 import (
+	"math/big"
 	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -64,4 +66,261 @@ func TestHardForkDijkstraSkipsEmptyGenesis(t *testing.T) {
 	}
 	dijkstraPParams.CostModels[0][0] = 9
 	require.Equal(t, []int64{1, 2, 3}, prev.CostModels[0])
+}
+
+func hardForkDijkstraFromGenesisJSON(
+	t *testing.T,
+	genesisJSON string,
+) *dijkstra.DijkstraProtocolParameters {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadDijkstraGenesisFromReader(strings.NewReader(genesisJSON)),
+	)
+	prev := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: 10,
+		},
+	}
+	got, err := eras.HardForkDijkstra(cfg, prev)
+	require.NoError(t, err)
+	pparams, ok := got.(*dijkstra.DijkstraProtocolParameters)
+	require.True(t, ok)
+	return pparams
+}
+
+func requireConwayRefScriptDefaults(
+	t *testing.T,
+	pparams *dijkstra.DijkstraProtocolParameters,
+) {
+	t.Helper()
+	require.Equal(t, uint32(25_600), pparams.RefScriptCostStride)
+	require.NotNil(t, pparams.RefScriptCostMultiplier)
+	require.Zero(t, pparams.RefScriptCostMultiplier.Cmp(big.NewRat(6, 5)))
+	require.Equal(t, uint32(200*1024), pparams.MaxRefScriptSizePerTx)
+	require.Equal(t, uint32(1024*1024), pparams.MaxRefScriptSizePerBlock)
+}
+
+func TestHardForkDijkstraEmptyGenesisKeepsRefScriptFeeDefaults(t *testing.T) {
+	t.Parallel()
+	pparams := hardForkDijkstraFromGenesisJSON(t, "{}")
+	requireConwayRefScriptDefaults(t, pparams)
+}
+
+func TestHardForkDijkstraCarriesFieldsSkippedByEmptyCheck(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		genesis string
+		check   func(*testing.T, *dijkstra.DijkstraProtocolParameters)
+	}{
+		{
+			name:    "plutusV4CostModel",
+			genesis: `{"plutusV4CostModel":[1,2,3]}`,
+			check: func(t *testing.T, p *dijkstra.DijkstraProtocolParameters) {
+				require.Equal(t, []int64{1, 2, 3}, p.CostModels[3])
+			},
+		},
+		{
+			name:    "maxPledgeLeverage",
+			genesis: `{"maxPledgeLeverage":5}`,
+			check: func(t *testing.T, p *dijkstra.DijkstraProtocolParameters) {
+				require.NotNil(t, p.MaxPledgeLeverage)
+				require.Zero(t, p.MaxPledgeLeverage.Cmp(big.NewRat(5, 1)))
+			},
+		},
+		{
+			name:    "minPoolMargin",
+			genesis: `{"minPoolMargin":0.1}`,
+			check: func(t *testing.T, p *dijkstra.DijkstraProtocolParameters) {
+				require.NotNil(t, p.MinPoolMargin)
+				require.Zero(t, p.MinPoolMargin.Cmp(big.NewRat(1, 10)))
+			},
+		},
+		{
+			name:    "leiosCommitteeSize",
+			genesis: `{"leiosCommitteeSize":7}`,
+			check: func(t *testing.T, p *dijkstra.DijkstraProtocolParameters) {
+				require.Equal(t, uint16(7), p.LeiosCommitteeSize)
+			},
+		},
+		{
+			name:    "maxEndorserBlockTxsSize",
+			genesis: `{"maxEndorserBlockTxsSize":1234}`,
+			check: func(t *testing.T, p *dijkstra.DijkstraProtocolParameters) {
+				require.Equal(t, uint32(1234), p.MaxEndorserBlockTxsSize)
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pparams := hardForkDijkstraFromGenesisJSON(t, tc.genesis)
+			tc.check(t, pparams)
+			requireConwayRefScriptDefaults(t, pparams)
+		})
+	}
+}
+
+func TestHardForkDijkstraKeepsConwayGovernanceParamsGenesisOmits(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		genesis string
+	}{
+		{
+			name: "refScriptFieldsOnly",
+			genesis: `{"maxRefScriptSizePerBlock":1048576,` +
+				`"maxRefScriptSizePerTx":204800,"refScriptCostStride":25600,` +
+				`"refScriptCostMultiplier":1.2}`,
+		},
+		{
+			name:    "plutusV4CostModelOnly",
+			genesis: `{"plutusV4CostModel":[1,2,3]}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &cardano.CardanoNodeConfig{}
+			require.NoError(
+				t,
+				cfg.LoadDijkstraGenesisFromReader(
+					strings.NewReader(tc.genesis),
+				),
+			)
+			prev := &conway.ConwayProtocolParameters{
+				MinCommitteeSize:        7,
+				CommitteeTermLimit:      146,
+				GovActionValidityPeriod: 6,
+				GovActionDeposit:        100_000_000_000,
+				DRepDeposit:             500_000_000,
+				DRepInactivityPeriod:    20,
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: 10,
+				},
+			}
+			got, err := eras.HardForkDijkstra(cfg, prev)
+			require.NoError(t, err)
+			p, ok := got.(*dijkstra.DijkstraProtocolParameters)
+			require.True(t, ok)
+			require.Equal(t, uint(7), p.MinCommitteeSize)
+			require.Equal(t, uint64(146), p.CommitteeTermLimit)
+			require.Equal(t, uint64(6), p.GovActionValidityPeriod)
+			require.Equal(t, uint64(100_000_000_000), p.GovActionDeposit)
+			require.Equal(t, uint64(500_000_000), p.DRepDeposit)
+			require.Equal(t, uint64(20), p.DRepInactivityPeriod)
+		})
+	}
+}
+
+func TestHardForkDijkstraAppliesConwayGovernanceParamsGenesisSets(
+	t *testing.T,
+) {
+	t.Parallel()
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadDijkstraGenesisFromReader(strings.NewReader(
+			`{"govActionDeposit":5,"dRepDeposit":6,"committeeMinSize":3}`,
+		)),
+	)
+	prev := &conway.ConwayProtocolParameters{
+		MinCommitteeSize: 7,
+		GovActionDeposit: 42,
+		DRepDeposit:      84,
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: 10,
+		},
+	}
+	got, err := eras.HardForkDijkstra(cfg, prev)
+	require.NoError(t, err)
+	p, ok := got.(*dijkstra.DijkstraProtocolParameters)
+	require.True(t, ok)
+	require.Equal(t, uint(3), p.MinCommitteeSize)
+	require.Equal(t, uint64(5), p.GovActionDeposit)
+	require.Equal(t, uint64(6), p.DRepDeposit)
+}
+
+func TestHardForkDijkstraValidatesGenesisParameterDomains(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		genesis string
+		wantErr string
+	}{
+		{
+			name:    "zero reference script multiplier",
+			genesis: `{"refScriptCostMultiplier":0}`,
+			wantErr: "refScriptCostMultiplier",
+		},
+		{
+			name: "inherited voting threshold above one",
+			genesis: `{"poolVotingThresholds":` +
+				`{"committeeNormal":2}}`,
+			wantErr: "poolVotingThresholds.committeeNormal",
+		},
+		{
+			name:    "quorum stake threshold above one",
+			genesis: `{"leiosQuorumStakeThreshold":2}`,
+			wantErr: "leiosQuorumStakeThreshold",
+		},
+		{
+			name: "negative endorser block execution units",
+			genesis: `{"maxEndorserBlockExecutionUnits":` +
+				`{"memory":-1,"steps":0}}`,
+			wantErr: "maxEndorserBlockExUnits",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &cardano.CardanoNodeConfig{}
+			require.NoError(
+				t,
+				cfg.LoadDijkstraGenesisFromReader(
+					strings.NewReader(tc.genesis),
+				),
+			)
+			unitRat := func() cbor.Rat {
+				return cbor.Rat{Rat: big.NewRat(1, 2)}
+			}
+			prev := &conway.ConwayProtocolParameters{
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: 10,
+				},
+				PoolVotingThresholds: conway.PoolVotingThresholds{
+					MotionNoConfidence:    unitRat(),
+					CommitteeNormal:       unitRat(),
+					CommitteeNoConfidence: unitRat(),
+					HardForkInitiation:    unitRat(),
+					PpSecurityGroup:       unitRat(),
+				},
+			}
+			_, err := eras.HardForkDijkstra(cfg, prev)
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestHardForkDijkstraAcceptsValidGenesisParameterDomains(t *testing.T) {
+	t.Parallel()
+	const genesis = `{
+		"refScriptCostMultiplier":1.2,
+		"maxPledgeLeverage":5,
+		"minPoolMargin":0.1,
+		"leiosQuorumStakeThreshold":0.75,
+		"maxEndorserBlockExecutionUnits":{"memory":1,"steps":2}
+	}`
+	pparams := hardForkDijkstraFromGenesisJSON(t, genesis)
+	require.Zero(t, pparams.RefScriptCostMultiplier.Cmp(big.NewRat(6, 5)))
+	require.Zero(t, pparams.MaxPledgeLeverage.Cmp(big.NewRat(5, 1)))
+	require.Zero(t, pparams.MinPoolMargin.Cmp(big.NewRat(1, 10)))
+	require.Zero(t, pparams.LeiosQuorumStakeThreshold.Cmp(big.NewRat(3, 4)))
+	require.Equal(
+		t,
+		lcommon.ExUnits{Memory: 1, Steps: 2},
+		pparams.MaxEndorserBlockExUnits,
+	)
 }

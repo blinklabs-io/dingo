@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -754,6 +755,305 @@ func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticReferenceScript(
 	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
 }
 
+const (
+	refFeeTestStride    = 100
+	refFeeTestBase      = 1_000
+	refFeeTestBalance   = uint64(50_000_000)
+	refFeeTestPerByte   = 1
+	refFeeTestMultNum   = 2
+	refFeeTestMultDenom = 1
+)
+
+// tieredRefScriptFee prices each full stride at perByte * multiplier^tier per
+// byte and the remainder at the next tier, rounded down. It is written out
+// here so the expectation does not come from the fee code under test.
+func tieredRefScriptFee(size uint64) uint64 {
+	price := big.NewRat(refFeeTestPerByte, 1)
+	mult := big.NewRat(refFeeTestMultNum, refFeeTestMultDenom)
+	total := new(big.Rat)
+	remaining := size
+	for remaining >= refFeeTestStride {
+		total.Add(
+			total,
+			new(big.Rat).Mul(price, big.NewRat(refFeeTestStride, 1)),
+		)
+		price.Mul(price, mult)
+		remaining -= refFeeTestStride
+	}
+	total.Add(total, new(big.Rat).Mul(price, new(big.Rat).SetUint64(remaining)))
+	return new(big.Int).Quo(total.Num(), total.Denom()).Uint64()
+}
+
+func refFeeTestParams() *gdijkstra.DijkstraProtocolParameters {
+	return &gdijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MinFeeB:      refFeeTestBase,
+			MaxTxSize:    16_384,
+			MaxValueSize: 5_000,
+			MinFeeRefScriptCostPerByte: &cbor.Rat{
+				Rat: big.NewRat(refFeeTestPerByte, 1),
+			},
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: gdijkstra.MinProtocolVersionDijkstra,
+			},
+		},
+		MaxRefScriptSizePerTx:    100_000,
+		MaxRefScriptSizePerBlock: 1_000_000,
+		RefScriptCostStride:      refFeeTestStride,
+		RefScriptCostMultiplier: &cbor.Rat{
+			Rat: big.NewRat(refFeeTestMultNum, refFeeTestMultDenom),
+		},
+	}
+}
+
+func refFeeTestScriptOutput(
+	t *testing.T,
+	scriptSize int,
+) referenceOverlapScriptOutput {
+	t.Helper()
+	return referenceOverlapScriptOutput{
+		testAddressScriptOutput: testAddressScriptOutput{
+			testOutput: newTestOutput(2_000_000),
+			addr:       newTestKeyAddress(t),
+			scriptRef:  lcommon.PlutusV4Script(make([]byte, scriptSize)),
+		},
+	}
+}
+
+func refFeeTestOutput(
+	t *testing.T,
+	amount uint64,
+) gdijkstra.DijkstraTransactionOutput {
+	t.Helper()
+	return gdijkstra.DijkstraTransactionOutput{
+		Output: babbage.BabbageTransactionOutput{
+			OutputAddress: newTestKeyAddress(t),
+			OutputAmount:  mary.MaryTransactionOutputValue{Amount: amount},
+		},
+	}
+}
+
+var (
+	refFeeTestInput = shelley.NewShelleyTransactionInput(
+		"a228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee11", 0,
+	)
+	refFeeTestRefInput = shelley.NewShelleyTransactionInput(
+		"b228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22", 0,
+	)
+	refFeeTestChildInput = shelley.NewShelleyTransactionInput(
+		"c228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee33", 0,
+	)
+)
+
+// newRefFeeTestTx builds a transaction paying fee. The reference script sits
+// on a top-level reference input, or on a sub-transaction reference input when
+// inChild is set.
+func newRefFeeTestTx(
+	t *testing.T,
+	fee uint64,
+	inChild bool,
+) *gdijkstra.DijkstraTransaction {
+	t.Helper()
+	body := gdijkstra.DijkstraTransactionBody{
+		TxInputs: conway.NewConwayTransactionInputSet(
+			[]shelley.ShelleyTransactionInput{refFeeTestInput},
+		),
+		TxOutputs: []gdijkstra.DijkstraTransactionOutput{
+			refFeeTestOutput(t, refFeeTestBalance-fee),
+		},
+		TxFee: fee,
+	}
+	refSet := cbor.NewSetType(
+		[]shelley.ShelleyTransactionInput{refFeeTestRefInput},
+		false,
+	)
+	if inChild {
+		body.TxSubTransactions = cbor.NewSetType(
+			[]gdijkstra.DijkstraSubTransaction{{
+				Body: gdijkstra.DijkstraSubTransactionBody{
+					TxInputs: conway.NewConwayTransactionInputSet(
+						[]shelley.ShelleyTransactionInput{refFeeTestChildInput},
+					),
+					TxOutputs: []gdijkstra.DijkstraTransactionOutput{
+						refFeeTestOutput(t, 1_000_000),
+					},
+					TxReferenceInputs: refSet,
+				},
+			}},
+			false,
+		)
+	} else {
+		body.TxReferenceInputs = refSet
+	}
+	return &gdijkstra.DijkstraTransaction{Body: body, TxIsValid: true}
+}
+
+func newRefFeeTestState(t *testing.T, scriptSize int) *mockLedgerState {
+	t.Helper()
+	state := newMockLedgerState()
+	state.networkId = uint(lcommon.AddressNetworkTestnet)
+	state.addUtxo(refFeeTestInput, newTestOutput(refFeeTestBalance))
+	state.addUtxo(refFeeTestChildInput, newTestOutput(1_000_000))
+	state.addUtxo(refFeeTestRefInput, refFeeTestScriptOutput(t, scriptSize))
+	return state
+}
+
+func requireFeeTooSmall(t *testing.T, err error) {
+	t.Helper()
+	require.Error(t, err)
+	var feeErr shelley.FeeTooSmallUtxoError
+	require.ErrorAs(t, err, &feeErr)
+}
+
+func TestValidateTxDijkstraTieredRefScriptFeeBoundaries(t *testing.T) {
+	t.Parallel()
+	sizes := []int{0, 99, 100, 101, 199, 200, 250, 300}
+	for _, size := range sizes {
+		t.Run(big.NewInt(int64(size)).String(), func(t *testing.T) {
+			t.Parallel()
+			minFee := uint64(refFeeTestBase) + tieredRefScriptFee(uint64(size))
+			state := newRefFeeTestState(t, size)
+			params := refFeeTestParams()
+
+			err := ValidateTxDijkstra(
+				newRefFeeTestTx(t, minFee, false), 0, state, params,
+			)
+			require.NoError(
+				t,
+				err,
+				"exactly paid fee %d must be accepted",
+				minFee,
+			)
+
+			err = ValidateTxDijkstra(
+				newRefFeeTestTx(t, minFee-1, false), 0, state, params,
+			)
+			requireFeeTooSmall(t, err)
+		})
+	}
+}
+
+func TestValidateTxDijkstraRefScriptFeeUsesPParamStrideAndMultiplier(
+	t *testing.T,
+) {
+	t.Parallel()
+	const size = 250
+	minFee := uint64(refFeeTestBase) + tieredRefScriptFee(size)
+	state := newRefFeeTestState(t, size)
+
+	// A Conway-default stride (25600) would price 250 bytes at one flat tier
+	// (250), far below the fee demanded by the configured stride/multiplier.
+	require.Greater(t, minFee, uint64(refFeeTestBase)+size)
+	err := ValidateTxDijkstra(
+		newRefFeeTestTx(t, uint64(refFeeTestBase)+size, false),
+		0, state, refFeeTestParams(),
+	)
+	requireFeeTooSmall(t, err)
+}
+
+func TestValidateTxDijkstraChildRefScriptsExcludedFromFee(t *testing.T) {
+	t.Parallel()
+	const size = 250
+	state := newRefFeeTestState(t, size)
+
+	// The script sits on a sub-transaction reference input, so the top-level
+	// fee stays at the size-only minimum.
+	err := ValidateTxDijkstra(
+		newRefFeeTestTx(t, refFeeTestBase, true), 0, state, refFeeTestParams(),
+	)
+	require.NoError(t, err)
+
+	err = ValidateTxDijkstra(
+		newRefFeeTestTx(
+			t,
+			refFeeTestBase-1,
+			true,
+		),
+		0,
+		state,
+		refFeeTestParams(),
+	)
+	requireFeeTooSmall(t, err)
+}
+
+func TestValidateTxDijkstraRefScriptFeeWithEmptyGenesisUpgrade(t *testing.T) {
+	t.Parallel()
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadDijkstraGenesisFromReader(strings.NewReader("{}")),
+	)
+	prev := refFeeTestParams().ConwayProtocolParameters
+	prev.ProtocolVersion.Major = gdijkstra.MinProtocolVersionDijkstra - 1
+	upgraded, err := HardForkDijkstra(cfg, &prev)
+	require.NoError(t, err)
+
+	// 30000 bytes: one full 25600-byte tier at 1/byte plus 4400 bytes at 1.2.
+	const size = 30_000
+	const refFee = 25_600 + 5_280
+	minFee := uint64(refFeeTestBase + refFee)
+	state := newRefFeeTestState(t, size)
+
+	require.NoError(
+		t,
+		ValidateTxDijkstra(
+			newRefFeeTestTx(t, minFee, false), 0, state, upgraded,
+		),
+	)
+	requireFeeTooSmall(
+		t,
+		ValidateTxDijkstra(
+			newRefFeeTestTx(t, minFee-1, false), 0, state, upgraded,
+		),
+	)
+}
+
+func TestRefScriptFeeUsesGenesisStrideAndMultiplier(t *testing.T) {
+	t.Parallel()
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(t, cfg.LoadDijkstraGenesisFromReader(strings.NewReader(
+		`{"refScriptCostStride": 100, "refScriptCostMultiplier": 2}`,
+	)))
+	prev := refFeeTestParams().ConwayProtocolParameters
+	prev.ProtocolVersion.Major = gdijkstra.MinProtocolVersionDijkstra - 1
+	upgraded, err := HardForkDijkstra(cfg, &prev)
+	require.NoError(t, err)
+	params, ok := upgraded.(*gdijkstra.DijkstraProtocolParameters)
+	require.True(t, ok)
+
+	// 250 bytes at the genesis stride and multiplier: 100 at 1, 100 at 2 and
+	// 50 at 4. The Conway stride would price them at one flat tier of 250.
+	const size = 250
+	const refFee = 100 + 200 + 200
+	require.Equal(t, uint64(refFee), tieredRefScriptFee(size))
+	minFee := uint64(refFeeTestBase + refFee)
+	state := newRefFeeTestState(t, size)
+
+	require.NoError(t, ValidateTxDijkstra(
+		newRefFeeTestTx(t, minFee, false), 0, state, upgraded,
+	))
+	requireFeeTooSmall(t, ValidateTxDijkstra(
+		newRefFeeTestTx(t, minFee-1, false), 0, state, upgraded,
+	))
+
+	fee, _, _, err := EvaluateTxDijkstra(
+		newRefFeeTestTx(t, minFee, false), state, params,
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		CalculateMinFee(
+			TxSizeForFee(newRefFeeTestTx(t, minFee, false)),
+			lcommon.ExUnits{},
+			params.MinFeeA,
+			params.MinFeeB,
+			nil,
+			nil,
+		)+refFee,
+		fee,
+	)
+}
+
 // TestEvaluateTxDijkstraFeeUsesProtocolRefScriptTiers pins the evaluation fee
 // to the Dijkstra minimum-fee rule, which prices reference scripts at the
 // protocol stride and multiplier rather than the fixed Conway tiers.
@@ -810,5 +1110,4 @@ func TestEvaluateTxDijkstraFeeUsesProtocolRefScriptTiers(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1_000+250), fee,
 		"absent Dijkstra tiers retain Conway reference-script pricing")
-
 }

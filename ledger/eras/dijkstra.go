@@ -115,18 +115,164 @@ func HardForkDijkstra(
 		ConwayProtocolParameters: *conwayPParams,
 	}
 	ret.CostModels = cloneCostModels(ret.CostModels)
+	var dijkstraGenesis *gdijkstra.DijkstraGenesis
 	if nodeConfig != nil {
-		dijkstraGenesis := nodeConfig.DijkstraGenesis()
+		dijkstraGenesis = nodeConfig.DijkstraGenesis()
 		if !isEmptyDijkstraGenesis(dijkstraGenesis) {
 			if err := ret.UpdateFromGenesis(dijkstraGenesis); err != nil {
 				return nil, err
 			}
+			keepConwayGovernanceParams(
+				&ret,
+				conwayPParams,
+				&dijkstraGenesis.ConwayGenesis,
+			)
 		}
+	}
+	applyDijkstraRefScriptDefaults(&ret)
+	if err := validateDijkstraProtocolParameterDomains(&ret, dijkstraGenesis); err != nil {
+		return nil, fmt.Errorf("validate Dijkstra genesis parameters: %w", err)
 	}
 	if ret.ProtocolVersion.Major < gdijkstra.MinProtocolVersionDijkstra {
 		ret.ProtocolVersion.Major = gdijkstra.MinProtocolVersionDijkstra
 	}
 	return &ret, nil
+}
+
+func validateDijkstraProtocolParameterDomains(
+	p *gdijkstra.DijkstraProtocolParameters,
+	genesis *gdijkstra.DijkstraGenesis,
+) error {
+	if p == nil {
+		return errors.New("dijkstra protocol parameters are nil")
+	}
+	// ApplyUpdate owns the domain rules for Dijkstra ledger parameters. Apply
+	// every Dijkstra field and each inherited field supplied by genesis to a
+	// copy so genesis follows the same rules as a governance update without
+	// changing the parameters a second time.
+	check := *p
+	update := gdijkstra.DijkstraProtocolParameterUpdate{
+		MaxRefScriptSizePerBlock:         &p.MaxRefScriptSizePerBlock,
+		MaxRefScriptSizePerTx:            &p.MaxRefScriptSizePerTx,
+		RefScriptCostStride:              &p.RefScriptCostStride,
+		RefScriptCostMultiplier:          p.RefScriptCostMultiplier,
+		MaxPledgeLeverage:                p.MaxPledgeLeverage,
+		MaxPledgeLeverageSet:             p.MaxPledgeLeverage != nil,
+		MinPoolMargin:                    p.MinPoolMargin,
+		LeiosAnnouncementPeriodLength:    &p.LeiosAnnouncementPeriodLength,
+		LeiosVotePeriodLength:            &p.LeiosVotePeriodLength,
+		LeiosDiffusionPeriodLength:       &p.LeiosDiffusionPeriodLength,
+		LeiosCommitteeSize:               &p.LeiosCommitteeSize,
+		LeiosQuorumStakeThreshold:        p.LeiosQuorumStakeThreshold,
+		MaxEndorserBlockReferencesSize:   &p.MaxEndorserBlockReferencesSize,
+		MaxEndorserBlockTxsSize:          &p.MaxEndorserBlockTxsSize,
+		MaxEndorserBlockExUnits:          &p.MaxEndorserBlockExUnits,
+		MaxRefScriptSizePerEndorserBlock: &p.MaxRefScriptSizePerEndorserBlock,
+	}
+	if genesis == nil {
+		return check.ApplyUpdate(&update)
+	}
+	conwayGenesis := &genesis.ConwayGenesis
+	if conwayGenesis.MinCommitteeSize != 0 {
+		update.MinCommitteeSize = &p.MinCommitteeSize
+	}
+	if conwayGenesis.CommitteeTermLimit != 0 {
+		update.CommitteeTermLimit = &p.CommitteeTermLimit
+	}
+	if conwayGenesis.GovActionValidityPeriod != 0 {
+		update.GovActionValidityPeriod = &p.GovActionValidityPeriod
+	}
+	if conwayGenesis.GovActionDeposit != 0 {
+		update.GovActionDeposit = &p.GovActionDeposit
+	}
+	if conwayGenesis.DRepDeposit != 0 {
+		update.DRepDeposit = &p.DRepDeposit
+	}
+	if conwayGenesis.DRepInactivityPeriod != 0 {
+		update.DRepInactivityPeriod = &p.DRepInactivityPeriod
+	}
+	if conwayGenesis.MinFeeRefScriptCostPerByte != nil {
+		update.MinFeeRefScriptCostPerByte = p.MinFeeRefScriptCostPerByte
+	}
+	if len(conwayGenesis.PlutusV3CostModel) > 0 ||
+		len(genesis.PlutusV4CostModel) > 0 {
+		update.CostModels = p.CostModels
+	}
+	if dijkstraGenesisPoolThresholdsSet(&conwayGenesis.PoolVotingThresholds) {
+		update.PoolVotingThresholds = &p.PoolVotingThresholds
+	}
+	if dijkstraGenesisDRepThresholdsSet(&conwayGenesis.DRepVotingThresholds) {
+		update.DRepVotingThresholds = &p.DRepVotingThresholds
+	}
+	return check.ApplyUpdate(&update)
+}
+
+func dijkstraGenesisPoolThresholdsSet(
+	t *conway.ConwayGenesisPoolVotingThresholds,
+) bool {
+	return t.MotionNoConfidence != nil ||
+		t.CommitteeNormal != nil ||
+		t.CommitteeNoConfidence != nil ||
+		t.HardForkInitiation != nil ||
+		t.PpSecurityGroup != nil
+}
+
+func dijkstraGenesisDRepThresholdsSet(
+	t *conway.ConwayGenesisDRepVotingThresholds,
+) bool {
+	return t.MotionNoConfidence != nil ||
+		t.CommitteeNormal != nil ||
+		t.CommitteeNoConfidence != nil ||
+		t.UpdateToConstitution != nil ||
+		t.HardForkInitiation != nil ||
+		t.PpNetworkGroup != nil ||
+		t.PpEconomicGroup != nil ||
+		t.PpTechnicalGroup != nil ||
+		t.PpGovGroup != nil ||
+		t.TreasuryWithdrawal != nil
+}
+
+// keepConwayGovernanceParams restores the Conway governance parameters that
+// conway.UpdateFromGenesis copies unconditionally. A Dijkstra genesis that
+// sets only Dijkstra fields leaves them zero, which would otherwise wipe the
+// deposits, lifetimes and committee bounds carried over from Conway.
+func keepConwayGovernanceParams(
+	p *gdijkstra.DijkstraProtocolParameters,
+	prev *conway.ConwayProtocolParameters,
+	genesis *conway.ConwayGenesis,
+) {
+	if genesis.MinCommitteeSize == 0 {
+		p.MinCommitteeSize = prev.MinCommitteeSize
+	}
+	if genesis.CommitteeTermLimit == 0 {
+		p.CommitteeTermLimit = prev.CommitteeTermLimit
+	}
+	if genesis.GovActionValidityPeriod == 0 {
+		p.GovActionValidityPeriod = prev.GovActionValidityPeriod
+	}
+	if genesis.GovActionDeposit == 0 {
+		p.GovActionDeposit = prev.GovActionDeposit
+	}
+	if genesis.DRepDeposit == 0 {
+		p.DRepDeposit = prev.DRepDeposit
+	}
+	if genesis.DRepInactivityPeriod == 0 {
+		p.DRepInactivityPeriod = prev.DRepInactivityPeriod
+	}
+}
+
+// applyDijkstraRefScriptDefaults fills reference-script parameters the genesis
+// left unset with the fixed Conway values. A zero stride makes the tiered
+// reference-script fee calculation fail, and zero size limits reject every
+// transaction that consumes a reference script.
+func applyDijkstraRefScriptDefaults(p *gdijkstra.DijkstraProtocolParameters) {
+	gdijkstra.ApplyConwayRefScriptFeeDefaults(p)
+	if p.MaxRefScriptSizePerTx == 0 {
+		p.MaxRefScriptSizePerTx = uint32(conway.MaxRefScriptSizePerTx)
+	}
+	if p.MaxRefScriptSizePerBlock == 0 {
+		p.MaxRefScriptSizePerBlock = uint32(conway.MaxRefScriptSizePerBlock)
+	}
 }
 
 func isEmptyDijkstraGenesis(genesis *gdijkstra.DijkstraGenesis) bool {
@@ -138,7 +284,19 @@ func isEmptyDijkstraGenesis(genesis *gdijkstra.DijkstraGenesis) bool {
 		genesis.RefScriptCostStride != 0 ||
 		genesis.RefScriptCostMultiplier != nil ||
 		genesis.CommitteeStakeCoverage != nil ||
-		genesis.QuorumStakeThreshold != nil {
+		genesis.QuorumStakeThreshold != nil ||
+		genesis.MaxPledgeLeverage != nil ||
+		genesis.MinPoolMargin != nil ||
+		len(genesis.PlutusV4CostModel) > 0 ||
+		genesis.LeiosAnnouncementPeriodLength != 0 ||
+		genesis.LeiosVotePeriodLength != 0 ||
+		genesis.LeiosDiffusionPeriodLength != 0 ||
+		genesis.LeiosCommitteeSize != 0 ||
+		genesis.LeiosQuorumStakeThreshold != nil ||
+		genesis.MaxEndorserBlockReferencesSize != 0 ||
+		genesis.MaxEndorserBlockTxsSize != 0 ||
+		genesis.MaxEndorserBlockExUnits != (lcommon.ExUnits{}) ||
+		genesis.MaxRefScriptSizePerEndorserBlock != 0 {
 		return false
 	}
 	return isEmptyConwayGenesis(&genesis.ConwayGenesis)
@@ -597,6 +755,11 @@ func dijkstraReferenceInputOverlap(
 	return nil, false
 }
 
+// EvaluateTxDijkstra runs every Plutus redeemer of a Dijkstra transaction,
+// at the top level and in each sub-transaction, with the per-transaction
+// execution limit as each script's budget. The returned total and fee cover
+// every level. The per-redeemer map is keyed by tag and index, which name a
+// redeemer only within its own level, so it carries the top-level redeemers.
 func EvaluateTxDijkstra(
 	tx lcommon.Transaction,
 	ls lcommon.LedgerState,
@@ -606,19 +769,98 @@ func EvaluateTxDijkstra(
 	if !ok || tmpPparams == nil {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
 	}
-	stride := uint64(tmpPparams.RefScriptCostStride)
+	dijkstraTx, ok := tx.(*gdijkstra.DijkstraTransaction)
+	if !ok || dijkstraTx == nil {
+		stride, multiplier := dijkstraRefScriptTiers(tmpPparams)
+		return evaluateTxConway(
+			tx,
+			ls,
+			&tmpPparams.ConwayProtocolParameters,
+			stride,
+			multiplier,
+		)
+	}
+	if syntheticV2CostModelInEffect(ls) {
+		if err := dijkstraSyntheticV2CostModelGuard(
+			tx, 0, ls, tmpPparams,
+		); err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
+	}
+	if err := gdijkstra.UtxoValidateCostModelsPresent(
+		tx, 0, ls, tmpPparams,
+	); err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
+	results, err := gdijkstra.EvaluatePlutusScripts(
+		dijkstraTx,
+		ls,
+		tmpPparams,
+		tmpPparams.MaxTxExUnits,
+	)
+	if err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
+	var total lcommon.ExUnits
+	redeemers := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
+	for _, result := range results {
+		total, err = SafeAddExUnits(total, result.ExUnits)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+				"aggregate execution units: %w",
+				err,
+			)
+		}
+		if result.SubTransactionIndex == nil {
+			redeemers[result.Key] = result.ExUnits
+		}
+	}
+	fee, err := dijkstraEvaluationFee(tx, ls, tmpPparams, total)
+	if err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
+	return fee, total, redeemers, nil
+}
+
+// dijkstraEvaluationFee is the Dijkstra minimum fee for tx with exUnits as
+// its execution units. As in the Dijkstra minimum-fee rule, only top-level
+// reference scripts are charged, at the protocol's tiered stride and
+// multiplier.
+func dijkstraEvaluationFee(
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+	pp *gdijkstra.DijkstraProtocolParameters,
+	exUnits lcommon.ExUnits,
+) (uint64, error) {
+	refScriptSize, err := lcommon.ConsumedReferenceScriptSize(tx, ls)
+	if err != nil {
+		return 0, err
+	}
+	stride, multiplier := dijkstraRefScriptTiers(pp)
+	return saturatedAddUint64(
+		evaluationMinFee(tx, &pp.ConwayProtocolParameters, exUnits),
+		calculateTieredRefScriptFee(
+			refScriptSize,
+			refScriptCostPerByteRat(&pp.ConwayProtocolParameters),
+			stride,
+			multiplier,
+		),
+	), nil
+}
+
+// dijkstraRefScriptTiers returns the reference-script stride and multiplier
+// from the protocol parameters, falling back to the fixed Conway values for
+// any the parameters leave unset.
+func dijkstraRefScriptTiers(
+	pp *gdijkstra.DijkstraProtocolParameters,
+) (uint64, *big.Rat) {
+	stride := uint64(pp.RefScriptCostStride)
 	if stride == 0 {
 		stride = conwayRefScriptCostStride
 	}
 	multiplier := big.NewRat(6, 5)
-	if tmpPparams.RefScriptCostMultiplier != nil {
-		multiplier = tmpPparams.RefScriptCostMultiplier.ToBigRat()
+	if pp.RefScriptCostMultiplier != nil {
+		multiplier = pp.RefScriptCostMultiplier.ToBigRat()
 	}
-	return evaluateTxConway(
-		tx,
-		ls,
-		&tmpPparams.ConwayProtocolParameters,
-		stride,
-		multiplier,
-	)
+	return stride, multiplier
 }
