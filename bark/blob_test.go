@@ -135,7 +135,7 @@ func startFakeArchive(
 			if a.oversize {
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(
-					bytes.Repeat([]byte{0xFF}, maxArchiveBlockSize+1),
+					bytes.Repeat([]byte{0xFF}, defaultMaxArchiveBlockSize+1),
 				)
 				return
 			}
@@ -644,7 +644,7 @@ func TestGetBlock_RejectsRedirect(t *testing.T) {
 }
 
 // TestGetBlock_CapsResponseSize verifies that a download response larger than
-// maxArchiveBlockSize is rejected rather than fully buffered into memory.
+// defaultMaxArchiveBlockSize is rejected rather than fully buffered into memory.
 func TestGetBlock_CapsResponseSize(t *testing.T) {
 	t.Parallel()
 
@@ -664,6 +664,72 @@ func TestGetBlock_CapsResponseSize(t *testing.T) {
 	_, _, err := store.GetBlock(rTxn, slot, hash)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "limit")
+}
+
+// TestGetBlock_BoundedByConfiguredBlockSize pins that the download bound is the
+// limit the store was configured with, not the compile-time default: a block one
+// byte over the configured limit is refused and one at the limit is accepted.
+func TestGetBlock_BoundedByConfiguredBlockSize(t *testing.T) {
+	t.Parallel()
+
+	block := archiveBlockFixtures(t, 2)[1]
+	hash := block.Hash()
+	size := uint64(len(block.Cbor()))
+	require.Less(
+		t,
+		size,
+		uint64(defaultMaxArchiveBlockSize),
+		"the fixture must fit the default so only the configured limit can refuse it",
+	)
+
+	for _, tc := range []struct {
+		name    string
+		limit   uint64
+		wantErr bool
+	}{
+		{name: "one byte over the limit", limit: size - 1, wantErr: true},
+		{name: "at the limit", limit: size},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			blocks, configure := serveArchiveBlock(t, block)
+			baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+			configure(fakeArch)
+			store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+			store.config.MaxBlockSize = func() uint64 { return tc.limit }
+			rTxn := store.NewTransaction(false)
+			t.Cleanup(func() { _ = rTxn.Rollback() })
+
+			_, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
+			if tc.wantErr {
+				require.ErrorContains(t, err, "limit")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestGetBlock_RejectsTruncatedArchiveBlock pins that a download cut short of
+// the block it announced is refused rather than accepted as the block.
+func TestGetBlock_RejectsTruncatedArchiveBlock(t *testing.T) {
+	t.Parallel()
+
+	block := archiveBlockFixtures(t, 2)[1]
+	hash := block.Hash()
+	db := newTestDB(t)
+	blocks, configure := serveArchiveBlock(t, block)
+	baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+	configure(fakeArch)
+	fakeArch.substituteBody = block.Cbor()[:len(block.Cbor())/2]
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	_, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
+	require.ErrorIs(t, err, ErrArchiveBlockUndecodable)
 }
 
 // archiveBlockFixtures returns count real Conway blocks whose CBOR

@@ -182,7 +182,7 @@ func dijkstraBatchWithSubOutputTx(t *testing.T) *dijkstra.DijkstraTransaction {
 		23: cbor.NewSetType([]cbor.RawMessage{subTransaction}, true),
 	})
 	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, true, nil})
+	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, nil})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
 	require.NoError(t, err)
@@ -213,8 +213,9 @@ func TestTxValidationSessionAppliesDijkstraBatchLevels(t *testing.T) {
 	ls.publishSnapshotsLocked()
 
 	err := ls.withTxValidationSession(context.Background(), nil, nil, true, func(
-		_ func(common.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]common.Utxo) error,
+		_ func(common.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]common.Utxo, *utxoref.StateOverlay) error,
 		_ func() bool,
+		_ func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
 	) error {
 		return applyTx(
@@ -446,7 +447,7 @@ func TestDijkstraDirectDepositUpdatesRewardAccountBalance(t *testing.T) {
 		25: map[cbor.ByteString]uint64{cbor.NewByteString(rewardAddress): 20},
 	})
 	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, true, nil})
+	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, nil})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
 	require.NoError(t, err)

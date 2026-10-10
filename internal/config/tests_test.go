@@ -585,6 +585,17 @@ func TestDefaultLoggingConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultSnapshotMaxCommitPause(t *testing.T) {
+	t.Parallel()
+
+	defaults := newDefaultConfig()
+	require.Equal(
+		t,
+		defaultSnapshotMaxCommitPause,
+		defaults.DatabaseLifecycle.SnapshotMaxCommitPause,
+	)
+}
+
 func TestLoad_LoggingEnvVars(t *testing.T) {
 	resetGlobalConfig()
 	// Avoid picking up a real ~/.dingo/dingo.yaml on the dev machine.

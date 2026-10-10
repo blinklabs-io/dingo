@@ -728,6 +728,9 @@ jobs:
   build-image-manifest:
     name: build-image-manifest
     needs: [build-images]
+    # build-images overrides its skipped release-only dependency on main; this
+    # job must also override that propagated skip before checking its result.
+    if: always() && needs.build-images.result == 'success'
     permissions:
       contents: read
       packages: write

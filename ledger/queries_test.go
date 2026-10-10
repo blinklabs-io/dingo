@@ -2634,7 +2634,7 @@ func TestQueryShelleyStakeDelegDeposits(t *testing.T) {
 		ocommon.NewPoint(100, bytes.Repeat([]byte{0x53}, 32)),
 		0,
 		map[int]uint64{0: 2_000_000},
-		nil,
+		nil, 0,
 	))
 
 	ls := &LedgerState{db: db}

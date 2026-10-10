@@ -611,6 +611,16 @@ func initialDRepDeposit(pp common.ProtocolParameters) (uint64, error) {
 	return deposit.Uint64(), nil
 }
 
+func stateManagerProtocolMajor(
+	pp common.ProtocolParameters,
+) (uint64, error) {
+	versioned, ok := pp.(common.PoolRuleProtocolParameters)
+	if !ok {
+		return 0, errors.New("protocol parameters do not define a protocol version")
+	}
+	return uint64(versioned.ProtocolMajorVersion()), nil
+}
+
 func stateManagerConwayProtocolParameters(
 	pp common.ProtocolParameters,
 ) *conway.ConwayProtocolParameters {
@@ -693,9 +703,13 @@ func (m *DingoStateManager) seedAuthCommitteeHot(
 		return fmt.Errorf("build synthetic auth-committee-hot tx: %w", err)
 	}
 	point := ocommon.Point{Slot: 0, Hash: syntheticBlockHash(0)}
+	protocolMajor, err := stateManagerProtocolMajor(m.protocolParams)
+	if err != nil {
+		return fmt.Errorf("resolve protocol major: %w", err)
+	}
 	if err := m.db.SetTransactionMetadataOnly(
 		context.Background(),
-		tx, point, 0, map[int]uint64{}, txn,
+		tx, point, 0, map[int]uint64{}, txn, protocolMajor,
 	); err != nil {
 		return fmt.Errorf("seed auth committee hot: %w", err)
 	}
@@ -945,13 +959,27 @@ func (m *DingoStateManager) ApplyTransaction(
 	)
 	govActionLifetime := defaultGovActionLifetime
 	drepInactivityPeriod := defaultDRepInactivityPeriod
-	if conwayPP := stateManagerConwayProtocolParameters(m.protocolParams); conwayPP != nil {
+	conwayPP := stateManagerConwayProtocolParameters(m.protocolParams)
+	if conwayPP != nil {
 		govActionLifetime = conwayPP.GovActionValidityPeriod
 		drepInactivityPeriod = conwayPP.DRepInactivityPeriod
+	}
+	protocolMajor, err := stateManagerProtocolMajor(m.protocolParams)
+	if err != nil {
+		return fmt.Errorf("resolve protocol major: %w", err)
 	}
 
 	for levelIndex, level := range levels {
 		storageIndex := idx + uint32(levelIndex) //nolint:gosec
+		if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+			context.Background(),
+			level,
+			point,
+			m.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+		}
 		if err := m.spendUtxos(txn, level.Inputs(), slot); err != nil {
 			return fmt.Errorf(
 				"spend transaction body %d inputs: %w",
@@ -982,6 +1010,7 @@ func (m *DingoStateManager) ApplyTransaction(
 			storageIndex,
 			m.certDepositsFor(level.Certificates()),
 			txn,
+			protocolMajor,
 		); err != nil {
 			return fmt.Errorf(
 				"store transaction body %d metadata: %w",
@@ -1015,59 +1044,25 @@ func (m *DingoStateManager) ApplyTransaction(
 			)
 		}
 
+		if err := governance.ProcessTransactionEffects(
+			context.Background(),
+			level,
+			point,
+			storageIndex,
+			m.currentEpoch,
+			drepInactivityPeriod,
+			govActionLifetime,
+			protocolMajor,
+			m.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("process transaction body %d governance effects: %w", levelIndex, err)
+		}
 		if proposals := level.ProposalProcedures(); len(proposals) > 0 {
-			if err := governance.ProcessProposals(
-				context.Background(),
-				level,
-				point,
-				storageIndex,
-				m.currentEpoch,
-				govActionLifetime,
-				m.db,
-				txn,
-			); err != nil {
-				return fmt.Errorf(
-					"process transaction body %d proposals: %w",
-					levelIndex,
-					err,
-				)
-			}
 			m.recordProposalsInGovState(level, govActionLifetime)
 		}
 		if votes := level.VotingProcedures(); len(votes) > 0 {
-			if err := governance.ProcessVotes(
-				context.Background(),
-				level,
-				point,
-				m.currentEpoch,
-				drepInactivityPeriod,
-				m.db,
-				txn,
-			); err != nil {
-				return fmt.Errorf(
-					"process transaction body %d votes: %w",
-					levelIndex,
-					err,
-				)
-			}
 			m.recordVotesInGovState(level)
-		}
-		if governance.HasDRepActivityCertificates(level) {
-			if err := governance.ProcessDRepActivityCertificates(
-				context.Background(),
-				level,
-				point,
-				m.currentEpoch,
-				drepInactivityPeriod,
-				m.db,
-				txn,
-			); err != nil {
-				return fmt.Errorf(
-					"process transaction body %d DRep activity: %w",
-					levelIndex,
-					err,
-				)
-			}
 		}
 	}
 

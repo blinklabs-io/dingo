@@ -57,7 +57,7 @@ func dupBatchTx(t *testing.T, subTxs ...[]byte) []byte {
 	})
 	require.NoError(t, err)
 	txCbor, err := cbor.Encode(
-		[]any{cbor.RawMessage(body), map[uint]any{}, true, nil},
+		[]any{cbor.RawMessage(body), map[uint]any{}, nil},
 	)
 	require.NoError(t, err)
 	return txCbor

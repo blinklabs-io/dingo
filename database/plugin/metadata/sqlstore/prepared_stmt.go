@@ -17,7 +17,11 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
+
+	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // hotStatements is the fixed, exhaustive list of query texts Start prepares
@@ -26,22 +30,84 @@ import (
 // sumCredentialUtxoStakeQuery's doc comment does, that it is worth the
 // caching mechanism's overhead and that it is safe to prepare once and
 // reuse under this Store's single write connection.
-var hotStatements = []string{
-	sumCredentialUtxoStakeQuery,
-	rewardLiveStakeAccountQuery,
-	rewardLiveStakeUpsertQuery,
-	rewardLiveStakeUtxoStakeQuery,
-	insertUtxoQuery,
-	insertUtxoQueryIgnoreConflict,
-	importAssetQuery,
-	getAssetIDQuery,
-	getLiveUtxoByRefQuery,
-	getUtxoIncludingSpentByRefQuery,
-}
+var hotStatements = func() []string {
+	queries := []string{
+		sumCredentialUtxoStakeQuery,
+		rewardLiveStakeAccountQuery,
+		rewardLiveStakeUpsertQuery,
+		rewardLiveStakeUtxoStakeQuery,
+		insertUtxoQuery,
+		insertUtxoQueryIgnoreConflict,
+		importAssetQuery,
+		getAssetIDQuery,
+		getLiveUtxoByRefQuery,
+		getUtxoIncludingSpentByRefQuery,
+		transactionInsertSQL,
+		consumeUtxoSQL,
+		consumeUtxoSQLiteReturningSQL,
+		getUtxoSpendStateQuery,
+		poolOpCertSequenceUpsertSQL,
+		poolUpdateLatestOpCertSequenceSQL,
+		transactionCertificateInsertSQL,
+		hasSpecializedCertificatesSQL,
+		deletePoolRegistrationOwnersSQL,
+		deletePoolRegistrationRelaysSQL,
+		deleteMIRRewardsSQL,
+		deleteAddressTransactionSQL,
+		poolByKeyHashQuery,
+		sqlitequery.GetAccountByCredentialQuery,
+		sqlitequery.GetActiveAccountByCredentialQuery,
+		sqlitequery.SetTipQuery,
+		sqlitequery.SetBlockNonceQuery,
+		utxoStakeConsumedDeltaQuery(1),
+		utxoStakeConsumedDeltaQuery(2),
+		utxoStakeConsumedDeltaQuery(4),
+		utxoStakeConsumedDeltaQuery(8),
+		utxoStakeConsumedDeltaQuery(16),
+		utxoStakeConsumedDeltaQuery(32),
+		utxoStakeConsumedDeltaQuery(64),
+		utxoStakeConsumedDeltaQuery(128),
+		utxoStakeConsumedDeltaQuery(256),
+		utxoStakeConsumedDeltaQuery(400),
+	}
+	for rowCount := 2; rowCount <= utxoBatchSize; rowCount++ {
+		queries = append(queries,
+			insertUtxoBatchQuery(rowCount),
+			consumeUtxosBatchQuery(rowCount, false),
+			consumeUtxosBatchQuery(rowCount, true),
+		)
+	}
+	for _, table := range transactionWitnessTables {
+		queries = append(queries, TransactionWitnessCleanupSQL(table))
+	}
+	for _, table := range certificateTables {
+		queries = append(queries, certificateTableCleanupSQL(table))
+	}
+	for _, size := range cachedAddressInputQuerySizes {
+		queries = append(queries, addressTransactionInputQuery(size))
+		for _, table := range []string{
+			"utxo_collateral_input",
+			"utxo_reference_input",
+		} {
+			queries = append(queries,
+				utxoReferenceInsertBatchSQL(table, size),
+			)
+		}
+		for _, column := range []string{
+			"collateral_by_tx_id",
+			"referenced_by_tx_id",
+		} {
+			queries = append(queries,
+				utxoReferenceUpdateBatchSQL(column, size),
+			)
+		}
+	}
+	return queries
+}()
 
 // cacheableForDialect reports whether query is safe to serve from the
-// hot-statement cache when running against dialect. The only unsafe
-// combination today is a RETURNING-id query on MySQL: dialectQueryer.
+// hot-statement cache when running against dialect. A RETURNING-id query on
+// MySQL is unsafe: dialectQueryer.
 // QueryRowContext (dialect_queryer.go) special-cases exactly that shape and
 // never calls QueryRowContext with the translated text at all, instead
 // issuing its own ExecContext + LastInsertId (or RowsAffected, for an
@@ -49,9 +115,19 @@ var hotStatements = []string{
 // *sql.Stmt would sit unused by that path regardless of whether one exists,
 // so prepareHotStatements skips creating it. PostgreSQL supports RETURNING
 // natively (dialectQueryer.QueryRowContext takes its ordinary path there,
-// like SQLite), so this only ever excludes the MySQL+RETURNING pair.
+// like SQLite). The multi-row mutation shapes are SQLite-specific and are
+// also excluded from other dialects.
 func cacheableForDialect(dialect, query string) bool {
+	if dialect != "sqlite" && isSQLiteBatchQuery(query) {
+		return false
+	}
 	return dialect != "mysql" || !hasReturningID(query)
+}
+
+func isSQLiteBatchQuery(query string) bool {
+	return strings.Contains(query, "RETURNING id, tx_id, output_idx") ||
+		strings.Contains(query, "RETURNING tx_id, output_idx") ||
+		strings.Contains(query, "AND (tx_id, output_idx) IN (")
 }
 
 // prepareHotStatements prepares every entry in hotStatements once against
@@ -357,6 +433,18 @@ func (s *Store) evictTxStmts(tx *sql.Tx) {
 	s.txStmtMu.Unlock()
 }
 
+// isClosedStmtErr reports database/sql's "statement is closed" error, which
+// is unexported. A transaction-scoped statement memoized by txScopedStmt is
+// closed by database/sql itself when the transaction's context is cancelled,
+// before Commit or Rollback evicts it, so a later call through the memoized
+// statement fails with this error instead of the transaction's own
+// (context.Canceled or sql.ErrTxDone). queryRowCached, execCached and
+// queryRowsCached retry uncached in that case so callers see the same error
+// an uncached call gives.
+func isClosedStmtErr(err error) bool {
+	return err != nil && err.Error() == "sql: statement is closed"
+}
+
 // queryRowCached and execCached are the shared cache-or-fallback dance
 // sumCredentialUtxoStake originally inlined by hand: use the hot-statement
 // cache when query has an entry, and fall back to a plain one-shot call
@@ -391,14 +479,15 @@ func (s *Store) queryRowCached(
 		// returned below defers running Scan against it until the caller
 		// invokes Scan.
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
-		if s.sqlQueryDuration == nil {
-			return stmt.QueryRowContext(ctx, args...)
-		}
 		start := time.Now()
 		row := stmt.QueryRowContext(ctx, args...)
-		s.sqlQueryDuration.WithLabelValues(op, name).
-			Observe(time.Since(start).Seconds())
-		return row
+		if s.sqlQueryDuration != nil {
+			s.sqlQueryDuration.WithLabelValues(op, name).
+				Observe(time.Since(start).Seconds())
+		}
+		if !isClosedStmtErr(row.Err()) {
+			return row
+		}
 	}
 	return db.QueryRowContext(ctx, query, args...)
 }
@@ -420,14 +509,92 @@ func (s *Store) execCached(
 		// the transaction ends, so there is nothing for this function to
 		// close.
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
-		if s.sqlQueryDuration == nil {
-			return stmt.ExecContext(ctx, args...)
-		}
 		start := time.Now()
 		result, err := stmt.ExecContext(ctx, args...)
-		s.sqlQueryDuration.WithLabelValues(op, name).
-			Observe(time.Since(start).Seconds())
-		return result, err
+		if s.sqlQueryDuration != nil {
+			s.sqlQueryDuration.WithLabelValues(op, name).
+				Observe(time.Since(start).Seconds())
+		}
+		if !isClosedStmtErr(err) {
+			return result, err
+		}
 	}
 	return db.ExecContext(ctx, query, args...)
+}
+
+// cachedDBTX hands sqlc-generated queries the hot-statement cache: a query
+// whose text is in hotStatements runs on its cached statement, any other text
+// takes the plain dialect-aware queryer. db must be the dialect-translated
+// queryer (newDialectQueryer's result), so a cache miss still gets dialect
+// translation and stmtForQueryer can unwrap it to find a *sql.Tx.
+type cachedDBTX struct {
+	sqlitequery.DBTX
+	s  *Store
+	db queryer
+}
+
+func (c cachedDBTX) ExecContext(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (sql.Result, error) {
+	return c.s.execCached(ctx, c.db, query, args...)
+}
+
+func (c cachedDBTX) QueryRowContext(
+	ctx context.Context,
+	query string,
+	args ...any,
+) *sql.Row {
+	return c.s.queryRowCached(ctx, c.db, query, args...)
+}
+
+// operationalQueriesCached is operationalQueries for callers that run on the
+// write pool or a write transaction, where the hot-statement cache is usable.
+// Use operationalQueries for reads that may run on a separate read pool.
+func (s *Store) operationalQueriesCached(db queryer) *sqlitequery.Queries {
+	translated := newDialectQueryer(db, s.dialect.Name())
+	return sqlitequery.New(cachedDBTX{DBTX: translated, s: s, db: translated})
+}
+
+// readCanUseWriteCache reports whether a read issued through readDBFromTxn(txn)
+// runs on a handle the write-pool hot-statement cache is valid for. A file-
+// backed SQLite store has a distinct read-only pool, whose reads cannot use
+// statements prepared against writeDB.
+func (s *Store) readCanUseWriteCache(txn types.Txn) bool {
+	if s.readDB == s.writeDB {
+		return true
+	}
+	if txn == nil {
+		return false
+	}
+	if sqlTxn, ok := txn.(*sqlTxn); ok && sqlTxn.readOnly {
+		return false
+	}
+	return true
+}
+
+func (s *Store) queryRowsCached(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) (*sql.Rows, error) {
+	if cached, ok := s.lookupCachedStmt(query); ok {
+		op, name := classifySQLStatement(query)
+		if s.sqlOperations != nil {
+			s.sqlOperations.WithLabelValues(op).Inc()
+		}
+		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
+		start := time.Now()
+		rows, err := stmt.QueryContext(ctx, args...)
+		if s.sqlQueryDuration != nil {
+			s.sqlQueryDuration.WithLabelValues(op, name).
+				Observe(time.Since(start).Seconds())
+		}
+		if !isClosedStmtErr(err) {
+			return rows, err
+		}
+	}
+	return db.QueryContext(ctx, query, args...)
 }

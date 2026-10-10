@@ -83,7 +83,7 @@ func Snapshot(
 	if _, err := manifestByteLimit(opts); err != nil {
 		return Manifest{}, err
 	}
-	maxPause, pauseNow, pauseContext, err := commitPauseConfig(opts)
+	maxPause, pauseNow, pauseContext, pauseDeadline, err := commitPauseConfig(opts)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -243,7 +243,7 @@ func Snapshot(
 	// the caller's ctx as well, so cancellation behaves as before.
 	backupCtx, cancelBackup := context.WithCancel(ctx)
 	if maxPause > 0 {
-		timeoutCtx, cancelTimeout := context.WithTimeout(backupCtx, maxPause)
+		timeoutCtx, cancelTimeout := pauseDeadline(backupCtx, maxPause)
 		cancelParent := cancelBackup
 		cancelBackup = func() {
 			cancelTimeout()
@@ -283,6 +283,16 @@ func Snapshot(
 		return Manifest{}, backupCtx.Err()
 	}
 	if state.err != nil {
+		if maxPause > 0 && ctx.Err() == nil &&
+			errors.Is(backupCtx.Err(), context.DeadlineExceeded) {
+			pauseExceeded = true
+			return Manifest{}, fmt.Errorf(
+				"read snapshot state: %w (%s): %w",
+				ErrCommitPauseExceeded,
+				maxPause,
+				errors.Join(backupCtx.Err(), state.err),
+			)
+		}
 		return Manifest{}, fmt.Errorf("read snapshot state: %w", state.err)
 	}
 	if err := backupCtx.Err(); err != nil {
@@ -435,6 +445,14 @@ func Snapshot(
 		return Manifest{}, fmt.Errorf("stat %q: %w", metadataPath, err)
 	}
 
+	blobDigest, _, err := hashFileContext(ctx, blobPath)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("hash %q: %w", blobPath, err)
+	}
+	metadataDigest, _, err := hashFileContext(ctx, metadataPath)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("hash %q: %w", metadataPath, err)
+	}
 	metrics.bytes.WithLabelValues("blob").Add(float64(blobInfo.Size()))
 	metrics.bytes.WithLabelValues("metadata").Add(float64(metadataInfo.Size()))
 
@@ -453,6 +471,8 @@ func Snapshot(
 		DingoVersion:    dingoVersion,
 		BlobBytes:       blobInfo.Size(),
 		MetadataBytes:   metadataInfo.Size(),
+		BlobSHA256:      blobDigest,
+		MetadataSHA256:  metadataDigest,
 	}
 	if err := ctx.Err(); err != nil {
 		return Manifest{}, err

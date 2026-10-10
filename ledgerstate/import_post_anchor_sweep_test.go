@@ -28,8 +28,8 @@ import (
 
 // TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows pins the
 // block_nonce, network_state, and network_donation part of
-// ImportLedgerState's post-anchor sweep: rows a local rollover wrote above the
-// anchor are removed, and rows at or below the anchor are kept.
+// ImportLedgerState's post-anchor sweep: rows above the anchor are removed,
+// while anchor-epoch donations are replaced by the snapshot total.
 func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 	t.Parallel()
 
@@ -84,7 +84,7 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 				},
 			},
 			EpochLength: func(uint) (uint, uint, error) {
-				return 1, 1_000, nil
+				return 1, importTestEpochLength, nil
 			},
 		},
 	))
@@ -119,9 +119,12 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 	require.Zero(t, count(
 		"SELECT COUNT(*) FROM network_donation WHERE slot > ?", anchorSlot,
 	), "network donations above the anchor must be swept")
-	require.Equal(t, 2, count(
+	require.Equal(t, 1, count(
 		"SELECT COUNT(*) FROM network_donation WHERE slot <= ?", anchorSlot,
-	), "network donations at or below the anchor must be kept")
+	), "prior-epoch donations remain; the anchor epoch is replaced by the snapshot")
+	require.Zero(t, count(
+		"SELECT COUNT(*) FROM network_donation WHERE slot = ?", anchorSlot,
+	), "zero snapshot donations replace the anchor epoch's local row")
 }
 
 func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
@@ -167,7 +170,7 @@ func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
 			},
 		},
 		EpochLength: func(uint) (uint, uint, error) {
-			return 1, 1_000, nil
+			return 1, importTestEpochLength, nil
 		},
 	})
 	require.ErrorContains(t, err, "deleting post-anchor network donations")

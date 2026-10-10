@@ -24,6 +24,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/immutable"
@@ -1602,7 +1603,11 @@ func TestAriadneRollbackRestoresPriorEpochState(t *testing.T) {
 	assert.Equal(t, datumB, params.Datum)
 
 	restarted := setupGovIndexer(t, store)
-	restarted.rollbackAriadne(block2.Number)
+	apply, err := restarted.rollbackAriadne(nil, block2.Number)
+	require.NoError(t, err)
+	restarted.mu.Lock()
+	apply()
+	restarted.mu.Unlock()
 
 	params, err = store.GetMidnightAriadneParamsByEpoch(1, nil)
 	require.NoError(t, err)
@@ -1631,7 +1636,11 @@ func TestAriadneRollbackRestoresPriorEpochState(t *testing.T) {
 	)
 
 	restartedAgain := setupGovIndexer(t, store)
-	restartedAgain.rollbackAriadne(block3.Number)
+	apply, err = restartedAgain.rollbackAriadne(nil, block3.Number)
+	require.NoError(t, err)
+	restartedAgain.mu.Lock()
+	apply()
+	restartedAgain.mu.Unlock()
 
 	params, err = store.GetMidnightAriadneParamsByEpoch(2, nil)
 	require.NoError(t, err)
@@ -1720,8 +1729,9 @@ func TestCandidateAddRemove(t *testing.T) {
 
 	// Epoch transition: snapshot must contain the one remaining candidate.
 	idx.mu.Lock()
-	idx.advanceEpochLocked(2, 2, nil)
+	err := idx.advanceEpochLocked(2, 2, nil)
 	idx.mu.Unlock()
+	require.NoError(t, err)
 
 	snapshots := epochCandidateSnapshots(t, store)
 	require.Len(
@@ -1995,13 +2005,22 @@ func TestCandidateRollbackRestoresSpentAndRemovesCreated(t *testing.T) {
 		"new candidate must be present after applying block 2",
 	)
 
-	idx.rollbackCandidateSpends(block2.Number)
-	idx.rollbackCandidateCreates([]lcommon.Transaction{spendAndCreateTx})
+	apply, err := idx.rollbackCandidateSpends(nil, block2.Number)
+	require.NoError(t, err)
+	idx.mu.Lock()
+	apply()
+	idx.removeCandidateCreates([]lcommon.Transaction{spendAndCreateTx})
+	idx.mu.Unlock()
+	remainingRemovals, err := store.FindMidnightCandidateRemovalsByBlock(
+		nil,
+		block2.Number,
+	)
+	require.NoError(t, err)
+	hasRemovalLog := len(remainingRemovals) > 0
 
 	idx.mu.RLock()
 	restoredDatum, hasKey1AfterRollback := idx.candidates[key1]
 	_, hasKey2AfterRollback := idx.candidates[key2]
-	_, hasRemovalLog := idx.candidateRemovals[block2.Number]
 	idx.mu.RUnlock()
 
 	assert.True(
@@ -2051,7 +2070,11 @@ func TestCandidateRollbackDeletesPersistedSnapshots(t *testing.T) {
 	assert.Equal(t, uint64(1), snapshots[0].Epoch)
 	assert.Equal(t, boundaryBlock.Number, snapshots[0].BlockNumber)
 
-	idx.rollbackCandidateSnapshots(boundaryBlock)
+	apply, err := idx.rollbackCandidateSnapshots(nil, boundaryBlock)
+	require.NoError(t, err)
+	idx.mu.Lock()
+	apply()
+	idx.mu.Unlock()
 
 	snapshots = epochCandidateSnapshots(t, store)
 	assert.Empty(
@@ -2110,13 +2133,13 @@ func TestCandidateEmptySnapshot(t *testing.T) {
 	idx := setupGovIndexer(t, store)
 
 	idx.mu.Lock()
-	idx.advanceEpochLocked(
-		0,
-		0,
-		nil,
-	) // cold-start init: sets currentEpoch=0, hasCurrentEpoch=true
-	idx.advanceEpochLocked(1, 1, nil) // advance to epoch 1, snapshots epoch 0
+	// cold-start init: sets currentEpoch=0, hasCurrentEpoch=true
+	initErr := idx.advanceEpochLocked(0, 0, nil)
+	// advance to epoch 1, snapshots epoch 0
+	advanceErr := idx.advanceEpochLocked(1, 1, nil)
 	idx.mu.Unlock()
+	require.NoError(t, initErr)
+	require.NoError(t, advanceErr)
 
 	snapshots := epochCandidateSnapshots(t, store)
 	require.Len(
@@ -2136,18 +2159,16 @@ func TestEpochTransitionIdempotent(t *testing.T) {
 	idx := setupGovIndexer(t, store)
 
 	idx.mu.Lock()
-	idx.advanceEpochLocked(
-		3,
-		0,
-		nil,
-	) // cold-start init: sets currentEpoch=3, hasCurrentEpoch=true
-	idx.advanceEpochLocked(4, 42, nil) // advance to epoch 4, snapshots epoch 3
-	idx.advanceEpochLocked(
-		4,
-		42,
-		nil,
-	) // no-op: same epoch, guard prevents a second snapshot
+	// cold-start init: sets currentEpoch=3, hasCurrentEpoch=true
+	initErr := idx.advanceEpochLocked(3, 0, nil)
+	// advance to epoch 4, snapshots epoch 3
+	advanceErr := idx.advanceEpochLocked(4, 42, nil)
+	// no-op: same epoch, guard prevents a second snapshot
+	repeatErr := idx.advanceEpochLocked(4, 42, nil)
 	idx.mu.Unlock()
+	require.NoError(t, initErr)
+	require.NoError(t, advanceErr)
+	require.NoError(t, repeatErr)
 
 	snapshots := epochCandidateSnapshots(t, store)
 	require.Len(
@@ -2372,5 +2393,256 @@ func TestProcessBlock_PartialFailureLeavesUnrelatedStateIntact(t *testing.T) {
 		idx.cNightUTxOs,
 		1,
 		"block 1's unrelated, already-committed UTxO must survive block 2's rollback untouched",
+	)
+}
+
+// candidateSpendAndEpochAdvanceFixture applies, through idx, a block that
+// creates a candidate and a second block that spends it one epoch later, and
+// returns the second block, its transactions, and the spent candidate's key
+// and datum.
+func candidateSpendAndEpochAdvanceFixture(
+	t *testing.T,
+	idx *Indexer,
+	prefix string,
+) (models.Block, []lcommon.Transaction, candidateKey, []byte) {
+	t.Helper()
+	datum := simpleDatumCbor(t)
+	createHash := pad32(prefix + "01")
+	createTx := buildTx(
+		t,
+		createHash,
+		[]lcommon.TransactionInput{buildInput(t, pad32(prefix+"00"), 0)},
+		[]lcommon.TransactionOutput{buildGovOutput(t, testMappingAddr, datum)},
+	)
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(1, 100, 0xE1),
+			[]lcommon.Transaction{createTx},
+			1_000,
+		),
+	)
+	spendTx := buildTx(
+		t,
+		pad32(prefix+"02"),
+		[]lcommon.TransactionInput{buildInput(t, createHash, 0)},
+		[]lcommon.TransactionOutput{buildGovOutput(t, testOtherAddr, datum)},
+	)
+	block := testBlock(2, 200, 0xE2)
+	txs := []lcommon.Transaction{spendTx}
+	require.NoError(t, idx.processBlock(block, txs, 2_000))
+	return block, txs, candidateTestKey(t, createHash, 0), datum
+}
+
+// TestRollbackAfterRestartRestoresCandidateAndEpoch shows that the candidate
+// removal and epoch transition rollback journals survive a process restart: a
+// block that spent a candidate and advanced the epoch is rolled back by a new
+// Indexer over the same store, and re-applying it advances the epoch again.
+func TestRollbackAfterRestartRestoresCandidateAndEpoch(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+	block2, txs, key, datum := candidateSpendAndEpochAdvanceFixture(
+		t, idx, "ca30",
+	)
+
+	restarted := setupGovIndexer(t, store)
+	// The test block carries no CBOR, so the created candidates cannot be
+	// removed and the rollback reports itself incomplete; the journals are
+	// still consumed.
+	require.ErrorIs(t, restarted.rollbackBlock(block2), errIncompleteRollback)
+
+	restarted.mu.RLock()
+	require.Equal(
+		t,
+		datum,
+		restarted.candidates[key],
+		"the candidate spent by the rolled-back block must be restored",
+	)
+	require.True(t, restarted.hasCurrentEpoch)
+	require.Equal(
+		t,
+		uint64(1),
+		restarted.currentEpoch,
+		"the epoch must return to its pre-transition value",
+	)
+	restarted.mu.RUnlock()
+
+	require.NoError(t, restarted.processBlock(block2, txs, 2_000))
+	snapshots := epochCandidateSnapshots(t, store)
+	require.NotEmpty(t, snapshots)
+	require.Equal(
+		t,
+		uint64(1),
+		snapshots[len(snapshots)-1].Epoch,
+		"re-applying the block must advance from the restored epoch and snapshot it",
+	)
+}
+
+func TestEpochJournalSurvivesReplayAfterRestart(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+	block, txs, _, _ := candidateSpendAndEpochAdvanceFixture(t, idx, "ca60")
+	restarted := setupGovIndexer(t, store)
+	require.NoError(t, restarted.processBlock(block, txs, 2_000))
+	transition, err := store.GetMidnightEpochTransitionByBlock(nil, block.Number)
+	require.NoError(t, err)
+	require.NotNil(t, transition)
+	require.True(t, transition.PreviousExists)
+	require.Equal(t, uint64(1), transition.PreviousEpoch)
+	require.ErrorIs(t, restarted.rollbackBlock(block), errIncompleteRollback)
+	require.True(t, restarted.hasCurrentEpoch)
+	require.Equal(t, uint64(1), restarted.currentEpoch)
+	require.NoError(t, restarted.processBlock(block, txs, 2_000))
+	snapshots := epochCandidateSnapshots(t, store)
+	require.NotEmpty(t, snapshots)
+	require.Equal(t, uint64(1), snapshots[len(snapshots)-1].Epoch)
+}
+
+// failingEpochJournalStore fails the epoch-transition journal delete while
+// fail is set.
+type failingEpochJournalStore struct {
+	*testStore
+	fail atomic.Bool
+}
+
+func (s *failingEpochJournalStore) DeleteMidnightEpochTransitionsByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	if s.fail.Load() {
+		return errors.New("injected epoch transition journal failure")
+	}
+	return s.testStore.DeleteMidnightEpochTransitionsByBlock(txn, blockNumber)
+}
+
+// TestRollbackBlockIsAtomicAndRetryable shows that a rollback failing part-way
+// leaves the database journals and the in-memory state untouched and returns
+// the error, and that the retry then completes.
+func TestRollbackBlockIsAtomicAndRetryable(t *testing.T) {
+	t.Parallel()
+	store := &failingEpochJournalStore{testStore: setupTestStore(t)}
+	idx, err := New(Config{
+		Metadata: store,
+		Logger: slog.New(
+			slog.NewTextHandler(os.Stderr, nil),
+		),
+		TechnicalCommitteeAddress:   testMappingAddr,
+		TechnicalCommitteePolicyID:  testGovPolicyID,
+		CouncilAddress:              testCouncilAddr,
+		CouncilPolicyID:             testCouncilPolicyID,
+		PermissionedCandidatePolicy: testPermPolicyID,
+		CommitteeCandidateAddress:   testMappingAddr,
+		SlotToEpoch: func(slot uint64) (uint64, error) {
+			return slot / 100, nil
+		},
+	})
+	require.NoError(t, err)
+	block2, _, key, datum := candidateSpendAndEpochAdvanceFixture(
+		t, idx, "ca40",
+	)
+
+	store.fail.Store(true)
+	require.ErrorContains(
+		t,
+		idx.rollbackBlock(block2),
+		"injected epoch transition journal failure",
+	)
+	idx.mu.RLock()
+	_, restored := idx.candidates[key]
+	epoch := idx.currentEpoch
+	idx.mu.RUnlock()
+	require.False(t, restored, "a failed rollback must not restore memory")
+	require.Equal(t, uint64(2), epoch)
+	removals, err := store.FindMidnightCandidateRemovalsByBlock(
+		nil,
+		block2.Number,
+	)
+	require.NoError(t, err)
+	require.Len(t, removals, 1, "a failed rollback must keep the spend journal")
+	transition, err := store.GetMidnightEpochTransitionByBlock(
+		nil,
+		block2.Number,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, transition)
+
+	store.fail.Store(false)
+	require.ErrorIs(t, idx.rollbackBlock(block2), errIncompleteRollback)
+	idx.mu.RLock()
+	require.Equal(t, datum, idx.candidates[key])
+	require.Equal(t, uint64(1), idx.currentEpoch)
+	idx.mu.RUnlock()
+	removals, err = store.FindMidnightCandidateRemovalsByBlock(
+		nil,
+		block2.Number,
+	)
+	require.NoError(t, err)
+	require.Empty(t, removals)
+	transition, err = store.GetMidnightEpochTransitionByBlock(
+		nil,
+		block2.Number,
+	)
+	require.NoError(t, err)
+	require.Nil(t, transition)
+}
+
+// TestProcessBlockPrunesRollbackJournalsBeyondDepth shows that the persisted
+// journals are bounded to the rollback window while the current block's own
+// entries are kept.
+func TestProcessBlockPrunesRollbackJournalsBeyondDepth(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+	block2, _, _, _ := candidateSpendAndEpochAdvanceFixture(t, idx, "ca50")
+
+	far := testBlock(block2.Number+candidateRollbackDepth+1, 300, 0xE3)
+	require.NoError(t, idx.processBlock(far, nil, 3_000))
+
+	removals, err := store.FindMidnightCandidateRemovalsByBlock(
+		nil,
+		block2.Number,
+	)
+	require.NoError(t, err)
+	require.Empty(t, removals, "journal rows beyond the depth must be pruned")
+	old, err := store.GetMidnightEpochTransitionByBlock(nil, block2.Number)
+	require.NoError(t, err)
+	require.Nil(t, old)
+	current, err := store.GetMidnightEpochTransitionByBlock(nil, far.Number)
+	require.NoError(t, err)
+	require.NotNil(t, current, "the block's own transition must be kept")
+}
+
+func TestRollbackColdStartEpochAfterRestart(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+	block := models.Block{Number: 1, Slot: 2_000}
+	require.NoError(t, idx.processBlock(block, nil, 2_000))
+	require.True(t, idx.hasCurrentEpoch)
+	restarted := setupGovIndexer(t, store)
+	next := models.Block{Number: 2, Slot: 2_100}
+	require.NoError(t, restarted.processBlock(next, nil, 2_100))
+	require.ErrorIs(t, restarted.rollbackBlock(next), errIncompleteRollback)
+	require.ErrorIs(t, restarted.rollbackBlock(block), errIncompleteRollback)
+	require.False(
+		t,
+		restarted.hasCurrentEpoch,
+		"rolling back the first block must restore the uninitialized epoch",
+	)
+	require.NoError(
+		t,
+		restarted.processBlock(
+			models.Block{Number: 1, Slot: 1_000},
+			nil,
+			1_000,
+		),
+	)
+	require.Equal(t, uint64(10), restarted.currentEpoch)
+	require.Empty(
+		t,
+		epochCandidateSnapshots(t, store),
+		"a replacement first block must not snapshot a removed branch's epoch",
 	)
 }

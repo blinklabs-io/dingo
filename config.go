@@ -152,6 +152,7 @@ type TokenRegistryConfig struct {
 	HTTPClient            *http.Client
 	SourceURL             string
 	UserAgent             string
+	Headers               map[string]string
 	Interval              time.Duration
 	RequestTimeout        time.Duration
 	MaxBytes              int64
@@ -235,6 +236,7 @@ type Config struct {
 	barkBlockDownloadHosts                                                              []string
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
+	barkArchiveMaxConcurrentFetches                                                     int
 	barkOperatorCertificateFingerprints                                                 []string
 	barkLifecycleEnabled                                                                bool
 	barkLifecycleOperatorCertificateFingerprints                                        []string
@@ -277,6 +279,8 @@ type Config struct {
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
+	ledgerPrefetchAheadEnabled                                                          bool
+	ledgerApplyRowBatchingEnabled                                                       bool
 	minPoolMargin                                                                       uint
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
@@ -793,6 +797,7 @@ func (c *Config) syncCompatFields() {
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
+	c.barkArchiveMaxConcurrentFetches = c.cfg.BarkArchiveMaxConcurrentFetches
 	c.barkOperatorCertificateFingerprints = slices.Clone(
 		c.cfg.BarkOperatorCertificateFingerprints,
 	)
@@ -849,6 +854,7 @@ func (c *Config) syncCompatFields() {
 		HTTPClient:            c.tokenRegistry.HTTPClient,
 		SourceURL:             c.cfg.TokenRegistry.SourceURL,
 		UserAgent:             c.cfg.TokenRegistry.UserAgent,
+		Headers:               c.cfg.TokenRegistry.HeaderSecrets,
 		Interval:              c.cfg.TokenRegistry.Interval,
 		RequestTimeout:        c.cfg.TokenRegistry.RequestTimeout,
 		MaxBytes:              c.cfg.TokenRegistry.MaxBytes,
@@ -910,6 +916,8 @@ func (c *Config) syncCompatFields() {
 	c.forgeEBSelectionReserve = c.cfg.ForgeEBSelectionReserve
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
+	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
+	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
@@ -1100,8 +1108,8 @@ func WithCardanoNodeConfig(
 	}
 }
 
-// WithBindAddr specifies the IP address used by relay, metrics, and public
-// Blockfrost, Kupo, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
+// WithBindAddr specifies the IP address used by relay and public Blockfrost,
+// Kupo, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
@@ -1730,6 +1738,29 @@ func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 	}
 }
 
+// WithLedgerPrefetchAheadEnabled prefetches the next block's input UTxOs from a
+// read-only transaction while the current block applies, for blocks under
+// normal validation only. Not consensus-affecting; off by default. See
+// LedgerStateConfig.LedgerPrefetchAheadEnabled.
+func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerPrefetchAheadEnabled = enabled
+	}
+}
+
+// WithLedgerApplyRowBatchingEnabled writes the accumulated deltas of blocks
+// that are not validated through the metadata store's batched path in core
+// storage mode, as API storage mode already does. Validated blocks, Leios
+// endorser-block applies, and batches applied with closure context keep the
+// per-transaction path in every storage mode, API mode included. Off by
+// default; the stored state is identical either way. See
+// LedgerStateConfig.ApplyRowBatchingEnabled.
+func WithLedgerApplyRowBatchingEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerApplyRowBatchingEnabled = enabled
+	}
+}
+
 // WithBlockfrostPort specifies the port for the
 // Blockfrost-compatible REST API server. The server binds
 // to the node's bindAddr on this port. 0 disables the
@@ -1777,6 +1808,15 @@ func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkClientCAFilePath = path
 		c.barkClientCAFilePath = path
+	}
+}
+
+// WithBarkArchiveMaxConcurrentFetches bounds how many Bark ArchiveService
+// FetchBlock requests are served at once. Zero selects Bark's default.
+func WithBarkArchiveMaxConcurrentFetches(limit int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkArchiveMaxConcurrentFetches = limit
+		c.barkArchiveMaxConcurrentFetches = limit
 	}
 }
 
@@ -1895,6 +1935,7 @@ func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
 			Interval:              cfg.Interval,
 			RequestTimeout:        cfg.RequestTimeout,
 			UserAgent:             cfg.UserAgent,
+			HeaderSecrets:         cfg.Headers,
 			MaxBytes:              cfg.MaxBytes,
 			MaxDecompressedBytes:  cfg.MaxDecompressedBytes,
 			MaxEntryBytes:         cfg.MaxEntryBytes,
@@ -2062,7 +2103,7 @@ func (c *Config) MetadataPlugin() string {
 	return c.cfg.Plugins.Storage.Metadata.Provider
 }
 
-// BindAddr returns the IP address for relay and metrics listeners.
+// BindAddr returns the IP address for relay and public API listeners.
 func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
 }
@@ -2583,6 +2624,18 @@ func (c *Config) BlockPipelineEnabled() bool {
 // OpCert validate stage of the block-decode pipeline is enabled.
 func (c *Config) BlockPipelineValidateEnabled() bool {
 	return c.cfg.BlockPipelineValidateEnabled
+}
+
+// LedgerPrefetchAheadEnabled returns whether next-block UTxO prefetching is
+// enabled.
+func (c *Config) LedgerPrefetchAheadEnabled() bool {
+	return c.cfg.LedgerPrefetchAheadEnabled
+}
+
+// LedgerApplyRowBatchingEnabled returns whether blocks that are not validated
+// are applied through the batched metadata write path.
+func (c *Config) LedgerApplyRowBatchingEnabled() bool {
+	return c.cfg.LedgerApplyRowBatchingEnabled
 }
 
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.

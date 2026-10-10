@@ -52,9 +52,19 @@ dingo_only=(
 	"preview/README.md"
 )
 
-# These files are shipped by cardano-configs but are intentionally not embedded
-# by dingo. Keep the allowlist explicit so any new upstream file still fails.
+# These upstream files are not embedded as network configuration. The local
+# DevNet CLI separately embeds only its three producer credentials from
+# internal/devnetkeys. Keep the allowlist explicit so new upstream files fail.
 upstream_only=(
+# Keep upstream credentials out of config/cardano; local producer keys live in
+# the explicit internal/devnetkeys bundle.
+	"devnet/keys/byron-delegate.key"
+	"devnet/keys/byron-delegation.cert"
+	"devnet/keys/faucet.skey"
+	"devnet/keys/faucet.vkey"
+	"devnet/keys/kes.skey"
+	"devnet/keys/opcert.cert"
+	"devnet/keys/vrf.skey"
 	"preview/db-sync-config.json"
 	"preview/tracer-config.json"
 	"mainnet/db-sync-config.json"

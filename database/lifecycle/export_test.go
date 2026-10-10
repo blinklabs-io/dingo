@@ -30,3 +30,13 @@ func WithSnapshotPauseClockForTest(
 		cfg.pauseContext = pauseContext
 	}
 }
+
+// WithSnapshotPauseDeadlineForTest supplies a deterministic deadline seam to
+// external lifecycle tests without exposing it in production.
+func WithSnapshotPauseDeadlineForTest(
+	deadline func(context.Context, time.Duration) (context.Context, context.CancelFunc),
+) ManifestOption {
+	return func(cfg *manifestConfig) {
+		cfg.pauseDeadline = deadline
+	}
+}

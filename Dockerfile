@@ -93,6 +93,12 @@ VOLUME /ipc
 ENV DINGO_SOCKET_PATH=/ipc/dingo.socket
 ENV CARDANO_NODE_SOCKET_PATH=/ipc/dingo.socket
 ENV CARDANO_SOCKET_PATH=/ipc/dingo.socket
+# The binary binds Prometheus metrics to loopback by default. Inside a
+# container that would refuse every scraper and orchestrator probe, and the
+# container's own network namespace already bounds the exposure, so the image
+# binds the wildcard. Set DINGO_METRICS_BIND_ADDR=127.0.0.1 to keep metrics
+# private to the container; the variable takes precedence over YAML.
+ENV DINGO_METRICS_BIND_ADDR=0.0.0.0
 EXPOSE 3001 3002 9090 12798 12799
 # Probes the dedicated health listener's LIVENESS path, not /readyz, and not
 # /metrics as this previously did.

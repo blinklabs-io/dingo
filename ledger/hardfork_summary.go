@@ -215,6 +215,29 @@ func (ls *LedgerState) buildHardForkSummary(
 	tipState *tipSnapshot,
 	horizonAnchorSlot uint64,
 ) (*hardfork.Summary, error) {
+	return ls.buildHardForkSummaryFrom(
+		consensusState,
+		max(tipState.currentTip.Point.Slot, horizonAnchorSlot),
+	)
+}
+
+// forecastSummaryFrom builds a summary whose current-era horizon is measured
+// from forecastSlot itself, even below the published tip: the forecast a
+// peer's chain gets from its intersection with the local chain. It bypasses
+// the shared summary cache, which holds one entry keyed for the tip.
+func (ls *LedgerState) forecastSummaryFrom(
+	forecastSlot uint64,
+) (*hardfork.Summary, error) {
+	consensusState, _ := ls.loadStateSnapshots()
+	return ls.buildHardForkSummaryFrom(consensusState, forecastSlot)
+}
+
+// buildHardForkSummaryFrom is buildHardForkSummary with the current era's
+// forecast horizon measured from tipSlot.
+func (ls *LedgerState) buildHardForkSummaryFrom(
+	consensusState *consensusSnapshot,
+	tipSlot uint64,
+) (*hardfork.Summary, error) {
 	// SystemStart is sourced from the Shelley genesis when available. When it
 	// isn't (e.g. SlotToEpoch-style callers that work from the epoch cache
 	// alone), SystemStart stays at the zero time.Time and callers must avoid
@@ -228,7 +251,6 @@ func (ls *LedgerState) buildHardForkSummary(
 
 	cache := consensusState.epochCache
 	transitionInfo := consensusState.transitionInfo
-	tipSlot := max(tipState.currentTip.Point.Slot, horizonAnchorSlot)
 
 	if len(cache) == 0 {
 		return nil, errors.New("ledger: no epochs in cache")

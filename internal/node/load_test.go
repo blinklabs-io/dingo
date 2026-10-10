@@ -1573,3 +1573,35 @@ func requireChunkTrio(t *testing.T, name, dir string) {
 		))
 	}
 }
+
+// TestLoadWithDBPropagatesApplyRowBatching verifies that `dingo load`, which
+// replays blocks without validating them, honours the operator's
+// ledgerApplyRowBatchingEnabled setting as serve mode does.
+func TestLoadWithDBPropagatesApplyRowBatching(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stop := errors.New("stop after ledger config capture")
+	run := func(enabled bool) ledger.LedgerStateConfig {
+		db := newTestDB(t)
+		var captured ledger.LedgerStateConfig
+		old := newLedgerStateForLoad
+		newLedgerStateForLoad = func(cfg ledger.LedgerStateConfig) (*ledger.LedgerState, error) {
+			captured = cfg
+			return nil, stop
+		}
+		t.Cleanup(func() { newLedgerStateForLoad = old })
+		err := LoadWithDB(
+			context.Background(),
+			&config.Config{
+				Network:                       "preview",
+				LedgerApplyRowBatchingEnabled: enabled,
+			},
+			logger,
+			"unused",
+			db,
+		)
+		require.ErrorIs(t, err, stop)
+		return captured
+	}
+	require.True(t, run(true).ApplyRowBatchingEnabled)
+	require.False(t, run(false).ApplyRowBatchingEnabled)
+}

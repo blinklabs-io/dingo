@@ -4330,6 +4330,27 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		}
 	}
 
+	// A header past the forecast horizon cannot be validated until the
+	// applied ledger advances, so it must not join the queue blockfetch
+	// drains. Admission holds such headers back; one that still arrives (the
+	// horizon moved back after admission, or an event that bypassed it) is
+	// re-delivered from a fresh intersection instead. Passing crypto against
+	// the local epoch data does not exempt it: a fork is forecast from its
+	// intersection, which can end before the tip's horizon does.
+	if ls.headerBeyondForecastHorizon(ls.lifecycleContext(), e) {
+		ls.config.Logger.Debug(
+			"not queueing chainsync header past the forecast horizon",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"connection_id", e.ConnectionId.String(),
+		)
+		ls.requestChainsyncResync(
+			e.ConnectionId,
+			"header past forecast horizon",
+			pending,
+		)
+		return nil
+	}
 	if ls.setChainsyncState(SyncingChainsyncState) == RollbackChainsyncState {
 		ls.config.Logger.Info(
 			fmt.Sprintf(
@@ -4485,6 +4506,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			}
 			return nil
 		}
+		if errors.Is(err, chain.ErrHeaderQueueFull) {
+			// A full queue rejects every header before the fetch decision
+			// below, so if nothing is fetching the queued headers nothing
+			// ever will.
+			ls.ensureBlockfetchDrainingQueuedHeaders(
+				e.ConnectionId,
+				event.ChainsyncResyncReasonHeaderQueueFullRestartFailed,
+				pending,
+			)
+		}
 		return fmt.Errorf("failed adding chain block header: %w", err)
 	}
 	// Reset mismatch counter on successful header addition
@@ -4623,12 +4654,14 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 // A header received no more than defaultHeaderClockSkew before its slot waits
 // for slot onset and is accepted. A header received earlier is deliberately
 // dropped by returning (false, nil): local clock skew cannot by itself justify
-// penalizing the peer. ErrPastHorizon is also accepted as a deferred decision,
-// matching headerVerificationEpoch; without a forecast the header cannot be
-// proven future. Other conversion failures fail closed. A zero timestamp is
-// retained for compatibility with synthetic/internal events that never crossed
-// the network ingress path. As with other Go APIs that accept a context, ctx
-// must not be nil.
+// penalizing the peer. A header past the ledger's forecast horizon cannot be
+// validated, so it waits until the applied ledger advances far enough to
+// forecast its slot before the onset check runs, as the reference ChainSync
+// client does for OutsideForecastRange; until then it must not influence chain
+// selection or reach blockfetch. Other conversion failures fail closed. A zero
+// timestamp is retained for compatibility with synthetic/internal events that
+// never crossed the network ingress path. As with other Go APIs that accept a
+// context, ctx must not be nil.
 func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	ctx context.Context,
 	e ChainsyncEvent,
@@ -4638,10 +4671,25 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	}
 	headerSlot := e.BlockHeader.SlotNumber()
 	slotTime, err := ls.slotClock.SlotToTime(headerSlot)
-	if err != nil {
-		if errors.Is(err, hardfork.ErrPastHorizon) {
-			return true, nil
+	if errors.Is(err, hardfork.ErrPastHorizon) {
+		if ctx == nil {
+			return false, errors.New(
+				"chainsync header admission context is nil",
+			)
 		}
+		if err := ls.awaitForecastHorizon(ctx, e); err != nil {
+			return false, fmt.Errorf("wait for forecast horizon: %w", err)
+		}
+		slotTime, err = ls.slotClock.SlotToTime(headerSlot)
+	} else if err == nil && ls.headerBeyondForecastHorizon(ctx, e) {
+		// The slot is in range from the local tip, but the peer's chain
+		// leaves the local chain earlier, and is forecast from there.
+		if err := ls.awaitForecastHorizon(ctx, e); err != nil {
+			return false, fmt.Errorf("wait for forecast horizon: %w", err)
+		}
+		slotTime, err = ls.slotClock.SlotToTime(headerSlot)
+	}
+	if err != nil {
 		return false, fmt.Errorf("resolve header slot onset: %w", err)
 	}
 	earlyBy := slotTime.Sub(e.ArrivalTime)
@@ -4675,6 +4723,172 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 		return false, fmt.Errorf("wait for header slot onset: %w", err)
 	}
 	return true, nil
+}
+
+// awaitForecastHorizon blocks until the published ledger state can forecast
+// e's slot, or ctx ends. The horizon only moves when a snapshot is published,
+// so it waits for publication rather than polling.
+func (ls *LedgerState) awaitForecastHorizon(
+	ctx context.Context,
+	e ChainsyncEvent,
+) error {
+	logged := false
+	for {
+		published := ls.snapshotPublishedChan()
+		if !ls.headerBeyondForecastHorizon(ctx, e) {
+			return nil
+		}
+		if !logged && ls.config.Logger != nil {
+			ls.config.Logger.Debug(
+				"holding chainsync header past the forecast horizon",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+			)
+			logged = true
+		}
+		select {
+		case <-published:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// headerBeyondForecastHorizon reports whether e's header lies past the
+// horizon its chain can be forecast to. Like the reference ChainSync client,
+// the forecast is measured from the peer chain's intersection with the local
+// chain, so a fork that left the local chain before the ledger tip has a
+// shorter horizon than the tip's.
+func (ls *LedgerState) headerBeyondForecastHorizon(
+	ctx context.Context,
+	e ChainsyncEvent,
+) bool {
+	if ls.slotClock == nil || e.BlockHeader == nil {
+		return false
+	}
+	slot := e.BlockHeader.SlotNumber()
+	if _, err := ls.slotClock.SlotToTime(slot); err != nil {
+		return errors.Is(err, hardfork.ErrPastHorizon)
+	}
+	anchor, ok := ls.chainsyncForkAnchor(ctx, e)
+	if !ok {
+		return false
+	}
+	summary, err := ls.forecastSummaryFrom(anchor)
+	if err != nil {
+		return false
+	}
+	_, err = summary.SlotToEpoch(slot)
+	return errors.Is(err, hardfork.ErrPastHorizon)
+}
+
+// chainsyncForkAnchor returns the slot at which the peer chain delivering e
+// leaves the local chain, when that is below the ledger tip. ok is false when
+// the peer's chain contains the ledger tip, which is then the forecast anchor,
+// and when the intersection cannot be resolved from recorded peer headers.
+func (ls *LedgerState) chainsyncForkAnchor(
+	ctx context.Context,
+	e ChainsyncEvent,
+) (uint64, bool) {
+	if ls.chain == nil {
+		return 0, false
+	}
+	tip := ls.loadTipSnapshot()
+	if tip == nil {
+		return 0, false
+	}
+	prevHash := e.BlockHeader.PrevHash().Bytes()
+	if bytes.Equal(prevHash, ls.chain.HeaderTip().Point.Hash) ||
+		bytes.Equal(prevHash, ls.chain.Tip().Point.Hash) {
+		return 0, false
+	}
+	return resolveForkAnchor(
+		prevHash,
+		tip.currentTip.Point.Slot,
+		ls.peerHeaderHistoryLimit(),
+		forkAnchorLookups{
+			peerHeader: func(hash []byte) (ocommon.Point, []byte, bool) {
+				if ls.config.PeerHeaderLookupFunc == nil {
+					return ocommon.Point{}, nil, false
+				}
+				ancestor, parentHash, found := ls.config.PeerHeaderLookupFunc(
+					e.ConnectionId,
+					hash,
+				)
+				return ancestor.Point, parentHash, found
+			},
+			queuedHeader: ls.chain.HoldsQueuedHeader,
+			heldBlock: func(point ocommon.Point) bool {
+				return ls.chain.HoldsPoint(ctx, point)
+			},
+			blockByHash: func(hash []byte) (ocommon.Point, bool) {
+				if ls.db == nil && ls.lookupBlockByHash == nil {
+					return ocommon.Point{}, false
+				}
+				block, err := ls.blockByHash(ctx, hash)
+				if err != nil {
+					return ocommon.Point{}, false
+				}
+				return ocommon.NewPoint(block.Slot, block.Hash), true
+			},
+		},
+	)
+}
+
+type forkAnchorLookups struct {
+	// peerHeader resolves a header the peer delivered, with its parent hash.
+	peerHeader func(hash []byte) (ocommon.Point, []byte, bool)
+	// queuedHeader and heldBlock report membership of the local chain.
+	queuedHeader func(point ocommon.Point) bool
+	heldBlock    func(point ocommon.Point) bool
+	// blockByHash resolves a stored block the peer did not deliver, such as
+	// the point its chainsync session intersected at.
+	blockByHash func(hash []byte) (ocommon.Point, bool)
+}
+
+// resolveForkAnchor walks a peer's delivered headers back from prevHash to
+// the first point the local chain holds. A queued header or a block above the
+// ledger tip means the peer's chain contains the tip. A header built on origin
+// carries the zero hash as its parent, which no stored block has: that
+// intersection is slot 0.
+func resolveForkAnchor(
+	prevHash []byte,
+	tipSlot uint64,
+	limit int,
+	lookups forkAnchorLookups,
+) (uint64, bool) {
+	for range limit {
+		if isOriginHash(prevHash) {
+			return localForkAnchor(0, tipSlot)
+		}
+		point, parentHash, found := lookups.peerHeader(prevHash)
+		if !found {
+			point, found = lookups.blockByHash(prevHash)
+			if !found || !lookups.heldBlock(point) {
+				return 0, false
+			}
+			return localForkAnchor(point.Slot, tipSlot)
+		}
+		if lookups.queuedHeader(point) {
+			return 0, false
+		}
+		if lookups.heldBlock(point) {
+			return localForkAnchor(point.Slot, tipSlot)
+		}
+		prevHash = parentHash
+	}
+	return 0, false
+}
+
+func isOriginHash(hash []byte) bool {
+	return !slices.ContainsFunc(hash, func(b byte) bool { return b != 0 })
+}
+
+func localForkAnchor(intersectionSlot, tipSlot uint64) (uint64, bool) {
+	if intersectionSlot >= tipSlot {
+		return 0, false
+	}
+	return intersectionSlot, true
 }
 
 // chainsyncHeaderCryptoPolicy distinguishes headers trusted by Mithril
@@ -5536,7 +5750,9 @@ func (ls *LedgerState) recoverBlockfetchRestartFailureLocked(
 }
 
 // ensureBlockfetchDrainingAfterForkQueueFailure restarts blockfetch for
-// already-queued headers when nothing is currently fetching them. It is
+// already-queued headers when nothing is currently fetching them. The main
+// header path does the same through ensureBlockfetchDrainingQueuedHeaders
+// when it rejects a header with ErrHeaderQueueFull. This entry point is
 // called after tryResolveFork fails to append a fork-resolution header path
 // onto the chain's header queue (most commonly because the queue is already
 // at ErrHeaderQueueFull capacity): the success paths in tryResolveFork
@@ -5562,6 +5778,22 @@ func (ls *LedgerState) ensureBlockfetchDrainingAfterForkQueueFailure(
 	connId ouroboros.ConnectionId,
 	pending *pendingPublishes,
 ) {
+	ls.ensureBlockfetchDrainingQueuedHeaders(
+		connId,
+		event.ChainsyncResyncReasonForkQueueOverflowRestartFailed,
+		pending,
+	)
+}
+
+// ensureBlockfetchDrainingQueuedHeaders is
+// ensureBlockfetchDrainingAfterForkQueueFailure with the re-sync reason
+// supplied by the caller, so a failed restart names the path that hit the
+// full queue.
+func (ls *LedgerState) ensureBlockfetchDrainingQueuedHeaders(
+	connId ouroboros.ConnectionId,
+	resyncReason string,
+	pending *pendingPublishes,
+) {
 	if ls.config.BlockfetchRequestRangeFunc == nil ||
 		ls.chain.HeaderCount() == 0 {
 		return
@@ -5584,11 +5816,12 @@ func (ls *LedgerState) ensureBlockfetchDrainingAfterForkQueueFailure(
 	// still land on a stale peer instead of the one actually now fetching.
 	if err := ls.startQueuedBlockfetchOnLocked(connId, pending); err != nil {
 		ls.config.Logger.Warn(
-			"failed to start blockfetch after fork-resolution queue overflow, "+
-				"dropping queued headers and requesting chainsync re-sync",
+			"failed to start blockfetch for queued headers after header-queue "+
+				"rejection, dropping queued headers and requesting chainsync re-sync",
 			"component", "ledger",
 			"error", err,
 			"connection_id", connId.String(),
+			"reason", resyncReason,
 		)
 		// Nothing else schedules a fetch for these headers once the queue
 		// is full and no blockfetch is in flight (see doc comment above):
@@ -5596,12 +5829,19 @@ func (ls *LedgerState) ensureBlockfetchDrainingAfterForkQueueFailure(
 		// permanently. Clear them and ask for a fresh intersect instead,
 		// matching noteBlockfetchRangeUnavailable's equivalent recovery.
 		ls.clearQueuedHeaders()
-		ls.requestChainsyncResync(
-			connId,
-			event.ChainsyncResyncReasonForkQueueOverflowRestartFailed,
-			pending,
-		)
+		ls.requestChainsyncResync(connId, resyncReason, pending)
+		return
 	}
+	// Logged once per episode: the in-flight guard above suppresses repeat
+	// calls until this batch completes, so a recovered stall stays visible
+	// without flooding the log.
+	ls.config.Logger.Info(
+		"started blockfetch for queued headers after header-queue rejection",
+		"component", "ledger",
+		"connection_id", connId.String(),
+		"reason", resyncReason,
+		"queued_headers", ls.chain.HeaderCount(),
+	)
 }
 
 // blockfetchRangeFailureState counts definitive failures to obtain one
@@ -5877,13 +6117,7 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 // an optional test synchronization signal for the prior-request drain.
 func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	connId ouroboros.ConnectionId,
-	//nolint:unparam // pending's only use here was the synchronous NoBlocks
-	// branch this commit removes (NoBlocks now resolves asynchronously, in
-	// handleEventBlockfetchBatchDone). Kept rather than threaded out of every
-	// caller and test helper, since the dispatch-timing rework this function
-	// is meant to support needs it again for its own disruption-path
-	// publishes.
-	pending *pendingPublishes,
+	_ *pendingPublishes,
 	waitStarted chan<- struct{},
 ) error {
 	// The caller owns chainsyncBlockfetchMutex. Keep the reservation and
@@ -7329,13 +7563,9 @@ func (ls *LedgerState) calculateEpochNonce(ctx context.Context,
 	currentEpoch models.Epoch,
 	newEpochPParams lcommon.ProtocolParameters,
 ) ([]byte, []byte, []byte, []byte, error) {
-	// No epoch nonce in Byron. NOTE: currentEra is the SOURCE era being
-	// rolled over, not necessarily the era the new epoch will run at — a
-	// rollover whose source era is Byron but whose destination era (per
-	// the caller's later era-transition decision) is Shelley or beyond
-	// still returns nil here. applyBoundaryEraTransitions seeds a real
-	// nonce for that case once the destination era is known; see the
-	// comment there.
+	// No epoch nonce exists in Byron. At a Byron-to-Shelley boundary the caller
+	// applies the transition before rollover, so currentEra is Shelley and the
+	// empty source-epoch nonce takes the genesis-nonce initialization below.
 	if currentEra.Id == 0 {
 		return nil, nil, nil, nil, nil
 	}
@@ -7458,10 +7688,9 @@ func (ls *LedgerState) calculateEpochNonce(ctx context.Context,
 	// (Babbage runs Praos but retains the smaller window for
 	// backwards compatibility); 4k/f kicks in at Conway. The two
 	// formulas only disagree at the Babbage→Conway boundary, but the
-	// source-vs-target distinction matters for every transition: by
-	// the time this code runs, applyHardForkTransition has already
-	// advanced currentEra to the new era, so passing currentEra.Id
-	// here would pick the wrong window for the source epoch's blocks
+	// source-vs-target distinction matters for every transition: currentEra
+	// describes the successor epoch here, so the source epoch ID must come from
+	// currentEpoch.EraId when selecting the nonce window
 	// and produce an epoch nonce that diverges from peers. The
 	// observed symptom at Alonzo→Babbage was every header in the new
 	// Praos epoch VRF-failing; the same shape repeats at
@@ -7683,36 +7912,100 @@ func cloneProtocolParametersForEra(
 	return ret, nil
 }
 
+func (ls *LedgerState) computeClassicPParamUpdates(
+	ctx context.Context,
+	txn *database.Txn,
+	slot uint64,
+	epoch uint64,
+	era eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, bool, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return nil, false, errors.New(
+			"compute classic protocol parameter updates: CardanoNodeConfig is nil",
+		)
+	}
+	updateQuorum := 0
+	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
+		updateQuorum = shelleyGenesis.UpdateQuorum
+	}
+	return ls.db.ComputeAndApplyPParamUpdates(
+		ctx,
+		slot,
+		epoch,
+		era.Id,
+		updateQuorum,
+		currentPParams,
+		era.DecodePParamsUpdateFunc,
+		era.PParamsUpdateFunc,
+		era.ParamUpdateHasPlutusV2CostModelFunc,
+		txn,
+	)
+}
+
 // processEpochRollover returns all computed state without applying it. The
 // caller is responsible for:
 //   - Applying the result to in-memory state after successful commit
 //   - Starting background cleanup goroutines
 //   - Calling Scheduler.ChangeInterval if SchedulerIntervalMs > 0
-//
-// deferBoundarySnapshot suppresses the authoritative mark-snapshot capture so
-// the caller can take it after applying era transitions that this rollover does
-// not perform itself. Only the multi-era boundary path sets it: a boundary block
-// encoded in the era before the era its header announces needs the rollover to
-// enact source-era pparam updates first, so the final era and protocol
-// parameters do not exist yet when the capture would normally run. Capturing
-// then would durably record the source era's protocol major for an epoch that
-// runs at the successor era's, and disagree with the post-commit
-// EpochTransitionEvent. When set and the rollover reaches the capture point, the
-// result reports BoundarySnapshotDeferred so exactly one capture is taken —
-// re-running the capture instead would double-write under the savepoint.
 func (ls *LedgerState) processEpochRollover(
 	ctx context.Context,
 	txn *database.Txn,
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
-	deferBoundarySnapshot bool,
+) (*EpochRolloverResult, error) {
+	return ls.processEpochRolloverWithClassicPParamsContext(
+		ctx,
+		txn,
+		currentEpoch,
+		currentEra,
+		currentPParams,
+		false,
+		false,
+		nil,
+	)
+}
+
+func (ls *LedgerState) applyTransitionHardForkRules(
+	ctx context.Context,
+	txn *database.Txn,
+	majors []uint,
+	boundarySlot uint64,
+	newEpoch uint64,
+) error {
+	for _, major := range majors {
+		if err := ls.applyIntraEraHardForkRule(
+			ctx,
+			txn,
+			major,
+			boundarySlot,
+			newEpoch,
+		); err != nil {
+			return fmt.Errorf(
+				"apply transition major-version HARDFORK %d: %w",
+				major,
+				err,
+			)
+		}
+	}
+	return nil
+}
+
+func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
+	ctx context.Context,
+	txn *database.Txn,
+	currentEpoch models.Epoch,
+	currentEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	classicPParamsApplied bool,
+	plutusV2CostModelWritten bool,
+	transitionHardForkMajors []uint,
 ) (*EpochRolloverResult, error) {
 	// Fail closed at the top of the production rollover path rather than
 	// letting a nil config reach one of the several unchecked
 	// ls.config.CardanoNodeConfig dereferences below (e.g. the
-	// ShelleyGenesis() read further down, or applyBoundaryEraTransitions's
-	// post-Byron nonce seeding) -- any of which would panic instead of
+	// ShelleyGenesis() read further down) -- any of which would panic instead of
 	// returning an error. NewLedgerState does not itself require a non-nil
 	// CardanoNodeConfig, so this is the boundary that must catch it.
 	if ls.config.CardanoNodeConfig == nil {
@@ -7737,6 +8030,7 @@ func (ls *LedgerState) processEpochRollover(
 		CheckpointWrittenForEpoch: false,
 		NewCurrentEra:             currentEra,
 		NewCurrentPParams:         ownedPParams,
+		RealV2CostModelObserved:   plutusV2CostModelWritten,
 	}
 
 	// Create initial epoch
@@ -7911,7 +8205,7 @@ func (ls *LedgerState) processEpochRollover(
 	snapDeferred := ls.deferredBoundarySnapshotHook.Load() != nil &&
 		ls.epochBoundarySnapshotStakeHook() != nil &&
 		ls.epochBoundarySnapshotHook() != nil &&
-		!ls.ratifyAtBoundary && !deferBoundarySnapshot &&
+		!ls.ratifyAtBoundary &&
 		currentEra.Id == eras.ConwayEraDesc.Id &&
 		!ls.config.DelegatorInactivityEnabled
 	if currentEra.Id >= eras.DijkstraEraDesc.Id {
@@ -7965,31 +8259,32 @@ func (ls *LedgerState) processEpochRollover(
 		}
 	}
 
-	updateQuorum := 0
-	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
-		updateQuorum = shelleyGenesis.UpdateQuorum
-	}
-	var newPParams lcommon.ProtocolParameters
-	var plutusV2CostModelWritten bool
-	if err := ls.timeRolloverPhase(
-		currentEpoch.EpochId+1, "pparam_updates", func() error {
-			var err error
-			newPParams, plutusV2CostModelWritten, err = ls.db.ComputeAndApplyPParamUpdates(
-				ctx,
-				epochStartSlot,
-				currentEpoch.EpochId+1, // Target epoch for updates
-				currentEra.Id,
-				updateQuorum,
-				ownedPParams,
-				currentEra.DecodePParamsUpdateFunc,
-				currentEra.PParamsUpdateFunc,
-				currentEra.ParamUpdateHasPlutusV2CostModelFunc,
-				txn,
-			)
-			return err
-		},
-	); err != nil {
-		return nil, fmt.Errorf("apply pparam updates: %w", err)
+	newPParams := ownedPParams
+	if !classicPParamsApplied {
+		updateQuorum := 0
+		if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
+			updateQuorum = shelleyGenesis.UpdateQuorum
+		}
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "pparam_updates", func() error {
+				var err error
+				newPParams, plutusV2CostModelWritten, err = ls.db.ComputeAndApplyPParamUpdates(
+					ctx,
+					epochStartSlot,
+					currentEpoch.EpochId+1, // Target epoch for updates
+					currentEra.Id,
+					updateQuorum,
+					ownedPParams,
+					currentEra.DecodePParamsUpdateFunc,
+					currentEra.PParamsUpdateFunc,
+					currentEra.ParamUpdateHasPlutusV2CostModelFunc,
+					txn,
+				)
+				return err
+			},
+		); err != nil {
+			return nil, fmt.Errorf("apply pparam updates: %w", err)
+		}
 	}
 	if plutusV2CostModelWritten {
 		// The classic Shelley-style update system, not CIP-1694 governance,
@@ -8103,7 +8398,7 @@ func (ls *LedgerState) processEpochRollover(
 		if plan := govOut.Ratification; plan != nil {
 			if err := ls.timeRolloverPhase(
 				currentEpoch.EpochId+1, "ratify", func() error {
-					if ls.ratifyAtBoundary || deferBoundarySnapshot ||
+					if ls.ratifyAtBoundary ||
 						hardForkHere {
 						if currentBoundarySPOState == nil {
 							state, err := ls.currentBoundarySPOStakeState(
@@ -8253,22 +8548,45 @@ func (ls *LedgerState) processEpochRollover(
 				"component", "ledger",
 			)
 		}
-		// Apply cardano-ledger's per-major-version HARDFORK rule. This
-		// runs on ANY major-version bump, including intra-era ones like
-		// Conway pv9→pv10 (Plomin, mainnet January 2025) that do not
-		// trigger an era change, and inter-era ones like Shelley→Allegra
-		// (pv2→pv3) that carry a state rewrite. See cardano-ledger
-		// Conway/Rules/HardFork.hs and Allegra/Translation.hs.
-		if oldVer.Major != newVer.Major {
-			if err := ls.timeRolloverPhase(
-				currentEpoch.EpochId+1, "hardfork", func() error {
-					return ls.applyIntraEraHardForkRule(ctx,
-						txn, newVer.Major, epochStartSlot, currentEpoch.EpochId+1,
-					)
-				},
-			); err != nil {
-				return nil, fmt.Errorf("apply major-version HARDFORK: %w", err)
-			}
+	}
+	// Inter-era transitions were prepared before this rollover so the new
+	// era's epoch rules run with its parameters. Apply their state rewrite at
+	// the HARDFORK point, after reward and governance pot changes, so a later
+	// rule cannot overwrite the transition's reserve or treasury updates.
+	if len(transitionHardForkMajors) > 0 {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1,
+			"hardfork",
+			func() error {
+				return ls.applyTransitionHardForkRules(
+					ctx,
+					txn,
+					transitionHardForkMajors,
+					epochStartSlot,
+					currentEpoch.EpochId+1,
+				)
+			},
+		); err != nil {
+			return nil, err
+		}
+	}
+	// Apply cardano-ledger's per-major-version HARDFORK rule for any pparam
+	// bump enacted by this rollover, including intra-era bumps such as
+	// Conway pv9→pv10. Inter-era transition rules above use the same HARDFORK
+	// point in the EPOCH sequence.
+	if oldErr == nil && newErr == nil && oldVer.Major != newVer.Major {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "hardfork", func() error {
+				return ls.applyIntraEraHardForkRule(
+					ctx,
+					txn,
+					newVer.Major,
+					epochStartSlot,
+					currentEpoch.EpochId+1,
+				)
+			},
+		); err != nil {
+			return nil, fmt.Errorf("apply major-version HARDFORK: %w", err)
 		}
 	}
 
@@ -8384,13 +8702,9 @@ func (ls *LedgerState) processEpochRollover(
 	// SNAP point: capture the authoritative mark snapshot inside this rollover
 	// transaction, now that the new epoch record (and its nonce/boundary slot)
 	// exist. Runs only for the normal N->N+1 rollover; epoch 0 is seeded by
-	// CaptureGenesisSnapshot at startup. A multi-era boundary defers the capture
-	// to the caller, which takes it once the remaining era transitions have
-	// produced the era and protocol parameters the new epoch actually runs at.
+	// CaptureGenesisSnapshot at startup.
 	var snapshotEvt *event.EpochTransitionEvent
 	switch {
-	case deferBoundarySnapshot:
-		result.BoundarySnapshotDeferred = true
 	case snapDeferred:
 		evt := ls.boundarySnapshotEvent(currentEpoch, result)
 		snapshotEvt = &evt
@@ -8421,22 +8735,10 @@ func (ls *LedgerState) processEpochRollover(
 	return result, nil
 }
 
-// splitEraTransitionsForRollover keeps epoch-boundary protocol-parameter
-// enactment in the source era. A proposal submitted in the source era is
-// enacted at the boundary before the successor-era hard fork transforms the
-// protocol parameters. This matters for fields removed by the successor era,
-// such as Alonzo's decentralization parameter, which remains present in the
-// legacy update CBOR but is not a valid Babbage update field.
 func majorVersionChanges(before, after lcommon.ProtocolParameters) bool {
 	oldVer, oldErr := GetProtocolVersion(before)
 	newVer, newErr := GetProtocolVersion(after)
 	return oldErr == nil && newErr == nil && oldVer.Major != newVer.Major
-}
-
-func splitEraTransitionsForRollover(
-	transitionPath []uint,
-) (before, after []uint) {
-	return nil, transitionPath
 }
 
 // epochBoundarySnapshotSlot is the slot a mark snapshot describes: the last slot

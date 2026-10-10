@@ -639,7 +639,9 @@ func TestImportPParamsDowngradesTranslatedCrossEraHistory(t *testing.T) {
 	require.Equal(t, current, currentRows[0].Cbor)
 }
 
-func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(t *testing.T) {
+func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -2990,4 +2992,280 @@ func testGovStateData(
 	data, err := cbor.Encode(govState)
 	require.NoError(t, err)
 	return data
+}
+
+// partialCertStateData returns the fixture's cert state with a DState whose
+// only credential entry has an undecodable account payload, so ParseCertState
+// returns a result together with a warning.
+func partialCertStateData(
+	t *testing.T,
+	fixture *RawLedgerState,
+) cbor.RawMessage {
+	t.Helper()
+
+	parts, err := decodeRawArray(fixture.CertStateData)
+	require.NoError(t, err)
+	require.Len(t, parts, 3)
+	credential, err := cbor.Encode([]any{uint64(0), make([]byte, 28)})
+	require.NoError(t, err)
+	// map(1) { credential: 5 }, where an account payload must be an array.
+	credentialMap := append([]byte{0xa1}, credential...)
+	credentialMap = append(credentialMap, 0x05)
+	dstate, err := cbor.Encode([]cbor.RawMessage{credentialMap})
+	require.NoError(t, err)
+	data, err := cbor.Encode([]cbor.RawMessage{parts[0], parts[1], dstate})
+	require.NoError(t, err)
+
+	parsed, parseErr := ParseCertState(data)
+	require.NotNil(t, parsed)
+	require.Error(t, parseErr, "the fixture must be a partial parse")
+	return data
+}
+
+// TestImportLedgerStateRejectsMalformedInputBeforePersisting gives an
+// otherwise valid state one malformed consensus input and requires the import
+// to fail with nothing persisted. The UTxO phase runs first, so an input that
+// is only checked by a later phase leaves imported UTxOs behind.
+func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
+	t.Parallel()
+
+	fixture, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	garbage := cbor.RawMessage{0xff}
+	partialCertState := partialCertStateData(t, fixture)
+	snapshotParts, err := decodeRawArray(fixture.SnapShotsData)
+	require.NoError(t, err)
+	snapshotsWithFee, err := cbor.Encode([]any{
+		cbor.RawMessage(snapshotParts[0]),
+		cbor.RawMessage(snapshotParts[1]),
+		cbor.RawMessage(snapshotParts[2]),
+		uint64(1),
+	})
+	require.NoError(t, err)
+	currentPParams, previousPParams := distinctConwayPParams(t)
+
+	tests := []struct {
+		name    string
+		mutate  func(*RawLedgerState)
+		wantErr string
+		wantLog string
+	}{
+		{name: "valid input imports"},
+		{
+			name:    "cert state",
+			mutate:  func(s *RawLedgerState) { s.CertStateData = garbage },
+			wantErr: "parsing cert state",
+		},
+		{
+			name: "partially parsed cert state",
+			mutate: func(s *RawLedgerState) {
+				s.CertStateData = partialCertState
+			},
+			wantErr: "parsing cert state",
+		},
+		{
+			name: "stake snapshots",
+			mutate: func(s *RawLedgerState) {
+				s.SnapShotsData = garbage
+			},
+			wantErr: "parsing stake snapshots",
+		},
+		{
+			name: "active pool distribution",
+			mutate: func(s *RawLedgerState) {
+				s.SnapShotsData = fixture.SnapShotsData
+				s.PoolDistrData = garbage
+			},
+			wantErr: "parsing active pool distribution",
+		},
+		{
+			name:    "governance state",
+			mutate:  func(s *RawLedgerState) { s.GovStateData = garbage },
+			wantErr: "parsing governance state",
+		},
+		{
+			name:    "protocol parameters",
+			mutate:  func(s *RawLedgerState) { s.PParamsData = garbage },
+			wantErr: "validating protocol parameters",
+		},
+		{
+			name:    "previous protocol parameters",
+			mutate:  func(s *RawLedgerState) { s.PrevPParamsData = garbage },
+			wantErr: "validating previous protocol parameters",
+		},
+		{
+			name: "fees below snapshot fee pot",
+			mutate: func(s *RawLedgerState) {
+				s.SnapShotsData = snapshotsWithFee
+				s.Fees = 0
+			},
+			wantErr: "less than the snapshot fee pot",
+		},
+		{
+			name: "previous parameters era unknown with snapshots",
+			mutate: func(s *RawLedgerState) {
+				s.SnapShotsData = fixture.SnapShotsData
+				s.Fees = fixture.Fees
+				s.PParamsData = currentPParams
+				s.PrevPParamsData = previousPParams
+				s.EraBounds = nil
+				s.EraBoundEpoch = s.Epoch
+			},
+			wantErr: "validating imported era history: era bounds are required " +
+				"from genesis through Conway: got 0, want 7",
+		},
+		{
+			name: "previous parameters era unknown without snapshots",
+			mutate: func(s *RawLedgerState) {
+				s.PParamsData = currentPParams
+				s.PrevPParamsData = previousPParams
+				s.EraBounds = nil
+				s.EraBoundEpoch = s.Epoch
+			},
+			wantErr: "validating imported era history: era bounds are required " +
+				"from genesis through Conway: got 0, want 7",
+		},
+		{
+			name: "go snapshot without historical parameters",
+			mutate: func(s *RawLedgerState) {
+				s.SnapShotsData = fixture.SnapShotsData
+				s.Fees = fixture.Fees
+				s.PParamsData = currentPParams
+				s.Epoch = 100
+				s.Tip.Slot = 100_000
+			},
+			wantErr: "historical protocol parameters for epoch 99 are unavailable",
+		},
+		{
+			name: "opcert counter key",
+			mutate: func(s *RawLedgerState) {
+				s.OpCertCounters = map[string]uint64{"short": 1}
+			},
+			wantErr: "opcert pool key has length 5",
+		},
+		{
+			name: "block count key",
+			mutate: func(s *RawLedgerState) {
+				s.BlocksCur = map[string]uint64{"short": 1}
+			},
+			wantErr: "block count pool key has length 5",
+		},
+		{
+			name: "tip hash",
+			mutate: func(s *RawLedgerState) {
+				s.Tip.BlockHash = []byte{0x01}
+			},
+			wantErr: "tip hash has 1 bytes",
+		},
+		{
+			name: "evolving nonce",
+			mutate: func(s *RawLedgerState) {
+				s.EvolvingNonce = []byte{0x01}
+			},
+			wantErr: "invalid evolving nonce length 1",
+		},
+		{
+			name: "epoch nonce",
+			mutate: func(s *RawLedgerState) {
+				s.EpochNonce = []byte{0x01}
+			},
+			wantErr: "invalid epoch nonce length 1",
+		},
+		{
+			name: "candidate nonce",
+			mutate: func(s *RawLedgerState) {
+				s.CandidateNonce = []byte{0x01}
+			},
+			wantErr: "invalid candidate nonce length 1",
+		},
+		{
+			name: "last epoch block nonce",
+			mutate: func(s *RawLedgerState) {
+				s.LastEpochBlockNonce = []byte{0x01}
+			},
+			wantErr: "invalid last epoch block nonce length 1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			db, err := dbtest.NewDatabase(
+				t, &database.Config{DataDir: t.TempDir()},
+			)
+			require.NoError(t, err)
+			t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+			addr := buildShelleyAddr(
+				0, 1, bytes.Repeat([]byte{0x11}, 28),
+				bytes.Repeat([]byte{0x22}, 28),
+			)
+			nonce := make([]byte, 32)
+			state := &RawLedgerState{
+				UTxOData: inlineUTxOMap(
+					t,
+					addr,
+					[]uint64{1_000_000},
+				),
+				Epoch:               1,
+				EraIndex:            EraConway,
+				EraBounds:           make([]EraBound, EraConway+1),
+				EpochNonce:          nonce,
+				EvolvingNonce:       nonce,
+				CandidateNonce:      nonce,
+				LastEpochBlockNonce: nonce,
+				Tip: &SnapshotTip{
+					Slot:      1_000,
+					BlockHash: make([]byte, 32),
+				},
+			}
+			if tt.mutate != nil {
+				tt.mutate(state)
+			}
+
+			var logOutput bytes.Buffer
+			err = ImportLedgerState(context.Background(), ImportConfig{
+				Database: db,
+				Logger:   slog.New(slog.NewTextHandler(&logOutput, nil)),
+				State:    state,
+				EpochLength: func(uint) (uint, uint, error) {
+					return 1, 1_000, nil
+				},
+			})
+
+			raw, rawErr := dbtest.RawSQLiteMetadata(t, db)
+			require.NoError(t, rawErr)
+			var utxos int
+			require.NoError(t, raw.QueryRow(
+				"SELECT COUNT(*) FROM utxo",
+			).Scan(&utxos))
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				require.Equal(t, 1, utxos)
+				if tt.wantLog != "" {
+					require.Contains(t, logOutput.String(), tt.wantLog)
+				}
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+			require.Zero(t, utxos, "a failed import must persist no UTxOs")
+		})
+	}
+}
+
+func TestValidateImportStateRetainsStoredPreviousParameters(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	current, previous := distinctConwayPParams(t)
+	cfg := previewPParamsImportConfig(db, current, previous)
+	cfg.State.Tip = &SnapshotTip{BlockHash: make([]byte, 32)}
+	require.NoError(t, importPParams(t.Context(), cfg))
+	cfg.State.PrevPParamsData = cbor.RawMessage{0xff}
+	require.NoError(
+		t,
+		validateImportState(cfg),
+		"valid stored previous parameters must support catch-up reentry",
+	)
 }

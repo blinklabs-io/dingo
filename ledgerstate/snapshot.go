@@ -616,7 +616,7 @@ func parseCurrentEra(
 		)
 	}
 
-	// UTxOState = [UTxO, deposited, fees, GovState, ...]
+	// UTxOState = [UTxO, deposited, fees, GovState, InstantStake, donation]
 	utxoState, err := decodeRawArray(ls[1])
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -650,6 +650,18 @@ func parseCurrentEra(
 		}
 	}
 
+	// UTxOState[5] (utxosDonation) is the treasury donations collected
+	// this epoch up to and including the anchor block. Conway's EPOCH rule
+	// moves it into the treasury at the next boundary and zeroes it, so a
+	// bootstrap that drops it leaves that boundary's treasury short. Absent
+	// in shorter arrays, where it is zero.
+	var donation uint64
+	if len(utxoState) > 5 {
+		if _, err := cbor.Decode(utxoState[5], &donation); err != nil {
+			return nil, fmt.Errorf("decoding UTxOState donation: %w", err)
+		}
+	}
+
 	result := &RawLedgerState{
 		EraIndex:      eraIndex,
 		Epoch:         epoch,
@@ -657,6 +669,7 @@ func parseCurrentEra(
 		Treasury:      treasury,
 		Reserves:      reserves,
 		Fees:          fees,
+		Donation:      donation,
 		EraBoundSlot:  eraBoundSlot,
 		EraBoundEpoch: eraBoundEpoch,
 		UTxOData:      utxoState[0], // The UTxO map

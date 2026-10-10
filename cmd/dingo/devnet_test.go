@@ -151,6 +151,12 @@ func TestPrepareDevnetStateRewritesPathsForCopiedDirectory(t *testing.T) {
 	destinationDir := t.TempDir()
 	startTime := time.Date(2026, time.October, 8, 22, 0, 0, 0, time.UTC)
 	require.NoError(t, prepareDevnetState(sourceDir, true, false, startTime))
+	for _, name := range []string{"vrf.skey", "kes.skey", "opcert.cert"} {
+		require.FileExists(
+			t,
+			filepath.Join(sourceDir, "cardano", "keys", name),
+		)
+	}
 	require.NoError(t, os.CopyFS(destinationDir, os.DirFS(sourceDir)))
 	require.NoError(t, prepareDevnetState(destinationDir, true, false, startTime))
 

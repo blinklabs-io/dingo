@@ -84,39 +84,33 @@ type scheduledChainsyncResync struct {
 	fired  bool
 }
 
-// chainsyncAdmissionContext returns the context an admission wait inside a
-// chainsync client callback is bounded by, and the function that releases it.
-//
-// The callback runs on the protocol's receive loop, and the protocol's DoneChan
-// closes only after that loop returns, so DoneChan alone can never release a
-// wait that is holding the loop. The context is therefore also cancelled by the
-// protocol's StopChan, which Stop closes before waiting for the loops, and by
-// the owning connection's shutdown signal, which closes before the muxer stops.
+// chainsyncAdmissionContext ends when the peer's chainsync client is asked to
+// stop or its connection begins shutdown. It must not use the client's
+// DoneChan: that closes only after the protocol loop running this callback
+// returns, so a wait in the callback could never observe it.
 func chainsyncAdmissionContext(
-	ctx ochainsync.CallbackContext,
+	cb ochainsync.CallbackContext,
 ) (context.Context, context.CancelFunc) {
-	var stopChan, doneChan <-chan struct{}
-	if ctx.Client != nil {
-		if proto := ctx.Client.ProtocolInstance(); proto != nil {
-			stopChan = proto.StopChan()
-			doneChan = proto.DoneChan()
+	ctx, cancel := context.WithCancel(context.Background())
+	var stop <-chan struct{}
+	if cb.Client != nil {
+		if proto := cb.Client.ProtocolInstance(); proto != nil {
+			stop = proto.StopChan()
 		}
 	}
-	connDone := ctx.ConnectionDoneChan
-	if stopChan == nil && doneChan == nil && connDone == nil {
-		return context.Background(), func() {}
+	connDone := cb.ConnectionDoneChan
+	if stop == nil && connDone == nil {
+		return ctx, cancel
 	}
-	admissionCtx, cancel := context.WithCancel(context.Background())
 	go func() {
 		select {
-		case <-stopChan:
-		case <-doneChan:
+		case <-stop:
 		case <-connDone:
-		case <-admissionCtx.Done():
+		case <-ctx.Done():
 		}
 		cancel()
 	}()
-	return admissionCtx, cancel
+	return ctx, cancel
 }
 
 func defaultChainsyncScheduleAt(onset time.Time, fn func()) func() {
@@ -1204,51 +1198,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// permitted wait therefore blocks only this peer and never the shared
 		// ledger ChainSync dispatch mutex/goroutine.
 		if ingressEligible && o.chainsyncHeaderAdmission != nil {
-			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
-			accepted, err := o.chainsyncHeaderAdmission(
-				admissionCtx,
-				chainsyncEvent,
-			)
-			cancelAdmission()
-			if err != nil {
-				o.config.Logger.Warn(
-					"chainsync: future-header admission failed closed",
-					"component", "ouroboros",
-					"slot", blockSlot,
-					"connection_id", ctx.ConnectionId.String(),
-					"error", err,
-				)
-				return fmt.Errorf("chainsync: future-header admission: %w", err)
-			}
-			if !accepted {
-				// Returning nil deliberately drops this header without turning
-				// ambiguous local/remote clock skew into a connection penalty.
-				// Re-intersect at the earliest dropped header's onset so the
-				// protocol cursor cannot permanently strand the accepted chain.
-				if o.chainsyncHeaderSlotTime != nil {
-					onset, onsetErr := o.chainsyncHeaderSlotTime(blockSlot)
-					if onsetErr == nil {
-						o.scheduleFutureHeaderResync(ctx.ConnectionId, onset)
-					} else {
-						o.config.Logger.Error(
-							"chainsync: failed to schedule future-header recovery",
-							"component", "ouroboros",
-							"slot", blockSlot,
-							"connection_id", ctx.ConnectionId.String(),
-							"error", onsetErr,
-						)
-					}
-				}
-				return nil
-			}
-			if o.futureHeaderResyncPending(ctx.ConnectionId) {
-				o.config.Logger.Debug(
-					"chainsync: header withheld pending future-header re-intersection",
-					"component", "ouroboros",
-					"slot", blockSlot,
-					"connection_id", ctx.ConnectionId.String(),
-				)
-				return nil
+			admitted, err := o.admitChainsyncHeader(ctx, chainsyncEvent)
+			if err != nil || !admitted {
+				return err
 			}
 		}
 		// Verify header crypto (VRF/KES and, once local state has caught up,
@@ -1268,12 +1220,39 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// not. A deferred result (local state has not caught up to this
 		// header's slot yet) also leaves the header eligible -- that is the
 		// normal shape of a peer legitimately racing ahead of local ledger
-		// application, not a peer fault. Only a definite crypto/eligibility
-		// failure excludes the header from observation and recycles the
-		// connection.
+		// application, not a peer fault. The exception is a header past the
+		// forecast horizon, which cannot be validated at all yet: it is
+		// withheld without penalty until the ledger can forecast its slot.
+		// Only a definite crypto/eligibility failure excludes the header from
+		// observation and recycles the connection.
 		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
 			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
-			if verifyErr := o.chainSelectionVerifyHeaderCrypto(v); verifyErr != nil {
+			verifyErr := o.chainSelectionVerifyHeaderCrypto(v)
+			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) &&
+				o.chainsyncHeaderAdmission != nil {
+				// Admission waited for the horizon, so it has since moved
+				// back (a ledger rollback). Wait for it once more.
+				admitted, err := o.admitChainsyncHeader(ctx, chainsyncEvent)
+				if err != nil || !admitted {
+					return err
+				}
+				verifyErr = o.chainSelectionVerifyHeaderCrypto(v)
+			}
+			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) {
+				// The header cannot be validated yet, so it must not extend
+				// this peer's candidate or reach blockfetch. Withhold it
+				// without penalty and re-intersect, which re-delivers it
+				// through admission.
+				o.config.Logger.Debug(
+					"chainsync: header past the forecast horizon withheld from chain selection",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+				)
+				o.scheduleFutureHeaderResync(ctx.ConnectionId, time.Now())
+				return nil
+			}
+			if verifyErr != nil {
 				if ledger.IsHeaderVerificationDeferred(verifyErr) {
 					o.config.Logger.Debug(
 						"chainsync: header verification deferred for chain selection",
@@ -1508,6 +1487,60 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		return fmt.Errorf("unexpected block data type: %T", v)
 	}
 	return nil
+}
+
+// admitChainsyncHeader runs the future-header admission for one delivered
+// header and reports whether it may proceed. A header it withholds is not a
+// peer fault; the connection re-intersects so it is delivered again.
+func (o *Ouroboros) admitChainsyncHeader(
+	ctx ochainsync.CallbackContext,
+	e ledger.ChainsyncEvent,
+) (bool, error) {
+	blockSlot := e.Point.Slot
+	admissionCtx, cancel := chainsyncAdmissionContext(ctx)
+	defer cancel()
+	accepted, err := o.chainsyncHeaderAdmission(admissionCtx, e)
+	if err != nil {
+		o.config.Logger.Warn(
+			"chainsync: future-header admission failed closed",
+			"component", "ouroboros",
+			"slot", blockSlot,
+			"connection_id", ctx.ConnectionId.String(),
+			"error", err,
+		)
+		return false, fmt.Errorf("chainsync: future-header admission: %w", err)
+	}
+	if !accepted {
+		// Dropping the header without turning ambiguous local/remote clock
+		// skew into a connection penalty. Re-intersect at the earliest dropped
+		// header's onset so the protocol cursor cannot permanently strand the
+		// accepted chain.
+		if o.chainsyncHeaderSlotTime != nil {
+			onset, onsetErr := o.chainsyncHeaderSlotTime(blockSlot)
+			if onsetErr == nil {
+				o.scheduleFutureHeaderResync(ctx.ConnectionId, onset)
+			} else {
+				o.config.Logger.Error(
+					"chainsync: failed to schedule future-header recovery",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+					"error", onsetErr,
+				)
+			}
+		}
+		return false, nil
+	}
+	if o.futureHeaderResyncPending(ctx.ConnectionId) {
+		o.config.Logger.Debug(
+			"chainsync: header withheld pending future-header re-intersection",
+			"component", "ouroboros",
+			"slot", blockSlot,
+			"connection_id", ctx.ConnectionId.String(),
+		)
+		return false, nil
+	}
+	return true, nil
 }
 
 // shouldPublishChainsyncToLedger reports whether headers from connId should

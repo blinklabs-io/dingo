@@ -1139,6 +1139,7 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 				Interval:              2 * time.Hour,
 				RequestTimeout:        9 * time.Minute,
 				UserAgent:             "custom-agent/9",
+				HeaderSecrets:         map[string]string{"Authorization": "Bearer x"},
 				MaxBytes:              123,
 				MaxDecompressedBytes:  456,
 				MaxEntryBytes:         45,
@@ -1162,6 +1163,11 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 	require.Equal(t, 2*time.Hour, cfg.tokenRegistry.Interval)
 	require.Equal(t, 9*time.Minute, cfg.tokenRegistry.RequestTimeout)
 	require.Equal(t, "custom-agent/9", cfg.tokenRegistry.UserAgent)
+	require.Equal(
+		t,
+		map[string]string{"Authorization": "Bearer x"},
+		cfg.tokenRegistry.Headers,
+	)
 	require.Equal(t, int64(123), cfg.tokenRegistry.MaxBytes)
 	require.Equal(t, int64(456), cfg.tokenRegistry.MaxDecompressedBytes)
 	require.Equal(t, int64(45), cfg.tokenRegistry.MaxEntryBytes)
