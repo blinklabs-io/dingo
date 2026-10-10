@@ -286,6 +286,9 @@ type Ouroboros struct {
 	leiosFetchGuards     sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
 	leiosTxFetchClaimsMu sync.Mutex
 	leiosTxFetchClaims   map[string]*leiosTxFetchClaim
+	// leiosTxFetchAttemptTimeoutOverride shortens the fixed attempt budget in
+	// tests. Values above the production budget are ignored.
+	leiosTxFetchAttemptTimeoutOverride time.Duration
 	// leiosTxFetchBeforeLaunch is an instance-local test seam for the
 	// owner-selection to worker-launch cancellation boundary.
 	leiosTxFetchBeforeLaunch func()

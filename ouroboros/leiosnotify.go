@@ -647,10 +647,11 @@ func (o *Ouroboros) leiosnotifyClientConnOpts() []oleiosnotify.LeiosNotifyOption
 
 func (o *Ouroboros) fetchLeiosTxOffer(
 	ctx context.Context,
-	client *leiosfetch.Client,
+	client leiosTxOfferRequester,
 	connKey string,
 	point ocommon.Point,
 ) bool {
+	deadline, _ := ctx.Deadline()
 	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	if !ok {
 		// Manifest not cached yet (txs offered before/without a block
@@ -696,7 +697,7 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		return true
 	}
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
-		ctx, client, point, data.txCount, data.blockRaw, time.Time{},
+		ctx, client, point, data.txCount, data.blockRaw, deadline,
 	)
 	if err != nil {
 		// The transactions gathered by this attempt are retained
@@ -762,7 +763,7 @@ func newLeiosTxFetchCandidate(
 	connId ouroboros.ConnectionId,
 	connKey string,
 	guard *leiosFetchGuard,
-	client *leiosfetch.Client,
+	client leiosTxOfferRequester,
 	point ocommon.Point,
 	done <-chan any,
 ) *leiosTxFetchCandidate {
@@ -784,7 +785,7 @@ func newLeiosTxFetchCandidate(
 
 func (o *Ouroboros) dispatchLeiosTxOfferFetch(
 	guard *leiosFetchGuard,
-	client *leiosfetch.Client,
+	client leiosTxOfferRequester,
 	connId ouroboros.ConnectionId,
 	connKey string,
 	point ocommon.Point,
@@ -850,15 +851,28 @@ func (o *Ouroboros) launchLeiosTxFetchOwner(
 		return
 	}
 	o.dispatchLeiosFetchReserved(candidate.guard, func() {
-		success := o.fetchLeiosTxOffer(
+		attemptCtx, cancel := context.WithTimeout(
 			candidate.ctx,
+			o.leiosTxFetchAttemptTimeout(),
+		)
+		success := o.fetchLeiosTxOffer(
+			attemptCtx,
 			candidate.client,
 			candidate.connKey,
 			candidate.point,
 		)
+		cancel()
 		o.finishLeiosTxFetch(key, candidate, success)
 		candidate.cancel()
 	})
+}
+
+func (o *Ouroboros) leiosTxFetchAttemptTimeout() time.Duration {
+	if timeout := o.leiosTxFetchAttemptTimeoutOverride; timeout > 0 &&
+		timeout < leiosBackfillPerAttemptTimeout {
+		return timeout
+	}
+	return leiosBackfillPerAttemptTimeout
 }
 
 func (o *Ouroboros) finishLeiosTxFetch(
@@ -1410,7 +1424,7 @@ type leiosTxFetchCandidate struct {
 	connId  ouroboros.ConnectionId
 	connKey string
 	guard   *leiosFetchGuard
-	client  *leiosfetch.Client
+	client  leiosTxOfferRequester
 	point   ocommon.Point
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -1419,6 +1433,11 @@ type leiosTxFetchCandidate struct {
 type leiosTxFetchClaim struct {
 	owner   *leiosTxFetchCandidate
 	waiters []*leiosTxFetchCandidate
+}
+
+type leiosTxOfferRequester interface {
+	leiosBlockRequester
+	leiosBlockTxsRequester
 }
 
 // leiosFetchGuard serializes leios-fetch client operations on one connection

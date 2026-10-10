@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -600,6 +601,140 @@ func requireLeiosTxFetchClaim(
 	for idx, waiter := range waiters {
 		require.Equal(t, waiter, claim.waiters[idx].connId)
 	}
+}
+
+type leiosTxOfferTestRequester struct {
+	txs      []cbor.RawMessage
+	perRound time.Duration
+	limit    int
+	requests int
+	lastNeed int
+}
+
+func (r *leiosTxOfferTestRequester) BlockRequest(
+	context.Context,
+	ocommon.Point,
+) (protocol.Message, error) {
+	return nil, fmt.Errorf("unexpected manifest request")
+}
+
+func (r *leiosTxOfferTestRequester) BlockTxsRequest(
+	ctx context.Context,
+	point ocommon.Point,
+	bitmaps map[uint16]uint64,
+) (protocol.Message, error) {
+	if r.perRound > 0 {
+		timer := time.NewTimer(r.perRound)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	requested := leiosBitmapTxIndices(bitmaps)
+	slices.Sort(requested)
+	r.requests++
+	r.lastNeed = len(requested)
+	if r.limit > 0 && len(requested) > r.limit {
+		requested = requested[:r.limit]
+	}
+	served := make(map[uint16]uint64)
+	txs := make([]cbor.RawMessage, 0, len(requested))
+	for _, idx := range requested {
+		served[uint16(idx/64)] |= 1 << uint(63-(idx%64))
+		txs = append(txs, r.txs[idx])
+	}
+	return leiosfetch.NewMsgBlockTxsFull(point, served, txs), nil
+}
+
+func testLeiosTxOfferDeadlineFixture(
+	t *testing.T,
+	slot uint64,
+) (*Ouroboros, ocommon.Point, []cbor.RawMessage) {
+	t.Helper()
+	const txCount = 12
+	txs := make([]cbor.RawMessage, 0, txCount)
+	refs := make([]lcommon.LeiosTransactionReference, 0, txCount)
+	for idx := range txCount {
+		tx, ref := testLeiosManifestTx(t, byte(0x50+idx))
+		txs = append(txs, tx)
+		refs = append(refs, ref)
+	}
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: refs,
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(
+		slot,
+		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
+	)
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios: true, EnableLeiosTxFetch: true,
+	})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point, manifestRaw, nil, leiosStoreAuthoritative,
+	))
+	return o, point, txs
+}
+
+func TestLeiosTxsOfferDeadlineHandsDribblingOwnerToHealthyWaiter(t *testing.T) {
+	t.Parallel()
+	o, point, txs := testLeiosTxOfferDeadlineFixture(t, 465)
+	o.leiosTxFetchAttemptTimeoutOverride = 100 * time.Millisecond
+	owner := &leiosTxOfferTestRequester{
+		txs: txs, perRound: 20 * time.Millisecond, limit: 1,
+	}
+	healthy := &leiosTxOfferTestRequester{txs: txs}
+	ownerGuard := &leiosFetchGuard{}
+	waiterGuard := &leiosFetchGuard{}
+	ownerGuard.inflight.Store(1)
+	waiterGuard.inflight.Store(1)
+	o.dispatchLeiosTxOfferFetch(
+		ownerGuard, owner, namedConnId("dribble-owner"),
+		"dribble-owner", point, nil,
+	)
+	o.dispatchLeiosTxOfferFetch(
+		waiterGuard, healthy, namedConnId("healthy-waiter"),
+		"healthy-waiter", point, nil,
+	)
+	testutil.WaitForCondition(t, func() bool {
+		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		return ok && data.completeTxCache() &&
+			ownerGuard.inflight.Load() == 0 && waiterGuard.inflight.Load() == 0
+	}, 5*time.Second, "deadline did not hand off to the healthy waiter")
+	require.Positive(t, owner.requests)
+	require.Less(t, owner.requests, len(txs))
+	require.Equal(t, 1, healthy.requests)
+	require.Less(t, healthy.lastNeed, len(txs),
+		"the waiter must resume the partial cache instead of starting over")
+}
+
+func TestLeiosTxsOfferDeadlineWithoutWaiterReleasesClaim(t *testing.T) {
+	t.Parallel()
+	o, point, txs := testLeiosTxOfferDeadlineFixture(t, 466)
+	o.leiosTxFetchAttemptTimeoutOverride = 40 * time.Millisecond
+	owner := &leiosTxOfferTestRequester{
+		txs: txs, perRound: 10 * time.Millisecond, limit: 1,
+	}
+	guard := &leiosFetchGuard{}
+	guard.inflight.Store(1)
+	o.dispatchLeiosTxOfferFetch(
+		guard, owner, namedConnId("lone-dribble-owner"),
+		"lone-dribble-owner", point, nil,
+	)
+	key := leiosBlockKey(point.Slot, point.Hash)
+	testutil.WaitForCondition(t, func() bool {
+		o.leiosTxFetchClaimsMu.Lock()
+		defer o.leiosTxFetchClaimsMu.Unlock()
+		return guard.inflight.Load() == 0 && o.leiosTxFetchClaims[key] == nil
+	}, 5*time.Second, "deadline without a waiter retained the global claim")
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.False(t, data.completeTxCache())
+	require.Positive(t, data.partialTxCount(),
+		"progress before the deadline must remain cached")
 }
 
 func TestLeiosTxsOfferHandsOffAcrossMultipleFailingPeers(t *testing.T) {
