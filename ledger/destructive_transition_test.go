@@ -75,8 +75,6 @@ func TestRollbackWaitsForDestructiveTransitionBarrier(t *testing.T) {
 }
 
 func TestReconciliationTakesPruneLockBeforeDestructiveBarrier(t *testing.T) {
-	t.Parallel()
-
 	fixture := newChainsyncRollbackFixture(t)
 	require.NoError(t, fixture.ls.chain.Rollback(t.Context(), fixture.ancestorTip.Point))
 
@@ -130,8 +128,6 @@ func TestReconciliationTakesPruneLockBeforeDestructiveBarrier(t *testing.T) {
 }
 
 func TestReconciliationWaitsForDestructiveTransitionBarrier(t *testing.T) {
-	t.Parallel()
-
 	fixture := newChainsyncRollbackFixture(t)
 	require.NoError(t, fixture.ls.chain.Rollback(t.Context(), fixture.ancestorTip.Point))
 	finish := fixture.ls.db.BeginDestructiveTransition()
