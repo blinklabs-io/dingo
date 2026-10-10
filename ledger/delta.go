@@ -516,22 +516,24 @@ func (d *LedgerDelta) processGovernance(
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
 	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
+	hasDRepDeregistrationCerts :=
+		governance.HasDRepDeregistrationCertificates(tx)
+	requiresConwayParameters := governance.TransactionRequiresConwayParameters(tx)
 
-	// Early return if no governance data to process
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
+	if !requiresConwayParameters && !hasDRepDeregistrationCerts {
 		return nil
 	}
 
 	// Determine current epoch and Conway protocol parameters.
-	// These are needed for both proposals (govActionLifetime) and
-	// votes (dRepInactivityPeriod for activity tracking).
+	// These are needed for proposals, votes, and DRep activity certificates;
+	// deregistration cleanup does not depend on them.
 	ls.RLock()
 	currentEpoch := ls.currentEpoch.EpochId
 	pparams := ls.currentPParams
 	ls.RUnlock()
 
 	conwayPParams := conwayProtocolParameters(pparams)
-	if conwayPParams == nil {
+	if requiresConwayParameters && conwayPParams == nil {
 		return fmt.Errorf(
 			"governance requires Conway protocol parameters, got %T",
 			pparams,
@@ -583,7 +585,7 @@ func (d *LedgerDelta) processGovernance(
 			return fmt.Errorf("process DRep activity certificates: %w", err)
 		}
 	}
-	if governance.HasDRepDeregistrationCertificates(tx) {
+	if hasDRepDeregistrationCerts {
 		if err := governance.ProcessDRepDeregistrationEffects(
 			ctx,
 			tx,

@@ -1148,6 +1148,68 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 		"the same hash under a script credential remains distinct")
 }
 
+func TestProcessGovernanceClearsDRepVotesForDeregistrationOnlyTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	credentialBytes := bytes.Repeat([]byte{0x75}, lcommon.Blake2b224Size)
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], credentialBytes)
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    credentialBytes,
+		AddedSlot:     1,
+		Active:        true,
+	}))
+	proposalHash := bytes.Repeat([]byte{0x76}, lcommon.Blake2b256Size)
+	proposal := &models.GovernanceProposal{
+		TxHash:       proposalHash,
+		ExpiresEpoch: 200,
+		AddedSlot:    3,
+	}
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
+	updatedSlot := uint64(10)
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+		ProposalID:         proposal.ID,
+		VoterType:          models.VoterTypeDRep,
+		VoterCredentialTag: 0,
+		VoterCredential:    credentialBytes,
+		Vote:               models.VoteYes,
+		AddedSlot:          updatedSlot,
+		VoteUpdatedSlot:    &updatedSlot,
+	}, nil))
+
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithCertificates(&lcommon.DeregistrationDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: credentialHash,
+		},
+	})
+	ls := &LedgerState{db: db, currentEpoch: models.Epoch{EpochId: 10}}
+	point := ocommon.Point{
+		Slot: 30,
+		Hash: bytes.Repeat([]byte{0x77}, lcommon.Blake2b256Size),
+	}
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return (&LedgerDelta{Point: point}).processGovernance(
+			context.Background(), ls, tx, 0, txn,
+		)
+	}))
+
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
+	require.NoError(t, err)
+	require.Empty(t, votes)
+}
+
 func TestLedgerDeltaDRepDeregistrationPreservesLaterDelegation(t *testing.T) {
 	t.Parallel()
 
