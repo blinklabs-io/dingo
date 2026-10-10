@@ -945,7 +945,8 @@ these series carries a connection or peer label.
   read `Chain.HeaderCount` and `Chain.MaxQueuedHeaders` at scrape time, taking
   only the chain's lock and the chain manager's lock respectively, never a
   ledger or scheduler lock. `dingo_chain_header_queue_full_total` counts
-  headers rejected with `ErrHeaderQueueFull`; the ledger installs
+  headers the primary chain rejects with `ErrHeaderQueueFull`, the same queue
+  the two gauges read; the ledger installs
   `ChainManager.SetHeaderQueueFullObserver`, and `Chain.addBlockHeader` calls
   it under the chain lock, so the observer only increments the counter.
 - `dingo_ledger_last_block_added_timestamp_seconds` is one atomic store per
@@ -954,14 +955,20 @@ these series carries a connection or peer label.
   range request a peer's blockfetch client accepted. Both read 0 until the
   first one.
 - `dingo_blockfetch_requests_issued_total` counts accepted range requests and
-  `dingo_blockfetch_requests_completed_total{result="ok"|"error"}` their
-  terminal outcomes from `RangeDoneFunc`. Headers queued while the issued
-  counter is flat means nothing is being fetched. `peer_selections_total` and
-  the `enqueue`/`ledger_publish` observations of
+  `dingo_blockfetch_requests_completed_total{result="ok"|"error"}` the
+  terminal outcomes `RangeDoneFunc` reports for those requests only. A request
+  whose `RequestRange` call fails is in neither, even when gouroboros drained
+  it during protocol shutdown and reported it terminal, so completed never
+  exceeds issued. Headers
+  queued while the issued counter is flat means no new request is being
+  accepted; one already accepted may still be delivering until its completion
+  is counted. `dingo_blockfetch_peer_selections_total` and the
+  `enqueue`/`ledger_publish` observations of
   `dingo_blockfetch_stage_duration_seconds` do not answer that question: the
-  first counts one decision per batch window the ledger starts, continues or
-  tops up while a selection policy is wired, and the second is observed only
-  for events received through blockfetch.
+  first counts one selection-policy invocation per blockfetch window, made
+  before that window's request is issued and so also for a request that then
+  fails to start, and the second is observed only for events received through
+  blockfetch.
 - `dingo_ledger_blockfetch_batch_in_flight`,
   `dingo_ledger_blockfetch_continuation_pending` and
   `dingo_ledger_blockfetch_connection_selected` mirror

@@ -2901,9 +2901,11 @@ func (cs *ChainSelector) applyRollbackToTrackedPeer(e PeerRollbackEvent) bool {
 // newPeerChainTipFromRollback). It returns any evicted
 // connection, for the caller to publish outside the lock, and the outcome.
 // Callers must hold cs.mutex, and must have established that the connection is
-// live before acquiring it (HandlePeerRollbackEvent does); no configured
-// callback is invoked from here, so nothing under the lock can re-enter the
-// selector or block on the connection manager.
+// live before acquiring it (HandlePeerRollbackEvent does). The only
+// configured callback invoked from here is OnPeerTipRejected, through
+// checkPeerTipPlausibleLocked, and its contract confines it to non-blocking
+// work that does not call back into the selector, so nothing under the lock
+// can re-enter the selector or block on the connection manager.
 func (cs *ChainSelector) registerPeerFromRollbackLocked(
 	e PeerRollbackEvent,
 ) (*ouroboros.ConnectionId, RollbackRegistrationOutcome) {
