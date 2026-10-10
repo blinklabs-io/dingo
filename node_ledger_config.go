@@ -139,12 +139,6 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// certify deadline is the bound that matches when the EB is actually
 		// available to fetch.
 		EndorserBlockWaitSlots: n.leiosPipelineTiming().CertifyByDeadlineSlots,
-		// Two-path Leios ledger selection: the Musashi prototype
-		// (prototype-2026w29) applies only the certified parent EB, without
-		// validation or consumed-input recovery (Haskell-conformant), whereas
-		// dingo's forward path applies the current announcement normally
-		// (CIP-conformant).
-		LeiosApplyEndorserBlockTxs: !n.config.isMusashiNetwork(),
 		ValidateLeiosCertificate: func(
 			epoch uint64,
 			announcingBlockHash []byte,
@@ -160,12 +154,20 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			message := leios.PrototypeVoteMessageBytes(
 				lcommon.Blake2b256(announcingBlockHash),
 			)
-			return n.leiosVoteManager.ValidateDijkstraCertificate(
+			err := n.leiosVoteManager.ValidateDijkstraCertificate(
 				epoch,
 				signers,
 				aggregatedSignature,
 				message,
 			)
+			if errors.Is(err, leios.ErrInvalidCertificate) {
+				return fmt.Errorf(
+					"%w: %w",
+					ledger.ErrLeiosInvalidCertificate,
+					err,
+				)
+			}
+			return err
 		},
 		// The leadership stake includes reward-account balances; see
 		// LedgerStateConfig.SkipLeaderStakeThresholdCheck. The check

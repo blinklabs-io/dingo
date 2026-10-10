@@ -253,8 +253,8 @@ func (d *Database) SetTransaction(
 }
 
 // SetTransactionWithOpts is SetTransaction with control over UTxO ingest
-// behavior via opts. Leios endorser-block application on the Musashi/
-// Haskell-conformant path passes SkipConsumedInputRecovery so a transaction's
+// behavior via opts. Certified Leios endorser-block closure application
+// passes SkipConsumedInputRecovery so a transaction's
 // effects are applied without the consumed-utxo recovery/repair pass: produced
 // outputs and input spends are written, but a consumed input that is absent from
 // the store is left as a no-op instead of triggering blob recovery. This matches
@@ -443,7 +443,7 @@ func (d *Database) SetTransactionWithOpts(
 //
 // This is a general primitive for recording a transaction's certificate and
 // governance data without applying its UTxO effects. It is no longer on the
-// Leios endorser-block apply path: the Musashi path now applies endorser
+// Leios endorser-block apply path, which applies certified endorser
 // transactions with their full effects (see ledger/leios_apply.go and
 // SetTransactionWithOpts), matching the reference ledger.
 func (d *Database) SetTransactionMetadataOnly(

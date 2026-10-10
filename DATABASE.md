@@ -2623,11 +2623,10 @@ flowchart LR
 The `em`/`et` pair is for historical Leios fetch serving. `em` stores the
 manifest; `et` stores the separately fetched transaction bodies. They are
 written together only when the complete body list is available. Applying a
-referencing ranking block writes a standalone `bp` blob only for a non-empty
-body list. On the CIP path, at least one transaction must also remain after
-deduplication; the Musashi path retains the original list even when all its
-transactions are duplicates. The diagram shows these as separate stages
-because neither representation is inlined into the other.
+certifying ranking block writes a standalone `bp` blob only for a non-empty body
+list, and retains the original list even when all its transactions are
+duplicates. The diagram shows these as separate stages because neither
+representation is inlined into the other.
 
 | Logical key | Value | Used by |
 |---|---|---|
@@ -2774,15 +2773,14 @@ main block outright, as bark's archive-fetch path does, would make
 Byron-era history permanently unretrievable from an S3/GCS-backed node
 instead. See `Hash`'s doc comment in `blockverify.go` for the full account.
 
-Leios also uses the ordinary blob-key namespace for ledger application. An EB
-is not itself part of the ranking-block chain. When a Dijkstra ranking block
-references one (`ledger/leios_apply.go`), `SetGenesisCbor` writes its
-transactions as a standalone CBOR blob under `bp` + EB slot + EB hash if the
-EB has a non-empty body list. The CIP path also requires at least one
-transaction to remain after deduplication; the Musashi path writes the original
-non-empty list even when every transaction is a duplicate. This is the blob
-that transaction `DOFF` offsets resolve through cold extraction, separate from
-the `em`/`et` historical-serving records described above.
+Leios also uses the ordinary blob-key namespace for ledger application. An EB is
+not itself part of the ranking-block chain. When a Dijkstra ranking block
+certifies one (`ledger/leios_apply.go`), `SetGenesisCbor` writes its
+transactions as a standalone CBOR blob under `bp` + EB slot + EB hash if the EB
+has a non-empty body list, writing the original list even when every transaction
+is a duplicate. This is the blob that transaction `DOFF` offsets resolve through
+cold extraction, separate from the `em`/`et` historical-serving records
+described above.
 
 The synthetic `bp` blob has `ID=0` and deliberately has no `bi`/`bh` index
 entries. Chain iteration therefore does not treat it as a real block.
@@ -2790,27 +2788,20 @@ entries. Chain iteration therefore does not treat it as a real block.
 canonical chain query because retained fork blobs may sort before an epoch
 boundary.
 
-The blob transaction boundary depends on `LeiosApplyEndorserBlockTxs`:
+The standalone blob commits separately from the shared block-processing
+transaction, which can cover up to 50 blocks. Keeping large EB blobs out of that
+transaction avoids Badger's per-transaction size limit (`ErrTxnTooBig`) during
+dense backlogs. The blob is idempotent, and transaction ledger effects remain
+associated with the ranking block for rollback. The shared transaction's
+snapshot predates that commit, so `SetGenesisCbor` warms the block LRU with the
+committed blob and `applyEndorserBlock` calls
+`Txn.MarkBlockCborCommittedSeparately(slot, hash)` on the shared transaction.
+When a later offset read in that transaction misses the LRU, `ResolveUtxoCbor`
+reads the marked block through a fresh blob read transaction instead of the
+stale snapshot, which also keeps the block key out of the shared transaction's
+conflict-detection read set. The mark is dropped when the transaction finishes.
 
-- **Musashi / Haskell-conformant path (`false`):** the standalone blob commits
-  separately from the shared block-processing transaction, which can cover up
-  to 50 blocks. Keeping large EB blobs out of that transaction avoids Badger's
-  per-transaction size limit (`ErrTxnTooBig`) during dense backlogs. The blob
-  is idempotent, and transaction ledger effects remain associated with the
-  ranking block for rollback. The shared transaction's snapshot predates that
-  commit, so `SetGenesisCbor` warms the block LRU with the committed blob and
-  `applyEndorserBlock` calls `Txn.MarkBlockCborCommittedSeparately(slot, hash)`
-  on the shared transaction. When a later offset read in that transaction
-  misses the LRU, `ResolveUtxoCbor` reads the marked block through a fresh
-  blob read transaction instead of the stale snapshot, which also keeps the
-  block key out of the shared transaction's conflict-detection read set. The
-  mark is dropped when the transaction finishes.
-- **CIP-conformant path (`true`):** the blob remains in the shared transaction.
-  A later block in the same chunk may spend an EB-produced output and must be
-  able to read the blob through read-your-writes; a separately committed blob
-  is not visible to that transaction's starting snapshot.
-
-Both paths store transaction effects under the referencing ranking block's
+Transaction effects are stored under the certifying ranking block's
 point, so rolling back that ranking block removes the effects. A blob left
 behind by a crash or rollback is harmless and is overwritten on reprocessing.
 Epoch nonce code derives `last_epoch_block_nonce` from the previous epoch's last
@@ -2847,24 +2838,19 @@ floor" to detect and repair a slot-based rollback that left the in-memory
 or below that floor. The row's `nonce` bytes are ignored by that path — only
 `(slot, hash)` are consumed as a rollback point.
 
-Whether the decoded endorser transactions are then applied to the ledger is
-selected by `LedgerStateConfig.LeiosApplyEndorserBlockTxs` (see
-`ARCHITECTURE.md`; wired from the network in `node.go`, false on the Musashi
-prototype and true elsewhere). On the CIP-conformant path (every network except
-Musashi), `LeiosApplyEndorserBlockTxs` persists the transaction-level apply
-data: each endorser transaction's `t` entry and its outputs' `u` entries store
-ordinary `DOFF` references whose `block_slot`/`block_hash` point at the
-standalone `bp` blob above, so cold-extract resolution is identical to
-chain-block transactions. The transactions' metadata rows are recorded under
-the referencing ranking block's point, so a rollback of the ranking block
-removes them (the orphaned endorser-block blob is harmless and re-created on
-reprocess). On the Haskell-conformant path (Musashi,
-`LeiosApplyEndorserBlockTxs` false) the standalone `bp` endorser-block blob
-above is written for historical serving and the node-to-client inline view, and
-the endorser transactions are applied to the ledger with their full effects —
-the same `t`/`u` entries, UTxO/input rows, and certificate/governance rows as
-the CIP-conformant path — but without validation or consumed-input recovery,
-matching the reference ledger's `applyLeiosClosure` (prototype-2026w29,
+Only a certified closure reaches the ledger (see `ARCHITECTURE.md`): a ranking
+block without a certificate applies no endorser block. Besides the standalone
+`bp` blob above, which also serves historical fetches and the node-to-client
+inline view, the closure's transaction-level apply data is persisted: each
+endorser transaction's `t` entry and its outputs' `u` entries store ordinary
+`DOFF` references whose `block_slot`/`block_hash` point at the `bp` blob, so
+cold-extract resolution is identical to chain-block transactions. The
+transactions' metadata rows are recorded under the certifying ranking block's
+point, so a rollback of that block removes them (the orphaned endorser-block
+blob is harmless and re-created on reprocess). The endorser transactions are
+applied with their full effects — UTxO/input rows and certificate/governance
+rows — but without validation or consumed-input recovery, matching the
+reference ledger's `applyLeiosClosure` (prototype-2026w29,
 `ruleApplyTxValidation` `ValidateNone`): produced outputs and input spends are
 written, and a consumed input absent from the store is left as a no-op instead
 of driving blob recovery (`Database.SetTransactionWithOpts` with
@@ -2876,8 +2862,8 @@ still writes the transaction's produced outputs and its remaining spends. Two
 certified endorser blocks can name the same input across blocks, and
 `ValidateNone` treats the second consume as `Map.delete` on a missing key;
 returning `ErrUtxoConflict` there wedged block application instead.
-Ranking-block application and the CIP-conformant endorser apply keep
-the hard `ErrUtxoConflict` check, so a real double-spend is still rejected.
+Ranking-block application keeps the hard `ErrUtxoConflict` check, so a real
+double-spend is still rejected.
 Applying the outputs keeps the UTxO set — and the stake distribution derived
 from it — complete, matching the reference; the prior metadata-only behavior
 omitted the produced outputs, which diverged the UTxO and made downstream
@@ -2893,16 +2879,15 @@ Earlier ranking-block deltas are applied before processing the next Leios
 closure, including during unvalidated historical sync. This preserves input
 availability and stake accounting independently of read-batch boundaries.
 
-On the Musashi prototype path, a certified closure executes on the parent's
-unticked ledger before the certifying ranking block's epoch transition. A closure
-crossing that boundary therefore contributes to the ended epoch's fees and the
-new mark snapshot. `leios_transaction_context` records its transactions' parent
-ledger slot separately from the certifying block's physical slot. Fee sums,
-historical stake and reward reconstruction, pool lifecycle cuts, and key-age
-snapshot reads use that execution context; transaction and effect rows retain
-their physical slots so rollback removes them with the certifier. The context
-rows cascade with their owning transactions. The ordinary ranking body and the
-CIP path have no context override.
+A certified closure executes on the parent's unticked ledger before the
+certifying ranking block's epoch transition. A closure crossing that boundary
+therefore contributes to the ended epoch's fees and the new mark snapshot.
+`leios_transaction_context` records its transactions' parent ledger slot
+separately from the certifying block's physical slot. Fee sums, historical stake
+and reward reconstruction, pool lifecycle cuts, and key-age snapshot reads use
+that execution context; transaction and effect rows retain their physical slots
+so rollback removes them with the certifier. The context rows cascade with their
+owning transactions. The ordinary ranking body has no context override.
 
 Closure effects and the epoch rollover commit together. Transaction Apply events
 wait for the certifying block's commit, survive a failed body retry, and are
@@ -2910,11 +2895,10 @@ discarded when rollback removes the unpublished closure. Even a rollback to the
 unchanged parent tip must remove those pending effects. The migration does not
 reconstruct contexts or reward rounds previously computed with the old ordering;
 affected historical state requires replay from before its first affected boundary.
-On the forward/CIP path, decode/build failures are ignored before storage is
-touched; once the blob or transaction rows start writing, the caller aborts the
+Once the blob or transaction rows start writing, a failure aborts the
 enclosing block transaction rather than committing a partial endorser-block
-application. For a Musashi certifying ranking block, the certified parent EB
-and all of these writes are mandatory. The block-processing transaction is not
+application. For a certifying ranking block, the certified parent EB and all
+of these writes are mandatory. The block-processing transaction is not
 opened until the complete EB closure is available, and resolution, decode, or
 apply failure prevents the CertRB and its metadata tip from committing.
 Historical backfill retries instead of recording a prefix that lacks certified

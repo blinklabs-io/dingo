@@ -49,14 +49,15 @@ import (
 // has no producer on the local applied chain.
 //
 // Leios caveat. "A block was fetched, so its transactions are in hand" is true
-// of every pre-Leios block and false on the Leios cert-driven path, where a
-// certifying ranking block's body is empty: its transactions are the certified
-// endorser block's, which arrives over leios-fetch as a separate artifact and
-// is applied by LedgerState.applyEndorserBlock at ledger-apply time. The audit
-// runs at blockfetch time, so with the ledger pipeline behind the blockfetch
-// queue — the normal condition during an endorser-block backlog, and precisely
-// the condition a rollback arms the audit in — neither the UTxO nor the
-// transaction-metadata fallback can see an endorser-resident producer either.
+// of every pre-Leios block and false on the Leios cert-driven path: the
+// transactions a certifying ranking block certifies are not in its body but in
+// the certified endorser block, which arrives over leios-fetch as a separate
+// artifact and is applied by LedgerState.applyEndorserBlock at ledger-apply
+// time. The audit runs at blockfetch time, so with the ledger pipeline behind
+// the blockfetch queue — the normal condition during an endorser-block
+// backlog, and precisely the condition a rollback arms the audit in — neither
+// the UTxO nor the transaction-metadata fallback can see an endorser-resident
+// producer either.
 // The window therefore resolves each audited block's endorser block the same
 // way apply does (leiosEndorserBlockForApply plus EndorserBlockProvider) and
 // records its transaction ids as producers. When that endorser block has not
@@ -1029,39 +1030,20 @@ func (w *continuationAuditWindow) recordProducers(
 // block an audited ranking block applies, so it can be turned into producers
 // later if any input needs it.
 //
-// The reference is selected exactly as the apply path selects it: the block's
-// own announcement when LeiosApplyEndorserBlockTxs is set (the CIP path,
-// bound to the block's own slot), the parent's announcement otherwise (the
-// Musashi cert-driven path). The cert-driven case retains only the parent hash;
-// leiosCertifiedAnnouncementFromParent — the same helper
-// leiosEndorserBlockForApply uses — turns it into a reference when the time
-// comes, so the two cannot select different endorser blocks.
+// The reference is selected exactly as the apply path selects it: only a
+// certifying block applies an endorser block, the one its parent announced.
+// Only the parent hash is retained; leiosCertifiedAnnouncementFromParent — the
+// same helper leiosEndorserBlockForApply uses — turns it into a reference when
+// the time comes, so the two cannot select different endorser blocks.
 //
 // Non-Leios chains are unaffected: no endorser-block provider is configured,
-// and a header that neither announces nor certifies an endorser block queues
-// nothing.
+// and a header that does not certify an endorser block queues nothing.
 func (ls *LedgerState) continuationAuditEndorserRefFor(
 	e BlockfetchEvent,
 ) (continuationAuditEndorserRef, bool) {
 	var ref continuationAuditEndorserRef
 	if ls.config.EndorserBlockProvider == nil || e.Block == nil {
 		return ref, false
-	}
-	if ls.config.LeiosApplyEndorserBlockTxs {
-		referencer, ok := e.Block.Header().(leiosEndorserBlockReferencer)
-		if !ok {
-			return ref, false
-		}
-		ebHash, _, announced := referencer.LeiosAnnouncement()
-		if !announced {
-			return ref, false
-		}
-		return continuationAuditEndorserRef{
-			ebHash:    ebHash,
-			ebSlot:    e.Block.SlotNumber(),
-			resolved:  true,
-			blockSlot: e.Point.Slot,
-		}, true
 	}
 	certifier, ok := e.Block.Header().(leiosEndorserBlockCertifier)
 	if !ok {
@@ -1177,7 +1159,7 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 		*budget--
 		window.endorserResolutions++
 		if !ref.resolved {
-			ebHash, ebSlot, _, announced, err := ls.leiosCertifiedAnnouncementFromParent(
+			ebHash, ebSlot, announced, err := ls.leiosCertifiedAnnouncementFromParent(
 				ls.lifecycleContext(),
 				ref.certParentHash,
 			)

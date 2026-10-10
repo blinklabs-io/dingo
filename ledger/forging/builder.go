@@ -567,9 +567,10 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 		// transactions; node-to-client later inlines the certified EB txs.
 	case leios.Announcement != nil:
 		// An announcing slot carries either the endorser block or ranking-block
-		// transactions, never both. The endorser block is applied before its
-		// ranking block, so putting any mempool transaction in the RB would make
-		// both transaction sets apply at the same slot.
+		// transactions, never both. The two are selected from the mempool
+		// separately, so carrying both could put one transaction in each set,
+		// and the endorser block would then fail closure validation against the
+		// announcing block's state, which already spent its inputs.
 	default:
 		mempoolTxs = b.mempool.Transactions()
 	}

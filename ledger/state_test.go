@@ -6055,31 +6055,22 @@ func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		applyTxs bool
-		ebTxs    []cbor.RawMessage
-		applied  int
-		want     string
-		notWant  []string
+		name    string
+		ebTxs   []cbor.RawMessage
+		applied int
+		want    string
+		notWant []string
 	}{
 		{
-			name:     "empty CIP block",
-			applyTxs: true,
-			want:     "Leios endorser block has no transactions",
+			name: "empty block",
+			want: "Leios endorser block has no transactions",
 			notWant: []string{
 				"skipped already-applied Leios endorser block transactions",
 				"stored Leios endorser block without applying to UTxO",
 			},
 		},
 		{
-			name:     "CIP deduplicated block",
-			applyTxs: true,
-			ebTxs:    []cbor.RawMessage{{0x80}},
-			want:     "skipped already-applied Leios endorser block transactions",
-			notWant:  []string{"Leios endorser block has no transactions"},
-		},
-		{
-			name:  "Haskell deduplicated block",
+			name:  "deduplicated block",
 			ebTxs: []cbor.RawMessage{{0x80}},
 			want:  "skipped already-applied Leios endorser block transactions",
 			notWant: []string{
@@ -6093,7 +6084,6 @@ func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 			var logBuf bytes.Buffer
 			ls := &LedgerState{
 				config: LedgerStateConfig{
-					LeiosApplyEndorserBlockTxs: tc.applyTxs,
 					Logger: slog.New(slog.NewTextHandler(
 						&logBuf,
 						&slog.HandlerOptions{Level: slog.LevelDebug},

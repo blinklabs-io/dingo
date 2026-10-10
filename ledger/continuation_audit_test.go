@@ -279,12 +279,13 @@ func (f *leiosAuditFixture) spenderBlockAt(
 // TestContinuationAuditAcceptsEndorserBlockProducer is the regression for the
 // false positive this package reported on every Leios cert-driven fork window.
 //
-// A certifying ranking block's body is empty: its transactions live in the
-// endorser block it certifies, which LedgerState.applyEndorserBlock applies at
-// ledger-apply time, long after blockfetch time when the audit runs. Building
-// the in-window producer set from e.Block.Transactions() alone therefore never
-// records an endorser-block transaction, and the ledger fallbacks miss too
-// because the endorser block has not been applied yet. Every later ranking
+// The transactions a certifying ranking block certifies are not in its body:
+// they live in the endorser block it certifies, which
+// LedgerState.applyEndorserBlock applies at ledger-apply time, long after
+// blockfetch time when the audit runs. Building the in-window producer set
+// from e.Block.Transactions() alone therefore never records an endorser-block
+// transaction, and the ledger fallbacks miss too because the endorser block
+// has not been applied yet. Every later ranking
 // block spending an endorser-resident output was reported as having no
 // producer on the local applied chain, on a node whose UTxO set was correct.
 func TestContinuationAuditAcceptsEndorserBlockProducer(t *testing.T) {
@@ -865,115 +866,6 @@ func TestContinuationAuditEndorserResolutionIsBudgeted(t *testing.T) {
 		t,
 		f.logs.String(),
 		"no producer on the local applied chain",
-	)
-}
-
-// TestContinuationAuditAcceptsAnnouncedEndorserBlockProducer covers the
-// forward/CIP path, where a ranking block applies the endorser block it
-// announces itself rather than one its parent announced. The audit classifies
-// the reference the same way the apply path selects it, so both Leios shapes
-// are covered by one change; this pins the CIP half so a future divergence in
-// that selector cannot silently reintroduce the false positive on the
-// conformant path.
-func TestContinuationAuditAcceptsAnnouncedEndorserBlockProducer(t *testing.T) {
-	fixture := newChainsyncRollbackFixture(t)
-	ls := fixture.ls
-	logs := &strings.Builder{}
-	ls.config.Logger = slog.New(slog.NewJSONHandler(
-		logs,
-		&slog.HandlerOptions{Level: slog.LevelDebug},
-	))
-	ls.config.LeiosApplyEndorserBlockTxs = true
-
-	ebHash := lcommon.NewBlake2b256(testHashBytes("cip-audit-eb"))
-	certified, err := cbor.Encode(false)
-	require.NoError(t, err)
-	announcement, err := cbor.Encode([]any{ebHash.Bytes(), uint64(4096)})
-	require.NoError(t, err)
-	announcing := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber: 3,
-					Slot:        30,
-					PrevHash: lcommon.NewBlake2b256(
-						fixture.currentTip.Point.Hash,
-					),
-				},
-			},
-			LeiosHeaderExtension: []cbor.RawMessage{
-				cbor.RawMessage(certified),
-				cbor.RawMessage(announcement),
-			},
-		},
-	}
-
-	rawTx, _, ebTx := leiosApplyTestTx(t, 0x7C)
-	providerCalls := 0
-	ls.config.EndorserBlockProvider = func(
-		hash []byte,
-		slot uint64,
-	) ([]cbor.RawMessage, bool) {
-		providerCalls++
-		// On the CIP path the endorser block is bound to the announcing
-		// block's own slot, not a parent's.
-		if string(hash) != string(ebHash.Bytes()) ||
-			slot != announcing.SlotNumber() {
-			return nil, false
-		}
-		return []cbor.RawMessage{rawTx}, true
-	}
-
-	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "test rollback")
-	ls.auditContinuationBlock(BlockfetchEvent{
-		ConnectionId: fixture.connId,
-		Block:        announcing,
-		Point: ocommon.NewPoint(
-			announcing.SlotNumber(),
-			announcing.Hash().Bytes(),
-		),
-	}, true)
-	window := ls.continuationAudit.Load()
-	require.NotNil(t, window)
-	require.Equal(
-		t,
-		0,
-		providerCalls,
-		"an announced reference must be classified without being resolved",
-	)
-
-	spender := &spliceAuditBlock{
-		slot: 50,
-		hash: lcommon.NewBlake2b256(testHashBytes("cip-audit-spender")),
-		txs: []lcommon.Transaction{
-			mustSpliceAuditTx(
-				t,
-				testHashBytes("cip-audit-spender-tx"),
-				[]lcommon.TransactionInput{
-					mustSpliceAuditInput(t, ebTx.Hash().Bytes(), 0),
-				},
-			),
-		},
-	}
-	ls.auditContinuationBlock(BlockfetchEvent{
-		ConnectionId: fixture.connId,
-		Block:        spender,
-		Point:        ocommon.NewPoint(spender.slot, spender.hash.Bytes()),
-	}, true)
-
-	assert.NotContains(
-		t,
-		logs.String(),
-		"no producer on the local applied chain",
-		"a producer in the endorser block this window announced must not be reported",
-	)
-	assert.False(t, window.endorserProducersIncomplete())
-	assert.Equal(t, 1, window.endorserResolutions)
-	assert.Contains(
-		t,
-		window.producedTxs,
-		string(ebTx.Hash().Bytes()),
-		"the announced endorser block's transaction must be an in-window producer",
 	)
 }
 
