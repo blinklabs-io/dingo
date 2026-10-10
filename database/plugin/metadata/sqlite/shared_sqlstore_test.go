@@ -1287,7 +1287,7 @@ func TestSharedSQLStoreLeiosClosureTolerateDoubleConsume(t *testing.T) {
 		}))
 		txA := consumeTx(0xa2, input)
 		pointA := ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{0xc1}, 32)}
-		require.NoError(t, store.SetTransaction(txA, pointA, 0, nil, true, nil))
+		require.NoError(t, store.SetTransaction(txA, pointA, 0, nil, true, nil, 0))
 		return store, txA
 	}
 
@@ -1298,7 +1298,7 @@ func TestSharedSQLStoreLeiosClosureTolerateDoubleConsume(t *testing.T) {
 		store, _ := newStoreWithSpentInput(t)
 		txB := consumeTx(0xb2, input)
 		pointB := ocommon.Point{Slot: 20, Hash: bytes.Repeat([]byte{0xc2}, 32)}
-		err := store.SetTransaction(txB, pointB, 0, nil, true, nil)
+		err := store.SetTransaction(txB, pointB, 0, nil, true, nil, 0)
 		require.Error(t, err)
 		require.ErrorIs(t, err, types.ErrUtxoConflict)
 	})
@@ -1313,7 +1313,7 @@ func TestSharedSQLStoreLeiosClosureTolerateDoubleConsume(t *testing.T) {
 		pointB := ocommon.Point{Slot: 20, Hash: bytes.Repeat([]byte{0xc3}, 32)}
 		require.NoError(
 			t,
-			store.SetTransactionLeiosClosure(txB, pointB, 0, nil, true, nil),
+			store.SetTransactionLeiosClosure(txB, pointB, 0, nil, true, nil, 0),
 		)
 
 		// Producer input remains spent by the first (earlier certified) tx.
@@ -4737,6 +4737,7 @@ type transactionWriteStore interface {
 		map[int]uint64,
 		bool,
 		types.Txn,
+		uint64,
 	) error
 	SetTransactionBatchedHistorical(
 		lcommon.Transaction,
@@ -4747,6 +4748,7 @@ type transactionWriteStore interface {
 		bool,
 		types.MetadataBatchAccumulator,
 		types.Txn,
+		uint64,
 	) error
 	GetTransactionByHash([]byte, types.Txn) (*models.Transaction, error)
 	GetUtxoIncludingSpent([]byte, uint32, types.Txn) (*models.Utxo, error)
@@ -4842,7 +4844,7 @@ func TestSharedSQLStoreTransactionMetadataCollisionIsNullable(t *testing.T) {
 	}}}
 	require.NoError(t, store.SetTransaction(
 		&mockTransaction{hash: txHash, metadata: metadataValue},
-		ocommon.Point{Slot: 7, Hash: bytes.Repeat([]byte{0xe8}, 32)}, 0, nil, false, nil,
+		ocommon.Point{Slot: 7, Hash: bytes.Repeat([]byte{0xe8}, 32)}, 0, nil, false, nil, 0,
 	))
 	var jsonValue sql.NullString
 	var cborValue []byte
@@ -4921,7 +4923,7 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 		0,
 		nil,
 		false,
-		nil,
+		nil, 0,
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "reward withdrawal amount 1235 exceeds")
@@ -4953,7 +4955,7 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 		0,
 		nil,
 		true,
-		nil,
+		nil, 0,
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "reward withdrawal amount 1236 exceeds")
@@ -4976,7 +4978,7 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 		true,
 		true,
 		store.NewBatchAccumulator(),
-		nil,
+		nil, 0,
 	))
 	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1234), uint64(account.Reward))
@@ -5052,7 +5054,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 				0,
 				nil,
 				true,
-				nil,
+				nil, 0,
 			)
 			require.Error(t, err)
 			require.ErrorContains(t, err, "account not found")
@@ -5073,7 +5075,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 				true,
 				true,
 				store.NewBatchAccumulator(),
-				nil,
+				nil, 0,
 			)
 			if !tc.createInactive {
 				// A credential with no account row at all is an invariant
@@ -5121,7 +5123,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 				true,
 				true,
 				store.NewBatchAccumulator(),
-				nil,
+				nil, 0,
 			))
 			require.NoError(t, raw.QueryRow(
 				"SELECT COUNT(*) FROM account_reward_delta WHERE tx_hash = ?",
@@ -5173,7 +5175,7 @@ func TestSharedSQLStoreWithdrawalCredentialTagsRemainDistinct(t *testing.T) {
 			0,
 			nil,
 			true,
-			nil,
+			nil, 0,
 		))
 	}
 	for tag := range uint8(2) {
@@ -5209,7 +5211,7 @@ func TestSharedSQLStoreWithdrawalAllowsPartialBalance(t *testing.T) {
 		0,
 		nil,
 		true,
-		nil,
+		nil, 0,
 	))
 	account := requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1234), uint64(account.Reward))
@@ -5221,14 +5223,14 @@ func TestSharedSQLStoreWithdrawalAllowsPartialBalance(t *testing.T) {
 	}
 	point := ocommon.Point{Slot: 30, Hash: bytes.Repeat([]byte{0xf3}, 32)}
 	require.NoError(t, store.SetTransaction(
-		transaction, point, 0, nil, true, nil,
+		transaction, point, 0, nil, true, nil, 0,
 	))
 	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1000), uint64(account.Reward))
 
 	// Replaying the same transaction must not debit the remaining balance again.
 	require.NoError(t, store.SetTransaction(
-		transaction, point, 0, nil, true, nil,
+		transaction, point, 0, nil, true, nil, 0,
 	))
 	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1000), uint64(account.Reward))
@@ -5244,7 +5246,7 @@ func TestSharedSQLStoreWithdrawalAllowsPartialBalance(t *testing.T) {
 		0,
 		nil,
 		true,
-		nil,
+		nil, 0,
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "exceeds account balance 1000")
@@ -5327,7 +5329,7 @@ func TestSharedSQLStoreZeroWithdrawalValidatesAccountAndBalance(t *testing.T) {
 				0,
 				nil,
 				true,
-				nil,
+				nil, 0,
 			)
 			if tc.wantError != "" {
 				require.Error(t, err)
@@ -5417,7 +5419,7 @@ func TestSharedSQLStoreStorageModeTransactionParity(t *testing.T) {
 					0,
 					nil,
 					false,
-					nil,
+					nil, 0,
 				))
 				ret := map[string]int{}
 				for _, table := range []string{
@@ -5558,6 +5560,7 @@ func exerciseCertificateWriteStore(
 		deposits,
 		false,
 		nil,
+		10,
 	))
 	require.NoError(t, store.SetTransaction(
 		transaction,
@@ -5566,6 +5569,7 @@ func exerciseCertificateWriteStore(
 		deposits,
 		false,
 		nil,
+		10,
 	))
 	state := certificateWriteState{TableCounts: map[string]int{}}
 	require.NoError(t, db.QueryRow(`
@@ -5658,10 +5662,10 @@ func exerciseTransactionWriteStore(
 		Hash: bytes.Repeat([]byte{0xc1}, 32),
 	}
 	require.NoError(t, store.SetTransaction(
-		transaction, point, 3, nil, skipWithdrawalWitness, nil,
+		transaction, point, 3, nil, skipWithdrawalWitness, nil, 0,
 	))
 	require.NoError(t, store.SetTransaction(
-		transaction, point, 3, nil, skipWithdrawalWitness, nil,
+		transaction, point, 3, nil, skipWithdrawalWitness, nil, 0,
 	))
 	stored, err := store.GetTransactionByHash(transactionHash.Bytes(), nil)
 	require.NoError(t, err)

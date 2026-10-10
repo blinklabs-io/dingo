@@ -360,6 +360,64 @@ func (d *Database) UpdateDRepActivity(
 	})
 }
 
+// BumpDormantDRepExpiries extends active DRep expiries at an empty Conway
+// governance boundary. Replaying the same boundary slot is idempotent.
+func (d *Database) BumpDormantDRepExpiries(
+	ctx context.Context,
+	slot uint64,
+	txn *Txn,
+) (int, error) {
+	var affected int
+	err := d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		var err error
+		affected, err = d.governanceStore().BumpDormantDRepExpiries(
+			slot,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to bump dormant DRep expiries: %w", err)
+		}
+		return nil
+	})
+	return affected, err
+}
+
+func (d *Database) GetDormantDRepEpochs(ctx context.Context, txn *Txn) (uint64, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetDormantDRepEpochs(txn.Metadata())
+}
+
+func (d *Database) ResetDormantDRepEpochs(ctx context.Context, slot uint64, txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		if err := d.governanceStore().ResetDormantDRepEpochs(
+			slot,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to reset dormant DRep epoch count: %w", err)
+		}
+		return nil
+	})
+}
+
+func (d *Database) SetImportedDormantDRepEpochs(
+	ctx context.Context,
+	dormantEpochs uint64,
+	txn *Txn,
+) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		if err := d.governanceStore().SetImportedDormantDRepEpochs(
+			dormantEpochs,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to import dormant DRep epoch count: %w", err)
+		}
+		return nil
+	})
+}
+
 // RecordDRepActivityEpoch sets a DRep's last activity epoch without touching
 // its expiry. Historical replay below a Mithril anchor uses it: the snapshot's
 // DRepState expiry already reflects the dormant-epoch rules replay does not

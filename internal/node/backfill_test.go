@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -133,19 +134,17 @@ func TestBackfillProcessBlockGovernanceRecordsDRepActivityFromCertificateOnly(
 	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return backfill.processBlockGovernanceLevel(
-			context.Background(),
+		return backfill.processBlockGovernanceLevel(context.Background(),
 			tx,
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
 			0,
 			100,
-			backfillConwayProtocolParameters(&pparams),
+			&pparams,
 			txn,
 		)
 	}))
 
-	drep, err := db.GetDrepByCredential(
-		context.Background(),
+	drep, err := db.GetDrepByCredential(context.Background(),
 		0,
 		credentialBytes,
 		true,
@@ -251,8 +250,7 @@ func testBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
 		tx lcommon.Transaction,
 		slot uint64,
 	) error {
-		return backfill.processBlockTxsBatched(
-			context.Background(),
+		return backfill.processBlockTxsBatched(context.Background(),
 			[]lcommon.Transaction{tx},
 			ocommon.Point{
 				Slot: slot,
@@ -332,19 +330,17 @@ func TestBackfillProcessBlockGovernanceRecordsDRepActivityInDijkstra(t *testing.
 	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return backfill.processBlockGovernanceLevel(
-			context.Background(),
+		return backfill.processBlockGovernanceLevel(context.Background(),
 			tx,
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
 			0,
 			100,
-			backfillConwayProtocolParameters(pparams),
+			&pparams.ConwayProtocolParameters,
 			txn,
 		)
 	}))
 
-	drep, err := db.GetDrepByCredential(
-		context.Background(),
+	drep, err := db.GetDrepByCredential(context.Background(),
 		0,
 		credentialBytes,
 		true,
@@ -359,211 +355,370 @@ func TestBackfillProcessBlockGovernanceRecordsDRepActivityInDijkstra(t *testing.
 	assert.Equal(t, uint64(25), drep.ExpiryEpoch)
 }
 
-func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
-	t *testing.T,
-) {
+func TestBackfillProcessBlockGovernanceCleansDeregistrationVotes(t *testing.T) {
 	t.Parallel()
-	db := newTestDB(t)
-	backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	rewardAddress, err := lcommon.NewAddressFromBytes(
-		append([]byte{0xe0}, bytes.Repeat([]byte{0x42}, 28)...),
-	)
-	require.NoError(t, err)
-	proposal := dijkstra.DijkstraProposalProcedure{
-		PPDeposit:       42,
-		PPRewardAccount: rewardAddress,
-		PPGovAction: dijkstra.DijkstraGovAction{
-			Type: uint(lcommon.GovActionTypeInfo),
-			Action: &lcommon.InfoGovAction{
-				Type: uint(lcommon.GovActionTypeInfo),
-			},
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	drepCredential := bytes.Repeat([]byte{0xA7}, 28)
+	stakeCredential := bytes.Repeat([]byte{0xC9}, 28)
+	require.NoError(t, db.Metadata().ImportDrep(
+		&models.Drep{
+			CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+			Credential:    drepCredential,
+			AddedSlot:     900,
+			Active:        true,
+			Delegators: []models.StakeCredentialRef{{
+				Tag: uint8(lcommon.CredentialTypeAddrKeyHash),
+				Key: stakeCredential,
+			}},
 		},
-		PPAnchor: lcommon.GovAnchor{
-			Url:      "https://example.invalid/dijkstra-backfill-child",
-			DataHash: [32]byte(bytes.Repeat([]byte{0x24}, 32)),
+		&models.RegistrationDrep{
+			CredentialTag:  uint8(lcommon.CredentialTypeAddrKeyHash),
+			DrepCredential: drepCredential,
+			AddedSlot:      900,
+			DepositAmount:  types.Uint64(500),
 		},
-	}
-	proposalCbor, err := cbor.Encode(proposal)
-	require.NoError(t, err)
-	childBody, err := cbor.Encode(map[uint]any{
-		0:  []any{},
-		1:  []any{map[uint]any{0: append([]byte{0x60}, bytes.Repeat([]byte{0x25}, 28)...), 1: uint64(1_000_000)}},
-		20: []cbor.RawMessage{proposalCbor},
-	})
-	require.NoError(t, err)
-	childTx, err := cbor.Encode([]any{
-		cbor.RawMessage(childBody), map[uint]any{}, nil,
-	})
-	require.NoError(t, err)
-	rootBody, err := cbor.Encode(map[uint]any{
-		0:  []any{},
-		1:  []any{},
-		2:  uint64(0),
-		23: cbor.NewSetType([]cbor.RawMessage{childTx}, true),
-	})
-	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{
-		cbor.RawMessage(rootBody), map[uint]any{}, nil,
-	})
-	require.NoError(t, err)
-	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
-	require.NoError(t, err)
-	dijkstraTx := tx.(*dijkstra.DijkstraTransaction)
-	childHash := dijkstraTx.Body.TxSubTransactions.Items()[0].Body.Id()
-	rootHash := tx.Hash()
-	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber:  1,
-					Slot:         1000,
-					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
-				},
-			},
-		},
-		BlockBody: dijkstra.DijkstraBlockBody{
-			Transactions: []dijkstra.DijkstraTransaction{*dijkstraTx},
-		},
-	}
-	blockBodyCbor, err := block.BlockBody.MarshalCBOR()
-	require.NoError(t, err)
-	block.BlockHeader.Body.BlockBodySize = uint64(len(blockBodyCbor))
-	blockCbor, err := block.MarshalCBOR()
-	require.NoError(t, err)
-	block.SetCbor(blockCbor)
-	point := ocommon.Point{
-		Slot: 1000,
-		Hash: bytes.Repeat([]byte{0x26}, 32),
-	}
-	require.NoError(t, db.BlockCreate(models.Block{
-		Slot:   point.Slot,
-		Hash:   point.Hash,
-		Number: 1,
-		Cbor:   blockCbor,
-		Type:   uint(block.Type()),
+		nil,
+	))
+	proposalHash := bytes.Repeat([]byte{0xB8}, 32)
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    stakeCredential,
+		CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		Drep:          drepCredential,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     950,
+		CreatedSlot:   950,
+		Active:        true,
 	}, nil))
-	offsets, err := database.NewBlockIndexer(point.Slot, point.Hash).ComputeOffsets(
-		blockCbor,
-		block,
-	)
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
+		TxHash:        proposalHash,
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 100,
+		ExpiresEpoch:  120,
+		AddedSlot:     900,
+	}, nil))
+	proposal, err := db.GetGovernanceProposal(context.Background(), proposalHash, 0, nil)
 	require.NoError(t, err)
-	pparams := &dijkstra.DijkstraProtocolParameters{
-		ConwayProtocolParameters: conway.ConwayProtocolParameters{
-			GovActionValidityPeriod: 20,
-			DRepInactivityPeriod:    20,
+	require.NotNil(t, proposal)
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+		ProposalID:         proposal.ID,
+		VoterType:          uint8(models.VoterTypeDRep),
+		VoterCredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		VoterCredential:    drepCredential,
+		Vote:               uint8(models.VoteYes),
+		AddedSlot:          900,
+	}, nil))
+
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], drepCredential)
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithCertificates(&lcommon.DeregistrationDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: credentialHash,
+		},
+	})
+	tx.WithValid(true)
+	pparams := mockledger.NewMockConwayProtocolParams()
+
+	point := ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32))
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot:  point.Slot,
+				BlockHash:  blockHash,
+				ByteLength: 1,
+			},
 		},
 	}
 	acc := db.NewBatchAccumulator()
 	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := backfill.processBlockTxsBatched(
-			context.Background(),
-			[]lcommon.Transaction{tx},
+		if err := backfill.processBlockTxsBatched(context.Background(), []lcommon.Transaction{tx},
 			point,
-			12,
-			dijkstra.EraIdDijkstra,
-			pparams,
+			100,
+			eras.ConwayEraDesc.Id,
+			&pparams,
 			offsets,
 			acc,
 			txn,
 			nil,
-			true,
+			false,
 		); err != nil {
 			return err
 		}
 		return db.FlushBatch(acc, txn)
 	}))
 
-	childRow, err := db.Metadata().GetTransactionByHash(childHash.Bytes(), nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
-	require.Equal(t, uint32(0), childRow.BlockIndex)
-	rootRow, err := db.Metadata().GetTransactionByHash(rootHash.Bytes(), nil)
-	require.NoError(t, err)
-	require.Equal(t, uint32(1), rootRow.BlockIndex)
-	childUtxo, err := db.Metadata().GetUtxo(childHash.Bytes(), 0, nil)
-	require.NoError(t, err)
-	require.NotNil(t, childUtxo)
-	rootUtxo, err := db.Metadata().GetUtxo(rootHash.Bytes(), 0, nil)
-	require.NoError(t, err)
-	require.Nil(t, rootUtxo)
-	proposalRow, err := db.GetGovernanceProposal(
-		context.Background(),
-		childHash.Bytes(),
-		0,
+	require.Empty(t, votes, "backfill must apply DRep deregistration cleanup")
+	account, err := db.GetAccountByCredential(context.Background(), uint8(lcommon.CredentialTypeAddrKeyHash),
+		stakeCredential,
+		true,
 		nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, childHash.Bytes(), proposalRow.TxHash)
+	require.NotNil(t, account)
+	assert.Nil(t, account.Drep, "backfill must clear deregistered DRep delegations")
 }
 
-// Backfill replays history that the imported snapshot's account balances
-// already include, so a direct deposit in a replayed body must not credit the
-// account a second time.
-func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
+// Replay reads Conway parameters only for proposals (action lifetime) and
+// votes. A transaction that only registers or deregisters DReps applies while
+// no parameters are available; one that reads them must still fail.
+func TestBackfillProcessBlockGovernanceLevelWithoutConwayParameters(
 	t *testing.T,
 ) {
 	t.Parallel()
-	db := newTestDB(t)
-	backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	stakeKey := bytes.Repeat([]byte{0x42}, 28)
-	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
-		StakingKey:    stakeKey,
-		CredentialTag: 0,
-		AddedSlot:     1,
-		Reward:        5,
-		Active:        true,
-	}))
-	body, err := cbor.Encode(map[uint]any{
-		0: []any{},
-		1: []any{},
-		2: uint64(0),
-		25: map[cbor.ByteString]uint64{
-			cbor.NewByteString(append([]byte{0xe0}, stakeKey...)): 20,
-		},
-	})
-	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{
-		cbor.RawMessage(body), map[uint]any{}, nil,
-	})
-	require.NoError(t, err)
-	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
-	require.NoError(t, err)
-	dijkstraTx := tx.(*dijkstra.DijkstraTransaction)
-	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber:  1,
-					Slot:         1000,
-					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
-				},
+
+	drepCredential := bytes.Repeat([]byte{0xA1}, lcommon.Blake2b224Size)
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], drepCredential)
+	deregistration := func() lcommon.Transaction {
+		tx := mockledger.NewTransactionBuilder()
+		tx.WithId(bytes.Repeat([]byte{0xA2}, lcommon.Blake2b256Size))
+		tx.WithCertificates(&lcommon.DeregistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: credentialHash,
 			},
-		},
-		BlockBody: dijkstra.DijkstraBlockBody{
-			Transactions: []dijkstra.DijkstraTransaction{*dijkstraTx},
-		},
+		})
+		tx.WithValid(true)
+		return tx
 	}
-	blockBodyCbor, err := block.BlockBody.MarshalCBOR()
+	proposal := func() lcommon.Transaction {
+		rewardAddress, err := lcommon.NewAddressFromBytes(
+			append([]byte{0xE1}, bytes.Repeat([]byte{0xA6}, lcommon.Blake2b224Size)...),
+		)
+		require.NoError(t, err)
+		tx := mockledger.NewTransactionBuilder()
+		tx.WithId(bytes.Repeat([]byte{0xA3}, lcommon.Blake2b256Size))
+		tx.WithProposalProcedures(conway.ConwayProposalProcedure{
+			PPDeposit:       1,
+			PPRewardAccount: rewardAddress,
+			PPGovAction: conway.ConwayGovAction{
+				Type:   uint(lcommon.GovActionTypeInfo),
+				Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)},
+			},
+			PPAnchor: lcommon.GovAnchor{
+				Url:      "https://example.com/no-params",
+				DataHash: [32]byte{0xA7},
+			},
+		})
+		tx.WithValid(true)
+		return tx
+	}
+	point := ocommon.NewPoint(1000, bytes.Repeat([]byte{0xA4}, 32))
+
+	for _, test := range []struct {
+		name    string
+		tx      func() lcommon.Transaction
+		wantErr string
+	}{
+		{name: "deregistration only", tx: deregistration},
+		{
+			name:    "proposal",
+			tx:      proposal,
+			wantErr: "missing Conway protocol parameters",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			backfill := NewBackfill(db, nil, slog.Default())
+			require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+				CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+				Credential:    drepCredential,
+				AddedSlot:     900,
+				Active:        true,
+			}))
+			require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
+				TxHash:        bytes.Repeat([]byte{0xA5}, 32),
+				ActionType:    uint8(lcommon.GovActionTypeInfo),
+				ProposedEpoch: 100,
+				ExpiresEpoch:  120,
+				AddedSlot:     900,
+			},
+				nil,
+			))
+			proposal, err := db.GetGovernanceProposal(context.Background(), bytes.Repeat([]byte{0xA5}, 32), 0, nil)
+			require.NoError(t, err)
+			require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+				ProposalID:         proposal.ID,
+				VoterType:          uint8(models.VoterTypeDRep),
+				VoterCredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+				VoterCredential:    drepCredential,
+				Vote:               uint8(models.VoteYes),
+				AddedSlot:          900,
+			}, nil))
+			txn := db.Transaction(context.Background(), true)
+			defer txn.Release()
+			err = backfill.processBlockGovernanceLevel(context.Background(), test.tx(), point, 0, 100, nil, txn)
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.NoError(t, txn.Commit())
+			votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
+			require.NoError(t, err)
+			assert.Empty(t, votes)
+		})
+	}
+}
+
+func TestBackfillTransactionsUseBabbageProtocolMajorForDRepCertificates(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	drepOne := bytes.Repeat([]byte{0x71}, lcommon.Blake2b224Size)
+	drepTwo := bytes.Repeat([]byte{0x72}, lcommon.Blake2b224Size)
+	stakeCredential := bytes.Repeat([]byte{0x73}, lcommon.Blake2b224Size)
+	for _, credential := range [][]byte{drepOne, drepTwo} {
+		require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+			CredentialTag: 0,
+			Credential:    credential,
+			AddedSlot:     1,
+			Active:        true,
+		}))
+	}
+	delegation := func(id byte, drep []byte) lcommon.Transaction {
+		credentialHash := lcommon.NewBlake2b224(stakeCredential)
+		tx := mockledger.NewTransactionBuilder().WithCertificates(
+			&lcommon.VoteDelegationCertificate{
+				CertType:        uint(lcommon.CertificateTypeVoteDelegation),
+				StakeCredential: lcommon.Credential{CredType: 0, Credential: credentialHash},
+				Drep:            lcommon.Drep{Type: lcommon.DrepTypeAddrKeyHash, Credential: drep},
+			},
+		)
+		tx.WithId(bytes.Repeat([]byte{id}, lcommon.Blake2b256Size))
+		tx.WithValid(true)
+		return tx
+	}
+	first := delegation(0x74, drepOne)
+	move := delegation(0x75, drepTwo)
+	credentialHash := lcommon.NewBlake2b224(drepOne)
+	deregistration := mockledger.NewTransactionBuilder().WithCertificates(
+		&lcommon.DeregistrationDrepCertificate{
+			CertType:       uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{CredType: 0, Credential: credentialHash},
+			Amount:         500,
+		},
+	)
+	deregistration.WithId(bytes.Repeat([]byte{0x76}, lcommon.Blake2b256Size))
+	deregistration.WithValid(true)
+	txs := []lcommon.Transaction{first, move, deregistration}
+	point := ocommon.Point{
+		Slot: 1000,
+		Hash: bytes.Repeat([]byte{0x77}, lcommon.Blake2b256Size),
+	}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	txOffsets := make(map[[32]byte]database.CborOffset, len(txs))
+	for i, tx := range txs {
+		var txHash [32]byte
+		copy(txHash[:], tx.Hash().Bytes())
+		txOffsets[txHash] = database.CborOffset{
+			BlockSlot:  point.Slot,
+			BlockHash:  blockHash,
+			ByteOffset: uint32(i),
+			ByteLength: 1,
+		}
+	}
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Release()
+	pparams := &babbage.BabbageProtocolParameters{ProtocolMajor: 9}
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(context.Background(),
+			txs,
+			point,
+			100,
+			babbage.EraIdBabbage,
+			pparams,
+			&database.BlockIngestionResult{
+				TxOffsets:   txOffsets,
+				UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+			},
+			acc,
+			txn,
+			nil,
+			false,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeCredential, true, nil)
 	require.NoError(t, err)
-	block.BlockHeader.Body.BlockBodySize = uint64(len(blockBodyCbor))
-	blockCbor, err := block.MarshalCBOR()
-	require.NoError(t, err)
-	block.SetCbor(blockCbor)
-	point := ocommon.Point{Slot: 1000, Hash: bytes.Repeat([]byte{0x26}, 32)}
-	require.NoError(t, db.BlockCreate(models.Block{
-		Slot:   point.Slot,
-		Hash:   point.Hash,
-		Number: 1,
-		Cbor:   blockCbor,
-		Type:   uint(block.Type()),
-	}, nil))
-	offsets, err := database.NewBlockIndexer(point.Slot, point.Hash).ComputeOffsets(
-		blockCbor,
-		block,
+	require.NotNil(t, account)
+	require.Nil(t, account.Drep, "PV9 DRep deregistration clears the stale reverse delegation")
+}
+
+func TestBackfillKeepsImportedDormancyAndExpiryForHistoricalDRepRegistration(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	drepCredential := bytes.Repeat([]byte{0x79}, lcommon.Blake2b224Size)
+	require.NoError(t, db.SetImportedDormantDRepEpochs(context.Background(), 3, nil))
+
+	pparams := &conway.ConwayProtocolParameters{
+		ProtocolVersion:         lcommon.ProtocolParametersProtocolVersion{Major: 9},
+		DRepDeposit:             500,
+		DRepInactivityPeriod:    20,
+		GovActionValidityPeriod: 20,
+	}
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, bytes.Repeat([]byte{0x7A}, lcommon.Blake2b224Size)...),
 	)
 	require.NoError(t, err)
+	var anchorHash [32]byte
+	copy(anchorHash[:], bytes.Repeat([]byte{0x7B}, lcommon.Blake2b256Size))
+	proposal := conway.ConwayProposalProcedure{
+		PPDeposit:       1,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: conway.ConwayGovAction{
+			Type:   uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)},
+		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.com/backfill-dormancy",
+			DataHash: anchorHash,
+		},
+	}
+	credentialHash := lcommon.NewBlake2b224(drepCredential)
+	tx := mockledger.NewTransactionBuilder().WithCertificates(
+		&lcommon.RegistrationDrepCertificate{
+			CertType:       uint(lcommon.CertificateTypeRegistrationDrep),
+			DrepCredential: lcommon.Credential{CredType: 0, Credential: credentialHash},
+			Amount:         500,
+		},
+	)
+	tx.WithId(bytes.Repeat([]byte{0x7C}, lcommon.Blake2b256Size))
+	tx.WithType(gledger.TxTypeConway)
+	tx.WithValid(true)
+	tx.WithProposalProcedures(proposal)
+	point := ocommon.Point{
+		Slot: 100,
+		Hash: bytes.Repeat([]byte{0x7D}, lcommon.Blake2b256Size),
+	}
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
 	acc := db.NewBatchAccumulator()
 	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
@@ -571,26 +726,34 @@ func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
 		if err := backfill.processBlockTxsBatched(context.Background(),
 			[]lcommon.Transaction{tx},
 			point,
-			12,
-			dijkstra.EraIdDijkstra,
-			&dijkstra.DijkstraProtocolParameters{},
-			offsets,
+			100,
+			uint(conway.EraIdConway),
+			pparams,
+			&database.BlockIngestionResult{
+				TxOffsets: map[[32]byte]database.CborOffset{
+					txHash: {BlockSlot: point.Slot, BlockHash: blockHash, ByteLength: 1},
+				},
+				UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+			},
 			acc,
 			txn,
 			nil,
-			true,
+			false,
 		); err != nil {
 			return err
 		}
 		return db.FlushBatch(acc, txn)
 	}))
-	account, err := db.GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(5), uint64(account.Reward))
-}
 
-func closeTestDB(db *database.Database) error {
-	return dbtest.CloseDatabase(db)
+	drep, err := db.GetDrepByCredential(context.Background(), 0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
+	// Replay below the anchor neither resets the imported dormancy counter nor
+	// recomputes the expiry the snapshot recorded.
+	dormantEpochs, err := db.GetDormantDRepEpochs(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), dormantEpochs)
 }
 
 func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
@@ -1017,7 +1180,11 @@ func testRun_RestoresSnapshotAccountDelegationAtAnchor(
 		ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x76}, 32)},
 		0,
 		eras.ConwayEraDesc.Id,
-		nil,
+		&conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 10,
+			},
+		},
 		&database.BlockIngestionResult{
 			TxOffsets: map[[32]byte]database.CborOffset{
 				txHash: {BlockSlot: 1, ByteLength: 1},
@@ -1789,11 +1956,8 @@ func TestBackfill_AutoDetectsImmutableUtxoOffsetsTip(t *testing.T) {
 	assert.True(t, bf.immutableUtxoOffsetsTipSet)
 }
 
-// TestBackfill_ExplicitZeroOverridesAutoDetect pins the override semantics:
-// SetImmutableUtxoOffsetsTipSlot(0) is documented as disabling
-// the optimisation. The override bit must beat auto-detection so callers
-// that intentionally need offset repair below the immutable-copy tip cannot
-// have the optimisation silently re-enabled behind their back.
+// TestBackfill_ExplicitZeroOverridesAutoDetect verifies that an explicit zero
+// disables immutable-offset skipping even when the database has a stored tip.
 func TestBackfill_ExplicitZeroOverridesAutoDetect(t *testing.T) {
 	t.Parallel()
 
@@ -1887,4 +2051,218 @@ func TestRun_CancelledContext_WithBlocks(t *testing.T) {
 		"Run should return error on cancelled context with blocks",
 	)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xe0}, bytes.Repeat([]byte{0x42}, 28)...),
+	)
+	require.NoError(t, err)
+	proposal := dijkstra.DijkstraProposalProcedure{
+		PPDeposit:       42,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: dijkstra.DijkstraGovAction{
+			Type: uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{
+				Type: uint(lcommon.GovActionTypeInfo),
+			},
+		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.invalid/dijkstra-backfill-child",
+			DataHash: [32]byte(bytes.Repeat([]byte{0x24}, 32)),
+		},
+	}
+	proposalCbor, err := cbor.Encode(proposal)
+	require.NoError(t, err)
+	childBody, err := cbor.Encode(map[uint]any{
+		0:  []any{},
+		1:  []any{map[uint]any{0: append([]byte{0x60}, bytes.Repeat([]byte{0x25}, 28)...), 1: uint64(1_000_000)}},
+		20: []cbor.RawMessage{proposalCbor},
+	})
+	require.NoError(t, err)
+	childTx, err := cbor.Encode([]any{
+		cbor.RawMessage(childBody), map[uint]any{}, nil,
+	})
+	require.NoError(t, err)
+	rootBody, err := cbor.Encode(map[uint]any{
+		0:  []any{},
+		1:  []any{},
+		2:  uint64(0),
+		23: cbor.NewSetType([]cbor.RawMessage{childTx}, true),
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(rootBody), map[uint]any{}, nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	dijkstraTx := tx.(*dijkstra.DijkstraTransaction)
+	childHash := dijkstraTx.Body.TxSubTransactions.Items()[0].Body.Id()
+	rootHash := tx.Hash()
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber:  1,
+					Slot:         1000,
+					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
+				},
+			},
+		},
+		BlockBody: dijkstra.DijkstraBlockBody{
+			Transactions: []dijkstra.DijkstraTransaction{*dijkstraTx},
+		},
+	}
+	blockBodyCbor, err := block.BlockBody.MarshalCBOR()
+	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodySize = uint64(len(blockBodyCbor))
+	blockCbor, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	block.SetCbor(blockCbor)
+	point := ocommon.Point{
+		Slot: 1000,
+		Hash: bytes.Repeat([]byte{0x26}, 32),
+	}
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot:   point.Slot,
+		Hash:   point.Hash,
+		Number: 1,
+		Cbor:   blockCbor,
+		Type:   uint(block.Type()),
+	}, nil))
+	offsets, err := database.NewBlockIndexer(point.Slot, point.Hash).ComputeOffsets(
+		blockCbor,
+		block,
+	)
+	require.NoError(t, err)
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			GovActionValidityPeriod: 20,
+			DRepInactivityPeriod:    20,
+		},
+	}
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(context.Background(), []lcommon.Transaction{tx},
+			point,
+			12,
+			dijkstra.EraIdDijkstra,
+			pparams,
+			offsets,
+			acc,
+			txn,
+			nil,
+			true,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+
+	childRow, err := db.Metadata().GetTransactionByHash(childHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), childRow.BlockIndex)
+	rootRow, err := db.Metadata().GetTransactionByHash(rootHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), rootRow.BlockIndex)
+	childUtxo, err := db.Metadata().GetUtxo(childHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, childUtxo)
+	rootUtxo, err := db.Metadata().GetUtxo(rootHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, rootUtxo)
+	proposalRow, err := db.GetGovernanceProposal(context.Background(), childHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, childHash.Bytes(), proposalRow.TxHash)
+}
+
+// Backfill replays history that the imported snapshot's account balances
+// already include, so a direct deposit in a replayed body must not credit the
+// account a second time.
+func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	stakeKey := bytes.Repeat([]byte{0x42}, 28)
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		AddedSlot:     1,
+		Reward:        5,
+		Active:        true,
+	}))
+	body, err := cbor.Encode(map[uint]any{
+		0: []any{},
+		1: []any{},
+		2: uint64(0),
+		25: map[cbor.ByteString]uint64{
+			cbor.NewByteString(append([]byte{0xe0}, stakeKey...)): 20,
+		},
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(body), map[uint]any{}, nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	dijkstraTx := tx.(*dijkstra.DijkstraTransaction)
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber:  1,
+					Slot:         1000,
+					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
+				},
+			},
+		},
+		BlockBody: dijkstra.DijkstraBlockBody{
+			Transactions: []dijkstra.DijkstraTransaction{*dijkstraTx},
+		},
+	}
+	blockBodyCbor, err := block.BlockBody.MarshalCBOR()
+	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodySize = uint64(len(blockBodyCbor))
+	blockCbor, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	block.SetCbor(blockCbor)
+	point := ocommon.Point{Slot: 1000, Hash: bytes.Repeat([]byte{0x26}, 32)}
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: point.Slot, Hash: point.Hash, Number: 1, Cbor: blockCbor,
+		Type: uint(block.Type()),
+	}, nil))
+	offsets, err := database.NewBlockIndexer(point.Slot, point.Hash).ComputeOffsets(
+		blockCbor,
+		block,
+	)
+	require.NoError(t, err)
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(context.Background(), []lcommon.Transaction{tx}, point, 12, dijkstra.EraIdDijkstra,
+			&dijkstra.DijkstraProtocolParameters{}, offsets, acc, txn, nil, true,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(5), uint64(account.Reward))
+}
+
+func closeTestDB(db *database.Database) error {
+	return dbtest.CloseDatabase(db)
 }

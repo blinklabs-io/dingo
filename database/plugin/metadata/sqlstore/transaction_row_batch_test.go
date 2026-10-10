@@ -126,7 +126,7 @@ func TestBatchedWitnessRowsAreFlushedAsOneMultiRowInsert(t *testing.T) {
 	for seed := byte(1); seed <= 3; seed++ {
 		tx, point := witnessTx(t, seed, 2)
 		require.NoError(t, store.SetTransactionBatchedHistorical(
-			tx, point, 0, nil, true, true, acc, txn,
+			tx, point, 0, nil, true, true, acc, txn, 0,
 		))
 	}
 	require.Zero(
@@ -160,7 +160,7 @@ func TestBatchedWitnessRowsReplacePendingRowsOfSameTransaction(t *testing.T) {
 	for range 2 {
 		tx, point := witnessTx(t, 7, 2)
 		require.NoError(t, store.SetTransactionBatchedHistorical(
-			tx, point, 0, nil, true, true, acc, txn,
+			tx, point, 0, nil, true, true, acc, txn, 0,
 		))
 	}
 	require.NoError(t, store.FlushBatch(acc, txn))
@@ -181,7 +181,7 @@ func TestBatchedWitnessRowsReplaceFlushedRowsOfSameTransaction(t *testing.T) {
 	for range 2 {
 		tx, point := witnessTx(t, 9, 3)
 		require.NoError(t, store.SetTransactionBatchedHistorical(
-			tx, point, 0, nil, true, true, acc, txn,
+			tx, point, 0, nil, true, true, acc, txn, 0,
 		))
 		require.NoError(t, store.FlushBatch(acc, txn))
 	}
@@ -200,7 +200,7 @@ func TestBatchAccumulatorResetDropsQueuedWitnessRows(t *testing.T) {
 
 	tx, point := witnessTx(t, 5, 2)
 	require.NoError(t, store.SetTransactionBatchedHistorical(
-		tx, point, 0, nil, true, true, acc, txn,
+		tx, point, 0, nil, true, true, acc, txn, 0,
 	))
 	acc.Reset()
 	require.NoError(t, store.FlushBatch(acc, txn))
@@ -285,7 +285,7 @@ func TestBatchedWitnessRowsReplacePendingRowsOfEveryShape(t *testing.T) {
 	t.Cleanup(func() { _ = immediateTxn.Rollback() })
 	tx, point := allShapesWitnessTx(t, 11)
 	require.NoError(t, immediate.SetTransaction(
-		tx, point, 0, nil, true, immediateTxn,
+		tx, point, 0, nil, true, immediateTxn, 0,
 	))
 	require.Equal(t, want, witnessTableCounts(t, immediate, immediateTxn))
 
@@ -297,7 +297,7 @@ func TestBatchedWitnessRowsReplacePendingRowsOfEveryShape(t *testing.T) {
 	for range 2 {
 		tx, point := allShapesWitnessTx(t, 11)
 		require.NoError(t, store.SetTransactionBatchedHistorical(
-			tx, point, 0, nil, true, true, acc, txn,
+			tx, point, 0, nil, true, true, acc, txn, 0,
 		))
 	}
 	require.NoError(t, store.FlushBatch(acc, txn))
@@ -383,6 +383,7 @@ INSERT INTO utxo (
 		nil,
 		true,
 		txn,
+		0,
 	))
 	require.NoError(t, txn.Commit())
 
@@ -471,7 +472,7 @@ func TestBatchedAPIDetailRowsWaitForFlush(t *testing.T) {
 	t.Cleanup(func() { _ = immediateTxn.Rollback() })
 	tx, point := apiDetailTx(t, 21)
 	require.NoError(t, immediate.SetTransaction(
-		tx, point, 0, nil, true, immediateTxn,
+		tx, point, 0, nil, true, immediateTxn, 0,
 	))
 	want := tableCounts(t, immediate, immediateTxn, tables...)
 	require.Equal(t, map[string]int{
@@ -486,7 +487,7 @@ func TestBatchedAPIDetailRowsWaitForFlush(t *testing.T) {
 	for range 2 {
 		tx, point := apiDetailTx(t, 21)
 		require.NoError(t, store.SetTransactionBatchedHistorical(
-			tx, point, 0, nil, true, true, acc, txn,
+			tx, point, 0, nil, true, true, acc, txn, 0,
 		))
 	}
 	require.Equal(t, map[string]int{
@@ -512,7 +513,7 @@ func TestBatchedProducedAssetRowsWaitForFlush(t *testing.T) {
 	for seed := byte(1); seed <= 3; seed++ {
 		tx, point, policyID, name := assetOutputTx(t, seed)
 		require.NoError(t, store.SetTransactionBatchedHistorical(
-			tx, point, 0, nil, true, true, acc, txn,
+			tx, point, 0, nil, true, true, acc, txn, 0,
 		))
 		assets = append(assets, assetRef{policyID: policyID, name: name})
 	}
@@ -643,6 +644,7 @@ INSERT INTO reward_live_stake (
 			true,
 			acc,
 			txn,
+			0,
 		))
 	}
 
@@ -720,6 +722,7 @@ func TestFlushBatchAppliesCoalescedStakeDeltas(t *testing.T) {
 			true,
 			acc,
 			txn,
+			0,
 		))
 	}
 	batched, ok := acc.(*transactionBatchAccumulator)
@@ -789,7 +792,7 @@ VALUES (?, 0, 1, 5, ?, '1')`,
 	)
 	require.NoError(t, err)
 	err = store.SetTransactionBatchedHistorical(
-		tx, point, 0, nil, true, true, acc, nil,
+		tx, point, 0, nil, true, true, acc, nil, 0,
 	)
 	require.ErrorIs(t, err, types.ErrUtxoConflict)
 
@@ -813,7 +816,7 @@ func TestRowBatchFlushSplitsAtParameterLimit(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	tx, point := witnessTx(t, 25, 0)
-	require.NoError(t, store.SetTransaction(tx, point, 0, nil, true, txn))
+	require.NoError(t, store.SetTransaction(tx, point, 0, nil, true, txn, 0))
 	db, ctx, err := store.dbFromTxn(txn)
 	require.NoError(t, err)
 	var transactionID int64
@@ -1000,11 +1003,11 @@ func TestBatchedRowsRestoreQueueOnCallerRollback(t *testing.T) {
 	acc := store.NewBatchAccumulator()
 	defer acc.Reset()
 	retained, point := witnessTx(t, 7, 2)
-	require.NoError(t, store.SetTransactionBatchedHistorical(retained, point, 0, nil, true, true, acc, nil))
+	require.NoError(t, store.SetTransactionBatchedHistorical(retained, point, 0, nil, true, true, acc, nil, 0))
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	discarded, point := witnessTx(t, 9, 3)
-	require.NoError(t, store.SetTransactionBatchedHistorical(discarded, point, 0, nil, true, true, acc, txn))
+	require.NoError(t, store.SetTransactionBatchedHistorical(discarded, point, 0, nil, true, true, acc, txn, 0))
 	require.NoError(t, txn.Rollback())
 	require.NoError(t, store.FlushBatch(acc, nil))
 	require.Equal(t, 2, keyWitnessCount(t, store, nil))
@@ -1018,10 +1021,10 @@ func TestBatchedRowsRestoreQueueOnSavepointRollback(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
 	retained, point := witnessTx(t, 7, 2)
-	require.NoError(t, store.SetTransactionBatchedHistorical(retained, point, 0, nil, true, true, acc, txn))
+	require.NoError(t, store.SetTransactionBatchedHistorical(retained, point, 0, nil, true, true, acc, txn, 0))
 	require.NoError(t, txn.(*sqlTxn).SavePoint("retained"))
 	discarded, point := witnessTx(t, 9, 3)
-	require.NoError(t, store.SetTransactionBatchedHistorical(discarded, point, 0, nil, true, true, acc, txn))
+	require.NoError(t, store.SetTransactionBatchedHistorical(discarded, point, 0, nil, true, true, acc, txn, 0))
 	require.NoError(t, txn.(*sqlTxn).RollbackTo("retained"))
 	require.NoError(t, store.FlushBatch(acc, txn))
 	require.Equal(t, 2, keyWitnessCount(t, store, txn))
@@ -1036,7 +1039,7 @@ func TestBatchedRowsResetOnRollbackBeforeFirstSavepointBinding(t *testing.T) {
 	t.Cleanup(func() { _ = txn.Rollback() })
 	require.NoError(t, txn.(*sqlTxn).SavePoint("empty"))
 	discarded, point := witnessTx(t, 9, 3)
-	require.NoError(t, store.SetTransactionBatchedHistorical(discarded, point, 0, nil, true, true, acc, txn))
+	require.NoError(t, store.SetTransactionBatchedHistorical(discarded, point, 0, nil, true, true, acc, txn, 0))
 	require.NoError(t, txn.(*sqlTxn).RollbackTo("empty"))
 	require.NoError(t, store.FlushBatch(acc, txn))
 	require.Zero(t, keyWitnessCount(t, store, txn))
