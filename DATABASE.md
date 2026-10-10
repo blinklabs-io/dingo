@@ -3883,6 +3883,17 @@ bounded Go-side pass over account/reward-delta rows, keyed by credential, and
 adds it once while folding live UTxO rows. This keeps decimal `uint64` values
 exact and avoids multiplication across the UTxO join fan-out.
 
+Each batch reads `account_reward_delta` with a credential predicate grouped
+per `credential_tag` into one `staking_key IN (...)` list, and resolves the
+Leios context slot (`COALESCE(lc.slot, d.added_slot)`) through `LEFT JOIN`s on
+the unique `transaction.hash` and the `leios_transaction_context` primary key,
+so each delta row joins at most one context row. The credit query filters
+`NOT d.withdrawal` rather than `withdrawal = FALSE`: SQLite never uses an index
+for a negated column, so without `sqlite_stat1`, the state of a from-genesis
+sync, the planner drives from `idx_account_reward_delta_credential` instead of
+`idx_account_reward_delta_withdrawal`, which matches nearly every row. The
+withdrawal query keeps `withdrawal = TRUE`, which that index serves well.
+
 `utxo.amount`, `account.reward`, and the reward-delta amounts are stored as text
 (`types.Uint64`) on postgres and mysql, so each is cast to the backend's native
 integer type before arithmetic (`INTEGER` on sqlite, `BIGINT` on postgres,
