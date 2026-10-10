@@ -778,16 +778,36 @@ func (o *Ouroboros) enqueueLeiosRelayOffers(
 	o.leiosMu.Unlock()
 }
 
-// markLeiosEndorserBlockRelayOffer records that a peer offered an occurrence
-// already present in cache. This handles the common case where chain sync
-// completed the EB before its separate LeiosNotify offers arrived.
+// markLeiosEndorserBlockRelayOffer records that a peer offered an occurrence.
+// An intent-only entry preserves an offer that arrives before the manifest;
+// it shares the cache's entry and TTL bounds and is merged by a later store.
 func (o *Ouroboros) markLeiosEndorserBlockRelayOffer(
 	point ocommon.Point,
 ) {
+	if len(point.Hash) != lcommon.Blake2b256Size {
+		return
+	}
 	key := leiosBlockKey(point.Slot, point.Hash)
 	o.leiosMu.Lock()
+	if o.leiosEndorserBlocks == nil {
+		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
+	}
+	now := time.Now()
+	o.pruneLeiosEndorserBlockCacheLocked(now)
 	current := o.leiosEndorserBlocks[key]
 	if current == nil {
+		o.leiosEndorserBlockSeq++
+		o.leiosEndorserBlocks[key] = &leiosEndorserBlockData{
+			point: ocommon.Point{
+				Slot: point.Slot,
+				Hash: slices.Clone(point.Hash),
+			},
+			cacheKeys:           []string{key},
+			insertedAt:          now,
+			relayOfferRequested: true,
+			seq:                 o.leiosEndorserBlockSeq,
+		}
+		o.pruneLeiosEndorserBlockCacheLocked(now)
 		o.leiosMu.Unlock()
 		return
 	}
@@ -1176,7 +1196,11 @@ func (o *Ouroboros) leiosDatabase() *database.Database {
 }
 
 func (data *leiosEndorserBlockData) completeTxCache() bool {
-	return data != nil && len(data.txsRaw) == data.txCount
+	return data != nil && data.hasManifest() && len(data.txsRaw) == data.txCount
+}
+
+func (data *leiosEndorserBlockData) hasManifest() bool {
+	return data != nil && len(data.blockRaw) > 0
 }
 
 // approxBytes estimates the memory retained by one cache entry: the manifest
@@ -1466,7 +1490,7 @@ func (o *Ouroboros) lookupLeiosEndorserBlock(
 	now := time.Now()
 	o.leiosMu.RLock()
 	data, ok := o.leiosEndorserBlocks[key]
-	if !ok || data == nil {
+	if !ok || data == nil || !data.hasManifest() {
 		o.leiosMu.RUnlock()
 		// Memory cache miss: try the persistent blob store so we can serve
 		// historical EBs whose in-memory TTL has elapsed.
@@ -1480,7 +1504,7 @@ func (o *Ouroboros) lookupLeiosEndorserBlock(
 
 	o.leiosMu.Lock()
 	data, ok = o.leiosEndorserBlocks[key]
-	if !ok || data == nil {
+	if !ok || data == nil || !data.hasManifest() {
 		o.leiosMu.Unlock()
 		return o.loadLeiosEBFromDB(slot, hash)
 	}
@@ -1603,7 +1627,10 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 	}
 	// Only cache if no fresher entry has appeared while we were loading.
 	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing == nil ||
-		existing.expired(time.Now()) {
+		existing.expired(time.Now()) || !existing.hasManifest() {
+		if existing != nil {
+			data.relayOfferRequested = existing.relayOfferRequested
+		}
 		o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 		o.leiosEndorserBlockSeq++
 		data.seq = o.leiosEndorserBlockSeq
@@ -1619,6 +1646,7 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		data = existing
 	}
 	o.leiosMu.Unlock()
+	o.enqueueLeiosRelayOffers(data.point, data)
 	return data, true
 }
 

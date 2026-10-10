@@ -1083,6 +1083,133 @@ func TestLeiosTxsOfferOtherPathCompletionRelaysTransactionsOnce(t *testing.T) {
 	require.Equal(t, 1, txOffers)
 }
 
+func TestLeiosTxsOfferCacheMissIntentSurvivesOwnerCancellation(t *testing.T) {
+	t.Parallel()
+	tx, ref := testLeiosManifestTx(t, 0x62)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(471, lcommon.Blake2b256Hash(manifestRaw).Bytes())
+	conn, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
+	t.Cleanup(func() { _ = conn.Close() })
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	require.True(t, cm.AddConnection(conn, false, "cache-miss-owner"))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm, EnableLeios: true, EnableLeiosTxFetch: true,
+	})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	o.leiosEBLog.registerConn("observer", nil, nil)
+	guard := o.leiosFetchGuardFor(conn.Id())
+	guard.mu.Lock()
+	var unlockOnce sync.Once
+	unlock := func() { unlockOnce.Do(guard.mu.Unlock) }
+	t.Cleanup(unlock)
+	ownerDone := make(chan any)
+	require.NoError(t, o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{
+			ConnectionId: conn.Id(), ConnectionDoneChan: ownerDone,
+		},
+		oleiosnotify.NewMsgBlockTxsOffer(point),
+	))
+	close(ownerDone)
+	require.Eventually(t, func() bool {
+		o.leiosTxFetchClaimsMu.Lock()
+		defer o.leiosTxFetchClaimsMu.Unlock()
+		return o.leiosTxFetchClaims[leiosBlockKey(point.Slot, point.Hash)] == nil
+	}, 2*time.Second, 10*time.Millisecond,
+		"canceled owner must release the exact-point claim")
+	_, found := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.False(t, found, "relay intent alone must not appear as a manifest")
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point, manifestRaw, []cbor.RawMessage{tx}, leiosStoreAuthoritative,
+	))
+	unlock()
+	require.Eventually(t, func() bool {
+		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		return ok && data.relayTransactionsOffered && guard.inflight.Load() == 0
+	}, 2*time.Second, 10*time.Millisecond)
+	o.leiosEBLog.mu.Lock()
+	defer o.leiosEBLog.mu.Unlock()
+	txOffers := 0
+	for _, entry := range o.leiosEBLog.items {
+		if entry.txOffer != nil && entry.txOffer.Slot == point.Slot &&
+			bytes.Equal(entry.txOffer.Hash, point.Hash) {
+			txOffers++
+		}
+	}
+	require.Equal(t, 1, txOffers,
+		"alternate completion must publish the retained transaction offer once")
+}
+
+func TestLeiosRelayOfferIntentCacheIsBounded(t *testing.T) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	invalid := ocommon.NewPoint(1, make([]byte, lcommon.Blake2b256Size+1))
+	o.markLeiosEndorserBlockRelayOffer(invalid)
+	require.Nil(t, o.leiosEndorserBlocks[leiosBlockKey(invalid.Slot, invalid.Hash)], "an invalid hash length must not retain relay intent")
+	points := make([]ocommon.Point, leiosEndorserBlockCacheMaxEntries+1)
+	for idx := range points {
+		points[idx] = ocommon.NewPoint(
+			uint64(idx+1),
+			[]byte(fmt.Sprintf("%032d", idx+1)),
+		)
+		o.markLeiosEndorserBlockRelayOffer(points[idx])
+	}
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	unique := make(map[*leiosEndorserBlockData]struct{})
+	for _, data := range o.leiosEndorserBlocks {
+		unique[data] = struct{}{}
+	}
+	require.LessOrEqual(t, len(unique), leiosEndorserBlockCacheMaxEntries)
+	require.Nil(t, o.leiosEndorserBlocks[leiosBlockKey(points[0].Slot, points[0].Hash)], "the oldest distinct relay intent must be evicted at the cache cap")
+	latest := o.leiosEndorserBlocks[leiosBlockKey(points[len(points)-1].Slot, points[len(points)-1].Hash)]
+	require.NotNil(t, latest)
+	require.True(t, latest.relayOfferRequested)
+	require.False(t, latest.hasManifest())
+}
+
+func TestLeiosRelayOfferIntentMergesWithPersistedCacheReload(t *testing.T) {
+	t.Parallel()
+	tx, ref := testLeiosManifestTx(t, 0x63)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(472, lcommon.Blake2b256Hash(manifestRaw).Bytes())
+	o := newTestOuroborosWithLeiosDB(t)
+	o.leiosEBLog.registerConn("observer", nil, nil)
+	require.NoError(t, o.leiosDatabase().SetLeiosEB(
+		point.Slot, point.Hash, manifestRaw, []cbor.RawMessage{tx},
+	))
+	o.markLeiosEndorserBlockRelayOffer(point)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.True(t, data.hasManifest())
+	require.True(t, data.completeTxCache())
+	data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.True(t, data.relayTransactionsOffered)
+	o.leiosEBLog.mu.Lock()
+	defer o.leiosEBLog.mu.Unlock()
+	txOffers := 0
+	for _, entry := range o.leiosEBLog.items {
+		if entry.txOffer != nil && entry.txOffer.Slot == point.Slot &&
+			bytes.Equal(entry.txOffer.Hash, point.Hash) {
+			txOffers++
+		}
+	}
+	require.Equal(t, 1, txOffers,
+		"a persisted completion must publish retained transaction intent once")
+}
+
 func TestLeiosTxsOfferDisconnectedWaiterIsRemoved(t *testing.T) {
 	t.Parallel()
 	first, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
