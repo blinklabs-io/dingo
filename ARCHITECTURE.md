@@ -1633,7 +1633,8 @@ When `Node.Run()` is called, components are initialized in this order:
     `PRAGMA optimize` pass runs right after the database opens, before the chain
     manager or ledger exists, so no block batch plans against missing
     statistics; the manager is then started and subscribes to `epoch.transition`
-    (events without an epoch nonce, the slot clock's duplicate, are ignored).
+    (a post-Byron event without an epoch nonce, the slot clock's duplicate, is
+    ignored; Byron rollovers carry no nonce and still trigger a run).
     A one-slot pending signal coalesces transitions arriving during a run into
     at most one follow-up, and the run executes on its own worker after the
     rollover transaction has committed, never inside it. `Stop` cancels a run in

@@ -127,7 +127,10 @@ func TestEpochTransitionWithoutNonceIsIgnored(t *testing.T) {
 	require.NoError(t, m.Start(t.Context()))
 	defer func() { require.NoError(t, m.Stop()) }()
 
-	m.handleEpochTransition(epochEvent(nil))
+	m.handleEpochTransition(event.NewEvent(
+		event.EpochTransitionEventType,
+		event.EpochTransitionEvent{NewEpoch: 5, ProtocolVersion: 10},
+	))
 	require.Never(t, func() bool { return u.calls.Load() != 0 },
 		200*time.Millisecond, 10*time.Millisecond)
 	m.handleEpochTransition(epochEvent([]byte{1}))
@@ -206,4 +209,22 @@ func TestFailedRunDoesNotStopLaterRuns(t *testing.T) {
 	receive(t, u.entered, "first failing run")
 	m.handleEpochTransition(epochEvent([]byte{2}))
 	receive(t, u.entered, "run after a failure")
+}
+
+// Byron has no epoch nonce, so the ledger's own Byron rollover events carry
+// none; they must still trigger a run or a genesis sync of a chain with Byron
+// epochs plans its UTxO spends without statistics until it leaves Byron.
+func TestByronEpochTransitionWithoutNonceTriggersRun(t *testing.T) {
+	t.Parallel()
+	u := newFakeUpdater()
+	close(u.release)
+	m := newTestManager(u, event.NewEventBus(nil, nil))
+	require.NoError(t, m.Start(t.Context()))
+	defer func() { require.NoError(t, m.Stop()) }()
+
+	m.handleEpochTransition(event.NewEvent(
+		event.EpochTransitionEventType,
+		event.EpochTransitionEvent{NewEpoch: 5, ProtocolVersion: 1},
+	))
+	receive(t, u.entered, "run for a Byron rollover")
 }

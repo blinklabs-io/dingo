@@ -30,6 +30,10 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 )
 
+// shelleyProtocolMajor is the first protocol major version with an epoch
+// nonce; Byron used 0 and 1.
+const shelleyProtocolMajor = 2
+
 // Manager runs incremental planner-statistics maintenance. The epoch trigger
 // subscribes to event.EpochTransitionEventType, which the ledger publishes
 // only after the rollover transaction has committed, so a run never executes
@@ -146,10 +150,12 @@ func (m *Manager) handleEpochTransition(evt event.Event) {
 		)
 		return
 	}
-	// The slot clock publishes a second transition for the same boundary
-	// without a nonce; the ledger's own event is the one that follows a
-	// committed rollover.
-	if epochEvent.EpochNonce == nil {
+	// Near the tip the slot clock publishes a second transition for the same
+	// boundary without a nonce; the ledger's own event is the one that
+	// follows a committed rollover. Byron has no epoch nonce, so the ledger's
+	// Byron rollovers carry none either and must not be mistaken for it.
+	if epochEvent.EpochNonce == nil &&
+		epochEvent.ProtocolVersion >= shelleyProtocolMajor {
 		return
 	}
 	select {
