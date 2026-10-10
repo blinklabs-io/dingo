@@ -680,10 +680,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
 		o.chainsyncLocalTipBlock = func() (uint64, uint64) {
-			k := o.ledgerState.SecurityParam()
-			if k < 0 {
-				k = 0
-			}
+			k := max(o.ledgerState.SecurityParam(), 0)
 			return o.ledgerState.Tip().BlockNumber, uint64(k)
 		}
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
