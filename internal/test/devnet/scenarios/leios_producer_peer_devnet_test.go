@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,9 +51,7 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 
 	endpoints := devnet.LoadEndpoints()
 	require.Len(t, endpoints, 4)
-	producer := endpoints[0]
 	relay := endpoints[len(endpoints)-1]
-	require.Equal(t, "producer", producer.Role)
 	require.Equal(t, "relay", relay.Role)
 
 	ntcAddrs := devnet.DingoNtcAddrs()
@@ -72,6 +71,35 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 	)
 	defer observers.Stop()
 	group := observers.Group()
+	producerObservations := newLeiosProducerObservations()
+	producerErrors := make(chan error, len(endpoints))
+	producerMonitors := make([]*devnet.LeiosEndorserBlockOfferMonitor, 0, len(endpoints)-1)
+	for _, endpoint := range endpoints {
+		if endpoint.Role != "producer" {
+			continue
+		}
+		monitor, err := devnet.WatchLeiosEndorserBlockOffers(
+			ctx,
+			endpoint.Address,
+			cfg.NetworkMagic,
+		)
+		require.NoErrorf(t, err,
+			"could not observe producer %s LeiosNotify offers", endpoint.Name)
+		producerMonitors = append(producerMonitors, monitor)
+		go collectLeiosProducerObservations(
+			ctx,
+			endpoint.Name,
+			monitor,
+			producerObservations,
+			producerErrors,
+		)
+	}
+	require.NotEmpty(t, producerMonitors, "no producer endpoints are configured")
+	defer func() {
+		for _, monitor := range producerMonitors {
+			monitor.Stop()
+		}
+	}()
 
 	transactions, err := devnet.WatchLeiosEndorserBlockOffers(
 		ctx,
@@ -116,43 +144,18 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 		}), "Leios devnet did not become ready")
 	cancelReady()
 
-	monitor, err := devnet.WatchLeiosEndorserBlockOffers(
-		ctx,
-		producer.Address,
-		cfg.NetworkMagic,
-	)
-	require.NoError(t, err, "could not observe producer LeiosNotify offers")
-	defer monitor.Stop()
-
-	vote, err := awaitLeiosPrototypeVote(
-		ctx,
-		monitor.PrototypeVotes,
-		monitor.Errors,
-	)
-	require.NoError(t, err,
-		"producer did not diffuse a vote after voting registration became usable")
-
 	var announcingHeader devnet.ObservedHeader
-	err = group.Await(ctx,
-		fmt.Sprintf("relay adopts voted announcing ranking block %x",
-			vote.AnnouncingRbHash.Bytes()),
+	var offeringProducer string
+	err = awaitLeiosCanonicalTriple(ctx, group, producerErrors,
+		"relay adopts a voted announcing ranking block offered by a producer",
 		func(snapshots []devnet.ChainSnapshot) bool {
-			for _, snapshot := range snapshots {
-				if snapshot.Node != relay.Name {
-					continue
-				}
-				for _, header := range snapshot.Headers {
-					if bytes.Equal(header.Hash, vote.AnnouncingRbHash.Bytes()) &&
-						len(header.LeiosAnnouncementHash) > 0 {
-						announcingHeader = header
-						return true
-					}
-				}
-			}
-			return false
+			var found bool
+			announcingHeader, offeringProducer, found =
+				producerObservations.canonicalTriple(snapshots, relay.Name)
+			return found
 		})
 	require.NoError(t, err,
-		"relay never adopted the ranking block named by the producer vote")
+		"relay never adopted a voted ranking block for an EB offered by a producer")
 	require.Positive(t, announcingHeader.LeiosAnnouncementSize,
 		"announcing ranking header must carry a sized Leios announcement")
 	point := pcommon.Point{
@@ -160,17 +163,8 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 		Hash: append([]byte(nil), announcingHeader.LeiosAnnouncementHash...),
 	}
 
-	offerCtx, cancelOffer := context.WithTimeout(ctx, 2*time.Minute)
-	err = awaitLeiosTransactionOffer(
-		offerCtx,
-		monitor.Offers,
-		monitor.Errors,
-		point,
-	)
-	cancelOffer()
-	require.NoError(t, err,
-		"producer did not offer the endorser block named by its voted ranking block")
-	t.Logf("producer %s offered voted EB %x at slot %d", producer.Name, point.Hash, point.Slot)
+	t.Logf("producer %s offered voted EB %x at slot %d",
+		offeringProducer, point.Hash, point.Slot)
 
 	txOfferCtx, cancelTxOffer := context.WithTimeout(ctx, 2*time.Minute)
 	err = awaitLeiosTransactionOffer(
@@ -230,7 +224,7 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 		"relay did not apply any certified EB transaction output")
 	t.Logf(
 		"producer %s offered EB %x at slot %d; relay %s certified it in ranking block %x at slot %d, served %d bodies, and applied their outputs",
-		producer.Name,
+		offeringProducer,
 		point.Hash,
 		point.Slot,
 		relay.Name,
@@ -238,6 +232,128 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 		certifyingHeader.Slot,
 		len(bodies),
 	)
+}
+
+type leiosPointKey struct {
+	slot uint64
+	hash lcommon.Blake2b256
+}
+
+type leiosProducerObservations struct {
+	mu     sync.RWMutex
+	offers map[leiosPointKey]string
+	votes  map[lcommon.Blake2b256]map[string]struct{}
+}
+
+func newLeiosProducerObservations() *leiosProducerObservations {
+	return &leiosProducerObservations{
+		offers: make(map[leiosPointKey]string),
+		votes:  make(map[lcommon.Blake2b256]map[string]struct{}),
+	}
+}
+
+func (o *leiosProducerObservations) addOffer(source string, point pcommon.Point) {
+	if len(point.Hash) != lcommon.Blake2b256Size {
+		return
+	}
+	key := leiosPointKey{slot: point.Slot}
+	copy(key.hash[:], point.Hash)
+	o.mu.Lock()
+	o.offers[key] = source
+	o.mu.Unlock()
+}
+
+func (o *leiosProducerObservations) addVote(
+	source string,
+	vote lcommon.LeiosPrototypeVote,
+) {
+	o.mu.Lock()
+	if o.votes[vote.AnnouncingRbHash] == nil {
+		o.votes[vote.AnnouncingRbHash] = make(map[string]struct{})
+	}
+	o.votes[vote.AnnouncingRbHash][source] = struct{}{}
+	o.mu.Unlock()
+}
+
+func (o *leiosProducerObservations) canonicalTriple(
+	snapshots []devnet.ChainSnapshot,
+	relayName string,
+) (devnet.ObservedHeader, string, bool) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	for _, snapshot := range snapshots {
+		if snapshot.Node != relayName {
+			continue
+		}
+		for i := len(snapshot.Headers) - 1; i >= 0; i-- {
+			header := snapshot.Headers[i]
+			if len(header.Hash) != lcommon.Blake2b256Size ||
+				len(header.LeiosAnnouncementHash) != lcommon.Blake2b256Size {
+				continue
+			}
+			var rbHash lcommon.Blake2b256
+			copy(rbHash[:], header.Hash)
+			if _, ok := o.votes[rbHash]; !ok {
+				continue
+			}
+			point := leiosPointKey{slot: header.Slot}
+			copy(point.hash[:], header.LeiosAnnouncementHash)
+			source, ok := o.offers[point]
+			if ok {
+				return header, source, true
+			}
+		}
+	}
+	return devnet.ObservedHeader{}, "", false
+}
+
+func collectLeiosProducerObservations(
+	ctx context.Context,
+	source string,
+	monitor *devnet.LeiosEndorserBlockOfferMonitor,
+	observations *leiosProducerObservations,
+	errors chan<- error,
+) {
+	for {
+		select {
+		case point := <-monitor.Offers:
+			observations.addOffer(source, point)
+		case vote := <-monitor.PrototypeVotes:
+			observations.addVote(source, vote)
+		case err := <-monitor.Errors:
+			if err != nil {
+				select {
+				case errors <- fmt.Errorf("producer %s LeiosNotify: %w", source, err):
+				default:
+				}
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func awaitLeiosCanonicalTriple(
+	ctx context.Context,
+	group *devnet.ChainGroup,
+	errors <-chan error,
+	description string,
+	predicate func([]devnet.ChainSnapshot) bool,
+) error {
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- group.Await(waitCtx, description, predicate)
+	}()
+	select {
+	case err := <-done:
+		return err
+	case err := <-errors:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func awaitLeiosTransactionOutputsApplied(
@@ -287,25 +403,6 @@ func awaitLeiosTransactionOffer(
 			}
 		case <-ctx.Done():
 			return ctx.Err()
-		}
-	}
-}
-
-func awaitLeiosPrototypeVote(
-	ctx context.Context,
-	votes <-chan lcommon.LeiosPrototypeVote,
-	errors <-chan error,
-) (lcommon.LeiosPrototypeVote, error) {
-	for {
-		select {
-		case vote := <-votes:
-			return vote, nil
-		case err := <-errors:
-			if err != nil {
-				return lcommon.LeiosPrototypeVote{}, err
-			}
-		case <-ctx.Done():
-			return lcommon.LeiosPrototypeVote{}, ctx.Err()
 		}
 	}
 }
