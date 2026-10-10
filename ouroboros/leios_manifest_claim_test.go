@@ -361,6 +361,7 @@ func TestLeiosTxsOfferRetriesAfterAdmissionReleases(t *testing.T) {
 		require.True(t, o.dispatchLeiosFetch(conn.Id(), func() {}))
 	}
 	doneChan := make(chan any)
+	t.Cleanup(func() { close(doneChan) })
 	offer := oleiosnotify.NewMsgBlockTxsOffer(point)
 	callback := oleiosnotify.CallbackContext{
 		ConnectionId:       conn.Id(),
@@ -406,21 +407,18 @@ func TestLeiosTxsOfferCancellationClearsPendingRetry(t *testing.T) {
 	}, 5*time.Second, "connection cancellation must clear pending fetch work")
 }
 
-func TestLeiosTxsOfferPendingBoundRejectsDistinctOverflow(t *testing.T) {
-	t.Parallel()
-	guard := &leiosFetchGuard{}
+func fillLeiosPendingFetches(
+	t *testing.T,
+	guard *leiosFetchGuard,
+	done <-chan any,
+) {
+	t.Helper()
 	guard.inflight.Store(leiosFetchMaxInflightPerConn)
 	for idx := range leiosFetchMaxPendingPerConn {
 		require.NoError(t, guard.deferLeiosFetch(
-			fmt.Sprintf("%d", idx), nil, func() {},
+			fmt.Sprintf("%d", idx), done, func() {},
 		))
 	}
-	require.NoError(t, guard.deferLeiosFetch("0", nil, func() {}),
-		"an exact duplicate must coalesce at the bound")
-	require.ErrorIs(t,
-		guard.deferLeiosFetch("overflow", nil, func() {}),
-		errLeiosFetchPendingFull,
-	)
 }
 
 func TestLeiosTxsOfferPendingRetryUsesAdmissionOpenedBeforeQueue(t *testing.T) {
@@ -439,63 +437,170 @@ func TestLeiosTxsOfferPendingRetryUsesAdmissionOpenedBeforeQueue(t *testing.T) {
 	require.Equal(t, int32(leiosFetchMaxInflightPerConn), guard.inflight.Load())
 }
 
-func TestLeiosTxsOfferPendingOverflowReturnsConnectionError(t *testing.T) {
+func TestLeiosTxsOfferPendingBoundBlocksUntilSpace(t *testing.T) {
+	t.Parallel()
+	guard := &leiosFetchGuard{}
+	done := make(chan any)
+	fillLeiosPendingFetches(t, guard, done)
+	result := make(chan error, 1)
+	go func() {
+		result <- guard.deferLeiosFetch("overflow", done, func() {})
+	}()
+	testutil.WaitForCondition(t, func() bool {
+		guard.pendingMu.Lock()
+		defer guard.pendingMu.Unlock()
+		return guard.pendingChanged != nil
+	}, 5*time.Second, "full pending queue did not apply backpressure")
+	select {
+	case <-result:
+		t.Fatal("full pending queue returned before space opened")
+	default:
+	}
+
+	(&Ouroboros{}).releaseLeiosFetch(guard)
+	require.NoError(t, <-result)
+	guard.pendingMu.Lock()
+	require.Len(t, guard.pending, leiosFetchMaxPendingPerConn)
+	guard.pendingMu.Unlock()
+	close(done)
+}
+
+func TestLeiosTxsOfferPendingBoundUnblocksOnCancellation(t *testing.T) {
+	t.Parallel()
+	guard := &leiosFetchGuard{}
+	done := make(chan any)
+	fillLeiosPendingFetches(t, guard, done)
+	result := make(chan error, 1)
+	go func() {
+		result <- guard.deferLeiosFetch("overflow", done, func() {})
+	}()
+	testutil.WaitForCondition(t, func() bool {
+		guard.pendingMu.Lock()
+		defer guard.pendingMu.Unlock()
+		return guard.pendingChanged != nil
+	}, 5*time.Second, "full pending queue did not apply backpressure")
+	close(done)
+	require.NoError(t, <-result)
+	testutil.WaitForCondition(t, func() bool {
+		guard.pendingMu.Lock()
+		defer guard.pendingMu.Unlock()
+		return len(guard.pending) == 0
+	}, 5*time.Second, "connection cancellation did not clear pending work")
+}
+
+func TestLeiosTxsOfferHealthyPeerIsNotSuppressedByFailingPeer(t *testing.T) {
+	t.Parallel()
+	tx, ref := testLeiosManifestTx(t, 0x46)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(
+		460,
+		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
+	)
+	bitmap := map[uint16]uint64{0: 1 << 63}
+	first, firstDone := newLeiosFetchConversation(t, append(
+		leiosFetchHandshake(),
+		ouroboros_mock.ConversationEntryInput{
+			ProtocolId:  leiosfetch.ProtocolId,
+			MessageType: leiosfetch.MessageTypeBlockTxsRequest,
+		},
+		ouroboros_mock.ConversationEntryOutput{
+			ProtocolId: leiosfetch.ProtocolId,
+			IsResponse: true,
+			Messages: []protocol.Message{
+				leiosfetch.NewMsgBlockTxsFull(
+					point, bitmap, nil,
+				),
+			},
+		},
+	))
+	healthy, healthyDone := newLeiosFetchConversation(t, append(
+		leiosFetchHandshake(),
+		ouroboros_mock.ConversationEntryInput{
+			ProtocolId:  leiosfetch.ProtocolId,
+			MessageType: leiosfetch.MessageTypeBlockTxsRequest,
+		},
+		ouroboros_mock.ConversationEntryOutput{
+			ProtocolId: leiosfetch.ProtocolId,
+			IsResponse: true,
+			Messages: []protocol.Message{
+				leiosfetch.NewMsgBlockTxsFull(
+					point, bitmap, []cbor.RawMessage{tx},
+				),
+			},
+		},
+	))
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	require.True(t, cm.AddConnection(first, false, "first"))
+	require.True(t, cm.AddConnection(healthy, false, "healthy"))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	o := newOuroboros(OuroborosConfig{
+		ConnManager:        cm,
+		EnableLeios:        true,
+		EnableLeiosTxFetch: true,
+	})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point, manifestRaw, nil, leiosStoreAuthoritative,
+	))
+	firstGuard := o.leiosFetchGuardFor(first.Id())
+	healthyGuard := o.leiosFetchGuardFor(healthy.Id())
+	firstGuard.mu.Lock()
+	healthyGuard.mu.Lock()
+	var firstUnlockOnce sync.Once
+	var healthyUnlockOnce sync.Once
+	unlockFirst := func() { firstUnlockOnce.Do(firstGuard.mu.Unlock) }
+	unlockHealthy := func() { healthyUnlockOnce.Do(healthyGuard.mu.Unlock) }
+	t.Cleanup(unlockFirst)
+	t.Cleanup(unlockHealthy)
+	offer := oleiosnotify.NewMsgBlockTxsOffer(point)
+	require.NoError(t, o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{ConnectionId: first.Id()}, offer,
+	))
+	require.NoError(t, o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{ConnectionId: healthy.Id()}, offer,
+	))
+	require.Equal(t, int32(1), healthyGuard.inflight.Load(),
+		"a first peer's claim must not suppress a healthy peer")
+
+	unlockFirst()
+	requireLeiosFetchConversationDone(t, firstDone)
+	testutil.WaitForCondition(t, func() bool {
+		return firstGuard.inflight.Load() == 0
+	}, 5*time.Second, "failing peer fetch did not release admission")
+	unlockHealthy()
+	requireLeiosFetchConversationDone(t, healthyDone)
+	testutil.WaitForCondition(t, func() bool {
+		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		return ok && data.completeTxCache()
+	}, 5*time.Second, "healthy peer did not complete the transaction cache")
+}
+
+func TestLeiosManifestOfferClaimContentionReleasesAdmission(t *testing.T) {
 	t.Parallel()
 	o, first, _ := newHeldManifestOfferPeers(t)
-	guard := o.leiosFetchGuardFor(first.Id())
-	t.Cleanup(guard.cancelPendingLeiosFetches)
+	point, raw := testLeiosEndorserBlockRaw(t, 200)
+	offer := oleiosnotify.NewMsgBlockOffer(point, uint64(len(raw)))
+	key := leiosBlockKey(point.Slot, point.Hash)
+	o.leiosManifestFetchInProgress.Store(key, struct{}{})
+	t.Cleanup(func() { o.leiosManifestFetchInProgress.Delete(key) })
+	require.NoError(t, o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{ConnectionId: first.Id()}, offer,
+	))
+	require.Zero(t, o.leiosFetchGuardFor(first.Id()).inflight.Load(),
+		"losing a shared claim must return its admission slot")
+	_, present := o.leiosManifestFetchInProgress.Load(key)
+	require.True(t, present, "the other worker's claim must survive")
 	for range leiosFetchMaxInflightPerConn {
 		require.True(t, o.dispatchLeiosFetch(first.Id(), func() {}))
 	}
-	for idx := range leiosFetchMaxPendingPerConn {
-		require.NoError(t, guard.deferLeiosFetch(
-			fmt.Sprintf("held-%d", idx), nil, func() {},
-		))
-	}
-	point, _ := testLeiosEndorserBlockRaw(t, 452)
-	err := o.leiosnotifyClientNotification(
-		oleiosnotify.CallbackContext{ConnectionId: first.Id()},
-		oleiosnotify.NewMsgBlockTxsOffer(point),
-	)
-	require.ErrorIs(t, err, errLeiosFetchPendingFull,
-		"overflow must fail the connection instead of dropping the offer")
-}
-
-func TestLeiosOfferClaimContentionReleasesAdmission(t *testing.T) {
-	t.Parallel()
-	for _, transactions := range []bool{false, true} {
-		name := "manifest"
-		if transactions {
-			name = "transactions"
-		}
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			o, first, _ := newHeldManifestOfferPeers(t)
-			point, raw := testLeiosEndorserBlockRaw(t, 200)
-			var offer protocol.Message = oleiosnotify.NewMsgBlockOffer(
-				point, uint64(len(raw)),
-			)
-			claims := &o.leiosManifestFetchInProgress
-			if transactions {
-				offer = oleiosnotify.NewMsgBlockTxsOffer(point)
-				claims = &o.leiosFetchInProgress
-			}
-			key := leiosBlockKey(point.Slot, point.Hash)
-			claims.Store(key, struct{}{})
-			t.Cleanup(func() { claims.Delete(key) })
-			require.NoError(t, o.leiosnotifyClientNotification(
-				oleiosnotify.CallbackContext{ConnectionId: first.Id()}, offer,
-			))
-			require.Zero(t, o.leiosFetchGuardFor(first.Id()).inflight.Load(),
-				"losing a shared claim must return its admission slot")
-			_, present := claims.Load(key)
-			require.True(t, present, "the other worker's claim must survive")
-			for range leiosFetchMaxInflightPerConn {
-				require.True(t, o.dispatchLeiosFetch(first.Id(), func() {}))
-			}
-			require.False(t, o.dispatchLeiosFetch(first.Id(), func() {}))
-		})
-	}
+	require.False(t, o.dispatchLeiosFetch(first.Id(), func() {}))
 }
 
 func TestLeiosManifestOfferRechecksCacheAfterDispatch(t *testing.T) {

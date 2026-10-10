@@ -650,17 +650,13 @@ func (o *Ouroboros) dispatchLeiosTxOfferFetch(
 	client *leiosfetch.Client,
 	connId string,
 	point ocommon.Point,
-	hashKey string,
+	done <-chan any,
 ) {
-	if _, loaded := o.leiosFetchInProgress.LoadOrStore(hashKey, struct{}{}); loaded {
+	if connectionDone(done) {
 		o.releaseLeiosFetch(guard)
 		return
 	}
-	if o.leiosFetchClaimPublished != nil {
-		o.leiosFetchClaimPublished()
-	}
 	o.dispatchLeiosFetchReserved(guard, func() {
-		defer o.leiosFetchInProgress.Delete(hashKey)
 		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 		if !ok {
 			// Manifest not cached yet (txs offered before/without a block
@@ -1079,12 +1075,15 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				ctx.ConnectionDoneChan,
 				func() {
 					o.dispatchLeiosTxOfferFetch(
-						guard, client, connId, point, hashKey,
+						guard, client, connId, point,
+						ctx.ConnectionDoneChan,
 					)
 				},
 			)
 		}
-		o.dispatchLeiosTxOfferFetch(guard, client, connId, point, hashKey)
+		o.dispatchLeiosTxOfferFetch(
+			guard, client, connId, point, ctx.ConnectionDoneChan,
+		)
 	case *oleiosnotify.MsgVotesOffer:
 		// The Leios prototype diffuses full votes inline over leios-notify
 		// (rather than the standalone leios-votes protocol). Feed them to the
@@ -1216,11 +1215,9 @@ const leiosTxFetchTailPoll = 300 * time.Millisecond
 const leiosFetchMaxInflightPerConn = 4
 
 // leiosFetchMaxPendingPerConn bounds transaction offers retained while all
-// fetch admission slots are occupied. Overflow disconnects the peer so its
-// replacement connection can replay offers instead of silently losing them.
+// fetch admission slots are occupied. A connection applies backpressure at
+// this bound until queued work advances or the connection closes.
 const leiosFetchMaxPendingPerConn = leiosEndorserBlockCacheMaxEntries
-
-var errLeiosFetchPendingFull = errors.New("leios-fetch pending offer limit reached")
 
 type leiosPendingFetch struct {
 	done <-chan any
@@ -1230,14 +1227,15 @@ type leiosPendingFetch struct {
 // leiosFetchGuard serializes leios-fetch client operations on one connection
 // and bounds how many are outstanding.
 type leiosFetchGuard struct {
-	mu           sync.Mutex
-	inflight     atomic.Int32
-	pendingMu    sync.Mutex
-	pending      map[string]leiosPendingFetch
-	pendingOrder []string
-	pendingDone  chan struct{}
-	pendingStop  sync.Once
-	closed       bool
+	mu             sync.Mutex
+	inflight       atomic.Int32
+	pendingMu      sync.Mutex
+	pending        map[string]leiosPendingFetch
+	pendingOrder   []string
+	pendingChanged chan struct{}
+	pendingDone    chan struct{}
+	pendingStop    sync.Once
+	closed         bool
 	// cooledUntilNano is a unix-nano deadline before which the backfill
 	// connection selector should skip this connection after a failed or
 	// timed-out fetch, so it prefers healthy connections instead of repeatedly
@@ -1384,45 +1382,55 @@ func (g *leiosFetchGuard) deferLeiosFetch(
 	done <-chan any,
 	fn func(),
 ) error {
-	g.pendingMu.Lock()
-	if g.closed || connectionDone(done) {
-		g.pendingMu.Unlock()
-		return nil
-	}
-	// Admission may have opened between reserveLeiosFetch returning and this
-	// lock acquisition. Claim it here so the offer cannot become stranded in
-	// an otherwise idle pending queue.
-	if g.inflight.Load() < leiosFetchMaxInflightPerConn {
-		g.inflight.Add(1)
-		g.pendingMu.Unlock()
-		fn()
-		return nil
-	}
-	if _, ok := g.pending[key]; ok {
-		g.pendingMu.Unlock()
-		return nil
-	}
-	if len(g.pending) >= leiosFetchMaxPendingPerConn {
-		g.pendingMu.Unlock()
-		return errLeiosFetchPendingFull
-	}
-	if g.pending == nil {
-		g.pending = make(map[string]leiosPendingFetch)
-	}
-	g.pending[key] = leiosPendingFetch{done: done, fn: fn}
-	g.pendingOrder = append(g.pendingOrder, key)
-	if done != nil && g.pendingDone == nil {
-		g.pendingDone = make(chan struct{})
-		go func() {
-			select {
-			case <-done:
-				g.cancelPendingLeiosFetches()
-			case <-g.pendingDone:
+	for {
+		g.pendingMu.Lock()
+		if g.closed || connectionDone(done) {
+			g.pendingMu.Unlock()
+			return nil
+		}
+		if _, ok := g.pending[key]; ok {
+			g.pendingMu.Unlock()
+			return nil
+		}
+		// Admission may have opened between reserveLeiosFetch returning and
+		// this lock acquisition. Claim it here so the offer cannot become
+		// stranded in an otherwise idle pending queue.
+		if g.inflight.Load() < leiosFetchMaxInflightPerConn {
+			g.inflight.Add(1)
+			g.pendingMu.Unlock()
+			fn()
+			return nil
+		}
+		if len(g.pending) < leiosFetchMaxPendingPerConn {
+			if g.pending == nil {
+				g.pending = make(map[string]leiosPendingFetch)
 			}
-		}()
+			g.pending[key] = leiosPendingFetch{done: done, fn: fn}
+			g.pendingOrder = append(g.pendingOrder, key)
+			if done != nil && g.pendingDone == nil {
+				g.pendingDone = make(chan struct{})
+				go func() {
+					select {
+					case <-done:
+						g.cancelPendingLeiosFetches()
+					case <-g.pendingDone:
+					}
+				}()
+			}
+			g.pendingMu.Unlock()
+			return nil
+		}
+		if g.pendingChanged == nil {
+			g.pendingChanged = make(chan struct{})
+		}
+		changed := g.pendingChanged
+		g.pendingMu.Unlock()
+		select {
+		case <-changed:
+		case <-done:
+			return nil
+		}
 	}
-	g.pendingMu.Unlock()
-	return nil
 }
 
 func connectionDone(done <-chan any) bool {
@@ -1442,12 +1450,20 @@ func (g *leiosFetchGuard) cancelPendingLeiosFetches() {
 	g.closed = true
 	g.pending = nil
 	g.pendingOrder = nil
+	g.signalPendingChangedLocked()
 	g.pendingStop.Do(func() {
 		if g.pendingDone != nil {
 			close(g.pendingDone)
 		}
 	})
 	g.pendingMu.Unlock()
+}
+
+func (g *leiosFetchGuard) signalPendingChangedLocked() {
+	if g.pendingChanged != nil {
+		close(g.pendingChanged)
+		g.pendingChanged = nil
+	}
 }
 
 func (o *Ouroboros) releaseLeiosFetch(g *leiosFetchGuard) {
@@ -1462,6 +1478,7 @@ func (o *Ouroboros) releaseLeiosFetch(g *leiosFetchGuard) {
 			continue
 		}
 		delete(g.pending, key)
+		g.signalPendingChangedLocked()
 		if connectionDone(pending.done) {
 			continue
 		}

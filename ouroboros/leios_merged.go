@@ -370,10 +370,8 @@ const (
 // independently required occurrence at more than one slot at once (two
 // elections producing an identical transaction-reference set), and a
 // hash-only key could hold only one of them at a time -- silently evicting
-// or masking the other. The same composite identity is
-// used for leiosFetchInProgress's in-flight dedup and leiosClosureWaiters'
-// wait keys, so all three stay consistent about what "the same occurrence"
-// means.
+// or masking the other. Pending fetches and closure waiters use the same
+// composite identity so each path agrees on what "the same occurrence" means.
 func leiosBlockKey(slot uint64, hash []byte) string {
 	return fmt.Sprintf("%d:%s", slot, hash)
 }
