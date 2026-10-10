@@ -38,6 +38,9 @@ type Dialect interface {
 	// maintenance. supported is false, with no statement issued, for a
 	// backend that has none; UpdatePlannerStats (a full ANALYZE) is unchanged.
 	OptimizePlannerStats(context.Context, Execer) (supported bool, err error)
+	// HasIncrementalPlannerStats reports whether OptimizePlannerStats does
+	// anything on this backend, without issuing a statement.
+	HasIncrementalPlannerStats() bool
 	DropIndexSQL(name, table string) string
 	CreateIndexSQL(name, table string, columns []string) string
 	CanDropIndex(name, table string) bool
@@ -115,6 +118,10 @@ func (d dialect) OptimizePlannerStats(
 		return false, nil
 	}
 	return true, d.optimize(ctx, exec)
+}
+
+func (d dialect) HasIncrementalPlannerStats() bool {
+	return d.optimize != nil
 }
 
 func (d dialect) DropIndexSQL(name, table string) string {

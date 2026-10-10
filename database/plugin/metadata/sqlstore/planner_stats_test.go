@@ -417,8 +417,14 @@ func TestOptimizePlannerStatsMetrics(t *testing.T) {
 		}
 	}
 	require.Equal(t, map[string]float64{
-		"result=changed,trigger=startup,": 1,
-		"result=unchanged,trigger=epoch,": 1,
+		"result=changed,trigger=startup,":   1,
+		"result=unchanged,trigger=startup,": 0,
+		"result=skipped,trigger=startup,":   0,
+		"result=error,trigger=startup,":     0,
+		"result=changed,trigger=epoch,":     0,
+		"result=unchanged,trigger=epoch,":   1,
+		"result=skipped,trigger=epoch,":     0,
+		"result=error,trigger=epoch,":       0,
 	}, got)
 }
 
@@ -477,4 +483,99 @@ func TestNonSQLiteDialectsAreLeftUntouchedByOptimize(t *testing.T) {
 		SQLiteDialect().UpdatePlannerStats(context.Background(), lite),
 	)
 	require.Equal(t, []string{"ANALYZE"}, lite.statements)
+}
+
+// A caller holds a cached statement between looking it up and executing it.
+// Retiring the cache in that window must not close the statement under the
+// caller; it closes once the caller releases it.
+func TestRetiringCacheKeepsBorrowedStatementOpen(t *testing.T) {
+	t.Parallel()
+	for name, retire := range map[string]func(*Store){
+		"reprepare": func(s *Store) {
+			s.reprepareHotStatements(context.Background())
+		},
+		"close": func(s *Store) { s.closePreparedStatements() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := newFilePlannerStatsStore(t, nil)
+			stmt, release, ok := store.borrowCachedStmt(getLiveUtxoByRefQuery)
+			require.True(t, ok, "hot statement must be cached at start")
+
+			retire(store)
+			zero := make([]byte, 32)
+			rows, err := stmt.QueryContext(context.Background(), zero, 0)
+			require.NoError(t, err, "a borrowed statement must stay open")
+			require.NoError(t, rows.Close())
+
+			release()
+			_, err = stmt.QueryContext(context.Background(), zero, 0)
+			require.True(
+				t,
+				isClosedStmtErr(err),
+				"a retired statement must close once released, got %v",
+				err,
+			)
+		})
+	}
+}
+
+// An unretired statement is shared by every caller: releasing a borrow must
+// not close it.
+func TestReleasingBorrowKeepsCachedStatementOpen(t *testing.T) {
+	t.Parallel()
+	store := newFilePlannerStatsStore(t, nil)
+	stmt, release, ok := store.borrowCachedStmt(getLiveUtxoByRefQuery)
+	require.True(t, ok)
+	release()
+	rows, err := stmt.QueryContext(
+		context.Background(), make([]byte, 32), 0,
+	)
+	require.NoError(t, err)
+	require.NoError(t, rows.Close())
+}
+
+// A backend without incremental statistics must take the unsupported path
+// without issuing any statement, including the SQLite-only fingerprint and
+// during a bulk load. The closed handle fails any statement that is issued.
+func TestOptimizePlannerStatsUnsupportedDialectIssuesNoStatement(t *testing.T) {
+	t.Parallel()
+	for _, bulk := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bulk=%v", bulk), func(t *testing.T) {
+			t.Parallel()
+			db, err := sql.Open("sqlite", ":memory:")
+			require.NoError(t, err)
+			require.NoError(t, db.Close())
+			store := &Store{
+				dialect:  PostgresDialect(),
+				writeDB:  db,
+				readDB:   db,
+				bulkMode: bulk,
+			}
+			store.ready.Store(true)
+			result, err := store.OptimizePlannerStatsContext(
+				context.Background(), PlannerStatsTriggerEpoch,
+			)
+			require.NoError(t, err)
+			require.False(t, result.Supported)
+			require.False(t, result.Skipped)
+		})
+	}
+}
+
+// Every trigger and result series exists from the start, so a scrape before
+// the first run, or before a given outcome, sees zero rather than nothing.
+func TestPlannerStatsRunSeriesExistBeforeAnyRun(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	newFilePlannerStatsStore(t, reg)
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	series := 0
+	for _, family := range families {
+		if family.GetName() == "dingo_database_sql_planner_stats_runs_total" {
+			series = len(family.GetMetric())
+		}
+	}
+	require.Equal(t, 8, series, "2 triggers x 4 results")
 }

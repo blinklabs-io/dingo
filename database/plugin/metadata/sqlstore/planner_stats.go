@@ -54,7 +54,7 @@ func newPlannerStatsMetrics(
 	if reg == nil {
 		return sqlitePlannerStatsMetrics{}
 	}
-	return sqlitePlannerStatsMetrics{
+	metrics := sqlitePlannerStatsMetrics{
 		runs: registerOrReuse(reg, prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: sqlMetricNamePrefix + "planner_stats_runs_total",
@@ -80,6 +80,18 @@ func newPlannerStatsMetrics(
 			},
 		)),
 	}
+	// Export every series at zero, so a rate or alert over an outcome that
+	// has not happened yet reads zero instead of no data.
+	for _, trigger := range []string{
+		PlannerStatsTriggerStartup, PlannerStatsTriggerEpoch,
+	} {
+		for _, result := range []string{
+			"changed", "unchanged", "skipped", "error",
+		} {
+			metrics.runs.WithLabelValues(trigger, result)
+		}
+	}
+	return metrics
 }
 
 func registerOrReuse[C prometheus.Collector](
@@ -128,6 +140,11 @@ func (s *Store) OptimizePlannerStatsContext(
 	var result types.PlannerStatsResult
 	if s.closed.Load() || !s.ready.Load() {
 		return result, errors.New("sqlstore: store is not ready")
+	}
+	// Before the bulk-mode check and the fingerprint: the fingerprint reads
+	// SQLite's catalog, which other backends do not have.
+	if !s.dialect.HasIncrementalPlannerStats() {
+		return result, nil
 	}
 	s.scheduledWorkMu.Lock()
 	defer s.scheduledWorkMu.Unlock()
@@ -276,10 +293,10 @@ func (s *Store) reprepareHotStatements(ctx context.Context) {
 		return
 	}
 	s.stmtMu.Lock()
-	old := s.stmts
+	idle := s.retireStatementsLocked(s.stmts)
 	s.stmts = fresh
 	s.stmtMu.Unlock()
-	for _, stmt := range old {
+	for _, stmt := range idle {
 		_ = stmt.Close()
 	}
 }

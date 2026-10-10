@@ -224,10 +224,13 @@ type Store struct {
 	closeDone chan struct{}
 	closeErr  error
 
-	// stmtMu and stmts back the prepared-statement cache; see
-	// prepared_stmt.go for the mechanism and correctness argument.
-	stmtMu sync.Mutex
-	stmts  map[string]*sql.Stmt
+	// stmtMu guards stmts, the prepared-statement cache, and the borrow
+	// state that keeps a retired statement open until its callers finish;
+	// see prepared_stmt.go for the mechanism and correctness argument.
+	stmtMu      sync.Mutex
+	stmts       map[string]*sql.Stmt
+	stmtBorrows map[*sql.Stmt]int
+	stmtRetired map[*sql.Stmt]struct{}
 
 	// sumCredentialUtxoStakeCalls counts invocations of
 	// sumCredentialUtxoStake, the per-credential full live-UTxO aggregate

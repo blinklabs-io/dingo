@@ -108,9 +108,9 @@ writers wait for the run. The run is skipped during a bulk load, and the
 Mithril and backfill `ANALYZE` paths are unchanged. PostgreSQL and MySQL
 report the operation unsupported and are untouched.
 
-A run counts as having changed statistics when a 64-bit fingerprint of
-`sqlite_stat1` (row count plus a hash of `tbl`, `idx` and `stat`) differs
-before and after. Only then does the store refresh state that keeps the old
+A run counts as having changed statistics when a 64-bit FNV-1a hash of every
+`sqlite_stat1` row (`tbl`, `idx` and `stat`, in order) differs before and
+after. Only then does the store refresh state that keeps the old
 numbers. Pooled connections load statistics when they open, and later updates
 do not invalidate other connections' schemas, so for a file-backed store the
 read pool's idle limit is set to zero and restored, closing idle connections so
@@ -120,7 +120,9 @@ applies only when a connection is idle or returned. When the read and write
 pools are the same (in-memory shared-cache), idle connections are never
 dropped to zero because the database is destroyed with its last connection;
 `ANALYZE sqlite_schema` runs on a held connection instead. The cached hot
-statements are re-prepared and swapped in without leaving the cache empty.
+statements are re-prepared and swapped in without leaving the cache empty; a
+replaced statement a caller has already looked up stays open until that call
+returns, and is closed then.
 SQLite already re-plans a statement on the connection that ran the analysis, so
 the swap matters for statements whose cached plan could outlive the change on
 another connection, not for the write connection.

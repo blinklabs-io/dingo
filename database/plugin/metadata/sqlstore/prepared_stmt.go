@@ -211,10 +211,11 @@ func (s *Store) buildHotStatements(ctx context.Context) map[string]*sql.Stmt {
 			// directly, which dialectQueryer handles correctly on its own.
 			continue
 		}
-		// Cached for reuse: stmt is stored in s.stmts below and lives for
-		// the Store's lifetime, closed by closePreparedStatements on
-		// Reset, RestoreFrom, and CloseContext (see that function's doc
-		// comment). It is not a one-shot resource, so closing it here
+		// Cached for reuse: stmt is stored in s.stmts below and lives until
+		// it is retired, by closePreparedStatements on Reset, RestoreFrom
+		// and CloseContext or by reprepareHotStatements after a planner
+		// statistics change (see retireStatementsLocked). It is not a
+		// one-shot resource, so closing it here
 		// would defeat the caching this function exists to provide.
 		stmt, err := dialectDB.PrepareContext(ctx, query) //nolint:sqlclosecheck
 		if err != nil {
@@ -237,7 +238,9 @@ func (s *Store) buildHotStatements(ctx context.Context) map[string]*sql.Stmt {
 // !ok case with a plain, uncached call against its own queryer (which needs
 // no extra connection and so can never deadlock this way) rather than treat
 // a miss as an error: after Reset/RestoreFrom invalidate the cache, absence
-// is an expected, correct state, not a bug.
+// is an expected, correct state, not a bug. A caller that executes the
+// statement uses borrowCachedStmt instead, so a concurrent retirement cannot
+// close it first.
 func (s *Store) lookupCachedStmt(query string) (*sql.Stmt, bool) {
 	s.stmtMu.Lock()
 	defer s.stmtMu.Unlock()
@@ -245,18 +248,76 @@ func (s *Store) lookupCachedStmt(query string) (*sql.Stmt, bool) {
 	return stmt, ok
 }
 
-// closePreparedStatements closes and discards every cached statement. Safe
-// to call more than once (a nil map closes nothing) and safe to call while
-// another goroutine holds a previously-returned *sql.Stmt or *sql.Tx-scoped
-// statement derived from it: database/sql keeps a Stmt usable by any Rows
-// or Tx already using it and only releases the underlying driver resource
-// once every such use completes.
+// borrowCachedStmt is lookupCachedStmt for a caller about to execute the
+// statement. The caller must call release once the call on the statement has
+// returned. A statement retired while borrowed (by reprepareHotStatements or
+// closePreparedStatements) stays open until its last borrow is released:
+// lookup and execution are not atomic, and database/sql fails a call on a
+// closed *sql.Stmt with "statement is closed" rather than waiting. Rows or a
+// Row returned by the call keep the statement's driver resources alive on
+// their own, so release need not wait for them.
+func (s *Store) borrowCachedStmt(
+	query string,
+) (stmt *sql.Stmt, release func(), ok bool) {
+	s.stmtMu.Lock()
+	defer s.stmtMu.Unlock()
+	stmt, ok = s.stmts[query]
+	if !ok {
+		return nil, func() {}, false
+	}
+	if s.stmtBorrows == nil {
+		s.stmtBorrows = make(map[*sql.Stmt]int)
+	}
+	s.stmtBorrows[stmt]++
+	return stmt, func() { s.releaseCachedStmt(stmt) }, true
+}
+
+func (s *Store) releaseCachedStmt(stmt *sql.Stmt) {
+	s.stmtMu.Lock()
+	s.stmtBorrows[stmt]--
+	if s.stmtBorrows[stmt] > 0 {
+		s.stmtMu.Unlock()
+		return
+	}
+	delete(s.stmtBorrows, stmt)
+	_, retired := s.stmtRetired[stmt]
+	delete(s.stmtRetired, stmt)
+	s.stmtMu.Unlock()
+	if retired {
+		_ = stmt.Close()
+	}
+}
+
+// retireStatementsLocked closes every statement in stmts that no caller
+// borrows and marks the rest for releaseCachedStmt to close. The caller holds
+// stmtMu and must already have removed stmts from the cache; the returned
+// statements are closed after stmtMu is released.
+func (s *Store) retireStatementsLocked(
+	stmts map[string]*sql.Stmt,
+) []*sql.Stmt {
+	idle := make([]*sql.Stmt, 0, len(stmts))
+	for _, stmt := range stmts {
+		if s.stmtBorrows[stmt] == 0 {
+			idle = append(idle, stmt)
+			continue
+		}
+		if s.stmtRetired == nil {
+			s.stmtRetired = make(map[*sql.Stmt]struct{})
+		}
+		s.stmtRetired[stmt] = struct{}{}
+	}
+	return idle
+}
+
+// closePreparedStatements discards every cached statement, closing each one
+// now or, if a caller has borrowed it, when that caller releases it. Safe to
+// call more than once: a nil map closes nothing.
 func (s *Store) closePreparedStatements() {
 	s.stmtMu.Lock()
-	stmts := s.stmts
+	idle := s.retireStatementsLocked(s.stmts)
 	s.stmts = nil
 	s.stmtMu.Unlock()
-	for _, stmt := range stmts {
+	for _, stmt := range idle {
 		_ = stmt.Close()
 	}
 }
@@ -466,7 +527,7 @@ func (s *Store) queryRowCached(
 	query string,
 	args ...any,
 ) *sql.Row {
-	if cached, ok := s.lookupCachedStmt(query); ok {
+	if cached, release, ok := s.borrowCachedStmt(query); ok {
 		// Counted and timed here, not by countingQueryer: stmtForQueryer
 		// resolves straight to a *sql.Stmt, bypassing db (and any
 		// countingQueryer wrapping it) entirely -- see metrics.go's doc
@@ -488,6 +549,7 @@ func (s *Store) queryRowCached(
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		start := time.Now()
 		row := stmt.QueryRowContext(ctx, args...)
+		release()
 		if s.sqlQueryDuration != nil {
 			s.sqlQueryDuration.WithLabelValues(op, name).
 				Observe(time.Since(start).Seconds())
@@ -505,7 +567,7 @@ func (s *Store) execCached(
 	query string,
 	args ...any,
 ) (sql.Result, error) {
-	if cached, ok := s.lookupCachedStmt(query); ok {
+	if cached, release, ok := s.borrowCachedStmt(query); ok {
 		op, name := classifySQLStatement(query)
 		if s.sqlOperations != nil {
 			s.sqlOperations.WithLabelValues(op).Inc()
@@ -518,6 +580,7 @@ func (s *Store) execCached(
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		start := time.Now()
 		result, err := stmt.ExecContext(ctx, args...)
+		release()
 		if s.sqlQueryDuration != nil {
 			s.sqlQueryDuration.WithLabelValues(op, name).
 				Observe(time.Since(start).Seconds())
@@ -587,7 +650,7 @@ func (s *Store) queryRowsCached(
 	query string,
 	args ...any,
 ) (*sql.Rows, error) {
-	if cached, ok := s.lookupCachedStmt(query); ok {
+	if cached, release, ok := s.borrowCachedStmt(query); ok {
 		op, name := classifySQLStatement(query)
 		if s.sqlOperations != nil {
 			s.sqlOperations.WithLabelValues(op).Inc()
@@ -595,6 +658,7 @@ func (s *Store) queryRowsCached(
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		start := time.Now()
 		rows, err := stmt.QueryContext(ctx, args...)
+		release()
 		if s.sqlQueryDuration != nil {
 			s.sqlQueryDuration.WithLabelValues(op, name).
 				Observe(time.Since(start).Seconds())
