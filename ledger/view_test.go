@@ -6250,6 +6250,175 @@ func TestLedgerViewCommitteeHotAuthorizationRejectsMalformedSeatedColdHash(
 	}
 }
 
+func TestLedgerViewCommitteeMemberRejectsMalformedStoredIdentity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		tag  uint8
+		hash []byte
+	}{
+		{
+			name: "cold credential tag",
+			tag:  2,
+			hash: bytes.Repeat([]byte{0xa1}, lcommon.Blake2b224Size),
+		},
+		{
+			name: "cold credential hash",
+			tag:  uint8(lcommon.CredentialTypeAddrKeyHash),
+			hash: bytes.Repeat([]byte{0xa2}, lcommon.Blake2b224Size-1),
+		},
+	}
+	lookups := []struct {
+		name string
+		call func(*LedgerView, lcommon.Credential) error
+	}{
+		{
+			name: "legacy member",
+			call: func(lv *LedgerView, cold lcommon.Credential) error {
+				_, err := lv.CommitteeMember(cold.Credential)
+				return err
+			},
+		},
+		{
+			name: "credential member",
+			call: func(lv *LedgerView, cold lcommon.Credential) error {
+				_, err := lv.CommitteeCredentialMember(cold)
+				return err
+			},
+		},
+		{
+			name: "elected member",
+			call: func(lv *LedgerView, cold lcommon.Credential) error {
+				_, err := lv.CommitteeCredentialIsElected(cold)
+				return err
+			},
+		},
+		{
+			name: "member list",
+			call: func(lv *LedgerView, _ lcommon.Credential) error {
+				_, err := lv.CommitteeMembers()
+				return err
+			},
+		},
+	}
+	for _, tc := range tests {
+		for _, lookup := range lookups {
+			t.Run(tc.name+"/"+lookup.name, func(t *testing.T) {
+				t.Parallel()
+				lv, db := committeeTestView(
+					t, committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin),
+				)
+				raw, err := dbtest.RawSQLiteMetadata(t, db)
+				require.NoError(t, err)
+				_, err = raw.Exec(`
+INSERT INTO committee_member (
+    cold_cred_hash, cold_credential_tag, expires_epoch,
+    term_start_slot, term_start_slot_set, added_slot
+) VALUES (?, ?, ?, ?, TRUE, ?)`, tc.hash, tc.tag, 10, 1, 1)
+				require.NoError(t, err)
+
+				err = lookup.call(lv, committeeTestCredential(0xaf))
+				require.Error(t, err)
+				require.ErrorIs(
+					t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault,
+				)
+			})
+		}
+	}
+}
+
+func TestLedgerViewCommitteeAuthorizationRejectsMalformedStoredIdentity(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	validCold := bytes.Repeat([]byte{0xb1}, lcommon.Blake2b224Size)
+	validHot := bytes.Repeat([]byte{0xb2}, lcommon.Blake2b224Size)
+	tests := []struct {
+		name    string
+		coldTag uint8
+		cold    []byte
+		hotTag  uint8
+		hot     []byte
+	}{
+		{
+			name: "cold credential tag", coldTag: 2, cold: validCold,
+			hotTag: uint8(lcommon.CredentialTypeAddrKeyHash), hot: validHot,
+		},
+		{
+			name:    "cold credential hash",
+			coldTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+			cold:    validCold[:len(validCold)-1],
+			hotTag:  uint8(lcommon.CredentialTypeAddrKeyHash), hot: validHot,
+		},
+		{
+			name:    "hot credential tag",
+			coldTag: uint8(lcommon.CredentialTypeAddrKeyHash), cold: validCold,
+			hotTag: 2, hot: validHot,
+		},
+		{
+			name:    "hot credential hash",
+			coldTag: uint8(lcommon.CredentialTypeAddrKeyHash), cold: validCold,
+			hotTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+			hot:    validHot[:len(validHot)-1],
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lv, db := committeeTestView(
+				t, committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin),
+			)
+			raw, err := dbtest.RawSQLiteMetadata(t, db)
+			require.NoError(t, err)
+			_, err = raw.Exec(`
+INSERT INTO auth_committee_hot (
+    cold_credential_tag, cold_credential, hot_credential_tag,
+    host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?, ?, ?)`,
+				tc.coldTag, tc.cold, tc.hotTag, tc.hot, 1, 1,
+			)
+			require.NoError(t, err)
+
+			member, err := lv.CommitteeHotCredentialMember(
+				committeeTestCredential(0xbf),
+			)
+			require.Error(t, err)
+			require.Nil(t, member)
+			require.ErrorIs(
+				t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault,
+			)
+		})
+	}
+}
+
+func TestLedgerViewMissingCommitteeIdentityRemainsAbsent(t *testing.T) {
+	t.Parallel()
+
+	lv, _ := committeeTestView(
+		t, committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin),
+	)
+	cold := committeeTestCredential(0xc1)
+	hot := committeeTestCredential(0xc2)
+	legacy, err := lv.CommitteeMember(cold.Credential)
+	require.NoError(t, err)
+	require.Nil(t, legacy)
+	member, err := lv.CommitteeCredentialMember(cold)
+	require.NoError(t, err)
+	require.Nil(t, member)
+	elected, err := lv.CommitteeCredentialIsElected(cold)
+	require.NoError(t, err)
+	require.False(t, elected)
+	hotMember, err := lv.CommitteeHotCredentialMember(hot)
+	require.NoError(t, err)
+	require.Nil(t, hotMember)
+	members, err := lv.CommitteeMembers()
+	require.NoError(t, err)
+	require.Empty(t, members)
+	require.NoError(t, storageFaultOrErr(lv, nil))
+}
+
 func TestLedgerViewCommitteeProposalDecodeRecordsStorageFault(t *testing.T) {
 	t.Parallel()
 

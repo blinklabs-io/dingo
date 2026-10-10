@@ -1453,8 +1453,17 @@ func (lv *LedgerView) legacyCommitteeCredentialMember(
 		return nil, lv.storageFault("get committee members: %w", err)
 	}
 	for _, found := range dbMembers {
-		if found.ColdCredentialTag != coldTag ||
-			!bytes.Equal(found.ColdCredHash, coldCredential.Credential[:]) {
+		if found == nil {
+			continue
+		}
+		storedCold, err := lv.decodeStoredCommitteeCredential(
+			"cold", found.ColdCredentialTag, found.ColdCredHash,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if storedCold.CredType != uint(coldTag) ||
+			storedCold.Credential != coldCredential.Credential {
 			continue
 		}
 		member := &lcommon.CommitteeMember{
@@ -1493,8 +1502,17 @@ func (lv *LedgerView) CommitteeCredentialMember(
 	}
 	var found *models.CommitteeMember
 	for _, member := range dbMembers {
-		if member.ColdCredentialTag == coldTag &&
-			bytes.Equal(member.ColdCredHash, coldCredential.Credential[:]) {
+		if member == nil {
+			continue
+		}
+		storedCold, err := lv.decodeStoredCommitteeCredential(
+			"cold", member.ColdCredentialTag, member.ColdCredHash,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if storedCold.CredType == uint(coldTag) &&
+			storedCold.Credential == coldCredential.Credential {
 			if found == nil || member.TermStartSlot > found.TermStartSlot ||
 				(member.TermStartSlot == found.TermStartSlot && member.AddedSlot > found.AddedSlot) ||
 				(member.TermStartSlot == found.TermStartSlot && member.AddedSlot == found.AddedSlot && member.ID > found.ID) {
@@ -1558,15 +1576,13 @@ func (lv *LedgerView) populateCommitteeMemberStatus(
 		return lv.storageFault("get committee hot credential: %w", err)
 	}
 	if authorization != nil {
-		hotKey, err := lcommon.NewBlake2b224Checked(
-			authorization.HotCredential,
+		_, hotCredential, err := lv.decodeStoredCommitteeAuthorization(
+			authorization,
 		)
 		if err != nil {
-			return lv.storageFault(
-				"decode stored committee hot credential: %w", err,
-			)
+			return err
 		}
-		member.HotKey = &hotKey
+		member.HotKey = &hotCredential.Credential
 	}
 	return nil
 }
@@ -1699,6 +1715,48 @@ type committeeHotAuthorization struct {
 	member *lcommon.CommitteeMember
 }
 
+func (lv *LedgerView) decodeStoredCommitteeCredential(
+	role string,
+	tag uint8,
+	hash []byte,
+) (lcommon.Credential, error) {
+	if _, err := models.CredentialTagFromUint(uint(tag)); err != nil {
+		return lcommon.Credential{}, lv.storageFault(
+			"decode stored committee credential: %w",
+			fmt.Errorf("%s credential tag: %w", role, err),
+		)
+	}
+	checked, err := lcommon.NewBlake2b224Checked(hash)
+	if err != nil {
+		return lcommon.Credential{}, lv.storageFault(
+			"decode stored committee credential: %w",
+			fmt.Errorf("%s credential hash: %w", role, err),
+		)
+	}
+	return lcommon.Credential{
+		CredType:   uint(tag),
+		Credential: checked,
+	}, nil
+}
+
+func (lv *LedgerView) decodeStoredCommitteeAuthorization(
+	authorization *models.AuthCommitteeHot,
+) (lcommon.Credential, lcommon.Credential, error) {
+	cold, err := lv.decodeStoredCommitteeCredential(
+		"cold", authorization.ColdCredentialTag, authorization.ColdCredential,
+	)
+	if err != nil {
+		return lcommon.Credential{}, lcommon.Credential{}, err
+	}
+	hot, err := lv.decodeStoredCommitteeCredential(
+		"hot", authorization.HotCredentialTag, authorization.HotCredential,
+	)
+	if err != nil {
+		return lcommon.Credential{}, lcommon.Credential{}, err
+	}
+	return cold, hot, nil
+}
+
 // committeeHotAuthorizations returns the cold credentials whose committee
 // state currently authorizes hotCredential, seated members first.
 //
@@ -1718,28 +1776,6 @@ func (lv *LedgerView) committeeHotAuthorizations(
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
 	}
-	matchesHot := func(authorization *models.AuthCommitteeHot) bool {
-		return authorization != nil &&
-			authorization.HotCredentialTag == hotTag &&
-			bytes.Equal(
-				authorization.HotCredential,
-				hotCredential.Credential[:],
-			)
-	}
-	coldCredential := func(
-		authorization *models.AuthCommitteeHot,
-	) (lcommon.Credential, error) {
-		hash, err := lcommon.NewBlake2b224Checked(authorization.ColdCredential)
-		if err != nil {
-			return lcommon.Credential{}, lv.storageFault(
-				"decode stored committee cold credential: %w", err,
-			)
-		}
-		return lcommon.Credential{
-			CredType:   uint(authorization.ColdCredentialTag),
-			Credential: hash,
-		}, nil
-	}
 	type coldKey struct {
 		tag  uint8
 		hash lcommon.Blake2b224
@@ -1754,12 +1790,18 @@ func (lv *LedgerView) committeeHotAuthorizations(
 		return nil, lv.storageFault("get active committee hot credentials: %w", err)
 	}
 	for _, authorization := range seatedAuthorizations {
-		if !matchesHot(authorization) {
+		if authorization == nil {
 			continue
 		}
-		cold, err := coldCredential(authorization)
+		cold, storedHot, err := lv.decodeStoredCommitteeAuthorization(
+			authorization,
+		)
 		if err != nil {
 			return nil, err
+		}
+		if storedHot.CredType != uint(hotTag) ||
+			storedHot.Credential != hotCredential.Credential {
+			continue
 		}
 		key := coldKey{
 			tag:  authorization.ColdCredentialTag,
@@ -1791,15 +1833,15 @@ func (lv *LedgerView) committeeHotAuthorizations(
 		if member == nil {
 			continue
 		}
-		hash, err := lcommon.NewBlake2b224Checked(member.ColdCredHash)
+		storedCold, err := lv.decodeStoredCommitteeCredential(
+			"cold", member.ColdCredentialTag, member.ColdCredHash,
+		)
 		if err != nil {
-			return nil, lv.storageFault(
-				"decode stored seated committee cold credential: %w", err,
-			)
+			return nil, err
 		}
 		seatedColds[coldKey{
 			tag:  member.ColdCredentialTag,
-			hash: hash,
+			hash: storedCold.Credential,
 		}] = struct{}{}
 	}
 	authorizations, err := lv.ls.db.GetCommitteeHotAuthorizationsSince(
@@ -1811,12 +1853,18 @@ func (lv *LedgerView) committeeHotAuthorizations(
 		return nil, lv.storageFault("get committee hot credentials: %w", err)
 	}
 	for _, authorization := range authorizations {
-		if !matchesHot(authorization) {
+		if authorization == nil {
 			continue
 		}
-		cold, err := coldCredential(authorization)
+		cold, storedHot, err := lv.decodeStoredCommitteeAuthorization(
+			authorization,
+		)
 		if err != nil {
 			return nil, err
+		}
+		if storedHot.CredType != uint(hotTag) ||
+			storedHot.Credential != hotCredential.Credential {
+			continue
 		}
 		key := coldKey{
 			tag:  authorization.ColdCredentialTag,
@@ -1877,8 +1925,17 @@ func (lv *LedgerView) CommitteeCredentialIsElected(
 		return false, lv.storageFault("get elected committee members: %w", err)
 	}
 	for _, member := range members {
-		if member != nil && member.ColdCredentialTag == coldTag &&
-			bytes.Equal(member.ColdCredHash, coldCredential.Credential[:]) {
+		if member == nil {
+			continue
+		}
+		storedCold, err := lv.decodeStoredCommitteeCredential(
+			"cold", member.ColdCredentialTag, member.ColdCredHash,
+		)
+		if err != nil {
+			return false, err
+		}
+		if storedCold.CredType == uint(coldTag) &&
+			storedCold.Credential == coldCredential.Credential {
 			return true, nil
 		}
 	}
@@ -1909,9 +1966,15 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 		if m == nil {
 			continue
 		}
+		storedCold, err := lv.decodeStoredCommitteeCredential(
+			"cold", m.ColdCredentialTag, m.ColdCredHash,
+		)
+		if err != nil {
+			return nil, err
+		}
 		key := credentialKey{
 			tag:  m.ColdCredentialTag,
-			hash: string(m.ColdCredHash),
+			hash: string(storedCold.Credential[:]),
 		}
 		if tagsByHash[key.hash] == nil {
 			tagsByHash[key.hash] = make(map[uint8]struct{}, 1)
@@ -1959,21 +2022,17 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 		}
 		// Validate before the ambiguity filter, or a malformed hash seated
 		// under both tags is dropped silently instead of failing.
-		coldHash, err := lcommon.NewBlake2b224Checked(found.ColdCredHash)
+		coldCredential, err := lv.decodeStoredCommitteeCredential(
+			"cold", found.ColdCredentialTag, found.ColdCredHash,
+		)
 		if err != nil {
-			return nil, lv.storageFault(
-				"decode stored committee cold credential: %w", err,
-			)
+			return nil, err
 		}
 		// The legacy list shape cannot carry a credential tag, so a hash
 		// seated under both tags stays ambiguous and is omitted rather than
 		// aliasing a key member onto a script member.
 		if len(tagsByHash[key.hash]) != 1 {
 			continue
-		}
-		coldCredential := lcommon.Credential{
-			CredType:   uint(found.ColdCredentialTag),
-			Credential: coldHash,
 		}
 		member := &lcommon.CommitteeMember{
 			ColdKey:     coldCredential.Credential,
@@ -2008,15 +2067,13 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 			return nil, lv.storageFault("get committee hot credential: %w", err)
 		}
 		if authorization != nil {
-			hotKey, err := lcommon.NewBlake2b224Checked(
-				authorization.HotCredential,
+			_, hotCredential, err := lv.decodeStoredCommitteeAuthorization(
+				authorization,
 			)
 			if err != nil {
-				return nil, lv.storageFault(
-					"decode stored committee hot credential: %w", err,
-				)
+				return nil, err
 			}
-			member.HotKey = &hotKey
+			member.HotKey = &hotCredential.Credential
 		}
 		members = append(members, *member)
 	}
