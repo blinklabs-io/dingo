@@ -75,9 +75,9 @@ func TestRollbackWaitsForDestructiveTransitionBarrier(t *testing.T) {
 }
 
 func TestReconciliationTakesPruneLockBeforeDestructiveBarrier(t *testing.T) {
+	// Not t.Parallel: both reconciliation tests inspect process-wide goroutine
+	// dumps for identical frames and could satisfy each other's waits.
 	fixture := newChainsyncRollbackFixture(t)
-	require.NoError(t, fixture.ls.chain.Rollback(t.Context(), fixture.ancestorTip.Point))
-
 	// Hold the prune lock so reconciliation pauses before taking the
 	// destructive barrier. Another destructive transition must still be able
 	// to enter while reconciliation is waiting for the prune lock.
@@ -128,6 +128,8 @@ func TestReconciliationTakesPruneLockBeforeDestructiveBarrier(t *testing.T) {
 }
 
 func TestReconciliationWaitsForDestructiveTransitionBarrier(t *testing.T) {
+	// Not t.Parallel: both reconciliation tests inspect process-wide goroutine
+	// dumps for identical frames and could satisfy each other's waits.
 	fixture := newChainsyncRollbackFixture(t)
 	require.NoError(t, fixture.ls.chain.Rollback(t.Context(), fixture.ancestorTip.Point))
 	finish := fixture.ls.db.BeginDestructiveTransition()

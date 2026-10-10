@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -735,13 +736,16 @@ func registerExtendedCardanoTools(
 			if err != nil {
 				return nil, nil, fmt.Errorf("invalid output CBOR hex: %w", err)
 			}
-			n, err := cbor.Decode(raw, &output)
+			decoded, n, err := safedecode.Cbor[babbage.BabbageTransactionOutput](
+				raw,
+			)
 			if err != nil {
 				return nil, nil, fmt.Errorf("decode output CBOR: %w", err)
 			}
 			if n != len(raw) {
 				return nil, nil, errors.New("trailing data after output CBOR")
 			}
+			output = decoded
 		} else {
 			if input.HasDatum || input.InlineDatumHex != "" || input.RefScriptHex != "" || input.AssetsCount != 0 || input.PoliciesCount != 0 {
 				return nil, nil, errors.New("provide output_cbor_hex for assets, datums or reference scripts; counts alone cannot determine serialized size")

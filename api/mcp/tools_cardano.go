@@ -29,10 +29,10 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/btcsuite/btcd/btcutil/bech32"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -1916,9 +1916,12 @@ func RegisterCardanoTools(
 }
 
 func cborToPrettyJSON(raw []byte) (string, error) {
-	var val any
-	if _, err := cbor.Decode(raw, &val); err != nil {
+	val, consumed, err := safedecode.Cbor[any](raw)
+	if err != nil {
 		return "", err
+	}
+	if consumed != len(raw) {
+		return "", errors.New("trailing data after CBOR value")
 	}
 	cleaned := sanitizeCborValue(val)
 	jsonBytes, err := json.MarshalIndent(cleaned, "", "  ")
@@ -2166,6 +2169,42 @@ type txEvaluator interface {
 	) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error)
 }
 
+func decodeEvaluateTransaction(txBytes []byte) (lcommon.Transaction, error) {
+	return decodeEvaluateTransactionWith(
+		txBytes,
+		safedecode.TransactionType,
+		safedecode.Transaction,
+	)
+}
+
+func decodeEvaluateTransactionWith(
+	txBytes []byte,
+	transactionType func([]byte) (uint, error),
+	transaction func(uint, []byte) (lcommon.Transaction, error),
+) (lcommon.Transaction, error) {
+	return safedecode.Guard(func() (lcommon.Transaction, error) {
+		_, consumed, err := safedecode.Cbor[cbor.RawMessage](txBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode transaction CBOR: %w", err)
+		}
+		if consumed != len(txBytes) {
+			return nil, safedecode.ErrTrailingData
+		}
+		txType, err := transactionType(txBytes)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"failed to determine transaction type: %w",
+				err,
+			)
+		}
+		tx, err := transaction(txType, txBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode transaction: %w", err)
+		}
+		return tx, nil
+	})
+}
+
 func registerEvaluateTxTool(
 	server *mcp.Server,
 	evaluator txEvaluator,
@@ -2212,37 +2251,14 @@ func registerEvaluateTxTool(
 			}, nil, nil
 		}
 
-		var rawCBOR cbor.RawMessage
-		n, err := cbor.Decode(txBytes, &rawCBOR)
-		if err != nil {
-			return nil, nil, fmt.Errorf("invalid transaction CBOR: %w", err)
-		}
-		if n != len(txBytes) {
-			return nil, nil, errors.New("trailing data after transaction CBOR")
-		}
-		txType, err := gledger.DetermineTransactionType(txBytes)
+		tx, err := decodeEvaluateTransaction(txBytes)
 		if err != nil {
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
 					&mcp.TextContent{
 						Text: fmt.Sprintf(
-							"Error: Invalid transaction CBOR: failed to determine transaction type: %v",
-							err,
-						),
-					},
-				},
-			}, nil, nil
-		}
-
-		tx, err := gledger.NewTransactionFromCbor(txType, txBytes)
-		if err != nil {
-			return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{
-					&mcp.TextContent{
-						Text: fmt.Sprintf(
-							"Error: Invalid transaction CBOR: failed to decode transaction: %v",
+							"Error: Invalid transaction CBOR: %v",
 							err,
 						),
 					},

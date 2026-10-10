@@ -269,10 +269,12 @@ publishes it only after release finalization.
 `dingo devnet` is a convenience composition around the normal node startup. It
 copies the embedded single-node DevNet configuration and installs the
 local-only producer credentials from `internal/devnetkeys` into a private
-temporary directory, refreshes the Byron and Shelley start times, and starts
-the same executable with dev mode and block production enabled. The key bundle
-is separate from embedded network configuration, and normal node key paths
-still come from the operator. The child process runs the ordinary `serveRun`
+temporary directory. Key replacement is atomic on Unix; Windows replacement
+uses `os.Root.Rename` without an atomicity guarantee. Both platforms restrict
+key access to the owner. The command refreshes the Byron and Shelley start
+times and starts the same executable with dev mode and block production
+enabled. The key bundle is separate from embedded network configuration, and
+normal node key paths still come from the operator. The child process runs the ordinary `serveRun`
 and `internal/node` composition with an isolated database and no configured
 peers. The command forwards shutdown signals and removes its temporary
 directory after the node stops; the npm wrapper passes `devnet` through to the
@@ -9819,13 +9821,12 @@ by stake credential rather than a single address. Account UTxOs reuse the
 UTxO address-pattern query with a delegation-part-only pattern (matching
 every payment address sharing the stake credential) and recover each row's
 exact payment address from decoded output CBOR, the same CBOR-derived
-datum/reference-script recovery `/addresses/{address}/utxos` uses; like
-`/addresses/{address}/utxos`, pagination happens after fetching the
-credential's full live-UTxO set (there is no SQL `LIMIT`), which is an
-existing, accepted characteristic of that query shape rather than something
-introduced for this endpoint. Account withdrawals read the rollback-aware
-`account_reward_delta` withdrawal journal joined to its transaction, with
-`LIMIT`/`OFFSET` applied in SQL.
+datum/reference-script recovery `/addresses/{address}/utxos` uses. The
+account query counts matching live UTxOs and fetches the requested page with
+SQL `LIMIT`/`OFFSET`; the count and page share one read transaction so they
+describe the same database snapshot. Account withdrawals read the
+rollback-aware `account_reward_delta` withdrawal journal joined to its
+transaction, with `LIMIT`/`OFFSET` applied in SQL.
 
 Account and address transaction queries are bounded by the requested page
 size, not by the credential's or address's full transaction history:

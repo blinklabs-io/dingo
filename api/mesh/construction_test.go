@@ -1007,6 +1007,48 @@ func TestConstructionParseUnsigned(t *testing.T) {
 	require.Empty(t, resp.AccountIdentifierSigners)
 }
 
+func TestConstructionParseUnsignedRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler(t, newTestDeps())
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x22), nil,
+	)
+	unsigned := requestPayloads(t, h, addr)
+
+	rec := postJSON(t, h, "/construction/parse", parseRequest(
+		unsigned+"00", false,
+	))
+
+	requireMeshError(
+		t,
+		rec,
+		ErrInvalidTransaction,
+		http.StatusBadRequest,
+	)
+}
+
+func TestConstructionCombineRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler(t, newTestDeps())
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x22), nil,
+	)
+	unsigned := requestPayloads(t, h, addr)
+
+	rec := postJSON(t, h, "/construction/combine", combineRequest(
+		unsigned+"00", nil,
+	))
+
+	requireMeshError(
+		t,
+		rec,
+		ErrInvalidTransaction,
+		http.StatusBadRequest,
+	)
+}
+
 // TestConstructionParseCertificates covers the certificate shapes the
 // converter recognizes: each supported certificate becomes exactly one
 // operation, and unsupported ones are dropped rather than mis-typed.

@@ -251,12 +251,11 @@ func TestSnapshotMaxCommitPauseReleasesBarrierBeforeBackupStops(t *testing.T) {
 	}
 
 	releaseBackup()
-	select {
-	case err := <-finished:
-		require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
-	case <-time.After(5 * time.Second):
-		t.Fatal("snapshot did not return after the backup stopped")
-	}
+	err := testutil.RequireReceive(
+		t, finished, testutil.AsyncWait,
+		"snapshot must return after its backup stops",
+	)
+	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
 	require.NoDirExists(t, dir)
 }
 
