@@ -101,6 +101,44 @@ func TestMySQLRewardLiveStakeBatchBoundaries(t *testing.T) {
 	)
 }
 
+func TestMySQLOpCertConflictWithClientFoundRows(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	store := newIntegrationSQLStore(
+		t,
+		"mysql",
+		mysqlDSNWithClientFoundRows(t, dsn),
+		"mysql",
+		database,
+	)
+	poolKeyHash := lcommon.PoolKeyHash{1}
+	_, err := store.writeDB.ExecContext(
+		t.Context(),
+		"INSERT INTO pool (pool_key_hash, latest_op_cert_sequence) VALUES (?, ?)",
+		poolKeyHash.Bytes(),
+		0,
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.UpdatePoolOpCertSequence(poolKeyHash, 2, 10, nil))
+
+	err = store.UpdatePoolOpCertSequence(poolKeyHash, 3, 10, nil)
+	require.ErrorContains(t, err, "opcert counter conflict")
+
+	var latest, recorded uint64
+	require.NoError(t, store.writeDB.QueryRowContext(
+		t.Context(),
+		"SELECT latest_op_cert_sequence FROM pool WHERE pool_key_hash = ?",
+		poolKeyHash.Bytes(),
+	).Scan(&latest))
+	require.NoError(t, store.writeDB.QueryRowContext(
+		t.Context(),
+		"SELECT sequence FROM pool_opcert_sequence WHERE pool_key_hash = ? AND slot = ?",
+		poolKeyHash.Bytes(),
+		10,
+	).Scan(&recorded))
+	require.Equal(t, uint64(2), latest)
+	require.Equal(t, latest, recorded)
+}
+
 // newMySQLIntegrationDatabase creates a throwaway database and returns a DSN
 // that selects it.
 func newMySQLIntegrationDatabase(t *testing.T) (string, string) {

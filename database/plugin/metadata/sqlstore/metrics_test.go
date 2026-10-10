@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
@@ -602,4 +603,22 @@ func TestMissingCriticalDeferredIndexesIsCounted(t *testing.T) {
 		counterValue(t, reg, "select"),
 		"expected MissingCriticalDeferredIndexes' per-index checks to be counted",
 	)
+}
+
+func TestUpdatePoolOpCertSequenceReadsOnlyOnConflict(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	store := newMigratedSQLiteStoreWithRegistry(t, reg)
+	poolKeyHash := lcommon.PoolKeyHash{1}
+
+	before := counterValue(t, reg, "select")
+	require.NoError(t, store.UpdatePoolOpCertSequence(poolKeyHash, 2, 10, nil))
+	require.Equal(t, before, counterValue(t, reg, "select"))
+
+	require.NoError(t, store.UpdatePoolOpCertSequence(poolKeyHash, 2, 10, nil))
+	require.Equal(t, before+1, counterValue(t, reg, "select"))
+
+	err := store.UpdatePoolOpCertSequence(poolKeyHash, 3, 10, nil)
+	require.ErrorContains(t, err, "opcert counter conflict")
+	require.Equal(t, before+2, counterValue(t, reg, "select"))
 }
