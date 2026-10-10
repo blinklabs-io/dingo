@@ -67,7 +67,7 @@ func TestApplyPathStatementsArePreparedOnce(t *testing.T) {
 		// the input loop, which issues the spend-state SELECT.
 		for range 2 {
 			require.NoError(t, store.SetTransaction(
-				fx.tx, fx.point, 0, fx.certDeposits, false, nil,
+				fx.tx, fx.point, 0, fx.certDeposits, false, nil, 0,
 			))
 		}
 		_, err := store.GetAccountByCredential(0, fx.ref.Key, true, nil)
