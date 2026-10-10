@@ -197,11 +197,31 @@ storage providers. `plugins.storage.blob.config.dataDir` and
 when either is unset, that provider inherits `databasePath`.
 
 File-backed SQLite supports an optional `plugins.storage.metadata.config.vacuumIntervalSeconds`
-setting. It defaults to `0`, which disables full `VACUUM`: SQLite's full
-database rebuild holds a database-wide writer lock and can stop ledger writes
-for the duration. Setting a positive interval explicitly opts into that pause.
-VACUUM runs on its own ticker and does not change the separate daily committee
+setting. It defaults to `0`, which disables space reclaim. A full `VACUUM`
+rewrites the file under SQLite's database-wide write lock, and no connection
+choice avoids that lock: a writer on any other connection fails with
+`SQLITE_BUSY` once its busy timeout elapses, and ledger code does not retry it.
+The reclaim job therefore runs on the single-connection write pool, where
+ledger writes queue in Go rather than fail, and it keeps each hold short. The
+first run on a database whose `auto_vacuum` mode is not `INCREMENTAL` sets that
+mode and performs one full `VACUUM`, which holds the pool for the whole rewrite
+(minutes on a large database). Every later run releases free pages with
+`PRAGMA incremental_vacuum` in steps of 1000 pages and returns the connection
+to the pool between steps, so queued writes run between steps. If a step does
+not reduce `freelist_count`, the run stops with an error instead of continuing
+without progress. Incremental vacuum returns free pages to the filesystem; it
+does not defragment the file.
+The job runs on its own ticker and does not change the separate daily committee
 authorization cleanup schedule.
+
+The maintenance and VACUUM tickers wait their interval plus up to 10% random
+jitter between runs, so they do not recur at the same offset every day. A run
+that comes due while any connection in the shared SQL pool is in use is
+postponed and rechecked after the shorter of the interval and one minute. For
+PostgreSQL and MySQL, read and write handles share one pool, so read traffic can
+also postpone a run; a bulk-load session that retains a pool connection also
+holds maintenance until that session ends. A job postponed ten consecutive
+times logs a warning naming the job.
 
 Dingo stores chain state in two sibling stores:
 
@@ -439,6 +459,14 @@ statement is naturally idempotent on replay, so the runner gained matching
 "already applied" guards for a dropped column/index alongside its existing
 duplicate-column/duplicate-index guards for `ADD COLUMN`, confirming absence
 against the live schema before swallowing the error.
+
+An `ADD COLUMN` duplicate-column error is accepted as an already-applied
+statement only when the existing column matches the declared type,
+nullability and default. The lookup is bound to the migration's own schema
+(PostgreSQL resolves the table through the connection's `search_path`, MySQL
+through `DATABASE()`). A definition carrying any other constraint (`UNIQUE`,
+`CHECK`, `REFERENCES`, ...) cannot be read back from the catalog and is never
+accepted.
 
 Migration `v21` (`asset-amount-fingerprint-index-drop`, integer version 21)
 drops `idx_asset_amount` and `idx_asset_fingerprint`, carrying no column drop:
@@ -2342,7 +2370,7 @@ high-water mark under `wal_autocheckpoint` alone. With `journal_size_limit`
 configured, reset WALs can be capped at 64 MiB, while `checkpointWAL` is the
 operation that can reduce the file to zero: a `Store.Checkpoint` callback (a
 hook alongside `Store.Maintenance`, on its own two-minute ticker independent
-of `Maintenance`'s 24-hour VACUUM cadence — see `sqlstore.Config.Checkpoint`)
+of the `Maintenance` and `Vacuum` cadences — see `sqlstore.Config.Checkpoint`)
 attempts `PRAGMA wal_checkpoint(TRUNCATE)` every two minutes. Before
 truncating, `checkpointWAL` runs PASSIVE and proceeds to TRUNCATE only when
 PASSIVE reports every WAL frame checkpointed. If a reader
@@ -3736,6 +3764,17 @@ predicate over-counts them. Blockfrost's `AccountUTXOs` adapter
 (`api/blockfrost/adapter_account_activity.go`) uses `Offset`, `Descending`,
 and this count for a stake credential's UTxOs, since a credential-only
 pattern never needs exact-address filtering.
+
+`UtxoWithOrderingQuery.FilterByAsset` combined with `MatchAllAddresses` has no
+address to narrow the live set, so both queries start from the policy's `asset`
+rows (`idx_asset_policy_id`), deduplicate their `utxo_id`s, and look the live
+UTxOs up by primary key. Probing `asset` once per live UTxO instead costs the
+same however few UTxOs hold the policy. The cost of the asset-first form scales
+with the currently retained `asset` rows under the policy; spent UTxO rows are
+removed during pruning. A policy with many retained asset rows relative to its
+live UTxOs can still read more than a live scan would. With an address filter
+the asset filter remains a per-row `EXISTS` over
+the already narrowed set.
 
 `AddressUTXOs` (exact address) cannot use `Offset`/`Count`, since an exact
 total requires CBOR-decoding every coarse candidate either way. Instead

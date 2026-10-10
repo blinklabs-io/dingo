@@ -74,10 +74,17 @@ versus MySQL's `UPDATE ... JOIN ... ON ... SET ...`, since MySQL has no
 `UPDATE ... FROM` syntax at all). Generated query packages remain
 internal so generated row types cannot leak into ledger or API packages.
 
+Scheduled metadata maintenance waits until the shared SQL pool has no checked
+out connections before starting, then retries after a short delay if the pool
+is still busy. On PostgreSQL and MySQL this also includes read activity and a
+bulk-load session holding its dedicated connection; the detailed scheduling
+and SQLite reclaim behavior is documented in `DATABASE.md`.
+
 The SQLite provider is a thin factory around the pure-Go driver. It configures
 one WAL writer, a separate read pool, pragmas, disk-size accounting, migration
-locking, query tracing, daily `VACUUM`, and (on its own two-minute ticker,
-independent of `VACUUM`'s cadence) a best-effort `PRAGMA
+locking, query tracing, optional incremental space reclaim (off by default),
+and (on its own two-minute ticker, independent of the reclaim cadence) a
+best-effort `PRAGMA
 wal_checkpoint(TRUNCATE)` attempt against a dedicated short-timeout
 connection (never the write pool) — see `checkpointWAL` and
 `Store.Checkpoint` in DATABASE.md's write-amplification discussion for why

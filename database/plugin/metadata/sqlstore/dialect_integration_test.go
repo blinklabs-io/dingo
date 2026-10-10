@@ -88,6 +88,22 @@ func TestMySQLPParamUpdateOrdering(t *testing.T) {
 	)
 }
 
+func TestPostgresUtxoOrderingAssetFilter(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testUtxoOrderingAssetFilter(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLUtxoOrderingAssetFilter(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testUtxoOrderingAssetFilter(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
 func TestMySQLSQLStoreIntegration(t *testing.T) {
 	dsn, database := newMySQLIntegrationDatabase(t)
 	testSQLStoreIntegration(t, "mysql", dsn, "mysql", database)
@@ -226,6 +242,7 @@ func testSQLStoreIntegration(
 	store := newIntegrationSQLStore(t, driver, dsn, dialectName, lockNamespace)
 	db, dialect := store.writeDB, store.dialect
 	testBatchedTransactionWrites(t, store)
+	testLimitOffset(t, store)
 
 	txn := store.Transaction(t.Context())
 	require.NoError(t, store.SetCommitTimestamp(42, txn))

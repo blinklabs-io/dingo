@@ -28,6 +28,48 @@ groups:
           summary: "Dingo has no outgoing peers on {{ $labels.network }}"
           description: "Node {{ $labels.instance }} on {{ $labels.network }}: zero outgoing connections for 5+ minutes. Node cannot sync."
 
+  # Signals of a stalled metadata write path (for example a VACUUM or a long
+  # write transaction holding the write connection). Each one is cheap to
+  # read on its own, so a stall is diagnosable without cross-referencing
+  # metrics after the fact.
+  - name: dingo-database
+    rules:
+      - alert: DingoWritePoolContention
+        # The write pool holds a single connection, so ledger writers never
+        # wait for it on a healthy node and the counter stays flat at 0. The
+        # 5 second floor ignores a brief, expected overlap of two writers.
+        expr: increase(dingo_database_sql_pool_wait_duration_seconds_total{pool="write"}[5m]) > 5
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dingo write pool is contended on {{ $labels.instance }}"
+          description: "Node {{ $labels.instance }}: callers waited more than 5 seconds in total for the metadata write connection in the last 5 minutes. A long write transaction or maintenance job is holding it and ledger writes are queueing."
+
+      - alert: DingoWALBytesHigh
+        # A healthy WAL sits at the checkpoint floor (tens of MiB). Hundreds
+        # of MiB means a bulk rewrite is in progress or a long-lived reader
+        # is preventing the TRUNCATE checkpoint from shrinking the file.
+        expr: dingo_database_sql_wal_bytes > 524288000
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dingo SQLite WAL is oversized on {{ $labels.instance }}"
+          description: "Node {{ $labels.instance }}: the metadata WAL file has stayed above 500 MiB for 1 minute. A bulk rewrite such as VACUUM, or a checkpoint blocked by a long-lived reader, is in progress."
+
+      - alert: DingoBlockfetchDelayHigh
+        # The user-visible end of the same stall class: one block arriving
+        # late shows in the 16-slot delay ring until newer blocks displace
+        # it; report the latest 16 fetched blocks, not a five-minute window.
+        expr: max by (job, instance) (dingo_blockfetch_recent_delay_seconds) > 10
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dingo block propagation is delayed on {{ $labels.instance }}"
+          description: "Node {{ $labels.instance }}: one of the latest 16 fetched blocks arrived more than 10 seconds after its slot time."
+
   # node-parity (blinklabs-io/dingo#1900): cross-node ledger-state
   # comparison. check/watch compare against a reference cardano-node;
   # from-genesis compares a replay against Koios. The two run at very
