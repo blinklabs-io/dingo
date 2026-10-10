@@ -104,6 +104,16 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			}
 			return o.EndorserBlockTxsByHash(ebHash, ebSlot)
 		},
+		EndorserBlockValidation: func(
+			ebHash []byte,
+			ebSlot uint64,
+		) ledger.EndorserBlockValidationStatus {
+			o := n.ouroboros()
+			if o == nil {
+				return ledger.EndorserBlockValidationUnknown
+			}
+			return o.EndorserBlockValidation(ebHash, ebSlot)
+		},
 		// Actively fetches a referenced endorser block by point and caches
 		// it. Used during historical catch-up: the prototype relay serves
 		// any endorser block by point on demand, so a from-scratch sync can

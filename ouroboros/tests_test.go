@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gconnection "github.com/blinklabs-io/gouroboros/connection"
@@ -1087,6 +1088,13 @@ func TestPeerOfferedLedgerInvalidEndorserBlockIsNotVoted(t *testing.T) {
 	require.True(t, ok)
 	require.True(t, data.slotVerified)
 	require.Equal(t, leiosEBValidationInvalid, data.semanticValidationStatus)
+	_, providerOK := o.EndorserBlockTxsByHash(point.Hash, point.Slot)
+	require.False(t, providerOK)
+	require.Equal(
+		t,
+		dledger.EndorserBlockValidationInvalid,
+		o.EndorserBlockValidation(point.Hash, point.Slot),
+	)
 	require.Empty(
 		t,
 		votes.ebs,

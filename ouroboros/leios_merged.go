@@ -1668,10 +1668,34 @@ func (o *Ouroboros) EndorserBlockTxsByHash(
 	ebSlot uint64,
 ) ([]cbor.RawMessage, bool) {
 	data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash)
-	if !ok || !data.completeTxCache() || !data.slotVerified {
+	if !ok || !data.completeTxCache() || !data.slotVerified ||
+		data.semanticValidationStatus == leiosEBValidationPending ||
+		data.semanticValidationStatus == leiosEBValidationInvalid {
 		return nil, false
 	}
 	return cloneRawMessages(data.txsRaw), true
+}
+
+// EndorserBlockValidation reports the cached semantic verdict for an endorser
+// block occurrence.
+func (o *Ouroboros) EndorserBlockValidation(
+	ebHash []byte,
+	ebSlot uint64,
+) ledger.EndorserBlockValidationStatus {
+	data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash)
+	if !ok {
+		return ledger.EndorserBlockValidationUnknown
+	}
+	switch data.semanticValidationStatus {
+	case leiosEBValidationPending:
+		return ledger.EndorserBlockValidationPending
+	case leiosEBValidationValid:
+		return ledger.EndorserBlockValidationValid
+	case leiosEBValidationInvalid:
+		return ledger.EndorserBlockValidationInvalid
+	default:
+		return ledger.EndorserBlockValidationUnknown
+	}
 }
 
 // EndorserBlockTxHashesByHash returns the manifest-order transaction hashes of

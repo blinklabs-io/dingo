@@ -701,6 +701,7 @@ type LedgerStateConfig struct {
 	ForgedBlockChecker          ForgedBlockChecker
 	SlotBattleRecorder          SlotBattleRecorder
 	EndorserBlockProvider       EndorserBlockProviderFunc
+	EndorserBlockValidation     EndorserBlockValidationFunc
 	// RecordBlockfetchThroughputFunc receives each completed batch's
 	// delivery rate: the bytes that followed the first block and the time
 	// they took to arrive.
@@ -892,6 +893,28 @@ type EndorserBlockProviderFunc func(
 	ebHash []byte,
 	ebSlot uint64,
 ) (txs []cbor.RawMessage, ok bool)
+
+// EndorserBlockValidationStatus reports the semantic-validation state of one
+// cached endorser-block occurrence.
+type EndorserBlockValidationStatus uint8
+
+const (
+	// EndorserBlockValidationUnknown means no cached verdict is available.
+	EndorserBlockValidationUnknown EndorserBlockValidationStatus = iota
+	// EndorserBlockValidationPending means validation has not completed.
+	EndorserBlockValidationPending
+	// EndorserBlockValidationValid means cached validation succeeded.
+	EndorserBlockValidationValid
+	// EndorserBlockValidationInvalid means cached validation rejected the block.
+	EndorserBlockValidationInvalid
+)
+
+// EndorserBlockValidationFunc reports the cached semantic verdict for an
+// endorser block identified by hash and slot.
+type EndorserBlockValidationFunc func(
+	ebHash []byte,
+	ebSlot uint64,
+) EndorserBlockValidationStatus
 
 // EndorserBlockFetcherFunc actively fetches the endorser block identified by
 // (ebSlot, ebHash) over leios-fetch (manifest plus all transaction bodies) and
@@ -9078,7 +9101,13 @@ func (ls *LedgerState) ledgerProcessBlock(
 					ebTxs,
 				)
 				var storageErr *leiosEndorserBlockStorageError
+				var validationErr *leiosEndorserBlockValidationError
 				switch {
+				case errors.As(err, &validationErr):
+					return nil, ls.rejectLeiosCertifyingBlock(
+						block,
+						validationErr,
+					)
 				case errors.As(err, &storageErr):
 					ls.config.Logger.Warn(
 						"failed to apply Leios endorser block after storage mutation",

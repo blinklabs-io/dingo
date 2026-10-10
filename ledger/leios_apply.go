@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	leiosledger "github.com/blinklabs-io/dingo/ledger/leios"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -167,10 +168,10 @@ func endorserBlockTxIds(rawTxs []cbor.RawMessage) ([][]byte, error) {
 }
 
 // applyEndorserBlock decodes a certified Leios endorser block's standalone
-// transactions, persists them as a standalone blob, and applies them to the
-// ledger ahead of the certifying ranking block's own transactions, with full
-// effects but without validation or consumed-input recovery: the certificate
-// is what admits the closure, as in the reference applyLeiosClosure.
+// transactions, validates them against the closure state, persists them as a
+// standalone blob, and applies them to the ledger ahead of the certifying
+// ranking block's own transactions, with full effects but without
+// consumed-input recovery.
 // It returns the number of transactions applied to the UTxO (or zero when every
 // transaction was already applied).
 //
@@ -262,6 +263,14 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 	if err != nil {
 		return 0, 0, err
 	}
+	if err := ls.validateEndorserBlockTransactions(
+		txn,
+		ebSlot,
+		txs,
+		keepIndexes,
+	); err != nil {
+		return 0, 0, err
+	}
 
 	// Build the endorser-block blob and its offsets, then persist the blob
 	// under (ebSlot, ebHash) so cold-extract can resolve the DOFF refs.
@@ -298,11 +307,11 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 		delta.addTransaction(txs[idx], idx)
 	}
 
-	// The certified closure is applied with its full effects -- produced
-	// outputs, consumed inputs, certificates and governance -- but without
-	// validation or consumed-input recovery, as the reference applyLeiosClosure
-	// does (ruleApplyTxValidation ValidateNone): the certificate admitted it, and
-	// a consumed input that is not present is a no-op rather than a conflict.
+	// Validation above uses an ordered overlay of produced and consumed UTxOs.
+	// Applying the certified closure records its full effects -- produced
+	// outputs, consumed inputs, certificates and governance -- while leaving
+	// consumed-input recovery disabled because validation already established
+	// the closure's input availability.
 	// Omitting the produced outputs would leave the UTxO set, and the stake
 	// distribution derived from it, short of what the reference holds. The delta
 	// is recorded under the ranking block's point, so a rollback of the ranking
@@ -317,6 +326,90 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 		}
 	}
 	return len(delta.Transactions), delta.donation, nil
+}
+
+type leiosEndorserBlockValidationError struct {
+	err error
+}
+
+func (e *leiosEndorserBlockValidationError) Error() string {
+	return e.err.Error()
+}
+
+func (e *leiosEndorserBlockValidationError) Unwrap() error {
+	return e.err
+}
+
+func (ls *LedgerState) validateEndorserBlockTransactions(
+	txn *database.Txn,
+	referenceSlot uint64,
+	txs []lcommon.Transaction,
+	indexes []int,
+) error {
+	snapshot := ls.txValidationSnapshot()
+	created := make(map[utxoref.Key]lcommon.Utxo, len(indexes)*2)
+	consumed := make(map[utxoref.Key]struct{}, len(indexes)*2)
+	for _, idx := range indexes {
+		tx := txs[idx]
+		validationEra, err := resolveValidationEra(
+			tx,
+			snapshot.currentEra,
+			snapshot.eraList,
+		)
+		if err != nil {
+			return &leiosEndorserBlockValidationError{err: err}
+		}
+		if validationEra.ValidateTxFunc != nil {
+			pp := snapshot.currentPParams
+			isCurrentEraPParams := true
+			if validationEra.Id != snapshot.currentEra.Id &&
+				snapshot.prevEraPParams != nil {
+				pp = snapshot.prevEraPParams
+				isCurrentEraPParams = false
+			}
+			synthetic := syntheticV2CostModelForValidation(
+				pp,
+				isCurrentEraPParams,
+				snapshot.syntheticV2CostModelInEffect,
+			)
+			lv := (&LedgerView{
+				txn:               txn,
+				ls:                ls,
+				intraBlockUtxos:   created,
+				consumedUtxos:     consumed,
+				horizonAnchorSlot: referenceSlot,
+				epochStartSlot:    snapshot.currentEpochStartSlot,
+			}).pinCommitteeState(snapshot.currentEpoch, pp).
+				pinSyntheticV2CostModel(synthetic)
+			err = validationEra.ValidateTxFunc(
+				tx,
+				referenceSlot,
+				lv,
+				pp,
+			)
+			if faultErr := storageFaultOrErr(lv, nil); faultErr != nil {
+				return fmt.Errorf(
+					"validate endorser tx %d storage state: %w",
+					idx,
+					faultErr,
+				)
+			}
+			if err != nil {
+				return &leiosEndorserBlockValidationError{err: fmt.Errorf(
+					"endorser tx %d failed validation: %w",
+					idx,
+					err,
+				)}
+			}
+		}
+		for _, utxo := range tx.Produced() {
+			created[utxoref.ForUtxo(utxo)] = utxo
+		}
+		for _, input := range tx.Consumed() {
+			consumed[utxoref.ForInput(input)] = struct{}{}
+		}
+	}
+	return nil
 }
 
 func (ls *LedgerState) deduplicateEndorserBlockTransactionIndexes(
@@ -896,15 +989,21 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 	certificate := dijkstraBlock.BlockBody.LeiosCertificate
 	if !flagPresent {
 		if certificate != nil {
-			return errors.New("certificate body is present without a certified header flag")
+			return ls.rejectLeiosCertifyingBlock(
+				block,
+				errors.New("certificate body is present without a certified header flag"),
+			)
 		}
 		return nil
 	}
 	if certified != (certificate != nil) {
-		return fmt.Errorf(
-			"certified header flag is %t but certificate body presence is %t",
-			certified,
-			certificate != nil,
+		return ls.rejectLeiosCertifyingBlock(
+			block,
+			fmt.Errorf(
+				"certified header flag is %t but certificate body presence is %t",
+				certified,
+				certificate != nil,
+			),
 		)
 	}
 	if !certified {
@@ -914,14 +1013,15 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 		return errors.New("no Dijkstra Leios certificate validator configured")
 	}
 	var (
+		ebHash    lcommon.Blake2b256
 		ebSlot    uint64
 		announced bool
 		err       error
 	)
 	if batchAnnouncement, ok := batchAnnouncements[string(block.PrevHash().Bytes())]; ok {
-		ebSlot, announced = batchAnnouncement.slot, true
+		ebHash, ebSlot, announced = batchAnnouncement.hash, batchAnnouncement.slot, true
 	} else {
-		_, ebSlot, announced, err = ls.leiosCertifiedAnnouncementFromParent(
+		ebHash, ebSlot, announced, err = ls.leiosCertifiedAnnouncementFromParent(
 			ctx,
 			block.PrevHash().Bytes(),
 		)
@@ -936,6 +1036,22 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 			block,
 			errLeiosCertificateWithoutAnnouncement,
 		)
+	}
+	if ls.config.EndorserBlockValidation != nil {
+		switch ls.config.EndorserBlockValidation(ebHash.Bytes(), ebSlot) {
+		case EndorserBlockValidationPending:
+			return fmt.Errorf(
+				"%w: endorser block semantic validation is pending",
+				errCertifiedEndorserBlockUnavailable,
+			)
+		case EndorserBlockValidationInvalid:
+			return ls.rejectLeiosCertifyingBlock(
+				block,
+				errors.New("certified endorser block is semantically invalid"),
+			)
+		case EndorserBlockValidationUnknown,
+			EndorserBlockValidationValid:
+		}
 	}
 	epochInfo, err := ls.epochForSlot(ebSlot)
 	if err != nil {
@@ -1611,6 +1727,10 @@ func (ls *LedgerState) applyUntickedBoundaryClosure(
 	point := ocommon.Point{Slot: block.SlotNumber(), Hash: block.Hash().Bytes()}
 	_, donation, err := ls.applyEndorserBlockInContext(ctx, txn, point, block.BlockNumber(), slot, hash.Bytes(), txs, &parentPoint.Slot)
 	if err != nil {
+		var validationErr *leiosEndorserBlockValidationError
+		if errors.As(err, &validationErr) {
+			return ls.rejectLeiosCertifyingBlock(block, validationErr)
+		}
 		return err
 	}
 	if donation > 0 {

@@ -254,13 +254,13 @@ func (d *Database) SetTransaction(
 
 // SetTransactionWithOpts is SetTransaction with control over UTxO ingest
 // behavior via opts. Certified Leios endorser-block closure application
-// passes SkipConsumedInputRecovery so a transaction's
-// effects are applied without the consumed-utxo recovery/repair pass: produced
+// passes SkipConsumedInputRecovery after validating the complete ordered
+// closure, so a transaction's effects are applied without the consumed-utxo
+// recovery/repair pass: produced
 // outputs and input spends are written, but a consumed input that is absent from
 // the store is left as a no-op instead of triggering blob recovery. This matches
-// the reference ledger's endorser-closure apply (ruleApplyTxValidation
-// ValidateNone), which folds the closure's transactions onto the ledger state
-// without validation or recovery.
+// the reference ledger's endorser-closure apply, which folds the closure's
+// transactions onto the ledger state without storage recovery.
 func (d *Database) SetTransactionWithOpts(
 	ctx context.Context,
 	tx lcommon.Transaction,
@@ -390,8 +390,8 @@ func (d *Database) SetTransactionWithOpts(
 	}
 	// On the Leios endorser-block closure path (SkipConsumedInputRecovery), a
 	// consumed input already spent by a different certified endorser-block
-	// transaction is a no-op, matching the reference ledger's applyLeiosClosure
-	// (ValidateNone), rather than wedging the pipeline with ErrUtxoConflict on a
+	// transaction is a no-op, matching the reference ledger's applyLeiosClosure,
+	// rather than wedging the pipeline with ErrUtxoConflict on a
 	// legitimate cross-EB double-consume. Ranking-block application keeps the
 	// hard conflict check.
 	setTxErr := error(nil)
