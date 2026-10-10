@@ -183,6 +183,17 @@ func isSQLiteBatchQuery(query string) bool {
 // registry before this point, so this only degrades a deliberately
 // schema-less test harness, never a real deployment.
 func (s *Store) prepareHotStatements(ctx context.Context) {
+	fresh := s.buildHotStatements(ctx)
+	s.stmtMu.Lock()
+	s.stmts = fresh
+	s.stmtMu.Unlock()
+}
+
+// buildHotStatements prepares every cacheable hotStatements entry against
+// s.writeDB and returns them without installing anything; see
+// prepareHotStatements for the caching rules.
+func (s *Store) buildHotStatements(ctx context.Context) map[string]*sql.Stmt {
+	prepared := make(map[string]*sql.Stmt, len(hotStatements))
 	// instrumentedQueryer, not newDialectQueryer directly: PrepareContext is
 	// not counted by countingQueryer (see metrics.go), so this only gains
 	// dialect translation here, same as before -- routed through the shared
@@ -214,13 +225,9 @@ func (s *Store) prepareHotStatements(ctx context.Context) {
 			)
 			continue
 		}
-		s.stmtMu.Lock()
-		if s.stmts == nil {
-			s.stmts = make(map[string]*sql.Stmt)
-		}
-		s.stmts[query] = stmt
-		s.stmtMu.Unlock()
+		prepared[query] = stmt
 	}
+	return prepared
 }
 
 // lookupCachedStmt returns the statement prepareHotStatements installed for

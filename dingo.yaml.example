@@ -1076,6 +1076,15 @@
 # `dingo database snapshot|restore|truncate` CLI commands, and — when
 # bark is enabled (barkPort > 0) — the base directory bark's
 # DatabaseService CreateSnapshot/Restore RPCs use.
+# SQLite only: keep planner statistics current with PRAGMA optimize, run
+# before block processing starts and after each epoch rollover. A database
+# synced from genesis otherwise never has statistics and some queries scan most
+# of a large table. The first run on a large database can take minutes; later
+# runs are near-free. Escape hatch only.
+# Default: true
+# CLI: --planner-stats-refresh-enabled  Env: DINGO_PLANNER_STATS_REFRESH_ENABLED
+# plannerStatsRefreshEnabled: true
+
 # databaseLifecycle:
   # Capture automatic database snapshots at epoch boundaries. Unsupported
   # when the primary blob provider is s3 or gcs: their remote-object backup

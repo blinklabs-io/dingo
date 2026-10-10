@@ -3139,6 +3139,18 @@ type ContextPlannerStatsUpdater interface {
 	UpdatePlannerStatsContext(context.Context) error
 }
 
+// IncrementalPlannerStatsUpdater is an optional interface for metadata stores
+// whose planner statistics can be maintained incrementally while the node
+// runs. trigger labels the run for metrics ("startup" or "epoch"). A store
+// that does not implement it, or whose backend has no incremental form,
+// leaves statistics untouched.
+type IncrementalPlannerStatsUpdater interface {
+	OptimizePlannerStatsContext(
+		ctx context.Context,
+		trigger string,
+	) (types.PlannerStatsResult, error)
+}
+
 // PlannerStatsBackfillSyncKey records the completed backfill whose planner
 // statistics were refreshed after rebuilding critical indexes.
 const PlannerStatsBackfillSyncKey = "metadata_planner_stats_backfill"

@@ -93,6 +93,46 @@ reload the statistics on each batch's transaction connection before preparing
 the join, so pooled connections with independent planner caches use the updated
 estimates.
 
+SQLite keeps planner statistics current while the node runs. A node synced
+from genesis never ran `ANALYZE`, and without `sqlite_stat1` the planner picks
+indexes by shape alone: the batched spend `UPDATE` in `consumeUtxosBatchQuery`
+plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead
+of a seek on `tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs
+`PRAGMA optimize(0x10002)` (every table, exact rather than sampled statistics)
+on the write connection, outside any transaction, at startup before block
+processing begins and after each epoch rollover commits. Tables without
+statistics are always analyzed; tables with them only after roughly 25-fold
+growth, so a repeat run is near-free, while the first run on a large database
+analyzes every table and takes minutes. The write pool has one connection, so
+writers wait for the run. The run is skipped during a bulk load, and the
+Mithril and backfill `ANALYZE` paths are unchanged. PostgreSQL and MySQL
+report the operation unsupported and are untouched.
+
+A run counts as having changed statistics when a 64-bit fingerprint of
+`sqlite_stat1` (row count plus a hash of `tbl`, `idx` and `stat`) differs
+before and after. Only then does the store refresh state that keeps the old
+numbers. Pooled connections load statistics when they open, and later updates
+do not invalidate other connections' schemas, so for a file-backed store the
+read pool's idle limit is set to zero and restored, closing idle connections so
+the next reader loads the new statistics; a connection checked out during the
+refresh is covered by a five-minute `SetConnMaxLifetime`, which database/sql
+applies only when a connection is idle or returned. When the read and write
+pools are the same (in-memory shared-cache), idle connections are never
+dropped to zero because the database is destroyed with its last connection;
+`ANALYZE sqlite_schema` runs on a held connection instead. The cached hot
+statements are re-prepared and swapped in without leaving the cache empty.
+SQLite already re-plans a statement on the connection that ran the analysis, so
+the swap matters for statements whose cached plan could outlive the change on
+another connection, not for the write connection.
+
+`dingo_database_sql_planner_stats_runs_total{trigger,result}`,
+`dingo_database_sql_planner_stats_duration_seconds{trigger}` and
+`dingo_database_sql_planner_stats_errors_total` report runs
+(`trigger` is `startup` or `epoch`; `result` is `changed`, `unchanged`,
+`skipped` or `error`). `plannerStatsRefreshEnabled` (environment
+`DINGO_PLANNER_STATS_REFRESH_ENABLED`, default true) disables the whole
+mechanism and exists only as an escape hatch.
+
 MCP's `dingo://node/status` reports critical index availability separately from
 background index maintenance and recorded post-backfill statistics. A pending
 background rebuild alone does not make critical index readiness fail. These

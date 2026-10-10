@@ -1544,3 +1544,16 @@ func TestHeaderSecretsEnvErrorsOmitValues(t *testing.T) {
 		require.NotContains(t, err.Error(), "s3cr3t")
 	}
 }
+
+// Not t.Parallel: LoadConfig reads package-level globalConfig and the test
+// sets environment variables.
+func TestPlannerStatsRefreshDefaultsOnAndHonorsEnvOverride(t *testing.T) {
+	require.True(t, newDefaultConfig().PlannerStatsRefreshEnabled)
+
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLANNER_STATS_REFRESH_ENABLED", "false")
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.False(t, cfg.PlannerStatsRefreshEnabled)
+}

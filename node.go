@@ -54,6 +54,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
+	"github.com/blinklabs-io/dingo/internal/plannerstats"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/kesagent"
@@ -103,6 +104,7 @@ type Node struct {
 	ledgerState             *ledger.LedgerState
 	snapshotMgr             *snapshot.Manager
 	dbLifecycleMgr          *dblifecycle.Manager
+	plannerStatsMgr         *plannerstats.Manager
 	leiosVoteManager        *leios.VoteManager
 	leiosPipelineManager    *leios.PipelineManager
 	bark                    *bark.Bark
@@ -808,6 +810,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			pending.TargetID,
 		)
 	}
+	// Statistics must exist before the first block batch: a database that has
+	// never been analyzed plans the batched UTxO spend as a scan of every
+	// live output.
+	n.runPlannerStatsStartup(ctx)
 	// Load chain manager
 	cm, err := chain.NewManager(
 		ctx,
@@ -1158,6 +1164,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		)
 	}
 	started = append(started, func() { _ = n.dbLifecycleMgr.Stop() })
+	if err := n.startPlannerStatsManager(n.ctx); err != nil { //nolint:contextcheck
+		return fmt.Errorf("failed to start planner statistics manager: %w", err)
+	}
+	started = append(started, func() { _ = n.plannerStatsMgr.Stop() })
 	// Initialize Leios vote manager (experimental)
 	if enableDijkstra {
 		//nolint:contextcheck // n.ctx is the node's lifecycle context

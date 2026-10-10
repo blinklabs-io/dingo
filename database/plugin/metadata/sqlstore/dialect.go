@@ -34,6 +34,10 @@ type Dialect interface {
 	SetBulkMode(context.Context, Execer) error
 	RestoreNormalMode(context.Context, Execer) error
 	UpdatePlannerStats(context.Context, Execer) error
+	// OptimizePlannerStats runs the backend's incremental statistics
+	// maintenance. supported is false, with no statement issued, for a
+	// backend that has none; UpdatePlannerStats (a full ANALYZE) is unchanged.
+	OptimizePlannerStats(context.Context, Execer) (supported bool, err error)
 	DropIndexSQL(name, table string) string
 	CreateIndexSQL(name, table string, columns []string) string
 	CanDropIndex(name, table string) bool
@@ -66,6 +70,7 @@ type dialect struct {
 	setBulk        func(context.Context, Execer) error
 	restore        func(context.Context, Execer) error
 	analyze        func(context.Context, Execer) error
+	optimize       func(context.Context, Execer) error
 	updateFromJoin func(string, string, string, []JoinAssignment) string
 }
 
@@ -100,6 +105,16 @@ func (d dialect) RestoreNormalMode(ctx context.Context, exec Execer) error {
 
 func (d dialect) UpdatePlannerStats(ctx context.Context, exec Execer) error {
 	return d.analyze(ctx, exec)
+}
+
+func (d dialect) OptimizePlannerStats(
+	ctx context.Context,
+	exec Execer,
+) (bool, error) {
+	if d.optimize == nil {
+		return false, nil
+	}
+	return true, d.optimize(ctx, exec)
 }
 
 func (d dialect) DropIndexSQL(name, table string) string {
@@ -274,7 +289,15 @@ func SQLiteDialect() Dialect {
 			"PRAGMA temp_store = DEFAULT",
 			"PRAGMA wal_autocheckpoint = 10000",
 		),
-		analyze:        execStatements("ANALYZE"),
+		analyze: execStatements("ANALYZE"),
+		// 0x10002 is the "run ANALYZE" bit plus "consider every table": a
+		// plain PRAGMA optimize only looks at tables the issuing connection
+		// has already queried, which a freshly opened connection has not,
+		// and it samples rows (analysis_limit) where this form measures them
+		// all. Tables without statistics are always analyzed; tables that
+		// have them are re-analyzed only after growing roughly 25-fold, so a
+		// repeat run is effectively free.
+		optimize:       execStatements("PRAGMA optimize(0x10002)"),
 		updateFromJoin: standardUpdateFromJoinSQL,
 	}
 }
