@@ -4757,11 +4757,11 @@ func (ls *LedgerState) awaitForecastHorizon(
 	for {
 		published := ls.snapshotPublishedChan()
 		pastHorizon, parentResolvable := ls.headerForecastStatus(ctx, e)
-		if !parentResolvable {
-			return ErrChainsyncHeaderParentUnresolvable
-		}
 		if !pastHorizon {
 			return nil
+		}
+		if !parentResolvable {
+			return ErrChainsyncHeaderParentUnresolvable
 		}
 		if !logged && ls.config.Logger != nil {
 			ls.config.Logger.Debug(

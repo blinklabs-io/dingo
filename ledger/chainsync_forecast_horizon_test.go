@@ -145,6 +145,82 @@ func TestAwaitChainsyncHeaderAdmissionHoldsHeaderPastForecastHorizon(
 	require.Empty(t, *waits, "a historical header has no slot onset to wait for")
 }
 
+func TestAwaitChainsyncHeaderAdmissionAcceptsInRangeHeaderAfterParentHistoryExpires(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	ls.chain = cm.PrimaryChain()
+	ls.currentTip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, []byte("local tip")),
+		BlockNumber: 10,
+	}
+	ls.publishSnapshotsLocked()
+
+	covered := &atomic.Bool{}
+	parentHistoryAvailable := &atomic.Bool{}
+	parentHistoryAvailable.Store(true)
+	parentHistoryLookups := make(chan struct{}, 2)
+	ls.slotClock.provider = gatedHorizonSlotTimeProvider{
+		SlotTimeProvider: ls.slotClock.provider,
+		slot:             90,
+		covered:          covered,
+	}
+	ls.config.PeerHeaderLookupFunc = func(
+		_ ouroboros.ConnectionId,
+		_ []byte,
+	) (ChainsyncEvent, []byte, bool) {
+		if !parentHistoryAvailable.Load() {
+			return ChainsyncEvent{}, nil, false
+		}
+		parentHistoryLookups <- struct{}{}
+		return ChainsyncEvent{
+			Point: ocommon.NewPoint(50, []byte("peer ancestor")),
+		}, nil, true
+	}
+
+	e := futureHeaderEvent(90, arrival)
+	e.BlockHeader = mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("future header")),
+		prevHash:    lcommon.NewBlake2b256([]byte("unknown parent")),
+		blockNumber: 11,
+		slot:        90,
+	}
+	results := awaitAdmissionAsync(t.Context(), ls, e)
+	for range 2 {
+		testutil.RequireReceive(
+			t,
+			parentHistoryLookups,
+			testutil.AsyncWait,
+			"header admission did not check parent history before waiting",
+		)
+	}
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"a header past the forecast horizon must wait for the ledger",
+	)
+
+	covered.Store(true)
+	parentHistoryAvailable.Store(false)
+	ls.notifySnapshotPublished()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not resume after the horizon advanced",
+	)
+	require.NoError(t, got.err)
+	require.True(t, got.accepted)
+	require.Empty(t, *waits)
+}
+
 func TestAwaitChainsyncHeaderAdmissionResyncsUnresolvableFarAheadParent(
 	t *testing.T,
 ) {
