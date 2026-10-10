@@ -239,16 +239,24 @@ type leiosPointKey struct {
 	hash lcommon.Blake2b256
 }
 
+const leiosProducerObservationLimit = 4096
+
 type leiosProducerObservations struct {
-	mu     sync.RWMutex
-	offers map[leiosPointKey]string
-	votes  map[lcommon.Blake2b256]map[string]struct{}
+	mu         sync.RWMutex
+	offers     map[leiosPointKey]string
+	offerOrder []leiosPointKey
+	offerNext  int
+	votes      map[lcommon.Blake2b256]map[string]struct{}
+	voteOrder  []lcommon.Blake2b256
+	voteNext   int
 }
 
 func newLeiosProducerObservations() *leiosProducerObservations {
 	return &leiosProducerObservations{
-		offers: make(map[leiosPointKey]string),
-		votes:  make(map[lcommon.Blake2b256]map[string]struct{}),
+		offers:     make(map[leiosPointKey]string),
+		offerOrder: make([]leiosPointKey, 0, leiosProducerObservationLimit),
+		votes:      make(map[lcommon.Blake2b256]map[string]struct{}),
+		voteOrder:  make([]lcommon.Blake2b256, 0, leiosProducerObservationLimit),
 	}
 }
 
@@ -259,6 +267,15 @@ func (o *leiosProducerObservations) addOffer(source string, point pcommon.Point)
 	key := leiosPointKey{slot: point.Slot}
 	copy(key.hash[:], point.Hash)
 	o.mu.Lock()
+	if _, exists := o.offers[key]; !exists {
+		if len(o.offerOrder) == leiosProducerObservationLimit {
+			delete(o.offers, o.offerOrder[o.offerNext])
+			o.offerOrder[o.offerNext] = key
+			o.offerNext = (o.offerNext + 1) % leiosProducerObservationLimit
+		} else {
+			o.offerOrder = append(o.offerOrder, key)
+		}
+	}
 	o.offers[key] = source
 	o.mu.Unlock()
 }
@@ -269,6 +286,13 @@ func (o *leiosProducerObservations) addVote(
 ) {
 	o.mu.Lock()
 	if o.votes[vote.AnnouncingRbHash] == nil {
+		if len(o.voteOrder) == leiosProducerObservationLimit {
+			delete(o.votes, o.voteOrder[o.voteNext])
+			o.voteOrder[o.voteNext] = vote.AnnouncingRbHash
+			o.voteNext = (o.voteNext + 1) % leiosProducerObservationLimit
+		} else {
+			o.voteOrder = append(o.voteOrder, vote.AnnouncingRbHash)
+		}
 		o.votes[vote.AnnouncingRbHash] = make(map[string]struct{})
 	}
 	o.votes[vote.AnnouncingRbHash][source] = struct{}{}
