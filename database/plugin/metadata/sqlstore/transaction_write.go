@@ -203,17 +203,36 @@ ON CONFLICT (tx_id, output_idx) DO NOTHING
 RETURNING id, tx_id, output_idx`
 }
 
+// consumeUtxosBatchQuery builds the SQLite batched spend for rowCount inputs.
+// Each input is its own "tx_id = ? AND output_idx = ?" arm of an id subquery,
+// the shape of consumeUtxoSQLiteReturningSQL, so SQLite resolves it through
+// the unique tx_id_output_idx index whatever its statistics say.
+//
+// A row-value "(tx_id, output_idx) IN (...)" list or a join against VALUES
+// does not hold that plan. "deleted_slot = 0" and "spent_at_tx_id IS NULL"
+// match every live row, but spent rows carry many distinct values with few
+// rows each, so sqlite_stat1 reports both columns as selective and SQLite
+// drives the statement from a deleted_slot-leading index, visiting every live
+// UTxO per transaction. The liveness predicates stay inside each arm, where
+// the fully bound unique key already pins the plan; the outer statement
+// carries none, because any predicate on deleted_slot there lets the planner
+// choose that index again (see markUtxosDeletedQuery).
+//
+// Arguments are the two SET values followed by tx_id, output_idx per input.
 func consumeUtxosBatchQuery(rowCount int, returnStake bool) string {
-	row := "(?,?)"
-	values := strings.TrimSuffix(strings.Repeat(row+",", rowCount), ",")
+	const arm = "SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ? " +
+		"AND deleted_slot = 0 AND spent_at_tx_id IS NULL"
+	arms := strings.TrimSuffix(
+		strings.Repeat(arm+" UNION ALL ", rowCount),
+		" UNION ALL ",
+	)
 	returning := "tx_id, output_idx"
 	if returnStake {
 		returning += ", credential_tag, staking_key, amount"
 	}
 	return `UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
-WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL
-  AND (tx_id, output_idx) IN (` + values + `)
+WHERE id IN (` + arms + `)
 RETURNING ` + returning
 }
 
