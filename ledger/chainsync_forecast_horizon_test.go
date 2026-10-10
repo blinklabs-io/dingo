@@ -666,7 +666,10 @@ func TestAwaitChainsyncHeaderAdmissionRejectsDisconnectedHeaderPastHorizon(
 		}
 	}
 
-	building := headerOn(lcommon.NewBlake2b256(primary.Tip().Point.Hash), "building")
+	building := headerOn(
+		lcommon.NewBlake2b256(primary.Tip().Point.Hash),
+		"building",
+	)
 	ctx, cancel := context.WithCancel(t.Context())
 	results := awaitAdmissionAsync(ctx, ls, building)
 	testutil.RequireNoReceive(
@@ -684,7 +687,10 @@ func TestAwaitChainsyncHeaderAdmissionRejectsDisconnectedHeaderPastHorizon(
 	)
 	require.ErrorIs(t, got.err, context.Canceled)
 
-	orphan := headerOn(lcommon.Blake2b256Hash([]byte("unknown parent")), "orphan")
+	orphan := headerOn(
+		lcommon.Blake2b256Hash([]byte("unknown parent")),
+		"orphan",
+	)
 	results = awaitAdmissionAsync(t.Context(), ls, orphan)
 	got = testutil.RequireReceive(
 		t,
@@ -694,4 +700,138 @@ func TestAwaitChainsyncHeaderAdmissionRejectsDisconnectedHeaderPastHorizon(
 	)
 	require.ErrorIs(t, got.err, ErrChainsyncHeaderDisconnected)
 	require.False(t, got.accepted)
+}
+
+// connectsToLocalChain decides whether a held header can still be released by
+// blocks the node already has. Every way the walk reaches the local chain must
+// count as connected, and only an ancestry that leaves it, or that the
+// recorded history cannot resolve, counts as disconnected.
+func TestConnectsToLocalChain(t *testing.T) {
+	t.Parallel()
+
+	hash := func(label string) []byte { return []byte(label) }
+	type peerRecord struct {
+		slot   uint64
+		parent string
+	}
+	for _, tc := range []struct {
+		name   string
+		peer   map[string]peerRecord
+		queued map[string]bool
+		held   map[string]bool
+		blocks map[string]uint64
+		limit  int
+		start  string
+		want   bool
+	}{
+		{
+			name: "delivered headers reach a queued header",
+			peer: map[string]peerRecord{
+				"h2": {700, "q1"},
+				"q1": {600, "b9"},
+			},
+			queued: map[string]bool{"q1": true},
+			start:  "h2",
+			want:   true,
+		},
+		{
+			name:  "delivered headers reach a block the local chain holds",
+			peer:  map[string]peerRecord{"h2": {250, "b1"}, "b1": {150, "b0"}},
+			held:  map[string]bool{"b1": true},
+			start: "h2",
+			want:  true,
+		},
+		{
+			name: "delivered headers end at the session intersection block",
+			peer: map[string]peerRecord{
+				"h3": {300, "h2"},
+				"h2": {200, "b1"},
+			},
+			held:   map[string]bool{"b1": true},
+			blocks: map[string]uint64{"b1": 100},
+			start:  "h3",
+			want:   true,
+		},
+		{
+			name:   "a predecessor that is a held block below the tip",
+			held:   map[string]bool{"b1": true},
+			blocks: map[string]uint64{"b1": 100},
+			start:  "b1",
+			want:   true,
+		},
+		{
+			name:   "a stored block off the local chain is disconnected",
+			blocks: map[string]uint64{"x1": 100},
+			start:  "x1",
+		},
+		{
+			name:  "an unknown predecessor is disconnected",
+			start: "missing",
+		},
+		{
+			name: "delivered headers ending at an unknown ancestor are disconnected",
+			peer: map[string]peerRecord{
+				"h3": {300, "h2"},
+				"h2": {200, "missing"},
+			},
+			start: "h3",
+		},
+		{
+			name:  "a header built on origin is connected",
+			start: string(make([]byte, 32)),
+			want:  true,
+		},
+		{
+			name: "a delivered chain built on origin is connected",
+			peer: map[string]peerRecord{
+				"h1": {100, string(make([]byte, 32))},
+			},
+			start: "h1",
+			want:  true,
+		},
+		{
+			name: "an ancestry deeper than the history limit is disconnected",
+			peer: map[string]peerRecord{
+				"h3": {300, "h2"},
+				"h2": {200, "b1"},
+			},
+			held:   map[string]bool{"b1": true},
+			blocks: map[string]uint64{"b1": 100},
+			limit:  2,
+			start:  "h3",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			limit := tc.limit
+			if limit == 0 {
+				limit = 16
+			}
+			got := connectsToLocalChain(
+				hash(tc.start),
+				limit,
+				forkAnchorLookups{
+					peerHeader: func(h []byte) (ocommon.Point, []byte, bool) {
+						record, found := tc.peer[string(h)]
+						if !found {
+							return ocommon.Point{}, nil, false
+						}
+						return ocommon.NewPoint(record.slot, h),
+							hash(record.parent), true
+					},
+					queuedHeader: func(p ocommon.Point) bool {
+						return tc.queued[string(p.Hash)]
+					},
+					heldBlock: func(p ocommon.Point) bool {
+						return tc.held[string(p.Hash)]
+					},
+					blockByHash: func(h []byte) (ocommon.Point, bool) {
+						slot, found := tc.blocks[string(h)]
+						return ocommon.NewPoint(slot, h), found
+					},
+				},
+			)
+			require.Equal(t, tc.want, got)
+		})
+	}
 }

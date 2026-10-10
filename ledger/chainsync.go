@@ -4667,7 +4667,10 @@ var ErrChainsyncHeaderDisconnected = errors.New(
 // validated, so it waits until the applied ledger advances far enough to
 // forecast its slot before the onset check runs, as the reference ChainSync
 // client does for OutsideForecastRange; until then it must not influence chain
-// selection or reach blockfetch. Other conversion failures fail closed. A zero
+// selection or reach blockfetch. Such a header whose predecessor does not
+// connect to the local chain is not held: it returns an error wrapping
+// ErrChainsyncHeaderDisconnected, because no publication can release it.
+// Other conversion failures fail closed. A zero
 // timestamp is retained for compatibility with synthetic/internal events that
 // never crossed the network ingress path. As with other Go APIs that accept a
 // context, ctx must not be nil.
