@@ -67,6 +67,7 @@ import (
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
+	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
@@ -324,6 +325,49 @@ func TestChainsyncConfigLimitOnPatienceDefaults(t *testing.T) {
 	assert.Equal(t, chainsync.PatienceConfig{Enabled: true},
 		n.chainsyncConfig().Patience,
 		"enabled by default; zero capacity and rate select package defaults")
+}
+
+func TestChainsyncConfigFitsConfiguredLocalRoots(t *testing.T) {
+	t.Parallel()
+	topologyConfig := &topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{
+			{
+				AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+					{Address: "relay-a.example.com", Port: 3001},
+					{Address: "relay-b.example.com", Port: 3001},
+				},
+			},
+			{
+				AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+					{Address: "relay-c.example.com", Port: 3001},
+					{Address: "relay-d.example.com", Port: 3001},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name             string
+		configured       int
+		expectedCapacity int
+	}{
+		{name: "default", expectedCapacity: 4},
+		{name: "lower explicit limit", configured: 2, expectedCapacity: 2},
+		{name: "higher explicit limit", configured: 6, expectedCapacity: 6},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			opts := []ConfigOptionFunc{WithTopologyConfig(topologyConfig)}
+			if test.configured != 0 {
+				opts = append(opts, WithChainsyncMaxClients(test.configured))
+			}
+			n := &Node{config: NewConfig(opts...)}
+			assert.Equal(t, test.expectedCapacity, n.chainsyncConfig().MaxClients)
+		})
+	}
+	n := &Node{config: NewConfig()}
+	assert.Equal(t, chainsync.DefaultMaxClients, n.chainsyncConfig().MaxClients)
 }
 
 // TestLiveTruncateKeepsLimitOnPatience pins that the chainsync state rebuilt

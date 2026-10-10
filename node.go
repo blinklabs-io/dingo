@@ -2626,6 +2626,20 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 	chainsyncCfg := chainsync.DefaultConfig()
 	if n.config.chainsyncMaxClients > 0 {
 		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
+	} else {
+		if topologyConfig := n.config.topologyConfig; topologyConfig != nil {
+			localRootCount := 0
+			for _, localRoot := range topologyConfig.LocalRoots {
+				if len(localRoot.AccessPoints) > math.MaxInt-localRootCount {
+					localRootCount = math.MaxInt
+					break
+				}
+				localRootCount += len(localRoot.AccessPoints)
+			}
+			if localRootCount > chainsyncCfg.MaxClients {
+				chainsyncCfg.MaxClients = localRootCount
+			}
+		}
 	}
 	if n.config.chainsyncStallTimeout > 0 {
 		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
