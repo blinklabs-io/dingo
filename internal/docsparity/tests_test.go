@@ -3018,6 +3018,46 @@ func TestReleaseGatesOnGovulncheck(t *testing.T) {
 	}
 }
 
+// TestImageManifestRunsAfterMainBuilds checks the explicit condition that
+// keeps the manifest job runnable on main. The image builds have a skipped
+// release-only dependency on main, and GitHub otherwise propagates that skip
+// through the successful image-build job to its dependents.
+func TestImageManifestRunsAfterMainBuilds(t *testing.T) {
+	root := repoRoot(t)
+	jobs := pipelineJobs(t, root, publishPipeline)
+
+	job, ok := jobs["build-image-manifest"]
+	if !ok {
+		t.Fatalf("%s has no build-image-manifest job", publishPipeline)
+	}
+	fields, ok := job.(map[string]any)
+	if !ok {
+		t.Fatalf(
+			"%s job build-image-manifest is not a mapping",
+			publishPipeline,
+		)
+	}
+	condition, ok := fields["if"].(string)
+	if !ok {
+		t.Fatalf(
+			"%s: build-image-manifest has no job condition",
+			publishPipeline,
+		)
+	}
+	if !strings.Contains(condition, "always()") ||
+		!strings.Contains(
+			condition,
+			"needs.build-images.result == 'success'",
+		) {
+		t.Errorf(
+			"%s: build-image-manifest condition %q does not override a skipped "+
+				"release dependency while requiring successful image builds",
+			publishPipeline,
+			condition,
+		)
+	}
+}
+
 // buildGates names, for each build job, every test job for its own runner OS.
 // Gating a build on its own platform and no other is what lets the Linux
 // binaries start while macOS tests are still running.
