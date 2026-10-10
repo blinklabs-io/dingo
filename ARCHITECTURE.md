@@ -15861,6 +15861,16 @@ the peer's patience and is not a peer fault, and it ends when the peer's
 chainsync client is stopped or its connection begins shutdown (`StopChan`,
 `ConnectionDoneChan`); the client's `DoneChan` cannot end it, because that
 closes only after the callback returns.
+The hold applies only to a header that can still be released: one whose
+predecessor is the chain tip, the header tip, or reaches a queued header or
+held block through the peer's recorded headers. A header whose predecessor
+matches none of these, such as the far-ahead header a promoted observer
+connection already holds, cannot be released by applying blocks the node
+already has, so admission returns `ledger.ErrChainsyncHeaderDisconnected`
+without waiting (`chainsyncHeaderDisconnected`). The callback returns and the
+connection re-intersects from the local chain with
+`ChainsyncResyncReasonDisconnectedHeaderAdmission`, which does not penalize
+the peer.
 Should the horizon move back after admission (a ledger rollback),
 chain-selection verification reports `ledger.ErrHeaderBeyondForecastHorizon`:
 the header waits for admission once more, and if it is still out of range it is

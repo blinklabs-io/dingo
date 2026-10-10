@@ -4645,6 +4645,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	return nil
 }
 
+// ErrChainsyncHeaderDisconnected is returned by AwaitChainsyncHeaderAdmission
+// for a header past the forecast horizon whose predecessor is neither the
+// chain tip, the header tip, nor any header or block the local chain holds.
+// Applying blocks the node already has cannot bring such a header into range,
+// so the connection must re-intersect from the local chain instead of waiting.
+var ErrChainsyncHeaderDisconnected = errors.New(
+	"chainsync header does not connect to the local chain",
+)
+
 // AwaitChainsyncHeaderAdmission enforces the Ouroboros ChainSync future-header
 // rule against the timestamp recorded at network ingress. It must run from the
 // per-peer ChainSync callback before the header updates observed-tip, dedup, or
@@ -4738,6 +4747,9 @@ func (ls *LedgerState) awaitForecastHorizon(
 		if !ls.headerBeyondForecastHorizon(ctx, e) {
 			return nil
 		}
+		if ls.chainsyncHeaderDisconnected(ctx, e) {
+			return ErrChainsyncHeaderDisconnected
+		}
 		if !logged && ls.config.Logger != nil {
 			ls.config.Logger.Debug(
 				"holding chainsync header past the forecast horizon",
@@ -4806,33 +4818,90 @@ func (ls *LedgerState) chainsyncForkAnchor(
 		prevHash,
 		tip.currentTip.Point.Slot,
 		ls.peerHeaderHistoryLimit(),
-		forkAnchorLookups{
-			peerHeader: func(hash []byte) (ocommon.Point, []byte, bool) {
-				if ls.config.PeerHeaderLookupFunc == nil {
-					return ocommon.Point{}, nil, false
-				}
-				ancestor, parentHash, found := ls.config.PeerHeaderLookupFunc(
-					e.ConnectionId,
-					hash,
-				)
-				return ancestor.Point, parentHash, found
-			},
-			queuedHeader: ls.chain.HoldsQueuedHeader,
-			heldBlock: func(point ocommon.Point) bool {
-				return ls.chain.HoldsPoint(ctx, point)
-			},
-			blockByHash: func(hash []byte) (ocommon.Point, bool) {
-				if ls.db == nil && ls.lookupBlockByHash == nil {
-					return ocommon.Point{}, false
-				}
-				block, err := ls.blockByHash(ctx, hash)
-				if err != nil {
-					return ocommon.Point{}, false
-				}
-				return ocommon.NewPoint(block.Slot, block.Hash), true
-			},
-		},
+		ls.forkAnchorLookups(ctx, e),
 	)
+}
+
+// chainsyncHeaderDisconnected reports whether e's predecessor is neither the
+// chain tip, the header tip, nor reachable through the peer's delivered
+// headers to a header or block the local chain holds. Waiting for the
+// forecast horizon cannot release such a header, because only blocks the
+// node does not have could connect it. It reports false whenever the local
+// chain cannot be consulted.
+func (ls *LedgerState) chainsyncHeaderDisconnected(
+	ctx context.Context,
+	e ChainsyncEvent,
+) bool {
+	if ls.chain == nil || e.BlockHeader == nil {
+		return false
+	}
+	prevHash := e.BlockHeader.PrevHash().Bytes()
+	if bytes.Equal(prevHash, ls.chain.HeaderTip().Point.Hash) ||
+		bytes.Equal(prevHash, ls.chain.Tip().Point.Hash) {
+		return false
+	}
+	return !connectsToLocalChain(
+		prevHash,
+		ls.peerHeaderHistoryLimit(),
+		ls.forkAnchorLookups(ctx, e),
+	)
+}
+
+func (ls *LedgerState) forkAnchorLookups(
+	ctx context.Context,
+	e ChainsyncEvent,
+) forkAnchorLookups {
+	return forkAnchorLookups{
+		peerHeader: func(hash []byte) (ocommon.Point, []byte, bool) {
+			if ls.config.PeerHeaderLookupFunc == nil {
+				return ocommon.Point{}, nil, false
+			}
+			ancestor, parentHash, found := ls.config.PeerHeaderLookupFunc(
+				e.ConnectionId,
+				hash,
+			)
+			return ancestor.Point, parentHash, found
+		},
+		queuedHeader: ls.chain.HoldsQueuedHeader,
+		heldBlock: func(point ocommon.Point) bool {
+			return ls.chain.HoldsPoint(ctx, point)
+		},
+		blockByHash: func(hash []byte) (ocommon.Point, bool) {
+			if ls.db == nil && ls.lookupBlockByHash == nil {
+				return ocommon.Point{}, false
+			}
+			block, err := ls.blockByHash(ctx, hash)
+			if err != nil {
+				return ocommon.Point{}, false
+			}
+			return ocommon.NewPoint(block.Slot, block.Hash), true
+		},
+	}
+}
+
+// connectsToLocalChain walks a peer's delivered headers back from prevHash and
+// reports whether it reaches origin, a queued header, or a block the local
+// chain holds within limit headers.
+func connectsToLocalChain(
+	prevHash []byte,
+	limit int,
+	lookups forkAnchorLookups,
+) bool {
+	for range limit {
+		if isOriginHash(prevHash) {
+			return true
+		}
+		point, parentHash, found := lookups.peerHeader(prevHash)
+		if !found {
+			point, found = lookups.blockByHash(prevHash)
+			return found && lookups.heldBlock(point)
+		}
+		if lookups.queuedHeader(point) || lookups.heldBlock(point) {
+			return true
+		}
+		prevHash = parentHash
+	}
+	return false
 }
 
 type forkAnchorLookups struct {

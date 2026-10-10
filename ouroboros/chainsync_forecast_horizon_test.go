@@ -231,3 +231,60 @@ func TestChainsyncAdmissionWaitEndsWhenConnectionCloses(t *testing.T) {
 	)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+// Admission reports a held header that cannot connect to the local chain, as
+// happens to a promoted observer whose cursor ran far ahead. The connection
+// re-intersects from the local chain with a dedicated, non-penalizing reason,
+// and the callback returns instead of holding the protocol until its state
+// timer closes the connection.
+func TestChainsyncClientRollForwardResyncsDisconnectedHeader(t *testing.T) {
+	t.Parallel()
+
+	f := newForecastHorizonFixture(t, "10.0.0.23:3001")
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
+	f.o.chainsyncHeaderAdmission = func(
+		context.Context,
+		ledger.ChainsyncEvent,
+	) (bool, error) {
+		return false, fmt.Errorf(
+			"wait for forecast horizon: %w",
+			ledger.ErrChainsyncHeaderDisconnected,
+		)
+	}
+
+	f.rollForward(t, newTestBlockHeader(400, 1, 0xa4))
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"a disconnected header must request a re-intersection",
+	)
+	data, ok := resync.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, f.conn, data.ConnectionId)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonDisconnectedHeaderAdmission,
+		data.Reason,
+	)
+	require.False(t, chainsyncResyncDeniesPeer(data.Reason))
+	testutil.RequireNoReceive(
+		t,
+		f.tipCh,
+		200*time.Millisecond,
+		"a disconnected header must not extend the peer's candidate",
+	)
+	testutil.RequireNoReceive(
+		t,
+		f.ledgerCh,
+		200*time.Millisecond,
+		"a disconnected header must not be queued for blockfetch",
+	)
+	testutil.RequireNoReceive(
+		t,
+		f.recycle,
+		200*time.Millisecond,
+		"a disconnected header is not a peer fault",
+	)
+}

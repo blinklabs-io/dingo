@@ -586,3 +586,112 @@ func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
 	)
 	require.ErrorIs(t, got.err, context.Canceled)
 }
+
+// A header past the forecast horizon whose predecessor is not the chain tip,
+// the header tip, or any header or block the local chain holds cannot be
+// released by applying blocks the node already has. Admission reports that
+// instead of waiting for a publication that cannot come; a header that does
+// build on the local chain still waits.
+func TestAwaitChainsyncHeaderAdmissionRejectsDisconnectedHeaderPastHorizon(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	primary := cm.PrimaryChain()
+	blocks, err := fixtures.GenerateConwayChain(
+		1,
+		lcommon.Blake2b256{},
+		300_000,
+		1_000,
+		2,
+	)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, primary.AddBlock(context.Background(), block, nil))
+	}
+
+	cfg := minimalShelleyGenesisCfg(t)
+	ls := &LedgerState{
+		db:    db,
+		chain: primary,
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    1_000,
+			LengthInSlots: 432_000,
+			EraId:         eras.ConwayEraDesc.Id,
+		}},
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(302_400, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	systemStart := cfg.ShelleyGenesis().SystemStart
+	const headerSlot = 500_000
+	arrival := systemStart.Add(600_000 * time.Second)
+	clock := NewSlotClock(
+		pastHorizonSlotTimeProvider{
+			SlotTimeProvider: newMockSlotTimeProvider(
+				systemStart,
+				time.Second,
+				1_000_000,
+			),
+			rejectedSlot: headerSlot,
+		},
+		DefaultSlotClockConfig(),
+	)
+	clock.nowFunc = func() time.Time { return arrival }
+	ls.slotClock = clock
+	ls.publishSnapshotsLocked()
+
+	headerOn := func(parent lcommon.Blake2b256, label string) ChainsyncEvent {
+		header := mockHeader{
+			hash:        lcommon.Blake2b256Hash([]byte(label)),
+			prevHash:    parent,
+			blockNumber: 3,
+			slot:        headerSlot,
+		}
+		return ChainsyncEvent{
+			BlockHeader: header,
+			ArrivalTime: arrival,
+			Point:       ocommon.NewPoint(headerSlot, header.Hash().Bytes()),
+		}
+	}
+
+	building := headerOn(lcommon.NewBlake2b256(primary.Tip().Point.Hash), "building")
+	ctx, cancel := context.WithCancel(t.Context())
+	results := awaitAdmissionAsync(ctx, ls, building)
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"a header building on the chain tip must keep waiting",
+	)
+	cancel()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not return after its context ended",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+
+	orphan := headerOn(lcommon.Blake2b256Hash([]byte("unknown parent")), "orphan")
+	results = awaitAdmissionAsync(t.Context(), ls, orphan)
+	got = testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"a header whose predecessor the local chain does not hold must not wait for a publication",
+	)
+	require.ErrorIs(t, got.err, ErrChainsyncHeaderDisconnected)
+	require.False(t, got.accepted)
+}

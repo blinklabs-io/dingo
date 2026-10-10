@@ -57,6 +57,13 @@ const (
 	// outside the permitted clock-skew window. It is not a peer-fault signal and
 	// does not impose a peer cooldown.
 	ChainsyncResyncReasonFutureHeaderAdmissionRecovery = "future header admission recovery"
+	// ChainsyncResyncReasonDisconnectedHeaderAdmission re-intersects the
+	// ChainSync mini-protocol after admission found a header past the forecast
+	// horizon that does not build on the local chain. The held header cannot be
+	// released by applying blocks the node already has, so the connection
+	// restarts from fresh intersect points. It is not a peer-fault signal and
+	// does not impose a peer cooldown.
+	ChainsyncResyncReasonDisconnectedHeaderAdmission = "disconnected header admission"
 )
 
 // ChainsyncResyncEvent carries the connection ID that should

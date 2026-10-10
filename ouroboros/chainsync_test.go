@@ -4879,6 +4879,7 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 		event.ChainsyncResyncReasonForkQueueOverflowRestartFailed,
 		event.ChainsyncResyncReasonForkExtensionRestartFailed,
 		event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
+		event.ChainsyncResyncReasonDisconnectedHeaderAdmission,
 	}
 	for _, reason := range reasons {
 		t.Run(reason, func(t *testing.T) {

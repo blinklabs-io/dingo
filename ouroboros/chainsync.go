@@ -80,6 +80,7 @@ type chainsyncScheduleAtFunc func(time.Time, func()) func()
 
 type scheduledChainsyncResync struct {
 	onset  time.Time
+	reason string
 	cancel func()
 	fired  bool
 }
@@ -127,6 +128,20 @@ func (o *Ouroboros) scheduleFutureHeaderResync(
 	connId ouroboros.ConnectionId,
 	onset time.Time,
 ) {
+	o.scheduleHeaderResync(
+		connId,
+		onset,
+		event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
+	)
+}
+
+// scheduleHeaderResync is scheduleFutureHeaderResync with the reason the
+// recovery event carries. The winning schedule's reason is the one published.
+func (o *Ouroboros) scheduleHeaderResync(
+	connId ouroboros.ConnectionId,
+	onset time.Time,
+	reason string,
+) {
 	if o.chainsyncScheduleAt == nil || o.eventBus == nil || onset.IsZero() {
 		return
 	}
@@ -149,7 +164,7 @@ func (o *Ouroboros) scheduleFutureHeaderResync(
 		}
 		current.cancel()
 	}
-	scheduled := &scheduledChainsyncResync{onset: onset}
+	scheduled := &scheduledChainsyncResync{onset: onset, reason: reason}
 	// A timer whose onset is already due may invoke its callback before the
 	// scheduler returns. Arm publication only after the marker and cancel
 	// function are installed, or that callback can observe no current timer and
@@ -181,7 +196,7 @@ func (o *Ouroboros) scheduleFutureHeaderResync(
 					event.ChainsyncResyncEventType,
 					event.ChainsyncResyncEvent{
 						ConnectionId: connId,
-						Reason:       event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
+						Reason:       scheduled.reason,
 					},
 				),
 			)
@@ -1479,6 +1494,23 @@ func (o *Ouroboros) admitChainsyncHeader(
 	admissionCtx, cancel := chainsyncAdmissionContext(ctx)
 	defer cancel()
 	accepted, err := o.chainsyncHeaderAdmission(admissionCtx, e)
+	if errors.Is(err, ledger.ErrChainsyncHeaderDisconnected) {
+		// Blocks the node already has cannot connect this header, so no wait
+		// can release it. Return rather than hold the protocol until its state
+		// timer closes the connection, and restart from the local chain.
+		o.config.Logger.Debug(
+			"chainsync: header does not connect to the local chain",
+			"component", "ouroboros",
+			"slot", blockSlot,
+			"connection_id", ctx.ConnectionId.String(),
+		)
+		o.scheduleHeaderResync(
+			ctx.ConnectionId,
+			time.Now(),
+			event.ChainsyncResyncReasonDisconnectedHeaderAdmission,
+		)
+		return false, nil
+	}
 	if err != nil {
 		o.config.Logger.Warn(
 			"chainsync: future-header admission failed closed",
