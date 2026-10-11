@@ -1939,14 +1939,16 @@ func (s *Store) utxosByAddressPatterns(
 	return ret, nil
 }
 
-// utxoOrderingPredicate builds the WHERE predicate shared by
+// utxoOrderingClauses builds the FROM source and WHERE predicate shared by
 // GetUtxosByAddressWithOrdering and CountUtxosByAddressWithOrdering. The
-// returned predicate excludes any keyset (query.After) bound, which only
+// returned args follow the placeholders in from, then predicate. The
+// predicate excludes any keyset (query.After) bound, which only
 // GetUtxosByAddressWithOrdering applies.
-func utxoOrderingPredicate(
+func utxoOrderingClauses(
 	query *models.UtxoWithOrderingQuery,
 	disqualifyLivenessIndex bool,
-) (string, []any, error) {
+) (string, string, []any, error) {
+	from := "utxo"
 	predicate := "utxo.deleted_slot = 0"
 	if disqualifyLivenessIndex {
 		predicate = "+utxo.deleted_slot = 0"
@@ -1964,7 +1966,7 @@ func utxoOrderingPredicate(
 				&args,
 				pattern,
 			); err != nil {
-				return "", nil, err
+				return "", "", nil, err
 			}
 		}
 		if len(branches) == 0 {
@@ -1975,20 +1977,39 @@ func utxoOrderingPredicate(
 	}
 	if query.FilterByAsset {
 		if len(query.AssetPolicyID) == 0 {
-			return "", nil, models.ErrEmptyAssetPolicyID
+			return "", "", nil, models.ErrEmptyAssetPolicyID
 		}
-		predicate += `
- AND EXISTS (
-     SELECT 1 FROM asset
-     WHERE asset.utxo_id = utxo.id AND asset.policy_id = ?`
-		args = append(args, query.AssetPolicyID)
+		assetFilter := "asset.policy_id = ?"
+		assetArgs := []any{query.AssetPolicyID}
 		if query.AssetName != nil {
-			predicate += " AND asset.name = ?"
-			args = append(args, query.AssetName)
+			assetFilter += " AND asset.name = ?"
+			assetArgs = append(assetArgs, query.AssetName)
 		}
-		predicate += ")"
+		if query.MatchAllAddresses {
+			// Nothing else narrows the live UTxO set, so probing asset once
+			// per live UTxO costs the same however few hold the asset. Start
+			// from the asset rows instead and look the UTxOs up by primary
+			// key.
+			from = "(SELECT DISTINCT asset.utxo_id AS id FROM asset WHERE " +
+				assetFilter + ") AS held JOIN utxo ON utxo.id = held.id"
+			args = append(assetArgs, args...)
+		} else {
+			predicate += " AND EXISTS (SELECT 1 FROM asset " +
+				"WHERE asset.utxo_id = utxo.id AND " + assetFilter + ")"
+			args = append(args, assetArgs...)
+		}
 	}
-	return predicate, args, nil
+	return from, predicate, args, nil
+}
+
+func countUtxosOrderingStatement(
+	query *models.UtxoWithOrderingQuery,
+) (string, []any, error) {
+	from, predicate, args, err := utxoOrderingClauses(query, false)
+	if err != nil {
+		return "", nil, err
+	}
+	return "SELECT COUNT(*) FROM " + from + " WHERE " + predicate, args, nil
 }
 
 func (s *Store) GetUtxosByAddressWithOrdering(
@@ -2035,7 +2056,7 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 		hint = decodeErr == nil &&
 			addr.PaymentKeyHash() != lcommon.NewBlake2b224(nil)
 	}
-	predicate, args, err := utxoOrderingPredicate(query, hint)
+	from, predicate, args, err := utxoOrderingClauses(query, hint)
 	if err != nil {
 		return nil, fmt.Errorf("GetUtxosByAddressWithOrdering: %w", err)
 	}
@@ -2072,7 +2093,7 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	statement := `
 SELECT ` + qualifiedSQLiteUtxoColumns + `,
        ` + slotExpr + `, ` + blockIndexExpr + `
-FROM utxo
+FROM ` + from + `
 LEFT JOIN "transaction" ON utxo.transaction_id = "transaction".id
 WHERE ` + predicate + `
 ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir + `,
@@ -2338,16 +2359,14 @@ func (s *Store) CountUtxosByAddressWithOrdering(
 	if err != nil {
 		return 0, err
 	}
-	predicate, args, err := utxoOrderingPredicate(query, false)
+	statement, args, err := countUtxosOrderingStatement(query)
 	if err != nil {
 		return 0, fmt.Errorf("CountUtxosByAddressWithOrdering: %w", err)
 	}
 	var count int
 	err = db.QueryRowContext(
 		ctx,
-		s.dialect.Rebind(
-			"SELECT COUNT(*) FROM utxo WHERE "+predicate,
-		),
+		s.dialect.Rebind(statement),
 		args...,
 	).Scan(&count)
 	if err != nil {
