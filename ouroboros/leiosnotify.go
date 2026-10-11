@@ -833,7 +833,12 @@ func (o *Ouroboros) watchLeiosTxFetchCandidate(
 ) {
 	go func() {
 		<-candidate.ctx.Done()
-		o.cancelLeiosTxFetchCandidate(key, candidate)
+		if candidate.state.CompareAndSwap(
+			leiosTxFetchQueued,
+			leiosTxFetchCanceled,
+		) {
+			o.cancelLeiosTxFetchCandidate(key, candidate)
+		}
 	}()
 }
 
@@ -846,10 +851,15 @@ func (o *Ouroboros) startLeiosTxFetchAttempt(
 	)
 	go func() {
 		<-candidate.attemptCtx.Done()
-		o.cancelLeiosTxFetchCandidate(
-			leiosBlockKey(candidate.point.Slot, candidate.point.Hash),
-			candidate,
-		)
+		if candidate.state.CompareAndSwap(
+			leiosTxFetchQueued,
+			leiosTxFetchCanceled,
+		) {
+			o.cancelLeiosTxFetchCandidate(
+				leiosBlockKey(candidate.point.Slot, candidate.point.Hash),
+				candidate,
+			)
+		}
 	}()
 }
 
@@ -869,6 +879,12 @@ func (o *Ouroboros) launchLeiosTxFetchOwner(
 	o.dispatchLeiosFetchReserved(candidate.guard, func() {
 		defer candidate.attemptDone()
 		defer candidate.cancel()
+		if !candidate.state.CompareAndSwap(
+			leiosTxFetchQueued,
+			leiosTxFetchRunning,
+		) {
+			return
+		}
 		if !o.leiosTxFetchOwnerActive(key, candidate) {
 			return
 		}
@@ -1476,6 +1492,12 @@ type leiosPendingFetch struct {
 	fn   func()
 }
 
+const (
+	leiosTxFetchQueued uint32 = iota
+	leiosTxFetchRunning
+	leiosTxFetchCanceled
+)
+
 type leiosTxFetchCandidate struct {
 	connId      ouroboros.ConnectionId
 	connKey     string
@@ -1486,6 +1508,7 @@ type leiosTxFetchCandidate struct {
 	cancel      context.CancelFunc
 	attemptCtx  context.Context
 	attemptDone context.CancelFunc
+	state       atomic.Uint32
 }
 
 type leiosTxFetchClaim struct {
