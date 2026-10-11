@@ -1913,6 +1913,85 @@ func TestValidateChainSelectionHeaderCryptoSkipsByronFirstBlockGate(
 	require.ErrorContains(t, err, "epoch-boundary block")
 }
 
+// TestValidateChainSelectionHeaderCryptoAcceptsFirstByronEbbAtOrigin covers
+// the first header a peer sends on a from-genesis sync: the epoch 0 EBB is
+// verified peer-relative while the primary chain is at origin, and must not be
+// rejected as following an existing block. Once the primary chain holds a
+// block, the same header is still rejected.
+func TestValidateChainSelectionHeaderCryptoAcceptsFirstByronEbbAtOrigin(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ebbHeader := &byron.ByronEpochBoundaryBlockHeader{PrevBlock: genesisHash}
+
+	t.Run("at origin", func(t *testing.T) {
+		t.Parallel()
+		ls, primaryChain := newByronGenesisAnchorTestLedger(
+			t,
+			genesisHash.String(),
+		)
+		require.Zero(t, primaryChain.HeaderCount())
+		require.NoError(t, ls.ValidateChainSelectionHeaderCrypto(ebbHeader))
+		require.NoError(t, ls.ValidateBlockHeaderCrypto(ebbHeader))
+	})
+
+	// At origin an epoch 0 EBB can only be the chain's first block, so a
+	// peer-relative one is still held to the genesis anchor.
+	t.Run("wrong genesis hash at origin", func(t *testing.T) {
+		t.Parallel()
+		ls, _ := newByronGenesisAnchorTestLedger(t, genesisHash.String())
+		wrongHeader := &byron.ByronEpochBoundaryBlockHeader{
+			PrevBlock: lcommon.Blake2b256Hash([]byte("wrong prev hash")),
+		}
+		err := ls.ValidateChainSelectionHeaderCrypto(wrongHeader)
+		require.ErrorContains(
+			t,
+			err,
+			"does not match configured Byron genesis hash",
+		)
+		err = ls.ValidateBlockHeaderCrypto(wrongHeader)
+		require.ErrorContains(
+			t,
+			err,
+			"does not match configured Byron genesis hash",
+		)
+	})
+
+	// A genesis-tagged EBB after epoch 0 can be neither the first block nor
+	// a continuation, so origin does not exempt it.
+	t.Run("genesis tag after epoch 0 at origin", func(t *testing.T) {
+		t.Parallel()
+		ls, _ := newByronGenesisAnchorTestLedger(t, genesisHash.String())
+		tagged := byronTestEbbHeader(t, 1, true).BlockHeader
+		err := ls.ValidateChainSelectionHeaderCrypto(tagged)
+		require.ErrorContains(t, err, "chain already has a block")
+	})
+
+	t.Run("after a block", func(t *testing.T) {
+		t.Parallel()
+		ls, primaryChain := newByronGenesisAnchorTestLedger(
+			t,
+			genesisHash.String(),
+		)
+		require.NoError(
+			t,
+			primaryChain.AddBlock(
+				context.Background(),
+				loadBoundaryBlock(
+					t,
+					"mainnet-byron-last-4492799.cbor",
+					gledger.BlockTypeByronMain,
+				),
+				nil,
+			),
+		)
+		err := ls.ValidateChainSelectionHeaderCrypto(ebbHeader)
+		require.ErrorContains(t, err, "chain already has a block")
+	})
+}
+
 // TestValidateByronPBFTHeaderCryptoRejectsNilHeaders calls the Byron header
 // validator with typed-nil headers, the shape a Byron block type can carry
 // in process. It must return an error rather than read through the header.

@@ -1397,7 +1397,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 			// pipeline can accept headers from reconnected peers instead
 			// of stalling permanently.
 			ls.clearQueuedHeaders()
-			ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+			ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 		}
 	}
 	if err == nil {
@@ -1476,7 +1476,7 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	// connection, including one whose BatchDone was never delivered.
 	ls.releaseAllBlockfetchRequestsLocked(e.ConnectionId)
 	if sameConnectionId(ls.selectedBlockfetchConnId, e.ConnectionId) {
-		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+		ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 	}
 	if sameConnectionId(ls.shadowBlockfetchConnId, e.ConnectionId) {
 		ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
@@ -1557,7 +1557,7 @@ func (ls *LedgerState) handleEventChainsyncAwaitReply(evt event.Event) {
 		ls.chain.HeaderCount() == 0 {
 		return
 	}
-	ls.selectedBlockfetchConnId = e.ConnectionId
+	ls.setSelectedBlockfetchConnId(e.ConnectionId)
 	ls.config.Logger.Debug(
 		"selected chainsync peer entered await reply, flushing queued headers to blockfetch",
 		"component",
@@ -1631,7 +1631,7 @@ func (ls *LedgerState) detectConnectionSwitch(
 					err,
 				)
 				ls.clearQueuedHeaders()
-				ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+				ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 			}
 			ls.chainsyncBlockfetchMutex.Unlock()
 			if err == nil && connIdKey(replayConnId) != "" {
@@ -1730,7 +1730,7 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 	newConnId ouroboros.ConnectionId,
 	pending *pendingPublishes,
 ) (ouroboros.ConnectionId, error) {
-	ls.selectedBlockfetchConnId = newConnId
+	ls.setSelectedBlockfetchConnId(newConnId)
 	headerCount := 0
 	if ls.chain != nil {
 		headerCount = ls.chain.HeaderCount()
@@ -2798,7 +2798,7 @@ func (ls *LedgerState) logIdleSelectedOwnerRelease(e ChainsyncEvent) {
 func (ls *LedgerState) clearIdleSelectedOwner() {
 	if ls.chainsyncBlockfetchReadyChan == nil &&
 		(ls.chain == nil || ls.chain.HeaderCount() == 0) {
-		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+		ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 	}
 }
 
@@ -2856,7 +2856,7 @@ func (ls *LedgerState) claimHeaderPipelineOwnership(
 	}
 	if ls.headerFitsCurrentPipeline(e) {
 		ls.headerPipelineConnId = e.ConnectionId
-		ls.selectedBlockfetchConnId = e.ConnectionId
+		ls.setSelectedBlockfetchConnId(e.ConnectionId)
 		return owner, false, true
 	}
 	ls.headerPipelineConnId = owner
@@ -3668,7 +3668,7 @@ func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
 func (ls *LedgerState) resetChainsyncResyncState() {
 	ls.clearRollbackHistory()
 	ls.headerMismatchCount = 0
-	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 	ls.chainsyncBlockfetchMutex.Lock()
 	// clearQueuedHeaders mutates headerPipelineConnId, which every other
 	// mutator guards with chainsyncBlockfetchMutex -- moved inside this
@@ -4092,7 +4092,7 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 		ls.chainsyncBlockfetchMutex.Lock()
 		ls.headerPipelineConnId = connId
 		ls.chainsyncBlockfetchMutex.Unlock()
-		ls.selectedBlockfetchConnId = connId
+		ls.setSelectedBlockfetchConnId(connId)
 		return ls.chain.HeaderCount(), nil
 	}
 	return 0, nil
@@ -4215,7 +4215,7 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 						// failed recovery connection sends the next batch
 						// of a multi-batch replay straight back to it.
 						// Matches the fallback in handleEventChainsync.
-						ls.selectedBlockfetchConnId = *activeConnId
+						ls.setSelectedBlockfetchConnId(*activeConnId)
 						startErr = ls.startQueuedBlockfetchLocked(
 							*activeConnId,
 							&pending,
@@ -4251,7 +4251,7 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 	// nothing downstream currently reads a stale value -- but that makes the
 	// invariant depend on every future writer reassigning first, which is not a
 	// property worth relying on.
-	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 	return LocalRollbackRecoveryResult{}
 }
 
@@ -4581,7 +4581,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		return nil
 	}
 	// Mark blockfetch as in progress
-	ls.selectedBlockfetchConnId = e.ConnectionId
+	ls.setSelectedBlockfetchConnId(e.ConnectionId)
 	initialConnId := ls.selectInitialBlockfetchConn(e.ConnectionId)
 	ls.config.Logger.Debug(
 		"starting blockfetch",
@@ -4625,7 +4625,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"error",
 					err,
 				)
-				ls.selectedBlockfetchConnId = *activeConnId
+				ls.setSelectedBlockfetchConnId(*activeConnId)
 				if retryErr := ls.startQueuedBlockfetchLocked(*activeConnId, pending); retryErr == nil {
 					return nil
 				}
@@ -4633,7 +4633,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		}
 		// All fallbacks exhausted. Clear stale state so the next
 		// header can start a fresh blockfetch attempt.
-		ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+		ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 		ls.clearQueuedHeaders()
 		ls.requestChainsyncResync(
 			initialConnId,
@@ -4644,6 +4644,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	}
 	return nil
 }
+
+// ErrChainsyncHeaderDisconnected is returned by AwaitChainsyncHeaderAdmission
+// for a header past the forecast horizon whose predecessor is neither the
+// chain tip, the header tip, nor any header or block the local chain holds.
+// Applying blocks the node already has cannot bring such a header into range,
+// so the connection must re-intersect from the local chain instead of waiting.
+var ErrChainsyncHeaderDisconnected = errors.New(
+	"chainsync header does not connect to the local chain",
+)
 
 // AwaitChainsyncHeaderAdmission enforces the Ouroboros ChainSync future-header
 // rule against the timestamp recorded at network ingress. It must run from the
@@ -4658,7 +4667,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 // validated, so it waits until the applied ledger advances far enough to
 // forecast its slot before the onset check runs, as the reference ChainSync
 // client does for OutsideForecastRange; until then it must not influence chain
-// selection or reach blockfetch. Other conversion failures fail closed. A zero
+// selection or reach blockfetch. Such a header whose predecessor does not
+// connect to the local chain is not held: it returns an error wrapping
+// ErrChainsyncHeaderDisconnected, because no publication can release it.
+// Other conversion failures fail closed. A zero
 // timestamp is retained for compatibility with synthetic/internal events that
 // never crossed the network ingress path. As with other Go APIs that accept a
 // context, ctx must not be nil.
@@ -4738,6 +4750,9 @@ func (ls *LedgerState) awaitForecastHorizon(
 		if !ls.headerBeyondForecastHorizon(ctx, e) {
 			return nil
 		}
+		if ls.chainsyncHeaderDisconnected(ctx, e) {
+			return ErrChainsyncHeaderDisconnected
+		}
 		if !logged && ls.config.Logger != nil {
 			ls.config.Logger.Debug(
 				"holding chainsync header past the forecast horizon",
@@ -4806,36 +4821,113 @@ func (ls *LedgerState) chainsyncForkAnchor(
 		prevHash,
 		tip.currentTip.Point.Slot,
 		ls.peerHeaderHistoryLimit(),
-		forkAnchorLookups{
-			peerHeader: func(hash []byte) (ocommon.Point, []byte, bool) {
-				if ls.config.PeerHeaderLookupFunc == nil {
-					return ocommon.Point{}, nil, false
-				}
-				ancestor, parentHash, found := ls.config.PeerHeaderLookupFunc(
-					e.ConnectionId,
-					hash,
-				)
-				return ancestor.Point, parentHash, found
-			},
-			queuedHeader: ls.chain.HoldsQueuedHeader,
-			heldBlock: func(point ocommon.Point) bool {
-				return ls.chain.HoldsPoint(ctx, point)
-			},
-			blockByHash: func(hash []byte) (ocommon.Point, bool) {
-				if ls.db == nil && ls.lookupBlockByHash == nil {
-					return ocommon.Point{}, false
-				}
-				block, err := ls.blockByHash(ctx, hash)
-				if err != nil {
-					return ocommon.Point{}, false
-				}
-				return ocommon.NewPoint(block.Slot, block.Hash), true
-			},
-		},
+		ls.forkAnchorLookups(ctx, e),
 	)
 }
 
+// chainsyncHeaderDisconnected reports whether e's predecessor is neither the
+// chain tip, the header tip, nor reachable through the peer's delivered
+// headers to a header or block the local chain holds. Waiting for the
+// forecast horizon cannot release such a header, because only blocks the
+// node does not have could connect it. It reports false whenever the local
+// chain cannot be consulted.
+func (ls *LedgerState) chainsyncHeaderDisconnected(
+	ctx context.Context,
+	e ChainsyncEvent,
+) bool {
+	if ls.chain == nil || e.BlockHeader == nil {
+		return false
+	}
+	prevHash := e.BlockHeader.PrevHash().Bytes()
+	if bytes.Equal(prevHash, ls.chain.HeaderTip().Point.Hash) ||
+		bytes.Equal(prevHash, ls.chain.Tip().Point.Hash) {
+		return false
+	}
+	return !connectsToLocalChain(
+		prevHash,
+		ls.peerHeaderHistoryLimit(),
+		ls.forkAnchorLookups(ctx, e),
+	)
+}
+
+func (ls *LedgerState) forkAnchorLookups(
+	ctx context.Context,
+	e ChainsyncEvent,
+) forkAnchorLookups {
+	return forkAnchorLookups{
+		peerHeader: func(hash []byte) (ocommon.Point, []byte, bool) {
+			if ls.config.PeerHeaderLookupFunc == nil {
+				return ocommon.Point{}, nil, false
+			}
+			ancestor, parentHash, found := ls.config.PeerHeaderLookupFunc(
+				e.ConnectionId,
+				hash,
+			)
+			return ancestor.Point, parentHash, found
+		},
+		queuedHeader:     ls.chain.HoldsQueuedHeader,
+		queuedHeaderHash: ls.chain.HoldsQueuedHeaderHash,
+		heldBlock: func(point ocommon.Point) bool {
+			return ls.chain.HoldsPoint(ctx, point)
+		},
+		blockByHash: func(hash []byte) (ocommon.Point, bool) {
+			if ls.db == nil && ls.lookupBlockByHash == nil {
+				return ocommon.Point{}, false
+			}
+			block, err := ls.blockByHash(ctx, hash)
+			if err != nil {
+				return ocommon.Point{}, false
+			}
+			return ocommon.NewPoint(block.Slot, block.Hash), true
+		},
+	}
+}
+
+// connectsToLocalChain walks a peer's delivered headers back from prevHash and
+// reports whether it reaches origin, a queued header, or a block the local
+// chain holds within limit headers.
+func connectsToLocalChain(
+	prevHash []byte,
+	limit int,
+	lookups forkAnchorLookups,
+) bool {
+	for range limit {
+		if isOriginHash(prevHash) {
+			return true
+		}
+		point, parentHash, found := lookups.peerHeader(prevHash)
+		if !found {
+			if lookups.queuedHeaderHash != nil && lookups.queuedHeaderHash(prevHash) {
+				return true
+			}
+			point, found = lookups.blockByHash(prevHash)
+			return found && lookups.heldBlock(point)
+		}
+		if lookups.queuedHeader(point) || lookups.heldBlock(point) {
+			return true
+		}
+		prevHash = parentHash
+	}
+	// The last permitted hop advanced prevHash without examining it. Check it
+	// here without traversing another peer header, so an ancestry that ends at
+	// origin or a held block exactly at the limit is still connected.
+	if isOriginHash(prevHash) {
+		return true
+	}
+	if point, _, found := lookups.peerHeader(prevHash); found {
+		return lookups.queuedHeader(point) || lookups.heldBlock(point)
+	}
+	if lookups.queuedHeaderHash != nil && lookups.queuedHeaderHash(prevHash) {
+		return true
+	}
+	point, found := lookups.blockByHash(prevHash)
+	return found && lookups.heldBlock(point)
+}
+
 type forkAnchorLookups struct {
+	// queuedHeaderHash resolves queued ancestry without requiring the source
+	// peer to have delivered that header. Nil means no hash lookup is supplied.
+	queuedHeaderHash func([]byte) bool
 	// peerHeader resolves a header the peer delivered, with its parent hash.
 	peerHeader func(hash []byte) (ocommon.Point, []byte, bool)
 	// queuedHeader and heldBlock report membership of the local chain.
@@ -4877,7 +4969,25 @@ func resolveForkAnchor(
 		}
 		prevHash = parentHash
 	}
-	return 0, false
+	// As in connectsToLocalChain, the parent reached by the last permitted
+	// hop is examined without traversing another peer header.
+	if isOriginHash(prevHash) {
+		return localForkAnchor(0, tipSlot)
+	}
+	if point, _, found := lookups.peerHeader(prevHash); found {
+		if lookups.queuedHeader(point) {
+			return 0, false
+		}
+		if lookups.heldBlock(point) {
+			return localForkAnchor(point.Slot, tipSlot)
+		}
+		return 0, false
+	}
+	point, found := lookups.blockByHash(prevHash)
+	if !found || !lookups.heldBlock(point) {
+		return 0, false
+	}
+	return localForkAnchor(point.Slot, tipSlot)
 }
 
 func isOriginHash(hash []byte) bool {
@@ -5643,7 +5753,7 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	// is already the active connection.
 	if ls.chainsyncBlockfetchReadyChan != nil &&
 		!sameConnectionId(ls.activeBlockfetchConnId, connId) {
-		ls.selectedBlockfetchConnId = connId
+		ls.setSelectedBlockfetchConnId(connId)
 		return nil
 	}
 	if ls.chainsyncBlockfetchReadyChan != nil {
@@ -5665,11 +5775,12 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 		if ls.chainsyncBlockfetchReadyChan != nil {
 			close(ls.chainsyncBlockfetchReadyChan)
 			ls.chainsyncBlockfetchReadyChan = nil
+			ls.metrics.setBatchInFlight(false)
 		}
 		ls.chainsyncBlockfetchReadyMutex.Unlock()
 		if err := ls.flushPendingBlockfetchBlocksDeferred(pending); err != nil {
 			ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
-			ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
+			ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 			return fmt.Errorf(
 				"failed to flush stale blockfetch batch before restart: %w",
 				err,
@@ -5677,7 +5788,7 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 		}
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	}
-	ls.selectedBlockfetchConnId = connId
+	ls.setSelectedBlockfetchConnId(connId)
 	return ls.startQueuedBlockfetchLocked(connId, pending)
 }
 
@@ -6101,7 +6212,7 @@ func (ls *LedgerState) startQueuedBlockfetchOnLocked(
 		return err
 	}
 	if sameConnectionId(ls.selectedBlockfetchConnId, before) {
-		ls.selectedBlockfetchConnId = connId
+		ls.setSelectedBlockfetchConnId(connId)
 	}
 	return nil
 }
@@ -6148,6 +6259,7 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 		return nil
 	}
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.metrics.setBatchInFlight(true)
 	ls.activeBlockfetchConnId = connId
 	// Reset per-batch shadow state. The normal batch-completion path
 	// goes through blockfetchRequestRangeCleanup, which clears these,
@@ -6418,9 +6530,11 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 		return
 	}
 	ls.blockfetchContinuationPending = true
+	ls.metrics.setContinuationPending(true)
 	ls.blockfetchContinuationMu.Lock()
 	if ls.closed.Load() {
 		ls.blockfetchContinuationPending = false
+		ls.metrics.setContinuationPending(false)
 		ls.blockfetchContinuationMu.Unlock()
 		return
 	}
@@ -6445,10 +6559,12 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 		ls.chainsyncBlockfetchMutex.Lock()
 		if ls.closed.Load() {
 			ls.blockfetchContinuationPending = false
+			ls.metrics.setContinuationPending(false)
 			ls.chainsyncBlockfetchMutex.Unlock()
 			return
 		}
 		ls.blockfetchContinuationPending = false
+		ls.metrics.setContinuationPending(false)
 		err := ls.startQueuedBlockfetchOnLocked(connId, &pending)
 		if err != nil {
 			// A continuation can race a peer disconnect just as the previous
@@ -6594,6 +6710,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 		}
 		if addBlockErr == nil {
 			ls.batchBlocksApplied++
+			ls.metrics.markBlockAdded()
 			// Only a body accepted by chain insertion proves that the tracked
 			// range made progress. Received but rejected bodies retain the
 			// failure record so the retry guard can act on them.
@@ -6758,6 +6875,22 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("get genesis block hash: %w", err)
 	}
+	hasGenesis, err := ls.db.HasGenesisCbor(0, genesisHash[:])
+	if err != nil {
+		return fmt.Errorf("checking genesis CBOR: %w", err)
+	}
+	if !hasGenesis {
+		hasAnyGenesis, err := ls.db.HasAnyGenesisCbor(0)
+		if err != nil {
+			return fmt.Errorf("checking existing genesis CBOR: %w", err)
+		}
+		if hasAnyGenesis {
+			return fmt.Errorf(
+				"stored synthetic genesis does not match configured genesis hash %s",
+				hex.EncodeToString(genesisHash[:]),
+			)
+		}
+	}
 
 	// bootstrappedFromMithril is true only on the fall-through path below:
 	// a chain already past slot 0 whose genesis CBOR was never created,
@@ -6773,7 +6906,7 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 		// If genesis CBOR exists in the blob store with the expected hash,
 		// the database was created with a matching genesis. Older databases
 		// may still be missing the slot-0 network-state baseline.
-		if ls.db.HasGenesisCbor(0, genesisHash[:]) {
+		if hasGenesis {
 			if err := ls.ensureGenesisConstitution(nil); err != nil {
 				return err
 			}
@@ -6785,18 +6918,6 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 				return err
 			}
 			return ls.ensureGenesisNetworkState()
-		}
-		// Check if genesis CBOR exists but with a different hash.
-		// This indicates the database was created for a different
-		// network (e.g., mainnet DB with preview config) — fail fast.
-		if ls.db.HasAnyGenesisCbor(0) {
-			ls.config.Logger.Warn(
-				"slot-0 CBOR exists but does not match synthetic genesis hash, creating genesis block",
-				"component",
-				"ledger",
-				"expected_hash",
-				hex.EncodeToString(genesisHash[:]),
-			)
 		}
 		// Genesis CBOR missing (e.g., after Mithril bootstrap which
 		// imports ledger state and ImmutableDB blocks but does not
@@ -9502,6 +9623,7 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup() {
 	if ls.chainsyncBlockfetchReadyChan != nil {
 		close(ls.chainsyncBlockfetchReadyChan)
 		ls.chainsyncBlockfetchReadyChan = nil
+		ls.metrics.setBatchInFlight(false)
 	}
 	ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
 }
