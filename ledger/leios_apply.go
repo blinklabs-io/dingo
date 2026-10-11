@@ -187,9 +187,10 @@ func endorserBlockTxIds(rawTxs []cbor.RawMessage) ([][]byte, error) {
 // endorser block to the chain.
 //
 // It returns the number of transactions applied and the Conway donation total
-// from accepted endorser-block transactions. Decode/build failures happen
-// before storage is mutated and callers may treat them as best-effort. Once
-// the endorser blob or transaction rows start writing, any error is wrapped in
+// from accepted endorser-block transactions. Malformed peer transaction bytes
+// are deterministic validation failures. Local build failures happen before
+// storage is mutated and remain retryable. Once the endorser blob or
+// transaction rows start writing, any error is wrapped in
 // leiosEndorserBlockStorageError so callers can abort the outer transaction
 // instead of committing a partial endorser-block application.
 func (ls *LedgerState) applyEndorserBlock(
