@@ -51,18 +51,29 @@ const (
 	deadForkHonestTipSlot = uint64(50000)
 )
 
+// newGenesisWallClockSelector returns a Genesis selector whose wall clock reads
+// wallSlot.
+func newGenesisWallClockSelector(wallSlot uint64) *ChainSelector {
+	return NewChainSelector(ChainSelectorConfig{
+		GenesisMode:        true,
+		SecurityParam:      20,
+		GenesisWindowSlots: 100,
+		WallClockSlot: func() (uint64, bool) {
+			return wallSlot, true
+		},
+		DisableEventSubscriptions: true,
+	})
+}
+
 func newDeadForkSelector(t *testing.T, localTip ochainsync.Tip) (
 	*ChainSelector,
 	ouroboros.ConnectionId,
 	[]ouroboros.ConnectionId,
 ) {
 	t.Helper()
-	cs := NewChainSelector(ChainSelectorConfig{
-		GenesisMode:               true,
-		SecurityParam:             20,
-		GenesisWindowSlots:        100,
-		DisableEventSubscriptions: true,
-	})
+	// The honest peers advertise tips at the wall clock; the dead fork's
+	// last block is far older.
+	cs := newGenesisWallClockSelector(deadForkHonestTipSlot)
 	// A local tip exists, so advertised tips are not bounded by the first
 	// peer's: honest peers legitimately advertise far ahead while catching up.
 	cs.SetLocalTip(localTip)
@@ -91,7 +102,8 @@ func newDeadForkSelector(t *testing.T, localTip ochainsync.Tip) (
 }
 
 // A peer that has delivered its whole short fork leads on observed density,
-// but its advertised tip is far behind the tip every other peer advertises. It
+// but its advertised tip is older than the wall clock and far behind the tip
+// the other peers advertise. It
 // must not be selected over peers still streaming the longer chain.
 func TestGenesisSelectionRejectsPeerAdvertisingFarBehindTips(t *testing.T) {
 	t.Parallel()
@@ -124,9 +136,9 @@ func TestGenesisCorroboratedDeadForkDoesNotExcludeHonestPeers(t *testing.T) {
 	assert.Contains(t, honest, *best)
 }
 
-// Genesis mode must not exit at a horizon only a minority peer's advertised tip
-// supports while the other peers advertise tips beyond it.
-func TestGenesisExitIgnoresMinorityPeerAdvertisingFarBehindTip(t *testing.T) {
+// Genesis mode must not exit at a horizon only a stale-tipped peer supports
+// while the other peers advertise fresh tips beyond it.
+func TestGenesisExitIgnoresStaleTipPeer(t *testing.T) {
 	t.Parallel()
 	cs, _, _ := newDeadForkSelector(t, genesisTip(1000, "local", 100))
 	cs.SetLocalTip(genesisTip(1900, "local", 190))
@@ -135,16 +147,11 @@ func TestGenesisExitIgnoresMinorityPeerAdvertisingFarBehindTip(t *testing.T) {
 		"Genesis exited at a horizon only the dead-fork peer supports")
 }
 
-// Control: when the peers agree on the network tip, a peer is not a minority
-// and the exit behavior is unchanged.
+// Control: when the peers agree on the network tip, no peer is stale and the
+// exit behavior is unchanged.
 func TestGenesisExitWhenPeersAgreeOnTip(t *testing.T) {
 	t.Parallel()
-	cs := NewChainSelector(ChainSelectorConfig{
-		GenesisMode:               true,
-		SecurityParam:             20,
-		GenesisWindowSlots:        100,
-		DisableEventSubscriptions: true,
-	})
+	cs := newGenesisWallClockSelector(2000)
 	cs.SetLocalTip(genesisTip(1000, "local", 100))
 	for i := range deadForkHonestPeers {
 		feedAdvertising(
@@ -155,4 +162,55 @@ func TestGenesisExitWhenPeersAgreeOnTip(t *testing.T) {
 	}
 	cs.SetLocalTip(genesisTip(1900, "local", 190))
 	assert.Equal(t, SelectionModePraos, cs.SelectionMode())
+}
+
+const colluderTipBlock = uint64(90000)
+
+// newColluderSelector models one honest peer and two connections that deliver
+// only the first headers of the real chain while advertising an inflated tip.
+// The honest peer's tip is at the wall clock, so no claim by the colluders can
+// make it stale.
+func newColluderSelector(
+	t *testing.T,
+	honestDeliveredTo uint64,
+) (*ChainSelector, ouroboros.ConnectionId) {
+	t.Helper()
+	cs := newGenesisWallClockSelector(2000)
+	cs.SetLocalTip(genesisTip(1000, "local", 100))
+	honest := corrConn(10)
+	feedAdvertising(
+		t, cs, honest, genesisTip(2000, "tip", 200),
+		"h", 1000, honestDeliveredTo, 10,
+	)
+	for i := range 2 {
+		feedAdvertising(
+			t, cs, corrConn(20+i),
+			genesisTip(2000, "lie", colluderTipBlock),
+			"h", 1000, 1050, 10,
+		)
+	}
+	return cs, honest
+}
+
+// Connections that advertise an inflated tip and deliver a few real headers
+// must not push the one honest peer out of selection.
+func TestGenesisSelectionKeepsHonestPeerAgainstColludingTips(t *testing.T) {
+	t.Parallel()
+	cs, honest := newColluderSelector(t, 1500)
+
+	best := cs.SelectBestChain()
+	require.NotNil(t, best)
+	assert.Equal(t, honest, *best,
+		"colluding advertised tips displaced the honest peer")
+}
+
+// The same colluders must not remove the honest peer from the Genesis exit
+// horizon: once the local tip reaches the honest peer's tip, Genesis exits.
+func TestGenesisExitReachedAgainstColludingTips(t *testing.T) {
+	t.Parallel()
+	cs, _ := newColluderSelector(t, 2000)
+	cs.SetLocalTip(genesisTip(1990, "local", 199))
+
+	assert.Equal(t, SelectionModePraos, cs.SelectionMode(),
+		"colluding advertised tips kept Genesis from exiting")
 }

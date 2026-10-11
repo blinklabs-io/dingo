@@ -2165,6 +2165,9 @@ func (n *Node) buildChainSelectorConfig(
 	genesisMode bool,
 	genesisWindowSlots uint64,
 ) chainselection.ChainSelectorConfig {
+	// Captured once: n.ledgerState is replaced by live Restore/Truncate
+	// without a lock the selector could share.
+	ls := n.ledgerState
 	return chainselection.ChainSelectorConfig{
 		Logger:                n.config.logger,
 		EventBus:              n.eventBus,
@@ -2187,6 +2190,13 @@ func (n *Node) buildChainSelectorConfig(
 		},
 		OnRollbackRegistration:     n.recordRollbackRegistration,
 		OnGenesisDensityDisconnect: n.onGenesisDensityDisconnect,
+		WallClockSlot: func() (uint64, bool) {
+			if ls == nil {
+				return 0, false
+			}
+			slot, err := ls.CurrentSlot()
+			return slot, err == nil
+		},
 	}
 }
 
