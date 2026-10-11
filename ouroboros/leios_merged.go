@@ -1490,7 +1490,7 @@ func (o *Ouroboros) lookupLeiosEndorserBlock(
 	now := time.Now()
 	o.leiosMu.RLock()
 	data, ok := o.leiosEndorserBlocks[key]
-	if !ok || data == nil || !data.hasManifest() {
+	if !ok || data == nil {
 		o.leiosMu.RUnlock()
 		// Memory cache miss: try the persistent blob store so we can serve
 		// historical EBs whose in-memory TTL has elapsed.
@@ -1498,13 +1498,16 @@ func (o *Ouroboros) lookupLeiosEndorserBlock(
 	}
 	if !data.expired(now) {
 		o.leiosMu.RUnlock()
+		if !data.hasManifest() {
+			return o.loadLeiosEBFromDB(slot, hash)
+		}
 		return data, true
 	}
 	o.leiosMu.RUnlock()
 
 	o.leiosMu.Lock()
 	data, ok = o.leiosEndorserBlocks[key]
-	if !ok || data == nil || !data.hasManifest() {
+	if !ok || data == nil {
 		o.leiosMu.Unlock()
 		return o.loadLeiosEBFromDB(slot, hash)
 	}
@@ -1514,6 +1517,9 @@ func (o *Ouroboros) lookupLeiosEndorserBlock(
 		return o.loadLeiosEBFromDB(slot, hash)
 	}
 	o.leiosMu.Unlock()
+	if !data.hasManifest() {
+		return o.loadLeiosEBFromDB(slot, hash)
+	}
 	return data, true
 }
 
@@ -1626,12 +1632,13 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	}
 	// Only cache if no fresher entry has appeared while we were loading.
+	now := time.Now()
 	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing == nil ||
-		existing.expired(time.Now()) || !existing.hasManifest() {
-		if existing != nil {
+		existing.expired(now) || !existing.hasManifest() {
+		if existing != nil && !existing.expired(now) {
 			data.relayOfferRequested = existing.relayOfferRequested
 		}
-		o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+		o.pruneLeiosEndorserBlockCacheLocked(now)
 		o.leiosEndorserBlockSeq++
 		data.seq = o.leiosEndorserBlockSeq
 		for _, key := range cacheKeys {
@@ -1641,7 +1648,7 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		// budget but pushes the aggregate over its budget is evicted
 		// promptly, the same way storeLeiosEndorserBlock prunes both before
 		// and after admitting an entry.
-		o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+		o.pruneLeiosEndorserBlockCacheLocked(now)
 	} else {
 		data = existing
 	}

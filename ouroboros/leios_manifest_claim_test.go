@@ -1210,6 +1210,74 @@ func TestLeiosRelayOfferIntentMergesWithPersistedCacheReload(t *testing.T) {
 		"a persisted completion must publish retained transaction intent once")
 }
 
+func expireLeiosRelayIntent(
+	t *testing.T,
+	o *Ouroboros,
+	point ocommon.Point,
+) {
+	t.Helper()
+	key := leiosBlockKey(point.Slot, point.Hash)
+	o.leiosMu.Lock()
+	defer o.leiosMu.Unlock()
+	current := o.leiosEndorserBlocks[key]
+	require.NotNil(t, current)
+	require.False(t, current.hasManifest())
+	expired := *current
+	expired.insertedAt = time.Now().Add(-leiosEndorserBlockCacheTTL - time.Second)
+	for _, cacheKey := range current.cacheKeys {
+		if o.leiosEndorserBlocks[cacheKey] == current {
+			o.leiosEndorserBlocks[cacheKey] = &expired
+		}
+	}
+}
+
+func TestLeiosExpiredRelayIntentIsRemovedOnDatabaseMiss(t *testing.T) {
+	t.Parallel()
+	o := newTestOuroborosWithLeiosDB(t)
+	point := ocommon.NewPoint(
+		473,
+		lcommon.Blake2b256Hash([]byte("expired-missing-intent")).Bytes(),
+	)
+	o.markLeiosEndorserBlockRelayOffer(point)
+	expireLeiosRelayIntent(t, o, point)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.False(t, ok)
+	require.Nil(t, data)
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	require.Nil(t,
+		o.leiosEndorserBlocks[leiosBlockKey(point.Slot, point.Hash)],
+		"an expired intent must be removed before a database miss returns",
+	)
+}
+
+func TestLeiosExpiredRelayIntentDoesNotRelayDatabaseReload(t *testing.T) {
+	t.Parallel()
+	tx, ref := testLeiosManifestTx(t, 0x64)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(474, lcommon.Blake2b256Hash(manifestRaw).Bytes())
+	o := newTestOuroborosWithLeiosDB(t)
+	o.leiosEBLog.registerConn("observer", nil, nil)
+	require.NoError(t, o.leiosDatabase().SetLeiosEB(
+		point.Slot, point.Hash, manifestRaw, []cbor.RawMessage{tx},
+	))
+	o.markLeiosEndorserBlockRelayOffer(point)
+	expireLeiosRelayIntent(t, o, point)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.True(t, data.hasManifest())
+	require.True(t, data.completeTxCache())
+	require.False(t, data.relayOfferRequested)
+	require.False(t, data.relayTransactionsOffered)
+	o.leiosEBLog.mu.Lock()
+	defer o.leiosEBLog.mu.Unlock()
+	require.Empty(t, o.leiosEBLog.items,
+		"an expired intent must not relay reloaded content")
+}
+
 func TestLeiosTxsOfferDisconnectedWaiterIsRemoved(t *testing.T) {
 	t.Parallel()
 	first, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
