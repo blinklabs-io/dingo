@@ -5413,9 +5413,18 @@ connections cannot make an honest peer's live tip older than the wall clock.
 The wall-clock slot comes from `ChainSelectorConfig.WallClockSlot`, which node
 composition wires to the current `LedgerState.CurrentSlot` through an atomic
 that follows live Restore/Truncate; the rule is inactive while that hook is
-unset or reports no slot. While the ledger is still in Byron, `CurrentSlot`
-extrapolates at the Byron slot length and under-reports the slot on networks
-that later shortened it, so the rule does not fire there.
+unset or reports no slot. It deliberately uses the extrapolated `CurrentSlot`
+rather than `WallClockSlotFromConfirmedHistory`: during catch-up the wall clock
+lies past the confirmed history's forecast horizon, which is exactly when the
+rule is needed. Slot lengths only shorten across eras, so while the ledger is
+still in Byron the extrapolated slot under-reports the true one. That lowers
+the cutoff: the rule can miss a dead fork there, but any peer it excludes is
+stale by the true wall clock as well. The comparison peer's fresh tip is
+unverified, and requiring delivered evidence for it would discard the honest
+peers still streaming the longer chain; if the honest chain stalls for longer
+than a Genesis window, one connection advertising a fresh tip can therefore
+make the stale honest peers unselectable, a stall that already violates the
+chain-growth assumption Genesis selection rests on.
 
 **Per-peer candidate chain fragments** (`chainselection.CandidateFragment`)
 materialize each peer's delivered-header history as a first-class value —

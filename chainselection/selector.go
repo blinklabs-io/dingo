@@ -531,8 +531,13 @@ func (cs *ChainSelector) bestKnownGenesisSlotLocked(
 // verdict on an honest peer. The comparison peer's claim is needed only to
 // avoid excluding the sole available peer, and applies only to a peer that is
 // already stale. The rule is inactive without a wall-clock source, while the
-// clock is unavailable, outside Genesis mode, and when the whole network's
-// tips are stale.
+// clock is unavailable, outside Genesis mode, and while no peer advertises a
+// fresh tip. Requiring delivered evidence of that fresh tip is not possible:
+// honest peers still streaming the longer chain deliver far behind what they
+// advertise. So if the honest chain stalls for longer than a Genesis window,
+// one connection advertising a fresh tip can make the stale honest peers
+// unselectable; a stall that long already violates the chain-growth
+// assumption Genesis selection rests on.
 func (cs *ChainSelector) advertisedTipStaleLocked(
 	connId ouroboros.ConnectionId,
 	peerTip *PeerChainTip,
