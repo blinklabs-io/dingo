@@ -795,7 +795,6 @@ func TestLeiosTxsOfferHandsOffAcrossMultipleFailingPeers(t *testing.T) {
 	}
 	var unlock [3]sync.Once
 	for idx, guard := range guards {
-		idx, guard := idx, guard
 		t.Cleanup(func() { unlock[idx].Do(guard.mu.Unlock) })
 	}
 	offer := oleiosnotify.NewMsgBlockTxsOffer(point)
