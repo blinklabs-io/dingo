@@ -127,14 +127,7 @@ func (s *State) SelectBlockfetchRetryPeer(
 	candidates := s.blockfetchCandidates(excluded[0], holders)
 	remaining := candidates[:0]
 	for _, candidate := range candidates {
-		exclude := false
-		for _, connId := range excluded {
-			if candidate.connId == connId {
-				exclude = true
-				break
-			}
-		}
-		if !exclude {
+		if !slices.Contains(excluded, candidate.connId) {
 			remaining = append(remaining, candidate)
 		}
 	}
