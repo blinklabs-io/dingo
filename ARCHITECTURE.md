@@ -10067,9 +10067,13 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   way the real node does — then default to `sqlite`. The data directory
   likewise falls back through `--dingo-data`/`DINGO_DATA_DIR` (koios-parity-only
   overrides) to Dingo's resolved `DatabasePath` (`CARDANO_DATABASE_PATH` or
-  `dingo.yaml`), then `.dingo`. Dingo's configuration is loaded only when a
-  flag leaves a value unset; a DSN flag passed empty still counts as set and
-  clears the configured DSN. If the configuration fails to load (for example a plugin `_FILE`
+  `dingo.yaml`), then `.dingo`. Dingo's configuration is loaded only for a
+  value the flags leave unset: the backend when `--metadata-plugin` is absent,
+  the DSN of a `postgres`/`mysql` backend when neither DSN flag is passed (a
+  DSN flag passed empty still counts as set and clears the configured DSN),
+  and the data directory of a `sqlite` backend when `--dingo-data` and
+  `DINGO_DATA_DIR` are absent. Only `sqlite` reads the data directory. If the
+  configuration is needed and fails to load (for example a plugin `_FILE`
   variable naming a missing file), the command fails rather than falling back
   to defaults, which would inspect a different database.
   - `sqlite`: opens `{data-dir}/metadata.sqlite` in read-only WAL mode

@@ -619,9 +619,11 @@ func resolveDingoDB(cmd *cobra.Command) (koiosparity.DingoDBConfig, error) {
 
 	// Dingo's configuration is consulted only for what the flags leave
 	// unset, so explicit flags work even when it cannot be loaded. A DSN
-	// flag passed empty is still set and clears the configured DSN.
+	// flag passed empty is still set and clears the configured DSN. Only
+	// sqlite reads the data directory, which may itself need the
+	// configuration.
 	dsnFromFlags := dsnSet || dsnFileSet
-	if plugin == "" || !dsnFromFlags {
+	if plugin == "" || (plugin != "sqlite" && !dsnFromFlags) {
 		cfg, err := loadedDingoConfig()
 		if err != nil {
 			return koiosparity.DingoDBConfig{}, err
@@ -640,9 +642,11 @@ func resolveDingoDB(cmd *cobra.Command) (koiosparity.DingoDBConfig, error) {
 		}
 	}
 
-	dataDir, err := resolveDingoDataDir()
-	if err != nil {
-		return koiosparity.DingoDBConfig{}, err
+	var dataDir string
+	if plugin == "sqlite" {
+		if dataDir, err = resolveDingoDataDir(); err != nil {
+			return koiosparity.DingoDBConfig{}, err
+		}
 	}
 	return koiosparity.DingoDBConfig{
 		Plugin:  plugin,

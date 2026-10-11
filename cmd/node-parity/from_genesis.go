@@ -421,6 +421,22 @@ func koiosAPIKey(cmd *cobra.Command) (string, error) {
 	)
 }
 
+// newFromGenesisKoiosClient builds the Koios client from-genesis compares
+// against, from its --koios-* flags.
+func newFromGenesisKoiosClient(
+	cmd *cobra.Command,
+	network string,
+) (*koiosparity.KoiosClient, error) {
+	apiKey, err := koiosAPIKey(cmd)
+	if err != nil {
+		return nil, err
+	}
+	return nodeparity.NewKoiosClient(
+		network, apiKey, koiosFlags.baseURL, koiosFlags.allowInsecureHTTP,
+		koiosFlags.allowPrivateAddresses,
+	)
+}
+
 func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 	network, err := requireNetwork()
 	if err != nil {
@@ -438,14 +454,7 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	apiKey, err := koiosAPIKey(cmd)
-	if err != nil {
-		return err
-	}
-	koios, err := nodeparity.NewKoiosClient(
-		network, apiKey, koiosFlags.baseURL, koiosFlags.allowInsecureHTTP,
-		koiosFlags.allowPrivateAddresses,
-	)
+	koios, err := newFromGenesisKoiosClient(cmd, network)
 	if err != nil {
 		return err
 	}

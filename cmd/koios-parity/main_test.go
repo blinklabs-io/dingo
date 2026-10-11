@@ -545,3 +545,47 @@ func TestResolveDingoDBExplicitEmptyDSNOverridesConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveDingoDBExplicitFlagsSkipBrokenConfig(t *testing.T) {
+	// Not t.Parallel: t.Setenv, and loadedDingoConfig and globalFlags are
+	// package-level state.
+	resetDingoConfigCache(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(
+		"DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE",
+		filepath.Join(t.TempDir(), "missing"),
+	)
+	prevData := globalFlags.dingoData
+	t.Cleanup(func() { globalFlags.dingoData = prevData })
+	globalFlags.dingoData = ""
+
+	resolve := func(flags map[string]string) (string, error) {
+		cmd := &cobra.Command{}
+		addDingoDBFlags(cmd)
+		for name, value := range flags {
+			require.NoError(t, cmd.Flags().Set(name, value))
+		}
+		got, err := resolveDingoDB(cmd)
+		return got.DSN, err
+	}
+
+	// A DSN-based plugin never reads the data directory.
+	dsn, err := resolve(map[string]string{
+		"metadata-plugin": "postgres",
+		"metadata-dsn":    "postgres://flag.example.com/dingo",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "postgres://flag.example.com/dingo", dsn)
+
+	// sqlite opens a file in the data directory, which comes from the
+	// configuration unless --dingo-data names it.
+	_, err = resolve(map[string]string{"metadata-plugin": "sqlite"})
+	require.ErrorContains(
+		t,
+		err,
+		"DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE",
+	)
+	globalFlags.dingoData = t.TempDir()
+	_, err = resolve(map[string]string{"metadata-plugin": "sqlite"})
+	require.NoError(t, err)
+}

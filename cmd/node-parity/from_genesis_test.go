@@ -15,11 +15,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -723,4 +727,36 @@ func TestFromGenesisKoiosAPIKeySources(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestFromGenesisKoiosClientUsesKeyFile(t *testing.T) {
+	// Not t.Parallel: fromGenesisCommand binds its flags to the
+	// package-level koiosFlags.
+	var authorization atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			authorization.Store(r.Header.Get("Authorization"))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"epoch_no":7}]`))
+		},
+	))
+	t.Cleanup(srv.Close)
+	keyFile := filepath.Join(t.TempDir(), "key")
+	require.NoError(t, os.WriteFile(keyFile, []byte("from-file\n"), 0o600))
+
+	cmd := fromGenesisCommand()
+	for name, value := range map[string]string{
+		"koios-api-key-file":            keyFile,
+		"koios-base-url":                srv.URL,
+		"koios-allow-insecure-http":     "true",
+		"koios-allow-private-addresses": "true",
+	} {
+		require.NoError(t, cmd.Flags().Set(name, value))
+	}
+	client, err := newFromGenesisKoiosClient(cmd, "preview")
+	require.NoError(t, err)
+	epoch, err := client.GetTipEpoch(context.Background())
+	require.NoError(t, err)
+	require.EqualValues(t, 7, epoch)
+	require.Equal(t, "Bearer from-file", authorization.Load())
 }
