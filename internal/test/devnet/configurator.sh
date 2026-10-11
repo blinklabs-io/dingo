@@ -76,20 +76,40 @@ config_config_json() {
 configure_leios_dijkstra() {
     local pool_dir="$1"
     local configs_dir="${pool_dir}/configs"
+    local current_pool_id="${pool_dir##*/}"
+    local -a pool_ids
 
     if [ "${DEVNET_LEIOS_ENABLED:-0}" != "1" ]; then
         return
     fi
 
-    # Register one deterministic, test-only BLS key for each generated pool
-    # and activate Dijkstra at genesis. The devnet has equal pool stake, so
-    # all three producers can form a quorum without bypassing signature or
-    # on-chain key-registration checks.
+    read -r -a pool_ids <<<"${DINGO_POOL_IDS:-1 2 3}"
+    if [ "${#pool_ids[@]}" -ne "$(jq length /leios-credentials.json)" ]; then
+        echo "Leios credential count must match generated pool count" >&2
+        return 1
+    fi
+
     cp /dijkstra-genesis.json "${configs_dir}/dijkstra-genesis.json"
-    jq --slurpfile leios_key /leios-key.json \
-        '(.staking.pools[]).leiosKey = $leios_key[0]' \
-        "${configs_dir}/shelley-genesis.json" \
-        | write_file "${configs_dir}/shelley-genesis.json"
+    for index in "${!pool_ids[@]}"; do
+        local pool_id="${pool_ids[$index]}"
+        local pool_hash
+        pool_hash="$(cardano-cli stake-pool id \
+            --cold-verification-key-file "/configs/${pool_id}/keys/cold.vkey" \
+            --output-format hex)"
+        jq --arg pool_hash "${pool_hash}" --argjson leios_key \
+            "$(jq ".[${index}].registration" /leios-credentials.json)" \
+            'if (.staking.pools | has($pool_hash)) then
+                .staking.pools[$pool_hash].leiosKey = $leios_key
+            else
+                error("generated pool is missing from Shelley genesis")
+            end' \
+            "${configs_dir}/shelley-genesis.json" \
+            | write_file "${configs_dir}/shelley-genesis.json"
+        if [ "${pool_id}" = "${current_pool_id}" ]; then
+            jq -r ".[${index}].signingKey" /leios-credentials.json \
+                >"${pool_dir}/keys/leios-vote.skey"
+        fi
+    done
     jq '.DijkstraGenesisFile = "dijkstra-genesis.json"
         | .DijkstraGenesisHash = ""
         | .TestDijkstraHardForkAtEpoch = 0
@@ -97,7 +117,6 @@ configure_leios_dijkstra() {
         | .ExperimentalProtocolsEnabled = true' \
         "${configs_dir}/config.json" \
         | write_file "${configs_dir}/config.json"
-    cp /leios-vote.skey "${pool_dir}/keys/leios-vote.skey"
 }
 
 configure_byron_delegation() {

@@ -96,8 +96,7 @@ services:
       - ${DEVNET_DINGO_SPEC:-./testnet-dingo.yaml}:/testnet.yaml
       - ./testdata/byron-heavy-delegation.json:/byron-heavy-delegation.json:ro
       - ../../../config/cardano/musashi/dijkstra-genesis.json:/dijkstra-genesis.json:ro
-      - ./testdata/leios-key.json:/leios-key.json:ro
-      - ./testdata/leios-vote.skey:/leios-vote.skey:ro
+      - ./testdata/leios-credentials.json:/leios-credentials.json:ro
       - p1-configs:/configs/1
       - p2-configs:/configs/2
       - p3-configs:/configs/3
