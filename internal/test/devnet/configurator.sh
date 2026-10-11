@@ -93,9 +93,9 @@ configure_leios_dijkstra() {
     for index in "${!pool_ids[@]}"; do
         local pool_id="${pool_ids[$index]}"
         local pool_hash
-        pool_hash="$(cardano-cli stake-pool id \
+        pool_hash="$(cardano-cli latest stake-pool id \
             --cold-verification-key-file "/configs/${pool_id}/keys/cold.vkey" \
-            --output-format hex)"
+            --output-hex)"
         jq --arg pool_hash "${pool_hash}" --argjson leios_key \
             "$(jq ".[${index}].registration" /leios-credentials.json)" \
             'if (.staking.pools | has($pool_hash)) then
