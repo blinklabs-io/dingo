@@ -46,3 +46,10 @@ func WithBucket(bucket string) BlobStoreGCSOptionFunc {
 		b.bucketName = bucket
 	}
 }
+
+// WithPrefix scopes object keys beneath prefix.
+func WithPrefix(prefix string) BlobStoreGCSOptionFunc {
+	return func(b *BlobStoreGCS) {
+		b.prefix = prefix
+	}
+}

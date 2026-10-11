@@ -685,6 +685,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// swapInRestoredDataDir) that was interrupted by a crash, process
 	// kill, or power failure before it could be confirmed and cleaned up
 	// -- must run before anything else below opens n.config.dataDir.
+	if err := n.reconcileInterruptedRemoteRestore(n.ctx); err != nil {
+		return fmt.Errorf(
+			"reconcile interrupted remote restore: %w", err,
+		)
+	}
 	if err := n.reconcileInterruptedLiveRestoreSwap(); err != nil {
 		return fmt.Errorf(
 			"reconcile interrupted live restore swap: %w", err,

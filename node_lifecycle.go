@@ -1747,8 +1747,9 @@ func (n *Node) Restore(
 			return nil
 		},
 		lifecycle.RestoreStorageConfig{
-			Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
-			Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
+			Blob:          n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
+			Metadata:      n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
+			ActiveDataDir: n.config.dataDir,
 			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
 				n.config.cardanoNodeConfig, "", n.config.network,
 			),
@@ -1815,23 +1816,27 @@ func (n *Node) Restore(
 			recovery.BackupDir(),
 		)
 	}
-	if err := recovery.Commit(); err != nil {
+	if err := finalizeSuccessfulRestore(recovery.Commit, backupDir); err != nil {
 		n.config.logger.Warn(
-			"failed to remove remote rollback backup after a successful restore",
+			"failed to finalize restore recovery after a successful restore",
 			"dir",
 			recovery.BackupDir(),
 			"error",
 			err,
 		)
-	}
-	if err := os.RemoveAll(backupDir); err != nil {
-		n.config.logger.Warn(
-			"failed to remove pre-restore backup after a successful restore",
-			"dir", backupDir,
-			"error", err,
-		)
+		return manifest, nil
 	}
 	return manifest, nil
+}
+
+func finalizeSuccessfulRestore(commit func() error, backupDir string) error {
+	if err := commit(); err != nil {
+		return fmt.Errorf("commit remote restore recovery: %w", err)
+	}
+	if err := os.RemoveAll(backupDir); err != nil {
+		return fmt.Errorf("remove pre-restore backup: %w", err)
+	}
+	return nil
 }
 
 // errRestoreSwapUnrecoverable marks a swapInRestoredDataDir failure where
@@ -2056,6 +2061,63 @@ func (n *Node) reconcileInterruptedLiveRestoreSwap() error {
 	}
 }
 
+func (n *Node) restoreStorageConfig() lifecycle.RestoreStorageConfig {
+	return lifecycle.RestoreStorageConfig{
+		Blob:          n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
+		Metadata:      n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
+		ActiveDataDir: n.config.dataDir,
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			n.config.cardanoNodeConfig, "", n.config.network,
+		),
+	}
+}
+
+func (n *Node) reconcileInterruptedRemoteRestore(ctx context.Context) error {
+	dataDir := n.config.dataDir
+	stagingDir := dataDir + restoreStagingSuffix
+	recoveryDir := lifecycle.RestoreRecoveryDir(stagingDir)
+	if _, err := os.Stat(recoveryDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat remote restore recovery directory: %w", err)
+	}
+	_, dataErr := os.Stat(dataDir)
+	_, backupErr := os.Stat(dataDir + preRestoreBackupSuffix)
+	if dataErr != nil && !os.IsNotExist(dataErr) {
+		return fmt.Errorf("stat data directory during remote restore recovery: %w", dataErr)
+	}
+	if backupErr != nil && !os.IsNotExist(backupErr) {
+		return fmt.Errorf("stat backup directory during remote restore recovery: %w", backupErr)
+	}
+	if !remoteRestoreNeedsRollback(dataErr == nil, backupErr == nil) {
+		return nil
+	}
+	host, err := internalplugins.NewHost()
+	if err != nil {
+		return fmt.Errorf("build storage plugin host for restore recovery: %w", err)
+	}
+	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
+	if err := lifecycle.RecoverInterruptedRestore(
+		ctx,
+		host,
+		recoveryDir,
+		dataDir,
+		n.restoreStorageConfig(),
+		false,
+	); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return os.RemoveAll(recoveryDir)
+		}
+		return fmt.Errorf("roll back interrupted remote restore: %w", err)
+	}
+	return nil
+}
+
+func remoteRestoreNeedsRollback(dataExists, backupExists bool) bool {
+	return !dataExists || !backupExists
+}
+
 // removeConfirmedRestoreBackup removes n.config.dataDir's pre-restore
 // backup, if one is present, once Run() has fully started on dataDir --
 // the proof (matching reinitializeAndResume's role for the in-process
@@ -2064,6 +2126,41 @@ func (n *Node) reconcileInterruptedLiveRestoreSwap() error {
 func (n *Node) removeConfirmedRestoreBackup() {
 	backupDir := n.config.dataDir + preRestoreBackupSuffix
 	if _, err := os.Stat(backupDir); err != nil {
+		return
+	}
+	recoveryDir := lifecycle.RestoreRecoveryDir(
+		n.config.dataDir + restoreStagingSuffix,
+	)
+	if _, err := os.Stat(recoveryDir); err == nil {
+		host, hostErr := internalplugins.NewHost()
+		if hostErr != nil {
+			n.config.logger.Warn(
+				"failed to build storage plugin host for restore cleanup",
+				"error", hostErr,
+			)
+			return
+		}
+		cleanupErr := lifecycle.RecoverInterruptedRestore(
+			context.Background(),
+			host,
+			recoveryDir,
+			n.config.dataDir,
+			n.restoreStorageConfig(),
+			true,
+		)
+		_ = host.Stop(context.Background())
+		if cleanupErr != nil {
+			n.config.logger.Warn(
+				"failed to reclaim the prior remote blob namespace",
+				"error", cleanupErr,
+			)
+			return
+		}
+	} else if !os.IsNotExist(err) {
+		n.config.logger.Warn(
+			"failed to inspect remote restore recovery directory",
+			"error", err,
+		)
 		return
 	}
 	if err := os.RemoveAll(backupDir); err != nil {

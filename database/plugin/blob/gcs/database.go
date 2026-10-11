@@ -51,6 +51,7 @@ type BlobStoreGCS struct {
 	bucket        *storage.BucketHandle
 	startupCancel context.CancelFunc
 	bucketName    string
+	prefix        string
 	timeout       time.Duration
 }
 
@@ -131,10 +132,14 @@ func NewWithOptions(opts ...BlobStoreGCSOptionFunc) (*BlobStoreGCS, error) {
 }
 
 func (d *BlobStoreGCS) fullKey(key string) string {
-	return hex.EncodeToString([]byte(key))
+	return d.prefix + hex.EncodeToString([]byte(key))
 }
 
 func (d *BlobStoreGCS) externalKey(key string) (string, error) {
+	key, ok := strings.CutPrefix(key, d.prefix)
+	if !ok {
+		return "", fmt.Errorf("object key %q is outside configured prefix", key)
+	}
 	b, err := hex.DecodeString(key)
 	if err != nil {
 		return "", fmt.Errorf("failed decoding hex key %q: %w", key, err)

@@ -1693,6 +1693,49 @@ func requireNoDir(t *testing.T, dir string) {
 	require.Truef(t, os.IsNotExist(err), "expected %q to not exist", dir)
 }
 
+func TestFinalizeSuccessfulRestorePreservesBackupWhenCommitFails(t *testing.T) {
+	t.Parallel()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+	require.NoError(t, os.MkdirAll(backupDir, 0o700))
+	marker := filepath.Join(backupDir, "marker")
+	require.NoError(t, os.WriteFile(marker, []byte("original"), 0o600))
+	wantErr := errors.New("cleanup failed")
+
+	err := finalizeSuccessfulRestore(func() error { return wantErr }, backupDir)
+	require.ErrorIs(t, err, wantErr)
+	require.FileExists(t, marker)
+}
+
+func TestInterruptedRemoteRestoreDisposition(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		dataExists   bool
+		backupExists bool
+		wantRollback bool
+	}{
+		{name: "before swap", dataExists: true, wantRollback: true},
+		{name: "between renames", backupExists: true, wantRollback: true},
+		{name: "before target creation", wantRollback: true},
+		{
+			name:         "activated replacement",
+			dataExists:   true,
+			backupExists: true,
+			wantRollback: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(
+				t,
+				tc.wantRollback,
+				remoteRestoreNeedsRollback(tc.dataExists, tc.backupExists),
+			)
+		})
+	}
+}
+
 // TestSwapInRestoredDataDirRetainsBackupUntilCallerConfirms guards the
 // core fix: a directory swap succeeding is not by itself proof the
 // restored data actually works, so swapInRestoredDataDir must never

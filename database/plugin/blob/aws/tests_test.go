@@ -703,6 +703,20 @@ func TestRegisterProvider(t *testing.T) {
 	})
 }
 
+func TestProviderScopesObjectsToDataDirNamespace(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	namespace := "0123456789abcdef0123456789abcdef"
+	require.NoError(t, blob.WriteNamespace(dataDir, namespace))
+	prefix, err := objectPrefix("configured/", dataDir)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		"configured/.dingo-namespaces/"+namespace+"/",
+		prefix,
+	)
+}
+
 func TestReadBlobBodyWithLimit(t *testing.T) {
 	data, err := readBlobBodyWithLimit(strings.NewReader("123"), 3)
 	if err != nil || string(data) != "123" {

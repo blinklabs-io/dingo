@@ -19,6 +19,7 @@ package gcs
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -723,6 +724,25 @@ func TestRollbackIsNoopReportsFalse(t *testing.T) {
 	if txn.pending != nil {
 		t.Fatal("rollback should discard pending changes")
 	}
+}
+
+func TestProviderScopesObjectsToDataDirNamespace(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	namespace := "0123456789abcdef0123456789abcdef"
+	require.NoError(t, blob.WriteNamespace(dataDir, namespace))
+	prefix, err := objectPrefix(dataDir)
+	require.NoError(t, err)
+	require.Equal(t, ".dingo-namespaces/"+namespace+"/", prefix)
+
+	store, err := NewWithOptions(WithPrefix(prefix))
+	require.NoError(t, err)
+	key := []byte("key")
+	objectKey := store.fullKey(string(key))
+	require.Equal(t, prefix+hex.EncodeToString(key), objectKey)
+	decoded, err := store.externalKey(objectKey)
+	require.NoError(t, err)
+	require.Equal(t, string(key), decoded)
 }
 
 func TestTombstoneBlockRetainsMetadata(t *testing.T) {
