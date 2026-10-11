@@ -1961,6 +1961,22 @@ func (c *Chain) HoldsQueuedHeader(point ocommon.Point) bool {
 	return err == nil && index >= 0
 }
 
+// HoldsQueuedHeaderHash reports whether hash is queued on this chain ahead of
+// its blocks.
+func (c *Chain) HoldsQueuedHeaderHash(hash []byte) bool {
+	if c == nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	for _, header := range c.headers {
+		if bytes.Equal(header.point.Hash, hash) {
+			return true
+		}
+	}
+	return false
+}
+
 // ValidateRollback verifies that Rollback(point) would be accepted without
 // mutating chain state. Callers can use this to avoid applying external
 // side effects before the chain's rollback pre-checks have run.
