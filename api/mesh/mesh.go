@@ -93,12 +93,11 @@ type ServerConfig struct {
 
 // Server is the Mesh-compatible REST API server.
 type Server struct {
-	config              ServerConfig
-	logger              *slog.Logger
-	networkID           *NetworkIdentifier
-	genesisID           *BlockIdentifier
-	genesisStartTimeSec int64
-	addrNetworkID       uint8
+	config        ServerConfig
+	logger        *slog.Logger
+	networkID     *NetworkIdentifier
+	genesisID     *BlockIdentifier
+	addrNetworkID uint8
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -181,13 +180,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	return &Server{
-		config:              cfg,
-		logger:              logger,
-		networkID:           networkID,
-		genesisID:           genesisID,
-		genesisStartTimeSec: cfg.GenesisStartTimeSec,
-		addrNetworkID:       addrNetID,
-		listener:            apilistener.New("Mesh API", logger),
+		config:        cfg,
+		logger:        logger,
+		networkID:     networkID,
+		genesisID:     genesisID,
+		addrNetworkID: addrNetID,
+		listener:      apilistener.New("Mesh API", logger),
 	}, nil
 }
 
@@ -357,18 +355,13 @@ func (s *Server) decodeAndValidate(
 // slotToTimestamp converts a slot number to a Unix
 // timestamp in milliseconds. It delegates to
 // LedgerState.SlotToTime which handles Byron-to-Shelley
-// slot duration transitions via the epoch cache. Falls
-// back to simple 1s-per-slot calculation if the epoch
-// cache is not yet populated.
-func (s *Server) slotToTimestamp(slot uint64) int64 {
+// slot duration transitions via the epoch cache.
+func (s *Server) slotToTimestamp(slot uint64) (int64, error) {
 	t, err := s.config.LedgerState.SlotToTime(slot)
-	if err == nil {
-		return t.UnixMilli()
+	if err != nil {
+		return 0, err
 	}
-	// Fallback: assume 1s slots (Shelley+).
-	// #nosec G115 -- slot fits in int64
-	return (s.genesisStartTimeSec +
-		int64(slot)) * 1000
+	return t.UnixMilli(), nil
 }
 
 // tipBlockID returns a BlockIdentifier for the given

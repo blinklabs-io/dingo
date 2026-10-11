@@ -227,10 +227,13 @@ type Store struct {
 	closeDone chan struct{}
 	closeErr  error
 
-	// stmtMu and stmts back the prepared-statement cache; see
-	// prepared_stmt.go for the mechanism and correctness argument.
-	stmtMu sync.Mutex
-	stmts  map[string]*sql.Stmt
+	// stmtMu guards stmts, the prepared-statement cache, and the borrow
+	// state that keeps a retired statement open until its callers finish;
+	// see prepared_stmt.go for the mechanism and correctness argument.
+	stmtMu      sync.Mutex
+	stmts       map[string]*sql.Stmt
+	stmtBorrows map[*sql.Stmt]int
+	stmtRetired map[*sql.Stmt]struct{}
 
 	// sumCredentialUtxoStakeCalls counts invocations of
 	// sumCredentialUtxoStake, the per-credential full live-UTxO aggregate
@@ -244,6 +247,7 @@ type Store struct {
 
 	// sqlOperations and sqlQueryDuration are nil when Config.PromRegistry
 	// was nil; see instrumentedQueryer and metrics.go.
+	plannerStats     sqlitePlannerStatsMetrics
 	sqlOperations    *prometheus.CounterVec
 	sqlQueryDuration *prometheus.HistogramVec
 
@@ -320,12 +324,16 @@ func New(config Config) (*Store, error) {
 		reset:                       config.Reset,
 		validateBackup:              config.ValidateBackup,
 		closeDone:                   make(chan struct{}),
+		plannerStats:                newPlannerStatsMetrics(config.PromRegistry),
 		sqlOperations: newSQLOperationsCounter(
 			config.PromRegistry,
 		),
 		sqlQueryDuration: newSQLQueryDurationHistogram(
 			config.PromRegistry,
 		),
+	}
+	if store.readDB != store.writeDB {
+		store.readDB.SetConnMaxLifetime(readConnMaxLifetime)
 	}
 	// Registered against store.WritePoolStats/ReadPoolStats (not
 	// config.WriteDB.Stats/config.ReadDB.Stats directly) so every backend

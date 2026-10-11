@@ -64,11 +64,17 @@ func (s *Server) handleBlock(
 		return
 	}
 
+	timestamp, err := s.slotToTimestamp(block.Slot)
+	if err != nil {
+		s.logger.Error("failed to resolve block timestamp", "error", err)
+		writeError(w, ErrInternal)
+		return
+	}
 	writeJSON(w, http.StatusOK, &BlockResponse{
 		Block: convertBlock(
 			block, txs,
 			s.addrNetworkID,
-			s.slotToTimestamp,
+			timestamp,
 		),
 	})
 }
