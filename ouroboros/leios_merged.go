@@ -1142,19 +1142,57 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 ) func() {
 	// lookupLeiosEndorserBlock, not a direct map read: an entry may exist
 	// only in the blob store (evicted from memory by TTL, or never loaded
-	// this run). The lookup is keyed by (slot, hash), so a result found here
-	// is necessarily this exact occurrence -- a cached entry for a different
-	// slot of the same hash lives under its own key and is simply not found,
-	// left untouched rather than evicted.
-	data, ok := o.lookupLeiosEndorserBlock(slot, ebHash)
-	if !ok || data == nil {
-		return nil
-	}
+	// this run). A result found there is necessarily this exact occurrence.
+	// When it is absent, the authoritative binding below may reuse complete
+	// content cached for the same hash while keeping the occurrences separate.
+	key := leiosBlockKey(slot, ebHash)
+	_, _ = o.lookupLeiosEndorserBlock(slot, ebHash)
 	o.leiosMu.Lock()
-	cur, ok := o.leiosEndorserBlocks[leiosBlockKey(slot, ebHash)]
-	if !ok || cur != data {
-		// Superseded (or evicted) by a concurrent update since the lookup
-		// above; nothing to promote.
+	now := time.Now()
+	o.pruneLeiosEndorserBlockCacheLocked(now)
+	data := o.leiosEndorserBlocks[key]
+	contentChanged := false
+	if data == nil || !data.completeTxCache() {
+		// The manifest is content-addressed, so a complete cached occurrence
+		// supplies the same bytes and transaction bodies. The announcement is
+		// the authority for the new slot. Keep any exact-slot intent and trust
+		// state while filling its content from the other occurrence.
+		for _, candidate := range o.leiosEndorserBlocks {
+			if candidate == nil || candidate.expired(now) ||
+				!candidate.completeTxCache() ||
+				!slices.Equal(candidate.point.Hash, ebHash) {
+				continue
+			}
+			if data == nil {
+				o.leiosEndorserBlockSeq++
+				data = &leiosEndorserBlockData{
+					point: ocommon.Point{
+						Slot: slot,
+						Hash: slices.Clone(ebHash),
+					},
+					cacheKeys:  []string{key},
+					insertedAt: now,
+					seq:        o.leiosEndorserBlockSeq,
+				}
+			}
+			completed := *data
+			completed.blockRaw = slices.Clone(candidate.blockRaw)
+			completed.txsRaw = cloneRawMessages(candidate.txsRaw)
+			completed.partialTxs = nil
+			completed.txCount = candidate.txCount
+			completed.semanticValidationStatus = leiosEBValidationUnknown
+			for _, cacheKey := range data.cacheKeys {
+				if current := o.leiosEndorserBlocks[cacheKey]; current == data ||
+					current == nil {
+					o.leiosEndorserBlocks[cacheKey] = &completed
+				}
+			}
+			data = &completed
+			contentChanged = true
+			break
+		}
+	}
+	if data == nil {
 		o.leiosMu.Unlock()
 		return nil
 	}
@@ -1164,7 +1202,7 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 	// read of the same field. Publish a copy instead, the same pattern
 	// retainLeiosPartialTxs uses.
 	verified := *data
-	changed := false
+	changed := contentChanged
 	if !verified.slotVerified {
 		verified.slotVerified = true
 		changed = true
@@ -1194,6 +1232,7 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 			o.signalLeiosClosureWaitersLocked(key)
 		}
 	}
+	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 	o.leiosMu.Unlock()
 	return func() {
 		o.publishLeiosEndorserBlock(
