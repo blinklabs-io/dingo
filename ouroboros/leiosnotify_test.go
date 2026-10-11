@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/muxer"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -274,6 +275,90 @@ func TestLeiosNotifyClientStartBindsRealServerOwner(t *testing.T) {
 	o.leiosEBLog.mu.Lock()
 	defer o.leiosEBLog.mu.Unlock()
 	require.Same(t, client.LeiosNotify().Server, o.leiosEBLog.owners[key])
+}
+
+func TestLeiosNotifyClientContinuesAfterFirstNotification(t *testing.T) {
+	t.Parallel()
+
+	sender := newOuroboros(OuroborosConfig{})
+	receiverConnections := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	receiver := newOuroboros(OuroborosConfig{
+		ConnManager: receiverConnections,
+	})
+	clientCfg := leiosnotify.NewConfig(receiver.leiosnotifyClientConnOpts()...)
+	serverCfg := leiosnotify.NewConfig(sender.leiosnotifyServerConnOpts()...)
+	left, right := net.Pipe()
+	type result struct {
+		conn *gouroboros.Connection
+		err  error
+	}
+	clientCh := make(chan result, 1)
+	serverCh := make(chan result, 1)
+	var client, server *gouroboros.Connection
+	t.Cleanup(func() {
+		if client != nil {
+			_ = client.Close()
+		}
+		if server != nil {
+			_ = server.Close()
+		}
+		_ = left.Close()
+		_ = right.Close()
+	})
+	go func() {
+		conn, err := gouroboros.NewConnection(
+			gouroboros.WithConnection(left),
+			gouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+			gouroboros.WithNodeToNode(true),
+			gouroboros.WithLeiosNotifyConfig(clientCfg),
+		)
+		clientCh <- result{conn: conn, err: err}
+	}()
+	go func() {
+		conn, err := gouroboros.NewConnection(
+			gouroboros.WithConnection(right),
+			gouroboros.WithServer(true),
+			gouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+			gouroboros.WithNodeToNode(true),
+			gouroboros.WithLeiosNotifyConfig(serverCfg),
+		)
+		serverCh <- result{conn: conn, err: err}
+	}()
+	clientResult := testutil.RequireReceive(
+		t, clientCh, 5*time.Second, "real LeiosNotify client handshake",
+	)
+	serverResult := testutil.RequireReceive(
+		t, serverCh, 5*time.Second, "real LeiosNotify server handshake",
+	)
+	require.NoError(t, clientResult.err)
+	require.NoError(t, serverResult.err)
+	client = clientResult.conn
+	server = serverResult.conn
+	require.True(t, receiverConnections.AddConnection(client, false, ""))
+	require.NoError(t, receiver.leiosnotifyClientStart(client.Id()))
+
+	serverKey := leiosConnectionIdString(server.Id())
+	testutil.WaitForCondition(t, func() bool {
+		sender.leiosEBLog.mu.Lock()
+		defer sender.leiosEBLog.mu.Unlock()
+		_, registered := sender.leiosEBLog.cursors[serverKey]
+		return registered
+	}, time.Second, "notification request to register the server cursor")
+
+	for voterID := range uint64(4) {
+		vote := lcommon.LeiosPrototypeVote{
+			VoterId:       voterID,
+			VoteSignature: make([]byte, lcommon.LeiosBlsSignatureSize),
+		}
+		sender.EnqueueLeiosPrototypeVote(vote)
+	}
+	testutil.WaitForCondition(t, func() bool {
+		sender.leiosEBLog.mu.Lock()
+		defer sender.leiosEBLog.mu.Unlock()
+		return sender.leiosEBLog.base == 4 && len(sender.leiosEBLog.items) == 0
+	}, 2*time.Second, "client to consume notifications after the first response")
 }
 
 func TestLeiosNotifyClosedOwnerCannotRecreateCursor(t *testing.T) {

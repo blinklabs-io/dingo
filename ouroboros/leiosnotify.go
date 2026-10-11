@@ -632,11 +632,10 @@ func (o *Ouroboros) leiosnotifyClientConnOpts() []oleiosnotify.LeiosNotifyOption
 				o.leiosnotifyClientNotification,
 			),
 		),
-		// Keep the bounded request window full. This is the gouroboros
-		// equivalent of the prototype's Lookahead server mode: the server can
-		// hold each request until a notification is available, while the client
-		// keeps several requests outstanding.
-		oleiosnotify.WithPipelineLimit(oleiosnotify.MaxPipelineLimit),
+		// LeiosNotify's state machine permits one RequestNext while the server
+		// has agency. Sending another before its response stops the notification
+		// loop, so keep exactly one idle request outstanding.
+		oleiosnotify.WithPipelineLimit(1),
 		// Disable the Busy-state timeout. LeiosNotify is a push-based
 		// notification protocol where the server only sends when it has
 		// something to announce. Idle waits of arbitrary length are
