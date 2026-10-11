@@ -145,17 +145,21 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 	cancelReady()
 
 	var announcingHeader devnet.ObservedHeader
+	var certifyingHeader devnet.ObservedHeader
 	var offeringProducer string
 	err = awaitLeiosCanonicalTriple(ctx, group, producerErrors,
-		"relay adopts a voted announcing ranking block offered by a producer",
+		"relay adopts a certifying ranking block for an offered and voted endorser block",
 		func(snapshots []devnet.ChainSnapshot) bool {
 			var found bool
-			announcingHeader, offeringProducer, found =
-				producerObservations.canonicalTriple(snapshots, relay.Name)
+			announcingHeader, certifyingHeader, offeringProducer, found =
+				producerObservations.canonicalCertifiedTriple(
+					snapshots,
+					relay.Name,
+				)
 			return found
 		})
 	require.NoError(t, err,
-		"relay never adopted a voted ranking block for an EB offered by a producer")
+		"relay never adopted a CertRB for an EB offered and voted by producers")
 	require.Positive(t, announcingHeader.LeiosAnnouncementSize,
 		"announcing ranking header must carry a sized Leios announcement")
 	point := pcommon.Point{
@@ -187,30 +191,6 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 		"relay did not serve the announced EB manifest and bodies")
 	require.NotEmpty(t, bodies,
 		"relay served an EB without transaction bodies")
-
-	var certifyingHeader devnet.ObservedHeader
-	err = group.Await(ctx,
-		fmt.Sprintf("relay adopts CertRB extending announcing ranking block %x",
-			announcingHeader.Hash),
-		func(snapshots []devnet.ChainSnapshot) bool {
-			for _, snapshot := range snapshots {
-				if snapshot.Node != relay.Name {
-					continue
-				}
-				for _, header := range snapshot.Headers {
-					if header.LeiosCertified && bytes.Equal(
-						header.PrevHash,
-						announcingHeader.Hash,
-					) {
-						certifyingHeader = header
-						return true
-					}
-				}
-			}
-			return false
-		})
-	require.NoError(t, err,
-		"relay never adopted a CertRB for the voted announcing ranking block")
 
 	applyCtx, cancelApply := context.WithTimeout(ctx, 2*time.Minute)
 	err = awaitLeiosTransactionOutputsApplied(
@@ -299,36 +279,41 @@ func (o *leiosProducerObservations) addVote(
 	o.mu.Unlock()
 }
 
-func (o *leiosProducerObservations) canonicalTriple(
+func (o *leiosProducerObservations) canonicalCertifiedTriple(
 	snapshots []devnet.ChainSnapshot,
 	relayName string,
-) (devnet.ObservedHeader, string, bool) {
+) (devnet.ObservedHeader, devnet.ObservedHeader, string, bool) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	for _, snapshot := range snapshots {
 		if snapshot.Node != relayName {
 			continue
 		}
-		for i := len(snapshot.Headers) - 1; i >= 0; i-- {
-			header := snapshot.Headers[i]
-			if len(header.Hash) != lcommon.Blake2b256Size ||
-				len(header.LeiosAnnouncementHash) != lcommon.Blake2b256Size {
+		for certIndex := len(snapshot.Headers) - 1; certIndex > 0; certIndex-- {
+			certifying := snapshot.Headers[certIndex]
+			if !certifying.LeiosCertified {
+				continue
+			}
+			announcing := snapshot.Headers[certIndex-1]
+			if !bytes.Equal(certifying.PrevHash, announcing.Hash) ||
+				len(announcing.Hash) != lcommon.Blake2b256Size ||
+				len(announcing.LeiosAnnouncementHash) != lcommon.Blake2b256Size {
 				continue
 			}
 			var rbHash lcommon.Blake2b256
-			copy(rbHash[:], header.Hash)
+			copy(rbHash[:], announcing.Hash)
 			if _, ok := o.votes[rbHash]; !ok {
 				continue
 			}
-			point := leiosPointKey{slot: header.Slot}
-			copy(point.hash[:], header.LeiosAnnouncementHash)
+			point := leiosPointKey{slot: announcing.Slot}
+			copy(point.hash[:], announcing.LeiosAnnouncementHash)
 			source, ok := o.offers[point]
 			if ok {
-				return header, source, true
+				return announcing, certifying, source, true
 			}
 		}
 	}
-	return devnet.ObservedHeader{}, "", false
+	return devnet.ObservedHeader{}, devnet.ObservedHeader{}, "", false
 }
 
 func collectLeiosProducerObservations(
