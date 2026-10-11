@@ -657,3 +657,27 @@ func TestBuildDingoConfigTokenRegistryDefaultsOff(t *testing.T) {
 
 	require.False(t, built.TokenRegistry().Enabled)
 }
+
+// buildDingoConfig maps fields one by one, so plannerStatsRefreshEnabled from
+// YAML, the environment or the CLI reaches the node only through an explicit
+// option; without it the node keeps NewConfig's default and the escape hatch
+// does nothing.
+func TestBuildDingoConfigWiresPlannerStatsRefresh(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	for _, enabled := range []bool{false, true} {
+		built := buildDingoConfig(
+			&config.Config{PlannerStatsRefreshEnabled: enabled},
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		)
+		require.Equal(t, enabled, built.PlannerStatsRefreshEnabled())
+	}
+}

@@ -200,28 +200,30 @@ func (d *Database) SetGenesisCbor(
 // HasGenesisCbor checks whether genesis CBOR data exists at the expected
 // blob key for the given slot and hash. This is used to validate that
 // existing chain data matches the current genesis configuration.
-func (d *Database) HasGenesisCbor(slot uint64, hash []byte) bool {
+func (d *Database) HasGenesisCbor(slot uint64, hash []byte) (bool, error) {
 	txn := d.BlobTxn(false)
 	defer txn.Rollback() //nolint:errcheck
 	blob := txn.BlobStore()
 	if blob == nil {
-		return false
+		return false, types.ErrBlobStoreUnavailable
 	}
 	key := types.BlockBlobKey(slot, hash)
 	_, err := blob.Get(txn.Blob(), key)
-	return err == nil
+	if errors.Is(err, types.ErrBlobKeyNotFound) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // HasAnyGenesisCbor checks whether any genesis CBOR data exists at the
-// given slot, regardless of hash. This is used to distinguish between
-// "no genesis CBOR" (e.g., after Mithril bootstrap) and "genesis CBOR
-// exists but with a different hash" (true network mismatch).
-func (d *Database) HasAnyGenesisCbor(slot uint64) bool {
+// given slot, regardless of hash. Only ID-zero synthetic records qualify;
+// genuine Byron slot-zero blocks do not identify the configured genesis.
+func (d *Database) HasAnyGenesisCbor(slot uint64) (bool, error) {
 	txn := d.BlobTxn(false)
 	defer txn.Rollback() //nolint:errcheck
 	blob := txn.BlobStore()
 	if blob == nil {
-		return false
+		return false, types.ErrBlobStoreUnavailable
 	}
 	prefix := slices.Concat(
 		[]byte(types.BlockBlobKeyPrefix),
@@ -230,25 +232,31 @@ func (d *Database) HasAnyGenesisCbor(slot uint64) bool {
 	opts := types.BlobIteratorOptions{Prefix: prefix}
 	it := blob.NewIterator(txn.Blob(), opts)
 	if it == nil {
-		return false
+		return false, errors.New("genesis CBOR iterator unavailable")
 	}
 	defer it.Close()
 	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 		item := it.Item()
 		if item == nil {
-			continue
+			return false, errors.New("genesis CBOR iterator returned a nil item")
 		}
 		key := item.Key()
 		if key == nil {
-			continue
+			return false, errors.New("genesis CBOR iterator returned a nil key")
 		}
 		// Skip the metadata key
 		if strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
 			continue
 		}
-		return true
+		metadata, err := blockMetadataByKey(txn, key)
+		if err != nil {
+			return false, fmt.Errorf("reading genesis candidate: %w", err)
+		}
+		if metadata.ID == 0 {
+			return true, nil
+		}
 	}
-	return false
+	return false, it.Err()
 }
 
 func BlockDeleteTxn(txn *Txn, block models.Block) error {

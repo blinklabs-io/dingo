@@ -150,8 +150,10 @@ type Ouroboros struct {
 	// receive goroutine while the requester is still between that return and
 	// its blockFetchStarts insert. The insert consumes the marker instead of
 	// adding an entry that nothing would ever delete, since the request's
-	// one and only terminal callback has already run.
-	blockFetchDoneEarly map[blockFetchKey]struct{}
+	// one and only terminal callback has already run. The value is the
+	// terminal result, which the insert counts in
+	// dingo_blockfetch_requests_completed_total.
+	blockFetchDoneEarly map[blockFetchKey]error
 	blockFetchMutex     sync.Mutex
 	// blockfetchForward holds, per connection, the blockfetch events
 	// received but not yet published to the ledger; see
@@ -575,6 +577,19 @@ type blockfetchMetrics struct {
 	// forwardOverflows counts connections closed because their forward
 	// queue reached blockfetchForwardMaxBytes or blockfetchForwardMaxEvents.
 	forwardOverflows prometheus.Counter
+	// requestsIssued counts range requests accepted by a peer's blockfetch
+	// client, and requestsCompleted the terminal outcomes reported through
+	// RangeDoneFunc for those requests only, by result ("ok" or "error"), so
+	// completed never exceeds issued. Neither is labelled by
+	// connection: those series would grow without bound with reconnects.
+	// Together with lastRequestUnixNano they tell a node that is fetching
+	// from one that has headers queued and is not.
+	requestsIssued       prometheus.Counter
+	requestsCompletedOK  prometheus.Counter
+	requestsCompletedErr prometheus.Counter
+	// lastRequestUnixNano is when the most recent request was issued, or
+	// zero before the first. One atomic store per request.
+	lastRequestUnixNano atomic.Int64
 }
 
 // NewOuroboros builds a fully-wired Ouroboros. Every dependency is supplied up
@@ -630,7 +645,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncState:          cfg.ChainsyncState,
 		peerGov:                 cfg.PeerGov,
 		blockFetchStarts:        make(map[blockFetchKey]time.Time),
-		blockFetchDoneEarly:     make(map[blockFetchKey]struct{}),
+		blockFetchDoneEarly:     make(map[blockFetchKey]error),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),
@@ -763,7 +778,7 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 	o.blockfetchMetrics.stageDuration = promautoFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "dingo_blockfetch_stage_duration_seconds",
-			Help: "wall-clock time spent in each blockfetch-owned stage of per-block processing, by stage: decode (CBOR-decoding one fetched block's raw bytes, on a decode-cache miss only)",
+			Help: "wall-clock time spent in each blockfetch-owned stage of per-block processing, by stage: decode (CBOR-decoding one fetched block's raw bytes, on a decode-cache miss only), enqueue (handing a received block or batch-done marker to the connection's forward queue) and ledger_publish (delivering it to the ledger). Observed only for events received through blockfetch, so it does not move while no range is being fetched",
 			// 100us to ~419s, matching
 			// dingo_ledger_block_stage_duration_seconds's bucket range (see
 			// its doc comment for why) so the two histograms stay
@@ -794,6 +809,36 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 		prometheus.CounterOpts{
 			Name: "dingo_blockfetch_forward_overflow_total",
 			Help: "connections closed because their queue of blockfetch events awaiting the ledger reached its byte or event limit",
+		},
+	)
+	o.blockfetchMetrics.requestsIssued = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_blockfetch_requests_issued_total",
+			Help: "blockfetch range requests accepted by a peer's blockfetch client; flat while headers are queued means no new request is being accepted, though one already accepted may still be delivering (compare dingo_blockfetch_requests_completed_total)",
+		},
+	)
+	requestsCompleted := promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_blockfetch_requests_completed_total",
+			Help: "blockfetch range requests counted in dingo_blockfetch_requests_issued_total that reached a terminal outcome, by result: ok, or error (NoBlocks or any transport or protocol failure); never exceeds the issued count",
+		},
+		[]string{"result"},
+	)
+	o.blockfetchMetrics.requestsCompletedOK = requestsCompleted.
+		WithLabelValues("ok")
+	o.blockfetchMetrics.requestsCompletedErr = requestsCompleted.
+		WithLabelValues("error")
+	promautoFactory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_blockfetch_last_request_timestamp_seconds",
+			Help: "unix time the most recent blockfetch range request was issued, or 0 when none has been issued since start",
+		},
+		func() float64 {
+			nanos := o.blockfetchMetrics.lastRequestUnixNano.Load()
+			if nanos == 0 {
+				return 0
+			}
+			return float64(nanos) / float64(time.Second)
 		},
 	)
 }
