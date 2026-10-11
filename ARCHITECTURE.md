@@ -15874,7 +15874,8 @@ the peer.
 An ingress-eligible connection whose roll-forward header trails the applied
 ledger tip by more than the security parameter `k` in block number, while the
 peer's advertised tip does not, holds a stale cursor and is resynced the same
-way, with `ChainsyncResyncReasonBehindLocalTip` and no peer denial. Such a
+way, but only while chain selection has no best peer (`GetBestPeer()` is nil,
+read through `ChainsyncHasBestPeer`), with `ChainsyncResyncReasonBehindLocalTip` and no peer denial. Such a
 connection can never contribute: the ledger discards its headers as stale and
 chain selection skips the peer, while it holds an ingress slot that a peer at
 the tip could use. The check runs in the callback after
@@ -15885,7 +15886,10 @@ within `k` of the tip (a normal rollback or fork) is not affected, and neither
 is a peer whose own tip is more than `k` behind: re-intersecting cannot bring
 it closer, so it stays attached like any other peer lagging on our chain.
 Measuring against the applied tip rather than the header tip means a peer
-ahead of ledger application during sync is never reported.
+ahead of ledger application during sync is never reported. While a best peer
+exists the rule is off: a peer slower than the one feeding the ledger trails
+the applied tip by more than `k` during bulk sync, and resyncing it only
+churns connections.
 Should the horizon move back after admission (a ledger rollback),
 chain-selection verification reports `ledger.ErrHeaderBeyondForecastHorizon`:
 the header waits for admission once more, and if it is still out of range it is

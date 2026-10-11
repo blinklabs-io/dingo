@@ -312,6 +312,11 @@ func (f forecastHorizonFixture) setLocalTip(tipBlock, k uint64) {
 	}
 }
 
+// setBestPeer stubs whether chain selection has a best peer.
+func (f forecastHorizonFixture) setBestPeer(present bool) {
+	f.o.chainsyncHasBestPeer = func() bool { return present }
+}
+
 // peerTipAt is a peer tip at block number blockNumber.
 func peerTipAt(blockNumber uint64) ochainsync.Tip {
 	return ochainsync.Tip{
@@ -352,6 +357,7 @@ func TestChainsyncClientRollForwardResyncsEligibleClientFarBehindTip(
 	f := newForecastHorizonFixture(t, "10.0.0.24:3001")
 	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
 	f.setLocalTip(1000, 10)
+	f.setBestPeer(false)
 
 	// k+1 blocks behind the tip is the smallest distance that is resynced.
 	f.rollForwardWithTip(t, newTestBlockHeader(400, 989, 0xa5), peerTipAt(1000))
@@ -394,6 +400,7 @@ func TestChainsyncClientRollForwardResyncsPromotedObserverFarBehindTip(
 	f := newForecastHorizonFixture(t, "10.0.0.25:3001")
 	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
 	f.setLocalTip(1000, 10)
+	f.setBestPeer(false)
 	require.True(t, f.o.chainsyncState.SetClientObservabilityOnly(f.conn, true))
 
 	f.rollForwardWithTip(t, newTestBlockHeader(400, 500, 0xa7), peerTipAt(1000))
@@ -404,6 +411,35 @@ func TestChainsyncClientRollForwardResyncsPromotedObserverFarBehindTip(
 	)
 	require.True(t, exists)
 	require.False(t, observabilityOnly, "the observer must have been promoted")
+}
+
+// While chain selection has a best peer, a far-behind eligible connection is
+// a peer lagging the one feeding the ledger, not a stalled cursor: it is not
+// resynced and its header still reaches chain selection.
+func TestChainsyncClientRollForwardKeepsFarBehindClientWhileBestPeerExists(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newForecastHorizonFixture(t, "10.0.0.28:3001")
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
+	f.setLocalTip(1000, 10)
+	f.setBestPeer(true)
+
+	f.rollForwardWithTip(t, newTestBlockHeader(400, 500, 0xaa), peerTipAt(1000))
+
+	testutil.RequireReceive(
+		t,
+		f.tipCh,
+		testutil.AsyncWait,
+		"a far-behind header must still reach chain selection while a best peer exists",
+	)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		200*time.Millisecond,
+		"a far-behind client must not be resynced while a best peer exists",
+	)
 }
 
 // A fork or rollback within k is ordinary: the header is behind the local tip
@@ -417,6 +453,7 @@ func TestChainsyncClientRollForwardKeepsEligibleClientWithinKOfTip(
 	f := newForecastHorizonFixture(t, "10.0.0.26:3001")
 	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
 	f.setLocalTip(1000, 10)
+	f.setBestPeer(false)
 
 	// Exactly k behind is within bounds.
 	f.rollForwardWithTip(t, newTestBlockHeader(990, 990, 0xa8), peerTipAt(1000))
@@ -447,6 +484,7 @@ func TestChainsyncClientRollForwardKeepsEligibleClientWhosePeerTipIsFarBehind(
 	f := newForecastHorizonFixture(t, "10.0.0.27:3001")
 	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
 	f.setLocalTip(1000, 10)
+	f.setBestPeer(false)
 
 	f.rollForwardWithTip(t, newTestBlockHeader(400, 500, 0xa9), peerTipAt(500))
 

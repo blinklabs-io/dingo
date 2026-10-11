@@ -1150,11 +1150,21 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 // peer whose own tip is that far behind is merely lagging on the chain: it is
 // kept attached and left unselected until it catches up. Without a ledger the
 // answer is false.
+//
+// The rule only applies while chain selection has no best peer. During bulk
+// sync a peer slower than the one feeding the ledger trails the applied tip
+// by more than k while its advertised tip is ahead; it is merely lagging, and
+// closing it would only churn connections. With no best peer there is no
+// feeder to lag behind and nothing else advances the tip, so a stale cursor
+// is the stall.
 func (o *Ouroboros) chainsyncCursorFarBehindLocalTip(
 	headerBlockNumber uint64,
 	peerTipBlockNumber uint64,
 ) bool {
 	if o.chainsyncLocalTipBlock == nil {
+		return false
+	}
+	if o.chainsyncHasBestPeer != nil && o.chainsyncHasBestPeer() {
 		return false
 	}
 	tipBlock, k := o.chainsyncLocalTipBlock()
