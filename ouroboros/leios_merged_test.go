@@ -245,6 +245,42 @@ func testLeiosEndorserBlockRawWithRefs(
 	return ocommon.NewPoint(uint64(idx), hash.Bytes()), cbor.RawMessage(raw)
 }
 
+func TestRetryableLeiosEndorserBlocksPreferNewestOccurrence(t *testing.T) {
+	t.Parallel()
+
+	entry := func(slot uint64, hashByte byte) *leiosEndorserBlockData {
+		return &leiosEndorserBlockData{
+			point: ocommon.Point{
+				Slot: slot,
+				Hash: []byte{hashByte},
+			},
+			blockRaw:              []byte{0x80},
+			announcementHeaderRaw: []byte{0x80},
+			slotVerified:          true,
+		}
+	}
+	oldest := entry(40, 0x03)
+	newerB := entry(42, 0x02)
+	newerA := entry(42, 0x01)
+	notVerified := entry(43, 0x00)
+	notVerified.slotVerified = false
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	o.leiosEndorserBlocks = map[string]*leiosEndorserBlockData{
+		"oldest":        oldest,
+		"newer-b":       newerB,
+		"newer-a":       newerA,
+		"newer-a-alias": newerA,
+		"not-verified":  notVerified,
+	}
+
+	require.Equal(
+		t,
+		[]*leiosEndorserBlockData{newerA, newerB, oldest},
+		o.retryableLeiosEndorserBlocks(),
+	)
+}
+
 func TestMergedLeiosRankingBlockCborIsNoopForDijkstra(t *testing.T) {
 	t.Parallel()
 

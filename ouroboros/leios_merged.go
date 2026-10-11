@@ -1001,14 +1001,21 @@ func (o *Ouroboros) updateLeiosEndorserBlockValidation(
 }
 
 func (o *Ouroboros) retryLeiosEndorserBlockValidations() {
+	blocks := o.retryableLeiosEndorserBlocks()
+	for _, data := range blocks {
+		o.scheduleLeiosEndorserBlockValidation(data.point, data)
+	}
+}
+
+func (o *Ouroboros) retryableLeiosEndorserBlocks() []*leiosEndorserBlockData {
 	o.leiosMu.RLock()
 	blocks := make([]*leiosEndorserBlockData, 0, len(o.leiosEndorserBlocks))
-	seen := make(map[string]struct{}, len(o.leiosEndorserBlocks))
-	for key, data := range o.leiosEndorserBlocks {
-		if _, ok := seen[key]; ok {
+	seen := make(map[*leiosEndorserBlockData]struct{}, len(o.leiosEndorserBlocks))
+	for _, data := range o.leiosEndorserBlocks {
+		if _, ok := seen[data]; ok {
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[data] = struct{}{}
 		if data != nil && data.semanticValidationStatus == leiosEBValidationUnknown &&
 			data.slotVerified && data.completeTxCache() &&
 			len(data.announcementHeaderRaw) > 0 {
@@ -1016,9 +1023,13 @@ func (o *Ouroboros) retryLeiosEndorserBlockValidations() {
 		}
 	}
 	o.leiosMu.RUnlock()
-	for _, data := range blocks {
-		o.scheduleLeiosEndorserBlockValidation(data.point, data)
-	}
+	slices.SortFunc(blocks, func(a, b *leiosEndorserBlockData) int {
+		if order := cmp.Compare(b.point.Slot, a.point.Slot); order != 0 {
+			return order
+		}
+		return slices.Compare(a.point.Hash, b.point.Hash)
+	})
+	return blocks
 }
 
 func (o *Ouroboros) publishValidatedLeiosEndorserBlock(
