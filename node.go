@@ -201,9 +201,11 @@ type Node struct {
 	// running, which this mutex would otherwise make indistinguishable.
 	liveLifecycleMu sync.Mutex
 
-	// wallClockLedger mirrors n.ledgerState for the chain selector's
-	// wall-clock hook, which runs on the selector's goroutine across live
-	// rebuilds. Written only through setLedgerState.
+	// wallClockLedger is n.ledgerState once its Start has returned, for the
+	// chain selector's wall-clock hook, which runs on the selector's goroutine
+	// across live rebuilds. Start initializes the slot clock the hook reads,
+	// so a ledger is published only after it (publishStartedLedgerState) and
+	// withdrawn before it is replaced or closed (setLedgerState).
 	wallClockLedger atomic.Pointer[ledger.LedgerState]
 
 	// A selected-to-none transition cannot be dropped while a live database
@@ -1134,6 +1136,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
+	n.publishStartedLedgerState()
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {
@@ -2203,11 +2206,17 @@ func (n *Node) buildChainSelectorConfig(
 	}
 }
 
-// setLedgerState replaces n.ledgerState and the copy published to readers
-// that cannot take liveLifecycleMu.
+// setLedgerState replaces n.ledgerState and withdraws the copy published to
+// readers that cannot take liveLifecycleMu until publishStartedLedgerState.
 func (n *Node) setLedgerState(ls *ledger.LedgerState) {
+	n.wallClockLedger.Store(nil)
 	n.ledgerState = ls
-	n.wallClockLedger.Store(ls)
+}
+
+// publishStartedLedgerState publishes n.ledgerState to readers that cannot
+// take liveLifecycleMu. Call it only after the ledger's Start has returned.
+func (n *Node) publishStartedLedgerState() {
+	n.wallClockLedger.Store(n.ledgerState)
 }
 
 func (n *Node) setPeerGovernor(peerGov *peergov.PeerGovernor) {

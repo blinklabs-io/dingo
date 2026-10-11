@@ -250,6 +250,7 @@ func newLiveLifecycleTestNodeWithStorageMode(
 	n.ouroborosConfig = ouroborosCfg
 	n.ouroborosRef.Store(ouro)
 	require.NoError(t, ledgerState.Start(context.Background()))
+	n.publishStartedLedgerState()
 	t.Cleanup(func() {
 		cancel()
 		if n.pluginHost != nil {
