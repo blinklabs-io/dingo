@@ -466,6 +466,67 @@ func TestLeiosCertifiedClosureRejectsInvalidWitness(t *testing.T) {
 	requireRejectedEndorserClosure(t, f)
 }
 
+func TestLeiosCertifiedClosureMalformedCBORRejectsWithoutEffects(
+	t *testing.T,
+) {
+	t.Parallel()
+	badBody, err := cbor.Encode([]any{
+		uint64(1),
+		map[uint]any{},
+		nil,
+	})
+	require.NoError(t, err)
+	malformed := []struct {
+		name string
+		raw  cbor.RawMessage
+	}{
+		{name: "truncated envelope", raw: cbor.RawMessage{0x82, 0x01}},
+		{name: "invalid body shape", raw: badBody},
+	}
+	for _, malformedTx := range malformed {
+		for _, unticked := range []bool{false, true} {
+			pathName := "normal block"
+			if unticked {
+				pathName = "unticked epoch boundary"
+			}
+			t.Run(malformedTx.name+"/"+pathName, func(t *testing.T) {
+				t.Parallel()
+				f := newLeiosCertApplyFixture(t)
+				f.ebTxs = []cbor.RawMessage{bytes.Clone(malformedTx.raw)}
+				parent := f.announce()
+				certifier, offsets, envParent := f.certifyingChild(parent)
+				var applyErr error
+				if unticked {
+					parentPoint := ocommon.Point{
+						Slot: parent.SlotNumber(), Hash: parent.Hash().Bytes(),
+					}
+					applyErr = f.db.Transaction(t.Context(), true).Do(
+						func(txn *database.Txn) error {
+							return f.ls.applyUntickedBoundaryClosure(
+								t.Context(), txn, certifier, parentPoint,
+							)
+						},
+					)
+				} else {
+					applyErr = f.process(certifier, offsets, envParent)
+				}
+				var rejected *headerValidationError
+				require.ErrorAs(t, applyErr, &rejected)
+				require.NotErrorIs(
+					t,
+					applyErr,
+					errCertifiedEndorserBlockUnavailable,
+					"malformed peer content must reject instead of retrying",
+				)
+				f.requireEndorserEffects(false)
+				if unticked {
+					require.Nil(t, f.ls.untickedClosure)
+				}
+			})
+		}
+	}
+}
+
 func TestLeiosAnnouncementValidationMarksInvalidWitnessDeterministic(
 	t *testing.T,
 ) {

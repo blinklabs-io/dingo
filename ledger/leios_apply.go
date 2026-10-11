@@ -235,7 +235,11 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 	for i, raw := range rawTxs {
 		txCbor, elems, err := decodeEndorserTxEnvelope(raw)
 		if err != nil {
-			return 0, 0, fmt.Errorf("endorser tx %d: %w", i, err)
+			return 0, 0, &leiosEndorserBlockValidationError{err: fmt.Errorf(
+				"endorser tx %d: %w",
+				i,
+				err,
+			)}
 		}
 		// An endorser block referenced by a Dijkstra ranking block is
 		// Dijkstra-era, so decode its transactions as Dijkstra directly.
@@ -248,7 +252,11 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 		// failure leaves the ledger untouched.
 		tx, err := safedecode.Transaction(ledger.TxTypeDijkstra, txCbor)
 		if err != nil {
-			return 0, 0, fmt.Errorf("decode endorser tx %d: %w", i, err)
+			return 0, 0, &leiosEndorserBlockValidationError{err: fmt.Errorf(
+				"decode endorser tx %d: %w",
+				i,
+				err,
+			)}
 		}
 		txs[i] = tx
 		bodyCbors[i] = []byte(elems[0])
@@ -268,6 +276,11 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 	// under (ebSlot, ebHash) so cold-extract can resolve the DOFF refs.
 	blob, offsets, err := buildEndorserBlockBlob(txs, bodyCbors, ebSlot, ebHash)
 	if err != nil {
+		// The production provider bounds a complete closure well below the
+		// builder's uint32 offset limit. Its other error requires a decoded
+		// output to lack preserved CBOR and fail local re-encoding. Both are
+		// local construction failures, so keep them retryable rather than
+		// assigning a peer verdict.
 		return 0, 0, fmt.Errorf("build endorser block blob: %w", err)
 	}
 	applied, donation, err := ls.validateAndApplyEndorserBlockTransactions(
