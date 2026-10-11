@@ -111,6 +111,7 @@ if [[ "${LEIOS}" != "true" ]]; then
   unset DEVNET_DINGO_RUN_MODE
   unset DEVNET_DINGO_START_ERA
   unset DEVNET_TXPUMP_TRANSACTION_ERA
+  unset DEVNET_TXPUMP_START_DELAY_SECONDS
 fi
 
 # Derive mode-specific variables. COMPOSE_PROFILES is exported unconditionally
@@ -147,6 +148,9 @@ if [[ "${LEIOS}" == "true" ]]; then
   # Keep EB outputs in the tx pump's wallet quarantine until the scenario
   # queries the relay ledger; this delay is not proof of on-chain confirmation.
   export DEVNET_TXPUMP_CONFIRMATION_SLOTS=1000
+  # Voting registration becomes usable at epoch 2. Delay fresh EB work until
+  # after two 60-second epochs and the genesis-start offset.
+  export DEVNET_TXPUMP_START_DELAY_SECONDS=150
   export DEVNET_DINGO_SPEC="${ACTIVE_SPEC}"
   unset DEVNET_ACCELERATED
 elif [[ "${ACCELERATED}" == "true" ]]; then
