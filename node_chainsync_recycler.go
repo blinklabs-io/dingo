@@ -99,6 +99,11 @@ func (n *Node) chainsyncApplyEligible(
 	return n.chainSelector.ShouldApplyIngress(connId)
 }
 
+// chainsyncHasBestPeer reports whether chain selection has a best peer.
+func (n *Node) chainsyncHasBestPeer() bool {
+	return n.chainSelector != nil && n.chainSelector.GetBestPeer() != nil
+}
+
 func (n *Node) isChainsyncIngressEligible(
 	connId ouroboros.ConnectionId,
 ) bool {

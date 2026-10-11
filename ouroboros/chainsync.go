@@ -80,6 +80,7 @@ type chainsyncScheduleAtFunc func(time.Time, func()) func()
 
 type scheduledChainsyncResync struct {
 	onset  time.Time
+	reason string
 	cancel func()
 	fired  bool
 }
@@ -127,6 +128,20 @@ func (o *Ouroboros) scheduleFutureHeaderResync(
 	connId ouroboros.ConnectionId,
 	onset time.Time,
 ) {
+	o.scheduleHeaderResync(
+		connId,
+		onset,
+		event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
+	)
+}
+
+// scheduleHeaderResync is scheduleFutureHeaderResync with the reason the
+// recovery event carries. The winning schedule's reason is the one published.
+func (o *Ouroboros) scheduleHeaderResync(
+	connId ouroboros.ConnectionId,
+	onset time.Time,
+	reason string,
+) {
 	if o.chainsyncScheduleAt == nil || o.eventBus == nil || onset.IsZero() {
 		return
 	}
@@ -149,7 +164,7 @@ func (o *Ouroboros) scheduleFutureHeaderResync(
 		}
 		current.cancel()
 	}
-	scheduled := &scheduledChainsyncResync{onset: onset}
+	scheduled := &scheduledChainsyncResync{onset: onset, reason: reason}
 	// A timer whose onset is already due may invoke its callback before the
 	// scheduler returns. Arm publication only after the marker and cancel
 	// function are installed, or that callback can observe no current timer and
@@ -181,7 +196,7 @@ func (o *Ouroboros) scheduleFutureHeaderResync(
 					event.ChainsyncResyncEventType,
 					event.ChainsyncResyncEvent{
 						ConnectionId: connId,
-						Reason:       event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
+						Reason:       scheduled.reason,
 					},
 				),
 			)
@@ -1128,6 +1143,37 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	return nil
 }
 
+// chainsyncCursorFarBehindLocalTip reports whether a header with the given
+// block number trails the local tip by more than the security parameter while
+// the peer's advertised tip does not. Only that shape is a stale cursor that
+// re-intersecting can repair. A rollback or fork within k is ordinary, and a
+// peer whose own tip is that far behind is merely lagging on the chain: it is
+// kept attached and left unselected until it catches up. Without a ledger the
+// answer is false.
+//
+// The rule only applies while chain selection has no best peer. During bulk
+// sync a peer slower than the one feeding the ledger trails the applied tip
+// by more than k while its advertised tip is ahead; it is merely lagging, and
+// closing it would only churn connections. With no best peer there is no
+// feeder to lag behind and nothing else advances the tip, so a stale cursor
+// is the stall.
+func (o *Ouroboros) chainsyncCursorFarBehindLocalTip(
+	headerBlockNumber uint64,
+	peerTipBlockNumber uint64,
+) bool {
+	if o.chainsyncLocalTipBlock == nil {
+		return false
+	}
+	if o.chainsyncHasBestPeer != nil && o.chainsyncHasBestPeer() {
+		return false
+	}
+	tipBlock, k := o.chainsyncLocalTipBlock()
+	farBehind := func(blockNumber uint64) bool {
+		return tipBlock > blockNumber && tipBlock-blockNumber > k
+	}
+	return farBehind(headerBlockNumber) && !farBehind(peerTipBlockNumber)
+}
+
 func (o *Ouroboros) chainsyncClientRollForwardAt(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
@@ -1192,6 +1238,30 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			Type:         blockType,
 			BlockHeader:  v,
 			Tip:          tip,
+		}
+		// An ingress-eligible connection whose cursor trails the local tip by
+		// more than k while its peer is near the tip can never contribute: the
+		// ledger drops its headers as stale and chain selection skips the
+		// peer, while the connection holds an eligible slot. This also covers
+		// an observer promoted just above with a cursor left far behind.
+		if ingressEligible && o.chainsyncCursorFarBehindLocalTip(
+			v.BlockNumber(),
+			tip.BlockNumber,
+		) {
+			o.config.Logger.Debug(
+				"chainsync: cursor far behind the local tip",
+				"component", "ouroboros",
+				"slot", blockSlot,
+				"block_number", v.BlockNumber(),
+				"peer_tip_block_number", tip.BlockNumber,
+				"connection_id", ctx.ConnectionId.String(),
+			)
+			o.scheduleHeaderResync(
+				ctx.ConnectionId,
+				time.Now(),
+				event.ChainsyncResyncReasonBehindLocalTip,
+			)
+			return nil
 		}
 		// Enforce the future-header boundary on this peer's protocol callback,
 		// before any observed-tip, cursor, dedup, or ledger mutation. A
@@ -1479,6 +1549,23 @@ func (o *Ouroboros) admitChainsyncHeader(
 	admissionCtx, cancel := chainsyncAdmissionContext(ctx)
 	defer cancel()
 	accepted, err := o.chainsyncHeaderAdmission(admissionCtx, e)
+	if errors.Is(err, ledger.ErrChainsyncHeaderDisconnected) {
+		// Blocks the node already has cannot connect this header, so no wait
+		// can release it. Return rather than hold the protocol until its state
+		// timer closes the connection, and restart from the local chain.
+		o.config.Logger.Debug(
+			"chainsync: header does not connect to the local chain",
+			"component", "ouroboros",
+			"slot", blockSlot,
+			"connection_id", ctx.ConnectionId.String(),
+		)
+		o.scheduleHeaderResync(
+			ctx.ConnectionId,
+			time.Now(),
+			event.ChainsyncResyncReasonDisconnectedHeaderAdmission,
+		)
+		return false, nil
+	}
 	if err != nil {
 		o.config.Logger.Warn(
 			"chainsync: future-header admission failed closed",
