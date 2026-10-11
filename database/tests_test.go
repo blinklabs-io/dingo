@@ -3115,7 +3115,7 @@ func (t collateralReturnTx) CollateralReturn() lcommon.TransactionOutput {
 func (t collateralReturnTx) Produced() []lcommon.Utxo {
 	return []lcommon.Utxo{
 		{
-			Id: shelley.NewShelleyTransactionInput(
+			Id: shelley.MustNewShelleyTransactionInput(
 				t.Hash().String(),
 				len(t.Outputs()),
 			),

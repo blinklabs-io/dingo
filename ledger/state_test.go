@@ -3337,7 +3337,7 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 		ParamUpdate: conway.ConwayProtocolParameterUpdate{
 			MinFeeA: &fee,
 		},
-		PolicyHash: []byte{0xaa, 0xbb},
+		PolicyHash: bytes.Repeat([]byte{0xaa}, lcommon.Blake2b224Size),
 	}
 	actionCbor, err := cbor.Encode(action)
 	require.NoError(t, err)
@@ -3429,7 +3429,11 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 	require.NoError(t, err)
 	require.NotNil(t, translated.ParamUpdate.MinFeeA)
 	require.Equal(t, uint(1234), *translated.ParamUpdate.MinFeeA)
-	require.Equal(t, []byte{0xaa, 0xbb}, translated.PolicyHash)
+	require.Equal(
+		t,
+		bytes.Repeat([]byte{0xaa}, lcommon.Blake2b224Size),
+		translated.PolicyHash,
+	)
 }
 
 // TestEpochRolloverResult_FieldsPopulated tests that EpochRolloverResult

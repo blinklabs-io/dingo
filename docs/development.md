@@ -38,6 +38,11 @@ profiles as part of `./...`, and their verbose output reports the exact corpus
 and scenario counts. The [conformance tests](../internal/test/conformance/README.md)
 document what each profile proves and excludes.
 
+The tag-triggered release workflow also generates a Conway CBOR decoding
+conformance report from the upstream corpus and uploads it as a dated JSON
+release asset. A release proceeds to asset upload only when Dingo accepts and
+rejects the corpus samples as expected and matches the reference encodings.
+
 ## Local development workflows
 
 - [Run Dingo on the local DevNet](devnet.md).

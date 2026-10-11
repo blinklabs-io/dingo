@@ -2350,7 +2350,7 @@ func TestValidateTxPlutusConwayMainnetStorageDecodedUtxos(t *testing.T) {
 				idx,
 			)
 			ls.addUtxo(
-				shelley.NewShelleyTransactionInput(
+				shelley.MustNewShelleyTransactionInput(
 					inputTx.Hash().String(),
 					idx,
 				),
@@ -2580,7 +2580,7 @@ func TestEvaluateTxConwayPreprodFixtures(t *testing.T) {
 				require.NoError(t, err)
 				for idx, output := range inputTx.Outputs() {
 					ls.addUtxo(
-						shelley.NewShelleyTransactionInput(
+						shelley.MustNewShelleyTransactionInput(
 							inputTx.Hash().String(),
 							idx,
 						),
@@ -2689,7 +2689,7 @@ func TestEvaluateTxConwayPreprodSerialiseData(t *testing.T) {
 			inputTx.Hash().String(),
 		)
 		for outputIdx, output := range inputTx.Outputs() {
-			input := shelley.NewShelleyTransactionInput(
+			input := shelley.MustNewShelleyTransactionInput(
 				inputTx.Hash().String(),
 				outputIdx,
 			)
@@ -2927,7 +2927,7 @@ func TestValidateTxPlutusConwayPreviewWithdrawalOracle(t *testing.T) {
 		var output babbage.BabbageTransactionOutput
 		_, err = cbor.Decode(outputCbor, &output)
 		require.NoError(t, err, "decode output %s", ref)
-		input := shelley.NewShelleyTransactionInput(txId, outputIdx)
+		input := shelley.MustNewShelleyTransactionInput(txId, outputIdx)
 		ls.addUtxo(&input, &output)
 	}
 	require.Len(t, ls.utxos, len(tx.Inputs())+len(tx.ReferenceInputs()))
@@ -3122,7 +3122,7 @@ func decodeConwayTreasuryTx(
 	}, input
 }
 
-const conwayExplicitStakeAmount = int64(2_000_000)
+const conwayExplicitStakeAmount = uint64(2_000_000)
 
 // TestConwayTxInfoV3UsesProtocolVersionForExplicitStakeAmounts verifies the
 // PV9/PV10 TxInfo boundary with a V3 script that serialises the translated
@@ -3174,7 +3174,7 @@ func TestConwayTxInfoV3UsesProtocolVersionForExplicitStakeAmounts(
 					major: lcommon.ProtocolVersionPlomin,
 					option: data.NewConstr(
 						0,
-						data.NewInteger(big.NewInt(conwayExplicitStakeAmount)),
+						data.NewInteger(big.NewInt(int64(conwayExplicitStakeAmount))),
 					),
 				},
 			} {
@@ -4319,7 +4319,7 @@ func TestEvaluateTxConwayStopsAtTransactionWideBudget(t *testing.T) {
 			stored, err := gledger.NewTransactionOutputFromCbor(output.Cbor())
 			require.NoError(t, err)
 			ls.addUtxo(
-				shelley.NewShelleyTransactionInput(
+				shelley.MustNewShelleyTransactionInput(
 					inputTx.Hash().String(),
 					idx,
 				),
@@ -4361,7 +4361,7 @@ func TestEvaluateTxConwayStopsAfterCanceledInputLookup(t *testing.T) {
 			stored, err := gledger.NewTransactionOutputFromCbor(output.Cbor())
 			require.NoError(t, err)
 			base.addUtxo(
-				shelley.NewShelleyTransactionInput(inputTx.Hash().String(), idx),
+				shelley.MustNewShelleyTransactionInput(inputTx.Hash().String(), idx),
 				stored,
 			)
 		}

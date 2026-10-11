@@ -3751,8 +3751,18 @@ func TestPeerHeaderHistoryRehydratesWireHeader(t *testing.T) {
 			Slot:          slot,
 			PrevHash:      lcommon.NewBlake2b256([]byte("parent")),
 			BlockBodyHash: lcommon.NewBlake2b256([]byte("body")),
-			ProtoVersion:  babbage.BabbageProtoVersion{Major: 8},
+			VrfKey:        make([]byte, 32),
+			VrfResult: lcommon.VrfResult{
+				Output: make([]byte, 64),
+				Proof:  make([]byte, 80),
+			},
+			OpCert: babbage.BabbageOpCert{
+				HotVkey:   make([]byte, 32),
+				Signature: make([]byte, 64),
+			},
+			ProtoVersion: babbage.BabbageProtoVersion{Major: 8},
 		},
+		Signature: make([]byte, 448),
 	}
 	headerCbor, err := cbor.Encode(header)
 	require.NoError(t, err)
@@ -5450,18 +5460,27 @@ func newTestDijkstraBlockCbor(
 	header := &dijkstra.DijkstraBlockHeader{
 		BabbageBlockHeader: babbage.BabbageBlockHeader{
 			Body: babbage.BabbageBlockHeaderBody{
-				BlockNumber:   blockNumber,
-				Slot:          slot,
-				IssuerVkey:    issuer,
-				VrfResult:     lcommon.VrfResult{Output: vrfOutput},
+				BlockNumber: blockNumber,
+				Slot:        slot,
+				IssuerVkey:  issuer,
+				VrfResult: lcommon.VrfResult{
+					Output: vrfOutput,
+					Proof:  make([]byte, 80),
+				},
+				VrfKey:        make([]byte, 32),
 				BlockBodyHash: body.Hash(),
+				OpCert: babbage.BabbageOpCert{
+					HotVkey:        make([]byte, 32),
+					SequenceNumber: opCertSeqNo,
+					Signature:      make([]byte, 64),
+				},
+				ProtoVersion: babbage.BabbageProtoVersion{
+					Major: dijkstra.MinProtocolVersionDijkstra,
+				},
 			},
+			Signature: make([]byte, 448),
 		},
 	}
-	setOpCertSequenceNumber(
-		&header.Body.OpCert.SequenceNumber,
-		opCertSeqNo,
-	)
 	block := &dijkstra.DijkstraBlock{BlockHeader: header, BlockBody: body}
 	cborData, err := block.MarshalCBOR()
 	require.NoError(t, err)

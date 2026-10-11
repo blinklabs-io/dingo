@@ -75,11 +75,20 @@ func leiosBoundaryTestBlock(
 	require.NoError(t, err)
 
 	headerBodyCbor, err := cbor.Encode(&babbage.BabbageBlockHeaderBody{
-		BlockNumber:   blockNumber,
-		Slot:          slot,
-		PrevHash:      prevHash,
+		BlockNumber: blockNumber,
+		Slot:        slot,
+		PrevHash:    prevHash,
+		VrfKey:      make([]byte, 32),
+		VrfResult: lcommon.VrfResult{
+			Output: make([]byte, 64),
+			Proof:  make([]byte, 80),
+		},
 		BlockBodySize: uint64(len(bodyCbor)),
 		BlockBodyHash: body.Hash(),
+		OpCert: babbage.BabbageOpCert{
+			HotVkey:   make([]byte, 32),
+			Signature: make([]byte, 64),
+		},
 		ProtoVersion: babbage.BabbageProtoVersion{
 			Major: gdijkstra.MinProtocolVersionDijkstra,
 		},
@@ -97,7 +106,7 @@ func leiosBoundaryTestBlock(
 		leiosTestRaw(t, certifies),
 		leiosTestRaw(t, announcement),
 	)
-	headerCbor, err := cbor.Encode([]any{headerBody, []byte{}})
+	headerCbor, err := cbor.Encode([]any{headerBody, make([]byte, 448)})
 	require.NoError(t, err)
 	blockCbor, err := cbor.Encode([]cbor.RawMessage{
 		cbor.RawMessage(headerCbor),

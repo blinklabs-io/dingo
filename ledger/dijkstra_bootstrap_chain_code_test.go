@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const bootstrapChainCodeError = "bootstrap witness chain code must be 32 bytes"
+const bootstrapChainCodeError = "invalid bootstrap witness field 2 length"
 
 // withBootstrapWitness returns the CBOR of the fixture's transaction and of a
 // block carrying it, with one correctly signed bootstrap witness that no input
@@ -146,11 +146,9 @@ func TestDijkstraBootstrapWitnessChainCodeLength(t *testing.T) {
 	})
 }
 
-// TestConwayBootstrapWitnessChainCodeStaysPermissive pins the reference's
-// deliberate leniency before the Dijkstra era: a Conway transaction whose
-// bootstrap witness has a short chain code still decodes, so historical replay
-// is unaffected.
-func TestConwayBootstrapWitnessChainCodeStaysPermissive(t *testing.T) {
+// TestConwayBootstrapWitnessRejectsMalformedChainCode pins the reference's
+// bootstrap-witness shape validation on the Conway transaction path.
+func TestConwayBootstrapWitnessRejectsMalformedChainCode(t *testing.T) {
 	t.Parallel()
 
 	witness := []any{
@@ -166,10 +164,9 @@ func TestConwayBootstrapWitnessChainCodeStaysPermissive(t *testing.T) {
 		nil,
 	})
 	require.NoError(t, err)
-	tx, err := gledger.NewTransactionFromCbor(
+	_, err = gledger.NewTransactionFromCbor(
 		uint(gledger.TxTypeConway),
 		txCbor,
 	)
-	require.NoError(t, err)
-	require.Len(t, tx.Witnesses().Bootstrap(), 1)
+	require.ErrorContains(t, err, bootstrapChainCodeError)
 }

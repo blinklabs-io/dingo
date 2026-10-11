@@ -90,7 +90,7 @@ func committeeTestAddSpend(
 	paymentKeyHash []byte,
 ) (shelley.ShelleyTransactionInput, lcommon.Address) {
 	t.Helper()
-	input := shelley.NewShelleyTransactionInput(strings.Repeat("a7", 32), 0)
+	input := shelley.MustNewShelleyTransactionInput(strings.Repeat("a7", 32), 0)
 	address := mustCommitteeTestAddress(t, paymentKeyHash)
 	output := &shelley.ShelleyTransactionOutput{
 		OutputAddress: address,
@@ -6262,7 +6262,7 @@ func drepRefundTestCredential(seed byte) lcommon.Credential {
 // ledger state reports for the credential.
 func drepDeregistrationTx(
 	cred lcommon.Credential,
-	refund int64,
+	refund uint64,
 ) *conway.ConwayTransaction {
 	cert := &lcommon.DeregistrationDrepCertificate{
 		CertType:       uint(lcommon.CertificateTypeDeregistrationDrep),

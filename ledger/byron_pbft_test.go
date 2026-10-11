@@ -389,6 +389,9 @@ type byronPBFTBodyOverride struct {
 	// blockVersion replaces the version the header declares, which is the
 	// protocol version its issuer endorses.
 	blockVersion *byron.ByronBlockVersion
+	// skipBodyProofValidation returns a decoded malformed block for a test that
+	// verifies the receiving path rejects it.
+	skipBodyProofValidation bool
 }
 
 func newSignedByronPBFTBlockWithBody(
@@ -528,8 +531,14 @@ func newSignedByronPBFTBlockWithBody(
 	blockParts[1] = cbor.RawMessage(bodyCbor)
 	blockCbor, err := cbor.Encode(blockParts)
 	require.NoError(t, err)
-	rebuilt, err := byron.NewByronMainBlockFromCbor(blockCbor)
+	rebuilt, err := byron.NewByronMainBlockFromCbor(
+		blockCbor,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+	)
 	require.NoError(t, err)
+	if override == nil || !override.skipBodyProofValidation {
+		require.NoError(t, rebuilt.ValidateBodyProof())
+	}
 	require.Equal(t, previousHash, rebuilt.PrevHash())
 	require.Equal(t, delegationPayload, rebuilt.Body.DlgPayload)
 	return rebuilt

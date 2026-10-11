@@ -910,7 +910,7 @@ func buildBenchmarkTransaction(
 	benchmarkTemplateMu.Lock()
 	defer benchmarkTemplateMu.Unlock()
 	tx.Body.TxInputs.SetItems([]shelley.ShelleyTransactionInput{
-		shelley.NewShelleyTransactionInput(
+		shelley.MustNewShelleyTransactionInput(
 			inputHash,
 			int(inputIndex),
 		),
@@ -1216,7 +1216,7 @@ func (v dijkstraOverlapValidator) ValidateTxWithOverlay(
 
 func TestAddTransactionAcceptsDijkstraSpendReferenceOverlap(t *testing.T) {
 	t.Parallel()
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"a228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee11",
 		0,
 	)
@@ -1468,7 +1468,7 @@ func (g *fifoRevalidationTxGenerator) next(b *testing.B) []byte {
 		b.Fatalf("transaction template decoded as %T", decoded)
 	}
 	tx.Body.TxInputs.SetItems([]shelley.ShelleyTransactionInput{
-		shelley.NewShelleyTransactionInput(inputHash, 0),
+		shelley.MustNewShelleyTransactionInput(inputHash, 0),
 	})
 	tx.Body.TxFee = 1_000_000 + g.sequence
 	tx.TxIsValid = true

@@ -24,7 +24,8 @@ name: publish
 # The difference between a main push and a release tag is signing and
 # publishing the final artifacts. Both run every stage above and both push
 # branch- or version-tagged images; only a tag creates a GitHub release,
-# uploads binary archives, attests them, and finalizes the release.
+# uploads binary archives and a CBOR conformance report, attests the binaries,
+# and finalizes the release.
 #
 # The stages are duplicated from go-test.yml rather than factored into a
 # reusable workflow, because `needs:` cannot cross workflow files and a called
@@ -532,12 +533,31 @@ jobs:
           # Empty on a main push, which tells the script to skip packaging.
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: .github/scripts/build-targets.sh
+      - name: Checkout CBOR conformance corpus
+        if: github.ref_type == 'tag'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          repository: etorreborre/cardano-cbor-dataset
+          ref: etorreborre/feat/normalization
+          path: .conformance/cardano-cbor-dataset
+          persist-credentials: false
+      - name: Generate CBOR conformance report
+        if: github.ref_type == 'tag'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          report_date="$(date -u +%Y%m%d)"
+          report_name="dingo-${RELEASE_TAG#v}-${report_date}-cbor-conformance.json"
+          go run ./internal/cborconformance/cmd \
+            -dataset .conformance/cardano-cbor-dataset/dataset/conway-123-100 \
+            -output "dist/${report_name}"
       - name: Upload release assets
         if: github.ref_type == 'tag'
         env:
           RELEASE_ID: ${{ needs.create-draft-release.outputs.RELEASE_ID }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           RELEASE_UPLOAD_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUIRE_CONFORMANCE_REPORT: 'true'
         run: .github/scripts/upload-release-assets.sh
       - name: Attest binaries
         if: github.ref_type == 'tag'

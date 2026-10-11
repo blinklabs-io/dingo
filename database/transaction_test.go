@@ -51,10 +51,10 @@ func TestConsumedInputKeyEquality(t *testing.T) {
 	hashA := strings.Repeat("ab", 32)
 	hashB := strings.Repeat("cd", 32)
 
-	inputA0 := shelley.NewShelleyTransactionInput(hashA, 0)
-	inputA0Again := shelley.NewShelleyTransactionInput(hashA, 0)
-	inputA1 := shelley.NewShelleyTransactionInput(hashA, 1)
-	inputB0 := shelley.NewShelleyTransactionInput(hashB, 0)
+	inputA0 := shelley.MustNewShelleyTransactionInput(hashA, 0)
+	inputA0Again := shelley.MustNewShelleyTransactionInput(hashA, 0)
+	inputA1 := shelley.MustNewShelleyTransactionInput(hashA, 1)
+	inputB0 := shelley.MustNewShelleyTransactionInput(hashB, 0)
 
 	require.Equal(
 		t,
@@ -85,9 +85,9 @@ func TestConsumedInputKeyDedupsRepeatedInput(t *testing.T) {
 
 	hash := strings.Repeat("ef", 32)
 	consumed := []shelley.ShelleyTransactionInput{
-		shelley.NewShelleyTransactionInput(hash, 0),
-		shelley.NewShelleyTransactionInput(hash, 0), // repeated on-chain input
-		shelley.NewShelleyTransactionInput(hash, 1),
+		shelley.MustNewShelleyTransactionInput(hash, 0),
+		shelley.MustNewShelleyTransactionInput(hash, 0), // repeated on-chain input
+		shelley.MustNewShelleyTransactionInput(hash, 1),
 	}
 
 	seen := make(map[consumedInputKey]struct{}, len(consumed))
@@ -122,7 +122,7 @@ func TestConsumedInputKeyAllocationFree(t *testing.T) {
 	// tx.Consumed() returns []lcommon.TransactionInput, so the loop variable
 	// is already interface-typed and boxing has already happened once
 	// upstream, not on every newConsumedInputKey call.
-	var input lcommon.TransactionInput = shelley.NewShelleyTransactionInput(
+	var input lcommon.TransactionInput = shelley.MustNewShelleyTransactionInput(
 		strings.Repeat("11", 32),
 		7,
 	)
@@ -146,7 +146,7 @@ func TestConsumedInputKeyAllocationFree(t *testing.T) {
 // "seen" dedup set. Kept for direct before/after comparison against
 // BenchmarkConsumedInputKeyNewPattern.
 func BenchmarkConsumedInputKeyOldPattern(b *testing.B) {
-	var input lcommon.TransactionInput = shelley.NewShelleyTransactionInput(
+	var input lcommon.TransactionInput = shelley.MustNewShelleyTransactionInput(
 		strings.Repeat("ab", 32),
 		3,
 	)
@@ -163,7 +163,7 @@ func BenchmarkConsumedInputKeyOldPattern(b *testing.B) {
 // interface-typed here to match tx.Consumed()'s []lcommon.TransactionInput,
 // the type consumed inputs actually have on the hot path.
 func BenchmarkConsumedInputKeyNewPattern(b *testing.B) {
-	var input lcommon.TransactionInput = shelley.NewShelleyTransactionInput(
+	var input lcommon.TransactionInput = shelley.MustNewShelleyTransactionInput(
 		strings.Repeat("ab", 32),
 		3,
 	)

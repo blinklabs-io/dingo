@@ -458,7 +458,7 @@ func TestValidateTxShelleyFamily_RejectsUnregisteredDeregistration(
 	t.Parallel()
 	const keyDeposit = 2_000_000
 	fresh := mirCredential(0x70)
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"0000000000000000000000000000000000000000000000000000000000000001", 0,
 	)
 	addr := newTestKeyAddress(t)

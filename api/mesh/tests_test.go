@@ -1327,7 +1327,7 @@ func testSimpleSignedTx(
 	bodyCbor := testTxBody(
 		t,
 		[]shelley.ShelleyTransactionInput{
-			shelley.NewShelleyTransactionInput(
+			shelley.MustNewShelleyTransactionInput(
 				hexString(testHash(0xd1)), 0,
 			),
 		},
@@ -1365,7 +1365,7 @@ func testTxBodyWithCerts(
 	body := conway.ConwayTransactionBody{
 		TxInputs: conway.NewConwayTransactionInputSet(
 			[]shelley.ShelleyTransactionInput{
-				shelley.NewShelleyTransactionInput(
+				shelley.MustNewShelleyTransactionInput(
 					hexString(testHash(0xd2)), 0,
 				),
 			},

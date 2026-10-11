@@ -136,7 +136,10 @@ func (t transactionBodyLevel) Produced() []common.Utxo {
 	produced := make([]common.Utxo, 0, len(outputs))
 	for idx, output := range outputs {
 		produced = append(produced, common.Utxo{
-			Id:     shelley.NewShelleyTransactionInput(t.body.Id().String(), idx),
+			Id: shelley.ShelleyTransactionInput{
+				TxId:        t.body.Id(),
+				OutputIndex: uint32(idx),
+			},
 			Output: output,
 		})
 	}

@@ -390,7 +390,7 @@ func TestValidateTxDijkstraSkipPhase2StillValidatesRequiredRedeemers(
 
 	plutusScript := lcommon.PlutusV1Script{0x01, 0x02, 0x03}
 	scriptAddr := newTestScriptAddress(t, plutusScript)
-	spendInput := shelley.NewShelleyTransactionInput(
+	spendInput := shelley.MustNewShelleyTransactionInput(
 		"6666666666666666666666666666666666666666666666666666666666666666",
 		0,
 	)
@@ -623,7 +623,7 @@ func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticSubTransaction(
 
 	plutusV2Script := lcommon.PlutusV2Script([]byte{0x01})
 	scriptAddr := newTestScriptAddress(t, plutusV2Script)
-	subTxInput := shelley.NewShelleyTransactionInput(
+	subTxInput := shelley.MustNewShelleyTransactionInput(
 		strings.Repeat("ab", 32),
 		0,
 	)
@@ -694,11 +694,11 @@ func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticReferenceScript(
 
 	plutusV2Script := lcommon.PlutusV2Script([]byte{0x01})
 	scriptAddr := newTestScriptAddress(t, plutusV2Script)
-	spendInput := shelley.NewShelleyTransactionInput(
+	spendInput := shelley.MustNewShelleyTransactionInput(
 		strings.Repeat("cd", 32),
 		0,
 	)
-	refInput := shelley.NewShelleyTransactionInput(
+	refInput := shelley.MustNewShelleyTransactionInput(
 		strings.Repeat("ef", 32),
 		0,
 	)
@@ -759,10 +759,10 @@ func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticReferenceScript(
 // protocol stride and multiplier rather than the fixed Conway tiers.
 func TestEvaluateTxDijkstraFeeUsesProtocolRefScriptTiers(t *testing.T) {
 	t.Parallel()
-	spendIn := shelley.NewShelleyTransactionInput(
+	spendIn := shelley.MustNewShelleyTransactionInput(
 		"a228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee11", 0,
 	)
-	refIn := shelley.NewShelleyTransactionInput(
+	refIn := shelley.MustNewShelleyTransactionInput(
 		"b228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22", 0,
 	)
 	ls := newMockLedgerState()
