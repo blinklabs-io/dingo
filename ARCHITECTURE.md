@@ -5336,6 +5336,24 @@ fails closed to a fresh
 ChainSync intersection instead of making a density or rollback decision from
 an incomplete path.
 
+A peer that has delivered the whole of a short abandoned fork can lead on
+observed density and delivered frontier against peers still streaming the
+longer chain. In Genesis mode the selector therefore treats a peer as stale
+when its advertised tip slot is more than one Genesis window older than the
+wall-clock slot and another live, eligible, non-stale peer advertises a tip
+within the window that is more than `securityParam` blocks beyond it
+(`advertisedTipStaleLocked`). A stale peer is not selectable, so it also drops
+out of the exit horizon, and its frontier is ignored when deciding whether
+other peers are behind (`bestKnownBlockNumber`). The bound is the wall clock,
+not a count of advertised tips: those are unverified, and colluding
+connections cannot make an honest peer's live tip older than the wall clock.
+The wall-clock slot comes from `ChainSelectorConfig.WallClockSlot`, which node
+composition wires to the current `LedgerState.CurrentSlot` through an atomic
+that follows live Restore/Truncate; the rule is inactive while that hook is
+unset or reports no slot. While the ledger is still in Byron, `CurrentSlot`
+extrapolates at the Byron slot length and under-reports the slot on networks
+that later shortened it, so the rule does not fire there.
+
 **Per-peer candidate chain fragments** (`chainselection.CandidateFragment`)
 materialize each peer's delivered-header history as a first-class value —
 Dingo's analogue of the upstream consensus interface
