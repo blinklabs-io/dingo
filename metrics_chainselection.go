@@ -89,7 +89,7 @@ func (n *Node) registerChainSelectionMetrics(r *promutil.Registration) {
 		plateauDecisions: promutil.Register(r, prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "dingo_chainsync_plateau_decisions_total",
-				Help: "local-tip plateau watchdog decisions, by outcome: reconciled (ledger reconcile repaired the plateau), backlog_not_recycled (ledger-application backlog, chainsync left running) or resync (chainsync client resync requested)",
+				Help: "local-tip plateau watchdog decisions, by outcome: reconciled (ledger reconcile repaired the plateau), backlog_not_recycled (ledger-application backlog, chainsync left running) resync (chainsync client resync requested) or eagerness_held (primary held at the Limit on Eagerness, chainsync left running)",
 			},
 			[]string{"outcome"},
 		)),
@@ -118,6 +118,7 @@ func (n *Node) registerChainSelectionMetrics(r *promutil.Registration) {
 		chainsyncrecycler.PlateauOutcomeReconciled,
 		chainsyncrecycler.PlateauOutcomeBacklogNotRecycled,
 		chainsyncrecycler.PlateauOutcomeResync,
+		chainsyncrecycler.PlateauOutcomeEagernessHeld,
 	} {
 		metrics.plateauDecisions.WithLabelValues(string(outcome))
 	}

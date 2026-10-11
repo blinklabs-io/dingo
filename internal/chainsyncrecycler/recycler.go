@@ -122,6 +122,9 @@ const (
 	// PlateauOutcomeResync means the watchdog requested a chainsync resync of
 	// the selected connection.
 	PlateauOutcomeResync PlateauOutcome = "resync"
+	// PlateauOutcomeEagernessHeld means the selector holds the selected
+	// connection at the Limit on Eagerness, so the stream was left running.
+	PlateauOutcomeEagernessHeld PlateauOutcome = "eagerness_held"
 )
 
 // Config holds the recycler's dependencies and timing policy.
@@ -730,6 +733,7 @@ func (r *Recycler) checkLocalTipPlateau(
 		)
 		st.lastProgressAt = now
 		delete(st.recycleAt, connKey)
+		r.notePlateauDecision(PlateauOutcomeEagernessHeld)
 		return
 	}
 	// The local reconcile found nothing to repair (or failed), so the stall is

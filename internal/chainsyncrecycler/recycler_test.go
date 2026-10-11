@@ -2299,3 +2299,35 @@ func TestTickReportsNoPlateauOutcomeBeforeThreshold(t *testing.T) {
 
 	assert.Empty(t, rec.all())
 }
+
+// A plateau the watchdog leaves alone because the selector holds the primary
+// at the Limit on Eagerness is still a decision, so it is reported.
+func TestTickReportsPlateauOutcomeEagernessHeld(t *testing.T) {
+	t.Parallel()
+	connId := testConnId(8)
+	active := connId
+	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
+	state := &fakeChainsyncState{
+		tracked:    []chainsync.TrackedClient{stalledClient(connId, false)},
+		activeConn: &active,
+	}
+	selector := plateauSelector(connId, 500)
+	selector.paused = map[string]bool{connId.String(): true}
+	pub := newFakePublisher()
+	rec := &plateauOutcomeRecorder{}
+	r, _ := newTestRecycler(
+		t, ledger, state, selector, pub,
+		Config{OnPlateauDecision: rec.record},
+	)
+	now := time.Now()
+	st := newTestTickState(100, now.Add(-25*time.Minute))
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, 100)
+
+	assert.Empty(t, pub.byType(event.ChainsyncResyncEventType))
+	assert.Equal(t, []PlateauOutcome{PlateauOutcomeEagernessHeld}, rec.all())
+}
