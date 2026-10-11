@@ -15930,8 +15930,21 @@ admission holds it on that peer's callback until a ledger snapshot publication
 brings the slot into range (`awaitForecastHorizon`), then applies the onset
 check; until then it neither extends the peer's candidate nor reaches the
 header queue, matching the reference ChainSync client's `OutsideForecastRange`
-wait. As in the reference, the forecast is measured from where the peer's
-chain leaves the local chain: a fork that left before the ledger tip gets that
+wait. While it waits, admission starts blockfetch for headers already queued
+when no fetch is running (`flushQueuedHeadersForHorizonWait`): far from the
+peer tip the header handler otherwise waits for a full batch that the held
+header would complete, and only applying the queued blocks moves the horizon.
+The header pipeline owner that delivered the range is the fetch origin, and
+peer selection (`selectInitialBlockfetchConn`) may route the range to another
+connection that holds it; a closed origin starts nothing. A start that fails
+takes the header path's fallbacks (`startQueuedBlockfetchWithFallbackLocked`):
+it retries on the origin, then on the active best peer, and when those fail the queue is cleared
+and a re-sync requested, since the wait cannot end while nothing fetches the
+queued blocks. The discarded headers' invalidation is published after the ledger
+locks are released, so their Leios announcements and derived votes are removed
+without waiting for another chain event. As in the reference, the forecast is
+measured from where the peer's chain leaves the local chain: a fork that left
+before the ledger tip gets that
 point's shorter horizon (`chainsyncForkAnchor`, `forecastSummaryFrom`). The
 intersection is resolved from the peer's recorded headers; a header extending
 the local header chain resolves on the first step, and an intersection that

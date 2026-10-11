@@ -17,9 +17,11 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -124,7 +126,11 @@ func TestAwaitChainsyncHeaderAdmissionHoldsHeaderPastForecastHorizon(
 	)
 	require.NoError(t, got.err)
 	require.True(t, got.accepted)
-	require.Empty(t, *waits, "a historical header has no slot onset to wait for")
+	require.Empty(
+		t,
+		*waits,
+		"a historical header has no slot onset to wait for",
+	)
 }
 
 func TestAwaitChainsyncHeaderAdmissionPastForecastHorizonHonorsCancellation(
@@ -180,7 +186,9 @@ func TestSnapshotPublishedChanClosesOnPublish(t *testing.T) {
 	)
 	select {
 	case <-ls.snapshotPublishedChan():
-		t.Fatal("a channel obtained after publication must wait for the next one")
+		t.Fatal(
+			"a channel obtained after publication must wait for the next one",
+		)
 	default:
 	}
 }
@@ -221,10 +229,22 @@ func TestChainsyncHeaderPastForecastHorizonIsNotQueued(t *testing.T) {
 			testChain := cm.PrimaryChain()
 
 			header := mockHeader{slot: 1000, blockNumber: 100}
-			point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
+			point := ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			)
 			covered := &atomic.Bool{}
 			covered.Store(!tc.pastHorizon)
-			systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+			systemStart := time.Date(
+				2026,
+				time.August,
+				22,
+				12,
+				0,
+				0,
+				0,
+				time.UTC,
+			)
 			ls := &LedgerState{
 				chain: testChain,
 				slotClock: NewSlotClock(
@@ -262,15 +282,21 @@ func TestChainsyncHeaderPastForecastHorizonIsNotQueued(t *testing.T) {
 			})
 			connId := testRecycleConnId()
 
-			require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
-				ConnectionId: connId,
-				BlockHeader:  header,
-				Point:        point,
-				Tip: ochainsync.Tip{
-					Point:       ocommon.NewPoint(point.Slot+1, []byte("tip")),
-					BlockNumber: header.BlockNumber() + 1,
-				},
-			}))
+			require.NoError(
+				t,
+				ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+					ConnectionId: connId,
+					BlockHeader:  header,
+					Point:        point,
+					Tip: ochainsync.Tip{
+						Point: ocommon.NewPoint(
+							point.Slot+1,
+							[]byte("tip"),
+						),
+						BlockNumber: header.BlockNumber() + 1,
+					},
+				}),
+			)
 
 			if !tc.pastHorizon {
 				require.True(t, testChain.FirstHeaderMatchesPoint(point))
@@ -623,6 +649,399 @@ func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
 	require.ErrorIs(t, got.err, context.Canceled)
 }
 
+// Headers queued behind a far-from-tip batch are what advance the ledger, and
+// the ledger is what moves the forecast horizon. Admission must therefore
+// start blockfetch for the headers already queued instead of waiting for the
+// next header to complete the batch, which it is itself withholding.
+func TestAwaitChainsyncHeaderAdmissionStartsBlockfetchForQueuedHeaders(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	testChain := cm.PrimaryChain()
+	queued := mockHeader{slot: 10, blockNumber: 1}
+	require.NoError(t, testChain.AddBlockHeader(context.Background(), queued))
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	covered := &atomic.Bool{}
+	ranges := make(chan ocommon.Point, 4)
+	ls := &LedgerState{
+		chain: testChain,
+		ctx:   t.Context(),
+		slotClock: NewSlotClock(
+			gatedHorizonSlotTimeProvider{
+				SlotTimeProvider: newMockSlotTimeProvider(
+					systemStart,
+					time.Second,
+					100,
+				),
+				slot:    90,
+				covered: covered,
+			},
+			DefaultSlotClockConfig(),
+		),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				_ ouroboros.ConnectionId,
+				start ocommon.Point,
+				_ ocommon.Point,
+			) (uint64, error) {
+				ranges <- start
+				return 0, nil
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+	t.Cleanup(func() {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		}
+	})
+
+	e := futureHeaderEvent(90, arrival)
+	e.ConnectionId = testRecycleConnId()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	results := awaitAdmissionAsync(ctx, ls, e)
+
+	start := testutil.RequireReceive(
+		t,
+		ranges,
+		testutil.AsyncWait,
+		"a header held past the forecast horizon must not strand the queued headers that advance the ledger",
+	)
+	require.Equal(t, queued.SlotNumber(), start.Slot)
+
+	covered.Store(true)
+	ls.notifySnapshotPublished()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not resume once the ledger could forecast the slot",
+	)
+	require.NoError(t, got.err)
+	require.True(t, got.accepted)
+}
+
+type horizonFlushRequest struct {
+	connId ouroboros.ConnectionId
+	start  ocommon.Point
+}
+
+func TestHorizonFlushPublishesHeaderInvalidation(t *testing.T) {
+	t.Parallel()
+
+	for _, fail := range []bool{false, true} {
+		name := "successful dispatch"
+		if fail {
+			name = "failed dispatch"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := newHeaderStreamLedger(t)
+			header := announcingHeader(
+				577, "horizon-header", lcommon.NewBlake2b256(nil), 1,
+				lcommon.NewBlake2b256([]byte("announced-eb")),
+			)
+			require.NoError(
+				t,
+				fixture.ls.chain.AddVerifiedBlockHeader(t.Context(), header),
+			)
+			fixture.ls.chain.PublishPendingChainUpdates()
+			announcement := testutil.RequireReceive(
+				t,
+				fixture.ch,
+				testutil.AsyncWait,
+				"announcement",
+			)
+			announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
+			require.True(t, ok)
+			fixture.ls.headerPipelineConnId = fixture.connId
+			fixture.ls.config.BlockfetchRequestRangeFunc = func(
+				ouroboros.ConnectionId, ocommon.Point, ocommon.Point,
+			) (uint64, error) {
+				if fail {
+					return 0, errors.New("simulated blockfetch request failure")
+				}
+				return 1, nil
+			}
+			t.Cleanup(func() {
+				if fixture.ls.chainsyncBlockfetchTimeoutTimer != nil {
+					fixture.ls.chainsyncBlockfetchTimeoutTimer.Stop()
+				}
+			})
+
+			fixture.ls.flushQueuedHeadersForHorizonWait(fixture.connId)
+
+			if !fail {
+				require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+				testutil.RequireNoReceive(t, fixture.ch, 100*time.Millisecond,
+					"successful horizon flush must keep the announcement armed")
+				return
+			}
+			require.Zero(t, fixture.ls.chain.HeaderCount())
+			invalidation := testutil.RequireReceive(
+				t,
+				fixture.ch,
+				testutil.AsyncWait,
+				"failed horizon flush must publish invalidation without another event",
+			)
+			invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
+			require.True(t, ok)
+			require.Equal(
+				t,
+				chain.HeaderInvalidationQueueCleared,
+				invalid.Reason,
+			)
+			require.Contains(t, invalid.RbHashes, header.hash)
+			require.Greater(t, invalid.Seq, announced.Seq)
+		})
+	}
+}
+
+// newHorizonFlushTestLedger returns a ledger holding one queued header with
+// slot 90 past the forecast horizon, recording every blockfetch range request.
+func newHorizonFlushTestLedger(
+	t *testing.T,
+	live func(ouroboros.ConnectionId) bool,
+) (*LedgerState, <-chan horizonFlushRequest) {
+	t.Helper()
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	testChain := cm.PrimaryChain()
+	require.NoError(t, testChain.AddBlockHeader(
+		context.Background(),
+		mockHeader{slot: 10, blockNumber: 1},
+	))
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	requests := make(chan horizonFlushRequest, 4)
+	ls := &LedgerState{
+		chain: testChain,
+		ctx:   t.Context(),
+		slotClock: NewSlotClock(
+			gatedHorizonSlotTimeProvider{
+				SlotTimeProvider: newMockSlotTimeProvider(
+					systemStart,
+					time.Second,
+					100,
+				),
+				slot:    90,
+				covered: &atomic.Bool{},
+			},
+			DefaultSlotClockConfig(),
+		),
+		config: LedgerStateConfig{
+			Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+			ConnectionLiveFunc: live,
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				start ocommon.Point,
+				_ ocommon.Point,
+			) (uint64, error) {
+				requests <- horizonFlushRequest{connId: connId, start: start}
+				return 0, nil
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+	t.Cleanup(func() {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		}
+	})
+	return ls, requests
+}
+
+// The queued headers were delivered by the header pipeline owner, so that is
+// the connection that holds them. A different peer held at the horizon, such
+// as one whose chain forks below the ledger tip, must not become the fetch
+// origin for a range it never announced.
+func TestAwaitChainsyncHeaderAdmissionFlushFetchesFromPipelineOwner(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, requests := newHorizonFlushTestLedger(t, nil)
+	owner := testRecycleConnId()
+	ls.headerPipelineConnId = owner
+	e := futureHeaderEvent(
+		90,
+		time.Date(2026, time.August, 22, 12, 1, 40, 0, time.UTC),
+	)
+	e.ConnectionId = ouroboros.ConnectionId{
+		LocalAddr:  owner.LocalAddr,
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	got := testutil.RequireReceive(
+		t,
+		awaitAdmissionAsync(ctx, ls, e),
+		testutil.AsyncWait,
+		"canceled admission did not return",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+
+	req := testutil.RequireReceive(
+		t,
+		requests,
+		testutil.AsyncWait,
+		"queued headers were not flushed while a header awaited the horizon",
+	)
+	require.True(
+		t,
+		sameConnectionId(owner, req.connId),
+		"queued range requested from %s, not pipeline owner %s",
+		req.connId.String(),
+		owner.String(),
+	)
+	require.True(t, sameConnectionId(owner, ls.selectedBlockfetchConnId))
+}
+
+// A connection whose close was already processed must not be made the
+// blockfetch origin or selected connection by a horizon wait it left behind.
+func TestAwaitChainsyncHeaderAdmissionFlushSkipsClosedConnection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, requests := newHorizonFlushTestLedger(
+		t,
+		func(ouroboros.ConnectionId) bool { return false },
+	)
+	e := futureHeaderEvent(
+		90,
+		time.Date(2026, time.August, 22, 12, 1, 40, 0, time.UTC),
+	)
+	e.ConnectionId = testRecycleConnId()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	got := testutil.RequireReceive(
+		t,
+		awaitAdmissionAsync(ctx, ls, e),
+		testutil.AsyncWait,
+		"canceled admission did not return",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+
+	require.Empty(t, requests, "blockfetch started on a closed connection")
+	require.Empty(t, connIdKey(ls.selectedBlockfetchConnId))
+}
+
+// A horizon flush whose blockfetch cannot be dispatched must not leave the
+// queued headers stranded behind a wait only their application can end: like
+// the header-driven start, it falls back to the active best peer.
+func TestAwaitChainsyncHeaderAdmissionFlushFallsBackToActivePeer(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _ := newHorizonFlushTestLedger(t, nil)
+	owner := testRecycleConnId()
+	active := ouroboros.ConnectionId{
+		LocalAddr:  owner.LocalAddr,
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3003},
+	}
+	ls.headerPipelineConnId = owner
+	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &active
+	}
+	requests := make(chan ouroboros.ConnectionId, 4)
+	ls.config.BlockfetchRequestRangeFunc = func(
+		connId ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ ocommon.Point,
+	) (uint64, error) {
+		if sameConnectionId(connId, owner) {
+			return 0, errors.New("simulated blockfetch request failure")
+		}
+		requests <- connId
+		return 0, nil
+	}
+	e := futureHeaderEvent(
+		90,
+		time.Date(2026, time.August, 22, 12, 1, 40, 0, time.UTC),
+	)
+	e.ConnectionId = owner
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	got := testutil.RequireReceive(
+		t,
+		awaitAdmissionAsync(ctx, ls, e),
+		testutil.AsyncWait,
+		"canceled admission did not return",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+
+	connId := testutil.RequireReceive(
+		t,
+		requests,
+		testutil.AsyncWait,
+		"a failed horizon flush did not fall back to the active best peer",
+	)
+	require.True(t, sameConnectionId(active, connId))
+	require.True(t, sameConnectionId(active, ls.selectedBlockfetchConnId))
+}
+
+// When no connection can take the queued range, the horizon flush drops the
+// queue and requests a re-sync, as the header-driven start does, rather than
+// returning to a wait that nothing can now release.
+func TestAwaitChainsyncHeaderAdmissionFlushFailureRequestsResync(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _ := newHorizonFlushTestLedger(t, nil)
+	owner := testRecycleConnId()
+	ls.headerPipelineConnId = owner
+	ls.config.BlockfetchRequestRangeFunc = func(
+		_ ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ ocommon.Point,
+	) (uint64, error) {
+		return 0, errors.New("simulated blockfetch request failure")
+	}
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	resyncSubID, resyncCh := bus.SubscribeWithBuffer(
+		event.ChainsyncResyncEventType,
+		4,
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, resyncSubID)
+	})
+	e := futureHeaderEvent(
+		90,
+		time.Date(2026, time.August, 22, 12, 1, 40, 0, time.UTC),
+	)
+	e.ConnectionId = owner
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	got := testutil.RequireReceive(
+		t,
+		awaitAdmissionAsync(ctx, ls, e),
+		testutil.AsyncWait,
+		"canceled admission did not return",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+
+	resyncEvt := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"a failed horizon flush must request a re-sync",
+	)
+	data, ok := resyncEvt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok, "unexpected event payload %T", resyncEvt.Data)
+	require.True(t, sameConnectionId(owner, data.ConnectionId))
+	require.Zero(t, ls.chain.HeaderCount())
+}
+
 // A header past the forecast horizon whose predecessor is not the chain tip,
 // the header tip, or any header or block the local chain holds cannot be
 // released by applying blocks the node already has. Admission reports that
@@ -916,6 +1335,16 @@ func TestAdmissionHoldsQueuedParentWithoutPeerHistory(
 	cm, err := chain.NewManager(context.Background(), nil, nil)
 	require.NoError(t, err)
 	ls.chain = cm.PrimaryChain()
+	ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId, ocommon.Point, ocommon.Point,
+	) (uint64, error) {
+		return 1, nil
+	}
+	t.Cleanup(func() {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		}
+	})
 	parentHash := lcommon.Blake2b256Hash([]byte("queued parent"))
 	require.NoError(t, ls.chain.AddBlockHeader(context.Background(), mockHeader{
 		hash:        parentHash,
