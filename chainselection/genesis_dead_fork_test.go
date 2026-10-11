@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"fmt"
+	"math"
 	"testing"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -113,6 +114,25 @@ func TestGenesisSelectionRejectsPeerAdvertisingFarBehindTips(t *testing.T) {
 	require.NotNil(t, best)
 	assert.NotEqual(t, dead, *best,
 		"a peer advertising a tip far behind the other peers was selected")
+	assert.Contains(t, honest, *best)
+}
+
+// The stale peer's advertised block number is unverified. Advertising an old
+// slot with an inflated block number must not lift it above the fresh peers'
+// tips and keep it selectable; only its delivered frontier counts.
+func TestGenesisSelectionRejectsStalePeerInflatingBlockNumber(t *testing.T) {
+	t.Parallel()
+	cs, dead, honest := newDeadForkSelector(t, genesisTip(1000, "local", 100))
+	feedAdvertising(
+		t, cs, dead,
+		genesisTip(2000, "dead-tip", math.MaxUint64),
+		"d", 1910, 1910, 10,
+	)
+
+	best := cs.SelectBestChain()
+	require.NotNil(t, best)
+	assert.NotEqual(t, dead, *best,
+		"a stale peer inflating its advertised block number was selected")
 	assert.Contains(t, honest, *best)
 }
 

@@ -5403,8 +5403,9 @@ observed density and delivered frontier against peers still streaming the
 longer chain. In Genesis mode the selector therefore treats a peer as stale
 when its advertised tip slot is more than one Genesis window older than the
 wall-clock slot and another live, eligible, non-stale peer advertises a tip
-within the window that is more than `securityParam` blocks beyond it
-(`advertisedTipStaleLocked`). A stale peer is not selectable, so it also drops
+within the window that is more than `securityParam` blocks beyond the stale
+peer's delivered frontier (`advertisedTipStaleLocked`); the stale peer's own
+advertised block number is unverified and could otherwise lift it clear. A stale peer is not selectable, so it also drops
 out of the exit horizon, and its frontier is ignored when deciding whether
 other peers are behind (`bestKnownBlockNumber`). The bound is the wall clock,
 not a count of advertised tips: those are unverified, and colluding

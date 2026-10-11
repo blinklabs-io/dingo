@@ -518,7 +518,7 @@ func (cs *ChainSelector) bestKnownGenesisSlotLocked(
 // advertisedTipStaleLocked reports whether, in Genesis mode, this peer's
 // advertised tip is older than the wall clock by more than a Genesis window
 // while another live, eligible, non-stale peer advertises a fresh tip more than
-// k blocks beyond it. Such a peer holds a chain the network has stopped
+// k blocks beyond this peer's delivered frontier. Such a peer holds a chain the network has stopped
 // extending (an abandoned fork): it can lead on delivered density and frontier
 // because its whole chain is short, and it must neither be selected (which also
 // keeps it out of the Genesis exit horizon, built from selectable peers) nor
@@ -549,7 +549,13 @@ func (cs *ChainSelector) advertisedTipStaleLocked(
 	if safeAddUint64(peerTip.Tip.Point.Slot, window) >= wall {
 		return false
 	}
-	ceiling := safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam)
+	// The stale peer's advertised block number is unverified once a local tip
+	// exists; an inflated one would saturate the ceiling and keep the peer
+	// selectable, so measure its delivered frontier instead.
+	ceiling := safeAddUint64(
+		peerTip.SelectionTip().BlockNumber,
+		cs.securityParam,
+	)
 	for otherConn, other := range cs.peerTips {
 		if otherConn == connId || other == nil ||
 			other.awaitingFirstHeader ||
