@@ -6143,8 +6143,9 @@ func TestLeiosValidationSessionRollsBackStagedCertificateWrites(t *testing.T) {
 	ls.publishSnapshotsLocked()
 
 	err = ls.withTxValidationSession(context.Background(), nil, nil, true, false, func(
-		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error,
+		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 		_ func() bool,
+		_ func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
 	) error {
 		return applyTx(
@@ -14129,6 +14130,45 @@ func TestAtTipRecoveryFinalAttemptCrossesEpochBoundaryOnce(t *testing.T) {
 	)
 	require.Equal(t, tip, got, "the same epoch boundary must not be crossed twice")
 	require.Equal(t, 2.0, promtestutil.ToFloat64(crossed))
+}
+
+func TestAtTipRecoveryEpochBoundaryLookupHonorsLifecycleCancellation(t *testing.T) {
+	t.Parallel()
+
+	const boundarySlot = 120_000
+	f := newPrunedUtxoFixture(t, 0)
+	require.NoError(t, f.db.BlockCreate(models.Block{
+		ID:     99,
+		Slot:   130_000,
+		Hash:   testHashBytes("recovery-context-boundary"),
+		Number: 99,
+		Type:   1,
+		Cbor:   []byte{0x80},
+	}, nil))
+	f.ls.currentEpoch = models.Epoch{
+		EpochId:   1,
+		StartSlot: boundarySlot,
+		EraId:     eras.ConwayEraDesc.Id,
+	}
+	previousCtx := f.ls.ctx
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	f.ls.ctx = ctx
+	t.Cleanup(func() { f.ls.ctx = previousCtx })
+
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			pruneFixtureTipSlot+1,
+			testHashBytes("recovery-context"),
+		),
+	}
+	tip := ocommon.NewPoint(pruneFixtureTipSlot, testHashBytes("3766-tip"))
+	deep := ocommon.NewPoint(pruneFixtureFloorSlot, testHashBytes("3766-floor"))
+
+	got := f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts-1,
+	)
+	require.Equal(t, tip, got)
 }
 
 // TestAtTipRecoveryForwardProgressRestoresEpochBoundaryCrossing verifies that

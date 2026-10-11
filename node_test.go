@@ -3381,6 +3381,17 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 	)
 }
 
+func TestLedgerStateConfigForwardsLedgerPrefetchAheadFlag(t *testing.T) {
+	t.Parallel()
+
+	off := (&Node{config: NewConfig()}).ledgerStateConfig()
+	assert.False(t, off.LedgerPrefetchAheadEnabled)
+	on := (&Node{
+		config: NewConfig(WithLedgerPrefetchAheadEnabled(true)),
+	}).ledgerStateConfig()
+	assert.True(t, on.LedgerPrefetchAheadEnabled)
+}
+
 func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
 	t.Parallel()
 
@@ -4719,4 +4730,18 @@ func TestNewOuroborosConfigDoesNotInitiateLegacyLeiosVotes(t *testing.T) {
 
 	assert.False(t, cfg.EnableLeiosVotes,
 		"prototype nodes must diffuse votes over leios-notify")
+}
+
+func TestLedgerStateConfigForwardsApplyRowBatching(t *testing.T) {
+	t.Parallel()
+
+	off := &Node{config: NewConfig()}
+	assert.False(t, off.ledgerStateConfig().ApplyRowBatchingEnabled)
+
+	on := &Node{config: NewConfig(WithLedgerApplyRowBatchingEnabled(true))}
+	assert.True(
+		t,
+		on.ledgerStateConfig().ApplyRowBatchingEnabled,
+		"the option never reaches the ledger without this hop",
+	)
 }

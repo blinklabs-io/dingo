@@ -363,7 +363,7 @@ func seedFixtureTransactions(
 					// #nosec G115 -- transaction index within a block
 					uint32(idx),
 					certDeposits,
-					t,
+					t, 0,
 				); err != nil {
 					return err
 				}
@@ -3589,7 +3589,7 @@ func ingestStorageModeBenchmarkBlocks(
 				txData.paramUpdates,
 				txData.certDeposits,
 				blockData.offsets,
-				txn,
+				txn, 0,
 			); err != nil {
 				return totalTxs, fmt.Errorf(
 					"SetTransaction slot %d tx %d: %w",
@@ -3721,7 +3721,7 @@ func BenchmarkStorageModeIngestSteadyState(b *testing.B) {
 							txData.paramUpdates,
 							txData.certDeposits,
 							blockData.offsets,
-							txn,
+							txn, 0,
 						); err != nil {
 							_ = txn.Rollback()
 							b.Fatal(err)

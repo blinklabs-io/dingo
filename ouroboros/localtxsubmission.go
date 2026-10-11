@@ -164,6 +164,7 @@ func isLocalTxSubmissionInfrastructureError(err error) bool {
 	var fullErr *mempool.MempoolFullError
 	return errors.Is(err, mempool.ErrNilValidator) ||
 		errors.Is(err, mempool.ErrMempoolStopped) ||
+		errors.Is(err, mempool.ErrPendingStateMoved) ||
 		errors.As(err, &fullErr)
 }
 

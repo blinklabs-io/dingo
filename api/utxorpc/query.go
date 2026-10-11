@@ -245,13 +245,9 @@ func (s *queryServiceServer) ReadParams(
 	ctx context.Context,
 	req *connect.Request[query.ReadParamsRequest],
 ) (*connect.Response[query.ReadParamsResponse], error) {
-	fieldMask := req.Msg.GetFieldMask()
-
 	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf(
-			"Got a ReadParams request with fieldMask %v",
-			fieldMask,
-		),
+		"Got a ReadParams request",
+		"field_mask_paths", len(req.Msg.GetFieldMask().GetPaths()),
 	)
 	resp := &query.ReadParamsResponse{}
 
@@ -299,13 +295,9 @@ func (s *queryServiceServer) ReadEraSummary(
 	ctx context.Context,
 	req *connect.Request[query.ReadEraSummaryRequest],
 ) (*connect.Response[query.ReadEraSummaryResponse], error) {
-	fieldMask := req.Msg.GetFieldMask()
-
 	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf(
-			"Got a ReadEraSummary request with fieldMask %v",
-			fieldMask,
-		),
+		"Got a ReadEraSummary request",
+		"field_mask_paths", len(req.Msg.GetFieldMask().GetPaths()),
 	)
 
 	// Fetched chain system start time from shelley genesis
@@ -428,10 +420,6 @@ func (s *queryServiceServer) ReadUtxos(
 ) (*connect.Response[query.ReadUtxosResponse], error) {
 	keys := req.Msg.GetKeys() // []*TxoRef
 
-	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf("Got a ReadUtxos request with keys %v", keys),
-	)
-
 	// Enforce request size limit
 	if len(keys) > s.utxorpc.config.MaxUtxoKeys {
 		return nil, connect.NewError(
@@ -444,6 +432,16 @@ func (s *queryServiceServer) ReadUtxos(
 		)
 	}
 
+	s.utxorpc.config.Logger.Info(
+		"Got a ReadUtxos request",
+		"keys", len(keys),
+	)
+	release, err := s.utxorpc.acquireBulk(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	budget := byteBudget{limit: s.utxorpc.config.MaxResponseBytes}
 	resp := &query.ReadUtxosResponse{}
 
 	// Resolve all requested refs in a single batch, then correlate results
@@ -467,6 +465,10 @@ func (s *queryServiceServer) ReadUtxos(
 		if !ok {
 			return nil, database.ErrUtxoNotFound
 		}
+		if !budget.fits(len(utxo.Cbor)) {
+			return nil, budget.exceeded()
+		}
+		budget.add(len(utxo.Cbor))
 		var aud query.AnyUtxoData
 		ret, err := utxo.Decode()
 		if err != nil {
@@ -534,7 +536,6 @@ func (s *queryServiceServer) SearchUtxos(
 	predicate := req.Msg.GetPredicate()   // *UtxoPredicate
 	startToken := req.Msg.GetStartToken() // string
 	maxItems := req.Msg.GetMaxItems()     // int32
-	fieldMask := req.Msg.GetFieldMask()
 
 	maxAllowed := int32(
 		s.utxorpc.config.MaxHistoryItems,
@@ -557,19 +558,6 @@ func (s *queryServiceServer) SearchUtxos(
 	}
 	effectiveMax := effectiveSearchUtxosMaxItems(maxItems, maxAllowed)
 
-	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf(
-			"Got a SearchUtxos request with predicate %v, startToken %s, "+
-				"maxItems raw=%d effective=%d fieldMask %v",
-			predicate,
-			startToken,
-			maxItems,
-			effectiveMax,
-			fieldMask,
-		),
-	)
-	resp := &query.SearchUtxosResponse{}
-
 	addressPattern, assetPattern := extractSearchPredicatePatterns(predicate)
 
 	// Address resolution for the query:
@@ -586,16 +574,6 @@ func (s *queryServiceServer) SearchUtxos(
 	addressPatterns, err := searchUtxoAddressPatterns(addressPattern)
 	if err != nil {
 		return nil, err
-	}
-
-	if !matchAllAddresses && len(addressPatterns) == 0 {
-		resp.LedgerTip = s.searchUtxosLedgerTip()
-		return connect.NewResponse(resp), nil
-	}
-
-	if effectiveMax == 0 {
-		resp.LedgerTip = s.searchUtxosLedgerTip()
-		return connect.NewResponse(resp), nil
 	}
 
 	filterByAsset := assetPattern != nil
@@ -617,6 +595,31 @@ func (s *queryServiceServer) SearchUtxos(
 		return nil, err
 	}
 
+	s.utxorpc.config.Logger.Info(
+		"Got a SearchUtxos request",
+		"has_predicate", predicate != nil,
+		"has_start_token", startToken != "",
+		"max_items", maxItems,
+		"effective_max_items", effectiveMax,
+	)
+	resp := &query.SearchUtxosResponse{}
+
+	if !matchAllAddresses && len(addressPatterns) == 0 {
+		resp.LedgerTip = s.searchUtxosLedgerTip()
+		return connect.NewResponse(resp), nil
+	}
+
+	if effectiveMax == 0 {
+		resp.LedgerTip = s.searchUtxosLedgerTip()
+		return connect.NewResponse(resp), nil
+	}
+
+	release, err := s.utxorpc.acquireBulk(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	utxoQ := &models.UtxoWithOrderingQuery{
 		MatchAllAddresses: matchAllAddresses,
 		AddressPatterns:   addressPatterns,
@@ -637,8 +640,17 @@ func (s *queryServiceServer) SearchUtxos(
 	if hasMore {
 		utxos = utxos[:pageCap]
 	}
+	budget := byteBudget{limit: s.utxorpc.config.MaxResponseBytes}
 	items := make([]*query.AnyUtxoData, 0, len(utxos))
 	for i := range utxos {
+		if !budget.fits(len(utxos[i].Cbor)) {
+			// Truncate the page here; the token below resumes after the
+			// last item that fit.
+			utxos = utxos[:i]
+			hasMore = true
+			break
+		}
+		budget.add(len(utxos[i].Cbor))
 		aud, err := searchUtxoModelToAnyData(&utxos[i])
 		if err != nil {
 			return nil, err
@@ -667,15 +679,6 @@ func (s *queryServiceServer) ReadData(
 	req *connect.Request[query.ReadDataRequest],
 ) (*connect.Response[query.ReadDataResponse], error) {
 	keys := req.Msg.GetKeys() // [][]byte
-	fieldMask := req.Msg.GetFieldMask()
-
-	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf(
-			"Got a ReadData request with keys %v and fieldMask %v",
-			keys,
-			fieldMask,
-		),
-	)
 
 	// Enforce request size limit
 	if len(keys) > s.utxorpc.config.MaxDataKeys {
@@ -689,8 +692,6 @@ func (s *queryServiceServer) ReadData(
 		)
 	}
 
-	resp := &query.ReadDataResponse{}
-
 	for _, key := range keys {
 		if len(key) != lcommon.Blake2b256Size {
 			return nil, connect.NewError(
@@ -703,6 +704,21 @@ func (s *queryServiceServer) ReadData(
 				),
 			)
 		}
+	}
+
+	s.utxorpc.config.Logger.Info(
+		"Got a ReadData request",
+		"keys", len(keys),
+	)
+	release, err := s.utxorpc.acquireBulk(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	budget := byteBudget{limit: s.utxorpc.config.MaxResponseBytes}
+	resp := &query.ReadDataResponse{}
+
+	for _, key := range keys {
 		datum, err := s.utxorpc.config.LedgerState.Datum(key)
 		if err != nil {
 			if errors.Is(err, database.ErrDatumNotFound) {
@@ -713,6 +729,10 @@ func (s *queryServiceServer) ReadData(
 			}
 			return nil, fmt.Errorf("get datum %x: %w", key, err)
 		}
+		if !budget.fits(len(datum.RawDatum)) {
+			return nil, budget.exceeded()
+		}
+		budget.add(len(datum.RawDatum))
 		parsed, err := plutusDatumCBORToCardano(datum.RawDatum)
 		if err != nil {
 			return nil, connect.NewError(
@@ -749,15 +769,6 @@ func (s *queryServiceServer) ReadTx(
 	req *connect.Request[query.ReadTxRequest],
 ) (*connect.Response[query.ReadTxResponse], error) {
 	hash := req.Msg.GetHash()
-	fieldMask := req.Msg.GetFieldMask()
-
-	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf(
-			"Got a ReadTx request with hash %x and fieldMask %v",
-			hash,
-			fieldMask,
-		),
-	)
 
 	if len(hash) == 0 {
 		return nil, connect.NewError(
@@ -765,6 +776,10 @@ func (s *queryServiceServer) ReadTx(
 			errors.New("hash is required"),
 		)
 	}
+	s.utxorpc.config.Logger.Info(
+		"Got a ReadTx request",
+		"hash_bytes", len(hash),
+	)
 
 	// Resolve the transaction metadata to find it's containing block.
 	txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(ctx, hash)
@@ -862,9 +877,9 @@ func (s *queryServiceServer) ReadGenesis(
 	ctx context.Context,
 	req *connect.Request[query.ReadGenesisRequest],
 ) (*connect.Response[query.ReadGenesisResponse], error) {
-	fieldMask := req.Msg.GetFieldMask()
 	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf("Got a ReadGenesis request with fieldMask %v", fieldMask),
+		"Got a ReadGenesis request",
+		"field_mask_paths", len(req.Msg.GetFieldMask().GetPaths()),
 	)
 
 	// Pulls the Cardano node config via ledger state

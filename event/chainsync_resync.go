@@ -50,6 +50,7 @@ const (
 	// re-syncs every client, it targets only that peer's connection.
 	ChainsyncResyncReasonDeferredHeaderValidationFailure = "deferred header validation failure"
 	ChainsyncResyncReasonForkQueueOverflowRestartFailed  = "failed to restart blockfetch after fork-resolution header-queue overflow"
+	ChainsyncResyncReasonHeaderQueueFullRestartFailed    = "failed to restart blockfetch for a full header queue"
 	ChainsyncResyncReasonForkExtensionRestartFailed      = "failed to restart blockfetch after fork extension"
 	// ChainsyncResyncReasonFutureHeaderAdmissionRecovery re-intersects the
 	// ChainSync mini-protocol after a resolvable header was deliberately dropped
