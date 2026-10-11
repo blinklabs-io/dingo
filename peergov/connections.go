@@ -765,16 +765,25 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	var selectionEvents []pendingEvent
 	p.mu.Lock()
 	peerIdx, topologyGroupID := p.resolveInboundIdentity(address, normalized)
-	hostKey := inboundFlapHostKey(normalized)
-	history, hasHistory := p.inboundFlapHistory[hostKey]
+	history, hasHistory := p.inboundFlapHistory[normalized]
 	if hasHistory && !now.Before(history.expiresAt) {
-		delete(p.inboundFlapHistory, hostKey)
+		delete(p.inboundFlapHistory, normalized)
 		hasHistory = false
 	}
+	hostKey := inboundFlapHostKey(normalized)
+	p.cleanupInboundHostChurnLocked(now)
+	hostHistory, hasHostHistory := p.inboundHostChurn[hostKey]
+	hostChurnCapacityFull := !hasHostHistory &&
+		len(p.inboundHostChurn) >= p.maxPeerListSize()
 	isTopologyMatch := peerIdx >= 0 && p.peers[peerIdx] != nil &&
 		p.isTopologyPeer(p.peers[peerIdx].Source)
 	if p.isDeniedLocked(normalized) ||
-		(!isTopologyMatch && hasHistory && now.Before(history.cooldownUntil)) {
+		(!isTopologyMatch &&
+			((hasHistory && now.Before(history.cooldownUntil)) ||
+				hostChurnCapacityFull ||
+				(hasHostHistory &&
+					int(hostHistory.shortLivedCount) >= p.inboundHostChurnLimit() &&
+					now.Before(hostHistory.cooldownUntil)))) {
 		p.recordInboundLifecycle("denied")
 		p.config.Logger.Info(
 			"denied inbound peer during cooldown",
@@ -837,7 +846,6 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		}
 		p.recordInboundLifecycle("accepted")
 		if tmpPeer.Source == PeerSourceInboundConn {
-			// A reused entry follows the host to its newest source port.
 			tmpPeer.Address = address
 			tmpPeer.NormalizedAddress = normalized
 		}
@@ -854,7 +862,7 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			tmpPeer.InboundShortLivedCount = history.shortLivedCount
 			tmpPeer.inboundFlapHistoryCarried = true
 		}
-		delete(p.inboundFlapHistory, hostKey)
+		delete(p.inboundFlapHistory, normalized)
 	}
 	oldSource := tmpPeer.Source
 	oldConn := clonePeerConnection(tmpPeer.Connection)
@@ -979,6 +987,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 				// clean when every protocol is still idle, which is how a
 				// peer that handshakes and disconnects looks.
 				peer.InboundShortLivedCount++
+				p.rememberInboundHostChurnLocked(peer, connClosedAt)
 			} else if !peer.InboundConnectedAt.IsZero() {
 				peer.InboundShortLivedCount = 0
 			}

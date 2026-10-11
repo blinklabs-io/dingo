@@ -14,7 +14,11 @@
 
 package peergov
 
-import "time"
+import (
+	"net"
+	"strings"
+	"time"
+)
 
 type inboundFlapRecord struct {
 	shortLivedCount uint32
@@ -22,13 +26,31 @@ type inboundFlapRecord struct {
 	expiresAt       time.Time
 }
 
-// inboundFlapHostKey keeps ephemeral source ports out of the identity used
-// for inbound flapping. The prefix separates it from address deny keys.
+type inboundHostChurnRecord struct {
+	shortLivedCount uint32
+	windowStarted   time.Time
+	cooldownUntil   time.Time
+	expiresAt       time.Time
+}
+
 func inboundFlapHostKey(address string) string {
-	if host := addressHost(address); host != "" {
-		return "inbound-host:" + host
+	host := addressHost(address)
+	if host == "" {
+		return ""
 	}
-	return ""
+	host, _, _ = strings.Cut(host, "%")
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return strings.ToLower(host)
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4.String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
+func (p *PeerGovernor) inboundHostChurnLimit() int {
+	return p.maxPeerListSize() / 2
 }
 
 // rememberInboundFlapLocked retains the escalation across a pruned peer
@@ -39,27 +61,57 @@ func (p *PeerGovernor) rememberInboundFlapLocked(
 	now time.Time,
 	cooldown time.Duration,
 ) {
-	key := inboundFlapHostKey(peer.NormalizedAddress)
+	key := peer.NormalizedAddress
 	if key == "" {
 		return
 	}
 	p.cleanupInboundFlapHistoryLocked(now)
 	if _, exists := p.inboundFlapHistory[key]; !exists &&
 		len(p.inboundFlapHistory) >= p.maxPeerListSize() {
-		var oldestKey string
-		var oldestExpiry time.Time
-		for candidate, record := range p.inboundFlapHistory {
-			if oldestKey == "" || record.expiresAt.Before(oldestExpiry) {
-				oldestKey, oldestExpiry = candidate, record.expiresAt
-			}
-		}
-		delete(p.inboundFlapHistory, oldestKey)
+		return
 	}
 	until := now.Add(cooldown)
 	p.inboundFlapHistory[key] = inboundFlapRecord{
 		shortLivedCount: peer.InboundShortLivedCount,
 		cooldownUntil:   until,
 		expiresAt:       until.Add(p.config.InboundCooldown),
+	}
+}
+
+// rememberInboundHostChurnLocked records short sessions by host as a
+// high-volume abuse backstop. Tuple history remains authoritative for ordinary
+// flap cooldowns, so unrelated peers behind one NAT do not share escalation.
+func (p *PeerGovernor) rememberInboundHostChurnLocked(
+	peer *Peer,
+	now time.Time,
+) {
+	key := inboundFlapHostKey(peer.NormalizedAddress)
+	if key == "" {
+		return
+	}
+	p.cleanupInboundHostChurnLocked(now)
+	record, exists := p.inboundHostChurn[key]
+	if !exists && len(p.inboundHostChurn) >= p.maxPeerListSize() {
+		return
+	}
+	if !exists || record.windowStarted.IsZero() ||
+		now.Sub(record.windowStarted) >= p.config.InboundCooldown {
+		record = inboundHostChurnRecord{windowStarted: now}
+	}
+	record.shortLivedCount++
+	record.expiresAt = record.windowStarted.Add(p.config.InboundCooldown)
+	if int(record.shortLivedCount) >= p.inboundHostChurnLimit() {
+		record.cooldownUntil = now.Add(p.config.InboundCooldown)
+		record.expiresAt = record.cooldownUntil
+	}
+	p.inboundHostChurn[key] = record
+}
+
+func (p *PeerGovernor) cleanupInboundHostChurnLocked(now time.Time) {
+	for key, record := range p.inboundHostChurn {
+		if !now.Before(record.expiresAt) {
+			delete(p.inboundHostChurn, key)
+		}
 	}
 }
 
