@@ -251,12 +251,13 @@ func openStore(
 		return nil, err
 	}
 	store, err := sqlstore.New(sqlstore.Config{
-		WriteDB:     db,
-		ReadDB:      db,
-		Dialect:     sqlstore.MySQLDialect(),
-		Logger:      deps.Logger,
-		StorageMode: deps.StorageMode,
-		Migrations:  registry,
+		GenesisStakingEmpty: deps.GenesisStakingEmpty,
+		WriteDB:             db,
+		ReadDB:              db,
+		Dialect:             sqlstore.MySQLDialect(),
+		Logger:              deps.Logger,
+		StorageMode:         deps.StorageMode,
+		Migrations:          registry,
 		MigrationLocker: migrations.NewAdvisoryLocker(
 			"mysql",
 			0x64696e676f6d6574,

@@ -40,15 +40,14 @@ func newProviderHost(t *testing.T) *plugin.Host {
 // providerDeps builds provider dependencies over test doubles.
 func providerDeps(deps *testDeps) ProviderDependencies {
 	return ProviderDependencies{
-		LedgerState:         deps.ledger,
-		Database:            deps.database,
-		Chain:               deps.chain,
-		Mempool:             deps.mempool,
-		Host:                "127.0.0.1",
-		Network:             testNetwork,
-		NetworkMagic:        testNetworkMagic,
-		GenesisHash:         testGenesisHash,
-		GenesisStartTimeSec: testGenesisStartTimeSec,
+		LedgerState:  deps.ledger,
+		Database:     deps.database,
+		Chain:        deps.chain,
+		Mempool:      deps.mempool,
+		Host:         "127.0.0.1",
+		Network:      testNetwork,
+		NetworkMagic: testNetworkMagic,
+		GenesisHash:  testGenesisHash,
 	}
 }
 
@@ -195,11 +194,6 @@ func TestProviderPropagatesDependencies(t *testing.T) {
 	require.Equal(t, testNetwork, srv.config.Network)
 	require.Equal(t, testNetworkMagic, srv.config.NetworkMagic)
 	require.Equal(t, testGenesisHash, srv.config.GenesisHash)
-	require.Equal(
-		t,
-		testGenesisStartTimeSec,
-		srv.config.GenesisStartTimeSec,
-	)
 	require.Equal(
 		t,
 		[]string{"https://wallet.example"},

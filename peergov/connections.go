@@ -238,6 +238,9 @@ func (p *PeerGovernor) spawnOutboundConnectionLocked(peer *Peer) {
 	// the goroutine sets Reconnecting itself, every queued duplicate event can
 	// launch another dial before the first one runs.
 	reconnectPeer := p.peers[idx]
+	if p.isBootstrapPeer(reconnectPeer) && !p.canPromoteBootstrapPeer() {
+		return
+	}
 	reconnectPeer.Reconnecting = true
 	p.wg.Go(func() {
 		p.createOutboundConnection(reconnectPeer, true)
