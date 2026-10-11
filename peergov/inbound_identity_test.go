@@ -272,6 +272,33 @@ func TestInboundIPv6RotationWithinPrefixHitsHostBackstop(t *testing.T) {
 	require.Len(t, pg.GetPeers(), 1)
 }
 
+func TestInboundHostChurnActiveCooldownSurvivesWindowExpiry(t *testing.T) {
+	t.Parallel()
+	pg := newInboundIdentityGovernor(t)
+	now := time.Now()
+	hostKey := inboundFlapHostKey("44.0.0.1:51000")
+	windowStarted := now.Add(-2 * pg.config.InboundCooldown)
+	pg.inboundHostChurn[hostKey] = inboundHostChurnRecord{
+		shortLivedCount: uint32(pg.inboundHostChurnLimit()),
+		windowStarted:   windowStarted,
+		cooldownUntil:   now.Add(pg.config.InboundCooldown / 2),
+		expiresAt:       now.Add(pg.config.InboundCooldown / 2),
+	}
+
+	pg.rememberInboundHostChurnLocked(&Peer{
+		NormalizedAddress: "44.0.0.1:51000",
+	}, now)
+
+	record := pg.inboundHostChurn[hostKey]
+	assert.Equal(t, windowStarted, record.windowStarted)
+	assert.Equal(
+		t,
+		uint32(pg.inboundHostChurnLimit()+1),
+		record.shortLivedCount,
+	)
+	assert.Equal(t, now.Add(pg.config.InboundCooldown), record.cooldownUntil)
+}
+
 func TestInboundHostChurnCapacityFailsClosed(t *testing.T) {
 	t.Parallel()
 	now := time.Now()

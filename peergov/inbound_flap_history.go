@@ -95,7 +95,8 @@ func (p *PeerGovernor) rememberInboundHostChurnLocked(
 		return
 	}
 	if !exists || record.windowStarted.IsZero() ||
-		now.Sub(record.windowStarted) >= p.config.InboundCooldown {
+		(!now.Before(record.cooldownUntil) &&
+			now.Sub(record.windowStarted) >= p.config.InboundCooldown) {
 		record = inboundHostChurnRecord{windowStarted: now}
 	}
 	record.shortLivedCount++
