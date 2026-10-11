@@ -1252,34 +1252,29 @@ func (n *Node) reinitializeAPIServers() error {
 	}
 	if n.config.storageMode.IsAPI() && meshPort > 0 {
 		var genesisHash string
-		var genesisStartTimeSec int64
 		if nc := n.config.cardanoNodeConfig; nc != nil {
 			genesisHash = nc.ByronGenesisHash
-			if sg := nc.ShelleyGenesis(); sg != nil {
-				genesisStartTimeSec = sg.SystemStart.Unix()
-			}
 		}
-		if genesisHash == "" || genesisStartTimeSec == 0 {
+		if genesisHash == "" {
 			return errors.New(
 				"mesh API requires Cardano node config " +
-					"(Byron genesis hash and Shelley genesis)",
+					"(Byron genesis hash)",
 			)
 		}
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIMesh,
 			meshSelection.Provider, meshSelection.Config,
 			mesh.ProviderDependencies{
-				Logger:              n.config.logger,
-				LedgerState:         n.ledgerState,
-				Database:            mesh.NewMeshDatabase(n.db),
-				Chain:               n.ledgerState.Chain(),
-				Mempool:             n.mempool,
-				Host:                n.config.bindAddr,
-				Network:             n.config.network,
-				NetworkMagic:        n.config.networkMagic,
-				GenesisHash:         genesisHash,
-				GenesisStartTimeSec: genesisStartTimeSec,
-				CORSAllowedOrigins:  n.config.corsAllowedOrigins,
+				Logger:             n.config.logger,
+				LedgerState:        n.ledgerState,
+				Database:           mesh.NewMeshDatabase(n.db),
+				Chain:              n.ledgerState.Chain(),
+				Mempool:            n.mempool,
+				Host:               n.config.bindAddr,
+				Network:            n.config.network,
+				NetworkMagic:       n.config.networkMagic,
+				GenesisHash:        genesisHash,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
 		if err != nil {
