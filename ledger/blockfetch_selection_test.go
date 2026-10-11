@@ -172,7 +172,6 @@ func TestBlockfetchTimeoutPenalizesPeerBeforeModelRankedRetry(
 	stalled := testChainsyncConnId(6000, 3001)
 	modelChoice := testChainsyncConnId(6000, 3002)
 	active := testChainsyncConnId(6000, 3003)
-	penalized := false
 	var penalty time.Duration
 	var requested ouroboros.ConnectionId
 	ls := &LedgerState{
@@ -180,20 +179,19 @@ func TestBlockfetchTimeoutPenalizesPeerBeforeModelRankedRetry(
 		activeBlockfetchConnId: stalled,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-			RecordBlockfetchLatencyFunc: func(
-				connId ouroboros.ConnectionId,
-				latency time.Duration,
-			) {
-				assert.Equal(t, stalled, connId)
-				penalized = true
-				penalty = latency
-			},
 			SelectBlockfetchRetryPeerFunc: func(
 				excluded []ouroboros.ConnectionId,
 				_ ocommon.Point,
+				timeoutPenalty time.Duration,
 			) (ouroboros.ConnectionId, bool, bool) {
 				assert.Equal(t, []ouroboros.ConnectionId{stalled}, excluded)
-				assert.True(t, penalized, "rank the timeout before selecting the retry")
+				penalty = timeoutPenalty
+				assert.Equal(
+					t,
+					5*time.Second,
+					timeoutPenalty,
+					"rank the timeout before selecting the retry",
+				)
 				return modelChoice, true, true
 			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
@@ -375,6 +373,7 @@ func TestBlockfetchTimeoutExcludesBlockedShadowFromRetry(t *testing.T) {
 			SelectBlockfetchRetryPeerFunc: func(
 				excluded []ouroboros.ConnectionId,
 				_ ocommon.Point,
+				_ time.Duration,
 			) (ouroboros.ConnectionId, bool, bool) {
 				assert.Equal(
 					t,
@@ -528,6 +527,7 @@ func TestBlockfetchTimeoutDefersWhenRetrySelectionIsUnavailable(t *testing.T) {
 			SelectBlockfetchRetryPeerFunc: func(
 				[]ouroboros.ConnectionId,
 				ocommon.Point,
+				time.Duration,
 			) (ouroboros.ConnectionId, bool, bool) {
 				return ouroboros.ConnectionId{}, false, false
 			},

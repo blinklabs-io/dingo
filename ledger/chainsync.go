@@ -9067,6 +9067,7 @@ func (ls *LedgerState) selectRetryBlockfetchConn(
 }
 
 func (ls *LedgerState) selectTimeoutRetryBlockfetchConn(
+	timeoutPenalty time.Duration,
 	excluded ...ouroboros.ConnectionId,
 ) (ouroboros.ConnectionId, bool, bool) {
 	if ls.config.SelectBlockfetchRetryPeerFunc == nil || len(excluded) == 0 {
@@ -9083,6 +9084,7 @@ func (ls *LedgerState) selectTimeoutRetryBlockfetchConn(
 	selected, ok, selectionAvailable := ls.config.SelectBlockfetchRetryPeerFunc(
 		excluded,
 		end,
+		timeoutPenalty,
 	)
 	if !selectionAvailable {
 		return ouroboros.ConnectionId{}, false, false
@@ -9690,15 +9692,22 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 			)
 		}
 	}
+	timeoutPenalty := time.Duration(0)
+	if !ls.firstBlockReceived {
+		timeoutPenalty = timeout
+	}
+	if ls.config.SelectBlockfetchRetryPeerFunc == nil &&
+		timeoutPenalty > 0 && ls.config.RecordBlockfetchLatencyFunc != nil {
+		ls.config.RecordBlockfetchLatencyFunc(currentConnId, timeoutPenalty)
+		timeoutPenalty = 0
+	}
 	retryConnId, retryAvailable, selectionAvailable := ls.selectTimeoutRetryBlockfetchConn(
+		timeoutPenalty,
 		excluded...,
 	)
 	if !selectionAvailable {
 		ls.armBlockfetchTimeoutLocked(currentConnId)
 		return
-	}
-	if !ls.firstBlockReceived && ls.config.RecordBlockfetchLatencyFunc != nil {
-		ls.config.RecordBlockfetchLatencyFunc(currentConnId, timeout)
 	}
 	if !retryAvailable {
 		ls.config.Logger.Warn(
@@ -9746,6 +9755,7 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 		)
 		fallbackExcluded := append(excluded, retryConnId)
 		nextConnId, ok, fallbackSelectionAvailable := ls.selectTimeoutRetryBlockfetchConn(
+			0,
 			fallbackExcluded...,
 		)
 		if !fallbackSelectionAvailable {

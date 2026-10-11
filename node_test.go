@@ -3363,6 +3363,7 @@ func TestLedgerStateConfigReportsRetrySelectionUnavailableDuringLifecycle(
 	_, found, available := config.SelectBlockfetchRetryPeerFunc(
 		[]ouroboros.ConnectionId{newNodeTestConnId(3001)},
 		ocommon.NewPoint(100, []byte("header")),
+		5*time.Second,
 	)
 	n.liveLifecycleMu.Unlock()
 

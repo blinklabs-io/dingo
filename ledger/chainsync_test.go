@@ -1769,6 +1769,7 @@ func TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest(
 	ls.config.SelectBlockfetchRetryPeerFunc = func(
 		excluded []ouroboros.ConnectionId,
 		_ ocommon.Point,
+		_ time.Duration,
 	) (ouroboros.ConnectionId, bool, bool) {
 		require.Equal(t, []ouroboros.ConnectionId{connId}, excluded)
 		return retryConnId, true, true
@@ -13820,6 +13821,7 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 			SelectBlockfetchRetryPeerFunc: func(
 				[]ouroboros.ConnectionId,
 				ocommon.Point,
+				time.Duration,
 			) (ouroboros.ConnectionId, bool, bool) {
 				return connId2, true, true
 			},
@@ -13919,6 +13921,7 @@ func TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection(
 			SelectBlockfetchRetryPeerFunc: func(
 				[]ouroboros.ConnectionId,
 				ocommon.Point,
+				time.Duration,
 			) (ouroboros.ConnectionId, bool, bool) {
 				return connId2, true, true
 			},
@@ -14010,6 +14013,7 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 			SelectBlockfetchRetryPeerFunc: func(
 				excluded []ouroboros.ConnectionId,
 				_ ocommon.Point,
+				_ time.Duration,
 			) (ouroboros.ConnectionId, bool, bool) {
 				switch len(excluded) {
 				case 1:
@@ -14076,6 +14080,7 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureWithoutHolderResyncs(
 	ls.config.SelectBlockfetchRetryPeerFunc = func(
 		excluded []ouroboros.ConnectionId,
 		_ ocommon.Point,
+		_ time.Duration,
 	) (ouroboros.ConnectionId, bool, bool) {
 		if len(excluded) == 1 {
 			return retry, true, true

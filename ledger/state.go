@@ -965,12 +965,15 @@ type SelectBlockfetchPeerFunc func(
 	rangeEnd ocommon.Point,
 ) ouroboros.ConnectionId
 
-// SelectBlockfetchRetryPeerFunc returns another eligible connection that
-// announced the range end. Excluded connections are never valid results.
-// available is false when lifecycle contention prevented a selection.
+// SelectBlockfetchRetryPeerFunc records the failed peer's timeout penalty and
+// returns another eligible connection that announced the range end. A zero
+// timeoutPenalty records nothing. Excluded connections are never valid
+// results. available is false when lifecycle contention prevented both the
+// penalty and selection.
 type SelectBlockfetchRetryPeerFunc func(
 	excluded []ouroboros.ConnectionId,
 	rangeEnd ocommon.Point,
+	timeoutPenalty time.Duration,
 ) (selected ouroboros.ConnectionId, found, available bool)
 
 // RecordBlockfetchThroughputFunc records how many bytes a batch delivered
