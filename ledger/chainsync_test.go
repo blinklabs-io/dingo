@@ -1927,6 +1927,10 @@ type blockfetchRollbackFixture struct {
 	resyncCh  chan event.ChainsyncResyncEvent
 	forkAHash lcommon.Blake2b256
 	forkBHash lcommon.Blake2b256
+	// holdRequestReservation leaves each request reserved until its BatchDone
+	// releases it, as the production callback does for a request still
+	// outstanding with the peer.
+	holdRequestReservation bool
 }
 
 func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
@@ -1990,6 +1994,9 @@ func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
 		_ ocommon.Point,
 	) (uint64, error) {
 		f.requests = append(f.requests, start)
+		if f.holdRequestReservation {
+			return 0, nil
+		}
 		// The production callback returns after BatchDone has been emitted.
 		// This synthetic callback has no protocol event, so release the
 		// request reservation before returning to the ledger.
@@ -2209,16 +2216,22 @@ func TestForkRestartDropsAbandonedBodyArrivingAfterRestart(t *testing.T) {
 }
 
 // With the far-from-tip low watermark a range is requested about three ranges
-// of headers earlier than the queue allowance would, so a rollback more often
-// lands while that request is in flight. The rollback must discard the queued
-// headers and the bodies the abandoned request already buffered, and bodies it
-// delivers afterwards must not reach the chain or the ledger.
+// of headers earlier than the default four-range threshold, so a rollback more
+// often lands while that request is in flight. The rollback must discard the
+// queued headers and the bodies the abandoned request already buffered, and
+// bodies it delivers afterwards must not reach the chain or the ledger.
 //
 // The rollback target is the current chain tip, so the abandoned bodies still
 // fit the chain by parent hash; only the rollback generation check stops them.
 func TestFarFromTipLowWatermarkRollbackDiscardsInFlightBatch(t *testing.T) {
 	f := newBlockfetchRollbackFixture(t)
 	f.ls.config.BlockfetchLowWatermarkEnabled = true
+	f.holdRequestReservation = true
+	reservations := func() int {
+		f.ls.chainsyncBlockfetchMutex.Lock()
+		defer f.ls.chainsyncBlockfetchMutex.Unlock()
+		return blockfetchReservationsLocked(f.ls, f.connId)
+	}
 
 	farTip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(100_000_000, []byte("far-tip")),
@@ -2271,6 +2284,7 @@ func TestFarFromTipLowWatermarkRollbackDiscardsInFlightBatch(t *testing.T) {
 		f.requests[0],
 	)
 	require.Equal(t, BlockfetchBatchSize, f.ls.chain.HeaderCount())
+	require.Equal(t, 1, reservations(), "the range must be outstanding")
 
 	blockEvent := func(b *blockfetchTestBlock) event.Event {
 		return event.NewEvent(
@@ -2310,6 +2324,12 @@ func TestFarFromTipLowWatermarkRollbackDiscardsInFlightBatch(t *testing.T) {
 		f.ls.chain.HeaderCount(),
 		"the rollback must discard the headers the in-flight range was for",
 	)
+	require.Equal(
+		t,
+		1,
+		reservations(),
+		"the rollback cannot cancel the outstanding request",
+	)
 
 	// The request cannot be cancelled: its remaining bodies and BatchDone
 	// still arrive after the rollback.
@@ -2335,6 +2355,11 @@ func TestFarFromTipLowWatermarkRollbackDiscardsInFlightBatch(t *testing.T) {
 		f.ls.currentTip.Point.Slot,
 		f.currentTip.Point.Slot,
 		"no block past the rollback point may be applied to the ledger",
+	)
+	assert.Zero(
+		t,
+		reservations(),
+		"BatchDone of the abandoned range must release its reservation",
 	)
 }
 
