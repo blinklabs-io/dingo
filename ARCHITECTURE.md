@@ -586,7 +586,10 @@ queued header at an origin primary tip must be an epoch-0 EBB anchored to the
 configured Byron genesis hash. A rollback to origin drops the queue, so the
 rule applies again. Headers verified before they reach the queue (chain
 selection ingress, `ValidateBlockHeaderCrypto`) are peer-relative and skip
-the rule, since the EBB's own queueing event is delivered asynchronously.
+the rule, since the EBB's own queueing event is delivered asynchronously. The
+exception is an epoch-0 EBB verified peer-relative at an origin primary tip:
+it can only be a chain's first block, so it is held to the genesis anchor
+rather than rejected as following an existing block.
 
 While the local header tip is at least `blockfetchMinBatchGapSlots` behind the
 peer tip, BlockFetch starts only once `blockfetchMinBatchHeaders` headers are

@@ -229,7 +229,12 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 		return err
 	}
 	if isEbb {
-		if ls.isFirstByronHeader(block) {
+		// An epoch 0 EBB can only be a chain's first block, so a peer-relative
+		// one seen while the primary chain is at origin is held to the
+		// first-block rules rather than read as following an existing block.
+		if ls.isFirstByronHeader(block) ||
+			(ebbHeader.ConsensusData.Epoch == 0 &&
+				ls.peerRelativeAtOrigin(block)) {
 			// An EBB's block number (Difficulty.Value) and slot (derived from
 			// ConsensusData.Epoch) are independent fields: chain.firstBlockNumberValid
 			// only constrains the former, and validateByronPBFTCurrentSlot only
@@ -335,6 +340,23 @@ func (ls *LedgerState) isFirstByronHeader(block ledger.Block) bool {
 		return false
 	}
 	return c.IsFirstOnHeaderChain(block.Hash().Bytes())
+}
+
+// peerRelativeAtOrigin reports whether block is a peer-relative header (see
+// headerOnlyBlock) verified while the primary chain is still at origin.
+func (ls *LedgerState) peerRelativeAtOrigin(block ledger.Block) bool {
+	hb, ok := block.(headerOnlyBlock)
+	if !ok || !hb.peerRelative {
+		return false
+	}
+	ls.RLock()
+	c := ls.chain
+	ls.RUnlock()
+	if c == nil {
+		return false
+	}
+	tip := c.Tip()
+	return tip.Point.Slot == 0 && len(tip.Point.Hash) == 0
 }
 
 // validateByronGenesisAnchor requires the first epoch-boundary block of a
