@@ -149,8 +149,8 @@ if [[ "${LEIOS}" == "true" ]]; then
   # queries the relay ledger; this delay is not proof of on-chain confirmation.
   export DEVNET_TXPUMP_CONFIRMATION_SLOTS=1000
   # Voting registration becomes usable at epoch 2. Delay fresh EB work until
-  # after two 60-second epochs and the genesis-start offset.
-  export DEVNET_TXPUMP_START_DELAY_SECONDS=150
+  # after two 150-second epochs and the genesis-start offset.
+  export DEVNET_TXPUMP_START_DELAY_SECONDS=330
   export DEVNET_DINGO_SPEC="${ACTIVE_SPEC}"
   unset DEVNET_ACCELERATED
 elif [[ "${ACCELERATED}" == "true" ]]; then

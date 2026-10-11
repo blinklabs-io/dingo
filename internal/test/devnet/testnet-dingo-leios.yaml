@@ -18,11 +18,12 @@ protocolConsts:
   k: 10
 
 --- # Shelley Genesis Override
-epochLength: 120
+epochLength: 300
 slotLength: 0.5
 activeSlotsCoeff: 0.05
-# Keep 4k/f below the epoch length so nonce evolution remains possible.
-securityParam: 1
+# The 240-slot 4k/f safe zone expects 12 blocks while leaving 60 slots for
+# candidate nonce evolution.
+securityParam: 3
 maxLovelaceSupply: 6000000000000
 protocolParams:
   decentralisationParam: 0
