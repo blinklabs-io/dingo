@@ -1013,6 +1013,7 @@ func buildDingoConfig(
 			forgeEBCap(cfg.ForgeEBMaxBytes, config.DefaultForgeEBMaxBytes),
 		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
+		dingo.WithPlannerStatsRefresh(cfg.PlannerStatsRefreshEnabled),
 		// Parallel block-decode pipeline (decode and validate stages). Not
 		// consensus-affecting; off by default.
 		dingo.WithBlockPipelineEnabled(cfg.BlockPipelineEnabled),

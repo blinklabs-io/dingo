@@ -83,7 +83,12 @@ func (s *Server) handleNetworkStatus(
 	}
 
 	tip := s.config.Chain.Tip()
-	tipTimestamp := s.slotToTimestamp(tip.Point.Slot)
+	tipTimestamp, err := s.slotToTimestamp(tip.Point.Slot)
+	if err != nil {
+		s.logger.Error("failed to resolve tip timestamp", "error", err)
+		writeError(w, ErrInternal)
+		return
+	}
 	synced := false
 	if progress, ok := s.config.LedgerState.(MeshSyncProgress); ok {
 		synced = progress.SyncProgress() == 1

@@ -492,6 +492,9 @@ func (c *Chain) addBlockHeader(
 	// Reject headers when the queue is at capacity to prevent
 	// unbounded memory growth from a malicious peer.
 	if len(c.headers) >= c.MaxQueuedHeaders() {
+		if c.id == primaryChainId {
+			c.manager.notifyHeaderQueueFull()
+		}
 		return ErrHeaderQueueFull
 	}
 	// Make sure header fits on chain tip

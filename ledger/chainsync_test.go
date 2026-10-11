@@ -17965,8 +17965,10 @@ func TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap(
 	ls.currentTip.Point.Slot = 42
 	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
+	hasGenesis, genesisErr := db.HasGenesisCbor(0, genesisHash[:])
+	require.NoError(t, genesisErr)
 	require.True(
-		t, db.HasGenesisCbor(0, genesisHash[:]),
+		t, hasGenesis,
 		"the synthetic genesis block CBOR must still be created "+
 			"structurally, even though its UTxOs are not inserted as live",
 	)

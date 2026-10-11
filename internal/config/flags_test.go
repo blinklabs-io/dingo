@@ -1584,3 +1584,16 @@ func TestBlockfetchLowWatermarkEnabledEnvBinding(t *testing.T) {
 		t.Fatal("expected env var to enable the blockfetch low watermark")
 	}
 }
+
+// Not t.Parallel: LoadConfig reads package-level globalConfig and the test
+// sets environment variables.
+func TestPlannerStatsRefreshDefaultsOnAndHonorsEnvOverride(t *testing.T) {
+	require.True(t, newDefaultConfig().PlannerStatsRefreshEnabled)
+
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLANNER_STATS_REFRESH_ENABLED", "false")
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.False(t, cfg.PlannerStatsRefreshEnabled)
+}

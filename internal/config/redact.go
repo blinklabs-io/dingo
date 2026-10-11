@@ -262,6 +262,7 @@ var logPlainConfigFields = []string{
 	"Plugins.Mempool.Provider",
 	"Plugins.Storage.Blob.Provider",
 	"Plugins.Storage.Metadata.Provider",
+	"PlannerStatsRefreshEnabled",
 	"PrivateBindAddr",
 	"PrivatePort",
 	"ReconcileInterval",
