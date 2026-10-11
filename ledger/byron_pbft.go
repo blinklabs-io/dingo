@@ -229,7 +229,12 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 		return err
 	}
 	if isEbb {
-		if ls.isFirstByronHeader(block) {
+		// An epoch 0 EBB can only be a chain's first block, so a peer-relative
+		// one seen while the primary chain is at origin is held to the
+		// first-block rules rather than read as following an existing block.
+		if ls.isFirstByronHeader(block) ||
+			(ebbHeader.ConsensusData.Epoch == 0 &&
+				ls.peerRelativeAtOrigin(block)) {
 			// An EBB's block number (Difficulty.Value) and slot (derived from
 			// ConsensusData.Epoch) are independent fields: chain.firstBlockNumberValid
 			// only constrains the former, and validateByronPBFTCurrentSlot only
@@ -249,9 +254,8 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 			if err := ls.validateByronGenesisAnchor(ebbHeader); err != nil {
 				return err
 			}
-		} else if !ls.peerRelativeEbbAtOrigin(block) &&
-			(ebbHeader.ConsensusData.Epoch == 0 ||
-				ebbHeader.HasGenesisTag()) {
+		} else if ebbHeader.ConsensusData.Epoch == 0 ||
+			ebbHeader.HasGenesisTag() {
 			// The reference reads an EBB's previous hash as a genesis hash
 			// in epoch 0, or later when the deprecated 255 => "Genesis"
 			// attribute is present, and a genesis hash cannot continue a
@@ -338,12 +342,9 @@ func (ls *LedgerState) isFirstByronHeader(block ledger.Block) bool {
 	return c.IsFirstOnHeaderChain(block.Hash().Bytes())
 }
 
-// peerRelativeEbbAtOrigin reports whether block is a peer-relative header
-// verified while the primary chain is still at origin. Such a header may be
-// the first of a from-genesis chain, but is not provably so here (see
-// isFirstByronHeader), so the "genesis hash after an existing block" rejection
-// must not fire; the queue entry and blockfetch checks anchor it.
-func (ls *LedgerState) peerRelativeEbbAtOrigin(block ledger.Block) bool {
+// peerRelativeAtOrigin reports whether block is a peer-relative header (see
+// headerOnlyBlock) verified while the primary chain is still at origin.
+func (ls *LedgerState) peerRelativeAtOrigin(block ledger.Block) bool {
 	hb, ok := block.(headerOnlyBlock)
 	if !ok || !hb.peerRelative {
 		return false

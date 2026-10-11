@@ -1924,14 +1924,40 @@ func TestValidateChainSelectionHeaderCryptoAcceptsFirstByronEbbAtOrigin(
 			genesisHash.String(),
 		)
 		require.Zero(t, primaryChain.HeaderCount())
-		err := ls.ValidateChainSelectionHeaderCrypto(ebbHeader)
-		if err != nil {
-			require.NotContains(t, err.Error(), "chain already has a block")
+		require.NoError(t, ls.ValidateChainSelectionHeaderCrypto(ebbHeader))
+		require.NoError(t, ls.ValidateBlockHeaderCrypto(ebbHeader))
+	})
+
+	// At origin an epoch 0 EBB can only be the chain's first block, so a
+	// peer-relative one is still held to the genesis anchor.
+	t.Run("wrong genesis hash at origin", func(t *testing.T) {
+		t.Parallel()
+		ls, _ := newByronGenesisAnchorTestLedger(t, genesisHash.String())
+		wrongHeader := &byron.ByronEpochBoundaryBlockHeader{
+			PrevBlock: lcommon.Blake2b256Hash([]byte("wrong prev hash")),
 		}
-		err = ls.ValidateBlockHeaderCrypto(ebbHeader)
-		if err != nil {
-			require.NotContains(t, err.Error(), "chain already has a block")
-		}
+		err := ls.ValidateChainSelectionHeaderCrypto(wrongHeader)
+		require.ErrorContains(
+			t,
+			err,
+			"does not match configured Byron genesis hash",
+		)
+		err = ls.ValidateBlockHeaderCrypto(wrongHeader)
+		require.ErrorContains(
+			t,
+			err,
+			"does not match configured Byron genesis hash",
+		)
+	})
+
+	// A genesis-tagged EBB after epoch 0 can be neither the first block nor
+	// a continuation, so origin does not exempt it.
+	t.Run("genesis tag after epoch 0 at origin", func(t *testing.T) {
+		t.Parallel()
+		ls, _ := newByronGenesisAnchorTestLedger(t, genesisHash.String())
+		tagged := byronTestEbbHeader(t, 1, true).BlockHeader
+		err := ls.ValidateChainSelectionHeaderCrypto(tagged)
+		require.ErrorContains(t, err, "chain already has a block")
 	})
 
 	t.Run("after a block", func(t *testing.T) {
