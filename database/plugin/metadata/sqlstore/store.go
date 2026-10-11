@@ -706,9 +706,7 @@ func (s *Store) startMaintenance() {
 func jitteredInterval(every time.Duration) time.Duration {
 	const maxDuration = time.Duration(1<<63 - 1)
 	jitterMax := min(every/10, maxDuration-every)
-	return every + rand.N(
-		jitterMax+1,
-	) //nolint:gosec // schedule jitter, not a secret
+	return every + rand.N(jitterMax+1) //nolint:gosec // schedule jitter, not a secret
 }
 
 // postponeWarnEvery is how many consecutive postponements pass between
