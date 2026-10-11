@@ -229,13 +229,13 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		SelectBlockfetchRetryPeerFunc: func(
 			excluded []ouroboros.ConnectionId,
 			rangeEnd ocommon.Point,
-		) (ouroboros.ConnectionId, bool) {
+		) (ouroboros.ConnectionId, bool, bool) {
 			var selected ouroboros.ConnectionId
 			found := false
-			n.withLiveChainsyncState(func(state *chainsync.State) {
+			available := n.withLiveChainsyncState(func(state *chainsync.State) {
 				selected, found = state.SelectBlockfetchRetryPeer(excluded, rangeEnd)
 			})
-			return selected, found
+			return selected, found, available
 		},
 		RecordBlockfetchLatencyFunc: func(
 			connId ouroboros.ConnectionId,

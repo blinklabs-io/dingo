@@ -605,13 +605,18 @@ The BlockFetch watchdog uses a five-second first-block policy for near-tip
 windows of at most four headers. This is deliberately stricter than the
 protocol client's 60-second timeout ceiling; after the first block arrives,
 the 30-second streaming watchdog applies, and bulk catch-up uses that same
-30-second budget throughout. A timeout is recorded in the peer delivery EWMA
-before retry selection. Retry excludes the timed-out connection and requires
+30-second budget throughout. A timeout before any block is recorded in the
+peer delivery EWMA before retry selection; a later streaming stall does not
+replace the first-block latency already recorded for that batch. Retry excludes
+the timed-out connection before pricing the remaining candidates and requires
 another eligible peer that announced the range end, including an unmeasured
 holder. With no such holder the connection is recycled without redispatching
-the range to it. A request still blocked inside protocol dispatch follows the
-same recycle path; closing the protocol interrupts the dispatch before its
-longer transport deadline.
+the range to it. If a selected holder cannot start the request, another holder
+is tried and exhausting them requests a fresh ChainSync cursor. Selection is
+deferred while live lifecycle work makes the peer registry unavailable. A
+request still blocked inside protocol dispatch follows the same recycle path;
+closing the protocol interrupts the dispatch before its longer transport
+deadline.
 
 An admitted ChainSync rollback atomically refreshes the tracked client's
 cursor, advertised tip, activity, and syncing status before chain selection

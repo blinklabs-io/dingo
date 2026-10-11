@@ -191,10 +191,10 @@ func TestBlockfetchTimeoutPenalizesPeerBeforeModelRankedRetry(
 			SelectBlockfetchRetryPeerFunc: func(
 				excluded []ouroboros.ConnectionId,
 				_ ocommon.Point,
-			) (ouroboros.ConnectionId, bool) {
+			) (ouroboros.ConnectionId, bool, bool) {
 				assert.Equal(t, []ouroboros.ConnectionId{stalled}, excluded)
 				assert.True(t, penalized, "rank the timeout before selecting the retry")
-				return modelChoice, true
+				return modelChoice, true, true
 			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &active
@@ -375,13 +375,13 @@ func TestBlockfetchTimeoutExcludesBlockedShadowFromRetry(t *testing.T) {
 			SelectBlockfetchRetryPeerFunc: func(
 				excluded []ouroboros.ConnectionId,
 				_ ocommon.Point,
-			) (ouroboros.ConnectionId, bool) {
+			) (ouroboros.ConnectionId, bool, bool) {
 				assert.Equal(
 					t,
 					[]ouroboros.ConnectionId{primary, shadow},
 					excluded,
 				)
-				return retry, true
+				return retry, true, true
 			},
 		},
 	}
@@ -433,7 +433,10 @@ func TestBlockfetchFirstBlockInvalidatesExpiredNearTipWatchdog(t *testing.T) {
 	connId := testChainsyncConnId(6000, 3001)
 	penaltyCount := 0
 	ls := &LedgerState{
-		chain: testChain,
+		chain:                        testChain,
+		activeBlockfetchConnId:       connId,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		mithrilLedgerSlot:            100,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			RecordBlockfetchLatencyFunc: func(
@@ -444,46 +447,107 @@ func TestBlockfetchFirstBlockInvalidatesExpiredNearTipWatchdog(t *testing.T) {
 			},
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	ls.chainsyncBlockfetchMutex.Lock()
+	ls.activeBlockfetchStart = time.Now()
 	ls.armBlockfetchTimeoutForLocked(connId, blockfetchNearTipTimeout)
 	expiredGeneration := ls.chainsyncBlockfetchTimerGeneration
-	ls.armBlockfetchTimeoutForLocked(connId, blockfetchBusyTimeout)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	require.NoError(t, handleEventBlockfetchBlockDeferred(
+		ls,
+		BlockfetchEvent{
+			ConnectionId: connId,
+			Block:        &mockBabbageBlock{slot: 1},
+			RawBlock:     []byte{0x01},
+			Point:        ocommon.NewPoint(1, []byte{0x01}),
+		},
+		nil,
+	))
+	assert.Equal(t, 1, penaltyCount)
+	ls.chainsyncBlockfetchMutex.Lock()
 	ls.handleBlockfetchTimeoutGenerationLocked(
 		connId,
 		expiredGeneration,
 		&pendingPublishes{},
 	)
-	assert.Equal(t, 0, penaltyCount)
+	assert.Equal(t, 1, penaltyCount)
 	assert.Equal(t, blockfetchBusyTimeout, ls.activeBlockfetchTimeout)
+	ls.pendingBlockfetchEvents = nil
 	ls.blockfetchRequestRangeCleanup()
 	ls.chainsyncBlockfetchMutex.Unlock()
 }
 
-func TestBlockfetchStreamingTimeoutRecordsActiveWatchdog(t *testing.T) {
+func TestBlockfetchStreamingTimeoutDoesNotRecordFirstBlockLatency(t *testing.T) {
 	t.Parallel()
 
 	testChain, _ := buildDeepCatchupChain(t, 1)
 	stalled := testChainsyncConnId(6000, 3001)
-	var penalty time.Duration
+	penaltyCount := 0
 	ls := &LedgerState{
 		chain:                   testChain,
 		activeBlockfetchConnId:  stalled,
 		activeBlockfetchTimeout: blockfetchBusyTimeout,
+		firstBlockReceived:      true,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			RecordBlockfetchLatencyFunc: func(
 				_ ouroboros.ConnectionId,
-				latency time.Duration,
+				_ time.Duration,
 			) {
-				penalty = latency
+				penaltyCount++
 			},
 		},
 	}
 
 	handleBlockfetchTimeoutForTest(ls, stalled, nil)
 
-	assert.Equal(t, blockfetchBusyTimeout, penalty)
+	assert.Zero(t, penaltyCount)
+}
+
+func TestBlockfetchTimeoutDefersWhenRetrySelectionIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	testChain, _ := buildDeepCatchupChain(t, 1)
+	stalled := testChainsyncConnId(6000, 3001)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	_, recycled := bus.Subscribe(ConnectionRecycleRequestedEventType)
+	ls := &LedgerState{
+		chain:                  testChain,
+		activeBlockfetchConnId: stalled,
+		config: LedgerStateConfig{
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EventBus: bus,
+			RecordBlockfetchLatencyFunc: func(
+				ouroboros.ConnectionId,
+				time.Duration,
+			) {
+				t.Fatal("deferred selection must not record the timeout twice")
+			},
+			SelectBlockfetchRetryPeerFunc: func(
+				[]ouroboros.ConnectionId,
+				ocommon.Point,
+			) (ouroboros.ConnectionId, bool, bool) {
+				return ouroboros.ConnectionId{}, false, false
+			},
+		},
+	}
+	var pending pendingPublishes
+	handleBlockfetchTimeoutForTest(ls, stalled, &pending)
+	pending.flush()
+
+	assert.Equal(t, stalled, ls.activeBlockfetchConnId)
+	assert.NotNil(t, ls.chainsyncBlockfetchTimeoutTimer)
+	testutil.RequireNoReceive(
+		t,
+		recycled,
+		20*time.Millisecond,
+		"lifecycle contention must not recycle the active peer",
+	)
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.chainsyncBlockfetchMutex.Unlock()
 }
 
 // The next batch of a drained queue is fetched from the peer the policy now

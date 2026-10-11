@@ -124,18 +124,16 @@ func (s *State) SelectBlockfetchRetryPeer(
 		return ouroboros.ConnectionId{}, false
 	}
 	holders := s.PeersWithBlock(excluded[0], point)
-	candidates := s.blockfetchCandidates(excluded[0], holders)
-	remaining := candidates[:0]
-	for _, candidate := range candidates {
-		if !slices.Contains(excluded, candidate.connId) {
-			remaining = append(remaining, candidate)
-		}
-	}
-	if len(remaining) == 0 {
+	candidates := s.blockfetchCandidatesExcept(
+		excluded[0],
+		holders,
+		excluded,
+	)
+	if len(candidates) == 0 {
 		return ouroboros.ConnectionId{}, false
 	}
-	best := remaining[0]
-	for _, candidate := range remaining[1:] {
+	best := candidates[0]
+	for _, candidate := range candidates[1:] {
 		switch {
 		case candidate.sampled && !best.sampled:
 			best = candidate
@@ -153,11 +151,22 @@ func (s *State) blockfetchCandidates(
 	origin ouroboros.ConnectionId,
 	holders []ouroboros.ConnectionId,
 ) []blockfetchCandidate {
+	return s.blockfetchCandidatesExcept(origin, holders, nil)
+}
+
+func (s *State) blockfetchCandidatesExcept(
+	origin ouroboros.ConnectionId,
+	holders []ouroboros.ConnectionId,
+	excluded []ouroboros.ConnectionId,
+) []blockfetchCandidate {
 	s.clientConnIdMutex.RLock()
 	defer s.clientConnIdMutex.RUnlock()
 	candidates := make([]blockfetchCandidate, 0, 1+len(holders))
 	var perByte []float64
 	add := func(connId ouroboros.ConnectionId) {
+		if slices.Contains(excluded, connId) {
+			return
+		}
 		c := blockfetchCandidate{connId: connId, tie: s.blockfetchTie(connId)}
 		if tc, ok := s.trackedClients[connId]; ok &&
 			tc.blockfetchSampleCount > 0 {

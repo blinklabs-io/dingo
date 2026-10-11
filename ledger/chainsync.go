@@ -9068,9 +9068,9 @@ func (ls *LedgerState) selectRetryBlockfetchConn(
 
 func (ls *LedgerState) selectTimeoutRetryBlockfetchConn(
 	excluded ...ouroboros.ConnectionId,
-) (ouroboros.ConnectionId, bool) {
+) (ouroboros.ConnectionId, bool, bool) {
 	if ls.config.SelectBlockfetchRetryPeerFunc == nil || len(excluded) == 0 {
-		return ouroboros.ConnectionId{}, false
+		return ouroboros.ConnectionId{}, false, true
 	}
 	_, end, available := ls.chain.HeaderRangeAfterBytes(
 		0,
@@ -9078,21 +9078,24 @@ func (ls *LedgerState) selectTimeoutRetryBlockfetchConn(
 		BlockfetchMaxRangeBytes,
 	)
 	if available == 0 || len(end.Hash) == 0 {
-		return ouroboros.ConnectionId{}, false
+		return ouroboros.ConnectionId{}, false, true
 	}
-	selected, ok := ls.config.SelectBlockfetchRetryPeerFunc(
+	selected, ok, selectionAvailable := ls.config.SelectBlockfetchRetryPeerFunc(
 		excluded,
 		end,
 	)
+	if !selectionAvailable {
+		return ouroboros.ConnectionId{}, false, false
+	}
 	if !ok || connIdKey(selected) == "" {
-		return ouroboros.ConnectionId{}, false
+		return ouroboros.ConnectionId{}, false, true
 	}
 	for _, connId := range excluded {
 		if sameConnectionId(selected, connId) {
-			return ouroboros.ConnectionId{}, false
+			return ouroboros.ConnectionId{}, false, true
 		}
 	}
-	return selected, true
+	return selected, true, true
 }
 
 func (ls *LedgerState) requestBlockfetchConnectionRecycle(
@@ -9609,7 +9612,8 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 		}
 		timeout := ls.activeBlockfetchWatchdog()
 		firstTimeout := ls.blockfetchInFlightTimeoutCount == 0
-		if firstTimeout && ls.config.RecordBlockfetchLatencyFunc != nil {
+		if firstTimeout && !ls.firstBlockReceived &&
+			ls.config.RecordBlockfetchLatencyFunc != nil {
 			ls.config.RecordBlockfetchLatencyFunc(currentConnId, timeout)
 		}
 		if ls.blockfetchInFlightTimeoutCount <
@@ -9648,10 +9652,10 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 	}
 	headerCount := ls.chain.HeaderCount()
 	timeout := ls.activeBlockfetchWatchdog()
-	if ls.config.RecordBlockfetchLatencyFunc != nil {
-		ls.config.RecordBlockfetchLatencyFunc(currentConnId, timeout)
-	}
 	if headerCount == 0 {
+		if !ls.firstBlockReceived && ls.config.RecordBlockfetchLatencyFunc != nil {
+			ls.config.RecordBlockfetchLatencyFunc(currentConnId, timeout)
+		}
 		ls.blockfetchRequestRangeCleanup()
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		ls.clearQueuedHeaders()
@@ -9686,9 +9690,16 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 			)
 		}
 	}
-	retryConnId, retryAvailable := ls.selectTimeoutRetryBlockfetchConn(
+	retryConnId, retryAvailable, selectionAvailable := ls.selectTimeoutRetryBlockfetchConn(
 		excluded...,
 	)
+	if !selectionAvailable {
+		ls.armBlockfetchTimeoutLocked(currentConnId)
+		return
+	}
+	if !ls.firstBlockReceived && ls.config.RecordBlockfetchLatencyFunc != nil {
+		ls.config.RecordBlockfetchLatencyFunc(currentConnId, timeout)
+	}
 	if !retryAvailable {
 		ls.config.Logger.Warn(
 			"blockfetch operation timed out without another range holder; recycling connection",
@@ -9734,9 +9745,14 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 			"error", err,
 		)
 		fallbackExcluded := append(excluded, retryConnId)
-		if nextConnId, ok := ls.selectTimeoutRetryBlockfetchConn(
+		nextConnId, ok, fallbackSelectionAvailable := ls.selectTimeoutRetryBlockfetchConn(
 			fallbackExcluded...,
-		); ok {
+		)
+		if !fallbackSelectionAvailable {
+			ls.armBlockfetchTimeoutLocked(retryConnId)
+			return
+		}
+		if ok {
 			ls.config.Logger.Warn(
 				"retrying queued range on alternate blockfetch connection",
 				"component", "ledger",
@@ -9757,22 +9773,32 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 					"error",
 					retryErr,
 				)
-				if ls.chain.HeaderCount() > 0 {
-					pending.add(
-						ls.config.EventBus,
-						event.ChainsyncResyncEventType,
-						event.NewEvent(
-							event.ChainsyncResyncEventType,
-							event.ChainsyncResyncEvent{
-								ConnectionId: retryConnId,
-								Reason:       event.ChainsyncResyncReasonBlockfetchTimeoutRetryFailed,
-							},
-						),
-					)
-				}
+				ls.requestBlockfetchTimeoutRetryResync(retryConnId, pending)
 			}
+		} else {
+			ls.requestBlockfetchTimeoutRetryResync(retryConnId, pending)
 		}
 	}
+}
+
+func (ls *LedgerState) requestBlockfetchTimeoutRetryResync(
+	connId ouroboros.ConnectionId,
+	pending *pendingPublishes,
+) {
+	if ls.chain.HeaderCount() == 0 || ls.config.EventBus == nil || pending == nil {
+		return
+	}
+	pending.add(
+		ls.config.EventBus,
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				ConnectionId: connId,
+				Reason:       event.ChainsyncResyncReasonBlockfetchTimeoutRetryFailed,
+			},
+		),
+	)
 }
 
 func (ls *LedgerState) handleEventBlockfetchBatchDone(

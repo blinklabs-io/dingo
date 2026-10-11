@@ -3345,6 +3345,31 @@ func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 	assert.Nil(t, active)
 }
 
+func TestLedgerStateConfigReportsRetrySelectionUnavailableDuringLifecycle(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	n := &Node{
+		chainsyncState: chainsync.NewStateWithConfig(
+			nil,
+			nil,
+			chainsync.DefaultConfig(),
+		),
+		config: Config{cfg: &internalconfig.Config{}},
+	}
+	config := n.ledgerStateConfig()
+	n.liveLifecycleMu.Lock()
+	_, found, available := config.SelectBlockfetchRetryPeerFunc(
+		[]ouroboros.ConnectionId{newNodeTestConnId(3001)},
+		ocommon.NewPoint(100, []byte("header")),
+	)
+	n.liveLifecycleMu.Unlock()
+
+	assert.False(t, found)
+	assert.False(t, available)
+}
+
 // TestLedgerStateConfigForwardsBlockPipelineFlags is the second half of the
 // pipeline-flag regression coverage: it proves that a Config built through the
 // public NewConfig/With... option API -- not a hand-built struct literal --

@@ -1616,7 +1616,7 @@ func (s *State) PeersWithBlock(
 
 // RecordBlockfetchLatency updates the EWMA blockfetch delivery estimate for
 // the given connection. The ledger records first-block latency on success and
-// the watchdog duration when a request times out.
+// the watchdog duration when a request times out before delivering a block.
 func (s *State) RecordBlockfetchLatency(
 	connId ouroboros.ConnectionId,
 	latency time.Duration,

@@ -13811,8 +13811,8 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 			SelectBlockfetchRetryPeerFunc: func(
 				[]ouroboros.ConnectionId,
 				ocommon.Point,
-			) (ouroboros.ConnectionId, bool) {
-				return connId2, true
+			) (ouroboros.ConnectionId, bool, bool) {
+				return connId2, true, true
 			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &connId2
@@ -13910,8 +13910,8 @@ func TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection(
 			SelectBlockfetchRetryPeerFunc: func(
 				[]ouroboros.ConnectionId,
 				ocommon.Point,
-			) (ouroboros.ConnectionId, bool) {
-				return connId2, true
+			) (ouroboros.ConnectionId, bool, bool) {
+				return connId2, true, true
 			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &connId2
@@ -14001,20 +14001,20 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 			SelectBlockfetchRetryPeerFunc: func(
 				excluded []ouroboros.ConnectionId,
 				_ ocommon.Point,
-			) (ouroboros.ConnectionId, bool) {
+			) (ouroboros.ConnectionId, bool, bool) {
 				switch len(excluded) {
 				case 1:
 					assert.Equal(t, []ouroboros.ConnectionId{connId1}, excluded)
-					return connId2, true
+					return connId2, true, true
 				case 2:
 					assert.Equal(
 						t,
 						[]ouroboros.ConnectionId{connId1, connId2},
 						excluded,
 					)
-					return connId3, true
+					return connId3, true, true
 				default:
-					return ouroboros.ConnectionId{}, false
+					return ouroboros.ConnectionId{}, false, true
 				}
 			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
@@ -14046,6 +14046,55 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 	assert.Equal(t, connId3, ls.activeBlockfetchConnId)
 	require.NotNil(t, ls.chainsyncBlockfetchReadyChan)
 	assert.Equal(t, 1, testChain.HeaderCount())
+}
+
+func TestHandleBlockfetchTimeoutLocked_RetryFailureWithoutHolderResyncs(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _ := newForkExtensionRestartFixture(t)
+	stalled := testChainsyncConnId(6000, 3001)
+	retry := testChainsyncConnId(6000, 3002)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	ls.activeBlockfetchConnId = stalled
+	ls.config.EventBus = bus
+	ls.config.SelectBlockfetchRetryPeerFunc = func(
+		excluded []ouroboros.ConnectionId,
+		_ ocommon.Point,
+	) (ouroboros.ConnectionId, bool, bool) {
+		if len(excluded) == 1 {
+			return retry, true, true
+		}
+		return ouroboros.ConnectionId{}, false, true
+	}
+	ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId,
+		ocommon.Point,
+		ocommon.Point,
+	) (uint64, error) {
+		return 0, errors.New("retry failed")
+	}
+
+	var pending pendingPublishes
+	handleBlockfetchTimeoutForTest(ls, stalled, &pending)
+	pending.flush()
+	evt := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"resync after the last retry holder fails",
+	)
+	resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	assert.Equal(t, retry, resync.ConnectionId)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonBlockfetchTimeoutRetryFailed,
+		resync.Reason,
+	)
 }
 
 // TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue covers the
