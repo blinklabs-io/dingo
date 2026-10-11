@@ -1153,7 +1153,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		}
 		return nil
 	case *oleiosnotify.MsgBlockOffer:
-		o.markLeiosEndorserBlockRelayOffer(m.Point)
+		o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)
 		// While the ledger is deeply behind the head, do not prefetch this
 		// head endorser block: it would expire before the ledger reaches it and
 		// would starve the chain-driven historical backfill for connections. The
@@ -1278,7 +1278,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			)
 		})
 	case *oleiosnotify.MsgBlockTxsOffer:
-		o.markLeiosEndorserBlockRelayOffer(m.Point)
+		o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)
 		// The peer is offering the transactions for this endorser block. Fetch
 		// them over leios-fetch (off the handler, serialized per connection, and
 		// deduped across connections) so the EB becomes complete and its outputs

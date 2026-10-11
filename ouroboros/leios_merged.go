@@ -327,6 +327,12 @@ type leiosEndorserBlockData struct {
 	relayOfferRequested      bool
 	relayManifestOffered     bool
 	relayTransactionsOffered bool
+	// relayOfferSource identifies the most recent live connection that offered
+	// this exact occurrence. LeiosFetch has no not-found response, so a
+	// by-point request to a peer that never advertised the occurrence closes
+	// the shared bearer. Keeping one bounded source lets historical backfill
+	// try a peer known to hold the requested point first.
+	relayOfferSource string
 	// seq is a monotonic insertion sequence assigned while leiosMu is held
 	// (see Ouroboros.leiosEndorserBlockSeq), used to order eviction instead of
 	// insertedAt. insertedAt is a wall-clock timestamp captured before the
@@ -629,6 +635,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		data.partialTxs = existing.partialTxs
 		data.relayOfferRequested = data.relayOfferRequested ||
 			existing.relayOfferRequested
+		data.relayOfferSource = existing.relayOfferSource
 		data.relayManifestOffered = existing.relayManifestOffered
 		data.relayTransactionsOffered = existing.relayTransactionsOffered
 		data.semanticValidationStatus = existing.semanticValidationStatus
@@ -784,6 +791,13 @@ func (o *Ouroboros) enqueueLeiosRelayOffers(
 func (o *Ouroboros) markLeiosEndorserBlockRelayOffer(
 	point ocommon.Point,
 ) {
+	o.markLeiosEndorserBlockRelayOfferFrom(point, "")
+}
+
+func (o *Ouroboros) markLeiosEndorserBlockRelayOfferFrom(
+	point ocommon.Point,
+	connectionID string,
+) {
 	if len(point.Hash) != lcommon.Blake2b256Size {
 		return
 	}
@@ -805,6 +819,7 @@ func (o *Ouroboros) markLeiosEndorserBlockRelayOffer(
 			cacheKeys:           []string{key},
 			insertedAt:          now,
 			relayOfferRequested: true,
+			relayOfferSource:    connectionID,
 			seq:                 o.leiosEndorserBlockSeq,
 		}
 		o.pruneLeiosEndorserBlockCacheLocked(now)
@@ -813,6 +828,9 @@ func (o *Ouroboros) markLeiosEndorserBlockRelayOffer(
 	}
 	updated := *current
 	updated.relayOfferRequested = true
+	if connectionID != "" {
+		updated.relayOfferSource = connectionID
+	}
 	for _, cacheKey := range current.cacheKeys {
 		if o.leiosEndorserBlocks[cacheKey] == current {
 			o.leiosEndorserBlocks[cacheKey] = &updated
@@ -1637,6 +1655,7 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		existing.expired(now) || !existing.hasManifest() {
 		if existing != nil && !existing.expired(now) {
 			data.relayOfferRequested = existing.relayOfferRequested
+			data.relayOfferSource = existing.relayOfferSource
 		}
 		o.pruneLeiosEndorserBlockCacheLocked(now)
 		o.leiosEndorserBlockSeq++

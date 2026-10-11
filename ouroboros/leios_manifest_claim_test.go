@@ -1189,11 +1189,13 @@ func TestLeiosRelayOfferIntentMergesWithPersistedCacheReload(t *testing.T) {
 	require.NoError(t, o.leiosDatabase().SetLeiosEB(
 		point.Slot, point.Hash, manifestRaw, []cbor.RawMessage{tx},
 	))
-	o.markLeiosEndorserBlockRelayOffer(point)
+	const offerSource = "offer-source"
+	o.markLeiosEndorserBlockRelayOfferFrom(point, offerSource)
 	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(t, data.hasManifest())
 	require.True(t, data.completeTxCache())
+	require.Equal(t, offerSource, data.relayOfferSource)
 	data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(t, data.relayTransactionsOffered)
