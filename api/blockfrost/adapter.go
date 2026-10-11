@@ -4069,14 +4069,16 @@ func (a *NodeAdapter) TransactionSubmit(
 				ErrMempoolFull,
 			)
 		}
-		// A stopped mempool and a missing validator are both "the mempool
-		// cannot accept anything right now", the same condition the nil
-		// submitter above reports, so they answer 503 rather than telling the
-		// client its transaction was rejected. Everything remaining from
-		// AddTransaction is a real admission failure -- a validity interval
-		// that has not started, or ledger validation -- and stays a rejection.
+		// A stopped mempool, a missing validator and a ledger that kept
+		// moving during admission all mean "no verdict was reached", the same
+		// condition the nil submitter above reports, so they answer 503 rather
+		// than telling the client its transaction was rejected. Everything
+		// remaining from AddTransaction is a real admission failure -- a
+		// validity interval that has not started, or ledger validation -- and
+		// stays a rejection.
 		if errors.Is(err, mempool.ErrMempoolStopped) ||
-			errors.Is(err, mempool.ErrNilValidator) {
+			errors.Is(err, mempool.ErrNilValidator) ||
+			errors.Is(err, mempool.ErrPendingStateMoved) {
 			return "", fmt.Errorf(
 				"%w: %w",
 				ErrMempoolUnavailable,
@@ -5313,10 +5315,10 @@ func poolRewardAccountCredential(
 	hash := cert.RewardAccount[:]
 	rawCbor := cert.Cbor()
 	if len(rawCbor) > 0 {
-		var raw []cbor.RawMessage
-		if _, err := cbor.Decode(rawCbor, &raw); err == nil && len(raw) > 6 {
-			var rewardAddrBytes []byte
-			if _, err := cbor.Decode(raw[6], &rewardAddrBytes); err == nil &&
+		raw, _, err := safedecode.Cbor[[]cbor.RawMessage](rawCbor)
+		if err == nil && len(raw) > 6 {
+			rewardAddrBytes, _, err := safedecode.Cbor[[]byte](raw[6])
+			if err == nil &&
 				len(rewardAddrBytes) == 29 {
 				if (rewardAddrBytes[0] & 0xF0) == 0xF0 {
 					credType = lcommon.CredentialTypeScriptHash

@@ -1214,4 +1214,6 @@ func TestBlockfrostAdaptersHonorCancelledContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	_, _, err = adapter.AccountTransactions(ctx, stakeAddr, TransactionRangeParams{})
 	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AddressTransactions(ctx, stakeAddr, TransactionRangeParams{})
+	require.ErrorIs(t, err, context.Canceled)
 }
