@@ -15861,8 +15861,11 @@ connection that holds it; a closed origin starts nothing. A start that fails
 takes the header path's fallbacks (`startQueuedBlockfetchWithFallbackLocked`):
 it retries on the origin, then on the active best peer, and when those fail the queue is cleared
 and a re-sync requested, since the wait cannot end while nothing fetches the
-queued blocks. As in the reference, the forecast is measured from where the peer's
-chain leaves the local chain: a fork that left before the ledger tip gets that
+queued blocks. The discarded headers' invalidation is published after the ledger
+locks are released, so their Leios announcements and derived votes are removed
+without waiting for another chain event. As in the reference, the forecast is
+measured from where the peer's chain leaves the local chain: a fork that left
+before the ledger tip gets that
 point's shorter horizon (`chainsyncForkAnchor`, `forecastSummaryFrom`). The
 intersection is resolved from the peer's recorded headers; a header extending
 the local header chain resolves on the first step, and an intersection that

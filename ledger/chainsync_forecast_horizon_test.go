@@ -124,7 +124,11 @@ func TestAwaitChainsyncHeaderAdmissionHoldsHeaderPastForecastHorizon(
 	)
 	require.NoError(t, got.err)
 	require.True(t, got.accepted)
-	require.Empty(t, *waits, "a historical header has no slot onset to wait for")
+	require.Empty(
+		t,
+		*waits,
+		"a historical header has no slot onset to wait for",
+	)
 }
 
 func TestAwaitChainsyncHeaderAdmissionPastForecastHorizonHonorsCancellation(
@@ -180,7 +184,9 @@ func TestSnapshotPublishedChanClosesOnPublish(t *testing.T) {
 	)
 	select {
 	case <-ls.snapshotPublishedChan():
-		t.Fatal("a channel obtained after publication must wait for the next one")
+		t.Fatal(
+			"a channel obtained after publication must wait for the next one",
+		)
 	default:
 	}
 }
@@ -221,10 +227,22 @@ func TestChainsyncHeaderPastForecastHorizonIsNotQueued(t *testing.T) {
 			testChain := cm.PrimaryChain()
 
 			header := mockHeader{slot: 1000, blockNumber: 100}
-			point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
+			point := ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			)
 			covered := &atomic.Bool{}
 			covered.Store(!tc.pastHorizon)
-			systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+			systemStart := time.Date(
+				2026,
+				time.August,
+				22,
+				12,
+				0,
+				0,
+				0,
+				time.UTC,
+			)
 			ls := &LedgerState{
 				chain: testChain,
 				slotClock: NewSlotClock(
@@ -262,15 +280,21 @@ func TestChainsyncHeaderPastForecastHorizonIsNotQueued(t *testing.T) {
 			})
 			connId := testRecycleConnId()
 
-			require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
-				ConnectionId: connId,
-				BlockHeader:  header,
-				Point:        point,
-				Tip: ochainsync.Tip{
-					Point:       ocommon.NewPoint(point.Slot+1, []byte("tip")),
-					BlockNumber: header.BlockNumber() + 1,
-				},
-			}))
+			require.NoError(
+				t,
+				ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+					ConnectionId: connId,
+					BlockHeader:  header,
+					Point:        point,
+					Tip: ochainsync.Tip{
+						Point: ocommon.NewPoint(
+							point.Slot+1,
+							[]byte("tip"),
+						),
+						BlockNumber: header.BlockNumber() + 1,
+					},
+				}),
+			)
 
 			if !tc.pastHorizon {
 				require.True(t, testChain.FirstHeaderMatchesPoint(point))
@@ -671,6 +695,76 @@ func TestAwaitChainsyncHeaderAdmissionStartsBlockfetchForQueuedHeaders(
 type horizonFlushRequest struct {
 	connId ouroboros.ConnectionId
 	start  ocommon.Point
+}
+
+func TestHorizonFlushPublishesHeaderInvalidation(t *testing.T) {
+	t.Parallel()
+
+	for _, fail := range []bool{false, true} {
+		name := "successful dispatch"
+		if fail {
+			name = "failed dispatch"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := newHeaderStreamLedger(t)
+			header := announcingHeader(
+				577, "horizon-header", lcommon.NewBlake2b256(nil), 1,
+				lcommon.NewBlake2b256([]byte("announced-eb")),
+			)
+			require.NoError(
+				t,
+				fixture.ls.chain.AddVerifiedBlockHeader(t.Context(), header),
+			)
+			fixture.ls.chain.PublishPendingChainUpdates()
+			announcement := testutil.RequireReceive(
+				t,
+				fixture.ch,
+				testutil.AsyncWait,
+				"announcement",
+			)
+			announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
+			require.True(t, ok)
+			fixture.ls.headerPipelineConnId = fixture.connId
+			fixture.ls.config.BlockfetchRequestRangeFunc = func(
+				ouroboros.ConnectionId, ocommon.Point, ocommon.Point,
+			) (uint64, error) {
+				if fail {
+					return 0, errors.New("simulated blockfetch request failure")
+				}
+				return 1, nil
+			}
+			t.Cleanup(func() {
+				if fixture.ls.chainsyncBlockfetchTimeoutTimer != nil {
+					fixture.ls.chainsyncBlockfetchTimeoutTimer.Stop()
+				}
+			})
+
+			fixture.ls.flushQueuedHeadersForHorizonWait(fixture.connId)
+
+			if !fail {
+				require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+				testutil.RequireNoReceive(t, fixture.ch, 100*time.Millisecond,
+					"successful horizon flush must keep the announcement armed")
+				return
+			}
+			require.Zero(t, fixture.ls.chain.HeaderCount())
+			invalidation := testutil.RequireReceive(
+				t,
+				fixture.ch,
+				testutil.AsyncWait,
+				"failed horizon flush must publish invalidation without another event",
+			)
+			invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
+			require.True(t, ok)
+			require.Equal(
+				t,
+				chain.HeaderInvalidationQueueCleared,
+				invalid.Reason,
+			)
+			require.Contains(t, invalid.RbHashes, header.hash)
+			require.Greater(t, invalid.Seq, announced.Seq)
+		})
+	}
 }
 
 // newHorizonFlushTestLedger returns a ledger holding one queued header with

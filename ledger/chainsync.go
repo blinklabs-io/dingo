@@ -4767,6 +4767,7 @@ func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
 	}
 	var pending pendingPublishes
 	defer pending.flush()
+	pending.drainChain(ls.chain)
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
