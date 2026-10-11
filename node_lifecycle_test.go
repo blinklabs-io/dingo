@@ -2090,3 +2090,30 @@ func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 
 	addBlocksSerially(t, n, tailBlocks[5:], epochLength)
 }
+
+// A live truncate or restore replaces the database handle, possibly with one
+// that was never analyzed. The rebuilt planner statistics manager must run
+// its startup pass on the new handle rather than wait for the next epoch
+// rollover, so a further pass right after finds nothing to change.
+func TestLiveTruncateRunsPlannerStatsStartupOnReplacementHandle(t *testing.T) {
+	t.Parallel()
+
+	const numBlocks = 20
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+	targetSlot := points[numBlocks/2].Slot
+
+	_, err := n.Truncate(context.Background(), dblifecycle.TruncateTarget{
+		Slot: &targetSlot,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, n.plannerStatsMgr)
+
+	result, err := n.plannerStatsMgr.RunStartup(context.Background())
+	require.NoError(t, err)
+	require.True(t, result.Supported)
+	require.False(
+		t,
+		result.Changed,
+		"the replacement handle must already have been optimized",
+	)
+}
