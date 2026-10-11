@@ -213,11 +213,6 @@ var componentStopsForQuiesce = (*Node).quiesceComponentStops
 // interrupted from here, and the escalation brings the process down anyway, so
 // leaking it for that window is strictly safer than proceeding to close the
 // database it may still be using.
-//
-// The caller's context deliberately does not shorten this wait. Cancelling a
-// restore should not escalate a component that would have stopped cleanly into
-// a supervised restart, and a cancelled context is no reason to abandon a stop
-// mid-flight: the deadline alone decides, so the wait is bounded either way.
 func stopWithDeadline(
 	d time.Duration,
 	name string,

@@ -214,7 +214,10 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260921155816-b14227669459 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
 	lukechampine.com/blake3 v1.1.6 // indirect
-	modernc.org/libc v1.75.7 // indirect
+	modernc.org/libc v1.77.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
+
+// Remove when an upstream release preserves cancellation before SQLite execution.
+replace modernc.org/sqlite => github.com/wolf31o2/sqlite v1.60.2-0.20261010235151-e5bb553e3013
