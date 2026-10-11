@@ -67,14 +67,14 @@ func TestGenesisStakingEmpty(t *testing.T) {
 
 func TestResolveGenesisStakingEmptyRequiresKnownGenesis(t *testing.T) {
 	t.Parallel()
-	empty, err := ResolveGenesisStakingEmpty(nil, "", "")
+	empty, err := ResolveGenesisStakingEmpty(nil, "", "", 0)
 	require.NoError(t, err)
 	require.False(
 		t,
 		empty,
 		"an unspecified network must not certify a different network's genesis",
 	)
-	empty, err = ResolveGenesisStakingEmpty(nil, "", "preview")
+	empty, err = ResolveGenesisStakingEmpty(nil, "", "preview", 0)
 	require.NoError(t, err)
 	require.True(t, empty)
 	config, err := cardano.LoadCardanoNodeConfigWithFallback(
@@ -89,6 +89,7 @@ func TestResolveGenesisStakingEmptyRequiresKnownGenesis(t *testing.T) {
 		config,
 		"invalid config path",
 		"unknown network",
+		0,
 	)
 	require.NoError(t, err)
 	require.True(t, empty, "a supplied parsed config is authoritative")
@@ -96,6 +97,7 @@ func TestResolveGenesisStakingEmptyRequiresKnownGenesis(t *testing.T) {
 		nil,
 		"missing config path",
 		"unknown network",
+		0,
 	)
 	require.Error(t, err)
 	require.False(
@@ -103,4 +105,13 @@ func TestResolveGenesisStakingEmptyRequiresKnownGenesis(t *testing.T) {
 		empty,
 		"a failed explicit config load cannot certify genesis",
 	)
+}
+
+func TestResolveGenesisStakingEmptyNetworkMagic(t *testing.T) {
+	empty, err := ResolveGenesisStakingEmpty(nil, "", "", 2)
+	require.NoError(t, err)
+	require.True(t, empty)
+	empty, err = ResolveGenesisStakingEmpty(nil, "", "", 4294967295)
+	require.NoError(t, err)
+	require.False(t, empty)
 }

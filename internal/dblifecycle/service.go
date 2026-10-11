@@ -115,7 +115,7 @@ func (s *Service) openDatabase(
 	ctx context.Context,
 ) (*internalplugins.DatabaseRuntime, error) {
 	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
-		nil, s.cfg.CardanoConfig, s.cfg.Network,
+		nil, s.cfg.CardanoConfig, s.cfg.Network, s.cfg.NetworkMagic,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("loading cardano node config: %w", err)

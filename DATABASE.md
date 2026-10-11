@@ -1908,7 +1908,9 @@ ledger-state import.
 
 Migration `v15` (`reward-stake-calculation-version-restamp`) upgrades stale
 pre-v2 pool snapshots unconditionally, and Mark reward snapshots only when
-their sigma-denominator inputs can be verified. It cannot certify version 3: Dijkstra moves SNAP after POOLREAP and
+their sigma-denominator inputs can be verified. The startup preflight refuses
+pre-v2 snapshots before a pending v15 migration can run; v15 alone cannot
+certify version 3. Dijkstra moves SNAP after POOLREAP and
 governance enactment, and nonempty genesis staking changes the initial reward
 inputs. Snapshots outside the verified unchanged case require replay or a trusted
 ledger-state import.

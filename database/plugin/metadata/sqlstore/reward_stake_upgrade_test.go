@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -79,11 +80,18 @@ func TestRewardStakeUpgradeCompatibleSnapshots(t *testing.T) {
 		var stale int
 		require.NoError(
 			t,
-			conn.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM "+table+" WHERE calculation_version <> 3").
+			conn.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM "+table+" WHERE calculation_version IS NULL OR calculation_version <> 3").
 				Scan(&stale),
 		)
 		require.Zero(t, stale)
 	}
+	var amounts string
+	require.NoError(
+		t,
+		conn.QueryRowContext(t.Context(), `SELECT group_concat(total_stake, ',') FROM (SELECT total_stake FROM pool_stake_snapshot ORDER BY snapshot_type)`).
+			Scan(&amounts),
+	)
+	require.Equal(t, "345678901,123456789,234567890", amounts)
 	var total string
 	require.NoError(
 		t,
@@ -111,6 +119,7 @@ func TestRewardStakeUpgradeRefusalPreservesDatabase(t *testing.T) {
 		{name: "unverified genesis", unverifiedGenesis: true},
 		{name: "older provenance", query: `UPDATE reward_snapshot SET calculation_version = 1`},
 		{name: "unknown provenance", query: `UPDATE reward_snapshot SET calculation_version = NULL`},
+		{name: "unknown pool provenance", query: `UPDATE pool_stake_snapshot SET calculation_version = NULL`},
 		{name: "future provenance", query: `UPDATE reward_snapshot SET calculation_version = 4`},
 		{name: "Dijkstra epoch", query: `UPDATE epoch SET era_id = 7`},
 		{name: "missing epoch", query: `DELETE FROM epoch`},
@@ -132,25 +141,14 @@ func TestRewardStakeUpgradeRefusalPreservesDatabase(t *testing.T) {
 				_, err := conn.ExecContext(t.Context(), tc.query)
 				require.NoError(t, err)
 			}
+			before := rewardUpgradeFixtureState(t, conn)
 			s.genesisStakingEmpty = !tc.unverifiedGenesis
 			require.Error(t, s.preflightRewardStakeUpgrade(t.Context(), conn))
-			var upgraded, schemaVersion int
-			require.NoError(
-				t,
-				conn.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM pool_stake_snapshot WHERE calculation_version <> 2`).
-					Scan(&upgraded),
-			)
-			require.Zero(t, upgraded, "refusal must not certify any snapshot")
-			require.NoError(
-				t,
-				conn.QueryRowContext(t.Context(), `SELECT version FROM schema_version`).
-					Scan(&schemaVersion),
-			)
 			require.Equal(
 				t,
-				33,
-				schemaVersion,
-				"refusal must preserve rollback compatibility",
+				before,
+				rewardUpgradeFixtureState(t, conn),
+				"refusal must preserve snapshot values, nullable provenance, protocol inputs and schema version",
 			)
 		})
 	}
@@ -253,4 +251,30 @@ func TestRewardStakeUpgradeRejectsTrailingParameterCBOR(t *testing.T) {
 			Scan(&version),
 	)
 	require.Equal(t, 2, version)
+}
+
+func rewardUpgradeFixtureState(t *testing.T, conn *sql.Conn) []string {
+	t.Helper()
+	var result []string
+	for _, table := range []string{"pool_stake_snapshot", "reward_snapshot", "epoch", "pparams", "leios_transaction_context", "schema_version"} {
+		rows, err := conn.QueryContext(
+			t.Context(),
+			"SELECT * FROM "+table+" ORDER BY rowid",
+		)
+		require.NoError(t, err)
+		columns, err := rows.Columns()
+		require.NoError(t, err)
+		for rows.Next() {
+			values := make([]any, len(columns))
+			pointers := make([]any, len(columns))
+			for i := range values {
+				pointers[i] = &values[i]
+			}
+			require.NoError(t, rows.Scan(pointers...))
+			result = append(result, table+fmt.Sprint(values))
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+	}
+	return result
 }

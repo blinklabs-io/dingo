@@ -621,7 +621,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	// The previous ledger's tip-gap observation must not make readiness look
 	// healthy while Restore or Truncate is rebuilding the core storage.
 	n.health.forgetTipGap()
-	deps := n.storageDependencies(n.config.dataDir)
+	deps, err := n.storageDependencies(n.config.dataDir)
+	if err != nil {
+		return err
+	}
 	deps.PromRegistry = n.config.promRegistry
 	stores, err := internalplugins.ResolveStorage(
 		ctx, n.pluginHost, n.storageSelections(), deps,
@@ -1450,7 +1453,11 @@ func (n *Node) storageSelections() internalplugins.StorageSelections {
 // different directory than n.config.dataDir.
 func (n *Node) storageDependencies(
 	dataDir string,
-) internalplugins.StorageDependencies {
+) (internalplugins.StorageDependencies, error) {
+	genesisStakingEmpty, err := n.genesisStakingEmpty()
+	if err != nil {
+		return internalplugins.StorageDependencies{}, err
+	}
 	return internalplugins.StorageDependencies{
 		DataDir:             dataDir,
 		RunMode:             n.config.runMode,
@@ -1458,8 +1465,8 @@ func (n *Node) storageDependencies(
 		MaxConnections:      n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 		Logger:              n.config.logger,
 		TracingEnabled:      n.config.tracing,
-		GenesisStakingEmpty: n.genesisStakingEmpty(),
-	}
+		GenesisStakingEmpty: genesisStakingEmpty,
+	}, nil
 }
 
 // reinitializeAndResume reconstructs and restarts every component
@@ -2165,7 +2172,10 @@ func (n *Node) Truncate(
 	}
 
 	blocksRemoved, truncateErr := func() (uint64, error) {
-		deps := n.storageDependencies(n.config.dataDir)
+		deps, err := n.storageDependencies(n.config.dataDir)
+		if err != nil {
+			return 0, err
+		}
 		deps.PromRegistry = n.config.promRegistry
 		tmpRuntime, err := internalplugins.OpenDatabase(
 			ctx, n.databaseConfig(), n.storageSelections(), deps,
@@ -2262,9 +2272,18 @@ func (n *Node) Truncate(
 // from here).
 var _ dblifecycle.LiveNode = (*Node)(nil)
 
-func (n *Node) genesisStakingEmpty() bool {
-	if n.config.cardanoNodeConfig == nil {
-		return false
+func (n *Node) genesisStakingEmpty() (bool, error) {
+	path, network, magic := "", n.config.network, n.config.networkMagic
+	if n.config.cfg != nil {
+		path = n.config.cfg.CardanoConfig
+		network = n.config.cfg.Network
+		magic = n.config.cfg.NetworkMagic
 	}
-	return internalplugins.GenesisStakingEmpty(n.config.cardanoNodeConfig.ShelleyGenesis())
+	verified, err := internalplugins.ResolveGenesisStakingEmpty(
+		n.config.cardanoNodeConfig, path, network, magic,
+	)
+	if err != nil {
+		return false, fmt.Errorf("loading cardano node config: %w", err)
+	}
+	return verified, nil
 }

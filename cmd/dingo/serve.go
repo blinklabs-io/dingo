@@ -530,7 +530,7 @@ func openConfiguredDatabase(
 	maxConnections int,
 ) (*internalplugins.DatabaseRuntime, error) {
 	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
-		nil, cfg.CardanoConfig, cfg.Network,
+		nil, cfg.CardanoConfig, cfg.Network, cfg.NetworkMagic,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("loading cardano node config: %w", err)

@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/plugin"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -204,8 +205,14 @@ func GenesisStakingEmpty(genesis *shelley.ShelleyGenesis) bool {
 func ResolveGenesisStakingEmpty(
 	config *cardano.CardanoNodeConfig,
 	path, network string,
+	networkMagic uint32,
 ) (bool, error) {
 	if config == nil {
+		if path == "" && network == "" && networkMagic != 0 {
+			if known, ok := ouroboros.NetworkByNetworkMagic(networkMagic); ok {
+				network = known.Name
+			}
+		}
 		if path == "" && network == "" {
 			return false, nil
 		}

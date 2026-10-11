@@ -224,12 +224,13 @@ func ensureDB(
 	cfg *config.Config,
 	logger *slog.Logger,
 	db *database.Database,
+	nodeCfg *cardano.CardanoNodeConfig,
 ) (*database.Database, func(), error) {
 	if db != nil {
 		return db, func() {}, nil
 	}
 	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
-		nil, cfg.CardanoConfig, cfg.Network,
+		nodeCfg, cfg.CardanoConfig, cfg.Network, cfg.NetworkMagic,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading cardano node config: %w", err)
@@ -728,7 +729,7 @@ func LoadWithDB(
 		"config", nodeCfg,
 	)
 	// Load database (open new one if not provided)
-	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
+	db, closeDB, err := ensureDB(cfg, logger, db, nodeCfg) //nolint:contextcheck
 	if err != nil {
 		return err
 	}
@@ -1051,7 +1052,7 @@ func LoadBlobsWithDB(
 	}
 	// Load database (open new one if not provided)
 	callerProvidedDB := db != nil
-	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
+	db, closeDB, err := ensureDB(cfg, logger, db, nil) //nolint:contextcheck
 	if err != nil {
 		return nil, err
 	}

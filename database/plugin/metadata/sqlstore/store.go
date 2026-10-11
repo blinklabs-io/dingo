@@ -464,13 +464,15 @@ func (s *Store) Start(ctx context.Context) error {
 	}
 	if len(s.migrations) > 0 {
 		runner := migrations.Runner{
+			// A prior binary may have committed the current schema before its
+			// later provenance gate failed, so this must also run at target.
+			BeforeUpgrade: s.preflightRewardStakeUpgrade,
 			DB:            s.writeDB,
 			Dialect:       s.dialect.Name(),
 			Registry:      s.migrations,
 			Locker:        s.migrationLocker,
 			Logger:        s.logger,
 			Rebind:        s.dialect.Rebind,
-			BeforeUpgrade: s.preflightRewardStakeUpgrade,
 		}
 		if err := runner.Run(ctx); err != nil {
 			return fmt.Errorf("sqlstore: metadata upgrade: %w", err)

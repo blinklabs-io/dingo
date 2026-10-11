@@ -86,7 +86,9 @@ func rewardUpgradeDatabaseState(t *testing.T, db *sql.DB) []string {
 		`SELECT type, name, tbl_name, COALESCE(sql, '') FROM sqlite_master ORDER BY type, name`,
 		`SELECT version, name, checksum, phase, cursor, dirty, started_at, updated_at, completed_at FROM schema_migrations ORDER BY version`,
 		`SELECT epoch, snapshot_type, total_stake, calculation_version FROM pool_stake_snapshot ORDER BY id`,
-		`SELECT epoch, snapshot_type, total_active_stake, calculation_version FROM reward_snapshot ORDER BY id`,
+		`SELECT epoch, snapshot_type, total_active_stake, calculation_version, protocol_version FROM reward_snapshot ORDER BY id`,
+		`SELECT * FROM epoch ORDER BY id`,
+		`SELECT * FROM pparams ORDER BY id`,
 	} {
 		rows, err := db.QueryContext(t.Context(), query)
 		require.NoError(t, err)
@@ -119,6 +121,42 @@ func TestRewardStakeUpgradeStartCertifiesBeforeMigrations(t *testing.T) {
 			Scan(&version),
 	)
 	require.Equal(t, 41, version)
+	for _, table := range []string{"pool_stake_snapshot", "reward_snapshot"} {
+		require.NoError(
+			t,
+			db.QueryRowContext(t.Context(), "SELECT calculation_version FROM "+table).
+				Scan(&version),
+		)
+		require.Equal(t, 3, version)
+	}
+	var totalStake string
+	require.NoError(
+		t,
+		db.QueryRowContext(t.Context(), `SELECT total_stake FROM pool_stake_snapshot`).
+			Scan(&totalStake),
+	)
+	require.Equal(t, "123456789", totalStake)
+}
+
+func TestRewardStakeUpgradeStartCertifiesCurrentSchema(t *testing.T) {
+	t.Parallel()
+	store, db := rewardUpgradeStartFixture(t, true)
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runner := migrations.Runner{
+		DB: db, Dialect: "sqlite", Registry: registry,
+		Locker: migrations.NewProcessLocker(),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	require.NoError(t, runner.Run(t.Context()))
+	var version int
+	require.NoError(
+		t,
+		db.QueryRowContext(t.Context(), `SELECT MAX(version) FROM schema_migrations`).
+			Scan(&version),
+	)
+	require.Equal(t, len(registry), version)
+	require.NoError(t, store.Start(t.Context()))
 	for _, table := range []string{"pool_stake_snapshot", "reward_snapshot"} {
 		require.NoError(
 			t,

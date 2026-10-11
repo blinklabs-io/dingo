@@ -152,7 +152,6 @@ func (s *Store) preflightRewardStakeUpgrade(
 		return err
 	}
 	defer rows.Close()
-	defer rows.Close()
 	var foundParams bool
 	for rows.Next() {
 		var era sql.NullInt64
