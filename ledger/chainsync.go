@@ -4959,7 +4959,19 @@ func resolveForkAnchor(
 		}
 		prevHash = parentHash
 	}
-	return 0, false
+	// As in connectsToLocalChain, the parent reached by the last permitted
+	// hop is examined without traversing another peer header.
+	if isOriginHash(prevHash) {
+		return localForkAnchor(0, tipSlot)
+	}
+	if _, _, found := lookups.peerHeader(prevHash); found {
+		return 0, false
+	}
+	point, found := lookups.blockByHash(prevHash)
+	if !found || !lookups.heldBlock(point) {
+		return 0, false
+	}
+	return localForkAnchor(point.Slot, tipSlot)
 }
 
 func isOriginHash(hash []byte) bool {

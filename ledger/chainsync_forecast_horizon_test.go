@@ -374,11 +374,45 @@ func TestResolveForkAnchor(t *testing.T) {
 		{
 			name: "the walk stops at the history limit",
 			peer: map[string]peerRecord{
+				"h4": {400, "h3"},
 				"h3": {300, "h2"},
 				"h2": {200, "b1"},
 			},
 			held:   map[string]bool{"b1": true},
 			blocks: map[string]uint64{"b1": 100},
+			limit:  2,
+			start:  "h4",
+		},
+		{
+			name: "fork resolves at a held block reached by the last permitted hop",
+			peer: map[string]peerRecord{
+				"h3": {300, "h2"},
+				"h2": {200, "b1"},
+			},
+			held:     map[string]bool{"b1": true},
+			blocks:   map[string]uint64{"b1": 100},
+			limit:    2,
+			start:    "h3",
+			wantSlot: 100,
+			wantOk:   true,
+		},
+		{
+			name: "origin reached by the last permitted hop intersects at slot 0",
+			peer: map[string]peerRecord{
+				"h2": {200, "h1"},
+				"h1": {100, string(make([]byte, 32))},
+			},
+			limit:  2,
+			start:  "h2",
+			wantOk: true,
+		},
+		{
+			name: "a stored block off the local chain at the limit is unresolved",
+			peer: map[string]peerRecord{
+				"h3": {300, "h2"},
+				"h2": {200, "x1"},
+			},
+			blocks: map[string]uint64{"x1": 100},
 			limit:  2,
 			start:  "h3",
 		},
