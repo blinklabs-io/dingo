@@ -722,100 +722,6 @@ func TestChainsyncHeaderAdmissionErrorFailsClosedBeforeObservation(
 		"failed-closed admission must precede observation")
 }
 
-func TestChainsyncUnresolvableFutureHeaderRequestsFreshIntersection(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Close)
-	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
-	_, observedCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
-	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
-	connID := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
-	eligibleConn := newTestConnId("127.0.0.1:6000", "10.0.0.2:3001")
-	state := dchainsync.NewStateWithConfig(bus, nil, dchainsync.Config{
-		MaxClients:   1,
-		StallTimeout: time.Minute,
-		IsRoot: func(conn ouroboros.ConnectionId) bool {
-			return conn == connID
-		},
-	})
-	o := newOuroboros(OuroborosConfig{
-		EventBus: bus,
-		ChainsyncIngressEligible: func(conn ouroboros.ConnectionId) bool {
-			return conn == connID
-		},
-	})
-	o.chainsyncState = state
-	require.True(t, o.registerTrackedChainsyncClient(eligibleConn, true, true))
-	require.True(t, o.registerTrackedChainsyncClient(connID, false, true))
-	observabilityOnly, exists := state.ClientObservabilityOnly(connID)
-	require.True(t, exists)
-	require.True(t, observabilityOnly)
-	state.RemoveClientConnId(eligibleConn)
-	observabilityOnly, exists = state.ClientObservabilityOnly(connID)
-	require.True(t, exists)
-	require.False(t, observabilityOnly, "the observer should be promoted into the freed slot")
-	o.chainsyncHeaderAdmission = func(
-		context.Context,
-		ledger.ChainsyncEvent,
-	) (bool, error) {
-		return false, ledger.ErrChainsyncHeaderParentUnresolvable
-	}
-
-	const farAheadSlot = uint64(200_000)
-	header := newTestBlockHeader(farAheadSlot, 1, 0xaa)
-	callbackDone := make(chan error, 1)
-	go func() {
-		callbackDone <- o.chainsyncClientRollForwardAt(
-			ochainsync.CallbackContext{ConnectionId: connID},
-			0,
-			header,
-			ochainsync.Tip{
-				Point:       ocommon.NewPoint(farAheadSlot, header.Hash().Bytes()),
-				BlockNumber: 1,
-			},
-			time.Now(),
-		)
-	}()
-	require.NoError(t, testutil.RequireReceive(
-		t,
-		callbackDone,
-		testutil.AsyncWait,
-		"the promoted observer callback must return promptly",
-	))
-
-	resync := testutil.RequireReceive(
-		t,
-		resyncCh,
-		time.Second,
-		"an unresolvable future header must request a fresh intersection",
-	)
-	data, ok := resync.Data.(event.ChainsyncResyncEvent)
-	require.True(t, ok)
-	require.Equal(t, connID, data.ConnectionId)
-	require.Equal(
-		t,
-		event.ChainsyncResyncReasonUnresolvableFutureHeader,
-		data.Reason,
-	)
-	require.False(t, chainsyncResyncDeniesPeer(data.Reason))
-	require.Equal(t, farAheadSlot, data.Point.Slot)
-	testutil.RequireNoReceive(
-		t,
-		observedCh,
-		50*time.Millisecond,
-		"the unresolved header must not affect chain selection",
-	)
-	testutil.RequireNoReceive(
-		t,
-		ledgerCh,
-		50*time.Millisecond,
-		"the unresolved header must not reach the ledger",
-	)
-}
-
 // nonByronTestHeader wraps testBlockHeader to report a post-Byron era so
 // header-crypto verification takes the Praos path (epoch/nonce lookup)
 // instead of the Byron PBFT path, which requires a concrete Byron header
@@ -4973,7 +4879,8 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 		event.ChainsyncResyncReasonForkQueueOverflowRestartFailed,
 		event.ChainsyncResyncReasonForkExtensionRestartFailed,
 		event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
-		event.ChainsyncResyncReasonUnresolvableFutureHeader,
+		event.ChainsyncResyncReasonDisconnectedHeaderAdmission,
+		event.ChainsyncResyncReasonBehindLocalTip,
 	}
 	for _, reason := range reasons {
 		t.Run(reason, func(t *testing.T) {
@@ -5784,5 +5691,100 @@ func TestSubscribeChainsyncResyncPenalizesOnlyTheResponsibleDeferredHeaderPeer(
 		func() bool { return peerGov.IsDenied(honest.RemoteAddr.String()) },
 		200*time.Millisecond,
 		20*time.Millisecond,
+	)
+}
+
+func TestChainsyncUnresolvableFutureHeaderRequestsFreshIntersection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	_, observedCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	connID := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	eligibleConn := newTestConnId("127.0.0.1:6000", "10.0.0.2:3001")
+	state := dchainsync.NewStateWithConfig(bus, nil, dchainsync.Config{
+		MaxClients:   1,
+		StallTimeout: time.Minute,
+		IsRoot: func(conn ouroboros.ConnectionId) bool {
+			return conn == connID
+		},
+	})
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(conn ouroboros.ConnectionId) bool {
+			return conn == connID
+		},
+	})
+	o.chainsyncState = state
+	require.True(t, o.registerTrackedChainsyncClient(eligibleConn, true, true))
+	require.True(t, o.registerTrackedChainsyncClient(connID, false, true))
+	observabilityOnly, exists := state.ClientObservabilityOnly(connID)
+	require.True(t, exists)
+	require.True(t, observabilityOnly)
+	state.RemoveClientConnId(eligibleConn)
+	observabilityOnly, exists = state.ClientObservabilityOnly(connID)
+	require.True(t, exists)
+	require.False(t, observabilityOnly, "the observer should be promoted into the freed slot")
+	o.chainsyncHeaderAdmission = func(
+		context.Context,
+		ledger.ChainsyncEvent,
+	) (bool, error) {
+		return false, ledger.ErrChainsyncHeaderDisconnected
+	}
+
+	const farAheadSlot = uint64(200_000)
+	header := newTestBlockHeader(farAheadSlot, 1, 0xaa)
+	callbackDone := make(chan error, 1)
+	go func() {
+		callbackDone <- o.chainsyncClientRollForwardAt(
+			ochainsync.CallbackContext{ConnectionId: connID},
+			0,
+			header,
+			ochainsync.Tip{
+				Point:       ocommon.NewPoint(farAheadSlot, header.Hash().Bytes()),
+				BlockNumber: 1,
+			},
+			time.Now(),
+		)
+	}()
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		callbackDone,
+		testutil.AsyncWait,
+		"the promoted observer callback must return promptly",
+	))
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"an unresolvable future header must request a fresh intersection",
+	)
+	data, ok := resync.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, connID, data.ConnectionId)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonDisconnectedHeaderAdmission,
+		data.Reason,
+	)
+	require.False(t, chainsyncResyncDeniesPeer(data.Reason))
+	require.Equal(t, ocommon.Point{}, data.Point,
+		"scheduled recovery must re-intersect from the local chain rather than the disconnected header")
+	testutil.RequireNoReceive(
+		t,
+		observedCh,
+		50*time.Millisecond,
+		"the unresolved header must not affect chain selection",
+	)
+	testutil.RequireNoReceive(
+		t,
+		ledgerCh,
+		50*time.Millisecond,
+		"the unresolved header must not reach the ledger",
 	)
 }

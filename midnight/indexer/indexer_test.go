@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -124,6 +125,9 @@ func setupIndexer(t *testing.T, store *testStore) *Indexer {
 	t.Helper()
 	idx, err := New(Config{
 		Metadata:                store,
+		SlotTimer: timestampFunc(func(slot uint64) (time.Time, error) {
+			return time.UnixMilli(int64(slot)), nil
+		}),
 		Logger:                  slog.New(slog.NewTextHandler(os.Stderr, nil)),
 		CNightPolicyID:          testPolicyID,
 		CNightAssetName:         testAssetNameHex,
@@ -1185,6 +1189,9 @@ func setupGovIndexer(t *testing.T, store *testStore) *Indexer {
 	t.Helper()
 	idx, err := New(Config{
 		Metadata: store,
+		SlotTimer: timestampFunc(func(slot uint64) (time.Time, error) {
+			return time.UnixMilli(int64(slot)), nil
+		}),
 		Logger: slog.New(
 			slog.NewTextHandler(os.Stderr, nil),
 		),
