@@ -24,7 +24,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	leiosledger "github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -632,8 +631,8 @@ func TestLeiosInvalidCertificateRejectsRankingBlock(t *testing.T) {
 	f := newLeiosCertApplyFixture(t)
 	parent := f.announce()
 	f.certErr = fmt.Errorf(
-		"%w: certificate signature does not verify",
-		leiosledger.ErrInvalidDijkstraCertificate,
+		"%w: aggregate signature does not verify",
+		ErrLeiosInvalidCertificate,
 	)
 
 	certifier, offsets, envParent := f.certifyingChild(parent)
@@ -642,31 +641,65 @@ func TestLeiosInvalidCertificateRejectsRankingBlock(t *testing.T) {
 		[]gledger.Block{certifier},
 	)
 	require.ErrorIs(t, err, f.certErr)
+	var rejected *headerValidationError
+	require.ErrorAs(
+		t,
+		err,
+		&rejected,
+		"an invalid certificate must reject the block",
+	)
 	err = f.process(certifier, offsets, envParent)
 	require.ErrorIs(t, err, f.certErr)
+	require.ErrorAs(
+		t,
+		err,
+		&rejected,
+		"an invalid certificate must reject the block",
+	)
 	require.NotErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
 	f.requireEndorserEffects(false)
 }
 
-func TestLeiosCertificateLocalFailureDoesNotRejectRankingBlock(t *testing.T) {
+// A certificate this node could not check, because the validator failed
+// locally rather than returning a verdict, says nothing about the block. It
+// must stay a retryable failure, not a rejection that rewinds past a block that
+// may be valid, and the block applies once the validator recovers.
+func TestLeiosCertificateLocalFailureIsRetried(t *testing.T) {
 	t.Parallel()
 	f := newLeiosCertApplyFixture(t)
 	parent := f.announce()
-	f.certErr = errors.New("committee snapshot unavailable")
+	f.certErr = errors.New("leios vote manager is unavailable")
 
 	certifier, offsets, envParent := f.certifyingChild(parent)
+	var rejected *headerValidationError
 	err := f.ls.ensureReferencedEndorserBlocks(
 		t.Context(),
 		[]gledger.Block{certifier},
 	)
 	require.ErrorIs(t, err, f.certErr)
-	var validationErr *headerValidationError
-	require.False(t, errors.As(err, &validationErr))
-
+	require.False(
+		t,
+		errors.As(err, &rejected),
+		"a local validator failure must not reject the block: %v",
+		err,
+	)
 	err = f.process(certifier, offsets, envParent)
 	require.ErrorIs(t, err, f.certErr)
-	require.False(t, errors.As(err, &validationErr))
+	require.False(
+		t,
+		errors.As(err, &rejected),
+		"a local validator failure must not reject the block: %v",
+		err,
+	)
 	f.requireEndorserEffects(false)
+
+	f.certErr = nil
+	require.NoError(t, f.ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{certifier},
+	))
+	require.NoError(t, f.process(certifier, offsets, envParent))
+	f.requireEndorserEffects(true)
 }
 
 // A certifying ranking block whose closure has not arrived is held back as
@@ -696,4 +729,40 @@ func TestLeiosCertifiedRankingBlockWaitsForMissingClosure(t *testing.T) {
 	))
 	require.NoError(t, f.process(certifier, offsets, envParent))
 	f.requireEndorserEffects(true)
+}
+
+// A parent whose stored bytes do not decode as a block says nothing about
+// what it announced. Reading it as "announced nothing" would reject the
+// certifying block as LeiosCertificateWithoutAnnouncement, so it must stay a
+// retryable failure to resolve the parent.
+func TestLeiosUndecodableParentIsNotAMissingAnnouncement(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	parent, _ := f.block(
+		1,
+		leiosCertApplyAnnouncingSlot,
+		f.originHash,
+		false,
+		true,
+	)
+	require.NoError(t, f.db.BlockCreate(models.Block{
+		Slot:     parent.SlotNumber(),
+		Hash:     parent.Hash().Bytes(),
+		PrevHash: parent.PrevHash().Bytes(),
+		Number:   parent.BlockNumber(),
+		Type:     gledger.BlockTypeDijkstra,
+		Cbor:     []byte{0xff},
+	}, nil))
+
+	certifier, _, _ := f.certifyingChild(parent)
+	err := f.ls.validateDijkstraLeiosCertificate(t.Context(), certifier, nil)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+	var rejected *headerValidationError
+	require.False(
+		t,
+		errors.As(err, &rejected),
+		"an undecodable parent must not reject the certifying block: %v",
+		err,
+	)
+	require.Zero(t, f.certCalls)
 }

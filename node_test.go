@@ -70,6 +70,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
@@ -3497,7 +3498,65 @@ func TestLedgerStateConfigUsesMusashiCertificateTrust(t *testing.T) {
 		}}}
 		validate := n.ledgerStateConfig().ValidateLeiosCertificate
 		require.NotNil(t, validate)
-		require.ErrorContains(t, validate(0, nil, nil, nil), "vote manager is unavailable")
+		err := validate(0, nil, nil, nil)
+		require.ErrorContains(t, err, "vote manager is unavailable")
+		require.NotErrorIs(t, err, ledger.ErrLeiosInvalidCertificate,
+			"an unavailable verifier is not a verdict on the certificate")
+	})
+}
+
+type certificateLeiosStakeProvider struct{}
+
+func (certificateLeiosStakeProvider) GetStakeDistribution(
+	uint64,
+) (map[string]uint64, uint64, error) {
+	return map[string]uint64{strings.Repeat("01", 28): 100}, 100, nil
+}
+
+// The ledger rejects a certifying block only for
+// ledger.ErrLeiosInvalidCertificate, so the node's validator must carry a
+// vote-manager verdict across as that error and leave a committee that could
+// not be resolved as a plain failure.
+func TestLedgerStateConfigMapsCertificateVerdicts(t *testing.T) {
+	t.Parallel()
+	newNode := func(t *testing.T, stake leios.StakeDistributionProvider) *Node {
+		t.Helper()
+		voteManager, err := leios.NewVoteManager(leios.VoteManagerConfig{
+			Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+			EventBus:       event.NewEventBus(nil, nil),
+			StakeProvider:  stake,
+			EpochProvider:  startupLeiosEpochProvider{},
+			ParamsProvider: startupLeiosParamsProvider{},
+			KeyProvider:    startupLeiosKeyProvider{},
+		})
+		require.NoError(t, err)
+		return &Node{
+			config: Config{cfg: &internalconfig.Config{
+				Network:      ouroboros.NetworkCardanoPreview.Name,
+				NetworkMagic: ouroboros.NetworkCardanoPreview.NetworkMagic,
+			}},
+			leiosVoteManager: voteManager,
+		}
+	}
+	signers := []byte{0x80}
+	aggregate := make([]byte, lcommon.LeiosBlsSignatureSize)
+	aggregate[0] = 0xc0 // compressed point at infinity: well-formed encoding
+
+	t.Run("keyless signer is a verdict", func(t *testing.T) {
+		t.Parallel()
+		validate := newNode(t, certificateLeiosStakeProvider{}).
+			ledgerStateConfig().ValidateLeiosCertificate
+		err := validate(5, make([]byte, 32), signers, aggregate)
+		require.ErrorContains(t, err, "no usable key")
+		require.ErrorIs(t, err, ledger.ErrLeiosInvalidCertificate)
+	})
+	t.Run("unresolvable committee is not a verdict", func(t *testing.T) {
+		t.Parallel()
+		validate := newNode(t, startupLeiosStakeProvider{}).
+			ledgerStateConfig().ValidateLeiosCertificate
+		err := validate(5, make([]byte, 32), signers, aggregate)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ledger.ErrLeiosInvalidCertificate)
 	})
 }
 

@@ -26,7 +26,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
-	leiosledger "github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -75,10 +74,13 @@ var errLeiosCertificateWithoutAnnouncement = errors.New(
 	"certifying ranking block's parent announced no endorser block",
 )
 
-// errLeiosInvalidCertificate is the verdict on a certifying ranking block whose
+// ErrLeiosInvalidCertificate is the verdict on a certifying ranking block whose
 // certificate does not verify against its parent's announcement, as in the
-// reference Forker.applyBlock (LeiosInvalidCertificate).
-var errLeiosInvalidCertificate = errors.New("invalid Leios certificate")
+// reference Forker.applyBlock (LeiosInvalidCertificate). A
+// LedgerStateConfig.ValidateLeiosCertificate implementation wraps it only for
+// a verdict on the certificate itself; the ledger rejects the block for that
+// error alone and retries any other.
+var ErrLeiosInvalidCertificate = errors.New("invalid Leios certificate")
 
 // rejectLeiosCertifyingBlock marks a verdict on a certifying ranking block as a
 // rejected block. The block is already on the primary chain, so a plain error
@@ -1160,13 +1162,14 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 		certificate.Signers,
 		certificate.AggregatedSignature,
 	); err != nil {
-		if !errors.Is(err, leiosledger.ErrInvalidDijkstraCertificate) {
-			return fmt.Errorf("validate Leios certificate: %w", err)
+		if errors.Is(err, ErrLeiosInvalidCertificate) {
+			return ls.rejectLeiosCertifyingBlock(block, err)
 		}
-		return ls.rejectLeiosCertifyingBlock(
-			block,
-			fmt.Errorf("%w: %w", errLeiosInvalidCertificate, err),
-		)
+		// This node could not check the certificate (an unavailable vote
+		// manager, a committee or database read failure), which says nothing
+		// about the block. Rejecting it would rewind past a block that may be
+		// valid, so it is retried like any other local failure.
+		return fmt.Errorf("verify Leios certificate: %w", err)
 	}
 	return nil
 }
@@ -1323,8 +1326,34 @@ func (ls *LedgerState) leiosCertifiedAnnouncementFromParent(
 			perr,
 		)
 	}
+	// A parent whose stored bytes are not a block says nothing about what it
+	// announced, so it must not read as "announced nothing", which rejects the
+	// certifying block.
+	if err := leiosStoredBlockDecodes(parent.Cbor); err != nil {
+		return lcommon.Blake2b256{}, 0, false, fmt.Errorf(
+			"resolve certifying block parent: decode stored block: %w",
+			err,
+		)
+	}
 	hash, announced = leiosAnnouncementFromBlockCbor(parent.Cbor)
 	return hash, parent.Slot, announced, nil
+}
+
+// leiosStoredBlockDecodes reports whether blockCbor is a non-empty CBOR array,
+// the outer shape of every stored block.
+func leiosStoredBlockDecodes(blockCbor []byte) error {
+	top, err := safedecode.Guard(func() ([]cbor.RawMessage, error) {
+		var top []cbor.RawMessage
+		_, err := cbor.Decode(blockCbor, &top)
+		return top, err
+	})
+	if err != nil {
+		return err
+	}
+	if len(top) == 0 {
+		return errors.New("empty block array")
+	}
+	return nil
 }
 
 // leiosBackfillConcurrency bounds how many historical endorser blocks are

@@ -166,11 +166,6 @@ var voteNotEmittedReasons = []string{
 // manager stops before that computation finishes.
 var ErrVoteManagerStopped = errors.New("leios vote manager stopped")
 
-// ErrInvalidDijkstraCertificate marks a deterministic certificate verdict.
-// Committee, parameter, snapshot, and storage failures are deliberately not
-// wrapped with this error because retrying may resolve them.
-var ErrInvalidDijkstraCertificate = errors.New("invalid Dijkstra certificate")
-
 // ErrPeerMisbehavior is returned after a connection repeatedly submits
 // structurally invalid, equivocal, or over-budget votes within one window.
 var ErrPeerMisbehavior = errors.New("repeated invalid leios votes")
@@ -1260,6 +1255,8 @@ func (m *VoteManager) CommitteeForEpoch(epoch uint64) (*Committee, error) {
 // ValidateDijkstraCertificate verifies a Dijkstra certificate against the
 // historical committee and keys resolved for epoch. Unlike vote admission,
 // block admission is strict: every selected signer must have a verified key.
+// A verdict on the certificate wraps ErrInvalidCertificate; an error that does
+// not means the committee, its keys, or its threshold could not be resolved.
 func (m *VoteManager) ValidateDijkstraCertificate(
 	epoch uint64,
 	signers []byte,
@@ -1274,10 +1271,10 @@ func (m *VoteManager) ValidateDijkstraCertificate(
 		"Dijkstra Leios certificate aggregated signature",
 		aggregatedSignature,
 	); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidDijkstraCertificate, err)
+		return fmt.Errorf("%w: %w", ErrInvalidCertificate, err)
 	}
 	if err := lcommon.ValidateLeiosSignerBitfield(signers, entry.committee.Size()); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidDijkstraCertificate, err)
+		return fmt.Errorf("%w: %w", ErrInvalidCertificate, err)
 	}
 	var signerStake uint64
 	signerPubs := make([]*bls12381.G2Affine, 0, len(entry.committee.Members))
@@ -1288,16 +1285,16 @@ func (m *VoteManager) ValidateDijkstraCertificate(
 		pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash)
 		if !ok {
 			return fmt.Errorf(
-				"%w: leios certificate signer %d has no usable key",
-				ErrInvalidDijkstraCertificate,
+				"%w: signer %d has no usable key",
+				ErrInvalidCertificate,
 				member.VoterId,
 			)
 		}
+		// Member stakes sum to at most the snapshot's total stake, itself a
+		// uint64, so overflow means inconsistent local snapshot data rather
+		// than anything about the certificate.
 		if ^uint64(0)-signerStake < member.Stake {
-			return fmt.Errorf(
-				"%w: leios certificate signer stake overflows uint64",
-				ErrInvalidDijkstraCertificate,
-			)
+			return errors.New("leios certificate signer stake overflows uint64")
 		}
 		signerStake += member.Stake
 		signerPubs = append(signerPubs, pub)
@@ -1308,15 +1305,15 @@ func (m *VoteManager) ValidateDijkstraCertificate(
 		entry.tau,
 	)
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidDijkstraCertificate, err)
+		return err
 	}
 	if !quorumMet {
-		return fmt.Errorf("%w: %w", ErrInvalidDijkstraCertificate, ErrQuorumNotMet)
+		return fmt.Errorf("%w: %w", ErrInvalidCertificate, ErrQuorumNotMet)
 	}
 	if err := VerifyAggregateSignature(signerPubs, message, aggregatedSignature); err != nil {
 		return fmt.Errorf(
-			"%w: verify Leios certificate aggregate signature: %w",
-			ErrInvalidDijkstraCertificate,
+			"%w: verify aggregate signature: %w",
+			ErrInvalidCertificate,
 			err,
 		)
 	}

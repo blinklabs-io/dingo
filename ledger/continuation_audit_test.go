@@ -279,12 +279,13 @@ func (f *leiosAuditFixture) spenderBlockAt(
 // TestContinuationAuditAcceptsEndorserBlockProducer is the regression for the
 // false positive this package reported on every Leios cert-driven fork window.
 //
-// A certifying ranking block's body is empty: its transactions live in the
-// endorser block it certifies, which LedgerState.applyEndorserBlock applies at
-// ledger-apply time, long after blockfetch time when the audit runs. Building
-// the in-window producer set from e.Block.Transactions() alone therefore never
-// records an endorser-block transaction, and the ledger fallbacks miss too
-// because the endorser block has not been applied yet. Every later ranking
+// The transactions a certifying ranking block certifies are not in its body:
+// they live in the endorser block it certifies, which
+// LedgerState.applyEndorserBlock applies at ledger-apply time, long after
+// blockfetch time when the audit runs. Building the in-window producer set
+// from e.Block.Transactions() alone therefore never records an endorser-block
+// transaction, and the ledger fallbacks miss too because the endorser block
+// has not been applied yet. Every later ranking
 // block spending an endorser-resident output was reported as having no
 // producer on the local applied chain, on a node whose UTxO set was correct.
 func TestContinuationAuditAcceptsEndorserBlockProducer(t *testing.T) {

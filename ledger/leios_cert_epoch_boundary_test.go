@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,7 +30,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	leiosledger "github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -144,8 +144,8 @@ func TestLedgerProcessBlocksRejectsInvalidLeiosCertificatePastEpochBoundary(
 	t.Parallel()
 
 	errInvalidCertificate := fmt.Errorf(
-		"%w: invalid leios certificate",
-		leiosledger.ErrInvalidDijkstraCertificate,
+		"%w: quorum not met",
+		ErrLeiosInvalidCertificate,
 	)
 	t.Run("same era", func(t *testing.T) {
 		t.Parallel()
@@ -157,14 +157,36 @@ func TestLedgerProcessBlocksRejectsInvalidLeiosCertificatePastEpochBoundary(
 	})
 }
 
+// TestLedgerProcessBlocksRetriesLocalLeiosCertificateFailurePastEpochBoundary
+// shows that a certificate the node could not check, because the validator
+// failed locally, leaves the certifying block on the primary chain to be
+// retried rather than rewinding past it.
+func TestLedgerProcessBlocksRetriesLocalLeiosCertificateFailurePastEpochBoundary(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	errLocal := errors.New("leios vote manager is unavailable")
+	t.Run("same era", func(t *testing.T) {
+		t.Parallel()
+		runLeiosCertEpochBoundaryCase(t, false, errLocal, false)
+	})
+	t.Run("hard fork", func(t *testing.T) {
+		t.Parallel()
+		runLeiosCertEpochBoundaryCase(t, true, errLocal, false)
+	})
+}
+
 func TestLedgerProcessBlocksAppliesCertifiedClosureBeforeEpochSnapshot(t *testing.T) {
 	t.Parallel()
 	runLeiosCertEpochBoundaryCase(t, false, nil, true)
 }
 
 // runLeiosCertEpochBoundaryCase drives the batch through the ledger. A nil
-// certificateErr makes the certificate validator accept; otherwise it rejects
-// and the certifying block must be rejected before it applies.
+// certificateErr makes the certificate validator accept. One wrapping
+// ErrLeiosInvalidCertificate is a verdict, and the certifying block must be
+// rejected before it applies; any other is a local failure, and the block must
+// stay on the primary chain unapplied.
 func runLeiosCertEpochBoundaryCase(
 	t *testing.T,
 	hardFork bool,
@@ -334,6 +356,20 @@ func runLeiosCertEpochBoundaryCase(
 		context.Background(),
 		results,
 	)
+	if certificateErr != nil &&
+		!errors.Is(certificateErr, ErrLeiosInvalidCertificate) {
+		require.Equal(
+			t,
+			certifier.Hash().Bytes(),
+			cm.PrimaryChain().Tip().Point.Hash,
+			"a block whose certificate was not checked must stay on the "+
+				"primary chain",
+		)
+		require.ErrorIs(t, processErr, certificateErr)
+		require.NotErrorIs(t, processErr, errRestartLedgerPipeline)
+		require.Less(t, ls.currentTip.Point.Slot, certifier.SlotNumber())
+		return
+	}
 	if certificateErr != nil {
 		// The rejected block is dropped from the primary chain and the
 		// pipeline restarts, as for any other block that fails validation.
