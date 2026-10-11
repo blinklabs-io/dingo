@@ -240,7 +240,12 @@ func stopWithDeadline(
 
 func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	var err error
-	ctx, cancel := context.WithTimeout(ctx, n.configuredShutdownTimeout())
+	// A caller cancellation stops the requested mutation, but teardown still
+	// gets its own bounded chance to remove every storage user safely.
+	ctx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		n.configuredShutdownTimeout(),
+	)
 	defer cancel()
 	drainSubscription := func(topic event.EventType, id *event.EventSubscriberId) {
 		if *id == 0 {
@@ -249,6 +254,7 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		if stopErr := n.eventBus.UnsubscribeAndWaitContext(ctx, topic, *id); stopErr != nil {
 			err = errors.Join(err, errStorageDrainUnconfirmed,
 				fmt.Errorf("%s subscription shutdown: %w", topic, stopErr))
+			return
 		}
 		*id = 0
 	}
@@ -483,7 +489,7 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			)
 		}
 	}
-	if ctx.Err() != nil && err != nil {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		err = errors.Join(err, errStorageDrainUnconfirmed)
 	}
 

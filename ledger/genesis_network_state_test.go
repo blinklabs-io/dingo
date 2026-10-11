@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -75,23 +76,31 @@ func TestCreateGenesisBlockPropagatesReadFailure(t *testing.T) {
 
 func TestCreateGenesisBlockRejectsDifferentSyntheticGenesis(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
-		"musashi/config.json", "musashi", cardano.EmbeddedConfigFS,
-	)
-	require.NoError(t, err)
-	ls := &LedgerState{db: db, config: LedgerStateConfig{
-		Database: db, CardanoNodeConfig: nodeCfg,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}}
-	ls.currentTip.Point.Slot = 42
-	require.NoError(t, db.SetGenesisCbor(0, make([]byte, 32), []byte{1}, nil))
-	require.ErrorContains(t, ls.createGenesisBlock(t.Context()), "stored synthetic genesis does not match")
-	state, err := db.Metadata().GetNetworkState(nil)
-	require.NoError(t, err)
-	require.Nil(t, state)
+	for _, slot := range []uint64{0, 42} {
+		t.Run(fmt.Sprintf("slot=%d", slot), func(t *testing.T) {
+			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+			nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+				"musashi/config.json", "musashi", cardano.EmbeddedConfigFS,
+			)
+			require.NoError(t, err)
+			ls := &LedgerState{db: db, config: LedgerStateConfig{
+				Database: db, CardanoNodeConfig: nodeCfg,
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			}}
+			ls.currentTip.Point.Slot = slot
+			require.NoError(t, db.SetGenesisCbor(0, make([]byte, 32), []byte{1}, nil))
+			err = ls.createGenesisBlock(t.Context())
+			if err == nil {
+				t.Fatal("startup accepted a different stored synthetic genesis")
+			}
+			require.ErrorContains(t, err, "stored synthetic genesis does not match")
+			state, err := db.Metadata().GetNetworkState(nil)
+			require.NoError(t, err)
+			require.Nil(t, state)
+		})
+	}
 }
 
 func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {

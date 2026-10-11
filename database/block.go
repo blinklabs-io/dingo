@@ -248,11 +248,11 @@ func (d *Database) HasAnyGenesisCbor(slot uint64) (bool, error) {
 		if strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
 			continue
 		}
-		block, err := blockByKey(txn, key)
+		metadata, err := blockMetadataByKey(txn, key)
 		if err != nil {
 			return false, fmt.Errorf("reading genesis candidate: %w", err)
 		}
-		if block.ID == 0 {
+		if metadata.ID == 0 {
 			return true, nil
 		}
 	}

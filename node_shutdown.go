@@ -289,7 +289,8 @@ func (n *Node) shutdown() error {
 	if n.midnightIndexer != nil {
 		if stopErr := n.midnightIndexer.Stop(ctx); stopErr != nil {
 			storageDrainConfirmed = false
-			err = errors.Join(err, fmt.Errorf("midnight indexer shutdown: %w", stopErr))
+			err = errors.Join(err, errStorageDrainUnconfirmed,
+				fmt.Errorf("midnight indexer shutdown: %w", stopErr))
 		}
 	}
 

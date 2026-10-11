@@ -15,6 +15,7 @@
 package topology_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -39,5 +40,23 @@ func TestTopologyHotValency(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, uint(1), cfg.LocalRoots[0].Valency)
 		require.GreaterOrEqual(t, cfg.LocalRoots[0].WarmValency, uint(1))
+	}
+}
+
+func TestTopologyRejectsHotValencyAboveAccessPointCount(t *testing.T) {
+	t.Parallel()
+	for _, hot := range []int{2, 3} {
+		_, err := topology.NewTopologyConfigFromReader(strings.NewReader(fmt.Sprintf(`{
+			"localRoots": [{"accessPoints": [
+				{"address":"127.0.0.1","port":3001},
+				{"address":"127.0.0.2","port":3001}
+			], "hotValency": %d}]}`, hot)))
+		if hot == 2 {
+			require.NoError(t, err)
+		} else {
+			if err == nil {
+				t.Fatal("topology accepted hotValency above the access-point count")
+			}
+		}
 	}
 }

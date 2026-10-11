@@ -16,8 +16,10 @@ package dingo
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +30,24 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/stretchr/testify/require"
 )
+
+func TestQuiesceDoesNotPromoteDrainedStopFailureOnCancellation(t *testing.T) {
+	// Not t.Parallel: componentStopsForQuiesce is a process-global test seam.
+	previous := componentStopsForQuiesce
+	defer func() { componentStopsForQuiesce = previous }()
+	failure := errors.New("drained component cleanup failed")
+	componentStopsForQuiesce = func(*Node) []namedStop {
+		return []namedStop{{name: "drained component", stop: func() error { return failure }}}
+	}
+	n := &Node{config: NewConfig(WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := n.quiesceForLiveLifecycleOp(ctx)
+	require.ErrorIs(t, err, failure)
+	if errors.Is(err, errStorageDrainUnconfirmed) {
+		t.Fatalf("caller cancellation misclassified a drained cleanup failure: %v", err)
+	}
+}
 
 func TestQuiesceBoundsSubscriptionDrains(t *testing.T) {
 	t.Parallel()
@@ -46,12 +66,17 @@ func TestQuiesceBoundsSubscriptionDrains(t *testing.T) {
 			eb := event.NewEventBus(nil, nil)
 			defer eb.Close()
 			entered, release := make(chan struct{}), make(chan struct{})
-			defer close(release)
-			n := &Node{config: NewConfig(WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))), eventBus: eb}
-			tc.assign(n, eb.SubscribeFunc(tc.topic, func(event.Event) {
+			releaseHandler := sync.OnceFunc(func() { close(release) })
+			defer releaseHandler()
+			n := &Node{config: NewConfig(
+				WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+				WithShutdownTimeout(20*time.Millisecond),
+			), eventBus: eb}
+			id := eb.SubscribeFunc(tc.topic, func(event.Event) {
 				close(entered)
 				<-release
-			}))
+			})
+			tc.assign(n, id)
 			eb.Publish(tc.topic, event.NewEvent(tc.topic, nil))
 			testutil.RequireReceive(t, entered, time.Second, "handler did not start")
 			ctx, cancel := context.WithCancel(t.Context())
@@ -59,8 +84,17 @@ func TestQuiesceBoundsSubscriptionDrains(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- n.quiesceForLiveLifecycleOp(ctx) }()
 			err := testutil.RequireReceive(t, done, time.Second, "quiesce blocked")
-			require.ErrorIs(t, err, context.Canceled)
+			require.ErrorIs(t, err, context.DeadlineExceeded)
 			require.ErrorIs(t, err, errStorageDrainUnconfirmed)
+			err = n.quiesceForLiveLifecycleOp(ctx)
+			if !errors.Is(err, errStorageDrainUnconfirmed) {
+				t.Fatalf("later quiesce forgot the still-running handler: %v", err)
+			}
+			releaseHandler()
+			drainCtx, drainCancel := context.WithTimeout(t.Context(), time.Second)
+			defer drainCancel()
+			require.NoError(t, eb.UnsubscribeAndWaitContext(drainCtx, tc.topic, id))
+			require.NoError(t, n.quiesceForLiveLifecycleOp(drainCtx))
 		})
 	}
 }

@@ -72,6 +72,14 @@ func TestGenesisPresencePropagatesStorageErrors(t *testing.T) {
 	present, err = db.HasAnyGenesisCbor(0)
 	require.NoError(t, err)
 	require.False(t, present, "a real slot-zero block is not synthetic genesis")
+	txn = db.BlobTxn(true)
+	require.NoError(t, base.TombstoneBlock(txn.Blob(), 0, hash))
+	require.NoError(t, txn.Commit())
+	present, err = db.HasAnyGenesisCbor(0)
+	if err != nil {
+		t.Fatalf("genesis scan failed on a pruned real block with retained metadata: %v", err)
+	}
+	require.False(t, present)
 	require.NoError(t, db.SetGenesisCbor(0, hash, []byte{1}, nil))
 	present, err = db.HasGenesisCbor(0, hash)
 	require.NoError(t, err)
