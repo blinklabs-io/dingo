@@ -13808,6 +13808,12 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 		},
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			SelectBlockfetchRetryPeerFunc: func(
+				[]ouroboros.ConnectionId,
+				ocommon.Point,
+			) (ouroboros.ConnectionId, bool) {
+				return connId2, true
+			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &connId2
 			},
@@ -13901,6 +13907,12 @@ func TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection(
 		selectedBlockfetchConnId: connId1,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			SelectBlockfetchRetryPeerFunc: func(
+				[]ouroboros.ConnectionId,
+				ocommon.Point,
+			) (ouroboros.ConnectionId, bool) {
+				return connId2, true
+			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &connId2
 			},
@@ -13983,9 +13995,28 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 	ls := &LedgerState{
 		chain:                    testChain,
 		activeBlockfetchConnId:   connId1,
-		selectedBlockfetchConnId: connId3,
+		selectedBlockfetchConnId: connId1,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			SelectBlockfetchRetryPeerFunc: func(
+				excluded []ouroboros.ConnectionId,
+				_ ocommon.Point,
+			) (ouroboros.ConnectionId, bool) {
+				switch len(excluded) {
+				case 1:
+					assert.Equal(t, []ouroboros.ConnectionId{connId1}, excluded)
+					return connId2, true
+				case 2:
+					assert.Equal(
+						t,
+						[]ouroboros.ConnectionId{connId1, connId2},
+						excluded,
+					)
+					return connId3, true
+				default:
+					return ouroboros.ConnectionId{}, false
+				}
+			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &connId2
 			},

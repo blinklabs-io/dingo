@@ -113,6 +113,48 @@ func (s *State) SelectBlockfetchPeer(
 	return chosen
 }
 
+// SelectBlockfetchRetryPeer chooses an eligible holder after other peers fail.
+// Unlike ordinary exploration, an unmeasured holder is usable immediately:
+// failed peers stay excluded and retrying one would only repeat the failure.
+func (s *State) SelectBlockfetchRetryPeer(
+	excluded []ouroboros.ConnectionId,
+	point ocommon.Point,
+) (ouroboros.ConnectionId, bool) {
+	if len(excluded) == 0 {
+		return ouroboros.ConnectionId{}, false
+	}
+	holders := s.PeersWithBlock(excluded[0], point)
+	candidates := s.blockfetchCandidates(excluded[0], holders)
+	remaining := candidates[:0]
+	for _, candidate := range candidates {
+		exclude := false
+		for _, connId := range excluded {
+			if candidate.connId == connId {
+				exclude = true
+				break
+			}
+		}
+		if !exclude {
+			remaining = append(remaining, candidate)
+		}
+	}
+	if len(remaining) == 0 {
+		return ouroboros.ConnectionId{}, false
+	}
+	best := remaining[0]
+	for _, candidate := range remaining[1:] {
+		switch {
+		case candidate.sampled && !best.sampled:
+			best = candidate
+		case candidate.sampled == best.sampled &&
+			(candidate.estimate < best.estimate ||
+				(candidate.estimate == best.estimate && candidate.tie < best.tie)):
+			best = candidate
+		}
+	}
+	return best.connId, true
+}
+
 // blockfetchCandidates prices origin and the eligible holders.
 func (s *State) blockfetchCandidates(
 	origin ouroboros.ConnectionId,

@@ -679,28 +679,29 @@ type LedgerStateConfig struct {
 	// reuses its identity for wire compatibility -- see isMainnet in
 	// header_protocol_version.go. Empty when dingo was configured with a
 	// raw NetworkMagic instead of a named network.
-	Network                     string
-	BlockfetchRequestRangeFunc  BlockfetchRequestRangeFunc
-	RejectBlockDecodeCacheFunc  func(uint, []byte)
-	PeersWithBlockFunc          PeersWithBlockFunc
-	SelectBlockfetchPeerFunc    SelectBlockfetchPeerFunc
-	RecordBlockfetchLatencyFunc RecordBlockfetchLatencyFunc
-	BlockfetchLatencyFunc       BlockfetchLatencyFunc
-	BlockfetchLatencyMedianFunc BlockfetchLatencyMedianFunc
-	GetActiveConnectionFunc     GetActiveConnectionFunc
-	GetPeerObservedTipFunc      GetPeerObservedTipFunc
-	GetPeerSyncTargetFunc       GetPeerSyncTargetFunc
-	ConnectionLiveFunc          ConnectionLiveFunc
-	ConnectionSwitchFunc        ConnectionSwitchFunc
-	ClearSeenHeadersFromFunc    ClearSeenHeadersFromFunc
-	PeerHeaderLookupFunc        PeerHeaderLookupFunc
-	GenesisSelectionStateFunc   GenesisSelectionStateFunc
-	FatalErrorFunc              FatalErrorFunc
-	ReportTipGapFunc            ReportTipGapFunc
-	ReportSlotClockAliveFunc    ReportSlotClockAliveFunc
-	ForgedBlockChecker          ForgedBlockChecker
-	SlotBattleRecorder          SlotBattleRecorder
-	EndorserBlockProvider       EndorserBlockProviderFunc
+	Network                       string
+	BlockfetchRequestRangeFunc    BlockfetchRequestRangeFunc
+	RejectBlockDecodeCacheFunc    func(uint, []byte)
+	PeersWithBlockFunc            PeersWithBlockFunc
+	SelectBlockfetchPeerFunc      SelectBlockfetchPeerFunc
+	SelectBlockfetchRetryPeerFunc SelectBlockfetchRetryPeerFunc
+	RecordBlockfetchLatencyFunc   RecordBlockfetchLatencyFunc
+	BlockfetchLatencyFunc         BlockfetchLatencyFunc
+	BlockfetchLatencyMedianFunc   BlockfetchLatencyMedianFunc
+	GetActiveConnectionFunc       GetActiveConnectionFunc
+	GetPeerObservedTipFunc        GetPeerObservedTipFunc
+	GetPeerSyncTargetFunc         GetPeerSyncTargetFunc
+	ConnectionLiveFunc            ConnectionLiveFunc
+	ConnectionSwitchFunc          ConnectionSwitchFunc
+	ClearSeenHeadersFromFunc      ClearSeenHeadersFromFunc
+	PeerHeaderLookupFunc          PeerHeaderLookupFunc
+	GenesisSelectionStateFunc     GenesisSelectionStateFunc
+	FatalErrorFunc                FatalErrorFunc
+	ReportTipGapFunc              ReportTipGapFunc
+	ReportSlotClockAliveFunc      ReportSlotClockAliveFunc
+	ForgedBlockChecker            ForgedBlockChecker
+	SlotBattleRecorder            SlotBattleRecorder
+	EndorserBlockProvider         EndorserBlockProviderFunc
 	// RecordBlockfetchThroughputFunc receives each completed batch's
 	// delivery rate: the bytes that followed the first block and the time
 	// they took to arrive.
@@ -964,6 +965,13 @@ type SelectBlockfetchPeerFunc func(
 	rangeEnd ocommon.Point,
 ) ouroboros.ConnectionId
 
+// SelectBlockfetchRetryPeerFunc returns another eligible connection that
+// announced the range end. Excluded connections are never valid results.
+type SelectBlockfetchRetryPeerFunc func(
+	excluded []ouroboros.ConnectionId,
+	rangeEnd ocommon.Point,
+) (ouroboros.ConnectionId, bool)
+
 // RecordBlockfetchThroughputFunc records how many bytes a batch delivered
 // after its first block and how long that took.
 type RecordBlockfetchThroughputFunc func(
@@ -972,8 +980,8 @@ type RecordBlockfetchThroughputFunc func(
 	elapsed time.Duration,
 )
 
-// RecordBlockfetchLatencyFunc records a first-block latency sample
-// for the given connection after a successful RequestRange response.
+// RecordBlockfetchLatencyFunc records a delivery estimate for a connection:
+// first-block latency after success or the watchdog duration after timeout.
 type RecordBlockfetchLatencyFunc func(ouroboros.ConnectionId, time.Duration)
 
 // BlockfetchLatencyFunc returns the EWMA first-block latency for the
@@ -1108,6 +1116,7 @@ type LedgerState struct {
 	config                             LedgerStateConfig
 	chainsyncBlockfetchTimeoutTimer    *time.Timer // timeout timer for blockfetch operations
 	chainsyncBlockfetchTimerGeneration uint64      // generation counter to detect stale timer callbacks
+	activeBlockfetchTimeout            time.Duration
 	currentPParams                     lcommon.ProtocolParameters
 	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
 	// plutusEvalCtxCache holds one *cek.EvalContext per distinct (language
@@ -1224,8 +1233,8 @@ type LedgerState struct {
 	shadowBlockfetchConnId       ouroboros.ConnectionId // shadow peer dispatched for parallel blockfetch
 	// blockfetchPrimaryRequestGeneration identifies the currently running
 	// primary request. A timeout may fire while the request is blocked in the
-	// protocol client; keeping its generation lets the timeout wait instead of
-	// issuing a duplicate request on the same batch.
+	// protocol client; keeping its generation lets the timeout penalize and
+	// recycle that request only once without issuing a duplicate batch.
 	blockfetchRequestGeneration        uint64
 	blockfetchPrimaryRequestGeneration uint64
 	// blockfetchRollbackGeneration counts rollbacks that abandon the chain

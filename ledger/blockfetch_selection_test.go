@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -143,6 +145,345 @@ func TestSelectInitialBlockfetchConnWithoutPolicyKeepsHeaderPeer(
 	header := testChainsyncConnId(6000, 3001)
 
 	assert.Equal(t, header, ls.selectInitialBlockfetchConn(header))
+}
+
+func TestBlockfetchTimeoutUsesShortNearTipBudget(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, 5*time.Second, blockfetchTimeout(1))
+	assert.Equal(
+		t,
+		5*time.Second,
+		blockfetchTimeout(shadowBlockfetchMaxHeaders),
+	)
+	assert.Equal(
+		t,
+		30*time.Second,
+		blockfetchTimeout(shadowBlockfetchMaxHeaders+1),
+	)
+}
+
+func TestBlockfetchTimeoutPenalizesPeerBeforeModelRankedRetry(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	testChain, _ := buildDeepCatchupChain(t, 1)
+	stalled := testChainsyncConnId(6000, 3001)
+	modelChoice := testChainsyncConnId(6000, 3002)
+	active := testChainsyncConnId(6000, 3003)
+	penalized := false
+	var penalty time.Duration
+	var requested ouroboros.ConnectionId
+	ls := &LedgerState{
+		chain:                  testChain,
+		activeBlockfetchConnId: stalled,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			RecordBlockfetchLatencyFunc: func(
+				connId ouroboros.ConnectionId,
+				latency time.Duration,
+			) {
+				assert.Equal(t, stalled, connId)
+				penalized = true
+				penalty = latency
+			},
+			SelectBlockfetchRetryPeerFunc: func(
+				excluded []ouroboros.ConnectionId,
+				_ ocommon.Point,
+			) (ouroboros.ConnectionId, bool) {
+				assert.Equal(t, []ouroboros.ConnectionId{stalled}, excluded)
+				assert.True(t, penalized, "rank the timeout before selecting the retry")
+				return modelChoice, true
+			},
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &active
+			},
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				_ ocommon.Point,
+				_ ocommon.Point,
+			) (uint64, error) {
+				requested = connId
+				return 1, nil
+			},
+		},
+	}
+
+	handleBlockfetchTimeoutForTest(ls, stalled, nil)
+
+	assert.Equal(t, 5*time.Second, penalty)
+	assert.Equal(t, modelChoice, requested)
+	assert.Equal(t, modelChoice, ls.activeBlockfetchConnId)
+	ls.blockfetchRequestRangeCleanup()
+}
+
+func TestBlockfetchTimeoutInterruptsRequestBlockedDuringDispatch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	testChain, _ := buildDeepCatchupChain(t, 1)
+	stalled := testChainsyncConnId(6000, 3001)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	_, recycled := bus.Subscribe(ConnectionRecycleRequestedEventType)
+	var penalty time.Duration
+	penaltyCount := 0
+	ls := &LedgerState{
+		chain:                              testChain,
+		activeBlockfetchConnId:             stalled,
+		blockfetchPrimaryRequestGeneration: 7,
+		activeBlockfetchTimeout:            blockfetchNearTipTimeout,
+		config: LedgerStateConfig{
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EventBus: bus,
+			RecordBlockfetchLatencyFunc: func(
+				_ ouroboros.ConnectionId,
+				latency time.Duration,
+			) {
+				penalty = latency
+				penaltyCount++
+			},
+		},
+	}
+	var pending pendingPublishes
+	handleBlockfetchTimeoutForTest(ls, stalled, &pending)
+	handleBlockfetchTimeoutForTest(ls, stalled, &pending)
+	pending.flush()
+
+	got := testutil.RequireReceive(
+		t,
+		recycled,
+		time.Second,
+		"blocked blockfetch dispatch recycle request",
+	)
+	recycle, ok := got.Data.(ConnectionRecycleRequestedEvent)
+	require.True(t, ok)
+	assert.Equal(t, stalled, recycle.ConnectionId)
+	assert.Equal(t, "blockfetch_dispatch_timeout", recycle.Reason)
+	assert.Equal(t, 5*time.Second, penalty)
+	assert.Equal(t, 1, penaltyCount)
+	testutil.RequireNoReceive(
+		t,
+		recycled,
+		20*time.Millisecond,
+		"one dispatch generation must emit only one recycle request",
+	)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
+func TestBlockfetchTimeoutWithoutAlternateRecyclesInsteadOfRedispatching(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	testChain, _ := buildDeepCatchupChain(t, 1)
+	stalled := testChainsyncConnId(6000, 3001)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	_, recycled := bus.Subscribe(ConnectionRecycleRequestedEventType)
+	ls := &LedgerState{
+		chain:                    testChain,
+		activeBlockfetchConnId:   stalled,
+		selectedBlockfetchConnId: stalled,
+		config: LedgerStateConfig{
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EventBus: bus,
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) (uint64, error) {
+				t.Fatal("timeout must not redispatch to the stalled connection")
+				return 0, nil
+			},
+		},
+	}
+	var pending pendingPublishes
+	handleBlockfetchTimeoutForTest(ls, stalled, &pending)
+	pending.flush()
+
+	got := testutil.RequireReceive(
+		t,
+		recycled,
+		time.Second,
+		"stalled blockfetch response recycle request",
+	)
+	recycle, ok := got.Data.(ConnectionRecycleRequestedEvent)
+	require.True(t, ok)
+	assert.Equal(t, stalled, recycle.ConnectionId)
+	assert.Equal(t, "blockfetch_response_timeout", recycle.Reason)
+	assert.Equal(t, ouroboros.ConnectionId{}, ls.activeBlockfetchConnId)
+	assert.Equal(t, ouroboros.ConnectionId{}, ls.selectedBlockfetchConnId)
+}
+
+func TestBlockfetchTimeoutExcludesBlockedShadowFromRetry(t *testing.T) {
+	t.Parallel()
+
+	testChain, _ := buildDeepCatchupChain(t, 1)
+	primary := testChainsyncConnId(6000, 3001)
+	shadow := testChainsyncConnId(6000, 3002)
+	retry := testChainsyncConnId(6000, 3003)
+	primaryCalls := make(chan struct{}, 2)
+	shadowCalls := make(chan struct{}, 2)
+	retryCalls := make(chan struct{}, 2)
+	releaseShadow := make(chan struct{})
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	_, recycled := bus.Subscribe(ConnectionRecycleRequestedEventType)
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EventBus: bus,
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				_ ocommon.Point,
+				_ ocommon.Point,
+			) (uint64, error) {
+				switch {
+				case sameConnectionId(connId, primary):
+					primaryCalls <- struct{}{}
+					return 1, nil
+				case sameConnectionId(connId, shadow):
+					shadowCalls <- struct{}{}
+					<-releaseShadow
+					return 2, nil
+				case sameConnectionId(connId, retry):
+					retryCalls <- struct{}{}
+					return 3, nil
+				default:
+					t.Fatalf("unexpected blockfetch connection: %s", connId.String())
+					return 0, nil
+				}
+			},
+			PeersWithBlockFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+			) []ouroboros.ConnectionId {
+				return []ouroboros.ConnectionId{shadow}
+			},
+			BlockfetchLatencyFunc: func(
+				ouroboros.ConnectionId,
+			) (time.Duration, bool) {
+				return time.Second, true
+			},
+			SelectBlockfetchRetryPeerFunc: func(
+				excluded []ouroboros.ConnectionId,
+				_ ocommon.Point,
+			) (ouroboros.ConnectionId, bool) {
+				assert.Equal(
+					t,
+					[]ouroboros.ConnectionId{primary, shadow},
+					excluded,
+				)
+				return retry, true
+			},
+		},
+	}
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- startQueuedBlockfetchForTest(ls, primary, nil)
+	}()
+
+	testutil.RequireReceive(
+		t,
+		shadowCalls,
+		time.Second,
+		"blocked shadow dispatch",
+	)
+	var pending pendingPublishes
+	handleBlockfetchTimeoutForTest(ls, primary, &pending)
+	pending.flush()
+
+	got := testutil.RequireReceive(
+		t,
+		recycled,
+		time.Second,
+		"blocked shadow recycle request",
+	)
+	recycle, ok := got.Data.(ConnectionRecycleRequestedEvent)
+	require.True(t, ok)
+	assert.Equal(t, shadow, recycle.ConnectionId)
+	assert.Equal(t, "blockfetch_shadow_dispatch_timeout", recycle.Reason)
+	assert.Len(t, primaryCalls, 1)
+	assert.Empty(t, shadowCalls, "retry must not target the blocked shadow")
+	assert.Len(t, retryCalls, 1)
+
+	close(releaseShadow)
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		startDone,
+		time.Second,
+		"shadow dispatch return",
+	))
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
+func TestBlockfetchFirstBlockInvalidatesExpiredNearTipWatchdog(t *testing.T) {
+	t.Parallel()
+
+	testChain, _ := buildDeepCatchupChain(t, 1)
+	connId := testChainsyncConnId(6000, 3001)
+	penaltyCount := 0
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			RecordBlockfetchLatencyFunc: func(
+				ouroboros.ConnectionId,
+				time.Duration,
+			) {
+				penaltyCount++
+			},
+		},
+	}
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.armBlockfetchTimeoutForLocked(connId, blockfetchNearTipTimeout)
+	expiredGeneration := ls.chainsyncBlockfetchTimerGeneration
+	ls.armBlockfetchTimeoutForLocked(connId, blockfetchBusyTimeout)
+	ls.handleBlockfetchTimeoutGenerationLocked(
+		connId,
+		expiredGeneration,
+		&pendingPublishes{},
+	)
+	assert.Equal(t, 0, penaltyCount)
+	assert.Equal(t, blockfetchBusyTimeout, ls.activeBlockfetchTimeout)
+	ls.blockfetchRequestRangeCleanup()
+	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
+func TestBlockfetchStreamingTimeoutRecordsActiveWatchdog(t *testing.T) {
+	t.Parallel()
+
+	testChain, _ := buildDeepCatchupChain(t, 1)
+	stalled := testChainsyncConnId(6000, 3001)
+	var penalty time.Duration
+	ls := &LedgerState{
+		chain:                   testChain,
+		activeBlockfetchConnId:  stalled,
+		activeBlockfetchTimeout: blockfetchBusyTimeout,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			RecordBlockfetchLatencyFunc: func(
+				_ ouroboros.ConnectionId,
+				latency time.Duration,
+			) {
+				penalty = latency
+			},
+		},
+	}
+
+	handleBlockfetchTimeoutForTest(ls, stalled, nil)
+
+	assert.Equal(t, blockfetchBusyTimeout, penalty)
 }
 
 // The next batch of a drained queue is fetched from the peer the policy now

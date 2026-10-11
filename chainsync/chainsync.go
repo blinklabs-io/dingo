@@ -370,7 +370,7 @@ func NewStateWithConfig(
 	s.blockfetchLatencyGauge = promauto.With(cfg.PromRegistry).NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "dingo_chainsync_blockfetch_latency_seconds",
-			Help: "exponential moving average (alpha=0.2) of blockfetch RequestRange-to-first-block latency in seconds, by peer connection",
+			Help: "exponential moving average (alpha=0.2) of blockfetch delivery latency and timeout penalties in seconds, by peer connection",
 		},
 		[]string{"peer", "connection_id"},
 	)
@@ -1614,9 +1614,9 @@ func (s *State) PeersWithBlock(
 	return result
 }
 
-// RecordBlockfetchLatency updates the EWMA blockfetch latency for
-// the given connection. Called by the ledger when the first block
-// body arrives after a RequestRange.
+// RecordBlockfetchLatency updates the EWMA blockfetch delivery estimate for
+// the given connection. The ledger records first-block latency on success and
+// the watchdog duration when a request times out.
 func (s *State) RecordBlockfetchLatency(
 	connId ouroboros.ConnectionId,
 	latency time.Duration,

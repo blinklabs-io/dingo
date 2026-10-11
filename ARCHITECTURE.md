@@ -601,6 +601,18 @@ peer's header that does not extend them is buffered rather than clearing them. N
 starts BlockFetch immediately. An in-flight batch from another connection is
 never cancelled by a switch.
 
+The BlockFetch watchdog uses a five-second first-block policy for near-tip
+windows of at most four headers. This is deliberately stricter than the
+protocol client's 60-second timeout ceiling; after the first block arrives,
+the 30-second streaming watchdog applies, and bulk catch-up uses that same
+30-second budget throughout. A timeout is recorded in the peer delivery EWMA
+before retry selection. Retry excludes the timed-out connection and requires
+another eligible peer that announced the range end, including an unmeasured
+holder. With no such holder the connection is recycled without redispatching
+the range to it. A request still blocked inside protocol dispatch follows the
+same recycle path; closing the protocol interrupts the dispatch before its
+longer transport deadline.
+
 An admitted ChainSync rollback atomically refreshes the tracked client's
 cursor, advertised tip, activity, and syncing status before chain selection
 observes it and before the ledger apply gate runs. This bookkeeping does not
