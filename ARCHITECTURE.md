@@ -15885,8 +15885,9 @@ rate, so that fill time can exceed the ledger's remaining backlog and leave it
 waiting for the first block of the next batch.
 `LedgerStateConfig.BlockfetchLowWatermarkEnabled` (off by default) lowers the
 far-from-tip gate to one blockfetch range (`BlockfetchBatchSize`,
-`farFromTipHeaderGate`). `allowedQueuedHeaders()` still bounds the queue, and
-the existing guards are unchanged: no new batch while a request or continuation
+`farFromTipHeaderGate`). Only the fetch-start threshold moves: the header queue
+capacity (`chain.MaxQueuedHeaders()`, at least 10,000) is unchanged, and so are
+the existing guards: no new batch while a request or continuation
 is pending, and the batch starts through `startQueuedBlockfetchLocked` from the
 header pipeline owner. The node sets it from the
 `blockfetchLowWatermarkEnabled` config key, the

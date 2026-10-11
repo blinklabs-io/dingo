@@ -1684,7 +1684,8 @@ func (ls *LedgerState) allowedQueuedHeaders() int {
 // blockfetch starts while the header is far from the peer tip. With the low
 // watermark enabled it is one blockfetch range, so the first range after a
 // forecast-horizon release is requested while the ledger is still applying
-// the previous backlog; allowedHeaderCount still bounds the queue itself.
+// the previous backlog. Only this threshold moves; the header queue capacity
+// is chain.MaxQueuedHeaders either way.
 func (ls *LedgerState) farFromTipHeaderGate(allowedHeaderCount int) int {
 	if ls.config.BlockfetchLowWatermarkEnabled {
 		return min(BlockfetchBatchSize, allowedHeaderCount)

@@ -1765,8 +1765,8 @@ func WithLedgerApplyRowBatchingEnabled(enabled bool) ConfigOptionFunc {
 
 // WithBlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
 // range of headers is queued while the node is far from the peer tip, instead
-// of waiting for the full queue allowance. Not consensus-affecting; off by
-// default. See LedgerStateConfig.BlockfetchLowWatermarkEnabled.
+// of waiting for four ranges. The header queue capacity is unchanged. Not
+// consensus-affecting; off by default. See LedgerStateConfig.BlockfetchLowWatermarkEnabled.
 func WithBlockfetchLowWatermarkEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BlockfetchLowWatermarkEnabled = enabled

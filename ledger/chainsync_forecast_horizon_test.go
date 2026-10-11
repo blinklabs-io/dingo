@@ -597,10 +597,10 @@ func TestFarFromTipBlockfetchLowWatermark(t *testing.T) {
 		headers   int
 		wantFetch bool
 	}{
-		{name: "default holds below the queue bound", headers: 600},
+		{name: "default holds below the four-range threshold", headers: 600},
 		{name: "low watermark starts at one range", lowMark: true, headers: BlockfetchBatchSize, wantFetch: true},
 		{name: "low watermark waits below one range", lowMark: true, headers: BlockfetchBatchSize - 1},
-		{name: "default starts at the queue bound", headers: BlockfetchBatchSize * 4, wantFetch: true},
+		{name: "default starts at the four-range threshold", headers: BlockfetchBatchSize * 4, wantFetch: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -685,8 +685,7 @@ func TestFarFromTipBlockfetchLowWatermark(t *testing.T) {
 
 // The forecast horizon holds the header that follows the queued ones; once the
 // ledger can forecast its slot and the connection re-delivers it, the far-from-
-// tip gate decides whether blockfetch starts at one range or at the full queue
-// allowance.
+// tip gate decides whether blockfetch starts at one range or at four ranges.
 func TestFarFromTipBlockfetchLowWatermarkAfterHorizonRelease(t *testing.T) {
 	t.Parallel()
 
@@ -695,7 +694,7 @@ func TestFarFromTipBlockfetchLowWatermarkAfterHorizonRelease(t *testing.T) {
 		lowMark   bool
 		wantFetch bool
 	}{
-		{name: "default keeps waiting for the queue bound"},
+		{name: "default keeps waiting for the four-range threshold"},
 		{name: "low watermark starts at one range", lowMark: true, wantFetch: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -827,7 +826,7 @@ func TestFarFromTipBlockfetchLowWatermarkAfterHorizonRelease(t *testing.T) {
 					t,
 					requests,
 					100*time.Millisecond,
-					"the default gate must keep waiting for the queue bound",
+					"the default gate must keep waiting for the four-range threshold",
 				)
 				return
 			}

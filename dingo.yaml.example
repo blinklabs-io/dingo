@@ -696,9 +696,9 @@
 # ledgerApplyRowBatchingEnabled: false
 
 # While the header is far from the peer tip, start blockfetch once one
-# blockfetch range (500) of headers is queued instead of waiting for the full
-# queue allowance (2000). The queue stays bounded by the allowance
-# (default: false). Not consensus-affecting.
+# blockfetch range (500) of headers is queued instead of waiting for four
+# ranges (2000). The header queue capacity is unchanged (default: false). Not
+# consensus-affecting.
 #
 # Can be overridden with the DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED
 # environment variable

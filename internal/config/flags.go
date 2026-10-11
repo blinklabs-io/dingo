@@ -752,7 +752,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"BlockfetchLowWatermarkEnabled",
 		"blockfetch-low-watermark-enabled",
-		"start blockfetch once one range of headers is queued while far from the peer tip, instead of waiting for the full queue allowance (not consensus-affecting; default off)",
+		"start blockfetch once one range of headers is queued while far from the peer tip, instead of waiting for four ranges; the header queue capacity is unchanged (not consensus-affecting; default off)",
 	),
 
 	// Block production

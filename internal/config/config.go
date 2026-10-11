@@ -787,8 +787,8 @@ type Config struct {
 
 	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
 	// range of headers is queued while far from the peer tip, instead of
-	// waiting for the full queue allowance. Not consensus-affecting; off by
-	// default.
+	// waiting for four ranges. The header queue capacity is unchanged. Not
+	// consensus-affecting; off by default.
 	BlockfetchLowWatermarkEnabled bool `yaml:"blockfetchLowWatermarkEnabled"          envconfig:"DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED"`
 
 	// Peer targets (0 = use default, -1 = unlimited)
