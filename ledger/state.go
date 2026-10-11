@@ -899,6 +899,11 @@ type LedgerStateConfig struct {
 	// state is identical either way. See ARCHITECTURE.md ("Block Processing
 	// Pipeline").
 	ApplyRowBatchingEnabled bool
+	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
+	// range of headers is queued while the node is far from the peer tip,
+	// instead of waiting for allowedQueuedHeaders. The header queue capacity
+	// (chain.MaxQueuedHeaders) is unchanged. Off by default.
+	BlockfetchLowWatermarkEnabled bool
 }
 
 // EndorserBlockProviderFunc returns the complete set of standalone
@@ -1927,6 +1932,8 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	// not-started LedgerState would otherwise nil-deref on the metrics
 	// counters.
 	ls.metrics.init(cfg.PromRegistry)
+	ls.registerSyncGauges(cfg.PromRegistry)
+	cfg.ChainManager.SetHeaderQueueFullObserver(ls.metrics.incHeaderQueueFull)
 	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
 	if cfg.BlockPipelineEnabled && cfg.BlockPipelineValidateEnabled &&
 		!cfg.ManualBlockProcessing && ls.SlotsPerKESPeriod() == 0 {
@@ -2258,8 +2265,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Refuse to start on a snapshot-seeded database whose governance
 	// purpose roots are missing: tallying would skip ratifications the
 	// network performs and diverge at enactment. This runs before the
-	// worker pool and cleanup timer start because the caller only closes
-	// the ledger after Start succeeds, so the epoch comes from the stored
+	// worker pool and cleanup timer start. The epoch comes from the stored
 	// epoch rows rather than currentEpoch, which loadEpochs sets later.
 	if err := ls.verifyGovernancePurposeRoots(ctx); err != nil {
 		return fmt.Errorf("verify governance purpose roots: %w", err)

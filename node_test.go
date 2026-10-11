@@ -2632,6 +2632,53 @@ func runStopsLIFO(stops []func()) {
 	}
 }
 
+func TestRunDrainsLedgerWorkersWhenLedgerStartFails(t *testing.T) {
+	t.Parallel()
+
+	n := newStartupCleanupRunNode(t)
+	n.config.midnight.Enabled = true
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	initialized := make(chan struct{}, 1)
+	indexerAttached := make(chan bool, 1)
+	indexerDrained := make(chan bool, 1)
+	n.config.logger = slog.New(nodeTestLogSignalHandler{
+		message: "database worker pool initialized",
+		seen:    initialized,
+		onRecord: func(record slog.Record) {
+			switch record.Message {
+			case "database worker pool initialized":
+				indexerAttached <- n.eventBus.HasSubscribers(ledger.BlockEventType)
+				cancel()
+			case "shutting down database worker pool":
+				indexerDrained <- !n.eventBus.HasSubscribers(ledger.BlockEventType)
+			}
+		},
+	})
+	// Keep the test from leaking workers when proving the broken ordering.
+	t.Cleanup(func() {
+		if n.ledgerState != nil {
+			require.NoError(t, n.ledgerState.Close())
+		}
+	})
+
+	err := n.Run(ctx)
+	require.ErrorContains(t, err, "failed to start ledger")
+	require.ErrorIs(t, err, context.Canceled)
+	require.Len(t, initialized, 1, "failure must occur after workers start")
+	called := false
+	err = n.ledgerState.SubmitAsyncDBOperation(func(*database.Database) error {
+		called = true
+		return nil
+	})
+	require.ErrorContains(t, err, "database worker pool is shut down")
+	require.False(t, called, "startup rollback must stop accepting storage work")
+	require.Len(t, indexerAttached, 1)
+	require.True(t, <-indexerAttached, "indexer must subscribe before ledger startup")
+	require.Len(t, indexerDrained, 1)
+	require.True(t, <-indexerDrained, "indexer must drain before ledger cleanup")
+}
+
 // TestStartBlockProducerStopIsRegisteredBeforeLeiosVotingCanFail covers the
 // ordering defect in the startup-cleanup stack: initBlockForger returns with
 // the forge loop and the election's workers already running, and
@@ -2837,6 +2884,7 @@ func (m nodeTestSecurityParamLedger) SecurityParam() int {
 type nodeTestLogSignalHandler struct {
 	message string
 	seen    chan struct{}
+	onRecord func(slog.Record)
 }
 
 type nodeTestLogCountHandler struct {
@@ -2874,6 +2922,9 @@ func (h nodeTestLogSignalHandler) Handle(
 	_ context.Context,
 	record slog.Record,
 ) error {
+	if h.onRecord != nil {
+		h.onRecord(record)
+	}
 	if record.Message == h.message {
 		select {
 		case h.seen <- struct{}{}:
@@ -4663,6 +4714,32 @@ func TestNewOuroborosConfigAppliesTxSubmissionRateLimit(t *testing.T) {
 	)
 }
 
+// The behind-tip chainsync resync is gated on chain selection having no best
+// peer; the production config must carry that answer from the live selector.
+func TestNewOuroborosConfigReportsChainSelectionBestPeer(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: NewConfig()}
+	cfg := n.newOuroborosConfig(false, 0, 0)
+	require.NotNil(t, cfg.ChainsyncHasBestPeer)
+	assert.False(t, cfg.ChainsyncHasBestPeer(), "no chain selector")
+
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	assert.False(t, cfg.ChainsyncHasBestPeer(), "no peer selected yet")
+
+	conn := newNodeTestConnId(3104)
+	tipPoint := ocommon.NewPoint(130, []byte("best"))
+	require.True(t, n.chainSelector.UpdatePeerTip(
+		conn,
+		ochainsync.Tip{Point: tipPoint, BlockNumber: 13},
+		nil,
+	))
+	require.NotNil(t, n.chainSelector.GetBestPeer())
+	assert.True(t, cfg.ChainsyncHasBestPeer(), "a selected best peer")
+}
+
 func TestLedgerStateConfigForwardsApplyRowBatching(t *testing.T) {
 	t.Parallel()
 
@@ -4675,4 +4752,15 @@ func TestLedgerStateConfigForwardsApplyRowBatching(t *testing.T) {
 		on.ledgerStateConfig().ApplyRowBatchingEnabled,
 		"the option never reaches the ledger without this hop",
 	)
+}
+
+func TestLedgerStateConfigForwardsBlockfetchLowWatermarkFlag(t *testing.T) {
+	t.Parallel()
+
+	off := (&Node{config: NewConfig()}).ledgerStateConfig()
+	assert.False(t, off.BlockfetchLowWatermarkEnabled)
+	on := (&Node{
+		config: NewConfig(WithBlockfetchLowWatermarkEnabled(true)),
+	}).ledgerStateConfig()
+	assert.True(t, on.BlockfetchLowWatermarkEnabled)
 }

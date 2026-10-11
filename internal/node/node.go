@@ -1013,6 +1013,7 @@ func buildDingoConfig(
 			forgeEBCap(cfg.ForgeEBMaxBytes, config.DefaultForgeEBMaxBytes),
 		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
+		dingo.WithPlannerStatsRefresh(cfg.PlannerStatsRefreshEnabled),
 		// Parallel block-decode pipeline (decode and validate stages). Not
 		// consensus-affecting; off by default.
 		dingo.WithBlockPipelineEnabled(cfg.BlockPipelineEnabled),
@@ -1022,6 +1023,9 @@ func buildDingoConfig(
 		dingo.WithLedgerPrefetchAheadEnabled(cfg.LedgerPrefetchAheadEnabled),
 		dingo.WithLedgerApplyRowBatchingEnabled(
 			cfg.LedgerApplyRowBatchingEnabled,
+		),
+		dingo.WithBlockfetchLowWatermarkEnabled(
+			cfg.BlockfetchLowWatermarkEnabled,
 		),
 		// CIP-0163 reward-account inactivity expiry (consensus-affecting)
 		dingo.WithDelegatorInactivity(

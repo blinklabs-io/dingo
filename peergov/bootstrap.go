@@ -19,6 +19,15 @@ import (
 	"time"
 )
 
+// PreferPeerSnapshot keeps topology bootstrap peers dormant until the snapshot
+// peers have had the bootstrap recovery cooldown to establish connections.
+func (p *PeerGovernor) PreferPeerSnapshot() {
+	p.mu.Lock()
+	events := p.exitBootstrapLocked("peer snapshot bootstrap")
+	p.mu.Unlock()
+	p.publishPendingEvents(events)
+}
+
 // shouldExitBootstrap checks if conditions are met to exit bootstrap mode.
 // Returns true if any of these conditions are met:
 // 1. Ledger peer count >= MinLedgerPeersForExit

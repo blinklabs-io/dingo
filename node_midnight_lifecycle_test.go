@@ -75,7 +75,7 @@ func TestLiveTruncateReinitializesMidnightIndexerByEnableGate(t *testing.T) {
 					"the recreated indexer must backfill the rebuilt storage")
 				require.Equal(t, targetSlot, slot,
 					"backfill must stop at the truncated ledger tip")
-				n.midnightIndexer.Stop()
+				require.NoError(t, n.midnightIndexer.Stop(t.Context()))
 			})
 	}
 }
@@ -117,7 +117,7 @@ func TestLiveRestoreReinitializesMidnightIndexerByEnableGate(t *testing.T) {
 					"the recreated indexer must backfill the restored storage")
 				require.Equal(t, points[len(points)-1].Slot, slot,
 					"backfill must stop at the restored ledger tip")
-				n.midnightIndexer.Stop()
+				require.NoError(t, n.midnightIndexer.Stop(t.Context()))
 			})
 	}
 }
