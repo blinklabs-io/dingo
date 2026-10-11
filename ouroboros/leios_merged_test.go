@@ -297,10 +297,16 @@ func TestLeiosFetchServerMissingDataUsesUnavailableErrors(t *testing.T) {
 	require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
 }
 
-func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
+func TestLeiosFetchServerBlockTxsServesAvailableBodiesWhileIncomplete(t *testing.T) {
 	t.Parallel()
 
-	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
+	tx0, ref0 := testLeiosManifestTx(t, 0)
+	tx1, ref1 := testLeiosManifestTx(t, 1)
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref0, ref1},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(10, lcommon.Blake2b256Hash(blockRaw).Bytes())
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
@@ -308,20 +314,61 @@ func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
 		o.storeLeiosEndorserBlock(
 			point,
 			blockRaw,
-			[]cbor.RawMessage{mustCbor(t, "tx0")},
+			nil,
 			leiosStoreAuthoritative,
 		),
+	)
+	o.retainLeiosPartialTxs(
+		point.Slot,
+		point.Hash,
+		[]cbor.RawMessage{nil, tx1},
+		nil,
 	)
 
 	msg, err := o.leiosfetchServerBlockTxsRequest(
 		oleiosfetch.CallbackContext{},
 		point,
-		map[uint16]uint64{0: 0b11},
+		map[uint16]uint64{0: 1 << 63},
 	)
-	require.Error(t, err)
-	require.Nil(t, msg)
-	require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
-	require.Contains(t, err.Error(), "txs not available")
+	require.NoError(t, err)
+	response, ok := msg.(*oleiosfetch.MsgBlockTxs)
+	require.True(t, ok)
+	require.Equal(t, point, response.Point)
+	require.NotNil(t, response.Bitmaps)
+	require.Empty(t, response.Bitmaps)
+	require.Empty(t, response.TxsRaw)
+
+	msg, err = o.leiosfetchServerBlockTxsRequest(
+		oleiosfetch.CallbackContext{},
+		point,
+		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
+	)
+	require.NoError(t, err)
+	response, ok = msg.(*oleiosfetch.MsgBlockTxs)
+	require.True(t, ok)
+	require.Equal(t, point, response.Point)
+	require.Equal(t, map[uint16]uint64{0: 1 << 62}, response.Bitmaps)
+	require.Equal(t, []cbor.RawMessage{tx1}, response.TxsRaw)
+
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			[]cbor.RawMessage{tx0, tx1},
+			leiosStoreAuthoritative,
+		),
+	)
+	msg, err = o.leiosfetchServerBlockTxsRequest(
+		oleiosfetch.CallbackContext{},
+		point,
+		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
+	)
+	require.NoError(t, err)
+	response, ok = msg.(*oleiosfetch.MsgBlockTxs)
+	require.True(t, ok)
+	require.Nil(t, response.Bitmaps)
+	require.Equal(t, []cbor.RawMessage{tx0, tx1}, response.TxsRaw)
 }
 
 func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
@@ -335,7 +382,7 @@ func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
 		o.storeLeiosEndorserBlock(
 			point,
 			blockRaw,
-			[]cbor.RawMessage{mustCbor(t, "tx0"), mustCbor(t, "tx1")},
+			nil,
 			leiosStoreAuthoritative,
 		),
 	)
