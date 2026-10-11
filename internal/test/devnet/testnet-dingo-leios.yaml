@@ -21,7 +21,8 @@ protocolConsts:
 epochLength: 120
 slotLength: 0.5
 activeSlotsCoeff: 0.05
-securityParam: 10
+# Keep 4k/f below the epoch length so nonce evolution remains possible.
+securityParam: 1
 maxLovelaceSupply: 6000000000000
 protocolParams:
   decentralisationParam: 0
