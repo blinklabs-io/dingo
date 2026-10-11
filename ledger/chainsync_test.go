@@ -1613,9 +1613,10 @@ func TestBatchDoneTransportRangeErrKeepsHeadersAcrossLargeTipGap(
 // dispatch on the returned channel.
 func requestIdTestLedger(
 	t *testing.T,
-	connId ouroboros.ConnectionId,
+	connIds ...ouroboros.ConnectionId,
 ) (*LedgerState, <-chan uint64, []lcommon.Blake2b256) {
 	t.Helper()
+	require.NotEmpty(t, connIds)
 	headerCount := BlockfetchBatchSize + 50
 	testChain, hashes := buildDeepCatchupChain(t, headerCount)
 	dispatched := make(chan uint64, 16)
@@ -1630,7 +1631,7 @@ func requestIdTestLedger(
 				_ ocommon.Point,
 				_ ocommon.Point,
 			) (uint64, error) {
-				require.Equal(t, connId, gotConnId)
+				require.Contains(t, connIds, gotConnId)
 				mu.Lock()
 				nextId++
 				id := nextId
@@ -1752,7 +1753,7 @@ func TestBlockfetchRefusedPromotionKeepsQueuedRequestReserved(
 // TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest covers the
 // force-release side: a timeout teardown releases the active and pre-queued
 // requests' reservations while both are still outstanding with the peer and
-// redispatches on the same connection. Their late terminal events must not
+// redispatches on an alternate connection. Their late terminal events must not
 // release the replacement requests' reservations, and the timed-out active
 // request's terminal event must not open the discard latch armed for the
 // pre-queued request, whose blocks would then be accepted as the
@@ -1763,7 +1764,15 @@ func TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest(
 	t.Parallel()
 
 	connId := testChainsyncConnId(6321, 3001)
-	ls, dispatched, hashes := requestIdTestLedger(t, connId)
+	retryConnId := testChainsyncConnId(6321, 3002)
+	ls, dispatched, hashes := requestIdTestLedger(t, connId, retryConnId)
+	ls.config.SelectBlockfetchRetryPeerFunc = func(
+		excluded []ouroboros.ConnectionId,
+		_ ocommon.Point,
+	) (ouroboros.ConnectionId, bool, bool) {
+		require.Equal(t, []ouroboros.ConnectionId{connId}, excluded)
+		return retryConnId, true, true
+	}
 
 	ls.chainsyncBlockfetchMutex.Lock()
 	require.NoError(t, ls.startQueuedBlockfetchLocked(connId, nil))
@@ -1774,10 +1783,10 @@ func TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest(
 	receiveDispatches(t, dispatched, 3, 4)
 
 	ls.chainsyncBlockfetchMutex.Lock()
-	require.Equal(t, 2, blockfetchReservationsLocked(ls, connId))
+	require.Equal(t, 2, blockfetchReservationsLocked(ls, retryConnId))
 	replacement := append(
 		[]chan struct{}(nil),
-		ls.blockfetchRequestsInFlight[connIdKey(connId)]...,
+		ls.blockfetchRequestsInFlight[connIdKey(retryConnId)]...,
 	)
 	for _, id := range []uint64{1, 2} {
 		require.NoError(t, ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
@@ -1788,7 +1797,7 @@ func TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest(
 		assert.Equal(
 			t,
 			2,
-			blockfetchReservationsLocked(ls, connId),
+			blockfetchReservationsLocked(ls, retryConnId),
 			"late terminal event for force-released request %d released "+
 				"a replacement request's reservation",
 			id,
