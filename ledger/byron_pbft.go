@@ -249,8 +249,9 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 			if err := ls.validateByronGenesisAnchor(ebbHeader); err != nil {
 				return err
 			}
-		} else if ebbHeader.ConsensusData.Epoch == 0 ||
-			ebbHeader.HasGenesisTag() {
+		} else if !ls.peerRelativeEbbAtOrigin(block) &&
+			(ebbHeader.ConsensusData.Epoch == 0 ||
+				ebbHeader.HasGenesisTag()) {
 			// The reference reads an EBB's previous hash as a genesis hash
 			// in epoch 0, or later when the deprecated 255 => "Genesis"
 			// attribute is present, and a genesis hash cannot continue a
@@ -335,6 +336,26 @@ func (ls *LedgerState) isFirstByronHeader(block ledger.Block) bool {
 		return false
 	}
 	return c.IsFirstOnHeaderChain(block.Hash().Bytes())
+}
+
+// peerRelativeEbbAtOrigin reports whether block is a peer-relative header
+// verified while the primary chain is still at origin. Such a header may be
+// the first of a from-genesis chain, but is not provably so here (see
+// isFirstByronHeader), so the "genesis hash after an existing block" rejection
+// must not fire; the queue entry and blockfetch checks anchor it.
+func (ls *LedgerState) peerRelativeEbbAtOrigin(block ledger.Block) bool {
+	hb, ok := block.(headerOnlyBlock)
+	if !ok || !hb.peerRelative {
+		return false
+	}
+	ls.RLock()
+	c := ls.chain
+	ls.RUnlock()
+	if c == nil {
+		return false
+	}
+	tip := c.Tip()
+	return tip.Point.Slot == 0 && len(tip.Point.Hash) == 0
 }
 
 // validateByronGenesisAnchor requires the first epoch-boundary block of a
