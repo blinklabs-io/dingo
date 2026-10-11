@@ -20,7 +20,7 @@ protocolConsts:
 --- # Shelley Genesis Override
 epochLength: 120
 slotLength: 0.5
-activeSlotsCoeff: 0.4
+activeSlotsCoeff: 0.05
 securityParam: 10
 maxLovelaceSupply: 6000000000000
 protocolParams:
