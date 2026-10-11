@@ -72,6 +72,9 @@ const (
 	rewardOutputFoldedSchemaRelease                     = "reward-account-output-folded"
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
 	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
+	drepExpiryHistorySchemaRelease                      = "drep-expiry-history"
+	drepDormancyStateSchemaRelease                      = "drep-dormancy-state"
+	drepDelegatorStateSchemaRelease                     = "drep-delegator-state"
 	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
 	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
@@ -218,17 +221,15 @@ var schemaVersions = []struct {
 		Name:    committeeHotAuthorizationPruneOrderSchemaRelease,
 		Dir:     "v36",
 	},
-	{Version: 37, Name: "drep-expiry-history", Dir: "v37"},
+	{Version: 37, Name: drepExpiryHistorySchemaRelease, Dir: "v37"},
 	{Version: 38, Name: poolRelayTypeSchemaRelease, Dir: "v38"},
+	{Version: 39, Name: midnightRollbackJournalSchemaRelease, Dir: "v39"},
+	{Version: 40, Name: drepDormancyStateSchemaRelease, Dir: "v40"},
+	{Version: 41, Name: drepDelegatorStateSchemaRelease, Dir: "v41"},
 	{
-		Version: 39,
-		Name:    midnightRollbackJournalSchemaRelease,
-		Dir:     "v39",
-	},
-	{
-		Version: 40,
+		Version: 42,
 		Name:    committeeRenewalTermStartSchemaRelease,
-		Dir:     "v40",
+		Dir:     "v42",
 	},
 }
 

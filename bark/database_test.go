@@ -1779,8 +1779,6 @@ func TestTruncateAndGetTruncateStatus(t *testing.T) {
 // TestGetDatabaseInfoReturnsTipSizeBytesAndBlockCount verifies that
 // GetDatabaseInfo reports the real tip, on-disk size, block count, and oldest slot.
 func TestGetDatabaseInfoReturnsTipSizeBytesAndBlockCount(t *testing.T) {
-	t.Parallel()
-
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	for id := uint64(1); id <= 3; id++ {
