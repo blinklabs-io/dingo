@@ -790,13 +790,46 @@ func TestConnectsToLocalChain(t *testing.T) {
 			want:  true,
 		},
 		{
-			name: "an ancestry deeper than the history limit is disconnected",
+			name: "an ancestry needing one more peer header than the limit is disconnected",
+			peer: map[string]peerRecord{
+				"h4": {400, "h3"},
+				"h3": {300, "h2"},
+				"h2": {200, "b1"},
+			},
+			held:   map[string]bool{"b1": true},
+			blocks: map[string]uint64{"b1": 100},
+			limit:  2,
+			start:  "h4",
+		},
+		{
+			name: "a held block reached by the last permitted hop is connected",
 			peer: map[string]peerRecord{
 				"h3": {300, "h2"},
 				"h2": {200, "b1"},
 			},
 			held:   map[string]bool{"b1": true},
 			blocks: map[string]uint64{"b1": 100},
+			limit:  2,
+			start:  "h3",
+			want:   true,
+		},
+		{
+			name: "origin reached by the last permitted hop is connected",
+			peer: map[string]peerRecord{
+				"h2": {200, "h1"},
+				"h1": {100, string(make([]byte, 32))},
+			},
+			limit: 2,
+			start: "h2",
+			want:  true,
+		},
+		{
+			name: "a stored block off the local chain at the limit is disconnected",
+			peer: map[string]peerRecord{
+				"h3": {300, "h2"},
+				"h2": {200, "x1"},
+			},
+			blocks: map[string]uint64{"x1": 100},
 			limit:  2,
 			start:  "h3",
 		},

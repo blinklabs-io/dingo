@@ -4904,7 +4904,17 @@ func connectsToLocalChain(
 		}
 		prevHash = parentHash
 	}
-	return false
+	// The last permitted hop advanced prevHash without examining it. Check it
+	// here without traversing another peer header, so an ancestry that ends at
+	// origin or a held block exactly at the limit is still connected.
+	if isOriginHash(prevHash) {
+		return true
+	}
+	if _, _, found := lookups.peerHeader(prevHash); found {
+		return false
+	}
+	point, found := lookups.blockByHash(prevHash)
+	return found && lookups.heldBlock(point)
 }
 
 type forkAnchorLookups struct {
