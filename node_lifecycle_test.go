@@ -1139,7 +1139,8 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	// Once drain is confirmed, a scratch runtime opening the same data
 	// directory must succeed deterministically -- the old Badger lock is
 	// guaranteed released, so this is a single attempt, not a poll.
-	deps := n.storageDependencies(n.config.dataDir)
+	deps, err := n.storageDependencies(n.config.dataDir)
+	require.NoError(t, err)
 	deps.PromRegistry = n.config.promRegistry
 	runtime, openErr := internalplugins.OpenDatabase(
 		context.Background(),
@@ -2116,4 +2117,51 @@ func TestLiveTruncateRunsPlannerStatsStartupOnReplacementHandle(t *testing.T) {
 		result.Changed,
 		"the replacement handle must already have been optimized",
 	)
+}
+
+func TestStorageDependenciesResolveGenesisCertificate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		network string
+		magic   uint32
+		want    bool
+		wantErr bool
+	}{
+		{name: "named preview", network: "preview", want: true},
+		{name: "preview magic", magic: 2, want: true},
+		{name: "unknown identity"},
+		{name: "invalid explicit network", network: "invalid-network", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := &Node{config: NewConfig(
+				WithNetwork(tc.network), WithNetworkMagic(tc.magic),
+			)}
+			deps, err := n.storageDependencies(t.TempDir())
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, deps.GenesisStakingEmpty)
+		})
+	}
+}
+
+func TestStorageDependenciesWithoutInternalConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config Config
+		want   bool
+	}{
+		{name: "unknown identity"},
+		{name: "named preview", config: Config{network: "preview"}, want: true},
+		{name: "preview magic", config: Config{networkMagic: 2}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := &Node{config: tc.config}
+			deps, err := n.storageDependencies(t.TempDir())
+			require.NoError(t, err)
+			require.Equal(t, tc.want, deps.GenesisStakingEmpty)
+		})
+	}
 }

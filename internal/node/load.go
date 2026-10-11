@@ -224,9 +224,16 @@ func ensureDB(
 	cfg *config.Config,
 	logger *slog.Logger,
 	db *database.Database,
+	nodeCfg *cardano.CardanoNodeConfig,
 ) (*database.Database, func(), error) {
 	if db != nil {
 		return db, func() {}, nil
+	}
+	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
+		nodeCfg, cfg.CardanoConfig, cfg.Network, cfg.NetworkMagic,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading cardano node config: %w", err)
 	}
 	dbConfig := &database.Config{
 		DataDir: cfg.DatabasePath, Logger: logger,
@@ -251,6 +258,7 @@ func ensureDB(
 			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode: cfg.StorageMode, MaxConnections: cfg.DatabaseWorkers,
 			Logger: logger, TracingEnabled: cfg.Tracing,
+			GenesisStakingEmpty: genesisStakingEmpty,
 		},
 	)
 	if err != nil {
@@ -721,7 +729,7 @@ func LoadWithDB(
 		"config", nodeCfg,
 	)
 	// Load database (open new one if not provided)
-	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
+	db, closeDB, err := ensureDB(cfg, logger, db, nodeCfg) //nolint:contextcheck
 	if err != nil {
 		return err
 	}
@@ -888,7 +896,9 @@ func LoadWithDB(
 					"remote ImmutableDB requires a valid Byron security parameter",
 				)
 			}
-			regularSlots = uint64(byronGenesis.ProtocolConsts.K) * 10 //nolint:gosec
+			regularSlots = uint64(
+				byronGenesis.ProtocolConsts.K,
+			) * 10 //nolint:gosec
 			canContainEBB = true
 		} else if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil &&
 			shelleyGenesis.EpochLength > 0 {
@@ -944,7 +954,10 @@ func LoadWithDB(
 		return err
 	}
 	if err := deferredIndexes.BuildCritical(); err != nil {
-		return fmt.Errorf("rebuilding critical metadata indexes after immutable load: %w", err)
+		return fmt.Errorf(
+			"rebuilding critical metadata indexes after immutable load: %w",
+			err,
+		)
 	}
 	return nil
 }
@@ -1039,7 +1052,7 @@ func LoadBlobsWithDB(
 	}
 	// Load database (open new one if not provided)
 	callerProvidedDB := db != nil
-	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
+	db, closeDB, err := ensureDB(cfg, logger, db, nil) //nolint:contextcheck
 	if err != nil {
 		return nil, err
 	}

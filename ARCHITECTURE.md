@@ -142,7 +142,10 @@ fixtures when schema seeding or assertions require raw SQL.
 
 Startup reserves the write connection, acquires the backend migration lock,
 rejects unversioned metadata tables (users must delete the data directory,
-including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
+including metadata and blob stores, and resync), and checks consensus stake provenance before changing schema state. Compatible
+version-2 snapshots are certified only with verified empty genesis staking and
+retained pre-Dijkstra accounting history; refusal leaves the schema unchanged.
+The runner then validates/resumes versioned expand/backfill/contract work before
 advertising readiness. The current registry has migrations 1 through 14:
 `v1alpha1`, `leios-key-registration`, `token-registry-metadata`,
 `account-import-baseline`, `leios-snapshot-keys`,

@@ -315,7 +315,10 @@ func New(cfg Config) (*Node, error) {
 	// only after configuration validates. If it were created earlier, a
 	// validation failure would return a nil Node while leaving those goroutines
 	// running, with no handle for the caller to Stop() them.
-	eventBus, err := event.TryNewEventBus(n.config.promRegistry, n.config.logger)
+	eventBus, err := event.TryNewEventBus(
+		n.config.promRegistry,
+		n.config.logger,
+	)
 	if err != nil {
 		metricsRegistration.Rollback()
 		// TryNewEventBus names the failed registration in its error.
@@ -697,20 +700,13 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Resolve provider-owned storage before constructing the database that uses
 	// it. The startup cleanup stack stops any provider that started before a
 	// later storage resolution failure.
+	deps, err := n.storageDependencies(n.config.dataDir)
+	if err != nil {
+		return err
+	}
+	deps.PromRegistry = n.config.promRegistry
 	stores, err := internalplugins.ResolveStorage(
-		n.ctx,
-		n.pluginHost,
-		internalplugins.StorageSelections{
-			Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob],
-			Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata],
-		},
-		internalplugins.StorageDependencies{
-			DataDir: n.config.dataDir, RunMode: n.config.runMode,
-			StorageMode:    string(n.config.storageMode),
-			MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
-			Logger:         n.config.logger, PromRegistry: n.config.promRegistry,
-			TracingEnabled: n.config.tracing,
-		},
+		n.ctx, n.pluginHost, n.storageSelections(), deps,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to resolve storage plugins: %w", err)
