@@ -15,8 +15,10 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -1004,4 +1006,398 @@ func TestAwaitChainsyncHeaderAdmissionFlushFailureRequestsResync(
 	require.True(t, ok, "unexpected event payload %T", resyncEvt.Data)
 	require.True(t, sameConnectionId(owner, data.ConnectionId))
 	require.Zero(t, ls.chain.HeaderCount())
+}
+
+// A header past the forecast horizon whose predecessor is not the chain tip,
+// the header tip, or any header or block the local chain holds cannot be
+// released by applying blocks the node already has. Admission reports that
+// instead of waiting for a publication that cannot come; a header that does
+// build on the local chain still waits.
+func TestAwaitChainsyncHeaderAdmissionRejectsDisconnectedHeaderPastHorizon(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	primary := cm.PrimaryChain()
+	blocks, err := fixtures.GenerateConwayChain(
+		1,
+		lcommon.Blake2b256{},
+		300_000,
+		1_000,
+		2,
+	)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, primary.AddBlock(context.Background(), block, nil))
+	}
+
+	cfg := minimalShelleyGenesisCfg(t)
+	ls := &LedgerState{
+		db:    db,
+		chain: primary,
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    1_000,
+			LengthInSlots: 432_000,
+			EraId:         eras.ConwayEraDesc.Id,
+		}},
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(302_400, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	systemStart := cfg.ShelleyGenesis().SystemStart
+	const headerSlot = 500_000
+	arrival := systemStart.Add(600_000 * time.Second)
+	clock := NewSlotClock(
+		pastHorizonSlotTimeProvider{
+			SlotTimeProvider: newMockSlotTimeProvider(
+				systemStart,
+				time.Second,
+				1_000_000,
+			),
+			rejectedSlot: headerSlot,
+		},
+		DefaultSlotClockConfig(),
+	)
+	clock.nowFunc = func() time.Time { return arrival }
+	ls.slotClock = clock
+	ls.publishSnapshotsLocked()
+
+	headerOn := func(parent lcommon.Blake2b256, label string) ChainsyncEvent {
+		header := mockHeader{
+			hash:        lcommon.Blake2b256Hash([]byte(label)),
+			prevHash:    parent,
+			blockNumber: 3,
+			slot:        headerSlot,
+		}
+		return ChainsyncEvent{
+			BlockHeader: header,
+			ArrivalTime: arrival,
+			Point:       ocommon.NewPoint(headerSlot, header.Hash().Bytes()),
+		}
+	}
+
+	building := headerOn(
+		lcommon.NewBlake2b256(primary.Tip().Point.Hash),
+		"building",
+	)
+	ctx, cancel := context.WithCancel(t.Context())
+	results := awaitAdmissionAsync(ctx, ls, building)
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"a header building on the chain tip must keep waiting",
+	)
+	cancel()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not return after its context ended",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+
+	orphan := headerOn(
+		lcommon.Blake2b256Hash([]byte("unknown parent")),
+		"orphan",
+	)
+	results = awaitAdmissionAsync(t.Context(), ls, orphan)
+	got = testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"a header whose predecessor the local chain does not hold must not wait for a publication",
+	)
+	require.ErrorIs(t, got.err, ErrChainsyncHeaderDisconnected)
+	require.False(t, got.accepted)
+}
+
+// connectsToLocalChain decides whether a held header can still be released by
+// blocks the node already has. Every way the walk reaches the local chain must
+// count as connected, and only an ancestry that leaves it, or that the
+// recorded history cannot resolve, counts as disconnected.
+func TestConnectsToLocalChain(t *testing.T) {
+	t.Parallel()
+
+	hash := func(label string) []byte { return []byte(label) }
+	type peerRecord struct {
+		slot   uint64
+		parent string
+	}
+	for _, tc := range []struct {
+		name   string
+		peer   map[string]peerRecord
+		queued map[string]bool
+		held   map[string]bool
+		blocks map[string]uint64
+		limit  int
+		start  string
+		want   bool
+	}{
+		{
+			name: "delivered headers reach a queued header",
+			peer: map[string]peerRecord{
+				"h2": {700, "q1"},
+				"q1": {600, "b9"},
+			},
+			queued: map[string]bool{"q1": true},
+			start:  "h2",
+			want:   true,
+		},
+		{
+			name:  "delivered headers reach a block the local chain holds",
+			peer:  map[string]peerRecord{"h2": {250, "b1"}, "b1": {150, "b0"}},
+			held:  map[string]bool{"b1": true},
+			start: "h2",
+			want:  true,
+		},
+		{
+			name: "delivered headers end at the session intersection block",
+			peer: map[string]peerRecord{
+				"h3": {300, "h2"},
+				"h2": {200, "b1"},
+			},
+			held:   map[string]bool{"b1": true},
+			blocks: map[string]uint64{"b1": 100},
+			start:  "h3",
+			want:   true,
+		},
+		{
+			name:   "a predecessor that is a held block below the tip",
+			held:   map[string]bool{"b1": true},
+			blocks: map[string]uint64{"b1": 100},
+			start:  "b1",
+			want:   true,
+		},
+		{
+			name:   "a stored block off the local chain is disconnected",
+			blocks: map[string]uint64{"x1": 100},
+			start:  "x1",
+		},
+		{
+			name:  "an unknown predecessor is disconnected",
+			start: "missing",
+		},
+		{
+			name: "delivered headers ending at an unknown ancestor are disconnected",
+			peer: map[string]peerRecord{
+				"h3": {300, "h2"},
+				"h2": {200, "missing"},
+			},
+			start: "h3",
+		},
+		{
+			name:  "a header built on origin is connected",
+			start: string(make([]byte, 32)),
+			want:  true,
+		},
+		{
+			name: "a delivered chain built on origin is connected",
+			peer: map[string]peerRecord{
+				"h1": {100, string(make([]byte, 32))},
+			},
+			start: "h1",
+			want:  true,
+		},
+		{
+			name: "an ancestry needing one more peer header than the limit is disconnected",
+			peer: map[string]peerRecord{
+				"h4": {400, "h3"},
+				"h3": {300, "h2"},
+				"h2": {200, "b1"},
+			},
+			held:   map[string]bool{"b1": true},
+			blocks: map[string]uint64{"b1": 100},
+			limit:  2,
+			start:  "h4",
+		},
+		{
+			name: "a held block reached by the last permitted hop is connected",
+			peer: map[string]peerRecord{
+				"h3": {300, "h2"},
+				"h2": {200, "b1"},
+			},
+			held:   map[string]bool{"b1": true},
+			blocks: map[string]uint64{"b1": 100},
+			limit:  2,
+			start:  "h3",
+			want:   true,
+		},
+		{
+			name: "origin reached by the last permitted hop is connected",
+			peer: map[string]peerRecord{
+				"h2": {200, "h1"},
+				"h1": {100, string(make([]byte, 32))},
+			},
+			limit: 2,
+			start: "h2",
+			want:  true,
+		},
+		{
+			name: "a stored block off the local chain at the limit is disconnected",
+			peer: map[string]peerRecord{
+				"h3": {300, "h2"},
+				"h2": {200, "x1"},
+			},
+			blocks: map[string]uint64{"x1": 100},
+			limit:  2,
+			start:  "h3",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			limit := tc.limit
+			if limit == 0 {
+				limit = 16
+			}
+			got := connectsToLocalChain(
+				hash(tc.start),
+				limit,
+				forkAnchorLookups{
+					peerHeader: func(h []byte) (ocommon.Point, []byte, bool) {
+						record, found := tc.peer[string(h)]
+						if !found {
+							return ocommon.Point{}, nil, false
+						}
+						return ocommon.NewPoint(record.slot, h),
+							hash(record.parent), true
+					},
+					queuedHeader: func(p ocommon.Point) bool {
+						return tc.queued[string(p.Hash)]
+					},
+					heldBlock: func(p ocommon.Point) bool {
+						return tc.held[string(p.Hash)]
+					},
+					blockByHash: func(h []byte) (ocommon.Point, bool) {
+						slot, found := tc.blocks[string(h)]
+						return ocommon.NewPoint(slot, h), found
+					},
+				},
+			)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestAdmissionHoldsQueuedParentWithoutPeerHistory(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	ls.chain = cm.PrimaryChain()
+	ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId, ocommon.Point, ocommon.Point,
+	) (uint64, error) {
+		return 1, nil
+	}
+	t.Cleanup(func() {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		}
+	})
+	parentHash := lcommon.Blake2b256Hash([]byte("queued parent"))
+	require.NoError(t, ls.chain.AddBlockHeader(context.Background(), mockHeader{
+		hash:        parentHash,
+		prevHash:    lcommon.Blake2b256{},
+		blockNumber: 1,
+		slot:        50,
+	}))
+	require.NoError(t, ls.chain.AddBlockHeader(context.Background(), mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("queued head")),
+		prevHash:    parentHash,
+		blockNumber: 2,
+		slot:        60,
+	}))
+	ls.publishSnapshotsLocked()
+	covered := &atomic.Bool{}
+	ls.slotClock.provider = gatedHorizonSlotTimeProvider{
+		SlotTimeProvider: ls.slotClock.provider,
+		slot:             90,
+		covered:          covered,
+	}
+
+	e := futureHeaderEvent(90, arrival)
+	e.BlockHeader = mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("future header")),
+		prevHash:    parentHash,
+		blockNumber: 2,
+		slot:        90,
+	}
+	results := awaitAdmissionAsync(t.Context(), ls, e)
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"a header past the forecast horizon must wait for the ledger",
+	)
+
+	ls.notifySnapshotPublished()
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"a publication that leaves the slot past the horizon must keep waiting",
+	)
+
+	covered.Store(true)
+	ls.notifySnapshotPublished()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not resume once the ledger could forecast the slot",
+	)
+	require.NoError(t, got.err)
+	require.True(t, got.accepted)
+	require.Empty(t, *waits, "a historical header has no slot onset to wait for")
+}
+
+func TestForkWalkRecognizesTerminalLocalPoint(t *testing.T) {
+	t.Parallel()
+	for _, queued := range []bool{false, true} {
+		t.Run(fmt.Sprintf("queued=%t", queued), func(t *testing.T) {
+			lookups := forkAnchorLookups{
+				peerHeader: func(hash []byte) (ocommon.Point, []byte, bool) {
+					if bytes.Equal(hash, []byte("start")) {
+						return ocommon.NewPoint(20, hash), []byte("anchor"), true
+					}
+					return ocommon.NewPoint(10, hash), []byte("older"), true
+				},
+				queuedHeader: func(p ocommon.Point) bool {
+					return queued && bytes.Equal(p.Hash, []byte("anchor"))
+				},
+				heldBlock: func(p ocommon.Point) bool {
+					return !queued && bytes.Equal(p.Hash, []byte("anchor"))
+				},
+				blockByHash: func([]byte) (ocommon.Point, bool) { return ocommon.Point{}, false },
+			}
+			require.True(t,
+				connectsToLocalChain([]byte("start"), 1, lookups),
+				"terminal local point must connect without another ancestry hop",
+			)
+			anchor, below := resolveForkAnchor([]byte("start"), 30, 1, lookups)
+			if queued {
+				require.False(t, below)
+			} else {
+				require.True(t, below, "terminal applied point must resolve the fork anchor")
+				require.Equal(t, uint64(10), anchor)
+			}
+		})
+	}
 }

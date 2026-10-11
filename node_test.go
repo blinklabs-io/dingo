@@ -4663,6 +4663,32 @@ func TestNewOuroborosConfigAppliesTxSubmissionRateLimit(t *testing.T) {
 	)
 }
 
+// The behind-tip chainsync resync is gated on chain selection having no best
+// peer; the production config must carry that answer from the live selector.
+func TestNewOuroborosConfigReportsChainSelectionBestPeer(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: NewConfig()}
+	cfg := n.newOuroborosConfig(false, 0, 0)
+	require.NotNil(t, cfg.ChainsyncHasBestPeer)
+	assert.False(t, cfg.ChainsyncHasBestPeer(), "no chain selector")
+
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	assert.False(t, cfg.ChainsyncHasBestPeer(), "no peer selected yet")
+
+	conn := newNodeTestConnId(3104)
+	tipPoint := ocommon.NewPoint(130, []byte("best"))
+	require.True(t, n.chainSelector.UpdatePeerTip(
+		conn,
+		ochainsync.Tip{Point: tipPoint, BlockNumber: 13},
+		nil,
+	))
+	require.NotNil(t, n.chainSelector.GetBestPeer())
+	assert.True(t, cfg.ChainsyncHasBestPeer(), "a selected best peer")
+}
+
 func TestLedgerStateConfigForwardsApplyRowBatching(t *testing.T) {
 	t.Parallel()
 

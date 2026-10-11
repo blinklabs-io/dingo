@@ -586,7 +586,10 @@ queued header at an origin primary tip must be an epoch-0 EBB anchored to the
 configured Byron genesis hash. A rollback to origin drops the queue, so the
 rule applies again. Headers verified before they reach the queue (chain
 selection ingress, `ValidateBlockHeaderCrypto`) are peer-relative and skip
-the rule, since the EBB's own queueing event is delivered asynchronously.
+the rule, since the EBB's own queueing event is delivered asynchronously. The
+exception is an epoch-0 EBB verified peer-relative at an origin primary tip:
+it can only be a chain's first block, so it is held to the genesis anchor
+rather than rejected as following an existing block.
 
 While the local header tip is at least `blockfetchMinBatchGapSlots` behind the
 peer tip, BlockFetch starts only once `blockfetchMinBatchHeaders` headers are
@@ -15874,6 +15877,39 @@ the peer's patience and is not a peer fault, and it ends when the peer's
 chainsync client is stopped or its connection begins shutdown (`StopChan`,
 `ConnectionDoneChan`); the client's `DoneChan` cannot end it, because that
 closes only after the callback returns.
+The hold applies only to a header that can still be released: one whose
+predecessor is the chain tip, the header tip, or reaches a queued header or
+held block through the peer's recorded headers. Queued-header membership is
+checked by hash independently of that peer's recorded history, so a header
+queued by another peer remains a valid parent. The terminal ancestor at the
+history limit is checked for local membership without another ancestry hop.
+A header whose predecessor
+matches none of these, such as the far-ahead header a promoted observer
+connection already holds, cannot be released by applying blocks the node
+already has, so admission returns `ledger.ErrChainsyncHeaderDisconnected`
+without waiting (`chainsyncHeaderDisconnected`). The callback returns and the
+connection re-intersects from the local chain with
+`ChainsyncResyncReasonDisconnectedHeaderAdmission`, which does not penalize
+the peer.
+An ingress-eligible connection whose roll-forward header trails the applied
+ledger tip by more than the security parameter `k` in block number, while the
+peer's advertised tip does not, holds a stale cursor and is resynced the same
+way, but only while chain selection has no best peer (`GetBestPeer()` is nil,
+read through `ChainsyncHasBestPeer`), with `ChainsyncResyncReasonBehindLocalTip` and no peer denial. Such a
+connection can never contribute: the ledger discards its headers as stale and
+chain selection skips the peer, while it holds an ingress slot that a peer at
+the tip could use. The check runs in the callback after
+`reconcileChainsyncIngressAdmission`, so an observer promoted with a cursor
+left far behind is resynced on its first header. The shared per-connection
+timer marker allows one resync per connection until it reconnects. A header
+within `k` of the tip (a normal rollback or fork) is not affected, and neither
+is a peer whose own tip is more than `k` behind: re-intersecting cannot bring
+it closer, so it stays attached like any other peer lagging on our chain.
+Measuring against the applied tip rather than the header tip means a peer
+ahead of ledger application during sync is never reported. While a best peer
+exists the rule is off: a peer slower than the one feeding the ledger trails
+the applied tip by more than `k` during bulk sync, and resyncing it only
+churns connections.
 Should the horizon move back after admission (a ledger rollback),
 chain-selection verification reports `ledger.ErrHeaderBeyondForecastHorizon`:
 the header waits for admission once more, and if it is still out of range it is
