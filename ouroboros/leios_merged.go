@@ -1496,17 +1496,32 @@ func (o *Ouroboros) pruneLeiosEndorserBlockCacheLocked(now time.Time) {
 	for data := range uniqueBlocks {
 		blocks = append(blocks, data)
 	}
-	// Sort by seq, not insertedAt: insertedAt is a wall-clock timestamp
-	// captured before leiosMu is acquired, so a delayed goroutine can carry an
-	// earlier timestamp into the map after a goroutine that actually won the
-	// lock and inserted first. seq is assigned while the lock is held, so it
-	// reflects true insertion order.
+	// Evict intent-only entries first, then peer-fetched manifests whose slots
+	// have not been corroborated. Unauthenticated network input must not
+	// displace content bound to an authoritative slot from the shared cache.
+	// Within each class, sort by seq rather than insertedAt:
+	// insertedAt is a wall-clock timestamp captured before leiosMu is acquired,
+	// so a delayed goroutine can carry an earlier timestamp into the map after a
+	// goroutine that actually won the lock and inserted first. seq is assigned
+	// while the lock is held, so it reflects true insertion order.
 	slices.SortFunc(blocks, func(a, b *leiosEndorserBlockData) int {
+		if a.hasManifest() != b.hasManifest() {
+			if a.hasManifest() {
+				return 1
+			}
+			return -1
+		}
+		if a.slotVerified != b.slotVerified {
+			if a.slotVerified {
+				return 1
+			}
+			return -1
+		}
 		return cmp.Compare(a.seq, b.seq)
 	})
-	// Evict oldest-inserted entries first until both the entry-count and the
-	// aggregate byte budget are satisfied. totalBytes is updated as each
-	// victim is chosen instead of being recomputed from scratch.
+	// Evict in the priority order above until both the entry-count and aggregate
+	// byte budget are satisfied. totalBytes is updated as each victim is chosen
+	// instead of being recomputed from scratch.
 	evict := 0
 	for evict < len(blocks) &&
 		(len(blocks)-evict > leiosEndorserBlockCacheMaxEntries ||

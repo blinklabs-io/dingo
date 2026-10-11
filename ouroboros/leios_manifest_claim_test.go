@@ -1176,6 +1176,84 @@ func TestLeiosRelayOfferIntentCacheIsBounded(t *testing.T) {
 	require.False(t, latest.hasManifest())
 }
 
+func TestLeiosRelayOfferIntentCannotEvictManifest(t *testing.T) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	manifestPoint, manifestRaw := testLeiosEndorserBlockRaw(t, 1)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		manifestPoint,
+		manifestRaw,
+		nil,
+		leiosStoreAuthoritative,
+	))
+
+	points := make([]ocommon.Point, leiosEndorserBlockCacheMaxEntries)
+	for idx := range points {
+		points[idx] = ocommon.NewPoint(
+			uint64(idx+2),
+			[]byte(fmt.Sprintf("%032d", idx+1)),
+		)
+		o.markLeiosEndorserBlockRelayOffer(points[idx])
+	}
+
+	data, ok := o.lookupLeiosEndorserBlock(
+		manifestPoint.Slot,
+		manifestPoint.Hash,
+	)
+	require.True(t, ok, "relay intents must not evict a cached manifest")
+	require.True(t, data.hasManifest())
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	require.Nil(t,
+		o.leiosEndorserBlocks[leiosBlockKey(points[0].Slot, points[0].Hash)],
+		"the oldest intent must be evicted before a cached manifest",
+	)
+}
+
+func TestLeiosUnverifiedManifestCannotEvictVerifiedManifest(t *testing.T) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	verifiedPoint, verifiedRaw := testLeiosEndorserBlockRaw(t, 1)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		verifiedPoint,
+		verifiedRaw,
+		nil,
+		leiosStoreAuthoritative,
+	))
+
+	var oldestUnverified ocommon.Point
+	for idx := 2; idx < leiosEndorserBlockCacheMaxEntries+2; idx++ {
+		point, raw := testLeiosEndorserBlockRaw(t, idx)
+		if idx == 2 {
+			oldestUnverified = point
+		}
+		require.NoError(t, o.storeLeiosEndorserBlock(
+			point,
+			raw,
+			nil,
+			leiosStorePeerOffered,
+		))
+	}
+
+	data, ok := o.lookupLeiosEndorserBlock(
+		verifiedPoint.Slot,
+		verifiedPoint.Hash,
+	)
+	require.True(t, ok, "unverified manifests must not evict verified content")
+	require.True(t, data.slotVerified)
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	require.Nil(t,
+		o.leiosEndorserBlocks[leiosBlockKey(
+			oldestUnverified.Slot,
+			oldestUnverified.Hash,
+		)],
+		"the oldest unverified manifest must be evicted before verified content",
+	)
+}
+
 func TestLeiosRelayOfferIntentMergesWithPersistedCacheReload(t *testing.T) {
 	t.Parallel()
 	tx, ref := testLeiosManifestTx(t, 0x63)
