@@ -6875,6 +6875,22 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("get genesis block hash: %w", err)
 	}
+	hasGenesis, err := ls.db.HasGenesisCbor(0, genesisHash[:])
+	if err != nil {
+		return fmt.Errorf("checking genesis CBOR: %w", err)
+	}
+	if !hasGenesis {
+		hasAnyGenesis, err := ls.db.HasAnyGenesisCbor(0)
+		if err != nil {
+			return fmt.Errorf("checking existing genesis CBOR: %w", err)
+		}
+		if hasAnyGenesis {
+			return fmt.Errorf(
+				"stored synthetic genesis does not match configured genesis hash %s",
+				hex.EncodeToString(genesisHash[:]),
+			)
+		}
+	}
 
 	// bootstrappedFromMithril is true only on the fall-through path below:
 	// a chain already past slot 0 whose genesis CBOR was never created,
@@ -6890,7 +6906,7 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 		// If genesis CBOR exists in the blob store with the expected hash,
 		// the database was created with a matching genesis. Older databases
 		// may still be missing the slot-0 network-state baseline.
-		if ls.db.HasGenesisCbor(0, genesisHash[:]) {
+		if hasGenesis {
 			if err := ls.ensureGenesisConstitution(nil); err != nil {
 				return err
 			}
@@ -6902,18 +6918,6 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 				return err
 			}
 			return ls.ensureGenesisNetworkState()
-		}
-		// Check if genesis CBOR exists but with a different hash.
-		// This indicates the database was created for a different
-		// network (e.g., mainnet DB with preview config) — fail fast.
-		if ls.db.HasAnyGenesisCbor(0) {
-			ls.config.Logger.Warn(
-				"slot-0 CBOR exists but does not match synthetic genesis hash, creating genesis block",
-				"component",
-				"ledger",
-				"expected_hash",
-				hex.EncodeToString(genesisHash[:]),
-			)
 		}
 		// Genesis CBOR missing (e.g., after Mithril bootstrap which
 		// imports ledger state and ImmutableDB blocks but does not

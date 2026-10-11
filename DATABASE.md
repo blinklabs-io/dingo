@@ -604,14 +604,25 @@ until the locked, offline run succeeds. PostgreSQL/MySQL advisory locks are
 connection-owned for the complete migration run. Bulk-load session settings are held on a dedicated
 connection for the duration of a bulk window and restored before that
 connection returns to the pool. Optional SQLite VACUUM receives the provider
-stop context. The modernc SQLite driver requests `sqlite3_interrupt` when
-`ExecContext` is canceled, and SQLite exits when execution reaches an
-interruptible point. Shutdown can still reach its deadline before an active
+stop context. The SQLite driver requests `sqlite3_interrupt` when an
+`ExecContext` or `QueryContext` context is canceled. A progress callback retains
+cancellation observed before execution, so cancellation during parameter binding
+is not lost when SQLite starts its first active statement. SQLite exits when
+execution reaches an interruptible point; this does not bound blocking I/O or
+user-defined callbacks. Shutdown can still reach its deadline before an active
 VACUUM callback exits; a later close call can wait for that callback to drain.
 
 The Go model `models.Block` has `TableName() == "block"`, but it is not migrated into the metadata database. Blocks are stored in the blob store. SQL rows refer to blocks with `slot`, `block_hash`, and other hash columns. `Block.Decode` is Leios-aware for Conway-tagged blocks (`ledger.BlockTypeConway`): it calls `DecodeConwayBlock` (`database/models/leios_block.go`), which tries gouroboros' strict Conway decoder first and only falls back to reconstructing a Leios-extended block when strict decode fails. This is detection-based, so the Musashi prototype's Conway-tagged blocks (block type 7 carrying a 12-field Leios-extended header body) decode from stored CBOR while real Conway networks (mainnet/preprod/preview) are unaffected. Dijkstra decoding also accepts the earlier four-component block body retained in Musashi history: it maps the body's invalid-transaction index set onto the current per-transaction validity flags for typed access while retaining the original block and body CBOR. Both compatibility decoders preserve the original wire bytes, so `Block.Cbor()` returns the verbatim block and any `DOFF` byte offsets recorded against the stored block CBOR stay valid.
 
 ## API Surface
+
+Genesis CBOR presence queries return `(bool, error)`: only a missing key or an
+exhausted, error-free iterator means absence. Backend errors reach ledger
+startup instead of triggering genesis creation.
+Synthetic genesis is identified by its ID-zero metadata, not merely its slot:
+genuine Byron slot-zero blocks are not a network mismatch. A different stored
+synthetic genesis hash rejects startup rather than creating a second baseline.
+Block-range backfill rejects invalid iterator items instead of skipping data.
 
 Use the Go APIs when code runs inside Dingo:
 
@@ -1490,6 +1501,12 @@ subset — and reports the elapsed time afterwards, because the build itself
 emits nothing while it runs.
 
 ### Midnight Indexer
+
+Block timestamps are resolved before indexing or checkpoint advancement.
+A missing slot timer, conversion error, or negative timestamp fails the
+block; backfill also fails on undecodable block data. The checkpoint remains
+at the last successfully indexed block so restart can retry the failed block.
+Synthetic storage blobs with ID zero are excluded from the chain-block scan.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
