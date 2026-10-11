@@ -4753,3 +4753,14 @@ func TestLedgerStateConfigForwardsApplyRowBatching(t *testing.T) {
 		"the option never reaches the ledger without this hop",
 	)
 }
+
+func TestLedgerStateConfigForwardsBlockfetchLowWatermarkFlag(t *testing.T) {
+	t.Parallel()
+
+	off := (&Node{config: NewConfig()}).ledgerStateConfig()
+	assert.False(t, off.BlockfetchLowWatermarkEnabled)
+	on := (&Node{
+		config: NewConfig(WithBlockfetchLowWatermarkEnabled(true)),
+	}).ledgerStateConfig()
+	assert.True(t, on.BlockfetchLowWatermarkEnabled)
+}

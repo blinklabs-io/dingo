@@ -1680,6 +1680,19 @@ func (ls *LedgerState) allowedQueuedHeaders() int {
 	)
 }
 
+// farFromTipHeaderGate returns how many headers must be queued before a
+// blockfetch starts while the header is far from the peer tip. With the low
+// watermark enabled it is one blockfetch range, so the first range after a
+// forecast-horizon release is requested while the ledger is still applying
+// the previous backlog. Only this threshold moves; the header queue capacity
+// is chain.MaxQueuedHeaders either way.
+func (ls *LedgerState) farFromTipHeaderGate(allowedHeaderCount int) int {
+	if ls.config.BlockfetchLowWatermarkEnabled {
+		return min(BlockfetchBatchSize, allowedHeaderCount)
+	}
+	return allowedHeaderCount
+}
+
 // blockfetchMinBatchHeaders returns how many headers must be queued before a
 // blockfetch starts while the local header tip is at least
 // blockfetchMinBatchGapSlots behind peerTip. It returns 0 near the peer tip,
@@ -4554,7 +4567,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	slotThreshold := ls.calculateStabilityWindow()
 	if e.Point.Slot < e.Tip.Point.Slot &&
 		(e.Tip.Point.Slot-e.Point.Slot > slotThreshold) &&
-		headersReady < allowedHeaderCount {
+		headersReady < ls.farFromTipHeaderGate(allowedHeaderCount) {
 		ls.config.Logger.Debug(
 			"accumulating headers (far from tip)",
 			"component", "ledger",

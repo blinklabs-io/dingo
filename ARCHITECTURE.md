@@ -16003,6 +16003,22 @@ allowance a second time at application, and rejects even the epoch-zero EBB
 before system start. Historical Byron validation therefore needs only the
 header's known slot onset, not a forecast of the present wall-clock slot.
 
+While the header is far from the peer tip (beyond the stability window),
+blockfetch normally starts only once `allowedQueuedHeaders()` headers are
+queued. After a forecast-horizon release the headers arrive at the pipeline
+rate, so that fill time can exceed the ledger's remaining backlog and leave it
+waiting for the first block of the next batch.
+`LedgerStateConfig.BlockfetchLowWatermarkEnabled` (off by default) lowers the
+far-from-tip gate to one blockfetch range (`BlockfetchBatchSize`,
+`farFromTipHeaderGate`). Only the fetch-start threshold moves: the header queue
+capacity (`chain.MaxQueuedHeaders()`, at least 10,000) is unchanged, and so are
+the existing guards: no new batch while a request or continuation
+is pending, and the batch starts through `startQueuedBlockfetchLocked` from the
+header pipeline owner. The node sets it from the
+`blockfetchLowWatermarkEnabled` config key, the
+`DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED` environment variable, or the
+`--blockfetch-low-watermark-enabled` flag.
+
 `blockPipelineEta0Provider` reads the immutable epoch-cache snapshot directly;
 it does not forecast, mutate the cache, or rebuild `HardForkSummary` per
 block. `decodeReadChainBatch` enforces pipeline results only when the serial

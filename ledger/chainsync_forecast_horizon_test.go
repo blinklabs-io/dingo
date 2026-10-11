@@ -1435,3 +1435,255 @@ func TestForkWalkRecognizesTerminalLocalPoint(t *testing.T) {
 		})
 	}
 }
+
+func TestFarFromTipBlockfetchLowWatermark(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		lowMark   bool
+		headers   int
+		wantFetch bool
+	}{
+		{name: "default holds below the four-range threshold", headers: 600},
+		{name: "low watermark starts at one range", lowMark: true, headers: BlockfetchBatchSize, wantFetch: true},
+		{name: "low watermark waits below one range", lowMark: true, headers: BlockfetchBatchSize - 1},
+		{name: "default starts at the four-range threshold", headers: BlockfetchBatchSize * 4, wantFetch: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cm, err := chain.NewManager(context.Background(), nil, nil)
+			require.NoError(t, err)
+			requests := make(chan [2]ocommon.Point, 8)
+			ls := &LedgerState{
+				chain: cm.PrimaryChain(),
+				config: LedgerStateConfig{
+					Logger: slog.New(
+						slog.NewJSONHandler(io.Discard, nil),
+					),
+					BlockfetchLowWatermarkEnabled: tc.lowMark,
+					BlockfetchRequestRangeFunc: func(
+						_ ouroboros.ConnectionId,
+						start ocommon.Point,
+						end ocommon.Point,
+					) (uint64, error) {
+						requests <- [2]ocommon.Point{start, end}
+						return 1, nil
+					},
+				},
+			}
+			ls.publishSnapshotsLocked()
+			t.Cleanup(func() {
+				if ls.chainsyncBlockfetchTimeoutTimer != nil {
+					ls.chainsyncBlockfetchTimeoutTimer.Stop()
+				}
+			})
+			connId := testRecycleConnId()
+			tip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(100_000_000, []byte("tip")),
+				BlockNumber: 10_000_000,
+			}
+
+			prev := lcommon.NewBlake2b256(nil)
+			for i := 1; i <= tc.headers; i++ {
+				hash := lcommon.NewBlake2b256(
+					testHashBytes(fmt.Sprintf("lowmark-%d", i)),
+				)
+				header := mockHeader{
+					hash:        hash,
+					prevHash:    prev,
+					blockNumber: uint64(i),
+					slot:        uint64(i),
+				}
+				prev = hash
+				require.NoError(
+					t,
+					ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+						ConnectionId: connId,
+						BlockHeader:  header,
+						Point: ocommon.NewPoint(
+							header.SlotNumber(),
+							hash.Bytes(),
+						),
+						Tip: tip,
+					}),
+				)
+			}
+
+			if !tc.wantFetch {
+				testutil.RequireNoReceive(
+					t,
+					requests,
+					100*time.Millisecond,
+					"blockfetch must wait for the configured header count",
+				)
+				return
+			}
+			testutil.RequireReceive(
+				t,
+				requests,
+				testutil.AsyncWait,
+				"blockfetch must start once the gate is met",
+			)
+			require.Less(t, ls.chain.HeaderCount(), ls.allowedQueuedHeaders()+1)
+		})
+	}
+}
+
+// The forecast horizon holds the header that follows the queued ones; once the
+// ledger can forecast its slot and the connection re-delivers it, the far-from-
+// tip gate decides whether blockfetch starts at one range or at four ranges.
+func TestFarFromTipBlockfetchLowWatermarkAfterHorizonRelease(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		lowMark   bool
+		wantFetch bool
+	}{
+		{name: "default keeps waiting for the four-range threshold"},
+		{name: "low watermark starts at one range", lowMark: true, wantFetch: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			bus := event.NewEventBus(nil, nil)
+			t.Cleanup(bus.Stop)
+			resyncs := make(chan event.ChainsyncResyncEvent, 1)
+			bus.SubscribeFunc(
+				event.ChainsyncResyncEventType,
+				func(evt event.Event) {
+					if e, ok := evt.Data.(event.ChainsyncResyncEvent); ok {
+						resyncs <- e
+					}
+				},
+			)
+			cm, err := chain.NewManager(context.Background(), nil, nil)
+			require.NoError(t, err)
+			requests := make(chan [2]ocommon.Point, 8)
+			// The last header of the first range is the one the horizon holds.
+			heldSlot := uint64(BlockfetchBatchSize)
+			covered := &atomic.Bool{}
+			systemStart := time.Date(
+				2026,
+				time.August,
+				22,
+				12,
+				0,
+				0,
+				0,
+				time.UTC,
+			)
+			ls := &LedgerState{
+				chain: cm.PrimaryChain(),
+				slotClock: NewSlotClock(
+					gatedHorizonSlotTimeProvider{
+						SlotTimeProvider: newMockSlotTimeProvider(
+							systemStart,
+							time.Second,
+							100,
+						),
+						slot:    heldSlot,
+						covered: covered,
+					},
+					DefaultSlotClockConfig(),
+				),
+				config: LedgerStateConfig{
+					Logger: slog.New(
+						slog.NewJSONHandler(io.Discard, nil),
+					),
+					EventBus:                      bus,
+					BlockfetchLowWatermarkEnabled: tc.lowMark,
+					BlockfetchRequestRangeFunc: func(
+						_ ouroboros.ConnectionId,
+						start ocommon.Point,
+						end ocommon.Point,
+					) (uint64, error) {
+						requests <- [2]ocommon.Point{start, end}
+						return 1, nil
+					},
+				},
+			}
+			ls.publishSnapshotsLocked()
+			t.Cleanup(func() {
+				if ls.chainsyncBlockfetchTimeoutTimer != nil {
+					ls.chainsyncBlockfetchTimeoutTimer.Stop()
+				}
+			})
+			connId := testRecycleConnId()
+			tip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(100_000_000, []byte("tip")),
+				BlockNumber: 10_000_000,
+			}
+			prev := lcommon.NewBlake2b256(nil)
+			deliver := func(i int) {
+				t.Helper()
+				hash := lcommon.NewBlake2b256(
+					testHashBytes(fmt.Sprintf("horizon-lowmark-%d", i)),
+				)
+				header := mockHeader{
+					hash:        hash,
+					prevHash:    prev,
+					blockNumber: uint64(i),
+					slot:        uint64(i),
+				}
+				require.NoError(t, ls.handleEventChainsyncBlockHeader(
+					ChainsyncEvent{
+						ConnectionId: connId,
+						BlockHeader:  header,
+						Point: ocommon.NewPoint(
+							header.SlotNumber(),
+							hash.Bytes(),
+						),
+						Tip: tip,
+					},
+				))
+				// A header the horizon withholds is not queued, so the next
+				// delivery must still chain from the last queued header.
+				if ls.chain.HeaderCount() == i {
+					prev = hash
+				}
+			}
+
+			for i := 1; i < BlockfetchBatchSize; i++ {
+				deliver(i)
+			}
+			deliver(BlockfetchBatchSize)
+			require.Equal(t, BlockfetchBatchSize-1, ls.chain.HeaderCount())
+			got := testutil.RequireReceive(
+				t,
+				resyncs,
+				testutil.AsyncWait,
+				"a header past the horizon must re-intersect its connection",
+			)
+			require.Equal(t, "header past forecast horizon", got.Reason)
+			testutil.RequireNoReceive(
+				t,
+				requests,
+				100*time.Millisecond,
+				"no blockfetch may start while the horizon holds the header",
+			)
+
+			covered.Store(true)
+			deliver(BlockfetchBatchSize)
+			require.Equal(t, BlockfetchBatchSize, ls.chain.HeaderCount())
+
+			if !tc.wantFetch {
+				testutil.RequireNoReceive(
+					t,
+					requests,
+					100*time.Millisecond,
+					"the default gate must keep waiting for the four-range threshold",
+				)
+				return
+			}
+			testutil.RequireReceive(
+				t,
+				requests,
+				testutil.AsyncWait,
+				"the released range must be requested at one range of headers",
+			)
+		})
+	}
+}
