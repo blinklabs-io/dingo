@@ -490,6 +490,49 @@ func (cs *ChainSelector) bestKnownGenesisSlotLocked(
 	return best
 }
 
+// advertisedTipFarBehindMajorityLocked reports whether, in Genesis mode, a
+// strict majority of the live, eligible, non-stale peers advertise a tip more
+// than k blocks beyond this peer's advertised tip. Such a peer holds a chain the
+// rest of the network has long outgrown (an abandoned fork whose tip stopped
+// advancing), however many headers it has already delivered: delivery is
+// bounded by the chain it holds, so it can lead on delivered density and
+// frontier against peers still streaming a longer chain. It must neither be
+// selected (which also keeps it out of the Genesis exit horizon, built from
+// selectable peers) nor define the delivered frontier honest peers are measured
+// against.
+//
+// A majority is required so a single peer advertising an inflated tip cannot
+// disqualify the honest rest, and a lone peer or peers that agree on the
+// network tip are never affected. Outside Genesis mode, Praos comparison
+// already orders chains by their selection tip.
+func (cs *ChainSelector) advertisedTipFarBehindMajorityLocked(
+	connId ouroboros.ConnectionId,
+	peerTip *PeerChainTip,
+) bool {
+	if cs.mode != SelectionModeGenesis || cs.securityParam == 0 ||
+		peerTip == nil {
+		return false
+	}
+	ceiling := safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam)
+	var ahead, rest int
+	for otherConn, other := range cs.peerTips {
+		if otherConn == connId {
+			rest++
+			continue
+		}
+		if other == nil || other.awaitingFirstHeader ||
+			!cs.peerLiveEligibleNonStaleLocked(otherConn, other) {
+			continue
+		}
+		if other.Tip.BlockNumber > ceiling {
+			ahead++
+		} else {
+			rest++
+		}
+	}
+	return ahead > rest
+}
+
 func (cs *ChainSelector) shouldExitGenesisModeLocked(
 	bestKnownBlock *uint64,
 ) (bool, uint64) {
@@ -1686,6 +1729,17 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 		}
 		return false
 	}
+	if cs.advertisedTipFarBehindMajorityLocked(connId, peerTip) {
+		if logSkip {
+			cs.config.Logger.Debug(
+				"skipping peer advertising a tip far behind other peers",
+				"connection_id", connId.String(),
+				"advertised_block_number", peerTip.Tip.BlockNumber,
+				"security_param", cs.securityParam,
+			)
+		}
+		return false
+	}
 	selectionTip := peerTip.SelectionTip()
 	// The two behind-filters below compare delivered block numbers. A peer
 	// registered from a rollback has not delivered a header yet, so its
@@ -1878,6 +1932,9 @@ func (cs *ChainSelector) bestKnownBlockNumber() uint64 {
 	}
 	frontiers := make([]frontier, 0, len(cs.peerTips))
 	for connId, pt := range cs.peerTips {
+		if cs.advertisedTipFarBehindMajorityLocked(connId, pt) {
+			continue
+		}
 		if blockNumber := pt.SelectionTip().BlockNumber; blockNumber > 0 {
 			frontiers = append(frontiers, frontier{connId, pt, blockNumber})
 		}
