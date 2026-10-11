@@ -1205,6 +1205,9 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// error must not tear down the shared connection.
 		manifestKey := leiosBlockKey(point.Slot, point.Hash)
 		guard, admitted := o.reserveLeiosFetch(ctx.ConnectionId)
+		if guard == nil {
+			return errors.New("missing leios fetch guard")
+		}
 		if !admitted {
 			return nil
 		}
@@ -1314,6 +1317,9 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// this occurrence from a healthy peer.
 		hashKey := leiosBlockKey(point.Slot, point.Hash)
 		guard, admitted := o.reserveLeiosFetch(ctx.ConnectionId)
+		if guard == nil {
+			return errors.New("missing leios fetch guard")
+		}
 		if !admitted {
 			return guard.deferLeiosFetch(
 				hashKey,
@@ -1619,7 +1625,11 @@ func (o *Ouroboros) leiosFetchGuardFor(
 	connId ouroboros.ConnectionId,
 ) *leiosFetchGuard {
 	g, _ := o.leiosFetchGuards.LoadOrStore(connId, &leiosFetchGuard{})
-	return g.(*leiosFetchGuard)
+	guard := g.(*leiosFetchGuard)
+	if guard == nil {
+		panic("nil leios fetch guard")
+	}
+	return guard
 }
 
 // reserveLeiosFetch reserves one per-connection fetch slot without publishing
