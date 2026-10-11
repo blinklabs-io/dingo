@@ -215,6 +215,12 @@ type Ouroboros struct {
 	// the connection; one earliest-onset timer is retained per connection.
 	chainsyncHeaderAdmission chainsyncHeaderAdmissionFunc
 	chainsyncHeaderSlotTime  func(uint64) (time.Time, error)
+	// chainsyncLocalTipBlock returns the local tip's block number and the
+	// security parameter k. Tests override it without a LedgerState.
+	chainsyncLocalTipBlock func() (tipBlock, k uint64)
+	// chainsyncHasBestPeer reports whether chain selection currently has a
+	// best peer. Nil means none. Tests override it without a node.
+	chainsyncHasBestPeer func() bool
 	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
 	// gate whether a peer-reported header may influence Genesis chain-selection
 	// density or corroboration before its VRF/KES cryptography (and, once local
@@ -414,6 +420,11 @@ type OuroborosConfig struct {
 	// keep inbound/public noise out of ledger ingress while still
 	// tracking peer tips separately for selection and observability.
 	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncHasBestPeer reports whether chain selection currently has a
+	// selected best peer. It runs on the ChainSync callback goroutine for
+	// every roll-forward, so it must not wait on locks held across a call back
+	// into this package. When nil, no best peer is assumed.
+	ChainsyncHasBestPeer func() bool
 	// ChainsyncApplyEligible reports whether a peer's chainsync headers
 	// and rollbacks may be APPLIED to the ledger. It is a second gate,
 	// stricter than ChainsyncIngressEligible: a peer can be ingress-
@@ -672,11 +683,16 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.BlockfetchMaxRangesGlobal,
 	)
 	o.blockfetchConnClient = o.blockfetchConnClientLive
+	o.chainsyncHasBestPeer = cfg.ChainsyncHasBestPeer
 	o.blockfetchRangeBytes = func(ocommon.Point, ocommon.Point) uint64 { return 0 }
 	if o.ledgerState != nil {
 		o.blockfetchRangeBytes = o.ledgerState.BlockfetchRangeExpectedBytes
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
+		o.chainsyncLocalTipBlock = func() (uint64, uint64) {
+			k := max(o.ledgerState.SecurityParam(), 0)
+			return o.ledgerState.Tip().BlockNumber, uint64(k)
+		}
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
 		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCrypto
 	}
