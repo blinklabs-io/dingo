@@ -214,7 +214,7 @@ func newLiveLifecycleTestNodeWithStorageMode(
 	// the field under test.
 	ledgerState, err := ledger.NewLedgerState(n.ledgerStateConfig())
 	require.NoError(t, err)
-	n.ledgerState = ledgerState
+	n.setLedgerState(ledgerState)
 	// Build the harness ouroboros the way Run() does: every dependency up
 	// front, through the validating constructor, so the live-restore
 	// reconstruction assertions below exercise the production path rather

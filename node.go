@@ -199,6 +199,11 @@ type Node struct {
 	// running, which this mutex would otherwise make indistinguishable.
 	liveLifecycleMu sync.Mutex
 
+	// wallClockLedger mirrors n.ledgerState for the chain selector's
+	// wall-clock hook, which runs on the selector's goroutine across live
+	// rebuilds. Written only through setLedgerState.
+	wallClockLedger atomic.Pointer[ledger.LedgerState]
+
 	// A selected-to-none transition cannot be dropped while a live database
 	// lifecycle operation holds liveLifecycleMu. One node-owned worker retains
 	// only the latest contended transition and retries until the lifecycle lock
@@ -865,7 +870,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to load state database: %w", err)
 	}
-	n.ledgerState = state
+	n.setLedgerState(state)
 	// n.ouroboros is constructed once every dependency exists; see the
 	// NewOuroboros call below.
 	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
@@ -2165,9 +2170,6 @@ func (n *Node) buildChainSelectorConfig(
 	genesisMode bool,
 	genesisWindowSlots uint64,
 ) chainselection.ChainSelectorConfig {
-	// Captured once: n.ledgerState is replaced by live Restore/Truncate
-	// without a lock the selector could share.
-	ls := n.ledgerState
 	return chainselection.ChainSelectorConfig{
 		Logger:                n.config.logger,
 		EventBus:              n.eventBus,
@@ -2190,7 +2192,11 @@ func (n *Node) buildChainSelectorConfig(
 		},
 		OnRollbackRegistration:     n.recordRollbackRegistration,
 		OnGenesisDensityDisconnect: n.onGenesisDensityDisconnect,
+		// The selector outlives a live Restore/Truncate and calls this under
+		// its own lock, so it reads the ledger through an atomic rather than
+		// capturing one instance or taking liveLifecycleMu.
 		WallClockSlot: func() (uint64, bool) {
+			ls := n.wallClockLedger.Load()
 			if ls == nil {
 				return 0, false
 			}
@@ -2198,6 +2204,13 @@ func (n *Node) buildChainSelectorConfig(
 			return slot, err == nil
 		},
 	}
+}
+
+// setLedgerState replaces n.ledgerState and the copy published to readers
+// that cannot take liveLifecycleMu.
+func (n *Node) setLedgerState(ls *ledger.LedgerState) {
+	n.ledgerState = ls
+	n.wallClockLedger.Store(ls)
 }
 
 func (n *Node) setPeerGovernor(peerGov *peergov.PeerGovernor) {

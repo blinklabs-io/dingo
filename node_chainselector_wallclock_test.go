@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -32,4 +33,29 @@ func TestBuildChainSelectorConfigWallClockSlot(t *testing.T) {
 	slot, ok := cfg.WallClockSlot()
 	assert.False(t, ok)
 	assert.Zero(t, slot)
+}
+
+// The chain selector outlives a live Truncate or Restore and is never rebuilt,
+// so its wall-clock hook must follow the node's current ledger state: unknown
+// while storage is closed, and the rebuilt ledger afterwards, never the closed
+// instance it was built alongside.
+func TestChainSelectorWallClockFollowsLiveLedgerRebuild(t *testing.T) {
+	t.Parallel()
+	n, _ := newLiveLifecycleTestNode(t, 4)
+	cfg := n.buildChainSelectorConfig(2160, true, 0)
+	_, ok := cfg.WallClockSlot()
+	require.True(t, ok, "fixture: wall clock unavailable before the rebuild")
+
+	ctx := context.Background()
+	n.liveLifecycleMu.Lock()
+	defer n.liveLifecycleMu.Unlock()
+	require.NoError(t, n.quiesceForLiveLifecycleOp(ctx))
+	require.NoError(t, n.closeStorageForLiveLifecycleOp(ctx))
+	_, ok = cfg.WallClockSlot()
+	assert.False(t, ok,
+		"wall clock read from the ledger state a live lifecycle op closed")
+
+	require.NoError(t, n.reinitializeAndResume(ctx))
+	_, ok = cfg.WallClockSlot()
+	assert.True(t, ok, "wall clock unavailable after the ledger was rebuilt")
 }

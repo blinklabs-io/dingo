@@ -538,7 +538,7 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 				fmt.Errorf("ledger state close: %w", closeErr),
 			)
 		}
-		n.ledgerState = nil
+		n.setLedgerState(nil)
 	}
 
 	if n.deferredIndexMaintenanceDone != nil {
@@ -673,7 +673,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to reload state database: %w", err)
 	}
-	n.ledgerState = state
+	n.setLedgerState(state)
 	// n.ouroboros is rewired in one place, once every rebuilt dependency
 	// exists; see the NewOuroboros call in reinitializeNetworkingCore.
 	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
