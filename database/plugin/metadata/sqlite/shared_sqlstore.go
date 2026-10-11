@@ -596,6 +596,7 @@ func openSQLStore(
 	}
 
 	store, err := sqlstore.New(sqlstore.Config{
+		GenesisStakingEmpty: dependencies.GenesisStakingEmpty,
 		SQLitePath:          databasePath,
 		WriteDB:             writeDB,
 		ReadDB:              readDB,

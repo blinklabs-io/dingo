@@ -36,6 +36,8 @@ var savepointNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Config contains dependencies and optional provider capabilities for a Store.
 type Config struct {
+	// GenesisStakingEmpty certifies that the loaded genesis has no initial staking.
+	GenesisStakingEmpty bool
 	// SQLitePath identifies the file opened by the provider, including its
 	// dataDir override. Reconstructing it from the node's global directory
 	// could point introspection clients at a different database. It is empty
@@ -173,24 +175,25 @@ type Store struct {
 	// it nil.
 	committeeAuthPruneLocked func()
 
-	migrations        []migrations.Migration
-	migrationLocker   migrations.Locker
-	diskSize          func() (int64, error)
-	maintenance       func(context.Context) error
-	maintenanceEvery  time.Duration
-	vacuum            func(context.Context) error
-	vacuumEvery       time.Duration
-	backupTo          func(context.Context, string) error
-	restoreFrom       func(context.Context, string) error
-	prepare           func(context.Context) error
-	reset             func(context.Context) error
-	validateBackup    func(context.Context, string) error
-	maintenanceCancel context.CancelFunc
-	maintenanceDone   chan struct{}
-	maintenanceState  atomic.Uint32
-	vacuumCancel      context.CancelFunc
-	vacuumDone        chan struct{}
-	vacuumState       atomic.Uint32
+	migrations          []migrations.Migration
+	genesisStakingEmpty bool
+	migrationLocker     migrations.Locker
+	diskSize            func() (int64, error)
+	maintenance         func(context.Context) error
+	maintenanceEvery    time.Duration
+	vacuum              func(context.Context) error
+	vacuumEvery         time.Duration
+	backupTo            func(context.Context, string) error
+	restoreFrom         func(context.Context, string) error
+	prepare             func(context.Context) error
+	reset               func(context.Context) error
+	validateBackup      func(context.Context, string) error
+	maintenanceCancel   context.CancelFunc
+	maintenanceDone     chan struct{}
+	maintenanceState    atomic.Uint32
+	vacuumCancel        context.CancelFunc
+	vacuumDone          chan struct{}
+	vacuumState         atomic.Uint32
 
 	// tickDelay returns how long a periodic job waits before its next run.
 	// New sets it to jitteredInterval; tests replace it before Start.
@@ -302,6 +305,7 @@ func New(config Config) (*Store, error) {
 		committeeAuthRetentionSlots: config.CommitteeAuthRetentionSlots,
 		migrations:                  config.Migrations,
 		migrationLocker:             config.MigrationLocker,
+		genesisStakingEmpty:         config.GenesisStakingEmpty,
 		diskSize:                    config.DiskSize,
 		tickDelay:                   jitteredInterval,
 		maintenance:                 config.Maintenance,
@@ -452,12 +456,13 @@ func (s *Store) Start(ctx context.Context) error {
 	}
 	if len(s.migrations) > 0 {
 		runner := migrations.Runner{
-			DB:       s.writeDB,
-			Dialect:  s.dialect.Name(),
-			Registry: s.migrations,
-			Locker:   s.migrationLocker,
-			Logger:   s.logger,
-			Rebind:   s.dialect.Rebind,
+			DB:            s.writeDB,
+			Dialect:       s.dialect.Name(),
+			Registry:      s.migrations,
+			Locker:        s.migrationLocker,
+			Logger:        s.logger,
+			Rebind:        s.dialect.Rebind,
+			BeforeUpgrade: s.preflightRewardStakeUpgrade,
 		}
 		if err := runner.Run(ctx); err != nil {
 			return fmt.Errorf("sqlstore: metadata upgrade: %w", err)
@@ -693,7 +698,9 @@ func (s *Store) startMaintenance() {
 func jitteredInterval(every time.Duration) time.Duration {
 	const maxDuration = time.Duration(1<<63 - 1)
 	jitterMax := min(every/10, maxDuration-every)
-	return every + rand.N(jitterMax+1) //nolint:gosec // schedule jitter, not a secret
+	return every + rand.N(
+		jitterMax+1,
+	) //nolint:gosec // schedule jitter, not a secret
 }
 
 // postponeWarnEvery is how many consecutive postponements pass between
@@ -1247,9 +1254,13 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 	switch operation {
 	case "SAVEPOINT":
 		if t.batchSavepoints == nil {
-			t.batchSavepoints = make(map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint)
+			t.batchSavepoints = make(
+				map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint,
+			)
 		}
-		checkpoint := make(map[*transactionBatchAccumulator]transactionBatchCheckpoint)
+		checkpoint := make(
+			map[*transactionBatchAccumulator]transactionBatchCheckpoint,
+		)
 		for accumulator := range t.batchBefore {
 			checkpoint[accumulator] = accumulator.checkpoint()
 		}
@@ -1366,7 +1377,9 @@ func (t *sqlTxn) bindBatch(accumulator *transactionBatchAccumulator) error {
 		return types.ErrNilTxn
 	}
 	if t.batchBefore == nil {
-		t.batchBefore = make(map[*transactionBatchAccumulator]transactionBatchCheckpoint)
+		t.batchBefore = make(
+			map[*transactionBatchAccumulator]transactionBatchCheckpoint,
+		)
 	}
 	if _, exists := t.batchBefore[accumulator]; exists {
 		return nil

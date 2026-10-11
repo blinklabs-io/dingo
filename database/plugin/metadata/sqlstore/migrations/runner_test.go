@@ -509,17 +509,67 @@ func TestRunnerAddColumnReplayVerifiesDefinition(t *testing.T) {
 		declared string
 		wantErr  bool
 	}{
-		{"identical", "integer NOT NULL DEFAULT 0", "integer NOT NULL DEFAULT 0", false},
-		{"boolean spelling", "boolean NOT NULL DEFAULT false", "boolean NOT NULL DEFAULT FALSE", false},
+		{
+			"identical",
+			"integer NOT NULL DEFAULT 0",
+			"integer NOT NULL DEFAULT 0",
+			false,
+		},
+		{
+			"boolean spelling",
+			"boolean NOT NULL DEFAULT false",
+			"boolean NOT NULL DEFAULT FALSE",
+			false,
+		},
 		{"nullable no default", "text", "text", false},
-		{"quoted whitespace default", "text NOT NULL DEFAULT 'needs review'", "text NOT NULL DEFAULT 'needs review'", false},
-		{"escaped quoted whitespace default", "text NOT NULL DEFAULT 'it''s under review'", "text NOT NULL DEFAULT 'it''s under review'", false},
-		{"quoted literal case", "text NOT NULL DEFAULT 'abc'", "text NOT NULL DEFAULT 'ABC'", true},
-		{"declared not null, existing nullable", "integer DEFAULT 0", "integer NOT NULL DEFAULT 0", true},
-		{"declared nullable, existing not null", "integer NOT NULL DEFAULT 0", "integer DEFAULT 0", true},
-		{"declared default, existing none", "integer NOT NULL", "integer NOT NULL DEFAULT 0", true},
-		{"declared none, existing default", "integer NOT NULL DEFAULT 0", "integer NOT NULL", true},
-		{"different default", "integer NOT NULL DEFAULT 1", "integer NOT NULL DEFAULT 0", true},
+		{
+			"quoted whitespace default",
+			"text NOT NULL DEFAULT 'needs review'",
+			"text NOT NULL DEFAULT 'needs review'",
+			false,
+		},
+		{
+			"escaped quoted whitespace default",
+			"text NOT NULL DEFAULT 'it''s under review'",
+			"text NOT NULL DEFAULT 'it''s under review'",
+			false,
+		},
+		{
+			"quoted literal case",
+			"text NOT NULL DEFAULT 'abc'",
+			"text NOT NULL DEFAULT 'ABC'",
+			true,
+		},
+		{
+			"declared not null, existing nullable",
+			"integer DEFAULT 0",
+			"integer NOT NULL DEFAULT 0",
+			true,
+		},
+		{
+			"declared nullable, existing not null",
+			"integer NOT NULL DEFAULT 0",
+			"integer DEFAULT 0",
+			true,
+		},
+		{
+			"declared default, existing none",
+			"integer NOT NULL",
+			"integer NOT NULL DEFAULT 0",
+			true,
+		},
+		{
+			"declared none, existing default",
+			"integer NOT NULL DEFAULT 0",
+			"integer NOT NULL",
+			true,
+		},
+		{
+			"different default",
+			"integer NOT NULL DEFAULT 1",
+			"integer NOT NULL DEFAULT 0",
+			true,
+		},
 		{"unverifiable constraint", "integer UNIQUE", "integer UNIQUE", true},
 	}
 	for _, tc := range cases {
@@ -928,4 +978,104 @@ func openTestDBFromBaseline(t *testing.T, baseline []byte) *sql.DB {
 		require.NoError(t, db.Close())
 	})
 	return db
+}
+
+func TestRunnerPrerequisiteRefusalPreservesSchema(t *testing.T) {
+	t.Parallel()
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
+			db := openTestDB(t)
+			runner := testRunner(db, testMigration(nil))
+			if existing {
+				require.NoError(t, runner.Run(t.Context()))
+			}
+			schema := func() string {
+				t.Helper()
+				var value string
+				require.NoError(
+					t,
+					db.QueryRow(`SELECT COALESCE(group_concat(sql), '')
+FROM (SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name)`).Scan(&value),
+				)
+				return value
+			}
+			beforeSchema := schema()
+			conn, err := db.Conn(t.Context())
+			require.NoError(t, err)
+			var beforeStates map[int]state
+			if existing {
+				beforeStates, err = runner.readStates(t.Context(), conn)
+				require.NoError(t, err)
+			}
+			require.NoError(t, conn.Close())
+			backfillCalled := false
+			runner.Registry = append(runner.Registry, Migration{
+				Version:          2,
+				Name:             "new_column",
+				BackfillRevision: "1",
+				SQL: map[string]SQL{"sqlite": {
+					Expand: []string{
+						"ALTER TABLE item ADD COLUMN upgraded BOOLEAN NOT NULL DEFAULT FALSE",
+					},
+				}},
+				Backfill: func(context.Context, Batch) (BatchResult, error) {
+					backfillCalled = true
+					return BatchResult{Done: true}, nil
+				},
+			})
+			refusal := errors.New("startup prerequisite refused")
+			calls := 0
+			runner.BeforeUpgrade = func(ctx context.Context, conn *sql.Conn) error {
+				calls++
+				var present int
+				err := conn.QueryRowContext(
+					ctx,
+					"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'item'",
+				).Scan(&present)
+				require.NoError(t, err)
+				require.Equal(t, existing, present != 0)
+				return refusal
+			}
+			require.ErrorIs(t, runner.Run(t.Context()), refusal)
+			require.Equal(t, 1, calls)
+			require.Equal(
+				t,
+				beforeSchema,
+				schema(),
+				"refusal must preserve every schema object",
+			)
+			require.False(
+				t,
+				backfillCalled,
+				"refusal must precede all migration execution",
+			)
+			if existing {
+				conn, err := db.Conn(t.Context())
+				require.NoError(t, err)
+				afterStates, err := runner.readStates(t.Context(), conn)
+				require.NoError(t, err)
+				require.NoError(t, conn.Close())
+				require.Equal(
+					t,
+					beforeStates,
+					afterStates,
+					"refusal must preserve migration progress",
+				)
+			}
+			runner.BeforeUpgrade = func(context.Context, *sql.Conn) error { return nil }
+			require.NoError(t, runner.Run(t.Context()))
+			require.True(
+				t,
+				backfillCalled,
+				"accepted prerequisites must allow the pending upgrade",
+			)
+			var upgraded bool
+			require.NoError(
+				t,
+				db.QueryRow("SELECT upgraded FROM item LIMIT 1").
+					Scan(&upgraded),
+			)
+			require.False(t, upgraded)
+		})
+	}
 }

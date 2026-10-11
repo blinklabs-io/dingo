@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -36,7 +37,8 @@ import (
 
 func testConfig(dataDir string) *config.Config {
 	return &config.Config{
-		DatabasePath: dataDir,
+		CardanoConfig: cardano.EmbeddedConfigPath("preview"),
+		DatabasePath:  dataDir,
 		Plugins: config.PluginsConfig{
 			Storage: config.StoragePluginsConfig{
 				Blob:     plugin.Selection{Provider: "badger"},

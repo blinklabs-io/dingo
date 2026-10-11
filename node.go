@@ -313,7 +313,10 @@ func New(cfg Config) (*Node, error) {
 	// only after configuration validates. If it were created earlier, a
 	// validation failure would return a nil Node while leaving those goroutines
 	// running, with no handle for the caller to Stop() them.
-	eventBus, err := event.TryNewEventBus(n.config.promRegistry, n.config.logger)
+	eventBus, err := event.TryNewEventBus(
+		n.config.promRegistry,
+		n.config.logger,
+	)
 	if err != nil {
 		metricsRegistration.Rollback()
 		// TryNewEventBus names the failed registration in its error.
@@ -706,7 +709,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			StorageMode:    string(n.config.storageMode),
 			MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 			Logger:         n.config.logger, PromRegistry: n.config.promRegistry,
-			TracingEnabled: n.config.tracing,
+			TracingEnabled:      n.config.tracing,
+			GenesisStakingEmpty: n.genesisStakingEmpty(),
 		},
 	)
 	if err != nil {

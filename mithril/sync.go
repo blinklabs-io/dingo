@@ -121,7 +121,10 @@ func cleanupInvalidRepairStoredGapBeforeImport(
 	}
 	recent, err := database.BlocksRecent(ctx, db, 1)
 	if err != nil {
-		return false, fmt.Errorf("reading local chain tip for repair gap: %w", err)
+		return false, fmt.Errorf(
+			"reading local chain tip for repair gap: %w",
+			err,
+		)
 	}
 	if len(recent) == 0 || recent[0].Slot <= certifiedTip.Slot {
 		return false, nil
@@ -133,11 +136,17 @@ func cleanupInvalidRepairStoredGapBeforeImport(
 		resumeGapEnd,
 	)
 	if err != nil {
-		return false, fmt.Errorf("loading stored repair gap before import: %w", err)
+		return false, fmt.Errorf(
+			"loading stored repair gap before import: %w",
+			err,
+		)
 	}
 	immutableTip, err := database.BlockByPoint(ctx, db, certifiedTip)
 	if err != nil {
-		return false, fmt.Errorf("reading certified tip for repair gap: %w", err)
+		return false, fmt.Errorf(
+			"reading certified tip for repair gap: %w",
+			err,
+		)
 	}
 	var validateErr error
 	if recent[0].Slot < stateTip.Slot {
@@ -170,7 +179,10 @@ func cleanupInvalidRepairStoredGapBeforeImport(
 		certifiedTip.Slot,
 		preservedLocalTail,
 	); err != nil {
-		return false, fmt.Errorf("cleaning rejected stored repair gap before import: %w", err)
+		return false, fmt.Errorf(
+			"cleaning rejected stored repair gap before import: %w",
+			err,
+		)
 	}
 	return true, nil
 }
@@ -243,7 +255,10 @@ func verifyRewardRepairLocalTail(
 		anchorPoint,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("validating existing Mithril ledger point: %w", err)
+		return nil, fmt.Errorf(
+			"validating existing Mithril ledger point: %w",
+			err,
+		)
 	}
 	if !oldAnchorOnLocalChain {
 		return nil, fmt.Errorf(
@@ -264,7 +279,10 @@ func verifyRewardRepairLocalTail(
 		ctx, db, localTip, statePoint,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("validating reward-repair snapshot ancestry: %w", err)
+		return nil, fmt.Errorf(
+			"validating reward-repair snapshot ancestry: %w",
+			err,
+		)
 	}
 	if !stateOnLocalChain {
 		return nil, fmt.Errorf(
@@ -606,7 +624,10 @@ func markSyncInProgress(
 		if err := db.SetSyncState(
 			RewardStateRepairActiveKey, "1", nil,
 		); err != nil {
-			return fmt.Errorf("marking reward-state repair in-progress: %w", err)
+			return fmt.Errorf(
+				"marking reward-state repair in-progress: %w",
+				err,
+			)
 		}
 	}
 	if err := db.SetSyncState(
@@ -1092,7 +1113,9 @@ func Sync(
 		)
 	}
 	if certifiedTip == nil {
-		return SyncResult{}, errors.New("certified ImmutableDB has no chain tip")
+		return SyncResult{}, errors.New(
+			"certified ImmutableDB has no chain tip",
+		)
 	}
 
 	var preparedRepairImport *preparedLedgerStateImport
@@ -1106,10 +1129,15 @@ func Sync(
 	if catchUp {
 		recent, recentErr := database.BlocksRecent(ctx, db, 1)
 		if recentErr != nil {
-			return SyncResult{}, fmt.Errorf("reading local chain tip: %w", recentErr)
+			return SyncResult{}, fmt.Errorf(
+				"reading local chain tip: %w",
+				recentErr,
+			)
 		}
 		if len(recent) == 0 {
-			return SyncResult{}, errors.New("catch-up: local database has no chain tip")
+			return SyncResult{}, errors.New(
+				"catch-up: local database has no chain tip",
+			)
 		}
 		localTip := recent[0]
 		targetImmutable := uint64(0)
@@ -1919,6 +1947,12 @@ func openDatabase(
 	logger *slog.Logger,
 	maxConnections int,
 ) (*internalplugins.DatabaseRuntime, error) {
+	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
+		cfg.CardanoNodeConfig, cfg.CardanoConfigPath, cfg.Network,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("loading cardano node config: %w", err)
+	}
 	storagePlugins := cfg.StoragePlugins
 	if storagePlugins.Blob.Provider == "" {
 		storagePlugins.Blob.Provider = "badger"
@@ -1940,7 +1974,8 @@ func openDatabase(
 			Metadata: storagePlugins.Metadata,
 		},
 		internalplugins.StorageDependencies{
-			DataDir: cfg.DataDir, RunMode: cfg.RunMode,
+			GenesisStakingEmpty: genesisStakingEmpty,
+			DataDir:             cfg.DataDir, RunMode: cfg.RunMode,
 			StorageMode: cfg.StorageMode, MaxConnections: maxConnections,
 			Logger: logger, TracingEnabled: cfg.Tracing,
 		},

@@ -1083,14 +1083,18 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		if usePeerSnapshot {
 			topologyConfig = topologyConfig.WithoutBootstrapPeers()
 		}
-		n.peerGov.LoadTopologyConfig(topologyConfig) //nolint:contextcheck // address normalization bounds its own DNS lookup
+		n.peerGov.LoadTopologyConfig(
+			topologyConfig,
+		) //nolint:contextcheck // address normalization bounds its own DNS lookup
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
 				ctx,
 				n.config.topologyConfig.PeerSnapshot,
 			)
 			if added == 0 {
-				n.peerGov.LoadTopologyConfig(n.config.topologyConfig) //nolint:contextcheck // address normalization bounds its own DNS lookup
+				n.peerGov.LoadTopologyConfig(
+					n.config.topologyConfig,
+				) //nolint:contextcheck // address normalization bounds its own DNS lookup
 			}
 		}
 	}
@@ -1455,12 +1459,13 @@ func (n *Node) storageDependencies(
 	dataDir string,
 ) internalplugins.StorageDependencies {
 	return internalplugins.StorageDependencies{
-		DataDir:        dataDir,
-		RunMode:        n.config.runMode,
-		StorageMode:    string(n.config.storageMode),
-		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
-		Logger:         n.config.logger,
-		TracingEnabled: n.config.tracing,
+		DataDir:             dataDir,
+		RunMode:             n.config.runMode,
+		StorageMode:         string(n.config.storageMode),
+		MaxConnections:      n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
+		Logger:              n.config.logger,
+		TracingEnabled:      n.config.tracing,
+		GenesisStakingEmpty: n.genesisStakingEmpty(),
 	}
 }
 
@@ -1533,7 +1538,12 @@ func (n *Node) Snapshot(
 	if err != nil {
 		return lifecycle.Manifest{}, err
 	}
-	manifestOpts = append(manifestOpts, lifecycle.WithMaxCommitPause(n.config.databaseLifecycle.SnapshotMaxCommitPause))
+	manifestOpts = append(
+		manifestOpts,
+		lifecycle.WithMaxCommitPause(
+			n.config.databaseLifecycle.SnapshotMaxCommitPause,
+		),
+	)
 	return lifecycle.SnapshotToCloud(
 		ctx,
 		n.destinationRegistry,
@@ -2258,3 +2268,10 @@ func (n *Node) Truncate(
 // that interface's doc comment for why it's defined there, not imported
 // from here).
 var _ dblifecycle.LiveNode = (*Node)(nil)
+
+func (n *Node) genesisStakingEmpty() bool {
+	if n.config.cardanoNodeConfig == nil {
+		return false
+	}
+	return internalplugins.GenesisStakingEmpty(n.config.cardanoNodeConfig.ShelleyGenesis())
+}
