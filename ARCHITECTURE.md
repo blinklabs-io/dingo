@@ -15863,7 +15863,11 @@ chainsync client is stopped or its connection begins shutdown (`StopChan`,
 closes only after the callback returns.
 The hold applies only to a header that can still be released: one whose
 predecessor is the chain tip, the header tip, or reaches a queued header or
-held block through the peer's recorded headers. A header whose predecessor
+held block through the peer's recorded headers. Queued-header membership is
+checked by hash independently of that peer's recorded history, so a header
+queued by another peer remains a valid parent. The terminal ancestor at the
+history limit is checked for local membership without another ancestry hop.
+A header whose predecessor
 matches none of these, such as the far-ahead header a promoted observer
 connection already holds, cannot be released by applying blocks the node
 already has, so admission returns `ledger.ErrChainsyncHeaderDisconnected`

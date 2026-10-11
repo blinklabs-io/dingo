@@ -15,7 +15,9 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync/atomic"
@@ -899,6 +901,108 @@ func TestConnectsToLocalChain(t *testing.T) {
 				},
 			)
 			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestAdmissionHoldsQueuedParentWithoutPeerHistory(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	ls.chain = cm.PrimaryChain()
+	parentHash := lcommon.Blake2b256Hash([]byte("queued parent"))
+	require.NoError(t, ls.chain.AddBlockHeader(context.Background(), mockHeader{
+		hash:        parentHash,
+		prevHash:    lcommon.Blake2b256{},
+		blockNumber: 1,
+		slot:        50,
+	}))
+	require.NoError(t, ls.chain.AddBlockHeader(context.Background(), mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("queued head")),
+		prevHash:    parentHash,
+		blockNumber: 2,
+		slot:        60,
+	}))
+	ls.publishSnapshotsLocked()
+	covered := &atomic.Bool{}
+	ls.slotClock.provider = gatedHorizonSlotTimeProvider{
+		SlotTimeProvider: ls.slotClock.provider,
+		slot:             90,
+		covered:          covered,
+	}
+
+	e := futureHeaderEvent(90, arrival)
+	e.BlockHeader = mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("future header")),
+		prevHash:    parentHash,
+		blockNumber: 2,
+		slot:        90,
+	}
+	results := awaitAdmissionAsync(t.Context(), ls, e)
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"a header past the forecast horizon must wait for the ledger",
+	)
+
+	ls.notifySnapshotPublished()
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"a publication that leaves the slot past the horizon must keep waiting",
+	)
+
+	covered.Store(true)
+	ls.notifySnapshotPublished()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not resume once the ledger could forecast the slot",
+	)
+	require.NoError(t, got.err)
+	require.True(t, got.accepted)
+	require.Empty(t, *waits, "a historical header has no slot onset to wait for")
+}
+
+func TestForkWalkRecognizesTerminalLocalPoint(t *testing.T) {
+	t.Parallel()
+	for _, queued := range []bool{false, true} {
+		t.Run(fmt.Sprintf("queued=%t", queued), func(t *testing.T) {
+			lookups := forkAnchorLookups{
+				peerHeader: func(hash []byte) (ocommon.Point, []byte, bool) {
+					if bytes.Equal(hash, []byte("start")) {
+						return ocommon.NewPoint(20, hash), []byte("anchor"), true
+					}
+					return ocommon.NewPoint(10, hash), []byte("older"), true
+				},
+				queuedHeader: func(p ocommon.Point) bool {
+					return queued && bytes.Equal(p.Hash, []byte("anchor"))
+				},
+				heldBlock: func(p ocommon.Point) bool {
+					return !queued && bytes.Equal(p.Hash, []byte("anchor"))
+				},
+				blockByHash: func([]byte) (ocommon.Point, bool) { return ocommon.Point{}, false },
+			}
+			require.True(t,
+				connectsToLocalChain([]byte("start"), 1, lookups),
+				"terminal local point must connect without another ancestry hop",
+			)
+			anchor, below := resolveForkAnchor([]byte("start"), 30, 1, lookups)
+			if queued {
+				require.False(t, below)
+			} else {
+				require.True(t, below, "terminal applied point must resolve the fork anchor")
+				require.Equal(t, uint64(10), anchor)
+			}
 		})
 	}
 }

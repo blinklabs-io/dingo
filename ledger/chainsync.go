@@ -4865,7 +4865,8 @@ func (ls *LedgerState) forkAnchorLookups(
 			)
 			return ancestor.Point, parentHash, found
 		},
-		queuedHeader: ls.chain.HoldsQueuedHeader,
+		queuedHeader:     ls.chain.HoldsQueuedHeader,
+		queuedHeaderHash: ls.chain.HoldsQueuedHeaderHash,
 		heldBlock: func(point ocommon.Point) bool {
 			return ls.chain.HoldsPoint(ctx, point)
 		},
@@ -4896,6 +4897,9 @@ func connectsToLocalChain(
 		}
 		point, parentHash, found := lookups.peerHeader(prevHash)
 		if !found {
+			if lookups.queuedHeaderHash != nil && lookups.queuedHeaderHash(prevHash) {
+				return true
+			}
 			point, found = lookups.blockByHash(prevHash)
 			return found && lookups.heldBlock(point)
 		}
@@ -4910,14 +4914,20 @@ func connectsToLocalChain(
 	if isOriginHash(prevHash) {
 		return true
 	}
-	if _, _, found := lookups.peerHeader(prevHash); found {
-		return false
+	if point, _, found := lookups.peerHeader(prevHash); found {
+		return lookups.queuedHeader(point) || lookups.heldBlock(point)
+	}
+	if lookups.queuedHeaderHash != nil && lookups.queuedHeaderHash(prevHash) {
+		return true
 	}
 	point, found := lookups.blockByHash(prevHash)
 	return found && lookups.heldBlock(point)
 }
 
 type forkAnchorLookups struct {
+	// queuedHeaderHash resolves queued ancestry without requiring the source
+	// peer to have delivered that header. Nil means no hash lookup is supplied.
+	queuedHeaderHash func([]byte) bool
 	// peerHeader resolves a header the peer delivered, with its parent hash.
 	peerHeader func(hash []byte) (ocommon.Point, []byte, bool)
 	// queuedHeader and heldBlock report membership of the local chain.
@@ -4964,7 +4974,13 @@ func resolveForkAnchor(
 	if isOriginHash(prevHash) {
 		return localForkAnchor(0, tipSlot)
 	}
-	if _, _, found := lookups.peerHeader(prevHash); found {
+	if point, _, found := lookups.peerHeader(prevHash); found {
+		if lookups.queuedHeader(point) {
+			return 0, false
+		}
+		if lookups.heldBlock(point) {
+			return localForkAnchor(point.Slot, tipSlot)
+		}
 		return 0, false
 	}
 	point, found := lookups.blockByHash(prevHash)
