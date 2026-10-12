@@ -73,8 +73,11 @@ upload_asset() {
 for archive in "${archives[@]}"; do
   upload_asset "$archive"
 done
-for report in "${reports[@]}"; do
-  upload_asset "$report"
-done
+# Bash 3.2 treats an empty array expansion as unset under nounset.
+if [ "${#reports[@]}" -gt 0 ]; then
+  for report in "${reports[@]}"; do
+    upload_asset "$report"
+  done
+fi
 
 echo "uploaded ${#archives[@]} archive(s) and ${#reports[@]} conformance report(s) to release ${RELEASE_ID}"

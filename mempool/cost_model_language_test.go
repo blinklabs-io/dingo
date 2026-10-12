@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -82,7 +83,7 @@ func TestAddTransactionRejectsOverwideCostModelLanguageIDs(t *testing.T) {
 				})
 				require.NoError(t, err)
 
-				err = pool.AddTransaction(
+				err = pool.AddTransaction(context.Background(),
 					txType,
 					parameterChangeCostModelTx(t, txType, languageID),
 				)

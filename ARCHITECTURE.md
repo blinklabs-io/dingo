@@ -607,6 +607,23 @@ peer's header that does not extend them is buffered rather than clearing them. N
 starts BlockFetch immediately. An in-flight batch from another connection is
 never cancelled by a switch.
 
+The BlockFetch watchdog uses a five-second first-block policy for near-tip
+windows of at most four headers. This is deliberately stricter than the
+protocol client's 60-second timeout ceiling; after the first block arrives,
+the 30-second streaming watchdog applies, and bulk catch-up uses that same
+30-second budget throughout. A timeout before any block is recorded in the
+peer delivery EWMA before retry selection; a later streaming stall does not
+replace the first-block latency already recorded for that batch. Retry excludes
+the timed-out connection before pricing the remaining candidates and requires
+another eligible peer that announced the range end, including an unmeasured
+holder. With no such holder the connection is recycled without redispatching
+the range to it. If a selected holder cannot start the request, another holder
+is tried and exhausting them requests a fresh ChainSync cursor. Selection is
+deferred while live lifecycle work makes the peer registry unavailable. A
+request still blocked inside protocol dispatch follows the same recycle path;
+closing the protocol interrupts the dispatch before its longer transport
+deadline.
+
 An admitted ChainSync rollback atomically refreshes the tracked client's
 cursor, advertised tip, activity, and syncing status before chain selection
 observes it and before the ledger apply gate runs. This bookkeeping does not
@@ -1519,6 +1536,7 @@ dingo/
 │   │   └── pruner.go    # Background expiry scanner
 │   ├── committeeauth/   # Live rollback-safe immutable-slot sync for committee auth pruning
 │   │   └── syncer.go    # Background PointAtDepth -> SetCommitteeAuthImmutableSlot sync
+│   ├── tracing/         # Span helpers over the process-wide OpenTelemetry provider
 │   ├── test/            # Test utilities
 │   │   ├── conformance/ # Cardano Blueprint ledger-rule conformance tests
 │   │   ├── devnet/      # DevNet end-to-end tests
@@ -1528,6 +1546,22 @@ dingo/
 ├── config.go            # Configuration management (functional options)
 └── tracing.go           # OpenTelemetry tracing
 ```
+
+Tracing is off unless `tracing` is set or `tracingEndpoint` is non-empty.
+`setupTracing` installs an OTLP HTTP (or stdout) exporter with `service.name`/`service.version` resource attributes
+and a parent-based trace-ID-ratio sampler (`tracingSampleRatio`, default 1).
+`tracingEndpoint` sets the collector URL and must be an `http` or `https` URL;
+empty defers to the standard `OTEL_EXPORTER_OTLP_*` variables. Hot paths start spans through
+`internal/tracing`: `chain.add_blocks`, `ledger.process_block`,
+`ledger.epoch_transition`, `chainsync.roll_forward`,
+`chainsync.roll_backward`, `blockfetch.block` and `mempool.add_transaction`.
+`Chain.AddBlocks`, `Mempool.AddTransaction` and the ledger block and epoch
+steps take a `context.Context`, so their spans nest under the caller's span;
+the API submit handlers pass the request context through mempool admission
+and overlay reconciliation. The epoch-transition span wraps the shared rollover
+implementation, including era-transition rollovers. The Ouroboros chainsync,
+blockfetch and transaction-submission callbacks carry no context, so their
+spans are roots.
 
 ## Core Node Structure
 

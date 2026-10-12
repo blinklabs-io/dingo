@@ -38,7 +38,7 @@ func requireTxShapeAdmission(
 	validator := &countingValidator{}
 	m := newTestMempoolWithValidator(t, validator)
 	defer m.Stop(context.Background())
-	err := m.AddTransaction(txType, txBytes)
+	err := m.AddTransaction(context.Background(), txType, txBytes)
 	if wantErr == "" {
 		require.NoError(t, err)
 		require.EqualValues(t, 1, validator.calls.Load())
