@@ -504,7 +504,9 @@ func init() {
 	)
 }
 
-type barkContextDeleteDestination struct{}
+type barkContextDeleteDestination struct {
+	dir string
+}
 
 func (*barkContextDeleteDestination) UploadDir(context.Context, string) error {
 	return nil
@@ -514,17 +516,17 @@ func (*barkContextDeleteDestination) DownloadFiles(context.Context, string, []li
 	return nil
 }
 
-func (*barkContextDeleteDestination) FetchManifest(
+func (d *barkContextDeleteDestination) FetchManifest(
 	context.Context,
 ) (lifecycle.Manifest, error) {
-	return lifecycle.Manifest{}, nil
+	return lifecycle.ReadManifest(d.dir)
 }
 
-func (*barkContextDeleteDestination) FetchManifestWithOptions(
-	ctx context.Context,
-	_ ...lifecycle.ManifestOption,
+func (d *barkContextDeleteDestination) FetchManifestWithOptions(
+	_ context.Context,
+	opts ...lifecycle.ManifestOption,
 ) (lifecycle.Manifest, error) {
-	return lifecycle.Manifest{}, ctx.Err()
+	return lifecycle.ReadManifest(d.dir, opts...)
 }
 
 func (*barkContextDeleteDestination) Delete(ctx context.Context) error {
@@ -580,8 +582,8 @@ func (d *barkRecoveringCatalogDestination) ListSnapshotCatalog(
 func init() {
 	testDestinationRegistry.Register(
 		"barkfaketest-context-delete",
-		func(*url.URL) (lifecycle.CloudDestination, error) {
-			return &barkContextDeleteDestination{}, nil
+		func(uri *url.URL) (lifecycle.CloudDestination, error) {
+			return &barkContextDeleteDestination{dir: uri.Path}, nil
 		},
 	)
 }
@@ -1265,7 +1267,7 @@ func TestDeleteSnapshotRemovesBothLocalAndCloudCopies(t *testing.T) {
 
 func TestDeleteSnapshotMapsContextErrorsBeforeDeletion(t *testing.T) {
 	t.Parallel()
-	h := newTestDatabaseServiceHandlerWithTrustKey(t, nil, t.TempDir())
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	dir := filepath.Join(h.bark.config.SnapshotDir, "keep")
 	require.NoError(t, os.Mkdir(dir, 0o755))
 	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
@@ -1308,9 +1310,17 @@ func TestDeleteSnapshotMapsContextErrorsBeforeDeletion(t *testing.T) {
 
 func TestDeleteSnapshotMapsCloudDeleteContextErrors(t *testing.T) {
 	t.Parallel()
-	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	cloudRoot := t.TempDir()
+	cloudSnapshotDir := filepath.Join(cloudRoot, "cloud-only")
+	require.NoError(t, os.Mkdir(cloudSnapshotDir, 0o755))
+	require.NoError(t, lifecycle.WriteManifest(
+		cloudSnapshotDir,
+		lifecycle.Manifest{CreatedAt: time.Now().UTC()},
+		lifecycle.WithManifestKey(testSnapshotTrustKey),
+	))
+	h := newTestDatabaseServiceHandlerWithTrustKey(t, nil, t.TempDir())
 	h.bark.config.SnapshotCloudDestination =
-		"barkfaketest-context-delete://bucket/prefix"
+		"barkfaketest-context-delete://bucket" + cloudRoot
 
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
