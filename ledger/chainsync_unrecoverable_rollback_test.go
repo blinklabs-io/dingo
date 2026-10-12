@@ -206,7 +206,7 @@ func TestReportUnrecoverableRollbackClearsEvidenceAfterLocalProgress(t *testing.
 
 	fixture.ls.reportUnrecoverableRollbackIfStuck(
 		fixture.ancestorTip.Point,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		event.ChainsyncResyncReasonRollbackNotFound,
 		fixture.connId,
 	)
 	require.Zero(
@@ -287,5 +287,22 @@ func TestReportUnrecoverableRollbackDoesNotGuessOnLookupError(t *testing.T) {
 		t,
 		promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks),
 	)
-	require.Empty(t, fixture.ls.unrecoverableRollbacks)
+}
+
+func TestReportProtocolConstrainedRollbackEscalatesImmediately(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{
+		event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			for range unrecoverableRollbackThreshold {
+				fixture.ls.reportUnrecoverableRollbackIfStuck(fixture.ancestorTip.Point, reason, fixture.connId)
+			}
+			require.Equal(t, float64(1), promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
+		})
+	}
 }

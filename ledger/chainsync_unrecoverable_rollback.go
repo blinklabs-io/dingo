@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/blinklabs-io/dingo/event"
+
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -108,7 +110,7 @@ func (ls *LedgerState) clearUnrecoverableRollbacks() {
 // cycles, surfaces the stuck-divergence condition as a throttled
 // operator-facing error plus a metric, rather than only the per-attempt
 // WARN that otherwise repeats indefinitely with zero forward progress.
-// A point retained on the local primary chain cannot by itself establish which
+// For peer-fork failures, a point retained on the local primary chain cannot establish which
 // side of that point the network will ultimately select. Such a point is only
 // diagnosed as stuck when the local tip also remains unchanged for the full
 // tracking window. Any local progress discards the point's accumulated failures.
@@ -124,6 +126,31 @@ func (ls *LedgerState) reportUnrecoverableRollbackIfStuck(
 	}
 	localTip := ls.chain.HeaderTip()
 	if point.Slot > localTip.Point.Slot {
+		return
+	}
+	protocolConstrained := reason == event.ChainsyncResyncReasonRollbackExceedsK ||
+		reason == event.ChainsyncResyncReasonRollbackExceedsMithril ||
+		reason == event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor
+	if protocolConstrained {
+		count, stuck := ls.noteUnrecoverableRollback(point)
+		if stuck {
+			ls.emitUnrecoverableRollback(point, reason, connId, count)
+		}
+		return
+	}
+	key := unrecoverableRollbackKey(point)
+	rec := ls.unrecoverableRollbacks[key]
+	if rec.count > 0 && !pointMatches(rec.localTip, localTip.Point) {
+		delete(ls.unrecoverableRollbacks, key)
+		return
+	}
+	count, stuck := ls.noteUnrecoverableRollback(point)
+	rec = ls.unrecoverableRollbacks[key]
+	if rec.count == 1 || len(rec.localTip.Hash) == 0 {
+		rec.localTip = ocommon.NewPoint(localTip.Point.Slot, append([]byte(nil), localTip.Point.Hash...))
+		ls.unrecoverableRollbacks[key] = rec
+	}
+	if !stuck {
 		return
 	}
 	onPrimary, err := ls.historicalPointOnPrimaryChain(point, localTip)
@@ -143,32 +170,7 @@ func (ls *LedgerState) reportUnrecoverableRollbackIfStuck(
 		}
 		return
 	}
-	if onPrimary {
-		key := unrecoverableRollbackKey(point)
-		rec := ls.unrecoverableRollbacks[key]
-		if rec.count > 0 && !pointMatches(rec.localTip, localTip.Point) {
-			// Other peers extended or switched the authoritative local chain
-			// while this rollback kept failing, so the node is making progress.
-			delete(ls.unrecoverableRollbacks, key)
-			return
-		}
-		count, stuck := ls.noteUnrecoverableRollback(point)
-		rec = ls.unrecoverableRollbacks[key]
-		if rec.count == 1 || len(rec.localTip.Hash) == 0 {
-			rec.localTip = ocommon.NewPoint(
-				localTip.Point.Slot,
-				append([]byte(nil), localTip.Point.Hash...),
-			)
-			ls.unrecoverableRollbacks[key] = rec
-		}
-		if !stuck || time.Since(rec.firstSeen) < unrecoverableRollbackWindow {
-			return
-		}
-		ls.emitUnrecoverableRollback(point, reason, connId, count)
-		return
-	}
-	count, stuck := ls.noteUnrecoverableRollback(point)
-	if !stuck {
+	if onPrimary && time.Since(rec.firstSeen) < unrecoverableRollbackWindow {
 		return
 	}
 	ls.emitUnrecoverableRollback(point, reason, connId, count)

@@ -6350,17 +6350,14 @@ un-crossable rollbacks; once the same point recurs past a threshold within a
 window it surfaces the stuck-divergence condition as a throttled operator
 error plus the `dingo_chainsync_unrecoverable_rollback_total` metric, since a
 node in this state cannot self-recover and needs operator intervention
-(e.g. re-bootstrapping from a Mithril snapshot). Before recording a failure,
-the tracker uses the bounded local primary-chain membership check also used for
-historical headers. An absent point can advance the diagnosis immediately;
-unavailable chain state or a lookup error cannot. Primary-chain membership
-alone cannot establish which branch the network will ultimately select. For an
-on-chain point, the tracker also requires the authoritative local tip to remain
-unchanged for the full tracking window before it issues the definitive local
-divergence diagnosis. Local progress discards the accumulated failures for that
-point. This preserves eventual escalation when crossing a shared ancestor would
-exceed K or a local restoration boundary without letting a forked peer blame a
-node that continues to advance.
+(e.g. re-bootstrapping from a Mithril snapshot). Protocol-constrained failures (exceeding K, the Mithril boundary, or the UTxO
+prune floor) escalate at the recurrence threshold even when the rollback point
+is on the primary chain: retained ancestry does not make that rollback possible.
+For peer-fork failures, the tracker uses the bounded local primary-chain
+membership check also used for historical headers. An absent point can advance
+the diagnosis immediately; unavailable chain state or a lookup error cannot.
+An on-chain peer-fork point requires the local tip to remain unchanged for the
+full tracking window. Local progress discards that point's accumulated failures.
 When the per-connection loop
 detector itself breaks a loop by skipping a rollback it can no longer cross,
 it feeds that same point-keyed tracker so the escalation and metric fire on
