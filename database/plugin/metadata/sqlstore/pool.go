@@ -293,7 +293,8 @@ func latestPoolRetirementBefore(
 	poolID int64,
 	at poolCertPosition,
 ) (poolRetirementPositionRow, bool, error) {
-	predicate, args := poolPositionPredicate("rt", "t.block_index", at)
+	blockIndexExpression := `(SELECT tx.block_index FROM "transaction" tx WHERE tx.id = c.transaction_id)`
+	predicate, args := poolPositionPredicate("rt", blockIndexExpression, at)
 	var (
 		row       poolRetirementPositionRow
 		epoch     int64
@@ -308,15 +309,14 @@ func latestPoolRetirementBefore(
 	// snapshot-retired pool looking still-registered.
 	err := db.QueryRowContext(ctx, `
 SELECT rt.epoch, rt.added_slot,
-       COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0)
+       COALESCE(`+blockIndexExpression+`, 0), COALESCE(c.cert_index, 0)
 FROM pool_retirement rt
 LEFT JOIN certs c ON c.id = rt.certificate_id
-LEFT JOIN "transaction" t ON t.id = c.transaction_id
 WHERE rt.pool_id = ?
   AND `+predicate+`
 ORDER BY rt.added_slot DESC,
          CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
-         COALESCE(t.block_index, 0) DESC,
+         COALESCE(`+blockIndexExpression+`, 0) DESC,
          COALESCE(c.cert_index, 0) DESC
 LIMIT 1`,
 		append([]any{poolID}, args...)...,

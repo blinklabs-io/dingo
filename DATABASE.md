@@ -5298,3 +5298,7 @@ DRep maps by their value encodings. Empty DState maps do not claim a DRep
 registry, and resignation maps cannot create DRep rows. Imported pool block
 counts reject a recorded empty Mithril boundary; only an absent boundary
 means no snapshot was imported.
+
+Pool deposit-history lookups resolve both registration and retirement transaction
+positions by transaction primary key. This bounds each candidate lookup even
+when planner statistics lag behind a bulk import.
