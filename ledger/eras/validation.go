@@ -21,6 +21,7 @@ import (
 	"math"
 	"math/big"
 
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -36,6 +37,55 @@ import (
 var ErrExUnitsOverflow = errors.New(
 	"execution units overflow int64",
 )
+
+type semanticRuleValidationError struct {
+	err error
+}
+
+func (e *semanticRuleValidationError) Error() string { return e.err.Error() }
+func (e *semanticRuleValidationError) Unwrap() error { return e.err }
+
+type localRuleValidationError struct {
+	err error
+}
+
+func (e *localRuleValidationError) Error() string { return e.err.Error() }
+func (e *localRuleValidationError) Unwrap() error { return e.err }
+
+// IsSemanticRuleValidationError reports whether an error came from a
+// deterministic era validation rule. Callers use the rule boundary rather
+// than concrete error types so new ledger verdicts inherit the right
+// disposition without classifying errors from injected validators.
+func IsSemanticRuleValidationError(err error) bool {
+	var semanticErr *semanticRuleValidationError
+	return errors.As(err, &semanticErr)
+}
+
+func semanticRuleValidationErrorFor(err error) error {
+	if err == nil {
+		return nil
+	}
+	var localErr *localRuleValidationError
+	if errors.As(err, &localErr) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, hardfork.ErrPastHorizon) {
+		return err
+	}
+	var validationErr *lcommon.ValidationError
+	if errors.As(err, &validationErr) &&
+		validationErr.Type == lcommon.ValidationErrorTypeConfiguration {
+		return err
+	}
+	return &semanticRuleValidationError{err: err}
+}
+
+func localRuleValidationErrorFor(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &localRuleValidationError{err: err}
+}
 
 type phase2ValidationSkipper interface {
 	SkipPhase2Validation() bool

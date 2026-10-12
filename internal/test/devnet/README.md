@@ -97,6 +97,11 @@ checks EB notification, relay fetch, ranking-header reference, and ledger
 application. It selects that feature scenario only; it does not change the
 canonical Conway specs or the `--accelerated` timeline.
 
+The Leios spec uses 300-slot, 150-second epochs with `f: 0.05` and `k: 3`.
+Its 240-slot nonce stability window contains 12 expected blocks, which keeps
+the finite era horizon advancing while leaving half of the ten-minute scenario
+after voting registrations become usable in epoch 2.
+
 ## Network parameters
 
 Dingo mode reads `testnet-dingo.yaml`, conformance mode reads `testnet.yaml`.
@@ -783,7 +788,7 @@ harness and the compose port mappings always agree.
 | `testnet.yaml`               | Canonical network spec for conformance mode: 2 pools |
 | `testnet-dingo-accelerated.yaml` | Accelerated dingo-mode spec: 60s epochs, `k: 10`, 0.5s slots |
 | `testnet-accelerated.yaml`   | Accelerated conformance-mode spec: same timing, 2 pools |
-| `testnet-dingo-leios.yaml`   | Dijkstra/Leios all-Dingo integration spec: Dijkstra at genesis, 120-slot epochs, 0.5s slots |
+| `testnet-dingo-leios.yaml`   | Dijkstra/Leios all-Dingo integration spec: Dijkstra at genesis, 300-slot epochs, 0.5s slots |
 | `topology/dingo-1.json`, `dingo-2.json`, `dingo-3.json`, `dingo-relay.json` | Static peer lists for dingo mode |
 | `topology/dingo-producer.json`, `cardano-producer.json`, `relay.json` | Static peer lists for conformance mode |
 | `.env`                       | Sets the default `COMPOSE_PROFILES=dingo` |

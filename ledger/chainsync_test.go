@@ -832,7 +832,7 @@ func newNoBlocksLedgerState(
 	require.Equal(t, 1, testChain.HeaderCount())
 
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	eventBus := event.NewEventBus(nil, logger)
+	eventBus := newTestEventBus(t, logger)
 	resyncChan := make(chan event.ChainsyncResyncEvent, 8)
 	eventBus.SubscribeFunc(
 		event.ChainsyncResyncEventType,
@@ -1244,7 +1244,7 @@ func TestHandleEventBlockfetchBatchDoneStopsRepeatingEmptyBatches(
 
 	connId := testChainsyncConnId(6100, 3001)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	eventBus := event.NewEventBus(nil, logger)
+	eventBus := newTestEventBus(t, logger)
 	resyncChan := make(chan event.ChainsyncResyncEvent, 4)
 	eventBus.SubscribeFunc(
 		event.ChainsyncResyncEventType,
@@ -1936,7 +1936,7 @@ type blockfetchRollbackFixture struct {
 func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
 	t.Helper()
 	base := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	base.ls.config.EventBus = bus
 
@@ -2718,7 +2718,7 @@ func TestCompareIncomingHeaderToLocalTip_ByronEBBBeatsRegularTip(t *testing.T) {
 func TestBlockfetchContinuationPublishesHeaderInvalidationOnFailure(
 	t *testing.T,
 ) {
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	cm, err := chain.NewManager(context.Background(), nil, bus)
 	require.NoError(t, err)
@@ -3540,7 +3540,7 @@ func TestRecoverBlockfetchRestartFailureRetriesLiveActiveConnection(t *testing.T
 		return 0, nil
 	}
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 	resyncCh := make(chan event.ChainsyncResyncEvent, 4)
@@ -3605,7 +3605,7 @@ func TestRecoverBlockfetchRestartFailureFallsBackToResyncWithoutLiveConnection(
 		return 0, nil
 	}
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 	resyncCh := make(chan event.ChainsyncResyncEvent, 4)
@@ -4075,7 +4075,7 @@ func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 		return 0, errors.New("simulated blockfetch request failure")
 	}
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	fixture.ls.config.EventBus = bus
 	resyncSubID, resyncCh := bus.SubscribeWithBuffer(
@@ -4485,7 +4485,7 @@ func TestCanonicalFrontierCrossingDoesNotCloseAPeerAheadOfLocalTip(
 		},
 	}
 
-	selectorBus := event.NewEventBus(nil, nil)
+	selectorBus := newTestEventBus(t, nil)
 	t.Cleanup(selectorBus.Stop)
 	_, switchCh := selectorBus.Subscribe(chainselection.ChainSwitchEventType)
 
@@ -5244,7 +5244,7 @@ func TestHandleEventChainsyncRollbackToBlockTipDoesNotPublishLedgerRollback(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -5325,7 +5325,7 @@ func TestRollbackAtCurrentTipIsNoop(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -5787,7 +5787,7 @@ func testRecycleConnId() ouroboros.ConnectionId {
 func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
@@ -5841,7 +5841,7 @@ func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
@@ -5913,7 +5913,7 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
@@ -6038,7 +6038,7 @@ func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
@@ -6389,7 +6389,7 @@ func TestNoteNonExtendingBlockRejectionPublishesRecycleAtThreshold(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
@@ -6443,7 +6443,7 @@ func TestNoteNonExtendingBlockRejectionPublishesRecycleAtThreshold(
 func TestNoteNonExtendingBlockRejectionResetsOnAcceptedBlock(t *testing.T) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
@@ -6500,7 +6500,7 @@ func TestNoteNonExtendingBlockRejectionResetsOnAcceptedBlock(t *testing.T) {
 func TestNoteNonExtendingBlockRejectionPerConnectionIndependent(t *testing.T) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	floodConn := testRecycleConnId()
 	healthyConn := ouroboros.ConnectionId{
@@ -6599,7 +6599,7 @@ func TestFlushPendingBlockfetchNonExtendingFloodRecyclesConnection(
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 
@@ -6678,7 +6678,7 @@ func TestFlushPendingBlockfetchNonExtendingHandfulNotRecycled(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 
@@ -6859,7 +6859,7 @@ func runResyncDeferredPublishScenario(
 ) {
 	t.Helper()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	defer bus.Stop()
 
 	ls := &LedgerState{
@@ -7167,7 +7167,7 @@ func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
@@ -7475,7 +7475,7 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "live-rollback")
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -7609,7 +7609,7 @@ func TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor(
 	// fire.
 	fixture.ls.mithrilLedgerSlot = fixture.ancestorTip.Point.Slot + 1
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -7663,7 +7663,7 @@ func TestLedgerReadChainRequestsResyncOnOverKReconcile(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "ledger-read-chain-resync")
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -7739,7 +7739,7 @@ func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 	)
 	fixture.ls.mithrilLedgerSlot = fixture.ancestorTip.Point.Slot + 1
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -7806,7 +7806,7 @@ func TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile(
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "pipeline-retry-over-k")
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 	resyncCh := subscribeChainsyncResync(t, bus)
@@ -8269,7 +8269,7 @@ func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "live-fork-resolution")
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -8439,7 +8439,7 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -8714,7 +8714,7 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -8801,7 +8801,7 @@ func TestRollbackPublishesChainsyncResyncAtRollbackPoint(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -9426,7 +9426,7 @@ func TestHandleEventChainsyncBlockHeaderIgnoresStaleRollForwardBehindTip(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -9665,7 +9665,7 @@ func TestReconcileLivePrimaryChainLedgerDivergenceRequestsMithrilResync(
 	)
 	fixture.ls.mithrilLedgerSlot = fixture.ancestorTip.Point.Slot + 1
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 	resyncCh := subscribeChainsyncResync(t, bus)
@@ -9810,7 +9810,7 @@ func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 	)
 	require.NoError(t, err)
 	removedBlock.Cbor = []byte{0xff}
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	fixture.ls.config.EventBus = bus
 	errSubID, errCh := bus.Subscribe(LedgerErrorEventType)
@@ -10459,7 +10459,7 @@ func TestHandleEventChainsyncRollbackClassifiesStalePeerBelowMithrilBoundary(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
@@ -10520,7 +10520,7 @@ func TestHandleEventChainsyncRollbackRejectsDivergentPeerTipAboveMithrilBoundary
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
@@ -11889,7 +11889,7 @@ func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	connId1 := ouroboros.ConnectionId{
@@ -11945,7 +11945,7 @@ func TestHandleChainSwitchEventDoesNotRepeatFreshCursorBeforeHeaders(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	previousConnId := testChainsyncConnId(6000, 3001)
@@ -12137,7 +12137,7 @@ func TestHandleChainSwitchEventCyclingPeersRequestsOneFreshCursorEach(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	logs := &syncSafeBuffer{}
@@ -12293,7 +12293,7 @@ func TestHandleChainSwitchEventCoalescedFreshCursorIsNotRecorded(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	previousConnId := testChainsyncConnId(6000, 3001)
@@ -12463,7 +12463,7 @@ func newChainSwitchFallbackFixture(
 	t *testing.T,
 ) chainSwitchFallbackFixture {
 	t.Helper()
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 
@@ -12626,7 +12626,7 @@ func TestHandleChainSwitchEventDoesNotResyncInitialPeerSelection(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	connId := ouroboros.ConnectionId{
@@ -15205,7 +15205,7 @@ type mockForgedBlockChecker struct {
 func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	localHash := []byte{0x01, 0x02, 0x03, 0x04}
@@ -15258,7 +15258,7 @@ func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	localHash := []byte{0x01, 0x02, 0x03, 0x04}
@@ -15306,7 +15306,7 @@ func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
 func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	checker := &mockForgedBlockChecker{
@@ -15346,7 +15346,7 @@ func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
 func TestCheckSlotBattle_SameHashIsNotBattle(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	blockHash := []byte{0x01, 0x02, 0x03, 0x04}
@@ -15387,7 +15387,7 @@ func TestCheckSlotBattle_SameHashIsNotBattle(t *testing.T) {
 func TestCheckSlotBattle_NilCheckerSkips(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	ls := &LedgerState{
@@ -15453,7 +15453,7 @@ func TestCheckSlotBattle_NilEventBus(t *testing.T) {
 func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	localHash := []byte{0x01, 0x02, 0x03, 0x04}
@@ -18217,7 +18217,7 @@ type headerStreamFixture struct {
 
 func newHeaderStreamLedger(t *testing.T) *headerStreamFixture {
 	t.Helper()
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	cm, err := chain.NewManager(context.Background(), nil, bus)
 	require.NoError(t, err)
@@ -18371,7 +18371,7 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			bus := event.NewEventBus(nil, nil)
+			bus := newTestEventBus(t, nil)
 			t.Cleanup(bus.Stop)
 			fixture := newChainsyncRollbackFixtureWithBus(t, bus)
 			subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
@@ -18807,7 +18807,7 @@ func TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor(t *testing.T) {
 // chain and ask for a fresh intersection, exactly as the Mithril boundary does.
 func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -19080,7 +19080,7 @@ func TestHandleEventChainsyncBlockHeaderCoalescesResyncPerConnection(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -19143,7 +19143,7 @@ func TestRequestChainsyncResyncCoalescesPerConnectionWithinWindow(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 	var published atomic.Int32

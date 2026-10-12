@@ -18,6 +18,7 @@ package devnet
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -52,21 +53,38 @@ func TestLeiosFetchBitmapsRejectsInvalidCounts(t *testing.T) {
 }
 
 func TestLeiosDevnetCredentialsMatchGenesisRegistration(t *testing.T) {
-	var registered lcommon.LeiosKey
-	keyData, err := os.ReadFile("testdata/leios-key.json")
+	var credentials []struct {
+		SigningKey   string           `json:"signingKey"`
+		Registration lcommon.LeiosKey `json:"registration"`
+	}
+	keyData, err := os.ReadFile("testdata/leios-credentials.json")
 	require.NoError(t, err)
-	require.NoError(t, json.Unmarshal(keyData, &registered))
-	require.NoError(t, leios.VerifyLeiosKeyProofOfPossession(&registered))
+	require.NoError(t, json.Unmarshal(keyData, &credentials))
+	require.Len(t, credentials, 3)
 
-	secretData, err := os.ReadFile("testdata/leios-vote.skey")
-	require.NoError(t, err)
-	voteKey, err := leios.ParseVoteSigningKey(strings.TrimSpace(string(secretData)))
-	require.NoError(t, err)
-	require.Equal(t, registered.PublicKey, voteKey.PublicKeyBytes())
+	publicKeys := make(map[string]struct{}, len(credentials))
+	for index, credential := range credentials {
+		require.Equal(t, fmt.Sprintf("%064x", index+1), credential.SigningKey)
+		require.NoError(
+			t,
+			leios.VerifyLeiosKeyProofOfPossession(&credential.Registration),
+		)
+		voteKey, err := leios.ParseVoteSigningKey(
+			strings.TrimSpace(credential.SigningKey),
+		)
+		require.NoError(t, err)
+		require.Equal(
+			t,
+			credential.Registration.PublicKey,
+			voteKey.PublicKeyBytes(),
+		)
 
-	proof, err := leios.SignLeiosKeyProofOfPossession(voteKey)
-	require.NoError(t, err)
-	require.Equal(t, registered.PossessionProof, proof)
+		proof, err := leios.SignLeiosKeyProofOfPossession(voteKey)
+		require.NoError(t, err)
+		require.Equal(t, credential.Registration.PossessionProof, proof)
+		publicKeys[string(credential.Registration.PublicKey)] = struct{}{}
+	}
+	require.Len(t, publicKeys, len(credentials))
 }
 
 func TestDevnetByronGenesisTrustRootIsValid(t *testing.T) {

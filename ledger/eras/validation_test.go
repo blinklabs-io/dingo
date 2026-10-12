@@ -688,11 +688,12 @@ type mockConwayFeeTx struct {
 
 type mockCommitteeEpochState struct {
 	*mockLedgerState
-	epoch uint64
+	epoch    uint64
+	epochErr error
 }
 
 func (s *mockCommitteeEpochState) EpochForSlot(uint64) (uint64, error) {
-	return s.epoch, nil
+	return s.epoch, s.epochErr
 }
 
 func (s *mockCommitteeEpochState) IsStakeCredentialRegistered(
@@ -3418,10 +3419,16 @@ func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
 		name        string
 		expiryEpoch uint64
 		wantExpired bool
+		epochErr    error
 	}{
 		{name: "past epoch", expiryEpoch: 499, wantExpired: true},
 		{name: "current epoch", expiryEpoch: 500, wantExpired: true},
 		{name: "next epoch", expiryEpoch: 501},
+		{
+			name:        "epoch beyond forecast horizon",
+			expiryEpoch: 501,
+			epochErr:    hardfork.ErrPastHorizon,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			action, err := lcommon.NewUpdateCommitteeGovAction(
@@ -3477,6 +3484,7 @@ func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
 			state := &mockCommitteeEpochState{
 				mockLedgerState: baseState,
 				epoch:           500,
+				epochErr:        test.epochErr,
 			}
 			bodyCbor, err := cbor.Encode(tx.Body)
 			require.NoError(t, err)
@@ -3491,6 +3499,13 @@ func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
 			)
 
 			err = ValidateTxConway(tx, 1, state, pp)
+			if test.epochErr != nil {
+				require.ErrorIs(t, err, hardfork.ErrPastHorizon)
+				var unavailable conway.CommitteeExpiryEpochUnavailableError
+				require.ErrorAs(t, err, &unavailable)
+				require.False(t, IsSemanticRuleValidationError(err))
+				return
+			}
 			var expired conway.CommitteeMemberAlreadyExpiredError
 			if test.wantExpired {
 				require.ErrorAs(t, err, &expired)
