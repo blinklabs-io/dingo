@@ -353,9 +353,6 @@ func ProcessHistoricalProposals(
 	db *database.Database,
 	txn *database.Txn,
 ) error {
-	if err := validateCostModelLanguageIDs(tx); err != nil {
-		return err
-	}
 	return persistGovernanceProposals(
 		ctx,
 		tx,
@@ -469,9 +466,6 @@ func ProcessHistoricalTransactionEffects(
 	db *database.Database,
 	txn *database.Txn,
 ) error {
-	if err := validateCostModelLanguageIDs(tx); err != nil {
-		return err
-	}
 	if len(tx.ProposalProcedures()) > 0 {
 		if err := ProcessHistoricalProposals(
 			ctx, tx, point, txIndex, currentEpoch, govActionLifetime, db, txn,
@@ -503,7 +497,7 @@ func ProcessHistoricalTransactionEffects(
 	return nil
 }
 
-func validateCostModelLanguageIDs(tx lcommon.Transaction) error {
+func validateCostModelLanguageIDs(tx proposalSource) error {
 	for _, proposal := range tx.ProposalProcedures() {
 		var models map[uint][]int64
 		switch action := proposal.GovAction().(type) {
@@ -580,6 +574,9 @@ func persistGovernanceProposals(
 	db *database.Database,
 	txn *database.Txn,
 ) error {
+	if err := validateCostModelLanguageIDs(tx); err != nil {
+		return err
+	}
 	proposals := tx.ProposalProcedures()
 	if len(proposals) == 0 {
 		return nil

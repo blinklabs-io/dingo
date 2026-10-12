@@ -207,6 +207,9 @@ func TestGovernanceEffectsRejectOverwideCostModelLanguageIDs(t *testing.T) {
 
 	type applyFunc func(*database.Database, lcommon.Transaction) error
 	paths := map[string]applyFunc{
+		"persistence core": func(db *database.Database, tx lcommon.Transaction) error {
+			return persistGovernanceProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, false, db, nil)
+		},
 		"live proposals": func(db *database.Database, tx lcommon.Transaction) error {
 			return ProcessProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil)
 		},
