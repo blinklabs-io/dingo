@@ -361,10 +361,8 @@ func TestServeForgedEndorserBlockTxs(t *testing.T) {
 	// Build the manifest in the same order as the bodies.
 	refs := make([]lcommon.LeiosTransactionReference, len(bodies))
 	for i, b := range bodies {
-		var h [32]byte
-		h[0] = byte(i + 1)
 		refs[i] = lcommon.LeiosTransactionReference{
-			TransactionHash: lcommon.NewBlake2b256(h[:]),
+			TransactionHash: lcommon.Blake2b256Hash(b),
 			TransactionSize: uint16(len(b)), //nolint:gosec // small test bodies
 		}
 	}

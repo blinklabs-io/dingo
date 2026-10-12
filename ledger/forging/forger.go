@@ -875,6 +875,11 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 				"production Leios forging requires transaction validator",
 			)
 		}
+		if cfg.LeiosProduceChecker != nil && cfg.LeiosAnnouncementValidator == nil {
+			return nil, errors.New(
+				"production Leios forging requires announcement validator",
+			)
+		}
 	}
 	if cfg.LeiosProduceChecker != nil {
 		if cfg.LeiosEBBroadcaster == nil {

@@ -529,6 +529,34 @@ func (ls *LedgerState) prepareBlockApplySnapshot(
 	); err != nil {
 		return blockApplyStateSnapshot{}, err
 	}
+	snapshot := ls.captureBlockApplyStateSnapshot()
+	if !validateAnnouncement {
+		precheck := blocksBeforeEpochEnd(blocks, selectionEpoch)
+		if len(precheck) > 0 &&
+			ls.config.ValidateLeiosAnnouncement != nil &&
+			ls.blockApplySnapshotInLiveValidationRegion(
+				snapshot,
+				precheck[0].SlotNumber(),
+			) {
+			if err := ls.validateLeiosAnnouncementBeforeApply(
+				ctx,
+				precheck[0],
+				true,
+			); err != nil {
+				ls.config.Logger.Debug(
+					"Leios announcement not validated before block apply",
+					"component", "ledger",
+					"slot", precheck[0].SlotNumber(),
+					"error", err,
+				)
+			}
+			snapshot = ls.captureBlockApplyStateSnapshot()
+		}
+	}
+	return snapshot, nil
+}
+
+func (ls *LedgerState) captureBlockApplyStateSnapshot() blockApplyStateSnapshot {
 	ls.RLock()
 	snapshot := blockApplyStateSnapshot{
 		epoch:                ls.currentEpoch,
@@ -547,7 +575,31 @@ func (ls *LedgerState) prepareBlockApplySnapshot(
 		snapshot.chainTipSlot = ls.chain.Tip().Point.Slot
 	}
 	ls.RUnlock()
-	return snapshot, nil
+	return snapshot
+}
+
+func (ls *LedgerState) blockApplySnapshotInLiveValidationRegion(
+	snapshot blockApplyStateSnapshot,
+	blockSlot uint64,
+) bool {
+	stabilityWindow := ls.calculateStabilityWindowForEra(snapshot.era.Id)
+	referenceSlot := snapshot.chainTipSlot
+	if wallSlot, err := ls.CurrentSlot(); err == nil && wallSlot > referenceSlot {
+		referenceSlot = wallSlot
+	}
+	var cutoffSlot uint64
+	if referenceSlot >= stabilityWindow {
+		cutoffSlot = referenceSlot - stabilityWindow
+	}
+	_, live := historicalBlockValidationDecision(
+		snapshot.validationEnabled,
+		ls.config.TrustedReplay,
+		snapshot.chainsyncState,
+		blockSlot,
+		cutoffSlot,
+		snapshot.mithrilSlot,
+	)
+	return live
 }
 
 // blocksBeforeEpochEnd returns the leading blocks that the block-apply

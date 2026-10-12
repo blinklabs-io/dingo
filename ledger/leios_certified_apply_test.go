@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -141,44 +140,26 @@ func (f *leiosCertApplyFixture) block(
 	if announce {
 		announcement = leiosTestRaw(t, []any{f.ebHash.Bytes(), uint64(4096)})
 	}
-	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber: number,
-					Slot:        slot,
-					PrevHash:    lcommon.NewBlake2b256(prevHash),
-					VrfKey:      make([]byte, 32),
-					VrfResult: lcommon.VrfResult{
-						Output: make([]byte, 64),
-						Proof:  make([]byte, 80),
-					},
-					OpCert: babbage.BabbageOpCert{
-						HotVkey:   make([]byte, 32),
-						Signature: make([]byte, 64),
-					},
-					ProtoVersion: babbage.BabbageProtoVersion{
-						Major: dijkstra.MinProtocolVersionDijkstra,
-					},
-				},
-				Signature: make([]byte, 448),
-			},
-			LeiosHeaderExtension: []cbor.RawMessage{
-				leiosTestRaw(t, certified),
-				announcement,
-			},
-		},
-	}
+	block := &dijkstra.DijkstraBlock{}
 	if certified {
 		block.BlockBody.LeiosCertificate = &dijkstra.DijkstraLeiosCertificate{
 			Signers:             []byte{0x80},
 			AggregatedSignature: make([]byte, 48),
 		}
 	}
-	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	bodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
-	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
+	block.BlockHeader = dijkstraTestBlockHeader(
+		number,
+		slot,
+		lcommon.NewBlake2b256(prevHash),
+		block.BlockBody.Hash(),
+		uint64(len(bodyCbor)),
+	)
+	block.BlockHeader.LeiosHeaderExtension = []cbor.RawMessage{
+		leiosTestRaw(t, certified),
+		announcement,
+	}
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)
 	block.SetCbor(blockCbor)

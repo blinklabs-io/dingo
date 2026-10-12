@@ -2902,6 +2902,94 @@ func TestValidateLeiosEndorserBlockForHeaderRevalidatesDistinctParent(
 	require.Len(t, votes.ebs, 1)
 }
 
+func TestScheduleLeiosEndorserBlockValidationUsesCurrentHeaderParent(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	txRaw := testDijkstraTx(t, 0)
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(txRaw),
+			TransactionSize: uint16(len(txRaw)),
+		}},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(79, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	staleHeaderRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	var headerTop []cbor.RawMessage
+	_, err = cbor.Decode(staleHeaderRaw, &headerTop)
+	require.NoError(t, err)
+	var headerBody []cbor.RawMessage
+	_, err = cbor.Decode(headerTop[0], &headerBody)
+	require.NoError(t, err)
+	currentParent := lcommon.NewBlake2b256([]byte("current-parent"))
+	headerBody[2] = mustCbor(t, currentParent)
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	currentHeaderRaw, err := cbor.Encode(headerTop)
+	require.NoError(t, err)
+
+	validationStarted := make(chan struct{})
+	releaseValidation := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseValidation) }) }
+	validationLedger := &fakeLeiosAnnouncementLedger{
+		txValidationFunc: func(context.Context, gledger.BlockHeader) error {
+			close(validationStarted)
+			<-releaseValidation
+			return nil
+		},
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: validationLedger,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	defer release()
+	key := leiosBlockKey(point.Slot, point.Hash)
+	current := &leiosEndorserBlockData{
+		point:                    point,
+		blockRaw:                 blockRaw,
+		txCount:                  1,
+		txsRaw:                   []cbor.RawMessage{txRaw},
+		announcementHeaderRaw:    currentHeaderRaw,
+		semanticValidationStatus: leiosEBValidationUnknown,
+		slotVerified:             true,
+		cacheKeys:                []string{key},
+	}
+	o.leiosMu.Lock()
+	o.leiosEndorserBlocks[key] = current
+	o.leiosMu.Unlock()
+	stale := *current
+	stale.announcementHeaderRaw = staleHeaderRaw
+	o.scheduleLeiosEndorserBlockValidation(point, &stale)
+	testutil.RequireReceive(
+		t,
+		validationStarted,
+		time.Second,
+		"semantic validation start",
+	)
+	o.leiosMu.RLock()
+	gotParent := append(
+		[]byte(nil),
+		o.leiosEndorserBlocks[key].semanticValidationParent...,
+	)
+	o.leiosMu.RUnlock()
+	require.Equal(
+		t,
+		currentParent.Bytes(),
+		gotParent,
+	)
+	release()
+	o.leiosValidationWG.Wait()
+}
+
 func TestAwaitMergedLeiosRankingBlockTimesOut(t *testing.T) {
 	t.Parallel()
 

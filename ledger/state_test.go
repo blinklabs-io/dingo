@@ -14286,7 +14286,7 @@ func TestLeiosAnnouncementBatchEndWaitsOnlyForSelectedBlock(t *testing.T) {
 	))
 }
 
-func TestLeiosTransitionBlockValidatesBeforeReachedTipIsPublished(t *testing.T) {
+func TestLeiosTransitionBlockReconcilesLiveRegionAfterWait(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256([]byte("transition-endorser"))
 	header := announcingHeader(
 		100,
@@ -14297,37 +14297,30 @@ func TestLeiosTransitionBlockValidatesBeforeReachedTipIsPublished(t *testing.T) 
 	)
 	block := leiosApplyBatchTestBlock{header: header}
 	validated := 0
-	ls := &LedgerState{config: LedgerStateConfig{
-		ValidateLeiosAnnouncement: func(
-			_ context.Context,
-			got lcommon.BlockHeader,
-		) error {
-			require.Equal(t, header, got)
-			validated++
-			return nil
+	epoch := models.Epoch{StartSlot: 0, SlotLength: 1, LengthInSlots: 1_000}
+	ls := &LedgerState{
+		chainsyncState: SyncingChainsyncState,
+		currentEpoch:   epoch,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			ValidateLeiosAnnouncement: func(
+				_ context.Context,
+				got lcommon.BlockHeader,
+			) error {
+				require.Equal(t, header, got)
+				validated++
+				return nil
+			},
 		},
-	}}
-	require.False(t, ls.IsAtTip())
-	_, entersLiveValidationRegion := historicalBlockValidationDecision(
-		false,
-		false,
-		SyncingChainsyncState,
-		header.SlotNumber(),
-		header.SlotNumber(),
-		0,
-	)
-	require.True(t, entersLiveValidationRegion)
-	require.Equal(t, 1, leiosAnnouncementBatchEnd(
-		[]lcommon.Block{block},
-		0,
-		1,
-		func(uint64) bool { return entersLiveValidationRegion },
-	))
-	require.NoError(t, ls.validateLeiosAnnouncementBeforeApply(
+	}
+	snapshot, err := ls.prepareBlockApplySnapshot(
 		t.Context(),
-		block,
-		entersLiveValidationRegion,
-	))
+		[]lcommon.Block{block},
+		epoch,
+		false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, SyncingChainsyncState, snapshot.chainsyncState)
 	require.Equal(t, 1, validated)
 }
 

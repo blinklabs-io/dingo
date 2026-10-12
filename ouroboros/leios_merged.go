@@ -900,13 +900,6 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 		len(data.announcementHeaderRaw) == 0 {
 		return
 	}
-	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(
-		data.announcementHeaderRaw,
-	)
-	if err != nil {
-		return
-	}
-	parentHash := ledger.LeiosValidationParentHash(header)
 	key := leiosBlockKey(point.Slot, point.Hash)
 	o.leiosValidationMu.Lock()
 	if o.leiosValidationClosed || o.leiosValidationSlots == nil {
@@ -929,6 +922,16 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 		o.leiosValidationMu.Unlock()
 		return
 	}
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(
+		current.announcementHeaderRaw,
+	)
+	if err != nil {
+		o.leiosMu.Unlock()
+		<-o.leiosValidationSlots
+		o.leiosValidationMu.Unlock()
+		return
+	}
+	parentHash := ledger.LeiosValidationParentHash(header)
 	pending := *current
 	pending.semanticValidationStatus = leiosEBValidationPending
 	pending.semanticValidationParent = slices.Clone(parentHash)

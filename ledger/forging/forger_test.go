@@ -3708,29 +3708,52 @@ func TestCheckAndForgeProductionRecoversBlockBroadcasterPanic(t *testing.T) {
 	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))
 }
 
-func TestNewBlockForgerRejectsProductionLeiosWithoutTxValidator(t *testing.T) {
-	creds := setupTestCredentials(t)
-	_, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     &forgerTestBuilder{},
-		BlockBroadcaster: &forgerTestBroadcaster{},
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       10,
-			chainTipSlot:      9,
-			slotsPerKESPeriod: 100,
+func TestNewBlockForgerRejectsProductionLeiosWithoutValidators(t *testing.T) {
+	for _, test := range []struct {
+		name                  string
+		txValidator           TxValidator
+		announcementValidator func(context.Context, ledger.BlockHeader) error
+		want                  string
+	}{
+		{
+			name: "transaction validator",
+			announcementValidator: func(
+				context.Context,
+				ledger.BlockHeader,
+			) error {
+				return nil
+			},
+			want: "production Leios forging requires transaction validator",
 		},
-		LeiosProduceChecker: &forgerTestLeiosChecker{allowed: true},
-		LeiosEBBroadcaster:  &forgerTestLeiosCaster{},
-		LeiosMempool:        forgerTestMempoolProvider{},
-	})
-	require.EqualError(
-		t,
-		err,
-		"production Leios forging requires transaction validator",
-	)
+		{
+			name:        "announcement validator",
+			txValidator: &mockTxValidator{},
+			want:        "production Leios forging requires announcement validator",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			creds := setupTestCredentials(t)
+			_, err := NewBlockForger(ForgerConfig{
+				Mode:             ModeProduction,
+				Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				Credentials:      creds,
+				LeaderChecker:    forgerTestLeader{},
+				BlockBuilder:     &forgerTestBuilder{},
+				BlockBroadcaster: &forgerTestBroadcaster{},
+				SlotClock: forgerTestSlotClock{
+					currentSlot:       10,
+					chainTipSlot:      9,
+					slotsPerKESPeriod: 100,
+				},
+				LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
+				LeiosEBBroadcaster:         &forgerTestLeiosCaster{},
+				LeiosMempool:               forgerTestMempoolProvider{},
+				LeiosTxValidator:           test.txValidator,
+				LeiosAnnouncementValidator: test.announcementValidator,
+			})
+			require.EqualError(t, err, test.want)
+		})
+	}
 }
 
 func TestCheckAndForgeProductionAdoptsIneligibleLeiosAnnouncement(t *testing.T) {
