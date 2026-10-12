@@ -61,7 +61,7 @@ func (s *Store) DeleteCertificatesAfterSlot(
 	// until the next sync resolves a fresh value against the post-rollback
 	// chain. Always safe to call even when no live syncer is wired (a no-op
 	// store field write) and even if the delete below fails.
-	s.committeeAuthImmutableSlotKnown.Store(false)
+	s.invalidateCommitteeAuthImmutableSlot()
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {

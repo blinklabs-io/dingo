@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -53,7 +54,7 @@ func rewardOutputIDs(
 
 func requirePrecomputeReusable(t *testing.T, ls *LedgerState) {
 	t.Helper()
-	txn := ls.db.Transaction(false)
+	txn := ls.db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		_, ok, err := ls.precomputedStakeRewardApplication(
 			txn, survivalNewEpoch, survivalBoundarySlot,

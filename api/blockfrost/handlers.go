@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -94,12 +95,14 @@ func (b *Blockfrost) handleRoot(
 	})
 }
 
-// handleNotFound handles any request that doesn't match a
-// registered route, including unimplemented endpoints.
+// handleNotFound distinguishes documented unsupported operations from unknown paths.
 func (b *Blockfrost) handleNotFound(
 	w http.ResponseWriter,
-	_ *http.Request,
+	r *http.Request,
 ) {
+	if b.writeUnsupportedOperation(w, r) {
+		return
+	}
 	writeError(
 		w,
 		http.StatusNotFound,
@@ -974,7 +977,7 @@ func (b *Blockfrost) handleAddressUTXOs(
 		return
 	}
 	address := r.PathValue("address")
-	utxos, total, err := b.node.AddressUTXOs(address, params)
+	utxos, total, err := b.node.AddressUTXOs(r.Context(), address, params)
 	if err != nil {
 		b.logger.Error(
 			"failed to get address utxos",
@@ -1013,12 +1016,16 @@ func (b *Blockfrost) handleAddressTransactions(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
+	pagination, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
+	params, ok := parseTransactionRangeOrWriteError(w, r, pagination)
 	if !ok {
 		return
 	}
 	address := r.PathValue("address")
-	txs, total, err := b.node.AddressTransactions(address, params)
+	txs, total, err := b.node.AddressTransactions(r.Context(), address, params)
 	if err != nil {
 		b.logger.Error(
 			"failed to get address transactions",
@@ -1033,7 +1040,7 @@ func (b *Blockfrost) handleAddressTransactions(
 		return
 	}
 
-	SetPaginationHeaders(w, total, params)
+	SetPaginationHeaders(w, total, pagination)
 	resp := make([]AddressTransactionResponse, 0, len(txs))
 	for _, tx := range txs {
 		resp = append(resp, AddressTransactionResponse{
@@ -1267,7 +1274,7 @@ func (b *Blockfrost) handleTransactionSubmit(
 		return
 	}
 
-	hash, err := b.node.TransactionSubmit(txCbor)
+	hash, err := b.node.TransactionSubmit(r.Context(), txCbor)
 	if err != nil {
 		// Classify node conditions before the rejection: admission runs
 		// ledger validation against storage, so a storage fault arrives on
@@ -2200,7 +2207,7 @@ func handlePaginatedAccountRequest[Item, Response any](
 	b *Blockfrost,
 	w http.ResponseWriter,
 	r *http.Request,
-	fetch func(string, PaginationParams) ([]Item, int, error),
+	fetch func(context.Context, string, PaginationParams) ([]Item, int, error),
 	convert func(Item) Response,
 	errorMessage string,
 ) {
@@ -2208,7 +2215,7 @@ func handlePaginatedAccountRequest[Item, Response any](
 	if !ok {
 		return
 	}
-	items, total, err := fetch(r.PathValue("stake_address"), params)
+	items, total, err := fetch(r.Context(), r.PathValue("stake_address"), params)
 	if err != nil {
 		b.writeAccountError(w, err, errorMessage)
 		return

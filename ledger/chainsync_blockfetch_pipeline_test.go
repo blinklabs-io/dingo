@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -57,12 +58,15 @@ func buildDeepCatchupChain(
 		hash := lcommon.NewBlake2b256(
 			testHashBytes(fmt.Sprintf("deep-catchup-hdr-%d", i)),
 		)
-		require.NoError(t, testChain.AddBlockHeader(mockHeader{
-			hash:        hash,
-			prevHash:    prevHash,
-			blockNumber: uint64(i + 1),
-			slot:        uint64(i + 1),
-		}))
+		require.NoError(
+			t,
+			testChain.AddBlockHeader(context.Background(), mockHeader{
+				hash:        hash,
+				prevHash:    prevHash,
+				blockNumber: uint64(i + 1),
+				slot:        uint64(i + 1),
+			}),
+		)
 		hashes = append(hashes, hash)
 		prevHash = hash
 	}
@@ -687,9 +691,6 @@ func TestHandleBlockfetchTimeoutDiscardsQueuedRequestRatherThanLeakingIt(
 		ls.nextBlockfetchRequest,
 		"a pre-queued request must not survive a timeout-driven teardown",
 	)
-	// The retry below re-registers a fresh entry for connId, so the map
-	// contains the key again; what must not happen is the two channels
-	// captured before the timeout going unclosed (checked below).
 	ls.chainsyncBlockfetchMutex.Unlock()
 
 	select {
@@ -711,9 +712,9 @@ func TestHandleBlockfetchTimeoutDiscardsQueuedRequestRatherThanLeakingIt(
 
 	assert.Equal(
 		t,
-		1,
+		0,
 		requestCount,
-		"the timeout retry must still issue a fresh dispatch for the queued headers",
+		"a timeout without another holder must not duplicate the range on the stalled connection",
 	)
 
 	ls.chainsyncBlockfetchMutex.Lock()
@@ -821,12 +822,15 @@ func buildPartiallyAppliedCatchupChain(
 		)
 		hashes[i] = hash
 		if i >= firstSlot {
-			require.NoError(t, testChain.AddBlockHeader(mockHeader{
-				hash:        hash,
-				prevHash:    prevHash,
-				blockNumber: uint64(i),
-				slot:        uint64(i),
-			}))
+			require.NoError(
+				t,
+				testChain.AddBlockHeader(context.Background(), mockHeader{
+					hash:        hash,
+					prevHash:    prevHash,
+					blockNumber: uint64(i),
+					slot:        uint64(i),
+				}),
+			)
 		}
 		prevHash = hash
 	}

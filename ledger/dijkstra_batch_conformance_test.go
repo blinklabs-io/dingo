@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -28,7 +29,6 @@ import (
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -63,23 +63,16 @@ func TestLedgerProcessBlockExpandsIndexesAcrossValidatedTransactions(
 	require.NoError(t, err)
 
 	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber: 1,
-					Slot:        10,
-					ProtoVersion: babbage.BabbageProtoVersion{
-						Major: dijkstra.MinProtocolVersionDijkstra,
-					},
-				},
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			1, 10, common.Blake2b256{}, common.Blake2b256{}, 0,
+		),
 		BlockBody: dijkstra.DijkstraBlockBody{
 			Transactions: []dijkstra.DijkstraTransaction{*batch, *plain},
 		},
 	}
 	bodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)
@@ -118,26 +111,31 @@ func TestLedgerProcessBlockExpandsIndexesAcrossValidatedTransactions(
 			SkipDijkstraTxValidation: true,
 		},
 	}
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
-			txn,
-			point,
-			block,
-			true,
-			false,
-			false,
-			nil,
-			envelopeParent{},
-			offsets,
-			eras.DijkstraEraDesc,
-			pparams,
-			nil,
-			0,
-			0,
-			false,
-		)
-		return err
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				_, err := ls.ledgerProcessBlock(
+					context.Background(),
+					txn,
+					point,
+					block,
+					true,
+					false,
+					false,
+					nil,
+					envelopeParent{},
+					offsets,
+					eras.DijkstraEraDesc,
+					pparams,
+					nil,
+					0,
+					0,
+					false,
+				)
+				return err
+			}),
+	)
 
 	batchSubTx := batch.Body.TxSubTransactions.Items()[0].Body.Id()
 	for _, want := range []struct {
@@ -176,7 +174,7 @@ func dijkstraBatchWithSubOutputTx(t *testing.T) *dijkstra.DijkstraTransaction {
 		23: cbor.NewSetType([]cbor.RawMessage{subTransaction}, true),
 	})
 	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, true, nil})
+	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, nil})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
 	require.NoError(t, err)
@@ -206,9 +204,10 @@ func TestTxValidationSessionAppliesDijkstraBatchLevels(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	err := ls.withTxValidationSession(nil, nil, true, func(
-		_ func(common.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]common.Utxo) error,
+	err := ls.withTxValidationSession(context.Background(), nil, nil, true, false, func(
+		_ func(common.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]common.Utxo, *utxoref.StateOverlay) error,
 		_ func() bool,
+		_ func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
 	) error {
 		return applyTx(
@@ -238,21 +237,16 @@ func TestDijkstraBatchIndexesAndStoresSubtransactionOutput(t *testing.T) {
 	copy(parentHashArray[:], parentHash.Bytes())
 
 	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber:  1,
-					Slot:         1,
-					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
-				},
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			1, 1, common.Blake2b256{}, common.Blake2b256{}, 0,
+		),
 		BlockBody: dijkstra.DijkstraBlockBody{
 			Transactions: []dijkstra.DijkstraTransaction{*dijkstraTx},
 		},
 	}
 	bodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)
@@ -278,9 +272,13 @@ func TestDijkstraBatchIndexesAndStoresSubtransactionOutput(t *testing.T) {
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		},
 	}
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		return delta.apply(ls, txn)
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				return delta.apply(context.Background(), ls, txn)
+			}),
+	)
 
 	child, err := db.Metadata().GetTransactionByHash(childHash.Bytes(), nil)
 	require.NoError(t, err)
@@ -337,21 +335,16 @@ func TestDijkstraBatchAppliesSubtransactionGovernance(t *testing.T) {
 	rootHash := tx.Hash()
 	require.NotEqual(t, childHash, rootHash)
 	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber:  1,
-					Slot:         1,
-					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
-				},
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			1, 1, common.Blake2b256{}, common.Blake2b256{}, 0,
+		),
 		BlockBody: dijkstra.DijkstraBlockBody{
 			Transactions: []dijkstra.DijkstraTransaction{*tx},
 		},
 	}
 	bodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)
@@ -387,15 +380,29 @@ func TestDijkstraBatchAppliesSubtransactionGovernance(t *testing.T) {
 	delta.Offsets = offsets
 	delta.addTransaction(tx, 0)
 	t.Cleanup(delta.Release)
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		return delta.apply(ls, txn)
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				return delta.apply(context.Background(), ls, txn)
+			}),
+	)
 
-	got, err := db.GetGovernanceProposal(childHash.Bytes(), 0, nil)
+	got, err := db.GetGovernanceProposal(
+		context.Background(),
+		childHash.Bytes(),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, childHash.Bytes(), got.TxHash)
 	require.Equal(t, uint64(12), got.ProposedEpoch)
-	rootProposal, err := db.GetGovernanceProposal(rootHash.Bytes(), 0, nil)
+	rootProposal, err := db.GetGovernanceProposal(
+		context.Background(),
+		rootHash.Bytes(),
+		0,
+		nil,
+	)
 	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
 	require.Nil(t, rootProposal)
 }
@@ -405,13 +412,16 @@ func TestDijkstraDirectDepositUpdatesRewardAccountBalance(t *testing.T) {
 	db := newTestDB(t)
 	stakeKey := bytes.Repeat([]byte{0x42}, 28)
 	rewardAddress := append([]byte{0xe0}, stakeKey...)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:    stakeKey,
-		CredentialTag: 0,
-		AddedSlot:     1,
-		Reward:        dbtypes.Uint64(5),
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:    stakeKey,
+			CredentialTag: 0,
+			AddedSlot:     1,
+			Reward:        dbtypes.Uint64(5),
+			Active:        true,
+		}),
+	)
 	body, err := cbor.Encode(map[uint]any{
 		0:  []any{},
 		1:  []any{},
@@ -419,28 +429,23 @@ func TestDijkstraDirectDepositUpdatesRewardAccountBalance(t *testing.T) {
 		25: map[cbor.ByteString]uint64{cbor.NewByteString(rewardAddress): 20},
 	})
 	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, true, nil})
+	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, nil})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
 	require.NoError(t, err)
 	dijkstraTx, ok := tx.(*dijkstra.DijkstraTransaction)
 	require.True(t, ok)
 	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber:  1,
-					Slot:         2,
-					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
-				},
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			1, 2, common.Blake2b256{}, common.Blake2b256{}, 0,
+		),
 		BlockBody: dijkstra.DijkstraBlockBody{
 			Transactions: []dijkstra.DijkstraTransaction{*dijkstraTx},
 		},
 	}
 	bodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)
@@ -463,23 +468,58 @@ func TestDijkstraDirectDepositUpdatesRewardAccountBalance(t *testing.T) {
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		},
 	}
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		return delta.apply(ls, txn)
-	}))
-	account, err := db.GetAccountByCredential(0, stakeKey, false, nil)
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				return delta.apply(context.Background(), ls, txn)
+			}),
+	)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		stakeKey,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, dbtypes.Uint64(25), account.Reward)
 
 	// Direct-deposit credits use the transaction-body hash as their journal
 	// source, so rollback removes the credit and replay can apply it again.
-	require.NoError(t, db.DeleteAccountRewardsAfterSlot(1, nil))
-	account, err = db.GetAccountByCredential(0, stakeKey, false, nil)
+	require.NoError(
+		t,
+		db.DeleteAccountRewardsAfterSlot(context.Background(), 1, nil),
+	)
+	account, err = db.GetAccountByCredential(
+		context.Background(),
+		0,
+		stakeKey,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, dbtypes.Uint64(5), account.Reward)
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		return ApplyDijkstraDirectDeposits(db, tx, 2, txn)
-	}))
-	account, err = db.GetAccountByCredential(0, stakeKey, false, nil)
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				return ApplyDijkstraDirectDeposits(
+					context.Background(),
+					db,
+					tx,
+					2,
+					txn,
+				)
+			}),
+	)
+	account, err = db.GetAccountByCredential(
+		context.Background(),
+		0,
+		stakeKey,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, dbtypes.Uint64(25), account.Reward)
 }

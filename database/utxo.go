@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -330,6 +331,7 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 // depend on an incidental property of a different package's nil-handling
 // rather than on something stated and tested here.
 func (d *Database) ResolveUtxoCborWithRecovery(
+	ctx context.Context,
 	txId []byte,
 	outputIdx uint32,
 	txn *Txn,
@@ -338,7 +340,7 @@ func (d *Database) ResolveUtxoCborWithRecovery(
 	// *Txn -- mirror UtxoByRef's nil handling here rather than passing a nil
 	// txn through to it.
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	cbor, err := d.CborCache().ResolveUtxoCbor(txId, outputIdx, txn)
@@ -348,7 +350,13 @@ func (d *Database) ResolveUtxoCborWithRecovery(
 			var cleanup func()
 			switch {
 			case txn.Metadata() == nil:
-				recoveryTxn, cleanup = txn.withMetadataForRecovery()
+				recoveryTxn, cleanup, err = txn.withMetadataForRecovery(ctx)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"open metadata recovery transaction: %w",
+						err,
+					)
+				}
 			case txn.Blob() == nil:
 				// A metadata-only caller: recoverUtxoCbor's block lookup
 				// (utxoRecoveryBlockForTx -> BlockByPointTxn) needs a blob
@@ -655,12 +663,13 @@ func repairUtxoBlob(
 }
 
 func (d *Database) UtxoByRef(
+	ctx context.Context,
 	txId []byte,
 	outputIdx uint32,
 	txn *Txn,
 ) (*models.Utxo, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	utxo, err := d.utxoStore().GetUtxo(txId, outputIdx, txn.Metadata())
@@ -687,12 +696,13 @@ func (d *Database) UtxoByRef(
 // referenced input of a failing transaction (see
 // LedgerState.findReplayRecoveryCandidate), so it uses this instead.
 func (d *Database) UtxoExists(
+	ctx context.Context,
 	txId []byte,
 	outputIdx uint32,
 	txn *Txn,
 ) (bool, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	utxo, err := d.utxoStore().GetUtxo(txId, outputIdx, txn.Metadata())
@@ -706,11 +716,12 @@ func (d *Database) UtxoExists(
 // single batch. Refs with no matching live UTxO are simply absent from the
 // result.
 func (d *Database) UtxosByRefs(
+	ctx context.Context,
 	refs []models.UtxoId,
 	txn *Txn,
 ) ([]models.Utxo, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	utxos, err := d.utxoStore().GetUtxosByRefs(refs, txn.Metadata())
@@ -737,12 +748,13 @@ func (d *Database) UtxosByRefs(
 // node-parity) must reject that case themselves before
 // calling this -- see ledger's checkUtxoRetentionWindow.
 func (d *Database) UtxosByRefsAsOf(
+	ctx context.Context,
 	refs []models.UtxoId,
 	atSlot uint64,
 	txn *Txn,
 ) ([]models.Utxo, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	utxos, err := d.utxoStore().GetUtxosByRefsAsOf(refs, atSlot, txn.Metadata())
@@ -762,11 +774,15 @@ func (d *Database) UtxosByRefsAsOf(
 // variant for callers that already have a populated model. When txn
 // is nil a write transaction is opened, committed on success and
 // rolled back on error via Txn.Do.
-func (d *Database) CreateUtxo(txn *Txn, utxo *models.Utxo) error {
+func (d *Database) CreateUtxo(
+	ctx context.Context,
+	txn *Txn,
+	utxo *models.Utxo,
+) error {
 	if txn != nil {
 		return d.utxoStore().CreateUtxo(txn.Metadata(), utxo)
 	}
-	return d.MetadataTxn(true).Do(func(t *Txn) error {
+	return d.MetadataTxn(ctx, true).Do(func(t *Txn) error {
 		return d.utxoStore().CreateUtxo(t.Metadata(), utxo)
 	})
 }
@@ -774,12 +790,13 @@ func (d *Database) CreateUtxo(txn *Txn, utxo *models.Utxo) error {
 // UtxoByRefIncludingSpent returns a Utxo by reference,
 // including spent (consumed) UTxOs.
 func (d *Database) UtxoByRefIncludingSpent(
+	ctx context.Context,
 	txId []byte,
 	outputIdx uint32,
 	txn *Txn,
 ) (*models.Utxo, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	utxo, err := d.utxoStore().GetUtxoIncludingSpent(
@@ -805,6 +822,7 @@ func (d *Database) UtxoByRefIncludingSpent(
 // own should pass MaxUtxosByAddressResults. Exceeding the bound returns
 // models.ErrTooManyUtxoResults.
 func (d *Database) UtxosByAddress(
+	ctx context.Context,
 	addrs []ledger.Address,
 	maxResults int,
 	txn *Txn,
@@ -813,7 +831,7 @@ func (d *Database) UtxosByAddress(
 		return nil, nil
 	}
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	patterns := make([]models.UtxoAddressPattern, len(addrs))
@@ -826,6 +844,49 @@ func (d *Database) UtxosByAddress(
 	}
 	utxos, err := d.utxoStore().
 		GetUtxosByAddress(patterns, maxResults, txn.Metadata())
+	if err != nil {
+		return nil, err
+	}
+	for i := range utxos {
+		if err := loadCbor(&utxos[i], txn); err != nil {
+			return nil, err
+		}
+	}
+	return filterUtxosByAddressPatterns(utxos, patterns)
+}
+
+// UtxosByAddressAsOf is UtxosByAddress as the outputs stood at atSlot (see
+// the metadata store's GetUtxosByAddressAsOf). Rows spent at or before
+// atSlot and later removed by consumed-UTxO cleanup are missing, so callers
+// must reject a point below their retention floor first.
+func (d *Database) UtxosByAddressAsOf(
+	ctx context.Context,
+	addrs []ledger.Address,
+	atSlot uint64,
+	maxResults int,
+	txn *Txn,
+) ([]models.Utxo, error) {
+	if len(addrs) == 0 {
+		return nil, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	patterns := make([]models.UtxoAddressPattern, len(addrs))
+	for i, addr := range addrs {
+		pattern, err := models.ExactUtxoAddressPattern(addr)
+		if err != nil {
+			return nil, err
+		}
+		patterns[i] = pattern
+	}
+	utxos, err := d.utxoStore().GetUtxosByAddressAsOf(
+		patterns,
+		atSlot,
+		maxResults,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -851,7 +912,7 @@ func (d *Database) UtxosWithHistory(
 		return nil, models.ErrNilUtxoHistoryQuery
 	}
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.TransactionContext(context.Background(), false)
 		defer txn.Release()
 	}
 	requiresExact := !q.MatchAllAddresses &&
@@ -958,12 +1019,13 @@ func (d *Database) loadAndFilterHistoricalUtxos(
 // GetControlledAmountByCredential returns the sum of live UTxO amounts
 // controlled by the given stake credential.
 func (d *Database) GetControlledAmountByCredential(
+	ctx context.Context,
 	credentialTag uint8,
 	stakingKey []byte,
 	txn *Txn,
 ) (uint64, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	total, err := d.utxoStore().GetControlledAmountByCredential(
@@ -987,13 +1049,14 @@ func (d *Database) GetControlledAmountByCredential(
 // each payment credential is a script hash. See the metadata store
 // interface doc comment for the full contract.
 func (d *Database) GetUtxoPaymentScriptByCredential(
+	ctx context.Context,
 	credentialTag uint8,
 	stakingKey []byte,
 	paymentKeys [][]byte,
 	txn *Txn,
 ) (map[string]bool, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	ret, err := d.utxoStore().GetUtxoPaymentScriptByCredential(
@@ -1012,11 +1075,12 @@ func (d *Database) GetUtxoPaymentScriptByCredential(
 }
 
 func (d *Database) UtxosByAddressWithOrdering(
+	ctx context.Context,
 	q *models.UtxoWithOrderingQuery,
 	txn *Txn,
 ) ([]models.UtxoWithOrdering, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	if q == nil {
@@ -1103,11 +1167,12 @@ func (d *Database) UtxosByAddressWithOrdering(
 // a page's worth of references to pass to UtxosByRefs, letting a caller
 // avoid materializing more than one page of an address's UTxO history.
 func (d *Database) MatchingUtxoRefsByAddressWithOrdering(
+	ctx context.Context,
 	q *models.UtxoWithOrderingQuery,
 	txn *Txn,
 ) ([]models.UtxoId, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	if q == nil {
@@ -1203,11 +1268,12 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrdering(
 // filtering, since Dingo has no cheap way to compute an exact-address total
 // without decoding every coarse candidate's output CBOR.
 func (d *Database) CountUtxosByAddressWithOrdering(
+	ctx context.Context,
 	q *models.UtxoWithOrderingQuery,
 	txn *Txn,
 ) (int, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	if q == nil {
@@ -1222,12 +1288,13 @@ func (d *Database) CountUtxosByAddressWithOrdering(
 }
 
 func (d *Database) UtxosByAddressAtSlot(
+	ctx context.Context,
 	addr lcommon.Address,
 	slot uint64,
 	txn *Txn,
 ) ([]models.Utxo, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	pattern, err := models.ExactUtxoAddressPattern(addr)
@@ -1326,12 +1393,13 @@ func (d *Database) loadAndFilterOrderedUtxos(
 // policyId: the policy ID of the asset (required)
 // assetName: the asset name (pass nil to match all assets under the policy, or empty []byte{} to match assets with empty names)
 func (d *Database) UtxosByAssets(
+	ctx context.Context,
 	policyId []byte,
 	assetName []byte,
 	txn *Txn,
 ) ([]models.Utxo, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	utxos, err := d.utxoStore().GetUtxosByAssets(
@@ -1365,13 +1433,14 @@ func (d *Database) UtxosByAssets(
 const ConsumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
 
 func (d *Database) UtxosDeleteConsumed(
+	ctx context.Context,
 	slot uint64,
 	limit int,
 	txn *Txn,
 ) (int, error) {
 	owned := false
 	if txn == nil {
-		txn = d.Transaction(true)
+		txn = d.Transaction(ctx, true)
 		owned = true
 		defer func() {
 			if owned {
@@ -1450,12 +1519,13 @@ func (d *Database) UtxosDeleteConsumed(
 }
 
 func (d *Database) UtxosDeleteRolledback(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
 	owned := false
 	if txn == nil {
-		txn = d.Transaction(true)
+		txn = d.Transaction(ctx, true)
 		owned = true
 		defer func() {
 			if owned {
@@ -1497,12 +1567,13 @@ func (d *Database) UtxosDeleteRolledback(
 }
 
 func (d *Database) UtxosUnspend(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
 	owned := false
 	if txn == nil {
-		txn = NewMetadataOnlyTxn(d, true)
+		txn = NewMetadataOnlyTxn(ctx, d, true)
 		owned = true
 		defer func() {
 			if owned {
@@ -1534,6 +1605,7 @@ func (d *Database) UtxosUnspend(
 // is propagated up; CBOR-loading failures are also propagated.
 // When txn is nil a read transaction is opened internally.
 func (d *Database) IterateLiveUtxos(
+	ctx context.Context,
 	txn *Txn,
 	fn func(*models.Utxo) error,
 ) error {
@@ -1551,7 +1623,7 @@ func (d *Database) IterateLiveUtxos(
 	if txn != nil {
 		return d.utxoStore().IterateLiveUtxos(txn.Metadata(), withCbor(txn))
 	}
-	return d.Transaction(false).Do(func(t *Txn) error {
+	return d.Transaction(ctx, false).Do(func(t *Txn) error {
 		return d.utxoStore().IterateLiveUtxos(t.Metadata(), withCbor(t))
 	})
 }
@@ -1567,13 +1639,14 @@ func (d *Database) IterateLiveUtxos(
 // u.TxId) you intend to retain past the current call.
 // When txn is nil a read transaction is opened internally.
 func (d *Database) IterateLiveUtxoRefs(
+	ctx context.Context,
 	txn *Txn,
 	fn func(*models.Utxo) error,
 ) error {
 	if txn != nil {
 		return d.utxoStore().IterateLiveUtxos(txn.Metadata(), fn)
 	}
-	return d.Transaction(false).Do(func(t *Txn) error {
+	return d.Transaction(ctx, false).Do(func(t *Txn) error {
 		return d.utxoStore().IterateLiveUtxos(t.Metadata(), fn)
 	})
 }
@@ -1594,6 +1667,7 @@ func (d *Database) IterateLiveUtxoRefs(
 // query, since the rows it would need may already be pruned -- see
 // IterateUtxosAsOf's doc comment on the MetadataStore interface.
 func (d *Database) IterateUtxoRefsAsOf(
+	ctx context.Context,
 	atSlot uint64,
 	txn *Txn,
 	fn func(*models.Utxo) error,
@@ -1601,7 +1675,7 @@ func (d *Database) IterateUtxoRefsAsOf(
 	if txn != nil {
 		return d.utxoStore().IterateUtxosAsOf(atSlot, txn.Metadata(), fn)
 	}
-	return d.Transaction(false).Do(func(t *Txn) error {
+	return d.Transaction(ctx, false).Do(func(t *Txn) error {
 		return d.utxoStore().IterateUtxosAsOf(atSlot, t.Metadata(), fn)
 	})
 }
@@ -1613,6 +1687,7 @@ func (d *Database) IterateUtxoRefsAsOf(
 // write transaction is opened, committed on success and rolled back
 // on error via Txn.Do.
 func (d *Database) MarkUtxosDeletedAtSlot(
+	ctx context.Context,
 	txn *Txn,
 	refs []types.UtxoKey,
 	atSlot uint64,
@@ -1625,7 +1700,7 @@ func (d *Database) MarkUtxosDeletedAtSlot(
 			txn.Metadata(), refs, atSlot,
 		)
 	}
-	return d.MetadataTxn(true).Do(func(t *Txn) error {
+	return d.MetadataTxn(ctx, true).Do(func(t *Txn) error {
 		return d.utxoStore().MarkUtxosDeletedAtSlot(
 			t.Metadata(), refs, atSlot,
 		)

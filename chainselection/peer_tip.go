@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"bytes"
+	"sort"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -283,8 +284,8 @@ func (p *PeerChainTip) trimObservedPointsTo(keepUntil int) {
 // corroboration (observedPoints, the block hashes), keeping the two in lockstep
 // and bounded to the density window.
 //
-// trackHashes gates the hash frontier: it is stored only while Genesis
-// corroboration is active. When false the hash frontier is dropped, so normal
+// trackHashes gates the hash frontier: it is stored only in Genesis mode.
+// When false the hash frontier is dropped, so normal
 // Praos operation does not retain per-peer window-length hash history.
 func (p *PeerChainTip) recordObservedPoint(
 	point ocommon.Point,
@@ -412,11 +413,9 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 }
 
 // confirmsRecentChain reports whether witness confirms this peer's (candidate's)
-// chain across the window range they overlap. It is true when, for every block
-// the witness observed within the candidate's frontier slot range, the candidate
-// observed the identical (slot, hash) block, AND they share at least one such
-// block. In other words the witness's chain, as far as it reaches into the
-// candidate's window, is a prefix/subset of the candidate's chain.
+// chain. Within the slot range of the candidate's observed frontier, every
+// witness-observed point must match the candidate, and the witness must have
+// independently delivered the candidate's current point.
 //
 // This is deliberately stronger than "share any common point": a fast source
 // that shares only an old ancestor and then diverges for every later block is
@@ -424,12 +423,15 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 // not (or a conflicting hash at the same slot). A witness whose frontier does
 // not overlap the candidate's window at all cannot confirm it (returns false),
 // so corroboration fails closed — the candidate then stalls rather than being
-// followed uncorroborated.
+// followed uncorroborated. Requiring the current point is what keeps a match
+// in older candidate history, however recent, from authorizing candidate
+// blocks the witness has never observed.
 //
 // Both frontiers are kept in strictly-ascending slot order; this is a
-// two-pointer scan. It relies on the observed frontier being populated per
-// header (dense) during chainsync, so two peers on the same chain share every
-// block in their overlap.
+// two-pointer scan that starts the witness at the candidate's first slot. It
+// relies on the observed frontier being populated per header (dense) during
+// chainsync, so two peers on the same chain share every block in their
+// overlap.
 func (p *PeerChainTip) confirmsRecentChain(witness *PeerChainTip) bool {
 	if p == nil || witness == nil ||
 		len(p.observedPoints) == 0 || len(witness.observedPoints) == 0 {
@@ -438,12 +440,13 @@ func (p *PeerChainTip) confirmsRecentChain(witness *PeerChainTip) bool {
 	candidate := p.observedPoints
 	lo := candidate[0].Slot
 	hi := candidate[len(candidate)-1].Slot
+	witnessPoints := witness.observedPoints
+	witnessPoints = witnessPoints[sort.Search(len(witnessPoints), func(i int) bool {
+		return witnessPoints[i].Slot >= lo
+	}):]
 	i := 0
-	hadMatch := false
-	for _, w := range witness.observedPoints {
-		if w.Slot < lo {
-			continue
-		}
+	tipMatched := false
+	for _, w := range witnessPoints {
 		if w.Slot > hi {
 			break
 		}
@@ -452,7 +455,7 @@ func (p *PeerChainTip) confirmsRecentChain(witness *PeerChainTip) bool {
 		}
 		if i < len(candidate) && candidate[i].Slot == w.Slot &&
 			len(w.Hash) > 0 && bytes.Equal(candidate[i].Hash, w.Hash) {
-			hadMatch = true
+			tipMatched = i == len(candidate)-1
 			continue
 		}
 		// The witness observed a block within the candidate's range that the
@@ -460,7 +463,7 @@ func (p *PeerChainTip) confirmsRecentChain(witness *PeerChainTip) bool {
 		// they are on different chains, so this witness does not confirm.
 		return false
 	}
-	return hadMatch
+	return tipMatched
 }
 
 func (p *PeerChainTip) observedDensity(window uint64) uint64 {

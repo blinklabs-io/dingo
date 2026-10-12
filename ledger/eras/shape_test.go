@@ -310,23 +310,54 @@ func TestBuildShape_NextEraTrigger_AtEpochOverride(t *testing.T) {
 	assert.Equal(t, hardfork.TriggerAtVersion, shelley.NextEraTrigger.Kind)
 }
 
-// TestXHardForkAtEpoch is ignored when ExperimentalHardForksEnabled is not
-// set: HardForkEpoch returns false, so we fall through to AtVersion.
-func TestBuildShape_NextEraTrigger_NoOverrideWithoutExperimentalFlag(
+// cardano-node honours TestShelley..ConwayHardForkAtEpoch without
+// ExperimentalHardForksEnabled, so the override must reach the shape when the
+// flag is unset. Otherwise the era falls back to AtVersion and dingo stays in
+// Alonzo at an epoch where cardano-node enters Babbage.
+func TestBuildShape_NextEraTrigger_OverrideWithoutExperimentalFlag(
 	t *testing.T,
 ) {
 	cfg := newTestCfg(t)
-	override := uint64(5)
-	cfg.TestShelleyHardForkAtEpoch = &override
+	override := uint64(2)
+	cfg.TestBabbageHardForkAtEpoch = &override
 	// ExperimentalHardForksEnabled left nil.
 
 	shape, err := eras.BuildShape(cfg)
 	require.NoError(t, err)
 
-	byron := shape.Eras[0]
-	require.Equal(t, "Byron", byron.EraName)
-	assert.Equal(t, hardfork.TriggerAtVersion, byron.NextEraTrigger.Kind,
-		"without ExperimentalHardForksEnabled, override must be ignored")
+	alonzo, ok := shape.EraForID(eras.AlonzoEraDesc.Id)
+	require.True(t, ok)
+	assert.Equal(t, hardfork.TriggerAtEpoch, alonzo.NextEraTrigger.Kind,
+		"without ExperimentalHardForksEnabled, the override must still apply")
+	assert.Equal(t, override, alonzo.NextEraTrigger.Epoch)
+}
+
+// TestDijkstraHardForkAtEpoch is the one override cardano-node gates on
+// ExperimentalHardForksEnabled.
+func TestBuildShape_DijkstraOverrideRequiresExperimentalFlag(t *testing.T) {
+	override := uint64(7)
+	for _, tc := range []struct {
+		name string
+		flag *bool
+		want hardfork.TriggerKind
+	}{
+		{"flag unset", nil, hardfork.TriggerAtVersion},
+		{"flag false", new(false), hardfork.TriggerAtVersion},
+		{"flag true", new(true), hardfork.TriggerAtEpoch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newTestCfg(t)
+			cfg.ExperimentalHardForksEnabled = tc.flag
+			cfg.TestDijkstraHardForkAtEpoch = &override
+
+			shape, err := eras.BuildShapeWithDijkstra(cfg, true)
+			require.NoError(t, err)
+
+			conway, ok := shape.EraForID(eras.ConwayEraDesc.Id)
+			require.True(t, ok)
+			assert.Equal(t, tc.want, conway.NextEraTrigger.Kind)
+		})
+	}
 }
 
 // Multiple TestXHardForkAtEpoch overrides: each affects only the era

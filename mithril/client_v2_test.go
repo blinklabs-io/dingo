@@ -275,8 +275,8 @@ func TestCertificateCardanoDatabaseFixtureSTMVerifies(t *testing.T) {
 	var cert Certificate
 	require.NoError(t, json.Unmarshal(data, &cert))
 
-	require.NoError(t, verifySTMCertificate(&cert))
+	require.NoError(t, verifySTMCertificate(&cert, newCertificateChainBudget()))
 
 	cert.SignedMessage = "00" + cert.SignedMessage[2:]
-	require.Error(t, verifySTMCertificate(&cert))
+	require.Error(t, verifySTMCertificate(&cert, newCertificateChainBudget()))
 }

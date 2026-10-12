@@ -237,6 +237,7 @@ func (i *nodeMatchIterator) Next() (Match, bool, error) {
 			continue
 		}
 		match, err := i.adapter.matchFromUtxo(
+			i.ctx,
 			utxo,
 			i.query.ResolveHashes,
 			i.txn,
@@ -264,6 +265,7 @@ func (i *nodeMatchIterator) spentFields(
 	if !ok {
 		transaction, err := i.adapter.ledgerState.Database().
 			GetTransactionByHash(
+				i.ctx,
 				utxo.SpentAtTxId,
 				i.txn,
 			)
@@ -428,6 +430,7 @@ func stringsEqualFoldHex(raw []byte, encoded string) bool {
 }
 
 func (a *NodeAdapter) matchFromUtxo(
+	ctx context.Context,
 	utxo models.UtxoWithHistory,
 	resolve bool,
 	txn *database.Txn,
@@ -486,7 +489,11 @@ func (a *NodeAdapter) matchFromUtxo(
 		}
 	}
 	if resolve && ret.DatumHash != nil && ret.Datum == nil {
-		datum, err := a.ledgerState.Database().GetDatum(utxo.DatumHash, txn)
+		datum, err := a.ledgerState.Database().GetDatum(
+			ctx,
+			utxo.DatumHash,
+			txn,
+		)
 		if err != nil && !errors.Is(err, database.ErrDatumNotFound) {
 			return Match{}, fmt.Errorf(
 				"resolve datum %x: %w",
@@ -534,7 +541,7 @@ func (a *NodeAdapter) Datum(
 	}
 	defer txn.Release()
 	snapshotTip := pointFromChainPoint(tip.Point)
-	datum, err := db.GetDatum(hash, txn)
+	datum, err := db.GetDatum(ctx, hash, txn)
 	if errors.Is(err, database.ErrDatumNotFound) {
 		return nil, snapshotTip, nil
 	}
@@ -555,7 +562,7 @@ func (a *NodeAdapter) Script(
 	}
 	defer txn.Release()
 	snapshotTip := pointFromChainPoint(tip.Point)
-	script, err := db.GetScript(hash, txn)
+	script, err := db.GetScript(ctx, hash, txn)
 	if errors.Is(err, database.ErrScriptNotFound) {
 		return nil, snapshotTip, nil
 	}

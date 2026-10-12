@@ -50,7 +50,7 @@ func TestValidateTxDijkstraV3ExposesExplicitStakeAmounts(t *testing.T) {
 	}
 	explicit := data.NewConstr(
 		0,
-		data.NewInteger(big.NewInt(conwayExplicitStakeAmount)),
+		data.NewInteger(big.NewInt(int64(conwayExplicitStakeAmount))),
 	)
 	for _, certificateCase := range []struct {
 		name        string

@@ -34,6 +34,8 @@ go.work
 
 # node_modules for npm publishing
 node_modules/
+/npm/vendor/
+/npm/checksums.json
 
 # IDEs
 .idea/
@@ -41,3 +43,18 @@ node_modules/
 
 # Git worktrees
 .worktrees/
+
+# Local secrets and operator configuration
+.env
+*.skey
+*.vkey
+*.key
+*.pem
+credentials.json
+dingo.yaml
+
+# Tracked fixtures and public verification keys that match the patterns above
+!/config/cardano/*/*.vkey
+!/internal/test/devnet/.env
+!/internal/test/devnet/testdata/*.skey
+!/internal/devnetkeys/keys/*

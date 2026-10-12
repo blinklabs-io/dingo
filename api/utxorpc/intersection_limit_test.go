@@ -16,6 +16,7 @@ package utxorpc
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -39,6 +40,7 @@ type intersectionLimitLedger struct {
 }
 
 func (l *intersectionLimitLedger) GetIntersectPoint(
+	_ context.Context,
 	points []ocommon.Point,
 ) (*ocommon.Point, error) {
 	l.calls++

@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"fmt"
 	"math/big"
 	"testing"
@@ -1331,7 +1332,7 @@ func TestConwayRatifyQuorum_FromGenesis(t *testing.T) {
 			Threshold: &threshold,
 		},
 	}
-	got, err := conwayRatifyQuorum(nil, nil, nil, genesis)
+	got, err := conwayRatifyQuorum(context.Background(), nil, nil, nil, genesis)
 	assert.NoError(t, err)
 	assert.Equal(t, big.NewRat(3, 5), got)
 }
@@ -1339,7 +1340,7 @@ func TestConwayRatifyQuorum_FromGenesis(t *testing.T) {
 func TestConwayRatifyQuorum_FallbackWhenGenesisNil(t *testing.T) {
 	t.Parallel()
 
-	got, err := conwayRatifyQuorum(nil, nil, nil, nil)
+	got, err := conwayRatifyQuorum(context.Background(), nil, nil, nil, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, big.NewRat(2, 3), got)
 }
@@ -1348,7 +1349,7 @@ func TestConwayRatifyQuorum_FallbackWhenThresholdMissing(t *testing.T) {
 	t.Parallel()
 
 	genesis := &conway.ConwayGenesis{}
-	got, err := conwayRatifyQuorum(nil, nil, nil, genesis)
+	got, err := conwayRatifyQuorum(context.Background(), nil, nil, nil, genesis)
 	assert.NoError(t, err)
 	assert.Equal(t, big.NewRat(2, 3), got)
 }
@@ -1361,7 +1362,15 @@ func TestConwayRatifyQuorum_PrefersDBOverGenesis(t *testing.T) {
 	// An enacted quorum must win over the Conway genesis default so
 	// the ratify loop tracks on-chain state rather than the initial
 	// bootstrap threshold.
-	require.NoError(t, db.SetCommitteeQuorum(big.NewRat(3, 5), 1000, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeQuorum(
+			context.Background(),
+			big.NewRat(3, 5),
+			1000,
+			nil,
+		),
+	)
 
 	threshold := cbor.Rat{Rat: big.NewRat(2, 3)}
 	genesis := &conway.ConwayGenesis{
@@ -1369,7 +1378,7 @@ func TestConwayRatifyQuorum_PrefersDBOverGenesis(t *testing.T) {
 			Threshold: &threshold,
 		},
 	}
-	got, err := conwayRatifyQuorum(nil, db, nil, genesis)
+	got, err := conwayRatifyQuorum(context.Background(), nil, db, nil, genesis)
 	require.NoError(t, err)
 	assert.Equal(t, big.NewRat(3, 5), got)
 }
@@ -1385,8 +1394,16 @@ func TestConwayRatifyQuorum_FallsBackToGenesisAfterClear(
 	// genesis until the next UpdateCommittee writes a new positive
 	// quorum, matching the cardano-ledger ENACT semantics for
 	// NoConfidence.
-	require.NoError(t, db.SetCommitteeQuorum(big.NewRat(3, 5), 1000, nil))
-	require.NoError(t, db.ClearCommitteeQuorum(2000, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeQuorum(
+			context.Background(),
+			big.NewRat(3, 5),
+			1000,
+			nil,
+		),
+	)
+	require.NoError(t, db.ClearCommitteeQuorum(context.Background(), 2000, nil))
 
 	// Pick a genesis threshold distinct from defaultCCQuorum (2/3) so
 	// the assertion fails if the code path slipped to the last-resort
@@ -1397,7 +1414,7 @@ func TestConwayRatifyQuorum_FallsBackToGenesisAfterClear(
 			Threshold: &threshold,
 		},
 	}
-	got, err := conwayRatifyQuorum(nil, db, nil, genesis)
+	got, err := conwayRatifyQuorum(context.Background(), nil, db, nil, genesis)
 	require.NoError(t, err)
 	assert.Equal(t, big.NewRat(4, 7), got)
 }

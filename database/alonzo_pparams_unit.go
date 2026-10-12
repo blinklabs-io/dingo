@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 
@@ -30,8 +31,8 @@ type alonzoPParamsEraStore interface {
 	HasPParamsForEra(uint, types.Txn) (bool, error)
 }
 
-func (d *Database) checkAlonzoPParamsUnit() error {
-	gates, err := d.Metadata().GetNodeSettingsGates()
+func (d *Database) checkAlonzoPParamsUnit(ctx context.Context) error {
+	gates, err := d.Metadata().GetNodeSettingsGates(ctx)
 	if err != nil {
 		return fmt.Errorf(
 			"read Alonzo protocol-parameter unit marker: %w",
@@ -52,7 +53,7 @@ func (d *Database) checkAlonzoPParamsUnit() error {
 		// The lossy value is recomputable from Alonzo genesis for a row the
 		// pre-v0.205.7 era transition wrote, so a resync is the fallback
 		// rather than the first answer. See repairAlonzoPParamsUnit.
-		repaired, err := d.repairAlonzoPParamsUnit()
+		repaired, err := d.repairAlonzoPParamsUnit(ctx)
 		if repaired {
 			return nil
 		}
@@ -93,8 +94,8 @@ func (d *Database) checkAlonzoPParamsUnit() error {
 //
 // Missing and unknown markers are never inferred here. They remain hard
 // failures in checkAlonzoPParamsUnit rather than being silently blessed.
-func (d *Database) ReconcileAlonzoPParamsUnitAfterRecovery() error {
-	gates, err := d.Metadata().GetNodeSettingsGates()
+func (d *Database) ReconcileAlonzoPParamsUnitAfterRecovery(ctx context.Context) error {
+	gates, err := d.Metadata().GetNodeSettingsGates(ctx)
 	if err != nil {
 		return fmt.Errorf(
 			"read Alonzo protocol-parameter unit marker: %w",
@@ -113,10 +114,12 @@ func (d *Database) ReconcileAlonzoPParamsUnitAfterRecovery() error {
 		// legacy and the following phase-1 check requires a resync.
 		return nil
 	}
+	txn := d.MetadataTxn(ctx, false)
 	hasAlonzo, err := store.HasPParamsForEra(
 		alonzo.EraIdAlonzo,
-		nil,
+		txn.Metadata(),
 	)
+	txn.Release()
 	if err != nil {
 		return fmt.Errorf(
 			"check recovered Alonzo protocol parameters: %w",
@@ -126,8 +129,8 @@ func (d *Database) ReconcileAlonzoPParamsUnitAfterRecovery() error {
 	if hasAlonzo {
 		return nil
 	}
-	epoch, slot := d.currentEpochSlot()
-	if err := d.Metadata().SetNodeSettingsGates(
+	epoch, slot := d.currentEpochSlot(ctx)
+	if err := d.Metadata().SetNodeSettingsGates(ctx,
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitWordV1,
 		},
@@ -186,7 +189,7 @@ func (e errAlonzoPParamsUnitUnrepairable) Error() string {
 // carries a non-nil error: an errAlonzoPParamsUnitUnrepairable carries the
 // reason the repair could not be applied, and any other error is a store
 // failure. It never returns (false, nil).
-func (d *Database) repairAlonzoPParamsUnit() (bool, error) {
+func (d *Database) repairAlonzoPParamsUnit(ctx context.Context) (bool, error) {
 	word := d.config.AlonzoLovelacePerUtxoWord
 	if word == 0 {
 		return false, errAlonzoPParamsUnitUnrepairable{
@@ -286,7 +289,7 @@ func (d *Database) repairAlonzoPParamsUnit() (bool, error) {
 		repairs = append(repairs, repair{id: row.ID, cbor: corrected})
 	}
 	if len(repairs) > 0 {
-		if err := d.Transaction(true).Do(func(txn *Txn) error {
+		if err := d.Transaction(ctx, true).Do(func(txn *Txn) error {
 			for _, item := range repairs {
 				if err := store.UpdatePParamsCbor(
 					item.id,
@@ -305,8 +308,8 @@ func (d *Database) repairAlonzoPParamsUnit() (bool, error) {
 			return false, err
 		}
 	}
-	epoch, slot := d.currentEpochSlot()
-	if err := d.Metadata().SetNodeSettingsGates(
+	epoch, slot := d.currentEpochSlot(ctx)
+	if err := d.Metadata().SetNodeSettingsGates(ctx,
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitWordV1,
 		},

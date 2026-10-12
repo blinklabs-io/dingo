@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
+	"github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 	"github.com/stretchr/testify/require"
 )
@@ -55,6 +56,8 @@ func newLeiosFetchConversation(
 		gouroboros.WithConnection(mockConn),
 		gouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
 		gouroboros.WithNodeToNode(true),
+		gouroboros.WithLeiosNotifyConfig(leiosnotify.NewConfig()),
+		gouroboros.WithLeiosFetchConfig(leiosfetch.NewConfig()),
 	)
 	require.NoError(t, err)
 

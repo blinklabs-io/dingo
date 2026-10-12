@@ -60,8 +60,10 @@ func TestLeiosSpecActivatesDijkstraAtGenesis(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg.DijkstraHardForkAtEpoch)
 	require.Zero(t, *cfg.DijkstraHardForkAtEpoch)
-	require.Equal(t, uint64(120), cfg.EpochLength)
+	require.Equal(t, uint64(300), cfg.EpochLength)
 	require.Equal(t, 500*time.Millisecond, cfg.SlotDuration())
+	require.Equal(t, uint64(3), cfg.SecurityParam)
+	require.Equal(t, uint64(240), cfg.NonceStabilityWindowSlots())
 }
 
 // The accelerated specs exist to make a full scenario fit the reference
@@ -106,10 +108,11 @@ func TestAcceleratedTxPumpQuarantineFitsRunnerBudget(t *testing.T) {
 					args = append(args, "--conformance")
 				}
 				slots := launchedTxPumpWindow(t, script, args...)
-				require.Positive(
+				require.GreaterOrEqual(
 					t,
 					slots,
-					"accelerated runs must retain output quarantine",
+					cfg.BlockFetchStabilityWindowSlots(),
+					"quarantine must cover 3k/f slots, the window an early fork can still remove outputs in",
 				)
 				require.Equal(t, "${DEVNET_TXPUMP_CONFIRMATION_SLOTS:-600}",
 					environments[profile.service]["TXPUMP_CONFIRMATION_SLOTS"],

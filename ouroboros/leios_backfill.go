@@ -269,7 +269,7 @@ const leiosBackfillAffinityWindow = 2 * time.Minute
 // is tried; the unanswered request leaves that connection's request slot
 // abandoned, so the next request on it is classified dead.
 func (o *Ouroboros) FetchEndorserBlockByPoint(
-	ctx context.Context,
+	ctx context.Context, //nolint:contextcheck // literal-nil fallback
 	ebSlot uint64,
 	ebHash []byte,
 ) error {
@@ -298,8 +298,27 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	}
 	connIds := o.connManager.LeiosFetchConnectionIds()
 	if len(connIds) == 0 {
-		return errors.New("leios backfill: no leios-fetch connection available")
+		return fmt.Errorf(
+			"leios backfill: %w",
+			ledger.ErrEndorserBlockFetchNoPeer,
+		)
 	}
+	return o.fetchEndorserBlockByPointWithConnections(
+		ctx,
+		ebSlot,
+		ebHash,
+		connIds,
+		o.connManager.GetConnectionById,
+	)
+}
+
+func (o *Ouroboros) fetchEndorserBlockByPointWithConnections(
+	ctx context.Context,
+	ebSlot uint64,
+	ebHash []byte,
+	connIds []ouroboros.ConnectionId,
+	getConnection func(ouroboros.ConnectionId) *ouroboros.Connection,
+) error {
 	overall, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
 		overall = time.Now().Add(leiosBackfillTotalBudget)
@@ -320,12 +339,14 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		time.Now(),
 	)
 	var lastErr, busyErr error
-	remainingCandidates := len(connIds)
+	usableConnection := false
+	remainingCandidates := len(candidates)
 	var preferredConn *ouroboros.Connection
 	if len(candidates) > 0 {
 		preferredConn = candidates[0].conn
 	}
 	for _, candidate := range candidates {
+		remainingCandidates--
 		connId := candidate.connId
 		if err := ctx.Err(); err != nil {
 			if lastErr == nil {
@@ -333,12 +354,20 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			}
 			break
 		}
-		conn := o.leiosBackfillCandidateConn(candidate, preferredConn)
+		conn := getConnection(connId)
+		if candidate.conn != nil {
+			if conn != candidate.conn {
+				continue
+			}
+			conn = candidate.conn
+		} else if conn == preferredConn && preferredConn != nil {
+			continue
+		}
 		if conn == nil || conn.LeiosFetch() == nil ||
 			conn.LeiosFetch().Client == nil {
 			continue
 		}
-		remainingCandidates--
+		usableConnection = true
 		// now anchors both remaining and attemptDeadline below to a single
 		// clock read, so a last/only candidate's attemptDeadline is computed
 		// as now.Add(overall.Sub(now)) -- algebraically exactly overall, with
@@ -408,10 +437,53 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	if lastErr == nil {
 		lastErr = busyErr
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !usableConnection {
+		return fmt.Errorf(
+			"leios backfill: %w",
+			ledger.ErrEndorserBlockFetchNoPeer,
+		)
+	}
 	if lastErr == nil {
 		lastErr = errors.New("leios backfill: fetch failed")
 	}
 	return lastErr
+}
+
+func (o *Ouroboros) leiosEndorserBlockRelayOfferSource(
+	point ocommon.Point,
+) string {
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	data := o.leiosEndorserBlocks[leiosBlockKey(point.Slot, point.Hash)]
+	if data == nil {
+		return ""
+	}
+	return data.relayOfferSource
+}
+
+func preferLeiosBackfillOfferSource(
+	order []ouroboros.ConnectionId,
+	connectionID string,
+	guardFor func(ouroboros.ConnectionId) *leiosFetchGuard,
+) []ouroboros.ConnectionId {
+	if connectionID == "" {
+		return order
+	}
+	for idx, connID := range order {
+		if leiosConnectionIdString(connID) != connectionID ||
+			guardFor(connID).isProtocolDead() {
+			continue
+		}
+		if idx > 0 {
+			copy(order[1:idx+1], order[:idx])
+			order[0] = connID
+		}
+		break
+	}
+	return order
 }
 
 // requestLeiosFetchConnRecycle asks the connection manager to close a
@@ -694,6 +766,7 @@ func (o *Ouroboros) leiosBackfillConnCandidatesForPoint(
 		leiosBackfillAffinityWindow,
 		o.leiosFetchGuardFor,
 	)
+	order = preferLeiosBackfillOfferSource(order, o.leiosEndorserBlockRelayOfferSource(point), o.leiosFetchGuardFor)
 	candidates := make([]leiosBackfillConnCandidate, 0, len(order)+1)
 	if len(order) > 0 && o.chainsyncState != nil {
 		active := o.chainsyncState.GetClientConnId()

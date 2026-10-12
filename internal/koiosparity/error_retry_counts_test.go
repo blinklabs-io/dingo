@@ -32,7 +32,6 @@ import (
 )
 
 func TestObserverAutomaticallyRecoversErrorEpochWithoutNewEvent(t *testing.T) {
-	t.Parallel()
 	for _, accounts := range []bool{false, true} {
 		t.Run(map[bool]string{false: "aggregate", true: "accounts"}[accounts], func(t *testing.T) {
 			source, err := NewDatabaseSource(newTestDatabaseSourceDB(t))

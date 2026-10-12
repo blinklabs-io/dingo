@@ -28,6 +28,17 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+const transactionCertificateInsertSQL = `
+INSERT INTO certs (
+    block_hash, transaction_id, certificate_id, slot, cert_index, cert_type
+) VALUES (?, ?, 0, ?, ?, ?)
+ON CONFLICT (transaction_id, cert_index) DO UPDATE SET
+    block_hash = excluded.block_hash,
+    certificate_id = 0,
+    slot = excluded.slot,
+    cert_type = excluded.cert_type
+RETURNING id`
+
 var certificateTables = []string{
 	"stake_registration",
 	"pool_registration",
@@ -50,11 +61,68 @@ var certificateTables = []string{
 	"genesis_delegation",
 }
 
+const hasSpecializedCertificatesSQL = `
+SELECT EXISTS (
+    SELECT 1 FROM certs WHERE transaction_id = ?
+)`
+
+const (
+	deletePoolRegistrationOwnersSQL = `
+DELETE FROM pool_registration_owner
+WHERE pool_registration_id IN (
+    SELECT pool_registration.id
+    FROM pool_registration
+    JOIN certs ON certs.id = pool_registration.certificate_id
+    WHERE certs.transaction_id = ?
+)`
+	deletePoolRegistrationRelaysSQL = `
+DELETE FROM pool_registration_relay
+WHERE pool_registration_id IN (
+    SELECT pool_registration.id
+    FROM pool_registration
+    JOIN certs ON certs.id = pool_registration.certificate_id
+    WHERE certs.transaction_id = ?
+)`
+	deleteMIRRewardsSQL = `
+DELETE FROM move_instantaneous_rewards_reward
+WHERE mir_id IN (
+    SELECT move_instantaneous_rewards.id
+    FROM move_instantaneous_rewards
+    JOIN certs ON certs.id = move_instantaneous_rewards.certificate_id
+    WHERE certs.transaction_id = ?
+)`
+)
+
+func certificateTableCleanupSQL(table string) string {
+	return "DELETE FROM " + table + " WHERE certificate_id IN (" +
+		"SELECT id FROM certs WHERE transaction_id = ?)"
+}
+
 type certificateAccountState struct {
 	active   bool
 	pool     []byte
 	drep     []byte
 	drepType uint64
+}
+
+func validateDRepDelegationProtocolMajor(
+	certificates []lcommon.Certificate,
+	protocolMajor uint64,
+) error {
+	for _, certificate := range certificates {
+		switch certificate.(type) {
+		case *lcommon.StakeVoteDelegationCertificate,
+			*lcommon.StakeVoteRegistrationDelegationCertificate,
+			*lcommon.VoteRegistrationDelegationCertificate,
+			*lcommon.VoteDelegationCertificate:
+			if protocolMajor == 0 {
+				return errors.New(
+					"protocol major is required for certificates that change DRep delegations",
+				)
+			}
+		}
+	}
+	return nil
 }
 
 // depositPolicy decides what applyTransactionCertificates does with a
@@ -83,12 +151,19 @@ func (s *Store) applyTransactionCertificates(
 	blockIndex uint32,
 	deposits map[int]uint64,
 	policy depositPolicy,
+	transactionIsNew bool,
+	protocolMajor uint64,
 ) ([]models.StakeCredentialRef, error) {
 	if len(certificates) == 0 {
 		return nil, nil
 	}
-	if err := deleteSpecializedCertificates(ctx, db, transactionID); err != nil {
+	if err := validateDRepDelegationProtocolMajor(certificates, protocolMajor); err != nil {
 		return nil, err
+	}
+	if !transactionIsNew {
+		if err := s.deleteSpecializedCertificates(ctx, db, transactionID); err != nil {
+			return nil, err
+		}
 	}
 	refs := make(map[string]models.StakeCredentialRef)
 	for certIndex, certificate := range certificates {
@@ -96,22 +171,14 @@ func (s *Store) applyTransactionCertificates(
 		if err != nil {
 			return nil, err
 		}
-		unifiedID, err := queryReturnedID(ctx, db, `
-INSERT INTO certs (
-    block_hash, transaction_id, certificate_id, slot, cert_index, cert_type
-) VALUES (?, ?, 0, ?, ?, ?)
-ON CONFLICT (transaction_id, cert_index) DO UPDATE SET
-    block_hash = excluded.block_hash,
-    certificate_id = 0,
-    slot = excluded.slot,
-    cert_type = excluded.cert_type
-RETURNING id`,
+		var unifiedID int64
+		err = s.queryRowCached(ctx, db, transactionCertificateInsertSQL,
 			point.Hash,
 			transactionID,
 			point.Slot,
 			certIndex,
 			certType,
-		)
+		).Scan(&unifiedID)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"create certificate %d: %w",
@@ -152,6 +219,7 @@ RETURNING id`,
 			blockIndex,
 			uint(certIndex),
 			deposit,
+			protocolMajor,
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -179,54 +247,38 @@ UPDATE certs SET certificate_id = ? WHERE id = ?`,
 	return ret, nil
 }
 
-func deleteSpecializedCertificates(
+func (s *Store) deleteSpecializedCertificates(
 	ctx context.Context,
 	db queryer,
 	transactionID int64,
 ) error {
-	if _, err := db.ExecContext(ctx, `
-DELETE FROM pool_registration_owner
-WHERE pool_registration_id IN (
-    SELECT pool_registration.id
-    FROM pool_registration
-    JOIN certs ON certs.id = pool_registration.certificate_id
-    WHERE certs.transaction_id = ?
-)`,
+	var exists bool
+	if err := s.queryRowCached(
+		ctx, db, hasSpecializedCertificatesSQL, transactionID,
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if _, err := s.execCached(ctx, db, deletePoolRegistrationOwnersSQL,
 		transactionID,
 	); err != nil {
 		return fmt.Errorf("delete existing pool registration owners: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `
-DELETE FROM pool_registration_relay
-WHERE pool_registration_id IN (
-    SELECT pool_registration.id
-    FROM pool_registration
-    JOIN certs ON certs.id = pool_registration.certificate_id
-    WHERE certs.transaction_id = ?
-)`,
+	if _, err := s.execCached(ctx, db, deletePoolRegistrationRelaysSQL,
 		transactionID,
 	); err != nil {
 		return fmt.Errorf("delete existing pool registration relays: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `
-DELETE FROM move_instantaneous_rewards_reward
-WHERE mir_id IN (
-    SELECT move_instantaneous_rewards.id
-    FROM move_instantaneous_rewards
-    JOIN certs ON certs.id = move_instantaneous_rewards.certificate_id
-    WHERE certs.transaction_id = ?
-)`,
+	if _, err := s.execCached(ctx, db, deleteMIRRewardsSQL,
 		transactionID,
 	); err != nil {
 		return fmt.Errorf("delete existing MIR rewards: %w", err)
 	}
 	for _, table := range certificateTables {
-		query := "DELETE FROM " + table +
-			" WHERE certificate_id IN (" +
-			"SELECT id FROM certs WHERE transaction_id = ?)"
-		if _, err := db.ExecContext(
-			ctx,
-			query,
+		if _, err := s.execCached(
+			ctx, db, certificateTableCleanupSQL(table),
 			transactionID,
 		); err != nil {
 			return fmt.Errorf(
@@ -311,6 +363,7 @@ func (s *Store) applySpecializedCertificate(
 	blockIndex uint32,
 	certIndex uint,
 	deposit *uint64,
+	protocolMajor uint64,
 ) (uint, *models.StakeCredentialRef, error) {
 	switch cert := certificate.(type) {
 	case *lcommon.PoolRegistrationCertificate:
@@ -476,6 +529,7 @@ RETURNING id`,
 		certificateID,
 		slot,
 		deposit,
+		protocolMajor,
 	)
 }
 
@@ -499,6 +553,7 @@ func applyAccountCertificate(
 	certificateID uint,
 	slot uint64,
 	deposit *uint64,
+	protocolMajor uint64,
 ) (uint, *models.StakeCredentialRef, error) {
 	var (
 		stakeCredential lcommon.Credential
@@ -601,8 +656,79 @@ func applyAccountCertificate(
 		return 0, nil, err
 	}
 	key := stakeCredential.Credential[:]
+	changesDrepDelegation := false
+	newDrepCredential := state.drep
+	newDrepType := state.drepType
+	switch certificate.(type) {
+	case *lcommon.StakeDeregistrationCertificate,
+		*lcommon.DeregistrationCertificate,
+		*lcommon.StakeVoteDelegationCertificate,
+		*lcommon.StakeVoteRegistrationDelegationCertificate,
+		*lcommon.VoteRegistrationDelegationCertificate,
+		*lcommon.VoteDelegationCertificate:
+		changesDrepDelegation = true
+	}
+	var oldDrepCredential []byte
+	var oldDrepType uint64
+	if changesDrepDelegation {
+		err := db.QueryRowContext(ctx, `
+SELECT drep, drep_type FROM account
+WHERE credential_tag = ? AND staking_key = ?`, tag, key).Scan(
+			&oldDrepCredential,
+			&oldDrepType,
+		)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, nil, fmt.Errorf("read prior account DRep delegation: %w", err)
+		}
+	}
 	if err := updateCertificateAccount(ctx, db, tag, key, slot, state); err != nil {
 		return 0, nil, err
+	}
+	if changesDrepDelegation {
+		removeOld := shouldRemovePriorDrepDelegation(
+			protocolMajor,
+			oldDrepType,
+			len(oldDrepCredential) > 0,
+			newDrepType,
+			len(newDrepCredential) > 0,
+		)
+		if removeOld {
+			if err := removeDrepDelegator(
+				ctx,
+				db,
+				uint8(oldDrepType),
+				oldDrepCredential,
+				tag,
+				key,
+				slot,
+			); err != nil {
+				return 0, nil, fmt.Errorf("remove prior reverse DRep delegation: %w", err)
+			}
+		}
+		if len(newDrepCredential) > 0 &&
+			newDrepType <= models.DrepTypeScriptHash {
+			var registered bool
+			if err := db.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM drep
+    WHERE credential_tag = ? AND credential = ? AND active = TRUE
+)`, newDrepType, newDrepCredential).Scan(&registered); err != nil {
+				return 0, nil, fmt.Errorf("check delegated DRep registration: %w", err)
+			}
+			if registered {
+				if err := addDrepDelegator(
+					ctx,
+					db,
+					uint8(newDrepType),
+					newDrepCredential,
+					tag,
+					key,
+					slot,
+				); err != nil {
+					return 0, nil, fmt.Errorf("add reverse DRep delegation: %w", err)
+				}
+			}
+		}
 	}
 	switch cert := certificate.(type) {
 	case *lcommon.StakeRegistrationCertificate,
@@ -633,6 +759,22 @@ func applyAccountCertificate(
 	)
 	ref := models.NewStakeCredentialRef(tag, key)
 	return id, &ref, err
+}
+
+func shouldRemovePriorDrepDelegation(
+	protocolMajor uint64,
+	oldDrepType uint64,
+	hasOldCredential bool,
+	newDrepType uint64,
+	hasNewCredential bool,
+) bool {
+	if !hasOldCredential || oldDrepType > models.DrepTypeScriptHash {
+		return false
+	}
+	if protocolMajor >= 10 {
+		return true
+	}
+	return newDrepType > models.DrepTypeScriptHash || !hasNewCredential
 }
 
 func updateCertificateAccount(
@@ -790,7 +932,15 @@ RETURNING id`,
 	// and no history, so the held amount is derived from the registration and
 	// retirement rows strictly before this certificate's position rather than
 	// from live pool state.
-	held, err := poolRegistrationDepositHeld(ctx, db, poolID, at, deposit)
+	executionSlot := at.slot
+	var closureSlot sql.NullInt64
+	if err := db.QueryRowContext(ctx, `SELECT lc.slot FROM leios_transaction_context lc JOIN certs ON certs.transaction_id = lc.transaction_id WHERE certs.id = ?`, certificateID).Scan(&closureSlot); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	if closureSlot.Valid {
+		executionSlot = uint64(closureSlot.Int64)
+	}
+	held, err := poolRegistrationDepositHeld(ctx, db, poolID, at, deposit, executionSlot)
 	if err != nil {
 		return 0, err
 	}
@@ -842,6 +992,7 @@ INSERT INTO pool_registration_owner (
 		}
 	}
 	for _, relay := range cert.Relays {
+		relayType := relay.Type
 		var port uint
 		var hostname string
 		if relay.Port != nil {
@@ -852,10 +1003,11 @@ INSERT INTO pool_registration_owner (
 		}
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO pool_registration_relay (
-    ipv4, ipv6, hostname, pool_registration_id, pool_id, port
-) VALUES (?, ?, ?, ?, ?, ?)`,
+    ipv4, ipv6, relay_type, hostname, pool_registration_id, pool_id, port
+) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			netIPValue(relay.Ipv4),
 			netIPValue(relay.Ipv6),
+			&relayType,
 			hostname,
 			registrationID,
 			poolID,
@@ -981,6 +1133,15 @@ func applyDrepDeregistrationCertificate(
 	); err != nil {
 		return 0, err
 	}
+	if err := removeAllDrepDelegators(
+		ctx,
+		db,
+		tag,
+		cert.DrepCredential.Credential[:],
+		slot,
+	); err != nil {
+		return 0, fmt.Errorf("clear delegations for DRep deregistration: %w", err)
+	}
 	return insertCertificateRow(ctx, db, `
 INSERT INTO deregistration_drep (
     drep_credential, certificate_id, credential_tag, added_slot,
@@ -1053,14 +1214,19 @@ func setDrepCertificateState(
 	active bool,
 	requireExisting bool,
 ) error {
-	var exists bool
-	if err := db.QueryRowContext(ctx, `
+	query := `
 SELECT EXISTS (
     SELECT 1 FROM drep WHERE credential_tag = ? AND credential = ?
-)`,
-		tag,
-		credential,
-	).Scan(&exists); err != nil {
+)`
+	if requireExisting {
+		query = `
+SELECT EXISTS (
+    SELECT 1 FROM drep
+    WHERE credential_tag = ? AND credential = ? AND active = TRUE
+)`
+	}
+	var exists bool
+	if err := db.QueryRowContext(ctx, query, tag, credential).Scan(&exists); err != nil {
 		return err
 	}
 	if requireExisting && !exists {

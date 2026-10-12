@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -167,6 +168,7 @@ func (ls *LedgerState) PendingRewardCredit(
 // in txn, before a write that reads its stored balance, and marks them folded
 // so no balance read counts them again.
 func (ls *LedgerState) foldRewardCreditFor(
+	ctx context.Context,
 	txn *database.Txn,
 	credentialTag uint8,
 	stakingKey []byte,
@@ -181,13 +183,14 @@ func (ls *LedgerState) foldRewardCreditFor(
 	if err != nil {
 		return err
 	}
-	return ls.writeClaimedRewardCredits(txn, outputs)
+	return ls.writeClaimedRewardCredits(ctx, txn, outputs)
 }
 
 // writeClaimedRewardCredits writes claimed credits to their accounts with the
 // journal rows the boundary would have written: each at its round's boundary
 // slot, under its source hash.
 func (ls *LedgerState) writeClaimedRewardCredits(
+	ctx context.Context,
 	txn *database.Txn,
 	outputs []*models.RewardAccountOutput,
 ) error {
@@ -208,12 +211,13 @@ func (ls *LedgerState) writeClaimedRewardCredits(
 	if len(credits) == 0 {
 		return nil
 	}
-	return ls.db.AddAccountRewardsByCredential(credits, txn)
+	return ls.db.AddAccountRewardsByCredential(ctx, credits, txn)
 }
 
 // foldRewardCreditsForWithdrawals writes the pending reward credits of every
 // credential tx withdraws from, before the withdrawal reads its balance.
 func (ls *LedgerState) foldRewardCreditsForWithdrawals(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	txn *database.Txn,
 ) error {
@@ -238,7 +242,7 @@ func (ls *LedgerState) foldRewardCreditsForWithdrawals(
 			continue
 		}
 		stakeKey := address.StakeKeyHash()
-		if err := ls.foldRewardCreditFor(txn, tag, stakeKey.Bytes()); err != nil {
+		if err := ls.foldRewardCreditFor(ctx, txn, tag, stakeKey.Bytes()); err != nil {
 			return fmt.Errorf(
 				"credit pending rewards before withdrawal: %w",
 				err,

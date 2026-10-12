@@ -17,6 +17,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
@@ -56,6 +57,13 @@ func GetProtocolVersion(
 ) (ProtocolVersion, error) {
 	if pparams == nil {
 		return ProtocolVersion{}, errors.New("protocol parameters are nil")
+	}
+	value := reflect.ValueOf(pparams)
+	if value.Kind() == reflect.Pointer && value.IsNil() {
+		return ProtocolVersion{}, fmt.Errorf(
+			"protocol parameters are a nil %T pointer",
+			pparams,
+		)
 	}
 	switch pp := pparams.(type) {
 	case *shelley.ShelleyProtocolParameters:

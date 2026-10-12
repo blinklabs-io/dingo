@@ -28,6 +28,8 @@ package forging
 // including a defense-in-depth re-check inside kesSign itself, so a signer
 // implementation can never be handed a period the operational certificate has
 // not authorized, regardless of what its caller already checked.
+// Remote providers used by readiness also implement CheckReady() error, which
+// must check availability without signing or evolving KES material.
 type RemoteKESSigner interface {
 	// Sign returns the KES signature for message at the given ABSOLUTE KES
 	// period. The implementation is responsible for translating to whatever

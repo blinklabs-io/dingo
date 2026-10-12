@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -26,7 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -95,7 +95,7 @@ func TestValidateAndEmitRollbackUndoRefusesBeforePersistingIntent(t *testing.T) 
 			t.Parallel()
 			fixture := newChainsyncRollbackFixture(t)
 			require.NoError(t, tc.prepare(fixture))
-			err := fixture.ls.validateAndEmitRollbackUndo(
+			err := fixture.ls.validateAndEmitRollbackUndo(context.Background(),
 				fixture.ancestorTip.Point,
 			)
 			require.ErrorIs(t, err, tc.want)
@@ -115,6 +115,7 @@ func TestRollbackNoopDoesNotFinishForeignIntent(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	block, err := database.BlockByPoint(
+		context.Background(),
 		fixture.ls.db,
 		fixture.currentTip.Point,
 	)
@@ -127,6 +128,7 @@ func TestRollbackNoopDoesNotFinishForeignIntent(t *testing.T) {
 	))
 
 	err = fixture.ls.rollbackWithBlocksAndIntent(
+		context.Background(),
 		fixture.currentTip.Point,
 		nil,
 		false,
@@ -145,6 +147,7 @@ func TestRollbackNoopDoesNotFinishForeignIntent(t *testing.T) {
 		testHashBytes("rollback-intent-ahead-point"),
 	)
 	err = fixture.ls.rollbackWithBlocksAndIntent(
+		context.Background(),
 		aheadPoint,
 		nil,
 		false,
@@ -164,7 +167,7 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	blocks := loadTestBlocksWithTxs(t, 2)
@@ -181,9 +184,12 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 			raw[i].PrevHash = append([]byte(nil), raw[i-1].Hash...)
 		}
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(raw))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), raw),
+	)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
 	require.NotZero(t, txSubID)
@@ -229,7 +235,7 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	) (ochainsync.Tip, []byte, error) {
 		return ochainsync.Tip{}, nil, injected
 	}
-	rollbackErr := ls.rollbackChainAndStateDeferred(targetPoint, nil)
+	rollbackErr := ls.rollbackChainAndStateDeferred(context.Background(), targetPoint, nil)
 	require.ErrorIs(t, rollbackErr, ErrChainTruncatedLedgerRollbackFailed)
 	require.Contains(t, rollbackErr.Error(), injected.Error())
 
@@ -253,11 +259,11 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	require.NoError(t, dbtest.CloseDatabase(db))
 	db, err = dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
 	require.NoError(t, err)
-	cm, err = chain.NewManager(db, nil)
+	cm, err = chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
-	recoveryBus := event.NewEventBus(nil, nil)
+	recoveryBus := newTestEventBus(t, nil)
 	t.Cleanup(recoveryBus.Stop)
 	recoverySubID, recoveryCh := recoveryBus.SubscribeWithBuffer(
 		TransactionEventType,
@@ -279,7 +285,7 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	recoveredLS.currentTip = currentTip
 	recoveredLS.currentTipBlockNonce = bytes.Repeat([]byte{0x22}, 32)
 	recoveredLS.rollbackTruncateAfterSlotFunc = nil
-	require.NoError(t, recoveredLS.recoverRollbackIntent())
+	require.NoError(t, recoveredLS.recoverRollbackIntent(context.Background()))
 
 	recoveredEvent := testutil.RequireReceive(
 		t, recoveryCh, 2*time.Second, "expected recovered rollback undo event",
@@ -310,12 +316,12 @@ func TestRecoverRollbackIntentAheadOfLedgerDeliversUndo(t *testing.T) {
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
 	blocks := loadTestBlocksWithTxs(t, 2)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	subID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
 	require.NotZero(t, subID)
@@ -340,7 +346,7 @@ func TestRecoverRollbackIntentAheadOfLedgerDeliversUndo(t *testing.T) {
 	// is possible and the record cannot be replayed as a rollback.
 	ls.currentTip = ochainsync.Tip{}
 	ls.currentTipBlockNonce = nil
-	require.NoError(t, ls.recoverRollbackIntent())
+	require.NoError(t, ls.recoverRollbackIntent(context.Background()))
 
 	undoEvent := testutil.RequireReceive(
 		t, txCh, 2*time.Second,
@@ -367,7 +373,7 @@ func TestEnsureRollbackIntentRetainsSupersededPayload(t *testing.T) {
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
@@ -385,9 +391,12 @@ func TestEnsureRollbackIntentRetainsSupersededPayload(t *testing.T) {
 			raw[i].PrevHash = append([]byte(nil), raw[i-1].Hash...)
 		}
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(raw))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), raw),
+	)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	subID, _ := bus.SubscribeWithBuffer(TransactionEventType, 64)
 	require.NotZero(t, subID)
@@ -410,7 +419,7 @@ func TestEnsureRollbackIntentRetainsSupersededPayload(t *testing.T) {
 	ls.currentTip = tip
 
 	middlePoint := ocommon.NewPoint(raw[1].Slot, raw[1].Hash)
-	require.NoError(t, ls.validateAndEmitRollbackUndo(middlePoint))
+	require.NoError(t, ls.validateAndEmitRollbackUndo(context.Background(), middlePoint))
 	_, firstBlocks, pending, err := loadRollbackIntent(db)
 	require.NoError(t, err)
 	require.True(t, pending)
@@ -419,13 +428,22 @@ func TestEnsureRollbackIntentRetainsSupersededPayload(t *testing.T) {
 
 	// The chain truncation that follows the first intent deletes the captured
 	// body, so it exists nowhere else once the record is rewritten.
-	require.NoError(t, cm.PrimaryChain().Rollback(middlePoint))
-	stillThere, err := ls.readBlocksAboveSlot(middlePoint.Slot)
+	require.NoError(
+		t,
+		cm.PrimaryChain().Rollback(context.Background(), middlePoint),
+	)
+	stillThere, err := ls.readBlocksAboveSlot(
+		context.Background(),
+		middlePoint.Slot,
+	)
 	require.NoError(t, err)
 	require.Empty(t, stillThere)
 
 	deeperPoint := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
-	require.NoError(t, ls.ensureRollbackIntent(deeperPoint, nil))
+	require.NoError(
+		t,
+		ls.ensureRollbackIntent(context.Background(), deeperPoint, nil),
+	)
 
 	gotPoint, gotBlocks, pending, err := loadRollbackIntent(db)
 	require.NoError(t, err)

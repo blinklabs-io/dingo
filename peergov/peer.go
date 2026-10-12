@@ -84,7 +84,11 @@ const (
 )
 
 type Peer struct {
-	LastActivity       time.Time
+	LastActivity time.Time
+	// LastServedActivity is when this peer last consumed from this node
+	// (chainsync/blockfetch server requests, keepalive pings). Kept apart
+	// from LastActivity, which drives outbound hot/churn decisions.
+	LastServedActivity time.Time
 	LastTestTime       time.Time // When peer was last tested for suitability
 	LastBlockFetchTime time.Time // Timestamp of last observed block fetch
 	FirstSeen          time.Time // When peer was first seen (used for tenure calculation)
@@ -143,6 +147,13 @@ type Peer struct {
 	WarmValency uint
 	// GroupID identifies the topology group this peer belongs to (for valency tracking)
 	GroupID string
+
+	// StakeLovelace is the delegated stake, in lovelace, of the pool this
+	// peer was discovered from. StakeKnown distinguishes a known zero from
+	// unavailable ledger data.
+	StakeLovelace uint64
+	// StakeKnown is true when ledger discovery supplied stake, including zero.
+	StakeKnown bool
 
 	// Inbound admission metadata (phase 2). These fields are only
 	// populated on inbound arrivals, but they live on every Peer so that

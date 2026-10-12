@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -59,6 +60,14 @@ func (d *Database) FlushBatch(
 // (currently API-mode Mithril backfill) into write-elision when the offsets
 // are known to already be present.
 type BatchedTxIngestOpts struct {
+	// ProtocolMajor is the protocol version in force for certificate
+	// transitions. Zero means the caller has no version context.
+	ProtocolMajor uint64
+
+	// LedgerContextSlot is the unticked parent slot for a prototype closure.
+	// Point still identifies its certifying block for rollback.
+	LedgerContextSlot *uint64
+
 	// SkipProducedUtxoOffsetWrites elides blob.SetUtxo calls for produced
 	// outputs. Use when the produced-UTxO offset references for this block
 	// have already been written (e.g. by the Mithril immutable-copy phase
@@ -78,6 +87,12 @@ type BatchedTxIngestOpts struct {
 	// gap blocks, resumed backfill with potential missing rows, or normal
 	// replay paths where producer rows may be absent.
 	SkipConsumedInputRecovery bool
+
+	// TrustedImmutableReplay elides consumed-input blob recovery while
+	// preserving normal transaction conflict validation. Use only when replaying
+	// a complete, trusted immutable history in slot order, so each consumed
+	// output was written by an earlier block in the same replay.
+	TrustedImmutableReplay bool
 
 	// StrictAppliedInputConservation marks the steady-state, at-tip, validated
 	// path. Past the Mithril trust boundary, a missing producer row is recovered
@@ -130,6 +145,7 @@ type transactionStoreHistoricalBackfill interface {
 		bool,
 		BatchAccumulator,
 		types.Txn,
+		uint64,
 	) error
 }
 
@@ -141,10 +157,38 @@ type inFlightProducerLookup interface {
 	HasInFlightProducer(txId []byte, outputIdx uint32) bool
 }
 
+type transactionStoreStakeDeltaFlusher interface {
+	FlushBatchStakeDeltas(types.MetadataBatchAccumulator, types.Txn) error
+}
+
+// FlushBatchStakeDeltas applies pending live-stake changes while leaving the
+// accumulator's other batched rows queued for FlushBatch.
+func (d *Database) FlushBatchStakeDeltas(
+	acc BatchAccumulator,
+	txn *Txn,
+) error {
+	if acc == nil {
+		return nil
+	}
+	flusher, ok := d.transactionStore().(transactionStoreStakeDeltaFlusher)
+	if !ok {
+		return nil
+	}
+	var metadataTxn types.Txn
+	if txn != nil {
+		metadataTxn = txn.Metadata()
+		if metadataTxn == nil {
+			return types.ErrNilTxn
+		}
+	}
+	return flusher.FlushBatchStakeDeltas(acc, metadataTxn)
+}
+
 // SetTransactionBatched stores transaction blob offsets and immediate
 // metadata, while accumulating bulk metadata rows into acc for a later
 // FlushBatch.
 func (d *Database) SetTransactionBatched(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
@@ -154,17 +198,20 @@ func (d *Database) SetTransactionBatched(
 	offsets *BlockIngestionResult,
 	acc BatchAccumulator,
 	txn *Txn,
+	protocolMajor uint64,
 ) (retErr error) {
 	return d.SetTransactionBatchedWithOpts(
+		ctx,
 		tx, point, idx, updateEpoch, pparamUpdates,
 		certDeposits, offsets, acc, txn,
-		BatchedTxIngestOpts{},
+		BatchedTxIngestOpts{ProtocolMajor: protocolMajor},
 	)
 }
 
 // SetTransactionBatchedWithOpts is the option-aware form of
 // SetTransactionBatched. See BatchedTxIngestOpts for the available toggles.
 func (d *Database) SetTransactionBatchedWithOpts(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
@@ -176,12 +223,15 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	txn *Txn,
 	opts BatchedTxIngestOpts,
 ) (retErr error) {
+	if opts.LedgerContextSlot != nil {
+		return errors.New("prototype closure context requires unbatched ingestion")
+	}
 	if acc == nil {
 		return errors.New("batch accumulator must not be nil")
 	}
 	owned := false
 	if txn == nil {
-		txn = d.Transaction(true)
+		txn = d.Transaction(ctx, true)
 		owned = true
 		defer func() {
 			if txn == nil {
@@ -310,13 +360,13 @@ func (d *Database) SetTransactionBatchedWithOpts(
 			tx, point, idx, certDeposits,
 			opts.SkipWithdrawalWitnessWrite,
 			opts.HistoricalBackfill,
-			acc, metadataTxn,
+			acc, metadataTxn, opts.ProtocolMajor,
 		)
 	} else {
 		metadataErr = d.transactionStore().SetTransactionBatched(
 			tx, point, idx, certDeposits,
 			opts.SkipWithdrawalWitnessWrite, acc, metadataTxn,
-		)
+			opts.ProtocolMajor)
 	}
 	if err := metadataErr; err != nil {
 		return fmt.Errorf(

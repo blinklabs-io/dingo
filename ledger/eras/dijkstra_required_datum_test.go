@@ -49,7 +49,7 @@ func TestValidateTxDijkstraRequiresSpendingDatums(t *testing.T) {
 	}
 	plutusScript := lcommon.PlutusV1Script{0x01}
 	datum := lcommon.Datum{Data: data.NewConstr(0)}
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee66",
 		0,
 	)
@@ -128,7 +128,7 @@ func TestValidateTxDijkstraRequiresSubtransactionSpendingDatums(t *testing.T) {
 	}
 	plutusScript := lcommon.PlutusV1Script{0x01}
 	datum := lcommon.Datum{Data: data.NewConstr(0)}
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"e228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee77",
 		0,
 	)

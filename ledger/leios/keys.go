@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"math/big"
-	"os"
 	"strings"
 	"sync"
 
@@ -102,7 +101,7 @@ func ParseVoteSigningKey(hexStr string) (*VoteSigningKey, error) {
 // handle via keystore, which avoids TOCTOU races between check and read)
 // and must not exceed voteSigningKeyFileMaxSize.
 func LoadVoteSigningKeyFile(path string) (*VoteSigningKey, error) {
-	f, err := os.Open(path) // #nosec G304 -- operator-configured key path
+	f, err := keystore.OpenRegularFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("open vote signing key file: %w", err)
 	}

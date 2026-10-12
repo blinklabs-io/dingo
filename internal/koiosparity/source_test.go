@@ -348,7 +348,7 @@ func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
 	// Simulate the same core-mode retention cleanup
 	// ledger/snapshot/rotation.go's cleanupOldSnapshots performs once epoch
 	// falls out of the rolling window (deleteBeforeEpoch = currentEpoch-3).
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(
 		t,
 		db.Metadata().DeleteRewardStateBeforeEpoch(epoch+1, txn.Metadata()),

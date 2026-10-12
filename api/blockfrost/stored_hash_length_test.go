@@ -16,6 +16,7 @@ package blockfrost
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -44,7 +45,7 @@ func TestPoolsListRejectsMalformedStoredPoolKey(t *testing.T) {
 		nil,
 	))
 
-	ids, total, err := adapter.PoolsList(PaginationParams{Count: 10, Page: 1})
+	ids, total, err := adapter.PoolsList(context.Background(), PaginationParams{Count: 10, Page: 1})
 	require.ErrorContains(t, err, "active pool key hash")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, ids)

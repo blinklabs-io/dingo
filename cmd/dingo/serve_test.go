@@ -105,7 +105,7 @@ func TestCheckSyncStateRepairsLegacyAlonzoPParamsUnit(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = reopened.Close(context.Background()) })
-	gates, err := reopened.Database.Metadata().GetNodeSettingsGates()
+	gates, err := reopened.Database.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -401,7 +401,7 @@ func TestCheckSyncStateDevModeAgreesWithLaterAPIModeOpen(t *testing.T) {
 	require.NoError(t, runtime.RecoveryError())
 	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 
-	gates, err := runtime.Database.Metadata().GetNodeSettingsGates()
+	gates, err := runtime.Database.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t,

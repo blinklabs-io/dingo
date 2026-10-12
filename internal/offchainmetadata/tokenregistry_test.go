@@ -38,6 +38,7 @@ const (
 	redactQuery    = "SENTINEL-QUERY-TOKEN"
 	redactFragment = "SENTINEL-FRAGMENT-TOKEN"
 	redactRedirect = "SENTINEL-REDIRECT-TOKEN"
+	redactHeader   = "SENTINEL-HEADER-TOKEN"
 )
 
 // redactSecrets lists every sentinel that must never be rendered. The
@@ -49,6 +50,7 @@ var redactSecrets = []string{
 	redactQuery,
 	redactFragment,
 	redactRedirect,
+	redactHeader,
 }
 
 // withCredentials appends a credential-bearing query and fragment to a base

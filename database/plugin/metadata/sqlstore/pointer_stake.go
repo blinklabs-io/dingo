@@ -279,7 +279,7 @@ func (s *Store) GetPointerStakeInputsForPools(
 	ret := make([]*models.RewardStakeInput, 0)
 	for start := 0; start < len(poolKeyHashes); start += 400 {
 		end := min(start+400, len(poolKeyHashes))
-		query, args := activeDelegationSQL(slot)
+		query, args := activeDelegationSQL(slot, slot)
 		resolution, resolutionArgs, err := pointerResolutionSQL(slot)
 		if err != nil {
 			return nil, err

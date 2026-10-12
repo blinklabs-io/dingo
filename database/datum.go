@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -41,6 +42,7 @@ func (d *Database) SetDatum(
 
 // GetDatum retrieves a datum by its hash.
 func (d *Database) GetDatum(
+	ctx context.Context,
 	hash []byte,
 	txn *Txn,
 ) (*models.Datum, error) {
@@ -48,7 +50,7 @@ func (d *Database) GetDatum(
 		return nil, ErrDatumNotFound
 	}
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	tmpHash, err := lcommon.NewBlake2b256Checked(hash)

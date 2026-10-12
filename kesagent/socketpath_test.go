@@ -15,12 +15,69 @@
 package kesagent
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestNewClientPinsRelativeSocketPath(t *testing.T) {
+	root, err := os.MkdirTemp("", "kesagent-endpoint-")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(root)) })
+	first := filepath.Join(root, "first")
+	second := filepath.Join(root, "second")
+	require.NoError(t, os.Mkdir(first, 0o700))
+	require.NoError(t, os.Mkdir(second, 0o700))
+
+	t.Chdir(first)
+	client, err := NewClient(Config{
+		SocketPath: "kes-agent.sock",
+		Mode:       ModeServeKey,
+	})
+	require.NoError(t, err)
+	t.Chdir(second)
+	require.Equal(t, filepath.Join(first, "kes-agent.sock"), client.cfg.SocketPath)
+}
+
+func TestNewClientCleansAbsoluteSocketPath(t *testing.T) {
+	t.Parallel()
+
+	separator := string(filepath.Separator)
+	root := filepath.VolumeName(os.TempDir()) + separator
+	want := filepath.Join(root, "run", "kes-agent.sock")
+	configured := root + "var" + separator + ".." + separator +
+		"run" + separator + "kes-agent.sock"
+	client, err := NewClient(Config{
+		SocketPath: configured,
+		Mode:       ModeServeKey,
+	})
+	require.NoError(t, err)
+	require.Equal(t, want, client.cfg.SocketPath)
+}
+
+func TestNewClientKeepsAbstractSocketAddress(t *testing.T) {
+	t.Parallel()
+
+	const want = "@kes-agent"
+	client, err := NewClient(Config{SocketPath: want, Mode: ModeServeKey})
+	require.NoError(t, err)
+	require.Equal(t, want, client.cfg.SocketPath)
+}
+
+func TestNewClientRejectsNULPrefixedSocketAddress(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewClient(Config{
+		SocketPath: "\x00kes-agent",
+		Mode:       ModeServeKey,
+	})
+	require.ErrorContains(t, err, "NUL-prefixed")
+	require.ErrorContains(t, err, "@ prefix")
+}
 
 // TestNewClientRejectsOverLongSocketPath pins the operator-facing half of this
 // check: a path too long for the platform is refused at construction, with an

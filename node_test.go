@@ -70,6 +70,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
@@ -440,7 +441,7 @@ func TestNodeEventSubscriptionPoliciesAreExplicit(t *testing.T) {
 			},
 			"subscribeChainSelectorEvents": {
 				required:   8,
-				detachable: 1,
+				detachable: 2,
 			},
 		},
 		"node_lifecycle.go": {
@@ -1353,7 +1354,7 @@ func newHandleConnManagerClosedOwnerConn(
 	o *ouroborosPkg.Ouroboros,
 ) *ouroboros.Connection {
 	t.Helper()
-	listener := o.ConfigureListeners([]connmanager.ListenerConfig{{UseNtC: true}})[0]
+	listener := o.ConfigureListeners(context.Background(), []connmanager.ListenerConfig{{UseNtC: true}})[0]
 	localWire, peerWire := newLeiosNotifyTestConnPair(
 		&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
 		&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
@@ -1542,7 +1543,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -1626,7 +1627,7 @@ func TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -2491,6 +2492,14 @@ func requireGoroutineGone(t *testing.T, marker string) {
 // devnet credential fixtures.
 func newStartupCleanupProducerNode(t *testing.T) *Node {
 	t.Helper()
+	return newStartupCleanupProducerNodeWithGenesisStart(t, nil)
+}
+
+func newStartupCleanupProducerNodeWithGenesisStart(
+	t *testing.T,
+	start *time.Time,
+) *Node {
+	t.Helper()
 	vrf, kes, opcert := devnetCredPaths(t)
 	// The full devnet config, for the Byron genesis and the genesis hashes
 	// LedgerState.Start needs to build the genesis block. Its own Shelley
@@ -2506,13 +2515,17 @@ func newStartupCleanupProducerNode(t *testing.T) *Node {
 	// and the initial funds and protocol params the genesis block needs stay
 	// exactly as shipped.
 	cardanoCfg.ShelleyGenesis().SystemStart = time.Now().Add(-time.Hour)
+	if start != nil {
+		cardanoCfg.ShelleyGenesis().SystemStart = *start
+		cardanoCfg.ByronGenesis().StartTime = int(start.Unix())
+	}
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	eventBus := event.NewEventBus(nil, logger)
 	t.Cleanup(eventBus.Close)
-	chainManager, err := chain.NewManager(db, eventBus)
+	chainManager, err := chain.NewManager(context.Background(), db, eventBus)
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
@@ -2618,6 +2631,53 @@ func runStopsLIFO(stops []func()) {
 	for _, stop := range slices.Backward(stops) {
 		stop()
 	}
+}
+
+func TestRunDrainsLedgerWorkersWhenLedgerStartFails(t *testing.T) {
+	t.Parallel()
+
+	n := newStartupCleanupRunNode(t)
+	n.config.midnight.Enabled = true
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	initialized := make(chan struct{}, 1)
+	indexerAttached := make(chan bool, 1)
+	indexerDrained := make(chan bool, 1)
+	n.config.logger = slog.New(nodeTestLogSignalHandler{
+		message: "database worker pool initialized",
+		seen:    initialized,
+		onRecord: func(record slog.Record) {
+			switch record.Message {
+			case "database worker pool initialized":
+				indexerAttached <- n.eventBus.HasSubscribers(ledger.BlockEventType)
+				cancel()
+			case "shutting down database worker pool":
+				indexerDrained <- !n.eventBus.HasSubscribers(ledger.BlockEventType)
+			}
+		},
+	})
+	// Keep the test from leaking workers when proving the broken ordering.
+	t.Cleanup(func() {
+		if n.ledgerState != nil {
+			require.NoError(t, n.ledgerState.Close())
+		}
+	})
+
+	err := n.Run(ctx)
+	require.ErrorContains(t, err, "failed to start ledger")
+	require.ErrorIs(t, err, context.Canceled)
+	require.Len(t, initialized, 1, "failure must occur after workers start")
+	called := false
+	err = n.ledgerState.SubmitAsyncDBOperation(func(*database.Database) error {
+		called = true
+		return nil
+	})
+	require.ErrorContains(t, err, "database worker pool is shut down")
+	require.False(t, called, "startup rollback must stop accepting storage work")
+	require.Len(t, indexerAttached, 1)
+	require.True(t, <-indexerAttached, "indexer must subscribe before ledger startup")
+	require.Len(t, indexerDrained, 1)
+	require.True(t, <-indexerDrained, "indexer must drain before ledger cleanup")
 }
 
 // TestStartBlockProducerStopIsRegisteredBeforeLeiosVotingCanFail covers the
@@ -2779,7 +2839,7 @@ VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
-	require.NoError(t, n.backfillRewardLiveStake())
+	require.NoError(t, n.backfillRewardLiveStake(context.Background()))
 
 	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
 	require.NoError(t, err)
@@ -2825,6 +2885,7 @@ func (m nodeTestSecurityParamLedger) SecurityParam() int {
 type nodeTestLogSignalHandler struct {
 	message string
 	seen    chan struct{}
+	onRecord func(slog.Record)
 }
 
 type nodeTestLogCountHandler struct {
@@ -2862,6 +2923,9 @@ func (h nodeTestLogSignalHandler) Handle(
 	_ context.Context,
 	record slog.Record,
 ) error {
+	if h.onRecord != nil {
+		h.onRecord(record)
+	}
 	if record.Message == h.message {
 		select {
 		case h.seen <- struct{}{}:
@@ -3333,6 +3397,32 @@ func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 	assert.Nil(t, active)
 }
 
+func TestLedgerStateConfigReportsRetrySelectionUnavailableDuringLifecycle(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	n := &Node{
+		chainsyncState: chainsync.NewStateWithConfig(
+			nil,
+			nil,
+			chainsync.DefaultConfig(),
+		),
+		config: Config{cfg: &internalconfig.Config{}},
+	}
+	config := n.ledgerStateConfig()
+	n.liveLifecycleMu.Lock()
+	_, found, available := config.SelectBlockfetchRetryPeerFunc(
+		[]ouroboros.ConnectionId{newNodeTestConnId(3001)},
+		ocommon.NewPoint(100, []byte("header")),
+		5*time.Second,
+	)
+	n.liveLifecycleMu.Unlock()
+
+	assert.False(t, found)
+	assert.False(t, available)
+}
+
 // TestLedgerStateConfigForwardsBlockPipelineFlags is the second half of the
 // pipeline-flag regression coverage: it proves that a Config built through the
 // public NewConfig/With... option API -- not a hand-built struct literal --
@@ -3366,6 +3456,30 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 			"pipeline's parallel VRF/KES validate stage never activates "+
 			"otherwise",
 	)
+}
+
+func TestLedgerStateConfigForwardsLedgerPrefetchAheadFlag(t *testing.T) {
+	t.Parallel()
+
+	off := (&Node{config: NewConfig()}).ledgerStateConfig()
+	assert.False(t, off.LedgerPrefetchAheadEnabled)
+	on := (&Node{
+		config: NewConfig(WithLedgerPrefetchAheadEnabled(true)),
+	}).ledgerStateConfig()
+	assert.True(t, on.LedgerPrefetchAheadEnabled)
+}
+
+func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
+	t.Parallel()
+
+	node := &Node{config: NewConfig(
+		WithRunMode("dev"),
+		WithBlockProducer(false),
+	)}
+
+	assert.True(t, node.config.blockProducer)
+	assert.Equal(t, StorageModeAPI, node.config.storageMode)
+	assert.False(t, node.ledgerStateConfig().ForgeBlocks)
 }
 
 // The ledger is started, and replays any stored blocks it has not applied,
@@ -3408,6 +3522,7 @@ func TestLedgerStateConfigCallbacksTolerateMissingOuroboros(t *testing.T) {
 			)
 		})
 		assert.ErrorIs(t, err, errOuroborosNotStarted)
+		assert.ErrorIs(t, err, ledger.ErrEndorserBlockFetchNoPeer)
 	})
 
 	t.Run("blockfetch range request returns an error", func(t *testing.T) {
@@ -3471,7 +3586,65 @@ func TestLedgerStateConfigUsesMusashiCertificateTrust(t *testing.T) {
 		}}}
 		validate := n.ledgerStateConfig().ValidateLeiosCertificate
 		require.NotNil(t, validate)
-		require.ErrorContains(t, validate(0, nil, nil, nil), "vote manager is unavailable")
+		err := validate(0, nil, nil, nil)
+		require.ErrorContains(t, err, "vote manager is unavailable")
+		require.NotErrorIs(t, err, ledger.ErrLeiosInvalidCertificate,
+			"an unavailable verifier is not a verdict on the certificate")
+	})
+}
+
+type certificateLeiosStakeProvider struct{}
+
+func (certificateLeiosStakeProvider) GetStakeDistribution(
+	uint64,
+) (map[string]uint64, uint64, error) {
+	return map[string]uint64{strings.Repeat("01", 28): 100}, 100, nil
+}
+
+// The ledger rejects a certifying block only for
+// ledger.ErrLeiosInvalidCertificate, so the node's validator must carry a
+// vote-manager verdict across as that error and leave a committee that could
+// not be resolved as a plain failure.
+func TestLedgerStateConfigMapsCertificateVerdicts(t *testing.T) {
+	t.Parallel()
+	newNode := func(t *testing.T, stake leios.StakeDistributionProvider) *Node {
+		t.Helper()
+		voteManager, err := leios.NewVoteManager(leios.VoteManagerConfig{
+			Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+			EventBus:       event.NewEventBus(nil, nil),
+			StakeProvider:  stake,
+			EpochProvider:  startupLeiosEpochProvider{},
+			ParamsProvider: startupLeiosParamsProvider{},
+			KeyProvider:    startupLeiosKeyProvider{},
+		})
+		require.NoError(t, err)
+		return &Node{
+			config: Config{cfg: &internalconfig.Config{
+				Network:      ouroboros.NetworkCardanoPreview.Name,
+				NetworkMagic: ouroboros.NetworkCardanoPreview.NetworkMagic,
+			}},
+			leiosVoteManager: voteManager,
+		}
+	}
+	signers := []byte{0x80}
+	aggregate := make([]byte, lcommon.LeiosBlsSignatureSize)
+	aggregate[0] = 0xc0 // compressed point at infinity: well-formed encoding
+
+	t.Run("keyless signer is a verdict", func(t *testing.T) {
+		t.Parallel()
+		validate := newNode(t, certificateLeiosStakeProvider{}).
+			ledgerStateConfig().ValidateLeiosCertificate
+		err := validate(5, make([]byte, 32), signers, aggregate)
+		require.ErrorContains(t, err, "no usable key")
+		require.ErrorIs(t, err, ledger.ErrLeiosInvalidCertificate)
+	})
+	t.Run("unresolvable committee is not a verdict", func(t *testing.T) {
+		t.Parallel()
+		validate := newNode(t, startupLeiosStakeProvider{}).
+			ledgerStateConfig().ValidateLeiosCertificate
+		err := validate(5, make([]byte, 32), signers, aggregate)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ledger.ErrLeiosInvalidCertificate)
 	})
 }
 
@@ -4021,7 +4194,8 @@ func TestNodeEventSubscriptionClassifications(t *testing.T) {
 		expectedRequired[group.function] = group.count
 	}
 	expectedDetachable := map[string]int{
-		"subscribeChainSelectorEvents": 1,
+		"subscribeChainSelectorEvents":  2,
+		"subscribeEquivocationDetector": 1,
 	}
 	expectedPolicies := map[string]string{
 		"subscribeRequiredEvent":                      "SubscriberBackpressureBlock",
@@ -4568,7 +4742,7 @@ func TestBackfillRewardLiveStakeSkipsScanWhenConfigured(t *testing.T) {
 			skipRewardLiveStakeBackfillCheck: true,
 		},
 	}
-	require.NoError(t, n.backfillRewardLiveStake())
+	require.NoError(t, n.backfillRewardLiveStake(context.Background()))
 
 	// Still needed: the scan was skipped, so no rebuild happened.
 	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
@@ -4607,7 +4781,81 @@ VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
 			skipRewardLiveStakeBackfillCheck: true,
 		},
 	}
-	err = n.backfillRewardLiveStake()
+	err = n.backfillRewardLiveStake(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "older accounting")
+}
+
+func TestNewOuroborosConfigAppliesTxSubmissionRateLimit(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: NewConfig()}
+	cfg := n.newOuroborosConfig(false, 0, 0)
+
+	assert.Positive(
+		t,
+		cfg.MaxTxSubmissionsPerSecond,
+		"production ouroboros config must enable the TxSubmission limiter",
+	)
+}
+
+func TestNewOuroborosConfigDoesNotInitiateLegacyLeiosVotes(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: NewConfig()}
+	cfg := n.newOuroborosConfig(true, 0, 0)
+
+	assert.False(t, cfg.EnableLeiosVotes,
+		"prototype nodes must diffuse votes over leios-notify")
+}
+
+// The behind-tip chainsync resync is gated on chain selection having no best
+// peer; the production config must carry that answer from the live selector.
+func TestNewOuroborosConfigReportsChainSelectionBestPeer(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: NewConfig()}
+	cfg := n.newOuroborosConfig(false, 0, 0)
+	require.NotNil(t, cfg.ChainsyncHasBestPeer)
+	assert.False(t, cfg.ChainsyncHasBestPeer(), "no chain selector")
+
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	assert.False(t, cfg.ChainsyncHasBestPeer(), "no peer selected yet")
+
+	conn := newNodeTestConnId(3104)
+	tipPoint := ocommon.NewPoint(130, []byte("best"))
+	require.True(t, n.chainSelector.UpdatePeerTip(
+		conn,
+		ochainsync.Tip{Point: tipPoint, BlockNumber: 13},
+		nil,
+	))
+	require.NotNil(t, n.chainSelector.GetBestPeer())
+	assert.True(t, cfg.ChainsyncHasBestPeer(), "a selected best peer")
+}
+
+func TestLedgerStateConfigForwardsApplyRowBatching(t *testing.T) {
+	t.Parallel()
+
+	off := &Node{config: NewConfig()}
+	assert.False(t, off.ledgerStateConfig().ApplyRowBatchingEnabled)
+
+	on := &Node{config: NewConfig(WithLedgerApplyRowBatchingEnabled(true))}
+	assert.True(
+		t,
+		on.ledgerStateConfig().ApplyRowBatchingEnabled,
+		"the option never reaches the ledger without this hop",
+	)
+}
+
+func TestLedgerStateConfigForwardsBlockfetchLowWatermarkFlag(t *testing.T) {
+	t.Parallel()
+
+	off := (&Node{config: NewConfig()}).ledgerStateConfig()
+	assert.False(t, off.BlockfetchLowWatermarkEnabled)
+	on := (&Node{
+		config: NewConfig(WithBlockfetchLowWatermarkEnabled(true)),
+	}).ledgerStateConfig()
+	assert.True(t, on.BlockfetchLowWatermarkEnabled)
 }

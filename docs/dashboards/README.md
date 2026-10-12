@@ -18,7 +18,7 @@ Before you begin, make sure you have:
 
 - **Grafana 12+** (tested on 12.4) — [install guide](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
 - **Prometheus** scraping your Dingo node on port `12798` (configured in step 2 below)
-- **Dingo** node with metrics enabled (default port `12798`)
+- **Dingo** node with metrics enabled (default port `12798`, bound to loopback; set `metricsBindAddr` to scrape from another host)
 - **[Business Text plugin](https://grafana.com/grafana/plugins/marcusolsson-dynamictext-panel/)** — required by all dashboards for the header panel
 - **[prometheus-node-exporter](https://github.com/prometheus/node_exporter)** — required only by the Resource Usage dashboard for host-level CPU, memory, and disk metrics
 
@@ -166,6 +166,11 @@ Some metrics only emit when their feature is active. Panels display "No data" un
 | `dingo_metrics_blockForgingLatency_seconds_bucket` | Block is forged |
 | `cardano_node_metrics_remainingKESPeriods_int` | KES key is configured |
 | `dingo_forge_tip_gap_slots` | Forging is enabled |
+| `dingo_forge_opcert_counter_loaded` | Block producer credentials are loaded |
+| `dingo_forge_opcert_counter_onchain` | Block producer credentials are loaded; `NaN` until the ledger has applied a block carrying one of the pool's operational certificates. For a numeric value, the next certificate to issue carries this value plus one; when `NaN`, wait for a numeric on-chain value before calculating the next counter |
+| `dingo_forge_slots_per_kes_period` | Block producer credentials are loaded |
+| `dingo_forge_credentials_valid` | Block producer credentials are loaded; 0 when they could not sign at the current slot |
+| `dingo_forge_missed_leader_slots_total` | Forging is enabled; increments for each slot confirmed by leader selection without an adopted block of the node's own; excludes KES and tip safety refusals before leader selection |
 | `dingo_database_size_bytes` | Database stores are initialized |
 | `database_blob_*` | Badger blob store is active |
 

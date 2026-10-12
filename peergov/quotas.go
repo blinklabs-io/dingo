@@ -529,6 +529,13 @@ func (p *PeerGovernor) inboundFlappingStateLocked(
 	if now.Sub(peer.LastInboundDisconnect) >= p.config.InboundCooldown {
 		return false, 0
 	}
+	// A peer that has held its current session past the stability threshold
+	// is not flapping now; earlier short sessions alone do not justify
+	// cutting a connection that has proven stable.
+	if !peer.InboundConnectedAt.IsZero() &&
+		now.Sub(peer.InboundConnectedAt) >= minStableConnectionDuration {
+		return false, 0
+	}
 	return true, min(int(peer.InboundShortLivedCount), 5)
 }
 

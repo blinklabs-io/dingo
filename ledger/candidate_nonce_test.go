@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -35,6 +36,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -78,40 +80,44 @@ func TestComputeCandidateNonceAsOf_SlowPathStopsAtFoldEnd(t *testing.T) {
 	prevEvolving := bytes.Repeat([]byte{0x61}, 32)
 	prevCandidate := bytes.Repeat([]byte{0x62}, 32)
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		// Byron blocks carry no Praos VRF contribution, so foldBlockEtaV
-		// returns before touching the body. Their CBOR is never read.
-		for _, blk := range []struct {
-			slot   uint64
-			hash   []byte
-			number uint64
-		}{
-			{earlySlot, bytes.Repeat([]byte{0x63}, 32), 1},
-			{tipSlot, bytes.Repeat([]byte{0x64}, 32), 2},
-		} {
-			if err := db.BlockCreate(models.Block{
-				Slot:     blk.slot,
-				Hash:     blk.hash,
-				PrevHash: bytes.Repeat([]byte{0x65}, 32),
-				Cbor:     []byte{0x80},
-				Number:   blk.number,
-				Type:     byron.BlockTypeByronMain,
-			}, txn); err != nil {
-				return err
-			}
-		}
-		// The tripwire: past the tip, and a Conway body the decoder cannot
-		// read. Reaching it is a decode error, which is the signal that the
-		// fold ran past the point it was asked to stop at.
-		return db.BlockCreate(models.Block{
-			Slot:     beyondSlot,
-			Hash:     bytes.Repeat([]byte{0x66}, 32),
-			PrevHash: bytes.Repeat([]byte{0x67}, 32),
-			Cbor:     []byte{0xff, 0xff, 0xff, 0xff},
-			Number:   3,
-			Type:     conway.BlockTypeConway,
-		}, txn)
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				// Byron blocks carry no Praos VRF contribution, so foldBlockEtaV
+				// returns before touching the body. Their CBOR is never read.
+				for _, blk := range []struct {
+					slot   uint64
+					hash   []byte
+					number uint64
+				}{
+					{earlySlot, bytes.Repeat([]byte{0x63}, 32), 1},
+					{tipSlot, bytes.Repeat([]byte{0x64}, 32), 2},
+				} {
+					if err := db.BlockCreate(models.Block{
+						Slot:     blk.slot,
+						Hash:     blk.hash,
+						PrevHash: bytes.Repeat([]byte{0x65}, 32),
+						Cbor:     []byte{0x80},
+						Number:   blk.number,
+						Type:     byron.BlockTypeByronMain,
+					}, txn); err != nil {
+						return err
+					}
+				}
+				// The tripwire: past the tip, and a Conway body the decoder cannot
+				// read. Reaching it is a decode error, which is the signal that the
+				// fold ran past the point it was asked to stop at.
+				return db.BlockCreate(models.Block{
+					Slot:     beyondSlot,
+					Hash:     bytes.Repeat([]byte{0x66}, 32),
+					PrevHash: bytes.Repeat([]byte{0x67}, 32),
+					Cbor:     []byte{0xff, 0xff, 0xff, 0xff},
+					Number:   3,
+					Type:     conway.BlockTypeConway,
+				}, txn)
+			}),
+	)
 
 	// No block_nonce rows anywhere, so computeCandidateNonceFast finds the
 	// tip's row empty, reports errNoncesMissing, and hands over to the slow
@@ -125,20 +131,27 @@ func TestComputeCandidateNonceAsOf_SlowPathStopsAtFoldEnd(t *testing.T) {
 	}
 
 	var candidate, evolving []byte
-	require.NoError(t, db.Transaction(false).Do(func(txn *database.Txn) error {
-		var err error
-		candidate, evolving, err = ls.computeCandidateNonceAsOf(
-			txn,
-			eras.ConwayEraDesc.Id,
-			prevEvolving,
-			prevCandidate,
-			epochStart,
-			epochLength,
-			foldEndSlotForTip(tipSlot),
-		)
-		return err
-	}), "the fold must stop at the tip; reaching the block stored above it "+
-		"means decoding a body that was never applied on this chain")
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), false).
+			Do(func(txn *database.Txn) error {
+				var err error
+				candidate, evolving, err = ls.computeCandidateNonceAsOf(
+					context.Background(),
+					txn,
+					eras.ConwayEraDesc.Id,
+					prevEvolving,
+					prevCandidate,
+					epochStart,
+					epochLength,
+					foldEndSlotForTip(tipSlot),
+					nil,
+				)
+				return err
+			}),
+		"the fold must stop at the tip; reaching the block stored above it "+
+			"means decoding a body that was never applied on this chain",
+	)
 
 	// Byron blocks contribute nothing, so both nonces come through as the
 	// epoch's carried values. What the test is really asserting is that this
@@ -148,6 +161,94 @@ func TestComputeCandidateNonceAsOf_SlowPathStopsAtFoldEnd(t *testing.T) {
 			"nonce is the value carried in")
 	assert.Equal(t, prevCandidate, candidate,
 		"and the candidate likewise stays at the value carried in")
+}
+
+// TestComputeCandidateNonceAsOf_SlowPathFoldsOnlyTipChain stores a block on
+// an abandoned fork inside the fold's range. Iterating the range by slot would
+// fold it; with foldTip the slow path folds only foldTip's own ancestors.
+func TestComputeCandidateNonceAsOf_SlowPathFoldsOnlyTipChain(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	const (
+		epochStart    uint64 = 1000
+		epochLength   uint64 = 1000
+		earlySlot     uint64 = 1100
+		abandonedSlot uint64 = 1150
+		tipSlot       uint64 = 1200
+	)
+	earlyHash := bytes.Repeat([]byte{0x63}, 32)
+	tipHash := bytes.Repeat([]byte{0x64}, 32)
+	prevEvolving := bytes.Repeat([]byte{0x61}, 32)
+	prevCandidate := bytes.Repeat([]byte{0x62}, 32)
+
+	require.NoError(
+		t,
+		db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+			// Byron blocks fold to nothing without their bodies being read.
+			for _, blk := range []struct {
+				slot         uint64
+				hash, parent []byte
+				number       uint64
+			}{
+				{earlySlot, earlyHash, bytes.Repeat([]byte{0x65}, 32), 1},
+				{tipSlot, tipHash, earlyHash, 2},
+			} {
+				if err := db.BlockCreate(models.Block{
+					Slot:     blk.slot,
+					Hash:     blk.hash,
+					PrevHash: blk.parent,
+					Cbor:     []byte{0x80},
+					Number:   blk.number,
+					Type:     byron.BlockTypeByronMain,
+				}, txn); err != nil {
+					return err
+				}
+			}
+			// The tripwire: a sibling of the tip with a body the decoder
+			// cannot read, so folding it is a decode error.
+			return db.BlockCreate(models.Block{
+				Slot:     abandonedSlot,
+				Hash:     bytes.Repeat([]byte{0x66}, 32),
+				PrevHash: earlyHash,
+				Cbor:     []byte{0xff, 0xff, 0xff, 0xff},
+				Number:   2,
+				Type:     conway.BlockTypeConway,
+			}, txn)
+		}),
+	)
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newConwayBootstrapStabilityCfg(t),
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	tip := ocommon.Point{Slot: tipSlot, Hash: tipHash}
+	var candidate, evolving []byte
+	require.NoError(
+		t,
+		db.Transaction(t.Context(), false).Do(func(txn *database.Txn) error {
+			var err error
+			candidate, evolving, err = ls.computeCandidateNonceAsOf(
+				t.Context(),
+				txn,
+				eras.ConwayEraDesc.Id,
+				prevEvolving,
+				prevCandidate,
+				epochStart,
+				epochLength,
+				foldEndSlotForTip(tipSlot),
+				&tip,
+			)
+			return err
+		}),
+		"the fold must skip the block on the abandoned fork",
+	)
+	assert.Equal(t, prevEvolving, evolving)
+	assert.Equal(t, prevCandidate, candidate)
 }
 
 // TestComputeCandidateNonce_RejectsWrappedEpochRange covers an epoch whose end
@@ -181,17 +282,19 @@ func TestComputeCandidateNonce_RejectsWrappedEpochRange(t *testing.T) {
 		for _, asOf := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/asOf=%v", tc.name, asOf), func(t *testing.T) {
 				t.Parallel()
-				err := ls.db.Transaction(false).
+				err := ls.db.Transaction(t.Context(), false).
 					Do(func(txn *database.Txn) error {
 						var err error
 						if asOf {
 							_, _, err = ls.computeCandidateNonceAsOf(
+								t.Context(),
 								txn, eras.ConwayEraDesc.Id,
 								prevEvolving, prevCandidate,
-								tc.start, tc.length, tc.start,
+								tc.start, tc.length, tc.start, nil,
 							)
 						} else {
 							_, _, err = ls.computeCandidateNonce(
+								t.Context(),
 								txn, eras.ConwayEraDesc.Id,
 								prevEvolving, prevCandidate,
 								tc.start, tc.length,
@@ -277,12 +380,13 @@ func TestComputeCandidateNonceFastRejectsMalformedNonceRows(t *testing.T) {
 	}, nil))
 	require.NoError(t, db.SetBlockNonce(hash, 100, []byte{0x01}, false, nil))
 	ls := &LedgerState{db: db}
-	err := db.Transaction(false).Do(func(txn *database.Txn) error {
-		_, _, err := ls.computeCandidateNonceFast(txn,
-			bytes.Repeat([]byte{0x73}, 32), bytes.Repeat([]byte{0x74}, 32),
-			0, 101, 101)
-		return err
-	})
+	err := db.Transaction(context.Background(), false).
+		Do(func(txn *database.Txn) error {
+			_, _, err := ls.computeCandidateNonceFast(context.Background(), txn,
+				bytes.Repeat([]byte{0x73}, 32), bytes.Repeat([]byte{0x74}, 32),
+				0, 101, 101, nil)
+			return err
+		})
 	require.ErrorIs(t, err, errNoncesMissing)
 }
 

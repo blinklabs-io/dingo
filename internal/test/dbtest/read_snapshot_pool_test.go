@@ -45,7 +45,7 @@ func TestReadSnapshotDoesNotHoldCommitBarrierForTheReadPool(t *testing.T) {
 	// Occupy every read connection, as concurrent streamed responses do.
 	holders := make([]*database.Txn, 0, sqlite.DefaultMaxConnections)
 	for range sqlite.DefaultMaxConnections {
-		readTxn := db.Transaction(false)
+		readTxn := db.Transaction(t.Context(), false)
 		require.NotNil(t, readTxn.Metadata())
 		holders = append(holders, readTxn)
 	}
@@ -71,7 +71,7 @@ func TestReadSnapshotDoesNotHoldCommitBarrierForTheReadPool(t *testing.T) {
 	for i := range applies {
 		done := make(chan error, 1)
 		go func() {
-			writeTxn := db.Transaction(true)
+			writeTxn := db.Transaction(t.Context(), true)
 			done <- writeTxn.Do(func(*database.Txn) error { return nil })
 		}()
 		require.NoError(t, testutil.RequireReceive(
@@ -146,7 +146,7 @@ func TestOpenReadSnapshotsLeaveAConnectionForDestructiveTransitionReads(
 
 	readDone := make(chan struct{})
 	go func() {
-		txn := db.Transaction(false)
+		txn := db.Transaction(t.Context(), false)
 		txn.Release()
 		close(readDone)
 	}()

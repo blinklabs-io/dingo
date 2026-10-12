@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"io"
 	"log/slog"
@@ -68,36 +69,40 @@ func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 	hashAtPostCut := bytes.Repeat([]byte{0x70}, 32)
 	prevHashAtPreCut := bytes.Repeat([]byte{0x09}, 32)
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		if err := db.BlockCreate(models.Block{
-			Slot:     preCutSlot,
-			Hash:     hashAtPreCut,
-			PrevHash: prevHashAtPreCut,
-			Cbor:     []byte{0x80},
-			Number:   1,
-			Type:     conway.BlockTypeConway,
-		}, txn); err != nil {
-			return err
-		}
-		if err := db.BlockCreate(models.Block{
-			Slot:     postCutSlot,
-			Hash:     hashAtPostCut,
-			PrevHash: hashAtPreCut,
-			Cbor:     []byte{0x80},
-			Number:   2,
-			Type:     conway.BlockTypeConway,
-		}, txn); err != nil {
-			return err
-		}
-		if err := db.SetBlockNonce(
-			hashAtPreCut, preCutSlot, nonceAtPreCut, false, txn,
-		); err != nil {
-			return err
-		}
-		return db.SetBlockNonce(
-			hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn,
-		)
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				if err := db.BlockCreate(models.Block{
+					Slot:     preCutSlot,
+					Hash:     hashAtPreCut,
+					PrevHash: prevHashAtPreCut,
+					Cbor:     []byte{0x80},
+					Number:   1,
+					Type:     conway.BlockTypeConway,
+				}, txn); err != nil {
+					return err
+				}
+				if err := db.BlockCreate(models.Block{
+					Slot:     postCutSlot,
+					Hash:     hashAtPostCut,
+					PrevHash: hashAtPreCut,
+					Cbor:     []byte{0x80},
+					Number:   2,
+					Type:     conway.BlockTypeConway,
+				}, txn); err != nil {
+					return err
+				}
+				if err := db.SetBlockNonce(
+					hashAtPreCut, preCutSlot, nonceAtPreCut, false, txn,
+				); err != nil {
+					return err
+				}
+				return db.SetBlockNonce(
+					hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn,
+				)
+			}),
+	)
 
 	prevEpoch := models.Epoch{
 		EpochId:             100,
@@ -123,23 +128,27 @@ func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 	ls.publishSnapshotsLocked()
 
 	hvNonce, _, hvCandidate, hvLab, err :=
-		ls.computeEpochNonceForSlot(epochEnd, prevEpoch)
+		ls.computeEpochNonceForSlot(context.Background(), epochEnd, prevEpoch)
 	require.NoError(t, err)
 
 	var rNonce, rCandidate, rLab []byte
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		n, _, c, lab, err := ls.calculateEpochNonce(
-			txn,
-			epochEnd,
-			eras.ConwayEraDesc,
-			prevEpoch,
-			nil,
-		)
-		rNonce = n
-		rCandidate = c
-		rLab = lab
-		return err
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				n, _, c, lab, err := ls.calculateEpochNonce(context.Background(),
+					txn,
+					epochEnd,
+					eras.ConwayEraDesc,
+					prevEpoch,
+					nil,
+				)
+				rNonce = n
+				rCandidate = c
+				rLab = lab
+				return err
+			}),
+	)
 
 	// Correct assembly: eta = candidate ⭒ carried lastEpochBlockNonce.
 	wantEta, err := lcommon.CalculateEpochNonce(
@@ -237,7 +246,13 @@ func TestEpochLabNonceEmptyEpochCarriesPrevNonceForward(t *testing.T) {
 
 	carried := bytes.Repeat([]byte{0x03}, 32)
 	ls := &LedgerState{db: db}
-	lab, err := ls.epochLabNonce(nil, epochStart, epochEnd, carried)
+	lab, err := ls.epochLabNonce(
+		context.Background(),
+		nil,
+		epochStart,
+		epochEnd,
+		carried,
+	)
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -261,7 +276,7 @@ func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	canonicalChain := cm.PrimaryChain()
 
@@ -283,8 +298,14 @@ func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(
 	forkHash := bytes.Repeat([]byte{0xf0}, 32)
 	forkPrevHash := bytes.Repeat([]byte{0xfa}, 32)
 
-	require.NoError(t, canonicalChain.AddBlock(canonicalBlocks[0], nil))
-	require.NoError(t, canonicalChain.AddBlock(canonicalBlocks[1], nil))
+	require.NoError(
+		t,
+		canonicalChain.AddBlock(context.Background(), canonicalBlocks[0], nil),
+	)
+	require.NoError(
+		t,
+		canonicalChain.AddBlock(context.Background(), canonicalBlocks[1], nil),
+	)
 	require.NoError(t, db.BlockCreate(models.Block{
 		ID:       99,
 		Slot:     30,
@@ -295,7 +316,7 @@ func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(
 		Type:     conway.BlockTypeConway,
 	}, nil))
 
-	rawBlock, err := database.BlockBeforeSlot(db, 40)
+	rawBlock, err := database.BlockBeforeSlot(context.Background(), db, 40)
 	require.NoError(t, err)
 	require.Equal(t, forkHash, rawBlock.Hash)
 
@@ -303,7 +324,7 @@ func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(
 		db:    db,
 		chain: canonicalChain,
 	}
-	lab, err := ls.epochLabNonce(nil, 0, 40, nil)
+	lab, err := ls.epochLabNonce(context.Background(), nil, 0, 40, nil)
 	require.NoError(t, err)
 	// Must be the canonical boundary block's PrevHash (from the canonical chain),
 	// NOT the higher-slot fork blob's PrevHash, and NOT the boundary block's own
@@ -345,7 +366,13 @@ func TestEpochLabNonceReturnsPrevHashNotHash(t *testing.T) {
 	}, nil))
 
 	ls := &LedgerState{db: db}
-	lab, err := ls.epochLabNonce(nil, epochStart, epochEnd, nil)
+	lab, err := ls.epochLabNonce(
+		context.Background(),
+		nil,
+		epochStart,
+		epochEnd,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, parentHash, lab,
 		"epochLabNonce must return the last block's PrevHash (the parent hash)")

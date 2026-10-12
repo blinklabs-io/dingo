@@ -35,10 +35,11 @@ import (
 // RPC server. Using this interface keeps the server and service handlers free
 // of a direct *ledger.LedgerState dependency.
 type UtxorpcLedgerState interface {
-	BlockByHash(hash []byte) (models.Block, error)
+	BlockByHash(ctx context.Context, hash []byte) (models.Block, error)
 	CardanoNodeConfig() *cardano.CardanoNodeConfig
 	Datum(hash []byte) (*models.Datum, error)
-	EvaluateTx(
+	EvaluateTxContext(
+		ctx context.Context,
 		tx lcommon.Transaction,
 	) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error)
 	GetBlock(point ocommon.Point) (models.Block, error)
@@ -50,7 +51,10 @@ type UtxorpcLedgerState interface {
 	GetCurrentPParams() lcommon.ProtocolParameters
 	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
 	GetEpochs() ([]models.Epoch, error)
-	GetIntersectPoint(points []ocommon.Point) (*ocommon.Point, error)
+	GetIntersectPoint(
+		ctx context.Context,
+		points []ocommon.Point,
+	) (*ocommon.Point, error)
 	GetPParamsForEpoch(
 		epoch uint64,
 		era eras.EraDesc,
@@ -61,14 +65,18 @@ type UtxorpcLedgerState interface {
 	// the zero value and txn is nil here -- this RPC handler always answers
 	// live, never pinned.
 	PoolStakeDistribution(
+		ctx context.Context,
 		poolFilter []lcommon.PoolKeyHash,
 		at ledger.QueryPoint,
 		txn *database.Txn,
 	) (*ledger.PoolStakeDistribution, error)
+	// SecurityParam is the configured security parameter k, the deepest
+	// rollback a chain follower can be asked to undo.
+	SecurityParam() int
 	SlotToTime(slot uint64) (time.Time, error)
 	SystemStart() (time.Time, error)
 	Tip() ochainsync.Tip
-	TransactionByHash(hash []byte) (*models.Transaction, error)
+	TransactionByHash(ctx context.Context, hash []byte) (*models.Transaction, error)
 	UtxoByRef(txId []byte, outputIdx uint32) (*models.Utxo, error)
 	UtxosByRefs(refs []models.UtxoId) ([]models.Utxo, error)
 	UtxosByAddressWithOrdering(
@@ -79,8 +87,17 @@ type UtxorpcLedgerState interface {
 // UtxorpcMempool is the subset of mempool.Mempool needed by the UTxO RPC
 // server.
 type UtxorpcMempool interface {
-	AddTransaction(txType uint, txBytes []byte) error
-	Transactions() []mempool.MempoolTransaction
+	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
+	// TransactionsBounded returns a prefix of the pool in its snapshot
+	// order holding at most maxItems transactions whose CBOR totals at most
+	// maxBytes, together with the pool's total transaction count. A bound of
+	// zero or less is not applied. The first transaction is returned even
+	// when it alone exceeds maxBytes, so a non-empty pool never yields an
+	// empty result.
+	TransactionsBounded(
+		maxItems int,
+		maxBytes int64,
+	) ([]mempool.MempoolTransaction, int)
 }
 
 // UtxorpcEventBus is the subset of event.EventBus needed by the UTxO RPC

@@ -100,7 +100,7 @@ func TestBackupToRestoreFromIntegration(t *testing.T) {
 	require.NoError(t, dstStore.RestoreFrom(context.Background(), dumpPath))
 	require.NoError(t, dstStore.Start(context.Background()))
 
-	restoredTimestamp, err := dstStore.GetCommitTimestamp()
+	restoredTimestamp, err := dstStore.GetCommitTimestamp(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, int64(4242), restoredTimestamp)
 }
@@ -198,7 +198,7 @@ func TestResetThenRestoreIntegration(t *testing.T) {
 
 	require.NoError(t, dstStore.RestoreFrom(context.Background(), dumpPath))
 	require.NoError(t, dstStore.Start(context.Background()))
-	restoredTimestamp, err := dstStore.GetCommitTimestamp()
+	restoredTimestamp, err := dstStore.GetCommitTimestamp(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, int64(777), restoredTimestamp)
 }
@@ -230,12 +230,41 @@ func TestResetRefusesWhenTargetHasData(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "already contains data")
 
-	restoredTimestamp, err := store.GetCommitTimestamp()
+	restoredTimestamp, err := store.GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t, int64(999), restoredTimestamp,
 		"a refused Reset must not have touched the existing data",
 	)
+}
+
+func TestResetRefusesWhenDormantDRepStateIsPopulated(t *testing.T) {
+	baseDSN := mysqlIntegrationDSN(t)
+	dsn := createIsolatedDatabase(t, baseDSN, "mysqlbackup_dormancy")
+	store, err := openStore(
+		context.Background(),
+		Config{DSN: dsn},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	require.NoError(t, store.Start(context.Background()))
+
+	admin, err := sql.Open("mysql", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	_, err = admin.Exec(
+		"UPDATE drep_dormancy_state SET dormant_epochs = 1 WHERE id = 1",
+	)
+	require.NoError(t, err)
+	parsed, err := mysqldriver.ParseDSN(dsn)
+	require.NoError(t, err)
+
+	err = refuseIfTargetHasData(
+		context.Background(), admin, parsed.DBName,
+		[]string{drepDormancyStateTableName},
+	)
+	require.ErrorContains(t, err, "already contains data")
 }
 
 // TestResetToleratesView guards a real gap: databaseIsEmpty/resetDatabase

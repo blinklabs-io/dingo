@@ -74,16 +74,17 @@ type byronBlockTestOutput struct {
 	amount  uint64
 }
 
-// buildByronBlockTestTx assembles and decodes a real Byron transaction whose
-// witnesses sign its body under protocolMagic, in signer order.
-func buildByronBlockTestTx(
+// encodeByronBlockTestTx assembles the wire bytes of a Byron transaction
+// whose witnesses sign its body under protocolMagic, in signer order, without
+// decoding them, and returns them with the body hash.
+func encodeByronBlockTestTx(
 	t *testing.T,
 	protocolMagic uint32,
 	inputs []byronBlockTestInput,
 	outputs []byronBlockTestOutput,
 	attributes []byte,
 	signers []byronBlockTestKey,
-) *byron.ByronTransaction {
+) ([]byte, lcommon.Blake2b256) {
 	t.Helper()
 	wireInputs := make([]any, 0, len(inputs))
 	for _, input := range inputs {
@@ -128,6 +129,23 @@ func buildByronBlockTestTx(
 		[]any{cbor.RawMessage(body), witnesses},
 	)
 	require.NoError(t, err)
+	return txCbor, bodyHash
+}
+
+// buildByronBlockTestTx assembles and decodes a real Byron transaction whose
+// witnesses sign its body under protocolMagic, in signer order.
+func buildByronBlockTestTx(
+	t *testing.T,
+	protocolMagic uint32,
+	inputs []byronBlockTestInput,
+	outputs []byronBlockTestOutput,
+	attributes []byte,
+	signers []byronBlockTestKey,
+) *byron.ByronTransaction {
+	t.Helper()
+	txCbor, bodyHash := encodeByronBlockTestTx(
+		t, protocolMagic, inputs, outputs, attributes, signers,
+	)
 	tx, err := byron.NewByronTransactionFromCbor(txCbor)
 	require.NoError(t, err)
 	require.Equal(t, bodyHash, tx.WireId())

@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -69,7 +68,12 @@ func TestApplyByronBlockRecordsAppliedPoint(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	require.Len(t, rows, 1, "an applied Byron block must leave an applied-point row")
+	require.Len(
+		t,
+		rows,
+		1,
+		"an applied Byron block must leave an applied-point row",
+	)
 	require.Equal(t, byronPoint.Hash, rows[0].Hash)
 	require.Empty(t, rows[0].Nonce, "Byron has no evolving nonce")
 
@@ -90,14 +94,17 @@ func addNilNonceAppliedBlock(
 	t.Helper()
 	tip := fixture.currentTip
 	point := ocommon.NewPoint(tip.Point.Slot+5, testHashBytes(name))
-	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{{
-		Slot:        point.Slot,
-		Hash:        point.Hash,
-		BlockNumber: tip.BlockNumber + 1,
-		Type:        1,
-		PrevHash:    tip.Point.Hash,
-		Cbor:        []byte{0x80},
-	}}))
+	require.NoError(
+		t,
+		fixture.ls.chain.AddRawBlocks(t.Context(), []chain.RawBlock{{
+			Slot:        point.Slot,
+			Hash:        point.Hash,
+			BlockNumber: tip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    tip.Point.Hash,
+			Cbor:        []byte{0x80},
+		}}),
+	)
 	require.NoError(t, fixture.ls.db.SetBlockNonce(
 		point.Hash, point.Slot, nil, false, nil,
 	))
@@ -120,6 +127,7 @@ func TestLatestLedgerPrimaryChainAncestorFindsNilNonceAppliedPoint(
 		testHashBytes("ancestor-diverged"),
 	)
 	ancestor, ok, err := fixture.ls.latestLedgerPrimaryChainAncestor(
+		t.Context(),
 		diverged,
 		false,
 	)
@@ -155,7 +163,7 @@ func TestReconcileDivergenceUndoesAppliedByronBlock(t *testing.T) {
 	require.Len(t, byronTxs, 2)
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
@@ -173,23 +181,26 @@ func TestReconcileDivergenceUndoesAppliedByronBlock(t *testing.T) {
 		),
 		BlockNumber: byronBlock.BlockNumber(),
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
-		{
-			Slot:        ancestorTip.Point.Slot,
-			Hash:        ancestorTip.Point.Hash,
-			BlockNumber: ancestorTip.BlockNumber,
-			Type:        1,
-			Cbor:        []byte{0x80},
-		},
-		{
-			Slot:        byronTip.Point.Slot,
-			Hash:        byronTip.Point.Hash,
-			BlockNumber: byronTip.BlockNumber,
-			Type:        1,
-			PrevHash:    ancestorTip.Point.Hash,
-			Cbor:        byronBlock.Cbor(),
-		},
-	}))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(t.Context(), []chain.RawBlock{
+			{
+				Slot:        ancestorTip.Point.Slot,
+				Hash:        ancestorTip.Point.Hash,
+				BlockNumber: ancestorTip.BlockNumber,
+				Type:        1,
+				Cbor:        []byte{0x80},
+			},
+			{
+				Slot:        byronTip.Point.Slot,
+				Hash:        byronTip.Point.Hash,
+				BlockNumber: byronTip.BlockNumber,
+				Type:        1,
+				PrevHash:    ancestorTip.Point.Hash,
+				Cbor:        byronBlock.Cbor(),
+			},
+		}),
+	)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
@@ -212,7 +223,7 @@ func TestReconcileDivergenceUndoesAppliedByronBlock(t *testing.T) {
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
@@ -220,8 +231,8 @@ func TestReconcileDivergenceUndoesAppliedByronBlock(t *testing.T) {
 	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
 	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
 
-	require.NoError(t, ls.chain.Rollback(ancestorTip.Point))
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
+	require.NoError(t, ls.chain.Rollback(t.Context(), ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks(t.Context(), []chain.RawBlock{{
 		Slot:        byronTip.Point.Slot + 5,
 		Hash:        testHashBytes("byron-reconcile-fork"),
 		BlockNumber: byronTip.BlockNumber,
@@ -230,7 +241,7 @@ func TestReconcileDivergenceUndoesAppliedByronBlock(t *testing.T) {
 		Cbor:        []byte{0x80},
 	}}))
 
-	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(t.Context()))
 
 	for i, tx := range slices.Backward(byronTxs) {
 		evt := testutil.RequireReceive(

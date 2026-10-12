@@ -37,10 +37,10 @@ func TestForInputEquality(t *testing.T) {
 	hashA := strings.Repeat("ab", 32)
 	hashB := strings.Repeat("cd", 32)
 
-	inputA0 := shelley.NewShelleyTransactionInput(hashA, 0)
-	inputA0Again := shelley.NewShelleyTransactionInput(hashA, 0)
-	inputA1 := shelley.NewShelleyTransactionInput(hashA, 1)
-	inputB0 := shelley.NewShelleyTransactionInput(hashB, 0)
+	inputA0 := shelley.MustNewShelleyTransactionInput(hashA, 0)
+	inputA0Again := shelley.MustNewShelleyTransactionInput(hashA, 0)
+	inputA1 := shelley.MustNewShelleyTransactionInput(hashA, 1)
+	inputB0 := shelley.MustNewShelleyTransactionInput(hashB, 0)
 
 	require.Equal(
 		t,
@@ -72,7 +72,7 @@ func TestForUtxoMatchesForInput(t *testing.T) {
 	t.Parallel()
 
 	hash := strings.Repeat("11", 32)
-	inputRef := shelley.NewShelleyTransactionInput(hash, 2)
+	inputRef := shelley.MustNewShelleyTransactionInput(hash, 2)
 	utxo := lcommon.Utxo{Id: inputRef}
 
 	require.Equal(
@@ -91,9 +91,9 @@ func TestKeyDedupsRepeatedInput(t *testing.T) {
 
 	hash := strings.Repeat("ef", 32)
 	consumed := []lcommon.TransactionInput{
-		shelley.NewShelleyTransactionInput(hash, 0),
-		shelley.NewShelleyTransactionInput(hash, 0), // repeated on-chain input
-		shelley.NewShelleyTransactionInput(hash, 1),
+		shelley.MustNewShelleyTransactionInput(hash, 0),
+		shelley.MustNewShelleyTransactionInput(hash, 0), // repeated on-chain input
+		shelley.MustNewShelleyTransactionInput(hash, 1),
 	}
 
 	seen := make(map[utxoref.Key]struct{}, len(consumed))
@@ -123,7 +123,7 @@ func TestKeyString(t *testing.T) {
 	t.Parallel()
 
 	hash := strings.Repeat("11", 32)
-	input := shelley.NewShelleyTransactionInput(hash, 9)
+	input := shelley.MustNewShelleyTransactionInput(hash, 9)
 	key := utxoref.ForInput(input)
 
 	require.Equal(t, hash+":9", key.String())
@@ -142,7 +142,7 @@ func TestKeyAllocationFree(t *testing.T) {
 	// tx.Consumed() returns []lcommon.TransactionInput, so the loop variable
 	// is already interface-typed and boxing has already happened once
 	// upstream, not on every ForInput call.
-	var input lcommon.TransactionInput = shelley.NewShelleyTransactionInput(
+	var input lcommon.TransactionInput = shelley.MustNewShelleyTransactionInput(
 		strings.Repeat("11", 32),
 		7,
 	)
@@ -177,7 +177,7 @@ func TestKeyAllocationFree(t *testing.T) {
 // map. Kept for direct before/after comparison against
 // BenchmarkKeyNewPatternInput.
 func BenchmarkKeyOldPatternInput(b *testing.B) {
-	var input lcommon.TransactionInput = shelley.NewShelleyTransactionInput(
+	var input lcommon.TransactionInput = shelley.MustNewShelleyTransactionInput(
 		strings.Repeat("ab", 32),
 		3,
 	)
@@ -191,7 +191,7 @@ func BenchmarkKeyOldPatternInput(b *testing.B) {
 // struct built directly from input.Id() and input.Index(), with no
 // formatting, no hex encoding, and no heap allocation.
 func BenchmarkKeyNewPatternInput(b *testing.B) {
-	var input lcommon.TransactionInput = shelley.NewShelleyTransactionInput(
+	var input lcommon.TransactionInput = shelley.MustNewShelleyTransactionInput(
 		strings.Repeat("ab", 32),
 		3,
 	)
@@ -206,7 +206,7 @@ func BenchmarkKeyNewPatternInput(b *testing.B) {
 // utxo.Id.Index()), as used when recording an intra-block or forging-
 // candidate "created" overlay entry.
 func BenchmarkKeyOldPatternUtxo(b *testing.B) {
-	input := shelley.NewShelleyTransactionInput(strings.Repeat("ab", 32), 3)
+	input := shelley.MustNewShelleyTransactionInput(strings.Repeat("ab", 32), 3)
 	utxo := lcommon.Utxo{Id: input}
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -215,7 +215,7 @@ func BenchmarkKeyOldPatternUtxo(b *testing.B) {
 }
 
 func BenchmarkKeyNewPatternUtxo(b *testing.B) {
-	input := shelley.NewShelleyTransactionInput(strings.Repeat("ab", 32), 3)
+	input := shelley.MustNewShelleyTransactionInput(strings.Repeat("ab", 32), 3)
 	utxo := lcommon.Utxo{Id: input}
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {

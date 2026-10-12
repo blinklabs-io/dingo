@@ -86,7 +86,7 @@ func TestDijkstraBootstrapWitnessChainCodeLength(t *testing.T) {
 				pool := newDijkstraTestMempool(t, fx.ls)
 				require.ErrorContains(
 					t,
-					pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), txCbor),
+					pool.AddTransaction(context.Background(), uint(gdijkstra.TxTypeDijkstra), txCbor),
 					bootstrapChainCodeError,
 				)
 				require.Empty(t, pool.Transactions())
@@ -107,7 +107,7 @@ func TestDijkstraBootstrapWitnessChainCodeLength(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, fx.startTip, tip)
 				for _, inputId := range fx.inputIds {
-					_, err := fx.db.UtxoByRef(inputId, 0, nil)
+					_, err := fx.db.UtxoByRef(t.Context(), inputId, 0, nil)
 					require.NoError(t, err)
 				}
 			},
@@ -128,7 +128,7 @@ func TestDijkstraBootstrapWitnessChainCodeLength(t *testing.T) {
 		pool := newDijkstraTestMempool(t, fx.ls)
 		require.NoError(
 			t,
-			pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), txCbor),
+			pool.AddTransaction(context.Background(), uint(gdijkstra.TxTypeDijkstra), txCbor),
 		)
 		require.Len(t, pool.Transactions(), 1)
 
@@ -146,30 +146,34 @@ func TestDijkstraBootstrapWitnessChainCodeLength(t *testing.T) {
 	})
 }
 
-// TestConwayBootstrapWitnessChainCodeStaysPermissive pins the reference's
-// deliberate leniency before the Dijkstra era: a Conway transaction whose
-// bootstrap witness has a short chain code still decodes, so historical replay
-// is unaffected.
-func TestConwayBootstrapWitnessChainCodeStaysPermissive(t *testing.T) {
+// TestConwayBootstrapWitnessPreservesPreDijkstraChainCodeLeniency pins the
+// reference decoder's pre-Dijkstra treatment of bootstrap chain-code width.
+func TestConwayBootstrapWitnessPreservesPreDijkstraChainCodeLeniency(
+	t *testing.T,
+) {
 	t.Parallel()
 
-	witness := []any{
-		bytes.Repeat([]byte{0x01}, 32),
-		bytes.Repeat([]byte{0x02}, 64),
-		bytes.Repeat([]byte{0x03}, 31),
-		[]byte{0xa0},
+	for _, chainCodeLen := range []int{31, 33} {
+		t.Run(fmt.Sprintf("%d bytes", chainCodeLen), func(t *testing.T) {
+			t.Parallel()
+			witness := []any{
+				bytes.Repeat([]byte{0x01}, 32),
+				bytes.Repeat([]byte{0x02}, 64),
+				bytes.Repeat([]byte{0x03}, chainCodeLen),
+				[]byte{0xa0},
+			}
+			txCbor, err := cbor.Encode([]any{
+				map[uint]any{0: []any{}, 1: []any{}, 2: uint64(0)},
+				map[uint]any{2: []any{witness}},
+				true,
+				nil,
+			})
+			require.NoError(t, err)
+			_, err = gledger.NewTransactionFromCbor(
+				uint(gledger.TxTypeConway),
+				txCbor,
+			)
+			require.NoError(t, err)
+		})
 	}
-	txCbor, err := cbor.Encode([]any{
-		map[uint]any{0: []any{}, 1: []any{}, 2: uint64(0)},
-		map[uint]any{2: []any{witness}},
-		true,
-		nil,
-	})
-	require.NoError(t, err)
-	tx, err := gledger.NewTransactionFromCbor(
-		uint(gledger.TxTypeConway),
-		txCbor,
-	)
-	require.NoError(t, err)
-	require.Len(t, tx.Witnesses().Bootstrap(), 1)
 }
