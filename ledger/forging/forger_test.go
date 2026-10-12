@@ -2574,11 +2574,12 @@ func TestCheckAndForgeProductionStopsBeforeOpCertStart(t *testing.T) {
 			chainTipSlot:      3,
 			slotsPerKESPeriod: 1,
 		},
-		LeiosProduceChecker: leiosChecker,
-		LeiosEBBroadcaster:  &forgerTestLeiosCaster{},
-		LeiosMempool:        forgerTestMempoolProvider{},
-		LeiosTxValidator:    &mockTxValidator{},
-		PromRegistry:        prometheus.NewRegistry(),
+		LeiosProduceChecker:        leiosChecker,
+		LeiosEBBroadcaster:         &forgerTestLeiosCaster{},
+		LeiosMempool:               forgerTestMempoolProvider{},
+		LeiosTxValidator:           &mockTxValidator{},
+		LeiosAnnouncementValidator: acceptLeiosAnnouncement,
+		PromRegistry:               prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
 
@@ -2882,10 +2883,11 @@ func TestCheckAndForgeProductionRejectsReentrantLeiosRevalidation(
 			chainTipSlot:      0,
 			slotsPerKESPeriod: 1,
 		},
-		LeiosProduceChecker: leiosChecker,
-		LeiosEBBroadcaster:  &forgerTestLeiosCaster{},
-		LeiosMempool:        forgerTestMempoolProvider{},
-		LeiosTxValidator:    &mockTxValidator{},
+		LeiosProduceChecker:        leiosChecker,
+		LeiosEBBroadcaster:         &forgerTestLeiosCaster{},
+		LeiosMempool:               forgerTestMempoolProvider{},
+		LeiosTxValidator:           &mockTxValidator{},
+		LeiosAnnouncementValidator: acceptLeiosAnnouncement,
 	})
 	require.NoError(t, err)
 
@@ -3887,6 +3889,7 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				LeiosProduceChecker:             leiosChecker,
 				LeiosEBBroadcaster:              leiosCaster,
 				LeiosTxValidator:                &mockTxValidator{},
+				LeiosAnnouncementValidator:      acceptLeiosAnnouncement,
 				LeiosMempool: forgerTestMempoolProvider{
 					txs: []MempoolTransaction{
 						{
