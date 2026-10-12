@@ -50,7 +50,7 @@ require (
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.60.0
 	golang.org/x/sync v0.23.0
-	golang.org/x/sys v0.48.0
+	golang.org/x/sys v0.49.0
 	golang.org/x/time v0.16.0
 	google.golang.org/api v0.300.0
 	google.golang.org/grpc v1.86.0-dev
