@@ -819,9 +819,13 @@ func (s *TokenRegistrySync) SyncOnce(
 	if err != nil {
 		return 0, fmt.Errorf("read token registry sync state: %w", err)
 	}
-	storedSequence, storedDigest, err := s.readManifestState()
-	if err != nil {
-		return 0, err
+	var storedSequence uint64
+	var storedDigest string
+	if storedIdentity == identity {
+		storedSequence, storedDigest, err = s.readManifestState()
+		if err != nil {
+			return 0, err
+		}
 	}
 	previousETag := ""
 	if storedIdentity == identity && storedSequence > 0 {
@@ -1005,6 +1009,19 @@ func (s *TokenRegistrySync) SyncOnce(
 		)
 		return 0, nil
 	}
+	if stage.skipped > 0 {
+		s.logger.Warn(
+			"token registry snapshot had unusable mappings; keeping the previous snapshot",
+			"skipped",
+			stage.skipped,
+			"url",
+			registryLogURL(s.sourceURL),
+		)
+		return 0, fmt.Errorf(
+			"token registry snapshot rejected: unusable mappings: %d",
+			stage.skipped,
+		)
+	}
 
 	// Artifact ingestion is complete before the metadata transaction begins.
 	// This keeps network and parsing latency outside SQLite's writer lock and
@@ -1040,19 +1057,6 @@ func (s *TokenRegistrySync) SyncOnce(
 	)
 	if err != nil {
 		return 0, err
-	}
-	if stage.skipped > 0 {
-		s.logger.Warn(
-			"token registry snapshot had unusable mappings; keeping the previous snapshot",
-			"skipped",
-			stage.skipped,
-			"url",
-			registryLogURL(s.sourceURL),
-		)
-		return 0, fmt.Errorf(
-			"token registry snapshot rejected: unusable mappings: %d",
-			stage.skipped,
-		)
 	}
 	// The snapshot applied in full and carried something, so it is
 	// authoritative: retire subjects

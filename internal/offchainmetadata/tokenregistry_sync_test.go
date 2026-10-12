@@ -32,6 +32,7 @@ import (
 	"net/http/httptest"
 	neturl "net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,6 +58,15 @@ var testTokenRegistryManifestPrivateKey = ed25519.NewKeyFromSeed(
 func testTokenRegistryManifestKey() string {
 	return hex.EncodeToString(
 		testTokenRegistryManifestPrivateKey.Public().(ed25519.PublicKey),
+	)
+}
+
+func testTokenRegistrySnapshotIdentity(serverURL string) string {
+	return tokenRegistrySnapshotIdentity(
+		serverURL,
+		serverURL+"/manifest",
+		testTokenRegistryManifestPrivateKey.Public().(ed25519.PublicKey),
+		false,
 	)
 }
 
@@ -685,6 +695,8 @@ func TestTokenRegistryManifestSequencePolicy(t *testing.T) {
 	t.Run("lower rejected", func(t *testing.T) {
 		server := newRegistryServer(t, body)
 		store := newFakeTokenRegistryStore()
+		store.syncState[tokenRegistrySnapshotIDKey] =
+			testTokenRegistrySnapshotIdentity(server.URL)
 		store.syncState[tokenRegistryManifestSequence] = "2"
 		store.syncState[tokenRegistrySnapshotDigestKey] = strings.Repeat("a", 64)
 		sync := newTestSync(t, store, server.URL, nil)
@@ -696,6 +708,8 @@ func TestTokenRegistryManifestSequencePolicy(t *testing.T) {
 	t.Run("lower accepted explicitly", func(t *testing.T) {
 		server := newRegistryServer(t, body)
 		store := newFakeTokenRegistryStore()
+		store.syncState[tokenRegistrySnapshotIDKey] =
+			testTokenRegistrySnapshotIdentity(server.URL)
 		store.syncState[tokenRegistryManifestSequence] = "2"
 		store.syncState[tokenRegistrySnapshotDigestKey] = strings.Repeat("a", 64)
 		sync := newTestSync(t, store, server.URL, func(cfg *TokenRegistryConfig) {
@@ -709,6 +723,8 @@ func TestTokenRegistryManifestSequencePolicy(t *testing.T) {
 	t.Run("same sequence different digest rejected", func(t *testing.T) {
 		server := newRegistryServer(t, body)
 		store := newFakeTokenRegistryStore()
+		store.syncState[tokenRegistrySnapshotIDKey] =
+			testTokenRegistrySnapshotIdentity(server.URL)
 		store.syncState[tokenRegistryManifestSequence] = "1"
 		store.syncState[tokenRegistrySnapshotDigestKey] = strings.Repeat("a", 64)
 		sync := newTestSync(t, store, server.URL, func(cfg *TokenRegistryConfig) {
@@ -852,12 +868,17 @@ func TestTokenRegistrySyncSkipsMalformedMappings(t *testing.T) {
 	})
 	server := newRegistryServer(t, body)
 	store := newFakeTokenRegistryStore()
+	var transactionCalls atomic.Int64
+	store.transactionHook = func() { transactionCalls.Add(1) }
 	sync := newTestSync(t, store, server.URL, nil)
 
 	written, err := sync.SyncOnce(t.Context())
 
 	require.ErrorContains(t, err, "unusable mappings: 2")
 	require.Zero(t, written)
+	require.Zero(t, transactionCalls.Load())
+	require.Zero(t, store.upserts)
+	require.Empty(t, store.ops)
 	require.Empty(t, store.snapshot())
 }
 
@@ -1912,6 +1933,50 @@ func TestTokenRegistrySyncIgnoresETagFromADifferentSource(t *testing.T) {
 		second.ifNoneMatch(),
 		"the previous source's ETag must not be sent to a new source",
 	)
+}
+
+func TestTokenRegistrySyncScopesManifestStateToSnapshotIdentity(t *testing.T) {
+	bodyA := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "from source A", "AAA", "",
+		),
+	})
+	bodyB := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(
+			syncSubjectDjed, "from source B", "BBB", "",
+		),
+	})
+
+	for name, sequences := range map[string][2]uint64{
+		"lower sequence":                 {2, 1},
+		"same sequence different digest": {1, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sourceA := newRegistryServer(t, bodyA)
+			sourceA.setSequence(sequences[0])
+			sourceB := newRegistryServer(t, bodyB)
+			sourceB.setSequence(sequences[1])
+			store := newFakeTokenRegistryStore()
+
+			_, err := newTestSync(t, store, sourceA.URL, nil).
+				SyncOnce(t.Context())
+			require.NoError(t, err)
+
+			written, err := newTestSync(t, store, sourceB.URL, nil).
+				SyncOnce(t.Context())
+
+			require.NoError(t, err)
+			require.Equal(t, 1, written)
+			require.Equal(
+				t,
+				strconv.FormatUint(sequences[1], 10),
+				store.state(tokenRegistryManifestSequence),
+			)
+			entries := store.snapshot()
+			require.Contains(t, entries, syncSubjectDjed)
+			require.NotContains(t, entries, syncSubjectNut)
+		})
+	}
 }
 
 // TestTokenRegistrySyncRollsBackWhenMappingsSkipped keeps authenticated state
