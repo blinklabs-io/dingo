@@ -3660,7 +3660,8 @@ func TestWithTxValidationSessionKeepsUnavailableUtxoCborRetryable(
 ) {
 	t.Parallel()
 	db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
-	input := shelley.NewShelleyTransactionInput(strings.Repeat("a9", 32), 0)
+	input, inputErr := shelley.NewShelleyTransactionInput(strings.Repeat("a9", 32), 0)
+	require.NoError(t, inputErr)
 	require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
 		TxId:      input.Id().Bytes(),
 		OutputIdx: input.Index(),
