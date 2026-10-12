@@ -688,6 +688,7 @@ func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
 		"test-version",
 		"badger",
 		"sqlite",
+		lifecycle.WithManifestKey(testSnapshotTrustKey),
 	)
 	require.NoError(t, err)
 
@@ -763,6 +764,7 @@ func TestListAvailableSnapshotsSurvivesCloudListingFailure(t *testing.T) {
 		"test-version",
 		"badger",
 		"sqlite",
+		lifecycle.WithManifestKey(testSnapshotTrustKey),
 	)
 	require.NoError(t, err)
 	localManifest, err := lifecycle.ReadManifest(
