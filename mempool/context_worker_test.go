@@ -109,27 +109,13 @@ func TestChainUpdateWorkerRateLimitsFailedRebuilds(t *testing.T) {
 		time.Second,
 		"events coalesce during the failed rebuild cooldown",
 	)
-	firstDeadline := first.at.Add(revalidationInterval)
-	if remaining := time.Until(firstDeadline); remaining > 0 {
-		testutil.RequireNoReceive(
-			t,
-			attempts,
-			remaining,
-			"failed rebuild is not retried before its cooldown expires",
-		)
-	}
 	second := testutil.RequireReceive(t, attempts, time.Second, "cooldown retry")
 	require.Equal(t, 2, second.number)
+	require.GreaterOrEqual(t, second.at.Sub(first.at), revalidationInterval,
+		"failed rebuild is not retried before its cooldown expires")
 
-	secondDeadline := second.at.Add(revalidationInterval)
-	if remaining := time.Until(secondDeadline); remaining > 0 {
-		testutil.RequireNoReceive(
-			t,
-			attempts,
-			remaining,
-			"repeated failed rebuild remains rate limited",
-		)
-	}
 	third := testutil.RequireReceive(t, attempts, time.Second, "scheduled retry")
 	require.Equal(t, 3, third.number)
+	require.GreaterOrEqual(t, third.at.Sub(second.at), revalidationInterval,
+		"repeated failed rebuild remains rate limited")
 }
