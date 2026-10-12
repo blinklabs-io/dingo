@@ -507,7 +507,7 @@ func seedRetentionReconstructionFixture(
 		0, 0, nil, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1, 100, nil,
 	))
-	mgr := snapshot.NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := snapshot.NewManager(db, newTestEventBus(t, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        retentionRewardSnapshotEpoch,
@@ -6271,7 +6271,6 @@ func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
 			},
 			eras.ShelleyEraDesc,
 			pparams,
-			false,
 		)
 		return err
 	})
@@ -8457,7 +8456,6 @@ func (f *epochBoundaryBenchFixture) rollover(
 			f.epochs[epochBoundaryBenchEndedEpoch],
 			eras.ConwayEraDesc,
 			f.pparams,
-			false,
 		)
 		bodyDone = time.Now()
 		return err
@@ -8904,7 +8902,6 @@ func TestMithrilImportProvidesPreview1398RewardPParams(t *testing.T) {
 			*currentEpoch,
 			eras.ConwayEraDesc,
 			currentParams,
-			false,
 		)
 		return rolloverErr
 	}))
@@ -9861,7 +9858,7 @@ func TestRewardPrecomputeCoalescesEpochTransitionBurst(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{}
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})

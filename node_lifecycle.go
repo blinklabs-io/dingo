@@ -127,8 +127,9 @@ type namedStop struct {
 // Ordering is preserved from the inline calls it replaced: the Leios pipeline
 // manager stops before the vote manager because it consumes that manager's
 // EbQuorumEvent, matching the dependency order Run()'s startup-failure cleanup
-// stack already uses (see node.go). The database lifecycle manager stops last,
-// as it did inline, after the koios parity observer.
+// stack already uses (see node.go). The database lifecycle manager stops after
+// the koios parity observer, as it did inline, and the planner statistics
+// manager stops last.
 func (n *Node) quiesceComponentStops() []namedStop {
 	var stops []namedStop
 	if n.blockForger != nil {
@@ -181,6 +182,12 @@ func (n *Node) quiesceComponentStops() []namedStop {
 			stop: n.dbLifecycleMgr.Stop,
 		})
 	}
+	if n.plannerStatsMgr != nil {
+		stops = append(stops, namedStop{
+			name: "planner statistics manager",
+			stop: n.plannerStatsMgr.Stop,
+		})
+	}
 	return stops
 }
 
@@ -213,11 +220,6 @@ var componentStopsForQuiesce = (*Node).quiesceComponentStops
 // interrupted from here, and the escalation brings the process down anyway, so
 // leaking it for that window is strictly safer than proceeding to close the
 // database it may still be using.
-//
-// The caller's context deliberately does not shorten this wait. Cancelling a
-// restore should not escalate a component that would have stopped cleanly into
-// a supervised restart, and a cancelled context is no reason to abandon a stop
-// mid-flight: the deadline alone decides, so the wait is bounded either way.
 func stopWithDeadline(
 	d time.Duration,
 	name string,
@@ -245,6 +247,24 @@ func stopWithDeadline(
 
 func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	var err error
+	// A caller cancellation stops the requested mutation, but teardown still
+	// gets its own bounded chance to remove every storage user safely.
+	ctx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		n.configuredShutdownTimeout(),
+	)
+	defer cancel()
+	drainSubscription := func(topic event.EventType, id *event.EventSubscriberId) {
+		if *id == 0 {
+			return
+		}
+		if stopErr := n.eventBus.UnsubscribeAndWaitContext(ctx, topic, *id); stopErr != nil {
+			err = errors.Join(err, errStorageDrainUnconfirmed,
+				fmt.Errorf("%s subscription shutdown: %w", topic, stopErr))
+			return
+		}
+		*id = 0
+	}
 
 	// Every component whose Stop cancels its own context and then waits on a
 	// WaitGroup with no deadline of its own is bounded here -- see
@@ -257,14 +277,14 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// visible in one place and testable as a set: quiesceComponentStops is
 	// what a quiesce-level test asserts against, and a call site that went
 	// back to a direct Stop would drop out of it.
-	stopTimeout := n.configuredShutdownTimeout()
+	deadline, _ := ctx.Deadline()
 	for _, cs := range componentStopsForQuiesce(n) {
 		if cs.name == "block producer credentials" &&
 			errors.Is(err, errStorageDrainUnconfirmed) {
 			continue
 		}
 		if stopErr := stopWithDeadline(
-			stopTimeout, cs.name, cs.stop,
+			max(time.Until(deadline), 0), cs.name, cs.stop,
 		); stopErr != nil {
 			err = errors.Join(err, stopErr)
 		}
@@ -313,13 +333,7 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		}
 		n.koiosParityObserver = nil
 	}
-	if n.koiosParitySubId != 0 {
-		n.eventBus.UnsubscribeAndWait(
-			event.EpochTransitionEventType,
-			n.koiosParitySubId,
-		)
-		n.koiosParitySubId = 0
-	}
+	drainSubscription(event.EpochTransitionEventType, &n.koiosParitySubId)
 	// API services, including MCP in either storage mode, are owned by the
 	// plugin host. Unresolved capabilities need no shutdown.
 	if n.pluginHost != nil {
@@ -417,14 +431,13 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		// rather than restarting an instance bound to the closed store.
 		n.tokenRegistrySync = nil
 	}
-	// midnightIndexer and chainManager/chainsyncState have no corresponding
-	// stop call in node_shutdown.go's shutdown() — production shutdown
-	// relies on process exit to clean them up. That's not available here
-	// since the process keeps running, so midnightIndexer is stopped
-	// explicitly; chainManager/chainsyncState have no Stop method at all
-	// and are simply discarded/replaced in reinitializeStorage.
+	// The indexer must drain before storage replacement. Chain manager and
+	// chainsync state have no Stop method and are replaced during reinitialization.
 	if n.midnightIndexer != nil {
-		n.midnightIndexer.Stop()
+		if stopErr := n.midnightIndexer.Stop(ctx); stopErr != nil {
+			err = errors.Join(err, errStorageDrainUnconfirmed,
+				fmt.Errorf("midnight indexer shutdown: %w", stopErr))
+		}
 	}
 	// mempool is a plugin-capability provider with no Stop method of its
 	// own (see node.go's Run()) -- it is stopped/discarded via the host.
@@ -438,20 +451,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	n.mempool = nil
 	if n.connManager != nil {
 		if stopErr := n.connManager.Stop(ctx); stopErr != nil {
-			// errStorageDrainUnconfirmed, not a bare join: connManager.Stop
-			// returning an error means its own bounded wait (connection
-			// close, then goroutineWg) gave up before confirming every
-			// connection/listener goroutine actually exited -- exactly the
-			// precondition PauseLeiosPersistWriterForLiveLifecycleOp below
-			// depends on ("no more inbound Leios fetch traffic") to safely
-			// reset the persist writer's start-once guard. Escalating here,
-			// the same way an unconfirmed leios persist drain itself does,
-			// means Restore/Truncate call n.cancel() for a full supervised
-			// restart instead of reinitializeAndResume -- so a straggling
-			// connection's Leios fetch racing that reset (see
-			// PauseLeiosPersistWriterForLiveLifecycleOp's doc comment) can
-			// no longer happen: the node never reaches reinitializeAndResume
-			// in that case at all.
+			// Unconfirmed connection shutdown leaves traffic able to restart the
+			// persistence writer, so storage replacement requires a full restart.
 			err = errors.Join(
 				err,
 				errStorageDrainUnconfirmed,
@@ -472,20 +473,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// Unsubscribe only stops future deliveries, so a handler goroutine
 	// already dispatched before this loop runs could still be reading
 	// those fields concurrently with that teardown.
-	if n.chainsyncClientRemoveSubId != 0 {
-		n.eventBus.UnsubscribeAndWait(
-			chainsync.ClientRemoveRequestedEventType,
-			n.chainsyncClientRemoveSubId,
-		)
-		n.chainsyncClientRemoveSubId = 0
-	}
-	if n.connManagerRecycleSubId != 0 {
-		n.eventBus.UnsubscribeAndWait(
-			connmanager.ConnectionRecycleRequestedEventType,
-			n.connManagerRecycleSubId,
-		)
-		n.connManagerRecycleSubId = 0
-	}
+	drainSubscription(chainsync.ClientRemoveRequestedEventType, &n.chainsyncClientRemoveSubId)
+	drainSubscription(connmanager.ConnectionRecycleRequestedEventType, &n.connManagerRecycleSubId)
 	// leiosVoteManager is stopped above and rebuilt by initLeiosVoteManager
 	// (called again for a Dijkstra/Leios-enabled node during reinit), which
 	// re-subscribes a fresh handler -- without unsubscribing the old one
@@ -493,33 +482,11 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// accumulate one extra permanently-active subscription per live
 	// restore/truncate cycle, and a single emitted vote would be enqueued
 	// (and diffused to peers) once per accumulated subscription.
-	if n.leiosVoteEmittedSubId != 0 {
-		n.eventBus.UnsubscribeAndWait(
-			leios.VoteEmittedEventType,
-			n.leiosVoteEmittedSubId,
-		)
-		n.leiosVoteEmittedSubId = 0
-	}
-	if n.leiosVoteReceivedSubId != 0 {
-		n.eventBus.UnsubscribeAndWait(
-			leios.VoteReceivedEventType,
-			n.leiosVoteReceivedSubId,
-		)
-		n.leiosVoteReceivedSubId = 0
-	}
+	drainSubscription(leios.VoteEmittedEventType, &n.leiosVoteEmittedSubId)
+	drainSubscription(leios.VoteReceivedEventType, &n.leiosVoteReceivedSubId)
 
-	// Last, now that connManager.Stop above has closed every connection —
-	// so no more inbound Leios fetch traffic can call enqueueLeiosPersist
-	// concurrently with the reset this performs (see
-	// PauseLeiosPersistWriterForLiveLifecycleOp's own doc comment for why
-	// that ordering matters, and this file's top doc comment for why
-	// n.ouroboros needs this one exception at all).
-	//
-	// errStorageDrainUnconfirmed, not a bare join: an unconfirmed leios
-	// persist drain means that writer goroutine may still be running
-	// against the about-to-close database, exactly the same danger
-	// errStorageDrainUnconfirmed already makes Restore/Truncate fail
-	// closed on rather than attempt reinitializeAndResume.
+	// Drain persistence while storage is open. An unconfirmed drain requires
+	// a supervised restart because the writer may still access that storage.
 	if n.ouroboros() != nil {
 		if pauseErr := n.ouroboros().PauseLeiosPersistWriterForLiveLifecycleOp(); pauseErr != nil {
 			err = errors.Join(
@@ -528,6 +495,9 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 				fmt.Errorf("leios persist writer pause: %w", pauseErr),
 			)
 		}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		err = errors.Join(err, errStorageDrainUnconfirmed)
 	}
 
 	return err
@@ -651,7 +621,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	// The previous ledger's tip-gap observation must not make readiness look
 	// healthy while Restore or Truncate is rebuilding the core storage.
 	n.health.forgetTipGap()
-	deps := n.storageDependencies(n.config.dataDir)
+	deps, err := n.storageDependencies(n.config.dataDir)
+	if err != nil {
+		return err
+	}
 	deps.PromRegistry = n.config.promRegistry
 	stores, err := internalplugins.ResolveStorage(
 		ctx, n.pluginHost, n.storageSelections(), deps,
@@ -709,6 +682,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		barkBlobStore, err := bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
 			BaseUrl:                   n.config.barkBaseUrl,
 			BlockDownloadAllowedHosts: n.config.barkBlockDownloadHosts,
+			MaxBlockSize:              state.MaxBlockSize,
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},
@@ -781,7 +755,7 @@ func (n *Node) reinitializeMidnightIndexer() error {
 	if !midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		return nil
 	}
-	if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
+	if err := n.ledgerState.PrepareEpochCacheForStartup(n.ctx); err != nil {
 		return fmt.Errorf(
 			"load epoch cache before Midnight indexer restart: %w",
 			err,
@@ -912,6 +886,14 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 			"failed to restart database lifecycle manager: %w",
 			err,
 		)
+	}
+	// The database handle was replaced, so the previous manager's updater is
+	// closed; build a new one rather than restarting it, and run its startup
+	// pass now: the replacement may never have been analyzed, and the epoch
+	// trigger would leave it without statistics until the next rollover.
+	n.runPlannerStatsStartup(ctx)
+	if err := n.startPlannerStatsManager(n.ctx); err != nil { //nolint:contextcheck
+		return fmt.Errorf("failed to restart planner statistics manager: %w", err)
 	}
 
 	if n.config.experimentalDijkstraEnabled() {
@@ -1101,17 +1083,14 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		usePeerSnapshot := genesisSelectionMode &&
 			topologyConfig.PeerSnapshot != nil &&
 			topologyConfig.PeerSnapshot.HasRelays()
-		if usePeerSnapshot {
-			topologyConfig = topologyConfig.WithoutBootstrapPeers()
-		}
 		n.peerGov.LoadTopologyConfig(topologyConfig) //nolint:contextcheck // address normalization bounds its own DNS lookup
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
 				ctx,
 				n.config.topologyConfig.PeerSnapshot,
 			)
-			if added == 0 {
-				n.peerGov.LoadTopologyConfig(n.config.topologyConfig) //nolint:contextcheck // address normalization bounds its own DNS lookup
+			if added > 0 {
+				n.peerGov.PreferPeerSnapshot()
 			}
 		}
 	}
@@ -1273,34 +1252,29 @@ func (n *Node) reinitializeAPIServers() error {
 	}
 	if n.config.storageMode.IsAPI() && meshPort > 0 {
 		var genesisHash string
-		var genesisStartTimeSec int64
 		if nc := n.config.cardanoNodeConfig; nc != nil {
 			genesisHash = nc.ByronGenesisHash
-			if sg := nc.ShelleyGenesis(); sg != nil {
-				genesisStartTimeSec = sg.SystemStart.Unix()
-			}
 		}
-		if genesisHash == "" || genesisStartTimeSec == 0 {
+		if genesisHash == "" {
 			return errors.New(
 				"mesh API requires Cardano node config " +
-					"(Byron genesis hash and Shelley genesis)",
+					"(Byron genesis hash)",
 			)
 		}
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIMesh,
 			meshSelection.Provider, meshSelection.Config,
 			mesh.ProviderDependencies{
-				Logger:              n.config.logger,
-				LedgerState:         n.ledgerState,
-				Database:            mesh.NewMeshDatabase(n.db),
-				Chain:               n.ledgerState.Chain(),
-				Mempool:             n.mempool,
-				Host:                n.config.bindAddr,
-				Network:             n.config.network,
-				NetworkMagic:        n.config.networkMagic,
-				GenesisHash:         genesisHash,
-				GenesisStartTimeSec: genesisStartTimeSec,
-				CORSAllowedOrigins:  n.config.corsAllowedOrigins,
+				Logger:             n.config.logger,
+				LedgerState:        n.ledgerState,
+				Database:           mesh.NewMeshDatabase(n.db),
+				Chain:              n.ledgerState.Chain(),
+				Mempool:            n.mempool,
+				Host:               n.config.bindAddr,
+				Network:            n.config.network,
+				NetworkMagic:       n.config.networkMagic,
+				GenesisHash:        genesisHash,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
 		if err != nil {
@@ -1474,15 +1448,20 @@ func (n *Node) storageSelections() internalplugins.StorageSelections {
 // different directory than n.config.dataDir.
 func (n *Node) storageDependencies(
 	dataDir string,
-) internalplugins.StorageDependencies {
-	return internalplugins.StorageDependencies{
-		DataDir:        dataDir,
-		RunMode:        n.config.runMode,
-		StorageMode:    string(n.config.storageMode),
-		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
-		Logger:         n.config.logger,
-		TracingEnabled: n.config.tracing,
+) (internalplugins.StorageDependencies, error) {
+	genesisStakingEmpty, err := n.genesisStakingEmpty()
+	if err != nil {
+		return internalplugins.StorageDependencies{}, err
 	}
+	return internalplugins.StorageDependencies{
+		DataDir:             dataDir,
+		RunMode:             n.config.runMode,
+		StorageMode:         string(n.config.storageMode),
+		MaxConnections:      n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
+		Logger:              n.config.logger,
+		TracingEnabled:      n.config.tracing,
+		GenesisStakingEmpty: genesisStakingEmpty,
+	}, nil
 }
 
 // reinitializeAndResume reconstructs and restarts every component
@@ -1550,6 +1529,16 @@ func (n *Node) Snapshot(
 			"node database is not open",
 		)
 	}
+	manifestOpts, err := dblifecycle.ManifestOptions(n.config.databaseLifecycle)
+	if err != nil {
+		return lifecycle.Manifest{}, err
+	}
+	manifestOpts = append(
+		manifestOpts,
+		lifecycle.WithMaxCommitPause(
+			n.config.databaseLifecycle.SnapshotMaxCommitPause,
+		),
+	)
 	return lifecycle.SnapshotToCloud(
 		ctx,
 		n.destinationRegistry,
@@ -1565,9 +1554,7 @@ func (n *Node) Snapshot(
 		),
 		name,
 		description,
-		lifecycle.WithMaxCommitPause(
-			n.config.databaseLifecycle.SnapshotMaxCommitPause,
-		),
+		manifestOpts...,
 	)
 }
 
@@ -1622,6 +1609,13 @@ func (n *Node) Restore(
 	// liveLifecycleMu.
 	n.snapshotMu.Lock()
 	defer n.snapshotMu.Unlock()
+
+	// Resolved before anything is quiesced so an unusable trust key refuses
+	// the restore while the node is still serving.
+	manifestOpts, err := dblifecycle.ManifestOptions(n.config.databaseLifecycle)
+	if err != nil {
+		return lifecycle.Manifest{}, err
+	}
 
 	stagingDir := n.config.dataDir + restoreStagingSuffix
 	if err := os.RemoveAll(stagingDir); err != nil {
@@ -1767,6 +1761,7 @@ func (n *Node) Restore(
 				n.config.cardanoNodeConfig, "", n.config.network,
 			),
 		},
+		manifestOpts...,
 	)
 	if err != nil {
 		_ = os.RemoveAll(stagingDir)
@@ -2175,7 +2170,10 @@ func (n *Node) Truncate(
 	}
 
 	blocksRemoved, truncateErr := func() (uint64, error) {
-		deps := n.storageDependencies(n.config.dataDir)
+		deps, err := n.storageDependencies(n.config.dataDir)
+		if err != nil {
+			return 0, err
+		}
 		deps.PromRegistry = n.config.promRegistry
 		tmpRuntime, err := internalplugins.OpenDatabase(
 			ctx, n.databaseConfig(), n.storageSelections(), deps,
@@ -2271,3 +2269,19 @@ func (n *Node) Truncate(
 // that interface's doc comment for why it's defined there, not imported
 // from here).
 var _ dblifecycle.LiveNode = (*Node)(nil)
+
+func (n *Node) genesisStakingEmpty() (bool, error) {
+	path, network, magic := "", n.config.network, n.config.networkMagic
+	if n.config.cfg != nil {
+		path = n.config.cfg.CardanoConfig
+		network = n.config.cfg.Network
+		magic = n.config.cfg.NetworkMagic
+	}
+	verified, err := internalplugins.ResolveGenesisStakingEmpty(
+		n.config.cardanoNodeConfig, path, network, magic,
+	)
+	if err != nil {
+		return false, fmt.Errorf("loading cardano node config: %w", err)
+	}
+	return verified, nil
+}

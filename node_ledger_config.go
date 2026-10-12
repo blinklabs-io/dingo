@@ -17,6 +17,7 @@ package dingo
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -77,7 +78,6 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		CardanoNodeConfig:  n.config.cardanoNodeConfig,
 		Network:            n.config.network,
 		PromRegistry:       n.config.promRegistry,
-		ForgeBlocks:        n.config.isDevMode(),
 		ValidateHistorical: n.config.validateHistorical,
 		EnableDijkstra:     n.config.experimentalDijkstraEnabled(),
 		StartInDijkstra:    n.config.startEra.IsDijkstra(),
@@ -87,6 +87,15 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// Parallel VRF/KES validate stage for the same pipeline (phase 3).
 		// Off by default; requires BlockPipelineEnabled.
 		BlockPipelineValidateEnabled: n.config.blockPipelineValidateEnabled,
+		// Prefetch the next block's input UTxOs while the current block
+		// applies. Not consensus-affecting; off by default.
+		LedgerPrefetchAheadEnabled: n.config.ledgerPrefetchAheadEnabled,
+		// Core-mode batched metadata writes for blocks that are not
+		// validated. Not consensus-affecting; off by default.
+		ApplyRowBatchingEnabled: n.config.ledgerApplyRowBatchingEnabled,
+		// Start blockfetch at one range of queued headers while far from
+		// the peer tip. Not consensus-affecting; off by default.
+		BlockfetchLowWatermarkEnabled: n.config.blockfetchLowWatermarkEnabled,
 		// Supplies fetched Leios endorser-block transactions so the ledger
 		// can apply them when their referencing Dijkstra ranking block is
 		// processed (completing the UTxO set for endorser-resident outputs).
@@ -104,6 +113,16 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			}
 			return o.EndorserBlockTxsByHash(ebHash, ebSlot)
 		},
+		EndorserBlockValidation: func(
+			ebHash []byte,
+			ebSlot uint64,
+		) ledger.EndorserBlockValidationStatus {
+			o := n.ouroboros()
+			if o == nil {
+				return ledger.EndorserBlockValidationUnknown
+			}
+			return o.EndorserBlockValidation(ebHash, ebSlot)
+		},
 		// Actively fetches a referenced endorser block by point and caches
 		// it. Used during historical catch-up: the prototype relay serves
 		// any endorser block by point on demand, so a from-scratch sync can
@@ -116,7 +135,11 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		) error {
 			o := n.ouroboros()
 			if o == nil {
-				return errOuroborosNotStarted
+				return fmt.Errorf(
+					"%w: %w",
+					ledger.ErrEndorserBlockFetchNoPeer,
+					errOuroborosNotStarted,
+				)
 			}
 			return o.FetchEndorserBlockByPoint(
 				ctx,
@@ -135,12 +158,6 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// certify deadline is the bound that matches when the EB is actually
 		// available to fetch.
 		EndorserBlockWaitSlots: n.leiosPipelineTiming().CertifyByDeadlineSlots,
-		// Two-path Leios ledger selection: the Musashi prototype
-		// (prototype-2026w29) applies only the certified parent EB, without
-		// validation or consumed-input recovery (Haskell-conformant), whereas
-		// dingo's forward path applies the current announcement normally
-		// (CIP-conformant).
-		LeiosApplyEndorserBlockTxs: !n.config.isMusashiNetwork(),
 		ValidateLeiosCertificate: func(
 			epoch uint64,
 			announcingBlockHash []byte,
@@ -156,12 +173,20 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			message := leios.PrototypeVoteMessageBytes(
 				lcommon.Blake2b256(announcingBlockHash),
 			)
-			return n.leiosVoteManager.ValidateDijkstraCertificate(
+			err := n.leiosVoteManager.ValidateDijkstraCertificate(
 				epoch,
 				signers,
 				aggregatedSignature,
 				message,
 			)
+			if errors.Is(err, leios.ErrInvalidCertificate) {
+				return fmt.Errorf(
+					"%w: %w",
+					ledger.ErrLeiosInvalidCertificate,
+					err,
+				)
+			}
+			return err
 		},
 		// The leadership stake includes reward-account balances; see
 		// LedgerStateConfig.SkipLeaderStakeThresholdCheck. The check

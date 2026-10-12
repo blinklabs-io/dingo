@@ -582,11 +582,12 @@ func updateSnapshotCatalogIfPresent(
 	ctx context.Context,
 	baseDir string,
 	entry SnapshotEntry,
+	opts ...ManifestOption,
 ) error {
 	if err := validateSnapshotCatalogID(entry.ID); err != nil {
 		return err
 	}
-	return mutateSnapshotCatalog(ctx, baseDir, func(txn *sql.Tx) (bool, error) {
+	err := mutateSnapshotCatalog(ctx, baseDir, func(txn *sql.Tx) (bool, error) {
 		if _, err := txn.ExecContext(ctx, `
 INSERT INTO snapshots(id, created_sec, created_ns) VALUES (?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
@@ -609,6 +610,22 @@ ON CONFLICT(id) DO UPDATE SET
 			entry.Manifest.CreatedAt.Nanosecond())
 		return err == nil, err
 	})
+	if err == nil || !snapshotCatalogCanRebuild(err) {
+		return err
+	}
+	repairErr := ensureSnapshotCatalogContext(
+		context.WithoutCancel(ctx), baseDir, randomSnapshotCatalogGeneration,
+		opts...,
+	)
+	if repairErr != nil && !errors.Is(repairErr, ErrSnapshotCatalogIncomplete) {
+		return errors.Join(err, repairErr)
+	}
+	if reconcile := snapshotCatalogReconcile(opts); reconcile != nil {
+		if reconcileErr := reconcile(context.WithoutCancel(ctx), baseDir); reconcileErr != nil {
+			return errors.Join(err, repairErr, reconcileErr)
+		}
+	}
+	return nil
 }
 
 func removeSnapshotCatalogEntryIfPresent(
@@ -756,9 +773,13 @@ func updateCloudSnapshotCatalogIfPresent(
 	baseDir string,
 	entry SnapshotEntry,
 	cloudDest string,
+	opts ...ManifestOption,
 ) error {
 	if err := validateSnapshotCatalogID(entry.ID); err != nil {
 		return err
+	}
+	if err := entry.Manifest.Authenticate(opts...); err != nil {
+		return fmt.Errorf("authenticate cloud snapshot %q: %w", entry.ID, err)
 	}
 	data, err := json.Marshal(entry.Manifest)
 	if err != nil {
@@ -828,6 +849,7 @@ func RemoveCloudSnapshotCatalogEntryContext(
 	id string,
 	registry *DestinationRegistry,
 	cloudDest string,
+	opts ...ManifestOption,
 ) error {
 	if err := validateSnapshotCatalogID(id); err != nil {
 		return err
@@ -837,7 +859,7 @@ func RemoveCloudSnapshotCatalogEntryContext(
 		return nil
 	}
 	if repairErr := RepairSnapshotCatalogContext(
-		context.WithoutCancel(ctx), baseDir, registry, cloudDest,
+		context.WithoutCancel(ctx), baseDir, registry, cloudDest, opts...,
 	); repairErr != nil {
 		return errors.Join(err, repairErr)
 	}

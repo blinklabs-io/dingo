@@ -196,7 +196,6 @@ func runHardForkRewardRound(
 			*currentEpoch,
 			eras.ConwayEraDesc,
 			currentParams,
-			false,
 		)
 		if rolloverErr == nil {
 			require.NotNil(t, rollover)

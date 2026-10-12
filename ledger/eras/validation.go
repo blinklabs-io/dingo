@@ -15,11 +15,13 @@
 package eras
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
 	"math/big"
 
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -36,8 +38,73 @@ var ErrExUnitsOverflow = errors.New(
 	"execution units overflow int64",
 )
 
+type semanticRuleValidationError struct {
+	err error
+}
+
+func (e *semanticRuleValidationError) Error() string { return e.err.Error() }
+func (e *semanticRuleValidationError) Unwrap() error { return e.err }
+
+type localRuleValidationError struct {
+	err error
+}
+
+func (e *localRuleValidationError) Error() string { return e.err.Error() }
+func (e *localRuleValidationError) Unwrap() error { return e.err }
+
+// IsSemanticRuleValidationError reports whether an error came from a
+// deterministic era validation rule. Callers use the rule boundary rather
+// than concrete error types so new ledger verdicts inherit the right
+// disposition without classifying errors from injected validators.
+func IsSemanticRuleValidationError(err error) bool {
+	var semanticErr *semanticRuleValidationError
+	return errors.As(err, &semanticErr)
+}
+
+func semanticRuleValidationErrorFor(err error) error {
+	if err == nil {
+		return nil
+	}
+	var localErr *localRuleValidationError
+	if errors.As(err, &localErr) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, hardfork.ErrPastHorizon) {
+		return err
+	}
+	var validationErr *lcommon.ValidationError
+	if errors.As(err, &validationErr) &&
+		validationErr.Type == lcommon.ValidationErrorTypeConfiguration {
+		return err
+	}
+	return &semanticRuleValidationError{err: err}
+}
+
+func localRuleValidationErrorFor(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &localRuleValidationError{err: err}
+}
+
 type phase2ValidationSkipper interface {
 	SkipPhase2Validation() bool
+}
+
+type evaluationContextProvider interface {
+	EvaluationContext() context.Context
+}
+
+func evaluationContext(ls lcommon.LedgerState) context.Context {
+	provider, ok := stateCapability[evaluationContextProvider](ls)
+	if !ok || provider.EvaluationContext() == nil {
+		return context.Background()
+	}
+	return provider.EvaluationContext()
+}
+
+func checkEvaluationCanceled(ls lcommon.LedgerState) error {
+	return evaluationContext(ls).Err()
 }
 
 // MinPoolMarginProvider is satisfied by the dingo ledger state to expose the
@@ -72,10 +139,23 @@ type CommitteeCredentialState interface {
 	) (*lcommon.CommitteeMember, error)
 }
 
+// stateCapability returns ls as T, or else the provider beneath ls's
+// validation adapters as T. An adapter such as the state that layers pending
+// transactions over a ledger view exposes the LedgerState methods but not the
+// view's optional capabilities, so asserting on ls alone reads a capability
+// the ledger has as absent.
+func stateCapability[T any](ls lcommon.LedgerState) (T, bool) {
+	if capability, ok := ls.(T); ok {
+		return capability, true
+	}
+	capability, ok := lcommon.UnwrapLedgerState(ls).(T)
+	return capability, ok
+}
+
 // minPoolMarginFromLedgerState returns the CIP-23 minimum pool margin the ledger
 // state enforces, or nil when the state does not provide one (feature disabled).
 func minPoolMarginFromLedgerState(ls lcommon.LedgerState) *big.Rat {
-	provider, ok := ls.(MinPoolMarginProvider)
+	provider, ok := stateCapability[MinPoolMarginProvider](ls)
 	if !ok {
 		return nil
 	}
@@ -131,7 +211,7 @@ const (
 func shouldSkipPhase2Validation(
 	ls lcommon.LedgerState,
 ) bool {
-	skipper, ok := ls.(phase2ValidationSkipper)
+	skipper, ok := stateCapability[phase2ValidationSkipper](ls)
 	return ok && skipper.SkipPhase2Validation()
 }
 
@@ -206,7 +286,7 @@ func validateCommitteeCertificates(
 			return err
 		}
 	}
-	state, ok := ls.(CommitteeCredentialState)
+	state, ok := stateCapability[CommitteeCredentialState](ls)
 	if !ok {
 		return conway.UtxoValidateCommitteeCertificates(tx, slot, ls, pp)
 	}
@@ -336,7 +416,7 @@ func validateUnknownVoters(
 			return err
 		}
 	}
-	state, ok := ls.(CommitteeCredentialState)
+	state, ok := stateCapability[CommitteeCredentialState](ls)
 	if !ok {
 		if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
 			return nil
@@ -647,6 +727,17 @@ func resolveUtxoValidationSkipIndex(
 		))
 	}
 	return found
+}
+
+// remainingExUnits returns the part of limit not yet consumed, floored at zero
+// in each dimension. Evaluating each redeemer against it keeps the
+// transaction's total work within the limit instead of granting every
+// redeemer the whole limit.
+func remainingExUnits(limit, used lcommon.ExUnits) lcommon.ExUnits {
+	return lcommon.ExUnits{
+		Memory: max(limit.Memory-used.Memory, 0),
+		Steps:  max(limit.Steps-used.Steps, 0),
+	}
 }
 
 // SafeAddExUnits adds two ExUnits values with

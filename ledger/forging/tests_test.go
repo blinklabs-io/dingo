@@ -4824,13 +4824,14 @@ type leiosOverlayValidator struct {
 }
 
 func (v *leiosOverlayValidator) ValidateTx(tx ledger.Transaction) error {
-	return v.ValidateTxWithOverlay(tx, nil, nil)
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
 }
 
 func (v *leiosOverlayValidator) ValidateTxWithOverlay(
 	tx ledger.Transaction,
 	consumed map[utxoref.Key]struct{},
 	created map[utxoref.Key]lcommon.Utxo,
+	accounts *utxoref.StateOverlay,
 ) error {
 	if _, reject := v.reject[tx.Hash().String()]; reject {
 		return errors.New("rejected parent")

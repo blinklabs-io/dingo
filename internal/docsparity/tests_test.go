@@ -3018,6 +3018,43 @@ func TestReleaseGatesOnGovulncheck(t *testing.T) {
 	}
 }
 
+// TestImageManifestRunsAfterMainBuilds checks the explicit condition that
+// keeps the manifest job runnable on main. The image builds have a skipped
+// release-only dependency on main, and GitHub otherwise propagates that skip
+// through the successful image-build job to its dependents.
+func TestImageManifestRunsAfterMainBuilds(t *testing.T) {
+	root := repoRoot(t)
+	jobs := pipelineJobs(t, root, publishPipeline)
+
+	job, ok := jobs["build-image-manifest"]
+	if !ok {
+		t.Fatalf("%s has no build-image-manifest job", publishPipeline)
+	}
+	fields, ok := job.(map[string]any)
+	if !ok {
+		t.Fatalf(
+			"%s job build-image-manifest is not a mapping",
+			publishPipeline,
+		)
+	}
+	condition, ok := fields["if"].(string)
+	if !ok {
+		t.Fatalf(
+			"%s: build-image-manifest has no job condition",
+			publishPipeline,
+		)
+	}
+	const expected = "always() && needs.build-images.result == 'success'"
+	if condition != expected {
+		t.Errorf(
+			"%s: build-image-manifest condition %q, want %q",
+			publishPipeline,
+			condition,
+			expected,
+		)
+	}
+}
+
 // buildGates names, for each build job, every test job for its own runner OS.
 // Gating a build on its own platform and no other is what lets the Linux
 // binaries start while macOS tests are still running.
@@ -3851,6 +3888,87 @@ func TestLintGatesNilawayAndModernize(t *testing.T) {
 	for _, doc := range []string{"AGENTS.md", "CLAUDE.md"} {
 		if strings.Contains(readRepoFile(t, root, doc), "advisory") {
 			t.Errorf("%s calls a lint analyzer advisory", doc)
+		}
+	}
+}
+
+// TestGitignoreCoversLocalSecretsAndKeepsTrackedFixtures pins both halves of
+// the secret-file patterns: names that carry local credentials are ignored,
+// and every tracked fixture that matches one of them is un-ignored explicitly,
+// so an intentional fixture is never one `git add -f` away from looking like
+// a leak.
+func TestGitignoreCoversLocalSecretsAndKeepsTrackedFixtures(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+	if err := exec.Command(
+		"git", "-C", root, "rev-parse", "--git-dir",
+	).Run(); err != nil {
+		t.Skip("not a git checkout")
+	}
+
+	for _, name := range []string{
+		".env",
+		"payment.skey",
+		"payment.vkey",
+		"node.key",
+		"tls/server.pem",
+		"credentials.json",
+		"dingo.yaml",
+	} {
+		// --no-index judges the pattern alone, whether or not the path exists
+		// or is tracked.
+		err := exec.Command(
+			"git", "-C", root, "check-ignore", "--no-index", "-q", name,
+		).Run()
+		if err != nil {
+			t.Errorf("%s is not ignored: %v", name, err)
+		}
+	}
+
+	tracked, err := exec.Command(
+		"git", "-C", root, "ls-files", "-ci", "--exclude-standard",
+	).Output()
+	if err != nil {
+		t.Fatalf("listing ignored tracked files: %v", err)
+	}
+	if got := strings.TrimSpace(string(tracked)); got != "" {
+		t.Errorf(
+			"tracked files match an ignore pattern without a negation:\n%s",
+			got,
+		)
+	}
+}
+
+// TestDockerfilesExposingMetricsBindThem keeps an image that publishes the
+// metrics port reachable on it. The binary binds metrics to loopback unless
+// told otherwise, so an image that EXPOSEs 12798 without setting the bind
+// address advertises a port that refuses every connection from outside the
+// container, including an orchestrator's probes and scrapers.
+func TestDockerfilesExposingMetricsBindThem(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+	for _, rel := range dockerfiles(t, root) {
+		var exposes, binds bool
+		for line := range strings.SplitSeq(readRepoFile(t, root, rel), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			switch strings.ToUpper(fields[0]) {
+			case "EXPOSE":
+				exposes = exposes || slices.Contains(fields[1:], "12798")
+			case "ENV":
+				binds = binds ||
+					strings.HasPrefix(fields[1], "DINGO_METRICS_BIND_ADDR=")
+			}
+		}
+		if exposes && !binds {
+			t.Errorf(
+				"%s exposes the metrics port without setting DINGO_METRICS_BIND_ADDR",
+				rel,
+			)
 		}
 	}
 }

@@ -532,7 +532,7 @@ func TestBlockReferenceScriptAggregateReusesPrefetchedUtxos(t *testing.T) {
 			)
 			inputs = append(
 				inputs,
-				shelley.NewShelleyTransactionInput(hex.EncodeToString(id), 0),
+				shelley.MustNewShelleyTransactionInput(hex.EncodeToString(id), 0),
 			)
 		}
 		return inputs

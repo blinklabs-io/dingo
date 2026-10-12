@@ -122,7 +122,7 @@ func BuildDijkstraBlockBytesWithTx(t testing.TB, txBytes []byte) []byte {
 		[]cbor.RawMessage{txBytes}, nil, nil,
 	})
 	vrf := lcommon.VrfResult{
-		Output: make([]byte, 32),
+		Output: make([]byte, 64),
 		Proof:  make([]byte, 80),
 	}
 	header := &dijkstra.DijkstraBlockHeader{

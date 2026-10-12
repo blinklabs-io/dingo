@@ -438,8 +438,15 @@ func (m *Manager) handleEpochTransition(
 			"dir",
 			destDir,
 		)
+		manifestOpts, err := ManifestOptions(m.cfg)
+		if err != nil {
+			return fmt.Errorf(
+				"retry epoch-boundary snapshot cloud mirror: %w", err,
+			)
+		}
 		if err := lifecycle.MirrorToCloud(
 			ctx, m.destinationRegistry, destDir, cloudDest,
+			manifestOpts...,
 		); err != nil {
 			return fmt.Errorf(
 				"retry epoch-boundary snapshot cloud mirror: %w", err,
@@ -459,7 +466,12 @@ func (m *Manager) handleEpochTransition(
 		}
 		return nil
 	}
-	_, err := lifecycle.SnapshotToCloud(
+	manifestOpts, err := ManifestOptions(m.cfg)
+	if err != nil {
+		return fmt.Errorf("capture epoch-boundary snapshot: %w", err)
+	}
+	manifestOpts = append(manifestOpts, lifecycle.WithMaxCommitPause(m.cfg.SnapshotMaxCommitPause))
+	_, err = lifecycle.SnapshotToCloud(
 		ctx,
 		m.destinationRegistry,
 		m.db,
@@ -471,7 +483,7 @@ func (m *Manager) handleEpochTransition(
 		m.effectiveCloudDestination(),
 		"",
 		"",
-		lifecycle.WithMaxCommitPause(m.cfg.SnapshotMaxCommitPause),
+		manifestOpts...,
 	)
 	if err != nil {
 		return fmt.Errorf("capture epoch-boundary snapshot: %w", err)
@@ -576,8 +588,13 @@ func (m *Manager) retryMirrorToCloud(
 			err = fmt.Errorf("panic retrying cloud mirror: %v", r)
 		}
 	}()
+	manifestOpts, err := ManifestOptions(m.cfg)
+	if err != nil {
+		return err
+	}
 	return lifecycle.MirrorToCloud(
 		ctx, m.destinationRegistry, dir, m.effectiveCloudDestination(),
+		manifestOpts...,
 	)
 }
 
@@ -623,6 +640,18 @@ func (m *Manager) pruneOldSnapshots(ctx context.Context) {
 	slices.Sort(epochs)
 
 	cloudDest := m.effectiveCloudDestination()
+	var manifestOpts []lifecycle.ManifestOption
+	if cloudDest != "" {
+		manifestOpts, err = ManifestOptions(m.cfg)
+		if err != nil {
+			m.logger.Warn(
+				"failed to load snapshot trust key for retention pruning",
+				"component", "dblifecycle",
+				"error", err,
+			)
+			return
+		}
+	}
 	toRemove := epochs[:len(epochs)-m.cfg.SnapshotRetention]
 	for _, epoch := range toRemove {
 		epochName := fmt.Sprintf("%s%d", epochSnapshotDirPrefix, epoch)
@@ -687,6 +716,7 @@ func (m *Manager) pruneOldSnapshots(ctx context.Context) {
 				if err := lifecycle.RemoveCloudSnapshotCatalogEntryContext(
 					ctx, m.cfg.SnapshotDir, epochName,
 					m.destinationRegistry, cloudDest,
+					manifestOpts...,
 				); err != nil {
 					m.logger.Warn(
 						"cloud snapshot was deleted but its catalog could not be reconciled, keeping local copy",

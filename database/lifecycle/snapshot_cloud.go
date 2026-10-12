@@ -86,9 +86,22 @@ func MirrorToCloud(
 	registry *DestinationRegistry,
 	dir string,
 	cloudDest string,
+	opts ...ManifestOption,
 ) error {
 	if cloudDest == "" {
 		return nil
+	}
+	if err := requireManifestKey(opts); err != nil {
+		return err
+	}
+	manifest, err := ReadManifest(dir)
+	if err != nil {
+		return fmt.Errorf("read snapshot before cloud mirror: %w", err)
+	}
+	if manifest.Authentication != "" {
+		if err := manifest.Authenticate(opts...); err != nil {
+			return fmt.Errorf("authenticate snapshot before cloud mirror: %w", err)
+		}
 	}
 	snapshotCloudURI := JoinCloudURI(cloudDest, filepath.Base(dir))
 	markerValue, err := cloudDestinationIdentity(snapshotCloudURI)
@@ -103,6 +116,11 @@ func MirrorToCloud(
 		)
 	}
 	defer closeCloudDestination(dest)
+	if manifest.Authentication == "" {
+		if err := authenticateLegacySnapshot(ctx, dir, manifest, opts...); err != nil {
+			return fmt.Errorf("authenticate legacy snapshot before cloud mirror: %w", err)
+		}
+	}
 	if err := dest.UploadDir(ctx, dir); err != nil {
 		return fmt.Errorf(
 			"upload to %q failed: %w",
@@ -110,7 +128,7 @@ func MirrorToCloud(
 			sanitizeCloudError(snapshotCloudURI, err),
 		)
 	}
-	manifest, err := ReadManifest(dir)
+	manifest, err = ReadManifest(dir, opts...)
 	if err != nil {
 		return fmt.Errorf("read mirrored snapshot manifest: %w", err)
 	}
@@ -119,9 +137,11 @@ func MirrorToCloud(
 		filepath.Dir(dir),
 		SnapshotEntry{ID: filepath.Base(dir), Manifest: manifest},
 		cloudDest,
+		opts...,
 	); err != nil {
 		if repairErr := RepairSnapshotCatalogContext(
 			context.WithoutCancel(ctx), filepath.Dir(dir), registry, cloudDest,
+			opts...,
 		); repairErr != nil {
 			return fmt.Errorf(
 				"%w: %w", ErrSnapshotCatalogUpdate,
@@ -138,6 +158,42 @@ func MirrorToCloud(
 		)
 	}
 	return nil
+}
+
+// authenticateLegacySnapshot adds the current trust root to a local snapshot
+// written before manifest authentication and payload digests were required.
+// The manifest checksum and declared sizes are checked before deriving any
+// missing digests, so an incomplete or corrupted snapshot is never mirrored.
+func authenticateLegacySnapshot(
+	ctx context.Context,
+	dir string,
+	manifest Manifest,
+	opts ...ManifestOption,
+) error {
+	if err := manifest.verifyPayloads(ctx, dir, false); err != nil {
+		return err
+	}
+	for _, file := range manifest.payloadFiles() {
+		if file.sha256 != "" {
+			continue
+		}
+		digest, size, err := hashFileContext(ctx, filepath.Join(dir, file.name))
+		if err != nil {
+			return fmt.Errorf("hash legacy snapshot payload %q: %w", file.name, err)
+		}
+		if size != file.size {
+			return fmt.Errorf(
+				"%w: %s is %d bytes, manifest declares %d",
+				ErrSnapshotPayloadMismatch, file.name, size, file.size,
+			)
+		}
+		if file.name == BlobBackupFileName {
+			manifest.BlobSHA256 = digest
+		} else {
+			manifest.MetadataSHA256 = digest
+		}
+	}
+	return WriteManifest(dir, manifest, opts...)
 }
 
 // SnapshotToCloud calls Snapshot to produce the local copy at dir exactly
@@ -164,6 +220,8 @@ func MirrorToCloud(
 //
 // cloudDest == "" skips the upload — existing local-only callers are
 // unaffected, and registry may be nil in that case.
+// A recognized cloud destination requires WithManifestKey; the request is
+// rejected before the local snapshot is written when the key is absent.
 //
 // If the upload fails, the local snapshot is still valid and left in
 // place, but this still returns an error: the operator asked for both
@@ -184,13 +242,17 @@ func SnapshotToCloud(
 	opts ...ManifestOption,
 ) (Manifest, error) {
 	if cloudDest != "" {
-		opts = append(opts, withSnapshotCatalogRepair(
+		opts = append(opts, withSnapshotCatalogReconcile(
 			func(ctx context.Context, baseDir string) error {
-				return RepairSnapshotCatalogContext(
-					ctx, baseDir, registry, cloudDest,
+				_, err := ReconcileCloudSnapshotCatalogContext(
+					ctx, baseDir, registry, cloudDest, opts...,
 				)
+				return err
 			},
 		))
+		if err := requireManifestKey(opts); err != nil {
+			return Manifest{}, err
+		}
 	}
 	manifest, err := Snapshot(
 		ctx, db, dir, trigger, dingoVersion, blobPluginName, metadataPluginName,
@@ -215,7 +277,7 @@ func SnapshotToCloud(
 			)
 		}
 	}
-	if err := MirrorToCloud(ctx, registry, dir, cloudDest); err != nil {
+	if err := MirrorToCloud(ctx, registry, dir, cloudDest, opts...); err != nil {
 		return manifest, fmt.Errorf(
 			"snapshot written locally to %q, but %w", dir, err,
 		)

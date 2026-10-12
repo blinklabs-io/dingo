@@ -247,7 +247,7 @@ INSERT INTO auth_committee_hot (
 	// fails (TestCaptureEpochBoundarySnapshotStakeHookFailureDeferred), so
 	// this is still a realistic, supported configuration -- not a
 	// fixture-only shortcut.
-	snapshotMgr := snapshot.NewManager(db, event.NewEventBus(nil, nil), nil)
+	snapshotMgr := snapshot.NewManager(db, newTestEventBus(t, nil), nil)
 	ls.SetEpochBoundarySnapshotHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
 			return snapshotMgr.CaptureEpochBoundarySnapshot(

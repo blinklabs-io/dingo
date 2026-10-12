@@ -30,6 +30,8 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
+var catalogTestTrustKey = []byte("catalog-test-trust-root-012345")
+
 type catalogRepairDestination struct {
 	dir string
 }
@@ -41,10 +43,10 @@ type catalogScriptedLister struct {
 }
 
 func (*catalogScriptedLister) UploadDir(context.Context, string) error { return nil }
-func (*catalogScriptedLister) DownloadDir(context.Context, string) error {
+func (*catalogScriptedLister) DownloadFiles(context.Context, string, []DownloadFile) error {
 	return nil
 }
-func (d *catalogScriptedLister) ListSnapshots(context.Context) ([]SnapshotEntry, error) {
+func (d *catalogScriptedLister) ListSnapshots(context.Context, ...ManifestOption) ([]SnapshotEntry, error) {
 	return d.entries, d.err
 }
 func (d *catalogScriptedLister) ListSnapshotCatalog(
@@ -58,7 +60,7 @@ func (d *catalogScriptedLister) ListSnapshotCatalog(
 type catalogUnsupportedDestination struct{}
 
 func (*catalogUnsupportedDestination) UploadDir(context.Context, string) error { return nil }
-func (*catalogUnsupportedDestination) DownloadDir(context.Context, string) error {
+func (*catalogUnsupportedDestination) DownloadFiles(context.Context, string, []DownloadFile) error {
 	return nil
 }
 
@@ -69,10 +71,10 @@ type blockingCatalogLister struct {
 }
 
 func (*blockingCatalogLister) UploadDir(context.Context, string) error { return nil }
-func (*blockingCatalogLister) DownloadDir(context.Context, string) error {
+func (*blockingCatalogLister) DownloadFiles(context.Context, string, []DownloadFile) error {
 	return nil
 }
-func (d *blockingCatalogLister) ListSnapshots(ctx context.Context) ([]SnapshotEntry, error) {
+func (d *blockingCatalogLister) ListSnapshots(ctx context.Context, _ ...ManifestOption) ([]SnapshotEntry, error) {
 	entries := append([]SnapshotEntry(nil), d.entries...)
 	close(d.captured)
 	select {
@@ -112,11 +114,11 @@ func (d *catalogRepairDestination) UploadDir(_ context.Context, localDir string)
 	return nil
 }
 
-func (*catalogRepairDestination) DownloadDir(context.Context, string) error {
+func (*catalogRepairDestination) DownloadFiles(context.Context, string, []DownloadFile) error {
 	return nil
 }
 
-func (d *catalogRepairDestination) ListSnapshots(context.Context) ([]SnapshotEntry, error) {
+func (d *catalogRepairDestination) ListSnapshots(context.Context, ...ManifestOption) ([]SnapshotEntry, error) {
 	return ListSnapshots(d.dir)
 }
 func (d *catalogRepairDestination) ListSnapshotCatalog(
@@ -425,7 +427,7 @@ func TestEnsureSnapshotCatalogRemovesStaleTargetSidecars(t *testing.T) {
 	require.Nil(t, next)
 }
 
-func TestWriteManifestReportsIncompleteCatalogRepair(t *testing.T) {
+func TestWriteManifestAcceptsIncompleteCatalogRepair(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
 	brokenDir := filepath.Join(base, "broken")
@@ -440,13 +442,34 @@ func TestWriteManifestReportsIncompleteCatalogRepair(t *testing.T) {
 		snapshotCatalogPath(base), []byte("not a sqlite database"), 0o600,
 	))
 
-	err := writeManifest(t.Context(), dir, Manifest{
+	require.NoError(t, writeManifest(t.Context(), dir, Manifest{
 		CreatedAt: time.Unix(1_700_000_000, 0).UTC(),
-	})
-	require.ErrorIs(t, err, ErrSnapshotCatalogUpdate)
-	require.ErrorIs(t, err, ErrSnapshotCatalogIncomplete)
+	}))
 	_, readErr := ReadManifest(dir)
 	require.NoError(t, readErr)
+	entries, _, listErr := ListSnapshotPage(base, 10, nil)
+	require.NoError(t, listErr)
+	require.Len(t, entries, 1)
+	require.Equal(t, "complete", entries[0].ID)
+}
+
+func TestWriteManifestRepairsRebuildableCatalogUpdateFailure(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	dir := filepath.Join(base, "complete")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, EnsureSnapshotCatalog(base))
+	require.NoError(t, os.WriteFile(
+		snapshotCatalogPath(base), []byte("not a sqlite database"), 0o600,
+	))
+	manifest := Manifest{CreatedAt: time.Unix(1_700_000_000, 0).UTC()}
+
+	require.NoError(t, writeManifest(t.Context(), dir, manifest))
+	entries, next, err := ListSnapshotPage(base, 10, nil)
+	require.NoError(t, err)
+	require.Nil(t, next)
+	require.Len(t, entries, 1)
+	require.Equal(t, "complete", entries[0].ID)
 }
 
 func TestSnapshotCatalogOperationalErrorsAreNotRebuildable(t *testing.T) {
@@ -601,8 +624,8 @@ func TestCloudCatalogMutationFailureRepairsFromDurableSource(t *testing.T) {
 	require.NoError(t, os.Mkdir(snapshotDir, 0o755))
 	require.NoError(t, WriteManifest(snapshotDir, Manifest{
 		CreatedAt: time.Unix(10, 0).UTC(), Trigger: TriggerManual,
-	}))
-	require.NoError(t, EnsureSnapshotCatalog(base))
+	}, WithManifestKey(catalogTestTrustKey)))
+	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
 
 	cloudRoot := t.TempDir()
 	registry := NewDestinationRegistry()
@@ -617,6 +640,7 @@ func TestCloudCatalogMutationFailureRepairsFromDurableSource(t *testing.T) {
 	))
 	require.NoError(t, MirrorToCloud(
 		t.Context(), registry, snapshotDir, cloudDest,
+		WithManifestKey(catalogTestTrustKey),
 	))
 	require.NoError(t, RemoveSnapshotContext(t.Context(), snapshotDir))
 	entries, _, err := ListAvailableSnapshotPageContext(
@@ -636,6 +660,7 @@ func TestCloudCatalogMutationFailureRepairsFromDurableSource(t *testing.T) {
 	))
 	require.NoError(t, RemoveCloudSnapshotCatalogEntryContext(
 		t.Context(), base, "snapshot-one", registry, cloudDest,
+		WithManifestKey(catalogTestTrustKey),
 	))
 	entries, _, err = ListAvailableSnapshotPageContext(
 		t.Context(), base, cloudDest, 10, nil,
@@ -651,8 +676,8 @@ func TestMirrorMarkerWaitsForCatalogRepair(t *testing.T) {
 	require.NoError(t, os.Mkdir(snapshotDir, 0o755))
 	require.NoError(t, WriteManifest(snapshotDir, Manifest{
 		CreatedAt: time.Unix(10, 0).UTC(), Trigger: TriggerManual,
-	}))
-	require.NoError(t, EnsureSnapshotCatalog(base))
+	}, WithManifestKey(catalogTestTrustKey)))
+	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
 	require.NoError(t, os.WriteFile(
 		snapshotCatalogPath(base), []byte("not a sqlite database"), 0o600,
 	))
@@ -664,6 +689,7 @@ func TestMirrorMarkerWaitsForCatalogRepair(t *testing.T) {
 	err := MirrorToCloud(
 		t.Context(), registry, snapshotDir,
 		"markerrepair://user:secret@bucket/snapshots?token=private#fragment",
+		WithManifestKey(catalogTestTrustKey),
 	)
 	require.ErrorIs(t, err, ErrSnapshotCatalogUpdate)
 	require.ErrorIs(t, err, providerErr)
@@ -683,7 +709,7 @@ func TestSnapshotCloudRepairRepopulatesCloudRowsAfterTotalCatalogCorruption(
 	require.NoError(t, os.MkdirAll(cloudOnlyDir, 0o755))
 	require.NoError(t, WriteManifest(cloudOnlyDir, Manifest{
 		CreatedAt: time.Unix(10, 0).UTC(), Trigger: TriggerManual,
-	}))
+	}, WithManifestKey(catalogTestTrustKey)))
 
 	registry := NewDestinationRegistry()
 	registry.Register("catalogrepairwrite", func(uri *url.URL) (CloudDestination, error) {
@@ -692,9 +718,10 @@ func TestSnapshotCloudRepairRepopulatesCloudRowsAfterTotalCatalogCorruption(
 		)}, nil
 	})
 	const cloudDest = "catalogrepairwrite://bucket/snapshots"
-	require.NoError(t, EnsureSnapshotCatalog(base))
+	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
 	require.NoError(t, RepairSnapshotCatalogContext(
 		t.Context(), base, registry, cloudDest,
+		WithManifestKey(catalogTestTrustKey),
 	))
 	require.NoError(t, os.WriteFile(
 		snapshotCatalogPath(base), []byte("not a sqlite database"), 0o600,
@@ -705,6 +732,7 @@ func TestSnapshotCloudRepairRepopulatesCloudRowsAfterTotalCatalogCorruption(
 	_, err := SnapshotToCloud(
 		t.Context(), registry, db, localDir,
 		TriggerManual, "test", "badger", "sqlite", cloudDest, "", "",
+		WithManifestKey(catalogTestTrustKey),
 	)
 	require.NoError(t, err)
 
@@ -768,8 +796,8 @@ func TestAvailableCatalogExposesOnlyConfiguredCloudSource(t *testing.T) {
 	manifestDir := t.TempDir()
 	require.NoError(t, WriteManifest(manifestDir, Manifest{
 		CreatedAt: time.Unix(10, 0).UTC(), Trigger: TriggerManual,
-	}))
-	manifest, err := ReadManifest(manifestDir)
+	}, WithManifestKey(catalogTestTrustKey)))
+	manifest, err := ReadManifest(manifestDir, WithManifestKey(catalogTestTrustKey))
 	require.NoError(t, err)
 	const oldDest = "s3://old-bucket/snapshots"
 	require.NoError(t, RebuildCloudSnapshotCatalogContext(
@@ -801,8 +829,8 @@ func TestCloudCatalogPersistsOnlyDigestAndManifest(t *testing.T) {
 	manifestDir := t.TempDir()
 	require.NoError(t, WriteManifest(manifestDir, Manifest{
 		CreatedAt: time.Unix(10, 0).UTC(), Trigger: TriggerManual,
-	}))
-	manifest, err := ReadManifest(manifestDir)
+	}, WithManifestKey(catalogTestTrustKey)))
+	manifest, err := ReadManifest(manifestDir, WithManifestKey(catalogTestTrustKey))
 	require.NoError(t, err)
 	const cloudDest = "s3://user:secret@bucket/snapshots?token=private#option"
 	require.NoError(t, RebuildCloudSnapshotCatalogContext(
@@ -860,8 +888,8 @@ func TestRepairSnapshotCatalogPreservesPartialErrorsWithoutPublishingRows(
 	manifestDir := t.TempDir()
 	require.NoError(t, WriteManifest(manifestDir, Manifest{
 		CreatedAt: time.Unix(10, 0).UTC(), Trigger: TriggerManual,
-	}))
-	manifest, err := ReadManifest(manifestDir)
+	}, WithManifestKey(catalogTestTrustKey)))
+	manifest, err := ReadManifest(manifestDir, WithManifestKey(catalogTestTrustKey))
 	require.NoError(t, err)
 
 	registry := NewDestinationRegistry()
@@ -873,7 +901,9 @@ func TestRepairSnapshotCatalogPreservesPartialErrorsWithoutPublishingRows(
 		}, nil
 	})
 	const cloudDest = "partialcatalog://bucket/snapshots"
-	err = RepairSnapshotCatalogContext(t.Context(), base, registry, cloudDest)
+	err = RepairSnapshotCatalogContext(
+		t.Context(), base, registry, cloudDest, WithManifestKey(catalogTestTrustKey),
+	)
 	require.ErrorIs(t, err, ErrSnapshotCatalogIncomplete)
 	require.ErrorIs(t, err, providerErr)
 	entries, _, listErr := ListAvailableSnapshotPageContext(
@@ -888,6 +918,7 @@ func TestRepairSnapshotCatalogPreservesPartialErrorsWithoutPublishingRows(
 	const unsupportedDest = "unsupportedcatalog://bucket/snapshots"
 	err = RepairSnapshotCatalogContext(
 		t.Context(), base, registry, unsupportedDest,
+		WithManifestKey(catalogTestTrustKey),
 	)
 	require.ErrorIs(t, err, ErrSnapshotCatalogIncomplete)
 	entries, _, listErr = ListAvailableSnapshotPageContext(
@@ -900,12 +931,12 @@ func TestRepairSnapshotCatalogPreservesPartialErrorsWithoutPublishingRows(
 func TestRepairSnapshotCatalogTotalListFailureRetainsStaleRows(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	require.NoError(t, EnsureSnapshotCatalog(base))
+	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
 	manifestDir := t.TempDir()
 	require.NoError(t, WriteManifest(manifestDir, Manifest{
 		CreatedAt: time.Unix(10, 0).UTC(), Trigger: TriggerManual,
-	}))
-	manifest, err := ReadManifest(manifestDir)
+	}, WithManifestKey(catalogTestTrustKey)))
+	manifest, err := ReadManifest(manifestDir, WithManifestKey(catalogTestTrustKey))
 	require.NoError(t, err)
 	const cloudDest = "failedcatalog://bucket/snapshots"
 	require.NoError(t, RebuildCloudSnapshotCatalogContext(
@@ -918,7 +949,9 @@ func TestRepairSnapshotCatalogTotalListFailureRetainsStaleRows(t *testing.T) {
 		return &catalogScriptedLister{err: providerErr}, nil
 	})
 
-	err = RepairSnapshotCatalogContext(t.Context(), base, registry, cloudDest)
+	err = RepairSnapshotCatalogContext(
+		t.Context(), base, registry, cloudDest, WithManifestKey(catalogTestTrustKey),
+	)
 	require.ErrorIs(t, err, providerErr)
 	entries, _, listErr := ListAvailableSnapshotPageContext(
 		t.Context(), base, cloudDest, 10, nil,
@@ -931,7 +964,7 @@ func TestRepairSnapshotCatalogTotalListFailureRetainsStaleRows(t *testing.T) {
 func TestCloudCatalogRecoversAfterStartupConstructorFailure(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	require.NoError(t, EnsureSnapshotCatalog(base))
+	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
 	cloudRoot := t.TempDir()
 	failConstruction := true
 	registry := NewDestinationRegistry()
@@ -947,6 +980,7 @@ func TestCloudCatalogRecoversAfterStartupConstructorFailure(t *testing.T) {
 	const cloudDest = "constructorrecovery://bucket/snapshots"
 	current, err := ReconcileCloudSnapshotCatalogContext(
 		t.Context(), base, registry, cloudDest,
+		WithManifestKey(catalogTestTrustKey),
 	)
 	require.ErrorContains(t, err, "provider initialization failed")
 	require.False(t, current)
@@ -955,9 +989,10 @@ func TestCloudCatalogRecoversAfterStartupConstructorFailure(t *testing.T) {
 	require.NoError(t, os.Mkdir(snapshotDir, 0o755))
 	require.NoError(t, WriteManifest(snapshotDir, Manifest{
 		CreatedAt: time.Unix(10, 0).UTC(), Trigger: TriggerManual,
-	}))
+	}, WithManifestKey(catalogTestTrustKey)))
 	require.NoError(t, MirrorToCloud(
 		t.Context(), registry, snapshotDir, cloudDest,
+		WithManifestKey(catalogTestTrustKey),
 	))
 	require.NoError(t, RemoveSnapshotContext(t.Context(), snapshotDir))
 	entries, _, err := ListAvailableSnapshotPageContext(
@@ -971,13 +1006,13 @@ func TestCloudCatalogRecoversAfterStartupConstructorFailure(t *testing.T) {
 
 func TestCloudReconciliationSerializesConcurrentIncrementalMirror(t *testing.T) {
 	base := t.TempDir()
-	require.NoError(t, EnsureSnapshotCatalog(base))
+	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
 	manifestAt := func(second int64) Manifest {
 		dir := t.TempDir()
 		require.NoError(t, WriteManifest(dir, Manifest{
 			CreatedAt: time.Unix(second, 0).UTC(), Trigger: TriggerManual,
-		}))
-		manifest, err := ReadManifest(dir)
+		}, WithManifestKey(catalogTestTrustKey)))
+		manifest, err := ReadManifest(dir, WithManifestKey(catalogTestTrustKey))
 		require.NoError(t, err)
 		return manifest
 	}
@@ -995,6 +1030,7 @@ func TestCloudReconciliationSerializesConcurrentIncrementalMirror(t *testing.T) 
 	go func() {
 		_, err := ReconcileCloudSnapshotCatalogContext(
 			t.Context(), base, registry, cloudDest,
+			WithManifestKey(catalogTestTrustKey),
 		)
 		reconcileDone <- err
 	}()
@@ -1013,6 +1049,7 @@ func TestCloudReconciliationSerializesConcurrentIncrementalMirror(t *testing.T) 
 		updateDone <- updateCloudSnapshotCatalogIfPresent(
 			t.Context(), base,
 			SnapshotEntry{ID: "mirrored", Manifest: mirroredManifest}, cloudDest,
+			WithManifestKey(catalogTestTrustKey),
 		)
 	}()
 	close(provider.release)
@@ -1032,7 +1069,7 @@ func TestCloudReconciliationSerializesConcurrentIncrementalMirror(t *testing.T) 
 
 func TestCloudReconciliationConstructsProviderBeforeGate(t *testing.T) {
 	base := t.TempDir()
-	require.NoError(t, EnsureSnapshotCatalog(base))
+	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
 	registry := NewDestinationRegistry()
 	registry.Register("constructorgate", func(*url.URL) (CloudDestination, error) {
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
@@ -1045,6 +1082,7 @@ func TestCloudReconciliationConstructsProviderBeforeGate(t *testing.T) {
 	})
 	current, err := ReconcileCloudSnapshotCatalogContext(
 		t.Context(), base, registry, "constructorgate://bucket/snapshots",
+		WithManifestKey(catalogTestTrustKey),
 	)
 	require.NoError(t, err)
 	require.True(t, current)
@@ -1053,13 +1091,13 @@ func TestCloudReconciliationConstructsProviderBeforeGate(t *testing.T) {
 func TestCloudReconciliationDoesNotPublishTruncatedScan(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	require.NoError(t, EnsureSnapshotCatalog(base))
+	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
 	manifestAt := func(second int64) Manifest {
 		dir := t.TempDir()
 		require.NoError(t, WriteManifest(dir, Manifest{
 			CreatedAt: time.Unix(second, 0).UTC(), Trigger: TriggerManual,
-		}))
-		manifest, err := ReadManifest(dir)
+		}, WithManifestKey(catalogTestTrustKey)))
+		manifest, err := ReadManifest(dir, WithManifestKey(catalogTestTrustKey))
 		require.NoError(t, err)
 		return manifest
 	}
@@ -1081,6 +1119,7 @@ func TestCloudReconciliationDoesNotPublishTruncatedScan(t *testing.T) {
 
 	current, err := ReconcileCloudSnapshotCatalogContext(
 		t.Context(), base, registry, cloudDest,
+		WithManifestKey(catalogTestTrustKey),
 	)
 	require.ErrorIs(t, err, ErrSnapshotCatalogScanLimit)
 	require.False(t, current)
@@ -1091,6 +1130,47 @@ func TestCloudReconciliationDoesNotPublishTruncatedScan(t *testing.T) {
 	require.Positive(t, lister.budget.MaxEntries)
 	require.Positive(t, lister.budget.MaxProblems)
 
+	entries, _, listErr := ListAvailableSnapshotPageContext(
+		t.Context(), base, cloudDest, 10, nil,
+	)
+	require.NoError(t, listErr)
+	require.Len(t, entries, 1)
+	require.Equal(t, "previous", entries[0].Entry.ID)
+}
+
+func TestCloudReconciliationRejectsUnauthenticatedManifest(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	require.NoError(t, EnsureSnapshotCatalog(
+		base, WithManifestKey(catalogTestTrustKey),
+	))
+	manifestAt := func(key []byte, second int64) Manifest {
+		dir := t.TempDir()
+		require.NoError(t, WriteManifest(dir, Manifest{
+			CreatedAt: time.Unix(second, 0).UTC(), Trigger: TriggerManual,
+		}, WithManifestKey(key)))
+		manifest, err := ReadManifest(dir, WithManifestKey(key))
+		require.NoError(t, err)
+		return manifest
+	}
+	const cloudDest = "authenticatedcatalog://bucket/snapshots"
+	require.NoError(t, RebuildCloudSnapshotCatalogContext(
+		t.Context(), base, cloudDest,
+		[]SnapshotEntry{{ID: "previous", Manifest: manifestAt(catalogTestTrustKey, 1)}},
+	))
+	registry := NewDestinationRegistry()
+	registry.Register("authenticatedcatalog", func(*url.URL) (CloudDestination, error) {
+		return &catalogScriptedLister{entries: []SnapshotEntry{{
+			ID: "forged", Manifest: manifestAt([]byte("different-catalog-trust-root"), 2),
+		}}}, nil
+	})
+
+	current, err := ReconcileCloudSnapshotCatalogContext(
+		t.Context(), base, registry, cloudDest,
+		WithManifestKey(catalogTestTrustKey),
+	)
+	require.ErrorIs(t, err, ErrManifestUnauthenticated)
+	require.False(t, current)
 	entries, _, listErr := ListAvailableSnapshotPageContext(
 		t.Context(), base, cloudDest, 10, nil,
 	)

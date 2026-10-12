@@ -52,7 +52,7 @@ func newTestGCSCatalogPageLister(
 // claim live GCS or gRPC framing coverage.
 func TestGCSManifestByteLimits(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, WriteManifest(dir, Manifest{Network: "preview"}))
+	require.NoError(t, WriteManifest(dir, Manifest{Network: "preview"}, WithManifestKey([]byte("trusted-key"))))
 	data, err := os.ReadFile(filepath.Join(dir, ManifestFileName))
 	require.NoError(t, err)
 	for _, oversized := range []bool{false, true} {
@@ -70,7 +70,7 @@ func TestGCSManifestByteLimits(t *testing.T) {
 			if oversized {
 				limit = 3
 			}
-			manifest, err := d.FetchManifestWithOptions(context.Background(), WithManifestMaxBytes(limit))
+			manifest, err := d.FetchManifestWithOptions(context.Background(), WithManifestMaxBytes(limit), WithManifestKey([]byte("trusted-key")))
 			if oversized {
 				require.ErrorIs(t, err, ErrManifestTooLarge)
 				require.NotErrorIs(t, err, ErrCloudSnapshotNotFound)
@@ -79,6 +79,9 @@ func TestGCSManifestByteLimits(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, "preview", manifest.Network)
 				require.Zero(t, body.Len())
+				body = bytes.NewReader(data)
+				_, err = d.FetchManifestWithOptions(context.Background(), WithManifestKey([]byte("wrong-key")))
+				require.ErrorIs(t, err, ErrManifestUnauthenticated)
 			}
 		})
 	}

@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -63,6 +64,9 @@ func newBackfillHarness(
 	h := &backfillHarness{logs: &bytes.Buffer{}}
 	idx, err := New(Config{
 		Metadata: store,
+		SlotTimer: timestampFunc(func(slot uint64) (time.Time, error) {
+			return time.UnixMilli(int64(slot)), nil
+		}),
 		Logger: slog.New(
 			slog.NewTextHandler(
 				h.logs,
@@ -245,6 +249,9 @@ func TestBackfillInProgressGaugeSetDuringScan(t *testing.T) {
 	var during float64
 	idx, err := New(Config{
 		Metadata:      store,
+		SlotTimer: timestampFunc(func(slot uint64) (time.Time, error) {
+			return time.UnixMilli(int64(slot)), nil
+		}),
 		Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		PromRegistry:  reg,
 		LedgerTipSlot: func() (uint64, error) { return 250, nil },

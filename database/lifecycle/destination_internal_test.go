@@ -15,8 +15,10 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -40,10 +42,10 @@ func (e *credentialBearingProviderError) Unwrap() error { return e.cause }
 func (d credentialEchoDestination) UploadDir(context.Context, string) error {
 	return errors.New(d.message)
 }
-func (d credentialEchoDestination) DownloadDir(context.Context, string) error {
+func (d credentialEchoDestination) DownloadFiles(context.Context, string, []DownloadFile) error {
 	return errors.New(d.message)
 }
-func (d credentialEchoDestination) ListSnapshots(context.Context) ([]SnapshotEntry, error) {
+func (d credentialEchoDestination) ListSnapshots(context.Context, ...ManifestOption) ([]SnapshotEntry, error) {
 	return nil, errors.New(d.message)
 }
 func (d credentialEchoDestination) FetchManifest(context.Context) (Manifest, error) {
@@ -94,7 +96,10 @@ func TestCloudDestinationDisplayAndErrorsHideCredentials(t *testing.T) {
 	assertSafe(err)
 	_, err = DeleteCloudSnapshot(t.Context(), registry, raw)
 	assertSafe(err)
-	_, cleanup, err := downloadCloudSnapshot(t.Context(), registry, raw)
+	_, cleanup, err := downloadCloudFiles(
+		t.Context(), registry, raw, "",
+		[]DownloadFile{{Name: ManifestFileName, MaxBytes: MaxManifestBytes}},
+	)
 	if cleanup != nil {
 		cleanup()
 	}
@@ -260,7 +265,7 @@ func TestFetchCloudSnapshotEntryRejectsUnsafeIDBeforeFetch(t *testing.T) {
 // list/download/delete prefix matching compares against that same Path
 // left uncleaned — so a URI with repeated slashes or "."/".." segments
 // would make UploadDir write under one (cleaned) key while
-// ListSnapshots/DownloadDir/Delete search under a different, uncleaned
+// ListSnapshots/DownloadFiles/Delete search under a different, uncleaned
 // prefix, even though both derive from the exact same configured
 // destination string. ParseCloudDestination must canonicalize u.Path
 // before ever handing it to a registered factory.
@@ -305,9 +310,10 @@ func (*fakeInternalCloudDestination) UploadDir(
 	return nil
 }
 
-func (*fakeInternalCloudDestination) DownloadDir(
+func (*fakeInternalCloudDestination) DownloadFiles(
 	context.Context,
 	string,
+	[]DownloadFile,
 ) error {
 	return nil
 }
@@ -329,4 +335,59 @@ func TestDestinationRegistryRegisterNilReceiverIsNoOp(t *testing.T) {
 			return nil, nil
 		})
 	})
+}
+
+type boundaryFailureReader struct {
+	data    *bytes.Reader
+	failure error
+}
+
+func (r boundaryFailureReader) Read(p []byte) (int, error) {
+	if r.data.Len() == 0 {
+		return 0, r.failure
+	}
+	return r.data.Read(p)
+}
+
+func TestCopyBoundedPropagatesBoundaryReadFailure(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("transfer failed")
+	err := copyBounded(io.Discard, boundaryFailureReader{bytes.NewReader([]byte("abc")), failure}, 3, "payload")
+	require.ErrorIs(t, err, failure)
+}
+
+func TestWriteBoundedFilePreservesExistingOutput(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "payload")
+	require.NoError(t, os.WriteFile(path, []byte("original"), 0o600))
+	require.Error(t, writeBoundedFile(path, bytes.NewReader([]byte("oversized")), DownloadFile{Name: "payload", MaxBytes: 1}))
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "original", string(got))
+}
+
+func TestFetchLocalPayloadsUsesIndependentBoundedCopies(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, name := range []string{BlobBackupFileName, MetadataBackupFileName} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("original"), 0o600))
+	}
+	copied, cleanup, err := fetchPayloads(context.Background(), nil, dir, t.TempDir(), Manifest{BlobBytes: 8, MetadataBytes: 8})
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.NotEqual(t, dir, copied)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, BlobBackupFileName), []byte("replaced"), 0o600))
+	got, err := os.ReadFile(filepath.Join(copied, BlobBackupFileName))
+	require.NoError(t, err)
+	require.Equal(t, "original", string(got))
+}
+
+func TestHashFileContextRejectsCancellation(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "payload")
+	require.NoError(t, os.WriteFile(path, []byte("payload"), 0o600))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := hashFileContext(ctx, path)
+	require.ErrorIs(t, err, context.Canceled)
 }

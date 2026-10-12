@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -32,18 +31,19 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	badger "github.com/dgraph-io/badger/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -90,6 +90,63 @@ func leiosApplyTestSpendingTx(
 	return leiosApplyTestTxFromBody(t, bodyCbor)
 }
 
+func leiosApplyTestSeedKeyUtxo(
+	t *testing.T,
+	db *database.Database,
+	seed byte,
+	amount uint64,
+) []byte {
+	t.Helper()
+	txID := bytes.Repeat([]byte{seed}, lcommon.Blake2b256Size)
+	address := append([]byte{0x60}, pathSignerHash()...)
+	outputCbor, err := cbor.Encode(map[uint]any{
+		0: address,
+		1: amount,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+		if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
+			TxId:       txID,
+			OutputIdx:  0,
+			PaymentKey: pathSignerHash(),
+			AddedSlot:  1,
+			Amount:     types.Uint64(amount),
+		}); err != nil {
+			return err
+		}
+		return db.Blob().SetUtxo(txn.Blob(), txID, 0, outputCbor)
+	}))
+	return txID
+}
+
+func leiosApplyTestSignedSpendingTx(
+	t *testing.T,
+	seed byte,
+	inTxID []byte,
+	inIdx uint64,
+	inAmount uint64,
+) (cbor.RawMessage, lcommon.Transaction) {
+	t.Helper()
+	fee := uint64(200_000) + uint64(seed)
+	require.Greater(t, inAmount, fee)
+	address := append([]byte{0x60}, pathSignerHash()...)
+	bodyCbor, err := cbor.Encode(map[uint]any{
+		0: cbor.Tag{Number: 258, Content: []any{[]any{inTxID, inIdx}}},
+		1: []any{map[uint]any{0: address, 1: inAmount - fee}},
+		2: fee,
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(bodyCbor),
+		pathSignedWitnesses(pathSigner(), lcommon.Blake2b256Hash(bodyCbor)),
+		nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	return cbor.RawMessage(txCbor), tx
+}
+
 func leiosApplyTestTxFromBody(
 	t *testing.T,
 	bodyCbor []byte,
@@ -98,7 +155,6 @@ func leiosApplyTestTxFromBody(
 	txCbor, err := cbor.Encode([]any{
 		cbor.RawMessage(bodyCbor),
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
@@ -238,7 +294,7 @@ func TestApplyEndorserBlockHaskellPathToleratesCrossEndorserDoubleConsume(
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
+	enableLeiosApplyInputValidation(ls)
 	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xa1)
 	require.Len(t, producerTx.Produced(), 2)
 	producerHash := producerTx.Hash().Bytes()
@@ -309,58 +365,119 @@ SELECT added_slot FROM utxo WHERE tx_id = ? AND output_idx = 0`,
 	require.Equal(t, secondPoint.Slot, addedSlot)
 }
 
-// The tolerance is scoped to the Musashi closure apply. On the CIP-conformant
-// path (LeiosApplyEndorserBlockTxs true) endorser transactions are applied with
-// ranking-block semantics -- consumed-input recovery stays on and a conflicting
-// consume is a hard error -- so a real double-spend still fails and the
-// endorser block is refused.
-func TestApplyEndorserBlockCIPPathRejectsCrossEndorserDoubleConsume(
-	t *testing.T,
-) {
+func enableLeiosApplyInputValidation(ls *LedgerState) {
+	validateInputs := func(
+		tx lcommon.Transaction,
+		_ uint64,
+		state lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) error {
+		for _, input := range tx.Consumed() {
+			if _, err := state.UtxoById(input); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	ls.currentEra.ValidateTxFunc = validateInputs
+	ls.activeEras[0].ValidateTxFunc = validateInputs
+	ls.publishSnapshotsLocked()
+}
+
+func TestApplyEndorserBlockRejectsSameClosureDoubleConsume(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
+	enableLeiosApplyInputValidation(ls)
 	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xc1)
 	producerHash := producerTx.Hash().Bytes()
-	rawFirst, firstTx := leiosApplyTestSpendingTx(t, 0xd1, producerHash, 0)
-	rawSecond, secondTx := leiosApplyTestSpendingTx(t, 0xd2, producerHash, 0)
+	rawFirst, firstTx := leiosApplyTestSpendingTx(t, 0xc2, producerHash, 0)
+	rawSecond, secondTx := leiosApplyTestSpendingTx(t, 0xc3, producerHash, 0)
 
-	firstPoint := leiosApplyTestRankingPoint(0x22)
 	_, err := leiosApplyTestApplyEndorserBlock(
 		t, ls, db, leiosApplyTestRankingPoint(0x21), 1, 910,
-		leiosApplyTestEbHash(0xc2), rawProducer,
+		leiosApplyTestEbHash(0xc4), rawProducer,
 	)
 	require.NoError(t, err)
 	_, err = leiosApplyTestApplyEndorserBlock(
-		t, ls, db, firstPoint, 2, 911, leiosApplyTestEbHash(0xd3), rawFirst,
+		t, ls, db, leiosApplyTestRankingPoint(0x22), 2, 911,
+		leiosApplyTestEbHash(0xc5), rawFirst, rawSecond,
 	)
-	require.NoError(t, err)
-
-	_, err = leiosApplyTestApplyEndorserBlock(
-		t, ls, db, leiosApplyTestRankingPoint(0x23), 3, 912,
-		leiosApplyTestEbHash(0xd4), rawSecond,
-	)
-	require.ErrorIs(t, err, types.ErrUtxoConflict)
-	var storageErr *leiosEndorserBlockStorageError
-	require.ErrorAs(
-		t,
-		err,
-		&storageErr,
-		"a failure after storage mutation must abort the outer transaction",
-	)
-
-	// The aborted endorser block left no effects: the contested input is still
-	// consumed by the first transaction and the rejected one has no row.
+	require.ErrorIs(t, err, ErrUtxoAlreadyConsumed)
+	require.NotErrorIs(t, err, ErrInvalidLeiosEndorserBlockTransactions)
 	spentBy, deletedSlot := leiosApplyTestUtxoState(t, gdb, producerHash, 0)
-	require.Equal(t, firstTx.Hash().Bytes(), spentBy)
-	require.Equal(t, firstPoint.Slot, deletedSlot)
-	var rows int64
-	require.NoError(t, gdb.QueryRow(`
-SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
-		secondTx.Hash().Bytes(),
-	).Scan(&rows))
-	require.Equal(t, int64(0), rows)
+	require.Empty(t, spentBy)
+	require.Zero(t, deletedSlot)
+	for _, tx := range []lcommon.Transaction{firstTx, secondTx} {
+		stored, getErr := db.GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
+		require.NoError(t, getErr)
+		require.Nil(t, stored)
+	}
+}
+
+func TestLeiosAnnouncementValidationAcceptsPriorClosureConsume(t *testing.T) {
+	t.Parallel()
+
+	ls, db, _ := newLeiosApplyTestLedger(t)
+	enableLeiosApplyInputValidation(ls)
+	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xd1)
+	producerHash := producerTx.Hash().Bytes()
+	rawFirst, _ := leiosApplyTestSpendingTx(t, 0xd2, producerHash, 0)
+	rawSecond, _ := leiosApplyTestSpendingTx(t, 0xd3, producerHash, 0)
+
+	_, err := leiosApplyTestApplyEndorserBlock(
+		t, ls, db, leiosApplyTestRankingPoint(0x31), 1, 920,
+		leiosApplyTestEbHash(0xd4), rawProducer,
+	)
+	require.NoError(t, err)
+	_, err = leiosApplyTestApplyEndorserBlock(
+		t, ls, db, leiosApplyTestRankingPoint(0x32), 2, 921,
+		leiosApplyTestEbHash(0xd5), rawFirst,
+	)
+	require.NoError(t, err)
+
+	parentHash := bytes.Repeat([]byte{0xd6}, lcommon.Blake2b256Size)
+	ls.currentTip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(922, parentHash),
+		BlockNumber: 3,
+	}
+	ls.publishSnapshotsLocked()
+	header := &dijkstra.DijkstraBlockHeader{
+		BabbageBlockHeader: babbage.BabbageBlockHeader{
+			Body: babbage.BabbageBlockHeaderBody{
+				BlockNumber: 4,
+				Slot:        923,
+				PrevHash:    lcommon.NewBlake2b256(parentHash),
+				ProtoVersion: babbage.BabbageProtoVersion{
+					Major: dijkstra.MinProtocolVersionDijkstra,
+				},
+			},
+		},
+	}
+	require.NoError(t, ls.ValidateLeiosEndorserBlockTransactions(
+		t.Context(),
+		header,
+		[][]byte{rawSecond},
+	))
+}
+
+func TestApplyEndorserBlockKeepsProtocolParamFaultRetryable(t *testing.T) {
+	t.Parallel()
+
+	ls, db, _ := newLeiosApplyTestLedger(t)
+	ls.currentEra = eras.DijkstraEraDesc
+	ls.activeEras = []eras.EraDesc{eras.DijkstraEraDesc}
+	ls.currentPParams = &conway.ConwayProtocolParameters{}
+	ls.publishSnapshotsLocked()
+	rawTx, _ := leiosApplyTestProducerTx(t, 0xe1)
+
+	_, err := leiosApplyTestApplyEndorserBlock(
+		t, ls, db, leiosApplyTestRankingPoint(0x41), 1, 930,
+		leiosApplyTestEbHash(0xe2), rawTx,
+	)
+	require.ErrorIs(t, err, eras.ErrIncompatibleProtocolParams)
+	var validationErr *leiosEndorserBlockValidationError
+	require.NotErrorAs(t, err, &validationErr)
 }
 
 // A ranking block's own transactions are applied by a delta with the closure
@@ -373,7 +490,6 @@ func TestRankingBlockDeltaKeepsHardConsumedInputConflict(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
 	rawProducer, producerTx := leiosApplyTestProducerTx(t, 0xe1)
 	producerHash := producerTx.Hash().Bytes()
 	rawClosure, closureTx := leiosApplyTestSpendingTx(t, 0xf1, producerHash, 0)
@@ -491,7 +607,22 @@ func newLeiosApplyTestLedger(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	initializeLeiosApplyTestState(ls)
 	return ls, db, raw
+}
+
+func initializeLeiosApplyTestState(ls *LedgerState) {
+	ls.activeEras = []eras.EraDesc{{Id: dijkstra.EraIdDijkstra}}
+	ls.currentEra = eras.EraDesc{Id: dijkstra.EraIdDijkstra}
+	ls.currentEpoch = models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		SlotLength:    1,
+		LengthInSlots: 20_000,
+		EraId:         dijkstra.EraIdDijkstra,
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.publishSnapshotsLocked()
 }
 
 func leiosApplyTestTx(
@@ -508,7 +639,6 @@ func leiosApplyTestTx(
 	txCbor, err := cbor.Encode([]any{
 		cbor.RawMessage(bodyCbor),
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
@@ -575,7 +705,6 @@ func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
 	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x01)
 
 	const ebSlot = uint64(200)
@@ -612,7 +741,6 @@ func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
 	rawTx1, body1, tx1 := leiosApplyTestTx(t, 0x02)
 	rawTx2, body2, tx2 := leiosApplyTestTx(t, 0x03)
 
@@ -641,11 +769,10 @@ func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, want)
 }
 
-func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
+func TestApplyEndorserBlockDeduplicatesTransactions(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
 	rawTx1, body1, tx1 := leiosApplyTestTx(t, 0x04)
 	rawTx2, _, _ := leiosApplyTestTx(t, 0x05)
 
@@ -695,12 +822,17 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 	require.Equal(t, 0, appliedSameTxnDuplicate)
 	require.Equal(t, 1, appliedSecondUnique)
 	requireLeiosApplyTestTxCount(t, gdb, 2)
+	// The blob is served whole, so it keeps the repeated transaction; only
+	// its ledger effects are recorded once.
 	requireLeiosApplyTestEndorserBlob(
 		t,
 		db,
 		500,
 		leiosApplyTestEbHash(0x82),
-		leiosApplyTestBlob(body1, tx1),
+		append(
+			leiosApplyTestBlob(body1, tx1),
+			leiosApplyTestBlob(body1, tx1)...,
+		),
 	)
 
 	appliedCommittedDuplicate := -1
@@ -731,7 +863,6 @@ func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
 	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x06)
 
 	const ebSlot = uint64(400)
@@ -789,7 +920,6 @@ func leiosApplyTestTxWithOutput(
 	txCbor, err := cbor.Encode([]any{
 		cbor.RawMessage(bodyCbor),
 		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
@@ -809,7 +939,6 @@ func TestApplyEndorserBlockHaskellPathProducesUtxo(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
 	rawTx, tx := leiosApplyTestTxWithOutput(t, 0x6a)
 	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")
 
@@ -843,8 +972,11 @@ SELECT added_slot, deleted_slot FROM utxo WHERE tx_id = ?`,
 	require.Equal(t, uint64(0), utxo.DeletedSlot)
 }
 
-// A directly applied Haskell-conformant block still supports shared-transaction
-// storage when no production pre-stage has populated its blob.
+// The Haskell-conformant path commits the endorser-block blob in its own blob
+// transaction, which the shared batch transaction's snapshot predates. Reading
+// an endorser-produced output back through that batch after the shared block
+// cache has evicted the blob must therefore use a fresh snapshot, which only
+// applyEndorserBlock's separate-commit mark enables.
 func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
 	t *testing.T,
 ) {
@@ -861,10 +993,11 @@ func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	initializeLeiosApplyTestState(ls)
 	rawTx, tx := leiosApplyTestTxWithOutput(t, 0x6c)
 	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")
 
-	txn := db.BlockBatchTransaction(t.Context())
+	txn := db.Transaction(t.Context(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		_, _, err := ls.applyEndorserBlock(
 			t.Context(),
@@ -884,146 +1017,13 @@ func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
 			431,
 			leiosApplyTestEbHash(0x6e),
 			[]byte{0x01},
-			txn,
+			nil,
 		))
 		got, err := db.CborCache().ResolveUtxoCbor(tx.Hash().Bytes(), 0, txn)
 		require.NoError(t, err)
 		require.Equal(t, tx.Produced()[0].Output.Cbor(), got)
 		return nil
 	}))
-	count, oldest, err := db.CountBlocksAndOldestSlot(nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(2), count)
-	require.Equal(t, uint64(430), oldest)
-}
-
-func TestApplyEndorserBlockReusesStagedBlobAtBadgerBudget(t *testing.T) {
-	t.Parallel()
-	ls, db, _ := newLeiosApplyTestLedger(t)
-	const txCount = 64
-	rawTxs := make([]cbor.RawMessage, 0, txCount)
-	for i := range txCount {
-		raw, _ := leiosApplyTestProducerTx(t, byte(i+1))
-		rawTxs = append(rawTxs, raw)
-	}
-	hashBytes := leiosApplyTestEbHash(0xd1)
-	hash := lcommon.NewBlake2b256(hashBytes)
-	parent1 := leiosWaitTestAnnouncingBlock(t, 1, 700, hash)
-	parent2 := leiosWaitTestAnnouncingBlock(t, 3, 701, hash)
-	parent1.BlockHeader.SetCbor([]byte{0x81, 0x01})
-	parent2.BlockHeader.SetCbor([]byte{0x81, 0x02})
-	certifier := func(number, slot uint64, parent *dijkstra.DijkstraBlock) *dijkstra.DijkstraBlock {
-		return &dijkstra.DijkstraBlock{BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{Body: babbage.BabbageBlockHeaderBody{
-				BlockNumber: number, Slot: slot, PrevHash: parent.Hash(),
-			}},
-			LeiosHeaderExtension: []cbor.RawMessage{leiosTestRaw(t, true), {0xf6}},
-		}}
-	}
-	cert1 := certifier(2, 720, parent1)
-	cert2 := certifier(4, 721, parent2)
-	ls.config.EndorserBlockProvider = func(got []byte, slot uint64) ([]cbor.RawMessage, bool) {
-		return rawTxs, bytes.Equal(got, hashBytes) && (slot == 700 || slot == 701)
-	}
-	blocks := []gledger.Block{parent1, cert1, parent2, cert2}
-	require.NoError(t, ls.stageMusashiEndorserBlocks(t.Context(), blocks))
-
-	txs, bodies, err := decodeEndorserTransactions(rawTxs)
-	require.NoError(t, err)
-	want, _, err := buildEndorserBlockBlob(txs, bodies, 700, hash)
-	require.NoError(t, err)
-	read := db.BlobTxn(false)
-	for _, slot := range []uint64{700, 701} {
-		got, metadata, err := read.BlobStore().GetBlock(read.Blob(), slot, hashBytes)
-		require.NoError(t, err)
-		require.Zero(t, metadata.ID)
-		require.Zero(t, metadata.Type)
-		require.Equal(t, want, got)
-	}
-	require.NoError(t, read.Rollback())
-
-	// An exact staged record is reused; mismatched content and a missing
-	// metadata half are repaired under the serialized blob transaction.
-	require.NoError(t, db.SetGenesisCbor(700, hashBytes, []byte{0x01}, nil))
-	partial := db.BlockBlobTxn()
-	require.NoError(t, partial.BlobStore().Delete(
-		partial.Blob(),
-		types.BlockBlobMetadataKey(types.BlockBlobKey(701, hashBytes)),
-	))
-	require.NoError(t, partial.Commit())
-	require.NoError(t, ls.stageMusashiEndorserBlocks(t.Context(), blocks))
-	repaired := db.BlobTxn(false)
-	for _, slot := range []uint64{700, 701} {
-		got, metadata, err := repaired.BlobStore().GetBlock(
-			repaired.Blob(), slot, hashBytes,
-		)
-		require.NoError(t, err)
-		require.Zero(t, metadata.ID)
-		require.Zero(t, metadata.Type)
-		require.Equal(t, want, got)
-	}
-	require.NoError(t, repaired.Rollback())
-
-	first := db.BlockBatchTransaction(t.Context())
-	require.NoError(t, first.Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyStagedEndorserBlock(
-			t.Context(), txn, leiosApplyTestRankingPoint(0xd2), 1,
-			700, hashBytes, rawTxs,
-		)
-		return err
-	}))
-
-	fillBudget := func(txn *database.Txn) {
-		budget, ok := txn.BlobStore().(blob.TxnBudget)
-		require.True(t, ok)
-		remaining, ok := budget.RemainingTxnEntries(txn.Blob(), 33)
-		require.True(t, ok)
-		require.Greater(t, remaining, 1)
-		for i := range remaining - 1 {
-			key := make([]byte, 33)
-			key[0] = 'z'
-			binary.BigEndian.PutUint32(key[1:5], uint32(i)) //nolint:gosec
-			require.NoError(t, txn.BlobStore().Delete(txn.Blob(), key))
-		}
-	}
-	outer := db.BlockBatchTransaction(t.Context())
-	fillBudget(outer)
-	require.NoError(t, outer.Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyStagedEndorserBlock(
-			t.Context(), txn, leiosApplyTestRankingPoint(0xd3), 2,
-			700, hashBytes, rawTxs,
-		)
-		return err
-	}))
-
-	deleted := db.BlockBlobTxn()
-	require.NoError(t, database.BlockDeleteTxn(deleted, models.Block{
-		Slot: 701, Hash: hashBytes,
-	}))
-	require.NoError(t, deleted.Commit())
-	missing := db.BlockBatchTransaction(t.Context())
-	fillBudget(missing)
-	err = missing.Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyStagedEndorserBlock(
-			t.Context(), txn, leiosApplyTestRankingPoint(0xd4), 3,
-			701, hashBytes, rawTxs,
-		)
-		return err
-	})
-	require.ErrorContains(t, err, "staged endorser block blob is missing")
-	require.NotErrorIs(t, err, badger.ErrTxnTooBig)
-}
-
-func TestStageMusashiEndorserBlocksRejectsMissingProvider(t *testing.T) {
-	t.Parallel()
-	ls, _, _ := newLeiosApplyTestLedger(t)
-	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
-
-	err := ls.stageMusashiEndorserBlocks(
-		t.Context(), []gledger.Block{parent, certifier},
-	)
-	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
-	require.ErrorContains(t, err, "no endorser block provider configured")
 }
 
 func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
@@ -1103,13 +1103,25 @@ func leiosTestCertifiedBlockPair(
 	t *testing.T,
 ) (*dijkstra.DijkstraBlock, *dijkstra.DijkstraBlock, lcommon.Blake2b256) {
 	t.Helper()
-	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xE1))
+	return leiosTestCertifiedBlockPairAt(t, 0xE1, 100)
+}
+
+// leiosTestCertifiedBlockPairAt returns a ranking block at parentSlot that
+// announces the endorser block leiosTestHash(seed), and a child 40 slots later
+// that certifies it.
+func leiosTestCertifiedBlockPairAt(
+	t *testing.T,
+	seed byte,
+	parentSlot uint64,
+) (*dijkstra.DijkstraBlock, *dijkstra.DijkstraBlock, lcommon.Blake2b256) {
+	t.Helper()
+	ebHash := lcommon.NewBlake2b256(leiosTestHash(seed))
 	parent := &dijkstra.DijkstraBlock{
 		BlockHeader: &dijkstra.DijkstraBlockHeader{
 			BabbageBlockHeader: babbage.BabbageBlockHeader{
 				Body: babbage.BabbageBlockHeaderBody{
 					BlockNumber: 1,
-					Slot:        100,
+					Slot:        parentSlot,
 				},
 			},
 			LeiosHeaderExtension: []cbor.RawMessage{
@@ -1123,7 +1135,7 @@ func leiosTestCertifiedBlockPair(
 			BabbageBlockHeader: babbage.BabbageBlockHeader{
 				Body: babbage.BabbageBlockHeaderBody{
 					BlockNumber: 2,
-					Slot:        140,
+					Slot:        parentSlot + 40,
 					PrevHash:    parent.Hash(),
 				},
 			},
@@ -1243,32 +1255,6 @@ func TestEnsureReferencedEndorserBlocksRejectsProviderResultAtWrongSlot(
 		[]gledger.Block{parent, certifier},
 	)
 	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
-}
-
-func TestEnsureReferencedEndorserBlocksKeepsCIPAnnouncementsBestEffort(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EndorserBlockProvider: func(
-				[]byte,
-				uint64,
-			) ([]cbor.RawMessage, bool) {
-				return nil, false
-			},
-			EndorserBlockWaitSlots:     0,
-			LeiosApplyEndorserBlockTxs: true,
-		},
-	}
-	leiosTestEnableCertifiedBlock(t, ls, certifier)
-
-	require.NoError(t, ls.ensureReferencedEndorserBlocks(
-		t.Context(),
-		[]gledger.Block{parent, certifier},
-	))
 }
 
 func TestEnsureReferencedEndorserBlocksRejectsUnresolvedCertifyingParent(
@@ -1514,19 +1500,22 @@ func TestClassifyEndorserBlockFetchesKeepsDistinctSlotsOfSameHash(
 	t.Parallel()
 
 	sameHash := lcommon.NewBlake2b256(leiosTestHash(0xFE))
-	hashX := leiosTestHash(0x11)
-	hashY := leiosTestHash(0x22)
+	parentX := leiosTestHash(0x11)
+	parentY := leiosTestHash(0x22)
 	infos := []leiosBlockInfo{
-		{hash: string(hashX), slot: 100, announces: true, ebHash: sameHash},
-		{hash: string(hashY), slot: 200, announces: true, ebHash: sameHash},
+		{prevHash: string(parentX), slot: 140, certifies: true},
+		{prevHash: string(parentY), slot: 240, certifies: true},
+	}
+	annByHash := map[string]leiosEbRef{
+		string(parentX): {slot: 100, hash: sameHash},
+		string(parentY): {slot: 200, hash: sameHash},
 	}
 	neverCached := func(leiosEbRef) bool { return false }
 
 	// wallSlot 100_050 with waitSlots 100 puts both well into settled
-	// backlog; certDrivenHistorical=false (CIP path) fetches every
-	// referenced historical endorser block.
+	// backlog, where each certified closure is fetched.
 	backfill, tipWait := classifyEndorserBlockFetches(
-		infos, nil, 100_050, true, 100, false, neverCached,
+		infos, annByHash, 100_050, true, 100, neverCached,
 	)
 	require.Empty(t, tipWait)
 	require.ElementsMatch(t, []leiosEbRef{
@@ -1569,10 +1558,10 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	}
 	neverCached := func(leiosEbRef) bool { return false }
 
-	// Haskell/cert-driven path. wallSlot 100050, waitSlots 100: slots 100/140/200
-	// are settled backlog, slot 100000 is within the head window.
+	// wallSlot 100050, waitSlots 100: slots 100/140/200 are settled backlog,
+	// slot 100000 is within the head window.
 	backfill, tipWait := classifyEndorserBlockFetches(
-		infos, annByHash, 100_050, true, 100, true, neverCached,
+		infos, annByHash, 100_050, true, 100, neverCached,
 	)
 	// Only the certified endorser block (ebA, via CertRB C's parent A) is
 	// backfilled; the uncertified historical announcement (ebE) is skipped.
@@ -1583,9 +1572,9 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	require.Len(t, tipWait, 1)
 	require.Equal(t, ebB, tipWait[0].hash)
 
-	// prototype-2026w29 permits one near-head block to certify its parent's EB
-	// and announce a new EB. Both references must be available, but only the
-	// parent's EB is applied by the certifying block.
+	// One near-head block may certify its parent's EB and announce a new EB.
+	// Both references are fetched, but only the parent's EB is applied by the
+	// certifying block.
 	nearParentHash := leiosTestHash(0xF1)
 	nearCombinedHash := leiosTestHash(0xF2)
 	nearParentEb := lcommon.NewBlake2b256(leiosTestHash(0x1F))
@@ -1608,7 +1597,7 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 		map[string]leiosEbRef{
 			string(nearParentHash): {slot: 100_000, hash: nearParentEb},
 		},
-		100_050, true, 100, true, neverCached,
+		100_050, true, 100, neverCached,
 	)
 	require.Empty(t, backfill)
 	require.Len(t, tipWait, 2)
@@ -1620,34 +1609,15 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 
 	// A cached endorser block is not refetched.
 	backfill, _ = classifyEndorserBlockFetches(
-		infos, annByHash, 100_050, true, 100, true,
+		infos, annByHash, 100_050, true, 100,
 		func(r leiosEbRef) bool { return r.hash == ebA },
 	)
 	require.Empty(t, backfill)
 
-	// CIP path (certDrivenHistorical=false): the settled backlog is
-	// announcement-driven, so every referenced historical endorser block is
-	// backfilled (ebA and ebE), not just certified ones, and the near-head
-	// announcement (ebB) still goes to tipWait.
-	backfill, tipWait = classifyEndorserBlockFetches(
-		infos, annByHash, 100_050, true, 100, false, neverCached,
-	)
-	backfillHashes := make([]lcommon.Blake2b256, 0, len(backfill))
-	for _, ref := range backfill {
-		backfillHashes = append(backfillHashes, ref.hash)
-	}
-	require.ElementsMatch(
-		t,
-		[]lcommon.Blake2b256{ebA, ebE},
-		backfillHashes,
-	)
-	require.Len(t, tipWait, 1)
-	require.Equal(t, ebB, tipWait[0].hash)
-
 	// With an unknown wall-clock slot every block is treated as near-head, so
 	// all announcements fetch on announcement and none go to backfill.
 	backfill, tipWait = classifyEndorserBlockFetches(
-		infos, annByHash, 0, false, 100, true, neverCached,
+		infos, annByHash, 0, false, 100, neverCached,
 	)
 	require.Empty(t, backfill)
 	require.Len(t, tipWait, 3) // ebA, ebB, ebE (all announcements)
@@ -1668,7 +1638,6 @@ func TestRequiredCertifiedEndorserBlocksKeepsDistinctSlots(t *testing.T) {
 			string(parentA): {slot: 100, hash: sharedHash},
 			string(parentB): {slot: 200, hash: sharedHash},
 		},
-		true,
 	)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []leiosEbRef{
@@ -1811,8 +1780,6 @@ func TestEnsureReferencedEndorserBlocksDoesNotBlockOnUnreadAnnouncement(
 			return nil
 		},
 		EndorserBlockWaitSlots: leiosWaitTestWaitSlots,
-		// Haskell-conformant path: application reads only certified closures.
-		LeiosApplyEndorserBlockTxs: false,
 	}
 	ls := &LedgerState{config: cfg}
 	ls.leiosBackfill = newLeiosBackfiller(cfg)
@@ -1933,8 +1900,7 @@ func TestEnsureReferencedEndorserBlocksWaitsForCertifiedClosureArrivingLate(
 			arrivedInsideWait.Store(true)
 			return nil, true
 		},
-		EndorserBlockWaitSlots:     leiosWaitTestLongWaitSlots,
-		LeiosApplyEndorserBlockTxs: false,
+		EndorserBlockWaitSlots: leiosWaitTestLongWaitSlots,
 	}
 	ls := &LedgerState{config: cfg}
 	leiosTestEnableCertifiedBlock(t, ls, certifier)
@@ -1974,39 +1940,36 @@ func TestEnsureReferencedEndorserBlocksWaitsForCertifiedClosureArrivingLate(
 // batch referencing k missing endorser blocks cost k windows, which is the
 // long tail of the measured apply stalls. They must share one window.
 //
-// The CIP-conformant path is used because every reference there is read at
-// apply time, so all three stay blocking and only the concurrency changes.
+// Three certified closures are used because each is read at apply time, so all
+// three stay blocking and only the concurrency changes.
 func TestEnsureReferencedEndorserBlocksSharesOneWindowAcrossMissingBlocks(
 	t *testing.T,
 ) {
 	const missing = 3
-	blocks := make([]gledger.Block, 0, missing)
-	for i := range missing {
-		blocks = append(blocks, leiosWaitTestAnnouncingBlock(
-			t,
-			uint64(i+1),
-			uint64(100+i),
-			lcommon.NewBlake2b256(leiosTestHash(byte(0xB0+i))),
-		))
-	}
 	cfg := LedgerStateConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
 			return nil, false
 		},
 		EndorserBlockWaitSlots: leiosWaitTestWaitSlots,
-		// CIP-conformant path: every announcement is read at apply time.
-		LeiosApplyEndorserBlockTxs: true,
 	}
 	ls := &LedgerState{config: cfg}
+	blocks := make([]gledger.Block, 0, 2*missing)
+	for i := range missing {
+		parent, certifier, _ := leiosTestCertifiedBlockPairAt(
+			t,
+			byte(0xB0+i),
+			uint64(100+20*i),
+		)
+		leiosTestEnableCertifiedBlock(t, ls, certifier)
+		blocks = append(blocks, parent, certifier)
+	}
 	withLeiosWaitTestSlotLength(t, ls)
 
 	start := time.Now()
-	require.NoError(t, ls.ensureReferencedEndorserBlocks(
-		t.Context(),
-		blocks,
-	))
+	err := ls.ensureReferencedEndorserBlocks(t.Context(), blocks)
 	elapsed := time.Since(start)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
 	require.GreaterOrEqual(
 		t,
 		elapsed,
@@ -2022,9 +1985,8 @@ func TestEnsureReferencedEndorserBlocksSharesOneWindowAcrossMissingBlocks(
 }
 
 // TestSplitTipWaitByApplyDependency pins the apply-path contract itself,
-// independently of timing: on the CIP path every reference is read at apply
-// time and stays blocking; on the Musashi path only the mandatory certified
-// closures are read, and a block's own announcement is demoted to background
+// independently of timing: only the mandatory certified closures are read at
+// apply time, and a block's own announcement is demoted to background
 // prefetch.
 func TestSplitTipWaitByApplyDependency(t *testing.T) {
 	certified := leiosEbRef{
@@ -2040,14 +2002,13 @@ func TestSplitTipWaitByApplyDependency(t *testing.T) {
 	blocking, prefetch := splitTipWaitByApplyDependency(
 		tipWait,
 		[]leiosEbRef{certified},
-		true,
 	)
 	require.Equal(t, []leiosEbRef{certified}, blocking)
 	require.Equal(t, []leiosEbRef{announced}, prefetch)
 
-	blocking, prefetch = splitTipWaitByApplyDependency(tipWait, nil, false)
-	require.Equal(t, tipWait, blocking)
-	require.Empty(t, prefetch)
+	blocking, prefetch = splitTipWaitByApplyDependency(tipWait, nil)
+	require.Empty(t, blocking)
+	require.Equal(t, tipWait, prefetch)
 }
 
 // TestAwaitEndorserBlocksFetchesUpFront pins the second half of the wait fix:
@@ -2174,13 +2135,12 @@ func TestLeiosEbWaitMetricsRecordOutcomeAndDuration(t *testing.T) {
 	// Every outcome series is pre-materialized at init, before any wait.
 	require.Equal(
 		t,
-		4,
+		3,
 		promtestutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
 	)
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "timeout"))
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "cancelled"))
-	require.Zero(t, leiosWaitTestHistogram(t, reg, "unavailable"))
 	require.Zero(t, promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts))
 
 	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xE7))
@@ -2274,7 +2234,7 @@ func TestLeiosEbWaitCancellationIsNotCountedAsTimeout(t *testing.T) {
 			// Every outcome series exists before any wait.
 			require.Equal(
 				t,
-				4,
+				3,
 				promtestutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
 			)
 
@@ -2328,8 +2288,7 @@ func TestLeiosEbWaitCancellationLeavesCallerBehaviourUnchanged(t *testing.T) {
 			) ([]cbor.RawMessage, bool) {
 				return nil, false
 			},
-			EndorserBlockWaitSlots:     leiosWaitTestWaitSlots,
-			LeiosApplyEndorserBlockTxs: false,
+			EndorserBlockWaitSlots: leiosWaitTestWaitSlots,
 		},
 	}
 	leiosTestEnableCertifiedBlock(t, ls, certifier)
@@ -2343,300 +2302,6 @@ func TestLeiosEbWaitCancellationLeavesCallerBehaviourUnchanged(t *testing.T) {
 		[]gledger.Block{parent, certifier},
 	)
 	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
-}
-
-// leiosWaitTestPolledFromGrace reports whether the provider is being polled by
-// the post-window fetch wait (awaitInFlightEndorserFetches).
-//
-// It matches awaitInFlightEndorserFetches itself, NOT awaitFetch. awaitFetch is
-// shared: the certificate-driven path reaches it through fetchOnce's dedup
-// wait, so keying on it would make a cert-driven test report a grace phase that
-// never ran, depending on whether a fetch happened to be in flight. The waits
-// are dispatched from a goroutine per reference, and a closure carries its
-// enclosing function's name in the stack (…awaitInFlightEndorserFetches.func1),
-// so the enclosing frame is still visible from inside the poll.
-func leiosWaitTestPolledFromGrace() bool {
-	pcs := make([]uintptr, 64)
-	n := runtime.Callers(2, pcs)
-	frames := runtime.CallersFrames(pcs[:n])
-	for {
-		frame, more := frames.Next()
-		if strings.Contains(
-			frame.Function,
-			"awaitInFlightEndorserFetches",
-		) {
-			return true
-		}
-		if !more {
-			return false
-		}
-	}
-}
-
-// TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath covers the
-// regression the review found in the CIP-conformant path. Application there
-// reads each ranking block's own announcement and nothing re-applies an
-// endorser block that lands afterwards, so if the by-point fetch is still in
-// flight when the diffusion window elapses, the ranking block is applied
-// without the endorser-resident outputs and its spends fall through to the
-// interim trust path permanently.
-//
-// The previous code got this right by accident: it issued a SYNCHRONOUS
-// by-point fetch after the window, so however slow the fetch was it still
-// populated the cache before the batch reached ledgerProcessBlock. Dispatching
-// the fetch up front and asynchronously is better for latency but dropped that
-// guarantee. The grace phase restores it.
-//
-// The fetch is released by the grace phase's own first poll rather than by a
-// timer, so "slower than the window, faster than the grace" holds by
-// construction and cannot flake: until the grace phase runs, the fetch cannot
-// complete, so it is always later than the window.
-func TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath(t *testing.T) {
-	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xF1))
-	block := leiosWaitTestAnnouncingBlock(t, 1, 100, ebHash)
-
-	// gracePollsBeforeRelease is chosen so the fetch cannot complete until the
-	// wait has polled for materially longer than the soft-warn window: the poll
-	// interval is a tenth of a slot, so the window is worth about
-	// leiosWaitTestWaitSlots*10 polls and this is comfortably beyond it. A wait
-	// bounded BY that window -- which is what this test exists to reject --
-	// gives up before reaching this count, deterministically and regardless of
-	// machine load, because it is counting the wait's own polls rather than
-	// racing a clock.
-	const gracePollsBeforeRelease = leiosWaitTestWaitSlots * 20
-
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	var gracePolls atomic.Int64
-	var cached, sawGracePhase, fetchCompleted atomic.Bool
-
-	cfg := LedgerStateConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EndorserBlockProvider: func(
-			hash []byte,
-			slot uint64,
-		) ([]cbor.RawMessage, bool) {
-			if slot != 100 || string(hash) != string(ebHash.Bytes()) {
-				return nil, false
-			}
-			if leiosWaitTestPolledFromGrace() {
-				// The diffusion window has elapsed and the post-window wait is
-				// running. Hold the fetch for long enough that a wait bounded
-				// by one further window would have abandoned it.
-				sawGracePhase.Store(true)
-				if gracePolls.Add(1) >= gracePollsBeforeRelease {
-					releaseOnce.Do(func() { close(release) })
-				}
-			}
-			return nil, cached.Load()
-		},
-		EndorserBlockFetcher: func(
-			ctx context.Context,
-			_ uint64,
-			_ []byte,
-		) error {
-			select {
-			case <-release:
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(10 * time.Second):
-				// Backstop so a regression that never runs the grace phase
-				// fails the assertions below instead of hanging.
-				return nil
-			}
-			cached.Store(true)
-			fetchCompleted.Store(true)
-			return nil
-		},
-		// CIP-conformant path: application reads the announcement.
-		EndorserBlockWaitSlots:     leiosWaitTestWaitSlots,
-		LeiosApplyEndorserBlockTxs: true,
-	}
-	ls := &LedgerState{config: cfg}
-	ls.leiosBackfill = newLeiosBackfiller(cfg)
-	withLeiosWaitTestSlotLength(t, ls)
-
-	require.NoError(t, ls.ensureReferencedEndorserBlocks(
-		t.Context(),
-		[]gledger.Block{block},
-	))
-
-	require.True(
-		t,
-		sawGracePhase.Load(),
-		"the post-window grace phase must run on the CIP path",
-	)
-	require.True(t, fetchCompleted.Load(), "the in-flight fetch must finish")
-	require.GreaterOrEqual(
-		t,
-		gracePolls.Load(),
-		int64(gracePollsBeforeRelease),
-		"the wait must outlast a single further diffusion window",
-	)
-	require.True(
-		t,
-		endorserBlockAvailableAt(
-			ls.config.EndorserBlockProvider,
-			ebHash.Bytes(),
-			100,
-		),
-		"the endorser block must be cached before the batch is applied; "+
-			"otherwise the ranking block commits without its endorser-resident "+
-			"outputs and nothing ever re-applies them",
-	)
-}
-
-// TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath pins that the
-// grace is CIP-only, exercised against a MANDATORY certified closure so the
-// blocking set is non-empty and the guard is what decides. On this path a
-// missing closure is already retried by the bounded fetch that follows, so
-// paying a second diffusion window here would add head-of-line blocking on the
-// pipeline for nothing.
-func TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath(
-	t *testing.T,
-) {
-	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
-
-	var sawGracePhase atomic.Bool
-	cfg := LedgerStateConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
-			if leiosWaitTestPolledFromGrace() {
-				sawGracePhase.Store(true)
-			}
-			return nil, false
-		},
-		EndorserBlockFetcher: func(
-			_ context.Context,
-			_ uint64,
-			_ []byte,
-		) error {
-			return nil
-		},
-		EndorserBlockWaitSlots:     leiosWaitTestWaitSlots,
-		LeiosApplyEndorserBlockTxs: false,
-	}
-	ls := &LedgerState{config: cfg}
-	ls.leiosBackfill = newLeiosBackfiller(cfg)
-	leiosTestEnableCertifiedBlock(t, ls, certifier)
-	withLeiosWaitTestSlotLength(t, ls)
-
-	// The closure never arrives, so the mandatory check fails -- which is the
-	// correct outcome and is what makes the grace pointless here.
-	err := ls.ensureReferencedEndorserBlocks(
-		t.Context(),
-		[]gledger.Block{parent, certifier},
-	)
-	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
-	require.False(
-		t,
-		sawGracePhase.Load(),
-		"the post-window grace must not run on the certificate-driven path",
-	)
-}
-
-// TestEnsureReferencedEndorserBlocksProceedsWhenCIPFetchFindsNothing pins the
-// other arm of the CIP wait: when the by-point fetch finishes without caching
-// -- no connected peer holds the endorser block -- application proceeds without
-// it rather than failing the chunk.
-//
-// This is deliberate and is NOT a behaviour this change introduces: it is the
-// long-standing semantics of the CIP path. Failing the chunk instead would turn
-// an unfetchable endorser block into an unbounded pipeline retry, which is a
-// wedge this codebase has hit before. The wait exists to stop us abandoning a
-// fetch that was about to succeed, not to convert a genuine absence into a
-// stall.
-func TestEnsureReferencedEndorserBlocksProceedsWhenCIPFetchFindsNothing(
-	t *testing.T,
-) {
-	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xF3))
-	block := leiosWaitTestAnnouncingBlock(t, 1, 100, ebHash)
-
-	var fetches atomic.Int64
-	cfg := LedgerStateConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
-			return nil, false
-		},
-		EndorserBlockFetcher: func(
-			_ context.Context,
-			_ uint64,
-			_ []byte,
-		) error {
-			// Finishes promptly, having found nothing.
-			fetches.Add(1)
-			return errors.New("no peer holds this endorser block")
-		},
-		EndorserBlockWaitSlots:     leiosWaitTestWaitSlots,
-		LeiosApplyEndorserBlockTxs: true,
-	}
-	ls := &LedgerState{config: cfg}
-	ls.leiosBackfill = newLeiosBackfiller(cfg)
-	withLeiosWaitTestSlotLength(t, ls)
-
-	start := time.Now()
-	require.NoError(t, ls.ensureReferencedEndorserBlocks(
-		t.Context(),
-		[]gledger.Block{block},
-	))
-	// One diffusion window, then the fetch's own prompt failure -- not the
-	// hard backstop.
-	require.Less(t, time.Since(start), leiosTipFetchHardBound)
-	require.Positive(t, fetches.Load())
-	require.False(t, endorserBlockAvailableAt(
-		ls.config.EndorserBlockProvider,
-		ebHash.Bytes(),
-		100,
-	))
-}
-
-// TestLeiosGraceDetectorIgnoresSharedAwaitFetch pins the property that makes
-// the certificate-driven test above meaningful rather than timing-dependent.
-//
-// awaitFetch is shared: the certificate-driven path reaches it through
-// fetchOnce's dedup wait whenever a spawned fetch for the same reference is
-// still in flight. A grace detector keyed on awaitFetch therefore reports a
-// post-window wait that never ran, but only when that race happens to occur --
-// so the cert-driven test would pass or fail depending on scheduling. Keying on
-// awaitInFlightEndorserFetches makes it positive and deterministic, and this
-// asserts exactly that: reached through awaitFetch alone, the detector is
-// false.
-func TestLeiosGraceDetectorIgnoresSharedAwaitFetch(t *testing.T) {
-	var sawGrace atomic.Bool
-	cfg := LedgerStateConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
-			if leiosWaitTestPolledFromGrace() {
-				sawGrace.Store(true)
-			}
-			return nil, false
-		},
-		EndorserBlockFetcher: func(
-			_ context.Context,
-			_ uint64,
-			_ []byte,
-		) error {
-			return nil
-		},
-	}
-	b := newLeiosBackfiller(cfg)
-	require.NotNil(t, b)
-
-	b.awaitFetch(
-		t.Context(),
-		leiosEbRef{
-			slot: 100,
-			hash: lcommon.NewBlake2b256(leiosTestHash(0xF4)),
-		},
-		time.Millisecond,
-		20*time.Millisecond,
-	)
-
-	require.False(
-		t,
-		sawGrace.Load(),
-		"awaitFetch alone must not be mistaken for the post-window wait",
-	)
 }
 
 // leiosWaitTestLogBuffer is a concurrency-safe log sink. The waits under test
@@ -2709,180 +2374,6 @@ func TestFetchRequiredReportsCancellationNotBudgetExpiry(t *testing.T) {
 		t,
 		logs.String(),
 		"certified leios endorser block fetch cancelled",
-	)
-}
-
-// TestCIPFetchWaitReportsCancellationNotFailure covers the third site. On the
-// CIP path a fetch that finishes without caching is reported as "could not be
-// fetched", which is a real diagnosis -- unless the pass was cancelled, in
-// which case nothing was learned about whether any peer holds the block and
-// the line would be a false diagnosis emitted on every shutdown.
-func TestCIPFetchWaitReportsCancellationNotFailure(t *testing.T) {
-	var logs leiosWaitTestLogBuffer
-	cfg := LedgerStateConfig{
-		Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		})),
-		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
-			return nil, false
-		},
-		EndorserBlockFetcher: func(
-			ctx context.Context,
-			_ uint64,
-			_ []byte,
-		) error {
-			<-ctx.Done()
-			return ctx.Err()
-		},
-	}
-	ls := &LedgerState{config: cfg}
-	ls.leiosBackfill = newLeiosBackfiller(cfg)
-
-	ref := leiosEbRef{
-		slot: 100,
-		hash: lcommon.NewBlake2b256(leiosTestHash(0xC8)),
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	// Dispatch the fetch, then cancel: the fetch is in flight and will end
-	// only because of the cancellation.
-	ls.leiosBackfill.spawn(ctx, ref)
-	cancel()
-
-	ls.awaitInFlightEndorserFetches(
-		ctx,
-		[]leiosEbRef{ref},
-		leiosWaitTestWindow,
-		time.Millisecond,
-		leiosTipFetchHardBound,
-	)
-
-	require.NotContains(
-		t,
-		logs.String(),
-		"endorser block could not be fetched",
-		"a cancelled pass must not be reported as an unfetchable endorser block",
-	)
-	require.Contains(
-		t,
-		logs.String(),
-		"endorser block fetch cancelled before it completed",
-	)
-}
-
-// TestCIPFetchWaitDoesNotWarnOnRoutineUnfetchableEndorserBlock pins the log
-// level of the CIP path's most common non-cached outcome.
-//
-// awaitFetch returns for two reasons that this wait cannot otherwise tell
-// apart: the all-peers fetch cleared its in-flight marker without caching (no
-// peer holds this endorser block), or it neither cached nor cleared before the
-// hard bound. Only the second is anomalous. The first is the expected,
-// long-standing behaviour of this path -- the code this replaced logged its
-// equivalent at Debug -- and on a CIP node where endorser blocks are routinely
-// unfetchable, a WARN per reference turns normal operation into alertable
-// volume.
-func TestCIPFetchWaitDoesNotWarnOnRoutineUnfetchableEndorserBlock(
-	t *testing.T,
-) {
-	var logs leiosWaitTestLogBuffer
-	cfg := LedgerStateConfig{
-		Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		})),
-		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
-			return nil, false
-		},
-		// Fails immediately, the way a sweep that finds no peer holding the
-		// block does: the in-flight marker clears and awaitFetch returns
-		// without the hard bound ever being approached.
-		EndorserBlockFetcher: func(context.Context, uint64, []byte) error {
-			return errors.New("no peer holds it")
-		},
-	}
-	ls := &LedgerState{config: cfg}
-	ls.leiosBackfill = newLeiosBackfiller(cfg)
-
-	ref := leiosEbRef{
-		slot: 100,
-		hash: lcommon.NewBlake2b256(leiosTestHash(0xC9)),
-	}
-	ls.leiosBackfill.spawn(t.Context(), ref)
-
-	ls.awaitInFlightEndorserFetches(
-		t.Context(),
-		[]leiosEbRef{ref},
-		leiosWaitTestWindow,
-		time.Millisecond,
-		leiosWaitTestLongWindow,
-	)
-
-	require.Contains(
-		t,
-		logs.String(),
-		"endorser block could not be fetched",
-		"the outcome must still be reported, just not at WARN",
-	)
-	require.NotContains(
-		t,
-		logs.String(),
-		`"level":"WARN"`,
-		"a fetch that swept every peer and found none holding the endorser "+
-			"block is this path's expected outcome, not an alert",
-	)
-}
-
-// TestCIPFetchWaitWarnsWhenAFetchNeitherCachesNorClears is the other half:
-// the case that IS anomalous must stay at WARN. A fetch that neither caches
-// nor clears its in-flight marker held the ledger pipeline for the whole hard
-// bound and produced nothing, which is a wedged fetch rather than an absent
-// endorser block.
-func TestCIPFetchWaitWarnsWhenAFetchNeitherCachesNorClears(t *testing.T) {
-	var logs leiosWaitTestLogBuffer
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	cfg := LedgerStateConfig{
-		Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		})),
-		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
-			return nil, false
-		},
-		// Never returns while the wait runs, so the in-flight marker is still
-		// set when awaitFetch gives up at the hard bound. Released by the
-		// cleanup so the goroutine does not outlive the test.
-		EndorserBlockFetcher: func(context.Context, uint64, []byte) error {
-			<-release
-			return errors.New("released")
-		},
-	}
-	ls := &LedgerState{config: cfg}
-	ls.leiosBackfill = newLeiosBackfiller(cfg)
-
-	ref := leiosEbRef{
-		slot: 100,
-		hash: lcommon.NewBlake2b256(leiosTestHash(0xCA)),
-	}
-	// A live parent context, so the wait can only end at the hard bound --
-	// never through the cancellation branch.
-	ls.leiosBackfill.spawn(t.Context(), ref)
-
-	ls.awaitInFlightEndorserFetches(
-		t.Context(),
-		[]leiosEbRef{ref},
-		leiosWaitTestWindow,
-		time.Millisecond,
-		leiosWaitTestSlotLen,
-	)
-
-	require.Contains(
-		t,
-		logs.String(),
-		"endorser block fetch neither completed nor cached within the hard bound",
-	)
-	require.Contains(
-		t,
-		logs.String(),
-		`"level":"WARN"`,
-		"a fetch wedged for the whole hard bound is worth an alert",
 	)
 }
 
@@ -2969,64 +2460,6 @@ func TestMandatoryFetchIsNotStarvedByBestEffortSpawns(t *testing.T) {
 	)
 }
 
-// TestCIPGraceUnavailableIsNotRecordedAsATimeout pins the grace phase's metric
-// classification against the two ways inferring it after the fact goes wrong.
-//
-// Re-reading the cache and the context once awaitFetch has returned cannot
-// tell a fetch that COMPLETED without caching (routine on a CIP node: no peer
-// holds the block) from one that ran to the hard bound, so the routine case
-// was recorded as a timeout -- inflating both the timeout histogram and
-// dingo_metrics_leios_eb_wait_timeouts_total on every unfetchable block.
-// awaitFetch now reports its own termination cause instead.
-func TestCIPGraceUnavailableIsNotRecordedAsATimeout(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	cfg := LedgerStateConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
-			return nil, false
-		},
-		// Completes immediately without caching: the in-flight marker clears
-		// long before the hard bound, so nothing timed out.
-		EndorserBlockFetcher: func(context.Context, uint64, []byte) error {
-			return errors.New("no peer holds it")
-		},
-	}
-	ls := &LedgerState{config: cfg}
-	ls.metrics.init(reg)
-	ls.leiosBackfill = newLeiosBackfiller(cfg)
-
-	ref := leiosEbRef{
-		slot: 100,
-		hash: lcommon.NewBlake2b256(leiosTestHash(0xF1)),
-	}
-	ls.leiosBackfill.spawn(t.Context(), ref)
-
-	ls.awaitInFlightEndorserFetches(
-		t.Context(),
-		[]leiosEbRef{ref},
-		leiosWaitTestWindow,
-		time.Millisecond,
-		leiosWaitTestLongWindow,
-	)
-
-	require.Equal(
-		t,
-		uint64(1),
-		leiosWaitTestHistogram(t, reg, "unavailable"),
-		"a fetch that completed without caching is its own outcome",
-	)
-	require.Zero(
-		t,
-		leiosWaitTestHistogram(t, reg, "timeout"),
-		"nothing timed out: the hard bound was never approached",
-	)
-	require.Zero(
-		t,
-		promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
-		"the timeout counter must not move for a routine unfetchable block",
-	)
-}
-
 func TestApplyEndorserBlockContextFailureRollsBackEffects(t *testing.T) {
 	t.Parallel()
 	ls, db, raw := newLeiosApplyTestLedger(t)
@@ -3038,7 +2471,7 @@ func TestApplyEndorserBlockContextFailureRollsBackEffects(t *testing.T) {
 	point := leiosApplyTestRankingPoint(0xA6)
 	point.Slot = 1020
 	apply := func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xA7), []cbor.RawMessage{closure, second}, &contextSlot, false)
+		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xA7), []cbor.RawMessage{closure, second}, &contextSlot)
 		return err
 	}
 	require.ErrorContains(t, db.Transaction(t.Context(), true).Do(apply), "injected closure context failure")
@@ -3069,7 +2502,7 @@ func TestUntickedClosureEventsWaitForCertifyingBlockCommit(t *testing.T) {
 	publications := 0
 	ls.beforeTransactionApplyPublish = func() { publications++ }
 	require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xB3), []cbor.RawMessage{closure}, &contextSlot, false)
+		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, point, 1, 990, leiosApplyTestEbHash(0xB3), []cbor.RawMessage{closure}, &contextSlot)
 		return err
 	}))
 	require.Zero(t, publications, "rollover alone must not publish certifying-block transaction events")
@@ -3094,6 +2527,7 @@ func TestRollbackSameTipRemovesUntickedClosure(t *testing.T) {
 	t.Parallel()
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
+	initializeLeiosApplyTestState(ls)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	ls.currentTip = fixture.ancestorTip
 	ls.publishSnapshotsLocked()
@@ -3101,7 +2535,7 @@ func TestRollbackSameTipRemovesUntickedClosure(t *testing.T) {
 	closure, tx := leiosApplyTestProducerTx(t, 0xC1)
 	contextSlot := fixture.ancestorTip.Point.Slot
 	require.NoError(t, ls.db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot, false)
+		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot)
 		return err
 	}))
 	require.NotNil(t, ls.untickedClosure)
@@ -3116,6 +2550,7 @@ func TestRollbackAheadOfParentRemovesUntickedClosure(t *testing.T) {
 	t.Parallel()
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
+	initializeLeiosApplyTestState(ls)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	ls.currentTip = fixture.ancestorTip
 	ls.publishSnapshotsLocked()
@@ -3123,7 +2558,7 @@ func TestRollbackAheadOfParentRemovesUntickedClosure(t *testing.T) {
 	closure, tx := leiosApplyTestProducerTx(t, 0xC1)
 	contextSlot := fixture.ancestorTip.Point.Slot
 	require.NoError(t, ls.db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot, false)
+		_, _, err := ls.applyEndorserBlockInContext(t.Context(), txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot)
 		return err
 	}))
 	require.NotNil(t, ls.untickedClosure)

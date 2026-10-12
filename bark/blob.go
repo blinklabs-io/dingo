@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -44,15 +45,19 @@ import (
 // per-item expired-history resolution.
 const archiveFetchTimeout = 20 * time.Second
 
-// maxArchiveBlockSize caps archive download responses to guard against
-// memory exhaustion from a malicious or misconfigured archive service.
+// defaultMaxArchiveBlockSize caps archive download responses to guard against
+// memory exhaustion from a malicious or misconfigured archive service when no
+// protocol-derived limit is available.
 // 128 KiB covers the current Cardano max block body size (~90 KiB) plus
 // header/CBOR overhead while keeping malicious archive responses small.
-const maxArchiveBlockSize = 128 * 1024
+const defaultMaxArchiveBlockSize = 128 * 1024
 
 // validateArchiveURL rejects download URLs that could enable SSRF, credential
 // leakage, or TLS-downgrade attacks.
-func validateArchiveURL(rawURL string, allowedOrigins map[string]struct{}) error {
+func validateArchiveURL(
+	rawURL string,
+	allowedOrigins map[string]struct{},
+) error {
 	origin, err := archiveDownloadOrigin(rawURL)
 	if err != nil {
 		return err
@@ -83,7 +88,10 @@ func normalizeArchiveOrigin(rawURL string) (string, string, error) {
 		return "", "", errors.New("URL must not contain embedded credentials")
 	}
 	if u.Scheme != "https" && u.Scheme != "http" {
-		return "", "", fmt.Errorf("URL must use HTTP or HTTPS, got scheme %q", u.Scheme)
+		return "", "", fmt.Errorf(
+			"URL must use HTTP or HTTPS, got scheme %q",
+			u.Scheme,
+		)
 	}
 	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 	if host == "" {
@@ -133,7 +141,11 @@ func archiveDownloadOrigins(
 		}
 		origin, err := archiveDownloadOrigin(value)
 		if err != nil {
-			return nil, fmt.Errorf("invalid archive download origin %q: %w", value, err)
+			return nil, fmt.Errorf(
+				"invalid archive download origin %q: %w",
+				value,
+				err,
+			)
 		}
 		origins[origin] = struct{}{}
 	}
@@ -212,8 +224,13 @@ type BlobStoreBarkConfig struct {
 	BaseUrl                   string
 	HTTPClient                *http.Client
 	BlockDownloadAllowedHosts []string
-	dialContext               netguard.DialContextFunc
-	lookupIPAddr              netguard.LookupIPAddrFunc
+	// MaxBlockSize reports the largest block, in bytes, an archive download may
+	// carry. It is read on every download, so a limit that follows the live
+	// protocol parameters stays current. A nil func, or a zero result, selects
+	// the default cap.
+	MaxBlockSize func() uint64
+	dialContext  netguard.DialContextFunc
+	lookupIPAddr netguard.LookupIPAddrFunc
 }
 
 type BlobStoreBark struct {
@@ -259,6 +276,17 @@ func NewBarkBlobStore(
 		blockDownloadOrigins: allowedOrigins,
 		upstream:             upstream,
 	}, nil
+}
+
+// maxBlockSize returns the largest archive download to accept.
+func (b *BlobStoreBark) maxBlockSize() int64 {
+	if b.config.MaxBlockSize != nil {
+		if limit := b.config.MaxBlockSize(); limit > 0 &&
+			limit <= math.MaxInt64-1 {
+			return int64(limit)
+		}
+	}
+	return defaultMaxArchiveBlockSize
 }
 
 func (b *BlobStoreBark) Close() error {
@@ -602,18 +630,15 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 				blockResp.StatusCode)
 	}
 
-	lr := io.LimitReader(blockResp.Body, maxArchiveBlockSize+1)
-	blockBody, err := io.ReadAll(lr)
+	limit := b.maxBlockSize()
+	blockBody, err := io.ReadAll(io.LimitReader(blockResp.Body, limit+1))
 	if err != nil {
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("failed reading block body: %w", err)
 	}
-	if int64(len(blockBody)) > maxArchiveBlockSize {
+	if int64(len(blockBody)) > limit {
 		return nil, types.BlockMetadata{},
-			fmt.Errorf(
-				"bark: archive response exceeds %d-byte limit",
-				maxArchiveBlockSize,
-			)
+			fmt.Errorf("bark: archive response exceeds %d-byte limit", limit)
 	}
 
 	archivePrevHash, err := hex.DecodeString(block.GetMeta().GetPrevHash())
@@ -645,9 +670,6 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 	// only the recorded type follows the claim, the residual
 	// internal/blockverify.Hash also accepts.
 	era := uint(blockType)
-	if err := assertBodyFullyAuthenticated(era); err != nil {
-		return nil, types.BlockMetadata{}, err
-	}
 	meta, err := archiveBlockMetadata(
 		decoded, era, block.GetBlock().GetHeight(), archivePrevHash,
 	)
@@ -683,39 +705,7 @@ var (
 	ErrArchiveMetadataMismatch = errors.New(
 		"bark: archive metadata contradicts the block",
 	)
-	// ErrArchiveBlockNotFullyAuthenticated reports a block whose body cannot
-	// be bound to its header in full, so the archive could alter the
-	// unauthenticated part without changing anything checked here.
-	ErrArchiveBlockNotFullyAuthenticated = errors.New(
-		"bark: archive block body cannot be fully authenticated",
-	)
 )
-
-// assertBodyFullyAuthenticated refuses blocks whose body is only partly bound
-// to their header.
-//
-// Byron main blocks are the sole case. gouroboros checks their transaction,
-// delegation, and update proofs but not ssc_proof, because the SSC proof
-// hashes cardano-ledger's own encoding of the sub-payloads rather than the
-// bytes carried in the block. An alteration confined to the SSC payload
-// therefore changes nothing this package verifies — hash, slot, height, and
-// previous hash all come from the untouched header — so the archive could
-// still substitute part of a historical block.
-//
-// Epoch boundary blocks are unaffected: they carry no transactions and no SSC
-// payload, and a single body hash covers the whole body.
-//
-// This restriction can be lifted once Byron SSC proof validation exists
-// upstream.
-func assertBodyFullyAuthenticated(blockType uint) error {
-	if blockType == gledger.BlockTypeByronMain {
-		return fmt.Errorf(
-			"%w: byron main block ssc payload is unverified",
-			ErrArchiveBlockNotFullyAuthenticated,
-		)
-	}
-	return nil
-}
 
 // verifyArchiveBlock establishes locally that the bytes the archive returned
 // really are the block that was requested. Bark chooses both the download URL

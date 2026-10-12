@@ -339,9 +339,18 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	// Block LRU miss
 	c.metrics.IncBlockLRUMiss()
 
-	// Fetch block from blob store
+	// Fetch block from blob store. A block committed after the caller's batch
+	// transaction opened needs a fresh snapshot when the shared cache misses.
+	blockTxn := txn
+	if callerTxn != nil && callerTxn.blockCborCommittedSeparately(
+		offset.BlockSlot,
+		offset.BlockHash,
+	) {
+		blockTxn = blob.NewTransaction(false)
+		defer blockTxn.Rollback() //nolint:errcheck
+	}
 	blockCbor, _, err := blob.GetBlock(
-		txn,
+		blockTxn,
 		offset.BlockSlot,
 		offset.BlockHash[:],
 	)

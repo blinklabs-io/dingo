@@ -101,10 +101,8 @@ func (s *Server) handleConstructionDerive(
 		nil,
 	)
 	if err != nil {
-		writeError(w, wrapErr(
-			ErrInternal,
-			fmt.Errorf("build address: %w", err),
-		))
+		s.logger.Error("failed to build address", "error", err)
+		writeError(w, ErrInternal)
 		return
 	}
 
@@ -227,11 +225,20 @@ func (s *Server) parseUnsignedTransaction(
 		return
 	}
 
-	var body conway.ConwayTransactionBody
-	if _, err := cbor.Decode(bodyBytes, &body); err != nil {
+	body, consumed, err := safedecode.Cbor[conway.ConwayTransactionBody](
+		bodyBytes,
+	)
+	if err != nil {
 		writeError(w, wrapErr(
 			ErrInvalidTransaction,
 			fmt.Errorf("decode body: %w", err),
+		))
+		return
+	}
+	if consumed != len(bodyBytes) {
+		writeError(w, wrapErr(
+			ErrInvalidTransaction,
+			errors.New("trailing data after transaction body"),
 		))
 		return
 	}
@@ -343,12 +350,8 @@ func (s *Server) handleConstructionMetadata(
 
 	pp, err := pparams.Utxorpc()
 	if err != nil {
-		writeError(w, wrapErr(
-			ErrInternal,
-			fmt.Errorf(
-				"convert protocol params: %w", err,
-			),
-		))
+		s.logger.Error("failed to convert protocol parameters", "error", err)
+		writeError(w, ErrInternal)
 		return
 	}
 	if pp == nil {
@@ -444,9 +447,7 @@ func (s *Server) handleConstructionPayloads(
 				))
 				return
 			}
-			// Validate hex and length before calling
-			// NewShelleyTransactionInput, which panics
-			// on invalid input.
+			// Validate the hash before constructing the input.
 			hashBytes, err := hex.DecodeString(
 				parts[0],
 			)
@@ -472,7 +473,7 @@ func (s *Server) handleConstructionPayloads(
 				return
 			}
 			idx, err := strconv.Atoi(parts[1])
-			if err != nil || idx < 0 || uint64(idx) > math.MaxUint32 {
+			if err != nil || idx < 0 || uint64(idx) > math.MaxUint16 {
 				writeError(w, wrapErr(
 					ErrInvalidRequest,
 					fmt.Errorf(
@@ -482,12 +483,14 @@ func (s *Server) handleConstructionPayloads(
 				))
 				return
 			}
-			inputs = append(
-				inputs,
-				shelley.NewShelleyTransactionInput(
-					parts[0], idx,
-				),
+			input, err := shelley.NewShelleyTransactionInput(
+				parts[0], idx,
 			)
+			if err != nil {
+				writeError(w, wrapErr(ErrInvalidRequest, err))
+				return
+			}
+			inputs = append(inputs, input)
 		case OpOutput:
 			if op.Account == nil || op.Amount == nil {
 				writeError(w, wrapErr(
@@ -682,10 +685,8 @@ func (s *Server) handleConstructionPayloads(
 
 	bodyCbor, err := cbor.Encode(&body)
 	if err != nil {
-		writeError(w, wrapErr(
-			ErrInternal,
-			fmt.Errorf("encode body: %w", err),
-		))
+		s.logger.Error("failed to encode transaction body", "error", err)
+		writeError(w, ErrInternal)
 		return
 	}
 
@@ -729,9 +730,12 @@ func (s *Server) handleConstructionPayloads(
 				keyHash[:], nil,
 			)
 			if addrErr != nil {
-				writeError(w, wrapErr(
-					ErrInternal, addrErr,
-				))
+				s.logger.Error(
+					"failed to build signer address",
+					"error",
+					addrErr,
+				)
+				writeError(w, ErrInternal)
 				return
 			}
 			payloads = append(payloads,
@@ -863,6 +867,24 @@ func (s *Server) handleConstructionCombine(
 		)
 	}
 
+	_, consumed, err := safedecode.Cbor[conway.ConwayTransactionBody](
+		bodyBytes,
+	)
+	if err != nil {
+		writeError(w, wrapErr(
+			ErrInvalidTransaction,
+			fmt.Errorf("decode body: %w", err),
+		))
+		return
+	}
+	if consumed != len(bodyBytes) {
+		writeError(w, wrapErr(
+			ErrInvalidTransaction,
+			errors.New("trailing data after transaction body"),
+		))
+		return
+	}
+
 	// Build signed TX as CBOR 4-element array:
 	// [body, witness_set, is_valid, auxiliary_data]
 	// Use RawMessage for body to preserve exact bytes.
@@ -878,12 +900,8 @@ func (s *Server) handleConstructionCombine(
 
 	signedCbor, err := cbor.Encode(signedTx)
 	if err != nil {
-		writeError(w, wrapErr(
-			ErrInternal,
-			fmt.Errorf(
-				"encode signed tx: %w", err,
-			),
-		))
+		s.logger.Error("failed to encode signed transaction", "error", err)
+		writeError(w, ErrInternal)
 		return
 	}
 
