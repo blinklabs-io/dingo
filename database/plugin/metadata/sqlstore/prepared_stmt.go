@@ -17,7 +17,11 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
+
+	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // hotStatements is the fixed, exhaustive list of query texts Start prepares
@@ -26,22 +30,84 @@ import (
 // sumCredentialUtxoStakeQuery's doc comment does, that it is worth the
 // caching mechanism's overhead and that it is safe to prepare once and
 // reuse under this Store's single write connection.
-var hotStatements = []string{
-	sumCredentialUtxoStakeQuery,
-	rewardLiveStakeAccountQuery,
-	rewardLiveStakeUpsertQuery,
-	rewardLiveStakeUtxoStakeQuery,
-	insertUtxoQuery,
-	insertUtxoQueryIgnoreConflict,
-	importAssetQuery,
-	getAssetIDQuery,
-	getLiveUtxoByRefQuery,
-	getUtxoIncludingSpentByRefQuery,
-}
+var hotStatements = func() []string {
+	queries := []string{
+		sumCredentialUtxoStakeQuery,
+		rewardLiveStakeAccountQuery,
+		rewardLiveStakeUpsertQuery,
+		rewardLiveStakeUtxoStakeQuery,
+		insertUtxoQuery,
+		insertUtxoQueryIgnoreConflict,
+		importAssetQuery,
+		getAssetIDQuery,
+		getLiveUtxoByRefQuery,
+		getUtxoIncludingSpentByRefQuery,
+		transactionInsertSQL,
+		consumeUtxoSQL,
+		consumeUtxoSQLiteReturningSQL,
+		getUtxoSpendStateQuery,
+		poolOpCertSequenceUpsertSQL,
+		poolUpdateLatestOpCertSequenceSQL,
+		transactionCertificateInsertSQL,
+		hasSpecializedCertificatesSQL,
+		deletePoolRegistrationOwnersSQL,
+		deletePoolRegistrationRelaysSQL,
+		deleteMIRRewardsSQL,
+		deleteAddressTransactionSQL,
+		poolByKeyHashQuery,
+		sqlitequery.GetAccountByCredentialQuery,
+		sqlitequery.GetActiveAccountByCredentialQuery,
+		sqlitequery.SetTipQuery,
+		sqlitequery.SetBlockNonceQuery,
+		utxoStakeConsumedDeltaQuery(1),
+		utxoStakeConsumedDeltaQuery(2),
+		utxoStakeConsumedDeltaQuery(4),
+		utxoStakeConsumedDeltaQuery(8),
+		utxoStakeConsumedDeltaQuery(16),
+		utxoStakeConsumedDeltaQuery(32),
+		utxoStakeConsumedDeltaQuery(64),
+		utxoStakeConsumedDeltaQuery(128),
+		utxoStakeConsumedDeltaQuery(256),
+		utxoStakeConsumedDeltaQuery(400),
+	}
+	for rowCount := 2; rowCount <= utxoBatchSize; rowCount++ {
+		queries = append(queries,
+			insertUtxoBatchQuery(rowCount),
+			consumeUtxosBatchQuery(rowCount, false),
+			consumeUtxosBatchQuery(rowCount, true),
+		)
+	}
+	for _, table := range transactionWitnessTables {
+		queries = append(queries, TransactionWitnessCleanupSQL(table))
+	}
+	for _, table := range certificateTables {
+		queries = append(queries, certificateTableCleanupSQL(table))
+	}
+	for _, size := range cachedAddressInputQuerySizes {
+		queries = append(queries, addressTransactionInputQuery(size))
+		for _, table := range []string{
+			"utxo_collateral_input",
+			"utxo_reference_input",
+		} {
+			queries = append(queries,
+				utxoReferenceInsertBatchSQL(table, size),
+			)
+		}
+		for _, column := range []string{
+			"collateral_by_tx_id",
+			"referenced_by_tx_id",
+		} {
+			queries = append(queries,
+				utxoReferenceUpdateBatchSQL(column, size),
+			)
+		}
+	}
+	return queries
+}()
 
 // cacheableForDialect reports whether query is safe to serve from the
-// hot-statement cache when running against dialect. The only unsafe
-// combination today is a RETURNING-id query on MySQL: dialectQueryer.
+// hot-statement cache when running against dialect. A RETURNING-id query on
+// MySQL is unsafe: dialectQueryer.
 // QueryRowContext (dialect_queryer.go) special-cases exactly that shape and
 // never calls QueryRowContext with the translated text at all, instead
 // issuing its own ExecContext + LastInsertId (or RowsAffected, for an
@@ -49,13 +115,23 @@ var hotStatements = []string{
 // *sql.Stmt would sit unused by that path regardless of whether one exists,
 // so prepareHotStatements skips creating it. PostgreSQL supports RETURNING
 // natively (dialectQueryer.QueryRowContext takes its ordinary path there,
-// like SQLite), so this only ever excludes the MySQL+RETURNING pair.
+// like SQLite). The multi-row mutation shapes are SQLite-specific and are
+// also excluded from other dialects.
 func cacheableForDialect(dialect, query string) bool {
+	if dialect != "sqlite" && isSQLiteBatchQuery(query) {
+		return false
+	}
 	return dialect != "mysql" || !hasReturningID(query)
 }
 
+func isSQLiteBatchQuery(query string) bool {
+	return strings.Contains(query, "RETURNING id, tx_id, output_idx") ||
+		strings.Contains(query, "RETURNING tx_id, output_idx") ||
+		strings.Contains(query, "AND (tx_id, output_idx) IN (")
+}
+
 // prepareHotStatements prepares every entry in hotStatements once against
-// s.writeDB and installs the result in the cache, so a later lookupCachedStmt
+// s.writeDB and installs the result in the cache, so a later borrowCachedStmt
 // for one of these queries is a plain map read rather than a fresh
 // PrepareContext call. This exists because modernc.org/sqlite (the SQLite
 // driver dingo now uses directly, see the "switch from glebarez/go-sqlite to
@@ -107,6 +183,17 @@ func cacheableForDialect(dialect, query string) bool {
 // registry before this point, so this only degrades a deliberately
 // schema-less test harness, never a real deployment.
 func (s *Store) prepareHotStatements(ctx context.Context) {
+	fresh := s.buildHotStatements(ctx)
+	s.stmtMu.Lock()
+	s.stmts = fresh
+	s.stmtMu.Unlock()
+}
+
+// buildHotStatements prepares every cacheable hotStatements entry against
+// s.writeDB and returns them without installing anything; see
+// prepareHotStatements for the caching rules.
+func (s *Store) buildHotStatements(ctx context.Context) map[string]*sql.Stmt {
+	prepared := make(map[string]*sql.Stmt, len(hotStatements))
 	// instrumentedQueryer, not newDialectQueryer directly: PrepareContext is
 	// not counted by countingQueryer (see metrics.go), so this only gains
 	// dialect translation here, same as before -- routed through the shared
@@ -124,10 +211,11 @@ func (s *Store) prepareHotStatements(ctx context.Context) {
 			// directly, which dialectQueryer handles correctly on its own.
 			continue
 		}
-		// Cached for reuse: stmt is stored in s.stmts below and lives for
-		// the Store's lifetime, closed by closePreparedStatements on
-		// Reset, RestoreFrom, and CloseContext (see that function's doc
-		// comment). It is not a one-shot resource, so closing it here
+		// Cached for reuse: stmt is stored in s.stmts below and lives until
+		// it is retired, by closePreparedStatements on Reset, RestoreFrom
+		// and CloseContext or by reprepareHotStatements after a planner
+		// statistics change (see retireStatementsLocked). It is not a
+		// one-shot resource, so closing it here
 		// would defeat the caching this function exists to provide.
 		stmt, err := dialectDB.PrepareContext(ctx, query) //nolint:sqlclosecheck
 		if err != nil {
@@ -138,42 +226,90 @@ func (s *Store) prepareHotStatements(ctx context.Context) {
 			)
 			continue
 		}
-		s.stmtMu.Lock()
-		if s.stmts == nil {
-			s.stmts = make(map[string]*sql.Stmt)
-		}
-		s.stmts[query] = stmt
+		prepared[query] = stmt
+	}
+	return prepared
+}
+
+// borrowCachedStmt returns the statement prepareHotStatements installed for
+// query, if any, to a caller about to execute it. It never prepares one
+// itself -- see prepareHotStatements for why a lazy Prepare against
+// s.writeDB here would risk deadlocking against a caller's own open write
+// transaction. A caller must handle the !ok case with a plain, uncached call
+// against its own queryer (which needs no extra connection and so can never
+// deadlock this way) rather than treat a miss as an error: after
+// Reset/RestoreFrom invalidate the cache, absence is an expected, correct
+// state, not a bug.
+//
+// The caller must call release once the call on the statement has
+// returned. A statement retired while borrowed (by reprepareHotStatements or
+// closePreparedStatements) stays open until its last borrow is released:
+// lookup and execution are not atomic, and database/sql fails a call on a
+// closed *sql.Stmt with "statement is closed" rather than waiting. Rows or a
+// Row returned by the call keep the statement's driver resources alive on
+// their own, so release need not wait for them.
+func (s *Store) borrowCachedStmt(
+	query string,
+) (stmt *sql.Stmt, release func(), ok bool) {
+	s.stmtMu.Lock()
+	defer s.stmtMu.Unlock()
+	stmt, ok = s.stmts[query]
+	if !ok {
+		return nil, func() {}, false
+	}
+	if s.stmtBorrows == nil {
+		s.stmtBorrows = make(map[*sql.Stmt]int)
+	}
+	s.stmtBorrows[stmt]++
+	return stmt, func() { s.releaseCachedStmt(stmt) }, true
+}
+
+func (s *Store) releaseCachedStmt(stmt *sql.Stmt) {
+	s.stmtMu.Lock()
+	s.stmtBorrows[stmt]--
+	if s.stmtBorrows[stmt] > 0 {
 		s.stmtMu.Unlock()
+		return
+	}
+	delete(s.stmtBorrows, stmt)
+	_, retired := s.stmtRetired[stmt]
+	delete(s.stmtRetired, stmt)
+	s.stmtMu.Unlock()
+	if retired {
+		_ = stmt.Close()
 	}
 }
 
-// lookupCachedStmt returns the statement prepareHotStatements installed for
-// query, if any. It never prepares one itself -- see prepareHotStatements
-// for why a lazy Prepare against s.writeDB here would risk deadlocking
-// against a caller's own open write transaction. A caller must handle the
-// !ok case with a plain, uncached call against its own queryer (which needs
-// no extra connection and so can never deadlock this way) rather than treat
-// a miss as an error: after Reset/RestoreFrom invalidate the cache, absence
-// is an expected, correct state, not a bug.
-func (s *Store) lookupCachedStmt(query string) (*sql.Stmt, bool) {
-	s.stmtMu.Lock()
-	defer s.stmtMu.Unlock()
-	stmt, ok := s.stmts[query]
-	return stmt, ok
+// retireStatementsLocked closes every statement in stmts that no caller
+// borrows and marks the rest for releaseCachedStmt to close. The caller holds
+// stmtMu and must already have removed stmts from the cache; the returned
+// statements are closed after stmtMu is released.
+func (s *Store) retireStatementsLocked(
+	stmts map[string]*sql.Stmt,
+) []*sql.Stmt {
+	idle := make([]*sql.Stmt, 0, len(stmts))
+	for _, stmt := range stmts {
+		if s.stmtBorrows[stmt] == 0 {
+			idle = append(idle, stmt)
+			continue
+		}
+		if s.stmtRetired == nil {
+			s.stmtRetired = make(map[*sql.Stmt]struct{})
+		}
+		s.stmtRetired[stmt] = struct{}{}
+	}
+	return idle
 }
 
-// closePreparedStatements closes and discards every cached statement. Safe
-// to call more than once (a nil map closes nothing) and safe to call while
-// another goroutine holds a previously-returned *sql.Stmt or *sql.Tx-scoped
-// statement derived from it: database/sql keeps a Stmt usable by any Rows
-// or Tx already using it and only releases the underlying driver resource
-// once every such use completes.
+// closePreparedStatements discards every cached statement, closing each one
+// now or, if a caller has borrowed it, when that caller releases it. Safe to
+// call more than once: a nil map closes nothing.
 func (s *Store) closePreparedStatements() {
 	s.stmtMu.Lock()
-	stmts := s.stmts
+	idle := s.retireStatementsLocked(s.stmts)
 	s.stmts = nil
 	s.stmtMu.Unlock()
-	for _, stmt := range stmts {
+	for _, stmt := range idle {
 		_ = stmt.Close()
 	}
 }
@@ -357,6 +493,18 @@ func (s *Store) evictTxStmts(tx *sql.Tx) {
 	s.txStmtMu.Unlock()
 }
 
+// isClosedStmtErr reports database/sql's "statement is closed" error, which
+// is unexported. A transaction-scoped statement memoized by txScopedStmt is
+// closed by database/sql itself when the transaction's context is cancelled,
+// before Commit or Rollback evicts it, so a later call through the memoized
+// statement fails with this error instead of the transaction's own
+// (context.Canceled or sql.ErrTxDone). queryRowCached, execCached and
+// queryRowsCached retry uncached in that case so callers see the same error
+// an uncached call gives.
+func isClosedStmtErr(err error) bool {
+	return err != nil && err.Error() == "sql: statement is closed"
+}
+
 // queryRowCached and execCached are the shared cache-or-fallback dance
 // sumCredentialUtxoStake originally inlined by hand: use the hot-statement
 // cache when query has an entry, and fall back to a plain one-shot call
@@ -371,7 +519,7 @@ func (s *Store) queryRowCached(
 	query string,
 	args ...any,
 ) *sql.Row {
-	if cached, ok := s.lookupCachedStmt(query); ok {
+	if cached, release, ok := s.borrowCachedStmt(query); ok {
 		// Counted and timed here, not by countingQueryer: stmtForQueryer
 		// resolves straight to a *sql.Stmt, bypassing db (and any
 		// countingQueryer wrapping it) entirely -- see metrics.go's doc
@@ -391,14 +539,16 @@ func (s *Store) queryRowCached(
 		// returned below defers running Scan against it until the caller
 		// invokes Scan.
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
-		if s.sqlQueryDuration == nil {
-			return stmt.QueryRowContext(ctx, args...)
-		}
 		start := time.Now()
 		row := stmt.QueryRowContext(ctx, args...)
-		s.sqlQueryDuration.WithLabelValues(op, name).
-			Observe(time.Since(start).Seconds())
-		return row
+		release()
+		if s.sqlQueryDuration != nil {
+			s.sqlQueryDuration.WithLabelValues(op, name).
+				Observe(time.Since(start).Seconds())
+		}
+		if !isClosedStmtErr(row.Err()) {
+			return row
+		}
 	}
 	return db.QueryRowContext(ctx, query, args...)
 }
@@ -409,7 +559,7 @@ func (s *Store) execCached(
 	query string,
 	args ...any,
 ) (sql.Result, error) {
-	if cached, ok := s.lookupCachedStmt(query); ok {
+	if cached, release, ok := s.borrowCachedStmt(query); ok {
 		op, name := classifySQLStatement(query)
 		if s.sqlOperations != nil {
 			s.sqlOperations.WithLabelValues(op).Inc()
@@ -420,14 +570,94 @@ func (s *Store) execCached(
 		// the transaction ends, so there is nothing for this function to
 		// close.
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
-		if s.sqlQueryDuration == nil {
-			return stmt.ExecContext(ctx, args...)
-		}
 		start := time.Now()
 		result, err := stmt.ExecContext(ctx, args...)
-		s.sqlQueryDuration.WithLabelValues(op, name).
-			Observe(time.Since(start).Seconds())
-		return result, err
+		release()
+		if s.sqlQueryDuration != nil {
+			s.sqlQueryDuration.WithLabelValues(op, name).
+				Observe(time.Since(start).Seconds())
+		}
+		if !isClosedStmtErr(err) {
+			return result, err
+		}
 	}
 	return db.ExecContext(ctx, query, args...)
+}
+
+// cachedDBTX hands sqlc-generated queries the hot-statement cache: a query
+// whose text is in hotStatements runs on its cached statement, any other text
+// takes the plain dialect-aware queryer. db must be the dialect-translated
+// queryer (newDialectQueryer's result), so a cache miss still gets dialect
+// translation and stmtForQueryer can unwrap it to find a *sql.Tx.
+type cachedDBTX struct {
+	sqlitequery.DBTX
+	s  *Store
+	db queryer
+}
+
+func (c cachedDBTX) ExecContext(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (sql.Result, error) {
+	return c.s.execCached(ctx, c.db, query, args...)
+}
+
+func (c cachedDBTX) QueryRowContext(
+	ctx context.Context,
+	query string,
+	args ...any,
+) *sql.Row {
+	return c.s.queryRowCached(ctx, c.db, query, args...)
+}
+
+// operationalQueriesCached is operationalQueries for callers that run on the
+// write pool or a write transaction, where the hot-statement cache is usable.
+// Use operationalQueries for reads that may run on a separate read pool.
+func (s *Store) operationalQueriesCached(db queryer) *sqlitequery.Queries {
+	translated := newDialectQueryer(db, s.dialect.Name())
+	return sqlitequery.New(cachedDBTX{DBTX: translated, s: s, db: translated})
+}
+
+// readCanUseWriteCache reports whether a read issued through readDBFromTxn(txn)
+// runs on a handle the write-pool hot-statement cache is valid for. A file-
+// backed SQLite store has a distinct read-only pool, whose reads cannot use
+// statements prepared against writeDB.
+func (s *Store) readCanUseWriteCache(txn types.Txn) bool {
+	if s.readDB == s.writeDB {
+		return true
+	}
+	if txn == nil {
+		return false
+	}
+	if sqlTxn, ok := txn.(*sqlTxn); ok && sqlTxn.readOnly {
+		return false
+	}
+	return true
+}
+
+func (s *Store) queryRowsCached(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) (*sql.Rows, error) {
+	if cached, release, ok := s.borrowCachedStmt(query); ok {
+		op, name := classifySQLStatement(query)
+		if s.sqlOperations != nil {
+			s.sqlOperations.WithLabelValues(op).Inc()
+		}
+		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
+		start := time.Now()
+		rows, err := stmt.QueryContext(ctx, args...)
+		release()
+		if s.sqlQueryDuration != nil {
+			s.sqlQueryDuration.WithLabelValues(op, name).
+				Observe(time.Since(start).Seconds())
+		}
+		if !isClosedStmtErr(err) {
+			return rows, err
+		}
+	}
+	return db.QueryContext(ctx, query, args...)
 }

@@ -33,7 +33,11 @@ type cancellableWorkerValidator struct {
 	release chan struct{}
 }
 
-func (v *cancellableWorkerValidator) WithTxValidationSession(ctx context.Context, _ func(func(gledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error, func() bool) error) error {
+func (v *cancellableWorkerValidator) WithTxValidationSession(ctx context.Context, _ func(
+	func(gledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+	func() bool,
+	func(func() error) (bool, error),
+) error) error {
 	v.started <- ctx
 	select {
 	case <-ctx.Done():

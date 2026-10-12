@@ -1161,6 +1161,8 @@ func runFakeDevnetScript(
 	if failRm {
 		writeExecutable(t, filepath.Join(fakeBin, "rm"), failingRmScript)
 	}
+	dockerLogPath := filepath.Join(tempRoot, "docker.log")
+	require.NoError(t, os.WriteFile(dockerLogPath, nil, 0o600))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1171,7 +1173,7 @@ func runFakeDevnetScript(
 	cmd := exec.CommandContext(ctx, "bash", args...)
 	cmd.Dir = root
 	env := map[string]string{
-		"FAKE_DOCKER_LOG":      filepath.Join(tempRoot, "docker.log"),
+		"FAKE_DOCKER_LOG":      dockerLogPath,
 		"FAKE_GO_EXIT":         strconv.Itoa(testExit),
 		"FAKE_GO_COMPILE_EXIT": "0",
 		"MODE":                 "dingo",
@@ -1206,7 +1208,7 @@ func runFakeDevnetScript(
 		filepath.Join(tempRoot, "dingo-devnet-artifacts.*"),
 	)
 	require.NoError(t, err)
-	dockerLog, err := os.ReadFile(filepath.Join(tempRoot, "docker.log"))
+	dockerLog, err := os.ReadFile(dockerLogPath)
 	require.NoError(t, err)
 	return fakeDevnetResult{
 		exitCode:     exitCode,

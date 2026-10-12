@@ -375,7 +375,7 @@ func TestValidateTxDijkstraDecodesBalanceIntervalsFromRawCbor(t *testing.T) {
 		})
 		require.NoError(t, err)
 		txCbor, err := cbor.Encode([]any{
-			cbor.RawMessage(bodyCbor), map[uint]any{}, true, nil,
+			cbor.RawMessage(bodyCbor), map[uint]any{}, nil,
 		})
 		require.NoError(t, err)
 		return txCbor

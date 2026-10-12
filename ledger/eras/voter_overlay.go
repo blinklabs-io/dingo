@@ -75,7 +75,7 @@ func newVoterOverlay(
 	ls lcommon.LedgerState,
 	committee CommitteeCredentialState,
 ) *voterOverlay {
-	voting, _ := ls.(lcommon.CommitteeVotingState)
+	voting, _ := stateCapability[lcommon.CommitteeVotingState](ls)
 	return &voterOverlay{
 		ls:        ls,
 		committee: committee,

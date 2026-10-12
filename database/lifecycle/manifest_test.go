@@ -173,9 +173,15 @@ func TestManifestNegativeLimit(t *testing.T) {
 	require.ErrorContains(t, err, "must be >= 0")
 	require.False(t, ok)
 	require.False(t, constructed, "invalid limit must fail before provider construction")
-	_, ok, err = lifecycle.FetchCloudManifest(context.Background(), registry, "test://bucket/snapshot", lifecycle.WithManifestMaxBytes(3))
+	_, ok, err = lifecycle.FetchCloudManifest(
+		context.Background(),
+		registry,
+		"test://bucket/snapshot",
+		lifecycle.WithManifestMaxBytes(3),
+		lifecycle.WithManifestKey(testTrustKey),
+	)
 	require.True(t, ok)
-	require.ErrorContains(t, err, "does not support manifest options")
+	require.Error(t, err)
 }
 
 // TestManifestRejectsNewerFormatVersion verifies that a manifest whose

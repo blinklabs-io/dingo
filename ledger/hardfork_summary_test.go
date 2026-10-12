@@ -1809,6 +1809,15 @@ func TestHeaderVerificationEpoch_PastHorizonDeferred(t *testing.T) {
 	require.ErrorIs(t, err, errHeaderVerificationDeferred,
 		"past-horizon header must be deferred, not a peer-fault rejection")
 	require.ErrorIs(t, err, hardfork.ErrPastHorizon)
+	require.ErrorIs(t, err, ErrHeaderBeyondForecastHorizon,
+		"chainsync must be able to tell past-horizon apart from other deferrals")
+	require.True(t, IsHeaderVerificationDeferred(err))
+
+	// A slot inside the horizon whose epoch has no nonce yet is deferred for
+	// a different reason and must not be held back as past-horizon.
+	_, err = ls.headerVerificationEpoch(context.Background(), 450_000, false)
+	require.True(t, IsHeaderVerificationDeferred(err))
+	require.NotErrorIs(t, err, ErrHeaderBeyondForecastHorizon)
 }
 
 func TestHardForkSummary_MainnetForecastBoundary(t *testing.T) {
@@ -1942,7 +1951,7 @@ func TestEpochInfoUsesMaterializedEpochPastForecast(t *testing.T) {
 	assert.Equal(t, uint(100), info.LengthInSlots)
 }
 
-func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(
+func TestHardForkSummary_TransitionImpossibleStartsAtEraBoundary(
 	t *testing.T,
 ) {
 	ls := &LedgerState{
@@ -1971,7 +1980,7 @@ func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(
 	assert.Equal(t, hardfork.NewTransitionImpossible(), sum.Transition)
 	require.Len(t, sum.Eras, 1)
 	require.NotNil(t, sum.Eras[0].End)
-	assert.Equal(t, uint64(26_500), sum.Eras[0].End.Slot)
+	assert.Equal(t, uint64(26_000), sum.Eras[0].End.Slot)
 
 	_, err = sum.SlotToEpoch(500)
 	require.NoError(t, err,

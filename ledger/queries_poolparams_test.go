@@ -674,14 +674,17 @@ func TestQueryStakePoolParams_GenesisRelayWireOrderAndBlsKey(t *testing.T) {
 		PublicKey:       repeatedBytes(96, 0x66),
 		PossessionProof: repeatedBytes(48, 0x77),
 	}
-	encodedKey, err := json.Marshal(key)
+	encodedKey, err := json.Marshal(struct {
+		PublicKey       string `json:"blsPubKey"`
+		PossessionProof string `json:"blsPossessionProof"`
+	}{
+		PublicKey:       hex.EncodeToString(key.PublicKey),
+		PossessionProof: hex.EncodeToString(key.PossessionProof),
+	})
 	require.NoError(t, err)
 	var poolID string
 	for id, pool := range genesis.ExtraConfig.StakePools.Data {
-		if pool.Unknown == nil {
-			pool.Unknown = make(map[string]json.RawMessage)
-		}
-		pool.Unknown["blsKey"] = encodedKey
+		pool.LeiosKey = json.RawMessage(encodedKey)
 		genesis.ExtraConfig.StakePools.Data[id] = pool
 		poolID = id
 		break
@@ -756,7 +759,7 @@ func TestQueryStakePoolParams_SnapshotRelayWireOrder(t *testing.T) {
 	require.Contains(t, hex.EncodeToString(gotCbor), "440101a8c0")
 }
 
-func TestInitialPoolsReadsGenesisBlsKeyAlias(t *testing.T) {
+func TestInitialPoolsReadsGenesisLeiosKey(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := cardano.LoadCardanoNodeConfigWithFallback(
@@ -773,11 +776,17 @@ func TestInitialPoolsReadsGenesisBlsKeyAlias(t *testing.T) {
 		PublicKey:       repeatedBytes(96, 0x66),
 		PossessionProof: repeatedBytes(48, 0x77),
 	}
-	encoded, err := json.Marshal(key)
+	encoded, err := json.Marshal(struct {
+		PublicKey       string `json:"blsPubKey"`
+		PossessionProof string `json:"blsPossessionProof"`
+	}{
+		PublicKey:       hex.EncodeToString(key.PublicKey),
+		PossessionProof: hex.EncodeToString(key.PossessionProof),
+	})
 	require.NoError(t, err)
 	var poolID string
 	for id, pool := range genesis.ExtraConfig.StakePools.Data {
-		pool.Unknown["blsKey"] = encoded
+		pool.LeiosKey = encoded
 		genesis.ExtraConfig.StakePools.Data[id] = pool
 		poolID = id
 		break
