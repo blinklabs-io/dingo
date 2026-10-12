@@ -160,7 +160,7 @@ sql-check: sql ## Run sql, then fail when checked-in sqlc output is stale
 
 govulncheck: ## Fail on known vulnerabilities reachable from source, including the Go toolchain/stdlib
 	$(call VERIFY_GO_MODULE,$(GOVULNCHECK_MODULE),$(GOVULNCHECK_VERSION),$(GOVULNCHECK_SUM))
-	$(GOVULNCHECK) $(GO_TAG_FLAGS) ./...
+	GOTOOLCHAIN=auto $(GOVULNCHECK) $(GO_TAG_FLAGS) ./...
 
 $(PROTOC):
 	mkdir -p $(TOOLS_BIN) $(PROTOC_DIR)
