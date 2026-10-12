@@ -425,7 +425,7 @@ func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
 		o.storeLeiosEndorserBlock(
 			point,
 			blockRaw,
-			nil,
+			[]cbor.RawMessage{testDijkstraTx(t, 0), testDijkstraTx(t, 1)},
 			leiosStoreAuthoritative,
 		),
 	)
@@ -947,7 +947,7 @@ func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
-	txRaw := mustCbor(t, "tx0")
+	txRaw := testDijkstraTx(t, 0)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
@@ -982,7 +982,7 @@ func TestEndorserBlockTxHashesByHashReturnsManifestHashes(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point,
 		blockRaw,
-		[]cbor.RawMessage{mustCbor(t, "tx0"), mustCbor(t, "tx1")},
+		[]cbor.RawMessage{testDijkstraTx(t, 0), testDijkstraTx(t, 1)},
 		leiosStoreAuthoritative,
 	))
 
@@ -1271,7 +1271,7 @@ func testDijkstraCertRBRaw(
 
 func testDijkstraTx(t *testing.T, seed byte) cbor.RawMessage {
 	t.Helper()
-	// A complete Dijkstra block transaction: [body, witness_set, aux, is_valid].
+	// A complete Dijkstra block transaction: [body, witness_set, is_valid, aux].
 	txHash := make([]byte, lcommon.Blake2b256Size)
 	txHash[0] = seed
 	return mustCbor(t, []cbor.RawMessage{
@@ -1281,8 +1281,8 @@ func testDijkstraTx(t *testing.T, seed byte) cbor.RawMessage {
 			2: 100_000 + uint64(seed),
 		}),
 		mustCbor(t, map[uint]any{}),
-		mustCbor(t, nil),
 		mustCbor(t, true),
+		mustCbor(t, nil),
 	})
 }
 
@@ -1402,6 +1402,94 @@ func TestValidateLeiosEndorserBlockTxsRejectsWrongSizeAndMalformedBody(
 			)
 		})
 	}
+}
+
+func TestStoreLeiosEndorserBlockRejectsMalformedCompleteBodyBeforePublication(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	blockRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(txRaw),
+			TransactionSize: uint16(len(txRaw)),
+		}},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(
+		77,
+		lcommon.Blake2b256Hash(blockRaw).Bytes(),
+	)
+	o := newTestOuroborosWithLeiosDB(t)
+	o.leiosEBLog.registerConn("relay", nil, nil)
+
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		nil,
+		leiosStorePeerOffered,
+	))
+	publish := o.bindLeiosEndorserBlockSlot(point.Hash, point.Slot)
+	require.NotNil(t, publish)
+	publish()
+	manifestOffer, _ := o.leiosEBLog.next("relay")
+	require.NotNil(t, manifestOffer)
+	require.NotNil(t, manifestOffer.point)
+	o.leiosEBLog.complete("relay", nil, true)
+
+	waitCtx, cancel := context.WithCancel(t.Context())
+	ready := make(chan bool, 1)
+	go func() {
+		ready <- o.waitForLeiosEndorserClosure(
+			waitCtx,
+			point.Slot,
+			point.Hash,
+		)
+	}()
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			o.leiosMu.RLock()
+			defer o.leiosMu.RUnlock()
+			return len(o.leiosClosureWaiters[leiosBlockKey(
+				point.Slot,
+				point.Hash,
+			)]) == 1
+		},
+		time.Second,
+		"closure waiter to register",
+	)
+
+	err = o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStorePeerOffered,
+	)
+	require.ErrorContains(t, err, "decode endorser tx 0")
+	testutil.RequireNoReceive(
+		t,
+		ready,
+		100*time.Millisecond,
+		"malformed transaction must not signal closure readiness",
+	)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.False(t, data.completeTxCache())
+	relayOffer, _ := o.leiosEBLog.next("relay")
+	require.Nil(t, relayOffer)
+
+	cancel()
+	require.False(t, testutil.RequireReceive(
+		t,
+		ready,
+		time.Second,
+		"closure waiter cancellation",
+	))
+	o.StopLeiosPersistWriter()
+	_, err = o.leiosDatabase().GetLeiosEBTxs(point.Hash, point.Slot)
+	require.Error(t, err)
 }
 
 type manifestTxRequester struct {
@@ -1955,7 +2043,7 @@ func TestWaitForLeiosEndorserClosureReturnsWhenAlreadyCached(t *testing.T) {
 		o.storeLeiosEndorserBlock(
 			point,
 			blockRaw,
-			[]cbor.RawMessage{mustCbor(t, "tx0")},
+			[]cbor.RawMessage{testDijkstraTx(t, 0)},
 			leiosStoreAuthoritative,
 		),
 	)
@@ -2001,7 +2089,7 @@ func TestWaitForLeiosEndorserClosureWakesOnStore(t *testing.T) {
 		o.storeLeiosEndorserBlock(
 			point,
 			blockRaw,
-			[]cbor.RawMessage{mustCbor(t, "tx0")},
+			[]cbor.RawMessage{testDijkstraTx(t, 0)},
 			leiosStoreAuthoritative,
 		),
 	)
@@ -2801,8 +2889,8 @@ func TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs(t *testing.T) {
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 2636557, 2)
 	txsRaw := []cbor.RawMessage{
-		mustCbor(t, "tx0"),
-		mustCbor(t, "tx1"),
+		testDijkstraTx(t, 0),
+		testDijkstraTx(t, 1),
 	}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -2875,9 +2963,9 @@ func TestStoreLeiosEndorserBlockKeepsLargerTxSet(t *testing.T) {
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 4242, 3)
 	full := []cbor.RawMessage{
-		mustCbor(t, "tx0"),
-		mustCbor(t, "tx1"),
-		mustCbor(t, "tx2"),
+		testDijkstraTx(t, 0),
+		testDijkstraTx(t, 1),
+		testDijkstraTx(t, 2),
 	}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -2997,7 +3085,7 @@ func TestResolveCertifiedEndorserTxsWithholdsUnverifiedSlot(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		manifestPoint,
 		manifestRaw,
-		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		[]cbor.RawMessage{testDijkstraTx(t, 0)},
 		leiosStorePeerOffered,
 	))
 	data, ok := o.lookupLeiosEndorserBlock(manifestPoint.Slot, ebHash.Bytes())
@@ -3044,7 +3132,7 @@ func TestMaxVerifiedEndorserBlockSlotTracksOnlyCorroboratedSlots(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point,
 		blockRaw,
-		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		[]cbor.RawMessage{testDijkstraTx(t, 0)},
 		leiosStoreAuthoritative,
 	))
 	require.Equal(t, uint64(10), o.MaxVerifiedEndorserBlockSlot())
@@ -3055,7 +3143,7 @@ func TestMaxVerifiedEndorserBlockSlotTracksOnlyCorroboratedSlots(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		offered,
 		offeredRaw,
-		[]cbor.RawMessage{mustCbor(t, "tx1")},
+		[]cbor.RawMessage{testDijkstraTx(t, 1)},
 		leiosStorePeerOffered,
 	))
 	require.Equal(
@@ -3072,7 +3160,7 @@ func TestMaxVerifiedEndorserBlockSlotTracksOnlyCorroboratedSlots(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		older,
 		olderRaw,
-		[]cbor.RawMessage{mustCbor(t, "tx2")},
+		[]cbor.RawMessage{testDijkstraTx(t, 2)},
 		leiosStoreAuthoritative,
 	))
 	require.Equal(t, uint64(10), o.MaxVerifiedEndorserBlockSlot())
@@ -3082,7 +3170,7 @@ func TestMaxVerifiedEndorserBlockSlotTracksOnlyCorroboratedSlots(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		newer,
 		newerRaw,
-		[]cbor.RawMessage{mustCbor(t, "tx3")},
+		[]cbor.RawMessage{testDijkstraTx(t, 3)},
 		leiosStoreAuthoritative,
 	))
 	require.Equal(t, uint64(42), o.MaxVerifiedEndorserBlockSlot())

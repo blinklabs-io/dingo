@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -472,6 +473,20 @@ func validateLeiosEndorserBlockTx(
 	return nil
 }
 
+func validateLeiosEndorserBlockTxStructure(
+	index int,
+	raw cbor.RawMessage,
+) ([]byte, error) {
+	txCbor, err := leiosEndorserBlockTxCbor(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode endorser tx %d envelope: %w", index, err)
+	}
+	if _, err := safedecode.Transaction(gledger.TxTypeDijkstra, txCbor); err != nil {
+		return nil, fmt.Errorf("decode endorser tx %d: %w", index, err)
+	}
+	return txCbor, nil
+}
+
 func leiosEndorserBlockTxCbor(raw cbor.RawMessage) ([]byte, error) {
 	txCbor := []byte(raw)
 	if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
@@ -555,6 +570,20 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if !slices.Equal(blockHash.Bytes(), point.Hash) {
 		return errors.New("leios endorser block cache: point hash mismatch")
 	}
+	block, err := decodeLeiosEndorserBlock(blockRaw)
+	if err != nil {
+		return fmt.Errorf("decode leios endorser block: %w", err)
+	}
+	if len(txsRaw) == len(block.TransactionReferences) {
+		for i, raw := range txsRaw {
+			if _, err := validateLeiosEndorserBlockTxStructure(i, raw); err != nil {
+				return fmt.Errorf(
+					"leios endorser block cache: %w",
+					err,
+				)
+			}
+		}
+	}
 	// Bind the entry to the slot its announcement actually vouched for. A
 	// peer-offered point is only that connection's claim: the manifest is
 	// content-addressed, so an authentic endorser block can be replayed under
@@ -584,15 +613,6 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	o.leiosAnnouncementsMu.Lock()
 	verified := origin == leiosStoreAuthoritative ||
 		o.leiosAnnouncementBindsSlotLocked(point.Hash, point.Slot)
-	// leiosAnnouncementsMu is released by explicit Unlock calls on this path,
-	// not by a defer, so this decode must fail by returning rather than by
-	// unwinding: a panic here would leave the lock held for the life of the
-	// process. As an error it takes the branch below, which unlocks.
-	block, err := decodeLeiosEndorserBlock(blockRaw)
-	if err != nil {
-		o.leiosAnnouncementsMu.Unlock()
-		return fmt.Errorf("decode leios endorser block: %w", err)
-	}
 	cacheKeys := []string{leiosBlockKey(point.Slot, point.Hash)}
 	data := &leiosEndorserBlockData{
 		point:                    point,

@@ -783,7 +783,7 @@ func TestStoreLeiosEndorserBlockAcceptsDifferentSlotOfSameHashWhileFirstIsLive(
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 7, 1)
 	second := ocommon.Point{Slot: point.Slot + 1, Hash: point.Hash}
-	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
+	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
 
 	// This test covers announcement lock ordering; the injected validation
 	// gate is tested separately.
@@ -970,7 +970,7 @@ func TestStoreLeiosEndorserBlockCrossConnectionDifferentSlotsCoexistRegardlessOf
 func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
 	t.Parallel()
 
-	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	txRaw := testDijkstraTx(t, 9)
 	ref := lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txRaw),
 		TransactionSize: uint16(len(txRaw)),
@@ -1041,7 +1041,7 @@ func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
 func TestPeerOfferedLedgerInvalidEndorserBlockIsNotVoted(t *testing.T) {
 	t.Parallel()
 
-	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	txRaw := testDijkstraTx(t, 10)
 	ref := lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txRaw),
 		TransactionSize: uint16(len(txRaw)),
@@ -1230,7 +1230,7 @@ func TestEndorserBlockTxsByHashWithholdsUnverifiedSlotFromLedger(
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 21, 1)
-	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
+	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(
@@ -1607,7 +1607,7 @@ func TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot(t *testing.T) {
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 22, 1)
-	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
+	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(
@@ -1656,7 +1656,7 @@ func TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point,
 		blockRaw,
-		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		[]cbor.RawMessage{testDijkstraTx(t, 0)},
 		leiosStorePeerOffered,
 	))
 	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
