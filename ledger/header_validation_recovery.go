@@ -27,10 +27,11 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// headerValidationError marks a header check that failed after the chain
-// store already persisted the block. This includes deferred registered-VRF-
-// key and Praos leader-eligibility checks at ledger apply, plus stateless
-// VRF/KES/OpCert rejection by the block pipeline's validate path.
+// headerValidationError marks a consensus validation check that failed after
+// the chain store already persisted the block. This includes deferred
+// registered-VRF-key and Praos leader-eligibility checks at ledger apply,
+// stateless VRF/KES/OpCert rejection by the block pipeline's validate path,
+// and Byron body-proof failures discovered while decoding persisted blocks.
 //
 // It exists to make that failure recoverable in the same sense transaction
 // validation failures already are. Rejecting the block is correct and stays

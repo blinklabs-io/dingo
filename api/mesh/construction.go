@@ -447,9 +447,7 @@ func (s *Server) handleConstructionPayloads(
 				))
 				return
 			}
-			// Validate hex and length before calling
-			// NewShelleyTransactionInput, which panics
-			// on invalid input.
+			// Validate the hash before constructing the input.
 			hashBytes, err := hex.DecodeString(
 				parts[0],
 			)
@@ -475,7 +473,7 @@ func (s *Server) handleConstructionPayloads(
 				return
 			}
 			idx, err := strconv.Atoi(parts[1])
-			if err != nil || idx < 0 || uint64(idx) > math.MaxUint32 {
+			if err != nil || idx < 0 || uint64(idx) > math.MaxUint16 {
 				writeError(w, wrapErr(
 					ErrInvalidRequest,
 					fmt.Errorf(
@@ -485,12 +483,14 @@ func (s *Server) handleConstructionPayloads(
 				))
 				return
 			}
-			inputs = append(
-				inputs,
-				shelley.NewShelleyTransactionInput(
-					parts[0], idx,
-				),
+			input, err := shelley.NewShelleyTransactionInput(
+				parts[0], idx,
 			)
+			if err != nil {
+				writeError(w, wrapErr(ErrInvalidRequest, err))
+				return
+			}
+			inputs = append(inputs, input)
 		case OpOutput:
 			if op.Account == nil || op.Amount == nil {
 				writeError(w, wrapErr(

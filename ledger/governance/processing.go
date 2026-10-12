@@ -315,6 +315,9 @@ func ProcessProposals(
 	db *database.Database,
 	txn *database.Txn,
 ) error {
+	if err := validateCostModelLanguageIDs(tx); err != nil {
+		return err
+	}
 	if err := ResetDormantDRepExpiryBeforeCertificates(
 		ctx, tx, point, db, txn,
 	); err != nil {
@@ -408,6 +411,9 @@ func ProcessTransactionEffects(
 	db *database.Database,
 	txn *database.Txn,
 ) error {
+	if err := validateCostModelLanguageIDs(tx); err != nil {
+		return err
+	}
 	if len(tx.VotingProcedures()) > 0 {
 		if err := ProcessVotes(
 			ctx, tx, point, currentEpoch, drepInactivityPeriod, db, txn,
@@ -491,6 +497,30 @@ func ProcessHistoricalTransactionEffects(
 	return nil
 }
 
+func validateCostModelLanguageIDs(tx proposalSource) error {
+	for _, proposal := range tx.ProposalProcedures() {
+		var models map[uint][]int64
+		switch action := proposal.GovAction().(type) {
+		case *conway.ConwayParameterChangeGovAction:
+			if action == nil {
+				continue
+			}
+			models = action.ParamUpdate.CostModels
+		case *gdijkstra.DijkstraParameterChangeGovAction:
+			if action == nil {
+				continue
+			}
+			models = action.ParamUpdate.CostModels
+		default:
+			continue
+		}
+		if err := lcommon.ValidateCostModelLanguageIDs(models); err != nil {
+			return fmt.Errorf("invalid parameter change: %w", err)
+		}
+	}
+	return nil
+}
+
 // ResetDormantDRepExpiryBeforeCertificates applies the proposal-induced
 // dormancy reset at the Conway CERTS boundary, before transaction
 // certificates can calculate DRep expiry epochs.
@@ -544,6 +574,9 @@ func persistGovernanceProposals(
 	db *database.Database,
 	txn *database.Txn,
 ) error {
+	if err := validateCostModelLanguageIDs(tx); err != nil {
+		return err
+	}
 	proposals := tx.ProposalProcedures()
 	if len(proposals) == 0 {
 		return nil

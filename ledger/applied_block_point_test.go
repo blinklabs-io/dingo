@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -224,7 +223,7 @@ func TestReconcileDivergenceUndoesAppliedByronBlock(t *testing.T) {
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)

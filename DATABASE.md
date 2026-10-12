@@ -93,6 +93,48 @@ reload the statistics on each batch's transaction connection before preparing
 the join, so pooled connections with independent planner caches use the updated
 estimates.
 
+SQLite keeps planner statistics current while the node runs. A node synced
+from genesis never ran `ANALYZE`, and without `sqlite_stat1` the planner picks
+indexes by shape alone: the batched spend `UPDATE` in `consumeUtxosBatchQuery`
+plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead
+of a seek on `tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs
+`PRAGMA optimize(0x10002)` (every table, exact rather than sampled statistics)
+on the write connection, outside any transaction, at startup before block
+processing begins and after each epoch rollover commits. Tables without
+statistics are always analyzed; tables with them only after roughly 25-fold
+growth, so a repeat run is near-free, while the first run on a large database
+analyzes every table and takes minutes. The write pool has one connection, so
+writers wait for the run. The run is skipped during a bulk load, and the
+Mithril and backfill `ANALYZE` paths are unchanged. PostgreSQL and MySQL
+report the operation unsupported and are untouched.
+
+A run counts as having changed statistics when a 64-bit FNV-1a hash of every
+`sqlite_stat1` row (`tbl`, `idx` and `stat`, in order) differs before and
+after. Only then does the store refresh state that keeps the old
+numbers. Pooled connections load statistics when they open, and later updates
+do not invalidate other connections' schemas, so for a file-backed store the
+read pool's idle limit is set to zero and restored, closing idle connections so
+the next reader loads the new statistics; a connection checked out during the
+refresh is covered by a five-minute `SetConnMaxLifetime`, which database/sql
+applies only when a connection is idle or returned. When the read and write
+pools are the same (in-memory shared-cache), idle connections are never
+dropped to zero because the database is destroyed with its last connection;
+`ANALYZE sqlite_schema` runs on a held connection instead. The cached hot
+statements are re-prepared and swapped in without leaving the cache empty; a
+replaced statement a caller has already looked up stays open until that call
+returns, and is closed then.
+SQLite already re-plans a statement on the connection that ran the analysis, so
+the swap matters for statements whose cached plan could outlive the change on
+another connection, not for the write connection.
+
+`dingo_database_sql_planner_stats_runs_total{trigger,result}`,
+`dingo_database_sql_planner_stats_duration_seconds{trigger}` and
+`dingo_database_sql_planner_stats_errors_total` report runs
+(`trigger` is `startup` or `epoch`; `result` is `changed`, `unchanged`,
+`skipped` or `error`). `plannerStatsRefreshEnabled` (environment
+`DINGO_PLANNER_STATS_REFRESH_ENABLED`, default true) disables the whole
+mechanism and exists only as an escape hatch.
+
 MCP's `dingo://node/status` reports critical index availability separately from
 background index maintenance and recorded post-backfill statistics. A pending
 background rebuild alone does not make critical index readiness fail. These
@@ -562,14 +604,25 @@ until the locked, offline run succeeds. PostgreSQL/MySQL advisory locks are
 connection-owned for the complete migration run. Bulk-load session settings are held on a dedicated
 connection for the duration of a bulk window and restored before that
 connection returns to the pool. Optional SQLite VACUUM receives the provider
-stop context. The modernc SQLite driver requests `sqlite3_interrupt` when
-`ExecContext` is canceled, and SQLite exits when execution reaches an
-interruptible point. Shutdown can still reach its deadline before an active
+stop context. The SQLite driver requests `sqlite3_interrupt` when an
+`ExecContext` or `QueryContext` context is canceled. A progress callback retains
+cancellation observed before execution, so cancellation during parameter binding
+is not lost when SQLite starts its first active statement. SQLite exits when
+execution reaches an interruptible point; this does not bound blocking I/O or
+user-defined callbacks. Shutdown can still reach its deadline before an active
 VACUUM callback exits; a later close call can wait for that callback to drain.
 
 The Go model `models.Block` has `TableName() == "block"`, but it is not migrated into the metadata database. Blocks are stored in the blob store. SQL rows refer to blocks with `slot`, `block_hash`, and other hash columns. `Block.Decode` is Leios-aware for Conway-tagged blocks (`ledger.BlockTypeConway`): it calls `DecodeConwayBlock` (`database/models/leios_block.go`), which tries gouroboros' strict Conway decoder first and only falls back to reconstructing a Leios-extended block when strict decode fails. This is detection-based, so the Musashi prototype's Conway-tagged blocks (block type 7 carrying a 12-field Leios-extended header body) decode from stored CBOR while real Conway networks (mainnet/preprod/preview) are unaffected. Dijkstra decoding also accepts the earlier four-component block body retained in Musashi history: it maps the body's invalid-transaction index set onto the current per-transaction validity flags for typed access while retaining the original block and body CBOR. Both compatibility decoders preserve the original wire bytes, so `Block.Cbor()` returns the verbatim block and any `DOFF` byte offsets recorded against the stored block CBOR stay valid.
 
 ## API Surface
+
+Genesis CBOR presence queries return `(bool, error)`: only a missing key or an
+exhausted, error-free iterator means absence. Backend errors reach ledger
+startup instead of triggering genesis creation.
+Synthetic genesis is identified by its ID-zero metadata, not merely its slot:
+genuine Byron slot-zero blocks are not a network mismatch. A different stored
+synthetic genesis hash rejects startup rather than creating a second baseline.
+Block-range backfill rejects invalid iterator items instead of skipping data.
 
 Use the Go APIs when code runs inside Dingo:
 
@@ -1449,6 +1502,12 @@ emits nothing while it runs.
 
 ### Midnight Indexer
 
+Block timestamps are resolved before indexing or checkpoint advancement.
+A missing slot timer, conversion error, or negative timestamp fails the
+block; backfill also fails on undecodable block data. The checkpoint remains
+at the last successfully indexed block so restart can retry the failed block.
+Synthetic storage blobs with ID zero are excluded from the chain-block scan.
+
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `midnight_asset_creates` | `id`, `address`, `quantity`, `tx_hash`, `output_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)`; **unique** composite index `(tx_hash, output_index)` (`idx_midnight_asset_creates_utxo_lookup`) | cNIGHT UTxO creations. The unique index enforces one create row per UTxO and makes `Create*` idempotent (ON CONFLICT DO NOTHING) for safe backfill replay. |
@@ -1832,21 +1891,29 @@ leader-threshold rejection.
 `models.RewardStakeCalculationVersion` (`database/models/reward_state.go`)
 identifies the stake-accounting algorithm behind persisted `pool_stake_snapshot`
 and `reward_snapshot` rows; it is bumped whenever that calculation changes so an
-upgrade cannot silently trust an older value. At every startup,
-`StaleConsensusStakeSnapshotsExist` (`database/plugin/metadata/sqlstore/live_stake.go`)
-checks both tables for any Mark/Set/Go `pool_stake_snapshot` row or Mark
-`reward_snapshot` row (authoritative or fallback) carrying a version other than
-the current one, and `Node.backfillRewardLiveStake` (`node.go`) fails closed at
-startup if any are found, naming the affected epochs: such a snapshot cannot be
-safely reconstructed from a pruned database, since recomputing it correctly
-would require replaying that epoch's historical stake distribution.
+upgrade cannot silently trust an older value. Before any schema migration, the
+metadata provider checks consensus snapshot provenance under the migration lock.
+Version-2 snapshots can be certified as version 3 only when the loaded genesis
+contains no initial staking, retained epoch and protocol-parameter history prove
+that Dijkstra has not activated (including its transition boundary), and no
+Leios transaction context exists. Certification changes only the version stamp;
+the stake values remain identical. Missing provenance and affected calculations
+refuse startup before schema changes, preserving the prior binary's schema.
+
+`StaleConsensusStakeSnapshotsExist` remains a second gate before ledger startup:
+any Mark/Set/Go pool snapshot or Mark reward snapshot with an incompatible
+version refuses startup and identifies the affected epochs. Historical stake
+cannot be reconstructed from a pruned database without replay or a trusted
+ledger-state import.
 
 Migration `v15` (`reward-stake-calculation-version-restamp`) upgrades stale
 pre-v2 pool snapshots unconditionally, and Mark reward snapshots only when
-their sigma-denominator inputs can be verified. It cannot certify version 3: Dijkstra moves SNAP after POOLREAP and
+their sigma-denominator inputs can be verified. The startup preflight refuses
+pre-v2 snapshots before a pending v15 migration can run; v15 alone cannot
+certify version 3. Dijkstra moves SNAP after POOLREAP and
 governance enactment, and nonempty genesis staking changes the initial reward
-inputs. Older persisted snapshots require replay or a trusted ledger-state
-import rather than a version stamp.
+inputs. Snapshots outside the verified unchanged case require replay or a trusted
+ledger-state import.
 
 #### Incremental live-UTxO stake maintenance
 
@@ -2666,11 +2733,10 @@ flowchart LR
 The `em`/`et` pair is for historical Leios fetch serving. `em` stores the
 manifest; `et` stores the separately fetched transaction bodies. They are
 written together only when the complete body list is available. Applying a
-referencing ranking block writes a standalone `bp` blob only for a non-empty
-body list. On the CIP path, at least one transaction must also remain after
-deduplication; the Musashi path retains the original list even when all its
-transactions are duplicates. The diagram shows these as separate stages
-because neither representation is inlined into the other.
+certifying ranking block writes a standalone `bp` blob only for a non-empty body
+list, and retains the original list even when all its transactions are
+duplicates. The diagram shows these as separate stages because neither
+representation is inlined into the other.
 
 | Logical key | Value | Used by |
 |---|---|---|
@@ -2817,15 +2883,14 @@ main block outright, as bark's archive-fetch path does, would make
 Byron-era history permanently unretrievable from an S3/GCS-backed node
 instead. See `Hash`'s doc comment in `blockverify.go` for the full account.
 
-Leios also uses the ordinary blob-key namespace for ledger application. An EB
-is not itself part of the ranking-block chain. When a Dijkstra ranking block
-references one (`ledger/leios_apply.go`), `SetGenesisCbor` writes its
-transactions as a standalone CBOR blob under `bp` + EB slot + EB hash if the
-EB has a non-empty body list. The CIP path also requires at least one
-transaction to remain after deduplication; the Musashi path writes the original
-non-empty list even when every transaction is a duplicate. This is the blob
-that transaction `DOFF` offsets resolve through cold extraction, separate from
-the `em`/`et` historical-serving records described above.
+Leios also uses the ordinary blob-key namespace for ledger application. An EB is
+not itself part of the ranking-block chain. When a Dijkstra ranking block
+certifies one (`ledger/leios_apply.go`), `SetGenesisCbor` writes its
+transactions as a standalone CBOR blob under `bp` + EB slot + EB hash if the EB
+has a non-empty body list, writing the original list even when every transaction
+is a duplicate. This is the blob that transaction `DOFF` offsets resolve through
+cold extraction, separate from the `em`/`et` historical-serving records
+described above.
 
 The synthetic `bp` blob has `ID=0` and deliberately has no `bi`/`bh` index
 entries. Chain iteration therefore does not treat it as a real block.
@@ -2833,27 +2898,20 @@ entries. Chain iteration therefore does not treat it as a real block.
 canonical chain query because retained fork blobs may sort before an epoch
 boundary.
 
-The blob transaction boundary depends on `LeiosApplyEndorserBlockTxs`:
+The standalone blob commits separately from the shared block-processing
+transaction, which can cover up to 50 blocks. Keeping large EB blobs out of that
+transaction avoids Badger's per-transaction size limit (`ErrTxnTooBig`) during
+dense backlogs. The blob is idempotent, and transaction ledger effects remain
+associated with the ranking block for rollback. The shared transaction's
+snapshot predates that commit, so `SetGenesisCbor` warms the block LRU with the
+committed blob and `applyEndorserBlock` calls
+`Txn.MarkBlockCborCommittedSeparately(slot, hash)` on the shared transaction.
+When a later offset read in that transaction misses the LRU, `ResolveUtxoCbor`
+reads the marked block through a fresh blob read transaction instead of the
+stale snapshot, which also keeps the block key out of the shared transaction's
+conflict-detection read set. The mark is dropped when the transaction finishes.
 
-- **Musashi / Haskell-conformant path (`false`):** the standalone blob commits
-  separately from the shared block-processing transaction, which can cover up
-  to 50 blocks. Keeping large EB blobs out of that transaction avoids Badger's
-  per-transaction size limit (`ErrTxnTooBig`) during dense backlogs. The blob
-  is idempotent, and transaction ledger effects remain associated with the
-  ranking block for rollback. The shared transaction's snapshot predates that
-  commit, so `SetGenesisCbor` warms the block LRU with the committed blob and
-  `applyEndorserBlock` calls `Txn.MarkBlockCborCommittedSeparately(slot, hash)`
-  on the shared transaction. When a later offset read in that transaction
-  misses the LRU, `ResolveUtxoCbor` reads the marked block through a fresh
-  blob read transaction instead of the stale snapshot, which also keeps the
-  block key out of the shared transaction's conflict-detection read set. The
-  mark is dropped when the transaction finishes.
-- **CIP-conformant path (`true`):** the blob remains in the shared transaction.
-  A later block in the same chunk may spend an EB-produced output and must be
-  able to read the blob through read-your-writes; a separately committed blob
-  is not visible to that transaction's starting snapshot.
-
-Both paths store transaction effects under the referencing ranking block's
+Transaction effects are stored under the certifying ranking block's
 point, so rolling back that ranking block removes the effects. A blob left
 behind by a crash or rollback is harmless and is overwritten on reprocessing.
 Epoch nonce code derives `last_epoch_block_nonce` from the previous epoch's last
@@ -2890,37 +2948,34 @@ floor" to detect and repair a slot-based rollback that left the in-memory
 or below that floor. The row's `nonce` bytes are ignored by that path — only
 `(slot, hash)` are consumed as a rollback point.
 
-Whether the decoded endorser transactions are then applied to the ledger is
-selected by `LedgerStateConfig.LeiosApplyEndorserBlockTxs` (see
-`ARCHITECTURE.md`; wired from the network in `node.go`, false on the Musashi
-prototype and true elsewhere). On the CIP-conformant path (every network except
-Musashi), `LeiosApplyEndorserBlockTxs` persists the transaction-level apply
-data: each endorser transaction's `t` entry and its outputs' `u` entries store
-ordinary `DOFF` references whose `block_slot`/`block_hash` point at the
-standalone `bp` blob above, so cold-extract resolution is identical to
-chain-block transactions. The transactions' metadata rows are recorded under
-the referencing ranking block's point, so a rollback of the ranking block
-removes them (the orphaned endorser-block blob is harmless and re-created on
-reprocess). On the Haskell-conformant path (Musashi,
-`LeiosApplyEndorserBlockTxs` false) the standalone `bp` endorser-block blob
-above is written for historical serving and the node-to-client inline view, and
-the endorser transactions are applied to the ledger with their full effects —
-the same `t`/`u` entries, UTxO/input rows, and certificate/governance rows as
-the CIP-conformant path — but without validation or consumed-input recovery,
-matching the reference ledger's `applyLeiosClosure` (prototype-2026w29,
-`ruleApplyTxValidation` `ValidateNone`): produced outputs and input spends are
-written, and a consumed input absent from the store is left as a no-op instead
-of driving blob recovery (`Database.SetTransactionWithOpts` with
+Only a certified closure reaches the ledger (see `ARCHITECTURE.md`): a ranking
+block without a certificate applies no endorser block. Besides the standalone
+`bp` blob above, which also serves historical fetches and the node-to-client
+inline view, the closure's transaction-level apply data is persisted: each
+endorser transaction's `t` entry and its outputs' `u` entries store ordinary
+`DOFF` references whose `block_slot`/`block_hash` point at the `bp` blob, so
+cold-extract resolution is identical to chain-block transactions. The
+transactions' metadata rows are recorded under the certifying ranking block's
+point, so a rollback of that block removes them (the orphaned endorser-block
+blob is harmless and re-created on reprocess). The endorser transactions are
+fully validated in manifest order against the closure state, including an
+overlay of earlier transactions' produced and consumed UTxOs, before their
+ledger effects are written. They are then applied with their full effects —
+UTxO/input rows and certificate/governance rows — while consumed-input recovery
+remains disabled because validation already established input availability. A
+consumed input absent from the store is left as a no-op instead of driving blob
+recovery (`Database.SetTransactionWithOpts` with
 `SkipConsumedInputRecovery`). A consumed input that is present but already
 spent by a *different* certified endorser transaction is likewise a no-op:
 `SkipConsumedInputRecovery` routes the metadata write through
 `TransactionStore.SetTransactionLeiosClosure`, which skips only that input and
 still writes the transaction's produced outputs and its remaining spends. Two
-certified endorser blocks can name the same input across blocks, and
-`ValidateNone` treats the second consume as `Map.delete` on a missing key;
-returning `ErrUtxoConflict` there wedged block application instead.
-Ranking-block application and the CIP-conformant endorser apply keep
-the hard `ErrUtxoConflict` check, so a real double-spend is still rejected.
+certified endorser blocks can name the same input across blocks; returning
+`ErrUtxoConflict` there wedged block application instead. Validation resolves
+that prior consumed input from spent history, while the current closure's
+consumed overlay still rejects a repeated spend within one closure.
+Ranking-block application keeps the hard `ErrUtxoConflict` check, so a real
+double-spend is still rejected.
 Applying the outputs keeps the UTxO set — and the stake distribution derived
 from it — complete, matching the reference; the prior metadata-only behavior
 omitted the produced outputs, which diverged the UTxO and made downstream
@@ -2936,16 +2991,15 @@ Earlier ranking-block deltas are applied before processing the next Leios
 closure, including during unvalidated historical sync. This preserves input
 availability and stake accounting independently of read-batch boundaries.
 
-On the Musashi prototype path, a certified closure executes on the parent's
-unticked ledger before the certifying ranking block's epoch transition. A closure
-crossing that boundary therefore contributes to the ended epoch's fees and the
-new mark snapshot. `leios_transaction_context` records its transactions' parent
-ledger slot separately from the certifying block's physical slot. Fee sums,
-historical stake and reward reconstruction, pool lifecycle cuts, and key-age
-snapshot reads use that execution context; transaction and effect rows retain
-their physical slots so rollback removes them with the certifier. The context
-rows cascade with their owning transactions. The ordinary ranking body and the
-CIP path have no context override.
+A certified closure executes on the parent's unticked ledger before the
+certifying ranking block's epoch transition. A closure crossing that boundary
+therefore contributes to the ended epoch's fees and the new mark snapshot.
+`leios_transaction_context` records its transactions' parent ledger slot
+separately from the certifying block's physical slot. Fee sums, historical stake
+and reward reconstruction, pool lifecycle cuts, and key-age snapshot reads use
+that execution context; transaction and effect rows retain their physical slots
+so rollback removes them with the certifier. The context rows cascade with their
+owning transactions. The ordinary ranking body has no context override.
 
 Closure effects and the epoch rollover commit together. Transaction Apply events
 wait for the certifying block's commit, survive a failed body retry, and are
@@ -2953,11 +3007,10 @@ discarded when rollback removes the unpublished closure. Even a rollback to the
 unchanged parent tip must remove those pending effects. The migration does not
 reconstruct contexts or reward rounds previously computed with the old ordering;
 affected historical state requires replay from before its first affected boundary.
-On the forward/CIP path, decode/build failures are ignored before storage is
-touched; once the blob or transaction rows start writing, the caller aborts the
+Once the blob or transaction rows start writing, a failure aborts the
 enclosing block transaction rather than committing a partial endorser-block
-application. For a Musashi certifying ranking block, the certified parent EB
-and all of these writes are mandatory. The block-processing transaction is not
+application. For a certifying ranking block, the certified parent EB and all
+of these writes are mandatory. The block-processing transaction is not
 opened until the complete EB closure is available, and resolution, decode, or
 apply failure prevents the CertRB and its metadata tip from committing.
 Historical backfill retries instead of recording a prefix that lacks certified

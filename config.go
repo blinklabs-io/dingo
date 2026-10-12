@@ -281,6 +281,7 @@ type Config struct {
 	blockPipelineValidateEnabled                                                        bool
 	ledgerPrefetchAheadEnabled                                                          bool
 	ledgerApplyRowBatchingEnabled                                                       bool
+	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
@@ -726,6 +727,10 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			Logging:             internalconfig.DefaultLoggingConfig(),
 			Midnight:            internalconfig.DefaultMidnightConfig(),
 			CORSAllowedOrigins:  []string{"*"},
+
+			// SQLite planner statistics stay current unless an operator
+			// opts out; see internalconfig.Config.PlannerStatsRefreshEnabled.
+			PlannerStatsRefreshEnabled: true,
 			Plugins: internalconfig.PluginsConfig{
 				Storage: internalconfig.StoragePluginsConfig{
 					Blob: hostplugin.Selection{
@@ -918,6 +923,7 @@ func (c *Config) syncCompatFields() {
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
+	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
@@ -1719,6 +1725,23 @@ func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 	}
 }
 
+// WithPlannerStatsRefresh controls SQLite's incremental planner-statistics
+// maintenance, run before block processing starts and after each epoch
+// rollover. Enabled by default; pass false only as an escape hatch. Other
+// metadata backends are unaffected.
+func WithPlannerStatsRefresh(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.PlannerStatsRefreshEnabled = enabled
+	}
+}
+
+// PlannerStatsRefreshEnabled reports whether SQLite planner-statistics
+// maintenance is on. A Config without an internal config, as hand-built test
+// configs are, leaves it off.
+func (c *Config) PlannerStatsRefreshEnabled() bool {
+	return c.cfg != nil && c.cfg.PlannerStatsRefreshEnabled
+}
+
 // WithBlockPipelineEnabled enables the parallel block-decode pipeline for the
 // chainsync replay loop (phase 1 of the pipeline). Not consensus-affecting; off
 // by default. See LedgerStateConfig.BlockPipelineEnabled.
@@ -1758,6 +1781,16 @@ func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 func WithLedgerApplyRowBatchingEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerApplyRowBatchingEnabled = enabled
+	}
+}
+
+// WithBlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
+// range of headers is queued while the node is far from the peer tip, instead
+// of waiting for four ranges. The header queue capacity is unchanged. Not
+// consensus-affecting; off by default. See LedgerStateConfig.BlockfetchLowWatermarkEnabled.
+func WithBlockfetchLowWatermarkEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BlockfetchLowWatermarkEnabled = enabled
 	}
 }
 
@@ -2636,6 +2669,12 @@ func (c *Config) LedgerPrefetchAheadEnabled() bool {
 // are applied through the batched metadata write path.
 func (c *Config) LedgerApplyRowBatchingEnabled() bool {
 	return c.cfg.LedgerApplyRowBatchingEnabled
+}
+
+// BlockfetchLowWatermarkEnabled returns whether the far-from-tip blockfetch
+// low watermark is enabled.
+func (c *Config) BlockfetchLowWatermarkEnabled() bool {
+	return c.cfg.BlockfetchLowWatermarkEnabled
 }
 
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.

@@ -400,24 +400,20 @@ func newPathFixture(
 	f.ls = ls
 
 	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber: 1,
-					Slot:        pathBlockSlot,
-					PrevHash:    lcommon.NewBlake2b256(f.originHash),
-					ProtoVersion: babbage.BabbageProtoVersion{
-						Major: dijkstra.MinProtocolVersionDijkstra,
-					},
-				},
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			1,
+			pathBlockSlot,
+			lcommon.NewBlake2b256(f.originHash),
+			lcommon.Blake2b256{},
+			0,
+		),
 	}
 	for _, tx := range f.txs[:len(blockTxs)] {
 		block.BlockBody.Transactions = append(block.BlockBody.Transactions, *tx)
 	}
 	blockBodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	block.BlockHeader.Body.BlockBodySize = uint64(len(blockBodyCbor))
 	f.blockCbor, err = block.MarshalCBOR()
 	require.NoError(t, err)

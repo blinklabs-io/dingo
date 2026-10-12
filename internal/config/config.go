@@ -785,6 +785,12 @@ type Config struct {
 	// proven. See ARCHITECTURE.md ("Block Processing Pipeline").
 	LedgerApplyRowBatchingEnabled bool `yaml:"ledgerApplyRowBatchingEnabled"       envconfig:"DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED"`
 
+	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
+	// range of headers is queued while far from the peer tip, instead of
+	// waiting for four ranges. The header queue capacity is unchanged. Not
+	// consensus-affecting; off by default.
+	BlockfetchLowWatermarkEnabled bool `yaml:"blockfetchLowWatermarkEnabled"          envconfig:"DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED"`
+
 	// Peer targets (0 = use default, -1 = unlimited)
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`
 	TargetNumberOfEstablishedPeers int `yaml:"targetNumberOfEstablishedPeers" envconfig:"DINGO_TARGET_ESTABLISHED_PEERS"`
@@ -977,6 +983,16 @@ type Config struct {
 
 	// Database lifecycle (snapshot/restore/truncate) configuration
 	DatabaseLifecycle DatabaseLifecycleConfig `yaml:"databaseLifecycle"`
+
+	// PlannerStatsRefreshEnabled runs SQLite's incremental planner-statistics
+	// maintenance (PRAGMA optimize) before block processing starts and after
+	// each epoch rollover. A database that never ran ANALYZE has no
+	// sqlite_stat1, and without it some queries scan most of a large table
+	// instead of seeking an index. The first run on a large database
+	// analyzes every table and can take minutes; later runs are near-free.
+	// Enabled by default; this is an escape hatch, not a tuning knob. Other
+	// metadata backends are unaffected.
+	PlannerStatsRefreshEnabled bool `yaml:"plannerStatsRefreshEnabled" envconfig:"DINGO_PLANNER_STATS_REFRESH_ENABLED"`
 
 	// provenance records, for gated fields only, whether their value came
 	// from an operator (CLI flag, environment variable, or YAML file) or
@@ -1484,6 +1500,8 @@ func newDefaultConfig() *Config {
 		// Fail closed: self-validate locally-forged blocks before adoption and
 		// diffusion unless an operator explicitly opts out.
 		ValidateForgedBlock: true,
+		// SQLite planner statistics stay current unless an operator opts out.
+		PlannerStatsRefreshEnabled: true,
 	}
 }
 

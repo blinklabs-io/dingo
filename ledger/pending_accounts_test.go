@@ -326,7 +326,7 @@ func TestValidateTxWithOverlayDeregistersPendingRegistration(t *testing.T) {
 		StakeCredential: fresh,
 		Amount:          pendingKeyDeposit,
 	})
-	deregister := func(amount int64) lcommon.Transaction {
+	deregister := func(amount uint64) lcommon.Transaction {
 		return f.certificateTx(0x02, &lcommon.DeregistrationCertificate{
 			CertType:        uint(lcommon.CertificateTypeDeregistration),
 			StakeCredential: fresh,

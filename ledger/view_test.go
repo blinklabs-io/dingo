@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"strings"
 	"testing"
@@ -90,7 +91,7 @@ func committeeTestAddSpend(
 	paymentKeyHash []byte,
 ) (shelley.ShelleyTransactionInput, lcommon.Address) {
 	t.Helper()
-	input := shelley.NewShelleyTransactionInput(strings.Repeat("a7", 32), 0)
+	input := shelley.MustNewShelleyTransactionInput(strings.Repeat("a7", 32), 0)
 	address := mustCommitteeTestAddress(t, paymentKeyHash)
 	output := &shelley.ShelleyTransactionOutput{
 		OutputAddress: address,
@@ -3613,6 +3614,254 @@ func TestWithTxValidationSessionSurfacesStorageFaultOverNilVerdict(
 	require.ErrorIs(t, err, ErrLedgerViewStorageFault)
 }
 
+func TestWithTxValidationSessionKeepsCommitteeStorageFaultRetryable(
+	t *testing.T,
+) {
+	t.Parallel()
+	stubErr := errors.New("synthetic committee lookup fault")
+	db := newStorageFaultTestDB(t, errInjectingMetadataStore{
+		getCommitteeMembersErr: stubErr,
+	})
+	ls := newFakeEraLedgerState(db, func(
+		_ lcommon.Transaction,
+		_ uint64,
+		view lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) error {
+		provider, ok := view.(interface {
+			CommitteeStateAvailable() (bool, error)
+		})
+		require.True(t, ok)
+		_, err := provider.CommitteeStateAvailable()
+		return err
+	}, nil)
+
+	err := ls.WithTxValidationSession(t.Context(), func(
+		validate func(
+			lcommon.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		_ func() bool,
+		_ func(func() error) (bool, error),
+	) error {
+		return validate(&conway.ConwayTransaction{TxIsValid: true}, nil, nil, nil)
+	})
+
+	require.ErrorIs(t, err, stubErr)
+	require.ErrorIs(t, err, ErrLedgerViewStorageFault)
+	var semanticErr *semanticTxValidationError
+	require.False(t, errors.As(err, &semanticErr))
+}
+
+func TestWithTxValidationSessionKeepsUnavailableUtxoCborRetryable(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+	input := shelley.MustNewShelleyTransactionInput(strings.Repeat("a9", 32), 0)
+	require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
+		TxId:      input.Id().Bytes(),
+		OutputIdx: input.Index(),
+		AddedSlot: 1,
+	}))
+	ls := newFakeEraLedgerState(db, func(
+		_ lcommon.Transaction,
+		_ uint64,
+		view lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) error {
+		_, err := view.UtxoById(input)
+		return err
+	}, nil)
+
+	err := ls.WithTxValidationSession(t.Context(), func(
+		validate func(
+			lcommon.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		_ func() bool,
+		_ func(func() error) (bool, error),
+	) error {
+		return validate(&conway.ConwayTransaction{TxIsValid: true}, nil, nil, nil)
+	})
+
+	require.ErrorIs(t, err, database.ErrUtxoCborUnavailable)
+	require.ErrorIs(t, err, ErrLedgerViewStorageFault)
+	var semanticErr *semanticTxValidationError
+	require.False(t, errors.As(err, &semanticErr))
+}
+
+func TestWithTxValidationSessionClassifiesOnlyKnownSemanticVerdicts(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		validationErr error
+		wantSemantic  bool
+	}{
+		{
+			name:          "unknown validator failure",
+			validationErr: errors.New("validator runtime failure"),
+		},
+		{
+			name: "evaluator configuration failure",
+			validationErr: lcommon.NewValidationError(
+				lcommon.ValidationErrorTypeConfiguration,
+				"evaluator configuration unavailable",
+				nil,
+				errors.New("cost model setup failed"),
+			),
+		},
+		{
+			name: "injected transaction-shaped failure",
+			validationErr: lcommon.NewValidationError(
+				lcommon.ValidationErrorTypeTransaction,
+				"invalid witness",
+				nil,
+				nil,
+			),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+			ls := newFakeEraLedgerState(db, func(
+				_ lcommon.Transaction,
+				_ uint64,
+				_ lcommon.LedgerState,
+				_ lcommon.ProtocolParameters,
+			) error {
+				return tc.validationErr
+			}, nil)
+
+			err := ls.WithTxValidationSession(t.Context(), func(
+				validate func(
+					lcommon.Transaction,
+					map[utxoref.Key]struct{},
+					map[utxoref.Key]lcommon.Utxo,
+					*utxoref.StateOverlay,
+				) error,
+				_ func() bool,
+				_ func(func() error) (bool, error),
+			) error {
+				return validate(
+					&conway.ConwayTransaction{TxIsValid: true}, nil, nil, nil,
+				)
+			})
+
+			require.ErrorIs(t, err, tc.validationErr)
+			var semanticErr *semanticTxValidationError
+			require.Equal(t, tc.wantSemantic, errors.As(err, &semanticErr))
+		})
+	}
+}
+
+func TestDijkstraValidationKeepsMissingProviderStateRetryable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		setup    func(*testing.T, *database.Database)
+		validate func(lcommon.LedgerState) error
+	}{
+		{
+			name: "constitution",
+			validate: func(state lcommon.LedgerState) error {
+				provider, ok := state.(interface {
+					Constitution() (*lcommon.Constitution, error)
+				})
+				if !ok {
+					return errors.New("constitution provider unavailable")
+				}
+				_, err := provider.Constitution()
+				return err
+			},
+		},
+		{
+			name: "malformed constitution",
+			setup: func(t *testing.T, db *database.Database) {
+				require.NoError(t, db.SetConstitution(&models.Constitution{
+					AnchorURL:  "https://example.invalid/malformed",
+					AnchorHash: []byte{0x01},
+					AddedSlot:  1,
+				}, nil))
+			},
+			validate: func(state lcommon.LedgerState) error {
+				provider, ok := state.(interface {
+					Constitution() (*lcommon.Constitution, error)
+				})
+				if !ok {
+					return errors.New("constitution provider unavailable")
+				}
+				_, err := provider.Constitution()
+				return err
+			},
+		},
+		{
+			name: "treasury",
+			validate: func(state lcommon.LedgerState) error {
+				provider, ok := state.(interface {
+					TreasuryValue() (uint64, error)
+				})
+				if !ok {
+					return errors.New("treasury provider unavailable")
+				}
+				_, err := provider.TreasuryValue()
+				return err
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
+			if tc.setup != nil {
+				tc.setup(t, db)
+			}
+			ls := newFakeEraLedgerState(db, nil, nil)
+			era := eras.DijkstraEraDesc
+			era.ValidateTxFunc = func(
+				_ lcommon.Transaction,
+				_ uint64,
+				state lcommon.LedgerState,
+				_ lcommon.ProtocolParameters,
+			) error {
+				return tc.validate(state)
+			}
+			ls.currentEra = era
+			ls.activeEras = []eras.EraDesc{era}
+			ls.currentPParams = &dijkstra.DijkstraProtocolParameters{}
+			ls.publishSnapshotsLocked()
+
+			err := ls.WithTxValidationSession(t.Context(), func(
+				validate func(
+					lcommon.Transaction,
+					map[utxoref.Key]struct{},
+					map[utxoref.Key]lcommon.Utxo,
+					*utxoref.StateOverlay,
+				) error,
+				_ func() bool,
+				_ func(func() error) (bool, error),
+			) error {
+				return validate(
+					&dijkstra.DijkstraTransaction{TxIsValid: true}, nil, nil, nil,
+				)
+			})
+
+			require.ErrorIs(t, err, ErrLedgerViewStorageFault)
+			var semanticErr *semanticTxValidationError
+			require.False(t, errors.As(err, &semanticErr))
+		})
+	}
+}
+
 func TestTxValidationCommitExcludesLedgerPublication(t *testing.T) {
 	t.Parallel()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
@@ -4433,6 +4682,35 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Zero(t, *got)
+
+	overflow := bytes.Repeat([]byte{0xa5}, lcommon.AddressHashSize)
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+		StakingKey: overflow,
+		Reward:     types.Uint64(math.MaxUint64),
+		Active:     true,
+	}))
+	require.NoError(t, db.Metadata().SetPendingRewardCreditRounds(
+		[]models.RewardCreditRound{{SnapshotEpoch: 8, BoundarySlot: 50}},
+		nil,
+	))
+	require.NoError(t, db.Metadata().SaveRewardAccountOutputs(
+		[]*models.RewardAccountOutput{{
+			StakingKey:    overflow,
+			PoolKeyHash:   bytes.Repeat([]byte{0xa6}, lcommon.Blake2b224Size),
+			RewardType:    "member",
+			Epoch:         8,
+			CredentialTag: 0,
+			Amount:        1,
+			Spendable:     true,
+			CapturedSlot:  40,
+			BoundarySlot:  50,
+		}},
+		nil,
+	))
+	got, err = lv.RewardAccountBalance(credential(0, overflow))
+	require.Error(t, err)
+	require.Nil(t, got)
+	require.ErrorIs(t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault)
 
 	_, err = lv.RewardAccountBalance(lcommon.Credential{CredType: 2})
 	require.Error(t, err)
@@ -6198,6 +6476,9 @@ func TestLedgerViewCommitteeHotAuthorizationRejectsMalformedSeatedColdHash(
 			member, err := lv.CommitteeHotCredentialMember(hot)
 			require.Nil(t, member)
 			require.ErrorContains(t, err, "invalid blake2b-224 hash")
+			require.ErrorIs(
+				t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault,
+			)
 			coldCredentials, err := lv.CommitteeHotCredentialColdCredentials(
 				hot,
 			)
@@ -6214,6 +6495,355 @@ func TestLedgerViewCommitteeHotAuthorizationRejectsMalformedSeatedColdHash(
 			require.ErrorContains(t, err, "invalid blake2b-224 hash")
 		})
 	}
+}
+
+func TestLedgerViewCommitteeMemberRejectsMalformedStoredIdentity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		tag  uint8
+		hash []byte
+	}{
+		{
+			name: "cold credential tag",
+			tag:  2,
+			hash: bytes.Repeat([]byte{0xa1}, lcommon.Blake2b224Size),
+		},
+		{
+			name: "cold credential hash",
+			tag:  uint8(lcommon.CredentialTypeAddrKeyHash),
+			hash: bytes.Repeat([]byte{0xa2}, lcommon.Blake2b224Size-1),
+		},
+	}
+	lookups := []struct {
+		name string
+		call func(*LedgerView, lcommon.Credential) error
+	}{
+		{
+			name: "legacy member",
+			call: func(lv *LedgerView, cold lcommon.Credential) error {
+				_, err := lv.CommitteeMember(cold.Credential)
+				return err
+			},
+		},
+		{
+			name: "credential member",
+			call: func(lv *LedgerView, cold lcommon.Credential) error {
+				_, err := lv.CommitteeCredentialMember(cold)
+				return err
+			},
+		},
+		{
+			name: "elected member",
+			call: func(lv *LedgerView, cold lcommon.Credential) error {
+				_, err := lv.CommitteeCredentialIsElected(cold)
+				return err
+			},
+		},
+		{
+			name: "member list",
+			call: func(lv *LedgerView, _ lcommon.Credential) error {
+				_, err := lv.CommitteeMembers()
+				return err
+			},
+		},
+	}
+	for _, tc := range tests {
+		for _, lookup := range lookups {
+			t.Run(tc.name+"/"+lookup.name, func(t *testing.T) {
+				t.Parallel()
+				lv, db := committeeTestView(
+					t, committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin),
+				)
+				raw, err := dbtest.RawSQLiteMetadata(t, db)
+				require.NoError(t, err)
+				_, err = raw.Exec(`
+INSERT INTO committee_member (
+    cold_cred_hash, cold_credential_tag, expires_epoch,
+    term_start_slot, term_start_slot_set, added_slot
+) VALUES (?, ?, ?, ?, TRUE, ?)`, tc.hash, tc.tag, 10, 1, 1)
+				require.NoError(t, err)
+
+				err = lookup.call(lv, committeeTestCredential(0xaf))
+				require.Error(t, err)
+				require.ErrorIs(
+					t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault,
+				)
+			})
+		}
+	}
+}
+
+func TestLedgerViewCommitteeAuthorizationRejectsMalformedStoredIdentity(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	validCold := bytes.Repeat([]byte{0xb1}, lcommon.Blake2b224Size)
+	validHot := bytes.Repeat([]byte{0xb2}, lcommon.Blake2b224Size)
+	tests := []struct {
+		name    string
+		coldTag uint8
+		cold    []byte
+		hotTag  uint8
+		hot     []byte
+	}{
+		{
+			name: "cold credential tag", coldTag: 2, cold: validCold,
+			hotTag: uint8(lcommon.CredentialTypeAddrKeyHash), hot: validHot,
+		},
+		{
+			name:    "cold credential hash",
+			coldTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+			cold:    validCold[:len(validCold)-1],
+			hotTag:  uint8(lcommon.CredentialTypeAddrKeyHash), hot: validHot,
+		},
+		{
+			name:    "hot credential tag",
+			coldTag: uint8(lcommon.CredentialTypeAddrKeyHash), cold: validCold,
+			hotTag: 2, hot: validHot,
+		},
+		{
+			name:    "hot credential hash",
+			coldTag: uint8(lcommon.CredentialTypeAddrKeyHash), cold: validCold,
+			hotTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+			hot:    validHot[:len(validHot)-1],
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lv, db := committeeTestView(
+				t, committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin),
+			)
+			raw, err := dbtest.RawSQLiteMetadata(t, db)
+			require.NoError(t, err)
+			_, err = raw.Exec(`
+INSERT INTO auth_committee_hot (
+    cold_credential_tag, cold_credential, hot_credential_tag,
+    host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?, ?, ?)`,
+				tc.coldTag, tc.cold, tc.hotTag, tc.hot, 1, 1,
+			)
+			require.NoError(t, err)
+
+			member, err := lv.CommitteeHotCredentialMember(
+				committeeTestCredential(0xbf),
+			)
+			require.Error(t, err)
+			require.Nil(t, member)
+			require.ErrorIs(
+				t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault,
+			)
+		})
+	}
+}
+
+func TestLedgerViewMissingCommitteeIdentityRemainsAbsent(t *testing.T) {
+	t.Parallel()
+
+	lv, _ := committeeTestView(
+		t, committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin),
+	)
+	cold := committeeTestCredential(0xc1)
+	hot := committeeTestCredential(0xc2)
+	legacy, err := lv.CommitteeMember(cold.Credential)
+	require.NoError(t, err)
+	require.Nil(t, legacy)
+	member, err := lv.CommitteeCredentialMember(cold)
+	require.NoError(t, err)
+	require.Nil(t, member)
+	elected, err := lv.CommitteeCredentialIsElected(cold)
+	require.NoError(t, err)
+	require.False(t, elected)
+	hotMember, err := lv.CommitteeHotCredentialMember(hot)
+	require.NoError(t, err)
+	require.Nil(t, hotMember)
+	members, err := lv.CommitteeMembers()
+	require.NoError(t, err)
+	require.Empty(t, members)
+	require.NoError(t, storageFaultOrErr(lv, nil))
+}
+
+func TestLedgerViewDRepDelegationRejectsMalformedStoredState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		drepType uint64
+		drep     []byte
+	}{
+		{
+			name: "unknown type", drepType: 4,
+			drep: bytes.Repeat([]byte{0xd1}, lcommon.Blake2b224Size),
+		},
+		{
+			name: "short key credential", drepType: models.DrepTypeAddrKeyHash,
+			drep: bytes.Repeat([]byte{0xd2}, lcommon.Blake2b224Size-1),
+		},
+		{
+			name: "empty script credential", drepType: models.DrepTypeScriptHash,
+		},
+		{
+			name:     "predefined type with credential",
+			drepType: models.DrepTypeAlwaysAbstain,
+			drep:     bytes.Repeat([]byte{0xd3}, lcommon.Blake2b224Size),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, db := committeeTestView(
+				t, committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin),
+			)
+			raw, err := dbtest.RawSQLiteMetadata(t, db)
+			require.NoError(t, err)
+			stake := bytes.Repeat([]byte{0xd4}, lcommon.Blake2b224Size)
+			_, err = raw.Exec(`
+INSERT INTO account (
+    staking_key, drep, reward, active, added_slot, credential_tag, drep_type
+) VALUES (?, ?, '0', TRUE, 1, 0, ?)`, stake, tc.drep, tc.drepType)
+			require.NoError(t, err)
+
+			ls := newFakeEraLedgerState(db, func(
+				_ lcommon.Transaction,
+				_ uint64,
+				state lcommon.LedgerState,
+				_ lcommon.ProtocolParameters,
+			) error {
+				provider, ok := state.(interface {
+					DRepDelegation(lcommon.Credential) (*lcommon.Drep, error)
+				})
+				require.True(t, ok)
+				_, err := provider.DRepDelegation(lcommon.Credential{
+					CredType:   lcommon.CredentialTypeAddrKeyHash,
+					Credential: lcommon.NewBlake2b224(stake),
+				})
+				return err
+			}, nil)
+			err = ls.WithTxValidationSession(t.Context(), func(
+				validate func(
+					lcommon.Transaction,
+					map[utxoref.Key]struct{},
+					map[utxoref.Key]lcommon.Utxo,
+					*utxoref.StateOverlay,
+				) error,
+				_ func() bool,
+				_ func(func() error) (bool, error),
+			) error {
+				return validate(
+					&conway.ConwayTransaction{TxIsValid: true}, nil, nil, nil,
+				)
+			})
+			require.Error(t, err)
+			require.ErrorIs(t, err, ErrLedgerViewStorageFault)
+			var semanticErr *semanticTxValidationError
+			require.False(t, errors.As(err, &semanticErr))
+		})
+	}
+}
+
+func TestLedgerViewDRepDelegationPreservesAbsence(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing account", func(t *testing.T) {
+		t.Parallel()
+		lv, _ := committeeTestView(
+			t, committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin),
+		)
+		delegation, err := lv.DRepDelegation(committeeTestCredential(0xd5))
+		require.NoError(t, err)
+		require.Nil(t, delegation)
+		require.NoError(t, lv.StorageErr())
+	})
+
+	t.Run("default empty delegation", func(t *testing.T) {
+		t.Parallel()
+		lv, db := committeeTestView(
+			t, committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin),
+		)
+		raw, err := dbtest.RawSQLiteMetadata(t, db)
+		require.NoError(t, err)
+		stake := bytes.Repeat([]byte{0xd6}, lcommon.Blake2b224Size)
+		_, err = raw.Exec(`
+INSERT INTO account (
+    staking_key, reward, active, added_slot, credential_tag, drep_type
+) VALUES (?, '0', TRUE, 1, 0, ?)`, stake, models.DrepTypeAddrKeyHash)
+		require.NoError(t, err)
+
+		delegation, err := lv.DRepDelegation(lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(stake),
+		})
+		require.NoError(t, err)
+		require.Nil(t, delegation)
+		require.NoError(t, lv.StorageErr())
+	})
+}
+
+func TestWithTxValidationSessionKeepsMalformedVrfPoolKeyRetryable(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, _ := newStoredHashDB(t, func(store *storedHashStore) {
+		store.poolByVrfKeyHash = &models.Pool{
+			PoolKeyHash: bytes.Repeat([]byte{0xd7}, lcommon.Blake2b224Size-1),
+		}
+	})
+	ls := newFakeEraLedgerState(db, func(
+		_ lcommon.Transaction,
+		_ uint64,
+		state lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) error {
+		_, _, err := state.IsVrfKeyInUse(lcommon.Blake2b256{0xd8})
+		return err
+	}, nil)
+
+	err := ls.WithTxValidationSession(t.Context(), func(
+		validate func(
+			lcommon.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		_ func() bool,
+		_ func(func() error) (bool, error),
+	) error {
+		return validate(&conway.ConwayTransaction{TxIsValid: true}, nil, nil, nil)
+	})
+
+	require.ErrorIs(t, err, ErrLedgerViewStorageFault)
+	var semanticErr *semanticTxValidationError
+	require.False(t, errors.As(err, &semanticErr))
+}
+
+func TestLedgerViewCommitteeProposalDecodeRecordsStorageFault(t *testing.T) {
+	t.Parallel()
+
+	pparams := committeeVotingConway.pparams(lcommon.ProtocolVersionPlomin)
+	lv, db := committeeTestView(t, pparams)
+	cold := committeeTestCredential(0x94)
+	require.NoError(t, db.SetGovernanceProposal(
+		context.Background(),
+		&models.GovernanceProposal{
+			TxHash:        governanceTestHash(0x95),
+			ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
+			ProposedEpoch: 0,
+			ExpiresEpoch:  100,
+			AnchorHash:    make([]byte, 32),
+			ReturnAddress: make([]byte, 29),
+			GovActionCbor: []byte{0xff},
+		},
+		nil,
+	))
+
+	member, err := lv.CommitteeCredentialMember(cold)
+	require.Error(t, err)
+	require.Nil(t, member)
+	require.ErrorIs(t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault)
 }
 
 // incorrectRefundSubstring is the message
@@ -6262,7 +6892,7 @@ func drepRefundTestCredential(seed byte) lcommon.Credential {
 // ledger state reports for the credential.
 func drepDeregistrationTx(
 	cred lcommon.Credential,
-	refund int64,
+	refund uint64,
 ) *conway.ConwayTransaction {
 	cert := &lcommon.DeregistrationDrepCertificate{
 		CertType:       uint(lcommon.CertificateTypeDeregistrationDrep),
@@ -6432,6 +7062,28 @@ func TestDRepRegistrationReportsNilForUnregisteredCredential(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, regs, 1)
 	require.Nil(t, regs[0].Deposit)
+}
+
+func TestDRepRegistrationRecordsMalformedStoredAnchor(t *testing.T) {
+	t.Parallel()
+
+	lv, db := newStakeRefundTestView(t)
+	cred := drepRefundTestCredential(0xd5)
+	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
+	require.NoError(t, err)
+	require.NoError(t, db.CreateDrep(t.Context(), nil, &models.Drep{
+		CredentialTag: tag,
+		Credential:    append([]byte(nil), cred.Credential[:]...),
+		AnchorURL:     "https://example.invalid/malformed",
+		AnchorHash:    []byte{0x01},
+		AddedSlot:     100,
+		Active:        true,
+	}))
+
+	reg, err := lv.DRepRegistration(cred)
+	require.Error(t, err)
+	require.Nil(t, reg)
+	require.ErrorIs(t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault)
 }
 
 // inconsistentDepositSubstring is the message

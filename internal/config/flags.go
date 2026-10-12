@@ -749,6 +749,12 @@ var flagSpecs = []flagSpec{
 		"in core storage mode, write the deltas of blocks that are not validated with multi-row batched inserts instead of per-row statements, as API mode always does (not consensus-affecting; default off)",
 	),
 
+	boolFlag(
+		"BlockfetchLowWatermarkEnabled",
+		"blockfetch-low-watermark-enabled",
+		"start blockfetch once one range of headers is queued while far from the peer tip, instead of waiting for four ranges; the header queue capacity is unchanged (not consensus-affecting; default off)",
+	),
+
 	// Block production
 	boolFlag("BlockProducer", "block-producer", "enable block production mode"),
 	stringFlag(
@@ -840,6 +846,11 @@ var flagSpecs = []flagSpec{
 		"ValidateForgedBlock",
 		"validate-forged-block",
 		"validate forged blocks before adoption and diffusion (header crypto, body hash, per-tx ledger rules)",
+	),
+	boolFlag(
+		"PlannerStatsRefreshEnabled",
+		"planner-stats-refresh-enabled",
+		"keep SQLite planner statistics current with PRAGMA optimize at startup and after each epoch rollover",
 	),
 
 	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)

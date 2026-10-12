@@ -126,7 +126,7 @@ func testUtxoOrderingAssetFilter(t *testing.T, store *Store) {
 	for i, out := range outputs {
 		utxos = append(utxos, models.UtxoSlot{
 			Utxo: ledger.Utxo{
-				Id:     shelley.NewShelleyTransactionInput(txHash(i+1), 0),
+				Id:     shelley.MustNewShelleyTransactionInput(txHash(i+1), 0),
 				Output: out,
 			},
 			Slot: 1,
