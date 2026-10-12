@@ -803,6 +803,9 @@ func mergeFuturePoolParams(
 	future []ParsedPool,
 	warning error,
 ) error {
+	if pools == nil {
+		return errors.New("future pool params without current pool params")
+	}
 	byHash := make(map[string]int, len(pools))
 	for i := range pools {
 		byHash[string(pools[i].PoolKeyHash)] = i
