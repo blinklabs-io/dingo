@@ -36,7 +36,9 @@ import (
 // precompute complete, leaving the round credited and every credit unfolded.
 func creditedRewardRound(t *testing.T) *epochBoundaryBenchFixture {
 	t.Helper()
-	f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
+	shape := epochBoundaryDumpShape()
+	shape.delegators = 248
+	f := newEpochBoundaryBenchFixture(t, shape, "")
 	require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
 		epochBoundaryBenchPrecomputeEvent(),
 	))

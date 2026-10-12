@@ -245,6 +245,42 @@ func testLeiosEndorserBlockRawWithRefs(
 	return ocommon.NewPoint(uint64(idx), hash.Bytes()), cbor.RawMessage(raw)
 }
 
+func TestRetryableLeiosEndorserBlocksPreferNewestOccurrence(t *testing.T) {
+	t.Parallel()
+
+	entry := func(slot uint64, hashByte byte) *leiosEndorserBlockData {
+		return &leiosEndorserBlockData{
+			point: ocommon.Point{
+				Slot: slot,
+				Hash: []byte{hashByte},
+			},
+			blockRaw:              []byte{0x80},
+			announcementHeaderRaw: []byte{0x80},
+			slotVerified:          true,
+		}
+	}
+	oldest := entry(40, 0x03)
+	newerB := entry(42, 0x02)
+	newerA := entry(42, 0x01)
+	notVerified := entry(43, 0x00)
+	notVerified.slotVerified = false
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	o.leiosEndorserBlocks = map[string]*leiosEndorserBlockData{
+		"oldest":        oldest,
+		"newer-b":       newerB,
+		"newer-a":       newerA,
+		"newer-a-alias": newerA,
+		"not-verified":  notVerified,
+	}
+
+	require.Equal(
+		t,
+		[]*leiosEndorserBlockData{newerA, newerB, oldest},
+		o.retryableLeiosEndorserBlocks(),
+	)
+}
+
 func TestMergedLeiosRankingBlockCborIsNoopForDijkstra(t *testing.T) {
 	t.Parallel()
 
@@ -297,10 +333,16 @@ func TestLeiosFetchServerMissingDataUsesUnavailableErrors(t *testing.T) {
 	require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
 }
 
-func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
+func TestLeiosFetchServerBlockTxsServesAvailableBodiesWhileIncomplete(t *testing.T) {
 	t.Parallel()
 
-	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
+	tx0, ref0 := testLeiosManifestTx(t, 0)
+	tx1, ref1 := testLeiosManifestTx(t, 1)
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref0, ref1},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(10, lcommon.Blake2b256Hash(blockRaw).Bytes())
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
@@ -308,20 +350,61 @@ func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
 		o.storeLeiosEndorserBlock(
 			point,
 			blockRaw,
-			[]cbor.RawMessage{mustCbor(t, "tx0")},
+			nil,
 			leiosStoreAuthoritative,
 		),
+	)
+	o.retainLeiosPartialTxs(
+		point.Slot,
+		point.Hash,
+		[]cbor.RawMessage{nil, tx1},
+		nil,
 	)
 
 	msg, err := o.leiosfetchServerBlockTxsRequest(
 		oleiosfetch.CallbackContext{},
 		point,
-		map[uint16]uint64{0: 0b11},
+		map[uint16]uint64{0: 1 << 63},
 	)
-	require.Error(t, err)
-	require.Nil(t, msg)
-	require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
-	require.Contains(t, err.Error(), "txs not available")
+	require.NoError(t, err)
+	response, ok := msg.(*oleiosfetch.MsgBlockTxs)
+	require.True(t, ok)
+	require.Equal(t, point, response.Point)
+	require.NotNil(t, response.Bitmaps)
+	require.Empty(t, response.Bitmaps)
+	require.Empty(t, response.TxsRaw)
+
+	msg, err = o.leiosfetchServerBlockTxsRequest(
+		oleiosfetch.CallbackContext{},
+		point,
+		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
+	)
+	require.NoError(t, err)
+	response, ok = msg.(*oleiosfetch.MsgBlockTxs)
+	require.True(t, ok)
+	require.Equal(t, point, response.Point)
+	require.Equal(t, map[uint16]uint64{0: 1 << 62}, response.Bitmaps)
+	require.Equal(t, []cbor.RawMessage{tx1}, response.TxsRaw)
+
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			[]cbor.RawMessage{tx0, tx1},
+			leiosStoreAuthoritative,
+		),
+	)
+	msg, err = o.leiosfetchServerBlockTxsRequest(
+		oleiosfetch.CallbackContext{},
+		point,
+		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
+	)
+	require.NoError(t, err)
+	response, ok = msg.(*oleiosfetch.MsgBlockTxs)
+	require.True(t, ok)
+	require.Nil(t, response.Bitmaps)
+	require.Equal(t, []cbor.RawMessage{tx0, tx1}, response.TxsRaw)
 }
 
 func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
@@ -335,7 +418,7 @@ func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
 		o.storeLeiosEndorserBlock(
 			point,
 			blockRaw,
-			[]cbor.RawMessage{mustCbor(t, "tx0"), mustCbor(t, "tx1")},
+			nil,
 			leiosStoreAuthoritative,
 		),
 	)

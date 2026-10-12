@@ -44,6 +44,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -701,6 +702,7 @@ type LedgerStateConfig struct {
 	ForgedBlockChecker          ForgedBlockChecker
 	SlotBattleRecorder          SlotBattleRecorder
 	EndorserBlockProvider       EndorserBlockProviderFunc
+	EndorserBlockValidation     EndorserBlockValidationFunc
 	// RecordBlockfetchThroughputFunc receives each completed batch's
 	// delivery rate: the bytes that followed the first block and the time
 	// they took to arrive.
@@ -723,19 +725,14 @@ type LedgerStateConfig struct {
 	// is the bound for when it is actually available to fetch) rather than a
 	// hardcoded duration; the ledger converts it to wall-clock using the
 	// Shelley slot length. Zero disables best-effort announcement waiting, but
-	// does not permit a Musashi certifying ranking block to commit without its
+	// does not permit a certifying ranking block to commit without its
 	// certified closure.
 	EndorserBlockWaitSlots uint64
-	// LeiosApplyEndorserBlockTxs selects the endorser-block ledger path. When
-	// true (the CIP-conformant path, dingo's forward behavior for real Leios),
-	// a referenced endorser block's transactions are applied to the UTxO set.
-	// When false (the Haskell-conformant path, matching prototype-2026w29), only
-	// the certified parent announcement is applied, with full effects but without
-	// validation or consumed-input recovery. Set from the network in node.go
-	// (false on musashi, true otherwise).
-	LeiosApplyEndorserBlockTxs bool
 	// ValidateLeiosCertificate verifies a Dijkstra certificate before any
-	// certified endorser-block transactions are fetched or applied.
+	// certified endorser-block transactions are fetched or applied. An error
+	// wrapping ErrLeiosInvalidCertificate is a verdict that the certificate
+	// does not verify, and the certifying block is rejected. Any other error
+	// means the certificate could not be checked, and the block is retried.
 	ValidateLeiosCertificate func(
 		epoch uint64,
 		announcingBlockHash []byte,
@@ -780,9 +777,8 @@ type LedgerStateConfig struct {
 	// only way to bypass that.
 	SkipLeaderStakeThresholdCheck bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
-	// validation rule set entirely. On the Haskell-conformant Musashi path,
-	// certified closure and ranking-block transactions are trusted because the
-	// prototype does not validate endorser-block transactions. Running dingo's
+	// validation rule set entirely. On Musashi, ranking-block transactions are
+	// trusted because the prototype does not validate them. Running dingo's
 	// rule set only to discard any disagreement is
 	// wasted work that prevents the node from reaching tip under load. Set true
 	// on Musashi in node.go via Config.prototypeTrustBypassesEnabled, which
@@ -920,6 +916,28 @@ type EndorserBlockProviderFunc func(
 	ebHash []byte,
 	ebSlot uint64,
 ) (txs []cbor.RawMessage, ok bool)
+
+// EndorserBlockValidationStatus reports the semantic-validation state of one
+// cached endorser-block occurrence.
+type EndorserBlockValidationStatus uint8
+
+const (
+	// EndorserBlockValidationUnknown means no cached verdict is available.
+	EndorserBlockValidationUnknown EndorserBlockValidationStatus = iota
+	// EndorserBlockValidationPending means validation has not completed.
+	EndorserBlockValidationPending
+	// EndorserBlockValidationValid means cached validation succeeded.
+	EndorserBlockValidationValid
+	// EndorserBlockValidationInvalid means cached validation rejected the block.
+	EndorserBlockValidationInvalid
+)
+
+// EndorserBlockValidationFunc reports the cached semantic verdict for an
+// endorser block identified by hash and slot.
+type EndorserBlockValidationFunc func(
+	ebHash []byte,
+	ebSlot uint64,
+) EndorserBlockValidationStatus
 
 // EndorserBlockFetcherFunc actively fetches the endorser block identified by
 // (ebSlot, ebHash) over leios-fetch (manifest plus all transaction bodies) and
@@ -7737,12 +7755,21 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			}
 
 			var untickedClosure ledger.Block
-			if snapshotEra.Id == dijkstra.EraIdDijkstra && !ls.config.LeiosApplyEndorserBlockTxs && len(cachedNextBatch) > 0 {
+			if snapshotEra.Id == dijkstra.EraIdDijkstra && len(cachedNextBatch) > 0 {
 				boundary := cachedNextBatch[0]
 				if certifier, ok := boundary.Header().(leiosEndorserBlockCertifier); ok {
 					if certified, present := certifier.LeiosCertified(); present && certified {
 						if err := ls.ensureReferencedEndorserBlocks(ctx, []ledger.Block{boundary}); err != nil {
 							completeReadResult()
+							recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
+								err,
+							)
+							if recoverErr != nil {
+								return fmt.Errorf("recover rejected Leios certifying block: %w", recoverErr)
+							}
+							if recovered {
+								return errRestartLedgerPipeline
+							}
 							return err
 						}
 						untickedClosure = boundary
@@ -8261,6 +8288,21 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					precheck,
 				); err != nil {
 					completeReadResult()
+					// A block the pre-check rejects is already on the
+					// primary chain, so a plain restart would re-read it.
+					// Rewind past it as a rejected block.
+					recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
+						err,
+					)
+					if recoverErr != nil {
+						return fmt.Errorf(
+							"recover rejected Leios certifying block: %w",
+							recoverErr,
+						)
+					}
+					if recovered {
+						return errRestartLedgerPipeline
+					}
 					return fmt.Errorf(
 						"ensure referenced Leios endorser blocks: %w",
 						err,
@@ -9106,15 +9148,13 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 	var blockDonation uint64
-	// Apply the relevant Leios endorser block's transactions before the ranking
-	// block's own. On the forward/CIP path this is the current block's announced
-	// EB. On the Musashi prototype-2026w29 path it is the certified EB announced
-	// by the parent; a CertRB may simultaneously announce a different, new EB.
-	// Decode/build failures remain best-effort on the forward/CIP path. On the
-	// Musashi certificate-driven path every certified closure is mandatory, so
-	// resolution, availability, decode, and apply failures abort the block.
-	// Storage-phase failures always abort the DB transaction so a partial
-	// endorser-block application cannot be committed.
+	// A certifying ranking block applies the certified closure -- the EB its
+	// parent announced -- before its own transactions; a CertRB may also
+	// announce a different, new EB, which is not applied. A ranking block
+	// without a certificate applies no EB. Every certified closure is
+	// mandatory, so resolution, availability, decode, and apply failures abort
+	// the block, and storage-phase failures abort the DB transaction so a
+	// partial endorser-block application cannot be committed.
 	if dijkstraEraGate(currentEra) {
 		if err := ls.validateDijkstraLeiosCertificate(ctx, block, nil); err != nil {
 			return nil, fmt.Errorf(
@@ -9125,8 +9165,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if ls.config.EndorserBlockProvider == nil {
 			if certifier, ok := block.Header().(leiosEndorserBlockCertifier); ok {
 				if certified, present := certifier.LeiosCertified(); present &&
-					certified &&
-					!ls.config.LeiosApplyEndorserBlockTxs {
+					certified {
 					return nil, fmt.Errorf(
 						"%w: ranking block at slot %d has no endorser block provider",
 						errCertifiedEndorserBlockUnavailable,
@@ -9135,25 +9174,17 @@ func (ls *LedgerState) ledgerProcessBlock(
 				}
 			}
 		} else {
-			ebHash, ebSlot, ebSize, referenced, refErr := ls.leiosEndorserBlockForApply(
+			ebHash, ebSlot, referenced, refErr := ls.leiosEndorserBlockForApply(
 				ctx,
 				block,
 			)
 			switch {
 			case refErr != nil:
-				if !ls.config.LeiosApplyEndorserBlockTxs {
-					return nil, fmt.Errorf(
-						"%w: resolve certified endorser block at slot %d: %w",
-						errCertifiedEndorserBlockUnavailable,
-						point.Slot,
-						refErr,
-					)
-				}
-				ls.config.Logger.Warn(
-					"failed to resolve Leios endorser block for ranking block",
-					"component", "ledger",
-					"slot", point.Slot,
-					"error", refErr,
+				return nil, fmt.Errorf(
+					"%w: resolve certified endorser block at slot %d: %w",
+					errCertifiedEndorserBlockUnavailable,
+					point.Slot,
+					refErr,
 				)
 			case referenced:
 				// ebSlot is the expected slot leiosEndorserBlockForApply
@@ -9169,79 +9200,64 @@ func (ls *LedgerState) ledgerProcessBlock(
 					ebHash.Bytes(),
 					ebSlot,
 				)
-				if ok {
-					var donation uint64
-					applied, donation, err := ls.applyEndorserBlock(
-						ctx,
-						txn,
-						point,
-						block.BlockNumber(),
-						ebSlot,
-						ebHash.Bytes(),
-						ebTxs,
+				if !ok {
+					return nil, fmt.Errorf(
+						"%w: ranking block at slot %d requires EB %s",
+						errCertifiedEndorserBlockUnavailable,
+						point.Slot,
+						ebHash.String(),
 					)
-					var storageErr *leiosEndorserBlockStorageError
-					switch {
-					case errors.As(err, &storageErr):
-						ls.config.Logger.Warn(
-							"failed to apply Leios endorser block after storage mutation",
-							"component", "ledger",
-							"slot", point.Slot,
-							"eb_slot", ebSlot,
-							"error", err,
-						)
-						return nil, err
-					case err != nil:
-						if !ls.config.LeiosApplyEndorserBlockTxs {
-							return nil, fmt.Errorf(
-								"%w: apply certified endorser block at slot %d: %w",
-								errCertifiedEndorserBlockUnavailable,
-								point.Slot,
-								err,
-							)
-						}
-						ls.config.Logger.Warn(
-							"failed to apply Leios endorser block transactions",
-							"component", "ledger",
-							"slot", point.Slot,
-							"eb_slot", ebSlot,
-							"error", err,
-						)
-					default:
-						ls.logLeiosEndorserBlockApplyResult(
-							point,
-							ebSlot,
-							ebTxs,
-							applied,
-						)
-						blockDonation, err = addUint64(blockDonation, donation)
-						if err != nil {
-							return nil, fmt.Errorf(
-								"accumulate leios endorser block donation: %w",
-								err,
-							)
-						}
-					}
-				} else {
-					if !ls.config.LeiosApplyEndorserBlockTxs {
-						return nil, fmt.Errorf(
-							"%w: ranking block at slot %d requires EB %s",
-							errCertifiedEndorserBlockUnavailable,
-							point.Slot,
-							ebHash.String(),
-						)
-					}
-					ls.config.Logger.Debug(
-						"ranking block references an endorser block not yet cached",
+				}
+				applied, donation, err := ls.applyEndorserBlock(
+					ctx,
+					txn,
+					point,
+					block.BlockNumber(),
+					ebSlot,
+					ebHash.Bytes(),
+					ebTxs,
+				)
+				var storageErr *leiosEndorserBlockStorageError
+				var validationErr *leiosEndorserBlockValidationError
+				switch {
+				case errors.As(err, &validationErr):
+					return nil, ls.rejectLeiosCertifyingBlock(
+						block,
+						validationErr,
+					)
+				case errors.As(err, &storageErr):
+					ls.config.Logger.Warn(
+						"failed to apply Leios endorser block after storage mutation",
 						"component", "ledger",
 						"slot", point.Slot,
-						"eb_hash", ebHash.String(),
-						"eb_size", ebSize,
+						"eb_slot", ebSlot,
+						"error", err,
+					)
+					return nil, err
+				case err != nil:
+					return nil, fmt.Errorf(
+						"%w: apply certified endorser block at slot %d: %w",
+						errCertifiedEndorserBlockUnavailable,
+						point.Slot,
+						err,
+					)
+				}
+				ls.logLeiosEndorserBlockApplyResult(
+					point,
+					ebSlot,
+					ebTxs,
+					applied,
+				)
+				blockDonation, err = addUint64(blockDonation, donation)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"accumulate leios endorser block donation: %w",
+						err,
 					)
 				}
 			default:
 				ls.config.Logger.Debug(
-					"dijkstra block has no Leios endorser block to apply",
+					"dijkstra block has no certified Leios endorser block to apply",
 					"component", "ledger",
 					"slot", point.Slot,
 				)
@@ -9335,9 +9351,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 			// Standard Dijkstra/CIP profiles validate ranking-block transactions
 			// even when the referenced endorser block is unavailable; missing
 			// endorser-resident inputs then produce a validation error. Skip
-			// Dijkstra validation only on the Haskell-conformant prototype path
-			// (Musashi, SkipDijkstraTxValidation), where endorser transactions
-			// are stored but not applied and the Leios certificate is trusted.
+			// Dijkstra validation only on the Musashi prototype
+			// (SkipDijkstraTxValidation), which trusts its ranking-block
+			// transactions.
 			skipDijkstraValidation := ls.skipDijkstraTxValidation(
 				validationEra.Id,
 			)
@@ -13661,11 +13677,11 @@ func resolveValidationEra(
 	}
 	txEra := eras.GetEraByIdIn(eraList, txEraId)
 	if txEra == nil {
-		return eras.EraDesc{}, fmt.Errorf(
+		return eras.EraDesc{}, &localTxValidationError{err: fmt.Errorf(
 			"TX %s era %d not found in era registry",
 			tx.Hash(),
 			txEraId,
-		)
+		)}
 	}
 	return *txEra, nil
 }
@@ -13724,6 +13740,33 @@ var ErrLeiosValidationParentUnavailable = errors.New(
 var ErrLeiosValidationParentSuperseded = errors.New(
 	"leios announcing parent is no longer the current ledger tip",
 )
+
+// ErrInvalidLeiosEndorserBlockTransactions marks a deterministic transaction
+// verdict for an endorser block. Other validation errors describe local state
+// or storage failures and remain retryable.
+var ErrInvalidLeiosEndorserBlockTransactions = errors.New(
+	"invalid leios endorser block transactions",
+)
+
+type semanticTxValidationError struct {
+	err error
+}
+
+func (e *semanticTxValidationError) Error() string { return e.err.Error() }
+func (e *semanticTxValidationError) Unwrap() error { return e.err }
+
+type localTxValidationError struct {
+	err error
+}
+
+func (e *localTxValidationError) Error() string { return e.err.Error() }
+func (e *localTxValidationError) Unwrap() error { return e.err }
+
+func isSemanticTxValidationError(err error) bool {
+	var eraMismatch *ledger.EraMismatch
+	return errors.As(err, &eraMismatch) ||
+		eras.IsSemanticRuleValidationError(err)
+}
 
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 	consensusState, tipState := ls.loadStateSnapshots()
@@ -13813,7 +13856,7 @@ func (ls *LedgerState) WithTxValidationSession(ctx context.Context,
 		commitIfCurrent func(func() error) (bool, error),
 	) error,
 ) error {
-	return ls.withTxValidationSession(ctx, nil, nil, false, func(
+	return ls.withTxValidationSession(ctx, nil, nil, false, false, func(
 		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
@@ -13827,6 +13870,7 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 	expectedParentHash []byte,
 	referenceSlot *uint64,
 	readWrite bool,
+	leiosClosureSemantics bool,
 	fn func(
 		validate func(
 			tx ledger.Transaction,
@@ -13862,8 +13906,22 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
 			accounts *utxoref.StateOverlay,
 		) error {
+			if leiosClosureSemantics {
+				if err := ls.loadLeiosSpentInputs(
+					ctx,
+					txn,
+					tx,
+					consumedUtxos,
+					createdUtxos,
+				); err != nil {
+					return fmt.Errorf("load TX input state: %w", err)
+				}
+			}
 			validationEra, pp, isCurrentEraPParams, err := snapshot.validationContext(tx)
 			if err != nil {
+				if isSemanticTxValidationError(err) {
+					return &semanticTxValidationError{err: err}
+				}
 				return err
 			}
 			if validationEra.ValidateTxFunc == nil {
@@ -13901,12 +13959,19 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 				)
 			}
 			err = storageFaultOrErr(lv, err)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			if err != nil {
-				return fmt.Errorf(
+				validationErr := fmt.Errorf(
 					"TX %s failed validation: %w",
 					tx.Hash(),
 					err,
 				)
+				if isSemanticTxValidationError(err) {
+					return &semanticTxValidationError{err: validationErr}
+				}
+				return validationErr
 			}
 			return nil
 		}
@@ -13932,6 +13997,7 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 			blockNumber uint64,
 		) error {
 			delta := NewLedgerDelta(point, eraID, blockNumber)
+			delta.skipConsumedInputRecovery = leiosClosureSemantics
 			delta.addTransaction(tx, index)
 			defer delta.Release()
 			offset := database.CborOffset{BlockSlot: point.Slot}
@@ -13987,16 +14053,24 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 		return errors.New("nil Leios announcing header")
 	}
 	if len(txs) == 0 {
-		return errors.New("leios endorser block has no transactions")
+		return fmt.Errorf(
+			"%w: leios endorser block has no transactions",
+			ErrInvalidLeiosEndorserBlockTransactions,
+		)
 	}
 	var totalBytes uint64
 	for i, txCbor := range txs {
 		if len(txCbor) == 0 {
-			return fmt.Errorf("leios endorser transaction %d is empty", i)
+			return fmt.Errorf(
+				"%w: leios endorser transaction %d is empty",
+				ErrInvalidLeiosEndorserBlockTransactions,
+				i,
+			)
 		}
 		if uint64(len(txCbor)) > (16<<20)-totalBytes {
-			return errors.New(
-				"leios endorser block exceeds validation byte limit",
+			return fmt.Errorf(
+				"%w: leios endorser block exceeds validation byte limit",
+				ErrInvalidLeiosEndorserBlockTransactions,
 			)
 		}
 		totalBytes += uint64(len(txCbor))
@@ -14013,6 +14087,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 	return ls.withTxValidationSession(ctx,
 		parentHash,
 		&slot,
+		true,
 		true,
 		func(
 			validate func(
@@ -14037,13 +14112,14 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 					}
 					return ErrLeiosValidationParentUnavailable
 				}
-				tx, err := ledger.NewTransactionFromCbor(
+				tx, err := safedecode.Transaction(
 					ledger.TxTypeDijkstra,
 					txCbor,
 				)
 				if err != nil {
 					return fmt.Errorf(
-						"decode leios endorser transaction %d: %w",
+						"%w: decode leios endorser transaction %d: %w",
+						ErrInvalidLeiosEndorserBlockTransactions,
 						i,
 						err,
 					)
@@ -14060,6 +14136,15 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 				// applyTx stages account effects in the session's write
 				// transaction, so no separate account overlay is passed.
 				if err := validate(tx, consumed, created, nil); err != nil {
+					if _, ok := errors.AsType[*semanticTxValidationError](err); ok {
+						return fmt.Errorf(
+							"%w: leios endorser transaction %d at slot %d: %w",
+							ErrInvalidLeiosEndorserBlockTransactions,
+							i,
+							slot,
+							err,
+						)
+					}
 					return fmt.Errorf(
 						"leios endorser transaction %d at slot %d: %w",
 						i,
