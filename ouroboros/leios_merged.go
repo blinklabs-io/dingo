@@ -970,7 +970,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		return nil
 	}
 	if isNilInterface(o.leiosAnnouncementLedger) {
-		return errors.New("Leios announcement ledger unavailable")
+		return errors.New("leios announcement ledger unavailable")
 	}
 	if o.ledgerState != nil && !slices.Equal(
 		o.ledgerState.Tip().Point.Hash,
@@ -1011,7 +1011,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		o.leiosMu.RUnlock()
 		if !complete {
 			return errors.New(
-				"Leios endorser closure unavailable with tail retry disabled",
+				"leios endorser closure unavailable with tail retry disabled",
 			)
 		}
 	} else if !o.waitForLeiosEndorserClosure(
@@ -1022,7 +1022,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		if err := waitCtx.Err(); err != nil {
 			return fmt.Errorf("wait for Leios endorser closure: %w", err)
 		}
-		return errors.New("Leios endorser closure unavailable")
+		return errors.New("leios endorser closure unavailable")
 	}
 	key := leiosBlockKey(header.SlotNumber(), ebHash.Bytes())
 	data, ok := o.lookupLeiosEndorserBlock(
@@ -1030,7 +1030,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		ebHash.Bytes(),
 	)
 	if !ok || data == nil || !data.completeTxCache() || !data.slotVerified {
-		return errors.New("Leios endorser closure unavailable after wakeup")
+		return errors.New("leios endorser closure unavailable after wakeup")
 	}
 	if err := validateLeiosEndorserBlockBinding(header, data); err != nil {
 		return err
@@ -1042,7 +1042,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		current := o.leiosEndorserBlocks[key]
 		if current == nil {
 			o.leiosMu.Unlock()
-			return errors.New("Leios endorser closure changed before validation")
+			return errors.New("leios endorser closure changed before validation")
 		}
 		sameParent := slices.Equal(
 			current.semanticValidationParent,
@@ -1056,7 +1056,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		case current.semanticValidationStatus == leiosEBValidationInvalid &&
 			sameParent:
 			o.leiosMu.Unlock()
-			return errors.New("Leios endorser closure failed semantic validation")
+			return errors.New("leios endorser closure failed semantic validation")
 		case current.semanticValidationStatus == leiosEBValidationPending &&
 			sameParent:
 			done := current.semanticValidationDone
@@ -1116,7 +1116,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		return err
 	}
 	if validated == nil {
-		return errors.New("Leios endorser closure changed during validation")
+		return errors.New("leios endorser closure changed during validation")
 	}
 	o.publishValidatedLeiosEndorserBlock(
 		validated.point.Slot,
