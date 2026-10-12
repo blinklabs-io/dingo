@@ -340,14 +340,17 @@ func (o *Ouroboros) fetchEndorserBlockByPointWithConnections(
 	)
 	var lastErr, busyErr error
 	usableConnection := false
-	remainingCandidates := len(candidates)
+	remainingCandidates := len(connIds)
 	var preferredConn *ouroboros.Connection
 	if len(candidates) > 0 {
 		preferredConn = candidates[0].conn
 	}
 	for _, candidate := range candidates {
-		remainingCandidates--
 		connId := candidate.connId
+		if candidate.conn == nil && preferredConn != nil && connId == preferredConn.Id() {
+			continue
+		}
+		remainingCandidates--
 		if err := ctx.Err(); err != nil {
 			if lastErr == nil {
 				lastErr = err
