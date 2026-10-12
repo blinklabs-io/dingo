@@ -13918,6 +13918,19 @@ func isSemanticTxValidationError(err error) bool {
 		eras.IsSemanticRuleValidationError(err)
 }
 
+// LeiosValidationParentHash returns the canonical ledger-point hash named by
+// an announcing header. The first block uses a null prev_hash on the wire, but
+// the typed header accessor represents it as a zero Blake2b-256 value while
+// the ledger origin point has an empty hash. Block number zero proves this is
+// that origin representation; every later block retains its exact 32 bytes.
+func LeiosValidationParentHash(header ledger.BlockHeader) []byte {
+	parentHash := header.PrevHash()
+	if header.BlockNumber() == 0 && parentHash == (lcommon.Blake2b256{}) {
+		return make([]byte, 0)
+	}
+	return parentHash.Bytes()
+}
+
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 	consensusState, tipState := ls.loadStateSnapshots()
 	tipSlot := tipState.currentTip.Point.Slot
@@ -14229,7 +14242,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 		ctx = context.Background() //nolint:contextcheck // literal-nil fallback
 	}
 	slot := header.SlotNumber()
-	parentHash := header.PrevHash().Bytes()
+	parentHash := LeiosValidationParentHash(header)
 	parentIsCurrentTip := func() bool {
 		_, currentTip := ls.loadStateSnapshots()
 		return bytes.Equal(currentTip.currentTip.Point.Hash, parentHash)

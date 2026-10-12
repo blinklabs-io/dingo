@@ -2100,6 +2100,95 @@ func TestValidateLeiosEndorserBlockForHeaderWaitsForRemoteBody(t *testing.T) {
 	require.Len(t, votes.ebs, 1)
 }
 
+func TestValidateLeiosEndorserBlockForHeaderAcceptsForgedGenesisParent(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(txRaw),
+			TransactionSize: uint16(len(txRaw)),
+		}},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(71, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	var headerTop []cbor.RawMessage
+	_, err = cbor.Decode(headerRaw, &headerTop)
+	require.NoError(t, err)
+	var headerBody []cbor.RawMessage
+	_, err = cbor.Decode(headerTop[0], &headerBody)
+	require.NoError(t, err)
+	headerBody[0] = mustCbor(t, uint64(0))
+	headerBody[2] = cbor.RawMessage{0xf6}
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRaw, err = cbor.Encode(headerTop)
+	require.NoError(t, err)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+	require.Zero(t, header.PrevHash())
+
+	validationLedger := &fakeLeiosAnnouncementLedger{}
+	o := newTestOuroborosWithLeiosDB(t)
+	o.leiosAnnouncementLedger = validationLedger
+	defer func() { require.NoError(t, o.Close()) }()
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStoreAuthoritative,
+	))
+
+	require.NoError(t, o.ValidateLeiosEndorserBlockForHeader(t.Context(), header))
+	require.Equal(t, 1, validationLedger.txValidated)
+}
+
+func TestValidateLeiosEndorserBlockForHeaderRejectsNonOriginParentMismatch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 72)
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	var headerTop []cbor.RawMessage
+	_, err := cbor.Decode(headerRaw, &headerTop)
+	require.NoError(t, err)
+	var headerBody []cbor.RawMessage
+	_, err = cbor.Decode(headerTop[0], &headerBody)
+	require.NoError(t, err)
+	headerBody[0] = mustCbor(t, uint64(1))
+	headerBody[2] = mustCbor(t, make([]byte, lcommon.Blake2b256Size))
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRaw, err = cbor.Encode(headerTop)
+	require.NoError(t, err)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+
+	o := newTestOuroborosWithLeiosDB(t)
+	o.leiosAnnouncementLedger = &fakeLeiosAnnouncementLedger{}
+	defer func() { require.NoError(t, o.Close()) }()
+
+	require.ErrorIs(
+		t,
+		o.ValidateLeiosEndorserBlockForHeader(t.Context(), header),
+		ledger.ErrLeiosValidationParentUnavailable,
+	)
+}
+
 func TestValidateLeiosEndorserBlockForHeaderBindsBodyArrivingAfterWait(
 	t *testing.T,
 ) {

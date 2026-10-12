@@ -880,7 +880,7 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 	if err != nil {
 		return
 	}
-	parentHash := header.PrevHash().Bytes()
+	parentHash := ledger.LeiosValidationParentHash(header)
 	key := leiosBlockKey(point.Slot, point.Hash)
 	o.leiosValidationMu.Lock()
 	if o.leiosValidationClosed || o.leiosValidationSlots == nil {
@@ -948,7 +948,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	}
 	if o.ledgerState != nil && !slices.Equal(
 		o.ledgerState.Tip().Point.Hash,
-		header.PrevHash().Bytes(),
+		ledger.LeiosValidationParentHash(header),
 	) {
 		return ledger.ErrLeiosValidationParentUnavailable
 	}
@@ -1009,7 +1009,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	if err := validateLeiosEndorserBlockBinding(header, data); err != nil {
 		return err
 	}
-	validationParent := header.PrevHash().Bytes()
+	validationParent := ledger.LeiosValidationParentHash(header)
 	var pending leiosEndorserBlockData
 	for {
 		o.leiosMu.Lock()
@@ -1110,7 +1110,7 @@ func (o *Ouroboros) retainSelectedLeiosHeader(
 		return nil, errors.New("selected Leios header has no preserved CBOR")
 	}
 	key := leiosBlockKey(header.SlotNumber(), ebHash.Bytes())
-	parentKey := string(header.PrevHash().Bytes())
+	parentKey := string(ledger.LeiosValidationParentHash(header))
 	raw := slices.Clone(header.Cbor())
 	rawKey := string(raw)
 	o.leiosMu.Lock()
