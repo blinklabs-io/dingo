@@ -2055,12 +2055,13 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.PoolRegistration, error)
 
-	// GetPoolRegistrationsEffectiveForEpoch retrieves, per requested pool,
-	// the registration whose parameters the ledger's pool-params map held
-	// during the ended epoch [epochStartSlot, snapshotSlot]. Re-registrations
-	// submitted during that epoch are future params (promoted after SNAP)
-	// and excluded; pools that freshly entered the params map during the
-	// epoch use their earliest in-epoch certificate.
+	// GetPoolRegistrationsEffectiveForEpoch retrieves the registration
+	// selected for each pool by the supplied epoch window. It considers the
+	// latest registration or retirement before epochStartSlot, then uses the
+	// earliest registration in [epochStartSlot, snapshotSlot] only for pools
+	// without an earlier registration. Callers whose SNAP follows POOLREAP
+	// set epochStartSlot to the incoming boundary so registrations from the
+	// just-ended epoch are included in the pre-epoch selection.
 	GetPoolRegistrationsEffectiveForEpoch(
 		[]lcommon.PoolKeyHash,
 		uint64, // epochStartSlot

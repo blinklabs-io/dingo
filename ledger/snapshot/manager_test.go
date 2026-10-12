@@ -474,11 +474,54 @@ func TestCaptureGenesisSnapshot_FreshSync(t *testing.T) {
 
 func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
 	t.Parallel()
+	for _, tc := range []struct {
+		name            string
+		protocolVersion uint
+		pledge          uint64
+		cost            uint64
+		margin          string
+	}{
+		{
+			name:            "Conway",
+			protocolVersion: lcommon.ProtocolVersionDijkstra - 1,
+			pledge:          1_000_000,
+			cost:            340_000_000,
+			margin:          "1/100",
+		},
+		{
+			name:            "Dijkstra",
+			protocolVersion: lcommon.ProtocolVersionDijkstra,
+			pledge:          2_000_000,
+			cost:            500_000_000,
+			margin:          "1/10",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			testHandleEpochTransitionPersistsRewardStateInputs(
+				t,
+				tc.protocolVersion,
+				tc.pledge,
+				tc.cost,
+				tc.margin,
+			)
+		})
+	}
+}
+
+func testHandleEpochTransitionPersistsRewardStateInputs(
+	t *testing.T,
+	protocolVersion uint,
+	expectedPledge uint64,
+	expectedCost uint64,
+	expectedMargin string,
+) {
 
 	db := setupTestDB(t)
 
 	seedEpochs(t, db, []models.Epoch{
-		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+		{EpochId: 0, StartSlot: 100, LengthInSlots: 431900},
 	})
 
 	poolHash := []byte("poolR_12345678901234567890AB")
@@ -490,7 +533,7 @@ func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
 			stakingKey:  []byte("reward_staking_key_123456789"),
 			utxoAmounts: []types.Uint64{50_000_000},
 		},
-	}, 500)
+	}, 50)
 	raw := snapshotSQLDB(t, db)
 	var poolID uint
 	require.NoError(t, raw.QueryRow(
@@ -501,7 +544,7 @@ func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
 	require.NoError(t, raw.QueryRow(`
 SELECT id FROM pool_registration
 WHERE pool_id = ? AND added_slot = ?`,
-		poolID, 500,
+		poolID, 50,
 	).Scan(&registrationID))
 	rewardAccount := []byte("reward_account_1234567890123")
 	require.Len(t, rewardAccount, 28)
@@ -532,11 +575,23 @@ INSERT INTO pool_registration_owner (
 		nil,
 		nil,
 	))
-	_, err = raw.Exec(`
+	result, err := raw.Exec(`
 INSERT INTO pool_registration (
-    pool_id, pool_key_hash, added_slot, pledge, cost, margin
-) VALUES (?, ?, 750, '2000000', '500000000', '1/10')`,
-		poolID, poolHash,
+    pool_id, pool_key_hash, added_slot, pledge, cost, margin,
+    reward_account, reward_account_credential_tag
+) VALUES (?, ?, 750, '2000000', '500000000', '1/10', ?, 1)`,
+		poolID, poolHash, rewardAccount,
+	)
+	require.NoError(t, err)
+	updatedRegistrationID, err := result.LastInsertId()
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO pool_registration_owner (
+    pool_registration_id, pool_id, key_hash
+) VALUES (?, ?, ?)`,
+		updatedRegistrationID,
+		poolID,
+		[]byte("reward_staking_key_123456789"),
 	)
 	require.NoError(t, err)
 	for _, row := range []models.PoolOpCertSequence{
@@ -563,8 +618,8 @@ VALUES (?, ?, ?)`,
 		NewEpoch:        1,
 		BoundarySlot:    432000,
 		EpochNonce:      []byte{0x01, 0x02, 0x03},
-		ProtocolVersion: 8,
-		SnapshotSlot:    1000,
+		ProtocolVersion: protocolVersion,
+		SnapshotSlot:    431999,
 	}
 	require.NoError(t, mgr.handleEpochTransition(context.Background(), evt))
 
@@ -578,10 +633,10 @@ VALUES (?, ?, ?)`,
 	)
 	require.Equal(t, uint64(1), rewardSnapshot.TotalPoolCount)
 	require.Equal(t, uint64(1), rewardSnapshot.TotalDelegators)
-	require.Equal(t, uint64(1000), rewardSnapshot.CapturedSlot)
+	require.Equal(t, uint64(431999), rewardSnapshot.CapturedSlot)
 	require.Equal(t, uint64(432000), rewardSnapshot.BoundarySlot)
 	require.Equal(t, []byte{0x01, 0x02, 0x03}, rewardSnapshot.EpochNonce)
-	require.Equal(t, uint(8), rewardSnapshot.ProtocolVersion)
+	require.Equal(t, protocolVersion, rewardSnapshot.ProtocolVersion)
 
 	inputs, err := db.Metadata().GetRewardPoolInputs(1, nil)
 	require.NoError(t, err)
@@ -591,15 +646,15 @@ VALUES (?, ?, ?)`,
 	require.Equal(t, uint64(1), *inputs[0].BlocksProduced)
 	require.NotNil(t, inputs[0].TotalBlocksInEpoch)
 	require.Equal(t, uint64(2), *inputs[0].TotalBlocksInEpoch)
-	require.Equal(t, uint64(1_000_000), uint64(inputs[0].Pledge))
+	require.Equal(t, expectedPledge, uint64(inputs[0].Pledge))
 	require.Equal(t, uint64(57_000_000), uint64(inputs[0].DelegatedStake))
 	require.Equal(t, uint64(57_000_000), uint64(inputs[0].OwnerStake))
 	require.Equal(t, rewardAccount, inputs[0].RewardAccount)
 	require.Equal(t, uint8(1), inputs[0].RewardAccountCredentialTag)
-	require.Equal(t, uint64(340_000_000), uint64(inputs[0].Cost))
-	require.Equal(t, "1/100", inputs[0].Margin.String())
+	require.Equal(t, expectedCost, uint64(inputs[0].Cost))
+	require.Equal(t, expectedMargin, inputs[0].Margin.String())
 	require.Equal(t, uint64(1), inputs[0].DelegatorCount)
-	require.Equal(t, uint64(1000), inputs[0].CapturedSlot)
+	require.Equal(t, uint64(431999), inputs[0].CapturedSlot)
 	require.Equal(t, uint64(432000), inputs[0].BoundarySlot)
 }
 

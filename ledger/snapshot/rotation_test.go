@@ -736,6 +736,121 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 	require.Equal(t, uint64(7), *stored.LeiosKeyRegistrationEpoch)
 }
 
+func TestLeiosKeySnapshotUsesEraSpecificPoolRegistrationWindow(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name            string
+		protocolVersion uint
+		wantPublic      byte
+		wantProof       byte
+		wantEpoch       uint64
+	}{
+		{
+			name:            "Conway",
+			protocolVersion: lcommon.ProtocolVersionDijkstra - 1,
+			wantPublic:      0x51,
+			wantProof:       0x61,
+			wantEpoch:       7,
+		},
+		{
+			name:            "Dijkstra",
+			protocolVersion: lcommon.ProtocolVersionDijkstra,
+			wantPublic:      0x52,
+			wantProof:       0x62,
+			wantEpoch:       8,
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := setupTestDB(t)
+			seedEpochs(t, db, []models.Epoch{{
+				EpochId:       6,
+				StartSlot:     0,
+				LengthInSlots: 100,
+			}, {
+				EpochId:       7,
+				StartSlot:     100,
+				LengthInSlots: 100,
+			}, {
+				EpochId:       8,
+				StartSlot:     200,
+				LengthInSlots: 100,
+			}})
+
+			poolHash := bytes.Repeat([]byte{0x41}, 28)
+			importPool := func(slot uint64, publicByte, proofByte byte) {
+				t.Helper()
+				public := bytes.Repeat([]byte{publicByte}, 96)
+				proof := bytes.Repeat([]byte{proofByte}, 48)
+				pool := &models.Pool{
+					PoolKeyHash:             append([]byte(nil), poolHash...),
+					VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
+					LeiosKeyPublic:          public,
+					LeiosKeyPossessionProof: proof,
+				}
+				registration := &models.PoolRegistration{
+					PoolKeyHash:             append([]byte(nil), poolHash...),
+					VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
+					AddedSlot:               slot,
+					LeiosKeyPublic:          public,
+					LeiosKeyPossessionProof: proof,
+				}
+				require.NoError(
+					t,
+					db.ImportPool(context.Background(), nil, pool, registration),
+				)
+			}
+			importPool(50, 0x51, 0x61)
+			importPool(150, 0x52, 0x62)
+
+			var poolKey lcommon.PoolKeyHash
+			copy(poolKey[:], poolHash)
+			distribution := &StakeDistribution{
+				Slot:           199,
+				PoolStakes:     map[lcommon.PoolKeyHash]uint64{poolKey: 100},
+				DelegatorCount: map[lcommon.PoolKeyHash]uint64{poolKey: 1},
+				TotalStake:     100,
+				TotalPools:     1,
+			}
+			mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+			saved, err := mgr.saveSnapshot(
+				context.Background(),
+				8,
+				models.PoolStakeSnapshotTypeMark,
+				distribution,
+				event.EpochTransitionEvent{
+					PreviousEpoch:   7,
+					NewEpoch:        8,
+					BoundarySlot:    200,
+					SnapshotSlot:    199,
+					ProtocolVersion: tc.protocolVersion,
+				},
+				false,
+				false,
+				false,
+			)
+			require.NoError(t, err)
+			require.True(t, saved)
+
+			stored, err := db.Metadata().GetPoolStakeSnapshot(
+				8,
+				models.PoolStakeSnapshotTypeMark,
+				poolHash,
+				nil,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, stored)
+			require.Equal(t, bytes.Repeat([]byte{tc.wantPublic}, 96), stored.LeiosKeyPublic)
+			require.Equal(t, bytes.Repeat([]byte{tc.wantProof}, 48), stored.LeiosKeyPossessionProof)
+			require.NotNil(t, stored.LeiosKeyRegistrationEpoch)
+			require.Equal(t, tc.wantEpoch, *stored.LeiosKeyRegistrationEpoch)
+		})
+	}
+}
+
 func TestRotateSnapshotsPreservesLeiosKeyWhenImportedAgeIsUnknown(
 	t *testing.T,
 ) {
