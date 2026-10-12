@@ -437,20 +437,6 @@ func (d *gcsDestination) fetchManifestWithOptions(
 	return m, nil
 }
 
-func (d *gcsDestination) fetchManifestForListing(
-	ctx context.Context,
-	snapshotID string,
-	opts ...ManifestOption,
-) (Manifest, error) {
-	limit, err := manifestByteLimit(opts)
-	if err != nil {
-		return Manifest{}, err
-	}
-	configured := *d
-	configured.maxManifestBytes = limit
-	return configured.fetchManifest(ctx, snapshotID)
-}
-
 // Delete implements CloudDeleter: it removes every object under this
 // destination's own prefix (all of UploadDir's files) — used by
 // DeleteSnapshot to clean up a snapshot's cloud copy. Meant to be called

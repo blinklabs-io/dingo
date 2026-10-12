@@ -782,14 +782,6 @@ func (h *databaseServiceHandler) ListSnapshots(
 	}), nil
 }
 
-// snapshotCatalogItem pairs a snapshot entry with the location string its
-// SnapshotInfo should report — a local path for a locally-known entry, a
-// cloud URI for one only discoverable via ListCloudSnapshots.
-type snapshotCatalogItem struct {
-	location string
-	entry    lifecycle.SnapshotEntry
-}
-
 func (h *databaseServiceHandler) cloudManifestOptions() (
 	[]lifecycle.ManifestOption,
 	error,

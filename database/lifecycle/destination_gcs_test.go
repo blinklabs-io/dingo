@@ -296,7 +296,10 @@ func TestGCSDownloadSkipsCloudMirrorMarker(t *testing.T) {
 		client: client, bucket: client.Bucket("bucket"), prefix: "prefix/snapshot",
 	}
 	dir := t.TempDir()
-	require.NoError(t, d.DownloadDir(t.Context(), dir))
+	require.NoError(t, d.DownloadFiles(t.Context(), dir, []DownloadFile{{
+		Name: ManifestFileName, MaxBytes: 1024,
+	}}))
 	require.Equal(t, int32(1), requests.Load())
+	require.FileExists(t, filepath.Join(dir, ManifestFileName))
 	require.NoFileExists(t, filepath.Join(dir, cloudMirrorMarkerName))
 }

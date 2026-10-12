@@ -292,7 +292,10 @@ func TestS3DownloadSkipsCloudMirrorMarker(t *testing.T) {
 	}, func(options *s3.Options) { options.UsePathStyle = true })
 	d := s3Destination{client: client, bucket: "bucket", prefix: "prefix/snapshot"}
 	dir := t.TempDir()
-	require.NoError(t, d.DownloadDir(t.Context(), dir))
-	require.Zero(t, objectFetches.Load())
+	require.NoError(t, d.DownloadFiles(t.Context(), dir, []DownloadFile{{
+		Name: ManifestFileName, MaxBytes: 1024,
+	}}))
+	require.Equal(t, int32(1), objectFetches.Load())
+	require.FileExists(t, filepath.Join(dir, ManifestFileName))
 	require.NoFileExists(t, filepath.Join(dir, cloudMirrorMarkerName))
 }

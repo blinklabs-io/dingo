@@ -226,7 +226,7 @@ func authenticateLegacySnapshot(
 			manifest.MetadataSHA256 = digest
 		}
 	}
-	return WriteManifest(dir, manifest, opts...)
+	return writeManifest(ctx, dir, manifest, opts...)
 }
 
 // SnapshotToCloud calls Snapshot to produce the local copy at dir exactly
