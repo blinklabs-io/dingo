@@ -78,9 +78,9 @@ type LedgerDelta struct {
 	expandedIndexOffset uint64
 	// skipConsumedInputRecovery applies transaction effects without the
 	// consumed-utxo recovery/repair pass (see Database.SetTransactionWithOpts).
-	// Set only for the Leios Musashi endorser-block apply, which mirrors the
-	// reference ledger's ValidateNone closure apply; false for all ranking-block
-	// deltas so their behavior is unchanged.
+	// Set only for Leios endorser-block closure application, which mirrors the
+	// reference ledger's applyLeiosClosure; false for all ranking-block deltas so
+	// their behavior is unchanged.
 	skipConsumedInputRecovery bool
 	// strictConsumedInputs refuses to recover an absent consumed-input producer
 	// from the blob store and treats it as a hard error instead.

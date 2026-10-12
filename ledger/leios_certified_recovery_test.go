@@ -125,8 +125,35 @@ func TestEnsureReferencedEndorserBlocksRejectsHeaderOnlyCertificateBeforeFetch(
 		[]gledger.Block{parent, certifier},
 	)
 	require.ErrorContains(t, err, "certificate body presence is false")
+	var validationErr *headerValidationError
+	require.ErrorAs(t, err, &validationErr)
 	require.Zero(t, probe.attemptCount(),
 		"a certification header flag without its body certificate must not trigger a fetch")
+}
+
+func TestEnsureReferencedEndorserBlocksRejectsBodyOnlyCertificateBeforeFetch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+	certifier.BlockHeader.LeiosHeaderExtension = nil
+	certifier.BlockBody.LeiosCertificate = &dijkstra.DijkstraLeiosCertificate{
+		Signers:             []byte{1},
+		AggregatedSignature: make([]byte, 48),
+	}
+	probe := &leiosRecoveryProbe{err: errors.New("fetch must not run")}
+	ls := newLeiosRecoveryLedgerState(probe)
+
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.ErrorContains(t, err, "certificate body is present without a certified header flag")
+	var validationErr *headerValidationError
+	require.ErrorAs(t, err, &validationErr)
+	require.Zero(t, probe.attemptCount(),
+		"a certificate body without its header flag must not trigger a fetch")
 }
 
 // leiosRecoveryProbe is a scripted EndorserBlockFetcher/EndorserBlockProvider

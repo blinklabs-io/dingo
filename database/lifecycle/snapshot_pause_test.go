@@ -213,11 +213,13 @@ func TestSnapshotMaxCommitPauseReleasesBarrierBeforeBackupStops(t *testing.T) {
 	t.Parallel()
 
 	backupStarted := make(chan struct{})
+	backupStopped := make(chan struct{})
 	finishBackup := make(chan struct{})
 	releaseBackup := sync.OnceFunc(func() { close(finishBackup) })
 	defer releaseBackup()
 	hooks := &backupHooks{
 		blob: func(_ context.Context, w io.Writer) error {
+			defer close(backupStopped)
 			close(backupStarted)
 			<-finishBackup
 			_, err := io.WriteString(w, "blob")
@@ -251,6 +253,10 @@ func TestSnapshotMaxCommitPauseReleasesBarrierBeforeBackupStops(t *testing.T) {
 	}
 
 	releaseBackup()
+	testutil.RequireReceive(
+		t, backupStopped, testutil.AsyncWait,
+		"blob backup must stop after it is released",
+	)
 	err := testutil.RequireReceive(
 		t, finished, testutil.AsyncWait,
 		"snapshot must return after its backup stops",

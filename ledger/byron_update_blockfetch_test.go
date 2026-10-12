@@ -215,7 +215,7 @@ func newByronUpdateBlockfetchChain(t *testing.T) *byronUpdateBlockfetchChain {
 	require.NoError(t, db.SetEpoch(
 		0, 0, nil, nil, nil, nil, eras.ByronEraDesc.Id, 20_000, 100, nil,
 	))
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:           db,

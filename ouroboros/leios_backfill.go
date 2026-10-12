@@ -329,14 +329,20 @@ func (o *Ouroboros) fetchEndorserBlockByPointWithConnections(
 	// Order the connections for this attempt: recently-successful ones first
 	// (positive affinity), then other healthy ones, then ones cooling down from a
 	// recent failed fetch, then ones whose leios-fetch protocol is dead, each
-	// partition kept in round-robin order so concurrent backfills still spread. A
-	// cooled or dead connection is still eventually tried, so a transiently-flaky
-	// one is skipped, not starved.
+	// partition kept in round-robin order so concurrent backfills still spread.
+	// A live connection that offered this exact point is then moved first because
+	// leios-fetch has no not-found response. A cooled or dead connection is still
+	// eventually tried, so a transiently-flaky one is skipped, not starved.
 	order := leiosBackfillConnOrder(
 		connIds,
 		start,
 		time.Now(),
 		leiosBackfillAffinityWindow,
+		o.leiosFetchGuardFor,
+	)
+	order = preferLeiosBackfillOfferSource(
+		order,
+		o.leiosEndorserBlockRelayOfferSource(point),
 		o.leiosFetchGuardFor,
 	)
 	var lastErr, busyErr error
@@ -438,6 +444,40 @@ func (o *Ouroboros) fetchEndorserBlockByPointWithConnections(
 		lastErr = errors.New("leios backfill: fetch failed")
 	}
 	return lastErr
+}
+
+func (o *Ouroboros) leiosEndorserBlockRelayOfferSource(
+	point ocommon.Point,
+) string {
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	data := o.leiosEndorserBlocks[leiosBlockKey(point.Slot, point.Hash)]
+	if data == nil {
+		return ""
+	}
+	return data.relayOfferSource
+}
+
+func preferLeiosBackfillOfferSource(
+	order []ouroboros.ConnectionId,
+	connectionID string,
+	guardFor func(ouroboros.ConnectionId) *leiosFetchGuard,
+) []ouroboros.ConnectionId {
+	if connectionID == "" {
+		return order
+	}
+	for idx, connID := range order {
+		if leiosConnectionIdString(connID) != connectionID ||
+			guardFor(connID).isProtocolDead() {
+			continue
+		}
+		if idx > 0 {
+			copy(order[1:idx+1], order[:idx])
+			order[0] = connID
+		}
+		break
+	}
+	return order
 }
 
 // requestLeiosFetchConnRecycle asks the connection manager to close a

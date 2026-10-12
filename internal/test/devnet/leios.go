@@ -41,6 +41,7 @@ const leiosDevNetDialTimeout = 10 * time.Second
 type LeiosEndorserBlockOfferMonitor struct {
 	Offers            <-chan pcommon.Point
 	TransactionOffers <-chan pcommon.Point
+	PrototypeVotes    <-chan lcommon.LeiosPrototypeVote
 	Errors            <-chan error
 	conn              *ouroboros.Connection
 }
@@ -59,11 +60,12 @@ func WatchLeiosEndorserBlockOffers(
 	addr string,
 	magic uint32,
 ) (*LeiosEndorserBlockOfferMonitor, error) {
-	offers := make(chan pcommon.Point, 1)
+	offers := make(chan pcommon.Point, 4096)
 	// The relay monitor starts before the test knows which producer EB it
 	// needs. Retain a bounded pre-queue so early transaction offers are still
 	// available when the scenario reaches its fetch phase.
 	txOffers := make(chan pcommon.Point, 4096)
+	prototypeVotes := make(chan lcommon.LeiosPrototypeVote, 4096)
 	errorsCh := make(chan error, 1)
 	dialer := &net.Dialer{Timeout: leiosDevNetDialTimeout}
 	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
@@ -82,30 +84,25 @@ func WatchLeiosEndorserBlockOffers(
 			oleiosnotify.WithTimeout(0),
 			oleiosnotify.WithNotificationFunc(
 				func(_ oleiosnotify.CallbackContext, msg protocol.Message) error {
-					var point pcommon.Point
-					var dest chan pcommon.Point
 					switch offer := msg.(type) {
 					case *oleiosnotify.MsgBlockOffer:
-						point = offer.Point
-						dest = offers
+						return enqueueLeiosPoint(offers, offer.Point)
 					case *oleiosnotify.MsgBlockTxsOffer:
-						point = offer.Point
-						dest = txOffers
+						return enqueueLeiosPoint(txOffers, offer.Point)
+					case *oleiosnotify.MsgVotesOffer:
+						for _, vote := range offer.PrototypeVotes {
+							vote.VoteSignature = append(
+								[]byte(nil), vote.VoteSignature...,
+							)
+							select {
+							case prototypeVotes <- vote:
+							default:
+							}
+						}
+						return nil
 					default:
 						return nil
 					}
-					if len(point.Hash) != lcommon.Blake2b256Size {
-						return fmt.Errorf(
-							"LeiosNotify offer has %d-byte hash",
-							len(point.Hash),
-						)
-					}
-					point.Hash = append([]byte(nil), point.Hash...)
-					select {
-					case dest <- point:
-					default:
-					}
-					return nil
 				},
 			),
 		)),
@@ -125,6 +122,7 @@ func WatchLeiosEndorserBlockOffers(
 	monitor := &LeiosEndorserBlockOfferMonitor{
 		Offers:            offers,
 		TransactionOffers: txOffers,
+		PrototypeVotes:    prototypeVotes,
 		Errors:            errorsCh,
 		conn:              conn,
 	}
@@ -142,6 +140,18 @@ func WatchLeiosEndorserBlockOffers(
 		}
 	}()
 	return monitor, nil
+}
+
+func enqueueLeiosPoint(dest chan<- pcommon.Point, point pcommon.Point) error {
+	if len(point.Hash) != lcommon.Blake2b256Size {
+		return fmt.Errorf("LeiosNotify offer has %d-byte hash", len(point.Hash))
+	}
+	point.Hash = append([]byte(nil), point.Hash...)
+	select {
+	case dest <- point:
+	default:
+	}
+	return nil
 }
 
 // FetchLeiosEndorserBlock fetches an EB manifest and every referenced
