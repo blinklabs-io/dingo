@@ -17,6 +17,9 @@ package mempool
 import (
 	"context"
 	"errors"
+	"testing"
+	"time"
+
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -24,8 +27,6 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
-	"testing"
-	"time"
 )
 
 type cancellableWorkerValidator struct {
@@ -64,9 +65,13 @@ func TestStopCancelsBlockedWorkerValidation(t *testing.T) {
 func TestChainUpdateWorkerRateLimitsFailedRebuilds(t *testing.T) {
 	t.Parallel()
 	const revalidationInterval = 100 * time.Millisecond
+	type rebuildAttempt struct {
+		number int
+		at     time.Time
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	updates := make(chan event.Event, 8)
-	attempts := make(chan int, 4)
+	attempts := make(chan rebuildAttempt, 4)
 	workerDone := make(chan struct{})
 	calls := 0
 	go func() {
@@ -78,7 +83,11 @@ func TestChainUpdateWorkerRateLimitsFailedRebuilds(t *testing.T) {
 			revalidationInterval,
 			func() error {
 				calls++
-				attempts <- calls
+				select {
+				case attempts <- rebuildAttempt{number: calls, at: time.Now()}:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 				return errors.New("ledger snapshot changed")
 			},
 			func(error) {},
@@ -90,11 +99,8 @@ func TestChainUpdateWorkerRateLimitsFailedRebuilds(t *testing.T) {
 	})
 
 	updates <- event.Event{}
-	require.Equal(
-		t,
-		1,
-		testutil.RequireReceive(t, attempts, time.Second, "first rebuild"),
-	)
+	first := testutil.RequireReceive(t, attempts, time.Second, "first rebuild")
+	require.Equal(t, 1, first.number)
 	updates <- event.Event{}
 	updates <- event.Event{}
 	testutil.WaitForCondition(
@@ -103,26 +109,27 @@ func TestChainUpdateWorkerRateLimitsFailedRebuilds(t *testing.T) {
 		time.Second,
 		"events coalesce during the failed rebuild cooldown",
 	)
-	testutil.RequireNoReceive(
-		t,
-		attempts,
-		revalidationInterval/2,
-		"failed rebuild is not retried for every chain event",
-	)
-	require.Equal(
-		t,
-		2,
-		testutil.RequireReceive(t, attempts, time.Second, "cooldown retry"),
-	)
-	testutil.RequireNoReceive(
-		t,
-		attempts,
-		revalidationInterval/2,
-		"repeated failed rebuild remains rate limited",
-	)
-	require.Equal(
-		t,
-		3,
-		testutil.RequireReceive(t, attempts, time.Second, "scheduled retry"),
-	)
+	firstDeadline := first.at.Add(revalidationInterval)
+	if remaining := time.Until(firstDeadline); remaining > 0 {
+		testutil.RequireNoReceive(
+			t,
+			attempts,
+			remaining,
+			"failed rebuild is not retried before its cooldown expires",
+		)
+	}
+	second := testutil.RequireReceive(t, attempts, time.Second, "cooldown retry")
+	require.Equal(t, 2, second.number)
+
+	secondDeadline := second.at.Add(revalidationInterval)
+	if remaining := time.Until(secondDeadline); remaining > 0 {
+		testutil.RequireNoReceive(
+			t,
+			attempts,
+			remaining,
+			"repeated failed rebuild remains rate limited",
+		)
+	}
+	third := testutil.RequireReceive(t, attempts, time.Second, "scheduled retry")
+	require.Equal(t, 3, third.number)
 }
