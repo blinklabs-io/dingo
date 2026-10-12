@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,11 +58,13 @@ type fakeLeiosAnnouncementLedger struct {
 	// e.g. so a test can make one slot's binding read as expired while
 	// another's does not. Every other caller leaves it nil and gets the
 	// single fixed slotTime as before.
-	slotTimeFunc    func(uint64) time.Time
-	staleness       ledger.LeiosAnnouncementOCINStaleness
-	err             error
-	txValidationErr error
-	validated       int
+	slotTimeFunc     func(uint64) time.Time
+	staleness        ledger.LeiosAnnouncementOCINStaleness
+	err              error
+	txValidationErr  error
+	txValidationFunc func(gledger.BlockHeader) error
+	validated        int
+	txValidated      int
 }
 
 func (f *fakeLeiosAnnouncementLedger) CurrentSlot() (uint64, error) {
@@ -88,10 +91,14 @@ func (f *fakeLeiosAnnouncementLedger) ValidateLeiosAnnouncementHeader(
 }
 
 func (f *fakeLeiosAnnouncementLedger) ValidateLeiosEndorserBlockTransactions(
-	context.Context,
-	gledger.BlockHeader,
-	[][]byte,
+	_ context.Context,
+	header gledger.BlockHeader,
+	_ [][]byte,
 ) error {
+	f.txValidated++
+	if f.txValidationFunc != nil {
+		return f.txValidationFunc(header)
+	}
 	return f.txValidationErr
 }
 
@@ -2025,6 +2032,548 @@ func TestWaitForLeiosEndorserClosureTimesOutAndCleansUp(t *testing.T) {
 	waiters := len(o.leiosClosureWaiters)
 	o.leiosMu.RUnlock()
 	require.Zero(t, waiters)
+}
+
+func TestValidateLeiosEndorserBlockForHeaderWaitsForRemoteBody(t *testing.T) {
+	t.Parallel()
+
+	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	ref := lcommon.LeiosTransactionReference{
+		TransactionHash: lcommon.Blake2b256Hash(txRaw),
+		TransactionSize: uint16(len(txRaw)),
+	}
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(71, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+
+	validationLedger := &fakeLeiosAnnouncementLedger{}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: validationLedger,
+		LeiosTxFetchTailBudget:  time.Second,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	votes := &fakeLeiosVoteHandler{}
+	o.leiosVotes = votes
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		nil,
+		leiosStorePeerOffered,
+	))
+
+	result := make(chan error, 1)
+	go func() {
+		result <- o.ValidateLeiosEndorserBlockForHeader(t.Context(), header)
+	}()
+	testutil.WaitForCondition(t, func() bool {
+		o.leiosMu.RLock()
+		defer o.leiosMu.RUnlock()
+		return len(o.leiosClosureWaiters[leiosBlockKey(
+			point.Slot,
+			point.Hash,
+		)]) == 1
+	}, time.Second, "header validation to wait for the remote transaction body")
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStorePeerOffered,
+	))
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		result,
+		time.Second,
+		"remote endorser validation",
+	))
+	require.Equal(t, 1, validationLedger.txValidated)
+	require.Len(t, votes.ebs, 1)
+}
+
+func TestValidateLeiosEndorserBlockForHeaderBindsBodyArrivingAfterWait(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(txRaw),
+			TransactionSize: uint16(len(txRaw)),
+		}},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(72, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+	validationLedger := &fakeLeiosAnnouncementLedger{}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: validationLedger,
+		LeiosTxFetchTailBudget:  time.Second,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	votes := &fakeLeiosVoteHandler{}
+	o.leiosVotes = votes
+
+	result := make(chan error, 1)
+	go func() {
+		result <- o.ValidateLeiosEndorserBlockForHeader(t.Context(), header)
+	}()
+	key := leiosBlockKey(point.Slot, point.Hash)
+	testutil.WaitForCondition(t, func() bool {
+		o.leiosMu.RLock()
+		defer o.leiosMu.RUnlock()
+		return len(o.leiosClosureWaiters[key]) == 1 &&
+			len(o.leiosSelectedHeaders[key]) == 1
+	}, time.Second, "selected header authority and closure waiter")
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStorePeerOffered,
+	))
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		result,
+		time.Second,
+		"late complete body validation",
+	))
+	require.Equal(t, 1, validationLedger.txValidated)
+	require.Len(t, votes.ebs, 1)
+	o.leiosMu.RLock()
+	require.Empty(t, o.leiosSelectedHeaders[key])
+	o.leiosMu.RUnlock()
+}
+
+func TestSelectedLeiosHeaderAuthoritySeparatesDistinctRawHeaders(t *testing.T) {
+	t.Parallel()
+
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 78)
+	headerRawA := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	var headerTop []cbor.RawMessage
+	_, err := cbor.Decode(headerRawA, &headerTop)
+	require.NoError(t, err)
+	var headerBody []cbor.RawMessage
+	_, err = cbor.Decode(headerTop[0], &headerBody)
+	require.NoError(t, err)
+	headerBody[0] = mustCbor(t, uint64(999))
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRawB, err := cbor.Encode(headerTop)
+	require.NoError(t, err)
+	require.NotEqual(t, headerRawA, headerRawB)
+	headerA, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRawA)
+	require.NoError(t, err)
+	headerB, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRawB)
+	require.NoError(t, err)
+	require.Equal(t, headerA.PrevHash(), headerB.PrevHash())
+	require.Equal(t, headerA.SlotNumber(), headerB.SlotNumber())
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	defer func() { require.NoError(t, o.Close()) }()
+	releaseA, err := o.retainSelectedLeiosHeader(headerA)
+	require.NoError(t, err)
+	releaseB, err := o.retainSelectedLeiosHeader(headerB)
+	require.NoError(t, err)
+	key := leiosBlockKey(point.Slot, point.Hash)
+	parentKey := string(headerA.PrevHash().Bytes())
+	o.leiosMu.RLock()
+	require.Len(t, o.leiosSelectedHeaders[key][parentKey], 2)
+	o.leiosMu.RUnlock()
+
+	var releases sync.WaitGroup
+	releases.Add(2)
+	go func() {
+		defer releases.Done()
+		releaseA()
+	}()
+	go func() {
+		defer releases.Done()
+		releaseB()
+	}()
+	releases.Wait()
+	o.leiosMu.RLock()
+	require.Empty(t, o.leiosSelectedHeaders[key])
+	o.leiosMu.RUnlock()
+}
+
+func TestValidateLeiosEndorserBlockForHeaderMissingBodyFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 73)
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: &fakeLeiosAnnouncementLedger{},
+		LeiosTxFetchTailBudget:  20 * time.Millisecond,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	votes := &fakeLeiosVoteHandler{}
+	o.leiosVotes = votes
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		nil,
+		leiosStorePeerOffered,
+	))
+
+	err = o.ValidateLeiosEndorserBlockForHeader(t.Context(), header)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Empty(t, votes.ebs)
+	o.leiosMu.RLock()
+	waiters := len(o.leiosClosureWaiters)
+	o.leiosMu.RUnlock()
+	require.Zero(t, waiters)
+}
+
+func TestValidateLeiosEndorserBlockForHeaderZeroBudgetFailsImmediately(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 75)
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: &fakeLeiosAnnouncementLedger{},
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	votes := &fakeLeiosVoteHandler{}
+	o.leiosVotes = votes
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		nil,
+		leiosStorePeerOffered,
+	))
+
+	result := make(chan error, 1)
+	go func() {
+		result <- o.ValidateLeiosEndorserBlockForHeader(t.Context(), header)
+	}()
+	err = testutil.RequireReceive(
+		t,
+		result,
+		time.Second,
+		"zero-budget endorser validation",
+	)
+	require.ErrorContains(t, err, "tail retry disabled")
+	require.Empty(t, votes.ebs)
+	o.leiosMu.RLock()
+	waiters := len(o.leiosClosureWaiters)
+	o.leiosMu.RUnlock()
+	require.Zero(t, waiters)
+}
+
+func TestValidateLeiosEndorserBlockForHeaderRejectsSizeBeforePublication(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(txRaw),
+			TransactionSize: uint16(len(txRaw)),
+		}},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(76, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)+1),
+	)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+	validationLedger := &fakeLeiosAnnouncementLedger{}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: validationLedger,
+		LeiosTxFetchTailBudget:  time.Second,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	votes := &fakeLeiosVoteHandler{}
+	pipeline := &recordingLeiosPipelineHandler{}
+	o.leiosVotes = votes
+	o.leiosPipeline = pipeline
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStorePeerOffered,
+	))
+
+	err = o.recordLeiosAnnouncement(
+		headerRaw,
+		testEbHash(point),
+		uint64(len(blockRaw)+1),
+		header,
+		"test",
+		false,
+	)
+	require.ErrorContains(t, err, "does not match announcement size")
+	require.Empty(t, votes.ebs)
+	require.Zero(t, pipeline.observed)
+	require.Zero(t, validationLedger.txValidated)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.False(t, data.slotVerified)
+
+	asyncLedger := &fakeLeiosAnnouncementLedger{slotTime: time.Now()}
+	async := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: asyncLedger,
+	})
+	defer func() { require.NoError(t, async.Close()) }()
+	asyncVotes := &fakeLeiosVoteHandler{}
+	asyncPipeline := &recordingLeiosPipelineHandler{}
+	async.leiosVotes = asyncVotes
+	async.leiosPipeline = asyncPipeline
+	require.NoError(t, async.recordLeiosAnnouncement(
+		headerRaw,
+		testEbHash(point),
+		uint64(len(blockRaw)+1),
+		header,
+		"test",
+		false,
+	))
+	require.NoError(t, async.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStorePeerOffered,
+	))
+	async.leiosValidationWG.Wait()
+	data, ok = async.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.Equal(t, uint8(leiosEBValidationInvalid), data.semanticValidationStatus)
+	require.Empty(t, asyncVotes.ebs)
+	require.Zero(t, asyncPipeline.observed)
+	require.Zero(t, asyncLedger.txValidated)
+}
+
+func TestValidateLeiosEndorserBlockForHeaderRetriesStorageFault(t *testing.T) {
+	t.Parallel()
+
+	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	ref := lcommon.LeiosTransactionReference{
+		TransactionHash: lcommon.Blake2b256Hash(txRaw),
+		TransactionSize: uint16(len(txRaw)),
+	}
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(77, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+	var validationLedger *fakeLeiosAnnouncementLedger
+	validationLedger = &fakeLeiosAnnouncementLedger{
+		txValidationFunc: func(gledger.BlockHeader) error {
+			if validationLedger.txValidated == 1 {
+				return ledger.ErrLedgerViewStorageFault
+			}
+			return nil
+		},
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: validationLedger,
+		LeiosTxFetchTailBudget:  time.Second,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	votes := &fakeLeiosVoteHandler{}
+	pipeline := &recordingLeiosPipelineHandler{}
+	o.leiosVotes = votes
+	o.leiosPipeline = pipeline
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStorePeerOffered,
+	))
+	key := leiosBlockKey(point.Slot, point.Hash)
+	o.leiosMu.Lock()
+	current := o.leiosEndorserBlocks[key]
+	verified := *current
+	verified.slotVerified = true
+	for _, cacheKey := range current.cacheKeys {
+		if o.leiosEndorserBlocks[cacheKey] == current {
+			o.leiosEndorserBlocks[cacheKey] = &verified
+		}
+	}
+	o.leiosMu.Unlock()
+
+	require.ErrorIs(
+		t,
+		o.ValidateLeiosEndorserBlockForHeader(t.Context(), header),
+		ledger.ErrLedgerViewStorageFault,
+	)
+	o.leiosMu.RLock()
+	require.Equal(
+		t,
+		uint8(leiosEBValidationUnknown),
+		o.leiosEndorserBlocks[key].semanticValidationStatus,
+	)
+	o.leiosMu.RUnlock()
+	require.NoError(t, o.ValidateLeiosEndorserBlockForHeader(t.Context(), header))
+	require.Equal(t, 2, validationLedger.txValidated)
+	require.Len(t, votes.ebs, 1)
+	require.Equal(t, 1, pipeline.observed)
+}
+
+func TestValidateLeiosEndorserBlockForHeaderRevalidatesDistinctParent(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	ref := lcommon.LeiosTransactionReference{
+		TransactionHash: lcommon.Blake2b256Hash(txRaw),
+		TransactionSize: uint16(len(txRaw)),
+	}
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(74, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	headerA, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+
+	var headerTop []cbor.RawMessage
+	_, err = cbor.Decode(headerRaw, &headerTop)
+	require.NoError(t, err)
+	var headerBody []cbor.RawMessage
+	_, err = cbor.Decode(headerTop[0], &headerBody)
+	require.NoError(t, err)
+	distinctParent := lcommon.NewBlake2b256([]byte("distinct-parent"))
+	headerBody[2] = mustCbor(t, distinctParent)
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRaw, err = cbor.Encode(headerTop)
+	require.NoError(t, err)
+	headerB, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+
+	rejectedParent := errors.New("parent-specific validation failure")
+	validationLedger := &fakeLeiosAnnouncementLedger{
+		txValidationFunc: func(header gledger.BlockHeader) error {
+			if header.PrevHash() == distinctParent {
+				return rejectedParent
+			}
+			return nil
+		},
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: validationLedger,
+		LeiosTxFetchTailBudget:  time.Second,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	votes := &fakeLeiosVoteHandler{}
+	o.leiosVotes = votes
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStoreAuthoritative,
+	))
+
+	require.NoError(t, o.ValidateLeiosEndorserBlockForHeader(t.Context(), headerA))
+	key := leiosBlockKey(point.Slot, point.Hash)
+	otherParentDone := make(chan struct{})
+	o.leiosMu.Lock()
+	current := o.leiosEndorserBlocks[key]
+	require.NotNil(t, current)
+	pendingOtherParent := *current
+	pendingOtherParent.semanticValidationStatus = leiosEBValidationPending
+	pendingOtherParent.semanticValidationParent = headerA.PrevHash().Bytes()
+	pendingOtherParent.semanticValidationDone = otherParentDone
+	for _, cacheKey := range current.cacheKeys {
+		if o.leiosEndorserBlocks[cacheKey] == current {
+			o.leiosEndorserBlocks[cacheKey] = &pendingOtherParent
+		}
+	}
+	o.leiosMu.Unlock()
+
+	result := make(chan error, 1)
+	go func() {
+		result <- o.ValidateLeiosEndorserBlockForHeader(t.Context(), headerB)
+	}()
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(
+			t,
+			result,
+			time.Second,
+			"distinct-parent validation to supersede pending work",
+		),
+		rejectedParent,
+	)
+	require.Nil(t, o.updateLeiosEndorserBlockValidation(
+		key,
+		headerA.PrevHash().Bytes(),
+		otherParentDone,
+		leiosEBValidationUnknown,
+	))
+	testutil.RequireReceive(
+		t,
+		otherParentDone,
+		time.Second,
+		"superseded parent completion cleanup",
+	)
+	require.Equal(t, 2, validationLedger.txValidated)
+	require.Len(t, votes.ebs, 1)
 }
 
 func TestAwaitMergedLeiosRankingBlockTimesOut(t *testing.T) {

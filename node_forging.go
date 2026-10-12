@@ -1046,13 +1046,19 @@ func (n *Node) initBlockForger(
 		LeiosVerifiedEbSlot: func() uint64 {
 			return n.ouroboros().MaxVerifiedEndorserBlockSlot()
 		},
-		BlockValidator:                  blockValidator,
-		ForgeFence:                      forgeFence,
-		PromRegistry:                    n.config.promRegistry,
-		LeiosProduceChecker:             leiosChecker,
-		LeiosEBBroadcaster:              leiosEBCaster,
-		LeiosMempool:                    leiosMempool,
-		LeiosTxValidator:                n.ledgerState,
+		BlockValidator:      blockValidator,
+		ForgeFence:          forgeFence,
+		PromRegistry:        n.config.promRegistry,
+		LeiosProduceChecker: leiosChecker,
+		LeiosEBBroadcaster:  leiosEBCaster,
+		LeiosMempool:        leiosMempool,
+		LeiosTxValidator:    n.ledgerState,
+		LeiosAnnouncementValidator: func(
+			ctx context.Context,
+			header lcommon.BlockHeader,
+		) error {
+			return n.ouroboros().ValidateLeiosEndorserBlockForHeader(ctx, header)
+		},
 		LeiosCertificateProvider:        leiosCerts,
 		LeiosParentAnnouncementProvider: leiosParent,
 		OpCertLedgerView: blockProducerLedgerView{

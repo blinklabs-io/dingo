@@ -147,6 +147,16 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 				ebHash,
 			)
 		},
+		ValidateLeiosAnnouncement: func(
+			ctx context.Context,
+			header lcommon.BlockHeader,
+		) error {
+			o := n.ouroboros()
+			if o == nil {
+				return errOuroborosNotStarted
+			}
+			return o.ValidateLeiosEndorserBlockForHeader(ctx, header)
+		},
 		// Wait, at the tip, for a ranking block's referenced endorser block
 		// to arrive before applying it. Sourced from the pipeline timing
 		// (CIP-0164-tracking, override-able via WithLeiosPipelineTiming)

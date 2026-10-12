@@ -249,12 +249,13 @@ type BlockForger struct {
 	fenceLoaded    bool
 
 	// Optional Leios EB forging (nil = relay or pre-Dijkstra era)
-	leiosChecker   LeiosProduceChecker
-	leiosEBCaster  EndorserBlockBroadcaster
-	leiosMempool   MempoolProvider
-	leiosValidator TxValidator
-	leiosCerts     LeiosCertificateProvider
-	leiosParent    LeiosParentAnnouncementProvider
+	leiosChecker               LeiosProduceChecker
+	leiosEBCaster              EndorserBlockBroadcaster
+	leiosMempool               MempoolProvider
+	leiosValidator             TxValidator
+	leiosAnnouncementValidator func(context.Context, ledger.BlockHeader) error
+	leiosCerts                 LeiosCertificateProvider
+	leiosParent                LeiosParentAnnouncementProvider
 
 	// Prometheus metrics
 	metrics *forgingMetrics
@@ -636,6 +637,10 @@ type ForgerConfig struct {
 	// coherent ledger snapshot before the EB is broadcast. Production wiring
 	// supplies LedgerState; nil preserves compatibility for test embedders.
 	LeiosTxValidator TxValidator
+	// LeiosAnnouncementValidator validates a locally built announcement
+	// against the exact signed ranking-block header before that block advances
+	// the ledger past its parent. Nil disables the pre-adoption check.
+	LeiosAnnouncementValidator func(context.Context, ledger.BlockHeader) error
 	// LeiosCertificateProvider supplies certified EBs for Dijkstra CertRBs.
 	LeiosCertificateProvider LeiosCertificateProvider
 	// LeiosParentAnnouncementProvider supplies the EB hash announced by the
@@ -771,29 +776,30 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	}
 
 	f := &BlockForger{
-		mode:             cfg.Mode,
-		logger:           cfg.Logger,
-		slotDuration:     cfg.SlotDuration,
-		creds:            cfg.Credentials,
-		leaderChecker:    cfg.LeaderChecker,
-		blockBuilder:     cfg.BlockBuilder,
-		blockBroadcaster: cfg.BlockBroadcaster,
-		confirmedTxs:     cfg.ConfirmedTxs,
-		blockForged:      cfg.BlockForged,
-		slotClock:        cfg.SlotClock,
-		slotTracker:      NewSlotTracker(),
-		leiosChecker:     cfg.LeiosProduceChecker,
-		leiosEBCaster:    cfg.LeiosEBBroadcaster,
-		leiosMempool:     cfg.LeiosMempool,
-		leiosValidator:   cfg.LeiosTxValidator,
-		leiosCerts:       cfg.LeiosCertificateProvider,
-		leiosParent:      cfg.LeiosParentAnnouncementProvider,
-		blockValidator:   cfg.BlockValidator,
-		fenceStore:       cfg.ForgeFence,
-		opCertLedgerView: cfg.OpCertLedgerView,
-		eraParams:        cfg.EraParams,
-		chainContext:     cfg.ChainContext,
-		siblingAdopter:   cfg.SiblingAdopter,
+		mode:                       cfg.Mode,
+		logger:                     cfg.Logger,
+		slotDuration:               cfg.SlotDuration,
+		creds:                      cfg.Credentials,
+		leaderChecker:              cfg.LeaderChecker,
+		blockBuilder:               cfg.BlockBuilder,
+		blockBroadcaster:           cfg.BlockBroadcaster,
+		confirmedTxs:               cfg.ConfirmedTxs,
+		blockForged:                cfg.BlockForged,
+		slotClock:                  cfg.SlotClock,
+		slotTracker:                NewSlotTracker(),
+		leiosChecker:               cfg.LeiosProduceChecker,
+		leiosEBCaster:              cfg.LeiosEBBroadcaster,
+		leiosMempool:               cfg.LeiosMempool,
+		leiosValidator:             cfg.LeiosTxValidator,
+		leiosAnnouncementValidator: cfg.LeiosAnnouncementValidator,
+		leiosCerts:                 cfg.LeiosCertificateProvider,
+		leiosParent:                cfg.LeiosParentAnnouncementProvider,
+		blockValidator:             cfg.BlockValidator,
+		fenceStore:                 cfg.ForgeFence,
+		opCertLedgerView:           cfg.OpCertLedgerView,
+		eraParams:                  cfg.EraParams,
+		chainContext:               cfg.ChainContext,
+		siblingAdopter:             cfg.SiblingAdopter,
 	}
 	if cfg.ForgeSyncToleranceSlots == 0 {
 		cfg.ForgeSyncToleranceSlots = forgeSyncToleranceSlots
@@ -2012,6 +2018,16 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 			"hash", blockHashStr,
 			"validation_duration", validationDuration,
 		)
+	}
+	if leiosState.data.Announcement != nil &&
+		f.leiosAnnouncementValidator != nil {
+		if err := f.leiosAnnouncementValidator(ctx, block.Header()); err != nil {
+			f.incCouldNotForge()
+			return fmt.Errorf(
+				"validate locally forged Leios announcement: %w",
+				err,
+			)
+		}
 	}
 
 	// Block forged successfully

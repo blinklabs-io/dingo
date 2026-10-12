@@ -99,7 +99,8 @@ import (
 func TestCloseStopsForgingScheduler(t *testing.T) {
 	t.Parallel()
 
-	ls := &LedgerState{
+	var ls *LedgerState
+	ls = &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
@@ -14219,4 +14220,158 @@ func TestAtTipRecoveryForwardProgressRestoresEpochBoundaryCrossing(
 		t, deep, got,
 		"a failure after forward progress should get its own crossing",
 	)
+}
+
+type leiosApplyBatchTestBlock struct {
+	lcommon.Block
+	header lcommon.BlockHeader
+}
+
+func (b leiosApplyBatchTestBlock) Header() lcommon.BlockHeader {
+	return b.header
+}
+
+func (b leiosApplyBatchTestBlock) SlotNumber() uint64 {
+	return b.header.SlotNumber()
+}
+
+func (b leiosApplyBatchTestBlock) Hash() lcommon.Blake2b256 {
+	return b.header.Hash()
+}
+
+func (b leiosApplyBatchTestBlock) PrevHash() lcommon.Blake2b256 {
+	return b.header.PrevHash()
+}
+
+func TestLeiosAnnouncementBatchEndWaitsOnlyForSelectedBlock(t *testing.T) {
+	plain := func(slot uint64) lcommon.Block {
+		return leiosApplyBatchTestBlock{header: mockHeader{slot: slot}}
+	}
+	announcing := func(slot uint64) lcommon.Block {
+		return leiosApplyBatchTestBlock{header: announcingHeader(
+			slot,
+			fmt.Sprintf("header-%d", slot),
+			lcommon.Blake2b256{},
+			slot,
+			lcommon.NewBlake2b256([]byte("endorser")),
+		)}
+	}
+
+	blocks := []lcommon.Block{
+		plain(1),
+		plain(2),
+		announcing(3),
+		announcing(4),
+		plain(5),
+	}
+	live := func(uint64) bool { return true }
+	require.Equal(t, 2, leiosAnnouncementBatchEnd(blocks, 0, len(blocks), live))
+	require.Equal(t, 4, leiosAnnouncementBatchEnd(blocks, 3, len(blocks), live))
+	require.Equal(t, len(blocks), leiosAnnouncementBatchEnd(blocks, 4, len(blocks), live))
+
+	// A chunk can begin in historical replay and cross the stability cutoff.
+	// The first live announcing block must begin the next one-block chunk.
+	crossing := []lcommon.Block{plain(8), plain(9), announcing(10), plain(11)}
+	require.Equal(t, 2, leiosAnnouncementBatchEnd(
+		crossing,
+		0,
+		len(crossing),
+		func(slot uint64) bool { return slot >= 10 },
+	))
+	require.Equal(t, 3, leiosAnnouncementBatchEnd(
+		crossing,
+		2,
+		len(crossing),
+		func(slot uint64) bool { return slot >= 10 },
+	))
+}
+
+func TestLeiosTransitionBlockValidatesBeforeReachedTipIsPublished(t *testing.T) {
+	ebHash := lcommon.NewBlake2b256([]byte("transition-endorser"))
+	header := announcingHeader(
+		100,
+		"transition-header",
+		lcommon.NewBlake2b256([]byte("parent")),
+		10,
+		ebHash,
+	)
+	block := leiosApplyBatchTestBlock{header: header}
+	validated := 0
+	ls := &LedgerState{config: LedgerStateConfig{
+		ValidateLeiosAnnouncement: func(
+			_ context.Context,
+			got lcommon.BlockHeader,
+		) error {
+			require.Equal(t, header, got)
+			validated++
+			return nil
+		},
+	}}
+	require.False(t, ls.IsAtTip())
+	_, entersLiveValidationRegion := historicalBlockValidationDecision(
+		false,
+		false,
+		SyncingChainsyncState,
+		header.SlotNumber(),
+		header.SlotNumber(),
+		0,
+	)
+	require.True(t, entersLiveValidationRegion)
+	require.Equal(t, 1, leiosAnnouncementBatchEnd(
+		[]lcommon.Block{block},
+		0,
+		1,
+		func(uint64) bool { return entersLiveValidationRegion },
+	))
+	require.NoError(t, ls.validateLeiosAnnouncementBeforeApply(
+		t.Context(),
+		block,
+		entersLiveValidationRegion,
+	))
+	require.Equal(t, 1, validated)
+}
+
+func TestLeiosApplySnapshotIsReadAfterAnnouncementWait(t *testing.T) {
+	header := announcingHeader(
+		100,
+		"waiting-header",
+		lcommon.NewBlake2b256([]byte("old-parent")),
+		10,
+		lcommon.NewBlake2b256([]byte("endorser")),
+	)
+	block := leiosApplyBatchTestBlock{header: header}
+	newTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(99, []byte("reloaded-parent")),
+		BlockNumber: 9,
+	}
+	var ls *LedgerState
+	ls = &LedgerState{
+		currentTip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(98, []byte("old-parent")),
+			BlockNumber: 8,
+		},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			ValidateLeiosAnnouncement: func(
+				_ context.Context,
+				_ lcommon.BlockHeader,
+			) error {
+				// Model rollback recovery publishing replacement state while the
+				// bounded announcement validation is in progress.
+				ls.Lock()
+				ls.currentTip = newTip
+				ls.Unlock()
+				return nil
+			},
+		},
+	}
+	snapshot, err := ls.prepareBlockApplySnapshot(
+		t.Context(),
+		[]lcommon.Block{block},
+		models.Epoch{StartSlot: 0, SlotLength: 1, LengthInSlots: 1_000},
+		true,
+	)
+	require.NoError(t, err)
+	require.Equal(t, newTip, snapshot.tip,
+		"the canonical apply snapshot must observe state published during the wait")
 }

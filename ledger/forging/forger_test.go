@@ -3740,6 +3740,7 @@ func TestCheckAndForgeProductionAnnouncesForgedLeiosEB(t *testing.T) {
 	broadcaster := &forgerTestBroadcaster{}
 	leiosChecker := &forgerTestLeiosChecker{allowed: true}
 	leiosCaster := &forgerTestLeiosCaster{}
+	announcementValidated := false
 
 	forger, err := NewBlockForger(ForgerConfig{
 		Mode:             ModeProduction,
@@ -3756,6 +3757,16 @@ func TestCheckAndForgeProductionAnnouncesForgedLeiosEB(t *testing.T) {
 		LeiosProduceChecker: leiosChecker,
 		LeiosEBBroadcaster:  leiosCaster,
 		LeiosTxValidator:    &mockTxValidator{},
+		LeiosAnnouncementValidator: func(
+			_ context.Context,
+			header ledger.BlockHeader,
+		) error {
+			require.Same(t, block, header)
+			require.Zero(t, broadcaster.calls,
+				"announcement validation must precede ranking-block adoption")
+			announcementValidated = true
+			return nil
+		},
 		LeiosMempool: forgerTestMempoolProvider{
 			txs: []MempoolTransaction{
 				{
@@ -3771,6 +3782,7 @@ func TestCheckAndForgeProductionAnnouncesForgedLeiosEB(t *testing.T) {
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 
+	require.True(t, announcementValidated)
 	require.Equal(t, 1, leiosChecker.calls)
 	require.NotEmpty(t, leiosCaster.hash)
 	require.Equal(t, uint64(10), leiosCaster.slot)
