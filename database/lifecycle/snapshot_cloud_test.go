@@ -150,6 +150,12 @@ func TestIsCloudMirroredToDetectsChangedDestination(t *testing.T) {
 	backingDir := t.TempDir()
 	setFakeCloudBackingDir(t, backingDir)
 	const cloudDest = "faketest://user:secret@bucket/prefix?token=private#fragment"
+	for _, name := range []string{
+		lifecycle.BlobBackupFileName,
+		lifecycle.MetadataBackupFileName,
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), nil, 0o600))
+	}
 	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{}))
 
 	require.False(
@@ -159,6 +165,7 @@ func TestIsCloudMirroredToDetectsChangedDestination(t *testing.T) {
 
 	require.NoError(t, lifecycle.MirrorToCloud(
 		t.Context(), testDestinationRegistry, dir, cloudDest,
+		lifecycle.WithManifestKey(testTrustKey),
 	))
 	marker, err := os.ReadFile(lifecycle.CloudMirrorMarkerPath(dir))
 	require.NoError(t, err)

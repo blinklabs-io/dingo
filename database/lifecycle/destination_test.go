@@ -545,6 +545,7 @@ func TestSnapshotToCloudInvalidDestinationStillErrorsButKeepsLocal(
 		"sqlite",
 		"unsupported-scheme://bucket/prefix",
 		"", "",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.Error(t, err)
 	// Local snapshot must still be valid even though the operation as a
