@@ -3219,7 +3219,7 @@ func captureLiveMarkSnapshot(
 ) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	eventBus := event.NewEventBus(nil, logger)
+	eventBus := newTestEventBus(t, logger)
 	t.Cleanup(eventBus.Close)
 
 	ctx, cancel := context.WithCancel(context.Background())

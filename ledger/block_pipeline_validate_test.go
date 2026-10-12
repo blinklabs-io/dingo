@@ -62,6 +62,30 @@ func TestNewLedgerStateRejectsPipelineValidationWithoutKesConfig(
 	assert.Contains(t, err.Error(), "slotsPerKESPeriod")
 }
 
+func TestByronBlockBodyValidationErrorClassification(t *testing.T) {
+	t.Parallel()
+
+	for _, blockType := range []uint{
+		gledger.BlockTypeByronMain,
+		gledger.BlockTypeByronEbb,
+	} {
+		require.True(
+			t,
+			isByronBlockBodyValidationError(
+				blockType,
+				byron.ErrMalformedBodyProof,
+			),
+		)
+	}
+	require.False(
+		t,
+		isByronBlockBodyValidationError(
+			gledger.BlockTypeConway,
+			byron.ErrMalformedBodyProof,
+		),
+	)
+}
+
 // buildValidatedTestModelsBlock wraps testutil.BuildValidatedConwayBlockBytes
 // as a models.Block plus its ValidatedConwayBlock parameters, for tests that
 // need a genuinely VRF/KES-valid block flowing through decodeReadChainBatch.

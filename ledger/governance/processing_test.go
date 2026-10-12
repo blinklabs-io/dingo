@@ -16,6 +16,7 @@ package governance
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -198,6 +199,95 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 				require.Equal(t, test.expiry, expiryEpoch)
 			}
 		})
+	}
+}
+
+func TestGovernanceEffectsRejectOverwideCostModelLanguageIDs(t *testing.T) {
+	t.Parallel()
+
+	type applyFunc func(*database.Database, lcommon.Transaction) error
+	paths := map[string]applyFunc{
+		"persistence core": func(db *database.Database, tx lcommon.Transaction) error {
+			return persistGovernanceProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, false, db, nil)
+		},
+		"live proposals": func(db *database.Database, tx lcommon.Transaction) error {
+			return ProcessProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil)
+		},
+		"historical proposals": func(db *database.Database, tx lcommon.Transaction) error {
+			return ProcessHistoricalProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil)
+		},
+		"live transaction effects": func(db *database.Database, tx lcommon.Transaction) error {
+			return ProcessTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, 20, 9, db, nil)
+		},
+		"historical transaction effects": func(db *database.Database, tx lcommon.Transaction) error {
+			return ProcessHistoricalTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil)
+		},
+	}
+	rewardAccount, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		testHash28("cost-model-language-reward"),
+	)
+	require.NoError(t, err)
+
+	for _, era := range []string{"Conway", "Dijkstra"} {
+		for _, languageID := range []uint{255, 256} {
+			for path, apply := range paths {
+				name := fmt.Sprintf("%s/language-%d/%s", era, languageID, path)
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+					db, err := dbtest.NewDatabase(t, &database.Config{
+						DataDir: t.TempDir(),
+						Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+					})
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+					var proposal lcommon.ProposalProcedure
+					if era == "Conway" {
+						proposal = conway.ConwayProposalProcedure{
+							PPRewardAccount: rewardAccount,
+							PPGovAction: conway.ConwayGovAction{
+								Type: uint(lcommon.GovActionTypeParameterChange),
+								Action: &conway.ConwayParameterChangeGovAction{
+									ParamUpdate: conway.ConwayProtocolParameterUpdate{
+										CostModels: map[uint][]int64{languageID: {1}},
+									},
+								},
+							},
+						}
+					} else {
+						proposal = gdijkstra.DijkstraProposalProcedure{
+							PPRewardAccount: rewardAccount,
+							PPGovAction: gdijkstra.DijkstraGovAction{
+								Type: uint(lcommon.GovActionTypeParameterChange),
+								Action: &gdijkstra.DijkstraParameterChangeGovAction{
+									ParamUpdate: gdijkstra.DijkstraProtocolParameterUpdate{
+										CostModels: map[uint][]int64{languageID: {1}},
+									},
+								},
+							},
+						}
+					}
+					txHash := testHash32(name)
+					tx := mockledger.NewTransactionBuilder()
+					tx.WithId(txHash)
+					tx.WithValid(true)
+					tx.WithProposalProcedures(proposal)
+
+					err = apply(db, tx)
+					_, getErr := db.GetGovernanceProposal(t.Context(), txHash, 0, nil)
+					if languageID == 256 {
+						require.ErrorContains(t, err, "exceeds Word8 maximum 255")
+						require.ErrorIs(t, getErr, models.ErrGovernanceProposalNotFound)
+						return
+					}
+					require.NoError(t, err)
+					require.NoError(t, getErr)
+				})
+			}
+		}
 	}
 }
 

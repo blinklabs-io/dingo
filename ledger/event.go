@@ -142,9 +142,9 @@ type ConnectionClosedEvent struct {
 	Error        error
 }
 
-// ConnectionRecycleRequestedEvent is emitted by the ledger when header or block
-// crypto verification fails on a peer connection. Node wiring translates this to
-// a connmanager recycle request, keeping ledger/ free of connmanager/ imports.
+// ConnectionRecycleRequestedEvent is emitted by the ledger when a peer
+// connection must be replaced. Node wiring translates this to a connmanager
+// recycle request, keeping ledger/ free of connmanager/ imports.
 type ConnectionRecycleRequestedEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	Reason       string

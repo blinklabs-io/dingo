@@ -2637,35 +2637,35 @@ func TestVoteManagerValidatesDijkstraCertificateStrictly(t *testing.T) {
 		message,
 	))
 
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers,
 		aggregatedSignature,
 		[]byte("wrong message"),
-	))
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	), ErrInvalidCertificate)
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers[:1],
 		aggregatedSignature,
 		message,
-	))
+	), ErrInvalidCertificate)
 
 	wrongSizeAggregate := make([]byte, lcommon.LeiosBlsSignatureSize)
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers,
 		wrongSizeAggregate,
 		message,
-	))
+	), ErrInvalidCertificate)
 
 	highBits := append([]byte(nil), signers...)
 	highBits[len(highBits)-1] |= 1
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		highBits,
 		aggregatedSignature,
 		message,
-	))
+	), ErrInvalidCertificate)
 
 	belowQuorum := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
 	belowQuorum[1] = 1 << 6 // only voter 9, with 10 of 550 active stake
@@ -2679,6 +2679,12 @@ func TestVoteManagerValidatesDijkstraCertificateStrictly(t *testing.T) {
 		belowQuorumAggregate,
 		message,
 	), ErrQuorumNotMet)
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
+		5,
+		belowQuorum,
+		belowQuorumAggregate,
+		message,
+	), ErrInvalidCertificate)
 }
 
 func TestVoteManagerRejectsKeylessDijkstraCertificateSigner(t *testing.T) {
@@ -2709,12 +2715,70 @@ func TestVoteManagerRejectsKeylessDijkstraCertificateSigner(t *testing.T) {
 	}
 	aggregatedSignature, err := AggregateSignatures(signatures)
 	require.NoError(t, err)
-	require.ErrorContains(t, fixture.mgr.ValidateDijkstraCertificate(
+	err = fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers,
 		aggregatedSignature,
 		message,
-	), "no usable key")
+	)
+	require.ErrorContains(t, err, "no usable key")
+	require.ErrorIs(t, err, ErrInvalidCertificate)
+}
+
+// A committee that cannot be resolved, including from an empty stake
+// snapshot, means the certificate was never checked. Neither may read as a
+// verdict, which would reject a certifying block that may be valid.
+func TestVoteManagerDijkstraCertificateLocalFailureIsNotVerdict(t *testing.T) {
+	t.Parallel()
+	message := []byte("certificate message")
+	signers := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
+	signers[0] = 0x80
+	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 1))
+	require.NoError(t, err)
+	aggregatedSignature, err := SignVote(key, message)
+	require.NoError(t, err)
+
+	t.Run("stake snapshot unavailable", func(t *testing.T) {
+		t.Parallel()
+		fixture := newManagerFixture(t)
+		readErr := errors.New("stake snapshot read failed")
+		fixture.stake.setError(readErr)
+		err := fixture.mgr.ValidateDijkstraCertificate(
+			5, signers, aggregatedSignature, message,
+		)
+		require.ErrorIs(t, err, readErr)
+		require.NotErrorIs(t, err, ErrInvalidCertificate)
+	})
+	t.Run("leios keys unavailable", func(t *testing.T) {
+		t.Parallel()
+		readErr := errors.New("leios key read failed")
+		fixture := newManagerFixture(
+			t,
+			func(_ *managerFixture, cfg *VoteManagerConfig) {
+				cfg.KeyProvider = &fakeLeiosKeyProvider{err: readErr}
+			},
+		)
+		err := fixture.mgr.ValidateDijkstraCertificate(
+			5, signers, aggregatedSignature, message,
+		)
+		require.ErrorIs(t, err, readErr)
+		require.NotErrorIs(t, err, ErrInvalidCertificate)
+	})
+	t.Run("empty stake snapshot", func(t *testing.T) {
+		t.Parallel()
+		fixture := newManagerFixture(
+			t,
+			func(f *managerFixture, _ *VoteManagerConfig) {
+				f.stake.pools = map[string]uint64{}
+				f.stake.total = 0
+			},
+		)
+		err := fixture.mgr.ValidateDijkstraCertificate(
+			5, nil, aggregatedSignature, message,
+		)
+		require.ErrorContains(t, err, "empty stake distribution")
+		require.NotErrorIs(t, err, ErrInvalidCertificate)
+	})
 }
 
 type nextVotesResult struct {
@@ -3525,18 +3589,55 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	)
 	assert.Len(t, raws, 1)
 
-	// The local vote is served to peers
+	// Prototype votes are diffused over leios-notify and must not be served
+	// through protocol 20, whose signature domain is slot plus EB hash.
 	done := make(chan struct{})
-	defer close(done)
-	result := testutil.RequireReceive(
+	resultCh := startNextVotes(fixture, done, "conn-b", 1)
+	testutil.RequireNoReceive(
 		t,
-		startNextVotes(fixture, done, "conn-b", 1),
-		testutil.AsyncWait,
-		"own vote served to peers",
+		resultCh,
+		300*time.Millisecond,
+		"local prototype vote must stay off the legacy protocol",
 	)
+	close(done)
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait, "aborted NextVotes returns",
+	)
+	assert.Error(t, result.err)
+}
+
+func TestVoteManagerNextVotesExcludesReceivedPrototypeVotes(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t)
+	rbHash := lcommon.NewBlake2b256([]byte("prototype-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("prototype-eb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	received := fixture.makePrototypeVote(t, 3, rbHash)
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", received))
+
+	done := make(chan struct{})
+	resultCh := startNextVotes(fixture, done, "conn-b", 1)
+	testutil.RequireNoReceive(
+		t,
+		resultCh,
+		300*time.Millisecond,
+		"received prototype vote must stay off the legacy protocol",
+	)
+
+	legacy := fixture.makeVote(
+		t,
+		4,
+		578,
+		lcommon.NewBlake2b256([]byte("legacy-eb")),
+	)
+	require.NoError(t, fixture.mgr.HandleVote("conn-a", legacy))
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait, "legacy vote served after prototype",
+	)
+	close(done)
 	require.NoError(t, result.err)
-	require.Len(t, result.votes, 1)
-	assert.Equal(t, uint64(3), result.votes[0].VoterId)
+	require.Equal(t, []lcommon.LeiosVote{legacy}, result.votes)
 }
 
 func TestVoteManagerDoesNotEmitVoteAfterVotingReconfiguredDuringSigning(

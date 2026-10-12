@@ -254,14 +254,14 @@ func (d *Database) SetTransaction(
 }
 
 // SetTransactionWithOpts is SetTransaction with control over UTxO ingest
-// behavior via opts. Leios endorser-block application on the Musashi/
-// Haskell-conformant path passes SkipConsumedInputRecovery so a transaction's
-// effects are applied without the consumed-utxo recovery/repair pass: produced
+// behavior via opts. Certified Leios endorser-block closure application
+// passes SkipConsumedInputRecovery after validating the complete ordered
+// closure, so a transaction's effects are applied without the consumed-utxo
+// recovery/repair pass: produced
 // outputs and input spends are written, but a consumed input that is absent from
 // the store is left as a no-op instead of triggering blob recovery. This matches
-// the reference ledger's endorser-closure apply (ruleApplyTxValidation
-// ValidateNone), which folds the closure's transactions onto the ledger state
-// without validation or recovery.
+// the reference ledger's endorser-closure apply, which folds the closure's
+// transactions onto the ledger state without storage recovery.
 func (d *Database) SetTransactionWithOpts(
 	ctx context.Context,
 	tx lcommon.Transaction,
@@ -391,8 +391,8 @@ func (d *Database) SetTransactionWithOpts(
 	}
 	// On the Leios endorser-block closure path (SkipConsumedInputRecovery), a
 	// consumed input already spent by a different certified endorser-block
-	// transaction is a no-op, matching the reference ledger's applyLeiosClosure
-	// (ValidateNone), rather than wedging the pipeline with ErrUtxoConflict on a
+	// transaction is a no-op, matching the reference ledger's applyLeiosClosure,
+	// rather than wedging the pipeline with ErrUtxoConflict on a
 	// legitimate cross-EB double-consume. Ranking-block application keeps the
 	// hard conflict check.
 	setTxErr := error(nil)
@@ -447,7 +447,7 @@ func (d *Database) SetTransactionWithOpts(
 //
 // This is a general primitive for recording a transaction's certificate and
 // governance data without applying its UTxO effects. It is no longer on the
-// Leios endorser-block apply path: the Musashi path now applies endorser
+// Leios endorser-block apply path, which applies certified endorser
 // transactions with their full effects (see ledger/leios_apply.go and
 // SetTransactionWithOpts), matching the reference ledger.
 func (d *Database) SetTransactionMetadataOnly(

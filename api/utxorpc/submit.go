@@ -85,7 +85,7 @@ func (s *submitServiceServer) SubmitTx(
 	}
 	txHash := tx.Hash()
 	// Add transaction to mempool
-	err = s.utxorpc.config.Mempool.AddTransaction(txType, txRawBytes)
+	err = s.utxorpc.config.Mempool.AddTransaction(ctx, txType, txRawBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to add tx to mempool: %w", err)
 	}

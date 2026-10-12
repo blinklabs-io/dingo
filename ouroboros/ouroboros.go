@@ -60,7 +60,7 @@ const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 // Mempool is the protocol-facing subset of the backend-neutral mempool. Keeping
 // this interface local prevents networking from depending on FIFO internals.
 type Mempool interface {
-	AddTransaction(txType uint, txBytes []byte) error
+	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 	Transactions() []mempool.MempoolTransaction
 	CapacityBytes() int64
 	AddConsumer(connId ouroboros.ConnectionId) mempool.RelayConsumer
@@ -198,8 +198,8 @@ type Ouroboros struct {
 	// localstatequeryAcquireMutex.
 	localstatequeryRequests map[ouroboros.ConnectionId][]*localstatequeryRequest
 	// localstatequeryVerifyHook and localstatequeryVerifiedHook, when set,
-	// run just before Acquire verifies its point and just after the
-	// verified view opens. Tests use them to act at those exact moments.
+	// run just before Acquire or a reopen verifies its point and just after
+	// the verified view opens. Tests use them to act at those exact moments.
 	localstatequeryVerifyHook   func()
 	localstatequeryVerifiedHook func()
 	localstatequeryAcquireMutex sync.Mutex
@@ -292,19 +292,20 @@ type Ouroboros struct {
 	// serialized; running them off the leios-notify handler keeps a
 	// multi-second EB fetch from head-of-line blocking every later offer on
 	// the connection.
-	leiosFetchGuards sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
-	// (slot, EB hash) occurrences with a transaction-offer fetch in progress,
-	// deduplicating that work across all connections (it is
-	// offered on every connection). Keyed by slot and hash together, not hash
-	// alone, so an in-flight fetch for one occurrence does not suppress a
-	// legitimate offer of the same content-addressed hash recurring at a
-	// different slot.
-	leiosFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	leiosFetchGuards     sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
+	leiosTxFetchClaimsMu sync.Mutex
+	leiosTxFetchClaims   map[string]*leiosTxFetchClaim
+	// leiosTxFetchAttemptTimeoutOverride shortens the fixed attempt budget in
+	// tests. Values above the production budget are ignored.
+	leiosTxFetchAttemptTimeoutOverride time.Duration
+	// leiosTxFetchBeforeLaunch is an instance-local test seam for the
+	// owner-selection to worker-launch cancellation boundary.
+	leiosTxFetchBeforeLaunch func()
 	// Manifest offers have their own claim: a pending manifest fetch must not
 	// suppress a transaction offer needed to complete the same occurrence.
 	leiosManifestFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
 	// leiosFetchClaimPublished is an instance-local test seam used to hold a
-	// claimed offer before dispatch and expose admission ordering deterministically.
+	// claimed manifest before dispatch and expose admission ordering deterministically.
 	leiosFetchClaimPublished func()
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
@@ -1176,6 +1177,10 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.dropDeferredLeiosAnnouncements(leiosConnectionIdString(connId))
 	// Drop the per-connection leios-fetch guard. In-flight fetch goroutines
 	// hold their own reference, so they finish safely after this.
+	if guard, ok := o.leiosFetchGuards.Load(connId); ok {
+		guard.(*leiosFetchGuard).cancelPendingLeiosFetches()
+	}
+	o.cancelLeiosTxFetchWaiters(connId)
 	o.leiosFetchGuards.Delete(connId)
 }
 

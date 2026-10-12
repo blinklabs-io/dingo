@@ -37,7 +37,7 @@ func overlayTx(seed byte) *mockledger.MockTransaction {
 	return tx
 }
 
-func registrationTx(seed byte, deposit int64) lcommon.Transaction {
+func registrationTx(seed byte, deposit uint64) lcommon.Transaction {
 	return overlayTx(seed).WithCertificates(&lcommon.RegistrationCertificate{
 		CertType:        uint(lcommon.CertificateTypeRegistration),
 		StakeCredential: overlayCredential,

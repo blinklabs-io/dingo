@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"bytes"
 	"context"
 	"math/big"
 	"testing"
@@ -362,9 +363,10 @@ func TestDecodeGovAction_HardForkRoundtrip(t *testing.T) {
 func TestDecodeGovAction_TreasuryWithdrawalRoundtrip(t *testing.T) {
 	t.Parallel()
 
+	policyHash := bytes.Repeat([]byte{0xAB}, lcommon.Blake2b224Size)
 	original := &lcommon.TreasuryWithdrawalGovAction{
 		Type:       2,
-		PolicyHash: []byte{0xAB, 0xCD, 0xEF},
+		PolicyHash: policyHash,
 	}
 	encoded, err := cbor.Encode(original)
 	require.NoError(t, err)
@@ -374,7 +376,7 @@ func TestDecodeGovAction_TreasuryWithdrawalRoundtrip(t *testing.T) {
 	require.NoError(t, err)
 	concrete, ok := decoded.(*lcommon.TreasuryWithdrawalGovAction)
 	require.True(t, ok)
-	assert.Equal(t, []byte{0xAB, 0xCD, 0xEF}, concrete.PolicyHash)
+	assert.Equal(t, policyHash, concrete.PolicyHash)
 }
 
 func TestDecodeGovAction_NoConfidenceRoundtrip(t *testing.T) {

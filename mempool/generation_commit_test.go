@@ -135,7 +135,7 @@ func TestAdmissionCommitRejectsSupersededLedgerGeneration(t *testing.T) {
 	})
 
 	validator.publishOnCheck.Store(true)
-	err := pool.AddTransaction(
+	err := pool.AddTransaction(context.Background(),
 		uint(conway.EraIdConway),
 		getTestTxBytes(t),
 	)
@@ -153,7 +153,7 @@ func TestRevalidationCommitRejectsSupersededLedgerGeneration(t *testing.T) {
 		require.NoError(t, pool.Stop(ctx))
 	})
 
-	require.NoError(t, pool.AddTransaction(
+	require.NoError(t, pool.AddTransaction(context.Background(),
 		uint(conway.EraIdConway),
 		getTestTxBytes(t),
 	))
@@ -211,7 +211,7 @@ func TestAdmissionReportsUnsettledLedgerAsPendingStateMoved(t *testing.T) {
 		require.NoError(t, pool.Stop(ctx))
 	})
 
-	err := pool.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t))
+	err := pool.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t))
 	require.ErrorIs(t, err, ErrPendingStateMoved)
 	require.Empty(t, pool.Transactions())
 }
