@@ -93,6 +93,8 @@ VOLUME /ipc
 ENV DINGO_SOCKET_PATH=/ipc/dingo.socket
 ENV CARDANO_NODE_SOCKET_PATH=/ipc/dingo.socket
 ENV CARDANO_SOCKET_PATH=/ipc/dingo.socket
+# Remote metrics scraping also requires DINGO_METRICS_BIND_ADDR to bind
+# beyond container loopback.
 EXPOSE 3001 3002 9090 12798 12799
 # Probes the dedicated health listener's LIVENESS path, not /readyz, and not
 # /metrics as this previously did.
