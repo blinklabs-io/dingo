@@ -892,7 +892,11 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 	}
 	blockHash := lcommon.Blake2b256Hash(data.blockRaw)
 	if !o.config.EnableLeios {
-		o.publishValidatedLeiosEndorserBlock(point.Slot, blockHash)
+		o.publishValidatedLeiosEndorserBlock(
+			point.Slot,
+			lcommon.Blake2b256{},
+			blockHash,
+		)
 		return
 	}
 	if !data.completeTxCache() ||
@@ -1123,6 +1127,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	}
 	o.publishValidatedLeiosEndorserBlock(
 		validated.point.Slot,
+		header.Hash(),
 		lcommon.Blake2b256Hash(validated.blockRaw),
 	)
 	return nil
@@ -1286,6 +1291,7 @@ func (o *Ouroboros) validateLeiosEndorserBlock(
 	if status == leiosEBValidationValid && validated != nil {
 		o.publishValidatedLeiosEndorserBlock(
 			validated.point.Slot,
+			header.Hash(),
 			lcommon.Blake2b256Hash(validated.blockRaw),
 		)
 	}
@@ -1403,12 +1409,13 @@ func (o *Ouroboros) retryableLeiosEndorserBlocks() []*leiosEndorserBlockData {
 
 func (o *Ouroboros) publishValidatedLeiosEndorserBlock(
 	slot uint64,
+	rbHash lcommon.Blake2b256,
 	blockHash lcommon.Blake2b256,
 ) {
 	// Trigger local vote emission for the stored block, outside the
 	// cache lock
-	if o.leiosVotes != nil {
-		o.leiosVotes.HandleEndorserBlock(slot, blockHash)
+	if o.leiosVotes != nil && rbHash != (lcommon.Blake2b256{}) {
+		o.leiosVotes.HandleValidatedEndorserBlock(slot, rbHash, blockHash)
 	}
 	// Register the block into the Leios pipeline for stage/timing
 	// tracking and EB equivocation detection

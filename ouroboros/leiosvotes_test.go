@@ -122,8 +122,9 @@ func (f *fakeLeiosVoteHandler) VotesByIds(
 	return f.rawVotes
 }
 
-func (f *fakeLeiosVoteHandler) HandleEndorserBlock(
+func (f *fakeLeiosVoteHandler) HandleValidatedEndorserBlock(
 	slot uint64,
+	_ lcommon.Blake2b256,
 	ebHash lcommon.Blake2b256,
 ) {
 	f.mu.Lock()

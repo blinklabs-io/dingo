@@ -1726,7 +1726,8 @@ func TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry(t *testing.T) {
 	)
 }
 
-// lockProbingVoteHandler's HandleEndorserBlock acquires leiosAnnouncementsMu
+// lockProbingVoteHandler's HandleValidatedEndorserBlock acquires
+// leiosAnnouncementsMu
 // itself before delegating, the way a real handler could legitimately need
 // to (e.g. to cross-check announcement state). If bindLeiosEndorserBlockSlot's
 // publish step still ran while recordLeiosAnnouncement held that same lock,
@@ -1736,13 +1737,14 @@ type lockProbingVoteHandler struct {
 	o *Ouroboros
 }
 
-func (l *lockProbingVoteHandler) HandleEndorserBlock(
+func (l *lockProbingVoteHandler) HandleValidatedEndorserBlock(
 	slot uint64,
+	rbHash lcommon.Blake2b256,
 	ebHash lcommon.Blake2b256,
 ) {
 	l.o.leiosAnnouncementsMu.Lock()
 	l.o.leiosAnnouncementsMu.Unlock()
-	l.fakeLeiosVoteHandler.HandleEndorserBlock(slot, ebHash)
+	l.fakeLeiosVoteHandler.HandleValidatedEndorserBlock(slot, rbHash, ebHash)
 }
 
 // TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock verifies
