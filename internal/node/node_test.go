@@ -1113,6 +1113,32 @@ func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
 	}
 }
 
+func TestBuildDingoConfigWiresLedgerPrefetchAheadFlag(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	for _, enabled := range []bool{false, true} {
+		built := buildDingoConfig(
+			&config.Config{LedgerPrefetchAheadEnabled: enabled},
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		)
+		if built.LedgerPrefetchAheadEnabled() != enabled {
+			t.Fatalf(
+				"LedgerPrefetchAheadEnabled = %v, want %v",
+				built.LedgerPrefetchAheadEnabled(),
+				enabled,
+			)
+		}
+	}
+}
+
 // TestBuildDingoConfigForwardsScalarConfigFields is recurrence-prevention
 // coverage for the defect class of the block pipeline flags, not just the
 // single field it reported: buildDingoConfig hand-lists roughly 85 individual
@@ -1399,6 +1425,32 @@ func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
 	}
 }
 
+func TestBuildDingoConfigWiresLedgerApplyRowBatching(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	for _, enabled := range []bool{false, true} {
+		built := buildDingoConfig(
+			&config.Config{LedgerApplyRowBatchingEnabled: enabled},
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		)
+		if built.LedgerApplyRowBatchingEnabled() != enabled {
+			t.Fatalf(
+				"LedgerApplyRowBatchingEnabled: want %v, got %v",
+				enabled,
+				built.LedgerApplyRowBatchingEnabled(),
+			)
+		}
+	}
+}
+
 // TestBuildDingoConfigWiresTokenRegistryHeaders pins the composition step a
 // loaded header secret takes on its way to the registry sync.
 func TestBuildDingoConfigWiresTokenRegistryHeaders(t *testing.T) {
@@ -1424,5 +1476,31 @@ func TestBuildDingoConfigWiresTokenRegistryHeaders(t *testing.T) {
 
 	if got := built.TokenRegistry().HeaderSecrets; !maps.Equal(got, headers) {
 		t.Fatalf("token registry headers = %v, want %v", got, headers)
+	}
+}
+
+func TestBuildDingoConfigWiresBlockfetchLowWatermarkFlag(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	for _, enabled := range []bool{false, true} {
+		built := buildDingoConfig(
+			&config.Config{BlockfetchLowWatermarkEnabled: enabled},
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		)
+		if built.BlockfetchLowWatermarkEnabled() != enabled {
+			t.Fatalf(
+				"BlockfetchLowWatermarkEnabled = %v, want %v",
+				built.BlockfetchLowWatermarkEnabled(),
+				enabled,
+			)
+		}
 	}
 }

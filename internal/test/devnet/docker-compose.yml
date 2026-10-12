@@ -96,8 +96,7 @@ services:
       - ${DEVNET_DINGO_SPEC:-./testnet-dingo.yaml}:/testnet.yaml
       - ./testdata/byron-heavy-delegation.json:/byron-heavy-delegation.json:ro
       - ../../../config/cardano/musashi/dijkstra-genesis.json:/dijkstra-genesis.json:ro
-      - ./testdata/leios-key.json:/leios-key.json:ro
-      - ./testdata/leios-vote.skey:/leios-vote.skey:ro
+      - ./testdata/leios-credentials.json:/leios-credentials.json:ro
       - p1-configs:/configs/1
       - p2-configs:/configs/2
       - p3-configs:/configs/3
@@ -243,6 +242,10 @@ services:
     profiles: ["dingo"]
     init: true
     user: "0:0"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - sleep "$${TXPUMP_START_DELAY_SECONDS:-0}"; exec /bin/txpump-entrypoint.sh
     depends_on:
       dingo-1:
         condition: service_healthy
@@ -267,6 +270,7 @@ services:
       TXPUMP_TX_COUNT_MIN: "1"
       TXPUMP_TX_COUNT_MAX: "1"
       TXPUMP_CONFIRMATION_SLOTS: "${DEVNET_TXPUMP_CONFIRMATION_SLOTS:-600}"
+      TXPUMP_START_DELAY_SECONDS: "${DEVNET_TXPUMP_START_DELAY_SECONDS:-0}"
       # txpump interprets cooldowns as milliseconds. Keep this at the
       # 5-15 second cadence documented in README.md.
       TXPUMP_COOLDOWN_MIN: "5000"

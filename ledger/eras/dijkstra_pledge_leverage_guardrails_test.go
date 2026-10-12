@@ -102,11 +102,11 @@ func newDijkstraGuardrailsTx(
 		deposit = uint64(1_000_000)
 		fee     = uint64(1_000_000)
 	)
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee66", 0)
-	collateralInput := shelley.NewShelleyTransactionInput(
+	collateralInput := shelley.MustNewShelleyTransactionInput(
 		"e228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee77", 0)
-	referenceInput := shelley.NewShelleyTransactionInput(
+	referenceInput := shelley.MustNewShelleyTransactionInput(
 		"f228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88", 0)
 
 	privateKey := ed25519.NewKeyFromSeed(

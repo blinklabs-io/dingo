@@ -147,6 +147,23 @@ var flagSpecs = []flagSpec{
 		"tracing",
 		"enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)",
 	),
+	stringFlag(
+		"TracingEndpoint",
+		"tracing-endpoint",
+		"",
+		"OTLP HTTP collector URL for spans; setting it enables tracing (default: OTEL_EXPORTER_OTLP_* env vars)",
+	),
+	stringFlag(
+		"TracingServiceName",
+		"tracing-service-name",
+		"",
+		"service.name resource attribute on exported spans",
+	),
+	float64Flag(
+		"TracingSampleRatio",
+		"tracing-sample-ratio",
+		"fraction of new traces sampled, from 0 to 1",
+	),
 	boolFlag(
 		"TracingStdout",
 		"tracing-stdout",
@@ -737,6 +754,23 @@ var flagSpecs = []flagSpec{
 		"block-pipeline-validate-enabled",
 		"also VRF/KES-validate blocks in the block-pipeline replay loop with a parallel worker pool (requires block-pipeline-enabled; default off)",
 	),
+	boolFlag(
+		"LedgerPrefetchAheadEnabled",
+		"ledger-prefetch-ahead-enabled",
+		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies, for validated blocks only (not consensus-affecting; default off)",
+	),
+
+	boolFlag(
+		"LedgerApplyRowBatchingEnabled",
+		"ledger-apply-row-batching-enabled",
+		"in core storage mode, write the deltas of blocks that are not validated with multi-row batched inserts instead of per-row statements, as API mode always does (not consensus-affecting; default off)",
+	),
+
+	boolFlag(
+		"BlockfetchLowWatermarkEnabled",
+		"blockfetch-low-watermark-enabled",
+		"start blockfetch once one range of headers is queued while far from the peer tip, instead of waiting for four ranges; the header queue capacity is unchanged (not consensus-affecting; default off)",
+	),
 
 	// Block production
 	boolFlag("BlockProducer", "block-producer", "enable block production mode"),
@@ -829,6 +863,11 @@ var flagSpecs = []flagSpec{
 		"ValidateForgedBlock",
 		"validate-forged-block",
 		"validate forged blocks before adoption and diffusion (header crypto, body hash, per-tx ledger rules)",
+	),
+	boolFlag(
+		"PlannerStatsRefreshEnabled",
+		"planner-stats-refresh-enabled",
+		"keep SQLite planner statistics current with PRAGMA optimize at startup and after each epoch rollover",
 	),
 
 	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)

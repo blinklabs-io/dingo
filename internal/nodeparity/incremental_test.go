@@ -1483,7 +1483,7 @@ func TestSaveCursor_OverwritesPriorContent(t *testing.T) {
 // same type from a real block's decoded transactions.
 func txIn(t *testing.T, hash string, idx int) lcommon.TransactionInput {
 	t.Helper()
-	return shelley.NewShelleyTransactionInput(hash, idx)
+	return shelley.MustNewShelleyTransactionInput(hash, idx)
 }
 
 // txHashA and txHashB are two distinct, well-formed 64-hex-character

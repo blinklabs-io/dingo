@@ -147,6 +147,12 @@ func (a *transactionBatchAccumulator) restore(
 	}
 }
 
+// getUtxoSpendStateQuery reads back a consumed input that the spend UPDATE
+// did not mark, to tell an already-spent input from a missing one.
+const getUtxoSpendStateQuery = `
+SELECT deleted_slot, spent_at_tx_id
+FROM utxo WHERE tx_id = ? AND output_idx = ?`
+
 const transactionInsertSQL = `
 INSERT INTO "transaction" (
     hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
@@ -203,17 +209,36 @@ ON CONFLICT (tx_id, output_idx) DO NOTHING
 RETURNING id, tx_id, output_idx`
 }
 
+// consumeUtxosBatchQuery builds the SQLite batched spend for rowCount inputs.
+// Each input is its own "tx_id = ? AND output_idx = ?" arm of an id subquery,
+// the shape of consumeUtxoSQLiteReturningSQL, so SQLite resolves it through
+// the unique tx_id_output_idx index whatever its statistics say.
+//
+// A row-value "(tx_id, output_idx) IN (...)" list or a join against VALUES
+// does not hold that plan. "deleted_slot = 0" and "spent_at_tx_id IS NULL"
+// match every live row, but spent rows carry many distinct values with few
+// rows each, so sqlite_stat1 reports both columns as selective and SQLite
+// drives the statement from a deleted_slot-leading index, visiting every live
+// UTxO per transaction. The liveness predicates stay inside each arm, where
+// the fully bound unique key already pins the plan; the outer statement
+// carries none, because any predicate on deleted_slot there lets the planner
+// choose that index again (see markUtxosDeletedQuery).
+//
+// Arguments are the two SET values followed by tx_id, output_idx per input.
 func consumeUtxosBatchQuery(rowCount int, returnStake bool) string {
-	row := "(?,?)"
-	values := strings.TrimSuffix(strings.Repeat(row+",", rowCount), ",")
+	const arm = "SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ? " +
+		"AND deleted_slot = 0 AND spent_at_tx_id IS NULL"
+	arms := strings.TrimSuffix(
+		strings.Repeat(arm+" UNION ALL ", rowCount),
+		" UNION ALL ",
+	)
 	returning := "tx_id, output_idx"
 	if returnStake {
 		returning += ", credential_tag, staking_key, amount"
 	}
 	return `UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
-WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL
-  AND (tx_id, output_idx) IN (` + values + `)
+WHERE id IN (` + arms + `)
 RETURNING ` + returning
 }
 
@@ -567,6 +592,7 @@ func (s *Store) SetTransactionBatched(
 	skipWithdrawalWitness bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
@@ -584,6 +610,7 @@ func (s *Store) SetTransactionBatched(
 		false,
 		accumulator,
 		txn,
+		protocolMajor,
 	)
 }
 
@@ -600,6 +627,7 @@ func (s *Store) SetTransactionBatchedHistorical(
 	historicalBackfill bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
@@ -610,7 +638,7 @@ func (s *Store) SetTransactionBatchedHistorical(
 	return s.setTransactionBatched(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill, false,
-		accumulator, txn,
+		accumulator, txn, protocolMajor,
 	)
 }
 
@@ -621,10 +649,11 @@ func (s *Store) SetTransaction(
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	return s.setTransaction(
 		transaction, point, index, certDeposits,
-		skipWithdrawalWitness, false, false, txn,
+		skipWithdrawalWitness, false, false, txn, protocolMajor,
 	)
 }
 
@@ -638,21 +667,21 @@ func (s *Store) setTransactionBatched(
 	tolerateConsumedInputConflict bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	return s.setTransactionWithAccumulator(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill,
-		tolerateConsumedInputConflict, accumulator, nil, txn,
+		tolerateConsumedInputConflict, accumulator, nil, txn, protocolMajor,
 	)
 }
 
-// SetTransactionLeiosClosure records a transaction on the Leios endorser-block
-// closure path (the Musashi/Haskell-conformant ValidateNone apply). It behaves
+// SetTransactionLeiosClosure records a validated transaction on the Leios
+// endorser-block closure path. It behaves
 // like SetTransaction except that a consumed input already spent by a
 // *different* transaction is treated as a no-op instead of ErrUtxoConflict,
 // matching the reference ledger's applyLeiosClosure: two certified endorser
-// blocks may legitimately name the same input across blocks, and the canonical
-// chain folds the closure without re-validation rather than rejecting it. Do
+// blocks may legitimately name the same input across blocks. Do
 // not use this for ranking-block application, where a real double-spend must
 // still fail.
 func (s *Store) SetTransactionLeiosClosure(
@@ -662,20 +691,21 @@ func (s *Store) SetTransactionLeiosClosure(
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	return s.setTransaction(
 		transaction, point, index, certDeposits,
-		skipWithdrawalWitness, false, true, txn,
+		skipWithdrawalWitness, false, true, txn, protocolMajor,
 	)
 }
 
 // SetTransactionLeiosClosureInContext records the execution context before
 // certificates are applied, so epoch-dependent effects use the unticked state.
-func (s *Store) SetTransactionLeiosClosureInContext(transaction lcommon.Transaction, point ocommon.Point, index uint32, certDeposits map[int]uint64, skipWithdrawalWitness bool, slot uint64, txn types.Txn) error {
+func (s *Store) SetTransactionLeiosClosureInContext(transaction lcommon.Transaction, point ocommon.Point, index uint32, certDeposits map[int]uint64, skipWithdrawalWitness bool, slot uint64, txn types.Txn, protocolMajor uint64) error {
 	if slot >= point.Slot {
 		return errors.New("closure context must precede its certifying block")
 	}
-	return s.setTransactionWithAccumulator(transaction, point, index, certDeposits, skipWithdrawalWitness, false, true, nil, &slot, txn)
+	return s.setTransactionWithAccumulator(transaction, point, index, certDeposits, skipWithdrawalWitness, false, true, nil, &slot, txn, protocolMajor)
 }
 
 func (s *Store) setTransaction(
@@ -687,9 +717,9 @@ func (s *Store) setTransaction(
 	historicalBackfill bool,
 	// tolerateConsumedInputConflict makes a consumed input that is already
 	// spent by a *different* transaction a no-op instead of ErrUtxoConflict.
-	// Set only on the Leios endorser-block closure path (ValidateNone), where
+	// Set only on the validated Leios endorser-block closure path, where
 	// the reference ledger's applyLeiosClosure folds the certified closure onto
-	// the UTxO set without re-validation: re-consuming an input an earlier
+	// the UTxO set: re-consuming an input an earlier
 	// certified endorser-block transaction already spent is Map.delete on a
 	// missing key (a no-op), not a fault. Two certified endorser blocks can name
 	// the same input across blocks (a legitimate cross-EB double-consume the
@@ -698,11 +728,12 @@ func (s *Store) setTransaction(
 	// double-spend still fails.
 	tolerateConsumedInputConflict bool,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	return s.setTransactionWithAccumulator(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill,
-		tolerateConsumedInputConflict, nil, nil, txn,
+		tolerateConsumedInputConflict, nil, nil, txn, protocolMajor,
 	)
 }
 
@@ -717,6 +748,7 @@ func (s *Store) setTransactionWithAccumulator(
 	accumulator types.MetadataBatchAccumulator,
 	ledgerContextSlot *uint64,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	if transaction == nil {
 		return errors.New("set transaction: nil transaction")
@@ -845,6 +877,7 @@ func (s *Store) setTransactionWithAccumulator(
 					certDeposits,
 					requireKnownDeposits,
 					transactionIsNew,
+					protocolMajor,
 				)
 				if err != nil {
 					return err
@@ -1039,9 +1072,7 @@ func (s *Store) setTransactionWithAccumulator(
 						deletedSlot uint64
 						spentBy     []byte
 					)
-					err = db.QueryRowContext(ctx, `
-SELECT deleted_slot, spent_at_tx_id
-FROM utxo WHERE tx_id = ? AND output_idx = ?`,
+					err = s.queryRowCached(ctx, db, getUtxoSpendStateQuery,
 						utxoID.Hash,
 						utxoID.Idx,
 					).Scan(&deletedSlot, &spentBy)
@@ -1153,6 +1184,7 @@ func (s *Store) SetGapBlockTransaction(
 	index uint32,
 	certDeposits map[int]uint64,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	// Gap ingestion intentionally has no available input state, so this is
 	// equivalent to SetTransaction with the consumed-input update suppressed.
@@ -1207,7 +1239,7 @@ RETURNING id`,
 				var err error
 				certificateRefs, err = s.applyTransactionCertificates(
 					ctx, db, transactionID, transaction.Certificates(),
-					point, index, certDeposits, allowUnknownDeposits, false,
+					point, index, certDeposits, allowUnknownDeposits, false, protocolMajor,
 				)
 				if err != nil {
 					return err

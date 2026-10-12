@@ -38,6 +38,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/blinklabs-io/plutigo/builtin"
 	"github.com/blinklabs-io/plutigo/cek"
 	"github.com/blinklabs-io/plutigo/data"
@@ -1288,6 +1289,7 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 		},
 	)
 	require.Error(t, err)
+	require.True(t, IsSemanticRuleValidationError(err))
 
 	var plutusErr conway.PlutusScriptFailedError
 	require.ErrorAs(t, err, &plutusErr)
@@ -1351,8 +1353,41 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 			)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "missing PlutusV1 cost model")
+			assert.False(t, IsSemanticRuleValidationError(err))
 		},
 	)
+
+	t.Run("evaluation context failure stays local", func(t *testing.T) {
+		orig := newEvalContextFunc
+		t.Cleanup(func() { newEvalContextFunc = orig })
+		evalErr := errors.New("evaluation context unavailable")
+		newEvalContextFunc = func(
+			lang.LanguageVersion,
+			cek.ProtoVersion,
+			[]int64,
+		) (*cek.EvalContext, error) {
+			return nil, evalErr
+		}
+		err := ValidateTxConway(
+			tx,
+			0,
+			newMockLedgerState(),
+			&conway.ConwayProtocolParameters{
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: 9,
+				},
+				MaxTxExUnits: lcommon.ExUnits{
+					Steps:  1_000_000,
+					Memory: 1_000_000,
+				},
+				CostModels: map[uint][]int64{
+					0: defaultMachineCostModel(t, lang.LanguageVersionV1),
+				},
+			},
+		)
+		require.ErrorIs(t, err, evalErr)
+		require.False(t, IsSemanticRuleValidationError(err))
+	})
 }
 
 type mockProducedValidityTx struct {
@@ -2349,7 +2384,7 @@ func TestValidateTxPlutusConwayMainnetStorageDecodedUtxos(t *testing.T) {
 				idx,
 			)
 			ls.addUtxo(
-				shelley.NewShelleyTransactionInput(
+				shelley.MustNewShelleyTransactionInput(
 					inputTx.Hash().String(),
 					idx,
 				),
@@ -2579,7 +2614,7 @@ func TestEvaluateTxConwayPreprodFixtures(t *testing.T) {
 				require.NoError(t, err)
 				for idx, output := range inputTx.Outputs() {
 					ls.addUtxo(
-						shelley.NewShelleyTransactionInput(
+						shelley.MustNewShelleyTransactionInput(
 							inputTx.Hash().String(),
 							idx,
 						),
@@ -2688,7 +2723,7 @@ func TestEvaluateTxConwayPreprodSerialiseData(t *testing.T) {
 			inputTx.Hash().String(),
 		)
 		for outputIdx, output := range inputTx.Outputs() {
-			input := shelley.NewShelleyTransactionInput(
+			input := shelley.MustNewShelleyTransactionInput(
 				inputTx.Hash().String(),
 				outputIdx,
 			)
@@ -2926,7 +2961,7 @@ func TestValidateTxPlutusConwayPreviewWithdrawalOracle(t *testing.T) {
 		var output babbage.BabbageTransactionOutput
 		_, err = cbor.Decode(outputCbor, &output)
 		require.NoError(t, err, "decode output %s", ref)
-		input := shelley.NewShelleyTransactionInput(txId, outputIdx)
+		input := shelley.MustNewShelleyTransactionInput(txId, outputIdx)
 		ls.addUtxo(&input, &output)
 	}
 	require.Len(t, ls.utxos, len(tx.Inputs())+len(tx.ReferenceInputs()))
@@ -3121,7 +3156,7 @@ func decodeConwayTreasuryTx(
 	}, input
 }
 
-const conwayExplicitStakeAmount = int64(2_000_000)
+const conwayExplicitStakeAmount = uint64(2_000_000)
 
 // TestConwayTxInfoV3UsesProtocolVersionForExplicitStakeAmounts verifies the
 // PV9/PV10 TxInfo boundary with a V3 script that serialises the translated
@@ -3173,7 +3208,7 @@ func TestConwayTxInfoV3UsesProtocolVersionForExplicitStakeAmounts(
 					major: lcommon.ProtocolVersionPlomin,
 					option: data.NewConstr(
 						0,
-						data.NewInteger(big.NewInt(conwayExplicitStakeAmount)),
+						data.NewInteger(big.NewInt(int64(conwayExplicitStakeAmount))),
 					),
 				},
 			} {
@@ -4318,7 +4353,7 @@ func TestEvaluateTxConwayStopsAtTransactionWideBudget(t *testing.T) {
 			stored, err := gledger.NewTransactionOutputFromCbor(output.Cbor())
 			require.NoError(t, err)
 			ls.addUtxo(
-				shelley.NewShelleyTransactionInput(
+				shelley.MustNewShelleyTransactionInput(
 					inputTx.Hash().String(),
 					idx,
 				),
@@ -4360,7 +4395,7 @@ func TestEvaluateTxConwayStopsAfterCanceledInputLookup(t *testing.T) {
 			stored, err := gledger.NewTransactionOutputFromCbor(output.Cbor())
 			require.NoError(t, err)
 			base.addUtxo(
-				shelley.NewShelleyTransactionInput(inputTx.Hash().String(), idx),
+				shelley.MustNewShelleyTransactionInput(inputTx.Hash().String(), idx),
 				stored,
 			)
 		}
@@ -4371,8 +4406,20 @@ func TestEvaluateTxConwayStopsAfterCanceledInputLookup(t *testing.T) {
 		ctx:                       ctx,
 		cancel:                    cancel,
 	}
+	pending := lcommon.NewBlockLedgerState(ls)
+	predecessor := mockledger.NewTransactionBuilder().WithType(
+		conway.EraIdConway,
+	).WithCertificates(&lcommon.RegistrationCertificate{
+		CertType: uint(lcommon.CertificateTypeRegistration),
+		StakeCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.CredentialHash{0x7f},
+		},
+		Amount: 1,
+	})
+	require.NoError(t, pending.ApplyTransaction(predecessor, pp))
 
-	_, _, _, err = EvaluateTxConway(tx, ls, pp)
+	_, _, _, err = EvaluateTxConway(tx, pending, pp)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, 1, ls.reads)
 }
@@ -4429,8 +4476,20 @@ func TestEvaluateTxConwayCancelsActivePlutusMachine(t *testing.T) {
 			Steps:  100_000_000,
 		},
 	}
+	pending := lcommon.NewBlockLedgerState(ls)
+	predecessor := mockledger.NewTransactionBuilder().WithType(
+		conway.EraIdConway,
+	).WithCertificates(&lcommon.RegistrationCertificate{
+		CertType: uint(lcommon.CertificateTypeRegistration),
+		StakeCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.CredentialHash{0x7e},
+		},
+		Amount: 1,
+	})
+	require.NoError(t, pending.ApplyTransaction(predecessor, pp))
 
-	_, _, _, err = EvaluateTxConway(tx, ls, pp)
+	_, _, _, err = EvaluateTxConway(tx, pending, pp)
 	require.ErrorIs(t, err, context.Canceled)
 	require.GreaterOrEqual(t, ctx.checks, ctx.limit)
 }

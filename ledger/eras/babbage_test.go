@@ -150,7 +150,7 @@ func TestEvaluateTxBabbagePreviewDuplicateRequiredSigner(t *testing.T) {
 			inputTx.Hash().String(),
 		)
 		for outputIdx, output := range inputTx.Outputs() {
-			input := shelley.NewShelleyTransactionInput(
+			input := shelley.MustNewShelleyTransactionInput(
 				inputTx.Hash().String(),
 				outputIdx,
 			)
@@ -225,7 +225,7 @@ func loadPreviewBabbageFixture(
 			inputTx.Hash().String(),
 		)
 		for outputIdx, output := range inputTx.Outputs() {
-			input := shelley.NewShelleyTransactionInput(
+			input := shelley.MustNewShelleyTransactionInput(
 				inputTx.Hash().String(),
 				outputIdx,
 			)

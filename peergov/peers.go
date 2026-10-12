@@ -971,14 +971,9 @@ func addressHost(address string) string {
 //     When two or more topology peers share the host we decline topology
 //     attribution and continue to rule 3 rather than guessing.
 //
-//  3. Disconnected inbound entry from the same host: an earlier inbound
-//     entry with no live connection is reused, so a peer reconnecting from
-//     a new source port keeps its short-session history and cooldown state
-//     instead of starting from a fresh record. An entry that still holds a
-//     connection is never reused: concurrent connections from one host stay
-//     separate because protocol ownership is per connection.
-//
-//  4. No match: caller creates a fresh PeerSourceInboundConn entry.
+//  3. No match: caller creates a fresh PeerSourceInboundConn entry. Arbitrary
+//     inbound peers cannot be matched by host because unrelated peers can
+//     arrive through the same source NAT.
 //
 // Rule 2 only consults topology peers; gossip/ledger/other inbound
 // entries never widen their identity to a topology peer, because the
@@ -1031,15 +1026,6 @@ func (p *PeerGovernor) resolveInboundIdentity(
 	}
 	if candidateIdx != -1 {
 		return candidateIdx, p.peers[candidateIdx].GroupID
-	}
-	// Rule 3: a disconnected inbound entry from the same host.
-	for i, peer := range p.peers {
-		if peer != nil &&
-			peer.Source == PeerSourceInboundConn &&
-			peer.Connection == nil &&
-			addressHost(peer.NormalizedAddress) == inboundHost {
-			return i, ""
-		}
 	}
 	return -1, ""
 }

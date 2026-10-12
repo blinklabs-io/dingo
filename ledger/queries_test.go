@@ -1266,7 +1266,7 @@ func utxoByTxInAsOf(
 	atSlot uint64,
 ) map[olocalstatequery.UtxoId]ledger.TransactionOutput {
 	t.Helper()
-	txIn := ledger.NewShelleyTransactionInput(
+	txIn := ledger.MustNewShelleyTransactionInput(
 		hex.EncodeToString(txId),
 		int(outputIdx),
 	)
@@ -1479,7 +1479,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_TooOldRejected(t *testing.T) {
 	}, nil))
 
 	// floor = 200_000 - 50_000 = 150_000; one slot behind it must reject.
-	txIn := ledger.NewShelleyTransactionInput(
+	txIn := ledger.MustNewShelleyTransactionInput(
 		hex.EncodeToString(repeatedBytes(32, 0xEE)),
 		0,
 	)
@@ -1506,7 +1506,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_AtFloor_Succeeds(t *testing.T) {
 		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
 	}, nil))
 
-	txIn := ledger.NewShelleyTransactionInput(
+	txIn := ledger.MustNewShelleyTransactionInput(
 		hex.EncodeToString(repeatedBytes(32, 0xEE)),
 		0,
 	)
@@ -1534,7 +1534,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_APIModeNeverRejects(
 		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
 	}, nil))
 
-	txIn := ledger.NewShelleyTransactionInput(
+	txIn := ledger.MustNewShelleyTransactionInput(
 		hex.EncodeToString(repeatedBytes(32, 0xEE)),
 		0,
 	)
@@ -1575,7 +1575,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_PersistedFloorOverridesLenientLi
 	// compute (100_000 - 50_000 = 50_000).
 	require.NoError(t, ls.persistConsumedUtxoPruneFloor(99_500, nil))
 
-	txIn := ledger.NewShelleyTransactionInput(
+	txIn := ledger.MustNewShelleyTransactionInput(
 		hex.EncodeToString(repeatedBytes(32, 0xEE)),
 		0,
 	)
@@ -1634,7 +1634,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_DeferredForCatchup_NotRejected(
 	// Without deferral this would compute floor = 200_000 - 50_000 =
 	// 150_000 (see RetentionWindow_TooOldRejected) and reject slot 1
 	// outright.
-	txIn := ledger.NewShelleyTransactionInput(
+	txIn := ledger.MustNewShelleyTransactionInput(
 		hex.EncodeToString(repeatedBytes(32, 0xEE)),
 		0,
 	)
@@ -1682,7 +1682,7 @@ func TestQuery_UtxoByTxIn_WiredThroughDispatch(t *testing.T) {
 		Point: ocommon.NewPoint(300, pointHash),
 	}, nil))
 
-	txIn := ledger.NewShelleyTransactionInput(hex.EncodeToString(txId), 0)
+	txIn := ledger.MustNewShelleyTransactionInput(hex.EncodeToString(txId), 0)
 	query := &olocalstatequery.BlockQuery{
 		Query: &olocalstatequery.ShelleyQuery{
 			Query: &olocalstatequery.ShelleyUtxoByTxinQuery{
@@ -2065,7 +2065,7 @@ func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 
 	realTxIns := make([]ledger.ShelleyTransactionInput, len(live))
 	for i, ref := range live {
-		realTxIns[i] = ledger.NewShelleyTransactionInput(
+		realTxIns[i] = ledger.MustNewShelleyTransactionInput(
 			hex.EncodeToString(ref.Hash),
 			int(ref.Idx),
 		)
@@ -2075,7 +2075,7 @@ func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 	// result, not fail the whole batch.
 	txIns := append(
 		realTxIns,
-		ledger.NewShelleyTransactionInput(strings.Repeat("00", 32), 9999),
+		ledger.MustNewShelleyTransactionInput(strings.Repeat("00", 32), 9999),
 	)
 
 	ls := &LedgerState{db: db}
@@ -2634,7 +2634,7 @@ func TestQueryShelleyStakeDelegDeposits(t *testing.T) {
 		ocommon.NewPoint(100, bytes.Repeat([]byte{0x53}, 32)),
 		0,
 		map[int]uint64{0: 2_000_000},
-		nil,
+		nil, 0,
 	))
 
 	ls := &LedgerState{db: db}

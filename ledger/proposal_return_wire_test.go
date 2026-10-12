@@ -54,7 +54,7 @@ func proposalReturnWireAddress(t *testing.T, base bool) lcommon.Address {
 }
 
 func proposalReturnWireInput() shelley.ShelleyTransactionInput {
-	return shelley.NewShelleyTransactionInput(
+	return shelley.MustNewShelleyTransactionInput(
 		"1128b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88",
 		0,
 	)
@@ -168,21 +168,16 @@ func dijkstraWireBlock(
 	t.Helper()
 	tx.TxIsValid = isValid
 	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber:  1,
-					Slot:         1,
-					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
-				},
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			1, 1, lcommon.Blake2b256{}, lcommon.Blake2b256{}, 0,
+		),
 		BlockBody: dijkstra.DijkstraBlockBody{
 			Transactions: []dijkstra.DijkstraTransaction{*tx},
 		},
 	}
 	bodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)

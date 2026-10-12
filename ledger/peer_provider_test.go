@@ -209,7 +209,7 @@ func TestPoolRelayProviderEventDrivenInvalidation(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 
 	adapter := newTestAdapter(t, db, bus, 10*time.Minute)
@@ -419,7 +419,7 @@ func TestPoolRelayProviderConcurrentAccess(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 
 	adapter := newTestAdapter(t, db, bus, 10*time.Millisecond)
@@ -560,7 +560,7 @@ func TestPoolRelayProviderCloseUnsubscribes(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 
 	adapter := newTestAdapter(t, db, bus, defaultRelayCacheTTL)

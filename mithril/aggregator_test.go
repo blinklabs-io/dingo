@@ -661,8 +661,24 @@ func TestAggregatorSignatureValidation(t *testing.T) {
 	// under another party's registration in the aggregate.
 	decoded, err := hex.DecodeString(good.Signature)
 	require.NoError(t, err)
-	claimed, err := parseSTMSingleSignatureBytes(decoded, stmMaxLotteryIndices)
+	claimed, err := parseSTMSingleSignatureBytes(
+		decoded,
+		uint64(stmMaxLotteryIndices),
+	)
 	require.NoError(t, err)
+	overM := *claimed
+	overM.Indexes = make([]uint64, int(f.aggregator.cfg.Parameters.M+1))
+	for i := range overM.Indexes {
+		overM.Indexes[i] = uint64(i)
+	}
+	tooMany := mutate(func(r *registerSignatureRequest) {
+		r.Signature = hex.EncodeToString(encodeSTMSingleSignature(overM))
+	})
+	code, body = f.post("/register-signatures", tooMany)
+	require.Equal(t, http.StatusBadRequest, code, body)
+	require.Contains(t, body, "malformed signature")
+	require.NotContains(t, body, "invalid signature")
+
 	claimed.SignerIndex++
 	misindexed := mutate(func(r *registerSignatureRequest) {
 		r.Signature = hex.EncodeToString(encodeSTMSingleSignature(*claimed))

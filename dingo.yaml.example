@@ -19,8 +19,11 @@
 # cardanoConfig: "./config/cardano/preview/config.json"
 
 # Longest a node-to-client LocalStateQuery session may hold one acquired
-# ledger snapshot. A snapshot past this age is closed and the session's next
-# query fails. Each held snapshot pins a database read transaction.
+# ledger snapshot. A snapshot past this age is closed, and the session's next
+# query reopens one at the same block. If that block was rolled back, or has
+# fallen behind a retention floor, while the snapshot was closed, the query
+# fails and the client's connection is closed. Each held snapshot pins a
+# database read transaction.
 # Default: "5m"
 # CLI: --local-state-query-view-max-lifetime
 # Env: DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME
@@ -43,8 +46,10 @@
       # config:
         # Optional SQLite data directory. When unset, databasePath applies.
         # dataDir: ".dingo"
-        # Full VACUUM can pause SQLite writers. It is disabled by default;
-        # set an interval in seconds only when that maintenance pause is acceptable.
+        # Space reclaim is disabled by default. If auto_vacuum is not already
+        # INCREMENTAL, its first run converts the database with one full
+        # VACUUM, which pauses SQLite writers for the whole rewrite; later
+        # runs release free pages in short steps.
         # vacuumIntervalSeconds: 86400
     # PostgreSQL metadata alternative (replace the metadata block above):
     # metadata:
@@ -71,7 +76,9 @@
     # "default" remains a compatibility alias for "fifo".
     # provider: "fifo"
     # config:
-      # Mempool capacity in bytes. Left commented out so the run-mode default
+      # Mempool capacity in bytes. A pending transaction counts its CBOR plus
+      # the CBOR of the decoded outputs the pool keeps for it. Left commented
+      # out so the run-mode default
       # applies: 1048576 (1 MiB) for standard modes, 26214400 (25 MiB) for the
       # leios run mode. An explicit value here overrides both defaults, so a
       # leios node would silently run with the smaller capacity — uncomment
@@ -243,6 +250,20 @@
 # enabled. Mostly useful for local debugging.
 # CLI: --tracing-stdout  Env: DINGO_TRACING_STDOUT
 # tracingStdout: false
+
+# OTLP HTTP collector URL for spans, for example http://localhost:4318.
+# Setting it enables tracing. Empty leaves tracing to the tracing setting and
+# the destination to the OTEL_EXPORTER_OTLP_* env vars.
+# CLI: --tracing-endpoint  Env: DINGO_TRACING_ENDPOINT
+# tracingEndpoint: ""
+
+# service.name resource attribute on exported spans.
+# CLI: --tracing-service-name  Env: DINGO_TRACING_SERVICE_NAME
+# tracingServiceName: dingo
+
+# Fraction of new traces sampled, from 0 to 1.
+# CLI: --tracing-sample-ratio  Env: DINGO_TRACING_SAMPLE_RATIO
+# tracingSampleRatio: 1
 
 # Internal/private address to bind for listening for Ouroboros NtC
 # privateBindAddr: "127.0.0.1"
@@ -667,6 +688,40 @@
 # CLI: --block-pipeline-validate-enabled
 # blockPipelineValidateEnabled: false
 
+# Prefetch the next block's input UTxOs on a separate goroutine from a
+# read-only transaction while the current block applies (default: false).
+# Not consensus-affecting. Inputs spent by earlier blocks of the same
+# block-apply chunk are never served from the prefetch, and any input it
+# misses is read as without the flag.
+#
+# Can be overridden with the DINGO_LEDGER_PREFETCH_AHEAD_ENABLED
+# environment variable
+# CLI: --ledger-prefetch-ahead-enabled
+# ledgerPrefetchAheadEnabled: false
+
+# In core storage mode, write the accumulated deltas of blocks that are not
+# validated with multi-row batched inserts instead of one statement group per
+# row (default: false), as API storage mode already does. Validated blocks,
+# Leios endorser-block applies, and batches applied with closure context keep
+# the per-transaction path in every storage mode. Not
+# consensus-affecting -- the stored state is identical either way. See
+# ARCHITECTURE.md ("Block Processing Pipeline").
+#
+# Can be overridden with the DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED
+# environment variable
+# CLI: --ledger-apply-row-batching-enabled
+# ledgerApplyRowBatchingEnabled: false
+
+# While the header is far from the peer tip, start blockfetch once one
+# blockfetch range (500) of headers is queued instead of waiting for four
+# ranges (2000). The header queue capacity is unchanged (default: false). Not
+# consensus-affecting.
+#
+# Can be overridden with the DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED
+# environment variable
+# CLI: --blockfetch-low-watermark-enabled
+# blockfetchLowWatermarkEnabled: false
+
 # Error out (instead of silently skipping) when a consumed UTxO cannot be
 # found or recovered for a block past the recorded Mithril sync boundary.
 # A non-genesis chainsync intersection without a Mithril snapshot may set this
@@ -1063,6 +1118,15 @@
 # `dingo database snapshot|restore|truncate` CLI commands, and — when
 # bark is enabled (barkPort > 0) — the base directory bark's
 # DatabaseService CreateSnapshot/Restore RPCs use.
+# SQLite only: keep planner statistics current with PRAGMA optimize, run
+# before block processing starts and after each epoch rollover. A database
+# synced from genesis otherwise never has statistics and some queries scan most
+# of a large table. The first run on a large database can take minutes; later
+# runs are near-free. Escape hatch only.
+# Default: true
+# CLI: --planner-stats-refresh-enabled  Env: DINGO_PLANNER_STATS_REFRESH_ENABLED
+# plannerStatsRefreshEnabled: true
+
 # databaseLifecycle:
   # Capture automatic database snapshots at epoch boundaries. Unsupported
   # when the primary blob provider is s3 or gcs: their remote-object backup

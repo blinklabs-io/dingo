@@ -44,6 +44,16 @@ type parameterChangeGovernanceTestBlock struct {
 	tx     lcommon.Transaction
 }
 
+func seedParameterChangeGovernanceConstitution(
+	t *testing.T,
+	db *database.Database,
+) {
+	t.Helper()
+	require.NoError(t, db.SetConstitution(&models.Constitution{
+		AnchorHash: bytes.Repeat([]byte{0x43}, lcommon.Blake2b256Size),
+	}, nil))
+}
+
 func (b *parameterChangeGovernanceTestBlock) Type() int {
 	return conway.BlockTypeConway
 }
@@ -105,6 +115,7 @@ func TestLedgerProcessBlockRejectsParameterChangeProtocolVersionAndPersistsNoPro
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	seedParameterChangeGovernanceConstitution(t, db)
 
 	txHash := bytes.Repeat([]byte{0x44}, 32)
 	minFeeA := uint(1)
@@ -201,6 +212,7 @@ func TestLedgerProcessBlockRejectsDijkstraParameterChangeProtocolVersionAndPersi
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	seedParameterChangeGovernanceConstitution(t, db)
 
 	txHash := bytes.Repeat([]byte{0x45}, 32)
 	minFeeA := uint(1)

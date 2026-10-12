@@ -59,7 +59,7 @@ func newTestConwayBlock(
 // counting under test never inspects the hash itself, so any well-formed
 // 32-byte hex string is enough.
 func testInput(fill byte, index int) shelley.ShelleyTransactionInput {
-	return shelley.NewShelleyTransactionInput(
+	return shelley.MustNewShelleyTransactionInput(
 		strings.Repeat(fmt.Sprintf("%02x", fill), 32),
 		index,
 	)

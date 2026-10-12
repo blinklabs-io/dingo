@@ -34,7 +34,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const blockExplicitStakeAmount = int64(2_000_000)
+const blockExplicitStakeAmount = uint64(2_000_000)
 
 // errBlockTxInfoEvaluated stops block application once the Plutus evaluation
 // has passed, so a passing case is distinguishable from a failing one without
@@ -97,7 +97,7 @@ func TestLedgerProcessBlockConwayV3TxInfoFollowsBlockProtocolVersion(
 
 	explicit := data.NewConstr(
 		0,
-		data.NewInteger(big.NewInt(blockExplicitStakeAmount)),
+		data.NewInteger(big.NewInt(int64(blockExplicitStakeAmount))),
 	)
 	nothing := data.NewConstr(1)
 	for _, certificateCase := range []struct {
@@ -419,7 +419,7 @@ func TestConwayV3TxInfoFollowsProtocolParametersOffTheChainSyncPath(
 			major: lcommon.ProtocolVersionPlomin,
 			option: data.NewConstr(
 				0,
-				data.NewInteger(big.NewInt(blockExplicitStakeAmount)),
+				data.NewInteger(big.NewInt(int64(blockExplicitStakeAmount))),
 			),
 		},
 	} {

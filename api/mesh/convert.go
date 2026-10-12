@@ -60,7 +60,7 @@ func convertBlock(
 	block models.Block,
 	txs []models.Transaction,
 	addrNetworkID uint8,
-	slotToTimestamp func(uint64) int64,
+	timestamp int64,
 ) *Block {
 	meshTxs := make([]*Transaction, 0, len(txs))
 	for i := range txs {
@@ -95,7 +95,7 @@ func convertBlock(
 			Hash:  blockHash,
 		},
 		ParentBlockIdentifier: parentID,
-		Timestamp:             slotToTimestamp(block.Slot),
+		Timestamp:             timestamp,
 		Transactions:          meshTxs,
 	}
 }

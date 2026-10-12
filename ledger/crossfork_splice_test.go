@@ -29,7 +29,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -340,7 +339,7 @@ func TestRollbackAheadOfLedgerDoesNotPersistIntent(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 	subID, _ := bus.SubscribeWithBuffer(TransactionEventType, 1)
@@ -1302,7 +1301,7 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 	) *chainsyncRollbackFixture {
 		t.Helper()
 		fixture := newChainsyncRollbackFixture(t)
-		bus := event.NewEventBus(nil, nil)
+		bus := newTestEventBus(t, nil)
 		t.Cleanup(bus.Stop)
 		fixture.ls.config.EventBus = bus
 		if deep {

@@ -96,11 +96,22 @@ func TestStoreRawBlockUtxoOffsetsDijkstraTransactionValidity(t *testing.T) {
 		BlockHeader: &dijkstra.DijkstraBlockHeader{
 			BabbageBlockHeader: babbage.BabbageBlockHeader{
 				Body: babbage.BabbageBlockHeaderBody{
-					Slot: 11,
+					Slot:        11,
+					BlockNumber: 1,
+					VrfKey:      make([]byte, 32),
+					VrfResult: lcommon.VrfResult{
+						Output: make([]byte, 64),
+						Proof:  make([]byte, 80),
+					},
+					OpCert: babbage.BabbageOpCert{
+						HotVkey:   make([]byte, 32),
+						Signature: make([]byte, 64),
+					},
 					ProtoVersion: babbage.BabbageProtoVersion{
 						Major: dijkstra.MinProtocolVersionDijkstra,
 					},
 				},
+				Signature: make([]byte, 448),
 			},
 		},
 		BlockBody: dijkstra.DijkstraBlockBody{

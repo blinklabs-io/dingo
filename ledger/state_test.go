@@ -2363,7 +2363,7 @@ func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
 func TestEmitNextEpochNonceReadyRequiresLedgerTipAtCutoff(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	_, evtCh := eventBus.Subscribe(event.EpochNonceReadyEventType)
@@ -2389,7 +2389,7 @@ func TestEmitNextEpochNonceReadyRequiresLedgerTipAtCutoff(t *testing.T) {
 func TestResetNextEpochNonceReadyAllowsReEmit(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	_, evtCh := eventBus.Subscribe(event.EpochNonceReadyEventType)
@@ -3337,7 +3337,7 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 		ParamUpdate: conway.ConwayProtocolParameterUpdate{
 			MinFeeA: &fee,
 		},
-		PolicyHash: []byte{0xaa, 0xbb},
+		PolicyHash: bytes.Repeat([]byte{0xaa}, lcommon.Blake2b224Size),
 	}
 	actionCbor, err := cbor.Encode(action)
 	require.NoError(t, err)
@@ -3429,7 +3429,11 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 	require.NoError(t, err)
 	require.NotNil(t, translated.ParamUpdate.MinFeeA)
 	require.Equal(t, uint(1234), *translated.ParamUpdate.MinFeeA)
-	require.Equal(t, []byte{0xaa, 0xbb}, translated.PolicyHash)
+	require.Equal(
+		t,
+		bytes.Repeat([]byte{0xaa}, lcommon.Blake2b224Size),
+		translated.PolicyHash,
+	)
 }
 
 // TestEpochRolloverResult_FieldsPopulated tests that EpochRolloverResult
@@ -6055,31 +6059,22 @@ func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		applyTxs bool
-		ebTxs    []cbor.RawMessage
-		applied  int
-		want     string
-		notWant  []string
+		name    string
+		ebTxs   []cbor.RawMessage
+		applied int
+		want    string
+		notWant []string
 	}{
 		{
-			name:     "empty CIP block",
-			applyTxs: true,
-			want:     "Leios endorser block has no transactions",
+			name: "empty block",
+			want: "Leios endorser block has no transactions",
 			notWant: []string{
 				"skipped already-applied Leios endorser block transactions",
 				"stored Leios endorser block without applying to UTxO",
 			},
 		},
 		{
-			name:     "CIP deduplicated block",
-			applyTxs: true,
-			ebTxs:    []cbor.RawMessage{{0x80}},
-			want:     "skipped already-applied Leios endorser block transactions",
-			notWant:  []string{"Leios endorser block has no transactions"},
-		},
-		{
-			name:  "Haskell deduplicated block",
+			name:  "deduplicated block",
 			ebTxs: []cbor.RawMessage{{0x80}},
 			want:  "skipped already-applied Leios endorser block transactions",
 			notWant: []string{
@@ -6093,7 +6088,6 @@ func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 			var logBuf bytes.Buffer
 			ls := &LedgerState{
 				config: LedgerStateConfig{
-					LeiosApplyEndorserBlockTxs: tc.applyTxs,
 					Logger: slog.New(slog.NewTextHandler(
 						&logBuf,
 						&slog.HandlerOptions{Level: slog.LevelDebug},
@@ -6152,9 +6146,10 @@ func TestLeiosValidationSessionRollsBackStagedCertificateWrites(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.withTxValidationSession(context.Background(), nil, nil, true, func(
-		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error,
+	err = ls.withTxValidationSession(context.Background(), nil, nil, true, false, func(
+		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 		_ func() bool,
+		_ func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
 	) error {
 		return applyTx(
@@ -11645,7 +11640,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 	pc := cm.PrimaryChain()
 	raw := seedTestChain(t, pc, "windowed-race", blockCount)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
@@ -14139,6 +14134,45 @@ func TestAtTipRecoveryFinalAttemptCrossesEpochBoundaryOnce(t *testing.T) {
 	)
 	require.Equal(t, tip, got, "the same epoch boundary must not be crossed twice")
 	require.Equal(t, 2.0, promtestutil.ToFloat64(crossed))
+}
+
+func TestAtTipRecoveryEpochBoundaryLookupHonorsLifecycleCancellation(t *testing.T) {
+	t.Parallel()
+
+	const boundarySlot = 120_000
+	f := newPrunedUtxoFixture(t, 0)
+	require.NoError(t, f.db.BlockCreate(models.Block{
+		ID:     99,
+		Slot:   130_000,
+		Hash:   testHashBytes("recovery-context-boundary"),
+		Number: 99,
+		Type:   1,
+		Cbor:   []byte{0x80},
+	}, nil))
+	f.ls.currentEpoch = models.Epoch{
+		EpochId:   1,
+		StartSlot: boundarySlot,
+		EraId:     eras.ConwayEraDesc.Id,
+	}
+	previousCtx := f.ls.ctx
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	f.ls.ctx = ctx
+	t.Cleanup(func() { f.ls.ctx = previousCtx })
+
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			pruneFixtureTipSlot+1,
+			testHashBytes("recovery-context"),
+		),
+	}
+	tip := ocommon.NewPoint(pruneFixtureTipSlot, testHashBytes("3766-tip"))
+	deep := ocommon.NewPoint(pruneFixtureFloorSlot, testHashBytes("3766-floor"))
+
+	got := f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts-1,
+	)
+	require.Equal(t, tip, got)
 }
 
 // TestAtTipRecoveryForwardProgressRestoresEpochBoundaryCrossing verifies that

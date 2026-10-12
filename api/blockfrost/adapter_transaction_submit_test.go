@@ -62,18 +62,44 @@ func submitTestTxCbor(t *testing.T) []byte {
 type stubSubmitter struct {
 	err   error
 	calls int
+	ctx   context.Context
 }
 
-func (s *stubSubmitter) AddTransaction(txType uint, txBytes []byte) error {
+func (s *stubSubmitter) AddTransaction(ctx context.Context, txType uint, txBytes []byte) error {
 	s.calls++
+	s.ctx = ctx
 	return s.err
+}
+
+// TestHandleTransactionSubmitPassesRequestContext pins that mempool admission
+// runs under the request context, so its span joins the request's trace.
+func TestHandleTransactionSubmitPassesRequestContext(t *testing.T) {
+	t.Parallel()
+
+	type requestKey struct{}
+	submitter := &stubSubmitter{}
+	b := newTestBlockfrost(&NodeAdapter{submitter: submitter})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		bytes.NewReader(submitTestTxCbor(t)),
+	)
+	req = req.WithContext(
+		context.WithValue(req.Context(), requestKey{}, "request"),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	b.handleTransactionSubmit(httptest.NewRecorder(), req)
+
+	require.Equal(t, 1, submitter.calls)
+	require.Equal(t, "request", submitter.ctx.Value(requestKey{}))
 }
 
 // TestTransactionSubmitUnavailableMempoolIsNotARejection pins that the two
 // conditions meaning "the mempool cannot accept anything right now" are
 // reported as ErrMempoolUnavailable, the same class the nil-submitter branch
-// reports, rather than as a rejection of the caller's transaction. Both are
-// members: a mempool stopped by shutdown, and one built without a validator.
+// reports, rather than as a rejection of the caller's transaction. Members: a
+// mempool stopped by shutdown, one built without a validator, and an
+// admission that could not reach a verdict because the ledger kept moving.
 func TestTransactionSubmitUnavailableMempoolIsNotARejection(t *testing.T) {
 	t.Parallel()
 
@@ -87,12 +113,16 @@ func TestTransactionSubmitUnavailableMempoolIsNotARejection(t *testing.T) {
 			"%w in AddTransaction",
 			mempool.ErrNilValidator,
 		),
+		"ledger unsettled": fmt.Errorf(
+			"validate transaction: %w",
+			mempool.ErrPendingStateMoved,
+		),
 	} {
 		t.Run(name, func(t *testing.T) {
 			submitter := &stubSubmitter{err: submitErr}
 			adapter := &NodeAdapter{submitter: submitter}
 
-			hash, err := adapter.TransactionSubmit(submitTestTxCbor(t))
+			hash, err := adapter.TransactionSubmit(context.Background(), submitTestTxCbor(t))
 
 			require.Error(t, err)
 			assert.Empty(t, hash)
@@ -127,7 +157,7 @@ func TestTransactionSubmitRejectionStaysARejection(t *testing.T) {
 	submitter := &stubSubmitter{err: submitErr}
 	adapter := &NodeAdapter{submitter: submitter}
 
-	hash, err := adapter.TransactionSubmit(submitTestTxCbor(t))
+	hash, err := adapter.TransactionSubmit(context.Background(), submitTestTxCbor(t))
 
 	require.Error(t, err)
 	assert.Empty(t, hash)
@@ -149,7 +179,7 @@ func TestTransactionSubmitAcceptedReturnsHash(t *testing.T) {
 	submitter := &stubSubmitter{}
 	adapter := &NodeAdapter{submitter: submitter}
 
-	hash, err := adapter.TransactionSubmit(submitTestTxCbor(t))
+	hash, err := adapter.TransactionSubmit(context.Background(), submitTestTxCbor(t))
 
 	require.NoError(t, err)
 	assert.NotEmpty(t, hash)
@@ -169,6 +199,10 @@ func TestHandleTransactionSubmitStoppedMempoolReturns503(t *testing.T) {
 		"nil validator": fmt.Errorf(
 			"%w in AddTransaction",
 			mempool.ErrNilValidator,
+		),
+		"ledger unsettled": fmt.Errorf(
+			"validate transaction: %w",
+			mempool.ErrPendingStateMoved,
 		),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -247,7 +281,7 @@ func TestTransactionSubmitStorageFailureIsNotARejection(t *testing.T) {
 			submitter := &stubSubmitter{err: submitErr}
 			adapter := &NodeAdapter{submitter: submitter}
 
-			hash, err := adapter.TransactionSubmit(submitTestTxCbor(t))
+			hash, err := adapter.TransactionSubmit(context.Background(), submitTestTxCbor(t))
 
 			require.Error(t, err)
 			assert.Empty(t, hash)
@@ -282,7 +316,7 @@ func TestTransactionSubmitUnresolvableInputStaysARejection(t *testing.T) {
 	submitter := &stubSubmitter{err: submitErr}
 	adapter := &NodeAdapter{submitter: submitter}
 
-	_, err := adapter.TransactionSubmit(submitTestTxCbor(t))
+	_, err := adapter.TransactionSubmit(context.Background(), submitTestTxCbor(t))
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrTransactionRejected)
@@ -510,7 +544,7 @@ func TestTransactionSubmitRejectsTrailingBytes(t *testing.T) {
 			adapter := &NodeAdapter{submitter: submitter}
 			padded := append(submitTestTxCbor(t), trailer...)
 
-			_, err := adapter.TransactionSubmit(padded)
+			_, err := adapter.TransactionSubmit(context.Background(), padded)
 
 			require.ErrorIs(t, err, ErrInvalidTransaction)
 			assert.Zero(t, submitter.calls)
