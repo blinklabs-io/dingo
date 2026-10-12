@@ -304,6 +304,24 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	if s.dialect.Name() != "sqlite" {
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+		result, err := s.execCached(ctx, db,
+			`DELETE FROM auth_committee_hot WHERE id IN (`+bindPlaceholders(len(ids))+`)`,
+			args...,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("prune superseded committee hot authorizations: %w", err)
+		}
+		pruned, err := result.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("prune superseded committee hot authorizations: row count: %w", err)
+		}
+		return pruned, nil
+	}
 	var pruned int64
 	for _, id := range ids {
 		result, err := s.execCached(
@@ -311,7 +329,7 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 		)
 		if err != nil {
 			return 0, fmt.Errorf(
-				"prune superseded committee hot authorizations: %w", err,
+				"prune superseded committee hot authorizations (id %d): %w", id, err,
 			)
 		}
 		rowsAffected, err := result.RowsAffected()

@@ -2329,6 +2329,11 @@ Rollback already owns that connection before it takes the mutex exclusively to
 invalidate the cached slot. The prune holds its read lock across the delete, so
 horizon selection and deletion stay ordered without a lock cycle.
 
+SQLite deletes the selected authorization IDs individually using cached
+primary-key statements, avoiding stale-statistics table scans. PostgreSQL and
+MySQL delete the selected IDs in one bounded batch to avoid one network round
+trip per row.
+
 The partition is the tagged credential, so a script-hash credential never prunes
 a key-hash credential sharing its 28 bytes. `committee_member` is not pruned:
 `CommitteeStateAvailable` reads it including soft-deleted rows to tell an
