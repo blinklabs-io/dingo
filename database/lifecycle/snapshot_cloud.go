@@ -88,6 +88,39 @@ func MirrorToCloud(
 	cloudDest string,
 	opts ...ManifestOption,
 ) error {
+	return mirrorToCloud(
+		ctx, registry, dir, cloudDest,
+		withCloudSnapshotCatalogReconcile(registry, cloudDest, opts),
+	)
+}
+
+func withCloudSnapshotCatalogReconcile(
+	registry *DestinationRegistry,
+	cloudDest string,
+	opts []ManifestOption,
+) []ManifestOption {
+	if cloudDest == "" {
+		return opts
+	}
+	configured := append([]ManifestOption(nil), opts...)
+	configured = append(configured, withSnapshotCatalogReconcile(
+		func(ctx context.Context, baseDir string) error {
+			_, err := ReconcileCloudSnapshotCatalogContext(
+				ctx, baseDir, registry, cloudDest, configured...,
+			)
+			return err
+		},
+	))
+	return configured
+}
+
+func mirrorToCloud(
+	ctx context.Context,
+	registry *DestinationRegistry,
+	dir string,
+	cloudDest string,
+	opts []ManifestOption,
+) error {
 	if cloudDest == "" {
 		return nil
 	}
@@ -242,14 +275,7 @@ func SnapshotToCloud(
 	opts ...ManifestOption,
 ) (Manifest, error) {
 	if cloudDest != "" {
-		opts = append(opts, withSnapshotCatalogReconcile(
-			func(ctx context.Context, baseDir string) error {
-				_, err := ReconcileCloudSnapshotCatalogContext(
-					ctx, baseDir, registry, cloudDest, opts...,
-				)
-				return err
-			},
-		))
+		opts = withCloudSnapshotCatalogReconcile(registry, cloudDest, opts)
 		if err := requireManifestKey(opts); err != nil {
 			return Manifest{}, err
 		}
@@ -277,7 +303,7 @@ func SnapshotToCloud(
 			)
 		}
 	}
-	if err := MirrorToCloud(ctx, registry, dir, cloudDest, opts...); err != nil {
+	if err := mirrorToCloud(ctx, registry, dir, cloudDest, opts); err != nil {
 		return manifest, fmt.Errorf(
 			"snapshot written locally to %q, but %w", dir, err,
 		)
