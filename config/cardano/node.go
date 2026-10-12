@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"math/big"
 	"os"
@@ -199,153 +200,14 @@ func NewCardanoNodeConfigFromEmbedFS(
 }
 
 func (c *CardanoNodeConfig) loadGenesisConfigs() error {
-	// Load Byron genesis
-	if c.ByronGenesisFile != "" {
-		byronGenesisPath := c.ByronGenesisFile
-		if !filepath.IsAbs(byronGenesisPath) {
-			byronGenesisPath = filepath.Join(c.path, byronGenesisPath)
+	err := c.loadGenesisDocuments(func(name string) ([]byte, error) {
+		if !filepath.IsAbs(name) {
+			name = filepath.Join(c.path, name)
 		}
-		byronGenesisBytes, err := os.ReadFile(byronGenesisPath)
-		if err != nil {
-			return err
-		}
-		byronGenesisHashBytes, err := canonicalizeByronGenesisJSON(
-			byronGenesisBytes,
-		)
-		if err != nil {
-			return err
-		}
-		byronHash, err := validateGenesisHash(
-			"Byron",
-			c.ByronGenesisHash,
-			byronGenesisHashBytes,
-		)
-		if err != nil {
-			return err
-		}
-		// Store computed hash if config does not contain hash.
-		c.ByronGenesisHash = byronHash
-		byronGenesis, err := loadByronGenesisFromBytes(byronGenesisBytes)
-		if err != nil {
-			return err
-		}
-		c.byronGenesis = &byronGenesis
-	}
-	// Load Shelley genesis
-	if c.ShelleyGenesisFile != "" {
-		shelleyGenesisPath := c.ShelleyGenesisFile
-		if !filepath.IsAbs(shelleyGenesisPath) {
-			shelleyGenesisPath = filepath.Join(c.path, shelleyGenesisPath)
-		}
-		shelleyGenesisBytes, err := os.ReadFile(shelleyGenesisPath)
-		if err != nil {
-			return err
-		}
-		shelleyGenesisHashBytes := replaceGenesisLineEndings(
-			shelleyGenesisBytes,
-		)
-		shelleyHash, err := validateGenesisHash(
-			"Shelley",
-			c.ShelleyGenesisHash,
-			shelleyGenesisHashBytes,
-		)
-		if err != nil {
-			return err
-		}
-		c.ShelleyGenesisHash = shelleyHash
-		shelleyGenesis, err := shelley.NewShelleyGenesisFromFile(
-			shelleyGenesisPath,
-		)
-		if err != nil {
-			return err
-		}
-		c.shelleyGenesis = &shelleyGenesis
-	}
-	// Load Alonzo genesis
-	if c.AlonzoGenesisFile != "" {
-		alonzoGenesisPath := c.AlonzoGenesisFile
-		if !filepath.IsAbs(alonzoGenesisPath) {
-			alonzoGenesisPath = filepath.Join(c.path, alonzoGenesisPath)
-		}
-		alonzoGenesisBytes, err := os.ReadFile(alonzoGenesisPath)
-		if err != nil {
-			return err
-		}
-		alonzoGenesisHashBytes := replaceGenesisLineEndings(
-			alonzoGenesisBytes,
-		)
-		alonzoHash, err := validateGenesisHash(
-			"Alonzo",
-			c.AlonzoGenesisHash,
-			alonzoGenesisHashBytes,
-		)
-		if err != nil {
-			return err
-		}
-		c.AlonzoGenesisHash = alonzoHash
-		alonzoGenesis, err := alonzo.NewAlonzoGenesisFromFile(alonzoGenesisPath)
-		if err != nil {
-			return err
-		}
-		c.alonzoGenesis = &alonzoGenesis
-	}
-	// Load Conway genesis
-	if c.ConwayGenesisFile != "" {
-		conwayGenesisPath := c.ConwayGenesisFile
-		if !filepath.IsAbs(conwayGenesisPath) {
-			conwayGenesisPath = filepath.Join(c.path, conwayGenesisPath)
-		}
-		conwayGenesisBytes, err := os.ReadFile(conwayGenesisPath)
-		if err != nil {
-			return err
-		}
-		conwayGenesisHashBytes := replaceGenesisLineEndings(
-			conwayGenesisBytes,
-		)
-		conwayHash, err := validateGenesisHash(
-			"Conway",
-			c.ConwayGenesisHash,
-			conwayGenesisHashBytes,
-		)
-		if err != nil {
-			return err
-		}
-		c.ConwayGenesisHash = conwayHash
-		conwayGenesis, err := loadConwayGenesisFromBytes(conwayGenesisBytes)
-		if err != nil {
-			return err
-		}
-		c.conwayGenesis = &conwayGenesis
-	}
-	// Load Dijkstra genesis
-	if c.DijkstraGenesisFile != "" {
-		dijkstraGenesisPath := c.DijkstraGenesisFile
-		if !filepath.IsAbs(dijkstraGenesisPath) {
-			dijkstraGenesisPath = filepath.Join(c.path, dijkstraGenesisPath)
-		}
-		dijkstraGenesisBytes, err := os.ReadFile(dijkstraGenesisPath)
-		if err != nil {
-			return err
-		}
-		dijkstraGenesisHashBytes := replaceGenesisLineEndings(
-			dijkstraGenesisBytes,
-		)
-		dijkstraHash, err := validateGenesisHash(
-			"Dijkstra",
-			c.DijkstraGenesisHash,
-			dijkstraGenesisHashBytes,
-		)
-		if err != nil {
-			return err
-		}
-		c.DijkstraGenesisHash = dijkstraHash
-		dijkstraGenesis, err := dijkstra.NewDijkstraGenesisFromFile(
-			dijkstraGenesisPath,
-		)
-		if err != nil {
-			return err
-		}
-		c.dijkstraGenesis = &dijkstraGenesis
+		return os.ReadFile(name)
+	})
+	if err != nil {
+		return err
 	}
 	if err := c.loadMithrilVerificationKeysFromDisk(); err != nil {
 		return err
@@ -357,6 +219,123 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		return err
 	}
 	return nil
+}
+
+// loadGenesisDocuments reads each configured genesis document once, then
+// hashes and parses those same bytes. Reading again to parse would let a file
+// replaced after the read make the parsed configuration differ from the bytes
+// whose hash was accepted.
+func (c *CardanoNodeConfig) loadGenesisDocuments(
+	read func(name string) ([]byte, error),
+) error {
+	if c.ByronGenesisFile != "" {
+		data, err := readHashedGenesis(
+			read, "Byron", c.ByronGenesisFile, &c.ByronGenesisHash,
+			canonicalizeByronGenesisJSON,
+		)
+		if err != nil {
+			return err
+		}
+		genesis, err := loadByronGenesisFromBytes(data)
+		if err != nil {
+			return err
+		}
+		c.byronGenesis = &genesis
+	}
+	if c.ShelleyGenesisFile != "" {
+		data, err := readHashedGenesis(
+			read, "Shelley", c.ShelleyGenesisFile, &c.ShelleyGenesisHash,
+			normalizeGenesisLineEndings,
+		)
+		if err != nil {
+			return err
+		}
+		genesis, err := shelley.NewShelleyGenesisFromReader(
+			bytes.NewReader(data),
+		)
+		if err != nil {
+			return err
+		}
+		c.shelleyGenesis = &genesis
+	}
+	if c.AlonzoGenesisFile != "" {
+		data, err := readHashedGenesis(
+			read, "Alonzo", c.AlonzoGenesisFile, &c.AlonzoGenesisHash,
+			normalizeGenesisLineEndings,
+		)
+		if err != nil {
+			return err
+		}
+		genesis, err := alonzo.NewAlonzoGenesisFromReader(
+			bytes.NewReader(data),
+		)
+		if err != nil {
+			return err
+		}
+		c.alonzoGenesis = &genesis
+	}
+	if c.ConwayGenesisFile != "" {
+		data, err := readHashedGenesis(
+			read, "Conway", c.ConwayGenesisFile, &c.ConwayGenesisHash,
+			normalizeGenesisLineEndings,
+		)
+		if err != nil {
+			return err
+		}
+		genesis, err := loadConwayGenesisFromBytes(data)
+		if err != nil {
+			return err
+		}
+		c.conwayGenesis = &genesis
+	}
+	if c.DijkstraGenesisFile != "" {
+		data, err := readHashedGenesis(
+			read, "Dijkstra", c.DijkstraGenesisFile, &c.DijkstraGenesisHash,
+			normalizeGenesisLineEndings,
+		)
+		if err != nil {
+			return err
+		}
+		genesis, err := dijkstra.NewDijkstraGenesisFromReader(
+			bytes.NewReader(data),
+		)
+		if err != nil {
+			return err
+		}
+		c.dijkstraGenesis = &genesis
+	}
+	return nil
+}
+
+// readHashedGenesis reads a genesis document, validates its hash against
+// *hash (storing the computed hash there when none is configured), and
+// returns the bytes that were hashed. hashInput derives the bytes the hash
+// covers from the document.
+func readHashedGenesis(
+	read func(name string) ([]byte, error),
+	era string,
+	file string,
+	hash *string,
+	hashInput func([]byte) ([]byte, error),
+) ([]byte, error) {
+	data, err := read(file)
+	if err != nil {
+		return nil, err
+	}
+	input, err := hashInput(data)
+	if err != nil {
+		return nil, err
+	}
+	computed, err := validateGenesisHash(era, *hash, input)
+	if err != nil {
+		return nil, err
+	}
+	*hash = computed
+	return input, nil
+}
+
+func normalizeGenesisLineEndings(data []byte) ([]byte, error) {
+	return replaceGenesisLineEndings(data), nil
 }
 
 func (c *CardanoNodeConfig) loadOptionalConfigFile(
@@ -430,25 +409,6 @@ func (c *CardanoNodeConfig) loadMithrilVerificationKeysFromDisk() error {
 	return nil
 }
 
-// loadGenesisFromEmbedFS loads a single genesis file from the embedded filesystem.
-// It handles path resolution and file opening/closing automatically.
-func (c *CardanoNodeConfig) loadGenesisFromEmbedFS(
-	filename string,
-) (io.ReadCloser, error) {
-	if filename == "" {
-		return nil, nil
-	}
-
-	genesisPath := filename
-	genesisPath = path.Join(c.path, genesisPath)
-
-	f, err := c.embedFS.Open(genesisPath)
-	if err != nil {
-		return nil, err
-	}
-	return f, nil
-}
-
 func (c *CardanoNodeConfig) loadOptionalConfigFileFromEmbedFS(
 	filename string,
 ) ([]byte, error) {
@@ -489,152 +449,11 @@ func (c *CardanoNodeConfig) resolveOptionalConfigFileFromEmbedFS(
 // loadGenesisConfigsFromEmbed loads all genesis configuration files from the embedded filesystem.
 // This method mirrors loadGenesisConfigs but reads from embed.FS instead of the regular filesystem.
 func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
-	// Load Byron genesis
-	if f, err := c.loadGenesisFromEmbedFS(c.ByronGenesisFile); err != nil {
+	err := c.loadGenesisDocuments(func(name string) ([]byte, error) {
+		return fs.ReadFile(c.embedFS, path.Join(c.path, name))
+	})
+	if err != nil {
 		return err
-	} else if f != nil {
-		defer f.Close()
-		byronGenesisBytes, err := io.ReadAll(f)
-		if err != nil {
-			return err
-		}
-		byronGenesisHashBytes, err := canonicalizeByronGenesisJSON(
-			byronGenesisBytes,
-		)
-		if err != nil {
-			return err
-		}
-		byronHash, err := validateGenesisHash(
-			"Byron",
-			c.ByronGenesisHash,
-			byronGenesisHashBytes,
-		)
-		if err != nil {
-			return err
-		}
-		c.ByronGenesisHash = byronHash
-		byronGenesis, err := loadByronGenesisFromBytes(byronGenesisBytes)
-		if err != nil {
-			return err
-		}
-		c.byronGenesis = &byronGenesis
-	}
-
-	// Load Shelley genesis
-	if f, err := c.loadGenesisFromEmbedFS(c.ShelleyGenesisFile); err != nil {
-		return err
-	} else if f != nil {
-		defer f.Close()
-		shelleyGenesisBytes, err := io.ReadAll(f)
-		if err != nil {
-			return err
-		}
-		shelleyGenesisHashBytes := replaceGenesisLineEndings(
-			shelleyGenesisBytes,
-		)
-		shelleyHash, err := validateGenesisHash(
-			"Shelley",
-			c.ShelleyGenesisHash,
-			shelleyGenesisHashBytes,
-		)
-		if err != nil {
-			return err
-		}
-		c.ShelleyGenesisHash = shelleyHash
-		shelleyGenesis, err := shelley.NewShelleyGenesisFromReader(
-			bytes.NewReader(shelleyGenesisBytes),
-		)
-		if err != nil {
-			return err
-		}
-		c.shelleyGenesis = &shelleyGenesis
-	}
-
-	// Load Alonzo genesis
-	if f, err := c.loadGenesisFromEmbedFS(c.AlonzoGenesisFile); err != nil {
-		return err
-	} else if f != nil {
-		defer f.Close()
-		alonzoGenesisBytes, err := io.ReadAll(f)
-		if err != nil {
-			return err
-		}
-		alonzoGenesisHashBytes := replaceGenesisLineEndings(
-			alonzoGenesisBytes,
-		)
-		alonzoHash, err := validateGenesisHash(
-			"Alonzo",
-			c.AlonzoGenesisHash,
-			alonzoGenesisHashBytes,
-		)
-		if err != nil {
-			return err
-		}
-		c.AlonzoGenesisHash = alonzoHash
-		alonzoGenesis, err := alonzo.NewAlonzoGenesisFromReader(
-			bytes.NewReader(alonzoGenesisBytes),
-		)
-		if err != nil {
-			return err
-		}
-		c.alonzoGenesis = &alonzoGenesis
-	}
-
-	// Load Conway genesis
-	if f, err := c.loadGenesisFromEmbedFS(c.ConwayGenesisFile); err != nil {
-		return err
-	} else if f != nil {
-		defer f.Close()
-		conwayGenesisBytes, err := io.ReadAll(f)
-		if err != nil {
-			return err
-		}
-		conwayGenesisHashBytes := replaceGenesisLineEndings(
-			conwayGenesisBytes,
-		)
-		conwayHash, err := validateGenesisHash(
-			"Conway",
-			c.ConwayGenesisHash,
-			conwayGenesisHashBytes,
-		)
-		if err != nil {
-			return err
-		}
-		c.ConwayGenesisHash = conwayHash
-		conwayGenesis, err := loadConwayGenesisFromBytes(conwayGenesisBytes)
-		if err != nil {
-			return err
-		}
-		c.conwayGenesis = &conwayGenesis
-	}
-	// Load Dijkstra genesis
-	if f, err := c.loadGenesisFromEmbedFS(c.DijkstraGenesisFile); err != nil {
-		return err
-	} else if f != nil {
-		defer f.Close()
-		dijkstraGenesisBytes, err := io.ReadAll(f)
-		if err != nil {
-			return err
-		}
-		dijkstraGenesisHashBytes := replaceGenesisLineEndings(
-			dijkstraGenesisBytes,
-		)
-		dijkstraHash, err := validateGenesisHash(
-			"Dijkstra",
-			c.DijkstraGenesisHash,
-			dijkstraGenesisHashBytes,
-		)
-		if err != nil {
-			return err
-		}
-		c.DijkstraGenesisHash = dijkstraHash
-		dijkstraGenesis, err := dijkstra.NewDijkstraGenesisFromReader(
-			bytes.NewReader(dijkstraGenesisBytes),
-		)
-		if err != nil {
-			return err
-		}
-		c.dijkstraGenesis = &dijkstraGenesis
 	}
 	c.MithrilGenesisVerificationKeyFile = c.resolveOptionalConfigFileFromEmbedFS(
 		c.MithrilGenesisVerificationKeyFile,

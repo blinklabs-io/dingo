@@ -235,6 +235,25 @@ func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
 	}
 }
 
+func TestAddressTransactionInputQueryUsesTxIDIndex(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	seedStakeRefLookupUtxos(t, store, 50_000, 256)
+
+	args := make([]any, maxCachedAddressInputQuerySize)
+	for i := range args {
+		args[i] = utxoIDAt(i * 7).Hash
+	}
+	plan := queryPlan(
+		t,
+		store.writeDB,
+		addressTransactionInputQuery(maxCachedAddressInputQuerySize),
+		args...,
+	)
+	require.Contains(t, plan, "tx_id_output_idx")
+	require.NotContains(t, plan, "SCAN utxo")
+}
+
 // TestGetUtxosByRefsReturnsSameRows proves the rewrite returns exactly the
 // rows the legacy OR-predicate implementation did: live rows only, one row
 // per requested ref, absent for a deleted or nonexistent ref, and correct
@@ -1637,7 +1656,7 @@ func TestAddUtxosRejectsOverflowAssetWithoutMutation(t *testing.T) {
 	)
 
 	utxo := ledger.Utxo{
-		Id: shelley.NewShelleyTransactionInput(
+		Id: shelley.MustNewShelleyTransactionInput(
 			"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
 			0,
 		),
@@ -1841,7 +1860,7 @@ func TestGetUtxosByAddressWithOrderingSkipAssets(t *testing.T) {
 		},
 	)
 	utxo := ledger.Utxo{
-		Id: shelley.NewShelleyTransactionInput(
+		Id: shelley.MustNewShelleyTransactionInput(
 			"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
 			0,
 		),
@@ -2190,7 +2209,7 @@ func TestQueryUtxoStakeConsumedDeltasNegatesAmounts(t *testing.T) {
 		{Hash: utxoTxIDForGroup(0, 1), Idx: 0},
 		{Hash: utxoTxIDForGroup(1, 0), Idx: 0},
 	}
-	deltas, err := queryUtxoStakeConsumedDeltas(ctx, store.writeDB, ids)
+	deltas, err := store.queryUtxoStakeConsumedDeltas(ctx, store.writeDB, ids)
 	require.NoError(t, err)
 
 	byKey := make(map[string]int64, len(deltas))
@@ -2229,7 +2248,7 @@ func TestExactAddressOrderingUsesPaymentIndex(t *testing.T) {
 	require.NoError(t, err)
 	pattern, err := models.ExactUtxoAddressPattern(address)
 	require.NoError(t, err)
-	predicate, args, err := utxoOrderingPredicate(
+	_, predicate, args, err := utxoOrderingClauses(
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 		},

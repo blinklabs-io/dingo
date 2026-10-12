@@ -21,7 +21,6 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -79,26 +78,19 @@ func TestNewServerRequiresDependencies(t *testing.T) {
 		"non-hex genesis hash": func(c *ServerConfig) {
 			c.GenesisHash = "not-hex"
 		},
-		"zero genesis start time": func(c *ServerConfig) {
-			c.GenesisStartTimeSec = 0
-		},
-		"negative genesis start time": func(c *ServerConfig) {
-			c.GenesisStartTimeSec = -1
-		},
 	}
 
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
 			deps := newTestDeps()
 			cfg := ServerConfig{
-				LedgerState:         deps.ledger,
-				Database:            deps.database,
-				Chain:               deps.chain,
-				Mempool:             deps.mempool,
-				Network:             testNetwork,
-				NetworkMagic:        testNetworkMagic,
-				GenesisHash:         testGenesisHash,
-				GenesisStartTimeSec: testGenesisStartTimeSec,
+				LedgerState:  deps.ledger,
+				Database:     deps.database,
+				Chain:        deps.chain,
+				Mempool:      deps.mempool,
+				Network:      testNetwork,
+				NetworkMagic: testNetworkMagic,
+				GenesisHash:  testGenesisHash,
 			}
 			mutate(&cfg)
 
@@ -118,16 +110,17 @@ func TestNewServerDefaults(t *testing.T) {
 
 	deps := newTestDeps()
 	srv, err := NewServer(ServerConfig{
-		LedgerState:         deps.ledger,
-		Database:            deps.database,
-		Chain:               deps.chain,
-		Mempool:             deps.mempool,
-		Network:             testNetwork,
-		GenesisHash:         testGenesisHash,
-		GenesisStartTimeSec: testGenesisStartTimeSec,
+		LedgerState: deps.ledger,
+		Database:    deps.database,
+		Chain:       deps.chain,
+		Mempool:     deps.mempool,
+		Network:     testNetwork,
+		GenesisHash: testGenesisHash,
 	})
 
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("Mesh constructor rejected valid dependencies with a ledger clock: %v", err)
+	}
 	require.NotNil(t, srv.logger)
 	require.Equal(t, defaultListenAddr, srv.config.ListenAddress)
 }
@@ -321,41 +314,28 @@ func TestServerGracefulShutdown(t *testing.T) {
 	require.NoError(t, restarted.Stop(t.Context()))
 }
 
-// TestConcurrentStartStopNeverLeavesThePortBound hammers the interleavings the
-// individual lifecycle tests each pin one of: Start racing Stop, Stop racing the
-// context monitor, and a restart on the same address immediately after.
-//
-// The invariant is the one every caller relies on: once Stop returns without an
-// error, the address is free, so the next Start on it must succeed.
-//
-// What this does NOT cover, verified by running it against the earlier buggy
-// revisions, where it passed: the paths that need a bind still in flight when a
-// wait expires. A real bind settles far too quickly for that, so a stalled bind
-// has to be constructed, which needs the protocol's internals. Those tests live
-// with the protocol, in internal/apilistener. Do not read a pass here as
-// covering them.
-func TestConcurrentStartStopNeverLeavesThePortBound(t *testing.T) {
+// TestConcurrentStartStopLeavesTheMeshServerStopped exercises Mesh's Start,
+// competing Stops, and context monitor. The listener package checks closure of
+// the owned socket directly; this test checks that Mesh unpublishes its server.
+func TestConcurrentStartStopLeavesTheMeshServerStopped(t *testing.T) {
 	t.Parallel()
-
-	addr := testutil.FreePort(t)
 
 	for i := range 60 {
 		srv := newTestServer(
 			t, newTestDeps(),
-			func(c *ServerConfig) { c.ListenAddress = addr },
+			func(c *ServerConfig) { c.ListenAddress = "127.0.0.1:0" },
 		)
 		ctx, cancel := context.WithCancel(context.Background())
 
-		// Four-way contention on purpose: Start, two Stops, and the context
-		// monitor. Two Stops matter — one of them loses takeServer and has to
-		// wait on the winner's teardown, which is the path where a premature
-		// completion signal turns into a false "the port is free".
-		var wg sync.WaitGroup
-		stopErrs := make([]error, 2)
+		var (
+			wg       sync.WaitGroup
+			startErr error
+			stopErrs = make([]error, 2)
+		)
 		wg.Add(4)
 		go func() {
 			defer wg.Done()
-			_ = srv.Start(ctx)
+			startErr = srv.Start(ctx)
 		}()
 		for slot := range stopErrs {
 			go func() {
@@ -369,34 +349,17 @@ func TestConcurrentStartStopNeverLeavesThePortBound(t *testing.T) {
 		}()
 		wg.Wait()
 
-		// Every Stop that returned nil made the same promise, so the strictest
-		// reading applies: if any of them reported clean, the port must be free.
-		stopErr := errors.Join(stopErrs...)
-		if stopErr != nil && stopErrs[0] != nil && stopErrs[1] != nil {
-			// A reported timeout is honest: the caller was told the port may
-			// still be held, so it is not licensed to rebind.
-			continue
-		}
+		require.NoError(t, startErr, "iteration %d", i)
+		require.NoError(t, stopErrs[0], "first Stop, iteration %d", i)
+		require.NoError(t, stopErrs[1], "second Stop, iteration %d", i)
 		require.NoError(
 			t, srv.Stop(t.Context()),
 			"a second Stop must stay clean (iteration %d)", i,
 		)
-		// The contract Stop's nil return promises: the address is rebindable.
-		// Rebinding is the package-level assertion: dialing a released
-		// ephemeral address could instead reach another package's listener
-		// when the suite runs concurrently.
-		next := newTestServer(
-			t, newTestDeps(),
-			func(c *ServerConfig) { c.ListenAddress = addr },
+		require.Nil(
+			t, srv.listener.Server(),
+			"a clean Stop must unpublish the Mesh server (iteration %d)", i,
 		)
-		nextCtx, cancelNext := context.WithCancel(context.Background())
-		require.NoError(
-			t, next.Start(nextCtx),
-			"rebinding after a clean Stop must succeed (iteration %d)", i,
-		)
-		require.NoError(t, next.Stop(t.Context()))
-		cancelNext()
-		_ = stopErr
 	}
 }
 
@@ -625,10 +588,8 @@ func TestRoutesRejectNonPost(t *testing.T) {
 }
 
 // TestStartIsRefusedWhileAnotherStartHoldsTheGate pins the start gate this
-// package is wired to. TestConcurrentStartStopNeverLeavesThePortBound cancels
-// the Start context on every iteration, so the monitor tears down any start a
-// Stop missed and the gate itself is never observed; without this test the
-// BeginStart/EndStart pair can be removed from Start with the suite green.
+// package is wired to, so BeginStart/EndStart cannot be removed from Start
+// without the suite failing.
 func TestStartIsRefusedWhileAnotherStartHoldsTheGate(t *testing.T) {
 	t.Parallel()
 
@@ -1007,6 +968,7 @@ type fakeMempool struct {
 }
 
 func (f *fakeMempool) AddTransaction(
+	ctx context.Context,
 	txType uint,
 	txBytes []byte,
 ) error {
@@ -1083,14 +1045,13 @@ func newTestServer(
 ) *Server {
 	t.Helper()
 	cfg := ServerConfig{
-		LedgerState:         deps.ledger,
-		Database:            deps.database,
-		Chain:               deps.chain,
-		Mempool:             deps.mempool,
-		Network:             testNetwork,
-		NetworkMagic:        testNetworkMagic,
-		GenesisHash:         testGenesisHash,
-		GenesisStartTimeSec: testGenesisStartTimeSec,
+		LedgerState:  deps.ledger,
+		Database:     deps.database,
+		Chain:        deps.chain,
+		Mempool:      deps.mempool,
+		Network:      testNetwork,
+		NetworkMagic: testNetworkMagic,
+		GenesisHash:  testGenesisHash,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -1374,7 +1335,7 @@ func testSimpleSignedTx(
 	bodyCbor := testTxBody(
 		t,
 		[]shelley.ShelleyTransactionInput{
-			shelley.NewShelleyTransactionInput(
+			shelley.MustNewShelleyTransactionInput(
 				hexString(testHash(0xd1)), 0,
 			),
 		},
@@ -1412,7 +1373,7 @@ func testTxBodyWithCerts(
 	body := conway.ConwayTransactionBody{
 		TxInputs: conway.NewConwayTransactionInputSet(
 			[]shelley.ShelleyTransactionInput{
-				shelley.NewShelleyTransactionInput(
+				shelley.MustNewShelleyTransactionInput(
 					hexString(testHash(0xd2)), 0,
 				),
 			},

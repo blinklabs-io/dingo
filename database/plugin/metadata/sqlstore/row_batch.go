@@ -83,6 +83,19 @@ var (
 		columns: []string{"hash", "raw_datum", "added_slot"},
 		suffix:  "ON CONFLICT (hash) DO NOTHING",
 	}
+	assetShape = rowShape{
+		table:   "asset",
+		columns: []string{"name", "policy_id", "fingerprint", "utxo_id", "amount"},
+		suffix:  "ON CONFLICT (name, policy_id, utxo_id) DO NOTHING",
+	}
+	assetMintBurnShape = rowShape{
+		table: "asset_mint_burn",
+		columns: []string{
+			"tx_hash", "policy_id", "name", "fingerprint", "slot",
+			"quantity", "tx_index",
+		},
+		suffix: "ON CONFLICT (tx_hash, policy_id, name) DO NOTHING",
+	}
 )
 
 // shapeRows holds rows queued for one shape. txIDCol indexes the
@@ -108,6 +121,9 @@ func (b *rowBatch) empty() bool {
 
 func (b *rowBatch) add(shape rowShape, row ...any) {
 	i := b.entryIndex(shape)
+	if len(row) != len(b.entries[i].shape.columns) {
+		panic("sqlstore: row width does not match shape")
+	}
 	b.entries[i].rows = append(b.entries[i].rows, row)
 	if col := b.entries[i].txIDCol; col >= 0 {
 		if b.queued == nil {

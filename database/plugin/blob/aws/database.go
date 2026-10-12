@@ -29,7 +29,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -922,7 +921,14 @@ func (t *s3Txn) Commit() error {
 	for key := range t.pending {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	// The expiry marker goes last so a reader never sees a block expired while
+	// data rewritten for that expiry is still pending.
+	keys = compensate.ApplyOrder(keys, func(key string) bool {
+		change := t.pending[key]
+		return !change.deleted &&
+			strings.HasPrefix(key, types.BlockBlobKeyPrefix) &&
+			types.IsBlockTombstone(change.value)
+	})
 
 	// Build the compensation log before applying anything. Existence is probed
 	// with HeadObject rather than a full GET, and a prior value is downloaded
@@ -991,7 +997,7 @@ func (t *s3Txn) Commit() error {
 			undoCtx, undoCancel := t.store.opContext()
 			defer undoCancel()
 			undoErr := comp.Undo(
-				i,
+				i+1,
 				func(key string, value *io.SectionReader, size int64) error {
 					return t.store.putStream(undoCtx, key, value, size)
 				},

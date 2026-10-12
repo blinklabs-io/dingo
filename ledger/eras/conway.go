@@ -17,6 +17,7 @@ package eras
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -199,7 +200,9 @@ func ValidateTxConway(
 	}
 	normalizedTx, err := normalizeScriptDataHashCbor(tx)
 	if err != nil {
-		return fmt.Errorf("normalize script data hash CBOR: %w", err)
+		return semanticRuleValidationErrorFor(
+			fmt.Errorf("normalize script data hash CBOR: %w", err),
+		)
 	}
 	tx = normalizedTx
 	// Validate TX through ledger validation rules (Phase-1).
@@ -211,25 +214,29 @@ func ValidateTxConway(
 		if err != nil {
 			errs = append(
 				errs,
-				fmt.Errorf(
+				semanticRuleValidationErrorFor(fmt.Errorf(
 					"conway utxo validation rule %d: %w",
 					validationRule.index,
 					err,
-				),
+				)),
 			)
 		}
 	}
 	if err := validateParameterChangeExcludesProtocolVersion(tx, slot, ls, pp); err != nil {
 		errs = append(
 			errs,
-			fmt.Errorf("conway parameter-change validation: %w", err),
+			semanticRuleValidationErrorFor(fmt.Errorf(
+				"conway parameter-change validation: %w", err,
+			)),
 		)
 	}
 	if err := ValidateTxFeeConway(tx, ls, tmpPparams); err != nil &&
 		(!isInputResolutionError(err) || len(errs) == 0) {
 		errs = append(
 			errs,
-			fmt.Errorf("conway fee validation: %w", err),
+			semanticRuleValidationErrorFor(fmt.Errorf(
+				"conway fee validation: %w", err,
+			)),
 		)
 	}
 	if len(errs) > 0 {
@@ -248,7 +255,9 @@ func ValidateTxConway(
 		plutusCtx.assetMint,
 		plutusCtx.redeemers,
 	); err != nil {
-		return fmt.Errorf("conway plutus redeemer validation: %w", err)
+		return semanticRuleValidationErrorFor(fmt.Errorf(
+			"conway plutus redeemer validation: %w", err,
+		))
 	}
 	if shouldSkipPhase2Validation(ls) {
 		return nil
@@ -263,7 +272,7 @@ func ValidateTxConway(
 	if phase2Err != nil {
 		phase2Err = fmt.Errorf("conway plutus validation: %w", phase2Err)
 	}
-	return validatePlutusOutcome(tx, phase2Err)
+	return semanticRuleValidationErrorFor(validatePlutusOutcome(tx, phase2Err))
 }
 
 var (
@@ -1005,6 +1014,9 @@ func resolveConwayScriptInputs(
 		),
 	}
 	for _, input := range tx.Inputs() {
+		if err := checkEvaluationCanceled(ls); err != nil {
+			return ret, err
+		}
 		utxo, err := ls.UtxoById(input)
 		if err != nil {
 			return ret, lcommon.InputResolutionError{
@@ -1016,6 +1028,9 @@ func resolveConwayScriptInputs(
 		ret.resolvedInputsMap[input.String()] = utxo
 	}
 	for _, input := range tx.ReferenceInputs() {
+		if err := checkEvaluationCanceled(ls); err != nil {
+			return ret, err
+		}
 		utxo, err := ls.UtxoById(input)
 		if err != nil {
 			return ret, lcommon.ReferenceInputResolutionError{
@@ -1160,7 +1175,8 @@ func rejectByronTxOutsForV1(
 		}
 	}
 	for _, output := range tx.Outputs() {
-		if output != nil && output.Address().Type() == lcommon.AddressTypeByron {
+		if output != nil &&
+			output.Address().Type() == lcommon.AddressTypeByron {
 			return errByronTxOutInV1Context
 		}
 	}
@@ -1225,12 +1241,15 @@ func evaluateConwayPlutusScript(
 	//
 	// In exact mode the caller-supplied budget argument is itself the machine
 	// limit, and no post-execution comparison is done. EvaluateTxConway uses
-	// that mode and passes tmpPparams.MaxTxExUnits, so the limit there is the
-	// protocol per-transaction maximum rather than any redeemer-declared
-	// budget.
+	// that mode and passes the transaction-wide budget left after earlier
+	// redeemers, rather than any redeemer-declared budget.
 	evalBudget := budget
 	if restrictive {
 		evalBudget = pp.MaxTxExUnits
+	}
+	machineCtx := context.Background()
+	if !restrictive {
+		machineCtx = evaluationContext(txInfos.ls)
 	}
 	switch s := plutusScript.(type) {
 	case lcommon.PlutusV3Script:
@@ -1249,7 +1268,7 @@ func evaluateConwayPlutusScript(
 		ctx := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
 		costModel, err := requiredCostModel(pp.CostModels, 2, "PlutusV3")
 		if err != nil {
-			return lcommon.ExUnits{}, nil, err
+			return lcommon.ExUnits{}, nil, localRuleValidationErrorFor(err)
 		}
 		evalContext, err := plutusEvalContext(
 			txInfos.ls,
@@ -1262,9 +1281,12 @@ func evaluateConwayPlutusScript(
 			false,
 		)
 		if err != nil {
-			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
+			return lcommon.ExUnits{}, nil, localRuleValidationErrorFor(
+				fmt.Errorf("build evaluation context: %w", err),
+			)
 		}
-		usedBudget, err := s.Evaluate(
+		usedBudget, err := s.EvaluateContext(
+			machineCtx,
 			ctx.ToPlutusData(),
 			evalBudget,
 			evalContext,
@@ -1297,7 +1319,7 @@ func evaluateConwayPlutusScript(
 		ctx := script.NewScriptContextV1V2(txInfoV2, purpose)
 		costModel, err := requiredCostModel(pp.CostModels, 1, "PlutusV2")
 		if err != nil {
-			return lcommon.ExUnits{}, nil, err
+			return lcommon.ExUnits{}, nil, localRuleValidationErrorFor(err)
 		}
 		evalContext, err := plutusEvalContext(
 			txInfos.ls,
@@ -1310,9 +1332,12 @@ func evaluateConwayPlutusScript(
 			syntheticV2CostModel,
 		)
 		if err != nil {
-			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
+			return lcommon.ExUnits{}, nil, localRuleValidationErrorFor(
+				fmt.Errorf("build evaluation context: %w", err),
+			)
 		}
-		usedBudget, err := s.Evaluate(
+		usedBudget, err := s.EvaluateContext(
+			machineCtx,
 			datum,
 			redeemer.Data,
 			ctx.ToPlutusData(),
@@ -1337,7 +1362,7 @@ func evaluateConwayPlutusScript(
 		ctx := script.NewScriptContextV1V2(txInfoV1, purpose)
 		costModel, err := requiredCostModel(pp.CostModels, 0, "PlutusV1")
 		if err != nil {
-			return lcommon.ExUnits{}, nil, err
+			return lcommon.ExUnits{}, nil, localRuleValidationErrorFor(err)
 		}
 		evalContext, err := plutusEvalContext(
 			txInfos.ls,
@@ -1350,9 +1375,12 @@ func evaluateConwayPlutusScript(
 			false,
 		)
 		if err != nil {
-			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
+			return lcommon.ExUnits{}, nil, localRuleValidationErrorFor(
+				fmt.Errorf("build evaluation context: %w", err),
+			)
 		}
-		usedBudget, err := s.Evaluate(
+		usedBudget, err := s.EvaluateContext(
+			machineCtx,
 			datum,
 			redeemer.Data,
 			ctx.ToPlutusData(),
@@ -1494,6 +1522,9 @@ func evaluateTxConway(
 	refScriptCostStride uint64,
 	refScriptCostMultiplier *big.Rat,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	if err := checkEvaluationCanceled(ls); err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
 	scriptInputs, err := resolveConwayScriptInputs(tx, ls, true)
 	if err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
@@ -1516,6 +1547,9 @@ func evaluateTxConway(
 		}
 	}
 	for _, redeemerPair := range txInfoV3.Redeemers {
+		if err := checkEvaluationCanceled(ls); err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 		purpose := redeemerPair.Key
 		if purpose == nil {
 			return 0, lcommon.ExUnits{}, nil, errors.New(
@@ -1539,12 +1573,15 @@ func evaluateTxConway(
 			purpose,
 			redeemer,
 			datum,
-			tmpPparams.MaxTxExUnits,
+			remainingExUnits(tmpPparams.MaxTxExUnits, retTotalExUnits),
 			tmpPparams,
 			txInfos,
 			false,
 			synthetic,
 		)
+		if cancelErr := checkEvaluationCanceled(ls); cancelErr != nil {
+			return 0, lcommon.ExUnits{}, nil, cancelErr
+		}
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
 		}

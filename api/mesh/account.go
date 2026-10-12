@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -72,7 +73,7 @@ func (s *Server) handleAccountBalance(
 				r.Context(),
 				addr,
 				point.slot,
-				database.DefaultPublicUtxoResultLimit,
+				math.MaxInt,
 				database.DefaultPublicUtxoCborBudget,
 			)
 	} else {
@@ -136,7 +137,7 @@ func (s *Server) handleAccountCoins(
 			req.AccountIdentifier.Address,
 			"error", err,
 		)
-		writeError(w, wrapErr(ErrInternal, err))
+		writeError(w, ErrInternal)
 		return
 	}
 

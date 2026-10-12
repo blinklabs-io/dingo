@@ -1,28 +1,50 @@
-# Local DevNet
+# Single-node local DevNet
 
-`devmode.sh` runs one Dingo process against the checked-in DevNet genesis
-configuration. It is useful for exercising startup, block production, and
-transaction submission locally without a reference node.
-
-Run it from the Dingo repository on Linux; the helper uses GNU `date` and
-`sed` options:
+Run Dingo's bundled private network with one command:
 
 ```sh
-./devmode.sh
+# From a Dingo checkout, after `make build`:
+./dingo devnet
+
+# Or use the published npm package (Node.js 22+ and tar required):
+npx @blinklabs/dingo devnet
 ```
 
-For debug logging:
+The command starts one Dingo node with block production enabled and no outbound
+peers. It uses the bundled DevNet genesis and test keys, so it does not need
+Docker, a Cardano node, or a separate genesis-generation step.
+
+Serving with `runMode: dev` always selects API storage and Dingo's regular
+keyed block producer, regardless of the configured `storageMode` or
+`blockProducer` values. The configuration still needs valid VRF, KES, and
+operational-certificate credentials; `dingo devnet` provisions local test keys
+for that purpose.
+
+By default, configuration, test keys, and the database live in a private
+temporary directory that is removed when the node exits, including after
+Ctrl+C. Each invocation starts a fresh chain and leaves the current directory
+untouched.
+
+To retain and reuse a chain, give Dingo a state directory:
 
 ```sh
-DEBUG=true ./devmode.sh
+./dingo devnet --data-dir ./.dingo-devnet
 ```
 
-Each run rewrites the start times in
-[`config/cardano/devnet/`](../config/cardano/devnet/) and removes the contents
-of `.devnet/`, which is the local database directory. Keep any edits to those
-genesis files and any `.devnet` data you need outside these paths before
-running the script.
+Run the same command again to resume that chain. Reset it with:
 
-The Shelley genesis configuration uses one-second slots, 600-slot epochs, a
-security parameter of 100, and an active slot coefficient of 1.0. These
-settings make local epoch transitions and block production quick to observe.
+```sh
+./dingo devnet --data-dir ./.dingo-devnet --reset
+```
+
+The first run requires an empty directory. Dingo places a marker there before
+creating its database, generated config, and test-key copies. `--reset` only
+recreates those Dingo-managed paths; other files in the directory are kept.
+Dingo rejects another invocation using the same directory, including attempts
+to reset it while its node is running. Copied state directories are rebound to
+their new database, config, and key paths when reused.
+These keys and this network are for local testing and must not be used with
+real funds.
+
+For multi-node consensus and reference-conformance scenarios, use the separate
+[DevNet integration harness](../internal/test/devnet/README.md).

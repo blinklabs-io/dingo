@@ -249,6 +249,19 @@ func (a *archiveServiceHandler) FetchBlock(
 		refs = append(refs, ref)
 	}
 
+	// A slot is taken before any storage is touched, and a request that finds
+	// none is refused rather than queued: ArchiveService is unauthenticated,
+	// so a queue would let anyone who can reach the listener stack up work.
+	select {
+	case a.bark.archiveSlots <- struct{}{}:
+		defer func() { <-a.bark.archiveSlots }()
+	default:
+		return nil, connect.NewError(
+			connect.CodeResourceExhausted,
+			errors.New("archive is serving its maximum concurrent requests"),
+		)
+	}
+
 	db, release, err := a.bark.Acquire()
 	if err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, err)
@@ -256,16 +269,14 @@ func (a *archiveServiceHandler) FetchBlock(
 	defer release()
 
 	// Height is the one identifier nothing is keyed by, so resolving one is
-	// a binary search bounded above by the highest indexed block. Reading
-	// that bound is a reverse iteration over the block-index prefix, and on
-	// s3 and gcs -- the only backends that sign URLs, so the only ones this
-	// handler is reachable on -- a reverse iterator lists every object under
-	// the prefix with no early break. ArchiveService is unauthenticated, so
-	// resolving the bound per reference let one anonymous request carrying
-	// DefaultMaxFetchBlockRefs height-only references cost that many
-	// full-bucket enumerations. Resolve it once for the batch, and only when
-	// the batch actually contains a reference that needs it: a batch of
-	// hash+slot references still touches no index at all.
+	// a binary search bounded above by the highest indexed block. Finding
+	// that bound takes up to 64 bounded forward probes of the block index
+	// (database.ResolveBlockNumberBound), not an enumeration of it. It is
+	// still resolved once for the batch, and only when the batch actually
+	// contains a reference that needs it: ArchiveService is unauthenticated,
+	// so repeating the probes per reference would multiply what one request
+	// can cost, and a batch of hash+slot references still touches no index
+	// at all.
 	var bound database.BlockNumberBound
 	if slices.ContainsFunc(refs, blockRefRequest.resolvesByHeight) {
 		bound, err = database.ResolveBlockNumberBound(ctx, db)

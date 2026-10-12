@@ -117,9 +117,11 @@ func AllErrors() []*Error {
 	}
 }
 
-// wrapErr creates a new Error with additional details.
+// wrapErr creates a new Error with additional details. An internal error
+// carries none: its cause is database or ledger text that belongs in the
+// server log, so a client sees only the stable code and description.
 func wrapErr(base *Error, detail error) *Error {
-	if detail == nil {
+	if detail == nil || base.Code == ErrInternal.Code {
 		return base
 	}
 	return &Error{

@@ -51,7 +51,15 @@ const (
 	DefaultMaxBlockRefs    = 100
 	DefaultMaxUtxoKeys     = database.DefaultPublicUtxoResultLimit
 	DefaultMaxHistoryItems = 10000
+	// DefaultHistoryPageItems is the DumpHistory page size when the request
+	// omits max_items; it stays well below DefaultMaxHistoryItems so an
+	// anonymous request without a limit cannot buffer the full maximum.
+	DefaultHistoryPageItems = 100
+	// DefaultMaxHistoryBytes bounds the serialized block data collected for
+	// one DumpHistory response.
+	DefaultMaxHistoryBytes = 8 << 20
 	DefaultMaxDataKeys     = 1000
+	DefaultMaxTxRefs       = 1000
 	// DefaultMaxRequestBody bounds each Connect message before it is decoded.
 	// Connect applies the same limit to the compressed wire
 	// message and to its decompressed form, preventing a small compressed body
@@ -62,7 +70,18 @@ const (
 	// filter, so a long explicit list is not the way to ask for the whole
 	// distribution.
 	DefaultMaxPoolFilter = 1000
-	DefaultServerTimeout = time.Hour
+	// DefaultMaxMempoolItems caps the transactions ReadMempool returns.
+	DefaultMaxMempoolItems = 1000
+	// DefaultMaxResponseBytes caps the payload a single unary bulk response
+	// retains (UTxO, datum, block and mempool bodies).
+	DefaultMaxResponseBytes = 16 << 20 // 16 MiB
+	// DefaultMaxConcurrentBulkRequests caps how many bulk read handlers run
+	// at once; further requests are refused with ResourceExhausted.
+	DefaultMaxConcurrentBulkRequests = 32
+	// DefaultBulkResponseWriteTimeout bounds delivery of a bulk unary
+	// response without imposing a deadline on streaming RPCs.
+	DefaultBulkResponseWriteTimeout = 30 * time.Second
+	DefaultServerTimeout            = time.Hour
 	// DefaultShutdownTimeout bounds Stop's graceful http.Server.Shutdown
 	// before it escalates to a hard Close, matching midnight/server's
 	// identical ShutdownTimeout/defaultShutdownTimeout pattern.
@@ -75,6 +94,9 @@ type Utxorpc struct {
 	// internal/apilistener.
 	listener *apilistener.Listener
 	config   UtxorpcConfig
+	// bulkSlots is a counting semaphore sized by MaxConcurrentBulkRequests.
+	bulkSlots chan struct{}
+	streams   *streamLimiter
 }
 
 type UtxorpcConfig struct {
@@ -92,9 +114,41 @@ type UtxorpcConfig struct {
 	// MaxHistoryItems caps DumpHistory and SearchUtxos page size; omitted
 	// max_items uses this cap.
 	MaxHistoryItems int
+	// HistoryPageItems is the DumpHistory page size used when max_items is
+	// omitted (0 = use default, capped at MaxHistoryItems).
+	HistoryPageItems int
+	// MaxHistoryBytes caps the serialized block bytes in one DumpHistory
+	// response; a longer page is cut short and continues from next_token
+	// (0 = use default).
+	MaxHistoryBytes int
 	MaxDataKeys     int
+	// MaxTxRefs caps the transaction references in one WaitForTx
+	// request (0 = use default).
+	MaxTxRefs int
+	// MaxStreams caps concurrent FollowTip, WatchTx, WatchMempool and WaitForTx streams
+	// across all clients; MaxStreamsPerClient caps them per remote host
+	// (0 = use default).
+	MaxStreams          int
+	MaxStreamsPerClient int
+	// MaxPredicateNodes caps the total nodes of a watch predicate
+	// (0 = use default).
+	MaxPredicateNodes int
+	// MaxReplayBlocks caps how far behind the tip a WatchTx intersect may
+	// start, in blocks (0 = use default).
+	MaxReplayBlocks int
 	// MaxPoolFilter caps ReadState's pool_keyhashes filter length.
 	MaxPoolFilter int
+	// MaxMempoolItems caps ReadMempool's result size (0 = use default).
+	MaxMempoolItems int
+	// MaxResponseBytes caps the payload bytes one bulk read response may
+	// retain (0 = use default).
+	MaxResponseBytes int64
+	// MaxConcurrentBulkRequests caps concurrently running bulk read handlers
+	// (0 = use default).
+	MaxConcurrentBulkRequests int
+	// BulkResponseWriteTimeout bounds delivery of a bulk unary response
+	// (0 = use default).
+	BulkResponseWriteTimeout time.Duration
 	// ServerTimeout bounds long-running UTxO RPC handlers server-side
 	// (0 = use default).
 	ServerTimeout time.Duration
@@ -128,11 +182,45 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	if cfg.MaxHistoryItems <= 0 {
 		cfg.MaxHistoryItems = DefaultMaxHistoryItems
 	}
+	if cfg.HistoryPageItems <= 0 {
+		cfg.HistoryPageItems = DefaultHistoryPageItems
+	}
+	cfg.HistoryPageItems = min(cfg.HistoryPageItems, cfg.MaxHistoryItems)
+	if cfg.MaxHistoryBytes <= 0 {
+		cfg.MaxHistoryBytes = DefaultMaxHistoryBytes
+	}
 	if cfg.MaxDataKeys <= 0 {
 		cfg.MaxDataKeys = DefaultMaxDataKeys
 	}
+	if cfg.MaxTxRefs <= 0 {
+		cfg.MaxTxRefs = DefaultMaxTxRefs
+	}
+	if cfg.MaxStreams <= 0 {
+		cfg.MaxStreams = DefaultMaxStreams
+	}
+	if cfg.MaxStreamsPerClient <= 0 {
+		cfg.MaxStreamsPerClient = DefaultMaxStreamsPerClient
+	}
+	if cfg.MaxPredicateNodes <= 0 {
+		cfg.MaxPredicateNodes = DefaultMaxPredicateNodes
+	}
+	if cfg.MaxReplayBlocks <= 0 {
+		cfg.MaxReplayBlocks = DefaultMaxReplayBlocks
+	}
 	if cfg.MaxPoolFilter <= 0 {
 		cfg.MaxPoolFilter = DefaultMaxPoolFilter
+	}
+	if cfg.MaxMempoolItems <= 0 {
+		cfg.MaxMempoolItems = DefaultMaxMempoolItems
+	}
+	if cfg.MaxResponseBytes <= 0 {
+		cfg.MaxResponseBytes = DefaultMaxResponseBytes
+	}
+	if cfg.MaxConcurrentBulkRequests <= 0 {
+		cfg.MaxConcurrentBulkRequests = DefaultMaxConcurrentBulkRequests
+	}
+	if cfg.BulkResponseWriteTimeout <= 0 {
+		cfg.BulkResponseWriteTimeout = DefaultBulkResponseWriteTimeout
 	}
 	if cfg.ServerTimeout <= 0 {
 		cfg.ServerTimeout = DefaultServerTimeout
@@ -141,7 +229,9 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 		cfg.ShutdownTimeout = DefaultShutdownTimeout
 	}
 	return &Utxorpc{
-		config: cfg,
+		config:    cfg,
+		bulkSlots: make(chan struct{}, cfg.MaxConcurrentBulkRequests),
+		streams:   newStreamLimiter(cfg.MaxStreams, cfg.MaxStreamsPerClient),
 		listener: apilistener.New(
 			"utxorpc gRPC", cfg.Logger,
 		),
@@ -277,6 +367,9 @@ func (u *Utxorpc) newServeMux() *http.ServeMux {
 	compress1KB := connect.WithOptions(
 		connect.WithCompressMinBytes(1024),
 		connect.WithReadMaxBytes(DefaultMaxRequestBody),
+		connect.WithInterceptors(connect.UnaryInterceptorFunc(
+			bulkResponseWriteDeadlineInterceptor,
+		)),
 	)
 	queryPath, queryHandler := queryconnect.NewQueryServiceHandler(
 		&queryServiceServer{utxorpc: u},
@@ -324,13 +417,25 @@ func (u *Utxorpc) newServeMux() *http.ServeMux {
 		betaWatchPath,
 		watchPath,
 	)
-	mux.Handle(queryPath, queryHandler)
-	mux.Handle(submitPath, submitHandler)
-	mux.Handle(syncPath, syncHandler)
+	mux.Handle(queryPath, holdBulkSlotsUntilWritten(
+		queryHandler, u.config.BulkResponseWriteTimeout,
+	))
+	mux.Handle(submitPath, holdBulkSlotsUntilWritten(
+		submitHandler, u.config.BulkResponseWriteTimeout,
+	))
+	mux.Handle(syncPath, holdBulkSlotsUntilWritten(
+		syncHandler, u.config.BulkResponseWriteTimeout,
+	))
 	mux.Handle(watchPath, watchHandler)
-	mux.Handle(betaQueryPath, betaQueryHandler)
-	mux.Handle(betaSubmitPath, betaSubmitHandler)
-	mux.Handle(betaSyncPath, betaSyncHandler)
+	mux.Handle(betaQueryPath, holdBulkSlotsUntilWritten(
+		betaQueryHandler, u.config.BulkResponseWriteTimeout,
+	))
+	mux.Handle(betaSubmitPath, holdBulkSlotsUntilWritten(
+		betaSubmitHandler, u.config.BulkResponseWriteTimeout,
+	))
+	mux.Handle(betaSyncPath, holdBulkSlotsUntilWritten(
+		betaSyncHandler, u.config.BulkResponseWriteTimeout,
+	))
 	mux.Handle(betaWatchPath, betaWatchHandler)
 	// One list drives health checking and both reflection versions so the
 	// served set cannot drift between them. The v1alpha reflection service is

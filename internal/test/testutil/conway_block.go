@@ -43,7 +43,7 @@ func BuildDecodableConwayBlockBytes(
 					Slot:        slot,
 					VrfKey:      make([]byte, 32),
 					VrfResult: lcommon.VrfResult{
-						Output: make([]byte, 32),
+						Output: make([]byte, 64),
 						Proof:  make([]byte, 80),
 					},
 					OpCert: babbage.BabbageOpCert{
