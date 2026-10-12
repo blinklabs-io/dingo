@@ -1,6 +1,6 @@
 module github.com/blinklabs-io/dingo
 
-go 1.26.5
+go 1.26.8
 
 toolchain go1.26.9
 
@@ -19,14 +19,14 @@ require (
 	github.com/aws/smithy-go v1.28.4
 	github.com/blinklabs-io/bark v0.2.0
 	github.com/blinklabs-io/bursa v0.17.1
-	github.com/blinklabs-io/gouroboros v0.212.0
-	github.com/blinklabs-io/ouroboros-mock v0.20.5-0.20261002194245-6bfd701ae86c
-	github.com/blinklabs-io/plutigo v0.8.1
+	github.com/blinklabs-io/gouroboros v0.212.6
+	github.com/blinklabs-io/ouroboros-mock v0.20.5
+	github.com/blinklabs-io/plutigo v0.9.2
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
-	github.com/consensys/gnark-crypto v0.21.0
+	github.com/consensys/gnark-crypto v0.22.0
 	github.com/dgraph-io/badger/v4 v4.9.6
-	github.com/fxamacker/cbor/v2 v2.9.4
+	github.com/fxamacker/cbor/v2 v2.9.6
 	github.com/getsops/sops/v3 v3.13.3
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/google/uuid v1.6.0
@@ -106,7 +106,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.3 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/bits-and-blooms/bitset v1.24.6 // indirect
+	github.com/bits-and-blooms/bitset v1.25.0 // indirect
 	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/blinklabs-io/go-bip39 v0.2.0 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.5.0 // indirect

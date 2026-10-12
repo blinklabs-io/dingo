@@ -1510,7 +1510,7 @@ func TestConstructionParseNativeAssetOutputs(t *testing.T) {
 	bodyCbor := testTxBody(
 		t,
 		[]shelley.ShelleyTransactionInput{
-			shelley.NewShelleyTransactionInput(
+			shelley.MustNewShelleyTransactionInput(
 				hexString(testHash(0xd3)), 0,
 			),
 		},
@@ -1603,7 +1603,14 @@ func TestConstructionRejectsNullElements(t *testing.T) {
 
 func TestConstructionInputIndexBounds(t *testing.T) {
 	addr := testAddress(t, lcommon.AddressTypeKeyNone, testKeyHash(0x33), nil)
-	for _, index := range []int64{-1, 0, math.MaxUint32 - 1, math.MaxUint32, math.MaxUint32 + 1} {
+	for _, index := range []int64{
+		-1,
+		0,
+		math.MaxUint16 - 1,
+		math.MaxUint16,
+		math.MaxUint16 + 1,
+		math.MaxUint32,
+	} {
 		t.Run(strconv.FormatInt(index, 10), func(t *testing.T) {
 			h := newTestHandler(t, newTestDeps())
 			coin := hexString(
@@ -1623,13 +1630,7 @@ func TestConstructionInputIndexBounds(t *testing.T) {
 					nil,
 				))
 			})
-			// The library constructor takes int, so 32-bit hosts cannot represent
-			// the upper uint32 half even though its serialized index is uint32.
-			maxIndex := int64(math.MaxUint32)
-			if strconv.IntSize == 32 {
-				maxIndex = math.MaxInt32
-			}
-			if index < 0 || index > maxIndex {
+			if index < 0 || index > math.MaxUint16 {
 				requireMeshError(
 					t,
 					rec,

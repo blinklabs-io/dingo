@@ -116,11 +116,11 @@ func newPhase2DepositTx(
 		require.NoError(t, err)
 		plutusScript = lcommon.PlutusV3Script(scriptBytes)
 	}
-	scriptInput := shelley.NewShelleyTransactionInput(
+	scriptInput := shelley.MustNewShelleyTransactionInput(
 		"f228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88",
 		0,
 	)
-	collateralInput := shelley.NewShelleyTransactionInput(
+	collateralInput := shelley.MustNewShelleyTransactionInput(
 		"f328b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee99",
 		0,
 	)
@@ -297,7 +297,7 @@ func TestValidateTxConwayPhase2InvalidDepositAccounting(t *testing.T) {
 								lcommon.CertificateTypeRegistration,
 							),
 							StakeCredential: keyCred(t),
-							Amount:          int64(amount),
+							Amount:          amount,
 						},
 					}},
 					delta: -int64(amount),
@@ -318,7 +318,7 @@ func TestValidateTxConwayPhase2InvalidDepositAccounting(t *testing.T) {
 								lcommon.CertificateTypeRegistrationDrep,
 							),
 							DrepCredential: keyCred(t),
-							Amount:         int64(amount),
+							Amount:         amount,
 						},
 					}},
 					delta: -int64(amount),
@@ -340,7 +340,7 @@ func TestValidateTxConwayPhase2InvalidDepositAccounting(t *testing.T) {
 								lcommon.CertificateTypeDeregistrationDrep,
 							),
 							DrepCredential: keyCred(t),
-							Amount:         int64(amount),
+							Amount:         amount,
 						},
 					}},
 					delta: int64(amount),

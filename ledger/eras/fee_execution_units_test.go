@@ -237,7 +237,7 @@ func feeTestDijkstraTx(
 	if len(children) > 0 {
 		subs := []gdijkstra.DijkstraSubTransaction{}
 		for i, c := range children {
-			in := shelley.NewShelleyTransactionInput(
+			in := shelley.MustNewShelleyTransactionInput(
 				fmt.Sprintf("%02x", i+1)+strings.Repeat("ab", 31), 0,
 			)
 			sub := gdijkstra.DijkstraSubTransaction{

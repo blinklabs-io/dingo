@@ -123,7 +123,7 @@ func buildDijkstraBatch(
 
 func refKey(ref batchOutRef) utxoref.Key {
 	return utxoref.ForInput(
-		shelley.NewShelleyTransactionInput(
+		shelley.MustNewShelleyTransactionInput(
 			fmt.Sprintf("%x", ref.txID),
 			int(ref.index), //nolint:gosec
 		),
@@ -137,7 +137,7 @@ func childOutputKey(
 ) utxoref.Key {
 	childID := tx.Body.TxSubTransactions.Items()[child].Body.Id()
 	return utxoref.ForInput(
-		shelley.NewShelleyTransactionInput(childID.String(), index),
+		shelley.MustNewShelleyTransactionInput(childID.String(), index),
 	)
 }
 
@@ -159,7 +159,7 @@ func TestUtxoOverlayApplyTxCoversEveryDijkstraBatchLevel(t *testing.T) {
 	require.Len(t, overlay.consumed, 2)
 	childOut := childOutputKey(tx, 0, 0)
 	topOut := utxoref.ForInput(
-		shelley.NewShelleyTransactionInput(tx.Hash().String(), 0),
+		shelley.MustNewShelleyTransactionInput(tx.Hash().String(), 0),
 	)
 	require.NotEqual(t, childOut, topOut)
 	require.Contains(t, overlay.created, childOut)
@@ -193,7 +193,7 @@ func TestUtxoOverlayApplyTxReservesOnlyCollateralForInvalidBatch(
 	)
 	require.Len(t, overlay.created, 1)
 	collateralReturnKey := utxoref.ForInput(
-		shelley.NewShelleyTransactionInput(tx.Hash().String(), 1),
+		shelley.MustNewShelleyTransactionInput(tx.Hash().String(), 1),
 	)
 	require.Contains(t, overlay.created, collateralReturnKey)
 }

@@ -6856,7 +6856,18 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 	}
 }
 
-// decodeReadChainBatch decodes a batch of raw blocks gathered from the chain
+func isByronBlockBodyValidationError(blockType uint, err error) bool {
+	if blockType != ledger.BlockTypeByronMain &&
+		blockType != ledger.BlockTypeByronEbb {
+		return false
+	}
+	return errors.Is(err, byron.ErrBodyProofMismatch) ||
+		errors.Is(err, byron.ErrMalformedBodyProof) ||
+		errors.Is(err, byron.ErrInvalidPayload) ||
+		errors.Is(err, byron.ErrInvalidSignature)
+}
+
+// decodeReadChainBatchWithError decodes a batch of raw blocks gathered from the chain
 // iterator into ledger.Block values, preserving input order. When
 // ls.blockPipeline is configured (LedgerStateConfig.BlockPipelineEnabled) it
 // submits the batch to the pipeline's decode worker pool while concurrently
@@ -6883,10 +6894,6 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 // after a Submit error, by CloseBlockPipelineDrainTimeout: a fatal
 // apply-stage error cancels the pipeline without closing Results(), so the
 // submitted prefix's results may never arrive.
-// decodeReadChainBatchWithError is the error-preserving form used by the
-// ledger reader. Keeping the cause lets a validation failure on an already
-// persisted block enter header-validation recovery instead of silently
-// closing the reader and restarting on the same block forever.
 func (ls *LedgerState) decodeReadChainBatchWithError(
 	ctx context.Context,
 	rawBatch []models.Block,
@@ -6903,11 +6910,18 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 					"failed to decode block",
 					"error", err,
 				)
-				return nil, fmt.Errorf(
+				decodeErr := fmt.Errorf(
 					"decode block at slot %d: %w",
 					raw.Slot,
 					err,
 				)
+				if isByronBlockBodyValidationError(raw.Type, err) {
+					return nil, &headerValidationError{
+						BlockPoint: ocommon.NewPoint(raw.Slot, raw.Hash),
+						Cause:      decodeErr,
+					}
+				}
+				return nil, decodeErr
 			}
 			decoded = append(decoded, block)
 		}
@@ -7033,6 +7047,14 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 				"error", decodeErr,
 			)
 			retErr = fmt.Errorf("decode block: %w", decodeErr)
+			if isByronBlockBodyValidationError(item.BlockType(), decodeErr) {
+				tip := item.Tip()
+				retErr = &headerValidationError{
+					BlockPoint: tip.Point,
+					Cause:      retErr,
+					Source:     ls.deferredHeaderSource(tip.Point),
+				}
+			}
 			continue
 		}
 		block := item.Block()
@@ -8990,6 +9012,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// any further work. Honest chains always agree with the checkpoints.
 	if err := ls.validateBlockCheckpoint(block); err != nil {
 		return nil, err
+	}
+	if err := validateTransactionOutputIndexes(block.Transactions()); err != nil {
+		return nil, fmt.Errorf("validate block transaction output indexes: %w", err)
 	}
 	// Reject blocks whose header protocol major version runs more than
 	// one ahead of current pparams. Skipped on testnets pre-Dijkstra
@@ -14023,6 +14048,15 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 						err,
 					)
 				}
+				if err := validateTransactionOutputIndexes(
+					[]lcommon.Transaction{tx},
+				); err != nil {
+					return fmt.Errorf(
+						"validate leios endorser transaction %d output indexes: %w",
+						i,
+						err,
+					)
+				}
 				// applyTx stages account effects in the session's write
 				// transaction, so no separate account overlay is passed.
 				if err := validate(tx, consumed, created, nil); err != nil {
@@ -14078,6 +14112,9 @@ func (ls *LedgerState) validateTxCore(
 	tx lcommon.Transaction,
 	buildLV func(txn *database.Txn) *LedgerView,
 ) error {
+	if err := validateTransactionOutputIndexes([]lcommon.Transaction{tx}); err != nil {
+		return fmt.Errorf("validate transaction output indexes: %w", err)
+	}
 	snapshot := ls.txValidationSnapshot()
 
 	validationEra, pp, isCurrentEraPParams, err := snapshot.validationContext(tx)
@@ -14720,13 +14757,17 @@ func (ls *LedgerState) forgeBlock() {
 		Slot:        nextSlot,
 		PrevHash:    lcommon.NewBlake2b256(currentTip.Point.Hash),
 		IssuerVkey:  lcommon.IssuerVkey{},
-		VrfKey:      []byte{},
+		VrfKey:      make([]byte, 32),
 		VrfResult: lcommon.VrfResult{
-			Output: lcommon.Blake2b256{}.Bytes(),
+			Output: make([]byte, 64),
+			Proof:  make([]byte, 80),
 		},
 		BlockBodySize: bodySize,
 		BlockBodyHash: bodyHash,
-		OpCert:        babbage.BabbageOpCert{},
+		OpCert: babbage.BabbageOpCert{
+			HotVkey:   make([]byte, 32),
+			Signature: make([]byte, 64),
+		},
 		// Keep header-field changes in sync with ledger/forging/builder.go:
 		// this dev-mode path duplicates mempool iteration, ExUnits accounting,
 		// metadata encoding, and header assembly.
@@ -14740,7 +14781,7 @@ func (ls *LedgerState) forgeBlock() {
 	conwayHeader := &conway.ConwayBlockHeader{
 		BabbageBlockHeader: babbage.BabbageBlockHeader{
 			Body:      headerBody,
-			Signature: []byte{},
+			Signature: make([]byte, 448),
 		},
 	}
 
