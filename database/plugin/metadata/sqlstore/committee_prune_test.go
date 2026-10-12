@@ -522,6 +522,9 @@ func TestCommitteeHotPruningBoundsEachDeleteCall(t *testing.T) {
 		)
 	}
 
+	// Force execCached through the supplied queryer so this test can record
+	// each ExecContext call instead of the store-owned prepared statement.
+	store.closePreparedStatements()
 	queryer := &committeePruneRecordingQueryer{
 		queryer: newDialectQueryer(store.writeDB, store.dialect.Name()),
 	}
