@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -269,6 +270,37 @@ func TestBoundaryBlockEraMustMatchLedgerProtocolVersion(t *testing.T) {
 	})
 }
 
+// TestRefusedBoundaryReleasesValidationTransition pins that refusing a
+// boundary block ends the validation transition the rollover opened. A
+// transition left open makes every later transaction validation session
+// report itself stale, so the mempool could never commit a transaction.
+func TestRefusedBoundaryReleasesValidationTransition(t *testing.T) {
+	t.Parallel()
+	ls, err := runBoundaryEraCase(t, boundaryEraCase{pparamsMajor: 8})
+	require.ErrorIs(t, err, errRestartLedgerPipeline)
+	assert.Equal(t, int64(0), ls.txValidationTransitions.Load())
+
+	var current bool
+	require.NoError(t, ls.WithTxValidationSession(
+		context.Background(),
+		func(
+			_ func(
+				gledger.Transaction,
+				map[utxoref.Key]struct{},
+				map[utxoref.Key]lcommon.Utxo,
+				*utxoref.StateOverlay,
+			) error,
+			stillCurrent func() bool,
+			_ func(func() error) (bool, error),
+		) error {
+			current = stillCurrent()
+			return nil
+		},
+	))
+	assert.True(t, current,
+		"a validation session after a refused boundary must stay current")
+}
+
 // TestAuthorizedBoundaryEra covers the era gate directly for the transitions
 // the pipeline test cannot reach cheaply: two consecutive hard forks at one
 // boundary and Byron.
@@ -337,6 +369,49 @@ func TestAuthorizedBoundaryEra(t *testing.T) {
 		)
 		require.NoError(t, err)
 		assert.Equal(t, eras.BabbageEraDesc.Id, era)
+	})
+	// From Conway the version moves through HardForkInitiation, enacted
+	// after translation, so only a configured trigger epoch is judged.
+	conwaySource := func(t *testing.T, dijkstraAt *uint64) *LedgerState {
+		t.Helper()
+		cfg := newTestEraHistoryCfg(t)
+		enabled := true
+		cfg.ExperimentalHardForksEnabled = &enabled
+		cfg.TestDijkstraHardForkAtEpoch = dijkstraAt
+		return &LedgerState{
+			activeEras: eras.ErasWithDijkstra,
+			config: LedgerStateConfig{
+				CardanoNodeConfig: cfg,
+				EnableDijkstra:    true,
+			},
+		}
+	}
+	conwayPParams := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{Major: 10},
+	}
+	t.Run("a conway source under a version trigger is left to the block", func(t *testing.T) {
+		t.Parallel()
+		era, err := conwaySource(t, nil).authorizedBoundaryEra(
+			eras.ConwayEraDesc.Id, eras.DijkstraEraDesc.Id,
+			eras.DijkstraEraDesc.Id, conwayPParams, 10,
+		)
+		require.NoError(t, err)
+		assert.Equal(t, eras.DijkstraEraDesc.Id, era)
+	})
+	t.Run("a conway source is held to its configured trigger epoch", func(t *testing.T) {
+		t.Parallel()
+		at := uint64(20)
+		_, err := conwaySource(t, &at).authorizedBoundaryEra(
+			eras.ConwayEraDesc.Id, eras.DijkstraEraDesc.Id,
+			eras.DijkstraEraDesc.Id, conwayPParams, 10,
+		)
+		require.ErrorIs(t, err, errBoundaryEraNotAuthorized)
+		era, err := conwaySource(t, &at).authorizedBoundaryEra(
+			eras.ConwayEraDesc.Id, eras.DijkstraEraDesc.Id,
+			eras.DijkstraEraDesc.Id, conwayPParams, 20,
+		)
+		require.NoError(t, err)
+		assert.Equal(t, eras.DijkstraEraDesc.Id, era)
 	})
 	t.Run("byron has no version to compare", func(t *testing.T) {
 		t.Parallel()

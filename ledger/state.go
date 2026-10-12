@@ -5631,32 +5631,6 @@ func (ls *LedgerState) transitionToEraFrom(
 	return result, nil
 }
 
-func (ls *LedgerState) prepareEraTransitionsForRollover(
-	ctx context.Context,
-	txn *database.Txn,
-	snapshotEpoch models.Epoch,
-	snapshotEra eras.EraDesc,
-	currentPParams lcommon.ProtocolParameters,
-	transitionPath []uint,
-) (
-	lcommon.ProtocolParameters,
-	uint,
-	[]*EraTransitionResult,
-	[]uint,
-	bool,
-	error,
-) {
-	return ls.prepareAuthorizedEraTransitionsForRollover(
-		ctx,
-		txn,
-		snapshotEpoch,
-		snapshotEra,
-		currentPParams,
-		transitionPath,
-		nil,
-	)
-}
-
 // boundaryPathAuthorizer receives the source-era parameters after the
 // boundary's updates are enacted and the planned transition path, and returns
 // the path to apply or an error refusing the boundary.
@@ -5665,12 +5639,12 @@ type boundaryPathAuthorizer func(
 	transitionPath []uint,
 ) ([]uint, error)
 
-// prepareAuthorizedEraTransitionsForRollover is
-// prepareEraTransitionsForRollover with an optional authorizer. It runs
-// between the source-era enactment and the first translation: a translation
-// rewrites the protocol version through HardForkFunc, so a check after it
-// would only see the version it was meant to judge.
-func (ls *LedgerState) prepareAuthorizedEraTransitionsForRollover(
+// prepareEraTransitionsForRollover enacts the source era's classic parameter
+// updates and then translates along transitionPath. A non-nil authorize runs
+// between the two: a translation rewrites the protocol version through
+// HardForkFunc, so a check after it would only see the version it was meant
+// to judge.
+func (ls *LedgerState) prepareEraTransitionsForRollover(
 	ctx context.Context,
 	txn *database.Txn,
 	snapshotEpoch models.Epoch,
@@ -7977,7 +7951,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					}
 				}
 				workingPParams, workingEraId, transitionResults,
-					transitionHardForkMajors, plutusV2CostModelWritten, err = ls.prepareAuthorizedEraTransitionsForRollover(
+					transitionHardForkMajors, plutusV2CostModelWritten, err = ls.prepareEraTransitionsForRollover(
 					ctx,
 					txn,
 					snapshotEpoch,
@@ -8022,11 +7996,11 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					rolloverElapsed.Seconds(),
 				)
 			}
-			if errors.Is(err, errBoundaryEraNotAuthorized) {
-				return rejectBoundaryBlock(err, "process epoch rollover")
-			}
 			if err != nil {
 				finishValidationTransition()
+				if errors.Is(err, errBoundaryEraNotAuthorized) {
+					return rejectBoundaryBlock(err, "process epoch rollover")
+				}
 				// This runs on the pass after a boundary-crossing batch
 				// deferred its remainder to cachedNextBatch, which (per the
 				// cachedNextBatch != nil branch below) leaves
