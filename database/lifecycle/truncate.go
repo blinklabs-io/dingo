@@ -814,13 +814,61 @@ func finishPendingTruncate(
 				)
 			}
 		}
-		if _, _, err := db.TruncateAfterSlot(
+		newTip, _, err := db.TruncateAfterSlot(
 			ctx,
 			point,
 			pending.MithrilFloor,
 			txn,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("truncate metadata: %w", err)
+		}
+		metadataStore := db.Metadata()
+		metadataTxn := txn.Metadata()
+		if err := metadataStore.DeleteMidnightAriadneRollbacksAfterBlock(
+			metadataTxn,
+			newTip.BlockNumber,
+		); err != nil {
+			return fmt.Errorf(
+				"truncate: delete Midnight Ariadne rollback journals: %w",
+				err,
+			)
+		}
+		if err := metadataStore.DeleteMidnightCandidateRemovalsAfterBlock(
+			metadataTxn,
+			newTip.BlockNumber,
+		); err != nil {
+			return fmt.Errorf(
+				"truncate: delete Midnight candidate removal journals: %w",
+				err,
+			)
+		}
+		if err := metadataStore.DeleteMidnightEpochTransitionsAfterBlock(
+			metadataTxn,
+			newTip.BlockNumber,
+		); err != nil {
+			return fmt.Errorf(
+				"truncate: delete Midnight epoch transition journals: %w",
+				err,
+			)
+		}
+		checkpoint, err := metadataStore.GetBackfillCheckpoint(
+			"midnight",
+			metadataTxn,
+		)
+		if err != nil {
+			return fmt.Errorf("truncate: read Midnight backfill checkpoint: %w", err)
+		}
+		if checkpoint != nil && checkpoint.LastSlot > point.Slot {
+			checkpoint.LastSlot = point.Slot
+			checkpoint.TotalSlots = 0
+			checkpoint.Completed = false
+			if err := metadataStore.SetBackfillCheckpoint(
+				checkpoint,
+				metadataTxn,
+			); err != nil {
+				return fmt.Errorf("truncate: rewind Midnight backfill checkpoint: %w", err)
+			}
 		}
 		if err := database.RecomputeAccountExpirationsAfterTruncate(
 			ctx,

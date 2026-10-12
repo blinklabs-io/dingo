@@ -63,7 +63,9 @@ func backfillTestBatch(
 		23: cbor.NewSetType([]cbor.RawMessage{child}, true),
 	})
 	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, true, nil})
+	txCbor, err := cbor.Encode(
+		[]any{cbor.RawMessage(body), map[uint]any{}, nil},
+	)
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
 	require.NoError(t, err)

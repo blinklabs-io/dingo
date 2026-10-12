@@ -22,6 +22,7 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -64,12 +65,44 @@ type ManifestOption func(*manifestConfig)
 
 type manifestConfig struct {
 	maxBytes int64
+	key      []byte
 	// maxPause is consumed only by Snapshot and SnapshotToCloud.
 	maxPause time.Duration
-	// pauseNow and pauseContext are per-call test seams consumed only by
-	// Snapshot. Production callers cannot construct options that set them.
-	pauseNow     func() time.Time
-	pauseContext func(context.Context) context.Context
+	// pauseNow, pauseContext, and pauseDeadline are per-call test seams
+	// consumed only by Snapshot. Production callers cannot construct options
+	// that set them.
+	pauseNow      func() time.Time
+	pauseContext  func(context.Context) context.Context
+	pauseDeadline func(context.Context, time.Duration) (context.Context, context.CancelFunc)
+}
+
+// WithManifestKey sets the operator trust root: a shared secret that
+// WriteManifest uses to authenticate a manifest, and that ParseManifest,
+// ReadManifest and Manifest.Authenticate require a manifest to verify against.
+// A manifest carries the digests of its payload files, so authenticating it
+// authenticates them. An empty key is the same as passing no option.
+func WithManifestKey(key []byte) ManifestOption {
+	return func(cfg *manifestConfig) { cfg.key = key }
+}
+
+func manifestKey(opts []ManifestOption) []byte {
+	cfg := manifestConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg.key
+}
+
+func requireManifestKey(opts []ManifestOption) error {
+	if len(manifestKey(opts)) == 0 {
+		return fmt.Errorf(
+			"%w: cloud snapshots require a manifest trust key",
+			ErrManifestUnauthenticated,
+		)
+	}
+	return nil
 }
 
 // WithManifestMaxBytes sets the maximum encoded manifest size. Zero uses
@@ -127,6 +160,14 @@ func readManifestData(r io.Reader, opts []ManifestOption) ([]byte, error) {
 // so a corrupted snapshot is reported as corrupted rather than missing.
 var ErrManifestCorrupted = errors.New(
 	"manifest failed checksum validation (corrupted or hand-edited)",
+)
+
+// ErrManifestUnauthenticated marks a manifest whose authentication tag is
+// missing or does not verify under the configured trust key. Unlike
+// ErrManifestCorrupted, which an unkeyed checksum can only trap by accident,
+// this means the manifest was not produced by a holder of the key.
+var ErrManifestUnauthenticated = errors.New(
+	"manifest is not authenticated by the configured trust key",
 )
 
 // Trigger values recorded in Manifest.Trigger.
@@ -209,6 +250,22 @@ type Manifest struct {
 	BlobBytes     int64 `json:"blobBytes"`
 	MetadataBytes int64 `json:"metadataBytes"`
 
+	// BlobSHA256/MetadataSHA256 are the hex SHA-256 digests of the blob and
+	// metadata backup files (BlobBackupFileName, MetadataBackupFileName). With
+	// BlobBytes/MetadataBytes they declare the only objects a restore will
+	// fetch and the sizes it will accept. Empty in a manifest written before
+	// they existed.
+	BlobSHA256     string `json:"blobSha256,omitempty"`
+	MetadataSHA256 string `json:"metadataSha256,omitempty"`
+
+	// Authentication is the hex HMAC-SHA256, under the operator trust key
+	// (WithManifestKey), of the manifest's JSON encoding with Checksum and
+	// Authentication blanked. Empty when no key was configured at snapshot time.
+	// Like Gates, its addition did not bump ManifestFormatVersion: a build
+	// that predates these fields recomputes Checksum without them and rejects
+	// such a manifest as corrupted.
+	Authentication string `json:"authentication,omitempty"`
+
 	// Checksum is a SHA-256 hex digest of the manifest's own JSON
 	// encoding with Checksum itself blanked out, guarding against a
 	// corrupted or hand-edited manifest file. It is not a security
@@ -226,6 +283,38 @@ func (m Manifest) checksum() (string, error) {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// authentication returns the HMAC-SHA256 of m's JSON encoding, with Checksum
+// and Authentication cleared, under key.
+func (m Manifest) authentication(key []byte) (string, error) {
+	m.Checksum = ""
+	m.Authentication = ""
+	data, err := json.Marshal(m)
+	if err != nil {
+		return "", fmt.Errorf("marshal manifest for authentication: %w", err)
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write(data)
+	return hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+// Authenticate verifies m against the trust key in opts. It returns nil when
+// no key is configured, since there is then nothing to verify against, and
+// ErrManifestUnauthenticated when m's tag is absent or does not match.
+func (m Manifest) Authenticate(opts ...ManifestOption) error {
+	key := manifestKey(opts)
+	if len(key) == 0 {
+		return nil
+	}
+	want, err := m.authentication(key)
+	if err != nil {
+		return err
+	}
+	if !hmac.Equal([]byte(want), []byte(m.Authentication)) {
+		return ErrManifestUnauthenticated
+	}
+	return nil
 }
 
 // CheckPluginMatch returns an error if the manifest was produced by a
@@ -373,6 +462,14 @@ func WriteManifest(dir string, m Manifest, opts ...ManifestOption) error {
 		return err
 	}
 	m.FormatVersion = ManifestFormatVersion
+	m.Authentication = ""
+	if key := manifestKey(opts); len(key) > 0 {
+		tag, err := m.authentication(key)
+		if err != nil {
+			return err
+		}
+		m.Authentication = tag
+	}
 	sum, err := m.checksum()
 	if err != nil {
 		return err
@@ -485,6 +582,9 @@ func ParseManifest(data []byte, opts ...ManifestOption) (Manifest, error) {
 	}
 	if wantSum == "" || gotSum != wantSum {
 		return Manifest{}, ErrManifestCorrupted
+	}
+	if err := m.Authenticate(opts...); err != nil {
+		return Manifest{}, err
 	}
 	return m, nil
 }

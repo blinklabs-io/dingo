@@ -106,10 +106,11 @@ func TestAcceleratedTxPumpQuarantineFitsRunnerBudget(t *testing.T) {
 					args = append(args, "--conformance")
 				}
 				slots := launchedTxPumpWindow(t, script, args...)
-				require.Positive(
+				require.GreaterOrEqual(
 					t,
 					slots,
-					"accelerated runs must retain output quarantine",
+					cfg.BlockFetchStabilityWindowSlots(),
+					"quarantine must cover 3k/f slots, the window an early fork can still remove outputs in",
 				)
 				require.Equal(t, "${DEVNET_TXPUMP_CONFIRMATION_SLOTS:-600}",
 					environments[profile.service]["TXPUMP_CONFIRMATION_SLOTS"],

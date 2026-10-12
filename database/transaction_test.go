@@ -234,7 +234,7 @@ func TestSetTransactionMetadataOnlyRecordsCertificatesWithoutUtxos(
 		point,
 		7,
 		map[int]uint64{0: 500_000_000},
-		nil,
+		nil, 0,
 	))
 
 	gotTx, err := db.Metadata().GetTransactionByHash(tx.Hash().Bytes(), nil)
@@ -945,7 +945,7 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 					producer.point,
 					0,
 					nil,
-					txn.Metadata(),
+					txn.Metadata(), 0,
 				)
 			}),
 		)
@@ -1018,7 +1018,7 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 			nil,
 			nil,
 			mustBlockOffsets(t, candidate.consumerBlock),
-			nil,
+			nil, 0,
 		),
 	)
 
@@ -1148,7 +1148,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 					producer.point,
 					0,
 					nil,
-					txn.Metadata(),
+					txn.Metadata(), 0,
 				)
 			}))
 			metaTxn.Release()
@@ -1252,7 +1252,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 					producer.point,
 					0,
 					nil,
-					txn.Metadata(),
+					txn.Metadata(), 0,
 				)
 			}))
 			metaTxn.Release()
@@ -1317,7 +1317,7 @@ func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 			nil,
 			nil,
 			mustBlockOffsets(t, candidate.consumerBlock),
-			nil,
+			nil, 0,
 		)
 	}
 

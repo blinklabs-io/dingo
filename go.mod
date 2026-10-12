@@ -2,7 +2,7 @@ module github.com/blinklabs-io/dingo
 
 go 1.26.5
 
-toolchain go1.26.7
+toolchain go1.26.9
 
 require (
 	cloud.google.com/go/storage v1.68.0
@@ -19,9 +19,9 @@ require (
 	github.com/aws/smithy-go v1.28.2
 	github.com/blinklabs-io/bark v0.2.0
 	github.com/blinklabs-io/bursa v0.17.1
-	github.com/blinklabs-io/gouroboros v0.210.0
+	github.com/blinklabs-io/gouroboros v0.212.0
 	github.com/blinklabs-io/ouroboros-mock v0.20.5-0.20261002194245-6bfd701ae86c
-	github.com/blinklabs-io/plutigo v0.8.0
+	github.com/blinklabs-io/plutigo v0.8.1
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/consensys/gnark-crypto v0.21.0
@@ -48,7 +48,7 @@ require (
 	go.uber.org/automaxprocs v1.6.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/crypto v0.57.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/time v0.16.0
@@ -214,7 +214,10 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260921155816-b14227669459 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
 	lukechampine.com/blake3 v1.1.6 // indirect
-	modernc.org/libc v1.75.7 // indirect
+	modernc.org/libc v1.77.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
+
+// Remove when an upstream release preserves cancellation before SQLite execution.
+replace modernc.org/sqlite => github.com/wolf31o2/sqlite v1.60.2-0.20261010235151-e5bb553e3013

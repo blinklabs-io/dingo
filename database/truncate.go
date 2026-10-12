@@ -203,6 +203,10 @@ func (d *Database) rollbackAfterSlot(
 		}()
 	}
 
+	if err := d.lowerHistoryExpiryCursor(point.Slot, txn); err != nil {
+		return ochainsync.Tip{}, nil, err
+	}
+
 	// Restore pool state before deleting any certificates: unlike account
 	// restoration (which reads the Account row's own denormalized
 	// AddedSlot field, independent of certificate rows),

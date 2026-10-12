@@ -718,6 +718,33 @@ func TestBlockAtOrAfterIndexSkipsInvalidIndexMappings(t *testing.T) {
 	require.Equal(t, nextBlock.Hash, block.Hash)
 }
 
+func TestBlockAtOrBeforeIndexSkipsSparseAndInvalidMappings(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	first := testIndexedBlock(10, 1, 0x01)
+	last := testIndexedBlock(30, 300, 0x03)
+	require.NoError(t, db.BlockCreate(first, nil))
+	require.NoError(t, db.BlockCreate(last, nil))
+
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *Txn) error {
+		if err := db.Blob().Set(txn.Blob(), types.BlockBlobIndexKey(100),
+			types.BlockBlobKey(last.Slot, last.Hash)); err != nil {
+			return err
+		}
+		return db.Blob().Set(txn.Blob(), types.BlockBlobIndexKey(200),
+			types.BlockBlobKey(20, bytes.Repeat([]byte{0x02}, 32)))
+	}))
+
+	block, err := db.BlockAtOrBeforeIndex(context.Background(), 299, nil)
+	require.NoError(t, err)
+	require.Equal(t, first.ID, block.ID)
+	require.Equal(t, first.Hash, block.Hash)
+
+	_, err = db.BlockAtOrBeforeIndex(context.Background(), 0, nil)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
 // TestBlockBeforeSlotSkipsSyntheticBlobs verifies BlockBeforeSlot returns the
 // highest real ranking block before a slot and skips synthetic blobs. Genesis
 // CBOR and Leios endorser blocks are persisted at block-blob keys via
@@ -979,6 +1006,36 @@ func TestBlockByNumberReportsMissingNumbersAsNotFound(t *testing.T) {
 	}
 
 	_, err = BlockByNumber(context.Background(), db, 99)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+func TestFirstBlockAtOrAfterSlot(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	for _, b := range []struct {
+		slot uint64
+		id   uint64
+	}{{100, 1}, {200, 2}, {300, 3}} {
+		hash := make([]byte, 32)
+		hash[0] = byte(b.id)
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID: b.id, Slot: b.slot, Hash: hash, Number: b.id, Type: 1,
+			Cbor: []byte{0x80},
+		}, nil))
+	}
+	// A synthetic blob (ID 0) between real blocks must be skipped.
+	require.NoError(t, db.SetGenesisCbor(
+		150, bytes.Repeat([]byte{0xcc}, 32), []byte{0x80}, nil,
+	))
+	for _, tc := range []struct {
+		query uint64
+		want  uint64
+	}{{0, 100}, {100, 100}, {101, 200}, {300, 300}} {
+		blk, err := FirstBlockAtOrAfterSlot(t.Context(), db, tc.query)
+		require.NoError(t, err, "query %d", tc.query)
+		require.Equal(t, tc.want, blk.Slot, "query %d", tc.query)
+	}
+	_, err := FirstBlockAtOrAfterSlot(t.Context(), db, 301)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 

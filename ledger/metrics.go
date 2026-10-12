@@ -28,24 +28,30 @@ import (
 )
 
 type stateMetrics struct {
-	blockfetchEventMu     sync.Mutex
-	blockfetchEventStarts map[uint64]time.Time
-	blockfetchEventNextID uint64
-	blockNum              prometheus.Gauge
-	density               prometheus.Gauge
-	epochNum              prometheus.Gauge
-	slotInEpoch           prometheus.Gauge
-	slotNum               prometheus.Gauge
-	forks                 prometheus.Gauge
-	slotClockFallbacks    prometheus.Counter
-	blocksForgedTotal     prometheus.Counter
-	blockForgingLatency   prometheus.Histogram
-	forgingEnabled        prometheus.Gauge
-	nodeStartTime         prometheus.Gauge
-	tipGapSlots           prometheus.Gauge
-	shelleyStartTime      prometheus.Gauge
-	epochLengthSlots      prometheus.Gauge
-	shadowGateDecisions   *prometheus.CounterVec
+	// Sync-progress state; see metrics_sync.go.
+	blockfetchBatchInFlight       atomic.Bool
+	blockfetchContinuationPending atomic.Bool
+	blockfetchConnSelected        atomic.Bool
+	lastBlockAddedUnixNano        atomic.Int64
+	headerQueueFull               prometheus.Counter
+	blockfetchEventMu             sync.Mutex
+	blockfetchEventStarts         map[uint64]time.Time
+	blockfetchEventNextID         uint64
+	blockNum                      prometheus.Gauge
+	density                       prometheus.Gauge
+	epochNum                      prometheus.Gauge
+	slotInEpoch                   prometheus.Gauge
+	slotNum                       prometheus.Gauge
+	forks                         prometheus.Gauge
+	slotClockFallbacks            prometheus.Counter
+	blocksForgedTotal             prometheus.Counter
+	blockForgingLatency           prometheus.Histogram
+	forgingEnabled                prometheus.Gauge
+	nodeStartTime                 prometheus.Gauge
+	tipGapSlots                   prometheus.Gauge
+	shelleyStartTime              prometheus.Gauge
+	epochLengthSlots              prometheus.Gauge
+	shadowGateDecisions           *prometheus.CounterVec
 	// Wall-clock time the ledger apply path spent waiting for a referenced
 	// Leios endorser block, by outcome ("arrived", "timeout", "cancelled" or
 	// "unavailable"). It covers both waits the apply path can take: the
@@ -220,6 +226,10 @@ type stateMetrics struct {
 	// rising value means recovery is asking for rewinds deeper than local
 	// history can support.
 	atTipRecoveryPruneFloorClamped prometheus.Counter
+	// Incremented when an at-tip recovery rewind target would cross the
+	// most recent epoch boundary and is clamped to the first block at or
+	// after it, so the completed rollover is not discarded and recomputed.
+	atTipRecoveryEpochBoundaryClamped prometheus.Counter
 	// Incremented when unresolved-producer replay recovery repeatedly fails
 	// to move the applied ledger tip forward and holds at that tip instead of
 	// pruning another security-parameter window.
@@ -901,6 +911,10 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		},
 		m.blockfetchEventInProgressSeconds,
 	)
+	m.headerQueueFull = promautoFactory.NewCounter(prometheus.CounterOpts{
+		Name: "dingo_chain_header_queue_full_total",
+		Help: "headers rejected because the primary chain's header queue was at capacity",
+	})
 	m.blockNum = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_blockNum_int",
 		Help: "current block number",
@@ -1132,6 +1146,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_attip_recovery_prune_floor_clamped_total",
 			Help: "times an at-tip validation recovery rewind target below the consumed-UTxO prune floor was clamped to the ledger tip, because UTxOs consumed above that floor were hard-deleted and cannot be restored by a rewind",
+		},
+	)
+	m.atTipRecoveryEpochBoundaryClamped = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_attip_recovery_epoch_boundary_clamped_total",
+			Help: "times an at-tip validation recovery rewind target below the most recent epoch boundary was clamped to the first applied block at or after it, or held at the ledger tip when none is applied, to avoid recomputing a completed epoch rollover",
 		},
 	)
 	m.replayRecoveryNonConverging = promautoFactory.NewCounter(
