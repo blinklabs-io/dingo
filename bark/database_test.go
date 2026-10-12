@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -2472,9 +2473,14 @@ func TestListSnapshotsRejectsOversizedPage(t *testing.T) {
 
 func TestDecodeSnapshotPageTokenRejectsOversizedInput(t *testing.T) {
 	t.Parallel()
-	_, err := decodeSnapshotPageToken(strings.Repeat(
-		"A", maxSnapshotPageTokenLength+1,
-	))
+	data, err := json.Marshal(snapshotPageToken{
+		Generation: 1,
+		ID:         strings.Repeat("a", maxSnapshotPageTokenLength),
+	})
+	require.NoError(t, err)
+	token := base64.RawURLEncoding.EncodeToString(data)
+	require.Greater(t, len(token), maxSnapshotPageTokenLength)
+	_, err = decodeSnapshotPageToken(token)
 	require.ErrorContains(t, err, "invalid snapshot page token")
 }
 
