@@ -1057,7 +1057,11 @@ func (n *Node) initBlockForger(
 			ctx context.Context,
 			header lcommon.BlockHeader,
 		) error {
-			return n.ouroboros().ValidateLeiosEndorserBlockForHeader(ctx, header)
+			o := n.ouroboros()
+			if o == nil {
+				return errOuroborosNotStarted
+			}
+			return o.ValidateLeiosEndorserBlockForHeader(ctx, header)
 		},
 		LeiosCertificateProvider:        leiosCerts,
 		LeiosParentAnnouncementProvider: leiosParent,

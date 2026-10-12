@@ -3733,7 +3733,7 @@ func TestNewBlockForgerRejectsProductionLeiosWithoutTxValidator(t *testing.T) {
 	)
 }
 
-func TestCheckAndForgeProductionAnnouncesForgedLeiosEB(t *testing.T) {
+func TestCheckAndForgeProductionAdoptsIneligibleLeiosAnnouncement(t *testing.T) {
 	creds := setupTestCredentials(t)
 	block := newForgerTestBlock(10, 2)
 	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
@@ -3765,7 +3765,7 @@ func TestCheckAndForgeProductionAnnouncesForgedLeiosEB(t *testing.T) {
 			require.Zero(t, broadcaster.calls,
 				"announcement validation must precede ranking-block adoption")
 			announcementValidated = true
-			return nil
+			return errors.New("ledger tip trails ranking block parent")
 		},
 		LeiosMempool: forgerTestMempoolProvider{
 			txs: []MempoolTransaction{
@@ -3783,6 +3783,7 @@ func TestCheckAndForgeProductionAnnouncesForgedLeiosEB(t *testing.T) {
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 
 	require.True(t, announcementValidated)
+	require.Equal(t, 1, broadcaster.calls)
 	require.Equal(t, 1, leiosChecker.calls)
 	require.NotEmpty(t, leiosCaster.hash)
 	require.Equal(t, uint64(10), leiosCaster.slot)

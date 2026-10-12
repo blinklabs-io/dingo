@@ -2022,10 +2022,10 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	if leiosState.data.Announcement != nil &&
 		f.leiosAnnouncementValidator != nil {
 		if err := f.leiosAnnouncementValidator(ctx, block.Header()); err != nil {
-			f.incCouldNotForge()
-			return fmt.Errorf(
-				"validate locally forged Leios announcement: %w",
-				err,
+			f.logger.Warn(
+				"locally forged Leios announcement is not vote-eligible",
+				"slot", currentSlot,
+				"error", err,
 			)
 		}
 	}

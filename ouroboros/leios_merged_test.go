@@ -62,7 +62,7 @@ type fakeLeiosAnnouncementLedger struct {
 	staleness        ledger.LeiosAnnouncementOCINStaleness
 	err              error
 	txValidationErr  error
-	txValidationFunc func(gledger.BlockHeader) error
+	txValidationFunc func(context.Context, gledger.BlockHeader) error
 	validated        int
 	txValidated      int
 }
@@ -91,13 +91,13 @@ func (f *fakeLeiosAnnouncementLedger) ValidateLeiosAnnouncementHeader(
 }
 
 func (f *fakeLeiosAnnouncementLedger) ValidateLeiosEndorserBlockTransactions(
-	_ context.Context,
+	ctx context.Context,
 	header gledger.BlockHeader,
 	_ [][]byte,
 ) error {
 	f.txValidated++
 	if f.txValidationFunc != nil {
-		return f.txValidationFunc(header)
+		return f.txValidationFunc(ctx, header)
 	}
 	return f.txValidationErr
 }
@@ -2267,6 +2267,59 @@ func TestValidateLeiosEndorserBlockForHeaderWaitsForRemoteBody(t *testing.T) {
 	}, time.Second, time.Millisecond)
 }
 
+func TestValidateLeiosEndorserBlockForHeaderKeepsCallerValidationBudget(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	txRaw := testDijkstraTx(t, 0)
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(txRaw),
+			TransactionSize: uint16(len(txRaw)),
+		}},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(72, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+
+	const tailBudget = 20 * time.Millisecond
+	validationLedger := &fakeLeiosAnnouncementLedger{
+		txValidationFunc: func(ctx context.Context, _ gledger.BlockHeader) error {
+			timer := time.NewTimer(2 * tailBudget)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: validationLedger,
+		LeiosTxFetchTailBudget:  tailBudget,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStorePeerOffered,
+	))
+
+	require.NoError(t, o.ValidateLeiosEndorserBlockForHeader(t.Context(), header))
+	require.Equal(t, 1, validationLedger.txValidated)
+}
+
 func TestValidateLeiosEndorserBlockForHeaderAcceptsForgedGenesisParent(
 	t *testing.T,
 ) {
@@ -2686,7 +2739,7 @@ func TestValidateLeiosEndorserBlockForHeaderRetriesStorageFault(t *testing.T) {
 	require.NoError(t, err)
 	var validationLedger *fakeLeiosAnnouncementLedger
 	validationLedger = &fakeLeiosAnnouncementLedger{
-		txValidationFunc: func(gledger.BlockHeader) error {
+		txValidationFunc: func(context.Context, gledger.BlockHeader) error {
 			if validationLedger.txValidated == 1 {
 				return ledger.ErrLedgerViewStorageFault
 			}
@@ -2780,7 +2833,7 @@ func TestValidateLeiosEndorserBlockForHeaderRevalidatesDistinctParent(
 
 	rejectedParent := errors.New("parent-specific validation failure")
 	validationLedger := &fakeLeiosAnnouncementLedger{
-		txValidationFunc: func(header gledger.BlockHeader) error {
+		txValidationFunc: func(_ context.Context, header gledger.BlockHeader) error {
 			if header.PrevHash() == distinctParent {
 				return rejectedParent
 			}

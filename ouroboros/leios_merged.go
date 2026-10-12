@@ -1100,7 +1100,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	}
 	if err == nil {
 		err = o.leiosAnnouncementLedger.ValidateLeiosEndorserBlockTransactions(
-			waitCtx,
+			ctx,
 			header,
 			txCbors,
 		)
