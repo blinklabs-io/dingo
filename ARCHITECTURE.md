@@ -6345,15 +6345,15 @@ error plus the `dingo_chainsync_unrecoverable_rollback_total` metric, since a
 node in this state cannot self-recover and needs operator intervention
 (e.g. re-bootstrapping from a Mithril snapshot). Before recording a failure,
 the tracker uses the bounded local primary-chain membership check also used for
-historical headers. It advances only after that authoritative check confirms
-the point is absent; unavailable chain state or a lookup error cannot produce
-the diagnosis. A rollback point still on the authoritative local chain is
-evidence of the peer's fork, so it cannot diagnose the local chain as diverged;
-the tracker also discards any older failure record for that point.
-Primary-chain membership alone cannot establish which branch the network will
-ultimately select. The tracker therefore does not issue the definitive local
-divergence diagnosis for an on-chain point, including when crossing that point
-would exceed K or a local restoration boundary.
+historical headers. An absent point can advance the diagnosis immediately;
+unavailable chain state or a lookup error cannot. Primary-chain membership
+alone cannot establish which branch the network will ultimately select. For an
+on-chain point, the tracker also requires the authoritative local tip to remain
+unchanged for the full tracking window before it issues the definitive local
+divergence diagnosis. Local progress discards the accumulated failures for that
+point. This preserves eventual escalation when crossing a shared ancestor would
+exceed K or a local restoration boundary without letting a forked peer blame a
+node that continues to advance.
 When the per-connection loop
 detector itself breaks a loop by skipping a rollback it can no longer cross,
 it feeds that same point-keyed tracker so the escalation and metric fire on

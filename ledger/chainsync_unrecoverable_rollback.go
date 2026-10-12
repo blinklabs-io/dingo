@@ -49,6 +49,7 @@ type unrecoverableRollbackRecord struct {
 	count     int
 	firstSeen time.Time
 	lastSeen  time.Time
+	localTip  ocommon.Point
 }
 
 func unrecoverableRollbackKey(point ocommon.Point) string {
@@ -107,10 +108,10 @@ func (ls *LedgerState) clearUnrecoverableRollbacks() {
 // cycles, surfaces the stuck-divergence condition as a throttled
 // operator-facing error plus a metric, rather than only the per-attempt
 // WARN that otherwise repeats indefinitely with zero forward progress.
-// A point retained on the local primary chain cannot establish which side of
-// that point the network will ultimately select. This tracker therefore does
-// not diagnose local divergence from that point based on one peer's rollback,
-// even when the rollback is beyond K or a local restoration boundary.
+// A point retained on the local primary chain cannot by itself establish which
+// side of that point the network will ultimately select. Such a point is only
+// diagnosed as stuck when the local tip also remains unchanged for the full
+// tracking window. Any local progress discards the point's accumulated failures.
 //
 // Callers must hold chainsyncMutex.
 func (ls *LedgerState) reportUnrecoverableRollbackIfStuck(
@@ -143,20 +144,42 @@ func (ls *LedgerState) reportUnrecoverableRollbackIfStuck(
 		return
 	}
 	if onPrimary {
-		// A peer asking us to discard authoritative local descendants after
-		// this common point is evidence that the peer forked there. It is not
-		// evidence that our own chain diverged, so discard older failures for
-		// this point.
-		delete(
-			ls.unrecoverableRollbacks,
-			unrecoverableRollbackKey(point),
-		)
+		key := unrecoverableRollbackKey(point)
+		rec := ls.unrecoverableRollbacks[key]
+		if rec.count > 0 && !pointMatches(rec.localTip, localTip.Point) {
+			// Other peers extended or switched the authoritative local chain
+			// while this rollback kept failing, so the node is making progress.
+			delete(ls.unrecoverableRollbacks, key)
+			return
+		}
+		count, stuck := ls.noteUnrecoverableRollback(point)
+		rec = ls.unrecoverableRollbacks[key]
+		if rec.count == 1 || len(rec.localTip.Hash) == 0 {
+			rec.localTip = ocommon.NewPoint(
+				localTip.Point.Slot,
+				append([]byte(nil), localTip.Point.Hash...),
+			)
+			ls.unrecoverableRollbacks[key] = rec
+		}
+		if !stuck || time.Since(rec.firstSeen) < unrecoverableRollbackWindow {
+			return
+		}
+		ls.emitUnrecoverableRollback(point, reason, connId, count)
 		return
 	}
 	count, stuck := ls.noteUnrecoverableRollback(point)
 	if !stuck {
 		return
 	}
+	ls.emitUnrecoverableRollback(point, reason, connId, count)
+}
+
+func (ls *LedgerState) emitUnrecoverableRollback(
+	point ocommon.Point,
+	reason string,
+	connId ouroboros.ConnectionId,
+	count int,
+) {
 	if ls.metrics.unrecoverableRollbacks != nil {
 		ls.metrics.unrecoverableRollbacks.Inc()
 	}

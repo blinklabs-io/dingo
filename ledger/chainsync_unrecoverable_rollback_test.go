@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -177,7 +178,7 @@ func TestReportUnrecoverableRollbackSurfacesOperatorSignal(t *testing.T) {
 	require.False(t, stuck)
 }
 
-func TestReportUnrecoverableRollbackRequiresPointOffPrimaryChain(t *testing.T) {
+func TestReportUnrecoverableRollbackClearsEvidenceAfterLocalProgress(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
@@ -187,25 +188,59 @@ func TestReportUnrecoverableRollbackRequiresPointOffPrimaryChain(t *testing.T) {
 			count:     unrecoverableRollbackThreshold - 1,
 			firstSeen: time.Now(),
 			lastSeen:  time.Now(),
+			localTip:  fixture.currentTip.Point,
 		},
 	}
-
-	// The local primary chain has continued beyond this rollback point. A
-	// forked peer can ask us to leave it repeatedly, but that cannot establish
-	// that our own chain diverged.
-	for range unrecoverableRollbackThreshold + 1 {
-		fixture.ls.reportUnrecoverableRollbackIfStuck(
-			fixture.ancestorTip.Point,
-			event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
-			fixture.connId,
-		)
+	nextBlock := chain.RawBlock{
+		Slot:        fixture.currentTip.Point.Slot + 1,
+		Hash:        testHashBytes("next-canonical-block"),
+		BlockNumber: fixture.currentTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    fixture.currentTip.Point.Hash,
+		Cbor:        []byte{0x80},
 	}
+	require.NoError(t, fixture.ls.chain.AddRawBlocks(
+		t.Context(),
+		[]chain.RawBlock{nextBlock},
+	))
+
+	fixture.ls.reportUnrecoverableRollbackIfStuck(
+		fixture.ancestorTip.Point,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		fixture.connId,
+	)
 	require.Zero(
 		t,
 		promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks),
 	)
 	_, tracked := fixture.ls.unrecoverableRollbacks[key]
 	require.False(t, tracked)
+}
+
+func TestReportUnrecoverableRollbackEscalatesStalledPrimaryChain(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	key := unrecoverableRollbackKey(fixture.ancestorTip.Point)
+	fixture.ls.unrecoverableRollbacks = map[string]unrecoverableRollbackRecord{
+		key: {
+			count:     unrecoverableRollbackThreshold - 1,
+			firstSeen: time.Now().Add(-unrecoverableRollbackWindow),
+			lastSeen:  time.Now(),
+			localTip:  fixture.currentTip.Point,
+		},
+	}
+
+	fixture.ls.reportUnrecoverableRollbackIfStuck(
+		fixture.ancestorTip.Point,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		fixture.connId,
+	)
+	require.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks),
+	)
 }
 
 func TestReportUnrecoverableRollbackRequiresAuthoritativeChain(t *testing.T) {
