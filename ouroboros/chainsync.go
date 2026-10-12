@@ -30,12 +30,14 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -80,42 +82,38 @@ type chainsyncScheduleAtFunc func(time.Time, func()) func()
 
 type scheduledChainsyncResync struct {
 	onset  time.Time
+	reason string
 	cancel func()
 	fired  bool
 }
 
-type chainsyncClientDoneContext struct {
-	done <-chan struct{}
-}
-
-func (c chainsyncClientDoneContext) Deadline() (time.Time, bool) {
-	return time.Time{}, false
-}
-
-func (c chainsyncClientDoneContext) Done() <-chan struct{} {
-	return c.done
-}
-
-func (c chainsyncClientDoneContext) Err() error {
-	select {
-	case <-c.done:
-		return context.Canceled
-	default:
-		return nil
-	}
-}
-
-func (c chainsyncClientDoneContext) Value(any) any {
-	return nil
-}
-
+// chainsyncAdmissionContext ends when the peer's chainsync client is asked to
+// stop or its connection begins shutdown. It must not use the client's
+// DoneChan: that closes only after the protocol loop running this callback
+// returns, so a wait in the callback could never observe it.
 func chainsyncAdmissionContext(
-	ctx ochainsync.CallbackContext,
-) context.Context {
-	if ctx.Client == nil || ctx.Client.ProtocolInstance() == nil {
-		return context.Background()
+	cb ochainsync.CallbackContext,
+) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var stop <-chan struct{}
+	if cb.Client != nil {
+		if proto := cb.Client.ProtocolInstance(); proto != nil {
+			stop = proto.StopChan()
+		}
 	}
-	return chainsyncClientDoneContext{done: ctx.Client.DoneChan()}
+	connDone := cb.ConnectionDoneChan
+	if stop == nil && connDone == nil {
+		return ctx, cancel
+	}
+	go func() {
+		select {
+		case <-stop:
+		case <-connDone:
+		case <-ctx.Done():
+		}
+		cancel()
+	}()
+	return ctx, cancel
 }
 
 func defaultChainsyncScheduleAt(onset time.Time, fn func()) func() {
@@ -131,6 +129,20 @@ func defaultChainsyncScheduleAt(onset time.Time, fn func()) func() {
 func (o *Ouroboros) scheduleFutureHeaderResync(
 	connId ouroboros.ConnectionId,
 	onset time.Time,
+) {
+	o.scheduleHeaderResync(
+		connId,
+		onset,
+		event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
+	)
+}
+
+// scheduleHeaderResync is scheduleFutureHeaderResync with the reason the
+// recovery event carries. The winning schedule's reason is the one published.
+func (o *Ouroboros) scheduleHeaderResync(
+	connId ouroboros.ConnectionId,
+	onset time.Time,
+	reason string,
 ) {
 	if o.chainsyncScheduleAt == nil || o.eventBus == nil || onset.IsZero() {
 		return
@@ -154,7 +166,7 @@ func (o *Ouroboros) scheduleFutureHeaderResync(
 		}
 		current.cancel()
 	}
-	scheduled := &scheduledChainsyncResync{onset: onset}
+	scheduled := &scheduledChainsyncResync{onset: onset, reason: reason}
 	// A timer whose onset is already due may invoke its callback before the
 	// scheduler returns. Arm publication only after the marker and cancel
 	// function are installed, or that callback can observe no current timer and
@@ -186,7 +198,7 @@ func (o *Ouroboros) scheduleFutureHeaderResync(
 					event.ChainsyncResyncEventType,
 					event.ChainsyncResyncEvent{
 						ConnectionId: connId,
-						Reason:       event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
+						Reason:       scheduled.reason,
 					},
 				),
 			)
@@ -249,6 +261,7 @@ func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
 }
 
 func (o *Ouroboros) chainsyncConnectionConfigOption(
+	ctx context.Context,
 	includeClient bool,
 ) ouroboros.ConnectionOptionFunc {
 	return func(c *ouroboros.Connection) {
@@ -256,7 +269,7 @@ func (o *Ouroboros) chainsyncConnectionConfigOption(
 			chainsyncFindIntersectBudgetRate,
 			chainsyncFindIntersectBudgetBurst,
 		)
-		opts := o.chainsyncServerConnOpts(limiter)
+		opts := o.chainsyncServerConnOpts(ctx, limiter)
 		if includeClient {
 			opts = slices.Concat(o.chainsyncClientConnOpts(), opts)
 		}
@@ -267,18 +280,20 @@ func (o *Ouroboros) chainsyncConnectionConfigOption(
 }
 
 func (o *Ouroboros) chainsyncServerConnOpts(
+	ctx context.Context,
 	limiter *chainsyncFindIntersectRateLimiter,
 ) []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
 		ochainsync.WithFindIntersectFunc(
 			o.instrumentChainsyncFindIntersect(
 				func(
-					ctx ochainsync.CallbackContext,
+					cbCtx ochainsync.CallbackContext,
 					points []ocommon.Point,
 				) (ocommon.Point, ochainsync.Tip, error) {
 					return o.chainsyncServerFindIntersect(
-						limiter,
 						ctx,
+						limiter,
+						cbCtx,
 						points,
 					)
 				},
@@ -509,6 +524,7 @@ func (o *Ouroboros) denyDivergentChainsyncPeer(
 }
 
 func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
+	ctx context.Context,
 	connId ouroboros.ConnectionId,
 ) ([]ocommon.Point, error) {
 	if o.ledgerState == nil {
@@ -528,6 +544,7 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 		)
 	}
 	intersectPoints, err := o.ledgerState.IntersectPoints(
+		ctx,
 		chainsyncIntersectPointCount,
 	)
 	if err != nil {
@@ -569,7 +586,9 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 		hasRollbackAnchor bool
 	)
 	if !intersectPointsHaveRealPoint(intersectPoints) {
-		rollbackAnchor, hasRollbackAnchor, err = o.ledgerState.RollbackWindowIntersectAnchor()
+		rollbackAnchor, hasRollbackAnchor, err = o.ledgerState.RollbackWindowIntersectAnchor(
+			ctx,
+		)
 		if err != nil {
 			// Surfaced like any other intersect-point failure above: a
 			// storage fault must fail the chainsync start so the caller
@@ -619,7 +638,10 @@ func (o *Ouroboros) syncChainsyncClient(
 }
 
 func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
-	intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(connId)
+	intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(
+		context.Background(),
+		connId,
+	)
 	if err != nil {
 		return fmt.Errorf(
 			"build default chainsync intersect points for start: %w",
@@ -633,15 +655,16 @@ func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 }
 
 func (o *Ouroboros) chainsyncServerFindIntersect(
+	ctx context.Context,
 	limiter *chainsyncFindIntersectRateLimiter,
-	ctx ochainsync.CallbackContext,
+	cbCtx ochainsync.CallbackContext,
 	points []ocommon.Point,
 ) (ocommon.Point, ochainsync.Tip, error) {
 	var retPoint ocommon.Point
 	o.config.Logger.Debug(
 		"chainsync server: FindIntersect callback entered",
 		"component", "ouroboros",
-		"connection_id", ctx.ConnectionId.String(),
+		"connection_id", cbCtx.ConnectionId.String(),
 		"num_points", len(points),
 	)
 	tip := o.ledgerState.Tip()
@@ -660,7 +683,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 		o.config.Logger.Warn(
 			"chainsync server: rejecting FindIntersect with too many points",
 			"component", "ouroboros",
-			"connection_id", ctx.ConnectionId.String(),
+			"connection_id", cbCtx.ConnectionId.String(),
 			"num_points", len(points),
 			"max_points", chainsyncMaxFindIntersectPoints,
 		)
@@ -680,13 +703,13 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 			"component",
 			"ouroboros",
 			"connection_id",
-			ctx.ConnectionId.String(),
+			cbCtx.ConnectionId.String(),
 			"num_points",
 			len(points),
 		)
 		return retPoint, tip, ochainsync.ErrIntersectNotFound
 	}
-	intersectPoint, err := o.ledgerState.GetIntersectPoint(points)
+	intersectPoint, err := o.ledgerState.GetIntersectPoint(ctx, points)
 	if err != nil {
 		o.config.Logger.Error(
 			"chainsync server: GetIntersectPoint error",
@@ -705,18 +728,21 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 	}
 	// Add our client to the chainsync state
 	_, err = o.chainsyncState.AddClient(
-		ctx.ConnectionId,
+		cbCtx.ConnectionId,
 		*intersectPoint,
-		ctx.Server,
+		cbCtx.Server,
 	)
 	if err != nil {
 		return retPoint, tip, fmt.Errorf(
 			"add chainsync client for connection %s: %w",
-			ctx.ConnectionId.String(),
+			cbCtx.ConnectionId.String(),
 			err,
 		)
 	}
 	retPoint = *intersectPoint
+	// Count only an intersection actually served: rejected or unmatched
+	// requests must not keep an otherwise idle inbound peer from pruning.
+	o.recordServedActivity(cbCtx.ConnectionId)
 	return retPoint, tip, nil
 }
 
@@ -738,6 +764,7 @@ func (o *Ouroboros) refreshTip(next *chain.ChainIteratorResult) ochainsync.Tip {
 func (o *Ouroboros) chainsyncServerRequestNext(
 	ctx ochainsync.CallbackContext,
 ) error {
+	o.recordServedActivity(ctx.ConnectionId)
 	// Create/retrieve chainsync state for connection
 	tip := o.ledgerState.Tip()
 	clientState, err := o.chainsyncState.AddClient(
@@ -771,7 +798,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		)
 		if err != nil {
 			clientState.UnlockRollbackState()
-			return err
+			return fmt.Errorf("chainsync server: initial rollback: %w", err)
 		}
 		clientState.NeedsInitialRollback = false
 		clientState.UnlockRollbackState()
@@ -782,7 +809,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 	next, err := clientState.ChainIter.Next(false)
 	if err != nil {
 		if !errors.Is(err, chain.ErrIteratorChainTip) {
-			return err
+			return fmt.Errorf("chainsync server: next chain event: %w", err)
 		}
 	}
 	if next != nil {
@@ -806,7 +833,10 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 				tip,
 			)
 		}
-		return err
+		if err != nil {
+			return fmt.Errorf("chainsync server: send chain event: %w", err)
+		}
+		return nil
 	}
 	// Send AwaitReply
 	o.config.Logger.Debug(
@@ -815,7 +845,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		"tip_slot", tip.Point.Slot,
 	)
 	if err := ctx.Server.AwaitReply(); err != nil {
-		return err
+		return fmt.Errorf("chainsync server: send AwaitReply: %w", err)
 	}
 	// Wait for next block and send
 	rawConn, connDone, closeErr := o.connManager.GetConnectionWithDoneAndError(
@@ -905,6 +935,9 @@ func (o *Ouroboros) chainsyncServerServeAwaited(
 	next *chain.ChainIteratorResult,
 	nextErr error,
 ) {
+	if nextErr == nil {
+		o.recordServedActivity(ctx.ConnectionId)
+	}
 	if nextErr != nil {
 		if errors.Is(nextErr, context.Canceled) {
 			// The only cancellations of a server client's iterator come from
@@ -1044,7 +1077,15 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	ctx ochainsync.CallbackContext,
 	point ocommon.Point,
 	tip ochainsync.Tip,
-) error {
+) (err error) {
+	_, span := tracing.Start(
+		context.Background(),
+		"chainsync.roll_backward",
+		attribute.String("connection.id", ctx.ConnectionId.String()),
+		tracing.Uint64("block.slot", point.Slot),
+		attribute.String("block.hash", hex.EncodeToString(point.Hash)),
+	)
+	defer func() { tracing.End(span, err) }()
 	if !o.reconcileChainsyncIngressAdmission(
 		ctx.ConnectionId,
 		o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
@@ -1107,9 +1148,40 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 			},
 		),
 	); err != nil {
-		return err
+		return fmt.Errorf("chainsync: publish rollback event: %w", err)
 	}
 	return nil
+}
+
+// chainsyncCursorFarBehindLocalTip reports whether a header with the given
+// block number trails the local tip by more than the security parameter while
+// the peer's advertised tip does not. Only that shape is a stale cursor that
+// re-intersecting can repair. A rollback or fork within k is ordinary, and a
+// peer whose own tip is that far behind is merely lagging on the chain: it is
+// kept attached and left unselected until it catches up. Without a ledger the
+// answer is false.
+//
+// The rule only applies while chain selection has no best peer. During bulk
+// sync a peer slower than the one feeding the ledger trails the applied tip
+// by more than k while its advertised tip is ahead; it is merely lagging, and
+// closing it would only churn connections. With no best peer there is no
+// feeder to lag behind and nothing else advances the tip, so a stale cursor
+// is the stall.
+func (o *Ouroboros) chainsyncCursorFarBehindLocalTip(
+	headerBlockNumber uint64,
+	peerTipBlockNumber uint64,
+) bool {
+	if o.chainsyncLocalTipBlock == nil {
+		return false
+	}
+	if o.chainsyncHasBestPeer != nil && o.chainsyncHasBestPeer() {
+		return false
+	}
+	tipBlock, k := o.chainsyncLocalTipBlock()
+	farBehind := func(blockNumber uint64) bool {
+		return tipBlock > blockNumber && tipBlock-blockNumber > k
+	}
+	return farBehind(headerBlockNumber) && !farBehind(peerTipBlockNumber)
 }
 
 func (o *Ouroboros) chainsyncClientRollForwardAt(
@@ -1118,11 +1190,19 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 	blockData any,
 	tip ochainsync.Tip,
 	arrivalTime time.Time,
-) error {
+) (err error) {
 	switch v := blockData.(type) {
 	case gledger.BlockHeader:
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
+		_, span := tracing.Start(
+			context.Background(),
+			"chainsync.roll_forward",
+			attribute.String("connection.id", ctx.ConnectionId.String()),
+			tracing.Uint64("block.slot", blockSlot),
+			attribute.String("block.hash", hex.EncodeToString(blockHash)),
+		)
+		defer func() { tracing.End(span, err) }()
 		point := ocommon.NewPoint(blockSlot, blockHash)
 		// Genesis Limit on Patience: the peer is charged up to the header's
 		// network arrival, not for this node's decoding, admission waits,
@@ -1177,54 +1257,38 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			BlockHeader:  v,
 			Tip:          tip,
 		}
+		// An ingress-eligible connection whose cursor trails the local tip by
+		// more than k while its peer is near the tip can never contribute: the
+		// ledger drops its headers as stale and chain selection skips the
+		// peer, while the connection holds an eligible slot. This also covers
+		// an observer promoted just above with a cursor left far behind.
+		if ingressEligible && o.chainsyncCursorFarBehindLocalTip(
+			v.BlockNumber(),
+			tip.BlockNumber,
+		) {
+			o.config.Logger.Debug(
+				"chainsync: cursor far behind the local tip",
+				"component", "ouroboros",
+				"slot", blockSlot,
+				"block_number", v.BlockNumber(),
+				"peer_tip_block_number", tip.BlockNumber,
+				"connection_id", ctx.ConnectionId.String(),
+			)
+			o.scheduleHeaderResync(
+				ctx.ConnectionId,
+				time.Now(),
+				event.ChainsyncResyncReasonBehindLocalTip,
+			)
+			return nil
+		}
 		// Enforce the future-header boundary on this peer's protocol callback,
 		// before any observed-tip, cursor, dedup, or ledger mutation. A
 		// permitted wait therefore blocks only this peer and never the shared
 		// ledger ChainSync dispatch mutex/goroutine.
 		if ingressEligible && o.chainsyncHeaderAdmission != nil {
-			accepted, err := o.chainsyncHeaderAdmission(
-				chainsyncAdmissionContext(ctx),
-				chainsyncEvent,
-			)
-			if err != nil {
-				o.config.Logger.Warn(
-					"chainsync: future-header admission failed closed",
-					"component", "ouroboros",
-					"slot", blockSlot,
-					"connection_id", ctx.ConnectionId.String(),
-					"error", err,
-				)
+			admitted, err := o.admitChainsyncHeader(ctx, chainsyncEvent)
+			if err != nil || !admitted {
 				return err
-			}
-			if !accepted {
-				// Returning nil deliberately drops this header without turning
-				// ambiguous local/remote clock skew into a connection penalty.
-				// Re-intersect at the earliest dropped header's onset so the
-				// protocol cursor cannot permanently strand the accepted chain.
-				if o.chainsyncHeaderSlotTime != nil {
-					onset, onsetErr := o.chainsyncHeaderSlotTime(blockSlot)
-					if onsetErr == nil {
-						o.scheduleFutureHeaderResync(ctx.ConnectionId, onset)
-					} else {
-						o.config.Logger.Error(
-							"chainsync: failed to schedule future-header recovery",
-							"component", "ouroboros",
-							"slot", blockSlot,
-							"connection_id", ctx.ConnectionId.String(),
-							"error", onsetErr,
-						)
-					}
-				}
-				return nil
-			}
-			if o.futureHeaderResyncPending(ctx.ConnectionId) {
-				o.config.Logger.Debug(
-					"chainsync: header withheld pending future-header re-intersection",
-					"component", "ouroboros",
-					"slot", blockSlot,
-					"connection_id", ctx.ConnectionId.String(),
-				)
-				return nil
 			}
 		}
 		// Verify header crypto (VRF/KES and, once local state has caught up,
@@ -1244,12 +1308,39 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// not. A deferred result (local state has not caught up to this
 		// header's slot yet) also leaves the header eligible -- that is the
 		// normal shape of a peer legitimately racing ahead of local ledger
-		// application, not a peer fault. Only a definite crypto/eligibility
-		// failure excludes the header from observation and recycles the
-		// connection.
+		// application, not a peer fault. The exception is a header past the
+		// forecast horizon, which cannot be validated at all yet: it is
+		// withheld without penalty until the ledger can forecast its slot.
+		// Only a definite crypto/eligibility failure excludes the header from
+		// observation and recycles the connection.
 		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
 			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
-			if verifyErr := o.chainSelectionVerifyHeaderCrypto(v); verifyErr != nil {
+			verifyErr := o.chainSelectionVerifyHeaderCrypto(v)
+			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) &&
+				o.chainsyncHeaderAdmission != nil {
+				// Admission waited for the horizon, so it has since moved
+				// back (a ledger rollback). Wait for it once more.
+				admitted, err := o.admitChainsyncHeader(ctx, chainsyncEvent)
+				if err != nil || !admitted {
+					return err
+				}
+				verifyErr = o.chainSelectionVerifyHeaderCrypto(v)
+			}
+			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) {
+				// The header cannot be validated yet, so it must not extend
+				// this peer's candidate or reach blockfetch. Withhold it
+				// without penalty and re-intersect, which re-delivers it
+				// through admission.
+				o.config.Logger.Debug(
+					"chainsync: header past the forecast horizon withheld from chain selection",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+				)
+				o.scheduleFutureHeaderResync(ctx.ConnectionId, time.Now())
+				return nil
+			}
+			if verifyErr != nil {
 				if ledger.IsHeaderVerificationDeferred(verifyErr) {
 					o.config.Logger.Debug(
 						"chainsync: header verification deferred for chain selection",
@@ -1306,6 +1397,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ObservedTip:  observedTip,
 				VRFOutput:    vrfOutput,
 				PraosView:    praosView,
+				// The parent hash is what lets the selector tell a connected
+				// header chain from a sequence of advancing numbers.
+				ObservedPrevHash: v.PrevHash().Bytes(),
+				ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
 			}
 			// If the hook handles it synchronously (Genesis corroboration
 			// active, so the apply gate below must reflect this header), skip
@@ -1434,7 +1529,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				chainsyncEvent,
 			),
 		); err != nil {
-			return err
+			return fmt.Errorf("chainsync: publish roll-forward event: %w", err)
 		}
 		if point.Slot == tip.Point.Slot &&
 			bytes.Equal(point.Hash, tip.Point.Hash) {
@@ -1459,6 +1554,77 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		return fmt.Errorf("unexpected block data type: %T", v)
 	}
 	return nil
+}
+
+// admitChainsyncHeader runs the future-header admission for one delivered
+// header and reports whether it may proceed. A header it withholds is not a
+// peer fault; the connection re-intersects so it is delivered again.
+func (o *Ouroboros) admitChainsyncHeader(
+	ctx ochainsync.CallbackContext,
+	e ledger.ChainsyncEvent,
+) (bool, error) {
+	blockSlot := e.Point.Slot
+	admissionCtx, cancel := chainsyncAdmissionContext(ctx)
+	defer cancel()
+	accepted, err := o.chainsyncHeaderAdmission(admissionCtx, e)
+	if errors.Is(err, ledger.ErrChainsyncHeaderDisconnected) {
+		// Blocks the node already has cannot connect this header, so no wait
+		// can release it. Return rather than hold the protocol until its state
+		// timer closes the connection, and restart from the local chain.
+		o.config.Logger.Debug(
+			"chainsync: header does not connect to the local chain",
+			"component", "ouroboros",
+			"slot", blockSlot,
+			"connection_id", ctx.ConnectionId.String(),
+		)
+		o.scheduleHeaderResync(
+			ctx.ConnectionId,
+			time.Now(),
+			event.ChainsyncResyncReasonDisconnectedHeaderAdmission,
+		)
+		return false, nil
+	}
+	if err != nil {
+		o.config.Logger.Warn(
+			"chainsync: future-header admission failed closed",
+			"component", "ouroboros",
+			"slot", blockSlot,
+			"connection_id", ctx.ConnectionId.String(),
+			"error", err,
+		)
+		return false, fmt.Errorf("chainsync: future-header admission: %w", err)
+	}
+	if !accepted {
+		// Dropping the header without turning ambiguous local/remote clock
+		// skew into a connection penalty. Re-intersect at the earliest dropped
+		// header's onset so the protocol cursor cannot permanently strand the
+		// accepted chain.
+		if o.chainsyncHeaderSlotTime != nil {
+			onset, onsetErr := o.chainsyncHeaderSlotTime(blockSlot)
+			if onsetErr == nil {
+				o.scheduleFutureHeaderResync(ctx.ConnectionId, onset)
+			} else {
+				o.config.Logger.Error(
+					"chainsync: failed to schedule future-header recovery",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+					"error", onsetErr,
+				)
+			}
+		}
+		return false, nil
+	}
+	if o.futureHeaderResyncPending(ctx.ConnectionId) {
+		o.config.Logger.Debug(
+			"chainsync: header withheld pending future-header re-intersection",
+			"component", "ouroboros",
+			"slot", blockSlot,
+			"connection_id", ctx.ConnectionId.String(),
+		)
+		return false, nil
+	}
+	return true, nil
 }
 
 // shouldPublishChainsyncToLedger reports whether headers from connId should
@@ -1722,6 +1888,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 					return
 				}
 				recovery := o.ledgerState.RecoverAfterLocalRollback(
+					ctx,
 					connIds,
 					e.Point,
 				)
@@ -1792,7 +1959,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			// connection down anyway. Closing lets peer governance
 			// reconnect with a fresh bearer and updated intersect points.
 			for _, connId := range connIds {
-				o.denyDivergentChainsyncPeer(connId, e.Reason)
+				o.denyDivergentChainsyncPeer(connId, e.Reason) //nolint:contextcheck // address normalization bounds its own DNS lookup
 				if o.chainsyncState != nil {
 					o.chainsyncState.ClearObservedHeaderHistory(connId)
 				}
@@ -1824,6 +1991,7 @@ func (o *Ouroboros) instrumentChainsyncFindIntersect(
 		start := time.Now()
 		p, t, err := fn(ctx, points)
 		o.recordProtocolMessage("chainsync", err, time.Since(start))
+		// The instrumented callback's error passes through unchanged.
 		return p, t, err
 	}
 }
@@ -1840,6 +2008,7 @@ func (o *Ouroboros) instrumentChainsyncRequestNext(
 		start := time.Now()
 		err := fn(ctx)
 		o.recordProtocolMessage("chainsync", err, time.Since(start))
+		// The instrumented callback's error passes through unchanged.
 		return err
 	}
 }
@@ -1855,6 +2024,7 @@ func (o *Ouroboros) instrumentChainsyncRollBackward(
 		start := time.Now()
 		err := fn(ctx, point, tip)
 		o.recordProtocolMessage("chainsync", err, time.Since(start))
+		// The instrumented callback's error passes through unchanged.
 		return err
 	}
 }
@@ -1882,6 +2052,7 @@ func (o *Ouroboros) decodeChainsyncHeader(
 	}
 	header, err = gledger.NewBlockHeaderFromCbor(blockType, raw)
 	if err == nil || blockType != gledger.BlockTypeByronEbb {
+		// The caller wraps decode errors with the block type.
 		return header, err
 	}
 	// Some dingo peers have sent a complete Byron EBB in the NtN header
@@ -1892,6 +2063,7 @@ func (o *Ouroboros) decodeChainsyncHeader(
 	// headers.
 	block, blockErr := gledger.NewBlockFromCbor(blockType, raw)
 	if blockErr != nil {
+		// Report the header decode error; the EBB fallback is only a retry.
 		return nil, err
 	}
 	return block.Header(), nil
@@ -1974,6 +2146,7 @@ func (o *Ouroboros) instrumentChainsyncRollForwardRaw(
 		start := time.Now()
 		err := fn(ctx, blockType, blockData, tip)
 		o.recordProtocolMessage("chainsync", err, time.Since(start))
+		// The instrumented callback's error passes through unchanged.
 		return err
 	}
 }

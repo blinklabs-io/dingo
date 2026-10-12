@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -66,11 +67,11 @@ func ForEachBlockInRange(
 	); it.Next() {
 		item := it.Item()
 		if item == nil {
-			continue
+			return errors.New("block range iterator returned a nil item")
 		}
 		k := item.Key()
 		if k == nil {
-			continue
+			return errors.New("block range iterator returned a nil key")
 		}
 		// Skip the metadata key
 		if strings.HasSuffix(
@@ -109,11 +110,12 @@ func ForEachBlockInRange(
 // ForEachBlockInRangeDB is a convenience wrapper that creates a read-only
 // transaction and calls ForEachBlockInRange.
 func ForEachBlockInRangeDB(
+	ctx context.Context,
 	db *Database,
 	startSlot, endSlot uint64,
 	fn func(block models.Block) error,
 ) error {
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	return txn.Do(func(txn *Txn) error {
 		return ForEachBlockInRange(txn, startSlot, endSlot, fn)
 	})

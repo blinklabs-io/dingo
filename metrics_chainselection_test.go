@@ -15,15 +15,23 @@
 package dingo
 
 import (
+	"bytes"
+	"context"
 	"io"
 	"log/slog"
+	"math/big"
+	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/promutil"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -193,6 +201,149 @@ func TestBuildChainSelectorConfigWiresRollbackRegistrationCounter(
 	)
 }
 
+// The corroboration identity hook is installed by the composition site; a
+// hook left unset silently falls back to grouping witnesses by remote host.
+func TestBuildChainSelectorConfigWiresPeerIdentity(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	t.Cleanup(bus.Stop)
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger, EventBus: bus},
+	)
+	t.Cleanup(func() {
+		assert.NoError(t, connManager.Stop(context.Background()))
+	})
+
+	localAddr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 6000}
+	remoteAddr := &net.TCPAddr{IP: net.IPv4(44, 0, 0, 1), Port: 3001}
+	localWire, peerWire := newLeiosNotifyTestConnPair(localAddr, remoteAddr)
+	t.Cleanup(func() {
+		_ = localWire.Close()
+		_ = peerWire.Close()
+	})
+	type connectionResult struct {
+		conn *ouroboros.Connection
+		err  error
+	}
+	localResult := make(chan connectionResult, 1)
+	peerResult := make(chan connectionResult, 1)
+	go func() {
+		conn, err := ouroboros.NewConnection(
+			ouroboros.WithConnection(localWire),
+			ouroboros.WithNetworkMagic(42),
+			ouroboros.WithNodeToNode(true),
+			ouroboros.WithServer(true),
+		)
+		localResult <- connectionResult{conn: conn, err: err}
+	}()
+	go func() {
+		conn, err := ouroboros.NewConnection(
+			ouroboros.WithConnection(peerWire),
+			ouroboros.WithNetworkMagic(42),
+			ouroboros.WithNodeToNode(true),
+		)
+		peerResult <- connectionResult{conn: conn, err: err}
+	}()
+	receiveConnection := func(ch <-chan connectionResult) connectionResult {
+		t.Helper()
+		select {
+		case result := <-ch:
+			return result
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for local Ouroboros handshake")
+			return connectionResult{}
+		}
+	}
+	local := receiveConnection(localResult)
+	peer := receiveConnection(peerResult)
+	require.NoError(t, local.err)
+	require.NoError(t, peer.err)
+	t.Cleanup(func() {
+		_ = local.conn.Close()
+		_ = peer.conn.Close()
+	})
+
+	conn := local.conn.Id()
+	require.Equal(t, localAddr.String(), conn.LocalAddr.String())
+	require.Equal(t, remoteAddr.String(), conn.RemoteAddr.String())
+	require.True(t, connManager.AddConnection(local.conn, true, remoteAddr.String()))
+
+	n, _ := newMetricsTestNode(t)
+	n.eventBus = bus
+	n.connManager = connManager
+	cfg := n.buildChainSelectorConfig(2160, true, 0)
+	require.NotNil(t, cfg.PeerIdentity)
+	peerGovs := []*peergov.PeerGovernor{
+		peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+			Logger: logger, EventBus: bus, ConnManager: connManager,
+			DisableOutbound: true,
+		}),
+		peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+			Logger: logger, EventBus: bus, ConnManager: connManager,
+			DisableOutbound: true,
+		}),
+	}
+	const expectedGroup = "ipv4:44.0.0.0/24"
+	for _, peerGov := range peerGovs {
+		t.Cleanup(func() {
+			assert.NoError(t, peerGov.Stop(context.Background()))
+		})
+		require.NoError(t, peerGov.AddPeer(
+			remoteAddr.String(),
+			peergov.PeerSourceTopologyLocalRoot,
+		))
+		require.NoError(t, peerGov.Start(context.Background()))
+		n.setPeerGovernor(peerGov)
+		bus.Publish(
+			connmanager.InboundConnectionEventType,
+			event.NewEvent(
+				connmanager.InboundConnectionEventType,
+				connmanager.InboundConnectionEvent{
+					ConnectionId:         conn,
+					LocalAddr:            conn.LocalAddr,
+					RemoteAddr:           conn.RemoteAddr,
+					NormalizedRemoteAddr: connmanager.NormalizePeerAddr(remoteAddr.String()),
+				},
+			),
+		)
+		require.Eventually(t, func() bool {
+			return peerGov.DiversityGroupByConnId(conn) == expectedGroup &&
+				cfg.PeerIdentity(conn) == expectedGroup
+		}, time.Second, time.Millisecond)
+		require.NoError(t, peerGov.Stop(context.Background()))
+	}
+	n.setPeerGovernor(peerGovs[0])
+	assert.Equal(t, expectedGroup, cfg.PeerIdentity(conn))
+
+	// Live restore replaces this pointer while the retained selector remains
+	// active. Exercise the same synchronized read alongside repeated replacement.
+	start := make(chan struct{})
+	groups := make(chan string, 64)
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		<-start
+		for range 64 {
+			groups <- cfg.PeerIdentity(conn)
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		<-start
+		for i := range 64 {
+			n.setPeerGovernor(peerGovs[i%len(peerGovs)])
+		}
+	}()
+	close(start)
+	workers.Wait()
+	close(groups)
+	for got := range groups {
+		assert.Equal(t, expectedGroup, got)
+	}
+}
+
 // New() registers the chain-selection counters, so they exist for the node's
 // whole lifetime rather than only after a component that happens to touch them
 // is built. Registration must happen against the pre-wrap registerer (see
@@ -231,4 +382,138 @@ func TestNewRegistersChainSelectionMetrics(t *testing.T) {
 		),
 		string(chainselection.RollbackRegistrationRegistered),
 	)
+}
+
+// The composed selector config installs the Genesis Density Disconnector
+// callback; a reported peer is counted and put on peer governance's deny list
+// so it is not redialed straight away.
+func TestBuildChainSelectorConfigWiresGenesisDensityDisconnect(t *testing.T) {
+	t.Parallel()
+	n, registry := newMetricsTestNode(t)
+	n.peerGov = peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+	conn := newNodeTestConnId(3303)
+
+	cfg := n.buildChainSelectorConfig(2160, true, 0)
+	require.NotNil(t, cfg.OnGenesisDensityDisconnect)
+	require.False(t, n.peerGov.IsDenied(conn.RemoteAddr.String()))
+
+	cfg.OnGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
+		ConnectionId: conn,
+	})
+
+	assert.Equal(
+		t,
+		map[string]float64{"": 1},
+		counterValues(
+			t,
+			registry,
+			"dingo_chainselection_gdd_disconnects_total",
+		),
+	)
+	assert.True(t, n.peerGov.IsDenied(conn.RemoteAddr.String()))
+}
+
+func TestGenesisDensityDisconnectDuringNetworkingCoreReplacement(t *testing.T) {
+	t.Parallel()
+	n, _ := newMetricsTestNode(t)
+	outgoingGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+	currentGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	outgoingManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	currentManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	n.setPeerGovernor(outgoingGov)
+	n.connManager = outgoingManager
+	disconnect := chainselection.GenesisDensityDisconnect{
+		ConnectionId: newNodeTestConnId(3306),
+	}
+
+	n.networkingCoreMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		n.onGenesisDensityDisconnect(disconnect)
+		close(done)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"density action crossed a live networking replacement",
+	)
+	n.setPeerGovernor(currentGov)
+	n.connManager = currentManager
+	n.networkingCoreMu.Unlock()
+	testutil.RequireReceive(t, done, time.Second, "density action completion")
+
+	address := disconnect.ConnectionId.RemoteAddr.String()
+	assert.False(t, outgoingGov.IsDenied(address))
+	assert.True(t, currentGov.IsDenied(address))
+}
+
+// The disconnect log reports whether the peer was actually denied: a
+// connection ID with no remote address cannot be put on the deny list, and a
+// log that only carries the deny duration would claim a denial that did not
+// happen.
+func TestGenesisDensityDisconnectLogReportsDenial(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	n, _ := newMetricsTestNode(t)
+	n.config.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	n.peerGov = peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+
+	withAddr := newNodeTestConnId(3304)
+	n.onGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
+		ConnectionId: withAddr,
+	})
+	require.Contains(t, logs.String(), "denied=true")
+	require.True(t, n.peerGov.IsDenied(withAddr.RemoteAddr.String()))
+
+	logs.Reset()
+	noAddr := newNodeTestConnId(3305)
+	noAddr.RemoteAddr = nil
+	n.onGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
+		ConnectionId: noAddr,
+	})
+	require.Contains(t, logs.String(), "denied=false")
+}
+
+// Without k and a positive f the node keeps the selector's long-standing
+// 6480-slot window for the exit horizon but must not run the Genesis Density
+// Disconnector over it.
+func TestChainSelectorGenesisWindow(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		configured uint64
+		k          uint64
+		f          *big.Rat
+		window     uint64
+		gdd        bool
+	}{
+		{"configured", 500, 0, nil, 500, true},
+		{"from params", 0, 2160, big.NewRat(1, 20), 129600, true},
+		{
+			"no active slot coefficient",
+			0, 50000, nil,
+			chainselection.DefaultGenesisWindowSlots, false,
+		},
+		{
+			"no security param",
+			0, 0, big.NewRat(1, 20),
+			chainselection.DefaultGenesisWindowSlots, false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			window, gdd := chainSelectorGenesisWindow(
+				tc.configured, tc.k, tc.f,
+			)
+			assert.Equal(t, tc.window, window)
+			assert.Equal(t, tc.gdd, gdd)
+		})
+	}
 }

@@ -16,6 +16,7 @@ package database_test
 
 import (
 	"bytes"
+	"context"
 	"math"
 	"testing"
 
@@ -48,7 +49,7 @@ func anchoredBlockCountFixture(
 	meta := db.Metadata()
 	require.NoError(t, meta.SetSyncState("mithril_ledger_slot", "150", nil))
 	for _, slot := range []uint64{160, 170} {
-		require.NoError(t, db.UpdatePoolOpCertSequence(pool, slot, slot, nil))
+		require.NoError(t, db.UpdatePoolOpCertSequence(context.Background(), pool, slot, slot, nil))
 	}
 	if withImported {
 		for _, imported := range []struct{ epoch, blocks uint64 }{

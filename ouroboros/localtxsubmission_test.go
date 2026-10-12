@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/mempool"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -103,6 +104,7 @@ func TestLocalTxSubmissionInfrastructureErrorsStayGeneric(t *testing.T) {
 		mempool.ErrNilValidator,
 		fmt.Errorf("wrapped: %w", mempool.ErrMempoolStopped),
 		&mempool.MempoolFullError{CurrentSize: 10, TxSize: 2, Capacity: 10},
+		fmt.Errorf("validate transaction: %w", mempool.ErrPendingStateMoved),
 	} {
 		require.True(t, isLocalTxSubmissionInfrastructureError(err))
 		rejectErr := localTxSubmissionRejectReason(gledger.EraIdConway, err)
@@ -403,7 +405,7 @@ func TestLocalTxSubmissionServer_ConwayRejectThenAccept(t *testing.T) {
 	peer.send(t, olocaltxsubmission.ProtocolId,
 		olocaltxsubmission.NewMsgSubmitTx(gledger.EraIdConway, []byte{0x80}),
 	)
-	first := peer.readResponse(t, 2*time.Second)
+	first := peer.readResponse(t, testutil.AsyncWait)
 	require.Equal(t, olocaltxsubmission.ProtocolId, first.ProtocolId&0x7fff)
 	var firstItems []cbor.RawMessage
 	_, err := cbor.Decode(first.Payload, &firstItems)
@@ -422,7 +424,7 @@ func TestLocalTxSubmissionServer_ConwayRejectThenAccept(t *testing.T) {
 	peer.send(t, olocaltxsubmission.ProtocolId,
 		olocaltxsubmission.NewMsgSubmitTx(gledger.EraIdConway, []byte{0x80}),
 	)
-	second := peer.readResponse(t, 2*time.Second)
+	second := peer.readResponse(t, testutil.AsyncWait)
 	var secondItems []cbor.RawMessage
 	_, err = cbor.Decode(second.Payload, &secondItems)
 	require.NoError(t, err)
@@ -455,7 +457,7 @@ func TestLocalTxSubmissionServer_DijkstraRejectThenAccept(t *testing.T) {
 	peer.send(t, olocaltxsubmission.ProtocolId,
 		olocaltxsubmission.NewMsgSubmitTx(gledger.EraIdDijkstra, []byte{0x80}),
 	)
-	first := peer.readResponse(t, 2*time.Second)
+	first := peer.readResponse(t, testutil.AsyncWait)
 	var firstItems []cbor.RawMessage
 	_, err := cbor.Decode(first.Payload, &firstItems)
 	require.NoError(t, err)
@@ -473,7 +475,7 @@ func TestLocalTxSubmissionServer_DijkstraRejectThenAccept(t *testing.T) {
 	peer.send(t, olocaltxsubmission.ProtocolId,
 		olocaltxsubmission.NewMsgSubmitTx(gledger.EraIdDijkstra, []byte{0x80}),
 	)
-	second := peer.readResponse(t, 2*time.Second)
+	second := peer.readResponse(t, testutil.AsyncWait)
 	var secondItems []cbor.RawMessage
 	_, err = cbor.Decode(second.Payload, &secondItems)
 	require.NoError(t, err)

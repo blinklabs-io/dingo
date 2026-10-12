@@ -80,7 +80,7 @@ func (ls *LedgerState) chainsyncPeerBehindOnOurChain(
 	if !onChain {
 		return 0, false
 	}
-	onChain, err = ls.primaryChainContainsPoint(e.Point)
+	onChain, err = ls.primaryChainContainsPoint(ls.lifecycleContext(), e.Point)
 	if err != nil {
 		ls.logChainsyncBehindLookupError(e, "rollback point", err)
 		return 0, false
@@ -109,7 +109,7 @@ func (ls *LedgerState) primaryChainBlockAtPoint(
 	if ls.db == nil {
 		return models.Block{}, false, nil
 	}
-	block, err := database.BlockByPoint(ls.db, point)
+	block, err := database.BlockByPoint(ls.lifecycleContext(), ls.db, point)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return models.Block{}, false, nil

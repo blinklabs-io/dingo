@@ -83,7 +83,7 @@ type sigmaAuditEpochProvider struct {
 
 func (p *sigmaAuditEpochProvider) CurrentEpoch() uint64 { return sigmaAuditEpoch }
 
-func (p *sigmaAuditEpochProvider) EpochNonce(uint64) []byte {
+func (p *sigmaAuditEpochProvider) EpochNonce(context.Context, uint64) []byte {
 	return coeffTestNonce
 }
 
@@ -127,7 +127,7 @@ func newSigmaAuditElection(
 ) *Election {
 	return NewElection(
 		coeffTestPoolID,
-		coeffTestVRFSeed,
+		vrfSeedSource(coeffTestVRFSeed),
 		stake,
 		epochs,
 		nil,
@@ -163,6 +163,47 @@ func TestComputeScheduleDrawsSigmaInputsFromSameSnapshotEpoch(t *testing.T) {
 	require.Equal(t, []uint64{wantSnapshotEpoch}, stake.totalStakeEpochs)
 	require.Equal(t, sigmaAuditPoolStake, schedule.PoolStake)
 	require.Equal(t, sigmaAuditTotalStake, schedule.TotalStake)
+}
+
+// TestComputeScheduleWipesTheSeedItTook proves the election holds the VRF seed
+// only for the duration of a schedule computation: every copy the seed source
+// handed out is zeroed once the computation returns, and the election keeps
+// no copy of its own to scan for.
+func TestComputeScheduleWipesTheSeedItTook(t *testing.T) {
+	t.Parallel()
+
+	var issued [][]byte
+	source := func() []byte {
+		seed := append([]byte(nil), coeffTestVRFSeed...)
+		issued = append(issued, seed)
+		return seed
+	}
+	election := NewElection(
+		coeffTestPoolID,
+		source,
+		&recordingStakeProvider{
+			poolStake:  sigmaAuditPoolStake,
+			totalStake: sigmaAuditTotalStake,
+		},
+		&sigmaAuditEpochProvider{floatCoeff: 0.05},
+		nil,
+		slog.New(slog.DiscardHandler),
+	)
+	require.Empty(t, issued, "construction must not take a seed")
+
+	schedule, err := election.computeSchedule(
+		context.Background(), sigmaAuditEpoch,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, schedule)
+
+	require.Len(t, issued, 1)
+	require.Equal(
+		t,
+		make([]byte, len(coeffTestVRFSeed)),
+		issued[0],
+		"the seed copy must be wiped after the schedule is computed",
+	)
 }
 
 // TestComputeSchedulePrefersExactGenesisActiveSlotCoeff proves the election
@@ -459,7 +500,7 @@ func (m *mockEpochProvider) CurrentEpoch() uint64 {
 	return m.currentEpoch.Load()
 }
 
-func (m *mockEpochProvider) EpochNonce(epoch uint64) []byte {
+func (m *mockEpochProvider) EpochNonce(_ context.Context, epoch uint64) []byte {
 	m.epochNonceMu.RLock()
 	nonce, ok := m.epochNonces[epoch]
 	m.epochNonceMu.RUnlock()
@@ -597,10 +638,16 @@ func waitForSchedule(
 	return schedule
 }
 
+// vrfSeedSource serves a private copy of seed per call, as the node's
+// credentials do, so a test can tell whether the election wipes what it took.
+func vrfSeedSource(seed []byte) func() []byte {
+	return func() []byte { return append([]byte(nil), seed...) }
+}
+
 func TestNewElection(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
-	vrfKey := electionTestVRFSeed
+	vrfKey := vrfSeedSource(electionTestVRFSeed)
 
 	stakeProvider := newMockStakeProvider()
 	epochProvider := newMockEpochProvider()
@@ -618,7 +665,6 @@ func TestNewElection(t *testing.T) {
 
 	require.NotNil(t, election)
 	assert.Equal(t, poolId, election.poolId)
-	assert.Equal(t, vrfKey, election.poolVrfSkey)
 	assert.NotNil(t, election.logger)
 }
 
@@ -634,7 +680,7 @@ func TestElectionStartStop(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -680,7 +726,7 @@ func TestElectionStopPreventsStaleMonitorFromStoppingALaterStart(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -735,7 +781,7 @@ func TestElectionStopDoesNotDeadlockOnMonitorSelectRace(t *testing.T) {
 		eventBus := event.NewEventBus(nil, nil)
 		election := NewElection(
 			poolId,
-			electionTestVRFSeed,
+			vrfSeedSource(electionTestVRFSeed),
 			stakeProvider,
 			epochProvider,
 			eventBus,
@@ -810,7 +856,7 @@ func TestElectionStopWaitsForInFlightScheduleComputation(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		blocking,
 		epochProvider,
 		eventBus,
@@ -862,7 +908,7 @@ func TestElectionScheduleEarlyEpochs(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -913,7 +959,7 @@ func TestElectionUsesEpochSlotRangeForSchedule(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -953,7 +999,7 @@ func TestElectionLoadsPersistedSchedule(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1001,7 +1047,7 @@ func TestElectionIgnoresStalePersistedSchedule(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1041,7 +1087,7 @@ func TestElectionPersistsComputedSchedule(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1089,7 +1135,7 @@ func TestElectionPrecomputesNextEpochAtStartupWhenNonceReady(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1135,7 +1181,7 @@ func TestElectionZeroPoolStake(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1174,7 +1220,7 @@ func TestElectionShouldProduceBlock(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1213,7 +1259,7 @@ func TestElectionNextLeaderSlot(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1275,7 +1321,7 @@ func TestElectionShouldProduceBlock_UsesEpochForSlot(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1317,7 +1363,7 @@ func TestElectionShouldProduceBlock_ReturnsFalseOnEpochResolveError(
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		newMockStakeProvider(),
 		epochProvider,
 		eventBus,
@@ -1351,7 +1397,7 @@ func TestElectionNextLeaderSlot_UsesEpochForSlot(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		newMockStakeProvider(),
 		epochProvider,
 		eventBus,
@@ -1392,7 +1438,7 @@ func TestElectionEpochTransition(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1463,7 +1509,7 @@ func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1520,7 +1566,7 @@ func TestElectionRollbackKeepsCurrentSchedule(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1574,7 +1620,7 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1629,7 +1675,7 @@ func TestElectionConcurrentAccess(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1682,7 +1728,7 @@ func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
 	defer release.Do(func() { close(blocked.release) })
 	e := NewElection(
 		pool,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		blocked,
 		newMockEpochProvider(),
 		bus,
@@ -1818,7 +1864,7 @@ func TestComputeScheduleDeclinesUnresolvableConsensusMode(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1833,4 +1879,20 @@ func TestComputeScheduleDeclinesUnresolvableConsensusMode(t *testing.T) {
 	require.ErrorContains(t, err, "era shape unavailable")
 	require.Nil(t, schedule,
 		"no schedule may be produced from an unresolved consensus mode")
+}
+
+func TestComputeScheduleRejectsMissingVRFSeedProvider(t *testing.T) {
+	t.Parallel()
+	stake := &recordingStakeProvider{
+		poolStake:  sigmaAuditPoolStake,
+		totalStake: sigmaAuditTotalStake,
+	}
+	election := newSigmaAuditElection(
+		stake,
+		&sigmaAuditEpochProvider{floatCoeff: 0.05},
+		slog.New(slog.DiscardHandler),
+	)
+	election.vrfSeed = nil
+	_, err := election.computeSchedule(context.Background(), sigmaAuditEpoch)
+	require.ErrorContains(t, err, "pool VRF seed is unavailable")
 }

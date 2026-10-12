@@ -146,15 +146,15 @@ func peerCertContextMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// errAnonymousDatabaseCall is returned for every DatabaseService call whose
+// errAnonymousDatabaseCall is returned for every authenticated-service call whose
 // connection presented no verified client certificate.
 var errAnonymousDatabaseCall = errors.New(
-	"DatabaseService RPCs require a verified mTLS client certificate",
+	"DatabaseService and LifecycleService RPCs require a verified mTLS client certificate",
 )
 
 var errOperatorPermissionDenied = errors.New(
 	"the authenticated client certificate is not authorized for destructive " +
-		"DatabaseService operations",
+		"DatabaseService and LifecycleService operations",
 )
 
 func normalizeOperatorCertificateFingerprints(
@@ -180,7 +180,8 @@ func normalizeOperatorCertificateFingerprints(
 	return ret, nil
 }
 
-// newOperatorAuthInterceptor enforces DatabaseService's two-stage policy:
+// newOperatorAuthInterceptor enforces the two-stage policy shared by
+// DatabaseService and LifecycleService:
 // every call requires a verified client certificate, and every non-read-only
 // call additionally requires its fingerprint in operatorFingerprints.
 // Destructive calls are logged with the caller's certificate identity so an
@@ -189,10 +190,8 @@ func normalizeOperatorCertificateFingerprints(
 //
 // Implements the full connect.Interceptor interface — including
 // WrapStreamingHandler/WrapStreamingClient, which are no-ops for every
-// procedure in destructive today (none of them stream) — so the same
-// interceptor and destructive-procedure-set pattern can be reused for
-// a proposed LifecycleService, which explicitly calls for the same
-// "no anonymous calls" requirement and may include streaming RPCs.
+// procedure in either service streams — so one interceptor, parametrized by
+// each service's procedure sets, serves both.
 func newOperatorAuthInterceptor(
 	logger *slog.Logger,
 	destructive map[string]bool,
@@ -231,7 +230,7 @@ func (i *operatorAuthInterceptor) authorize(
 	id := peerIdentityFromContext(ctx)
 	if !id.Verified {
 		i.logger.Warn(
-			"rejected anonymous call to DatabaseService RPC",
+			"rejected anonymous call to bark RPC",
 			"component", "bark",
 			"procedure", procedure,
 		)
@@ -245,8 +244,8 @@ func (i *operatorAuthInterceptor) authorize(
 	}
 	if !i.destructive[procedure] {
 		i.logger.Warn(
-			"unclassified DatabaseService procedure treated as destructive (fail closed) — "+
-				"add it to destructiveDatabaseProcedures or readOnlyDatabaseProcedures in bark/auth.go",
+			"unclassified bark procedure treated as destructive (fail closed) — "+
+				"add it to its service's destructive or read-only procedure set",
 			"component",
 			"bark",
 			"procedure",
@@ -255,7 +254,7 @@ func (i *operatorAuthInterceptor) authorize(
 	}
 	if _, ok := i.operatorFingerprints[id.Fingerprint]; !ok {
 		i.logger.Warn(
-			"rejected destructive DatabaseService RPC from non-operator identity",
+			"rejected destructive bark RPC from non-operator identity",
 			"component",
 			"bark",
 			"procedure",
@@ -271,7 +270,7 @@ func (i *operatorAuthInterceptor) authorize(
 		)
 	}
 	i.logger.Info(
-		"destructive DatabaseService RPC authenticated",
+		"destructive bark RPC authenticated",
 		"component", "bark",
 		"procedure", procedure,
 		"operator_cn", id.CommonName,
@@ -281,8 +280,8 @@ func (i *operatorAuthInterceptor) authorize(
 }
 
 // WrapUnary runs authorize against the incoming request's procedure before
-// calling the real handler — this is where every DatabaseService unary RPC
-// (all six destructive ones included) actually gets gated.
+// calling the real handler — this is where every unary RPC of a service
+// using this interceptor actually gets gated.
 func (i *operatorAuthInterceptor) WrapUnary(
 	next connect.UnaryFunc,
 ) connect.UnaryFunc {
@@ -305,9 +304,8 @@ func (i *operatorAuthInterceptor) WrapStreamingClient(
 
 // WrapStreamingHandler is WrapUnary's server-streaming counterpart, for
 // completeness: no procedure in destructiveDatabaseProcedures streams
-// today, but a future addition (or a proposed LifecycleService,
-// reusing this same interceptor) might, and this ensures authorize runs
-// for that case too rather than silently skipping it.
+// today, but a future addition might, and this ensures authorize runs for
+// that case too rather than silently skipping it.
 func (i *operatorAuthInterceptor) WrapStreamingHandler(
 	next connect.StreamingHandlerFunc,
 ) connect.StreamingHandlerFunc {

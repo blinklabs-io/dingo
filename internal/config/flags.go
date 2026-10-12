@@ -124,7 +124,7 @@ var flagSpecs = []flagSpec{
 		"ImmutableDbPath",
 		"immutable-db-path",
 		"",
-		"path to ImmutableDB for load mode",
+		"path or http(s) URL of the ImmutableDB for load mode",
 	),
 	boolFlag("IntersectTip", "intersect-tip", "start from current tip"),
 	boolFlag(
@@ -146,6 +146,23 @@ var flagSpecs = []flagSpec{
 		"Tracing",
 		"tracing",
 		"enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)",
+	),
+	stringFlag(
+		"TracingEndpoint",
+		"tracing-endpoint",
+		"",
+		"OTLP HTTP collector URL for spans; setting it enables tracing (default: OTEL_EXPORTER_OTLP_* env vars)",
+	),
+	stringFlag(
+		"TracingServiceName",
+		"tracing-service-name",
+		"",
+		"service.name resource attribute on exported spans",
+	),
+	float64Flag(
+		"TracingSampleRatio",
+		"tracing-sample-ratio",
+		"fraction of new traces sampled, from 0 to 1",
 	),
 	boolFlag(
 		"TracingStdout",
@@ -178,6 +195,12 @@ var flagSpecs = []flagSpec{
 		"private bind address",
 	),
 	uintFlag("PrivatePort", "private-port", "private/NtC port"),
+	stringFlag(
+		"MetricsBindAddr",
+		"metrics-bind-addr",
+		"",
+		"metrics bind address (wildcard exposure requires an explicit override)",
+	),
 	uintFlag("MetricsPort", "metrics-port", "metrics port"),
 	stringFlag(
 		"DebugBindAddr",
@@ -422,7 +445,7 @@ var flagSpecs = []flagSpec{
 	stringSliceFlag(
 		"BarkBlockDownloadHosts",
 		"bark-block-download-hosts",
-		"allowed HTTPS hostnames for Bark block downloads",
+		"allowed HTTPS origins for Bark block downloads (ports matched exactly)",
 	),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
 	stringFlag(
@@ -437,10 +460,25 @@ var flagSpecs = []flagSpec{
 		"",
 		"path to a PEM CA bundle; client certs verified against it authenticate every Bark DatabaseService RPC (required whenever the database lifecycle service is enabled)",
 	),
+	intFlag(
+		"BarkArchiveMaxConcurrentFetches",
+		"bark-archive-max-concurrent-fetches",
+		"maximum concurrent Bark ArchiveService FetchBlock requests; requests over the limit are refused (0 = default of 16)",
+	),
 	stringSliceFlag(
 		"BarkOperatorCertificateFingerprints",
 		"bark-operator-certificate-fingerprints",
 		"SHA-256 client certificate fingerprints authorized for destructive Bark DatabaseService RPCs",
+	),
+	boolFlag(
+		"BarkLifecycleEnabled",
+		"bark-lifecycle-enabled",
+		"enable Bark remote Stop, Restart, and GetStatus RPCs",
+	),
+	stringSliceFlag(
+		"BarkLifecycleOperatorCertificateFingerprints",
+		"bark-lifecycle-operator-certificate-fingerprints",
+		"SHA-256 client certificate fingerprints authorized for Bark Stop and Restart RPCs",
 	),
 
 	// History expiry
@@ -743,6 +781,23 @@ var flagSpecs = []flagSpec{
 		"block-pipeline-validate-enabled",
 		"also VRF/KES-validate blocks in the block-pipeline replay loop with a parallel worker pool (requires block-pipeline-enabled; default off)",
 	),
+	boolFlag(
+		"LedgerPrefetchAheadEnabled",
+		"ledger-prefetch-ahead-enabled",
+		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies, for validated blocks only (not consensus-affecting; default off)",
+	),
+
+	boolFlag(
+		"LedgerApplyRowBatchingEnabled",
+		"ledger-apply-row-batching-enabled",
+		"in core storage mode, write the deltas of blocks that are not validated with multi-row batched inserts instead of per-row statements, as API mode always does (not consensus-affecting; default off)",
+	),
+
+	boolFlag(
+		"BlockfetchLowWatermarkEnabled",
+		"blockfetch-low-watermark-enabled",
+		"start blockfetch once one range of headers is queued while far from the peer tip, instead of waiting for four ranges; the header queue capacity is unchanged (not consensus-affecting; default off)",
+	),
 
 	// Block production
 	boolFlag("BlockProducer", "block-producer", "enable block production mode"),
@@ -835,6 +890,11 @@ var flagSpecs = []flagSpec{
 		"ValidateForgedBlock",
 		"validate-forged-block",
 		"validate forged blocks before adoption and diffusion (header crypto, body hash, per-tx ledger rules)",
+	),
+	boolFlag(
+		"PlannerStatsRefreshEnabled",
+		"planner-stats-refresh-enabled",
+		"keep SQLite planner statistics current with PRAGMA optimize at startup and after each epoch rollover",
 	),
 
 	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)
@@ -947,6 +1007,83 @@ var flagSpecs = []flagSpec{
 		"allow plain-HTTP Mithril aggregator/artifact URLs (local dev/test only)",
 	),
 
+	uintFlag(
+		"Mithril.Server.Port",
+		"mithril-server-port",
+		"port for the Mithril snapshot artifact server",
+	),
+	stringFlag(
+		"Mithril.Server.PublicBaseURL",
+		"mithril-server-public-base-url",
+		"",
+		"public HTTPS origin used in snapshot locations (HTTP only on loopback)",
+	),
+	stringFlag(
+		"Mithril.Server.ArtifactStore",
+		"mithril-server-artifact-store",
+		"",
+		"Mithril artifact store: directory, s3://bucket/prefix or gcs://bucket/prefix",
+	),
+	stringFlag(
+		"Mithril.Server.RedirectBaseURL",
+		"mithril-server-redirect-base-url",
+		"",
+		"redirect Mithril archive requests to this base URL instead of streaming them",
+	),
+	intFlag(
+		"Mithril.Server.KeepSnapshots",
+		"mithril-server-keep-snapshots",
+		"newest Mithril snapshots to keep after producing one (0 keeps all)",
+	),
+	stringFlag(
+		"Mithril.Server.AncillarySigningKeyFile",
+		"mithril-server-ancillary-signing-key-file",
+		"",
+		"path to the Ed25519 key signing produced ancillary manifests",
+	),
+	boolFlag(
+		"Mithril.Server.TLSEnabled",
+		"mithril-server-tls-enabled",
+		"serve the Mithril artifact server over HTTPS with the shared TLS certificate",
+	),
+	boolFlag(
+		"Mithril.Server.Aggregator.Enabled",
+		"mithril-aggregator-enabled",
+		"collect signer registrations and signatures and certify stored snapshots",
+	),
+	uint64Flag(
+		"Mithril.Server.Aggregator.Epoch",
+		"mithril-aggregator-epoch",
+		"epoch Mithril signers register for",
+	),
+	uint64Flag(
+		"Mithril.Server.Aggregator.K",
+		"mithril-aggregator-k",
+		"Mithril STM quorum of lottery indices",
+	),
+	uint64Flag(
+		"Mithril.Server.Aggregator.M",
+		"mithril-aggregator-m",
+		"Mithril STM lottery size",
+	),
+	float64Flag(
+		"Mithril.Server.Aggregator.PhiF",
+		"mithril-aggregator-phi-f",
+		"Mithril STM lottery win probability",
+	),
+	stringFlag(
+		"Mithril.Server.Aggregator.GenesisSigningKeyFile",
+		"mithril-aggregator-genesis-signing-key-file",
+		"",
+		"file holding the Ed25519 Mithril genesis signing key",
+	),
+	stringFlag(
+		"Mithril.Server.Aggregator.OperatorTokenFile",
+		"mithril-aggregator-operator-token-file",
+		"",
+		"file holding the bearer token for aggregator signer registration",
+	),
+
 	// Database lifecycle (snapshot/restore/truncate)
 	boolFlag(
 		"DatabaseLifecycle.SnapshotEnabled",
@@ -980,6 +1117,17 @@ var flagSpecs = []flagSpec{
 		"DatabaseLifecycle.SnapshotEveryNEpochs",
 		"db-snapshot-every-n-epochs",
 		"capture an automatic snapshot every N epoch boundaries",
+	),
+	stringFlag(
+		"DatabaseLifecycle.SnapshotTrustKeyFile",
+		"db-snapshot-trust-key-file",
+		"",
+		"file holding the shared secret that authenticates snapshot manifests; snapshots are signed with it and restores require it to verify",
+	),
+	durationFlag(
+		"DatabaseLifecycle.SnapshotMaxCommitPause",
+		"db-snapshot-max-commit-pause",
+		"cancel a snapshot still holding the commit barrier after this long (default 30s; 0 = no bound)",
 	),
 }
 
@@ -1300,6 +1448,9 @@ func uint32Flag(field, name, help string) flagSpec {
 				)
 			}
 			targetValue(cfg, field).SetUint(uint64(v))
+			if field == "DMQ.NetworkMagic" {
+				cfg.DMQ.networkMagicSet = true
+			}
 			return nil
 		},
 	}

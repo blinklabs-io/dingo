@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"strconv"
@@ -48,14 +49,15 @@ import (
 // has no producer on the local applied chain.
 //
 // Leios caveat. "A block was fetched, so its transactions are in hand" is true
-// of every pre-Leios block and false on the Leios cert-driven path, where a
-// certifying ranking block's body is empty: its transactions are the certified
-// endorser block's, which arrives over leios-fetch as a separate artifact and
-// is applied by LedgerState.applyEndorserBlock at ledger-apply time. The audit
-// runs at blockfetch time, so with the ledger pipeline behind the blockfetch
-// queue — the normal condition during an endorser-block backlog, and precisely
-// the condition a rollback arms the audit in — neither the UTxO nor the
-// transaction-metadata fallback can see an endorser-resident producer either.
+// of every pre-Leios block and false on the Leios cert-driven path: the
+// transactions a certifying ranking block certifies are not in its body but in
+// the certified endorser block, which arrives over leios-fetch as a separate
+// artifact and is applied by LedgerState.applyEndorserBlock at ledger-apply
+// time. The audit runs at blockfetch time, so with the ledger pipeline behind
+// the blockfetch queue — the normal condition during an endorser-block
+// backlog, and precisely the condition a rollback arms the audit in — neither
+// the UTxO nor the transaction-metadata fallback can see an endorser-resident
+// producer either.
 // The window therefore resolves each audited block's endorser block the same
 // way apply does (leiosEndorserBlockForApply plus EndorserBlockProvider) and
 // records its transaction ids as producers. When that endorser block has not
@@ -459,7 +461,7 @@ func (w *continuationAuditWindow) producersAtOrBelow(
 // instead of publishing. The prior window's producers may still be on the
 // chain, and a window published without them reports a later spend of their
 // outputs as a missing producer at ERROR on a node where nothing is wrong.
-func (ls *LedgerState) armContinuationAudit(
+func (ls *LedgerState) armContinuationAudit(ctx context.Context,
 	point ocommon.Point,
 	reason string,
 ) {
@@ -484,7 +486,7 @@ func (ls *LedgerState) armContinuationAudit(
 	ls.continuationAuditMutex.Lock()
 	defer ls.continuationAuditMutex.Unlock()
 	if prior := ls.continuationAudit.Load(); prior != nil {
-		if err := ls.carryForwardWindow(prior, next, point); err != nil {
+		if err := ls.carryForwardWindow(ctx, prior, next, point); err != nil {
 			ls.disarmContinuationAuditUnverified(prior.forkPoint, err)
 			return
 		}
@@ -545,13 +547,13 @@ func (ls *LedgerState) disarmContinuationAuditUnverified(
 
 // continuationAuditOnPrimaryChain is the primary-chain membership read every
 // audit decision about a producer rests on. See primaryChainContainsPoint.
-func (ls *LedgerState) continuationAuditOnPrimaryChain(
+func (ls *LedgerState) continuationAuditOnPrimaryChain(ctx context.Context,
 	point ocommon.Point,
 ) (bool, error) {
 	if ls.continuationAuditContainsPoint != nil {
 		return ls.continuationAuditContainsPoint(point)
 	}
-	return ls.primaryChainContainsPoint(point)
+	return ls.primaryChainContainsPoint(ctx, point)
 }
 
 // carryForwardWindow moves what prior knows about blocks this rollback did not
@@ -585,12 +587,12 @@ func (ls *LedgerState) continuationAuditOnPrimaryChain(
 //
 // It returns the membership read's error, having carried nothing. next is then
 // not fit to publish: see armContinuationAudit.
-func (ls *LedgerState) carryForwardWindow(
+func (ls *LedgerState) carryForwardWindow(ctx context.Context,
 	prior *continuationAuditWindow,
 	next *continuationAuditWindow,
 	point ocommon.Point,
 ) error {
-	onChain, err := ls.continuationAuditOnPrimaryChain(prior.forkPoint)
+	onChain, err := ls.continuationAuditOnPrimaryChain(ctx, prior.forkPoint)
 	if err != nil {
 		return err
 	}
@@ -805,7 +807,7 @@ func (ls *LedgerState) recordLateProducers(
 	window *continuationAuditWindow,
 	e BlockfetchEvent,
 ) {
-	onChain, err := ls.continuationAuditOnPrimaryChain(e.Point)
+	onChain, err := ls.continuationAuditOnPrimaryChain(ls.lifecycleContext(), e.Point)
 	if err != nil {
 		ls.continuationAuditMutex.Lock()
 		defer ls.continuationAuditMutex.Unlock()
@@ -876,7 +878,7 @@ func (ls *LedgerState) commitContinuationAuditBody(
 		return false
 	}
 	if published != window {
-		onChain, err := ls.continuationAuditOnPrimaryChain(e.Point)
+		onChain, err := ls.continuationAuditOnPrimaryChain(ls.lifecycleContext(), e.Point)
 		switch {
 		case err != nil:
 			ls.disarmContinuationAuditUnverified(e.Point, err)
@@ -923,14 +925,23 @@ func (ls *LedgerState) continuationInputHasProducer(
 	if window.hasProducer(string(producerId)) {
 		return true, nil
 	}
-	utxo, err := ls.db.UtxoByRef(producerId, input.Index(), nil)
+	utxo, err := ls.db.UtxoByRef(
+		ls.lifecycleContext(),
+		producerId,
+		input.Index(),
+		nil,
+	)
 	if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
 		return false, err
 	}
 	if utxo != nil {
 		return true, nil
 	}
-	producerTx, err := ls.db.GetTransactionByHash(producerId, nil)
+	producerTx, err := ls.db.GetTransactionByHash(
+		ls.lifecycleContext(),
+		producerId,
+		nil,
+	)
 	if err != nil {
 		return false, err
 	}
@@ -1019,39 +1030,20 @@ func (w *continuationAuditWindow) recordProducers(
 // block an audited ranking block applies, so it can be turned into producers
 // later if any input needs it.
 //
-// The reference is selected exactly as the apply path selects it: the block's
-// own announcement when LeiosApplyEndorserBlockTxs is set (the CIP path,
-// bound to the block's own slot), the parent's announcement otherwise (the
-// Musashi cert-driven path). The cert-driven case retains only the parent hash;
-// leiosCertifiedAnnouncementFromParent — the same helper
-// leiosEndorserBlockForApply uses — turns it into a reference when the time
-// comes, so the two cannot select different endorser blocks.
+// The reference is selected exactly as the apply path selects it: only a
+// certifying block applies an endorser block, the one its parent announced.
+// Only the parent hash is retained; leiosCertifiedAnnouncementFromParent — the
+// same helper leiosEndorserBlockForApply uses — turns it into a reference when
+// the time comes, so the two cannot select different endorser blocks.
 //
 // Non-Leios chains are unaffected: no endorser-block provider is configured,
-// and a header that neither announces nor certifies an endorser block queues
-// nothing.
+// and a header that does not certify an endorser block queues nothing.
 func (ls *LedgerState) continuationAuditEndorserRefFor(
 	e BlockfetchEvent,
 ) (continuationAuditEndorserRef, bool) {
 	var ref continuationAuditEndorserRef
 	if ls.config.EndorserBlockProvider == nil || e.Block == nil {
 		return ref, false
-	}
-	if ls.config.LeiosApplyEndorserBlockTxs {
-		referencer, ok := e.Block.Header().(leiosEndorserBlockReferencer)
-		if !ok {
-			return ref, false
-		}
-		ebHash, _, announced := referencer.LeiosAnnouncement()
-		if !announced {
-			return ref, false
-		}
-		return continuationAuditEndorserRef{
-			ebHash:    ebHash,
-			ebSlot:    e.Block.SlotNumber(),
-			resolved:  true,
-			blockSlot: e.Point.Slot,
-		}, true
 	}
 	certifier, ok := e.Block.Header().(leiosEndorserBlockCertifier)
 	if !ok {
@@ -1167,7 +1159,8 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 		*budget--
 		window.endorserResolutions++
 		if !ref.resolved {
-			ebHash, ebSlot, _, announced, err := ls.leiosCertifiedAnnouncementFromParent(
+			ebHash, ebSlot, announced, err := ls.leiosCertifiedAnnouncementFromParent(
+				ls.lifecycleContext(),
 				ref.certParentHash,
 			)
 			switch {

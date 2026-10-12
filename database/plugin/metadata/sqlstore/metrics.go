@@ -92,8 +92,8 @@ func newSQLOperationsCounter(
 // it at SetMaxOpenConns(1) (see sqlite.openSQLStore; postgres/mysql size
 // theirs the same way) because the underlying store allows only one writer
 // regardless of connection count, so any second concurrent write path --
-// for example ledger block-apply racing persistDeferredHeaderValidation's
-// per-block durability write -- can only ever queue behind it. rate() of
+// for example ledger block-apply racing a nil-txn sync_state write --
+// can only ever queue behind it. rate() of
 // pool="write"'s wait_duration_seconds_total over a window is the average
 // number of callers waiting concurrently, not a value capped at 1.0: a
 // sustained value near 1.0 already means a caller is waiting essentially

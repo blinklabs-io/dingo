@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/binary"
 	"math/big"
 	"sort"
@@ -100,10 +101,11 @@ func TestDeferredStakeInputRecoveryPreservesRowsWhenReconstructionIsEmpty(
 		meta, nil, rewardSnapshotEpoch, 100,
 	))
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
 		return ls.ensureRewardStakeInputsReady(txn, rewardSnapshotEpoch)
 	})
+	require.ErrorIs(t, err, errRewardStakeInputsUnrecoverable)
 	require.ErrorContains(t, err, "returned no rows")
 
 	inputs, err := meta.GetRewardStakeInputs(rewardSnapshotEpoch, nil)
@@ -113,6 +115,40 @@ func TestDeferredStakeInputRecoveryPreservesRowsWhenReconstructionIsEmpty(
 	pending, err := loadRewardStakeInputsPending(meta, nil)
 	require.NoError(t, err)
 	require.Len(t, pending.Entries, 1, "the snapshot must remain marked incomplete")
+}
+
+func TestApplyStakeRewardsHaltsWhenPendingInputsCannotBeReconstructed(
+	t *testing.T,
+) {
+	t.Parallel()
+	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 1, 1, 7)
+	meta := db.Metadata()
+	const rewardSnapshotEpoch = uint64(1)
+	require.NoError(t, meta.DeleteRewardInputsForEpoch(rewardSnapshotEpoch, nil))
+	require.NoError(t, markRewardStakeInputsPending(
+		meta, nil, rewardSnapshotEpoch, 100,
+	))
+
+	var fatalErr error
+	ls.config.FatalErrorFunc = func(err error) {
+		fatalErr = err
+	}
+	txn := db.Transaction(context.Background(), true)
+	err := txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(
+			context.Background(),
+			txn, survivalNewEpoch, survivalBoundarySlot,
+		)
+	})
+	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+	require.ErrorIs(t, err, errHaltLedgerPipeline)
+	require.ErrorIs(t, fatalErr, errRequiredStakeRewardBasisUnavailable)
+	require.ErrorIs(t, fatalErr, errHaltLedgerPipeline)
+
+	pending, err := loadRewardStakeInputsPending(meta, nil)
+	require.NoError(t, err)
+	require.Len(t, pending.Entries, 1,
+		"the unrecoverable snapshot must remain marked incomplete")
 }
 
 // seedMultiPoolRewardInputs writes seedMultiPoolRewardPrecomputeFixture's
@@ -172,11 +208,23 @@ func seedMultiPoolRewardInputs(
 		rewardAccount := chunkedFixtureCredential(0x50, uint64(p)+1)
 		var poolID lcommon.PoolKeyHash
 		copy(poolID[:], poolKey)
-		require.NoError(t, db.UpdatePoolOpCertSequence(poolID, 1, 140, nil))
-		require.NoError(t, db.CreateAccount(nil, &models.Account{
-			StakingKey: rewardAccount,
-			Active:     true,
-		}))
+		require.NoError(
+			t,
+			db.UpdatePoolOpCertSequence(
+				context.Background(),
+				poolID,
+				1,
+				140,
+				nil,
+			),
+		)
+		require.NoError(
+			t,
+			db.CreateAccount(context.Background(), nil, &models.Account{
+				StakingKey: rewardAccount,
+				Active:     true,
+			}),
+		)
 
 		ownerStake := uint64(500)
 		delegatedStake := ownerStake
@@ -197,10 +245,13 @@ func seedMultiPoolRewardInputs(
 			member := chunkedFixtureCredential(
 				0x60, uint64(p)*uint64(delegatorsPerPool)+uint64(d)+1,
 			)
-			require.NoError(t, db.CreateAccount(nil, &models.Account{
-				StakingKey: member,
-				Active:     true,
-			}))
+			require.NoError(
+				t,
+				db.CreateAccount(context.Background(), nil, &models.Account{
+					StakingKey: member,
+					Active:     true,
+				}),
+			)
 			stake := uint64(100 + d*7)
 			stakeInputs = append(stakeInputs, &models.RewardStakeInput{
 				Epoch:         rewardSnapshotEpoch,
@@ -389,14 +440,14 @@ func TestChunkedRewardPrecomputeMatchesMonolithicCalculation(t *testing.T) {
 	monolithic, monolithicDB := seedMultiPoolRewardPrecomputeFixture(
 		t, poolCount, delegatorsPerPool, 7,
 	)
-	writeTxn := monolithicDB.Transaction(true)
+	writeTxn := monolithicDB.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
 		app, ok, err := monolithic.calculateStakeRewardApplication(
 			txn, newEpoch, capturedSlot, boundarySlot, true,
 		)
 		require.NoError(t, err)
 		require.True(t, ok, "fixture must produce a calculable reward round")
-		return monolithic.applyStakeRewardApplication(txn, app, boundarySlot)
+		return monolithic.applyStakeRewardApplication(context.Background(), txn, app, boundarySlot)
 	}))
 	monolithicResult := snapshotRewardPrecomputeOutputs(
 		t, monolithicDB, rewardSnapshotEpoch, potsEpoch,
@@ -716,14 +767,14 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 	}
 
 	monolithic, monolithicDB := degenerate(t)
-	writeTxn := monolithicDB.Transaction(true)
+	writeTxn := monolithicDB.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
 		app, ok, err := monolithic.calculateStakeRewardApplication(
 			txn, newEpoch, capturedSlot, boundarySlot, true,
 		)
 		require.NoError(t, err)
 		require.True(t, ok)
-		return monolithic.applyStakeRewardApplication(txn, app, boundarySlot)
+		return monolithic.applyStakeRewardApplication(context.Background(), txn, app, boundarySlot)
 	}))
 	want := snapshotRewardPrecomputeOutputs(
 		t, monolithicDB, rewardSnapshotEpoch, potsEpoch,
@@ -742,9 +793,9 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cursor)
 	require.True(t, cursor.Done, "a degenerate round finishes in one step")
-	writeTxn = chunkedDB.Transaction(true)
+	writeTxn = chunkedDB.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-		return chunked.applyStakeRewards(txn, newEpoch, boundarySlot)
+		return chunked.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 	settleRewardCredits(t, chunked)
 	require.Equal(t, want, snapshotRewardPrecomputeOutputs(

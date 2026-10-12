@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"sync"
@@ -109,12 +110,11 @@ const utxoWholeResolveWorkers = 16
 // worker pool cannot parallelize away. This is not yet a complete fix;
 // see the linked issue for the full investigation and a recommended next
 // step (streaming the reply instead of fully materializing it).
-func (ls *LedgerState) queryShelleyUtxoWhole(
-	at QueryPoint,
+func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
 	if txn == nil {
-		txn = ls.db.Transaction(false)
+		txn = ls.db.Transaction(ctx, false)
 		defer txn.Release()
 	}
 
@@ -152,10 +152,13 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 			return nil, err
 		}
-		if err := ls.db.IterateUtxoRefsAsOf(at.Slot, txn, collect); err != nil {
+		if err := ls.db.IterateUtxoRefsAsOf(ctx, at.Slot, txn, collect); err != nil {
 			return nil, err
 		}
-	} else if err := ls.db.IterateLiveUtxoRefs(txn, collect); err != nil {
+	} else if err := ls.db.IterateLiveUtxoRefs(ctx, txn, collect); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
@@ -185,6 +188,9 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 	// failure must see the same sentinel regardless of which
 	// implementation answered the query.
 	resolveRow := func(txn *database.Txn, ref database.UtxoRef) (r resolved) {
+		if err := ctx.Err(); err != nil {
+			return resolved{err: err}
+		}
 		defer func() {
 			if rec := recover(); rec != nil {
 				r = resolved{err: database.NewTxnPanicError(
@@ -213,6 +219,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 		// otherwise read a dropped row as a ledger divergence rather than a
 		// storage fault.
 		cborBytes, err := ls.db.ResolveUtxoCborWithRecovery(
+			ctx,
 			ref.TxId[:],
 			ref.OutputIdx,
 			txn,
@@ -222,6 +229,9 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 				"resolve utxo cbor %x#%d: %w",
 				ref.TxId[:8], ref.OutputIdx, err,
 			)}
+		}
+		if err := ctx.Err(); err != nil {
+			return resolved{err: err}
 		}
 		txOut, err := decodeUtxoWholeCborFunc(ref, cborBytes)
 		return resolved{id: id, txOut: txOut, err: err}
@@ -248,7 +258,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 			// metadata, only ResolveUtxoCborWithRecovery's rare recovery
 			// fallback does, and it opens its own metadata-capable
 			// transaction on demand for that branch. A full
-			// Database.Transaction(false) here would hold a metadata read
+			// Database.Transaction(ctx, false) here would hold a metadata read
 			// connection from the shared pool (sized by DatabaseWorkers,
 			// 5 by default) for this whole worker's lifetime, well past
 			// utxoWholeResolveWorkers workers deep -- starving every other
@@ -275,12 +285,16 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 			// select still catches the remaining narrow window where done
 			// closes between this check and the send.
 			select {
+			case <-ctx.Done():
+				return
 			case <-done:
 				return
 			default:
 			}
 			select {
 			case jobs <- ref:
+			case <-ctx.Done():
+				return
 			case <-done:
 				return
 			}
@@ -302,6 +316,8 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 	// one of several unresolvable rows across runs), so nothing is lost
 	// except which specific ref is named first.
 	var firstErr error
+	// Drain every result after cancellation so workers release their blob
+	// transactions before this call returns.
 	for r := range results {
 		if r.err != nil {
 			if firstErr == nil {
@@ -313,7 +329,12 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 			}
 			continue
 		}
-		ret[r.id] = r.txOut
+		if ctx.Err() == nil && firstErr == nil {
+			ret[r.id] = r.txOut
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if firstErr != nil {
 		return nil, firstErr

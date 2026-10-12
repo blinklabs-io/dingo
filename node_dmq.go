@@ -31,7 +31,7 @@ import (
 // stack needs one.
 func (n *Node) configPopulateDMQNetworkMagic() error {
 	dmqCfg := &n.config.cfg.DMQ
-	if !dmqCfg.Enabled || dmqCfg.NetworkMagic != 0 {
+	if !dmqCfg.Enabled || dmqCfg.NetworkMagic != 0 || dmqCfg.NetworkMagicExplicit() {
 		return nil
 	}
 	magic, ok := dmq.TopicNetworkMagic(dmqCfg.Topic, n.config.cfg.Network)

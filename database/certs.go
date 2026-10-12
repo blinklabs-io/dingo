@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -24,10 +25,11 @@ import (
 // given slot. This is used during chain rollbacks to undo certificate state
 // changes.
 func (d *Database) DeleteCertificatesAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.certificateStore().DeleteCertificatesAfterSlot(
 			slot,
 			txn.Metadata(),

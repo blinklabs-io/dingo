@@ -72,6 +72,7 @@ func newAdapterDatabase(t *testing.T) *database.Database {
 	require.NoError(t, err)
 
 	db, err := database.New(
+		context.Background(),
 		&database.Config{DataDir: dataDir, Logger: logger},
 		database.Stores{
 			Blob: blobStore, Metadata: metadataStore,
@@ -114,7 +115,7 @@ func TestMeshDatabaseAdapterBlockByIndexUsesChainHeight(t *testing.T) {
 	}
 
 	for height := range uint64(3) {
-		block, err := meshDB.BlockByIndex(height)
+		block, err := meshDB.BlockByIndex(context.Background(), height)
 
 		require.NoError(t, err, "height %d", height)
 		require.Equal(
@@ -137,7 +138,7 @@ func TestMeshDatabaseAdapterBlockByIndexNotFound(t *testing.T) {
 	db := newAdapterDatabase(t)
 	meshDB := NewMeshDatabase(db)
 
-	_, err := meshDB.BlockByIndex(9999)
+	_, err := meshDB.BlockByIndex(context.Background(), 9999)
 
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
@@ -156,13 +157,13 @@ func TestMeshDatabaseAdapterBlockByHash(t *testing.T) {
 		Slot:   410,
 	}, nil))
 
-	block, err := meshDB.BlockByHash(hash)
+	block, err := meshDB.BlockByHash(context.Background(), hash)
 
 	require.NoError(t, err)
 	require.Equal(t, hash, block.Hash)
 	require.Equal(t, uint64(41), block.Number)
 
-	_, err = meshDB.BlockByHash(testHash(0x5b))
+	_, err = meshDB.BlockByHash(context.Background(), testHash(0x5b))
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
@@ -175,11 +176,11 @@ func TestMeshDatabaseAdapterTransactionLookups(t *testing.T) {
 	db := newAdapterDatabase(t)
 	meshDB := NewMeshDatabase(db)
 
-	tx, err := meshDB.GetTransactionByHash(testHash(0x5c))
+	tx, err := meshDB.GetTransactionByHash(context.Background(), testHash(0x5c))
 	require.NoError(t, err)
 	require.Nil(t, tx)
 
-	txs, err := meshDB.GetTransactionsByBlockHash(testHash(0x5d))
+	txs, err := meshDB.GetTransactionsByBlockHash(context.Background(), testHash(0x5d))
 	require.NoError(t, err)
 	require.Empty(t, txs)
 }
@@ -193,7 +194,23 @@ func TestMeshDatabaseAdapterBlockIndexOverflow(t *testing.T) {
 	db := newAdapterDatabase(t)
 	meshDB := NewMeshDatabase(db)
 
-	_, err := meshDB.BlockByIndex(math.MaxUint64)
+	_, err := meshDB.BlockByIndex(context.Background(), math.MaxUint64)
 
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+func TestMeshAdapterHonorsCancelledContext(t *testing.T) {
+	t.Parallel()
+	db := newAdapterDatabase(t)
+	adapter := &meshDatabaseAdapter{db: db}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := adapter.BlockByHash(ctx, make([]byte, 32))
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = adapter.BlockByIndex(ctx, 0)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = adapter.GetTransactionByHash(ctx, make([]byte, 32))
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = adapter.GetTransactionsByBlockHash(ctx, make([]byte, 32))
+	require.ErrorIs(t, err, context.Canceled)
 }

@@ -693,13 +693,25 @@ func extractAllEraBounds(
 	return extractEraBoundsNested(items, 0)
 }
 
+func validateEraBoundLink(eraIndex int, end, next EraBound) error {
+	if end == next {
+		return nil
+	}
+	return fmt.Errorf(
+		"past era %s ends at slot %d epoch %d, but %s starts at slot %d epoch %d",
+		EraName(eraIndex), end.Slot, end.Epoch,
+		EraName(eraIndex+1), next.Slot, next.Epoch,
+	)
+}
+
 // extractEraBoundsFlat handles the flat telescope encoding. Each
-// item is an array [start_bound, ...]. We parse the start bound
-// of every entry.
+// item starts with its start bound; every past entry follows it
+// with the bound where the next era begins.
 func extractEraBoundsFlat(
 	items [][]byte,
 ) ([]EraBound, error) {
 	bounds := make([]EraBound, 0, len(items))
+	var previousEnd EraBound
 	for i, item := range items {
 		entry, err := decodeRawArray(item)
 		if err != nil {
@@ -720,10 +732,34 @@ func extractEraBoundsFlat(
 				i, err,
 			)
 		}
-		bounds = append(bounds, EraBound{
+		start := EraBound{
 			Slot:  slot,
 			Epoch: epoch,
-		})
+		}
+		if i > 0 {
+			if err := validateEraBoundLink(i-1, previousEnd, start); err != nil {
+				return nil, err
+			}
+		}
+		bounds = append(bounds, start)
+
+		if i+1 == len(items) {
+			continue
+		}
+		if len(entry) < 2 {
+			return nil, fmt.Errorf(
+				"past era %s entry has %d elements, expected at least 2",
+				EraName(i), len(entry),
+			)
+		}
+		endSlot, endEpoch, err := parseBound(entry[1])
+		if err != nil {
+			return nil, fmt.Errorf(
+				"parsing past era %s end bound: %w",
+				EraName(i), err,
+			)
+		}
+		previousEnd = EraBound{Slot: endSlot, Epoch: endEpoch}
 	}
 	return bounds, nil
 }
@@ -807,10 +843,10 @@ func extractEraBoundsNestedDepth(
 				EraName(eraIndex), err,
 			)
 		}
-		if len(summary) == 0 {
+		if len(summary) < 2 {
 			return nil, fmt.Errorf(
-				"past era %s summary is empty",
-				EraName(eraIndex),
+				"past era %s summary has %d elements, expected at least 2",
+				EraName(eraIndex), len(summary),
 			)
 		}
 		slot, epoch, bErr := parseBound(summary[0])
@@ -821,6 +857,14 @@ func extractEraBoundsNestedDepth(
 			)
 		}
 		bound := EraBound{Slot: slot, Epoch: epoch}
+		endSlot, endEpoch, bErr := parseBound(summary[1])
+		if bErr != nil {
+			return nil, fmt.Errorf(
+				"parsing past era %s end bound: %w",
+				EraName(eraIndex), bErr,
+			)
+		}
+		endBound := EraBound{Slot: endSlot, Epoch: endEpoch}
 
 		// Continue to rest
 		rest, err := decodeRawArray(items[2])
@@ -834,6 +878,11 @@ func extractEraBoundsNestedDepth(
 			rest, eraIndex+1, depth+1,
 		)
 		if err != nil {
+			return nil, err
+		}
+		if err := validateEraBoundLink(
+			eraIndex, endBound, restBounds[0],
+		); err != nil {
 			return nil, err
 		}
 		return append(

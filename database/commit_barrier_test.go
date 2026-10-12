@@ -64,7 +64,7 @@ func TestPauseCommitsBlocksNewReadWriteTxns(t *testing.T) {
 	opened := make(chan *Txn, 1)
 	go func() {
 		close(started)
-		opened <- db.Transaction(true)
+		opened <- db.Transaction(context.Background(), true)
 	}()
 	testutil.RequireReceive(t, started, time.Second, "goroutine must start")
 
@@ -113,7 +113,7 @@ func TestBlobOnlyTxnDoesNotBlockOnPendingPauseCommits(t *testing.T) {
 
 	db := openTestDB(t)
 
-	outer := db.Transaction(true)
+	outer := db.Transaction(context.Background(), true)
 	defer outer.Rollback() //nolint:errcheck
 
 	pauseStarted := make(chan struct{})
@@ -175,7 +175,7 @@ func TestPauseCommitsContextReturnsPromptlyWhenCancelled(t *testing.T) {
 
 	db := openTestDB(t)
 
-	outer := db.Transaction(true)
+	outer := db.Transaction(context.Background(), true)
 	// Rollback() is idempotent (checks t.finished), so this defer is safe
 	// alongside the explicit Rollback() call further down: if any
 	// assertion between here and that explicit call fails, this defer
@@ -464,7 +464,7 @@ func TestUnlockRejectsStaleTokenAfterLaterAcquisition(t *testing.T) {
 
 	done := make(chan *Txn, 1)
 	go func() {
-		done <- db.Transaction(true)
+		done <- db.Transaction(context.Background(), true)
 	}()
 	testutil.RequireNoReceive(
 		t, done, 150*time.Millisecond,
@@ -495,7 +495,7 @@ func TestPauseCommitsAllowsConcurrentReads(t *testing.T) {
 
 	done := make(chan *Txn, 1)
 	go func() {
-		done <- db.Transaction(false)
+		done <- db.Transaction(context.Background(), false)
 	}()
 
 	txn := testutil.RequireReceive(

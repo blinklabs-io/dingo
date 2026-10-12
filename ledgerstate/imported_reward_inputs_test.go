@@ -322,7 +322,7 @@ func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, seedImportedRewardInputs(
 		db.Metadata(),
 		txn.Metadata(),
@@ -380,7 +380,7 @@ func TestSeedImportedRewardInputsPropagatesParamsError(t *testing.T) {
 	require.NoError(t, err)
 
 	wantErr := errors.New("metadata store unavailable")
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	err = seedImportedRewardInputs(
 		db.Metadata(),
@@ -433,7 +433,7 @@ func TestImportSnapShotsPrefersSnapshotPoolParamsOverRegistrations(
 	noProgress := func(ImportProgress) {}
 	slot := state.Tip.Slot
 
-	_, err = importCertState(ctx, cfg, slot, noProgress)
+	_, _, err = importCertState(ctx, cfg, slot, noProgress)
 	require.NoError(t, err)
 
 	// The pool has to be one the snapshots actually delegate to, or the
@@ -462,7 +462,7 @@ func TestImportSnapShotsPrefersSnapshotPoolParamsOverRegistrations(
 			"registration, so this test cannot distinguish the sources")
 
 	const registrationCost = 111_000_000
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, db.Metadata().ImportPool(
 		importTestPoolModel(target),
 		importTestPoolRegistration(target, goStart-1, registrationCost),
@@ -559,7 +559,7 @@ func TestSeedImportedRewardInputsSeedsWithoutAParamsWindow(t *testing.T) {
 	snapshots, err := ParseSnapShots(state.SnapShotsData)
 	require.NoError(t, err)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, seedImportedRewardInputs(
 		db.Metadata(),
 		txn.Metadata(),
@@ -616,7 +616,7 @@ func TestSeedImportedRewardInputsFailsEpochsWithNoParamsWindow(t *testing.T) {
 	}
 
 	unplaceable := state.Epoch - 2
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	seedErr := seedImportedRewardInputs(
 		db.Metadata(),
 		txn.Metadata(),
@@ -680,7 +680,7 @@ func TestSeedImportedRewardInputsSeedsEmptyBundle(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, seedImportedRewardInputs(
 		db.Metadata(),
 		txn.Metadata(),
@@ -778,7 +778,7 @@ func TestSeedImportedRewardInputsScopesFallbackToTargetSnapshot(t *testing.T) {
 		hex.EncodeToString(poolC.PoolKeyHash): compactC,
 	}
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	seedErr := seedImportedRewardInputs(
 		db.Metadata(),
 		txn.Metadata(),
@@ -1292,7 +1292,7 @@ func TestSeedImportedRewardInputsWritesRows(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, seedImportedRewardInputs(
 		db.Metadata(),
 		txn.Metadata(),
@@ -1362,7 +1362,7 @@ func TestSeedImportedRewardInputsUsesSnapshotPoolParams(t *testing.T) {
 	require.NoError(t, err, "stake snapshots must parse completely")
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	seedErr := seedImportedRewardInputs(
 		db.Metadata(), txn.Metadata(), snapshots, nil, nil,
 		state.Epoch, state.Tip.Slot, logger,
@@ -1403,7 +1403,7 @@ func TestSeedImportedRewardInputsWritesNothingWithoutPoolParams(t *testing.T) {
 	stripPoolParamsToVrfOnly(snapshots)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	seedErr := seedImportedRewardInputs(
 		db.Metadata(), txn.Metadata(), snapshots, nil, nil,
 		state.Epoch, state.Tip.Slot, logger,

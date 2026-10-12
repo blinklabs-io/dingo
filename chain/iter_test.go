@@ -84,7 +84,7 @@ func TestPersistentIteratorDrainsAlreadyAheadPrimaryChainAcrossSparseIndex(
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	cm, err := NewManager(db, nil)
+	cm, err := NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	c := cm.PrimaryChain()
 	require.Equal(t, blocks[len(blocks)-1].Slot, c.Tip().Point.Slot)
@@ -154,7 +154,7 @@ func TestPersistentIteratorRejectsSparseIndexWithHashDiscontinuity(
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	cm, err := NewManager(db, nil)
+	cm, err := NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	c := cm.PrimaryChain()
 
@@ -176,7 +176,7 @@ func TestIteratorCancelRemovesFromChain(t *testing.T) {
 
 	// Create a chain manager without a database (in-memory only)
 	eventBus := event.NewEventBus(nil, nil)
-	cm, err := NewManager(nil, eventBus)
+	cm, err := NewManager(context.Background(), nil, eventBus)
 	require.NoError(t, err)
 
 	// Get the primary chain
@@ -215,7 +215,7 @@ func TestIteratorCancelMultiple(t *testing.T) {
 
 	// Create a chain manager without a database (in-memory only)
 	eventBus := event.NewEventBus(nil, nil)
-	cm, err := NewManager(nil, eventBus)
+	cm, err := NewManager(context.Background(), nil, eventBus)
 	require.NoError(t, err)
 
 	c := cm.PrimaryChain()
@@ -259,7 +259,7 @@ func TestIteratorCancelIdempotent(t *testing.T) {
 
 	// Create a chain manager without a database (in-memory only)
 	eventBus := event.NewEventBus(nil, nil)
-	cm, err := NewManager(nil, eventBus)
+	cm, err := NewManager(context.Background(), nil, eventBus)
 	require.NoError(t, err)
 
 	c := cm.PrimaryChain()
@@ -285,7 +285,7 @@ func TestIteratorParentContextCancelUnblocksNext(t *testing.T) {
 	t.Parallel()
 
 	eventBus := event.NewEventBus(nil, nil)
-	cm, err := NewManager(nil, eventBus)
+	cm, err := NewManager(context.Background(), nil, eventBus)
 	require.NoError(t, err)
 
 	c := cm.PrimaryChain()
@@ -344,7 +344,7 @@ func TestIterNextSpuriousWakeups(t *testing.T) {
 	t.Parallel()
 
 	eventBus := event.NewEventBus(nil, nil)
-	cm, err := NewManager(nil, eventBus)
+	cm, err := NewManager(context.Background(), nil, eventBus)
 	require.NoError(t, err)
 
 	c := cm.PrimaryChain()
@@ -434,7 +434,7 @@ func TestIterNextRegistersWaitBeforeChainUpdateCanCommit(t *testing.T) {
 	t.Parallel()
 
 	eventBus := event.NewEventBus(nil, nil)
-	cm, err := NewManager(nil, eventBus)
+	cm, err := NewManager(context.Background(), nil, eventBus)
 	require.NoError(t, err)
 
 	c := cm.PrimaryChain()
@@ -479,7 +479,7 @@ func TestIterNextRegistersWaitBeforeChainUpdateCanCommit(t *testing.T) {
 	blockHash := block.Hash().Bytes()
 
 	go func() {
-		addDone <- c.AddBlock(block, nil)
+		addDone <- c.AddBlock(context.Background(), block, nil)
 	}()
 
 	testutil.RequireNoReceive(

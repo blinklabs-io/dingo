@@ -15,6 +15,7 @@
 package server_test
 
 import (
+	"context"
 	"math"
 	"testing"
 
@@ -30,7 +31,7 @@ func TestBlockByNumber_OverflowIsRejected(t *testing.T) {
 	db := newTestDatabase(t)
 	adapted := server.NewDatabase(db)
 
-	_, err := adapted.BlockByNumber(math.MaxUint64)
+	_, err := adapted.BlockByNumber(context.Background(), math.MaxUint64)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
@@ -41,7 +42,23 @@ func TestBlockByNumber_ResolvesInsertedBlock(t *testing.T) {
 	blk := insertPlaceholderBlock(t, db, 5, 5, 0x05)
 	adapted := server.NewDatabase(db)
 
-	got, err := adapted.BlockByNumber(5)
+	got, err := adapted.BlockByNumber(context.Background(), 5)
 	require.NoError(t, err)
 	require.Equal(t, blk.Hash, got.Hash)
+}
+
+func TestMidnightBlockAdapterHonorsCancelledContext(t *testing.T) {
+	t.Parallel()
+	db := newTestDatabase(t)
+	adapter := server.NewDatabase(db)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := adapter.BlockByHash(ctx, make([]byte, 32))
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = adapter.BlockByNumber(ctx, 0)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = adapter.BlocksRecent(ctx, 1)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = adapter.BlockBeforeSlot(ctx, 1)
+	require.ErrorIs(t, err, context.Canceled)
 }

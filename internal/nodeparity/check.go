@@ -76,10 +76,6 @@ type CheckResult struct {
 // live-tip race left to discard a cycle over once a point is explicitly
 // named.
 //
-// See QuerySnapshot's doc comment for the one accepted gap pinning doesn't
-// close in either mode (Dingo's protocol-params/stake-distribution queries
-// only honor a pinned point within the live tip's current epoch).
-//
 // ctx bounds the whole cycle: every query below is a synchronous protocol
 // call with no timeout of its own, so cancelling ctx (e.g. on SIGINT) is
 // what lets a caller stuck against an unresponsive peer actually return,

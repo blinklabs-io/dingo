@@ -74,6 +74,8 @@ const (
 
 // StackConfig configures a Stack.
 type StackConfig struct {
+	// Now supplies the clock shared by admission, feeding, and pool expiry.
+	Now          func() time.Time
 	Logger       *slog.Logger
 	PromRegistry prometheus.Registerer
 	// NetworkMagic is the DMQ topic's network magic, used for the local
@@ -131,6 +133,9 @@ type Stack struct {
 
 // NewStack builds a Stack. Call Start to open its socket.
 func NewStack(cfg StackConfig) (*Stack, error) {
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
 	if cfg.Authenticator == nil {
 		return nil, errors.New("dmq: stack requires a message authenticator")
 	}
@@ -150,6 +155,7 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		cfg:    cfg,
 		logger: logger,
 		pool: NewMessageMempool(Config{
+			Now:          cfg.Now,
 			Capacity:     cfg.MaxMempoolBytes,
 			PromRegistry: cfg.PromRegistry,
 		}),
@@ -312,7 +318,7 @@ func (s *Stack) submit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 }
 
 func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
-	if !msg.IsValid() {
+	if !msg.IsValidAt(s.cfg.Now()) {
 		return ocommon.ExpiredReason{}
 	}
 	if s.cfg.CurrentKESPeriod != nil {
@@ -333,7 +339,7 @@ func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 			}
 		}
 	}
-	if err := s.ttl.ValidateMessageTTL(msg); err != nil {
+	if err := s.ttl.ValidateMessageTTLAt(msg, s.cfg.Now()); err != nil {
 		return ocommon.InvalidReason{Message: err.Error()}
 	}
 	if err := s.cfg.Authenticator.VerifyMessage(msg); err != nil {
@@ -449,7 +455,7 @@ func (s *Stack) feed(
 				}
 				pending = &msg
 			}
-			if !pending.IsValid() {
+			if !pending.IsValidAt(s.cfg.Now()) {
 				pending = nil
 				continue
 			}

@@ -305,6 +305,7 @@ func newCountingTestDB(t *testing.T) (*database.Database, *countingBlobStore) {
 	require.NoError(t, err)
 
 	db, err := database.New(
+		context.Background(),
 		config,
 		database.Stores{Blob: counting, Metadata: metadataStore},
 	)
@@ -432,6 +433,7 @@ func newErroringIteratorTestDB(
 	require.NoError(t, err)
 
 	db, err := database.New(
+		context.Background(),
 		config,
 		database.Stores{
 			Blob: &erroringIteratorBlobStore{
@@ -558,6 +560,7 @@ func newMidWalkErrorTestDB(
 	require.NoError(t, err)
 
 	db, err := database.New(
+		context.Background(),
 		config,
 		database.Stores{
 			Blob: &midWalkErrorBlobStore{
@@ -847,6 +850,7 @@ func newCloudLikeTestDB(t *testing.T) *database.Database {
 	require.NoError(t, err)
 
 	db, err := database.New(
+		context.Background(),
 		config,
 		database.Stores{
 			Blob:     &cloudLikeBlobStore{BlobStore: realBlob},
@@ -1029,6 +1033,7 @@ func newPartialCommitTestDB(
 		cloudLikeBlobStore: &cloudLikeBlobStore{BlobStore: realBlob},
 	}
 	db, err := database.New(
+		context.Background(),
 		config,
 		database.Stores{
 			Blob:     blobStore,

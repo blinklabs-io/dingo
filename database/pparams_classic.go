@@ -71,6 +71,10 @@ type classicPParamVote struct {
 //     the boundary into enactEpoch are those targeting enactEpoch-1;
 //   - each genesis key has one vote, its latest proposal for that epoch, in
 //     chain order (slot, then insertion order within a slot);
+//   - a proposal outside the reference domain, or carrying a malformed cost
+//     model before protocol version 9, is refused: the reference would have
+//     rejected its transaction, so it neither votes nor displaces the key's
+//     earlier proposal;
 //   - proposals made during the previous epoch, after its slot of no return,
 //     carry over into the submission epoch only if every one of them has a
 //     protocol version that can follow the submission epoch's parameters;
@@ -133,8 +137,11 @@ func selectClassicPParamUpdate(
 		if _, ok := voted[genesis]; ok {
 			continue
 		}
-		voted[genesis] = struct{}{}
 		update, decodeErr := decodeFunc(proposals[i].Cbor)
+		if classicProposalRefused(currentPParams, update, decodeErr) {
+			continue
+		}
+		voted[genesis] = struct{}{}
 		identity := "raw:" + string(proposals[i].Cbor)
 		if decodeErr == nil {
 			if encoded, encodeErr := classicPParamUpdateIdentity(
@@ -195,8 +202,11 @@ func classicCarriedOverProposalsFollow(
 		if _, ok := seen[genesis]; ok {
 			continue
 		}
-		seen[genesis] = struct{}{}
 		update, err := decodeFunc(newestFirst[i].Cbor)
+		if classicProposalRefused(currentPParams, update, err) {
+			continue
+		}
+		seen[genesis] = struct{}{}
 		if err != nil {
 			return false, fmt.Errorf(
 				"decode carried-over pparam update: %w",
@@ -291,6 +301,33 @@ func classicUpdateKeepsBlockSizes(
 	}
 	sum := uint64(txSize) + uint64(headerSize)
 	return sum >= uint64(txSize) && sum < uint64(bodySize)
+}
+
+// classicProposalRefused reports whether a stored proposal is one the PPUP
+// validation rule refuses: outside the reference domain, or carrying a cost
+// model the submission epoch's protocol version rejects. A stored row can
+// predate either check. Other decode errors are not refusals; the caller
+// decides whether they halt the boundary.
+func classicProposalRefused(
+	currentPParams lcommon.ProtocolParameters,
+	update any,
+	decodeErr error,
+) bool {
+	if decodeErr != nil {
+		var domainErr lcommon.ProtocolParameterUpdateDomainError
+		return errors.As(decodeErr, &domainErr)
+	}
+	validator, ok := update.(lcommon.ProtocolParameterUpdateVersionValidator)
+	if !ok {
+		return false
+	}
+	provider, ok := currentPParams.(lcommon.ProtocolParametersProtocolVersionProvider)
+	if !ok {
+		return false
+	}
+	return validator.ValidateProtocolParameterUpdateVersion(
+		provider.ProtocolParametersProtocolVersion(),
+	) != nil
 }
 
 func classicPParamBlockSizes(

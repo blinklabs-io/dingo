@@ -35,6 +35,7 @@ func TestRollbackWaitsForDestructiveTransitionBarrier(t *testing.T) {
 	rollbackDone := make(chan error, 1)
 	go func() {
 		rollbackDone <- fixture.ls.rollbackChainAndStateDeferred(
+			t.Context(),
 			fixture.ancestorTip.Point,
 			nil,
 		)
@@ -74,11 +75,9 @@ func TestRollbackWaitsForDestructiveTransitionBarrier(t *testing.T) {
 }
 
 func TestReconciliationTakesPruneLockBeforeDestructiveBarrier(t *testing.T) {
-	t.Parallel()
-
+	// Not t.Parallel: both reconciliation tests inspect process-wide goroutine
+	// dumps for identical frames and could satisfy each other's waits.
 	fixture := newChainsyncRollbackFixture(t)
-	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
-
 	// Hold the prune lock so reconciliation pauses before taking the
 	// destructive barrier. Another destructive transition must still be able
 	// to enter while reconciliation is waiting for the prune lock.
@@ -91,7 +90,7 @@ func TestReconciliationTakesPruneLockBeforeDestructiveBarrier(t *testing.T) {
 
 	reconcileDone := make(chan error, 1)
 	go func() {
-		reconcileDone <- fixture.ls.reconcilePrimaryChainTipWithLedgerTip()
+		reconcileDone <- fixture.ls.reconcilePrimaryChainTipWithLedgerTip(t.Context())
 	}()
 	const wait = 10 * time.Second
 	testutil.WaitForCondition(
@@ -129,10 +128,10 @@ func TestReconciliationTakesPruneLockBeforeDestructiveBarrier(t *testing.T) {
 }
 
 func TestReconciliationWaitsForDestructiveTransitionBarrier(t *testing.T) {
-	t.Parallel()
-
+	// Not t.Parallel: both reconciliation tests inspect process-wide goroutine
+	// dumps for identical frames and could satisfy each other's waits.
 	fixture := newChainsyncRollbackFixture(t)
-	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.chain.Rollback(t.Context(), fixture.ancestorTip.Point))
 	finish := fixture.ls.db.BeginDestructiveTransition()
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(finish) }
@@ -140,7 +139,7 @@ func TestReconciliationWaitsForDestructiveTransitionBarrier(t *testing.T) {
 
 	reconcileDone := make(chan error, 1)
 	go func() {
-		reconcileDone <- fixture.ls.reconcilePrimaryChainTipWithLedgerTip()
+		reconcileDone <- fixture.ls.reconcilePrimaryChainTipWithLedgerTip(t.Context())
 	}()
 	const wait = 10 * time.Second
 	testutil.WaitForCondition(

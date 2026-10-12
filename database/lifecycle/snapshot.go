@@ -21,12 +21,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
 // File synchronization failures cannot be induced reliably on a healthy
@@ -54,10 +55,14 @@ const (
 // its cross-store consistency check. Snapshot closes that window with
 // Database.PauseCommitsContext, which blocks new read-write Txns from
 // being constructed (not reads, and not a quiesce — nothing is torn down
-// or disconnected) for the full duration of whichever backup call runs
-// longer — bounded by the slower of the two, not their sum, which is the
-// point of running them concurrently in the first place. This is safe to
-// call against a database a live node is actively writing to.
+// or disconnected) while both backups capture their stores. A successful
+// snapshot holds the barrier through the slower backup. An aborted snapshot
+// releases it as soon as cancellation or a backup failure makes the result
+// unusable, then waits for both providers before removing partial files.
+// This is safe to call against a database a live node is actively writing to.
+//
+// The hold is observed in the dingo_snapshot_commit_pause_seconds histogram
+// and can be bounded with WithMaxCommitPause.
 //
 // dingoVersion is recorded in the manifest for cross-version restore
 // detection; pass the running binary's version string. blobPluginName and
@@ -76,6 +81,14 @@ func Snapshot(
 	opts ...ManifestOption,
 ) (m Manifest, err error) {
 	if _, err := manifestByteLimit(opts); err != nil {
+		return Manifest{}, err
+	}
+	maxPause, pauseNow, pauseContext, pauseDeadline, err := commitPauseConfig(opts)
+	if err != nil {
+		return Manifest{}, err
+	}
+	metrics, err := snapshotMetricsFor(db.Config().PromRegistry)
+	if err != nil {
 		return Manifest{}, err
 	}
 	// Pinned for the whole call: the Backup below runs long, and the store
@@ -185,7 +198,6 @@ func Snapshot(
 	// rework of both, not attempted here.
 	metadataPath := filepath.Join(dir, MetadataBackupFileName)
 	logger := db.Logger()
-	pauseStart := time.Now()
 	if logger != nil {
 		logger.Debug(
 			"pausing commits for snapshot backup",
@@ -197,57 +209,192 @@ func Snapshot(
 	// can block for as long as any currently open write transaction takes
 	// to commit, and this ctx is exactly what a caller cancels to give up
 	// on a Snapshot call that's stuck waiting behind one.
-	resume, err := db.PauseCommitsContext(ctx)
+	pauseCtx := ctx
+	if pauseContext != nil {
+		pauseCtx = pauseContext(ctx)
+	}
+	resume, err := db.PauseCommitsContext(pauseCtx)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("pause commits: %w", err)
 	}
-	tip, tipErr := db.GetTip(nil)
-	commitTimestamp, commitTimestampErr := db.Metadata().GetCommitTimestamp()
-	gates, gatesErr := db.Metadata().GetNodeSettingsGates()
+	pauseStart := pauseNow()
+	var pauseDuration time.Duration
+	pauseExceeded := false
+	barrierHeld := true
+	releaseBarrier := func() {
+		if barrierHeld {
+			resume()
+			pauseDuration = pauseNow().Sub(pauseStart)
+			barrierHeld = false
+		}
+	}
+	defer func() {
+		result := snapshotResultOK
+		switch {
+		case pauseExceeded:
+			result = snapshotResultExceeded
+		case err != nil:
+			result = snapshotResultFailed
+		}
+		metrics.pause.WithLabelValues(result).Observe(pauseDuration.Seconds())
+	}()
+	defer releaseBarrier()
+	// The limit starts once the barrier is held; backupCtx is cancelled by
+	// the caller's ctx as well, so cancellation behaves as before.
+	backupCtx, cancelBackup := context.WithCancel(ctx)
+	if maxPause > 0 {
+		timeoutCtx, cancelTimeout := pauseDeadline(backupCtx, maxPause)
+		cancelParent := cancelBackup
+		cancelBackup = func() {
+			cancelTimeout()
+			cancelParent()
+		}
+		backupCtx = timeoutCtx
+	}
+	defer cancelBackup()
+	type snapshotState struct {
+		tip             ochainsync.Tip
+		commitTimestamp int64
+		gates           nodesettings.Values
+		err             error
+	}
+	stateReady := make(chan snapshotState, 1)
+	go func() {
+		var state snapshotState
+		tipTxn := db.MetadataTxn(backupCtx, false)
+		state.tip, state.err = db.GetTip(tipTxn)
+		tipTxn.Release()
+		if state.err == nil && backupCtx.Err() == nil {
+			state.commitTimestamp, state.err = db.Metadata().GetCommitTimestamp(backupCtx)
+		}
+		if state.err == nil && backupCtx.Err() == nil {
+			state.gates, state.err = db.Metadata().GetNodeSettingsGates(backupCtx)
+		}
+		stateReady <- state
+	}()
+	var state snapshotState
+	select {
+	case state = <-stateReady:
+	case <-backupCtx.Done():
+		pauseExceeded = maxPause > 0 && ctx.Err() == nil
+		if pauseExceeded {
+			return Manifest{}, fmt.Errorf("%w (%s): %w", ErrCommitPauseExceeded, maxPause, backupCtx.Err())
+		}
+		return Manifest{}, backupCtx.Err()
+	}
+	if state.err != nil {
+		if maxPause > 0 && ctx.Err() == nil &&
+			errors.Is(backupCtx.Err(), context.DeadlineExceeded) {
+			pauseExceeded = true
+			return Manifest{}, fmt.Errorf(
+				"read snapshot state: %w (%s): %w",
+				ErrCommitPauseExceeded,
+				maxPause,
+				errors.Join(backupCtx.Err(), state.err),
+			)
+		}
+		return Manifest{}, fmt.Errorf("read snapshot state: %w", state.err)
+	}
+	if err := backupCtx.Err(); err != nil {
+		pauseExceeded = maxPause > 0 && ctx.Err() == nil
+		if pauseExceeded {
+			return Manifest{}, fmt.Errorf("%w (%s): %w", ErrCommitPauseExceeded, maxPause, err)
+		}
+		return Manifest{}, err
+	}
+	tip, commitTimestamp, gates := state.tip, state.commitTimestamp, state.gates
 
+	type backupResult struct {
+		store string
+		err   error
+	}
+	backupResults := make(chan backupResult, 2)
+	go func() {
+		backupResults <- backupResult{
+			store: "blob",
+			err:   blobBackuper.Backup(backupCtx, blobFile),
+		}
+	}()
+	go func() {
+		backupResults <- backupResult{
+			store: "metadata",
+			err:   metadataBackuper.BackupTo(backupCtx, metadataPath),
+		}
+	}()
 	var backupErr, metadataErr error
-	var backupWG sync.WaitGroup
-	backupWG.Add(2)
-	go func() {
-		defer backupWG.Done()
-		backupErr = blobBackuper.Backup(ctx, blobFile)
-	}()
-	go func() {
-		defer backupWG.Done()
-		metadataErr = metadataBackuper.BackupTo(ctx, metadataPath)
-	}()
-	backupWG.Wait()
+	backupCtxDone := backupCtx.Done()
+	pauseLimitExpired := false
+	for completed := 0; completed < 2; {
+		select {
+		case result := <-backupResults:
+			completed++
+			if result.store == "blob" {
+				backupErr = result.err
+			} else {
+				metadataErr = result.err
+			}
+			if result.err != nil {
+				// A failed store makes the cross-store snapshot unusable.
+				// Cancel its peer and resume commits before waiting for it
+				// to stop writing the partial backup.
+				cancelBackup()
+				releaseBarrier()
+				backupCtxDone = nil
+			}
+		case <-backupCtxDone:
+			// An aborted snapshot cannot be published. Provider cleanup
+			// must not extend the node's commit pause.
+			pauseLimitExpired = maxPause > 0 && ctx.Err() == nil &&
+				errors.Is(backupCtx.Err(), context.DeadlineExceeded)
+			cancelBackup()
+			releaseBarrier()
+			backupCtxDone = nil
+		}
+	}
 
-	resume()
+	// A provider may return success despite ignoring cancellation. Measure
+	// the barrier hold against the deadline rather than relying on its error.
+	pauseExceeded = pauseLimitExpired || (maxPause > 0 && ctx.Err() == nil &&
+		(errors.Is(backupCtx.Err(), context.DeadlineExceeded) || pauseDuration >= maxPause))
+	cancelBackup()
+	releaseBarrier()
 	if logger != nil {
 		logger.Debug(
 			"resumed commits after snapshot backup",
 			"component", "database",
 			"dir", dir,
-			"paused_for", time.Since(pauseStart),
+			"paused_for", pauseDuration,
 		)
 	}
 
-	if tipErr != nil {
-		return Manifest{}, fmt.Errorf("get tip: %w", tipErr)
-	}
-	if commitTimestampErr != nil {
+	if pauseExceeded {
 		return Manifest{}, fmt.Errorf(
-			"get commit timestamp: %w",
-			commitTimestampErr,
+			"%w (%s): %w",
+			ErrCommitPauseExceeded, maxPause,
+			errors.Join(context.DeadlineExceeded, backupErr, metadataErr),
 		)
 	}
-	if gatesErr != nil {
-		return Manifest{}, fmt.Errorf(
-			"get node settings gates: %w",
-			gatesErr,
+	if backupErr != nil && !errors.Is(backupErr, context.Canceled) &&
+		metadataErr != nil && !errors.Is(metadataErr, context.Canceled) {
+		return Manifest{}, errors.Join(
+			fmt.Errorf("backup blob store: %w", backupErr),
+			fmt.Errorf("backup metadata store: %w", metadataErr),
 		)
+	}
+	if backupErr != nil && !errors.Is(backupErr, context.Canceled) {
+		return Manifest{}, fmt.Errorf("backup blob store: %w", backupErr)
+	}
+	if metadataErr != nil && !errors.Is(metadataErr, context.Canceled) {
+		return Manifest{}, fmt.Errorf("backup metadata store: %w", metadataErr)
 	}
 	if backupErr != nil {
 		return Manifest{}, fmt.Errorf("backup blob store: %w", backupErr)
 	}
 	if metadataErr != nil {
 		return Manifest{}, fmt.Errorf("backup metadata store: %w", metadataErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return Manifest{}, err
 	}
 	// Flush after releasing the commit barrier: both backup streams are
 	// complete, so making their files durable needs no further writer pause.
@@ -298,6 +445,17 @@ func Snapshot(
 		return Manifest{}, fmt.Errorf("stat %q: %w", metadataPath, err)
 	}
 
+	blobDigest, _, err := hashFileContext(ctx, blobPath)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("hash %q: %w", blobPath, err)
+	}
+	metadataDigest, _, err := hashFileContext(ctx, metadataPath)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("hash %q: %w", metadataPath, err)
+	}
+	metrics.bytes.WithLabelValues("blob").Add(float64(blobInfo.Size()))
+	metrics.bytes.WithLabelValues("metadata").Add(float64(metadataInfo.Size()))
+
 	manifest := Manifest{
 		CreatedAt:       time.Now().UTC(),
 		Trigger:         trigger,
@@ -313,6 +471,11 @@ func Snapshot(
 		DingoVersion:    dingoVersion,
 		BlobBytes:       blobInfo.Size(),
 		MetadataBytes:   metadataInfo.Size(),
+		BlobSHA256:      blobDigest,
+		MetadataSHA256:  metadataDigest,
+	}
+	if err := ctx.Err(); err != nil {
+		return Manifest{}, err
 	}
 	if err := WriteManifest(dir, manifest, opts...); err != nil {
 		return Manifest{}, err

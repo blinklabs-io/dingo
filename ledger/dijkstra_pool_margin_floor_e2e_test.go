@@ -19,12 +19,47 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/utxoref"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
+
+func dijkstraTestBlockHeader(
+	blockNumber, slot uint64,
+	prevHash lcommon.Blake2b256,
+	bodyHash lcommon.Blake2b256,
+	bodySize uint64,
+) *gdijkstra.DijkstraBlockHeader {
+	return &gdijkstra.DijkstraBlockHeader{
+		BabbageBlockHeader: babbage.BabbageBlockHeader{
+			Body: babbage.BabbageBlockHeaderBody{
+				BlockNumber:   blockNumber,
+				Slot:          slot,
+				PrevHash:      prevHash,
+				BlockBodyHash: bodyHash,
+				BlockBodySize: bodySize,
+				VrfKey:        make([]byte, 32),
+				VrfResult: lcommon.VrfResult{
+					Output: make([]byte, 64),
+					Proof:  make([]byte, 80),
+				},
+				OpCert: babbage.BabbageOpCert{
+					HotVkey:   make([]byte, 32),
+					Signature: make([]byte, 64),
+				},
+				ProtoVersion: babbage.BabbageProtoVersion{
+					Major: gdijkstra.MinProtocolVersionDijkstra,
+				},
+			},
+			Signature: make([]byte, 448),
+		},
+	}
+}
 
 // dijkstraPoolCertTx builds a real *gdijkstra.DijkstraTransaction carrying a
 // single pool registration certificate with the given margin, for exercising
@@ -61,6 +96,13 @@ func dijkstraTestProtocolParameters() *gdijkstra.DijkstraProtocolParameters {
 			CollateralPercentage: 150,
 			MaxCollateralInputs:  3,
 		},
+		PerasHealingFactor: &cbor.Rat{
+			Rat: new(big.Rat).SetFrac(
+				big.NewInt(1),
+				new(big.Int).Exp(big.NewInt(10), big.NewInt(19), nil),
+			),
+		},
+		PerasQuorumThresholdSafetyMargin: &cbor.Rat{Rat: big.NewRat(0, 1)},
 	}
 }
 
@@ -86,6 +128,41 @@ func TestValidateTxDijkstraRejectsBelowFloorPoolMarginThroughLedgerView(
 
 	tx := dijkstraPoolCertTx(1, 1000) // 0.1%, below the 1.5% floor
 	err := eras.ValidateTxDijkstra(tx, 0, lv, dijkstraTestProtocolParameters())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "below minimum pool margin")
+}
+
+// TestValidateTxDijkstraRejectsBelowFloorPoolMarginWithPendingState runs the
+// same rule against the state a validation sees while earlier pending
+// transactions are layered over the view. The layered state must still
+// expose the view's minimum pool margin, or the floor reads as disabled.
+func TestValidateTxDijkstraRejectsBelowFloorPoolMarginWithPendingState(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _ := newRewardCalculationTestLedger(t)
+	ls.config.MinPoolMargin = 150 // 1.5%
+	pending := utxoref.NewStateOverlay()
+	pending.Apply(dijkstraPoolCertTx(2, 100))
+	require.Equal(t, 1, pending.Len())
+	pp := dijkstraTestProtocolParameters()
+	lv := &LedgerView{ls: ls, pendingState: pending}
+	state, err := lv.validationState(
+		func(lcommon.Transaction) (lcommon.ProtocolParameters, error) {
+			return pp, nil
+		},
+		1,
+	)
+	require.NoError(t, err)
+	_, layered := state.(*LedgerView)
+	require.False(
+		t,
+		layered,
+		"the pending transaction must be layered over the view",
+	)
+
+	err = eras.ValidateTxDijkstra(dijkstraPoolCertTx(1, 1000), 0, state, pp)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "below minimum pool margin")
 }

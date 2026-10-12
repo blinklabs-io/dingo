@@ -220,6 +220,7 @@ func TestServerRejectsReboundOrigin(t *testing.T) {
 		cfg := DefaultProviderConfig()
 		cfg.AuthToken = "test-secret"
 		server, err := NewServer(
+			t.Context(),
 			cfg,
 			ProviderDependencies{},
 			apiconfig.EffectiveTLS{Enabled: true},

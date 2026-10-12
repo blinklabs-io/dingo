@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -111,7 +112,7 @@ func runClassicEnactment(
 	for _, mode := range []string{"compute", "forecast", "apply"} {
 		db, err := newTestDatabase(t, &Config{DataDir: ""})
 		require.NoError(t, err)
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		for epoch, start := range map[uint64]uint64{
 			classicTestSubmissionEpoch - 1: classicTestEpochStart - 100,
 			classicTestSubmissionEpoch:     classicTestEpochStart,
@@ -130,8 +131,16 @@ func runClassicEnactment(
 		switch mode {
 		case "compute":
 			result, _, err = db.ComputeAndApplyPParamUpdates(
-				classicTestEpochStart+100, classicTestEnactEpoch, 1, quorum,
-				&pp, classicDecode, classicApply, nil, txn,
+				context.Background(),
+				classicTestEpochStart+100,
+				classicTestEnactEpoch,
+				1,
+				quorum,
+				&pp,
+				classicDecode,
+				classicApply,
+				nil,
+				txn,
 			)
 		case "forecast":
 			result, err = db.ForecastPParamUpdates(
@@ -141,6 +150,7 @@ func runClassicEnactment(
 		case "apply":
 			result = &pp
 			err = db.ApplyPParamUpdates(
+				context.Background(),
 				classicTestEpochStart+100, classicTestEnactEpoch, 1, quorum,
 				&result, classicDecode, classicApply, txn,
 			)

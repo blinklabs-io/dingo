@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"database/sql"
 	"math/big"
 	"testing"
@@ -129,9 +130,9 @@ func TestBoundaryCreditVisibility_StakeRewardIsIncludedInSnapshot(
 	credential := reapCred28(0x53)
 	insertBoundaryAccount(t, gdb, credential)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return db.AddAccountRewardByCredential(
+		return db.AddAccountRewardByCredential(context.Background(),
 			0, credential, 40, 200, make([]byte, 32), txn,
 		)
 	}))

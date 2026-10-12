@@ -14,18 +14,23 @@
 
 package database
 
-import "github.com/blinklabs-io/dingo/database/models"
+import (
+	"context"
+
+	"github.com/blinklabs-io/dingo/database/models"
+)
 
 // GetPoolsRetiringAtEpoch returns the pools whose effective retirement takes
 // effect at the given epoch as of the boundary slot, with the reward account
 // and deposit needed to refund their POOLREAP deposit.
 func (d *Database) GetPoolsRetiringAtEpoch(
+	ctx context.Context,
 	epoch uint64,
 	boundarySlot uint64,
 	txn *Txn,
 ) ([]models.PoolRetirementRefund, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.GetPoolsRetiringAtEpoch(

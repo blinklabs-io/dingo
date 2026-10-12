@@ -603,8 +603,27 @@ func TestStackServesConnectionsAfterInboundStall(t *testing.T) {
 	s, _ := newTestStack(t, StackConfig{})
 	// Hold the feeder registry so the inbound handler stalls on the first
 	// real connection.
+	require.NoError(t, s.bus.UnsubscribeAndWaitContext(t.Context(), connmanager.InboundConnectionEventType, s.inboundSub))
+	entered := make(chan struct{})
+	var enteredOnce sync.Once
+	s.inboundSub = subscribeInbound(s.bus, func(evt event.Event) {
+		enteredOnce.Do(func() { close(entered) })
+		s.handleInbound(evt)
+	})
 	s.mu.Lock()
 	newConsumer(t, s)
+	locked := true
+	defer func() {
+		if locked {
+			s.mu.Unlock()
+		}
+	}()
+	select {
+	case <-entered:
+	case <-t.Context().Done():
+		t.Fatal("inbound handler did not enter")
+	}
+
 	flooded := make(chan struct{})
 	var attempts atomic.Int64
 	go func() {
@@ -632,6 +651,7 @@ func TestStackServesConnectionsAfterInboundStall(t *testing.T) {
 	default:
 	}
 	s.mu.Unlock()
+	locked = false
 	select {
 	case <-flooded:
 	case <-time.After(10 * time.Second):
@@ -854,4 +874,23 @@ func TestStackBacksOffFullNotificationQueue(t *testing.T) {
 			return refusals.n.Load() > before
 		}, 5*time.Second, time.Millisecond, "retry %d did not run", i+1)
 	}
+}
+
+func TestStackAcceptsCurrentKESPeriod(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestStack(t, StackConfig{
+		CurrentKESPeriod: func() (uint64, error) { return 1, nil },
+	})
+	msg := newTestMessage([]byte("current"), soonExpiry())
+	require.Equal(t, uint64(1), msg.Payload.KESPeriod)
+	require.Nil(t, s.admit(&msg))
+}
+
+func TestStackAdmissionUsesPoolClock(t *testing.T) {
+	t.Parallel()
+	now := time.Now().Add(-time.Minute)
+	s, _ := newTestStack(t, StackConfig{Now: func() time.Time { return now }})
+	msg := newTestMessage([]byte("clock"), uint32(now.Add(30*time.Second).Unix()))
+	require.False(t, msg.IsValid())
+	require.Nil(t, s.admit(&msg))
 }

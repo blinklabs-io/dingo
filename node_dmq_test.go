@@ -82,6 +82,7 @@ func TestConfigPopulateDMQNetworkMagic(t *testing.T) {
 			network:   "mainnet",
 			wantMagic: 42,
 		},
+
 		{
 			name: "network without a default",
 			dmq: internalconfig.DMQConfig{

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"slices"
 	"testing"
 
@@ -56,9 +57,9 @@ WHERE spendable AND NOT guarded AND NOT folded`).Scan(&n))
 func TestRewardCreditCompactionWithFoldedRoundIsNotDue(t *testing.T) {
 	t.Parallel()
 	f := agedCreditedRound(t)
-	require.NoError(t, f.ls.compactRewardCreditRounds())
+	require.NoError(t, f.ls.compactRewardCreditRounds(context.Background()))
 	require.Zero(t, unfoldedCreditCount(t, f))
-	due, err := f.ls.rewardCreditRoundDue()
+	due, err := f.ls.rewardCreditRoundDue(context.Background())
 	require.NoError(t, err)
 	require.False(t, due)
 }
@@ -69,7 +70,7 @@ func TestRewardCreditCompactionWithFoldedRoundIsNotDue(t *testing.T) {
 func TestRewardCreditCompactionIgnoresUnfoldedKeptRounds(t *testing.T) {
 	t.Parallel()
 	f := agedCreditedRound(t)
-	require.NoError(t, f.ls.compactRewardCreditRounds())
+	require.NoError(t, f.ls.compactRewardCreditRounds(context.Background()))
 	require.Zero(t, unfoldedCreditCount(t, f))
 	for i := range uint64(rewardCreditRoundsKeptUnfolded) {
 		require.NoError(t, f.db.Metadata().SaveRewardAccountOutputs(
@@ -85,7 +86,7 @@ func TestRewardCreditCompactionIgnoresUnfoldedKeptRounds(t *testing.T) {
 	}
 	require.Equal(t, rewardCreditRoundsKeptUnfolded, unfoldedCreditCount(t, f))
 
-	due, err := f.ls.rewardCreditRoundDue()
+	due, err := f.ls.rewardCreditRoundDue(context.Background())
 	require.NoError(t, err)
 	require.False(t, due, "credits in the newest two rounds are kept unfolded")
 }
@@ -103,10 +104,10 @@ func TestRewardCreditCompactionFoldsDueRoundsExactly(t *testing.T) {
 		keys = append(keys, key)
 	}
 	slices.Sort(keys)
-	txn := f.db.Transaction(true)
+	txn := f.db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		for _, key := range keys[:len(keys)/5] {
-			if err := f.ls.foldRewardCreditFor(txn, 0, []byte(key)); err != nil {
+			if err := f.ls.foldRewardCreditFor(context.Background(), txn, 0, []byte(key)); err != nil {
 				return err
 			}
 		}
@@ -116,7 +117,7 @@ func TestRewardCreditCompactionFoldsDueRoundsExactly(t *testing.T) {
 	unfolded := unfoldedCreditCount(t, f)
 	require.Positive(t, unfolded)
 
-	done, err := f.ls.compactRewardCreditChunk(50)
+	done, err := f.ls.compactRewardCreditChunk(context.Background(), 50)
 	require.NoError(t, err)
 	require.False(t, done)
 	require.Equal(t, unfolded-50, unfoldedCreditCount(t, f),
@@ -124,7 +125,7 @@ func TestRewardCreditCompactionFoldsDueRoundsExactly(t *testing.T) {
 	require.Equal(t, before, observePendingRoundReaders(t, f, credits),
 		"a partly compacted round reads the same balances")
 
-	require.NoError(t, f.ls.compactRewardCreditRounds())
+	require.NoError(t, f.ls.compactRewardCreditRounds(context.Background()))
 	require.Zero(t, unfoldedCreditCount(t, f))
 	require.Equal(t, before, observePendingRoundReaders(t, f, credits),
 		"a compacted round reads the same balances")
@@ -148,7 +149,7 @@ func TestRewardCreditCompactionLeavesNewestRounds(t *testing.T) {
 	t.Parallel()
 	f := creditedRewardRound(t)
 	unfolded := unfoldedCreditCount(t, f)
-	require.NoError(t, f.ls.compactRewardCreditRounds())
+	require.NoError(t, f.ls.compactRewardCreditRounds(context.Background()))
 	require.Equal(t, unfolded, unfoldedCreditCount(t, f))
 }
 
@@ -160,12 +161,12 @@ func TestRewardCreditCompactionRollbackBelowBoundary(t *testing.T) {
 	f := agedCreditedRound(t)
 	credits := rewardedCredentials(t, f)
 	stored := accountRewards(t, f, credits)
-	require.NoError(t, f.ls.compactRewardCreditRounds())
+	require.NoError(t, f.ls.compactRewardCreditRounds(context.Background()))
 	require.Zero(t, unfoldedCreditCount(t, f))
 	boundary := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch + 1)
-	txn := f.db.Transaction(true)
+	txn := f.db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := f.db.DeleteAccountRewardsAfterSlot(boundary-1, txn); err != nil {
+		if err := f.db.DeleteAccountRewardsAfterSlot(context.Background(), boundary-1, txn); err != nil {
 			return err
 		}
 		return f.db.DeleteRewardStateAfterSlot(boundary-1, txn)

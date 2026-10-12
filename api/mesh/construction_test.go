@@ -15,6 +15,7 @@
 package mesh
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1006,6 +1007,48 @@ func TestConstructionParseUnsigned(t *testing.T) {
 	require.Empty(t, resp.AccountIdentifierSigners)
 }
 
+func TestConstructionParseUnsignedRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler(t, newTestDeps())
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x22), nil,
+	)
+	unsigned := requestPayloads(t, h, addr)
+
+	rec := postJSON(t, h, "/construction/parse", parseRequest(
+		unsigned+"00", false,
+	))
+
+	requireMeshError(
+		t,
+		rec,
+		ErrInvalidTransaction,
+		http.StatusBadRequest,
+	)
+}
+
+func TestConstructionCombineRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+
+	h := newTestHandler(t, newTestDeps())
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x22), nil,
+	)
+	unsigned := requestPayloads(t, h, addr)
+
+	rec := postJSON(t, h, "/construction/combine", combineRequest(
+		unsigned+"00", nil,
+	))
+
+	requireMeshError(
+		t,
+		rec,
+		ErrInvalidTransaction,
+		http.StatusBadRequest,
+	)
+}
+
 // TestConstructionParseCertificates covers the certificate shapes the
 // converter recognizes: each supported certificate becomes exactly one
 // operation, and unsupported ones are dropped rather than mis-typed.
@@ -1467,7 +1510,7 @@ func TestConstructionParseNativeAssetOutputs(t *testing.T) {
 	bodyCbor := testTxBody(
 		t,
 		[]shelley.ShelleyTransactionInput{
-			shelley.NewShelleyTransactionInput(
+			shelley.MustNewShelleyTransactionInput(
 				hexString(testHash(0xd3)), 0,
 			),
 		},
@@ -1560,7 +1603,14 @@ func TestConstructionRejectsNullElements(t *testing.T) {
 
 func TestConstructionInputIndexBounds(t *testing.T) {
 	addr := testAddress(t, lcommon.AddressTypeKeyNone, testKeyHash(0x33), nil)
-	for _, index := range []int64{-1, 0, math.MaxUint32 - 1, math.MaxUint32, math.MaxUint32 + 1} {
+	for _, index := range []int64{
+		-1,
+		0,
+		math.MaxUint16 - 1,
+		math.MaxUint16,
+		math.MaxUint16 + 1,
+		math.MaxUint32,
+	} {
 		t.Run(strconv.FormatInt(index, 10), func(t *testing.T) {
 			h := newTestHandler(t, newTestDeps())
 			coin := hexString(
@@ -1580,13 +1630,7 @@ func TestConstructionInputIndexBounds(t *testing.T) {
 					nil,
 				))
 			})
-			// The library constructor takes int, so 32-bit hosts cannot represent
-			// the upper uint32 half even though its serialized index is uint32.
-			maxIndex := int64(math.MaxUint32)
-			if strconv.IntSize == 32 {
-				maxIndex = math.MaxInt32
-			}
-			if index < 0 || index > maxIndex {
+			if index < 0 || index > math.MaxUint16 {
 				requireMeshError(
 					t,
 					rec,
@@ -1606,4 +1650,52 @@ func TestConstructionInputIndexBounds(t *testing.T) {
 			require.Equal(t, uint32(index), body.Inputs()[0].Index())
 		})
 	}
+}
+
+func TestConstructionSubmitRejectsTrailingBytes(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	h := newTestHandler(t, deps)
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x26), nil,
+	)
+	txCbor, _ := testSimpleSignedTx(t, addr)
+
+	for name, padded := range map[string][]byte{
+		"one byte":       append(bytes.Clone(txCbor), 0x00),
+		"second payload": append(bytes.Clone(txCbor), txCbor...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := postJSON(
+				t, h, "/construction/submit",
+				submitRequest(hexString(padded)),
+			)
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			require.Empty(t, deps.mempool.submissions())
+		})
+	}
+}
+
+func TestConstructionSubmitDuplicateSubmitsSameBytes(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	h := newTestHandler(t, deps)
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x26), nil,
+	)
+	txCbor, tx := testSimpleSignedTx(t, addr)
+
+	for range 2 {
+		rec := postJSON(
+			t, h, "/construction/submit", submitRequest(hexString(txCbor)),
+		)
+		resp := decodeResponse[ConstructionSubmitResponse](t, rec)
+		require.Equal(t, tx.Hash().String(), resp.TransactionIdentifier.Hash)
+	}
+	subs := deps.mempool.submissions()
+	require.Len(t, subs, 2)
+	require.Equal(t, txCbor, subs[0].txBytes)
+	require.Equal(t, subs[0].txBytes, subs[1].txBytes)
 }

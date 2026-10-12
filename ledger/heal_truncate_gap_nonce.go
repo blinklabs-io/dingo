@@ -91,8 +91,9 @@ func (ls *LedgerState) healTruncateGapBlockNonces(ctx context.Context) error {
 	tipNonce := bytes.Clone(ls.currentTipBlockNonce)
 	ls.RUnlock()
 
-	// Genesis has no block and no nonce to reconstruct.
-	if tipPoint.Slot == 0 {
+	// Origin has no block and no nonce to reconstruct. A block at slot 0
+	// is a real tip and is handled below.
+	if tipPoint.Slot == 0 && len(tipPoint.Hash) == 0 {
 		return nil
 	}
 	// A valid tip nonce means either there was never a gap, or a previous
@@ -103,7 +104,7 @@ func (ls *LedgerState) healTruncateGapBlockNonces(ctx context.Context) error {
 		return nil
 	}
 
-	tipBlock, err := database.BlockByPoint(ls.db, tipPoint)
+	tipBlock, err := database.BlockByPoint(ctx, ls.db, tipPoint)
 	if err != nil {
 		return fmt.Errorf(
 			"load tip block for truncate gap nonce heal: %w",
@@ -154,6 +155,7 @@ func (ls *LedgerState) healTruncateGapBlockNonces(ctx context.Context) error {
 		for i := range checkpointCandidates {
 			candidate := &checkpointCandidates[i]
 			contains, cErr := ls.primaryChainContainsExactPoint(
+				ctx,
 				ocommon.Point{Slot: candidate.Slot, Hash: candidate.Hash},
 			)
 			if cErr != nil {
@@ -305,7 +307,7 @@ func (ls *LedgerState) healTruncateGapBlockNonces(ctx context.Context) error {
 	}
 	var pending []nonceRow
 	writeRows := func(rows []nonceRow) error {
-		txn := ls.db.Transaction(true)
+		txn := ls.db.Transaction(ctx, true)
 		defer txn.Release()
 		return txn.Do(func(txn *database.Txn) error {
 			for _, row := range rows {
@@ -398,6 +400,7 @@ func (ls *LedgerState) healTruncateGapBlockNonces(ctx context.Context) error {
 		}
 	} else {
 		if err := database.ForEachBlockInRangeDB(
+			ctx,
 			ls.db,
 			anchorSlot+1,
 			tipPoint.Slot+1,

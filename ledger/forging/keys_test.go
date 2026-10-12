@@ -182,7 +182,9 @@ func TestStartupOpCertCounterUnresolvedEraDoesNotRefuse(t *testing.T) {
 // of the rule an unresolved era does not excuse. A counter below the observed
 // on-chain value is a stale or stolen hot key whatever the era, so it must
 // still refuse startup.
-func TestStartupOpCertCounterUnresolvedEraStillRejectsStaleCounter(t *testing.T) {
+func TestStartupOpCertCounterUnresolvedEraStillRejectsStaleCounter(
+	t *testing.T,
+) {
 	t.Parallel()
 	credentials := newCredsForLedger(t)
 	credentials.opCert.IssueNumber = 4
@@ -197,7 +199,7 @@ func TestStartupOpCertCounterUnresolvedEraStillRejectsStaleCounter(t *testing.T)
 	require.ErrorIs(t, result.EraUnevaluable, ErrOpCertEraUnevaluable)
 }
 
-// Sample test keys from config/cardano/devnet/keys/
+// Sample test keys from internal/devnetkeys/keys/
 const (
 	testVRFSKeyJSON = `{
     "type": "VrfSigningKey_PraosVRF",
@@ -640,7 +642,7 @@ func TestLoadSecretKeyRejectsOversizedFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oversized.skey")
 	require.NoError(t, os.WriteFile(
 		path,
-		make([]byte, maxSecretKeyFileSize+1),
+		make([]byte, 2<<20),
 		0o600,
 	))
 	testutil.RestrictFileToCurrentUser(t, path)
@@ -648,6 +650,18 @@ func TestLoadSecretKeyRejectsOversizedFile(t *testing.T) {
 	_, err := loadSecretKeyFromFile(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds maximum size")
+}
+
+func TestLoadOperationalCertificateRejectsOversizedEnvelope(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.cert")
+	content := testOpCertJSON + strings.Repeat(
+		" ",
+		2<<20,
+	)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	_, err := LoadOperationalCertificateFile(path)
+	require.ErrorContains(t, err, "exceeds maximum size")
 }
 
 func TestVRFProve(t *testing.T) {

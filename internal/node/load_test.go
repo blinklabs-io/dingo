@@ -17,6 +17,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -34,17 +35,20 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
+	"github.com/blinklabs-io/dingo/plugin"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	fxcbor "github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -595,7 +599,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -615,7 +619,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 		ebbHeader.SlotNumber(),
 		ebbHeader.Hash().Bytes(),
 	)
-	importedEbb, err := cm.BlockByPoint(ebbPoint, nil)
+	importedEbb, err := cm.BlockByPoint(context.Background(), ebbPoint, nil)
 	require.NoError(t, err)
 	require.NotNil(t, importedEbb)
 	assert.Equal(t, ebbPoint.Hash, importedEbb.Hash)
@@ -624,7 +628,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 		nextHeader.SlotNumber(),
 		nextHeader.Hash().Bytes(),
 	)
-	importedNext, err := cm.BlockByPoint(nextPoint, nil)
+	importedNext, err := cm.BlockByPoint(context.Background(), nextPoint, nil)
 	require.NoError(t, err)
 	require.NotNil(t, importedNext)
 	assert.Equal(t, ebbPoint.Hash, importedNext.PrevHash)
@@ -700,7 +704,7 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -739,7 +743,11 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 	assert.Equal(t, expectedPoint.Slot, offset.BlockSlot)
 	assert.Equal(t, expectedPoint.Hash, offset.BlockHash[:])
 
-	storedBlock, err := database.BlockByPoint(db, expectedPoint)
+	storedBlock, err := database.BlockByPoint(
+		context.Background(),
+		db,
+		expectedPoint,
+	)
 	require.NoError(t, err)
 	end := uint64(offset.ByteOffset) + uint64(offset.ByteLength)
 	require.LessOrEqual(t, end, uint64(len(storedBlock.Cbor)))
@@ -818,7 +826,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 		"testdata",
 	)
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -839,7 +847,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 	// for the resume check exercised below. If a future change
 	// makes AddRawBlocks decode the body, swap this for a real
 	// raw block from the immutable testdata directory.
-	err = cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+	err = cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
 		{
 			Slot:        immutableTipSlot + 5,
 			Hash:        bytes.Repeat([]byte{0x42}, 32),
@@ -1014,6 +1022,7 @@ func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 				hookCalled = true
 				rollbackErr = loadConfig.ChainManager.PrimaryChain().
 					ValidateRollback(
+						context.Background(),
 						ocommon.NewPoint(0, nil),
 					)
 				return stopAfterRollbackValidation
@@ -1331,21 +1340,24 @@ func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
 	db := newTestDB(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	currentTip := cm.PrimaryChain().Tip()
 	stubSlot := immutableTip.Slot + 5
 	stubHash := bytes.Repeat([]byte{0xAB}, 32)
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
-		{
-			Slot:        stubSlot,
-			Hash:        stubHash,
-			BlockNumber: currentTip.BlockNumber + 1,
-			Type:        0,
-			PrevHash:    currentTip.Point.Hash,
-			Cbor:        []byte{0x80},
-		},
-	}))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot:        stubSlot,
+				Hash:        stubHash,
+				BlockNumber: currentTip.BlockNumber + 1,
+				Type:        0,
+				PrevHash:    currentTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point:       ocommon.NewPoint(stubSlot, stubHash),
 		BlockNumber: currentTip.BlockNumber + 1,
@@ -1563,5 +1575,86 @@ func requireChunkTrio(t *testing.T, name, dir string) {
 		require.NoError(t, os.WriteFile(
 			filepath.Join(dir, name+ext), data, 0o640,
 		))
+	}
+}
+
+// TestLoadWithDBPropagatesApplyRowBatching verifies that `dingo load`, which
+// replays blocks without validating them, honours the operator's
+// ledgerApplyRowBatchingEnabled setting as serve mode does.
+func TestLoadWithDBPropagatesApplyRowBatching(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stop := errors.New("stop after ledger config capture")
+	run := func(enabled bool) ledger.LedgerStateConfig {
+		db := newTestDB(t)
+		var captured ledger.LedgerStateConfig
+		old := newLedgerStateForLoad
+		newLedgerStateForLoad = func(cfg ledger.LedgerStateConfig) (*ledger.LedgerState, error) {
+			captured = cfg
+			return nil, stop
+		}
+		t.Cleanup(func() { newLedgerStateForLoad = old })
+		err := LoadWithDB(
+			context.Background(),
+			&config.Config{
+				Network:                       "preview",
+				LedgerApplyRowBatchingEnabled: enabled,
+			},
+			logger,
+			"unused",
+			db,
+		)
+		require.ErrorIs(t, err, stop)
+		return captured
+	}
+	require.True(t, run(true).ApplyRowBatchingEnabled)
+	require.False(t, run(false).ApplyRowBatchingEnabled)
+}
+
+func TestLoadWithDBDefaultConfigCertifiesLegacySnapshots(t *testing.T) {
+	dataDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sqlDB, err := sql.Open("sqlite", filepath.Join(dataDir, "metadata.sqlite")+
+		"?_pragma=synchronous(OFF)&_pragma=journal_mode(MEMORY)")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runner := migrations.Runner{
+		DB: sqlDB, Dialect: "sqlite", Registry: registry[:34],
+		Locker: migrations.NewProcessLocker(), Logger: logger,
+	}
+	require.NoError(t, runner.Run(t.Context()))
+	for _, query := range []string{
+		`INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots) VALUES (658, 280000000, 6, 1, 432000)`,
+		`INSERT INTO pool_stake_snapshot (epoch, snapshot_type, pool_key_hash, total_stake, delegator_count, captured_slot, calculation_version) VALUES (658, 'mark', X'010203', '123456789', 1, 279999999, 2)`,
+		`INSERT INTO reward_snapshot (epoch, snapshot_type, total_active_stake, total_pool_count, total_delegators, captured_slot, boundary_slot, protocol_version, calculation_version) VALUES (658, 'mark', '123456789', 1, 1, 279999999, 280000000, 9, 2)`,
+	} {
+		_, err := sqlDB.ExecContext(t.Context(), query)
+		require.NoError(t, err)
+	}
+	params := mockledger.NewMockConwayProtocolParams()
+	params.ProtocolVersion.Major = 9
+	raw, err := gcbor.Encode(&params)
+	require.NoError(t, err)
+	_, err = sqlDB.ExecContext(t.Context(),
+		`INSERT INTO pparams (era_id, epoch, added_slot, cbor) VALUES (6, 658, 280000000, ?)`, raw)
+	require.NoError(t, err)
+
+	stopAfterOpen := errors.New("stop after certified database open")
+	old := newLedgerStateForLoad
+	newLedgerStateForLoad = func(ledger.LedgerStateConfig) (*ledger.LedgerState, error) {
+		return nil, stopAfterOpen
+	}
+	t.Cleanup(func() { newLedgerStateForLoad = old })
+	cfg := &config.Config{DatabasePath: dataDir}
+	cfg.Plugins.Storage.Blob = plugin.Selection{Provider: "badger"}
+	cfg.Plugins.Storage.Metadata = plugin.Selection{Provider: "sqlite"}
+	err = LoadWithDB(t.Context(), cfg, logger, "unused", nil)
+	require.ErrorIs(t, err, stopAfterOpen)
+	for _, table := range []string{"pool_stake_snapshot", "reward_snapshot"} {
+		var version uint
+		require.NoError(t, sqlDB.QueryRowContext(t.Context(),
+			"SELECT calculation_version FROM "+table).Scan(&version))
+		require.Equal(t, models.RewardStakeCalculationVersion, version)
 	}
 }

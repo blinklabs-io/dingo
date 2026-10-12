@@ -176,26 +176,27 @@ func validateTxInBlock(
 		txs:    []lcommon.Transaction{tx},
 		era:    era,
 	}
-	return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
-			txn,
-			ocommon.NewPoint(200, block.Hash().Bytes()),
-			block,
-			true,
-			false,
-			false,
-			nil,
-			envelopeParent{origin: true},
-			nil,
-			desc,
-			pp,
-			nil,
-			0,
-			0,
-			false,
-		)
-		return err
-	})
+	return ls.db.Transaction(t.Context(), true).
+		Do(func(txn *database.Txn) error {
+			_, err := ls.ledgerProcessBlock(t.Context(),
+				txn,
+				ocommon.NewPoint(200, block.Hash().Bytes()),
+				block,
+				true,
+				false,
+				false,
+				nil,
+				envelopeParent{origin: true},
+				nil,
+				desc,
+				pp,
+				nil,
+				0,
+				0,
+				false,
+			)
+			return err
+		})
 }
 
 // conwayBlockTestPparams extends the stake-refund fixture with the block size
@@ -263,7 +264,7 @@ func TestBlockValueConservationRefundsCurrentDepositAfterSameTxReregistration(
 							lcommon.CertificateTypeDeregistration,
 						),
 						StakeCredential: cred,
-						Amount:          int64(recordedDeposit),
+						Amount:          recordedDeposit,
 					},
 					&lcommon.StakeRegistrationCertificate{
 						CertType: uint(
@@ -342,23 +343,23 @@ func TestBlockZeroConwayDepositsAndRefundsAreAccepted(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		cert func(amount int64) lcommon.Certificate
+		cert func(amount uint64) lcommon.Certificate
 	}{
-		{"stake registration", func(a int64) lcommon.Certificate {
+		{"stake registration", func(a uint64) lcommon.Certificate {
 			return &lcommon.RegistrationCertificate{
 				CertType:        uint(lcommon.CertificateTypeRegistration),
 				StakeCredential: fresh,
 				Amount:          a,
 			}
 		}},
-		{"stake deregistration", func(a int64) lcommon.Certificate {
+		{"stake deregistration", func(a uint64) lcommon.Certificate {
 			return &lcommon.DeregistrationCertificate{
 				CertType:        uint(lcommon.CertificateTypeDeregistration),
 				StakeCredential: registered,
 				Amount:          a,
 			}
 		}},
-		{"stake and delegate registration", func(a int64) lcommon.Certificate {
+		{"stake and delegate registration", func(a uint64) lcommon.Certificate {
 			return &lcommon.StakeRegistrationDelegationCertificate{
 				CertType:        uint(lcommon.CertificateTypeStakeRegistrationDelegation),
 				StakeCredential: fresh,
@@ -366,7 +367,7 @@ func TestBlockZeroConwayDepositsAndRefundsAreAccepted(t *testing.T) {
 				Amount:          a,
 			}
 		}},
-		{"vote and delegate registration", func(a int64) lcommon.Certificate {
+		{"vote and delegate registration", func(a uint64) lcommon.Certificate {
 			return &lcommon.VoteRegistrationDelegationCertificate{
 				CertType:        uint(lcommon.CertificateTypeVoteRegistrationDelegation),
 				StakeCredential: fresh,
@@ -374,7 +375,7 @@ func TestBlockZeroConwayDepositsAndRefundsAreAccepted(t *testing.T) {
 				Amount:          a,
 			}
 		}},
-		{"stake vote and delegate registration", func(a int64) lcommon.Certificate {
+		{"stake vote and delegate registration", func(a uint64) lcommon.Certificate {
 			return &lcommon.StakeVoteRegistrationDelegationCertificate{
 				CertType:        uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation),
 				StakeCredential: fresh,
@@ -383,14 +384,14 @@ func TestBlockZeroConwayDepositsAndRefundsAreAccepted(t *testing.T) {
 				Amount:          a,
 			}
 		}},
-		{"drep registration", func(a int64) lcommon.Certificate {
+		{"drep registration", func(a uint64) lcommon.Certificate {
 			return &lcommon.RegistrationDrepCertificate{
 				CertType:       uint(lcommon.CertificateTypeRegistrationDrep),
 				DrepCredential: freshDrep,
 				Amount:         a,
 			}
 		}},
-		{"drep deregistration", func(a int64) lcommon.Certificate {
+		{"drep deregistration", func(a uint64) lcommon.Certificate {
 			return &lcommon.DeregistrationDrepCertificate{
 				CertType:       uint(lcommon.CertificateTypeDeregistrationDrep),
 				DrepCredential: drep,
@@ -400,7 +401,7 @@ func TestBlockZeroConwayDepositsAndRefundsAreAccepted(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			run := func(amount int64) error {
+			run := func(amount uint64) error {
 				return validateTxInBlock(
 					t, ls, conway.EraConway, eras.ConwayEraDesc, pp,
 					conwayCertTx(0, tc.cert(amount)),
@@ -409,12 +410,108 @@ func TestBlockZeroConwayDepositsAndRefundsAreAccepted(t *testing.T) {
 			err := run(0)
 			require.False(t, depositRuleRejected(err),
 				"an explicit zero must match the zero parameter: %v", err)
-			for _, amount := range []int64{1, -1} {
+			for _, amount := range []uint64{1} {
 				err := run(amount)
 				require.True(t, depositRuleRejected(err),
 					"amount %d against a zero deposit must be rejected: %v",
 					amount, err)
 			}
+		})
+	}
+}
+
+func TestConwayExplicitCertificatesRejectNegativeDepositCBOR(t *testing.T) {
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.CredentialHash{0xd1},
+	}
+	drep := lcommon.Drep{Type: lcommon.DrepTypeAbstain}
+	tests := []struct {
+		name        string
+		certificate lcommon.Certificate
+		amountIndex int
+	}{
+		{
+			name: "registration",
+			certificate: &lcommon.RegistrationCertificate{
+				CertType:        uint(lcommon.CertificateTypeRegistration),
+				StakeCredential: credential,
+			},
+			amountIndex: 2,
+		},
+		{
+			name: "deregistration",
+			certificate: &lcommon.DeregistrationCertificate{
+				CertType:        uint(lcommon.CertificateTypeDeregistration),
+				StakeCredential: credential,
+			},
+			amountIndex: 2,
+		},
+		{
+			name: "stake registration delegation",
+			certificate: &lcommon.StakeRegistrationDelegationCertificate{
+				CertType:        uint(lcommon.CertificateTypeStakeRegistrationDelegation),
+				StakeCredential: credential,
+			},
+			amountIndex: 3,
+		},
+		{
+			name: "vote registration delegation",
+			certificate: &lcommon.VoteRegistrationDelegationCertificate{
+				CertType:        uint(lcommon.CertificateTypeVoteRegistrationDelegation),
+				StakeCredential: credential,
+				Drep:            drep,
+			},
+			amountIndex: 3,
+		},
+		{
+			name: "stake vote registration delegation",
+			certificate: &lcommon.StakeVoteRegistrationDelegationCertificate{
+				CertType:        uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation),
+				StakeCredential: credential,
+				Drep:            drep,
+			},
+			amountIndex: 4,
+		},
+		{
+			name: "drep registration",
+			certificate: &lcommon.RegistrationDrepCertificate{
+				CertType:       uint(lcommon.CertificateTypeRegistrationDrep),
+				DrepCredential: credential,
+			},
+			amountIndex: 2,
+		},
+		{
+			name: "drep deregistration",
+			certificate: &lcommon.DeregistrationDrepCertificate{
+				CertType:       uint(lcommon.CertificateTypeDeregistrationDrep),
+				DrepCredential: credential,
+			},
+			amountIndex: 2,
+		},
+	}
+	negativeDeposit, err := cbor.Encode(int64(-1))
+	require.NoError(t, err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			certificate, err := cbor.Encode(tc.certificate)
+			require.NoError(t, err)
+			var decoded lcommon.CertificateWrapper
+			_, err = cbor.DecodeExact(certificate, &decoded)
+			require.NoError(t, err,
+				"zero-deposit fixture must decode before mutation")
+
+			var fields []cbor.RawMessage
+			_, err = cbor.Decode(certificate, &fields)
+			require.NoError(t, err)
+			require.Greater(t, len(fields), tc.amountIndex)
+			fields[tc.amountIndex] = cbor.RawMessage(negativeDeposit)
+			certificate, err = cbor.Encode(fields)
+			require.NoError(t, err)
+
+			_, err = cbor.DecodeExact(certificate, &decoded)
+			require.Error(t, err,
+				"negative explicit deposit must be rejected while decoding")
 		})
 	}
 }

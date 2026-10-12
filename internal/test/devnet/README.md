@@ -97,6 +97,11 @@ checks EB notification, relay fetch, ranking-header reference, and ledger
 application. It selects that feature scenario only; it does not change the
 canonical Conway specs or the `--accelerated` timeline.
 
+The Leios spec uses 300-slot, 150-second epochs with `f: 0.05` and `k: 3`.
+Its 240-slot nonce stability window contains 12 expected blocks, which keeps
+the finite era horizon advancing while leaving half of the ten-minute scenario
+after voting registrations become usable in epoch 2.
+
 ## Network parameters
 
 Dingo mode reads `testnet-dingo.yaml`, conformance mode reads `testnet.yaml`.
@@ -617,7 +622,7 @@ session; `DiffSnapshots(a, b)` reports every divergence between two such
 snapshots.
 
 `TestLedgerStateConsensus` additionally queries treasury/reserves and absolute
-mark/set/go stake snapshots inside the same stable-tip check. Its samples cover
+mark/set/go stake snapshots at the same acquired point. Its samples cover
 epochs 1 and 2: the first update must leave the d=0 genesis treasury empty, and
 the next must use epoch 0's block production. Both samples compare pots and
 stake distribution with cardano-node. Run it on a fresh network so the epoch-1
@@ -639,16 +644,18 @@ implemented in `ledger/queries_stakedistribution.go` and
 specifically (the rest of that TODO block is unrelated to this scenario and
 remains open).
 
-Dingo's LocalStateQuery server (`ouroboros/localstatequery.go`) does not yet
-implement point-specific ledger views: every `Acquire` — even
-`Acquire(point)` for a specific historical block — is answered against the
-node's live tip (tracked upstream as blinklabs-io/dingo#382). Until that
-lands, `SnapshotAtTip` only supports "acquire the current volatile tip",
-and comparing two nodes at the same point requires confirming via NtN
-chain-tip polling that both report an identical tip immediately before and
-after the LocalStateQuery round trip — see `TestLedgerStateConsensus` for
-the retry loop this requires. This is why the scenario samples ledger state
-periodically at settled common tips rather than replaying every block.
+Dingo's LocalStateQuery server (`ouroboros/localstatequery.go`) answers every
+query in a session from a ledger snapshot opened at `Acquire`, and
+`Acquire(point)` reads at that block for every query this scenario issues
+(protocol parameters, stake distribution, whole UTxO set, account state and
+stake snapshots). Each `TestLedgerStateConsensus` sample therefore acquires the
+trailing node's tip as a specific point on both producers, so both answers
+describe the same block however far either node advances during the queries.
+If the two nodes have forked, the leading node's `Acquire` fails with
+point-not-on-chain and the sample retries with a new candidate; a candidate at
+or past the end of the intended epoch fails the test instead. The scenario
+samples rather than replaying every block because each sample walks the whole
+UTxO set on both nodes.
 
 ### Running the CIP-50 pledge-leverage scenario
 
@@ -715,7 +722,7 @@ Reference-conformance scenario
 | Test | What it verifies |
 |------|-------------------|
 | `TestCardanoProducerChainAdvances` | `cardano-producer`'s tip advances (sanity check on the reference node) |
-| `TestLedgerStateConsensus` | dingo-producer's and cardano-producer's ledger state (protocol parameters, stake distribution, whole UTxO set) match at several settled common-tip samples over the run; fails with a diagnostic naming every divergence found |
+| `TestLedgerStateConsensus` | dingo-producer's and cardano-producer's ledger state (protocol parameters, stake distribution, whole UTxO set) match at a point acquired on both nodes in epochs 1 and 2; fails with a diagnostic naming every divergence found |
 
 Dingo-only feature scenario
 (`//go:build linux && devnet && !devnet_conformance`) runs only in the default
@@ -781,7 +788,7 @@ harness and the compose port mappings always agree.
 | `testnet.yaml`               | Canonical network spec for conformance mode: 2 pools |
 | `testnet-dingo-accelerated.yaml` | Accelerated dingo-mode spec: 60s epochs, `k: 10`, 0.5s slots |
 | `testnet-accelerated.yaml`   | Accelerated conformance-mode spec: same timing, 2 pools |
-| `testnet-dingo-leios.yaml`   | Dijkstra/Leios all-Dingo integration spec: Dijkstra at genesis, 120-slot epochs, 0.5s slots |
+| `testnet-dingo-leios.yaml`   | Dijkstra/Leios all-Dingo integration spec: Dijkstra at genesis, 300-slot epochs, 0.5s slots |
 | `topology/dingo-1.json`, `dingo-2.json`, `dingo-3.json`, `dingo-relay.json` | Static peer lists for dingo mode |
 | `topology/dingo-producer.json`, `cardano-producer.json`, `relay.json` | Static peer lists for conformance mode |
 | `.env`                       | Sets the default `COMPOSE_PROFILES=dingo` |

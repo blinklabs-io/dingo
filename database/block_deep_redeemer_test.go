@@ -42,7 +42,7 @@ func TestBlockByPointPreservesDeepConwayRedeemer(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(block, nil))
 
-	stored, err := BlockByPoint(db, ocommon.NewPoint(block.Slot, hash))
+	stored, err := BlockByPoint(t.Context(), db, ocommon.NewPoint(block.Slot, hash))
 	require.NoError(t, err)
 	require.Equal(t, block.ID, stored.ID)
 	require.Equal(t, block.Number, stored.Number)

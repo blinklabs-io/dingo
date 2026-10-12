@@ -15,6 +15,7 @@
 package peergov
 
 import (
+	"context"
 	"net"
 	"strconv"
 	"strings"
@@ -49,7 +50,7 @@ type LedgerPeerProvider interface {
 	// either no retirement certificate, or a retirement epoch in the future.
 	// Returns an empty slice if no relays are available.
 	// Returns an error if the underlying data cannot be read.
-	GetPoolRelays() ([]PoolRelay, error)
+	GetPoolRelays(context.Context) ([]PoolRelay, error)
 
 	// CurrentSlot returns the current chain tip slot number.
 	// This is used to check if UseLedgerAfterSlot threshold has been reached.

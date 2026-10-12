@@ -64,6 +64,7 @@ type ObservedHeader struct {
 	Slot        uint64 `json:"slot"`
 	BlockNumber uint64 `json:"block"`
 	Hash        []byte `json:"hash"`
+	PrevHash    []byte `json:"prevHash"`
 	// BodySize is the header's declared block body size. It is what
 	// lets a scenario tell a block carrying transactions from an empty
 	// one without a node-to-client connection, which the mixed
@@ -73,6 +74,7 @@ type ObservedHeader struct {
 	// an endorser block. Scenarios can match it to the separately fetched EB.
 	LeiosAnnouncementHash []byte `json:"leiosAnnouncementHash,omitempty"`
 	LeiosAnnouncementSize uint64 `json:"leiosAnnouncementSize,omitempty"`
+	LeiosCertified        bool   `json:"leiosCertified,omitempty"`
 }
 
 // ChainSnapshot is a consistent point-in-time copy of one node's

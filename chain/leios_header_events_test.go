@@ -15,6 +15,7 @@
 package chain_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -75,7 +76,7 @@ func newHeaderStreamChain(t *testing.T) (*chain.Chain, *event.EventBus) {
 	t.Helper()
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
-	cm, err := chain.NewManager(nil, bus)
+	cm, err := chain.NewManager(context.Background(), nil, bus)
 	require.NoError(t, err)
 	c := cm.PrimaryChain()
 	require.NotNil(t, c)
@@ -132,9 +133,9 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 			// TestHeaderAnnouncementRequiresCryptoVerifiedHeader.
 			switch h := tc.header.(type) {
 			case announcingStreamHeader:
-				require.NoError(t, c.AddVerifiedBlockHeader(h))
+				require.NoError(t, c.AddVerifiedBlockHeader(context.Background(), h))
 			case headerStreamHeader:
-				require.NoError(t, c.AddVerifiedBlockHeader(h))
+				require.NoError(t, c.AddVerifiedBlockHeader(context.Background(), h))
 			default:
 				t.Fatalf("unexpected header type %T", h)
 			}
@@ -173,17 +174,20 @@ func TestClearHeadersQueuesHeaderInvalidation(t *testing.T) {
 	subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
 	defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
 
-	require.NoError(t, c.AddVerifiedBlockHeader(announcingStreamHeader{
-		headerStreamHeader: headerStreamHeader{
-			hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
-			prevHash:    lcommon.NewBlake2b256(nil),
-			blockNumber: 1,
-			slot:        577,
-		},
-		ebHash:    lcommon.NewBlake2b256([]byte("announced-eb")),
-		ebSize:    4096,
-		announces: true,
-	}))
+	require.NoError(
+		t,
+		c.AddVerifiedBlockHeader(context.Background(), announcingStreamHeader{
+			headerStreamHeader: headerStreamHeader{
+				hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
+				prevHash:    lcommon.NewBlake2b256(nil),
+				blockNumber: 1,
+				slot:        577,
+			},
+			ebHash:    lcommon.NewBlake2b256([]byte("announced-eb")),
+			ebSize:    4096,
+			announces: true,
+		}),
+	)
 	c.ClearHeaders()
 	c.PublishPendingChainUpdates()
 
@@ -251,8 +255,8 @@ func TestRollbackToQueuedHeaderInvalidatesLaterHeaders(t *testing.T) {
 		ebSize:    4096,
 		announces: true,
 	}
-	require.NoError(t, c.AddVerifiedBlockHeader(first))
-	require.NoError(t, c.AddVerifiedBlockHeader(second))
+	require.NoError(t, c.AddVerifiedBlockHeader(context.Background(), first))
+	require.NoError(t, c.AddVerifiedBlockHeader(context.Background(), second))
 	c.PublishPendingChainUpdates()
 	for range 2 {
 		testutil.RequireReceive(t, ch, 2*time.Second, "announcement")
@@ -260,7 +264,7 @@ func TestRollbackToQueuedHeaderInvalidatesLaterHeaders(t *testing.T) {
 
 	// Roll back to the first queued header. The second is dropped; no block
 	// was ever added, so no chain.update is produced.
-	require.NoError(t, c.Rollback(ocommon.NewPoint(
+	require.NoError(t, c.Rollback(context.Background(), ocommon.NewPoint(
 		first.slot,
 		first.hash.Bytes(),
 	)))
@@ -276,7 +280,7 @@ func TestRollbackToQueuedHeaderInvalidatesLaterHeaders(t *testing.T) {
 	assert.NotZero(t, invalid.Seq)
 
 	// Rolling back to the queue tip drops nothing and publishes nothing.
-	require.NoError(t, c.Rollback(ocommon.NewPoint(
+	require.NoError(t, c.Rollback(context.Background(), ocommon.NewPoint(
 		first.slot,
 		first.hash.Bytes(),
 	)))
@@ -329,10 +333,15 @@ func TestRollbackInvalidationRoutedThroughSequencer(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, blocks, 2)
 	for i := range blocks {
-		_, addErr := c.AddBlockWithPointDeferred(blocks[i], ocommon.Point{
-			Slot: blocks[i].SlotNumber(),
-			Hash: blocks[i].Hash().Bytes(),
-		}, nil)
+		_, addErr := c.AddBlockWithPointDeferred(
+			context.Background(),
+			blocks[i],
+			ocommon.Point{
+				Slot: blocks[i].SlotNumber(),
+				Hash: blocks[i].Hash().Bytes(),
+			},
+			nil,
+		)
 		require.NoError(t, addErr)
 	}
 	c.PublishPendingChainUpdates()
@@ -346,10 +355,10 @@ func TestRollbackInvalidationRoutedThroughSequencer(t *testing.T) {
 	second.prevHash = first.hash
 	second.blockNumber = first.blockNumber + 1
 	second.slot = first.slot + 1
-	require.NoError(t, c.AddVerifiedBlockHeader(first))
-	require.NoError(t, c.AddVerifiedBlockHeader(second))
+	require.NoError(t, c.AddVerifiedBlockHeader(context.Background(), first))
+	require.NoError(t, c.AddVerifiedBlockHeader(context.Background(), second))
 
-	evts, err := c.RollbackDeferred(ocommon.Point{
+	evts, err := c.RollbackDeferred(context.Background(), ocommon.Point{
 		Slot: blocks[0].SlotNumber(),
 		Hash: blocks[0].Hash().Bytes(),
 	})
@@ -381,7 +390,7 @@ func TestRollbackInvalidationRoutedThroughSequencer(t *testing.T) {
 		ebSize:    4096,
 		announces: true,
 	}
-	require.NoError(t, c.AddVerifiedBlockHeader(third))
+	require.NoError(t, c.AddVerifiedBlockHeader(context.Background(), third))
 
 	c.PublishPendingChainUpdates()
 
@@ -493,9 +502,9 @@ func TestNonDeferredRollbackPublishesInvalidation(t *testing.T) {
 		ebSize:    4096,
 		announces: true,
 	}
-	require.NoError(t, c.AddVerifiedBlockHeader(first))
-	require.NoError(t, c.AddVerifiedBlockHeader(second))
-	require.NoError(t, c.Rollback(ocommon.NewPoint(
+	require.NoError(t, c.AddVerifiedBlockHeader(context.Background(), first))
+	require.NoError(t, c.AddVerifiedBlockHeader(context.Background(), second))
+	require.NoError(t, c.Rollback(context.Background(), ocommon.NewPoint(
 		first.slot,
 		first.hash.Bytes(),
 	)))
@@ -562,10 +571,15 @@ func TestAddLocalBlockInvalidatesDiscardedPeerHeaders(t *testing.T) {
 	blocks, err := testfixtures.GenerateConwayChain(2)
 	require.NoError(t, err)
 	for i := range blocks {
-		_, addErr := c.AddBlockWithPointDeferred(blocks[i], ocommon.Point{
-			Slot: blocks[i].SlotNumber(),
-			Hash: blocks[i].Hash().Bytes(),
-		}, nil)
+		_, addErr := c.AddBlockWithPointDeferred(
+			context.Background(),
+			blocks[i],
+			ocommon.Point{
+				Slot: blocks[i].SlotNumber(),
+				Hash: blocks[i].Hash().Bytes(),
+			},
+			nil,
+		)
 		require.NoError(t, addErr)
 	}
 	c.PublishPendingChainUpdates()
@@ -582,7 +596,10 @@ func TestAddLocalBlockInvalidatesDiscardedPeerHeaders(t *testing.T) {
 		ebSize:    4096,
 		announces: true,
 	}
-	require.NoError(t, c.AddVerifiedBlockHeader(peerHeader))
+	require.NoError(
+		t,
+		c.AddVerifiedBlockHeader(context.Background(), peerHeader),
+	)
 	c.PublishPendingChainUpdates()
 	announcement := testutil.RequireReceive(
 		t, ch, 2*time.Second, "peer header announcement",
@@ -602,7 +619,7 @@ func TestAddLocalBlockInvalidatesDiscardedPeerHeaders(t *testing.T) {
 			slot:        peerHeader.slot + 10,
 		},
 	}}
-	require.NoError(t, c.AddLocalBlock(local))
+	require.NoError(t, c.AddLocalBlock(context.Background(), local))
 	require.Zero(t, c.HeaderCount(), "the local block discards peer headers")
 
 	// AddLocalBlock drains the sequencer itself; no other event is needed.
@@ -647,10 +664,15 @@ func TestAddLocalBlockNonAnnouncingPublishesNoAnnouncement(t *testing.T) {
 		})
 		blocks, err := testfixtures.GenerateConwayChain(1)
 		require.NoError(t, err)
-		_, err = c.AddBlockWithPointDeferred(blocks[0], ocommon.Point{
-			Slot: blocks[0].SlotNumber(),
-			Hash: blocks[0].Hash().Bytes(),
-		}, nil)
+		_, err = c.AddBlockWithPointDeferred(
+			context.Background(),
+			blocks[0],
+			ocommon.Point{
+				Slot: blocks[0].SlotNumber(),
+				Hash: blocks[0].Hash().Bytes(),
+			},
+			nil,
+		)
 		require.NoError(t, err)
 		c.PublishPendingChainUpdates()
 		return c, ch, blocks
@@ -671,7 +693,13 @@ func TestAddLocalBlockNonAnnouncingPublishesNoAnnouncement(t *testing.T) {
 
 	t.Run("nothing to discard publishes nothing at all", func(t *testing.T) {
 		c, ch, blocks := newFixture(t)
-		require.NoError(t, c.AddLocalBlock(nonAnnouncingBlock(blocks[0])))
+		require.NoError(
+			t,
+			c.AddLocalBlock(
+				context.Background(),
+				nonAnnouncingBlock(blocks[0]),
+			),
+		)
 		testutil.RequireNoReceive(
 			t,
 			ch,
@@ -695,13 +723,22 @@ func TestAddLocalBlockNonAnnouncingPublishesNoAnnouncement(t *testing.T) {
 				ebSize:    4096,
 				announces: true,
 			}
-			require.NoError(t, c.AddVerifiedBlockHeader(peerHeader))
+			require.NoError(
+				t,
+				c.AddVerifiedBlockHeader(context.Background(), peerHeader),
+			)
 			c.PublishPendingChainUpdates()
 			testutil.RequireReceive(
 				t, ch, 2*time.Second, "peer announcement",
 			)
 
-			require.NoError(t, c.AddLocalBlock(nonAnnouncingBlock(blocks[0])))
+			require.NoError(
+				t,
+				c.AddLocalBlock(
+					context.Background(),
+					nonAnnouncingBlock(blocks[0]),
+				),
+			)
 			evt := testutil.RequireReceive(
 				t, ch, 2*time.Second, "invalidation for the discarded header",
 			)
@@ -737,10 +774,15 @@ func TestAddLocalBlockAnnouncesItselfAfterInvalidation(t *testing.T) {
 	blocks, err := testfixtures.GenerateConwayChain(2)
 	require.NoError(t, err)
 	for i := range blocks {
-		_, addErr := c.AddBlockWithPointDeferred(blocks[i], ocommon.Point{
-			Slot: blocks[i].SlotNumber(),
-			Hash: blocks[i].Hash().Bytes(),
-		}, nil)
+		_, addErr := c.AddBlockWithPointDeferred(
+			context.Background(),
+			blocks[i],
+			ocommon.Point{
+				Slot: blocks[i].SlotNumber(),
+				Hash: blocks[i].Hash().Bytes(),
+			},
+			nil,
+		)
 		require.NoError(t, addErr)
 	}
 	c.PublishPendingChainUpdates()
@@ -758,7 +800,10 @@ func TestAddLocalBlockAnnouncesItselfAfterInvalidation(t *testing.T) {
 		ebSize:    4096,
 		announces: true,
 	}
-	require.NoError(t, c.AddVerifiedBlockHeader(peerHeader))
+	require.NoError(
+		t,
+		c.AddVerifiedBlockHeader(context.Background(), peerHeader),
+	)
 	c.PublishPendingChainUpdates()
 	testutil.RequireReceive(t, ch, 2*time.Second, "peer announcement")
 
@@ -774,7 +819,7 @@ func TestAddLocalBlockAnnouncesItselfAfterInvalidation(t *testing.T) {
 		ebSize:    4096,
 		announces: true,
 	}}
-	require.NoError(t, c.AddLocalBlock(local))
+	require.NoError(t, c.AddLocalBlock(context.Background(), local))
 
 	// Invalidation first, then the forged block's own announcement.
 	invalidation := testutil.RequireReceive(

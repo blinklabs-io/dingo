@@ -16,6 +16,7 @@ package mithril
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -106,13 +107,14 @@ func openBootstrappedImmutable(
 // validates the selected signed state against the existing trust point and
 // preserves the verified local tail for ordinary ledger replay.
 func verifyCatchupBeforeImport(
+	ctx context.Context,
 	db *database.Database,
 	imm *immutable.ImmutableDb,
 	targetImmutable uint64,
 	continueAfterLocalAhead bool,
 	logger *slog.Logger,
 ) (upToDate bool, err error) {
-	verifyErr := verifyCatchupIntersection(db, imm, logger)
+	verifyErr := verifyCatchupIntersection(ctx, db, imm, logger)
 	if verifyErr == nil {
 		return false, nil
 	}
@@ -160,11 +162,12 @@ func verifyCatchupBeforeImport(
 // the check about whichever tree holds that name now, which is not necessarily
 // the one the import is about to read.
 func verifyCatchupIntersection(
+	ctx context.Context,
 	db *database.Database,
 	imm *immutable.ImmutableDb,
 	logger *slog.Logger,
 ) error {
-	recent, err := database.BlocksRecent(db, 1)
+	recent, err := database.BlocksRecent(ctx, db, 1)
 	if err != nil {
 		return fmt.Errorf("reading local chain tip: %w", err)
 	}
@@ -178,7 +181,7 @@ func verifyCatchupIntersection(
 	)
 	if err != nil {
 		if errors.Is(err, immutable.ErrPointBeyondLastChunk) {
-			return verifyLocalAheadOfArtifactTip(db, imm, tip, logger)
+			return verifyLocalAheadOfArtifactTip(ctx, db, imm, tip, logger)
 		}
 		return fmt.Errorf("locating local tip in target immutable DB: %w", err)
 	}
@@ -189,7 +192,7 @@ func verifyCatchupIntersection(
 		return fmt.Errorf("reading target immutable at local tip: %w", err)
 	}
 	if first == nil {
-		return verifyLocalAheadOfArtifactTip(db, imm, tip, logger)
+		return verifyLocalAheadOfArtifactTip(ctx, db, imm, tip, logger)
 	}
 	if first.Slot != tip.Slot || !bytes.Equal(first.Hash, tip.Hash) {
 		return fmt.Errorf(
@@ -209,6 +212,7 @@ func verifyCatchupIntersection(
 }
 
 func verifyLocalAheadOfArtifactTip(
+	ctx context.Context,
 	db *database.Database,
 	imm *immutable.ImmutableDb,
 	localTip models.Block,
@@ -222,6 +226,7 @@ func verifyLocalAheadOfArtifactTip(
 		return errors.New("catch-up: target immutable DB has no chain tip")
 	}
 	containsArtifactTip, err := localChainDescendsFromPoint(
+		ctx,
 		db, localTip, *artifactTip,
 	)
 	if err != nil {
@@ -247,17 +252,19 @@ func verifyLocalAheadOfArtifactTip(
 }
 
 func localChainDescendsFromPoint(
+	ctx context.Context,
 	db *database.Database,
 	localTip models.Block,
 	ancestor ocommon.Point,
 ) (bool, error) {
 	_, descends, err := localChainBlockHashesAfterPoint(
-		db, localTip, ancestor,
+		ctx, db, localTip, ancestor,
 	)
 	return descends, err
 }
 
 func localChainBlockAtSlot(
+	ctx context.Context,
 	db *database.Database,
 	localTip models.Block,
 	slot uint64,
@@ -278,7 +285,7 @@ func localChainBlockAtSlot(
 			)
 		}
 		visited[key] = struct{}{}
-		prev, err := database.BlockByHash(db, cur.PrevHash)
+		prev, err := database.BlockByHash(ctx, db, cur.PrevHash)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
 				return models.Block{}, false, nil
@@ -293,6 +300,7 @@ func localChainBlockAtSlot(
 }
 
 func localChainBlockHashesAfterPoint(
+	ctx context.Context,
 	db *database.Database,
 	localTip models.Block,
 	ancestor ocommon.Point,
@@ -317,7 +325,7 @@ func localChainBlockHashesAfterPoint(
 		}
 		path[key] = struct{}{}
 
-		prev, err := database.BlockByHash(db, cur.PrevHash)
+		prev, err := database.BlockByHash(ctx, db, cur.PrevHash)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
 				return nil, false, nil

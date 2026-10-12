@@ -8,7 +8,7 @@
   <a href="https://discord.gg/5fPRZnX4qW"><img src="https://img.shields.io/badge/Discord-7289DA?style=flat&logo=discord&logoColor=white" alt="Discord"></a>
 </div>
 
-> ⚠️ **WARNING: Dingo is under heavy active development and is not yet ready for production use. It should only be used on testnets (preview, preprod) and devnets. Do not use Dingo on mainnet with real funds.**
+> ⚠️ **WARNING: Dingo is under heavy active development and is not yet ready for mainnet block production use. It should only be used on testnets (preview, preprod, musashi) and devnets. Do not use Dingo on mainnet for block production with real funds.**
 
 Dingo is Blink Labs' Cardano node implementation in Go. It implements the
 Ouroboros networking and consensus protocols, validates ledger state, and
@@ -59,7 +59,15 @@ Use Go 1.26 or later and `make`:
 ```sh
 make build
 ./dingo --help
+./dingo devnet
+
+# Keep the chain between runs, then reset it when needed:
+./dingo devnet --data-dir ./.dingo-devnet
+./dingo devnet --data-dir ./.dingo-devnet --reset
 ```
+
+The npm package supports the same commands, including
+`npx @blinklabs/dingo devnet --data-dir ./.dingo-devnet`.
 
 Run the test suite with race detection using `make test`. See the
 [development guide](docs/development.md) for repository checks, integration

@@ -16,6 +16,7 @@ package health_test
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -170,4 +171,109 @@ func TestMuxHeadCarriesStatusWithoutBody(t *testing.T) {
 	)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.Empty(t, rec.Body.String())
+}
+
+func failing(msg string) func() error {
+	return func() error { return errors.New(msg) }
+}
+
+func passing() error { return nil }
+
+// TestChecksGateTheProbesTheyBelongTo pins which probe each kind of check
+// moves. A readiness check must hold /readyz off while leaving /healthz
+// alone: a node whose database is unavailable should leave the load balancer,
+// not be restarted. A liveness check is the reverse.
+func TestChecksGateTheProbesTheyBelongTo(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		checks    []health.Check
+		wantLive  int
+		wantReady int
+		wantMsg   string
+	}{
+		{
+			name:      "missing readiness callback",
+			checks:    []health.Check{{}},
+			wantLive:  200,
+			wantReady: 503,
+			wantMsg:   "callback is unavailable",
+		},
+		{
+			name:      "missing liveness callback",
+			checks:    []health.Check{{Liveness: true}},
+			wantLive:  503,
+			wantReady: 503,
+			wantMsg:   "callback is unavailable",
+		},
+		{
+			name: "passing checks change nothing",
+			checks: []health.Check{
+				{Fn: passing},
+				{Liveness: true, Fn: passing},
+			},
+			wantLive:  200,
+			wantReady: 200,
+		},
+		{
+			name:      "failing readiness check holds readiness only",
+			checks:    []health.Check{{Fn: failing("database read failed")}},
+			wantLive:  200,
+			wantReady: 503,
+			wantMsg:   "database read failed",
+		},
+		{
+			name: "failing liveness check fails both",
+			checks: []health.Check{
+				{Liveness: true, Fn: failing("slot ticks have stopped")},
+			},
+			wantLive:  503,
+			wantReady: 503,
+			wantMsg:   "slot ticks have stopped",
+		},
+		{
+			name: "first failing readiness check names the reason",
+			checks: []health.Check{
+				{Fn: failing("block forger is not running")},
+				{Fn: failing("database read failed")},
+			},
+			wantLive:  200,
+			wantReady: 503,
+			wantMsg:   "block forger is not running",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			mux := health.NewMux(gap(0), 1000, test.checks...)
+			for path, want := range map[string]int{
+				health.PathLive:   test.wantLive,
+				health.PathHealth: test.wantLive,
+				health.PathReady:  test.wantReady,
+			} {
+				rec := httptest.NewRecorder()
+				mux.ServeHTTP(
+					rec,
+					httptest.NewRequest(http.MethodGet, path, nil),
+				)
+				assert.Equal(t, want, rec.Code, "path %s", path)
+				if want != http.StatusOK {
+					assert.Contains(t, decode(t, rec).Reason, test.wantMsg)
+				}
+			}
+		})
+	}
+}
+
+// TestReadinessChecksWaitForTheTipGap pins that a check never turns a node
+// that is still syncing into a ready one, nor hides why it is not ready.
+func TestReadinessChecksWaitForTheTipGap(t *testing.T) {
+	t.Parallel()
+
+	status := health.Evaluate(
+		gap(5000), 1000, health.Check{Fn: passing},
+	)
+	assert.False(t, status.Ready)
+	assert.Contains(t, status.Reason, "tip gap")
 }

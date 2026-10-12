@@ -17,6 +17,7 @@
 package integration
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -430,11 +431,11 @@ func seedMetadataMigrationDataset(
 	txn := store.Transaction(t.Context())
 	require.NoError(t, store.SetCommitTimestamp(dataset.commitTimestamp, txn))
 	require.NoError(t, txn.Commit())
-	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
+	require.NoError(t, store.SetNodeSettings(context.Background(), &types.NodeSettings{
 		StorageMode: types.StorageModeCore,
 		Network:     dataset.network,
 	}))
-	require.NoError(t, store.SetNodeSettingsGates(
+	require.NoError(t, store.SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{dataset.gateName: dataset.gateValue},
 		1,
 		10,
@@ -452,18 +453,18 @@ func migrateMetadataDataset(
 	src, dest metadata.MetadataStore,
 ) {
 	t.Helper()
-	timestamp, err := src.GetCommitTimestamp()
+	timestamp, err := src.GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
-	settings, err := src.GetNodeSettings()
+	settings, err := src.GetNodeSettings(context.Background())
 	require.NoError(t, err)
-	gates, err := src.GetNodeSettingsGates()
+	gates, err := src.GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 
 	txn := dest.Transaction(t.Context())
 	require.NoError(t, dest.SetCommitTimestamp(timestamp, txn))
 	require.NoError(t, txn.Commit())
-	require.NoError(t, dest.SetNodeSettings(settings))
-	require.NoError(t, dest.SetNodeSettingsGates(gates, 1, 10))
+	require.NoError(t, dest.SetNodeSettings(context.Background(), settings))
+	require.NoError(t, dest.SetNodeSettingsGates(context.Background(), gates, 1, 10))
 }
 
 func requireMetadataDatasetMatches(
@@ -472,16 +473,16 @@ func requireMetadataDatasetMatches(
 	dataset metadataMigrationDataset,
 ) {
 	t.Helper()
-	timestamp, err := store.GetCommitTimestamp()
+	timestamp, err := store.GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, dataset.commitTimestamp, timestamp)
 
-	settings, err := store.GetNodeSettings()
+	settings, err := store.GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, dataset.network, settings.Network)
 	require.Equal(t, types.StorageModeCore, settings.StorageMode)
 
-	gates, err := store.GetNodeSettingsGates()
+	gates, err := store.GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, dataset.gateValue, gates[dataset.gateName])
 }

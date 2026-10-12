@@ -449,24 +449,112 @@ func TestDeactivateAccountsClearsBaseline(t *testing.T) {
 	key := snapshotStakingKey(0x83)
 	poolA := []byte{0xaa, 0xaa}
 	importSnapshotAccount(t, store, key, poolA, nil, 0, 100)
+	execAccountSQL(t, store, `
+INSERT INTO registration (staking_key, credential_tag, added_slot)
+VALUES (?, 0, 200)`, key)
+	execAccountSQL(t, store, `
+UPDATE account SET active = TRUE, added_slot = 200
+WHERE credential_tag = 0 AND staking_key = ?`, key)
 
 	require.NoError(
 		t,
 		store.DeactivateAccounts(nil, []models.StakeCredentialRef{
 			models.NewStakeCredentialRef(0, key),
-		}),
+		}, 300),
 	)
 	execAccountSQL(t, store, `
-UPDATE account SET added_slot = 200
+UPDATE account SET added_slot = 400
 WHERE credential_tag = 0 AND staking_key = ?`, key)
 
-	require.NoError(t, store.RestoreAccountStateAtSlot(150, nil))
+	require.NoError(t, store.RestoreAccountStateAtSlot(350, nil))
 
 	got, err := store.GetAccountByCredential(0, key, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.False(t, got.Active)
 	require.Empty(t, got.Pool)
+}
+
+func TestRestoreAccountStateAtSlotPreservesPV10DRepClear(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	key := snapshotStakingKey(0x84)
+	drep := []byte{0xdd, 0xdd}
+	importSnapshotAccount(t, store, key, nil, nil, 0, 100)
+	execAccountSQL(t, store, `
+INSERT INTO vote_delegation (
+    staking_key, credential_tag, drep, drep_type, added_slot
+) VALUES (?, 0, ?, 0, 200)`, key, drep)
+	execAccountSQL(t, store, `
+UPDATE account SET drep = ?, drep_type = 0, added_slot = 200
+WHERE credential_tag = 0 AND staking_key = ?`, drep, key)
+
+	cleared, err := store.ClearDanglingDRepDelegations(300, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, cleared)
+	execAccountSQL(t, store, `
+UPDATE account SET pool = ?, added_slot = 400
+WHERE credential_tag = 0 AND staking_key = ?`, []byte{0xaa}, key)
+
+	require.NoError(t, store.RestoreAccountStateAtSlot(350, nil))
+	got, err := store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Empty(t, got.Drep)
+
+	require.NoError(t, store.RestoreAccountStateAtSlot(250, nil))
+	got, err = store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, drep, got.Drep)
+	var futureClears int
+	require.NoError(t, store.readDB.QueryRow(`
+SELECT COUNT(*) FROM account_drep_clear WHERE added_slot > 250`).Scan(
+		&futureClears,
+	))
+	require.Zero(t, futureClears)
+}
+
+func TestRestoreAccountStateAtSlotSameSlotCertificateFollowsPV10Clear(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	key := snapshotStakingKey(0x85)
+	oldDRep := []byte{0xdd, 0x01}
+	newDRep := []byte{0xdd, 0x02}
+	importSnapshotAccount(t, store, key, nil, oldDRep, 0, 100)
+
+	cleared, err := store.ClearDanglingDRepDelegations(300, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, cleared)
+	execAccountSQL(t, store, `
+INSERT INTO vote_delegation (
+    staking_key, credential_tag, drep, drep_type, added_slot
+) VALUES (?, 0, ?, 0, 300)`, key, newDRep)
+	execAccountSQL(t, store, `
+UPDATE account SET drep = ?, drep_type = 0, added_slot = 400
+WHERE credential_tag = 0 AND staking_key = ?`, newDRep, key)
+
+	require.NoError(t, store.RestoreAccountStateAtSlot(350, nil))
+	got, err := store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, newDRep, got.Drep)
+}
+
+func TestClearDanglingDRepDelegationsJournalFailureKeepsDelegation(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	key := snapshotStakingKey(0x86)
+	drep := []byte{0xdd, 0x03}
+	importSnapshotAccount(t, store, key, nil, drep, 0, 100)
+	execAccountSQL(t, store, `DROP TABLE account_drep_clear`)
+
+	_, err := store.ClearDanglingDRepDelegations(300, nil)
+	require.Error(t, err)
+	got, err := store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, drep, got.Drep)
 }
 
 // A failing baseline write must not leave the account row behind. The pair is
@@ -506,7 +594,7 @@ func TestDeactivateAccountsBaselineFailureKeepsAccountActive(t *testing.T) {
 
 	require.Error(t, store.DeactivateAccounts(nil, []models.StakeCredentialRef{
 		models.NewStakeCredentialRef(0, key),
-	}))
+	}, 100))
 
 	got, err := store.GetAccountByCredential(0, key, true, nil)
 	require.NoError(t, err)

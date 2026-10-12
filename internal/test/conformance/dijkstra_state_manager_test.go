@@ -16,6 +16,7 @@ package conformance
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"testing"
 
@@ -75,7 +76,7 @@ func TestDijkstraStateManagerAppliesChildBodyOutputsAndDeposits(t *testing.T) {
 	})
 	require.NoError(t, err)
 	txCbor, err := cbor.Encode([]any{
-		cbor.RawMessage(rootBody), map[uint]any{}, true, nil,
+		cbor.RawMessage(rootBody), map[uint]any{}, nil,
 	})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
@@ -87,14 +88,25 @@ func TestDijkstraStateManagerAppliesChildBodyOutputsAndDeposits(t *testing.T) {
 
 	require.NoError(t, manager.ApplyTransaction(tx, 10))
 
-	childUtxo, err := manager.db.UtxoByRef(childHash.Bytes(), 0, nil)
+	childUtxo, err := manager.db.UtxoByRef(
+		context.Background(),
+		childHash.Bytes(),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, childUtxo)
-	rootUtxoExists, err := manager.db.UtxoExists(rootHash.Bytes(), 0, nil)
+	rootUtxoExists, err := manager.db.UtxoExists(
+		context.Background(),
+		rootHash.Bytes(),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.False(t, rootUtxoExists)
 
 	account, err := manager.db.GetAccountByCredential(
+		context.Background(),
 		uint8(common.CredentialTypeAddrKeyHash),
 		stakeCredential[:],
 		false,
@@ -158,10 +170,13 @@ func TestDijkstraStateManagerEnactsDijkstraParameterChange(t *testing.T) {
 		AnchorHash:    bytes.Repeat([]byte{0x36}, 32),
 		ReturnAddress: append([]byte{0xe0}, bytes.Repeat([]byte{0x37}, 28)...),
 	}
-	require.NoError(t, manager.db.SetGovernanceProposal(proposal, nil))
+	require.NoError(
+		t,
+		manager.db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
 
 	proposalID := hex.EncodeToString(proposalHash) + "#0"
-	txn := manager.db.Transaction(true)
+	txn := manager.db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return manager.persistEnactment(txn, proposalID, 2000)

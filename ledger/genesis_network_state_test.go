@@ -15,14 +15,19 @@
 package ledger
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -30,6 +35,73 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
+
+type genesisReadFailureStore struct {
+	blob.BlobStore
+	err error
+}
+
+func (s genesisReadFailureStore) Get(types.Txn, []byte) ([]byte, error) {
+	return nil, s.err
+}
+
+func TestCreateGenesisBlockPropagatesReadFailure(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json", "musashi", cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	ls := &LedgerState{db: db, config: LedgerStateConfig{
+		Database: db, CardanoNodeConfig: nodeCfg,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}}
+	ls.currentTip.Point.Slot = 42
+	base := db.Blob()
+	failure := errors.New("genesis read failed")
+	db.SetBlobStore(genesisReadFailureStore{BlobStore: base, err: failure})
+	err = ls.createGenesisBlock(t.Context())
+	db.SetBlobStore(base)
+	require.ErrorIs(t, err, failure)
+	state, err := db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	require.Nil(t, state)
+	require.NoError(t, ls.createGenesisBlock(t.Context()))
+	state, err = db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+}
+
+func TestCreateGenesisBlockRejectsDifferentSyntheticGenesis(t *testing.T) {
+	t.Parallel()
+	for _, slot := range []uint64{0, 42} {
+		t.Run(fmt.Sprintf("slot=%d", slot), func(t *testing.T) {
+			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+			nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+				"musashi/config.json", "musashi", cardano.EmbeddedConfigFS,
+			)
+			require.NoError(t, err)
+			ls := &LedgerState{db: db, config: LedgerStateConfig{
+				Database: db, CardanoNodeConfig: nodeCfg,
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			}}
+			ls.currentTip.Point.Slot = slot
+			require.NoError(t, db.SetGenesisCbor(0, make([]byte, 32), []byte{1}, nil))
+			err = ls.createGenesisBlock(t.Context())
+			if err == nil {
+				t.Fatal("startup accepted a different stored synthetic genesis")
+			}
+			require.ErrorContains(t, err, "stored synthetic genesis does not match")
+			state, err := db.Metadata().GetNetworkState(nil)
+			require.NoError(t, err)
+			require.Nil(t, state)
+		})
+	}
+}
 
 func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {
 	t.Parallel()
@@ -57,7 +129,7 @@ func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {
 			),
 		},
 	}
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	state, err := db.Metadata().GetNetworkState(nil)
 	require.NoError(t, err)
@@ -113,12 +185,12 @@ func TestCreateGenesisBlockStoresExactlyOneUtxoPerGenesisOutput(t *testing.T) {
 			),
 		},
 	}
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	for i := range genesisUtxos {
 		txId := genesisUtxos[i].Id.Id()
 		idx := genesisUtxos[i].Id.Index()
-		exists, err := db.UtxoExists(txId[:], idx, nil)
+		exists, err := db.UtxoExists(context.Background(), txId[:], idx, nil)
 		require.NoError(t, err)
 		require.True(
 			t,
@@ -134,7 +206,7 @@ func TestCreateGenesisBlockStoresExactlyOneUtxoPerGenesisOutput(t *testing.T) {
 		// offset collapsed onto the wrong reference.
 		wantCbor, err := cbor.Encode(genesisUtxos[i].Output)
 		require.NoError(t, err)
-		model, err := db.UtxoByRef(txId[:], idx, nil)
+		model, err := db.UtxoByRef(context.Background(), txId[:], idx, nil)
 		require.NoError(t, err)
 		require.Equal(
 			t,
@@ -203,7 +275,7 @@ func TestCreateGenesisBlockRejectsAvvmNonAvvmCollisionBeforeWriting(t *testing.T
 			),
 		},
 	}
-	err = ls.createGenesisBlock()
+	err = ls.createGenesisBlock(context.Background())
 	require.ErrorContains(t, err, "duplicate Byron genesis UTxO reference")
 
 	state, stateErr := db.Metadata().GetNetworkState(nil)
@@ -220,9 +292,11 @@ func TestCreateGenesisBlockRejectsAvvmNonAvvmCollisionBeforeWriting(t *testing.T
 		pots,
 		"epoch-0 reserves/ada-pots row must not be written when validation fails",
 	)
+	hasGenesis, genesisErr := db.HasGenesisCbor(0, genesisHash[:])
+	require.NoError(t, genesisErr)
 	require.False(
 		t,
-		db.HasGenesisCbor(0, genesisHash[:]),
+		hasGenesis,
 		"synthetic genesis CBOR must not be committed when validation fails",
 	)
 }
@@ -274,7 +348,7 @@ func TestCreateGenesisBlockPersistsMusashiExtraConfigStaking(t *testing.T) {
 			),
 		},
 	}
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 	expectedDeposit := uint64(
 		nodeCfg.ShelleyGenesis().ProtocolParameters.KeyDeposit,
 	)
@@ -287,7 +361,12 @@ func TestCreateGenesisBlockPersistsMusashiExtraConfigStaking(t *testing.T) {
 	require.NotNil(t, deposit)
 	require.Equal(t, expectedDeposit, *deposit)
 
-	pool, err := db.GetPool(lcommon.PoolKeyHash(poolKeyHash), false, nil)
+	pool, err := db.GetPool(
+		context.Background(),
+		lcommon.PoolKeyHash(poolKeyHash),
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, pool)
 	_, delegatorCount, err := db.Metadata().GetStakeByPool(poolKeyHash, nil)
@@ -348,7 +427,7 @@ func TestCreateGenesisBlockBackfillsMissingNetworkState(t *testing.T) {
 		},
 	}
 	ls.currentTip.Point.Slot = 42
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	state, err := db.Metadata().GetNetworkState(nil)
 	require.NoError(t, err)
@@ -374,11 +453,11 @@ func TestRejectDuplicateGenesisUtxosDetectsOverlap(t *testing.T) {
 	hash := "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
 	utxos := []lcommon.Utxo{
 		{
-			Id:     shelley.NewShelleyTransactionInput(hash, 0),
+			Id:     shelley.MustNewShelleyTransactionInput(hash, 0),
 			Output: &shelley.ShelleyTransactionOutput{OutputAmount: 1_000_000},
 		},
 		{
-			Id:     shelley.NewShelleyTransactionInput(hash, 0),
+			Id:     shelley.MustNewShelleyTransactionInput(hash, 0),
 			Output: &shelley.ShelleyTransactionOutput{OutputAmount: 2_000_000},
 		},
 	}
@@ -398,11 +477,11 @@ func TestRejectDuplicateGenesisUtxosDetectsOverlap(t *testing.T) {
 	// values disagree.
 	equalValueUtxos := []lcommon.Utxo{
 		{
-			Id:     shelley.NewShelleyTransactionInput(hash, 0),
+			Id:     shelley.MustNewShelleyTransactionInput(hash, 0),
 			Output: &shelley.ShelleyTransactionOutput{OutputAmount: 1_000_000},
 		},
 		{
-			Id:     shelley.NewShelleyTransactionInput(hash, 0),
+			Id:     shelley.MustNewShelleyTransactionInput(hash, 0),
 			Output: &shelley.ShelleyTransactionOutput{OutputAmount: 1_000_000},
 		},
 	}
@@ -456,9 +535,9 @@ func TestRejectDuplicateGenesisUtxosAllowsDistinctRefs(t *testing.T) {
 	hashA := "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
 	hashB := "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
 	utxos := []lcommon.Utxo{
-		{Id: shelley.NewShelleyTransactionInput(hashA, 0)},
-		{Id: shelley.NewShelleyTransactionInput(hashA, 1)},
-		{Id: shelley.NewShelleyTransactionInput(hashB, 0)},
+		{Id: shelley.MustNewShelleyTransactionInput(hashA, 0)},
+		{Id: shelley.MustNewShelleyTransactionInput(hashA, 1)},
+		{Id: shelley.MustNewShelleyTransactionInput(hashB, 0)},
 	}
 	require.NoError(t, rejectDuplicateGenesisUtxos(utxos))
 }
@@ -514,7 +593,7 @@ func TestCreateGenesisBlockSeedsEpochZeroRewardAdaPots(t *testing.T) {
 			),
 		},
 	}
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	pots, err := db.Metadata().GetRewardAdaPots(0, nil)
 	require.NoError(t, err)
@@ -570,7 +649,7 @@ func TestCreateGenesisBlockBackfillsMissingEpochZeroRewardAdaPots(
 		},
 	}
 	ls.currentTip.Point.Slot = 42
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	pots, err := db.Metadata().GetRewardAdaPots(0, nil)
 	require.NoError(t, err)
@@ -582,4 +661,52 @@ func TestCreateGenesisBlockBackfillsMissingEpochZeroRewardAdaPots(
 		uint64(pots.Reserves),
 	)
 	require.Equal(t, uint64(0), uint64(pots.Fees))
+}
+
+// Genesis relay addresses remain canonical in storage for peer discovery and
+// APIs; LocalStateQuery performs the ledger wire conversion when encoding.
+func TestCreateGenesisBlockStoresCanonicalRelayAddress(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	cfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json",
+		"musashi",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	pools := cfg.ShelleyGenesis().ExtraConfig.StakePools.Data
+	require.Len(t, pools, 1)
+	for id, pool := range pools {
+		pool.Relays = []byte(
+			`[{"type":0,"port":3001,"ipv4":"192.168.1.1"}]`,
+		)
+		pools[id] = pool
+	}
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Database:          db,
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	require.NoError(t, ls.createGenesisBlock(t.Context()))
+
+	var poolKeyHash []byte
+	for id := range pools {
+		poolKeyHash, err = hex.DecodeString(id)
+		require.NoError(t, err)
+	}
+	pool, err := db.GetPool(t.Context(), lcommon.PoolKeyHash(poolKeyHash), false, nil)
+	require.NoError(t, err)
+	require.Len(t, pool.Registration, 1)
+	require.Len(t, pool.Registration[0].Relays, 1)
+	require.Equal(
+		t,
+		"192.168.1.1",
+		pool.Registration[0].Relays[0].Ipv4.String(),
+	)
 }

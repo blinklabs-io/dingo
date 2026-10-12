@@ -215,17 +215,10 @@ func TestElectingVrfKeyHashStillLagsPoolParamsBeforeDijkstra(t *testing.T) {
 			"in Conway")
 }
 
-// TestElectingPoolParamsCutoffSlotUsesTheCapturedEpochsEra pins which era
-// decides the ordering.
-//
-// The EPOCH transition out of epoch N runs under the protocol version in
-// force during N, and HARDFORK is a sub-rule of that same transition, so the
-// snapshot frozen at that boundary was frozen by epoch N's rules. A block two
-// epochs after the hard fork is therefore elected by a snapshot Conway's
-// ordering froze, and asking the block's era -- or the current one -- gives
-// the wrong cutoff for exactly the two epochs following every hard fork into
-// Dijkstra.
-func TestElectingPoolParamsCutoffSlotUsesTheCapturedEpochsEra(t *testing.T) {
+// TestElectingPoolParamsCutoffSlotUsesTheSnapshotEpochsEra pins the transition
+// boundary: CapturedSlot is in the outgoing Conway epoch, while mark(30) was
+// produced after translation by Dijkstra's EPOCH rule.
+func TestElectingPoolParamsCutoffSlotUsesTheSnapshotEpochsEra(t *testing.T) {
 	t.Parallel()
 
 	nonce := bytes.Repeat([]byte{0x07}, 32)
@@ -254,16 +247,16 @@ func TestElectingPoolParamsCutoffSlotUsesTheCapturedEpochsEra(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, uint64(musashiLaggedCutoff), cutoff,
-		"the capture was frozen by epoch 29's rules, which are Conway's, "+
-			"even though the validated block is Dijkstra")
+	assert.Equal(t, uint64(musashiMark30Capture), cutoff,
+		"translation precedes TICK, so Dijkstra merges pool parameters "+
+			"before freezing mark(30)")
 
 	gotKey, ok, err := ls.electingVrfKeyHash(
 		tb.block, musashiFailingEpoch, pool,
 	)
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, oldKey, gotKey.Bytes())
+	assert.Equal(t, newKey, gotKey.Bytes())
 }
 
 // seedPoolRegistrationAtSlot adds one registration to a pool's history. Repeated

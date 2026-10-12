@@ -246,6 +246,9 @@ func (n *Node) shutdown() error {
 	// then skips closing both.
 	storageDrainConfirmed := true
 	for _, cs := range componentStopsForShutdownPhase1(n) {
+		if cs.name == "block producer credentials" && !storageDrainConfirmed {
+			continue
+		}
 		if stopErr := stopWithDeadline(
 			max(time.Until(deadline), 0), cs.name, cs.stop,
 		); stopErr != nil {
@@ -290,6 +293,13 @@ func (n *Node) shutdown() error {
 				err,
 				fmt.Errorf("midnight gRPC server shutdown: %w", stopErr),
 			)
+		}
+	}
+	if n.midnightIndexer != nil {
+		if stopErr := n.midnightIndexer.Stop(ctx); stopErr != nil {
+			storageDrainConfirmed = false
+			err = errors.Join(err, errStorageDrainUnconfirmed,
+				fmt.Errorf("midnight indexer shutdown: %w", stopErr))
 		}
 	}
 
