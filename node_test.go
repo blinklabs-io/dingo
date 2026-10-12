@@ -366,6 +366,23 @@ func TestChainsyncConfigFitsConfiguredLocalRoots(t *testing.T) {
 			assert.Equal(t, test.expectedCapacity, n.chainsyncConfig().MaxClients)
 		})
 	}
+	for _, count := range []int{1, 2} {
+		n := &Node{config: NewConfig(WithTopologyConfig(&topology.TopologyConfig{
+			LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
+				AccessPoints: make([]topology.TopologyConfigP2PAccessPoint, count),
+			}},
+		}))}
+		assert.Equal(t, chainsync.DefaultMaxClients, n.chainsyncConfig().MaxClients)
+	}
+	mixed := &topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
+			AccessPoints: make([]topology.TopologyConfigP2PAccessPoint, 2),
+		}},
+		PublicRoots: []topology.TopologyConfigP2PPublicRoot{{
+			AccessPoints: make([]topology.TopologyConfigP2PAccessPoint, 2),
+		}},
+	}
+	assert.Equal(t, 4, (&Node{config: NewConfig(WithTopologyConfig(mixed))}).chainsyncConfig().MaxClients)
 	n := &Node{config: NewConfig()}
 	assert.Equal(t, chainsync.DefaultMaxClients, n.chainsyncConfig().MaxClients)
 }
