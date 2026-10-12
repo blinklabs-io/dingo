@@ -234,3 +234,126 @@ func TestGenesisExitReachedAgainstColludingTips(t *testing.T) {
 	assert.Equal(t, SelectionModePraos, cs.SelectionMode(),
 		"colluding advertised tips kept Genesis from exiting")
 }
+
+// newSoleStalePeerSelector returns a selector whose only candidate is a peer
+// that advertises a tip more than one Genesis window older than the wall clock.
+func newSoleStalePeerSelector(t *testing.T) (
+	*ChainSelector,
+	ouroboros.ConnectionId,
+) {
+	t.Helper()
+	cs := newGenesisWallClockSelector(deadForkHonestTipSlot)
+	cs.SetLocalTip(genesisTip(1000, "local", 100))
+	dead := corrConn(1)
+	feedAdvertising(
+		t, cs, dead,
+		genesisTip(2000, "dead-tip", 200),
+		"d", 1000, 1900, 10,
+	)
+	return cs, dead
+}
+
+// A wall-clock-stale peer must not be selected even when no other peer is
+// available: selection waits instead of following a chain the network has
+// stopped extending.
+func TestGenesisSelectionWaitsWhenOnlyPeerIsWallClockStale(t *testing.T) {
+	t.Parallel()
+	cs, dead := newSoleStalePeerSelector(t)
+
+	best := cs.SelectBestChain()
+	assert.Nil(t, best,
+		"the sole wall-clock-stale peer was selected: %v", best)
+	assert.False(t, cs.EvaluateAndSwitch())
+	assert.Nil(t, cs.GetBestPeer())
+
+	// A fresh peer arriving later is selected, not the stale one.
+	fresh := corrConn(10)
+	feedAdvertising(
+		t, cs, fresh,
+		genesisTip(deadForkHonestTipSlot, "honest-tip", 5000),
+		"h", 1000, 1200, 10,
+	)
+	best = cs.SelectBestChain()
+	require.NotNil(t, best)
+	assert.Equal(t, fresh, *best)
+	assert.NotEqual(t, dead, *best)
+}
+
+// When the last honest peer disconnects, the stale peer must not be picked up
+// by the after-disconnect selection.
+func TestGenesisRemovePeerDoesNotSelectSoleWallClockStalePeer(t *testing.T) {
+	t.Parallel()
+	cs, dead := newSoleStalePeerSelector(t)
+	honest := corrConn(10)
+	feedAdvertising(
+		t, cs, honest,
+		genesisTip(deadForkHonestTipSlot, "honest-tip", 5000),
+		"h", 1000, 1200, 10,
+	)
+	best := cs.GetBestPeer()
+	require.NotNil(t, best)
+	require.Equal(t, honest, *best, "fixture: honest peer must be selected")
+
+	cs.RemovePeer(honest)
+
+	best = cs.GetBestPeer()
+	assert.Nil(t, best,
+		"the stale peer %v was selected after the honest peer left", dead)
+}
+
+// The apply gate keeps a wall-clock-stale peer's headers out of the ledger's
+// shared header queue; otherwise they remain queued after selection moves to
+// honest peers and make those peers' headers look like a persistent fork.
+func TestGenesisShouldApplyIngressRejectsWallClockStalePeer(t *testing.T) {
+	t.Parallel()
+	cs, dead, honest := newDeadForkSelector(t, genesisTip(1000, "local", 100))
+	assert.False(t, cs.ShouldApplyIngress(dead),
+		"headers from a wall-clock-stale peer are admitted to the ledger")
+	// Control: honest peers are unaffected.
+	assert.True(t, cs.ShouldApplyIngress(honest[0]))
+	// Unknown peers are not gated by staleness.
+	assert.True(t, cs.ShouldApplyIngress(corrConn(99)))
+}
+
+// Control: the gate is inactive without a wall clock and outside Genesis mode.
+func TestShouldApplyIngressStaleRuleInactiveWithoutGenesisClock(t *testing.T) {
+	t.Parallel()
+	for name, cfg := range map[string]ChainSelectorConfig{
+		"no wall clock": {
+			GenesisMode:        true,
+			SecurityParam:      20,
+			GenesisWindowSlots: 100,
+		},
+		"clock without slot": {
+			GenesisMode:        true,
+			SecurityParam:      20,
+			GenesisWindowSlots: 100,
+			WallClockSlot: func() (uint64, bool) {
+				return 0, false
+			},
+		},
+		"praos mode": {
+			SecurityParam: 20,
+			WallClockSlot: func() (uint64, bool) {
+				return deadForkHonestTipSlot, true
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cfg.DisableEventSubscriptions = true
+			cs := NewChainSelector(cfg)
+			cs.SetLocalTip(genesisTip(1000, "local", 100))
+			dead := corrConn(1)
+			feedAdvertising(
+				t, cs, dead,
+				genesisTip(2000, "dead-tip", 200),
+				"d", 1000, 1900, 10,
+			)
+			assert.True(t, cs.ShouldApplyIngress(dead))
+			best := cs.SelectBestChain()
+			require.NotNil(t, best)
+			assert.Equal(t, dead, *best)
+		})
+	}
+}

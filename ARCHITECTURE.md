@@ -5402,29 +5402,31 @@ A peer that has delivered the whole of a short abandoned fork can lead on
 observed density and delivered frontier against peers still streaming the
 longer chain. In Genesis mode the selector therefore treats a peer as stale
 when its advertised tip slot is more than one Genesis window older than the
-wall-clock slot and another live, eligible, non-stale peer advertises a tip
-within the window that is more than `securityParam` blocks beyond the stale
-peer's delivered frontier (`advertisedTipStaleLocked`); the stale peer's own
-advertised block number is unverified and could otherwise lift it clear. A stale peer is not selectable, so it also drops
-out of the exit horizon, and its frontier is ignored when deciding whether
-other peers are behind (`bestKnownBlockNumber`). The bound is the wall clock,
-not a count of advertised tips: those are unverified, and colluding
-connections cannot make an honest peer's live tip older than the wall clock.
-The wall-clock slot comes from `ChainSelectorConfig.WallClockSlot`, which node
-composition wires to the current `LedgerState.CurrentSlot` through an atomic
-that follows live Restore/Truncate; the rule is inactive while that hook is
-unset or reports no slot. It deliberately uses the extrapolated `CurrentSlot`
-rather than `WallClockSlotFromConfirmedHistory`: during catch-up the wall clock
-lies past the confirmed history's forecast horizon, which is exactly when the
-rule is needed. Slot lengths only shorten across eras, so while the ledger is
-still in Byron the extrapolated slot under-reports the true one. That lowers
-the cutoff: the rule can miss a dead fork there, but any peer it excludes is
-stale by the true wall clock as well. The comparison peer's fresh tip is
-unverified, and requiring delivered evidence for it would discard the honest
-peers still streaming the longer chain; if the honest chain stalls for longer
-than a Genesis window, one connection advertising a fresh tip can therefore
-make the stale honest peers unselectable, a stall that already violates the
-chain-growth assumption Genesis selection rests on.
+wall-clock slot (`advertisedTipStaleLocked`). A stale peer is not selectable,
+even when it is the only candidate (including in the selection that follows a
+disconnect), so selection waits for a fresher peer instead; it also drops out of
+the exit horizon, and its frontier is ignored when deciding whether other peers
+are behind (`bestKnownBlockNumber`). Its headers are also not applied to the
+ledger (`ChainSelector.ShouldApplyIngress`, the apply gate in the roll-forward
+and roll-backward handlers): ingress is open to every eligible peer, not only
+the selected one, so headers admitted from a stale peer would stay in the shared
+header queue after selection moved to honest peers and make their headers look
+like a persistent fork. The bound is the wall clock, not a count of advertised
+tips: those are unverified, and colluding connections cannot make an honest
+peer's live tip older than the wall clock. The wall-clock slot comes from
+`ChainSelectorConfig.WallClockSlot`, which node composition wires to the
+current `LedgerState.CurrentSlot` through an atomic that follows live
+Restore/Truncate; the rule is inactive while that hook is unset or reports no
+slot, and outside Genesis mode. It deliberately uses the extrapolated
+`CurrentSlot` rather than `WallClockSlotFromConfirmedHistory`: during catch-up
+the wall clock lies past the confirmed history's forecast horizon, which is
+exactly when the rule is needed. Slot lengths only shorten across eras, so
+while the ledger is still in Byron the extrapolated slot under-reports the true
+one. That lowers the cutoff: the rule can miss a dead fork there, but any peer
+it excludes is stale by the true wall clock as well. The trade-off is that if
+the honest network stalls for longer than one Genesis window, a syncing
+Genesis-mode node waits rather than following a chain that old; a stall that
+long already violates the chain-growth assumption Genesis selection rests on.
 
 **Per-peer candidate chain fragments** (`chainselection.CandidateFragment`)
 materialize each peer's delivered-header history as a first-class value —

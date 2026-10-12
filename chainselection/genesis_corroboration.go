@@ -211,12 +211,21 @@ func (cs *ChainSelector) isPeerCorroboratedLocked(
 //
 // An unknown peer (no tips observed yet) is treated as uncorroborated and denied
 // while the gate is active — fail closed until corroboration forms. Outside
-// Genesis corroboration it always returns true (no behavior change).
+// Genesis corroboration it returns true unless the peer's advertised tip is more
+// than a Genesis window older than the wall clock, which is denied in Genesis
+// mode regardless of corroboration (see advertisedTipStaleLocked).
 func (cs *ChainSelector) ShouldApplyIngress(
 	connId ouroboros.ConnectionId,
 ) bool {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
+	// A peer whose advertised tip is older than the wall clock by more than a
+	// Genesis window serves an abandoned chain. Its headers must not enter the
+	// ledger's shared header queue, where they would outlive its selection and
+	// make honest peers' headers look like a persistent fork.
+	if cs.advertisedTipStaleLocked(cs.peerTips[connId]) {
+		return false
+	}
 	if !cs.genesisCorroborationActiveLocked() {
 		return true
 	}

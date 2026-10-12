@@ -516,30 +516,29 @@ func (cs *ChainSelector) bestKnownGenesisSlotLocked(
 }
 
 // advertisedTipStaleLocked reports whether, in Genesis mode, this peer's
-// advertised tip is older than the wall clock by more than a Genesis window
-// while another live, eligible, non-stale peer advertises a fresh tip more than
-// k blocks beyond this peer's delivered frontier. Such a peer holds a chain the network has stopped
-// extending (an abandoned fork): it can lead on delivered density and frontier
-// because its whole chain is short, and it must neither be selected (which also
-// keeps it out of the Genesis exit horizon, built from selectable peers) nor
-// define the delivered frontier other peers are measured against.
+// advertised tip is older than the wall clock by more than a Genesis window.
+// Such a peer holds a chain the network has stopped extending (an abandoned
+// fork): it can lead on delivered density and frontier because its whole chain
+// is short, so it must not be selected (which also keeps it out of the Genesis
+// exit horizon, built from selectable peers), must not define the delivered
+// frontier other peers are measured against, and must not have its headers
+// applied to the ledger (see ShouldApplyIngress).
 //
-// The bound is the wall clock, not other peers' claims. Advertised tips are
-// unverified, so any rule that counts them can be tipped by colluding
+// The bound is the wall clock alone, not other peers' claims. Advertised tips
+// are unverified, so any rule that counts them can be tipped by colluding
 // connections into excluding the one honest peer. A live chain's tip is always
 // near the wall clock and no peer can make it older, so peers cannot move the
-// verdict on an honest peer. The comparison peer's claim is needed only to
-// avoid excluding the sole available peer, and applies only to a peer that is
-// already stale. The rule is inactive without a wall-clock source, while the
-// clock is unavailable, outside Genesis mode, and while no peer advertises a
-// fresh tip. Requiring delivered evidence of that fresh tip is not possible:
-// honest peers still streaming the longer chain deliver far behind what they
-// advertise. So if the honest chain stalls for longer than a Genesis window,
-// one connection advertising a fresh tip can make the stale honest peers
-// unselectable; a stall that long already violates the chain-growth
-// assumption Genesis selection rests on.
+// verdict on an honest peer. A stale peer is excluded even when it is the only
+// candidate: letting it through then is exactly how an abandoned fork gets
+// selected while honest peers reconnect, or after they all disconnect.
+//
+// The trade-off is that if the honest network stalls for longer than one
+// Genesis window, a syncing Genesis-mode node waits for a fresher peer instead
+// of following a chain that old; a stall that long already violates the
+// chain-growth assumption Genesis selection rests on. The rule is inactive
+// without a wall-clock source, while the clock reports no slot, and outside
+// Genesis mode.
 func (cs *ChainSelector) advertisedTipStaleLocked(
-	connId ouroboros.ConnectionId,
 	peerTip *PeerChainTip,
 ) bool {
 	if cs.mode != SelectionModeGenesis || cs.securityParam == 0 ||
@@ -550,29 +549,10 @@ func (cs *ChainSelector) advertisedTipStaleLocked(
 	if !ok {
 		return false
 	}
-	window := cs.genesisWindowSlotsLocked()
-	if safeAddUint64(peerTip.Tip.Point.Slot, window) >= wall {
-		return false
-	}
-	// The stale peer's advertised block number is unverified once a local tip
-	// exists; an inflated one would saturate the ceiling and keep the peer
-	// selectable, so measure its delivered frontier instead.
-	ceiling := safeAddUint64(
-		peerTip.SelectionTip().BlockNumber,
-		cs.securityParam,
-	)
-	for otherConn, other := range cs.peerTips {
-		if otherConn == connId || other == nil ||
-			other.awaitingFirstHeader ||
-			!cs.peerLiveEligibleNonStaleLocked(otherConn, other) {
-			continue
-		}
-		if other.Tip.BlockNumber > ceiling &&
-			safeAddUint64(other.Tip.Point.Slot, window) >= wall {
-			return true
-		}
-	}
-	return false
+	return safeAddUint64(
+		peerTip.Tip.Point.Slot,
+		cs.genesisWindowSlotsLocked(),
+	) < wall
 }
 
 func (cs *ChainSelector) shouldExitGenesisModeLocked(
@@ -1780,7 +1760,7 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 		}
 		return false
 	}
-	if cs.advertisedTipStaleLocked(connId, peerTip) {
+	if cs.advertisedTipStaleLocked(peerTip) {
 		if logSkip {
 			cs.config.Logger.Debug(
 				"skipping peer advertising a tip older than the wall clock",
@@ -1983,7 +1963,7 @@ func (cs *ChainSelector) bestKnownBlockNumber() uint64 {
 	}
 	frontiers := make([]frontier, 0, len(cs.peerTips))
 	for connId, pt := range cs.peerTips {
-		if cs.advertisedTipStaleLocked(connId, pt) {
+		if cs.advertisedTipStaleLocked(pt) {
 			continue
 		}
 		if blockNumber := pt.SelectionTip().BlockNumber; blockNumber > 0 {
