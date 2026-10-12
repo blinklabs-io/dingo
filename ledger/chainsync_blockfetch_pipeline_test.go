@@ -691,9 +691,6 @@ func TestHandleBlockfetchTimeoutDiscardsQueuedRequestRatherThanLeakingIt(
 		ls.nextBlockfetchRequest,
 		"a pre-queued request must not survive a timeout-driven teardown",
 	)
-	// The retry below re-registers a fresh entry for connId, so the map
-	// contains the key again; what must not happen is the two channels
-	// captured before the timeout going unclosed (checked below).
 	ls.chainsyncBlockfetchMutex.Unlock()
 
 	select {
@@ -715,9 +712,9 @@ func TestHandleBlockfetchTimeoutDiscardsQueuedRequestRatherThanLeakingIt(
 
 	assert.Equal(
 		t,
-		1,
+		0,
 		requestCount,
-		"the timeout retry must still issue a fresh dispatch for the queued headers",
+		"a timeout without another holder must not duplicate the range on the stalled connection",
 	)
 
 	ls.chainsyncBlockfetchMutex.Lock()

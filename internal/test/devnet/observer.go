@@ -185,6 +185,7 @@ func (o *ChainObservers) session(
 			Slot:        header.SlotNumber(),
 			BlockNumber: header.BlockNumber(),
 			Hash:        hash.Bytes(),
+			PrevHash:    header.PrevHash().Bytes(),
 			BodySize:    header.BlockBodySize(),
 		}
 		if dijkstraHeader, ok := header.(*gdijkstra.DijkstraBlockHeader); ok {
@@ -194,6 +195,8 @@ func (o *ChainObservers) session(
 				observed.LeiosAnnouncementHash = announcementHash.Bytes()
 				observed.LeiosAnnouncementSize = announcementSize
 			}
+			certified, present := dijkstraHeader.LeiosCertified()
+			observed.LeiosCertified = present && certified
 		}
 		chain.RollForward(
 			observed,

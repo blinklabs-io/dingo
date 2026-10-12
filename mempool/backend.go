@@ -58,7 +58,7 @@ type RelayConsumer interface {
 type Pool interface {
 	Implementation() Implementation
 	Stop(ctx context.Context) error
-	AddTransaction(txType uint, txBytes []byte) error
+	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 	GetTransaction(txHash string) (MempoolTransaction, bool)
 	Transactions() []MempoolTransaction
 	CapacityBytes() int64

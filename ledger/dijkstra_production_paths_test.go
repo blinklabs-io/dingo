@@ -159,10 +159,10 @@ func runPathScenario(t *testing.T, sc pathScenario) {
 	}
 	// Admission sees only the ledger state before the block, so it decides a
 	// lone transaction.
+	live := build(t)
 	if len(sc.txs) == 1 {
 		t.Run("validation", func(t *testing.T) {
-			t.Parallel()
-			err := build(t).admit(0)
+			err := live.admit(0)
 			if sc.reject == nil {
 				require.NoError(t, err)
 				return
@@ -170,54 +170,49 @@ func runPathScenario(t *testing.T, sc pathScenario) {
 			sc.reject(t, err)
 		})
 		t.Run("mempool", func(t *testing.T) {
-			t.Parallel()
-			f := build(t)
-			err := f.mempoolAdd(0)
+			err := live.mempoolAdd(0)
 			if sc.reject == nil {
 				require.NoError(t, err)
 				return
 			}
 			sc.reject(t, err)
-			requireRewards(t, f, initial, initialScript)
-			requireNoRegistrationLeaks(t, f)
+			requireRewards(t, live, initial, initialScript)
+			requireNoRegistrationLeaks(t, live)
 		})
 	}
 	t.Run("live block", func(t *testing.T) {
-		t.Parallel()
-		f := build(t)
 		if len(sc.pending) > 0 {
-			requirePending(t, f, false)
+			requirePending(t, live, false)
 		}
-		outcome(t, f, f.applyBlock())
+		outcome(t, live, live.applyBlock())
 		if len(sc.pending) > 0 && sc.reject == nil {
-			requirePending(t, f, true)
+			requirePending(t, live, true)
 		}
 	})
+	replay := build(t)
+	var replayErr error
 	t.Run("replay", func(t *testing.T) {
-		t.Parallel()
-		f := build(t)
-		outcome(t, f, f.replayBlock())
+		replayErr = replay.replayBlock()
+		outcome(t, replay, replayErr)
 	})
 	if sc.reject != nil {
 		return
 	}
 	t.Run("rollback and reapply", func(t *testing.T) {
-		t.Parallel()
-		f := build(t)
-		require.NoError(t, f.replayBlock())
-		requireRewards(t, f, sc.rewards, sc.scriptRewards)
-		requirePending(t, f, true)
-		require.NoError(t, f.ls.rollback(context.Background(),
-			ocommon.Point{Slot: pathOriginSlot, Hash: f.originHash},
+		require.NoError(t, replayErr)
+		requireRewards(t, replay, sc.rewards, sc.scriptRewards)
+		requirePending(t, replay, true)
+		require.NoError(t, replay.ls.rollback(context.Background(),
+			ocommon.Point{Slot: pathOriginSlot, Hash: replay.originHash},
 		))
-		requireRewards(t, f, initial, initialScript)
-		requireNoRegistrationLeaks(t, f)
-		requireInputs(t, f, true)
-		requirePending(t, f, false)
-		require.NoError(t, f.applyBlock())
-		requireRewards(t, f, sc.rewards, sc.scriptRewards)
-		requireInputs(t, f, false)
-		requirePending(t, f, true)
+		requireRewards(t, replay, initial, initialScript)
+		requireNoRegistrationLeaks(t, replay)
+		requireInputs(t, replay, true)
+		requirePending(t, replay, false)
+		require.NoError(t, replay.applyBlock())
+		requireRewards(t, replay, sc.rewards, sc.scriptRewards)
+		requireInputs(t, replay, false)
+		requirePending(t, replay, true)
 	})
 }
 

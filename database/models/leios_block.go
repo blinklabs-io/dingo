@@ -61,8 +61,9 @@ func DecodeConwayPeerBlock(raw []byte) (ledger.Block, error) {
 	}
 	if extBlock, extErr := decodeLeiosExtendedConwayBlock(raw); extErr == nil {
 		return extBlock, nil
+	} else {
+		return nil, fmt.Errorf("%w; Leios extension decode: %w", err, extErr)
 	}
-	return nil, err
 }
 
 // hasDijkstraLeiosShape gates the storage fallback on the historical Musashi

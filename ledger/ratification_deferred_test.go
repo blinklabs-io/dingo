@@ -663,7 +663,7 @@ INSERT INTO auth_committee_hot (
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
-	snapshotMgr := snapshot.NewManager(db, event.NewEventBus(nil, nil), nil)
+	snapshotMgr := snapshot.NewManager(db, newTestEventBus(t, nil), nil)
 	s.snapshotMgr = snapshotMgr
 	// Production reads the SNAP-point stake inside the boundary.
 	s.ls.SetEpochBoundarySnapshotStakeHook(
@@ -726,7 +726,7 @@ func (s *govDiffScenario) run(
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			var err error
 			result, err = s.ls.processEpochRollover(context.Background(),
-				txn, epoch, eras.ConwayEraDesc, pparams, false,
+				txn, epoch, eras.ConwayEraDesc, pparams,
 			)
 			return err
 		}))

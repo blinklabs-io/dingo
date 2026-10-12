@@ -41,6 +41,11 @@ func blake2b256Hex(data []byte) string {
 	return lcommon.Blake2b256Hash(data).String()
 }
 
+// checkpointHashHexLen is the hex width of a 32-byte block hash. Checkpoints
+// are compared to block hashes as whole strings, so a shorter entry could
+// never match.
+const checkpointHashHexLen = 64
+
 func isHexString(value string) bool {
 	for _, r := range value {
 		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') {
@@ -88,6 +93,14 @@ func parseCheckpoints(
 				"checkpoint for block %d has non-hex hash %q",
 				entry.BlockNo,
 				entry.Hash,
+			)
+		}
+		if len(hash) != checkpointHashHexLen {
+			return nil, fmt.Errorf(
+				"checkpoint for block %d has hash %q, must be %d hex characters",
+				entry.BlockNo,
+				entry.Hash,
+				checkpointHashHexLen,
 			)
 		}
 		if existing, ok := out[entry.BlockNo]; ok && existing != hash {

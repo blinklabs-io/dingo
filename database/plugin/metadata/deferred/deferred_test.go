@@ -78,7 +78,7 @@ func TestCriticalManifestNotEmpty(t *testing.T) {
 	// idx_utxo_transaction_id joined the critical subset: the rollback's
 	// DELETE FROM "transaction" cascades through it, and a rollback can
 	// run as soon as the database is marked ready.
-	const wantCritical = 13
+	const wantCritical = 25
 	if len(critical) != wantCritical {
 		t.Errorf(
 			"CriticalManifest: got %d entries, want %d — update this constant if the classification changed intentionally",
@@ -112,36 +112,75 @@ func TestSyncStateConstants(t *testing.T) {
 	}
 }
 
-// TestManifestKeepsImportIdempotencyIndexes covers the import-idempotency index
-// manifest.
-//
-// The import path clears each of these tables by transaction_id once per
-// transaction before re-inserting, so deferring the index the predicate needs
-// turns a b-tree descent into a scan of a table the same import path is
-// growing. Two of the five tables listed here were never deferred; the other
-// three were, and that is what made Mithril's API-mode backfill quadratic.
-//
-// Pinned by name because the manifest is data: nothing fails to compile when a
-// contributor adds one of these back, and the cost only shows up on a
-// multi-hour bootstrap.
+// TestManifestDefersAPIQueryIndexes pins query and rollback indexes that are
+// not used by per-transaction import predicates.
+func TestManifestDefersAPIQueryIndexes(t *testing.T) {
+	type expectation struct {
+		table    string
+		critical bool
+	}
+	want := map[string]expectation{
+		"idx_address_transaction_slot":         {"address_transaction", true},
+		"idx_addr_tx_stake_position":           {"address_transaction", true},
+		"idx_addr_tx_payment":                  {"address_transaction", true},
+		"idx_asset_mint_burn_slot":             {"asset_mint_burn", true},
+		"idx_asset_mint_burn_fingerprint":      {"asset_mint_burn", false},
+		"idx_asset_mint_burn_lookup":           {"asset_mint_burn", true},
+		"idx_datum_added_slot":                 {"datum", false},
+		"idx_certs_block_hash":                 {"certs", false},
+		"idx_certs_certificate_id":             {"certs", false},
+		"idx_certs_cert_type":                  {"certs", false},
+		"idx_key_witness_type":                 {"key_witness", true},
+		"idx_redeemer_index":                   {"redeemer", true},
+		"idx_redeemer_tag":                     {"redeemer", true},
+		"idx_witness_scripts_script_hash":      {"witness_scripts", true},
+		"idx_witness_scripts_type":             {"witness_scripts", true},
+		"idx_transaction_metadata_label_slot":  {"transaction_metadata_label", true},
+		"idx_transaction_metadata_label_label": {"transaction_metadata_label", true},
+		"idx_script_type":                      {"script", false},
+	}
+	found := make(map[string]bool, len(want))
+	for _, idx := range Manifest {
+		if expected, ok := want[idx.Name]; ok {
+			found[idx.Name] = true
+			if idx.Table != expected.table {
+				t.Errorf("%s table = %q, want %q", idx.Name, idx.Table, expected.table)
+			}
+			if idx.Critical != expected.critical {
+				t.Errorf("%s critical = %t, want %t", idx.Name, idx.Critical, expected.critical)
+			}
+		}
+	}
+	for name := range want {
+		if !found[name] {
+			t.Errorf("%s missing from deferred-index manifest", name)
+		}
+	}
+}
+
 func TestManifestKeepsImportIdempotencyIndexes(t *testing.T) {
-	retained := map[string]string{
+	want := map[string]string{
 		"idx_key_witness_transaction_id":         "key_witness",
 		"idx_witness_scripts_transaction_id":     "witness_scripts",
 		"idx_redeemer_transaction_id":            "redeemer",
 		"idx_plutus_data_transaction_id":         "plutus_data",
 		"idx_address_transaction_transaction_id": "address_transaction",
+		"idx_certs_transaction_id":               "certs",
 	}
+	manifest := make(map[string]bool, len(Manifest))
 	for _, idx := range Manifest {
-		if table, ok := retained[idx.Name]; ok {
-			t.Errorf(
-				"manifest defers %q, but SetTransaction filters %s by "+
-					"transaction_id on every transaction it writes; "+
-					"dropping it makes that delete a full scan of a table "+
-					"the import is still growing (issue #3253)",
-				idx.Name,
-				table,
-			)
+		manifest[idx.Name] = true
+	}
+	retained := make(map[string]string, len(Retained))
+	for _, idx := range Retained {
+		retained[idx.Name] = idx.Table
+	}
+	for name, table := range want {
+		if manifest[name] {
+			t.Errorf("%s is deferred despite being used by import cleanup", name)
+		}
+		if retained[name] != table {
+			t.Errorf("%s retained table = %q, want %q", name, retained[name], table)
 		}
 	}
 }
@@ -189,32 +228,17 @@ func TestRetainedEntriesAreResolvable(t *testing.T) {
 	}
 }
 
-// TestRetainedCoversImportIdempotencyIndexes is the other half of
-// TestManifestKeepsImportIdempotencyIndexes: keeping an index out of the
-// manifest only helps a database an older manifest already dropped it from if
-// the drop and rebuild paths restore it, and they read this list to do so.
-func TestRetainedCoversImportIdempotencyIndexes(t *testing.T) {
-	want := []string{
-		"idx_key_witness_transaction_id",
-		"idx_witness_scripts_transaction_id",
-		"idx_redeemer_transaction_id",
-		"idx_plutus_data_transaction_id",
-		"idx_address_transaction_transaction_id",
-		"idx_certs_transaction_id",
-		"idx_utxo_staking_deleted_amount",
-	}
+// TestRetainedCoversLiveStakeImportIndex keeps the live-stake aggregation
+// index out of the deferred manifest because backfill queries it per batch.
+func TestRetainedCoversLiveStakeImportIndex(t *testing.T) {
+	want := []string{"idx_utxo_staking_deleted_amount"}
 	present := map[string]bool{}
 	for _, idx := range Retained {
 		present[idx.Name] = true
 	}
 	for _, name := range want {
 		if !present[name] {
-			t.Errorf(
-				"%q is excluded from Manifest for an import predicate but "+
-					"missing from Retained, so a database an older "+
-					"manifest dropped it from never gets it back",
-				name,
-			)
+			t.Errorf("%q is missing from Retained", name)
 		}
 	}
 }

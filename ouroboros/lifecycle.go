@@ -143,9 +143,8 @@ func (o *Ouroboros) close() error {
 	o.leiosPersistLifecycleMu.Lock()
 	defer o.leiosPersistLifecycleMu.Unlock()
 
-	// Serialize closure against lazy worker startup and queue admission. A
-	// callback that passed this gate before Close may still finish cloning, but
-	// reserve/install reject it after closure; no worker can start afterward.
+	// The lifecycle lock waits for admitted enqueues to finish before closure,
+	// then prevents lazy worker startup and queue admission permanently.
 	o.leiosPersistMu.Lock()
 	o.leiosPersistClosed = true
 	o.leiosPersistMu.Unlock()

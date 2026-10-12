@@ -78,6 +78,25 @@ const snapshotWait = 30 * time.Second
 
 const testManagerBlobPlugin = "badger-test"
 
+var testSnapshotTrustKey = []byte("operator-trust-root-0123456789ab")
+
+func testSnapshotTrustKeyFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "snapshot-trust.key")
+	keyFile := append(append([]byte(nil), testSnapshotTrustKey...), '\n')
+	require.NoError(t, os.WriteFile(path, keyFile, 0o600))
+	return path
+}
+
+func writeManagerTestManifest(t *testing.T, dir string) {
+	t.Helper()
+	require.NoError(t, lifecycle.WriteManifest(
+		dir,
+		lifecycle.Manifest{},
+		lifecycle.WithManifestKey(testSnapshotTrustKey),
+	))
+}
+
 func newManagerTestDB(t *testing.T) *database.Database {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
@@ -520,9 +539,10 @@ func (d *directoryBackedCloudDestination) UploadDir(
 	return nil
 }
 
-func (d *directoryBackedCloudDestination) DownloadDir(
+func (d *directoryBackedCloudDestination) DownloadFiles(
 	context.Context,
 	string,
+	[]lifecycle.DownloadFile,
 ) error {
 	return errors.New("not implemented")
 }
@@ -605,6 +625,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 	require.NoError(t, os.WriteFile(
 		filepath.Join(startupProbeDir, "probe"), []byte("probe"), 0o600,
 	))
+	writeManagerTestManifest(t, startupProbeDir)
 
 	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
 		SnapshotEnabled:          true,
@@ -612,6 +633,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 		SnapshotEveryNEpochs:     1,
 		SnapshotRetention:        2,
 		SnapshotCloudDestination: cloudDest,
+		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", registry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
@@ -682,7 +704,11 @@ func (failingCloudDestination) UploadDir(context.Context, string) error {
 	return errors.New("simulated cloud upload failure")
 }
 
-func (failingCloudDestination) DownloadDir(context.Context, string) error {
+func (failingCloudDestination) DownloadFiles(
+	context.Context,
+	string,
+	[]lifecycle.DownloadFile,
+) error {
 	return errors.New("not implemented")
 }
 
@@ -717,7 +743,11 @@ func (d panickingCloudDestination) UploadDir(
 	return nil
 }
 
-func (panickingCloudDestination) DownloadDir(context.Context, string) error {
+func (panickingCloudDestination) DownloadFiles(
+	context.Context,
+	string,
+	[]lifecycle.DownloadFile,
+) error {
 	return errors.New("not implemented")
 }
 
@@ -760,6 +790,7 @@ func TestManagerSurvivesHandlerPanic(t *testing.T) {
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestpanic://bucket/prefix",
+		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
@@ -851,6 +882,7 @@ func TestManagerCloudUploadFailureIsNotSwallowed(t *testing.T) {
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestfail://bucket/prefix",
+		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
@@ -887,7 +919,11 @@ func (d *blockingCloudDestination) UploadDir(context.Context, string) error {
 	return nil
 }
 
-func (d *blockingCloudDestination) DownloadDir(context.Context, string) error {
+func (d *blockingCloudDestination) DownloadFiles(
+	context.Context,
+	string,
+	[]lifecycle.DownloadFile,
+) error {
 	return errors.New("not implemented")
 }
 
@@ -959,6 +995,7 @@ func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestblocking://bucket/prefix",
+		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(ctx))
 	// Registered immediately after Start succeeds (before any assertion
@@ -1056,7 +1093,11 @@ func (d flakyCloudDestination) UploadDir(
 	return nil
 }
 
-func (flakyCloudDestination) DownloadDir(context.Context, string) error {
+func (flakyCloudDestination) DownloadFiles(
+	context.Context,
+	string,
+	[]lifecycle.DownloadFile,
+) error {
 	return errors.New("not implemented")
 }
 
@@ -1162,6 +1203,7 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 	require.NoError(t, os.WriteFile(
 		filepath.Join(startupProbeDir, "probe"), []byte("probe"), 0o600,
 	))
+	writeManagerTestManifest(t, startupProbeDir)
 	// The probe's own upload must not consume flakyCloudFailed's one
 	// simulated failure -- pre-mark it "already failed" so the probe's
 	// attempt succeeds as a no-op, then reset it below once the scan's
@@ -1178,6 +1220,7 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestflaky://bucket/prefix",
+		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
@@ -1324,6 +1367,7 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 	require.NoError(t, os.WriteFile(
 		filepath.Join(startupProbeDir, "probe"), []byte("probe"), 0o600,
 	))
+	writeManagerTestManifest(t, startupProbeDir)
 	flakyCloud2Mu.Lock()
 	flakyCloud2Failed = true
 	flakyCloud2Mu.Unlock()
@@ -1335,6 +1379,7 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestflaky2://bucket/prefix",
+		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
@@ -1412,6 +1457,7 @@ func TestManagerRetriesUnmirroredSnapshotOnRestart(t *testing.T) {
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestflaky3://bucket/prefix",
+		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
 	}
 	destDir := filepath.Join(snapshotDir, "epoch-9")
 	// Recreate exactly the durable state a previous process leaves after
@@ -1428,6 +1474,7 @@ func TestManagerRetriesUnmirroredSnapshotOnRestart(t *testing.T) {
 		"test-version",
 		testManagerBlobPlugin,
 		"sqlite",
+		lifecycle.WithManifestKey(testSnapshotTrustKey),
 	)
 	require.NoError(t, err)
 	require.False(
@@ -1632,6 +1679,7 @@ func TestManagerPruningPreservesNeverMirroredSnapshotLocally(t *testing.T) {
 		SnapshotEveryNEpochs:     1,
 		SnapshotRetention:        1,
 		SnapshotCloudDestination: cloudDest,
+		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
@@ -1716,6 +1764,7 @@ func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(
 		SnapshotEveryNEpochs:           1,
 		SnapshotCloudDestination:       baseCloudDest,
 		SnapshotCloudDestinationPrefix: "node-a",
+		SnapshotTrustKeyFile:           testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
@@ -1760,6 +1809,7 @@ func TestManagerRejectsUnsafeCloudDestinationPrefix(t *testing.T) {
 					SnapshotDir:                    t.TempDir(),
 					SnapshotCloudDestination:       "managerfaketest://bucket/prefix",
 					SnapshotCloudDestinationPrefix: prefix,
+					SnapshotTrustKeyFile:           testSnapshotTrustKeyFile(t),
 				},
 				testManagerBlobPlugin,
 				"sqlite",
@@ -1798,6 +1848,7 @@ func TestManagerWarnsWhenCloudDestinationConfiguredWithoutPrefix(t *testing.T) {
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "managerfaketest://bucket/prefix",
+		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
@@ -1829,6 +1880,7 @@ func TestManagerDoesNotWarnWhenCloudDestinationPrefixIsSet(t *testing.T) {
 		SnapshotEveryNEpochs:           1,
 		SnapshotCloudDestination:       "managerfaketest://bucket/prefix",
 		SnapshotCloudDestinationPrefix: "node-a",
+		SnapshotTrustKeyFile:           testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
@@ -1869,6 +1921,7 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 		SnapshotEveryNEpochs:     1,
 		SnapshotRetention:        2,
 		SnapshotCloudDestination: cloudDest,
+		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()

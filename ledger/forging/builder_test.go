@@ -3170,16 +3170,20 @@ func TestComputeConwayBlockBodyHashProducesValidatingBlock(t *testing.T) {
 				Slot:        1001,
 				PrevHash:    lcommon.NewBlake2b256(make([]byte, 32)),
 				IssuerVkey:  lcommon.IssuerVkey{},
-				VrfKey:      []byte{},
+				VrfKey:      make([]byte, 32),
 				VrfResult: lcommon.VrfResult{
-					Output: lcommon.Blake2b256{}.Bytes(),
+					Output: make([]byte, 64),
+					Proof:  make([]byte, 80),
 				},
 				BlockBodySize: bodySize,
 				BlockBodyHash: bodyHash,
-				OpCert:        babbage.BabbageOpCert{},
-				ProtoVersion:  babbage.BabbageProtoVersion{Major: 10},
+				OpCert: babbage.BabbageOpCert{
+					HotVkey:   make([]byte, 32),
+					Signature: make([]byte, 64),
+				},
+				ProtoVersion: babbage.BabbageProtoVersion{Major: 10},
 			},
-			Signature: []byte{},
+			Signature: make([]byte, 448),
 		},
 	}
 	block := &conway.ConwayBlock{
@@ -3351,6 +3355,7 @@ func (v *mockTxValidator) ValidateTxWithOverlay(
 	tx ledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.StateOverlay,
 ) error {
 	return v.ValidateTx(tx)
 }
@@ -4377,7 +4382,7 @@ type sessionMockTxValidator struct {
 }
 
 func (v *sessionMockTxValidator) ValidateTx(tx ledger.Transaction) error {
-	return v.ValidateTxWithOverlay(tx, nil, nil)
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
 }
 
 // ValidateTxWithOverlay is only reached if the builder fails to discover the
@@ -4388,6 +4393,7 @@ func (v *sessionMockTxValidator) ValidateTxWithOverlay(
 	_ ledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.StateOverlay,
 ) error {
 	return nil
 }
@@ -4398,8 +4404,10 @@ func (v *sessionMockTxValidator) WithTxValidationSession(ctx context.Context,
 			tx ledger.Transaction,
 			consumed map[utxoref.Key]struct{},
 			created map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
+		_ func(func() error) (bool, error),
 	) error,
 ) error {
 	v.sessionContext = ctx
@@ -4409,6 +4417,7 @@ func (v *sessionMockTxValidator) WithTxValidationSession(ctx context.Context,
 		tx ledger.Transaction,
 		_ map[utxoref.Key]struct{},
 		_ map[utxoref.Key]lcommon.Utxo,
+		_ *utxoref.StateOverlay,
 	) error {
 		v.validateCalls++
 		if v.onValidate != nil {
@@ -4429,7 +4438,13 @@ func (v *sessionMockTxValidator) WithTxValidationSession(ctx context.Context,
 		return nil
 	}
 	stillCurrent := func() bool { return !stale }
-	return fn(validate, stillCurrent)
+	commitIfCurrent := func(commit func() error) (bool, error) {
+		if !stillCurrent() {
+			return false, nil
+		}
+		return true, commit()
+	}
+	return fn(validate, stillCurrent, commitIfCurrent)
 }
 
 var (

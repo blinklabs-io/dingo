@@ -140,10 +140,13 @@ func (o *Ouroboros) enqueueLeiosPersist(
 	if o.leiosDatabase() == nil {
 		return
 	}
+	o.leiosPersistLifecycleMu.RLock()
+	defer o.leiosPersistLifecycleMu.RUnlock()
 	o.startLeiosPersistenceGC(0, false)
 	if !o.startLeiosPersistWriterIfOpen() {
 		return
 	}
+	signal := o.leiosPersistSignal
 	// The caller's transaction slices, not a copy: they are only measured
 	// here, and are cloned below if and only if the job is admitted.
 	var txsRaw []cbor.RawMessage
@@ -197,7 +200,7 @@ func (o *Ouroboros) enqueueLeiosPersist(
 		return
 	}
 	select {
-	case o.leiosPersistSignal <- struct{}{}:
+	case signal <- struct{}{}:
 	default:
 	}
 }
@@ -350,8 +353,12 @@ func (o *Ouroboros) logLeiosPersistDrop(slot uint64, reason string) {
 // startLeiosPersistWriter initializes the writer state and launches the single
 // background writer goroutine. Runs exactly once via leiosPersistOnce, before
 // any enqueue proceeds past the Once, so the map and channels are safely
-// published to concurrent enqueuers.
+// published to concurrent enqueuers. Callers hold leiosPersistLifecycleMu; the
+// queue state is also assigned under leiosPersistMu because the enqueue and
+// drain paths read it under that mutex.
 func (o *Ouroboros) startLeiosPersistWriter() {
+	o.leiosPersistMu.Lock()
+	defer o.leiosPersistMu.Unlock()
 	o.leiosPersistPending = make(map[string]*leiosPersistJob)
 	// The byte and reservation counters describe the map being replaced, so
 	// they are reset with it. This matters on the
@@ -364,13 +371,18 @@ func (o *Ouroboros) startLeiosPersistWriter() {
 	o.leiosPersistStop = make(chan struct{})
 	o.leiosPersistDone = make(chan struct{})
 	o.leiosPersistStarted.Store(true)
-	go o.leiosPersistLoop()
+	go o.leiosPersistLoop(
+		o.leiosPersistStop,
+		o.leiosPersistSignal,
+		o.leiosPersistDone,
+	)
 }
 
 func (o *Ouroboros) startLeiosPersistWriterIfOpen() bool {
 	o.leiosPersistMu.Lock()
-	defer o.leiosPersistMu.Unlock()
-	if o.leiosPersistClosed {
+	closed := o.leiosPersistClosed
+	o.leiosPersistMu.Unlock()
+	if closed {
 		return false
 	}
 	o.leiosPersistOnce.Do(o.startLeiosPersistWriter)
@@ -514,16 +526,22 @@ func (o *Ouroboros) runLeiosPersistenceGC(
 	}
 }
 
-func (o *Ouroboros) leiosPersistLoop() {
-	defer close(o.leiosPersistDone)
+// leiosPersistLoop takes its channels as arguments so a later restart, which
+// replaces the fields, cannot be observed by a loop from an earlier start.
+func (o *Ouroboros) leiosPersistLoop(
+	stop <-chan struct{},
+	signal <-chan struct{},
+	done chan<- struct{},
+) {
+	defer close(done)
 	for {
 		select {
-		case <-o.leiosPersistStop:
+		case <-stop:
 			// Drain remaining queued writes before exiting so a clean
 			// shutdown still persists what was already fetched.
 			o.drainLeiosPersist()
 			return
-		case <-o.leiosPersistSignal:
+		case <-signal:
 			o.drainLeiosPersist()
 		}
 	}
@@ -581,6 +599,12 @@ func (o *Ouroboros) StopLeiosPersistWriter() {
 	o.leiosPersistLifecycleMu.Lock()
 	defer o.leiosPersistLifecycleMu.Unlock()
 	o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout)
+}
+
+func (o *Ouroboros) stopLeiosPersistWriter(timeout time.Duration) bool {
+	o.leiosPersistLifecycleMu.Lock()
+	defer o.leiosPersistLifecycleMu.Unlock()
+	return o.stopLeiosPersistenceWorkers(timeout)
 }
 
 func (o *Ouroboros) stopLeiosPersistenceWorkers(timeout time.Duration) bool {
@@ -659,7 +683,10 @@ func (o *Ouroboros) requestLeiosPersistenceGCStop() (<-chan struct{}, bool) {
 	return done, true
 }
 
-func waitForLeiosPersistWorker(done <-chan struct{}, timeout time.Duration) bool {
+func waitForLeiosPersistWorker(
+	done <-chan struct{},
+	timeout time.Duration,
+) bool {
 	select {
 	case <-done:
 		return true
@@ -701,20 +728,11 @@ func waitForLeiosPersistWorker(done <-chan struct{}, timeout time.Duration) bool
 // eventual drain would silently write pre-operation data into the freshly
 // restored/truncated store.
 //
-// Must be called late in the quiesce sequence, after inbound network
-// traffic has actually stopped (connManager.Stop): enqueueLeiosPersist
-// doesn't take leiosPersistMu before touching leiosPersistOnce, so a
-// concurrent enqueue from still-live Leios fetch traffic could otherwise
-// race this reset. This is not merely a documented call-order convention:
-// node_lifecycle.go's quiesceForLiveLifecycleOp escalates a connManager.Stop
-// failure to errStorageDrainUnconfirmed (the same as this method's own
-// unconfirmed-drain error below), specifically because connManager.Stop
-// returning an error means it could not confirm every connection/listener
-// goroutine actually exited -- i.e. this method's precondition may not
-// hold. That escalation makes the caller take the full-supervised-restart
-// path (n.cancel()) instead of ever reaching reinitializeAndResume, so a
-// straggling connection's Leios fetch can no longer race this reset in
-// practice, not just "shouldn't" by convention.
+// Call after inbound traffic stops so subsequent enqueues cannot restart the
+// writer while storage is replaced. The lifecycle lock waits for complete
+// enqueues and excludes new reservations throughout drain and reset. If
+// connection shutdown is unconfirmed, the caller must use a supervised restart
+// rather than replacing storage while traffic may still access it.
 //
 // Returns ErrLeiosPersistDrainUnconfirmed, without resetting anything, if
 // either worker misses its drain deadline. The writer may still be

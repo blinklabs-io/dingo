@@ -116,7 +116,7 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 		pool := newBackendContractPool(t, factory, 1<<20)
 		require.NoError(
 			t,
-			pool.AddTransaction(uint(conway.EraIdConway), txBytes),
+			pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes),
 		)
 
 		txs := pool.Transactions()
@@ -131,7 +131,7 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 		assert.Empty(t, pool.Transactions())
 		require.NoError(
 			t,
-			pool.AddTransaction(uint(conway.EraIdConway), txBytes),
+			pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes),
 		)
 		pool.RemoveTransaction(hash)
 		assert.Empty(t, pool.Transactions())
@@ -139,7 +139,7 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 		require.NoError(t, pool.Stop(context.Background()))
 		require.ErrorIs(
 			t,
-			pool.AddTransaction(uint(conway.EraIdConway), txBytes),
+			pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes),
 			ErrMempoolStopped,
 		)
 		assert.Nil(t, pool.AddConsumer(newTestConnectionId(99)))
@@ -150,7 +150,7 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 		t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 		require.NoError(
 			t,
-			pool.AddTransaction(uint(conway.EraIdConway), txBytes),
+			pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes),
 		)
 		consumer := pool.AddConsumer(newTestConnectionId(1))
 		require.NotNil(t, consumer)
@@ -188,11 +188,11 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 
 		require.NoError(
 			t,
-			pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+			pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 		)
 		require.NoError(
 			t,
-			pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+			pool.AddTransaction(context.Background(), uint(conway.EraIdConway), childBytes),
 		)
 		for _, wantHash := range []string{parentHash, childHash} {
 			evt := dingotestutil.RequireReceive(
@@ -240,7 +240,7 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 		pool := newBackendContractPool(t, factory, int64(len(txBytes)-1))
 		t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 		assert.Equal(t, int64(len(txBytes)-1), pool.CapacityBytes())
-		err := pool.AddTransaction(uint(conway.EraIdConway), txBytes)
+		err := pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 		var fullErr *MempoolFullError
 		require.ErrorAs(t, err, &fullErr)
 		assert.Empty(t, pool.Transactions())
@@ -253,7 +253,7 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 		errs := make(chan error, 16)
 		for range 16 {
 			wg.Go(func() {
-				errs <- pool.AddTransaction(uint(conway.EraIdConway), txBytes)
+				errs <- pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 			})
 		}
 		wg.Wait()
@@ -284,7 +284,7 @@ func TestFIFOBackendContract(t *testing.T) {
 		t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 		require.NoError(
 			t,
-			pool.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+			pool.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 		)
 		validator.removeBaseUtxo(inputKey)
 		require.NoError(t, pool.rebuildOverlay(context.Background()))
@@ -311,7 +311,7 @@ func TestDAGBackendContract(t *testing.T) {
 		t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 		require.NoError(
 			t,
-			pool.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+			pool.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 		)
 		validator.removeBaseUtxo(inputKey)
 		require.NoError(t, pool.rebuildOverlay(context.Background()))

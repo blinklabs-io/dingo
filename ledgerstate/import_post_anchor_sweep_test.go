@@ -28,8 +28,8 @@ import (
 
 // TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows pins the
 // block_nonce, network_state, and network_donation part of
-// ImportLedgerState's post-anchor sweep: rows a local rollover wrote above the
-// anchor are removed, and rows at or below the anchor are kept.
+// ImportLedgerState's post-anchor sweep: rows above the anchor are removed,
+// while anchor-epoch donations are replaced by the snapshot total.
 func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 	t.Parallel()
 
@@ -38,9 +38,9 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 
 	const (
-		belowSlot  = uint64(500)
-		anchorSlot = uint64(1_000)
-		aboveSlot  = uint64(1_500)
+		belowSlot  = uint64(99_500)
+		anchorSlot = uint64(100_000)
+		aboveSlot  = uint64(101_000)
 	)
 	tipHash := make([]byte, 32)
 	otherHash := bytes.Repeat([]byte{0x5a}, 32)
@@ -61,7 +61,7 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 	)
 	require.NoError(t, meta.SetNetworkState(1, 2, belowSlot, nil))
 	require.NoError(t, meta.SetNetworkState(3, 4, aboveSlot, nil))
-	require.NoError(t, meta.AddNetworkDonation(belowSlot, 100, 7, nil))
+	require.NoError(t, meta.AddNetworkDonation(belowSlot, 99, 7, nil))
 	require.NoError(t, meta.AddNetworkDonation(anchorSlot, 100, 8, nil))
 	require.NoError(t, meta.AddNetworkDonation(aboveSlot, 101, 9, nil))
 
@@ -71,7 +71,7 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 			Database: db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
-				Epoch:               100,
+				Epoch:               anchorSlot / 1_000,
 				EraIndex:            EraConway,
 				EraBounds:           make([]EraBound, EraConway+1),
 				EpochNonce:          nonce,
@@ -84,7 +84,7 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 				},
 			},
 			EpochLength: func(uint) (uint, uint, error) {
-				return 1, 1_000, nil
+				return 1, importTestEpochLength, nil
 			},
 		},
 	))
@@ -119,9 +119,12 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 	require.Zero(t, count(
 		"SELECT COUNT(*) FROM network_donation WHERE slot > ?", anchorSlot,
 	), "network donations above the anchor must be swept")
-	require.Equal(t, 2, count(
+	require.Equal(t, 1, count(
 		"SELECT COUNT(*) FROM network_donation WHERE slot <= ?", anchorSlot,
-	), "network donations at or below the anchor must be kept")
+	), "prior-epoch donations remain; the anchor epoch is replaced by the snapshot")
+	require.Zero(t, count(
+		"SELECT COUNT(*) FROM network_donation WHERE slot = ?", anchorSlot,
+	), "zero snapshot donations replace the anchor epoch's local row")
 }
 
 func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
@@ -132,8 +135,8 @@ func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 
 	const (
-		anchorSlot = uint64(1_000)
-		aboveSlot  = uint64(1_500)
+		anchorSlot = uint64(100_000)
+		aboveSlot  = uint64(101_000)
 	)
 	tipHash := make([]byte, 32)
 	nonce := make([]byte, 32)
@@ -154,7 +157,7 @@ func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State: &RawLedgerState{
-			Epoch:               100,
+			Epoch:               anchorSlot / 1_000,
 			EraIndex:            EraConway,
 			EraBounds:           make([]EraBound, EraConway+1),
 			EpochNonce:          nonce,
@@ -167,7 +170,7 @@ func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
 			},
 		},
 		EpochLength: func(uint) (uint, uint, error) {
-			return 1, 1_000, nil
+			return 1, importTestEpochLength, nil
 		},
 	})
 	require.ErrorContains(t, err, "deleting post-anchor network donations")
