@@ -3833,7 +3833,12 @@ after selection, full block fetch and admission to the ledger apply stream;
 announcing blocks form one-block apply chunks so the exact parent remains the
 published ledger tip during validation. Competing or queued headers therefore
 cannot each consume a diffusion-window wait. A locally forged header takes the
-same path after block self-validation and before adoption. Endorser manifests and
+same path after block self-validation and before adoption. A confirmed semantic
+failure rejects the locally forged ranking block before adoption; unavailable
+parent or storage state leaves adoption eligible for later validation. The
+composition adapter marks confirmed transaction failures for the forger without
+introducing a dependency from forging to the parent ledger package.
+Endorser manifests and
 transactions arrive independently on the asynchronous LeiosNotify and
 LeiosFetch workers, so this wait does not serialize the fetch that satisfies
 it. The wait is bounded by the configured diffusion window and observes node

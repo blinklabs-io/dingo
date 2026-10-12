@@ -3759,6 +3759,7 @@ func TestNewBlockForgerRejectsProductionLeiosWithoutValidators(t *testing.T) {
 }
 
 func TestCheckAndForgeProductionAdoptsIneligibleLeiosAnnouncement(t *testing.T) {
+	t.Parallel()
 	creds := setupTestCredentials(t)
 	block := newForgerTestBlock(10, 2)
 	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
@@ -3809,6 +3810,77 @@ func TestCheckAndForgeProductionAdoptsIneligibleLeiosAnnouncement(t *testing.T) 
 
 	require.True(t, announcementValidated)
 	require.Equal(t, 1, broadcaster.calls)
+	require.Equal(t, 1, leiosChecker.calls)
+	require.NotEmpty(t, leiosCaster.hash)
+	require.Equal(t, uint64(10), leiosCaster.slot)
+	require.Equal(t, 1, builder.leiosCalls)
+	require.NotNil(t, builder.leiosData.Announcement)
+	require.Nil(t, builder.leiosData.Certificate)
+	assert.Equal(
+		t,
+		leiosCaster.hash,
+		builder.leiosData.Announcement.Hash.Bytes(),
+	)
+	assert.Equal(
+		t,
+		uint64(len(leiosCaster.cbor)),
+		builder.leiosData.Announcement.Size,
+	)
+}
+
+func TestCheckAndForgeProductionRejectsSemanticallyInvalidLeiosAnnouncement(t *testing.T) {
+	t.Parallel()
+	creds := setupTestCredentials(t)
+	block := newForgerTestBlock(10, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	leiosChecker := &forgerTestLeiosChecker{allowed: true}
+	leiosCaster := &forgerTestLeiosCaster{}
+	announcementValidated := false
+
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+		},
+		LeiosProduceChecker: leiosChecker,
+		LeiosEBBroadcaster:  leiosCaster,
+		LeiosTxValidator:    &mockTxValidator{},
+		LeiosAnnouncementValidator: func(
+			_ context.Context,
+			header ledger.BlockHeader,
+		) error {
+			require.Same(t, block, header)
+			require.Zero(t, broadcaster.calls,
+				"announcement validation must precede ranking-block adoption")
+			announcementValidated = true
+			return fmt.Errorf("transaction validation: %w", ErrInvalidLeiosAnnouncement)
+		},
+		LeiosMempool: forgerTestMempoolProvider{
+			txs: []MempoolTransaction{
+				{
+					Hash: strings.Repeat("11", 32),
+					Cbor: makeMinimalTxCbor(t, 0x11, 0),
+					Type: conway.TxTypeConway,
+				},
+			},
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.ErrorIs(t, forger.checkAndForgeProduction(context.Background()), ErrInvalidLeiosAnnouncement)
+
+	require.True(t, announcementValidated)
+	require.Zero(t, broadcaster.calls)
+	require.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeValidationFailed))
 	require.Equal(t, 1, leiosChecker.calls)
 	require.NotEmpty(t, leiosCaster.hash)
 	require.Equal(t, uint64(10), leiosCaster.slot)

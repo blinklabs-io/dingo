@@ -1061,7 +1061,11 @@ func (n *Node) initBlockForger(
 			if o == nil {
 				return errOuroborosNotStarted
 			}
-			return o.ValidateLeiosEndorserBlockForHeader(ctx, header)
+			err := o.ValidateLeiosEndorserBlockForHeader(ctx, header)
+			if errors.Is(err, ledger.ErrInvalidLeiosEndorserBlockTransactions) {
+				return errors.Join(forging.ErrInvalidLeiosAnnouncement, err)
+			}
+			return err
 		},
 		LeiosCertificateProvider:        leiosCerts,
 		LeiosParentAnnouncementProvider: leiosParent,
