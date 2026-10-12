@@ -616,6 +616,8 @@ type snapshotPageToken struct {
 	ID         string `json:"id"`
 }
 
+const maxSnapshotPageTokenLength = 2048
+
 func encodeSnapshotPageToken(
 	cursor *lifecycle.SnapshotCatalogCursor,
 ) (string, error) {
@@ -636,6 +638,9 @@ func decodeSnapshotPageToken(
 ) (*lifecycle.SnapshotCatalogCursor, error) {
 	if token == "" {
 		return nil, nil
+	}
+	if len(token) > maxSnapshotPageTokenLength {
+		return nil, errors.New("invalid snapshot page token")
 	}
 	data, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {

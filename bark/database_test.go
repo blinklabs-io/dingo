@@ -2470,6 +2470,14 @@ func TestListSnapshotsRejectsOversizedPage(t *testing.T) {
 	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
 }
 
+func TestDecodeSnapshotPageTokenRejectsOversizedInput(t *testing.T) {
+	t.Parallel()
+	_, err := decodeSnapshotPageToken(strings.Repeat(
+		"A", maxSnapshotPageTokenLength+1,
+	))
+	require.ErrorContains(t, err, "invalid snapshot page token")
+}
+
 func TestListSnapshotsBoundsManifestWorkToPage(t *testing.T) {
 	t.Parallel()
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
