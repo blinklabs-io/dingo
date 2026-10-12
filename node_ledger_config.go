@@ -241,6 +241,21 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			})
 			return selected
 		},
+		SelectBlockfetchRetryPeerFunc: func(
+			excluded []ouroboros.ConnectionId,
+			rangeEnd ocommon.Point,
+			timeoutPenalty time.Duration,
+		) (ouroboros.ConnectionId, bool, bool) {
+			var selected ouroboros.ConnectionId
+			found := false
+			available := n.withLiveChainsyncState(func(state *chainsync.State) {
+				if timeoutPenalty > 0 && len(excluded) > 0 {
+					state.RecordBlockfetchLatency(excluded[0], timeoutPenalty)
+				}
+				selected, found = state.SelectBlockfetchRetryPeer(excluded, rangeEnd)
+			})
+			return selected, found, available
+		},
 		RecordBlockfetchLatencyFunc: func(
 			connId ouroboros.ConnectionId,
 			latency time.Duration,
