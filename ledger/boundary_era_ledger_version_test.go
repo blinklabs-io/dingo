@@ -178,6 +178,36 @@ type boundaryEraCase struct {
 	// configure may schedule a hard fork with a TestXHardForkAtEpoch
 	// override.
 	configure func(cfg *cardano.CardanoNodeConfig)
+	// classicUpdateMajor, when set, is the major of a classic
+	// protocol-parameter update proposed in epoch 0 by enough genesis
+	// delegates to meet the Shelley genesis updateQuorum. The boundary enacts
+	// it, so the major reaches the ledger only through that enactment.
+	classicUpdateMajor uint
+}
+
+// boundaryEraTestUpdateQuorum is the Shelley genesis updateQuorum of a case
+// that proposes a classic update.
+const boundaryEraTestUpdateQuorum = 2
+
+// seedClassicVersionUpdate stores, through the store the PPUP rule writes, a
+// proposal from each of boundaryEraTestUpdateQuorum genesis delegates that
+// sets the protocol major, made in epoch 0 for the boundary into epoch 1.
+func seedClassicVersionUpdate(
+	t *testing.T,
+	db *database.Database,
+	major uint,
+) {
+	t.Helper()
+	updateCbor, err := cbor.Encode(map[uint64]any{
+		14: lcommon.ProtocolParametersProtocolVersion{Major: major},
+	})
+	require.NoError(t, err)
+	for i := range boundaryEraTestUpdateQuorum {
+		require.NoError(t, db.SetPParamUpdate(
+			bytes.Repeat([]byte{byte(0xa0 + i)}, 28),
+			updateCbor, uint64(10+i), 0, nil,
+		))
+	}
 }
 
 // runBoundaryEraCase runs the boundary block through the pipeline and returns
@@ -271,6 +301,9 @@ func newBoundaryEraLedger(
 	if tc.configure != nil {
 		tc.configure(nodeConfig)
 	}
+	if tc.classicUpdateMajor != 0 {
+		nodeConfig.ShelleyGenesis().UpdateQuorum = boundaryEraTestUpdateQuorum
+	}
 
 	sourceEra := eras.BabbageEraDesc
 	var pparams lcommon.ProtocolParameters = boundaryEraBabbagePParams(
@@ -332,6 +365,9 @@ func newBoundaryEraLedger(
 	seedEmptyRewardBasisForRollover(t, db, epoch0, pparams)
 	if tc.seed != nil {
 		tc.seed(t, db)
+	}
+	if tc.classicUpdateMajor != 0 {
+		seedClassicVersionUpdate(t, db, tc.classicUpdateMajor)
 	}
 	return ls, block
 }
@@ -410,6 +446,28 @@ func TestBoundaryBlockEraMustMatchLedgerProtocolVersion(t *testing.T) {
 			votingBlocks: k,
 		})
 		requireBecomesConway(t, ls, err)
+	})
+	// A pre-Conway version-triggered fork reaches the boundary with the
+	// ending era's major in pparams; the next era's major exists only in the
+	// quorum-met update the boundary enacts.
+	t.Run("quorum-met classic major bump to conway transitions", func(t *testing.T) {
+		t.Parallel()
+		ls, err := runBoundaryEraCase(t, boundaryEraCase{
+			pparamsMajor:       8,
+			classicUpdateMajor: 9,
+			votingBlocks:       k,
+		})
+		requireBecomesConway(t, ls, err)
+	})
+	t.Run("babbage block after a quorum-met classic major bump is rejected", func(t *testing.T) {
+		t.Parallel()
+		ls, err := runBoundaryEraCase(t, boundaryEraCase{
+			pparamsMajor:       8,
+			classicUpdateMajor: 9,
+			babbageBody:        true,
+			votingBlocks:       k,
+		})
+		requireStaysBabbage(t, ls, err, 8)
 	})
 	t.Run("configured trigger epoch transitions", func(t *testing.T) {
 		t.Parallel()

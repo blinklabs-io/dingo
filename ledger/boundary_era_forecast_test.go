@@ -102,6 +102,24 @@ func TestForgedBoundaryEraIsAccepted(t *testing.T) {
 			wantConway: false,
 		},
 		{
+			name: "quorum-met classic major bump",
+			tc: boundaryEraCase{
+				pparamsMajor:       8,
+				classicUpdateMajor: 9,
+				votingBlocks:       k,
+			},
+			wantConway: true,
+		},
+		{
+			name: "quorum-met classic major bump with fewer than k blocks",
+			tc: boundaryEraCase{
+				pparamsMajor:       8,
+				classicUpdateMajor: 9,
+				votingBlocks:       k - 1,
+			},
+			wantConway: false,
+		},
+		{
 			name:       "no major bump",
 			tc:         boundaryEraCase{pparamsMajor: 8, votingBlocks: k},
 			wantConway: false,
