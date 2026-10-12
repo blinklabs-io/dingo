@@ -151,7 +151,7 @@ func babbageRedeemers() alonzo.AlonzoRedeemers {
 }
 
 func TestValidateTxBabbageCollateralKeyLockOnlyWhenPhase2Runs(t *testing.T) {
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
 		0,
 	)
@@ -368,7 +368,7 @@ func TestValidateTxDijkstraCollateralReturnRejectsPointerStakeAddress(t *testing
 }
 
 func TestValidateTxAllErasRejectExtraneousRedeemerForKeyInput(t *testing.T) {
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"6666666666666666666666666666666666666666666666666666666666666666",
 		0,
 	)
@@ -446,7 +446,7 @@ func TestValidateTxAllErasRejectExtraneousRedeemerForKeyInput(t *testing.T) {
 }
 
 func TestValidateTxBabbageCollateralUsesNetBalanceAndExactThreshold(t *testing.T) {
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
 		0,
 	)
@@ -511,7 +511,7 @@ func TestValidateTxBabbageCollateralUsesNetBalanceAndExactThreshold(t *testing.T
 }
 
 func TestValidateTxAlonzoCollateralThresholdUsesCeiling(t *testing.T) {
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
 		0,
 	)
@@ -557,7 +557,7 @@ func TestValidateTxAlonzoCollateralThresholdUsesCeiling(t *testing.T) {
 }
 
 func TestValidateTxConwayCollateralUsesNetBalanceAndExactThreshold(t *testing.T) {
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
 		0,
 	)
@@ -607,7 +607,7 @@ func TestValidateTxConwayCollateralUsesNetBalanceAndExactThreshold(t *testing.T)
 }
 
 func TestValidateTxDijkstraCollateralUsesNetBalanceAndExactThreshold(t *testing.T) {
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
 		0,
 	)
@@ -662,7 +662,7 @@ func TestValidateTxDijkstraCollateralUsesNetBalanceAndExactThreshold(t *testing.
 }
 
 func TestValidateTxBabbageCollateralReturnCannotCreateAssets(t *testing.T) {
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
 		0,
 	)
@@ -717,7 +717,7 @@ func TestValidateTxBabbageCollateralReturnCannotCreateAssets(t *testing.T) {
 }
 
 func TestValidateTxConwayCollateralReturnCannotCreateAssets(t *testing.T) {
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
 		0,
 	)
@@ -936,7 +936,7 @@ func TestValidateTxConwayCollateralReturnOutputPredicates(t *testing.T) {
 }
 
 func TestValidateTxBabbageTotalCollateralDistinguishesAbsentAndZero(t *testing.T) {
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
 		0,
 	)
@@ -991,7 +991,7 @@ func TestValidateTxBabbageTotalCollateralDistinguishesAbsentAndZero(t *testing.T
 }
 
 func TestValidateTxConwayTotalCollateralDistinguishesAbsentAndZero(t *testing.T) {
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
 		0,
 	)
@@ -1053,7 +1053,7 @@ func TestValidateTxConwayTotalCollateralDistinguishesAbsentAndZero(t *testing.T)
 }
 
 func TestValidateTxDijkstraTotalCollateralPreservesZeroPresence(t *testing.T) {
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
 		0,
 	)
@@ -1420,7 +1420,7 @@ func TestValidateTxConwaySupplementalDatumSources(t *testing.T) {
 	}
 
 	t.Run("key input does not justify a supplemental datum", func(t *testing.T) {
-		input := shelley.NewShelleyTransactionInput(
+		input := shelley.MustNewShelleyTransactionInput(
 			"1111111111111111111111111111111111111111111111111111111111111111",
 			0,
 		)
@@ -1467,7 +1467,7 @@ func TestValidateTxConwaySupplementalDatumSources(t *testing.T) {
 	})
 
 	t.Run("reference input justifies its datum hash", func(t *testing.T) {
-		input := shelley.NewShelleyTransactionInput(
+		input := shelley.MustNewShelleyTransactionInput(
 			"5555555555555555555555555555555555555555555555555555555555555555",
 			0,
 		)
@@ -1486,7 +1486,7 @@ func TestValidateTxConwaySupplementalDatumSources(t *testing.T) {
 	})
 
 	t.Run("missing V1 spending datum fails on invalid transaction", func(t *testing.T) {
-		input := shelley.NewShelleyTransactionInput(
+		input := shelley.MustNewShelleyTransactionInput(
 			"2222222222222222222222222222222222222222222222222222222222222222",
 			0,
 		)
@@ -1513,7 +1513,7 @@ func TestValidateTxConwaySupplementalDatumSources(t *testing.T) {
 	})
 
 	t.Run("native-script input does not justify a supplemental datum", func(t *testing.T) {
-		input := shelley.NewShelleyTransactionInput(
+		input := shelley.MustNewShelleyTransactionInput(
 			"3333333333333333333333333333333333333333333333333333333333333333",
 			0,
 		)
@@ -1541,7 +1541,7 @@ func TestValidateTxConwaySupplementalDatumSources(t *testing.T) {
 
 func TestValidateTxConwayRequiredSpendingDatumIgnoresValidityFlag(t *testing.T) {
 	datum, datumHash := testDatum(t)
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"7777777777777777777777777777777777777777777777777777777777777777",
 		0,
 	)
@@ -1601,7 +1601,7 @@ func TestValidateTxConwayRequiredSpendingDatumIgnoresValidityFlag(t *testing.T) 
 
 func TestValidateTxDijkstraRequiredSpendingDatumsAtTopAndNestedLevels(t *testing.T) {
 	datum, datumHash := testDatum(t)
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"8888888888888888888888888888888888888888888888888888888888888888",
 		0,
 	)
@@ -1729,7 +1729,7 @@ func TestValidateTxBabbageCollateralReturnDatumHashJustifiesWitnessDatum(t *test
 
 func TestValidateTxAlonzoAndBabbageDatumSetRules(t *testing.T) {
 	datum, datumHash := testDatum(t)
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"4444444444444444444444444444444444444444444444444444444444444444",
 		0,
 	)

@@ -81,12 +81,15 @@ var (
 	// transaction was at fault. It is the ledger-side counterpart of
 	// ErrMempoolUnavailable: both name a node condition the caller can
 	// retry rather than a transaction it must fix.
-	ErrLedgerUnavailable   = errors.New("ledger state unavailable")
-	ErrInvalidPoolID       = errors.New("invalid pool id")
-	ErrMempoolUnavailable  = errors.New("mempool unavailable")
-	ErrMempoolFull         = errors.New("mempool full")
-	ErrTransactionNotFound = errors.New("transaction not found")
-	ErrInvalidStakeAddress = errors.New("invalid stake address")
+	ErrLedgerUnavailable = errors.New("ledger state unavailable")
+	// ErrEvaluationOverloaded reports an evaluation refused because the node
+	// is already evaluating as many transactions as it admits.
+	ErrEvaluationOverloaded = errors.New("transaction evaluation overloaded")
+	ErrInvalidPoolID        = errors.New("invalid pool id")
+	ErrMempoolUnavailable   = errors.New("mempool unavailable")
+	ErrMempoolFull          = errors.New("mempool full")
+	ErrTransactionNotFound  = errors.New("transaction not found")
+	ErrInvalidStakeAddress  = errors.New("invalid stake address")
 	// ErrProtocolParamsUnavailable reports that no protocol parameters exist
 	// for the requested point. Byron carries no protocol-parameter CBOR, so a
 	// genuine Byron prefix reaches this during a from-genesis sync; it is an
@@ -122,7 +125,7 @@ func drepInactivityFromPParams(
 
 // TransactionSubmitter accepts raw transaction CBOR for mempool admission.
 type TransactionSubmitter interface {
-	AddTransaction(txType uint, txBytes []byte) error
+	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 }
 
 // transactionEvaluator evaluates a decoded transaction's scripts against the
@@ -130,7 +133,7 @@ type TransactionSubmitter interface {
 // evaluation endpoints depend only on this call, so how an evaluation failure
 // is classified can be exercised without a live ledger.
 type transactionEvaluator interface {
-	EvaluateTx(tx lcommon.Transaction) (
+	EvaluateTxContext(ctx context.Context, tx lcommon.Transaction) (
 		uint64,
 		lcommon.ExUnits,
 		map[lcommon.RedeemerKey]lcommon.ExUnits,
@@ -1174,7 +1177,7 @@ func (a *NodeAdapter) AssetAddresses(
 		)
 	}
 	total := len(holders)
-	return paginateAssetHolders(holders, params), total, nil
+	return paginateSlice(holders, params), total, nil
 }
 
 type assetHolderQuantity struct {
@@ -1240,18 +1243,6 @@ func assetHoldersFromUtxos(
 		})
 	}
 	return holders, nil
-}
-
-func paginateAssetHolders(
-	holders []AssetHolderInfo,
-	params PaginationParams,
-) []AssetHolderInfo {
-	start := (params.Page - 1) * params.Count
-	if start >= len(holders) {
-		return []AssetHolderInfo{}
-	}
-	end := min(start+params.Count, len(holders))
-	return holders[start:end]
 }
 
 // drepRatificationWait bounds how long a DRep request waits for the latest
@@ -3710,8 +3701,9 @@ func utxoDatumAndScriptRef(
 // AddressTransactions returns paginated transaction
 // history for the requested address.
 func (a *NodeAdapter) AddressTransactions(
+	ctx context.Context,
 	address string,
-	params PaginationParams,
+	params TransactionRangeParams,
 ) ([]AddressTransactionInfo, int, error) {
 	addr, err := lcommon.NewAddress(address)
 	if err != nil {
@@ -3723,7 +3715,37 @@ func (a *NodeAdapter) AddressTransactions(
 		)
 	}
 
-	total, err := a.ledgerState.CountTransactionsByAddress(addr)
+	from, fromSatisfiable, err := a.resolveBlockRangeBound(
+		ctx, params.From, true,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"resolve address transactions from range: %w",
+			err,
+		)
+	}
+	if !fromSatisfiable {
+		return []AddressTransactionInfo{}, 0, nil
+	}
+	to, toSatisfiable, err := a.resolveBlockRangeBound(
+		ctx, params.To, false,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"resolve address transactions to range: %w",
+			err,
+		)
+	}
+	if !toSatisfiable {
+		return []AddressTransactionInfo{}, 0, nil
+	}
+
+	total, err := a.ledgerState.CountTransactionsByAddress(
+		ctx,
+		addr,
+		from,
+		to,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count address transactions for %q: %w",
@@ -3733,10 +3755,13 @@ func (a *NodeAdapter) AddressTransactions(
 	}
 
 	txs, err := a.ledgerState.GetTransactionsByAddressWithOrder(
+		ctx,
 		addr,
-		params.Count,
-		(params.Page-1)*params.Count,
-		params.Order,
+		params.Pagination.Count,
+		(params.Pagination.Page-1)*params.Pagination.Count,
+		params.Pagination.Order,
+		from,
+		to,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3752,10 +3777,7 @@ func (a *NodeAdapter) AddressTransactions(
 		blockHashKey := hex.EncodeToString(tx.BlockHash)
 		blockHeight, ok := blockNumbers[blockHashKey]
 		if !ok {
-			block, err := a.ledgerState.BlockByHash(
-				context.Background(),
-				tx.BlockHash,
-			)
+			block, err := a.ledgerState.BlockByHash(ctx, tx.BlockHash)
 			if err != nil {
 				return nil, 0, fmt.Errorf(
 					"get block for transaction %x: %w",
@@ -4025,6 +4047,7 @@ func isLedgerStorageFailure(err error) bool {
 
 // TransactionSubmit submits raw signed transaction CBOR to the mempool.
 func (a *NodeAdapter) TransactionSubmit(
+	ctx context.Context,
 	txCbor []byte,
 ) (string, error) {
 	if a.submitter == nil {
@@ -4046,7 +4069,7 @@ func (a *NodeAdapter) TransactionSubmit(
 			ErrInvalidTransaction,
 		)
 	}
-	if err := a.submitter.AddTransaction(txType, txCbor); err != nil {
+	if err := a.submitter.AddTransaction(ctx, txType, txCbor); err != nil {
 		if _, ok := errors.AsType[*mempool.MempoolFullError](err); ok {
 			return "", fmt.Errorf(
 				"submit transaction to mempool: %w: %w",
@@ -4054,14 +4077,16 @@ func (a *NodeAdapter) TransactionSubmit(
 				ErrMempoolFull,
 			)
 		}
-		// A stopped mempool and a missing validator are both "the mempool
-		// cannot accept anything right now", the same condition the nil
-		// submitter above reports, so they answer 503 rather than telling the
-		// client its transaction was rejected. Everything remaining from
-		// AddTransaction is a real admission failure -- a validity interval
-		// that has not started, or ledger validation -- and stays a rejection.
+		// A stopped mempool, a missing validator and a ledger that kept
+		// moving during admission all mean "no verdict was reached", the same
+		// condition the nil submitter above reports, so they answer 503 rather
+		// than telling the client its transaction was rejected. Everything
+		// remaining from AddTransaction is a real admission failure -- a
+		// validity interval that has not started, or ledger validation -- and
+		// stays a rejection.
 		if errors.Is(err, mempool.ErrMempoolStopped) ||
-			errors.Is(err, mempool.ErrNilValidator) {
+			errors.Is(err, mempool.ErrNilValidator) ||
+			errors.Is(err, mempool.ErrPendingStateMoved) {
 			return "", fmt.Errorf(
 				"%w: %w",
 				ErrMempoolUnavailable,
@@ -4087,6 +4112,7 @@ func (a *NodeAdapter) TransactionSubmit(
 // TransactionEvaluate evaluates script execution units for raw transaction
 // CBOR without submitting the transaction.
 func (a *NodeAdapter) TransactionEvaluate(
+	ctx context.Context,
 	txCbor []byte,
 ) (TransactionEvaluationResponse, error) {
 	txType, err := safedecode.TransactionType(txCbor)
@@ -4108,8 +4134,11 @@ func (a *NodeAdapter) TransactionEvaluate(
 	if a.evaluator == nil {
 		return nil, ErrLedgerUnavailable
 	}
-	_, _, redeemerExUnits, err := a.evaluator.EvaluateTx(tx)
+	_, _, redeemerExUnits, err := a.evaluator.EvaluateTxContext(ctx, tx)
 	if err != nil {
+		if errors.Is(err, ledger.ErrEvaluationBusy) {
+			return nil, fmt.Errorf("%w: %w", ErrEvaluationOverloaded, err)
+		}
 		// Evaluation resolves the transaction's inputs from storage, so the
 		// same return carries both "this transaction cannot be evaluated"
 		// and "this node cannot read its own UTxO set". Only the former is
@@ -5294,10 +5323,10 @@ func poolRewardAccountCredential(
 	hash := cert.RewardAccount[:]
 	rawCbor := cert.Cbor()
 	if len(rawCbor) > 0 {
-		var raw []cbor.RawMessage
-		if _, err := cbor.Decode(rawCbor, &raw); err == nil && len(raw) > 6 {
-			var rewardAddrBytes []byte
-			if _, err := cbor.Decode(raw[6], &rewardAddrBytes); err == nil &&
+		raw, _, err := safedecode.Cbor[[]cbor.RawMessage](rawCbor)
+		if err == nil && len(raw) > 6 {
+			rewardAddrBytes, _, err := safedecode.Cbor[[]byte](raw[6])
+			if err == nil &&
 				len(rewardAddrBytes) == 29 {
 				if (rewardAddrBytes[0] & 0xF0) == 0xF0 {
 					credType = lcommon.CredentialTypeScriptHash

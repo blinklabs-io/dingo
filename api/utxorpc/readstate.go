@@ -52,11 +52,6 @@ func (s *betaQueryServiceServer) ReadState(
 	ctx context.Context,
 	req *connect.Request[betaquery.ReadStateRequest],
 ) (*connect.Response[betaquery.ReadStateResponse], error) {
-	fieldMask := req.Msg.GetFieldMask()
-	s.utxorpc.config.Logger.Info(
-		fmt.Sprintf("Got a ReadState request with fieldMask %v", fieldMask),
-	)
-
 	chainQuery := req.Msg.GetQuery()
 	if chainQuery == nil || chainQuery.GetQuery() == nil {
 		return nil, connect.NewError(
@@ -90,7 +85,11 @@ func (s *betaQueryServiceServer) ReadState(
 		// A nil inner message is a query with no pool filter rather than a
 		// malformed one: the generated getters are nil-safe and proto3 reads an
 		// absent message as its default.
-		return s.readStakePoolDistribution(ctx, query.StakePoolDistribution)
+		return s.readStakePoolDistribution(
+			ctx,
+			query.StakePoolDistribution,
+			len(req.Msg.GetFieldMask().GetPaths()),
+		)
 	default:
 		return nil, connect.NewError(
 			connect.CodeUnimplemented,
@@ -109,6 +108,7 @@ func (s *betaQueryServiceServer) ReadState(
 func (s *betaQueryServiceServer) readStakePoolDistribution(
 	ctx context.Context,
 	query *betacardano.GetStakePoolDistribution,
+	fieldMaskPaths int,
 ) (*connect.Response[betaquery.ReadStateResponse], error) {
 	// LedgerState is an optional dependency: Utxorpc.Start admits an untyped
 	// nil and documents that handlers check per request (it rejects only a
@@ -129,6 +129,12 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
+	s.utxorpc.config.Logger.Info(
+		"Got a ReadState request",
+		"query", "stake_pool_distribution",
+		"pool_filter", len(poolFilter),
+		"field_mask_paths", fieldMaskPaths,
+	)
 
 	dist, err := s.utxorpc.config.LedgerState.PoolStakeDistribution(
 		ctx,

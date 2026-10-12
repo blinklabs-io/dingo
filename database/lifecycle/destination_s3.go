@@ -163,68 +163,38 @@ func (d *s3Destination) UploadDir(ctx context.Context, localDir string) error {
 	return nil
 }
 
-// DownloadDir downloads every object under the destination's prefix into
-// localDir. Keys containing a further path separator are skipped — a
-// snapshot directory's contents are flat, so any such key wasn't written by
-// UploadDir.
-func (d *s3Destination) DownloadDir(
+// DownloadFiles downloads exactly the named objects into localDir, never
+// listing the prefix, and stops reading an object that carries more than its
+// MaxBytes.
+func (d *s3Destination) DownloadFiles(
 	ctx context.Context,
 	localDir string,
+	files []DownloadFile,
 ) error {
-	downloader := manager.NewDownloader( //nolint:staticcheck // see UploadDir's note on manager.Uploader
-		d.client,
-	)
-	listInput := &s3.ListObjectsV2Input{Bucket: &d.bucket}
-	if d.prefix != "" {
-		p := d.prefix + "/"
-		listInput.Prefix = &p
-	}
-	paginator := s3.NewListObjectsV2Paginator(d.client, listInput)
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return fmt.Errorf("list s3://%s/%s: %w", d.bucket, d.prefix, err)
+	for _, file := range files {
+		if !IsSafeCloudObjectFileName(file.Name) {
+			return fmt.Errorf("unsafe snapshot file name %q", file.Name)
 		}
-		for _, obj := range page.Contents {
-			if obj.Key == nil {
-				continue
-			}
-			fileName := strings.TrimPrefix(*obj.Key, d.prefix+"/")
-			if d.prefix == "" {
-				fileName = *obj.Key
-			}
-			if !IsSafeCloudObjectFileName(fileName) {
-				continue
-			}
-			localPath := filepath.Join(localDir, fileName)
-			f, err := os.Create(localPath)
-			if err != nil {
-				return fmt.Errorf("create %q for download: %w", localPath, err)
-			}
-			_, downloadErr := downloader.Download( //nolint:staticcheck
-				ctx,
-				f,
-				&s3.GetObjectInput{
-					Bucket: &d.bucket,
-					Key:    obj.Key,
-				},
-			)
-			closeErr := f.Close()
-			if downloadErr != nil {
+		key := d.objectKey(file.Name)
+		out, err := d.client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: &d.bucket,
+			Key:    &key,
+		})
+		if err != nil {
+			if isS3NotFoundError(err) {
 				return fmt.Errorf(
-					"download s3://%s/%s: %w",
-					d.bucket,
-					*obj.Key,
-					downloadErr,
+					"get s3://%s/%s: %w: %w",
+					d.bucket, key, ErrCloudSnapshotNotFound, err,
 				)
 			}
-			if closeErr != nil {
-				return fmt.Errorf(
-					"close %q after download: %w",
-					localPath,
-					closeErr,
-				)
-			}
+			return fmt.Errorf("get s3://%s/%s: %w", d.bucket, key, err)
+		}
+		err = writeBoundedFile(
+			filepath.Join(localDir, file.Name), out.Body, file,
+		)
+		_ = out.Body.Close()
+		if err != nil {
+			return fmt.Errorf("download s3://%s/%s: %w", d.bucket, key, err)
 		}
 	}
 	return nil
@@ -237,6 +207,7 @@ func (d *s3Destination) DownloadDir(
 // manifest.json rather than downloading the whole snapshot.
 func (d *s3Destination) ListSnapshots(
 	ctx context.Context,
+	opts ...ManifestOption,
 ) ([]SnapshotEntry, error) {
 	listPrefix := ""
 	if d.prefix != "" {
@@ -274,7 +245,9 @@ func (d *s3Destination) ListSnapshots(
 			if snapshotID == "" {
 				continue
 			}
-			manifest, err := d.fetchManifest(ctx, snapshotID)
+			manifest, err := d.fetchManifestForListing(
+				ctx, snapshotID, opts...,
+			)
 			if err != nil {
 				// A sub-path with no manifest.json object at all
 				// (ErrCloudSnapshotNotFound) is a snapshot still being
@@ -318,9 +291,14 @@ func (d *s3Destination) ListSnapshots(
 func isS3NotFoundError(err error) bool {
 	var noSuchKey *s3types.NoSuchKey
 	var notFound *s3types.NotFound
+	if errors.As(err, &noSuchKey) || errors.As(err, &notFound) {
+		return true
+	}
 	var apiErr smithy.APIError
-	return errors.As(err, &noSuchKey) || errors.As(err, &notFound) ||
-		(errors.As(err, &apiErr) && apiErr.ErrorCode() == "NotFound")
+	if !errors.As(err, &apiErr) || apiErr == nil {
+		return false
+	}
+	return apiErr.ErrorCode() == "NotFound"
 }
 
 // fetchManifest downloads and parses just the manifest.json for
@@ -363,13 +341,42 @@ func (d *s3Destination) FetchManifest(ctx context.Context) (Manifest, error) {
 }
 
 func (d *s3Destination) FetchManifestWithOptions(ctx context.Context, opts ...ManifestOption) (Manifest, error) {
+	return d.fetchManifestWithOptions(ctx, "", opts...)
+}
+
+func (d *s3Destination) fetchManifestWithOptions(
+	ctx context.Context,
+	snapshotID string,
+	opts ...ManifestOption,
+) (Manifest, error) {
 	limit, err := manifestByteLimit(opts)
 	if err != nil {
 		return Manifest{}, err
 	}
 	configured := *d
 	configured.maxManifestBytes = limit
-	return configured.FetchManifest(ctx)
+	m, err := configured.fetchManifest(ctx, snapshotID)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if err := m.Authenticate(opts...); err != nil {
+		return Manifest{}, err
+	}
+	return m, nil
+}
+
+func (d *s3Destination) fetchManifestForListing(
+	ctx context.Context,
+	snapshotID string,
+	opts ...ManifestOption,
+) (Manifest, error) {
+	limit, err := manifestByteLimit(opts)
+	if err != nil {
+		return Manifest{}, err
+	}
+	configured := *d
+	configured.maxManifestBytes = limit
+	return configured.fetchManifest(ctx, snapshotID)
 }
 
 // Delete implements CloudDeleter: it removes every object under this

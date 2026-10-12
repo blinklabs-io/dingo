@@ -268,6 +268,30 @@ func TestResetRefusesWhenTargetHasData(t *testing.T) {
 	)
 }
 
+func TestResetRefusesWhenDormantDRepStateIsPopulated(t *testing.T) {
+	baseDSN := postgresIntegrationDSN(t)
+	dsn := createIsolatedDatabase(t, baseDSN, "pgbackup_dormancy")
+	store, err := openStore(Config{DSN: dsn}, metadata.ProviderDependencies{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	require.NoError(t, store.Start(context.Background()))
+
+	admin, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	_, err = admin.Exec(
+		"UPDATE drep_dormancy_state SET dormant_epochs = 1 WHERE id = 1",
+	)
+	require.NoError(t, err)
+	var schema string
+	require.NoError(t, admin.QueryRow("SELECT current_schema()").Scan(&schema))
+
+	err = refuseIfTargetHasData(context.Background(), admin, []qualifiedTable{
+		{schema: schema, name: drepDormancyStateTableName},
+	})
+	require.ErrorContains(t, err, "already contains data")
+}
+
 // TestResetRefusesWhenOtherSchemaHasSchemaMigrationsTableWithData guards a
 // real gap: refuseIfTargetHasData originally exempted any table literally
 // named "schema_migrations" regardless of which schema it lived in, but

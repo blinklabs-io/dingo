@@ -125,7 +125,7 @@ func newBehindPeerFixture(t *testing.T) *behindPeerFixture {
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	ls.config.EventBus = bus
 	resyncCh := make(chan event.ChainsyncResyncEvent, 8)

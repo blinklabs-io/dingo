@@ -139,12 +139,13 @@ func openStore(
 		return nil, err
 	}
 	store, err := sqlstore.New(sqlstore.Config{
-		WriteDB:     db,
-		ReadDB:      db,
-		Dialect:     sqlstore.PostgresDialect(),
-		Logger:      deps.Logger,
-		StorageMode: deps.StorageMode,
-		Migrations:  registry,
+		GenesisStakingEmpty: deps.GenesisStakingEmpty,
+		WriteDB:             db,
+		ReadDB:              db,
+		Dialect:             sqlstore.PostgresDialect(),
+		Logger:              deps.Logger,
+		StorageMode:         deps.StorageMode,
+		Migrations:          registry,
 		MigrationLocker: migrations.NewAdvisoryLocker(
 			"postgres",
 			0x64696e676f6d6574,

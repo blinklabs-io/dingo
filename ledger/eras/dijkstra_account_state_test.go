@@ -95,7 +95,7 @@ func testDijkstraBatch(
 // Not t.Parallel: validateDijkstraWithRule swaps the package-level Dijkstra
 // rule list.
 func TestValidateTxDijkstraDirectDepositFundingIsEnforced(t *testing.T) {
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
 		0,
 	)
@@ -150,6 +150,7 @@ func TestValidateTxDijkstraDirectDepositFundingIsEnforced(t *testing.T) {
 			)
 			var notConserved shelley.ValueNotConservedUtxoError
 			require.ErrorAs(t, err, &notConserved)
+			require.True(t, IsSemanticRuleValidationError(err))
 		})
 	}
 }
@@ -195,9 +196,11 @@ func TestValidateTxDijkstraDirectDepositDestinations(t *testing.T) {
 		})
 		t.Run(name+" nonexistent account", func(t *testing.T) {
 			var e gdijkstra.DirectDepositAccountsMissingError
-			require.ErrorAs(t, validate(t, gdijkstra.DijkstraDirectDeposits{
+			err := validate(t, gdijkstra.DijkstraDirectDeposits{
 				missing: 1,
-			}), &e)
+			})
+			require.ErrorAs(t, err, &e)
+			require.True(t, IsSemanticRuleValidationError(err))
 		})
 		t.Run(name+" wrong network", func(t *testing.T) {
 			var e gdijkstra.WrongNetworkAccountAddressesError
@@ -375,7 +378,7 @@ func TestValidateTxDijkstraDecodesBalanceIntervalsFromRawCbor(t *testing.T) {
 		})
 		require.NoError(t, err)
 		txCbor, err := cbor.Encode([]any{
-			cbor.RawMessage(bodyCbor), map[uint]any{}, true, nil,
+			cbor.RawMessage(bodyCbor), map[uint]any{}, nil,
 		})
 		require.NoError(t, err)
 		return txCbor

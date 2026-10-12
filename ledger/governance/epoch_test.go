@@ -44,6 +44,46 @@ func TestProcessEpochSkipsPreConwayProtocolParameters(t *testing.T) {
 	assert.Same(t, pparams, out.UpdatedPParams)
 }
 
+func TestProcessEpochExtendsDRepsWhenNoLiveProposals(t *testing.T) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	credential := testBytes(28, 0x71)
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    credential,
+		ExpiryEpoch:   20,
+		Active:        true,
+	}))
+
+	processBoundary := func() {
+		txn := db.MetadataTxn(context.Background(), true)
+		defer txn.Release()
+		_, err := ProcessEpoch(context.Background(), &EpochInput{
+			DB:           db,
+			Txn:          txn,
+			PrevEpoch:    4,
+			NewEpoch:     5,
+			BoundarySlot: 500,
+			PParams:      conwayPParamsFixture(10),
+			UpdateFn: func(
+				pparams lcommon.ProtocolParameters,
+				_ any,
+			) (lcommon.ProtocolParameters, error) {
+				return pparams, nil
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, txn.Commit())
+	}
+
+	processBoundary()
+	processBoundary()
+	drep, err := store.GetDrepByCredential(0, credential, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(21), drep.ExpiryEpoch)
+}
+
 func TestRatificationPreconditionAcceptsZeroCommitteeQuorum(t *testing.T) {
 	t.Parallel()
 
@@ -88,7 +128,6 @@ func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 		Reward:     types.Uint64(5),
 		Active:     true,
 	}))
-
 	err = refundProposalDeposit(
 		context.Background(),
 		db,
@@ -226,11 +265,16 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 		Reward:     types.Uint64(5),
 		Active:     true,
 	}))
+	drepCredential := testBytes(28, 0x52)
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+		Credential:  drepCredential,
+		Active:      true,
+		ExpiryEpoch: 20,
+	}))
 	txHash := testBytes(32, 3)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
-			context.Background(),
+		db.SetGovernanceProposal(context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        txHash,
 				ActionIndex:   0,
@@ -265,6 +309,11 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, txn.Commit())
+	drep, err := db.GetDrepByCredential(context.Background(), 0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(21), drep.ExpiryEpoch,
+		"a proposal expiring in the previous epoch must not suppress the dormancy bump")
 
 	assert.Equal(t, 1, out.ExpiredCount)
 	assert.Equal(t, 0, out.DroppedCount)
@@ -322,8 +371,7 @@ func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
 	txHash := testBytes(32, 3)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
-			context.Background(),
+		db.SetGovernanceProposal(context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        txHash,
 				ActionIndex:   0,
@@ -417,8 +465,7 @@ func TestProcessEpochReplayedExpireBoundaryDoesNotDropInSameEpoch(
 	txHash := testBytes(32, 0x72)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
-			context.Background(),
+		db.SetGovernanceProposal(context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        txHash,
 				ActionIndex:   0,
@@ -525,8 +572,7 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 	siblingHash := testBytes(32, 0x94)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
-			context.Background(),
+		db.SetGovernanceProposal(context.Background(),
 			buildNoConfidenceProposal(
 				t, winnerHash, 0, 10, 30, winnerAddr, 100,
 				nil, nil, &ratifiedEpoch, &ratifiedSlot,
@@ -536,8 +582,7 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
-			context.Background(),
+		db.SetGovernanceProposal(context.Background(),
 			buildNoConfidenceProposal(
 				t, siblingHash, 0, 4, 25, siblingAddr, 101,
 				nil, nil, nil, nil,
@@ -612,8 +657,7 @@ func TestProcessEpochReplaysBoundaryDroppedProposalAfterStakeRewardReset(
 	txHash := testBytes(32, 0x21)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
-			context.Background(),
+		db.SetGovernanceProposal(context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        txHash,
 				ActionIndex:   0,
@@ -703,8 +747,7 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	txHash := testBytes(32, 3)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
-			context.Background(),
+		db.SetGovernanceProposal(context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        txHash,
 				ActionIndex:   0,
@@ -1155,8 +1198,7 @@ func TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify(
 	txHash := testBytes(32, 0x61)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
-			context.Background(),
+		db.SetGovernanceProposal(context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        txHash,
 				ActionIndex:   0,
@@ -1246,8 +1288,7 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 			require.NoError(t, err)
 
 			txHash := testBytes(32, 0xA1)
-			require.NoError(t, db.SetGovernanceProposal(
-				context.Background(),
+			require.NoError(t, db.SetGovernanceProposal(context.Background(),
 				&models.GovernanceProposal{
 					TxHash:        txHash,
 					ActionIndex:   0,
@@ -1304,6 +1345,71 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 			)
 		})
 	}
+}
+
+// An action ratified at the boundary that closes its final epoch has
+// expires_epoch below the new epoch, so it does not count as a live proposal
+// for the dormant-epoch bump into that new epoch.
+func TestProcessEpochDormancyBumpIgnoresActionRatifiedAtFinalBoundary(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, _ := newTallyTestDB(t)
+	drepCredential := testBytes(28, 0x71)
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+		Credential:  drepCredential,
+		Active:      true,
+		ExpiryEpoch: 20,
+	}))
+	actionCbor, err := cbor.Encode(&lcommon.NoConfidenceGovAction{
+		Type: uint(lcommon.GovActionTypeNoConfidence),
+	})
+	require.NoError(t, err)
+	txHash := testBytes(32, 0x72)
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
+		TxHash:        txHash,
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeNoConfidence),
+		ProposedEpoch: 4,
+		ExpiresEpoch:  4,
+		AnchorURL:     "https://example.invalid/dormancy-final-boundary",
+		AnchorHash:    testBytes(32, 0x73),
+		ReturnAddress: testBytes(29, 0x74),
+		GovActionCbor: actionCbor,
+		AddedSlot:     400,
+	},
+		nil,
+	))
+
+	txn := db.MetadataTxn(context.Background(), true)
+	defer txn.Release()
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    4,
+		NewEpoch:     5,
+		BoundarySlot: 500,
+		PParams: &conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 10,
+			},
+		},
+		UpdateFn: func(
+			pparams lcommon.ProtocolParameters,
+			_ any,
+		) (lcommon.ProtocolParameters, error) {
+			return pparams, nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+	require.Equal(t, 1, out.RatifiedCount)
+
+	drep, err := db.GetDrepByCredential(context.Background(), 0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(21), drep.ExpiryEpoch)
 }
 
 func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
@@ -1370,8 +1476,7 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 			require.NoError(t, err)
 
 			txHash := testBytes(32, byte(0xB0+index))
-			require.NoError(t, db.SetGovernanceProposal(
-				context.Background(),
+			require.NoError(t, db.SetGovernanceProposal(context.Background(),
 				&models.GovernanceProposal{
 					TxHash:        txHash,
 					ActionIndex:   0,
@@ -1503,8 +1608,7 @@ func TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten(
 	require.NoError(t, err)
 
 	txHash := testBytes(32, 0xE0)
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		&models.GovernanceProposal{
 			TxHash:        txHash,
 			ActionIndex:   0,
@@ -1616,8 +1720,7 @@ func TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset(
 	txHash := testBytes(32, 0x31)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
-			context.Background(),
+		db.SetGovernanceProposal(context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        txHash,
 				ActionIndex:   0,
@@ -1743,8 +1846,7 @@ func TestProcessEpochUnclaimedDepositDoesNotIncreaseWithdrawalCapacity(
 	ratifiedSlot := uint64(400)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
-			context.Background(),
+		db.SetGovernanceProposal(context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        testBytes(32, 8),
 				ActionIndex:   0,
@@ -1765,8 +1867,7 @@ func TestProcessEpochUnclaimedDepositDoesNotIncreaseWithdrawalCapacity(
 	)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
-			context.Background(),
+		db.SetGovernanceProposal(context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        testBytes(32, 10),
 				ActionIndex:   0,
@@ -2135,8 +2236,7 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 			require.NoError(t, err)
 
 			txHash := testBytes(32, byte(0x80+testIndex))
-			require.NoError(t, db.SetGovernanceProposal(
-				context.Background(),
+			require.NoError(t, db.SetGovernanceProposal(context.Background(),
 				&models.GovernanceProposal{
 					TxHash:        txHash,
 					ActionIndex:   0,
@@ -2357,14 +2457,12 @@ func TestProcessEpochEnactedChildPreserved(t *testing.T) {
 	childHash := testBytes(32, 52)
 	parentIdx := uint32(0)
 
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, parentHash, 0, 10, 30, returnAddr, 100,
 			nil, nil, &ratifiedEpoch, &ratifiedSlot),
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, childHash, 0, 12, 15, returnAddr, 101,
 			parentHash, &parentIdx, nil, nil),
 		nil,
@@ -2433,8 +2531,7 @@ func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 	parentHash := testBytes(32, 55)
 	childHash := testBytes(32, 56)
 
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(
 			t,
 			parentHash,
@@ -2450,8 +2547,7 @@ func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 		),
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(
 			t,
 			childHash,
@@ -2552,20 +2648,17 @@ func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 	grandchildHash := testBytes(32, 60)
 	parentIdx := uint32(0)
 
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, parentHash, 0, 10, 10, returnAddr, 100,
 			nil, nil, &ratifiedEpoch, &ratifiedSlot),
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, childHash, 0, 12, 20, returnAddr, 101,
 			nil, nil, nil, nil),
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, grandchildHash, 0, 14, 30, returnAddr, 102,
 			childHash, &parentIdx, nil, nil),
 		nil,
@@ -2645,14 +2738,12 @@ func TestProcessEpochOrphanExcludedFromActiveProposals(t *testing.T) {
 	parentHash := testBytes(32, 62)
 	childHash := testBytes(32, 63)
 
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, parentHash, 0, 10, 5, returnAddr, 100,
 			nil, nil, &ratifiedEpoch, &ratifiedSlot),
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, childHash, 0, 12, 5, returnAddr, 101,
 			nil, nil, nil, nil),
 		nil,
@@ -2703,14 +2794,12 @@ func TestProcessEpochOrphanedSiblingRestoredOnRollback(t *testing.T) {
 	parentHash := testBytes(32, 65)
 	childHash := testBytes(32, 66)
 
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, parentHash, 0, 10, 10, returnAddr, 100,
 			nil, nil, &ratifiedEpoch, &ratifiedSlot),
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, childHash, 0, 12, 20, returnAddr, 101,
 			nil, nil, nil, nil),
 		nil,
@@ -2795,15 +2884,13 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 	parentIdx := uint32(0)
 
 	// Parent expires at epoch 4 (ExpiresEpoch < NewEpoch=5).
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildInfoProposal(t, parentHash, 0, 4, 10, returnAddr, 100,
 			nil, nil, nil, nil),
 		nil,
 	))
 	// Child expires at epoch 15 but references parent.
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildInfoProposal(t, childHash, 0, 15, 20, returnAddr, 101,
 			parentHash, &parentIdx, nil, nil),
 		nil,
@@ -2923,14 +3010,12 @@ func TestDecideRatificationOnReadOnlySnapshotMatchesBoundary(t *testing.T) {
 	expiringHash := testBytes(32, 0x99)
 	childHash := testBytes(32, 0x9a)
 	expiringIdx := uint32(0)
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildInfoProposal(t, expiringHash, 0, currentEpoch-1, 3,
 			returnAddr, 10, nil, nil, nil, nil),
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceProposal(
-		context.Background(),
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildInfoProposal(t, childHash, 0, newEpoch+5, 3,
 			returnAddr, 11, expiringHash, &expiringIdx, nil, nil),
 		nil,

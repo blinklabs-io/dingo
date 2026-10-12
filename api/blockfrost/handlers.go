@@ -1016,12 +1016,16 @@ func (b *Blockfrost) handleAddressTransactions(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
+	pagination, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
+	params, ok := parseTransactionRangeOrWriteError(w, r, pagination)
 	if !ok {
 		return
 	}
 	address := r.PathValue("address")
-	txs, total, err := b.node.AddressTransactions(address, params)
+	txs, total, err := b.node.AddressTransactions(r.Context(), address, params)
 	if err != nil {
 		b.logger.Error(
 			"failed to get address transactions",
@@ -1036,7 +1040,7 @@ func (b *Blockfrost) handleAddressTransactions(
 		return
 	}
 
-	SetPaginationHeaders(w, total, params)
+	SetPaginationHeaders(w, total, pagination)
 	resp := make([]AddressTransactionResponse, 0, len(txs))
 	for _, tx := range txs {
 		resp = append(resp, AddressTransactionResponse{
@@ -1270,7 +1274,7 @@ func (b *Blockfrost) handleTransactionSubmit(
 		return
 	}
 
-	hash, err := b.node.TransactionSubmit(txCbor)
+	hash, err := b.node.TransactionSubmit(r.Context(), txCbor)
 	if err != nil {
 		// Classify node conditions before the rejection: admission runs
 		// ledger validation against storage, so a storage fault arrives on

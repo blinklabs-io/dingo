@@ -31,7 +31,6 @@ import (
 	dingomempool "github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -112,11 +111,11 @@ func newDijkstraCollateralReturnFixture(
 		[]byte{dijkstraCollateralCollateralInputByte},
 		lcommon.Blake2b256Size,
 	)
-	regularInput := shelley.NewShelleyTransactionInput(
+	regularInput := shelley.MustNewShelleyTransactionInput(
 		hex.EncodeToString(regularInputId),
 		0,
 	)
-	collateralInput := shelley.NewShelleyTransactionInput(
+	collateralInput := shelley.MustNewShelleyTransactionInput(
 		hex.EncodeToString(collateralInputId),
 		0,
 	)
@@ -262,17 +261,13 @@ func dijkstraCollateralReturnBlockCbor(
 ) []byte {
 	t.Helper()
 	block := &gdijkstra.DijkstraBlock{
-		BlockHeader: &gdijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber: 0,
-					Slot:        dijkstraCollateralReturnTestSlot,
-					ProtoVersion: babbage.BabbageProtoVersion{
-						Major: gdijkstra.MinProtocolVersionDijkstra,
-					},
-				},
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			0,
+			dijkstraCollateralReturnTestSlot,
+			lcommon.Blake2b256{},
+			lcommon.Blake2b256{},
+			0,
+		),
 		BlockBody: gdijkstra.DijkstraBlockBody{
 			Transactions: []gdijkstra.DijkstraTransaction{*tx},
 		},
@@ -318,7 +313,7 @@ func TestDijkstraCollateralReturnPointerThroughLedgerAndMempool(t *testing.T) {
 		pool := newDijkstraTestMempool(t, fx.ls)
 		assertDijkstraPointerReturnFailure(
 			t,
-			pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), fx.txCbor),
+			pool.AddTransaction(context.Background(), uint(gdijkstra.TxTypeDijkstra), fx.txCbor),
 		)
 		require.Empty(t, pool.Transactions())
 	})
@@ -329,7 +324,7 @@ func TestDijkstraCollateralReturnPointerThroughLedgerAndMempool(t *testing.T) {
 		require.NoError(t, fx.ls.ValidateTx(fx.tx))
 
 		pool := newDijkstraTestMempool(t, fx.ls)
-		require.NoError(t, pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), fx.txCbor))
+		require.NoError(t, pool.AddTransaction(context.Background(), uint(gdijkstra.TxTypeDijkstra), fx.txCbor))
 		require.Len(t, pool.Transactions(), 1)
 	})
 }

@@ -38,7 +38,7 @@ import (
 // trigger surface for that is Phase 4's job (the gRPC surface), this file
 // instead builds two real, full *dingo.Node instances in the same test
 // process — one an actual block producer using the devnet genesis
-// delegate's real VRF/KES/OpCert credentials (config/cardano/devnet/keys),
+// delegate's real VRF/KES/OpCert credentials (internal/devnetkeys/keys),
 // the other a normal-mode node syncing from it over a real loopback TCP
 // connection using the real Ouroboros NtN handshake/chainsync/blockfetch
 // stack — and calls Truncate/Restore on the syncing node while blocks are

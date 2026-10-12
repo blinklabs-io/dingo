@@ -29,7 +29,10 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/plutigo/lang"
 )
+
+var pooledDijkstraEvalContext = lcommon.PooledEvalContext
 
 var DijkstraEraDesc = EraDesc{
 	Id:                      gdijkstra.EraIdDijkstra,
@@ -409,7 +412,9 @@ func ValidateTxDijkstra(
 	}
 	normalizedTx, err := normalizeScriptDataHashCbor(tx)
 	if err != nil {
-		return fmt.Errorf("normalize script data hash CBOR: %w", err)
+		return semanticRuleValidationErrorFor(
+			fmt.Errorf("normalize script data hash CBOR: %w", err),
+		)
 	}
 	tx = normalizedTx
 	errs := []error{}
@@ -421,11 +426,11 @@ func ValidateTxDijkstra(
 		if err != nil {
 			errs = append(
 				errs,
-				fmt.Errorf(
+				semanticRuleValidationErrorFor(fmt.Errorf(
 					"dijkstra utxo validation rule %d: %w",
 					validationRule.index,
 					err,
-				),
+				)),
 			)
 		}
 	}
@@ -436,13 +441,15 @@ func ValidateTxDijkstra(
 			tx.Certificates(),
 			minPoolMarginFromLedgerState(ls),
 		); err != nil {
-			errs = append(errs, err)
+			errs = append(errs, semanticRuleValidationErrorFor(err))
 		}
 	}
 	if err := validateParameterChangeExcludesProtocolVersion(tx, slot, ls, pp); err != nil {
 		errs = append(
 			errs,
-			fmt.Errorf("dijkstra parameter-change validation: %w", err),
+			semanticRuleValidationErrorFor(fmt.Errorf(
+				"dijkstra parameter-change validation: %w", err,
+			)),
 		)
 	}
 	if len(errs) > 0 {
@@ -459,7 +466,7 @@ func ValidateTxDijkstra(
 			ls,
 			tmpPparams,
 		); err != nil {
-			return err
+			return semanticRuleValidationErrorFor(err)
 		}
 	}
 	if shouldSkipPhase2Validation(ls) {
@@ -473,10 +480,13 @@ func ValidateTxDijkstra(
 	// for Dijkstra guarding redeemers and sub-transaction witness scripts.
 	phase2Tx, err := dijkstraTransactionForPhase2(tx)
 	if err != nil {
-		return err
+		return semanticRuleValidationErrorFor(err)
+	}
+	if err := validateDijkstraEvalContexts(phase2Tx, tmpPparams); err != nil {
+		return localRuleValidationErrorFor(err)
 	}
 	if err := validateDijkstraPlutusV4ReferenceInputOverlap(phase2Tx, ls); err != nil {
-		return err
+		return semanticRuleValidationErrorFor(err)
 	}
 	phase2Err := gdijkstra.UtxoValidatePlutusScripts(
 		phase2Tx,
@@ -484,7 +494,62 @@ func ValidateTxDijkstra(
 		ls,
 		tmpPparams,
 	)
-	return validatePlutusOutcome(tx, phase2Err)
+	return semanticRuleValidationErrorFor(validatePlutusOutcome(tx, phase2Err))
+}
+
+func validateDijkstraEvalContexts(
+	tx *gdijkstra.DijkstraTransaction,
+	pp *gdijkstra.DijkstraProtocolParameters,
+) error {
+	hasRedeemers := func(redeemers lcommon.TransactionWitnessRedeemers) bool {
+		if redeemers == nil {
+			return false
+		}
+		for range redeemers.Iter() {
+			return true
+		}
+		return false
+	}
+	witnesses := tx.Witnesses()
+	needsContext := witnesses != nil && hasRedeemers(witnesses.Redeemers())
+	if !needsContext {
+		for _, subTx := range tx.Body.TxSubTransactions.Items() {
+			if hasRedeemers(subTx.WitnessSet.Redeemers()) {
+				needsContext = true
+				break
+			}
+		}
+	}
+	if !needsContext {
+		return nil
+	}
+	versions := []struct {
+		key      uint
+		language lang.LanguageVersion
+	}{
+		{key: 0, language: lang.LanguageVersionV1},
+		{key: 1, language: lang.LanguageVersionV2},
+		{key: 2, language: lang.LanguageVersionV3},
+		{key: 3, language: lang.LanguageVersionV4},
+	}
+	for _, version := range versions {
+		model, ok := pp.CostModels[version.key]
+		if !ok || len(model) == 0 {
+			continue
+		}
+		if _, err := pooledDijkstraEvalContext(
+			version.language,
+			pp.ProtocolVersion.Major,
+			model,
+		); err != nil {
+			return fmt.Errorf(
+				"build Plutus V%d evaluation context: %w",
+				version.key+1,
+				err,
+			)
+		}
+	}
+	return nil
 }
 
 // dijkstraSyntheticV2CostModelGuard rejects a transaction that uses --
@@ -520,10 +585,10 @@ func dijkstraSyntheticV2CostModelGuard(
 	}
 	var missing lcommon.MissingCostModelError
 	if errors.As(err, &missing) && missing.Version == 1 {
-		return fmt.Errorf(
+		return localRuleValidationErrorFor(fmt.Errorf(
 			"dijkstra plutus validation: %w",
 			ErrNoCostModelForPlutusV2,
-		)
+		))
 	}
 	return err
 }
