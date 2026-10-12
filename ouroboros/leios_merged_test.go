@@ -2333,7 +2333,7 @@ func TestValidateLeiosEndorserBlockForHeaderAcceptsForgedGenesisParent(
 		}},
 	})
 	require.NoError(t, err)
-	point := ocommon.NewPoint(71, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	point := ocommon.NewPoint(0, lcommon.Blake2b256Hash(blockRaw).Bytes())
 	headerRaw := testDijkstraAnnouncementHeaderRawFor(
 		t,
 		point.Slot,
@@ -2359,6 +2359,7 @@ func TestValidateLeiosEndorserBlockForHeaderAcceptsForgedGenesisParent(
 	validationLedger := &fakeLeiosAnnouncementLedger{}
 	o := newTestOuroborosWithLeiosDB(t)
 	o.leiosAnnouncementLedger = validationLedger
+	o.ledgerState = newTestLedgerState(t)
 	defer func() { require.NoError(t, o.Close()) }()
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point,
