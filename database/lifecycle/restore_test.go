@@ -184,6 +184,7 @@ type remoteTestBlobStore struct {
 
 type remoteBlobRestoreControl struct {
 	failRestores    atomic.Int32
+	failResets      atomic.Int32
 	cancelOnRestore atomic.Bool
 	cancel          context.CancelFunc
 }
@@ -195,6 +196,15 @@ var errInjectedRemoteBlobRestore = errors.New(
 func (s *remoteTestBlobStore) Reset(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	for {
+		remaining := s.control.failResets.Load()
+		if remaining == 0 {
+			break
+		}
+		if s.control.failResets.CompareAndSwap(remaining, remaining-1) {
+			return errors.New("injected remote blob reset failure")
+		}
 	}
 	if err := s.DB().DropAll(); err != nil {
 		return err
@@ -791,6 +801,57 @@ func TestCloudRestoreCommitReclaimsSupersededNamespaces(t *testing.T) {
 	require.Equal(t, secondBlobs, readRemoteBlobNamespace(t, remoteDir, secondNamespace))
 }
 
+func TestCloudRestoreRetryDisposesFailedCommitRecovery(t *testing.T) {
+	t.Parallel()
+
+	ctx := metadata.AllowResetOfPopulatedTarget(context.Background())
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	activeDir := filepath.Join(t.TempDir(), "active")
+	oldNamespace := strings.Repeat("4", 32)
+	require.NoError(t, blob.WriteNamespace(activeDir, oldNamespace))
+	original := openRemoteTestDatabaseInNamespace(t, remoteDir, oldNamespace)
+	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x11), nil))
+	original.close(t)
+
+	targetDir := filepath.Join(t.TempDir(), "restore-staging")
+	firstSnapshot, _ := makeCloudRestoreSnapshot(t, 0x55)
+	control := &remoteBlobRestoreControl{}
+	host := newRemoteRestoreHostWithBlobName(t, remoteDir, control, "s3", true)
+	_, firstRecovery, err := lifecycle.RestoreRecoverable(
+		ctx,
+		host,
+		nil,
+		firstSnapshot,
+		targetDir,
+		nil,
+		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+	)
+	require.NoError(t, err)
+	firstNamespace, err := blob.ReadNamespace(targetDir)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(targetDir))
+	require.NoError(t, os.RemoveAll(activeDir))
+	require.NoError(t, blob.WriteNamespace(activeDir, firstNamespace))
+
+	control.failResets.Store(1)
+	require.Error(t, firstRecovery.Commit())
+	require.DirExists(t, firstRecovery.BackupDir())
+
+	secondSnapshot, _ := makeCloudRestoreSnapshot(t, 0x77)
+	_, secondRecovery, err := lifecycle.RestoreRecoverable(
+		ctx,
+		host,
+		nil,
+		secondSnapshot,
+		targetDir,
+		nil,
+		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+	)
+	require.NoError(t, err)
+	require.Empty(t, readRemoteBlobNamespace(t, remoteDir, oldNamespace))
+	require.NoError(t, secondRecovery.Commit())
+}
+
 func TestCloudRestoreCommitPreservesNewNamespaceAfterLegacyStore(t *testing.T) {
 	t.Parallel()
 
@@ -970,6 +1031,21 @@ func TestInterruptedRestoreRejectsOversizedRecoveryRecord(t *testing.T) {
 		false,
 	)
 	require.ErrorContains(t, err, "exceeds 4096 bytes")
+}
+
+func TestInterruptedRestoreRemovesRecoveryWithoutRecord(t *testing.T) {
+	t.Parallel()
+	recoveryDir := filepath.Join(t.TempDir(), "recovery")
+	require.NoError(t, os.MkdirAll(recoveryDir, 0o700))
+	require.NoError(t, lifecycle.RecoverInterruptedRestore(
+		context.Background(),
+		plugin.NewHost(),
+		recoveryDir,
+		t.TempDir(),
+		lifecycle.RestoreStorageConfig{}, // restoreconfig:zero-value-required
+		true,
+	))
+	require.NoDirExists(t, recoveryDir)
 }
 
 func TestRestoreSuccessfulRemoteReplacementRemainsRecoverableUntilCommit(

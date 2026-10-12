@@ -1765,6 +1765,15 @@ func (n *Node) Restore(
 
 	backupDir, err := n.swapInRestoredDataDir(stagingDir)
 	if err != nil {
+		if errors.Is(err, errRestoreSwapActivated) {
+			n.cancel()
+			return lifecycle.Manifest{}, fmt.Errorf(
+				"%w (pre-restore local backup preserved at %q and remote rollback backup at %q pending a restart)",
+				err,
+				backupDir,
+				recovery.BackupDir(),
+			)
+		}
 		if rollbackErr := recovery.Rollback(ctx); rollbackErr != nil {
 			n.cancel()
 			return lifecycle.Manifest{}, errors.Join(err, rollbackErr)
@@ -1838,6 +1847,10 @@ func finalizeSuccessfulRestore(commit func() error, backupDir string) error {
 // bring the node down rather than resume on whatever is in place.
 var errRestoreSwapUnrecoverable = errors.New(
 	"data directory swap left no usable data directory in place",
+)
+
+var errRestoreSwapActivated = errors.New(
+	"restored data directory was activated but its durability is unconfirmed",
 )
 
 // errStorageDrainUnconfirmed marks a quiesceForLiveLifecycleOp or
@@ -1960,9 +1973,9 @@ func (n *Node) swapInRestoredDataDir(
 		return "", fmt.Errorf("activate restored data directory: %w", err)
 	}
 	if err := syncDataDirParent(parentDir); err != nil {
-		return "", fmt.Errorf(
-			"sync %q after activating restored data directory: %w",
-			parentDir, err,
+		return backupDir, fmt.Errorf(
+			"%w: sync %q after activating restored data directory: %w",
+			errRestoreSwapActivated, parentDir, err,
 		)
 	}
 	return backupDir, nil
@@ -2113,9 +2126,6 @@ func (n *Node) reconcileInterruptedRemoteRestore(ctx context.Context) error {
 		n.restoreStorageConfig(),
 		false,
 	); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return os.RemoveAll(recoveryDir)
-		}
 		return fmt.Errorf("roll back interrupted remote restore: %w", err)
 	}
 	return nil

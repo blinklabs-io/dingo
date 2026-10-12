@@ -921,6 +921,18 @@ func prepareRestore(
 	var err error
 	if durable {
 		rollbackDir = RestoreRecoveryDir(targetDataDir)
+		if err := RecoverInterruptedRestore(
+			ctx,
+			host,
+			rollbackDir,
+			targetDataDir,
+			storageConfig,
+			true,
+		); err != nil {
+			return restoreRollback{}, fmt.Errorf(
+				"dispose completed restore recovery: %w", err,
+			)
+		}
 		err = os.Mkdir(rollbackDir, 0o700)
 	} else {
 		rollbackDir, err = os.MkdirTemp(
@@ -1313,19 +1325,19 @@ func readRestoreRecovery(dir string) (restoreRollback, Manifest, error) {
 		)
 	}
 	return restoreRollback{
-		dir:              dir,
-		metadataPath:     filepath.Join(dir, MetadataBackupFileName),
-		newBlobNamespace: record.NewBlobNamespace,
-		oldBlobNamespace: record.OldBlobNamespace,
-		cloudBlob:        record.CloudBlob,
-		metadataMutated:  record.MetadataMutated,
-		blobMutated:      record.CloudBlob,
-		durable:          true,
-	}, Manifest{
-		BlobPlugin:     record.BlobPlugin,
-		MetadataPlugin: record.MetadataPlugin,
-		StorageMode:    record.StorageMode,
-	}, nil
+			dir:              dir,
+			metadataPath:     filepath.Join(dir, MetadataBackupFileName),
+			newBlobNamespace: record.NewBlobNamespace,
+			oldBlobNamespace: record.OldBlobNamespace,
+			cloudBlob:        record.CloudBlob,
+			metadataMutated:  record.MetadataMutated,
+			blobMutated:      record.CloudBlob,
+			durable:          true,
+		}, Manifest{
+			BlobPlugin:     record.BlobPlugin,
+			MetadataPlugin: record.MetadataPlugin,
+			StorageMode:    record.StorageMode,
+		}, nil
 }
 
 // RecoverInterruptedRestore disposes a durable live-restore recovery record.
@@ -1341,6 +1353,15 @@ func RecoverInterruptedRestore(
 ) error {
 	rollback, manifest, err := readRestoreRecovery(recoveryDir)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if removeErr := os.RemoveAll(recoveryDir); removeErr != nil {
+				return fmt.Errorf(
+					"remove incomplete restore recovery directory: %w",
+					removeErr,
+				)
+			}
+			return nil
+		}
 		return err
 	}
 	if accept {

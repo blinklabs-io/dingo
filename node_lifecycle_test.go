@@ -1852,15 +1852,9 @@ func TestSwapInRestoredDataDirRetainsBackupUntilCallerConfirms(t *testing.T) {
 	requireNoDir(t, stagingDir)
 }
 
-// withInjectedFirstSyncFailure replaces syncDataDirParent for the calling
-// test's duration so its very first invocation returns injectErr (and runs
-// beforeReturn, if non-nil, immediately before returning it) while every
-// later invocation behaves like the real fsyncdir.Sync -- used to simulate
-// an fsync failure landing exactly between swapInRestoredDataDir's first
-// rename and its rollback, without needing real filesystem-level fault
-// injection.
-func withInjectedFirstSyncFailure(
+func withInjectedSyncFailure(
 	t *testing.T,
+	failAt int,
 	injectErr error,
 	beforeReturn func(),
 ) {
@@ -1870,7 +1864,7 @@ func withInjectedFirstSyncFailure(
 	calls := 0
 	syncDataDirParent = func(path string) error {
 		calls++
-		if calls == 1 {
+		if calls == failAt {
 			if beforeReturn != nil {
 				beforeReturn()
 			}
@@ -1889,7 +1883,7 @@ func withInjectedFirstSyncFailure(
 // assumes it's still in place. swapInRestoredDataDir must roll the first
 // rename back and report a normal (recoverable) error when that rollback
 // succeeds.
-// Not t.Parallel: withInjectedFirstSyncFailure swaps a package-level sync
+// Not t.Parallel: withInjectedSyncFailure swaps a package-level sync
 // seam that every concurrent restore in this package would observe.
 func TestSwapInRestoredDataDirRollsBackWhenFirstSyncFails(t *testing.T) {
 	base := t.TempDir()
@@ -1898,7 +1892,7 @@ func TestSwapInRestoredDataDirRollsBackWhenFirstSyncFails(t *testing.T) {
 	writeMarkerFile(t, dataDir, "original")
 	writeMarkerFile(t, stagingDir, "restored")
 
-	withInjectedFirstSyncFailure(t, errors.New("injected sync failure"), nil)
+	withInjectedSyncFailure(t, 1, errors.New("injected sync failure"), nil)
 
 	n := newSwapTestNode(t, dataDir)
 	_, err := n.swapInRestoredDataDir(stagingDir)
@@ -1944,8 +1938,9 @@ func TestSwapInRestoredDataDirUnrecoverableWhenFirstSyncFailsAndRollbackFails(
 	// directly inside base, which a read-only base refuses -- made
 	// read-only right as the injected sync failure is reported, so the
 	// first rename (which already succeeded by then) is unaffected.
-	withInjectedFirstSyncFailure(
+	withInjectedSyncFailure(
 		t,
+		1,
 		errors.New("injected sync failure"),
 		func() {
 			require.NoError(t, os.Chmod(base, 0o500))
@@ -1956,6 +1951,28 @@ func TestSwapInRestoredDataDirUnrecoverableWhenFirstSyncFailsAndRollbackFails(
 	_, err := n.swapInRestoredDataDir(stagingDir)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errRestoreSwapUnrecoverable)
+}
+
+// Not t.Parallel: withInjectedSyncFailure swaps the package-level sync seam.
+func TestSwapInRestoredDataDirPreservesActivatedSwapWhenSecondSyncFails(
+	t *testing.T,
+) {
+	base := t.TempDir()
+	dataDir := filepath.Join(base, "data")
+	stagingDir := dataDir + restoreStagingSuffix
+	writeMarkerFile(t, dataDir, "original")
+	writeMarkerFile(t, stagingDir, "restored")
+
+	withInjectedSyncFailure(t, 2, errors.New("injected sync failure"), nil)
+
+	n := newSwapTestNode(t, dataDir)
+	backupDir, err := n.swapInRestoredDataDir(stagingDir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "durability is unconfirmed")
+	require.Equal(t, dataDir+preRestoreBackupSuffix, backupDir)
+	requireMarkerFile(t, dataDir, "restored")
+	requireMarkerFile(t, backupDir, "original")
+	requireNoDir(t, stagingDir)
 }
 
 // TestReconcileInterruptedLiveRestoreSwapNoOpWithoutInterruption verifies
