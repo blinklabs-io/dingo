@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const bootstrapChainCodeError = "invalid bootstrap witness field 2 length"
+const bootstrapChainCodeError = "bootstrap witness chain code must be 32 bytes"
 
 // withBootstrapWitness returns the CBOR of the fixture's transaction and of a
 // block carrying it, with one correctly signed bootstrap witness that no input
@@ -146,27 +146,34 @@ func TestDijkstraBootstrapWitnessChainCodeLength(t *testing.T) {
 	})
 }
 
-// TestConwayBootstrapWitnessRejectsMalformedChainCode pins the reference's
-// bootstrap-witness shape validation on the Conway transaction path.
-func TestConwayBootstrapWitnessRejectsMalformedChainCode(t *testing.T) {
+// TestConwayBootstrapWitnessPreservesPreDijkstraChainCodeLeniency pins the
+// reference decoder's pre-Dijkstra treatment of bootstrap chain-code width.
+func TestConwayBootstrapWitnessPreservesPreDijkstraChainCodeLeniency(
+	t *testing.T,
+) {
 	t.Parallel()
 
-	witness := []any{
-		bytes.Repeat([]byte{0x01}, 32),
-		bytes.Repeat([]byte{0x02}, 64),
-		bytes.Repeat([]byte{0x03}, 31),
-		[]byte{0xa0},
+	for _, chainCodeLen := range []int{31, 33} {
+		t.Run(fmt.Sprintf("%d bytes", chainCodeLen), func(t *testing.T) {
+			t.Parallel()
+			witness := []any{
+				bytes.Repeat([]byte{0x01}, 32),
+				bytes.Repeat([]byte{0x02}, 64),
+				bytes.Repeat([]byte{0x03}, chainCodeLen),
+				[]byte{0xa0},
+			}
+			txCbor, err := cbor.Encode([]any{
+				map[uint]any{0: []any{}, 1: []any{}, 2: uint64(0)},
+				map[uint]any{2: []any{witness}},
+				true,
+				nil,
+			})
+			require.NoError(t, err)
+			_, err = gledger.NewTransactionFromCbor(
+				uint(gledger.TxTypeConway),
+				txCbor,
+			)
+			require.NoError(t, err)
+		})
 	}
-	txCbor, err := cbor.Encode([]any{
-		map[uint]any{0: []any{}, 1: []any{}, 2: uint64(0)},
-		map[uint]any{2: []any{witness}},
-		true,
-		nil,
-	})
-	require.NoError(t, err)
-	_, err = gledger.NewTransactionFromCbor(
-		uint(gledger.TxTypeConway),
-		txCbor,
-	)
-	require.ErrorContains(t, err, bootstrapChainCodeError)
 }
