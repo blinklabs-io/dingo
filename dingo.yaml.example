@@ -695,6 +695,16 @@
 # CLI: --ledger-apply-row-batching-enabled
 # ledgerApplyRowBatchingEnabled: false
 
+# While the header is far from the peer tip, start blockfetch once one
+# blockfetch range (500) of headers is queued instead of waiting for four
+# ranges (2000). The header queue capacity is unchanged (default: false). Not
+# consensus-affecting.
+#
+# Can be overridden with the DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED
+# environment variable
+# CLI: --blockfetch-low-watermark-enabled
+# blockfetchLowWatermarkEnabled: false
+
 # Error out (instead of silently skipping) when a consumed UTxO cannot be
 # found or recovered for a block past the recorded Mithril sync boundary.
 # A non-genesis chainsync intersection without a Mithril snapshot may set this

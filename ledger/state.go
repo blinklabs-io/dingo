@@ -899,6 +899,11 @@ type LedgerStateConfig struct {
 	// state is identical either way. See ARCHITECTURE.md ("Block Processing
 	// Pipeline").
 	ApplyRowBatchingEnabled bool
+	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
+	// range of headers is queued while the node is far from the peer tip,
+	// instead of waiting for allowedQueuedHeaders. The header queue capacity
+	// (chain.MaxQueuedHeaders) is unchanged. Off by default.
+	BlockfetchLowWatermarkEnabled bool
 }
 
 // EndorserBlockProviderFunc returns the complete set of standalone

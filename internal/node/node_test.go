@@ -1478,3 +1478,29 @@ func TestBuildDingoConfigWiresTokenRegistryHeaders(t *testing.T) {
 		t.Fatalf("token registry headers = %v, want %v", got, headers)
 	}
 }
+
+func TestBuildDingoConfigWiresBlockfetchLowWatermarkFlag(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	for _, enabled := range []bool{false, true} {
+		built := buildDingoConfig(
+			&config.Config{BlockfetchLowWatermarkEnabled: enabled},
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		)
+		if built.BlockfetchLowWatermarkEnabled() != enabled {
+			t.Fatalf(
+				"BlockfetchLowWatermarkEnabled = %v, want %v",
+				built.BlockfetchLowWatermarkEnabled(),
+				enabled,
+			)
+		}
+	}
+}

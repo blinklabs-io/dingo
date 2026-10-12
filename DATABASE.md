@@ -1891,21 +1891,29 @@ leader-threshold rejection.
 `models.RewardStakeCalculationVersion` (`database/models/reward_state.go`)
 identifies the stake-accounting algorithm behind persisted `pool_stake_snapshot`
 and `reward_snapshot` rows; it is bumped whenever that calculation changes so an
-upgrade cannot silently trust an older value. At every startup,
-`StaleConsensusStakeSnapshotsExist` (`database/plugin/metadata/sqlstore/live_stake.go`)
-checks both tables for any Mark/Set/Go `pool_stake_snapshot` row or Mark
-`reward_snapshot` row (authoritative or fallback) carrying a version other than
-the current one, and `Node.backfillRewardLiveStake` (`node.go`) fails closed at
-startup if any are found, naming the affected epochs: such a snapshot cannot be
-safely reconstructed from a pruned database, since recomputing it correctly
-would require replaying that epoch's historical stake distribution.
+upgrade cannot silently trust an older value. Before any schema migration, the
+metadata provider checks consensus snapshot provenance under the migration lock.
+Version-2 snapshots can be certified as version 3 only when the loaded genesis
+contains no initial staking, retained epoch and protocol-parameter history prove
+that Dijkstra has not activated (including its transition boundary), and no
+Leios transaction context exists. Certification changes only the version stamp;
+the stake values remain identical. Missing provenance and affected calculations
+refuse startup before schema changes, preserving the prior binary's schema.
+
+`StaleConsensusStakeSnapshotsExist` remains a second gate before ledger startup:
+any Mark/Set/Go pool snapshot or Mark reward snapshot with an incompatible
+version refuses startup and identifies the affected epochs. Historical stake
+cannot be reconstructed from a pruned database without replay or a trusted
+ledger-state import.
 
 Migration `v15` (`reward-stake-calculation-version-restamp`) upgrades stale
 pre-v2 pool snapshots unconditionally, and Mark reward snapshots only when
-their sigma-denominator inputs can be verified. It cannot certify version 3: Dijkstra moves SNAP after POOLREAP and
+their sigma-denominator inputs can be verified. The startup preflight refuses
+pre-v2 snapshots before a pending v15 migration can run; v15 alone cannot
+certify version 3. Dijkstra moves SNAP after POOLREAP and
 governance enactment, and nonempty genesis staking changes the initial reward
-inputs. Older persisted snapshots require replay or a trusted ledger-state
-import rather than a version stamp.
+inputs. Snapshots outside the verified unchanged case require replay or a trusted
+ledger-state import.
 
 #### Incremental live-UTxO stake maintenance
 

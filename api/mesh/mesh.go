@@ -76,9 +76,6 @@ type ServerConfig struct {
 	NetworkMagic  uint32
 	// GenesisHash is the Byron genesis block hash (hex-encoded).
 	GenesisHash string
-	// GenesisStartTimeSec is the Unix timestamp (seconds) of slot 0 for the
-	// configured network. Used to convert slot numbers to absolute timestamps.
-	GenesisStartTimeSec int64
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
@@ -143,12 +140,6 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	); err != nil {
 		return nil, fmt.Errorf(
 			"mesh: invalid GenesisHash: %w", err,
-		)
-	}
-	if cfg.GenesisStartTimeSec <= 0 {
-		return nil, errors.New(
-			"mesh: GenesisStartTimeSec must be " +
-				"positive",
 		)
 	}
 	if cfg.Logger == nil {

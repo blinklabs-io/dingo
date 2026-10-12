@@ -281,6 +281,7 @@ type Config struct {
 	blockPipelineValidateEnabled                                                        bool
 	ledgerPrefetchAheadEnabled                                                          bool
 	ledgerApplyRowBatchingEnabled                                                       bool
+	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
@@ -922,6 +923,7 @@ func (c *Config) syncCompatFields() {
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
+	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
@@ -1779,6 +1781,16 @@ func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 func WithLedgerApplyRowBatchingEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerApplyRowBatchingEnabled = enabled
+	}
+}
+
+// WithBlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
+// range of headers is queued while the node is far from the peer tip, instead
+// of waiting for four ranges. The header queue capacity is unchanged. Not
+// consensus-affecting; off by default. See LedgerStateConfig.BlockfetchLowWatermarkEnabled.
+func WithBlockfetchLowWatermarkEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BlockfetchLowWatermarkEnabled = enabled
 	}
 }
 
@@ -2657,6 +2669,12 @@ func (c *Config) LedgerPrefetchAheadEnabled() bool {
 // are applied through the batched metadata write path.
 func (c *Config) LedgerApplyRowBatchingEnabled() bool {
 	return c.cfg.LedgerApplyRowBatchingEnabled
+}
+
+// BlockfetchLowWatermarkEnabled returns whether the far-from-tip blockfetch
+// low watermark is enabled.
+func (c *Config) BlockfetchLowWatermarkEnabled() bool {
+	return c.cfg.BlockfetchLowWatermarkEnabled
 }
 
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.

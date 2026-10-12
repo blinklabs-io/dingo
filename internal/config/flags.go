@@ -749,6 +749,12 @@ var flagSpecs = []flagSpec{
 		"in core storage mode, write the deltas of blocks that are not validated with multi-row batched inserts instead of per-row statements, as API mode always does (not consensus-affecting; default off)",
 	),
 
+	boolFlag(
+		"BlockfetchLowWatermarkEnabled",
+		"blockfetch-low-watermark-enabled",
+		"start blockfetch once one range of headers is queued while far from the peer tip, instead of waiting for four ranges; the header queue capacity is unchanged (not consensus-affecting; default off)",
+	),
+
 	// Block production
 	boolFlag("BlockProducer", "block-producer", "enable block production mode"),
 	stringFlag(
