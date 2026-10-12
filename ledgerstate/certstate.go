@@ -782,8 +782,7 @@ func hasPoolParamsEntries(data []byte) bool {
 		if _, err := cbor.Decode(entry.KeyRaw, &key); err != nil || len(key) != poolKeyHashLen {
 			continue
 		}
-		parts, err := decodeRawArray(entry.ValueRaw)
-		if err == nil && len(parts) >= 7 {
+		if _, err := decodeRawArray(entry.ValueRaw); err == nil {
 			return true
 		}
 	}

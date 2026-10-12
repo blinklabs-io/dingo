@@ -2089,3 +2089,18 @@ func TestParsePStateDoesNotReplaceUndecodableCurrentParams(t *testing.T) {
 	require.ErrorContains(t, err, "unregistered pool")
 	require.Empty(t, pools)
 }
+
+func TestParsePStateRejectsShortCurrentParamsAfterNonPoolMap(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	pstate, err := cbor.Encode([]any{
+		map[uint64]uint64{},
+		cbor.RawMessage(encodeCborMap(t, poolHash, []any{uint64(1)})),
+		cbor.RawMessage(encodeCborMap(t, poolHash, testPoolParams(0x11))),
+		map[uint64]uint64{},
+	})
+	require.NoError(t, err)
+	pools, _, err := parsePStateWithRetirements(pstate)
+	require.ErrorContains(t, err, "skipped 1 of 1")
+	require.Empty(t, pools)
+}
