@@ -92,7 +92,7 @@ type syntheticV2CostModelReporter interface {
 // the current PlutusV2 cost model is still HardForkBabbage's fabricated
 // default. See syntheticV2CostModelReporter and ErrNoCostModelForPlutusV2.
 func syntheticV2CostModelInEffect(ls lcommon.LedgerState) bool {
-	reporter, ok := ls.(syntheticV2CostModelReporter)
+	reporter, ok := stateCapability[syntheticV2CostModelReporter](ls)
 	return ok && reporter.SyntheticV2CostModelInEffect()
 }
 

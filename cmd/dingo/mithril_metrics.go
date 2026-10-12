@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/mithril"
@@ -481,4 +482,22 @@ func (m *mithrilSyncMetrics) recordError() {
 		return
 	}
 	m.errors.Inc()
+}
+
+func startMithrilMetricsServer(
+	logger *slog.Logger,
+	cfg *config.Config,
+	handler http.Handler,
+) (*prometheusMetricsServer, error) {
+	host, _, err := net.SplitHostPort(cfg.MetricsListenAddress())
+	if err != nil {
+		return nil, err
+	}
+	return startPrometheusMetricsServerWithHandler(
+		logger,
+		host,
+		cfg.MetricsPort,
+		"mithril",
+		handler,
+	)
 }

@@ -133,6 +133,16 @@ var (
 	)
 )
 
+// ErrHeaderBeyondForecastHorizon marks a header whose slot lies past the
+// ledger's forecast horizon. Such an error also satisfies
+// IsHeaderVerificationDeferred, but unlike the other deferred causes the
+// header cannot be validated at all until the applied ledger advances, so it
+// must not count for chain selection or reach blockfetch before then
+// (ouroboros-consensus ChainSync.Client, OutsideForecastRange).
+var ErrHeaderBeyondForecastHorizon = errors.New(
+	"header beyond the ledger forecast horizon",
+)
+
 // headerStateLookupErr marks err, a failure reading local state, with
 // errHeaderStateLookupFailed. models.ErrPoolNotFound is an answer rather than a
 // failure and is returned unchanged.
@@ -597,11 +607,13 @@ func (ls *LedgerState) headerVerificationEpoch(
 				// peer. Recycling on past-horizon starves the peer pool the
 				// block and Leios endorser-block fetch depend on and deadlocks
 				// catch-up at epoch boundaries; the chainsync recycle paths skip
-				// deferred errors.
+				// deferred errors. ErrHeaderBeyondForecastHorizon lets
+				// chainsync tell this cause apart and hold the header back.
 				return models.Epoch{}, fmt.Errorf(
-					"%w: block header verification deferred past era horizon "+
-						"at slot %d: %w",
+					"%w: %w: block header verification deferred past era "+
+						"horizon at slot %d: %w",
 					errHeaderVerificationDeferred,
+					ErrHeaderBeyondForecastHorizon,
 					blockSlot,
 					err,
 				)
@@ -2303,9 +2315,9 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 // electingPoolParamsCutoffSlot reports the slot up to which pool registrations
 // were in force in the snapshot that elected this block's producer.
 //
-// Which slot that is depends on the era in force during the epoch the snapshot
-// was captured in, because the two rules involved run in the opposite order on
-// either side of the Dijkstra hard fork. The merge of psFutureStakePoolParams
+// Which slot that is depends on the era whose EPOCH rule produced the snapshot,
+// because the two rules involved run in the opposite order on either side of
+// the Dijkstra hard fork. The merge of psFutureStakePoolParams
 // into psStakePools -- where a re-registration submitted during the epoch
 // waits -- lives in cardano-ledger's POOLREAP rule; SNAP is what freezes the
 // snapshot. The EPOCH rule sequences them:
@@ -2387,7 +2399,17 @@ func (ls *LedgerState) electingPoolParamsCutoffSlotFromSnapshot(
 		// exists.
 		return 0, 0, false, nil //nolint:nilerr // unplaceable capture is "unavailable", not an error
 	}
-	if poolParamsMergedBeforeSnapshot(capturedEpoch.EraId) {
+	var snapshotEpoch *models.Epoch
+	for i := range epochCache {
+		if epochCache[i].EpochId == snap.epoch {
+			snapshotEpoch = &epochCache[i]
+			break
+		}
+	}
+	if snapshotEpoch == nil {
+		return 0, 0, false, nil
+	}
+	if poolParamsMergedBeforeSnapshot(snapshotEpoch.EraId) {
 		// POOLREAP ran before SNAP, so the capture already carries every
 		// registration accepted through the end of the captured epoch.
 		// Returning the capture slot for both values also makes the
@@ -2405,15 +2427,13 @@ func (ls *LedgerState) electingPoolParamsCutoffSlotFromSnapshot(
 	return capturedEpoch.StartSlot - 1, snapshot.CapturedSlot, true, nil
 }
 
-// poolParamsMergedBeforeSnapshot reports whether the EPOCH rule in force
-// during the epoch a stake snapshot was captured in merges
+// poolParamsMergedBeforeSnapshot reports whether the EPOCH rule that produced
+// a stake snapshot merges
 // psFutureStakePoolParams into psStakePools before SNAP freezes the snapshot.
 //
-// The era to ask about is the captured epoch's own, not the validated block's:
-// the EPOCH transition out of epoch N runs under the protocol version in force
-// during N, and HARDFORK is a sub-rule of that same transition. A block two
-// epochs after a hard fork into Dijkstra can therefore be elected by a
-// snapshot that Conway's ordering froze.
+// The hard-fork combinator translates the state at the era bound before TICK,
+// so a snapshot made at a transition boundary follows the incoming epoch's
+// EPOCH rule even though its CapturedSlot is the outgoing epoch's final slot.
 func poolParamsMergedBeforeSnapshot(eraId uint) bool {
 	return eraId >= dijkstra.EraIdDijkstra
 }
@@ -2923,7 +2943,7 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 	// takes the deferred-header mutex only to test membership per key (releasing
 	// it before each DB delete, for the same lock-order reason) so it can skip
 	// any point re-deferred (and re-persisted) since eviction, keeping the
-	// sync_state table free of dead markers without dropping a marker that now
+	// marker store free of dead markers without dropping a marker that now
 	// backs a live pin. A restore failure for a point re-admitted during its
 	// delete is a lost DURABLE pin: it is joined onto the prune result so the
 	// retention guard's caller (cleanupOldSnapshots) surfaces the failed cleanup

@@ -65,6 +65,14 @@ func (s *Store) SetGenesisStakingWithDeposits(
 			Cost:                       types.Uint64(certificate.Cost),
 			Margin:                     &types.Rat{Rat: certificate.Margin.Rat},
 		}
+		if certificate.LeiosKey != nil {
+			pool.LeiosKeyPublic = append(
+				[]byte(nil), certificate.LeiosKey.PublicKey...,
+			)
+			pool.LeiosKeyPossessionProof = append(
+				[]byte(nil), certificate.LeiosKey.PossessionProof...,
+			)
+		}
 		registration := &models.PoolRegistration{
 			PoolKeyHash:                certificate.Operator[:],
 			VrfKeyHash:                 certificate.VrfKeyHash[:],
@@ -75,6 +83,14 @@ func (s *Store) SetGenesisStakingWithDeposits(
 			Margin:                     &types.Rat{Rat: certificate.Margin.Rat},
 			AddedSlot:                  0,
 			DepositAmount:              types.Uint64(poolDeposit),
+		}
+		if certificate.LeiosKey != nil {
+			registration.LeiosKeyPublic = append(
+				[]byte(nil), certificate.LeiosKey.PublicKey...,
+			)
+			registration.LeiosKeyPossessionProof = append(
+				[]byte(nil), certificate.LeiosKey.PossessionProof...,
+			)
 		}
 		if certificate.PoolMetadata != nil {
 			registration.MetadataUrl = certificate.PoolMetadata.Url
@@ -87,9 +103,11 @@ func (s *Store) SetGenesisStakingWithDeposits(
 			)
 		}
 		for _, relay := range certificate.Relays {
+			relayType := relay.Type
 			model := models.PoolRegistrationRelay{
 				Ipv4: relay.Ipv4,
 				Ipv6: relay.Ipv6,
+				Type: &relayType,
 			}
 			if relay.Port != nil {
 				model.Port = uint(*relay.Port)
@@ -286,6 +304,25 @@ WHERE NOT EXISTS (
 		}
 		if err != nil {
 			return err
+		}
+		if len(drepCredential) > 0 {
+			if drepType > models.DrepTypeScriptHash {
+				return fmt.Errorf(
+					"genesis DRep credential has non-credential type: %d",
+					drepType,
+				)
+			}
+			if err := addDrepDelegator(
+				ctx,
+				db,
+				uint8(drepType),
+				drepCredential,
+				tag,
+				stakeKey,
+				0,
+			); err != nil {
+				return fmt.Errorf("create genesis DRep delegator: %w", err)
+			}
 		}
 		refs = append(refs, models.NewStakeCredentialRef(tag, stakeKey))
 	}

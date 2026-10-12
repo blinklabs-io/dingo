@@ -20,7 +20,6 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/require"
@@ -57,7 +56,7 @@ func dupBatchTx(t *testing.T, subTxs ...[]byte) []byte {
 	})
 	require.NoError(t, err)
 	txCbor, err := cbor.Encode(
-		[]any{cbor.RawMessage(body), map[uint]any{}, true, nil},
+		[]any{cbor.RawMessage(body), map[uint]any{}, nil},
 	)
 	require.NoError(t, err)
 	return txCbor
@@ -154,16 +153,8 @@ func TestDijkstraBlockRejectsDuplicateSubTransactionBodyID(t *testing.T) {
 	var blockBody dijkstra.DijkstraBlockBody
 	require.NoError(t, blockBody.UnmarshalCBOR(blockBodyCbor))
 	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber:  1,
-					Slot:         1,
-					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
-				},
-			},
-		},
-		BlockBody: blockBody,
+		BlockHeader: dijkstraTestBlockHeader(1, 1, common.Blake2b256{}, common.Blake2b256{}, 0),
+		BlockBody:   blockBody,
 	}
 	oldBodyHash := blockBody.Hash()
 	block.BlockHeader.Body.BlockBodyHash = oldBodyHash

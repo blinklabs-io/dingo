@@ -128,7 +128,7 @@ func newV4ContextFixture(
 		}
 	}
 	inputAt := func(prefix string) shelley.ShelleyTransactionInput {
-		return shelley.NewShelleyTransactionInput(
+		return shelley.MustNewShelleyTransactionInput(
 			prefix+"28b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee11",
 			0,
 		)

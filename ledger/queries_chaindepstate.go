@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -136,6 +137,22 @@ func (ls *LedgerState) epochAtTip(
 	return tip, current, nil
 }
 
+// epochAtPoint is epochAtTip for a pinned at: the acquired block stands in
+// for the tip, and the epoch is the one containing its slot.
+func (ls *LedgerState) epochAtPoint(
+	at QueryPoint,
+	txn *database.Txn,
+) (ochainsync.Tip, *models.Epoch, error) {
+	if !at.pinned() {
+		return ls.epochAtTip(txn)
+	}
+	current, err := ls.db.GetEpochBySlot(at.Slot, txn)
+	if err != nil {
+		return ochainsync.Tip{}, nil, err
+	}
+	return ochainsync.Tip{Point: ocommon.NewPoint(at.Slot, at.Hash)}, current, nil
+}
+
 // nonceFromBytes converts a stored nonce into its wire form. An absent or
 // empty value is the neutral nonce, which is how the ledger represents "no
 // nonce yet" — notably at genesis and before the first epoch boundary. Any
@@ -159,8 +176,16 @@ func nonceFromBytes(b []byte) (lcommon.Nonce, error) {
 // schedule, so leaving it unhandled does not merely fail one query: an
 // unsupported query aborts the LocalStateQuery protocol, the node drops the
 // connection, and the caller sees only a closed bearer.
+//
+// A pinned at answers at that block instead of the tip: the epoch rows of its
+// epoch, the nonce fold stopped at it, the lab from its parent hash, and the
+// op-cert counters observed at or before it. Epoch rows and op-cert rows are
+// removed only by rollback. Block nonce rows keep the last three epochs; for a
+// point older than that (API storage mode accepts one) the nonce fold
+// recomputes from the stored blocks instead.
 func (ls *LedgerState) queryShelleyDebugChainDepState(
 	ctx context.Context,
+	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
 	// Every value in the reply is read from this one transaction, tip and epoch
@@ -169,7 +194,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 	txn, release := ls.readTxn(ctx, txn)
 	defer release()
 
-	tip, current, err := ls.epochAtTip(txn)
+	tip, current, err := ls.epochAtPoint(at, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +204,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 		lastSlot.Slot = tip.Point.Slot
 	}
 
-	counters, err := ls.chainDepStateOpCertCounters(ctx, txn)
+	counters, err := ls.chainDepStateOpCertCounters(ctx, txn, at)
 	if err != nil {
 		return nil, err
 	}
@@ -207,6 +232,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 			current.StartSlot,
 			uint64(current.LengthInSlots),
 			foldEndSlotForTip(tip.Point.Slot),
+			chainDepStateFoldTip(tip),
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -295,6 +321,16 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 			Inner:   state,
 		},
 	}, nil
+}
+
+// chainDepStateFoldTip is the block a GetChainDepState fold ends at, when the
+// tip names one: the acquired block, or the tip.
+func chainDepStateFoldTip(tip ochainsync.Tip) *ocommon.Point {
+	if len(tip.Point.Hash) != lcommon.Blake2b256Size {
+		return nil
+	}
+	point := tip.Point
+	return &point
 }
 
 // foldEndSlotForTip converts a tip slot into the exclusive end bound that
@@ -389,11 +425,25 @@ func (ls *LedgerState) chainDepStateLabNonce(
 // never minted has no accepted number to report, and a pool that minted and
 // has since left the active set still has one the chain enforces against any
 // block claiming its cold key.
-func (ls *LedgerState) chainDepStateOpCertCounters(ctx context.Context, txn *database.Txn) (
+func (ls *LedgerState) chainDepStateOpCertCounters(
+	ctx context.Context,
+	txn *database.Txn,
+	at QueryPoint,
+) (
 	map[lcommon.Blake2b224]uint64,
 	error,
 ) {
-	sequences, err := ls.db.LatestPoolOpCertSequences(ctx, txn)
+	var sequences map[string]uint64
+	var err error
+	if at.pinned() {
+		sequences, err = ls.db.LatestPoolOpCertSequencesAtOrBefore(
+			ctx,
+			at.Slot,
+			txn,
+		)
+	} else {
+		sequences, err = ls.db.LatestPoolOpCertSequences(ctx, txn)
+	}
 	if err != nil {
 		return nil, err
 	}

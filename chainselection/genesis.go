@@ -19,7 +19,11 @@ import (
 	"math/big"
 )
 
-const defaultGenesisWindowSlots uint64 = 6480
+// DefaultGenesisWindowSlots is the window the selector uses when neither
+// GenesisWindowSlots nor a security parameter is known (3 * 2160). It is a
+// stand-in for exit-horizon and density bookkeeping, not a Genesis window:
+// the Genesis Density Disconnector stays off unless GenesisWindowSlots is set.
+const DefaultGenesisWindowSlots uint64 = 6480
 
 // SelectionMode describes the chain-selection strategy currently in use.
 type SelectionMode uint8
@@ -46,8 +50,9 @@ func (m SelectionMode) String() string {
 // computeStabilityWindow. The division is exact: f must be the genesis
 // rational, because a float64 approximation of a value such as 3/10000 rounds
 // the quotient across an integer boundary and widens the window by one slot.
-// It returns the default window when k is zero or f is nil or not positive,
-// saturates at math.MaxUint64, and does not modify activeSlotsCoeff.
+// It returns 0 when k is zero or f is nil or not positive, since no Genesis
+// window exists without both; it saturates at math.MaxUint64 and does not
+// modify activeSlotsCoeff.
 func GenesisWindowSlotsForParams(
 	securityParam uint64,
 	activeSlotsCoeff *big.Rat,
@@ -55,7 +60,7 @@ func GenesisWindowSlotsForParams(
 	if securityParam == 0 ||
 		activeSlotsCoeff == nil ||
 		activeSlotsCoeff.Sign() <= 0 {
-		return defaultGenesisWindowSlots
+		return 0
 	}
 	// 3k / (num/denom) = 3k*denom / num, rounded up.
 	numerator := new(big.Int).SetUint64(securityParam)

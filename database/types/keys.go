@@ -154,6 +154,11 @@ const (
 	// txCount txs fetched), so a missing "et" key means the txs are not
 	// available.
 	LeiosEBTxsKeyPrefix = "et"
+	// DeferredHeaderMarkerKeyPrefix is the key prefix for the durable marker
+	// that records a block whose stateful header checks were deferred to
+	// ledger apply. Key format: "dh" + "<slot>:<hash hex>"; the value is a
+	// single byte and only the key's presence is meaningful.
+	DeferredHeaderMarkerKeyPrefix = "dh"
 )
 
 // LeiosEBManifestKey builds the blob key for one occurrence of a Leios

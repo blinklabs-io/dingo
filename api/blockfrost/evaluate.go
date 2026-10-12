@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -146,7 +147,7 @@ func (b *Blockfrost) handleTransactionEvaluate(
 	if !ok {
 		return
 	}
-	b.evaluateTransaction(w, payload)
+	b.evaluateTransaction(r.Context(), w, payload)
 }
 
 // handleTransactionEvaluateUtxos handles
@@ -189,12 +190,13 @@ func (b *Blockfrost) handleTransactionEvaluateUtxos(
 		)
 		return
 	}
-	b.evaluateTransaction(w, []byte(req.Cbor))
+	b.evaluateTransaction(r.Context(), w, []byte(req.Cbor))
 }
 
 // evaluateTransaction decodes a transaction payload, evaluates it, and writes
 // the Ogmios-format response shared by both evaluation endpoints.
 func (b *Blockfrost) evaluateTransaction(
+	ctx context.Context,
 	w http.ResponseWriter,
 	payload []byte,
 ) {
@@ -208,7 +210,7 @@ func (b *Blockfrost) evaluateTransaction(
 		)
 		return
 	}
-	result, err := b.node.TransactionEvaluate(txCbor)
+	result, err := b.node.TransactionEvaluate(ctx, txCbor)
 	if err != nil {
 		// Evaluation reads the UTxO set, so a storage fault returns on the
 		// same path as a transaction that cannot be evaluated. Answering it
@@ -225,6 +227,15 @@ func (b *Blockfrost) evaluateTransaction(
 				http.StatusServiceUnavailable,
 				"Service Unavailable",
 				"ledger state unavailable",
+			)
+			return
+		}
+		if errors.Is(err, ErrEvaluationOverloaded) {
+			writeError(
+				w,
+				http.StatusTooManyRequests,
+				"Too Many Requests",
+				"transaction evaluation is at capacity, try again later",
 			)
 			return
 		}

@@ -40,6 +40,7 @@ func (v *countingValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
 ) error {
 	v.calls.Add(1)
 	return nil
@@ -67,7 +68,7 @@ func dupBatch(t *testing.T, ttls [2]uint64, aux [2]any) []byte {
 	})
 	require.NoError(t, err)
 	txCbor, err := cbor.Encode(
-		[]any{cbor.RawMessage(body), map[uint]any{}, true, nil},
+		[]any{cbor.RawMessage(body), map[uint]any{}, nil},
 	)
 	require.NoError(t, err)
 	return txCbor
@@ -86,6 +87,7 @@ func TestAddTransactionRejectsDuplicateDijkstraSubTransactionBodyID(
 	txType := uint(dijkstra.TxTypeDijkstra)
 
 	err := pool.AddTransaction(
+		context.Background(),
 		txType,
 		dupBatch(t, [2]uint64{10, 10}, [2]any{nil, map[uint]any{1: "m"}}),
 	)
@@ -96,6 +98,7 @@ func TestAddTransactionRejectsDuplicateDijkstraSubTransactionBodyID(
 	require.NoError(
 		t,
 		pool.AddTransaction(
+			context.Background(),
 			txType,
 			dupBatch(t, [2]uint64{10, 11}, [2]any{nil, nil}),
 		),

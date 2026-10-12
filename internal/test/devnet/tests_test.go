@@ -861,6 +861,7 @@ case "${1:-}" in
     printf 'DINGO_RUN_MODE=%s\n' "${DEVNET_DINGO_RUN_MODE:-}" >>"${FAKE_DOCKER_LOG}"
     printf 'DINGO_START_ERA=%s\n' "${DEVNET_DINGO_START_ERA:-}" >>"${FAKE_DOCKER_LOG}"
     printf 'TXPUMP_TRANSACTION_ERA=%s\n' "${DEVNET_TXPUMP_TRANSACTION_ERA:-}" >>"${FAKE_DOCKER_LOG}"
+    printf 'TXPUMP_START_DELAY=%s\n' "${DEVNET_TXPUMP_START_DELAY_SECONDS:-0}" >>"${FAKE_DOCKER_LOG}"
     case " $* " in
       *" ps --status running --quiet "*) printf 'fake-container\n' ;;
       *" exec -T "*) printf '1 0 0\n' ;;
@@ -973,6 +974,7 @@ func TestRunTestsLeiosSelectsItsFullDijkstraScenario(t *testing.T) {
 	require.Contains(t, result.dockerLog, "DINGO_START_ERA=dijkstra\n")
 	require.Contains(t, result.dockerLog, "TXPUMP_TRANSACTION_ERA=dijkstra\n")
 	require.Contains(t, result.dockerLog, "TXPUMP_WINDOW=1000\n")
+	require.Contains(t, result.dockerLog, "TXPUMP_START_DELAY=330\n")
 	require.Contains(t, result.dockerLog, "GO_ARGS=test -tags devnet")
 	require.Contains(t, result.dockerLog, "-timeout 12m")
 	require.Contains(t, result.dockerLog,
@@ -1161,6 +1163,8 @@ func runFakeDevnetScript(
 	if failRm {
 		writeExecutable(t, filepath.Join(fakeBin, "rm"), failingRmScript)
 	}
+	dockerLogPath := filepath.Join(tempRoot, "docker.log")
+	require.NoError(t, os.WriteFile(dockerLogPath, nil, 0o600))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1171,7 +1175,7 @@ func runFakeDevnetScript(
 	cmd := exec.CommandContext(ctx, "bash", args...)
 	cmd.Dir = root
 	env := map[string]string{
-		"FAKE_DOCKER_LOG":      filepath.Join(tempRoot, "docker.log"),
+		"FAKE_DOCKER_LOG":      dockerLogPath,
 		"FAKE_GO_EXIT":         strconv.Itoa(testExit),
 		"FAKE_GO_COMPILE_EXIT": "0",
 		"MODE":                 "dingo",
@@ -1206,7 +1210,7 @@ func runFakeDevnetScript(
 		filepath.Join(tempRoot, "dingo-devnet-artifacts.*"),
 	)
 	require.NoError(t, err)
-	dockerLog, err := os.ReadFile(filepath.Join(tempRoot, "docker.log"))
+	dockerLog, err := os.ReadFile(dockerLogPath)
 	require.NoError(t, err)
 	return fakeDevnetResult{
 		exitCode:     exitCode,

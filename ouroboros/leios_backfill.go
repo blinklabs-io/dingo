@@ -298,8 +298,27 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	}
 	connIds := o.connManager.LeiosFetchConnectionIds()
 	if len(connIds) == 0 {
-		return errors.New("leios backfill: no leios-fetch connection available")
+		return fmt.Errorf(
+			"leios backfill: %w",
+			ledger.ErrEndorserBlockFetchNoPeer,
+		)
 	}
+	return o.fetchEndorserBlockByPointWithConnections(
+		ctx,
+		ebSlot,
+		ebHash,
+		connIds,
+		o.connManager.GetConnectionById,
+	)
+}
+
+func (o *Ouroboros) fetchEndorserBlockByPointWithConnections(
+	ctx context.Context,
+	ebSlot uint64,
+	ebHash []byte,
+	connIds []ouroboros.ConnectionId,
+	getConnection func(ouroboros.ConnectionId) *ouroboros.Connection,
+) error {
 	overall, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
 		overall = time.Now().Add(leiosBackfillTotalBudget)
@@ -310,9 +329,10 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	// Order the connections for this attempt: recently-successful ones first
 	// (positive affinity), then other healthy ones, then ones cooling down from a
 	// recent failed fetch, then ones whose leios-fetch protocol is dead, each
-	// partition kept in round-robin order so concurrent backfills still spread. A
-	// cooled or dead connection is still eventually tried, so a transiently-flaky
-	// one is skipped, not starved.
+	// partition kept in round-robin order so concurrent backfills still spread.
+	// A live connection that offered this exact point is then moved first because
+	// leios-fetch has no not-found response. A cooled or dead connection is still
+	// eventually tried, so a transiently-flaky one is skipped, not starved.
 	order := leiosBackfillConnOrder(
 		connIds,
 		start,
@@ -320,7 +340,13 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		leiosBackfillAffinityWindow,
 		o.leiosFetchGuardFor,
 	)
+	order = preferLeiosBackfillOfferSource(
+		order,
+		o.leiosEndorserBlockRelayOfferSource(point),
+		o.leiosFetchGuardFor,
+	)
 	var lastErr, busyErr error
+	usableConnection := false
 	remainingCandidates := len(order)
 	for _, connId := range order {
 		remainingCandidates--
@@ -330,11 +356,12 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			}
 			break
 		}
-		conn := o.connManager.GetConnectionById(connId)
+		conn := getConnection(connId)
 		if conn == nil || conn.LeiosFetch() == nil ||
 			conn.LeiosFetch().Client == nil {
 			continue
 		}
+		usableConnection = true
 		// now anchors both remaining and attemptDeadline below to a single
 		// clock read, so a last/only candidate's attemptDeadline is computed
 		// as now.Add(overall.Sub(now)) -- algebraically exactly overall, with
@@ -404,10 +431,53 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	if lastErr == nil {
 		lastErr = busyErr
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !usableConnection {
+		return fmt.Errorf(
+			"leios backfill: %w",
+			ledger.ErrEndorserBlockFetchNoPeer,
+		)
+	}
 	if lastErr == nil {
 		lastErr = errors.New("leios backfill: fetch failed")
 	}
 	return lastErr
+}
+
+func (o *Ouroboros) leiosEndorserBlockRelayOfferSource(
+	point ocommon.Point,
+) string {
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	data := o.leiosEndorserBlocks[leiosBlockKey(point.Slot, point.Hash)]
+	if data == nil {
+		return ""
+	}
+	return data.relayOfferSource
+}
+
+func preferLeiosBackfillOfferSource(
+	order []ouroboros.ConnectionId,
+	connectionID string,
+	guardFor func(ouroboros.ConnectionId) *leiosFetchGuard,
+) []ouroboros.ConnectionId {
+	if connectionID == "" {
+		return order
+	}
+	for idx, connID := range order {
+		if leiosConnectionIdString(connID) != connectionID ||
+			guardFor(connID).isProtocolDead() {
+			continue
+		}
+		if idx > 0 {
+			copy(order[1:idx+1], order[:idx])
+			order[0] = connID
+		}
+		break
+	}
+	return order
 }
 
 // requestLeiosFetchConnRecycle asks the connection manager to close a
