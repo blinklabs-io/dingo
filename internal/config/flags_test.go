@@ -121,6 +121,7 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 
 	specFields := map[string]string{}
 	yamlOnlyFields := map[string]struct{}{
+		"MetricsAuthToken":                     {},
 		"Plugins.Storage.Blob.Config":          {},
 		"Plugins.Storage.Metadata.Config":      {},
 		"Plugins.Mempool.Config":               {},
@@ -386,6 +387,27 @@ func TestMetricsBindAddressExplicitOverridePrecedence(t *testing.T) {
 	}))
 	require.NoError(t, ApplyFlags(cmd, cfg))
 	require.Equal(t, "0.0.0.0:9100", cfg.MetricsListenAddress())
+}
+
+func TestMetricsAuthTokenLoadsFromYAMLAndEnvironment(t *testing.T) {
+	resetGlobalConfig()
+	unsetEnv(t, "DINGO_METRICS_AUTH_TOKEN")
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte("metricsAuthToken: yaml-token\n"),
+		0o600,
+	))
+
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "yaml-token", cfg.MetricsAuthToken)
+
+	t.Setenv("DINGO_METRICS_AUTH_TOKEN", "environment-token")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "environment-token", cfg.MetricsAuthToken)
 }
 
 func TestFullPotRewardsEnvBinding(t *testing.T) {

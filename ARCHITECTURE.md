@@ -9503,11 +9503,10 @@ Dingo provides four client-facing APIs plus Bark. All are optional and gated by 
 `internal/node.Run` starts three auxiliary HTTP listeners, binding each with
 `bindAuxiliaryListener` and serving it with `serveAuxiliaryListenerOn` (bind
 or serve failures are logged, never fatal):
-Prometheus metrics on `metricsBindAddr:metricsPort` (loopback by default;
-remote scraping requires setting `metricsBindAddr`, which the container image
-does through `DINGO_METRICS_BIND_ADDR=0.0.0.0` so orchestrator probes and
-scrapers reach it; `metricsPort` `0` disables it here and in `dingo mithril
-sync`), pprof on `debugPort`
+Prometheus metrics on `metricsBindAddr:metricsPort` (loopback by default in the
+binary and container image; remote scraping requires setting
+`metricsBindAddr`; `metricsAuthToken` optionally requires Bearer authentication;
+`metricsPort` `0` disables it here and in `dingo mithril sync`), pprof on `debugPort`
 when enabled, and the health listener on `healthPort` (default `12799`, `0` disables).
 
 The health listener is **not** gated on storage mode. The four API
@@ -9677,7 +9676,10 @@ Blockfrost, Kupo, Mesh, and UTxO RPC use the root `bindAddr`, whose default is
 `0.0.0.0`. MCP overrides it with `plugins.api.mcp.config.host`, defaulting to
 `127.0.0.1`; an explicitly empty MCP host falls back to `bindAddr`.
 `metricsBindAddr` and `debugBindAddr` separately configure Prometheus and pprof;
-both default to loopback. `corsAllowedOrigins` remains a shared root setting,
+both default to loopback. `metricsAuthToken` protects both the ordinary and
+Mithril-sync Prometheus listeners when configured. The listener remains plain
+HTTP, so remote deployments carry it over a private management network or
+through a TLS reverse proxy. `corsAllowedOrigins` remains a shared root setting,
 but MCP rejects its wildcard and applies the origin checks described above.
 
 ### API listener lifecycle (`internal/apilistener`)
