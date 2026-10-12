@@ -4227,6 +4227,7 @@ func selectValidLeiosTransactions(ctx context.Context,
 		) error {
 			consumed := make(map[utxoref.Key]struct{})
 			created := make(map[utxoref.Key]lcommon.Utxo)
+			accounts := utxoref.NewStateOverlay()
 			for _, mempoolTx := range txs {
 				if err := ctx.Err(); err != nil {
 					return err
@@ -4256,7 +4257,7 @@ func selectValidLeiosTransactions(ctx context.Context,
 					continue
 				}
 				tx, err := decodeMempoolTx(mempoolTx)
-				if err != nil || validate(tx, consumed, created) != nil {
+				if err != nil || validate(tx, consumed, created, accounts) != nil {
 					continue
 				}
 				selected = append(selected, mempoolTx)
@@ -4266,6 +4267,7 @@ func selectValidLeiosTransactions(ctx context.Context,
 				for _, utxo := range tx.Produced() {
 					created[utxoref.ForUtxo(utxo)] = utxo
 				}
+				accounts.Apply(tx)
 			}
 			if err := ctx.Err(); err != nil {
 				return err

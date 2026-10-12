@@ -4765,18 +4765,17 @@ func waitUntilParkedIn(t *testing.T, symbol string) {
 func waitUntilParkedInFrom(t *testing.T, symbol, caller string) {
 	t.Helper()
 	buf := make([]byte, 1<<20)
+	required := [][]byte{
+		[]byte(semaphoreFrame),
+		[]byte(symbol),
+	}
+	if caller != "" {
+		required = append(required, []byte(caller))
+	}
 	testutil.WaitForConditionWithInterval(
 		t,
 		func() bool {
-			dump := string(buf[:runtime.Stack(buf, true)])
-			for g := range strings.SplitSeq(dump, "\n\ngoroutine ") {
-				if strings.Contains(g, semaphoreFrame) &&
-					strings.Contains(g, symbol) &&
-					(caller == "" || strings.Contains(g, caller)) {
-					return true
-				}
-			}
-			return false
+			return runtimeStackContains(&buf, required...)
 		},
 		5*time.Second,
 		time.Millisecond,
@@ -4791,14 +4790,46 @@ func waitUntilGoroutineIn(t *testing.T, symbol string) {
 	buf := make([]byte, 1<<20)
 	testutil.WaitForConditionWithInterval(
 		t,
-		func() bool {
-			dump := string(buf[:runtime.Stack(buf, true)])
-			return strings.Contains(dump, symbol)
-		},
+		func() bool { return runtimeStackContains(&buf, []byte(symbol)) },
 		5*time.Second,
 		time.Millisecond,
 		"no goroutine reached "+symbol,
 	)
+}
+
+func runtimeStackContains(buf *[]byte, required ...[]byte) bool {
+	for {
+		n := runtime.Stack(*buf, true)
+		if n < len(*buf) {
+			return goroutineStackContains((*buf)[:n], required...)
+		}
+		*buf = make([]byte, len(*buf)*2)
+	}
+}
+
+func goroutineStackContains(dump []byte, required ...[]byte) bool {
+	for len(dump) > 0 {
+		next := bytes.Index(dump, []byte("\n\ngoroutine "))
+		goroutine := dump
+		if next >= 0 {
+			goroutine = dump[:next]
+		}
+		matches := true
+		for _, frame := range required {
+			if !bytes.Contains(goroutine, frame) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return true
+		}
+		if next < 0 {
+			return false
+		}
+		dump = dump[next+2:]
+	}
+	return false
 }
 
 func TestRollbackDeferredThenExcludesPersistentAdds(t *testing.T) {
@@ -7709,4 +7740,73 @@ func TestMaxQueuedHeadersConcurrentWithSetLedger(t *testing.T) {
 	); got != want {
 		t.Fatalf("MaxQueuedHeaders() = %d, want %d", got, want)
 	}
+}
+
+func TestHeaderQueueFullObserverCountsRejections(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	mustSetLedger(t, cm, 1)
+	var rejected atomic.Int64
+	cm.SetHeaderQueueFullObserver(func() { rejected.Add(1) })
+	c := cm.PrimaryChain()
+	limit := chain.DefaultMaxQueuedHeaders
+	headers := makeLinkedHeaders(limit+2, 0, 1, "")
+
+	for i := range limit {
+		require.NoError(
+			t,
+			c.AddBlockHeader(context.Background(), headers[i]),
+		)
+	}
+	require.Zero(t, rejected.Load(), "accepted headers must not be counted")
+
+	err = c.AddBlockHeader(context.Background(), headers[limit])
+	require.ErrorIs(t, err, chain.ErrHeaderQueueFull)
+	require.Equal(t, int64(1), rejected.Load())
+	err = c.AddVerifiedBlockHeader(context.Background(), headers[limit+1])
+	require.ErrorIs(t, err, chain.ErrHeaderQueueFull)
+	require.Equal(t, int64(2), rejected.Load())
+
+	cm.SetHeaderQueueFullObserver(nil)
+	err = c.AddBlockHeader(context.Background(), headers[limit])
+	require.ErrorIs(t, err, chain.ErrHeaderQueueFull)
+	require.Equal(t, int64(2), rejected.Load())
+}
+
+// The observer feeds a counter exported beside gauges that read the primary
+// chain, so a fork chain's rejections must not reach it.
+func TestHeaderQueueFullObserverIgnoresForkChains(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	mustSetLedger(t, cm, 1)
+	primary := cm.PrimaryChain()
+	for _, block := range testBlocks {
+		require.NoError(t, primary.AddBlock(context.Background(), block, nil))
+	}
+	tipBlock := testBlocks[len(testBlocks)-1]
+	fork, err := cm.NewChain(context.Background(), blockPoint(tipBlock))
+	require.NoError(t, err)
+	var rejected atomic.Int64
+	cm.SetHeaderQueueFullObserver(func() { rejected.Add(1) })
+	limit := fork.MaxQueuedHeaders()
+	headers := makeLinkedHeaders(
+		limit+1,
+		tipBlock.MockSlot+20,
+		tipBlock.MockBlockNumber+1,
+		tipBlock.MockHash,
+	)
+
+	for i := range limit {
+		require.NoError(
+			t,
+			fork.AddBlockHeader(context.Background(), headers[i]),
+		)
+	}
+	err = fork.AddBlockHeader(context.Background(), headers[limit])
+	require.ErrorIs(t, err, chain.ErrHeaderQueueFull)
+	require.Zero(t, rejected.Load())
 }

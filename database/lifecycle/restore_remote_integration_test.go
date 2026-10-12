@@ -478,7 +478,7 @@ func TestLiveRemoteRestorePostgresS3PreservesOrSwitchesBothStores(
 			prepare: func(t *testing.T, dir string) {
 				corruptRemoteIntegrationBlobBackup(t, dir, true)
 			},
-			wantError:         "unexpected EOF",
+			wantError:         lifecycle.ErrSnapshotPayloadMismatch.Error(),
 			wantPreflightOnly: true,
 		},
 		{
@@ -486,7 +486,7 @@ func TestLiveRemoteRestorePostgresS3PreservesOrSwitchesBothStores(
 			prepare: func(t *testing.T, dir string) {
 				corruptRemoteIntegrationBlobBackup(t, dir, false)
 			},
-			wantError:         "corrupted",
+			wantError:         lifecycle.ErrSnapshotPayloadMismatch.Error(),
 			wantPreflightOnly: true,
 		},
 		{

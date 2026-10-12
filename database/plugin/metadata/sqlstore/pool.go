@@ -501,7 +501,14 @@ func (s *Store) GetPool(
 	if err != nil {
 		return nil, err
 	}
-	pool, err := queryPool(ctx, db, "pool_key_hash = ?", poolKeyHash.Bytes())
+	var pool *models.Pool
+	if s.readCanUseWriteCache(txn) {
+		pool, err = scanPoolOrNil(scanPool(s.queryRowCached(
+			ctx, db, poolByKeyHashQuery, poolKeyHash.Bytes(),
+		)))
+	} else {
+		pool, err = queryPool(ctx, db, "pool_key_hash = ?", poolKeyHash.Bytes())
+	}
 	if err != nil || pool == nil {
 		return pool, err
 	}
@@ -899,21 +906,14 @@ func (s *Store) UpdatePoolOpCertSequence(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			if _, err := db.ExecContext(ctx, `
-INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
-VALUES (?, ?, ?)
-ON CONFLICT (pool_key_hash, slot) DO UPDATE
-SET sequence = excluded.sequence`,
+			if _, err := s.execCached(ctx, db, poolOpCertSequenceUpsertSQL,
 				poolKeyHash.Bytes(),
 				slotValue,
 				sequenceValue,
 			); err != nil {
 				return err
 			}
-			_, err := db.ExecContext(ctx, `
-UPDATE pool SET latest_op_cert_sequence = ?
-WHERE pool_key_hash = ?
-  AND latest_op_cert_sequence < ?`,
+			_, err := s.execCached(ctx, db, poolUpdateLatestOpCertSequenceSQL,
 				sequenceValue,
 				poolKeyHash.Bytes(),
 				sequenceValue,
@@ -922,6 +922,17 @@ WHERE pool_key_hash = ?
 		},
 	)
 }
+
+const poolOpCertSequenceUpsertSQL = `
+INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
+VALUES (?, ?, ?)
+ON CONFLICT (pool_key_hash, slot) DO UPDATE
+SET sequence = excluded.sequence`
+
+const poolUpdateLatestOpCertSequenceSQL = `
+UPDATE pool SET latest_op_cert_sequence = ?
+WHERE pool_key_hash = ?
+  AND latest_op_cert_sequence < ?`
 
 func (s *Store) LatestPoolOpCertSequence(
 	poolKeyHash lcommon.PoolKeyHash,
@@ -1072,9 +1083,111 @@ func (s *Store) LatestPoolOpCertSequences(
 		if err := rows.Scan(&poolKeyHash, &sequence); err != nil {
 			return nil, err
 		}
-		ret[string(poolKeyHash)] = uint64(sequence)
+		value, err := opCertSequenceValue(sequence)
+		if err != nil {
+			return nil, err
+		}
+		ret[string(poolKeyHash)] = value
 	}
 	return ret, rows.Err()
+}
+
+// PoolOpCertSequencesChangedAfterSQL lists the pool of every op-cert row after
+// a slot, read as a range of idx_pool_opcert_sequence_slot. It is not
+// DISTINCT: that lets the planner prefer a full scan of the (pool_key_hash,
+// slot) index to deliver the pools in order, and the caller deduplicates the
+// few rows a recent slot leaves. Exported, like LatestPoolOpCertSequencesSQL,
+// so a test can pin its plan.
+const PoolOpCertSequencesChangedAfterSQL = `
+SELECT pool_key_hash
+FROM pool_opcert_sequence
+WHERE slot > ?`
+
+// PoolOpCertSequenceAtOrBeforeSQL is one pool's highest sequence at or before
+// a slot, read through idx_pool_opcert_sequence_pool_slot.
+const PoolOpCertSequenceAtOrBeforeSQL = `
+SELECT MAX(sequence)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND slot <= ?`
+
+func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
+	slot uint64,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	// A slot filter cannot use the (pool_key_hash, sequence) index the
+	// unbounded aggregate reads, and filtering the whole table by slot reads
+	// every row at or before it. Rows after a recent slot are few, so the
+	// unbounded result is corrected for just the pools that have one.
+	ret, err := s.LatestPoolOpCertSequences(txn)
+	if err != nil {
+		return nil, err
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		PoolOpCertSequencesChangedAfterSQL,
+		slotValue,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var changed [][]byte
+	seen := make(map[string]struct{})
+	for rows.Next() {
+		var poolKeyHash []byte
+		if err := rows.Scan(&poolKeyHash); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if _, dup := seen[string(poolKeyHash)]; dup {
+			continue
+		}
+		seen[string(poolKeyHash)] = struct{}{}
+		changed = append(changed, poolKeyHash)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, poolKeyHash := range changed {
+		var sequence sql.NullInt64
+		if err := db.QueryRowContext(
+			ctx,
+			PoolOpCertSequenceAtOrBeforeSQL,
+			poolKeyHash,
+			slotValue,
+		).Scan(&sequence); err != nil {
+			return nil, err
+		}
+		if !sequence.Valid {
+			delete(ret, string(poolKeyHash))
+			continue
+		}
+		value, err := opCertSequenceValue(sequence.Int64)
+		if err != nil {
+			return nil, err
+		}
+		ret[string(poolKeyHash)] = value
+	}
+	return ret, nil
+}
+
+// opCertSequenceValue converts a stored op-cert sequence, failing on a
+// negative one rather than wrapping it into a huge counter.
+func opCertSequenceValue(sequence int64) (uint64, error) {
+	if sequence < 0 {
+		return 0, fmt.Errorf("negative op-cert sequence %d", sequence)
+	}
+	return uint64(sequence), nil
 }
 
 // mithrilTrustBoundarySyncKey mirrors database.mithrilLedgerSlotSyncKey and
@@ -3034,20 +3147,29 @@ func ledgerPoolRelay(
 	return ret, nil
 }
 
+const poolSelectPrefix = `
+SELECT margin, pool_key_hash, vrf_key_hash, reward_account,
+       latest_op_cert_sequence, reward_account_credential_tag, id,
+       pledge, cost, leios_key_public, leios_key_possession_proof
+FROM pool WHERE `
+
+// poolByKeyHashQuery is the pool lookup GetPool issues, and the text queryPool
+// builds for the "pool_key_hash = ?" predicate.
+const poolByKeyHashQuery = poolSelectPrefix + "pool_key_hash = ? LIMIT 1"
+
 func queryPool(
 	ctx context.Context,
 	db queryer,
 	predicate string,
 	args ...any,
 ) (*models.Pool, error) {
-	row := db.QueryRowContext(ctx, `
-SELECT margin, pool_key_hash, vrf_key_hash, reward_account,
-       latest_op_cert_sequence, reward_account_credential_tag, id,
-       pledge, cost, leios_key_public, leios_key_possession_proof
-FROM pool WHERE `+predicate+` LIMIT 1`,
-		args...,
-	)
-	pool, err := scanPool(row)
+	return scanPoolOrNil(scanPool(db.QueryRowContext(
+		ctx, poolSelectPrefix+predicate+" LIMIT 1", args...,
+	)))
+}
+
+// scanPoolOrNil maps sql.ErrNoRows from scanPool to a nil pool.
+func scanPoolOrNil(pool *models.Pool, err error) (*models.Pool, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

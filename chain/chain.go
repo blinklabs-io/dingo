@@ -27,11 +27,13 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -164,6 +166,12 @@ func (c *Chain) WaitForHeaderCountBelow(
 	ctx context.Context,
 	limit int,
 ) error {
+	return c.WaitForHeaderCountBelowOrSignal(ctx, limit, nil)
+}
+
+// WaitForHeaderCountBelowOrSignal also resumes when an external capacity
+// constraint changes, allowing callers to re-evaluate their admission predicate.
+func (c *Chain) WaitForHeaderCountBelowOrSignal(ctx context.Context, limit int, signal <-chan struct{}) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
@@ -180,6 +188,8 @@ func (c *Chain) WaitForHeaderCountBelow(
 		c.mutex.Unlock()
 
 		select {
+		case <-signal:
+			return nil
 		case <-changed:
 		case <-ctx.Done():
 			return ctx.Err()
@@ -531,6 +541,9 @@ func (c *Chain) addBlockHeader(
 	// Reject headers when the queue is at capacity to prevent
 	// unbounded memory growth from a malicious peer.
 	if len(c.headers) >= c.MaxQueuedHeaders() {
+		if c.id == primaryChainId {
+			c.manager.notifyHeaderQueueFull()
+		}
 		return ErrHeaderQueueFull
 	}
 	// Make sure header fits on chain tip
@@ -1213,7 +1226,16 @@ func (c *Chain) addBlockLocked(
 	return evt, nil
 }
 
-func (c *Chain) AddBlocks(ctx context.Context, blocks []ledger.Block) error {
+func (c *Chain) AddBlocks(
+	ctx context.Context,
+	blocks []ledger.Block,
+) (err error) {
+	_, span := tracing.Start(
+		ctx,
+		"chain.add_blocks",
+		attribute.Int("blocks.count", len(blocks)),
+	)
+	defer func() { tracing.End(span, err) }()
 	if c == nil {
 		return errors.New("chain is nil")
 	}
@@ -1986,6 +2008,34 @@ func (c *Chain) findQueuedHeader(point ocommon.Point) (int, error) {
 		}
 	}
 	return -1, nil
+}
+
+// HoldsQueuedHeader reports whether point is a header queued on this chain
+// ahead of its blocks.
+func (c *Chain) HoldsQueuedHeader(point ocommon.Point) bool {
+	if c == nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	index, err := c.findQueuedHeader(point)
+	return err == nil && index >= 0
+}
+
+// HoldsQueuedHeaderHash reports whether hash is queued on this chain ahead of
+// its blocks.
+func (c *Chain) HoldsQueuedHeaderHash(hash []byte) bool {
+	if c == nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	for _, header := range c.headers {
+		if bytes.Equal(header.point.Hash, hash) {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateRollback verifies that Rollback(point) would be accepted without

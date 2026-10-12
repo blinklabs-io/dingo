@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
 
 // ErrQueryViewClosed is returned by QueryView.Query once the view has been
@@ -41,6 +42,10 @@ type QueryView struct {
 	ls  *LedgerState
 	at  QueryPoint
 	txn *database.Txn
+	// transitionInfo freezes the in-memory forecast that accompanied the
+	// database snapshot. Era-history queries must not observe a later forecast
+	// while every persisted input remains pinned at Acquire.
+	transitionInfo hardfork.TransitionInfo
 	// cancel ends the context txn's metadata transaction is bound to. The
 	// database cancels a transaction whose context ends, so the view owns
 	// that context rather than inheriting the caller's.
@@ -104,7 +109,14 @@ func (ls *LedgerState) AcquireQueryView(
 			cancelView()
 			return nil, err
 		}
-		return &QueryView{ls: ls, at: at, txn: txn, cancel: cancelView}, nil
+		transitionInfo := ls.loadConsensusSnapshot().transitionInfo
+		return &QueryView{
+			ls:             ls,
+			at:             at,
+			txn:            txn,
+			cancel:         cancelView,
+			transitionInfo: transitionInfo,
+		}, nil
 	}
 }
 
@@ -194,7 +206,9 @@ func (v *QueryView) Query(
 			result, err = nil, database.NewTxnPanicError("query view", r)
 		}
 	}()
-	return v.ls.queryInTxn(ctx, query, v.at, protocolVersion, v.txn)
+	return v.ls.queryInTxnWithTransition(
+		ctx, query, v.at, protocolVersion, v.txn, &v.transitionInfo,
+	)
 }
 
 func (v *QueryView) finishQuery() {

@@ -231,7 +231,7 @@ func TestConvertBlockGenesisParent(t *testing.T) {
 		models.Block{Hash: hash, Number: 0, Slot: 0},
 		nil,
 		lcommon.AddressNetworkTestnet,
-		func(slot uint64) int64 { return int64(slot) * 1000 },
+		0,
 	)
 
 	require.Equal(
@@ -258,7 +258,7 @@ func TestConvertBlockParent(t *testing.T) {
 		},
 		nil,
 		lcommon.AddressNetworkTestnet,
-		func(slot uint64) int64 { return int64(slot) * 1000 },
+		20000,
 	)
 
 	require.Equal(
