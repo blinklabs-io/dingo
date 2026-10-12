@@ -4692,9 +4692,10 @@ re-registration deferred, so the snapshot still carries the first one.
 A Mithril snapshot import writes a pool's registration (`ImportPool`) stamped
 at the import slot, because the snapshot carries only the pool's current
 parameters, not the certificate history that produced them. Both lookups
-above filter `added_slot <= slot`, so for any cutoff or capture slot before
-that import slot -- which the very first post-bootstrap epoch boundary's
-cutoff and capture necessarily are, since that boundary's electing snapshot
+above filter `added_slot <= slot`, so for a pool without staged parameters,
+any cutoff or capture slot before that import slot -- which the very first
+post-bootstrap epoch boundary's cutoff and capture necessarily are, since that
+boundary's electing snapshot
 was captured no later than the anchor the node just bootstrapped from --
 neither query finds a row for a pool that has in fact been continuously
 registered the whole time, and `electingVrfKeyHashWithCache`
@@ -4710,7 +4711,10 @@ writes two registrations for that pool: the parameters in force at
 `pool_registration` is unique on (`pool_id`, `added_slot`). The staged row is
 the pool's latest registration, so the next epoch boundary and a pool
 retirement refund read it, and the `pool` row holds its parameters, as after a
-live re-registration. The deposit is the same on both rows.
+live re-registration. The deposit is the same on both rows. Lookups at
+`import slot - 1` can resolve the current parameters; earlier cutoffs still
+have the history gap. A snapshot at slot zero with staged parameters is
+rejected before any import phase persists state.
 
 The fix lives in `electingVrfKeyHashWithCache`, not in these two queries or in
 `ImportPool`: when both lookups miss, and this is a Mithril-bootstrapped node

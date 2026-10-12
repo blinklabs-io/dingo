@@ -2036,3 +2036,56 @@ func TestParsePStateRejectsFuturePoolParamsForUnregisteredPool(t *testing.T) {
 	require.Len(t, pools, 1)
 	require.Nil(t, pools[0].FutureParams)
 }
+
+func TestParsePStateRejectsUndecodableFuturePoolParams(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	malformed := testPoolParams(0x11)
+	malformed[5] = []any{[]byte{1}}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, poolHash, malformed),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.ErrorContains(t, err, "future pool params")
+	require.Len(t, pools, 1)
+	require.Nil(t, pools[0].FutureParams)
+}
+
+func TestParsePStateDoesNotReplacePartiallyUndecodableCurrentParams(t *testing.T) {
+	t.Parallel()
+	first := bytes.Repeat([]byte{0x11}, 28)
+	second := bytes.Repeat([]byte{0x21}, 28)
+	malformed := testPoolParams(0x21)
+	malformed[5] = []any{[]byte{1}}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, first, testPoolParams(0x11), second, malformed),
+		encodeCborMap(t, first, testPoolParams(0x11), second, testPoolParams(0x21)),
+		encodeCborMap(t),
+		encodeCborMap(t, first, testPoolDeposit, second, testPoolDeposit),
+	))
+	require.ErrorContains(t, err, "skipped 1 of 2")
+	require.ErrorContains(t, err, "unregistered pool")
+	require.Len(t, pools, 1)
+	require.Equal(t, first, pools[0].PoolKeyHash)
+}
+
+func TestParsePStateDoesNotReplaceUndecodableCurrentParams(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	malformed := testPoolParams(0x11)
+	malformed[5] = []any{[]byte{1}}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, malformed),
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.ErrorContains(t, err, "skipped 1 of 1")
+	require.ErrorContains(t, err, "unregistered pool")
+	require.Empty(t, pools)
+}

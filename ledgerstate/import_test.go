@@ -3033,6 +3033,18 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 	require.NoError(t, err)
 	garbage := cbor.RawMessage{0xff}
 	partialCertState := partialCertStateData(t, fixture)
+	certParts, err := decodeRawArray(fixture.CertStateData)
+	require.NoError(t, err)
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	params := encodeCborMap(t, poolHash, testPoolParams(0x11))
+	certParts[1] = encodeTestPState(
+		t, params, params, encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	)
+	stagedCertState, err := cbor.Encode([]cbor.RawMessage{
+		certParts[0], certParts[1], certParts[2],
+	})
+	require.NoError(t, err)
 	snapshotParts, err := decodeRawArray(fixture.SnapShotsData)
 	require.NoError(t, err)
 	snapshotsWithFee, err := cbor.Encode([]any{
@@ -3051,6 +3063,15 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 		wantLog string
 	}{
 		{name: "valid input imports"},
+		{
+			name: "staged pool parameters at origin",
+			mutate: func(s *RawLedgerState) {
+				s.Tip.Slot = 0
+				s.Epoch = 0
+				s.CertStateData = stagedCertState
+			},
+			wantErr: "has staged parameters but the snapshot is at slot 0",
+		},
 		{
 			name:    "cert state",
 			mutate:  func(s *RawLedgerState) { s.CertStateData = garbage },
@@ -3276,7 +3297,7 @@ func TestValidateImportStateRetainsStoredPreviousParameters(t *testing.T) {
 func TestImportPoolsAppliesFutureParamsAtNextBoundary(t *testing.T) {
 	t.Parallel()
 
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
@@ -3325,4 +3346,18 @@ func TestImportPoolsAppliesFutureParamsAtNextBoundary(t *testing.T) {
 	require.Equal(t, newAccount, []byte(pool.RewardAccount))
 	require.NotEmpty(t, pool.Registration)
 	require.Equal(t, newAccount, []byte(pool.Registration[0].RewardAccount))
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	var registrations int
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM pool_registration",
+	).Scan(&registrations))
+	require.Equal(t, 2, registrations)
+	var earlierAccount []byte
+	var earlierSlot uint64
+	require.NoError(t, raw.QueryRow(
+		"SELECT reward_account, added_slot FROM pool_registration ORDER BY added_slot LIMIT 1",
+	).Scan(&earlierAccount, &earlierSlot))
+	require.Equal(t, oldAccount, earlierAccount)
+	require.Equal(t, uint64(999), earlierSlot)
 }

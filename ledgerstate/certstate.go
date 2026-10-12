@@ -15,7 +15,6 @@
 package ledgerstate
 
 import (
-	"cmp"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -681,8 +680,7 @@ func parsePStateWithRetirements(
 
 func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 	type mapEntry struct {
-		idx  int
-		size int
+		idx int
 	}
 	var maps []mapEntry
 	for i, elem := range ps {
@@ -691,19 +689,12 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		}
 		major := elem[0] >> 5
 		if major == 5 || elem[0] == 0xbf {
-			maps = append(maps, mapEntry{idx: i, size: len(elem)})
+			maps = append(maps, mapEntry{idx: i})
 		}
 	}
 	if len(maps) == 0 {
 		return nil, nil, nil
 	}
-
-	slices.SortFunc(
-		maps,
-		func(a, b mapEntry) int {
-			return cmp.Compare(b.size, a.size)
-		},
-	)
 
 	type parsedMap struct {
 		idx     int
@@ -714,18 +705,19 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 	var bestPools []ParsedPool
 	var bestWarning error
 	bestIdx := -1
+	bestIsPoolParams := false
 	for _, m := range maps {
 		pools, warning := parseCertPoolParamsMap(ps[m.idx])
 		parsed = append(parsed, parsedMap{m.idx, pools, warning})
-		// futurePoolParams can parse as many pools as poolParams, and may
-		// encode larger. Every layout lists poolParams first, so on a tie
-		// the lower position is the current map.
-		if bestIdx < 0 || len(pools) > len(bestPools) ||
-			(len(pools) > 0 && len(pools) == len(bestPools) &&
-				m.idx < bestIdx) {
+		// poolParams precedes futurePoolParams in every supported layout.
+		// Recognize malformed registrations by shape too: otherwise a staged
+		// map with more decodable entries can replace the current map.
+		isPoolParams := len(pools) > 0 || hasPoolParamsEntries(ps[m.idx])
+		if bestIdx < 0 || (isPoolParams && !bestIsPoolParams) {
 			bestPools = pools
 			bestWarning = warning
 			bestIdx = m.idx
+			bestIsPoolParams = isPoolParams
 		}
 	}
 	var mapErrs []error
@@ -736,17 +728,22 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		if err := mergePoolDeposits(bestPools, ps, bestIdx); err != nil {
 			mapErrs = append(mapErrs, err)
 		}
-		for _, p := range parsed {
-			if p.idx == bestIdx || len(p.pools) == 0 {
-				continue
-			}
-			if err := mergeFuturePoolParams(
-				bestPools, p.pools, p.warning,
-			); err != nil {
-				mapErrs = append(mapErrs, err)
-			}
-			break
+	}
+	for _, p := range parsed {
+		if p.idx <= bestIdx {
+			continue
 		}
+		// The adjacent future map can contain only malformed entries;
+		// zero successfully decoded pools must not erase its warning.
+		if len(p.pools) == 0 &&
+			(p.idx != bestIdx+1 || p.warning == nil) &&
+			!hasPoolParamsEntries(ps[p.idx]) {
+			continue
+		}
+		if err := mergeFuturePoolParams(bestPools, p.pools, p.warning); err != nil {
+			mapErrs = append(mapErrs, err)
+		}
+		break
 	}
 	retirementIndices := make([]int, 0, len(ps))
 	if len(ps) == 4 && bestIdx == 0 {
@@ -773,6 +770,24 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		mapErrs = append(mapErrs, err)
 	}
 	return bestPools, retirements, errors.Join(mapErrs...)
+}
+
+func hasPoolParamsEntries(data []byte) bool {
+	entries, err := decodeMapEntries(data)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		var key []byte
+		if _, err := cbor.Decode(entry.KeyRaw, &key); err != nil || len(key) != poolKeyHashLen {
+			continue
+		}
+		parts, err := decodeRawArray(entry.ValueRaw)
+		if err == nil && len(parts) >= 7 {
+			return true
+		}
+	}
+	return false
 }
 
 // mergeFuturePoolParams attaches the PState futurePoolParams entries -- the
