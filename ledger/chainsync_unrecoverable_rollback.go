@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
-
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
