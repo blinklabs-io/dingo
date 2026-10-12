@@ -2599,6 +2599,9 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 	ctx context.Context,
 ) error {
 	var committedRollbackErr error
+	if err := ls.db.EnsureBlockInventory(); err != nil {
+		return fmt.Errorf("initialize block inventory for recovery: %w", err)
+	}
 	// Load current ledger tip
 	tmpTip, err := ls.db.GetTip(nil)
 	if err != nil {

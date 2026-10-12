@@ -520,13 +520,21 @@ func (*barkContextDeleteDestination) FetchManifest(
 	return lifecycle.Manifest{}, nil
 }
 
+func (*barkContextDeleteDestination) FetchManifestWithOptions(
+	ctx context.Context,
+	_ ...lifecycle.ManifestOption,
+) (lifecycle.Manifest, error) {
+	return lifecycle.Manifest{}, ctx.Err()
+}
+
 func (*barkContextDeleteDestination) Delete(ctx context.Context) error {
 	return ctx.Err()
 }
 
 var (
-	_ lifecycle.CloudManifestFetcher = &barkContextDeleteDestination{}
-	_ lifecycle.CloudDeleter         = &barkContextDeleteDestination{}
+	_ lifecycle.CloudManifestFetcher             = &barkContextDeleteDestination{}
+	_ lifecycle.ConfigurableCloudManifestFetcher = &barkContextDeleteDestination{}
+	_ lifecycle.CloudDeleter                     = &barkContextDeleteDestination{}
 )
 
 type barkRecoveringCatalogDestination struct {
@@ -1257,7 +1265,7 @@ func TestDeleteSnapshotRemovesBothLocalAndCloudCopies(t *testing.T) {
 
 func TestDeleteSnapshotMapsContextErrorsBeforeDeletion(t *testing.T) {
 	t.Parallel()
-	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	h := newTestDatabaseServiceHandlerWithTrustKey(t, nil, t.TempDir())
 	dir := filepath.Join(h.bark.config.SnapshotDir, "keep")
 	require.NoError(t, os.Mkdir(dir, 0o755))
 	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
@@ -1439,6 +1447,7 @@ func TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud(t *testing.T) {
 		_, err := lifecycle.Snapshot(
 			context.Background(), db, filepath.Join(snapshotDir, name),
 			lifecycle.TriggerManual, "test-version", "badger", "sqlite",
+			lifecycle.WithManifestKey(testSnapshotTrustKey),
 		)
 		require.NoError(t, err)
 	}
@@ -1524,8 +1533,13 @@ func TestListAvailableSnapshotsPagesWithoutProviderRescan(t *testing.T) {
 		CreatedAt: time.Unix(1, 0).UTC(),
 		Trigger:   lifecycle.TriggerManual,
 	}
-	require.NoError(t, lifecycle.WriteManifest(manifestDir, manifest))
-	manifest, err := lifecycle.ReadManifest(manifestDir)
+	require.NoError(t, lifecycle.WriteManifest(
+		manifestDir, manifest,
+		lifecycle.WithManifestKey(testSnapshotTrustKey),
+	))
+	manifest, err := lifecycle.ReadManifest(
+		manifestDir, lifecycle.WithManifestKey(testSnapshotTrustKey),
+	)
 	require.NoError(t, err)
 	for i := range cloudCount {
 		id := fmt.Sprintf("cloud-%03d", i)
@@ -1545,6 +1559,9 @@ func TestListAvailableSnapshotsPagesWithoutProviderRescan(t *testing.T) {
 			Blob:     plugin.Selection{Provider: "badger"},
 			Metadata: plugin.Selection{Provider: "sqlite"},
 		}},
+		DatabaseLifecycle: config.DatabaseLifecycleConfig{
+			SnapshotTrustKeyFile: testSnapshotTrustKeyFile(t),
+		},
 	}, registry, nil)
 	b, err := NewBark(BarkConfig{
 		DB:                       newTestDB(t),
