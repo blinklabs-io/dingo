@@ -744,9 +744,17 @@ type Config struct {
 	SkipRewardLiveStakeBackfillCheck bool `yaml:"skipRewardLiveStakeBackfillCheck"                                                             split_words:"true"`
 	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
 	// collector listening, the OTLP exporter logs noisy connection errors.
-	// Spans are sent via OTLP HTTP; configure the destination with the
-	// standard OTEL_EXPORTER_OTLP_* env vars.
+	// Spans are sent via OTLP HTTP; the destination defaults to the
+	// standard OTEL_EXPORTER_OTLP_* env vars unless TracingEndpoint is set.
 	Tracing bool `yaml:"tracing"                             envconfig:"DINGO_TRACING_ENABLED"`
+	// TracingEndpoint is the OTLP HTTP collector URL (for example
+	// http://localhost:4318). Setting it enables tracing; empty leaves tracing
+	// to Tracing and the destination to the OTEL_EXPORTER_OTLP_* env vars.
+	TracingEndpoint string `yaml:"tracingEndpoint"                     envconfig:"DINGO_TRACING_ENDPOINT"`
+	// TracingServiceName is the service.name resource attribute on exported spans.
+	TracingServiceName string `yaml:"tracingServiceName"                  envconfig:"DINGO_TRACING_SERVICE_NAME"`
+	// TracingSampleRatio is the fraction of new traces sampled, from 0 to 1.
+	TracingSampleRatio float64 `yaml:"tracingSampleRatio"                  envconfig:"DINGO_TRACING_SAMPLE_RATIO"`
 	// TracingStdout redirects spans to stdout instead of OTLP. Requires
 	// Tracing to also be enabled. Mostly useful for local debugging.
 	TracingStdout   bool     `yaml:"tracingStdout"                       envconfig:"DINGO_TRACING_STDOUT"`
@@ -771,6 +779,25 @@ type Config struct {
 	// before replay reaches this stage. See ARCHITECTURE.md ("Block Processing
 	// Pipeline").
 	BlockPipelineValidateEnabled bool `yaml:"blockPipelineValidateEnabled"        envconfig:"DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED"`
+	// LedgerPrefetchAheadEnabled resolves the next block's input UTxOs on a
+	// separate goroutine while the current block applies, for blocks under
+	// normal validation only. Not consensus-affecting; off by default.
+	LedgerPrefetchAheadEnabled bool `yaml:"ledgerPrefetchAheadEnabled"          envconfig:"DINGO_LEDGER_PREFETCH_AHEAD_ENABLED"`
+	// LedgerApplyRowBatchingEnabled writes the accumulated deltas of blocks
+	// that are not validated through the metadata store's batched path in core
+	// storage mode, as API storage mode already does, instead of one statement
+	// group per row. Validated blocks, Leios endorser-block applies, and
+	// batches applied with closure context keep the per-transaction path in
+	// every storage mode. The stored state is identical either way, so the
+	// setting is not consensus-affecting; it defaults off until throughput is
+	// proven. See ARCHITECTURE.md ("Block Processing Pipeline").
+	LedgerApplyRowBatchingEnabled bool `yaml:"ledgerApplyRowBatchingEnabled"       envconfig:"DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED"`
+
+	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
+	// range of headers is queued while far from the peer tip, instead of
+	// waiting for four ranges. The header queue capacity is unchanged. Not
+	// consensus-affecting; off by default.
+	BlockfetchLowWatermarkEnabled bool `yaml:"blockfetchLowWatermarkEnabled"          envconfig:"DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED"`
 
 	// Peer targets (0 = use default, -1 = unlimited)
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`
@@ -964,6 +991,16 @@ type Config struct {
 
 	// Database lifecycle (snapshot/restore/truncate) configuration
 	DatabaseLifecycle DatabaseLifecycleConfig `yaml:"databaseLifecycle"`
+
+	// PlannerStatsRefreshEnabled runs SQLite's incremental planner-statistics
+	// maintenance (PRAGMA optimize) before block processing starts and after
+	// each epoch rollover. A database that never ran ANALYZE has no
+	// sqlite_stat1, and without it some queries scan most of a large table
+	// instead of seeking an index. The first run on a large database
+	// analyzes every table and can take minutes; later runs are near-free.
+	// Enabled by default; this is an escape hatch, not a tuning knob. Other
+	// metadata backends are unaffected.
+	PlannerStatsRefreshEnabled bool `yaml:"plannerStatsRefreshEnabled" envconfig:"DINGO_PLANNER_STATS_REFRESH_ENABLED"`
 
 	// provenance records, for gated fields only, whether their value came
 	// from an operator (CLI flag, environment variable, or YAML file) or
@@ -1392,6 +1429,8 @@ func newDefaultConfig() *Config {
 		StrictUtxoValidation:                true,
 		Tracing:                             false,
 		TracingStdout:                       false,
+		TracingServiceName:                  "dingo",
+		TracingSampleRatio:                  1,
 		Network:                             "preview",
 		NetworkMagic:                        0,
 		MetricsPort:                         12798,
@@ -1471,6 +1510,8 @@ func newDefaultConfig() *Config {
 		// Fail closed: self-validate locally-forged blocks before adoption and
 		// diffusion unless an operator explicitly opts out.
 		ValidateForgedBlock: true,
+		// SQLite planner statistics stay current unless an operator opts out.
+		PlannerStatsRefreshEnabled: true,
 	}
 }
 
@@ -1897,6 +1938,10 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.KoiosParity.GraceHours == 0 {
 		c.KoiosParity.GraceHours = 24
+	}
+	// A collector endpoint turns tracing on; see TracingEndpoint.
+	if c.TracingEndpoint != "" {
+		c.Tracing = true
 	}
 }
 

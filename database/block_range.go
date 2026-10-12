@@ -67,11 +67,11 @@ func ForEachBlockInRange(
 	); it.Next() {
 		item := it.Item()
 		if item == nil {
-			continue
+			return errors.New("block range iterator returned a nil item")
 		}
 		k := item.Key()
 		if k == nil {
-			continue
+			return errors.New("block range iterator returned a nil key")
 		}
 		// Skip the metadata key
 		if strings.HasSuffix(

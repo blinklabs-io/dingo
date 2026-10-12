@@ -211,6 +211,7 @@ type Indexer struct {
 	config  Config
 	mu      sync.RWMutex
 	metrics *indexerMetrics
+	failed  bool
 	// In-memory tracked UTxO sets; keyed by (tx_hash_hex, output_index).
 	cNightUTxOs map[utxoKey]cNightUTxO
 	regUTxOs    map[utxoKey]registrationUTxO
@@ -614,22 +615,13 @@ func (idx *Indexer) backfill() error {
 			} else {
 				decoded, err := block.Decode()
 				if err != nil {
-					if idx.config.Logger != nil {
-						idx.config.Logger.Warn(
-							"midnight indexer: backfill: skipping undecodable block",
-							"slot", block.Slot,
-							"error", err,
-						)
-					}
-					return nil
+					return fmt.Errorf("midnight indexer: backfill: decode block slot=%d: %w", block.Slot, err)
 				}
 				txs = decoded.Transactions()
 			}
-			var timestampMs uint64
-			if idx.config.SlotTimer != nil {
-				if t, tErr := idx.config.SlotTimer.SlotToTime(block.Slot); tErr == nil {
-					timestampMs = uint64(t.UnixMilli()) //nolint:gosec
-				}
+			timestampMs, err := idx.blockTimestamp(block.Slot)
+			if err != nil {
+				return err
 			}
 			if err := idx.processBlock(block, txs, timestampMs); err != nil {
 				return fmt.Errorf(
@@ -667,21 +659,40 @@ func (idx *Indexer) updateCheckpoint(slot uint64) error {
 }
 
 // Stop unsubscribes from block events, waiting for any in-flight handler
-// call to finish before returning. A plain Unsubscribe only stops future
+// until it finishes or ctx expires. A plain Unsubscribe only stops future
 // deliveries, so a handler goroutine that already dequeued a block event
 // could still be executing (writing to the database) when Stop returns --
 // the live database restore/truncate path (node_lifecycle.go) calls Stop
 // and then closes/reopens the node's storage while the process keeps
 // running, so an in-flight write finishing after that point is a real
 // use-after-close risk, not just a benign leak during a normal process
-// shutdown.
-func (idx *Indexer) Stop() {
-	idx.config.EventBus.UnsubscribeAndWait(ledger.BlockEventType, idx.subID)
+// shutdown. A non-nil return means the handler may still be using storage.
+func (idx *Indexer) Stop(ctx context.Context) error {
+	return idx.config.EventBus.UnsubscribeAndWaitContext(
+		ctx, ledger.BlockEventType, idx.subID,
+	)
+}
+
+func (idx *Indexer) blockTimestamp(slot uint64) (uint64, error) {
+	if idx.config.SlotTimer == nil {
+		return 0, errors.New("midnight indexer: slot timer unavailable")
+	}
+	t, err := idx.config.SlotTimer.SlotToTime(slot)
+	if err != nil {
+		return 0, fmt.Errorf("midnight indexer: timestamp for slot %d: %w", slot, err)
+	}
+	if t.UnixMilli() < 0 {
+		return 0, fmt.Errorf("midnight indexer: negative timestamp for slot %d", slot)
+	}
+	return uint64(t.UnixMilli()), nil
 }
 
 // fatal logs err and forwards it to FatalErrorFunc (typically node cancel).
 // Called when the indexer cannot continue without risking a checkpoint gap.
 func (idx *Indexer) fatal(err error) {
+	idx.mu.Lock()
+	idx.failed = true
+	idx.mu.Unlock()
 	if idx.config.Logger != nil {
 		idx.config.Logger.Error("midnight indexer fatal error", "error", err)
 	}
@@ -693,6 +704,12 @@ func (idx *Indexer) fatal(err error) {
 // handleBlockEvent is the SubscribeFunc callback; it decodes the block and
 // delegates to processBlock or rollbackBlock depending on the action.
 func (idx *Indexer) handleBlockEvent(evt event.Event) {
+	idx.mu.RLock()
+	failed := idx.failed
+	idx.mu.RUnlock()
+	if failed {
+		return
+	}
 	blockEvt, ok := evt.Data.(ledger.BlockEvent)
 	if !ok {
 		return
@@ -712,11 +729,10 @@ func (idx *Indexer) handleBlockEvent(evt event.Event) {
 			))
 			return
 		}
-		var timestampMs uint64
-		if idx.config.SlotTimer != nil {
-			if t, err := idx.config.SlotTimer.SlotToTime(block.Slot); err == nil {
-				timestampMs = uint64(t.UnixMilli()) //nolint:gosec
-			}
+		timestampMs, err := idx.blockTimestamp(block.Slot)
+		if err != nil {
+			idx.fatal(err)
+			return
 		}
 		// Epoch resolution and advance happen inside processBlock (it must
 		// also handle the backfill path, which calls processBlock directly),

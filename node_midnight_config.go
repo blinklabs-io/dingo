@@ -61,7 +61,13 @@ func (n *Node) midnightIndexerConfig() midnightindexer.Config {
 				n.db,
 				startSlot,
 				endSlot,
-				fn,
+				func(block models.Block) error {
+					// ID zero identifies synthetic storage blobs, not chain blocks.
+					if block.ID == 0 {
+						return nil
+					}
+					return fn(block)
+				},
 			)
 		},
 		// Read the applied ledger tip straight from metadata rather than

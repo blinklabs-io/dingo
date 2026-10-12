@@ -80,6 +80,7 @@ var logURIConfigFields = []string{
 	"Mithril.Server.RedirectBaseURL",
 	"OffchainMetadata.IPFSGatewayURL",
 	"TokenRegistry.SourceURL",
+	"TracingEndpoint",
 }
 
 // logProviderConfigFields are Config field paths holding a plugin
@@ -123,6 +124,7 @@ var logPlainConfigFields = []string{
 	"BlockPipelineEnabled",
 	"BlockPipelineValidateEnabled",
 	"BlockProducer",
+	"BlockfetchLowWatermarkEnabled",
 	"CORSAllowedOrigins",
 	"Cache.BlockLRUEntries",
 	"Cache.HotTxEntries",
@@ -188,7 +190,9 @@ var logPlainConfigFields = []string{
 	"KoiosParity.GraceHours",
 	"KoiosParity.Network",
 	"KoiosParity.Strict",
+	"LedgerApplyRowBatchingEnabled",
 	"LedgerCatchupTimeout",
+	"LedgerPrefetchAheadEnabled",
 	"LeiosVoteSigningKeyFile",
 	"LocalStateQueryViewMaxLifetime",
 	"Logging.Format",
@@ -259,6 +263,7 @@ var logPlainConfigFields = []string{
 	"Plugins.Mempool.Provider",
 	"Plugins.Storage.Blob.Provider",
 	"Plugins.Storage.Metadata.Provider",
+	"PlannerStatsRefreshEnabled",
 	"PrivateBindAddr",
 	"PrivatePort",
 	"ReconcileInterval",
@@ -301,6 +306,8 @@ var logPlainConfigFields = []string{
 	"TokenRegistry.UserAgent",
 	"Topology",
 	"Tracing",
+	"TracingServiceName",
+	"TracingSampleRatio",
 	"TracingStdout",
 	"UnsafeFullPotRewardsOnStandardNetworks",
 	"ValidateForgedBlock",

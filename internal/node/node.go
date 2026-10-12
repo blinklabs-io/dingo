@@ -898,6 +898,9 @@ func buildDingoConfig(
 		dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 		dingo.WithTracing(cfg.Tracing),
 		dingo.WithTracingStdout(cfg.TracingStdout),
+		dingo.WithTracingEndpoint(cfg.TracingEndpoint),
+		dingo.WithTracingServiceName(cfg.TracingServiceName),
+		dingo.WithTracingSampleRatio(cfg.TracingSampleRatio),
 		dingo.WithTopologyConfig(config.GetTopologyConfig()),
 		dingo.WithDatabaseWorkerPoolConfig(ledger.DatabaseWorkerPoolConfig{
 			WorkerPoolSize: cfg.DatabaseWorkers,
@@ -1013,11 +1016,19 @@ func buildDingoConfig(
 			forgeEBCap(cfg.ForgeEBMaxBytes, config.DefaultForgeEBMaxBytes),
 		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
+		dingo.WithPlannerStatsRefresh(cfg.PlannerStatsRefreshEnabled),
 		// Parallel block-decode pipeline (decode and validate stages). Not
 		// consensus-affecting; off by default.
 		dingo.WithBlockPipelineEnabled(cfg.BlockPipelineEnabled),
 		dingo.WithBlockPipelineValidateEnabled(
 			cfg.BlockPipelineValidateEnabled,
+		),
+		dingo.WithLedgerPrefetchAheadEnabled(cfg.LedgerPrefetchAheadEnabled),
+		dingo.WithLedgerApplyRowBatchingEnabled(
+			cfg.LedgerApplyRowBatchingEnabled,
+		),
+		dingo.WithBlockfetchLowWatermarkEnabled(
+			cfg.BlockfetchLowWatermarkEnabled,
 		),
 		// CIP-0163 reward-account inactivity expiry (consensus-affecting)
 		dingo.WithDelegatorInactivity(

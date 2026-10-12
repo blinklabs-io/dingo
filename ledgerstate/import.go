@@ -68,6 +68,11 @@ type RawLedgerState struct {
 	// for "the current epoch so far" in isolation. Fees minus ssFee is the
 	// epoch's pre-anchor fee pot; see seedImportedRewardBasis.
 	Fees uint64
+	// Donation is UTxOState.utxosDonation: the treasury donations collected
+	// in Epoch up to and including the anchor block, which the next epoch
+	// boundary moves into the treasury. ImportLedgerState records it as the
+	// epoch's network donations.
+	Donation uint64
 	// UTxOData is the deferred CBOR for the UTxO map.
 	UTxOData cbor.RawMessage
 	// CertStateData is the deferred CBOR for [VState, PState, DState].
@@ -231,6 +236,7 @@ type ParsedCertState struct {
 	Pools                  []ParsedPool
 	PendingPoolRetirements map[uint64][][]byte
 	DReps                  []ParsedDRep
+	DormantEpochs          uint64
 	CommitteeHotKeys       []ParsedCommitteeHotKey
 	CommitteeResignations  []Credential
 }
@@ -337,6 +343,7 @@ type ParsedDRep struct {
 	Deposit     uint64
 	ExpiryEpoch uint64 // epoch when this DRep expires (0 = unknown)
 	Active      bool
+	Delegators  []Credential
 }
 
 // ParsedSnapShots holds the three stake distribution snapshots
@@ -671,6 +678,9 @@ func ImportLedgerState(
 			ctx, slot, txn,
 		); err != nil {
 			return fmt.Errorf("deleting post-anchor network donations: %w", err)
+		}
+		if err := seedImportedEpochDonations(cfg, slot, txn); err != nil {
+			return err
 		}
 		return nil
 	}); err != nil {
@@ -1224,6 +1234,41 @@ func setCheckpoint(ctx context.Context, cfg ImportConfig, phase string) error {
 	return nil
 }
 
+// seedImportedEpochDonations records the snapshot's utxosDonation as the
+// anchor epoch's network donations. The boundary out of that epoch credits
+// the treasury, and seeds RATIFY, from SumNetworkDonationsForEpoch, which
+// otherwise sees only donations this node applied after the anchor.
+//
+// The snapshot total covers every block of the epoch up to the anchor, so it
+// replaces rather than adds to any rows local replay wrote for that epoch
+// before a catch-up import; the post-anchor sweep has already removed the
+// rest.
+func seedImportedEpochDonations(
+	cfg ImportConfig,
+	slot uint64,
+	txn *database.Txn,
+) error {
+	meta := cfg.Database.Metadata()
+	if err := meta.DeleteNetworkDonationsForEpoch(
+		cfg.State.Epoch,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("replacing imported epoch donations: %w", err)
+	}
+	if cfg.State.Donation == 0 {
+		return nil
+	}
+	if err := meta.AddNetworkDonation(
+		slot,
+		cfg.State.Epoch,
+		cfg.State.Donation,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("seeding imported epoch donations: %w", err)
+	}
+	return nil
+}
+
 // importUTxOs streams the UTxO map and imports in batches. Supports
 // both inline UTxO data and file-based UTxO-HD tvar format.
 func importUTxOs(
@@ -1455,6 +1500,13 @@ func importCertState(
 			err,
 		)
 	}
+	if err := cfg.Database.SetImportedDormantDRepEpochs(
+		ctx,
+		certState.DormantEpochs,
+		nil,
+	); err != nil {
+		return 0, nil, fmt.Errorf("importing dormant DRep epochs: %w", err)
+	}
 
 	// Catch-up reconcile: record the snapshot's live cert-state keys (the
 	// registered accounts/pools/DReps at this tip) so the post-import reconcile
@@ -1570,6 +1622,7 @@ func importCertState(
 		certState,
 		snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
 		nil,
+		0,
 	); err != nil {
 		return 0, nil, fmt.Errorf("importing committee authorizations: %w", err)
 	}
@@ -2083,6 +2136,21 @@ func importDReps(
 			AddedSlot:     slot,
 			ExpiryEpoch:   drep.ExpiryEpoch,
 			Active:        drep.Active,
+		}
+		for _, delegator := range drep.Delegators {
+			tag, err := models.CredentialTagFromUint(uint(delegator.Type))
+			if err != nil {
+				return fmt.Errorf(
+					"importing DRep %x delegator credential type %d: %w",
+					drep.Credential.Hash,
+					delegator.Type,
+					err,
+				)
+			}
+			model.Delegators = append(model.Delegators, models.NewStakeCredentialRef(
+				tag,
+				delegator.Hash,
+			))
 		}
 
 		reg := &models.RegistrationDrep{
@@ -4315,6 +4383,7 @@ func persistImportedCommitteeCertificates(
 	certState *ParsedCertState,
 	slot uint64,
 	txn *database.Txn,
+	protocolMajor uint64,
 ) error {
 	if certState == nil ||
 		(len(certState.CommitteeHotKeys) == 0 && len(certState.CommitteeResignations) == 0) {
@@ -4366,7 +4435,8 @@ func persistImportedCommitteeCertificates(
 	tx := importedCommitteeTransaction{hash: hash, certs: certs}
 	return db.SetTransactionMetadataOnly(
 		ctx,
-		&tx, ocommon.Point{Slot: slot, Hash: hash[:]}, 0, map[int]uint64{}, txn,
+		&tx, ocommon.Point{Slot: slot, Hash: hash[:]}, 0, map[int]uint64{},
+		txn, protocolMajor,
 	)
 }
 

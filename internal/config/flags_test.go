@@ -432,6 +432,26 @@ func TestBlockPipelineEnabledEnvBinding(t *testing.T) {
 	}
 }
 
+func TestLedgerPrefetchAheadEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEDGER_PREFETCH_AHEAD_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.LedgerPrefetchAheadEnabled {
+		t.Fatal("expected env var to enable next-block UTxO prefetch")
+	}
+}
+
 func TestBlockPipelineValidateEnabledEnvBinding(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
@@ -1459,6 +1479,26 @@ func TestMinPoolMarginEnvBinding(t *testing.T) {
 	}
 }
 
+func TestLedgerApplyRowBatchingEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.LedgerApplyRowBatchingEnabled {
+		t.Fatal("expected env var to enable batched ledger apply")
+	}
+}
+
 func TestTokenRegistryHeadersLoadFromYAMLAndEnvironment(t *testing.T) {
 	resetGlobalConfig()
 	unsetEnv(t, "DINGO_TOKEN_REGISTRY_HEADER_SECRETS")
@@ -1523,4 +1563,37 @@ func TestHeaderSecretsEnvErrorsOmitValues(t *testing.T) {
 		)
 		require.NotContains(t, err.Error(), "s3cr3t")
 	}
+}
+
+func TestBlockfetchLowWatermarkEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.BlockfetchLowWatermarkEnabled {
+		t.Fatal("expected env var to enable the blockfetch low watermark")
+	}
+}
+
+// Not t.Parallel: LoadConfig reads package-level globalConfig and the test
+// sets environment variables.
+func TestPlannerStatsRefreshDefaultsOnAndHonorsEnvOverride(t *testing.T) {
+	require.True(t, newDefaultConfig().PlannerStatsRefreshEnabled)
+
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLANNER_STATS_REFRESH_ENABLED", "false")
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.False(t, cfg.PlannerStatsRefreshEnabled)
 }

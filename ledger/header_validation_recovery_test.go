@@ -145,7 +145,7 @@ func TestHeaderValidationRecoveryRewindsPastRejectedBlock(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	_, resyncEvents := bus.Subscribe(event.ChainsyncResyncEventType)
 
@@ -232,7 +232,7 @@ func TestLedgerProcessBlocksRecoversReadChainValidationFailure(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	_, resyncEvents := bus.Subscribe(event.ChainsyncResyncEventType)
 
@@ -324,7 +324,7 @@ func TestHeaderValidationRecoveryDeclinesAtOrBehindLedgerTip(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	_, resyncEvents := bus.Subscribe(event.ChainsyncResyncEventType)
 
@@ -415,7 +415,7 @@ func TestHeaderValidationRecoveryYieldsWhenChainSelectionMovedOn(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	_, resyncEvents := bus.Subscribe(event.ChainsyncResyncEventType)
 
@@ -566,7 +566,7 @@ func TestHeaderValidationRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 
 	ls := &LedgerState{
@@ -677,7 +677,7 @@ func newSameSlotRecoveryFixture(t *testing.T) *sameSlotRecoveryFixture {
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	_, resyncEvents := bus.Subscribe(event.ChainsyncResyncEventType)
 
@@ -878,7 +878,7 @@ func TestHeaderValidationRecoveryPenalizesOnlyTheResponsiblePeer(t *testing.T) {
 			}
 			require.NoError(t, db.SetTip(ledgerTip, nil))
 
-			bus := event.NewEventBus(nil, nil)
+			bus := newTestEventBus(t, nil)
 			t.Cleanup(bus.Close)
 			_, resyncEvents := bus.Subscribe(event.ChainsyncResyncEventType)
 			ls := &LedgerState{

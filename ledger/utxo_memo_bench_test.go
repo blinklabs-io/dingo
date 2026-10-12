@@ -318,7 +318,7 @@ func TestUtxoMemoBenchmarkNegativeControls(t *testing.T) {
 		txn := fx.db.Transaction(context.Background(), false)
 		defer txn.Release()
 		view := fx.dingoLS.NewView(txn)
-		missing := shelley.NewShelleyTransactionInput(
+		missing := shelley.MustNewShelleyTransactionInput(
 			"0000000000000000000000000000000000000000000000000000000000000000",
 			0,
 		)

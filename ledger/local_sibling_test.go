@@ -378,7 +378,7 @@ func newSiblingTestBlock(
 					},
 					ProtoVersion: babbage.BabbageProtoVersion{Major: 9},
 				},
-				Signature: siblingTestBytes(64, issuerSeed),
+				Signature: siblingTestBytes(448, issuerSeed),
 			},
 		},
 	}

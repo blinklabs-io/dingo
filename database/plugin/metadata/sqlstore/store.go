@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"regexp"
 	"slices"
 	"sync"
@@ -35,6 +36,8 @@ var savepointNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Config contains dependencies and optional provider capabilities for a Store.
 type Config struct {
+	// GenesisStakingEmpty certifies that the loaded genesis has no initial staking.
+	GenesisStakingEmpty bool
 	// SQLitePath identifies the file opened by the provider, including its
 	// dataDir override. Reconstructing it from the node's global directory
 	// could point introspection clients at a different database. It is empty
@@ -172,24 +175,29 @@ type Store struct {
 	// it nil.
 	committeeAuthPruneLocked func()
 
-	migrations        []migrations.Migration
-	migrationLocker   migrations.Locker
-	diskSize          func() (int64, error)
-	maintenance       func(context.Context) error
-	maintenanceEvery  time.Duration
-	vacuum            func(context.Context) error
-	vacuumEvery       time.Duration
-	backupTo          func(context.Context, string) error
-	restoreFrom       func(context.Context, string) error
-	prepare           func(context.Context) error
-	reset             func(context.Context) error
-	validateBackup    func(context.Context, string) error
-	maintenanceCancel context.CancelFunc
-	maintenanceDone   chan struct{}
-	maintenanceState  atomic.Uint32
-	vacuumCancel      context.CancelFunc
-	vacuumDone        chan struct{}
-	vacuumState       atomic.Uint32
+	migrations          []migrations.Migration
+	genesisStakingEmpty bool
+	migrationLocker     migrations.Locker
+	diskSize            func() (int64, error)
+	maintenance         func(context.Context) error
+	maintenanceEvery    time.Duration
+	vacuum              func(context.Context) error
+	vacuumEvery         time.Duration
+	backupTo            func(context.Context, string) error
+	restoreFrom         func(context.Context, string) error
+	prepare             func(context.Context) error
+	reset               func(context.Context) error
+	validateBackup      func(context.Context, string) error
+	maintenanceCancel   context.CancelFunc
+	maintenanceDone     chan struct{}
+	maintenanceState    atomic.Uint32
+	vacuumCancel        context.CancelFunc
+	vacuumDone          chan struct{}
+	vacuumState         atomic.Uint32
+
+	// tickDelay returns how long a periodic job waits before its next run.
+	// New sets it to jitteredInterval; tests replace it before Start.
+	tickDelay func(time.Duration) time.Duration
 
 	// checkpoint/checkpointEvery back an independent ticker from
 	// maintenance/maintenanceEvery -- see Config.Checkpoint's doc comment for
@@ -219,10 +227,13 @@ type Store struct {
 	closeDone chan struct{}
 	closeErr  error
 
-	// stmtMu and stmts back the prepared-statement cache; see
-	// prepared_stmt.go for the mechanism and correctness argument.
-	stmtMu sync.Mutex
-	stmts  map[string]*sql.Stmt
+	// stmtMu guards stmts, the prepared-statement cache, and the borrow
+	// state that keeps a retired statement open until its callers finish;
+	// see prepared_stmt.go for the mechanism and correctness argument.
+	stmtMu      sync.Mutex
+	stmts       map[string]*sql.Stmt
+	stmtBorrows map[*sql.Stmt]int
+	stmtRetired map[*sql.Stmt]struct{}
 
 	// sumCredentialUtxoStakeCalls counts invocations of
 	// sumCredentialUtxoStake, the per-credential full live-UTxO aggregate
@@ -236,6 +247,7 @@ type Store struct {
 
 	// sqlOperations and sqlQueryDuration are nil when Config.PromRegistry
 	// was nil; see instrumentedQueryer and metrics.go.
+	plannerStats     sqlitePlannerStatsMetrics
 	sqlOperations    *prometheus.CounterVec
 	sqlQueryDuration *prometheus.HistogramVec
 
@@ -297,7 +309,9 @@ func New(config Config) (*Store, error) {
 		committeeAuthRetentionSlots: config.CommitteeAuthRetentionSlots,
 		migrations:                  config.Migrations,
 		migrationLocker:             config.MigrationLocker,
+		genesisStakingEmpty:         config.GenesisStakingEmpty,
 		diskSize:                    config.DiskSize,
+		tickDelay:                   jitteredInterval,
 		maintenance:                 config.Maintenance,
 		maintenanceEvery:            config.MaintenanceInterval,
 		vacuum:                      config.Vacuum,
@@ -310,12 +324,16 @@ func New(config Config) (*Store, error) {
 		reset:                       config.Reset,
 		validateBackup:              config.ValidateBackup,
 		closeDone:                   make(chan struct{}),
+		plannerStats:                newPlannerStatsMetrics(config.PromRegistry),
 		sqlOperations: newSQLOperationsCounter(
 			config.PromRegistry,
 		),
 		sqlQueryDuration: newSQLQueryDurationHistogram(
 			config.PromRegistry,
 		),
+	}
+	if store.readDB != store.writeDB {
+		store.readDB.SetConnMaxLifetime(readConnMaxLifetime)
 	}
 	// Registered against store.WritePoolStats/ReadPoolStats (not
 	// config.WriteDB.Stats/config.ReadDB.Stats directly) so every backend
@@ -446,12 +464,15 @@ func (s *Store) Start(ctx context.Context) error {
 	}
 	if len(s.migrations) > 0 {
 		runner := migrations.Runner{
-			DB:       s.writeDB,
-			Dialect:  s.dialect.Name(),
-			Registry: s.migrations,
-			Locker:   s.migrationLocker,
-			Logger:   s.logger,
-			Rebind:   s.dialect.Rebind,
+			// A prior binary may have committed the current schema before its
+			// later provenance gate failed, so this must also run at target.
+			BeforeUpgrade: s.preflightRewardStakeUpgrade,
+			DB:            s.writeDB,
+			Dialect:       s.dialect.Name(),
+			Registry:      s.migrations,
+			Locker:        s.migrationLocker,
+			Logger:        s.logger,
+			Rebind:        s.dialect.Rebind,
 		}
 		if err := runner.Run(ctx); err != nil {
 			return fmt.Errorf("sqlstore: metadata upgrade: %w", err)
@@ -646,47 +667,83 @@ func (s *Store) startMaintenance() {
 	s.maintenanceDone = make(chan struct{})
 	go func() {
 		defer close(s.maintenanceDone)
-		ticker := time.NewTicker(s.maintenanceEvery)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
+		for s.waitForTick(ctx, "maintenance", s.maintenanceEvery) {
+			// Admission is an atomic state transition. Close moves the
+			// state to closed before cancelling the callback context, so a
+			// racing tick cannot start maintenance against closing pools.
+			if !s.maintenanceState.CompareAndSwap(0, 1) {
 				return
-			case <-ticker.C:
-				// Admission is an atomic state transition. Close moves the
-				// state to closed before cancelling the callback context, so a
-				// racing tick cannot start maintenance against closing pools.
-				if !s.maintenanceState.CompareAndSwap(0, 1) {
-					return
-				}
-				if ctx.Err() != nil || s.closed.Load() {
-					s.maintenanceState.CompareAndSwap(1, 0)
-					return
-				}
-				started := time.Now()
-				err := s.runMaintenance(ctx)
+			}
+			if ctx.Err() != nil || s.closed.Load() {
 				s.maintenanceState.CompareAndSwap(1, 0)
-				if err != nil {
-					if ctx.Err() == nil {
-						s.logger.Error(
-							"metadata database maintenance failed",
-							"dialect", s.dialect.Name(),
-							"duration", time.Since(started),
-							"error", err,
-						)
-					} else {
-						return
-					}
-					continue
+				return
+			}
+			started := time.Now()
+			err := s.runMaintenance(ctx)
+			s.maintenanceState.CompareAndSwap(1, 0)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
 				}
-				s.logger.Debug(
-					"metadata database maintenance complete",
+				s.logger.Error(
+					"metadata database maintenance failed",
 					"dialect", s.dialect.Name(),
 					"duration", time.Since(started),
+					"error", err,
 				)
+				continue
 			}
+			s.logger.Debug(
+				"metadata database maintenance complete",
+				"dialect", s.dialect.Name(),
+				"duration", time.Since(started),
+			)
 		}
 	}()
+}
+
+// jitteredInterval returns every plus up to a tenth of it. A fixed cadence
+// measured from process start lands on the same wall-clock offset every day,
+// so it would meet the same recurring network activity every day.
+func jitteredInterval(every time.Duration) time.Duration {
+	const maxDuration = time.Duration(1<<63 - 1)
+	jitterMax := min(every/10, maxDuration-every)
+	return every + rand.N(jitterMax+1) //nolint:gosec // schedule jitter, not a secret
+}
+
+// postponeWarnEvery is how many consecutive postponements pass between
+// warnings; at the one-minute retry delay it is one warning per ten minutes.
+const postponeWarnEvery = 10
+
+// waitForTick blocks until a periodic job is due and the shared pool is
+// quiet, and returns false once ctx ends. Any checked-out connection delays
+// the job, including read and bulk-load connections on shared pools.
+func (s *Store) waitForTick(
+	ctx context.Context,
+	job string,
+	every time.Duration,
+) bool {
+	delay := s.tickDelay(every)
+	for postponed := 1; ; postponed++ {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+		if s.writeDB.Stats().InUse == 0 {
+			return true
+		}
+		if postponed%postponeWarnEvery == 0 {
+			s.logger.Warn(
+				"metadata database job postponed while the write pool is busy",
+				"job", job,
+				"postponements", postponed,
+			)
+		}
+		delay = s.tickDelay(min(every, time.Minute))
+	}
 }
 
 func (s *Store) runMaintenance(ctx context.Context) error {
@@ -720,42 +777,34 @@ func (s *Store) startVacuumTicker() {
 	s.vacuumDone = make(chan struct{})
 	go func() {
 		defer close(s.vacuumDone)
-		ticker := time.NewTicker(s.vacuumEvery)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
+		for s.waitForTick(ctx, "vacuum", s.vacuumEvery) {
+			if !s.vacuumState.CompareAndSwap(0, 1) {
 				return
-			case <-ticker.C:
-				if !s.vacuumState.CompareAndSwap(0, 1) {
-					return
-				}
-				if ctx.Err() != nil || s.closed.Load() {
-					s.vacuumState.CompareAndSwap(1, 0)
-					return
-				}
-				started := time.Now()
-				err := s.vacuum(ctx)
+			}
+			if ctx.Err() != nil || s.closed.Load() {
 				s.vacuumState.CompareAndSwap(1, 0)
-				if err != nil {
-					if ctx.Err() == nil {
-						s.logger.Error(
-							"metadata database vacuum failed",
-							"dialect", s.dialect.Name(),
-							"duration", time.Since(started),
-							"error", err,
-						)
-					} else {
-						return
-					}
-					continue
+				return
+			}
+			started := time.Now()
+			err := s.vacuum(ctx)
+			s.vacuumState.CompareAndSwap(1, 0)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
 				}
-				s.logger.Debug(
-					"metadata database vacuum complete",
+				s.logger.Error(
+					"metadata database vacuum failed",
 					"dialect", s.dialect.Name(),
 					"duration", time.Since(started),
+					"error", err,
 				)
+				continue
 			}
+			s.logger.Debug(
+				"metadata database vacuum complete",
+				"dialect", s.dialect.Name(),
+				"duration", time.Since(started),
+			)
 		}
 	}()
 }
@@ -1041,11 +1090,15 @@ func (r *readReservation) Begin() types.Txn {
 		r.releaseConn()
 		return &sqlTxn{owner: r.owner, ctx: r.ctx, beginErr: err}
 	}
+	// readOnly marks tx as running on the read pool, which
+	// readCanUseWriteCache relies on: statements prepared on the write pool
+	// cannot be derived into it.
 	return &sqlTxn{
-		owner:   r.owner,
-		tx:      tx,
-		ctx:     r.ctx,
-		release: r.releaseConn,
+		owner:    r.owner,
+		tx:       tx,
+		ctx:      r.ctx,
+		readOnly: true,
+		release:  r.releaseConn,
 	}
 }
 
@@ -1209,9 +1262,13 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 	switch operation {
 	case "SAVEPOINT":
 		if t.batchSavepoints == nil {
-			t.batchSavepoints = make(map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint)
+			t.batchSavepoints = make(
+				map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint,
+			)
 		}
-		checkpoint := make(map[*transactionBatchAccumulator]transactionBatchCheckpoint)
+		checkpoint := make(
+			map[*transactionBatchAccumulator]transactionBatchCheckpoint,
+		)
 		for accumulator := range t.batchBefore {
 			checkpoint[accumulator] = accumulator.checkpoint()
 		}
@@ -1328,7 +1385,9 @@ func (t *sqlTxn) bindBatch(accumulator *transactionBatchAccumulator) error {
 		return types.ErrNilTxn
 	}
 	if t.batchBefore == nil {
-		t.batchBefore = make(map[*transactionBatchAccumulator]transactionBatchCheckpoint)
+		t.batchBefore = make(
+			map[*transactionBatchAccumulator]transactionBatchCheckpoint,
+		)
 	}
 	if _, exists := t.batchBefore[accumulator]; exists {
 		return nil

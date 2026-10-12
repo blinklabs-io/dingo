@@ -92,7 +92,7 @@ func TestQueryViewIsolatedFromLaterCommits(t *testing.T) {
 	ls, db := newDiskTestLedger(t)
 	addr := queryViewTestAddress(t)
 	txId := seedBabbageUtxo(t, db, 0xC1, 0, addr, 5_000_000)
-	txIn := ledger.NewShelleyTransactionInput(hex.EncodeToString(txId), 0)
+	txIn := ledger.MustNewShelleyTransactionInput(hex.EncodeToString(txId), 0)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(1_000, repeatedBytes(32, 0x0B)),
 	}, nil))
@@ -224,7 +224,7 @@ func TestQueryViewPinnedPointSurvivesRollback(t *testing.T) {
 		Point: ocommon.NewPoint(200, bytes.Repeat([]byte{0xEF}, 32)),
 	}, nil))
 
-	txIn := ledger.NewShelleyTransactionInput(hex.EncodeToString(txId), 0)
+	txIn := ledger.MustNewShelleyTransactionInput(hex.EncodeToString(txId), 0)
 	query := shelleyBlockQuery(&olocalstatequery.ShelleyUtxoByTxinQuery{
 		TxIns: []ledger.ShelleyTransactionInput{txIn},
 	})

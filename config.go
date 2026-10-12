@@ -208,6 +208,9 @@ type Config struct {
 	// Programmatic API-only fields (not in YAML/env):
 	tracing             bool
 	tracingStdout       bool
+	tracingEndpoint     string
+	tracingServiceName  string
+	tracingSampleRatio  float64
 	ledgerPeerTarget    int
 	leiosPipelineTiming *leios.PipelineTiming
 	// Runtime-only, programmatic offchain metadata config (preserves HTTPClient)
@@ -279,6 +282,9 @@ type Config struct {
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
+	ledgerPrefetchAheadEnabled                                                          bool
+	ledgerApplyRowBatchingEnabled                                                       bool
+	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
@@ -709,6 +715,8 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			RunMode:              internalconfig.RunModeServe,
 			ValidateHistorical:   true,
 			StrictUtxoValidation: true,
+			TracingServiceName:   "dingo",
+			TracingSampleRatio:   1,
 			// Fail closed: self-validate locally-forged blocks before
 			// adoption and diffusion unless an operator explicitly opts
 			// out. Mirrors internalconfig's own package-level default
@@ -724,6 +732,10 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			Logging:             internalconfig.DefaultLoggingConfig(),
 			Midnight:            internalconfig.DefaultMidnightConfig(),
 			CORSAllowedOrigins:  []string{"*"},
+
+			// SQLite planner statistics stay current unless an operator
+			// opts out; see internalconfig.Config.PlannerStatsRefreshEnabled.
+			PlannerStatsRefreshEnabled: true,
 			Plugins: internalconfig.PluginsConfig{
 				Storage: internalconfig.StoragePluginsConfig{
 					Blob: hostplugin.Selection{
@@ -776,7 +788,9 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		},
 		// Default logger will throw away logs
 		// We do this so we don't have to add guards around every log operation
-		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		tracingServiceName: "dingo",
+		tracingSampleRatio: 1,
 	}
 	// Apply options
 	for _, opt := range opts {
@@ -787,6 +801,11 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 }
 
 func (c *Config) syncCompatFields() {
+	// A collector endpoint turns tracing on. The tracing flag alone still
+	// enables it with the OTEL_EXPORTER_OTLP_* destination.
+	if c.tracingEndpoint != "" {
+		c.tracing = true
+	}
 	c.cfg.ApplyRunModeOverrides(c.cfg.RunMode)
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
@@ -914,6 +933,9 @@ func (c *Config) syncCompatFields() {
 	c.forgeEBSelectionReserve = c.cfg.ForgeEBSelectionReserve
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
+	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
+	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
+	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
@@ -1089,6 +1111,9 @@ func NewConfigFromInternal(
 		chainsyncStallTimeout: chainsyncDur,
 		tracing:               cfg.Tracing,
 		tracingStdout:         cfg.TracingStdout,
+		tracingEndpoint:       cfg.TracingEndpoint,
+		tracingServiceName:    cfg.TracingServiceName,
+		tracingSampleRatio:    cfg.TracingSampleRatio,
 	}
 	c.syncCompatFields()
 	return c, nil
@@ -1243,6 +1268,27 @@ func WithTopologyConfig(
 func WithTracing(tracing bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tracing = tracing
+	}
+}
+
+// WithTracingEndpoint sets the OTLP HTTP collector URL and enables tracing. Empty leaves tracing to WithTracing and the destination to the OTEL_EXPORTER_OTLP_* env vars.
+func WithTracingEndpoint(endpoint string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tracingEndpoint = endpoint
+	}
+}
+
+// WithTracingServiceName sets the service.name resource attribute on exported spans.
+func WithTracingServiceName(name string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tracingServiceName = name
+	}
+}
+
+// WithTracingSampleRatio sets the fraction of new traces sampled, from 0 to 1.
+func WithTracingSampleRatio(ratio float64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tracingSampleRatio = ratio
 	}
 }
 
@@ -1715,6 +1761,23 @@ func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 	}
 }
 
+// WithPlannerStatsRefresh controls SQLite's incremental planner-statistics
+// maintenance, run before block processing starts and after each epoch
+// rollover. Enabled by default; pass false only as an escape hatch. Other
+// metadata backends are unaffected.
+func WithPlannerStatsRefresh(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.PlannerStatsRefreshEnabled = enabled
+	}
+}
+
+// PlannerStatsRefreshEnabled reports whether SQLite planner-statistics
+// maintenance is on. A Config without an internal config, as hand-built test
+// configs are, leaves it off.
+func (c *Config) PlannerStatsRefreshEnabled() bool {
+	return c.cfg != nil && c.cfg.PlannerStatsRefreshEnabled
+}
+
 // WithBlockPipelineEnabled enables the parallel block-decode pipeline for the
 // chainsync replay loop (phase 1 of the pipeline). Not consensus-affecting; off
 // by default. See LedgerStateConfig.BlockPipelineEnabled.
@@ -1731,6 +1794,39 @@ func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
 func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BlockPipelineValidateEnabled = enabled
+	}
+}
+
+// WithLedgerPrefetchAheadEnabled prefetches the next block's input UTxOs from a
+// read-only transaction while the current block applies, for blocks under
+// normal validation only. Not consensus-affecting; off by default. See
+// LedgerStateConfig.LedgerPrefetchAheadEnabled.
+func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerPrefetchAheadEnabled = enabled
+	}
+}
+
+// WithLedgerApplyRowBatchingEnabled writes the accumulated deltas of blocks
+// that are not validated through the metadata store's batched path in core
+// storage mode, as API storage mode already does. Validated blocks, Leios
+// endorser-block applies, and batches applied with closure context keep the
+// per-transaction path in every storage mode, API mode included. Off by
+// default; the stored state is identical either way. See
+// LedgerStateConfig.ApplyRowBatchingEnabled.
+func WithLedgerApplyRowBatchingEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerApplyRowBatchingEnabled = enabled
+	}
+}
+
+// WithBlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
+// range of headers is queued while the node is far from the peer tip, instead
+// of waiting for four ranges. The header queue capacity is unchanged. Not
+// consensus-affecting; off by default. See LedgerStateConfig.BlockfetchLowWatermarkEnabled.
+func WithBlockfetchLowWatermarkEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BlockfetchLowWatermarkEnabled = enabled
 	}
 }
 
@@ -2599,6 +2695,24 @@ func (c *Config) BlockPipelineValidateEnabled() bool {
 	return c.cfg.BlockPipelineValidateEnabled
 }
 
+// LedgerPrefetchAheadEnabled returns whether next-block UTxO prefetching is
+// enabled.
+func (c *Config) LedgerPrefetchAheadEnabled() bool {
+	return c.cfg.LedgerPrefetchAheadEnabled
+}
+
+// LedgerApplyRowBatchingEnabled returns whether blocks that are not validated
+// are applied through the batched metadata write path.
+func (c *Config) LedgerApplyRowBatchingEnabled() bool {
+	return c.cfg.LedgerApplyRowBatchingEnabled
+}
+
+// BlockfetchLowWatermarkEnabled returns whether the far-from-tip blockfetch
+// low watermark is enabled.
+func (c *Config) BlockfetchLowWatermarkEnabled() bool {
+	return c.cfg.BlockfetchLowWatermarkEnabled
+}
+
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.
 func (c *Config) LeiosVoteSigningKeyFile() string {
 	return c.cfg.LeiosVoteSigningKeyFile
@@ -2652,6 +2766,22 @@ func (c *Config) Tracing() bool {
 // TracingStdout returns whether tracing output goes to stdout.
 func (c *Config) TracingStdout() bool {
 	return c.tracingStdout
+}
+
+// TracingEndpoint returns the OTLP HTTP collector URL, or empty to use the
+// OTEL_EXPORTER_OTLP_* env vars.
+func (c *Config) TracingEndpoint() string {
+	return c.tracingEndpoint
+}
+
+// TracingServiceName returns the service.name resource attribute on spans.
+func (c *Config) TracingServiceName() string {
+	return c.tracingServiceName
+}
+
+// TracingSampleRatio returns the fraction of new traces sampled.
+func (c *Config) TracingSampleRatio() float64 {
+	return c.tracingSampleRatio
 }
 
 // LedgerPeerTarget returns the target number of ledger peers.

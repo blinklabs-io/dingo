@@ -339,6 +339,9 @@ func (s *Store) GetAccountByCredential(
 		return nil, err
 	}
 	q := s.operationalQueries(db)
+	if s.readCanUseWriteCache(txn) {
+		q = s.operationalQueriesCached(db)
+	}
 	params := sqlitequery.GetActiveAccountByCredentialParams{
 		CredentialTag: int64(credentialTag),
 		StakingKey:    stakeKey,

@@ -1199,6 +1199,9 @@ func TestHeaderVerificationEpochRejectsPastForecastBeforeCacheAdvance(
 	_, err = ls.headerVerificationEpoch(context.Background(), horizonSlot, true)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, hardfork.ErrPastHorizon)
+	pastHorizon := createTestBlockWithNonceAtSlots(t, [32]byte{92}, bytes.Repeat([]byte{0x01}, lcommon.Blake2b256Size), horizonSlot, horizonSlot+100, make([]byte, lcommon.Blake2b256Size), tamperNone)
+	err = ls.ValidatePeerChainSelectionHeaderCrypto(ouroboros.ConnectionId{}, pastHorizon.block.Header())
+	require.ErrorIs(t, err, ErrHeaderBeyondForecastHorizon)
 	assert.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
 		"past-horizon rejection must happen before forecast cache mutation")
 }
@@ -3269,7 +3272,7 @@ func captureLiveMarkSnapshot(
 ) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	eventBus := event.NewEventBus(nil, logger)
+	eventBus := newTestEventBus(t, logger)
 	t.Cleanup(eventBus.Close)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -6965,6 +6968,20 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	require.Len(t, pathHeaders, 2)
 	require.Equal(t, forkHeader.block.Hash(), pathHeaders[0].Hash())
 	require.Equal(t, target.block.Hash(), pathHeaders[1].Hash())
+	cachedNextNumber := target.block.BlockNumber() + 1
+	cachedNext := createTestBlockWithNonceAtSlotsAndBlockNumber(t, [32]byte{93}, forkEpochNonce, targetEpochStart+10, targetEpochStart+110, target.block.Hash().Bytes(), &cachedNextNumber, tamperNone)
+	lookupCalls := 0
+	ls.config.PeerHeaderLookupFunc = func(ouroboros.ConnectionId, []byte) (ChainsyncEvent, []byte, bool) {
+		lookupCalls++
+		return ChainsyncEvent{}, nil, false
+	}
+	cachedAncestor, cachedHeaders, cachedFound, cachedErr := ls.peerHeaderForkPath(ouroboros.ConnectionId{}, cachedNext.block.Header())
+	require.NoError(t, cachedErr)
+	require.True(t, cachedFound)
+	require.Equal(t, anchorPoint, cachedAncestor)
+	require.Len(t, cachedHeaders, 3)
+	require.Zero(t, lookupCalls, "a direct extension must reuse its resolved ancestry")
+	ls.config.PeerHeaderLookupFunc = peerLookup(forkHeader)
 
 	peerNonce, peerEpoch, fork, nonceErr :=
 		ls.peerChainSelectionEpochNonce(
@@ -7200,6 +7217,18 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	)
 	require.Error(t, twoBoundaryErr)
 	require.True(t, IsHeaderVerificationWithheld(twoBoundaryErr))
+	// The same epoch span extends the held tip when it links to lateAnchor.
+	ls.removePeerForkNoncePrefix(connIdKey(ouroboros.ConnectionId{}))
+	ls.config.PeerHeaderLookupFunc = peerLookup(lateAnchor)
+	extensionNumber := lateAnchor.block.BlockNumber() + 1
+	extension := createTestBlockWithNonceAtSlotsAndBlockNumber(t, [32]byte{88}, ls.epochCache[2].Nonce, 2*targetEpochStart, 2*targetEpochStart+100, lateAnchor.block.Hash().Bytes(), &extensionNumber, tamperNone)
+	extensionErr := ls.ValidatePeerChainSelectionHeaderCrypto(ouroboros.ConnectionId{}, extension.block.Header())
+	require.True(t, IsHeaderVerificationDeferred(extensionErr))
+	require.False(t, IsHeaderVerificationWithheld(extensionErr))
+	pastHorizonFork := createTestBlockWithNonceAtSlotsAndBlockNumber(t, [32]byte{94}, sourceNonce, 1_000_000, 1_000_100, anchorPoint.Hash, &forkBlockNumber, tamperNone)
+	pastHorizonForkErr := ls.ValidatePeerChainSelectionHeaderCrypto(ouroboros.ConnectionId{}, pastHorizonFork.block.Header())
+	require.ErrorIs(t, pastHorizonForkErr, ErrHeaderBeyondForecastHorizon)
+
 }
 
 func TestPeerChainSelectionEpochNonceUsesSeededShelleyBoundaryNonce(

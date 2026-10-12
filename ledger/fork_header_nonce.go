@@ -29,6 +29,12 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+type peerForkPathPrefix struct {
+	tip      ocommon.Point
+	ancestor models.Block
+	headers  []gledger.BlockHeader
+}
+
 type peerForkNoncePrefix struct {
 	sourceEpoch uint64
 	cutoff      uint64
@@ -64,6 +70,9 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 			header.SlotNumber(),
 		)
 	}
+	if _, err := ls.headerVerificationEpoch(context.Background(), header.SlotNumber(), false); err != nil {
+		return nil, models.Epoch{}, false, err
+	}
 	if snapshot == nil {
 		return nil, models.Epoch{}, false, fmt.Errorf(
 			"%w: consensus snapshot is unavailable",
@@ -96,6 +105,9 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 		return cloneNonce(targetEpoch.Nonce), targetEpoch, true, nil
 	}
 	if targetEpoch.EpochId != sourceEpoch.EpochId+1 {
+		if tip := ls.chain.Tip().Point; tip.Slot == ancestor.Slot && bytes.Equal(tip.Hash, ancestor.Hash) {
+			return nil, models.Epoch{}, false, errHeaderVerificationDeferred
+		}
 		return nil, models.Epoch{}, false, fmt.Errorf(
 			"%w: candidate fork spans epoch %d to %d",
 			ErrHeaderVerificationWithheld,
@@ -307,6 +319,7 @@ func (ls *LedgerState) removePeerForkNoncePrefix(key string) {
 	ls.forkHeaderNonceCacheMutex.Lock()
 	defer ls.forkHeaderNonceCacheMutex.Unlock()
 	delete(ls.forkHeaderNonceCache, key)
+	delete(ls.forkHeaderPathCache, key)
 }
 
 func (ls *LedgerState) verifyByronTransitionAncestry(
@@ -358,6 +371,22 @@ func (ls *LedgerState) peerHeaderForkPath(
 	if ls.chain == nil || ls.config.PeerHeaderLookupFunc == nil {
 		return ocommon.Point{}, nil, false, nil
 	}
+	tip := ls.chain.Tip().Point
+	key := connIdKey(connId)
+	ls.forkHeaderNonceCacheMutex.Lock()
+	cached, cachedOK := ls.forkHeaderPathCache[key]
+	ls.forkHeaderNonceCacheMutex.Unlock()
+	if cachedOK && cached.tip.Slot == tip.Slot && bytes.Equal(cached.tip.Hash, tip.Hash) &&
+		len(cached.headers) > 0 && len(cached.headers) < ls.peerHeaderHistoryLimit() &&
+		bytes.Equal(cached.headers[len(cached.headers)-1].Hash().Bytes(), header.PrevHash().Bytes()) {
+		parent := headerOnlyBlock{header: cached.headers[len(cached.headers)-1], peerRelative: true}
+		if err := validateBlockOrder(headerOnlyBlock{header: header, peerRelative: true}, envelopeParentFromBlock(parent), byronEpochSlots(ls.config.CardanoNodeConfig)); err != nil {
+			return ocommon.Point{}, nil, false, err
+		}
+		path := append(slices.Clone(cached.headers), header)
+		ls.storePeerForkPathPrefix(key, tip, cached.ancestor, path)
+		return ocommon.NewPoint(cached.ancestor.Slot, cached.ancestor.Hash), path, true, nil
+	}
 	pathReversed := []gledger.BlockHeader{header}
 	prevHash := append([]byte(nil), header.PrevHash().Bytes()...)
 	visited := map[string]struct{}{string(header.Hash().Bytes()): {}}
@@ -376,6 +405,7 @@ func (ls *LedgerState) peerHeaderForkPath(
 				); err != nil {
 					return ocommon.Point{}, nil, false, err
 				}
+				ls.storePeerForkPathPrefix(key, tip, block, pathReversed)
 				return point, pathReversed, true, nil
 			}
 		} else if !errors.Is(err, models.ErrBlockNotFound) {
@@ -392,7 +422,7 @@ func (ls *LedgerState) peerHeaderForkPath(
 		}
 		visited[key] = struct{}{}
 		if remaining == 0 {
-			return ocommon.Point{}, nil, false, nil
+			return ocommon.Point{}, nil, false, errHeaderVerificationDeferred
 		}
 		event, nextPrevHash, ok := ls.config.PeerHeaderLookupFunc(
 			connId,
@@ -410,6 +440,15 @@ func (ls *LedgerState) peerHeaderForkPath(
 		pathReversed = append(pathReversed, event.BlockHeader)
 		prevHash = append(prevHash[:0], nextPrevHash...)
 	}
+}
+
+func (ls *LedgerState) storePeerForkPathPrefix(key string, tip ocommon.Point, ancestor models.Block, headers []gledger.BlockHeader) {
+	ls.forkHeaderNonceCacheMutex.Lock()
+	defer ls.forkHeaderNonceCacheMutex.Unlock()
+	if ls.forkHeaderPathCache == nil {
+		ls.forkHeaderPathCache = make(map[string]peerForkPathPrefix)
+	}
+	ls.forkHeaderPathCache[key] = peerForkPathPrefix{tip: tip, ancestor: ancestor, headers: headers}
 }
 
 func (ls *LedgerState) validatePeerHeaderPath(

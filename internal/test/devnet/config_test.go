@@ -60,8 +60,10 @@ func TestLeiosSpecActivatesDijkstraAtGenesis(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg.DijkstraHardForkAtEpoch)
 	require.Zero(t, *cfg.DijkstraHardForkAtEpoch)
-	require.Equal(t, uint64(120), cfg.EpochLength)
+	require.Equal(t, uint64(300), cfg.EpochLength)
 	require.Equal(t, 500*time.Millisecond, cfg.SlotDuration())
+	require.Equal(t, uint64(3), cfg.SecurityParam)
+	require.Equal(t, uint64(240), cfg.NonceStabilityWindowSlots())
 }
 
 // The accelerated specs exist to make a full scenario fit the reference
@@ -151,7 +153,7 @@ func launchedTxPumpWindow(t *testing.T, script string, args ...string) uint64 {
 	t.Helper()
 	result := runFakeDevnetScript(t, script, 0, false, map[string]string{
 		"DEVNET_TXPUMP_CONFIRMATION_SLOTS": "999999",
-	}, false, args...)
+	}, args...)
 	require.Equal(t, 0, result.exitCode, result.output)
 	matches := regexp.MustCompile(`(?m)^TXPUMP_WINDOW=(\d+)$`).
 		FindAllStringSubmatch(result.dockerLog, -1)
