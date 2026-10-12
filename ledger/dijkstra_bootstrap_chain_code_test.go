@@ -86,7 +86,7 @@ func TestDijkstraBootstrapWitnessChainCodeLength(t *testing.T) {
 				pool := newDijkstraTestMempool(t, fx.ls)
 				require.ErrorContains(
 					t,
-					pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), txCbor),
+					pool.AddTransaction(context.Background(), uint(gdijkstra.TxTypeDijkstra), txCbor),
 					bootstrapChainCodeError,
 				)
 				require.Empty(t, pool.Transactions())
@@ -128,7 +128,7 @@ func TestDijkstraBootstrapWitnessChainCodeLength(t *testing.T) {
 		pool := newDijkstraTestMempool(t, fx.ls)
 		require.NoError(
 			t,
-			pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), txCbor),
+			pool.AddTransaction(context.Background(), uint(gdijkstra.TxTypeDijkstra), txCbor),
 		)
 		require.Len(t, pool.Transactions(), 1)
 

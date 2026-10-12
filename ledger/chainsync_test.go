@@ -1613,9 +1613,10 @@ func TestBatchDoneTransportRangeErrKeepsHeadersAcrossLargeTipGap(
 // dispatch on the returned channel.
 func requestIdTestLedger(
 	t *testing.T,
-	connId ouroboros.ConnectionId,
+	connIds ...ouroboros.ConnectionId,
 ) (*LedgerState, <-chan uint64, []lcommon.Blake2b256) {
 	t.Helper()
+	require.NotEmpty(t, connIds)
 	headerCount := BlockfetchBatchSize + 50
 	testChain, hashes := buildDeepCatchupChain(t, headerCount)
 	dispatched := make(chan uint64, 16)
@@ -1630,7 +1631,7 @@ func requestIdTestLedger(
 				_ ocommon.Point,
 				_ ocommon.Point,
 			) (uint64, error) {
-				require.Equal(t, connId, gotConnId)
+				require.Contains(t, connIds, gotConnId)
 				mu.Lock()
 				nextId++
 				id := nextId
@@ -1752,7 +1753,7 @@ func TestBlockfetchRefusedPromotionKeepsQueuedRequestReserved(
 // TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest covers the
 // force-release side: a timeout teardown releases the active and pre-queued
 // requests' reservations while both are still outstanding with the peer and
-// redispatches on the same connection. Their late terminal events must not
+// redispatches on an alternate connection. Their late terminal events must not
 // release the replacement requests' reservations, and the timed-out active
 // request's terminal event must not open the discard latch armed for the
 // pre-queued request, whose blocks would then be accepted as the
@@ -1763,7 +1764,16 @@ func TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest(
 	t.Parallel()
 
 	connId := testChainsyncConnId(6321, 3001)
-	ls, dispatched, hashes := requestIdTestLedger(t, connId)
+	retryConnId := testChainsyncConnId(6321, 3002)
+	ls, dispatched, hashes := requestIdTestLedger(t, connId, retryConnId)
+	ls.config.SelectBlockfetchRetryPeerFunc = func(
+		excluded []ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ time.Duration,
+	) (ouroboros.ConnectionId, bool, bool) {
+		require.Equal(t, []ouroboros.ConnectionId{connId}, excluded)
+		return retryConnId, true, true
+	}
 
 	ls.chainsyncBlockfetchMutex.Lock()
 	require.NoError(t, ls.startQueuedBlockfetchLocked(connId, nil))
@@ -1774,10 +1784,10 @@ func TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest(
 	receiveDispatches(t, dispatched, 3, 4)
 
 	ls.chainsyncBlockfetchMutex.Lock()
-	require.Equal(t, 2, blockfetchReservationsLocked(ls, connId))
+	require.Equal(t, 2, blockfetchReservationsLocked(ls, retryConnId))
 	replacement := append(
 		[]chan struct{}(nil),
-		ls.blockfetchRequestsInFlight[connIdKey(connId)]...,
+		ls.blockfetchRequestsInFlight[connIdKey(retryConnId)]...,
 	)
 	for _, id := range []uint64{1, 2} {
 		require.NoError(t, ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
@@ -1788,7 +1798,7 @@ func TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest(
 		assert.Equal(
 			t,
 			2,
-			blockfetchReservationsLocked(ls, connId),
+			blockfetchReservationsLocked(ls, retryConnId),
 			"late terminal event for force-released request %d released "+
 				"a replacement request's reservation",
 			id,
@@ -13982,6 +13992,13 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 		},
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			SelectBlockfetchRetryPeerFunc: func(
+				[]ouroboros.ConnectionId,
+				ocommon.Point,
+				time.Duration,
+			) (ouroboros.ConnectionId, bool, bool) {
+				return connId2, true, true
+			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &connId2
 			},
@@ -14075,6 +14092,13 @@ func TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection(
 		selectedBlockfetchConnId: connId1,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			SelectBlockfetchRetryPeerFunc: func(
+				[]ouroboros.ConnectionId,
+				ocommon.Point,
+				time.Duration,
+			) (ouroboros.ConnectionId, bool, bool) {
+				return connId2, true, true
+			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &connId2
 			},
@@ -14157,9 +14181,29 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 	ls := &LedgerState{
 		chain:                    testChain,
 		activeBlockfetchConnId:   connId1,
-		selectedBlockfetchConnId: connId3,
+		selectedBlockfetchConnId: connId1,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			SelectBlockfetchRetryPeerFunc: func(
+				excluded []ouroboros.ConnectionId,
+				_ ocommon.Point,
+				_ time.Duration,
+			) (ouroboros.ConnectionId, bool, bool) {
+				switch len(excluded) {
+				case 1:
+					assert.Equal(t, []ouroboros.ConnectionId{connId1}, excluded)
+					return connId2, true, true
+				case 2:
+					assert.Equal(
+						t,
+						[]ouroboros.ConnectionId{connId1, connId2},
+						excluded,
+					)
+					return connId3, true, true
+				default:
+					return ouroboros.ConnectionId{}, false, true
+				}
+			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &connId2
 			},
@@ -14189,6 +14233,59 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 	assert.Equal(t, connId3, ls.activeBlockfetchConnId)
 	require.NotNil(t, ls.chainsyncBlockfetchReadyChan)
 	assert.Equal(t, 1, testChain.HeaderCount())
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
+func TestHandleBlockfetchTimeoutLocked_RetryFailureWithoutHolderResyncs(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _ := newForkExtensionRestartFixture(t)
+	stalled := testChainsyncConnId(6000, 3001)
+	retry := testChainsyncConnId(6000, 3002)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	ls.activeBlockfetchConnId = stalled
+	ls.config.EventBus = bus
+	ls.config.SelectBlockfetchRetryPeerFunc = func(
+		excluded []ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ time.Duration,
+	) (ouroboros.ConnectionId, bool, bool) {
+		if len(excluded) == 1 {
+			return retry, true, true
+		}
+		return ouroboros.ConnectionId{}, false, true
+	}
+	ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId,
+		ocommon.Point,
+		ocommon.Point,
+	) (uint64, error) {
+		return 0, errors.New("retry failed")
+	}
+
+	var pending pendingPublishes
+	handleBlockfetchTimeoutForTest(ls, stalled, &pending)
+	pending.flush()
+	evt := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"resync after the last retry holder fails",
+	)
+	resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	assert.Equal(t, retry, resync.ConnectionId)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonBlockfetchTimeoutRetryFailed,
+		resync.Reason,
+	)
 }
 
 // TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue covers the

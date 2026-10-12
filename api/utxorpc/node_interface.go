@@ -87,7 +87,7 @@ type UtxorpcLedgerState interface {
 // UtxorpcMempool is the subset of mempool.Mempool needed by the UTxO RPC
 // server.
 type UtxorpcMempool interface {
-	AddTransaction(txType uint, txBytes []byte) error
+	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 	// TransactionsBounded returns a prefix of the pool in its snapshot
 	// order holding at most maxItems transactions whose CBOR totals at most
 	// maxBytes, together with the pool's total transaction count. A bound of
