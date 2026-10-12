@@ -12756,24 +12756,21 @@ func (ls *LedgerState) GetCurrentPParamsForReporting() lcommon.ProtocolParameter
 }
 
 // ProtocolParamsForSlot returns the protocol parameters that should
-// govern a block forged at the given slot. When the slot lies in an
-// epoch beyond a scheduled fork (the active era's NextEraTrigger is
-// TriggerAtEpoch and the slot's epoch is at or past the trigger),
-// the returned pparams are the post-fork pparams computed by walking
-// each successor era's HardForkFunc up to the slot's era.
+// govern a block forged at the given slot. For a slot in a later epoch it
+// applies the in-era update the next boundary enacts, then each successor
+// era's HardForkFunc up to the era the ledger enters at that boundary: an era
+// with a configured TriggerAtEpoch ends at that epoch, and an era with a
+// version trigger ends once the forecast protocol version names a later era
+// and at least k blocks of the current epoch lie at or past the voting
+// deadline.
 //
-// The forger uses this when picking an era to build a block in.
-// Reading currentPParams alone would lock a sole producer to the
-// pre-fork era forever: the boundary-crossing block would be encoded
-// in the old era, the rollover (which trusts the observed block's
-// era) would not advance, and the chain would never traverse the
-// fork. Forecasting from the schedule lets the forger produce a
-// block in the era the schedule requires, regardless of how the
-// schedule was produced — administrative overrides, on-chain update
-// proposals, or HardForkInitiation gov actions all surface as
-// TriggerAtEpoch entries on the shape.
-// A future epoch whose configured shape or current era is unavailable returns
-// nil so callers cannot forge or verify it using stale current parameters.
+// The forger uses this to pick the era of the block it builds, and the epoch
+// boundary check applies the same decision to the block that opens the
+// epoch, so a block forged in the returned era is the one the ledger accepts
+// there and a block in any other era is refused.
+// It returns nil when that decision or the parameters cannot be resolved, so
+// callers cannot forge or verify a future slot using stale current
+// parameters.
 func (ls *LedgerState) ProtocolParamsForSlot(
 	slot uint64,
 ) lcommon.ProtocolParameters {

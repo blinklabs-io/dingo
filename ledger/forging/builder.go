@@ -496,12 +496,10 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 		)
 	}
 
-	// Get protocol parameters for the slot being forged. This
-	// projects forward through any scheduled fork (TriggerAtEpoch)
-	// whose epoch lies at or before the slot, so the forger
-	// produces an era-correct block at a fork boundary even when
-	// the in-memory rollover has not yet seen a post-fork peer
-	// block.
+	// Get protocol parameters for the slot being forged. For a slot
+	// past the next epoch boundary these are the parameters of the era
+	// the ledger enters there, so the first block of a new era is
+	// forged in that era before the rollover has run.
 	pparams := b.pparamsProvider.ProtocolParamsForSlot(slot)
 	if pparams == nil {
 		return nil, nil, errors.New("failed to get protocol parameters")
