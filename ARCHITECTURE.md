@@ -9678,8 +9678,9 @@ Blockfrost, Kupo, Mesh, and UTxO RPC use the root `bindAddr`, whose default is
 `metricsBindAddr` and `debugBindAddr` separately configure Prometheus and pprof;
 both default to loopback. `metricsAuthToken` protects both the ordinary and
 Mithril-sync Prometheus listeners when configured. The listener remains plain
-HTTP, so remote deployments carry it over a private management network or
-through a TLS reverse proxy. `corsAllowedOrigins` remains a shared root setting,
+HTTP, so remote Bearer authentication requires a TLS reverse proxy or an
+authenticated encrypted tunnel; network isolation is an additional access
+control. `corsAllowedOrigins` remains a shared root setting,
 but MCP rejects its wildcard and applies the origin checks described above.
 
 ### API listener lifecycle (`internal/apilistener`)

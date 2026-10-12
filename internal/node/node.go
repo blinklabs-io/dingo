@@ -300,10 +300,11 @@ func MetricsAuthHandler(token string, next http.Handler) http.Handler {
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		provided, ok := strings.CutPrefix(
-			r.Header.Get("Authorization"),
-			"Bearer ",
+		scheme, provided, ok := strings.Cut(
+			r.Header.Get("Authorization"), " ",
 		)
+		ok = ok && strings.EqualFold(scheme, "Bearer")
+		provided = strings.TrimLeft(provided, " ")
 		providedHash := sha256.Sum256([]byte(provided))
 		if !ok || subtle.ConstantTimeCompare(
 			providedHash[:],

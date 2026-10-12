@@ -379,7 +379,7 @@ func TestMithrilMetricsRequiresConfiguredToken(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Authorization", "bearer  "+token)
 	response, err = client.Do(request)
 	require.NoError(t, err)
 	require.NoError(t, response.Body.Close())

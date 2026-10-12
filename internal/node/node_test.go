@@ -703,6 +703,8 @@ func TestMetricsServerAuthenticatesRemoteListener(t *testing.T) {
 		{name: "missing token", want: http.StatusUnauthorized},
 		{name: "wrong token", header: "Bearer wrong", want: http.StatusUnauthorized},
 		{name: "authenticated", header: "Bearer " + token, want: http.StatusOK},
+		{name: "lowercase scheme", header: "bearer " + token, want: http.StatusOK},
+		{name: "multiple spaces", header: "Bearer   " + token, want: http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

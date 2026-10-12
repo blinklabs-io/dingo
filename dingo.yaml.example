@@ -188,8 +188,9 @@
 # Optional Bearer token required by the Prometheus listener. Prefer the
 # environment variable so the token does not live in a shared config file.
 # There is no CLI flag because arguments may be visible to other users.
-# Remote traffic remains plain HTTP; use a private management network or a TLS
-# reverse proxy so the token cannot be observed in transit.
+# Remote traffic remains plain HTTP. Require a TLS reverse proxy or an
+# authenticated encrypted tunnel to protect the token in transit; use network
+# isolation as an additional access control.
 # Env: DINGO_METRICS_AUTH_TOKEN
 # metricsAuthToken: ""
 

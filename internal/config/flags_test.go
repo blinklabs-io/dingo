@@ -391,6 +391,7 @@ func TestMetricsBindAddressExplicitOverridePrecedence(t *testing.T) {
 
 func TestMetricsAuthTokenLoadsFromYAMLAndEnvironment(t *testing.T) {
 	resetGlobalConfig()
+	unsetEnv(t, "CARDANO_DINGO_METRICS_AUTH_TOKEN")
 	unsetEnv(t, "DINGO_METRICS_AUTH_TOKEN")
 	t.Setenv("HOME", t.TempDir())
 	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
