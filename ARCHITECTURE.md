@@ -6275,21 +6275,29 @@ known alternates at once (`redialDisconnectedPeersLocked`) instead of waiting
 for the next reconcile, and redial ranking puts a peer that stalled within
 `chainsyncStallRankWindow` behind every other candidate.
 
-Inbound source ports are ephemeral, so inbound identity is the host.
-`resolveInboundIdentity` reuses a disconnected inbound entry from the same host
-when a peer reconnects from a new port, keeping its short-session history. A
-session counts toward that history whenever it is short, whatever the close
-error: the connection layer reports a remote close as clean when every protocol
-is still idle, so a peer that handshakes and disconnects arrives with no error.
+Arbitrary inbound peers are identified by their transport tuple. A source host
+alone is insufficient because unrelated peers can arrive through the same NAT
+gateway. Configured topology peers retain their unambiguous host match so an
+operator-declared peer can connect from an ephemeral source port. A session
+counts toward its transport identity's short-session history whenever it is
+short, whatever the close error: the connection layer reports a remote close as
+clean when every protocol is still idle, so a peer that handshakes and
+disconnects arrives with no error.
+Short sessions also charge a higher-volume host churn budget over the inbound
+cooldown window, with IPv6 sources grouped by `/64` as they are in the
+connection manager. The budget admits half the bounded peer-list capacity
+before temporarily refusing that host, so source-port rotation cannot create
+unlimited peer work while ordinary successful peers behind the same NAT spend
+no budget. Host churn has separate bounded state from tuple history. When every
+host slot is live, an untracked non-topology host is refused until a slot
+expires; live history is never evicted to grant a fresh budget.
 Inbound admission refuses an arrival whose exact connection tuple is denied.
-When a repeatedly short-lived inbound-only peer is pruned, a bounded host
-record also keeps its cooldown and escalation count across source-port changes.
-The record expires after the cooldown and one more admission window; the first
-admitted session consumes it. This host cooldown does not apply to a configured
-topology identity, so an ordinary peer denial does not cut off a downstream
-that reconnects because this node closed its sessions. A denial on a configured
-peer is instead applied to its upstream role. While the peer is denied, its
-open connection has `PeerConnection.UpstreamWithheld` set and
+When a repeatedly short-lived inbound-only peer is pruned, a bounded transport
+identity record keeps its cooldown and escalation count. The record expires
+after the cooldown and one more admission window; the first admitted session
+consumes it. A denial on a configured peer is instead applied to its upstream
+role. While the peer is denied, its open connection has
+`PeerConnection.UpstreamWithheld` set and
 `chainSelectionEligible` excludes it,
 while the connection stays open so the peer can still consume from this node.
 The withhold is read against the live denial (`upstreamWithheldLocked`), so an
