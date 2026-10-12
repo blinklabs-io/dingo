@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net"
 	"net/netip"
@@ -1075,9 +1076,7 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 			map[string]ouroboros.ConnectionId, len(restoredSources),
 		)
 	}
-	for mapKey, source := range restoredSources {
-		ls.deferredHeaderValidation[mapKey] = source
-	}
+	maps.Copy(ls.deferredHeaderValidation, restoredSources)
 	ls.deferredHeaderValidationMu.Unlock()
 	restored := len(restoredSources)
 	if restored > 0 {
