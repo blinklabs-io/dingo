@@ -352,12 +352,11 @@ func TestServeForgedEndorserBlockTxs(t *testing.T) {
 
 	o := &Ouroboros{leiosEBLog: newLeiosForgedEBLog()}
 
-	// Three forged transaction bodies (arbitrary raw CBOR is fine; they are
-	// only stored and served, not decoded as transactions here).
+	// Three forged standalone transaction bodies.
 	bodies := [][]byte{
-		{0x83, 0x01, 0x02, 0x03},
-		{0x84, 0x0a, 0x0b, 0x0c, 0x0d},
-		{0x82, 0xf6},
+		testDijkstraTx(t, 1),
+		testDijkstraTx(t, 2),
+		testDijkstraTx(t, 3),
 	}
 	// Build the manifest in the same order as the bodies.
 	refs := make([]lcommon.LeiosTransactionReference, len(bodies))

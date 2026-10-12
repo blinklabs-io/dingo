@@ -446,7 +446,7 @@ func TestLeiosAnnouncementBindsCompleteCachedBlockAtNewSlot(t *testing.T) {
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 1)
-	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
+	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
 	o := newOuroboros(OuroborosConfig{EnableLeios: false})
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
@@ -491,7 +491,7 @@ func TestLeiosAnnouncementCompletesExistingRelayIntent(t *testing.T) {
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 20, 1)
-	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
+	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
 	o := newOuroboros(OuroborosConfig{EnableLeios: false})
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
