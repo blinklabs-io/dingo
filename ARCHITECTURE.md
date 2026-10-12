@@ -6343,7 +6343,13 @@ un-crossable rollbacks; once the same point recurs past a threshold within a
 window it surfaces the stuck-divergence condition as a throttled operator
 error plus the `dingo_chainsync_unrecoverable_rollback_total` metric, since a
 node in this state cannot self-recover and needs operator intervention
-(e.g. re-bootstrapping from a Mithril snapshot). When the per-connection loop
+(e.g. re-bootstrapping from a Mithril snapshot). Before recording a failure,
+the tracker uses the bounded local primary-chain membership check also used for
+historical headers. It advances only after that authoritative check confirms
+the point is absent; unavailable chain state or a lookup error cannot produce
+the diagnosis. A rollback point still on the authoritative local chain is
+evidence of the peer's fork, so it cannot diagnose the local chain as diverged.
+When the per-connection loop
 detector itself breaks a loop by skipping a rollback it can no longer cross,
 it feeds that same point-keyed tracker so the escalation and metric fire on
 the skip path too, rather than silently suppressing the rollback.

@@ -114,6 +114,41 @@ func (ls *LedgerState) reportUnrecoverableRollbackIfStuck(
 	reason string,
 	connId ouroboros.ConnectionId,
 ) {
+	if ls.chain == nil || ls.db == nil || len(point.Hash) == 0 {
+		return
+	}
+	localTip := ls.chain.HeaderTip()
+	if point.Slot > localTip.Point.Slot {
+		return
+	}
+	onPrimary, err := ls.historicalPointOnPrimaryChain(point, localTip)
+	if err != nil {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Debug(
+				"could not classify failed rollback point against primary chain",
+				"component",
+				"ledger",
+				"slot",
+				point.Slot,
+				"hash",
+				hex.EncodeToString(point.Hash),
+				"error",
+				err,
+			)
+		}
+		return
+	}
+	if onPrimary {
+		// A peer asking us to discard authoritative local descendants after
+		// this common point is evidence that the peer forked there. It is not
+		// evidence that our own chain diverged, so discard older failures for
+		// this point.
+		delete(
+			ls.unrecoverableRollbacks,
+			unrecoverableRollbackKey(point),
+		)
+		return
+	}
 	count, stuck := ls.noteUnrecoverableRollback(point)
 	if !stuck {
 		return

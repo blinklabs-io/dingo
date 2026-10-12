@@ -2407,59 +2407,7 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	e ChainsyncEvent,
 	localTip ochainsync.Tip,
 ) bool {
-	if ls.db == nil || len(e.Point.Hash) == 0 {
-		return false
-	}
-	if e.Point.Slot > localTip.Point.Slot {
-		return false
-	}
-	block, err := ls.blockByHash(ls.lifecycleContext(), e.Point.Hash)
-	if errors.Is(err, models.ErrBlockNotFound) {
-		// Blocks written before the hash index was introduced still have an
-		// exact point key and metadata. Probe that local path without allowing
-		// Bark to fall through to its archive on an unknown fork hash.
-		blockID, localErr := database.BlockIDByPointLocal(ls.db, e.Point)
-		if errors.Is(localErr, models.ErrBlockNotFound) {
-			return false
-		}
-		if localErr != nil {
-			ls.config.Logger.Debug(
-				"could not check legacy historical header by local point",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-				"error", localErr,
-			)
-			return false
-		}
-		contains, localErr := ls.primaryChainContainsBlockID(blockID, e.Point)
-		if localErr != nil {
-			ls.config.Logger.Debug(
-				"could not check legacy historical header against primary chain",
-				"component",
-				"ledger",
-				"slot",
-				e.Point.Slot,
-				"hash",
-				hex.EncodeToString(e.Point.Hash),
-				"error",
-				localErr,
-			)
-			return false
-		}
-		return contains
-	}
-	if err != nil {
-		ls.config.Logger.Debug(
-			"could not prefilter historical header by hash index",
-			"component", "ledger",
-			"slot", e.Point.Slot,
-			"hash", hex.EncodeToString(e.Point.Hash),
-			"error", err,
-		)
-		return false
-	}
-	contains, err := ls.primaryChainContainsBlock(block, e.Point)
+	contains, err := ls.historicalPointOnPrimaryChain(e.Point, localTip)
 	if err != nil {
 		ls.config.Logger.Debug(
 			"could not check historical header against primary chain",
@@ -2468,9 +2416,40 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 			"hash", hex.EncodeToString(e.Point.Hash),
 			"error", err,
 		)
-		return false
 	}
 	return contains
+}
+
+// historicalPointOnPrimaryChain performs the bounded local membership check
+// shared by historical-header filtering and rollback diagnosis. It never
+// treats append-only blob presence as primary-chain membership and never
+// falls through to a configured archive for a legacy point lookup.
+func (ls *LedgerState) historicalPointOnPrimaryChain(
+	point ocommon.Point,
+	localTip ochainsync.Tip,
+) (bool, error) {
+	if ls.db == nil || len(point.Hash) == 0 ||
+		point.Slot > localTip.Point.Slot {
+		return false, nil
+	}
+	block, err := ls.blockByHash(ls.lifecycleContext(), point.Hash)
+	if errors.Is(err, models.ErrBlockNotFound) {
+		// Blocks written before the hash index was introduced still have an
+		// exact point key and metadata. Probe that local path without allowing
+		// Bark to fall through to its archive on an unknown fork hash.
+		blockID, localErr := database.BlockIDByPointLocal(ls.db, point)
+		if errors.Is(localErr, models.ErrBlockNotFound) {
+			return false, nil
+		}
+		if localErr != nil {
+			return false, localErr
+		}
+		return ls.primaryChainContainsBlockID(blockID, point)
+	}
+	if err != nil {
+		return false, err
+	}
+	return ls.primaryChainContainsBlock(block, point)
 }
 
 func (ls *LedgerState) findPeerForkPath(

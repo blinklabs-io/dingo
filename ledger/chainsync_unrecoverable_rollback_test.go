@@ -15,12 +15,14 @@
 package ledger
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -120,15 +122,11 @@ func TestUnrecoverableRollbackTrackerSurvivesResyncReset(t *testing.T) {
 func TestReportUnrecoverableRollbackSurfacesOperatorSignal(t *testing.T) {
 	t.Parallel()
 
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-	}
-	ls.metrics.init(prometheus.NewRegistry())
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
 	point := ocommon.NewPoint(
-		116385054,
-		[]byte{0x46, 0xc5, 0xd0, 0x72, 0x6c, 0xcf, 0xc5, 0xde},
+		fixture.ancestorTip.Point.Slot,
+		testHashBytes("missing-canonical-rollback-point"),
 	)
 
 	// Below threshold: no metric increment.
@@ -177,4 +175,76 @@ func TestReportUnrecoverableRollbackSurfacesOperatorSignal(t *testing.T) {
 	count, stuck := ls.noteUnrecoverableRollback(point)
 	require.Equal(t, 1, count)
 	require.False(t, stuck)
+}
+
+func TestReportUnrecoverableRollbackRequiresPointOffPrimaryChain(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+
+	// The local primary chain has continued beyond this rollback point. A
+	// forked peer can ask us to leave it repeatedly, but that cannot establish
+	// that our own chain diverged.
+	for range unrecoverableRollbackThreshold + 1 {
+		fixture.ls.reportUnrecoverableRollbackIfStuck(
+			fixture.ancestorTip.Point,
+			event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+			fixture.connId,
+		)
+	}
+	require.Zero(
+		t,
+		promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks),
+	)
+	_, tracked := fixture.ls.unrecoverableRollbacks[unrecoverableRollbackKey(
+		fixture.ancestorTip.Point,
+	)]
+	require.False(t, tracked)
+}
+
+func TestReportUnrecoverableRollbackRequiresAuthoritativeChain(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.metrics.init(prometheus.NewRegistry())
+	point := ocommon.NewPoint(110374142, []byte("unverified-point"))
+
+	for range unrecoverableRollbackThreshold + 1 {
+		ls.reportUnrecoverableRollbackIfStuck(
+			point,
+			event.ChainsyncResyncReasonRollbackNotFound,
+			freshUnrecoverableConnId(3001),
+		)
+	}
+	require.Zero(
+		t,
+		promtestutil.ToFloat64(ls.metrics.unrecoverableRollbacks),
+	)
+	require.Empty(t, ls.unrecoverableRollbacks)
+}
+
+func TestReportUnrecoverableRollbackDoesNotGuessOnLookupError(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		return models.Block{}, errors.New("lookup failed")
+	}
+	point := ocommon.NewPoint(
+		fixture.ancestorTip.Point.Slot,
+		testHashBytes("unreadable-rollback-point"),
+	)
+
+	for range unrecoverableRollbackThreshold + 1 {
+		fixture.ls.reportUnrecoverableRollbackIfStuck(
+			point,
+			event.ChainsyncResyncReasonRollbackNotFound,
+			fixture.connId,
+		)
+	}
+	require.Zero(
+		t,
+		promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks),
+	)
+	require.Empty(t, fixture.ls.unrecoverableRollbacks)
 }
