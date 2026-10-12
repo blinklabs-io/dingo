@@ -29,7 +29,6 @@ import (
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -64,23 +63,16 @@ func TestLedgerProcessBlockExpandsIndexesAcrossValidatedTransactions(
 	require.NoError(t, err)
 
 	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber: 1,
-					Slot:        10,
-					ProtoVersion: babbage.BabbageProtoVersion{
-						Major: dijkstra.MinProtocolVersionDijkstra,
-					},
-				},
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			1, 10, common.Blake2b256{}, common.Blake2b256{}, 0,
+		),
 		BlockBody: dijkstra.DijkstraBlockBody{
 			Transactions: []dijkstra.DijkstraTransaction{*batch, *plain},
 		},
 	}
 	bodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)
@@ -182,7 +174,7 @@ func dijkstraBatchWithSubOutputTx(t *testing.T) *dijkstra.DijkstraTransaction {
 		23: cbor.NewSetType([]cbor.RawMessage{subTransaction}, true),
 	})
 	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, true, nil})
+	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, nil})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
 	require.NoError(t, err)
@@ -212,9 +204,10 @@ func TestTxValidationSessionAppliesDijkstraBatchLevels(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	err := ls.withTxValidationSession(context.Background(), nil, nil, true, func(
-		_ func(common.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]common.Utxo) error,
+	err := ls.withTxValidationSession(context.Background(), nil, nil, true, false, func(
+		_ func(common.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]common.Utxo, *utxoref.StateOverlay) error,
 		_ func() bool,
+		_ func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
 	) error {
 		return applyTx(
@@ -244,21 +237,16 @@ func TestDijkstraBatchIndexesAndStoresSubtransactionOutput(t *testing.T) {
 	copy(parentHashArray[:], parentHash.Bytes())
 
 	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber:  1,
-					Slot:         1,
-					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
-				},
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			1, 1, common.Blake2b256{}, common.Blake2b256{}, 0,
+		),
 		BlockBody: dijkstra.DijkstraBlockBody{
 			Transactions: []dijkstra.DijkstraTransaction{*dijkstraTx},
 		},
 	}
 	bodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)
@@ -347,21 +335,16 @@ func TestDijkstraBatchAppliesSubtransactionGovernance(t *testing.T) {
 	rootHash := tx.Hash()
 	require.NotEqual(t, childHash, rootHash)
 	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber:  1,
-					Slot:         1,
-					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
-				},
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			1, 1, common.Blake2b256{}, common.Blake2b256{}, 0,
+		),
 		BlockBody: dijkstra.DijkstraBlockBody{
 			Transactions: []dijkstra.DijkstraTransaction{*tx},
 		},
 	}
 	bodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)
@@ -444,28 +427,23 @@ func TestDijkstraDirectDepositUpdatesRewardAccountBalance(t *testing.T) {
 		25: map[cbor.ByteString]uint64{cbor.NewByteString(rewardAddress): 20},
 	})
 	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, true, nil})
+	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, nil})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
 	require.NoError(t, err)
 	dijkstraTx, ok := tx.(*dijkstra.DijkstraTransaction)
 	require.True(t, ok)
 	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber:  1,
-					Slot:         2,
-					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
-				},
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			1, 2, common.Blake2b256{}, common.Blake2b256{}, 0,
+		),
 		BlockBody: dijkstra.DijkstraBlockBody{
 			Transactions: []dijkstra.DijkstraTransaction{*dijkstraTx},
 		},
 	}
 	bodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)

@@ -27,6 +27,13 @@ import (
 // represent enough stake to meet the quorum threshold.
 var ErrQuorumNotMet = errors.New("stake quorum not met")
 
+// ErrInvalidCertificate marks a VoteManager.ValidateDijkstraCertificate
+// failure as a verdict on the certificate: a malformed aggregate signature or
+// signer bitfield, a signer with no usable key, a quorum shortfall, or an
+// aggregate signature that does not verify. Every other failure means the
+// committee could not be resolved, so the certificate was never checked.
+var ErrInvalidCertificate = errors.New("invalid Dijkstra Leios certificate")
+
 // VerifiedVote identifies a committee member whose vote signature has been
 // cryptographically verified, for aggregation into a certificate.
 type VerifiedVote struct {

@@ -59,6 +59,35 @@ type TopologyConfigP2PPublicRoot struct {
 	WarmValency  uint                           `json:"warmValency"`
 }
 
+// UnmarshalJSON accepts the reference node's hotValency spelling as well as
+// valency. valency takes precedence when both are present, as in the reference.
+func (r *TopologyConfigP2PLocalRoot) UnmarshalJSON(data []byte) error {
+	type root TopologyConfigP2PLocalRoot
+	var decoded struct {
+		root
+		Valency     *uint `json:"valency"`
+		HotValency  *uint `json:"hotValency"`
+		WarmValency *uint `json:"warmValency"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*r = TopologyConfigP2PLocalRoot(decoded.root)
+	if decoded.Valency != nil {
+		r.Valency = *decoded.Valency
+	} else if decoded.HotValency != nil {
+		r.Valency = *decoded.HotValency
+	}
+	r.WarmValency = r.Valency
+	if decoded.WarmValency != nil {
+		r.WarmValency = *decoded.WarmValency
+		if r.WarmValency < r.Valency {
+			return errors.New("local root warmValency must be >= valency")
+		}
+	}
+	return nil
+}
+
 type TopologyConfigP2PBootstrapPeer = TopologyConfigP2PAccessPoint
 
 // PeerSnapshotConfig represents cardano-node's peer-snapshot.json format.
@@ -331,9 +360,9 @@ func validateRootValencies(
 	valency uint,
 	accessPointCount int,
 ) error {
-	if warmValency != 0 && warmValency > valency {
+	if warmValency != 0 && warmValency < valency {
 		return fmt.Errorf(
-			"%s.warmValency must be <= %s.valency",
+			"%s.warmValency must be >= %s.valency",
 			fieldPrefix,
 			fieldPrefix,
 		)
@@ -344,6 +373,9 @@ func validateRootValencies(
 			fieldPrefix,
 			fieldPrefix,
 		)
+	}
+	if accessPointCount > 0 && warmValency > uint(accessPointCount) {
+		return fmt.Errorf("%s.warmValency must be <= len(%s.accessPoints)", fieldPrefix, fieldPrefix)
 	}
 	return nil
 }

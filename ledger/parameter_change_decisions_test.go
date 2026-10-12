@@ -264,7 +264,7 @@ func (fx *parameterChangeFixture) admitToMempool(t *testing.T) error {
 		defer cancel()
 		require.NoError(t, pool.Stop(ctx))
 	})
-	err = pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), fx.txCbor)
+	err = pool.AddTransaction(t.Context(), uint(gdijkstra.TxTypeDijkstra), fx.txCbor)
 	if err == nil {
 		require.Len(t, pool.Transactions(), 1)
 	} else {

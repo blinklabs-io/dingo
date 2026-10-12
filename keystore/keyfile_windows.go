@@ -24,28 +24,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// insecureSIDs maps SDDL SID abbreviations and full SID strings to
-// human-readable names for groups that must not have access to key
-// files.
-//
-// Superseded by the handle-based checkOpenFilePermissions chain, which
-// resolves the descriptor from an open handle rather than a path (so it is
-// not open to a TOCTOU swap) and allowlists permitted trustees instead of
-// denylisting known-insecure ones. This path-based chain is reachable only
-// from keyfile_windows_test.go; `run.tests: false` hides those callers from
-// the linter, so the report is accurate about production reachability.
-// Retained until its cases are migrated to the handle-based path.
-//
-//nolint:unused
-var insecureSIDs = map[string]string{
-	"WD":           "Everyone",
-	"S-1-1-0":      "Everyone",
-	"BU":           "BUILTIN\\Users",
-	"S-1-5-32-545": "BUILTIN\\Users",
-	"AU":           "Authenticated Users",
-	"S-1-5-11":     "Authenticated Users",
-}
-
 // SDDL has four access-allowed ACE forms. Object and callback variants are
 // grants just like a basic A ACE and must receive the same trustee checks.
 func isAccessAllowedACEType(aceType string) bool {
@@ -66,69 +44,6 @@ func isKnownNonGrantACEType(aceType string) bool {
 	default:
 		return false
 	}
-}
-
-// checkFilePermissions verifies that a key file has appropriate
-// access controls on Windows. It converts the file's DACL to an
-// SDDL string and rejects files that grant access to Everyone,
-// the BUILTIN\Users group, or Authenticated Users.
-//
-// The implementation stays inside golang.org/x/sys/windows and does not use
-// the unsafe package, so security descriptor and SID lifetimes stay owned by
-// that package. https://go.dev/issue/73199 was a dangling pointer inside
-// those helpers and was fixed there; hand-rolling them here would reopen it.
-//
-// Superseded by the handle-based checkOpenFilePermissions chain, which
-// resolves the descriptor from an open handle rather than a path (so it is
-// not open to a TOCTOU swap) and allowlists permitted trustees instead of
-// denylisting known-insecure ones. This path-based chain is reachable only
-// from keyfile_windows_test.go; `run.tests: false` hides those callers from
-// the linter, so the report is accurate about production reachability.
-// Retained until its cases are migrated to the handle-based path.
-//
-//nolint:unused
-func checkFilePermissions(path string) error {
-	sd, err := windows.GetNamedSecurityInfo(
-		path,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"failed to get security info for %q: %w",
-			path,
-			err,
-		)
-	}
-	// GetNamedSecurityInfo frees the Windows heap descriptor itself and
-	// returns a Go-heap copy, so sd needs no explicit free here.
-	return checkSecurityDescriptor(path, sd)
-}
-
-// checkSecurityDescriptor validates a path-derived security descriptor.
-//
-// Superseded by the handle-based checkOpenFilePermissions chain, which
-// resolves the descriptor from an open handle rather than a path (so it is
-// not open to a TOCTOU swap) and allowlists permitted trustees instead of
-// denylisting known-insecure ones. This path-based chain is reachable only
-// from keyfile_windows_test.go; `run.tests: false` hides those callers from
-// the linter, so the report is accurate about production reachability.
-// Retained until its cases are migrated to the handle-based path.
-//
-//nolint:unused
-func checkSecurityDescriptor(
-	path string,
-	sd *windows.SECURITY_DESCRIPTOR,
-) error {
-	sddl := sd.String()
-	if sddl == "" {
-		return fmt.Errorf(
-			"failed to read security descriptor for %q",
-			path,
-		)
-	}
-
-	return checkSDDL(path, sddl)
 }
 
 // checkOpenFilePermissions verifies permissions on an already-opened file.
@@ -362,85 +277,4 @@ func sddlSection(sddl, section string) string {
 		}
 	}
 	return value[:end]
-}
-
-// checkSDDL parses an SDDL string and returns an error if the DACL
-// contains any allow ACEs granting access to well-known insecure
-// groups.
-//
-// Superseded by the handle-based checkOpenFilePermissions chain, which
-// resolves the descriptor from an open handle rather than a path (so it is
-// not open to a TOCTOU swap) and allowlists permitted trustees instead of
-// denylisting known-insecure ones. This path-based chain is reachable only
-// from keyfile_windows_test.go; `run.tests: false` hides those callers from
-// the linter, so the report is accurate about production reachability.
-// Retained until its cases are migrated to the handle-based path.
-//
-//nolint:unused
-func checkSDDL(path, sddl string) error {
-	// Extract the DACL portion ("D:" up to the next section).
-	daclIdx := strings.Index(sddl, "D:")
-	if daclIdx < 0 {
-		// No DACL means unrestricted access.
-		return fmt.Errorf(
-			"key file %q has no DACL (unrestricted access): %w",
-			path,
-			ErrInsecureFileMode,
-		)
-	}
-	daclStr := sddl[daclIdx+2:]
-	// Trim at the SACL section if present.
-	if idx := strings.Index(daclStr, "S:"); idx >= 0 {
-		daclStr = daclStr[:idx]
-	}
-
-	// Walk each ACE (parenthesised entries).
-	for {
-		start := strings.IndexByte(daclStr, '(')
-		if start < 0 {
-			break
-		}
-		end := strings.IndexByte(daclStr[start:], ')')
-		if end < 0 {
-			return fmt.Errorf(
-				"key file %q has unterminated DACL ACE: %w",
-				path, ErrInsecureFileMode,
-			)
-		}
-		ace := daclStr[start+1 : start+end]
-		daclStr = daclStr[start+end+1:]
-
-		// ACE: type;flags;rights;object;inherit;trustee
-		fields := strings.Split(ace, ";")
-		if len(fields) < 6 {
-			return fmt.Errorf(
-				"key file %q has malformed DACL ACE %q: %w",
-				path, ace, ErrInsecureFileMode,
-			)
-		}
-
-		// Only inspect access grants; deny, audit, and policy ACEs do not
-		// make the file readable by their trustee.
-		if !isAccessAllowedACEType(fields[0]) {
-			if isKnownNonGrantACEType(fields[0]) {
-				continue
-			}
-			return fmt.Errorf(
-				"key file %q has unsupported DACL ACE type %q: %w",
-				path, fields[0], ErrInsecureFileMode,
-			)
-		}
-
-		trustee := fields[5]
-		if name, ok := insecureSIDs[trustee]; ok {
-			return fmt.Errorf(
-				"key file %q grants access to %s: %w",
-				path,
-				name,
-				ErrInsecureFileMode,
-			)
-		}
-	}
-
-	return nil
 }

@@ -136,7 +136,7 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 		// true regardless of what the import actually swept.
 		loadTxn := db.Transaction(context.Background(), true)
 		require.NoError(t, loadTxn.Do(func(txn *database.Txn) error {
-			return ls.loadEpochs(txn)
+			return ls.loadEpochs(context.Background(), txn)
 		}))
 		require.Equal(t, anchorEpoch, ls.currentEpoch.EpochId,
 			"current-epoch pointer must reflect the anchor epoch, not a "+
@@ -153,7 +153,6 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 				ls.currentEpoch,
 				ls.currentEra,
 				ls.currentPParams,
-				false,
 			)
 			return rolloverErr
 		}))

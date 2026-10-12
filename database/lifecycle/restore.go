@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,6 +144,54 @@ type RestoreStorageConfig struct {
 	// and demands a resync, exactly as a real startup would that omitted
 	// it. Zero preserves that refusal for a caller that has no genesis.
 	AlonzoLovelacePerUtxoWord uint64
+}
+
+const staleRestoreWorkDirAge = 7 * 24 * time.Hour
+
+var restoreWorkDirPrefixes = []string{
+	".dingo-restore-payloads-",
+	".dingo-cloud-snapshot-",
+	".dingo-verify-snapshot-",
+}
+
+// CleanStaleRestoreWorkDirs removes restore work directories older than a
+// week from parentDir. Recent directories may belong to another active
+// restore and are left alone.
+func CleanStaleRestoreWorkDirs(parentDir string) error {
+	entries, err := os.ReadDir(parentDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read restore work directory parent %q: %w", parentDir, err)
+	}
+	cutoff := time.Now().Add(-staleRestoreWorkDirAge)
+	for _, entry := range entries {
+		if !entry.IsDir() || !hasRestoreWorkDirPrefix(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect restore work directory %q: %w", entry.Name(), err)
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		path := filepath.Join(parentDir, entry.Name())
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("remove stale restore work directory %q: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func hasRestoreWorkDirPrefix(name string) bool {
+	for _, prefix := range restoreWorkDirPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Restore populates targetDataDir (which must not already exist, or must
@@ -315,15 +364,21 @@ func restoreValidated(
 	retainRecovery **RestoreRecovery,
 	opts ...ManifestOption,
 ) (m Manifest, err error) {
-	manifest, snapshotDir, cleanup, err := resolveManifest(
-		ctx,
-		registry,
-		snapshotDir,
-		opts...,
-	)
-	if cleanup != nil {
-		defer cleanup()
+	// Downloads and private payload copies are as large as the snapshot, so
+	// they are made beside the target, on the volume sized for the restored
+	// data, never in the system temp directory.
+	workParent := filepath.Dir(targetDataDir)
+	if err := os.MkdirAll(workParent, 0o755); err != nil {
+		return Manifest{}, fmt.Errorf(
+			"create parent directory for %q: %w", targetDataDir, err,
+		)
 	}
+	if err := CleanStaleRestoreWorkDirs(workParent); err != nil {
+		return Manifest{}, err
+	}
+	manifest, err := resolveManifest(
+		ctx, registry, snapshotDir, workParent, opts...,
+	)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -331,6 +386,15 @@ func restoreValidated(
 		if err := validate(manifest); err != nil {
 			return Manifest{}, err
 		}
+	}
+	snapshotDir, cleanup, err := fetchPayloads(
+		ctx, registry, snapshotDir, workParent, manifest,
+	)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		return Manifest{}, err
 	}
 	if err := checkNoDataDirOverride("blob", storageConfig.Blob); err != nil {
 		return Manifest{}, err
@@ -360,11 +424,6 @@ func restoreValidated(
 			"clear restore staging directory %q: %w", stagingDir, err,
 		)
 	}
-	if err := os.MkdirAll(filepath.Dir(targetDataDir), 0o755); err != nil {
-		return Manifest{}, fmt.Errorf(
-			"create parent directory for %q: %w", targetDataDir, err,
-		)
-	}
 	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
 		return Manifest{}, fmt.Errorf(
 			"create restore staging directory %q: %w", stagingDir, err,
@@ -379,6 +438,15 @@ func restoreValidated(
 			_ = os.RemoveAll(stagingDir)
 		}
 	}()
+
+	// Verified only now that the staging directory exists, and before any
+	// store is touched, so a payload that does not match its manifest is
+	// refused with the target and every external store still as they were.
+	if err := manifest.verifyPayloads(
+		ctx, snapshotDir, len(manifestKey(opts)) > 0,
+	); err != nil {
+		return Manifest{}, err
+	}
 
 	rollback, err := prepareRestore(
 		ctx, host, manifest, snapshotDir, stagingDir, storageConfig,
@@ -524,8 +592,8 @@ func restoreValidated(
 // For a cloud snapshotDir, this tries FetchCloudManifest first — which
 // fetches just the one manifest.json object via CloudManifestFetcher,
 // without downloading the (possibly very large) blob/metadata backups
-// alongside it — before falling back to the full download-based
-// resolveManifest path below. FetchCloudManifest's ok=false covers two
+// alongside it — before falling back to resolveManifest below, which
+// downloads manifest.json alone. FetchCloudManifest's ok=false covers two
 // distinct cases resolveManifest already handles correctly on its own:
 // snapshotDir isn't a recognized cloud URI at all (a plain local path),
 // or it is one but that destination type doesn't implement
@@ -542,52 +610,100 @@ func PeekManifest(
 	if _, err := manifestByteLimit(opts); err != nil {
 		return Manifest{}, err
 	}
+	if !recognizedCloudScheme(registry, snapshotDir) {
+		return ReadManifest(snapshotDir, opts...)
+	}
+	if err := requireManifestKey(opts); err != nil {
+		return Manifest{}, err
+	}
 	if m, ok, err := FetchCloudManifest(ctx, registry, snapshotDir, opts...); ok {
 		return m, err
 	}
-	manifest, _, cleanup, err := resolveManifest(ctx, registry, snapshotDir, opts...)
-	if cleanup != nil {
-		defer cleanup()
-	}
-	return manifest, err
+	return resolveManifest(ctx, registry, snapshotDir, "", opts...)
 }
 
-// resolveManifest downloads snapshotDir first if it's a cloud destination
-// URI, then reads its manifest. Returns the manifest, the resolved local
-// snapshot directory to read backup files from (== snapshotDir itself
-// when it was already local), and a cleanup func for any downloaded temp
-// directory — nil when nothing was downloaded, so callers must nil-check
-// before deferring it.
+// resolveManifest reads the manifest of the snapshot at snapshotDir, a local
+// directory or a cloud destination URI, authenticating it with opts. A cloud
+// snapshot's manifest.json is fetched on its own into a temporary directory
+// under workParent (the system temp directory when empty), bounded by the
+// manifest size limit, and nothing else under the prefix is read.
 func resolveManifest(
 	ctx context.Context,
 	registry *DestinationRegistry,
 	snapshotDir string,
+	workParent string,
 	opts ...ManifestOption,
-) (manifest Manifest, resolvedDir string, cleanup func(), err error) {
-	if _, err := manifestByteLimit(opts); err != nil {
-		return Manifest{}, "", nil, err
-	}
-	resolvedDir = snapshotDir
-	if _, ok := recognizedCloudScheme(registry, snapshotDir); ok {
-		localSnapshotDir, cloudCleanup, downloadErr := downloadCloudSnapshot(
-			ctx,
-			registry,
-			snapshotDir,
-		)
-		if downloadErr != nil {
-			return Manifest{}, "", nil, downloadErr
-		}
-		resolvedDir = localSnapshotDir
-		cleanup = cloudCleanup
-	}
-	manifest, err = ReadManifest(resolvedDir, opts...)
+) (Manifest, error) {
+	limit, err := manifestByteLimit(opts)
 	if err != nil {
-		if cleanup != nil {
-			cleanup()
-		}
-		return Manifest{}, "", nil, err
+		return Manifest{}, err
 	}
-	return manifest, resolvedDir, cleanup, nil
+	if !recognizedCloudScheme(registry, snapshotDir) {
+		return ReadManifest(snapshotDir, opts...)
+	}
+	if err := requireManifestKey(opts); err != nil {
+		return Manifest{}, err
+	}
+	// One byte over the limit lets ReadManifest, not the transfer, report an
+	// oversized manifest as ErrManifestTooLarge.
+	downloadLimit := limit
+	if limit < math.MaxInt64 {
+		downloadLimit++
+	}
+	dir, cleanup, err := downloadCloudFiles(
+		ctx, registry, snapshotDir, workParent,
+		[]DownloadFile{{Name: ManifestFileName, MaxBytes: downloadLimit}},
+	)
+	if err != nil {
+		return Manifest{}, err
+	}
+	defer cleanup()
+	return ReadManifest(dir, opts...)
+}
+
+// fetchPayloads returns a local directory, created under workParent, holding
+// the backup files manifest declares. A cloud snapshot downloads only those
+// files, each bounded by its declared size. It returns a cleanup func for any downloaded temp directory —
+// nil when nothing was downloaded, so callers must nil-check before deferring
+// it. The files are not yet verified; see Manifest.verifyPayloads.
+func fetchPayloads(
+	ctx context.Context,
+	registry *DestinationRegistry,
+	snapshotDir string,
+	workParent string,
+	manifest Manifest,
+) (resolvedDir string, cleanup func(), err error) {
+	if !recognizedCloudScheme(registry, snapshotDir) {
+		// Consume private copies: reopening the operator's path after digest
+		// verification permits a replacement file to bypass authentication.
+		dir, err := os.MkdirTemp(workParent, ".dingo-restore-payloads-")
+		if err != nil {
+			return "", nil, err
+		}
+		cleanup := func() { _ = os.RemoveAll(dir) }
+		for _, file := range manifest.payloadDownloads() {
+			src, err := os.Open(filepath.Join(snapshotDir, file.Name))
+			if err != nil {
+				return "", cleanup, err
+			}
+			err = writeBoundedFile(filepath.Join(dir, file.Name),
+				payloadContextReader{ctx: ctx, reader: src}, file)
+			closeErr := src.Close()
+			if err != nil {
+				if errors.Is(err, ErrDownloadTooLarge) {
+					err = fmt.Errorf("%w: %w", ErrSnapshotPayloadMismatch, err)
+				}
+				return "", cleanup, err
+			}
+			if closeErr != nil {
+				return "", cleanup, closeErr
+			}
+		}
+		return dir, cleanup, nil
+	}
+	return downloadCloudFiles(
+		ctx, registry, snapshotDir, workParent, manifest.payloadDownloads(),
+	)
 }
 
 // requireEmptyOrAbsent returns an error if dir exists and already contains

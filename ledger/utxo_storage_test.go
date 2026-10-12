@@ -165,7 +165,7 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 						TxOffsets:   offsets.TxOffsets,
 						UtxoOffsets: offsets.UtxoOffsets,
 					},
-					txn,
+					txn, 0,
 				)
 				if err != nil {
 					return err
@@ -515,7 +515,7 @@ func tryStoreBlockFirstTx(
 			TxOffsets:   offsets.TxOffsets,
 			UtxoOffsets: offsets.UtxoOffsets,
 		},
-		txn,
+		txn, 0,
 	); err != nil {
 		return nil, err
 	}
@@ -719,7 +719,7 @@ func TestUtxoByRefRecoversMissingBlobFromProducerBlock(t *testing.T) {
 							TxOffsets:   offsets.TxOffsets,
 							UtxoOffsets: offsets.UtxoOffsets,
 						},
-						txn,
+						txn, 0,
 					)
 				})
 				require.NoError(t, err)

@@ -163,18 +163,17 @@ func (o *Ouroboros) leiosfetchServerBlockTxsRequest(
 			oleiosfetch.ErrBlockTxsNotFound,
 		)
 	}
-	if !data.completeTxCache() {
-		return nil, fmt.Errorf(
-			"leios endorser block txs not available: %d.%x: have %d of %d txs: %w",
-			point.Slot,
-			point.Hash,
-			len(data.txsRaw),
-			data.txCount,
-			oleiosfetch.ErrBlockTxsNotFound,
-		)
-	}
-	if err := validateLeiosTxBitmap(len(data.txsRaw), txBitmap); err != nil {
+	if err := validateLeiosTxBitmap(data.txCount, txBitmap); err != nil {
 		return nil, err
+	}
+	if !data.completeTxCache() {
+		available := make([]cbor.RawMessage, data.txCount)
+		data.seedLeiosPartialTxsLocked(available, nil)
+		servedBitmap, txs := leiosAvailableTxsFromBitmap(
+			available,
+			txBitmap,
+		)
+		return oleiosfetch.NewMsgBlockTxsFull(point, servedBitmap, txs), nil
 	}
 	return oleiosfetch.NewMsgBlockTxs(
 		leiosTxsFromBitmap(data.txsRaw, txBitmap),

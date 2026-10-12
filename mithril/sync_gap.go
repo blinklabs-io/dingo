@@ -547,28 +547,24 @@ func processGapBlocks(
 			)
 		}
 		txs := parsedBlock.Transactions()
+		point := ocommon.NewPoint(block.Slot, block.Hash)
 		if len(txs) == 0 {
 			continue
 		}
-		indexer := database.NewBlockIndexer(
-			block.Slot, block.Hash,
-		)
-		offsets, err := indexer.ComputeOffsets(
-			block.Cbor, parsedBlock,
-		)
-		if err != nil {
-			return fmt.Errorf(
-				"computing offsets for gap block at slot %d: %w",
-				block.Slot, err,
-			)
-		}
-		point := ocommon.NewPoint(block.Slot, block.Hash)
 		epoch, err := gapBlockEpoch(epochs, block.Slot)
 		if err != nil {
 			return fmt.Errorf(
 				"resolving epoch for gap block at slot %d: %w",
 				block.Slot,
 				err,
+			)
+		}
+		indexer := database.NewBlockIndexer(block.Slot, block.Hash)
+		offsets, err := indexer.ComputeOffsets(block.Cbor, parsedBlock)
+		if err != nil {
+			return fmt.Errorf(
+				"computing offsets for gap block at slot %d: %w",
+				block.Slot, err,
 			)
 		}
 		paramsEpoch, blockPParams, err := gapBlockParams(
@@ -684,6 +680,10 @@ func processGapBlockTransactions(
 ) error {
 	txn := db.Transaction(ctx, true)
 	defer txn.Release()
+	protocolMajor := uint64(0)
+	if versioned, ok := pparams.(lcommon.PoolRuleProtocolParameters); ok {
+		protocolMajor = uint64(versioned.ProtocolMajorVersion())
+	}
 	var storageIndexOffset uint64
 	for i, tx := range txs {
 		var proposalsValidated bool
@@ -710,6 +710,7 @@ func processGapBlockTransactions(
 				gapCertDeposits(logger, level, point, eraId, pparams),
 				offsets,
 				txn,
+				protocolMajor,
 			); err != nil {
 				return fmt.Errorf(
 					"storing transaction body %d: %w",
@@ -720,72 +721,32 @@ func processGapBlockTransactions(
 			if !level.IsValid() {
 				continue
 			}
-			hasGovernance := len(level.ProposalProcedures()) > 0 ||
-				len(level.VotingProcedures()) > 0 ||
-				governance.HasDRepActivityCertificates(level)
-			if !hasGovernance {
+			if !governance.TransactionHasGovernanceEffects(level) {
 				continue
 			}
-			if len(level.ProposalProcedures()) > 0 {
-				if conwayPParams == nil {
-					return errors.New(
-						"missing Conway protocol parameters for governance gap block processing",
-					)
-				}
-				if err := governance.ProcessHistoricalProposals(
-					ctx,
-					level,
-					point,
-					uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec
-					epochId,
-					conwayPParams.GovActionValidityPeriod,
-					pparams,
-					db,
-					txn,
-					&proposalsValidated,
-				); err != nil {
-					return fmt.Errorf(
-						"processing body %d governance proposals: %w",
-						levelIndex,
-						err,
-					)
-				}
+			if conwayPParams == nil &&
+				governance.HistoricalTransactionRequiresConwayParameters(level) {
+				return errors.New(
+					"missing Conway protocol parameters for governance gap block processing",
+				)
 			}
-			if len(level.VotingProcedures()) > 0 {
-				if conwayPParams == nil {
-					return errors.New(
-						"missing Conway protocol parameters for governance gap block processing",
-					)
-				}
-				if err := governance.ProcessHistoricalVotes(
-					ctx,
-					level,
-					point,
-					epochId,
-					db,
-					txn,
-				); err != nil {
-					return fmt.Errorf(
-						"processing body %d governance votes: %w",
-						levelIndex,
-						err,
-					)
-				}
+			govActionLifetime := uint64(0)
+			if conwayPParams != nil {
+				govActionLifetime = conwayPParams.GovActionValidityPeriod
 			}
-			if governance.HasDRepActivityCertificates(level) {
-				if err := governance.ProcessHistoricalDRepActivityCertificates(
-					ctx,
-					level,
-					epochId,
-					db,
-					txn,
-				); err != nil {
-					return fmt.Errorf(
-						"processing body %d DRep activity: %w",
-						levelIndex,
-						err,
-					)
-				}
+			if err := governance.ProcessHistoricalTransactionEffects(
+				ctx,
+				level,
+				point,
+				uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec
+				epochId,
+				govActionLifetime,
+				db,
+				txn,
+				pparams,
+				&proposalsValidated,
+			); err != nil {
+				return fmt.Errorf("processing body %d transaction governance: %w", levelIndex, err)
 			}
 		}
 	}

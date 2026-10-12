@@ -51,6 +51,9 @@ const (
 	// DefaultMaxFetchBlockRefs bounds the storage/signing work and response
 	// growth driven by one anonymous ArchiveService request.
 	DefaultMaxFetchBlockRefs = 100
+	// DefaultMaxArchiveConcurrentFetches is the default for
+	// BarkConfig.ArchiveMaxConcurrentFetches.
+	DefaultMaxArchiveConcurrentFetches = 16
 	// DefaultRequestReadTimeout bounds request headers and bodies while leaving
 	// response writes unbounded for long-lived server streams.
 	DefaultRequestReadTimeout = 60 * time.Second
@@ -80,6 +83,8 @@ type Bark struct {
 	// read-locks it (via TryRLock, never blocking) for the duration of one
 	// request. See Acquire's doc comment for the full race this prevents.
 	dbGate sync.RWMutex
+	// archiveSlots holds one token per in-flight ArchiveService.FetchBlock.
+	archiveSlots chan struct{}
 	// beforePreflight is a test hook, nil in production, called at the start
 	// of startServer so a test can hold Start inside its TLS/listen
 	// preflight while another goroutine races it.
@@ -199,6 +204,13 @@ type BarkConfig struct {
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
+	// ArchiveMaxConcurrentFetches bounds how many ArchiveService.FetchBlock
+	// requests run at once; a request over the limit is refused immediately
+	// rather than queued. ArchiveService takes no client credentials, so this
+	// and DefaultMaxFetchBlockRefs are what bound the work anyone who can
+	// reach the listener can cause. Zero selects
+	// DefaultMaxArchiveConcurrentFetches; a negative value is invalid.
+	ArchiveMaxConcurrentFetches int
 }
 
 // ErrDBUnavailable is returned by Acquire when there is currently no
@@ -311,6 +323,14 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 			err,
 		)
 	}
+	if cfg.ArchiveMaxConcurrentFetches < 0 {
+		return nil, errors.New(
+			"bark: ArchiveMaxConcurrentFetches must not be negative",
+		)
+	}
+	if cfg.ArchiveMaxConcurrentFetches == 0 {
+		cfg.ArchiveMaxConcurrentFetches = DefaultMaxArchiveConcurrentFetches
+	}
 	lifecycleOperatorFingerprints, err := normalizeOperatorCertificateFingerprints(
 		cfg.LifecycleOperatorCertificateFingerprints,
 	)
@@ -327,6 +347,10 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 		config:                        cfg,
 		operatorFingerprints:          operatorFingerprints,
 		lifecycleOperatorFingerprints: lifecycleOperatorFingerprints,
+		archiveSlots: make(
+			chan struct{},
+			cfg.ArchiveMaxConcurrentFetches,
+		),
 	}, nil
 }
 

@@ -734,53 +734,33 @@ func (b *Backfill) processBlockGovernanceLevel(
 	if !tx.IsValid() {
 		return nil
 	}
-	proposals := tx.ProposalProcedures()
-	votes := tx.VotingProcedures()
-	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
+	if !governance.TransactionHasGovernanceEffects(tx) {
 		return nil
 	}
 	conwayPP := backfillConwayProtocolParameters(pp)
-	if conwayPP == nil {
+	if conwayPP == nil &&
+		governance.HistoricalTransactionRequiresConwayParameters(tx) {
 		return errors.New(
 			"missing Conway protocol parameters for governance backfill",
 		)
 	}
-	if len(proposals) > 0 {
-		if err := governance.ProcessHistoricalProposals(
-			ctx,
-			tx, point, txIndex, epochId,
-			conwayPP.GovActionValidityPeriod,
-			pp, b.db, txn, validated,
-		); err != nil {
-			return fmt.Errorf(
-				"governance proposals: %w", err,
-			)
-		}
+	var proposalLifetime uint64
+	if conwayPP != nil {
+		proposalLifetime = conwayPP.GovActionValidityPeriod
 	}
-	if len(votes) > 0 {
-		if err := governance.ProcessHistoricalVotes(
-			ctx,
-			tx, point, epochId,
-			b.db, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"governance votes: %w", err,
-			)
-		}
-	}
-	if hasDRepActivityCerts {
-		if err := governance.ProcessHistoricalDRepActivityCertificates(
-			ctx,
-			tx,
-			epochId,
-			b.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"DRep activity certificates: %w", err,
-			)
-		}
+	if err := governance.ProcessHistoricalTransactionEffects(
+		ctx,
+		tx,
+		point,
+		txIndex,
+		epochId,
+		proposalLifetime,
+		b.db,
+		txn,
+		pp,
+		validated,
+	); err != nil {
+		return fmt.Errorf("governance transaction effects: %w", err)
 	}
 	return nil
 }
@@ -1367,6 +1347,10 @@ func (b *Backfill) processBlockTxsBatched(
 		for levelIndex, level := range levels {
 			storageIndex := storageBaseIndex + uint64(levelIndex)
 			updateEpoch, paramUpdates := level.ProtocolParameterUpdates()
+			protocolMajor := uint64(0)
+			if versioned, ok := pp.(lcommon.PoolRuleProtocolParameters); ok {
+				protocolMajor = uint64(versioned.ProtocolMajorVersion())
+			}
 			if opts.SkipProducedUtxoOffsetWrites {
 				b.skippedUtxoRefs += uint64(len(level.Produced()))
 			}
@@ -1382,6 +1366,7 @@ func (b *Backfill) processBlockTxsBatched(
 					Stats:                        stats,
 					SkipWithdrawalWitnessWrite:   !b.delegatorInactivityEnabled,
 					HistoricalBackfill:           true,
+					ProtocolMajor:                protocolMajor,
 				},
 			); err != nil {
 				return fmt.Errorf(
