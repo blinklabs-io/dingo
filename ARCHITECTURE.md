@@ -12712,16 +12712,12 @@ client re-establishes block identity locally rather than trusting the response.
 Downloaded bytes are decoded with body validation enabled, and the block's
 computed hash and slot must match the point that was requested.
 
-That binding is complete for every era except Byron main. gouroboros checks a
-Byron main block's transaction, delegation, and update proofs but not
-`ssc_proof`, whose hashes cover cardano-ledger's own encoding of the SSC
-sub-payloads rather than the bytes carried in the block. An alteration confined
-to the SSC payload would therefore leave the hash, slot, height, and previous
-hash — all taken from the untouched header — unchanged. Rather than serve a
-body that is only partly authenticated, Bark refuses Byron main archive reads
-outright; the restriction lifts once Byron SSC proof validation exists
-upstream. Byron epoch boundary blocks are unaffected, carrying neither
-transactions nor an SSC payload, so one body hash covers their whole body.
+The default gouroboros decoder validates each Byron main block body-proof
+component against its payload, including `ssc_proof`. This binds archived SSC
+payloads to the untouched header, whose hash otherwise does not cover the body.
+Byron epoch boundary blocks carry no transactions or SSC payload; their
+reference body proof does not bind the body, so archive reads instead verify
+that their proof is well-formed and match the requested header hash and slot.
 
 The block era needs its own check. For Shelley and later the hash covers the
 header alone, and adjacent eras share that header layout, so one set of bytes
@@ -16638,23 +16634,20 @@ doesn't — and is deliberately generic rather than classifying specific
 error types, since the failure modes this guards against are exactly the
 ones not yet fully understood well enough to special-case safely.
 
-One error class is deterministic rather than transient and needs more than
-backoff. A block whose *deferred* stateful header checks (registered VRF
-key, Praos leader eligibility) fail is already persisted in the chain
-store, so a bare pipeline restart re-reads that same block and fails
-identically, forever. Transaction validation failures already carried a
-type (`txValidationError`) that routes them into rewind-based recovery;
-header validation carried a bare error and so had nowhere to go.
-`headerValidationError` closes that gap: the block is still rejected — the
-validity predicate is unchanged and stays identical to the reference
-node's — but the rejection now rewinds the primary chain and the ledger to
-the last good tip and asks chainsync to re-deliver, so chain selection can
-offer a different candidate instead of the pipeline spinning on a chain it
-has already refused. If the network genuinely offers no other chain the
-node still cannot advance, which is the correct outcome for a node that
-believes the block is invalid and the same one the reference node reaches;
-the difference is that it surfaces through the stuck-pipeline signal below
-rather than an unbounded retry loop.
+Persisted blocks can fail deterministically during decoding or deferred
+validation. This includes Byron body-proof failures and stateful header
+checks (registered VRF key, Praos leader eligibility); a bare pipeline
+restart rereads the same block and fails identically. Transaction validation
+failures already carried a type (`txValidationError`) that routes them into
+rewind-based recovery; persisted-block decode and header validation failures
+had no such path. `headerValidationError` carries the rejected block point so
+the rejection rewinds the primary chain and ledger to the last good tip and
+asks chainsync to re-deliver, letting chain selection offer a different
+candidate instead of the pipeline spinning on a chain it has already refused.
+The block remains rejected, and if the network offers no other chain the node
+cannot advance, as with any block the reference node considers invalid.
+Instead of an unbounded retry loop, the condition surfaces through the
+stuck-pipeline signal below.
 
 A deterministic failure can still recur after rewind: a canonical block this
 node rejects will be rejected identically on every replay. After
