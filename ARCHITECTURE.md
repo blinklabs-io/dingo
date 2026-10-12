@@ -592,7 +592,9 @@ selection ingress, `ValidateBlockHeaderCrypto`) are peer-relative and skip
 the rule, since the EBB's own queueing event is delivered asynchronously. The
 exception is an epoch-0 EBB verified peer-relative at an origin primary tip:
 it can only be a chain's first block, so it is held to the genesis anchor
-rather than rejected as following an existing block.
+rather than rejected as following an existing block. An epoch-0 EBB verified
+while the ledger tip is at origin, as during ledger apply when the primary
+chain already holds it, is held to the same anchor.
 
 While the local header tip is at least `blockfetchMinBatchGapSlots` behind the
 peer tip, BlockFetch starts only once `blockfetchMinBatchHeaders` headers are
