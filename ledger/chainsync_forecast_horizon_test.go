@@ -213,7 +213,7 @@ func TestChainsyncHeaderPastForecastHorizonIsNotQueued(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			bus := event.NewEventBus(nil, nil)
+			bus := newTestEventBus(t, nil)
 			t.Cleanup(bus.Stop)
 			resyncs := make(chan event.ChainsyncResyncEvent, 1)
 			bus.SubscribeFunc(

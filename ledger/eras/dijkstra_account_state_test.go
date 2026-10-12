@@ -150,6 +150,7 @@ func TestValidateTxDijkstraDirectDepositFundingIsEnforced(t *testing.T) {
 			)
 			var notConserved shelley.ValueNotConservedUtxoError
 			require.ErrorAs(t, err, &notConserved)
+			require.True(t, IsSemanticRuleValidationError(err))
 		})
 	}
 }
@@ -195,9 +196,11 @@ func TestValidateTxDijkstraDirectDepositDestinations(t *testing.T) {
 		})
 		t.Run(name+" nonexistent account", func(t *testing.T) {
 			var e gdijkstra.DirectDepositAccountsMissingError
-			require.ErrorAs(t, validate(t, gdijkstra.DijkstraDirectDeposits{
+			err := validate(t, gdijkstra.DijkstraDirectDeposits{
 				missing: 1,
-			}), &e)
+			})
+			require.ErrorAs(t, err, &e)
+			require.True(t, IsSemanticRuleValidationError(err))
 		})
 		t.Run(name+" wrong network", func(t *testing.T) {
 			var e gdijkstra.WrongNetworkAccountAddressesError
