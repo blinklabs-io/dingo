@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 const (
@@ -81,6 +82,19 @@ func (n *Node) chainsyncObservePeerRollback(
 		event.NewEvent(chainselection.PeerRollbackEventType, e),
 	)
 	return true
+}
+
+// chainsyncObserveAwaitReply records the explicit ChainSync idle frontier in
+// the selector. The nil check keeps standalone Ouroboros config construction
+// safe before Run has built the selector.
+func (n *Node) chainsyncObserveAwaitReply(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) {
+	if n.chainSelector == nil {
+		return
+	}
+	n.chainSelector.SetPeerIdling(connId, point)
 }
 
 // chainsyncApplyEligible gates whether a peer's headers/rollbacks are APPLIED to

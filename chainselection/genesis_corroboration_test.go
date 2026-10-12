@@ -73,8 +73,8 @@ func feedFrontier(
 // feedPoints records a sequence of points into a bare PeerChainTip with hash
 // tracking enabled.
 func feedPoints(pt *PeerChainTip, window uint64, points ...ocommon.Point) {
-	for _, p := range points {
-		pt.recordObservedPoint(p, window, true)
+	for i, p := range points {
+		pt.recordObservedPoint(p, uint64(i+1), window, window, true)
 	}
 }
 
@@ -94,8 +94,7 @@ func feedPointsWithTipHistory(
 	}
 }
 
-// recordObservedPoint keeps the slot frontier and the point (slot+hash)
-// frontier in lockstep, storing the current hash at each slot.
+// recordObservedPoint stores the current hash for each retained point.
 func TestRecordObservedPointTracksHashFrontier(t *testing.T) {
 	pt := &PeerChainTip{}
 	window := uint64(100)
@@ -119,12 +118,37 @@ func TestRecordObservedPointTracksHashFrontier(t *testing.T) {
 	// Re-reporting the same slot with a new hash updates the frontier in place.
 	pt.recordObservedPoint(
 		ocommon.Point{Slot: 30, Hash: []byte("h30b")},
+		3,
+		window,
 		window,
 		true,
 	)
 	require.Equal(t, []uint64{10, 20, 30}, pt.observedSlots)
 	require.Len(t, pt.observedPoints, 3)
 	assert.Equal(t, []byte("h30b"), pt.observedPoints[2].Hash)
+}
+
+func TestRecordObservedPointRestartsAfterHeightGap(t *testing.T) {
+	pt := &PeerChainTip{}
+	window := uint64(100)
+	pt.recordObservedPoint(
+		ocommon.Point{Slot: 10, Hash: []byte("h10")},
+		10,
+		window,
+		window,
+		true,
+	)
+	pt.recordObservedPoint(
+		ocommon.Point{Slot: 30, Hash: []byte("h30")},
+		12,
+		window,
+		window,
+		true,
+	)
+
+	require.Len(t, pt.observedPoints, 1)
+	assert.Equal(t, uint64(12), pt.observedPointBaseBlock)
+	assert.Equal(t, uint64(30), pt.observedPoints[0].Slot)
 }
 
 // With hash tracking disabled (corroboration inactive) only the slot frontier
@@ -136,7 +160,7 @@ func TestRecordObservedPointSkipsHashesWhenInactive(t *testing.T) {
 		{Slot: 10, Hash: []byte("h10")},
 		{Slot: 20, Hash: []byte("h20")},
 	} {
-		pt.recordObservedPoint(p, window, false)
+		pt.recordObservedPoint(p, p.Slot/10, window, window, false)
 	}
 	assert.Equal(t, []uint64{10, 20}, pt.observedSlots)
 	assert.Empty(t, pt.observedPoints)
@@ -145,20 +169,23 @@ func TestRecordObservedPointSkipsHashesWhenInactive(t *testing.T) {
 	// clears it.
 	pt.recordObservedPoint(
 		ocommon.Point{Slot: 30, Hash: []byte("h30")},
+		3,
+		window,
 		window,
 		true,
 	)
 	assert.Len(t, pt.observedPoints, 1)
 	pt.recordObservedPoint(
 		ocommon.Point{Slot: 40, Hash: []byte("h40")},
+		4,
+		window,
 		window,
 		false,
 	)
 	assert.Empty(t, pt.observedPoints)
 }
 
-// ApplyRollback trims the slot and point frontiers together so they stay
-// aligned after a rollback.
+// ApplyRollback trims both frontiers to the rollback slot.
 func TestApplyRollbackTrimsPointFrontier(t *testing.T) {
 	pt := &PeerChainTip{}
 	window := uint64(100)
@@ -184,12 +211,32 @@ func TestApplyRollbackTrimsPointFrontier(t *testing.T) {
 	// A subsequent point extends both frontiers consistently.
 	pt.recordObservedPoint(
 		ocommon.Point{Slot: 40, Hash: []byte("h40")},
+		3,
+		window,
 		window,
 		true,
 	)
 	require.Equal(t, []uint64{10, 20, 40}, pt.observedSlots)
 	require.Len(t, pt.observedPoints, 3)
 	assert.Equal(t, []byte("h40"), pt.observedPoints[2].Hash)
+}
+
+func TestApplyRollbackClearsPointFrontierForUnknownFork(t *testing.T) {
+	pt := &PeerChainTip{}
+	window := uint64(100)
+	feedPoints(pt, window,
+		ocommon.Point{Slot: 10, Hash: []byte("h10")},
+		ocommon.Point{Slot: 20, Hash: []byte("h20")},
+	)
+
+	pt.ApplyRollback(
+		ocommon.Point{Slot: 20, Hash: []byte("other-h20")},
+		genesisTip(30, "advertised", 3),
+	)
+
+	assert.Empty(t, pt.observedPoints)
+	assert.Empty(t, pt.observedSlots)
+	assert.Zero(t, pt.observedPointBaseBlock)
 }
 
 func TestApplyRollbackDoesNotPromoteAdvertisedTipToObserved(t *testing.T) {
@@ -269,9 +316,9 @@ func TestConfirmsRecentChainHashSensitive(t *testing.T) {
 		ocommon.Point{Slot: 20, Hash: []byte("x20")},
 	)
 
-	assert.True(t, honestA.confirmsRecentChain(honestB))
-	assert.False(t, honestA.confirmsRecentChain(divergent))
-	assert.False(t, divergent.confirmsRecentChain(honestB))
+	assert.True(t, honestA.confirmsRecentChainWithin(honestB, 0))
+	assert.False(t, honestA.confirmsRecentChainWithin(divergent, 0))
+	assert.False(t, divergent.confirmsRecentChainWithin(honestB, 0))
 }
 
 // Regression for the "shared ancestor then diverge" bypass: a fast source that
@@ -295,7 +342,7 @@ func TestConfirmsRecentChainRejectsSharedAncestorThenDiverge(t *testing.T) {
 		ocommon.Point{Slot: 111, Hash: []byte("h111")},
 	)
 
-	assert.False(t, fast.confirmsRecentChain(honest),
+	assert.False(t, fast.confirmsRecentChainWithin(honest, 0),
 		"a witness that diverges after the shared ancestor must not confirm")
 }
 
@@ -313,7 +360,7 @@ func TestConfirmsRecentChainRequiresOverlap(t *testing.T) {
 		ocommon.Point{Slot: 100, Hash: []byte("h100")},
 		ocommon.Point{Slot: 105, Hash: []byte("h105")},
 	)
-	assert.False(t, ahead.confirmsRecentChain(behind))
+	assert.False(t, ahead.confirmsRecentChainWithin(behind, 0))
 }
 
 func TestGenesisCorroborationRejectsOldMatchWithAheadWitness(t *testing.T) {
@@ -963,8 +1010,8 @@ func TestGenesisCorroborationDedupsBySybilHost(t *testing.T) {
 	for _, conn := range []ouroboros.ConnectionId{fast, sybilA, sybilB} {
 		feedFrontier(cs, conn,
 			genesisTip(100, "h100", 100),
-			genesisTip(105, "h105", 105),
-			genesisTip(110, "h110", 110),
+			genesisTip(105, "h105", 101),
+			genesisTip(110, "h110", 102),
 		)
 	}
 
@@ -980,7 +1027,7 @@ func TestGenesisCorroborationDedupsBySybilHost(t *testing.T) {
 	independent := corrConnAddr("10.0.0.42", 3001)
 	feedFrontier(cs, independent,
 		genesisTip(100, "h100", 100),
-		genesisTip(105, "h105", 105),
+		genesisTip(105, "h105", 101),
 	)
 	cs.EvaluateAndSwitch()
 	require.NotNil(t, cs.GetBestPeer(),
