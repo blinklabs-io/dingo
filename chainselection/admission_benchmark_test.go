@@ -32,7 +32,7 @@ func admissionCostFixture(
 		DisableEventSubscriptions: true,
 	})
 	var measured PeerTipUpdateEvent
-	for i := 0; i < admissionCostPeerCount; i++ {
+	for i := range admissionCostPeerCount {
 		connID := newTestConnectionId(100 + i)
 		point := ocommon.Point{Slot: uint64(10_000 + i), Hash: []byte("tip")}
 		tip := ochainsync.Tip{Point: point, BlockNumber: uint64(10_000 + i)}
