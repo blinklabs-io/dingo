@@ -107,6 +107,10 @@ func (ls *LedgerState) clearUnrecoverableRollbacks() {
 // cycles, surfaces the stuck-divergence condition as a throttled
 // operator-facing error plus a metric, rather than only the per-attempt
 // WARN that otherwise repeats indefinitely with zero forward progress.
+// A point retained on the local primary chain cannot establish which side of
+// that point the network will ultimately select. This tracker therefore does
+// not diagnose local divergence from that point based on one peer's rollback,
+// even when the rollback is beyond K or a local restoration boundary.
 //
 // Callers must hold chainsyncMutex.
 func (ls *LedgerState) reportUnrecoverableRollbackIfStuck(

@@ -181,6 +181,14 @@ func TestReportUnrecoverableRollbackRequiresPointOffPrimaryChain(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
+	key := unrecoverableRollbackKey(fixture.ancestorTip.Point)
+	fixture.ls.unrecoverableRollbacks = map[string]unrecoverableRollbackRecord{
+		key: {
+			count:     unrecoverableRollbackThreshold - 1,
+			firstSeen: time.Now(),
+			lastSeen:  time.Now(),
+		},
+	}
 
 	// The local primary chain has continued beyond this rollback point. A
 	// forked peer can ask us to leave it repeatedly, but that cannot establish
@@ -196,9 +204,7 @@ func TestReportUnrecoverableRollbackRequiresPointOffPrimaryChain(t *testing.T) {
 		t,
 		promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks),
 	)
-	_, tracked := fixture.ls.unrecoverableRollbacks[unrecoverableRollbackKey(
-		fixture.ancestorTip.Point,
-	)]
+	_, tracked := fixture.ls.unrecoverableRollbacks[key]
 	require.False(t, tracked)
 }
 

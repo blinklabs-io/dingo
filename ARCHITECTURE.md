@@ -6348,7 +6348,12 @@ the tracker uses the bounded local primary-chain membership check also used for
 historical headers. It advances only after that authoritative check confirms
 the point is absent; unavailable chain state or a lookup error cannot produce
 the diagnosis. A rollback point still on the authoritative local chain is
-evidence of the peer's fork, so it cannot diagnose the local chain as diverged.
+evidence of the peer's fork, so it cannot diagnose the local chain as diverged;
+the tracker also discards any older failure record for that point.
+Primary-chain membership alone cannot establish which branch the network will
+ultimately select. The tracker therefore does not issue the definitive local
+divergence diagnosis for an on-chain point, including when crossing that point
+would exceed K or a local restoration boundary.
 When the per-connection loop
 detector itself breaks a loop by skipping a rollback it can no longer cross,
 it feeds that same point-keyed tracker so the escalation and metric fire on
