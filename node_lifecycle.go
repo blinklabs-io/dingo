@@ -1746,14 +1746,7 @@ func (n *Node) Restore(
 			}
 			return nil
 		},
-		lifecycle.RestoreStorageConfig{
-			Blob:          n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
-			Metadata:      n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
-			ActiveDataDir: n.config.dataDir,
-			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
-				n.config.cardanoNodeConfig, "", n.config.network,
-			),
-		},
+		n.restoreStorageConfig(),
 		manifestOpts...,
 	)
 	if err != nil {
@@ -1819,8 +1812,8 @@ func (n *Node) Restore(
 	if err := finalizeSuccessfulRestore(recovery.Commit, backupDir); err != nil {
 		n.config.logger.Warn(
 			"failed to finalize restore recovery after a successful restore",
-			"dir",
-			recovery.BackupDir(),
+			"remote_recovery_dir", recovery.BackupDir(),
+			"local_backup_dir", backupDir,
 			"error",
 			err,
 		)
@@ -2072,6 +2065,20 @@ func (n *Node) restoreStorageConfig() lifecycle.RestoreStorageConfig {
 	}
 }
 
+func (n *Node) reconcileInterruptedRestore(ctx context.Context) error {
+	if err := n.reconcileInterruptedLiveRestoreSwap(); err != nil {
+		return fmt.Errorf(
+			"reconcile interrupted live restore swap: %w", err,
+		)
+	}
+	if err := n.reconcileInterruptedRemoteRestore(ctx); err != nil {
+		return fmt.Errorf("reconcile interrupted remote restore: %w", err)
+	}
+	return nil
+}
+
+var recoverInterruptedRestore = lifecycle.RecoverInterruptedRestore
+
 func (n *Node) reconcileInterruptedRemoteRestore(ctx context.Context) error {
 	dataDir := n.config.dataDir
 	stagingDir := dataDir + restoreStagingSuffix
@@ -2098,11 +2105,11 @@ func (n *Node) reconcileInterruptedRemoteRestore(ctx context.Context) error {
 		return fmt.Errorf("build storage plugin host for restore recovery: %w", err)
 	}
 	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
-	if err := lifecycle.RecoverInterruptedRestore(
+	if err := recoverInterruptedRestore(
 		ctx,
 		host,
 		recoveryDir,
-		dataDir,
+		stagingDir,
 		n.restoreStorageConfig(),
 		false,
 	); err != nil {

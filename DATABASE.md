@@ -669,7 +669,8 @@ survive cleanup rather than be replaced by an older value read by the import.
   same marker again before opening the blob provider. Validation therefore
   reads the staged metadata and staged blob namespace as one pair, while every
   failure before activation leaves the configured cloud prefix unchanged and
-  removes any objects written to the failed namespace. The existing atomic
+  attempts to remove objects written to the failed namespace. Cleanup failures
+  are reported as `ErrRestoreRollbackPending`. The existing atomic
   directory rename activates the local store and its cloud namespace selector.
   PostgreSQL/MySQL metadata changes before that rename, so live restore also
   fsyncs a recovery record beside the staging directory before mutation.

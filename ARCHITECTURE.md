@@ -3023,10 +3023,11 @@ database. Before resetting remote metadata,
 the metadata archive, reads the complete cloud-blob stream (all record framing,
 terminator count, CRC32 checksum, and trailing-data check), and captures
 the original remote metadata backup. S3/GCS restore into a random namespace
-beneath the configured object prefix. A selector in the staged data directory
-selects the blob generation when the directory becomes active. Provider startup
-without a selector continues to use the legacy object layout. PostgreSQL/MySQL
-metadata is replaced before the local swap, so lifecycle fsyncs a durable
+beneath the S3 configured prefix or the GCS bucket root. A selector in the
+staged data directory selects the blob generation when the directory becomes
+active. Provider startup without a selector continues to use the legacy object
+layout. PostgreSQL/MySQL metadata is replaced before the local swap, so
+lifecycle fsyncs a durable
 recovery record before that mutation. Startup combines the record with the
 live/backup directory state to compensate an incomplete swap or retain the
 activated external pair.

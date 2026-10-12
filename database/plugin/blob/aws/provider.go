@@ -18,6 +18,7 @@ package aws
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -75,6 +76,9 @@ func objectPrefix(configured string, dataDir string) (string, error) {
 	namespace, err := blob.ReadNamespace(dataDir)
 	if err != nil {
 		return "", err
+	}
+	if namespace != "" && configured != "" && !strings.HasSuffix(configured, "/") {
+		configured += "/"
 	}
 	return blob.NamespacePrefix(configured, namespace), nil
 }

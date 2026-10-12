@@ -726,7 +726,7 @@ func TestRollbackIsNoopReportsFalse(t *testing.T) {
 	}
 }
 
-func TestProviderScopesObjectsToDataDirNamespace(t *testing.T) {
+func TestObjectPrefixScopesKeysToDataDirNamespace(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	namespace := "0123456789abcdef0123456789abcdef"
@@ -743,6 +743,20 @@ func TestProviderScopesObjectsToDataDirNamespace(t *testing.T) {
 	decoded, err := store.externalKey(objectKey)
 	require.NoError(t, err)
 	require.Equal(t, string(key), decoded)
+}
+
+func TestLegacyPrefixExcludesNamespacedObjects(t *testing.T) {
+	t.Parallel()
+	store, err := NewWithOptions()
+	require.NoError(t, err)
+	require.True(t, store.isNamespacedObject(
+		".dingo-namespaces/0123456789abcdef0123456789abcdef/00",
+	))
+	require.False(t, store.isNamespacedObject("00"))
+	store.prefix = "configured/"
+	require.False(t, store.isNamespacedObject(
+		".dingo-namespaces/0123456789abcdef0123456789abcdef/00",
+	))
 }
 
 func TestTombstoneBlockRetainsMetadata(t *testing.T) {

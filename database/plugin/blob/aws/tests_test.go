@@ -708,13 +708,15 @@ func TestProviderScopesObjectsToDataDirNamespace(t *testing.T) {
 	dataDir := t.TempDir()
 	namespace := "0123456789abcdef0123456789abcdef"
 	require.NoError(t, blob.WriteNamespace(dataDir, namespace))
-	prefix, err := objectPrefix("configured/", dataDir)
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		"configured/.dingo-namespaces/"+namespace+"/",
-		prefix,
-	)
+	for _, configured := range []string{"configured", "configured/"} {
+		prefix, err := objectPrefix(configured, dataDir)
+		require.NoError(t, err)
+		require.Equal(
+			t,
+			"configured/.dingo-namespaces/"+namespace+"/",
+			prefix,
+		)
+	}
 }
 
 func TestReadBlobBodyWithLimit(t *testing.T) {

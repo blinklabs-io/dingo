@@ -34,6 +34,30 @@ const (
 	namespaceBytes    = 16
 )
 
+var syncNamespaceDir = fsyncdir.Sync
+
+// namespacePublishedError reports a directory sync failure after the namespace
+// marker was atomically replaced. Callers that are compensating a failed
+// operation can still use the published marker to clean up its namespace.
+type namespacePublishedError struct {
+	err error
+}
+
+func (e *namespacePublishedError) Error() string {
+	return e.err.Error()
+}
+
+func (e *namespacePublishedError) Unwrap() error {
+	return e.err
+}
+
+// NamespacePublished reports whether WriteNamespace published the marker
+// before returning err.
+func NamespacePublished(err error) bool {
+	var publishedErr *namespacePublishedError
+	return errors.As(err, &publishedErr)
+}
+
 // NewNamespace returns a random identifier suitable for an isolated cloud
 // blob namespace.
 func NewNamespace() (string, error) {
@@ -85,7 +109,12 @@ func WriteNamespace(dataDir string, namespace string) error {
 		return fmt.Errorf("publish blob namespace: %w", err)
 	}
 	renamed = true
-	return fsyncdir.Sync(dataDir)
+	if err := syncNamespaceDir(dataDir); err != nil {
+		return &namespacePublishedError{
+			err: fmt.Errorf("sync blob namespace directory: %w", err),
+		}
+	}
+	return nil
 }
 
 // ReadNamespace returns the namespace selected by dataDir. A missing marker

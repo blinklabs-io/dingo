@@ -800,6 +800,7 @@ func TestCloudRestoreCommitPreservesNewNamespaceAfterLegacyStore(t *testing.T) {
 	require.NoError(t, os.MkdirAll(activeDir, 0o700))
 	original := openRemoteTestDatabase(t, remoteDir)
 	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x11), nil))
+	legacyBlobs := readBlobContents(t, original.db)
 	original.close(t)
 
 	snapshotDir, incomingBlobs := makeCloudRestoreSnapshot(t, 0x66)
@@ -820,6 +821,7 @@ func TestCloudRestoreCommitPreservesNewNamespaceAfterLegacyStore(t *testing.T) {
 	newNamespace, err := blob.ReadNamespace(targetDir)
 	require.NoError(t, err)
 	require.NoError(t, recovery.Commit())
+	require.Equal(t, legacyBlobs, readRemoteBlobNamespace(t, remoteDir, ""))
 	require.Equal(t, incomingBlobs, readRemoteBlobNamespace(t, remoteDir, newNamespace))
 }
 

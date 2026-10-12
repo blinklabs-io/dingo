@@ -1736,6 +1736,94 @@ func TestInterruptedRemoteRestoreDisposition(t *testing.T) {
 	}
 }
 
+func TestInterruptedRestoreReconcilesLocalSwapBeforeRemoteState(t *testing.T) {
+	originalRecover := recoverInterruptedRestore
+	recoverInterruptedRestore = func(
+		_ context.Context,
+		_ *plugin.Host,
+		recoveryDir string,
+		targetDataDir string,
+		_ lifecycle.RestoreStorageConfig,
+		_ bool,
+	) error {
+		if err := os.MkdirAll(targetDataDir, 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(
+			filepath.Join(targetDataDir, "remote-recovery"),
+			[]byte("marker"),
+			0o600,
+		); err != nil {
+			return err
+		}
+		return os.RemoveAll(recoveryDir)
+	}
+	t.Cleanup(func() { recoverInterruptedRestore = originalRecover })
+
+	tests := []struct {
+		name         string
+		dataMarker   string
+		backupMarker string
+		wantMarker   string
+		wantDataDir  bool
+		wantRecovery bool
+	}{
+		{
+			name: "before swap", dataMarker: "original",
+			wantMarker: "original", wantDataDir: true,
+		},
+		{
+			name: "between renames", backupMarker: "original",
+			wantMarker: "original", wantDataDir: true,
+		},
+		{
+			name: "before target creation",
+		},
+		{
+			name: "activated replacement", dataMarker: "restored",
+			backupMarker: "original", wantMarker: "restored",
+			wantDataDir: true, wantRecovery: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			dataDir := filepath.Join(base, "data")
+			backupDir := dataDir + preRestoreBackupSuffix
+			stagingDir := dataDir + restoreStagingSuffix
+			if tc.dataMarker != "" {
+				writeMarkerFile(t, dataDir, tc.dataMarker)
+			}
+			if tc.backupMarker != "" {
+				writeMarkerFile(t, backupDir, tc.backupMarker)
+			}
+			recoveryDir := lifecycle.RestoreRecoveryDir(stagingDir)
+			require.NoError(t, os.MkdirAll(recoveryDir, 0o700))
+
+			n := newSwapTestNode(t, dataDir)
+			require.NoError(t, n.reconcileInterruptedRestore(
+				context.Background(),
+			))
+
+			if tc.wantDataDir {
+				requireMarkerFile(t, dataDir, tc.wantMarker)
+				require.NoFileExists(
+					t,
+					filepath.Join(dataDir, "remote-recovery"),
+				)
+			} else {
+				requireNoDir(t, dataDir)
+			}
+			_, err := os.Stat(recoveryDir)
+			if tc.wantRecovery {
+				require.NoError(t, err)
+			} else {
+				require.True(t, os.IsNotExist(err))
+			}
+		})
+	}
+}
+
 // TestSwapInRestoredDataDirRetainsBackupUntilCallerConfirms guards the
 // core fix: a directory swap succeeding is not by itself proof the
 // restored data actually works, so swapInRestoredDataDir must never

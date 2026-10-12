@@ -47,7 +47,8 @@ func WithBucket(bucket string) BlobStoreGCSOptionFunc {
 	}
 }
 
-// WithPrefix scopes object keys beneath prefix.
+// WithPrefix scopes object keys beneath prefix. The prefix is used verbatim, so
+// callers must include any trailing separator.
 func WithPrefix(prefix string) BlobStoreGCSOptionFunc {
 	return func(b *BlobStoreGCS) {
 		b.prefix = prefix

@@ -147,6 +147,10 @@ func (d *BlobStoreGCS) externalKey(key string) (string, error) {
 	return string(b), nil
 }
 
+func (d *BlobStoreGCS) isNamespacedObject(key string) bool {
+	return d.prefix == "" && strings.HasPrefix(key, ".dingo-namespaces/")
+}
+
 func (d *BlobStoreGCS) object(key []byte) *storage.ObjectHandle {
 	return d.bucket.Object(d.fullKey(string(key)))
 }
@@ -568,6 +572,9 @@ func (it *gcsStreamIterator) advance() {
 			it.err = err
 			it.valid = false
 			return
+		}
+		if it.store.isNamespacedObject(objAttrs.Name) {
+			continue
 		}
 		key, err := it.store.externalKey(objAttrs.Name)
 		if err != nil {
@@ -1253,6 +1260,9 @@ func (d *BlobStoreGCS) listKeysToFile(
 		}
 		if err != nil {
 			return nil, cleanup(err)
+		}
+		if d.isNamespacedObject(objAttrs.Name) {
+			continue
 		}
 
 		externalKey, err := d.externalKey(objAttrs.Name)
