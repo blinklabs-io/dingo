@@ -96,7 +96,7 @@ func (t *validityOutcomeStateTx) Produced() []lcommon.Utxo {
 		return nil
 	}
 	return []lcommon.Utxo{{
-		Id: shelley.NewShelleyTransactionInput(
+		Id: shelley.MustNewShelleyTransactionInput(
 			t.Hash().String(),
 			len(t.Outputs()),
 		),

@@ -162,17 +162,16 @@ func TestHeaderQueueFullWithBlockfetchInFlightDoesNotRestart(t *testing.T) {
 	assert.Equal(t, inFlight, fixture.ls.chainsyncBlockfetchReadyChan)
 }
 
-// A blockfetch timeout whose retry fails with no alternate connection clears
-// the batch but keeps the queued headers. With the queue at capacity, that is
-// the idle full queue: every later header is rejected for capacity, so the
-// next header must be the one that starts the fetch again.
-func TestHeaderQueueFullAfterTimeoutRetryFailureResumesFetch(t *testing.T) {
+// A blockfetch timeout with no alternate connection clears the batch but keeps
+// the queued headers without redispatching to the timed-out peer. With the
+// queue at capacity, that is the idle full queue: every later header is
+// rejected for capacity, so the next header must start the fetch again.
+func TestHeaderQueueFullAfterTimeoutWithoutAlternateResumesFetch(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
 	queueTip, queueBlockNumber := fillHeaderQueue(t, fixture)
 	connId := testChainsyncConnId(6303, 3001)
-	requestErr := errors.New("connection unavailable")
 	requestCount := 0
 	fixture.ls.config.BlockfetchRequestRangeFunc = func(
 		_ ouroboros.ConnectionId,
@@ -180,7 +179,7 @@ func TestHeaderQueueFullAfterTimeoutRetryFailureResumesFetch(t *testing.T) {
 		_ ocommon.Point,
 	) (uint64, error) {
 		requestCount++
-		return 0, requestErr
+		return 0, nil
 	}
 	fixture.ls.activeBlockfetchConnId = connId
 	fixture.ls.selectedBlockfetchConnId = connId
@@ -188,21 +187,20 @@ func TestHeaderQueueFullAfterTimeoutRetryFailureResumesFetch(t *testing.T) {
 
 	handleBlockfetchTimeoutForTest(fixture.ls, connId, nil)
 
-	require.Positive(t, requestCount, "the timeout must attempt a retry")
+	require.Zero(t, requestCount, "the timeout must not retry the stalled peer")
 	require.Nil(
 		t,
 		fixture.ls.chainsyncBlockfetchReadyChan,
-		"a failed retry leaves no batch in flight",
+		"a timeout without an alternate leaves no batch in flight",
 	)
 	require.False(t, fixture.ls.blockfetchContinuationPending)
 	require.Equal(
 		t,
 		fixture.ls.chain.MaxQueuedHeaders(),
 		fixture.ls.chain.HeaderCount(),
-		"a failed retry with no alternate keeps the full queue",
+		"a timeout without an alternate keeps the full queue",
 	)
 
-	requestErr = nil
 	requestCount = 0
 	next := mockHeader{
 		hash:        lcommon.NewBlake2b256(testHashBytes("queue-full-next-c")),

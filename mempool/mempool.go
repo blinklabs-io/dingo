@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -38,6 +39,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -119,7 +121,7 @@ type Consumer interface {
 // Service is the domain-owned mempool capability consumed by node wiring,
 // networking, forging, ledger, and APIs.
 type Service interface {
-	AddTransaction(uint, []byte) error
+	AddTransaction(context.Context, uint, []byte) error
 	GetTransaction(string) (MempoolTransaction, bool)
 	Transactions() []MempoolTransaction
 	TransactionsBounded(
@@ -1621,7 +1623,27 @@ func (m *Mempool) removeExpiredTransactions() {
 	}
 }
 
-func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
+func (m *Mempool) AddTransaction(
+	ctx context.Context,
+	txType uint,
+	txBytes []byte,
+) (err error) {
+	_, span := tracing.Start(ctx, "mempool.add_transaction")
+	defer func() {
+		result := "accepted"
+		switch {
+		case errors.Is(err, ErrNilValidator),
+			errors.Is(err, ErrMempoolStopped):
+			// Infrastructure faults, not verdicts on the transaction.
+			result = "unavailable"
+		case err != nil:
+			result = "rejected"
+		}
+		span.SetAttributes(
+			attribute.String("mempool.validation_result", result),
+		)
+		tracing.End(span, err)
+	}()
 	if m.validator == nil {
 		// Wrap the package sentinel rather than building a fresh error, so
 		// callers can classify this the same way they classify the other
@@ -1661,7 +1683,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	for attempt := 0; ; attempt++ {
 		var seen *utxoOverlay
 		addEvent, evictedEvents, seen, err = m.addTransactionAttempt(
-			context.Background(), txType, txBytes, tmpTx, txHash,
+			ctx, txType, txBytes, tmpTx, txHash,
 		)
 		if !errors.Is(err, ErrPendingStateMoved) {
 			break
@@ -1669,7 +1691,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		if attempt == maxAdmissionReconciles {
 			return fmt.Errorf("validate transaction: %w", ErrPendingStateMoved)
 		}
-		if err := m.reconcileOverlay(context.Background(), seen); err != nil {
+		if err := m.reconcileOverlay(ctx, seen); err != nil {
 			if errors.Is(err, errValidationSnapshotChanged) {
 				return fmt.Errorf(
 					"reconcile pending transactions: %w: %w",

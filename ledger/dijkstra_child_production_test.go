@@ -285,7 +285,7 @@ func (f *childProdFixture) admit(t *testing.T) error {
 		defer cancel()
 		require.NoError(t, pool.Stop(ctx))
 	}()
-	return pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), f.tx.Cbor())
+	return pool.AddTransaction(context.Background(), uint(gdijkstra.TxTypeDijkstra), f.tx.Cbor())
 }
 
 func (f *childProdFixture) importBlock() error {

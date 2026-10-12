@@ -32,7 +32,7 @@ func TestDrepDeregistrationRejectsWrongRefundWhenUnrecorded(t *testing.T) {
 	seedActiveDrepWithoutRegistration(t, db, cred, 100)
 
 	pp := drepRefundTestPparams()
-	for _, refund := range []int64{0, drepRefundTestPparamDeposit + 1, -1} {
+	for _, refund := range []uint64{0, drepRefundTestPparamDeposit + 1} {
 		err := conway.UtxoValidateCertificateDeposits(
 			drepDeregistrationTx(cred, refund),
 			200,

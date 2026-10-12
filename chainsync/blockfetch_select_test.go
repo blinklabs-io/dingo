@@ -107,6 +107,52 @@ func TestSelectBlockfetchPeerPrefersFasterPeer(t *testing.T) {
 	)
 }
 
+func TestSelectBlockfetchRetryPeerExcludesTimedOutHolder(t *testing.T) {
+	t.Parallel()
+	f := newFetchPeers(t, 2)
+	f.sample(0, 40*time.Millisecond, 50*time.Millisecond)
+
+	got, ok := f.state.SelectBlockfetchRetryPeer(
+		[]ouroboros.ConnectionId{f.conns[0]},
+		f.start,
+	)
+	require.True(t, ok)
+	assert.Equal(t, 1, f.indexOf(got))
+}
+
+func TestSelectBlockfetchRetryPeerPreservesExclusions(t *testing.T) {
+	t.Parallel()
+	f := newFetchPeers(t, 3)
+	f.sample(0, 40*time.Millisecond, 50*time.Millisecond)
+	f.sample(1, 20*time.Millisecond, 25*time.Millisecond)
+
+	got, ok := f.state.SelectBlockfetchRetryPeer(
+		[]ouroboros.ConnectionId{f.conns[0], f.conns[1]},
+		f.start,
+	)
+	require.True(t, ok)
+	assert.Equal(t, 2, f.indexOf(got))
+}
+
+func TestSelectBlockfetchRetryPeerPricesOnlyRemainingPeers(t *testing.T) {
+	t.Parallel()
+	f := newFetchPeers(t, 3)
+	// The failed peer's slow rate must not become the estimate assigned to
+	// the unmeasured remaining peer.
+	f.sample(0, 40*time.Millisecond, 100*time.Second)
+	for range 50 {
+		f.state.RecordBlockfetchLatency(f.conns[1], 10*time.Millisecond)
+	}
+	f.sample(2, 200*time.Millisecond, time.Second)
+
+	got, ok := f.state.SelectBlockfetchRetryPeer(
+		[]ouroboros.ConnectionId{f.conns[0]},
+		f.start,
+	)
+	require.True(t, ok)
+	assert.Equal(t, 1, f.indexOf(got))
+}
+
 // Latency alone would pick peer 0; the per-byte cost makes peer 1 deliver a
 // real batch sooner.
 func TestSelectBlockfetchPeerWeighsThroughput(t *testing.T) {

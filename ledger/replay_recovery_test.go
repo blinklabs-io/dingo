@@ -823,7 +823,7 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 		),
 	)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
 	subId := bus.SubscribeFunc(
@@ -1399,7 +1399,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 		),
 	)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
 	subId := bus.SubscribeFunc(
@@ -1928,7 +1928,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	})
 	require.NoError(t, err)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 
 	cm, err := chain.NewManager(context.Background(), db, bus)
@@ -2107,7 +2107,7 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 
 	cm, err := chain.NewManager(context.Background(), db, bus)
@@ -2448,7 +2448,7 @@ func TestReplayRecoveryRefusesBelowPruneFloorBeforeChainRewind(t *testing.T) {
 	const pruneFloorSyncKey = database.ConsumedUtxoPruneFloorSyncKey
 	require.NoError(t, ls.db.SetSyncState(pruneFloorSyncKey, "120", nil))
 	chainTipBefore := ls.chain.Tip().Point
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
 	resyncSubID := bus.SubscribeFunc(
@@ -2503,7 +2503,7 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
 		return &activeConnId
 	}
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
 	resyncSubID := bus.SubscribeFunc(
@@ -2601,7 +2601,7 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 	ls.config.EventBus = bus
@@ -2715,7 +2715,7 @@ func TestReplayRecoveryRejectsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 	validation := func() *txValidationError {
@@ -2786,7 +2786,7 @@ func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
@@ -2839,7 +2839,7 @@ func TestReplayRecoveryRejectsDeterministicMalformedReferenceScripts(
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
@@ -2884,7 +2884,7 @@ func TestReplayRecoveryRejectsDeterministicMalformedScriptWitnesses(
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
@@ -2934,7 +2934,7 @@ func TestReplayRecoveryDeterministicDuplicateAtTipSkipsDescentSchedule(
 	ls := newReplayRecoveryAuditLedger(t, true)
 	ls.reachedTip.Store(true)
 	require.True(t, ls.IsAtTip())
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
@@ -2989,7 +2989,7 @@ func TestReplayRecoveryDeterministicLatchIsPerFailingBlock(t *testing.T) {
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 	duplicate := shelley.DuplicateInputError{
@@ -3105,7 +3105,7 @@ func TestReplayRecoveryRejectsDeterministicByronUnknownAttributes(
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
 	resyncSubID := bus.SubscribeFunc(
@@ -3636,7 +3636,7 @@ func requireMissingRedeemerRecovery(
 ) {
 	t.Helper()
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
@@ -3716,7 +3716,7 @@ func TestReplayRecoveryKeepsBadInputsOnTheRewindPath(t *testing.T) {
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
@@ -3806,7 +3806,7 @@ func newTrustWindowLedger(
 		}),
 	)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	// Observe the bus-owned subscriber channel directly. Publish hands an
 	// event to this channel before it returns, so draining after a recovery
@@ -4285,7 +4285,7 @@ func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	raw := seedTestChain(t, cm.PrimaryChain(), "halt-on-unreachable", 5)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
@@ -4350,7 +4350,7 @@ func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	raw := seedTestChain(t, cm.PrimaryChain(), "halt-budget-reset", 5)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
@@ -4425,7 +4425,7 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 	pc := cm.PrimaryChain()
 	raw := seedTestChain(t, pc, "moving-target", startingChain)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
@@ -4565,7 +4565,7 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 	pc := cm.PrimaryChain()
 	raw := seedTestChain(t, pc, "target-not-on-chain", blockCount)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
@@ -4645,7 +4645,7 @@ func TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold(t *testing.T) {
 	pc := cm.PrimaryChain()
 	seedTestChain(t, pc, "slot-zero-target", blockCount)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
