@@ -2058,8 +2058,9 @@ type MetadataStore interface {
 	// GetPoolRegistrationsEffectiveForEpoch retrieves the registration
 	// selected for each pool by the supplied epoch window. It considers the
 	// latest registration or retirement before epochStartSlot, then uses the
-	// earliest registration in [epochStartSlot, snapshotSlot] only for pools
-	// without an earlier registration. Callers whose SNAP follows POOLREAP
+	// earliest registration in [epochStartSlot, snapshotSlot] for pools without
+	// a pre-epoch registration selected, including pools whose latest prior
+	// event is a retirement. Callers whose SNAP follows POOLREAP
 	// set epochStartSlot to the incoming boundary so registrations from the
 	// just-ended epoch are included in the pre-epoch selection.
 	GetPoolRegistrationsEffectiveForEpoch(
