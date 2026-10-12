@@ -3269,3 +3269,60 @@ func TestValidateImportStateRetainsStoredPreviousParameters(t *testing.T) {
 		"valid stored previous parameters must support catch-up reentry",
 	)
 }
+
+// A re-registration staged before the anchor must be the registration the
+// next boundary promotes: a retirement there refunds the staged reward
+// account, and the stored pool carries the staged parameters.
+func TestImportPoolsAppliesFutureParamsAtNextBoundary(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x81}, 28)
+	oldAccount := bytes.Repeat([]byte{0x82}, 28)
+	newAccount := bytes.Repeat([]byte{0x83}, 28)
+	deposit := uint64(500_000_000)
+	cfg := ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State:    &RawLedgerState{Epoch: 659},
+	}
+	current := ParsedPool{
+		PoolKeyHash:   poolKeyHash,
+		VrfKeyHash:    bytes.Repeat([]byte{0x84}, 32),
+		RewardAccount: oldAccount,
+		Pledge:        1,
+		MarginDen:     1,
+		Deposit:       deposit,
+	}
+	staged := current
+	staged.RewardAccount = newAccount
+	staged.Pledge = 2
+	current.FutureParams = &staged
+
+	require.NoError(t, importPools(
+		context.Background(),
+		cfg,
+		[]ParsedPool{current},
+		1000,
+		map[uint64][][]byte{661: {poolKeyHash}},
+	))
+
+	refunds, err := db.GetPoolsRetiringAtEpoch(
+		context.Background(), 661, 2000, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, refunds, 1)
+	require.Equal(t, newAccount, []byte(refunds[0].RewardAccount))
+	require.Equal(t, deposit, uint64(refunds[0].DepositHeld))
+
+	pool, err := db.Metadata().GetPool(
+		testPoolKeyHash(poolKeyHash), true, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, newAccount, []byte(pool.RewardAccount))
+	require.NotEmpty(t, pool.Registration)
+	require.Equal(t, newAccount, []byte(pool.Registration[0].RewardAccount))
+}

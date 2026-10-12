@@ -705,12 +705,24 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		},
 	)
 
+	type parsedMap struct {
+		idx     int
+		pools   []ParsedPool
+		warning error
+	}
+	parsed := make([]parsedMap, 0, len(maps))
 	var bestPools []ParsedPool
 	var bestWarning error
 	bestIdx := -1
 	for _, m := range maps {
 		pools, warning := parseCertPoolParamsMap(ps[m.idx])
-		if bestIdx < 0 || len(pools) > len(bestPools) {
+		parsed = append(parsed, parsedMap{m.idx, pools, warning})
+		// futurePoolParams can parse as many pools as poolParams, and may
+		// encode larger. Every layout lists poolParams first, so on a tie
+		// the lower position is the current map.
+		if bestIdx < 0 || len(pools) > len(bestPools) ||
+			(len(pools) > 0 && len(pools) == len(bestPools) &&
+				m.idx < bestIdx) {
 			bestPools = pools
 			bestWarning = warning
 			bestIdx = m.idx
@@ -723,6 +735,17 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 	if len(bestPools) > 0 {
 		if err := mergePoolDeposits(bestPools, ps, bestIdx); err != nil {
 			mapErrs = append(mapErrs, err)
+		}
+		for _, p := range parsed {
+			if p.idx == bestIdx || len(p.pools) == 0 {
+				continue
+			}
+			if err := mergeFuturePoolParams(
+				bestPools, p.pools, p.warning,
+			); err != nil {
+				mapErrs = append(mapErrs, err)
+			}
+			break
 		}
 	}
 	retirementIndices := make([]int, 0, len(ps))
@@ -750,6 +773,44 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		mapErrs = append(mapErrs, err)
 	}
 	return bestPools, retirements, errors.Join(mapErrs...)
+}
+
+// mergeFuturePoolParams attaches the PState futurePoolParams entries -- the
+// re-registrations staged during the snapshot's epoch and not yet promoted --
+// to the pools they re-register. Only the map that decodes as pool parameters
+// but is not poolParams can be futurePoolParams: the other PState maps carry
+// scalars or VRF keys. The pool's deposit is carried forward because a
+// re-registration of a registered pool pays none.
+//
+// An entry that cannot be decoded or has no registered pool is an error: it
+// is a re-registration the node would otherwise never apply.
+func mergeFuturePoolParams(
+	pools []ParsedPool,
+	future []ParsedPool,
+	warning error,
+) error {
+	byHash := make(map[string]int, len(pools))
+	for i := range pools {
+		byHash[string(pools[i].PoolKeyHash)] = i
+	}
+	var errs []error
+	if warning != nil {
+		errs = append(errs, fmt.Errorf("future pool params: %w", warning))
+	}
+	for i := range future {
+		idx, ok := byHash[string(future[i].PoolKeyHash)]
+		if !ok {
+			errs = append(errs, fmt.Errorf(
+				"future pool params for unregistered pool %x",
+				future[i].PoolKeyHash,
+			))
+			continue
+		}
+		f := future[i]
+		f.Deposit = pools[idx].Deposit
+		pools[idx].FutureParams = &f
+	}
+	return errors.Join(errs...)
 }
 
 func mergePoolDeposits(

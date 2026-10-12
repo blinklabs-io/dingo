@@ -4703,6 +4703,15 @@ unconditionally (the deferred-retry path in
 `verifyBlockHeaderStateWithCache` only covers a ledger tip still catching up,
 not this permanent gap).
 
+When the snapshot's PState carries a re-registration staged in
+`futurePoolParams` (made in the anchor epoch, not yet promoted), the import
+writes two registrations for that pool: the parameters in force at
+`import slot - 1` and the staged parameters at the import slot, because
+`pool_registration` is unique on (`pool_id`, `added_slot`). The staged row is
+the pool's latest registration, so the next epoch boundary and a pool
+retirement refund read it, and the `pool` row holds its parameters, as after a
+live re-registration. The deposit is the same on both rows.
+
 The fix lives in `electingVrfKeyHashWithCache`, not in these two queries or in
 `ImportPool`: when both lookups miss, and this is a Mithril-bootstrapped node
 (`ls.mithrilLedgerSlot != 0`) whose stake-snapshot capture slot is at or below
