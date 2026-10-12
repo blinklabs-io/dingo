@@ -51,6 +51,8 @@ func TestProviderRejectsInvalidGCPolicy(t *testing.T) {
 		config map[string]any
 	}{
 		{"negative interval", map[string]any{"gcInterval": "-1m"}},
+		{"nanosecond interval", map[string]any{"gcInterval": "1ns"}},
+		{"millisecond interval", map[string]any{"gcInterval": "1ms"}},
 		{"negative ratio", map[string]any{"gcDiscardRatio": -0.1}},
 		{"ratio one", map[string]any{"gcDiscardRatio": 1.0}},
 		{"ratio above one", map[string]any{"gcDiscardRatio": 1.5}},

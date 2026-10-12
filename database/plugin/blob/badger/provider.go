@@ -16,6 +16,7 @@ package badger
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"time"
 
@@ -90,6 +91,9 @@ func RegisterProvider(host *hostplugin.Host) error {
 			gcEnabled := deps.RunMode != "load"
 			if cfg.GC != nil && deps.RunMode != "load" {
 				gcEnabled = *cfg.GC
+			}
+			if cfg.GCInterval != 0 && cfg.GCInterval < time.Second {
+				return nil, nil, fmt.Errorf("gcInterval must be at least one second")
 			}
 			gcDiscardRatio := DefaultGCDiscardRatio
 			if cfg.GCDiscardRatio != nil {

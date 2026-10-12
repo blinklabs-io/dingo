@@ -2,7 +2,7 @@
 
 Dingo's Badger blob store runs value-log GC every five minutes with a discard
 ratio of `0.5`. Both values are configurable through the Badger provider
-options `gcInterval` (a duration such as `10m`; zero keeps the default) and
+options `gcInterval` (at least one second, such as `10m`; zero keeps the default) and
 `gcDiscardRatio` (greater than 0 and less than 1). Invalid values are rejected
 at startup. Keep the defaults unless measurements on your workload show a
 better tradeoff. This is separate from Badger's automatic LSM compaction. The

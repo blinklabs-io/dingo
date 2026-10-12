@@ -117,9 +117,6 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return testutil.ToFloat64(store.gcMetrics.noRewrite) > 0
 	}, time.Minute, 10*time.Millisecond)
-	close(stop)
-	store.gcWg.Wait()
-
 	require.Positive(t, testutil.ToFloat64(store.gcMetrics.successes))
 	require.Positive(t, testutil.ToFloat64(store.gcMetrics.consecutive))
 	require.Equal(
@@ -127,6 +124,14 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 		wantReclaimed,
 		testutil.ToFloat64(store.gcMetrics.reclaimedBytes),
 	)
+	ticks <- time.Time{}
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(store.gcMetrics.noRewrite) > 1
+	}, time.Minute, 10*time.Millisecond)
+	close(stop)
+	store.gcWg.Wait()
+	require.Zero(t, testutil.ToFloat64(store.gcMetrics.consecutive))
+	require.Zero(t, testutil.ToFloat64(store.gcMetrics.reclaimedBytes))
 	_, vlog, err := store.onDiskSize()
 	require.NoError(t, err)
 	require.Equal(
