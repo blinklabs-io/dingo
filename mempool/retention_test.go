@@ -162,12 +162,12 @@ func TestMempoolDuplicateAtCapacityRetainsNothingNew(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), first),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), first),
 	)
 
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), first),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), first),
 		"a duplicate is accepted without a new entry even when the pool is full",
 	)
 	require.Equal(t, retainedSize(t, first), pool.currentSizeBytes)
@@ -177,7 +177,7 @@ func TestMempoolDuplicateAtCapacityRetainsNothingNew(t *testing.T) {
 	var full *MempoolFullError
 	require.ErrorAs(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), second),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), second),
 		&full,
 		"the refresh must not make room for a different transaction",
 	)
@@ -199,7 +199,7 @@ func TestMempoolDuplicateOfExpiredTransactionIsChargedAgain(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	txType := uint(conway.EraIdConway)
-	require.NoError(t, pool.AddTransaction(txType, first))
+	require.NoError(t, pool.AddTransaction(context.Background(), txType, first))
 	pool.Lock()
 	for _, tx := range pool.transactions {
 		tx.LastSeen = time.Now().Add(-2 * time.Minute)
@@ -209,11 +209,11 @@ func TestMempoolDuplicateOfExpiredTransactionIsChargedAgain(t *testing.T) {
 	require.Empty(t, pool.Transactions())
 	require.Zero(t, pool.currentSizeBytes)
 
-	require.NoError(t, pool.AddTransaction(txType, second))
+	require.NoError(t, pool.AddTransaction(context.Background(), txType, second))
 	var full *MempoolFullError
 	require.ErrorAs(
 		t,
-		pool.AddTransaction(txType, first),
+		pool.AddTransaction(context.Background(), txType, first),
 		&full,
 		"an expired transaction is admitted afresh, not refreshed",
 	)
@@ -250,7 +250,7 @@ func TestMempoolSizeCounterMatchesRetainedTransactionBytes(t *testing.T) {
 		txBytes := withdrawalTxCbor(t, seed, withdrawalStakeKey, uint64(seed))
 		require.NoError(
 			t,
-			pool.AddTransaction(uint(conway.EraIdConway), txBytes),
+			pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes),
 		)
 		tx, err := gledger.NewTransactionFromCbor(
 			uint(conway.EraIdConway),
@@ -420,8 +420,8 @@ func TestRevalidationKeepsDescendantWhenParentConfirmedMidPass(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 			txType := uint(conway.EraIdConway)
-			require.NoError(t, pool.AddTransaction(txType, parentBytes))
-			require.NoError(t, pool.AddTransaction(txType, childBytes))
+			require.NoError(t, pool.AddTransaction(context.Background(), txType, parentBytes))
+			require.NoError(t, pool.AddTransaction(context.Background(), txType, childBytes))
 
 			validator.confirmOnCheck.Store(true)
 			require.NoError(t, pool.rebuildOverlay(context.Background()))

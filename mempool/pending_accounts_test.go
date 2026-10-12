@@ -201,10 +201,10 @@ func TestAdmissionAccountsForPendingWithdrawals(t *testing.T) {
 			second := withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 100)
 			require.NoError(
 				t,
-				pool.AddTransaction(uint(conway.EraIdConway), first),
+				pool.AddTransaction(context.Background(), uint(conway.EraIdConway), first),
 			)
 
-			err := pool.AddTransaction(uint(conway.EraIdConway), second)
+			err := pool.AddTransaction(context.Background(), uint(conway.EraIdConway), second)
 			var incorrect shelley.IncorrectWithdrawalAmountError
 			require.ErrorAs(
 				t,
@@ -224,7 +224,7 @@ func TestAdmissionAccountsForPendingWithdrawals(t *testing.T) {
 			pool.RemoveTransaction(firstTx.Hash().String())
 			require.NoError(
 				t,
-				pool.AddTransaction(uint(conway.EraIdConway), second),
+				pool.AddTransaction(context.Background(), uint(conway.EraIdConway), second),
 				"removing the pending withdrawal releases its balance",
 			)
 		})
@@ -244,11 +244,11 @@ func TestRevalidationAccountsForPendingWithdrawals(t *testing.T) {
 			second := withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 0)
 			require.NoError(
 				t,
-				pool.AddTransaction(uint(conway.EraIdConway), first),
+				pool.AddTransaction(context.Background(), uint(conway.EraIdConway), first),
 			)
 			require.NoError(
 				t,
-				pool.AddTransaction(uint(conway.EraIdConway), second),
+				pool.AddTransaction(context.Background(), uint(conway.EraIdConway), second),
 				"the first withdrawal drains the account the second reads",
 			)
 
@@ -275,7 +275,7 @@ func TestPendingStateWorkGrowsLinearlyWithPoolSize(t *testing.T) {
 		}
 		require.NoError(
 			t,
-			pool.AddTransaction(
+			pool.AddTransaction(context.Background(),
 				uint(conway.EraIdConway),
 				withdrawalTxCbor(t, byte(i+1), withdrawalStakeKey, amount),
 			),
@@ -308,12 +308,12 @@ func TestRemovalKeepsStateOverlayUnlessStatefulTxDropped(t *testing.T) {
 	utxoOnly, _, utxoOnlyHash, _ := getDependentTestTxBytes(t)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), utxoOnly),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), utxoOnly),
 	)
 	stateful := withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 100)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), stateful),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), stateful),
 	)
 	statefulTx, err := gledger.NewTransactionFromCbor(
 		uint(conway.EraIdConway),
@@ -344,7 +344,7 @@ func TestAdmissionFollowsLedgerTipWithoutRebuild(t *testing.T) {
 	for _, seed := range []byte{0x01, 0x03} {
 		require.NoError(
 			t,
-			pool.AddTransaction(
+			pool.AddTransaction(context.Background(),
 				uint(conway.EraIdConway),
 				withdrawalTxCbor(t, seed, withdrawalStakeKey, 0),
 			),
@@ -357,7 +357,7 @@ func TestAdmissionFollowsLedgerTipWithoutRebuild(t *testing.T) {
 
 	require.NoError(
 		t,
-		pool.AddTransaction(
+		pool.AddTransaction(context.Background(),
 			uint(conway.EraIdConway),
 			withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 100),
 		),
@@ -409,7 +409,7 @@ func TestAdmissionAfterPendingWithdrawalConfirmed(t *testing.T) {
 			first := withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 100)
 			require.NoError(
 				t,
-				pool.AddTransaction(uint(conway.EraIdConway), first),
+				pool.AddTransaction(context.Background(), uint(conway.EraIdConway), first),
 			)
 
 			// A block holding the first withdrawal arrives and credits 50;
@@ -418,7 +418,7 @@ func TestAdmissionAfterPendingWithdrawalConfirmed(t *testing.T) {
 
 			require.NoError(
 				t,
-				pool.AddTransaction(
+				pool.AddTransaction(context.Background(),
 					uint(conway.EraIdConway),
 					withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 50),
 				),
@@ -441,7 +441,7 @@ func TestAdmissionAfterPendingDepositConfirmed(t *testing.T) {
 			deposit := depositTxCbor(t, 0x01, withdrawalStakeKey, 50)
 			require.NoError(
 				t,
-				pool.AddTransaction(uint(gledger.TxTypeDijkstra), deposit),
+				pool.AddTransaction(context.Background(), uint(gledger.TxTypeDijkstra), deposit),
 			)
 
 			validator.confirm(t, deposit, 50)
@@ -449,7 +449,7 @@ func TestAdmissionAfterPendingDepositConfirmed(t *testing.T) {
 			var incorrect shelley.IncorrectWithdrawalAmountError
 			require.ErrorAs(
 				t,
-				pool.AddTransaction(
+				pool.AddTransaction(context.Background(),
 					uint(conway.EraIdConway),
 					withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 100),
 				),
@@ -459,7 +459,7 @@ func TestAdmissionAfterPendingDepositConfirmed(t *testing.T) {
 			require.Equal(t, uint64(50), incorrect.Balance)
 			require.NoError(
 				t,
-				pool.AddTransaction(
+				pool.AddTransaction(context.Background(),
 					uint(conway.EraIdConway),
 					withdrawalTxCbor(t, 0x03, withdrawalStakeKey, 50),
 				),
@@ -474,7 +474,7 @@ func TestAdmissionKeepsPendingTxWhenLedgerMovesWithoutConfirming(t *testing.T) {
 	pool, validator := newWithdrawalPool(t, ImplementationFIFO, 100)
 	require.NoError(
 		t,
-		pool.AddTransaction(
+		pool.AddTransaction(context.Background(),
 			uint(conway.EraIdConway),
 			withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 100),
 		),
@@ -485,7 +485,7 @@ func TestAdmissionKeepsPendingTxWhenLedgerMovesWithoutConfirming(t *testing.T) {
 	var incorrect shelley.IncorrectWithdrawalAmountError
 	require.ErrorAs(
 		t,
-		pool.AddTransaction(
+		pool.AddTransaction(context.Background(),
 			uint(conway.EraIdConway),
 			withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 100),
 		),
@@ -571,7 +571,7 @@ func TestConcurrentAdmissionsReconcileThePoolOnce(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(
+		pool.AddTransaction(context.Background(),
 			uint(conway.EraIdConway),
 			withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 0),
 		),
@@ -587,7 +587,7 @@ func TestConcurrentAdmissionsReconcileThePoolOnce(t *testing.T) {
 	errs := make([]error, len(txs))
 	for i, txCbor := range txs {
 		wg.Go(func() {
-			errs[i] = pool.AddTransaction(uint(conway.EraIdConway), txCbor)
+			errs[i] = pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txCbor)
 		})
 	}
 	wg.Wait()
