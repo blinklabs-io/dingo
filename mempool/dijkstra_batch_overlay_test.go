@@ -108,7 +108,7 @@ func buildDijkstraBatch(
 	body, err := cbor.Encode(bodyMap)
 	require.NoError(t, err)
 	txCbor, err := cbor.Encode([]any{
-		cbor.RawMessage(body), map[uint]any{}, true, nil,
+		cbor.RawMessage(body), map[uint]any{}, nil,
 	})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
@@ -123,7 +123,7 @@ func buildDijkstraBatch(
 
 func refKey(ref batchOutRef) utxoref.Key {
 	return utxoref.ForInput(
-		shelley.NewShelleyTransactionInput(
+		shelley.MustNewShelleyTransactionInput(
 			fmt.Sprintf("%x", ref.txID),
 			int(ref.index), //nolint:gosec
 		),
@@ -137,7 +137,7 @@ func childOutputKey(
 ) utxoref.Key {
 	childID := tx.Body.TxSubTransactions.Items()[child].Body.Id()
 	return utxoref.ForInput(
-		shelley.NewShelleyTransactionInput(childID.String(), index),
+		shelley.MustNewShelleyTransactionInput(childID.String(), index),
 	)
 }
 
@@ -145,21 +145,21 @@ func TestUtxoOverlayApplyTxCoversEveryDijkstraBatchLevel(t *testing.T) {
 	t.Parallel()
 	childIn := batchInput(0x11, 0)
 	topIn := batchInput(0x12, 0)
-	tx, txCbor := buildDijkstraBatch(t, batchSpec{
+	tx, _ := buildDijkstraBatch(t, batchSpec{
 		childInputs:  [][]batchOutRef{{childIn}},
 		childOutputs: [][]uint64{{1_000_000}},
 		inputs:       []batchOutRef{topIn},
 		outputs:      []uint64{2_000_000},
 	})
 	overlay := newUtxoOverlay()
-	overlay.applyTx(tx.Hash().String(), uint(dijkstra.TxTypeDijkstra), txCbor, tx)
+	overlay.applyTx(tx.Hash().String(), uint(dijkstra.TxTypeDijkstra), tx, nil)
 
 	require.Contains(t, overlay.consumed, refKey(childIn))
 	require.Contains(t, overlay.consumed, refKey(topIn))
 	require.Len(t, overlay.consumed, 2)
 	childOut := childOutputKey(tx, 0, 0)
 	topOut := utxoref.ForInput(
-		shelley.NewShelleyTransactionInput(tx.Hash().String(), 0),
+		shelley.MustNewShelleyTransactionInput(tx.Hash().String(), 0),
 	)
 	require.NotEqual(t, childOut, topOut)
 	require.Contains(t, overlay.created, childOut)
@@ -174,7 +174,7 @@ func TestUtxoOverlayApplyTxReservesOnlyCollateralForInvalidBatch(
 	childIn := batchInput(0x21, 0)
 	topIn := batchInput(0x22, 0)
 	collateral := batchInput(0x23, 0)
-	tx, txCbor := buildDijkstraBatch(t, batchSpec{
+	tx, _ := buildDijkstraBatch(t, batchSpec{
 		childInputs:      [][]batchOutRef{{childIn}},
 		childOutputs:     [][]uint64{{1_000_000}},
 		inputs:           []batchOutRef{topIn},
@@ -184,7 +184,7 @@ func TestUtxoOverlayApplyTxReservesOnlyCollateralForInvalidBatch(
 		invalid:          true,
 	})
 	overlay := newUtxoOverlay()
-	overlay.applyTx(tx.Hash().String(), uint(dijkstra.TxTypeDijkstra), txCbor, tx)
+	overlay.applyTx(tx.Hash().String(), uint(dijkstra.TxTypeDijkstra), tx, nil)
 
 	require.Equal(
 		t,
@@ -193,7 +193,7 @@ func TestUtxoOverlayApplyTxReservesOnlyCollateralForInvalidBatch(
 	)
 	require.Len(t, overlay.created, 1)
 	collateralReturnKey := utxoref.ForInput(
-		shelley.NewShelleyTransactionInput(tx.Hash().String(), 1),
+		shelley.MustNewShelleyTransactionInput(tx.Hash().String(), 1),
 	)
 	require.Contains(t, overlay.created, collateralReturnKey)
 }
@@ -226,8 +226,8 @@ func TestUtxoOverlayPrunesDescendantOfBatchChildOutput(t *testing.T) {
 		overlay.applyTx(
 			entry.tx.Hash().String(),
 			uint(dijkstra.TxTypeDijkstra),
-			entry.cbor,
 			entry.tx,
+			entry.cbor,
 		)
 	}
 	require.Contains(t, overlay.consumed, childOutput)
@@ -257,6 +257,7 @@ func (v *chainedOverlayValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	consumed map[utxoref.Key]struct{},
 	created map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.StateOverlay,
 ) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()

@@ -4868,7 +4868,13 @@ func TestConwayUnknownVoterRuleDoesNotRejectWhenStateUnavailable(t *testing.T) {
 		conwayUtxoValidationRules,
 		validateUnknownVoters,
 	)
-	require.NoError(t, rule(tx, 0, state, &conway.ConwayProtocolParameters{}))
+	require.NoError(t, lcommon.VerifyTransaction(
+		tx,
+		0,
+		state,
+		&conway.ConwayProtocolParameters{},
+		[]lcommon.UtxoValidationRuleFunc{rule},
+	))
 }
 
 // TestConwayCommitteeRulesAcceptAuthoritativeEmptyCommittee is the mandatory

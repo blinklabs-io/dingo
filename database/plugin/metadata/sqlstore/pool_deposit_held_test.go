@@ -188,7 +188,7 @@ func writeDepositHeldCertWithDeposits(
 		blockIndex,
 		deposits,
 		false,
-		nil,
+		nil, 0,
 	))
 }
 

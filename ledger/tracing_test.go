@@ -128,13 +128,15 @@ func TestProcessEpochRolloverRecordsSpan(t *testing.T) {
 	}
 
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, err := ls.processEpochRollover(
+		_, err := ls.processEpochRolloverWithClassicPParamsContext(
 			context.Background(),
 			txn,
 			currentEpoch,
 			eras.DijkstraEraDesc,
 			pparams,
 			false,
+			false,
+			nil,
 		)
 		return err
 	}))

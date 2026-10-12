@@ -399,6 +399,9 @@ func buildEndorserBlockBlob(
 	ebSlot uint64,
 	ebHash [lcommon.Blake2b256Size]byte,
 ) ([]byte, *database.BlockIngestionResult, error) {
+	if err := validateTransactionOutputIndexes(txs); err != nil {
+		return nil, nil, fmt.Errorf("validate endorser block output indexes: %w", err)
+	}
 	var buf bytes.Buffer
 	result := &database.BlockIngestionResult{
 		TxOffsets:   make(map[[32]byte]database.CborOffset, len(txs)),

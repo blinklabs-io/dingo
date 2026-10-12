@@ -78,45 +78,8 @@ func (b *Blockfrost) handleAccountTransactions(
 	if !ok {
 		return
 	}
-	params := AccountTransactionsParams{Pagination: pagination}
-
-	query := r.URL.Query()
-	if raw := query.Get("from"); raw != "" {
-		pos, err := parseBlockRangePosition(raw)
-		if err != nil {
-			writeError(
-				w,
-				http.StatusBadRequest,
-				"Bad Request",
-				"querystring/from must be a block number, "+
-					`optionally suffixed with ":index".`,
-			)
-			return
-		}
-		params.From = &pos
-	}
-	if raw := query.Get("to"); raw != "" {
-		pos, err := parseBlockRangePosition(raw)
-		if err != nil {
-			writeError(
-				w,
-				http.StatusBadRequest,
-				"Bad Request",
-				"querystring/to must be a block number, "+
-					`optionally suffixed with ":index".`,
-			)
-			return
-		}
-		params.To = &pos
-	}
-	if params.From != nil && params.To != nil &&
-		blockRangeInverted(*params.From, *params.To) {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Bad Request",
-			"querystring/from must be lower than or equal to querystring/to.",
-		)
+	params, ok := parseTransactionRangeOrWriteError(w, r, pagination)
+	if !ok {
 		return
 	}
 
@@ -142,6 +105,53 @@ func (b *Blockfrost) handleAccountTransactions(
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// parseTransactionRangeOrWriteError parses the optional inclusive from/to
+// block-range query parameters shared by the account and address transaction
+// endpoints, writing a Blockfrost 400 when one is malformed or inverted.
+func parseTransactionRangeOrWriteError(
+	w http.ResponseWriter,
+	r *http.Request,
+	pagination PaginationParams,
+) (TransactionRangeParams, bool) {
+	params := TransactionRangeParams{Pagination: pagination}
+	query := r.URL.Query()
+	for _, bound := range []struct {
+		name string
+		dest **BlockRangePosition
+	}{
+		{"from", &params.From},
+		{"to", &params.To},
+	} {
+		raw := query.Get(bound.name)
+		if raw == "" {
+			continue
+		}
+		pos, err := parseBlockRangePosition(raw)
+		if err != nil {
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"querystring/"+bound.name+" must be a block number, "+
+					`optionally suffixed with ":index".`,
+			)
+			return TransactionRangeParams{}, false
+		}
+		*bound.dest = &pos
+	}
+	if params.From != nil && params.To != nil &&
+		blockRangeInverted(*params.From, *params.To) {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"querystring/from must be lower than or equal to querystring/to.",
+		)
+		return TransactionRangeParams{}, false
+	}
+	return params, true
 }
 
 // parseBlockRangePosition parses the Blockfrost account-transactions

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -173,6 +174,31 @@ func (s *waitForTxLedgerStub) TransactionByHash(ctx context.Context,
 	hash []byte,
 ) (*models.Transaction, error) {
 	return s.transactionByHash(hash)
+}
+
+type blockingWaitForTxLedgerStub struct {
+	UtxorpcLedgerState
+	lookupStarted  chan waitForTxLookupStart
+	lookupReturned chan struct{}
+}
+
+type waitForTxLookupStart struct {
+	deadline    time.Time
+	hasDeadline bool
+}
+
+func (s *blockingWaitForTxLedgerStub) TransactionByHash(
+	ctx context.Context,
+	_ []byte,
+) (*models.Transaction, error) {
+	deadline, hasDeadline := ctx.Deadline()
+	s.lookupStarted <- waitForTxLookupStart{
+		deadline:    deadline,
+		hasDeadline: hasDeadline,
+	}
+	<-ctx.Done()
+	close(s.lookupReturned)
+	return nil, ctx.Err()
 }
 
 func TestWaitForTxAlreadyCommittedPreservesFirstRequestOrder(t *testing.T) {
@@ -493,6 +519,60 @@ func TestWaitForTxTimeoutUsesSynchronousUnsubscribe(t *testing.T) {
 		},
 	)
 	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
+	testutil.RequireReceive(
+		t,
+		eb.unsubscribeAndWaitCalled,
+		time.Second,
+		"WaitForTx timeout synchronous unsubscribe",
+	)
+}
+
+func TestWaitForTxTimeoutCancelsCommittedLookupAndUnsubscribes(
+	t *testing.T,
+) {
+	eb := newControlledWaitForTxEventBus()
+	ledgerState := &blockingWaitForTxLedgerStub{
+		lookupStarted:  make(chan waitForTxLookupStart, 1),
+		lookupReturned: make(chan struct{}),
+	}
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus:      eb,
+			LedgerState:   ledgerState,
+			ServerTimeout: 100 * time.Millisecond,
+		}),
+	}
+	resultCh := make(chan error, 1)
+
+	go func() {
+		resultCh <- server.waitForTx(
+			t.Context(),
+			[][]byte{bytes.Repeat([]byte{0xb3}, 32)},
+			func(*submit.WaitForTxResponse) error {
+				t.Error("timeout path must not send a response")
+				return nil
+			},
+		)
+	}()
+
+	lookupStart := testutil.RequireReceive(
+		t,
+		ledgerState.lookupStarted,
+		time.Second,
+		"WaitForTx committed lookup start",
+	)
+	require.True(t, lookupStart.hasDeadline)
+	require.False(t, lookupStart.deadline.IsZero())
+	err := testutil.RequireReceive(
+		t, resultCh, time.Second, "WaitForTx timeout result",
+	)
+	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
+	testutil.RequireReceive(
+		t,
+		ledgerState.lookupReturned,
+		time.Second,
+		"WaitForTx committed lookup cancellation",
+	)
 	testutil.RequireReceive(
 		t,
 		eb.unsubscribeAndWaitCalled,
@@ -1643,4 +1723,160 @@ func TestMatchesTxPattern_SignedMint(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestWaitForTxLimitsReferences(t *testing.T) {
+	t.Parallel()
+
+	ref := func(b byte) []byte { return bytes.Repeat([]byte{b}, 32) }
+	for _, tc := range []struct {
+		name    string
+		refs    [][]byte
+		wantErr bool
+	}{
+		{"at the limit", [][]byte{ref(1), ref(2)}, false},
+		{"duplicate at the limit", [][]byte{ref(1), ref(1)}, false},
+		{"duplicate over the limit", [][]byte{ref(1), ref(1), ref(1)}, true},
+		{"distinct over the limit", [][]byte{ref(1), ref(2), ref(3)}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eb := newControlledWaitForTxEventBus()
+			lookups := 0
+			server := &submitServiceServer{
+				utxorpc: NewUtxorpc(UtxorpcConfig{
+					EventBus: eb,
+					LedgerState: &waitForTxLedgerStub{
+						transactionByHash: func([]byte) (*models.Transaction, error) {
+							lookups++
+							return &models.Transaction{}, nil
+						},
+					},
+					ServerTimeout: time.Second,
+					MaxTxRefs:     2,
+				}),
+			}
+
+			err := server.waitForTx(
+				context.Background(),
+				tc.refs,
+				func(*submit.WaitForTxResponse) error { return nil },
+			)
+
+			if !tc.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+			require.Zero(t, lookups, "no ledger access before the limit check")
+			select {
+			case <-eb.subscribed:
+				t.Fatal("subscribed before the limit check")
+			default:
+			}
+		})
+	}
+}
+
+func TestWaitForTxLookupStopsOnCancel(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lookups := 0
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus: newControlledWaitForTxEventBus(),
+			LedgerState: &waitForTxLedgerStub{
+				transactionByHash: func([]byte) (*models.Transaction, error) {
+					lookups++
+					cancel()
+					return nil, nil
+				},
+			},
+			ServerTimeout: time.Second,
+		}),
+	}
+	refs := [][]byte{
+		bytes.Repeat([]byte{1}, 32),
+		bytes.Repeat([]byte{2}, 32),
+		bytes.Repeat([]byte{3}, 32),
+	}
+
+	err := server.waitForTx(
+		ctx, refs, func(*submit.WaitForTxResponse) error { return nil },
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, lookups)
+}
+
+type evalBusyLedgerStub struct {
+	UtxorpcLedgerState
+}
+
+type cancelingEvalLedgerStub struct {
+	UtxorpcLedgerState
+	ctx context.Context
+}
+
+func (s *cancelingEvalLedgerStub) EvaluateTxContext(
+	ctx context.Context,
+	_ gledger.Transaction,
+) (uint64, common.ExUnits, map[common.RedeemerKey]common.ExUnits, error) {
+	s.ctx = ctx
+	return 0, common.ExUnits{}, nil, ctx.Err()
+}
+
+func (evalBusyLedgerStub) EvaluateTxContext(
+	context.Context,
+	gledger.Transaction,
+) (uint64, common.ExUnits, map[common.RedeemerKey]common.ExUnits, error) {
+	return 0, common.ExUnits{}, nil, fmt.Errorf(
+		"evaluate: %w", ledger.ErrEvaluationBusy,
+	)
+}
+
+func TestEvalTxOverloadReturnsResourceExhausted(t *testing.T) {
+	t.Parallel()
+
+	_, txCbor, _ := firstTxInFixtureBlocks(t, 40)
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{LedgerState: evalBusyLedgerStub{}}),
+	}
+
+	_, err := server.EvalTx(
+		context.Background(),
+		connect.NewRequest(&submit.EvalTxRequest{
+			Tx: &submit.AnyChainTx{
+				Type: &submit.AnyChainTx_Raw{Raw: txCbor},
+			},
+		}),
+	)
+
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+}
+
+func TestEvalTxPropagatesCancellation(t *testing.T) {
+	t.Parallel()
+
+	_, txCbor, _ := firstTxInFixtureBlocks(t, 40)
+	stub := &cancelingEvalLedgerStub{}
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{LedgerState: stub}),
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := server.EvalTx(
+		ctx,
+		connect.NewRequest(&submit.EvalTxRequest{
+			Tx: &submit.AnyChainTx{
+				Type: &submit.AnyChainTx_Raw{Raw: txCbor},
+			},
+		}),
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, stub.ctx.Err(), context.Canceled)
 }

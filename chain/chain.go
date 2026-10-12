@@ -494,6 +494,9 @@ func (c *Chain) addBlockHeader(
 	// Reject headers when the queue is at capacity to prevent
 	// unbounded memory growth from a malicious peer.
 	if len(c.headers) >= c.MaxQueuedHeaders() {
+		if c.id == primaryChainId {
+			c.manager.notifyHeaderQueueFull()
+		}
 		return ErrHeaderQueueFull
 	}
 	// Make sure header fits on chain tip
@@ -1958,6 +1961,34 @@ func (c *Chain) findQueuedHeader(point ocommon.Point) (int, error) {
 		}
 	}
 	return -1, nil
+}
+
+// HoldsQueuedHeader reports whether point is a header queued on this chain
+// ahead of its blocks.
+func (c *Chain) HoldsQueuedHeader(point ocommon.Point) bool {
+	if c == nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	index, err := c.findQueuedHeader(point)
+	return err == nil && index >= 0
+}
+
+// HoldsQueuedHeaderHash reports whether hash is queued on this chain ahead of
+// its blocks.
+func (c *Chain) HoldsQueuedHeaderHash(hash []byte) bool {
+	if c == nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	for _, header := range c.headers {
+		if bytes.Equal(header.point.Hash, hash) {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateRollback verifies that Rollback(point) would be accepted without

@@ -51,6 +51,16 @@ func leiosAuditAnnouncingBlockCbor(
 		BlockNumber: 3,
 		Slot:        slot,
 		PrevHash:    prevHash,
+		VrfKey:      make([]byte, 32),
+		VrfResult: lcommon.VrfResult{
+			Output: make([]byte, 64),
+			Proof:  make([]byte, 80),
+		},
+		OpCert: babbage.BabbageOpCert{
+			HotVkey:   make([]byte, 32),
+			Signature: make([]byte, 64),
+		},
+		ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
 	}
 	babbageBodyCbor, err := cbor.Encode(&headerBody)
 	require.NoError(t, err)
@@ -70,7 +80,7 @@ func leiosAuditAnnouncingBlockCbor(
 	require.NoError(t, err)
 	headerCbor, err := cbor.Encode([]any{
 		cbor.RawMessage(extendedBody),
-		[]byte("leios-audit-signature"),
+		make([]byte, 448),
 	})
 	require.NoError(t, err)
 	emptyBody, err := cbor.Encode(dijkstra.DijkstraBlockBody{})

@@ -75,13 +75,14 @@ type benchmarkValidator struct {
 }
 
 func (v benchmarkValidator) ValidateTx(tx gledger.Transaction) error {
-	return v.ValidateTxWithOverlay(tx, nil, nil)
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
 }
 
 func (v benchmarkValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	consumed map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.StateOverlay,
 ) error {
 	for _, input := range tx.Inputs() {
 		key := utxoref.ForInput(input)
@@ -917,7 +918,7 @@ func buildBenchmarkTransaction(
 	benchmarkTemplateMu.Lock()
 	defer benchmarkTemplateMu.Unlock()
 	tx.Body.TxInputs.SetItems([]shelley.ShelleyTransactionInput{
-		shelley.NewShelleyTransactionInput(
+		shelley.MustNewShelleyTransactionInput(
 			inputHash,
 			int(inputIndex),
 		),
@@ -1217,13 +1218,14 @@ func (v dijkstraOverlapValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.StateOverlay,
 ) error {
 	return v.ValidateTx(tx)
 }
 
 func TestAddTransactionAcceptsDijkstraSpendReferenceOverlap(t *testing.T) {
 	t.Parallel()
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"a228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee11",
 		0,
 	)
@@ -1277,13 +1279,14 @@ type fifoRevalidationBenchmarkValidator struct {
 func (v *fifoRevalidationBenchmarkValidator) ValidateTx(
 	tx gledger.Transaction,
 ) error {
-	return v.ValidateTxWithOverlay(tx, nil, nil)
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
 }
 
 func (v *fifoRevalidationBenchmarkValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
 ) error {
 	if delay := time.Duration(v.delayNS.Load()); delay > 0 {
 		start := time.Now()
@@ -1299,12 +1302,19 @@ func (v *fifoRevalidationBenchmarkValidator) WithTxValidationSession(ctx context
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
 		) error,
 		func() bool,
+		func(func() error) (bool, error),
 	) error,
 ) error {
 	v.once.Do(func() { close(v.started) })
-	return fn(v.ValidateTxWithOverlay, func() bool { return true })
+	stillCurrent := func() bool { return true }
+	return fn(
+		v.ValidateTxWithOverlay,
+		stillCurrent,
+		testCommitIfCurrent(stillCurrent),
+	)
 }
 
 func BenchmarkFIFOAdmissionNoRevalidation(b *testing.B) {
@@ -1470,7 +1480,7 @@ func (g *fifoRevalidationTxGenerator) next(b *testing.B) []byte {
 		b.Fatalf("transaction template decoded as %T", decoded)
 	}
 	tx.Body.TxInputs.SetItems([]shelley.ShelleyTransactionInput{
-		shelley.NewShelleyTransactionInput(inputHash, 0),
+		shelley.MustNewShelleyTransactionInput(inputHash, 0),
 	})
 	tx.Body.TxFee = 1_000_000 + g.sequence
 	tx.TxIsValid = true

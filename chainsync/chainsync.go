@@ -383,7 +383,7 @@ func NewStateWithConfig(
 	s.blockfetchSelectionsCounter = promauto.With(cfg.PromRegistry).NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_blockfetch_peer_selections_total",
-			Help: "blockfetch peer selections, by decision",
+			Help: "blockfetch peer selection decisions, by decision; one per selection-policy invocation for a blockfetch window, made before that window's request is issued, so it also counts windows whose request then fails to start; it does not move while a batch drains and is not a count of requests (see dingo_blockfetch_requests_issued_total)",
 		},
 		[]string{"decision"},
 	)

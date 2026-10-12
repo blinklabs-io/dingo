@@ -481,6 +481,7 @@ func TestFetchEndorserBlockByPointFailsWhenSolePeerCannotAnswer(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, leiosfetch.ErrRequestSlotAbandoned)
+	require.NotErrorIs(t, err, ledger.ErrEndorserBlockFetchNoPeer)
 
 	evt := testutil.RequireReceive(
 		t,
@@ -494,6 +495,63 @@ func TestFetchEndorserBlockByPointFailsWhenSolePeerCannotAnswer(t *testing.T) {
 		o.leiosFetchGuardFor(deadConn.Id()).isProtocolDead(),
 		"sole unanswerable connection was not diagnosed dead",
 	)
+}
+
+// TestFetchEndorserBlockByPointReportsNoPeer verifies a fetch with no
+// leios-fetch connection reports ledger.ErrEndorserBlockFetchNoPeer, the cause
+// the ledger pipeline keeps out of its deterministic-halt count (dingo#5026).
+func TestFetchEndorserBlockByPointReportsNoPeer(t *testing.T) {
+	t.Parallel()
+
+	_, _, point, _ := leiosCertifiedRecoveryFixture(t, 0x54, 376040)
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm,
+		EnableLeios: true,
+	})
+
+	err := o.FetchEndorserBlockByPoint(
+		t.Context(),
+		point.Slot,
+		point.Hash,
+	)
+	require.ErrorIs(t, err, ledger.ErrEndorserBlockFetchNoPeer)
+}
+
+func TestFetchEndorserBlockByPointReportsNoPeerAfterDisconnect(t *testing.T) {
+	t.Parallel()
+
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm,
+		EnableLeios: true,
+	})
+	staleConnId := gouroboros.ConnectionId{}
+
+	err := o.fetchEndorserBlockByPointWithConnections(
+		t.Context(),
+		376040,
+		[]byte("eb-hash"),
+		[]gouroboros.ConnectionId{staleConnId},
+		func(gouroboros.ConnectionId) *gouroboros.Connection {
+			return nil
+		},
+	)
+	require.ErrorIs(t, err, ledger.ErrEndorserBlockFetchNoPeer)
 }
 
 // TestFetchEndorserBlockByPointHonoursCallerBudget verifies the by-point fetch

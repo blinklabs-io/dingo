@@ -237,6 +237,7 @@ func (d *Database) SetTransaction(
 	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
 	txn *Txn,
+	protocolMajor uint64,
 ) error {
 	return d.SetTransactionWithOpts(
 		ctx,
@@ -248,7 +249,7 @@ func (d *Database) SetTransaction(
 		certDeposits,
 		offsets,
 		txn,
-		BatchedTxIngestOpts{},
+		BatchedTxIngestOpts{ProtocolMajor: protocolMajor},
 	)
 }
 
@@ -399,19 +400,22 @@ func (d *Database) SetTransactionWithOpts(
 		if !opts.SkipConsumedInputRecovery {
 			return errors.New("ledger context requires a prototype closure")
 		}
-		setTxErr = d.transactionStore().SetTransactionLeiosClosureInContext(tx, point, idx, certDeposits, opts.SkipWithdrawalWitnessWrite, *opts.LedgerContextSlot, txn.Metadata())
+		setTxErr = d.transactionStore().SetTransactionLeiosClosureInContext(
+			tx, point, idx, certDeposits,
+			opts.SkipWithdrawalWitnessWrite, *opts.LedgerContextSlot,
+			txn.Metadata(), opts.ProtocolMajor,
+		)
 	} else if opts.SkipConsumedInputRecovery {
 		setTxErr = d.transactionStore().SetTransactionLeiosClosure(
 			tx, point, idx, certDeposits,
-			opts.SkipWithdrawalWitnessWrite,
-			txn.Metadata(),
+			opts.SkipWithdrawalWitnessWrite, txn.Metadata(),
+			opts.ProtocolMajor,
 		)
 	} else {
 		setTxErr = d.transactionStore().SetTransaction(
 			tx, point, idx, certDeposits,
-			opts.SkipWithdrawalWitnessWrite,
-			txn.Metadata(),
-		)
+			opts.SkipWithdrawalWitnessWrite, txn.Metadata(),
+			opts.ProtocolMajor)
 	}
 	if setTxErr != nil {
 		return fmt.Errorf(
@@ -453,6 +457,7 @@ func (d *Database) SetTransactionMetadataOnly(
 	idx uint32,
 	certDeposits map[int]uint64,
 	txn *Txn,
+	protocolMajor uint64,
 ) error {
 	owned := false
 	if txn == nil {
@@ -476,7 +481,7 @@ func (d *Database) SetTransactionMetadataOnly(
 		// instead of implying real gate logic applies here.
 		false,
 		metadataTxn,
-	); err != nil {
+		protocolMajor); err != nil {
 		return fmt.Errorf(
 			"set transaction metadata only for tx %s (block idx %d, slot %d): %w",
 			tx.Hash(),
@@ -506,6 +511,7 @@ func (d *Database) SetGapBlockTransaction(
 	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
 	txn *Txn,
+	protocolMajor uint64,
 ) error {
 	owned := false
 	if txn == nil {
@@ -577,7 +583,7 @@ func (d *Database) SetGapBlockTransaction(
 	}
 
 	if err := d.transactionStore().SetGapBlockTransaction(
-		tx, point, idx, certDeposits, txn.Metadata(),
+		tx, point, idx, certDeposits, txn.Metadata(), protocolMajor,
 	); err != nil {
 		return fmt.Errorf(
 			"set gap block transaction metadata: %w", err,
@@ -628,13 +634,11 @@ func (d *Database) ensureTransactionConsumedUtxos(
 		return nil
 	}
 
-	// During Mithril historical backfill, immutable blocks are replayed in
-	// slot order against a metadata store being populated from the same
-	// history. Consumed inputs are guaranteed to already exist in the store
-	// from earlier producer transactions, so the per-input recovery checks
-	// are redundant. The in-flight producer lookup optimization (same-batch
-	// provenance) remains valuable and is preserved below.
-	if opts.SkipConsumedInputRecovery {
+	// During Mithril historical backfill or a trusted immutable replay, blocks
+	// are applied in slot order against a store containing the earlier
+	// producers. Consumed inputs are therefore already represented in the
+	// metadata store, so per-input blob recovery is redundant.
+	if opts.SkipConsumedInputRecovery || opts.TrustedImmutableReplay {
 		if opts.Stats != nil {
 			// Count inputs that would have triggered GetUtxoIncludingSpent
 			// lookups. The in-flight check below is cheap and would have
@@ -1438,18 +1442,23 @@ func (d *Database) GetTransactionsByAddress(
 		limit,
 		offset,
 		"desc",
+		nil,
+		nil,
 		txn,
 	)
 }
 
 // GetTransactionsByAddressWithOrder returns transactions
-// involving a given address with explicit ordering.
+// involving a given address with explicit ordering, restricted to the
+// inclusive (slot, block index) range [from, to]. A nil bound is open.
 func (d *Database) GetTransactionsByAddressWithOrder(
 	ctx context.Context,
 	addr lcommon.Address,
 	limit int,
 	offset int,
 	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 	txn *Txn,
 ) ([]models.Transaction, error) {
 	return d.getTransactionsByExactAddress(
@@ -1458,6 +1467,8 @@ func (d *Database) GetTransactionsByAddressWithOrder(
 		limit,
 		offset,
 		order,
+		from,
+		to,
 		txn,
 	)
 }
@@ -1491,6 +1502,8 @@ func (d *Database) getTransactionsByExactAddress(
 	limit int,
 	offset int,
 	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 	txn *Txn,
 ) ([]models.Transaction, error) {
 	if txn == nil {
@@ -1526,6 +1539,8 @@ func (d *Database) getTransactionsByExactAddress(
 			batchSize,
 			candidateOffset,
 			order,
+			from,
+			to,
 			txn.Metadata(),
 		)
 		if err != nil {
@@ -1642,6 +1657,8 @@ func (d *Database) GetTransactionsByAddressKeys(
 		limit,
 		offset,
 		order,
+		nil,
+		nil,
 		txn.Metadata(),
 	)
 	if err != nil {
@@ -1659,10 +1676,13 @@ func (d *Database) GetTransactionsByAddressKeys(
 }
 
 // CountTransactionsByAddress returns the total number of
-// transactions involving a given address.
+// transactions involving a given address within the inclusive
+// (slot, block index) range [from, to]. A nil bound is open.
 func (d *Database) CountTransactionsByAddress(
 	ctx context.Context,
 	addr lcommon.Address,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 	txn *Txn,
 ) (int, error) {
 	txs, err := d.getTransactionsByExactAddress(
@@ -1671,6 +1691,8 @@ func (d *Database) CountTransactionsByAddress(
 		0,
 		0,
 		"desc",
+		from,
+		to,
 		txn,
 	)
 	if err != nil {
@@ -1692,6 +1714,8 @@ func (d *Database) HasTransactionsByAddress(
 		1,
 		0,
 		"desc",
+		nil,
+		nil,
 		txn,
 	)
 	if err != nil {

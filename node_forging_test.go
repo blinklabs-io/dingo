@@ -883,7 +883,7 @@ func TestValidateBlockProducerLedger_SyncedTipUnobservedCounterUsesZeroBaseline(
 
 // devnetKeysDir locates the credential fixtures shipped with the repo.
 // Path is relative to this file (top-level dingo package).
-const devnetKeysDir = "config/cardano/devnet/keys"
+const devnetKeysDir = "internal/devnetkeys/keys"
 
 func devnetCredPaths(t testing.TB) (vrf, kes, opcert string) {
 	t.Helper()
@@ -1299,7 +1299,7 @@ func leiosParentBlock(
 		issuerVkey,
 		make([]byte, 32),
 		lcommon.VrfResult{
-			Output: []byte{},
+			Output: make([]byte, 64),
 			Proof:  make([]byte, 80),
 		},
 		uint64(len(bodyCbor)),

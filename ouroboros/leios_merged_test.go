@@ -158,7 +158,7 @@ func testDijkstraBlockRaw(
 					BlockBodyHash: blockBody.Hash(),
 					VrfKey:        make([]byte, 32),
 					VrfResult: lcommon.VrfResult{
-						Output: []byte{},
+						Output: make([]byte, 64),
 						Proof:  make([]byte, 80),
 					},
 					OpCert: babbage.BabbageOpCert{
@@ -1118,7 +1118,7 @@ func buildDijkstraLeiosBlockRaw(
 		),
 		VrfKey: make([]byte, 32),
 		VrfResult: lcommon.VrfResult{
-			Output: []byte{},
+			Output: make([]byte, 64),
 			Proof:  make([]byte, 80),
 		},
 		OpCert: babbage.BabbageOpCert{

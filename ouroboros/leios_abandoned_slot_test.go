@@ -55,6 +55,7 @@ func newLeiosFetchConversation(
 		gouroboros.WithConnection(mockConn),
 		gouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
 		gouroboros.WithNodeToNode(true),
+		gouroboros.WithLeiosFetchConfig(leiosfetch.NewConfig()),
 	)
 	require.NoError(t, err)
 

@@ -92,7 +92,7 @@ func TestQueryViewIsolatedFromLaterCommits(t *testing.T) {
 	ls, db := newDiskTestLedger(t)
 	addr := queryViewTestAddress(t)
 	txId := seedBabbageUtxo(t, db, 0xC1, 0, addr, 5_000_000)
-	txIn := ledger.NewShelleyTransactionInput(hex.EncodeToString(txId), 0)
+	txIn := ledger.MustNewShelleyTransactionInput(hex.EncodeToString(txId), 0)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(1_000, repeatedBytes(32, 0x0B)),
 	}, nil))
@@ -224,7 +224,7 @@ func TestQueryViewPinnedPointSurvivesRollback(t *testing.T) {
 		Point: ocommon.NewPoint(200, bytes.Repeat([]byte{0xEF}, 32)),
 	}, nil))
 
-	txIn := ledger.NewShelleyTransactionInput(hex.EncodeToString(txId), 0)
+	txIn := ledger.MustNewShelleyTransactionInput(hex.EncodeToString(txId), 0)
 	query := shelleyBlockQuery(&olocalstatequery.ShelleyUtxoByTxinQuery{
 		TxIns: []ledger.ShelleyTransactionInput{txIn},
 	})
@@ -489,6 +489,46 @@ func TestQueryViewEraHistoryUsesFrozenTip(t *testing.T) {
 		t, before, after,
 		"the live tip must change the forecast for this test to mean anything",
 	)
+	viewed, err := view.Query(t.Context(), query, 0)
+	require.NoError(t, err)
+	require.Equal(t, before, viewed)
+}
+
+func TestQueryViewEraHistoryUsesFrozenTransition(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newDiskTestLedger(t)
+	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
+	require.NoError(t, db.SetEpoch(
+		100_000, 500, nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, 1_000, 432_000, nil,
+	))
+	tip := ochainsync.Tip{
+		Point: ocommon.NewPoint(200_000, repeatedBytes(32, 0x0D)),
+	}
+	require.NoError(t, db.SetTip(tip, nil))
+	ls.currentTip = tip
+	ls.currentEra = eras.ConwayEraDesc
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
+	ls.publishSnapshotsLocked()
+	query := &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.HardForkQuery{
+			Query: &olocalstatequery.HardForkEraHistoryQuery{},
+		},
+	}
+
+	before, err := ls.Query(t.Context(), query, QueryPoint{})
+	require.NoError(t, err)
+	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
+	require.NoError(t, err)
+	t.Cleanup(view.Close)
+
+	ls.transitionInfo = hardfork.NewTransitionKnown(502)
+	ls.publishSnapshotsLocked()
+	live, err := ls.Query(t.Context(), query, QueryPoint{})
+	require.NoError(t, err)
+	require.NotEqual(t, before, live)
+
 	viewed, err := view.Query(t.Context(), query, 0)
 	require.NoError(t, err)
 	require.Equal(t, before, viewed)

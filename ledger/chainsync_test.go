@@ -29,6 +29,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/big"
 	"net"
 	"os"
 	"strconv"
@@ -56,6 +57,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	byronconsensus "github.com/blinklabs-io/gouroboros/consensus/byron"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1925,6 +1927,10 @@ type blockfetchRollbackFixture struct {
 	resyncCh  chan event.ChainsyncResyncEvent
 	forkAHash lcommon.Blake2b256
 	forkBHash lcommon.Blake2b256
+	// holdRequestReservation leaves each request reserved until its BatchDone
+	// releases it, as the production callback does for a request still
+	// outstanding with the peer.
+	holdRequestReservation bool
 }
 
 func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
@@ -1988,6 +1994,9 @@ func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
 		_ ocommon.Point,
 	) (uint64, error) {
 		f.requests = append(f.requests, start)
+		if f.holdRequestReservation {
+			return 0, nil
+		}
 		// The production callback returns after BatchDone has been emitted.
 		// This synthetic callback has no protocol event, so release the
 		// request reservation before returning to the ledger.
@@ -2204,6 +2213,154 @@ func TestForkRestartDropsAbandonedBodyArrivingAfterRestart(t *testing.T) {
 
 	require.Len(t, f.ls.pendingBlockfetchEvents, 1)
 	require.Equal(t, point, f.ls.pendingBlockfetchEvents[0].Point)
+}
+
+// With the far-from-tip low watermark a range is requested about three ranges
+// of headers earlier than the default four-range threshold, so a rollback more
+// often lands while that request is in flight. The rollback must discard the
+// queued headers and the bodies the abandoned request already buffered, and
+// bodies it delivers afterwards must not reach the chain or the ledger.
+//
+// The rollback target is the current chain tip, so the abandoned bodies still
+// fit the chain by parent hash; only the rollback generation check stops them.
+func TestFarFromTipLowWatermarkRollbackDiscardsInFlightBatch(t *testing.T) {
+	f := newBlockfetchRollbackFixture(t)
+	f.ls.config.BlockfetchLowWatermarkEnabled = true
+	f.holdRequestReservation = true
+	reservations := func() int {
+		f.ls.chainsyncBlockfetchMutex.Lock()
+		defer f.ls.chainsyncBlockfetchMutex.Unlock()
+		return blockfetchReservationsLocked(f.ls, f.connId)
+	}
+
+	farTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100_000_000, []byte("far-tip")),
+		BlockNumber: 10_000_000,
+	}
+	prev := lcommon.NewBlake2b256(f.currentTip.Point.Hash)
+	blocks := make([]*blockfetchTestBlock, 0, BlockfetchBatchSize)
+	for i := range BlockfetchBatchSize {
+		hash := lcommon.NewBlake2b256(
+			testHashBytes(fmt.Sprintf("far-lowmark-%d", i)),
+		)
+		block := &blockfetchTestBlock{
+			hash:        hash,
+			prevHash:    prev,
+			slot:        f.currentTip.Point.Slot + uint64(i) + 1,
+			blockNumber: f.currentTip.BlockNumber + uint64(i) + 1,
+		}
+		blocks = append(blocks, block)
+		prev = hash
+		if i == BlockfetchBatchSize-1 {
+			require.Empty(
+				t,
+				f.requests,
+				"no request may start before one range of headers is queued",
+			)
+		}
+		require.NoError(t, f.ls.handleEventChainsyncBlockHeader(
+			ChainsyncEvent{
+				ConnectionId: f.connId,
+				BlockHeader: mockHeader{
+					hash:        block.hash,
+					prevHash:    block.prevHash,
+					blockNumber: block.blockNumber,
+					slot:        block.slot,
+				},
+				Point: ocommon.NewPoint(block.slot, block.hash.Bytes()),
+				Tip:   farTip,
+			},
+		))
+	}
+	require.Len(
+		t,
+		f.requests,
+		1,
+		"the low watermark must start the first range at one range of headers",
+	)
+	require.Equal(
+		t,
+		ocommon.NewPoint(blocks[0].slot, blocks[0].hash.Bytes()),
+		f.requests[0],
+	)
+	require.Equal(t, BlockfetchBatchSize, f.ls.chain.HeaderCount())
+	require.Equal(t, 1, reservations(), "the range must be outstanding")
+
+	blockEvent := func(b *blockfetchTestBlock) event.Event {
+		return event.NewEvent(
+			BlockfetchEventType,
+			BlockfetchEvent{
+				ConnectionId: f.connId,
+				Point:        ocommon.NewPoint(b.slot, b.hash.Bytes()),
+				Type:         1,
+				Block:        b,
+			},
+		)
+	}
+	f.ls.handleEventBlockfetch(blockEvent(blocks[0]))
+	require.Len(
+		t,
+		f.ls.pendingBlockfetchEvents,
+		1,
+		"the first body of the in-flight range must be buffered",
+	)
+
+	f.ls.chainsyncMutex.Lock()
+	var pending pendingPublishes
+	err := f.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: f.connId,
+			Rollback:     true,
+			Point:        f.currentTip.Point,
+		},
+		&pending,
+	)
+	f.ls.chainsyncMutex.Unlock()
+	pending.flush()
+	require.NoError(t, err)
+	require.Equal(t, f.currentTip.Point, f.ls.chain.Tip().Point)
+	require.Zero(
+		t,
+		f.ls.chain.HeaderCount(),
+		"the rollback must discard the headers the in-flight range was for",
+	)
+	require.Equal(
+		t,
+		1,
+		reservations(),
+		"the rollback cannot cancel the outstanding request",
+	)
+
+	// The request cannot be cancelled: its remaining bodies and BatchDone
+	// still arrive after the rollback.
+	f.ls.handleEventBlockfetch(blockEvent(blocks[1]))
+	f.ls.handleEventBlockfetch(event.NewEvent(
+		BlockfetchEventType,
+		BlockfetchEvent{ConnectionId: f.connId, BatchDone: true},
+	))
+
+	assert.Empty(
+		t,
+		f.ls.pendingBlockfetchEvents,
+		"no body of the abandoned range may stay buffered",
+	)
+	assert.Equal(
+		t,
+		f.currentTip.Point,
+		f.ls.chain.Tip().Point,
+		"no block past the rollback point may reach the chain",
+	)
+	assert.LessOrEqual(
+		t,
+		f.ls.currentTip.Point.Slot,
+		f.currentTip.Point.Slot,
+		"no block past the rollback point may be applied to the ledger",
+	)
+	assert.Zero(
+		t,
+		reservations(),
+		"BatchDone of the abandoned range must release its reservation",
+	)
 }
 
 // The bounded-recovery case: a batch that delivered bodies but
@@ -3749,8 +3906,18 @@ func TestPeerHeaderHistoryRehydratesWireHeader(t *testing.T) {
 			Slot:          slot,
 			PrevHash:      lcommon.NewBlake2b256([]byte("parent")),
 			BlockBodyHash: lcommon.NewBlake2b256([]byte("body")),
-			ProtoVersion:  babbage.BabbageProtoVersion{Major: 8},
+			VrfKey:        make([]byte, 32),
+			VrfResult: lcommon.VrfResult{
+				Output: make([]byte, 64),
+				Proof:  make([]byte, 80),
+			},
+			OpCert: babbage.BabbageOpCert{
+				HotVkey:   make([]byte, 32),
+				Signature: make([]byte, 64),
+			},
+			ProtoVersion: babbage.BabbageProtoVersion{Major: 8},
 		},
+		Signature: make([]byte, 448),
 	}
 	headerCbor, err := cbor.Encode(header)
 	require.NoError(t, err)
@@ -4563,22 +4730,6 @@ func TestAwaitChainsyncHeaderAdmissionBoundaries(t *testing.T) {
 		},
 	)
 
-	t.Run("slot past the forecast horizon is deferred", func(t *testing.T) {
-		arrival := systemStart.Add(100 * time.Second)
-		ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
-		ls.slotClock.provider = pastHorizonSlotTimeProvider{
-			SlotTimeProvider: ls.slotClock.provider,
-			rejectedSlot:     10_000,
-		}
-
-		accepted, err := ls.AwaitChainsyncHeaderAdmission(t.Context(),
-			futureHeaderEvent(10_000, arrival),
-		)
-		require.NoError(t, err)
-		require.True(t, accepted)
-		require.Empty(t, *waits)
-	})
-
 	t.Run(
 		"processing delay does not change arrival judgment",
 		func(t *testing.T) {
@@ -4979,7 +5130,7 @@ func observeProcessEpochRolloverCallOrder(
 func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 	t.Parallel()
 
-	const targetFunc = "processEpochRollover"
+	const targetFunc = "processEpochRolloverWithClassicPParamsContext"
 
 	// In source order, the calls that must appear inside processEpochRollover.
 	// Each entry is the trailing identifier of a SelectorExpr (or a bare
@@ -4999,7 +5150,8 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 		"ProcessEpoch",                        // (5) Conway-style governance enact
 		"SetPParams",                          // (6) persist enacted pparams
 		"isHardForkTransition",                // (7) inter-era boundary detection
-		"applyIntraEraHardForkRule",           // (8) per-major-version HARDFORK rule
+		"applyTransitionHardForkRules",        // (8) inter-era HARDFORK state rewrites
+		"applyIntraEraHardForkRule",           // (9) per-major-version pparam rule
 	}
 
 	seen, observed := observeProcessEpochRolloverCallOrder(
@@ -5040,7 +5192,7 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
 	t.Parallel()
 
-	const targetFunc = "processEpochRollover"
+	const targetFunc = "processEpochRolloverWithClassicPParamsContext"
 
 	// In source order: reward application first, then the governance/pparam
 	// core, then the ADA-pot capture last.
@@ -5048,7 +5200,8 @@ func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
 		"applyStakeRewards",            // (1) delayed reward update, pre-governance
 		"ComputeAndApplyPParamUpdates", // pparam updates
 		"ProcessEpoch",                 // governance enact (reads treasury)
-		"applyIntraEraHardForkRule",    // last treasury/reserves mutation
+		"applyTransitionHardForkRules", // inter-era state rewrite after rewards
+		"applyIntraEraHardForkRule",    // pparam state rewrite after rewards
 		"saveRewardAdaPotsForEpoch",    // (last) post-boundary ADA pot capture
 	}
 
@@ -5462,18 +5615,27 @@ func newTestDijkstraBlockCbor(
 	header := &dijkstra.DijkstraBlockHeader{
 		BabbageBlockHeader: babbage.BabbageBlockHeader{
 			Body: babbage.BabbageBlockHeaderBody{
-				BlockNumber:   blockNumber,
-				Slot:          slot,
-				IssuerVkey:    issuer,
-				VrfResult:     lcommon.VrfResult{Output: vrfOutput},
+				BlockNumber: blockNumber,
+				Slot:        slot,
+				IssuerVkey:  issuer,
+				VrfResult: lcommon.VrfResult{
+					Output: vrfOutput,
+					Proof:  make([]byte, 80),
+				},
+				VrfKey:        make([]byte, 32),
 				BlockBodyHash: body.Hash(),
+				OpCert: babbage.BabbageOpCert{
+					HotVkey:        make([]byte, 32),
+					SequenceNumber: opCertSeqNo,
+					Signature:      make([]byte, 64),
+				},
+				ProtoVersion: babbage.BabbageProtoVersion{
+					Major: dijkstra.MinProtocolVersionDijkstra,
+				},
 			},
+			Signature: make([]byte, 448),
 		},
 	}
-	setOpCertSequenceNumber(
-		&header.Body.OpCert.SequenceNumber,
-		opCertSeqNo,
-	)
 	block := &dijkstra.DijkstraBlock{BlockHeader: header, BlockBody: body}
 	cborData, err := block.MarshalCBOR()
 	require.NoError(t, err)
@@ -10822,7 +10984,7 @@ func TestHandleEventChainsyncBlockHeaderRoutesSlotBattleToForkResolution(
 func TestProcessEpochRollover_SnapStakeReadOrdering(t *testing.T) {
 	t.Parallel()
 
-	const targetFunc = "processEpochRollover"
+	const targetFunc = "processEpochRolloverWithClassicPParamsContext"
 
 	wantOrder := []string{
 		"applyStakeRewards",                 // pre-SNAP: delayed reward update
@@ -16753,16 +16915,111 @@ func TestCalculateEpochNonceNeutralLabMixesExtraEntropy(t *testing.T) {
 	require.Equal(t, want.Bytes(), nonce)
 }
 
-func TestEraTransitionsRunAfterSourceEraPParamEnactment(t *testing.T) {
+func TestPrepareEraTransitionsEnactsClassicUpdateWithSourceDecoder(
+	t *testing.T,
+) {
 	t.Parallel()
 
-	path := []uint{eras.BabbageEraDesc.Id}
-	before, after := splitEraTransitionsForRollover(path)
+	db := newTestDB(t)
+	cfg := newAlonzoBabbageAtEpoch1Cfg(t)
+	epoch := models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		LengthInSlots: 75,
+		SlotLength:    1_000,
+		EraId:         eras.AlonzoEraDesc.Id,
+	}
+	require.NoError(t, db.SetEpoch(
+		epoch.StartSlot,
+		epoch.EpochId,
+		nil,
+		nil,
+		nil,
+		nil,
+		epoch.EraId,
+		epoch.SlotLength,
+		epoch.LengthInSlots,
+		nil,
+	))
 
-	require.Empty(t, before,
-		"successor transitions must not replace the source era before rollover")
-	require.Equal(t, path, after,
-		"the successor transition must run after source-era pparam enactment")
+	minFeeA := uint(99)
+	updateCbor, err := cbor.Encode(map[uint64]any{
+		0:  minFeeA,
+		12: &cbor.Rat{Rat: big.NewRat(0, 1)},
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParamUpdate(
+		[]byte{0x01}, updateCbor, 50, epoch.EpochId, nil,
+	))
+
+	rat := func() *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(1, 2)} }
+	params := &alonzo.AlonzoProtocolParameters{
+		MinFeeA:            44,
+		MaxBlockBodySize:   65_536,
+		MaxTxSize:          16_384,
+		MaxBlockHeaderSize: 1_100,
+		A0:                 rat(),
+		Rho:                rat(),
+		Tau:                rat(),
+		Decentralization:   rat(),
+		ProtocolMajor:      eras.AlonzoEraDesc.MaxMajorVersion,
+	}
+	var logs bytes.Buffer
+	ls := &LedgerState{
+		db:         db,
+		activeEras: eras.ErasWithDijkstra,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger: slog.New(slog.NewJSONHandler(
+				&logs,
+				&slog.HandlerOptions{Level: slog.LevelDebug},
+			)),
+		},
+	}
+
+	var got lcommon.ProtocolParameters
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var transitionErr error
+		got, _, _, _, _, transitionErr = ls.prepareEraTransitionsForRollover(
+			context.Background(),
+			txn,
+			epoch,
+			eras.AlonzoEraDesc,
+			params,
+			[]uint{eras.BabbageEraDesc.Id},
+		)
+		return transitionErr
+	}))
+
+	babbageParams, ok := got.(*babbage.BabbageProtocolParameters)
+	require.True(t, ok)
+	require.Equal(t, minFeeA, babbageParams.MinFeeA,
+		"the legacy update must enact before its removed field is translated")
+	stored, err := db.GetPParams(
+		epoch.EpochId+1,
+		eras.BabbageEraDesc.Id,
+		eras.DecodePParamsBabbage,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored,
+		"the translated parameters belong to the incoming epoch")
+	storedBabbageParams, ok := stored.(*babbage.BabbageProtocolParameters)
+	require.True(t, ok)
+	require.Equal(t, minFeeA, storedBabbageParams.MinFeeA,
+		"the persisted translation must retain the enacted update")
+	require.Contains(t, logs.String(), `"phase":"pparam_updates"`,
+		"source-era update work must remain visible in rollover telemetry")
+	storedAtSourceEpoch, err := db.GetPParams(
+		epoch.EpochId,
+		eras.BabbageEraDesc.Id,
+		eras.DecodePParamsBabbage,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Nil(t, storedAtSourceEpoch,
+		"the translated parameters must not be backdated to the ended epoch")
 }
 
 // TestCreateGenesisBlockFileBackedNoFKError drives the real genesis sync path
@@ -17727,8 +17984,10 @@ func TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap(
 	ls.currentTip.Point.Slot = 42
 	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
+	hasGenesis, genesisErr := db.HasGenesisCbor(0, genesisHash[:])
+	require.NoError(t, genesisErr)
 	require.True(
-		t, db.HasGenesisCbor(0, genesisHash[:]),
+		t, hasGenesis,
 		"the synthetic genesis block CBOR must still be created "+
 			"structurally, even though its UTxOs are not inserted as live",
 	)
@@ -17787,7 +18046,6 @@ END`)
 			f.currentEpoch,
 			eras.ConwayEraDesc,
 			f.currentPParams,
-			false,
 		)
 		return rolloverErr
 	})
@@ -17926,7 +18184,6 @@ func TestProcessEpochRolloverReplayEnactmentFailureRemainsFatal(
 			f.currentEpoch,
 			eras.ConwayEraDesc,
 			f.currentPParams,
-			false,
 		)
 		return rolloverErr
 	})

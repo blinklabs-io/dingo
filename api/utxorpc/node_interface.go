@@ -70,6 +70,9 @@ type UtxorpcLedgerState interface {
 		at ledger.QueryPoint,
 		txn *database.Txn,
 	) (*ledger.PoolStakeDistribution, error)
+	// SecurityParam is the configured security parameter k, the deepest
+	// rollback a chain follower can be asked to undo.
+	SecurityParam() int
 	SlotToTime(slot uint64) (time.Time, error)
 	SystemStart() (time.Time, error)
 	Tip() ochainsync.Tip
@@ -85,7 +88,16 @@ type UtxorpcLedgerState interface {
 // server.
 type UtxorpcMempool interface {
 	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
-	Transactions() []mempool.MempoolTransaction
+	// TransactionsBounded returns a prefix of the pool in its snapshot
+	// order holding at most maxItems transactions whose CBOR totals at most
+	// maxBytes, together with the pool's total transaction count. A bound of
+	// zero or less is not applied. The first transaction is returned even
+	// when it alone exceeds maxBytes, so a non-empty pool never yields an
+	// empty result.
+	TransactionsBounded(
+		maxItems int,
+		maxBytes int64,
+	) ([]mempool.MempoolTransaction, int)
 }
 
 // UtxorpcEventBus is the subset of event.EventBus needed by the UTxO RPC
