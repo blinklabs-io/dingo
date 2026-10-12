@@ -2258,8 +2258,10 @@ certificate write path therefore prunes superseded rows for the credential it
 just wrote, in batches bounded per certificate so no single applied block turns
 into a large delete. Every 24 hours, store-level maintenance finds candidate
 credentials on the read connection, closes that cursor, and applies the same
-indexed bounded deletes one credential at a time until no superseded rows
-remain. Closing the discovery cursor before deleting prevents the maintenance
+bounded deletes one credential at a time until no superseded rows remain. Each
+selected row is deleted by its integer primary key, so delete planning does not
+depend on table cardinality statistics staying current while imports grow the
+table. Closing the discovery cursor before deleting prevents the maintenance
 sweep from holding a read snapshot while it drains the history. This second
 path is required for a credential that stops re-authorizing: its old rows must
 drain even though no later certificate will revisit that partition.

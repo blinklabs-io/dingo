@@ -535,9 +535,10 @@ func TestCommitteeHotPruningBoundsEachDeleteCall(t *testing.T) {
 		committeeAuthPruneBatch,
 		authRowCountFor(t, store, coldTag, cold),
 	)
-	require.Equal(t, []string{
-		committeeHotAuthorizationDeleteIDsQuery(committeeAuthPruneBatch),
-	}, queryer.statements)
+	require.Len(t, queryer.statements, committeeAuthPruneBatch)
+	for _, query := range queryer.statements {
+		require.Equal(t, committeeHotAuthorizationDeleteIDQuery, query)
+	}
 }
 
 type committeePruneRecordingQueryer struct {
@@ -554,16 +555,63 @@ func (q *committeePruneRecordingQueryer) ExecContext(
 	return q.queryer.ExecContext(ctx, query, args...)
 }
 
-func TestCommitteeHotAuthorizationBatchDeleteUsesPrimaryKeyLookup(t *testing.T) {
+func TestCommitteeHotAuthorizationDeleteUsesPrimaryKeyWithStaleStats(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
-	args := make([]any, committeeAuthPruneBatch)
-	for i := range args {
-		args[i] = int64(i + 1)
+	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	cold := credentialHash(0xc5)
+	for i := 1; i <= 3; i++ {
+		seedAuthorization(
+			t, store, coldTag, cold,
+			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x73, i),
+			uint64(i), uint64(i), // #nosec G115
+		)
 	}
+	_, err := store.writeDB.Exec("ANALYZE auth_committee_hot")
+	require.NoError(t, err)
+	const pruneIndex = "idx_auth_committee_hot_cold_credential_prune_order"
+	var analyzedStats string
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT stat FROM sqlite_stat1 WHERE idx = ?", pruneIndex,
+	).Scan(&analyzedStats))
+	statsFields := strings.Fields(analyzedStats)
+	require.NotEmpty(t, statsFields)
+	require.Equal(t, "3", statsFields[0])
+
+	insertTxn, err := store.writeDB.Begin()
+	require.NoError(t, err)
+	defer func() { _ = insertTxn.Rollback() }()
+	insertStmt, err := insertTxn.Prepare(`
+INSERT INTO auth_committee_hot (
+    cold_credential_tag, cold_credential, hot_credential_tag,
+    host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?, ?, ?)`)
+	require.NoError(t, err)
+	for i := 4; i <= 2_003; i++ {
+		_, err := insertStmt.Exec(
+			coldTag, cold,
+			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x73, i),
+			uint64(i), uint64(i), // #nosec G115
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, insertStmt.Close())
+	require.NoError(t, insertTxn.Commit())
+
+	var actualRows int
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT count(*) FROM auth_committee_hot",
+	).Scan(&actualRows))
+	var currentStats string
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT stat FROM sqlite_stat1 WHERE idx = ?", pruneIndex,
+	).Scan(&currentStats))
+	require.Equal(t, analyzedStats, currentStats)
+	require.Greater(t, actualRows, 3)
+
 	rows, err := store.writeDB.Query(
-		"EXPLAIN QUERY PLAN "+committeeHotAuthorizationDeleteIDsQuery(committeeAuthPruneBatch),
-		args...,
+		"EXPLAIN QUERY PLAN "+committeeHotAuthorizationDeleteIDQuery,
+		int64(1),
 	)
 	require.NoError(t, err)
 	defer rows.Close()
@@ -581,19 +629,20 @@ func TestCommitteeHotAuthorizationBatchDeleteUsesPrimaryKeyLookup(t *testing.T) 
 	require.True(t, usesPrimaryKey)
 }
 
-func TestCommitteeHotAuthorizationBatchDeleteRebindsForSQLProviders(t *testing.T) {
+func TestCommitteeHotAuthorizationDeleteRebindsForSQLProviders(t *testing.T) {
 	t.Parallel()
-	args := []any{int64(1), int64(2)}
-	query := committeeHotAuthorizationDeleteIDsQuery(len(args))
 	for dialect, want := range map[string]string{
-		"postgres": "DELETE FROM auth_committee_hot WHERE id IN ($1,$2)",
-		"mysql":    "DELETE FROM auth_committee_hot WHERE id IN (?,?)",
+		"postgres": "DELETE FROM auth_committee_hot WHERE id = $1",
+		"mysql":    "DELETE FROM auth_committee_hot WHERE id = ?",
 	} {
 		t.Run(dialect, func(t *testing.T) {
 			t.Parallel()
 			recorder := &recordingQueryer{}
 			queryer := newDialectQueryer(recorder, dialect)
-			_, err := queryer.ExecContext(context.Background(), query, args...)
+			_, err := queryer.ExecContext(
+				context.Background(), committeeHotAuthorizationDeleteIDQuery,
+				int64(1),
+			)
 			require.NoError(t, err)
 			require.Equal(t, []string{want}, recorder.statements)
 		})
