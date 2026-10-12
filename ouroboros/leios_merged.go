@@ -1188,6 +1188,11 @@ func (o *Ouroboros) validateLeiosEndorserBlock(
 			ledger.ErrInvalidLeiosEndorserBlockTransactions,
 			err,
 		)
+	} else if header == nil {
+		err = fmt.Errorf(
+			"%w: decoded Leios announcing header is nil",
+			ledger.ErrInvalidLeiosEndorserBlockTransactions,
+		)
 	}
 	if err == nil {
 		err = validateLeiosEndorserBlockBinding(header, &data)
@@ -1261,17 +1266,21 @@ func validateLeiosEndorserBlockBinding(
 	header lcommon.BlockHeader,
 	data *leiosEndorserBlockData,
 ) error {
-	announcer, ok := header.(interface {
-		LeiosAnnouncement() (lcommon.Blake2b256, uint64, bool)
-	})
+	dijkstraHeader, ok := header.(*gdijkstra.DijkstraBlockHeader)
 	if !ok {
 		return fmt.Errorf(
 			"%w: header has no Leios announcement",
 			ledger.ErrInvalidLeiosEndorserBlockTransactions,
 		)
 	}
-	announcedHash, announcedSize, announced := announcer.LeiosAnnouncement()
-	if !announced || header.SlotNumber() != data.point.Slot ||
+	if dijkstraHeader == nil {
+		return fmt.Errorf(
+			"%w: Leios announcing header is nil",
+			ledger.ErrInvalidLeiosEndorserBlockTransactions,
+		)
+	}
+	announcedHash, announcedSize, announced := dijkstraHeader.LeiosAnnouncement()
+	if !announced || dijkstraHeader.SlotNumber() != data.point.Slot ||
 		!slices.Equal(announcedHash.Bytes(), data.point.Hash) {
 		return fmt.Errorf(
 			"%w: leios announcing header does not bind the cached endorser block",

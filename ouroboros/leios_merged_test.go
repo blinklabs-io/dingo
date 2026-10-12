@@ -2255,6 +2255,17 @@ func TestValidateLeiosEndorserBlockForHeaderMissingBodyFailsClosed(t *testing.T)
 	require.Zero(t, waiters)
 }
 
+func TestValidateLeiosEndorserBlockBindingRejectsNilHeader(t *testing.T) {
+	t.Parallel()
+
+	var header *gdijkstra.DijkstraBlockHeader
+	err := validateLeiosEndorserBlockBinding(
+		header,
+		&leiosEndorserBlockData{},
+	)
+	require.ErrorIs(t, err, ledger.ErrInvalidLeiosEndorserBlockTransactions)
+}
+
 func TestValidateLeiosEndorserBlockForHeaderZeroBudgetFailsImmediately(
 	t *testing.T,
 ) {
