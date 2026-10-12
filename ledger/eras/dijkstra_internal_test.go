@@ -24,10 +24,13 @@ import (
 
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/plutigo/cek"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/stretchr/testify/require"
@@ -345,6 +348,33 @@ func TestValidateTxDijkstraDoesNotTreatPhase1FailureAsPhase2Failure(
 	require.ErrorIs(t, err, phase1Sentinel)
 }
 
+func TestValidateTxDijkstraKeepsEvalContextFailuresLocal(t *testing.T) {
+	disablePhase1RulesForTest(t)
+	original := pooledDijkstraEvalContext
+	t.Cleanup(func() { pooledDijkstraEvalContext = original })
+	evalErr := errors.New("Dijkstra evaluation context unavailable")
+	pooledDijkstraEvalContext = func(
+		version lang.LanguageVersion,
+		_ uint,
+		_ []int64,
+	) (*cek.EvalContext, error) {
+		require.Equal(t, lang.LanguageVersionV3, version)
+		return nil, evalErr
+	}
+	tx := newDijkstraGuardingValidityOutcomeTx(
+		t,
+		true,
+		lang.LanguageVersionV3,
+		false,
+		lcommon.ExUnits{Steps: 1, Memory: 1},
+	)
+	pp := dijkstraValidityOutcomePParams(t)
+	pp.CostModels = map[uint][]int64{2: pp.CostModels[2]}
+	err := ValidateTxDijkstra(tx, 0, newMockLedgerState(), pp)
+	require.ErrorIs(t, err, evalErr)
+	require.False(t, IsSemanticRuleValidationError(err))
+}
+
 // TestValidateTxDijkstraSkipPhase2StillValidatesRequiredRedeemers pins the
 // Dijkstra phase-1 boundary through Dingo's production entry point. Historical
 // replay may skip script execution, but a reference-script spend must still
@@ -388,7 +418,7 @@ func TestValidateTxDijkstraSkipPhase2StillValidatesRequiredRedeemers(
 
 	plutusScript := lcommon.PlutusV1Script{0x01, 0x02, 0x03}
 	scriptAddr := newTestScriptAddress(t, plutusScript)
-	spendInput := shelley.NewShelleyTransactionInput(
+	spendInput := shelley.MustNewShelleyTransactionInput(
 		"6666666666666666666666666666666666666666666666666666666666666666",
 		0,
 	)
@@ -621,7 +651,7 @@ func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticSubTransaction(
 
 	plutusV2Script := lcommon.PlutusV2Script([]byte{0x01})
 	scriptAddr := newTestScriptAddress(t, plutusV2Script)
-	subTxInput := shelley.NewShelleyTransactionInput(
+	subTxInput := shelley.MustNewShelleyTransactionInput(
 		strings.Repeat("ab", 32),
 		0,
 	)
@@ -692,11 +722,11 @@ func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticReferenceScript(
 
 	plutusV2Script := lcommon.PlutusV2Script([]byte{0x01})
 	scriptAddr := newTestScriptAddress(t, plutusV2Script)
-	spendInput := shelley.NewShelleyTransactionInput(
+	spendInput := shelley.MustNewShelleyTransactionInput(
 		strings.Repeat("cd", 32),
 		0,
 	)
-	refInput := shelley.NewShelleyTransactionInput(
+	refInput := shelley.MustNewShelleyTransactionInput(
 		strings.Repeat("ef", 32),
 		0,
 	)
@@ -750,4 +780,63 @@ func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticReferenceScript(
 	)
 
 	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
+}
+
+// TestEvaluateTxDijkstraFeeUsesProtocolRefScriptTiers pins the evaluation fee
+// to the Dijkstra minimum-fee rule, which prices reference scripts at the
+// protocol stride and multiplier rather than the fixed Conway tiers.
+func TestEvaluateTxDijkstraFeeUsesProtocolRefScriptTiers(t *testing.T) {
+	t.Parallel()
+	spendIn := shelley.MustNewShelleyTransactionInput(
+		"a228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee11", 0,
+	)
+	refIn := shelley.MustNewShelleyTransactionInput(
+		"b228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22", 0,
+	)
+	ls := newMockLedgerState()
+	ls.addUtxo(spendIn, babbage.BabbageTransactionOutput{
+		OutputAmount: mary.MaryTransactionOutputValue{Amount: 10_000_000},
+	})
+	ls.addUtxo(refIn, babbage.BabbageTransactionOutput{
+		OutputAmount: mary.MaryTransactionOutputValue{Amount: 2_000_000},
+		TxOutScriptRef: &lcommon.ScriptRef{
+			Type:   lcommon.ScriptRefTypePlutusV4,
+			Script: lcommon.PlutusV4Script(make([]byte, 250)),
+		},
+	})
+	tx := &gdijkstra.DijkstraTransaction{
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxInputs: conway.NewConwayTransactionInputSet(
+				[]shelley.ShelleyTransactionInput{spendIn},
+			),
+			TxReferenceInputs: cbor.NewSetType(
+				[]shelley.ShelleyTransactionInput{refIn},
+				false,
+			),
+		},
+		TxIsValid: true,
+	}
+	pp := &gdijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MinFeeB:                    1_000,
+			MinFeeRefScriptCostPerByte: &cbor.Rat{Rat: big.NewRat(1, 1)},
+		},
+		RefScriptCostStride:     100,
+		RefScriptCostMultiplier: &cbor.Rat{Rat: big.NewRat(2, 1)},
+	}
+
+	fee, _, _, err := EvaluateTxDijkstra(tx, ls, pp)
+	require.NoError(t, err)
+	// 100 bytes at 1, 100 at 2 and 50 at 4; the Conway tiers would charge 250.
+	require.Equal(t, uint64(1_000+100+200+200), fee)
+	ledgerMin, err := gdijkstra.MinFeeTxWithUtxo(tx, pp, ls)
+	require.NoError(t, err)
+	require.Equal(t, ledgerMin, fee)
+	pp.RefScriptCostStride = 0
+	pp.RefScriptCostMultiplier = nil
+	fee, _, _, err = EvaluateTxDijkstra(tx, ls, pp)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1_000+250), fee,
+		"absent Dijkstra tiers retain Conway reference-script pricing")
+
 }

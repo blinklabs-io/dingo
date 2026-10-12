@@ -78,6 +78,13 @@ type PeerTipUpdateEvent struct {
 	ObservedTip ochainsync.Tip
 	VRFOutput   []byte // VRF output from observed block header for tie-breaking
 	PraosView   PraosTiebreakerView
+	// ObservedPrevHash is the hash of the parent the delivered header names.
+	// It lets the selector require that far frontiers claimed by one
+	// connection form a connected header chain; empty means unknown.
+	ObservedPrevHash []byte
+	// ObservedBoundary is set when the delivered header is a Byron epoch
+	// boundary block, whose block number equals its parent's.
+	ObservedBoundary bool
 }
 
 // PeerActivityEvent is published when a peer has recent protocol activity
@@ -113,6 +120,12 @@ type PeerRollbackEvent struct {
 //   - PreviousObservedTip: The delivered frontier of the previous peer.
 //   - ComparisonResult: Why the new chain is better than the previous chain.
 //   - BlockDifference: NewTip.BlockNumber - PreviousTip.BlockNumber.
+//   - RollbackPoint: The highest point the previous and new peers' candidate
+//     fragments share, including when the previous peer was just removed on
+//     disconnect or stale cleanup. It is not intersected with the local chain
+//     and can lie above the local tip, so a consumer rolling the local chain
+//     back must intersect it with that chain first. Nil when the fragments
+//     share no retained point.
 type ChainSwitchEvent struct {
 	PreviousConnectionId ouroboros.ConnectionId
 	NewConnectionId      ouroboros.ConnectionId
@@ -123,6 +136,7 @@ type ChainSwitchEvent struct {
 	PreviousObservedTip  ochainsync.Tip
 	ComparisonResult     ChainComparisonResult
 	BlockDifference      int64
+	RollbackPoint        *ocommon.Point
 }
 
 // ChainSelectionEvent is published when chain selection evaluation completes.

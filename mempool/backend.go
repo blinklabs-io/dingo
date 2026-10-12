@@ -58,7 +58,7 @@ type RelayConsumer interface {
 type Pool interface {
 	Implementation() Implementation
 	Stop(ctx context.Context) error
-	AddTransaction(txType uint, txBytes []byte) error
+	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 	GetTransaction(txHash string) (MempoolTransaction, bool)
 	Transactions() []MempoolTransaction
 	CapacityBytes() int64
@@ -74,7 +74,7 @@ type Pool interface {
 type AdmissionHeadroom interface {
 	AdmissionHeadroomBytes() int64
 	MaxAdmissionHeadroomBytes() int64
-	WaitForAdmissionHeadroom(minBytes int64, done <-chan error) bool
+	WaitForAdmissionHeadroom(minBytes int64, done <-chan struct{}) bool
 }
 
 // FIFO exposes the current ordered mempool explicitly as the FIFO backend. The
@@ -123,7 +123,7 @@ func (f *FIFO) MaxAdmissionHeadroomBytes() int64 {
 
 func (f *FIFO) WaitForAdmissionHeadroom(
 	minBytes int64,
-	done <-chan error,
+	done <-chan struct{},
 ) bool {
 	return f.waitForAdmissionHeadroom(minBytes, done)
 }
@@ -179,7 +179,7 @@ func (d *DAG) MaxAdmissionHeadroomBytes() int64 {
 // budget is available or either the connection or mempool stops.
 func (d *DAG) WaitForAdmissionHeadroom(
 	minBytes int64,
-	done <-chan error,
+	done <-chan struct{},
 ) bool {
 	return d.waitForAdmissionHeadroom(minBytes, done)
 }

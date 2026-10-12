@@ -88,8 +88,7 @@ func sqliteResetFileURI(databasePath string) string {
 //  2. DELETE does not reset AUTOINCREMENT, and the recreate path did, so
 //     sqlite_sequence has to be cleared for the same tables. A table can also
 //     hold an advanced sequence while holding no rows, which the row probe
-//     cannot see; sqliteAdvancedAutoIncrementTables reports those, the same
-//     role mysqlAdvancedAutoIncrementTables plays for MySQL.
+//     cannot see; sqliteAdvancedAutoIncrementTables reports those.
 //  3. SQLite has no CASCADE on DELETE, so this connection disables foreign
 //     keys rather than ordering the deletes. Correct here because the whole
 //     managed set is emptied together; a partial reset is never issued.
@@ -271,8 +270,7 @@ type sqliteRowQuerier interface {
 // still gets its sequence cleared. Without this, the dirty-only row probe
 // would skip such a table and the next insert would continue from the previous
 // vector's high water mark rather than from 1, which the close-and-reopen path
-// this replaces always gave. It is the SQLite counterpart to
-// mysqlAdvancedAutoIncrementTables.
+// this replaces always gave.
 func sqliteAdvancedAutoIncrementTables(
 	ctx context.Context,
 	db *sql.DB,

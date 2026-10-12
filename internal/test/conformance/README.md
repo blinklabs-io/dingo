@@ -22,9 +22,9 @@ vote-shape heuristic ("did each voter group say yes"), not by calling
 those two vectors need production's actual stake-weighted thresholds to
 distinguish. Building the `governance.ProposalTally` those two action types
 pass to `ShouldRatify` still happens in the harness rather than
-`ledger/governance`'s own tally, because that production tally does not yet
-count an active proposal's own deposit as part of its return account's DRep
-voting power (CIP-1694 active voting stake -- tracked as issue #4355).
+`ledger/governance`'s own tally. The harness adds active proposal deposits to
+each return account's delegated stake locally. Production applies the same
+CIP-1694 rule through `ActiveProposalDepositDRepPower`.
 
 ## What the vectors cover
 
@@ -50,16 +50,58 @@ networking, node-to-node protocol, or end-to-end compatibility with
 | Deterministic consensus | Shared `ouroboros-mock/consensus` captured scenarios | `go test ./ouroboros/ -run TestConsensusConformance` | Final chain choice, within-k and beyond-k behavior, rollback/intersection points, tie-breaking, and downstream ChainSync observations | Live sockets, full block bodies, and cardano-node process behavior |
 | Reference node | DevNet `--conformance` profile | `./internal/test/devnet/run-tests.sh --conformance` | Dingo beside `cardano-node` in the configured live topology | Not run by the ledger or deterministic consensus profiles |
 
-The deterministic corpus currently contains five scenarios: one origin
-roll-forward smoke test, one within-k fork, one longer fork using `local_tip`,
-one equal-length slot battle, and one beyond-k no-switch case. The tests log
-the exact scenario and ledger coverage counts; a passing ledger profile must
-not be summarized as complete node conformance.
+The deterministic corpus currently contains seven scenarios: one origin
+roll-forward smoke test, one non-origin intersection, one within-k fork, the
+same fork with the winning peer fed first, one longer fork using `local_tip`
+whose losing fork is denser after the fork point, one equal-length slot battle,
+and one beyond-k no-switch case. The corpus has no generated multi-peer
+schedules (see the Tweag runner below). The tests log the exact scenario and
+ledger coverage counts; a passing ledger profile must not be summarized as
+complete node conformance. The release and Linux CI gates run the ledger and
+deterministic consensus profiles as part of `./...`; the reference-node profile
+is a separate DevNet check and is not represented as passing when it was not
+run.
 
-The Tweag Node-vs-Environment runner/test-generator approach remains a
-feasibility reference rather than a dependency: no stable reusable upstream
-artifact is pinned here, so these shared local captures preserve equivalent
-fork-choice and rollback scenarios until one exists.
+The consensus replay feeds each peer's captured headers through Dingo's
+ChainSync client handlers into the real chain selector, then asserts the final
+tip, the selector's reported rollback point on fork switches, and the ChainSync
+messages Dingo serves downstream. For the last, the selected peer's headers
+are added to a Dingo chain as header-only blocks (the replay has no block
+bodies, and a node-to-node `RollForward` carries only the header) and a
+node-to-node client syncs that chain through Dingo's ChainSync server until it
+receives `AwaitReply`. The client intersects where the selected peer's trace
+starts: at origin, or at the point of a leading `RollBackward`, in which case a
+stand-in block with that point's slot and hash anchors the chain below the
+first header and is never served.
+
+### Tweag Node-vs-Environment runner
+
+[tweag/cardano-conformance-testing-of-consensus](https://github.com/tweag/cardano-conformance-testing-of-consensus)
+designs three tools around `ouroboros-consensus`'s Node-vs-Environment tests:
+`testgen` generates a test file holding a point schedule and a property,
+`runner` serves that schedule from simulated upstream peers and judges the
+node under test through a downstream observer peer, and `shrinkview` prints
+shrunk counterexamples. Each `testgen`/`runner` pair is one property-test
+case, to be run in a loop.
+
+Dingo does not consume it yet:
+
+- No release exists. The executables live on unreleased `conformance-testing`
+  branches of Tweag forks of `cardano-node` (based on 10.5.1) and
+  `ouroboros-consensus`, and there is no tagged test-file format or corpus to
+  pin in `go.mod` or `ouroboros-mock`.
+- The node under test must take a generated topology, connect to the runner's
+  peers over real sockets, and accept headers without VRF validation, because
+  the generators place blocks in arbitrary slots. Dingo has no option to skip
+  VRF validation.
+- Runs depend on the runner's wall-clock ticking and a Haskell toolchain, so
+  they belong beside the reference-node DevNet profile rather than in the
+  deterministic `go test` profile.
+
+What it would add is generated density, peer-scheduling and adversarial
+schedules with shrinking. Until a tagged runner release exists, the captured
+scenarios in `ouroboros-mock` are the deterministic consensus coverage, and new
+fork-choice cases are added there.
 
 ## Running the tests
 
@@ -153,10 +195,17 @@ and, more importantly, scans and drops tables across *every* non-system
 schema in the target database, not just the process-scoped conformance
 schema, so calling it here would also destroy `database/plugin/metadata/postgres`'s
 own concurrently running tests' tables in the shared `dingo_test` database.
-Reset instead `TRUNCATE`s every table in that process-scoped schema in
+Reset instead empties every dirty table in that process-scoped schema in
 place, over a separate admin connection, discovering the table list from
 `information_schema` rather than hardcoding it (see
-`state_manager_postgres.go`'s `wipeMetadata`). This keeps the already-open
+`state_manager_postgres.go`'s `wipeMetadata`). It deletes rather than
+truncates: `TRUNCATE` rewrites each table's relation file, so its cost is per
+table and does not fall when the table holds only what one vector wrote —
+measured on a `postgres:16` container configured like the CI service, 12
+dirty tables cost 501ms as one `TRUNCATE ... CASCADE` against 22ms as a
+single statement of data-modifying CTEs. That one statement is also what
+removes the need to order the deletes by dependency, since the schema's
+foreign keys are `NOT DEFERRABLE`; see `deletePostgresTables`. This keeps the already-open
 store's connection pool live throughout -- no close, no reopen, no
 re-migration -- which is what keeps the cost of a Reset (and so the whole
 vector suite, which resets once per vector) from being a real
@@ -213,14 +262,26 @@ specifically rather than the `MYSQL_PASSWORD` the plugin's own tests use.
 the Postgres backend above: `NewDingoMysqlStateManager` creates one
 `os.MkdirTemp` directory the first time it's called in a process (via
 `sync.Once`) and reuses it for every later call in that same process,
-paired with the process-scoped database, and `Reset()` `TRUNCATE`s every
+paired with the process-scoped database, and `Reset()` empties every dirty
 table in that database in place, over a separate admin connection (rather
 than calling `Resettable.Reset`, which drops tables individually without
 recreating them), keeping the already-open store's connection pool live
 throughout instead of paying for a close/reopen/re-migrate cycle on every
-vector. `TestMain` drops the process database and removes this directory
-once, after every test in the process has finished -- see
-`process_cleanup_test.go`.
+vector.
+
+MySQL has no multi-table `TRUNCATE`, and InnoDB implements `TRUNCATE` by
+dropping and recreating the table's tablespace, so its cost is per table and
+does not fall when the table holds the handful of rows one vector wrote.
+`deleteMysqlTables` batches a `DELETE` per dirty table into one transaction
+instead — measured on a `mysql:8` container with the CI service's settings,
+1,687ms of `TRUNCATE` per reset against 23ms of batched `DELETE`. `DELETE`
+does not restart `AUTO_INCREMENT`, unlike MySQL's former `TRUNCATE`. Resetting
+IDs is unnecessary here: PostgreSQL's former `TRUNCATE` omitted `RESTART
+IDENTITY`, so its sequences already advanced between vectors. The PostgreSQL
+backend still reproduces the SQLite baseline vector for vector, as
+`TestRulesConformanceVectorsPostgres` asserts. `TestMain` drops the process
+database and removes this directory once, after every test in the process has
+finished; see `process_cleanup_test.go`.
 
 `TestRulesConformanceVectorsMysql` follows the same count-comparison approach
 as the Postgres variant, for the same reason, and likewise reuses the memoized
@@ -264,7 +325,10 @@ Cross-repo change cascades that must re-run this suite:
    [Corpus replay budget](#corpus-replay-budget).
 5. Between vectors, `Reset()` clears the real backend (not just in-memory
    bookkeeping) so each vector starts from a genuinely empty database --
-   see each backend's own "Reset semantics" above for how.
+   see each backend's own "Reset semantics" above for how. The corpus is
+   2,574 Blueprint vectors plus one synthetic rollback fixture, and the
+   rollback fixture resets a second time when it rolls back, so a replay
+   makes 2,576 `Reset` calls.
 
 ## Dingo validation entry point coverage
 
@@ -279,10 +343,10 @@ implementations for the committee-certificate, unknown-voter, Plutus, fee and
 PlutusV1/V2 feature rules; the pre-Alonzo eras replace the upstream fee and
 max-size rules outright).
 
-The pinned `ouroboros-mock v0.20.2` corpus contains 2,574 Blueprint vectors
-and one synthetic rollback fixture. A complete SQLite run therefore reports
-2,575/2,575, 100%, with the breakdown by era and rule family shown in the
-verbose test output.
+The pinned `ouroboros-mock v0.20.5-0.20261002194245-6bfd701ae86c` corpus
+contains 2,574 Blueprint vectors and one synthetic rollback fixture. A complete
+SQLite run therefore reports 2,575/2,575, 100%, with the breakdown by era and
+rule family shown in the verbose test output.
 
 `state_provider_test.go` closes that gap:
 
@@ -383,12 +447,34 @@ access patterns. That needs **one** pass per dialect, not several.
 | `state_provider.go`   | State-query adapters used by the harness -- every read queries the real backend live (see its type doc comment for the one narrow, documented exception) |
 | `docker-compose.yml`  | Local PostgreSQL and MySQL for the SQL-backed tests |
 
+## Peras vectors
+
+`peras_vectors_test.go` discovers Peras (CIP-0140) conformance vectors in a
+`peras/` directory of the extracted `ouroboros-mock` corpus, beside `eras/`
+and `synthetic/`. The corpus does not ship that directory yet, and
+`TestPerasConformanceVectors` skips cleanly while it is absent or holds no
+vectors. Expected layout:
+
+```
+peras/
+├── <group>/              # optional, any depth
+│   └── <vector>          # one vector per file
+└── pparams-by-hash/      # skipped, as in eras/
+```
+
+Files are collected by `conformance.CollectVectorFiles`, the same rules the
+rest of the corpus uses: `pparams-by-hash/` and `scripts/` are skipped, as are
+`README` and `*.md` files, and the result is in lexical path order. Peras
+vectors arrive through an `ouroboros-mock` bump like every other vector. The
+loader performs no Peras validation yet; each discovered vector is only
+checked to be non-empty.
+
 ## Updating vectors
 
 The vectors themselves are **embedded in `ouroboros-mock`**, not in this repo.
-The current import is `ouroboros-mock v0.20.2`, whose `conformance/CORPUS.md`
-records Blueprint revision `0f0c17e1ca24b062c868d216ae50708fc19c83ab`, archive
-SHA-256
+The current import is `ouroboros-mock v0.20.5-0.20261002194245-6bfd701ae86c`,
+whose `conformance/CORPUS.md` records Blueprint revision
+`0f0c17e1ca24b062c868d216ae50708fc19c83ab`, archive SHA-256
 `574ff7a17857dfc1f0cf477f7eb9eba1c2a0f901453396a779de4b2392ef6863`, and
 the vector/protocol-parameter inventory. To update the corpus, bump the
 `ouroboros-mock` dependency in `go.mod`, update the expected count and this

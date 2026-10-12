@@ -75,13 +75,14 @@ type benchmarkValidator struct {
 }
 
 func (v benchmarkValidator) ValidateTx(tx gledger.Transaction) error {
-	return v.ValidateTxWithOverlay(tx, nil, nil)
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
 }
 
 func (v benchmarkValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	consumed map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.StateOverlay,
 ) error {
 	for _, input := range tx.Inputs() {
 		key := utxoref.ForInput(input)
@@ -210,12 +211,14 @@ func TestBenchmarkTransactionShapes(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	if err := pool.AddTransaction(
+		context.Background(),
 		uint(conway.EraIdConway),
 		parentBytes,
 	); err != nil {
 		t.Fatalf("add parent transaction: %v", err)
 	}
 	if err := pool.AddTransaction(
+		context.Background(),
 		uint(conway.EraIdConway),
 		childBytes,
 	); err != nil {
@@ -240,6 +243,7 @@ func TestBenchmarkTransactionShapes(t *testing.T) {
 		{name: "second fanout child", txBytes: secondBytes},
 	} {
 		if err := pool.AddTransaction(
+			context.Background(),
 			uint(conway.EraIdConway),
 			item.txBytes,
 		); err != nil {
@@ -270,12 +274,14 @@ func TestBenchmarkTransactionShapes(t *testing.T) {
 		t.Fatalf("create second conflicting transaction: %v", err)
 	}
 	if err := pool.AddTransaction(
+		context.Background(),
 		uint(conway.EraIdConway),
 		firstConflictBytes,
 	); err != nil {
 		t.Fatalf("add first conflicting transaction: %v", err)
 	}
 	err = pool.AddTransaction(
+		context.Background(),
 		uint(conway.EraIdConway),
 		secondConflictBytes,
 	)
@@ -637,6 +643,7 @@ func runBenchmarkAdder(
 		default:
 		}
 		if addErr := pool.AddTransaction(
+			context.Background(),
 			uint(conway.EraIdConway),
 			txBytes,
 		); addErr != nil {
@@ -693,7 +700,7 @@ func runBenchmarkSyncer(
 ) {
 	for benchmarkWait(ctx, syncPeriod) {
 		start := time.Now()
-		if err := pool.rebuildOverlay(); err != nil {
+		if err := pool.rebuildOverlay(context.Background()); err != nil {
 			reportBenchmarkError(errCh, err)
 			return
 		}
@@ -731,6 +738,7 @@ func prepareBenchmarkGenerators(
 				return nil, err
 			}
 			if err := pool.AddTransaction(
+				context.Background(),
 				uint(conway.EraIdConway),
 				parentBytes,
 			); err != nil {
@@ -793,6 +801,7 @@ func prefillBenchmarkPool(pool Pool, count int) error {
 			return fmt.Errorf("generate prefill transaction %d: %w", i, err)
 		}
 		if err := pool.AddTransaction(
+			context.Background(),
 			uint(conway.EraIdConway),
 			txBytes,
 		); err != nil {
@@ -909,7 +918,7 @@ func buildBenchmarkTransaction(
 	benchmarkTemplateMu.Lock()
 	defer benchmarkTemplateMu.Unlock()
 	tx.Body.TxInputs.SetItems([]shelley.ShelleyTransactionInput{
-		shelley.NewShelleyTransactionInput(
+		shelley.MustNewShelleyTransactionInput(
 			inputHash,
 			int(inputIndex),
 		),
@@ -1003,6 +1012,7 @@ func benchmarkRemovalCascade(
 				)
 			}
 			if err := pluginPool.pool.AddTransaction(
+				context.Background(),
 				uint(conway.EraIdConway),
 				txBytes,
 			); err != nil {
@@ -1208,13 +1218,14 @@ func (v dijkstraOverlapValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.StateOverlay,
 ) error {
 	return v.ValidateTx(tx)
 }
 
 func TestAddTransactionAcceptsDijkstraSpendReferenceOverlap(t *testing.T) {
 	t.Parallel()
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"a228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee11",
 		0,
 	)
@@ -1253,7 +1264,7 @@ func TestAddTransactionAcceptsDijkstraSpendReferenceOverlap(t *testing.T) {
 
 	pool := newTestMempoolWithValidator(t, dijkstraOverlapValidator{})
 	defer pool.Stop(context.Background())
-	require.NoError(t, pool.AddTransaction(uint(dijkstra.TxTypeDijkstra), txCbor))
+	require.NoError(t, pool.AddTransaction(context.Background(), uint(dijkstra.TxTypeDijkstra), txCbor))
 	require.Len(t, pool.Transactions(), 1)
 }
 
@@ -1268,13 +1279,14 @@ type fifoRevalidationBenchmarkValidator struct {
 func (v *fifoRevalidationBenchmarkValidator) ValidateTx(
 	tx gledger.Transaction,
 ) error {
-	return v.ValidateTxWithOverlay(tx, nil, nil)
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
 }
 
 func (v *fifoRevalidationBenchmarkValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
 ) error {
 	if delay := time.Duration(v.delayNS.Load()); delay > 0 {
 		start := time.Now()
@@ -1284,18 +1296,25 @@ func (v *fifoRevalidationBenchmarkValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-func (v *fifoRevalidationBenchmarkValidator) WithTxValidationSession(
+func (v *fifoRevalidationBenchmarkValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		func(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
 		) error,
 		func() bool,
+		func(func() error) (bool, error),
 	) error,
 ) error {
 	v.once.Do(func() { close(v.started) })
-	return fn(v.ValidateTxWithOverlay, func() bool { return true })
+	stillCurrent := func() bool { return true }
+	return fn(
+		v.ValidateTxWithOverlay,
+		stillCurrent,
+		testCommitIfCurrent(stillCurrent),
+	)
 }
 
 func BenchmarkFIFOAdmissionNoRevalidation(b *testing.B) {
@@ -1309,6 +1328,7 @@ func BenchmarkFIFOAdmissionNoRevalidation(b *testing.B) {
 	for range b.N {
 		txBytes := generator.next(b)
 		if err := pool.AddTransaction(
+			context.Background(),
 			uint(conway.EraIdConway),
 			txBytes,
 		); err != nil {
@@ -1340,6 +1360,7 @@ func BenchmarkFIFORevalidation(b *testing.B) {
 				for range fifoRevalidationBenchmarkOccupancy {
 					txBytes := generator.next(b)
 					if err := pool.AddTransaction(
+						context.Background(),
 						uint(conway.EraIdConway),
 						txBytes,
 					); err != nil {
@@ -1351,7 +1372,7 @@ func BenchmarkFIFORevalidation(b *testing.B) {
 
 				syncStart := time.Now()
 				rebuildDone := make(chan error, 1)
-				go func() { rebuildDone <- pool.rebuildOverlay() }()
+				go func() { rebuildDone <- pool.rebuildOverlay(context.Background()) }()
 				waitCtx, cancelWait := context.WithTimeout(
 					context.Background(),
 					3*time.Second,
@@ -1366,6 +1387,7 @@ func BenchmarkFIFORevalidation(b *testing.B) {
 
 				admissionStart := time.Now()
 				if err := pool.AddTransaction(
+					context.Background(),
 					uint(conway.EraIdConway),
 					generator.next(b),
 				); err != nil {
@@ -1458,7 +1480,7 @@ func (g *fifoRevalidationTxGenerator) next(b *testing.B) []byte {
 		b.Fatalf("transaction template decoded as %T", decoded)
 	}
 	tx.Body.TxInputs.SetItems([]shelley.ShelleyTransactionInput{
-		shelley.NewShelleyTransactionInput(inputHash, 0),
+		shelley.MustNewShelleyTransactionInput(inputHash, 0),
 	})
 	tx.Body.TxFee = 1_000_000 + g.sequence
 	tx.TxIsValid = true

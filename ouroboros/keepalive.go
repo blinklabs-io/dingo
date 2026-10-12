@@ -15,6 +15,11 @@
 package ouroboros
 
 import (
+	"errors"
+	"fmt"
+	"net"
+	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -23,8 +28,38 @@ import (
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
 
+// keepalivePongTimeoutErr is the exact message gouroboros protocol.go
+// reports when the keep-alive client's transition timer for the Server state
+// (waiting on the peer's pong) fires. The server side's ping-wait timeout
+// reports the Client state instead, so it does not match.
+var keepalivePongTimeoutErr = fmt.Sprintf(
+	"%s: timeout waiting on transition from protocol state %s",
+	okeepalive.ProtocolName,
+	okeepalive.StateServer,
+)
+
+// classifyKeepaliveTimeoutClose reports whether err is a keep-alive pong
+// timeout. gouroboros v0.208.0 has no typed error for it, and its connection
+// wraps every forwarded mini-protocol error ("protocol error: %w" in
+// connection.go), so this matches the protocol.go message exactly at any
+// level of the wrap chain rather than against the outer string.
+func classifyKeepaliveTimeoutClose(err error) bool {
+	for ; err != nil; err = errors.Unwrap(err) {
+		if err.Error() == keepalivePongTimeoutErr {
+			return true
+		}
+	}
+	return false
+}
+
 func (o *Ouroboros) keepaliveConnOpts() []okeepalive.KeepAliveOptionFunc {
 	opts := []okeepalive.KeepAliveOptionFunc{
+		// Server side: a downstream peer pinging us is not idle.
+		okeepalive.WithOnKeepAliveReceived(
+			func(connId connection.ConnectionId, _ uint16) {
+				o.recordServedActivity(connId)
+			},
+		),
 		okeepalive.WithOnKeepAliveResponseReceived(
 			o.instrumentKeepaliveResponse(o.keepaliveClientResponse),
 		),
@@ -69,4 +104,81 @@ func (o *Ouroboros) keepaliveClientResponse(
 		},
 	)
 	o.eventBus.Publish(chainselection.PeerActivityEventType, evt)
+}
+
+// servedActivityReportInterval bounds how often one connection's server-side
+// activity is forwarded to the peer governor. It is far below
+// InboundPruneAfter, and keeps the per-header chainsync path off the governor
+// lock.
+const servedActivityReportInterval = 10 * time.Second
+
+// servedActivityClockBase anchors the throttle's timestamps. Storing
+// time.Since(base) keeps the monotonic reading, so a wall-clock step cannot
+// stall or burst reports.
+var servedActivityClockBase = time.Now()
+
+type servedActivityKey struct {
+	local, remote netip.AddrPort
+}
+
+func servedActivityKeyFor(
+	connId connection.ConnectionId,
+) (servedActivityKey, bool) {
+	l, lok := connId.LocalAddr.(*net.TCPAddr)
+	r, rok := connId.RemoteAddr.(*net.TCPAddr)
+	if !lok || !rok || l == nil || r == nil {
+		return servedActivityKey{}, false
+	}
+	return servedActivityKey{local: l.AddrPort(), remote: r.AddrPort()}, true
+}
+
+// recordServedActivity tells the peer governor that the downstream peer on
+// connId is consuming from this node, at most once per
+// servedActivityReportInterval per connection. The hot path is a sync.Map
+// load and an atomic compare-and-swap; it never takes the governor lock
+// between reports.
+func (o *Ouroboros) recordServedActivity(connId connection.ConnectionId) {
+	report := o.reportServedActivity
+	key, ok := servedActivityKeyFor(connId)
+	if !ok {
+		// Not TCP: a node-to-client unix-socket connection sharing these
+		// server handlers. The governor tracks no peer for it, and reporting
+		// unthrottled would take the governor lock per served header.
+		return
+	}
+	interval := servedActivityReportInterval
+	if o.servedActivityInterval > 0 {
+		interval = o.servedActivityInterval
+	}
+	// +1 so a stored value is never 0, which marks "never reported".
+	now := int64(time.Since(servedActivityClockBase)) + 1
+	v, loaded := o.servedActivityLast.Load(key)
+	if !loaded {
+		v, _ = o.servedActivityLast.LoadOrStore(key, new(atomic.Int64))
+	}
+	last := v.(*atomic.Int64)
+	prev := last.Load()
+	if prev != 0 && now-prev < int64(interval) {
+		return
+	}
+	if !last.CompareAndSwap(prev, now) {
+		return // a concurrent caller is reporting
+	}
+	report(connId)
+}
+
+func (o *Ouroboros) reportServedActivity(connId connection.ConnectionId) {
+	if o.servedActivityHook != nil {
+		o.servedActivityHook(connId)
+		return
+	}
+	if o.peerGov != nil {
+		o.peerGov.RecordServedActivityByConnId(connId)
+	}
+}
+
+func (o *Ouroboros) forgetServedActivity(connId connection.ConnectionId) {
+	if key, ok := servedActivityKeyFor(connId); ok {
+		o.servedActivityLast.Delete(key)
+	}
 }

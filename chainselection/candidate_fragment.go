@@ -116,6 +116,23 @@ func (f CandidateFragment) Intersect(
 	return ocommon.Point{}, false
 }
 
+// fragmentIntersection returns the highest point two peers' delivered
+// fragments share, or nil when either peer is nil or they share none. It
+// wraps the histories without copying them, since callers hold the selector
+// lock; Intersect clones only the point it returns.
+func fragmentIntersection(a, b *PeerChainTip) *ocommon.Point {
+	if a == nil || b == nil {
+		return nil
+	}
+	point, ok := CandidateFragment{entries: a.observedTipHistory}.Intersect(
+		CandidateFragment{entries: b.observedTipHistory},
+	)
+	if !ok {
+		return nil
+	}
+	return &point
+}
+
 // candidateFragmentFromHistory snapshots a peer's delivered-tip history into
 // an independently owned CandidateFragment.
 func candidateFragmentFromHistory(

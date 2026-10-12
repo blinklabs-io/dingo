@@ -29,7 +29,9 @@ import (
 // reward-stake total (the sigma_a denominator) rather than the total of the
 // pools that survived degraded-registration exclusion, so a version 1 row
 // understates the denominator for any epoch that excluded a pool.
-const RewardStakeCalculationVersion uint = 2
+// Version 3: Dijkstra snapshots follow enactment and include boundary credits.
+// Warm prototype genesis staking receives initial rewards; pools retain deposits.
+const RewardStakeCalculationVersion uint = 3
 
 // RewardAdaPots captures the reward-related ADA pots at an epoch boundary.
 type RewardAdaPots struct {
@@ -170,6 +172,8 @@ type RewardPoolOutput struct {
 	OptimalReward       types.Uint64
 	TotalReward         types.Uint64
 	LeaderReward        types.Uint64
+	// LeaderRewardDeficit preserves the magnitude of a negative leader reward.
+	LeaderRewardDeficit types.Uint64
 	MemberRewardTotal   types.Uint64
 	OwnerStake          types.Uint64
 	Undistributed       types.Uint64

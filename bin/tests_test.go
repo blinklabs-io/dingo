@@ -19,6 +19,7 @@ package bin_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -29,7 +30,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,6 +47,10 @@ const (
 	// entrypointChildDelayEnv makes the fake child stall before signalling
 	// ready and before exiting, standing in for a starved runner.
 	entrypointChildDelayEnv = "DINGO_TEST_ENTRYPOINT_CHILD_DELAY"
+
+	// entrypointChildHangEnv makes the fake child start and then never become
+	// ready, standing in for a child that is wedged after spawning.
+	entrypointChildHangEnv = "DINGO_TEST_ENTRYPOINT_CHILD_HANG"
 )
 
 // TestMain turns a re-executed copy of this test binary into the fake dingo
@@ -64,7 +68,21 @@ func runEntrypointChild(kind string) int {
 	readyFile := os.Getenv(
 		"DINGO_TEST_" + strings.ToUpper(kind) + "_READY_FILE",
 	)
+	startedFile := os.Getenv(
+		"DINGO_TEST_" + strings.ToUpper(kind) + "_STARTED_FILE",
+	)
+	if err := os.WriteFile(startedFile, []byte("started\n"), 0o600); err != nil {
+		return 125
+	}
 	childDelay, _ := time.ParseDuration(os.Getenv(entrypointChildDelayEnv))
+	if os.Getenv(entrypointChildHangEnv) != "" {
+		// Started but never ready: wait to be killed by the harness. Not
+		// select{}: without cgo (the darwin default) the runtime reports that
+		// as a deadlock and exits 2, so the child dies instead of hanging.
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	if kind == bootstrapChild && os.Getenv("DINGO_TEST_BOOTSTRAP_WAIT") == "" {
 		if err := os.WriteFile(readyFile, []byte("ready\n"), 0o600); err != nil {
 			return 125
@@ -143,17 +161,12 @@ func TestEntrypointForwardsSignalsDuringMithrilBootstrap(t *testing.T) {
 					test.childStatus,
 				),
 			)
-			cmd, done, output := harness.start(t)
+			_, process, output := harness.start(t)
 
-			testutil.WaitForCondition(
-				t,
-				func() bool { return fileExists(harness.bootstrapReadyFile) },
-				entrypointStepTimeout,
-				"Mithril bootstrap child did not become ready",
-			)
-			require.NoError(t, cmd.Process.Signal(test.signal))
+			harness.requireBootstrapReady(t, process, output)
+			require.NoError(t, process.cmd.Process.Signal(test.signal))
 
-			err := waitForEntrypoint(t, cmd, done, output)
+			err := waitForEntrypoint(t, process.cmd, process, output)
 			require.Equal(
 				t,
 				test.childStatus,
@@ -167,8 +180,13 @@ func TestEntrypointForwardsSignalsDuringMithrilBootstrap(t *testing.T) {
 			)
 			require.False(
 				t,
-				fileExists(harness.serveReadyFile),
+				fileExists(harness.serveStartedFile),
 				"serve must not start after an interrupted bootstrap",
+			)
+			require.False(
+				t,
+				fileExists(harness.serveReadyFile),
+				"serve must not become ready after an interrupted bootstrap",
 			)
 		})
 	}
@@ -186,17 +204,12 @@ func TestEntrypointForwardsSignalsToSlowChild(t *testing.T) {
 		"DINGO_TEST_BOOTSTRAP_EXIT_CODE=41",
 		entrypointChildDelayEnv+"=2500ms",
 	)
-	cmd, done, output := harness.start(t)
+	_, process, output := harness.start(t)
 
-	testutil.WaitForCondition(
-		t,
-		func() bool { return fileExists(harness.bootstrapReadyFile) },
-		entrypointStepTimeout,
-		"Mithril bootstrap child did not become ready",
-	)
-	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
+	harness.requireBootstrapReady(t, process, output)
+	require.NoError(t, process.cmd.Process.Signal(syscall.SIGTERM))
 
-	err := waitForEntrypoint(t, cmd, done, output)
+	err := waitForEntrypoint(t, process.cmd, process, output)
 	require.Equal(t, 41, commandExitCode(t, err), output.String())
 	require.Equal(
 		t, "SIGTERM\n", readFile(t, harness.bootstrapSignalFile),
@@ -206,32 +219,242 @@ func TestEntrypointForwardsSignalsToSlowChild(t *testing.T) {
 func TestEntrypointSignalHandlingSurvivesBootstrapToServeHandoff(t *testing.T) {
 	harness := newEntrypointHarness(t, false)
 	harness.env = append(harness.env, "DINGO_TEST_SERVE_EXIT_CODE=39")
-	cmd, done, output := harness.start(t)
+	_, process, output := harness.start(t)
 
-	testutil.WaitForCondition(
-		t,
-		func() bool { return fileExists(harness.serveReadyFile) },
-		entrypointStepTimeout,
-		"serve child did not become ready after Mithril bootstrap",
-	)
-	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
+	harness.requireServeReady(t, process, output)
+	require.NoError(t, process.cmd.Process.Signal(syscall.SIGTERM))
 
-	err := waitForEntrypoint(t, cmd, done, output)
+	err := waitForEntrypoint(t, process.cmd, process, output)
 	require.Equal(t, 39, commandExitCode(t, err), output.String())
 	require.Equal(t, "SIGTERM\n", readFile(t, harness.serveSignalFile))
 }
 
+// A child that spawns and then wedges must fail the readiness wait, and the
+// failure must say it started, so the stage is not misread as a spawn stall.
+func TestEntrypointReadinessWaitFailsForChildThatNeverBecomesReady(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	harness := newEntrypointHarness(t, false)
+	harness.env = append(
+		harness.env,
+		"DINGO_TEST_BOOTSTRAP_WAIT=1",
+		entrypointChildHangEnv+"=1",
+	)
+	_, process, _ := harness.start(t)
+
+	err := waitForEntrypointChildReady(
+		process,
+		harness.bootstrapStartedFile,
+		harness.bootstrapReadyFile,
+		entrypointStepTimeout,
+		300*time.Millisecond,
+		"Mithril bootstrap",
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "started but did not become ready")
+	require.False(t, fileExists(harness.bootstrapReadyFile))
+}
+
 type entrypointHarness struct {
-	env                 []string
-	bootstrapReadyFile  string
-	bootstrapSignalFile string
-	serveReadyFile      string
-	serveSignalFile     string
+	env                  []string
+	bootstrapStartedFile string
+	bootstrapReadyFile   string
+	bootstrapSignalFile  string
+	serveStartedFile     string
+	serveReadyFile       string
+	serveSignalFile      string
+}
+
+func (h *entrypointHarness) requireBootstrapReady(
+	t *testing.T, process *entrypointProcess, output *bytes.Buffer,
+) {
+	t.Helper()
+	requireEntrypointChildReady(
+		t,
+		process,
+		output,
+		h.bootstrapStartedFile,
+		h.bootstrapReadyFile,
+		entrypointStepTimeout,
+		entrypointStepTimeout,
+		"Mithril bootstrap",
+	)
+}
+
+func (h *entrypointHarness) requireServeReady(
+	t *testing.T, process *entrypointProcess, output *bytes.Buffer,
+) {
+	t.Helper()
+	requireEntrypointChildReady(
+		t,
+		process,
+		output,
+		h.serveStartedFile,
+		h.serveReadyFile,
+		entrypointStepTimeout,
+		entrypointStepTimeout,
+		"serve",
+	)
 }
 
 type entrypointProcess struct {
+	cmd  *exec.Cmd
 	done chan struct{}
 	err  error
+}
+
+func TestWaitForEntrypointChildReady(t *testing.T) {
+	t.Parallel()
+	exitErr := errors.New("exit status 7")
+	tests := []struct {
+		name          string
+		started       bool
+		ready         bool
+		exited        bool
+		wantErrorPart string
+	}{
+		{
+			name:          "child never started",
+			wantErrorPart: "bootstrap child did not start within",
+		},
+		{
+			name:          "child started but never became ready",
+			started:       true,
+			wantErrorPart: "bootstrap child started but did not become ready",
+		},
+		{
+			name:          "entrypoint exited before the child started",
+			exited:        true,
+			wantErrorPart: "bootstrap child did not start: entrypoint exited: exit status 7",
+		},
+		{
+			name:          "entrypoint exited before the child became ready",
+			started:       true,
+			exited:        true,
+			wantErrorPart: "bootstrap child started but exited before becoming ready: exit status 7",
+		},
+		{
+			name:    "child became ready as the entrypoint exited",
+			started: true,
+			ready:   true,
+			exited:  true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			startedFile := filepath.Join(dir, "child.started")
+			readyFile := filepath.Join(dir, "child.ready")
+			if test.started {
+				require.NoError(t, os.WriteFile(startedFile, []byte("started\n"), 0o600))
+			}
+			if test.ready {
+				require.NoError(t, os.WriteFile(readyFile, []byte("ready\n"), 0o600))
+			}
+			process := &entrypointProcess{done: make(chan struct{})}
+			if test.exited {
+				process.err = exitErr
+				close(process.done)
+			}
+			err := waitForEntrypointChildReady(
+				process,
+				startedFile,
+				readyFile,
+				10*time.Millisecond,
+				10*time.Millisecond,
+				"bootstrap",
+			)
+			if test.wantErrorPart == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, test.wantErrorPart)
+		})
+	}
+}
+
+// waitForEntrypointChildReady waits for the child to start and then to write
+// its ready file, each against its own budget, so a timeout names the stage
+// that stalled: spawn queueing on a loaded runner is charged to startBudget
+// only, and readyBudget begins once the child is observed running. The ready
+// file is re-checked when the entrypoint exits or a deadline fires, because
+// the child can write it in the same window: a ready child must not be
+// reported as one that never became ready.
+func waitForEntrypointChildReady(
+	process *entrypointProcess,
+	startedFile string,
+	readyFile string,
+	startBudget time.Duration,
+	readyBudget time.Duration,
+	name string,
+) error {
+	deadline := time.NewTimer(startBudget)
+	defer func() { deadline.Stop() }()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	running := false
+	for {
+		select {
+		case <-process.done:
+			if fileExists(readyFile) {
+				return nil
+			}
+			if !fileExists(startedFile) {
+				return fmt.Errorf("%s child did not start: entrypoint exited: %v", name, process.err)
+			}
+			return fmt.Errorf("%s child started but exited before becoming ready: %v", name, process.err)
+		case <-deadline.C:
+			if fileExists(readyFile) {
+				return nil
+			}
+			if !running && !fileExists(startedFile) {
+				return fmt.Errorf("%s child did not start within %s", name, startBudget)
+			}
+			return fmt.Errorf("%s child started but did not become ready within %s", name, readyBudget)
+		case <-poll.C:
+			if fileExists(readyFile) {
+				return nil
+			}
+			if !running && fileExists(startedFile) {
+				running = true
+				deadline.Stop()
+				deadline = time.NewTimer(readyBudget)
+			}
+		}
+	}
+}
+
+// requireEntrypointChildReady fails the test with the entrypoint's captured
+// output when the child never becomes ready. The entrypoint is stopped before
+// the output is read, since its copy goroutine is still writing to it.
+func requireEntrypointChildReady(
+	t *testing.T,
+	process *entrypointProcess,
+	output *bytes.Buffer,
+	startedFile string,
+	readyFile string,
+	startBudget time.Duration,
+	readyBudget time.Duration,
+	name string,
+) {
+	t.Helper()
+	err := waitForEntrypointChildReady(
+		process,
+		startedFile,
+		readyFile,
+		startBudget,
+		readyBudget,
+		name,
+	)
+	if err == nil {
+		return
+	}
+	_ = syscall.Kill(-process.cmd.Process.Pid, syscall.SIGKILL)
+	<-process.done
+	require.NoError(t, err, output.String())
 }
 
 func newEntrypointHarness(t *testing.T, resume bool) *entrypointHarness {
@@ -272,10 +495,12 @@ exec "${DINGO_TEST_BINARY}"
 	}
 
 	harness := &entrypointHarness{
-		bootstrapReadyFile:  filepath.Join(root, "bootstrap.ready"),
-		bootstrapSignalFile: filepath.Join(root, "bootstrap.signal"),
-		serveReadyFile:      filepath.Join(root, "serve.ready"),
-		serveSignalFile:     filepath.Join(root, "serve.signal"),
+		bootstrapStartedFile: filepath.Join(root, "bootstrap.started"),
+		bootstrapReadyFile:   filepath.Join(root, "bootstrap.ready"),
+		bootstrapSignalFile:  filepath.Join(root, "bootstrap.signal"),
+		serveStartedFile:     filepath.Join(root, "serve.started"),
+		serveReadyFile:       filepath.Join(root, "serve.ready"),
+		serveSignalFile:      filepath.Join(root, "serve.signal"),
 	}
 	harness.env = cleanEnvironment(
 		os.Environ(),
@@ -297,8 +522,10 @@ exec "${DINGO_TEST_BINARY}"
 		"DINGO_SOCKET_PATH="+filepath.Join(root, "ipc", "dingo.socket"),
 		"RESTORE_SNAPSHOT=1",
 		"DINGO_TEST_BINARY="+testBinary,
+		"DINGO_TEST_BOOTSTRAP_STARTED_FILE="+harness.bootstrapStartedFile,
 		"DINGO_TEST_BOOTSTRAP_READY_FILE="+harness.bootstrapReadyFile,
 		"DINGO_TEST_BOOTSTRAP_SIGNAL_FILE="+harness.bootstrapSignalFile,
+		"DINGO_TEST_SERVE_STARTED_FILE="+harness.serveStartedFile,
 		"DINGO_TEST_SERVE_READY_FILE="+harness.serveReadyFile,
 		"DINGO_TEST_SERVE_SIGNAL_FILE="+harness.serveSignalFile,
 	)
@@ -320,7 +547,7 @@ func (h *entrypointHarness) start(
 	cmd.Stderr = output
 	require.NoError(t, cmd.Start())
 
-	process := &entrypointProcess{done: make(chan struct{})}
+	process := &entrypointProcess{cmd: cmd, done: make(chan struct{})}
 	go func() {
 		process.err = cmd.Wait()
 		close(process.done)

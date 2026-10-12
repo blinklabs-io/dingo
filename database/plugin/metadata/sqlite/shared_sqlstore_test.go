@@ -77,7 +77,7 @@ type accountStore interface {
 	GetActiveAccountCredentials(
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
-	DeactivateAccounts(types.Txn, []models.StakeCredentialRef) error
+	DeactivateAccounts(types.Txn, []models.StakeCredentialRef, uint64) error
 	AddAccountRewardByCredential(
 		uint8,
 		[]byte,
@@ -125,7 +125,26 @@ type accountState struct {
 func TestSharedSQLStoreAccountParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseAccountStore(t, store)
+	state := exerciseAccountStore(t, store)
+	require.NotNil(t, state.active)
+	require.Nil(t, state.inactiveHidden)
+	require.NotNil(t, state.inactive)
+	require.Len(t, state.activeBatch, 1)
+	require.Len(t, state.allBatch, 2)
+	require.NotNil(t, state.renewed)
+	require.Equal(t, uint64(55), state.renewed.ExpirationEpoch)
+	require.Equal(t, []models.StakeCredentialRef{
+		models.NewStakeCredentialRef(0, bytes.Repeat([]byte{0x11}, 28)),
+	}, state.activeRefs)
+	require.Equal(t, int64(1), state.stamped)
+	require.NotNil(t, state.afterCredit)
+	require.Equal(t, uint64(60), uint64(state.afterCredit.Reward))
+	require.NotNil(t, state.afterWithdrawal)
+	require.Zero(t, state.afterWithdrawal.Reward)
+	require.NotNil(t, state.afterCreditRollback)
+	require.Equal(t, uint64(50), uint64(state.afterCreditRollback.Reward))
+	require.NotNil(t, state.deactivated)
+	require.False(t, state.deactivated.Active)
 }
 
 func exerciseAccountStore(t *testing.T, store accountStore) accountState {
@@ -232,15 +251,18 @@ func exerciseAccountStore(t *testing.T, store accountStore) accountState {
 	require.NoError(t, err)
 	ret.accountSums, err = store.GetAccountSumsByCredential(0, activeKey, nil)
 	require.NoError(t, err)
+	require.NotNil(t, ret.afterCreditRollback)
+	require.True(t, ret.afterCreditRollback.Active)
 	require.NoError(t, store.DeactivateAccounts(
 		nil,
 		[]models.StakeCredentialRef{
-			models.NewStakeCredentialRef(1, inactiveKey),
+			models.NewStakeCredentialRef(0, activeKey),
 		},
+		1_000,
 	))
 	ret.deactivated, err = store.GetAccountByCredential(
-		1,
-		inactiveKey,
+		0,
+		activeKey,
 		true,
 		nil,
 	)
@@ -425,7 +447,7 @@ type drepStore interface {
 		[]byte,
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
-	UpdateDRepActivity(uint8, []byte, uint64, uint64, types.Txn) error
+	UpdateDRepActivity(uint8, []byte, uint64, uint64, uint64, types.Txn) error
 	GetExpiredDReps(uint64, types.Txn) ([]*models.Drep, error)
 	GetDrepLastRegistrationSlot(uint8, []byte, types.Txn) (uint64, error)
 	GetDrepLastRegistrationDeposit(uint8, []byte, types.Txn) (*uint64, error)
@@ -486,7 +508,69 @@ type drepState struct {
 func TestSharedSQLStoreDrepParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseDrepStore(t, store)
+	state := exerciseDrepStore(t, store)
+	require.NotNil(t, state.Created)
+	require.Equal(t, uint64(12), state.Created.AddedSlot)
+	require.Equal(t, "inactive", state.Created.AnchorURL)
+	require.NotNil(t, state.Imported)
+	require.Equal(t, uint64(30), state.Imported.LastActivityEpoch)
+	require.Equal(t, uint64(35), state.Imported.ExpiryEpoch)
+	require.Nil(t, state.InactiveHidden)
+	require.NotNil(t, state.Inactive)
+	require.False(t, state.Inactive.Active)
+	require.Len(t, state.Active, 3)
+	activeDrepCredentials := make([]string, len(state.Active))
+	for i, drep := range state.Active {
+		activeDrepCredentials[i] = models.DrepDepositKey(
+			drep.CredentialTag, drep.Credential,
+		)
+	}
+	require.ElementsMatch(t, []string{
+		models.DrepDepositKey(1, bytes.Repeat([]byte{0x42}, 28)),
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x44}, 28)),
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x45}, 28)),
+	}, activeDrepCredentials)
+	require.Len(t, state.Delegators, 2)
+	require.ElementsMatch(t, []models.StakeCredentialRef{
+		models.NewStakeCredentialRef(0, bytes.Repeat([]byte{0x51}, 28)),
+		models.NewStakeCredentialRef(1, bytes.Repeat([]byte{0x50}, 28)),
+	}, state.Delegators)
+	firstSeenSlots := map[string]uint64{
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x41}, 28)): 12,
+		models.DrepDepositKey(1, bytes.Repeat([]byte{0x42}, 28)): 21,
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x44}, 28)): 22,
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x45}, 28)): 23,
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x46}, 28)): 24,
+	}
+	lastRegistrationSlots := map[string]uint64{
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x41}, 28)): 0,
+		models.DrepDepositKey(1, bytes.Repeat([]byte{0x42}, 28)): 21,
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x44}, 28)): 0,
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x45}, 28)): 44,
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x46}, 28)): 24,
+	}
+	gotDrepSlots := make(map[string]uint64, len(state.Dreps))
+	gotDrepLastRegistrationSlots := make(map[string]uint64, len(state.Dreps))
+	for _, drep := range state.Dreps {
+		key := models.DrepDepositKey(drep.CredentialTag, drep.Credential)
+		gotDrepSlots[key] = drep.FirstSeenSlot
+		gotDrepLastRegistrationSlots[key] = drep.LastRegistrationSlot
+	}
+	require.Equal(t, firstSeenSlots, gotDrepSlots)
+	require.Equal(t, lastRegistrationSlots, gotDrepLastRegistrationSlots)
+	require.Len(t, state.Deposits, 3)
+	require.Equal(t, map[string]uint64{
+		models.DrepDepositKey(1, bytes.Repeat([]byte{0x42}, 28)): 700,
+	}, state.VotingPowerBatch)
+	wantLiveStake := []*models.RewardStakeInput{{
+		PoolKeyHash:   []byte("pool-a"),
+		StakingKey:    bytes.Repeat([]byte{0x51}, 28),
+		CredentialTag: 0,
+		Stake:         types.Uint64(500),
+		Registered:    true,
+	}}
+	require.Equal(t, wantLiveStake, state.LiveStake)
+	require.Equal(t, wantLiveStake, state.LiveStakeAfterRebuild)
 }
 
 func exerciseDrepStore(t *testing.T, store drepStore) drepState {
@@ -602,6 +686,7 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		importedCredential,
 		30,
 		5,
+		300,
 		nil,
 	))
 	require.NoError(t, store.CreateAccount(nil, &models.Account{
@@ -761,7 +846,7 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		},
 		ret.Deposits,
 	)
-	err = store.UpdateDRepActivity(0, missingCredential, 1, 1, nil)
+	err = store.UpdateDRepActivity(0, missingCredential, 1, 1, 10, nil)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, models.ErrDrepActivityNotUpdated))
 	ret.MissingActivityError = err.Error()
@@ -1013,7 +1098,7 @@ func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
 	// The Mithril bootstrap sequence: drop the manifest for the bulk load,
 	// then rebuild only the critical subset before the database is marked
 	// ready. The lazy remainder is finished by later maintenance, and on a
-	// database whose pending marker the sync's own ClearSyncState wiped,
+	// database whose pending marker an older sync's blanket clear wiped,
 	// never — so whatever the rollback path needs has to be in this
 	// subset.
 	require.NoError(t, store.DropDeferredIndexes())
@@ -1202,7 +1287,7 @@ func TestSharedSQLStoreLeiosClosureTolerateDoubleConsume(t *testing.T) {
 		}))
 		txA := consumeTx(0xa2, input)
 		pointA := ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{0xc1}, 32)}
-		require.NoError(t, store.SetTransaction(txA, pointA, 0, nil, true, nil))
+		require.NoError(t, store.SetTransaction(txA, pointA, 0, nil, true, nil, 0))
 		return store, txA
 	}
 
@@ -1213,7 +1298,7 @@ func TestSharedSQLStoreLeiosClosureTolerateDoubleConsume(t *testing.T) {
 		store, _ := newStoreWithSpentInput(t)
 		txB := consumeTx(0xb2, input)
 		pointB := ocommon.Point{Slot: 20, Hash: bytes.Repeat([]byte{0xc2}, 32)}
-		err := store.SetTransaction(txB, pointB, 0, nil, true, nil)
+		err := store.SetTransaction(txB, pointB, 0, nil, true, nil, 0)
 		require.Error(t, err)
 		require.ErrorIs(t, err, types.ErrUtxoConflict)
 	})
@@ -1228,7 +1313,7 @@ func TestSharedSQLStoreLeiosClosureTolerateDoubleConsume(t *testing.T) {
 		pointB := ocommon.Point{Slot: 20, Hash: bytes.Repeat([]byte{0xc3}, 32)}
 		require.NoError(
 			t,
-			store.SetTransactionLeiosClosure(txB, pointB, 0, nil, true, nil),
+			store.SetTransactionLeiosClosure(txB, pointB, 0, nil, true, nil, 0),
 		)
 
 		// Producer input remains spent by the first (earlier certified) tx.
@@ -1350,7 +1435,48 @@ type midnightState struct {
 func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseMidnightStore(t, store)
+	state := exerciseMidnightStore(t, store)
+	assetTxHashes := make([]string, len(state.unspentAssets))
+	for i, asset := range state.unspentAssets {
+		assetTxHashes[i] = string(asset.TxHash)
+	}
+	require.ElementsMatch(t, []string{"create-b", "create-c"}, assetTxHashes)
+	registrationTxHashes := make([]string, len(state.unspentRegistrations))
+	for i, registration := range state.unspentRegistrations {
+		registrationTxHashes[i] = string(registration.TxHash)
+	}
+	require.ElementsMatch(t, []string{"reg-b"}, registrationTxHashes)
+	pageTxHashes := make([]string, len(state.page))
+	for i, asset := range state.page {
+		pageTxHashes[i] = string(asset.TxHash)
+	}
+	require.Equal(t, []string{"create-a", "create-b"}, pageTxHashes)
+	require.NotNil(t, state.governance)
+	require.Equal(t, []byte("gov-a"), state.governance.TxHash)
+	require.Equal(t, []byte("datum-a"), state.governance.Datum)
+	require.Equal(t, uint64(10), state.governance.BlockNumber)
+	require.NotNil(t, state.latestAriadne)
+	require.Equal(t, uint64(2), state.latestAriadne.Epoch)
+	require.Equal(t, []byte("ariadne-b"), state.latestAriadne.Datum)
+	require.NotNil(t, state.historicalAriadne)
+	require.Equal(t, uint64(1), state.historicalAriadne.Epoch)
+	require.Equal(t, []byte("ariadne-a"), state.historicalAriadne.Datum)
+	require.Len(t, state.rollbacks, 1)
+	require.NotNil(t, state.candidates)
+	require.Equal(t, uint64(2), state.candidates.Epoch)
+	require.Equal(t, uint64(12), state.candidates.BlockNumber)
+	require.Equal(t, []byte("candidates"), state.candidates.CandidatesCbor)
+	require.Len(t, state.registrations, 1)
+	deletedCreateTxHashes := make([]string, len(state.deletedCreates))
+	for i, create := range state.deletedCreates {
+		deletedCreateTxHashes[i] = string(create.TxHash)
+	}
+	require.ElementsMatch(t, []string{"create-c"}, deletedCreateTxHashes)
+	deletedRegistrationTxHashes := make([]string, len(state.deletedRegistrations))
+	for i, registration := range state.deletedRegistrations {
+		deletedRegistrationTxHashes[i] = string(registration.TxHash)
+	}
+	require.ElementsMatch(t, []string{"reg-b"}, deletedRegistrationTxHashes)
 }
 
 func exerciseMidnightStore(t *testing.T, store midnightStore) midnightState {
@@ -1539,7 +1665,14 @@ type offchainState struct {
 func TestSharedSQLStoreOffchainParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseOffchainStore(t, store)
+	state := exerciseOffchainStore(t, store)
+	require.Equal(t, 1, state.created)
+	require.Zero(t, state.createdAgain)
+	require.Len(t, state.firstBatch, 1)
+	require.Empty(t, state.secondBatch)
+	require.NotNil(t, state.fetched)
+	require.Equal(t, models.OffchainMetadataStatusFetched, state.fetched.Status)
+	require.Equal(t, []byte(`{"name":"constitution"}`), state.fetched.Content)
 }
 
 func exerciseOffchainStore(t *testing.T, store offchainStore) offchainState {
@@ -1654,7 +1787,6 @@ type operationalStore interface {
 	GetSyncState(string, types.Txn) (string, error)
 	SetSyncState(string, string, types.Txn) error
 	DeleteSyncState(string, types.Txn) error
-	ClearSyncState(types.Txn) error
 	SetEpoch(
 		uint64,
 		uint64,
@@ -1761,17 +1893,31 @@ func TestSharedSQLStoreOperationalParity(t *testing.T) {
 	require.Equal(t, "value", snapshot.syncValue)
 	require.Empty(t, snapshot.deletedSync)
 	require.NotNil(t, snapshot.epoch)
+	require.Equal(t, uint64(1), snapshot.epoch.EpochId)
+	require.Equal(t, uint64(100), snapshot.epoch.StartSlot)
+	require.Equal(t, []byte("nonce-1"), snapshot.epoch.Nonce)
+	require.Equal(t, []byte("evolving-1"), snapshot.epoch.EvolvingNonce)
+	require.Equal(t, []byte("candidate-1"), snapshot.epoch.CandidateNonce)
+	require.Equal(t, []byte("lab-1"), snapshot.epoch.LastEpochBlockNonce)
+	require.Equal(t, uint(2), snapshot.epoch.EraId)
+	require.Equal(t, uint(2), snapshot.epoch.SlotLength)
+	require.Equal(t, uint(200), snapshot.epoch.LengthInSlots)
 	require.Len(t, snapshot.epochs, 2)
 	require.Len(t, snapshot.nonces, 3)
 	require.Equal(t, []byte("nonce-1-updated"), snapshot.nonce)
 	require.Equal(t, uint64(16), snapshot.donations)
 	require.NotNil(t, snapshot.datum)
+	require.Equal(t, []byte("datum"), snapshot.datum.RawDatum)
+	require.Equal(t, uint64(42), snapshot.datum.AddedSlot)
 	require.Len(t, snapshot.pparams, 1)
 	require.Len(t, snapshot.pparamUpdates, 2)
 	require.Nil(t, snapshot.committeeQuorum)
 	require.Len(t, snapshot.committeeMembers, 1)
 	require.Len(t, snapshot.allCommitteeMembers, 2)
 	require.NotNil(t, snapshot.networkRollback)
+	require.Equal(t, uint64(10), uint64(snapshot.networkRollback.Treasury))
+	require.Equal(t, uint64(20), uint64(snapshot.networkRollback.Reserves))
+	require.Equal(t, uint64(5), snapshot.networkRollback.Slot)
 	require.Len(t, snapshot.epochsRollback, 1)
 	require.Equal(t, uint64(7), snapshot.donationsRollback)
 }
@@ -2148,7 +2294,42 @@ type poolState struct {
 func TestSharedSQLStorePoolParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exercisePoolStore(t, store)
+	state := exercisePoolStore(t, store)
+	poolKeyHash := bytes.Repeat([]byte{0x91}, 28)
+	require.NotNil(t, state.Pool)
+	require.Equal(t, poolKeyHash, state.Pool.PoolKeyHash)
+	require.NotNil(t, state.ByVRF)
+	require.Equal(t, poolKeyHash, state.ByVRF.PoolKeyHash)
+	require.Equal(t, 1, len(state.Pools))
+	require.Equal(t, bytes.Repeat([]byte{0x91}, 28), state.Pools[0].PoolKeyHash)
+	require.Nil(t, state.Missing)
+	require.Equal(t, uint64(3), state.Sequence)
+	require.True(t, state.SequenceSet)
+	require.Equal(t, uint64(2), state.HistoricalSequence)
+	require.True(t, state.HistoricalSequenceSet)
+	require.Equal(t, []models.PoolOpCertSequence{
+		{PoolKeyHash: bytes.Repeat([]byte{0x91}, 28), ID: 1, Sequence: 2, Slot: 20},
+		{PoolKeyHash: bytes.Repeat([]byte{0x91}, 28), ID: 2, Sequence: 3, Slot: 21},
+	}, state.Issuers)
+	require.Equal(t, uint64(2), state.Total)
+	require.Equal(t, map[string]uint64{
+		string(bytes.Repeat([]byte{0x91}, 28)): 2,
+	}, state.Counts)
+	require.Len(t, state.Active, 1)
+	require.Equal(t, bytes.Repeat([]byte{0x91}, 28), state.Active[0])
+	require.Len(t, state.ActiveAtSlot, 1)
+	require.Equal(t, bytes.Repeat([]byte{0x91}, 28), state.ActiveAtSlot[0])
+	require.Equal(t, uint64(700), state.Stake)
+	require.Equal(t, uint64(1), state.Delegators)
+	require.Equal(t, map[string]uint64{
+		string(bytes.Repeat([]byte{0x91}, 28)): 700,
+	}, state.StakeMap)
+	require.Equal(t, map[string]uint64{
+		string(bytes.Repeat([]byte{0x91}, 28)): 1,
+	}, state.DelegatorMap)
+	require.Equal(t, []models.PoolRetiringRow{{
+		PoolKeyHash: bytes.Repeat([]byte{0x91}, 28), Epoch: 5,
+	}}, state.Retiring)
 }
 
 func exercisePoolStore(t *testing.T, store poolStore) poolState {
@@ -2334,7 +2515,35 @@ type rewardState struct {
 func TestSharedSQLStoreRewardStateParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseRewardStore(t, store)
+	state := exerciseRewardStore(t, store)
+	require.NotNil(t, state.pots)
+	require.Equal(t, uint64(10), uint64(state.pots.Treasury))
+	require.Equal(t, uint64(20), uint64(state.pots.Reserves))
+	require.Equal(t, uint64(30), uint64(state.pots.Fees))
+	require.Equal(t, uint64(40), uint64(state.pots.Rewards))
+	require.False(t, state.authoritativeClaim)
+	require.True(t, state.fallbackClaim)
+	require.NotNil(t, state.fallback)
+	require.Equal(t, uint64(250), uint64(state.fallback.TotalActiveStake))
+	require.Equal(t, uint64(60), state.fallback.BoundarySlot)
+	require.True(t, state.guardCreated)
+	require.Nil(t, state.guardRemoved)
+	require.True(t, state.provisionalGuard)
+	require.False(t, state.authoritativeGuard)
+	require.Len(t, state.poolInputs, 1)
+	require.Equal(t, []byte("pool-a"), state.poolInputs[0].PoolKeyHash)
+	require.Equal(t, types.Uint64(100), state.poolInputs[0].DelegatedStake)
+	require.Len(t, state.stakeInputs, 1)
+	require.Equal(t, []byte("stake-a"), state.stakeInputs[0].StakingKey)
+	require.Equal(t, types.Uint64(75), state.stakeInputs[0].Stake)
+	require.Len(t, state.poolOutputs, 1)
+	require.Equal(t, types.Uint64(90), state.poolOutputs[0].TotalReward)
+	require.Equal(t, types.Uint64(10), state.poolOutputs[0].LeaderReward)
+	require.Equal(t, types.Uint64(7), state.poolOutputs[0].LeaderRewardDeficit)
+	require.Len(t, state.accountOutputs, 1)
+	require.Equal(t, uint64(80), uint64(state.accountOutputs[0].Amount))
+	require.Empty(t, state.rolledBackPoolOutputs)
+	require.Empty(t, state.rolledBackAccountOutput)
 }
 
 func exerciseRewardStore(t *testing.T, store rewardStore) rewardState {
@@ -2511,6 +2720,7 @@ func exerciseRewardStore(t *testing.T, store rewardStore) rewardState {
 				OptimalReward:       100,
 				TotalReward:         90,
 				LeaderReward:        10,
+				LeaderRewardDeficit: 7,
 				MemberRewardTotal:   80,
 				OwnerStake:          20,
 				Undistributed:       5,
@@ -2621,7 +2831,46 @@ type snapshotState struct {
 func TestSharedSQLStoreSnapshotParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseSnapshotStore(t, store)
+	state := exerciseSnapshotStore(t, store)
+	require.NotNil(t, state.pool)
+	require.Equal(t, types.Uint64(20), state.pool.TotalStake)
+	require.Len(t, state.pools, 2)
+	snapshotRows := make(map[string]models.PoolStakeSnapshot, len(state.pools))
+	for _, snapshot := range state.pools {
+		snapshotRows[string(snapshot.PoolKeyHash)] = *snapshot
+	}
+	poolA := snapshotRows["pool-a"]
+	require.Equal(t, uint64(1), poolA.Epoch)
+	require.Equal(t, models.PoolStakeSnapshotTypeMark, poolA.SnapshotType)
+	require.Equal(t, types.Uint64(20), poolA.TotalStake)
+	require.Equal(t, types.Uint64(999), poolA.StakeDenominator)
+	require.Equal(t, uint64(2), poolA.DelegatorCount)
+	require.Equal(t, uint64(20), poolA.CapturedSlot)
+	require.Equal(t, uint8(2), poolA.RewardAccountAutoVote)
+	require.True(t, poolA.RewardAccountAutoVoteResolved)
+	poolB := snapshotRows["pool-b"]
+	require.Equal(t, uint64(1), poolB.Epoch)
+	require.Equal(t, models.PoolStakeSnapshotTypeMark, poolB.SnapshotType)
+	require.Equal(t, types.Uint64(30), poolB.TotalStake)
+	require.Equal(t, types.Uint64(200), poolB.StakeDenominator)
+	require.Equal(t, uint64(3), poolB.DelegatorCount)
+	require.Equal(t, uint64(20), poolB.CapturedSlot)
+	require.Equal(t, uint64(50), state.totalBeforeReady)
+	require.Equal(t, uint64(888), state.totalAfterReady)
+	require.NotNil(t, state.summary)
+	require.Equal(t, types.Uint64(888), state.summary.TotalActiveStake)
+	require.Equal(t, uint64(22), state.summary.BoundarySlot)
+	require.NotNil(t, state.latest)
+	require.Equal(t, types.Uint64(888), state.latest.TotalActiveStake)
+	require.Equal(t, uint64(22), state.latest.BoundarySlot)
+	remainingStakeByPool := make(map[string]types.Uint64, len(state.remaining))
+	for _, snapshot := range state.remaining {
+		remainingStakeByPool[string(snapshot.PoolKeyHash)] = snapshot.TotalStake
+	}
+	require.Equal(t, map[string]types.Uint64{
+		"pool-a": types.Uint64(20),
+		"pool-b": types.Uint64(30),
+	}, remainingStakeByPool)
 }
 
 func exerciseSnapshotStore(t *testing.T, store snapshotStore) snapshotState {
@@ -3221,13 +3470,9 @@ func TestWALCheckpointTruncateIdleConnectionDoesNotBlock(t *testing.T) {
 	})
 }
 
-// TestOpenSharedSQLStoreWALAutocheckpoint pins the raised checkpoint
-// threshold discussed at length in sqliteCommonPragmas' doc comment: a
-// regression back to SQLite's compiled-in default of 1000 pages would
-// silently reintroduce the checkpoint-driven write amplification that
-// change fixed, without failing any functional test, since 1000 is itself a
-// valid, working value.
-func TestOpenSharedSQLStoreWALAutocheckpoint(t *testing.T) {
+// TestOpenSharedSQLStoreWALPragmas pins the checkpoint threshold and retained
+// WAL limit. Both pragmas are connection-local, so each pool must set them.
+func TestOpenSharedSQLStoreWALPragmas(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	store, writeDB, readDB, err := openSQLStore(
@@ -3246,7 +3491,93 @@ func TestOpenSharedSQLStoreWALAutocheckpoint(t *testing.T) {
 			"PRAGMA wal_autocheckpoint",
 		).Scan(&pages))
 		require.Equalf(t, 10000, pages, "%s wal_autocheckpoint", name)
+
+		var bytes int
+		require.NoError(t, db.QueryRow(
+			"PRAGMA journal_size_limit",
+		).Scan(&bytes))
+		require.Equalf(t, 67108864, bytes, "%s journal_size_limit", name)
 	}
+}
+
+func TestWALResetHonorsJournalSizeLimit(t *testing.T) {
+	t.Parallel()
+	const journalSizeLimit = 64 << 20
+	dataDir := t.TempDir()
+	store, writeDB, _, err := openSQLStore(
+		Config{},
+		metadata.ProviderDependencies{DataDir: dataDir},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+
+	ctx := context.Background()
+	conn, err := writeDB.Conn(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, conn.Close())
+	})
+	var limit int64
+	require.NoError(
+		t,
+		conn.QueryRowContext(ctx, "PRAGMA journal_size_limit").Scan(&limit),
+	)
+	require.Equal(t, int64(journalSizeLimit), limit)
+	_, err = conn.ExecContext(ctx, "PRAGMA wal_autocheckpoint=0")
+	require.NoError(t, err)
+	_, err = conn.ExecContext(
+		ctx,
+		`CREATE TABLE wal_size_limit (id INTEGER PRIMARY KEY, data BLOB)`,
+	)
+	require.NoError(t, err)
+
+	// One transaction ensures the active WAL grows beyond the limit before a
+	// reset can occur, leaving room for SQLite page and record overhead.
+	blob := bytes.Repeat([]byte{0xA5}, 1<<20)
+	tx, err := conn.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	for range 66 {
+		_, err = tx.ExecContext(
+			ctx,
+			`INSERT INTO wal_size_limit (data) VALUES (?)`,
+			blob,
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
+
+	walPath := filepath.Join(dataDir, "metadata.sqlite-wal")
+	walInfo, err := os.Stat(walPath)
+	require.NoError(t, err)
+	require.Greater(t, walInfo.Size(), int64(journalSizeLimit))
+
+	var busy, logFrames, checkpointedFrames int
+	require.NoError(
+		t,
+		conn.QueryRowContext(ctx, "PRAGMA wal_checkpoint(RESTART)").Scan(
+			&busy,
+			&logFrames,
+			&checkpointedFrames,
+		),
+	)
+	require.Zero(t, busy)
+	require.Equal(t, logFrames, checkpointedFrames)
+	// RESTART checkpoints and makes the next writer restart the WAL from the
+	// beginning. That subsequent commit performs the reset and applies the
+	// configured journal size limit to the oversized file.
+	_, err = conn.ExecContext(
+		ctx,
+		`INSERT INTO wal_size_limit (data) VALUES (?)`,
+		[]byte("reset"),
+	)
+	require.NoError(t, err)
+
+	walInfo, err = os.Stat(walPath)
+	require.NoError(t, err)
+	require.LessOrEqual(t, walInfo.Size(), int64(journalSizeLimit))
 }
 
 func TestOpenSharedSQLStoreMemoryIsolation(t *testing.T) {
@@ -4170,6 +4501,8 @@ type transactionReadStore interface {
 		int,
 		int,
 		string,
+		*models.AddressTransactionPosition,
+		*models.AddressTransactionPosition,
 		types.Txn,
 	) ([]models.Transaction, error)
 	CountTransactionsByAddress(
@@ -4265,7 +4598,28 @@ INSERT INTO transaction_metadata_label (
 		return err
 	})
 
-	_ = exerciseTransactionReadStore(t, store)
+	state := exerciseTransactionReadStore(t, store)
+	require.NotNil(t, state.ByHash)
+	require.Equal(t, []byte("tx-a"), state.ByHash.Hash)
+	require.Nil(t, state.Missing)
+	require.Equal(t, uint64(11), state.Slot)
+	require.True(t, state.SlotFound)
+	require.Equal(t, uint(3), state.ID)
+	require.True(t, state.IDFound)
+	require.Equal(t, []byte("meta-a"), state.Metadata)
+	require.Equal(t, uint64(16), state.FeeSum)
+	require.Len(t, state.ByBlock, 2)
+	require.Len(t, state.ByHashes, 2)
+	require.Len(t, state.HashesAfter, 2)
+	require.Len(t, state.ByAddress, 1)
+	require.Equal(t, 2, state.AddressCount)
+	require.Equal(t, 2, state.PaymentCount)
+	require.Len(t, state.ByLabel, 2)
+	require.Equal(t, 2, state.LabelCount)
+	require.Len(t, state.Addresses, 1)
+	require.Equal(t, 1, state.AddressesCount)
+	require.Equal(t, 1, state.AddressCountAfter)
+	require.Equal(t, 1, state.LabelCountAfter)
 }
 
 func exerciseTransactionReadStore(
@@ -4315,6 +4669,8 @@ func exerciseTransactionReadStore(
 		1,
 		0,
 		"desc",
+		nil,
+		nil,
 		nil,
 	)
 	require.NoError(t, err)
@@ -4381,6 +4737,7 @@ type transactionWriteStore interface {
 		map[int]uint64,
 		bool,
 		types.Txn,
+		uint64,
 	) error
 	SetTransactionBatchedHistorical(
 		lcommon.Transaction,
@@ -4391,6 +4748,7 @@ type transactionWriteStore interface {
 		bool,
 		types.MetadataBatchAccumulator,
 		types.Txn,
+		uint64,
 	) error
 	GetTransactionByHash([]byte, types.Txn) (*models.Transaction, error)
 	GetUtxoIncludingSpent([]byte, uint32, types.Txn) (*models.Utxo, error)
@@ -4449,7 +4807,19 @@ func TestSharedSQLStoreTransactionWriteParity(t *testing.T) {
 		).Scan(&witnesses))
 		return deltas, witnesses
 	}
-	_ = exerciseTransactionWriteStore(t, store, false, counts)
+	state := exerciseTransactionWriteStore(t, store, false, counts)
+	require.Equal(t, uint64(10), state.Slot)
+	require.Equal(t, uint32(3), state.BlockIndex)
+	require.True(t, state.Valid)
+	require.Equal(t, uint64(10), state.InputDeletedSlot)
+	require.Len(t, state.InputSpentBy, 32)
+	require.Equal(t, byte(0xa2), state.InputSpentBy[0])
+	require.Equal(t, uint64(600), state.OutputAmount)
+	require.Zero(t, state.AccountReward)
+	require.Equal(t, 1, state.WithdrawalDeltas)
+	require.Equal(t, 1, state.WithdrawalProofs)
+	require.Equal(t, 1, state.Inputs)
+	require.Equal(t, 1, state.Outputs)
 }
 
 func TestSharedSQLStoreTransactionMetadataCollisionIsNullable(t *testing.T) {
@@ -4474,7 +4844,7 @@ func TestSharedSQLStoreTransactionMetadataCollisionIsNullable(t *testing.T) {
 	}}}
 	require.NoError(t, store.SetTransaction(
 		&mockTransaction{hash: txHash, metadata: metadataValue},
-		ocommon.Point{Slot: 7, Hash: bytes.Repeat([]byte{0xe8}, 32)}, 0, nil, false, nil,
+		ocommon.Point{Slot: 7, Hash: bytes.Repeat([]byte{0xe8}, 32)}, 0, nil, false, nil, 0,
 	))
 	var jsonValue sql.NullString
 	var cborValue []byte
@@ -4553,7 +4923,7 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 		0,
 		nil,
 		false,
-		nil,
+		nil, 0,
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "reward withdrawal amount 1235 exceeds")
@@ -4585,7 +4955,7 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 		0,
 		nil,
 		true,
-		nil,
+		nil, 0,
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "reward withdrawal amount 1236 exceeds")
@@ -4608,7 +4978,7 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 		true,
 		true,
 		store.NewBatchAccumulator(),
-		nil,
+		nil, 0,
 	))
 	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1234), uint64(account.Reward))
@@ -4684,7 +5054,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 				0,
 				nil,
 				true,
-				nil,
+				nil, 0,
 			)
 			require.Error(t, err)
 			require.ErrorContains(t, err, "account not found")
@@ -4705,7 +5075,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 				true,
 				true,
 				store.NewBatchAccumulator(),
-				nil,
+				nil, 0,
 			)
 			if !tc.createInactive {
 				// A credential with no account row at all is an invariant
@@ -4753,7 +5123,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 				true,
 				true,
 				store.NewBatchAccumulator(),
-				nil,
+				nil, 0,
 			))
 			require.NoError(t, raw.QueryRow(
 				"SELECT COUNT(*) FROM account_reward_delta WHERE tx_hash = ?",
@@ -4805,7 +5175,7 @@ func TestSharedSQLStoreWithdrawalCredentialTagsRemainDistinct(t *testing.T) {
 			0,
 			nil,
 			true,
-			nil,
+			nil, 0,
 		))
 	}
 	for tag := range uint8(2) {
@@ -4841,7 +5211,7 @@ func TestSharedSQLStoreWithdrawalAllowsPartialBalance(t *testing.T) {
 		0,
 		nil,
 		true,
-		nil,
+		nil, 0,
 	))
 	account := requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1234), uint64(account.Reward))
@@ -4853,14 +5223,14 @@ func TestSharedSQLStoreWithdrawalAllowsPartialBalance(t *testing.T) {
 	}
 	point := ocommon.Point{Slot: 30, Hash: bytes.Repeat([]byte{0xf3}, 32)}
 	require.NoError(t, store.SetTransaction(
-		transaction, point, 0, nil, true, nil,
+		transaction, point, 0, nil, true, nil, 0,
 	))
 	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1000), uint64(account.Reward))
 
 	// Replaying the same transaction must not debit the remaining balance again.
 	require.NoError(t, store.SetTransaction(
-		transaction, point, 0, nil, true, nil,
+		transaction, point, 0, nil, true, nil, 0,
 	))
 	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1000), uint64(account.Reward))
@@ -4876,7 +5246,7 @@ func TestSharedSQLStoreWithdrawalAllowsPartialBalance(t *testing.T) {
 		0,
 		nil,
 		true,
-		nil,
+		nil, 0,
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "exceeds account balance 1000")
@@ -4959,7 +5329,7 @@ func TestSharedSQLStoreZeroWithdrawalValidatesAccountAndBalance(t *testing.T) {
 				0,
 				nil,
 				true,
-				nil,
+				nil, 0,
 			)
 			if tc.wantError != "" {
 				require.Error(t, err)
@@ -4993,7 +5363,27 @@ type certificateWriteState struct {
 func TestSharedSQLStoreCertificateWriteParity(t *testing.T) {
 	t.Parallel()
 	store, raw := newSharedSQLStore(t)
-	_ = exerciseCertificateWriteStore(t, store, raw)
+	state := exerciseCertificateWriteStore(t, store, raw)
+	require.Equal(t, 9, state.CertificateCount)
+	require.True(t, state.AccountActive)
+	require.Equal(t, uint64(81), state.AccountAddedSlot)
+	require.Equal(t, uint64(81), state.AccountCreated)
+	require.True(t, state.DrepActive)
+	require.Equal(t, uint64(81), state.DrepAddedSlot)
+	for _, table := range []string{
+		"pool_registration",
+		"pool_registration_owner",
+		"stake_registration",
+		"stake_delegation",
+		"vote_delegation",
+		"registration_drep",
+		"update_drep",
+		"auth_committee_hot",
+		"resign_committee_cold",
+		"genesis_delegation",
+	} {
+		require.Equal(t, 1, state.TableCounts[table], table)
+	}
 }
 
 func TestSharedSQLStoreStorageModeTransactionParity(t *testing.T) {
@@ -5029,7 +5419,7 @@ func TestSharedSQLStoreStorageModeTransactionParity(t *testing.T) {
 					0,
 					nil,
 					false,
-					nil,
+					nil, 0,
 				))
 				ret := map[string]int{}
 				for _, table := range []string{
@@ -5047,7 +5437,13 @@ func TestSharedSQLStoreStorageModeTransactionParity(t *testing.T) {
 				}
 				return ret
 			}
-			_ = exercise(store, raw)
+			counts := exercise(store, raw)
+			require.Equal(t, 1, counts["transaction"])
+			wantWitnesses := 0
+			if mode == types.StorageModeAPI {
+				wantWitnesses = 1
+			}
+			require.Equal(t, wantWitnesses, counts["key_witness"])
 		})
 	}
 }
@@ -5164,6 +5560,7 @@ func exerciseCertificateWriteStore(
 		deposits,
 		false,
 		nil,
+		10,
 	))
 	require.NoError(t, store.SetTransaction(
 		transaction,
@@ -5172,6 +5569,7 @@ func exerciseCertificateWriteStore(
 		deposits,
 		false,
 		nil,
+		10,
 	))
 	state := certificateWriteState{TableCounts: map[string]int{}}
 	require.NoError(t, db.QueryRow(`
@@ -5264,10 +5662,10 @@ func exerciseTransactionWriteStore(
 		Hash: bytes.Repeat([]byte{0xc1}, 32),
 	}
 	require.NoError(t, store.SetTransaction(
-		transaction, point, 3, nil, skipWithdrawalWitness, nil,
+		transaction, point, 3, nil, skipWithdrawalWitness, nil, 0,
 	))
 	require.NoError(t, store.SetTransaction(
-		transaction, point, 3, nil, skipWithdrawalWitness, nil,
+		transaction, point, 3, nil, skipWithdrawalWitness, nil, 0,
 	))
 	stored, err := store.GetTransactionByHash(transactionHash.Bytes(), nil)
 	require.NoError(t, err)
@@ -5330,7 +5728,19 @@ type utxoMutationState struct {
 func TestSharedSQLStoreUtxoMutationParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseUtxoMutationStore(t, store)
+	state := exerciseUtxoMutationStore(t, store)
+	require.NotNil(t, state.Marked)
+	require.Equal(t, uint64(20), uint64(state.Marked.DeletedSlot))
+	require.NotNil(t, state.Restored)
+	require.Zero(t, state.Restored.DeletedSlot)
+	require.Nil(t, state.DeletedOne)
+	require.Nil(t, state.DeletedBatch)
+	require.Nil(t, state.DeletedAfterSlot)
+	require.Len(t, state.LiveStake, 1)
+	require.Equal(t, bytes.Repeat([]byte{0x71}, 28), state.LiveStake[0].StakingKey)
+	require.Equal(t, bytes.Repeat([]byte{0x72}, 28), state.LiveStake[0].PoolKeyHash)
+	require.Equal(t, types.Uint64(28), state.LiveStake[0].Stake)
+	require.Nil(t, state.Imported)
 }
 
 func exerciseUtxoMutationStore(
@@ -5463,7 +5873,39 @@ type utxoReadState struct {
 func TestSharedSQLStoreUtxoReadParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseUtxoReadStore(t, store)
+	state := exerciseUtxoReadStore(t, store)
+	require.NotNil(t, state.live)
+	require.Equal(t, []byte("tx-live"), state.live.TxId)
+	require.Equal(t, uint64(10), state.live.AddedSlot)
+	require.Equal(t, uint64(100), uint64(state.live.Amount))
+	require.Nil(t, state.spentLiveLookup)
+	require.NotNil(t, state.spent)
+	require.Equal(t, []byte("tx-spent"), state.spent.TxId)
+	require.Equal(t, uint64(20), uint64(state.spent.DeletedSlot))
+	require.Equal(t, uint64(50), uint64(state.spent.Amount))
+	require.Len(t, state.added, 1)
+	require.Equal(t, []byte("tx-script"), state.added[0].TxId)
+	require.Equal(t, []models.UtxoId{{Hash: []byte("tx-live"), Idx: 0}}, state.liveAtSlot)
+	require.ElementsMatch(t, []models.UtxoId{
+		{Hash: []byte("tx-live"), Idx: 0},
+		{Hash: []byte("tx-spent"), Idx: 1},
+	}, state.allAtSlot)
+	require.Len(t, state.deleted, 1)
+	require.Equal(t, []byte("tx-spent"), state.deleted[0].TxId)
+	require.Len(t, state.byAddress, 1)
+	require.Equal(t, []byte("tx-live"), state.byAddress[0].TxId)
+	require.Equal(t, uint64(100), state.controlled)
+	require.Equal(t, uint64(70), state.scriptLocked)
+	require.Len(t, state.byAsset, 1)
+	require.Equal(t, []byte("tx-live"), state.byAsset[0].TxId)
+	iteratedAmounts := make(map[string]types.Uint64, len(state.iterated))
+	for _, utxo := range state.iterated {
+		iteratedAmounts[string(utxo.TxId)] = utxo.Amount
+	}
+	require.Equal(t, map[string]types.Uint64{
+		"tx-live":   types.Uint64(100),
+		"tx-script": types.Uint64(70),
+	}, iteratedAmounts)
 }
 
 // TestGetUtxosByAddressEmptyPatterns proves an empty patterns slice returns

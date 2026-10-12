@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
@@ -39,7 +40,6 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type ListenerConfig = connmanager.ListenerConfig
@@ -53,7 +53,7 @@ const (
 	// are skipped. Suitable for block producers with no APIs.
 	StorageModeCore StorageMode = "core"
 	// StorageModeAPI stores everything needed for API queries
-	// (blockfrost, utxorpc, mesh) in addition to core data.
+	// (blockfrost, utxorpc, mesh, kupo) in addition to core data.
 	StorageModeAPI StorageMode = "api"
 )
 
@@ -152,6 +152,7 @@ type TokenRegistryConfig struct {
 	HTTPClient            *http.Client
 	SourceURL             string
 	UserAgent             string
+	Headers               map[string]string
 	Interval              time.Duration
 	RequestTimeout        time.Duration
 	MaxBytes              int64
@@ -207,6 +208,9 @@ type Config struct {
 	// Programmatic API-only fields (not in YAML/env):
 	tracing             bool
 	tracingStdout       bool
+	tracingEndpoint     string
+	tracingServiceName  string
+	tracingSampleRatio  float64
 	ledgerPeerTarget    int
 	leiosPipelineTiming *leios.PipelineTiming
 	// Runtime-only, programmatic offchain metadata config (preserves HTTPClient)
@@ -215,6 +219,9 @@ type Config struct {
 	tokenRegistry TokenRegistryConfig
 	// Parsed duration for chainsync stall timeout (runtime convenience)
 	chainsyncStallTimeout time.Duration
+	// Parsed duration for the LocalStateQuery snapshot lifetime; zero selects
+	// the ouroboros package default.
+	localStateQueryViewMaxLifetime time.Duration
 	// Compatibility mirrors used by the composition layer. cfg remains the
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
 	dataDir                         string
@@ -232,7 +239,10 @@ type Config struct {
 	barkBlockDownloadHosts                                                              []string
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
+	barkArchiveMaxConcurrentFetches                                                     int
 	barkOperatorCertificateFingerprints                                                 []string
+	barkLifecycleEnabled                                                                bool
+	barkLifecycleOperatorCertificateFingerprints                                        []string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
 	koiosParity                                                                         KoiosParityConfig
@@ -272,6 +282,9 @@ type Config struct {
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
+	ledgerPrefetchAheadEnabled                                                          bool
+	ledgerApplyRowBatchingEnabled                                                       bool
+	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
@@ -334,17 +347,17 @@ func (n *Node) configWrapPromRegistry() {
 
 // registerBuildInfo registers a dingo_build_info gauge with version and
 // commit labels. The gauge is always set to 1; Grafana reads the labels.
-func (n *Node) registerBuildInfo() {
+func (n *Node) registerBuildInfo(r *promutil.Registration) {
 	if n.config.promRegistry == nil {
 		return
 	}
-	promauto.With(n.config.promRegistry).NewGaugeVec(
+	promutil.Register(r, prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "dingo_build_info",
 			Help: "dingo build information",
 		},
 		[]string{"version", "commit", "goversion"},
-	).WithLabelValues(
+	)).WithLabelValues(
 		version.GetVersionString(),
 		version.CommitHash,
 		runtime.Version(),
@@ -374,28 +387,27 @@ type rtsMetrics struct {
 // registry. Safe to call when promRegistry is nil — in that case it
 // returns early and leaves n.rtsMetrics nil, matching the registerBuildInfo
 // nil-guard pattern.
-func (n *Node) registerRTSMetrics() {
+func (n *Node) registerRTSMetrics(r *promutil.Registration) {
 	if n.config.promRegistry == nil {
 		return
 	}
-	factory := promauto.With(n.config.promRegistry)
 	n.rtsMetrics = &rtsMetrics{
-		gcLiveBytes: factory.NewGauge(prometheus.GaugeOpts{
+		gcLiveBytes: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_RTS_gcLiveBytes_int",
 			Help: "live heap bytes currently in use (Go runtime.MemStats.HeapAlloc)",
-		}),
-		gcHeapBytes: factory.NewGauge(prometheus.GaugeOpts{
+		})),
+		gcHeapBytes: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_RTS_gcHeapBytes_int",
 			Help: "heap memory bytes obtained from the OS (Go runtime.MemStats.HeapSys)",
-		}),
-		gcMajorNum: factory.NewGauge(prometheus.GaugeOpts{
+		})),
+		gcMajorNum: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_RTS_gcMajorNum_int",
 			Help: "count of forced GCs (Go runtime.MemStats.NumForcedGC)",
-		}),
-		gcMinorNum: factory.NewGauge(prometheus.GaugeOpts{
+		})),
+		gcMinorNum: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_RTS_gcMinorNum_int",
 			Help: "count of automatic GCs (Go runtime.MemStats.NumGC - NumForcedGC)",
-		}),
+		})),
 	}
 }
 
@@ -704,6 +716,8 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			RunMode:              internalconfig.RunModeServe,
 			ValidateHistorical:   true,
 			StrictUtxoValidation: true,
+			TracingServiceName:   "dingo",
+			TracingSampleRatio:   1,
 			// Fail closed: self-validate locally-forged blocks before
 			// adoption and diffusion unless an operator explicitly opts
 			// out. Mirrors internalconfig's own package-level default
@@ -719,6 +733,10 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			Logging:             internalconfig.DefaultLoggingConfig(),
 			Midnight:            internalconfig.DefaultMidnightConfig(),
 			CORSAllowedOrigins:  []string{"*"},
+
+			// SQLite planner statistics stay current unless an operator
+			// opts out; see internalconfig.Config.PlannerStatsRefreshEnabled.
+			PlannerStatsRefreshEnabled: true,
 			Plugins: internalconfig.PluginsConfig{
 				Storage: internalconfig.StoragePluginsConfig{
 					Blob: hostplugin.Selection{
@@ -745,6 +763,15 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 						Provider: "builtin",
 						Config:   map[string]any{"port": uint(3000)},
 					},
+					// Port 0 leaves Kupo disabled unless an operator
+					// configures one, matching internal/config's default.
+					// The provider still has to be named here:
+					// apiPluginSelection rejects an empty Provider, and it
+					// runs before the port gate that makes the API optional.
+					Kupo: hostplugin.Selection{
+						Provider: "builtin",
+						Config:   map[string]any{"port": uint(0)},
+					},
 					Mesh: hostplugin.Selection{
 						Provider: "builtin",
 						Config:   map[string]any{"port": uint(8080)},
@@ -753,12 +780,18 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 						Provider: "builtin",
 						Config:   map[string]any{"port": uint(9090)},
 					},
+					Mcp: hostplugin.Selection{
+						Provider: "builtin",
+						Config:   map[string]any{"port": uint(0)},
+					},
 				},
 			},
 		},
 		// Default logger will throw away logs
 		// We do this so we don't have to add guards around every log operation
-		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		tracingServiceName: "dingo",
+		tracingSampleRatio: 1,
 	}
 	// Apply options
 	for _, opt := range opts {
@@ -769,6 +802,12 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 }
 
 func (c *Config) syncCompatFields() {
+	// A collector endpoint turns tracing on. The tracing flag alone still
+	// enables it with the OTEL_EXPORTER_OTLP_* destination.
+	if c.tracingEndpoint != "" {
+		c.tracing = true
+	}
+	c.cfg.ApplyRunModeOverrides(c.cfg.RunMode)
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
@@ -776,8 +815,13 @@ func (c *Config) syncCompatFields() {
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
+	c.barkArchiveMaxConcurrentFetches = c.cfg.BarkArchiveMaxConcurrentFetches
 	c.barkOperatorCertificateFingerprints = slices.Clone(
 		c.cfg.BarkOperatorCertificateFingerprints,
+	)
+	c.barkLifecycleEnabled = c.cfg.BarkLifecycleEnabled
+	c.barkLifecycleOperatorCertificateFingerprints = slices.Clone(
+		c.cfg.BarkLifecycleOperatorCertificateFingerprints,
 	)
 	c.databaseLifecycle = c.cfg.DatabaseLifecycle
 	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
@@ -828,6 +872,7 @@ func (c *Config) syncCompatFields() {
 		HTTPClient:            c.tokenRegistry.HTTPClient,
 		SourceURL:             c.cfg.TokenRegistry.SourceURL,
 		UserAgent:             c.cfg.TokenRegistry.UserAgent,
+		Headers:               c.cfg.TokenRegistry.HeaderSecrets,
 		Interval:              c.cfg.TokenRegistry.Interval,
 		RequestTimeout:        c.cfg.TokenRegistry.RequestTimeout,
 		MaxBytes:              c.cfg.TokenRegistry.MaxBytes,
@@ -889,6 +934,9 @@ func (c *Config) syncCompatFields() {
 	c.forgeEBSelectionReserve = c.cfg.ForgeEBSelectionReserve
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
+	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
+	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
+	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
@@ -897,7 +945,9 @@ func (c *Config) syncCompatFields() {
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
 		hostplugin.CapabilityStorageBlob: c.cfg.Plugins.Storage.Blob, hostplugin.CapabilityStorageMetadata: c.cfg.Plugins.Storage.Metadata,
 		hostplugin.CapabilityMempool: c.cfg.Plugins.Mempool, hostplugin.CapabilityAPIBlockfrost: c.cfg.Plugins.API.Blockfrost,
+		hostplugin.CapabilityAPIKupo: c.cfg.Plugins.API.Kupo,
 		hostplugin.CapabilityAPIMesh: c.cfg.Plugins.API.Mesh, hostplugin.CapabilityAPIUtxorpc: c.cfg.Plugins.API.Utxorpc,
+		hostplugin.CapabilityAPIMcp: c.cfg.Plugins.API.Mcp,
 	}
 }
 
@@ -929,10 +979,14 @@ func WithPluginSelection(
 			c.cfg.Plugins.Mempool = selection
 		case hostplugin.CapabilityAPIBlockfrost:
 			c.cfg.Plugins.API.Blockfrost = selection
+		case hostplugin.CapabilityAPIKupo:
+			c.cfg.Plugins.API.Kupo = selection
 		case hostplugin.CapabilityAPIMesh:
 			c.cfg.Plugins.API.Mesh = selection
 		case hostplugin.CapabilityAPIUtxorpc:
 			c.cfg.Plugins.API.Utxorpc = selection
+		case hostplugin.CapabilityAPIMcp:
+			c.cfg.Plugins.API.Mcp = selection
 		default:
 			return
 		}
@@ -1058,6 +1112,9 @@ func NewConfigFromInternal(
 		chainsyncStallTimeout: chainsyncDur,
 		tracing:               cfg.Tracing,
 		tracingStdout:         cfg.TracingStdout,
+		tracingEndpoint:       cfg.TracingEndpoint,
+		tracingServiceName:    cfg.TracingServiceName,
+		tracingSampleRatio:    cfg.TracingSampleRatio,
 	}
 	c.syncCompatFields()
 	return c, nil
@@ -1073,8 +1130,8 @@ func WithCardanoNodeConfig(
 	}
 }
 
-// WithBindAddr specifies the IP address used by relay, metrics, and public
-// Blockfrost, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
+// WithBindAddr specifies the IP address used by relay and public Blockfrost,
+// Kupo, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
@@ -1173,8 +1230,8 @@ func WithUtxorpcPort(port uint) ConfigOptionFunc {
 }
 
 // WithAPIConfig sets the shared api.tls policy applied to every
-// selected plugins.api.* provider (Blockfrost, Mesh, UTxORPC) unless that
-// provider's own plugins.api.<name>.config.tls overrides a field.
+// selected plugins.api.* provider (Blockfrost, Kupo, Mesh, UTxORPC) unless
+// that provider's own plugins.api.<name>.config.tls overrides a field.
 // See internal/apiconfig and ARCHITECTURE.md's "API security" section.
 func WithAPIConfig(cfg internalconfig.APIConfig) ConfigOptionFunc {
 	return func(c *Config) {
@@ -1212,6 +1269,27 @@ func WithTopologyConfig(
 func WithTracing(tracing bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tracing = tracing
+	}
+}
+
+// WithTracingEndpoint sets the OTLP HTTP collector URL and enables tracing. Empty leaves tracing to WithTracing and the destination to the OTEL_EXPORTER_OTLP_* env vars.
+func WithTracingEndpoint(endpoint string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tracingEndpoint = endpoint
+	}
+}
+
+// WithTracingServiceName sets the service.name resource attribute on exported spans.
+func WithTracingServiceName(name string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tracingServiceName = name
+	}
+}
+
+// WithTracingSampleRatio sets the fraction of new traces sampled, from 0 to 1.
+func WithTracingSampleRatio(ratio float64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tracingSampleRatio = ratio
 	}
 }
 
@@ -1684,6 +1762,23 @@ func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 	}
 }
 
+// WithPlannerStatsRefresh controls SQLite's incremental planner-statistics
+// maintenance, run before block processing starts and after each epoch
+// rollover. Enabled by default; pass false only as an escape hatch. Other
+// metadata backends are unaffected.
+func WithPlannerStatsRefresh(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.PlannerStatsRefreshEnabled = enabled
+	}
+}
+
+// PlannerStatsRefreshEnabled reports whether SQLite planner-statistics
+// maintenance is on. A Config without an internal config, as hand-built test
+// configs are, leaves it off.
+func (c *Config) PlannerStatsRefreshEnabled() bool {
+	return c.cfg != nil && c.cfg.PlannerStatsRefreshEnabled
+}
+
 // WithBlockPipelineEnabled enables the parallel block-decode pipeline for the
 // chainsync replay loop (phase 1 of the pipeline). Not consensus-affecting; off
 // by default. See LedgerStateConfig.BlockPipelineEnabled.
@@ -1703,6 +1798,39 @@ func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 	}
 }
 
+// WithLedgerPrefetchAheadEnabled prefetches the next block's input UTxOs from a
+// read-only transaction while the current block applies, for blocks under
+// normal validation only. Not consensus-affecting; off by default. See
+// LedgerStateConfig.LedgerPrefetchAheadEnabled.
+func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerPrefetchAheadEnabled = enabled
+	}
+}
+
+// WithLedgerApplyRowBatchingEnabled writes the accumulated deltas of blocks
+// that are not validated through the metadata store's batched path in core
+// storage mode, as API storage mode already does. Validated blocks, Leios
+// endorser-block applies, and batches applied with closure context keep the
+// per-transaction path in every storage mode, API mode included. Off by
+// default; the stored state is identical either way. See
+// LedgerStateConfig.ApplyRowBatchingEnabled.
+func WithLedgerApplyRowBatchingEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerApplyRowBatchingEnabled = enabled
+	}
+}
+
+// WithBlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
+// range of headers is queued while the node is far from the peer tip, instead
+// of waiting for four ranges. The header queue capacity is unchanged. Not
+// consensus-affecting; off by default. See LedgerStateConfig.BlockfetchLowWatermarkEnabled.
+func WithBlockfetchLowWatermarkEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BlockfetchLowWatermarkEnabled = enabled
+	}
+}
+
 // WithBlockfrostPort specifies the port for the
 // Blockfrost-compatible REST API server. The server binds
 // to the node's bindAddr on this port. 0 disables the
@@ -1719,6 +1847,8 @@ func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
 	}
 }
 
+// WithBarkBlockDownloadHosts configures allowed HTTPS origins for Bark block
+// downloads. Entries without a scheme use HTTPS; ports are matched exactly.
 func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkBlockDownloadHosts = slices.Clone(hosts)
@@ -1742,12 +1872,21 @@ func WithBarkHost(host string) ConfigOptionFunc {
 }
 
 // WithBarkClientCAFilePath sets the PEM CA bundle Bark uses to authenticate
-// every DatabaseService caller. Destructive methods additionally require an
-// allowlisted fingerprint set by WithBarkOperatorCertificateFingerprints.
+// every DatabaseService and LifecycleService caller. Destructive methods
+// additionally require their service's operator allowlist.
 func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkClientCAFilePath = path
 		c.barkClientCAFilePath = path
+	}
+}
+
+// WithBarkArchiveMaxConcurrentFetches bounds how many Bark ArchiveService
+// FetchBlock requests are served at once. Zero selects Bark's default.
+func WithBarkArchiveMaxConcurrentFetches(limit int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkArchiveMaxConcurrentFetches = limit
+		c.barkArchiveMaxConcurrentFetches = limit
 	}
 }
 
@@ -1759,6 +1898,26 @@ func WithBarkOperatorCertificateFingerprints(
 	return func(c *Config) {
 		c.cfg.BarkOperatorCertificateFingerprints = slices.Clone(fingerprints)
 		c.barkOperatorCertificateFingerprints = slices.Clone(fingerprints)
+	}
+}
+
+// WithBarkLifecycleEnabled explicitly enables Bark's remote node lifecycle
+// service. It is disabled by default.
+func WithBarkLifecycleEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkLifecycleEnabled = enabled
+		c.barkLifecycleEnabled = enabled
+	}
+}
+
+// WithBarkLifecycleOperatorCertificateFingerprints sets the SHA-256 client
+// certificate fingerprints authorized to invoke Bark Stop and Restart RPCs.
+func WithBarkLifecycleOperatorCertificateFingerprints(
+	fingerprints []string,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkLifecycleOperatorCertificateFingerprints = slices.Clone(fingerprints)
+		c.barkLifecycleOperatorCertificateFingerprints = slices.Clone(fingerprints)
 	}
 }
 
@@ -1846,6 +2005,7 @@ func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
 			Interval:              cfg.Interval,
 			RequestTimeout:        cfg.RequestTimeout,
 			UserAgent:             cfg.UserAgent,
+			HeaderSecrets:         cfg.Headers,
 			MaxBytes:              cfg.MaxBytes,
 			MaxDecompressedBytes:  cfg.MaxDecompressedBytes,
 			MaxEntryBytes:         cfg.MaxEntryBytes,
@@ -1893,6 +2053,18 @@ func WithChainsyncMaxClients(
 ) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Chainsync.MaxClients = maxClients
+	}
+}
+
+// WithLocalStateQueryViewMaxLifetime specifies how long a node-to-client
+// LocalStateQuery session may hold one acquired ledger snapshot before the
+// node closes it. Default is 5 minutes.
+func WithLocalStateQueryViewMaxLifetime(
+	lifetime time.Duration,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LocalStateQueryViewMaxLifetime = lifetime.String()
+		c.localStateQueryViewMaxLifetime = lifetime
 	}
 }
 
@@ -2001,7 +2173,7 @@ func (c *Config) MetadataPlugin() string {
 	return c.cfg.Plugins.Storage.Metadata.Provider
 }
 
-// BindAddr returns the IP address for relay and metrics listeners.
+// BindAddr returns the IP address for relay and public API listeners.
 func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
 }
@@ -2056,7 +2228,7 @@ func (c *Config) BarkBaseUrl() string {
 	return c.cfg.BarkBaseUrl
 }
 
-// BarkBlockDownloadHosts returns the list of allowed hosts for block downloads via Bark.
+// BarkBlockDownloadHosts returns the allowed Bark block-download origins.
 func (c *Config) BarkBlockDownloadHosts() []string {
 	return c.cfg.BarkBlockDownloadHosts
 }
@@ -2065,6 +2237,18 @@ func (c *Config) BarkBlockDownloadHosts() []string {
 // fingerprints authorized to invoke destructive Bark DatabaseService RPCs.
 func (c *Config) BarkOperatorCertificateFingerprints() []string {
 	return slices.Clone(c.cfg.BarkOperatorCertificateFingerprints)
+}
+
+// BarkLifecycleEnabled reports whether Bark's remote node lifecycle service
+// is explicitly enabled.
+func (c *Config) BarkLifecycleEnabled() bool {
+	return c.cfg.BarkLifecycleEnabled
+}
+
+// BarkLifecycleOperatorCertificateFingerprints returns the distinct operator
+// allowlist for Bark Stop and Restart RPCs.
+func (c *Config) BarkLifecycleOperatorCertificateFingerprints() []string {
+	return slices.Clone(c.cfg.BarkLifecycleOperatorCertificateFingerprints)
 }
 
 // TlsCertFilePath returns the path to the TLS certificate for gRPC APIs.
@@ -2361,6 +2545,20 @@ func (c *Config) ChainsyncStallTimeoutDuration() time.Duration {
 	return 2 * time.Minute
 }
 
+// LocalStateQueryViewMaxLifetimeDuration returns the parsed LocalStateQuery
+// snapshot lifetime, or zero when it is unset or unparsable so the consumer
+// applies its own default.
+func (c *Config) LocalStateQueryViewMaxLifetimeDuration() time.Duration {
+	if c.localStateQueryViewMaxLifetime != 0 {
+		return c.localStateQueryViewMaxLifetime
+	}
+	d, err := time.ParseDuration(c.cfg.LocalStateQueryViewMaxLifetime)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
 // GenesisBootstrap returns the Genesis bootstrap configuration.
 func (c *Config) GenesisBootstrap() internalconfig.GenesisBootstrapConfig {
 	return c.cfg.GenesisBootstrap
@@ -2482,7 +2680,7 @@ func (c *Config) ForgeStaleGapThresholdSlots() uint64 {
 }
 
 // ValidateForgedBlock returns whether to self-validate forged blocks.
-func (c *Config) ValidateForgedBlock() bool {
+func (c *Config) ValidateForgedBlock(ctx context.Context) bool {
 	return c.cfg.ValidateForgedBlock
 }
 
@@ -2496,6 +2694,24 @@ func (c *Config) BlockPipelineEnabled() bool {
 // OpCert validate stage of the block-decode pipeline is enabled.
 func (c *Config) BlockPipelineValidateEnabled() bool {
 	return c.cfg.BlockPipelineValidateEnabled
+}
+
+// LedgerPrefetchAheadEnabled returns whether next-block UTxO prefetching is
+// enabled.
+func (c *Config) LedgerPrefetchAheadEnabled() bool {
+	return c.cfg.LedgerPrefetchAheadEnabled
+}
+
+// LedgerApplyRowBatchingEnabled returns whether blocks that are not validated
+// are applied through the batched metadata write path.
+func (c *Config) LedgerApplyRowBatchingEnabled() bool {
+	return c.cfg.LedgerApplyRowBatchingEnabled
+}
+
+// BlockfetchLowWatermarkEnabled returns whether the far-from-tip blockfetch
+// low watermark is enabled.
+func (c *Config) BlockfetchLowWatermarkEnabled() bool {
+	return c.cfg.BlockfetchLowWatermarkEnabled
 }
 
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.
@@ -2551,6 +2767,22 @@ func (c *Config) Tracing() bool {
 // TracingStdout returns whether tracing output goes to stdout.
 func (c *Config) TracingStdout() bool {
 	return c.tracingStdout
+}
+
+// TracingEndpoint returns the OTLP HTTP collector URL, or empty to use the
+// OTEL_EXPORTER_OTLP_* env vars.
+func (c *Config) TracingEndpoint() string {
+	return c.tracingEndpoint
+}
+
+// TracingServiceName returns the service.name resource attribute on spans.
+func (c *Config) TracingServiceName() string {
+	return c.tracingServiceName
+}
+
+// TracingSampleRatio returns the fraction of new traces sampled.
+func (c *Config) TracingSampleRatio() float64 {
+	return c.tracingSampleRatio
 }
 
 // LedgerPeerTarget returns the target number of ledger peers.

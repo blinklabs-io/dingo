@@ -41,6 +41,10 @@ type Drep struct {
 	// Epoch when DRep expires (activity + inactivity).
 	ExpiryEpoch uint64
 	Active      bool
+	// Delegators is the reverse membership set carried by Cardano DRepState.
+	// During the Conway bootstrap phase it can differ from accounts' current
+	// forward delegation fields and must be retained for deregistration.
+	Delegators []StakeCredentialRef
 }
 
 // DrepDepositKey builds the map key that GetDrepLastRegistrationDeposits

@@ -31,7 +31,6 @@ import (
 	dingomempool "github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -57,6 +56,8 @@ type dijkstraCollateralReturnFixture struct {
 	offsets  *database.BlockIngestionResult
 	inputIds [][]byte
 	startTip ochainsync.Tip
+	key      ed25519.PrivateKey
+	address  lcommon.Address
 }
 
 func (fx *dijkstraCollateralReturnFixture) rawBlock() chain.RawBlock {
@@ -110,11 +111,11 @@ func newDijkstraCollateralReturnFixture(
 		[]byte{dijkstraCollateralCollateralInputByte},
 		lcommon.Blake2b256Size,
 	)
-	regularInput := shelley.NewShelleyTransactionInput(
+	regularInput := shelley.MustNewShelleyTransactionInput(
 		hex.EncodeToString(regularInputId),
 		0,
 	)
-	collateralInput := shelley.NewShelleyTransactionInput(
+	collateralInput := shelley.MustNewShelleyTransactionInput(
 		hex.EncodeToString(collateralInputId),
 		0,
 	)
@@ -170,8 +171,8 @@ func newDijkstraCollateralReturnFixture(
 			OutputAmount:  seed.amount,
 		})
 		require.NoError(t, err)
-		require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-			if err := db.CreateUtxo(txn, &models.Utxo{
+		require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+			if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
 				TxId:      seed.id,
 				OutputIdx: 0,
 				AddedSlot: 0,
@@ -234,6 +235,8 @@ func newDijkstraCollateralReturnFixture(
 		offsets:  offsets,
 		inputIds: [][]byte{regularInputId, collateralInputId},
 		startTip: startTip,
+		key:      privateKey,
+		address:  paymentAddress,
 	}
 }
 
@@ -242,18 +245,29 @@ func newDijkstraCollateralReturnBlock(
 	tx *gdijkstra.DijkstraTransaction,
 ) *gdijkstra.DijkstraBlock {
 	t.Helper()
+	decoded, err := gdijkstra.NewDijkstraBlockFromCbor(
+		dijkstraCollateralReturnBlockCbor(t, tx),
+	)
+	require.NoError(t, err)
+	return decoded
+}
+
+// dijkstraCollateralReturnBlockCbor encodes a block carrying tx without
+// decoding it, so a transaction that the decoder rejects can still be framed
+// as a block.
+func dijkstraCollateralReturnBlockCbor(
+	t *testing.T,
+	tx *gdijkstra.DijkstraTransaction,
+) []byte {
+	t.Helper()
 	block := &gdijkstra.DijkstraBlock{
-		BlockHeader: &gdijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber: 0,
-					Slot:        dijkstraCollateralReturnTestSlot,
-					ProtoVersion: babbage.BabbageProtoVersion{
-						Major: gdijkstra.MinProtocolVersionDijkstra,
-					},
-				},
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			0,
+			dijkstraCollateralReturnTestSlot,
+			lcommon.Blake2b256{},
+			lcommon.Blake2b256{},
+			0,
+		),
 		BlockBody: gdijkstra.DijkstraBlockBody{
 			Transactions: []gdijkstra.DijkstraTransaction{*tx},
 		},
@@ -264,9 +278,7 @@ func newDijkstraCollateralReturnBlock(
 	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)
-	decoded, err := gdijkstra.NewDijkstraBlockFromCbor(blockCbor)
-	require.NoError(t, err)
-	return decoded
+	return blockCbor
 }
 
 func newDijkstraCollateralReturnReplayFixture(
@@ -298,22 +310,10 @@ func TestDijkstraCollateralReturnPointerThroughLedgerAndMempool(t *testing.T) {
 		fx := newDijkstraCollateralReturnFixture(t, lcommon.AddressTypeKeyPointer)
 		assertDijkstraPointerReturnFailure(t, fx.ls.ValidateTx(fx.tx))
 
-		pool, err := dingomempool.NewMempool(dingomempool.MempoolConfig{
-			Validator:       fx.ls,
-			Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
-			PromRegistry:    prometheus.NewRegistry(),
-			MempoolCapacity: 1024 * 1024,
-		})
-		require.NoError(t, err)
-		require.NoError(t, pool.Start(context.Background()))
-		t.Cleanup(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			require.NoError(t, pool.Stop(ctx))
-		})
+		pool := newDijkstraTestMempool(t, fx.ls)
 		assertDijkstraPointerReturnFailure(
 			t,
-			pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), fx.txCbor),
+			pool.AddTransaction(context.Background(), uint(gdijkstra.TxTypeDijkstra), fx.txCbor),
 		)
 		require.Empty(t, pool.Transactions())
 	})
@@ -323,20 +323,8 @@ func TestDijkstraCollateralReturnPointerThroughLedgerAndMempool(t *testing.T) {
 		fx := newDijkstraCollateralReturnFixture(t, lcommon.AddressTypeKeyNone)
 		require.NoError(t, fx.ls.ValidateTx(fx.tx))
 
-		pool, err := dingomempool.NewMempool(dingomempool.MempoolConfig{
-			Validator:       fx.ls,
-			Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
-			PromRegistry:    prometheus.NewRegistry(),
-			MempoolCapacity: 1024 * 1024,
-		})
-		require.NoError(t, err)
-		require.NoError(t, pool.Start(context.Background()))
-		t.Cleanup(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			require.NoError(t, pool.Stop(ctx))
-		})
-		require.NoError(t, pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), fx.txCbor))
+		pool := newDijkstraTestMempool(t, fx.ls)
+		require.NoError(t, pool.AddTransaction(context.Background(), uint(gdijkstra.TxTypeDijkstra), fx.txCbor))
 		require.Len(t, pool.Transactions(), 1)
 	})
 }
@@ -351,8 +339,8 @@ func TestDijkstraCollateralReturnPointerRejectedByBlockValidation(t *testing.T) 
 		{
 			name: "imported block transaction validation",
 			run: func(fx *dijkstraCollateralReturnFixture) error {
-				return fx.db.Transaction(true).Do(func(txn *database.Txn) error {
-					_, err := fx.ls.ledgerProcessBlock(
+				return fx.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+					_, err := fx.ls.ledgerProcessBlock(context.Background(),
 						txn,
 						ocommon.NewPoint(dijkstraCollateralReturnTestSlot, fx.block.Hash().Bytes()),
 						fx.block,
@@ -376,7 +364,7 @@ func TestDijkstraCollateralReturnPointerRejectedByBlockValidation(t *testing.T) 
 		{
 			name: "forged block transaction revalidation",
 			run: func(fx *dijkstraCollateralReturnFixture) error {
-				return fx.ls.validateForgedTxs(fx.block)
+				return fx.ls.validateForgedTxs(context.Background(), fx.block)
 			},
 		},
 	}
@@ -387,7 +375,7 @@ func TestDijkstraCollateralReturnPointerRejectedByBlockValidation(t *testing.T) 
 			require.NoError(t, fx.db.SetTip(fx.startTip, nil))
 			initialUtxos := make([]*models.Utxo, 0, len(fx.inputIds))
 			for _, inputId := range fx.inputIds {
-				utxo, err := fx.db.UtxoByRef(inputId, 0, nil)
+				utxo, err := fx.db.UtxoByRef(context.Background(), inputId, 0, nil)
 				require.NoError(t, err)
 				initialUtxos = append(initialUtxos, utxo)
 			}
@@ -405,7 +393,7 @@ func TestDijkstraCollateralReturnPointerRejectedByBlockValidation(t *testing.T) 
 				return tip
 			}())
 			for index, inputId := range fx.inputIds {
-				utxo, err := fx.db.UtxoByRef(inputId, 0, nil)
+				utxo, err := fx.db.UtxoByRef(context.Background(), inputId, 0, nil)
 				require.NoError(t, err)
 				require.Equal(t, initialUtxos[index], utxo)
 			}
@@ -421,7 +409,7 @@ func TestDijkstraCollateralReturnPointerRejectedDuringBlockReplay(t *testing.T) 
 	)
 	initialUtxos := make([]*models.Utxo, 0, len(fx.inputIds))
 	for _, inputId := range fx.inputIds {
-		utxo, err := fx.db.UtxoByRef(inputId, 0, nil)
+		utxo, err := fx.db.UtxoByRef(context.Background(), inputId, 0, nil)
 		require.NoError(t, err)
 		initialUtxos = append(initialUtxos, utxo)
 	}
@@ -436,9 +424,9 @@ func TestDijkstraCollateralReturnPointerRejectedDuringBlockReplay(t *testing.T) 
 		)
 	}
 	replay()
-	require.NoError(t, fx.ls.chain.Rollback(ocommon.Point{}))
+	require.NoError(t, fx.ls.chain.Rollback(context.Background(), ocommon.Point{}))
 	require.Empty(t, fx.ls.chain.Tip().Point.Hash)
-	require.NoError(t, fx.ls.chain.AddRawBlocks([]chain.RawBlock{fx.rawBlock()}))
+	require.NoError(t, fx.ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{fx.rawBlock()}))
 	replay()
 	require.Equal(t, ochainsync.Tip{}, func() ochainsync.Tip {
 		tip, err := fx.db.GetTip(nil)
@@ -446,8 +434,29 @@ func TestDijkstraCollateralReturnPointerRejectedDuringBlockReplay(t *testing.T) 
 		return tip
 	}())
 	for index, inputId := range fx.inputIds {
-		utxo, err := fx.db.UtxoByRef(inputId, 0, nil)
+		utxo, err := fx.db.UtxoByRef(context.Background(), inputId, 0, nil)
 		require.NoError(t, err)
 		require.Equal(t, initialUtxos[index], utxo)
 	}
+}
+
+func newDijkstraTestMempool(
+	t *testing.T,
+	ls *LedgerState,
+) *dingomempool.Mempool {
+	t.Helper()
+	pool, err := dingomempool.NewMempool(dingomempool.MempoolConfig{
+		Validator:       ls,
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PromRegistry:    prometheus.NewRegistry(),
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	require.NoError(t, pool.Start(context.Background()))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, pool.Stop(ctx))
+	})
+	return pool
 }

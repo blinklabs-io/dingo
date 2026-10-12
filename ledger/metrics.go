@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	"github.com/prometheus/client_golang/prometheus"
@@ -27,24 +28,30 @@ import (
 )
 
 type stateMetrics struct {
-	blockfetchEventMu     sync.Mutex
-	blockfetchEventStarts map[uint64]time.Time
-	blockfetchEventNextID uint64
-	blockNum              prometheus.Gauge
-	density               prometheus.Gauge
-	epochNum              prometheus.Gauge
-	slotInEpoch           prometheus.Gauge
-	slotNum               prometheus.Gauge
-	forks                 prometheus.Gauge
-	slotClockFallbacks    prometheus.Counter
-	blocksForgedTotal     prometheus.Counter
-	blockForgingLatency   prometheus.Histogram
-	forgingEnabled        prometheus.Gauge
-	nodeStartTime         prometheus.Gauge
-	tipGapSlots           prometheus.Gauge
-	shelleyStartTime      prometheus.Gauge
-	epochLengthSlots      prometheus.Gauge
-	shadowGateDecisions   *prometheus.CounterVec
+	// Sync-progress state; see metrics_sync.go.
+	blockfetchBatchInFlight       atomic.Bool
+	blockfetchContinuationPending atomic.Bool
+	blockfetchConnSelected        atomic.Bool
+	lastBlockAddedUnixNano        atomic.Int64
+	headerQueueFull               prometheus.Counter
+	blockfetchEventMu             sync.Mutex
+	blockfetchEventStarts         map[uint64]time.Time
+	blockfetchEventNextID         uint64
+	blockNum                      prometheus.Gauge
+	density                       prometheus.Gauge
+	epochNum                      prometheus.Gauge
+	slotInEpoch                   prometheus.Gauge
+	slotNum                       prometheus.Gauge
+	forks                         prometheus.Gauge
+	slotClockFallbacks            prometheus.Counter
+	blocksForgedTotal             prometheus.Counter
+	blockForgingLatency           prometheus.Histogram
+	forgingEnabled                prometheus.Gauge
+	nodeStartTime                 prometheus.Gauge
+	tipGapSlots                   prometheus.Gauge
+	shelleyStartTime              prometheus.Gauge
+	epochLengthSlots              prometheus.Gauge
+	shadowGateDecisions           *prometheus.CounterVec
 	// Wall-clock time the ledger apply path spent waiting for a referenced
 	// Leios endorser block, by outcome ("arrived", "timeout", "cancelled" or
 	// "unavailable"). It covers both waits the apply path can take: the
@@ -53,24 +60,20 @@ type stateMetrics struct {
 	// on the single ledger pipeline, so it is time every block queued behind
 	// the batch also spends waiting.
 	// Only references ledger application actually reads are waited on (see
-	// leiosApplyReadsOwnAnnouncement); the rest are prefetched in the
+	// splitTipWaitByApplyDependency); the rest are prefetched in the
 	// background and never observed here.
 	leiosEbWaitSeconds *prometheus.HistogramVec
 	// Pre-materialized observers for the outcome label values, so the apply
 	// path does not resolve a label on every wait.
-	leiosEbWaitArrived     prometheus.Observer
-	leiosEbWaitTimedOut    prometheus.Observer
-	leiosEbWaitCancelled   prometheus.Observer
-	leiosEbWaitUnavailable prometheus.Observer
-	// Waits that ran to a full bound without the endorser block arriving --
-	// the diffusion window, or the CIP grace phase's hard bound. A rising
-	// value against a flat leios_eb_wait_seconds "arrived" count means the
-	// wait is buying nothing and is pure apply latency.
+	leiosEbWaitArrived   prometheus.Observer
+	leiosEbWaitTimedOut  prometheus.Observer
+	leiosEbWaitCancelled prometheus.Observer
+	// Waits that ran the full diffusion window without the endorser block
+	// arriving. A rising value against a flat leios_eb_wait_seconds "arrived"
+	// count means the wait is buying nothing and is pure apply latency.
 	//
-	// Two outcomes are deliberately excluded because neither is a bound
-	// expiring: "cancelled" says nothing about endorser-block availability,
-	// and "unavailable" means the fetch COMPLETED without caching, which is
-	// routine on a CIP node and would swamp the counter.
+	// "cancelled" is deliberately excluded because it is not a bound
+	// expiring and says nothing about endorser-block availability.
 	leiosEbWaitTimeouts prometheus.Counter
 	// Per-stage wall-clock time spent processing one block through the
 	// ledger's slice of the pipeline: header_verify (VRF/KES/signature
@@ -219,6 +222,10 @@ type stateMetrics struct {
 	// rising value means recovery is asking for rewinds deeper than local
 	// history can support.
 	atTipRecoveryPruneFloorClamped prometheus.Counter
+	// Incremented when an at-tip recovery rewind target would cross the
+	// most recent epoch boundary and is clamped to the first block at or
+	// after it, so the completed rollover is not discarded and recomputed.
+	atTipRecoveryEpochBoundaryClamped prometheus.Counter
 	// Incremented when unresolved-producer replay recovery repeatedly fails
 	// to move the applied ledger tip forward and holds at that tip instead of
 	// pruning another security-parameter window.
@@ -240,12 +247,11 @@ type stateMetrics struct {
 	// Incremented by the block-number count the reconciler's undo-block
 	// resolution expects but has no block_nonce row for at all -- not
 	// merely unresolvable (reconciliationUndoUnresolved), but entirely
-	// absent from the query, the shape of a Byron-era applied block: Byron's
-	// BFT/PoA consensus writes no VRF nonce, so it is invisible to a
-	// block_nonce-keyed search. A rising value means an applied block's
-	// ledger.tx undo event could not even be attempted for lack of a
-	// durable per-block record, not merely because the content was no
-	// longer reachable.
+	// absent from the query, the shape of a Byron-era block applied before
+	// applied points were recorded for every era. A rising value means an
+	// applied block's ledger.tx undo event could not even be attempted for
+	// lack of a durable per-block record, not merely because the content
+	// was no longer reachable.
 	reconciliationUndoMissingRecord prometheus.Counter
 	// Cross-fork continuation audit outcomes. clean, missing_producer and
 	// inconclusive_eb_pending count one audited input each; disarmed_cap
@@ -416,14 +422,8 @@ func (m *stateMetrics) observeLeaderThresholdMargin(margin float64) {
 // Outcome label values for dingo_metrics_leios_eb_wait_seconds.
 //
 //   - arrived:   the endorser block became available during the wait.
-//   - timeout:   a bound elapsed without it -- the diffusion window, or the
-//     CIP grace phase's hard bound. This is the outcome that means the wait
-//     cost apply latency and bought nothing.
-//   - unavailable: the CIP grace phase's by-point fetch COMPLETED without
-//     caching, because no peer holds the endorser block. Nothing timed out,
-//     and this is the common ending on a CIP node, so it is deliberately not
-//     folded into timeout: doing so would inflate the timeout rate and its
-//     counter on routine operation.
+//   - timeout:   the diffusion window elapsed without it. This is the
+//     outcome that means the wait cost apply latency and bought nothing.
 //   - cancelled: the wait ended because the block-processing context was
 //     cancelled (node shutdown, or the pass being aborted and restarted).
 //     Nothing was learned about the endorser block's availability, so this is
@@ -434,12 +434,6 @@ const (
 	leiosEbWaitOutcomeArrived   = "arrived"
 	leiosEbWaitOutcomeTimeout   = "timeout"
 	leiosEbWaitOutcomeCancelled = "cancelled"
-	// leiosEbWaitOutcomeUnavailable is the CIP grace phase's routine ending:
-	// the by-point fetch COMPLETED without caching, because no peer holds the
-	// endorser block. Nothing timed out and nothing was cancelled, so folding
-	// it into either would overstate both -- and it is the most common ending
-	// on a CIP node, so it would overstate them badly.
-	leiosEbWaitOutcomeUnavailable = "unavailable"
 )
 
 // Stage labels for blockStageDuration. See its field doc comment for what
@@ -652,6 +646,21 @@ type blockComposition struct {
 	certificates int
 }
 
+// createdUtxoCount returns how many UTxOs tx adds. This runs inside the
+// block-apply DB transaction for every applied block, so for a valid
+// Shelley-era or later transaction the count is taken without building the
+// UTxOs: Produced() allocates an lcommon.Utxo per output, and those eras
+// produce exactly one UTxO per output. A Byron transaction is the exception,
+// since only outputs 0 through 65535 become UTxOs, and the phase-2-failed rule
+// differs by era (Alonzo produces nothing, Babbage onward at most a collateral
+// return), so both cases are read from Produced() rather than restated here.
+func createdUtxoCount(tx lcommon.Transaction) int {
+	if _, isByron := tx.(*byron.ByronTransaction); isByron || !tx.IsValid() {
+		return len(tx.Produced())
+	}
+	return len(tx.Outputs())
+}
+
 // computeBlockComposition derives a blockComposition from one applied block.
 // UTxO churn follows Produced()/Consumed() semantics, not raw
 // Outputs()/Inputs() -- see the utxoCreatedTotal/utxoConsumedTotal field doc
@@ -665,20 +674,7 @@ func computeBlockComposition(block lcommon.Block) blockComposition {
 	txs := block.Transactions()
 	c.transactions = len(txs)
 	for _, tx := range txs {
-		// This runs inside the block-apply DB transaction for every applied
-		// block, so the created-UTxO count is taken without building the
-		// UTxOs. Produced() allocates an lcommon.Utxo per output and
-		// round-trips the transaction hash through hex to construct each
-		// one's input reference; only its length is wanted here, and every
-		// era defines Produced() for a valid transaction as exactly one UTxO
-		// per output. The phase-2-failed rule differs by era (Alonzo produces
-		// nothing, Babbage onward at most a collateral return), so that case
-		// is still read from Produced() rather than restated here.
-		if tx.IsValid() {
-			c.utxoCreated += len(tx.Outputs())
-		} else {
-			c.utxoCreated += len(tx.Produced())
-		}
+		c.utxoCreated += createdUtxoCount(tx)
 		c.utxoConsumed += len(tx.Consumed())
 		c.certificates += len(tx.Certificates())
 		witnesses := tx.Witnesses()
@@ -756,8 +752,6 @@ func (m *stateMetrics) observeLeiosEbWait(d time.Duration, outcome string) {
 		}
 	case leiosEbWaitOutcomeCancelled:
 		obs = m.leiosEbWaitCancelled
-	case leiosEbWaitOutcomeUnavailable:
-		obs = m.leiosEbWaitUnavailable
 	}
 	if obs != nil {
 		obs.Observe(d.Seconds())
@@ -899,6 +893,10 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		},
 		m.blockfetchEventInProgressSeconds,
 	)
+	m.headerQueueFull = promautoFactory.NewCounter(prometheus.CounterOpts{
+		Name: "dingo_chain_header_queue_full_total",
+		Help: "headers rejected because the primary chain's header queue was at capacity",
+	})
 	m.blockNum = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_blockNum_int",
 		Help: "current block number",
@@ -985,14 +983,9 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.leiosEbWaitSeconds = promautoFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "dingo_metrics_leios_eb_wait_seconds",
-			Help: "wall-clock time the ledger apply path spent waiting for a referenced Leios endorser block, across both the diffusion window and the CIP in-flight-fetch grace phase, by outcome (arrived, timeout, cancelled, unavailable)",
+			Help: "wall-clock time the ledger apply path spent waiting in the diffusion window for a referenced Leios endorser block, by outcome (arrived, timeout, cancelled)",
 			// 5ms to ~164s. The lower end covers sub-slot arrivals; the
-			// upper end must clear the LONGEST wait this histogram now
-			// records, the CIP grace phase's leiosTipFetchHardBound
-			// (leiosBackfillMaxWait, 120s). At 15 buckets the top edge was
-			// ~82s, so every wedged-fetch wait -- the most anomalous ones,
-			// and the reason the grace phase is instrumented at all --
-			// collapsed into +Inf with no resolution.
+			// upper end clears the diffusion window with margin.
 			Buckets: prometheus.ExponentialBuckets(0.005, 2, 16),
 		},
 		[]string{"outcome"},
@@ -1006,13 +999,10 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.leiosEbWaitCancelled = m.leiosEbWaitSeconds.WithLabelValues(
 		leiosEbWaitOutcomeCancelled,
 	)
-	m.leiosEbWaitUnavailable = m.leiosEbWaitSeconds.WithLabelValues(
-		leiosEbWaitOutcomeUnavailable,
-	)
 	m.leiosEbWaitTimeouts = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_metrics_leios_eb_wait_timeouts_total",
-			Help: "ledger apply-path waits for a referenced Leios endorser block that ran to a full bound without it arriving: the diffusion window, or the CIP in-flight-fetch grace phase hard bound",
+			Help: "ledger apply-path waits for a referenced Leios endorser block that ran the full diffusion window without it arriving",
 		},
 	)
 	m.epochRolloverDuration = promautoFactory.NewHistogram(
@@ -1132,6 +1122,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "times an at-tip validation recovery rewind target below the consumed-UTxO prune floor was clamped to the ledger tip, because UTxOs consumed above that floor were hard-deleted and cannot be restored by a rewind",
 		},
 	)
+	m.atTipRecoveryEpochBoundaryClamped = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_attip_recovery_epoch_boundary_clamped_total",
+			Help: "times an at-tip validation recovery rewind target below the most recent epoch boundary was clamped to the first applied block at or after it, or held at the ledger tip when none is applied, to avoid recomputing a completed epoch rollover",
+		},
+	)
 	m.replayRecoveryNonConverging = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_replay_recovery_nonconverging_total",
@@ -1153,7 +1149,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.reconciliationUndoMissingRecord = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_reconciliation_undo_missing_record_total",
-			Help: "applied blocks in a reconciliation undo range with no block_nonce row at all, not merely unresolvable content -- the shape of a Byron-era applied block (issue #3778)",
+			Help: "applied blocks in a reconciliation undo range with no block_nonce row at all, not merely unresolvable content -- the shape of a Byron-era block applied before applied points were recorded for every era",
 		},
 	)
 	// Cross-fork continuation audit verdicts, labelled by result:

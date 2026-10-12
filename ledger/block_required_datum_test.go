@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
@@ -26,7 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -106,8 +106,8 @@ func newRequiredDatumFixture(
 		require.NoError(t, err)
 		require.NoError(
 			t,
-			f.db.Transaction(true).Do(func(txn *database.Txn) error {
-				if err := f.db.CreateUtxo(txn, &models.Utxo{
+			f.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+				if err := f.db.CreateUtxo(context.Background(), txn, &models.Utxo{
 					TxId: *txId, OutputIdx: 0, AddedSlot: 1,
 				}); err != nil {
 					return err
@@ -230,8 +230,8 @@ func applyRequiredDatumBlock(
 	era eras.EraDesc,
 	pparams lcommon.ProtocolParameters,
 ) error {
-	return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
+	return ls.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(context.Background(),
 			txn,
 			ocommon.NewPoint(slot, block.Hash().Bytes()),
 			block,
@@ -354,10 +354,10 @@ func dijkstraRequiredDatumBlock(
 	slot uint64,
 ) (*gdijkstra.DijkstraBlock, *database.BlockIngestionResult) {
 	t.Helper()
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		hex.EncodeToString(f.spendTxId), 0,
 	)
-	collateral := shelley.NewShelleyTransactionInput(
+	collateral := shelley.MustNewShelleyTransactionInput(
 		hex.EncodeToString(f.collateralTxId), 0,
 	)
 	witnessSet := gdijkstra.DijkstraTransactionWitnessSet{}
@@ -398,17 +398,13 @@ func dijkstraRequiredDatumBlock(
 		tx.WitnessSet = witnessSet
 	}
 	block := &gdijkstra.DijkstraBlock{
-		BlockHeader: &gdijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber: 1,
-					Slot:        slot,
-					ProtoVersion: babbage.BabbageProtoVersion{
-						Major: gdijkstra.MinProtocolVersionDijkstra,
-					},
-				},
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			1,
+			slot,
+			lcommon.Blake2b256{},
+			lcommon.Blake2b256{},
+			0,
+		),
 		BlockBody: gdijkstra.DijkstraBlockBody{
 			Transactions: []gdijkstra.DijkstraTransaction{tx},
 		},
@@ -418,6 +414,7 @@ func dijkstraRequiredDatumBlock(
 	}
 	bodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)

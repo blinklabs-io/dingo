@@ -317,7 +317,7 @@ func readPersistedGateValues(
 		}
 	}()
 
-	legacy, err := store.GetNodeSettings()
+	legacy, err := store.GetNodeSettings(context.Background())
 	if err != nil {
 		slog.Debug(
 			"settingsresolve: failed to read legacy node settings",
@@ -325,7 +325,7 @@ func readPersistedGateValues(
 		)
 		return nil, false
 	}
-	gates, err := store.GetNodeSettingsGates()
+	gates, err := store.GetNodeSettingsGates(context.Background())
 	if err != nil {
 		slog.Debug(
 			"settingsresolve: failed to read node settings gates",

@@ -1,11 +1,8 @@
-# 1.26.3-1 is the newest published tag of this image, and it is behind the Go
-# patch releases that fix the standard-library advisories govulncheck finds
-# reachable from this module (the last of them fixed in 1.26.6). What actually
-# compiles the release binary is go.mod's `toolchain` floor, not this tag:
-# GOTOOLCHAIN is `auto` in this image, so the build fetches that toolchain and
-# uses it in place of the image's own go1.26.3. Advance this tag when
-# blinklabs-io/docker-go publishes a newer one; never lower the go.mod floor to
-# match it.
+# This image bundles Go 1.26.7; go.mod's toolchain is pinned to 1.26.9.
+# GOTOOLCHAIN is `auto` in this image, so the build fetches the patched toolchain
+# instead of using the bundled compiler. Update this tag when blinklabs-io/
+# docker-go publishes a matching image; never lower the module toolchain to
+# match an older image.
 FROM ghcr.io/blinklabs-io/go:1.26.7-1 AS build
 
 ARG VERSION
@@ -34,7 +31,7 @@ RUN make CGO_ENABLED=1 build
 
 FROM ghcr.io/blinklabs-io/cardano-cli:11.2.3.1-1 AS cardano-cli
 FROM ghcr.io/blinklabs-io/cardano-configs:20260915-1 AS cardano-configs
-FROM ghcr.io/blinklabs-io/nview:0.15.1 AS nview
+FROM ghcr.io/blinklabs-io/nview:0.15.2 AS nview
 FROM ghcr.io/blinklabs-io/txtop:0.16.0 AS txtop
 
 FROM debian:bookworm-slim AS dingo
@@ -96,6 +93,12 @@ VOLUME /ipc
 ENV DINGO_SOCKET_PATH=/ipc/dingo.socket
 ENV CARDANO_NODE_SOCKET_PATH=/ipc/dingo.socket
 ENV CARDANO_SOCKET_PATH=/ipc/dingo.socket
+# The binary binds Prometheus metrics to loopback by default. Inside a
+# container that would refuse every scraper and orchestrator probe, and the
+# container's own network namespace already bounds the exposure, so the image
+# binds the wildcard. Set DINGO_METRICS_BIND_ADDR=127.0.0.1 to keep metrics
+# private to the container; the variable takes precedence over YAML.
+ENV DINGO_METRICS_BIND_ADDR=0.0.0.0
 EXPOSE 3001 3002 9090 12798 12799
 # Probes the dedicated health listener's LIVENESS path, not /readyz, and not
 # /metrics as this previously did.

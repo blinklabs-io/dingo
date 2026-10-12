@@ -90,3 +90,19 @@ func TestMidnightIndexerFatalCallbackPreservesCause(t *testing.T) {
 	callback(errors.New("later midnight failure"))
 	require.ErrorIs(t, n.waitForShutdown(), want)
 }
+
+// TestMidnightIndexerConfigFollowsReplacedStorage shows that a configuration
+// built after a live restore or truncate swaps in the reopened database,
+// rather than keeping the closed one the previous indexer was built on.
+func TestMidnightIndexerConfigFollowsReplacedStorage(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{db: newMidnightConfigDatabase(t, 1)}
+	before := n.midnightIndexerConfig()
+	require.Same(t, n.db.Metadata(), before.Metadata)
+
+	n.db = newMidnightConfigDatabase(t, 2)
+	after := n.midnightIndexerConfig()
+	require.Same(t, n.db.Metadata(), after.Metadata)
+	require.NotSame(t, before.Metadata, after.Metadata)
+}

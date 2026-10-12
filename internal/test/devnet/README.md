@@ -20,8 +20,7 @@ Two networks are available, selected by a Docker Compose profile:
 
 The Go test harness lives alongside this directory: `internal/test/devnet/`
 (helpers and config loader at the top level, runnable scenarios under
-`internal/test/devnet/scenarios/`). The layout mirrors
-`internal/test/antithesis/`. Every Go file in the tree has a `linux` build
+`internal/test/devnet/scenarios/`). Every Go file in the tree has a `linux` build
 constraint because the harness requires a native Linux Docker engine, Bash,
 Linux container networking, and Unix ownership semantics. Code that talks to
 a running network additionally requires the `devnet` build tag, and
@@ -85,9 +84,11 @@ within the scenario budget. This delay reduces immediate dependency reuse;
 txpump does not verify on-chain confirmation or recover outputs lost to a
 rollback, so expiry alone does not prove an output is spendable. It exists
 to keep the mempool exercised while the consensus tests run, so block bodies
-are non-empty and tx-submission / mempool paths are continuously hit. The image
-is built from
-`internal/test/antithesis/` (`Dockerfile.txpump`, `cmd/txpump/`).
+are non-empty and tx-submission / mempool paths are continuously hit. Compose
+pulls `ghcr.io/blinklabs-io/cardano-txpump:main` by default; set
+`TXPUMP_IMAGE` to select another image tag. Its source and container build
+live in the [`cardano-txpump`](https://github.com/blinklabs-io/cardano-txpump)
+repository.
 
 The dedicated `--leios` runner uses the all-Dingo topology with
 `testnet-dingo-leios.yaml`: Dijkstra is active from genesis, test-only Leios
@@ -95,6 +96,11 @@ keys are registered on the three pools, and a producer-to-peer scenario
 checks EB notification, relay fetch, ranking-header reference, and ledger
 application. It selects that feature scenario only; it does not change the
 canonical Conway specs or the `--accelerated` timeline.
+
+The Leios spec uses 300-slot, 150-second epochs with `f: 0.05` and `k: 3`.
+Its 240-slot nonce stability window contains 12 expected blocks, which keeps
+the finite era horizon advancing while leaving half of the ten-minute scenario
+after voting registrations become usable in epoch 2.
 
 ## Network parameters
 
@@ -146,7 +152,7 @@ The canonical specs are deliberately *not* accelerated: they are what soak
 and canary runs use, and `TestCanonicalSpecsKeepCanonicalTiming` fails if
 someone quietly speeds them up.
 
-## Prerequisites
+## Docker runtime prerequisites
 
 - Docker with the Compose plugin (`docker compose version` must work).
 - Go 1.26+ on the host (matching `go.mod`) to run the integration tests.
@@ -156,10 +162,54 @@ someone quietly speeds them up.
   image.
 - Local build of Dingo via the repo root `Dockerfile` — Compose builds it
   automatically on `up` / `run-tests.sh`.
-- Local build of `txpump` from `../antithesis/` — also built automatically
-  by Compose.
+- Pull of `ghcr.io/blinklabs-io/cardano-txpump:main` for the transaction
+  generator; set `TXPUMP_IMAGE` to select a different tag.
 
 ## Building Dingo
+
+### Apple Container on macOS
+
+`run-tests.sh` optionally uses [Apple Container](https://github.com/apple/container)
+on an Apple silicon Mac with the Apple Container CLI installed and its system running. A host Go installation and host Docker are not required. Docker remains the default runtime:
+
+```bash
+container system start
+./internal/test/devnet/run-tests.sh --runtime container --accelerated
+./internal/test/devnet/run-tests.sh --runtime container --accelerated --conformance
+# Equivalent environment selection; an explicit --runtime flag takes precedence:
+DEVNET_RUNTIME=container ./internal/test/devnet/run-tests.sh --accelerated
+```
+
+This runs Docker Engine and Compose **inside an Apple Container Linux VM**.
+Docker Desktop and a host Docker daemon are not required. The existing Linux
+harness, bridge networking, health checks, named volumes, and disruption tests
+run unchanged inside that VM. Apple Container 1.4.1 is the tested CLI version;
+the runner needs its capability and path-mask options for the nested engine.
+The Docker API listens only on a Unix socket inside the VM.
+
+The VM receives 6 CPUs and 12 GiB of RAM by default. Set
+`DEVNET_CONTAINER_CPUS` and `DEVNET_CONTAINER_MEMORY` before the first run to
+change those allocations. A stopped VM retains its filesystem, including
+images, build caches, and the Go toolchain selected by this repository. It is
+reused for the same checkout and stopped after tests finish. Delete the stopped
+runner with `container delete <runner-name>` to reclaim its disk or change its
+resource allocation. The runner name is printed at startup. Concurrent runs
+against the same checkout are rejected by a lock directory.
+
+The checkout is mounted at the same absolute path inside Linux. Failure
+artifacts default to `.devnet/apple-container/run.XXXXXX` on the Mac and survive
+VM shutdown. `DEVNET_ARTIFACT_DIR` must be inside the checkout. Other file-path
+overrides must also refer to files available inside the VM; arbitrary host
+directories are not mounted. Test configuration environment variables
+(`DEVNET_*`, `COMPOSE_PROJECT_NAME`, `COMPOSE_PROFILES`, and `MODE`) are forwarded.
+
+`--keep-up` leaves both the network and VM running after success. Use
+`container exec -e COMPOSE_PROJECT_NAME=<project-name> -w <checkout-path> <runner-name> bash internal/test/devnet/stop.sh`
+(using the project name selected for the run and adding `--conformance` if selected) to tear the network down, then
+`container stop <runner-name>` to stop the VM. Run manual queries inside the
+VM with `container exec`; its DevNet ports are not published to macOS.
+
+### Docker
 
 You do not need to `make build` Dingo locally — Compose builds the Dingo
 node images (`dingo-1`/`dingo-2`/`dingo-3`/`dingo-relay` in dingo mode,
@@ -572,7 +622,7 @@ session; `DiffSnapshots(a, b)` reports every divergence between two such
 snapshots.
 
 `TestLedgerStateConsensus` additionally queries treasury/reserves and absolute
-mark/set/go stake snapshots inside the same stable-tip check. Its samples cover
+mark/set/go stake snapshots at the same acquired point. Its samples cover
 epochs 1 and 2: the first update must leave the d=0 genesis treasury empty, and
 the next must use epoch 0's block production. Both samples compare pots and
 stake distribution with cardano-node. Run it on a fresh network so the epoch-1
@@ -594,16 +644,18 @@ implemented in `ledger/queries_stakedistribution.go` and
 specifically (the rest of that TODO block is unrelated to this scenario and
 remains open).
 
-Dingo's LocalStateQuery server (`ouroboros/localstatequery.go`) does not yet
-implement point-specific ledger views: every `Acquire` — even
-`Acquire(point)` for a specific historical block — is answered against the
-node's live tip (tracked upstream as blinklabs-io/dingo#382). Until that
-lands, `SnapshotAtTip` only supports "acquire the current volatile tip",
-and comparing two nodes at the same point requires confirming via NtN
-chain-tip polling that both report an identical tip immediately before and
-after the LocalStateQuery round trip — see `TestLedgerStateConsensus` for
-the retry loop this requires. This is why the scenario samples ledger state
-periodically at settled common tips rather than replaying every block.
+Dingo's LocalStateQuery server (`ouroboros/localstatequery.go`) answers every
+query in a session from a ledger snapshot opened at `Acquire`, and
+`Acquire(point)` reads at that block for every query this scenario issues
+(protocol parameters, stake distribution, whole UTxO set, account state and
+stake snapshots). Each `TestLedgerStateConsensus` sample therefore acquires the
+trailing node's tip as a specific point on both producers, so both answers
+describe the same block however far either node advances during the queries.
+If the two nodes have forked, the leading node's `Acquire` fails with
+point-not-on-chain and the sample retries with a new candidate; a candidate at
+or past the end of the intended epoch fails the test instead. The scenario
+samples rather than replaying every block because each sample walks the whole
+UTxO set on both nodes.
 
 ### Running the CIP-50 pledge-leverage scenario
 
@@ -670,7 +722,7 @@ Reference-conformance scenario
 | Test | What it verifies |
 |------|-------------------|
 | `TestCardanoProducerChainAdvances` | `cardano-producer`'s tip advances (sanity check on the reference node) |
-| `TestLedgerStateConsensus` | dingo-producer's and cardano-producer's ledger state (protocol parameters, stake distribution, whole UTxO set) match at several settled common-tip samples over the run; fails with a diagnostic naming every divergence found |
+| `TestLedgerStateConsensus` | dingo-producer's and cardano-producer's ledger state (protocol parameters, stake distribution, whole UTxO set) match at a point acquired on both nodes in epochs 1 and 2; fails with a diagnostic naming every divergence found |
 
 Dingo-only feature scenario
 (`//go:build linux && devnet && !devnet_conformance`) runs only in the default
@@ -736,14 +788,14 @@ harness and the compose port mappings always agree.
 | `testnet.yaml`               | Canonical network spec for conformance mode: 2 pools |
 | `testnet-dingo-accelerated.yaml` | Accelerated dingo-mode spec: 60s epochs, `k: 10`, 0.5s slots |
 | `testnet-accelerated.yaml`   | Accelerated conformance-mode spec: same timing, 2 pools |
-| `testnet-dingo-leios.yaml`   | Dijkstra/Leios all-Dingo integration spec: Dijkstra at genesis, 120-slot epochs, 0.5s slots |
+| `testnet-dingo-leios.yaml`   | Dijkstra/Leios all-Dingo integration spec: Dijkstra at genesis, 300-slot epochs, 0.5s slots |
 | `topology/dingo-1.json`, `dingo-2.json`, `dingo-3.json`, `dingo-relay.json` | Static peer lists for dingo mode |
 | `topology/dingo-producer.json`, `cardano-producer.json`, `relay.json` | Static peer lists for conformance mode |
 | `.env`                       | Sets the default `COMPOSE_PROFILES=dingo` |
 | `compose-project.sh`         | Derives a stable, worktree-specific Compose project name, a collision-checked bridge subnet and host port block, and a rendered topology directory; wraps `docker compose up` with a retry on subnet collision |
 | `start.sh` / `stop.sh`       | Convenience wrappers around `docker compose up -d` / `down -v`; accept `--conformance` |
 | `run-tests.sh`               | Full native-Linux bring-up → test → tear-down runner; accepts `--conformance`, `--keep-up`, and forwards other flags to `go test` |
-| `../antithesis/Dockerfile.txpump`, `../antithesis/cmd/txpump/` | Source for the `txpump` load generator image |
+| `TXPUMP_IMAGE` (default `ghcr.io/blinklabs-io/cardano-txpump:main`) | Transaction generator container image |
 | `harness.go`                 | Go test harness: Ouroboros NtN client, tip queries, consensus checks, the `WaitForChainStart` genesis gate, and per-scenario failure capture (build tag `devnet`) |
 | `config.go`                  | `testnet*.yaml` loader, derived timings, and spec validation (`linux`) |
 | `chainstate.go`              | Observed-chain state machine: applies RollForward/RollBackward, tracks tip and retained headers, and exposes cross-node agreement helpers and bounded-context conditions (`linux`) |

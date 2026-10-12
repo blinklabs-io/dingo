@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"strconv"
 	"testing"
 
@@ -35,9 +36,9 @@ func runActivate(
 	currentEpoch uint64,
 ) error {
 	t.Helper()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	return txn.Do(func(txn *database.Txn) error {
-		return ls.activateDelegatorInactivityIfNeeded(txn, currentEpoch)
+		return ls.activateDelegatorInactivityIfNeeded(context.Background(), txn, currentEpoch)
 	})
 }
 
@@ -55,24 +56,42 @@ func TestActivateDelegatorInactivityIfNeeded_GateOn(t *testing.T) {
 
 	credA := renewTestCred(0x11)
 	credB := renewTestCred(0x12)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:    credA,
-		CredentialTag: 0,
-		Active:        true,
-	}))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:    credB,
-		CredentialTag: 0,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:    credA,
+			CredentialTag: 0,
+			Active:        true,
+		}),
+	)
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:    credB,
+			CredentialTag: 0,
+			Active:        true,
+		}),
+	)
 
 	require.NoError(t, runActivate(t, ls, db, epoch))
 
-	acctA, err := db.GetAccountByCredential(0, credA, false, nil)
+	acctA, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		credA,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, epoch+inactivity, acctA.ExpirationEpoch)
 
-	acctB, err := db.GetAccountByCredential(0, credB, false, nil)
+	acctB, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		credB,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, epoch+inactivity, acctB.ExpirationEpoch)
 
@@ -103,11 +122,14 @@ func TestActivateDelegatorInactivityIfNeeded_RunsOnce(t *testing.T) {
 	ls, db := newRenewTestLedger(t, true, inactivity)
 
 	cred := renewTestCred(0x21)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:    cred,
-		CredentialTag: 0,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:    cred,
+			CredentialTag: 0,
+			Active:        true,
+		}),
+	)
 
 	require.NoError(t, runActivate(t, ls, db, epoch))
 
@@ -116,6 +138,7 @@ func TestActivateDelegatorInactivityIfNeeded_RunsOnce(t *testing.T) {
 	// pass must not clobber.
 	const manualExpiration = uint64(9999)
 	require.NoError(t, db.RenewAccountExpirations(
+		context.Background(),
 		[]models.StakeCredentialRef{models.NewStakeCredentialRef(0, cred)},
 		manualExpiration,
 		nil,
@@ -125,7 +148,13 @@ func TestActivateDelegatorInactivityIfNeeded_RunsOnce(t *testing.T) {
 	// no-op: the marker is already set.
 	require.NoError(t, runActivate(t, ls, db, epoch+inactivity+5))
 
-	acct, err := db.GetAccountByCredential(0, cred, false, nil)
+	acct, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(
 		t,
@@ -146,15 +175,24 @@ func TestActivateDelegatorInactivityIfNeeded_GateOff(t *testing.T) {
 	ls, db := newRenewTestLedger(t, false, 90)
 
 	cred := renewTestCred(0x31)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:    cred,
-		CredentialTag: 0,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:    cred,
+			CredentialTag: 0,
+			Active:        true,
+		}),
+	)
 
 	require.NoError(t, runActivate(t, ls, db, epoch))
 
-	acct, err := db.GetAccountByCredential(0, cred, false, nil)
+	acct, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), acct.ExpirationEpoch, "gate off must not stamp")
 

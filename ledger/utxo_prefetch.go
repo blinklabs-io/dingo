@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"context"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -24,11 +26,18 @@ import (
 // prefetchBlockUtxos resolves every spend, collateral and reference input of
 // txs that no transaction in the block produces, with a single UtxosByRefs
 // query. Rows that fail to decode are left out so the point lookup in
-// LedgerView.UtxoById reports the error as before. A failed batch yields nil.
+// LedgerView.UtxoById reports the error as before. Entries already in have,
+// such as UTxOs utxoPrefetchAhead resolved, are returned with the result; a
+// failed batch returns have unchanged, and every ref it lacks falls back to a
+// point lookup.
 func (ls *LedgerState) prefetchBlockUtxos(
+	ctx context.Context,
 	txn *database.Txn,
 	txs []lcommon.Transaction,
+	have map[utxoref.Key]lcommon.Utxo,
+	skip map[utxoref.Key]struct{},
 ) map[utxoref.Key]lcommon.Utxo {
+	ls.utxoPrefetchAheadServed.Add(uint64(len(have)))
 	produced := make(map[utxoref.Key]struct{})
 	for _, tx := range txs {
 		for _, utxo := range tx.Produced() {
@@ -46,6 +55,12 @@ func (ls *LedgerState) prefetchBlockUtxos(
 			if _, ok := seen[key]; ok {
 				continue
 			}
+			if _, ok := skip[key]; ok {
+				continue
+			}
+			if _, ok := have[key]; ok {
+				continue
+			}
 			seen[key] = in
 			refs = append(refs, models.UtxoId{
 				Hash: in.Id().Bytes(),
@@ -59,10 +74,10 @@ func (ls *LedgerState) prefetchBlockUtxos(
 		add(tx.ReferenceInputs())
 	}
 	if len(refs) == 0 {
-		return nil
+		return have
 	}
 	ls.utxoBatchLookups.Add(1)
-	rows, err := ls.db.UtxosByRefs(refs, txn)
+	rows, err := ls.db.UtxosByRefs(ctx, refs, txn)
 	if err != nil {
 		// Prefetching is an optimization: a failed batch must not reject a
 		// block whose validators may never read the failing ref. The same
@@ -72,10 +87,13 @@ func (ls *LedgerState) prefetchBlockUtxos(
 			"component", "ledger",
 			"error", err,
 		)
-		return nil
+		return have
 	}
 	ls.utxoByRefReads.Add(uint64(len(rows)))
-	out := make(map[utxoref.Key]lcommon.Utxo, len(rows))
+	out := have
+	if out == nil {
+		out = make(map[utxoref.Key]lcommon.Utxo, len(rows))
+	}
 	for i := range rows {
 		output, err := rows[i].Decode()
 		if err != nil || output == nil {

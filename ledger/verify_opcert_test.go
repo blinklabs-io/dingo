@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"testing"
 
@@ -61,7 +62,7 @@ func addLeiosOCINChainBlocks(
 			hash:             hash,
 			prev:             prev,
 		}
-		require.NoError(t, c.AddBlock(block, nil))
+		require.NoError(t, c.AddBlock(context.Background(), block, nil))
 		prev = hash
 	}
 }
@@ -111,7 +112,7 @@ func TestOpCertFromHeader_NonPraosReturnsFalse(t *testing.T) {
 // TestVerifyOpCertColdSignature_RealCardanoCliCert is a known-answer test that
 // pins the opcert signable representation to real cardano output. The values
 // are taken from a real cardano-cli NodeOperationalCertificate
-// (config/cardano/devnet/keys/opcert.cert). The signature verifies only under
+// (internal/devnetkeys/keys/opcert.cert). The signature verifies only under
 // the raw 48-byte OCertSignable representation (KES vkey || counter || period),
 // which is what verifyOpCertColdSignature now verifies by delegating directly
 // to gouroboros' ledger.VerifyOpCertSignature. If this test ever fails, either
@@ -359,7 +360,7 @@ func TestLeiosAnnouncementOCINStalenessUsesImmutableTip(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(nil, nil)
+	cm, err := chain.NewManager(context.Background(), nil, nil)
 	require.NoError(t, err)
 	addLeiosOCINChainBlocks(t, cm.PrimaryChain(), 5)
 
@@ -376,8 +377,14 @@ func TestLeiosAnnouncementOCINStalenessUsesImmutableTip(t *testing.T) {
 	var issuer lcommon.IssuerVkey
 	issuer[0] = 0xA1
 	pkh := lcommon.PoolKeyHash(issuer.Hash())
-	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 3, 20, nil))
-	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 5, 40, nil))
+	require.NoError(
+		t,
+		db.UpdatePoolOpCertSequence(context.Background(), pkh, 3, 20, nil),
+	)
+	require.NoError(
+		t,
+		db.UpdatePoolOpCertSequence(context.Background(), pkh, 5, 40, nil),
+	)
 
 	tests := []struct {
 		name      string
@@ -431,7 +438,7 @@ func TestLeiosAnnouncementOCINStalenessTreatsPreKChainAsOrigin(
 	t.Parallel()
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(nil, nil)
+	cm, err := chain.NewManager(context.Background(), nil, nil)
 	require.NoError(t, err)
 	addLeiosOCINChainBlocks(t, cm.PrimaryChain(), 2)
 
@@ -446,7 +453,10 @@ func TestLeiosAnnouncementOCINStalenessTreatsPreKChainAsOrigin(
 	var issuer lcommon.IssuerVkey
 	issuer[0] = 0xC3
 	pkh := lcommon.PoolKeyHash(issuer.Hash())
-	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 0, 10, nil))
+	require.NoError(
+		t,
+		db.UpdatePoolOpCertSequence(context.Background(), pkh, 0, 10, nil),
+	)
 
 	got, err := ls.leiosAnnouncementOCINStaleness(
 		leiosOCINHeader(issuer, 0),
@@ -466,14 +476,17 @@ func TestValidateLeiosAnnouncementHeaderRunsCryptoBeforeOCINClassification(
 	pkh := lcommon.PoolKeyHash(tb.block.IssuerVkey().Hash())
 	seedPoolStakeSnapshot(t, db, 4, pkh.Bytes(), 1_000_000_000)
 
-	cm, err := chain.NewManager(nil, nil)
+	cm, err := chain.NewManager(context.Background(), nil, nil)
 	require.NoError(t, err)
 	addLeiosOCINChainBlocks(t, cm.PrimaryChain(), 5)
 	ls.chain = cm.PrimaryChain()
 	ls.currentEra = eras.BabbageEraDesc
 	ls.config.CardanoNodeConfig.ShelleyGenesis().SecurityParam = 2
 	ls.publishSnapshotsLocked()
-	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 0, 20, nil))
+	require.NoError(
+		t,
+		db.UpdatePoolOpCertSequence(context.Background(), pkh, 0, 20, nil),
+	)
 
 	staleness, err := ls.ValidateLeiosAnnouncementHeader(tb.block.Header())
 	require.NoError(t, err)

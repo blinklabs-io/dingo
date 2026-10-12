@@ -376,9 +376,8 @@ func parseSnapshotData(data []byte) (*RawLedgerState, error) {
 	var boundsWarning error
 	eraBounds, boundsErr := extractAllEraBounds(telescopeData)
 	if boundsErr != nil {
-		// Non-fatal: era bounds extraction can fail for older
-		// snapshot formats. Epoch generation will fall back to
-		// the single-epoch path.
+		// Preserve the parsing failure so import can reject the snapshot
+		// before mutating the database.
 		boundsWarning = boundsErr
 		eraBounds = nil
 	}
@@ -617,7 +616,7 @@ func parseCurrentEra(
 		)
 	}
 
-	// UTxOState = [UTxO, deposited, fees, GovState, ...]
+	// UTxOState = [UTxO, deposited, fees, GovState, InstantStake, donation]
 	utxoState, err := decodeRawArray(ls[1])
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -651,6 +650,18 @@ func parseCurrentEra(
 		}
 	}
 
+	// UTxOState[5] (utxosDonation) is the treasury donations collected
+	// this epoch up to and including the anchor block. Conway's EPOCH rule
+	// moves it into the treasury at the next boundary and zeroes it, so a
+	// bootstrap that drops it leaves that boundary's treasury short. Absent
+	// in shorter arrays, where it is zero.
+	var donation uint64
+	if len(utxoState) > 5 {
+		if _, err := cbor.Decode(utxoState[5], &donation); err != nil {
+			return nil, fmt.Errorf("decoding UTxOState donation: %w", err)
+		}
+	}
+
 	result := &RawLedgerState{
 		EraIndex:      eraIndex,
 		Epoch:         epoch,
@@ -658,6 +669,7 @@ func parseCurrentEra(
 		Treasury:      treasury,
 		Reserves:      reserves,
 		Fees:          fees,
+		Donation:      donation,
 		EraBoundSlot:  eraBoundSlot,
 		EraBoundEpoch: eraBoundEpoch,
 		UTxOData:      utxoState[0], // The UTxO map
@@ -1167,11 +1179,13 @@ func ParseSnapShots(data cbor.RawMessage) (*ParsedSnapShots, error) {
 		))
 	}
 
+	// The fee field is absent from older encodings. When present it is the
+	// fee pot a reward round adds, so an undecodable value is reported
+	// rather than read as zero.
 	var fee uint64
 	if len(ss) > 3 {
 		if _, err := cbor.Decode(ss[3], &fee); err != nil {
-			// Fee might be optional or zero, don't fail
-			fee = 0
+			warnings = append(warnings, fmt.Errorf("decoding fee: %w", err))
 		}
 	}
 

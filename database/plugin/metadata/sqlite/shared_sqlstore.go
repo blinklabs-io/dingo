@@ -41,6 +41,43 @@ const maxVacuumIntervalSeconds uint64 = uint64(
 	(1<<63 - 1) / int64(time.Second),
 )
 
+// openMaintenanceDB opens a single-connection pool that is neither writeDB nor
+// readDB, for work that must not occupy writeDB's sole connection. SQLite
+// tracks locks per database file rather than per database/sql connection, so
+// it still contends with the pools at the SQLite level.
+func openMaintenanceDB(
+	databaseURI string,
+	busyTimeout time.Duration,
+) (*sql.DB, error) {
+	db, err := sqlstore.OpenDB(
+		"sqlite",
+		fmt.Sprintf(
+			"%s?_pragma=busy_timeout(%d)",
+			databaseURI,
+			busyTimeout.Milliseconds(),
+		),
+		"sqlite",
+		false, // short-lived per-run connection; not worth tracing
+	)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
+// vacuumChunkPages bounds how many free pages one incremental vacuum step
+// releases, and therefore how long that step holds SQLite's write lock.
+const vacuumChunkPages = 1000
+
+// sqliteVacuum returns the optional periodic space-reclaim callback.
+//
+// A full VACUUM rewrites the whole file under SQLite's database-wide write
+// lock, and no connection choice avoids that lock. Issued on any connection
+// outside writeDB, a ledger write waits in SQLite's busy handler and fails
+// with SQLITE_BUSY once its busy_timeout elapses, which ledger code does not
+// retry. The callback therefore runs on writeDB, where writers queue in Go
+// until it finishes or yields, and keeps each hold short: see vacuumWith.
 func sqliteVacuum(
 	writeDB *sql.DB,
 	intervalSeconds uint64,
@@ -55,9 +92,82 @@ func sqliteVacuum(
 		)
 	}
 	return func(ctx context.Context) error {
-		_, err := writeDB.ExecContext(ctx, "VACUUM")
-		return err
+		return vacuumWith(ctx, writeDB, vacuumChunkPages, nil)
 	}, time.Duration(intervalSeconds) * time.Second, nil // #nosec G115 -- bounded above by maxVacuumIntervalSeconds
+}
+
+// vacuumWith reclaims free pages in bounded steps. A database whose
+// auto_vacuum mode is not INCREMENTAL is converted first, which needs one
+// full VACUUM; after that each step releases at most chunkPages pages and
+// returns the write connection to the pool, so queued ledger writes run
+// between steps instead of waiting for the whole file to be rewritten.
+// afterChunk, when set, runs after each step with the connection released.
+func vacuumWith(
+	ctx context.Context,
+	writeDB *sql.DB,
+	chunkPages int,
+	afterChunk func(),
+) error {
+	const autoVacuumIncremental = 2
+	var mode int
+	if err := writeDB.QueryRowContext(
+		ctx,
+		"PRAGMA auto_vacuum",
+	).Scan(&mode); err != nil {
+		return fmt.Errorf("read auto_vacuum mode: %w", err)
+	}
+	if mode != autoVacuumIncremental {
+		conn, err := writeDB.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("acquire write connection: %w", err)
+		}
+		// The new mode only takes effect through the VACUUM that follows
+		// it, on the same connection.
+		_, err = conn.ExecContext(ctx, "PRAGMA auto_vacuum = INCREMENTAL")
+		if err == nil {
+			_, err = conn.ExecContext(ctx, "VACUUM")
+		}
+		closeErr := conn.Close()
+		if err != nil {
+			return errors.Join(
+				fmt.Errorf("convert to incremental auto_vacuum: %w", err),
+				closeErr,
+			)
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	previousFree := -1
+	for {
+		var free int
+		if err := writeDB.QueryRowContext(
+			ctx,
+			"PRAGMA freelist_count",
+		).Scan(&free); err != nil {
+			return fmt.Errorf("read freelist_count: %w", err)
+		}
+		if free == 0 {
+			return nil
+		}
+		if previousFree >= 0 && free >= previousFree {
+			return fmt.Errorf(
+				"incremental vacuum made no progress: freelist_count was %d and is now %d",
+				previousFree,
+				free,
+			)
+		}
+		previousFree = free
+		if _, err := writeDB.ExecContext(
+			ctx,
+			fmt.Sprintf("PRAGMA incremental_vacuum(%d)", chunkPages),
+		); err != nil {
+			return fmt.Errorf("incremental vacuum: %w", err)
+		}
+		if afterChunk != nil {
+			afterChunk()
+		}
+	}
 }
 
 // sqliteCommonPragmas is the DSN fragment applied to both the write and read
@@ -95,6 +205,11 @@ func sqliteVacuum(
 // is not a new, unvalidated setting -- only its use outside of bulk mode is
 // new.
 //
+// journal_size_limit(67108864) lets SQLite shrink a reset WAL to at most
+// 64 MiB. It does not bound an active WAL or one that cannot reset because a
+// reader still holds an older snapshot; checkpointWAL's periodic TRUNCATE
+// remains the path that can bring an idle WAL all the way to zero.
+//
 // Durability: per DATABASE.md's Cross-Store Durability Contract, synchronous
 // NORMAL under WAL mode means SQLite fsyncs the WAL at checkpoint boundaries,
 // not after every commit -- a committed transaction survives an application
@@ -113,6 +228,7 @@ func sqliteVacuum(
 const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 	"&_pragma=synchronous(NORMAL)" +
 	"&_pragma=wal_autocheckpoint(10000)" +
+	"&_pragma=journal_size_limit(67108864)" +
 	"&_pragma=cache_size(-50000)" +
 	"&_pragma=foreign_keys(1)" +
 	"&_pragma=mmap_size(268435456)"
@@ -123,8 +239,9 @@ const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 // wal_autocheckpoint only ever runs a PASSIVE checkpoint (that is what
 // SQLite's auto-checkpoint mechanism invokes internally), and PASSIVE -- like
 // FULL and RESTART -- backfills WAL frames into metadata.sqlite and lets
-// future writes reuse the reclaimed space, but never calls ftruncate on the
-// -wal file itself: only SQLITE_CHECKPOINT_TRUNCATE does that. Verified
+// future writes reuse the reclaimed space, but does not shrink the -wal file
+// itself. journal_size_limit can shrink the file when SQLite resets the WAL;
+// SQLITE_CHECKPOINT_TRUNCATE can bring it to zero. Verified
 // directly against a copy of a live, actively-growing metadata.sqlite: with
 // zero readers blocking it (every attempt reported busy=0 with
 // checkpointed==log, i.e. a fully successful checkpoint), PASSIVE, FULL, and
@@ -133,14 +250,13 @@ const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 // plain os.Stat of that file -- see metrics.go) can never show a single
 // decrease under wal_autocheckpoint alone, no matter how well passive
 // checkpointing is working underneath -- the file's on-disk footprint is a
-// high-water mark that only grows or holds steady until something truncates
-// it. checkpointWAL is that something: a periodic, independent TRUNCATE
-// checkpoint attempt so the WAL's on-disk size can be brought back down on a
-// schedule instead of only ever growing to whatever the largest
-// inter-checkpoint write burst has been so far. This is best-effort, not an
-// unconditional ceiling: a reader holding an old snapshot can make a given
-// attempt busy (see checkpointBusyTimeout below), in which case the file
-// stays at its current size until a later tick succeeds.
+// high-water mark under wal_autocheckpoint alone. The configured
+// journal_size_limit caps a reset WAL at 64 MiB; checkpointWAL is the path
+// that can bring it to zero, using a periodic, independent TRUNCATE
+// checkpoint attempt. This is best-effort, not an unconditional ceiling: a
+// reader holding an old snapshot can prevent WAL reset and make a given
+// TRUNCATE attempt busy (see checkpointBusyTimeout below), in which case the
+// file stays at its current size until a later reset or tick succeeds.
 const checkpointInterval = 2 * time.Minute
 
 // checkpointBusyTimeout bounds how long a single checkpoint attempt waits for
@@ -187,23 +303,13 @@ func checkpointWAL(
 	logger *slog.Logger,
 ) func(context.Context) error {
 	return func(ctx context.Context) error {
-		db, err := sqlstore.OpenDB(
-			"sqlite",
-			fmt.Sprintf(
-				"%s?_pragma=busy_timeout(%d)",
-				databaseURI,
-				checkpointBusyTimeout.Milliseconds(),
-			),
-			"sqlite",
-			false, // short-lived per-tick connection; not worth tracing
-		)
+		db, err := openMaintenanceDB(databaseURI, checkpointBusyTimeout)
 		if err != nil {
 			return fmt.Errorf("open WAL checkpoint connection: %w", err)
 		}
 		defer func() {
 			_ = db.Close()
 		}()
-		db.SetMaxOpenConns(1)
 
 		return checkpointWALWith(
 			ctx,
@@ -490,6 +596,8 @@ func openSQLStore(
 	}
 
 	store, err := sqlstore.New(sqlstore.Config{
+		GenesisStakingEmpty: dependencies.GenesisStakingEmpty,
+		SQLitePath:          databasePath,
 		WriteDB:             writeDB,
 		ReadDB:              readDB,
 		Dialect:             sqlstore.SQLiteDialect(),
@@ -536,7 +644,8 @@ const sqliteDiskSizeQueryTimeout = 5 * time.Second
 // against writeDB or readDB. This mirrors checkpointWAL's own dedicated
 // connection above. An earlier version queried readDB directly: one gauge
 // read left a connection idled back into that shared pool indefinitely
-// (neither pool sets SetConnMaxIdleTime/SetConnMaxLifetime), confirmed by
+// (no idle timeout on either pool; the read pool's five-minute lifetime still
+// outlasts a gauge interval), confirmed by
 // inspecting readDB's own sql.DB.Stats().OpenConnections after a single
 // DiskSize() call (see TestDiskSizeDoesNotLeaveReadDBConnectionOpen). Against
 // live containers running the perf branch,

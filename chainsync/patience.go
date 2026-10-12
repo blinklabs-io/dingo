@@ -207,21 +207,6 @@ func (s *State) PatienceHeaderAccepted(
 	p.Paused = atTip
 }
 
-// PatiencePause stops a client's bucket from leaking until the peer's next
-// message, for local work such as a ChainSync restart that the peer is not
-// responsible for.
-func (s *State) PatiencePause(connId ouroboros.ConnectionId) {
-	active := s.patienceActive()
-	s.clientConnIdMutex.Lock()
-	defer s.clientConnIdMutex.Unlock()
-	tc, exists := s.trackedClients[connId]
-	if !exists {
-		return
-	}
-	s.leakPatienceLocked(tc, s.now(), active)
-	tc.Patience.Paused = true
-}
-
 // resumePatienceAfterRollbackLocked restarts the leak after a rollback: the
 // peer has rolled back to point and owes the headers up to its tip.
 // Caller must hold clientConnIdMutex.

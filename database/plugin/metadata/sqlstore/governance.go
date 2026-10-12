@@ -32,24 +32,37 @@ id, tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
 parent_tx_hash, parent_action_idx, enacted_epoch, enacted_slot,
 ratified_epoch, ratified_slot, policy_hash, anchor_url, anchor_hash, deposit,
 return_address, gov_action_cbor, expired_epoch, expired_slot, added_slot,
-deleted_slot, dropped_epoch, dropped_slot`
+deleted_slot, dropped_epoch, dropped_slot, tx_index`
 
-// governanceProposalFromSQL joins in the drop-state companion table (see its
-// migration comment for why dropped_epoch/dropped_slot are not columns on
-// governance_proposal itself). Every column name across the two tables is
-// unique, so callers can keep referencing dropped_epoch/dropped_slot and
-// every other governance_proposal column unqualified.
+// governanceProposalFromSQL joins in the drop-state and submission-order
+// companion tables (see their migration comments for why dropped_epoch,
+// dropped_slot and tx_index are not columns on governance_proposal itself).
+// Apart from the two proposal_id join keys, every column name across the
+// three tables is unique, so callers can keep referencing those columns and
+// every governance_proposal column unqualified.
 const governanceProposalFromSQL = `
 FROM governance_proposal
 LEFT JOIN governance_proposal_drop
-  ON governance_proposal_drop.proposal_id = governance_proposal.id`
+  ON governance_proposal_drop.proposal_id = governance_proposal.id
+LEFT JOIN governance_proposal_order
+  ON governance_proposal_order.proposal_id = governance_proposal.id`
+
+// governanceProposalSubmissionOrderSQL orders proposals within one slot the
+// way Conway RATIFY walks them: block transaction position, then action
+// position within the transaction. tx_hash separates two transactions only
+// for rows stored without a position, which keep the hash order they had
+// before positions were recorded; the CASE keeps any such rows first on
+// every backend, whatever its NULL ordering.
+const governanceProposalSubmissionOrderSQL = `
+CASE WHEN governance_proposal_order.tx_index IS NULL THEN 0 ELSE 1 END ASC,
+governance_proposal_order.tx_index ASC, tx_hash ASC, action_index ASC`
 
 const governanceProposalOrderSQL = `
-proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC`
+proposed_epoch ASC, added_slot ASC,` + governanceProposalSubmissionOrderSQL
 
 const ratifiedGovernanceProposalOrderSQL = `
-ratified_epoch ASC, ratified_slot ASC, proposed_epoch ASC, added_slot ASC,
-tx_hash ASC, action_index ASC`
+ratified_epoch ASC, ratified_slot ASC, proposed_epoch ASC, added_slot ASC,` +
+	governanceProposalSubmissionOrderSQL
 
 func (s *Store) GetGovernanceProposal(
 	txHash []byte,
@@ -95,6 +108,31 @@ func (s *Store) GetGovernanceProposalSet(
 		"enacted_epoch IS NULL AND dropped_epoch IS NULL "+
 			"AND deleted_slot IS NULL",
 		governanceProposalOrderSQL,
+	)
+}
+
+func (s *Store) GetGovernanceProposalSetAtSlot(
+	slot uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	// The predicate GetGovernanceProposalSet applies at the tip, read
+	// through the lifecycle slots rollback reverts by.
+	return s.queryGovernanceProposals(
+		txn,
+		"governance_proposal.added_slot <= ? "+
+			"AND (enacted_slot IS NULL OR enacted_slot > ?) "+
+			"AND (governance_proposal_drop.dropped_slot IS NULL "+
+			"OR governance_proposal_drop.dropped_slot > ?) "+
+			"AND (deleted_slot IS NULL OR deleted_slot > ?)",
+		governanceProposalOrderSQL,
+		slotValue,
+		slotValue,
+		slotValue,
+		slotValue,
 	)
 }
 
@@ -211,15 +249,26 @@ func (s *Store) GetLastEnactedGovernanceProposal(
 	if err != nil {
 		return nil, err
 	}
-	args := make([]any, len(actionTypes))
+	args := make([]any, len(actionTypes)*2)
 	for i, actionType := range actionTypes {
 		args[i] = actionType
+		args[len(actionTypes)+i] = actionType
 	}
+	placeholders := bindPlaceholders(len(actionTypes))
 	proposal, err := scanGovernanceProposal(db.QueryRowContext(
 		ctx,
 		"SELECT "+governanceProposalColumns+governanceProposalFromSQL+`
- WHERE action_type IN (`+bindPlaceholders(len(args))+`)
+ WHERE action_type IN (`+placeholders+`)
    AND enacted_epoch IS NOT NULL AND deleted_slot IS NULL
+   AND NOT EXISTS (
+       SELECT 1 FROM governance_proposal AS child
+        WHERE child.parent_tx_hash = governance_proposal.tx_hash
+          AND child.parent_action_idx = governance_proposal.action_index
+          AND child.action_type IN (`+placeholders+`)
+          AND child.enacted_epoch = governance_proposal.enacted_epoch
+          AND child.enacted_slot = governance_proposal.enacted_slot
+          AND child.deleted_slot IS NULL
+   )
  ORDER BY enacted_epoch DESC, enacted_slot DESC, id DESC
  LIMIT 1`,
 		args...,
@@ -346,6 +395,21 @@ ON CONFLICT (proposal_id) DO UPDATE SET
 				}
 			}
 
+			// A nil TxIndex means the caller did not supply the position, so
+			// an existing row is left in place rather than cleared.
+			if proposal.TxIndex != nil {
+				if _, err := db.ExecContext(ctx, `
+INSERT INTO governance_proposal_order (proposal_id, tx_index)
+VALUES (?, ?)
+ON CONFLICT (proposal_id) DO UPDATE SET
+    tx_index = excluded.tx_index`,
+					id,
+					*proposal.TxIndex,
+				); err != nil {
+					return err
+				}
+			}
+
 			if proposal.RatifiedEpoch == nil {
 				return nil
 			}
@@ -464,6 +528,68 @@ WHERE proposal_id = ? AND deleted_slot IS NULL`,
 	return ret, rows.Err()
 }
 
+func (s *Store) GetGovernanceVotesAtSlot(
+	proposalID uint,
+	slot uint64,
+	txn types.Txn,
+) ([]*models.GovernanceVote, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	// A replaced vote keeps only its latest value; the value in effect at
+	// slot is the latest governance_vote_history entry at or before it,
+	// which SetGovernanceVote writes on every change including the first
+	// cast. A vote with no such entry predates the journal: its row is the
+	// value at slot only when it took effect by then. One replaced before the
+	// v22 journal after slot has no record of its value there and is left
+	// out rather than reported with a later one.
+	rows, err := db.QueryContext(ctx, `
+SELECT v.id, v.proposal_id, v.voter_type, v.voter_credential_tag,
+       v.voter_credential,
+       CASE WHEN h.id IS NULL THEN v.vote ELSE h.vote END,
+       CASE WHEN h.id IS NULL THEN v.anchor_url ELSE h.anchor_url END,
+       CASE WHEN h.id IS NULL THEN v.anchor_hash ELSE h.anchor_hash END,
+       v.added_slot,
+       CASE WHEN h.id IS NULL THEN v.vote_updated_slot
+            ELSE h.transition_slot END,
+       NULL
+FROM governance_vote v
+LEFT JOIN governance_vote_history h ON h.id = (
+    SELECT h2.id FROM governance_vote_history h2
+    WHERE h2.vote_id = v.id AND h2.transition_slot <= ?
+    ORDER BY h2.transition_slot DESC, h2.id DESC
+    LIMIT 1
+)
+WHERE v.proposal_id = ? AND v.added_slot <= ?
+  AND (v.deleted_slot IS NULL OR v.deleted_slot > ?)
+  AND (h.id IS NOT NULL
+       OR COALESCE(v.vote_updated_slot, v.added_slot) <= ?)`,
+		slotValue,
+		proposalID,
+		slotValue,
+		slotValue,
+		slotValue,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []*models.GovernanceVote{}
+	for rows.Next() {
+		vote, err := scanGovernanceVote(rows)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, vote)
+	}
+	return ret, rows.Err()
+}
+
 func (s *Store) SetGovernanceVote(
 	vote *models.GovernanceVote,
 	txn types.Txn,
@@ -554,6 +680,55 @@ INSERT INTO governance_vote_history (
 	)
 }
 
+func (s *Store) DeleteGovernanceVotesForDrep(
+	credentialTag uint8,
+	credential []byte,
+	epoch uint64,
+	deletedSlot uint64,
+	txn types.Txn,
+) (int, error) {
+	var affected int
+	err := s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			slot, err := checkedInt64(deletedSlot)
+			if err != nil {
+				return err
+			}
+			currentEpochValue, err := checkedInt64(epoch)
+			if err != nil {
+				return err
+			}
+			result, err := db.ExecContext(ctx, `
+UPDATE governance_vote
+SET deleted_slot = ?
+WHERE voter_type = ? AND voter_credential_tag = ?
+  AND voter_credential = ? AND deleted_slot IS NULL
+  AND proposal_id IN (
+      SELECT id FROM governance_proposal
+      WHERE expires_epoch >= ? AND enacted_epoch IS NULL
+        AND expired_epoch IS NULL AND deleted_slot IS NULL
+  )`,
+				slot,
+				models.VoterTypeDRep,
+				credentialTag,
+				credential,
+				currentEpochValue,
+			)
+			if err != nil {
+				return err
+			}
+			rows, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			affected = int(rows)
+			return nil
+		},
+	)
+	return affected, err
+}
+
 func (s *Store) DeleteGovernanceProposalsAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -565,6 +740,15 @@ func (s *Store) DeleteGovernanceProposalsAfterSlot(
 				query string
 				args  []any
 			}{
+				{
+					// Deleted explicitly rather than through the foreign-key
+					// cascade, which SQLite applies only with foreign_keys on.
+					query: `DELETE FROM governance_proposal_order
+				 WHERE proposal_id IN (
+				     SELECT id FROM governance_proposal WHERE added_slot > ?
+				 )`,
+					args: []any{slot},
+				},
 				{
 					query: "DELETE FROM governance_proposal WHERE added_slot > ?",
 					args:  []any{slot},
@@ -787,6 +971,7 @@ func scanGovernanceProposal(
 		&proposal.DeletedSlot,
 		&proposal.DroppedEpoch,
 		&proposal.DroppedSlot,
+		&proposal.TxIndex,
 	)
 	if err != nil {
 		return nil, err
@@ -1050,7 +1235,7 @@ GROUP BY cold_credential_tag, cold_credential`
 	return ret, nil
 }
 
-func (s *Store) GetCommitteeActiveCount(
+func (s *Store) GetCommitteeAuthorizedCount(
 	txn types.Txn,
 ) (int, error) {
 	members, err := s.GetActiveCommitteeMembers(txn)

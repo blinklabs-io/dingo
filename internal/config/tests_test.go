@@ -15,6 +15,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -205,7 +206,7 @@ func TestLoad_APIProviderConfigInvalidMergedTLSPair(t *testing.T) {
 // TestValidate_InvalidAPITLSMode covers the fail-fast top-level mode
 // enum check: a typo in api.tls.mode is rejected once, with a clear
 // message, by Validate rather than only surfacing later from each of the
-// three API providers that would otherwise inherit it.
+// four API providers that would otherwise inherit it.
 func TestValidate_InvalidAPITLSMode(t *testing.T) {
 	resetGlobalConfig()
 	cfg := GetConfig()
@@ -583,6 +584,17 @@ func TestDefaultLoggingConfig(t *testing.T) {
 	if d.Level != "info" {
 		t.Errorf("default Level = %q, want info", d.Level)
 	}
+}
+
+func TestDefaultSnapshotMaxCommitPause(t *testing.T) {
+	t.Parallel()
+
+	defaults := newDefaultConfig()
+	require.Equal(
+		t,
+		defaultSnapshotMaxCommitPause,
+		defaults.DatabaseLifecycle.SnapshotMaxCommitPause,
+	)
 }
 
 func TestLoad_LoggingEnvVars(t *testing.T) {
@@ -982,4 +994,47 @@ func TestValidateAllowsUnambiguousNetworks(t *testing.T) {
 			require.NoError(t, cfg.Validate(RunModeServe))
 		})
 	}
+}
+
+func TestValidateTracingSampleRatio(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		ratio   float64
+		wantErr bool
+	}{
+		{name: "zero", ratio: 0},
+		{name: "fraction", ratio: 0.25},
+		{name: "one", ratio: 1},
+		{name: "negative", ratio: -0.1, wantErr: true},
+		{name: "above one", ratio: 1.5, wantErr: true},
+		{name: "nan", ratio: math.NaN(), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := newDefaultConfig()
+			cfg.DatabasePath = t.TempDir()
+			cfg.TracingSampleRatio = tc.ratio
+			err := cfg.Validate(RunModeServe)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "tracingSampleRatio")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestApplyDefaultsTracingEndpointEnablesTracing(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{}
+	cfg.ApplyDefaults()
+	require.False(t, cfg.Tracing)
+
+	cfg = &Config{TracingEndpoint: "http://localhost:4318"}
+	cfg.ApplyDefaults()
+	require.True(t, cfg.Tracing)
 }

@@ -84,7 +84,11 @@ const (
 )
 
 type Peer struct {
-	LastActivity       time.Time
+	LastActivity time.Time
+	// LastServedActivity is when this peer last consumed from this node
+	// (chainsync/blockfetch server requests, keepalive pings). Kept apart
+	// from LastActivity, which drives outbound hot/churn decisions.
+	LastServedActivity time.Time
 	LastTestTime       time.Time // When peer was last tested for suitability
 	LastBlockFetchTime time.Time // Timestamp of last observed block fetch
 	FirstSeen          time.Time // When peer was first seen (used for tenure calculation)
@@ -106,6 +110,10 @@ type Peer struct {
 	// so this counter is what carries the backoff rung across sessions.
 	OutboundShortLivedCount uint32
 	Reconnecting            bool // Whether a reconnect goroutine is active for this peer
+	// LastChainsyncStall is when a connection to this peer last closed on a
+	// ChainSync stall timeout. Redial ranking puts recently stalled peers
+	// behind every alternate.
+	LastChainsyncStall time.Time
 	// EverConnected records whether this peer has ever established a
 	// client-capable connection. Discovered (peer-share/ledger) and
 	// public-root peers that have never connected are dropped after a failed
@@ -140,6 +148,13 @@ type Peer struct {
 	// GroupID identifies the topology group this peer belongs to (for valency tracking)
 	GroupID string
 
+	// StakeLovelace is the delegated stake, in lovelace, of the pool this
+	// peer was discovered from. StakeKnown distinguishes a known zero from
+	// unavailable ledger data.
+	StakeLovelace uint64
+	// StakeKnown is true when ledger discovery supplied stake, including zero.
+	StakeKnown bool
+
 	// Inbound admission metadata (phase 2). These fields are only
 	// populated on inbound arrivals, but they live on every Peer so that
 	// a configured topology peer that an inbound matched to can record
@@ -154,6 +169,9 @@ type Peer struct {
 	// sessions (duration < minStableConnectionDuration). This drives
 	// flapping cooldown decisions.
 	InboundShortLivedCount uint32
+	// inboundFlapHistoryCarried delays the next reset until the newly
+	// admitted session has proved whether it is stable.
+	inboundFlapHistoryCarried bool
 	// LastInboundDisconnect is when the most recent inbound connection
 	// for this peer closed.
 	LastInboundDisconnect time.Time
@@ -194,4 +212,8 @@ type PeerConnection struct {
 	VersionData     oprotocol.VersionData
 	ProtocolVersion uint
 	IsClient        bool
+	// UpstreamWithheld marks a connection from a peer under a denial. The
+	// connection stays open so the peer can still use this node as a
+	// downstream, but it is never a chain selection source.
+	UpstreamWithheld bool
 }

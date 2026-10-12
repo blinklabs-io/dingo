@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/dingo/ledger/byronupdate"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -196,7 +195,7 @@ func newByronUpdateBlockfetchChain(t *testing.T) *byronUpdateBlockfetchChain {
 	limits.MaxProposalSize = 700
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{
 		securityParam: securityParam,
@@ -208,11 +207,15 @@ func newByronUpdateBlockfetchChain(t *testing.T) *byronUpdateBlockfetchChain {
 		Type:        uint(gledger.BlockTypeByronEbb),
 		Cbor:        []byte{0x80},
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{parent}))
+	require.NoError(
+		t,
+		cm.PrimaryChain().
+			AddRawBlocks(context.Background(), []chain.RawBlock{parent}),
+	)
 	require.NoError(t, db.SetEpoch(
 		0, 0, nil, nil, nil, nil, eras.ByronEraDesc.Id, 20_000, 100, nil,
 	))
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:           db,
@@ -291,6 +294,7 @@ func (c *byronUpdateBlockfetchChain) signedBlock(
 	blockNumber uint64,
 	prevHash lcommon.Blake2b256,
 	updatePayload []byte,
+	skipBodyProofValidation bool,
 ) *byron.ByronMainBlock {
 	t.Helper()
 	issuer := newByronPBFTTestKey(0x91)
@@ -310,11 +314,14 @@ func (c *byronUpdateBlockfetchChain) signedBlock(
 		certificate,
 		nil,
 		&byronPBFTBodyOverride{
-			emptyTransactions: true,
-			updatePayload:     updatePayload,
+			emptyTransactions:       true,
+			updatePayload:           updatePayload,
+			skipBodyProofValidation: skipBodyProofValidation,
 		},
 	)
-	require.NoError(t, block.ValidateBodyProof())
+	if !skipBodyProofValidation {
+		require.NoError(t, block.ValidateBodyProof())
+	}
 	return block
 }
 
@@ -376,8 +383,8 @@ func (c *byronUpdateBlockfetchChain) startApply(
 // TestByronBlockfetchRejectsBodyProofedBlockWithInvalidUpdateVote covers
 // update-vote validation end to end: blocks reach the ledger through the
 // blockfetch handler, whose header checks pass for a re-signed header carrying
-// a correct upd_proof, and the block whose update payload votes with a bad
-// signature for a registered proposal is refused when the chain is applied.
+// a correct upd_proof, and a block whose update payload votes with a bad
+// signature for a registered proposal is rejected and removed from the chain.
 func TestByronBlockfetchRejectsBodyProofedBlockWithInvalidUpdateVote(
 	t *testing.T,
 ) {
@@ -399,12 +406,14 @@ func TestByronBlockfetchRejectsBodyProofedBlockWithInvalidUpdateVote(
 				t, 6, 1,
 				lcommon.NewBlake2b256(c.parent.Hash),
 				byronUpdatePayload(proposal),
+				false,
 			)
 			voting := c.signedBlock(
 				t, 7, 2, registering.Hash(),
 				byronUpdatePayload(nil, newByronUpdateVote(
 					t, c.magic, c.proposer, proposalId, test.corruptVote,
 				)),
+				test.corruptVote,
 			)
 			c.deliver(t, registering, voting)
 
@@ -436,15 +445,13 @@ func TestByronBlockfetchRejectsBodyProofedBlockWithInvalidUpdateVote(
 				"the ledger applied a block whose update vote has an "+
 					"invalid signature",
 			)
-			// A header-stage rejection drops the block from the primary chain,
-			// rolls the ledger back to its last good tip and restarts the
-			// pipeline; the verdict is what recovery recorded.
+			// The decoder rejects the invalid Byron payload, then persisted-block
+			// recovery removes it from the primary chain and restarts the reader.
 			require.ErrorIs(t, err, errRestartLedgerPipeline)
 			failure := c.ls.lastHeaderValidationFailure
 			require.NotNil(t, failure, "the block must be rejected, not skipped")
 			require.Equal(t, voting.Hash().Bytes(), failure.BlockPoint.Hash)
-			var invalidSignature byronupdate.VoteInvalidSignatureError
-			require.ErrorAs(t, failure.Cause, &invalidSignature)
+			require.ErrorIs(t, failure.Cause, byron.ErrInvalidSignature)
 			require.Equal(
 				t, c.parent.Hash, c.ls.chain.Tip().Point.Hash,
 				"the rejected block must be dropped from the primary chain",

@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -90,7 +91,7 @@ func TestLoadDRepVotingStateIncludesActiveProposalDeposit(t *testing.T) {
 			Active:    true,
 		},
 	)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        testBytes(32, 9),
 		ActionIndex:   0,
 		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -103,7 +104,7 @@ func TestLoadDRepVotingStateIncludesActiveProposalDeposit(t *testing.T) {
 		AddedSlot:     1,
 	}, nil))
 
-	state, err := loadDRepVotingState(db, nil, 6, 5, false)
+	state, err := loadDRepVotingState(context.Background(), db, nil, 6, 5, false)
 	require.NoError(t, err)
 	ref := models.StakeCredentialRef{Tag: 0, Key: drepCred}
 	assert.Equal(t, uint64(150), state.Powers[ref.MapKey()])
@@ -145,7 +146,7 @@ func TestSPOVotingPowerIncludesProposalDepositsWithoutChangingMarkStake(
 		AnchorHash:    testBytes(32, 0xA1),
 		AddedSlot:     1,
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
 
 	state, err := LoadSPOVotingState(db, nil, 6)
 	require.NoError(t, err)
@@ -155,7 +156,7 @@ func TestSPOVotingPowerIncludesProposalDepositsWithoutChangingMarkStake(
 		DRepTotalStake: 100,
 	}
 	proposalEpoch := uint64(5)
-	require.NoError(t, tallySPOVotes(
+	require.NoError(t, tallySPOVotes(context.Background(),
 		&TallyContext{
 			DB:                  db,
 			StakeEpoch:          6,
@@ -175,7 +176,7 @@ func TestSPOVotingPowerIncludesProposalDepositsWithoutChangingMarkStake(
 	assert.Equal(t, uint64(300), tally.SPOTotalStake)
 	assert.Equal(t, big.NewRat(2, 3), tally.SPOYesRatio())
 	replayedTally := &ProposalTally{ActionType: tally.ActionType}
-	require.NoError(t, tallySPOVotes(
+	require.NoError(t, tallySPOVotes(context.Background(),
 		&TallyContext{
 			DB:           db,
 			StakeEpoch:   6,
@@ -283,7 +284,7 @@ func TestProcessEpochRatifiesWithMultipleKeyAndScriptProposalDeposits(
 		{0x82, 40, keyReturnAddress},
 		{0x83, 50, scriptReturnAddress},
 	} {
-		require.NoError(t, db.SetGovernanceProposal(
+		require.NoError(t, db.SetGovernanceProposal(context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        testBytes(32, proposal.seed),
 				ActionIndex:   uint32(i),
@@ -318,15 +319,15 @@ func TestProcessEpochRatifiesWithMultipleKeyAndScriptProposalDeposits(
 		GovActionCbor: committeeAction,
 		AddedSlot:     1,
 	}
-	require.NoError(t, db.SetGovernanceProposal(target, nil))
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), target, nil))
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      target.ID,
 		VoterType:       models.VoterTypeDRep,
 		VoterCredential: drepYes,
 		Vote:            models.VoteYes,
 		AddedSlot:       2,
 	}, nil))
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:      target.ID,
 		VoterType:       models.VoterTypeSPO,
 		VoterCredential: poolYes,
@@ -337,9 +338,9 @@ func TestProcessEpochRatifiesWithMultipleKeyAndScriptProposalDeposits(
 	pparams := conwayPParamsFixture(10)
 	pparams.DRepVotingThresholds.CommitteeNoConfidence = newRat(40, 100)
 	pparams.PoolVotingThresholds.CommitteeNoConfidence = newRat(40, 100)
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    epoch - 1,
@@ -357,7 +358,7 @@ func TestProcessEpochRatifiesWithMultipleKeyAndScriptProposalDeposits(
 	require.NoError(t, txn.Commit())
 
 	assert.Equal(t, 1, out.RatifiedCount)
-	stored, err := db.GetGovernanceProposal(
+	stored, err := db.GetGovernanceProposal(context.Background(),
 		target.TxHash,
 		target.ActionIndex,
 		nil,
@@ -379,8 +380,8 @@ func TestProcessEpochRatifiesWithMultipleKeyAndScriptProposalDeposits(
 
 	// Rolling back the proposal transactions removes their deposits from
 	// both voting distributions without changing the persistent mark snapshot.
-	require.NoError(t, db.DeleteGovernanceProposalsAfterSlot(0, nil))
-	drepState, err := LoadDRepVotingState(db, nil, epoch, false)
+	require.NoError(t, db.DeleteGovernanceProposalsAfterSlot(context.Background(), 0, nil))
+	drepState, err := LoadDRepVotingState(context.Background(), db, nil, epoch, false)
 	require.NoError(t, err)
 	assert.Equal(
 		t,
@@ -395,7 +396,7 @@ func TestProcessEpochRatifiesWithMultipleKeyAndScriptProposalDeposits(
 	rolledBackTally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeUpdateCommittee),
 	}
-	require.NoError(t, tallySPOVotes(
+	require.NoError(t, tallySPOVotes(context.Background(),
 		&TallyContext{
 			DB:           db,
 			StakeEpoch:   epoch,
@@ -465,7 +466,7 @@ func TestProcessEpochUpdateCommitteeThresholdUsesCommitteePresence(
 			seedPoolWithStake(t, store, poolNo, testBytes(28, 99), 40, epoch)
 
 			if tt.committeeExpires != 0 {
-				require.NoError(t, db.SetCommitteeMembers(
+				require.NoError(t, db.SetCommitteeMembers(context.Background(),
 					[]*models.CommitteeMember{{
 						ColdCredHash: testBytes(28, 100),
 						ExpiresEpoch: tt.committeeExpires,
@@ -488,7 +489,7 @@ func TestProcessEpochUpdateCommitteeThresholdUsesCommitteePresence(
 				GovActionCbor: actionCbor,
 				AddedSlot:     1,
 			}
-			require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+			require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
 			for _, vote := range []*models.GovernanceVote{
 				{
 					ProposalID:      proposal.ID,
@@ -505,7 +506,7 @@ func TestProcessEpochUpdateCommitteeThresholdUsesCommitteePresence(
 					AddedSlot:       2,
 				},
 			} {
-				require.NoError(t, db.SetGovernanceVote(vote, nil))
+				require.NoError(t, db.SetGovernanceVote(context.Background(), vote, nil))
 			}
 
 			pparams := conwayPParamsFixture(10)
@@ -513,9 +514,9 @@ func TestProcessEpochUpdateCommitteeThresholdUsesCommitteePresence(
 			pparams.DRepVotingThresholds.CommitteeNoConfidence = newRat(50, 100)
 			pparams.PoolVotingThresholds.CommitteeNormal = newRat(70, 100)
 			pparams.PoolVotingThresholds.CommitteeNoConfidence = newRat(50, 100)
-			txn := db.MetadataTxn(true)
+			txn := db.MetadataTxn(context.Background(), true)
 			defer txn.Release()
-			out, err := ProcessEpoch(&EpochInput{
+			out, err := ProcessEpoch(context.Background(), &EpochInput{
 				DB:           db,
 				Txn:          txn,
 				PrevEpoch:    epoch - 1,
@@ -532,7 +533,7 @@ func TestProcessEpochUpdateCommitteeThresholdUsesCommitteePresence(
 			require.NoError(t, err)
 			require.NoError(t, txn.Commit())
 
-			stored, err := db.GetGovernanceProposal(
+			stored, err := db.GetGovernanceProposal(context.Background(),
 				proposal.TxHash, proposal.ActionIndex, nil,
 			)
 			require.NoError(t, err)
@@ -562,7 +563,7 @@ func TestLoadDRepVotingStateAddsProposalDepositToAlwaysNoConfidence(t *testing.T
 			Active:    true,
 		},
 	)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        testBytes(32, 10),
 		ActionIndex:   0,
 		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -575,7 +576,7 @@ func TestLoadDRepVotingStateAddsProposalDepositToAlwaysNoConfidence(t *testing.T
 		AddedSlot:     1,
 	}, nil))
 
-	state, err := LoadDRepVotingState(db, nil, 6, false)
+	state, err := LoadDRepVotingState(context.Background(), db, nil, 6, false)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(75), state.NoConfidencePower)
 }
@@ -593,7 +594,7 @@ func TestLoadDRepVotingStateExcludesAlwaysAbstainProposalDeposit(t *testing.T) {
 			Active:    true,
 		},
 	)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        testBytes(32, 11),
 		ActionIndex:   0,
 		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -606,7 +607,7 @@ func TestLoadDRepVotingStateExcludesAlwaysAbstainProposalDeposit(t *testing.T) {
 		AddedSlot:     1,
 	}, nil))
 
-	state, err := LoadDRepVotingState(db, nil, 6, false)
+	state, err := LoadDRepVotingState(context.Background(), db, nil, 6, false)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), state.AbstainPower)
 	assert.Equal(t, uint64(0), state.NoConfidencePower)
@@ -634,7 +635,7 @@ func TestLoadDRepVotingStateExcludesExpiredProposalDeposit(t *testing.T) {
 	)
 	// Expired as of epoch 6: expires_epoch (5) < currentEpoch (6), so
 	// GetActiveGovernanceProposals must not return it.
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        testBytes(32, 12),
 		ActionIndex:   0,
 		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -647,7 +648,7 @@ func TestLoadDRepVotingStateExcludesExpiredProposalDeposit(t *testing.T) {
 		AddedSlot:     1,
 	}, nil))
 
-	state, err := LoadDRepVotingState(db, nil, 6, false)
+	state, err := LoadDRepVotingState(context.Background(), db, nil, 6, false)
 	require.NoError(t, err)
 	ref := models.StakeCredentialRef{Tag: 0, Key: drepCred}
 	assert.Equal(t, uint64(0), state.Powers[ref.MapKey()])
@@ -677,7 +678,7 @@ func TestLoadDRepVotingStateExcludesDeregisteredReturnAccountDeposit(t *testing.
 			Active:    false,
 		},
 	)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        testBytes(32, 13),
 		ActionIndex:   0,
 		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -690,7 +691,7 @@ func TestLoadDRepVotingStateExcludesDeregisteredReturnAccountDeposit(t *testing.
 		AddedSlot:     1,
 	}, nil))
 
-	state, err := LoadDRepVotingState(db, nil, 6, false)
+	state, err := LoadDRepVotingState(context.Background(), db, nil, 6, false)
 	require.NoError(t, err)
 	ref := models.StakeCredentialRef{Tag: 0, Key: drepCred}
 	assert.Equal(t, uint64(100), state.Powers[ref.MapKey()])
@@ -723,7 +724,7 @@ func TestLoadDRepVotingStateHonorsDelegatorInactivityGateOnDeposit(t *testing.T)
 			ExpirationEpoch: 1,
 		},
 	)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        testBytes(32, 14),
 		ActionIndex:   0,
 		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -740,14 +741,14 @@ func TestLoadDRepVotingStateHonorsDelegatorInactivityGateOnDeposit(t *testing.T)
 
 	// Gate off: byte-identical to pre-CIP-0163 behavior, deposit still
 	// counts regardless of the stale ExpirationEpoch.
-	offState, err := LoadDRepVotingState(db, nil, 6, false)
+	offState, err := LoadDRepVotingState(context.Background(), db, nil, 6, false)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(150), offState.Powers[ref.MapKey()])
 
 	// Gate on: the return account is inactive by the same rule
 	// VotingPowerBatchSQL applies to its ordinary stake, so its deposit is
 	// excluded too.
-	onState, err := LoadDRepVotingState(db, nil, 6, true)
+	onState, err := LoadDRepVotingState(context.Background(), db, nil, 6, true)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), onState.Powers[ref.MapKey()])
 }
@@ -778,7 +779,7 @@ func TestLoadDRepVotingStateProposalDepositSumOverflow(t *testing.T) {
 		},
 	)
 	for i, deposit := range []uint64{maxInt64, maxInt64, 2} {
-		require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 			TxHash:        testBytes(32, byte(0xC0+i)),
 			ActionIndex:   0,
 			ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -792,7 +793,7 @@ func TestLoadDRepVotingStateProposalDepositSumOverflow(t *testing.T) {
 		}, nil))
 	}
 
-	_, err := LoadDRepVotingState(db, nil, 6, false)
+	_, err := LoadDRepVotingState(context.Background(), db, nil, 6, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sum active proposal deposits")
 }

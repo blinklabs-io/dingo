@@ -263,7 +263,7 @@ func TestLeiosDijkstraPParamsFallbackUsesFirstEraRow(t *testing.T) {
 			nil,
 		))
 	}
-	txn := db.MetadataTxn(false)
+	txn := db.MetadataTxn(context.Background(), false)
 	defer txn.Rollback()
 
 	pp, err := leiosDijkstraPParamsForSnapshot(db, 9, txn)
@@ -607,16 +607,16 @@ func TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles(
 		leios.VoteEmittedEvent{Vote: lcommon.LeiosPrototypeVote{}},
 	))
 
-	// A single require.Eventually asserting the exact count (not >= 1)
-	// both waits for delivery and stays red if a stale, over-counted
-	// subscription pushes the count past 1: EventBus dispatches every
-	// live subscriber for one Publish call around the same time, so if a
-	// duplicate delivery were going to happen, it already would have by
-	// the time any poll first observes the count reaching 1 -- no
-	// additional settle-time sleep is needed to catch it.
+	// Eventually returns at the first observation, so on its own it cannot
+	// see a duplicate delivery from a stale subscription that lands a moment
+	// later. Wait for the first vote, then require the count to stay at one.
 	require.Eventually(t, func() bool {
-		return n.ouroboros().LeiosVoteEnqueueCount() == 1
+		return n.ouroboros().LeiosVoteEnqueueCount() >= 1
 	}, 2*time.Second, 10*time.Millisecond,
+		"the published event must enqueue a vote")
+	require.Never(t, func() bool {
+		return n.ouroboros().LeiosVoteEnqueueCount() != 1
+	}, 250*time.Millisecond, 10*time.Millisecond,
 		"exactly one vote must be enqueued for the single published event, "+
 			"not once per accumulated live-lifecycle cycle")
 }

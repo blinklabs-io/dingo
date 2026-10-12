@@ -61,6 +61,8 @@ const (
 var logSecretConfigFields = []string{
 	// Koios Bearer token.
 	"KoiosParity.APIKey",
+	// Outbound registry headers, typically Authorization.
+	"TokenRegistry.HeaderSecrets",
 }
 
 // logURIConfigFields are Config field paths holding a URI that an operator
@@ -73,8 +75,12 @@ var logURIConfigFields = []string{
 	"DatabaseLifecycle.SnapshotCloudDestination",
 	"KoiosParity.BaseURL",
 	"Mithril.AggregatorURL",
+	"Mithril.Server.ArtifactStore",
+	"Mithril.Server.PublicBaseURL",
+	"Mithril.Server.RedirectBaseURL",
 	"OffchainMetadata.IPFSGatewayURL",
 	"TokenRegistry.SourceURL",
+	"TracingEndpoint",
 }
 
 // logProviderConfigFields are Config field paths holding a plugin
@@ -84,6 +90,8 @@ var logURIConfigFields = []string{
 // recursively and classified per key rather than as a whole.
 var logProviderConfigFields = []string{
 	"Plugins.API.Blockfrost.Config",
+	"Plugins.API.Kupo.Config",
+	"Plugins.API.Mcp.Config",
 	"Plugins.API.Mesh.Config",
 	"Plugins.API.Utxorpc.Config",
 	"Plugins.Mempool.Config",
@@ -105,14 +113,18 @@ var logPlainConfigFields = []string{
 	"ActivePeersLedgerQuota",
 	"ActivePeersTopologyQuota",
 	"BackfillBatchSize",
+	"BarkArchiveMaxConcurrentFetches",
 	"BarkClientCAFilePath",
 	"BarkHost",
+	"BarkLifecycleEnabled",
+	"BarkLifecycleOperatorCertificateFingerprints",
 	"BarkOperatorCertificateFingerprints",
 	"BarkPort",
 	"BindAddr",
 	"BlockPipelineEnabled",
 	"BlockPipelineValidateEnabled",
 	"BlockProducer",
+	"BlockfetchLowWatermarkEnabled",
 	"CORSAllowedOrigins",
 	"Cache.BlockLRUEntries",
 	"Cache.HotTxEntries",
@@ -128,7 +140,9 @@ var logPlainConfigFields = []string{
 	"DatabaseLifecycle.SnapshotDir",
 	"DatabaseLifecycle.SnapshotEnabled",
 	"DatabaseLifecycle.SnapshotEveryNEpochs",
+	"DatabaseLifecycle.SnapshotMaxCommitPause",
 	"DatabaseLifecycle.SnapshotRetention",
+	"DatabaseLifecycle.SnapshotTrustKeyFile",
 	"DatabasePath",
 	"DatabaseQueueSize",
 	"DatabaseWorkers",
@@ -176,8 +190,11 @@ var logPlainConfigFields = []string{
 	"KoiosParity.GraceHours",
 	"KoiosParity.Network",
 	"KoiosParity.Strict",
+	"LedgerApplyRowBatchingEnabled",
 	"LedgerCatchupTimeout",
+	"LedgerPrefetchAheadEnabled",
 	"LeiosVoteSigningKeyFile",
+	"LocalStateQueryViewMaxLifetime",
 	"Logging.Format",
 	"Logging.Level",
 	"MaxConnectionsPerIP",
@@ -186,6 +203,7 @@ var logPlainConfigFields = []string{
 	"MaxTrustedLocalNtCConns",
 	"MaxNtCConnectionsPerIP",
 	"MaxKESEvolutions",
+	"MetricsBindAddr",
 	"MetricsPort",
 	"Midnight.AuthTokenAssetName",
 	"Midnight.AuthTokenPolicyID",
@@ -210,9 +228,21 @@ var logPlainConfigFields = []string{
 	"Mithril.CleanupAfterLoad",
 	"Mithril.DownloadDir",
 	"Mithril.DownloadIdleTimeout",
+	"Mithril.DownloadMaxBytes",
 	"Mithril.DownloadMaxIdleRetries",
 	"Mithril.Enabled",
 	"Mithril.PinnedDigest",
+	"Mithril.Server.Aggregator.Enabled",
+	"Mithril.Server.Aggregator.Epoch",
+	"Mithril.Server.Aggregator.GenesisSigningKeyFile",
+	"Mithril.Server.Aggregator.K",
+	"Mithril.Server.Aggregator.M",
+	"Mithril.Server.Aggregator.PhiF",
+	"Mithril.Server.Aggregator.OperatorTokenFile",
+	"Mithril.Server.AncillarySigningKeyFile",
+	"Mithril.Server.KeepSnapshots",
+	"Mithril.Server.Port",
+	"Mithril.Server.TLSEnabled",
 	"Mithril.VerifyCertificates",
 	"Network",
 	"NetworkMagic",
@@ -226,11 +256,14 @@ var logPlainConfigFields = []string{
 	"PledgeLeverage",
 	"PledgeLeverageEnabled",
 	"Plugins.API.Blockfrost.Provider",
+	"Plugins.API.Kupo.Provider",
+	"Plugins.API.Mcp.Provider",
 	"Plugins.API.Mesh.Provider",
 	"Plugins.API.Utxorpc.Provider",
 	"Plugins.Mempool.Provider",
 	"Plugins.Storage.Blob.Provider",
 	"Plugins.Storage.Metadata.Provider",
+	"PlannerStatsRefreshEnabled",
 	"PrivateBindAddr",
 	"PrivatePort",
 	"ReconcileInterval",
@@ -273,6 +306,8 @@ var logPlainConfigFields = []string{
 	"TokenRegistry.UserAgent",
 	"Topology",
 	"Tracing",
+	"TracingServiceName",
+	"TracingSampleRatio",
 	"TracingStdout",
 	"UnsafeFullPotRewardsOnStandardNetworks",
 	"ValidateForgedBlock",
@@ -314,7 +349,7 @@ var providerConfigPlainKeys = []string{
 	// mempool
 	"capacity", "evictionwatermark", "rejectionwatermark",
 	"revalidationdeltacap",
-	// api/{blockfrost,mesh,utxorpc} TLS policy keys
+	// api/{blockfrost,kupo,mesh,utxorpc} TLS policy keys
 	"mode", "certfilepath", "keyfilepath",
 }
 

@@ -1167,6 +1167,16 @@ func TestStaleConsensusStakeSnapshotsExistFailsClosed(t *testing.T) {
 		require.False(t, stale)
 	})
 
+	t.Run("version 2 Dijkstra snapshot requires replay", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		require.NoError(t, store.SaveRewardSnapshot(&models.RewardSnapshot{
+			Epoch: 4, SnapshotType: "mark", Authoritative: true, CalculationVersion: 2,
+		}, nil))
+		stale, err := store.StaleConsensusStakeSnapshotsExist(nil)
+		require.NoError(t, err)
+		require.True(t, stale)
+	})
+
 	t.Run(
 		"literal old pool_stake_snapshot version trips the gate",
 		func(t *testing.T) {

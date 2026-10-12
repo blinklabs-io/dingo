@@ -15,8 +15,8 @@
 package event
 
 import (
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type eventMetrics struct {
@@ -29,59 +29,66 @@ type eventMetrics struct {
 	handlerStalls       *prometheus.CounterVec
 }
 
-func (e *EventBus) initMetrics(promRegistry prometheus.Registerer) {
-	promautoFactory := promauto.With(promRegistry)
+// initMetrics registers the bus collectors, reusing compatible collectors
+// already on the registry. On failure it unregisters what it added.
+func (e *EventBus) initMetrics(promRegistry prometheus.Registerer) error {
+	r := promutil.NewRegistration(promRegistry)
 	e.metrics = &eventMetrics{}
-	e.metrics.eventsTotal = promautoFactory.NewCounterVec(
+	e.metrics.eventsTotal = promutil.Register(r, prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "event_total",
 			Help: "total events by type",
 		},
 		[]string{"type"},
-	)
-	e.metrics.subscribers = promautoFactory.NewGaugeVec(
+	))
+	e.metrics.subscribers = promutil.Register(r, prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "event_subscribers",
 			Help: "subscribers by event type and kind",
 		},
 		[]string{"type", "kind"},
-	)
-	e.metrics.deliveryErrors = promautoFactory.NewCounterVec(
+	))
+	e.metrics.deliveryErrors = promutil.Register(r, prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "event_delivery_errors_total",
 			Help: "total delivery errors by event type and kind",
 		},
 		[]string{"type", "kind"},
-	)
-	e.metrics.deliveryTimeouts = promautoFactory.NewCounterVec(
+	))
+	e.metrics.deliveryTimeouts = promutil.Register(r, prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "event_delivery_timeouts_total",
 			Help: "total subscriber delivery timeouts by event type",
 		},
 		[]string{"type"},
-	)
-	e.metrics.deliveryBlocked = promautoFactory.NewCounterVec(
+	))
+	e.metrics.deliveryBlocked = promutil.Register(r, prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "event_delivery_blocked_total",
 			Help: "total deliveries that waited for subscriber buffer " +
 				"capacity, by event type and kind",
 		},
 		[]string{"type", "kind"},
-	)
-	e.metrics.asyncEnqueueBlocked = promautoFactory.NewCounterVec(
+	))
+	e.metrics.asyncEnqueueBlocked = promutil.Register(r, prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "event_async_enqueue_blocked_total",
 			Help: "total async publishes that waited for queue capacity, " +
 				"by event type",
 		},
 		[]string{"type"},
-	)
-	e.metrics.handlerStalls = promautoFactory.NewCounterVec(
+	))
+	e.metrics.handlerStalls = promutil.Register(r, prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "event_subscriber_handler_stalled_total",
 			Help: "observations of a subscriber handler that had not " +
 				"returned within the progress interval, by event type",
 		},
 		[]string{"type"},
-	)
+	))
+	if err := r.Err(); err != nil {
+		r.Rollback()
+		return err
+	}
+	return nil
 }

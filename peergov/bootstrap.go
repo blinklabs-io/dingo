@@ -19,6 +19,15 @@ import (
 	"time"
 )
 
+// PreferPeerSnapshot keeps topology bootstrap peers dormant until the snapshot
+// peers have had the bootstrap recovery cooldown to establish connections.
+func (p *PeerGovernor) PreferPeerSnapshot() {
+	p.mu.Lock()
+	events := p.exitBootstrapLocked("peer snapshot bootstrap")
+	p.mu.Unlock()
+	p.publishPendingEvents(events)
+}
+
 // shouldExitBootstrap checks if conditions are met to exit bootstrap mode.
 // Returns true if any of these conditions are met:
 // 1. Ledger peer count >= MinLedgerPeersForExit
@@ -48,7 +57,7 @@ func (p *PeerGovernor) shouldExitBootstrap() (bool, string) {
 		ledgerPeerCount := 0
 		for _, peer := range p.peers {
 			if peer != nil && peer.Source == PeerSourceP2PLedger &&
-				peer.hasClientConnection() &&
+				p.usableClientLocked(peer) &&
 				(peer.State == PeerStateHot || peer.State == PeerStateWarm) {
 				ledgerPeerCount++
 			}
@@ -124,7 +133,7 @@ func (p *PeerGovernor) bootstrapExitSuccessorCountLocked() int {
 			(peer.State != PeerStateHot && peer.State != PeerStateWarm) {
 			continue
 		}
-		if chainSelectionEligible(peer.Source, peer.Connection) {
+		if chainSelectionEligible(peer.Source, p.selectionConnLocked(peer)) {
 			successorCount++
 		}
 	}
@@ -234,7 +243,7 @@ func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
 	hotCount := 0
 	for _, peer := range p.peers {
 		if peer != nil && peer.State == PeerStateHot &&
-			peer.hasClientConnection() {
+			p.usableClientLocked(peer) {
 			hotCount++
 		}
 	}
@@ -255,7 +264,7 @@ func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
 		if peer == nil {
 			continue
 		}
-		if peer.State == PeerStateWarm && peer.hasClientConnection() {
+		if peer.State == PeerStateWarm && p.usableClientLocked(peer) {
 			if peer.Source == PeerSourceP2PGossip ||
 				peer.Source == PeerSourceP2PLedger {
 				hasWarmCandidates = true

@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"crypto/ed25519"
 	"errors"
 	"fmt"
@@ -191,7 +192,10 @@ func seatCommitteeMembers(
 			ExpiresEpoch:      10,
 		})
 	}
-	require.NoError(t, db.SetCommitteeMembers(members, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), members, nil),
+	)
 }
 
 // requireOnlyRuleError requires that validation failed and that no rule other
@@ -640,15 +644,22 @@ func storeCommitteeVotingTarget(
 	}
 	encoded, err := cbor.Encode(action)
 	require.NoError(t, err)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        governanceTestHash(seed),
-		ActionType:    uint8(actionType),
-		ProposedEpoch: 0,
-		ExpiresEpoch:  100,
-		AnchorHash:    make([]byte, 32),
-		ReturnAddress: make([]byte, 29),
-		GovActionCbor: encoded,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(
+			context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        governanceTestHash(seed),
+				ActionType:    uint8(actionType),
+				ProposedEpoch: 0,
+				ExpiresEpoch:  100,
+				AnchorHash:    make([]byte, 32),
+				ReturnAddress: make([]byte, 29),
+				GovActionCbor: encoded,
+			},
+			nil,
+		),
+	)
 	var txID [32]byte
 	copy(txID[:], governanceTestHash(seed))
 	return &lcommon.GovActionId{TransactionId: txID}
@@ -836,14 +847,18 @@ func TestValidateTxRejectsHotKeyOfRemovedCommitteeMember(t *testing.T) {
 			hot, hotKey := committeeTestVotingKey(0xe2)
 			seatCommitteeMembers(t, db, removed, committeeTestCredential(0xe3))
 			seedCommitteeCredentialAuthorization(t, db, removed, hot, 1, 1)
-			require.NoError(t, db.SoftDeleteCommitteeMembers(
-				[]models.CommitteeCredential{{
-					CredentialTag: uint8(removed.CredType),
-					Credential:    removed.Credential[:],
-				}},
-				removalSlot,
-				nil,
-			))
+			require.NoError(
+				t,
+				db.SoftDeleteCommitteeMembers(
+					context.Background(),
+					[]models.CommitteeCredential{{
+						CredentialTag: uint8(removed.CredType),
+						Credential:    removed.Credential[:],
+					}},
+					removalSlot,
+					nil,
+				),
+			)
 
 			err := committeeVotingValidate(
 				t, era, lv, pparams, hotKey,

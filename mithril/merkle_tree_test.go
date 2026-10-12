@@ -162,3 +162,33 @@ func TestImmutableFileNumberFromName(t *testing.T) {
 		}
 	}
 }
+
+// Mithril orders leaves by immutable file number, then name, so 99999
+// sorts before 100000 even though the strings compare the other way.
+func TestDigestMerkleLeavesOrdersByFileNumber(t *testing.T) {
+	t.Parallel()
+
+	entries := []CardanoDatabaseDigestEntry{
+		{ImmutableFileName: "100000.chunk", Digest: "d-100000-chunk"},
+		{ImmutableFileName: "99999.secondary", Digest: "d-99999-secondary"},
+		{ImmutableFileName: "99999.chunk", Digest: "d-99999-chunk"},
+		{ImmutableFileName: "100000.primary", Digest: "d-100000-primary"},
+	}
+	leaves, err := digestMerkleLeaves(entries, 100000)
+	require.NoError(t, err)
+
+	got := make([]string, 0, len(leaves))
+	for _, l := range leaves {
+		got = append(got, string(l))
+	}
+	assert.Equal(
+		t,
+		[]string{
+			"d-99999-chunk",
+			"d-99999-secondary",
+			"d-100000-chunk",
+			"d-100000-primary",
+		},
+		got,
+	)
+}

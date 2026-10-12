@@ -122,6 +122,9 @@ type ObserverConfig struct {
 	// package defaults.
 	FetchRetryAttempts int
 	FetchRetryDelay    time.Duration
+	// ErrorRetryDelay is the minimum interval before rechecking ERROR epochs.
+	// Zero uses five minutes; timer polling can add one further interval.
+	ErrorRetryDelay time.Duration
 	// OnResult, if set, is called after every epoch this observer validates
 	// (pass, fail, or error), for tests/observability. Never called
 	// concurrently with itself.
@@ -176,9 +179,11 @@ type Observer struct {
 	koios   *KoiosClient
 	metrics *metrics
 
-	mu       sync.Mutex
-	pending  map[uint64]struct{} // epochs requested for (re)validation
-	resultMu sync.Mutex
+	mu            sync.Mutex
+	pending       map[uint64]struct{} // epochs requested for (re)validation
+	resultMu      sync.Mutex
+	retry         map[uint64]time.Time
+	retryAccounts map[uint64]time.Time
 
 	// pendingAccounts is pending's twin for the slow per-account queue (see
 	// the Observer doc comment). Guarded by the same mu as pending: both are
@@ -248,6 +253,10 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 		cfg.FetchRetryDelay = defaultFetchRetryDelay
 	}
 
+	if cfg.ErrorRetryDelay <= 0 {
+		cfg.ErrorRetryDelay = 5 * time.Minute
+	}
+
 	cache, err := OpenCache(cfg.CachePath, cfg.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("open koios parity cache: %w", err)
@@ -271,6 +280,8 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 		metrics:         newMetrics(cfg.PromRegistry),
 		pending:         make(map[uint64]struct{}),
 		pendingAccounts: make(map[uint64]struct{}),
+		retry:           make(map[uint64]time.Time),
+		retryAccounts:   make(map[uint64]time.Time),
 		wake:            make(chan struct{}, defaultQueueBuffer),
 		wakeAccounts:    make(chan struct{}, defaultQueueBuffer),
 	}, nil
@@ -401,6 +412,11 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("seed koiosparity observer backlog: %w", err)
 	}
+	retryEpochs, err := o.cache.GetEpochsNeedingRetry(o.cfg.Network, false)
+	if err != nil {
+		return fmt.Errorf("seed koiosparity observer retries: %w", err)
+	}
+	needing = append(needing, retryEpochs...)
 	uncached, err := o.cache.GetUncachedEpochs(
 		o.cfg.Network,
 		seedFrom,
@@ -448,6 +464,11 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("seed koiosparity observer backlog: %w", err)
 		}
+		retryEpochs, err := o.cache.GetEpochsNeedingRetry(o.cfg.Network, true)
+		if err != nil {
+			return fmt.Errorf("seed koiosparity observer account retries: %w", err)
+		}
+		needingAccounts = append(needingAccounts, retryEpochs...)
 		o.mu.Lock()
 		for _, e := range needingAccounts {
 			if e >= seedFrom && e <= throughEpoch {
@@ -615,6 +636,8 @@ func (o *Observer) signalWakeAccounts() {
 // two share o.cache/o.koios and o.fail/o.fatalFired but otherwise never
 // block on each other.
 func (o *Observer) run(ctx context.Context) {
+	ticker := time.NewTicker(o.cfg.ErrorRetryDelay)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -625,6 +648,7 @@ func (o *Observer) run(ctx context.Context) {
 		o.mu.Lock()
 		todo := make([]uint64, 0, len(o.pending))
 		for e := range o.pending {
+			delete(o.retry, e)
 			todo = append(todo, e)
 		}
 		clear(o.pending)
@@ -650,6 +674,14 @@ func (o *Observer) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-o.wake:
+		case now := <-ticker.C:
+			o.mu.Lock()
+			for epoch, due := range o.retry {
+				if !now.Before(due) {
+					o.pending[epoch] = struct{}{}
+				}
+			}
+			o.mu.Unlock()
 		}
 	}
 }
@@ -659,6 +691,8 @@ func (o *Observer) run(ctx context.Context) {
 // calling processAccountEpoch instead of processEpoch. Only launched by
 // Start when cfg.AccountsEnabled.
 func (o *Observer) runAccounts(ctx context.Context) {
+	ticker := time.NewTicker(o.cfg.ErrorRetryDelay)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -669,6 +703,7 @@ func (o *Observer) runAccounts(ctx context.Context) {
 		o.mu.Lock()
 		todo := make([]uint64, 0, len(o.pendingAccounts))
 		for e := range o.pendingAccounts {
+			delete(o.retryAccounts, e)
 			todo = append(todo, e)
 		}
 		clear(o.pendingAccounts)
@@ -694,6 +729,14 @@ func (o *Observer) runAccounts(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-o.wakeAccounts:
+		case now := <-ticker.C:
+			o.mu.Lock()
+			for epoch, due := range o.retryAccounts {
+				if !now.Before(due) {
+					o.pendingAccounts[epoch] = struct{}{}
+				}
+			}
+			o.mu.Unlock()
 		}
 	}
 }
@@ -754,6 +797,7 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		o.reportError(epoch, false, fmt.Errorf("check: %w", err))
 		return
 	}
+	o.scheduleErrorRetry(epoch, false, result.Status)
 	o.emitResult(result)
 	if result.Status != StatusPass {
 		significant := CountSignificant(result.Mismatches)
@@ -844,6 +888,16 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 		o.reportError(epoch, true, fmt.Errorf("check: %w", err))
 		return
 	}
+	if result.CoversScope(ScopeAccount) {
+		var accountMismatches []CheckMismatch
+		for _, mismatch := range result.Mismatches {
+			if mismatch.Scope == ScopeAccount {
+				accountMismatches = append(accountMismatches, mismatch)
+			}
+		}
+		// The merged verdict can hide an account ERROR under an aggregate FAIL.
+		o.scheduleErrorRetry(epoch, true, DetermineStatus(accountMismatches))
+	}
 	o.emitResult(result)
 	if err := o.cache.PruneAccountCoverage(o.cfg.Network, epoch); err != nil {
 		o.cfg.Logger.Warn(
@@ -891,11 +945,9 @@ func cancelled(ctx context.Context, err error) bool {
 // additionally invokes OnResult (when set) with a synthesized ERROR-status
 // result carrying err's text as a synthetic mismatch — otherwise these two
 // error branches in processEpoch would be invisible to OnResult callers,
-// unlike every other outcome (PASS/FAIL) processEpoch reports. Not
-// persisted to the cache: checkEpoch/CheckEpoch itself does not persist
-// check_epoch_status on this class of failure either (a fetch or query
-// error that occurs before any comparison could run), so this stays
-// consistent with that existing behavior.
+// unlike every other outcome (PASS/FAIL) processEpoch reports. The queue's
+// ERROR status is persisted so startup can recover its retry even when the
+// prior reference remains fresh; prior comparison evidence stays untouched.
 //
 // accountsChecked names the phases the caller's check would have covered, so
 // the synthesized result carries the same CheckedScopes a completed check
@@ -906,6 +958,13 @@ func (o *Observer) reportError(
 	accountsChecked bool,
 	err error,
 ) {
+	if persistErr := o.cache.RecordObserverError(o.cfg.Network, epoch, accountsChecked); persistErr != nil {
+		err = errors.Join(
+			err,
+			fmt.Errorf("persist observer retry: %w", persistErr),
+		)
+	}
+	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
 	o.fail(epoch, err, true)
 	now := time.Now()
 	o.emitResult(&EpochCompareResult{
@@ -1271,5 +1330,19 @@ func (o *Observer) fail(epoch uint64, err error, fatal bool) {
 	}
 	if o.cfg.FatalFunc != nil {
 		o.cfg.FatalFunc(fmt.Errorf("koios parity: epoch %d: %w", epoch, err))
+	}
+}
+
+func (o *Observer) scheduleErrorRetry(epoch uint64, accounts bool, status string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	retry := o.retry
+	if accounts {
+		retry = o.retryAccounts
+	}
+	if status == StatusError {
+		retry[epoch] = time.Now().Add(o.cfg.ErrorRetryDelay)
+	} else {
+		delete(retry, epoch)
 	}
 }

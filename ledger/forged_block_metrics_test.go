@@ -98,7 +98,7 @@ func (b *recordForgedBlockTestBlock) BlockBodyHash() lcommon.Blake2b256 {
 func TestRecordForgedBlockRecordsMetricsAndPublishes(t *testing.T) {
 	t.Parallel()
 
-	eb := event.NewEventBus(nil, nil)
+	eb := newTestEventBus(t, nil)
 	defer eb.Stop()
 	_, events := eb.Subscribe(event.BlockForgedEventType)
 

@@ -163,8 +163,9 @@ func PrintStatus(
 			}
 			fmt.Fprintf(
 				w,
-				"  epoch %d: %d mismatches (only_koios=%d only_dingo=%d)\n",
+				"  epoch %d: %d significant of %d mismatches (only_koios=%d only_dingo=%d)\n",
 				st.Epoch,
+				st.SignificantMismatchCount,
 				st.MismatchCount,
 				len(UnmarshalPoolList(st.OnlyKoiosPools)),
 				len(UnmarshalPoolList(st.OnlyDingoPools)),
@@ -194,10 +195,11 @@ type JSONReportSummary struct {
 
 // JSONEpochEntry is a failing or erroring epoch in the JSON report.
 type JSONEpochEntry struct {
-	Epoch         uint64         `json:"epoch"`
-	Status        string         `json:"status"`
-	MismatchCount int            `json:"mismatch_count"`
-	Mismatches    []JSONMismatch `json:"mismatches,omitempty"`
+	Epoch                    uint64         `json:"epoch"`
+	Status                   string         `json:"status"`
+	MismatchCount            int            `json:"mismatch_count"`
+	SignificantMismatchCount int            `json:"significant_mismatch_count"`
+	Mismatches               []JSONMismatch `json:"mismatches,omitempty"`
 }
 
 // JSONMismatch is a single field-level mismatch in the JSON report.
@@ -246,9 +248,10 @@ func BuildJSONReport(
 		}
 
 		entry := JSONEpochEntry{
-			Epoch:         st.Epoch,
-			Status:        st.Status,
-			MismatchCount: st.MismatchCount,
+			Epoch:                    st.Epoch,
+			Status:                   st.Status,
+			MismatchCount:            st.MismatchCount,
+			SignificantMismatchCount: st.SignificantMismatchCount,
 		}
 		if getMismatches != nil {
 			mismatches, err := getMismatches(st.Epoch)

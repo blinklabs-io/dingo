@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -227,6 +228,7 @@ func bytePrefix(data []byte) []byte {
 }
 
 func (d *Database) SetTransaction(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
@@ -235,8 +237,10 @@ func (d *Database) SetTransaction(
 	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
 	txn *Txn,
+	protocolMajor uint64,
 ) error {
 	return d.SetTransactionWithOpts(
+		ctx,
 		tx,
 		point,
 		idx,
@@ -245,20 +249,21 @@ func (d *Database) SetTransaction(
 		certDeposits,
 		offsets,
 		txn,
-		BatchedTxIngestOpts{},
+		BatchedTxIngestOpts{ProtocolMajor: protocolMajor},
 	)
 }
 
 // SetTransactionWithOpts is SetTransaction with control over UTxO ingest
-// behavior via opts. Leios endorser-block application on the Musashi/
-// Haskell-conformant path passes SkipConsumedInputRecovery so a transaction's
-// effects are applied without the consumed-utxo recovery/repair pass: produced
+// behavior via opts. Certified Leios endorser-block closure application
+// passes SkipConsumedInputRecovery after validating the complete ordered
+// closure, so a transaction's effects are applied without the consumed-utxo
+// recovery/repair pass: produced
 // outputs and input spends are written, but a consumed input that is absent from
 // the store is left as a no-op instead of triggering blob recovery. This matches
-// the reference ledger's endorser-closure apply (ruleApplyTxValidation
-// ValidateNone), which folds the closure's transactions onto the ledger state
-// without validation or recovery.
+// the reference ledger's endorser-closure apply, which folds the closure's
+// transactions onto the ledger state without storage recovery.
 func (d *Database) SetTransactionWithOpts(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
@@ -271,7 +276,7 @@ func (d *Database) SetTransactionWithOpts(
 ) error {
 	owned := false
 	if txn == nil {
-		txn = d.Transaction(true)
+		txn = d.Transaction(ctx, true)
 		owned = true
 		defer txn.Rollback() //nolint:errcheck
 	}
@@ -386,23 +391,31 @@ func (d *Database) SetTransactionWithOpts(
 	}
 	// On the Leios endorser-block closure path (SkipConsumedInputRecovery), a
 	// consumed input already spent by a different certified endorser-block
-	// transaction is a no-op, matching the reference ledger's applyLeiosClosure
-	// (ValidateNone), rather than wedging the pipeline with ErrUtxoConflict on a
+	// transaction is a no-op, matching the reference ledger's applyLeiosClosure,
+	// rather than wedging the pipeline with ErrUtxoConflict on a
 	// legitimate cross-EB double-consume. Ranking-block application keeps the
 	// hard conflict check.
 	setTxErr := error(nil)
-	if opts.SkipConsumedInputRecovery {
+	if opts.LedgerContextSlot != nil {
+		if !opts.SkipConsumedInputRecovery {
+			return errors.New("ledger context requires a prototype closure")
+		}
+		setTxErr = d.transactionStore().SetTransactionLeiosClosureInContext(
+			tx, point, idx, certDeposits,
+			opts.SkipWithdrawalWitnessWrite, *opts.LedgerContextSlot,
+			txn.Metadata(), opts.ProtocolMajor,
+		)
+	} else if opts.SkipConsumedInputRecovery {
 		setTxErr = d.transactionStore().SetTransactionLeiosClosure(
 			tx, point, idx, certDeposits,
-			opts.SkipWithdrawalWitnessWrite,
-			txn.Metadata(),
+			opts.SkipWithdrawalWitnessWrite, txn.Metadata(),
+			opts.ProtocolMajor,
 		)
 	} else {
 		setTxErr = d.transactionStore().SetTransaction(
 			tx, point, idx, certDeposits,
-			opts.SkipWithdrawalWitnessWrite,
-			txn.Metadata(),
-		)
+			opts.SkipWithdrawalWitnessWrite, txn.Metadata(),
+			opts.ProtocolMajor)
 	}
 	if setTxErr != nil {
 		return fmt.Errorf(
@@ -434,19 +447,21 @@ func (d *Database) SetTransactionWithOpts(
 //
 // This is a general primitive for recording a transaction's certificate and
 // governance data without applying its UTxO effects. It is no longer on the
-// Leios endorser-block apply path: the Musashi path now applies endorser
+// Leios endorser-block apply path, which applies certified endorser
 // transactions with their full effects (see ledger/leios_apply.go and
 // SetTransactionWithOpts), matching the reference ledger.
 func (d *Database) SetTransactionMetadataOnly(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
 	certDeposits map[int]uint64,
 	txn *Txn,
+	protocolMajor uint64,
 ) error {
 	owned := false
 	if txn == nil {
-		txn = d.Transaction(true)
+		txn = d.Transaction(ctx, true)
 		owned = true
 		defer txn.Rollback() //nolint:errcheck
 	}
@@ -466,7 +481,7 @@ func (d *Database) SetTransactionMetadataOnly(
 		// instead of implying real gate logic applies here.
 		false,
 		metadataTxn,
-	); err != nil {
+		protocolMajor); err != nil {
 		return fmt.Errorf(
 			"set transaction metadata only for tx %s (block idx %d, slot %d): %w",
 			tx.Hash(),
@@ -489,16 +504,18 @@ func (d *Database) SetTransactionMetadataOnly(
 // up or consume input UTxOs because the mithril snapshot already reflects the
 // correct spent/unspent state.
 func (d *Database) SetGapBlockTransaction(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
 	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
 	txn *Txn,
+	protocolMajor uint64,
 ) error {
 	owned := false
 	if txn == nil {
-		txn = d.Transaction(true)
+		txn = d.Transaction(ctx, true)
 		owned = true
 		defer txn.Rollback() //nolint:errcheck
 	}
@@ -566,7 +583,7 @@ func (d *Database) SetGapBlockTransaction(
 	}
 
 	if err := d.transactionStore().SetGapBlockTransaction(
-		tx, point, idx, certDeposits, txn.Metadata(),
+		tx, point, idx, certDeposits, txn.Metadata(), protocolMajor,
 	); err != nil {
 		return fmt.Errorf(
 			"set gap block transaction metadata: %w", err,
@@ -617,13 +634,11 @@ func (d *Database) ensureTransactionConsumedUtxos(
 		return nil
 	}
 
-	// During Mithril historical backfill, immutable blocks are replayed in
-	// slot order against a metadata store being populated from the same
-	// history. Consumed inputs are guaranteed to already exist in the store
-	// from earlier producer transactions, so the per-input recovery checks
-	// are redundant. The in-flight producer lookup optimization (same-batch
-	// provenance) remains valuable and is preserved below.
-	if opts.SkipConsumedInputRecovery {
+	// During Mithril historical backfill or a trusted immutable replay, blocks
+	// are applied in slot order against a store containing the earlier
+	// producers. Consumed inputs are therefore already represented in the
+	// metadata store, so per-input blob recovery is redundant.
+	if opts.SkipConsumedInputRecovery || opts.TrustedImmutableReplay {
 		if opts.Stats != nil {
 			// Count inputs that would have triggered GetUtxoIncludingSpent
 			// lookups. The in-flight check below is cheap and would have
@@ -1149,6 +1164,7 @@ func (d *Database) recoverConsumedUtxo(
 // Genesis transactions have no inputs, witnesses, or fees - just outputs.
 // The offsets map contains pre-computed byte offsets into the synthetic genesis block.
 func (d *Database) SetGenesisTransaction(
+	ctx context.Context,
 	txHash []byte,
 	blockHash []byte,
 	outputs []lcommon.Utxo,
@@ -1157,7 +1173,7 @@ func (d *Database) SetGenesisTransaction(
 ) error {
 	owned := false
 	if txn == nil {
-		txn = d.Transaction(true)
+		txn = d.Transaction(ctx, true)
 		owned = true
 		defer txn.Rollback() //nolint:errcheck
 	}
@@ -1251,11 +1267,32 @@ func (d *Database) SetGenesisStaking(
 	blockHash []byte,
 	txn *Txn,
 ) error {
+	return d.SetGenesisStakingWithDeposits(
+		pools,
+		stakeDelegations,
+		keyDeposit,
+		0,
+		blockHash,
+		txn,
+	)
+}
+
+// SetGenesisStakingWithDeposits stores genesis staking with the key and pool
+// deposits that the reference ledger retains for later refunds.
+func (d *Database) SetGenesisStakingWithDeposits(
+	pools map[string]lcommon.PoolRegistrationCertificate,
+	stakeDelegations map[string]string,
+	keyDeposit uint64,
+	poolDeposit uint64,
+	blockHash []byte,
+	txn *Txn,
+) error {
 	if txn == nil {
-		if err := d.metadata.SetGenesisStaking(
+		if err := d.metadata.SetGenesisStakingWithDeposits(
 			pools,
 			stakeDelegations,
 			keyDeposit,
+			poolDeposit,
 			blockHash,
 			nil,
 		); err != nil {
@@ -1263,10 +1300,11 @@ func (d *Database) SetGenesisStaking(
 		}
 		return nil
 	}
-	if err := d.metadata.SetGenesisStaking(
+	if err := d.metadata.SetGenesisStakingWithDeposits(
 		pools,
 		stakeDelegations,
 		keyDeposit,
+		poolDeposit,
 		blockHash,
 		txn.Metadata(),
 	); err != nil {
@@ -1306,6 +1344,7 @@ func (d *Database) SetGenesisGovernance(
 }
 
 func (d *Database) GetTransactionByHash(
+	ctx context.Context,
 	hash []byte,
 	txn *Txn,
 ) (*models.Transaction, error) {
@@ -1313,7 +1352,7 @@ func (d *Database) GetTransactionByHash(
 		return nil, nil
 	}
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.transactionStore().GetTransactionByHash(hash, txn.Metadata())
@@ -1323,6 +1362,7 @@ func (d *Database) GetTransactionByHash(
 // transaction with the given hash, without loading any associations. Returns
 // (nil, nil) when no such transaction exists or it carries no metadata.
 func (d *Database) GetTransactionMetadataByHash(
+	ctx context.Context,
 	hash []byte,
 	txn *Txn,
 ) ([]byte, error) {
@@ -1330,7 +1370,7 @@ func (d *Database) GetTransactionMetadataByHash(
 		return nil, nil
 	}
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.transactionStore().
@@ -1339,6 +1379,7 @@ func (d *Database) GetTransactionMetadataByHash(
 
 // GetTransactionsByHashes returns transactions for the provided hashes.
 func (d *Database) GetTransactionsByHashes(
+	ctx context.Context,
 	hashes [][]byte,
 	txn *Txn,
 ) ([]models.Transaction, error) {
@@ -1346,7 +1387,7 @@ func (d *Database) GetTransactionsByHashes(
 		return nil, nil
 	}
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	txs, err := d.transactionStore().GetTransactionsByHashes(
@@ -1362,6 +1403,7 @@ func (d *Database) GetTransactionsByHashes(
 // GetTransactionsByBlockHash returns all transactions for a given
 // block hash, ordered by their position within the block.
 func (d *Database) GetTransactionsByBlockHash(
+	ctx context.Context,
 	blockHash []byte,
 	txn *Txn,
 ) ([]models.Transaction, error) {
@@ -1369,7 +1411,7 @@ func (d *Database) GetTransactionsByBlockHash(
 		return nil, nil
 	}
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	txs, err := d.transactionStore().GetTransactionsByBlockHash(
@@ -1388,34 +1430,45 @@ func (d *Database) GetTransactionsByBlockHash(
 // address as either a sender (input) or receiver (output).
 // Results are returned in descending on-chain order.
 func (d *Database) GetTransactionsByAddress(
+	ctx context.Context,
 	addr lcommon.Address,
 	limit int,
 	offset int,
 	txn *Txn,
 ) ([]models.Transaction, error) {
 	return d.getTransactionsByExactAddress(
+		ctx,
 		addr,
 		limit,
 		offset,
 		"desc",
+		nil,
+		nil,
 		txn,
 	)
 }
 
 // GetTransactionsByAddressWithOrder returns transactions
-// involving a given address with explicit ordering.
+// involving a given address with explicit ordering, restricted to the
+// inclusive (slot, block index) range [from, to]. A nil bound is open.
 func (d *Database) GetTransactionsByAddressWithOrder(
+	ctx context.Context,
 	addr lcommon.Address,
 	limit int,
 	offset int,
 	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 	txn *Txn,
 ) ([]models.Transaction, error) {
 	return d.getTransactionsByExactAddress(
+		ctx,
 		addr,
 		limit,
 		offset,
 		order,
+		from,
+		to,
 		txn,
 	)
 }
@@ -1444,14 +1497,17 @@ func addressTransactionKeys(
 }
 
 func (d *Database) getTransactionsByExactAddress(
+	ctx context.Context,
 	addr lcommon.Address,
 	limit int,
 	offset int,
 	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 	txn *Txn,
 ) ([]models.Transaction, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	paymentKey, credentialTag, stakingKey, err := addressTransactionKeys(addr)
@@ -1483,6 +1539,8 @@ func (d *Database) getTransactionsByExactAddress(
 			batchSize,
 			candidateOffset,
 			order,
+			from,
+			to,
 			txn.Metadata(),
 		)
 		if err != nil {
@@ -1579,6 +1637,7 @@ func transactionContainsExactAddress(
 // GetTransactionsByAddressKeys returns transactions for a payment/staking
 // credential tuple with pagination and explicit order (asc|desc).
 func (d *Database) GetTransactionsByAddressKeys(
+	ctx context.Context,
 	paymentKey []byte,
 	credentialTag uint8,
 	stakingKey []byte,
@@ -1588,7 +1647,7 @@ func (d *Database) GetTransactionsByAddressKeys(
 	txn *Txn,
 ) ([]models.Transaction, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	txs, err := d.transactionStore().GetTransactionsByAddress(
@@ -1598,6 +1657,8 @@ func (d *Database) GetTransactionsByAddressKeys(
 		limit,
 		offset,
 		order,
+		nil,
+		nil,
 		txn.Metadata(),
 	)
 	if err != nil {
@@ -1615,16 +1676,23 @@ func (d *Database) GetTransactionsByAddressKeys(
 }
 
 // CountTransactionsByAddress returns the total number of
-// transactions involving a given address.
+// transactions involving a given address within the inclusive
+// (slot, block index) range [from, to]. A nil bound is open.
 func (d *Database) CountTransactionsByAddress(
+	ctx context.Context,
 	addr lcommon.Address,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 	txn *Txn,
 ) (int, error) {
 	txs, err := d.getTransactionsByExactAddress(
+		ctx,
 		addr,
 		0,
 		0,
 		"desc",
+		from,
+		to,
 		txn,
 	)
 	if err != nil {
@@ -1636,14 +1704,18 @@ func (d *Database) CountTransactionsByAddress(
 // HasTransactionsByAddress reports whether at least one transaction involves
 // the given exact address.
 func (d *Database) HasTransactionsByAddress(
+	ctx context.Context,
 	addr lcommon.Address,
 	txn *Txn,
 ) (bool, error) {
 	txs, err := d.getTransactionsByExactAddress(
+		ctx,
 		addr,
 		1,
 		0,
 		"desc",
+		nil,
+		nil,
 		txn,
 	)
 	if err != nil {
@@ -1655,13 +1727,14 @@ func (d *Database) HasTransactionsByAddress(
 // CountTransactionsByAddressKeys returns the total number
 // of transactions for a payment/staking credential tuple.
 func (d *Database) CountTransactionsByAddressKeys(
+	ctx context.Context,
 	paymentKey []byte,
 	credentialTag uint8,
 	stakingKey []byte,
 	txn *Txn,
 ) (int, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	count, err := d.transactionStore().CountTransactionsByAddress(
@@ -1685,11 +1758,12 @@ func (d *Database) CountTransactionsByAddressKeys(
 // involving a payment credential across every address that carries it,
 // regardless of staking part.
 func (d *Database) CountTransactionsByPaymentCred(
+	ctx context.Context,
 	paymentKey []byte,
 	txn *Txn,
 ) (int, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	count, err := d.transactionStore().CountTransactionsByPaymentCred(
@@ -1708,6 +1782,7 @@ func (d *Database) CountTransactionsByPaymentCred(
 
 // GetAddressesByCredential returns distinct address mappings for a stake credential.
 func (d *Database) GetAddressesByCredential(
+	ctx context.Context,
 	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
@@ -1716,7 +1791,7 @@ func (d *Database) GetAddressesByCredential(
 	txn *Txn,
 ) ([]models.AddressTransaction, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	addresses, err := d.transactionStore().GetAddressesByCredential(
@@ -1742,12 +1817,13 @@ func (d *Database) GetAddressesByCredential(
 
 // CountAddressesByCredential returns the total number of distinct address mappings for a stake credential.
 func (d *Database) CountAddressesByCredential(
+	ctx context.Context,
 	credentialTag uint8,
 	stakingKey []byte,
 	txn *Txn,
 ) (int, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	count, err := d.transactionStore().CountAddressesByCredential(
@@ -1769,6 +1845,7 @@ func (d *Database) CountAddressesByCredential(
 // GetTransactionsByMetadataLabel returns transactions that include metadata
 // for a given label key.
 func (d *Database) GetTransactionsByMetadataLabel(
+	ctx context.Context,
 	label uint64,
 	limit int,
 	offset int,
@@ -1776,7 +1853,7 @@ func (d *Database) GetTransactionsByMetadataLabel(
 	txn *Txn,
 ) ([]models.Transaction, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	txs, err := d.transactionStore().GetTransactionsByMetadataLabel(
@@ -1802,11 +1879,12 @@ func (d *Database) GetTransactionsByMetadataLabel(
 // CountTransactionsByMetadataLabel returns the total number of transactions
 // that include metadata for a given label key.
 func (d *Database) CountTransactionsByMetadataLabel(
+	ctx context.Context,
 	label uint64,
 	txn *Txn,
 ) (int, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	count, err := d.transactionStore().CountTransactionsByMetadataLabel(
@@ -1826,10 +1904,11 @@ func (d *Database) CountTransactionsByMetadataLabel(
 // DeleteTransactionMetadataLabelsAfterSlot removes transaction metadata
 // label index records added after the given slot.
 func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.transactionStore().DeleteTransactionMetadataLabelsAfterSlot(
 			slot,
 			txn.Metadata(),
@@ -1974,12 +2053,13 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 // for transactions added after the given slot. This is used during rollback
 // to clean up both blob storage and metadata for rolled-back transactions.
 func (d *Database) TransactionsDeleteRolledback(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
 	owned := false
 	if txn == nil {
-		txn = d.Transaction(true)
+		txn = d.Transaction(ctx, true)
 		owned = true
 		defer func() {
 			if owned {

@@ -87,7 +87,7 @@ func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
 	}
 
 	unknown := randomHash(t)
-	_, err := BlockByHash(db, unknown)
+	_, err := BlockByHash(context.Background(), db, unknown)
 	require.ErrorIs(
 		t,
 		err,
@@ -125,7 +125,7 @@ func TestBlockByHashTxn_KnownHashStillResolves(t *testing.T) {
 	hash := randomHash(t)
 	insertTestBlock(t, db, 42, hash, []byte("payload"))
 
-	got, err := BlockByHash(db, hash)
+	got, err := BlockByHash(context.Background(), db, hash)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(42), got.Slot)
 	assert.Equal(t, hash, got.Hash)
@@ -155,7 +155,7 @@ func TestBlockByHashTxn_EmptyIndexEntryIsCorruption(t *testing.T) {
 	require.NoError(t, db.Blob().Set(txn.Blob(), hashIndexKey, []byte{}))
 	require.NoError(t, txn.Commit())
 
-	_, err := BlockByHash(db, hash)
+	_, err := BlockByHash(context.Background(), db, hash)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, models.ErrBlockNotFound,
 		"empty index entry must not be reported as a soft miss")
@@ -233,7 +233,7 @@ func BenchmarkBlockByHashTxn_UnknownHash(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_, _ = BlockByHash(db, unknown)
+		_, _ = BlockByHash(context.Background(), db, unknown)
 	}
 }
 
@@ -553,7 +553,7 @@ func TestBlockBySlotReturnsHighestIndexedBlockForSlot(t *testing.T) {
 	require.NoError(t, db.BlockCreate(lowerIDBlock, nil))
 	require.NoError(t, db.BlockCreate(higherIDBlock, nil))
 
-	block, err := BlockBySlot(db, slot)
+	block, err := BlockBySlot(context.Background(), db, slot)
 	require.NoError(t, err)
 	require.Equal(t, higherIDBlock.ID, block.ID)
 	require.Equal(t, higherIDBlock.Hash, block.Hash)
@@ -579,7 +579,7 @@ func TestBlockBySlotSkipsStaleSameSlotIndex(t *testing.T) {
 		)
 	}))
 
-	block, err := BlockBySlot(db, slot)
+	block, err := BlockBySlot(context.Background(), db, slot)
 	require.NoError(t, err)
 	require.Equal(t, lowerIDBlock.ID, block.ID)
 	require.Equal(t, lowerIDBlock.Hash, block.Hash)
@@ -718,6 +718,33 @@ func TestBlockAtOrAfterIndexSkipsInvalidIndexMappings(t *testing.T) {
 	require.Equal(t, nextBlock.Hash, block.Hash)
 }
 
+func TestBlockAtOrBeforeIndexSkipsSparseAndInvalidMappings(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	first := testIndexedBlock(10, 1, 0x01)
+	last := testIndexedBlock(30, 300, 0x03)
+	require.NoError(t, db.BlockCreate(first, nil))
+	require.NoError(t, db.BlockCreate(last, nil))
+
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *Txn) error {
+		if err := db.Blob().Set(txn.Blob(), types.BlockBlobIndexKey(100),
+			types.BlockBlobKey(last.Slot, last.Hash)); err != nil {
+			return err
+		}
+		return db.Blob().Set(txn.Blob(), types.BlockBlobIndexKey(200),
+			types.BlockBlobKey(20, bytes.Repeat([]byte{0x02}, 32)))
+	}))
+
+	block, err := db.BlockAtOrBeforeIndex(context.Background(), 299, nil)
+	require.NoError(t, err)
+	require.Equal(t, first.ID, block.ID)
+	require.Equal(t, first.Hash, block.Hash)
+
+	_, err = db.BlockAtOrBeforeIndex(context.Background(), 0, nil)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
 // TestBlockBeforeSlotSkipsSyntheticBlobs verifies BlockBeforeSlot returns the
 // highest real ranking block before a slot and skips synthetic blobs. Genesis
 // CBOR and Leios endorser blocks are persisted at block-blob keys via
@@ -747,7 +774,7 @@ func TestBlockBeforeSlotSkipsSyntheticBlobs(t *testing.T) {
 	ebHash := bytes.Repeat([]byte{0xcc}, 32)
 	require.NoError(t, db.SetGenesisCbor(110, ebHash, []byte{0x80}, nil))
 
-	got, err := BlockBeforeSlot(db, 120)
+	got, err := BlockBeforeSlot(context.Background(), db, 120)
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -776,7 +803,7 @@ func TestBlockBeforeSlotSyntheticOnlyNotFound(t *testing.T) {
 	ebHash := bytes.Repeat([]byte{0xcc}, 32)
 	require.NoError(t, db.SetGenesisCbor(110, ebHash, []byte{0x80}, nil))
 
-	_, err := BlockBeforeSlot(db, 120)
+	_, err := BlockBeforeSlot(context.Background(), db, 120)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
@@ -796,7 +823,7 @@ func TestBlockByNumberResolvesEveryIndexedBlock(t *testing.T) {
 	}
 
 	for _, want := range blocks {
-		got, err := BlockByNumber(db, want.Number)
+		got, err := BlockByNumber(context.Background(), db, want.Number)
 		require.NoError(t, err)
 		require.Equal(t, want.ID, got.ID)
 		require.Equal(t, want.Slot, got.Slot)
@@ -823,11 +850,11 @@ func TestBlockByNumberSkipsSparseIndexGap(t *testing.T) {
 		blocks = append(blocks, block)
 	}
 
-	below, err := BlockByNumber(db, blocks[1].Number)
+	below, err := BlockByNumber(context.Background(), db, blocks[1].Number)
 	require.NoError(t, err)
 	require.Equal(t, blocks[1].ID, below.ID)
 
-	above, err := BlockByNumber(db, blocks[4].Number)
+	above, err := BlockByNumber(context.Background(), db, blocks[4].Number)
 	require.NoError(t, err)
 	require.Equal(t, blocks[4].ID, above.ID)
 }
@@ -843,7 +870,7 @@ func TestResolveBlockNumberBoundIsSeparableFromTheSearch(t *testing.T) {
 
 	db := newTestDB(t)
 
-	empty, err := ResolveBlockNumberBound(db)
+	empty, err := ResolveBlockNumberBound(context.Background(), db)
 	require.NoError(t, err)
 	require.False(t, empty.Resolved, "an empty chain bounds nothing")
 
@@ -854,7 +881,7 @@ func TestResolveBlockNumberBoundIsSeparableFromTheSearch(t *testing.T) {
 		blocks = append(blocks, block)
 	}
 
-	bound, err := ResolveBlockNumberBound(db)
+	bound, err := ResolveBlockNumberBound(context.Background(), db)
 	require.NoError(t, err)
 	require.True(t, bound.Resolved)
 	require.Equal(t, blocks[4].ID, bound.HighestID)
@@ -862,14 +889,24 @@ func TestResolveBlockNumberBoundIsSeparableFromTheSearch(t *testing.T) {
 
 	// One bound answers every number in the chain.
 	for _, want := range blocks {
-		got, err := BlockByNumberBounded(db, want.Number, bound)
+		got, err := BlockByNumberBounded(
+			context.Background(),
+			db,
+			want.Number,
+			bound,
+		)
 		require.NoError(t, err)
 		require.Equal(t, want.ID, got.ID)
 		require.Equal(t, want.Slot, got.Slot)
 		require.True(t, bytes.Equal(want.Hash, got.Hash))
 	}
 
-	_, err = BlockByNumberBounded(db, blocks[4].Number+1, bound)
+	_, err = BlockByNumberBounded(
+		context.Background(),
+		db,
+		blocks[4].Number+1,
+		bound,
+	)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
@@ -914,14 +951,14 @@ func TestBlockByNumberResolvesCompactBlockMetadata(t *testing.T) {
 		"expected compact block metadata for run mode serve and storage mode core",
 	)
 
-	bound, err := ResolveBlockNumberBound(db)
+	bound, err := ResolveBlockNumberBound(context.Background(), db)
 	require.NoError(t, err)
 	require.True(t, bound.Resolved)
 	require.Equal(t, blocks[4].ID, bound.HighestID)
 	require.Equal(t, blocks[4].Number, bound.HighestNumber)
 
 	for _, want := range blocks {
-		got, err := BlockByNumber(db, want.Number)
+		got, err := BlockByNumber(context.Background(), db, want.Number)
 		require.NoError(t, err)
 		require.Equal(t, want.ID, got.ID)
 		require.Equal(t, want.Slot, got.Slot)
@@ -942,7 +979,12 @@ func TestBlockByNumberBoundedRejectsUnresolvedBound(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	_, err := BlockByNumberBounded(db, 1, BlockNumberBound{})
+	_, err := BlockByNumberBounded(
+		context.Background(),
+		db,
+		1,
+		BlockNumberBound{},
+	)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
@@ -955,7 +997,7 @@ func TestBlockByNumberReportsMissingNumbersAsNotFound(t *testing.T) {
 
 	db := newTestDB(t)
 
-	_, err := BlockByNumber(db, 1)
+	_, err := BlockByNumber(context.Background(), db, 1)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 
 	for i := uint64(1); i <= 3; i++ {
@@ -963,6 +1005,220 @@ func TestBlockByNumberReportsMissingNumbersAsNotFound(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	_, err = BlockByNumber(db, 99)
+	_, err = BlockByNumber(context.Background(), db, 99)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+func TestFirstBlockAtOrAfterSlot(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	for _, b := range []struct {
+		slot uint64
+		id   uint64
+	}{{100, 1}, {200, 2}, {300, 3}} {
+		hash := make([]byte, 32)
+		hash[0] = byte(b.id)
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID: b.id, Slot: b.slot, Hash: hash, Number: b.id, Type: 1,
+			Cbor: []byte{0x80},
+		}, nil))
+	}
+	// A synthetic blob (ID 0) between real blocks must be skipped.
+	require.NoError(t, db.SetGenesisCbor(
+		150, bytes.Repeat([]byte{0xcc}, 32), []byte{0x80}, nil,
+	))
+	for _, tc := range []struct {
+		query uint64
+		want  uint64
+	}{{0, 100}, {100, 100}, {101, 200}, {300, 300}} {
+		blk, err := FirstBlockAtOrAfterSlot(t.Context(), db, tc.query)
+		require.NoError(t, err, "query %d", tc.query)
+		require.Equal(t, tc.want, blk.Slot, "query %d", tc.query)
+	}
+	_, err := FirstBlockAtOrAfterSlot(t.Context(), db, 301)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+// reverseIteratorCountingStore records reverse blob iterators opened through
+// it. The s3 and gcs plugins implement reverse iteration by listing every key
+// under the prefix into a temporary file before the seek runs, so a reverse
+// iterator in a request path is unbounded work there however few steps the
+// caller takes.
+type reverseIteratorCountingStore struct {
+	blob.BlobStore
+	reverseIterators int
+}
+
+func (s *reverseIteratorCountingStore) NewIterator(
+	txn types.Txn,
+	opts types.BlobIteratorOptions,
+) types.BlobIterator {
+	if opts.Reverse {
+		s.reverseIterators++
+	}
+	return s.BlobStore.NewIterator(txn, opts)
+}
+
+func seedSparseChain(t *testing.T, db *Database) []models.Block {
+	t.Helper()
+	blocks := []models.Block{
+		testIndexedBlock(10, 1, 0x10),
+		testIndexedBlock(20, 2, 0x20),
+		testIndexedBlock(30, 3, 0x30),
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	return blocks
+}
+
+// TestBlockPointAtOrAfterSlotSelectsTheFollowingBlock pins the direction of
+// the forward slot lookup: an empty slot resolves to the next canonical block,
+// never the previous one.
+func TestBlockPointAtOrAfterSlotSelectsTheFollowingBlock(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := seedSparseChain(t, db)
+	store := &reverseIteratorCountingStore{BlobStore: db.Blob()}
+	db.SetBlobStore(store)
+
+	for name, tc := range map[string]struct {
+		slot uint64
+		want int
+	}{
+		"empty slot takes the next block": {slot: 15, want: 1},
+		"slot holding a block takes it":   {slot: 20, want: 1},
+		"slot below the first block":      {slot: 1, want: 0},
+		"slot one below a block":          {slot: 30, want: 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			txn := db.BlobTxn(false)
+			defer txn.Release()
+			point, err := BlockPointAtOrAfterSlotTxn(t.Context(), txn, tc.slot)
+			require.NoError(t, err)
+			require.Equal(t, blocks[tc.want].Slot, point.Slot)
+			require.Equal(t, blocks[tc.want].Hash, point.Hash)
+		})
+	}
+
+	txn := db.BlobTxn(false)
+	defer txn.Release()
+	_, err := BlockPointAtOrAfterSlotTxn(t.Context(), txn, 31)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	require.Zero(
+		t,
+		store.reverseIterators,
+		"the forward slot lookup must not open a reverse blob iterator",
+	)
+}
+
+// TestBlockPointAtOrBeforeSlotBoundedSelectsThePrecedingBlock pins the bounded
+// at-or-before lookup, including that it answers without a reverse blob
+// iterator.
+func TestBlockPointAtOrBeforeSlotBoundedSelectsThePrecedingBlock(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := seedSparseChain(t, db)
+	tipID := blocks[len(blocks)-1].ID
+	store := &reverseIteratorCountingStore{BlobStore: db.Blob()}
+	db.SetBlobStore(store)
+
+	for name, tc := range map[string]struct {
+		slot uint64
+		want int
+	}{
+		"empty slot takes the previous block": {slot: 15, want: 0},
+		"slot holding a block takes it":       {slot: 20, want: 1},
+		"slot above the tip takes the tip":    {slot: 10_000, want: 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			txn := db.BlobTxn(false)
+			defer txn.Release()
+			point, err := BlockPointAtOrBeforeSlotBoundedTxn(
+				txn,
+				tc.slot,
+				tipID,
+			)
+			require.NoError(t, err)
+			require.Equal(t, blocks[tc.want].Slot, point.Slot)
+			require.Equal(t, blocks[tc.want].Hash, point.Hash)
+		})
+	}
+
+	txn := db.BlobTxn(false)
+	defer txn.Release()
+	_, err := BlockPointAtOrBeforeSlotBoundedTxn(txn, 9, tipID)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	require.Zero(
+		t,
+		store.reverseIterators,
+		"the bounded at-or-before lookup must not open a reverse blob iterator",
+	)
+}
+
+// TestBlockPointAtOrBeforeSlotBoundedSkipsSparseIndexGap proves the binary
+// search tolerates gaps in the block-ID space, which a Mithril bootstrap or a
+// drain import leaves behind. A probe landing in the gap seeks forward to the
+// next indexed block, so the loop must advance its lower bound past the block
+// it actually read rather than treating the overshoot as a reason to shrink
+// the upper bound: that variant converges into the dense low range and answers
+// a slot above the gap with a block below it. Matches
+// TestBlockByNumberSkipsSparseIndexGap, which pins the same gap for the
+// height search.
+func TestBlockPointAtOrBeforeSlotBoundedSkipsSparseIndexGap(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ids := []uint64{1, 2, 3, 1000, 1001, 1002}
+	blocks := make([]models.Block, 0, len(ids))
+	for i, id := range ids {
+		// #nosec G115 -- fixed small test fixture values.
+		block := testIndexedBlock(id*10, id, byte(i+1))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+	tipID := blocks[len(blocks)-1].ID
+
+	txn := db.BlobTxn(false)
+	defer txn.Release()
+
+	for name, tc := range map[string]struct {
+		slot uint64
+		want int
+	}{
+		"slot above the gap takes the block at it":     {slot: 10_010, want: 4},
+		"empty slot above the gap takes the previous":  {slot: 10_015, want: 4},
+		"slot inside the gap takes the last low block": {slot: 500, want: 2},
+		"slot below the gap takes its own block":       {slot: 20, want: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			point, err := BlockPointAtOrBeforeSlotBoundedTxn(
+				txn,
+				tc.slot,
+				tipID,
+			)
+			require.NoError(t, err)
+			require.Equal(t, blocks[tc.want].Slot, point.Slot)
+			require.Equal(t, blocks[tc.want].Hash, point.Hash)
+		})
+	}
+}
+
+// TestBlockPointAtOrBeforeSlotBoundedHonorsTheBound pins that the bound caps
+// the search: a slot above a lower bound resolves to the bounding block, not
+// to a newer one the blob store still holds.
+func TestBlockPointAtOrBeforeSlotBoundedHonorsTheBound(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := seedSparseChain(t, db)
+
+	txn := db.BlobTxn(false)
+	defer txn.Release()
+	point, err := BlockPointAtOrBeforeSlotBoundedTxn(txn, 10_000, blocks[1].ID)
+	require.NoError(t, err)
+	require.Equal(t, blocks[1].Slot, point.Slot)
+	require.Equal(t, blocks[1].Hash, point.Hash)
 }

@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -130,7 +131,7 @@ func TestProcessEpochRolloverEnactmentFailureRollsBackAndRetries(
 
 	retry := f.proposal(t, failing)
 	retry.ReturnAddress = failingReturn
-	require.NoError(t, f.db.SetGovernanceProposal(retry, nil))
+	require.NoError(t, f.db.SetGovernanceProposal(context.Background(), retry, nil))
 	require.NoError(t, f.db.Metadata().SetNetworkState(
 		70,
 		reserves,
@@ -166,7 +167,9 @@ func TestProcessEpochRolloverEnactmentFailureRollsBackAndRetries(
 		thirdRollover.NewCurrentEpoch.EpochId,
 	)
 	assert.NotNil(t, f.proposal(t, failing).EnactedEpoch)
-	assert.Equal(t, uint64(60), f.accountReward(t, failingCredential))
+	// The retried return account is also the withdrawal destination, so it
+	// receives the 60 withdrawn plus the refunded deposit of 1.
+	assert.Equal(t, uint64(61), f.accountReward(t, failingCredential))
 	assert.Equal(t, uint64(50), f.accountReward(t, succeedingCredential))
 	treasury, _, _ = networkState(t, f.db)
 	assert.Equal(t, uint64(10), treasury)

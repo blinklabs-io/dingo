@@ -39,9 +39,8 @@ import (
 //
 // Returning a port number from a listener that has been closed again would
 // be a race, not a reservation: in the gap anything asking the kernel for an
-// arbitrary port takes it -- including the mithril metrics listener started
-// moments later in this same process, which is what happens when MetricsPort
-// is 0.
+// arbitrary port takes it -- including another test's listener in this same
+// process.
 func heldHealthProbe(t *testing.T, cfg *config.Config) *boundHealthProbe {
 	t.Helper()
 
@@ -240,4 +239,19 @@ func TestMithrilSyncServesHealthProbe(t *testing.T) {
 		"serving health probes on "+probe.listener.Addr().String(),
 		"mithril sync must serve the health probe while it bootstraps",
 	)
+}
+
+// metricsPort 0 disables the Prometheus listener in the bootstrap as it does
+// in serve, rather than binding an ephemeral port nothing scrapes.
+func TestMithrilSyncStartsNoMetricsListenerWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	cfg := &config.Config{BindAddr: "127.0.0.1", MetricsPort: 0}
+	cfg.Mithril.Backend = "not-a-backend"
+
+	err := runMithrilSync(context.Background(), cfg, logger, "preview", nil)
+	require.ErrorContains(t, err, "unsupported Mithril backend")
+	require.NotContains(t, logs.String(), "serving prometheus metrics")
 }

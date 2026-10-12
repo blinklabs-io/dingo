@@ -66,6 +66,11 @@ type connectionInfo struct {
 	isNtC            bool // true for node-to-client (local) connections
 	trustedLocal     bool
 	ipKey            string // rate-limit key (IP or /64 prefix for IPv6)
+	// done is closed by the connection's watcher once it has consumed the
+	// connection's error, so protocol handlers learn of teardown without
+	// receiving from the one-shot error channel themselves.
+	done     chan struct{}
+	closeErr error
 }
 
 type ConnectionManager struct {
@@ -924,6 +929,7 @@ func (c *ConnectionManager) addConnectionImplWithTrust(
 		trustedLocal: trustedLocal,
 		peerAddr:     peerAddr,
 		ipKey:        ipKey,
+		done:         make(chan struct{}),
 	}
 	if isNtC {
 		info.ntcBufferTracker = &ntcBufferTracker{
@@ -945,6 +951,10 @@ func (c *ConnectionManager) addConnectionImplWithTrust(
 		if onClose != nil {
 			defer onClose()
 		}
+		// This watcher is the only receiver of conn.ErrorChan(): the channel
+		// delivers each error to one receiver, so a protocol handler that also
+		// received from it could take the error before this goroutine, which
+		// owns teardown. Handlers wait on info.done instead.
 		var err error
 		if info.ntcBufferTracker != nil {
 			ticker := time.NewTicker(ntcBufferedBytesSampleInterval)
@@ -961,6 +971,8 @@ func (c *ConnectionManager) addConnectionImplWithTrust(
 		} else {
 			err = <-conn.ErrorChan()
 		}
+		info.closeErr = err
+		close(info.done)
 		if info.ntcBufferTracker != nil {
 			info.ntcBufferTracker.close(c)
 		}
@@ -1141,6 +1153,34 @@ func (c *ConnectionManager) GetConnectionById(
 		return info.conn
 	}
 	return nil // nil indicates connection not found
+}
+
+// GetConnectionWithDone returns the connection and a channel closed once the
+// manager has consumed the connection's error, or nil, nil when the connection
+// is not registered.
+func (c *ConnectionManager) GetConnectionWithDone(
+	connId ouroboros.ConnectionId,
+) (*ouroboros.Connection, <-chan struct{}) {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	if info, exists := c.connections[connId]; exists {
+		return info.conn, info.done
+	}
+	return nil, nil
+}
+
+// GetConnectionWithDoneAndError returns the connection, its teardown signal,
+// and an accessor for the error consumed by the manager. Call the accessor
+// after done is closed so the error write is synchronized with the read.
+func (c *ConnectionManager) GetConnectionWithDoneAndError(
+	connId ouroboros.ConnectionId,
+) (*ouroboros.Connection, <-chan struct{}, func() error) {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	if info, exists := c.connections[connId]; exists {
+		return info.conn, info.done, func() error { return info.closeErr }
+	}
+	return nil, nil, nil
 }
 
 // LeiosFetchConnectionIds returns the IDs of connections that currently have a

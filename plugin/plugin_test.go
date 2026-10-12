@@ -571,3 +571,218 @@ func TestStopCapabilityRacingWithResolveUnwindsNewInstance(t *testing.T) {
 		t.Fatalf("racing provider stop count after host stop = %d, want 1", got)
 	}
 }
+
+func TestHostStopWaitsForInFlightStopCapability(t *testing.T) {
+	t.Parallel()
+
+	host := NewHost()
+	stopStarted := make(chan struct{})
+	releaseStop := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseStop) }) }
+	defer release()
+	var stopFinished atomic.Bool
+	stopFailure := errors.New("capability drain failed")
+	if err := Register(host, Descriptor{Capability: CapabilityStorageBlob, Name: "dependency"},
+		func() testConfig { return testConfig{} },
+		func(context.Context, testConfig, testDeps) (string, Instance, error) {
+			return "dependency", Lifecycle{StopFunc: func(context.Context) error {
+				if !stopFinished.Load() {
+					return errors.New("dependency stopped before consumer")
+				}
+				return nil
+			}}, nil
+		}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve[string](context.Background(), host, CapabilityStorageBlob, "dependency", nil, testDeps{}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Register(
+		host,
+		Descriptor{Capability: CapabilityMempool, Name: "blocked"},
+		func() testConfig { return testConfig{} },
+		func(context.Context, testConfig, testDeps) (string, Instance, error) {
+			return "blocked", Lifecycle{
+				StopFunc: func(context.Context) error {
+					close(stopStarted)
+					<-releaseStop
+					stopFinished.Store(true)
+					return stopFailure
+				},
+			}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve[string](
+		context.Background(), host, CapabilityMempool, "blocked", nil, testDeps{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	capStopDone := make(chan error, 1)
+	go func() {
+		capStopDone <- host.StopCapability(context.Background(), CapabilityMempool)
+	}()
+	testutil.RequireReceive(t, stopStarted, 3*time.Second, "provider stop")
+
+	hostStopDone := make(chan error, 1)
+	go func() { hostStopDone <- host.Stop(context.Background()) }()
+
+	select {
+	case <-hostStopDone:
+		t.Fatal("Host.Stop returned while a provider was still being stopped")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	release()
+	if err := testutil.RequireReceive(t, hostStopDone, 3*time.Second, "host stop"); !errors.Is(
+		err,
+		stopFailure,
+	) ||
+		strings.Contains(err.Error(), "dependency stopped") {
+		t.Fatalf("Host.Stop error = %v", err)
+	}
+	if !stopFinished.Load() {
+		t.Fatal("Host.Stop returned before provider teardown completed")
+	}
+	if err := testutil.RequireReceive(t, capStopDone, 3*time.Second, "capability stop"); !errors.Is(
+		err,
+		stopFailure,
+	) {
+		t.Fatal(err)
+	}
+}
+
+func TestHostStopHonorsContextWhileWaitingForStopCapability(t *testing.T) {
+	t.Parallel()
+
+	host := NewHost()
+	dependencyStopStarted := make(chan struct{}, 1)
+	consumerStopStarted := make(chan struct{})
+	consumerFinished := make(chan struct{})
+	releaseConsumerStop := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseConsumer := func() {
+		releaseOnce.Do(func() { close(releaseConsumerStop) })
+	}
+	defer releaseConsumer()
+	var dependencyStoppedAfterConsumer atomic.Bool
+	consumerStopErr := errors.New("consumer stop failed")
+	dependencyStopErr := errors.New("dependency stop failed")
+	err := Register(
+		host,
+		Descriptor{Capability: CapabilityStorageBlob, Name: "dependency"},
+		func() testConfig { return testConfig{} },
+		func(context.Context, testConfig, testDeps) (string, Instance, error) {
+			return "dependency", Lifecycle{StopFunc: func(context.Context) error {
+				select {
+				case <-consumerFinished:
+					dependencyStoppedAfterConsumer.Store(true)
+				default:
+				}
+				dependencyStopStarted <- struct{}{}
+				return dependencyStopErr
+			}}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve[string](
+		context.Background(), host, CapabilityStorageBlob, "dependency", nil, testDeps{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	err = Register(
+		host,
+		Descriptor{Capability: CapabilityMempool, Name: "consumer"},
+		func() testConfig { return testConfig{} },
+		func(context.Context, testConfig, testDeps) (string, Instance, error) {
+			return "consumer", Lifecycle{
+				StopFunc: func(context.Context) error {
+					close(consumerStopStarted)
+					<-releaseConsumerStop
+					close(consumerFinished)
+					return consumerStopErr
+				},
+			}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve[string](
+		context.Background(), host, CapabilityMempool, "consumer", nil, testDeps{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	capStopDone := make(chan error, 1)
+	go func() {
+		capStopDone <- host.StopCapability(
+			context.Background(),
+			CapabilityMempool,
+		)
+	}()
+	testutil.RequireReceive(
+		t,
+		consumerStopStarted,
+		3*time.Second,
+		"consumer provider stop",
+	)
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		50*time.Millisecond,
+	)
+	defer cancel()
+	if err := host.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Host.Stop error = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-dependencyStopStarted:
+		t.Fatal("Host.Stop stopped a dependency before consumer teardown finished")
+	default:
+	}
+
+	releaseConsumer()
+	if err := testutil.RequireReceive(
+		t,
+		capStopDone,
+		3*time.Second,
+		"capability stop",
+	); !errors.Is(err, consumerStopErr) {
+		t.Fatalf("StopCapability error = %v, want consumer stop error", err)
+	}
+	testutil.RequireReceive(
+		t,
+		dependencyStopStarted,
+		3*time.Second,
+		"dependency stop after consumer teardown",
+	)
+	if !dependencyStoppedAfterConsumer.Load() {
+		t.Fatal("dependency stop started before consumer teardown finished")
+	}
+	if err := host.Stop(context.Background()); !errors.Is(err, context.DeadlineExceeded) ||
+		!errors.Is(err, consumerStopErr) || !errors.Is(err, dependencyStopErr) {
+		t.Fatalf(
+			"completed Host.Stop error = %v, want deadline and both provider stop errors",
+			err,
+		)
+	}
+}
+
+func TestHostStopWithExpiredContextAndNoStopCapabilityInFlight(t *testing.T) {
+	t.Parallel()
+
+	host := NewHost()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := host.Stop(ctx); err != nil {
+		t.Fatalf("Host.Stop error = %v, want nil with nothing in flight", err)
+	}
+}

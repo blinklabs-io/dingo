@@ -448,6 +448,45 @@ func TestCommitteeVotingStateRejectsMalformedStoredHashes(t *testing.T) {
 				return err
 			},
 		},
+		{
+			name: "committee member list",
+			mutate: func(t *testing.T, raw *sql.DB) {
+				_, err := raw.Exec(
+					`UPDATE committee_member SET cold_cred_hash = ?`,
+					overlong(cold),
+				)
+				require.NoError(t, err)
+			},
+			lookup: func(p *DingoStateProvider) error {
+				_, err := p.CommitteeMembers()
+				return err
+			},
+		},
+		{
+			name: "committee member list with hash under both tags",
+			mutate: func(t *testing.T, raw *sql.DB) {
+				_, err := raw.Exec(
+					`UPDATE committee_member SET cold_cred_hash = ?`,
+					overlong(cold),
+				)
+				require.NoError(t, err)
+				_, err = raw.Exec(
+					`INSERT INTO committee_member (
+						cold_credential_tag, cold_cred_hash, expires_epoch,
+						term_start_slot, term_start_slot_set, added_slot
+					)
+					SELECT 1 - cold_credential_tag, cold_cred_hash,
+						expires_epoch, term_start_slot, term_start_slot_set,
+						added_slot
+					FROM committee_member`,
+				)
+				require.NoError(t, err)
+			},
+			lookup: func(p *DingoStateProvider) error {
+				_, err := p.CommitteeMembers()
+				return err
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, err := NewDingoStateManager()

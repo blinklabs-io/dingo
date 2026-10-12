@@ -177,7 +177,7 @@ func TestImportLedgerStateFromMithril(t *testing.T) {
 
 	// Verify tip was set
 	store := db.Metadata()
-	txn := db.MetadataTxn(false)
+	txn := db.MetadataTxn(context.Background(), false)
 	defer txn.Release()
 	tip, err := store.GetTip(txn.Metadata())
 	require.NoError(t, err, "getting tip")

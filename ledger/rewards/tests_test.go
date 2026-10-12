@@ -865,7 +865,7 @@ func requireOptimalPoolReward(
 	totalStake uint64,
 ) uint64 {
 	t.Helper()
-	ret, err := optimalPoolRewardChecked(
+	ret := optimalPoolRewardChecked(
 		availableRewards,
 		optimalPoolCount,
 		a0,
@@ -874,8 +874,8 @@ func requireOptimalPoolReward(
 		totalStake,
 		nil,
 	)
-	require.NoError(t, err)
-	return ret
+	require.True(t, ret.IsUint64(), "maxPool' = %s", ret.String())
+	return ret.Uint64()
 }
 
 func requireLeaderReward(

@@ -125,6 +125,7 @@ func openRealDatabase(
 	}
 
 	db, err := database.New(
+		context.Background(),
 		// alonzopparams:word-not-required -- this harness creates the
 		// database it opens, so there is never a pre-gouroboros-v0.205.7
 		// Alonzo protocol-parameter row here to repair from genesis.

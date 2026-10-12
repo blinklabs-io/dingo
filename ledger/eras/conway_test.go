@@ -16,6 +16,7 @@ package eras
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/blinklabs-io/plutigo/builtin"
 	"github.com/blinklabs-io/plutigo/cek"
 	"github.com/blinklabs-io/plutigo/data"
@@ -1287,6 +1289,7 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 		},
 	)
 	require.Error(t, err)
+	require.True(t, IsSemanticRuleValidationError(err))
 
 	var plutusErr conway.PlutusScriptFailedError
 	require.ErrorAs(t, err, &plutusErr)
@@ -1350,8 +1353,41 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 			)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "missing PlutusV1 cost model")
+			assert.False(t, IsSemanticRuleValidationError(err))
 		},
 	)
+
+	t.Run("evaluation context failure stays local", func(t *testing.T) {
+		orig := newEvalContextFunc
+		t.Cleanup(func() { newEvalContextFunc = orig })
+		evalErr := errors.New("evaluation context unavailable")
+		newEvalContextFunc = func(
+			lang.LanguageVersion,
+			cek.ProtoVersion,
+			[]int64,
+		) (*cek.EvalContext, error) {
+			return nil, evalErr
+		}
+		err := ValidateTxConway(
+			tx,
+			0,
+			newMockLedgerState(),
+			&conway.ConwayProtocolParameters{
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: 9,
+				},
+				MaxTxExUnits: lcommon.ExUnits{
+					Steps:  1_000_000,
+					Memory: 1_000_000,
+				},
+				CostModels: map[uint][]int64{
+					0: defaultMachineCostModel(t, lang.LanguageVersionV1),
+				},
+			},
+		)
+		require.ErrorIs(t, err, evalErr)
+		require.False(t, IsSemanticRuleValidationError(err))
+	})
 }
 
 type mockProducedValidityTx struct {
@@ -2187,6 +2223,60 @@ type mainnetFixtureLedgerState struct {
 	*mockLedgerState
 }
 
+type cancelingEvaluationLedgerState struct {
+	mainnetFixtureLedgerState
+	ctx    context.Context
+	cancel context.CancelFunc
+	reads  int
+}
+
+type cancelDuringCekContext struct {
+	checks int
+	limit  int
+	done   chan struct{}
+}
+
+func (*cancelDuringCekContext) Deadline() (time.Time, bool) {
+	return time.Time{}, false
+}
+
+func (c *cancelDuringCekContext) Done() <-chan struct{} { return c.done }
+
+func (c *cancelDuringCekContext) Err() error {
+	c.checks++
+	if c.checks == c.limit {
+		close(c.done)
+	}
+	if c.checks >= c.limit {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (*cancelDuringCekContext) Value(any) any { return nil }
+
+type activeEvaluationLedgerState struct {
+	*mockLedgerState
+	ctx context.Context
+}
+
+func (ls *activeEvaluationLedgerState) EvaluationContext() context.Context {
+	return ls.ctx
+}
+
+func (ls *cancelingEvaluationLedgerState) EvaluationContext() context.Context {
+	return ls.ctx
+}
+
+func (ls *cancelingEvaluationLedgerState) UtxoById(
+	input lcommon.TransactionInput,
+) (lcommon.Utxo, error) {
+	ls.reads++
+	utxo, err := ls.mainnetFixtureLedgerState.UtxoById(input)
+	ls.cancel()
+	return utxo, err
+}
+
 func (mainnetFixtureLedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	if slot < mainnetByronSlots {
 		return time.Unix(
@@ -2294,7 +2384,7 @@ func TestValidateTxPlutusConwayMainnetStorageDecodedUtxos(t *testing.T) {
 				idx,
 			)
 			ls.addUtxo(
-				shelley.NewShelleyTransactionInput(
+				shelley.MustNewShelleyTransactionInput(
 					inputTx.Hash().String(),
 					idx,
 				),
@@ -2524,7 +2614,7 @@ func TestEvaluateTxConwayPreprodFixtures(t *testing.T) {
 				require.NoError(t, err)
 				for idx, output := range inputTx.Outputs() {
 					ls.addUtxo(
-						shelley.NewShelleyTransactionInput(
+						shelley.MustNewShelleyTransactionInput(
 							inputTx.Hash().String(),
 							idx,
 						),
@@ -2633,7 +2723,7 @@ func TestEvaluateTxConwayPreprodSerialiseData(t *testing.T) {
 			inputTx.Hash().String(),
 		)
 		for outputIdx, output := range inputTx.Outputs() {
-			input := shelley.NewShelleyTransactionInput(
+			input := shelley.MustNewShelleyTransactionInput(
 				inputTx.Hash().String(),
 				outputIdx,
 			)
@@ -2871,7 +2961,7 @@ func TestValidateTxPlutusConwayPreviewWithdrawalOracle(t *testing.T) {
 		var output babbage.BabbageTransactionOutput
 		_, err = cbor.Decode(outputCbor, &output)
 		require.NoError(t, err, "decode output %s", ref)
-		input := shelley.NewShelleyTransactionInput(txId, outputIdx)
+		input := shelley.MustNewShelleyTransactionInput(txId, outputIdx)
 		ls.addUtxo(&input, &output)
 	}
 	require.Len(t, ls.utxos, len(tx.Inputs())+len(tx.ReferenceInputs()))
@@ -3066,7 +3156,7 @@ func decodeConwayTreasuryTx(
 	}, input
 }
 
-const conwayExplicitStakeAmount = int64(2_000_000)
+const conwayExplicitStakeAmount = uint64(2_000_000)
 
 // TestConwayTxInfoV3UsesProtocolVersionForExplicitStakeAmounts verifies the
 // PV9/PV10 TxInfo boundary with a V3 script that serialises the translated
@@ -3118,7 +3208,7 @@ func TestConwayTxInfoV3UsesProtocolVersionForExplicitStakeAmounts(
 					major: lcommon.ProtocolVersionPlomin,
 					option: data.NewConstr(
 						0,
-						data.NewInteger(big.NewInt(conwayExplicitStakeAmount)),
+						data.NewInteger(big.NewInt(int64(conwayExplicitStakeAmount))),
 					),
 				},
 			} {
@@ -4242,4 +4332,164 @@ func TestEvaluateTxConwayAllowsPlutusV2WhenNotSynthetic(t *testing.T) {
 	)
 
 	require.NoError(t, err)
+}
+
+// TestEvaluateTxConwayStopsAtTransactionWideBudget evaluates a multi-redeemer
+// transaction with MaxTxExUnits set at, and one step below, the work its
+// scripts consume in total. Each script alone fits either limit, so only a
+// budget shared across the redeemers can refuse the second.
+func TestEvaluateTxConwayStopsAtTransactionWideBudget(t *testing.T) {
+	t.Parallel()
+
+	pp := mainnetFixtureProtocolParams(t)
+	tx, err := conway.NewConwayTransactionFromCbor(
+		readErasFixture(t, mainnetFixtureTxFile),
+	)
+	require.NoError(t, err)
+	ls := mainnetFixtureLedgerState{mockLedgerState: newMockLedgerState()}
+	ls.networkId = uint(lcommon.AddressNetworkMainnet)
+	for _, inputTx := range mainnetFixtureInputTxs(t) {
+		for idx, output := range inputTx.Outputs() {
+			stored, err := gledger.NewTransactionOutputFromCbor(output.Cbor())
+			require.NoError(t, err)
+			ls.addUtxo(
+				shelley.MustNewShelleyTransactionInput(
+					inputTx.Hash().String(),
+					idx,
+				),
+				stored,
+			)
+		}
+	}
+	_, total, perRedeemer, err := EvaluateTxConway(tx, ls, pp)
+	require.NoError(t, err)
+	require.Greater(t, len(perRedeemer), 1, "fixture needs several redeemers")
+
+	atLimit := *pp
+	atLimit.MaxTxExUnits = total
+	_, _, _, err = EvaluateTxConway(tx, ls, &atLimit)
+	require.NoError(t, err, "a transaction using exactly the limit is valid")
+
+	overLimit := *pp
+	overLimit.MaxTxExUnits = lcommon.ExUnits{
+		Memory: total.Memory,
+		Steps:  total.Steps - 1,
+	}
+	_, _, _, err = EvaluateTxConway(tx, ls, &overLimit)
+	require.Error(t, err, "aggregate steps beyond the limit must be refused")
+}
+
+func TestEvaluateTxConwayStopsAfterCanceledInputLookup(t *testing.T) {
+	t.Parallel()
+
+	pp := mainnetFixtureProtocolParams(t)
+	tx, err := conway.NewConwayTransactionFromCbor(
+		readErasFixture(t, mainnetFixtureTxFile),
+	)
+	require.NoError(t, err)
+	require.Greater(t, len(tx.Inputs()), 1, "fixture needs multiple inputs")
+	base := mainnetFixtureLedgerState{mockLedgerState: newMockLedgerState()}
+	base.networkId = uint(lcommon.AddressNetworkMainnet)
+	for _, inputTx := range mainnetFixtureInputTxs(t) {
+		for idx, output := range inputTx.Outputs() {
+			stored, err := gledger.NewTransactionOutputFromCbor(output.Cbor())
+			require.NoError(t, err)
+			base.addUtxo(
+				shelley.MustNewShelleyTransactionInput(inputTx.Hash().String(), idx),
+				stored,
+			)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	ls := &cancelingEvaluationLedgerState{
+		mainnetFixtureLedgerState: base,
+		ctx:                       ctx,
+		cancel:                    cancel,
+	}
+	pending := lcommon.NewBlockLedgerState(ls)
+	predecessor := mockledger.NewTransactionBuilder().WithType(
+		conway.EraIdConway,
+	).WithCertificates(&lcommon.RegistrationCertificate{
+		CertType: uint(lcommon.CertificateTypeRegistration),
+		StakeCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.CredentialHash{0x7f},
+		},
+		Amount: 1,
+	})
+	require.NoError(t, pending.ApplyTransaction(predecessor, pp))
+
+	_, _, _, err = EvaluateTxConway(tx, pending, pp)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, ls.reads)
+}
+
+func TestEvaluateTxConwayCancelsActivePlutusMachine(t *testing.T) {
+	t.Parallel()
+
+	selfApply := &syn.Lambda[syn.DeBruijn]{
+		Body: &syn.Apply[syn.DeBruijn]{
+			Function: &syn.Var[syn.DeBruijn]{Name: 1},
+			Argument: &syn.Var[syn.DeBruijn]{Name: 1},
+		},
+	}
+	term := syn.Term[syn.DeBruijn](&syn.Lambda[syn.DeBruijn]{
+		Body: &syn.Apply[syn.DeBruijn]{
+			Function: selfApply,
+			Argument: selfApply,
+		},
+	})
+	flatProgram, err := syn.Encode(&syn.Program[syn.DeBruijn]{
+		Version: lang.LanguageVersion{1, 1, 0},
+		Term:    term,
+	})
+	require.NoError(t, err)
+	scriptBytes, err := cbor.Encode(flatProgram)
+	require.NoError(t, err)
+	plutusScript := lcommon.PlutusV3Script(scriptBytes)
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: plutusScript.Hash(),
+	}
+	tx := conwayTxInfoCertificateTx(
+		plutusScript,
+		&lcommon.RegistrationCertificate{
+			CertType:        uint(lcommon.CertificateTypeRegistration),
+			StakeCredential: credential,
+			Amount:          conwayExplicitStakeAmount,
+		},
+	)
+	ctx := &cancelDuringCekContext{limit: 64, done: make(chan struct{})}
+	ls := &activeEvaluationLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		ctx:             ctx,
+	}
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: lcommon.ProtocolVersionVanRossem,
+		},
+		CostModels: map[uint][]int64{
+			2: defaultMachineCostModel(t, lang.LanguageVersionV3),
+		},
+		MaxTxExUnits: lcommon.ExUnits{
+			Memory: 10_000_000,
+			Steps:  100_000_000,
+		},
+	}
+	pending := lcommon.NewBlockLedgerState(ls)
+	predecessor := mockledger.NewTransactionBuilder().WithType(
+		conway.EraIdConway,
+	).WithCertificates(&lcommon.RegistrationCertificate{
+		CertType: uint(lcommon.CertificateTypeRegistration),
+		StakeCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.CredentialHash{0x7e},
+		},
+		Amount: 1,
+	})
+	require.NoError(t, pending.ApplyTransaction(predecessor, pp))
+
+	_, _, _, err = EvaluateTxConway(tx, pending, pp)
+	require.ErrorIs(t, err, context.Canceled)
+	require.GreaterOrEqual(t, ctx.checks, ctx.limit)
 }

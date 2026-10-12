@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -47,7 +48,7 @@ func TestFailedEnactmentClearRestoresRatificationOnRollback(t *testing.T) {
 	require.GreaterOrEqual(t, rollbackPoint, originalRatifiedSlot)
 	require.NoError(
 		t,
-		f.db.DeleteGovernanceProposalsAfterSlot(rollbackPoint, nil),
+		f.db.DeleteGovernanceProposalsAfterSlot(context.Background(), rollbackPoint, nil),
 	)
 
 	restored := f.proposal(t, proposal)

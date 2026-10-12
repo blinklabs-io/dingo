@@ -15,9 +15,14 @@
 package sqlstore
 
 import (
+	"fmt"
 	"testing"
 
+	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -122,4 +127,120 @@ func TestGetStakeByPoolsAtSlotCountsDelegationAfterExplicitRedelegation(
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), delegators[string(pool.Bytes())])
 	_ = stakes
+}
+
+func TestEpochBoundaryActivePoolsUseEraSpecificReap(t *testing.T) {
+	t.Parallel()
+	for _, era := range []uint{6, 7} {
+		t.Run(fmt.Sprintf("era_%d", era), func(t *testing.T) {
+			store := newDepositHeldStore(t)
+			depositHeldEpochs(t, store, 2)
+			require.NoError(t, store.SetEpoch(1_000, 1, nil, nil, nil, nil,
+				era, 1, depositHeldEpochLength, nil))
+			pool := depositHeldPoolKey(0xd1)
+			writeDepositHeldCert(t, store, 100, 0,
+				depositHeldRegistration(pool), 0)
+			writeDepositHeldCert(t, store, 200, 0,
+				depositHeldRetirement(pool, 1), 0)
+			ordinary, err := store.GetActivePoolKeyHashesAtSlot(999, nil)
+			require.NoError(t, err)
+			require.Equal(t, [][]byte{pool.Bytes()}, ordinary)
+			boundary, err := store.GetEpochBoundaryActivePoolKeyHashes(
+				999, 1_000, nil)
+			require.NoError(t, err)
+			if era == 7 {
+				require.Empty(t, boundary)
+			} else {
+				require.Equal(t, ordinary, boundary)
+			}
+		})
+	}
+}
+
+func TestBoundarySnapshotUsesEnactedDijkstraProtocolVersion(t *testing.T) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	depositHeldEpochs(t, store, 2)
+	params := mockledger.NewMockConwayProtocolParams()
+	params.ProtocolVersion.Major = 12
+	raw, err := gcbor.Encode(&params)
+	require.NoError(t, err)
+	require.NoError(t, store.SetPParams(raw, 1_000, 1, 6, nil))
+	after, err := boundarySnapshotAfterEnactment(
+		t.Context(), store.writeDB, 1_000)
+	require.NoError(t, err)
+	require.True(t, after, "SNAP precedes incoming era translation")
+}
+
+func TestHistoricalPoolEventsOrderClosureBeforeCertifier(t *testing.T) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	depositHeldEpochs(t, store, 2)
+	pool := depositHeldPoolKey(0xd2)
+	writeDepositHeldCert(t, store, 100, 0, depositHeldRegistration(pool), 0)
+	writeDepositHeldCert(t, store, 400, 1, depositHeldRetirement(pool, 0), 0)
+	_, err := store.writeDB.Exec(`INSERT INTO leios_transaction_context
+		(transaction_id, slot) SELECT id, 200 FROM "transaction"
+		WHERE slot = 400 AND block_index = 1`)
+	require.NoError(t, err)
+	writeDepositHeldCert(t, store, 400, 0, depositHeldRegistration(pool), 0)
+	require.NoError(t, store.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(400, make([]byte, 32)),
+	}, nil))
+	for _, ordered := range []bool{false, true} {
+		var pools [][]byte
+		if ordered {
+			pools, err = store.GetActivePoolKeyHashesOrdered(nil)
+		} else {
+			pools, err = store.GetActivePoolKeyHashesAtSlot(400, nil)
+		}
+		require.NoError(t, err)
+		require.Equal(t, [][]byte{pool.Bytes()}, pools,
+			"ranking registration cancels earlier closure retirement")
+	}
+}
+
+func TestTransactionLedgerContextCanBeReplayed(t *testing.T) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	depositHeldEpochs(t, store, 1)
+	writeDepositHeldCert(t, store, 100, 0,
+		depositHeldRegistration(depositHeldPoolKey(0xd3)), 0)
+	var id int64
+	require.NoError(t, store.writeDB.QueryRow(`SELECT id FROM "transaction"`).Scan(&id))
+	require.NoError(t, recordTransactionLedgerContext(t.Context(), store.writeDB, id, 99))
+	require.NoError(t, recordTransactionLedgerContext(t.Context(), store.writeDB, id, 99))
+}
+
+func TestHistoricalExpirationUsesClosureExecutionSlot(t *testing.T) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	depositHeldEpochs(t, store, 3)
+	pool := depositHeldPoolKey(0xd4)
+	credential := stakeCredential(0xd5)
+	writeDepositHeldCert(t, store, 50, 0, depositHeldRegistration(pool), 0)
+	writeDepositHeldCert(t, store, 100, 0,
+		&lcommon.StakeRegistrationCertificate{
+			CertType:        uint(lcommon.CertificateTypeStakeRegistration),
+			StakeCredential: credential,
+		}, 0)
+	writeDepositHeldCert(t, store, 2_000, 0,
+		&lcommon.StakeDelegationCertificate{
+			CertType:        uint(lcommon.CertificateTypeStakeDelegation),
+			StakeCredential: &credential, PoolKeyHash: pool,
+		}, 0)
+	_, err := store.writeDB.Exec(`INSERT INTO leios_transaction_context
+		(transaction_id, slot) SELECT id, 1999 FROM "transaction"
+		WHERE slot = 2000`)
+	require.NoError(t, err)
+	query, args := activeDelegationSQL(1_999, 1_999)
+	expiration, expirationArgs, err := historicalExpirationSQL(
+		t.Context(), store.writeDB, 1_999, 2, 1)
+	require.NoError(t, err)
+	query += expiration + ` SELECT expiration_epoch FROM historical_expiration`
+	args = append(args, expirationArgs...)
+	var expiry uint64
+	require.NoError(t, store.writeDB.QueryRow(query, args...).Scan(&expiry))
+	require.Equal(t, uint64(2), expiry,
+		"the epoch-1 closure refreshes activity before epoch 2")
 }

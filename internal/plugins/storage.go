@@ -21,10 +21,13 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/plugin"
+	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -38,12 +41,14 @@ type StorageSelections struct {
 // StorageDependencies contains shared application settings injected into
 // storage providers. These settings are deliberately not provider config.
 type StorageDependencies struct {
-	DataDir        string
-	RunMode        string
-	StorageMode    string
-	MaxConnections int
-	Logger         *slog.Logger
-	PromRegistry   prometheus.Registerer
+	// GenesisStakingEmpty certifies that the loaded genesis has no initial staking.
+	GenesisStakingEmpty bool
+	DataDir             string
+	RunMode             string
+	StorageMode         string
+	MaxConnections      int
+	Logger              *slog.Logger
+	PromRegistry        prometheus.Registerer
 	// TracingEnabled is forwarded to metadata.ProviderDependencies; see its
 	// doc comment.
 	TracingEnabled bool
@@ -82,12 +87,13 @@ func ResolveStorage(
 		selections.Metadata.Provider,
 		selections.Metadata.Config,
 		metadata.ProviderDependencies{
-			DataDir:        deps.DataDir,
-			StorageMode:    deps.StorageMode,
-			MaxConnections: deps.MaxConnections,
-			Logger:         deps.Logger,
-			PromRegistry:   deps.PromRegistry,
-			TracingEnabled: deps.TracingEnabled,
+			DataDir:             deps.DataDir,
+			StorageMode:         deps.StorageMode,
+			MaxConnections:      deps.MaxConnections,
+			Logger:              deps.Logger,
+			PromRegistry:        deps.PromRegistry,
+			TracingEnabled:      deps.TracingEnabled,
+			GenesisStakingEmpty: deps.GenesisStakingEmpty,
 		},
 	)
 	if err != nil {
@@ -155,7 +161,7 @@ func OpenDatabase(
 		_ = host.Stop(context.WithoutCancel(ctx))
 		return nil, err
 	}
-	db, err := database.New(dbConfig, stores) //nolint:contextcheck
+	db, err := database.New(ctx, dbConfig, stores) //nolint:contextcheck
 	runtime := &DatabaseRuntime{Database: db, Host: host}
 	if db == nil {
 		closeErr := runtime.Close(context.WithoutCancel(ctx))
@@ -178,4 +184,48 @@ func OpenDatabase(
 		)
 	}
 	return runtime, nil
+}
+
+// GenesisStakingEmpty reports whether a known genesis contains no initial staking.
+func GenesisStakingEmpty(genesis *shelley.ShelleyGenesis) bool {
+	if genesis == nil {
+		return false
+	}
+	if len(genesis.Staking.Pools) != 0 || len(genesis.Staking.Stake) != 0 {
+		return false
+	}
+	extra := genesis.ExtraConfig
+	return extra == nil ||
+		(len(extra.StakePools.Data) == 0 && len(extra.StakeCredentials.Data) == 0)
+}
+
+// ResolveGenesisStakingEmpty certifies staking only from a loaded config or an
+// explicitly selected config path or network. An unspecified genesis remains
+// unverified; a selected config that cannot be loaded returns an error.
+func ResolveGenesisStakingEmpty(
+	config *cardano.CardanoNodeConfig,
+	path, network string,
+	networkMagic uint32,
+) (bool, error) {
+	if config == nil {
+		if path == "" && network == "" && networkMagic != 0 {
+			if known, ok := ouroboros.NetworkByNetworkMagic(networkMagic); ok {
+				network = known.Name
+			}
+		}
+		if path == "" && network == "" {
+			return false, nil
+		}
+		if path == "" {
+			path = cardano.EmbeddedConfigPath(network)
+		}
+		var err error
+		config, err = cardano.LoadCardanoNodeConfigWithFallback(
+			path, network, cardano.EmbeddedConfigFS,
+		)
+		if err != nil {
+			return false, err
+		}
+	}
+	return GenesisStakingEmpty(config.ShelleyGenesis()), nil
 }

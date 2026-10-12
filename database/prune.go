@@ -16,13 +16,48 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 )
+
+// HistoryExpiryCursorSyncKey is the sync_state key holding the slot below
+// which every block has already been expired. The history-expiry pruner
+// resumes its scan there, so a round costs the newly eligible blocks rather
+// than every tombstone left by earlier rounds. A rollback or truncate lowers
+// it to the rollback point, the slot above which replay stores new blocks.
+const HistoryExpiryCursorSyncKey = "history_expiry_cursor"
+
+// lowerHistoryExpiryCursor caps the history-expiry cursor at slot. A cursor
+// at or below slot, or an absent one, is left unchanged: blocks at or below
+// the rollback point survive it, so a routine rollback does not send the
+// pruner back over every expired block.
+func (d *Database) lowerHistoryExpiryCursor(slot uint64, txn *Txn) error {
+	raw, err := d.GetSyncState(HistoryExpiryCursorSyncKey, txn)
+	if err != nil {
+		return fmt.Errorf("read history expiry cursor: %w", err)
+	}
+	if raw == "" {
+		return nil
+	}
+	if cursor, err := strconv.ParseUint(raw, 10, 64); err == nil &&
+		cursor <= slot {
+		return nil
+	}
+	if err := d.SetSyncState(
+		HistoryExpiryCursorSyncKey,
+		strconv.FormatUint(slot, 10),
+		txn,
+	); err != nil {
+		return fmt.Errorf("lower history expiry cursor: %w", err)
+	}
+	return nil
+}
 
 // PruneBlock expires the given block's local CBOR in the blob store after
 // materializing any active UTxOs that still reference it. The block's CBOR
@@ -38,7 +73,9 @@ import (
 // block, and rewrites the UTxO blob entry as raw CBOR (which the resolver
 // treats as the legacy non-offset format). The block expiry marker and all
 // UTxO rewrites happen in a single blob transaction, so the block is
-// never expired while live UTxOs still depend on it.
+// never expired while live UTxOs still depend on it. The cloud plugins apply
+// a transaction's objects one request at a time and apply the marker last,
+// so a concurrent reader or snapshot never sees it ahead of the rewrites.
 //
 // In core storage mode only live (deleted_slot = 0) UTxOs at the slot are
 // considered, because spent UTxOs are hard-deleted by the periodic
@@ -50,7 +87,11 @@ import (
 // expired block without requiring a wrapping archive proxy.
 //
 // Returns the number of UTxOs that were materialized.
-func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
+func (d *Database) PruneBlock(
+	ctx context.Context,
+	slot uint64,
+	hash []byte,
+) (int, error) {
 	// Read UTxO refs for this slot from metadata. This is a separate
 	// transaction so the blob write txn below has a single, simple commit
 	// scope. A UTxO consumed between this read and the blob write is
@@ -58,7 +99,7 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 	// is skipped. Release the read txn as soon as the refs are
 	// materialized so the connection is freed before the blob write txn
 	// and block operations run.
-	mdTxn := d.MetadataTxn(false)
+	mdTxn := d.MetadataTxn(ctx, false)
 	var (
 		utxoRefs []models.UtxoId
 		err      error
@@ -77,9 +118,15 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 		)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	var materialized int
 	blobTxn := d.BlobTxn(true)
 	if err := blobTxn.Do(func(txn *Txn) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		blobStore := txn.BlobStore()
 		if blobStore == nil {
 			return types.ErrBlobStoreUnavailable
@@ -93,11 +140,17 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 			)
 		}
 		for _, ref := range utxoRefs {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			n, err := d.materializeUtxo(txn, slot, hash, blockCbor, ref)
 			if err != nil {
 				return err
 			}
 			materialized += n
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if err := blobStore.TombstoneBlock(txn.Blob(), slot, hash); err != nil {
 			return fmt.Errorf(

@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
@@ -37,6 +38,38 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// reloadOnSignal calls reload for every signal received on sigs until ctx is
+// done. A failed reload is logged and ends nothing: the node keeps running on
+// the credentials it already has.
+func reloadOnSignal(
+	ctx context.Context,
+	sigs <-chan os.Signal,
+	reload func() error,
+	logger *slog.Logger,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sig := <-sigs:
+			logger.Info(
+				"reloading block producer credentials",
+				"component", "node",
+				"signal", sig.String(),
+			)
+			if err := reload(); err != nil {
+				logger.Error(
+					"block producer credential reload failed; keeping the loaded credentials",
+					"component",
+					"node",
+					"error",
+					err,
+				)
+			}
+		}
+	}
+}
 
 func waitForSignalOrError(
 	signalCtx context.Context,
@@ -57,6 +90,57 @@ func waitForSignalOrError(
 	}
 }
 
+// waitForStop is waitForSignalOrError plus the remote lifecycle request that
+// ended the run, if any. endRequests closes the node's request intake and
+// returns the accepted request, so a request is either returned here or
+// refused; Bark keeps serving into shutdown, and a request accepted after this
+// point would never be performed. It is called however the run ended: Node.Run
+// returns nil on the cancellation a request causes, which can reach errChan
+// before the cancellation is observed.
+func waitForStop(
+	signalCtx context.Context,
+	errChan <-chan error,
+	endRequests func() (dingo.ShutdownRequest, bool),
+) (*dingo.ShutdownRequest, bool, error) {
+	err, signaled := waitForSignalOrError(signalCtx, errChan)
+	req, ok := endRequests()
+	if !ok {
+		return nil, signaled, err
+	}
+	return &req, signaled, err
+}
+
+// runRequestedShutdown performs a stop or restart accepted over the remote
+// lifecycle service. The graceful shutdown is abandoned once req.Timeout
+// elapses so the request can never leave the process hanging, and a restart
+// re-executes the process even then.
+func runRequestedShutdown(
+	req dingo.ShutdownRequest,
+	causalErr error,
+	shutdown func() error,
+	reExec func() error,
+) error {
+	done := make(chan error, 1)
+	go func() { done <- shutdown() }()
+	remaining := req.Timeout
+	if !req.Deadline.IsZero() {
+		remaining = max(time.Until(req.Deadline), 0)
+	}
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(remaining):
+		err = fmt.Errorf("graceful shutdown exceeded %s", req.Timeout)
+	}
+	if !req.Restart {
+		return errors.Join(causalErr, err)
+	}
+	if reExecErr := reExec(); reExecErr != nil {
+		return errors.Join(causalErr, err, reExecErr)
+	}
+	return errors.Join(causalErr, err)
+}
+
 func gracefulShutdown(
 	logger *slog.Logger,
 	metricsServer *http.Server,
@@ -66,7 +150,7 @@ func gracefulShutdown(
 	timeout time.Duration,
 ) error {
 	shutdownErr := shutdownNodeResources(
-		metricsServer.Shutdown,
+		optionalShutdown(metricsServer),
 		optionalShutdown(debugServer),
 		optionalShutdown(healthServer),
 		d.Stop,
@@ -104,11 +188,13 @@ func shutdownNodeResources(
 	)
 	defer cancel()
 	var err error
-	if shutdownErr := metricsServerShutdown(shutdownCtx); shutdownErr != nil {
-		err = errors.Join(
-			err,
-			fmt.Errorf("metrics server shutdown: %w", shutdownErr),
-		)
+	if metricsServerShutdown != nil {
+		if shutdownErr := metricsServerShutdown(shutdownCtx); shutdownErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("metrics server shutdown: %w", shutdownErr),
+			)
+		}
 	}
 	if debugServerShutdown != nil {
 		if shutdownErr := debugServerShutdown(shutdownCtx); shutdownErr != nil {
@@ -184,6 +270,24 @@ func serveAuxiliaryListenerOn(
 	}
 }
 
+// newMetricsServer builds the Prometheus listener on its own dedicated
+// mux so pprof or other handlers registered on DefaultServeMux are never
+// exposed, or returns nil when metricsPort is 0.
+func newMetricsServer(cfg *config.Config) *http.Server {
+	if cfg.MetricsPort == 0 {
+		return nil
+	}
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	return &http.Server{
+		Addr:              cfg.MetricsListenAddress(),
+		Handler:           metricsMux,
+		ReadHeaderTimeout: 60 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+}
+
 func newPprofDebugServer(cfg *config.Config) *http.Server {
 	if cfg.DebugPort == 0 {
 		return nil
@@ -201,15 +305,25 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 	}
 }
 
+// nodeHealthChecks is the node's contribution to the probes beyond the tip
+// gap: a stopped slot clock fails liveness, and an unavailable database or a
+// block producer that cannot forge holds readiness.
+func nodeHealthChecks(d *dingo.Node) []health.Check {
+	return []health.Check{
+		{Liveness: true, Fn: d.EventLoopResponsive},
+		{Fn: d.DatabaseReady},
+		{Fn: d.BlockProducerReady},
+	}
+}
+
 // NewHealthServer builds the dedicated liveness/readiness listener, or nil
 // when healthPort is 0.
 //
-// Two properties are load-bearing and are covered by tests:
+// Two properties are covered by tests:
 //
-//  1. It is not gated on storage mode. All three API listeners are started
-//     only when storageMode.IsAPI(), and the shipped docker-compose.yml runs
-//     the default `core` mode, so a probe wired the way the APIs are would be
-//     inert in exactly the configuration the image ships with.
+//  1. It is not gated on storage mode. Client API listeners require
+//     storageMode.IsAPI(), while health probes must remain available in core
+//     mode so an orchestrator can verify node state.
 //  2. It binds cfg.BindAddr, the address the relay and metrics listeners
 //     already use, not the API listeners' loopback-by-default address. A
 //     probe is operational surface: a Docker HEALTHCHECK runs inside the
@@ -227,6 +341,7 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 func NewHealthServer(
 	cfg *config.Config,
 	tipGap health.TipGapFunc,
+	checks ...health.Check,
 ) *http.Server {
 	if cfg.HealthPort == 0 {
 		return nil
@@ -242,7 +357,7 @@ func NewHealthServer(
 			cfg.BindAddr,
 			strconv.FormatUint(uint64(cfg.HealthPort), 10),
 		),
-		Handler:           health.NewMux(tipGap, readyTipGapSlots),
+		Handler:           health.NewMux(tipGap, readyTipGapSlots, checks...),
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -258,6 +373,10 @@ func logStartupConfig(logger *slog.Logger, cfg *config.Config) {
 }
 
 func Run(cfg *config.Config, logger *slog.Logger) error {
+	cfg.ApplyRunModeOverrides(cfg.RunMode)
+	if cfg.RunMode.IsDevMode() {
+		logger.Info("dev mode: forcing API storage and block production")
+	}
 	logStartupConfig(logger, cfg)
 	logger.Debug(
 		fmt.Sprintf("topology: %+v", config.GetTopologyConfig()),
@@ -401,22 +520,18 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.StorageModeAPI,
 		)
 	}
-	// Dev mode always uses API storage for full transaction metadata
-	if cfg.RunMode.IsDevMode() && !storageMode.IsAPI() {
-		logger.Info(
-			"dev mode: overriding storage mode to api",
-			"previous", string(storageMode),
-		)
-		storageMode = dingo.StorageModeAPI
-	}
 	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
+	kupoPort := config.APIPluginPort(cfg.Plugins.API.Kupo)
 	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
 	meshPort := config.APIPluginPort(cfg.Plugins.API.Mesh)
+	mcpPort := config.APIPluginPort(cfg.Plugins.API.Mcp)
 	logger.Info("storage mode",
 		"mode", string(storageMode),
 		"blockfrost", storageMode.IsAPI() && blockfrostPort > 0,
+		"kupo", storageMode.IsAPI() && kupoPort > 0,
 		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
 		"mesh", storageMode.IsAPI() && meshPort > 0,
+		"mcp", mcpPort > 0,
 		"midnight_indexing", cfg.Midnight.Enabled && storageMode.IsAPI(),
 		"midnight_grpc", storageMode.IsAPI() &&
 			cfg.Midnight.ServerEnabled && cfg.Midnight.Port > 0,
@@ -438,25 +553,13 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	// Metrics listener with dedicated mux to avoid exposing
-	// pprof or other handlers registered on DefaultServeMux.
-	metricsMux := http.NewServeMux()
-	metricsMux.Handle("/metrics", promhttp.Handler())
-	metricsAddr := net.JoinHostPort(
-		cfg.BindAddr,
-		strconv.FormatUint(uint64(cfg.MetricsPort), 10),
-	)
-	logger.Info(
-		"serving prometheus metrics on "+metricsAddr,
-		"component",
-		"node",
-	)
-	metricsServer := &http.Server{
-		Addr:              metricsAddr,
-		Handler:           metricsMux,
-		ReadHeaderTimeout: 60 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+	metricsServer := newMetricsServer(cfg)
+	if metricsServer != nil {
+		logger.Info(
+			"serving prometheus metrics on "+metricsServer.Addr,
+			"component",
+			"node",
+		)
 	}
 	// Optional debug listener with pprof handlers, on a separate port from
 	// metrics so monitoring scrapers never see profiling endpoints.
@@ -470,7 +573,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	// Liveness/readiness listener, on a port of its own so an orchestrator
 	// or load balancer can probe the node without being handed the metrics
 	// or pprof surface. Started for every storage mode.
-	healthServer := NewHealthServer(cfg, d.TipGapSlots)
+	healthServer := NewHealthServer(
+		cfg, d.TipGapSlots, nodeHealthChecks(d)...,
+	)
 	if healthServer != nil {
 		logger.Info(
 			"serving health probes on "+healthServer.Addr,
@@ -484,16 +589,30 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		syscall.SIGTERM,
 	)
 	defer signalCtxStop()
+	// A block producer re-reads its credential files on SIGHUP. Relays leave
+	// the signal at its default so their behaviour is unchanged.
+	if cfg.BlockProducer {
+		reloadSigs := make(chan os.Signal, 1)
+		signal.Notify(reloadSigs, syscall.SIGHUP)
+		defer signal.Stop(reloadSigs)
+		go reloadOnSignal(
+			signalCtx, reloadSigs, d.ReloadBlockProducerCredentials, logger,
+		)
+	}
 
 	// Error channel for the node goroutine. The metrics, pprof debug and
 	// health listeners are non-essential observability endpoints; their
 	// bind/serve failures are logged but never queued here, so a port
 	// conflict on them cannot take down the node.
 	errChan := make(chan error, 1)
-	if listener := bindAuxiliaryListener(
-		"metrics", metricsServer, logger,
-	); listener != nil {
-		go serveAuxiliaryListenerOn("metrics", metricsServer, listener, logger)
+	if metricsServer != nil {
+		if listener := bindAuxiliaryListener(
+			"metrics", metricsServer, logger,
+		); listener != nil {
+			go serveAuxiliaryListenerOn(
+				"metrics", metricsServer, listener, logger,
+			)
+		}
 	}
 	if debugServer != nil {
 		if listener := bindAuxiliaryListener(
@@ -511,6 +630,15 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			go serveAuxiliaryListenerOn("health", healthServer, listener, logger)
 		}
 	}
+	// A remote stop or restart ends the run exactly like a signal does;
+	// waitForStop then tells them apart.
+	go func() {
+		select {
+		case <-d.ShutdownRequests():
+			signalCtxStop()
+		case <-signalCtx.Done():
+		}
+	}()
 	go func() {
 		//nolint:contextcheck
 		err := d.Run(signalCtx)
@@ -523,19 +651,29 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		}
 	}()
 
-	// Wait for signal or error
-	err, signaled := waitForSignalOrError(signalCtx, errChan)
-	if signaled {
-		logger.Info("signal received, initiating graceful shutdown")
-
-		if err := gracefulShutdown(
+	// Wait for signal, remote request or error
+	req, signaled, err := waitForStop(signalCtx, errChan, d.EndShutdownRequests)
+	shutdown := func() error {
+		return gracefulShutdown(
 			logger,
 			metricsServer,
 			debugServer,
 			healthServer,
 			d,
 			shutdownTimeout,
-		); err != nil {
+		)
+	}
+	if req != nil {
+		logger.Info(
+			"remote lifecycle request received, initiating graceful shutdown",
+			"restart", req.Restart,
+			"timeout", req.Timeout,
+		)
+		return runRequestedShutdown(*req, err, shutdown, dingo.ReExec)
+	}
+	if signaled {
+		logger.Info("signal received, initiating graceful shutdown")
+		if err := shutdown(); err != nil {
 			return err
 		}
 		logger.Info("shutdown complete")
@@ -544,24 +682,14 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 
 	if err == nil {
 		logger.Info("node stopped")
-		if err := gracefulShutdown(
-			logger,
-			metricsServer,
-			debugServer,
-			healthServer,
-			d,
-			shutdownTimeout,
-		); err != nil {
-			return err
-		}
-		return nil
+		return shutdown()
 	}
 
 	logger.Error("node error", "error", err)
 	signalCtxStop()
 
 	cleanupErr := shutdownNodeResources(
-		metricsServer.Shutdown,
+		optionalShutdown(metricsServer),
 		optionalShutdown(debugServer),
 		optionalShutdown(healthServer),
 		d.Stop,
@@ -614,6 +742,11 @@ func buildDingoConfig(
 	chainsyncStallTimeout time.Duration,
 	chainsyncStrategy chainsync.HeaderSyncStrategy,
 ) dingo.Config {
+	// Validated by config.Validate before the node starts, so a parse
+	// failure here leaves the zero value and selects the default.
+	localStateQueryViewMaxLifetime, _ := time.ParseDuration(
+		cfg.LocalStateQueryViewMaxLifetime,
+	)
 	return dingo.NewConfig(
 		dingo.WithIntersectTip(cfg.IntersectTip),
 		dingo.WithLogger(logger),
@@ -635,12 +768,20 @@ func buildDingoConfig(
 			cfg.Plugins.API.Blockfrost,
 		),
 		dingo.WithPluginSelection(
+			plugin.CapabilityAPIKupo,
+			cfg.Plugins.API.Kupo,
+		),
+		dingo.WithPluginSelection(
 			plugin.CapabilityAPIMesh,
 			cfg.Plugins.API.Mesh,
 		),
 		dingo.WithPluginSelection(
 			plugin.CapabilityAPIUtxorpc,
 			cfg.Plugins.API.Utxorpc,
+		),
+		dingo.WithPluginSelection(
+			plugin.CapabilityAPIMcp,
+			cfg.Plugins.API.Mcp,
 		),
 		dingo.WithNetwork(cfg.Network),
 		dingo.WithNetworkMagic(cfg.NetworkMagic),
@@ -656,8 +797,15 @@ func buildDingoConfig(
 		dingo.WithBarkPort(cfg.BarkPort),
 		dingo.WithBarkHost(cfg.BarkHost),
 		dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
+		dingo.WithBarkArchiveMaxConcurrentFetches(
+			cfg.BarkArchiveMaxConcurrentFetches,
+		),
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
+		),
+		dingo.WithBarkLifecycleEnabled(cfg.BarkLifecycleEnabled),
+		dingo.WithBarkLifecycleOperatorCertificateFingerprints(
+			cfg.BarkLifecycleOperatorCertificateFingerprints,
 		),
 		dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 			Enabled:   cfg.HistoryExpiry.Enabled,
@@ -705,6 +853,7 @@ func buildDingoConfig(
 				RequestTimeout: cfg.TokenRegistry.
 					RequestTimeout,
 				UserAgent: cfg.TokenRegistry.UserAgent,
+				Headers:   cfg.TokenRegistry.HeaderSecrets,
 				MaxBytes:  cfg.TokenRegistry.MaxBytes,
 				MaxDecompressedBytes: cfg.TokenRegistry.
 					MaxDecompressedBytes,
@@ -744,10 +893,14 @@ func buildDingoConfig(
 		dingo.WithRunMode(string(cfg.RunMode)),
 		dingo.WithStartEra(string(cfg.StartEra)),
 		dingo.WithShutdownTimeout(shutdownTimeout),
+		dingo.WithLocalStateQueryViewMaxLifetime(localStateQueryViewMaxLifetime),
 		// Enable metrics with default prometheus registry
 		dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 		dingo.WithTracing(cfg.Tracing),
 		dingo.WithTracingStdout(cfg.TracingStdout),
+		dingo.WithTracingEndpoint(cfg.TracingEndpoint),
+		dingo.WithTracingServiceName(cfg.TracingServiceName),
+		dingo.WithTracingSampleRatio(cfg.TracingSampleRatio),
 		dingo.WithTopologyConfig(config.GetTopologyConfig()),
 		dingo.WithDatabaseWorkerPoolConfig(ledger.DatabaseWorkerPoolConfig{
 			WorkerPoolSize: cfg.DatabaseWorkers,
@@ -863,11 +1016,19 @@ func buildDingoConfig(
 			forgeEBCap(cfg.ForgeEBMaxBytes, config.DefaultForgeEBMaxBytes),
 		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
+		dingo.WithPlannerStatsRefresh(cfg.PlannerStatsRefreshEnabled),
 		// Parallel block-decode pipeline (decode and validate stages). Not
 		// consensus-affecting; off by default.
 		dingo.WithBlockPipelineEnabled(cfg.BlockPipelineEnabled),
 		dingo.WithBlockPipelineValidateEnabled(
 			cfg.BlockPipelineValidateEnabled,
+		),
+		dingo.WithLedgerPrefetchAheadEnabled(cfg.LedgerPrefetchAheadEnabled),
+		dingo.WithLedgerApplyRowBatchingEnabled(
+			cfg.LedgerApplyRowBatchingEnabled,
+		),
+		dingo.WithBlockfetchLowWatermarkEnabled(
+			cfg.BlockfetchLowWatermarkEnabled,
 		),
 		// CIP-0163 reward-account inactivity expiry (consensus-affecting)
 		dingo.WithDelegatorInactivity(

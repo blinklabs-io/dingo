@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/pipeline"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -177,31 +178,8 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 	// confirmed to reproduce the pre-fix hang deterministically.
 	const numBlocks = 4000
 
-	errLog := &capturedErrorLog{}
-	ls := &LedgerState{
-		epochCache: []models.Epoch{
-			{
-				EpochId:       0,
-				StartSlot:     0,
-				LengthInSlots: 432000,
-				Nonce:         nil, // no Praos nonce -- every eta0 lookup fails
-			},
-		},
-		config: LedgerStateConfig{
-			CardanoNodeConfig:            newTestShelleyGenesisCfg(t),
-			Logger:                       errLog.logger(),
-			BlockPipelineValidateEnabled: true,
-		},
-	}
-	ls.metrics.init(prometheus.NewRegistry())
-	ls.publishSnapshotsLocked()
-
-	ls.blockPipeline = pipeline.NewBlockPipeline(
-		pipeline.WithDecodeWorkers(2),
-		pipeline.WithValidateWorkers(2),
-		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
-		pipeline.WithSlotsPerKesPeriod(129600),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+	ls, errLog, stopAndDrain := newNoNonceValidatePipelineLedger(
+		t,
 		// Submit waits once MaxPendingBlocks sequences are outstanding past
 		// the last completed one, and completion stalls while nothing reads
 		// Results(), so the default 2160 would block Submit before errorsChan
@@ -209,10 +187,6 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 		// can stop this batch.
 		pipeline.WithMaxPendingBlocks(0),
 	)
-	require.NoError(t, ls.blockPipeline.Start(t.Context()))
-	ls.blockPipelineErrorsDone = make(chan struct{})
-	go ls.drainBlockPipelineErrors()
-	stopAndDrain := stopAndDrainBlockPipeline(t, ls)
 	defer stopAndDrain()
 
 	rawBatch := buildNoNonceValidateBatch(t, numBlocks)
@@ -225,8 +199,7 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 		// Results() entry once it sees the first validation failure rather
 		// than stopping early -- see its doc comment), but the interesting
 		// part is that every one of numBlocks Submit() calls completed
-		// without blocking forever, since decodeReadChainBatch submits the
-		// entire batch before it starts draining Results().
+		// without blocking forever on the errors channel.
 		_, _ = ls.decodeReadChainBatch(t.Context(), rawBatch)
 	}()
 
@@ -269,6 +242,264 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 		promtestutil.ToFloat64(ls.metrics.blockPipelineExpectedEta0Errors),
 		"every block's eta0-unavailable error should have been drained and counted",
 	)
+}
+
+// newNoNonceValidatePipelineLedger returns a LedgerState whose started block
+// pipeline, built with opts appended to the defaults, validates blocks
+// against an epoch with no cached Praos nonce, so every eta0 lookup fails.
+// It also returns the captured error log and an idempotent function that
+// stops the pipeline and waits for its error drain; see
+// stopAndDrainBlockPipeline.
+func newNoNonceValidatePipelineLedger(
+	t *testing.T,
+	opts ...pipeline.PipelineOption,
+) (*LedgerState, *capturedErrorLog, func()) {
+	t.Helper()
+	errLog := &capturedErrorLog{}
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 432000,
+				Nonce:         nil,
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig:            newTestShelleyGenesisCfg(t),
+			Logger:                       errLog.logger(),
+			BlockPipelineValidateEnabled: true,
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.publishSnapshotsLocked()
+
+	ls.blockPipeline = pipeline.NewBlockPipeline(
+		append([]pipeline.PipelineOption{
+			pipeline.WithDecodeWorkers(2),
+			pipeline.WithValidateWorkers(2),
+			pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
+			pipeline.WithSlotsPerKesPeriod(129600),
+			pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+		}, opts...)...,
+	)
+	require.NoError(t, ls.blockPipeline.Start(t.Context()))
+	ls.blockPipelineErrorsDone = make(chan struct{})
+	go ls.drainBlockPipelineErrors()
+	return ls, errLog, stopAndDrainBlockPipeline(t, ls)
+}
+
+type decodeBatchResult struct {
+	decoded []gledger.Block
+	err     error
+}
+
+// goDecodeBatch runs decodeReadChainBatchWithError in a goroutine and
+// returns the channel its result arrives on.
+func goDecodeBatch(
+	t *testing.T,
+	ls *LedgerState,
+	rawBatch []models.Block,
+) <-chan decodeBatchResult {
+	t.Helper()
+	done := make(chan decodeBatchResult, 1)
+	go func() {
+		decoded, err := ls.decodeReadChainBatchWithError(t.Context(), rawBatch)
+		done <- decodeBatchResult{decoded: decoded, err: err}
+	}()
+	return done
+}
+
+// TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks submits more
+// validation-failing blocks than the pipeline's default MaxPendingBlocks.
+// Submit waits for completions that only happen once Results() is consumed,
+// so decodeReadChainBatch must read results while it is still submitting
+// rather than after the whole batch is in.
+func TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const numBlocks = pipeline.DefaultMaxPendingBlocks * 2
+
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+
+	res := testutil.RequireReceive(
+		t,
+		goDecodeBatch(t, ls, buildNoNonceValidateBatch(t, numBlocks)),
+		testutil.AsyncWait,
+		"decodeReadChainBatch blocked in Submit on a batch larger than "+
+			"MaxPendingBlocks while Results() was unread",
+	)
+	// Returning is not enough: a Submit failure after a prefix also returns.
+	// Every block's eta0 lookup fails as deferred, so the whole batch must
+	// come back decoded.
+	require.NoError(t, res.err)
+	require.Len(t, res.decoded, numBlocks)
+}
+
+// TestDecodeReadChainBatchSubmitErrorDrainsSubmittedResults fails Submit
+// after a prefix of the batch went in. The prefix's results must be read off
+// the shared results channel before the error is returned; otherwise the next
+// call would take them for its own submissions.
+func TestDecodeReadChainBatchSubmitErrorDrainsSubmittedResults(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const submitOK = 5
+	errSubmit := errors.New("injected submit failure")
+
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+
+	calls := 0
+	ls.blockPipelineSubmit = func(
+		ctx context.Context,
+		blockType uint,
+		rawCbor []byte,
+		tip ocommon.Tip,
+	) error {
+		calls++
+		if calls > submitOK {
+			return errSubmit
+		}
+		return ls.blockPipeline.Submit(ctx, blockType, rawCbor, tip)
+	}
+
+	res := testutil.RequireReceive(
+		t,
+		goDecodeBatch(t, ls, buildNoNonceValidateBatch(t, submitOK+3)),
+		testutil.AsyncWait,
+		"decodeReadChainBatch did not return after a Submit error",
+	)
+	require.ErrorIs(t, res.err, errSubmit)
+	require.Nil(t, res.decoded)
+
+	// A fresh submission must come back as the first result: anything left
+	// over from the failed batch would be read here instead.
+	probe := buildNoNonceValidateBatch(t, submitOK+1)[submitOK]
+	require.NoError(t, ls.blockPipeline.Submit(
+		t.Context(),
+		probe.Type,
+		probe.Cbor,
+		ocommon.Tip{
+			Point:       ocommon.NewPoint(probe.Slot, probe.Hash),
+			BlockNumber: probe.Number,
+		},
+	))
+	item := testutil.RequireReceive(
+		t,
+		ls.blockPipeline.Results(),
+		testutil.AsyncWait,
+		"probe block result",
+	)
+	require.NoError(t, item.DecodeError())
+	require.Equal(t, probe.Slot, item.Block().SlotNumber())
+}
+
+// TestDecodeReadChainBatchSubmitErrorDrainTimesOut fails Submit after a
+// prefix whose results never arrive, as when a fatal apply-stage error
+// cancels the pipeline without closing Results(). The drain of that prefix
+// must give up after CloseBlockPipelineDrainTimeout instead of blocking.
+//
+// Not t.Parallel: shrinks the package-level CloseBlockPipelineDrainTimeout.
+func TestDecodeReadChainBatchSubmitErrorDrainTimesOut(t *testing.T) {
+	orig := CloseBlockPipelineDrainTimeout
+	CloseBlockPipelineDrainTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { CloseBlockPipelineDrainTimeout = orig })
+
+	errSubmit := errors.New("injected submit failure")
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+
+	calls := 0
+	ls.blockPipelineSubmit = func(
+		context.Context,
+		uint,
+		[]byte,
+		ocommon.Tip,
+	) error {
+		calls++
+		if calls > 1 {
+			return errSubmit
+		}
+		// Reported as submitted, but nothing reaches the pipeline, so its
+		// result never arrives.
+		return nil
+	}
+
+	res := testutil.RequireReceive(
+		t,
+		goDecodeBatch(t, ls, buildNoNonceValidateBatch(t, 3)),
+		testutil.AsyncWait,
+		"drain after a Submit error did not time out",
+	)
+	require.ErrorIs(t, res.err, errSubmit)
+	require.ErrorContains(
+		t,
+		res.err,
+		"drain submitted block pipeline results: timeout",
+	)
+	require.Nil(t, res.decoded)
+}
+
+// TestDecodeReadChainBatchJoinsSubmitterOnReturn returns from the batch call
+// while its submitting goroutine is blocked inside Submit, by stopping the
+// pipeline (which closes Results()). The call must cancel the submit context
+// and not return until the goroutine has exited.
+func TestDecodeReadChainBatchJoinsSubmitterOnReturn(t *testing.T) {
+	t.Parallel()
+
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	var exited atomic.Bool
+	var proceedOnce sync.Once
+	release := func() { proceedOnce.Do(func() { close(proceed) }) }
+	defer release()
+	ls.blockPipelineSubmit = func(
+		ctx context.Context,
+		_ uint,
+		_ []byte,
+		_ ocommon.Tip,
+	) error {
+		close(entered)
+		<-ctx.Done() // only returns if the batch call cancels its context
+		<-proceed
+		exited.Store(true)
+		return ctx.Err()
+	}
+
+	done := goDecodeBatch(t, ls, buildNoNonceValidateBatch(t, 3))
+	testutil.RequireReceive(
+		t,
+		entered,
+		testutil.AsyncWait,
+		"submitter did not start",
+	)
+	stopAndDrain()
+
+	// The submitter is parked until proceed is closed, so a call that
+	// returns now has not joined it.
+	testutil.RequireNoReceive(
+		t,
+		done,
+		200*time.Millisecond,
+		"decodeReadChainBatch returned before its submitter exited",
+	)
+	release()
+	res := testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"decodeReadChainBatch did not cancel its submit context",
+	)
+	require.Error(t, res.err)
+	require.True(t, exited.Load(), "submitter must have exited at return")
 }
 
 // stopAndDrainBlockPipeline returns an idempotent function that stops ls's

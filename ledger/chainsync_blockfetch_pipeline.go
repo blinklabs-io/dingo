@@ -227,19 +227,21 @@ func (ls *LedgerState) tryPromoteQueuedBlockfetchLocked() bool {
 		ls.chainsyncBlockfetchTimeoutTimer.Stop()
 		ls.chainsyncBlockfetchTimeoutTimer = nil
 	}
+	ls.activeBlockfetchTimeout = 0
 	ls.chainsyncBlockfetchTimerGeneration++
 	ls.chainsyncBlockfetchReadyMutex.Lock()
 	if ls.chainsyncBlockfetchReadyChan != nil {
 		close(ls.chainsyncBlockfetchReadyChan)
 	}
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.metrics.setBatchInFlight(true)
 	ls.chainsyncBlockfetchReadyMutex.Unlock()
 	ls.activeBlockfetchConnId = next.connId
 	ls.activeBlockfetchRequestDone = next.done
 	ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.shadowBlockfetchRequestDone = nil
 	ls.shadowBlockReceivedHashes = nil
-	ls.batchBlocksReceived = 0
+	ls.resetBatchDeliveryLocked()
 	ls.batchBlocksApplied = 0
 	ls.blockfetchBatchRollbackGeneration = next.rollbackGeneration
 	ls.blockfetchBatchChainGeneration = next.chainGeneration
@@ -256,6 +258,16 @@ func (ls *LedgerState) tryPromoteQueuedBlockfetchLocked() bool {
 		"header_start_slot", next.headerStart.Slot,
 		"header_end_slot", next.headerEnd.Slot,
 	)
+	// The top-up pins the following window to this connection, so it is
+	// where the selection policy gets its say during deep catch-up. When it
+	// prefers another peer, leave the pipeline empty: the promoted batch
+	// drains here and the continuation after it hands the queue over.
+	if !sameConnectionId(
+		ls.selectBlockfetchConnForWindow(next.connId, next.headerCount),
+		next.connId,
+	) {
+		return true
+	}
 	batchReadyChan := ls.chainsyncBlockfetchReadyChan
 	ls.startQueuedBlockfetchPrefetchLocked(
 		next.connId,

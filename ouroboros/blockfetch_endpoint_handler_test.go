@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -67,16 +68,24 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 			blocks, err := testfixtures.GenerateConwayChain(3)
 			require.NoError(t, err)
 			for _, block := range blocks {
-				require.NoError(t, ledgerState.Chain().AddBlock(block, nil))
+				require.NoError(
+					t,
+					ledgerState.Chain().
+						AddBlock(context.Background(), block, nil),
+				)
 			}
 			// Keep block 1 as an actual rolled-back point. Chain.FromPoint
 			// rejects this point through its membership check even though
 			// BlockByPoint can still resolve the historical block from the
 			// manager cache.
-			require.NoError(t, ledgerState.Chain().Rollback(ocommon.NewPoint(
-				blocks[0].SlotNumber(),
-				blocks[0].Hash().Bytes(),
-			)))
+			require.NoError(
+				t,
+				ledgerState.Chain().
+					Rollback(context.Background(), ocommon.NewPoint(
+						blocks[0].SlotNumber(),
+						blocks[0].Hash().Bytes(),
+					)),
+			)
 
 			point := func(index int) ocommon.Point {
 				return ocommon.NewPoint(
@@ -120,14 +129,14 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 				t.Helper()
 				peer.send(t, oblockfetch.ProtocolId,
 					oblockfetch.NewMsgRequestRange(start, validEnd))
-				protocolId, payload := peer.readMessage(t, 5*time.Second)
+				protocolId, payload := peer.readMessage(t, testutil.AsyncWait)
 				require.Equal(t, oblockfetch.ProtocolId, protocolId)
 				require.Equal(
 					t,
 					[]byte{0x81, oblockfetch.MessageTypeStartBatch},
 					payload,
 				)
-				protocolId, payload = peer.readMessage(t, 5*time.Second)
+				protocolId, payload = peer.readMessage(t, testutil.AsyncWait)
 				require.Equal(t, oblockfetch.ProtocolId, protocolId)
 				var msg oblockfetch.MsgBlock
 				_, err := cbor.Decode(payload, &msg)
@@ -142,7 +151,7 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 				)
 				require.NoError(t, err)
 				require.Equal(t, wrapped, msg.WrappedBlock)
-				protocolId, payload = peer.readMessage(t, 5*time.Second)
+				protocolId, payload = peer.readMessage(t, testutil.AsyncWait)
 				require.Equal(t, oblockfetch.ProtocolId, protocolId)
 				require.Equal(
 					t,
@@ -156,7 +165,7 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 				oblockfetch.ProtocolId,
 				oblockfetch.NewMsgRequestRange(start, invalidEnd),
 			)
-			protocolId, payload := peer.readMessage(t, 5*time.Second)
+			protocolId, payload := peer.readMessage(t, testutil.AsyncWait)
 			require.Equal(t, oblockfetch.ProtocolId, protocolId)
 			require.Equal(
 				t,
@@ -205,7 +214,7 @@ func newRegisteredBlockfetchServerPeer(
 	}()
 	peer.send(t, handshake.ProtocolId,
 		ouroboros_mock.ConversationEntryHandshakeRequestOutput.Messages[0])
-	protocolId, payload := peer.readMessage(t, 5*time.Second)
+	protocolId, payload := peer.readMessage(t, testutil.AsyncWait)
 	require.Equal(t, uint16(handshake.ProtocolId), protocolId)
 	var accepted handshake.MsgAcceptVersion
 	_, err = cbor.Decode(payload, &accepted)

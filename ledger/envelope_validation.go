@@ -489,13 +489,8 @@ func validateBlockSizes(
 			pparams,
 		)
 	}
-	headerCbor := block.Header().Cbor()
-	if uint64(len(headerCbor)) > limits.maxHeaderSize {
-		return fmt.Errorf(
-			"block header size %d exceeds maxBlockHeaderSize %d",
-			len(headerCbor),
-			limits.maxHeaderSize,
-		)
+	if err := limits.checkHeaderSize(block.Header()); err != nil {
+		return err
 	}
 	actualBodySize, err := serializedBlockBodySize(block)
 	if err != nil {
@@ -509,11 +504,26 @@ func validateBlockSizes(
 			actualBodySize,
 		)
 	}
-	if actualBodySize > limits.maxBodySize {
+	return limits.checkBodySize(actualBodySize)
+}
+
+func (l blockProtocolLimits) checkHeaderSize(header gledger.BlockHeader) error {
+	if size := uint64(len(header.Cbor())); size > l.maxHeaderSize {
+		return fmt.Errorf(
+			"block header size %d exceeds maxBlockHeaderSize %d",
+			size,
+			l.maxHeaderSize,
+		)
+	}
+	return nil
+}
+
+func (l blockProtocolLimits) checkBodySize(size uint64) error {
+	if size > l.maxBodySize {
 		return fmt.Errorf(
 			"block body size %d exceeds maxBlockBodySize %d",
-			actualBodySize,
-			limits.maxBodySize,
+			size,
+			l.maxBodySize,
 		)
 	}
 	return nil

@@ -86,33 +86,62 @@ func (cs *ChainSelector) peerCanCorroborateLocked(
 	return cs.peerLiveEligibleNonStaleLocked(connId, peerTip)
 }
 
-// corroboratorIdentity returns a coarse peer identity (remote host, without
-// port) used to de-duplicate corroboration witnesses. Counting raw connection
-// IDs would let several connections from one operator corroborate each other, so
-// witnesses are grouped by remote host. This is a lower bound on independence,
-// not a guarantee: true independence (distinct operators, ASNs, chain views)
-// depends on the operator's topology and diversity groups in peer governance.
-func corroboratorIdentity(connId ouroboros.ConnectionId) string {
+// corroboratorIdentity returns the independence group used to de-duplicate
+// corroboration witnesses, and whether the connection could be placed in one.
+// With a PeerIdentity hook configured the group is the one it reports, which
+// the node backs with peer governance's diversity group, so one operator's
+// several addresses count once. A connection the hook cannot place has no
+// identity: keying it by remote host instead would put it in a different
+// namespace from its siblings, so an untracked connection and its tracked
+// siblings would count as independent of each other. Without a hook,
+// witnesses are grouped by remote host. Either is a lower bound on
+// independence, not a guarantee.
+func (cs *ChainSelector) corroboratorIdentity(
+	connId ouroboros.ConnectionId,
+) (string, bool) {
+	if cs.config.PeerIdentity != nil {
+		id := cs.config.PeerIdentity(connId)
+		return id, id != ""
+	}
 	if connId.RemoteAddr == nil {
-		return connId.String()
+		return connId.String(), true
 	}
 	addr := connId.RemoteAddr.String()
 	if host, _, err := net.SplitHostPort(addr); err == nil && host != "" {
-		return host
+		return host, true
 	}
-	return addr
+	return addr, true
+}
+
+// witnessSupportsSuffixLocked checks that the witness's delivered block number
+// is consistent with the candidate's current point within k blocks. The point
+// itself must match in confirmsRecentChain. Keepalive activity does not advance
+// this delivered frontier.
+func (cs *ChainSelector) witnessSupportsSuffixLocked(
+	candidateTip *PeerChainTip,
+	witnessTip *PeerChainTip,
+) bool {
+	return safeAddUint64(
+		witnessTip.SelectionTip().BlockNumber,
+		cs.securityParam,
+	) >= candidateTip.SelectionTip().BlockNumber
 }
 
 // corroboratingPeersLocked counts the distinct witness identities whose chain
-// confirms the candidate's recent chain within the Genesis window. Witnesses are
-// de-duplicated by remote host, and any witness sharing the candidate's own host
-// is excluded, so a Sybil fast source opening several connections cannot
-// self-corroborate.
+// confirms the candidate's recent chain within the Genesis window and reaches
+// its suffix. Any witness sharing the candidate's own identity is excluded, so
+// a Sybil fast source opening several connections cannot self-corroborate.
+// A candidate or witness without an identity fails closed: the candidate has
+// no corroborators and the witness does not count.
 func (cs *ChainSelector) corroboratingPeersLocked(
 	candidate ouroboros.ConnectionId,
 	candidateTip *PeerChainTip,
 ) int {
 	if candidateTip == nil {
+		return 0
+	}
+	candidateIdentity, ok := cs.corroboratorIdentity(candidate)
+	if !ok {
 		return 0
 	}
 	witnesses := make(map[string]struct{})
@@ -123,14 +152,35 @@ func (cs *ChainSelector) corroboratingPeersLocked(
 		if !cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
-		if candidateTip.confirmsRecentChain(peerTip) {
-			witnesses[corroboratorIdentity(connId)] = struct{}{}
+		if !candidateTip.confirmsRecentChain(peerTip) ||
+			!cs.witnessSupportsSuffixLocked(candidateTip, peerTip) {
+			continue
 		}
+		identity, ok := cs.corroboratorIdentity(connId)
+		if !ok || identity == candidateIdentity {
+			continue
+		}
+		witnesses[identity] = struct{}{}
 	}
-	// A witness on the candidate's own host is the same operator; it cannot
-	// count as independent corroboration.
-	delete(witnesses, corroboratorIdentity(candidate))
 	return len(witnesses)
+}
+
+// frontierTrustedLocked reports whether a peer's delivered frontier may be used
+// to exclude other candidates as behind. In Genesis mode the peer must be live,
+// eligible and fresh and its chain must be corroborated by at least
+// MinCorroboratingPeers independent witnesses, and by one even when the
+// threshold is 0, so a single peer cannot define the frontier. Outside Genesis
+// every eligible, non-stale peer's frontier counts.
+func (cs *ChainSelector) frontierTrustedLocked(
+	connId ouroboros.ConnectionId,
+	peerTip *PeerChainTip,
+) bool {
+	if cs.mode != SelectionModeGenesis {
+		return cs.isConnectionEligible(connId) && !cs.isPeerTipStale(peerTip)
+	}
+	return cs.peerLiveEligibleNonStaleLocked(connId, peerTip) &&
+		cs.corroboratingPeersLocked(connId, peerTip) >=
+			max(1, cs.config.MinCorroboratingPeers)
 }
 
 // isPeerCorroboratedLocked reports whether a peer may drive Genesis chain
@@ -306,7 +356,6 @@ func (cs *ChainSelector) GenesisStatus() GenesisStatus {
 			Selectable: cs.isPeerSelectableLocked(
 				connId,
 				peerTip,
-				false,
 			),
 		})
 	}

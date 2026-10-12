@@ -16,6 +16,7 @@ package chain
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -64,17 +65,23 @@ func EraIdForBlockType(blockType uint) (uint8, bool) {
 // this chain's last queued header or its tip block, the two parents a header
 // can be admitted onto. found is false for any other hash, including one
 // naming a block this chain holds further back.
-func (c *Chain) ParentEra(prevHash []byte) (uint8, bool, error) {
+func (c *Chain) ParentEra(
+	ctx context.Context,
+	prevHash []byte,
+) (uint8, bool, error) {
 	if c == nil {
 		return 0, false, nil
 	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	return c.parentEraLocked(prevHash)
+	return c.parentEraLocked(ctx, prevHash)
 }
 
 // parentEraLocked implements ParentEra. The caller must hold c.mutex.
-func (c *Chain) parentEraLocked(prevHash []byte) (uint8, bool, error) {
+func (c *Chain) parentEraLocked(
+	ctx context.Context,
+	prevHash []byte,
+) (uint8, bool, error) {
 	if n := len(c.headers); n > 0 &&
 		bytes.Equal(c.headers[n-1].point.Hash, prevHash) {
 		return c.headers[n-1].header.Era().Id, true, nil
@@ -85,7 +92,7 @@ func (c *Chain) parentEraLocked(prevHash []byte) (uint8, bool, error) {
 	}
 	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
 	defer unlockBlockIndexReadLocks()
-	tipBlock, err := c.blockByIndexLocked(c.tipBlockIndex)
+	tipBlock, err := c.blockByIndexLocked(ctx, c.tipBlockIndex)
 	if err != nil {
 		return 0, false, fmt.Errorf("load chain tip block: %w", err)
 	}

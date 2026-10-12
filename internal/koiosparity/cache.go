@@ -255,16 +255,17 @@ type KoiosAccountZeroRewardSummary struct {
 
 // CheckEpochStatus stores the last check result for an epoch.
 type CheckEpochStatus struct {
-	ID             uint
-	Network        string
-	Epoch          uint64
-	LastCheckedAt  time.Time
-	Status         string // PASS, FAIL, ERROR; merged across both phases
-	MismatchCount  int    // merged across both phases
-	DingoPoolCount int
-	KoiosPoolCount int
-	OnlyDingoPools string // JSON array of pool IDs
-	OnlyKoiosPools string // JSON array of pool IDs
+	ID                       uint
+	Network                  string
+	Epoch                    uint64
+	LastCheckedAt            time.Time
+	Status                   string // PASS, FAIL, ERROR; merged across both phases
+	MismatchCount            int    // merged across both phases
+	SignificantMismatchCount int    // non-informational mismatches across both phases
+	DingoPoolCount           int
+	KoiosPoolCount           int
+	OnlyDingoPools           string // JSON array of pool IDs
+	OnlyKoiosPools           string // JSON array of pool IDs
 
 	// AggregateStatus and AccountStatus record each check phase's own outcome
 	// so the merged Status above can be recomputed from them rather than
@@ -280,10 +281,12 @@ type CheckEpochStatus struct {
 	// An empty status means that phase has not run for this epoch. It
 	// contributes nothing to the merge and is left untouched by the other
 	// phase's writes.
-	AggregateStatus        string
-	AggregateMismatchCount int
-	AccountStatus          string
-	AccountMismatchCount   int
+	AggregateStatus                   string
+	AggregateMismatchCount            int
+	AggregateSignificantMismatchCount int
+	AccountStatus                     string
+	AccountMismatchCount              int
+	AccountSignificantMismatchCount   int
 }
 
 // MergeCheckStatus reduces the aggregate and account phase statuses to the
@@ -1754,6 +1757,60 @@ func (c *Cache) GetEpochsMissingParams(
 	return result, rows.Err()
 }
 
+// RecordObserverError makes a queue's failed fetch/check retryable after restart
+// without replacing prior comparison evidence or the other queue's verdict.
+// A first error leaves the check timestamp zero because no comparison ran.
+func (c *Cache) RecordObserverError(
+	network string,
+	epoch uint64,
+	accounts bool,
+) error {
+	column, otherColumn := "aggregate_status", "account_status"
+	aggregateStatus, accountStatus := StatusError, ""
+	if accounts {
+		column, otherColumn = otherColumn, column
+		aggregateStatus, accountStatus = "", StatusError
+	}
+	return c.withClaimedSource(network, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`INSERT INTO check_epoch_status
+			(network, epoch, last_checked_at, status, mismatch_count,
+			 dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools,
+			 aggregate_status, account_status)
+			VALUES (?, ?, ?, ?, 0, 0, 0, '', '', ?, ?)
+			ON CONFLICT(network, epoch) DO UPDATE SET
+			 `+column+`='`+StatusError+`',
+			 status=CASE WHEN `+otherColumn+`='`+StatusFail+`'
+			 THEN '`+StatusFail+`' ELSE '`+StatusError+`' END`,
+			network, epoch, time.Time{}, StatusError,
+			aggregateStatus, accountStatus,
+		)
+		return err
+	})
+}
+
+// GetEpochsNeedingRetry returns ERROR epochs belonging to one observer queue.
+// Freshness-based CLI selection remains separate from the observer retry policy.
+func (c *Cache) GetEpochsNeedingRetry(network string, accounts bool) ([]uint64, error) {
+	column := "aggregate_status"
+	if accounts {
+		column = "account_status"
+	}
+	rows, err := c.db.Query("SELECT epoch FROM check_epoch_status WHERE network = ? AND "+column+" = ? ORDER BY epoch", network, StatusError)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var epochs []uint64
+	for rows.Next() {
+		var epoch uint64
+		if err := rows.Scan(&epoch); err != nil {
+			return nil, err
+		}
+		epochs = append(epochs, epoch)
+	}
+	return epochs, rows.Err()
+}
+
 // GetUncachedEpochs returns epoch numbers in [from, through] (inclusive) that
 // are NOT yet complete in the cache for the given network. This is used by Fetch
 // to fill holes left by prior failed or interrupted runs rather than naively
@@ -1811,6 +1868,8 @@ func (c *Cache) GetUncachedEpochs(
 const (
 	keptAccountStatus = `CASE WHEN excluded.account_status <> '' ` +
 		`THEN excluded.account_status ELSE check_epoch_status.account_status END`
+	keptAccountSignificantCount = `CASE WHEN excluded.account_status <> '' ` +
+		`THEN excluded.account_significant_mismatch_count ELSE check_epoch_status.account_significant_mismatch_count END`
 	keptAccountCount = `CASE WHEN excluded.account_status <> '' ` +
 		`THEN excluded.account_mismatch_count ELSE check_epoch_status.account_mismatch_count END`
 )
@@ -1826,8 +1885,8 @@ const (
 var upsertCheckEpochStatusSQL = `INSERT INTO check_epoch_status
 		(network, epoch, last_checked_at, status, mismatch_count, dingo_pool_count,
 		 koios_pool_count, only_dingo_pools, only_koios_pools,
-		 aggregate_status, aggregate_mismatch_count, account_status, account_mismatch_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 aggregate_status, aggregate_mismatch_count, account_status, account_mismatch_count, significant_mismatch_count, aggregate_significant_mismatch_count, account_significant_mismatch_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(network, epoch) DO UPDATE SET
 			last_checked_at=excluded.last_checked_at,
 			dingo_pool_count=excluded.dingo_pool_count,
@@ -1844,7 +1903,10 @@ var upsertCheckEpochStatusSQL = `INSERT INTO check_epoch_status
 				WHEN excluded.aggregate_status = '` + StatusError + `'
 					OR ` + keptAccountStatus + ` = '` + StatusError + `' THEN '` + StatusError + `'
 				ELSE '` + StatusPass + `' END,
-			mismatch_count=excluded.aggregate_mismatch_count + ` + keptAccountCount
+			mismatch_count=excluded.aggregate_mismatch_count + ` + keptAccountCount + `,
+			aggregate_significant_mismatch_count=excluded.aggregate_significant_mismatch_count,
+			account_significant_mismatch_count=` + keptAccountSignificantCount + `,
+			significant_mismatch_count=excluded.aggregate_significant_mismatch_count + ` + keptAccountSignificantCount
 
 // UpsertCheckEpochStatus idempotently stores a check result for an epoch.
 //
@@ -1861,8 +1923,10 @@ var upsertCheckEpochStatusSQL = `INSERT INTO check_epoch_status
 func (c *Cache) UpsertCheckEpochStatus(status CheckEpochStatus) error {
 	aggregateStatus := status.AggregateStatus
 	aggregateCount := status.AggregateMismatchCount
+	aggregateSignificant := status.AggregateSignificantMismatchCount
 	if aggregateStatus == "" {
 		aggregateStatus, aggregateCount = status.Status, status.MismatchCount
+		aggregateSignificant = status.SignificantMismatchCount
 	}
 	if aggregateStatus == "" {
 		aggregateStatus = StatusPass
@@ -1883,6 +1947,9 @@ func (c *Cache) UpsertCheckEpochStatus(status CheckEpochStatus) error {
 			aggregateCount,
 			status.AccountStatus,
 			status.AccountMismatchCount,
+			aggregateSignificant+status.AccountSignificantMismatchCount,
+			aggregateSignificant,
+			status.AccountSignificantMismatchCount,
 		)
 		return err
 	})
@@ -1938,7 +2005,7 @@ func (c *Cache) withClaimedSource(
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer func() { _ = tx.Rollback() }()
 	if err := fn(tx); err != nil {
 		return err
 	}
@@ -2067,7 +2134,7 @@ func (c *Cache) GetMismatches(
 // GetStatusSummary returns all check epoch statuses for a network in epoch order.
 func (c *Cache) GetStatusSummary(network string) ([]CheckEpochStatus, error) {
 	rows, err := c.db.Query(
-		`SELECT network, epoch, last_checked_at, status, mismatch_count, dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools, aggregate_status, aggregate_mismatch_count, account_status, account_mismatch_count FROM check_epoch_status WHERE network = ? ORDER BY epoch ASC`,
+		`SELECT network, epoch, last_checked_at, status, mismatch_count, dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools, aggregate_status, aggregate_mismatch_count, account_status, account_mismatch_count, significant_mismatch_count, aggregate_significant_mismatch_count, account_significant_mismatch_count FROM check_epoch_status WHERE network = ? ORDER BY epoch ASC`,
 		network,
 	)
 	if err != nil {
@@ -2077,7 +2144,7 @@ func (c *Cache) GetStatusSummary(network string) ([]CheckEpochStatus, error) {
 	var ret []CheckEpochStatus
 	for rows.Next() {
 		var s CheckEpochStatus
-		if err := rows.Scan(&s.Network, &s.Epoch, &s.LastCheckedAt, &s.Status, &s.MismatchCount, &s.DingoPoolCount, &s.KoiosPoolCount, &s.OnlyDingoPools, &s.OnlyKoiosPools, &s.AggregateStatus, &s.AggregateMismatchCount, &s.AccountStatus, &s.AccountMismatchCount); err != nil {
+		if err := rows.Scan(&s.Network, &s.Epoch, &s.LastCheckedAt, &s.Status, &s.MismatchCount, &s.DingoPoolCount, &s.KoiosPoolCount, &s.OnlyDingoPools, &s.OnlyKoiosPools, &s.AggregateStatus, &s.AggregateMismatchCount, &s.AccountStatus, &s.AccountMismatchCount, &s.SignificantMismatchCount, &s.AggregateSignificantMismatchCount, &s.AccountSignificantMismatchCount); err != nil {
 			return nil, err
 		}
 		ret = append(ret, s)
@@ -2345,7 +2412,7 @@ func (c *Cache) RecordKoiosSource(
 	if err != nil {
 		return change, fmt.Errorf("begin koios source tx: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer func() { _ = tx.Rollback() }()
 
 	// Claim the writer slot before reading. This UPDATE assigns network to
 	// itself and so changes nothing, but SQLite treats any UPDATE as
@@ -2742,6 +2809,10 @@ GROUP BY network`); err != nil {
 	); err != nil {
 		return fmt.Errorf("migrate check_epoch_status phase backfill: %w", err)
 	}
+	if err := migrateSignificantMismatchCounts(db); err != nil {
+		return fmt.Errorf("migrate significant mismatch counts: %w", err)
+	}
+
 	// The pre-account-parity unique index only covered (network, epoch,
 	// stake_address); drop it now that reward_type is guaranteed to exist
 	// (old rows default to "" via the ADD COLUMN above, which is fine:
@@ -2898,4 +2969,62 @@ func UnmarshalPoolList(s string) []string {
 	var pools []string
 	_ = json.Unmarshal([]byte(s), &pools)
 	return pools
+}
+
+func migrateSignificantMismatchCounts(db *sql.DB) error {
+	present, err := columnExists(db, "check_epoch_status", "significant_mismatch_count")
+	if err != nil {
+		return err
+	}
+	if present {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, column := range []string{"significant_mismatch_count", "aggregate_significant_mismatch_count", "account_significant_mismatch_count"} {
+		if _, err := tx.Exec("ALTER TABLE check_epoch_status ADD COLUMN " + column + " INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+	}
+	rows, err := tx.Query("SELECT network, epoch, category, scope FROM check_mismatches")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type key struct {
+		network string
+		epoch   uint64
+	}
+	counts := make(map[key][2]int)
+	for rows.Next() {
+		var k key
+		var category, scope string
+		if err := rows.Scan(&k.network, &k.epoch, &category, &scope); err != nil {
+			return err
+		}
+		if severityOf(category) == severityInformational {
+			continue
+		}
+		c := counts[k]
+		if scope == ScopeAccount {
+			c[1]++
+		} else {
+			c[0]++
+		}
+		counts[k] = c
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for k, c := range counts {
+		if _, err := tx.Exec("UPDATE check_epoch_status SET significant_mismatch_count = ?, aggregate_significant_mismatch_count = ?, account_significant_mismatch_count = ? WHERE network = ? AND epoch = ?", c[0]+c[1], c[0], c[1], k.network, k.epoch); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

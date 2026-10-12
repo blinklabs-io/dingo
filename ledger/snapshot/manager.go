@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -109,11 +110,12 @@ type pendingBoundarySnapshot struct {
 	// before CaptureEpochBoundarySnapshot; allowing a later retry with the same
 	// boundary identity to consume that stale distribution would persist state
 	// from the abandoned transaction instead of recomputing SNAP.
-	txn          *database.Txn
-	newEpoch     uint64
-	boundarySlot uint64
-	snapshotSlot uint64
-	expiryEpoch  uint64
+	txn            *database.Txn
+	newEpoch       uint64
+	boundarySlot   uint64
+	snapshotSlot   uint64
+	expiryEpoch    uint64
+	afterEnactment bool
 }
 
 func (m *Manager) stashBoundaryDistribution(
@@ -137,7 +139,8 @@ func (m *Manager) takeBoundaryDistribution(
 	pending := m.pendingBoundary
 	m.pendingBoundary = nil
 	m.mu.Unlock()
-	if pending == nil || pending.txn != txn {
+	if pending == nil || pending.txn != txn ||
+		(evt.ProtocolVersion >= lcommon.ProtocolVersionDijkstra && !pending.afterEnactment) {
 		return nil
 	}
 	if pending.newEpoch != evt.NewEpoch ||
@@ -162,7 +165,8 @@ func (m *Manager) peekBoundaryDistribution(
 	m.mu.Lock()
 	pending := m.pendingBoundary
 	m.mu.Unlock()
-	if pending == nil || pending.txn != txn {
+	if pending == nil || pending.txn != txn ||
+		(evt.ProtocolVersion >= lcommon.ProtocolVersionDijkstra && !pending.afterEnactment) {
 		return nil
 	}
 	if pending.newEpoch != evt.NewEpoch ||
@@ -638,7 +642,7 @@ func (m *Manager) handleEpochTransition(
 		return nil
 	}
 
-	preCheckTxn := m.db.Transaction(false)
+	preCheckTxn := m.db.Transaction(ctx, false)
 	exists, err := m.authoritativeMarkRewardSnapshotExists(
 		evt,
 		preCheckTxn.Metadata(),
@@ -763,12 +767,13 @@ func (m *Manager) ComputeEpochBoundarySnapshot(
 		return fmt.Errorf("calculate snap-point stake distribution: %w", err)
 	}
 	m.stashBoundaryDistribution(&pendingBoundarySnapshot{
-		distribution: distribution,
-		txn:          txn,
-		newEpoch:     evt.NewEpoch,
-		boundarySlot: evt.BoundarySlot,
-		snapshotSlot: evt.SnapshotSlot,
-		expiryEpoch:  expiryEpoch,
+		distribution:   distribution,
+		txn:            txn,
+		newEpoch:       evt.NewEpoch,
+		boundarySlot:   evt.BoundarySlot,
+		snapshotSlot:   evt.SnapshotSlot,
+		expiryEpoch:    expiryEpoch,
+		afterEnactment: evt.ProtocolVersion >= lcommon.ProtocolVersionDijkstra,
 	})
 	m.logger.Debug(
 		"computed snap-point stake distribution",
@@ -864,6 +869,7 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	deferStakeInputs := m.deferRewardStakeInputs
 	m.mu.RUnlock()
 	if err := m.saveSnapshotInTxnDeferring(
+		ctx,
 		evt.NewEpoch,
 		"mark",
 		distribution,
@@ -973,6 +979,7 @@ func (m *Manager) DeferEpochBoundaryCapture(
 ) error {
 	m.lockConfiguration()
 	refunds, err := m.db.GetPoolsRetiringAtEpoch(
+		context.Background(),
 		evt.NewEpoch, evt.BoundarySlot, txn,
 	)
 	if err != nil {
@@ -1131,6 +1138,7 @@ func (m *Manager) PrepareEpochBoundarySnapshot(
 		return nil, fmt.Errorf("validate reward stake inputs: %w", err)
 	}
 	prepared, err := m.prepareSnapshot(
+		ctx,
 		evt.NewEpoch, "mark", distribution, evt, true, true, txn,
 	)
 	if err != nil {
@@ -1219,7 +1227,7 @@ func (m *Manager) CurrentBoundarySPOStakeRows(
 	// comment. Resolved against the same live state
 	// calculateStakeDistributionInTxn just read, matching CaptureEpochBoundary
 	// Snapshot's own resolveAutoVote=true call for the authoritative capture.
-	if err := m.db.ResolvePoolRewardAccountAutoVotes(rows, txn); err != nil {
+	if err := m.db.ResolvePoolRewardAccountAutoVotes(ctx, rows, txn); err != nil {
 		return nil, fmt.Errorf("resolve reward-account auto-votes: %w", err)
 	}
 	return rows, nil
@@ -1236,7 +1244,7 @@ func (m *Manager) calculateSnapshotDistribution(
 	expiryEpoch uint64,
 ) (*StakeDistribution, error) {
 	calculator := NewCalculator(m.db)
-	txn := m.db.Transaction(false)
+	txn := m.db.Transaction(ctx, false)
 	defer func() { _ = txn.Commit() }()
 	return calculator.calculateBoundaryStakeDistributionInTxn(
 		ctx, txn, slot, boundarySlot, expiryEpoch, m.inactivityPeriod(),

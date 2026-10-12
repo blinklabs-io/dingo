@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -310,9 +311,12 @@ func txsubmissionBackoffDuration(consecutiveHits int) time.Duration {
 	return d
 }
 
+// retryTxsubmissionAdmission retries add while the mempool reports it full.
+// waitForHeadroom receives the bytes the rejected admission needed, which the
+// pool measures after decoding and which can exceed the advertised size.
 func retryTxsubmissionAdmission(
 	add func() error,
-	waitForHeadroom func() bool,
+	waitForHeadroom func(need int64) bool,
 	recordRetry func(int),
 ) error {
 	for retryStreak := 0; ; {
@@ -320,8 +324,8 @@ func retryTxsubmissionAdmission(
 		if err == nil {
 			return nil
 		}
-		var fullErr *mempool.MempoolFullError
-		if !errors.As(err, &fullErr) {
+		full, ok := errors.AsType[*mempool.MempoolFullError](err)
+		if !ok {
 			return err
 		}
 		retryStreak++
@@ -334,7 +338,7 @@ func retryTxsubmissionAdmission(
 				err,
 			)
 		}
-		if !waitForHeadroom() {
+		if !waitForHeadroom(int64(full.TxSize)) {
 			return errTxsubmissionAdmissionStopped
 		}
 	}
@@ -342,6 +346,7 @@ func retryTxsubmissionAdmission(
 
 func (o *Ouroboros) txsubmissionServerConnOpts() []txsubmission.TxSubmissionOptionFunc {
 	return []txsubmission.TxSubmissionOptionFunc{
+		//nolint:staticcheck // WithOnInit omits the required CallbackContext.
 		txsubmission.WithInitFunc(
 			o.instrumentTxsubmissionInit(o.txsubmissionServerInit),
 		),
@@ -442,7 +447,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 ) error {
 	// Start async loop to request transactions from the peer's mempool
 	go func() {
-		conn := o.connManager.GetConnectionById(ctx.ConnectionId)
+		conn, connDone := o.connManager.GetConnectionWithDone(ctx.ConnectionId)
 		if conn == nil {
 			return
 		}
@@ -460,7 +465,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 			if limitAdmission {
 				if !headroom.WaitForAdmissionHeadroom(
 					1,
-					conn.ErrorChan(),
+					connDone,
 				) {
 					return
 				}
@@ -484,7 +489,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 			}()
 			select {
 			case <-done:
-			case <-conn.ErrorChan():
+			case <-connDone:
 				return
 			}
 			if err != nil {
@@ -564,7 +569,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 						) {
 							continue
 						}
-					case <-conn.ErrorChan():
+					case <-connDone:
 						return
 					}
 				} else {
@@ -606,7 +611,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 						))
 						select {
 						case <-backoffTimer.C:
-						case <-conn.ErrorChan():
+						case <-connDone:
 							return
 						}
 						continue
@@ -614,7 +619,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 					consecutiveImpossibleOffers = 0
 					if !headroom.WaitForAdmissionHeadroom(
 						advertisedBytes+maxDiscrepancyBytes,
-						conn.ErrorChan(),
+						connDone,
 					) {
 						return
 					}
@@ -696,7 +701,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 					)
 					select {
 					case <-backoffTimer.C:
-					case <-conn.ErrorChan():
+					case <-connDone:
 						return
 					}
 					continue
@@ -720,20 +725,27 @@ func (o *Ouroboros) txsubmissionServerInit(
 						err = retryTxsubmissionAdmission(
 							func() error {
 								return o.mempool.AddTransaction(
+									context.Background(),
 									uint(txBody.EraId),
 									txBody.TxBody,
 								)
 							},
-							func() bool {
+							func(need int64) bool {
+								// A transaction that cannot fit even an empty
+								// pool waits for the whole budget and is then
+								// dropped by the retry bound; asking for more
+								// would end intake for this peer.
+								limit := headroom.MaxAdmissionHeadroomBytes()
 								return headroom.WaitForAdmissionHeadroom(
-									int64(len(txBody.TxBody)),
-									conn.ErrorChan(),
+									min(need, limit),
+									connDone,
 								)
 							},
 							o.recordTxsubmissionAdmissionRetry,
 						)
 					} else {
 						err = o.mempool.AddTransaction(
+							context.Background(),
 							uint(txBody.EraId),
 							txBody.TxBody,
 						)

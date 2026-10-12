@@ -16,12 +16,14 @@ package governance
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -49,26 +51,201 @@ func HasDRepActivityCertificates(tx lcommon.Transaction) bool {
 	return false
 }
 
+// HasDRepDeregistrationCertificates reports whether a transaction contains a
+// DRep deregistration whose votes and stake-account delegations need cleanup.
+func HasDRepDeregistrationCertificates(tx lcommon.Transaction) bool {
+	for _, cert := range tx.Certificates() {
+		if _, ok := cert.(*lcommon.DeregistrationDrepCertificate); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// ProcessDRepDeregistrationEffects clears votes on active
+// proposals after a transaction's voting procedures have been recorded.
+func ProcessDRepDeregistrationEffects(
+	ctx context.Context,
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	currentEpoch uint64,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	for index, cert := range tx.Certificates() {
+		deregistration, ok := cert.(*lcommon.DeregistrationDrepCertificate)
+		if !ok || deregistration == nil {
+			continue
+		}
+		tag, err := models.CredentialTagFromUint(
+			deregistration.DrepCredential.CredType,
+		)
+		if err != nil {
+			return fmt.Errorf("DRep deregistration certificate %d: %w", index, err)
+		}
+		credential := deregistration.DrepCredential.Credential[:]
+		if _, err := db.DeleteGovernanceVotesForDrep(
+			ctx,
+			tag,
+			credential,
+			currentEpoch,
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete votes for DRep deregistration certificate %d: %w",
+				index,
+				err,
+			)
+		}
+	}
+	return nil
+}
+
+// drepActivityWriter records a DRep activity write. The activity slot and effective inactivity period are supplied by the caller so PV9 registration can account for dormant epochs.
+type drepActivityWriter func(
+	ctx context.Context,
+	credentialTag uint8,
+	credential []byte,
+	slot uint64,
+	epoch uint64,
+	inactivityPeriod uint64,
+	txn *database.Txn,
+) error
+
+// renewDRepExpiry is the live-ledger writer: activity also resets expiry.
+func renewDRepExpiry(db *database.Database) drepActivityWriter {
+	return func(
+		ctx context.Context,
+		credentialTag uint8,
+		credential []byte,
+		slot uint64,
+		epoch uint64,
+		inactivityPeriod uint64,
+		txn *database.Txn,
+	) error {
+		return db.UpdateDRepActivity(
+			ctx,
+			credentialTag,
+			credential,
+			epoch,
+			inactivityPeriod,
+			slot,
+			txn,
+		)
+	}
+}
+
+// recordDRepActivityEpoch is the historical-replay writer. Replay below a
+// Mithril anchor does not run the dormant-epoch rules (Conway EPOCH
+// updateNumDormantEpochs, CERTS updateDormantDRepExpiry), so an expiry
+// recomputed from a historical vote or certificate would replace the correct
+// expiry the snapshot recorded with a stale one.
+func recordDRepActivityEpoch(db *database.Database) drepActivityWriter {
+	return func(
+		ctx context.Context,
+		credentialTag uint8,
+		credential []byte,
+		_ uint64,
+		epoch uint64,
+		_ uint64,
+		txn *database.Txn,
+	) error {
+		return db.RecordDRepActivityEpoch(
+			ctx,
+			credentialTag,
+			credential,
+			epoch,
+			txn,
+		)
+	}
+}
+
 // ProcessDRepActivityCertificates renews DRep activity for registration and
 // update certificates. Certificate persistence creates or updates the DRep row
 // before this function runs, and both writes participate in the same database
 // transaction.
 func ProcessDRepActivityCertificates(
+	ctx context.Context,
 	tx lcommon.Transaction,
+	point ocommon.Point,
 	currentEpoch uint64,
 	drepInactivityPeriod uint64,
+	protocolMajor uint64,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	return processDRepActivityCertificates(
+		ctx,
+		tx,
+		point.Slot,
+		currentEpoch,
+		drepInactivityPeriod,
+		protocolMajor,
+		renewDRepExpiry(db),
+		db,
+		txn,
+	)
+}
+
+// ProcessHistoricalDRepActivityCertificates is ProcessDRepActivityCertificates
+// for replay of blocks at or below a Mithril snapshot anchor: it records each
+// DRep's activity epoch and keeps the expiry the snapshot recorded.
+func ProcessHistoricalDRepActivityCertificates(
+	ctx context.Context,
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	currentEpoch uint64,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	return processDRepActivityCertificates(
+		ctx,
+		tx,
+		point.Slot,
+		currentEpoch,
+		0,
+		historicalProtocolMajor,
+		recordDRepActivityEpoch(db),
+		db,
+		txn,
+	)
+}
+
+// historicalProtocolMajor makes replay skip the pre-PV10 dormant-epoch
+// registration extension, which the snapshot expiry already includes.
+const historicalProtocolMajor = 10
+
+func processDRepActivityCertificates(
+	ctx context.Context,
+	tx lcommon.Transaction,
+	slot uint64,
+	currentEpoch uint64,
+	drepInactivityPeriod uint64,
+	protocolMajor uint64,
+	recordActivity drepActivityWriter,
 	db *database.Database,
 	txn *database.Txn,
 ) error {
 	updated := make(map[string]struct{})
+	dormantEpochs := uint64(0)
+	if protocolMajor < 10 {
+		var err error
+		dormantEpochs, err = db.GetDormantDRepEpochs(ctx, txn)
+		if err != nil {
+			return fmt.Errorf("read dormant DRep epochs: %w", err)
+		}
+	}
 	for i, cert := range tx.Certificates() {
 		var credential lcommon.Credential
+		registration := false
 		switch c := cert.(type) {
 		case *lcommon.RegistrationDrepCertificate:
 			if c == nil {
 				continue
 			}
 			credential = c.DrepCredential
+			registration = true
 		case *lcommon.UpdateDrepCertificate:
 			if c == nil {
 				continue
@@ -92,11 +269,21 @@ func ProcessDRepActivityCertificates(
 		if _, ok := updated[key]; ok {
 			continue
 		}
-		if err := db.UpdateDRepActivity(
+		inactivityPeriod := drepInactivityPeriod
+		if registration && protocolMajor < 10 {
+			var ok bool
+			inactivityPeriod, ok = dbtypes.CheckedAddUint64(inactivityPeriod, dormantEpochs)
+			if !ok {
+				return fmt.Errorf("renew DRep activity for certificate %d: expiry overflows", i)
+			}
+		}
+		if err := recordActivity(
+			ctx,
 			credentialTag,
 			credential.Credential[:],
+			slot,
 			currentEpoch,
-			drepInactivityPeriod,
+			inactivityPeriod,
 			txn,
 		); err != nil {
 			return fmt.Errorf(
@@ -116,38 +303,284 @@ func ProcessDRepActivityCertificates(
 // action type, parent action, anchor, and deposit information.
 //
 // The govActionLifetime parameter determines how many epochs a proposal remains
-// active before expiring.
+// active before expiring. txIndex is the transaction's position in its block;
+// Conway RATIFY orders equal-priority actions by it within a slot.
 func ProcessProposals(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
+	txIndex uint32,
+	currentEpoch uint64,
+	govActionLifetime uint64,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	if err := validateCostModelLanguageIDs(tx); err != nil {
+		return err
+	}
+	if err := ResetDormantDRepExpiryBeforeCertificates(
+		ctx, tx, point, db, txn,
+	); err != nil {
+		return err
+	}
+	return persistGovernanceProposals(
+		ctx,
+		tx,
+		point,
+		txIndex,
+		currentEpoch,
+		govActionLifetime,
+		false,
+		db,
+		txn,
+	)
+}
+
+// ProcessHistoricalProposals is ProcessProposals for replay of blocks at or
+// below a Mithril snapshot anchor. The snapshot already holds every proposal
+// still live at the anchor, so a replayed proposal with no row was enacted,
+// expired or dropped before it, and its refund or payout is already in the
+// snapshot's balances. Such a proposal is stored for history as expired and
+// dropped at its own slot, so no later boundary expires, refunds or ratifies
+// it again.
+func ProcessHistoricalProposals(
+	ctx context.Context,
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	txIndex uint32,
 	currentEpoch uint64,
 	govActionLifetime uint64,
 	db *database.Database,
 	txn *database.Txn,
 ) error {
 	return persistGovernanceProposals(
+		ctx,
 		tx,
 		point,
+		txIndex,
 		currentEpoch,
 		govActionLifetime,
+		true,
 		db,
 		txn,
 	)
 }
 
-func persistGovernanceProposals(
-	tx proposalSource,
+// TransactionRequiresConwayParameters reports whether applying tx's governance
+// effects reads Conway protocol parameters: votes and DRep activity
+// certificates use the DRep inactivity period, and proposals use the governance
+// action lifetime. DRep deregistration reads neither, so a transaction that
+// only deregisters DReps applies without them. Live application, backfill and
+// gap replay share this predicate so their missing-parameter guards agree.
+func TransactionRequiresConwayParameters(tx lcommon.Transaction) bool {
+	return len(tx.ProposalProcedures()) > 0 ||
+		len(tx.VotingProcedures()) > 0 ||
+		HasDRepActivityCertificates(tx)
+}
+
+// HistoricalTransactionRequiresConwayParameters is
+// TransactionRequiresConwayParameters for ProcessHistoricalTransactionEffects:
+// replay records DRep activity without an inactivity period, so only
+// proposals (action lifetime) and votes (proposal repair) read parameters.
+func HistoricalTransactionRequiresConwayParameters(
+	tx lcommon.Transaction,
+) bool {
+	return len(tx.ProposalProcedures()) > 0 ||
+		len(tx.VotingProcedures()) > 0
+}
+
+// TransactionHasGovernanceEffects reports whether ProcessTransactionEffects
+// has anything to apply for tx.
+func TransactionHasGovernanceEffects(tx lcommon.Transaction) bool {
+	return TransactionRequiresConwayParameters(tx) ||
+		HasDRepDeregistrationCertificates(tx)
+}
+
+// ProcessTransactionEffects applies transaction governance state after its
+// certificate records have been persisted. Keep this ordering shared by live
+// application, backfill, gap replay, and conformance state.
+func ProcessTransactionEffects(
+	ctx context.Context,
+	tx lcommon.Transaction,
 	point ocommon.Point,
+	txIndex uint32,
+	currentEpoch uint64,
+	drepInactivityPeriod uint64,
+	govActionLifetime uint64,
+	protocolMajor uint64,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	if err := validateCostModelLanguageIDs(tx); err != nil {
+		return err
+	}
+	if len(tx.VotingProcedures()) > 0 {
+		if err := ProcessVotes(
+			ctx, tx, point, currentEpoch, drepInactivityPeriod, db, txn,
+		); err != nil {
+			return fmt.Errorf("process governance votes: %w", err)
+		}
+	}
+	if HasDRepActivityCertificates(tx) {
+		if err := ProcessDRepActivityCertificates(
+			ctx,
+			tx,
+			point,
+			currentEpoch,
+			drepInactivityPeriod,
+			protocolMajor,
+			db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("process DRep activity certificates: %w", err)
+		}
+	}
+	if len(tx.ProposalProcedures()) > 0 {
+		if err := persistGovernanceProposals(
+			ctx, tx, point, txIndex, currentEpoch, govActionLifetime, false, db, txn,
+		); err != nil {
+			return fmt.Errorf("process governance proposals: %w", err)
+		}
+	}
+	if HasDRepDeregistrationCertificates(tx) {
+		if err := ProcessDRepDeregistrationEffects(
+			ctx, tx, point, currentEpoch, db, txn,
+		); err != nil {
+			return fmt.Errorf("process DRep deregistration effects: %w", err)
+		}
+	}
+	return nil
+}
+
+// ProcessHistoricalTransactionEffects is ProcessTransactionEffects for replay
+// of blocks at or below a Mithril snapshot anchor. Proposals are stored first
+// so votes can resolve them; DRep activity keeps the snapshot expiry; DRep
+// deregistration still clears votes on proposals live at replay time.
+func ProcessHistoricalTransactionEffects(
+	ctx context.Context,
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	txIndex uint32,
 	currentEpoch uint64,
 	govActionLifetime uint64,
 	db *database.Database,
 	txn *database.Txn,
 ) error {
+	if len(tx.ProposalProcedures()) > 0 {
+		if err := ProcessHistoricalProposals(
+			ctx, tx, point, txIndex, currentEpoch, govActionLifetime, db, txn,
+		); err != nil {
+			return fmt.Errorf("process governance proposals: %w", err)
+		}
+	}
+	if len(tx.VotingProcedures()) > 0 {
+		if err := ProcessHistoricalVotes(
+			ctx, tx, point, currentEpoch, db, txn,
+		); err != nil {
+			return fmt.Errorf("process governance votes: %w", err)
+		}
+	}
+	if HasDRepActivityCertificates(tx) {
+		if err := ProcessHistoricalDRepActivityCertificates(
+			ctx, tx, point, currentEpoch, db, txn,
+		); err != nil {
+			return fmt.Errorf("process DRep activity certificates: %w", err)
+		}
+	}
+	if HasDRepDeregistrationCertificates(tx) {
+		if err := ProcessDRepDeregistrationEffects(
+			ctx, tx, point, currentEpoch, db, txn,
+		); err != nil {
+			return fmt.Errorf("process DRep deregistration effects: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateCostModelLanguageIDs(tx proposalSource) error {
+	for _, proposal := range tx.ProposalProcedures() {
+		var models map[uint][]int64
+		switch action := proposal.GovAction().(type) {
+		case *conway.ConwayParameterChangeGovAction:
+			if action == nil {
+				continue
+			}
+			models = action.ParamUpdate.CostModels
+		case *gdijkstra.DijkstraParameterChangeGovAction:
+			if action == nil {
+				continue
+			}
+			models = action.ParamUpdate.CostModels
+		default:
+			continue
+		}
+		if err := lcommon.ValidateCostModelLanguageIDs(models); err != nil {
+			return fmt.Errorf("invalid parameter change: %w", err)
+		}
+	}
+	return nil
+}
+
+// ResetDormantDRepExpiryBeforeCertificates applies the proposal-induced
+// dormancy reset at the Conway CERTS boundary, before transaction
+// certificates can calculate DRep expiry epochs.
+func ResetDormantDRepExpiryBeforeCertificates(
+	ctx context.Context,
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	if len(tx.ProposalProcedures()) == 0 {
+		return nil
+	}
+	if err := db.ResetDormantDRepEpochs(ctx, point.Slot, txn); err != nil {
+		return fmt.Errorf("reset dormant DRep epochs before certificate processing: %w", err)
+	}
+	return nil
+}
+
+// BumpDormantDRepExpiryAtEpochBoundary extends dormant DRep expiries during
+// historical replay when no governance proposal was active in the epoch that
+// just ended, matching ProcessEpoch's RATIFY candidate set.
+func BumpDormantDRepExpiryAtEpochBoundary(
+	ctx context.Context,
+	db *database.Database,
+	epoch uint64,
+	slot uint64,
+	txn *database.Txn,
+) error {
+	proposals, err := db.GetActiveGovernanceProposals(ctx, epoch, txn)
+	if err != nil {
+		return fmt.Errorf("get active proposals for DRep dormancy: %w", err)
+	}
+	if len(proposals) != 0 {
+		return nil
+	}
+	if _, err := db.BumpDormantDRepExpiries(ctx, slot, txn); err != nil {
+		return fmt.Errorf("extend dormant DRep expiries: %w", err)
+	}
+	return nil
+}
+
+func persistGovernanceProposals(
+	ctx context.Context,
+	tx proposalSource,
+	point ocommon.Point,
+	txIndex uint32,
+	currentEpoch uint64,
+	govActionLifetime uint64,
+	settleNew bool,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	if err := validateCostModelLanguageIDs(tx); err != nil {
+		return err
+	}
 	proposals := tx.ProposalProcedures()
 	if len(proposals) == 0 {
 		return nil
 	}
-
 	txHash := tx.Id().Bytes()
 	if len(txHash) != 32 {
 		return fmt.Errorf("invalid tx hash length: got %d", len(txHash))
@@ -216,6 +649,7 @@ func persistGovernanceProposals(
 			Deposit:       proposal.Deposit(),
 			ReturnAddress: rewardAddrBytes,
 			GovActionCbor: actionCbor,
+			TxIndex:       &txIndex,
 			AddedSlot:     point.Slot,
 		}
 
@@ -228,7 +662,32 @@ func persistGovernanceProposals(
 			govProposal.PolicyHash = policyHash
 		}
 
-		if err := db.SetGovernanceProposal(govProposal, txn); err != nil {
+		if settleNew {
+			_, err := db.GetGovernanceProposal(
+				ctx,
+				txHash,
+				uint32(i), //nolint:gosec
+				txn,
+			)
+			if err != nil &&
+				!errors.Is(err, models.ErrGovernanceProposalNotFound) {
+				return fmt.Errorf(
+					"look up proposal %d in tx %s: %w",
+					i,
+					txHashForLog,
+					err,
+				)
+			}
+			if err != nil {
+				settledEpoch, settledSlot := currentEpoch, point.Slot
+				govProposal.ExpiredEpoch = &settledEpoch
+				govProposal.ExpiredSlot = &settledSlot
+				govProposal.DroppedEpoch = &settledEpoch
+				govProposal.DroppedSlot = &settledSlot
+			}
+		}
+
+		if err := db.SetGovernanceProposal(ctx, govProposal, txn); err != nil {
 			return fmt.Errorf(
 				"set governance proposal %d in tx %s: %w",
 				i,
@@ -248,10 +707,60 @@ func persistGovernanceProposals(
 // When a DRep votes, their activity epoch is updated to the current epoch,
 // which resets their expiry countdown based on the dRepInactivityPeriod.
 func ProcessVotes(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
 	drepInactivityPeriod uint64,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	return processVotes(
+		ctx,
+		tx,
+		point,
+		currentEpoch,
+		renewDRepExpiry(db),
+		drepInactivityPeriod,
+		false,
+		db,
+		txn,
+	)
+}
+
+// ProcessHistoricalVotes is ProcessVotes for replay of blocks at or below a
+// Mithril snapshot anchor: it records votes and each voting DRep's activity
+// epoch, keeps the expiry the snapshot recorded, and settles any proposal it
+// has to rebuild as ProcessHistoricalProposals does.
+func ProcessHistoricalVotes(
+	ctx context.Context,
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	currentEpoch uint64,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	return processVotes(
+		ctx,
+		tx,
+		point,
+		currentEpoch,
+		recordDRepActivityEpoch(db),
+		0,
+		true,
+		db,
+		txn,
+	)
+}
+
+func processVotes(
+	ctx context.Context,
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	currentEpoch uint64,
+	recordActivity drepActivityWriter,
+	drepInactivityPeriod uint64,
+	settleNewProposals bool,
 	db *database.Database,
 	txn *database.Txn,
 ) error {
@@ -273,7 +782,7 @@ func ProcessVotes(
 		actionIdx uint32
 	}
 	proposalCache := make(map[proposalKey]*models.GovernanceProposal)
-	repairCache := newProposalRepairCache()
+	repairCache := newProposalRepairCache(settleNewProposals)
 
 	// Track DRep credentials that have already had their activity updated
 	// in this transaction to avoid redundant DB writes.
@@ -301,9 +810,11 @@ func ProcessVotes(
 			}
 			credKey := string([]byte{drepCredTag}) + string(voter.Hash[:])
 			if !drepActivityUpdated[credKey] {
-				err := db.UpdateDRepActivity(
+				err := recordActivity(
+					ctx,
 					drepCredTag,
 					voter.Hash[:],
+					point.Slot,
 					currentEpoch,
 					drepInactivityPeriod,
 					txn,
@@ -317,6 +828,7 @@ func ProcessVotes(
 					// anchor_hash, active) is preserved and rollback semantics
 					// in RestoreDrepStateAtSlot remain intact.
 					if setErr := db.InsertDrepIfAbsent(
+						ctx,
 						drepCredTag,
 						voter.Hash[:],
 						point.Slot,
@@ -340,9 +852,11 @@ func ProcessVotes(
 							"component", "governance",
 						)
 					}
-					err = db.UpdateDRepActivity(
+					err = recordActivity(
+						ctx,
 						drepCredTag,
 						voter.Hash[:],
+						point.Slot,
 						currentEpoch,
 						drepInactivityPeriod,
 						txn,
@@ -373,6 +887,7 @@ func ProcessVotes(
 			if !ok {
 				var err error
 				proposal, err = db.GetGovernanceProposal(
+					ctx,
 					actionId.TransactionId[:],
 					actionId.GovActionIdx,
 					txn,
@@ -387,6 +902,7 @@ func ProcessVotes(
 					}
 					var repairErr error
 					proposal, repairErr = repairMissingGovernanceProposal(
+						ctx,
 						actionId.TransactionId[:],
 						actionId.GovActionIdx,
 						db,
@@ -437,7 +953,7 @@ func ProcessVotes(
 				vote.AnchorHash = procedure.Anchor.DataHash[:]
 			}
 
-			if err := db.SetGovernanceVote(vote, txn); err != nil {
+			if err := db.SetGovernanceVote(ctx, vote, txn); err != nil {
 				return fmt.Errorf(
 					"set governance vote in tx %s: %w",
 					txHashForLog,
@@ -453,12 +969,16 @@ func ProcessVotes(
 type proposalRepairCache struct {
 	epochsByID                 map[uint64]models.Epoch
 	govActionValidityByEpochID map[uint64]uint64
+	// settleNew stores a rebuilt proposal the snapshot does not hold as
+	// already settled; see ProcessHistoricalProposals.
+	settleNew bool
 }
 
-func newProposalRepairCache() *proposalRepairCache {
+func newProposalRepairCache(settleNew bool) *proposalRepairCache {
 	return &proposalRepairCache{
 		epochsByID:                 make(map[uint64]models.Epoch),
 		govActionValidityByEpochID: make(map[uint64]uint64),
+		settleNew:                  settleNew,
 	}
 }
 
@@ -561,13 +1081,14 @@ func (c *proposalRepairCache) govActionValidityPeriod(
 }
 
 func repairMissingGovernanceProposal(
+	ctx context.Context,
 	proposalTxHash []byte,
 	actionIndex uint32,
 	db *database.Database,
 	txn *database.Txn,
 	repairCache *proposalRepairCache,
 ) (*models.GovernanceProposal, error) {
-	txRecord, err := db.GetTransactionByHash(proposalTxHash, txn)
+	txRecord, err := db.GetTransactionByHash(ctx, proposalTxHash, txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"lookup governance proposal tx %s: %w",
@@ -621,13 +1142,16 @@ func repairMissingGovernanceProposal(
 		return nil, err
 	}
 	if err := persistGovernanceProposals(
+		ctx,
 		txBody,
 		ocommon.Point{
 			Slot: txRecord.Slot,
 			Hash: txRecord.BlockHash,
 		},
+		txRecord.BlockIndex,
 		epoch.EpochId,
 		govActionValidityPeriod,
+		repairCache.settleNew,
 		db,
 		txn,
 	); err != nil {
@@ -637,7 +1161,7 @@ func repairMissingGovernanceProposal(
 			err,
 		)
 	}
-	return db.GetGovernanceProposal(proposalTxHash, actionIndex, txn)
+	return db.GetGovernanceProposal(ctx, proposalTxHash, actionIndex, txn)
 }
 
 func epochContainsSlot(epoch models.Epoch, slot uint64) bool {

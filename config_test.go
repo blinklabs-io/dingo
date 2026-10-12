@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/prometheus/client_golang/prometheus"
@@ -1036,7 +1037,7 @@ func TestRunRTSMetricsUpdater_Lifecycle(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	n := &Node{config: Config{promRegistry: reg}}
-	n.registerRTSMetrics()
+	n.registerRTSMetrics(promutil.NewRegistration(reg))
 	require.NotNil(
 		t,
 		n.rtsMetrics,
@@ -1138,6 +1139,7 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 				Interval:              2 * time.Hour,
 				RequestTimeout:        9 * time.Minute,
 				UserAgent:             "custom-agent/9",
+				HeaderSecrets:         map[string]string{"Authorization": "Bearer x"},
 				MaxBytes:              123,
 				MaxDecompressedBytes:  456,
 				MaxEntryBytes:         45,
@@ -1161,6 +1163,11 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 	require.Equal(t, 2*time.Hour, cfg.tokenRegistry.Interval)
 	require.Equal(t, 9*time.Minute, cfg.tokenRegistry.RequestTimeout)
 	require.Equal(t, "custom-agent/9", cfg.tokenRegistry.UserAgent)
+	require.Equal(
+		t,
+		map[string]string{"Authorization": "Bearer x"},
+		cfg.tokenRegistry.Headers,
+	)
 	require.Equal(t, int64(123), cfg.tokenRegistry.MaxBytes)
 	require.Equal(t, int64(456), cfg.tokenRegistry.MaxDecompressedBytes)
 	require.Equal(t, int64(45), cfg.tokenRegistry.MaxEntryBytes)
@@ -1209,4 +1216,15 @@ func TestWithTokenRegistryConfigPreservesHTTPClient(t *testing.T) {
 	require.Equal(t, 67, cfg.TokenRegistry().MaxArchiveEntries)
 	require.Equal(t, 34, cfg.TokenRegistry().MaxAcceptedEntries)
 	require.Equal(t, int64(89), cfg.TokenRegistry().MaxBatchBytes)
+}
+
+func TestNewConfigPlannerStatsRefreshDefaultsOnAndCanBeDisabled(t *testing.T) {
+	t.Parallel()
+	cfg := NewConfig()
+	assert.True(t, cfg.PlannerStatsRefreshEnabled())
+	off := NewConfig(WithPlannerStatsRefresh(false))
+	assert.False(t, off.PlannerStatsRefreshEnabled())
+	// A hand-built Config has no internal config and must not start the
+	// refresh.
+	assert.False(t, (&Config{}).PlannerStatsRefreshEnabled())
 }

@@ -59,15 +59,6 @@ func (q *Queries) ClaimOffchainMetadataFetch(ctx context.Context, arg ClaimOffch
 	return result.RowsAffected()
 }
 
-const clearSyncState = `-- name: ClearSyncState :exec
-DELETE FROM sync_state
-`
-
-func (q *Queries) ClearSyncState(ctx context.Context) error {
-	_, err := q.db.ExecContext(ctx, clearSyncState)
-	return err
-}
-
 const countPParamsByEra = `-- name: CountPParamsByEra :one
 SELECT COUNT(*)
 FROM pparams
@@ -326,6 +317,30 @@ func (q *Queries) CreateMidnightAssetSpend(ctx context.Context, arg CreateMidnig
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const createMidnightCandidateRemoval = `-- name: CreateMidnightCandidateRemoval :exec
+INSERT INTO midnight_candidate_removals (
+    block_number, tx_hash, output_index, datum
+) VALUES (?, ?, ?, ?)
+ON CONFLICT DO NOTHING
+`
+
+type CreateMidnightCandidateRemovalParams struct {
+	BlockNumber int64
+	TxHash      []byte
+	OutputIndex int64
+	Datum       []byte
+}
+
+func (q *Queries) CreateMidnightCandidateRemoval(ctx context.Context, arg CreateMidnightCandidateRemovalParams) error {
+	_, err := q.db.ExecContext(ctx, createMidnightCandidateRemoval,
+		arg.BlockNumber,
+		arg.TxHash,
+		arg.OutputIndex,
+		arg.Datum,
+	)
+	return err
 }
 
 const createMidnightDeregistration = `-- name: CreateMidnightDeregistration :one
@@ -703,6 +718,15 @@ func (q *Queries) DeleteMidnightAriadneParamsByEpoch(ctx context.Context, epoch 
 	return err
 }
 
+const deleteMidnightAriadneRollbacksAfterBlock = `-- name: DeleteMidnightAriadneRollbacksAfterBlock :exec
+DELETE FROM midnight_ariadne_rollbacks WHERE block_number > ?
+`
+
+func (q *Queries) DeleteMidnightAriadneRollbacksAfterBlock(ctx context.Context, blockNumber int64) error {
+	_, err := q.db.ExecContext(ctx, deleteMidnightAriadneRollbacksAfterBlock, blockNumber)
+	return err
+}
+
 const deleteMidnightAriadneRollbacksBeforeBlock = `-- name: DeleteMidnightAriadneRollbacksBeforeBlock :exec
 DELETE FROM midnight_ariadne_rollbacks WHERE block_number < ?
 `
@@ -739,6 +763,33 @@ func (q *Queries) DeleteMidnightAssetSpendsByBlock(ctx context.Context, blockNum
 	return err
 }
 
+const deleteMidnightCandidateRemovalsAfterBlock = `-- name: DeleteMidnightCandidateRemovalsAfterBlock :exec
+DELETE FROM midnight_candidate_removals WHERE block_number > ?
+`
+
+func (q *Queries) DeleteMidnightCandidateRemovalsAfterBlock(ctx context.Context, blockNumber int64) error {
+	_, err := q.db.ExecContext(ctx, deleteMidnightCandidateRemovalsAfterBlock, blockNumber)
+	return err
+}
+
+const deleteMidnightCandidateRemovalsBeforeBlock = `-- name: DeleteMidnightCandidateRemovalsBeforeBlock :exec
+DELETE FROM midnight_candidate_removals WHERE block_number < ?
+`
+
+func (q *Queries) DeleteMidnightCandidateRemovalsBeforeBlock(ctx context.Context, blockNumber int64) error {
+	_, err := q.db.ExecContext(ctx, deleteMidnightCandidateRemovalsBeforeBlock, blockNumber)
+	return err
+}
+
+const deleteMidnightCandidateRemovalsByBlock = `-- name: DeleteMidnightCandidateRemovalsByBlock :exec
+DELETE FROM midnight_candidate_removals WHERE block_number = ?
+`
+
+func (q *Queries) DeleteMidnightCandidateRemovalsByBlock(ctx context.Context, blockNumber int64) error {
+	_, err := q.db.ExecContext(ctx, deleteMidnightCandidateRemovalsByBlock, blockNumber)
+	return err
+}
+
 const deleteMidnightCommitteeCandidateRegistrationsByBlock = `-- name: DeleteMidnightCommitteeCandidateRegistrationsByBlock :exec
 DELETE FROM midnight_committee_candidate_registrations
 WHERE block_number = ?
@@ -764,6 +815,33 @@ DELETE FROM midnight_epoch_candidates WHERE block_number = ?
 
 func (q *Queries) DeleteMidnightEpochCandidatesByBlock(ctx context.Context, blockNumber int64) error {
 	_, err := q.db.ExecContext(ctx, deleteMidnightEpochCandidatesByBlock, blockNumber)
+	return err
+}
+
+const deleteMidnightEpochTransitionsAfterBlock = `-- name: DeleteMidnightEpochTransitionsAfterBlock :exec
+DELETE FROM midnight_epoch_transitions WHERE block_number > ?
+`
+
+func (q *Queries) DeleteMidnightEpochTransitionsAfterBlock(ctx context.Context, blockNumber int64) error {
+	_, err := q.db.ExecContext(ctx, deleteMidnightEpochTransitionsAfterBlock, blockNumber)
+	return err
+}
+
+const deleteMidnightEpochTransitionsBeforeBlock = `-- name: DeleteMidnightEpochTransitionsBeforeBlock :exec
+DELETE FROM midnight_epoch_transitions WHERE block_number < ?
+`
+
+func (q *Queries) DeleteMidnightEpochTransitionsBeforeBlock(ctx context.Context, blockNumber int64) error {
+	_, err := q.db.ExecContext(ctx, deleteMidnightEpochTransitionsBeforeBlock, blockNumber)
+	return err
+}
+
+const deleteMidnightEpochTransitionsByBlock = `-- name: DeleteMidnightEpochTransitionsByBlock :exec
+DELETE FROM midnight_epoch_transitions WHERE block_number = ?
+`
+
+func (q *Queries) DeleteMidnightEpochTransitionsByBlock(ctx context.Context, blockNumber int64) error {
+	_, err := q.db.ExecContext(ctx, deleteMidnightEpochTransitionsByBlock, blockNumber)
 	return err
 }
 
@@ -1067,6 +1145,42 @@ func (q *Queries) FindMidnightAriadneRollbacksByBlock(ctx context.Context, block
 			&i.Epoch,
 			&i.PreviousExists,
 			&i.PreviousDatum,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const findMidnightCandidateRemovalsByBlock = `-- name: FindMidnightCandidateRemovalsByBlock :many
+SELECT id, block_number, tx_hash, output_index, datum
+FROM midnight_candidate_removals
+WHERE block_number = ?
+ORDER BY id ASC
+`
+
+func (q *Queries) FindMidnightCandidateRemovalsByBlock(ctx context.Context, blockNumber int64) ([]MidnightCandidateRemoval, error) {
+	rows, err := q.db.QueryContext(ctx, findMidnightCandidateRemovalsByBlock, blockNumber)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MidnightCandidateRemoval{}
+	for rows.Next() {
+		var i MidnightCandidateRemoval
+		if err := rows.Scan(
+			&i.ID,
+			&i.BlockNumber,
+			&i.TxHash,
+			&i.OutputIndex,
+			&i.Datum,
 		); err != nil {
 			return nil, err
 		}
@@ -2700,6 +2814,19 @@ func (q *Queries) GetMidnightEpochCandidatesByEpoch(ctx context.Context, epoch i
 	return i, err
 }
 
+const getMidnightEpochTransitionByBlock = `-- name: GetMidnightEpochTransitionByBlock :one
+SELECT block_number, previous_epoch, previous_exists
+FROM midnight_epoch_transitions
+WHERE block_number = ?
+`
+
+func (q *Queries) GetMidnightEpochTransitionByBlock(ctx context.Context, blockNumber int64) (MidnightEpochTransition, error) {
+	row := q.db.QueryRowContext(ctx, getMidnightEpochTransitionByBlock, blockNumber)
+	var i MidnightEpochTransition
+	err := row.Scan(&i.BlockNumber, &i.PreviousEpoch, &i.PreviousExists)
+	return i, err
+}
+
 const getMidnightRegistrationsByBlock = `-- name: GetMidnightRegistrationsByBlock :many
 SELECT id, full_datum, tx_hash, output_index, block_number, block_hash,
        tx_index, block_timestamp_ms
@@ -3161,7 +3288,8 @@ func (q *Queries) GetRewardPoolInputs(ctx context.Context, epoch int64) ([]Rewar
 
 const getRewardPoolOutputs = `-- name: GetRewardPoolOutputs :many
 SELECT apparent_performance, pool_key_hash, id, epoch, optimal_reward,
-       total_reward, leader_reward, member_reward_total, owner_stake,
+       total_reward, leader_reward, leader_reward_deficit,
+       member_reward_total, owner_stake,
        undistributed, unspendable, captured_slot, boundary_slot
 FROM reward_pool_output
 WHERE epoch = ?
@@ -3185,6 +3313,7 @@ func (q *Queries) GetRewardPoolOutputs(ctx context.Context, epoch int64) ([]Rewa
 			&i.OptimalReward,
 			&i.TotalReward,
 			&i.LeaderReward,
+			&i.LeaderRewardDeficit,
 			&i.MemberRewardTotal,
 			&i.OwnerStake,
 			&i.Undistributed,
@@ -4508,14 +4637,16 @@ func (q *Queries) SaveRewardPoolInput(ctx context.Context, arg SaveRewardPoolInp
 const saveRewardPoolOutput = `-- name: SaveRewardPoolOutput :one
 INSERT INTO reward_pool_output (
     apparent_performance, pool_key_hash, epoch, optimal_reward,
-    total_reward, leader_reward, member_reward_total, owner_stake,
+    total_reward, leader_reward, leader_reward_deficit,
+    member_reward_total, owner_stake,
     undistributed, unspendable, captured_slot, boundary_slot
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
     apparent_performance = excluded.apparent_performance,
     optimal_reward = excluded.optimal_reward,
     total_reward = excluded.total_reward,
     leader_reward = excluded.leader_reward,
+    leader_reward_deficit = excluded.leader_reward_deficit,
     member_reward_total = excluded.member_reward_total,
     owner_stake = excluded.owner_stake,
     undistributed = excluded.undistributed,
@@ -4532,6 +4663,7 @@ type SaveRewardPoolOutputParams struct {
 	OptimalReward       string
 	TotalReward         string
 	LeaderReward        string
+	LeaderRewardDeficit string
 	MemberRewardTotal   string
 	OwnerStake          string
 	Undistributed       string
@@ -4548,6 +4680,7 @@ func (q *Queries) SaveRewardPoolOutput(ctx context.Context, arg SaveRewardPoolOu
 		arg.OptimalReward,
 		arg.TotalReward,
 		arg.LeaderReward,
+		arg.LeaderRewardDeficit,
 		arg.MemberRewardTotal,
 		arg.OwnerStake,
 		arg.Undistributed,
@@ -5311,6 +5444,23 @@ func (q *Queries) UpsertMidnightEpochCandidates(ctx context.Context, arg UpsertM
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const upsertMidnightEpochTransition = `-- name: UpsertMidnightEpochTransition :exec
+INSERT INTO midnight_epoch_transitions (block_number, previous_epoch, previous_exists)
+VALUES (?, ?, ?)
+ON CONFLICT (block_number) DO NOTHING
+`
+
+type UpsertMidnightEpochTransitionParams struct {
+	BlockNumber    int64
+	PreviousEpoch  int64
+	PreviousExists int64
+}
+
+func (q *Queries) UpsertMidnightEpochTransition(ctx context.Context, arg UpsertMidnightEpochTransitionParams) error {
+	_, err := q.db.ExecContext(ctx, upsertMidnightEpochTransition, arg.BlockNumber, arg.PreviousEpoch, arg.PreviousExists)
+	return err
 }
 
 const upsertTokenRegistryEntry = `-- name: UpsertTokenRegistryEntry :exec

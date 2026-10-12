@@ -1007,6 +1007,7 @@ func checkEpoch(
 	// slice afterwards.
 	aggregateStatus := DetermineStatus(allMismatches)
 	aggregateCount := len(allMismatches)
+	aggregateSignificant := CountSignificant(allMismatches)
 
 	var accountMismatches []CheckMismatch
 	if accountsEnabled && hasStakeEpoch {
@@ -1057,17 +1058,19 @@ func checkEpoch(
 	}
 
 	if err := cache.UpsertCheckEpochStatus(CheckEpochStatus{
-		Network:                network,
-		Epoch:                  epoch,
-		LastCheckedAt:          now,
-		DingoPoolCount:         dingoFound,
-		KoiosPoolCount:         len(koiosPools),
-		OnlyDingoPools:         MarshalPoolList(onlyDingo),
-		OnlyKoiosPools:         MarshalPoolList(onlyKoios),
-		AggregateStatus:        aggregateStatus,
-		AggregateMismatchCount: aggregateCount,
-		AccountStatus:          accountStatus,
-		AccountMismatchCount:   len(accountMismatches),
+		Network:                           network,
+		Epoch:                             epoch,
+		LastCheckedAt:                     now,
+		DingoPoolCount:                    dingoFound,
+		KoiosPoolCount:                    len(koiosPools),
+		OnlyDingoPools:                    MarshalPoolList(onlyDingo),
+		OnlyKoiosPools:                    MarshalPoolList(onlyKoios),
+		AggregateStatus:                   aggregateStatus,
+		AggregateMismatchCount:            aggregateCount,
+		AggregateSignificantMismatchCount: aggregateSignificant,
+		AccountStatus:                     accountStatus,
+		AccountMismatchCount:              len(accountMismatches),
+		AccountSignificantMismatchCount:   CountSignificant(accountMismatches),
 	}); err != nil {
 		return nil, fmt.Errorf("upsert check status: %w", err)
 	}

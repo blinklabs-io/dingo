@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -222,9 +224,16 @@ func ensureDB(
 	cfg *config.Config,
 	logger *slog.Logger,
 	db *database.Database,
+	nodeCfg *cardano.CardanoNodeConfig,
 ) (*database.Database, func(), error) {
 	if db != nil {
 		return db, func() {}, nil
+	}
+	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
+		nodeCfg, cfg.CardanoConfig, cfg.Network, cfg.NetworkMagic,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading cardano node config: %w", err)
 	}
 	dbConfig := &database.Config{
 		DataDir: cfg.DatabasePath, Logger: logger,
@@ -249,6 +258,7 @@ func ensureDB(
 			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode: cfg.StorageMode, MaxConnections: cfg.DatabaseWorkers,
 			Logger: logger, TracingEnabled: cfg.Tracing,
+			GenesisStakingEmpty: genesisStakingEmpty,
 		},
 	)
 	if err != nil {
@@ -358,7 +368,11 @@ func (r *DeferredIndexRebuilder) BuildCritical() error {
 	if r == nil || r.manager == nil {
 		return nil
 	}
-	if err := r.manager.BuildCriticalDeferredIndexes(); err != nil {
+	logger := r.logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	if err := ensureCriticalDeferredIndexes(r.manager, logger); err != nil {
 		return fmt.Errorf("rebuilding critical deferred indexes: %w", err)
 	}
 	return nil
@@ -420,9 +434,8 @@ const criticalIndexRebuildLogThreshold = time.Second
 // The pending marker records that a cycle was interrupted; it does not
 // record which indexes exist, and it is not durable across a Mithril sync:
 // mithril/sync.go rebuilds the critical subset and then calls
-// updateMithrilReadyState, whose db.ClearSyncState is an unqualified
-// DELETE FROM sync_state. Until that clear learned to carry
-// deferred.SyncStateKey across it (mithril/sync_import.go), every completed
+// updateMithrilReadyState, which now leaves deferred.SyncStateKey untouched
+// (mithril/sync_import.go). Before that preservation, every completed
 // Mithril sync erased the marker moments after BuildCritical set it, leaving
 // the database with the critical subset built, the lazy remainder dropped,
 // and nothing recording either — the state two Mithril-bootstrapped preview
@@ -646,6 +659,16 @@ func LoadWithDB(
 	immutableDir string,
 	db *database.Database,
 ) error {
+	remoteImmutable, err := classifyRemoteImmutableSource(immutableDir)
+	if err != nil {
+		return err
+	}
+	if remoteImmutable && cfg.DatabasePath == "" {
+		return errors.New(
+			"loading from a remote ImmutableDB requires databasePath " +
+				"for its download cache",
+		)
+	}
 	// Derive default config path from cfg.Network when cfg.CardanoConfig is empty
 	cardanoConfigPath := cfg.CardanoConfig
 	network := cfg.Network
@@ -706,16 +729,18 @@ func LoadWithDB(
 		"config", nodeCfg,
 	)
 	// Load database (open new one if not provided)
-	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
+	db, closeDB, err := ensureDB(cfg, logger, db, nodeCfg) //nolint:contextcheck
 	if err != nil {
 		return err
 	}
 	defer closeDB()
 	// Enable bulk-load optimizations if the metadata store supports them
 	defer WithBulkLoadPragmas(db, logger)()
+	deferredIndexes := WithDeferredIndexes(db, logger)
 	// Immutable load replays trusted block batches directly into the ledger, so
 	// it does not need the event-driven reread path here.
 	cm, err := chain.NewManager(
+		ctx,
 		db,
 		nil,
 	)
@@ -764,6 +789,8 @@ func LoadWithDB(
 			// must match serve mode (node.go) on replay of the same DB.
 			DelegatorInactivityEnabled: cfg.DelegatorInactivityEnabled,
 			DelegatorInactivity:        cfg.DelegatorInactivity,
+			// Load replays unvalidated blocks, the path this setting batches.
+			ApplyRowBatchingEnabled: cfg.LedgerApplyRowBatchingEnabled,
 			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
 				WorkerPoolSize: cfg.DatabaseWorkers,
 				TaskQueueSize:  cfg.DatabaseQueueSize,
@@ -853,9 +880,50 @@ func LoadWithDB(
 		replayErrCh <- err
 	}()
 
-	blocksCopied, immutableTipSlot, err := copyBlocksDirect(
-		replayCtx, logger, immutableDir, c, replayBatches,
+	var (
+		blocksCopied     int
+		immutableTipSlot uint64
 	)
+	if remoteImmutable {
+		var (
+			regularSlots  uint64
+			canContainEBB bool
+		)
+		if byronGenesis := nodeCfg.ByronGenesis(); byronGenesis != nil {
+			if byronGenesis.ProtocolConsts.K <= 0 ||
+				uint64(byronGenesis.ProtocolConsts.K) > math.MaxUint64/10 {
+				return errors.New(
+					"remote ImmutableDB requires a valid Byron security parameter",
+				)
+			}
+			regularSlots = uint64(
+				byronGenesis.ProtocolConsts.K,
+			) * 10 //nolint:gosec
+			canContainEBB = true
+		} else if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil &&
+			shelleyGenesis.EpochLength > 0 {
+			regularSlots = uint64(shelleyGenesis.EpochLength) //nolint:gosec
+		} else {
+			return errors.New(
+				"remote ImmutableDB requires an initial era epoch length",
+			)
+		}
+		limits, limitErr := remoteImmutableLimitsForSlots(
+			regularSlots, canContainEBB,
+		)
+		if limitErr != nil {
+			return limitErr
+		}
+		blocksCopied, immutableTipSlot, err = copyBlocksRemote(
+			replayCtx, logger, immutableDir,
+			filepath.Join(cfg.DatabasePath, remoteImmutableCacheDir),
+			limits, c, replayBatches,
+		)
+	} else {
+		blocksCopied, immutableTipSlot, err = copyBlocksDirect(
+			replayCtx, logger, immutableDir, c, replayBatches,
+		)
+	}
 	close(replayBatches)
 	if err != nil {
 		cancelReplay()
@@ -884,6 +952,12 @@ func LoadWithDB(
 	// the database missing mark/reward snapshots for those epochs.
 	if err := captureFailures.err(); err != nil {
 		return err
+	}
+	if err := deferredIndexes.BuildCritical(); err != nil {
+		return fmt.Errorf(
+			"rebuilding critical metadata indexes after immutable load: %w",
+			err,
+		)
 	}
 	return nil
 }
@@ -978,7 +1052,7 @@ func LoadBlobsWithDB(
 	}
 	// Load database (open new one if not provided)
 	callerProvidedDB := db != nil
-	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
+	db, closeDB, err := ensureDB(cfg, logger, db, nil) //nolint:contextcheck
 	if err != nil {
 		return nil, err
 	}
@@ -991,7 +1065,7 @@ func LoadBlobsWithDB(
 		defer WithBulkLoadPragmas(db, logger)()
 	}
 	// Load chain without event bus (no ledger processing)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(ctx, db, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load chain manager: %w", err)
 	}
@@ -1113,7 +1187,7 @@ func copyBlocksDirect(
 				"decoding block CBOR: non-empty batch decoded to no blocks",
 			)
 		}
-		if err := c.AddBlocks(blockBatch); err != nil {
+		if err := c.AddBlocks(ctx, blockBatch); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
 				"failed to import block: %w",
 				err,
@@ -1380,7 +1454,7 @@ func CopyImmutableBlobsBounded(
 			}
 		}
 		if len(blockBatch) > 0 {
-			if err := c.AddRawBlocksWithCallback(blockBatch, callback); err != nil {
+			if err := c.AddRawBlocksWithCallback(ctx, blockBatch, callback); err != nil {
 				return blocksCopied, lastSlot, fmt.Errorf(
 					"failed to import block: %w", err,
 				)
@@ -1528,7 +1602,7 @@ func copyBlocksRawWithCallback(
 		if len(blockBatch) == 0 {
 			break
 		}
-		if err := c.AddRawBlocksWithCallback(blockBatch, callback); err != nil {
+		if err := c.AddRawBlocksWithCallback(ctx, blockBatch, callback); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
 				"failed to import block: %w",
 				err,

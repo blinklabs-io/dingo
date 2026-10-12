@@ -344,7 +344,20 @@ func (s *Store) claimUnfoldedRewardCredits(
 ) ([]*models.RewardAccountOutput, error) {
 	var ret []*models.RewardAccountOutput
 	err := s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
-		query := `
+		var err error
+		ret, err = s.claimUnfoldedRewardCreditsIn(db, ctx, where, args...)
+		return err
+	})
+	return ret, err
+}
+
+func (s *Store) claimUnfoldedRewardCreditsIn(
+	db queryer,
+	ctx context.Context,
+	where string,
+	args ...any,
+) ([]*models.RewardAccountOutput, error) {
+	query := `
 SELECT ` + rewardAccountOutputColumns + `
 FROM reward_account_output rao
 WHERE ` + where + `
@@ -354,34 +367,32 @@ WHERE ` + where + `
       WHERE rcr.snapshot_epoch = rao.epoch
   )
 ORDER BY rao.id`
-		if s.dialect.Name() != "sqlite" {
-			query += " FOR UPDATE"
+	if s.dialect.Name() != "sqlite" {
+		query += " FOR UPDATE"
+	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), args...)
+	if err != nil {
+		return nil, fmt.Errorf("claim unfolded reward credits: %w", err)
+	}
+	ret, err := scanRewardAccountOutputRows(rows)
+	if err != nil {
+		return nil, err
+	}
+	chunk := max(1, s.dialect.ParameterLimit())
+	for start := 0; start < len(ret); start += chunk {
+		end := min(start+chunk, len(ret))
+		ids := make([]any, 0, end-start)
+		for _, output := range ret[start:end] {
+			ids = append(ids, output.ID)
 		}
-		rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), args...)
-		if err != nil {
-			return fmt.Errorf("claim unfolded reward credits: %w", err)
+		if _, err := db.ExecContext(ctx, s.dialect.Rebind(
+			`UPDATE reward_account_output SET folded = TRUE WHERE id IN (`+
+				bindPlaceholders(len(ids))+`)`,
+		), ids...); err != nil {
+			return nil, fmt.Errorf("fold claimed reward credits: %w", err)
 		}
-		ret, err = scanRewardAccountOutputRows(rows)
-		if err != nil {
-			return err
-		}
-		chunk := max(1, s.dialect.ParameterLimit())
-		for start := 0; start < len(ret); start += chunk {
-			end := min(start+chunk, len(ret))
-			ids := make([]any, 0, end-start)
-			for _, output := range ret[start:end] {
-				ids = append(ids, output.ID)
-			}
-			if _, err := db.ExecContext(ctx, s.dialect.Rebind(
-				`UPDATE reward_account_output SET folded = TRUE WHERE id IN (`+
-					bindPlaceholders(len(ids))+`)`,
-			), ids...); err != nil {
-				return fmt.Errorf("fold claimed reward credits: %w", err)
-			}
-		}
-		return nil
-	})
-	return ret, err
+	}
+	return ret, nil
 }
 
 // ClaimPendingRewardCreditsForCredential claims every unfolded credit of one
@@ -415,13 +426,61 @@ func (s *Store) ClaimUnfoldedRewardCredits(
 	if limit <= 0 {
 		return nil, nil
 	}
-	return s.claimUnfoldedRewardCredits(
-		txn,
-		"rao.id IN (SELECT id FROM (SELECT o.id FROM reward_account_output o "+
-			"WHERE o.epoch = ? AND o.spendable = TRUE AND o.guarded = FALSE "+
-			"AND o.folded = FALSE ORDER BY o.id LIMIT ?) AS next_ids)",
-		epoch, limit,
-	)
+	var ret []*models.RewardAccountOutput
+	err = s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
+		// The ids are selected on their own, from the pending-round index
+		// down to the epoch, and the rows are then read by primary key.
+		// Folded into one statement, SQLite drives it from the (spendable,
+		// guarded) prefix of that index, which visits every spendable,
+		// unguarded row, folded or not, for each claim.
+		rows, err := db.QueryContext(ctx, s.dialect.Rebind(
+			unfoldedRewardOutputIDsSQL,
+		), epoch, limit)
+		if err != nil {
+			return fmt.Errorf("select unfolded reward credits: %w", err)
+		}
+		ids, err := scanRewardCreditIDs(rows)
+		if err != nil {
+			return err
+		}
+		chunk := max(1, s.dialect.ParameterLimit())
+		for start := 0; start < len(ids); start += chunk {
+			end := min(start+chunk, len(ids))
+			claimed, err := s.claimUnfoldedRewardCreditsIn(
+				db, ctx,
+				"rao.id IN ("+bindPlaceholders(end-start)+")",
+				ids[start:end]...,
+			)
+			if err != nil {
+				return err
+			}
+			ret = append(ret, claimed...)
+		}
+		return nil
+	})
+	return ret, err
+}
+
+const unfoldedRewardOutputIDsSQL = `
+SELECT o.id FROM reward_account_output o
+WHERE o.epoch = ? AND o.spendable = TRUE AND o.guarded = FALSE
+  AND o.folded = FALSE
+ORDER BY o.id LIMIT ?`
+
+func scanRewardCreditIDs(rows *sql.Rows) ([]any, error) {
+	defer rows.Close()
+	var ids []any
+	for rows.Next() {
+		var id uint
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan unfolded reward credit id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read unfolded reward credit ids: %w", err)
+	}
+	return ids, nil
 }
 
 const rollbackUnfoldRewardAccountOutputsSQL = `

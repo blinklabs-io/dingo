@@ -17,18 +17,22 @@ package ouroboros
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // blockfetchMetricsCdfUpdateInterval controls how often CDF metrics are
@@ -141,9 +145,33 @@ type blockfetchSendDrainWaiter interface {
 	WaitSendQueueDrained(time.Duration) bool
 }
 
-type blockfetchConnection interface {
-	ErrorChan() chan error
+// managedConnection is what a protocol handler may do with a connection the
+// connection manager owns: wait for its teardown and drop the transport. It
+// deliberately has no ErrorChan: the manager is the only receiver of that
+// one-shot channel, so a handler that received from it could take the error
+// the manager's cleanup is waiting for.
+type managedConnection interface {
+	Done() <-chan struct{}
 	Close() error
+}
+
+// connWithDone adapts a manager-owned *ouroboros.Connection and the teardown
+// signal from GetConnectionWithDone to managedConnection.
+type connWithDone struct {
+	conn     *ouroboros.Connection
+	done     <-chan struct{}
+	closeErr func() error
+}
+
+func (c connWithDone) Done() <-chan struct{} { return c.done }
+
+func (c connWithDone) Close() error { return c.conn.Close() }
+
+func (c connWithDone) CloseError() error {
+	if c.closeErr == nil {
+		return nil
+	}
+	return c.closeErr()
 }
 
 // blockFetchKey identifies one outstanding RequestRange call. gouroboros'
@@ -252,7 +280,15 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 	ctx blockfetch.CallbackContext,
 	blockType uint,
 	blockData []byte,
-) error {
+) (err error) {
+	// The span covers the decode, so a delivery that fails to decode is still
+	// traced; the block's own attributes are added once it has decoded.
+	_, span := tracing.Start(
+		context.Background(),
+		"blockfetch.block",
+		attribute.String("connection.id", ctx.ConnectionId.String()),
+	)
+	defer func() { tracing.End(span, err) }()
 	key := hashDecodeInput(blockType, blockData)
 	cacheBytes := decodeCacheChargeForRaw(len(blockData))
 	if !hasCborArrayEnvelope(blockData) {
@@ -271,6 +307,7 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 					time.Since(decodeStart).Seconds(),
 				)
 			}
+			// Wrapped with the block type below.
 			return block, err
 		},
 		o.recordBlockDecodeCacheOutcome,
@@ -292,6 +329,7 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 			blockType,
 		)
 	}
+	span.SetAttributes(blockSpanAttributes(block)...)
 	return o.blockfetchClientBlock(ctx, blockType, block)
 }
 
@@ -306,6 +344,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
+	o.recordServedActivity(ctx.ConnectionId)
 	// Validate that start is not after end
 	if start.Slot > end.Slot {
 		o.config.Logger.Warn(
@@ -328,6 +367,22 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		)
 		return nil
 	}
+	// Reserve range capacity before the first allocation (the chain
+	// iterator below and the sender goroutine). Saturation is answered with
+	// NoBlocks, the only rejection BlockFetch defines for a request.
+	release, admitted := o.blockfetchRangeAdmission.reserve(
+		ctx.ConnectionId,
+		ctx.Server.ProtocolInstance().DoneChan(),
+	)
+	if admitted != blockfetchRangeAdmitted {
+		return o.blockfetchRejectSaturated(ctx, start, admitted)
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 	// The requested slot span is not validated here: on a sparse or
 	// low-active-slot-coefficient network, a valid run of consecutive
 	// blocks can span far more slots than mainnet's stability window.
@@ -435,13 +490,19 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		}
 	}
 	o.blockfetchResetNoBlocks(ctx.ConnectionId)
-	// Start async process to send requested block range
+	// Start async process to send requested block range. The goroutine owns
+	// the reservation from here on.
+	handedOff = true
 	go func() {
-		conn := o.connManager.GetConnectionById(ctx.ConnectionId)
-		if conn == nil {
+		defer release()
+		rawConn, connDone := o.connManager.GetConnectionWithDone(
+			ctx.ConnectionId,
+		)
+		if rawConn == nil {
 			chainIter.Cancel()
 			return
 		}
+		conn := connWithDone{conn: rawConn, done: connDone}
 		err := o.blockfetchServerSendBatch(
 			ctx.ConnectionId.String(),
 			start,
@@ -464,13 +525,34 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	return nil
 }
 
+// blockfetchRejectSaturated answers a range request that exceeded the
+// per-connection or global admission bound. BlockFetch permits pipelined range
+// requests, so saturation is backpressure and must not feed the stuck-peer
+// valve or disconnect a protocol-compliant peer.
+func (o *Ouroboros) blockfetchRejectSaturated(
+	ctx blockfetch.CallbackContext,
+	start ocommon.Point,
+	result blockfetchRangeAdmitResult,
+) error {
+	o.config.Logger.Debug(
+		"blockfetch: range admission saturated, sending NoBlocks",
+		"connection_id", ctx.ConnectionId.String(),
+		"start_slot", start.Slot,
+		"per_connection", result == blockfetchRangeConnSaturated,
+	)
+	if err := ctx.Server.NoBlocks(); err != nil {
+		return fmt.Errorf("blockfetch NoBlocks after saturation: %w", err)
+	}
+	return nil
+}
+
 func (o *Ouroboros) blockfetchServerSendBatch(
 	connectionID string,
 	start ocommon.Point,
 	end ocommon.Point,
 	chainIter blockfetchRangeIterator,
 	server blockfetchBatchServer,
-	conn blockfetchConnection,
+	conn managedConnection,
 	maxBlocks int,
 ) error {
 	defer chainIter.Cancel()
@@ -490,6 +572,7 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 		conn,
 		"StartBatch",
 	); err != nil {
+		// The drain error already names the phase.
 		return err
 	}
 	reachedEnd := false
@@ -497,7 +580,7 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 Loop:
 	for {
 		select {
-		case <-conn.ErrorChan():
+		case <-conn.Done():
 			return nil
 		default:
 			next, iterErr := chainIter.Next(false)
@@ -603,6 +686,7 @@ Loop:
 				conn,
 				"Block",
 			); err != nil {
+				// The drain error already names the phase.
 				return err
 			}
 			// Make sure we don't hang waiting for the next block if we've already hit the end
@@ -635,7 +719,7 @@ func (o *Ouroboros) blockfetchServerWaitForSendDrain(
 	start ocommon.Point,
 	end ocommon.Point,
 	server blockfetchBatchServer,
-	conn blockfetchConnection,
+	conn managedConnection,
 	phase string,
 ) error {
 	drainWaiter, ok := server.(blockfetchSendDrainWaiter)
@@ -646,7 +730,7 @@ func (o *Ouroboros) blockfetchServerWaitForSendDrain(
 		return nil
 	}
 	select {
-	case <-conn.ErrorChan():
+	case <-conn.Done():
 		return nil
 	default:
 	}
@@ -671,7 +755,7 @@ func (o *Ouroboros) blockfetchServerWaitForSendDrain(
 }
 
 func (o *Ouroboros) reportBlockfetchServerAsyncError(
-	conn blockfetchConnection,
+	conn io.Closer,
 	connectionID string,
 	start ocommon.Point,
 	end ocommon.Point,
@@ -700,7 +784,7 @@ func (o *Ouroboros) reportBlockfetchServerAsyncError(
 }
 
 func (o *Ouroboros) closeBlockfetchConnection(
-	conn blockfetchConnection,
+	conn io.Closer,
 	connectionID string,
 	reason string,
 ) {
@@ -805,6 +889,7 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 ) (uint64, error) {
 	client, err := o.blockfetchConnClient(connId)
 	if err != nil {
+		// blockfetchConnClient names the missing manager or connection.
 		return 0, err
 	}
 	dispatchStart := time.Now()
@@ -832,30 +917,52 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 				false,
 			)
 		}
+		// Callers name the range request in their own wrap or log.
 		return 0, err
+	}
+	if o.blockfetchMetrics != nil {
+		o.blockfetchMetrics.requestsIssued.Inc()
+		o.blockfetchMetrics.lastRequestUnixNano.Store(time.Now().UnixNano())
 	}
 	// RequestRange returns once the request is on the wire, so a peer that
 	// replies immediately can drive blockfetchClientRangeDone to completion
 	// on the protocol's receive goroutine before this insert runs. Recording
 	// the start time anyway would leave an entry whose only deleter has
-	// already fired, so consume the marker it left instead.
+	// already fired, so consume the marker it left instead, and count the
+	// completion it deferred now that the request is counted as issued.
 	key := blockFetchKey{connId: connId, requestId: requestId}
 	o.blockFetchMutex.Lock()
-	if _, doneEarly := o.blockFetchDoneEarly[key]; doneEarly {
+	rangeErr, doneEarly := o.blockFetchDoneEarly[key]
+	if doneEarly {
 		delete(o.blockFetchDoneEarly, key)
 	} else {
 		o.blockFetchStarts[key] = dispatchStart
 	}
 	o.blockFetchMutex.Unlock()
+	if doneEarly {
+		o.countBlockfetchRequestCompleted(rangeErr)
+	}
 	return requestId, nil
 }
 
+// blockSpanAttributes describes a decoded block on its blockfetch span.
+func blockSpanAttributes(block gledger.Block) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		tracing.Uint64("block.slot", block.SlotNumber()),
+		attribute.String(
+			"block.hash",
+			hex.EncodeToString(block.Hash().Bytes()),
+		),
+	}
+}
+
+// blockfetchClientBlock updates metrics and peer scoring for a decoded block
+// and forwards it to the shared block handler. The caller owns the span.
 func (o *Ouroboros) blockfetchClientBlock(
 	ctx blockfetch.CallbackContext,
 	blockType uint,
 	block gledger.Block,
 ) error {
-	// Update metrics and peer scoring
 	key := blockFetchKey{connId: ctx.ConnectionId, requestId: ctx.RequestId}
 	o.blockFetchMutex.Lock()
 	startTime, exists := o.blockFetchStarts[key]
@@ -882,6 +989,11 @@ func (o *Ouroboros) blockfetchClientBlock(
 				block.Hash(),
 				delaySeconds,
 				fetchDuration.Seconds(),
+			)
+			o.blockfetchMetrics.recentForks.recordParticipant(
+				block.BlockNumber(),
+				block.SlotNumber(),
+				block.Hash(),
 			)
 			total := o.blockfetchMetrics.totalBlocksFetched.Add(1)
 			// Cumulative CDF buckets: each counter includes all
@@ -926,8 +1038,10 @@ func (o *Ouroboros) blockfetchClientBlock(
 	}
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.eventBus.Publish(
-			ledger.BlockfetchEventType,
+		// This runs on the blockfetch receive goroutine, which must not wait
+		// on the ledger; see enqueueBlockfetchEvent.
+		o.enqueueBlockfetchEvent(
+			ctx.ConnectionId,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
@@ -942,6 +1056,7 @@ func (o *Ouroboros) blockfetchClientBlock(
 					Block: block,
 				},
 			),
+			len(block.Cbor()),
 		)
 	}
 	return nil
@@ -961,18 +1076,31 @@ func (o *Ouroboros) blockfetchClientRangeDone(
 	// dispatching BlockfetchClientRequestRange to the map, so leave a marker
 	// for it to consume rather than letting it insert an entry that no
 	// further callback will ever remove.
+	//
+	// The completion is counted only for a request already counted as
+	// issued. A marked one is counted by the dispatching call once
+	// RequestRange succeeds; if it fails instead (gouroboros can drain a
+	// queued request during protocol shutdown while its send is still
+	// failing), the request was never counted as issued and its completion
+	// is dropped with the marker, so completed never exceeds issued.
 	key := blockFetchKey{connId: ctx.ConnectionId, requestId: ctx.RequestId}
 	o.blockFetchMutex.Lock()
-	if _, started := o.blockFetchStarts[key]; started {
+	_, started := o.blockFetchStarts[key]
+	if started {
 		delete(o.blockFetchStarts, key)
 	} else {
-		o.blockFetchDoneEarly[key] = struct{}{}
+		o.blockFetchDoneEarly[key] = rangeErr
 	}
 	o.blockFetchMutex.Unlock()
+	if started {
+		o.countBlockfetchRequestCompleted(rangeErr)
+	}
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.eventBus.Publish(
-			ledger.BlockfetchEventType,
+		// Same per-connection queue as the blocks, so this BatchDone reaches
+		// the ledger after every block the connection delivered before it.
+		o.enqueueBlockfetchEvent(
+			ctx.ConnectionId,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
@@ -982,6 +1110,7 @@ func (o *Ouroboros) blockfetchClientRangeDone(
 					RangeErr:     rangeErr,
 				},
 			),
+			0,
 		)
 	}
 	return nil
@@ -1004,6 +1133,7 @@ func (o *Ouroboros) instrumentBlockfetchRequestRange(
 		startTime := time.Now()
 		err := fn(ctx, start, end)
 		o.recordProtocolMessage("blockfetch", err, time.Since(startTime))
+		// The instrumented callback's error passes through unchanged.
 		return err
 	}
 }
@@ -1019,6 +1149,7 @@ func (o *Ouroboros) instrumentBlockfetchBlockRaw(
 		start := time.Now()
 		err := fn(ctx, blockType, blockData)
 		o.recordProtocolMessage("blockfetch", err, time.Since(start))
+		// The instrumented callback's error passes through unchanged.
 		return err
 	}
 }
@@ -1030,6 +1161,20 @@ func (o *Ouroboros) instrumentBlockfetchRangeDone(
 		start := time.Now()
 		err := fn(ctx, rangeErr)
 		o.recordProtocolMessage("blockfetch", err, time.Since(start))
+		// The instrumented callback's error passes through unchanged.
 		return err
+	}
+}
+
+// countBlockfetchRequestCompleted counts one terminal outcome of a request
+// already counted in requestsIssued.
+func (o *Ouroboros) countBlockfetchRequestCompleted(rangeErr error) {
+	if o.blockfetchMetrics == nil {
+		return
+	}
+	if rangeErr == nil {
+		o.blockfetchMetrics.requestsCompletedOK.Inc()
+	} else {
+		o.blockfetchMetrics.requestsCompletedErr.Inc()
 	}
 }
