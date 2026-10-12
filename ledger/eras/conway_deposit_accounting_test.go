@@ -122,7 +122,7 @@ func TestValidateTxConwayDepositsComeFromProtocolParameters(t *testing.T) {
 		certType lcommon.CertificateType
 		required uint64
 		supplied uint64
-		build    func(amount int64) lcommon.Certificate
+		build    func(amount uint64) lcommon.Certificate
 	}
 	scenarios := []scenario{
 		{
@@ -130,7 +130,7 @@ func TestValidateTxConwayDepositsComeFromProtocolParameters(t *testing.T) {
 			certType: lcommon.CertificateTypeRegistration,
 			required: depositTestKeyDeposit,
 			supplied: 1_000_000,
-			build: func(amount int64) lcommon.Certificate {
+			build: func(amount uint64) lcommon.Certificate {
 				return &lcommon.RegistrationCertificate{
 					CertType:        uint(lcommon.CertificateTypeRegistration),
 					StakeCredential: depositTestCred(),
@@ -143,7 +143,7 @@ func TestValidateTxConwayDepositsComeFromProtocolParameters(t *testing.T) {
 			certType: lcommon.CertificateTypeRegistrationDrep,
 			required: depositTestDRepDeposit,
 			supplied: 1_000_000,
-			build: func(amount int64) lcommon.Certificate {
+			build: func(amount uint64) lcommon.Certificate {
 				return &lcommon.RegistrationDrepCertificate{
 					CertType: uint(
 						lcommon.CertificateTypeRegistrationDrep,
@@ -164,7 +164,7 @@ func TestValidateTxConwayDepositsComeFromProtocolParameters(t *testing.T) {
 				t.Parallel()
 				// #nosec G115 -- small test constants
 				tx, in := depositTestTx(
-					isValid, sc.build(int64(sc.supplied)),
+					isValid, sc.build(sc.supplied),
 					sc.certType, sc.supplied,
 				)
 				ls := newMockLedgerState()
@@ -194,7 +194,7 @@ func TestValidateTxConwayDepositsComeFromProtocolParameters(t *testing.T) {
 				t.Parallel()
 				// #nosec G115 -- small test constants
 				tx, in := depositTestTx(
-					isValid, sc.build(int64(sc.required)),
+					isValid, sc.build(sc.required),
 					sc.certType, sc.required,
 				)
 				ls := newMockLedgerState()

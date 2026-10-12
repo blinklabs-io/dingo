@@ -300,13 +300,14 @@ type VoteManagerConfig struct {
 
 // storedVote is one retained vote with its serving metadata.
 type storedVote struct {
-	vote       lcommon.LeiosVote
-	raw        cbor.RawMessage
-	originConn string // empty for locally emitted votes
-	verified   bool
-	seq        uint64
-	epoch      uint64
-	insertedAt time.Time
+	vote             lcommon.LeiosVote
+	raw              cbor.RawMessage
+	originConn       string // empty for locally emitted votes
+	announcingRbHash lcommon.Blake2b256
+	verified         bool
+	seq              uint64
+	epoch            uint64
+	insertedAt       time.Time
 }
 
 // voteRecord is the authoritative dedup and tally-accounting entry for
@@ -1254,6 +1255,8 @@ func (m *VoteManager) CommitteeForEpoch(epoch uint64) (*Committee, error) {
 // ValidateDijkstraCertificate verifies a Dijkstra certificate against the
 // historical committee and keys resolved for epoch. Unlike vote admission,
 // block admission is strict: every selected signer must have a verified key.
+// A verdict on the certificate wraps ErrInvalidCertificate; an error that does
+// not means the committee, its keys, or its threshold could not be resolved.
 func (m *VoteManager) ValidateDijkstraCertificate(
 	epoch uint64,
 	signers []byte,
@@ -1268,10 +1271,10 @@ func (m *VoteManager) ValidateDijkstraCertificate(
 		"Dijkstra Leios certificate aggregated signature",
 		aggregatedSignature,
 	); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrInvalidCertificate, err)
 	}
 	if err := lcommon.ValidateLeiosSignerBitfield(signers, entry.committee.Size()); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrInvalidCertificate, err)
 	}
 	var signerStake uint64
 	signerPubs := make([]*bls12381.G2Affine, 0, len(entry.committee.Members))
@@ -1281,8 +1284,15 @@ func (m *VoteManager) ValidateDijkstraCertificate(
 		}
 		pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash)
 		if !ok {
-			return fmt.Errorf("leios certificate signer %d has no usable key", member.VoterId)
+			return fmt.Errorf(
+				"%w: signer %d has no usable key",
+				ErrInvalidCertificate,
+				member.VoterId,
+			)
 		}
+		// Member stakes sum to at most the snapshot's total stake, itself a
+		// uint64, so overflow means inconsistent local snapshot data rather
+		// than anything about the certificate.
 		if ^uint64(0)-signerStake < member.Stake {
 			return errors.New("leios certificate signer stake overflows uint64")
 		}
@@ -1298,10 +1308,14 @@ func (m *VoteManager) ValidateDijkstraCertificate(
 		return err
 	}
 	if !quorumMet {
-		return ErrQuorumNotMet
+		return fmt.Errorf("%w: %w", ErrInvalidCertificate, ErrQuorumNotMet)
 	}
 	if err := VerifyAggregateSignature(signerPubs, message, aggregatedSignature); err != nil {
-		return fmt.Errorf("verify Leios certificate aggregate signature: %w", err)
+		return fmt.Errorf(
+			"%w: verify aggregate signature: %w",
+			ErrInvalidCertificate,
+			err,
+		)
 	}
 	return nil
 }
@@ -2278,13 +2292,14 @@ func (m *VoteManager) insertVote(
 	}
 	m.updateRecordsGaugeLocked()
 	stored := &storedVote{
-		vote:       vote,
-		raw:        raw,
-		originConn: originConn,
-		verified:   verified,
-		seq:        m.nextSeq,
-		epoch:      epoch,
-		insertedAt: now,
+		vote:             vote,
+		raw:              raw,
+		originConn:       originConn,
+		announcingRbHash: announcingRbHash,
+		verified:         verified,
+		seq:              m.nextSeq,
+		epoch:            epoch,
+		insertedAt:       now,
 	}
 	m.nextSeq++
 	m.votesById[voteId] = stored
@@ -2533,6 +2548,13 @@ func (m *VoteManager) NextVotes(
 		for _, sv := range m.voteLog[startIdx:] {
 			cursor = sv.seq + 1
 			if sv.originConn == connKey {
+				continue
+			}
+			// Prototype votes sign the announcing ranking-block hash and are
+			// diffused inline over leios-notify. Protocol 20 carries the legacy
+			// slot-plus-EB-hash domain, so serving a prototype signature there
+			// guarantees that an honest peer rejects it.
+			if sv.announcingRbHash != (lcommon.Blake2b256{}) {
 				continue
 			}
 			collected = append(collected, sv.vote)

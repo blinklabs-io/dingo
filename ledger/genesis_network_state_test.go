@@ -453,11 +453,11 @@ func TestRejectDuplicateGenesisUtxosDetectsOverlap(t *testing.T) {
 	hash := "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
 	utxos := []lcommon.Utxo{
 		{
-			Id:     shelley.NewShelleyTransactionInput(hash, 0),
+			Id:     shelley.MustNewShelleyTransactionInput(hash, 0),
 			Output: &shelley.ShelleyTransactionOutput{OutputAmount: 1_000_000},
 		},
 		{
-			Id:     shelley.NewShelleyTransactionInput(hash, 0),
+			Id:     shelley.MustNewShelleyTransactionInput(hash, 0),
 			Output: &shelley.ShelleyTransactionOutput{OutputAmount: 2_000_000},
 		},
 	}
@@ -477,11 +477,11 @@ func TestRejectDuplicateGenesisUtxosDetectsOverlap(t *testing.T) {
 	// values disagree.
 	equalValueUtxos := []lcommon.Utxo{
 		{
-			Id:     shelley.NewShelleyTransactionInput(hash, 0),
+			Id:     shelley.MustNewShelleyTransactionInput(hash, 0),
 			Output: &shelley.ShelleyTransactionOutput{OutputAmount: 1_000_000},
 		},
 		{
-			Id:     shelley.NewShelleyTransactionInput(hash, 0),
+			Id:     shelley.MustNewShelleyTransactionInput(hash, 0),
 			Output: &shelley.ShelleyTransactionOutput{OutputAmount: 1_000_000},
 		},
 	}
@@ -535,9 +535,9 @@ func TestRejectDuplicateGenesisUtxosAllowsDistinctRefs(t *testing.T) {
 	hashA := "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
 	hashB := "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
 	utxos := []lcommon.Utxo{
-		{Id: shelley.NewShelleyTransactionInput(hashA, 0)},
-		{Id: shelley.NewShelleyTransactionInput(hashA, 1)},
-		{Id: shelley.NewShelleyTransactionInput(hashB, 0)},
+		{Id: shelley.MustNewShelleyTransactionInput(hashA, 0)},
+		{Id: shelley.MustNewShelleyTransactionInput(hashA, 1)},
+		{Id: shelley.MustNewShelleyTransactionInput(hashB, 0)},
 	}
 	require.NoError(t, rejectDuplicateGenesisUtxos(utxos))
 }

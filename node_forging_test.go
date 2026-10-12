@@ -1299,7 +1299,7 @@ func leiosParentBlock(
 		issuerVkey,
 		make([]byte, 32),
 		lcommon.VrfResult{
-			Output: []byte{},
+			Output: make([]byte, 64),
 			Proof:  make([]byte, 80),
 		},
 		uint64(len(bodyCbor)),

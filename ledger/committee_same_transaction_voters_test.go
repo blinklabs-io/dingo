@@ -437,7 +437,7 @@ func TestValidateTxDijkstraSubTransactionCommitteeVoterEligibility(
 			subPaymentHash := lcommon.Blake2b224Hash(
 				subPaymentKey.Public().(ed25519.PublicKey),
 			)
-			subInput := shelley.NewShelleyTransactionInput(
+			subInput := shelley.MustNewShelleyTransactionInput(
 				strings.Repeat("b8", lcommon.Blake2b256Size),
 				0,
 			)

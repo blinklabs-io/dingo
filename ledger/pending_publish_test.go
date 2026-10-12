@@ -27,8 +27,7 @@ import (
 func TestPendingPublishesFlushesInOrder(t *testing.T) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
-	defer bus.Close()
+	bus := newTestEventBus(t, nil)
 
 	var mu sync.Mutex
 	var got []string
@@ -97,8 +96,7 @@ func TestPendingPublishesIgnoresNilBus(t *testing.T) {
 func TestPendingPublishesBreaksLockCycle(t *testing.T) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
-	defer bus.Close()
+	bus := newTestEventBus(t, nil)
 
 	var chainsyncMutex sync.Mutex
 	handled := make(chan struct{}, 8)

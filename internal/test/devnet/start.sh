@@ -96,6 +96,9 @@ if [[ "${LEIOS}" == "true" ]]; then
   # Keep EB outputs in the tx pump's wallet quarantine until the scenario
   # queries the relay ledger; this delay is not proof of on-chain confirmation.
   export DEVNET_TXPUMP_CONFIRMATION_SLOTS=1000
+  # Voting registration becomes usable at epoch 2. Delay fresh EB work until
+  # after two 150-second epochs and the genesis-start offset.
+  export DEVNET_TXPUMP_START_DELAY_SECONDS=330
   ACTIVE_SPEC="${DEVNET_DINGO_SPEC}"
   echo "Using Dijkstra/Leios network spec: ${ACTIVE_SPEC}"
   echo "Run the producer-to-peer scenario with:"
@@ -111,6 +114,7 @@ if [[ "${LEIOS}" == "true" ]]; then
   echo "  go test -tags devnet -run '^TestLeiosEndorserBlockProducerToPeer$' \\"
   echo "    -timeout 12m ./internal/test/devnet/scenarios/"
 elif [[ "${ACCELERATED}" == "true" ]]; then
+  unset DEVNET_TXPUMP_START_DELAY_SECONDS
   export DEVNET_TXPUMP_CONFIRMATION_SLOTS=100
   if [[ "${MODE}" == "conformance" ]]; then
     export DEVNET_CONFORMANCE_SPEC="./testnet-accelerated.yaml"
@@ -147,6 +151,7 @@ else
   unset DEVNET_DINGO_RUN_MODE
   unset DEVNET_DINGO_START_ERA
   unset DEVNET_TXPUMP_TRANSACTION_ERA
+  unset DEVNET_TXPUMP_START_DELAY_SECONDS
   export DEVNET_TXPUMP_CONFIRMATION_SLOTS=600
 fi
 

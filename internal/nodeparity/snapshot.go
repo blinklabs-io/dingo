@@ -277,9 +277,15 @@ func queryUTxOByRefs(
 		batch := refs[start:end]
 		txIns := make([]lcommon.TransactionInput, len(batch))
 		for i, ref := range batch {
-			txIns[i] = shelley.NewShelleyTransactionInput(
+			input, err := shelley.NewShelleyTransactionInput(
 				ref.Hash.String(), ref.Idx,
 			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"utxo by txin ref %d: %w", start+i, err,
+				)
+			}
+			txIns[i] = input
 		}
 		page, err := client.GetUTxOByTxIn(txIns)
 		if err != nil {

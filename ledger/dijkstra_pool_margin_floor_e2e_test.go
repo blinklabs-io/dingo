@@ -20,12 +20,46 @@ import (
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/utxoref"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
+
+func dijkstraTestBlockHeader(
+	blockNumber, slot uint64,
+	prevHash lcommon.Blake2b256,
+	bodyHash lcommon.Blake2b256,
+	bodySize uint64,
+) *gdijkstra.DijkstraBlockHeader {
+	return &gdijkstra.DijkstraBlockHeader{
+		BabbageBlockHeader: babbage.BabbageBlockHeader{
+			Body: babbage.BabbageBlockHeaderBody{
+				BlockNumber:   blockNumber,
+				Slot:          slot,
+				PrevHash:      prevHash,
+				BlockBodyHash: bodyHash,
+				BlockBodySize: bodySize,
+				VrfKey:        make([]byte, 32),
+				VrfResult: lcommon.VrfResult{
+					Output: make([]byte, 64),
+					Proof:  make([]byte, 80),
+				},
+				OpCert: babbage.BabbageOpCert{
+					HotVkey:   make([]byte, 32),
+					Signature: make([]byte, 64),
+				},
+				ProtoVersion: babbage.BabbageProtoVersion{
+					Major: gdijkstra.MinProtocolVersionDijkstra,
+				},
+			},
+			Signature: make([]byte, 448),
+		},
+	}
+}
 
 // dijkstraPoolCertTx builds a real *gdijkstra.DijkstraTransaction carrying a
 // single pool registration certificate with the given margin, for exercising
@@ -62,6 +96,13 @@ func dijkstraTestProtocolParameters() *gdijkstra.DijkstraProtocolParameters {
 			CollateralPercentage: 150,
 			MaxCollateralInputs:  3,
 		},
+		PerasHealingFactor: &cbor.Rat{
+			Rat: new(big.Rat).SetFrac(
+				big.NewInt(1),
+				new(big.Int).Exp(big.NewInt(10), big.NewInt(19), nil),
+			),
+		},
+		PerasQuorumThresholdSafetyMargin: &cbor.Rat{Rat: big.NewRat(0, 1)},
 	}
 }
 

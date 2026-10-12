@@ -188,8 +188,12 @@ func addDijkstraFailingScriptSpend(
 	}
 	params, ok := fx.ls.currentPParams.(*gdijkstra.DijkstraProtocolParameters)
 	require.True(t, ok)
+	costModel := make([]int64, len(lang.GetParamNamesForVersion(lang.LanguageVersionV3)))
+	for i := range costModel {
+		costModel[i] = 1
+	}
 	params.CostModels = map[uint][]int64{
-		2: make([]int64, len(lang.GetParamNamesForVersion(lang.LanguageVersionV3))),
+		2: costModel,
 	}
 	params.ExecutionCosts = lcommon.ExUnitPrice{
 		MemPrice:  &cbor.Rat{Rat: big.NewRat(1, 1000)},
