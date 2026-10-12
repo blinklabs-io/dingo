@@ -33,7 +33,8 @@ type evalTxLedgerStub struct {
 	redeemers map[lcommon.RedeemerKey]lcommon.ExUnits
 }
 
-func (s *evalTxLedgerStub) EvaluateTx(
+func (s *evalTxLedgerStub) EvaluateTxContext(
+	context.Context,
 	lcommon.Transaction,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
 	return 1, lcommon.ExUnits{Memory: 3, Steps: 3}, s.redeemers, nil

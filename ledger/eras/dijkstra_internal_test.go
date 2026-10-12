@@ -862,13 +862,13 @@ func refFeeTestOutput(
 }
 
 var (
-	refFeeTestInput = shelley.NewShelleyTransactionInput(
+	refFeeTestInput = shelley.MustNewShelleyTransactionInput(
 		"a228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee11", 0,
 	)
-	refFeeTestRefInput = shelley.NewShelleyTransactionInput(
+	refFeeTestRefInput = shelley.MustNewShelleyTransactionInput(
 		"b228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22", 0,
 	)
-	refFeeTestChildInput = shelley.NewShelleyTransactionInput(
+	refFeeTestChildInput = shelley.MustNewShelleyTransactionInput(
 		"c228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee33", 0,
 	)
 )

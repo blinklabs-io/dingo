@@ -72,7 +72,7 @@ func newDijkstraTopLevelMintFromSubTx(
 }
 
 func dijkstraEvaluateTestRefInput(index uint32) shelley.ShelleyTransactionInput {
-	return shelley.NewShelleyTransactionInput(
+	return shelley.MustNewShelleyTransactionInput(
 		"b228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
 		int(index),
 	)
