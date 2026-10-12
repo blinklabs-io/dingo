@@ -836,6 +836,9 @@ func (o *Ouroboros) watchLeiosTxFetchCandidate(
 		if candidate.state.CompareAndSwap(
 			leiosTxFetchQueued,
 			leiosTxFetchCanceled,
+		) || candidate.state.CompareAndSwap(
+			leiosTxFetchRunning,
+			leiosTxFetchCanceled,
 		) {
 			o.cancelLeiosTxFetchCandidate(key, candidate)
 		}
