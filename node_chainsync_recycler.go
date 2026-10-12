@@ -99,6 +99,11 @@ func (n *Node) chainsyncApplyEligible(
 	return n.chainSelector.ShouldApplyIngress(connId)
 }
 
+// chainsyncHasBestPeer reports whether chain selection has a best peer.
+func (n *Node) chainsyncHasBestPeer() bool {
+	return n.chainSelector != nil && n.chainSelector.GetBestPeer() != nil
+}
+
 func (n *Node) isChainsyncIngressEligible(
 	connId ouroboros.ConnectionId,
 ) bool {
@@ -422,15 +427,16 @@ func (n *Node) recyclerComponents() chainsyncrecycler.ComponentProvider {
 // lifecycle work holds liveLifecycleMu while it discards and rebuilds the
 // state, and blocking a background ledger callback there can deadlock the
 // quiesce that waits for the callback's goroutine to exit.
-func (n *Node) withLiveChainsyncState(fn func(*chainsync.State)) {
+func (n *Node) withLiveChainsyncState(fn func(*chainsync.State)) bool {
 	if !n.liveLifecycleMu.TryLock() {
-		return
+		return false
 	}
 	defer n.liveLifecycleMu.Unlock()
 	if n.chainsyncState == nil {
-		return
+		return false
 	}
 	fn(n.chainsyncState)
+	return true
 }
 
 // WithLiveComponents runs fn against the node's current ledger, chainsync
@@ -481,20 +487,29 @@ func (n *Node) startChainsyncStallRecycler(
 	chainsyncCfg chainsync.Config,
 ) error {
 	n.chainsyncStallRecycler = chainsyncrecycler.New(
-		chainsyncrecycler.Config{
-			Components:   n.recyclerComponents(),
-			EventBus:     n.eventBus,
-			Logger:       n.config.logger,
-			StallTimeout: chainsyncCfg.StallTimeout,
-			Interval: min(
-				max(chainsyncCfg.StallTimeout/2, 10*time.Second),
-				30*time.Second,
-			),
-			Grace:    max(chainsyncCfg.StallTimeout, 30*time.Second),
-			Cooldown: max(2*chainsyncCfg.StallTimeout, 2*time.Minute),
-		},
+		n.buildChainsyncRecyclerConfig(chainsyncCfg),
 	)
 	return n.chainsyncStallRecycler.Start(ctx)
+}
+
+// buildChainsyncRecyclerConfig assembles the recycler's configuration, the
+// single composition site for its dependencies and hooks.
+func (n *Node) buildChainsyncRecyclerConfig(
+	chainsyncCfg chainsync.Config,
+) chainsyncrecycler.Config {
+	return chainsyncrecycler.Config{
+		Components:   n.recyclerComponents(),
+		EventBus:     n.eventBus,
+		Logger:       n.config.logger,
+		StallTimeout: chainsyncCfg.StallTimeout,
+		Interval: min(
+			max(chainsyncCfg.StallTimeout/2, 10*time.Second),
+			30*time.Second,
+		),
+		Grace:             max(chainsyncCfg.StallTimeout, 30*time.Second),
+		Cooldown:          max(2*chainsyncCfg.StallTimeout, 2*time.Minute),
+		OnPlateauDecision: n.recordPlateauDecision,
+	}
 }
 
 // waitChainsyncStallRecycler stops the recycler and waits for it to exit.

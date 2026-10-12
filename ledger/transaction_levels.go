@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"fmt"
 	"math/big"
 
 	"github.com/blinklabs-io/gouroboros/ledger/common"
@@ -136,7 +137,10 @@ func (t transactionBodyLevel) Produced() []common.Utxo {
 	produced := make([]common.Utxo, 0, len(outputs))
 	for idx, output := range outputs {
 		produced = append(produced, common.Utxo{
-			Id:     shelley.NewShelleyTransactionInput(t.body.Id().String(), idx),
+			Id: shelley.ShelleyTransactionInput{
+				TxId:        t.body.Id(),
+				OutputIndex: uint32(idx),
+			},
 			Output: output,
 		})
 	}
@@ -204,6 +208,38 @@ func TransactionLevelsForApply(tx common.Transaction) []common.Transaction {
 		return levels[len(levels)-1:]
 	}
 	return levels
+}
+
+func validateTransactionOutputIndexes(txs []common.Transaction) error {
+	// Shelley transaction inputs encode their output index in 16 bits.
+	const maxOutputIndex = uint64(1<<16 - 1)
+	const maxOutputCount = maxOutputIndex + 1
+
+	for txIndex, tx := range txs {
+		for levelIndex, level := range TransactionLevelsForApply(tx) {
+			outputCount := uint64(len(level.Outputs()))
+			if outputCount > maxOutputCount {
+				return fmt.Errorf(
+					"transaction %d level %d output index %d exceeds maximum %d",
+					txIndex,
+					levelIndex,
+					outputCount-1,
+					maxOutputIndex,
+				)
+			}
+			if !level.IsValid() && level.CollateralReturn() != nil &&
+				outputCount > maxOutputIndex {
+				return fmt.Errorf(
+					"transaction %d level %d collateral return index %d exceeds maximum %d",
+					txIndex,
+					levelIndex,
+					outputCount,
+					maxOutputIndex,
+				)
+			}
+		}
+	}
+	return nil
 }
 
 var _ common.Transaction = transactionBodyLevel{}

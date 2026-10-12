@@ -17,10 +17,12 @@ package dblifecycle_test
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -35,7 +37,8 @@ import (
 
 func testConfig(dataDir string) *config.Config {
 	return &config.Config{
-		DatabasePath: dataDir,
+		CardanoConfig: cardano.EmbeddedConfigPath("preview"),
+		DatabasePath:  dataDir,
 		Plugins: config.PluginsConfig{
 			Storage: config.StoragePluginsConfig{
 				Blob:     plugin.Selection{Provider: "badger"},
@@ -92,6 +95,50 @@ func TestServiceSnapshotAndRestore(t *testing.T) {
 	restoredManifest, err := restoreSvc.Restore(context.Background(), snapDir)
 	require.NoError(t, err)
 	require.Equal(t, m.CommitTimestamp, restoredManifest.CommitTimestamp)
+}
+
+// TestServiceSignsAndVerifiesSnapshotsWithTrustKey verifies that the
+// configured trust key file reaches both Service.Snapshot, which signs with
+// it, and Service.Restore, which refuses a snapshot signed under another key.
+func TestServiceSignsAndVerifiesSnapshotsWithTrustKey(t *testing.T) {
+	t.Parallel()
+
+	writeKey := func(secret string) string {
+		path := filepath.Join(t.TempDir(), "trust.key")
+		require.NoError(t, os.WriteFile(path, []byte(secret), 0o600))
+		return path
+	}
+	srcDir := filepath.Join(t.TempDir(), "src")
+	srcCfg := testConfig(srcDir)
+	srcCfg.DatabaseLifecycle.SnapshotTrustKeyFile = writeKey(
+		"operator-trust-root-0123456789ab",
+	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: srcDir})
+	require.NoError(t, err)
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	snapDir := filepath.Join(t.TempDir(), "snap")
+	m, err := dblifecycle.NewService(srcCfg, nil, nil).Snapshot(
+		context.Background(), snapDir, "", "",
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, m.Authentication)
+
+	wrongCfg := testConfig(filepath.Join(t.TempDir(), "restored-wrong"))
+	wrongCfg.DatabaseLifecycle.SnapshotTrustKeyFile = writeKey(
+		"some-other-trust-root-0123456789",
+	)
+	_, err = dblifecycle.NewService(wrongCfg, nil, nil).Restore(
+		context.Background(), snapDir,
+	)
+	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
+
+	rightCfg := testConfig(filepath.Join(t.TempDir(), "restored"))
+	rightCfg.DatabaseLifecycle.SnapshotTrustKeyFile = srcCfg.DatabaseLifecycle.SnapshotTrustKeyFile
+	_, err = dblifecycle.NewService(rightCfg, nil, nil).Restore(
+		context.Background(), snapDir,
+	)
+	require.NoError(t, err)
 }
 
 // TestServiceSnapshotAppliesMaxCommitPause verifies the offline path passes

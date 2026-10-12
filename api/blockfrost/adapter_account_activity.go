@@ -234,7 +234,7 @@ func (a *NodeAdapter) AccountWithdrawals(ctx context.Context,
 // resolved only for the <= count rows on the page.
 func (a *NodeAdapter) AccountTransactions(ctx context.Context,
 	stakeAddress string,
-	params AccountTransactionsParams,
+	params TransactionRangeParams,
 ) ([]AccountTransactionInfo, int, error) {
 	stakeAddr, credentialTag, stakeKey, err := parseStakeAddress(stakeAddress)
 	if err != nil {
@@ -262,12 +262,15 @@ func (a *NodeAdapter) AccountTransactions(ctx context.Context,
 	if !fromSatisfiable {
 		return []AccountTransactionInfo{}, 0, nil
 	}
-	to, _, err := a.resolveBlockRangeBound(ctx, params.To, false)
+	to, toSatisfiable, err := a.resolveBlockRangeBound(ctx, params.To, false)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"resolve account transactions to range: %w",
 			err,
 		)
+	}
+	if !toSatisfiable {
+		return []AccountTransactionInfo{}, 0, nil
 	}
 
 	offset := (params.Pagination.Page - 1) * params.Pagination.Count
@@ -404,11 +407,9 @@ func (a *NodeAdapter) AccountTransactions(ctx context.Context,
 //     import gap). If no block at or after it exists at all (the position
 //     is beyond every known block), the range is unsatisfiable and the
 //     caller should return an empty result without querying further.
-//   - for an upper ("to") bound, there is no equivalent "last existing
-//     block at or before" index lookup available, so the bound is instead
-//     treated as unconstrained. This can only return more rows than a
-//     literal reading of an unresolvable "to" would (never fewer), which
-//     is the safe direction for an inclusive range filter.
+//   - for an upper ("to") bound in an import gap, the preceding existing
+//     block is used. If there is no preceding block, the range is empty.
+//     A bound beyond the latest block resolves to the latest block.
 //
 // An explicit ":index" sub-position is honored only when the exact block
 // was found; a gap-fallback ignores it and defaults to the start (from)
@@ -421,18 +422,35 @@ func (a *NodeAdapter) resolveBlockRangeBound(ctx context.Context,
 	if pos == nil {
 		return nil, true, nil
 	}
-	if pos.Block > math.MaxUint64-database.BlockInitialIndex {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
+	defer txn.Rollback() //nolint:errcheck
+
+	tip, err := db.GetTip(txn)
+	if err != nil {
+		return nil, false, fmt.Errorf("get chain tip for block range: %w", err)
+	}
+	blockNumber := pos.Block
+	exactRequest := true
+	if blockNumber > tip.BlockNumber {
 		if lower {
 			return nil, false, nil
 		}
-		return nil, true, nil
+		blockNumber = tip.BlockNumber
+		exactRequest = false
 	}
-	idx := pos.Block + database.BlockInitialIndex
+	if blockNumber > math.MaxUint64-database.BlockInitialIndex {
+		return nil, !lower, nil
+	}
+	idx := blockNumber + database.BlockInitialIndex
 
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
-	block, err := a.ledgerState.Database().BlockByIndex(idx, nil)
+	block, err := db.BlockByIndex(idx, txn)
 	if cancelErr := ctx.Err(); cancelErr != nil {
 		return nil, false, cancelErr
 	}
@@ -442,7 +460,7 @@ func (a *NodeAdapter) resolveBlockRangeBound(ctx context.Context,
 		if !lower {
 			txIndex = math.MaxUint32
 		}
-		if pos.Index != nil {
+		if pos.Index != nil && exactRequest {
 			txIndex = *pos.Index
 		}
 		return &models.AddressTransactionPosition{
@@ -451,9 +469,16 @@ func (a *NodeAdapter) resolveBlockRangeBound(ctx context.Context,
 		}, true, nil
 	case errors.Is(err, models.ErrBlockNotFound):
 		if !lower {
-			return nil, true, nil
+			prev, prevErr := db.BlockAtOrBeforeIndex(ctx, idx, txn)
+			if errors.Is(prevErr, models.ErrBlockNotFound) {
+				return nil, false, nil
+			}
+			if prevErr != nil {
+				return nil, false, fmt.Errorf("resolve block at or before %d: %w", pos.Block, prevErr)
+			}
+			return &models.AddressTransactionPosition{Slot: prev.Slot, TxIndex: math.MaxUint32}, true, nil
 		}
-		next, err := a.ledgerState.Database().BlockAtOrAfterIndex(idx, nil)
+		next, err := db.BlockAtOrAfterIndex(idx, txn)
 		if err == nil {
 			return &models.AddressTransactionPosition{
 				Slot:    next.Slot,

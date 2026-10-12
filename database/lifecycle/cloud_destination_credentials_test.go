@@ -169,6 +169,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 		baseURI,
 		"",
 		"",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err, "SnapshotToCloud (local write + cloud upload)")
 
@@ -176,6 +177,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 		ctx,
 		cloudCredentialsTestRegistry,
 		baseURI,
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err, "ListCloudSnapshots")
 	require.True(t, ok, "cloud destination must report listing support")
@@ -198,13 +200,14 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 		ctx,
 		cloudCredentialsTestRegistry,
 		snapshotURI,
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err, "FetchCloudManifest")
 	require.True(t, ok, "cloud destination must report manifest-fetch support")
 	require.Equal(t, manifest.Checksum, fetched.Checksum)
 
 	// Restore accepts the cloud URI directly (downloads, then runs the same
-	// validation as a local restore) — this exercises DownloadDir plus the
+	// validation as a local restore) — this exercises DownloadFiles plus the
 	// full manifest/tip/commit-timestamp consistency checks against real
 	// downloaded data, not just a local round-trip.
 	restoredDir := filepath.Join(t.TempDir(), "restored")
@@ -215,6 +218,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 		snapshotURI,
 		restoredDir,
 		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err, "Restore from cloud URI")
 	require.Equal(t, manifest.CommitTimestamp, restoreMan.CommitTimestamp)
@@ -243,6 +247,10 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 		ctx,
 		cloudCredentialsTestRegistry,
 		snapshotURI,
+		lifecycle.WithManifestKey(testTrustKey),
 	)
-	require.Error(t, err, "manifest must no longer be fetchable after delete")
+	require.ErrorIs(
+		t, err, lifecycle.ErrCloudSnapshotNotFound,
+		"manifest must no longer be fetchable after delete",
+	)
 }

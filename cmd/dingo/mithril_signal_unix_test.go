@@ -122,3 +122,13 @@ func runMithrilSignalHelper(t *testing.T) {
 	cmd.SetContext(config.WithContext(context.Background(), cfg))
 	require.ErrorIs(t, executeWithSignalContext(cmd), context.Canceled)
 }
+
+func TestExecuteWithSignalContextWithoutParent(t *testing.T) {
+	t.Parallel()
+	cmd := &cobra.Command{Use: "no-parent", RunE: func(cmd *cobra.Command, _ []string) error {
+		require.NotNil(t, cmd.Context())
+		return nil
+	}}
+	cmd.SetArgs([]string{})
+	require.NoError(t, executeWithSignalContext(cmd))
+}

@@ -165,13 +165,13 @@ func (s *Store) ImportDrep(
 				regParams,
 			)
 			if errors.Is(err, sql.ErrNoRows) {
-				return nil
+				return insertImportedDrepDelegators(ctx, db, drep)
 			}
 			if err != nil {
 				return fmt.Errorf("import drep registration: %w", err)
 			}
 			registration.ID = uint(registrationID)
-			return nil
+			return insertImportedDrepDelegators(ctx, db, drep)
 		},
 	)
 }
@@ -343,6 +343,15 @@ func (s *Store) RestoreDrepStateAtSlot(
 		txn,
 		func(db queryer, ctx context.Context) error {
 			if _, err := db.ExecContext(ctx, `
+DELETE FROM drep_delegator WHERE added_slot > ?`, slot); err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, `
+UPDATE drep_delegator SET removed_slot = NULL
+WHERE removed_slot > ?`, slot); err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, `
 DELETE FROM drep
 WHERE added_slot > ?
   AND NOT EXISTS (
@@ -462,7 +471,14 @@ WHERE credential_tag = ? AND credential = ?`,
 DELETE FROM drep_expiry_history WHERE added_slot > ?`,
 				slot,
 			)
-			return err
+			if err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, `
+DELETE FROM drep_expiry_epoch_event WHERE added_slot > ?`, slot); err != nil {
+				return err
+			}
+			return s.restoreDormantDRepEpochHistory(db, ctx, slot)
 		},
 	)
 }
@@ -1425,11 +1441,21 @@ func (s *Store) ClearDanglingDRepDelegations(
         AND drep.credential = account.drep
         AND drep.active = TRUE
   )`
-		if _, err := db.ExecContext(ctx, `
+		insertClear := `
 INSERT INTO account_drep_clear (credential_tag, staking_key, added_slot)
 SELECT credential_tag, staking_key, ? FROM account
-WHERE `+predicate+`
-ON CONFLICT (credential_tag, staking_key, added_slot) DO NOTHING`, slot); err != nil {
+WHERE ` + predicate
+		if wrapped, ok := unwrapDialectQueryer(db); ok && wrapped.dialect == "mysql" {
+			insertClear = strings.Replace(
+				insertClear,
+				"INSERT INTO",
+				"INSERT IGNORE INTO",
+				1,
+			)
+		} else {
+			insertClear += "\nON CONFLICT (credential_tag, staking_key, added_slot) DO NOTHING"
+		}
+		if _, err := db.ExecContext(ctx, insertClear, slot); err != nil {
 			return fmt.Errorf("record dangling DRep delegation clears: %w", err)
 		}
 		result, err := db.ExecContext(ctx, `
@@ -1440,8 +1466,32 @@ WHERE `+predicate, slot)
 			return err
 		}
 		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
 		cleared = int(affected)
-		return err
+		if _, err := db.ExecContext(ctx, `
+UPDATE drep_delegator SET removed_slot = ?
+WHERE removed_slot IS NULL`, slot); err != nil {
+			return fmt.Errorf("close existing DRep delegator links: %w", err)
+		}
+		if _, err := db.ExecContext(ctx, `
+INSERT INTO drep_delegator (
+    drep_credential_tag, drep_credential, stake_credential_tag,
+    stake_credential, added_slot
+)
+SELECT d.credential_tag, d.credential, a.credential_tag, a.staking_key, ?
+FROM account a
+JOIN drep d
+  ON d.credential_tag = a.drep_type
+ AND d.credential = a.drep
+WHERE a.active = TRUE
+  AND a.drep IS NOT NULL
+  AND a.drep_type IN (0, 1)
+  AND d.active = TRUE`, slot); err != nil {
+			return fmt.Errorf("rebuild DRep delegator links from accounts: %w", err)
+		}
+		return nil
 	})
 	return cleared, err
 }

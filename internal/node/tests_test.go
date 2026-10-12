@@ -338,15 +338,14 @@ func (m *namedMissingManager) MissingCriticalDeferredIndexes() (
 	return m.missing, nil
 }
 
-// TestEnsureCriticalDeferredIndexesNamesMissingBeforeBuilding pins the
+// TestDeferredIndexRebuilderBuildCriticalNamesMissingBeforeBuilding pins the
 // ordering: the names are logged before the rebuild is entered, not after it
 // returns.
 //
 // A rebuild of one index on a multi-million-row table takes minutes and emits
-// nothing while it runs, which is the silence the reported incident opened
-// with. The assertion reads the log as the rebuild sees it, so a message moved
-// back below the build fails here.
-func TestEnsureCriticalDeferredIndexesNamesMissingBeforeBuilding(
+// nothing while it runs. The assertion reads the log as the rebuild sees it,
+// so a message moved below the build fails here.
+func TestDeferredIndexRebuilderBuildCriticalNamesMissingBeforeBuilding(
 	t *testing.T,
 ) {
 	var buf bytes.Buffer
@@ -356,9 +355,11 @@ func TestEnsureCriticalDeferredIndexesNamesMissingBeforeBuilding(
 		log:     &buf,
 	}
 
-	require.NoError(t, ensureCriticalDeferredIndexes(
-		t.Context(), manager, logger,
-	))
+	require.NoError(t, (&DeferredIndexRebuilder{
+		ctx:     t.Context(),
+		manager: manager,
+		logger:  logger,
+	}).BuildCritical())
 
 	require.Contains(
 		t,
@@ -748,4 +749,28 @@ func TestBuildDingoConfigTokenRegistryDefaultsOff(t *testing.T) {
 	)
 
 	require.False(t, built.TokenRegistry().Enabled)
+}
+
+// buildDingoConfig maps fields one by one, so plannerStatsRefreshEnabled from
+// YAML, the environment or the CLI reaches the node only through an explicit
+// option; without it the node keeps NewConfig's default and the escape hatch
+// does nothing.
+func TestBuildDingoConfigWiresPlannerStatsRefresh(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	for _, enabled := range []bool{false, true} {
+		built := buildDingoConfig(
+			&config.Config{PlannerStatsRefreshEnabled: enabled},
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		)
+		require.Equal(t, enabled, built.PlannerStatsRefreshEnabled())
+	}
 }

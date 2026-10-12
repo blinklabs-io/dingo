@@ -224,9 +224,16 @@ func ensureDB(
 	cfg *config.Config,
 	logger *slog.Logger,
 	db *database.Database,
+	nodeCfg *cardano.CardanoNodeConfig,
 ) (*database.Database, func(), error) {
 	if db != nil {
 		return db, func() {}, nil
+	}
+	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
+		nodeCfg, cfg.CardanoConfig, cfg.Network, cfg.NetworkMagic,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading cardano node config: %w", err)
 	}
 	dbConfig := &database.Config{
 		DataDir: cfg.DatabasePath, Logger: logger,
@@ -251,6 +258,7 @@ func ensureDB(
 			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode: cfg.StorageMode, MaxConnections: cfg.DatabaseWorkers,
 			Logger: logger, TracingEnabled: cfg.Tracing,
+			GenesisStakingEmpty: genesisStakingEmpty,
 		},
 	)
 	if err != nil {
@@ -361,14 +369,11 @@ func (r *DeferredIndexRebuilder) BuildCritical() error {
 	if r == nil || r.manager == nil {
 		return nil
 	}
-	var err error
-	builder, ok := r.manager.(metadata.ContextCriticalDeferredIndexBuilder)
-	if ok {
-		err = builder.BuildCriticalDeferredIndexesContext(r.ctx)
-	} else {
-		err = r.manager.BuildCriticalDeferredIndexes()
+	logger := r.logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
 	}
-	if err != nil {
+	if err := ensureCriticalDeferredIndexes(r.ctx, r.manager, logger); err != nil {
 		return fmt.Errorf("rebuilding critical deferred indexes: %w", err)
 	}
 	return nil
@@ -764,13 +769,14 @@ func LoadWithDB(
 		"config", nodeCfg,
 	)
 	// Load database (open new one if not provided)
-	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
+	db, closeDB, err := ensureDB(cfg, logger, db, nodeCfg) //nolint:contextcheck
 	if err != nil {
 		return err
 	}
 	defer closeDB()
 	// Enable bulk-load optimizations if the metadata store supports them
 	defer WithBulkLoadPragmas(db, logger)()
+	deferredIndexes := WithDeferredIndexes(ctx, db, logger)
 	// Immutable load replays trusted block batches directly into the ledger, so
 	// it does not need the event-driven reread path here.
 	cm, err := chain.NewManager(
@@ -823,6 +829,8 @@ func LoadWithDB(
 			// must match serve mode (node.go) on replay of the same DB.
 			DelegatorInactivityEnabled: cfg.DelegatorInactivityEnabled,
 			DelegatorInactivity:        cfg.DelegatorInactivity,
+			// Load replays unvalidated blocks, the path this setting batches.
+			ApplyRowBatchingEnabled: cfg.LedgerApplyRowBatchingEnabled,
 			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
 				WorkerPoolSize: cfg.DatabaseWorkers,
 				TaskQueueSize:  cfg.DatabaseQueueSize,
@@ -928,7 +936,9 @@ func LoadWithDB(
 					"remote ImmutableDB requires a valid Byron security parameter",
 				)
 			}
-			regularSlots = uint64(byronGenesis.ProtocolConsts.K) * 10 //nolint:gosec
+			regularSlots = uint64(
+				byronGenesis.ProtocolConsts.K,
+			) * 10 //nolint:gosec
 			canContainEBB = true
 		} else if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil &&
 			shelleyGenesis.EpochLength > 0 {
@@ -982,6 +992,12 @@ func LoadWithDB(
 	// the database missing mark/reward snapshots for those epochs.
 	if err := captureFailures.err(); err != nil {
 		return err
+	}
+	if err := deferredIndexes.BuildCritical(); err != nil {
+		return fmt.Errorf(
+			"rebuilding critical metadata indexes after immutable load: %w",
+			err,
+		)
 	}
 	return nil
 }
@@ -1076,7 +1092,7 @@ func LoadBlobsWithDB(
 	}
 	// Load database (open new one if not provided)
 	callerProvidedDB := db != nil
-	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
+	db, closeDB, err := ensureDB(cfg, logger, db, nil) //nolint:contextcheck
 	if err != nil {
 		return nil, err
 	}

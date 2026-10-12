@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -82,6 +83,7 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 	}
 	// Add transaction to mempool
 	err := o.mempool.AddTransaction(
+		context.Background(),
 		uint(tx.EraId),
 		rawTx,
 	)
@@ -164,6 +166,7 @@ func isLocalTxSubmissionInfrastructureError(err error) bool {
 	var fullErr *mempool.MempoolFullError
 	return errors.Is(err, mempool.ErrNilValidator) ||
 		errors.Is(err, mempool.ErrMempoolStopped) ||
+		errors.Is(err, mempool.ErrPendingStateMoved) ||
 		errors.As(err, &fullErr)
 }
 

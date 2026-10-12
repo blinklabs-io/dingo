@@ -87,7 +87,7 @@ func (f manifestRoundTripper) RoundTrip(r *http.Request) (*http.Response, error)
 
 func TestS3ManifestByteLimits(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, WriteManifest(dir, Manifest{Network: "preview"}))
+	require.NoError(t, WriteManifest(dir, Manifest{Network: "preview"}, WithManifestKey([]byte("trusted-key"))))
 	data, err := os.ReadFile(filepath.Join(dir, ManifestFileName))
 	require.NoError(t, err)
 	for _, oversized := range []bool{false, true} {
@@ -104,7 +104,7 @@ func TestS3ManifestByteLimits(t *testing.T) {
 			if oversized {
 				limit = 3
 			}
-			_, err := d.FetchManifestWithOptions(context.Background(), WithManifestMaxBytes(limit))
+			_, err := d.FetchManifestWithOptions(context.Background(), WithManifestMaxBytes(limit), WithManifestKey([]byte("trusted-key")))
 			if oversized {
 				require.ErrorContains(t, err, "size exceeds maximum")
 				require.ErrorIs(t, err, ErrManifestTooLarge)
@@ -113,6 +113,9 @@ func TestS3ManifestByteLimits(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				require.Zero(t, body.Len())
+				body = bytes.NewReader(data)
+				_, err = d.FetchManifestWithOptions(context.Background(), WithManifestKey([]byte("wrong-key")))
+				require.ErrorIs(t, err, ErrManifestUnauthenticated)
 			}
 		})
 	}

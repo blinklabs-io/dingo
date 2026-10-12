@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -77,9 +78,9 @@ type LedgerDelta struct {
 	expandedIndexOffset uint64
 	// skipConsumedInputRecovery applies transaction effects without the
 	// consumed-utxo recovery/repair pass (see Database.SetTransactionWithOpts).
-	// Set only for the Leios Musashi endorser-block apply, which mirrors the
-	// reference ledger's ValidateNone closure apply; false for all ranking-block
-	// deltas so their behavior is unchanged.
+	// Set only for Leios endorser-block closure application, which mirrors the
+	// reference ledger's applyLeiosClosure; false for all ranking-block deltas so
+	// their behavior is unchanged.
 	skipConsumedInputRecovery bool
 	// strictConsumedInputs refuses to recover an absent consumed-input producer
 	// from the blob store and treats it as a hard error instead.
@@ -87,8 +88,12 @@ type LedgerDelta struct {
 	// context, where every consumed input's producer must already be applied and
 	// live. See BatchedTxIngestOpts.StrictAppliedInputConservation.
 	strictConsumedInputs bool
-	closureContextSlot   *uint64
-	stageApplyEvents     func([]TransactionEvent)
+	// validated marks the delta a validated block hands back after applying
+	// each of its transactions; it carries only the block's donation.
+	// LedgerDeltaBatch.apply keeps such a batch on the per-transaction path.
+	validated          bool
+	closureContextSlot *uint64
+	stageApplyEvents   func([]TransactionEvent)
 }
 
 func NewLedgerDelta(
@@ -105,6 +110,7 @@ func NewLedgerDelta(
 	delta.expandedIndexOffset = 0
 	delta.skipConsumedInputRecovery = false
 	delta.strictConsumedInputs = false
+	delta.validated = false
 	delta.closureContextSlot = nil
 	delta.stageApplyEvents = nil
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
@@ -128,6 +134,7 @@ func (d *LedgerDelta) Release() {
 	d.expandedIndexOffset = 0
 	d.skipConsumedInputRecovery = false
 	d.strictConsumedInputs = false
+	d.validated = false
 	d.closureContextSlot = nil
 	d.stageApplyEvents = nil
 	// Return the delta to the pool
@@ -150,7 +157,7 @@ func (d *LedgerDelta) apply(
 	ls *LedgerState,
 	txn *database.Txn,
 ) error {
-	return d.applyWithDonationRecording(ctx, ls, txn, true)
+	return d.applyWithDonationRecording(ctx, ls, txn, true, nil)
 }
 
 func (d *LedgerDelta) applyWithoutRecordingDonations(
@@ -158,7 +165,16 @@ func (d *LedgerDelta) applyWithoutRecordingDonations(
 	ls *LedgerState,
 	txn *database.Txn,
 ) error {
-	return d.applyWithDonationRecording(ctx, ls, txn, false)
+	return d.applyWithDonationRecording(ctx, ls, txn, false, nil)
+}
+
+func (d *LedgerDelta) applyWithAccumulator(
+	ctx context.Context,
+	ls *LedgerState,
+	txn *database.Txn,
+	acc database.BatchAccumulator,
+) error {
+	return d.applyWithDonationRecording(ctx, ls, txn, true, acc)
 }
 
 func (d *LedgerDelta) applyWithDonationRecording(
@@ -166,6 +182,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	ls *LedgerState,
 	txn *database.Txn,
 	recordDonations bool,
+	acc database.BatchAccumulator,
 ) error {
 	// Keep one immutable protocol-parameter snapshot for every certificate in
 	// this delta. A parameter publication between certificates must not mix
@@ -173,6 +190,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	// certificate-free validation deltas may run before snapshots are
 	// initialized during startup.
 	var pparams lcommon.ProtocolParameters
+	var protocolMajor uint64
 	var snapshotLoaded bool
 	appliedTxs := make([]bool, len(d.Transactions))
 	storageIndexOffset := d.expandedIndexOffset
@@ -199,6 +217,18 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			for certIndex := range certDeposits {
 				delete(certDeposits, certIndex)
 			}
+			if level.IsValid() {
+				if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+					ctx,
+					level,
+					d.Point,
+					ls.db,
+					txn,
+				); err != nil {
+					certDepositsMapPool.Put(certDeposits)
+					return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+				}
+			}
 			if len(certs) > 0 && !snapshotLoaded {
 				snapshot := ls.loadConsensusSnapshot()
 				if snapshot == nil {
@@ -208,6 +238,12 @@ func (d *LedgerDelta) applyWithDonationRecording(
 					)
 				}
 				pparams = snapshot.currentPParams
+				version, err := GetProtocolVersion(pparams)
+				if err != nil {
+					certDepositsMapPool.Put(certDeposits)
+					return fmt.Errorf("resolve certificate protocol version: %w", err)
+				}
+				protocolMajor = uint64(version.Major)
 				snapshotLoaded = true
 			}
 			for certIndex, cert := range certs {
@@ -231,23 +267,46 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				certDepositsMapPool.Put(certDeposits)
 				return err
 			}
-			setErr := ls.db.SetTransactionWithOpts(
-				ctx,
-				level,
-				d.Point,
-				uint32(storageIndex), //nolint:gosec
-				updateEpoch,
-				paramUpdates,
-				certDeposits,
-				d.Offsets,
-				txn,
-				database.BatchedTxIngestOpts{
-					SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
-					LedgerContextSlot:              d.closureContextSlot,
-					StrictAppliedInputConservation: d.strictConsumedInputs,
-					SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
-				},
-			)
+			opts := database.BatchedTxIngestOpts{
+				SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
+				TrustedImmutableReplay:         ls.config.TrustedReplay,
+				LedgerContextSlot:              d.closureContextSlot,
+				StrictAppliedInputConservation: d.strictConsumedInputs,
+				SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
+				ProtocolMajor:                  protocolMajor,
+			}
+			var setErr error
+			if acc != nil {
+				setErr = ls.db.SetTransactionBatchedWithOpts(
+					ctx,
+					level,
+					d.Point,
+					uint32(storageIndex), //nolint:gosec
+					updateEpoch,
+					paramUpdates,
+					certDeposits,
+					d.Offsets,
+					acc,
+					txn,
+					opts,
+				)
+				if setErr == nil && ls.afterBatchedTransactionWrite != nil {
+					ls.afterBatchedTransactionWrite()
+				}
+			} else {
+				setErr = ls.db.SetTransactionWithOpts(
+					ctx,
+					level,
+					d.Point,
+					uint32(storageIndex), //nolint:gosec
+					updateEpoch,
+					paramUpdates,
+					certDeposits,
+					d.Offsets,
+					txn,
+					opts,
+				)
+			}
 			certDepositsMapPool.Put(certDeposits)
 			if setErr != nil {
 				if errors.Is(setErr, models.ErrRewardWithdrawalExceedsBalance) {
@@ -466,70 +525,86 @@ func (d *LedgerDelta) processGovernance(
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
 	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
+	hasDRepDeregistrationCerts := governance.HasDRepDeregistrationCertificates(tx)
+	requiresConwayParameters := governance.TransactionRequiresConwayParameters(tx)
 
-	// Early return if no governance data to process
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
+	if !requiresConwayParameters && !hasDRepDeregistrationCerts {
 		return nil
 	}
 
 	// Determine current epoch and Conway protocol parameters.
-	// These are needed for both proposals (govActionLifetime) and
-	// votes (dRepInactivityPeriod for activity tracking).
+	// These are needed for proposals, votes, and DRep activity certificates;
+	// deregistration cleanup does not depend on them.
 	ls.RLock()
 	currentEpoch := ls.currentEpoch.EpochId
 	pparams := ls.currentPParams
 	ls.RUnlock()
 
-	conwayPParams := conwayProtocolParameters(pparams)
-	if conwayPParams == nil {
-		return fmt.Errorf(
-			"governance requires Conway protocol parameters, got %T",
-			pparams,
-		)
-	}
+	if requiresConwayParameters {
+		conwayPParams := conwayProtocolParameters(pparams)
+		if conwayPParams == nil {
+			return fmt.Errorf(
+				"governance requires Conway protocol parameters, got %T",
+				pparams,
+			)
+		}
 
-	// Process governance proposals
-	if len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			ctx,
-			tx,
-			d.Point,
-			txIndex,
-			currentEpoch,
-			conwayPParams.GovActionValidityPeriod,
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process governance proposals: %w", err)
+		// Process governance proposals
+		if len(proposals) > 0 {
+			if err := governance.ProcessProposals(
+				ctx,
+				tx,
+				d.Point,
+				txIndex,
+				currentEpoch,
+				conwayPParams.GovActionValidityPeriod,
+				ls.db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("process governance proposals: %w", err)
+			}
+		}
+
+		// Process governance votes
+		if len(votes) > 0 {
+			if err := governance.ProcessVotes(
+				ctx,
+				tx,
+				d.Point,
+				currentEpoch,
+				conwayPParams.DRepInactivityPeriod,
+				ls.db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("process governance votes: %w", err)
+			}
+		}
+
+		if hasDRepActivityCerts {
+			if err := governance.ProcessDRepActivityCertificates(
+				ctx,
+				tx,
+				d.Point,
+				currentEpoch,
+				conwayPParams.DRepInactivityPeriod,
+				uint64(conwayPParams.ProtocolVersion.Major),
+				ls.db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("process DRep activity certificates: %w", err)
+			}
 		}
 	}
-
-	// Process governance votes
-	if len(votes) > 0 {
-		if err := governance.ProcessVotes(
+	if hasDRepDeregistrationCerts {
+		if err := governance.ProcessDRepDeregistrationEffects(
 			ctx,
 			tx,
 			d.Point,
 			currentEpoch,
-			conwayPParams.DRepInactivityPeriod,
 			ls.db,
 			txn,
 		); err != nil {
-			return fmt.Errorf("process governance votes: %w", err)
-		}
-	}
-
-	if hasDRepActivityCerts {
-		if err := governance.ProcessDRepActivityCertificates(
-			ctx,
-			tx,
-			d.Point,
-			currentEpoch,
-			conwayPParams.DRepInactivityPeriod,
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process DRep activity certificates: %w", err)
+			return fmt.Errorf("process DRep deregistration effects: %w", err)
 		}
 	}
 
@@ -585,12 +660,56 @@ func (b *LedgerDeltaBatch) apply(
 	ls *LedgerState,
 	txn *database.Txn,
 ) error {
+	// API mode batches without the flag. Other storage modes batch only when
+	// ApplyRowBatchingEnabled is set; the stored state is the same either way.
+	if ls.db.StorageMode() != types.StorageModeAPI &&
+		!ls.config.ApplyRowBatchingEnabled {
+		return b.applyUnbatched(ctx, ls, txn)
+	}
+	// The accumulator path does not implement Leios closure context or its
+	// conflict-tolerant input semantics, so keep those batches on the live path.
+	// Validated blocks are outside the batched scope too.
+	for _, delta := range b.deltas {
+		if delta != nil && (delta.closureContextSlot != nil ||
+			delta.skipConsumedInputRecovery || delta.strictConsumedInputs ||
+			delta.validated) {
+			return b.applyUnbatched(ctx, ls, txn)
+		}
+	}
+
+	acc := ls.db.NewBatchAccumulator()
+	if acc == nil {
+		return b.applyUnbatched(ctx, ls, txn)
+	}
+	defer acc.Reset()
 	for _, delta := range b.deltas {
 		if delta == nil {
 			continue // Skip nil deltas (shouldn't happen in normal operation)
 		}
-		err := delta.apply(ctx, ls, txn)
+		err := delta.applyWithAccumulator(ctx, ls, txn, acc)
 		if err != nil {
+			return err
+		}
+		if err := ls.db.FlushBatchStakeDeltas(acc, txn); err != nil {
+			return fmt.Errorf("flush ledger delta stake metadata: %w", err)
+		}
+	}
+	if err := ls.db.FlushBatch(acc, txn); err != nil {
+		return fmt.Errorf("flush ledger delta metadata batch: %w", err)
+	}
+	return nil
+}
+
+func (b *LedgerDeltaBatch) applyUnbatched(
+	ctx context.Context,
+	ls *LedgerState,
+	txn *database.Txn,
+) error {
+	for _, delta := range b.deltas {
+		if delta == nil {
+			continue
+		}
+		if err := delta.apply(ctx, ls, txn); err != nil {
 			return err
 		}
 	}
