@@ -17,6 +17,7 @@ package chainselection
 import (
 	"fmt"
 	"math"
+	"sync/atomic"
 	"testing"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -354,6 +355,87 @@ func TestShouldApplyIngressStaleRuleInactiveWithoutGenesisClock(t *testing.T) {
 			best := cs.SelectBestChain()
 			require.NotNil(t, best)
 			assert.Equal(t, dead, *best)
+		})
+	}
+}
+
+// A peer already selected is dropped, and its headers refused, once the wall
+// clock moves a Genesis window past its advertised tip.
+func TestGenesisIncumbentTurnsWallClockStale(t *testing.T) {
+	t.Parallel()
+	var wall atomic.Uint64
+	wall.Store(2050)
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:        true,
+		SecurityParam:      20,
+		GenesisWindowSlots: 100,
+		WallClockSlot: func() (uint64, bool) {
+			return wall.Load(), true
+		},
+		DisableEventSubscriptions: true,
+	})
+	cs.SetLocalTip(genesisTip(1000, "local", 100))
+	peer := corrConn(1)
+	feedAdvertising(
+		t, cs, peer,
+		genesisTip(2000, "peer-tip", 200),
+		"p", 1000, 1900, 10,
+	)
+	best := cs.SelectBestChain()
+	require.NotNil(t, best, "fixture: a peer within the window is selectable")
+	require.Equal(t, peer, *best)
+	require.True(t, cs.ShouldApplyIngress(peer))
+
+	wall.Store(2200)
+
+	assert.False(t, cs.ShouldApplyIngress(peer),
+		"the incumbent's headers are admitted after its tip went stale")
+	assert.Nil(t, cs.SelectBestChain(),
+		"the incumbent stays selectable after its tip went stale")
+}
+
+// The selector reports whether the stale-tip rule can currently decide, so the
+// composition layer orders tip observation ahead of the apply gate.
+func TestGenesisStaleTipRuleActive(t *testing.T) {
+	t.Parallel()
+	clock := func() (uint64, bool) { return 5000, true }
+	for name, tc := range map[string]struct {
+		cfg  ChainSelectorConfig
+		want bool
+	}{
+		"genesis with clock": {
+			cfg: ChainSelectorConfig{
+				GenesisMode:   true,
+				SecurityParam: 20,
+				WallClockSlot: clock,
+			},
+			want: true,
+		},
+		"genesis without clock source": {
+			cfg: ChainSelectorConfig{
+				GenesisMode:   true,
+				SecurityParam: 20,
+			},
+		},
+		"genesis clock without slot": {
+			cfg: ChainSelectorConfig{
+				GenesisMode:   true,
+				SecurityParam: 20,
+				WallClockSlot: func() (uint64, bool) { return 0, false },
+			},
+		},
+		"praos": {
+			cfg: ChainSelectorConfig{
+				SecurityParam: 20,
+				WallClockSlot: clock,
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tc.cfg.DisableEventSubscriptions = true
+			cs := NewChainSelector(tc.cfg)
+			assert.Equal(t, tc.want, cs.GenesisStaleTipRuleActive())
 		})
 	}
 }

@@ -31,8 +31,20 @@ const (
 	chainSelectedNoneMaxRetryInterval     = time.Second
 )
 
+// chainsyncObserveSynchronously reports whether peer observations must reach
+// chain selection before the apply gate runs. ShouldApplyIngress reads the
+// peer's tracked tip under both Genesis corroboration and the wall-clock
+// stale-tip rule; an unobserved peer reads as not stale, so delivering the
+// observation asynchronously would admit a stale peer's first headers.
+func (n *Node) chainsyncObserveSynchronously() bool {
+	return n.chainSelector != nil &&
+		(n.chainSelector.GenesisCorroborationActive() ||
+			n.chainSelector.GenesisStaleTipRuleActive())
+}
+
 // chainsyncObservePeerTip synchronously feeds a peer tip update into chain
-// selection (and peergov) when the Genesis corroboration gate is active, so the
+// selection (and peergov) when the Genesis corroboration gate or the wall-clock
+// stale-tip rule is active, so the
 // ChainsyncApplyEligible check that immediately follows in the roll-forward
 // handler reflects the header currently being admitted. This closes the race
 // where the apply gate would otherwise read corroboration state that predates
@@ -40,13 +52,12 @@ const (
 // true when it handled the observation synchronously, so the ouroboros layer
 // skips the async PeerTipUpdateEvent publish to avoid a double update.
 //
-// When corroboration is inactive the async path is used unchanged (returns
-// false), so normal high-throughput sync keeps its parallelism.
+// Outside Genesis mode the async path is used unchanged (returns false), so
+// normal high-throughput sync keeps its parallelism.
 func (n *Node) chainsyncObservePeerTip(
 	e chainselection.PeerTipUpdateEvent,
 ) bool {
-	if n.chainSelector == nil ||
-		!n.chainSelector.GenesisCorroborationActive() {
+	if !n.chainsyncObserveSynchronously() {
 		return false
 	}
 	n.chainSelector.HandlePeerTipUpdateEvent(
@@ -68,13 +79,12 @@ func (n *Node) chainsyncObservePeerTip(
 // publish to avoid a double update. Unlike chainsyncObservePeerTip there is no
 // peergov touch: only the chain selector subscribes to PeerRollbackEvent.
 //
-// When corroboration is inactive the async path is used unchanged (returns
+// When neither rule is active the async path is used unchanged (returns
 // false).
 func (n *Node) chainsyncObservePeerRollback(
 	e chainselection.PeerRollbackEvent,
 ) bool {
-	if n.chainSelector == nil ||
-		!n.chainSelector.GenesisCorroborationActive() {
+	if !n.chainsyncObserveSynchronously() {
 		return false
 	}
 	n.chainSelector.HandlePeerRollbackEvent(

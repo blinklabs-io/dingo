@@ -5726,6 +5726,9 @@ func TestChainsyncClientRollForwardWithholdsWallClockStalePeer(t *testing.T) {
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
+		// Models node.chainsyncObservePeerTip, which observes synchronously
+		// whenever the stale-tip rule can decide (the node-level tests pin
+		// that, including with corroboration off).
 		ChainsyncObservePeerTip: func(
 			e chainselection.PeerTipUpdateEvent,
 		) bool {
