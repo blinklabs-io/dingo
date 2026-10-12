@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -55,7 +56,7 @@ func commitTimestampRecoveryFixtureAtTip(
 	}
 	db, err := dbtest.NewDatabase(t, cfg)
 	require.NoError(t, err)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	raw := make([]chain.RawBlock, 0, 5)
 	var prev []byte
@@ -71,9 +72,9 @@ func commitTimestampRecoveryFixtureAtTip(
 		})
 		prev = h
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(raw))
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), raw))
 	ledgerTip := rawBlockTip(raw[tipIndex])
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return db.SetTip(ledgerTip, txn)
 	}))
@@ -139,7 +140,7 @@ func TestRecoverCommitTimestampConflictRewindsChainManagerTip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			raw, db := commitTimestampRecoveryFixture(t)
-			cm, err := chain.NewManager(db, nil)
+			cm, err := chain.NewManager(context.Background(), db, nil)
 			require.NoError(t, err)
 			if tc.securityParam > 0 {
 				require.NoError(t, cm.SetLedger(
@@ -158,13 +159,14 @@ func TestRecoverCommitTimestampConflictRewindsChainManagerTip(t *testing.T) {
 				},
 			}
 
-			require.NoError(t, ls.RecoverCommitTimestampConflict())
+			require.NoError(t, ls.RecoverCommitTimestampConflict(context.Background()))
 
 			require.Equal(t, rawBlockTip(raw[2]), ls.chain.Tip())
-			_, err = ls.chain.BlockByPoint(ls.chain.Tip().Point, nil)
+			_, err = ls.chain.BlockByPoint(context.Background(), ls.chain.Tip().Point, nil)
 			require.NoError(t, err, "chain tip block must be stored")
 			for _, b := range raw[3:] {
 				_, err := database.BlockByPoint(
+					context.Background(),
 					db,
 					ocommon.NewPoint(b.Slot, b.Hash),
 				)
@@ -177,7 +179,7 @@ func TestRecoverCommitTimestampConflictRewindsChainManagerTip(t *testing.T) {
 			}
 			// The node refetches the trimmed blocks; they must extend the
 			// chain again.
-			require.NoError(t, ls.chain.AddRawBlocks(raw[3:]))
+			require.NoError(t, ls.chain.AddRawBlocks(context.Background(), raw[3:]))
 			require.Equal(t, rawBlockTip(raw[4]), ls.chain.Tip())
 		})
 	}
@@ -193,7 +195,7 @@ func TestRecoverCommitTimestampConflictKeepsChainWhenRewindRefused(
 	t.Parallel()
 
 	raw, db := commitTimestampRecoveryFixture(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 1}))
 	ls := &LedgerState{
@@ -205,11 +207,11 @@ func TestRecoverCommitTimestampConflictKeepsChainWhenRewindRefused(
 		},
 	}
 
-	require.NoError(t, ls.RecoverCommitTimestampConflict())
+	require.NoError(t, ls.RecoverCommitTimestampConflict(context.Background()))
 
 	require.Equal(t, rawBlockTip(raw[4]), ls.chain.Tip())
 	for _, b := range raw {
-		_, err := ls.chain.BlockByPoint(ocommon.NewPoint(b.Slot, b.Hash), nil)
+		_, err := ls.chain.BlockByPoint(context.Background(), ocommon.NewPoint(b.Slot, b.Hash), nil)
 		require.NoError(t, err, "block at slot %d must remain", b.Slot)
 	}
 }
@@ -227,7 +229,7 @@ func TestRecoverCommitTimestampConflictFailsClosedOnLaterDeleteError(
 		err:       injectedErr,
 	}
 	db.SetBlobStore(failing)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	ls := &LedgerState{
@@ -238,14 +240,15 @@ func TestRecoverCommitTimestampConflictFailsClosedOnLaterDeleteError(
 			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
-	ls.armContinuationAudit(rawBlockTip(raw[1]).Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), rawBlockTip(raw[1]).Point, "test rollback")
 
-	err = ls.RecoverCommitTimestampConflict()
+	err = ls.RecoverCommitTimestampConflict(context.Background())
 
 	require.ErrorIs(t, err, injectedErr)
 	require.EqualValues(t, 2, failing.deletes.Load())
 	require.Nil(t, ls.continuationAudit.Load())
 	_, err = database.BlockByPoint(
+		context.Background(),
 		db,
 		ocommon.NewPoint(raw[3].Slot, raw[3].Hash),
 	)
@@ -258,7 +261,7 @@ func TestRecoverCommitTimestampConflictSerializesTipDecisionWithCleanup(
 	t.Parallel()
 
 	raw, db := commitTimestampRecoveryFixtureAtTip(t, 4)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	ls := &LedgerState{
@@ -279,13 +282,14 @@ func TestRecoverCommitTimestampConflictSerializesTipDecisionWithCleanup(
 		Cbor:        []byte{0x80},
 	}
 	ls.beforeCommitRecoveryMutationBarrier = func() {
-		require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{next}))
+		require.NoError(t, ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{next}))
 	}
 
-	require.NoError(t, ls.RecoverCommitTimestampConflict())
+	require.NoError(t, ls.RecoverCommitTimestampConflict(context.Background()))
 
 	require.Equal(t, rawBlockTip(raw[4]), ls.chain.Tip())
 	_, err = database.BlockByPoint(
+		context.Background(),
 		db,
 		ocommon.NewPoint(next.Slot, next.Hash),
 	)
@@ -296,7 +300,7 @@ func TestRecoverCommitTimestampConflictKeepsAppendAfterRewind(t *testing.T) {
 	t.Parallel()
 
 	raw, db := commitTimestampRecoveryFixture(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	ls := &LedgerState{
@@ -328,7 +332,7 @@ func TestRecoverCommitTimestampConflictKeepsAppendAfterRewind(t *testing.T) {
 	barrierErr := errors.New("orphan cleanup is outside the chain mutation barrier")
 	ls.beforeCommitRecoveryCleanup = func() error {
 		go func() {
-			addDone <- ls.chain.AddRawBlocks([]chain.RawBlock{next})
+			addDone <- ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{next})
 		}()
 		<-addReachedBarrier
 		held := ls.chain.RawBlockMutationBarrierExcludesAddsForTesting()
@@ -339,10 +343,11 @@ func TestRecoverCommitTimestampConflictKeepsAppendAfterRewind(t *testing.T) {
 		return nil
 	}
 
-	require.NoError(t, ls.RecoverCommitTimestampConflict())
+	require.NoError(t, ls.RecoverCommitTimestampConflict(context.Background()))
 	require.NoError(t, <-addDone)
 	require.Equal(t, rawBlockTip(next), ls.chain.Tip())
 	_, err = database.BlockByPoint(
+		context.Background(),
 		db,
 		ocommon.NewPoint(next.Slot, next.Hash),
 	)
@@ -355,7 +360,7 @@ func TestRecoverCommitTimestampConflictFailsClosedOnUnindexedOrphanDeleteError(
 	t.Parallel()
 
 	raw, db := commitTimestampRecoveryFixtureAtTip(t, 4)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	orphan := chain.RawBlock{
@@ -396,7 +401,7 @@ func TestRecoverCommitTimestampConflictFailsClosedOnUnindexedOrphanDeleteError(
 		},
 	}
 
-	err = ls.RecoverCommitTimestampConflict()
+	err = ls.RecoverCommitTimestampConflict(context.Background())
 
 	require.ErrorIs(t, err, injectedErr)
 	require.EqualValues(t, 1, failing.deletes.Load())
@@ -423,7 +428,7 @@ func TestRecoverCommitTimestampConflictSettlesContinuationAudit(
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			raw, db := commitTimestampRecoveryFixture(t)
-			cm, err := chain.NewManager(db, nil)
+			cm, err := chain.NewManager(context.Background(), db, nil)
 			require.NoError(t, err)
 			require.NoError(t, cm.SetLedger(
 				testSecurityParamLedger{securityParam: 2},
@@ -439,9 +444,9 @@ func TestRecoverCommitTimestampConflictSettlesContinuationAudit(
 				},
 			}
 			forkPoint := rawBlockTip(raw[tc.forkIndex]).Point
-			ls.armContinuationAudit(forkPoint, "test rollback")
+			ls.armContinuationAudit(context.Background(), forkPoint, "test rollback")
 
-			require.NoError(t, ls.RecoverCommitTimestampConflict())
+			require.NoError(t, ls.RecoverCommitTimestampConflict(context.Background()))
 
 			window := ls.continuationAudit.Load()
 			if tc.wantAudit {

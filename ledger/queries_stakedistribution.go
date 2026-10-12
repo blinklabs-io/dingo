@@ -79,12 +79,11 @@ type stakeDistributionEntry = struct {
 // reconstructs pool stakes as of that same slot, so a correct historical
 // numerator is paired with the reserves that were genuinely true at that
 // same point rather than whatever is live now.
-func (ls *LedgerState) queryShelleyStakeDistribution(
-	at QueryPoint,
+func (ls *LedgerState) queryShelleyStakeDistribution(ctx context.Context, at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
 	if txn == nil {
-		txn = ls.db.Transaction(false)
+		txn = ls.db.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	metaTxn := txn.Metadata()
@@ -109,7 +108,7 @@ func (ls *LedgerState) queryShelleyStakeDistribution(
 
 	calc := snapshot.NewCalculator(ls.db)
 	live, err := calc.CalculateStakeDistributionInTxn(
-		context.Background(), txn, targetSlot,
+		ctx, txn, targetSlot,
 	)
 	if err != nil {
 		// Epoch data may not be synced yet for the requested slot (early

@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -61,8 +62,7 @@ import (
 // into the pparams row, so a historical epoch whose fabricated PlutusV2
 // cost model had not yet been replaced by real data carries that same
 // fabrication in its persisted CBOR.
-func (ls *LedgerState) queryShelleyCurrentProtocolParams(
-	at QueryPoint,
+func (ls *LedgerState) queryShelleyCurrentProtocolParams(ctx context.Context, at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
 	snapshot := ls.loadConsensusSnapshot()
@@ -91,7 +91,7 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 		)}, nil
 	}
 	if txn == nil {
-		txn = ls.db.Transaction(false)
+		txn = ls.db.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)

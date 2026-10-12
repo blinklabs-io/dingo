@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"strings"
@@ -265,8 +266,9 @@ func TestClassicPPUPRejectedBeforeBlockApply(t *testing.T) {
 						OutputIdx: uint32(produced.Id.Index()), //nolint:gosec // fixture output index is zero
 					}] = database.CborOffset{BlockSlot: slot, ByteLength: 1}
 				}
-				return db.Transaction(true).Do(func(txn *database.Txn) error {
+				return db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
 					_, err := ls.ledgerProcessBlock(
+						context.Background(),
 						txn,
 						ocommon.NewPoint(slot, block.Hash().Bytes()),
 						block,
@@ -298,6 +300,7 @@ func TestClassicPPUPRejectedBeforeBlockApply(t *testing.T) {
 				before, err := cbor.Encode(pp)
 				require.NoError(t, err)
 				require.NoError(t, db.ApplyPParamUpdates(
+					context.Background(),
 					0, submission+1, ec.desc.Id, quorum, &pp,
 					ec.desc.DecodePParamsUpdateFunc,
 					ec.desc.PParamsUpdateFunc,

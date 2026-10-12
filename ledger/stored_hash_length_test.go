@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -153,7 +154,7 @@ func newStoredHashDB(
 
 func storedHashView(t *testing.T, db *database.Database) *LedgerView {
 	t.Helper()
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	t.Cleanup(txn.Release)
 	return &LedgerView{ls: &LedgerState{db: db}, txn: txn}
 }
@@ -178,7 +179,7 @@ func TestMIRDelegStateRejectsMalformedStoredCredential(t *testing.T) {
 			Amount:     big.NewInt(10),
 		}})
 
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	err := txn.Do(func(txn *database.Txn) error {
 		lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
 		_, err := lv.MIRDelegState(200, true)
@@ -195,11 +196,13 @@ func TestIsVrfKeyInUseRejectsMalformedStoredPoolKey(t *testing.T) {
 			PoolKeyHash: shortStoredHash(lcommon.Blake2b224Size, 0x21),
 		}
 	})
-	inUse, owner, err := storedHashView(t, db).IsVrfKeyInUse(
+	lv := storedHashView(t, db)
+	inUse, owner, err := lv.IsVrfKeyInUse(
 		lcommon.Blake2b256{0x01},
 	)
 	require.ErrorContains(t, err, "VRF key owner pool key hash")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
+	require.ErrorIs(t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault)
 	require.False(t, inUse)
 	require.Equal(t, lcommon.PoolKeyHash{}, owner)
 }
@@ -387,7 +390,7 @@ func TestChainDepStateRejectsMalformedStoredEpochNonce(t *testing.T) {
 	))
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
+	result, err := ls.Query(t.Context(), chainDepStateQuery(), QueryPoint{})
 	require.ErrorContains(t, err, "chain dep state epoch nonce")
 	require.ErrorContains(t, err, "invalid blake2b-256 hash")
 	require.Nil(t, result)

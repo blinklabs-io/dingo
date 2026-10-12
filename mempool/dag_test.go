@@ -45,6 +45,9 @@ type oneShotBlockingValidator struct {
 	startOnce        sync.Once
 }
 
+// countingFailValidator rejects failHash and, as a ledger would, any
+// transaction spending an output of failHash that the pending overlay does not
+// hold: a rejected, unconfirmed transaction's outputs exist nowhere.
 type countingFailValidator struct {
 	failHash string
 	calls    int
@@ -57,11 +60,20 @@ func (v *countingFailValidator) ValidateTx(gledger.Transaction) error {
 func (v *countingFailValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	_ map[utxoref.Key]struct{},
-	_ map[utxoref.Key]lcommon.Utxo,
+	created map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.StateOverlay,
 ) error {
 	v.calls++
 	if tx.Hash().String() == v.failHash {
 		return errors.New("rejected for test")
+	}
+	for _, input := range tx.Inputs() {
+		if input.Id().String() != v.failHash {
+			continue
+		}
+		if _, ok := created[utxoref.ForInput(input)]; !ok {
+			return errors.New("input not found")
+		}
 	}
 	return nil
 }
@@ -85,6 +97,7 @@ func (v *oneShotBlockingValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
 ) error {
 	v.calls.Add(1)
 	if v.advanceEveryCall.Load() {
@@ -97,22 +110,26 @@ func (v *oneShotBlockingValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-func (v *oneShotBlockingValidator) WithTxValidationSession(
+func (v *oneShotBlockingValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		validate func(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
 	) error,
 ) error {
 	generation := v.generation.Load()
+	stillCurrent := func() bool {
+		return v.generation.Load() == generation
+	}
 	return fn(
 		v.ValidateTxWithOverlay,
-		func() bool {
-			return v.generation.Load() == generation
-		},
+		stillCurrent,
+		testCommitIfCurrent(stillCurrent),
 	)
 }
 
@@ -223,6 +240,7 @@ func TestDAGTransactionsFallsBackOnInconsistentOrder(t *testing.T) {
 	require.NoError(
 		t,
 		pool.AddTransaction(
+			context.Background(),
 			uint(conway.EraIdConway),
 			getTestTxBytes(t),
 		),
@@ -253,11 +271,11 @@ func TestDAGTracksAdmittedTransactionDependencies(t *testing.T) {
 
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), childBytes),
 	)
 
 	require.NotNil(t, pool.dag)
@@ -284,7 +302,7 @@ func TestDAGTracksAdmittedTransactionDependencies(t *testing.T) {
 func TestDAGDoesNotWatermarkEvict(t *testing.T) {
 	parentBytes, childBytes, _, _ := getDependentTestTxBytes(t)
 	const originalInputHash = "0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8"
-	totalSize := int64(len(parentBytes) + len(childBytes))
+	totalSize := retainedSize(t, parentBytes) + retainedSize(t, childBytes)
 	capacity := totalSize
 	for totalSize > int64(float64(capacity)*DefaultRejectionWatermark) ||
 		totalSize <= int64(float64(capacity)*DefaultEvictionWatermark) {
@@ -306,11 +324,11 @@ func TestDAGDoesNotWatermarkEvict(t *testing.T) {
 
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), childBytes),
 	)
 	assert.Len(t, pool.Transactions(), 2)
 
@@ -393,7 +411,7 @@ func TestDAGConcurrentSnapshotsAndMutations(t *testing.T) {
 	}
 	wg.Go(func() {
 		for range 200 {
-			errs <- pool.AddTransaction(uint(conway.EraIdConway), txBytes)
+			errs <- pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 			pool.RemoveTransaction(txHash)
 		}
 	})
@@ -416,12 +434,12 @@ func TestDAGAdmissionContinuesDuringRevalidation(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 
 	validator.arm()
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- pool.rebuildOverlay() }()
+	go func() { rebuildDone <- pool.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -432,6 +450,7 @@ func TestDAGAdmissionContinuesDuringRevalidation(t *testing.T) {
 	addDone := make(chan error, 1)
 	go func() {
 		addDone <- pool.AddTransaction(
+			context.Background(),
 			uint(conway.EraIdConway),
 			childBytes,
 		)
@@ -468,16 +487,16 @@ func TestDAGRemovalContinuesDuringRevalidation(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), childBytes),
 	)
 
 	validator.arm()
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- pool.rebuildOverlay() }()
+	go func() { rebuildDone <- pool.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -519,13 +538,13 @@ func TestDAGRevalidationRetriesAfterLedgerGenerationChange(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), txBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes),
 	)
 	callsBeforeRevalidation := validator.calls.Load()
 
 	validator.arm()
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- pool.rebuildOverlay() }()
+	go func() { rebuildDone <- pool.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -562,11 +581,11 @@ func TestDAGRevalidationBoundsLedgerGenerationRetries(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), txBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes),
 	)
 
 	validator.advanceEveryCall.Store(true)
-	err = pool.rebuildOverlay()
+	err = pool.rebuildOverlay(context.Background())
 	require.ErrorIs(t, err, errValidationSnapshotChanged)
 	assert.Len(t, pool.Transactions(), 1)
 	assert.False(t, pool.journalActive)
@@ -584,13 +603,13 @@ func TestDAGRevalidationJournalOverflowLeavesLiveStateUntouched(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 	pool.revalidationJournalCap = 1
 
 	validator.arm()
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- pool.rebuildOverlay() }()
+	go func() { rebuildDone <- pool.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -600,7 +619,7 @@ func TestDAGRevalidationJournalOverflowLeavesLiveStateUntouched(t *testing.T) {
 	pool.RemoveTransaction(parentHash)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), childBytes),
 	)
 
 	close(validator.release)
@@ -622,7 +641,10 @@ func TestDAGRevalidationJournalOverflowLeavesLiveStateUntouched(t *testing.T) {
 	assert.False(t, pool.journalActive)
 }
 
-func TestDAGRevalidationSkipsInvalidDescendantValidation(t *testing.T) {
+// TestDAGRevalidationValidatesDescendantOfInvalidParent pins that a descendant
+// of a rejected parent is validated rather than dropped unseen: only the
+// validator can tell a confirmed parent from an invalid one.
+func TestDAGRevalidationValidatesDescendantOfInvalidParent(t *testing.T) {
 	parentBytes, childBytes, parentHash, _ := getDependentTestTxBytes(t)
 	validator := &countingFailValidator{}
 	pool, err := NewDAG(MempoolConfig{
@@ -634,18 +656,18 @@ func TestDAGRevalidationSkipsInvalidDescendantValidation(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), childBytes),
 	)
 
 	validator.failHash = parentHash
 	validator.calls = 0
-	require.NoError(t, pool.rebuildOverlay())
+	require.NoError(t, pool.rebuildOverlay(context.Background()))
 
-	assert.Equal(t, 1, validator.calls)
+	assert.Equal(t, 2, validator.calls)
 	assert.Empty(t, pool.Transactions())
 	assert.Empty(t, pool.dag.nodes)
 }
@@ -664,24 +686,25 @@ func TestFIFORevalidationPrunesDescendantsOfMissingIndexedTransaction(
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), childBytes),
 	)
 
 	// Simulate an inconsistent live index. The missing parent has no
-	// transaction body to add to the invalid set, but its outputs must still
-	// poison the child during the shared FIFO/DAG revalidation pass.
+	// transaction body to revalidate, so its outputs leave the overlay and the
+	// child is judged against a ledger that does not hold them.
 	pool.Lock()
 	delete(pool.txByHash, parentHash)
 	pool.Unlock()
+	validator.failHash = parentHash
 	validator.calls = 0
 
-	require.NoError(t, pool.rebuildOverlay())
+	require.NoError(t, pool.rebuildOverlay(context.Background()))
 
-	assert.Zero(t, validator.calls)
+	assert.Equal(t, 1, validator.calls)
 	assert.Empty(t, pool.Transactions())
 	assert.Empty(t, pool.overlay.applied)
 }

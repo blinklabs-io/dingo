@@ -15,11 +15,13 @@
 package ledger
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -37,6 +39,8 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -53,6 +57,18 @@ import (
 // transaction's TTL), just scaled down for a fast, readable test.
 func newBabbageQuorum1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 	t.Helper()
+	return newBabbageQuorumCfg(t, 1, "0.1")
+}
+
+// newBabbageQuorumCfg is newBabbageQuorum1Cfg with the security parameter
+// and active slot coefficient chosen by the caller, which sets the stability
+// window (3k/f) and with it the voting deadline.
+func newBabbageQuorumCfg(
+	t *testing.T,
+	securityParam int,
+	activeSlotsCoeff string,
+) *cardano.CardanoNodeConfig {
+	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
@@ -62,14 +78,16 @@ func newBabbageQuorum1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 			"protocolMagic": 42
 		}
 	}`)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(
+		fmt.Sprintf(`{
 		"systemStart": "2026-01-01T00:00:00Z",
-		"securityParam": 1,
-		"activeSlotsCoeff": 0.1,
+		"securityParam": %d,
+		"activeSlotsCoeff": %s,
 		"epochLength": 100,
 		"slotLength": 1,
 		"updateQuorum": 1
-	}`)))
+	}`, securityParam, activeSlotsCoeff),
+	)))
 	return cfg
 }
 
@@ -113,8 +131,12 @@ func TestEvaluateProtocolVersionBump_DetectsQuorumMetUpdate(t *testing.T) {
 		MaxTxSize:          16384,
 		MaxBlockHeaderSize: 1100,
 	}
+	// The voting deadline is slot 40 (100 - 2*30); k=1 block lies past it.
+	testChain, tips := newVersionBumpChain(t, db, 30, 15, 2)
 	ls := &LedgerState{
 		db:         db,
+		chain:      testChain,
+		currentTip: tips[1],
 		currentEra: eras.BabbageEraDesc,
 		currentEpoch: models.Epoch{
 			EpochId:       0,
@@ -132,7 +154,7 @@ func TestEvaluateProtocolVersionBump_DetectsQuorumMetUpdate(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 
 	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State,
 		"quorum-met version-bumping update must set TransitionKnown")
@@ -175,7 +197,7 @@ func TestEvaluateProtocolVersionBump_NoUpdateStaysUnknown(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 
 	require.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"no pending update must leave transitionInfo Unknown")
@@ -227,8 +249,13 @@ func TestHardForkSummary_ProtocolVersionBumpExtendsHorizonPastBoundary(
 		MaxTxSize:          16384,
 		MaxBlockHeaderSize: 1100,
 	}
+	// Blocks at slots 35 and 50: the tip is k=1 block past the slot-40
+	// voting deadline.
+	testChain, tips := newVersionBumpChain(t, db, 35, 15, 2)
+	require.Equal(t, tipSlot, tips[1].Point.Slot)
 	ls := &LedgerState{
-		db: db,
+		db:    db,
+		chain: testChain,
 		epochCache: []models.Epoch{{
 			EpochId:       0,
 			StartSlot:     0,
@@ -246,9 +273,7 @@ func TestHardForkSummary_ProtocolVersionBumpExtendsHorizonPastBoundary(
 		},
 		currentPParams: pparams,
 		transitionInfo: hardfork.NewTransitionUnknown(),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
+		currentTip:     tips[1],
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -275,7 +300,7 @@ func TestHardForkSummary_ProtocolVersionBumpExtendsHorizonPastBoundary(
 
 	// Run the new evaluator: the quorum-met update is detected and
 	// transitionInfo becomes TransitionKnown(1).
-	ls.evaluateProtocolVersionBump()
+	ls.evaluateProtocolVersionBump(t.Context())
 	ls.publishSnapshotsLocked()
 
 	after, err := ls.HardForkSummary()
@@ -286,6 +311,475 @@ func TestHardForkSummary_ProtocolVersionBumpExtendsHorizonPastBoundary(
 		"once the quorum-met update is detected, the appended successor "+
 			"era must cover the TTL just past the boundary",
 	)
+}
+
+// newVersionBumpChain adds count connected Babbage blocks, numbered from 1,
+// at startSlot and every slotIncrement slots after it. It returns the chain
+// and, for each block, the tip a ledger that had applied up to it would hold.
+func newVersionBumpChain(
+	t *testing.T,
+	db *database.Database,
+	startSlot, slotIncrement uint64,
+	count int,
+) (*chain.Chain, []ochainsync.Tip) {
+	t.Helper()
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	testChain := cm.PrimaryChain()
+	blocks, err := fixtures.GenerateBabbageChain(
+		1,
+		lcommon.Blake2b256{},
+		startSlot,
+		slotIncrement,
+		count,
+	)
+	require.NoError(t, err)
+	tips := make([]ochainsync.Tip, 0, len(blocks))
+	for _, block := range blocks {
+		require.NoError(t, testChain.AddBlock(t.Context(), block, nil))
+		tips = append(tips, ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				block.SlotNumber(),
+				block.Hash().Bytes(),
+			),
+			BlockNumber: block.BlockNumber(),
+		})
+	}
+	return testChain, tips
+}
+
+// newQuorumMetVersionBumpLedger returns a Babbage ledger in epoch 0 with a
+// pending update, already meeting the quorum of 1, that bumps the protocol
+// major version into Conway. The caller supplies the chain and tip.
+func newQuorumMetVersionBumpLedger(
+	t *testing.T,
+	cfg *cardano.CardanoNodeConfig,
+	db *database.Database,
+) *LedgerState {
+	t.Helper()
+	updateCbor, err := cbor.Encode(map[uint64]any{
+		14: lcommon.ProtocolParametersProtocolVersion{Major: 9, Minor: 0},
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParamUpdate(
+		[]byte{0xaa}, updateCbor, 10, 0, nil,
+	))
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.BabbageEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:       0,
+			StartSlot:     0,
+			LengthInSlots: 100,
+			SlotLength:    1000,
+			EraId:         eras.BabbageEraDesc.Id,
+		},
+		currentPParams: &babbage.BabbageProtocolParameters{
+			ProtocolMajor:      8,
+			MaxBlockBodySize:   65536,
+			MaxTxSize:          16384,
+			MaxBlockHeaderSize: 1100,
+		},
+		transitionInfo: hardfork.NewTransitionUnknown(),
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+	return ls
+}
+
+// A quorum-met proposal read before the voting deadline can still be
+// superseded, so it must not make the era end known. With k=1 and a 30-slot
+// stability window the deadline is slot 40, and the first block at or past
+// it is what makes the transition known.
+func TestEvaluateProtocolVersionBump_WaitsForVotingDeadline(t *testing.T) {
+	t.Parallel()
+
+	cfg := newBabbageQuorum1Cfg(t)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	ls := newQuorumMetVersionBumpLedger(t, cfg, db)
+	testChain, tips := newVersionBumpChain(t, db, 30, 15, 2)
+	ls.chain = testChain
+
+	ls.currentTip = tips[0]
+	ls.evaluateProtocolVersionBump(t.Context())
+	require.Equal(
+		t,
+		hardfork.TransitionUnknown,
+		ls.transitionInfo.State,
+		"a quorum-met proposal before the voting deadline must not make the transition known",
+	)
+
+	ls.currentTip = tips[1]
+	ls.evaluateProtocolVersionBump(t.Context())
+	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
+	require.Equal(t, uint64(1), ls.transitionInfo.KnownEpoch)
+}
+
+// The rule counts blocks, not slots: with k=2 and a 30-slot stability window
+// the deadline is slot 40, a block exactly at it counts, and the transition
+// is known only once two blocks lie at or past it.
+func TestEvaluateProtocolVersionBump_RequiresKBlocksPastDeadline(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := newBabbageQuorumCfg(t, 2, "0.2")
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	ls := newQuorumMetVersionBumpLedger(t, cfg, db)
+	// Blocks 1-4 at slots 30, 40, 50 and 60.
+	testChain, tips := newVersionBumpChain(t, db, 30, 10, 4)
+	ls.chain = testChain
+
+	ls.currentTip = tips[1]
+	ls.evaluateProtocolVersionBump(t.Context())
+	require.Equal(
+		t,
+		hardfork.TransitionUnknown,
+		ls.transitionInfo.State,
+		"one block at the deadline is fewer than k=2",
+	)
+
+	ls.currentTip = tips[2]
+	ls.evaluateProtocolVersionBump(t.Context())
+	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
+	require.Equal(t, uint64(1), ls.transitionInfo.KnownEpoch)
+}
+
+// The failure scenario: a quorum-met bump is replaced by the same genesis key
+// with a non-bumping update before the voting deadline. No era end may be
+// reported at any point, neither from the early reading nor after the
+// deadline.
+func TestEvaluateProtocolVersionBump_SupersededBeforeDeadlineNeverKnown(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := newBabbageQuorum1Cfg(t)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	ls := newQuorumMetVersionBumpLedger(t, cfg, db)
+	// Blocks at slots 30 and 45, either side of the slot-40 deadline.
+	testChain, tips := newVersionBumpChain(t, db, 30, 15, 2)
+	ls.chain = testChain
+
+	ls.currentTip = tips[0]
+	ls.evaluateProtocolVersionBump(t.Context())
+	require.Equal(
+		t,
+		hardfork.TransitionUnknown,
+		ls.transitionInfo.State,
+		"the early quorum-met bump must not be reported before the deadline",
+	)
+
+	nonBumpCbor, err := cbor.Encode(map[uint64]any{0: uint64(44)})
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParamUpdate(
+		[]byte{0xaa}, nonBumpCbor, 35, 0, nil,
+	))
+	ls.currentTip = tips[1]
+	ls.evaluateProtocolVersionBump(t.Context())
+	require.Equal(
+		t,
+		hardfork.TransitionUnknown,
+		ls.transitionInfo.State,
+		"the replacement no longer bumps the major version",
+	)
+}
+
+// Once reported, the transition cannot change on the same chain: a proposal
+// made after the voting deadline targets the epoch after next, so it does not
+// alter the reading for this boundary, even when the state is re-derived from
+// scratch as on a restart.
+func TestEvaluateProtocolVersionBump_PostDeadlineProposalKeepsTransition(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := newBabbageQuorum1Cfg(t)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	ls := newQuorumMetVersionBumpLedger(t, cfg, db)
+	// Blocks at slots 30, 45 and 60.
+	testChain, tips := newVersionBumpChain(t, db, 30, 15, 3)
+	ls.chain = testChain
+
+	ls.currentTip = tips[1]
+	ls.evaluateProtocolVersionBump(t.Context())
+	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
+
+	nonBumpCbor, err := cbor.Encode(map[uint64]any{0: uint64(44)})
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParamUpdate(
+		[]byte{0xaa}, nonBumpCbor, 50, 1, nil,
+	))
+	ls.currentTip = tips[2]
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
+	ls.evaluateProtocolVersionBump(t.Context())
+	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
+	require.Equal(t, uint64(1), ls.transitionInfo.KnownEpoch)
+}
+
+// A rollback to before the voting deadline leaves no counted block on the
+// surviving chain, so the real rollback path must re-derive Unknown, and a
+// different block past the deadline on that chain makes the transition known
+// again. The count is read from the chain, so nothing stored can carry the
+// abandoned blocks' reading across the rollback.
+func TestEvaluateProtocolVersionBump_RollbackRecountsFromSurvivingChain(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := newBabbageQuorum1Cfg(t)
+	db := newTestDB(t)
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+
+	// The voting deadline is slot 40 (100 - 2*30).
+	preDeadline := chain.RawBlock{
+		Slot:        30,
+		Hash:        testHashBytes("ppup-pre-deadline"),
+		BlockNumber: 1,
+		Type:        1,
+		Cbor:        []byte{0x80},
+	}
+	pastDeadline := chain.RawBlock{
+		Slot:        45,
+		Hash:        testHashBytes("ppup-past-deadline"),
+		PrevHash:    preDeadline.Hash,
+		BlockNumber: 2,
+		Type:        1,
+		Cbor:        []byte{0x80},
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(
+		t.Context(),
+		[]chain.RawBlock{preDeadline, pastDeadline},
+	))
+	for _, block := range []chain.RawBlock{preDeadline, pastDeadline} {
+		require.NoError(t, db.SetBlockNonce(
+			block.Hash, block.Slot, testHashBytes("nonce"), true, nil,
+		))
+	}
+
+	// The rollback reloads the epoch and its pparams from the database, so
+	// both must be stored for the re-evaluation to have a Babbage epoch.
+	require.NoError(t, db.SetEpoch(
+		0, 0, testHashBytes("epoch-nonce"), nil, nil, nil,
+		eras.BabbageEraDesc.Id, 1000, 100, nil,
+	))
+	pparams := &babbage.BabbageProtocolParameters{
+		ProtocolMajor:      8,
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+	}
+	pparamsCbor, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		pparamsCbor, 0, 0, eras.BabbageEraDesc.Id, nil,
+	))
+	bumpCbor, err := cbor.Encode(map[uint64]any{
+		14: lcommon.ProtocolParametersProtocolVersion{Major: 9, Minor: 0},
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParamUpdate(
+		[]byte{0xaa}, bumpCbor, 10, 0, nil,
+	))
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: cfg,
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	ls.metrics.init(prometheus.NewRegistry())
+
+	tipOf := func(block chain.RawBlock) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point:       ocommon.NewPoint(block.Slot, block.Hash),
+			BlockNumber: block.BlockNumber,
+		}
+	}
+	evaluate := func() hardfork.TransitionInfo {
+		ls.Lock()
+		defer ls.Unlock()
+		ls.evaluateProtocolVersionBump(t.Context())
+		return ls.transitionInfo
+	}
+
+	ls.Lock()
+	ls.currentEra = eras.BabbageEraDesc
+	ls.currentEpoch = models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		LengthInSlots: 100,
+		SlotLength:    1000,
+		EraId:         eras.BabbageEraDesc.Id,
+	}
+	ls.currentPParams = pparams
+	ls.currentTip = tipOf(pastDeadline)
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
+	ls.Unlock()
+	require.NoError(t, db.SetTip(tipOf(pastDeadline), nil))
+	require.Equal(t, hardfork.TransitionKnown, evaluate().State)
+
+	// Clear what the evaluation above was seeded with, so the assertions
+	// after the rollback can only hold if it reloads them from the database.
+	ls.Lock()
+	ls.currentEra = eras.EraDesc{}
+	ls.currentEpoch = models.Epoch{}
+	ls.currentPParams = nil
+	ls.Unlock()
+
+	// The chain rolls back first and the ledger follows it, as in chainsync.
+	rollbackPoint := ocommon.NewPoint(preDeadline.Slot, preDeadline.Hash)
+	require.NoError(t, cm.PrimaryChain().Rollback(t.Context(), rollbackPoint))
+	require.NoError(t, ls.rollbackWithBlocks(t.Context(), rollbackPoint, nil, false))
+	ls.RLock()
+	afterRollback := ls.transitionInfo
+	reloadedEra := ls.currentEra.Id
+	reloadedEraName := ls.currentEra.Name
+	reloadedEpochLength := ls.currentEpoch.LengthInSlots
+	reloadedPParams := ls.currentPParams
+	ls.RUnlock()
+	require.Equal(t, eras.BabbageEraDesc.Id, reloadedEra,
+		"the rollback must reload a Babbage epoch for the re-evaluation")
+	require.Equal(t, eras.BabbageEraDesc.Name, reloadedEraName)
+	require.Equal(t, uint(100), reloadedEpochLength,
+		"the rollback must reload the stored epoch")
+	reloadedVersion, err := GetProtocolVersion(reloadedPParams)
+	require.NoError(t, err,
+		"the rollback must reload the epoch's stored pparams")
+	require.Equal(t, uint(8), reloadedVersion.Major)
+	require.Equal(
+		t,
+		hardfork.TransitionUnknown,
+		afterRollback.State,
+		"no block of the surviving chain lies past the deadline",
+	)
+
+	forkPastDeadline := chain.RawBlock{
+		Slot:        50,
+		Hash:        testHashBytes("ppup-fork-past-deadline"),
+		PrevHash:    preDeadline.Hash,
+		BlockNumber: 2,
+		Type:        1,
+		Cbor:        []byte{0x80},
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(
+		t.Context(),
+		[]chain.RawBlock{forkPastDeadline},
+	))
+	ls.Lock()
+	ls.currentTip = tipOf(forkPastDeadline)
+	ls.Unlock()
+	known := evaluate()
+	require.Equal(t, hardfork.TransitionKnown, known.State,
+		"a block past the deadline on the surviving chain counts")
+	require.Equal(t, uint64(1), known.KnownEpoch)
+}
+
+// An empty prefix counts every block up to the tip, but a predecessor that
+// cannot be read counts nothing: the tip's block number would then include
+// blocks before the slot and could report a transition early.
+func TestBlocksAppliedFromSlot(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	// Blocks 1-3 at slots 30, 45 and 60.
+	testChain, tips := newVersionBumpChain(t, db, 30, 15, 3)
+	ls := &LedgerState{
+		db:         db,
+		chain:      testChain,
+		currentTip: tips[2],
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	assert.Equal(t, uint64(2), ls.blocksAppliedFromSlot(t.Context(), 40))
+	assert.Equal(
+		t,
+		uint64(3),
+		ls.blocksAppliedFromSlot(t.Context(), 30),
+		"with no block before the slot every block up to the tip counts",
+	)
+
+	first, err := database.BlockByHash(t.Context(), db, tips[0].Point.Hash)
+	require.NoError(t, err)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return database.BlockDeleteTxn(txn, first)
+	}))
+	assert.Zero(
+		t,
+		ls.blocksAppliedFromSlot(t.Context(), 40),
+		"a predecessor that cannot be read must count nothing",
+	)
+}
+
+// Upstream counts only blocks of the current epoch, so an epoch shorter than
+// twice the stability window counts from its own first slot rather than from
+// a deadline that falls in the previous epoch.
+func TestPParamVotingCountStartSlot(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name             string
+		securityParam    int
+		activeSlotsCoeff string
+		want             uint64
+	}{
+		{
+			name:             "deadline inside the epoch",
+			securityParam:    1,
+			activeSlotsCoeff: "0.1",
+			want:             140,
+		},
+		{
+			name:             "epoch shorter than twice the stability window",
+			securityParam:    2,
+			activeSlotsCoeff: "0.1",
+			want:             100,
+		},
+		{
+			// A window of 2^63+1 slots: doubling it wraps to 2, which
+			// would put the deadline at slot 198, inside the epoch.
+			name:             "stability window too large to double",
+			securityParam:    3074457345618258603,
+			activeSlotsCoeff: "1",
+			want:             100,
+		},
+	} {
+		ls := &LedgerState{
+			currentEra: eras.BabbageEraDesc,
+			currentEpoch: models.Epoch{
+				EpochId:       1,
+				StartSlot:     100,
+				LengthInSlots: 100,
+				EraId:         eras.BabbageEraDesc.Id,
+			},
+			config: LedgerStateConfig{
+				CardanoNodeConfig: newBabbageQuorumCfg(
+					t,
+					tc.securityParam,
+					tc.activeSlotsCoeff,
+				),
+				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			},
+		}
+		got, ok := ls.pparamVotingCountStartSlot()
+		require.True(t, ok, tc.name)
+		assert.Equal(t, tc.want, got, tc.name)
+	}
 }
 
 func TestGetProtocolVersion_Shelley(t *testing.T) {
@@ -398,6 +892,32 @@ func TestGetProtocolVersion_Nil(t *testing.T) {
 		err.Error(),
 		"protocol parameters are nil",
 	)
+}
+
+func TestGetProtocolVersion_TypedNil(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		pparams lcommon.ProtocolParameters
+	}{
+		{name: "Shelley", pparams: (*shelley.ShelleyProtocolParameters)(nil)},
+		{name: "Mary", pparams: (*mary.MaryProtocolParameters)(nil)},
+		{name: "Alonzo", pparams: (*alonzo.AlonzoProtocolParameters)(nil)},
+		{name: "Babbage", pparams: (*babbage.BabbageProtocolParameters)(nil)},
+		{name: "Conway", pparams: (*conway.ConwayProtocolParameters)(nil)},
+		{name: "Dijkstra", pparams: (*dijkstra.DijkstraProtocolParameters)(nil)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.NotPanics(t, func() {
+				_, err := GetProtocolVersion(test.pparams)
+				require.ErrorContains(t, err, "protocol parameters are a nil")
+			})
+		})
+	}
 }
 
 func TestEraForVersion(t *testing.T) {

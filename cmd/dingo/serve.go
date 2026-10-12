@@ -168,7 +168,7 @@ func repairPendingMithrilRewardState(
 	cfg *config.Config,
 	logger *slog.Logger,
 ) error {
-	pending, err := mithrilRewardRepairPending(cfg, logger)
+	pending, err := mithrilRewardRepairPending(ctx, cfg, logger)
 	if err != nil || !pending {
 		return err
 	}
@@ -196,7 +196,7 @@ func repairPendingMithrilRewardState(
 	); err != nil {
 		return fmt.Errorf("repairing legacy Mithril reward state: %w", err)
 	}
-	pending, err = mithrilRewardRepairPending(cfg, logger)
+	pending, err = mithrilRewardRepairPending(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -271,20 +271,24 @@ func retryMithrilRewardStateRepair(
 }
 
 func mithrilRewardRepairPending(
+	ctx context.Context,
 	cfg *config.Config,
 	logger *slog.Logger,
 ) (bool, error) {
 	runtime, err := openConfiguredDatabase(
-		context.Background(), cfg, logger, 1,
+		ctx, cfg, logger, 1,
 	)
 	if err != nil {
-		return false, fmt.Errorf("opening database for reward repair check: %w", err)
+		return false, fmt.Errorf(
+			"opening database for reward repair check: %w",
+			err,
+		)
 	}
 	db, err := runtimeDatabase(runtime)
 	if err != nil {
 		return false, err
 	}
-	defer runtime.Close(context.Background()) //nolint:contextcheck
+	defer runtime.Close(context.WithoutCancel(ctx))
 	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
 			return false, fmt.Errorf("opening database: %w", recoveryErr)
@@ -525,6 +529,12 @@ func openConfiguredDatabase(
 	logger *slog.Logger,
 	maxConnections int,
 ) (*internalplugins.DatabaseRuntime, error) {
+	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
+		nil, cfg.CardanoConfig, cfg.Network, cfg.NetworkMagic,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("loading cardano node config: %w", err)
+	}
 	storageMode := string(effectiveStorageMode(cfg))
 	return internalplugins.OpenDatabase(
 		ctx,
@@ -545,7 +555,8 @@ func openConfiguredDatabase(
 			Metadata: cfg.Plugins.Storage.Metadata,
 		},
 		internalplugins.StorageDependencies{
-			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
+			GenesisStakingEmpty: genesisStakingEmpty,
+			DataDir:             cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode: storageMode, MaxConnections: maxConnections,
 			Logger: logger, TracingEnabled: cfg.Tracing,
 		},

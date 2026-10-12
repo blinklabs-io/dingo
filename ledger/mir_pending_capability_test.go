@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"math/big"
 	"strings"
@@ -139,7 +140,7 @@ func TestLedgerViewAnswersPendingInstantaneousRewards(t *testing.T) {
 				tx, err := e.decode(mirNegativeDeltaTxCbor(t, dc.delta))
 				require.NoError(t, err)
 
-				txn := db.Transaction(false)
+				txn := db.Transaction(context.Background(), false)
 				err = txn.Do(func(txn *database.Txn) error {
 					lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
 					return e.validate(tx, 200, lv, e.pparams)

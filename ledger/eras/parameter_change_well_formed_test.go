@@ -59,7 +59,7 @@ func ppuRat(num, den int64) cbor.Tag {
 // proposal with update map ppu. The transaction is otherwise minimal: these
 // tests assert which rule rejects the proposal, not that the whole
 // transaction is valid.
-func parameterChangeTxCbor(t *testing.T, ppu map[uint]any) []byte {
+func parameterChangeTxCbor(t *testing.T, era string, ppu map[uint]any) []byte {
 	t.Helper()
 	inputHash := make([]byte, 32)
 	inputHash[0] = 0xaa
@@ -88,7 +88,16 @@ func parameterChangeTxCbor(t *testing.T, ppu map[uint]any) []byte {
 			},
 		},
 	}
-	txCbor, err := cbor.Encode([]any{body, map[uint]any{}, true, nil})
+	var txFields []any
+	switch era {
+	case "Conway":
+		txFields = []any{body, map[uint]any{}, true, nil}
+	case "Dijkstra":
+		txFields = []any{body, map[uint]any{}, nil}
+	default:
+		t.Fatalf("unknown era %q", era)
+	}
+	txCbor, err := cbor.Encode(txFields)
 	require.NoError(t, err)
 	return txCbor
 }
@@ -103,7 +112,7 @@ func validateParameterChange(
 	ppu map[uint]any,
 ) error {
 	t.Helper()
-	txCbor := parameterChangeTxCbor(t, ppu)
+	txCbor := parameterChangeTxCbor(t, era, ppu)
 	pp := conwayDivergencePparams()
 	pp.ProtocolVersion.Major = major
 	switch era {

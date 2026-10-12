@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"math"
@@ -29,6 +30,8 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 )
 
 // plominFixtureKeys holds the staking keys seeded by
@@ -54,25 +57,31 @@ func seedPlominFixtures(t *testing.T, db *database.Database) plominFixtureKeys {
 		Dead: bytes.Repeat([]byte{0xA2}, 28),
 	}
 
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		Credential: liveCred,
 		Active:     true,
 		AddedSlot:  10,
 	}))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: keys.Live,
-		Drep:       liveCred,
-		DrepType:   models.DrepTypeAddrKeyHash,
-		Active:     true,
-		AddedSlot:  100,
-	}))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: keys.Dead,
-		Drep:       deadCred,
-		DrepType:   models.DrepTypeAddrKeyHash,
-		Active:     true,
-		AddedSlot:  100,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: keys.Live,
+			Drep:       liveCred,
+			DrepType:   models.DrepTypeAddrKeyHash,
+			Active:     true,
+			AddedSlot:  100,
+		}),
+	)
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: keys.Dead,
+			Drep:       deadCred,
+			DrepType:   models.DrepTypeAddrKeyHash,
+			Active:     true,
+			AddedSlot:  100,
+		}),
+	)
 	return keys
 }
 
@@ -86,25 +95,221 @@ func TestApplyIntraEraHardForkRule_Pv10_ClearsDangling(t *testing.T) {
 	keys := seedPlominFixtures(t, db)
 
 	ls := newTestLSForHardForkRule(t, db)
-	require.NoError(t, ls.applyIntraEraHardForkRule(
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(),
 		nil,  // nil txn → owned metadata txn inside the Database wrapper
 		10,   // newMajor
 		7777, // boundarySlot
 		500,  // newEpoch (log-only)
 	))
 
-	live, err := db.GetAccountByCredential(0, keys.Live, true, nil)
+	live, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		keys.Live,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.NotNil(t, live.Drep,
 		"delegation to registered DRep must survive the rule")
 
-	dead, err := db.GetAccountByCredential(0, keys.Dead, true, nil)
+	dead, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		keys.Dead,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Nil(t, dead.Drep,
 		"dangling delegation must be cleared at pv10")
 	assert.Equal(t, uint64(7777), dead.AddedSlot,
 		"AddedSlot must be bumped to the boundary slot so a later "+
 			"rollback past boundarySlot re-derives from cert history")
+}
+
+func TestApplyIntraEraHardForkRule_Pv10RebuildsDRepDelegators(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	drepOne := bytes.Repeat([]byte{0x71}, 28)
+	drepTwo := bytes.Repeat([]byte{0x72}, 28)
+	drepThree := bytes.Repeat([]byte{0x73}, 28)
+	stakeOne := bytes.Repeat([]byte{0x74}, 28)
+	stakeTwo := bytes.Repeat([]byte{0x75}, 28)
+
+	applyCertificates := func(
+		slot uint64,
+		id byte,
+		protocolMajor uint64,
+		certificates ...lcommon.Certificate,
+	) {
+		t.Helper()
+		tx := mockledger.NewTransactionBuilder().WithCertificates(certificates...)
+		tx.WithId(bytes.Repeat([]byte{id}, lcommon.Blake2b256Size))
+		tx.WithValid(true)
+		point := ocommon.Point{Slot: slot, Hash: tx.Hash().Bytes()}
+		deposits := make(map[int]uint64)
+		for i, certificate := range certificates {
+			if _, ok := certificate.(*lcommon.RegistrationDrepCertificate); ok {
+				deposits[i] = 500
+			}
+		}
+		txn := db.MetadataTxn(context.Background(), true)
+		defer txn.Release()
+		require.NoError(t, txn.Do(func(txn *database.Txn) error {
+			return db.Metadata().SetTransaction(
+				tx,
+				point,
+				0,
+				deposits,
+				false,
+				txn.Metadata(),
+				protocolMajor,
+			)
+		}))
+	}
+	deregister := func(
+		slot uint64,
+		id byte,
+		credential []byte,
+		protocolMajor uint64,
+	) {
+		t.Helper()
+		applyCertificates(
+			slot,
+			id,
+			protocolMajor,
+			&lcommon.DeregistrationDrepCertificate{
+				CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+				DrepCredential: lcommon.Credential{
+					CredType:   lcommon.CredentialTypeAddrKeyHash,
+					Credential: lcommon.NewBlake2b224(credential),
+				},
+				Amount: 500,
+			},
+		)
+	}
+
+	require.NoError(t, db.Metadata().ImportDrep(
+		&models.Drep{
+			CredentialTag: 0,
+			Credential:    drepOne,
+			AddedSlot:     1,
+			Active:        true,
+			Delegators: []models.StakeCredentialRef{{
+				Tag: 0,
+				Key: stakeOne,
+			}},
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  0,
+			DrepCredential: drepOne,
+			AddedSlot:      1,
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().ImportDrep(
+		&models.Drep{
+			CredentialTag: 0,
+			Credential:    drepTwo,
+			AddedSlot:     1,
+			Active:        true,
+			Delegators: []models.StakeCredentialRef{{
+				Tag: 0,
+				Key: stakeOne,
+			}},
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  0,
+			DrepCredential: drepTwo,
+			AddedSlot:      1,
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().ImportDrep(
+		&models.Drep{
+			CredentialTag: 0,
+			Credential:    drepThree,
+			AddedSlot:     22,
+			Active:        true,
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  0,
+			DrepCredential: drepThree,
+			AddedSlot:      22,
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    stakeOne,
+		CredentialTag: 0,
+		Drep:          drepTwo,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     20,
+		CreatedSlot:   1,
+		Active:        true,
+	}, nil))
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    stakeTwo,
+		CredentialTag: 0,
+		Drep:          drepThree,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     21,
+		CreatedSlot:   1,
+		Active:        true,
+	}, nil))
+
+	ls := newTestLSForHardForkRule(t, db)
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyIntraEraHardForkRule(
+			context.Background(), txn, 10, 30, 500,
+		)
+	}))
+
+	deregister(31, 0x7c, drepOne, 10)
+	deregister(32, 0x7d, drepThree, 10)
+	account, err := db.GetAccountByCredential(
+		context.Background(), 0, stakeOne, true, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, drepTwo, account.Drep,
+		"deregistering stale D1 state must preserve the PV10 D2 delegation")
+	account, err = db.GetAccountByCredential(
+		context.Background(), 0, stakeTwo, true, nil,
+	)
+	require.NoError(t, err)
+	require.Nil(t, account.Drep,
+		"deregistering D3 must clear its rebuilt reverse membership")
+
+	require.NoError(t, db.RestoreAccountStateAtSlot(context.Background(), 29, nil))
+	require.NoError(t, db.RestoreDrepStateAtSlot(context.Background(), 29, nil))
+	account, err = db.GetAccountByCredential(
+		context.Background(), 0, stakeOne, true, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, drepTwo, account.Drep)
+	account, err = db.GetAccountByCredential(
+		context.Background(), 0, stakeTwo, true, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, drepThree, account.Drep)
+
+	deregister(31, 0x7e, drepOne, 9)
+	deregister(32, 0x7f, drepThree, 9)
+	account, err = db.GetAccountByCredential(
+		context.Background(), 0, stakeOne, true, nil,
+	)
+	require.NoError(t, err)
+	require.Nil(t, account.Drep,
+		"rollback must restore PV9's stale D1 reverse membership")
+	account, err = db.GetAccountByCredential(
+		context.Background(), 0, stakeTwo, true, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, drepThree, account.Drep,
+		"rollback must restore PV9's missing D3 reverse membership")
 }
 
 // Every major-version bump other than the ones with an explicit case
@@ -120,18 +325,30 @@ func TestApplyIntraEraHardForkRule_UnknownMajor_NoOp(t *testing.T) {
 	ls := newTestLSForHardForkRule(t, db)
 
 	for _, major := range []uint{9, 11, 12, 99} {
-		require.NoError(t, ls.applyIntraEraHardForkRule(
+		require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(),
 			nil, major, 1234, 100,
 		))
 	}
 
-	live, err := db.GetAccountByCredential(0, keys.Live, true, nil)
+	live, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		keys.Live,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.NotNil(t, live.Drep)
 	assert.Equal(t, uint64(100), live.AddedSlot,
 		"unknown-major dispatch must not touch unrelated accounts")
 
-	dead, err := db.GetAccountByCredential(0, keys.Dead, true, nil)
+	dead, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		keys.Dead,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.NotNil(t, dead.Drep,
 		"unknown-major dispatch must not touch even the dangling account")
@@ -220,8 +437,8 @@ func seedByronUtxoAt(
 	require.NoError(t, err)
 
 	txId := bytes.Repeat([]byte{txIdSeed}, 32)
-	txn := db.Transaction(true)
-	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
 		TxId:      txId,
 		OutputIdx: outputIdx,
 		AddedSlot: 100,
@@ -245,15 +462,20 @@ func TestApplyIntraEraHardForkRule_Pv3_RemovesAvvm(t *testing.T) {
 
 	ls := newTestLSForHardForkRule(t, db)
 	const boundarySlot uint64 = 4_492_800
-	require.NoError(t, ls.applyIntraEraHardForkRule(
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(),
 		nil, 3, boundarySlot, 208,
 	))
 
-	_, err := db.UtxoByRef(avvmTxId, 0, nil)
+	_, err := db.UtxoByRef(context.Background(), avvmTxId, 0, nil)
 	assert.ErrorIs(t, err, database.ErrUtxoNotFound,
 		"AVVM redeem UTxO must be marked deleted by pv3")
 
-	stillLive, err := db.UtxoByRefIncludingSpent(avvmTxId, 0, nil)
+	stillLive, err := db.UtxoByRefIncludingSpent(
+		context.Background(),
+		avvmTxId,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, stillLive)
 	assert.Equal(t, boundarySlot, stillLive.DeletedSlot,
@@ -261,7 +483,7 @@ func TestApplyIntraEraHardForkRule_Pv3_RemovesAvvm(t *testing.T) {
 			"across the boundary correctly un-deletes via "+
 			"SetUtxosNotDeletedAfterSlot")
 
-	pubkey, err := db.UtxoByRef(pubkeyTxId, 0, nil)
+	pubkey, err := db.UtxoByRef(context.Background(), pubkeyTxId, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pubkey)
 	assert.Equal(t, uint64(0), pubkey.DeletedSlot,
@@ -283,7 +505,7 @@ func TestApplyIntraEraHardForkRule_Pv3_CreditsAvvmToReserves(t *testing.T) {
 
 	ls := newTestLSForHardForkRule(t, db)
 	const boundarySlot uint64 = 4_492_800
-	require.NoError(t, ls.applyIntraEraHardForkRule(
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(),
 		nil, 3, boundarySlot, 208,
 	))
 
@@ -296,14 +518,14 @@ func TestApplyIntraEraHardForkRule_Pv3_CreditsAvvmToReserves(t *testing.T) {
 		"reserves plus live AVVM value must be conserved when AVVM is removed")
 	assert.Equal(t, boundarySlot, state.Slot)
 
-	_, err = db.UtxoByRef(avvmTxId, 0, nil)
+	_, err = db.UtxoByRef(context.Background(), avvmTxId, 0, nil)
 	assert.ErrorIs(t, err, database.ErrUtxoNotFound)
-	pubkey, err := db.UtxoByRef(pubkeyTxId, 0, nil)
+	pubkey, err := db.UtxoByRef(context.Background(), pubkeyTxId, 0, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, pubkey)
 
 	// A replay sees no live AVVM rows and must not credit the same value again.
-	require.NoError(t, ls.applyIntraEraHardForkRule(
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(),
 		nil, 3, boundarySlot, 208,
 	))
 	state, err = db.Metadata().GetNetworkState(nil)
@@ -334,15 +556,15 @@ func TestApplyIntraEraHardForkRule_Pv3_CreditsOnlyAvvmValue(t *testing.T) {
 	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 100, nil))
 
 	ls := newTestLSForHardForkRule(t, db)
-	require.NoError(t, ls.applyIntraEraHardForkRule(nil, 3, 200, 1))
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(), nil, 3, 200, 1))
 
 	state, err := db.Metadata().GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(1), uint64(state.Reserves))
-	_, err = db.UtxoByRef(pubkeyTxID, 0, nil)
+	_, err = db.UtxoByRef(context.Background(), pubkeyTxID, 0, nil)
 	require.NoError(t, err)
-	_, err = db.UtxoByRef(avvmTxID, 0, nil)
+	_, err = db.UtxoByRef(context.Background(), avvmTxID, 0, nil)
 	assert.ErrorIs(t, err, database.ErrUtxoNotFound)
 }
 
@@ -356,8 +578,8 @@ func TestApplyIntraEraHardForkRule_Pv3_RollbackRestoresReserveAndAvvm(
 	require.NoError(t, db.Metadata().SetNetworkState(7_000, 5_000, 100, nil))
 
 	ls := newTestLSForHardForkRule(t, db)
-	txn := db.Transaction(true)
-	require.NoError(t, ls.applyIntraEraHardForkRule(txn, 3, 200, 1))
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(), txn, 3, 200, 1))
 	require.NoError(t, txn.Rollback())
 
 	state, err := db.Metadata().GetNetworkState(nil)
@@ -366,7 +588,7 @@ func TestApplyIntraEraHardForkRule_Pv3_RollbackRestoresReserveAndAvvm(
 	assert.Equal(t, uint64(7_000), uint64(state.Treasury))
 	assert.Equal(t, uint64(5_000), uint64(state.Reserves))
 	assert.Equal(t, uint64(100), state.Slot)
-	_, err = db.UtxoByRef(avvmTxID, 0, nil)
+	_, err = db.UtxoByRef(context.Background(), avvmTxID, 0, nil)
 	require.NoError(t, err)
 }
 
@@ -394,10 +616,10 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 		)
 
 		ls := newTestLSForHardForkRule(t, db)
-		err = ls.applyIntraEraHardForkRule(nil, 3, 200, 1)
+		err = ls.applyIntraEraHardForkRule(context.Background(), nil, 3, 200, 1)
 		require.ErrorContains(t, err, "AVVM lovelace total overflows uint64")
 		for _, txID := range [][]byte{first, second} {
-			_, lookupErr := db.UtxoByRef(txID, 0, nil)
+			_, lookupErr := db.UtxoByRef(context.Background(), txID, 0, nil)
 			require.NoError(t, lookupErr)
 		}
 		state, stateErr := db.Metadata().GetNetworkState(nil)
@@ -420,9 +642,9 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 		)
 
 		ls := newTestLSForHardForkRule(t, db)
-		err = ls.applyIntraEraHardForkRule(nil, 3, 200, 1)
+		err = ls.applyIntraEraHardForkRule(context.Background(), nil, 3, 200, 1)
 		require.ErrorContains(t, err, "AVVM reserve credit overflows uint64")
-		_, lookupErr := db.UtxoByRef(txID, 0, nil)
+		_, lookupErr := db.UtxoByRef(context.Background(), txID, 0, nil)
 		require.NoError(t, lookupErr)
 		state, stateErr := db.Metadata().GetNetworkState(nil)
 		require.NoError(t, stateErr)
@@ -442,9 +664,9 @@ func TestApplyIntraEraHardForkRule_NonPv3_PreservesAvvm(t *testing.T) {
 	avvmTxId, _ := seedByronAvvmFixtures(t, db)
 
 	ls := newTestLSForHardForkRule(t, db)
-	require.NoError(t, ls.applyIntraEraHardForkRule(nil, 4, 1234, 100))
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(), nil, 4, 1234, 100))
 
-	avvm, err := db.UtxoByRef(avvmTxId, 0, nil)
+	avvm, err := db.UtxoByRef(context.Background(), avvmTxId, 0, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, avvm,
 		"non-pv3 dispatch must not touch AVVM UTxOs")

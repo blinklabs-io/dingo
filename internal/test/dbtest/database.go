@@ -263,6 +263,7 @@ func newDatabaseWithOptions(
 		metadataStore = wrap(metadataStore)
 	}
 	db, err := database.New(
+		context.Background(),
 		config,
 		database.Stores{Blob: blobStore, Metadata: metadataStore},
 	)

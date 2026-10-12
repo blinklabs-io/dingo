@@ -642,7 +642,7 @@ func (m *Manager) handleEpochTransition(
 		return nil
 	}
 
-	preCheckTxn := m.db.Transaction(false)
+	preCheckTxn := m.db.Transaction(ctx, false)
 	exists, err := m.authoritativeMarkRewardSnapshotExists(
 		evt,
 		preCheckTxn.Metadata(),
@@ -869,6 +869,7 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	deferStakeInputs := m.deferRewardStakeInputs
 	m.mu.RUnlock()
 	if err := m.saveSnapshotInTxnDeferring(
+		ctx,
 		evt.NewEpoch,
 		"mark",
 		distribution,
@@ -978,6 +979,7 @@ func (m *Manager) DeferEpochBoundaryCapture(
 ) error {
 	m.lockConfiguration()
 	refunds, err := m.db.GetPoolsRetiringAtEpoch(
+		context.Background(),
 		evt.NewEpoch, evt.BoundarySlot, txn,
 	)
 	if err != nil {
@@ -1136,6 +1138,7 @@ func (m *Manager) PrepareEpochBoundarySnapshot(
 		return nil, fmt.Errorf("validate reward stake inputs: %w", err)
 	}
 	prepared, err := m.prepareSnapshot(
+		ctx,
 		evt.NewEpoch, "mark", distribution, evt, true, true, txn,
 	)
 	if err != nil {
@@ -1224,7 +1227,7 @@ func (m *Manager) CurrentBoundarySPOStakeRows(
 	// comment. Resolved against the same live state
 	// calculateStakeDistributionInTxn just read, matching CaptureEpochBoundary
 	// Snapshot's own resolveAutoVote=true call for the authoritative capture.
-	if err := m.db.ResolvePoolRewardAccountAutoVotes(rows, txn); err != nil {
+	if err := m.db.ResolvePoolRewardAccountAutoVotes(ctx, rows, txn); err != nil {
 		return nil, fmt.Errorf("resolve reward-account auto-votes: %w", err)
 	}
 	return rows, nil
@@ -1241,7 +1244,7 @@ func (m *Manager) calculateSnapshotDistribution(
 	expiryEpoch uint64,
 ) (*StakeDistribution, error) {
 	calculator := NewCalculator(m.db)
-	txn := m.db.Transaction(false)
+	txn := m.db.Transaction(ctx, false)
 	defer func() { _ = txn.Commit() }()
 	return calculator.calculateBoundaryStakeDistributionInTxn(
 		ctx, txn, slot, boundarySlot, expiryEpoch, m.inactivityPeriod(),

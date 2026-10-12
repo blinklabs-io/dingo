@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -37,6 +39,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"golang.org/x/crypto/blake2b"
+	"golang.org/x/net/http/httpguts"
 )
 
 const (
@@ -157,6 +160,9 @@ type TokenRegistryConfig struct {
 	UserAgent      string
 	Interval       time.Duration
 	RequestTimeout time.Duration
+	// Headers are sent with every registry request, for mirrors that need
+	// authentication. They are dropped from a redirect to another origin.
+	Headers map[string]string
 	// MaxBytes caps the compressed download; MaxDecompressedBytes caps all
 	// expanded tar content; MaxEntryBytes caps one mapping. MaxArchiveEntries
 	// counts every tar header, while MaxAcceptedEntries bounds parsed rows and
@@ -191,6 +197,7 @@ type TokenRegistrySync struct {
 	manifestURL          string
 	manifestKey          ed25519.PublicKey
 	allowRollback        bool
+	headers              map[string]string
 	userAgent            string
 	interval             time.Duration
 	requestTimeout       time.Duration
@@ -280,6 +287,25 @@ func NewTokenRegistrySync(
 	if client.Timeout <= 0 || client.Timeout > timeout {
 		client.Timeout = timeout
 	}
+	headers, err := validateRegistryHeaders(cfg.Headers)
+	if err != nil {
+		return nil, err
+	}
+	if len(headers) > 0 {
+		// The parse error quotes the URL, which can carry a credential of
+		// its own. An unparsable source never sends a request: SyncOnce
+		// rejects it with the URL redacted before attaching any header.
+		if parsedSource, parseErr := url.Parse(sourceURL); parseErr == nil &&
+			parsedSource.Scheme != "https" &&
+			!isLoopbackHost(parsedSource.Hostname()) {
+			return nil, errors.New(
+				"token registry headers require an HTTPS or loopback source URL",
+			)
+		}
+		client.CheckRedirect = dropHeadersOnOriginChange(
+			client.CheckRedirect, headers,
+		)
+	}
 	userAgent := cfg.UserAgent
 	if userAgent == "" {
 		userAgent = defaultTokenRegistryUserAgent
@@ -316,6 +342,7 @@ func NewTokenRegistrySync(
 		manifestURL:          manifestURL,
 		manifestKey:          manifestKey,
 		allowRollback:        cfg.AllowRollback,
+		headers:              headers,
 		userAgent:            userAgent,
 		interval:             interval,
 		requestTimeout:       client.Timeout,
@@ -331,6 +358,68 @@ func NewTokenRegistrySync(
 		now:                  time.Now,
 		syncSlot:             make(chan struct{}, 1),
 	}, nil
+}
+
+func isLoopbackHost(host string) bool {
+	ip := net.ParseIP(host)
+	return host == "localhost" || (ip != nil && ip.IsLoopback())
+}
+
+// validateRegistryHeaders returns a copy of headers, rejecting any that could
+// not be sent. The error names the header, never its value, which is a
+// credential.
+func validateRegistryHeaders(
+	headers map[string]string,
+) (map[string]string, error) {
+	for name, value := range headers {
+		switch strings.ToLower(name) {
+		case "user-agent", "accept", "if-none-match", "host", "content-length":
+			return nil, fmt.Errorf("token registry header %q is reserved", name)
+		}
+		if !httpguts.ValidHeaderFieldName(name) {
+			return nil, fmt.Errorf(
+				"token registry header name %q is invalid", name,
+			)
+		}
+		if !httpguts.ValidHeaderFieldValue(value) {
+			return nil, fmt.Errorf(
+				"token registry header %q has an invalid value", name,
+			)
+		}
+	}
+	return maps.Clone(headers), nil
+}
+
+// dropHeadersOnOriginChange removes the configured headers from a redirect
+// that leaves the origin of the original request. The client already strips
+// Authorization when the domain changes, but not across ports or from https
+// to http, and never a differently named credential header.
+func dropHeadersOnOriginChange(
+	next func(*http.Request, []*http.Request) error,
+	headers map[string]string,
+) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		var originalScheme, originalHost string
+		if len(via) > 0 {
+			originalScheme, originalHost = via[0].URL.Scheme, via[0].URL.Host
+		}
+		if next != nil {
+			if err := next(req, via); err != nil {
+				return err
+			}
+		}
+		if len(via) > 0 &&
+			(req.URL.Scheme != originalScheme || req.URL.Host != originalHost) {
+			for configuredName := range headers {
+				for name := range req.Header {
+					if strings.EqualFold(name, configuredName) {
+						delete(req.Header, name)
+					}
+				}
+			}
+		}
+		return nil
+	}
 }
 
 // defaultTokenRegistryURL picks the registry for a network. Only mainnet has
@@ -843,6 +932,9 @@ func (s *TokenRegistrySync) SyncOnce(
 			operation: "build token registry request",
 			cause:     err,
 		}
+	}
+	for name, value := range s.headers {
+		req.Header.Set(name, value)
 	}
 	req.Header.Set("User-Agent", s.userAgent)
 	req.Header.Set("Accept", "application/gzip")

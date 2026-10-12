@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -211,7 +212,10 @@ func (ls *LedgerState) leiosAnnouncementOCINStaleness(
 			"security parameter unavailable for leios announcement validation",
 		)
 	}
-	immutablePoint, found, err := primaryChain.PointAtDepth(k)
+	immutablePoint, found, err := primaryChain.PointAtDepth(
+		context.Background(),
+		k,
+	)
 	if err != nil {
 		return LeiosAnnouncementFreshOCIN, fmt.Errorf(
 			"resolve immutable tip for leios announcement: %w",
@@ -223,6 +227,7 @@ func (ls *LedgerState) leiosAnnouncementOCINStaleness(
 	}
 	poolKeyHash := lcommon.PoolKeyHash(header.IssuerVkey().Hash())
 	stored, found, err := ls.db.LatestPoolOpCertSequenceAtOrBefore(
+		context.Background(),
 		poolKeyHash,
 		immutablePoint.Slot,
 		nil,

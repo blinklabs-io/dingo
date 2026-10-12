@@ -20,7 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"regexp"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,6 +36,8 @@ var savepointNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Config contains dependencies and optional provider capabilities for a Store.
 type Config struct {
+	// GenesisStakingEmpty certifies that the loaded genesis has no initial staking.
+	GenesisStakingEmpty bool
 	// SQLitePath identifies the file opened by the provider, including its
 	// dataDir override. Reconstructing it from the node's global directory
 	// could point introspection clients at a different database. It is empty
@@ -146,44 +150,54 @@ type Store struct {
 	// boundaries without a production-sized fixture.
 	rewardLiveStakeBatchSize int
 
-	// committeeAuthImmutableSlot and committeeAuthImmutableSlotKnown cache
-	// the live rollback-safe immutable slot (tip depth securityParam blocks
-	// back), pushed in by SetCommitteeAuthImmutableSlot from outside the
-	// package -- sqlstore cannot import chain (chain already imports
-	// database) to compute it directly. committeeAuthImmutableSlotEverSet
-	// distinguishes "no live syncer has ever been wired for this Store"
+	// committeeAuthImmutableSlot caches the live rollback-safe immutable slot
+	// (tip depth securityParam blocks back), pushed in by
+	// SetCommitteeAuthImmutableSlot from outside the package -- sqlstore cannot
+	// import chain (chain already imports database) to compute it directly. Its
+	// everSet bit distinguishes "no live syncer has ever been wired for this Store"
 	// (committeeAuthHorizon falls back to the slot-window assumption, the
 	// pre-live-sync behavior every existing caller and test still gets)
 	// from "a live syncer is wired but has no current value" (bootstrap
 	// before the first successful resolution, or invalidated by a rollback
 	// in DeleteCertificatesAfterSlot -- pruning suspends rather than fall
 	// back to an assumption a sparse or recently-reorganized chain can
-	// violate). Read through committeeAuthHorizon(). Plain atomics, not a
-	// mutex: the setter runs from an independent periodic sync goroutine
-	// while readers run inline in the certificate write path and the
-	// maintenance sweep, and none of them may block on each other.
-	committeeAuthImmutableSlot        atomic.Uint64
-	committeeAuthImmutableSlotKnown   atomic.Bool
-	committeeAuthImmutableSlotEverSet atomic.Bool
+	// violate). The mutex keeps the three state fields coherent and, while a
+	// prune delete holds its read side, orders rollback invalidation before or
+	// after that delete. Production prune callers already own the single write
+	// connection: block application supplies its transaction, and maintenance
+	// opens one before calling the pruning helper. This matches rollback's
+	// connection-then-mutex order and closes the gap where invalidation could
+	// otherwise race between choosing a horizon and deleting rollback-required
+	// history.
+	committeeAuthImmutableSlotMu sync.RWMutex
+	committeeAuthImmutableSlot   committeeAuthImmutableSlotState
+	// Test hook runs after a prune has selected its horizon. Production leaves
+	// it nil.
+	committeeAuthPruneLocked func()
 
-	migrations        []migrations.Migration
-	migrationLocker   migrations.Locker
-	diskSize          func() (int64, error)
-	maintenance       func(context.Context) error
-	maintenanceEvery  time.Duration
-	vacuum            func(context.Context) error
-	vacuumEvery       time.Duration
-	backupTo          func(context.Context, string) error
-	restoreFrom       func(context.Context, string) error
-	prepare           func(context.Context) error
-	reset             func(context.Context) error
-	validateBackup    func(context.Context, string) error
-	maintenanceCancel context.CancelFunc
-	maintenanceDone   chan struct{}
-	maintenanceState  atomic.Uint32
-	vacuumCancel      context.CancelFunc
-	vacuumDone        chan struct{}
-	vacuumState       atomic.Uint32
+	migrations          []migrations.Migration
+	genesisStakingEmpty bool
+	migrationLocker     migrations.Locker
+	diskSize            func() (int64, error)
+	maintenance         func(context.Context) error
+	maintenanceEvery    time.Duration
+	vacuum              func(context.Context) error
+	vacuumEvery         time.Duration
+	backupTo            func(context.Context, string) error
+	restoreFrom         func(context.Context, string) error
+	prepare             func(context.Context) error
+	reset               func(context.Context) error
+	validateBackup      func(context.Context, string) error
+	maintenanceCancel   context.CancelFunc
+	maintenanceDone     chan struct{}
+	maintenanceState    atomic.Uint32
+	vacuumCancel        context.CancelFunc
+	vacuumDone          chan struct{}
+	vacuumState         atomic.Uint32
+
+	// tickDelay returns how long a periodic job waits before its next run.
+	// New sets it to jitteredInterval; tests replace it before Start.
+	tickDelay func(time.Duration) time.Duration
 
 	// checkpoint/checkpointEvery back an independent ticker from
 	// maintenance/maintenanceEvery -- see Config.Checkpoint's doc comment for
@@ -213,10 +227,13 @@ type Store struct {
 	closeDone chan struct{}
 	closeErr  error
 
-	// stmtMu and stmts back the prepared-statement cache; see
-	// prepared_stmt.go for the mechanism and correctness argument.
-	stmtMu sync.Mutex
-	stmts  map[string]*sql.Stmt
+	// stmtMu guards stmts, the prepared-statement cache, and the borrow
+	// state that keeps a retired statement open until its callers finish;
+	// see prepared_stmt.go for the mechanism and correctness argument.
+	stmtMu      sync.Mutex
+	stmts       map[string]*sql.Stmt
+	stmtBorrows map[*sql.Stmt]int
+	stmtRetired map[*sql.Stmt]struct{}
 
 	// sumCredentialUtxoStakeCalls counts invocations of
 	// sumCredentialUtxoStake, the per-credential full live-UTxO aggregate
@@ -230,6 +247,7 @@ type Store struct {
 
 	// sqlOperations and sqlQueryDuration are nil when Config.PromRegistry
 	// was nil; see instrumentedQueryer and metrics.go.
+	plannerStats     sqlitePlannerStatsMetrics
 	sqlOperations    *prometheus.CounterVec
 	sqlQueryDuration *prometheus.HistogramVec
 
@@ -291,7 +309,9 @@ func New(config Config) (*Store, error) {
 		committeeAuthRetentionSlots: config.CommitteeAuthRetentionSlots,
 		migrations:                  config.Migrations,
 		migrationLocker:             config.MigrationLocker,
+		genesisStakingEmpty:         config.GenesisStakingEmpty,
 		diskSize:                    config.DiskSize,
+		tickDelay:                   jitteredInterval,
 		maintenance:                 config.Maintenance,
 		maintenanceEvery:            config.MaintenanceInterval,
 		vacuum:                      config.Vacuum,
@@ -304,12 +324,16 @@ func New(config Config) (*Store, error) {
 		reset:                       config.Reset,
 		validateBackup:              config.ValidateBackup,
 		closeDone:                   make(chan struct{}),
+		plannerStats:                newPlannerStatsMetrics(config.PromRegistry),
 		sqlOperations: newSQLOperationsCounter(
 			config.PromRegistry,
 		),
 		sqlQueryDuration: newSQLQueryDurationHistogram(
 			config.PromRegistry,
 		),
+	}
+	if store.readDB != store.writeDB {
+		store.readDB.SetConnMaxLifetime(readConnMaxLifetime)
 	}
 	// Registered against store.WritePoolStats/ReadPoolStats (not
 	// config.WriteDB.Stats/config.ReadDB.Stats directly) so every backend
@@ -440,12 +464,15 @@ func (s *Store) Start(ctx context.Context) error {
 	}
 	if len(s.migrations) > 0 {
 		runner := migrations.Runner{
-			DB:       s.writeDB,
-			Dialect:  s.dialect.Name(),
-			Registry: s.migrations,
-			Locker:   s.migrationLocker,
-			Logger:   s.logger,
-			Rebind:   s.dialect.Rebind,
+			// A prior binary may have committed the current schema before its
+			// later provenance gate failed, so this must also run at target.
+			BeforeUpgrade: s.preflightRewardStakeUpgrade,
+			DB:            s.writeDB,
+			Dialect:       s.dialect.Name(),
+			Registry:      s.migrations,
+			Locker:        s.migrationLocker,
+			Logger:        s.logger,
+			Rebind:        s.dialect.Rebind,
 		}
 		if err := runner.Run(ctx); err != nil {
 			return fmt.Errorf("sqlstore: metadata upgrade: %w", err)
@@ -511,7 +538,12 @@ func (s *Store) ReadTransaction(ctx context.Context) types.Txn {
 // transaction begins a transaction bound to ctx. The context.Background()
 // fallback below is for a caller passing a literal nil, not a dropped
 // caller ctx -- there is nothing above to derive from in that case.
-func (s *Store) transaction(ctx context.Context, readOnly bool) types.Txn {
+//
+//nolint:contextcheck // literal-nil fallback, no caller ctx exists
+func (s *Store) transaction(
+	ctx context.Context,
+	readOnly bool,
+) types.Txn {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -635,47 +667,83 @@ func (s *Store) startMaintenance() {
 	s.maintenanceDone = make(chan struct{})
 	go func() {
 		defer close(s.maintenanceDone)
-		ticker := time.NewTicker(s.maintenanceEvery)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
+		for s.waitForTick(ctx, "maintenance", s.maintenanceEvery) {
+			// Admission is an atomic state transition. Close moves the
+			// state to closed before cancelling the callback context, so a
+			// racing tick cannot start maintenance against closing pools.
+			if !s.maintenanceState.CompareAndSwap(0, 1) {
 				return
-			case <-ticker.C:
-				// Admission is an atomic state transition. Close moves the
-				// state to closed before cancelling the callback context, so a
-				// racing tick cannot start maintenance against closing pools.
-				if !s.maintenanceState.CompareAndSwap(0, 1) {
-					return
-				}
-				if ctx.Err() != nil || s.closed.Load() {
-					s.maintenanceState.CompareAndSwap(1, 0)
-					return
-				}
-				started := time.Now()
-				err := s.runMaintenance(ctx)
+			}
+			if ctx.Err() != nil || s.closed.Load() {
 				s.maintenanceState.CompareAndSwap(1, 0)
-				if err != nil {
-					if ctx.Err() == nil {
-						s.logger.Error(
-							"metadata database maintenance failed",
-							"dialect", s.dialect.Name(),
-							"duration", time.Since(started),
-							"error", err,
-						)
-					} else {
-						return
-					}
-					continue
+				return
+			}
+			started := time.Now()
+			err := s.runMaintenance(ctx)
+			s.maintenanceState.CompareAndSwap(1, 0)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
 				}
-				s.logger.Debug(
-					"metadata database maintenance complete",
+				s.logger.Error(
+					"metadata database maintenance failed",
 					"dialect", s.dialect.Name(),
 					"duration", time.Since(started),
+					"error", err,
 				)
+				continue
 			}
+			s.logger.Debug(
+				"metadata database maintenance complete",
+				"dialect", s.dialect.Name(),
+				"duration", time.Since(started),
+			)
 		}
 	}()
+}
+
+// jitteredInterval returns every plus up to a tenth of it. A fixed cadence
+// measured from process start lands on the same wall-clock offset every day,
+// so it would meet the same recurring network activity every day.
+func jitteredInterval(every time.Duration) time.Duration {
+	const maxDuration = time.Duration(1<<63 - 1)
+	jitterMax := min(every/10, maxDuration-every)
+	return every + rand.N(jitterMax+1) //nolint:gosec // schedule jitter, not a secret
+}
+
+// postponeWarnEvery is how many consecutive postponements pass between
+// warnings; at the one-minute retry delay it is one warning per ten minutes.
+const postponeWarnEvery = 10
+
+// waitForTick blocks until a periodic job is due and the shared pool is
+// quiet, and returns false once ctx ends. Any checked-out connection delays
+// the job, including read and bulk-load connections on shared pools.
+func (s *Store) waitForTick(
+	ctx context.Context,
+	job string,
+	every time.Duration,
+) bool {
+	delay := s.tickDelay(every)
+	for postponed := 1; ; postponed++ {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+		if s.writeDB.Stats().InUse == 0 {
+			return true
+		}
+		if postponed%postponeWarnEvery == 0 {
+			s.logger.Warn(
+				"metadata database job postponed while the write pool is busy",
+				"job", job,
+				"postponements", postponed,
+			)
+		}
+		delay = s.tickDelay(min(every, time.Minute))
+	}
 }
 
 func (s *Store) runMaintenance(ctx context.Context) error {
@@ -709,42 +777,34 @@ func (s *Store) startVacuumTicker() {
 	s.vacuumDone = make(chan struct{})
 	go func() {
 		defer close(s.vacuumDone)
-		ticker := time.NewTicker(s.vacuumEvery)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
+		for s.waitForTick(ctx, "vacuum", s.vacuumEvery) {
+			if !s.vacuumState.CompareAndSwap(0, 1) {
 				return
-			case <-ticker.C:
-				if !s.vacuumState.CompareAndSwap(0, 1) {
-					return
-				}
-				if ctx.Err() != nil || s.closed.Load() {
-					s.vacuumState.CompareAndSwap(1, 0)
-					return
-				}
-				started := time.Now()
-				err := s.vacuum(ctx)
+			}
+			if ctx.Err() != nil || s.closed.Load() {
 				s.vacuumState.CompareAndSwap(1, 0)
-				if err != nil {
-					if ctx.Err() == nil {
-						s.logger.Error(
-							"metadata database vacuum failed",
-							"dialect", s.dialect.Name(),
-							"duration", time.Since(started),
-							"error", err,
-						)
-					} else {
-						return
-					}
-					continue
+				return
+			}
+			started := time.Now()
+			err := s.vacuum(ctx)
+			s.vacuumState.CompareAndSwap(1, 0)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
 				}
-				s.logger.Debug(
-					"metadata database vacuum complete",
+				s.logger.Error(
+					"metadata database vacuum failed",
 					"dialect", s.dialect.Name(),
 					"duration", time.Since(started),
+					"error", err,
 				)
+				continue
 			}
+			s.logger.Debug(
+				"metadata database vacuum complete",
+				"dialect", s.dialect.Name(),
+				"duration", time.Since(started),
+			)
 		}
 	}()
 }
@@ -929,6 +989,7 @@ func (s *Store) withWriteTransactionContext(
 		if err != nil {
 			return err
 		}
+		//nolint:contextcheck // txnCtx is the caller transaction's own context
 		return fn(db, txnCtx)
 	}
 	sqlTransaction, release, err := s.beginWriteTx(ctx)
@@ -976,6 +1037,8 @@ func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, func(), error) {
 // the commit barrier it holds while fixing its two read views. Its lifetime
 // admission cap also leaves one connection outside coordinated snapshots for
 // operational reads during rollback.
+//
+//nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
 func (s *Store) ReserveRead(
 	ctx context.Context,
 ) (types.ReadReservation, error) {
@@ -1027,11 +1090,15 @@ func (r *readReservation) Begin() types.Txn {
 		r.releaseConn()
 		return &sqlTxn{owner: r.owner, ctx: r.ctx, beginErr: err}
 	}
+	// readOnly marks tx as running on the read pool, which
+	// readCanUseWriteCache relies on: statements prepared on the write pool
+	// cannot be derived into it.
 	return &sqlTxn{
-		owner:   r.owner,
-		tx:      tx,
-		ctx:     r.ctx,
-		release: r.releaseConn,
+		owner:    r.owner,
+		tx:       tx,
+		ctx:      r.ctx,
+		readOnly: true,
+		release:  r.releaseConn,
 	}
 }
 
@@ -1094,8 +1161,11 @@ type sqlTxn struct {
 	release  func()
 	beginErr error
 
-	mu       sync.Mutex
-	finished bool
+	mu              sync.Mutex
+	finished        bool
+	batchBefore     map[*transactionBatchAccumulator]transactionBatchCheckpoint
+	batchSavepoints map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint
+	savepointOrder  []string
 }
 
 func (t *sqlTxn) Commit() error {
@@ -1112,7 +1182,16 @@ func (t *sqlTxn) Commit() error {
 	if t.tx == nil {
 		return nil
 	}
-	return t.tx.Commit()
+	err := t.tx.Commit()
+	if err != nil {
+		t.restoreBatches(t.batchBefore)
+	}
+	for accumulator := range t.batchBefore {
+		accumulator.resetStatement()
+	}
+	t.batchBefore = nil
+	t.batchSavepoints = nil
+	return err
 }
 
 func (t *sqlTxn) Rollback() error {
@@ -1126,6 +1205,9 @@ func (t *sqlTxn) Rollback() error {
 	}
 	t.finished = true
 	defer t.releaseConnection()
+	t.restoreBatches(t.batchBefore)
+	t.batchBefore = nil
+	t.batchSavepoints = nil
 	if t.tx == nil {
 		return nil
 	}
@@ -1176,6 +1258,31 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 		t.owner.dialect.QuoteIdentifier(name)
 	if _, err := t.tx.ExecContext(context.Background(), statement); err != nil {
 		return fmt.Errorf("%s: %w", operation, err)
+	}
+	switch operation {
+	case "SAVEPOINT":
+		if t.batchSavepoints == nil {
+			t.batchSavepoints = make(
+				map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint,
+			)
+		}
+		checkpoint := make(
+			map[*transactionBatchAccumulator]transactionBatchCheckpoint,
+		)
+		for accumulator := range t.batchBefore {
+			checkpoint[accumulator] = accumulator.checkpoint()
+		}
+		t.batchSavepoints[name] = checkpoint
+		t.savepointOrder = append(t.savepointOrder, name)
+	case "ROLLBACK TO SAVEPOINT":
+		t.restoreBatches(t.batchSavepoints[name])
+		for i, savepointName := range slices.Backward(t.savepointOrder) {
+			if savepointName == name {
+				t.savepointOrder = t.savepointOrder[:i+1]
+				break
+			}
+			delete(t.batchSavepoints, savepointName)
+		}
 	}
 	return nil
 }
@@ -1269,6 +1376,35 @@ func (s *Store) UpdatePlannerStatsContext(ctx context.Context) error {
 	s.bulkConnMu.Lock()
 	defer s.bulkConnMu.Unlock()
 	return s.dialect.UpdatePlannerStats(ctx, s.bulkConn)
+}
+
+func (t *sqlTxn) bindBatch(accumulator *transactionBatchAccumulator) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.finished {
+		return types.ErrNilTxn
+	}
+	if t.batchBefore == nil {
+		t.batchBefore = make(
+			map[*transactionBatchAccumulator]transactionBatchCheckpoint,
+		)
+	}
+	if _, exists := t.batchBefore[accumulator]; exists {
+		return nil
+	}
+	t.batchBefore[accumulator] = accumulator.checkpoint()
+	for _, checkpoint := range t.batchSavepoints {
+		checkpoint[accumulator] = accumulator.checkpoint()
+	}
+	return nil
+}
+
+func (t *sqlTxn) restoreBatches(
+	checkpoint map[*transactionBatchAccumulator]transactionBatchCheckpoint,
+) {
+	for accumulator, state := range checkpoint {
+		accumulator.restore(state)
+	}
 }
 
 // SQLitePath returns the active provider's on-disk SQLite location, if any.

@@ -16,6 +16,8 @@ package database
 
 import (
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -172,4 +174,34 @@ func (d *Database) SetBlockNonce(
 		isCheckpoint,
 		txn.Metadata(),
 	)
+}
+
+// SetBlockNonces stores block nonces, using a batch-capable metadata backend
+// when available.
+func (d *Database) SetBlockNonces(
+	nonces []models.BlockNonce,
+	txn *Txn,
+) error {
+	if len(nonces) == 0 {
+		return nil
+	}
+	var metaTxn types.Txn
+	if txn != nil {
+		metaTxn = txn.Metadata()
+	}
+	if batchStore, ok := d.metadata.(metadata.BlockNonceBatchStore); ok {
+		return batchStore.SetBlockNonces(nonces, metaTxn)
+	}
+	for _, nonce := range nonces {
+		if err := d.SetBlockNonce(
+			nonce.Hash,
+			nonce.Slot,
+			nonce.Nonce,
+			nonce.IsCheckpoint,
+			txn,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -53,7 +54,7 @@ func TestChainsyncHeaderQueueClearedInvalidatesAnnouncement(t *testing.T) {
 	announcing := announcingHeader(
 		577, "hdr-1", lcommon.NewBlake2b256(nil), 1, ebHash,
 	)
-	require.NoError(t, fixture.ls.chain.AddVerifiedBlockHeader(announcing))
+	require.NoError(t, fixture.ls.chain.AddVerifiedBlockHeader(context.Background(), announcing))
 
 	follower := mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-2")),

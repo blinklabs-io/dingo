@@ -161,8 +161,7 @@ func (q sqliteManagementQueries) insertNodeSettingsGateIfAbsent(
 	recordedEpoch int64,
 	recordedSlot int64,
 ) (int64, error) {
-	return q.queries.InsertNodeSettingsGateIfAbsent(
-		ctx,
+	return q.queries.InsertNodeSettingsGateIfAbsent(ctx,
 		sqlitequery.InsertNodeSettingsGateIfAbsentParams{
 			Name:          name,
 			Value:         value,
@@ -263,8 +262,7 @@ func (q postgresManagementQueries) insertNodeSettingsGateIfAbsent(
 	recordedEpoch int64,
 	recordedSlot int64,
 ) (int64, error) {
-	return q.queries.InsertNodeSettingsGateIfAbsent(
-		ctx,
+	return q.queries.InsertNodeSettingsGateIfAbsent(ctx,
 		postgresquery.InsertNodeSettingsGateIfAbsentParams{
 			Name:          name,
 			Value:         value,
@@ -365,8 +363,7 @@ func (q mysqlManagementQueries) insertNodeSettingsGateIfAbsent(
 	recordedEpoch int64,
 	recordedSlot int64,
 ) (int64, error) {
-	return q.queries.InsertNodeSettingsGateIfAbsent(
-		ctx,
+	return q.queries.InsertNodeSettingsGateIfAbsent(ctx,
 		mysqlquery.InsertNodeSettingsGateIfAbsentParams{
 			Name:          name,
 			Value:         value,

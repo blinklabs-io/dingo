@@ -16,6 +16,7 @@ package node
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -91,10 +92,10 @@ func TestBackfillProcessBlockTxsBatchedUsesSharedGovernanceFixture(
 		},
 	}
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := backfill.processBlockTxsBatched(
+		if err := backfill.processBlockTxsBatched(context.Background(),
 			[]lcommon.Transaction{tx},
 			point,
 			12,
@@ -111,9 +112,9 @@ func TestBackfillProcessBlockTxsBatchedUsesSharedGovernanceFixture(
 		return db.FlushBatch(acc, txn)
 	}))
 
-	root, err := db.GetGovernanceProposal(fixture.ProposalIDs[0].Bytes(), 0, nil)
+	root, err := db.GetGovernanceProposal(context.Background(), fixture.ProposalIDs[0].Bytes(), 0, nil)
 	require.NoError(t, err)
-	child, err := db.GetGovernanceProposal(fixture.ProposalIDs[1].Bytes(), 0, nil)
+	child, err := db.GetGovernanceProposal(context.Background(), fixture.ProposalIDs[1].Bytes(), 0, nil)
 	require.NoError(t, err)
 	subTransactions := fixture.Transaction.Body.TxSubTransactions.Items()
 	require.Len(t, subTransactions, 2)
@@ -154,7 +155,7 @@ func TestBackfillProcessBlockTxsBatchedUsesSharedGovernanceFixture(
 	require.Equal(t, fixture.RootID.Bytes(), child.ParentTxHash)
 	require.NotNil(t, child.ParentActionIdx)
 	require.Zero(t, *child.ParentActionIdx)
-	votes, err := db.GetGovernanceVotes(root.ID, nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), root.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 2)
 	voters := make(map[byte]bool, len(votes))

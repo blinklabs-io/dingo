@@ -140,7 +140,7 @@ func reconcileStaleLedgerState(
 		)
 	}
 
-	rtxn := db.MetadataTxn(false)
+	rtxn := db.MetadataTxn(ctx, false)
 	if !keys.utxosComplete {
 		skipIncomplete("UTxO")
 	} else if err := store.IterateLiveUtxos(
@@ -242,7 +242,7 @@ func reconcileStaleLedgerState(
 			err,
 		)
 	}
-	wtxn := db.MetadataTxn(true)
+	wtxn := db.MetadataTxn(ctx, true)
 	defer wtxn.Release()
 	if err := store.MarkUtxosDeletedAtSlot(
 		wtxn.Metadata(), staleUtxos, tipSlot,

@@ -16,6 +16,7 @@ package dingo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -34,9 +36,49 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
+	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestShutdownReportsMidnightDrainFailure(t *testing.T) {
+	t.Parallel()
+	for _, blocked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("blocked=%t", blocked), func(t *testing.T) {
+			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+			require.NoError(t, err)
+			bus := event.NewEventBus(nil, nil)
+			defer bus.Close()
+			entered, release := make(chan struct{}), make(chan struct{})
+			defer close(release)
+			idx, err := midnightindexer.New(midnightindexer.Config{
+				EventBus: bus, Metadata: db.Metadata(),
+				FatalErrorFunc: func(error) { close(entered); <-release },
+			})
+			require.NoError(t, err)
+			require.NoError(t, idx.Start())
+			if blocked {
+				bus.Publish(ledger.BlockEventType, event.NewEvent(ledger.BlockEventType,
+					ledger.BlockEvent{Action: ledger.BlockActionApply, Block: models.Block{}}))
+				testutil.RequireReceive(t, entered, time.Second, "indexer handler did not start")
+			}
+			// The indexer's independently owned bus isolates its drain result.
+			n := &Node{config: NewConfig(WithShutdownTimeout(time.Second)), db: db, midnightIndexer: idx}
+			n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+			err = n.Stop()
+			if blocked {
+				if !errors.Is(err, errStorageDrainUnconfirmed) {
+					t.Fatalf("shutdown omitted the indexer drain sentinel: %v", err)
+				}
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				_, readErr := db.Metadata().GetBackfillCheckpoint("midnight", nil)
+				require.NoError(t, readErr, "storage must remain open while the indexer is using it")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
 
 // TestShutdownPhase1ComponentStopsCoverEveryUnboundedStop pins the set of
 // phase-1 components routed through stopWithDeadline. Each of these has a
@@ -259,7 +301,7 @@ func (h shutdownTestResourceLogHandler) WithGroup(string) slog.Handler {
 func TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
@@ -340,7 +382,7 @@ func TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 func TestNodeStopClosesLedgerStateWhenPhase1DrainConfirmed(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{

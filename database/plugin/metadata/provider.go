@@ -23,11 +23,13 @@ import (
 // ProviderDependencies are shared application settings injected into any
 // storage.metadata provider.
 type ProviderDependencies struct {
-	DataDir        string
-	StorageMode    string
-	MaxConnections int
-	Logger         *slog.Logger
-	PromRegistry   prometheus.Registerer
+	// GenesisStakingEmpty certifies that the loaded genesis has no initial staking.
+	GenesisStakingEmpty bool
+	DataDir             string
+	StorageMode         string
+	MaxConnections      int
+	Logger              *slog.Logger
+	PromRegistry        prometheus.Registerer
 	// TracingEnabled reports whether OpenTelemetry tracing is configured for
 	// this node (the "tracing"/--tracing/DINGO_TRACING_ENABLED setting). A
 	// provider's sqlstore.OpenDB calls use it to decide whether to pay for

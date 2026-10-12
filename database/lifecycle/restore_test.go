@@ -313,6 +313,7 @@ func openRemoteTestDatabase(
 	require.NoError(t, err)
 	require.NoError(t, metadataStore.Start(context.Background()))
 	db, err := database.New(
+		context.Background(),
 		&database.Config{Network: "preview"},
 		database.Stores{Blob: blobStore, Metadata: metadataStore},
 	)
@@ -370,9 +371,9 @@ func runRemoteRestoreFailureRollback(
 	require.NoError(t, original.db.BlockCreate(testBlock(2, 0x22), nil))
 	originalTip, err := original.db.GetTip(nil)
 	require.NoError(t, err)
-	originalCommitTimestamp, err := original.db.Metadata().GetCommitTimestamp()
+	originalCommitTimestamp, err := original.db.Metadata().GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
-	originalGates, err := original.db.Metadata().GetNodeSettingsGates()
+	originalGates, err := original.db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	originalBlobs := readBlobContents(t, original.db)
 	original.close(t)
@@ -429,10 +430,10 @@ func runRemoteRestoreFailureRollback(
 	restoredTip, err := restored.db.GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, originalTip, restoredTip)
-	restoredCommitTimestamp, err := restored.db.Metadata().GetCommitTimestamp()
+	restoredCommitTimestamp, err := restored.db.Metadata().GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, originalCommitTimestamp, restoredCommitTimestamp)
-	restoredGates, err := restored.db.Metadata().GetNodeSettingsGates()
+	restoredGates, err := restored.db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, originalGates, restoredGates)
 	require.Equal(t, originalBlobs, readBlobContents(t, restored.db))
@@ -551,9 +552,9 @@ func TestRestoreSuccessfulRemoteReplacementRemainsRecoverableUntilCommit(
 	require.NoError(t, original.db.BlockCreate(testBlock(2, 0x22), nil))
 	originalTip, err := original.db.GetTip(nil)
 	require.NoError(t, err)
-	originalCommitTimestamp, err := original.db.Metadata().GetCommitTimestamp()
+	originalCommitTimestamp, err := original.db.Metadata().GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
-	originalGates, err := original.db.Metadata().GetNodeSettingsGates()
+	originalGates, err := original.db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	originalBlobs := readBlobContents(t, original.db)
 	original.close(t)
@@ -618,10 +619,10 @@ func TestRestoreSuccessfulRemoteReplacementRemainsRecoverableUntilCommit(
 	require.NoError(t, err)
 	require.Equal(t, originalTip, rolledBackTip)
 	rolledBackCommitTimestamp, err := rolledBack.db.Metadata().
-		GetCommitTimestamp()
+		GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, originalCommitTimestamp, rolledBackCommitTimestamp)
-	rolledBackGates, err := rolledBack.db.Metadata().GetNodeSettingsGates()
+	rolledBackGates, err := rolledBack.db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, originalGates, rolledBackGates)
 	require.Equal(t, originalBlobs, readBlobContents(t, rolledBack.db))
@@ -1120,7 +1121,7 @@ func TestRestoreRejectsMismatchedTipBlockNumber(t *testing.T) {
 }
 
 // manifestOnlyCloudDestination implements CloudManifestFetcher but fails
-// UploadDir/DownloadDir outright -- used to prove a caller went through
+// UploadDir/DownloadFiles outright -- used to prove a caller went through
 // the lightweight FetchManifest path and never attempted a full
 // directory download at all, rather than merely happening to succeed
 // either way.
@@ -1137,12 +1138,13 @@ func (d *manifestOnlyCloudDestination) UploadDir(
 	)
 }
 
-func (d *manifestOnlyCloudDestination) DownloadDir(
+func (d *manifestOnlyCloudDestination) DownloadFiles(
 	context.Context,
 	string,
+	[]lifecycle.DownloadFile,
 ) error {
 	return errors.New(
-		"manifestOnlyCloudDestination: DownloadDir must never be called",
+		"manifestOnlyCloudDestination: DownloadFiles must never be called",
 	)
 }
 
@@ -1152,7 +1154,20 @@ func (d *manifestOnlyCloudDestination) FetchManifest(
 	return d.manifest, nil
 }
 
-var _ lifecycle.CloudManifestFetcher = &manifestOnlyCloudDestination{}
+func (d *manifestOnlyCloudDestination) FetchManifestWithOptions(
+	_ context.Context,
+	opts ...lifecycle.ManifestOption,
+) (lifecycle.Manifest, error) {
+	if err := d.manifest.Authenticate(opts...); err != nil {
+		return lifecycle.Manifest{}, err
+	}
+	return d.manifest, nil
+}
+
+var (
+	_ lifecycle.CloudManifestFetcher             = &manifestOnlyCloudDestination{}
+	_ lifecycle.ConfigurableCloudManifestFetcher = &manifestOnlyCloudDestination{}
+)
 
 // Registered directly on the package's shared testDestinationRegistry
 // (defined in destination_test.go) — package-level var initializers all
@@ -1180,24 +1195,39 @@ var manifestOnlyFixture = lifecycle.Manifest{
 // cloud snapshotDir whose destination type supports fetching just the
 // one manifest.json object via CloudManifestFetcher -- downloading the
 // (possibly very large) blob/metadata backups alongside it just to read
-// its manifest. This uses a destination whose UploadDir/DownloadDir both
+// its manifest. This uses a destination whose UploadDir/DownloadFiles both
 // fail outright, so this test only passes if PeekManifest actually took
-// the lightweight FetchCloudManifest path and never called DownloadDir
+// the lightweight FetchCloudManifest path and never called DownloadFiles
 // at all.
 func TestPeekManifestUsesLightweightCloudFetchWithoutDownloading(t *testing.T) {
 	t.Parallel()
+	dir := t.TempDir()
+	fixture := manifestOnlyFixture
+	require.NoError(t, lifecycle.WriteManifest(
+		dir, fixture, lifecycle.WithManifestKey(testTrustKey),
+	))
+	fixture, err := lifecycle.ReadManifest(dir)
+	require.NoError(t, err)
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register(
+		"faketest-manifestonly-authenticated",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			return &manifestOnlyCloudDestination{manifest: fixture}, nil
+		},
+	)
 
 	m, err := lifecycle.PeekManifest(
 		context.Background(),
-		testDestinationRegistry,
-		"faketest-manifestonly://bucket/prefix",
+		registry,
+		"faketest-manifestonly-authenticated://bucket/prefix",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
-	require.Equal(t, manifestOnlyFixture, m)
+	require.Equal(t, fixture, m)
 }
 
 // noManifestFetcherCloudDestination forwards to a real fakeCloudDestination
-// for UploadDir/DownloadDir but deliberately does not embed it or expose a
+// for UploadDir/DownloadFiles but deliberately does not embed it or expose a
 // FetchManifest method of its own -- unlike this package's "faketest"
 // scheme, whose fakeCloudDestination DOES implement CloudManifestFetcher.
 // A test resolving a destination through THIS wrapper's scheme instead
@@ -1217,11 +1247,12 @@ func (d *noManifestFetcherCloudDestination) UploadDir(
 	return d.inner.UploadDir(ctx, localDir)
 }
 
-func (d *noManifestFetcherCloudDestination) DownloadDir(
+func (d *noManifestFetcherCloudDestination) DownloadFiles(
 	ctx context.Context,
 	localDir string,
+	files []lifecycle.DownloadFile,
 ) error {
-	return d.inner.DownloadDir(ctx, localDir)
+	return d.inner.DownloadFiles(ctx, localDir, files)
 }
 
 var _ lifecycle.CloudDestination = &noManifestFetcherCloudDestination{}
@@ -1282,12 +1313,14 @@ func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite",
 		"faketest-nomanifestfetcher://bucket/prefix",
 		"", "",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
 
 	peeked, err := lifecycle.PeekManifest(
 		context.Background(), testDestinationRegistry,
 		"faketest-nomanifestfetcher://bucket/prefix/snap-peek",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
 	require.Equal(t, m.CommitTimestamp, peeked.CommitTimestamp)

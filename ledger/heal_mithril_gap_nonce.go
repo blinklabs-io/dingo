@@ -163,6 +163,7 @@ func (ls *LedgerState) healMithrilGapBlockNonces(ctx context.Context) error {
 		for i := range anchorCandidates {
 			candidate := &anchorCandidates[i]
 			contains, err := ls.primaryChainContainsExactPoint(
+				ctx,
 				ocommon.Point{
 					Slot: candidate.Slot,
 					Hash: candidate.Hash,
@@ -281,7 +282,7 @@ func (ls *LedgerState) healMithrilGapBlockNonces(ctx context.Context) error {
 		boundaryNonceRow *nonceRow
 	)
 	writeRows := func(rows []nonceRow) error {
-		txn := ls.db.Transaction(true)
+		txn := ls.db.Transaction(ctx, true)
 		defer txn.Release()
 		return txn.Do(func(txn *database.Txn) error {
 			for _, row := range rows {
@@ -383,6 +384,7 @@ func (ls *LedgerState) healMithrilGapBlockNonces(ctx context.Context) error {
 		// No chain index attached (tests/tooling): fall back to the slot-range
 		// blob scan.
 		if err := database.ForEachBlockInRangeDB(
+			ctx,
 			ls.db,
 			anchorSlot+1,
 			tipPoint.Slot+1,
@@ -448,6 +450,7 @@ func (ls *LedgerState) healMithrilGapBlockNonces(ctx context.Context) error {
 }
 
 func (ls *LedgerState) primaryChainContainsExactPoint(
+	ctx context.Context,
 	point ocommon.Point,
 ) (bool, error) {
 	if point.Slot == 0 && len(point.Hash) == 0 {
@@ -456,7 +459,7 @@ func (ls *LedgerState) primaryChainContainsExactPoint(
 	if ls.chain == nil || point.Slot == ^uint64(0) {
 		return false, nil
 	}
-	block, err := ls.chain.BlockBeforeSlot(point.Slot + 1)
+	block, err := ls.chain.BlockBeforeSlot(ctx, point.Slot+1)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return false, nil

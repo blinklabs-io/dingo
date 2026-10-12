@@ -94,7 +94,7 @@ func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *test
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database: db, ChainManager: chainManager, Logger: logger,
@@ -130,7 +130,7 @@ func TestHandleConnManagerClosedOwnerKeepsReplacementLeiosNotifyDelivery(t *test
 	t.Cleanup(func() { require.NoError(t, o.Close()) })
 	n.ouroborosRef.Store(o)
 
-	listener := o.ConfigureListeners([]connmanager.ListenerConfig{{}})[0]
+	listener := o.ConfigureListeners(context.Background(), []connmanager.ListenerConfig{{}})[0]
 	listener.ConnectionOpts = append(listener.ConnectionOpts, gouroboros.WithLogger(logger))
 	received := make(chan protocol.Message, 1)
 	peerOpts := append([]gouroboros.ConnectionOptionFunc{}, listener.ConnectionOpts...)

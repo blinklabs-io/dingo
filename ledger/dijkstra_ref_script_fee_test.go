@@ -110,10 +110,10 @@ func newDijkstraRefFeeFixture(t *testing.T) *dijkstraRefFeeFixture {
 			OutputAmount:  mary.MaryTransactionOutputValue{Amount: amount},
 		}
 	}
-	spendIn := shelley.NewShelleyTransactionInput(
+	spendIn := shelley.MustNewShelleyTransactionInput(
 		"a228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee11", 0,
 	)
-	refInput := shelley.NewShelleyTransactionInput(
+	refInput := shelley.MustNewShelleyTransactionInput(
 		"b228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22", 0,
 	)
 	refOutput := newOutput(2_000_000)
@@ -231,17 +231,17 @@ func TestLedgerStateValidateTxDijkstraTieredRefScriptFee(t *testing.T) {
 
 	require.NoError(
 		t,
-		ls.ValidateTxWithOverlay(fx.tx(t, fx.minFee), nil, created),
+		ls.ValidateTxWithOverlay(fx.tx(t, fx.minFee), nil, created, nil),
 		"exactly paid fee must be accepted",
 	)
 	requireDijkstraFeeTooSmall(
 		t,
-		ls.ValidateTxWithOverlay(fx.tx(t, fx.minFee-1), nil, created),
+		ls.ValidateTxWithOverlay(fx.tx(t, fx.minFee-1), nil, created, nil),
 	)
 	requireDijkstraFeeTooSmall(
 		t,
 		ls.ValidateTxWithOverlay(
-			fx.tx(t, uint64(dijkstraRefFeeBase)+fx.refSize), nil, created,
+			fx.tx(t, uint64(dijkstraRefFeeBase)+fx.refSize), nil, created, nil,
 		),
 	)
 }
@@ -265,11 +265,11 @@ func TestLedgerProcessBlockDijkstraTieredRefScriptFee(t *testing.T) {
 			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-			require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+			require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
 				for _, utxo := range fx.inputs {
 					id := utxo.Id.Id().Bytes()
 					idx := utxo.Id.Index()
-					if err := db.CreateUtxo(txn, &models.Utxo{
+					if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
 						TxId: id, OutputIdx: idx, AddedSlot: 1,
 					}); err != nil {
 						return err
@@ -313,8 +313,9 @@ func TestLedgerProcessBlockDijkstraTieredRefScriptFee(t *testing.T) {
 				txs: []lcommon.Transaction{tx},
 				era: gdijkstra.EraDijkstra,
 			}
-			processErr := db.Transaction(true).Do(func(txn *database.Txn) error {
+			processErr := db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
 				_, err := ls.ledgerProcessBlock(
+					t.Context(),
 					txn,
 					ocommon.NewPoint(10, block.Hash().Bytes()),
 					block,

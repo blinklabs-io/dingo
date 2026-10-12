@@ -673,7 +673,10 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 			LeiosKeyPublic:          append([]byte(nil), public...),
 			LeiosKeyPossessionProof: append([]byte(nil), proof...),
 		}
-		require.NoError(t, db.ImportPool(nil, pool, registration))
+		require.NoError(
+			t,
+			db.ImportPool(context.Background(), nil, pool, registration),
+		)
 	}
 	importPool(50, oldPublic, oldProof)
 
@@ -769,7 +772,10 @@ func TestRotateSnapshotsPreservesLeiosKeyWhenImportedAgeIsUnknown(
 		LeiosKeyPossessionProof:        append([]byte(nil), proof...),
 		LeiosKeyRegistrationAgeUnknown: true,
 	}
-	require.NoError(t, db.ImportPool(nil, pool, registration))
+	require.NoError(
+		t,
+		db.ImportPool(context.Background(), nil, pool, registration),
+	)
 
 	var poolHash lcommon.PoolKeyHash
 	copy(poolHash[:], poolKeyHash)
@@ -1006,9 +1012,11 @@ func rewardPoolBlockCountsFixture(
 		"mithril_ledger_slot", strconv.FormatUint(anchorSlot, 10), nil,
 	))
 	for _, slot := range []uint64{160, 170} {
-		require.NoError(t, db.UpdatePoolOpCertSequence(poolA, slot, slot, nil))
+		require.NoError(t, db.UpdatePoolOpCertSequence(t.Context(), poolA, slot, slot, nil))
 	}
-	require.NoError(t, db.UpdatePoolOpCertSequence(poolB, 180, 180, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(
+		t.Context(), poolB, 180, 180, nil,
+	))
 	if withImported {
 		retired := bytes.Repeat([]byte{0x93}, len(poolA))
 		require.NoError(t, meta.SaveImportedPoolBlockCounts(

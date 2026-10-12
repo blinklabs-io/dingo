@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"context"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -123,6 +125,7 @@ func witnessedRewardCredentials(
 // monotonic — a witness in the current epoch always yields an expiration >= any
 // earlier renewal, and re-witnessing within an epoch is idempotent.
 func (ls *LedgerState) renewWitnessedAccountExpirations(
+	ctx context.Context,
 	txn *database.Txn,
 	currentEpoch uint64,
 	txs []lcommon.Transaction,
@@ -149,5 +152,5 @@ func (ls *LedgerState) renewWitnessedAccountExpirations(
 	if len(refs) == 0 {
 		return nil
 	}
-	return ls.db.RenewAccountExpirations(refs, expiration, txn)
+	return ls.db.RenewAccountExpirations(ctx, refs, expiration, txn)
 }

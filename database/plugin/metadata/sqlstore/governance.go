@@ -111,6 +111,31 @@ func (s *Store) GetGovernanceProposalSet(
 	)
 }
 
+func (s *Store) GetGovernanceProposalSetAtSlot(
+	slot uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	// The predicate GetGovernanceProposalSet applies at the tip, read
+	// through the lifecycle slots rollback reverts by.
+	return s.queryGovernanceProposals(
+		txn,
+		"governance_proposal.added_slot <= ? "+
+			"AND (enacted_slot IS NULL OR enacted_slot > ?) "+
+			"AND (governance_proposal_drop.dropped_slot IS NULL "+
+			"OR governance_proposal_drop.dropped_slot > ?) "+
+			"AND (deleted_slot IS NULL OR deleted_slot > ?)",
+		governanceProposalOrderSQL,
+		slotValue,
+		slotValue,
+		slotValue,
+		slotValue,
+	)
+}
+
 func (s *Store) GetExpiringGovernanceProposals(
 	epoch uint64,
 	txn types.Txn,
@@ -503,6 +528,68 @@ WHERE proposal_id = ? AND deleted_slot IS NULL`,
 	return ret, rows.Err()
 }
 
+func (s *Store) GetGovernanceVotesAtSlot(
+	proposalID uint,
+	slot uint64,
+	txn types.Txn,
+) ([]*models.GovernanceVote, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	// A replaced vote keeps only its latest value; the value in effect at
+	// slot is the latest governance_vote_history entry at or before it,
+	// which SetGovernanceVote writes on every change including the first
+	// cast. A vote with no such entry predates the journal: its row is the
+	// value at slot only when it took effect by then. One replaced before the
+	// v22 journal after slot has no record of its value there and is left
+	// out rather than reported with a later one.
+	rows, err := db.QueryContext(ctx, `
+SELECT v.id, v.proposal_id, v.voter_type, v.voter_credential_tag,
+       v.voter_credential,
+       CASE WHEN h.id IS NULL THEN v.vote ELSE h.vote END,
+       CASE WHEN h.id IS NULL THEN v.anchor_url ELSE h.anchor_url END,
+       CASE WHEN h.id IS NULL THEN v.anchor_hash ELSE h.anchor_hash END,
+       v.added_slot,
+       CASE WHEN h.id IS NULL THEN v.vote_updated_slot
+            ELSE h.transition_slot END,
+       NULL
+FROM governance_vote v
+LEFT JOIN governance_vote_history h ON h.id = (
+    SELECT h2.id FROM governance_vote_history h2
+    WHERE h2.vote_id = v.id AND h2.transition_slot <= ?
+    ORDER BY h2.transition_slot DESC, h2.id DESC
+    LIMIT 1
+)
+WHERE v.proposal_id = ? AND v.added_slot <= ?
+  AND (v.deleted_slot IS NULL OR v.deleted_slot > ?)
+  AND (h.id IS NOT NULL
+       OR COALESCE(v.vote_updated_slot, v.added_slot) <= ?)`,
+		slotValue,
+		proposalID,
+		slotValue,
+		slotValue,
+		slotValue,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []*models.GovernanceVote{}
+	for rows.Next() {
+		vote, err := scanGovernanceVote(rows)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, vote)
+	}
+	return ret, rows.Err()
+}
+
 func (s *Store) SetGovernanceVote(
 	vote *models.GovernanceVote,
 	txn types.Txn,
@@ -591,6 +678,55 @@ INSERT INTO governance_vote_history (
 			return err
 		},
 	)
+}
+
+func (s *Store) DeleteGovernanceVotesForDrep(
+	credentialTag uint8,
+	credential []byte,
+	epoch uint64,
+	deletedSlot uint64,
+	txn types.Txn,
+) (int, error) {
+	var affected int
+	err := s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			slot, err := checkedInt64(deletedSlot)
+			if err != nil {
+				return err
+			}
+			currentEpochValue, err := checkedInt64(epoch)
+			if err != nil {
+				return err
+			}
+			result, err := db.ExecContext(ctx, `
+UPDATE governance_vote
+SET deleted_slot = ?
+WHERE voter_type = ? AND voter_credential_tag = ?
+  AND voter_credential = ? AND deleted_slot IS NULL
+  AND proposal_id IN (
+      SELECT id FROM governance_proposal
+      WHERE expires_epoch >= ? AND enacted_epoch IS NULL
+        AND expired_epoch IS NULL AND deleted_slot IS NULL
+  )`,
+				slot,
+				models.VoterTypeDRep,
+				credentialTag,
+				credential,
+				currentEpochValue,
+			)
+			if err != nil {
+				return err
+			}
+			rows, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			affected = int(rows)
+			return nil
+		},
+	)
+	return affected, err
 }
 
 func (s *Store) DeleteGovernanceProposalsAfterSlot(

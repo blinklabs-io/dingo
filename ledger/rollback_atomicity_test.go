@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -56,6 +57,7 @@ func failLedgerRollbackAfterChainTruncation(
 	t.Helper()
 	base := ls.db
 	failing, newErr := database.New(
+		context.Background(),
 		base.Config(),
 		database.Stores{
 			Blob: base.Blob(),
@@ -90,10 +92,10 @@ func TestRollbackChainAndStateDeferredReportsChainTruncationOnLedgerFailure(
 	ls := fixture.ls
 	failLedgerRollbackAfterChainTruncation(t, ls, models.ErrBlockNotFound)
 	// Arm the audit window so the discard below has something to discard.
-	ls.armContinuationAudit(fixture.currentTip.Point, "test arming")
+	ls.armContinuationAudit(context.Background(), fixture.currentTip.Point, "test arming")
 	require.NotNil(t, ls.continuationAudit.Load())
 
-	err := ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil)
+	err := ls.rollbackChainAndStateDeferred(context.Background(), fixture.ancestorTip.Point, nil)
 	require.Error(t, err)
 
 	// State the failure left behind: the chain truncated, the ledger did not.
@@ -191,6 +193,7 @@ func TestRollbackChainAndStateDeferredKeepsOrdinaryErrorWhenLedgerReachedPoint(
 	floorErr := models.ErrBlockNotFound
 	base := ls.db
 	failing, err := database.New(
+		context.Background(),
 		base.Config(),
 		database.Stores{
 			Blob: base.Blob(),
@@ -204,7 +207,7 @@ func TestRollbackChainAndStateDeferredKeepsOrdinaryErrorWhenLedgerReachedPoint(
 	t.Cleanup(func() { require.NoError(t, failing.Close()) })
 	ls.db = failing
 
-	rbErr := ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil)
+	rbErr := ls.rollbackChainAndStateDeferred(context.Background(), fixture.ancestorTip.Point, nil)
 	require.Error(t, rbErr)
 
 	// Both halves reached the rollback point: the chain truncated to it and

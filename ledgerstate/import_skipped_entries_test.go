@@ -62,7 +62,7 @@ func TestSeedImportedRewardBasisRejectsMalformedDelegationPoolKey(
 			"aa": bytes.Repeat([]byte{0x01}, credentialHashSize-1),
 		}},
 	}
-	err := seedImportedRewardBasis(cfg, snapshots, 2, 100)
+	err := seedImportedRewardBasis(context.Background(), cfg, snapshots, 2, 100)
 	require.ErrorContains(t, err, "seeding imported reward basis")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 }

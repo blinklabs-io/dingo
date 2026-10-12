@@ -204,10 +204,7 @@ func TestNetworkStatus(t *testing.T) {
 	require.Empty(t, resp.Peers)
 }
 
-// TestNetworkStatusSlotToTimeFallback covers the path where the epoch
-// cache is not yet populated: the handler must still return a timestamp
-// derived from genesis rather than failing the request.
-func TestNetworkStatusSlotToTimeFallback(t *testing.T) {
+func TestNetworkStatusSlotToTimeError(t *testing.T) {
 	t.Parallel()
 
 	deps := newTestDeps()
@@ -226,12 +223,7 @@ func TestNetworkStatusSlotToTimeFallback(t *testing.T) {
 		},
 	})
 
-	resp := decodeResponse[NetworkStatusResponse](t, rec)
-	require.Equal(
-		t,
-		(testGenesisStartTimeSec+120)*1000,
-		resp.CurrentBlockTimestamp,
-	)
+	requireMeshError(t, rec, ErrInternal, http.StatusInternalServerError)
 }
 
 // TestNetworkValidationRejectsUnknownNetwork covers every endpoint that

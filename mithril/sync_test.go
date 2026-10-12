@@ -16,6 +16,7 @@ package mithril
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -47,7 +48,7 @@ func TestDetermineSyncMode(t *testing.T) {
 
 	t.Run("empty database is bootstrap", func(t *testing.T) {
 		db := newSyncModeTestDB(t)
-		mode, err := determineSyncMode(db)
+		mode, err := determineSyncMode(context.Background(), db)
 		require.NoError(t, err)
 		require.Equal(t, syncModeBootstrap, mode)
 	})
@@ -57,7 +58,7 @@ func TestDetermineSyncMode(t *testing.T) {
 		require.NoError(
 			t, db.SetSyncState("sync_status", syncStatusInProgress, nil),
 		)
-		mode, err := determineSyncMode(db)
+		mode, err := determineSyncMode(context.Background(), db)
 		require.NoError(t, err)
 		require.Equal(t, syncModeResume, mode)
 	})
@@ -67,7 +68,7 @@ func TestDetermineSyncMode(t *testing.T) {
 		require.NoError(
 			t, db.SetSyncState("sync_status", syncStatusBackfill, nil),
 		)
-		mode, err := determineSyncMode(db)
+		mode, err := determineSyncMode(context.Background(), db)
 		require.NoError(t, err)
 		require.Equal(t, syncModeResume, mode)
 	})
@@ -85,7 +86,7 @@ func TestDetermineSyncMode(t *testing.T) {
 		require.NoError(
 			t, db.SetSyncState("sync_status", "unknown_interrupted_phase", nil),
 		)
-		mode, err := determineSyncMode(db)
+		mode, err := determineSyncMode(context.Background(), db)
 		require.NoError(t, err)
 		require.Equal(t, syncModeResume, mode)
 	})
@@ -101,7 +102,7 @@ func TestDetermineSyncMode(t *testing.T) {
 			Type:     6,
 		}
 		require.NoError(t, db.BlockCreate(block, nil))
-		mode, err := determineSyncMode(db)
+		mode, err := determineSyncMode(context.Background(), db)
 		require.NoError(t, err)
 		require.Equal(t, syncModeCatchUp, mode)
 	})

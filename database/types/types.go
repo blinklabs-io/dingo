@@ -368,7 +368,9 @@ type IrreversibleTxn interface {
 }
 
 // MetadataBatchAccumulator is an opaque plugin-owned accumulator used by
-// metadata stores that support batched transaction ingestion.
+// metadata stores that support batched transaction ingestion. Rows it holds
+// are written by FlushBatch in the caller's transaction; Reset discards them,
+// and a caller that rolls back that transaction must call it.
 type MetadataBatchAccumulator interface {
 	Reset()
 }

@@ -16,12 +16,16 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -41,6 +45,7 @@ type batchLevel struct {
 	collateral    []batchRef
 	collateralRet uint64
 	fee           uint64
+	certs         []any
 }
 
 type batchRef struct {
@@ -82,6 +87,9 @@ func (l batchLevel) encode(t *testing.T, top bool) map[uint]any {
 	if l.donation > 0 {
 		body[22] = l.donation
 	}
+	if len(l.certs) > 0 {
+		body[4] = l.certs
+	}
 	if len(l.collateral) > 0 {
 		collateral := make([]any, 0, len(l.collateral))
 		for _, in := range l.collateral {
@@ -116,7 +124,7 @@ func buildStateBatch(
 	}
 	body, err := cbor.Encode(topBody)
 	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, true, nil})
+	txCbor, err := cbor.Encode([]any{cbor.RawMessage(body), map[uint]any{}, nil})
 	require.NoError(t, err)
 	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
 	require.NoError(t, err)
@@ -153,8 +161,8 @@ func newStateBatchHarness(t *testing.T) *stateBatchHarness {
 
 func (h *stateBatchHarness) seedUtxo(t *testing.T, ref batchRef, amount uint64) {
 	t.Helper()
-	require.NoError(t, h.db.Transaction(true).Do(func(txn *database.Txn) error {
-		return h.db.CreateUtxo(txn, &models.Utxo{
+	require.NoError(t, h.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		return h.db.CreateUtxo(context.Background(), txn, &models.Utxo{
 			TxId:       ref.txID(),
 			OutputIdx:  uint32(ref.index), //nolint:gosec
 			PaymentKey: bytes.Repeat([]byte{0x42}, 28),
@@ -170,7 +178,7 @@ func (h *stateBatchHarness) seedAccount(
 	reward uint64,
 ) {
 	t.Helper()
-	require.NoError(t, h.db.CreateAccount(nil, &models.Account{
+	require.NoError(t, h.db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey:    stakeKey,
 		CredentialTag: 0,
 		AddedSlot:     1,
@@ -179,12 +187,13 @@ func (h *stateBatchHarness) seedAccount(
 	}))
 }
 
-// apply indexes tx through a block and applies it as one ledger delta. It
-// returns the delta so a caller can inspect accumulated donations.
-func (h *stateBatchHarness) apply(
+// block wraps tx in a one-transaction block and computes its offsets. A
+// phase-2-invalid tx is indexed as valid, because the wire format cannot carry
+// the flag, and its collateral-return offsets are filled in afterwards.
+func (h *stateBatchHarness) block(
 	t *testing.T,
 	tx *dijkstra.DijkstraTransaction,
-) (*LedgerDelta, error) {
+) (*dijkstra.DijkstraBlock, ocommon.Point, *database.BlockIngestionResult) {
 	t.Helper()
 	wasValid := tx.TxIsValid
 	tx.TxIsValid = true
@@ -215,8 +224,6 @@ func (h *stateBatchHarness) apply(
 	require.NoError(t, err)
 	tx.TxIsValid = wasValid
 	if !wasValid {
-		// The indexer saw a valid transaction, so it computed no offset for
-		// the collateral return that an invalid one creates.
 		var sample database.CborOffset
 		for _, offset := range offsets.UtxoOffsets {
 			sample = offset
@@ -231,19 +238,61 @@ func (h *stateBatchHarness) apply(
 			}] = sample
 		}
 	}
+	return block, ocommon.Point{Slot: h.slot, Hash: blockHash}, offsets
+}
 
-	delta := NewLedgerDelta(
-		ocommon.Point{Slot: h.slot, Hash: blockHash},
-		uint(dijkstra.EraIdDijkstra),
-		1,
-	)
+// apply applies tx as one ledger delta. It returns the delta so a caller can
+// inspect accumulated donations.
+func (h *stateBatchHarness) apply(
+	t *testing.T,
+	tx *dijkstra.DijkstraTransaction,
+) (*LedgerDelta, error) {
+	t.Helper()
+	_, point, offsets := h.block(t, tx)
+	delta := NewLedgerDelta(point, uint(dijkstra.EraIdDijkstra), 1)
 	delta.Offsets = offsets
 	delta.addTransaction(tx, 0)
 	t.Cleanup(delta.Release)
-	err = h.db.Transaction(true).Do(func(txn *database.Txn) error {
-		return delta.applyWithoutRecordingDonations(h.ls, txn)
+	err := h.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		return delta.applyWithoutRecordingDonations(context.Background(), h.ls, txn)
 	})
 	return delta, err
+}
+
+// process runs tx through the block-processing path. With validation off, as
+// in replay, the path hands back an unapplied delta, which is applied here;
+// with validation on, as for live blocks, it applies each delta itself.
+func (h *stateBatchHarness) process(
+	t *testing.T,
+	tx *dijkstra.DijkstraTransaction,
+	validate bool,
+) error {
+	t.Helper()
+	block, point, offsets := h.block(t, tx)
+	pparams := dijkstraTestProtocolParameters()
+	pparams.MaxBlockBodySize = 100_000
+	pparams.MaxBlockHeaderSize = 100_000
+	h.ls.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	h.ls.config.SkipDijkstraTxValidation = true
+	h.ls.config.CardanoNodeConfig.ShelleyGenesis().NetworkId = "Testnet"
+	return h.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		delta, err := h.ls.ledgerProcessBlock(
+			context.Background(),
+			txn, point, block,
+			validate, false, false,
+			nil, envelopeParent{}, offsets,
+			eras.DijkstraEraDesc, pparams, nil,
+			0, 0, false,
+		)
+		if err != nil || validate {
+			if delta != nil {
+				delta.Release()
+			}
+			return err
+		}
+		defer delta.Release()
+		return delta.apply(context.Background(), h.ls, txn)
+	})
 }
 
 func (h *stateBatchHarness) utxoLive(t *testing.T, txID []byte, index uint32) bool {
@@ -255,7 +304,7 @@ func (h *stateBatchHarness) utxoLive(t *testing.T, txID []byte, index uint32) bo
 
 func (h *stateBatchHarness) reward(t *testing.T, stakeKey []byte) uint64 {
 	t.Helper()
-	account, err := h.db.GetAccountByCredential(0, stakeKey, false, nil)
+	account, err := h.db.GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
 	require.NoError(t, err)
 	return uint64(account.Reward)
 }
@@ -391,8 +440,8 @@ func TestDijkstraBatchRollbackAndReapplyRestoresEveryLevel(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, applied, snapshot())
 
-	require.NoError(t, h.db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, _, err := h.db.TruncateAfterSlot(
+	require.NoError(t, h.db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+		_, _, err := h.db.TruncateAfterSlot(context.Background(),
 			ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x01}, 32)},
 			0,
 			txn,
@@ -478,4 +527,66 @@ func TestDijkstraBatchDonationsApplyOncePerLevel(t *testing.T) {
 	delta, err := h.apply(t, tx)
 	require.NoError(t, err)
 	require.Equal(t, uint64(11+12+100), delta.donation)
+}
+
+// TestDijkstraBatchApplyAgreesAcrossLedgerPaths drives one batch with several
+// child withdrawals and direct deposits through the delta applier, block replay and
+// live block processing, and requires the same UTxO set and reward balance from each.
+func TestDijkstraBatchApplyAgreesAcrossLedgerPaths(t *testing.T) {
+	t.Parallel()
+	stakeKey := bytes.Repeat([]byte{0xe1}, 28)
+	addr := stateRewardAddress(stakeKey)
+	childIn, childIn2, topIn := batchRef{seed: 0xe2}, batchRef{seed: 0xe3}, batchRef{seed: 0xe4}
+	for name, run := range map[string]func(*stateBatchHarness, *testing.T, *dijkstra.DijkstraTransaction) error{
+		"delta": func(h *stateBatchHarness, t *testing.T, tx *dijkstra.DijkstraTransaction) error {
+			_, err := h.apply(t, tx)
+			return err
+		},
+		"replay": func(h *stateBatchHarness, t *testing.T, tx *dijkstra.DijkstraTransaction) error {
+			return h.process(t, tx, false)
+		},
+		"live": func(h *stateBatchHarness, t *testing.T, tx *dijkstra.DijkstraTransaction) error {
+			return h.process(t, tx, true)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newStateBatchHarness(t)
+			h.seedAccount(t, stakeKey, 100)
+			for _, ref := range []batchRef{childIn, childIn2, topIn} {
+				h.seedUtxo(t, ref, 5_000_000)
+			}
+			tx := buildStateBatch(t,
+				[]batchLevel{
+					{
+						inputs:      []batchRef{childIn},
+						outputs:     []uint64{1_000_000},
+						withdrawals: map[string]uint64{addr: 30},
+					},
+					{
+						inputs:        []batchRef{childIn2},
+						outputs:       []uint64{1_100_000},
+						withdrawals:   map[string]uint64{addr: 20},
+						directDeposit: map[string]uint64{addr: 5},
+					},
+				},
+				batchLevel{
+					inputs:      []batchRef{topIn},
+					outputs:     []uint64{1_300_000},
+					fee:         7,
+					withdrawals: map[string]uint64{addr: 40},
+				},
+				false,
+			)
+			require.NoError(t, run(h, t, tx))
+
+			for _, ref := range []batchRef{childIn, childIn2, topIn} {
+				require.False(t, h.utxoLive(t, ref.txID(), 0), "input %x spent", ref.seed)
+			}
+			require.True(t, h.utxoLive(t, childBodyID(tx, 0), 0))
+			require.True(t, h.utxoLive(t, childBodyID(tx, 1), 0))
+			require.True(t, h.utxoLive(t, tx.Hash().Bytes(), 0))
+			require.Equal(t, uint64(15), h.reward(t, stakeKey))
+		})
+	}
 }

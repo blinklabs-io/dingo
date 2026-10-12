@@ -132,6 +132,17 @@ metadata and relay endpoints are validated before outbound startup; malformed
 snapshots fail startup rather than falling back. If a validated snapshot
 produces no peers accepted by peer governance, startup falls back to topology
 `bootstrapPeers` (so keep a bootstrap-peer list configured as a safety net).
+When snapshot peers are accepted, configured bootstrap peers remain dormant
+for the bootstrap recovery cooldown. If snapshot connections cannot sustain
+the minimum hot-peer set afterward, normal bootstrap recovery re-enables them
+when automatic recovery is enabled and no usable warm gossip or ledger peers
+are available to promote.
+
+Local-root groups accept `hotValency` or the legacy `valency` spelling;
+`valency` takes precedence. An omitted `warmValency` uses the hot target.
+An explicit warm target must be at least the hot target and cannot exceed
+the access-point count for a nonempty group. Unknown shared topology fields
+remain accepted.
 
 Dingo accepts cardano-node's version 23 snapshot format. Its network magic must
 match the configured node, its block point must carry a 32-byte hexadecimal

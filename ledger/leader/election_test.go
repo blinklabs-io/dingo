@@ -83,7 +83,7 @@ type sigmaAuditEpochProvider struct {
 
 func (p *sigmaAuditEpochProvider) CurrentEpoch() uint64 { return sigmaAuditEpoch }
 
-func (p *sigmaAuditEpochProvider) EpochNonce(uint64) []byte {
+func (p *sigmaAuditEpochProvider) EpochNonce(context.Context, uint64) []byte {
 	return coeffTestNonce
 }
 
@@ -500,7 +500,7 @@ func (m *mockEpochProvider) CurrentEpoch() uint64 {
 	return m.currentEpoch.Load()
 }
 
-func (m *mockEpochProvider) EpochNonce(epoch uint64) []byte {
+func (m *mockEpochProvider) EpochNonce(_ context.Context, epoch uint64) []byte {
 	m.epochNonceMu.RLock()
 	nonce, ok := m.epochNonces[epoch]
 	m.epochNonceMu.RUnlock()

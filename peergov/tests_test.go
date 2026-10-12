@@ -822,7 +822,7 @@ type countingLedgerPeerProvider struct {
 	calls atomic.Int32
 }
 
-func (p *countingLedgerPeerProvider) GetPoolRelays() ([]PoolRelay, error) {
+func (p *countingLedgerPeerProvider) GetPoolRelays(ctx context.Context) ([]PoolRelay, error) {
 	p.calls.Add(1)
 	return nil, nil
 }
@@ -837,7 +837,7 @@ type slowLedgerPeerProvider struct {
 	calls   atomic.Int32
 }
 
-func (p *slowLedgerPeerProvider) GetPoolRelays() ([]PoolRelay, error) {
+func (p *slowLedgerPeerProvider) GetPoolRelays(ctx context.Context) ([]PoolRelay, error) {
 	p.calls.Add(1)
 	p.started <- struct{}{}
 	<-p.release
@@ -853,7 +853,7 @@ type panicLedgerPeerProvider struct {
 	calls       atomic.Int32
 }
 
-func (p *panicLedgerPeerProvider) GetPoolRelays() ([]PoolRelay, error) {
+func (p *panicLedgerPeerProvider) GetPoolRelays(ctx context.Context) ([]PoolRelay, error) {
 	p.calls.Add(1)
 	if p.panicOnCall.Load() {
 		panic("ledger provider panic")

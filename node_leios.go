@@ -84,7 +84,7 @@ func (a *leiosKeyProviderAdapter) GetLeiosKeys(
 	if db == nil {
 		return nil, errors.New("database unavailable")
 	}
-	txn := db.MetadataTxn(false)
+	txn := db.MetadataTxn(context.Background(), false)
 	if txn == nil {
 		return nil, errors.New("metadata transaction unavailable")
 	}
@@ -121,7 +121,7 @@ func (a *leiosCommitteeParamsAdapter) LeiosCommitteeParameters(
 	if db == nil {
 		return 0, nil, errors.New("database unavailable")
 	}
-	txn := db.MetadataTxn(false)
+	txn := db.MetadataTxn(context.Background(), false)
 	if txn == nil {
 		return 0, nil, errors.New("metadata transaction unavailable")
 	}

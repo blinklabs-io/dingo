@@ -16,6 +16,7 @@ package blockfrost
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"io"
 	"log/slog"
@@ -112,7 +113,7 @@ func newMalformedHashAdapter(
 	if seed != nil {
 		seed(db)
 	}
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -157,7 +158,7 @@ func TestBlockfrostRejectsMalformedStoredHashes(t *testing.T) {
 	}
 	createAccount := func(pool []byte) func(*database.Database) {
 		return func(db *database.Database) {
-			require.NoError(t, db.CreateAccount(nil, &models.Account{
+			require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 				StakingKey: stakingKey,
 				Pool:       pool,
 				Active:     true,
@@ -216,7 +217,7 @@ func TestBlockfrostRejectsMalformedStoredHashes(t *testing.T) {
 			},
 			seed: createAccount(nil),
 			call: func(t *testing.T, a *NodeAdapter) error {
-				_, _, err := a.AccountDelegationHistory(stakeAddress(t), page)
+				_, _, err := a.AccountDelegationHistory(context.Background(), stakeAddress(t), page)
 				return err
 			},
 			want: "delegation pool key hash",
@@ -240,7 +241,7 @@ func TestBlockfrostRejectsMalformedStoredHashes(t *testing.T) {
 				))
 			},
 			call: func(t *testing.T, a *NodeAdapter) error {
-				_, _, err := a.AccountRewardHistory(stakeAddress(t), page)
+				_, _, err := a.AccountRewardHistory(context.Background(), stakeAddress(t), page)
 				return err
 			},
 			want: "reward pool key hash",
@@ -250,7 +251,7 @@ func TestBlockfrostRejectsMalformedStoredHashes(t *testing.T) {
 			store: &malformedHashStore{},
 			seed:  importPool(short, stakingKey),
 			call: func(_ *testing.T, a *NodeAdapter) error {
-				_, err := a.PoolDetail(hex.EncodeToString(poolKey))
+				_, err := a.PoolDetail(context.Background(), hex.EncodeToString(poolKey))
 				return err
 			},
 			want: "pool reward account",
@@ -260,7 +261,7 @@ func TestBlockfrostRejectsMalformedStoredHashes(t *testing.T) {
 			store: &malformedHashStore{},
 			seed:  importPool(stakingKey, short),
 			call: func(_ *testing.T, a *NodeAdapter) error {
-				_, err := a.PoolDetail(hex.EncodeToString(poolKey))
+				_, err := a.PoolDetail(context.Background(), hex.EncodeToString(poolKey))
 				return err
 			},
 			want: "pool owner key hash",

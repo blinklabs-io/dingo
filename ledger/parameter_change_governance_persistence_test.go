@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -41,6 +42,16 @@ import (
 type parameterChangeGovernanceTestBlock struct {
 	header lcommon.BlockHeader
 	tx     lcommon.Transaction
+}
+
+func seedParameterChangeGovernanceConstitution(
+	t *testing.T,
+	db *database.Database,
+) {
+	t.Helper()
+	require.NoError(t, db.SetConstitution(&models.Constitution{
+		AnchorHash: bytes.Repeat([]byte{0x43}, lcommon.Blake2b256Size),
+	}, nil))
 }
 
 func (b *parameterChangeGovernanceTestBlock) Type() int {
@@ -104,6 +115,7 @@ func TestLedgerProcessBlockRejectsParameterChangeProtocolVersionAndPersistsNoPro
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	seedParameterChangeGovernanceConstitution(t, db)
 
 	txHash := bytes.Repeat([]byte{0x44}, 32)
 	minFeeA := uint(1)
@@ -150,9 +162,10 @@ func TestLedgerProcessBlockRejectsParameterChangeProtocolVersionAndPersistsNoPro
 		tx:     tx,
 	}
 
-	processErr := db.Transaction(true).
+	processErr := db.Transaction(context.Background(), true).
 		Do(func(txn *database.Txn) error {
 			_, err := ls.ledgerProcessBlock(
+				context.Background(),
 				txn,
 				ocommon.NewPoint(10, block.Hash().Bytes()),
 				block,
@@ -180,7 +193,7 @@ func TestLedgerProcessBlockRejectsParameterChangeProtocolVersionAndPersistsNoPro
 		"block carrying a protocol-version ParameterChange must be rejected",
 	)
 
-	_, getErr := db.GetGovernanceProposal(txHash, 0, nil)
+	_, getErr := db.GetGovernanceProposal(context.Background(), txHash, 0, nil)
 	require.ErrorIs(
 		t,
 		getErr,
@@ -199,6 +212,7 @@ func TestLedgerProcessBlockRejectsDijkstraParameterChangeProtocolVersionAndPersi
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	seedParameterChangeGovernanceConstitution(t, db)
 
 	txHash := bytes.Repeat([]byte{0x45}, 32)
 	minFeeA := uint(1)
@@ -247,9 +261,10 @@ func TestLedgerProcessBlockRejectsDijkstraParameterChangeProtocolVersionAndPersi
 		tx:     tx,
 	}
 
-	processErr := db.Transaction(true).
+	processErr := db.Transaction(context.Background(), true).
 		Do(func(txn *database.Txn) error {
 			_, err := ls.ledgerProcessBlock(
+				context.Background(),
 				txn,
 				ocommon.NewPoint(10, block.Hash().Bytes()),
 				block,
@@ -277,7 +292,7 @@ func TestLedgerProcessBlockRejectsDijkstraParameterChangeProtocolVersionAndPersi
 		"block carrying a protocol-version ParameterChange must be rejected",
 	)
 
-	_, getErr := db.GetGovernanceProposal(txHash, 0, nil)
+	_, getErr := db.GetGovernanceProposal(context.Background(), txHash, 0, nil)
 	require.ErrorIs(
 		t,
 		getErr,

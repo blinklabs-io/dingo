@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -66,6 +67,7 @@ func (e *MissingEnactedRootError) Is(target error) bool {
 // pending sibling, or a stored but superseded or non-root action, is a
 // legitimate skip and returns nil.
 func checkMissingEnactedRoot(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	proposal *models.GovernanceProposal,
@@ -84,6 +86,7 @@ func checkMissingEnactedRoot(
 		return nil
 	}
 	_, err := db.GetGovernanceProposal(
+		ctx,
 		proposal.ParentTxHash, *proposal.ParentActionIdx, txn,
 	)
 	if err == nil {
@@ -130,6 +133,7 @@ func isMithrilBootstrapped(
 // MissingEnactedRootError for the first such proposal and nil for a
 // genesis-synced database.
 func VerifyPurposeRoots(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	epoch uint64,
@@ -141,7 +145,7 @@ func VerifyPurposeRoots(
 	if !bootstrapped {
 		return nil
 	}
-	active, err := db.GetActiveGovernanceProposals(epoch, txn)
+	active, err := db.GetActiveGovernanceProposals(ctx, epoch, txn)
 	if err != nil {
 		return fmt.Errorf("get active proposals: %w", err)
 	}
@@ -152,14 +156,14 @@ func VerifyPurposeRoots(
 			continue
 		}
 		root, err := db.GetLastEnactedGovernanceProposal(
-			purposeActionTypes(purpose), txn,
+			ctx, purposeActionTypes(purpose), txn,
 		)
 		if err != nil {
 			return fmt.Errorf(
 				"get current root for purpose %d: %w", purpose, err,
 			)
 		}
-		if err := checkMissingEnactedRoot(db, txn, p, root, keys); err != nil {
+		if err := checkMissingEnactedRoot(ctx, db, txn, p, root, keys); err != nil {
 			return err
 		}
 	}

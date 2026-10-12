@@ -50,12 +50,28 @@ const (
 	// re-syncs every client, it targets only that peer's connection.
 	ChainsyncResyncReasonDeferredHeaderValidationFailure = "deferred header validation failure"
 	ChainsyncResyncReasonForkQueueOverflowRestartFailed  = "failed to restart blockfetch after fork-resolution header-queue overflow"
+	ChainsyncResyncReasonHeaderQueueFullRestartFailed    = "failed to restart blockfetch for a full header queue"
 	ChainsyncResyncReasonForkExtensionRestartFailed      = "failed to restart blockfetch after fork extension"
 	// ChainsyncResyncReasonFutureHeaderAdmissionRecovery re-intersects the
 	// ChainSync mini-protocol after a resolvable header was deliberately dropped
 	// outside the permitted clock-skew window. It is not a peer-fault signal and
 	// does not impose a peer cooldown.
 	ChainsyncResyncReasonFutureHeaderAdmissionRecovery = "future header admission recovery"
+	// ChainsyncResyncReasonDisconnectedHeaderAdmission re-intersects the
+	// ChainSync mini-protocol after admission found a header past the forecast
+	// horizon that does not build on the local chain. The held header cannot be
+	// released by applying blocks the node already has, so the connection
+	// restarts from fresh intersect points. It is not a peer-fault signal and
+	// does not impose a peer cooldown.
+	ChainsyncResyncReasonDisconnectedHeaderAdmission = "disconnected header admission"
+	// ChainsyncResyncReasonBehindLocalTip re-intersects an ingress-eligible
+	// ChainSync connection whose delivered header trails the local tip by more
+	// than the security parameter while the peer's advertised tip does not,
+	// and only while chain selection has no best peer.
+	// Its headers cannot extend the local chain, so the connection restarts
+	// from fresh intersect points. It is not a peer-fault signal and does not
+	// impose a peer cooldown.
+	ChainsyncResyncReasonBehindLocalTip = "behind local tip"
 )
 
 // ChainsyncResyncEvent carries the connection ID that should

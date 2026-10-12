@@ -363,6 +363,7 @@ func (b *Backfill) bootstrapEraChain(
 // only when replay reaches it; txn is the batch those proposals were written
 // in, or nil before replay starts.
 func (b *Backfill) resolvePParamsThrough(
+	ctx context.Context,
 	targetEpoch uint64,
 	txn *database.Txn,
 ) error {
@@ -400,6 +401,7 @@ func (b *Backfill) resolvePParamsThrough(
 			break
 		}
 		if err := b.resolveEpochPParams(
+			ctx,
 			b.resolveNext == 0,
 			ep,
 			txn,
@@ -414,6 +416,7 @@ func (b *Backfill) resolvePParamsThrough(
 }
 
 func (b *Backfill) resolveEpochPParams(
+	ctx context.Context,
 	firstEpoch bool,
 	ep *models.Epoch,
 	txn *database.Txn,
@@ -443,6 +446,7 @@ func (b *Backfill) resolveEpochPParams(
 			sourceEra.DecodePParamsUpdateFunc != nil &&
 			sourceEra.PParamsUpdateFunc != nil {
 			newPP, _, err := b.db.ComputeAndApplyPParamUpdates(
+				ctx,
 				ep.StartSlot, ep.EpochId,
 				sourceEra.Id, b.resolveQuorum,
 				b.resolvePP,
@@ -700,6 +704,7 @@ func backfillConwayProtocolParameters(
 }
 
 func (b *Backfill) processBlockGovernanceLevel(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	txIndex uint32,
@@ -710,49 +715,30 @@ func (b *Backfill) processBlockGovernanceLevel(
 	if !tx.IsValid() {
 		return nil
 	}
-	proposals := tx.ProposalProcedures()
-	votes := tx.VotingProcedures()
-	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
+	if !governance.TransactionHasGovernanceEffects(tx) {
 		return nil
 	}
-	if conwayPP == nil {
+	if conwayPP == nil &&
+		governance.HistoricalTransactionRequiresConwayParameters(tx) {
 		return errors.New(
 			"missing Conway protocol parameters for governance backfill",
 		)
 	}
-	if len(proposals) > 0 {
-		if err := governance.ProcessHistoricalProposals(
-			tx, point, txIndex, epochId,
-			conwayPP.GovActionValidityPeriod,
-			b.db, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"governance proposals: %w", err,
-			)
-		}
+	var proposalLifetime uint64
+	if conwayPP != nil {
+		proposalLifetime = conwayPP.GovActionValidityPeriod
 	}
-	if len(votes) > 0 {
-		if err := governance.ProcessHistoricalVotes(
-			tx, point, epochId,
-			b.db, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"governance votes: %w", err,
-			)
-		}
-	}
-	if hasDRepActivityCerts {
-		if err := governance.ProcessHistoricalDRepActivityCertificates(
-			tx,
-			epochId,
-			b.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"DRep activity certificates: %w", err,
-			)
-		}
+	if err := governance.ProcessHistoricalTransactionEffects(
+		ctx,
+		tx,
+		point,
+		txIndex,
+		epochId,
+		proposalLifetime,
+		b.db,
+		txn,
+	); err != nil {
+		return fmt.Errorf("governance transaction effects: %w", err)
 	}
 	return nil
 }
@@ -800,7 +786,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 		b.immutableUtxoOffsetsTipSet = true
 	}
 
-	tipBlocks, err := database.BlocksRecent(b.db, 1)
+	// A cancelled ctx still reaches the nothing-to-backfill return below;
+	// the iteration loop is where cancellation stops real work.
+	tipBlocks, err := database.BlocksRecent(context.WithoutCancel(ctx), b.db, 1)
 	if err != nil {
 		return fmt.Errorf("reading chain tip: %w", err)
 	}
@@ -873,7 +861,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 	} else if len(b.epochs) > 0 {
 		resolveThrough = b.epochs[0].EpochId
 	}
-	if err := b.resolvePParamsThrough(resolveThrough, nil); err != nil {
+	if err := b.resolvePParamsThrough(ctx, resolveThrough, nil); err != nil {
 		return fmt.Errorf(
 			"resolving protocol parameters: %w", err,
 		)
@@ -984,7 +972,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 	ensureBatchTxn := func() {
 		if batchTxn == nil {
-			batchTxn = b.db.Transaction(true)
+			batchTxn = b.db.Transaction(ctx, true)
 		}
 	}
 	rollbackBatch := func() {
@@ -1070,7 +1058,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 		// Detect epoch boundary and update pparams
 		if isNewEpoch {
-			if err := b.resolvePParamsThrough(epochId, batchTxn); err != nil {
+			if err := b.resolvePParamsThrough(ctx, epochId, batchTxn); err != nil {
 				saveCommittedCheckpoint()
 				return fmt.Errorf(
 					"resolving protocol parameters for epoch %d: %w",
@@ -1133,6 +1121,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 					// Store transaction metadata into the shared batch
 					// instead of committing once per block.
 					if pErr := b.processBlockTxsBatched(
+						ctx,
 						txs, point, epochId, eraId,
 						pp, offsets, acc, batchTxn,
 						&intervalStats, isFreshStart,
@@ -1209,7 +1198,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 	// Replay has reached the anchor, where the snapshot is the ledger state.
 	// Restore before the rebuild, which attributes stake from account.pool.
 	if endSlotSet {
-		restored, err := b.db.RestoreImportedAccountStates(endSlot, nil)
+		restored, err := b.db.RestoreImportedAccountStates(ctx, endSlot, nil)
 		if err != nil {
 			saveCommittedCheckpoint()
 			return fmt.Errorf(
@@ -1233,9 +1222,13 @@ func (b *Backfill) Run(ctx context.Context) error {
 		// ledger-state importer already maintained one running total per live
 		// credential, so merge the final account/delegation state into those
 		// totals instead of scanning every live UTxO again.
-		rebuildErr = b.db.RebuildRewardLiveStakeFromRunningTotals(tipSlot, nil)
+		rebuildErr = b.db.RebuildRewardLiveStakeFromRunningTotals(
+			ctx,
+			tipSlot,
+			nil,
+		)
 	} else {
-		rebuildErr = b.db.RebuildRewardLiveStake(tipSlot, nil)
+		rebuildErr = b.db.RebuildRewardLiveStake(ctx, tipSlot, nil)
 	}
 	if err := rebuildErr; err != nil {
 		saveCommittedCheckpoint()
@@ -1296,6 +1289,7 @@ func (b *Backfill) computeBlockOffsets(
 // processBlockTxsBatched stores transactions into an existing database
 // transaction and accumulates batchable metadata rows for a later flush.
 func (b *Backfill) processBlockTxsBatched(
+	ctx context.Context,
 	txs []lcommon.Transaction,
 	point ocommon.Point,
 	epochId uint64,
@@ -1330,11 +1324,17 @@ func (b *Backfill) processBlockTxsBatched(
 		for levelIndex, level := range levels {
 			storageIndex := storageBaseIndex + uint64(levelIndex)
 			updateEpoch, paramUpdates := level.ProtocolParameterUpdates()
+			conwayPP := backfillConwayProtocolParameters(pp)
+			protocolMajor := uint64(0)
+			if versioned, ok := pp.(lcommon.PoolRuleProtocolParameters); ok {
+				protocolMajor = uint64(versioned.ProtocolMajorVersion())
+			}
 			if opts.SkipProducedUtxoOffsetWrites {
 				b.skippedUtxoRefs += uint64(len(level.Produced()))
 			}
 			setTxStart := time.Now()
 			if err := b.db.SetTransactionBatchedWithOpts(
+				ctx,
 				level, point, uint32(storageIndex), //nolint:gosec
 				updateEpoch, paramUpdates,
 				b.calculateCertDeposits(level, eraId, pp), offsets, acc, txn,
@@ -1344,6 +1344,7 @@ func (b *Backfill) processBlockTxsBatched(
 					Stats:                        stats,
 					SkipWithdrawalWitnessWrite:   !b.delegatorInactivityEnabled,
 					HistoricalBackfill:           true,
+					ProtocolMajor:                protocolMajor,
 				},
 			); err != nil {
 				return fmt.Errorf(
@@ -1358,11 +1359,12 @@ func (b *Backfill) processBlockTxsBatched(
 				stats.SetTransactionBatched += time.Since(setTxStart)
 			}
 			if err := b.processBlockGovernanceLevel(
+				ctx,
 				level,
 				point,
 				uint32(storageIndex), //nolint:gosec
 				epochId,
-				backfillConwayProtocolParameters(pp),
+				conwayPP,
 				txn,
 			); err != nil {
 				return fmt.Errorf(

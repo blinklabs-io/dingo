@@ -59,7 +59,15 @@ Use Go 1.26 or later and `make`:
 ```sh
 make build
 ./dingo --help
+./dingo devnet
+
+# Keep the chain between runs, then reset it when needed:
+./dingo devnet --data-dir ./.dingo-devnet
+./dingo devnet --data-dir ./.dingo-devnet --reset
 ```
+
+The npm package supports the same commands, including
+`npx @blinklabs/dingo devnet --data-dir ./.dingo-devnet`.
 
 Run the test suite with race detection using `make test`. See the
 [development guide](docs/development.md) for repository checks, integration

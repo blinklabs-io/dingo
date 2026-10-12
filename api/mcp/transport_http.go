@@ -48,6 +48,7 @@ type Server struct {
 
 // NewServer creates a new MCP Server instance.
 func NewServer(
+	ctx context.Context,
 	cfg ProviderConfig,
 	deps ProviderDependencies,
 	resolvedTLS apiconfig.EffectiveTLS,
@@ -60,7 +61,7 @@ func NewServer(
 	if err := validateListenSecurity(host, cfg.AuthToken, resolvedTLS.Enabled); err != nil {
 		return nil, err
 	}
-	mcpServer, openedDB, err := NewMCPServer(cfg, deps)
+	mcpServer, openedDB, err := NewMCPServer(ctx, cfg, deps)
 	if err != nil {
 		return nil, fmt.Errorf("create MCP server: %w", err)
 	}
@@ -191,11 +192,11 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.lifecycleMu.Unlock()
 	err := s.listener.Stop(ctx, stopHTTPServer)
 	if err != nil {
-		s.cleanupOnce.Do(func() {
+		s.cleanupOnce.Do(func() { //nolint:contextcheck // Deferred shutdown cleanup must outlive the caller's timed-out ctx.
 			// A timed-out Start still owns publication; wait for it before closing
 			// the database, and prevent any later Start with the stopped gate.
 			go func() {
-				if cleanupErr := s.listener.Stop(context.Background(), func(_ context.Context, server *http.Server) error { return server.Close() }); cleanupErr != nil {
+				if cleanupErr := s.listener.Stop(context.WithoutCancel(ctx), func(_ context.Context, server *http.Server) error { return server.Close() }); cleanupErr != nil {
 					s.logger.Error(
 						"MCP deferred shutdown failed",
 						"error",

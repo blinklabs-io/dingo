@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -255,8 +256,7 @@ type PoolStakeDistribution struct {
 // a pinned call's point-validation and this read share one consistent
 // snapshot -- nil opens and releases one internally, for a caller (a
 // direct, unpinned RPC handler) with no such transaction of its own.
-func (ls *LedgerState) PoolStakeDistribution(
-	poolFilter []lcommon.PoolKeyHash,
+func (ls *LedgerState) PoolStakeDistribution(ctx context.Context, poolFilter []lcommon.PoolKeyHash,
 	at QueryPoint,
 	txn *database.Txn,
 ) (*PoolStakeDistribution, error) {
@@ -268,10 +268,10 @@ func (ls *LedgerState) PoolStakeDistribution(
 	if txn == nil {
 		// A read opened before the boundary job writes mark[epoch] never
 		// sees it.
-		if err := ls.WaitEpochBoundaryJob(ls.closeCtx()); err != nil {
+		if err := ls.WaitEpochBoundaryJob(ctx); err != nil {
 			return nil, err
 		}
-		txn = ls.db.Transaction(false)
+		txn = ls.db.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	metaTxn := txn.Metadata()

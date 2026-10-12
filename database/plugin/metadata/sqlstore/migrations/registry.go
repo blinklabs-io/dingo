@@ -71,8 +71,14 @@ const (
 	rewardOutputFoldedSchemaRelease                     = "reward-account-output-folded"
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
 	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
+	drepExpiryHistorySchemaRelease                      = "drep-expiry-history"
+	drepDormancyStateSchemaRelease                      = "drep-dormancy-state"
+	drepDelegatorStateSchemaRelease                     = "drep-delegator-state"
 	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
 	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
+	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
+	poolRelayTypeSchemaRelease                          = "pool-relay-type"
+	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -208,6 +214,16 @@ var schemaVersions = []struct {
 	},
 	{Version: 34, Name: "leios-transaction-ledger-context", Dir: "v34"},
 	{Version: 35, Name: accountDRepClearSchemaRelease, Dir: "v35"},
+	{
+		Version: 36,
+		Name:    committeeHotAuthorizationPruneOrderSchemaRelease,
+		Dir:     "v36",
+	},
+	{Version: 37, Name: drepExpiryHistorySchemaRelease, Dir: "v37"},
+	{Version: 38, Name: poolRelayTypeSchemaRelease, Dir: "v38"},
+	{Version: 39, Name: midnightRollbackJournalSchemaRelease, Dir: "v39"},
+	{Version: 40, Name: drepDormancyStateSchemaRelease, Dir: "v40"},
+	{Version: 41, Name: drepDelegatorStateSchemaRelease, Dir: "v41"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -488,11 +504,17 @@ func rewardCreditRoundBackfill(
 		return BatchResult{Done: true}, nil
 	}
 	if err != nil {
-		return BatchResult{}, fmt.Errorf("read legacy reward credit rounds: %w", err)
+		return BatchResult{}, fmt.Errorf(
+			"read legacy reward credit rounds: %w",
+			err,
+		)
 	}
 	rounds := make([]models.RewardCreditRound, 0)
 	if err := json.Unmarshal([]byte(raw), &rounds); err != nil {
-		return BatchResult{}, fmt.Errorf("decode legacy reward credit rounds: %w", err)
+		return BatchResult{}, fmt.Errorf(
+			"decode legacy reward credit rounds: %w",
+			err,
+		)
 	}
 	if rounds == nil {
 		rounds = make([]models.RewardCreditRound, 0)
@@ -510,7 +532,8 @@ func rewardCreditRoundBackfill(
 	}
 	end := min(start+batch.Limit, len(rounds))
 	for _, round := range rounds[start:end] {
-		if round.SnapshotEpoch > uint64(1<<63-1) || round.BoundarySlot > uint64(1<<63-1) {
+		if round.SnapshotEpoch > uint64(1<<63-1) ||
+			round.BoundarySlot > uint64(1<<63-1) {
 			return BatchResult{}, fmt.Errorf(
 				"legacy reward credit round exceeds SQL integer range: epoch %d slot %d",
 				round.SnapshotEpoch,
@@ -523,7 +546,10 @@ func rewardCreditRoundBackfill(
 			int64(round.SnapshotEpoch),
 			int64(round.BoundarySlot),
 		); err != nil {
-			return BatchResult{}, fmt.Errorf("copy legacy reward credit round: %w", err)
+			return BatchResult{}, fmt.Errorf(
+				"copy legacy reward credit round: %w",
+				err,
+			)
 		}
 	}
 	if end == len(rounds) {
@@ -532,9 +558,16 @@ func rewardCreditRoundBackfill(
 			batch.Rebind(`DELETE FROM sync_state WHERE sync_key = ?`),
 			models.PendingRewardCreditRoundsKey,
 		); err != nil {
-			return BatchResult{}, fmt.Errorf("remove legacy reward credit rounds: %w", err)
+			return BatchResult{}, fmt.Errorf(
+				"remove legacy reward credit rounds: %w",
+				err,
+			)
 		}
-		return BatchResult{Cursor: strconv.Itoa(end), Rows: int64(end - start), Done: true}, nil
+		return BatchResult{
+			Cursor: strconv.Itoa(end),
+			Rows:   int64(end - start),
+			Done:   true,
+		}, nil
 	}
 	return BatchResult{Cursor: strconv.Itoa(end), Rows: int64(end - start)}, nil
 }

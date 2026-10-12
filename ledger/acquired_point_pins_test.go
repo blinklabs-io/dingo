@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -144,7 +145,7 @@ func TestVerifyPointQueryable_PinBeforePrune_IsRetained(t *testing.T) {
 
 	release := ls.PinAcquiredPoint(at.Slot)
 	defer release()
-	require.NoError(t, ls.VerifyPointQueryable(nil, at))
+	require.NoError(t, ls.VerifyPointQueryable(context.Background(), nil, at))
 
 	// The prune now runs, and would have cut well past the point.
 	floor := ls.capUtxoPruneFloor(at.Slot+500, pinTestStabilityWindow)
@@ -166,7 +167,7 @@ func TestVerifyPointQueryable_PruneAnnouncedBeforePin_IsRejected(t *testing.T) {
 
 	release := ls.PinAcquiredPoint(at.Slot)
 	defer release()
-	err := ls.VerifyPointQueryable(nil, at)
+	err := ls.VerifyPointQueryable(context.Background(), nil, at)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable,
 		"a point below an announced prune floor must be refused at Acquire")
 }
@@ -216,7 +217,7 @@ func TestVerifyPointQueryable_PoolSnapshotPruneAnnouncedBeforePin_IsRejected(
 
 	release := ls.PinAcquiredPoint(at.Slot)
 	defer release()
-	err := ls.VerifyPointQueryable(nil, at)
+	err := ls.VerifyPointQueryable(context.Background(), nil, at)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable,
 		"a point whose snapshot is below an announced boundary must be "+
 			"refused at Acquire")

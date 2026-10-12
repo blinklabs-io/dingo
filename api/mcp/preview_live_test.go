@@ -69,7 +69,7 @@ func TestPreviewLiveEvaluation(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	db, err := OpenReadOnlySQLite(path)
+	db, err := OpenReadOnlySQLite(ctx, path)
 	require.NoError(t, err)
 	defer db.Close()
 	var network string
@@ -186,7 +186,7 @@ func TestPreviewLiveSQL(t *testing.T) {
 	if path == "" {
 		t.Skip("set DINGO_MCP_PREVIEW_TEST_DB")
 	}
-	db, err := OpenReadOnlySQLite(path)
+	db, err := OpenReadOnlySQLite(t.Context(), path)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	var network string
@@ -199,7 +199,7 @@ func TestPreviewLiveSQL(t *testing.T) {
 	cfg := DefaultProviderConfig()
 	require.Positive(t, *previewTestQueryTimeout)
 	cfg.QueryTimeout = *previewTestQueryTimeout
-	server, _, err := NewMCPServer(cfg, ProviderDependencies{SQLDB: db})
+	server, _, err := NewMCPServer(t.Context(), cfg, ProviderDependencies{SQLDB: db})
 	require.NoError(t, err)
 	ct, st := mcp.NewInMemoryTransports()
 	ss, err := server.Connect(t.Context(), st, nil)

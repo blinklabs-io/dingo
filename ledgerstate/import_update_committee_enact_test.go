@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -120,21 +121,13 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	var logs bytes.Buffer
-	importCfg := govImportConfigForTest(db, govStateData)
-	importCfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 	require.NoError(t, importGovState(
 		context.Background(),
-		importCfg,
+		govImportConfigForTest(db, govStateData),
 		func(ImportProgress) {},
 	))
-	require.Contains(
-		t,
-		logs.String(),
-		"level=WARN msg=\"snapshot holds ratified committee actions not yet enacted\"",
-	)
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(t.Context(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 2)
 	imported := map[string]uint64{}
@@ -156,11 +149,11 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 	require.NotNil(t, row.RatifiedEpoch, "UpdateCommittee must be ratified")
 	require.Equal(t, uint64(500), *row.RatifiedEpoch)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(t.Context(), true)
 	defer txn.Release()
 	pp := &conway.ConwayProtocolParameters{}
 	pp.ProtocolVersion.Major = 10
-	out, err := governance.ProcessEpoch(&governance.EpochInput{
+	out, err := governance.ProcessEpoch(t.Context(), &governance.EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    500,
@@ -177,7 +170,7 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 	require.Equal(t, 1, out.EnactedCount)
 	require.NoError(t, txn.Commit())
 
-	members, err = db.GetCommitteeMembers(nil)
+	members, err = db.GetCommitteeMembers(t.Context(), nil)
 	require.NoError(t, err)
 	got := map[string]bool{}
 	for _, m := range members {
@@ -197,6 +190,168 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 		}.Key()] = true
 	}
 	require.Equal(t, want, got)
+}
+
+func TestImportedExpiredUpdateCommitteeAuthorizesSameEpochHotKey(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	staleHash := bytes.Repeat([]byte{0x33}, 28)
+	require.NoError(t, db.SetCommitteeMembers(
+		t.Context(),
+		[]*models.CommitteeMember{{
+			ColdCredentialTag: 0,
+			ColdCredHash:      staleHash,
+			ExpiresEpoch:      700,
+			AddedSlot:         1,
+		}},
+		nil,
+	))
+
+	oldHash := bytes.Repeat([]byte{0x44}, 28)
+	addHash := bytes.Repeat([]byte{0x55}, 28)
+	type entry = struct {
+		tag    uint64
+		hash   []byte
+		expiry uint64
+	}
+	inForce := []any{[]any{
+		committeeMapForTest(t, []entry{{1, oldHash, 653}}),
+		cbor.Rat{Rat: big.NewRat(2, 3)},
+	}}
+	enacted := []any{[]any{
+		committeeMapForTest(t, []entry{{1, addHash, 799}}),
+		cbor.Rat{Rat: big.NewRat(2, 3)},
+	}}
+	actionCbor, err := cbor.Encode([]any{
+		uint64(govActionTypeUpdateCommittee),
+		nil,
+		[]any{[]any{uint64(1), oldHash}},
+		committeeMapForTest(t, []entry{{1, addHash, 799}}),
+		cbor.Rat{Rat: big.NewRat(2, 3)},
+	})
+	require.NoError(t, err)
+	txHash := bytes.Repeat([]byte{0x77}, 32)
+	proposal := govActionStateForTest(
+		txHash, 0, govActionTypeUpdateCommittee, nil, 647,
+	)
+	body := proposal[4].([]any)
+	body[1] = append([]byte{0xe0}, bytes.Repeat([]byte{0xa1}, 28)...)
+	body[2] = cbor.RawMessage(actionCbor)
+	govStateData, err := cbor.Encode([]any{
+		[]any{encodeRootsAsAny(t, [4]*ParsedGovActionId{}), []any{proposal}},
+		inForce,
+		constitutionForTest(),
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		drepPulsingStateWithEnactCommittee(t, enacted, proposal),
+	})
+	require.NoError(t, err)
+
+	cfg := govImportConfigForTest(db, govStateData)
+	cfg.State.Epoch = 653
+	cfg.State.Tip = &SnapshotTip{Slot: 65_350}
+	require.NoError(t, importGovState(
+		context.Background(), cfg, func(ImportProgress) {},
+	))
+
+	members, err := db.GetCommitteeMembers(t.Context(), nil)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	require.Equal(t, uint8(1), members[0].ColdCredentialTag)
+	require.Equal(t, addHash, members[0].ColdCredHash)
+	state := mockledger.NewLedgerStateBuilder().
+		WithCommitteeCredentialMember(func(
+			credential lcommon.Credential,
+		) (*lcommon.CommitteeMember, error) {
+			for _, member := range members {
+				if uint(member.ColdCredentialTag) == credential.CredType &&
+					bytes.Equal(member.ColdCredHash, credential.Credential[:]) {
+					return &lcommon.CommitteeMember{
+						ColdKey:     credential.Credential,
+						ExpiryEpoch: member.ExpiresEpoch,
+					}, nil
+				}
+			}
+			return nil, nil
+		}).
+		Build()
+	var coldHash lcommon.Blake2b224
+	copy(coldHash[:], addHash)
+	hotHash := lcommon.Blake2b224Hash([]byte("same epoch hot key"))
+	tx := &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxCertificates: []lcommon.CertificateWrapper{{
+				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
+				Certificate: &lcommon.AuthCommitteeHotCertificate{
+					CertType: uint(lcommon.CertificateTypeAuthCommitteeHot),
+					ColdCredential: lcommon.Credential{
+						CredType:   lcommon.CredentialTypeScriptHash,
+						Credential: coldHash,
+					},
+					HotCredential: lcommon.Credential{
+						CredType:   lcommon.CredentialTypeAddrKeyHash,
+						Credential: hotHash,
+					},
+				},
+			}},
+		},
+	}
+	require.NoError(t, conway.UtxoValidateCommitteeCertificates(
+		tx, cfg.State.Tip.Slot+1, state, &conway.ConwayProtocolParameters{},
+	))
+
+	row, err := db.Metadata().GetGovernanceProposal(txHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, row.RatifiedEpoch)
+	require.Equal(t, uint64(653), *row.RatifiedEpoch)
+	require.NotNil(t, row.EnactedEpoch)
+	require.Equal(t, uint64(653), *row.EnactedEpoch)
+	require.NotNil(t, row.EnactedSlot)
+	require.Equal(t, uint64(65_300), *row.EnactedSlot)
+	pending, err := db.GetRatifiedGovernanceProposals(t.Context(), nil)
+	require.NoError(t, err)
+	require.Empty(t, pending, "the imported action must not enact again")
+}
+
+func TestImportedExpiredUpdateCommitteeRejectsMixedCommitteeActions(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	expiredHash := bytes.Repeat([]byte{0x81}, 32)
+	liveHash := bytes.Repeat([]byte{0x82}, 32)
+	_, err := importedEnactedUpdateCommitteeIds(&ParsedGovState{
+		Proposals: []ParsedGovProposal{{
+			TxHash:       expiredHash,
+			ActionIndex:  0,
+			ActionType:   govActionTypeUpdateCommittee,
+			ExpiresAfter: 652,
+		}},
+		RatifiedGovActionIds: []ParsedGovActionId{
+			{
+				TxHash:        expiredHash,
+				ActionIndex:   0,
+				ActionType:    govActionTypeUpdateCommittee,
+				ActionTypeSet: true,
+				ExpiresAfter:  652,
+			},
+			{
+				TxHash:        liveHash,
+				ActionIndex:   1,
+				ActionType:    govActionTypeNoConfidence,
+				ActionTypeSet: true,
+				ExpiresAfter:  700,
+			},
+		},
+	}, 653)
+	require.ErrorContains(t, err, "ambiguous")
 }
 
 // A snapshot whose ratified action is not a committee action leaves the

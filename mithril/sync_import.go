@@ -119,6 +119,7 @@ func resetMithrilBackfillCheckpoint(db *database.Database) error {
 }
 
 func updateMithrilReadyState(
+	ctx context.Context,
 	db *database.Database,
 	logger *slog.Logger,
 	loadResult *node.LoadBlobsResult,
@@ -127,7 +128,9 @@ func updateMithrilReadyState(
 	syncStatus string,
 	clearSyncState bool,
 ) error {
-	ledgerTip, err := db.GetTip(nil)
+	tipTxn := db.MetadataTxn(ctx, false)
+	ledgerTip, err := db.GetTip(tipTxn)
+	tipTxn.Release()
 	if err != nil {
 		return fmt.Errorf("reading imported ledger tip: %w", err)
 	}
@@ -152,7 +155,7 @@ func updateMithrilReadyState(
 		"blocks_loaded", blocksCopied,
 	)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(ctx, true)
 	if err := txn.Do(func(txn *database.Txn) error {
 		if clearSyncState {
 			// A read-clear-restore cycle can overwrite a newer fence on

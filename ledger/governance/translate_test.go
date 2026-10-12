@@ -15,6 +15,8 @@
 package governance
 
 import (
+	"bytes"
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -36,7 +38,7 @@ func TestTranslateRatifiedGovActions_ConwayToDijkstra(t *testing.T) {
 		ParamUpdate: conway.ConwayProtocolParameterUpdate{
 			MinFeeA: &fee,
 		},
-		PolicyHash: []byte{0xaa, 0xbb},
+		PolicyHash: bytes.Repeat([]byte{0xaa}, lcommon.Blake2b224Size),
 	}
 	actionCbor, err := cbor.Encode(action)
 	require.NoError(t, err)
@@ -57,21 +59,34 @@ func TestTranslateRatifiedGovActions_ConwayToDijkstra(t *testing.T) {
 		AnchorHash:    testBytes(32, 0xE2),
 		ReturnAddress: testBytes(29, 0xE3),
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
 
 	require.NoError(t, TranslateRatifiedGovActions(
+		context.Background(),
 		db,
 		nil,
 		conway.EraIdConway,
 		gdijkstra.EraIdDijkstra,
 	))
 
-	got, err := db.GetGovernanceProposal(proposal.TxHash, 0, nil)
+	got, err := db.GetGovernanceProposal(
+		context.Background(),
+		proposal.TxHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	var translated gdijkstra.DijkstraParameterChangeGovAction
 	_, err = cbor.Decode(got.GovActionCbor, &translated)
 	require.NoError(t, err)
 	require.NotNil(t, translated.ParamUpdate.MinFeeA)
 	require.Equal(t, uint(1234), *translated.ParamUpdate.MinFeeA)
-	require.Equal(t, []byte{0xaa, 0xbb}, translated.PolicyHash)
+	require.Equal(
+		t,
+		bytes.Repeat([]byte{0xaa}, lcommon.Blake2b224Size),
+		translated.PolicyHash,
+	)
 }

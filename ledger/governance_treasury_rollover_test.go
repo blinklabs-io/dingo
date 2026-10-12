@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -130,7 +131,7 @@ func TestProcessEpochRolloverEnactmentFailureRollsBackAndRetries(
 
 	retry := f.proposal(t, failing)
 	retry.ReturnAddress = failingReturn
-	require.NoError(t, f.db.SetGovernanceProposal(retry, nil))
+	require.NoError(t, f.db.SetGovernanceProposal(context.Background(), retry, nil))
 	require.NoError(t, f.db.Metadata().SetNetworkState(
 		70,
 		reserves,

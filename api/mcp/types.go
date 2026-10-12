@@ -49,6 +49,10 @@ type ProviderDependencies struct {
 	CORSAllowedOrigins []string
 }
 
+// defaultQueryTimeout bounds each SQLite-backed request when the configured
+// query timeout is not positive.
+const defaultQueryTimeout = 5 * time.Second
+
 // DefaultProviderConfig returns default settings for the MCP server.
 func DefaultProviderConfig() ProviderConfig {
 	return ProviderConfig{
@@ -57,7 +61,7 @@ func DefaultProviderConfig() ProviderConfig {
 		AuthToken:    "",
 		RateLimit:    60.0, // requests per second
 		Burst:        15,
-		QueryTimeout: 5 * time.Second,
+		QueryTimeout: defaultQueryTimeout,
 		MaxRows:      100,
 	}
 }

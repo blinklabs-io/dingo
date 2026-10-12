@@ -15,6 +15,7 @@
 package chain_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -59,11 +60,11 @@ func wireSizeOfBlock(t *testing.T, b ledger.Block) uint64 {
 
 func queueBlockHeaders(t *testing.T, blocks []ledger.Block) *chain.Chain {
 	t.Helper()
-	cm, err := chain.NewManager(nil, nil)
+	cm, err := chain.NewManager(context.Background(), nil, nil)
 	require.NoError(t, err)
 	c := cm.PrimaryChain()
 	for _, b := range blocks {
-		require.NoError(t, c.AddBlockHeader(b.Header()))
+		require.NoError(t, c.AddBlockHeader(context.Background(), b.Header()))
 	}
 	return c
 }
@@ -102,14 +103,18 @@ func TestQueuedRangeWireBytesNoEstimate(t *testing.T) {
 
 	t.Run("byron header in range", func(t *testing.T) {
 		t.Parallel()
-		cm, err := chain.NewManager(nil, nil)
+		cm, err := chain.NewManager(context.Background(), nil, nil)
 		require.NoError(t, err)
 		c := cm.PrimaryChain()
 		require.NoError(t, c.AddBlockHeader(
+			context.Background(),
 			byronEraHeader{BlockHeader: blocks[0].Header()},
 		))
 		for _, b := range blocks[1:] {
-			require.NoError(t, c.AddBlockHeader(b.Header()))
+			require.NoError(
+				t,
+				c.AddBlockHeader(context.Background(), b.Header()),
+			)
 		}
 		_, ok := c.QueuedRangeWireBytes(
 			rangePointOf(blocks[0]),

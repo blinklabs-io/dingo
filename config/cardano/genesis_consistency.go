@@ -47,19 +47,21 @@ func (c *CardanoNodeConfig) validateGenesisConsistency() error {
 	if err := c.validateSecurityParameters(); err != nil {
 		return err
 	}
-	if c.byronGenesis == nil || c.shelleyGenesis == nil {
-		return nil
+	if c.byronGenesis != nil && c.shelleyGenesis != nil {
+		byronStart := int64(c.byronGenesis.StartTime)
+		shelleyStart := c.shelleyGenesis.SystemStart.Unix()
+		if byronStart != shelleyStart {
+			return fmt.Errorf(
+				"genesis system start mismatch: Byron startTime %d does not match Shelley systemStart %d (%s); slot-to-time conversion is anchored on the Shelley systemStart and would be wrong for Byron-era slots",
+				byronStart,
+				shelleyStart,
+				c.shelleyGenesis.SystemStart.UTC().Format(time.RFC3339),
+			)
+		}
 	}
-	byronStart := int64(c.byronGenesis.StartTime)
-	shelleyStart := c.shelleyGenesis.SystemStart.Unix()
-	if byronStart != shelleyStart {
-		return fmt.Errorf(
-			"genesis system start mismatch: Byron startTime %d does not match Shelley systemStart %d (%s); slot-to-time conversion is anchored on the Shelley systemStart and would be wrong for Byron-era slots",
-			byronStart,
-			shelleyStart,
-			c.shelleyGenesis.SystemStart.UTC().Format(time.RFC3339),
-		)
-	}
+	// The nonce-window invariant is defined by Shelley genesis alone. Check it
+	// after the optional Byron/Shelley timestamp comparison so existing error
+	// precedence is preserved for multi-era configurations.
 	if err := c.validateEpochLengthFitsNonceWindow(); err != nil {
 		return err
 	}

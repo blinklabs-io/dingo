@@ -155,10 +155,11 @@ func (ls *LedgerState) byronPBFTGenesis() (
 }
 
 func (ls *LedgerState) validateByronPBFTHeader(
+	ctx context.Context,
 	block ledger.Block,
 	delegationState byronconsensus.PBFTDelegationState,
 ) (byronconsensus.PBFTIssuer, error) {
-	if err := ls.validateByronPBFTHeaderCrypto(block); err != nil {
+	if err := ls.validateByronPBFTHeaderCrypto(ctx, block); err != nil {
 		return byronconsensus.PBFTIssuer{}, err
 	}
 	if block.Type() == ledgerbyron.BlockTypeByronEbb {
@@ -189,6 +190,7 @@ func (ls *LedgerState) validateByronPBFTHeader(
 }
 
 func (ls *LedgerState) validateByronPBFTHeaderCrypto(
+	ctx context.Context,
 	block ledger.Block,
 ) error {
 	if block == nil {
@@ -223,11 +225,18 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 	// Every header entry point routes a Byron header here, and an unsigned
 	// epoch-boundary header would otherwise pass on the anchor and slot bound
 	// alone when it extends a post-Byron block.
-	if err := ls.validateHeaderEraOrder(header); err != nil {
+	if err := ls.validateHeaderEraOrder(ctx, header); err != nil {
 		return err
 	}
 	if isEbb {
-		if ls.isFirstByronHeader(block) {
+		// An epoch 0 EBB can only be a chain's first block, so one seen
+		// peer-relative while the primary chain is at origin, or verified
+		// while the ledger has applied nothing, is held to the first-block
+		// rules rather than read as following an existing block.
+		if ls.isFirstByronHeader(block) ||
+			(ebbHeader.ConsensusData.Epoch == 0 &&
+				(ls.peerRelativeAtOrigin(block) ||
+					ls.appliedAtLedgerOrigin(block))) {
 			// An EBB's block number (Difficulty.Value) and slot (derived from
 			// ConsensusData.Epoch) are independent fields: chain.firstBlockNumberValid
 			// only constrains the former, and validateByronPBFTCurrentSlot only
@@ -320,8 +329,8 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 // the queue -- the EBB's own queueing event is delivered asynchronously, so the
 // next header can be verified first -- and is never first here. The rule is
 // enforced where headers enter the queue, and by blockfetch for a queued
-// header not yet verified. Ledger apply does not enforce it: the block is
-// already on the primary chain by then, so the tip is not origin.
+// header not yet verified. Ledger apply finds the block already on the primary
+// chain, so appliedAtLedgerOrigin identifies the first block there.
 func (ls *LedgerState) isFirstByronHeader(block ledger.Block) bool {
 	if hb, ok := block.(headerOnlyBlock); ok && hb.peerRelative {
 		return false
@@ -335,6 +344,43 @@ func (ls *LedgerState) isFirstByronHeader(block ledger.Block) bool {
 	return c.IsFirstOnHeaderChain(block.Hash().Bytes())
 }
 
+// peerRelativeAtOrigin reports whether block is a peer-relative header (see
+// headerOnlyBlock) verified while the primary chain is still at origin.
+func (ls *LedgerState) peerRelativeAtOrigin(block ledger.Block) bool {
+	hb, ok := block.(headerOnlyBlock)
+	if !ok || !hb.peerRelative {
+		return false
+	}
+	ls.RLock()
+	c := ls.chain
+	ls.RUnlock()
+	if c == nil {
+		return false
+	}
+	tip := c.Tip()
+	return tip.Point.Slot == 0 && len(tip.Point.Hash) == 0
+}
+
+// appliedAtLedgerOrigin reports whether block, other than a peer-relative
+// header, is verified while the ledger tip is still at origin. Ledger apply
+// finds the block already on the primary chain, so isFirstByronHeader reports
+// false there; the reference likewise reads "the chain already has a block"
+// from ledger state. It does not check the block's position: chain linkage
+// (addBlockHeader, addBlockLocked) admits a block whose previous hash is not
+// a local block hash only when the chain is at origin. A peer-relative header
+// is handled by peerRelativeAtOrigin.
+func (ls *LedgerState) appliedAtLedgerOrigin(block ledger.Block) bool {
+	if hb, ok := block.(headerOnlyBlock); ok && hb.peerRelative {
+		return false
+	}
+	snap := ls.loadTipSnapshot()
+	if snap == nil {
+		return false
+	}
+	tip := snap.currentTip
+	return tip.Point.Slot == 0 && len(tip.Point.Hash) == 0
+}
+
 // validateByronGenesisAnchor requires the first epoch-boundary block of a
 // from-genesis (or post-rollback-to-origin) Byron chain to chain onto the
 // configured Byron genesis hash. The reference tracks the previous hash as
@@ -346,8 +392,8 @@ func (ls *LedgerState) isFirstByronHeader(block ledger.Block) bool {
 //
 // A ledger started from a snapshot or bulk import at a trusted non-origin
 // point never reaches this function with an unanchored EBB: its primary
-// chain tip is that trusted point, not origin, so isFirstByronHeader already
-// reports false and this check does not run.
+// chain and ledger tips are that trusted point, not origin, so neither
+// isFirstByronHeader nor appliedAtLedgerOrigin reports true.
 func (ls *LedgerState) validateByronGenesisAnchor(
 	header *ledgerbyron.ByronEpochBoundaryBlockHeader,
 ) error {
@@ -552,7 +598,7 @@ func (ls *LedgerState) byronPBFTStateAtTip(
 				err,
 			)
 		}
-		state, err = ls.advanceByronPBFTState(state, block, false)
+		state, err = ls.advanceByronPBFTState(ctx, state, block, false)
 		if err != nil {
 			return byronPBFTState{}, fmt.Errorf(
 				"rebuild Byron PBFT state: apply block at slot %d: %w",
@@ -599,6 +645,7 @@ func newByronPBFTState(
 }
 
 func (ls *LedgerState) advanceByronPBFTState(
+	ctx context.Context,
 	state byronPBFTState,
 	block ledger.Block,
 	shouldValidate bool,
@@ -631,6 +678,7 @@ func (ls *LedgerState) advanceByronPBFTState(
 	}
 	if shouldValidate {
 		issuer, err := ls.validateByronPBFTHeader(
+			ctx,
 			block,
 			state.delegationState,
 		)

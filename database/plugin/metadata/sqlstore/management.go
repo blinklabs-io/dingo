@@ -27,7 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-func (s *Store) GetCommitTimestamp() (int64, error) {
+func (s *Store) GetCommitTimestamp(ctx context.Context) (int64, error) {
 	if err := s.ensureReady(); err != nil {
 		return 0, err
 	}
@@ -35,7 +35,7 @@ func (s *Store) GetCommitTimestamp() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	timestamp, err := queries.getCommitTimestamp(context.Background())
+	timestamp, err := queries.getCommitTimestamp(ctx)
 	err = normalizeNoRows(err)
 	if errors.Is(err, metadata.ErrNotFound) {
 		return 0, nil
@@ -70,7 +70,7 @@ func (s *Store) SetCommitTimestamp(
 	return nil
 }
 
-func (s *Store) GetNodeSettings() (*types.NodeSettings, error) {
+func (s *Store) GetNodeSettings(ctx context.Context) (*types.NodeSettings, error) {
 	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}
@@ -79,7 +79,7 @@ func (s *Store) GetNodeSettings() (*types.NodeSettings, error) {
 		return nil, err
 	}
 	storageMode, network, err := queries.getNodeSettings(
-		context.Background(),
+		ctx,
 	)
 	err = normalizeNoRows(err)
 	if errors.Is(err, metadata.ErrNotFound) {
@@ -94,7 +94,7 @@ func (s *Store) GetNodeSettings() (*types.NodeSettings, error) {
 	}, nil
 }
 
-func (s *Store) SetNodeSettings(settings *types.NodeSettings) error {
+func (s *Store) SetNodeSettings(ctx context.Context, settings *types.NodeSettings) error {
 	if settings == nil {
 		return errors.New("set node settings: settings are nil")
 	}
@@ -106,7 +106,7 @@ func (s *Store) SetNodeSettings(settings *types.NodeSettings) error {
 		return err
 	}
 	_, err = queries.insertNodeSettings(
-		context.Background(),
+		ctx,
 		settings.StorageMode,
 		settings.Network,
 	)
@@ -122,7 +122,7 @@ func (s *Store) SetNodeSettings(settings *types.NodeSettings) error {
 		return nil
 	}
 	if _, err := queries.backfillNodeSettingsNetwork(
-		context.Background(),
+		ctx,
 		settings.Network,
 		settings.StorageMode,
 	); err != nil {
@@ -133,7 +133,7 @@ func (s *Store) SetNodeSettings(settings *types.NodeSettings) error {
 
 // GetNodeSettingsGates returns the persisted node settings gate values,
 // keyed by gate name. An empty result means no gates have been recorded yet.
-func (s *Store) GetNodeSettingsGates() (nodesettings.Values, error) {
+func (s *Store) GetNodeSettingsGates(ctx context.Context) (nodesettings.Values, error) {
 	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}
@@ -141,7 +141,7 @@ func (s *Store) GetNodeSettingsGates() (nodesettings.Values, error) {
 	if err != nil {
 		return nil, err
 	}
-	gates, err := queries.getNodeSettingsGates(context.Background())
+	gates, err := queries.getNodeSettingsGates(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get node settings gates: %w", err)
 	}
@@ -152,7 +152,7 @@ func (s *Store) GetNodeSettingsGates() (nodesettings.Values, error) {
 // later call can overwrite an earlier one. recordedEpoch and recordedSlot
 // are stamped on every row in this call; callers pass zero for both when
 // the write happens before the first block. A nil or empty gates is a no-op.
-func (s *Store) SetNodeSettingsGates(
+func (s *Store) SetNodeSettingsGates(ctx context.Context,
 	gates nodesettings.Values,
 	recordedEpoch uint64,
 	recordedSlot uint64,
@@ -177,7 +177,7 @@ func (s *Store) SetNodeSettingsGates(
 	}
 	for name, value := range gates {
 		if err := queries.upsertNodeSettingsGate(
-			context.Background(),
+			ctx,
 			name,
 			value,
 			epochVal,
@@ -200,7 +200,7 @@ func (s *Store) SetNodeSettingsGates(
 // commit_timestamp.go's evaluateAndPersistGates) instead of silently
 // overwriting it -- the loser learns it lost and can re-evaluate against
 // what is now actually persisted rather than assuming its own write landed.
-func (s *Store) InsertNodeSettingsGateIfAbsent(
+func (s *Store) InsertNodeSettingsGateIfAbsent(ctx context.Context,
 	name string,
 	value string,
 	recordedEpoch uint64,
@@ -230,7 +230,7 @@ func (s *Store) InsertNodeSettingsGateIfAbsent(
 		return false, err
 	}
 	rows, err := queries.insertNodeSettingsGateIfAbsent(
-		context.Background(),
+		ctx,
 		name,
 		value,
 		epochVal,
@@ -268,7 +268,7 @@ func isOnlyNodeSettingsGateInitializationRace(err error) bool {
 // transaction. A concurrent initializer may win the conditional insert for
 // one or more names; in that case the transaction is rolled back so this
 // method never leaves a partially initialized gate set behind.
-func (s *Store) InsertNodeSettingsGatesIfAbsent(
+func (s *Store) InsertNodeSettingsGatesIfAbsent(ctx context.Context,
 	gates nodesettings.Values,
 	recordedEpoch uint64,
 	recordedSlot uint64,
@@ -296,7 +296,8 @@ func (s *Store) InsertNodeSettingsGatesIfAbsent(
 	}
 	sort.Strings(names)
 	inserted := 0
-	err = s.withWriteTransaction(
+	err = s.withWriteTransactionContext(
+		ctx,
 		nil,
 		func(db queryer, ctx context.Context) error {
 			queries, err := newManagementQueries(s.dialect.Name(), db)

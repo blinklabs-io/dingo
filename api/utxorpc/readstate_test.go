@@ -74,6 +74,7 @@ func (s *readStateLedgerStub) GetBlock(ocommon.Point) (models.Block, error) {
 }
 
 func (s *readStateLedgerStub) PoolStakeDistribution(
+	ctx context.Context,
 	poolFilter []lcommon.PoolKeyHash,
 	_ ledger.QueryPoint,
 	_ *database.Txn,

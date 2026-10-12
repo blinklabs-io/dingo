@@ -28,7 +28,7 @@ func (b *Blockfrost) handlePoolDetail(
 	r *http.Request,
 ) {
 	poolID := r.PathValue("pool_id")
-	info, err := b.node.PoolDetail(poolID)
+	info, err := b.node.PoolDetail(r.Context(), poolID)
 	if err != nil {
 		if errors.Is(err, ErrInvalidPoolID) {
 			writeError(

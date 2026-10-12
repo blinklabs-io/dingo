@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"context"
 	"fmt"
 	"slices"
 
@@ -58,14 +59,17 @@ import (
 // would not reduce it. The response is bare pool ID strings, so slicing
 // the resulting hash slice in memory before conversion is cheap relative
 // to that query.
-func (a *NodeAdapter) PoolsList(
+func (a *NodeAdapter) PoolsList(ctx context.Context,
 	params PaginationParams,
 ) ([]string, int, error) {
 	db := a.ledgerState.Database()
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 
-	poolKeyHashes, err := db.GetActivePoolKeyHashesOrdered(txn)
+	poolKeyHashes, err := db.GetActivePoolKeyHashesOrdered(
+		ctx,
+		txn,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get active pool key hashes ordered: %w",
