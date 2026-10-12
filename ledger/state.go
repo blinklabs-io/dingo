@@ -2240,102 +2240,6 @@ func (ls *LedgerState) boundaryEraForBlock(
 	return headerEraID, len(path) == 2
 }
 
-// errBoundaryEraNotAuthorized marks an epoch-boundary block encoded in an era
-// the ledger has not moved into.
-var errBoundaryEraNotAuthorized = errors.New(
-	"boundary block era not authorized by the ledger",
-)
-
-// authorizedBoundaryEra returns the era a validated boundary may move into, or
-// refuses the boundary block. The era is decided by the ledger state: the
-// protocol version of the parameters after the epoch's updates were enacted,
-// or a configured TriggerAtEpoch for the era. A block whose body is encoded in
-// an era beyond that is rejected, as the reference HFC does with
-// HardForkLedgerErrorWrongEra (Shelley/ShelleyHFC.hs shelleyTransition decides
-// the era end from the updated pparams).
-//
-// targetEraID is the era boundaryEraForBlock chose, which may sit one era past
-// the body when the header protocol major elevates it. A header major is not
-// an era signal: cardano-node stamps its own protocol version, and outside
-// mainnet the header major is not bounded below major 12. So an elevation past
-// the authorized era is capped at that era rather than rejecting a block whose
-// body era the ledger did authorize.
-//
-// newPParams must be the source-era parameters after the boundary's enactment
-// and before any translation. Byron is exempt: it carries no protocol version,
-// and validateByronShelleyTransition gates that boundary. A parameter set that
-// yields no version cannot be judged and leaves targetEraID unchanged.
-//
-// From Conway the version moves through HardForkInitiation, which
-// processEpochRollover enacts after the translations, so newPParams does not
-// yet carry a version enacted at this boundary. Such a source is judged only
-// against a configured TriggerAtEpoch and is otherwise left to the block.
-func (ls *LedgerState) authorizedBoundaryEra(
-	sourceEraID, bodyEraID, targetEraID uint,
-	newPParams lcommon.ProtocolParameters,
-	newEpochID uint64,
-) (uint, error) {
-	if sourceEraID == targetEraID || sourceEraID == byron.EraIdByron {
-		return targetEraID, nil
-	}
-	version, err := GetProtocolVersion(newPParams)
-	if err != nil {
-		return targetEraID, nil //nolint:nilerr // no version, nothing to compare against
-	}
-	versionJudged := sourceEraID < eras.ConwayEraDesc.Id
-	shape := ls.eraShape()
-	if !versionJudged {
-		entry, ok := shape.EraForID(sourceEraID)
-		if !ok || entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch {
-			return targetEraID, nil
-		}
-	}
-	eraList := ls.eraList()
-	indexOf := func(eraID uint) int {
-		for i := range eraList {
-			if eraList[i].Id == eraID {
-				return i
-			}
-		}
-		return -1
-	}
-	sourceIndex := indexOf(sourceEraID)
-	bodyIndex := indexOf(bodyEraID)
-	targetIndex := indexOf(targetEraID)
-	if sourceIndex < 0 || bodyIndex < 0 || targetIndex < 0 {
-		return targetEraID, nil
-	}
-	allowedIndex := sourceIndex
-	if eraID, ok := ls.eraForVersion(version.Major); ok && versionJudged {
-		allowedIndex = max(allowedIndex, indexOf(eraID))
-	}
-	for allowedIndex+1 < len(eraList) {
-		entry, ok := shape.EraForID(eraList[allowedIndex].Id)
-		if !ok ||
-			entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch ||
-			entry.NextEraTrigger.Epoch > newEpochID {
-			break
-		}
-		allowedIndex++
-	}
-	// The second condition refuses an advancement the ledger did not
-	// authorize at all, which a capped elevation must not turn into a
-	// boundary with no transition.
-	if bodyIndex > allowedIndex || allowedIndex == sourceIndex {
-		return 0, fmt.Errorf(
-			"%w: epoch %d block is in era %d but protocol version %d.%d "+
-				"keeps the ledger at or below era %d",
-			errBoundaryEraNotAuthorized,
-			newEpochID,
-			bodyEraID,
-			version.Major,
-			version.Minor,
-			eraList[allowedIndex].Id,
-		)
-	}
-	return eraList[min(targetIndex, allowedIndex)].Id, nil
-}
-
 func (ls *LedgerState) isHardForkTransition(
 	oldVersion, newVersion ProtocolVersion,
 ) bool {
@@ -5631,19 +5535,6 @@ func (ls *LedgerState) transitionToEraFrom(
 	return result, nil
 }
 
-// boundaryPathAuthorizer receives the source-era parameters after the
-// boundary's updates are enacted and the planned transition path, and returns
-// the path to apply or an error refusing the boundary.
-type boundaryPathAuthorizer func(
-	enacted lcommon.ProtocolParameters,
-	transitionPath []uint,
-) ([]uint, error)
-
-// prepareEraTransitionsForRollover enacts the source era's classic parameter
-// updates and then translates along transitionPath. A non-nil authorize runs
-// between the two: a translation rewrites the protocol version through
-// HardForkFunc, so a check after it would only see the version it was meant
-// to judge.
 func (ls *LedgerState) prepareEraTransitionsForRollover(
 	ctx context.Context,
 	txn *database.Txn,
@@ -5651,7 +5542,6 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 	snapshotEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
 	transitionPath []uint,
-	authorize boundaryPathAuthorizer,
 ) (
 	lcommon.ProtocolParameters,
 	uint,
@@ -5702,13 +5592,6 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 			return nil, 0, nil, nil, false, fmt.Errorf(
 				"apply source-era pparam updates: %w", err,
 			)
-		}
-	}
-	if authorize != nil {
-		var err error
-		transitionPath, err = authorize(workingPParams, transitionPath)
-		if err != nil {
-			return nil, 0, nil, nil, false, err
 		}
 	}
 	workingEraID := snapshotEra.Id
@@ -7887,6 +7770,39 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// prior era at the boundary would never advance,
 				// since nextEpochEraId would equal snapshotEra.Id.
 				newEpochId := snapshotEpoch.EpochId + 1
+				// A validated boundary enters the era the ledger decides
+				// from its own state, and a block in any other era is
+				// refused. This runs before any translation: the enacted
+				// protocol version is what decides, and a translation
+				// rewrites it.
+				if boundaryShouldValidate {
+					enacted := snapshotPParams
+					forecast, err := ls.forecastPendingPParamUpdateIn(
+						snapshotEra, newEpochId, snapshotPParams, txn,
+					)
+					if err != nil {
+						return fmt.Errorf("forecast pparam updates: %w", err)
+					}
+					if forecast != nil {
+						enacted = forecast
+					}
+					nextEpochEraId, err = ls.authorizeBoundaryEra(
+						ctx,
+						boundaryEraInputs{
+							sourceEra:  snapshotEra,
+							epoch:      snapshotEpoch,
+							tip:        snapshotTip,
+							pparams:    enacted,
+							newEpochID: newEpochId,
+							txn:        txn,
+						},
+						boundaryBodyEraId,
+						nextEpochEraId,
+					)
+					if err != nil {
+						return err
+					}
+				}
 				if entry, ok := ls.eraShape().EraForID(snapshotEra.Id); ok &&
 					entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch &&
 					entry.NextEraTrigger.Epoch <= newEpochId &&
@@ -7920,36 +7836,6 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				var transitionResults []*EraTransitionResult
 				var transitionHardForkMajors []uint
 				var plutusV2CostModelWritten bool
-				var authorize boundaryPathAuthorizer
-				if boundaryShouldValidate {
-					authorize = func(
-						enacted lcommon.ProtocolParameters,
-						path []uint,
-					) ([]uint, error) {
-						authorizedEraID, err := ls.authorizedBoundaryEra(
-							snapshotEra.Id,
-							boundaryBodyEraId,
-							nextEpochEraId,
-							enacted,
-							newEpochId,
-						)
-						if err != nil {
-							return nil, err
-						}
-						if authorizedEraID == nextEpochEraId {
-							return path, nil
-						}
-						last := slices.Index(path, authorizedEraID)
-						if last < 0 {
-							return nil, fmt.Errorf(
-								"authorized era %d is not on the boundary transition path %v",
-								authorizedEraID,
-								path,
-							)
-						}
-						return path[:last+1], nil
-					}
-				}
 				workingPParams, workingEraId, transitionResults,
 					transitionHardForkMajors, plutusV2CostModelWritten, err = ls.prepareEraTransitionsForRollover(
 					ctx,
@@ -7958,7 +7844,6 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					snapshotEra,
 					workingPParams,
 					transitionPath,
-					authorize,
 				)
 				if err != nil {
 					return err
@@ -10167,31 +10052,41 @@ func (ls *LedgerState) evaluateProtocolVersionBump(ctx context.Context) {
 }
 
 // pparamVotingCountStartSlot returns the first slot whose blocks count toward
-// the post-deadline total evaluateProtocolVersionBump requires: the voting
-// deadline, 2 * stabilityWindow before the next epoch starts. Upstream counts
-// only blocks of the current epoch, so an epoch shorter than 2 *
-// stabilityWindow, as on some test networks, counts from its first slot.
+// the post-deadline total evaluateProtocolVersionBump requires, for the
+// current epoch.
 func (ls *LedgerState) pparamVotingCountStartSlot() (uint64, bool) {
-	if ls.currentEpoch.LengthInSlots == 0 {
+	return ls.votingCountStartSlot(ls.currentEra.Id, ls.currentEpoch)
+}
+
+// votingCountStartSlot returns the first slot of epoch whose blocks count
+// toward the post-deadline total a version-triggered transition requires: the
+// voting deadline, 2 * stabilityWindow before the next epoch starts. Upstream
+// counts only blocks of the current epoch, so an epoch shorter than 2 *
+// stabilityWindow, as on some test networks, counts from its first slot.
+func (ls *LedgerState) votingCountStartSlot(
+	eraID uint,
+	epoch models.Epoch,
+) (uint64, bool) {
+	if epoch.LengthInSlots == 0 {
 		return 0, false
 	}
 	nextEpochStart, err := checkedSlotAdd(
-		ls.currentEpoch.StartSlot,
-		uint64(ls.currentEpoch.LengthInSlots),
+		epoch.StartSlot,
+		uint64(epoch.LengthInSlots),
 	)
 	if err != nil {
 		return 0, false
 	}
 	// A stability window above half the slot range cannot be doubled
 	// without wrapping, and such a window covers the whole epoch anyway.
-	stabilityWindow := ls.calculateStabilityWindowForEra(ls.currentEra.Id)
+	stabilityWindow := ls.calculateStabilityWindowForEra(eraID)
 	if stabilityWindow > math.MaxUint64/2 {
-		return ls.currentEpoch.StartSlot, true
+		return epoch.StartSlot, true
 	}
 	votingWindow := 2 * stabilityWindow
 	if nextEpochStart <= votingWindow ||
-		nextEpochStart-votingWindow < ls.currentEpoch.StartSlot {
-		return ls.currentEpoch.StartSlot, true
+		nextEpochStart-votingWindow < epoch.StartSlot {
+		return epoch.StartSlot, true
 	}
 	return nextEpochStart - votingWindow, true
 }
@@ -10205,21 +10100,35 @@ func (ls *LedgerState) pparamVotingCountStartSlot() (uint64, bool) {
 // would then include blocks before slot and could report a transition early.
 // Both fallbacks can only delay a reported transition, never advance it.
 func (ls *LedgerState) blocksAppliedFromSlot(ctx context.Context, slot uint64) uint64 {
-	tip := ls.currentTip
-	if tip.Point.Slot < slot {
+	count, err := ls.countBlocksFromSlot(ctx, ls.currentTip, slot)
+	if err != nil {
 		return 0
+	}
+	return count
+}
+
+// countBlocksFromSlot is blocksAppliedFromSlot for an explicit tip. It reports
+// a failed lookup instead of counting nothing, for a caller that must not
+// mistake a failure for a short count.
+func (ls *LedgerState) countBlocksFromSlot(
+	ctx context.Context,
+	tip ochainsync.Tip,
+	slot uint64,
+) (uint64, error) {
+	if tip.Point.Slot < slot {
+		return 0, nil
 	}
 	before, err := ls.canonicalBlockBeforeSlot(ctx, nil, slot)
 	if err != nil {
 		if errors.Is(err, chain.ErrNoBlockBeforeSlot) {
-			return tip.BlockNumber
+			return tip.BlockNumber, nil
 		}
-		return 0
+		return 0, err
 	}
 	if before.Number >= tip.BlockNumber {
-		return 0
+		return 0, nil
 	}
-	return tip.BlockNumber - before.Number
+	return tip.BlockNumber - before.Number, nil
 }
 
 // evaluateTransitionImpossible records that the current era has no transition
@@ -12976,6 +12885,18 @@ func (ls *LedgerState) forecastPendingPParamUpdate(
 	targetEpoch uint64,
 	pparams lcommon.ProtocolParameters,
 ) (lcommon.ProtocolParameters, error) {
+	return ls.forecastPendingPParamUpdateIn(era, targetEpoch, pparams, nil)
+}
+
+// forecastPendingPParamUpdateIn is forecastPendingPParamUpdate reading
+// through txn, so a forecast inside a boundary transaction sees what that
+// transaction sees.
+func (ls *LedgerState) forecastPendingPParamUpdateIn(
+	era eras.EraDesc,
+	targetEpoch uint64,
+	pparams lcommon.ProtocolParameters,
+	txn *database.Txn,
+) (lcommon.ProtocolParameters, error) {
 	if ls.db == nil ||
 		pparams == nil ||
 		era.DecodePParamsUpdateFunc == nil ||
@@ -13003,7 +12924,7 @@ func (ls *LedgerState) forecastPendingPParamUpdate(
 		func(pp lcommon.ProtocolParameters) (lcommon.ProtocolParameters, error) {
 			return cloneProtocolParametersForEra(era, pp)
 		},
-		nil,
+		txn,
 	)
 	if err != nil {
 		ls.config.Logger.Warn(

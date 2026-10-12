@@ -8155,7 +8155,6 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 				ls.currentEra,
 				ls.currentPParams,
 				transitionPath,
-				nil,
 			)
 		if err != nil {
 			return err
@@ -8226,7 +8225,6 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 			sourceEra,
 			ls.currentPParams,
 			[]uint{eras.AllegraEraDesc.Id},
-			nil,
 		)
 		if err != nil {
 			return err

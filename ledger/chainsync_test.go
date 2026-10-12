@@ -16969,7 +16969,6 @@ func TestPrepareEraTransitionsEnactsClassicUpdateWithSourceDecoder(
 			eras.AlonzoEraDesc,
 			params,
 			[]uint{eras.BabbageEraDesc.Id},
-			nil,
 		)
 		return transitionErr
 	}))
