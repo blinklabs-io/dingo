@@ -2122,6 +2122,25 @@ func (ls *LedgerState) loadTipSnapshot() *tipSnapshot {
 	return ls.tip.Load()
 }
 
+// loadConsensusAndTipSnapshots returns a consensus snapshot and the tip
+// published with it. The two are stored one after the other, so a load that
+// straddles a publication is retried. A forecast that counts blocks of the
+// snapshot's epoch from a tip of another epoch would count the wrong blocks.
+func (ls *LedgerState) loadConsensusAndTipSnapshots() (
+	*consensusSnapshot,
+	*tipSnapshot,
+) {
+	for range 8 {
+		consensus := ls.loadConsensusSnapshot()
+		tip := ls.loadTipSnapshot()
+		if consensus == nil || tip == nil ||
+			consensus.generation == tip.generation {
+			return consensus, tip
+		}
+	}
+	return ls.loadConsensusSnapshot(), ls.loadTipSnapshot()
+}
+
 // SetTipForTesting replaces the in-memory tip and publishes a matching
 // snapshot generation. It exists for black-box tests that cannot use the
 // ledger package's white-box snapshot helpers.
@@ -12758,7 +12777,7 @@ func (ls *LedgerState) GetCurrentPParamsForReporting() lcommon.ProtocolParameter
 func (ls *LedgerState) ProtocolParamsForSlot(
 	slot uint64,
 ) lcommon.ProtocolParameters {
-	snapshot := ls.loadConsensusSnapshot()
+	snapshot, tipSnapshot := ls.loadConsensusAndTipSnapshots()
 	currentEpoch := snapshot.currentEpoch
 	currentEra := snapshot.currentEra
 	currentPParams := snapshot.currentPParams
@@ -12824,21 +12843,40 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	if updated != nil {
 		pparams = updated
 	}
-	// Walk forward from the current era, applying each successor's
-	// HardForkFunc whose triggerEpoch <= slotEpoch. The single-step
-	// case (one fork between currentEpoch and slotEpoch) is the
-	// nominal path; the loop also tolerates multi-step jumps so the
-	// helper stays sound if a caller skips ahead.
+	// The era the first block of the new epoch belongs to is the one the
+	// ledger enters at the boundary, decided by the same predicate the
+	// boundary check applies to that block. A trigger epoch at or before
+	// slotEpoch is already decided by it, so a slot several epochs ahead
+	// walks every scheduled fork.
+	var tip ochainsync.Tip
+	if tipSnapshot != nil {
+		tip = tipSnapshot.currentTip
+	}
+	targetID, decided, err := ls.ledgerBoundaryEra(
+		ls.closeCtx(),
+		boundaryEraInputs{
+			sourceEra:  currentEra,
+			epoch:      currentEpoch,
+			tip:        tip,
+			pparams:    pparams,
+			newEpochID: slotEpoch,
+		},
+	)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"ProtocolParamsForSlot: boundary era unavailable",
+			"slot", slot,
+			"slot_epoch", slotEpoch,
+			"error", err,
+		)
+		return nil
+	}
+	if !decided {
+		return pparams
+	}
+	// Apply each successor's HardForkFunc up to the decided era.
 	eraID := currentEra.Id
-	for {
-		entry, ok := shape.EraForID(eraID)
-		if !ok ||
-			entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch {
-			break
-		}
-		if entry.NextEraTrigger.Epoch > slotEpoch {
-			break
-		}
+	for eraID < targetID {
 		nextID := eraID + 1
 		nextEraPtr, ok := ls.eraById(nextID)
 		if !ok || nextEraPtr == nil {

@@ -4153,6 +4153,21 @@ at a normal-boundary `d` decrease. Blockfetch still defers the stateful overlay
 decision until ledger apply when even the forecast cannot resolve it; full
 historical validation and the normal leader checks remain enabled.
 
+`ProtocolParamsForSlot` is also what the forger reads to pick the era of a
+block, so for a slot in a later epoch it returns the parameters of the era the
+ledger enters at the boundary, decided by `ledgerBoundaryEra` from the
+forecast parameters and the applied tip. That is the predicate the boundary
+check applies to the first block of the epoch, so a block forged in the chosen
+era is accepted and one in the other era refused. The reference
+`hardForkForgeBlock` likewise forges in the era of the ticked ledger state. For
+a version-triggered transition the first block of the new epoch is forged in
+the new era only once `k` blocks of the ending epoch lie at or past the voting
+deadline; before that it is forged in the source era. The applied tip is read
+from the same snapshot publication as the epoch, retrying a load that straddles
+a publication, and a forecast that cannot be completed, such as an unfinished
+deferred ratification, returns no parameters so the forger skips the slot
+rather than forging in a guessed era.
+
 **Why deferring a `d=1` overlay header is a real fix, not a suppression.** With
 `d = 1` (full federation — every early Shelley epoch, and epoch 0 on every
 network) `classifyGenesisOverlaySlot` returns `genesisOverlayActive` or
