@@ -64,10 +64,10 @@ type boundaryEraInputs struct {
 // From Conway the major moves through HardForkInitiation, which ENACT applies
 // at the boundary itself, so the major is forecast from the proposals ENACT
 // will enact rather than read from pparams. A source without a protocol
-// version is undecided and decided is false. So is Byron, which carries none:
-// validateByronShelleyTransition gates that boundary.
+// version cannot be authorized. Byron is the sole exception because it carries
+// none: validateByronShelleyTransition gates that boundary.
 //
-// A returned error is a failure to read ledger state, not a verdict.
+// A returned error means the ledger cannot select a supported boundary era.
 func (ls *LedgerState) ledgerBoundaryEra(
 	ctx context.Context,
 	in boundaryEraInputs,
@@ -78,7 +78,7 @@ func (ls *LedgerState) ledgerBoundaryEra(
 	}
 	version, versionErr := GetProtocolVersion(in.pparams)
 	if versionErr != nil {
-		return sourceID, false, nil //nolint:nilerr // no version, nothing to judge
+		return 0, false, fmt.Errorf("source-era protocol version: %w", versionErr)
 	}
 	shape, err := ls.eraShapeWithError()
 	if err != nil {
@@ -92,7 +92,7 @@ func (ls *LedgerState) ledgerBoundaryEra(
 	}
 	reached := indexOf(sourceID)
 	if reached < 0 {
-		return sourceID, false, nil
+		return 0, false, fmt.Errorf("source era %d is unavailable", sourceID)
 	}
 
 	// The two version-trigger inputs are read lazily and once: the forecast
@@ -155,7 +155,12 @@ func (ls *LedgerState) ledgerBoundaryEra(
 				return 0, false, err
 			}
 			versionEra, ok := ls.eraForVersion(currentMajor)
-			if !ok || indexOf(versionEra) <= reached {
+			if !ok {
+				return 0, false, fmt.Errorf(
+					"protocol major %d has no active era", currentMajor,
+				)
+			}
+			if indexOf(versionEra) <= reached {
 				break
 			}
 			advance, err = votingClosed()
@@ -291,8 +296,8 @@ func (ls *LedgerState) pendingRatifiedProposals(
 // is capped at that era, while a body that only the elevation brings up to the
 // ledger's era is the validated predecessor-era pair a boundary may carry.
 //
-// It returns the era to transition into. An undecided ledger leaves
-// targetEraID unchanged.
+// It returns the era to transition into. Byron leaves targetEraID unchanged;
+// every post-Byron decision requires readable parameters and known era IDs.
 func (ls *LedgerState) authorizeBoundaryEra(
 	ctx context.Context,
 	in boundaryEraInputs,
@@ -314,8 +319,22 @@ func (ls *LedgerState) authorizeBoundaryEra(
 	ledgerIndex := indexOf(ledgerEraID)
 	bodyIndex := indexOf(bodyEraID)
 	targetIndex := indexOf(targetEraID)
-	if ledgerIndex < 0 || bodyIndex < 0 || targetIndex < 0 {
-		return targetEraID, nil
+	if ledgerIndex < 0 {
+		return 0, fmt.Errorf("ledger era %d is unavailable", ledgerEraID)
+	}
+	if bodyIndex < 0 {
+		return 0, fmt.Errorf(
+			"%w: block body era %d is unavailable",
+			errBoundaryEraNotAuthorized,
+			bodyEraID,
+		)
+	}
+	if targetIndex < 0 {
+		return 0, fmt.Errorf(
+			"%w: selected boundary era %d is unavailable",
+			errBoundaryEraNotAuthorized,
+			targetEraID,
+		)
 	}
 	if bodyIndex > ledgerIndex || targetIndex < ledgerIndex {
 		return 0, fmt.Errorf(

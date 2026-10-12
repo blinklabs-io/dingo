@@ -767,6 +767,48 @@ func TestAuthorizeBoundaryEra(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, eras.ShelleyEraDesc.Id, era)
 	})
+	t.Run("missing protocol version is refused", func(t *testing.T) {
+		t.Parallel()
+		_, err := decide(
+			newLedger(t, nil), eras.BabbageEraDesc, nil, 0,
+			eras.BabbageEraDesc.Id, eras.BabbageEraDesc.Id,
+		)
+		require.ErrorContains(t, err, "source-era protocol version")
+	})
+	t.Run("unknown source era is refused", func(t *testing.T) {
+		t.Parallel()
+		unknown := eras.BabbageEraDesc
+		unknown.Id = 1_000
+		_, err := decide(
+			newLedger(t, nil), unknown, babbagePParams(8), 0,
+			eras.BabbageEraDesc.Id, eras.BabbageEraDesc.Id,
+		)
+		require.ErrorContains(t, err, "source era 1000 is unavailable")
+	})
+	t.Run("unknown block eras are refused", func(t *testing.T) {
+		t.Parallel()
+		ls := newLedger(t, nil)
+		_, err := decide(
+			ls, eras.BabbageEraDesc, babbagePParams(8), 0,
+			1_000, eras.BabbageEraDesc.Id,
+		)
+		require.ErrorIs(t, err, errBoundaryEraNotAuthorized)
+		require.ErrorContains(t, err, "block body era 1000 is unavailable")
+		_, err = decide(
+			ls, eras.BabbageEraDesc, babbagePParams(8), 0,
+			eras.BabbageEraDesc.Id, 1_000,
+		)
+		require.ErrorIs(t, err, errBoundaryEraNotAuthorized)
+		require.ErrorContains(t, err, "selected boundary era 1000 is unavailable")
+	})
+	t.Run("unsupported protocol major is refused", func(t *testing.T) {
+		t.Parallel()
+		_, err := decide(
+			newLedger(t, nil), eras.BabbageEraDesc, babbagePParams(1_000), 0,
+			eras.BabbageEraDesc.Id, eras.BabbageEraDesc.Id,
+		)
+		require.ErrorContains(t, err, "protocol major 1000 has no active era")
+	})
 
 	conwayPParams := func(major uint) lcommon.ProtocolParameters {
 		return &conway.ConwayProtocolParameters{
