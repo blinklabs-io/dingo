@@ -16,6 +16,7 @@ package mempool
 
 import (
 	"context"
+	"errors"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -58,4 +59,70 @@ func TestStopCancelsBlockedWorkerValidation(t *testing.T) {
 	defer cancel()
 	require.NoError(t, m.Stop(stopCtx))
 	require.ErrorIs(t, workerCtx.Err(), context.Canceled)
+}
+
+func TestChainUpdateWorkerRateLimitsFailedRebuilds(t *testing.T) {
+	t.Parallel()
+	const revalidationInterval = 100 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	updates := make(chan event.Event, 8)
+	attempts := make(chan int, 4)
+	workerDone := make(chan struct{})
+	calls := 0
+	go func() {
+		defer close(workerDone)
+		runChainUpdateWorker(
+			ctx,
+			nil,
+			updates,
+			revalidationInterval,
+			func() error {
+				calls++
+				attempts <- calls
+				return errors.New("ledger snapshot changed")
+			},
+			func(error) {},
+		)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-workerDone
+	})
+
+	updates <- event.Event{}
+	require.Equal(
+		t,
+		1,
+		testutil.RequireReceive(t, attempts, time.Second, "first rebuild"),
+	)
+	updates <- event.Event{}
+	updates <- event.Event{}
+	testutil.WaitForCondition(
+		t,
+		func() bool { return len(updates) == 0 },
+		time.Second,
+		"events coalesce during the failed rebuild cooldown",
+	)
+	testutil.RequireNoReceive(
+		t,
+		attempts,
+		revalidationInterval/2,
+		"failed rebuild is not retried for every chain event",
+	)
+	require.Equal(
+		t,
+		2,
+		testutil.RequireReceive(t, attempts, time.Second, "cooldown retry"),
+	)
+	testutil.RequireNoReceive(
+		t,
+		attempts,
+		revalidationInterval/2,
+		"repeated failed rebuild remains rate limited",
+	)
+	require.Equal(
+		t,
+		3,
+		testutil.RequireReceive(t, attempts, time.Second, "scheduled retry"),
+	)
 }

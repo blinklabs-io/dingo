@@ -7024,6 +7024,11 @@ Dingo's own reply check is a second line behind it.
 
 The selected pool manages pending transactions:
 
+After a chain-update overlay rebuild fails because the ledger snapshot moved,
+the mempool coalesces subsequent chain events and retries at most once per 30
+seconds, even if no further event arrives. Successful rebuilds retain the
+normal queue-drain behavior.
+
 ```
                         Mempool
     -------------------------------------------------
