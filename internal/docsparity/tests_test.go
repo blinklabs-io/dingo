@@ -2997,13 +2997,18 @@ func TestPullRequestChangeGateUsesTrustedClassifier(t *testing.T) {
 		}
 		if strings.HasPrefix(uses, "actions/checkout@") &&
 			with["path"] == "trusted-ci" &&
-			with["ref"] == "${{ github.workflow_sha }}" {
+			with["ref"] == "${{ github.event.pull_request.base.sha || github.sha }}" {
 			trustedCheckout = idx
 		}
 		if fields["id"] == "detect" {
 			detect = idx
 			if fields["working-directory"] != "pull-request" ||
-				fields["run"] != "bash ../trusted-ci/.github/scripts/ci-changes.sh" {
+				fields["run"] != `if [[ -f ../trusted-ci/.github/scripts/ci-changes.sh ]]; then
+  bash ../trusted-ci/.github/scripts/ci-changes.sh
+else
+  echo "run-ci=true" >> "$GITHUB_OUTPUT"
+fi
+` {
 				t.Errorf("%s change detector must run trusted-ci's classifier against the pull-request checkout", prPipeline)
 			}
 		}
@@ -3012,7 +3017,7 @@ func TestPullRequestChangeGateUsesTrustedClassifier(t *testing.T) {
 		t.Errorf("%s changes job does not check out PR history into pull-request", prPipeline)
 	}
 	if trustedCheckout < 0 {
-		t.Errorf("%s changes job does not check out github.workflow_sha into trusted-ci", prPipeline)
+		t.Errorf("%s changes job does not check out the trusted base revision into trusted-ci", prPipeline)
 	}
 	if detect < 0 {
 		t.Errorf("%s changes job has no detect step", prPipeline)
