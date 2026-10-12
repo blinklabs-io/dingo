@@ -762,7 +762,6 @@ func TestLeiosKeySnapshotUsesEraSpecificPoolRegistrationWindow(
 			wantEpoch:       8,
 		},
 	} {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			db := setupTestDB(t)

@@ -496,7 +496,6 @@ func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
 			margin:          "1/10",
 		},
 	} {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			testHandleEpochTransitionPersistsRewardStateInputs(
