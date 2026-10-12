@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"context"
+	"errors"
 	"net"
 	"slices"
 	"testing"
@@ -330,7 +331,7 @@ func TestLeiosBackfillPreferenceKeepsAnnouncingConnectionLifetime(
 	require.Len(t, candidates, 2)
 	require.Same(t, first, candidates[0].conn)
 	require.Nil(t, candidates[1].conn)
-	require.Same(t, first, o.leiosBackfillCandidateConn(candidates[0], first))
+	require.Same(t, first, o.leiosBackfillCandidateConn(candidates[0], first, cm.GetConnectionById))
 
 	replacement := newLeiosFetchConversationWithAddrs(t, local, remote)
 	require.Equal(t, first.Id(), replacement.Id())
@@ -340,9 +341,9 @@ func TestLeiosBackfillPreferenceKeepsAnnouncingConnectionLifetime(
 	// replacement is available only at the unchanged fallback position.
 	require.Same(t, first, candidates[0].conn)
 	require.Nil(t, candidates[1].conn)
-	require.Nil(t, o.leiosBackfillCandidateConn(candidates[0], first))
+	require.Nil(t, o.leiosBackfillCandidateConn(candidates[0], first, cm.GetConnectionById))
 	require.Same(t, replacement,
-		o.leiosBackfillCandidateConn(candidates[1], first))
+		o.leiosBackfillCandidateConn(candidates[1], first, cm.GetConnectionById))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -631,4 +632,76 @@ func TestLeiosFetchGuardCooldown(t *testing.T) {
 	if g.inCooldown(now) {
 		t.Fatal("markFetchOK should clear the cooldown")
 	}
+}
+
+func TestBackfillFinalRelayGetsRemainingBudgetAfterPromotion(t *testing.T) {
+	t.Parallel()
+	cm, peers := newLeiosBackfillSelectorPeers(t, "active", "fallback")
+	state := chainsync.NewState(nil, nil)
+	state.SetClientConnId(peers[0].Id())
+	o := newOuroboros(OuroborosConfig{ConnManager: cm, ChainsyncState: state})
+	point := ocommon.NewPoint(200, []byte{1, 2})
+	o.recordLeiosBackfillSource(point, peers[0].Id(), peers[0].LeiosNotify().Client)
+	o.leiosFetchGuardFor(peers[1].Id()).markFetchFailed(time.Now(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	overall, _ := ctx.Deadline()
+	attempts := []ouroboros.ConnectionId{}
+	err := o.fetchEndorserBlockWithCandidates(
+		ctx,
+		point.Slot,
+		point.Hash,
+		[]ouroboros.ConnectionId{
+			peers[0].Id(),
+			namedConnId("removed"),
+			peers[1].Id(),
+		},
+		cm.GetConnectionById,
+		func(_ context.Context, id ouroboros.ConnectionId, _ *leiosfetch.Client, _ ocommon.Point, deadline time.Time) error {
+			attempts = append(attempts, id)
+			if id == peers[1].Id() {
+				require.Equal(t, overall, deadline)
+			}
+			return errLeiosBackfillConnBusy
+		},
+	)
+	require.ErrorIs(t, err, errLeiosBackfillConnBusy)
+	require.Equal(t, []ouroboros.ConnectionId{peers[0].Id(), peers[1].Id()}, attempts)
+}
+
+func TestBackfillLoopTriesReplacementAtFallbackPosition(t *testing.T) {
+	t.Parallel()
+	local, remote := fakeConnAddr("loop-local"), fakeConnAddr("loop-remote")
+	first := newLeiosFetchConversationWithAddrs(t, local, remote)
+	replacement := newLeiosFetchConversationWithAddrs(t, local, remote)
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	require.True(t, cm.AddConnection(first, false, "active"))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	state := chainsync.NewState(nil, nil)
+	state.SetClientConnId(first.Id())
+	o := newOuroboros(OuroborosConfig{ConnManager: cm, ChainsyncState: state})
+	point := ocommon.NewPoint(200, []byte{1, 2})
+	o.recordLeiosBackfillSource(point, first.Id(), first.LeiosNotify().Client)
+	attempted := false
+	sentinel := errors.New("replacement attempted")
+	err := o.fetchEndorserBlockWithCandidates(
+		context.Background(),
+		point.Slot,
+		point.Hash,
+		[]ouroboros.ConnectionId{
+			first.Id(),
+		},
+		func(ouroboros.ConnectionId) *ouroboros.Connection { return replacement },
+		func(_ context.Context, _ ouroboros.ConnectionId, client *leiosfetch.Client, _ ocommon.Point, _ time.Time) error {
+			attempted = true
+			require.Same(t, replacement.LeiosFetch().Client, client)
+			return sentinel
+		},
+	)
+	require.True(t, attempted)
+	require.ErrorIs(t, err, sentinel)
 }

@@ -319,6 +319,24 @@ func (o *Ouroboros) fetchEndorserBlockByPointWithConnections(
 	connIds []ouroboros.ConnectionId,
 	getConnection func(ouroboros.ConnectionId) *ouroboros.Connection,
 ) error {
+	return o.fetchEndorserBlockWithCandidates(
+		ctx,
+		ebSlot,
+		ebHash,
+		connIds,
+		getConnection,
+		o.fetchEndorserBlockOnConn,
+	)
+}
+
+func (o *Ouroboros) fetchEndorserBlockWithCandidates(
+	ctx context.Context,
+	ebSlot uint64,
+	ebHash []byte,
+	connIds []ouroboros.ConnectionId,
+	getConnection func(ouroboros.ConnectionId) *ouroboros.Connection,
+	fetch func(context.Context, ouroboros.ConnectionId, *oleiosfetch.Client, ocommon.Point, time.Time) error,
+) error {
 	overall, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
 		overall = time.Now().Add(leiosBackfillTotalBudget)
@@ -341,30 +359,43 @@ func (o *Ouroboros) fetchEndorserBlockByPointWithConnections(
 	var lastErr, busyErr error
 	usableConnection := false
 	remainingCandidates := len(connIds)
+	counted := make(map[ouroboros.ConnectionId]bool, len(connIds))
 	var preferredConn *ouroboros.Connection
 	if len(candidates) > 0 {
 		preferredConn = candidates[0].conn
 	}
+	preferredInFallback := false
+	if preferredConn != nil {
+		for _, id := range connIds {
+			if id == preferredConn.Id() {
+				preferredInFallback = true
+				break
+			}
+		}
+		if !preferredInFallback {
+			remainingCandidates++
+		}
+	}
 	for _, candidate := range candidates {
 		connId := candidate.connId
-		if candidate.conn == nil && preferredConn != nil && connId == preferredConn.Id() {
-			continue
-		}
-		remainingCandidates--
 		if err := ctx.Err(); err != nil {
 			if lastErr == nil {
 				lastErr = err
 			}
 			break
 		}
-		conn := getConnection(connId)
-		if candidate.conn != nil {
-			if conn != candidate.conn {
-				continue
+		conn := o.leiosBackfillCandidateConn(candidate, preferredConn, getConnection)
+		// A reconnected peer remains eligible at its fallback position; only
+		// the exact already-promoted connection is a duplicate.
+		if candidate.conn != nil && conn == nil {
+			if !preferredInFallback {
+				remainingCandidates--
 			}
-			conn = candidate.conn
-		} else if conn == preferredConn && preferredConn != nil {
 			continue
+		}
+		if !counted[connId] {
+			remainingCandidates--
+			counted[connId] = true
 		}
 		if conn == nil || conn.LeiosFetch() == nil ||
 			conn.LeiosFetch().Client == nil {
@@ -403,7 +434,7 @@ func (o *Ouroboros) fetchEndorserBlockByPointWithConnections(
 		// their cooldown state in fetch-completion order. Doing it here, after
 		// the guard is released, would let a slow failure's mark land after a
 		// newer success's mark and wrongly cool down a healthy connection.
-		err := o.fetchEndorserBlockOnConn(
+		err := fetch(
 			ctx,
 			connId,
 			conn.LeiosFetch().Client,
@@ -742,14 +773,15 @@ type leiosBackfillConnCandidate struct {
 func (o *Ouroboros) leiosBackfillCandidateConn(
 	candidate leiosBackfillConnCandidate,
 	preferred *ouroboros.Connection,
+	getConnection func(ouroboros.ConnectionId) *ouroboros.Connection,
 ) *ouroboros.Connection {
 	if candidate.conn != nil {
-		if o.connManager.GetConnectionById(candidate.connId) != candidate.conn {
+		if getConnection(candidate.connId) != candidate.conn {
 			return nil
 		}
 		return candidate.conn
 	}
-	conn := o.connManager.GetConnectionById(candidate.connId)
+	conn := getConnection(candidate.connId)
 	if conn == preferred {
 		return nil
 	}
@@ -769,7 +801,11 @@ func (o *Ouroboros) leiosBackfillConnCandidatesForPoint(
 		leiosBackfillAffinityWindow,
 		o.leiosFetchGuardFor,
 	)
-	order = preferLeiosBackfillOfferSource(order, o.leiosEndorserBlockRelayOfferSource(point), o.leiosFetchGuardFor)
+	order = preferLeiosBackfillOfferSource(
+		order,
+		o.leiosEndorserBlockRelayOfferSource(point),
+		o.leiosFetchGuardFor,
+	)
 	candidates := make([]leiosBackfillConnCandidate, 0, len(order)+1)
 	if len(order) > 0 && o.chainsyncState != nil {
 		active := o.chainsyncState.GetClientConnId()
