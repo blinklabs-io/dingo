@@ -315,6 +315,9 @@ func ProcessProposals(
 	db *database.Database,
 	txn *database.Txn,
 ) error {
+	if err := validateCostModelLanguageIDs(tx); err != nil {
+		return err
+	}
 	if err := ResetDormantDRepExpiryBeforeCertificates(
 		ctx, tx, point, db, txn,
 	); err != nil {
@@ -350,6 +353,9 @@ func ProcessHistoricalProposals(
 	db *database.Database,
 	txn *database.Txn,
 ) error {
+	if err := validateCostModelLanguageIDs(tx); err != nil {
+		return err
+	}
 	return persistGovernanceProposals(
 		ctx,
 		tx,
@@ -408,6 +414,9 @@ func ProcessTransactionEffects(
 	db *database.Database,
 	txn *database.Txn,
 ) error {
+	if err := validateCostModelLanguageIDs(tx); err != nil {
+		return err
+	}
 	if len(tx.VotingProcedures()) > 0 {
 		if err := ProcessVotes(
 			ctx, tx, point, currentEpoch, drepInactivityPeriod, db, txn,
@@ -460,6 +469,9 @@ func ProcessHistoricalTransactionEffects(
 	db *database.Database,
 	txn *database.Txn,
 ) error {
+	if err := validateCostModelLanguageIDs(tx); err != nil {
+		return err
+	}
 	if len(tx.ProposalProcedures()) > 0 {
 		if err := ProcessHistoricalProposals(
 			ctx, tx, point, txIndex, currentEpoch, govActionLifetime, db, txn,
@@ -486,6 +498,30 @@ func ProcessHistoricalTransactionEffects(
 			ctx, tx, point, currentEpoch, db, txn,
 		); err != nil {
 			return fmt.Errorf("process DRep deregistration effects: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateCostModelLanguageIDs(tx lcommon.Transaction) error {
+	for _, proposal := range tx.ProposalProcedures() {
+		var models map[uint][]int64
+		switch action := proposal.GovAction().(type) {
+		case *conway.ConwayParameterChangeGovAction:
+			if action == nil {
+				continue
+			}
+			models = action.ParamUpdate.CostModels
+		case *gdijkstra.DijkstraParameterChangeGovAction:
+			if action == nil {
+				continue
+			}
+			models = action.ParamUpdate.CostModels
+		default:
+			continue
+		}
+		if err := lcommon.ValidateCostModelLanguageIDs(models); err != nil {
+			return fmt.Errorf("invalid parameter change: %w", err)
 		}
 	}
 	return nil
