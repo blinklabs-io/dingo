@@ -476,15 +476,26 @@ func validateLeiosEndorserBlockTx(
 func validateLeiosEndorserBlockTxStructure(
 	index int,
 	raw cbor.RawMessage,
-) ([]byte, error) {
+) error {
 	txCbor, err := leiosEndorserBlockTxCbor(raw)
 	if err != nil {
-		return nil, fmt.Errorf("decode endorser tx %d envelope: %w", index, err)
+		return fmt.Errorf("decode endorser tx %d envelope: %w", index, err)
 	}
 	if _, err := safedecode.Transaction(gledger.TxTypeDijkstra, txCbor); err != nil {
-		return nil, fmt.Errorf("decode endorser tx %d: %w", index, err)
+		return fmt.Errorf("decode endorser tx %d: %w", index, err)
 	}
-	return txCbor, nil
+	return nil
+}
+
+func validateLeiosEndorserBlockTxStructures(
+	txsRaw []cbor.RawMessage,
+) error {
+	for i, raw := range txsRaw {
+		if err := validateLeiosEndorserBlockTxStructure(i, raw); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func leiosEndorserBlockTxCbor(raw cbor.RawMessage) ([]byte, error) {
@@ -575,13 +586,8 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		return fmt.Errorf("decode leios endorser block: %w", err)
 	}
 	if len(txsRaw) == len(block.TransactionReferences) {
-		for i, raw := range txsRaw {
-			if _, err := validateLeiosEndorserBlockTxStructure(i, raw); err != nil {
-				return fmt.Errorf(
-					"leios endorser block cache: %w",
-					err,
-				)
-			}
+		if err := validateLeiosEndorserBlockTxStructures(txsRaw); err != nil {
+			return fmt.Errorf("leios endorser block cache: %w", err)
 		}
 	}
 	// Bind the entry to the slot its announcement actually vouched for. A
@@ -2016,13 +2022,18 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		return nil, false
 	}
 	if len(txsRaw) > 0 {
-		if err := validateLeiosEndorserBlockTxs(manifestRaw, txsRaw); err != nil {
+		err := validateLeiosEndorserBlockTxs(manifestRaw, txsRaw)
+		if err == nil {
+			err = validateLeiosEndorserBlockTxStructures(txsRaw)
+		}
+		if err != nil {
 			// Transaction blobs written before manifest binding was enforced (or
-			// corrupted afterward) are only a historical-serving cache. Keep the
-			// content-addressed manifest, but discard the untrusted bodies so the
-			// normal by-point path fetches and persists a verified replacement.
+			// structural decoding was enforced), or corrupted afterward, are only
+			// a historical-serving cache. Keep the content-addressed manifest, but
+			// discard the untrusted bodies so the normal by-point path fetches and
+			// persists a verified replacement.
 			o.config.Logger.Debug(
-				"discarding leios EB txs that mismatch persisted manifest",
+				"discarding invalid persisted leios EB txs",
 				"component", "network",
 				"hash", hex.EncodeToString(hash),
 				"error", err,

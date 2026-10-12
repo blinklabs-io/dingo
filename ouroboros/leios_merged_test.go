@@ -1675,6 +1675,56 @@ func TestLoadLeiosEBFromDBRejectsTransactionsThatMismatchManifest(
 	require.Empty(t, cached.txsRaw)
 }
 
+func TestLoadLeiosEBFromDBRejectsMalformedCompleteTransactions(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	malformedTx := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(malformedTx),
+			TransactionSize: uint16(len(malformedTx)),
+		}},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(
+		124,
+		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
+	)
+	o := newTestOuroborosWithLeiosDB(t)
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+	require.NoError(t, db.SetLeiosEB(
+		point.Slot,
+		point.Hash,
+		manifestRaw,
+		[]cbor.RawMessage{malformedTx},
+	))
+	o.leiosEBLog.registerConn("relay", nil, nil)
+
+	cached, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok, "the valid manifest should remain available")
+	require.False(t, cached.completeTxCache())
+	require.Empty(t, cached.txsRaw)
+	_, ok = o.EndorserBlockTxsByHash(point.Hash, point.Slot)
+	require.False(t, ok)
+
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		manifestRaw,
+		nil,
+		leiosStorePeerOffered,
+	))
+	manifestOffer, _ := o.leiosEBLog.next("relay")
+	require.NotNil(t, manifestOffer)
+	require.NotNil(t, manifestOffer.point)
+	o.leiosEBLog.complete("relay", nil, true)
+	relayOffer, _ := o.leiosEBLog.next("relay")
+	require.Nil(t, relayOffer, "malformed persisted transactions must not be relayed")
+	o.StopLeiosPersistWriter()
+}
+
 func TestLoadLeiosEBFromDBAcceptsTransactionsThatMatchManifest(t *testing.T) {
 	t.Parallel()
 
