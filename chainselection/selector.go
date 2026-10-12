@@ -541,11 +541,10 @@ func (cs *ChainSelector) bestKnownGenesisSlotLocked(
 func (cs *ChainSelector) advertisedTipStaleLocked(
 	peerTip *PeerChainTip,
 ) bool {
-	if cs.mode != SelectionModeGenesis || cs.securityParam == 0 ||
-		peerTip == nil || cs.config.WallClockSlot == nil {
+	if peerTip == nil {
 		return false
 	}
-	wall, ok := cs.config.WallClockSlot()
+	wall, ok := cs.staleTipRuleWallSlotLocked()
 	if !ok {
 		return false
 	}
@@ -553,6 +552,18 @@ func (cs *ChainSelector) advertisedTipStaleLocked(
 		peerTip.Tip.Point.Slot,
 		cs.genesisWindowSlotsLocked(),
 	) < wall
+}
+
+// staleTipRuleWallSlotLocked returns the wall-clock slot the stale-tip rule
+// measures against, and false while the rule cannot decide. The apply gate and
+// GenesisStaleTipRuleActive share it: if the two disagreed, a tip could be
+// observed asynchronously while the gate already reads it.
+func (cs *ChainSelector) staleTipRuleWallSlotLocked() (uint64, bool) {
+	if cs.mode != SelectionModeGenesis || cs.securityParam == 0 ||
+		cs.config.WallClockSlot == nil {
+		return 0, false
+	}
+	return cs.config.WallClockSlot()
 }
 
 func (cs *ChainSelector) shouldExitGenesisModeLocked(

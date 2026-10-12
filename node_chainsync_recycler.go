@@ -44,9 +44,9 @@ func (n *Node) chainsyncObserveSynchronously() bool {
 
 // chainsyncObservePeerTip synchronously feeds a peer tip update into chain
 // selection (and peergov) when the Genesis corroboration gate or the wall-clock
-// stale-tip rule is active, so the
-// ChainsyncApplyEligible check that immediately follows in the roll-forward
-// handler reflects the header currently being admitted. This closes the race
+// stale-tip rule is active, so the ChainsyncApplyEligible check that
+// immediately follows in the roll-forward handler reflects the header
+// currently being admitted. This closes the race
 // where the apply gate would otherwise read corroboration state that predates
 // this header (the tip update is normally delivered asynchronously). It returns
 // true when it handled the observation synchronously, so the ouroboros layer
@@ -68,9 +68,9 @@ func (n *Node) chainsyncObservePeerTip(
 }
 
 // chainsyncObservePeerRollback synchronously applies a peer rollback into chain
-// selection when the Genesis corroboration gate is active, so the
-// ChainsyncApplyEligible check that immediately follows in the roll-backward
-// handler reflects the post-rollback corroboration state. A rollback trims the
+// selection when the Genesis corroboration gate or the wall-clock stale-tip
+// rule is active, so the ChainsyncApplyEligible check that immediately follows
+// in the roll-backward handler reflects the post-rollback state. A rollback trims the
 // peer's observed frontier (ApplyRollback), which can change its corroboration
 // status; delivering that observation asynchronously would let the apply gate
 // read pre-trim state and forward a rollback for a peer that the rollback has

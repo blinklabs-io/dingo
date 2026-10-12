@@ -5411,9 +5411,13 @@ ledger (`ChainSelector.ShouldApplyIngress`, the apply gate in the roll-forward
 and roll-backward handlers): ingress is open to every eligible peer, not only
 the selected one, so headers admitted from a stale peer would stay in the shared
 header queue after selection moved to honest peers and make their headers look
-like a persistent fork. The gate reads the peer's tracked tip, so while the rule can decide (`ChainSelector.GenesisStaleTipRuleActive`) node composition observes tip and rollback updates synchronously, before the gate runs, as it does for corroboration; an asynchronous observation would let a new stale peer's first headers through. The bound is the wall clock, not a count of advertised
-tips: those are unverified, and colluding connections cannot make an honest
-peer's live tip older than the wall clock. The wall-clock slot comes from
+like a persistent fork. The gate reads the peer's tracked tip, so while the
+rule can decide (`ChainSelector.GenesisStaleTipRuleActive`) node composition
+observes tip and rollback updates synchronously, before the gate runs, as it
+does for corroboration; an asynchronous observation would let a new stale
+peer's first headers through. The bound is the wall clock, not a count of
+advertised tips: those are unverified, and colluding connections cannot make
+an honest peer's live tip older than the wall clock. The wall-clock slot comes from
 `ChainSelectorConfig.WallClockSlot`, which node composition wires to the
 current `LedgerState.CurrentSlot` through an atomic that follows live
 Restore/Truncate; the rule is inactive while that hook is unset or reports no

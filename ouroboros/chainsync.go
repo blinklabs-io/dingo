@@ -1089,10 +1089,11 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	}
 	// Observe the rollback for chain selection FIRST — it trims the peer's
 	// observed frontier (ApplyRollback), which can change its corroboration
-	// status, so the apply gate below must reflect it. If the hook handles it
-	// synchronously (Genesis corroboration active), skip the async publish to
-	// avoid a double update; otherwise publish for the async subscriber. This
-	// mirrors the roll-forward ChainsyncObservePeerTip ordering.
+	// status and registers an untracked peer's tip, so the apply gate below
+	// must reflect it. If the hook handles it synchronously (whenever the gate
+	// reads the peer's tracked state), skip the async publish to avoid a double
+	// update; otherwise publish for the async subscriber. This mirrors the
+	// roll-forward ChainsyncObservePeerTip ordering.
 	rollbackEvent := chainselection.PeerRollbackEvent{
 		ConnectionId: ctx.ConnectionId,
 		Point:        point,
@@ -1384,10 +1385,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ObservedPrevHash: v.PrevHash().Bytes(),
 				ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
 			}
-			// If the hook handles it synchronously (Genesis corroboration
-			// active, so the apply gate below must reflect this header), skip
-			// the async publish to avoid a double update; otherwise publish for
-			// the async chain-selection and peergov subscribers.
+			// If the hook handles it synchronously (the apply gate below reads
+			// the peer's tracked tip, so it must reflect this header), skip the
+			// async publish to avoid a double update; otherwise publish for the
+			// async chain-selection and peergov subscribers.
 			observedSync := false
 			if o.config.ChainsyncObservePeerTip != nil {
 				observedSync = o.config.ChainsyncObservePeerTip(peerTipUpdate)

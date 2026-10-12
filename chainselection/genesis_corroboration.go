@@ -62,11 +62,7 @@ func (cs *ChainSelector) GenesisCorroborationActive() bool {
 func (cs *ChainSelector) GenesisStaleTipRuleActive() bool {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
-	if cs.mode != SelectionModeGenesis || cs.securityParam == 0 ||
-		cs.config.WallClockSlot == nil {
-		return false
-	}
-	_, ok := cs.config.WallClockSlot()
+	_, ok := cs.staleTipRuleWallSlotLocked()
 	return ok
 }
 
