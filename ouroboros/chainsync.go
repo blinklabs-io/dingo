@@ -354,7 +354,8 @@ func (o *Ouroboros) chainsyncClientAwaitReply(
 		return nil
 	}
 	o.chainsyncState.MarkClientSynced(ctx.ConnectionId)
-	if client.ObservabilityOnly {
+	if client.ObservabilityOnly ||
+		!o.shouldPublishChainsyncToLedger(ctx.ConnectionId) {
 		return nil
 	}
 	if o.config.ChainsyncObserveAwaitReply != nil {
@@ -1384,6 +1385,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 							},
 						),
 					)
+					if o.chainsyncState != nil {
+						o.chainsyncState.SetClientObservabilityOnly(
+							ctx.ConnectionId,
+							true,
+						)
+					}
 					ingressEligible = false
 				}
 			}
