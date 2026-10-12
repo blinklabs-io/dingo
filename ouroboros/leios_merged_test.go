@@ -2260,7 +2260,11 @@ func TestValidateLeiosEndorserBlockForHeaderWaitsForRemoteBody(t *testing.T) {
 		"remote endorser validation",
 	))
 	require.Equal(t, 1, validationLedger.txValidated)
-	require.Len(t, votes.ebs, 1)
+	require.Eventually(t, func() bool {
+		votes.mu.Lock()
+		defer votes.mu.Unlock()
+		return len(votes.ebs) == 1
+	}, time.Second, time.Millisecond)
 }
 
 func TestValidateLeiosEndorserBlockForHeaderAcceptsForgedGenesisParent(
@@ -2408,7 +2412,11 @@ func TestValidateLeiosEndorserBlockForHeaderBindsBodyArrivingAfterWait(
 		"late complete body validation",
 	))
 	require.Equal(t, 1, validationLedger.txValidated)
-	require.Len(t, votes.ebs, 1)
+	require.Eventually(t, func() bool {
+		votes.mu.Lock()
+		defer votes.mu.Unlock()
+		return len(votes.ebs) == 1
+	}, time.Second, time.Millisecond)
 	o.leiosMu.RLock()
 	require.Empty(t, o.leiosSelectedHeaders[key])
 	o.leiosMu.RUnlock()
