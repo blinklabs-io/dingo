@@ -333,7 +333,14 @@ type peerTipAdmissionCandidate struct {
 	plausible bool
 }
 
-func clonePeerChainTip(peerTip *PeerChainTip) *PeerChainTip {
+// clonePeerTipAdmissionFrontier copies only state used while a header waits
+// for ledger admission. Rollback and admitted-point history belong to the
+// committed peer; copying either on every delivered header makes admission
+// cost grow with k. Genesis corroboration still needs the committed density
+// window as the base for staged points.
+func (cs *ChainSelector) clonePeerTipAdmissionFrontier(
+	peerTip *PeerChainTip,
+) *PeerChainTip {
 	if peerTip == nil {
 		return nil
 	}
@@ -342,21 +349,14 @@ func clonePeerChainTip(peerTip *PeerChainTip) *PeerChainTip {
 	result.ObservedTip = cloneObservedTip(peerTip.ObservedTip)
 	result.VRFOutput = append([]byte(nil), peerTip.VRFOutput...)
 	result.PraosView = clonePraosTiebreakerView(peerTip.PraosView)
-	if len(peerTip.observedSlots) > 0 {
+	result.observedTipHistory = nil
+	result.admittedTipHistory = nil
+	if cs.genesisCorroborationActiveLocked() {
 		result.observedSlots = append([]uint64(nil), peerTip.observedSlots...)
-	}
-	result.observedPoints = cloneObservedPoints(peerTip.observedPoints)
-	if len(peerTip.observedTipHistory) > 0 {
-		result.observedTipHistory = make([]ochainsync.Tip, len(peerTip.observedTipHistory))
-		for i, tip := range peerTip.observedTipHistory {
-			result.observedTipHistory[i] = cloneObservedTip(tip)
-		}
-	}
-	if len(peerTip.admittedTipHistory) > 0 {
-		result.admittedTipHistory = make([]ocommon.Point, len(peerTip.admittedTipHistory))
-		for i, point := range peerTip.admittedTipHistory {
-			result.admittedTipHistory[i] = clonePoint(point)
-		}
+		result.observedPoints = cloneObservedPoints(peerTip.observedPoints)
+	} else {
+		result.observedSlots = nil
+		result.observedPoints = nil
 	}
 	return &result
 }
@@ -835,7 +835,9 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 			// No best peer yet, trigger evaluation
 			shouldEvaluate = true
 		}
-		cs.rebuildPendingAdmissionStateLocked()
+		if len(cs.pendingFarTipClaims) > 0 {
+			cs.rebuildPendingAdmissionStateLocked()
+		}
 	}()
 
 	// Publish eviction event outside the lock to prevent deadlock
@@ -924,11 +926,22 @@ func (cs *ChainSelector) PreparePeerTipAdmission(
 			update:    update,
 			plausible: plausible,
 		})
+		truncated := false
 		if len(pending) > maxPendingPeerTipAdmissions {
 			pending = pending[len(pending)-maxPendingPeerTipAdmissions:]
+			truncated = true
 		}
 		cs.pendingPeerTips[update.ConnectionId] = pending
-		cs.rebuildPendingAdmissionStateLocked()
+		switch {
+		case len(cs.pendingFarTipClaims) > 0:
+			// Far-frontier evidence can change another connection's pending
+			// plausibility, so replay the exceptional cross-peer state.
+			cs.rebuildPendingAdmissionStateLocked()
+		case truncated:
+			cs.rebuildPeerTipAdmissionFrontierLocked(update.ConnectionId)
+		case plausible:
+			cs.appendPeerTipAdmissionFrontierLocked(update)
+		}
 		commitImmediately = cs.admittedPeerTipPointLocked(update)
 		accepted = true
 	}()
@@ -969,7 +982,7 @@ func (cs *ChainSelector) rebuildPeerTipAdmissionFrontierLocked(
 	}
 	var frontier *PeerChainTip
 	if committed := cs.peerTips[connId]; committed != nil {
-		frontier = clonePeerChainTip(committed)
+		frontier = cs.clonePeerTipAdmissionFrontier(committed)
 	} else {
 		frontier = &PeerChainTip{ConnectionId: connId, nowFn: cs.nowFn}
 	}
@@ -980,6 +993,25 @@ func (cs *ChainSelector) rebuildPeerTipAdmissionFrontierLocked(
 		cs.applyPeerTipAdmissionUpdateLocked(frontier, candidate.update)
 	}
 	cs.pendingPeerTipFrontiers[connId] = frontier
+}
+
+func (cs *ChainSelector) appendPeerTipAdmissionFrontierLocked(
+	update PeerTipUpdateEvent,
+) {
+	frontier := cs.pendingPeerTipFrontiers[update.ConnectionId]
+	if frontier == nil {
+		frontier = cs.clonePeerTipAdmissionFrontier(
+			cs.peerTips[update.ConnectionId],
+		)
+		if frontier == nil {
+			frontier = &PeerChainTip{
+				ConnectionId: update.ConnectionId,
+				nowFn:        cs.nowFn,
+			}
+		}
+	}
+	cs.applyPeerTipAdmissionUpdateLocked(frontier, update)
+	cs.pendingPeerTipFrontiers[update.ConnectionId] = frontier
 }
 
 func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
@@ -1012,6 +1044,9 @@ func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
 	claims := cloneFarTipClaims(cs.farTipClaims)
 	for _, stagedUpdate := range stagedUpdates {
 		pending := cs.pendingPeerTips[stagedUpdate.connId]
+		if stagedUpdate.index >= len(pending) {
+			continue
+		}
 		candidate := &pending[stagedUpdate.index]
 		update := candidate.update
 		plausible := cs.checkPeerTipPlausibleWithClaimsLocked(
@@ -1038,7 +1073,7 @@ func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
 		frontier := cs.pendingPeerTipFrontiers[update.ConnectionId]
 		if frontier == nil {
 			if committed := cs.peerTips[update.ConnectionId]; committed != nil {
-				frontier = clonePeerChainTip(committed)
+				frontier = cs.clonePeerTipAdmissionFrontier(committed)
 			} else {
 				frontier = &PeerChainTip{
 					ConnectionId: update.ConnectionId,
@@ -1260,7 +1295,6 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 				cs.farTipClaims,
 			) {
 				cs.deletePeerLocked(update.ConnectionId)
-				cs.rebuildPendingAdmissionStateLocked()
 				shouldEvaluate = true
 				accepted = true
 				return
@@ -1282,7 +1316,11 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 					pending[i+1:]...,
 				)
 			}
-			cs.rebuildPendingAdmissionStateLocked()
+			if len(cs.pendingFarTipClaims) > 0 {
+				cs.rebuildPendingAdmissionStateLocked()
+			} else if len(cs.pendingPeerTips[update.ConnectionId]) == 0 {
+				delete(cs.pendingPeerTipFrontiers, update.ConnectionId)
+			}
 			accepted = true
 			if !plausible {
 				return
@@ -2137,7 +2175,9 @@ func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 		}
 		cs.localTipProgressBlock = tip.BlockNumber
 		cs.localTip = tip
-		cs.rebuildPendingAdmissionStateLocked()
+		if len(cs.pendingFarTipClaims) > 0 {
+			cs.rebuildPendingAdmissionStateLocked()
+		}
 		shouldEvaluate = cs.advanceSelectionModeLocked()
 	}()
 	if shouldEvaluate {
