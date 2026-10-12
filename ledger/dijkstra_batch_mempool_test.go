@@ -141,22 +141,22 @@ func TestDijkstraBatchPendingBalanceAgreesWithAppliedBalance(t *testing.T) {
 	txType := uint(gledger.TxTypeDijkstra)
 	require.NoError(
 		t,
-		pool.AddTransaction(txType, later(0xf1, 100)),
+		pool.AddTransaction(context.Background(), txType, later(0xf1, 100)),
 		"control: the stored balance covers a full withdrawal",
 	)
 	pool.RemoveTxsByHash([]string{pool.Transactions()[0].Hash})
 
-	require.NoError(t, pool.AddTransaction(txType, batch.Cbor()))
+	require.NoError(t, pool.AddTransaction(context.Background(), txType, batch.Cbor()))
 	var exceeds dijkstra.WithdrawalsExceedAccountBalanceError
 	require.ErrorAs(
 		t,
-		pool.AddTransaction(txType, later(0xf3, 16)),
+		pool.AddTransaction(context.Background(), txType, later(0xf3, 16)),
 		&exceeds,
 		"the pending batch leaves 15 after its child levels",
 	)
 	for _, amounts := range exceeds.Withdrawals {
 		require.Equal(t, []uint64{16, 15}, amounts)
 	}
-	require.NoError(t, pool.AddTransaction(txType, later(0xf4, 15)))
+	require.NoError(t, pool.AddTransaction(context.Background(), txType, later(0xf4, 15)))
 	require.Len(t, pool.Transactions(), 2)
 }

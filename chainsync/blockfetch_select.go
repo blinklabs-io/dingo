@@ -113,16 +113,60 @@ func (s *State) SelectBlockfetchPeer(
 	return chosen
 }
 
+// SelectBlockfetchRetryPeer chooses an eligible holder after other peers fail.
+// Unlike ordinary exploration, an unmeasured holder is usable immediately:
+// failed peers stay excluded and retrying one would only repeat the failure.
+func (s *State) SelectBlockfetchRetryPeer(
+	excluded []ouroboros.ConnectionId,
+	point ocommon.Point,
+) (ouroboros.ConnectionId, bool) {
+	if len(excluded) == 0 {
+		return ouroboros.ConnectionId{}, false
+	}
+	holders := s.PeersWithBlock(excluded[0], point)
+	candidates := s.blockfetchCandidatesExcept(
+		excluded[0],
+		holders,
+		excluded,
+	)
+	if len(candidates) == 0 {
+		return ouroboros.ConnectionId{}, false
+	}
+	best := candidates[0]
+	for _, candidate := range candidates[1:] {
+		switch {
+		case candidate.sampled && !best.sampled:
+			best = candidate
+		case candidate.sampled == best.sampled &&
+			(candidate.estimate < best.estimate ||
+				(candidate.estimate == best.estimate && candidate.tie < best.tie)):
+			best = candidate
+		}
+	}
+	return best.connId, true
+}
+
 // blockfetchCandidates prices origin and the eligible holders.
 func (s *State) blockfetchCandidates(
 	origin ouroboros.ConnectionId,
 	holders []ouroboros.ConnectionId,
+) []blockfetchCandidate {
+	return s.blockfetchCandidatesExcept(origin, holders, nil)
+}
+
+func (s *State) blockfetchCandidatesExcept(
+	origin ouroboros.ConnectionId,
+	holders []ouroboros.ConnectionId,
+	excluded []ouroboros.ConnectionId,
 ) []blockfetchCandidate {
 	s.clientConnIdMutex.RLock()
 	defer s.clientConnIdMutex.RUnlock()
 	candidates := make([]blockfetchCandidate, 0, 1+len(holders))
 	var perByte []float64
 	add := func(connId ouroboros.ConnectionId) {
+		if slices.Contains(excluded, connId) {
+			return
+		}
 		c := blockfetchCandidate{connId: connId, tie: s.blockfetchTie(connId)}
 		if tc, ok := s.trackedClients[connId]; ok &&
 			tc.blockfetchSampleCount > 0 {

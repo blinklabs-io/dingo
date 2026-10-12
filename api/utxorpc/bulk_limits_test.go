@@ -60,7 +60,7 @@ func newBoundsRecordingMempool(n int) *boundsRecordingMempool {
 	return &boundsRecordingMempool{txs: txs}
 }
 
-func (m *boundsRecordingMempool) AddTransaction(uint, []byte) error {
+func (m *boundsRecordingMempool) AddTransaction(context.Context, uint, []byte) error {
 	return nil
 }
 

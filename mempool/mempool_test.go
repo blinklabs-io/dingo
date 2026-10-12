@@ -1764,7 +1764,7 @@ func TestMempool_RejectsOperationsAfterStop(t *testing.T) {
 
 	require.NoError(t, m.Stop(context.Background()))
 
-	err := m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t))
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t))
 	require.ErrorIs(t, err, ErrMempoolStopped)
 	assert.Empty(t, m.Transactions())
 	assert.Nil(t, m.AddConsumer(connId))
@@ -1966,7 +1966,7 @@ func TestMempool_AddTransaction_DuplicateUpdatesLastSeen(t *testing.T) {
 	txBytes := getTestTxBytes(t)
 
 	// Add transaction first time
-	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err)
 
 	// Get the transaction hash dynamically
@@ -1986,7 +1986,7 @@ func TestMempool_AddTransaction_DuplicateUpdatesLastSeen(t *testing.T) {
 	m.Unlock()
 
 	// Add same transaction again
-	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err)
 
 	// Verify last seen was updated
@@ -2012,7 +2012,7 @@ func TestMempool_AddTransaction_ValidationFailure(t *testing.T) {
 	txBytes := getTestTxBytes(t)
 
 	// Try to add transaction - should fail validation
-	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.Error(t, err, "should fail validation")
 
 	// Verify mempool is empty
@@ -2033,7 +2033,7 @@ func TestMempool_MempoolFull(t *testing.T) {
 
 	// Add transaction that exceeds capacity
 	txBytes := getTestTxBytes(t)
-	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 
 	require.Error(t, err, "should fail due to capacity")
 	var fullErr *MempoolFullError
@@ -2066,7 +2066,7 @@ func TestMempool_AddTransaction_RejectsValidityIntervalBeyondCurrentSlot(
 	require.NoError(t, err)
 
 	// TX has ValidityIntervalStart=50000000, current slot is at 40000000 → reject
-	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "validity interval start")
 	assert.Equal(
@@ -2095,7 +2095,7 @@ func TestMempool_AddTransaction_AcceptsValidityIntervalAtOrBelowCurrentSlot(
 	require.NoError(t, err)
 
 	// TX has ValidityIntervalStart=50000000, current slot is at 60000000 → accept
-	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err)
 	assert.Equal(
 		t,
@@ -2119,7 +2119,7 @@ func TestMempool_AddTransaction_NoValidityStart_BypassesCheck(t *testing.T) {
 
 	// Original test TX has ValidityIntervalStart=0 (no lower bound)
 	txBytes := getTestTxBytes(t)
-	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err)
 	assert.Equal(
 		t,
@@ -2542,6 +2542,7 @@ func TestMempool_Rejection_AboveRejectionWatermark(
 
 	txBytes := getTestTxBytes(t)
 	err := m2.AddTransaction(
+		context.Background(),
 		uint(conway.EraIdConway), txBytes,
 	)
 	require.Error(
@@ -2718,7 +2719,7 @@ func TestMempool_DisabledEvictionRejectsAtCapacity(t *testing.T) {
 	addMockTransactionsOfSize(t, m, 10, 100)
 
 	txBytes := getTestTxBytes(t)
-	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.Error(t, err)
 	var fullErr *MempoolFullError
 	assert.ErrorAs(t, err, &fullErr)
@@ -3387,7 +3388,7 @@ func TestMempool_MEM03_SubscriberAccessesMempoolDuringAdd(
 
 	// Add a real transaction
 	txBytes := getTestTxBytes(t)
-	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err)
 
 	// Wait for subscriber to process the event
@@ -3443,7 +3444,7 @@ func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(t *testing.T) {
 	defer m.Stop(context.Background())
 
 	txBytes := getTestTxBytes(t)
-	require.NoError(t, m.AddTransaction(uint(conway.EraIdConway), txBytes))
+	require.NoError(t, m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes))
 	txs := m.Transactions()
 	require.Len(t, txs, 1)
 	consumer := m.AddConsumer(newTestConnectionId(0))
@@ -3531,7 +3532,7 @@ func TestMempool_AdmissionContinuesDuringRevalidation(t *testing.T) {
 
 	require.NoError(
 		t,
-		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 	validator.blockNextSession()
 	rebuildDone := make(chan error, 1)
@@ -3547,7 +3548,7 @@ func TestMempool_AdmissionContinuesDuringRevalidation(t *testing.T) {
 	require.NoError(t, err)
 	addDone := make(chan error, 1)
 	go func() {
-		addDone <- m.AddTransaction(uint(conway.EraIdConway), secondTx)
+		addDone <- m.AddTransaction(context.Background(), uint(conway.EraIdConway), secondTx)
 	}()
 	require.NoError(
 		t,
@@ -3602,7 +3603,7 @@ func TestMempool_RemovalsContinueDuringRevalidation(t *testing.T) {
 			defer m.Stop(context.Background())
 			require.NoError(
 				t,
-				m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+				m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 			)
 			hash := m.Transactions()[0].Hash
 
@@ -3660,7 +3661,7 @@ func TestMempool_ConfirmedTransactionLogVisibleAtInfoLevel(t *testing.T) {
 
 	require.NoError(
 		t,
-		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 	hash := m.Transactions()[0].Hash
 	m.RemoveTxsByHash([]string{hash})
@@ -3687,7 +3688,7 @@ func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop(context.Background())
-	require.NoError(t, m.AddTransaction(uint(conway.EraIdConway), firstTx))
+	require.NoError(t, m.AddTransaction(context.Background(), uint(conway.EraIdConway), firstTx))
 	firstHash := m.Transactions()[0].Hash
 
 	validator.blockNextSession()
@@ -3701,7 +3702,7 @@ func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 	)
 	addDone := make(chan error, 1)
 	go func() {
-		addDone <- m.AddTransaction(uint(conway.EraIdConway), secondTx)
+		addDone <- m.AddTransaction(context.Background(), uint(conway.EraIdConway), secondTx)
 	}()
 	require.NoError(
 		t,
@@ -3736,7 +3737,7 @@ func TestMempool_RevalidationStopsAfterBoundedGenerationRetries(t *testing.T) {
 	defer m.Stop(context.Background())
 	require.NoError(
 		t,
-		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 
 	validator.stale.Store(true)
@@ -3760,7 +3761,7 @@ func TestMempool_RevalidationJournalOverflowLeavesLiveStateUntouched(
 	defer m.Stop(context.Background())
 	require.NoError(
 		t,
-		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 	firstHash := m.Transactions()[0].Hash
 	m.revalidationJournalCap = 1
@@ -3777,7 +3778,7 @@ func TestMempool_RevalidationJournalOverflowLeavesLiveStateUntouched(
 	m.RemoveTransaction(firstHash)
 	secondTx, err := hex.DecodeString(testTxWithValidityStartHex)
 	require.NoError(t, err)
-	require.NoError(t, m.AddTransaction(uint(conway.EraIdConway), secondTx))
+	require.NoError(t, m.AddTransaction(context.Background(), uint(conway.EraIdConway), secondTx))
 
 	close(validator.release)
 	require.ErrorIs(
@@ -3802,7 +3803,7 @@ func TestMempool_StopContinuesDuringRevalidation(t *testing.T) {
 	m := newTestMempoolWithValidator(t, validator)
 	require.NoError(
 		t,
-		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 
 	validator.blockNextSession()
@@ -3846,7 +3847,7 @@ func TestMempool_ReadsAndConsumerRegistrationProceedDuringAdmissionValidation(
 
 	addDone := make(chan error, 1)
 	go func() {
-		addDone <- m.AddTransaction(uint(conway.EraIdConway), txBytes)
+		addDone <- m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	}()
 	dingotestutil.RequireReceive(
 		t,
@@ -4268,7 +4269,7 @@ func TestOverlayRebuildOnChainUpdate(t *testing.T) {
 
 	// Add the real TX via AddTransaction
 	txBytes := getTestTxBytes(t)
-	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err, "real TX should be accepted")
 
 	// Verify TX is in mempool
@@ -4309,7 +4310,7 @@ func TestRebuildOverlayReturnsErrorOnNilValidator(t *testing.T) {
 // transaction, and the API surfaces have to answer the two differently.
 func TestAddTransactionReturnsErrNilValidator(t *testing.T) {
 	m := &Mempool{}
-	err := m.AddTransaction(0, nil)
+	err := m.AddTransaction(context.Background(), 0, nil)
 	require.ErrorIs(t, err, ErrNilValidator)
 }
 
@@ -4665,7 +4666,7 @@ func TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget(
 	})
 	require.NoError(
 		t,
-		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 	invalidHash := m.Transactions()[0].Hash
 
