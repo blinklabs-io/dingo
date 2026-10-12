@@ -312,8 +312,40 @@ func TestGenesisShouldApplyIngressRejectsWallClockStalePeer(t *testing.T) {
 		"headers from a wall-clock-stale peer are admitted to the ledger")
 	// Control: honest peers are unaffected.
 	assert.True(t, cs.ShouldApplyIngress(honest[0]))
-	// Unknown peers are not gated by staleness.
-	assert.True(t, cs.ShouldApplyIngress(corrConn(99)))
+}
+
+func TestGenesisShouldApplyIngressRejectsPeerWhoseTipWasNotAccepted(
+	t *testing.T,
+) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:               true,
+		SecurityParam:             20,
+		GenesisWindowSlots:        100,
+		MaxTrackedPeers:           1,
+		DisableEventSubscriptions: true,
+		WallClockSlot: func() (uint64, bool) {
+			return 2000, true
+		},
+	})
+	cs.SetLocalTip(genesisTip(1000, "local", 100))
+	incumbent := corrConn(1)
+	require.True(t, cs.updatePeerTipObserved(
+		incumbent,
+		genesisTip(2000, "incumbent-tip", 200),
+		genesisTip(1500, "incumbent", 150),
+		nil,
+	))
+	require.Equal(t, &incumbent, cs.SelectBestChain())
+
+	rejected := corrConn(2)
+	require.False(t, cs.updatePeerTipObserved(
+		rejected,
+		genesisTip(2000, "rejected-tip", 201),
+		genesisTip(1510, "rejected", 151),
+		nil,
+	), "fixture: the selector must reject a peer it cannot track")
+	assert.False(t, cs.ShouldApplyIngress(rejected))
 }
 
 // Control: the gate is inactive without a wall clock and outside Genesis mode.

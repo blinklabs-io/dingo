@@ -1869,6 +1869,9 @@ func (n *Node) cleanupFailedStartup(started []func()) {
 	if n.cancel != nil {
 		n.cancel()
 	}
+	// The chain selector may still be unwinding after cancellation. Withdraw
+	// the ledger before the rollback stack closes it.
+	n.wallClockLedger.Store(nil)
 	for _, stop := range slices.Backward(started) {
 		stop()
 	}

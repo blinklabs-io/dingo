@@ -5757,7 +5757,7 @@ func TestChainsyncClientRollForwardWithholdsWallClockStalePeer(t *testing.T) {
 	freshHeader := newTestBlockHeader(101, 1, 0xbb)
 	freshTip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(wall, []byte("fresh-tip")),
-		BlockNumber: 5000,
+		BlockNumber: 3,
 	}
 	require.NoError(t, o.chainsyncClientRollForward(
 		ochainsync.CallbackContext{ConnectionId: fresh},

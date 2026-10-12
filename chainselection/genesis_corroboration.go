@@ -231,17 +231,22 @@ func (cs *ChainSelector) ShouldApplyIngress(
 ) bool {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
+	peerTip := cs.peerTips[connId]
 	// A peer whose advertised tip is older than the wall clock by more than a
 	// Genesis window serves an abandoned chain. Its headers must not enter the
 	// ledger's shared header queue, where they would outlive its selection and
 	// make honest peers' headers look like a persistent fork.
-	if cs.advertisedTipStaleLocked(cs.peerTips[connId]) {
-		return false
+	if _, active := cs.staleTipRuleWallSlotLocked(); active {
+		// Tip observation is ordered before this gate. If admission rejected
+		// that observation, there is no tip against which to apply the stale
+		// bound, so accepting the header would bypass the rule.
+		if peerTip == nil || cs.advertisedTipStaleLocked(peerTip) {
+			return false
+		}
 	}
 	if !cs.genesisCorroborationActiveLocked() {
 		return true
 	}
-	peerTip := cs.peerTips[connId]
 	if peerTip == nil {
 		return false
 	}

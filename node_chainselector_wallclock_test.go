@@ -18,6 +18,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,6 +34,22 @@ func TestBuildChainSelectorConfigWallClockSlot(t *testing.T) {
 	slot, ok := cfg.WallClockSlot()
 	assert.False(t, ok)
 	assert.Zero(t, slot)
+}
+
+func TestCleanupFailedStartupWithdrawsWallClockLedgerBeforeClose(
+	t *testing.T,
+) {
+	t.Parallel()
+	n := &Node{}
+	n.wallClockLedger.Store(&ledger.LedgerState{})
+	closed := false
+	n.startupLifecycleMu.Lock()
+	n.cleanupFailedStartup([]func(){func() {
+		closed = true
+		assert.Nil(t, n.wallClockLedger.Load())
+	}})
+
+	assert.True(t, closed)
 }
 
 // The chain selector outlives a live Truncate or Restore and is never rebuilt,

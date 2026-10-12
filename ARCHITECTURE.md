@@ -5450,12 +5450,14 @@ like a persistent fork. The gate reads the peer's tracked tip, so while the
 rule can decide (`ChainSelector.GenesisStaleTipRuleActive`) node composition
 observes tip and rollback updates synchronously, before the gate runs, as it
 does for corroboration; an asynchronous observation would let a new stale
-peer's first headers through. The bound is the wall clock, not a count of
+peer's first headers through. A peer that remains unknown because that
+synchronous observation was rejected is denied by the gate. The bound is the wall clock, not a count of
 advertised tips: those are unverified, and colluding connections cannot make
 an honest peer's live tip older than the wall clock. The wall-clock slot comes from
 `ChainSelectorConfig.WallClockSlot`, which node composition wires to the
 current `LedgerState.CurrentSlot` through an atomic that follows live
-Restore/Truncate; the rule is inactive while that hook is unset or reports no
+Restore/Truncate and is withdrawn before live-lifecycle or startup-rollback
+cleanup closes the ledger; the rule is inactive while that hook is unset or reports no
 slot, and outside Genesis mode. It deliberately uses the extrapolated
 `CurrentSlot` rather than `WallClockSlotFromConfirmedHistory`: during catch-up
 the wall clock lies past the confirmed history's forecast horizon, which is
