@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"math"
 	"strconv"
 	"strings"
@@ -111,8 +112,8 @@ func TestDeltaApplyTransactionIndexWidth(t *testing.T) {
 		delta := newTransactionEventTestDelta(t, 6, index)
 		defer delta.Release()
 
-		txn := db.Transaction(true)
-		require.NoError(t, delta.apply(ls, txn))
+		txn := db.Transaction(context.Background(), true)
+		require.NoError(t, delta.apply(context.Background(), ls, txn))
 		require.NoError(t, txn.Rollback())
 	})
 
@@ -123,10 +124,10 @@ func TestDeltaApplyTransactionIndexWidth(t *testing.T) {
 		delta := newTransactionEventTestDelta(t, 7, index)
 		defer delta.Release()
 
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		require.ErrorContains(
 			t,
-			delta.apply(ls, txn),
+			delta.apply(context.Background(), ls, txn),
 			"transaction index out of range",
 		)
 		require.NoError(t, txn.Rollback())
