@@ -63,3 +63,22 @@ func TestNormalizeCBORRejectsTrailingBytes(t *testing.T) {
 		t.Fatal("NormalizeCBOR accepted trailing bytes")
 	}
 }
+
+func TestNormalizeCBORRejectsInvalidUTF8Text(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{
+		"61ff",         // Invalid UTF-8 in a definite text string.
+		"7f61c261a2ff", // Each chunk must be valid UTF-8 on its own.
+	} {
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+			data, err := hex.DecodeString(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := NormalizeCBOR(data); err == nil {
+				t.Fatalf("NormalizeCBOR(%s) accepted invalid UTF-8 text", input)
+			}
+		})
+	}
+}

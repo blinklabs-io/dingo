@@ -94,6 +94,11 @@ func (s *cborValue) UnmarshalCBOR(data []byte) error {
 		if _, err := cbor.Decode(items[1], &s.Native); err != nil {
 			return fmt.Errorf("decode native script: %w", err)
 		}
+		if err := common.ValidateNativeScriptConstructors(
+			[]common.NativeScript{s.Native}, 5,
+		); err != nil {
+			return fmt.Errorf("validate Conway native script: %w", err)
+		}
 	case common.ScriptRefTypePlutusV1, common.ScriptRefTypePlutusV2, common.ScriptRefTypePlutusV3:
 		if _, err := cbor.Decode(items[1], &s.Script); err != nil {
 			return fmt.Errorf("decode Plutus script bytes: %w", err)

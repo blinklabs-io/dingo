@@ -447,9 +447,7 @@ func (s *Server) handleConstructionPayloads(
 				))
 				return
 			}
-			// Validate hex and length before calling
-			// NewShelleyTransactionInput, which panics
-			// on invalid input.
+			// Validate the hash before constructing the input.
 			hashBytes, err := hex.DecodeString(
 				parts[0],
 			)

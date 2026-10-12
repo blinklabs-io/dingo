@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"unicode/utf8"
 )
 
 const maxCBORDepth = 1024
@@ -130,6 +131,9 @@ func (n *cborNormalizer) string(head cborHead, depth int) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
+			if head.major == 3 && !utf8.Valid(part) {
+				return nil, errors.New("CBOR text chunk contains invalid UTF-8")
+			}
 			payload = append(payload, part...)
 		}
 		n.off++
@@ -137,6 +141,9 @@ func (n *cborNormalizer) string(head cborHead, depth int) ([]byte, error) {
 		part, err := n.readBytes(head.argument)
 		if err != nil {
 			return nil, err
+		}
+		if head.major == 3 && !utf8.Valid(part) {
+			return nil, errors.New("CBOR text string contains invalid UTF-8")
 		}
 		payload = part
 	}

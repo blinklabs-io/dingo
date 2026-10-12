@@ -14,7 +14,8 @@ func TestConwayNativeScriptRejectsDijkstraConstructor(t *testing.T) {
 	raw, err := cbor.Encode(common.NativeScriptRequireGuard{
 		Type: 6,
 		Credential: common.Credential{
-			CredType: common.CredentialTypeAddrKeyHash,
+			CredType:   common.CredentialTypeAddrKeyHash,
+			Credential: common.CredentialHash{0x01},
 		},
 	})
 	if err != nil {
@@ -22,6 +23,16 @@ func TestConwayNativeScriptRejectsDijkstraConstructor(t *testing.T) {
 	}
 	if _, err := reencode("native_script", raw); err == nil {
 		t.Fatal("accepted a Dijkstra native script constructor in Conway")
+	}
+	script, err := cbor.Encode([]any{
+		common.ScriptRefTypeNativeScript,
+		cbor.RawMessage(raw),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reencode("script", script); err == nil {
+		t.Fatal("accepted a Dijkstra native script constructor in a Conway script")
 	}
 }
 

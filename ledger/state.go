@@ -6851,7 +6851,11 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 	}
 }
 
-func isByronMainBodyValidationError(err error) bool {
+func isByronBlockBodyValidationError(blockType uint, err error) bool {
+	if blockType != ledger.BlockTypeByronMain &&
+		blockType != ledger.BlockTypeByronEbb {
+		return false
+	}
 	return errors.Is(err, byron.ErrBodyProofMismatch) ||
 		errors.Is(err, byron.ErrMalformedBodyProof) ||
 		errors.Is(err, byron.ErrInvalidPayload) ||
@@ -6906,8 +6910,7 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 					raw.Slot,
 					err,
 				)
-				if raw.Type == ledger.BlockTypeByronMain &&
-					isByronMainBodyValidationError(err) {
+				if isByronBlockBodyValidationError(raw.Type, err) {
 					return nil, &headerValidationError{
 						BlockPoint: ocommon.NewPoint(raw.Slot, raw.Hash),
 						Cause:      decodeErr,
@@ -7039,8 +7042,7 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 				"error", decodeErr,
 			)
 			retErr = fmt.Errorf("decode block: %w", decodeErr)
-			if item.BlockType() == ledger.BlockTypeByronMain &&
-				isByronMainBodyValidationError(decodeErr) {
+			if isByronBlockBodyValidationError(item.BlockType(), decodeErr) {
 				tip := item.Tip()
 				retErr = &headerValidationError{
 					BlockPoint: tip.Point,
@@ -9005,6 +9007,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// any further work. Honest chains always agree with the checkpoints.
 	if err := ls.validateBlockCheckpoint(block); err != nil {
 		return nil, err
+	}
+	if err := validateTransactionOutputIndexes(block.Transactions()); err != nil {
+		return nil, fmt.Errorf("validate block transaction output indexes: %w", err)
 	}
 	// Reject blocks whose header protocol major version runs more than
 	// one ahead of current pparams. Skipped on testnets pre-Dijkstra
@@ -14038,6 +14043,15 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 						err,
 					)
 				}
+				if err := validateTransactionOutputIndexes(
+					[]lcommon.Transaction{tx},
+				); err != nil {
+					return fmt.Errorf(
+						"validate leios endorser transaction %d output indexes: %w",
+						i,
+						err,
+					)
+				}
 				// applyTx stages account effects in the session's write
 				// transaction, so no separate account overlay is passed.
 				if err := validate(tx, consumed, created, nil); err != nil {
@@ -14093,6 +14107,9 @@ func (ls *LedgerState) validateTxCore(
 	tx lcommon.Transaction,
 	buildLV func(txn *database.Txn) *LedgerView,
 ) error {
+	if err := validateTransactionOutputIndexes([]lcommon.Transaction{tx}); err != nil {
+		return fmt.Errorf("validate transaction output indexes: %w", err)
+	}
 	snapshot := ls.txValidationSnapshot()
 
 	validationEra, pp, isCurrentEraPParams, err := snapshot.validationContext(tx)
