@@ -2929,7 +2929,7 @@ does not keep serving as if it were valid, without writing back to the row.
 `/pools/extended` needs the same classification for every active pool on a
 page, not one pool at a time, so it does not call `PoolMetadata` per pool
 (that would be one query per row). Instead `NodeAdapter.PoolsExtended`
-resolves every active pool's registered metadata URL in a single
+resolves only the requested page's registered metadata URLs in a single
 `MetadataStore.GetOffchainMetadataBatch` call, then applies the same
 pending/failed/fetched classification (including the `offchainFetchError`
 mapping and the read-time `ValidatePoolMetadata` fallback) as pure,

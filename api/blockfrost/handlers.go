@@ -563,7 +563,12 @@ func (b *Blockfrost) handleAssetAddresses(
 		)
 		return
 	}
-	holders, total, err := b.node.AssetAddresses(policyID, assetName, params)
+	holders, total, err := b.node.AssetAddresses(
+		r.Context(),
+		policyID,
+		assetName,
+		params,
+	)
 	if err != nil {
 		if errors.Is(err, ErrAssetNotFound) {
 			writeError(
@@ -615,7 +620,7 @@ func (b *Blockfrost) handlePoolsRetiring(
 		writeError(w, http.StatusBadRequest, "Bad Request", errMsg)
 		return
 	}
-	pools, total, err := b.node.PoolsRetiring(params)
+	pools, total, err := b.node.PoolsRetiring(r.Context(), params)
 	if err != nil {
 		b.logger.Error(
 			"failed to list retiring pools",
@@ -859,7 +864,7 @@ func (b *Blockfrost) handleDReps(
 		}
 	}
 
-	items, total, err := b.node.DReps(params)
+	items, total, err := b.node.DReps(r.Context(), params)
 	if err != nil {
 		b.logger.Error(
 			"failed to list dreps",

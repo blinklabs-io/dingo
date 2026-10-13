@@ -877,7 +877,7 @@ func TestDRepsListAmountsIncludeActiveProposalDeposit(t *testing.T) {
 		),
 	)
 
-	items, total, err := adapter.DReps(DRepListParams{
+	items, total, err := adapter.DReps(context.Background(), DRepListParams{
 		Pagination: PaginationParams{
 			Count: 100,
 			Page:  1,

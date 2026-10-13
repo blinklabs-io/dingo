@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -59,6 +60,28 @@ func (s *malformedHashStore) GetRetiringPools(
 		return s.MetadataStore.GetRetiringPools(currentEpoch, txn)
 	}
 	return s.retiring, nil
+}
+
+func (s *malformedHashStore) GetRetiringPoolsPage(
+	currentEpoch uint64,
+	limit, offset int,
+	descending bool,
+	txn types.Txn,
+) ([]models.PoolRetiringRow, int, error) {
+	if s.retiring == nil {
+		return s.MetadataStore.GetRetiringPoolsPage(
+			currentEpoch, limit, offset, descending, txn,
+		)
+	}
+	rows := slices.Clone(s.retiring)
+	if descending {
+		slices.Reverse(rows)
+	}
+	total := len(rows)
+	if offset >= total {
+		return []models.PoolRetiringRow{}, total, nil
+	}
+	return rows[offset:min(offset+limit, total)], total, nil
 }
 
 func (s *malformedHashStore) GetActivePoolKeyHashes(
@@ -135,6 +158,19 @@ func TestPoolsExtendedPaginatesBeforeEnrichment(t *testing.T) {
 		require.Equal(t, 100, total)
 		require.Zero(t, store.stakePoolCount)
 		require.Equal(t, 100, store.pageOffset)
+	})
+
+	t.Run("cancelled request", func(t *testing.T) {
+		t.Parallel()
+		store := &malformedHashStore{}
+		adapter := newMalformedHashAdapter(t, store, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, _, err := adapter.PoolsExtended(
+			ctx,
+			PaginationParams{Count: 1, Page: 1, Order: PaginationOrderAsc},
+		)
+		require.ErrorIs(t, err, context.Canceled)
 	})
 }
 
@@ -270,7 +306,7 @@ func TestBlockfrostRejectsMalformedStoredHashes(t *testing.T) {
 				Epoch:       5,
 			}}},
 			call: func(_ *testing.T, a *NodeAdapter) error {
-				_, _, err := a.PoolsRetiring(page)
+				_, _, err := a.PoolsRetiring(context.Background(), page)
 				return err
 			},
 			want: "retiring pool key hash",

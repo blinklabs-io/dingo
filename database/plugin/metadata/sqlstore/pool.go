@@ -1455,15 +1455,7 @@ WHERE NOT EXISTS (
 	)
 }
 
-func (s *Store) GetRetiringPools(
-	currentEpoch uint64,
-	txn types.Txn,
-) ([]models.PoolRetiringRow, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := db.QueryContext(ctx, `
+const retiringPoolsCTE = `
 WITH latest_reg AS (
     SELECT pr.pool_key_hash, pr.added_slot,
            CASE WHEN pr.certificate_id = 0 THEN 1 ELSE 0 END synth,
@@ -1496,7 +1488,9 @@ latest_ret AS (
     LEFT JOIN certs c ON c.id = pt.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
 )
-SELECT r.pool_key_hash, r.epoch
+`
+
+const retiringPoolsFrom = `
 FROM latest_ret r
 LEFT JOIN latest_reg g
   ON g.pool_key_hash = r.pool_key_hash AND g.rn = 1
@@ -1510,15 +1504,14 @@ WHERE r.rn = 1 AND r.epoch > ?
              = (g.added_slot, g.synth, g.block_index, g.cert_index)
           AND r.synth = 1
       )
-  )
-ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index`,
-		currentEpoch,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get retiring pools: %w", err)
-	}
+  )`
+
+const retiringPoolsOrder = `
+ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index`
+
+func scanRetiringPools(rows *sql.Rows, capacity int) ([]models.PoolRetiringRow, error) {
 	defer rows.Close()
-	ret := []models.PoolRetiringRow{}
+	ret := make([]models.PoolRetiringRow, 0, capacity)
 	for rows.Next() {
 		var row models.PoolRetiringRow
 		if err := rows.Scan(&row.PoolKeyHash, &row.Epoch); err != nil {
@@ -1527,6 +1520,67 @@ ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index`,
 		ret = append(ret, row)
 	}
 	return ret, rows.Err()
+}
+
+func (s *Store) GetRetiringPools(
+	currentEpoch uint64,
+	txn types.Txn,
+) ([]models.PoolRetiringRow, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(retiringPoolsCTE+"SELECT r.pool_key_hash, r.epoch"+
+			retiringPoolsFrom+retiringPoolsOrder),
+		currentEpoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get retiring pools: %w", err)
+	}
+	return scanRetiringPools(rows, 0)
+}
+
+func (s *Store) GetRetiringPoolsPage(
+	currentEpoch uint64,
+	limit, offset int,
+	descending bool,
+	txn types.Txn,
+) ([]models.PoolRetiringRow, int, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, 0, err
+	}
+	var total int
+	if err := db.QueryRowContext(
+		ctx,
+		s.dialect.Rebind(retiringPoolsCTE+"SELECT COUNT(*)"+retiringPoolsFrom),
+		currentEpoch,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count retiring pools: %w", err)
+	}
+	if limit < 1 || offset < 0 || offset >= total {
+		return []models.PoolRetiringRow{}, total, nil
+	}
+	order := retiringPoolsOrder
+	if descending {
+		order = `
+ORDER BY r.epoch DESC, r.added_slot DESC,
+         r.block_index DESC, r.cert_index DESC`
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(retiringPoolsCTE+
+			"SELECT r.pool_key_hash, r.epoch"+retiringPoolsFrom+order+
+			" LIMIT ? OFFSET ?"),
+		currentEpoch, limit, offset,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("get retiring pool page: %w", err)
+	}
+	ret, err := scanRetiringPools(rows, min(limit, total-offset))
+	return ret, total, err
 }
 
 func (s *Store) GetActivePoolKeyHashes(

@@ -615,3 +615,27 @@ func testBatchedTransactionWrites(t *testing.T, store *Store) {
 		require.NoError(t, txn.Commit())
 	}
 }
+
+func TestPostgresDrepAmountPageAdjustmentTyping(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	store := newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema)
+	credential := bytes.Repeat([]byte{0xd7}, 28)
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
+		Credential: credential,
+		AddedSlot:  1,
+		Active:     true,
+	}))
+	for _, adjustments := range [][]models.DrepPowerAdjustment{
+		nil,
+		{{Credential: credential, Amount: 1}},
+	} {
+		page, total, err := store.GetDrepsPage(models.DrepListPageQuery{
+			OrderByAmount:    true,
+			PowerAdjustments: adjustments,
+			Limit:            1,
+		}, nil)
+		require.NoError(t, err)
+		require.Equal(t, 1, total)
+		require.Len(t, page, 1)
+	}
+}
