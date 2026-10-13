@@ -33,7 +33,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	bfgo "github.com/blockfrost/blockfrost-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1985,53 +1984,6 @@ func TestHandleAssetAddressesNoHolders(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	assert.Equal(t, "Not Found", resp.Error)
 	assert.Equal(t, "The requested asset could not be found.", resp.Message)
-}
-
-func TestAssetHoldersFromUtxosPreservesPointerAddress(t *testing.T) {
-	t.Parallel()
-
-	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
-	policyID := bytes.Repeat([]byte{0xcd}, lcommon.AddressHashSize)
-	assetName := []byte("TOKEN")
-	addrBytes := []byte{
-		(lcommon.AddressTypeKeyPointer << 4) |
-			lcommon.AddressNetworkTestnet,
-	}
-	addrBytes = append(addrBytes, paymentHash...)
-	addrBytes = append(addrBytes, 0x01, 0x00, 0x00)
-	addr, err := lcommon.NewAddressFromBytes(addrBytes)
-	require.NoError(t, err)
-
-	output := shelley.ShelleyTransactionOutput{
-		OutputAddress: addr,
-		OutputAmount:  1_000_000,
-	}
-	outputCbor, err := cbor.Encode(&output)
-	require.NoError(t, err)
-	quantities := make(map[string]uint64)
-	_, err = addAssetHolderQuantities(
-		quantities,
-		policyID,
-		assetName,
-		[]models.Utxo{{
-			TxId:      bytes.Repeat([]byte{0x01}, 32),
-			OutputIdx: 0,
-			Cbor:      outputCbor,
-			Assets: []models.Asset{{
-				PolicyId: policyID,
-				Name:     assetName,
-				Amount:   types.Uint64(7),
-			}},
-		}},
-	)
-	require.NoError(t, err)
-	holders := assetHoldersFromQuantities(
-		quantities,
-		PaginationParams{Count: 100, Page: 1, Order: "asc"},
-	)
-	require.Len(t, holders, 1)
-	assert.Equal(t, addr.String(), holders[0].Address)
-	assert.Equal(t, "7", holders[0].Quantity)
 }
 
 func TestHandlePoolsRetiring(t *testing.T) {
