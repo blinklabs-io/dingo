@@ -10039,10 +10039,13 @@ submits the transaction nor requires it to be fully valid and balanced.
 Evaluation resolves inputs from the ledger's own UTxO set, so a non-empty
 `additionalUtxoSet` is rejected rather than silently ignored, and the
 `version` query parameter accepts only Blockfrost's default of `5`. The
-current router includes health/root, blocks,
-epochs/parameters, network/eras, genesis, assets, pools list, pools/extended,
-retiring pools, pool detail, pool metadata, governance DRep list and lookup, address
-summary, address UTxOs and transactions, metadata label JSON/CBOR,
+current router includes health/root, blocks (lookup, navigation, slot and
+epoch-slot lookup, transaction hashes and CBOR, affected addresses),
+epochs/parameters, network/eras, genesis, assets (lookup, listings, history,
+transactions, UTxOs, holders), scripts and datums, the mempool, pools list,
+pools/extended, retiring pools, pool detail, pool metadata, governance DRep list
+and lookup, address summary, extended details, totals, UTxOs (optionally of one
+asset) and transactions, metadata label JSON/CBOR,
 transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
 signers, and account/delegation/registration/reward/UTxOs/withdrawals/
 transactions endpoints. It uses an adapter pattern to translate between
@@ -10055,6 +10058,33 @@ Documented operations without a handler return `501`; unknown paths fall
 through to a catch-all `404` handler instead of the root document.
 `GET /addresses/{address}/transactions` honors the inclusive `from`/`to` block
 range through the same parser as the account endpoint.
+
+Go's `ServeMux` rejects two patterns that neither contains the other, so the
+routes whose literal segment overlaps a wildcard are served by one pattern that
+dispatches on the segment: `/blocks/{hash_or_number}/{section}` (with the
+literal `slot` of `/blocks/slot/{slot_number}`),
+`/assets/{asset}/{section}` (with the literal `policy` of
+`/assets/policy/{policy_id}`) and `/scripts/{script_hash}/{section}` (with the
+literal `datum` of `/scripts/datum/{datum_hash}`). An unknown section falls
+through to the catch-all. Block navigation walks the block index from the
+identified block, bounded by the page size; the transaction, CBOR and address
+listings of one block decode that block once and page its transactions, which
+the block size bounds. A block's addresses come from the decoded outputs plus
+the stored UTxOs its transactions consumed (collateral inputs and the
+collateral return for a transaction that failed phase 2). The mempool
+endpoints reach the pool through an optional read interface the submitter
+satisfies, so an ascending page reads only the prefix it needs from
+`TransactionsBounded`, a descending page and the address filter read the pool
+whole (its capacity bounds it), and a node whose submitter does not expose the
+pool answers 503. Mempool inputs resolve to an address only when they name a
+stored unspent output; the input of another mempool transaction is listed
+without one.
+
+The script redeemer and reference-UTxO listings, like the address, asset and
+transaction listings, need API storage mode. Their indexes (`redeemer_script`,
+`utxo_reference_script`) are written as transactions are applied, so a database
+populated before they existed lists only the transactions and outputs applied
+afterwards.
 
 The account UTxOs, withdrawals, and transactions endpoints resolve everything
 by stake credential rather than a single address. Account UTxOs reuse the
