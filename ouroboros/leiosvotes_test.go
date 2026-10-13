@@ -44,6 +44,7 @@ type handledPrototypeVote struct {
 
 type handledEb struct {
 	slot   uint64
+	rbHash lcommon.Blake2b256
 	ebHash lcommon.Blake2b256
 }
 
@@ -124,12 +125,27 @@ func (f *fakeLeiosVoteHandler) VotesByIds(
 
 func (f *fakeLeiosVoteHandler) HandleValidatedEndorserBlock(
 	slot uint64,
-	_ lcommon.Blake2b256,
+	rbHash lcommon.Blake2b256,
 	ebHash lcommon.Blake2b256,
 ) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.ebs = append(f.ebs, handledEb{slot: slot, ebHash: ebHash})
+	f.ebs = append(f.ebs, handledEb{
+		slot: slot, rbHash: rbHash, ebHash: ebHash,
+	})
+}
+
+func requireHandledEndorserBlock(
+	t *testing.T,
+	handler *fakeLeiosVoteHandler,
+	want handledEb,
+) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		handler.mu.Lock()
+		defer handler.mu.Unlock()
+		return len(handler.ebs) == 1 && handler.ebs[0] == want
+	}, time.Second, time.Millisecond)
 }
 
 func (f *fakeLeiosVoteHandler) RemoveConnection(connKey string) {
@@ -361,8 +377,13 @@ func TestLeiosFetchServerVotesRequestWithoutHandler(t *testing.T) {
 func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
 	t.Parallel()
 
-	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
-	o := newOuroboros(OuroborosConfig{EnableLeios: false})
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 1)
+	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: &fakeLeiosAnnouncementLedger{},
+	})
+	defer func() { require.NoError(t, o.Close()) }()
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
 
@@ -371,13 +392,17 @@ func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
 		o.storeLeiosEndorserBlock(
 			point,
 			blockRaw,
-			nil,
+			txsRaw,
 			leiosStoreAuthoritative,
 		),
 	)
-	require.Len(t, handler.ebs, 1)
-	assert.Equal(t, uint64(10), handler.ebs[0].slot)
-	assert.Equal(t, point.Hash, handler.ebs[0].ebHash.Bytes())
+	require.Empty(t, handler.ebs)
+	rbHash := announceTestEndorserBlock(
+		t, o, point.Slot, testEbHash(point), len(blockRaw),
+	)
+	requireHandledEndorserBlock(t, handler, handledEb{
+		slot: point.Slot, rbHash: rbHash, ebHash: testEbHash(point),
+	})
 }
 
 // A peer must not be able to make us vote for the same EB hash under a
@@ -398,8 +423,13 @@ func TestStoreLeiosEndorserBlockDifferentSlotOfSameHashStaysUnverifiedBeforeVote
 ) {
 	t.Parallel()
 
-	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
-	o := newOuroboros(OuroborosConfig{EnableLeios: false})
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 1)
+	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: &fakeLeiosAnnouncementLedger{},
+	})
+	defer func() { require.NoError(t, o.Close()) }()
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
 
@@ -408,10 +438,16 @@ func TestStoreLeiosEndorserBlockDifferentSlotOfSameHashStaysUnverifiedBeforeVote
 		o.storeLeiosEndorserBlock(
 			point,
 			blockRaw,
-			nil,
+			txsRaw,
 			leiosStoreAuthoritative,
 		),
 	)
+	rbHash := announceTestEndorserBlock(
+		t, o, point.Slot, testEbHash(point), len(blockRaw),
+	)
+	requireHandledEndorserBlock(t, handler, handledEb{
+		slot: point.Slot, rbHash: rbHash, ebHash: testEbHash(point),
+	})
 
 	otherSlotPoint := point
 	otherSlotPoint.Slot++
@@ -420,7 +456,7 @@ func TestStoreLeiosEndorserBlockDifferentSlotOfSameHashStaysUnverifiedBeforeVote
 		o.storeLeiosEndorserBlock(
 			otherSlotPoint,
 			blockRaw,
-			nil,
+			txsRaw,
 			leiosStorePeerOffered,
 		),
 	)
@@ -434,13 +470,10 @@ func TestStoreLeiosEndorserBlockDifferentSlotOfSameHashStaysUnverifiedBeforeVote
 		data.slotVerified,
 		"an unannounced occurrence at a different slot must not be trusted",
 	)
-	require.Len(
-		t,
-		handler.ebs,
-		1,
-		"the unverified second occurrence must not trigger a second vote",
-	)
-	assert.Equal(t, uint64(10), handler.ebs[0].slot)
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	require.Len(t, handler.ebs, 1,
+		"the unverified second occurrence must not trigger a second vote")
 }
 
 func TestLeiosAnnouncementBindsCompleteCachedBlockAtNewSlot(t *testing.T) {
@@ -448,7 +481,11 @@ func TestLeiosAnnouncementBindsCompleteCachedBlockAtNewSlot(t *testing.T) {
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 1)
 	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
-	o := newOuroboros(OuroborosConfig{EnableLeios: false})
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: &fakeLeiosAnnouncementLedger{},
+	})
+	defer func() { require.NoError(t, o.Close()) }()
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
 
@@ -466,9 +503,9 @@ func TestLeiosAnnouncementBindsCompleteCachedBlockAtNewSlot(t *testing.T) {
 		announcedPoint.Hash,
 	)
 	require.False(t, ok)
-	require.Len(t, handler.ebs, 1)
+	require.Empty(t, handler.ebs)
 
-	announceTestEndorserBlock(
+	rbHash := announceTestEndorserBlock(
 		t,
 		o,
 		announcedPoint.Slot,
@@ -484,8 +521,11 @@ func TestLeiosAnnouncementBindsCompleteCachedBlockAtNewSlot(t *testing.T) {
 	require.True(t, data.slotVerified)
 	require.NotEmpty(t, data.announcementHeaderRaw)
 	require.Equal(t, txsRaw, data.txsRaw)
-	require.Len(t, handler.ebs, 2)
-	assert.Equal(t, announcedPoint.Slot, handler.ebs[1].slot)
+	requireHandledEndorserBlock(t, handler, handledEb{
+		slot:   announcedPoint.Slot,
+		rbHash: rbHash,
+		ebHash: testEbHash(announcedPoint),
+	})
 }
 
 func TestLeiosAnnouncementCompletesExistingRelayIntent(t *testing.T) {
@@ -493,7 +533,11 @@ func TestLeiosAnnouncementCompletesExistingRelayIntent(t *testing.T) {
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 20, 1)
 	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
-	o := newOuroboros(OuroborosConfig{EnableLeios: false})
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: &fakeLeiosAnnouncementLedger{},
+	})
+	defer func() { require.NoError(t, o.Close()) }()
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
 
@@ -519,9 +563,9 @@ func TestLeiosAnnouncementCompletesExistingRelayIntent(t *testing.T) {
 	require.False(t, intent.slotVerified)
 	require.True(t, intent.relayOfferRequested)
 	require.Equal(t, "peer-a", intent.relayOfferSource)
-	require.Len(t, handler.ebs, 1)
+	require.Empty(t, handler.ebs)
 
-	announceTestEndorserBlock(
+	rbHash := announceTestEndorserBlock(
 		t,
 		o,
 		announcedPoint.Slot,
@@ -538,10 +582,13 @@ func TestLeiosAnnouncementCompletesExistingRelayIntent(t *testing.T) {
 	require.True(t, data.slotVerified)
 	require.NotEmpty(t, data.announcementHeaderRaw)
 	require.True(t, data.relayOfferRequested)
+	requireHandledEndorserBlock(t, handler, handledEb{
+		slot:   announcedPoint.Slot,
+		rbHash: rbHash,
+		ebHash: testEbHash(announcedPoint),
+	})
 	require.Equal(t, "peer-a", data.relayOfferSource)
 	require.Equal(t, txsRaw, data.txsRaw)
-	require.Len(t, handler.ebs, 2)
-	assert.Equal(t, announcedPoint.Slot, handler.ebs[1].slot)
 }
 
 func TestStoreLeiosEndorserBlockWithoutHandler(t *testing.T) {

@@ -752,13 +752,19 @@ func announceTestEndorserBlock(
 	slot uint64,
 	ebHash lcommon.Blake2b256,
 	ebSize int,
-) {
+) lcommon.Blake2b256 {
 	t.Helper()
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t, slot, ebHash, uint64(ebSize),
+	)
 	recordTestLeiosAnnouncement(
 		t,
 		o,
-		testDijkstraAnnouncementHeaderRawFor(t, slot, ebHash, uint64(ebSize)),
+		headerRaw,
 	)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+	return header.Hash()
 }
 
 func testEbHash(point ocommon.Point) lcommon.Blake2b256 {
@@ -1761,8 +1767,13 @@ func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
 ) {
 	t.Parallel()
 
-	point, blockRaw := testLeiosEndorserBlockRaw(t, 250)
-	o := newOuroboros(OuroborosConfig{EnableLeios: false})
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 250, 1)
+	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: &fakeLeiosAnnouncementLedger{},
+	})
+	defer func() { require.NoError(t, o.Close()) }()
 	votes := &lockProbingVoteHandler{
 		fakeLeiosVoteHandler: &fakeLeiosVoteHandler{},
 		o:                    o,
@@ -1772,7 +1783,7 @@ func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point,
 		blockRaw,
-		nil,
+		txsRaw,
 		leiosStorePeerOffered,
 	))
 
@@ -1782,6 +1793,8 @@ func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
 		testEbHash(point),
 		uint64(len(blockRaw)),
 	)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- recordTestLeiosAnnouncementNoFail(o, headerRaw)
@@ -1796,7 +1809,11 @@ func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
 				"releasing leiosAnnouncementsMu",
 		)
 	}
-	require.Len(t, votes.ebs, 1)
+	requireHandledEndorserBlock(t, votes.fakeLeiosVoteHandler, handledEb{
+		slot:   point.Slot,
+		rbHash: header.Hash(),
+		ebHash: testEbHash(point),
+	})
 }
 
 // fixedBlockRequester returns a fixed manifest body for every BlockRequest,
