@@ -34,7 +34,8 @@ func TestPoolRegistrationIdentityMigrationKeepsSyntheticReplayIdempotent(
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
 	db, err := sql.Open(
 		"sqlite",
-		"file:"+databasePath+"?_pragma=foreign_keys(1)",
+		"file:"+databasePath+"?_pragma=foreign_keys(1)&"+
+			"_pragma=journal_mode(MEMORY)&_pragma=synchronous(OFF)",
 	)
 	require.NoError(t, err)
 
