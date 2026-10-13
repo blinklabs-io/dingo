@@ -60,7 +60,7 @@ const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 // Mempool is the protocol-facing subset of the backend-neutral mempool. Keeping
 // this interface local prevents networking from depending on FIFO internals.
 type Mempool interface {
-	AddTransaction(txType uint, txBytes []byte) error
+	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 	Transactions() []mempool.MempoolTransaction
 	CapacityBytes() int64
 	AddConsumer(connId ouroboros.ConnectionId) mempool.RelayConsumer
@@ -215,8 +215,9 @@ type Ouroboros struct {
 	// any observed-tip, dedup, or ledger mutation. Resync timers recover the
 	// protocol cursor after a deliberate beyond-skew drop without recycling
 	// the connection; one earliest-onset timer is retained per connection.
-	chainsyncHeaderAdmission chainsyncHeaderAdmissionFunc
-	chainsyncHeaderSlotTime  func(uint64) (time.Time, error)
+	chainsyncHeaderBackpressure func(context.Context, int) error
+	chainsyncHeaderAdmission    chainsyncHeaderAdmissionFunc
+	chainsyncHeaderSlotTime     func(uint64) (time.Time, error)
 	// chainsyncLocalTipBlock returns the local tip's block number and the
 	// security parameter k. Tests override it without a LedgerState.
 	chainsyncLocalTipBlock func() (tipBlock, k uint64)
@@ -231,7 +232,7 @@ type Ouroboros struct {
 	// tests exercising a single protocol handler can override either seam
 	// directly instead of standing up a full LedgerState.
 	chainSelectionShouldVerifyHeaderCrypto func(slot uint64) bool
-	chainSelectionVerifyHeaderCrypto       func(header gledger.BlockHeader) error
+	chainSelectionVerifyHeaderCrypto       func(header gledger.BlockHeader) (uint64, error)
 	chainsyncScheduleAt                    chainsyncScheduleAtFunc
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
@@ -450,6 +451,9 @@ type OuroborosConfig struct {
 	// revokes corroboration is not yet processed). Returning false (or nil hook)
 	// falls back to the async PeerTipUpdateEvent path.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
+	// ChainsyncObserveAwaitReply records the peer's explicit protocol-idle
+	// frontier. It runs after gouroboros fences preceding pipelined updates.
+	ChainsyncObserveAwaitReply func(ouroboros.ConnectionId, ocommon.Point)
 	// ChainsyncSyncTarget snapshots the policy-bounded target for one observed
 	// peer-tip event. Its result is carried with that event into ledger
 	// admission; ledger must not reread mutable selector state.
@@ -615,6 +619,11 @@ func NewOuroboros(cfg OuroborosConfig) (*Ouroboros, error) {
 	if err := cfg.validateDependencies(); err != nil {
 		return nil, err
 	}
+	maxClients := cfg.ChainsyncState.MaxClients()
+	admittedHeadroom := ledger.ChainsyncEventBufferSize + 1 + maxClients
+	if err := ledger.ValidateChainsyncHeaderCapacity(admittedHeadroom); err != nil {
+		return nil, fmt.Errorf("invalid chainsync capacity: %w", err)
+	}
 	return newOuroboros(cfg), nil
 }
 
@@ -710,6 +719,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	o.blockfetchRangeBytes = func(ocommon.Point, ocommon.Point) uint64 { return 0 }
 	if o.ledgerState != nil {
 		o.blockfetchRangeBytes = o.ledgerState.BlockfetchRangeExpectedBytes
+		o.chainsyncHeaderBackpressure = o.ledgerState.AwaitChainsyncHeaderCapacity
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
 		o.chainsyncLocalTipBlock = func() (uint64, uint64) {
@@ -717,7 +727,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			return o.ledgerState.Tip().BlockNumber, uint64(k)
 		}
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
-		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCrypto
+		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCryptoWithGeneration
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond

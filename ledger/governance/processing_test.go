@@ -175,7 +175,9 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 				0,
 				100,
 				20,
+				testConwayProtocolParameters(),
 				db,
+				nil,
 				nil,
 			)
 			stored, getErr := db.GetGovernanceProposal(context.Background(),
@@ -205,22 +207,24 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 func TestGovernanceEffectsRejectOverwideCostModelLanguageIDs(t *testing.T) {
 	t.Parallel()
 
+	// These paths isolate cost-model key width from the enclosing transaction rule.
+	validated := true
 	type applyFunc func(*database.Database, lcommon.Transaction) error
 	paths := map[string]applyFunc{
 		"persistence core": func(db *database.Database, tx lcommon.Transaction) error {
 			return persistGovernanceProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, false, db, nil)
 		},
 		"live proposals": func(db *database.Database, tx lcommon.Transaction) error {
-			return ProcessProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil)
+			return ProcessProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, nil, db, nil, &validated)
 		},
 		"historical proposals": func(db *database.Database, tx lcommon.Transaction) error {
-			return ProcessHistoricalProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil)
+			return ProcessHistoricalProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, nil, db, nil, &validated)
 		},
 		"live transaction effects": func(db *database.Database, tx lcommon.Transaction) error {
-			return ProcessTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, 20, 9, db, nil)
+			return ProcessTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, 20, 9, db, nil, nil, &validated)
 		},
 		"historical transaction effects": func(db *database.Database, tx lcommon.Transaction) error {
-			return ProcessHistoricalTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil)
+			return ProcessHistoricalTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil, nil, &validated)
 		},
 	}
 	rewardAccount, err := lcommon.NewAddressFromParts(
@@ -491,7 +495,7 @@ func TestPV9DRepRegistrationUsesProposalDormancyReset(t *testing.T) {
 		if err := ProcessDRepActivityCertificates(context.Background(), tx, point, 100, 20, 9, db, txn); err != nil {
 			return err
 		}
-		return ProcessProposals(context.Background(), tx, point, 0, 100, 20, db, txn)
+		return ProcessProposals(context.Background(), tx, point, 0, 100, 20, nil, db, txn, nil)
 	}))
 
 	drep, err := db.GetDrepByCredential(context.Background(), 0, drepCredential, true, nil)

@@ -15,8 +15,13 @@
 package dingo
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -31,8 +36,15 @@ func TestNewTokenRegistrySyncSendsConfiguredHeaders(t *testing.T) {
 	t.Parallel()
 
 	auth := make(chan string, 1)
-	server := httptest.NewServer(
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	var manifest []byte
+	server := httptest.NewTLSServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/manifest" {
+				_, _ = w.Write(manifest)
+				return
+			}
 			select {
 			case auth <- r.Header.Get("Authorization"):
 			default:
@@ -41,6 +53,22 @@ func TestNewTokenRegistrySyncSendsConfiguredHeaders(t *testing.T) {
 		}),
 	)
 	t.Cleanup(server.Close)
+	payload, err := json.Marshal(map[string]any{
+		"version":       1,
+		"sequence":      1,
+		"archiveUrl":    server.URL + "/archive",
+		"archiveBytes":  0,
+		"archiveDigest": strings.Repeat("0", 64),
+	})
+	require.NoError(t, err)
+	message := append([]byte("dingo-token-registry-manifest-v1\x00"), payload...)
+	manifest, err = json.Marshal(map[string]string{
+		"payload": base64.RawURLEncoding.EncodeToString(payload),
+		"signature": base64.RawURLEncoding.EncodeToString(
+			ed25519.Sign(privateKey, message),
+		),
+	})
+	require.NoError(t, err)
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
@@ -48,7 +76,10 @@ func TestNewTokenRegistrySyncSendsConfiguredHeaders(t *testing.T) {
 		db: db,
 		config: Config{
 			tokenRegistry: TokenRegistryConfig{
-				SourceURL:             server.URL,
+				HTTPClient:            server.Client(),
+				SourceURL:             server.URL + "/archive",
+				ManifestURL:           server.URL + "/manifest",
+				TrustedManifestKey:    hex.EncodeToString(publicKey),
 				AllowPrivateAddresses: true,
 				Headers:               map[string]string{"Authorization": "Bearer node"},
 			},

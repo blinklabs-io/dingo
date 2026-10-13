@@ -125,7 +125,7 @@ func drepInactivityFromPParams(
 
 // TransactionSubmitter accepts raw transaction CBOR for mempool admission.
 type TransactionSubmitter interface {
-	AddTransaction(txType uint, txBytes []byte) error
+	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 }
 
 // transactionEvaluator evaluates a decoded transaction's scripts against the
@@ -3023,6 +3023,13 @@ func protocolParamsInfoFromNative(
 		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolVersion.Major, pp.ProtocolVersion.Minor)
 		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs, pp.CostModels)
 		fillConwayPParamsInfo(&info, pp)
+	case *dijkstra.DijkstraProtocolParameters:
+		// Blockfrost's epoch parameters carry no Dijkstra-only field, so the
+		// embedded Conway parameters (with every cost model) are the view.
+		return protocolParamsInfoFromNative(
+			&pp.ConwayProtocolParameters,
+			epoch,
+		)
 	default:
 		return ProtocolParamsInfo{}, fmt.Errorf(
 			"unsupported protocol parameters type: %T",
@@ -4040,6 +4047,7 @@ func isLedgerStorageFailure(err error) bool {
 
 // TransactionSubmit submits raw signed transaction CBOR to the mempool.
 func (a *NodeAdapter) TransactionSubmit(
+	ctx context.Context,
 	txCbor []byte,
 ) (string, error) {
 	if a.submitter == nil {
@@ -4061,7 +4069,7 @@ func (a *NodeAdapter) TransactionSubmit(
 			ErrInvalidTransaction,
 		)
 	}
-	if err := a.submitter.AddTransaction(txType, txCbor); err != nil {
+	if err := a.submitter.AddTransaction(ctx, txType, txCbor); err != nil {
 		if _, ok := errors.AsType[*mempool.MempoolFullError](err); ok {
 			return "", fmt.Errorf(
 				"submit transaction to mempool: %w: %w",

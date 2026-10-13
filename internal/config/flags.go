@@ -147,6 +147,23 @@ var flagSpecs = []flagSpec{
 		"tracing",
 		"enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)",
 	),
+	stringFlag(
+		"TracingEndpoint",
+		"tracing-endpoint",
+		"",
+		"OTLP HTTP collector URL for spans; setting it enables tracing (default: OTEL_EXPORTER_OTLP_* env vars)",
+	),
+	stringFlag(
+		"TracingServiceName",
+		"tracing-service-name",
+		"",
+		"service.name resource attribute on exported spans",
+	),
+	float64Flag(
+		"TracingSampleRatio",
+		"tracing-sample-ratio",
+		"fraction of new traces sampled, from 0 to 1",
+	),
 	boolFlag(
 		"TracingStdout",
 		"tracing-stdout",
@@ -313,6 +330,18 @@ var flagSpecs = []flagSpec{
 		"",
 		"CIP-26 token registry tarball URL (empty = select by network)",
 	),
+	stringFlag(
+		"TokenRegistry.ManifestURL",
+		"token-registry-manifest-url",
+		"",
+		"HTTPS URL of the signed CIP-26 snapshot manifest",
+	),
+	stringFlag(
+		"TokenRegistry.TrustedManifestKey",
+		"token-registry-trusted-manifest-key",
+		"",
+		"hex-encoded Ed25519 key trusted to sign token registry manifests",
+	),
 	durationFlag(
 		"TokenRegistry.Interval",
 		"token-registry-interval",
@@ -368,6 +397,11 @@ var flagSpecs = []flagSpec{
 		"TokenRegistry.AllowPrivateAddresses",
 		"token-registry-allow-private-addresses",
 		"allow token registry sync from private, loopback, and link-local addresses",
+	),
+	boolFlag(
+		"TokenRegistry.AllowRollback",
+		"token-registry-allow-rollback",
+		"allow a signed token registry manifest below the stored sequence",
 	),
 	boolFlag(
 		"Midnight.Enabled",

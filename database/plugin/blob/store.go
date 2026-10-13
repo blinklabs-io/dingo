@@ -117,6 +117,12 @@ type BlobStore interface {
 	Sync() error
 }
 
+// WriteConflictDetector is implemented by stores whose write transactions
+// detect overlapping writes made after their read snapshot was opened.
+type WriteConflictDetector interface {
+	DetectsWriteConflicts() bool
+}
+
 // TxnBudget is an optional extension for blob stores whose transactions hold
 // only a bounded number of staged mutations.
 //

@@ -45,6 +45,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -64,6 +65,7 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // cleanupConsumedUtxosInterval is the period between consumed-UTxO cleanup
@@ -1493,6 +1495,7 @@ type LedgerState struct {
 	// activeBlockfetchRequestDone and shadowBlockfetchRequestDone are the
 	// blockfetchRequestsInFlight entries of the active batch's and the shadow
 	// peer's requests, so teardown releases those requests by identity.
+	chainsyncCapacityChanged            chan struct{}
 	activeBlockfetchRequestDone         chan struct{}
 	shadowBlockfetchRequestDone         chan struct{}
 	blockfetchShadowRequestsInFlight    map[string]struct{}
@@ -1603,9 +1606,9 @@ type LedgerState struct {
 	// when non-zero.
 	maxDeferredHeaderMarkers int
 	// admissionVerified maps the slot of each block whose header passed full
-	// admission verification to its hash key, until block-pipeline replay
-	// consumes it. Guarded by admissionVerifiedMu.
-	admissionVerified   map[uint64]string
+	// admission verification to its point and ledger generation, until
+	// block-pipeline replay consumes it. Guarded by admissionVerifiedMu.
+	admissionVerified   map[uint64]admissionVerifiedRecord
 	admissionVerifiedMu sync.Mutex
 	// maxAdmissionVerified overrides defaultMaxAdmissionVerified when
 	// non-zero.
@@ -2561,18 +2564,14 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	}
 	// Setup event handlers only after startup nonce repair is complete, so a
 	// Mithril-bootstrapped node cannot process chainsync/blockfetch events with
-	// stale gap-block nonces. ChainSync and chain-update can burst at bulk-sync
-	// rates, so they opt into the large EventQueueSize buffer.
+	// stale gap-block nonces. ChainSync uses a protocol-window-sized buffer so
+	// its publisher backpressures before admitted headers can outrun the chain
+	// queue. Chain updates retain the large EventQueueSize buffer.
 	// Blockfetch events retain fully decoded blocks, so keep that lossless queue
 	// to one commit batch and let EventBus backpressure bound decoded CBOR while
 	// the chain store catches up. Sparser streams use the default.
 	if ls.config.EventBus != nil {
-		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
-			ChainsyncEventType,
-			event.EventQueueSize,
-			event.SubscriberBackpressureBlock,
-			ls.handleEventChainsync,
-		)
+		ls.subscribeChainsyncEvents(ls.handleEventChainsync)
 		ls.chainsyncAwaitReplySubID = ls.config.EventBus.SubscribeFunc(
 			ChainsyncAwaitReplyEventType,
 			ls.handleEventChainsyncAwaitReply,
@@ -2700,6 +2699,17 @@ func (ls *LedgerState) subscribeBlockfetchEvents(
 	)
 }
 
+func (ls *LedgerState) subscribeChainsyncEvents(
+	handler event.EventHandlerFunc,
+) {
+	ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
+		ChainsyncEventType,
+		ChainsyncEventBufferSize,
+		event.SubscriberBackpressureBlock,
+		handler,
+	)
+}
+
 // rollbackBelowConsumedUtxoPruneFloor reports whether rolling back to point
 // would leave the live UTxO set short of outputs the consumed-UTxO sweep has
 // already removed, and returns the floor it compared against.
@@ -2790,6 +2800,9 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 	ctx context.Context,
 ) error {
 	var committedRollbackErr error
+	if err := ls.db.EnsureBlockInventory(); err != nil {
+		return fmt.Errorf("initialize block inventory for recovery: %w", err)
+	}
 	// Load current ledger tip
 	tmpTip, err := ls.db.GetTip(nil)
 	if err != nil {
@@ -9246,7 +9259,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 	committeeEpoch uint64,
 	epochStartSlot uint64,
 	syntheticV2CostModel bool,
-) (*LedgerDelta, error) {
+) (delta *LedgerDelta, err error) {
+	_, span := tracing.Start(
+		ctx,
+		"ledger.process_block",
+		tracing.Uint64("block.slot", point.Slot),
+		attribute.String("block.hash", hex.EncodeToString(point.Hash)),
+	)
+	defer func() { tracing.End(span, err) }()
 	// Check that we're processing things in order
 	if len(expectedPrevHash) > 0 {
 		if string(
@@ -9514,7 +9534,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 	// Process transactions
-	var delta *LedgerDelta
 	// Steady-state, at-tip, validated application refuses to recover an absent
 	// consumed-input producer from the blob store and treats it as a hard error
 	// instead. See strictConsumedInputsEnabled for why the
@@ -11888,12 +11907,20 @@ func (ls *LedgerState) primaryChainContainsBlockID(
 	blockID uint64,
 	point ocommon.Point,
 ) (bool, error) {
+	return ls.primaryChainContainsBlockIDTxn(blockID, point, nil)
+}
+
+func (ls *LedgerState) primaryChainContainsBlockIDTxn(
+	blockID uint64,
+	point ocommon.Point,
+	txn *database.Txn,
+) (bool, error) {
 	// Blob presence by point is not authoritative: abandoned-fork blocks remain
 	// in the append-only blob store. The current primary chain is identified by
 	// its block-index entry, so compare the point encoded at this ID with the
 	// requested point. Reading only the index value avoids loading the indexed
 	// block's CBOR a second time while chainsyncMutex is held.
-	indexedPoint, err := ls.db.BlockPointByIndex(blockID, nil)
+	indexedPoint, err := ls.db.BlockPointByIndex(blockID, txn)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return false, nil
@@ -11916,7 +11943,7 @@ func (ls *LedgerState) durableAppliedFloor() (ocommon.Point, bool, error) {
 	if err != nil {
 		return ocommon.Point{}, false, err
 	}
-	if !ok || row.Slot == 0 || len(row.Hash) == 0 {
+	if !ok || len(row.Hash) == 0 {
 		return ocommon.Point{}, false, nil
 	}
 	return ocommon.NewPoint(row.Slot, row.Hash), true, nil
@@ -11936,6 +11963,9 @@ func (ls *LedgerState) enforceDurableTipFloor(ctx context.Context) error {
 	ls.RLock()
 	currentTip := ls.currentTip
 	ls.RUnlock()
+	if currentTip.Point.Slot == 0 && len(currentTip.Point.Hash) == 0 {
+		return nil
+	}
 	if currentTip.Point.Slot < floor.Slot ||
 		(currentTip.Point.Slot == floor.Slot &&
 			bytes.Equal(currentTip.Point.Hash, floor.Hash)) {
@@ -12532,6 +12562,17 @@ func (ls *LedgerState) GetIntersectPoint(
 				}
 				return fmt.Errorf("failed to get block: %w", err)
 			}
+			onPrimary, err := ls.primaryChainContainsBlockIDTxn(
+				tmpBlock.ID,
+				point,
+				txn,
+			)
+			if err != nil {
+				return fmt.Errorf("check block on primary chain: %w", err)
+			}
+			if !onPrimary {
+				continue
+			}
 			// Update return value
 			ret.Slot = tmpBlock.Slot
 			ret.Hash = tmpBlock.Hash
@@ -12541,7 +12582,7 @@ func (ls *LedgerState) GetIntersectPoint(
 	if err != nil {
 		return nil, err
 	}
-	if ret.Slot > 0 || foundOrigin {
+	if len(ret.Hash) > 0 || foundOrigin {
 		return &ret, nil
 	}
 	return nil, nil
