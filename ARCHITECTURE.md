@@ -9189,8 +9189,7 @@ accepted exactly at the limit and rejected one past it.
 parses the cert state, stake snapshots, active pool distribution and governance
 state, and checks the tip hash width, the epoch, evolving, candidate and
 last-epoch-block nonce widths, the certified opcert and block-count pool keys,
-UTxO-state fees against the snapshot fee pot, rejects staged pool parameters
-at slot zero, and checks both current and previous
+UTxO-state fees against the snapshot fee pot, and both current and previous
 protocol parameters, including historical era conversion when the previous
 epoch's era is known. When stake snapshots are present, a previous payload
 whose epoch has no resolvable era is rejected before persistence. Without
