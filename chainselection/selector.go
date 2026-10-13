@@ -1747,18 +1747,6 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 // tip only to enforce revocation and is excluded from other peers' references.
 //
 // Must be called with cs.mutex held and cs.securityParam > 0.
-func (cs *ChainSelector) corroborateFarTipClaimLocked(
-	connId ouroboros.ConnectionId,
-	observedTip ochainsync.Tip,
-	link deliveredLink,
-	claims map[ouroboros.ConnectionId]farTipClaim,
-) bool {
-	corroborated, _ := cs.corroborateFarTipClaimTrackedLocked(
-		connId, observedTip, link, claims,
-	)
-	return corroborated
-}
-
 func (cs *ChainSelector) corroborateFarTipClaimTrackedLocked(
 	connId ouroboros.ConnectionId,
 	observedTip ochainsync.Tip,

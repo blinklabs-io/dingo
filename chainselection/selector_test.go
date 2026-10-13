@@ -6435,14 +6435,15 @@ func TestLoneFarFrontierThroughEpochBoundaryBlocks(t *testing.T) {
 		require.True(t, claim.lone)
 		other := newTestConnectionId(3)
 		far := c.tip(claim.block + 1)
-		require.False(t, cs.corroborateFarTipClaimLocked(
+		corroborated, _ := cs.corroborateFarTipClaimTrackedLocked(
 			other, far, deliveredLink{prevHash: []byte("x")}, cs.farTipClaims,
-		))
+		)
+		require.False(t, corroborated)
 		assert.True(t, cs.farTipClaims[conn].lone)
 		assert.False(t, cs.farTipClaims[conn].corroborated)
 
 		// Re-entering with the lone connection's own next header keeps the mark.
-		cs.corroborateFarTipClaimLocked(conn, far, deliveredLink{
+		cs.corroborateFarTipClaimTrackedLocked(conn, far, deliveredLink{
 			prevHash: claim.hash,
 		}, cs.farTipClaims)
 		assert.True(t, cs.farTipClaims[conn].lone,
