@@ -4764,7 +4764,7 @@ consensus-critical question is actually asked, using the boundary the node
 already persists for exactly this purpose, avoids adding a row that other
 `added_slot`-scoped readers have to reason about.
 
-### `GetPoolByVrfKeyHash`
+### `GetPoolByVrfKeyHash` and `GetFuturePoolByVrfKeyHash`
 
 Backs `LedgerView.IsVrfKeyInUse`, the reverse of the pair above: given a VRF
 key hash, find whichever pool currently claims it, respecting the same
@@ -4776,8 +4776,11 @@ appear free to a different pool the moment a re-registration was applied, even
 though cardano-ledger keeps the old key reserved until the next epoch boundary
 merges `psFutureStakePoolParams` into `psStakePools`.
 
-Takes the current epoch's start slot (`epochStartSlot`) and resolves a claim
-in two tiers, checked in order:
+Both methods take the current epoch's start slot (`epochStartSlot`).
+`LedgerView.IsVrfKeyInUse` queries `GetPoolByVrfKeyHash` for the effective
+owner, then `GetFuturePoolByVrfKeyHash` for the deferred owner when the first
+lookup finds none. The shared SQL computes two claim tiers, and each method
+selects its own tier:
 
 1. **Effective owner.** The pool whose most recent registration strictly
    before `epochStartSlot` has this key (`pre_boundary`), falling back to a
@@ -4799,16 +4802,16 @@ in two tiers, checked in order:
    legitimate reuse of `B`).
    `IsVrfKeyInUse`'s caller (gouroboros's `validatePoolRegistration`)
    special-cases `owningPool == cert.Operator` by comparing against
-   `PoolCurrentState` (the pool's latest registration); this tier's
-   latest-only ranking is what keeps that comparison and this lookup
-   agreeing on which key is actually still pending.
+   `PoolCurrentState` (the epoch-effective registration). The deferred
+   lookup independently keeps only the latest pending registration, so
+   superseded deferred keys do not remain reserved.
 
 Both candidate sets are pre-filtered to pool IDs with *any* historical
 `pool_registration` row naming the queried key, so the query only walks a
 pool's full history when it has ever plausibly held that key.
 
-The query returns every matching pool ID ranked by tier (1 before 2, `pool_id`
-ascending within a tier), not a single winner picked by `LIMIT 1`: a long-
+Each query returns matching pool IDs from its selected tier in `pool_id`
+order, not a single winner picked by `LIMIT 1`: a long-
 retired pool's own last-ever registration can still satisfy tier 1's
 per-candidate effective-key computation (registration history and retirement
 are tracked independently, so retiring never rewrites what a pool's

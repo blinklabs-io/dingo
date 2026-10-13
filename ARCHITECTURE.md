@@ -4551,7 +4551,10 @@ The `LedgerView` interface provides query access to ledger state:
   final slot of a pending action's inclusive expiry epoch so ancestry,
   hard-fork succession, proposal expiry, and security-group voting use the
   persisted Dingo state.
-- `IsVrfKeyInUse` reads `epochStartSlot`, pinned on the view at every real
+- `IsVrfKeyInUse` reserves both the epoch-effective VRF key and the latest
+  deferred key, querying the effective owner first and falling back to
+  `IsFutureVrfKeyInUse`. A superseded deferred key becomes available again.
+  Both lookups read `epochStartSlot`, pinned on the view at every real
   construction site (`NewView`, `ledgerProcessBlock`, `validateTxCore`,
   `ValidateTxWithOverlay`, `EvaluateTx`) from the same snapshot that pins
   `committeeEpoch`/`pp` alongside it -- the same `horizonAnchorSlot`

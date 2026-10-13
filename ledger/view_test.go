@@ -5455,13 +5455,6 @@ func newUnwrittenDijkstraPoolRegistrationTx(
 	return tx
 }
 
-// TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral
-// is the full end-to-end proof of the acceptance criterion "reject a
-// different pool registering the active key during the deferral window":
-// not just that IsVrfKeyInUse reports the right owner, but that the real
-// validation entry point actually returns a rejection for it. Protocol
-// version 12 (Dijkstra) is required: DuplicateVrfKeysDisallowed only
-// applies the check for major > 10.
 func TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral(
 	t *testing.T,
 ) {
@@ -5509,31 +5502,26 @@ func TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral(
 	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
 	lv.epochStartSlot = 30
 
-	// Q attempts to claim key A, which is still P's active key during the
-	// deferral window. Not written to the database -- this is the
-	// certificate under validation, not setup.
-	conflictingTx := newUnwrittenDijkstraPoolRegistrationTx(t, 0x03, poolQ, keyA)
-	err := eras.ValidateTxDijkstra(
-		conflictingTx,
-		60,
-		lv,
-		dijkstraTestProtocolParameters(),
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already registered")
+	for name, key := range map[string]lcommon.VrfKeyHash{
+		"effective key": keyA,
+		"pending key":   keyB,
+	} {
+		t.Run(name, func(t *testing.T) {
+			conflictingTx := newUnwrittenDijkstraPoolRegistrationTx(
+				t, 0x03, poolQ, key,
+			)
+			err := eras.ValidateTxDijkstra(
+				conflictingTx,
+				60,
+				lv,
+				dijkstraTestProtocolParameters(),
+			)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "already registered")
+		})
+	}
 }
 
-// TestValidateTxDijkstraRejectsSameOperatorReuseOfSupersededFutureKey is
-// the full end-to-end proof of the PV11+ follow-up: pool P cycles
-// A -> B -> C within one epoch, then attempts to reuse B again. This
-// proves the actual rejection fires through the real validation entry
-// point, not just that IsVrfKeyInUse and PoolCurrentState individually
-// return the values the rejection depends on.
-// TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey pins release of a
-// superseded future VRF key
-// through the full production validation entry point: a key a pool cycled
-// through and then superseded within the same epoch is free for any pool
-// (including the pool that originally proposed it) to register.
 func TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey(
 	t *testing.T,
 ) {
