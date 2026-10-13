@@ -15,7 +15,11 @@
 package ouroboros
 
 import (
+	"fmt"
+
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
@@ -83,5 +87,21 @@ func decodeLeiosEndorserBlock(
 func decodeLeiosAnnouncementHeader(
 	raw []byte,
 ) (*gdijkstra.DijkstraBlockHeader, error) {
-	return guardedDecode(raw, gdijkstra.NewDijkstraBlockHeaderFromCbor)
+	return guardedDecode(raw, func(data []byte) (*gdijkstra.DijkstraBlockHeader, error) {
+		var parts []cbor.RawMessage
+		bytesRead, err := cbor.Decode(data, &parts)
+		if err == nil && bytesRead == len(data) && len(parts) == 2 {
+			var era uint8
+			if _, err := cbor.Decode(parts[0], &era); err == nil {
+				if uint(era) != gledger.BlockTypeDijkstra {
+					return nil, fmt.Errorf(
+						"unexpected era in Leios announcement header: %d",
+						era,
+					)
+				}
+				return gdijkstra.NewDijkstraBlockHeaderFromCbor(parts[1])
+			}
+		}
+		return gdijkstra.NewDijkstraBlockHeaderFromCbor(data)
+	})
 }
