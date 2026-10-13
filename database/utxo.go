@@ -1531,9 +1531,12 @@ func (d *Database) backfillLiveAssetUtxoAddressBatch(
 	afterID uint,
 	limit int,
 ) (uint, int, error) {
-	nextID := afterID
-	count := 0
-	err := d.Transaction(ctx, true).Do(func(txn *Txn) error {
+	type addressRow struct {
+		id      uint
+		address []byte
+	}
+	rows := make([]addressRow, 0, limit)
+	err := d.Transaction(ctx, false).Do(func(txn *Txn) error {
 		utxos, err := d.utxoStore().GetLiveAssetUtxosMissingAddress(
 			afterID,
 			limit,
@@ -1542,7 +1545,6 @@ func (d *Database) backfillLiveAssetUtxoAddressBatch(
 		if err != nil {
 			return err
 		}
-		count = len(utxos)
 		for i := range utxos {
 			if err := loadCbor(&utxos[i], txn); err != nil {
 				return fmt.Errorf(
@@ -1565,21 +1567,32 @@ func (d *Database) backfillLiveAssetUtxoAddressBatch(
 			if len(address) == 0 {
 				return errors.New("decoded UTxO address is empty")
 			}
-			if err := d.utxoStore().SetUtxoAddress(
-				utxos[i].ID,
-				address,
-				txn.Metadata(),
-			); err != nil {
-				return err
-			}
-			nextID = utxos[i].ID
+			rows = append(rows, addressRow{id: utxos[i].ID, address: address})
 		}
 		return nil
 	})
 	if err != nil {
 		return afterID, 0, err
 	}
-	return nextID, count, nil
+	if len(rows) == 0 {
+		return afterID, 0, nil
+	}
+	err = d.Transaction(ctx, true).Do(func(txn *Txn) error {
+		for _, row := range rows {
+			if err := d.utxoStore().SetUtxoAddress(
+				row.id,
+				row.address,
+				txn.Metadata(),
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return afterID, 0, err
+	}
+	return rows[len(rows)-1].id, len(rows), nil
 }
 
 func filterUtxosByAddressPatterns(

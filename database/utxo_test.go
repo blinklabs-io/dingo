@@ -1596,12 +1596,19 @@ func TestUtxosByAddressLoadsAssets(t *testing.T) {
 	txHash := bytes.Repeat([]byte{0x99}, 32)
 	policyID := bytes.Repeat([]byte{0x33}, 28)
 	assetName := []byte("asset")
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
 	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       txHash,
 		OutputIdx:  0,
 		PaymentKey: addr.PaymentKeyHash().Bytes(),
+		Address:    []byte(addr.String()),
 		AddedSlot:  1,
 		Amount:     types.Uint64(1_000_000),
+		Cbor:       encoded,
 		Assets: []models.Asset{{
 			Name:        assetName,
 			PolicyId:    policyID,
@@ -1610,11 +1617,6 @@ func TestUtxosByAddressLoadsAssets(t *testing.T) {
 		}},
 	}))
 
-	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
-		OutputAddress: addr,
-		OutputAmount:  1_000_000,
-	})
-	require.NoError(t, err)
 	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
 		return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
 	}))
