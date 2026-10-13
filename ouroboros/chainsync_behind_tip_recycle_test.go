@@ -230,3 +230,41 @@ func TestBehindLocalTipRecycleWindowNotSpentWhenNothingScheduled(
 	require.Equal(t, event.ChainsyncResyncReasonBehindLocalTip, data.Reason)
 	require.Equal(t, live, data.ConnectionId)
 }
+
+// A future-header recovery timer with a later onset does not recycle the
+// connection yet, and every header until it fires is withheld. A far-behind
+// header must replace it with an immediate re-intersection rather than leave
+// the cursor stale until the later onset.
+func TestBehindLocalTipRecycleReplacesLaterFutureHeaderTimer(t *testing.T) {
+	t.Parallel()
+
+	const (
+		tipBlock = uint64(10000)
+		k        = uint64(432)
+	)
+	f := newForecastHorizonFixture(t, "10.0.0.1:3001")
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
+	f.setLocalTip(tipBlock, k)
+	f.setBestPeer(false)
+
+	f.o.scheduleFutureHeaderResync(f.conn, time.Now().Add(time.Hour))
+	require.True(t, f.o.futureHeaderResyncPending(f.conn))
+
+	block := tipBlock - 500
+	require.NoError(t, f.o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: f.conn},
+		0,
+		newTestBlockHeader(block, block, 0x01),
+		peerTipAt(tipBlock+50000),
+	))
+	evt := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"the far-behind peer is recycled without waiting for the later timer",
+	)
+	data, ok := evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, event.ChainsyncResyncReasonBehindLocalTip, data.Reason)
+	require.Equal(t, f.conn, data.ConnectionId)
+}

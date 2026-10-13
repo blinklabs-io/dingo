@@ -238,6 +238,20 @@ func (o *Ouroboros) futureHeaderResyncPending(
 	return o.futureHeaderResyncs[connId] != nil
 }
 
+// headerResyncDueOrFired reports whether connId has a re-intersection that
+// has fired or whose onset is not after now. A timer with a later onset is not
+// reported: scheduling an earlier onset replaces it.
+func (o *Ouroboros) headerResyncDueOrFired(
+	connId ouroboros.ConnectionId,
+	now time.Time,
+) bool {
+	o.futureHeaderResyncMu.Lock()
+	defer o.futureHeaderResyncMu.Unlock()
+	scheduled := o.futureHeaderResyncs[connId]
+	return scheduled != nil &&
+		(scheduled.fired || !now.Before(scheduled.onset))
+}
+
 func (o *Ouroboros) cancelFutureHeaderResync(
 	connId ouroboros.ConnectionId,
 ) {
@@ -1344,11 +1358,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			v.BlockNumber(),
 			tip.BlockNumber,
 		) {
-			// A connection with a scheduled or fired re-intersection is
-			// already being recycled; its in-flight headers must not take
-			// the shared window from another stale peer.
+			// A connection with a due or fired re-intersection is already
+			// being recycled; its in-flight headers must not take the shared
+			// window from another stale peer. A later-onset future-header
+			// timer withholds every header until it fires, so it is replaced.
 			now := time.Now()
-			if o.futureHeaderResyncPending(ctx.ConnectionId) ||
+			if o.headerResyncDueOrFired(ctx.ConnectionId, now) ||
 				!o.claimBehindTipRecycle(now) {
 				return nil
 			}

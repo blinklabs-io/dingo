@@ -16204,7 +16204,9 @@ such recycle is requested across all connections per 30 seconds
 (`claimBehindTipRecycle`), so a gap with many lagging honest peers does not
 recycle all of them at once and leave only a near-tip peer; over a sustained
 gap they are still recycled one window at a time. A connection whose
-re-intersection is already scheduled does not take that window, and a claim
+re-intersection has fired or is already due does not take that window; a
+future-header timer with a later onset is replaced by an immediate one, since
+it withholds every header until it fires. A claim
 that schedules nothing (the connection has already left the connection
 manager) is released. A header
 within `k` of the tip (a normal rollback or fork) is not affected, and neither
