@@ -5155,12 +5155,14 @@ func TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral(t *testing.T) {
 		"the pre-boundary key must still be reported as reserved")
 	assert.Equal(t, poolKeyHash, owner)
 
-	// The new key is already claimed by P itself, as its same-epoch
-	// pending registration -- reported as "in use, by P" rather than
-	// free, which is what lets gouroboros's caller compare against
-	// PoolCurrentState and still allow P to keep using its own pending
-	// key without being rejected as a self-conflict.
+	// The new key is P's deferred key: not effective yet, so IsVrfKeyInUse
+	// leaves it free, while IsFutureVrfKeyInUse reports P as its owner so
+	// the caller can allow P to keep using its own pending key.
 	inUse, owner, err = lv.IsVrfKeyInUse(newVrfKeyHash)
+	require.NoError(t, err)
+	assert.False(t, inUse, "P's pending key is not yet effective")
+
+	inUse, owner, err = lv.IsFutureVrfKeyInUse(newVrfKeyHash)
 	require.NoError(t, err)
 	assert.True(t, inUse, "P's own pending key must be reported claimed")
 	assert.Equal(t, poolKeyHash, owner)
@@ -5276,9 +5278,15 @@ func TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish(
 
 	inUse, _, err = lv.IsVrfKeyInUse(keyB)
 	require.NoError(t, err)
+	assert.False(t, inUse,
+		"keyB is not yet effective per this view's pinned boundary, "+
+			"regardless of the live one")
+
+	inUse, owner, err = lv.IsFutureVrfKeyInUse(keyB)
+	require.NoError(t, err)
 	assert.True(t, inUse,
-		"keyB is still claimed by P's own same-epoch pending registration "+
-			"per this view's pinned boundary, regardless of the live one")
+		"keyB is still P's deferred key per this view's pinned boundary")
+	assert.Equal(t, poolKeyHash, owner)
 
 	require.NoError(t, dbtest.CloseDatabase(db))
 }
