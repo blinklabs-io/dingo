@@ -601,12 +601,6 @@ func (o *Ouroboros) StopLeiosPersistWriter() {
 	o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout)
 }
 
-func (o *Ouroboros) stopLeiosPersistWriter(timeout time.Duration) bool {
-	o.leiosPersistLifecycleMu.Lock()
-	defer o.leiosPersistLifecycleMu.Unlock()
-	return o.stopLeiosPersistenceWorkers(timeout)
-}
-
 func (o *Ouroboros) stopLeiosPersistenceWorkers(timeout time.Duration) bool {
 	return o.stopLeiosPersistenceWorkersWithWait(
 		timeout,

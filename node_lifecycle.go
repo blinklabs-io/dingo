@@ -1099,9 +1099,11 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		usePeerSnapshot := genesisSelectionMode &&
 			topologyConfig.PeerSnapshot != nil &&
 			topologyConfig.PeerSnapshot.HasRelays()
+		// Address normalization bounds its own DNS lookup.
+		//nolint:contextcheck
 		n.peerGov.LoadTopologyConfig(
 			topologyConfig,
-		) //nolint:contextcheck // address normalization bounds its own DNS lookup
+		)
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
 				ctx,

@@ -1363,7 +1363,10 @@ func TestLeiosPersistPauseAfterConcurrentEnqueue(t *testing.T) {
 	require.Empty(t, o.leiosPersistPending)
 	o.leiosPersistMu.Unlock()
 	o.enqueueLeiosPersist(entries[0][0].point, entries[0][0].raw, nil)
-	require.True(t, o.stopLeiosPersistWriter(leiosPersistShutdownDrainTimeout))
+	o.leiosPersistLifecycleMu.Lock()
+	stopped := o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout)
+	o.leiosPersistLifecycleMu.Unlock()
+	require.True(t, stopped)
 }
 
 func TestLeiosPersistencePauseResetsPruningFrontier(t *testing.T) {

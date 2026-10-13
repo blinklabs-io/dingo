@@ -674,6 +674,8 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		if !ok {
 			return false
 		}
+		// Persistence belongs to the node lifecycle and must outlive this peer request.
+		//nolint:contextcheck
 		if err := o.storeLeiosEndorserBlock(
 			point,
 			respBlock.BlockRaw,
@@ -728,6 +730,8 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		)
 		return false
 	}
+	// Persistence belongs to the node lifecycle and must outlive this peer request.
+	//nolint:contextcheck
 	if err := o.storeLeiosEndorserBlock(
 		point,
 		data.blockRaw,

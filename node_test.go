@@ -4921,16 +4921,6 @@ func TestLedgerStateConfigForwardsBlockfetchLowWatermarkFlag(t *testing.T) {
 	assert.True(t, on.BlockfetchLowWatermarkEnabled)
 }
 
-import (
-	"context"
-	"errors"
-	"testing"
-
-	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
-	"github.com/blinklabs-io/dingo/plugin"
-	"github.com/stretchr/testify/require"
-)
-
 // Not t.Parallel: swaps the package-level closeOuroborosInstance seam.
 func TestRunKeepsStorageOpenWhenLeiosPersistenceDrainIsUnconfirmed(
 	t *testing.T,

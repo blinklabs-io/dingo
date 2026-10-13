@@ -45,12 +45,12 @@ func validateLeiosPersistenceRetention(
 	)
 	if minimum == 0 {
 		return errors.New(
-			"Leios persistence retention requires known stability parameters",
+			"leios persistence retention requires known stability parameters",
 		)
 	}
 	if retention < minimum {
 		return fmt.Errorf(
-			"Leios persistence retention %d slots is below the stability window of %d slots",
+			"leios persistence retention %d slots is below the stability window of %d slots",
 			retention,
 			minimum,
 		)
