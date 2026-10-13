@@ -40,8 +40,7 @@ func newSubGovLedger(t *testing.T) (*LedgerState, *database.Database) {
 	t.Helper()
 	db := newTestDB(t)
 	ls := &LedgerState{
-		db:           db,
-		currentEpoch: models.Epoch{EpochId: 12},
+		db: db,
 		currentPParams: &dijkstra.DijkstraProtocolParameters{
 			ConwayProtocolParameters: conway.ConwayProtocolParameters{
 				GovActionValidityPeriod: 20,
@@ -57,7 +56,7 @@ func newSubGovLedger(t *testing.T) (*LedgerState, *database.Database) {
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
-	ls.publishSnapshotsLocked()
+	publishGovernanceTestEpoch(ls, 12, eras.DijkstraEraDesc)
 	return ls, db
 }
 

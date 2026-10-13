@@ -642,6 +642,24 @@ func (b *Backfill) getPParams(
 	return b.currentPParams
 }
 
+// blockEraParams returns the era and protocol parameters that apply to a
+// block of blockEraId in epoch epochId, which is recorded as era eraId. A
+// block of the previous era in an epoch recorded with its successor takes the
+// parameters of its own era's last epoch, as transaction validation does.
+func (b *Backfill) blockEraParams(
+	epochId uint64,
+	eraId, blockEraId uint,
+) (uint, lcommon.ProtocolParameters) {
+	if prev, ok := dledger.PreviousEraEpoch(
+		b.epochs, epochId, eraId, blockEraId,
+	); ok {
+		if pp, cached := b.pparamsCache[prev.EpochId]; cached {
+			return prev.EraId, pp
+		}
+	}
+	return eraId, b.getPParams(epochId)
+}
+
 // calculateCertDeposits computes deposit amounts for each
 // certificate in the transaction.
 //
@@ -709,8 +727,9 @@ func (b *Backfill) processBlockGovernanceLevel(
 	point ocommon.Point,
 	txIndex uint32,
 	epochId uint64,
-	conwayPP *conway.ConwayProtocolParameters,
+	pp lcommon.ProtocolParameters,
 	txn *database.Txn,
+	validated *bool,
 ) error {
 	if !tx.IsValid() {
 		return nil
@@ -718,6 +737,7 @@ func (b *Backfill) processBlockGovernanceLevel(
 	if !governance.TransactionHasGovernanceEffects(tx) {
 		return nil
 	}
+	conwayPP := backfillConwayProtocolParameters(pp)
 	if conwayPP == nil &&
 		governance.HistoricalTransactionRequiresConwayParameters(tx) {
 		return errors.New(
@@ -737,6 +757,8 @@ func (b *Backfill) processBlockGovernanceLevel(
 		proposalLifetime,
 		b.db,
 		txn,
+		pp,
+		validated,
 	); err != nil {
 		return fmt.Errorf("governance transaction effects: %w", err)
 	}
@@ -1068,8 +1090,6 @@ func (b *Backfill) Run(ctx context.Context) error {
 			b.processEpochBoundary(epochId, eraId)
 		}
 
-		pp := b.getPParams(epochId)
-
 		var blockTxCount int
 
 		parsedBlock, parseErr := models.DecodeBlockCbor(
@@ -1105,6 +1125,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 			txs := parsedBlock.Transactions()
 			if len(txs) > 0 {
+				txEraId, pp := b.blockEraParams(
+					epochId, eraId, uint(parsedBlock.Era().Id),
+				)
 				offsetStart := time.Now()
 				offsets, oErr := b.computeBlockOffsets(
 					blk.Slot, blk.Hash, blk.Cbor, parsedBlock,
@@ -1121,8 +1144,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 					// Store transaction metadata into the shared batch
 					// instead of committing once per block.
 					if pErr := b.processBlockTxsBatched(
-						ctx,
-						txs, point, epochId, eraId,
+						ctx, txs, point, epochId, txEraId,
 						pp, offsets, acc, batchTxn,
 						&intervalStats, isFreshStart,
 					); pErr != nil {
@@ -1310,6 +1332,7 @@ func (b *Backfill) processBlockTxsBatched(
 	}
 	var storageIndexOffset uint64
 	for txIndex, tx := range txs {
+		var proposalsValidated bool
 		levels := dledger.TransactionLevelsForApply(tx)
 		childCount := uint64(len(levels)) - 1
 		storageBaseIndex := uint64(txIndex) + storageIndexOffset
@@ -1324,7 +1347,6 @@ func (b *Backfill) processBlockTxsBatched(
 		for levelIndex, level := range levels {
 			storageIndex := storageBaseIndex + uint64(levelIndex)
 			updateEpoch, paramUpdates := level.ProtocolParameterUpdates()
-			conwayPP := backfillConwayProtocolParameters(pp)
 			protocolMajor := uint64(0)
 			if versioned, ok := pp.(lcommon.PoolRuleProtocolParameters); ok {
 				protocolMajor = uint64(versioned.ProtocolMajorVersion())
@@ -1364,8 +1386,9 @@ func (b *Backfill) processBlockTxsBatched(
 				point,
 				uint32(storageIndex), //nolint:gosec
 				epochId,
-				conwayPP,
+				pp,
 				txn,
+				&proposalsValidated,
 			); err != nil {
 				return fmt.Errorf(
 					"governance at slot %d tx %d body %d: %w",
