@@ -2192,7 +2192,8 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 	}
 	for len(history.order) > 0 &&
 		(history.retainedBytes+recordBytes > maxPeerHeaderHistoryBytesPerConn ||
-			len(history.order) >= ls.peerHeaderHistoryLimit()) {
+			(len(history.order) >= ls.peerHeaderHistoryLimit() &&
+				!ls.oldestPeerHeaderUnapplied(history))) {
 		if !ls.evictOldestPeerHeaderRecord(key) {
 			return
 		}
@@ -2231,6 +2232,24 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 	history.byHash[hashKey] = record
 	history.retainedBytes += recordBytes
 	ls.peerHeaderHistoryBytes += recordBytes
+}
+
+// oldestPeerHeaderUnapplied reports whether the connection's oldest retained
+// header is still ahead of the local chain tip and the history is within the
+// header queue's own capacity. A header queue can be deeper than the count
+// limit; if the oldest of those headers were evicted, clearing the queue would
+// leave in-flight headers whose ancestry walk can no longer reach the local
+// tip, and the honest connection would be resynced. The byte budgets still
+// bound the total retained, and MaxQueuedHeaders bounds the count.
+func (ls *LedgerState) oldestPeerHeaderUnapplied(
+	history *peerHeaderChain,
+) bool {
+	if ls.chain == nil || len(history.order) == 0 ||
+		len(history.order) >= ls.chain.MaxQueuedHeaders() {
+		return false
+	}
+	oldest, ok := history.byHash[history.order[0]]
+	return ok && oldest.event.Point.Slot > ls.chain.Tip().Point.Slot
 }
 
 func (ls *LedgerState) evictOldestPeerHeaderRecord(historyKey string) bool {
@@ -2492,6 +2511,9 @@ func (ls *LedgerState) findPeerForkPath(
 		hex.EncodeToString(e.Point.Hash): {},
 	}
 	limit := ls.peerHeaderHistoryLimit()
+	if history != nil {
+		limit = max(limit, len(history.order))
+	}
 	for depth := 0; depth < limit &&
 		len(prevHash) > 0; depth++ {
 		// Resolve the ancestor by O(1) hash index only: database.BlockByHash
@@ -3916,6 +3938,9 @@ func (ls *LedgerState) findPeerForkPathCached(
 	steps := make([]peerHeaderHistoryPathStep, 0)
 	visited := make(map[string]struct{})
 	limit := ls.peerHeaderHistoryLimit()
+	if history != nil {
+		limit = max(limit, len(history.order))
+	}
 	for depth := 0; depth < limit && len(prevHash) > 0; depth++ {
 		key := hex.EncodeToString(prevHash)
 		if _, seen := visited[key]; seen {
