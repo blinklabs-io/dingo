@@ -15,10 +15,14 @@
 package ouroboros
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -82,7 +86,7 @@ func TestMassBehindLocalTipRecycleKeepsSomeHonestPeers(t *testing.T) {
 	for i, conn := range honestConns {
 		deliver(conn, tipBlock-cursorBehind, honestTip, byte(0x10+i))
 	}
-	deliver(forkConn, tipBlock-1, peerTipAt(tipBlock+1), 0xf0)
+	deliver(forkConn, tipBlock, peerTipAt(tipBlock+1), 0xf0)
 
 	// The first recycle is the one the policy permits; wait for it, then
 	// require that nothing else follows.
@@ -157,4 +161,72 @@ func TestBehindLocalTipRecycleWindowSkipsConnectionAlreadyResyncing(
 	deliver(f.conn, 0x02)
 	deliver(other, 0x03)
 	requireResyncOf(other, "a second stale peer is recycled after the window")
+}
+
+// A far-behind header on a connection already gone from the connection
+// manager schedules no re-intersection. It must not take the window either,
+// or a live stale peer waits a full cooldown with nothing recycled.
+func TestBehindLocalTipRecycleWindowNotSpentWhenNothingScheduled(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		tipBlock = uint64(10000)
+		k        = uint64(432)
+	)
+	f := newForecastHorizonFixture(t, "10.0.0.1:3001")
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
+	f.setLocalTip(tipBlock, k)
+	f.setBestPeer(false)
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{
+			EventBus: f.o.eventBus,
+			Logger:   logger,
+		},
+	)
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer stopCancel()
+		_ = connManager.Stop(stopCtx)
+	})
+	liveConn := newChainsyncResyncTestConnection(t, "10.1.0.1:3001")
+	require.True(t, connManager.AddConnection(
+		liveConn,
+		false,
+		"10.1.0.1:3001",
+	))
+	f.o.connManager = connManager
+	live := liveConn.Id()
+	require.True(t, f.o.chainsyncState.AddClientConnId(live))
+
+	deliver := func(conn ouroboros.ConnectionId, b byte) {
+		t.Helper()
+		block := tipBlock - 500
+		require.NoError(t, f.o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{ConnectionId: conn},
+			0,
+			newTestBlockHeader(block, block, b),
+			peerTipAt(tipBlock+50000),
+		))
+	}
+
+	// f.conn was never registered with the connection manager.
+	deliver(f.conn, 0x01)
+	deliver(live, 0x02)
+	evt := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"the live stale peer is recycled in the same window",
+	)
+	data, ok := evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, event.ChainsyncResyncReasonBehindLocalTip, data.Reason)
+	require.Equal(t, live, data.ConnectionId)
 }

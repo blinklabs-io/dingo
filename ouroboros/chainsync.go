@@ -146,30 +146,31 @@ func (o *Ouroboros) scheduleFutureHeaderResync(
 
 // scheduleHeaderResync is scheduleFutureHeaderResync with the reason the
 // recovery event carries. The winning schedule's reason is the one published.
+// It reports whether this call armed a timer.
 func (o *Ouroboros) scheduleHeaderResync(
 	connId ouroboros.ConnectionId,
 	onset time.Time,
 	reason string,
-) {
+) bool {
 	if o.chainsyncScheduleAt == nil || o.eventBus == nil || onset.IsZero() {
-		return
+		return false
 	}
 	if o.connManager != nil && o.connManager.GetConnectionById(connId) == nil {
-		return
+		return false
 	}
 	o.futureHeaderResyncMu.Lock()
 	if o.futureHeaderResyncClosed {
 		o.futureHeaderResyncMu.Unlock()
-		return
+		return false
 	}
 	if current := o.futureHeaderResyncs[connId]; current != nil {
 		if current.fired {
 			o.futureHeaderResyncMu.Unlock()
-			return
+			return false
 		}
 		if !onset.Before(current.onset) {
 			o.futureHeaderResyncMu.Unlock()
-			return
+			return false
 		}
 		current.cancel()
 	}
@@ -222,10 +223,11 @@ func (o *Ouroboros) scheduleHeaderResync(
 		delete(o.futureHeaderResyncs, connId)
 		close(armed)
 		o.futureHeaderResyncMu.Unlock()
-		return
+		return false
 	}
 	close(armed)
 	o.futureHeaderResyncMu.Unlock()
+	return true
 }
 
 func (o *Ouroboros) futureHeaderResyncPending(
@@ -1205,6 +1207,17 @@ func (o *Ouroboros) claimBehindTipRecycle(now time.Time) bool {
 	return true
 }
 
+// releaseBehindTipRecycle returns the window taken by claimBehindTipRecycle at
+// now when no recycle was scheduled for it. No other claim can land inside an
+// open window, so the previous claim had already lapsed and clearing is exact.
+func (o *Ouroboros) releaseBehindTipRecycle(now time.Time) {
+	o.behindTipRecycleMu.Lock()
+	defer o.behindTipRecycleMu.Unlock()
+	if o.behindTipRecycleAt.Equal(now) {
+		o.behindTipRecycleAt = time.Time{}
+	}
+}
+
 func (o *Ouroboros) chainsyncClientRollForwardAt(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
@@ -1290,8 +1303,19 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			// A connection with a scheduled or fired re-intersection is
 			// already being recycled; its in-flight headers must not take
 			// the shared window from another stale peer.
+			now := time.Now()
 			if o.futureHeaderResyncPending(ctx.ConnectionId) ||
-				!o.claimBehindTipRecycle(time.Now()) {
+				!o.claimBehindTipRecycle(now) {
+				return nil
+			}
+			// The connection may already have left the connection manager,
+			// or another schedule may have won; neither recycles anything.
+			if !o.scheduleHeaderResync(
+				ctx.ConnectionId,
+				now,
+				event.ChainsyncResyncReasonBehindLocalTip,
+			) {
+				o.releaseBehindTipRecycle(now)
 				return nil
 			}
 			o.config.Logger.Debug(
@@ -1301,11 +1325,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				"block_number", v.BlockNumber(),
 				"peer_tip_block_number", tip.BlockNumber,
 				"connection_id", ctx.ConnectionId.String(),
-			)
-			o.scheduleHeaderResync(
-				ctx.ConnectionId,
-				time.Now(),
-				event.ChainsyncResyncReasonBehindLocalTip,
 			)
 			return nil
 		}

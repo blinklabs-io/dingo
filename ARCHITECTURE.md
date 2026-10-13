@@ -16023,8 +16023,11 @@ left far behind is resynced on its first header. The shared per-connection
 timer marker allows one resync per connection until it reconnects. At most one
 such recycle is requested across all connections per 30 seconds
 (`claimBehindTipRecycle`), so a gap with many lagging honest peers does not
-recycle all of them and leave only a near-tip peer. A connection whose
-re-intersection is already scheduled does not take that window. A header
+recycle all of them at once and leave only a near-tip peer; over a sustained
+gap they are still recycled one window at a time. A connection whose
+re-intersection is already scheduled does not take that window, and a claim
+that schedules nothing (the connection has already left the connection
+manager) is released. A header
 within `k` of the tip (a normal rollback or fork) is not affected, and neither
 is a peer whose own tip is more than `k` behind: re-intersecting cannot bring
 it closer, so it stays attached like any other peer lagging on our chain.
