@@ -823,6 +823,9 @@ func buildDingoConfig(
 		dingo.WithAPIConfig(cfg.API),
 		dingo.WithBarkBaseUrl(cfg.BarkBaseUrl),
 		dingo.WithBarkBlockDownloadHosts(cfg.BarkBlockDownloadHosts),
+		dingo.WithBarkBlockDownloadAllowPrivateAddresses(
+			cfg.BarkBlockDownloadAllowPrivateAddresses,
+		),
 		dingo.WithBarkPort(cfg.BarkPort),
 		dingo.WithBarkHost(cfg.BarkHost),
 		dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),

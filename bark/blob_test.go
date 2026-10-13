@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -346,6 +347,7 @@ func TestArchiveHTTPClientValidatesRedirectOrigin(t *testing.T) {
 	client := archiveDownloadHTTPClient(
 		&http.Client{Transport: &http.Transport{}},
 		allowedOrigins,
+		false,
 		func(context.Context, string, string) (net.Conn, error) {
 			return nil, errors.New("not used")
 		},
@@ -395,6 +397,7 @@ func TestArchiveHTTPClientValidatesRedirectAfterCallerPolicy(t *testing.T) {
 			},
 		},
 		allowedOrigins,
+		false,
 		func(context.Context, string, string) (net.Conn, error) {
 			return nil, errors.New("not used")
 		},
@@ -428,7 +431,13 @@ func TestArchiveHTTPClientReplacesCustomTransport(t *testing.T) {
 	)
 	require.NoError(t, err)
 	original := &http.Client{Transport: customRoundTripper{}}
-	client := archiveDownloadHTTPClient(original, allowedOrigins, nil, nil)
+	client := archiveDownloadHTTPClient(
+		original,
+		allowedOrigins,
+		false,
+		nil,
+		nil,
+	)
 
 	transport, ok := client.Transport.(*http.Transport)
 	require.True(t, ok)
@@ -449,6 +458,7 @@ func TestArchiveHTTPClientRejectsPrivateResolvedAddress(t *testing.T) {
 	client := archiveDownloadHTTPClient(
 		&http.Client{Transport: &http.Transport{}},
 		allowedOrigins,
+		false,
 		func(context.Context, string, string) (net.Conn, error) {
 			dialed = true
 			return nil, errors.New("unexpected dial")
@@ -481,6 +491,7 @@ func TestArchiveHTTPClientDisablesProxy(t *testing.T) {
 			Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
 		},
 		allowedOrigins,
+		false,
 		func(context.Context, string, string) (net.Conn, error) {
 			return nil, errors.New("not used")
 		},
@@ -512,6 +523,7 @@ func TestArchiveDownloadHTTPClientDiscardsCallerDialer(t *testing.T) {
 			},
 		}},
 		allowedOrigins,
+		false,
 		nil,
 		func(context.Context, string) ([]net.IPAddr, error) {
 			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
@@ -527,6 +539,89 @@ func TestArchiveDownloadHTTPClientDiscardsCallerDialer(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.False(t, callerDialed)
+}
+
+func TestArchiveHTTPClientAllowPrivateKeepsOtherChecks(t *testing.T) {
+	t.Parallel()
+
+	allowedOrigins, err := archiveDownloadOrigins(
+		"https://archive.example.com",
+		nil,
+	)
+	require.NoError(t, err)
+	var dialedAddress string
+	client := archiveDownloadHTTPClient(
+		&http.Client{
+			Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+		},
+		allowedOrigins,
+		true,
+		func(_ context.Context, _ string, address string) (net.Conn, error) {
+			dialedAddress = address
+			return nil, errors.New("dial reached")
+		},
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("10.0.0.5")}}, nil
+		},
+	)
+	transport := client.Transport.(*http.Transport)
+	assert.Nil(t, transport.Proxy)
+
+	_, err = transport.DialContext(
+		context.Background(),
+		"tcp",
+		"archive.example.com:443",
+	)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, netguard.ErrBlockedDestination)
+	assert.Equal(t, "archive.example.com:443", dialedAddress)
+
+	for _, target := range []string{
+		"https://other.example.com/block",
+		"http://archive.example.com/block",
+	} {
+		redirect, err := http.NewRequest(http.MethodGet, target, nil)
+		require.NoError(t, err)
+		err = client.CheckRedirect(redirect, nil)
+		require.Error(t, err, target)
+		assert.Contains(t, err.Error(), "unsafe archive redirect", target)
+	}
+}
+
+// TestGetBlock_PrivateArchiveDownloadRequiresOptIn serves the archive and its
+// download origin from loopback, the shape of a private S3-compatible store.
+func TestGetBlock_PrivateArchiveDownloadRequiresOptIn(t *testing.T) {
+	t.Parallel()
+
+	block := archiveBlockFixtures(t, 2)[1]
+	hash := block.Hash()
+	for _, allowPrivate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("allowPrivate=%t", allowPrivate), func(t *testing.T) {
+			t.Parallel()
+
+			db := newTestDB(t)
+			blocks, configure := serveArchiveBlock(t, block)
+			baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+			configure(fakeArch)
+			store, err := NewBarkBlobStore(BlobStoreBarkConfig{
+				BaseUrl:                            baseURL,
+				HTTPClient:                         httpClient,
+				BlockDownloadAllowPrivateAddresses: allowPrivate,
+			}, db.Blob())
+			require.NoError(t, err)
+			rTxn := store.NewTransaction(false)
+			t.Cleanup(func() { _ = rTxn.Rollback() })
+
+			cbor, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
+			if !allowPrivate {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, netguard.ErrBlockedDestination)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, block.Cbor(), cbor)
+		})
+	}
 }
 
 func TestArchiveServiceClientAllowsConfiguredLocalEndpoint(t *testing.T) {
