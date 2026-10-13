@@ -724,7 +724,8 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		// Recognize malformed registrations by shape too: otherwise a staged
 		// map with more decodable entries can replace the current map.
 		isPoolParams := len(pools) > 0 || hasPoolParamsEntries(ps[m.idx])
-		if bestIdx < 0 || (isPoolParams && !bestIsPoolParams) {
+		if bestIdx < 0 ||
+			(len(ps) != 4 && isPoolParams && !bestIsPoolParams) {
 			bestPools = pools
 			bestWarning = warning
 			bestIdx = m.idx

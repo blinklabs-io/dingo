@@ -2015,6 +2015,21 @@ func TestParsePStateFuturePoolParamsLargerThanCurrent(t *testing.T) {
 	require.Len(t, pools[0].FutureParams.Owners, 3)
 }
 
+func TestParsePStateRejectsFutureParamsWithoutCurrentPool(t *testing.T) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t),
+		encodeCborMap(t),
+	))
+	require.ErrorContains(t, err, "unregistered pool")
+	require.Empty(t, pools)
+}
+
 // A staged re-registration with no registered pool cannot be applied, so the
 // parse must report it instead of dropping it.
 func TestParsePStateRejectsFuturePoolParamsForUnregisteredPool(t *testing.T) {
