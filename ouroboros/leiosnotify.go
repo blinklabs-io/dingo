@@ -778,7 +778,7 @@ func newLeiosTxFetchCandidate(
 	}
 	return &leiosTxFetchCandidate{
 		connId: connId, connKey: connKey, guard: guard,
-		client: client, point: point, ctx: ctx, cancel: cancel,
+		client: client, point: point, done: done, ctx: ctx, cancel: cancel,
 	}
 }
 
@@ -870,7 +870,7 @@ func (o *Ouroboros) launchLeiosTxFetchOwner(
 	if o.leiosTxFetchBeforeLaunch != nil {
 		o.leiosTxFetchBeforeLaunch()
 	}
-	if candidate.ctx.Err() != nil {
+	if connectionDone(candidate.done) || candidate.ctx.Err() != nil {
 		o.finishLeiosTxFetch(key, candidate, false)
 		candidate.cancel()
 		o.releaseLeiosFetch(candidate.guard)
@@ -1504,6 +1504,7 @@ type leiosTxFetchCandidate struct {
 	guard       *leiosFetchGuard
 	client      leiosTxOfferRequester
 	point       ocommon.Point
+	done        <-chan any
 	ctx         context.Context
 	cancel      context.CancelFunc
 	attemptCtx  context.Context
