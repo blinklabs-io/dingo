@@ -2183,30 +2183,41 @@ func (a *NodeAdapter) PoolMetadata(
 // PoolsExtended returns the current active pools with the fields required
 // by the Blockfrost OpenAPI 0.1.90 pool_list_extended schema (active/live
 // stake, blocks_minted, live_saturation, margin/pledge/cost, and the
-// nullable off-chain metadata object). Pagination and ordering are applied
-// by the caller (handlePoolsExtended); this returns every active pool.
-func (a *NodeAdapter) PoolsExtended() (
-	[]PoolExtendedInfo, error,
+// nullable off-chain metadata object).
+func (a *NodeAdapter) PoolsExtended(
+	ctx context.Context,
+	params PaginationParams,
+) (
+	[]PoolExtendedInfo, int, error,
 ) {
 	db := a.ledgerState.Database()
-	txn := db.Transaction(context.Background(), false)
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 
-	poolKeyHashes, err := db.Metadata().GetActivePoolKeyHashes(txn.Metadata())
+	offset, ok := paginationOffset(params)
+	if !ok {
+		return []PoolExtendedInfo{}, 0, nil
+	}
+	poolKeyHashes, total, err := db.Metadata().GetActivePoolKeyHashesPage(
+		params.Count,
+		offset,
+		params.Order == PaginationOrderDesc,
+		txn.Metadata(),
+	)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"get active pool key hashes: %w",
+		return nil, 0, fmt.Errorf(
+			"get active pool key hash page: %w",
 			err,
 		)
 	}
 	if len(poolKeyHashes) == 0 {
-		return []PoolExtendedInfo{}, nil
+		return []PoolExtendedInfo{}, total, nil
 	}
 	poolHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
 	for _, poolKeyHash := range poolKeyHashes {
 		poolHash, err := lcommon.NewBlake2b224Checked(poolKeyHash)
 		if err != nil {
-			return nil, fmt.Errorf("active pool key hash: %w", err)
+			return nil, 0, fmt.Errorf("active pool key hash: %w", err)
 		}
 		poolHashes = append(poolHashes, lcommon.PoolKeyHash(poolHash))
 	}
@@ -2216,7 +2227,7 @@ func (a *NodeAdapter) PoolsExtended() (
 		txn.Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, 0, fmt.Errorf(
 			"get live stake by pools: %w",
 			err,
 		)
@@ -2228,13 +2239,14 @@ func (a *NodeAdapter) PoolsExtended() (
 	if currentEpoch >= 2 {
 		activeStakeEpoch = currentEpoch - 2
 	}
-	snapshots, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+	snapshots, err := db.Metadata().GetPoolStakeSnapshotsForPools(
 		activeStakeEpoch,
 		"mark",
+		poolKeyHashes,
 		txn.Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, 0, fmt.Errorf(
 			"get pool stake snapshots for epoch %d: %w",
 			activeStakeEpoch,
 			err,
@@ -2253,13 +2265,13 @@ func (a *NodeAdapter) PoolsExtended() (
 	// PoolDetail (adapter_pool_detail.go).
 	protocolParams, err := a.CurrentProtocolParams()
 	if err != nil {
-		return nil, fmt.Errorf("get protocol parameters: %w", err)
+		return nil, 0, fmt.Errorf("get protocol parameters: %w", err)
 	}
 	totalActiveStake, err := db.Metadata().GetTotalActiveStake(
 		activeStakeEpoch, "mark", txn.Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get total active stake: %w", err)
+		return nil, 0, fmt.Errorf("get total active stake: %w", err)
 	}
 	// live_saturation's denominator is the per-pool saturation threshold
 	// totalCirculation/nOpt, not total active stake. See
@@ -2267,12 +2279,12 @@ func (a *NodeAdapter) PoolsExtended() (
 	// Resolved once for the whole page rather than per pool.
 	totalCirculation, err := a.totalCirculation(txn.Metadata())
 	if err != nil {
-		return nil, fmt.Errorf("get total circulation: %w", err)
+		return nil, 0, fmt.Errorf("get total circulation: %w", err)
 	}
 
-	pools, err := db.GetPools(context.Background(), poolHashes, txn)
+	pools, err := db.GetPools(ctx, poolHashes, txn)
 	if err != nil {
-		return nil, fmt.Errorf("get pools: %w", err)
+		return nil, 0, fmt.Errorf("get pools: %w", err)
 	}
 	poolsByHash := make(map[string]*models.Pool, len(pools))
 	for i := range pools {
@@ -2280,7 +2292,7 @@ func (a *NodeAdapter) PoolsExtended() (
 		poolsByHash[string(pool.PoolKeyHash)] = pool
 	}
 
-	// blocks_minted (lifetime): one query across every active pool,
+	// blocks_minted (lifetime): one query across the requested page,
 	// keyed by pool, exactly like CountPoolBlocksInSlotRange is already
 	// used for pool detail (adapter_pool_detail.go) -- not a per-pool
 	// query. On a Mithril-bootstrapped node it is a lower bound: it adds the
@@ -2290,10 +2302,10 @@ func (a *NodeAdapter) PoolsExtended() (
 		db.Metadata(), txn.Metadata(), poolHashes, noSlotUpperBound,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("count lifetime blocks for pools: %w", err)
+		return nil, 0, fmt.Errorf("count lifetime blocks for pools: %w", err)
 	}
 
-	// Off-chain metadata: one batched query across every active pool's
+	// Off-chain metadata: one batched query across the requested pools'
 	// registered metadata URL (GetOffchainMetadataBatch), instead of one
 	// GetOffchainMetadata call per pool.
 	metadataURLs := make([]string, 0, len(pools))
@@ -2309,7 +2321,7 @@ func (a *NodeAdapter) PoolsExtended() (
 		models.OffchainMetadataSourcePool, metadataURLs, txn.Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get off-chain metadata for pools: %w", err)
+		return nil, 0, fmt.Errorf("get off-chain metadata for pools: %w", err)
 	}
 	metadataDocsByKey := make(
 		map[string]*models.OffchainMetadata, len(metadataDocs),
@@ -2325,7 +2337,7 @@ func (a *NodeAdapter) PoolsExtended() (
 	for _, poolKeyHash := range poolKeyHashes {
 		pool, ok := poolsByHash[string(poolKeyHash)]
 		if !ok {
-			return nil, fmt.Errorf(
+			return nil, 0, fmt.Errorf(
 				"get pool %x: %w",
 				poolKeyHash,
 				models.ErrPoolNotFound,
@@ -2333,7 +2345,7 @@ func (a *NodeAdapter) PoolsExtended() (
 		}
 		poolKeyHash, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
 		if err != nil {
-			return nil, fmt.Errorf("pool key hash: %w", err)
+			return nil, 0, fmt.Errorf("pool key hash: %w", err)
 		}
 		poolID := lcommon.PoolId(poolKeyHash)
 		poolHex := hex.EncodeToString(pool.PoolKeyHash)
@@ -2385,7 +2397,7 @@ func (a *NodeAdapter) PoolsExtended() (
 		})
 	}
 
-	return ret, nil
+	return ret, total, nil
 }
 
 // Account returns stake-account information for the

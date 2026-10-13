@@ -62,7 +62,9 @@ type BlockfrostNode interface {
 
 	// PoolsExtended returns the current active pools with
 	// extended details.
-	PoolsExtended() ([]PoolExtendedInfo, error)
+	PoolsExtended(context.Context, PaginationParams) (
+		[]PoolExtendedInfo, int, error,
+	)
 
 	// PoolsList returns the paginated list of registered (active,
 	// non-retired) stake pool IDs, along with the total number of

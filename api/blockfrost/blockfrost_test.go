@@ -24,6 +24,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1113,10 +1114,20 @@ func (m *mockNode) Genesis() (
 	return m.genesis, m.genesisErr
 }
 
-func (m *mockNode) PoolsExtended() (
-	[]PoolExtendedInfo, error,
+func (m *mockNode) PoolsExtended(
+	_ context.Context,
+	params PaginationParams,
+) (
+	[]PoolExtendedInfo, int, error,
 ) {
-	return m.pools, m.poolsErr
+	pools := slices.Clone(m.pools)
+	slices.SortFunc(pools, func(a, b PoolExtendedInfo) int {
+		return strings.Compare(a.Hex, b.Hex)
+	})
+	if params.Order == PaginationOrderDesc {
+		slices.Reverse(pools)
+	}
+	return paginateSlice(pools, params), len(pools), m.poolsErr
 }
 
 func (m *mockNode) PoolsList(ctx context.Context,

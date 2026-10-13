@@ -2100,6 +2100,15 @@ type MetadataStore interface {
 	// the retirement epoch is in the future.
 	GetActivePoolKeyHashes(types.Txn) ([][]byte, error)
 
+	// GetActivePoolKeyHashesPage returns one pool-key-ordered page of the
+	// currently active pools and the total active pool count.
+	GetActivePoolKeyHashesPage(
+		int, // limit
+		int, // offset
+		bool, // descending
+		types.Txn,
+	) ([][]byte, int, error)
+
 	// GetActivePoolKeyHashesOrdered retrieves the key hashes of all
 	// currently active pools (same active-pool semantics as
 	// GetActivePoolKeyHashes), ordered oldest-first by each pool's
