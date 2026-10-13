@@ -223,6 +223,10 @@ type Ouroboros struct {
 	// chainsyncHasBestPeer reports whether chain selection currently has a
 	// best peer. Nil means none. Tests override it without a node.
 	chainsyncHasBestPeer func() bool
+	// behindTipRecycleAt is when a behind-local-tip recycle was last
+	// requested on any connection; see claimBehindTipRecycle.
+	behindTipRecycleMu sync.Mutex
+	behindTipRecycleAt time.Time
 	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
 	// gate whether a peer-reported header may influence Genesis chain-selection
 	// density or corroboration before its VRF/KES cryptography (and, once local

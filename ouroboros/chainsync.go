@@ -41,6 +41,13 @@ import (
 )
 
 const (
+	// chainsyncBehindTipRecycleCooldown spaces behind-local-tip recycles
+	// across all connections. With no best peer every lagging honest peer
+	// matches the stale-cursor shape at once; recycling them together leaves
+	// only a peer whose cursor sits at the local tip, which may be a frozen
+	// dead-fork peer. Peers still behind retry on their next header.
+	chainsyncBehindTipRecycleCooldown = 30 * time.Second
+
 	chainsyncIntersectPointCount = 100
 
 	// chainsyncMaxFindIntersectPoints bounds how many points a peer may
@@ -1184,6 +1191,20 @@ func (o *Ouroboros) chainsyncCursorFarBehindLocalTip(
 	return farBehind(headerBlockNumber) && !farBehind(peerTipBlockNumber)
 }
 
+// claimBehindTipRecycle reports whether a behind-local-tip recycle may be
+// requested at now, and records it when so. It admits one recycle per
+// chainsyncBehindTipRecycleCooldown across all connections.
+func (o *Ouroboros) claimBehindTipRecycle(now time.Time) bool {
+	o.behindTipRecycleMu.Lock()
+	defer o.behindTipRecycleMu.Unlock()
+	if !o.behindTipRecycleAt.IsZero() &&
+		now.Sub(o.behindTipRecycleAt) < chainsyncBehindTipRecycleCooldown {
+		return false
+	}
+	o.behindTipRecycleAt = now
+	return true
+}
+
 func (o *Ouroboros) chainsyncClientRollForwardAt(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
@@ -1266,6 +1287,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			v.BlockNumber(),
 			tip.BlockNumber,
 		) {
+			if !o.claimBehindTipRecycle(time.Now()) {
+				return nil
+			}
 			o.config.Logger.Debug(
 				"chainsync: cursor far behind the local tip",
 				"component", "ouroboros",

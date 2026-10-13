@@ -16020,7 +16020,10 @@ chain selection skips the peer, while it holds an ingress slot that a peer at
 the tip could use. The check runs in the callback after
 `reconcileChainsyncIngressAdmission`, so an observer promoted with a cursor
 left far behind is resynced on its first header. The shared per-connection
-timer marker allows one resync per connection until it reconnects. A header
+timer marker allows one resync per connection until it reconnects. At most one
+such recycle is requested across all connections per 30 seconds
+(`claimBehindTipRecycle`), so a gap with many lagging honest peers does not
+recycle all of them and leave only a near-tip peer. A header
 within `k` of the tip (a normal rollback or fork) is not affected, and neither
 is a peer whose own tip is more than `k` behind: re-intersecting cannot bring
 it closer, so it stays attached like any other peer lagging on our chain.
