@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -114,7 +115,7 @@ INSERT INTO utxo (
 		require.NoError(t, err)
 		_, err = metadataTxn.Exec(`
 INSERT INTO asset (name, policy_id, utxo_id, amount)
-VALUES ('asset', 'policy', ?, '1')`, utxoID)
+VALUES (?, ?, ?, '1')`, []byte("asset"), []byte("policy"), utxoID)
 		require.NoError(t, err)
 		if outputCbor != nil {
 			require.NoError(t, db.Blob().SetUtxo(
@@ -198,6 +199,103 @@ func TestBackfillLiveAssetUtxoAddressesFailsClosed(t *testing.T) {
 				`SELECT COUNT(*) FROM utxo_address`,
 			).Scan(&count))
 			require.Zero(t, count)
+		})
+	}
+}
+
+func TestRollbackRestoresLegacyAssetAddressAtomically(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		validCbor bool
+	}{
+		{name: "restores address", validCbor: true},
+		{name: "invalid CBOR keeps UTxO spent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			raw := rawSQLiteMetadataFixture(t, db)
+			addr, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeKeyNone,
+				lcommon.AddressNetworkTestnet,
+				bytes.Repeat([]byte{0x52}, lcommon.AddressHashSize),
+				nil,
+			)
+			require.NoError(t, err)
+			outputCbor := []byte{0xff}
+			if tc.validCbor {
+				outputCbor, err = cbor.Encode(&shelley.ShelleyTransactionOutput{
+					OutputAddress: addr,
+					OutputAmount:  1,
+				})
+				require.NoError(t, err)
+			}
+			seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, outputCbor)
+			spenderHash := bytes.Repeat([]byte{0x73}, 32)
+			_, err = raw.Exec(`
+INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, 20, 0)`,
+				spenderHash,
+			)
+			require.NoError(t, err)
+			_, err = raw.Exec(`
+UPDATE utxo SET deleted_slot = 20, spent_at_tx_id = ?`, spenderHash)
+			require.NoError(t, err)
+
+			err = db.RollbackMetadataAfterSlot(
+				t.Context(),
+				ocommon.NewPoint(10, []byte("rollback")),
+				0,
+				nil,
+			)
+			if !tc.validCbor {
+				require.Error(t, err)
+				var deletedSlot uint64
+				var addressRows int
+				var transactionRows int
+				require.NoError(t, raw.QueryRow(
+					`SELECT deleted_slot FROM utxo`,
+				).Scan(&deletedSlot))
+				assert.Equal(t, uint64(20), deletedSlot)
+				require.NoError(t, raw.QueryRow(
+					`SELECT COUNT(*) FROM utxo_address`,
+				).Scan(&addressRows))
+				assert.Zero(t, addressRows)
+				require.NoError(t, raw.QueryRow(
+					`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
+					spenderHash,
+				).Scan(&transactionRows))
+				assert.Equal(t, 1, transactionRows)
+				return
+			}
+			require.NoError(t, err)
+			var deletedSlot uint64
+			var addressRows int
+			require.NoError(t, raw.QueryRow(
+				`SELECT deleted_slot FROM utxo`,
+			).Scan(&deletedSlot))
+			require.Zero(t, deletedSlot)
+			require.NoError(t, raw.QueryRow(
+				`SELECT COUNT(*) FROM utxo_address`,
+			).Scan(&addressRows))
+			require.Equal(t, 1, addressRows)
+			var transactionRows int
+			require.NoError(t, raw.QueryRow(
+				`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
+				spenderHash,
+			).Scan(&transactionRows))
+			require.Zero(t, transactionRows)
+			holders, total, err := db.AssetHolders(
+				t.Context(),
+				models.AssetHolderQuery{
+					PolicyID:  []byte("policy"),
+					AssetName: []byte("asset"),
+					Limit:     100,
+				},
+				nil,
+			)
+			require.NoError(t, err)
+			require.Equal(t, 1, total)
+			require.Len(t, holders, 1)
+			assert.Equal(t, addr.String(), string(holders[0].Address))
 		})
 	}
 }

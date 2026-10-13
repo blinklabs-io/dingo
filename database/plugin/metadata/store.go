@@ -919,6 +919,12 @@ type UtxoStore interface {
 		int,
 		types.Txn,
 	) ([]models.Utxo, error)
+	GetAssetUtxosDeletedAfterSlotMissingAddress(
+		uint64,
+		uint,
+		int,
+		types.Txn,
+	) ([]models.Utxo, error)
 	SetUtxoAddress(uint, []byte, types.Txn) error
 
 	// GetUtxosDeletedBeforeSlot retrieves UTxOs deleted before the given slot, up to the specified limit.

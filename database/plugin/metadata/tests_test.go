@@ -150,6 +150,7 @@ var utxoStoreMethods = []string{
 	"GetUtxosByAssets",
 	"GetAssetHolders",
 	"GetLiveAssetUtxosMissingAddress",
+	"GetAssetUtxosDeletedAfterSlotMissingAddress",
 	"SetUtxoAddress",
 	"IterateLiveUtxos",
 	"IterateUtxosAsOf",
