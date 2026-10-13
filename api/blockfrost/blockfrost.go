@@ -139,6 +139,34 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleAssetSection,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/scripts",
+		b.handleScripts,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/scripts/{script_hash}",
+		b.handleScript,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/scripts/{script_hash}/{section}",
+		b.handleScriptSection,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/scripts/datum/{datum_hash}/cbor",
+		b.handleDatumCBOR,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/mempool",
+		b.handleMempool,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/mempool/{hash}",
+		b.handleMempoolTransaction,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/mempool/addresses/{address}",
+		b.handleMempoolAddress,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/pools",
 		b.handlePoolsList,
 	)

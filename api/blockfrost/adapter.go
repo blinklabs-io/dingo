@@ -151,6 +151,10 @@ type NodeAdapter struct {
 	// production. The ledger converter needs the epoch cache a running node
 	// builds, which a store-backed test adapter has no way to populate.
 	slotTime func(slot uint64) (time.Time, error)
+	// mempool serves the mempool read endpoints. It is nil when the
+	// submitter does not expose the pool, which those endpoints report as
+	// ErrMempoolUnavailable.
+	mempool mempoolReader
 }
 
 // NewNodeAdapter creates a NodeAdapter that queries the
@@ -164,10 +168,12 @@ func NewNodeAdapter(
 			"new node adapter: ledger state must not be nil",
 		)
 	}
+	reader, _ := submitter.(mempoolReader)
 	return &NodeAdapter{
 		ledgerState: ls,
 		submitter:   submitter,
 		evaluator:   ls,
+		mempool:     reader,
 	}, nil
 }
 

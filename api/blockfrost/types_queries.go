@@ -87,3 +87,126 @@ type AssetUTXOResponse struct {
 	InlineDatumJSON     json.RawMessage         `json:"inline_datum_json"`
 	ReferenceScriptHash *string                 `json:"reference_script_hash"`
 }
+
+// ScriptListItemResponse is one entry of the script listing.
+type ScriptListItemResponse struct {
+	ScriptHash string `json:"script_hash"`
+}
+
+// ScriptResponse represents a Blockfrost script object. SerialisedSize is
+// null for a native script.
+type ScriptResponse struct {
+	ScriptHash     string `json:"script_hash"`
+	Type           string `json:"type"`
+	SerialisedSize *int   `json:"serialised_size"`
+}
+
+// ScriptJSONResponse carries the JSON form of a native script, or null for a
+// Plutus script.
+type ScriptJSONResponse struct {
+	JSON json.RawMessage `json:"json"`
+}
+
+// ScriptCBORResponse carries the CBOR of a Plutus script, or null for a native
+// script.
+type ScriptCBORResponse struct {
+	CBOR *string `json:"cbor"`
+}
+
+// ScriptRedeemerResponse is one redeemer that executed a script.
+type ScriptRedeemerResponse struct {
+	TxHash           string  `json:"tx_hash"`
+	TxIndex          int     `json:"tx_index"`
+	Purpose          string  `json:"purpose"`
+	RedeemerDataHash string  `json:"redeemer_data_hash"`
+	DatumHash        *string `json:"datum_hash"`
+	UnitMem          string  `json:"unit_mem"`
+	UnitSteps        string  `json:"unit_steps"`
+	Fee              string  `json:"fee"`
+}
+
+// ScriptUTXOResponse is one UTxO carrying a script as a reference script.
+type ScriptUTXOResponse struct {
+	Address             string                  `json:"address"`
+	TxHash              string                  `json:"tx_hash"`
+	OutputIndex         int                     `json:"output_index"`
+	Amount              []AddressAmountResponse `json:"amount"`
+	Block               string                  `json:"block"`
+	DataHash            *string                 `json:"data_hash"`
+	InlineDatum         *string                 `json:"inline_datum"`
+	ReferenceScriptHash string                  `json:"reference_script_hash"`
+}
+
+// DatumResponse carries the detailed-schema JSON of a datum.
+type DatumResponse struct {
+	JSONValue json.RawMessage `json:"json_value"`
+}
+
+// DatumCBORResponse carries the hex CBOR of a datum.
+type DatumCBORResponse struct {
+	CBOR string `json:"cbor"`
+}
+
+// MempoolHashResponse is one entry of a mempool listing.
+type MempoolHashResponse struct {
+	TxHash string `json:"tx_hash"`
+}
+
+// MempoolTransactionSummaryResponse holds the fields a transaction has before
+// it is in a block.
+type MempoolTransactionSummaryResponse struct {
+	Hash               string                  `json:"hash"`
+	OutputAmount       []AddressAmountResponse `json:"output_amount"`
+	Fees               string                  `json:"fees"`
+	Deposit            string                  `json:"deposit"`
+	Size               int                     `json:"size"`
+	InvalidBefore      *string                 `json:"invalid_before"`
+	InvalidHereafter   *string                 `json:"invalid_hereafter"`
+	UtxoCount          int                     `json:"utxo_count"`
+	WithdrawalCount    int                     `json:"withdrawal_count"`
+	MirCertCount       int                     `json:"mir_cert_count"`
+	DelegationCount    int                     `json:"delegation_count"`
+	StakeCertCount     int                     `json:"stake_cert_count"`
+	PoolUpdateCount    int                     `json:"pool_update_count"`
+	PoolRetireCount    int                     `json:"pool_retire_count"`
+	AssetMintBurnCount int                     `json:"asset_mint_or_burn_count"`
+	RedeemerCount      int                     `json:"redeemer_count"`
+	ValidContract      bool                    `json:"valid_contract"`
+}
+
+// MempoolInputResponse is one input of a mempool transaction. The address is
+// omitted when the input does not resolve to a confirmed output.
+type MempoolInputResponse struct {
+	Address     *string `json:"address,omitempty"`
+	TxHash      string  `json:"tx_hash"`
+	OutputIndex int     `json:"output_index"`
+	Collateral  bool    `json:"collateral"`
+	Reference   *bool   `json:"reference,omitempty"`
+}
+
+// MempoolOutputResponse is one output of a mempool transaction.
+type MempoolOutputResponse struct {
+	Address             string                  `json:"address"`
+	Amount              []AddressAmountResponse `json:"amount"`
+	OutputIndex         int                     `json:"output_index"`
+	DataHash            *string                 `json:"data_hash"`
+	InlineDatum         *string                 `json:"inline_datum"`
+	Collateral          bool                    `json:"collateral"`
+	ReferenceScriptHash *string                 `json:"reference_script_hash"`
+}
+
+// MempoolRedeemerResponse is one redeemer of a mempool transaction.
+type MempoolRedeemerResponse struct {
+	TxIndex   int    `json:"tx_index"`
+	Purpose   string `json:"purpose"`
+	UnitMem   string `json:"unit_mem"`
+	UnitSteps string `json:"unit_steps"`
+}
+
+// MempoolTransactionResponse represents a transaction in the mempool.
+type MempoolTransactionResponse struct {
+	Tx        MempoolTransactionSummaryResponse `json:"tx"`
+	Inputs    []MempoolInputResponse            `json:"inputs"`
+	Outputs   []MempoolOutputResponse           `json:"outputs"`
+	Redeemers []MempoolRedeemerResponse         `json:"redeemers,omitempty"`
+}

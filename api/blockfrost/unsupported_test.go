@@ -63,9 +63,6 @@ func TestRouterUnsupportedOperationsReturnExplicitError(t *testing.T) {
 		{"GET", "/api/v0/accounts/testvalue/mirs"},
 		{"GET", "/api/v0/accounts/testvalue/addresses/assets"},
 		{"GET", "/api/v0/accounts/testvalue/addresses/total"},
-		{"GET", "/api/v0/mempool"},
-		{"GET", "/api/v0/mempool/testvalue"},
-		{"GET", "/api/v0/mempool/addresses/testvalue"},
 		{"GET", "/api/v0/metadata/txs/labels"},
 		{"GET", "/api/v0/pools/retired"},
 		{"GET", "/api/v0/pools/testvalue/history"},
@@ -74,14 +71,6 @@ func TestRouterUnsupportedOperationsReturnExplicitError(t *testing.T) {
 		{"GET", "/api/v0/pools/testvalue/blocks"},
 		{"GET", "/api/v0/pools/testvalue/updates"},
 		{"GET", "/api/v0/pools/testvalue/votes"},
-		{"GET", "/api/v0/scripts"},
-		{"GET", "/api/v0/scripts/testvalue"},
-		{"GET", "/api/v0/scripts/testvalue/json"},
-		{"GET", "/api/v0/scripts/testvalue/cbor"},
-		{"GET", "/api/v0/scripts/testvalue/redeemers"},
-		{"GET", "/api/v0/scripts/testvalue/utxos"},
-		{"GET", "/api/v0/scripts/datum/testvalue"},
-		{"GET", "/api/v0/scripts/datum/testvalue/cbor"},
 		{"GET", "/api/v0/utils/addresses/xpub/testvalue/testvalue/testvalue"},
 		{"POST", "/api/v0/ipfs/add"},
 		{"GET", "/api/v0/ipfs/gateway/testvalue"},
@@ -116,11 +105,11 @@ func TestRouterUnsupportedMethodAndUnknownPath(t *testing.T) {
 		status              int
 	}{
 		{http.MethodPost, "/api/v0/pools/retired", "GET, HEAD", http.StatusMethodNotAllowed},
-		{http.MethodPost, "/api/v0/scripts/hash/cbor", "GET, HEAD", http.StatusMethodNotAllowed},
+		{http.MethodPost, "/api/v0/nutlink/hash/tickers", "GET, HEAD", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/api/v0/ipfs/pin/add/hash", "POST", http.StatusMethodNotAllowed},
-		{http.MethodHead, "/api/v0/scripts/hash", "", http.StatusNotImplemented},
+		{http.MethodHead, "/api/v0/nutlink/hash", "", http.StatusNotImplemented},
 		{http.MethodGet, "/api/v0", "", http.StatusNotFound},
-		{http.MethodGet, "/api/v0/scripts/hash/unknown", "", http.StatusNotFound},
+		{http.MethodGet, "/api/v0/nutlink/hash/unknown", "", http.StatusNotFound},
 		{http.MethodPost, "/api/v0/ipfs/pin/add/hash/extra", "", http.StatusNotImplemented},
 		{http.MethodGet, "/api/v0/ipfs/gateway/hash/dir/file.png", "", http.StatusNotImplemented},
 		{http.MethodGet, "/api/v0/ipfs/pin/list/hash/dir", "", http.StatusNotImplemented},
@@ -128,8 +117,8 @@ func TestRouterUnsupportedMethodAndUnknownPath(t *testing.T) {
 		{http.MethodGet, "/api/v0/ipfs/pin/add/hash/dir", "POST", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/api/v0/ipfs/gateway/", "", http.StatusNotFound},
 		{http.MethodPost, "/api/v0/ipfs/add/extra", "", http.StatusNotFound},
-		{http.MethodGet, "/api/v0/scripts/", "", http.StatusNotFound},
-		{http.MethodGet, "/api/v0/%73cripts/datum/hash", "", http.StatusNotImplemented},
+		{http.MethodGet, "/api/v0/nutlink/", "", http.StatusNotFound},
+		{http.MethodGet, "/api/v0/%6eutlink/tickers/hash", "", http.StatusNotImplemented},
 		{http.MethodGet, "/api/v0/ipfs/gateway/hash%2Ffile", "", http.StatusNotImplemented},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
@@ -167,7 +156,7 @@ func TestRouterUnsupportedHEADResponsesHaveNoBody(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(newTestBlockfrost(&mockNode{}).handler())
 	t.Cleanup(server.Close)
-	for _, path := range []string{"/api/v0/scripts", "/api/v0/scripts/hash"} {
+	for _, path := range []string{"/api/v0/metrics", "/api/v0/nutlink/hash"} {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()
 			response, err := server.Client().Head(server.URL + path)
