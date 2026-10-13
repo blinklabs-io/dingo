@@ -15,10 +15,11 @@
 package ledger
 
 import (
+	"encoding/hex"
 	"fmt"
-	ouroboros "github.com/blinklabs-io/gouroboros"
 	"testing"
 
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -28,9 +29,9 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
-// deadForkHeaders builds count contiguous mock headers extending from, one
+// queueClearHeaders builds count contiguous mock headers extending from, one
 // block and 10 slots apart, named so two seeds never collide.
-func deadForkHeaders(
+func queueClearHeaders(
 	seed string,
 	prevHash []byte,
 	prevBlock uint64,
@@ -51,15 +52,15 @@ func deadForkHeaders(
 	return out
 }
 
-func deadForkEvent(
+func queueClearEvent(
 	connId ouroboros.ConnectionId,
-	h mockHeader,
+	h lcommon.BlockHeader,
 	advertised ochainsync.Tip,
 ) ChainsyncEvent {
 	return ChainsyncEvent{
 		ConnectionId: connId,
 		BlockHeader:  h,
-		Point:        ocommon.NewPoint(h.slot, h.hash.Bytes()),
+		Point:        ocommon.NewPoint(h.SlotNumber(), h.Hash().Bytes()),
 		Tip:          advertised,
 	}
 }
@@ -105,7 +106,7 @@ func (r *resyncRecorder) drain(t *testing.T) []event.ChainsyncResyncEvent {
 // in-flight headers are still the canonical continuation of what it already
 // sent, so they must not each count as a fork mismatch and sum to a
 // persistent-fork resync of that peer.
-func TestDeadForkQueueClearDoesNotCascadeIntoPersistentFork(t *testing.T) {
+func TestQueueClearDoesNotCascadeIntoPersistentFork(t *testing.T) {
 	t.Parallel()
 
 	for _, queued := range []int{5, 250, 257, 1000} {
@@ -122,13 +123,13 @@ func TestDeadForkQueueClearDoesNotCascadeIntoPersistentFork(t *testing.T) {
 				Point:       ocommon.NewPoint(100000, testHashBytes("far-tip")),
 				BlockNumber: 5000,
 			}
-			canon := deadForkHeaders(
+			canon := queueClearHeaders(
 				"canon", tipHdr.Point.Hash, tipHdr.BlockNumber,
 				tipHdr.Point.Slot, queued+40,
 			)
 			for _, h := range canon[:queued] {
 				require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
-					deadForkEvent(fixture.connId, h, advertised)))
+					queueClearEvent(fixture.connId, h, advertised)))
 			}
 			require.Equal(t, queued, fixture.ls.chain.HeaderCount(),
 				"fixture must hold a pipeline of queued headers")
@@ -143,18 +144,12 @@ func TestDeadForkQueueClearDoesNotCascadeIntoPersistentFork(t *testing.T) {
 				slot:        tipHdr.Point.Slot,
 			}
 			require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
-				deadForkEvent(fixture.connId, stray, advertised)))
-			t.Logf("after stray: mismatches=%d queued=%d",
-				fixture.ls.headerMismatchCount, fixture.ls.chain.HeaderCount())
+				queueClearEvent(fixture.connId, stray, advertised)))
 
 			maxCount := 0
-			for i, h := range canon[queued:] {
+			for _, h := range canon[queued:] {
 				require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
-					deadForkEvent(fixture.connId, h, advertised)))
-				if fixture.ls.headerMismatchCount > 0 {
-					t.Logf("in-flight %d: mismatches=%d queued=%d", i,
-						fixture.ls.headerMismatchCount, fixture.ls.chain.HeaderCount())
-				}
+					queueClearEvent(fixture.connId, h, advertised)))
 				maxCount = max(maxCount, fixture.ls.headerMismatchCount)
 			}
 			for _, e := range rec.drain(t) {
@@ -183,7 +178,7 @@ func TestPeerHeaderHistoryRetainsOnlyUnappliedPastLimit(t *testing.T) {
 			t.Parallel()
 			fixture := newChainsyncRollbackFixture(t)
 			tip := fixture.currentTip
-			headers := deadForkHeaders(
+			headers := queueClearHeaders(
 				"hist", tip.Point.Hash, tip.BlockNumber, tip.Point.Slot, 300,
 			)
 			advertised := ochainsync.Tip{Point: tip.Point}
@@ -192,11 +187,64 @@ func TestPeerHeaderHistoryRetainsOnlyUnappliedPastLimit(t *testing.T) {
 					h.slot = tip.Point.Slot
 				}
 				fixture.ls.recordPeerHeaderHistory(
-					deadForkEvent(fixture.connId, h, advertised))
+					queueClearEvent(fixture.connId, h, advertised))
 			}
 			history := fixture.ls.peerHeaderHistory[connIdKey(fixture.connId)]
 			require.NotNil(t, history)
-			require.Len(t, history.order, tc.want)
+			require.Equal(t, tc.want, len(history.order))
 		})
 	}
+}
+
+// Retention must hold for headers of production size: the byte budgets may not
+// evict unapplied headers while the header queue still has room for them.
+func TestPeerHeaderHistoryRetainsRealSizedUnappliedHeaders(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	capacity := fixture.ls.chain.MaxQueuedHeaders()
+	count := capacity - 1
+	tip := fixture.currentTip
+	headers := queueClearHeaders(
+		"sized", tip.Point.Hash, tip.BlockNumber, tip.Point.Slot, count,
+	)
+	advertised := ochainsync.Tip{Point: tip.Point}
+	cbor := make([]byte, 900)
+	for _, h := range headers {
+		fixture.ls.recordPeerHeaderHistory(queueClearEvent(
+			fixture.connId, sizedMockHeader{mockHeader: h, cbor: cbor},
+			advertised,
+		))
+	}
+	history := fixture.ls.peerHeaderHistory[connIdKey(fixture.connId)]
+	require.NotNil(t, history)
+	require.Equal(t, count, len(history.order))
+	require.Equal(t, hex.EncodeToString(headers[0].hash.Bytes()),
+		history.order[0])
+	require.LessOrEqual(t, fixture.ls.peerHeaderHistoryBytes,
+		maxPeerHeaderHistoryBytesTotal)
+}
+
+// Headers too large to fit the queue in the byte budget are still bounded.
+func TestPeerHeaderHistoryUnappliedRetentionStaysByteBounded(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	tip := fixture.currentTip
+	headers := queueClearHeaders(
+		"huge", tip.Point.Hash, tip.BlockNumber, tip.Point.Slot, 2000,
+	)
+	advertised := ochainsync.Tip{Point: tip.Point}
+	cbor := make([]byte, 64<<10)
+	for _, h := range headers {
+		fixture.ls.recordPeerHeaderHistory(queueClearEvent(
+			fixture.connId, sizedMockHeader{mockHeader: h, cbor: cbor},
+			advertised,
+		))
+	}
+	history := fixture.ls.peerHeaderHistory[connIdKey(fixture.connId)]
+	require.NotNil(t, history)
+	require.LessOrEqual(t, history.retainedBytes,
+		maxPeerHeaderHistoryUnappliedBytesPerConn)
+	require.Greater(t, len(history.order), 0)
 }

@@ -224,9 +224,15 @@ const (
 	// K-sized history where possible; when pressure requires retiring a peer,
 	// fork recovery falls back to a fresh intersection.
 	maxPeerHeaderHistoryBytesPerConn = 8 << 20
-	maxPeerHeaderHistoryBytesTotal   = 32 << 20
-	minPeerHeaderHistoryRecords      = maxPeerHeaderHistoryPerConn
-	peerHeaderHistoryRecordOverhead  = 512
+	// A connection whose oldest retained header is still ahead of the local
+	// tip may exceed the per-connection budget up to this bound, sized to
+	// hold a full header queue (chain.DefaultMaxQueuedHeaders records of about
+	// 1.5 KiB each with record overhead) so a queue clear never leaves
+	// in-flight headers with an ancestry the walk cannot reach.
+	maxPeerHeaderHistoryUnappliedBytesPerConn = 24 << 20
+	maxPeerHeaderHistoryBytesTotal            = 64 << 20
+	minPeerHeaderHistoryRecords               = maxPeerHeaderHistoryPerConn
+	peerHeaderHistoryRecordOverhead           = 512
 
 	// Match ouroboros-consensus' default maximum permissible clock skew. A
 	// header within this window is held until its slot begins; an earlier
@@ -2191,7 +2197,7 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 		return
 	}
 	for len(history.order) > 0 &&
-		(history.retainedBytes+recordBytes > maxPeerHeaderHistoryBytesPerConn ||
+		(history.retainedBytes+recordBytes > ls.peerHeaderHistoryByteBudget(history) ||
 			(len(history.order) >= ls.peerHeaderHistoryLimit() &&
 				!ls.oldestPeerHeaderUnapplied(history))) {
 		if !ls.evictOldestPeerHeaderRecord(key) {
@@ -2244,12 +2250,33 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 func (ls *LedgerState) oldestPeerHeaderUnapplied(
 	history *peerHeaderChain,
 ) bool {
-	if ls.chain == nil || len(history.order) == 0 ||
-		len(history.order) >= ls.chain.MaxQueuedHeaders() {
+	return ls.chain != nil &&
+		len(history.order) < ls.chain.MaxQueuedHeaders() &&
+		ls.oldestPeerHeaderAheadOfTip(history)
+}
+
+// oldestPeerHeaderAheadOfTip reports whether the oldest retained header is
+// still ahead of the local chain tip.
+func (ls *LedgerState) oldestPeerHeaderAheadOfTip(
+	history *peerHeaderChain,
+) bool {
+	if ls.chain == nil || len(history.order) == 0 {
 		return false
 	}
 	oldest, ok := history.byHash[history.order[0]]
 	return ok && oldest.event.Point.Slot > ls.chain.Tip().Point.Slot
+}
+
+// peerHeaderHistoryByteBudget returns the byte budget for one connection's
+// history: the larger unapplied budget only while the history still holds
+// headers ahead of the local tip.
+func (ls *LedgerState) peerHeaderHistoryByteBudget(
+	history *peerHeaderChain,
+) int {
+	if ls.oldestPeerHeaderAheadOfTip(history) {
+		return maxPeerHeaderHistoryUnappliedBytesPerConn
+	}
+	return maxPeerHeaderHistoryBytesPerConn
 }
 
 func (ls *LedgerState) evictOldestPeerHeaderRecord(historyKey string) bool {
