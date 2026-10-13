@@ -5736,6 +5736,12 @@ func TestChainsyncClientRollForwardEagernessWaitErrorWithholdsHeader(
 		tip,
 	)
 	require.ErrorIs(t, err, waitErr)
+	otherConn := newTestConnId("127.0.0.1:6001", "1.1.1.2:3001")
+	require.True(
+		t,
+		state.RecordHeaderForDedup(otherConn, tip.Point),
+		"a withheld header must remain available from another peer",
+	)
 	testutil.RequireNoReceive(
 		t,
 		ledgerCh,
