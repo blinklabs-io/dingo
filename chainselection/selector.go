@@ -153,10 +153,11 @@ type ChainSelectorConfig struct {
 	GenesisMode        bool
 	GenesisWindowSlots uint64
 	// WallClockSlot returns the current wall-clock slot and whether it is
-	// known. In Genesis mode a peer whose advertised tip is older than a
-	// Genesis window, while another peer advertises a fresh tip more than k
-	// blocks beyond it, is treated as serving an abandoned fork. Optional;
-	// the rule is inactive while nil or while it reports false.
+	// known. In Genesis mode a peer whose advertised tip slot plus the
+	// Genesis window is below the wall-clock slot is treated as serving an
+	// abandoned fork: it is not selectable and its headers are not applied.
+	// Other peers' tips play no part in the decision. Optional; the rule is
+	// inactive while nil or while it reports false.
 	WallClockSlot func() (uint64, bool)
 	// MinCorroboratingPeers is the number of distinct other eligible peers
 	// that must report the same recent blocks as a candidate before that
@@ -565,9 +566,10 @@ func (cs *ChainSelector) advertisedTipStaleLocked(
 }
 
 // staleTipRuleWallSlotLocked returns the wall-clock slot the stale-tip rule
-// measures against, and false while the rule cannot decide. The apply gate and
-// GenesisStaleTipRuleActive share it: if the two disagreed, a tip could be
-// observed asynchronously while the gate already reads it.
+// measures against, and false while the rule cannot decide. It reports true
+// only in Genesis mode, and node composition observes tips synchronously
+// throughout Genesis selection, so the apply gate never reads a tracked tip
+// that predates the header it is admitting.
 func (cs *ChainSelector) staleTipRuleWallSlotLocked() (uint64, bool) {
 	if cs.mode != SelectionModeGenesis || cs.securityParam == 0 ||
 		cs.config.WallClockSlot == nil {
@@ -1809,11 +1811,13 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 	}
 	if cs.advertisedTipStaleLocked(peerTip) {
 		if logSkip {
+			wallSlot, _ := cs.staleTipRuleWallSlotLocked()
 			cs.config.Logger.Debug(
 				"skipping peer advertising a tip older than the wall clock",
 				"connection_id", connId.String(),
-				"advertised_block_number", peerTip.Tip.BlockNumber,
-				"security_param", cs.securityParam,
+				"advertised_tip_slot", peerTip.Tip.Point.Slot,
+				"wall_clock_slot", wallSlot,
+				"genesis_window_slots", cs.genesisWindowSlotsLocked(),
 			)
 		}
 		return false

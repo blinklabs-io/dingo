@@ -54,18 +54,6 @@ func (cs *ChainSelector) GenesisCorroborationActive() bool {
 	return cs.genesisCorroborationActiveLocked()
 }
 
-// GenesisStaleTipRuleActive reports whether the wall-clock stale-tip rule can
-// currently decide a peer's eligibility: Genesis mode with a wall-clock source
-// that reports a slot. While it holds, ShouldApplyIngress reads the peer's
-// advertised tip, so callers must record each tip observation before consulting
-// that gate rather than delivering it asynchronously.
-func (cs *ChainSelector) GenesisStaleTipRuleActive() bool {
-	cs.mutex.RLock()
-	defer cs.mutex.RUnlock()
-	_, ok := cs.staleTipRuleWallSlotLocked()
-	return ok
-}
-
 // peerLiveEligibleNonStaleLocked reports whether a peer passes the shared
 // live/eligible/non-stale prerequisite used by both Genesis corroboration
 // witness eligibility and normal selection eligibility. It is the single
