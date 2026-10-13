@@ -24,7 +24,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func serve(t *testing.T, node BlockfrostNode, path string) *httptest.ResponseRecorder {
+func serve(
+	t *testing.T,
+	node BlockfrostNode,
+	path string,
+) *httptest.ResponseRecorder {
 	t.Helper()
 	w := httptest.NewRecorder()
 	newTestBlockfrost(node).handler().ServeHTTP(
@@ -123,7 +127,11 @@ func TestHandleBlockNavigationRejectsInvalidPagination(t *testing.T) {
 				node := &mockNode{}
 				w := serve(t, node, "/api/v0/blocks/7/"+route+"?"+query)
 				require.Equal(t, http.StatusBadRequest, w.Code)
-				require.Contains(t, w.Body.String(), "Invalid pagination parameters.")
+				require.Contains(
+					t,
+					w.Body.String(),
+					"Invalid pagination parameters.",
+				)
 				node.mu.Lock()
 				defer node.mu.Unlock()
 				require.Zero(t, node.lastBlockCalls)
@@ -223,7 +231,11 @@ func TestHandleBlockTransactionHashesPages(t *testing.T) {
 			require.Equal(t, http.StatusOK, w.Code)
 			require.JSONEq(t, tc.want, w.Body.String())
 			require.Equal(t, "5", w.Header().Get("X-Pagination-Count-Total"))
-			require.Equal(t, tc.pages, w.Header().Get("X-Pagination-Page-Total"))
+			require.Equal(
+				t,
+				tc.pages,
+				w.Header().Get("X-Pagination-Page-Total"),
+			)
 			node.mu.Lock()
 			defer node.mu.Unlock()
 			require.Equal(t, "abc", node.lastBlockID)

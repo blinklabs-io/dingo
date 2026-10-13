@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -155,10 +156,12 @@ func TestNodeAdapterBlockAtEpochSlot(t *testing.T) {
 	adapter, _, db := newDBBackedAdapter(t)
 	chain := seedChain(t, db, 3)
 	ctx := context.Background()
-	// Epoch 4 starts at the second block's slot minus 7 and is 100 slots long.
+	// Epoch 4 starts 7 slots before the second block and ends where the
+	// third block's slot begins, so that block belongs to the next epoch.
 	start := chain[1].SlotNumber() - 7
+	length := uint(chain[2].SlotNumber() - start)
 	require.NoError(t, db.SetEpoch(
-		start, 4, nil, nil, nil, nil, 6, 1000, 100, nil,
+		start, 4, nil, nil, nil, nil, 6, 1000, length, nil,
 	))
 
 	block, err := adapter.blockAtEpochSlot(ctx, 4, 7)
@@ -167,7 +170,7 @@ func TestNodeAdapterBlockAtEpochSlot(t *testing.T) {
 
 	_, err = adapter.blockAtEpochSlot(ctx, 4, 8)
 	require.ErrorIs(t, err, ErrBlockNotFound, "empty slot")
-	_, err = adapter.blockAtEpochSlot(ctx, 4, 100)
+	_, err = adapter.blockAtEpochSlot(ctx, 4, uint64(length))
 	require.ErrorIs(t, err, ErrBlockNotFound, "slot past the epoch end")
 	_, err = adapter.blockAtEpochSlot(ctx, 9, 0)
 	require.ErrorIs(t, err, ErrBlockNotFound, "unknown epoch")
@@ -213,7 +216,10 @@ func insertSpentAdapterUtxo(
 	insertAdapterUtxo(t, raw, utxo)
 	_, err := raw.Exec(
 		`UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = ? WHERE tx_id = ? AND output_idx = ?`,
-		spentBy, utxo.AddedSlot+1, utxo.TxId, utxo.OutputIdx,
+		spentBy,
+		utxo.AddedSlot+1,
+		utxo.TxId,
+		utxo.OutputIdx,
 	)
 	require.NoError(t, err)
 }
@@ -263,10 +269,8 @@ func TestNodeAdapterBlockAddresses(t *testing.T) {
 	// by address.
 	want := map[string][]string{}
 	add := func(address, hash string) {
-		for _, existing := range want[address] {
-			if existing == hash {
-				return
-			}
+		if slices.Contains(want[address], hash) {
+			return
 		}
 		want[address] = append(want[address], hash)
 	}

@@ -109,6 +109,7 @@ func (a *NodeAdapter) AddressExtended(
 			extended.Decimals = &decimals
 		}
 		extended.HasNFTOnchainMetadata, err = a.assetHasOnchainMetadata(
+			ctx,
 			policyID,
 			assetName,
 		)
@@ -130,6 +131,7 @@ func (a *NodeAdapter) AddressExtended(
 // asset carries CIP-25 metadata for it. An asset with no recorded mint, as in
 // a database populated by a snapshot import, has none.
 func (a *NodeAdapter) assetHasOnchainMetadata(
+	ctx context.Context,
 	policyID string,
 	assetName []byte,
 ) (bool, error) {
@@ -156,6 +158,7 @@ func (a *NodeAdapter) assetHasOnchainMetadata(
 	}
 	var info AssetInfo
 	if err := a.populateAssetOnchainMetadata(
+		ctx,
 		&info,
 		mintTxHash,
 		policyID,
@@ -252,6 +255,8 @@ func (a *NodeAdapter) AddressTotal(
 		if err := ctx.Err(); err != nil {
 			return AddressTotalInfo{}, err
 		}
+		// The read runs in txn, which carries ctx.
+		//nolint:contextcheck // UtxosWithHistory takes its context from txn
 		batch, err := db.UtxosWithHistory(query, txn)
 		if err != nil {
 			return AddressTotalInfo{}, fmt.Errorf(

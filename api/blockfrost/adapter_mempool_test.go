@@ -138,7 +138,11 @@ func TestNodeAdapterMempoolTransactions(t *testing.T) {
 	require.Empty(t, got)
 	got, total, err = adapter.MempoolTransactions(
 		ctx,
-		PaginationParams{Count: 100, Page: MaxPaginationPage, Order: PaginationOrderAsc},
+		PaginationParams{
+			Count: 100,
+			Page:  MaxPaginationPage,
+			Order: PaginationOrderAsc,
+		},
 	)
 	require.NoError(t, err)
 	require.Equal(t, 5, total)
@@ -220,7 +224,11 @@ func TestNodeAdapterMempoolAddressTransactions(t *testing.T) {
 	asc := PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc}
 
 	// Paying to an address lists the transactions that pay it.
-	got, total, err := adapter.MempoolAddressTransactions(ctx, addresses[1], asc)
+	got, total, err := adapter.MempoolAddressTransactions(
+		ctx,
+		addresses[1],
+		asc,
+	)
 	require.NoError(t, err)
 	require.Equal(t, 1, total)
 	require.Equal(t, []string{txs[1].Hash}, got)
@@ -231,7 +239,11 @@ func TestNodeAdapterMempoolAddressTransactions(t *testing.T) {
 	spender, _, _ := testKeyAddress(t, 0xf2, 0)
 	seedMempoolInput(t, raw, db, inputIDs[0], spender)
 	seedMempoolInput(t, raw, db, inputIDs[2], spender)
-	got, total, err = adapter.MempoolAddressTransactions(ctx, spender.String(), asc)
+	got, total, err = adapter.MempoolAddressTransactions(
+		ctx,
+		spender.String(),
+		asc,
+	)
 	require.NoError(t, err)
 	require.Equal(t, 2, total)
 	require.Equal(t, []string{txs[0].Hash, txs[2].Hash}, got)
@@ -245,7 +257,11 @@ func TestNodeAdapterMempoolAddressTransactions(t *testing.T) {
 	require.Equal(t, []string{txs[2].Hash}, got)
 
 	other, _, _ := testKeyAddress(t, 0xf3, 0)
-	got, total, err = adapter.MempoolAddressTransactions(ctx, other.String(), asc)
+	got, total, err = adapter.MempoolAddressTransactions(
+		ctx,
+		other.String(),
+		asc,
+	)
 	require.NoError(t, err)
 	require.Zero(t, total)
 	require.Empty(t, got)

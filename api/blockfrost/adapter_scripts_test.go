@@ -41,7 +41,9 @@ func insertScript(
 	t.Helper()
 	_, err := raw.Exec(
 		`INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, 1, ?)`,
-		hash, content, scriptType,
+		hash,
+		content,
+		scriptType,
 	)
 	require.NoError(t, err)
 }
@@ -91,8 +93,16 @@ func TestNodeAdapterScripts(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, 5, total)
-	require.Equal(t, []string{hex.EncodeToString(v1), hex.EncodeToString(v2)}[:0], hashes[:0])
-	require.Equal(t, []string{hex.EncodeToString(v2), hex.EncodeToString(v3)}, hashes)
+	require.Equal(
+		t,
+		[]string{hex.EncodeToString(v1), hex.EncodeToString(v2)}[:0],
+		hashes[:0],
+	)
+	require.Equal(
+		t,
+		[]string{hex.EncodeToString(v2), hex.EncodeToString(v3)},
+		hashes,
+	)
 	hashes, _, err = adapter.Scripts(
 		ctx, PaginationParams{Count: 1, Page: 1, Order: PaginationOrderDesc},
 	)
@@ -106,11 +116,11 @@ func TestNodeAdapterScripts(t *testing.T) {
 	require.Empty(t, hashes)
 
 	for hash, want := range map[string]string{
-		hex.EncodeToString(v1):   "plutusV1",
-		hex.EncodeToString(v2):   "plutusV2",
-		hex.EncodeToString(v3):   "plutusV3",
-		hex.EncodeToString(v4):   "plutusV4",
-		native.Hash().String():   "timelock",
+		hex.EncodeToString(v1): "plutusV1",
+		hex.EncodeToString(v2): "plutusV2",
+		hex.EncodeToString(v3): "plutusV3",
+		hex.EncodeToString(v4): "plutusV4",
+		native.Hash().String(): "timelock",
 	} {
 		hashBytes, err := hex.DecodeString(hash)
 		require.NoError(t, err)
@@ -170,7 +180,11 @@ func TestNodeAdapterDatum(t *testing.T) {
 	ctx := context.Background()
 	jsonValue, err := adapter.DatumJSON(ctx, hash.Bytes())
 	require.NoError(t, err)
-	require.JSONEq(t, `{"constructor":0,"fields":[{"int":42}]}`, string(jsonValue))
+	require.JSONEq(
+		t,
+		`{"constructor":0,"fields":[{"int":42}]}`,
+		string(jsonValue),
+	)
 	cborHex, err := adapter.DatumCBOR(ctx, hash.Bytes())
 	require.NoError(t, err)
 	require.Equal(t, hex.EncodeToString(datumCbor), cborHex)
@@ -204,12 +218,41 @@ func TestBuildScriptRedeemerInfos(t *testing.T) {
 		calls: map[string]int{},
 		byTx: map[string][]TransactionRedeemerInfo{
 			hex.EncodeToString(txA): {
-				{TxIndex: 0, Purpose: "spend", RedeemerDataHash: "r0", DatumHash: &datum, UnitMem: "1", UnitSteps: "2", Fee: "3"},
-				{TxIndex: 1, Purpose: "spend", RedeemerDataHash: "r1", UnitMem: "4", UnitSteps: "5", Fee: "6"},
-				{TxIndex: 0, Purpose: "mint", RedeemerDataHash: "r2", UnitMem: "7", UnitSteps: "8", Fee: "9"},
+				{
+					TxIndex:          0,
+					Purpose:          "spend",
+					RedeemerDataHash: "r0",
+					DatumHash:        &datum,
+					UnitMem:          "1",
+					UnitSteps:        "2",
+					Fee:              "3",
+				},
+				{
+					TxIndex:          1,
+					Purpose:          "spend",
+					RedeemerDataHash: "r1",
+					UnitMem:          "4",
+					UnitSteps:        "5",
+					Fee:              "6",
+				},
+				{
+					TxIndex:          0,
+					Purpose:          "mint",
+					RedeemerDataHash: "r2",
+					UnitMem:          "7",
+					UnitSteps:        "8",
+					Fee:              "9",
+				},
 			},
 			hex.EncodeToString(txB): {
-				{TxIndex: 2, Purpose: "reward", RedeemerDataHash: "r3", UnitMem: "0", UnitSteps: "0", Fee: "0"},
+				{
+					TxIndex:          2,
+					Purpose:          "reward",
+					RedeemerDataHash: "r3",
+					UnitMem:          "0",
+					UnitSteps:        "0",
+					Fee:              "0",
+				},
 			},
 		},
 	}
@@ -222,10 +265,43 @@ func TestBuildScriptRedeemerInfos(t *testing.T) {
 	got, err := buildScriptRedeemerInfos(refs, source)
 	require.NoError(t, err)
 	require.Equal(t, []ScriptRedeemerInfo{
-		{TxHash: hex.EncodeToString(txA), TxIndex: 1, Purpose: "spend", RedeemerDataHash: "r1", UnitMem: "4", UnitSteps: "5", Fee: "6"},
-		{TxHash: hex.EncodeToString(txA), TxIndex: 0, Purpose: "mint", RedeemerDataHash: "r2", UnitMem: "7", UnitSteps: "8", Fee: "9"},
-		{TxHash: hex.EncodeToString(txB), TxIndex: 2, Purpose: "reward", RedeemerDataHash: "r3", UnitMem: "0", UnitSteps: "0", Fee: "0"},
-		{TxHash: hex.EncodeToString(txA), TxIndex: 0, Purpose: "spend", RedeemerDataHash: "r0", DatumHash: &datum, UnitMem: "1", UnitSteps: "2", Fee: "3"},
+		{
+			TxHash:           hex.EncodeToString(txA),
+			TxIndex:          1,
+			Purpose:          "spend",
+			RedeemerDataHash: "r1",
+			UnitMem:          "4",
+			UnitSteps:        "5",
+			Fee:              "6",
+		},
+		{
+			TxHash:           hex.EncodeToString(txA),
+			TxIndex:          0,
+			Purpose:          "mint",
+			RedeemerDataHash: "r2",
+			UnitMem:          "7",
+			UnitSteps:        "8",
+			Fee:              "9",
+		},
+		{
+			TxHash:           hex.EncodeToString(txB),
+			TxIndex:          2,
+			Purpose:          "reward",
+			RedeemerDataHash: "r3",
+			UnitMem:          "0",
+			UnitSteps:        "0",
+			Fee:              "0",
+		},
+		{
+			TxHash:           hex.EncodeToString(txA),
+			TxIndex:          0,
+			Purpose:          "spend",
+			RedeemerDataHash: "r0",
+			DatumHash:        &datum,
+			UnitMem:          "1",
+			UnitSteps:        "2",
+			Fee:              "3",
+		},
 	}, got)
 	require.Equal(t, 1, source.calls[hex.EncodeToString(txA)],
 		"each transaction is resolved once however many redeemers it holds")
@@ -233,7 +309,9 @@ func TestBuildScriptRedeemerInfos(t *testing.T) {
 	// A redeemer the index names but the transaction does not carry means the
 	// index and the transaction disagree; it must not be skipped silently.
 	_, err = buildScriptRedeemerInfos(
-		[]models.ScriptRedeemerRef{{TxHash: txB, Tag: uint8(lcommon.RedeemerTagSpend), Index: 9}},
+		[]models.ScriptRedeemerRef{
+			{TxHash: txB, Tag: uint8(lcommon.RedeemerTagSpend), Index: 9},
+		},
 		source,
 	)
 	require.Error(t, err)
@@ -267,7 +345,9 @@ func TestNodeAdapterScriptUTXOs(t *testing.T) {
 			Amount:        types.Uint64(1_000_000 * uint64(i+1)),
 		}
 		if tx == firstTx {
-			utxo.Assets = []models.Asset{{PolicyId: policy, Name: []byte("T"), Amount: 2}}
+			utxo.Assets = []models.Asset{
+				{PolicyId: policy, Name: []byte("T"), Amount: 2},
+			}
 		}
 		insertAdapterUtxo(t, raw, utxo)
 		storePointerOutputCbor(t, db, tx.Hash, 0, addr, uint64(utxo.Amount))
@@ -289,13 +369,15 @@ func TestNodeAdapterScriptUTXOs(t *testing.T) {
 		}
 		_, err := raw.Exec(
 			`INSERT INTO utxo_reference_script (utxo_id, script_hash) VALUES (?, ?)`,
-			utxoID, holds,
+			utxoID,
+			holds,
 		)
 		require.NoError(t, err)
 		if tx == spentTx {
 			_, err := raw.Exec(
 				`UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = 51 WHERE id = ?`,
-				spender.Hash, utxoID,
+				spender.Hash,
+				utxoID,
 			)
 			require.NoError(t, err)
 		}
@@ -319,7 +401,14 @@ func TestNodeAdapterScriptUTXOs(t *testing.T) {
 	require.Nil(t, rows[0].InlineDatum)
 	require.Equal(t, []AddressAmountInfo{
 		{Unit: "lovelace", Quantity: "1000000"},
-		{Unit: hex.EncodeToString(policy) + hex.EncodeToString([]byte("T")), Quantity: "2"},
+		{
+			Unit: hex.EncodeToString(
+				policy,
+			) + hex.EncodeToString(
+				[]byte("T"),
+			),
+			Quantity: "2",
+		},
 	}, rows[0].Amount)
 	require.Equal(t, hex.EncodeToString(secondTx.Hash), rows[1].TxHash)
 	require.Nil(t, rows[1].DataHash)

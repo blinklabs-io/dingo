@@ -40,7 +40,9 @@ func TestListScriptHashesAndCountScripts(t *testing.T) {
 	} {
 		_, err := db.Exec(
 			`INSERT INTO script (hash, content, created_slot, type) VALUES (?, ?, ?, 1)`,
-			hash, []byte{0x41, byte(i)}, i,
+			hash,
+			[]byte{0x41, byte(i)},
+			i,
 		)
 		require.NoError(t, err)
 	}
@@ -52,7 +54,11 @@ func TestListScriptHashesAndCountScripts(t *testing.T) {
 	}, hashes, "scripts list in the order they were first recorded")
 	hashes, err = store.ListScriptHashes(2, 1, true, nil)
 	require.NoError(t, err)
-	require.Equal(t, [][]byte{credentialHash(0x01), credentialHash(0x03)}, hashes)
+	require.Equal(
+		t,
+		[][]byte{credentialHash(0x01), credentialHash(0x03)},
+		hashes,
+	)
 	total, err := store.CountScripts(nil)
 	require.NoError(t, err)
 	require.Equal(t, 3, total)
@@ -143,7 +149,10 @@ func TestSetTransactionIndexesReferenceScripts(t *testing.T) {
 		txn := store.Transaction(context.Background())
 		t.Cleanup(func() { _ = txn.Rollback() })
 		tx, point := referenceScriptTx(t, 0x31, script)
-		require.NoError(t, store.SetTransaction(tx, point, 0, nil, true, txn, 0))
+		require.NoError(
+			t,
+			store.SetTransaction(tx, point, 0, nil, true, txn, 0),
+		)
 		require.Equal(
 			t,
 			map[uint][]byte{0: script.Hash().Bytes()},
@@ -151,7 +160,10 @@ func TestSetTransactionIndexesReferenceScripts(t *testing.T) {
 		)
 
 		// Applying the transaction again converges on the same row.
-		require.NoError(t, store.SetTransaction(tx, point, 0, nil, true, txn, 0))
+		require.NoError(
+			t,
+			store.SetTransaction(tx, point, 0, nil, true, txn, 0),
+		)
 		require.Len(t, referenceScriptRows(t, store, txn), 1)
 	})
 
@@ -161,7 +173,10 @@ func TestSetTransactionIndexesReferenceScripts(t *testing.T) {
 		txn := store.Transaction(context.Background())
 		t.Cleanup(func() { _ = txn.Rollback() })
 		tx, point := referenceScriptTx(t, 0x32, script)
-		require.NoError(t, store.SetTransaction(tx, point, 0, nil, true, txn, 0))
+		require.NoError(
+			t,
+			store.SetTransaction(tx, point, 0, nil, true, txn, 0),
+		)
 		require.Empty(t, referenceScriptRows(t, store, txn))
 	})
 }
@@ -195,7 +210,10 @@ func TestGetScriptReferenceUtxos(t *testing.T) {
 			s = other
 		}
 		tx, point := referenceScriptTx(t, seed, s)
-		require.NoError(t, store.SetTransaction(tx, point, 0, nil, true, txn, 0))
+		require.NoError(
+			t,
+			store.SetTransaction(tx, point, 0, nil, true, txn, 0),
+		)
 	}
 	// 0x42's holder is spent.
 	_, err := rawDB(t, store, txn).ExecContext(
@@ -387,7 +405,13 @@ func TestGetScriptRedeemersOrdersByChainPosition(t *testing.T) {
 	} {
 		res, err := db.Exec(
 			`INSERT OR IGNORE INTO "transaction" (hash, block_hash, slot, block_index, valid, fee) VALUES (?, ?, ?, ?, 1, '0')`,
-			bytes.Repeat([]byte{row.tx}, 32), credentialHash(0xee), row.slot, row.txIndex,
+			bytes.Repeat(
+				[]byte{row.tx},
+				32,
+			),
+			credentialHash(0xee),
+			row.slot,
+			row.txIndex,
 		)
 		require.NoError(t, err)
 		_ = res
@@ -398,7 +422,12 @@ func TestGetScriptRedeemersOrdersByChainPosition(t *testing.T) {
 		).Scan(&id))
 		_, err = db.Exec(
 			"INSERT INTO redeemer_script (transaction_id, tag, `index`, script_hash, slot, tx_index) VALUES (?, ?, ?, ?, ?, ?)",
-			id, row.tag, row.index, hash.Bytes(), row.slot, row.txIndex,
+			id,
+			row.tag,
+			row.index,
+			hash.Bytes(),
+			row.slot,
+			row.txIndex,
 		)
 		require.NoError(t, err)
 	}
@@ -414,7 +443,11 @@ func TestGetScriptRedeemersOrdersByChainPosition(t *testing.T) {
 	}
 	refs, err := store.GetScriptRedeemers(hash, 0, 0, false, nil)
 	require.NoError(t, err)
-	require.Equal(t, []string{"1/0/0", "1/0/1", "1/1/0", "2/0/0", "3/0/0"}, order(refs))
+	require.Equal(
+		t,
+		[]string{"1/0/0", "1/0/1", "1/1/0", "2/0/0", "3/0/0"},
+		order(refs),
+	)
 	refs, err = store.GetScriptRedeemers(hash, 2, 1, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{"2/0/0", "1/1/0"}, order(refs))

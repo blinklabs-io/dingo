@@ -166,7 +166,10 @@ func (b *Blockfrost) handleMempoolTransaction(
 		})
 	}
 	for _, redeemer := range info.Redeemers {
-		resp.Redeemers = append(resp.Redeemers, MempoolRedeemerResponse(redeemer))
+		resp.Redeemers = append(
+			resp.Redeemers,
+			MempoolRedeemerResponse(redeemer),
+		)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

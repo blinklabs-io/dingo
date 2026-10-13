@@ -57,7 +57,9 @@ func (a *NodeAdapter) storedScript(
 	if err != nil {
 		return nil, fmt.Errorf("script hash %x: %w", hash, err)
 	}
-	script, err := a.ledgerState.Database().Metadata().GetScript(scriptHash, txn)
+	script, err := a.ledgerState.Database().
+		Metadata().
+		GetScript(scriptHash, txn)
 	if err != nil {
 		return nil, fmt.Errorf("get script %x: %w", hash, err)
 	}

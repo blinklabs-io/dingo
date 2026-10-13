@@ -45,10 +45,8 @@ func (a *NodeAdapter) neighborBlocks(
 		return []models.Block{}, nil
 	}
 	// The origin is skipped as well as the pages before the requested one.
+	// offset is a non-negative int, so the sum cannot overflow a uint64.
 	skip := uint64(offset) + 1 // #nosec G115 -- offset is non-negative
-	if skip < uint64(offset) {
-		return []models.Block{}, nil
-	}
 	ret := make([]models.Block, 0, params.Count)
 	for i := range params.Count {
 		distance := skip + uint64(i) // #nosec G115 -- i is non-negative
@@ -104,6 +102,7 @@ func (a *NodeAdapter) BlockNext(
 	if err != nil {
 		return nil, err
 	}
+	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
 	return a.blockInfos(blocks)
 }
 
@@ -117,6 +116,7 @@ func (a *NodeAdapter) BlockPrevious(
 	if err != nil {
 		return nil, err
 	}
+	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
 	return a.blockInfos(blocks)
 }
 
@@ -147,6 +147,7 @@ func (a *NodeAdapter) BlockBySlot(
 	if err != nil {
 		return BlockInfo{}, err
 	}
+	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
 	return a.blockInfoFromBlock(block)
 }
 
@@ -190,6 +191,7 @@ func (a *NodeAdapter) BlockByEpochSlot(
 	if err != nil {
 		return BlockInfo{}, err
 	}
+	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
 	return a.blockInfoFromBlock(block)
 }
 
@@ -380,6 +382,7 @@ func transactionAddressEffects(
 	tx lcommon.Transaction,
 	row models.Transaction,
 ) (outputs []string, spent []models.Utxo) {
+	outputs = make([]string, 0, len(tx.Outputs()))
 	if tx.IsValid() {
 		for _, output := range tx.Outputs() {
 			outputs = append(outputs, output.Address().String())

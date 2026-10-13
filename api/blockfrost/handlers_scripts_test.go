@@ -45,7 +45,11 @@ func TestHandleScripts(t *testing.T) {
 	require.Equal(t, "150", w.Header().Get("X-Pagination-Count-Total"))
 	require.Equal(t, "75", w.Header().Get("X-Pagination-Page-Total"))
 	node.mu.Lock()
-	require.Equal(t, PaginationParams{Count: 2, Page: 2, Order: "desc"}, node.lastScriptPage)
+	require.Equal(
+		t,
+		PaginationParams{Count: 2, Page: 2, Order: "desc"},
+		node.lastScriptPage,
+	)
 	node.mu.Unlock()
 
 	w = serve(t, &mockNode{}, "/api/v0/scripts")
@@ -58,10 +62,18 @@ func TestHandleScript(t *testing.T) {
 	t.Parallel()
 	size := 42
 	node := &mockNode{}
-	node.scriptInfo = ScriptInfo{Hash: testScriptHash, Type: "plutusV2", SerialisedSize: &size}
+	node.scriptInfo = ScriptInfo{
+		Hash:           testScriptHash,
+		Type:           "plutusV2",
+		SerialisedSize: &size,
+	}
 	w := serve(t, node, "/api/v0/scripts/"+testScriptHash)
 	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(t, `{"script_hash":"`+testScriptHash+`","type":"plutusV2","serialised_size":42}`, w.Body.String())
+	require.JSONEq(
+		t,
+		`{"script_hash":"`+testScriptHash+`","type":"plutusV2","serialised_size":42}`,
+		w.Body.String(),
+	)
 	want, _ := hex.DecodeString(testScriptHash)
 	node.mu.Lock()
 	require.Equal(t, want, node.lastScriptHash)
@@ -70,7 +82,11 @@ func TestHandleScript(t *testing.T) {
 	node = &mockNode{}
 	node.scriptInfo = ScriptInfo{Hash: testScriptHash, Type: "timelock"}
 	w = serve(t, node, "/api/v0/scripts/"+testScriptHash)
-	require.JSONEq(t, `{"script_hash":"`+testScriptHash+`","type":"timelock","serialised_size":null}`, w.Body.String())
+	require.JSONEq(
+		t,
+		`{"script_hash":"`+testScriptHash+`","type":"timelock","serialised_size":null}`,
+		w.Body.String(),
+	)
 }
 
 func TestHandleScriptJSONAndCBOR(t *testing.T) {
@@ -110,7 +126,11 @@ func TestHandleScriptRedeemers(t *testing.T) {
 		},
 	}
 	node.scriptTotal = 2
-	w := serve(t, node, "/api/v0/scripts/"+testScriptHash+"/redeemers?order=desc")
+	w := serve(
+		t,
+		node,
+		"/api/v0/scripts/"+testScriptHash+"/redeemers?order=desc",
+	)
 	require.Equal(t, http.StatusOK, w.Code)
 	require.JSONEq(t, `[
 {"tx_hash":"aa","tx_index":1,"purpose":"spend","redeemer_data_hash":"rd","datum_hash":"dd","unit_mem":"10","unit_steps":"20","fee":"30"},
@@ -125,10 +145,12 @@ func TestHandleScriptUTXOs(t *testing.T) {
 	t.Parallel()
 	node := &mockNode{}
 	node.scriptUTXOs = []ScriptUTXOInfo{{
-		Address:             "addr1",
-		TxHash:              "aa",
-		OutputIndex:         2,
-		Amount:              []AddressAmountInfo{{Unit: "lovelace", Quantity: "7"}},
+		Address:     "addr1",
+		TxHash:      "aa",
+		OutputIndex: 2,
+		Amount: []AddressAmountInfo{
+			{Unit: "lovelace", Quantity: "7"},
+		},
 		Block:               "bb",
 		ReferenceScriptHash: testScriptHash,
 	}}
@@ -174,7 +196,11 @@ func TestHandleScriptRoutesValidateAndMapErrors(t *testing.T) {
 		node.scriptErr = ErrScriptNotFound
 		w := serve(t, node, path)
 		require.Equal(t, http.StatusNotFound, w.Code, route)
-		require.Contains(t, w.Body.String(), "The requested component has not been found.")
+		require.Contains(
+			t,
+			w.Body.String(),
+			"The requested component has not been found.",
+		)
 
 		node = &mockNode{}
 		node.scriptErr = errors.New("boom")
@@ -182,7 +208,11 @@ func TestHandleScriptRoutesValidateAndMapErrors(t *testing.T) {
 		require.Equal(t, http.StatusInternalServerError, w.Code, route)
 	}
 	for _, route := range []string{"/redeemers", "/utxos"} {
-		w := serve(t, &mockNode{}, "/api/v0/scripts/"+testScriptHash+route+"?page=0")
+		w := serve(
+			t,
+			&mockNode{},
+			"/api/v0/scripts/"+testScriptHash+route+"?page=0",
+		)
 		require.Equal(t, http.StatusBadRequest, w.Code, route)
 		require.Contains(t, w.Body.String(), "Invalid pagination parameters.")
 	}

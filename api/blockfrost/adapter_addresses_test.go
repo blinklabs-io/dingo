@@ -88,7 +88,9 @@ func seedAddressOutput(
 	if spentBy != nil {
 		_, err := raw.Exec(
 			`UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = ? WHERE tx_id = ?`,
-			spentBy, slot+1, txHash,
+			spentBy,
+			slot+1,
+			txHash,
 		)
 		require.NoError(t, err)
 	}
@@ -209,7 +211,17 @@ func TestNodeAdapterAddressTotal(t *testing.T) {
 	// An output at a different address form sharing the payment credential
 	// belongs to the credential, not to the exact address.
 	sibling, _, _ := testKeyAddress(t, 0x81, 0x83)
-	seedAddressOutput(t, raw, db, sibling, fill32(0x14), 13, 7_000_000, nil, nil)
+	seedAddressOutput(
+		t,
+		raw,
+		db,
+		sibling,
+		fill32(0x14),
+		13,
+		7_000_000,
+		nil,
+		nil,
+	)
 
 	got, err := adapter.AddressTotal(context.Background(), addr.String())
 	require.NoError(t, err)
@@ -284,11 +296,21 @@ VALUES (?, ?, ?, ?, 5, '1', 0)`, mint.Hash, policy, nft, []byte("fp"))
 	)
 	require.NoError(t, err)
 
-	seedAddressOutput(t, raw, db, addr, fill32(0x22), 6, 3_000_000, []models.Asset{
-		{PolicyId: policy, Name: nft, Amount: 1},
-		{PolicyId: policy, Name: coin, Amount: 100},
-		{PolicyId: policy, Name: plain, Amount: 4},
-	}, nil)
+	seedAddressOutput(
+		t,
+		raw,
+		db,
+		addr,
+		fill32(0x22),
+		6,
+		3_000_000,
+		[]models.Asset{
+			{PolicyId: policy, Name: nft, Amount: 1},
+			{PolicyId: policy, Name: coin, Amount: 100},
+			{PolicyId: policy, Name: plain, Amount: 4},
+		},
+		nil,
+	)
 
 	got, err := adapter.AddressExtended(context.Background(), addr.String())
 	require.NoError(t, err)

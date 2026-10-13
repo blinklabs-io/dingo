@@ -76,8 +76,19 @@ func TestNodeAdapterAssetListings(t *testing.T) {
 	insertAdapterTransaction(t, raw, &models.Transaction{
 		Hash: fill32(0x99), Slot: 7, Valid: true,
 	})
-	seedAddressOutput(t, raw, db, addr, fill32(0x13), 6, 1_000_000,
-		[]models.Asset{{PolicyId: p2, Name: []byte("C"), Amount: 9}}, fill32(0x99))
+	seedAddressOutput(
+		t,
+		raw,
+		db,
+		addr,
+		fill32(0x13),
+		6,
+		1_000_000,
+		[]models.Asset{
+			{PolicyId: p2, Name: []byte("C"), Amount: 9},
+		},
+		fill32(0x99),
+	)
 
 	ctx := context.Background()
 	items, total, err := adapter.Assets(
@@ -127,7 +138,12 @@ func TestNodeAdapterAssetListings(t *testing.T) {
 	// Past the last page and beyond the representable offset are empty pages
 	// that still report the total.
 	items, total, err = adapter.Assets(
-		ctx, PaginationParams{Count: 100, Page: MaxPaginationPage, Order: PaginationOrderAsc},
+		ctx,
+		PaginationParams{
+			Count: 100,
+			Page:  MaxPaginationPage,
+			Order: PaginationOrderAsc,
+		},
 	)
 	require.NoError(t, err)
 	require.Equal(t, 3, total)
@@ -151,8 +167,16 @@ func TestNodeAdapterAssetHistory(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, total)
 	require.Equal(t, []AssetHistoryItemInfo{
-		{TxHash: hex.EncodeToString(fill32(0x01)), Action: "minted", Amount: "10"},
-		{TxHash: hex.EncodeToString(fill32(0x02)), Action: "burned", Amount: "3"},
+		{
+			TxHash: hex.EncodeToString(fill32(0x01)),
+			Action: "minted",
+			Amount: "10",
+		},
+		{
+			TxHash: hex.EncodeToString(fill32(0x02)),
+			Action: "burned",
+			Amount: "3",
+		},
 	}, items)
 
 	items, _, err = adapter.AssetHistory(
@@ -165,8 +189,19 @@ func TestNodeAdapterAssetHistory(t *testing.T) {
 
 	// An asset that is held but has no recorded mint, as after a snapshot
 	// import, has an empty history; an asset nothing knows is not found.
-	seedAddressOutput(t, raw, db, addr, fill32(0x21), 3, 1_000_000,
-		[]models.Asset{{PolicyId: policy, Name: []byte("held"), Amount: 1}}, nil)
+	seedAddressOutput(
+		t,
+		raw,
+		db,
+		addr,
+		fill32(0x21),
+		3,
+		1_000_000,
+		[]models.Asset{
+			{PolicyId: policy, Name: []byte("held"), Amount: 1},
+		},
+		nil,
+	)
 	items, total, err = adapter.AssetHistory(
 		ctx, policyHex, []byte("held"),
 		PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
@@ -246,15 +281,25 @@ func TestNodeAdapterAssetTransactions(t *testing.T) {
 	}, nil))
 	_, err := raw.Exec(
 		`UPDATE "transaction" SET block_hash = ?, block_index = 0 WHERE hash = ?`,
-		blockHash, produce,
+		blockHash,
+		produce,
 	)
 	require.NoError(t, err)
 
 	ctx := context.Background()
 	params := TransactionRangeParams{
-		Pagination: PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
+		Pagination: PaginationParams{
+			Count: 10,
+			Page:  1,
+			Order: PaginationOrderAsc,
+		},
 	}
-	rows, total, err := adapter.AssetTransactions(ctx, policyHex, []byte("T"), params)
+	rows, total, err := adapter.AssetTransactions(
+		ctx,
+		policyHex,
+		[]byte("T"),
+		params,
+	)
 	require.NoError(t, err)
 	require.Equal(t, 3, total)
 	require.Len(t, rows, 3)
@@ -268,15 +313,29 @@ func TestNodeAdapterAssetTransactions(t *testing.T) {
 	require.Equal(t, int64(30), rows[2].BlockTime)
 
 	desc := params
-	desc.Pagination = PaginationParams{Count: 1, Page: 2, Order: PaginationOrderDesc}
-	rows, total, err = adapter.AssetTransactions(ctx, policyHex, []byte("T"), desc)
+	desc.Pagination = PaginationParams{
+		Count: 1,
+		Page:  2,
+		Order: PaginationOrderDesc,
+	}
+	rows, total, err = adapter.AssetTransactions(
+		ctx,
+		policyHex,
+		[]byte("T"),
+		desc,
+	)
 	require.NoError(t, err)
 	require.Equal(t, 3, total)
 	require.Len(t, rows, 1)
 	require.Equal(t, hex.EncodeToString(produce), rows[0].TxHash)
 
 	params.From = &BlockRangePosition{Block: 3}
-	rows, total, err = adapter.AssetTransactions(ctx, policyHex, []byte("T"), params)
+	rows, total, err = adapter.AssetTransactions(
+		ctx,
+		policyHex,
+		[]byte("T"),
+		params,
+	)
 	require.NoError(t, err)
 	require.Equal(t, 1, total)
 	require.Len(t, rows, 1)
@@ -284,21 +343,39 @@ func TestNodeAdapterAssetTransactions(t *testing.T) {
 
 	params.From = &BlockRangePosition{Block: 2}
 	params.To = &BlockRangePosition{Block: 2}
-	rows, total, err = adapter.AssetTransactions(ctx, policyHex, []byte("T"), params)
+	rows, total, err = adapter.AssetTransactions(
+		ctx,
+		policyHex,
+		[]byte("T"),
+		params,
+	)
 	require.NoError(t, err)
 	require.Equal(t, 1, total)
 	require.Equal(t, hex.EncodeToString(produce), rows[0].TxHash)
 	params.To = nil
 
 	params.From = &BlockRangePosition{Block: 50}
-	rows, total, err = adapter.AssetTransactions(ctx, policyHex, []byte("T"), params)
+	rows, total, err = adapter.AssetTransactions(
+		ctx,
+		policyHex,
+		[]byte("T"),
+		params,
+	)
 	require.NoError(t, err)
 	require.Zero(t, total)
 	require.Empty(t, rows)
 
 	_, _, err = adapter.AssetTransactions(
-		ctx, policyHex, []byte("unknown"),
-		TransactionRangeParams{Pagination: PaginationParams{Count: 1, Page: 1, Order: PaginationOrderAsc}},
+		ctx,
+		policyHex,
+		[]byte("unknown"),
+		TransactionRangeParams{
+			Pagination: PaginationParams{
+				Count: 1,
+				Page:  1,
+				Order: PaginationOrderAsc,
+			},
+		},
 	)
 	require.ErrorIs(t, err, ErrAssetNotFound)
 }
@@ -335,7 +412,8 @@ func TestNodeAdapterAssetUTXOs(t *testing.T) {
 		if spentBy != nil {
 			_, err := raw.Exec(
 				`UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = 41 WHERE tx_id = ?`,
-				spentBy, tx.Hash,
+				spentBy,
+				tx.Hash,
 			)
 			require.NoError(t, err)
 		}
@@ -355,7 +433,11 @@ func TestNodeAdapterAssetUTXOs(t *testing.T) {
 
 	ctx := context.Background()
 	params := TransactionRangeParams{
-		Pagination: PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
+		Pagination: PaginationParams{
+			Count: 10,
+			Page:  1,
+			Order: PaginationOrderAsc,
+		},
 	}
 	rows, total, err := adapter.AssetUTXOs(ctx, policyHex, []byte("T"), params)
 	require.NoError(t, err)
@@ -379,7 +461,11 @@ func TestNodeAdapterAssetUTXOs(t *testing.T) {
 	require.Equal(t, uint64(3), rows[1].BlockHeight)
 
 	desc := params
-	desc.Pagination = PaginationParams{Count: 1, Page: 1, Order: PaginationOrderDesc}
+	desc.Pagination = PaginationParams{
+		Count: 1,
+		Page:  1,
+		Order: PaginationOrderDesc,
+	}
 	rows, total, err = adapter.AssetUTXOs(ctx, policyHex, []byte("T"), desc)
 	require.NoError(t, err)
 	require.Equal(t, 2, total)
@@ -427,7 +513,9 @@ func decodeBabbageOutputAt(
 	t.Helper()
 	addrBytes, err := addr.Bytes()
 	require.NoError(t, err)
-	raw, err := cbor.Encode(map[int]any{0: addrBytes, 1: amount, 2: datumOption})
+	raw, err := cbor.Encode(
+		map[int]any{0: addrBytes, 1: amount, 2: datumOption},
+	)
 	require.NoError(t, err)
 	output, err := gledger.NewTransactionOutputFromCbor(raw)
 	require.NoError(t, err)

@@ -69,18 +69,26 @@ func TestListMintedAssetsOrdersByFirstEvent(t *testing.T) {
 	all, err := store.ListMintedAssets(nil, 0, 0, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{
-		policyTag(1) + "/A", policyTag(1) + "/B", policyTag(2) + "/C", policyTag(1) + "/",
+		policyTag(
+			1,
+		) + "/A", policyTag(1) + "/B", policyTag(2) + "/C", policyTag(1) + "/",
 	}, names(all))
 
 	desc, err := store.ListMintedAssets(nil, 0, 0, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{
-		policyTag(1) + "/", policyTag(2) + "/C", policyTag(1) + "/B", policyTag(1) + "/A",
+		policyTag(
+			1,
+		) + "/", policyTag(2) + "/C", policyTag(1) + "/B", policyTag(1) + "/A",
 	}, names(desc))
 
 	page, err := store.ListMintedAssets(nil, 2, 1, false, nil)
 	require.NoError(t, err)
-	require.Equal(t, []string{policyTag(1) + "/B", policyTag(2) + "/C"}, names(page))
+	require.Equal(
+		t,
+		[]string{policyTag(1) + "/B", policyTag(2) + "/C"},
+		names(page),
+	)
 
 	onlyP1, err := store.ListMintedAssets(p1, 0, 0, false, nil)
 	require.NoError(t, err)
@@ -116,7 +124,14 @@ func TestGetAssetMintBurnHistoryOrdersByChainPosition(t *testing.T) {
 	insertMintBurn(t, db, credentialHash(0x35), other, "T", 20, 0, "1")
 
 	policyHash := lcommon.NewBlake2b224(policy)
-	rows, err := store.GetAssetMintBurnHistory(policyHash, []byte("T"), 0, 0, false, nil)
+	rows, err := store.GetAssetMintBurnHistory(
+		policyHash,
+		[]byte("T"),
+		0,
+		0,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, rows, 3)
 	require.Equal(t, credentialHash(0x31), rows[0].TxHash)
@@ -125,13 +140,27 @@ func TestGetAssetMintBurnHistoryOrdersByChainPosition(t *testing.T) {
 	require.Equal(t, "-3", rows[1].Quantity)
 	require.Equal(t, credentialHash(0x33), rows[2].TxHash)
 
-	rows, err = store.GetAssetMintBurnHistory(policyHash, []byte("T"), 2, 0, true, nil)
+	rows, err = store.GetAssetMintBurnHistory(
+		policyHash,
+		[]byte("T"),
+		2,
+		0,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
 	require.Equal(t, credentialHash(0x33), rows[0].TxHash)
 	require.Equal(t, credentialHash(0x32), rows[1].TxHash)
 
-	rows, err = store.GetAssetMintBurnHistory(policyHash, []byte("T"), 1, 2, false, nil)
+	rows, err = store.GetAssetMintBurnHistory(
+		policyHash,
+		[]byte("T"),
+		1,
+		2,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	require.Equal(t, credentialHash(0x33), rows[0].TxHash)
@@ -139,7 +168,11 @@ func TestGetAssetMintBurnHistoryOrdersByChainPosition(t *testing.T) {
 	total, err := store.CountAssetMintBurnHistory(policyHash, []byte("T"), nil)
 	require.NoError(t, err)
 	require.Equal(t, 3, total)
-	total, err = store.CountAssetMintBurnHistory(policyHash, []byte("absent"), nil)
+	total, err = store.CountAssetMintBurnHistory(
+		policyHash,
+		[]byte("absent"),
+		nil,
+	)
 	require.NoError(t, err)
 	require.Zero(t, total)
 }
@@ -209,8 +242,18 @@ func TestGetAssetTransactionsCoversMintCreateAndSpend(t *testing.T) {
 	f := assetTxFixture{db: db, policy: assetPolicy(0x41), name: []byte("N")}
 	policyHash := lcommon.NewBlake2b224(f.policy)
 
-	mint, create, spend, unrelated, burn := credentialHash(0x51), credentialHash(0x52),
-		credentialHash(0x53), credentialHash(0x54), credentialHash(0x55)
+	mint, create, spend, unrelated, burn := credentialHash(
+		0x51,
+	), credentialHash(
+		0x52,
+	),
+		credentialHash(
+			0x53,
+		), credentialHash(
+			0x54,
+		), credentialHash(
+			0x55,
+		)
 	collateralTx := credentialHash(0x56)
 	f.transaction(t, mint, 10, 0)
 	createID := f.transaction(t, create, 20, 1)
@@ -250,39 +293,100 @@ VALUES (?, ?, ?, ?, '1')`, f.name, f.policy, []byte("fp"), secondUtxo)
 		return out
 	}
 
-	txs, err := store.GetAssetTransactions(policyHash, f.name, nil, nil, 0, 0, false, nil)
+	txs, err := store.GetAssetTransactions(
+		policyHash,
+		f.name,
+		nil,
+		nil,
+		0,
+		0,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
-	require.Equal(t, [][]byte{mint, create, collateralTx, spend, burn}, hashes(txs))
+	require.Equal(
+		t,
+		[][]byte{mint, create, collateralTx, spend, burn},
+		hashes(txs),
+	)
 	require.Equal(t, uint64(20), txs[1].Slot)
 	require.Equal(t, uint32(1), txs[1].BlockIndex)
 	require.Equal(t, credentialHash(0xee), txs[1].BlockHash)
 
-	txs, err = store.GetAssetTransactions(policyHash, f.name, nil, nil, 2, 1, true, nil)
+	txs, err = store.GetAssetTransactions(
+		policyHash,
+		f.name,
+		nil,
+		nil,
+		2,
+		1,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, [][]byte{spend, collateralTx}, hashes(txs))
 
 	from := &models.AddressTransactionPosition{Slot: 20, TxIndex: 1}
 	to := &models.AddressTransactionPosition{Slot: 30, TxIndex: 0}
-	txs, err = store.GetAssetTransactions(policyHash, f.name, from, to, 0, 0, false, nil)
+	txs, err = store.GetAssetTransactions(
+		policyHash,
+		f.name,
+		from,
+		to,
+		0,
+		0,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, [][]byte{create, collateralTx, spend}, hashes(txs))
 	// Bounds are inclusive on the transaction index within a slot.
 	later := &models.AddressTransactionPosition{Slot: 20, TxIndex: 2}
-	txs, err = store.GetAssetTransactions(policyHash, f.name, later, nil, 0, 0, false, nil)
+	txs, err = store.GetAssetTransactions(
+		policyHash,
+		f.name,
+		later,
+		nil,
+		0,
+		0,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, [][]byte{collateralTx, spend, burn}, hashes(txs))
 	earlier := &models.AddressTransactionPosition{Slot: 20, TxIndex: 0}
-	txs, err = store.GetAssetTransactions(policyHash, f.name, nil, earlier, 0, 0, false, nil)
+	txs, err = store.GetAssetTransactions(
+		policyHash,
+		f.name,
+		nil,
+		earlier,
+		0,
+		0,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, [][]byte{mint}, hashes(txs))
 
-	total, err := store.CountAssetTransactions(policyHash, f.name, nil, nil, nil)
+	total, err := store.CountAssetTransactions(
+		policyHash,
+		f.name,
+		nil,
+		nil,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, 5, total)
 	total, err = store.CountAssetTransactions(policyHash, f.name, from, to, nil)
 	require.NoError(t, err)
 	require.Equal(t, 3, total)
-	total, err = store.CountAssetTransactions(policyHash, []byte("other"), nil, nil, nil)
+	total, err = store.CountAssetTransactions(
+		policyHash,
+		[]byte("other"),
+		nil,
+		nil,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Zero(t, total)
 }

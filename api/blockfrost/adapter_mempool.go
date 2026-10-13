@@ -82,7 +82,11 @@ func (a *NodeAdapter) decodeMempoolTransaction(
 ) (lcommon.Transaction, error) {
 	decoded, err := safedecode.Transaction(tx.Type, tx.Cbor)
 	if err != nil {
-		return nil, fmt.Errorf("decode mempool transaction %s: %w", tx.Hash, err)
+		return nil, fmt.Errorf(
+			"decode mempool transaction %s: %w",
+			tx.Hash,
+			err,
+		)
 	}
 	return decoded, nil
 }
@@ -158,7 +162,10 @@ func outputAsUtxo(output lcommon.TransactionOutput) (models.Utxo, error) {
 	var utxo models.Utxo
 	amount := output.Amount()
 	if amount == nil || !amount.IsUint64() {
-		return utxo, fmt.Errorf("output lovelace amount %v is not a uint64", amount)
+		return utxo, fmt.Errorf(
+			"output lovelace amount %v is not a uint64",
+			amount,
+		)
 	}
 	utxo.Amount = dbtypes.Uint64(amount.Uint64())
 	if assets := output.Assets(); assets != nil {
@@ -192,7 +199,11 @@ func (a *NodeAdapter) MempoolTransaction(
 	if err != nil {
 		return MempoolTransactionInfo{}, err
 	}
-	allInputs := make([]lcommon.TransactionInput, 0)
+	allInputs := make(
+		[]lcommon.TransactionInput,
+		0,
+		len(tx.Inputs())+len(tx.Collateral())+len(tx.ReferenceInputs()),
+	)
 	allInputs = append(allInputs, tx.Inputs()...)
 	allInputs = append(allInputs, tx.Collateral()...)
 	allInputs = append(allInputs, tx.ReferenceInputs()...)
@@ -245,15 +256,18 @@ func (a *NodeAdapter) MempoolTransaction(
 			dataHash = &encoded
 		}
 		outputs = append(outputs, TransactionOutputInfo{
-			Address:             output.Address().String(),
-			Amount:              addressAmountsFromUtxo(utxo),
-			OutputIndex:         uint32(i), // #nosec G115 -- bounded by the transaction size
+			Address: output.Address().String(),
+			Amount:  addressAmountsFromUtxo(utxo),
+			OutputIndex: uint32(
+				i,
+			), // #nosec G115 -- bounded by the transaction size
 			DataHash:            dataHash,
 			InlineDatum:         inlineDatum,
 			ReferenceScriptHash: referenceScriptHash,
 		})
 	}
 
+	//nolint:contextcheck // protocol parameters are read through the ledger state, which takes no context
 	deposit, err := a.mempoolDeposit(tx)
 	if err != nil {
 		return MempoolTransactionInfo{}, fmt.Errorf(

@@ -37,7 +37,11 @@ func TestHandleMempool(t *testing.T) {
 	require.Equal(t, "7", w.Header().Get("X-Pagination-Count-Total"))
 	require.Equal(t, "4", w.Header().Get("X-Pagination-Page-Total"))
 	node.mu.Lock()
-	require.Equal(t, PaginationParams{Count: 2, Page: 2, Order: "desc"}, node.lastMempool)
+	require.Equal(
+		t,
+		PaginationParams{Count: 2, Page: 2, Order: "desc"},
+		node.lastMempool,
+	)
 	node.mu.Unlock()
 
 	w = serve(t, &mockNode{}, "/api/v0/mempool")
@@ -75,12 +79,14 @@ func TestHandleMempoolTransaction(t *testing.T) {
 	node := &mockNode{}
 	node.mempoolTx = MempoolTransactionInfo{
 		Tx: TransactionInfo{
-			Hash:         testMempoolHash,
-			OutputAmount: []AddressAmountInfo{{Unit: "lovelace", Quantity: "9"}},
-			Fees:         "170000",
-			Deposit:      "0",
-			Size:         300,
-			UtxoCount:    3,
+			Hash: testMempoolHash,
+			OutputAmount: []AddressAmountInfo{
+				{Unit: "lovelace", Quantity: "9"},
+			},
+			Fees:          "170000",
+			Deposit:       "0",
+			Size:          300,
+			UtxoCount:     3,
 			ValidContract: true,
 		},
 		Inputs: []TransactionInputInfo{
@@ -140,7 +146,11 @@ func TestHandleMempoolErrors(t *testing.T) {
 	node.mempoolErr = ErrTransactionNotFound
 	w := serve(t, node, "/api/v0/mempool/"+testMempoolHash)
 	require.Equal(t, http.StatusNotFound, w.Code)
-	require.Contains(t, w.Body.String(), "The requested component has not been found.")
+	require.Contains(
+		t,
+		w.Body.String(),
+		"The requested component has not been found.",
+	)
 
 	for _, hash := range []string{"abcd", strings.Repeat("z", 64), testScriptHash} {
 		w := serve(t, &mockNode{}, "/api/v0/mempool/"+hash)
@@ -148,5 +158,10 @@ func TestHandleMempoolErrors(t *testing.T) {
 		require.Contains(t, w.Body.String(), "Invalid transaction hash.")
 	}
 	w = serve(t, &mockNode{}, "/api/v0/mempool/addresses")
-	require.Equal(t, http.StatusBadRequest, w.Code, "addresses is not a transaction hash")
+	require.Equal(
+		t,
+		http.StatusBadRequest,
+		w.Code,
+		"addresses is not a transaction hash",
+	)
 }

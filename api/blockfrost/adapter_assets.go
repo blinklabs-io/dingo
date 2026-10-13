@@ -415,7 +415,10 @@ func (a *NodeAdapter) AssetUTXOs(
 		refs := make([]models.UtxoId, 0, len(window))
 		slots := make(map[database.UtxoRef]models.UtxoWithOrdering, len(window))
 		for _, utxo := range window {
-			refs = append(refs, models.UtxoId{Hash: utxo.TxId, Idx: utxo.OutputIdx})
+			refs = append(
+				refs,
+				models.UtxoId{Hash: utxo.TxId, Idx: utxo.OutputIdx},
+			)
 			ref, err := utxoRef(utxo.Utxo)
 			if err != nil {
 				return nil, 0, err
@@ -513,8 +516,11 @@ func (a *NodeAdapter) assetUTXOInfos(
 				info.InlineDatum, info.ReferenceScriptHash = utxoDatumAndScriptRef(
 					output,
 				)
-				if datum := output.Datum(); datum != nil && len(datum.Cbor()) > 0 {
-					info.InlineDatumJSON, err = plutusDataDetailedJSON(datum.Cbor())
+				if datum := output.Datum(); datum != nil &&
+					len(datum.Cbor()) > 0 {
+					info.InlineDatumJSON, err = plutusDataDetailedJSON(
+						datum.Cbor(),
+					)
 					if err != nil {
 						return nil, fmt.Errorf(
 							"inline datum of UTxO %s#%d: %w",

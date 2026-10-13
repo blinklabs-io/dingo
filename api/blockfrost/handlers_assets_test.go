@@ -47,7 +47,11 @@ func TestHandleAssetsList(t *testing.T) {
 			require.Equal(t, "103", w.Header().Get("X-Pagination-Page-Total"))
 			node.mu.Lock()
 			defer node.mu.Unlock()
-			require.Equal(t, PaginationParams{Count: 2, Page: 3, Order: "desc"}, node.lastAssetParams)
+			require.Equal(
+				t,
+				PaginationParams{Count: 2, Page: 3, Order: "desc"},
+				node.lastAssetParams,
+			)
 			if tc.name == "policy" {
 				require.Equal(t, testPolicy, node.lastPolicyID)
 			}
@@ -110,7 +114,11 @@ func TestHandleAssetListingsMapErrors(t *testing.T) {
 		node.assetListErr = ErrAssetNotFound
 		w := serve(t, node, path)
 		require.Equal(t, http.StatusNotFound, w.Code, route)
-		require.Contains(t, w.Body.String(), "The requested asset could not be found.")
+		require.Contains(
+			t,
+			w.Body.String(),
+			"The requested asset could not be found.",
+		)
 
 		node = &mockNode{}
 		node.assetListErr = errors.New("boom")
@@ -156,9 +164,17 @@ func TestHandleAssetTransactions(t *testing.T) {
 	require.NotNil(t, got.To)
 	require.Equal(t, uint64(9), got.To.Block)
 
-	w = serve(t, &mockNode{}, "/api/v0/assets/"+testAsset+"/transactions?from=x")
+	w = serve(
+		t,
+		&mockNode{},
+		"/api/v0/assets/"+testAsset+"/transactions?from=x",
+	)
 	require.Equal(t, http.StatusBadRequest, w.Code)
-	w = serve(t, &mockNode{}, "/api/v0/assets/"+testAsset+"/transactions?from=9&to=3")
+	w = serve(
+		t,
+		&mockNode{},
+		"/api/v0/assets/"+testAsset+"/transactions?from=9&to=3",
+	)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
@@ -185,10 +201,12 @@ func TestHandleAssetUTXOs(t *testing.T) {
 	node := &mockNode{}
 	node.assetUTXOs = []AssetUTXOInfo{
 		{
-			Address:         "addr1",
-			TxHash:          "aa",
-			OutputIndex:     1,
-			Amount:          []AddressAmountInfo{{Unit: "lovelace", Quantity: "2"}},
+			Address:     "addr1",
+			TxHash:      "aa",
+			OutputIndex: 1,
+			Amount: []AddressAmountInfo{
+				{Unit: "lovelace", Quantity: "2"},
+			},
 			Block:           "bb",
 			BlockHeight:     7,
 			BlockTime:       70,
@@ -240,6 +258,10 @@ func TestHandleAssetRoutesDoNotShadowEachOther(t *testing.T) {
 	w = serve(t, node, "/api/v0/assets/"+testAsset+"/unknown")
 	require.Equal(t, http.StatusNotFound, w.Code)
 
-	w = serve(t, &mockNode{asset: AssetInfo{Asset: testAsset}}, "/api/v0/assets/"+testAsset)
+	w = serve(
+		t,
+		&mockNode{asset: AssetInfo{Asset: testAsset}},
+		"/api/v0/assets/"+testAsset,
+	)
 	require.Equal(t, http.StatusOK, w.Code)
 }

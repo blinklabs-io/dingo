@@ -46,7 +46,11 @@ func TestHandleAddressLegacyTransactionsReturnsHashes(t *testing.T) {
 	require.Equal(t, "5", w.Header().Get("X-Pagination-Count-Total"))
 	require.Equal(t, "3", w.Header().Get("X-Pagination-Page-Total"))
 	got := node.lastAddressTransactionsParams
-	require.Equal(t, PaginationParams{Count: 2, Page: 2, Order: "desc"}, got.Pagination)
+	require.Equal(
+		t,
+		PaginationParams{Count: 2, Page: 2, Order: "desc"},
+		got.Pagination,
+	)
 	// The deprecated listing takes no block range.
 	require.Nil(t, got.From)
 	require.Nil(t, got.To)
@@ -166,7 +170,11 @@ func TestHandleAddressAssetUTXOs(t *testing.T) {
 	require.Equal(t, "addr1", node.lastAddress)
 	require.Equal(t, testPolicy, node.lastAssetPolicy)
 	require.Equal(t, []byte("nutcoin"), node.lastAssetName)
-	require.Equal(t, PaginationParams{Count: 1, Page: 3, Order: "desc"}, node.lastAddressPage)
+	require.Equal(
+		t,
+		PaginationParams{Count: 1, Page: 3, Order: "desc"},
+		node.lastAddressPage,
+	)
 }
 
 func TestHandleAddressAssetUTXOsRejectsBadInput(t *testing.T) {

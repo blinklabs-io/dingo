@@ -1089,6 +1089,7 @@ func (a *NodeAdapter) Asset(
 	if len(initialMintTxHash) > 0 {
 		info.InitialMintTxHash = hex.EncodeToString(initialMintTxHash)
 		if err := a.populateAssetOnchainMetadata(
+			context.Background(),
 			&info,
 			initialMintTxHash,
 			policyID,
@@ -1114,13 +1115,14 @@ func (a *NodeAdapter) Asset(
 // info. A mint transaction without (matching) metadata is not an error; the
 // fields are simply left unset.
 func (a *NodeAdapter) populateAssetOnchainMetadata(
+	ctx context.Context,
 	info *AssetInfo,
 	initialMintTxHash []byte,
 	policyID string,
 	assetName []byte,
 ) error {
 	metadataCbor, err := a.ledgerState.Database().
-		GetTransactionMetadataByHash(context.Background(), initialMintTxHash, nil)
+		GetTransactionMetadataByHash(ctx, initialMintTxHash, nil)
 	if err != nil {
 		return fmt.Errorf(
 			"get initial mint tx %x metadata for asset %s%x: %w",
@@ -3295,6 +3297,7 @@ func parseAddressOrPaymentCred(
 // exactAddressBalance aggregates balances after the database layer has
 // compared each candidate's complete decoded output address.
 func (a *NodeAdapter) exactAddressBalance(
+	ctx context.Context,
 	addr lcommon.Address,
 	txn *database.Txn,
 ) (models.AddressBalance, error) {
@@ -3306,7 +3309,7 @@ func (a *NodeAdapter) exactAddressBalance(
 
 	candidates, err := a.ledgerState.Database().
 		UtxosByAddressWithOrdering(
-			context.Background(),
+			ctx,
 			&models.UtxoWithOrderingQuery{
 				AddressPatterns: []models.UtxoAddressPattern{pattern},
 			},
@@ -3427,7 +3430,7 @@ func (a *NodeAdapter) addressSummary(
 				txn.Metadata(),
 			)
 	} else {
-		balance, err = a.exactAddressBalance(addr, txn)
+		balance, err = a.exactAddressBalance(ctx, addr, txn)
 	}
 	if err != nil {
 		return AddressInfo{}, fmt.Errorf(
