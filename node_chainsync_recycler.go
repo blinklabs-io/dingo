@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 const (
@@ -62,30 +63,42 @@ func (n *Node) chainsyncResolvePeerTip(
 }
 
 // chainsyncObservePeerRollback synchronously applies a peer rollback into chain
-// selection when the Genesis corroboration gate is active, so the
-// ChainsyncApplyEligible check that immediately follows in the roll-backward
-// handler reflects the post-rollback corroboration state. A rollback trims the
-// peer's observed frontier (ApplyRollback), which can change its corroboration
-// status; delivering that observation asynchronously would let the apply gate
-// read pre-trim state and forward a rollback for a peer that the rollback has
-// just made uncorroborated. It returns true when handled
-// synchronously, so the ouroboros layer skips the async PeerRollbackEvent
-// publish to avoid a double update. Unlike chainsyncObservePeerTip there is no
-// peergov touch: only the chain selector subscribes to PeerRollbackEvent.
+// selection when Genesis selection is active. This keeps the density frontier
+// ordered before a later AwaitReply and ensures the ChainsyncApplyEligible
+// check immediately following a roll-backward sees the post-rollback state. It
+// returns true when handled synchronously, so the ouroboros layer skips the
+// async PeerRollbackEvent publish to avoid a double update. Unlike
+// chainsyncObservePeerTip there is no peergov touch: only the chain selector
+// subscribes to PeerRollbackEvent.
 //
-// When corroboration is inactive the async path is used unchanged (returns
-// false).
+// Outside Genesis selection the async path is used unchanged (returns false).
 func (n *Node) chainsyncObservePeerRollback(
 	e chainselection.PeerRollbackEvent,
 ) bool {
-	if n.chainSelector == nil ||
-		!n.chainSelector.GenesisCorroborationActive() {
+	if n.chainSelector == nil {
+		return false
+	}
+	genesisActive, _ := n.chainSelector.GenesisSelectionState()
+	if !genesisActive {
 		return false
 	}
 	n.chainSelector.HandlePeerRollbackEvent(
 		event.NewEvent(chainselection.PeerRollbackEventType, e),
 	)
 	return true
+}
+
+// chainsyncObserveAwaitReply records the explicit ChainSync idle frontier in
+// the selector. The nil check keeps standalone Ouroboros config construction
+// safe before Run has built the selector.
+func (n *Node) chainsyncObserveAwaitReply(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) {
+	if n.chainSelector == nil {
+		return
+	}
+	n.chainSelector.SetPeerIdling(connId, point)
 }
 
 // chainsyncApplyEligible gates whether a peer's headers/rollbacks are APPLIED to

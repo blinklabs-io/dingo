@@ -349,6 +349,51 @@ func TestChainsyncHeaderAdmissionIsPreObservationAndPeerLocal(t *testing.T) {
 	))
 }
 
+func TestChainsyncAwaitReplyPublishesDeliveredFrontier(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, awaitCh := bus.Subscribe(ledger.ChainsyncAwaitReplyEventType)
+	state := dchainsync.NewState(bus, nil)
+	connId := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	require.True(t, state.AddClientConnId(connId))
+	point := ocommon.NewPoint(123, []byte("delivered"))
+	require.True(t, state.UpdateClientTipWithoutDedup(
+		connId,
+		point,
+		ochainsync.Tip{Point: point, BlockNumber: 10},
+	))
+
+	var observedPoint ocommon.Point
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncObserveAwaitReply: func(
+			_ ouroboros.ConnectionId,
+			point ocommon.Point,
+		) {
+			observedPoint = point
+		},
+	})
+	o.chainsyncState = state
+	cfg := ochainsync.NewConfig(o.chainsyncClientConnOpts()...)
+	require.NotNil(t, cfg.AwaitReplyFunc)
+	require.NoError(t, cfg.AwaitReplyFunc(ochainsync.CallbackContext{
+		ConnectionId: connId,
+	}))
+	assert.Equal(t, point, observedPoint)
+
+	evt := testutil.RequireReceive(
+		t,
+		awaitCh,
+		time.Second,
+		"AwaitReply callback should publish the delivered frontier",
+	)
+	data, ok := evt.Data.(ledger.ChainsyncAwaitReplyEvent)
+	require.True(t, ok)
+	assert.Equal(t, connId, data.ConnectionId)
+}
+
 func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
 	t.Parallel()
 
@@ -758,10 +803,12 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 
 	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
 	_, recycleCh := bus.Subscribe(ledger.ConnectionRecycleRequestedEventType)
+	_, awaitCh := bus.Subscribe(ledger.ChainsyncAwaitReplyEventType)
 	state := dchainsync.NewState(bus, nil)
 	conn := newTestConnId("127.0.0.1:6010", "1.1.1.2:3001")
 	require.True(t, state.AddClientConnId(conn))
 
+	awaitObserved := false
 	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
@@ -769,6 +816,12 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 		},
 		ChainsyncApplyEligible: func(ouroboros.ConnectionId) bool {
 			return true
+		},
+		ChainsyncObserveAwaitReply: func(
+			ouroboros.ConnectionId,
+			ocommon.Point,
+		) {
+			awaitObserved = true
 		},
 	})
 	o.chainsyncState = state
@@ -811,6 +864,19 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 			"expected a connection recycle request after crypto verification failure",
 		)
 	}
+
+	cfg := ochainsync.NewConfig(o.chainsyncClientConnOpts()...)
+	require.NotNil(t, cfg.AwaitReplyFunc)
+	require.NoError(t, cfg.AwaitReplyFunc(
+		ochainsync.CallbackContext{ConnectionId: conn},
+	))
+	require.False(t, awaitObserved)
+	testutil.RequireNoReceive(
+		t,
+		awaitCh,
+		200*time.Millisecond,
+		"an excluded peer's AwaitReply must not reach the ledger",
+	)
 }
 
 // TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification

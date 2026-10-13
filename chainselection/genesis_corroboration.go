@@ -168,7 +168,10 @@ func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
 		if !cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
-		if !candidateTip.confirmsRecentChain(peerTip) ||
+		if !candidateTip.confirmsRecentChainWithin(
+			peerTip,
+			cs.genesisWindowSlotsLocked(),
+		) ||
 			!cs.witnessSupportsSuffixLocked(candidateTip, peerTip) {
 			continue
 		}
@@ -189,7 +192,10 @@ func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
 		if !cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
-		if !candidateTip.confirmsRecentChain(peerTip) ||
+		if !candidateTip.confirmsRecentChainWithin(
+			peerTip,
+			cs.genesisWindowSlotsLocked(),
+		) ||
 			!cs.witnessSupportsSuffixLocked(candidateTip, peerTip) {
 			continue
 		}
