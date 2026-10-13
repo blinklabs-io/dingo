@@ -770,7 +770,7 @@ func (lv *LedgerView) PoolCurrentState(
 			}
 		}
 	}
-	_, regLatestSlot, regLatestCertID, hasLatestReg := latestPoolRegistration(pool)
+	_, regLatestSlot, regLatestCertID, _, hasLatestReg := latestPoolRegistration(pool)
 	// pendingEpoch reports the target epoch of the pool's latest retirement
 	// certificate -- the one most recently added by (AddedSlot,
 	// CertificateID), not the maximum epoch value across every retirement
@@ -808,24 +808,28 @@ func (lv *LedgerView) PoolCurrentState(
 }
 
 // latestPoolRegistration selects the pool's most recent registration row,
-// returning its slot and certificate ID alongside it.
+// returning its slot, certificate ID, and stable registration index alongside
+// it.
 func latestPoolRegistration(
 	pool *models.Pool,
-) (reg *models.PoolRegistration, slot uint64, certID uint, ok bool) {
+) (reg *models.PoolRegistration, slot uint64, certID uint, registrationIndex uint, ok bool) {
 	var latestIdx int
 	for i, candidate := range pool.Registration {
 		// Use CertificateID for deterministic disambiguation when slots are equal
 		if candidate.AddedSlot > slot ||
-			(candidate.AddedSlot == slot && candidate.CertificateID > certID) {
+			(candidate.AddedSlot == slot && candidate.CertificateID > certID) ||
+			(candidate.AddedSlot == slot && candidate.CertificateID == certID &&
+				candidate.RegistrationIndex > registrationIndex) {
 			slot = candidate.AddedSlot
 			certID = candidate.CertificateID
+			registrationIndex = candidate.RegistrationIndex
 			latestIdx = i
 		}
 	}
 	if len(pool.Registration) == 0 {
-		return nil, 0, 0, false
+		return nil, 0, 0, 0, false
 	}
-	return &pool.Registration[latestIdx], slot, certID, true
+	return &pool.Registration[latestIdx], slot, certID, registrationIndex, true
 }
 
 // poolRegistrationCertificate rebuilds the registration certificate from the

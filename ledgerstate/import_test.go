@@ -3070,7 +3070,6 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 				s.Epoch = 0
 				s.CertStateData = stagedCertState
 			},
-			wantErr: "has staged parameters but the snapshot is at slot 0",
 		},
 		{
 			name:    "cert state",
@@ -3330,6 +3329,36 @@ func TestImportPoolsAppliesFutureParamsAtNextBoundary(t *testing.T) {
 		1000,
 		map[uint64][][]byte{661: {poolKeyHash}},
 	))
+	// A restart can replay the same certified snapshot. Both synthetic rows
+	// use certificate ID zero, so their stable registration indexes must make
+	// the replay idempotent without collapsing current and staged state.
+	require.NoError(t, importPools(
+		context.Background(),
+		cfg,
+		[]ParsedPool{current},
+		1000,
+		map[uint64][][]byte{661: {poolKeyHash}},
+	))
+	currentRegs, err := db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
+		[]lcommon.PoolKeyHash{testPoolKeyHash(poolKeyHash)},
+		0,
+		659,
+		1000,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, currentRegs, 1)
+	require.Equal(t, oldAccount, []byte(currentRegs[0].RewardAccount))
+	promotedRegs, err := db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
+		[]lcommon.PoolKeyHash{testPoolKeyHash(poolKeyHash)},
+		2000,
+		660,
+		2000,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, promotedRegs, 1)
+	require.Equal(t, newAccount, []byte(promotedRegs[0].RewardAccount))
 
 	refunds, err := db.GetPoolsRetiringAtEpoch(
 		context.Background(), 661, 2000, nil,
@@ -3353,11 +3382,28 @@ func TestImportPoolsAppliesFutureParamsAtNextBoundary(t *testing.T) {
 		"SELECT COUNT(*) FROM pool_registration",
 	).Scan(&registrations))
 	require.Equal(t, 2, registrations)
+	rows, err := raw.Query(
+		"SELECT added_slot, registration_index FROM pool_registration " +
+			"ORDER BY registration_index",
+	)
+	require.NoError(t, err)
+	var positions [][2]uint64
+	for rows.Next() {
+		var row [2]uint64
+		require.NoError(t, rows.Scan(&row[0], &row[1]))
+		positions = append(positions, row)
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.Equal(t, [][2]uint64{{1000, 0}, {1000, 1}}, positions)
 	var earlierAccount []byte
 	var earlierSlot uint64
+	var earlierIndex uint
 	require.NoError(t, raw.QueryRow(
-		"SELECT reward_account, added_slot FROM pool_registration ORDER BY added_slot LIMIT 1",
-	).Scan(&earlierAccount, &earlierSlot))
+		"SELECT reward_account, added_slot, registration_index "+
+			"FROM pool_registration ORDER BY registration_index LIMIT 1",
+	).Scan(&earlierAccount, &earlierSlot, &earlierIndex))
 	require.Equal(t, oldAccount, earlierAccount)
-	require.Equal(t, uint64(999), earlierSlot)
+	require.Equal(t, uint64(1000), earlierSlot)
+	require.Zero(t, earlierIndex)
 }

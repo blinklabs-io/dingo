@@ -79,6 +79,7 @@ const (
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
 	poolRelayTypeSchemaRelease                          = "pool-relay-type"
 	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
+	poolRegistrationIdentitySchemaRelease               = "pool-registration-identity"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -224,6 +225,11 @@ var schemaVersions = []struct {
 	{Version: 39, Name: midnightRollbackJournalSchemaRelease, Dir: "v39"},
 	{Version: 40, Name: drepDormancyStateSchemaRelease, Dir: "v40"},
 	{Version: 41, Name: drepDelegatorStateSchemaRelease, Dir: "v41"},
+	{
+		Version: 42,
+		Name:    poolRegistrationIdentitySchemaRelease,
+		Dir:     "v42",
+	},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -1593,6 +1599,11 @@ func translateSchemaSQLInSchema(
 				value,
 				"DROP INDEX IF EXISTS `idx_asset_fingerprint`",
 				"DROP INDEX `idx_asset_fingerprint` ON `asset`",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `idx_pool_reg_pool_slot`",
+				"DROP INDEX `idx_pool_reg_pool_slot` ON `pool_registration`",
 			)
 			if strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
 				for column := range mysqlForeignKeyColumns[schemaTableName(statement)] {

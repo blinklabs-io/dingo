@@ -1028,12 +1028,9 @@ func validateImportState(cfg ImportConfig) error {
 	// Any parse warning is a rejection: a partial parse drops or zeroes
 	// entries, and the import would persist the remainder as the ledger state.
 	if state.CertStateData != nil {
-		certState, err := ParseCertState(state.CertStateData)
+		_, err := ParseCertState(state.CertStateData)
 		if err != nil {
 			return fmt.Errorf("parsing cert state: %w", err)
-		}
-		if err := validateImportedPoolSlots(certState.Pools, state.Tip.Slot); err != nil {
-			return err
 		}
 	}
 	if state.SnapShotsData != nil {
@@ -1884,21 +1881,6 @@ func poolImportModels(
 	return model, reg
 }
 
-func validateImportedPoolSlots(pools []ParsedPool, slot uint64) error {
-	if slot != 0 {
-		return nil
-	}
-	for _, pool := range pools {
-		if pool.FutureParams != nil {
-			return fmt.Errorf(
-				"pool %x has staged parameters but the snapshot is at slot 0",
-				pool.PoolKeyHash,
-			)
-		}
-	}
-	return nil
-}
-
 // importPools imports parsed pools into the metadata store.
 func importPools(
 	ctx context.Context,
@@ -1907,10 +1889,6 @@ func importPools(
 	slot uint64,
 	retirements map[uint64][][]byte,
 ) error {
-	if err := validateImportedPoolSlots(pools, slot); err != nil {
-		return err
-	}
-
 	cfg.Logger.Info(
 		"importing pools",
 		"component", "ledgerstate",
@@ -1953,17 +1931,16 @@ func importPools(
 
 		// A pool with a re-registration staged in futurePoolParams gets two
 		// registration rows, like a live re-registration: the parameters in
-		// force, then the staged ones, which the epoch boundary promotes. The
-		// (pool, slot) key forbids sharing the anchor slot, so the current
-		// row sits one slot earlier.
+		// force, then the staged ones, which the epoch boundary promotes.
+		// Stable indexes preserve this order when both synthetic rows share
+		// the snapshot anchor and make replay of the snapshot idempotent.
 		imports := []ParsedPool{pool}
-		slots := []uint64{slot}
 		if pool.FutureParams != nil {
 			imports = append(imports, *pool.FutureParams)
-			slots = []uint64{slot - 1, slot}
 		}
 		for i, p := range imports {
-			model, reg := poolImportModels(p, slots[i])
+			model, reg := poolImportModels(p, slot)
+			reg.RegistrationIndex = uint(i)
 			if err := store.ImportPool(
 				model, reg, txn.Metadata(),
 			); err != nil {
