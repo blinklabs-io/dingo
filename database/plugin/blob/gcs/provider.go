@@ -37,8 +37,13 @@ func RegisterProvider(host *plugin.Host) error {
 		},
 		func() Config { return Config{} },
 		func(_ context.Context, cfg Config, deps blob.ProviderDependencies) (*BlobStoreGCS, plugin.Instance, error) {
+			prefix, err := objectPrefix(deps.DataDir)
+			if err != nil {
+				return nil, nil, err
+			}
 			store, err := NewWithOptions(
 				WithBucket(cfg.Bucket),
+				WithPrefix(prefix),
 				WithLogger(deps.Logger),
 				WithPromRegistry(deps.PromRegistry),
 			)
@@ -51,4 +56,12 @@ func RegisterProvider(host *plugin.Host) error {
 			}, nil
 		},
 	)
+}
+
+func objectPrefix(dataDir string) (string, error) {
+	namespace, err := blob.ReadNamespace(dataDir)
+	if err != nil {
+		return "", err
+	}
+	return blob.NamespacePrefix("", namespace), nil
 }

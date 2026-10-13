@@ -712,24 +712,36 @@ survive cleanup rather than be replaced by an older value read by the import.
   S3/GCS backup through
   `blob.BackupValidator`, verifying every record, the terminator count and
   CRC32 checksum, and the absence of trailing data before either live store is
-  reset. For a live replacement of a populated remote target it also captures
-  rollback backups of both stores. S3/GCS implement `blob.Resettable` with
-  provider-native bounded deletion: S3 uses `DeleteObjects` batches of at most
-  1,000 keys, while GCS issues direct object deletes with a fresh provider
-  timeout for every object. Both bypass the ordinary
-  transaction commit path because its existence probes and per-key
-  compensation downloads would duplicate the complete rollback backup already
-  retained for this operation. Any metadata/blob reset or restore failure,
-  final consistency failure, or cancellation after mutation restores both
-  original backups under `context.WithoutCancel`. Rollback errors are joined
+  reset. For a live replacement of populated PostgreSQL/MySQL metadata it also
+  captures a rollback backup. S3/GCS blob restore instead writes into a fresh
+  object namespace. The staged data directory carries that namespace in
+  `.dingo-blob-namespace`; cloud providers append
+  `.dingo-namespaces/<id>/` to their configured object prefix when the marker
+  is present. The legacy layout remains selected when the marker is absent.
+  Metadata restore recreates the staging directory, so lifecycle writes the
+  same marker again before opening the blob provider. Validation therefore
+  reads the staged metadata and staged blob namespace as one pair, while every
+  failure before activation leaves the configured cloud prefix unchanged and
+  attempts to remove objects written to the failed namespace. Cleanup failures
+  are reported as `ErrRestoreRollbackPending`. The existing atomic
+  directory rename activates the local store and its cloud namespace selector.
+  PostgreSQL/MySQL metadata changes before that rename, so live restore also
+  fsyncs a recovery record beside the staging directory before mutation.
+  Startup uses that record and the live/backup directory state to compensate an
+  incomplete swap or finish cleanup after an activated swap. Any metadata reset
+  or restore failure, final consistency failure,
+  or cancellation after mutation restores the original metadata backup under
+  `context.WithoutCancel`. Rollback errors are joined
   with the original restore error as `ErrRestoreRollbackPending`, while a
   retryable `RestoreRecovery` handle and the backup directory named in the
   error remain available. Offline restore removes the rollback copy only after
   both replacement stores pass `validateRestoredDatabase`; live node restore uses
   `RestoreRecoverable` to retain it through the local directory swap and node
-  reinitialization as well.
+  reinitialization as well. Commit reclaims a superseded namespaced cloud
+  generation. The first migration from the marker-free layout retains its
+  legacy keys because the legacy prefix contains the newly active namespace.
 
-  `Reset` still destroys a live client/server target's tables directly, but
+  `Reset` still destroys a live client/server metadata target's tables directly, but
   live restore now brackets that mutation with the rollback operation above.
   It is wired through `sqlstore.Config.Reset` (mirroring
   `BackupTo`/`RestoreFrom`); every backend built on the shared `sqlstore.Store`
@@ -2354,7 +2366,7 @@ a different analysis.
 
 ## Blob Store Reference
 
-All blob plugins expose the same logical keys. Badger stores these binary keys directly. GCS and S3 hex-encode the logical key bytes into object names; S3 may prepend the configured object prefix.
+All blob plugins expose the same logical keys. Badger stores these binary keys directly. GCS and S3 hex-encode the logical key bytes into object names; S3 may prepend the configured object prefix. After an isolated cloud restore, both cloud providers insert `.dingo-namespaces/<id>/` between that configured prefix and the encoded logical key. The selected ID is stored in `.dingo-blob-namespace` beside the local metadata store, so the data-directory activation also selects the matching blob generation. A missing marker preserves the original object-key layout for existing databases; legacy S3/GCS iteration excludes nested namespace objects so backup and reset continue to see only legacy keys. A later successful restore reclaims the superseded namespaced generation. The first restore from the marker-free layout retains its legacy objects because deleting their prefix would also delete the nested active namespace. Durable cleanup state is retried before a later live restore creates its own record, and an incomplete recovery directory without a record is removed consistently during retry and startup cleanup.
 
 ### Badger Close and the Directory Lock
 
