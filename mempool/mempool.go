@@ -1072,6 +1072,14 @@ func (m *Mempool) processChainEvents(
 			return m.rebuildOverlay(ctx)
 		},
 		func(err error) {
+			if errors.Is(err, errValidationSnapshotChanged) {
+				m.logger.Debug(
+					"mempool overlay rebuild deferred after ledger update",
+					"component", "mempool",
+					"error", err,
+				)
+				return
+			}
 			m.logger.Error(
 				"mempool overlay rebuild failed",
 				"component", "mempool",
