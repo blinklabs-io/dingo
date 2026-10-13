@@ -1351,7 +1351,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// observation and recycles the connection.
 		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
 			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
-			verifyErr := o.chainSelectionVerifyHeaderCrypto(v)
+			verificationGeneration, verifyErr := o.chainSelectionVerifyHeaderCrypto(v)
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) &&
 				o.chainsyncHeaderAdmission != nil {
 				// Admission waited for the horizon, so it has since moved
@@ -1360,7 +1360,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				if err != nil || !admitted {
 					return err
 				}
-				verifyErr = o.chainSelectionVerifyHeaderCrypto(v)
+				verificationGeneration, verifyErr = o.chainSelectionVerifyHeaderCrypto(v)
+			}
+			if verifyErr == nil {
+				chainsyncEvent.HeaderCryptoVerificationGeneration = verificationGeneration
 			}
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) {
 				// The header cannot be validated yet, so it must not extend

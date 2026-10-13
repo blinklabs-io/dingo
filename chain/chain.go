@@ -151,11 +151,12 @@ type Chain struct {
 }
 
 type queuedHeader struct {
-	header         ledger.BlockHeader
-	point          ocommon.Point
-	prevHash       []byte
-	blockNumber    uint64
-	cryptoVerified bool
+	header                       ledger.BlockHeader
+	point                        ocommon.Point
+	prevHash                     []byte
+	blockNumber                  uint64
+	cryptoVerified               bool
+	cryptoVerificationGeneration uint64
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -459,20 +460,29 @@ func (c *Chain) AddBlockHeader(
 	ctx context.Context,
 	header ledger.BlockHeader,
 ) error {
-	return c.addBlockHeader(ctx, header, false)
+	return c.addBlockHeader(ctx, header, false, 0)
 }
 
 func (c *Chain) AddVerifiedBlockHeader(
 	ctx context.Context,
 	header ledger.BlockHeader,
 ) error {
-	return c.addBlockHeader(ctx, header, true)
+	return c.addBlockHeader(ctx, header, true, 0)
+}
+
+func (c *Chain) AddBlockHeaderWithCryptoVerificationGeneration(
+	ctx context.Context,
+	header ledger.BlockHeader,
+	generation uint64,
+) error {
+	return c.addBlockHeader(ctx, header, generation != 0, generation)
 }
 
 func (c *Chain) addBlockHeader(
 	ctx context.Context,
 	header ledger.BlockHeader,
 	cryptoVerified bool,
+	cryptoVerificationGeneration uint64,
 ) error {
 	if c == nil {
 		return errors.New("chain is nil")
@@ -485,9 +495,10 @@ func (c *Chain) addBlockHeader(
 			Slot: header.SlotNumber(),
 			Hash: headerHash.Bytes(),
 		},
-		prevHash:       headerPrevHash.Bytes(),
-		blockNumber:    header.BlockNumber(),
-		cryptoVerified: cryptoVerified,
+		prevHash:                     headerPrevHash.Bytes(),
+		blockNumber:                  header.BlockNumber(),
+		cryptoVerified:               cryptoVerified,
+		cryptoVerificationGeneration: cryptoVerificationGeneration,
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -2728,6 +2739,24 @@ func (c *Chain) QueuedVerifiedHeaderMatchesPoint(point ocommon.Point) bool {
 		}
 	}
 	return false
+}
+
+func (c *Chain) QueuedHeaderCryptoVerificationGeneration(
+	point ocommon.Point,
+) uint64 {
+	if c == nil {
+		return 0
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	for i := range c.headers {
+		header := &c.headers[i]
+		if header.point.Slot == point.Slot &&
+			bytes.Equal(header.point.Hash, point.Hash) {
+			return header.cryptoVerificationGeneration
+		}
+	}
+	return 0
 }
 
 func (c *Chain) firstHeaderMatchesPoint(
