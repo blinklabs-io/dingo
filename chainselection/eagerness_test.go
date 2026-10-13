@@ -476,6 +476,17 @@ func pausedWaiters(cs *ChainSelector, connId ouroboros.ConnectionId) int {
 	return cs.peerTips[connId].eagernessPaused
 }
 
+func (cs *ChainSelector) withinEagernessLimit(
+	connId ouroboros.ConnectionId,
+	blockNumber uint64,
+	appliedTip func() ochainsync.Tip,
+) bool {
+	within, tracked := cs.eagernessAdmissionStatus(
+		connId, blockNumber, appliedTip,
+	)
+	return !tracked || within
+}
+
 // Two forks both paused at the limit send no tips. The pause must not age
 // either into staleness, or each drops out of the other's candidate set and
 // both are released with no new evidence.

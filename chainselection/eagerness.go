@@ -369,17 +369,6 @@ func (cs *ChainSelector) EagernessPaused(connId ouroboros.ConnectionId) bool {
 	return ok && peerTip != nil && peerTip.eagernessPaused > 0
 }
 
-func (cs *ChainSelector) withinEagernessLimit(
-	connId ouroboros.ConnectionId,
-	blockNumber uint64,
-	appliedTip func() ochainsync.Tip,
-) bool {
-	within, tracked := cs.eagernessAdmissionStatus(
-		connId, blockNumber, appliedTip,
-	)
-	return !tracked || within
-}
-
 func (cs *ChainSelector) eagernessAdmissionStatus(
 	connId ouroboros.ConnectionId,
 	blockNumber uint64,
