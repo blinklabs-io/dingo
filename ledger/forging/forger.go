@@ -47,6 +47,13 @@ var errNoValidTxRefs = errors.New(
 // built announcement, distinct from unavailable validation state.
 var ErrInvalidLeiosAnnouncement = errors.New("invalid Leios announcement")
 
+// ErrLeiosAnnouncementUnavailable marks parent or storage state that cannot
+// currently validate a locally built announcement. The ranking block remains
+// eligible for adoption because the announcement does not apply ledger effects.
+var ErrLeiosAnnouncementUnavailable = errors.New(
+	"leios announcement validation unavailable",
+)
+
 // Mode represents the forging mode.
 type Mode int
 
@@ -645,6 +652,8 @@ type ForgerConfig struct {
 	// against the exact signed ranking-block header before that block advances
 	// the ledger past its parent. Nil disables the pre-adoption check.
 	// A confirmed semantic failure must wrap ErrInvalidLeiosAnnouncement.
+	// Parent or storage unavailability must wrap
+	// ErrLeiosAnnouncementUnavailable; every other error rejects the forge.
 	LeiosAnnouncementValidator func(context.Context, ledger.BlockHeader) error
 	// LeiosCertificateProvider supplies certified EBs for Dijkstra CertRBs.
 	LeiosCertificateProvider LeiosCertificateProvider
@@ -2032,18 +2041,22 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	if leiosState.data.Announcement != nil &&
 		f.leiosAnnouncementValidator != nil {
 		if err := f.leiosAnnouncementValidator(ctx, block.Header()); err != nil {
-			if errors.Is(err, ErrInvalidLeiosAnnouncement) {
+			if errors.Is(err, ErrLeiosAnnouncementUnavailable) {
+				f.logger.Warn(
+					"locally forged Leios announcement is not vote-eligible",
+					"slot", currentSlot,
+					"error", err,
+				)
+			} else {
 				f.incCouldNotForge()
 				if f.metrics != nil {
 					f.metrics.forgeValidationFailed.Inc()
 				}
-				return fmt.Errorf("forged Leios announcement failed validation: %w", err)
+				return fmt.Errorf(
+					"forged Leios announcement failed validation: %w",
+					err,
+				)
 			}
-			f.logger.Warn(
-				"locally forged Leios announcement is not vote-eligible",
-				"slot", currentSlot,
-				"error", err,
-			)
 		}
 	}
 

@@ -1063,7 +1063,10 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		case current.semanticValidationStatus == leiosEBValidationInvalid &&
 			sameParent:
 			o.leiosMu.Unlock()
-			return errors.New("leios endorser closure failed semantic validation")
+			return fmt.Errorf(
+				"%w: leios endorser closure failed semantic validation",
+				ledger.ErrInvalidLeiosEndorserBlockTransactions,
+			)
 		case current.semanticValidationStatus == leiosEBValidationPending &&
 			sameParent:
 			done := current.semanticValidationDone

@@ -2793,6 +2793,57 @@ func TestValidateLeiosEndorserBlockForHeaderRetriesStorageFault(t *testing.T) {
 	require.Equal(t, 1, pipeline.observed)
 }
 
+func TestValidateLeiosEndorserBlockForHeaderPreservesCachedInvalidVerdict(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	txRaw := testDijkstraTx(t, 0)
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(txRaw),
+			TransactionSize: uint16(len(txRaw)),
+		}},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(78, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+	validationLedger := &fakeLeiosAnnouncementLedger{
+		txValidationErr: ledger.ErrInvalidLeiosEndorserBlockTransactions,
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: validationLedger,
+		LeiosTxFetchTailBudget:  time.Second,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStoreAuthoritative,
+	))
+
+	require.ErrorIs(
+		t,
+		o.ValidateLeiosEndorserBlockForHeader(t.Context(), header),
+		ledger.ErrInvalidLeiosEndorserBlockTransactions,
+	)
+	require.ErrorIs(
+		t,
+		o.ValidateLeiosEndorserBlockForHeader(t.Context(), header),
+		ledger.ErrInvalidLeiosEndorserBlockTransactions,
+	)
+	require.Equal(t, 1, validationLedger.txValidated)
+}
+
 func TestValidateLeiosEndorserBlockForHeaderRevalidatesDistinctParent(
 	t *testing.T,
 ) {

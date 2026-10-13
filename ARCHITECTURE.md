@@ -3835,9 +3835,11 @@ published ledger tip during validation. Competing or queued headers therefore
 cannot each consume a diffusion-window wait. A locally forged header takes the
 same path after block self-validation and before adoption. A confirmed semantic
 failure rejects the locally forged ranking block before adoption; unavailable
-parent or storage state leaves adoption eligible for later validation. The
-composition adapter marks confirmed transaction failures for the forger without
-introducing a dependency from forging to the parent ledger package.
+parent or storage state leaves adoption eligible for later validation. Every
+other validation error rejects the local forge, so an unclassified failure
+cannot publish an unchecked announcement. The composition adapter marks
+confirmed transaction failures for the forger without introducing a dependency
+from forging to the parent ledger package.
 Endorser manifests and
 transactions arrive independently on the asynchronous LeiosNotify and
 LeiosFetch workers, so this wait does not serialize the fetch that satisfies
