@@ -394,6 +394,64 @@ func TestChainsyncAwaitReplyPublishesDeliveredFrontier(t *testing.T) {
 	assert.Equal(t, connId, data.ConnectionId)
 }
 
+func TestChainsyncRejectedStagedCandidateDoesNotReachLedger(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	_, observedCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
+	state := dchainsync.NewState(bus, nil)
+	connId := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	require.True(t, state.AddClientConnId(connId))
+
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncApplyEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncObservePeerTip: func(
+			chainselection.PeerTipUpdateEvent,
+		) bool {
+			return false
+		},
+		ChainsyncResolvePeerTip: func(
+			chainselection.PeerTipUpdateEvent,
+			bool,
+		) {
+		},
+	})
+	o.chainsyncState = state
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	require.NoError(t, o.chainsyncClientRollForwardAt(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		0,
+		header,
+		tip,
+		time.Now(),
+	))
+	testutil.RequireNoReceive(
+		t,
+		ledgerCh,
+		50*time.Millisecond,
+		"a rejected staged candidate must not reach the ledger",
+	)
+	testutil.RequireNoReceive(
+		t,
+		observedCh,
+		50*time.Millisecond,
+		"a rejected staged candidate must not enter the legacy async path",
+	)
+}
+
 func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
 	t.Parallel()
 

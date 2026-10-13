@@ -123,6 +123,7 @@ func TestChainsyncObservePeerTipStagesUntilAdmission(
 
 	update := chainselection.PeerTipUpdateEvent{
 		ConnectionId: connId,
+		AdmissionID:  1,
 		Tip:          tip,
 		ObservedTip:  tip,
 	}
@@ -146,6 +147,34 @@ func TestChainsyncObservePeerTipStagesUntilAdmission(
 	peerTip = selector.GetPeerTip(connId)
 	require.NotNil(t, peerTip)
 	require.Equal(t, origin, peerTip.ObservedTip.Point)
+}
+
+func TestChainsyncObservePeerTipRejectsAtAdmissionCapacity(t *testing.T) {
+	t.Parallel()
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{MaxTrackedPeers: 1},
+	)
+	n := &Node{chainSelector: selector}
+	update := func(
+		connNum uint,
+		admissionID uint64,
+	) chainselection.PeerTipUpdateEvent {
+		point := ocommon.NewPoint(42, []byte("capacity-frontier"))
+		tip := ochainsync.Tip{Point: point, BlockNumber: 7}
+		return chainselection.PeerTipUpdateEvent{
+			ConnectionId: newNodeTestConnId(connNum),
+			AdmissionID:  admissionID,
+			Tip:          tip,
+			ObservedTip:  tip,
+		}
+	}
+
+	first := update(1, 1)
+	second := update(2, 2)
+	require.True(t, n.chainsyncObservePeerTip(first))
+	assert.False(t, n.chainsyncObservePeerTip(second))
+	assert.Nil(t, selector.GetPeerTip(second.ConnectionId))
 }
 
 func TestRecyclerComponentsSkipsWhenLifecycleOpHoldsLock(t *testing.T) {

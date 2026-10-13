@@ -40,7 +40,9 @@ func (n *Node) chainsyncObservePeerTip(
 	if n.chainSelector == nil {
 		return false
 	}
-	n.chainSelector.PreparePeerTipAdmission(e)
+	if !n.chainSelector.PreparePeerTipAdmission(e) {
+		return false
+	}
 	n.touchPeerByConnId(e.ConnectionId)
 	return true
 }

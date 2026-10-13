@@ -1442,7 +1442,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			if o.config.ChainsyncObservePeerTip != nil {
 				observedSync = o.config.ChainsyncObservePeerTip(update)
 			}
-			if !observedSync {
+			if !observedSync && o.config.ChainsyncResolvePeerTip != nil {
+				// A resolver opts into staged admission. In that mode false
+				// means the selector rejected the candidate, so it must not
+				// fall through to ledger ingress without selectable state.
+				ingressEligible = false
+			} else if !observedSync {
 				peerTipUpdate = &update
 				o.eventBus.Publish(
 					chainselection.PeerTipUpdateEventType,
