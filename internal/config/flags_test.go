@@ -1639,9 +1639,18 @@ func TestPlannerStatsRefreshDefaultsOnAndHonorsEnvOverride(t *testing.T) {
 	require.False(t, cfg.PlannerStatsRefreshEnabled)
 }
 
+// unsetBarkAllowPrivateEnv clears both spellings LoadConfig reads, so each
+// subtest exercises its own source rather than the caller's environment.
+func unsetBarkAllowPrivateEnv(t *testing.T) {
+	t.Helper()
+	unsetEnv(t, "CARDANO_DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES")
+	unsetEnv(t, "DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES")
+}
+
 func TestBarkBlockDownloadAllowPrivateAddressesBindings(t *testing.T) {
 	t.Run("default", func(t *testing.T) {
 		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
 		t.Setenv("HOME", t.TempDir())
 
 		cfg, err := LoadConfig("")
@@ -1651,6 +1660,7 @@ func TestBarkBlockDownloadAllowPrivateAddressesBindings(t *testing.T) {
 
 	t.Run("yaml", func(t *testing.T) {
 		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
 		t.Setenv("HOME", t.TempDir())
 		configFile := filepath.Join(t.TempDir(), "dingo.yaml")
 		require.NoError(t, os.WriteFile(
@@ -1666,6 +1676,7 @@ func TestBarkBlockDownloadAllowPrivateAddressesBindings(t *testing.T) {
 
 	t.Run("environment", func(t *testing.T) {
 		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
 		t.Setenv("HOME", t.TempDir())
 		t.Setenv("DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES", "true")
 
@@ -1676,6 +1687,7 @@ func TestBarkBlockDownloadAllowPrivateAddressesBindings(t *testing.T) {
 
 	t.Run("flag", func(t *testing.T) {
 		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
 		t.Setenv("HOME", t.TempDir())
 		cfg, err := LoadConfig("")
 		require.NoError(t, err)
