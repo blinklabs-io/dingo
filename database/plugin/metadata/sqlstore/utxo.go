@@ -2596,27 +2596,41 @@ func persistUtxoAddress(
 	utxoID int64,
 	utxo *models.Utxo,
 ) error {
-	if len(utxo.Assets) == 0 {
+	address, err := assetUtxoAddress(utxo)
+	if err != nil {
+		return err
+	}
+	if len(address) == 0 {
 		return nil
+	}
+	_, err = db.ExecContext(ctx,
+		"INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?) "+
+			"ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address",
+		utxoID,
+		address,
+	)
+	if err != nil {
+		return fmt.Errorf("persist UTxO address: %w", err)
+	}
+	return nil
+}
+
+func assetUtxoAddress(utxo *models.Utxo) ([]byte, error) {
+	if len(utxo.Assets) == 0 {
+		return nil, nil
 	}
 	address := utxo.Address
 	if len(address) == 0 && len(utxo.Cbor) > 0 {
 		output, err := utxo.Decode()
 		if err != nil {
-			return fmt.Errorf("decode UTxO address: %w", err)
+			return nil, fmt.Errorf("decode UTxO address: %w", err)
 		}
 		address = []byte(output.Address().String())
 	}
 	if len(address) == 0 {
-		return errors.New("persist asset UTxO address: address is unavailable")
+		return nil, errors.New("persist asset UTxO address: address is unavailable")
 	}
-	_, err := db.ExecContext(ctx, `
-INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)
-ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address`, utxoID, address)
-	if err != nil {
-		return fmt.Errorf("persist UTxO address: %w", err)
-	}
-	return nil
+	return address, nil
 }
 
 func (s *Store) GetLiveAssetUtxosMissingAddress(

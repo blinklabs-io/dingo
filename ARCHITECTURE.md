@@ -28,6 +28,9 @@ configured port is nonzero, so core-mode nodes and disabled ports resolve
 none of them. Failures unwind providers in reverse order. Normal shutdown
 orders APIs, mempool, ledger/database, then storage.
 Database receives provider-owned stores through `database.Stores`.
+Before API providers start, API-mode database startup runs the one-time,
+cancellable backfill for rendered addresses of live asset UTxOs; a sync_state
+marker skips the scan after it completes.
 Storage lifecycle contexts cross the provider boundary. In particular, Badger
 stops scheduling value-log GC before close and prevents a successful rewrite
 from chaining another pass. Because Badger cannot cancel a rewrite already in

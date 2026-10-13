@@ -157,6 +157,34 @@ INSERT INTO drep (
 	require.Equal(t, credential, page[0].Credential)
 }
 
+func TestGetDrepsPageKeepsPredefinedDrepsUnexpired(t *testing.T) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	_, err := store.writeDB.Exec(
+		"INSERT INTO vote_delegation (drep_type, added_slot) VALUES (?, 1)",
+		models.DrepTypeAlwaysAbstain,
+	)
+	require.NoError(t, err)
+
+	expired := false
+	page, total, err := store.GetDrepsPage(models.DrepListPageQuery{
+		CurrentEpoch:     100,
+		InactivityPeriod: 20,
+		InactivityKnown:  true,
+		Expired:          &expired,
+		Limit:            10,
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Len(t, page, 1)
+	require.NotNil(t, page[0].Predefined)
+	require.Equal(
+		t,
+		uint64(models.DrepTypeAlwaysAbstain),
+		*page[0].Predefined,
+	)
+}
+
 func TestGetDrepsPageOrdersByVotingPowerBeforePaging(t *testing.T) {
 	t.Parallel()
 	store := newDepositHeldStore(t)

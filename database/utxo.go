@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -55,6 +56,8 @@ const exactAddressCandidateScanLimit = 10_000
 var errExactAddressCandidateScanLimit = errors.New(
 	"exact address candidate scan limit reached",
 )
+
+const assetUtxoAddressBackfillSyncKey = "dingo:asset-utxo-addresses:backfilled"
 
 // deleteUtxoBlobs deletes blob data for the given [models.Utxo] entries.
 // Metadata remains the authoritative source of truth; blob deletions are
@@ -1336,8 +1339,25 @@ func (d *Database) AssetHolders(
 }
 
 func (d *Database) backfillLiveAssetUtxoAddresses(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d.StorageMode() != types.StorageModeAPI {
+		return nil
+	}
+	complete, err := d.GetSyncState(assetUtxoAddressBackfillSyncKey, nil)
+	if err != nil {
+		return err
+	}
+	if complete == "true" {
+		return nil
+	}
+
 	const batchSize = 128
 	var afterID uint
+	var processed, lastLogged int
+	started := time.Now()
+	d.logger.Info("starting live asset UTxO address backfill")
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1350,9 +1370,27 @@ func (d *Database) backfillLiveAssetUtxoAddresses(ctx context.Context) error {
 		}
 		afterID = nextID
 		if count == 0 {
-			return nil
+			break
+		}
+		processed += count
+		if processed-lastLogged >= 10_000 {
+			d.logger.Info(
+				"live asset UTxO address backfill progress",
+				"utxos", processed,
+				"last_utxo_id", afterID,
+			)
+			lastLogged = processed
 		}
 	}
+	if err := d.SetSyncState(assetUtxoAddressBackfillSyncKey, "true", nil); err != nil {
+		return err
+	}
+	d.logger.Info(
+		"completed live asset UTxO address backfill",
+		"utxos", processed,
+		"duration", time.Since(started),
+	)
+	return nil
 }
 
 func (d *Database) backfillLiveAssetUtxoAddressBatch(

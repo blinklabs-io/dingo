@@ -1438,6 +1438,7 @@ listed AS (
 classified AS (
     SELECT *, NOT active retired,
            CASE
+             WHEN predefined IS NOT NULL THEN FALSE
              WHEN NOT active THEN FALSE
              WHEN expiry_epoch > 0 THEN expiry_epoch < ?
              WHEN ? THEN COALESCE(NULLIF(last_activity_epoch, 0), registration_epoch) + ? < ?

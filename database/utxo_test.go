@@ -105,6 +105,7 @@ VALUES ('asset', 'policy', ?, '1')`, utxoID)
 
 func TestBackfillLiveAssetUtxoAddressesBatchesAndResumes(t *testing.T) {
 	db := openTestDB(t)
+	db.config.StorageMode = types.StorageModeAPI
 	raw := rawSQLiteMetadataFixture(t, db)
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
@@ -165,6 +166,7 @@ func TestBackfillLiveAssetUtxoAddressesFailsClosed(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openTestDB(t)
+			db.config.StorageMode = types.StorageModeAPI
 			raw := rawSQLiteMetadataFixture(t, db)
 			seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, tc.outputCbor)
 
@@ -177,6 +179,36 @@ func TestBackfillLiveAssetUtxoAddressesFailsClosed(t *testing.T) {
 			require.Zero(t, count)
 		})
 	}
+}
+
+func TestBackfillLiveAssetUtxoAddressesSkipsCoreMode(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+	seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, []byte{0xff})
+
+	require.NoError(t, db.backfillLiveAssetUtxoAddresses(context.Background()))
+	var count int
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM utxo_address",
+	).Scan(&count))
+	require.Zero(t, count)
+}
+
+func TestBackfillLiveAssetUtxoAddressesSkipsCompletedMarker(t *testing.T) {
+	db := openTestDB(t)
+	db.config.StorageMode = types.StorageModeAPI
+	raw := rawSQLiteMetadataFixture(t, db)
+	seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, []byte{0xff})
+	require.NoError(t, db.SetSyncState(
+		assetUtxoAddressBackfillSyncKey, "true", nil,
+	))
+
+	require.NoError(t, db.backfillLiveAssetUtxoAddresses(context.Background()))
+	var count int
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM utxo_address",
+	).Scan(&count))
+	require.Zero(t, count)
 }
 
 func TestCreateAssetUtxoRequiresAddressIdentity(t *testing.T) {

@@ -189,9 +189,12 @@ Blockfrost asset-holder pages aggregate live quantities in metadata storage.
 bytes so every backend groups exact pointer and bootstrap identities and
 orders equal quantities with the same bytewise address order as the API.
 Migration v42 adds
-the table; startup backfills only live asset-bearing UTxOs in cancellable
-batches before APIs become available and fails if their output CBOR cannot be
-resolved. New UTxO writes persist the address in the same metadata transaction.
+the table; API-mode startup backfills only live asset-bearing UTxOs in
+cancellable batches before APIs become available, records completion in
+sync_state, and logs progress. Startup fails if an output CBOR cannot be
+resolved. A failed backfill leaves completion unset, so the next startup
+resumes from rows still missing an address. Core-mode nodes skip the backfill.
+New UTxO writes persist the address in the same metadata transaction.
 SQLite uses an exact unsigned 64-bit aggregate that returns a fixed-width
 decimal key; PostgreSQL and MySQL use decimal aggregation with an explicit
 overflow check. Holder count and LIMIT/OFFSET page reads share the request's
