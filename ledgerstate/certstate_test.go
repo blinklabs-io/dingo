@@ -594,11 +594,10 @@ func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
 	ownerHash := bytes.Repeat([]byte{0x44}, 28)
 	metadataHash := bytes.Repeat([]byte{0x55}, 32)
 
-	// UTxO-HD Preview snapshots encode PState with a non-pool map at
+	// UTxO-HD Preview snapshots may encode PState with an empty map at
 	// index 0 and the active pool map at index 1. The active pool map
 	// omits the operator from the value because it is already the map key.
-	wrongKey := bytes.Repeat([]byte{0x99}, 32)
-	wrongMap := encodeCredentialMapEntry(t, wrongKey, uint64(1))
+	wrongMap := encodeCborMap(t)
 	poolMap := encodeCredentialMapEntry(
 		t,
 		poolHash,
@@ -2102,20 +2101,6 @@ func TestParsePStateRejectsShortCurrentParamsAfterNonPoolMap(t *testing.T) {
 	require.NoError(t, err)
 	pools, _, err := parsePStateWithRetirements(pstate)
 	require.ErrorContains(t, err, "skipped 1 of 1")
-	require.Empty(t, pools)
-}
-
-func TestParsePStateRejectsFutureParamsAfterEmptyCurrentMap(t *testing.T) {
-	t.Parallel()
-	poolHash := bytes.Repeat([]byte{0x11}, 28)
-	pools, _, err := parsePStateWithRetirements(encodeTestPState(
-		t,
-		encodeCborMap(t),
-		encodeCborMap(t, poolHash, testPoolParams(0x11)),
-		encodeCborMap(t),
-		encodeCborMap(t),
-	))
-	require.ErrorContains(t, err, "unregistered pool")
 	require.Empty(t, pools)
 }
 

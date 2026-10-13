@@ -717,9 +717,6 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 	var bestWarning error
 	bestIdx := -1
 	bestIsPoolParams := false
-	fixedEmptyCurrent := len(ps) == 4 &&
-		isEmptyCborMap(ps[0]) &&
-		!hasDijkstraPoolParamsEntries(ps[1])
 	for _, m := range maps {
 		pools, warning := parseCertPoolParamsMap(ps[m.idx])
 		parsed = append(parsed, parsedMap{m.idx, pools, warning})
@@ -727,8 +724,7 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		// Recognize malformed registrations by shape too: otherwise a staged
 		// map with more decodable entries can replace the current map.
 		isPoolParams := len(pools) > 0 || hasPoolParamsEntries(ps[m.idx])
-		if bestIdx < 0 ||
-			(isPoolParams && !bestIsPoolParams && !fixedEmptyCurrent) {
+		if bestIdx < 0 || (isPoolParams && !bestIsPoolParams) {
 			bestPools = pools
 			bestWarning = warning
 			bestIdx = m.idx
@@ -799,33 +795,6 @@ func hasPoolParamsEntries(data []byte) bool {
 			continue
 		}
 		if _, err := decodeRawArray(entry.ValueRaw); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
-func isEmptyCborMap(data []byte) bool {
-	entries, err := decodeMapEntries(data)
-	return err == nil && len(entries) == 0
-}
-
-func hasDijkstraPoolParamsEntries(data []byte) bool {
-	entries, err := decodeMapEntries(data)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		var key []byte
-		if _, err := cbor.Decode(entry.KeyRaw, &key); err != nil || len(key) != poolKeyHashLen {
-			continue
-		}
-		params, err := decodeRawArray(entry.ValueRaw)
-		if err != nil || len(params) <= 1 || len(params[1]) == 0 {
-			continue
-		}
-		if (len(params[1]) == 1 && params[1][0] == 0xf6) ||
-			params[1][0]>>5 == 4 {
 			return true
 		}
 	}
