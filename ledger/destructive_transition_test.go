@@ -75,11 +75,11 @@ func TestRollbackWaitsForDestructiveTransitionBarrier(t *testing.T) {
 	))
 }
 
-// joinBeforeFixtureClose registers a cleanup that runs release and then waits
-// for wg. Cleanups run last-registered first, so calling this after
-// newChainsyncRollbackFixture makes it run before the fixture closes the
-// ledger: a test that fails mid-wait must not leave a rollback or
-// reconciliation running into LedgerState.Close.
+// joinBeforeFixtureClose registers a cleanup that runs release and then
+// waits for wg, without a bound. Cleanups run last-registered first, so
+// calling this after newChainsyncRollbackFixture makes it run before the
+// fixture closes the ledger: a test that fails mid-wait must not leave a
+// rollback or reconciliation running into LedgerState.Close.
 func joinBeforeFixtureClose(t *testing.T, wg *sync.WaitGroup, release func()) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -92,7 +92,15 @@ func joinBeforeFixtureClose(t *testing.T, wg *sync.WaitGroup, release func()) {
 		select {
 		case <-joined:
 		case <-time.After(testutil.AsyncWait):
-			t.Error("rollback or reconciliation still running at cleanup")
+			// Returning here would let the fixture close the ledger under a
+			// running worker, the failure this cleanup exists to prevent. Name
+			// the stuck stacks now and keep waiting: a worker that never
+			// returns is left to the package -timeout, whose dump repeats them.
+			t.Errorf(
+				"rollback or reconciliation still running at cleanup:\n%s",
+				testutil.AllGoroutineStacks(),
+			)
+			<-joined
 		}
 	})
 }
