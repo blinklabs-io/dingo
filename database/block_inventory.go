@@ -223,6 +223,7 @@ func (w *blockInventoryIndexWriter) flush() error {
 	cur := w.cur
 	w.cur = nil
 	if err := cur.Commit(); err != nil {
+		_ = cur.Rollback()
 		return fmt.Errorf("commit block inventory index batch: %w", err)
 	}
 	return nil

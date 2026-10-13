@@ -16,6 +16,7 @@ package database
 
 import (
 	"encoding/binary"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -115,7 +116,9 @@ func TestBlockInventoryClearsOverBudgetStaleIndex(t *testing.T) {
 		}
 		require.NoError(t, txn.Commit())
 	}
-	insertTestBlock(t, db, 500_000, randomHash(t), []byte{0x80})
+	oldestHash := randomHash(t)
+	insertTestBlock(t, db, 500_000, oldestHash, []byte{0x80})
+	insertTestBlock(t, db, 500_001, randomHash(t), []byte{0x80})
 	txn := NewBlobOnlyTxn(db, true)
 	require.NoError(t, txn.BlobStore().Delete(txn.Blob(), blockInventoryKey))
 	require.NoError(t, txn.Commit())
@@ -124,6 +127,28 @@ func TestBlockInventoryClearsOverBudgetStaleIndex(t *testing.T) {
 
 	count, oldest, err := db.CountBlocksAndOldestSlot(nil)
 	require.NoError(t, err)
-	require.Equal(t, uint64(1), count)
+	require.Equal(t, uint64(2), count)
 	require.Equal(t, uint64(500_000), oldest)
+
+	deleteTxn := db.BlockBlobTxn()
+	t.Cleanup(deleteTxn.Release)
+	require.NoError(t, db.tombstoneBlockTxn(deleteTxn, 500_000, oldestHash))
+	require.NoError(t, deleteTxn.Commit())
+	count, oldest, err = db.CountBlocksAndOldestSlot(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), count)
+	require.Equal(t, uint64(500_001), oldest)
+}
+
+func TestBlockInventoryIndexWriterRollsBackFailedCommit(t *testing.T) {
+	t.Parallel()
+	commitErr := errors.New("batch commit failed")
+	txn := &mockBlobTxn{commitErr: commitErr}
+	writer := &blockInventoryIndexWriter{cur: txn}
+
+	require.ErrorIs(t, writer.flush(), commitErr)
+	writer.abort()
+	require.Equal(t, 1, txn.commitCount)
+	require.Equal(t, 1, txn.rollbackCount)
+	require.Nil(t, writer.cur)
 }
