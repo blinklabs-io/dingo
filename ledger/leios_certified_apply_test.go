@@ -140,26 +140,29 @@ func (f *leiosCertApplyFixture) block(
 	if announce {
 		announcement = leiosTestRaw(t, []any{f.ebHash.Bytes(), uint64(4096)})
 	}
-	block := &dijkstra.DijkstraBlock{}
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: dijkstraTestBlockHeader(
+			number,
+			slot,
+			lcommon.NewBlake2b256(prevHash),
+			lcommon.Blake2b256{},
+			0,
+		),
+	}
+	block.BlockHeader.LeiosHeaderExtension = []cbor.RawMessage{
+		leiosTestRaw(t, certified),
+		announcement,
+	}
 	if certified {
 		block.BlockBody.LeiosCertificate = &dijkstra.DijkstraLeiosCertificate{
 			Signers:             []byte{0x80},
 			AggregatedSignature: make([]byte, 48),
 		}
 	}
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	bodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
-	block.BlockHeader = dijkstraTestBlockHeader(
-		number,
-		slot,
-		lcommon.NewBlake2b256(prevHash),
-		block.BlockBody.Hash(),
-		uint64(len(bodyCbor)),
-	)
-	block.BlockHeader.LeiosHeaderExtension = []cbor.RawMessage{
-		leiosTestRaw(t, certified),
-		announcement,
-	}
+	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)
 	block.SetCbor(blockCbor)
