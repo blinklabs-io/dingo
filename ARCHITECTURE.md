@@ -1686,7 +1686,7 @@ When `Node.Run()` is called, components are initialized in this order:
     Shelley staking declarations, including network-specific `extraConfig`
     pools and delegations, before snapshot capture.
     A Mithril-bootstrapped node instead reaches `createGenesisBlock` with its
-    tip already past slot 0 and no genesis CBOR yet stored (the bootstrap
+    tip already past origin and no genesis CBOR yet stored (the bootstrap
     imports ledger state and ImmutableDB blocks but never runs this
     function). It still stores the synthetic genesis block CBOR
     unconditionally — other code depends on it existing structurally — but
@@ -1694,7 +1694,9 @@ When `Node.Run()` is called, components are initialized in this order:
     rows: the imported ledger snapshot (`ledgerstate/import.go`) already
     reflects their correct current state as of the bootstrap point, and this
     function has no way to tell a still-live genesis declaration from one
-    already spent/retired/changed since.
+    already spent/retired/changed since. A slot-zero tip with a non-empty hash
+    is likewise an existing chain point rather than origin, so restart takes
+    this preservation path instead of reapplying genesis declarations.
     For networks with a real Byron genesis, an empty database retains a Byron
     epoch cache until the on-chain Shelley boundary is observed. A configured
     experimental Shelley hard-fork epoch is the explicit exception used by
@@ -2447,10 +2449,13 @@ not sufficient because abandoned-fork blocks remain in append-only storage.
 `LedgerState.rollback` and replay recovery also maintain the invariant that
 `currentTip` does not lead durably applied state. The durable applied floor is
 the highest-slot `block_nonce` row, written with the block's ledger effects and
-tip. Rollback and held replay recovery use that floor when it is on the current
-primary chain, while same-slot hash mismatches are repaired rather than treated
-as already covered. A floor from an abandoned fork is ignored so chain
-selection can recover the canonical branch.
+tip. A non-empty hash makes a slot-zero row a real floor, including a Byron row
+with no Praos nonce; only an empty-hash slot-zero point is origin. Rollback and
+held replay recovery use that floor when it is on the current primary chain,
+while same-slot hash mismatches are repaired rather than treated as already
+covered. An origin tip is never advanced to the floor by recovery. A floor from
+an abandoned fork is ignored so chain selection can recover the canonical
+branch.
 
 When the ledger tip is not on the primary chain at all (the fork-beyond-the-
 ledger shape, as opposed to the blob-behind-metadata shape above),

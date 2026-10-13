@@ -322,7 +322,7 @@ func (cm *ChainManager) NewChainFromIntersect(
 	if err != nil {
 		return nil, err
 	}
-	if intersectPoint.Slot == 0 && !foundOrigin {
+	if len(intersectPoint.Hash) == 0 && !foundOrigin {
 		return nil, ErrIntersectNotFound
 	}
 	// Increment current largest chain ID for new ID

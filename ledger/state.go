@@ -11694,12 +11694,20 @@ func (ls *LedgerState) primaryChainContainsBlockID(
 	blockID uint64,
 	point ocommon.Point,
 ) (bool, error) {
+	return ls.primaryChainContainsBlockIDTxn(blockID, point, nil)
+}
+
+func (ls *LedgerState) primaryChainContainsBlockIDTxn(
+	blockID uint64,
+	point ocommon.Point,
+	txn *database.Txn,
+) (bool, error) {
 	// Blob presence by point is not authoritative: abandoned-fork blocks remain
 	// in the append-only blob store. The current primary chain is identified by
 	// its block-index entry, so compare the point encoded at this ID with the
 	// requested point. Reading only the index value avoids loading the indexed
 	// block's CBOR a second time while chainsyncMutex is held.
-	indexedPoint, err := ls.db.BlockPointByIndex(blockID, nil)
+	indexedPoint, err := ls.db.BlockPointByIndex(blockID, txn)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return false, nil
@@ -11722,7 +11730,7 @@ func (ls *LedgerState) durableAppliedFloor() (ocommon.Point, bool, error) {
 	if err != nil {
 		return ocommon.Point{}, false, err
 	}
-	if !ok || row.Slot == 0 || len(row.Hash) == 0 {
+	if !ok || len(row.Hash) == 0 {
 		return ocommon.Point{}, false, nil
 	}
 	return ocommon.NewPoint(row.Slot, row.Hash), true, nil
@@ -11742,6 +11750,9 @@ func (ls *LedgerState) enforceDurableTipFloor(ctx context.Context) error {
 	ls.RLock()
 	currentTip := ls.currentTip
 	ls.RUnlock()
+	if currentTip.Point.Slot == 0 && len(currentTip.Point.Hash) == 0 {
+		return nil
+	}
 	if currentTip.Point.Slot < floor.Slot ||
 		(currentTip.Point.Slot == floor.Slot &&
 			bytes.Equal(currentTip.Point.Hash, floor.Hash)) {
@@ -12338,6 +12349,17 @@ func (ls *LedgerState) GetIntersectPoint(
 				}
 				return fmt.Errorf("failed to get block: %w", err)
 			}
+			onPrimary, err := ls.primaryChainContainsBlockIDTxn(
+				tmpBlock.ID,
+				point,
+				txn,
+			)
+			if err != nil {
+				return fmt.Errorf("check block on primary chain: %w", err)
+			}
+			if !onPrimary {
+				continue
+			}
 			// Update return value
 			ret.Slot = tmpBlock.Slot
 			ret.Hash = tmpBlock.Hash
@@ -12347,7 +12369,7 @@ func (ls *LedgerState) GetIntersectPoint(
 	if err != nil {
 		return nil, err
 	}
-	if ret.Slot > 0 || foundOrigin {
+	if len(ret.Hash) > 0 || foundOrigin {
 		return &ret, nil
 	}
 	return nil, nil

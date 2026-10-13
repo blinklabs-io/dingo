@@ -10346,6 +10346,20 @@ func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
 	localTip := ls.chain.Tip()
 	require.Equal(t, uint64(0), localTip.Point.Slot)
 	require.Equal(t, genesisHash, localTip.Point.Hash)
+	ls.currentTip = localTip
+	ls.publishSnapshotsLocked()
+	intersect, err := ls.GetIntersectPoint(
+		t.Context(),
+		[]ocommon.Point{ocommon.NewPoint(0, genesisHash)},
+	)
+	require.NoError(t, err)
+	require.Equal(t, ocommon.NewPoint(0, genesisHash), *intersect)
+	abandonedIntersect, err := ls.GetIntersectPoint(
+		t.Context(),
+		[]ocommon.Point{ocommon.NewPoint(0, abandonedHash)},
+	)
+	require.NoError(t, err)
+	require.Nil(t, abandonedIntersect)
 
 	assert.True(t, ls.headerAlreadyOnPrimaryChain(
 		ChainsyncEvent{Point: ocommon.NewPoint(0, genesisHash)},
@@ -17746,23 +17760,16 @@ func constitutionRowCount(t *testing.T, db *database.Database) int {
 	return count
 }
 
-// TestCreateGenesisBlockSkipsGenesisStakingAfterMithrilBootstrap is the
-// same-bug-class regression test the PR review recommended: it
-// found that SetGenesisStaking (and SetGenesisGovernance, covered by
-// TestCreateGenesisBlockSkipsGenesisGovernanceAfterMithrilBootstrap below)
-// weren't gated by the same bootstrappedFromMithril guard as genesis UTxO
-// insertion. Both upsert current-state rows (ON CONFLICT ... DO UPDATE),
-// and a Mithril-bootstrapped node's imported ledger snapshot
-// (ledgerstate/import.go's importCertState) already reflects the correct
-// current pool/delegation state as of the bootstrap point -- reapplying
-// stale genesis-config values would silently resurrect a pool genuinely
-// retired (or a delegation genuinely changed) before the bootstrap point.
+// TestCreateGenesisBlockSkipsGenesisStakingAtSlotZeroBlock verifies that a
+// real slot-zero block is treated as existing chain state. Reapplying the
+// genesis staking configuration would overwrite pool parameters and stake
+// delegations that the block changed.
 //
 // Uses the embedded devnet config, the only bundled network that declares
 // a nonzero genesis pool + stake delegation (mainnet/preview/preprod/
 // musashi all declare zero, so the bug was unreachable there, but live on
 // devnet).
-func TestCreateGenesisBlockSkipsGenesisStakingAfterMithrilBootstrap(
+func TestCreateGenesisBlockSkipsGenesisStakingAtSlotZeroBlock(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -17805,10 +17812,13 @@ func TestCreateGenesisBlockSkipsGenesisStakingAfterMithrilBootstrap(
 			),
 		},
 	}
-	// Same bootstrap shape as
-	// TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap: a
-	// currentTip past slot 0 with no genesis CBOR yet stored.
-	ls.currentTip.Point.Slot = 42
+	// A real slot-zero block has a hash and is distinct from origin. Restarting
+	// there must preserve state written by the block instead of applying the
+	// genesis staking configuration again.
+	ls.currentTip.Point = ocommon.NewPoint(
+		0,
+		testHashBytes("existing-slot-zero-block"),
+	)
 	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	_, err = db.GetPool(context.Background(), lcommon.PoolKeyHash(poolKeyHash), true, nil)

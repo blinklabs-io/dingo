@@ -7043,14 +7043,15 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 	}
 
 	// bootstrappedFromMithril is true only on the fall-through path below:
-	// a chain already past slot 0 whose genesis CBOR was never created,
+	// a chain already past origin whose genesis CBOR was never created,
 	// which happens specifically when a Mithril bootstrap imported ledger
 	// state and ImmutableDB blocks without going through this function
 	// first. Captured once, here, rather than re-read inline further
 	// down: this function's only caller runs it once at startup before
 	// any concurrent chain-extension could move currentTip, so a single
 	// snapshot is representative for the whole call.
-	bootstrappedFromMithril := ls.currentTip.Point.Slot > 0
+	bootstrappedFromMithril := ls.currentTip.Point.Slot > 0 ||
+		len(ls.currentTip.Point.Hash) > 0
 	if bootstrappedFromMithril {
 		// Validate existing chain data matches the current genesis config.
 		// If genesis CBOR exists in the blob store with the expected hash,
