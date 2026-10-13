@@ -16,6 +16,7 @@ package dingo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,23 +26,66 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
+	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestShutdownReportsMidnightDrainFailure(t *testing.T) {
+	t.Parallel()
+	for _, blocked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("blocked=%t", blocked), func(t *testing.T) {
+			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+			require.NoError(t, err)
+			bus := event.NewEventBus(nil, nil)
+			defer bus.Close()
+			entered, release := make(chan struct{}), make(chan struct{})
+			defer close(release)
+			idx, err := midnightindexer.New(midnightindexer.Config{
+				EventBus: bus, Metadata: db.Metadata(),
+				FatalErrorFunc: func(error) { close(entered); <-release },
+			})
+			require.NoError(t, err)
+			require.NoError(t, idx.Start())
+			if blocked {
+				bus.Publish(ledger.BlockEventType, event.NewEvent(ledger.BlockEventType,
+					ledger.BlockEvent{Action: ledger.BlockActionApply, Block: models.Block{}}))
+				testutil.RequireReceive(t, entered, time.Second, "indexer handler did not start")
+			}
+			// The indexer's independently owned bus isolates its drain result.
+			n := &Node{config: NewConfig(WithShutdownTimeout(time.Second)), db: db, midnightIndexer: idx}
+			n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+			err = n.Stop()
+			if blocked {
+				if !errors.Is(err, errStorageDrainUnconfirmed) {
+					t.Fatalf("shutdown omitted the indexer drain sentinel: %v", err)
+				}
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				_, readErr := db.Metadata().GetBackfillCheckpoint("midnight", nil)
+				require.NoError(t, readErr, "storage must remain open while the indexer is using it")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
 
 // TestShutdownPhase1ComponentStopsCoverEveryUnboundedStop pins the set of
 // phase-1 components routed through stopWithDeadline. Each of these has a
 // Stop that cancels its own context and then waits for a goroutine to exit
 // with no deadline of its own -- a call site that went back to calling Stop
 // directly would drop out of this list and escape the bound, exactly the gap
-// dingo#1649 (case R9) describes.
+// the shutdown audit found.
 func TestShutdownPhase1ComponentStopsCoverEveryUnboundedStop(t *testing.T) {
 	t.Parallel()
 
@@ -86,14 +130,14 @@ func TestShutdownPhase1ComponentStopsSkipsAbsentComponents(t *testing.T) {
 }
 
 // TestNodeStopEscalatesWhenPhase1ComponentNeverReturns is the point of the
-// change (dingo#1649 case R9). Before this fix, node_shutdown.go called each
+// change. Before this fix, node_shutdown.go called each
 // phase-1 component's Stop directly; a Stop that cancelled its own context
 // and then waited on a WaitGroup with no bound of its own (see
 // stopWithDeadline's doc comment in node_lifecycle.go) could wedge Node.Stop
 // forever, well past the configured shutdown timeout, with no error the
-// caller could act on. #3558 bounded this same style of wait in
-// quiesceForLiveLifecycleOp but not on this, the normal process-shutdown
-// path.
+// caller could act on. Live restore and truncate already bound this same style
+// of wait in quiesceForLiveLifecycleOp but not on this, the normal
+// process-shutdown path.
 //
 // None of the real phase-1 components can be made to block from outside the
 // package (their WaitGroups and done channels are unexported in other
@@ -107,6 +151,7 @@ func TestNodeStopEscalatesWhenPhase1ComponentNeverReturns(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 
+	var credentialsClosed atomic.Bool
 	previous := componentStopsForShutdownPhase1
 	t.Cleanup(func() { componentStopsForShutdownPhase1 = previous })
 	componentStopsForShutdownPhase1 = func(*Node) []namedStop {
@@ -116,7 +161,7 @@ func TestNodeStopEscalatesWhenPhase1ComponentNeverReturns(t *testing.T) {
 				<-release
 				return nil
 			},
-		}}
+		}, {name: "block producer credentials", stop: func() error { credentialsClosed.Store(true); return nil }}}
 	}
 
 	n := &Node{}
@@ -138,6 +183,11 @@ func TestNodeStopEscalatesWhenPhase1ComponentNeverReturns(t *testing.T) {
 				"are not bounded",
 		)
 	}
+	require.False(
+		t,
+		credentialsClosed.Load(),
+		"unconfirmed consumers must retain their credentials",
+	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errStorageDrainUnconfirmed,
 		"an unfinished phase 1 stop must be reported, not silently dropped")
@@ -167,7 +217,7 @@ func TestNodeStopSkipsDatabaseCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 		}}
 	}
 
-	db, err := dbtest.NewDatabase(t, nil)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 
 	n := &Node{db: db}
@@ -251,7 +301,7 @@ func (h shutdownTestResourceLogHandler) WithGroup(string) slog.Handler {
 func TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
@@ -332,7 +382,7 @@ func TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 func TestNodeStopClosesLedgerStateWhenPhase1DrainConfirmed(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
@@ -458,4 +508,40 @@ func TestNodeStopBoundsPhase1StopsByOneShutdownDeadline(t *testing.T) {
 	// (2s); one shared deadline returns shortly after shutdownTimeout.
 	assert.Less(t, elapsed, wedgedStops/2*shutdownTimeout,
 		"phase 1 stops must share the one shutdown deadline")
+}
+
+// TestNodeStopBoundsEventBusCloseAndSkipsDatabaseClose proves a SubscribeFunc
+// handler that never returns cannot hold Node.Stop past its shutdown timeout,
+// and that the stuck handler suppresses the database close it may still be
+// using.
+func TestNodeStopBoundsEventBusCloseAndSkipsDatabaseClose(t *testing.T) {
+	t.Parallel()
+
+	const stuckType event.EventType = "test.shutdown_stuck_handler"
+	bus := event.NewEventBus(nil, nil)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	bus.SubscribeFunc(stuckType, func(event.Event) {
+		close(entered)
+		<-release
+	})
+	bus.Publish(stuckType, event.NewEvent(stuckType, struct{}{}))
+	testutil.RequireReceive(t, entered, 5*time.Second, "handler never started")
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+
+	n := &Node{db: db, eventBus: bus}
+	n.config = NewConfig(WithShutdownTimeout(50 * time.Millisecond))
+	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	done := make(chan error, 1)
+	go func() { done <- n.Stop() }()
+	stopErr := testutil.RequireReceive(t, done, 5*time.Second,
+		"Node.Stop did not return while an event handler was blocked")
+
+	require.ErrorIs(t, stopErr, errStorageDrainUnconfirmed)
+	assert.ErrorContains(t, stopErr, string(stuckType))
+	assert.ErrorContains(t, stopErr, "database close skipped")
 }

@@ -1,3 +1,5 @@
+//go:build dingo_extra_plugins && dingo_db_integration
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build dingo_extra_plugins && dingo_db_integration
 
 package mysql
 
@@ -62,7 +62,7 @@ func withSessionParams(
 // not "SELECT SLEEP(n)": when max_execution_time interrupts SLEEP()
 // specifically, MySQL has SLEEP() return 1 and the statement complete
 // successfully rather than raising ER_QUERY_TIMEOUT -- confirmed live
-// against mysql:8 (see PR #3373 review). A statement doing real per-row
+// against mysql:8. A statement doing real per-row
 // work is genuinely aborted with error 3024 instead. A 3-way cross join
 // over a system view large enough to take far longer than 200ms to
 // complete guarantees that regardless of how many rows this particular

@@ -15,8 +15,10 @@
 package ledger
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -103,13 +105,14 @@ const (
 // certificate is discarded rather than retried. Failing the boundary instead
 // would wedge the node, since the stored certificates are re-read and re-fail
 // on every deterministic retry.
-func (ls *LedgerState) applyMIRCerts(
+func (ls *LedgerState) applyMIRCerts(ctx context.Context,
 	txn *database.Txn,
 	epochStartSlot uint64,
 	boundarySlot uint64,
 	epochEraID uint,
 ) error {
 	effects, err := ls.db.GetMIRCertsInSlotRange(
+		ctx,
 		epochStartSlot, boundarySlot, txn,
 	)
 	if err != nil {
@@ -118,7 +121,7 @@ func (ls *LedgerState) applyMIRCerts(
 	if len(effects) == 0 {
 		return nil
 	}
-	boundary, err := ls.collectMIRBoundary(txn, effects, epochEraID)
+	boundary, err := ls.collectMIRBoundary(ctx, txn, effects, epochEraID)
 	if err != nil {
 		return err
 	}
@@ -133,8 +136,14 @@ func (ls *LedgerState) applyMIRCerts(
 	if err != nil {
 		return fmt.Errorf("apply MIR certs: %w", err)
 	}
-	availableReserves, reservesOk := boundary.availablePot(mirPotReserves, reserves)
-	availableTreasury, treasuryOk := boundary.availablePot(mirPotTreasury, treasury)
+	availableReserves, reservesOk := boundary.availablePot(
+		mirPotReserves,
+		reserves,
+	)
+	availableTreasury, treasuryOk := boundary.availablePot(
+		mirPotTreasury,
+		treasury,
+	)
 	if boundary.discard != "" {
 		ls.discardMIRBoundary(boundarySlot, boundary.discard)
 		return nil
@@ -153,7 +162,7 @@ func (ls *LedgerState) applyMIRCerts(
 		)
 		return nil
 	}
-	appliedReserves, appliedTreasury, err := ls.applyMIRCredits(
+	appliedReserves, appliedTreasury, err := ls.applyMIRCredits(ctx,
 		txn, boundary.credits, boundarySlot,
 	)
 	if err != nil {
@@ -303,12 +312,12 @@ func (b *mirBoundary) addTransfer(sourcePot uint, amount uint64) {
 // or replaced by the latest certificate's amount below Alonzo, matching
 // `Map.union`'s left bias on the newer entry. See the era discussion on
 // applyMIRCerts.
-func (ls *LedgerState) collectMIRBoundary(
+func (ls *LedgerState) collectMIRBoundary(ctx context.Context,
 	txn *database.Txn,
 	effects []models.MIREffect,
 	epochEraID uint,
 ) (*mirBoundary, error) {
-	registered, err := ls.registeredMIRAccounts(txn, effects)
+	registered, err := ls.registeredMIRAccounts(ctx, txn, effects)
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +413,7 @@ func (ls *LedgerState) collectMIRBoundary(
 // is the read-only equivalent of the account lookup the credit path performs,
 // and it establishes the same registered-vs-skipped split before any pot is
 // debited.
-func (ls *LedgerState) registeredMIRAccounts(
+func (ls *LedgerState) registeredMIRAccounts(ctx context.Context,
 	txn *database.Txn,
 	effects []models.MIREffect,
 ) (map[string]bool, error) {
@@ -428,7 +437,12 @@ func (ls *LedgerState) registeredMIRAccounts(
 	if len(refs) == 0 {
 		return nil, nil
 	}
-	accounts, err := ls.db.GetAccountsByCredential(refs, false, txn)
+	accounts, err := ls.db.GetAccountsByCredential(
+		ctx,
+		refs,
+		false,
+		txn,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("get MIR reward accounts: %w", err)
 	}
@@ -445,13 +459,14 @@ func (ls *LedgerState) registeredMIRAccounts(
 // actually applied per source pot. The totals are re-derived here rather than
 // reused from the capacity check so the pot debit can never exceed what was
 // credited.
-func (ls *LedgerState) applyMIRCredits(
+func (ls *LedgerState) applyMIRCredits(ctx context.Context,
 	txn *database.Txn,
 	credits []mirCredit,
 	boundarySlot uint64,
 ) (appliedReserves, appliedTreasury uint64, err error) {
 	for _, credit := range credits {
 		credited, err := governance.CreditRegisteredRewardAccountBeforeSnapshot(
+			ctx,
 			ls.db,
 			txn,
 			credit.credentialTag,
@@ -536,6 +551,46 @@ func (b *mirBoundary) availablePot(
 		return 0, false
 	}
 	return available - out, true
+}
+
+// mirCertificateCutoff returns the first slot at which a MIR certificate is
+// too late for the epoch containing slot: firstSlot(nextEpoch) minus the
+// Shelley stability window, 3k/f rounded up. It fails rather than fall back to
+// a default window, because a wrong cutoff accepts or rejects blocks the
+// reference does not.
+func (ls *LedgerState) mirCertificateCutoff(slot uint64) (uint64, error) {
+	epoch, err := ls.epochForSlot(slot)
+	if err != nil {
+		return 0, fmt.Errorf("MIR cutoff epoch for slot %d: %w", slot, err)
+	}
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("MIR cutoff: cardano node config is not set")
+	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil {
+		return 0, errors.New("MIR cutoff: Shelley genesis is not loaded")
+	}
+	activeSlotsCoeff := shelleyGenesis.ActiveSlotsCoeff.Rat
+	if shelleyGenesis.SecurityParam <= 0 || activeSlotsCoeff == nil ||
+		activeSlotsCoeff.Num().Sign() <= 0 {
+		return 0, errors.New(
+			"MIR cutoff: Shelley genesis has no valid k and active slot coefficient",
+		)
+	}
+	window := new(big.Int).SetInt64(int64(shelleyGenesis.SecurityParam))
+	window.Mul(window, big.NewInt(3))
+	window.Mul(window, activeSlotsCoeff.Denom())
+	window, remainder := window.QuoRem(
+		window, activeSlotsCoeff.Num(), new(big.Int),
+	)
+	if remainder.Sign() != 0 {
+		window.Add(window, big.NewInt(1))
+	}
+	nextEpochStart := epoch.StartSlot + uint64(epoch.LengthInSlots)
+	if !window.IsUint64() || window.Uint64() >= nextEpochStart {
+		return 0, nil
+	}
+	return nextEpochStart - window.Uint64(), nil
 }
 
 func mirRewardSourceHash(pot uint) []byte {

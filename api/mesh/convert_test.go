@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package mesh
 
@@ -231,7 +231,7 @@ func TestConvertBlockGenesisParent(t *testing.T) {
 		models.Block{Hash: hash, Number: 0, Slot: 0},
 		nil,
 		lcommon.AddressNetworkTestnet,
-		func(slot uint64) int64 { return int64(slot) * 1000 },
+		0,
 	)
 
 	require.Equal(
@@ -258,7 +258,7 @@ func TestConvertBlockParent(t *testing.T) {
 		},
 		nil,
 		lcommon.AddressNetworkTestnet,
-		func(slot uint64) int64 { return int64(slot) * 1000 },
+		20000,
 	)
 
 	require.Equal(
@@ -604,19 +604,4 @@ func TestDecodeTxCborErrors(t *testing.T) {
 			require.NotEmpty(t, meshErr.Details["error"])
 		})
 	}
-}
-
-func TestDecodeTxCborSuccess(t *testing.T) {
-	t.Parallel()
-
-	addr := testAddress(
-		t, lcommon.AddressTypeKeyNone, testKeyHash(0x3d), nil,
-	)
-	txCbor, want := testSimpleSignedTx(t, addr)
-
-	tx, meshErr := decodeTxCbor(hexString(txCbor))
-
-	require.Nil(t, meshErr)
-	require.NotNil(t, tx)
-	require.Equal(t, want.Hash().String(), tx.Hash().String())
 }

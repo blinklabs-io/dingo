@@ -1,3 +1,5 @@
+//go:build dingo_extra_plugins && dingo_db_integration
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build dingo_extra_plugins && dingo_db_integration
 
 package postgres
 
@@ -31,7 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// postgresIntegrationDSN mirrors sqlstore/dialect_integration_test.go's
+// postgresIntegrationDSN mirrors ../sqlstore/dialect_integration_test.go's
 // TestPostgresSQLStoreIntegration default: same env var, same fallback.
 func postgresIntegrationDSN(t *testing.T) string {
 	t.Helper()
@@ -46,7 +46,7 @@ func postgresIntegrationDSN(t *testing.T) string {
 // dsn points at and returns a DSN pointed at it, so concurrent test runs
 // (and the src/dst databases within a single test) never see each other's
 // tables. Isolating via a separate database, not a schema within a shared
-// one (contrast dialect_integration_test.go's postgresDSNWithSearchPath,
+// one (contrast database/plugin/metadata/sqlstore/dialect_integration_test.go's postgresDSNWithSearchPath,
 // used for schema-scoped SQL operations): pg_dump/pg_restore operate on the
 // whole database a DSN points at regardless of search_path, so two "schema
 // siblings" in the same database collide the moment either one is dumped
@@ -113,7 +113,7 @@ func TestBackupToRestoreFromIntegration(t *testing.T) {
 	txn := srcStore.Transaction(t.Context())
 	require.NoError(t, srcStore.SetCommitTimestamp(4242, txn))
 	require.NoError(t, txn.Commit())
-	require.NoError(t, srcStore.SetNodeSettings(&types.NodeSettings{
+	require.NoError(t, srcStore.SetNodeSettings(context.Background(), &types.NodeSettings{
 		StorageMode: types.StorageModeAPI,
 		Network:     "preview",
 	}))
@@ -133,11 +133,11 @@ func TestBackupToRestoreFromIntegration(t *testing.T) {
 	require.NoError(t, dstStore.RestoreFrom(context.Background(), dumpPath))
 	require.NoError(t, dstStore.Start(context.Background()))
 
-	restoredTimestamp, err := dstStore.GetCommitTimestamp()
+	restoredTimestamp, err := dstStore.GetCommitTimestamp(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, int64(4242), restoredTimestamp)
 
-	restoredSettings, err := dstStore.GetNodeSettings()
+	restoredSettings, err := dstStore.GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, types.StorageModeAPI, restoredSettings.StorageMode)
 	require.Equal(t, "preview", restoredSettings.Network)
@@ -232,7 +232,7 @@ func TestResetThenRestoreIntegration(t *testing.T) {
 
 	require.NoError(t, dstStore.RestoreFrom(context.Background(), dumpPath))
 	require.NoError(t, dstStore.Start(context.Background()))
-	restoredTimestamp, err := dstStore.GetCommitTimestamp()
+	restoredTimestamp, err := dstStore.GetCommitTimestamp(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, int64(777), restoredTimestamp)
 }
@@ -260,12 +260,36 @@ func TestResetRefusesWhenTargetHasData(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "already contains data")
 
-	restoredTimestamp, err := store.GetCommitTimestamp()
+	restoredTimestamp, err := store.GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t, int64(999), restoredTimestamp,
 		"a refused Reset must not have touched the existing data",
 	)
+}
+
+func TestResetRefusesWhenDormantDRepStateIsPopulated(t *testing.T) {
+	baseDSN := postgresIntegrationDSN(t)
+	dsn := createIsolatedDatabase(t, baseDSN, "pgbackup_dormancy")
+	store, err := openStore(Config{DSN: dsn}, metadata.ProviderDependencies{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	require.NoError(t, store.Start(context.Background()))
+
+	admin, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	_, err = admin.Exec(
+		"UPDATE drep_dormancy_state SET dormant_epochs = 1 WHERE id = 1",
+	)
+	require.NoError(t, err)
+	var schema string
+	require.NoError(t, admin.QueryRow("SELECT current_schema()").Scan(&schema))
+
+	err = refuseIfTargetHasData(context.Background(), admin, []qualifiedTable{
+		{schema: schema, name: drepDormancyStateTableName},
+	})
+	require.ErrorContains(t, err, "already contains data")
 }
 
 // TestResetRefusesWhenOtherSchemaHasSchemaMigrationsTableWithData guards a

@@ -62,6 +62,7 @@ type LedgerSource interface {
 // ChainsyncState is the chainsync client tracking the recycler drives.
 type ChainsyncState interface {
 	CheckStalledClients() []ouroboros.ConnectionId
+	CheckPatienceExhausted() []ouroboros.ConnectionId
 	AdvanceHeaderSyncRotation()
 	GetTrackedClients() []chainsync.TrackedClient
 	GetClientConnId() *ouroboros.ConnectionId
@@ -103,6 +104,23 @@ type ComponentProvider interface {
 	WithLiveComponents(fn func(LiveComponents)) bool
 }
 
+// PlateauOutcome names what the local-tip plateau watchdog did when it fired.
+// The values are bounded so the composition layer can use them as a metric
+// label.
+type PlateauOutcome string
+
+const (
+	// PlateauOutcomeReconciled means the local ledger reconcile repaired a
+	// primary-chain/ledger divergence and the connection was left alone.
+	PlateauOutcomeReconciled PlateauOutcome = "reconciled"
+	// PlateauOutcomeBacklogNotRecycled means the plateau was classified as a
+	// ledger-application backlog and the chainsync stream was left running.
+	PlateauOutcomeBacklogNotRecycled PlateauOutcome = "backlog_not_recycled"
+	// PlateauOutcomeResync means the watchdog requested a chainsync resync of
+	// the selected connection.
+	PlateauOutcomeResync PlateauOutcome = "resync"
+)
+
 // Config holds the recycler's dependencies and timing policy.
 type Config struct {
 	// Components supplies the live node components each tick reads.
@@ -118,6 +136,10 @@ type Config struct {
 	Grace time.Duration
 	// Cooldown is the minimum spacing between recycles of one connection.
 	Cooldown time.Duration
+	// OnPlateauDecision, when set, is called once for every plateau the
+	// watchdog acts on, with what it did. It runs on the tick goroutine and
+	// must not block or call back into the recycler.
+	OnPlateauDecision func(PlateauOutcome)
 }
 
 // Recycler is the chainsync stall recycler background component.
@@ -404,6 +426,13 @@ func isLedgerApplicationBacklog(
 	return applyBacklog >= headerGap
 }
 
+// notePlateauDecision reports a plateau outcome to the configured hook.
+func (r *Recycler) notePlateauDecision(outcome PlateauOutcome) {
+	if r.config.OnPlateauDecision != nil {
+		r.config.OnPlateauDecision(outcome)
+	}
+}
+
 // tick runs one stall check against the live components.
 func (r *Recycler) tick(
 	now time.Time,
@@ -432,6 +461,7 @@ func (r *Recycler) tick(
 	effectiveGrace := time.Duration(multiplier) * r.config.Grace
 	effectivePlateau := r.plateauRecovery
 	effectiveCooldown := time.Duration(multiplier) * r.config.Cooldown
+	r.disconnectImpatientClients(live)
 	live.ChainsyncState.CheckStalledClients()
 	// Rotate the round-robin header-ingress driver on the stall-check
 	// cadence. No-op under the primary/parallel strategies.
@@ -526,8 +556,8 @@ func (r *Recycler) checkLocalTipPlateau(
 	//
 	// This only ever runs because chain selection tracks that peer. The
 	// sequence a plateau resync sets off is: the resync closes the connection
-	// (LocalTipPlateau is in chainsyncResyncRequiresFreshConnection,
-	// ouroboros/chainsync.go), the ConnectionClosedEvent subscription in
+	// (SubscribeChainsyncResync in ouroboros/chainsync.go closes the
+	// connection for every resync reason), the ConnectionClosedEvent subscription in
 	// node.go calls ChainSelector.RemovePeer, which drops the peer tip and
 	// clears bestPeerConn, and the replacement's only chainsync traffic until
 	// the network's next block is its post-FindIntersect MsgRollBackward.
@@ -613,6 +643,7 @@ func (r *Recycler) checkLocalTipPlateau(
 		// next tick before forward application has had a chance to advance the
 		// ledger.
 		st.lastProgressAt = now
+		r.notePlateauDecision(PlateauOutcomeReconciled)
 		st.lastRecycled[connKey] = now
 		// Reconciliation reset the plateau clock and recorded cooldown above.
 		// Give ledger replay a chance to resume from the repaired tip before
@@ -656,6 +687,7 @@ func (r *Recycler) checkLocalTipPlateau(
 		// drains.
 		st.lastProgressAt = now
 		delete(st.recycleAt, connKey)
+		r.notePlateauDecision(PlateauOutcomeBacklogNotRecycled)
 		return
 	}
 	// The local reconcile found nothing to repair (or failed), so the stall is
@@ -668,7 +700,7 @@ func (r *Recycler) checkLocalTipPlateau(
 	// spare and is suppressed at eligibleCount <= 1. A plateau resync instead
 	// closes the connection so peer governance reconnects to the SAME remote
 	// and re-enters FindIntersect with fresh intersect points anchored at the
-	// current local tip (see chainsyncResyncRequiresFreshConnection). That is
+	// current local tip (see SubscribeChainsyncResync). That is
 	// exactly the recovery a single-peer plateau needs: it restarts header
 	// delivery from local-tip+1 on the only upstream we have. The plateau
 	// predicate (peer ahead AND no local progress for the full plateau
@@ -705,6 +737,7 @@ func (r *Recycler) checkLocalTipPlateau(
 	delete(st.recycleAt, connKey)
 	st.lastRecycled[connKey] = now
 	st.lastProgressAt = now
+	r.notePlateauDecision(PlateauOutcomeResync)
 }
 
 // scheduleStalledRecycles gives every newly stalled client a guarded recycle
@@ -830,6 +863,27 @@ func (r *Recycler) processDueRecycles(
 		st.lastRecycled[connKey] = now
 	}
 }
+
+// disconnectImpatientClients closes every connection whose Genesis Limit on
+// Patience is exhausted. Unlike a stall, exhaustion is not subject to grace,
+// cooldown, or the only-eligible-peer guard: the peer is still sending, too
+// slowly for the progress it advertises, so keeping it holds a client slot and
+// a misleading candidate chain. The reference node likewise kills the
+// ChainSync client outright.
+func (r *Recycler) disconnectImpatientClients(live LiveComponents) {
+	for _, connId := range live.ChainsyncState.CheckPatienceExhausted() {
+		connKey := connId.String()
+		r.logger.Warn(
+			"chainsync client exhausted the Genesis Limit on Patience, disconnecting",
+			"connection_id", connKey,
+		)
+		r.publishConnectionRecycle(connId, connKey, ReasonPatienceExhausted)
+	}
+}
+
+// ReasonPatienceExhausted is the ConnectionRecycleRequestedEvent reason for a
+// peer disconnected by the Genesis Limit on Patience.
+const ReasonPatienceExhausted = "genesis_patience_exhausted"
 
 func (r *Recycler) publishConnectionRecycle(
 	connId ouroboros.ConnectionId,

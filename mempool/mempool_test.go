@@ -71,10 +71,23 @@ type blockingSessionValidator struct {
 	started   chan struct{}
 	release   chan struct{}
 	startOnce sync.Once
+	blockNext atomic.Bool
 }
 
 type changingSessionValidator struct {
 	sessions atomic.Int32
+	stale    atomic.Bool
+}
+
+func testCommitIfCurrent(
+	stillCurrent func() bool,
+) func(func() error) (bool, error) {
+	return func(commit func() error) (bool, error) {
+		if !stillCurrent() {
+			return false, nil
+		}
+		return true, commit()
+	}
 }
 
 func (v *changingSessionValidator) ValidateTx(gledger.Transaction) error {
@@ -85,30 +98,39 @@ func (v *changingSessionValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
 ) error {
 	return nil
 }
 
-func (v *changingSessionValidator) WithTxValidationSession(
+func (v *changingSessionValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		func(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
 		) error,
 		func() bool,
+		func(func() error) (bool, error),
 	) error,
 ) error {
-	v.sessions.Add(1)
+	stale := v.stale.Load()
+	if stale {
+		v.sessions.Add(1)
+	}
+	stillCurrent := func() bool { return !stale }
 	return fn(
 		func(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
 		) error {
 			return nil
 		},
-		func() bool { return false },
+		stillCurrent,
+		testCommitIfCurrent(stillCurrent),
 	)
 }
 
@@ -127,30 +149,44 @@ func (v *blockingSessionValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
 ) error {
 	return nil
 }
 
-func (v *blockingSessionValidator) WithTxValidationSession(
+func (v *blockingSessionValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		func(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
 		) error,
 		func() bool,
+		func(func() error) (bool, error),
 	) error,
 ) error {
-	v.startOnce.Do(func() { close(v.started) })
+	block := v.blockNext.CompareAndSwap(true, false)
+	if block {
+		v.startOnce.Do(func() { close(v.started) })
+	}
 	validate := func(
 		gledger.Transaction,
 		map[utxoref.Key]struct{},
 		map[utxoref.Key]lcommon.Utxo,
+		*utxoref.StateOverlay,
 	) error {
-		<-v.release
+		if block {
+			<-v.release
+		}
 		return nil
 	}
-	return fn(validate, func() bool { return true })
+	stillCurrent := func() bool { return true }
+	return fn(validate, stillCurrent, testCommitIfCurrent(stillCurrent))
+}
+
+func (v *blockingSessionValidator) blockNextSession() {
+	v.blockNext.Store(true)
 }
 
 func newBlockingOverlayValidator() *blockingOverlayValidator {
@@ -168,6 +204,7 @@ func (v *blockingOverlayValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
 ) error {
 	if v.shouldBlock.Load() {
 		v.startOnce.Do(func() { close(v.started) })
@@ -192,14 +229,9 @@ func (v *mockValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.StateOverlay,
 ) error {
 	return v.ValidateTx(tx)
-}
-
-func (v *mockValidator) setFailHash(hash string, fail bool) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.failHashes[hash] = fail
 }
 
 func (v *mockValidator) setFailAll(fail bool) {
@@ -325,7 +357,7 @@ func TestUtxoOverlayUsesConsensusConsumedInputsForInvalidTx(t *testing.T) {
 	require.NotEmpty(t, tx.Inputs())
 	require.NotEmpty(t, tx.Collateral())
 	overlay := newUtxoOverlay()
-	overlay.applyTx(tx.Hash().String(), uint(conway.EraIdConway), tx.Cbor(), tx)
+	overlay.applyTx(tx.Hash().String(), uint(conway.EraIdConway), tx, nil)
 	for _, input := range tx.Inputs() {
 		key := utxoref.ForInput(input)
 		assert.NotContains(t, overlay.consumed, key,
@@ -506,7 +538,9 @@ func TestMempool_AddConsumerIsIdempotent(t *testing.T) {
 	second := m.AddConsumer(connId)
 
 	require.Same(t, first, second)
+	m.consumersMutex.Lock()
 	assert.Len(t, m.consumers, 1)
+	m.consumersMutex.Unlock()
 }
 
 func TestMempoolConsumer_NextTx_NonBlocking(t *testing.T) {
@@ -648,40 +682,46 @@ func TestMempool_ConsumerCreatedDuringTxAddition(t *testing.T) {
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
-	// Start goroutine adding transactions continuously
-	stopAdding := make(chan struct{})
-	go func() {
-		for i := 0; ; i++ {
+	// Add a fixed stream of transactions and notify the consumer creator after
+	// each append so the test does not depend on wall-clock scheduling.
+	const numAdded = 100
+	added := make(chan struct{})
+	// Releases the producer if a require below fails before it is drained.
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	var addWG sync.WaitGroup
+	addWG.Go(func() {
+		defer close(added)
+		for i := range numAdded {
+			m.Lock()
+			tx := &MempoolTransaction{
+				Hash:     fmt.Sprintf("concurrent-tx-%d", i),
+				Cbor:     fmt.Appendf(nil, "cbor-%d", i),
+				Type:     uint(conway.EraIdConway),
+				LastSeen: time.Now(),
+			}
+			m.transactions = append(m.transactions, tx)
+			m.Unlock()
 			select {
-			case <-stopAdding:
+			case added <- struct{}{}:
+			case <-stop:
 				return
-			default:
-				m.Lock()
-				tx := &MempoolTransaction{
-					Hash:     fmt.Sprintf("concurrent-tx-%d", i),
-					Cbor:     fmt.Appendf(nil, "cbor-%d", i),
-					Type:     uint(conway.EraIdConway),
-					LastSeen: time.Now(),
-				}
-				m.transactions = append(m.transactions, tx)
-				m.Unlock()
-				time.Sleep(time.Millisecond)
 			}
 		}
-	}()
+	})
 
-	// Create consumers at various points during addition
+	// Create consumers at distinct points in the concurrent append stream.
 	consumers := make([]*MempoolConsumer, 10)
 	for i := range 10 {
-		time.Sleep(5 * time.Millisecond) // Stagger consumer creation
+		for range 10 {
+			_, ok := <-added
+			require.True(t, ok, "transaction producer ended before consumer %d", i)
+		}
 		connId := newTestConnectionId(i)
 		consumers[i] = mustAddConsumer(t, m, connId)
 		require.NotNil(t, consumers[i], "consumer %d should not be nil", i)
 	}
-
-	// Let more transactions be added
-	time.Sleep(50 * time.Millisecond)
-	close(stopAdding)
+	addWG.Wait()
 
 	// Verify each consumer can read transactions without panic
 	for i, consumer := range consumers {
@@ -1019,63 +1059,47 @@ func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
 	addMockTransactions(t, m, 50)
 
 	var wg sync.WaitGroup
-	done := make(chan struct{})
+	start := make(chan struct{})
 
 	// Goroutine adding transactions
 	wg.Go(func() {
-		for i := 0; ; i++ {
-			select {
-			case <-done:
-				return
-			default:
-				m.Lock()
-				tx := &MempoolTransaction{
-					Hash:     fmt.Sprintf("concurrent-add-%d", i),
-					Cbor:     fmt.Appendf(nil, "cbor-%d", i),
-					Type:     uint(conway.EraIdConway),
-					LastSeen: time.Now(),
-				}
-				m.transactions = append(m.transactions, tx)
-				m.Unlock()
-				time.Sleep(time.Millisecond)
+		<-start
+		for i := range 500 {
+			m.Lock()
+			tx := &MempoolTransaction{
+				Hash:     fmt.Sprintf("concurrent-add-%d", i),
+				Cbor:     fmt.Appendf(nil, "cbor-%d", i),
+				Type:     uint(conway.EraIdConway),
+				LastSeen: time.Now(),
 			}
+			m.transactions = append(m.transactions, tx)
+			m.Unlock()
 		}
 	})
 
 	// Goroutine removing transactions
 	wg.Go(func() {
+		<-start
 		removeIdx := 0
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				m.RemoveTransaction(fmt.Sprintf("tx-hash-%d", removeIdx))
-				removeIdx++
-				if removeIdx >= 50 {
-					removeIdx = 0
-				}
-				time.Sleep(2 * time.Millisecond)
+		for range 500 {
+			m.RemoveTransaction(fmt.Sprintf("tx-hash-%d", removeIdx))
+			removeIdx++
+			if removeIdx >= 50 {
+				removeIdx = 0
 			}
 		}
 	})
 
 	// Goroutine creating consumers
 	wg.Go(func() {
-		for i := 0; ; i++ {
-			select {
-			case <-done:
-				return
-			default:
-				connId := newTestConnectionId(1000 + i)
-				consumer := m.AddConsumer(connId)
-				if consumer != nil {
-					// Read a few transactions
-					for range 3 {
-						consumer.NextTx(false)
-					}
+		<-start
+		for i := range 100 {
+			connId := newTestConnectionId(1000 + i)
+			consumer := m.AddConsumer(connId)
+			if consumer != nil {
+				for range 3 {
+					consumer.NextTx(false)
 				}
-				time.Sleep(5 * time.Millisecond)
 			}
 		}
 	})
@@ -1084,20 +1108,13 @@ func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
 	connId := newTestConnectionId(0)
 	consumer := m.AddConsumer(connId)
 	wg.Go(func() {
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				consumer.NextTx(false)
-				time.Sleep(time.Millisecond)
-			}
+		<-start
+		for range 500 {
+			consumer.NextTx(false)
 		}
 	})
 
-	// Run for a short duration
-	time.Sleep(200 * time.Millisecond)
-	close(done)
+	close(start)
 
 	// Wait with timeout
 	waitCh := make(chan struct{})
@@ -1111,6 +1128,10 @@ func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
 		// Success - no deadlock
 	case <-time.After(5 * time.Second):
 		t.Fatal("potential deadlock detected - test timed out")
+	}
+	for i := range 50 {
+		_, exists := m.GetTransaction(fmt.Sprintf("tx-hash-%d", i))
+		assert.False(t, exists, "original transaction %d should be removed", i)
 	}
 }
 
@@ -1129,24 +1150,19 @@ func TestMempool_ConcurrentNextTx_MultipleConsumers(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	done := make(chan struct{})
 	txsRead := make([]int32, numConsumers)
+	start := make(chan struct{})
 
 	// Each consumer reads in its own goroutine
 	for i := range numConsumers {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			for {
-				select {
-				case <-done:
-					return
-				default:
-					tx := consumers[idx].NextTx(false)
-					if tx != nil {
-						atomic.AddInt32(&txsRead[idx], 1)
-					}
-					time.Sleep(time.Microsecond * 100)
+			<-start
+			for range 500 {
+				tx := consumers[idx].NextTx(false)
+				if tx != nil {
+					atomic.AddInt32(&txsRead[idx], 1)
 				}
 			}
 		}(i)
@@ -1154,41 +1170,29 @@ func TestMempool_ConcurrentNextTx_MultipleConsumers(t *testing.T) {
 
 	// Adder goroutine
 	wg.Go(func() {
-		for i := 0; ; i++ {
-			select {
-			case <-done:
-				return
-			default:
-				m.Lock()
-				tx := &MempoolTransaction{
-					Hash:     fmt.Sprintf("new-tx-%d", i),
-					Cbor:     fmt.Appendf(nil, "new-cbor-%d", i),
-					Type:     uint(conway.EraIdConway),
-					LastSeen: time.Now(),
-				}
-				m.transactions = append(m.transactions, tx)
-				m.Unlock()
-				time.Sleep(time.Millisecond)
+		<-start
+		for i := range 500 {
+			m.Lock()
+			tx := &MempoolTransaction{
+				Hash:     fmt.Sprintf("new-tx-%d", i),
+				Cbor:     fmt.Appendf(nil, "new-cbor-%d", i),
+				Type:     uint(conway.EraIdConway),
+				LastSeen: time.Now(),
 			}
+			m.transactions = append(m.transactions, tx)
+			m.Unlock()
 		}
 	})
 
 	// Remover goroutine
 	wg.Go(func() {
-		for i := 0; ; i++ {
-			select {
-			case <-done:
-				return
-			default:
-				m.RemoveTransaction(fmt.Sprintf("tx-hash-%d", i%100))
-				time.Sleep(time.Millisecond * 2)
-			}
+		<-start
+		for i := range 500 {
+			m.RemoveTransaction(fmt.Sprintf("tx-hash-%d", i%100))
 		}
 	})
 
-	// Run for short duration
-	time.Sleep(300 * time.Millisecond)
-	close(done)
+	close(start)
 
 	// Wait with timeout
 	waitCh := make(chan struct{})
@@ -1208,6 +1212,10 @@ func TestMempool_ConcurrentNextTx_MultipleConsumers(t *testing.T) {
 		t.Logf("Total transactions read: %d", total)
 	case <-time.After(5 * time.Second):
 		t.Fatal("potential deadlock detected")
+	}
+	for i := range 100 {
+		_, exists := m.GetTransaction(fmt.Sprintf("tx-hash-%d", i))
+		assert.False(t, exists, "original transaction %d should be removed", i)
 	}
 }
 
@@ -1756,7 +1764,7 @@ func TestMempool_RejectsOperationsAfterStop(t *testing.T) {
 
 	require.NoError(t, m.Stop(context.Background()))
 
-	err := m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t))
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t))
 	require.ErrorIs(t, err, ErrMempoolStopped)
 	assert.Empty(t, m.Transactions())
 	assert.Nil(t, m.AddConsumer(connId))
@@ -1958,7 +1966,7 @@ func TestMempool_AddTransaction_DuplicateUpdatesLastSeen(t *testing.T) {
 	txBytes := getTestTxBytes(t)
 
 	// Add transaction first time
-	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err)
 
 	// Get the transaction hash dynamically
@@ -1971,11 +1979,14 @@ func TestMempool_AddTransaction_DuplicateUpdatesLastSeen(t *testing.T) {
 	require.True(t, exists)
 	firstLastSeen := tx1.LastSeen
 
-	// Wait a bit
-	time.Sleep(10 * time.Millisecond)
+	// Move the stored timestamp back deterministically so refreshing it is
+	// observable even on a coarse or unusually fast clock.
+	m.Lock()
+	m.txByHash[txHash].LastSeen = firstLastSeen.Add(-time.Hour)
+	m.Unlock()
 
 	// Add same transaction again
-	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err)
 
 	// Verify last seen was updated
@@ -2001,7 +2012,7 @@ func TestMempool_AddTransaction_ValidationFailure(t *testing.T) {
 	txBytes := getTestTxBytes(t)
 
 	// Try to add transaction - should fail validation
-	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.Error(t, err, "should fail validation")
 
 	// Verify mempool is empty
@@ -2022,7 +2033,7 @@ func TestMempool_MempoolFull(t *testing.T) {
 
 	// Add transaction that exceeds capacity
 	txBytes := getTestTxBytes(t)
-	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 
 	require.Error(t, err, "should fail due to capacity")
 	var fullErr *MempoolFullError
@@ -2055,7 +2066,7 @@ func TestMempool_AddTransaction_RejectsValidityIntervalBeyondCurrentSlot(
 	require.NoError(t, err)
 
 	// TX has ValidityIntervalStart=50000000, current slot is at 40000000 → reject
-	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "validity interval start")
 	assert.Equal(
@@ -2084,7 +2095,7 @@ func TestMempool_AddTransaction_AcceptsValidityIntervalAtOrBelowCurrentSlot(
 	require.NoError(t, err)
 
 	// TX has ValidityIntervalStart=50000000, current slot is at 60000000 → accept
-	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err)
 	assert.Equal(
 		t,
@@ -2108,7 +2119,7 @@ func TestMempool_AddTransaction_NoValidityStart_BypassesCheck(t *testing.T) {
 
 	// Original test TX has ValidityIntervalStart=0 (no lower bound)
 	txBytes := getTestTxBytes(t)
-	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err)
 	assert.Equal(
 		t,
@@ -2531,6 +2542,7 @@ func TestMempool_Rejection_AboveRejectionWatermark(
 
 	txBytes := getTestTxBytes(t)
 	err := m2.AddTransaction(
+		context.Background(),
 		uint(conway.EraIdConway), txBytes,
 	)
 	require.Error(
@@ -2707,7 +2719,7 @@ func TestMempool_DisabledEvictionRejectsAtCapacity(t *testing.T) {
 	addMockTransactionsOfSize(t, m, 10, 100)
 
 	txBytes := getTestTxBytes(t)
-	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.Error(t, err)
 	var fullErr *MempoolFullError
 	assert.ErrorAs(t, err, &fullErr)
@@ -2870,8 +2882,9 @@ func TestMempool_TTL_NonExpiredTransactionsRetained(t *testing.T) {
 	m.consumersMutex.Unlock()
 	m.Unlock()
 
-	// Wait for a few cleanup cycles to run
-	time.Sleep(100 * time.Millisecond)
+	// Exercise the production cleanup path directly; the fresh timestamps
+	// must survive regardless of the background cleanup schedule.
+	m.removeExpiredTransactions()
 
 	// Verify transactions are still present
 	m.RLock()
@@ -3175,107 +3188,106 @@ func TestMempool_TTL_RemoveExpiredTransactions_EmptyMempool(
 }
 
 func TestMempool_TTL_LastSeenUpdatePreventsExpiry(t *testing.T) {
-	// Use a generous TTL (500ms) relative to the total refresh
-	// window (6 × 30ms = 180ms) so the test is not flaky under
-	// CI load.
-	m := newTestMempoolWithTTL(t, 500*time.Millisecond, 20*time.Millisecond)
+	// The background cleanup interval is far longer than the test, so removal
+	// only happens through the explicit removeExpiredTransactions calls.
+	m := newTestMempoolWithTTL(t, time.Hour, time.Hour)
 	defer m.Stop(context.Background())
 
-	// Add a transaction that will expire soon
-	m.Lock()
-	m.consumersMutex.Lock()
-	tx := &MempoolTransaction{
-		Hash:     "refresh-tx",
-		Cbor:     []byte("refresh-cbor"),
-		Type:     uint(conway.EraIdConway),
-		LastSeen: time.Now(),
+	// Both transactions start well past the TTL; only one is refreshed.
+	add := func(hash string) {
+		m.Lock()
+		m.consumersMutex.Lock()
+		tx := &MempoolTransaction{
+			Hash:     hash,
+			Cbor:     []byte(hash + "-cbor"),
+			Type:     uint(conway.EraIdConway),
+			LastSeen: time.Now().Add(-2 * time.Hour),
+		}
+		m.transactions = append(m.transactions, tx)
+		m.txByHash[tx.Hash] = tx
+		m.currentSizeBytes += int64(len(tx.Cbor))
+		m.metrics.txsInMempool.Inc()
+		m.consumersMutex.Unlock()
+		m.Unlock()
 	}
-	m.transactions = append(m.transactions, tx)
-	m.txByHash[tx.Hash] = tx
-	m.currentSizeBytes += int64(len(tx.Cbor))
-	m.metrics.txsInMempool.Inc()
-	m.consumersMutex.Unlock()
+	add("refresh-tx")
+	add("stale-tx")
+
+	m.Lock()
+	m.txByHash["refresh-tx"].LastSeen = time.Now()
 	m.Unlock()
 
-	// Keep refreshing LastSeen so the transaction never expires
-	refreshDone := make(chan struct{})
-	go func() {
-		defer close(refreshDone)
-		for range 6 {
-			time.Sleep(30 * time.Millisecond)
-			m.Lock()
-			if existingTx := m.txByHash["refresh-tx"]; existingTx != nil {
-				existingTx.LastSeen = time.Now()
-			}
-			m.Unlock()
-		}
-	}()
+	m.removeExpiredTransactions()
 
-	<-refreshDone
-
-	// The transaction should still be in the mempool because
-	// we kept refreshing it
 	m.RLock()
-	assert.Equal(
-		t, 1, len(m.transactions),
-		"refreshed transaction should still be present",
-	)
-	_, exists := m.txByHash["refresh-tx"]
-	assert.True(t, exists, "refreshed transaction should be in hash map")
-	m.RUnlock()
+	defer m.RUnlock()
+	require.Len(t, m.transactions, 1)
+	assert.Equal(t, "refresh-tx", m.transactions[0].Hash,
+		"refreshed transaction should still be present")
+	assert.Contains(t, m.txByHash, "refresh-tx")
+	assert.NotContains(t, m.txByHash, "stale-tx",
+		"an unrefreshed transaction past the TTL should be removed")
 }
 
 func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
-	m := newTestMempoolWithTTL(t, 30*time.Millisecond, 10*time.Millisecond)
+	m := newTestMempoolWithTTL(t, time.Minute, 10*time.Millisecond)
 	defer m.Stop(context.Background())
 
 	var wg sync.WaitGroup
-	done := make(chan struct{})
+	start := make(chan struct{})
+	expiredInserted := make(chan struct{})
+	addDone := make(chan struct{})
 
-	// Goroutine continuously adding transactions
+	// Add a deterministic mix of expired and live transactions while cleanup
+	// and consumer reads run concurrently.
 	wg.Go(func() {
-		for i := 0; ; i++ {
-			select {
-			case <-done:
-				return
-			default:
-				m.Lock()
-				m.consumersMutex.Lock()
-				tx := &MempoolTransaction{
-					Hash:     fmt.Sprintf("concurrent-tx-%d", i),
-					Cbor:     fmt.Appendf(nil, "concurrent-cbor-%d", i),
-					Type:     uint(conway.EraIdConway),
-					LastSeen: time.Now(),
-				}
-				m.transactions = append(m.transactions, tx)
-				m.txByHash[tx.Hash] = tx
-				m.currentSizeBytes += int64(len(tx.Cbor))
-				m.metrics.txsInMempool.Inc()
-				m.consumersMutex.Unlock()
-				m.Unlock()
-				time.Sleep(5 * time.Millisecond)
+		<-start
+		for i := range 200 {
+			lastSeen := time.Now()
+			if i%2 == 0 {
+				lastSeen = lastSeen.Add(-time.Hour)
+			}
+			m.Lock()
+			m.consumersMutex.Lock()
+			tx := &MempoolTransaction{
+				Hash:     fmt.Sprintf("concurrent-tx-%d", i),
+				Cbor:     fmt.Appendf(nil, "concurrent-cbor-%d", i),
+				Type:     uint(conway.EraIdConway),
+				LastSeen: lastSeen,
+			}
+			m.transactions = append(m.transactions, tx)
+			m.txByHash[tx.Hash] = tx
+			m.currentSizeBytes += int64(len(tx.Cbor))
+			m.metrics.txsInMempool.Inc()
+			m.consumersMutex.Unlock()
+			m.Unlock()
+			if i == 0 {
+				close(expiredInserted)
 			}
 		}
+		close(addDone)
+	})
+	wg.Go(func() {
+		<-start
+		<-expiredInserted
+		for range 200 {
+			m.removeExpiredTransactions()
+		}
+		<-addDone
+		m.removeExpiredTransactions()
 	})
 
 	// Goroutine reading transactions via consumer
 	connId := newTestConnectionId(0)
 	consumer := m.AddConsumer(connId)
 	wg.Go(func() {
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				consumer.NextTx(false)
-				time.Sleep(2 * time.Millisecond)
-			}
+		<-start
+		for range 200 {
+			consumer.NextTx(false)
 		}
 	})
 
-	// Let it run with concurrent adds, reads, and expiry
-	time.Sleep(200 * time.Millisecond)
-	close(done)
+	close(start)
 
 	waitCh := make(chan struct{})
 	go func() {
@@ -3285,14 +3297,18 @@ func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
 
 	select {
 	case <-waitCh:
-		// Success - no deadlock or race
 		m.RLock()
-		t.Logf(
-			"Final mempool state: %d transactions, %d bytes",
-			len(m.transactions),
-			m.currentSizeBytes,
-		)
+		transactionCount := len(m.transactions)
+		present := make(map[int]bool, 200)
+		for i := range 200 {
+			_, exists := m.txByHash[fmt.Sprintf("concurrent-tx-%d", i)]
+			present[i] = exists
+		}
 		m.RUnlock()
+		require.Equal(t, 100, transactionCount)
+		for i := range 200 {
+			require.Equal(t, i%2 != 0, present[i])
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("potential deadlock with concurrent expiry and addition")
 	}
@@ -3372,7 +3388,7 @@ func TestMempool_MEM03_SubscriberAccessesMempoolDuringAdd(
 
 	// Add a real transaction
 	txBytes := getTestTxBytes(t)
-	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err)
 
 	// Wait for subscriber to process the event
@@ -3428,14 +3444,14 @@ func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(t *testing.T) {
 	defer m.Stop(context.Background())
 
 	txBytes := getTestTxBytes(t)
-	require.NoError(t, m.AddTransaction(uint(conway.EraIdConway), txBytes))
+	require.NoError(t, m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes))
 	txs := m.Transactions()
 	require.Len(t, txs, 1)
 	consumer := m.AddConsumer(newTestConnectionId(0))
 	validator.shouldBlock.Store(true)
 
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- m.rebuildOverlay() }()
+	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -3516,10 +3532,11 @@ func TestMempool_AdmissionContinuesDuringRevalidation(t *testing.T) {
 
 	require.NoError(
 		t,
-		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
+	validator.blockNextSession()
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- m.rebuildOverlay() }()
+	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -3531,7 +3548,7 @@ func TestMempool_AdmissionContinuesDuringRevalidation(t *testing.T) {
 	require.NoError(t, err)
 	addDone := make(chan error, 1)
 	go func() {
-		addDone <- m.AddTransaction(uint(conway.EraIdConway), secondTx)
+		addDone <- m.AddTransaction(context.Background(), uint(conway.EraIdConway), secondTx)
 	}()
 	require.NoError(
 		t,
@@ -3586,12 +3603,13 @@ func TestMempool_RemovalsContinueDuringRevalidation(t *testing.T) {
 			defer m.Stop(context.Background())
 			require.NoError(
 				t,
-				m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+				m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 			)
 			hash := m.Transactions()[0].Hash
 
+			validator.blockNextSession()
 			rebuildDone := make(chan error, 1)
-			go func() { rebuildDone <- m.rebuildOverlay() }()
+			go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 			dingotestutil.RequireReceive(
 				t,
 				validator.started,
@@ -3643,7 +3661,7 @@ func TestMempool_ConfirmedTransactionLogVisibleAtInfoLevel(t *testing.T) {
 
 	require.NoError(
 		t,
-		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 	hash := m.Transactions()[0].Hash
 	m.RemoveTxsByHash([]string{hash})
@@ -3656,7 +3674,7 @@ func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 	firstTx := getTestTxBytes(t)
 	secondTx, err := hex.DecodeString(testTxWithValidityStartHex)
 	require.NoError(t, err)
-	totalSize := len(firstTx) + len(secondTx)
+	totalSize := retainedSize(t, firstTx) + retainedSize(t, secondTx)
 	capacity := int64(float64(totalSize)/0.925) + 1
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -3670,11 +3688,12 @@ func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop(context.Background())
-	require.NoError(t, m.AddTransaction(uint(conway.EraIdConway), firstTx))
+	require.NoError(t, m.AddTransaction(context.Background(), uint(conway.EraIdConway), firstTx))
 	firstHash := m.Transactions()[0].Hash
 
+	validator.blockNextSession()
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- m.rebuildOverlay() }()
+	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -3683,7 +3702,7 @@ func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 	)
 	addDone := make(chan error, 1)
 	go func() {
-		addDone <- m.AddTransaction(uint(conway.EraIdConway), secondTx)
+		addDone <- m.AddTransaction(context.Background(), uint(conway.EraIdConway), secondTx)
 	}()
 	require.NoError(
 		t,
@@ -3718,10 +3737,11 @@ func TestMempool_RevalidationStopsAfterBoundedGenerationRetries(t *testing.T) {
 	defer m.Stop(context.Background())
 	require.NoError(
 		t,
-		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 
-	err := m.rebuildOverlay()
+	validator.stale.Store(true)
+	err := m.rebuildOverlay(context.Background())
 	require.ErrorIs(t, err, errValidationSnapshotChanged)
 	assert.Equal(t, int32(2), validator.sessions.Load())
 	assert.Len(
@@ -3741,13 +3761,14 @@ func TestMempool_RevalidationJournalOverflowLeavesLiveStateUntouched(
 	defer m.Stop(context.Background())
 	require.NoError(
 		t,
-		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 	firstHash := m.Transactions()[0].Hash
 	m.revalidationJournalCap = 1
 
+	validator.blockNextSession()
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- m.rebuildOverlay() }()
+	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -3757,7 +3778,7 @@ func TestMempool_RevalidationJournalOverflowLeavesLiveStateUntouched(
 	m.RemoveTransaction(firstHash)
 	secondTx, err := hex.DecodeString(testTxWithValidityStartHex)
 	require.NoError(t, err)
-	require.NoError(t, m.AddTransaction(uint(conway.EraIdConway), secondTx))
+	require.NoError(t, m.AddTransaction(context.Background(), uint(conway.EraIdConway), secondTx))
 
 	close(validator.release)
 	require.ErrorIs(
@@ -3782,11 +3803,12 @@ func TestMempool_StopContinuesDuringRevalidation(t *testing.T) {
 	m := newTestMempoolWithValidator(t, validator)
 	require.NoError(
 		t,
-		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 
+	validator.blockNextSession()
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- m.rebuildOverlay() }()
+	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t,
 		validator.started,
@@ -3825,7 +3847,7 @@ func TestMempool_ReadsAndConsumerRegistrationProceedDuringAdmissionValidation(
 
 	addDone := make(chan error, 1)
 	go func() {
-		addDone <- m.AddTransaction(uint(conway.EraIdConway), txBytes)
+		addDone <- m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	}()
 	dingotestutil.RequireReceive(
 		t,
@@ -3884,61 +3906,70 @@ func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
 	var addEvents atomic.Int32
 	var removeEvents atomic.Int32
 
-	m.eventBus.SubscribeFunc(
+	addSubscriptionID := m.eventBus.SubscribeFuncWithBufferPolicy(
 		AddTransactionEventType,
+		600,
+		event.SubscriberBackpressureBlock,
 		func(evt event.Event) {
 			// Access mempool during event handling
 			_, _ = m.GetTransaction("any")
 			addEvents.Add(1)
 		},
 	)
-	m.eventBus.SubscribeFunc(
+	removeSubscriptionID := m.eventBus.SubscribeFuncWithBufferPolicy(
 		RemoveTransactionEventType,
+		400,
+		event.SubscriberBackpressureBlock,
 		func(evt event.Event) {
 			// Access mempool during event handling
 			_ = m.Transactions()
 			removeEvents.Add(1)
 		},
 	)
+	t.Cleanup(func() {
+		m.eventBus.UnsubscribeAndWait(
+			AddTransactionEventType,
+			addSubscriptionID,
+		)
+		m.eventBus.UnsubscribeAndWait(
+			RemoveTransactionEventType,
+			removeSubscriptionID,
+		)
+	})
+	addMockTransactions(t, m, 400)
 
 	var wg sync.WaitGroup
-	done := make(chan struct{})
+	start := make(chan struct{})
 
 	// Goroutines adding transactions via direct mock injection
 	for i := range 3 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; ; j++ {
-				select {
-				case <-done:
-					return
-				default:
-					hash := fmt.Sprintf("pub-tx-%d-%d", id, j)
-					m.Lock()
-					m.consumersMutex.Lock()
-					tx := &MempoolTransaction{
-						Hash:     hash,
-						Cbor:     []byte(hash),
-						Type:     uint(conway.EraIdConway),
-						LastSeen: time.Now(),
-					}
-					m.transactions = append(m.transactions, tx)
-					m.txByHash[tx.Hash] = tx
-					m.currentSizeBytes += int64(len(tx.Cbor))
-					m.metrics.txsInMempool.Inc()
-					m.consumersMutex.Unlock()
-					m.Unlock()
-					// Publish add event outside locks
-					m.eventBus.Publish(
-						AddTransactionEventType,
-						event.NewEvent(
-							AddTransactionEventType,
-							AddTransactionEvent{Hash: hash},
-						),
-					)
-					time.Sleep(time.Millisecond)
+			<-start
+			for j := range 200 {
+				hash := fmt.Sprintf("pub-tx-%d-%d", id, j)
+				m.Lock()
+				m.consumersMutex.Lock()
+				tx := &MempoolTransaction{
+					Hash:     hash,
+					Cbor:     []byte(hash),
+					Type:     uint(conway.EraIdConway),
+					LastSeen: time.Now(),
 				}
+				m.transactions = append(m.transactions, tx)
+				m.txByHash[tx.Hash] = tx
+				m.currentSizeBytes += int64(len(tx.Cbor))
+				m.metrics.txsInMempool.Inc()
+				m.consumersMutex.Unlock()
+				m.Unlock()
+				m.eventBus.Publish(
+					AddTransactionEventType,
+					event.NewEvent(
+						AddTransactionEventType,
+						AddTransactionEvent{Hash: hash},
+					),
+				)
 			}
 		}(i)
 	}
@@ -3948,22 +3979,15 @@ func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; ; j++ {
-				select {
-				case <-done:
-					return
-				default:
-					hash := fmt.Sprintf("pub-tx-%d-%d", id, j)
-					m.RemoveTransaction(hash)
-					time.Sleep(2 * time.Millisecond)
-				}
+			<-start
+			for j := range 200 {
+				hash := fmt.Sprintf("tx-hash-%d", id*200+j)
+				m.RemoveTransaction(hash)
 			}
 		}(i)
 	}
 
-	// Run for 200ms
-	time.Sleep(200 * time.Millisecond)
-	close(done)
+	close(start)
 
 	waitCh := make(chan struct{})
 	go func() {
@@ -3973,11 +3997,18 @@ func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
 
 	select {
 	case <-waitCh:
-		t.Logf(
-			"Add events: %d, Remove events: %d",
-			addEvents.Load(),
-			removeEvents.Load(),
+		require.Eventually(t, func() bool {
+			return addEvents.Load() == 600 && removeEvents.Load() == 400
+		}, 5*time.Second, 10*time.Millisecond,
+			"all published events should be handled",
 		)
+		require.Equal(t, int32(600), addEvents.Load())
+		require.Equal(t, int32(400), removeEvents.Load())
+		require.Len(t, m.Transactions(), 600)
+		for i := range 400 {
+			_, exists := m.GetTransaction(fmt.Sprintf("tx-hash-%d", i))
+			require.False(t, exists)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal(
 			"deadlock detected during concurrent publish operations",
@@ -4006,13 +4037,14 @@ func newOverlayValidator(
 func (v *overlayValidator) ValidateTx(
 	tx gledger.Transaction,
 ) error {
-	return v.ValidateTxWithOverlay(tx, nil, nil)
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
 }
 
 func (v *overlayValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	consumedUtxos map[utxoref.Key]struct{},
 	createdUtxos map[utxoref.Key]lcommon.Utxo,
+	accounts *utxoref.StateOverlay,
 ) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -4044,16 +4076,6 @@ func (v *overlayValidator) removeBaseUtxo(key utxoref.Key) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	delete(v.baseUtxos, key)
-}
-
-// hexToBlake2b256 converts a hex string to a Blake2b256 hash.
-func hexToBlake2b256(t *testing.T, h string) lcommon.Blake2b256 {
-	t.Helper()
-	var hash lcommon.Blake2b256
-	b, err := hex.DecodeString(h)
-	require.NoError(t, err)
-	copy(hash[:], b)
-	return hash
 }
 
 // buildMockTx builds a mock transaction with the given inputs and outputs.
@@ -4134,11 +4156,11 @@ func TestOverlayDoubleSpendRejection(t *testing.T) {
 		[]lcommon.TransactionInput{sharedInput},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 900000)},
 	)
-	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created)
+	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created, overlay.accounts)
 	require.NoError(t, err, "TX-A should pass overlay validation")
 
 	// Apply TX-A to the overlay
-	overlay.applyTx(txA.Hash().String(), 0, nil, txA)
+	overlay.applyTx(txA.Hash().String(), 0, txA, nil)
 
 	// Verify input is now consumed
 	_, consumed := overlay.consumed[utxoKey]
@@ -4151,7 +4173,7 @@ func TestOverlayDoubleSpendRejection(t *testing.T) {
 		[]lcommon.TransactionInput{sharedInput},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 900000)},
 	)
-	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created)
+	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created, overlay.accounts)
 	require.Error(t, err, "TX-B should be rejected (double-spend)")
 	assert.Contains(t, err.Error(), "already consumed")
 }
@@ -4179,9 +4201,9 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 		[]lcommon.TransactionInput{baseInput},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 1800000)},
 	)
-	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created)
+	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created, overlay.accounts)
 	require.NoError(t, err, "TX-A should pass")
-	overlay.applyTx(txA.Hash().String(), 0, nil, txA)
+	overlay.applyTx(txA.Hash().String(), 0, txA, nil)
 
 	// Verify TX-A's output is in the overlay created set
 	inputFromA := buildMockInput(t, txHashA, 0)
@@ -4196,13 +4218,13 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 		[]lcommon.TransactionInput{inputFromA},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 1600000)},
 	)
-	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created)
+	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created, overlay.accounts)
 	require.NoError(
 		t,
 		err,
 		"TX-B should pass (spends TX-A output from overlay)",
 	)
-	overlay.applyTx(txB.Hash().String(), 0, nil, txB)
+	overlay.applyTx(txB.Hash().String(), 0, txB, nil)
 
 	// Verify both TXs are tracked
 	assert.Len(t, overlay.applied, 2)
@@ -4219,7 +4241,7 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 		[]lcommon.TransactionInput{unknownInput},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 500000)},
 	)
-	err = v.ValidateTxWithOverlay(txC, overlay.consumed, overlay.created)
+	err = v.ValidateTxWithOverlay(txC, overlay.consumed, overlay.created, overlay.accounts)
 	require.Error(t, err, "TX-C should fail (input not found)")
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -4247,7 +4269,7 @@ func TestOverlayRebuildOnChainUpdate(t *testing.T) {
 
 	// Add the real TX via AddTransaction
 	txBytes := getTestTxBytes(t)
-	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err, "real TX should be accepted")
 
 	// Verify TX is in mempool
@@ -4259,7 +4281,7 @@ func TestOverlayRebuildOnChainUpdate(t *testing.T) {
 	v.removeBaseUtxo(realInputKey)
 
 	// Rebuild overlay (simulates what processChainEvents does)
-	require.NoError(t, m.rebuildOverlay())
+	require.NoError(t, m.rebuildOverlay(context.Background()))
 
 	// TX should be evicted because its input is no longer in base UTxOs
 	m.RLock()
@@ -4278,7 +4300,7 @@ func TestOverlayRebuildOnChainUpdate(t *testing.T) {
 // programming error — but it should not panic.
 func TestRebuildOverlayReturnsErrorOnNilValidator(t *testing.T) {
 	m := &Mempool{}
-	err := m.rebuildOverlay()
+	err := m.rebuildOverlay(context.Background())
 	require.ErrorIs(t, err, ErrNilValidator)
 }
 
@@ -4288,7 +4310,7 @@ func TestRebuildOverlayReturnsErrorOnNilValidator(t *testing.T) {
 // transaction, and the API surfaces have to answer the two differently.
 func TestAddTransactionReturnsErrNilValidator(t *testing.T) {
 	m := &Mempool{}
-	err := m.AddTransaction(0, nil)
+	err := m.AddTransaction(context.Background(), 0, nil)
 	require.ErrorIs(t, err, ErrNilValidator)
 }
 
@@ -4585,18 +4607,21 @@ func (v *blockingRejectingValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
 ) error {
 	return nil
 }
 
-func (v *blockingRejectingValidator) WithTxValidationSession(
+func (v *blockingRejectingValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		func(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
 		) error,
 		func() bool,
+		func(func() error) (bool, error),
 	) error,
 ) error {
 	v.startOnce.Do(func() { close(v.started) })
@@ -4604,6 +4629,7 @@ func (v *blockingRejectingValidator) WithTxValidationSession(
 		tx gledger.Transaction,
 		_ map[utxoref.Key]struct{},
 		_ map[utxoref.Key]lcommon.Utxo,
+		_ *utxoref.StateOverlay,
 	) error {
 		<-v.release
 		if tx != nil && tx.Hash().String() == v.rejectHash {
@@ -4611,7 +4637,8 @@ func (v *blockingRejectingValidator) WithTxValidationSession(
 		}
 		return nil
 	}
-	return fn(validate, func() bool { return true })
+	stillCurrent := func() bool { return true }
+	return fn(validate, stillCurrent, testCommitIfCurrent(stillCurrent))
 }
 
 // TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget covers the
@@ -4639,7 +4666,7 @@ func TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget(
 	})
 	require.NoError(
 		t,
-		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+		m.AddTransaction(context.Background(), uint(conway.EraIdConway), getTestTxBytes(t)),
 	)
 	invalidHash := m.Transactions()[0].Hash
 
@@ -4651,7 +4678,7 @@ func TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget(
 	backlog := maxRevalidationCatchupRounds * 3
 
 	rebuildDone := make(chan error, 1)
-	go func() { rebuildDone <- m.rebuildOverlay() }()
+	go func() { rebuildDone <- m.rebuildOverlay(context.Background()) }()
 	dingotestutil.RequireReceive(
 		t, validator.started, 2*time.Second, "revalidation start",
 	)

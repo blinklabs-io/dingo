@@ -22,6 +22,8 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -49,18 +51,26 @@ const (
 	// simultaneous inbound connections accepted by the connection manager.
 	// This prevents resource exhaustion from malicious or accidental
 	// connection floods.
-	DefaultMaxInboundConnections  = 100
-	DefaultMaxNtCConnections      = 100
-	DefaultMaxNtCConnectionsPerIP = 5
+	DefaultMaxInboundConnections         = 100
+	DefaultMaxNtCConnections             = 100
+	DefaultMaxNtCConnectionsPerIP        = 5
+	DefaultMaxTrustedLocalNtCConnections = 100
 )
 
 type connectionInfo struct {
-	conn      *ouroboros.Connection
-	onClose   func()
-	peerAddr  string
-	isInbound bool
-	isNtC     bool   // true for node-to-client (local) connections
-	ipKey     string // rate-limit key (IP or /64 prefix for IPv6)
+	conn             *ouroboros.Connection
+	ntcBufferTracker *ntcBufferTracker
+	onClose          func()
+	peerAddr         string
+	isInbound        bool
+	isNtC            bool // true for node-to-client (local) connections
+	trustedLocal     bool
+	ipKey            string // rate-limit key (IP or /64 prefix for IPv6)
+	// done is closed by the connection's watcher once it has consumed the
+	// connection's error, so protocol handlers learn of teardown without
+	// receiving from the one-shot error channel themselves.
+	done     chan struct{}
+	closeErr error
 }
 
 type ConnectionManager struct {
@@ -77,24 +87,27 @@ type ConnectionManager struct {
 	// ListenersProvider/OutboundConnOptsProvider. Using sync.Once also
 	// supplies the happens-before edge that lets the resolved slices be read
 	// from the listener and outbound-dial paths without further locking.
-	resolveDeferredOnce  sync.Once
-	listenerConfigs      []ListenerConfig
-	outboundConnOptsCfgs []ouroboros.ConnectionOptionFunc
-	connectionsMutex     sync.Mutex
-	listenersMutex       sync.Mutex
-	closing              bool
-	goroutineWg          sync.WaitGroup // tracks spawned goroutines for clean shutdown
-	ipConns              map[string]int // IP key -> active connection count
-	ipConnsMutex         sync.Mutex
-	outboundCount        int
-	fullDuplexCount      int
-	unidirectional       int
-	duplexPeers          int
-	prunableConns        int
-	trackedConnCount     int
-	ntcAdmissionMutex    sync.Mutex
-	ntcCount             int
-	ntcIPConns           map[string]int
+	resolveDeferredOnce          sync.Once
+	listenerConfigs              []ListenerConfig
+	outboundConnOptsCfgs         []ouroboros.ConnectionOptionFunc
+	connectionsMutex             sync.Mutex
+	listenersMutex               sync.Mutex
+	closing                      bool
+	goroutineWg                  sync.WaitGroup // tracks spawned goroutines for clean shutdown
+	ipConns                      map[string]int // IP key -> active connection count
+	ipConnsMutex                 sync.Mutex
+	outboundCount                int
+	fullDuplexCount              int
+	unidirectional               int
+	duplexPeers                  int
+	prunableConns                int
+	trackedConnCount             int
+	ntcAdmissionMutex            sync.Mutex
+	ntcCount                     int
+	trustedLocalNtCCount         int
+	ntcIPConns                   map[string]int
+	ntcTrustedLocalBufferedBytes atomic.Int64
+	ntcRemoteBufferedBytes       atomic.Int64
 }
 
 // DefaultMaxConnectionsPerIP is the default maximum number of concurrent
@@ -129,19 +142,23 @@ type ConnectionManagerConfig struct {
 	// MaxConnectionsPerIP limits the number of concurrent inbound
 	// connections from the same IP address. IPv6 addresses are grouped
 	// by /64 prefix. A value of 0 means use DefaultMaxConnectionsPerIP.
-	MaxConnectionsPerIP    int
-	MaxNtCConns            int
-	MaxNtCConnectionsPerIP int
+	MaxConnectionsPerIP     int
+	MaxNtCConns             int
+	MaxNtCConnectionsPerIP  int
+	MaxTrustedLocalNtCConns int
 }
 
 type connectionManagerMetrics struct {
-	incomingConns       prometheus.Gauge
-	outgoingConns       prometheus.Gauge
-	unidirectionalConns prometheus.Gauge
-	duplexConns         prometheus.Gauge
-	fullDuplexConns     prometheus.Gauge
-	prunableConns       prometheus.Gauge
-	ntcRejectedConns    *prometheus.CounterVec
+	incomingConns                prometheus.Gauge
+	outgoingConns                prometheus.Gauge
+	unidirectionalConns          prometheus.Gauge
+	duplexConns                  prometheus.Gauge
+	fullDuplexConns              prometheus.Gauge
+	prunableConns                prometheus.Gauge
+	ntcRejectedConns             *prometheus.CounterVec
+	ntcConnections               *prometheus.GaugeVec
+	ntcTrustedLocalBufferedBytes prometheus.GaugeFunc
+	ntcRemoteBufferedBytes       prometheus.GaugeFunc
 }
 
 type peerConnectionSummary struct {
@@ -195,6 +212,9 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 	}
 	if cfg.MaxNtCConnectionsPerIP <= 0 {
 		cfg.MaxNtCConnectionsPerIP = DefaultMaxNtCConnectionsPerIP
+	}
+	if cfg.MaxTrustedLocalNtCConns <= 0 {
+		cfg.MaxTrustedLocalNtCConns = DefaultMaxTrustedLocalNtCConnections
 	}
 	c := &ConnectionManager{
 		config: cfg,
@@ -270,6 +290,24 @@ func (c *ConnectionManager) initMetrics() {
 			Help: "number of node-to-client connections rejected by admission limits",
 		},
 		[]string{"reason"},
+	)
+	c.metrics.ntcConnections = promautoFactory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: metricNamePrefix + "ntcConnections",
+		Help: "number of admitted node-to-client connections by listener trust class",
+	}, []string{"trusted_local"})
+	c.metrics.ntcTrustedLocalBufferedBytes = promautoFactory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: metricNamePrefix + "ntcTrustedLocalBufferedBytes",
+			Help: "bytes reserved by incomplete message reassembly on trusted local node-to-client connections",
+		},
+		func() float64 { return c.ntcBufferedBytes(true) },
+	)
+	c.metrics.ntcRemoteBufferedBytes = promautoFactory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: metricNamePrefix + "ntcRemoteBufferedBytes",
+			Help: "bytes reserved by incomplete message reassembly on remote node-to-client connections",
+		},
+		func() float64 { return c.ntcBufferedBytes(false) },
 	)
 	c.metrics.incomingConns = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: metricNamePrefix + "incomingConns",
@@ -709,6 +747,26 @@ func (c *ConnectionManager) addConnectionImpl(
 	ipKey string,
 	onClose func(),
 ) bool {
+	return c.addConnectionImplWithTrust(
+		conn,
+		isInbound,
+		isNtC,
+		peerAddr,
+		ipKey,
+		onClose,
+		false,
+	)
+}
+
+func (c *ConnectionManager) addConnectionImplWithTrust(
+	conn *ouroboros.Connection,
+	isInbound bool,
+	isNtC bool,
+	peerAddr string,
+	ipKey string,
+	onClose func(),
+	trustedLocal bool,
+) bool {
 	// Check if shutting down before adding to WaitGroup to prevent panic
 	// during Stop()'s Wait() call. Must hold the same lock used to set closing.
 	c.listenersMutex.Lock()
@@ -797,6 +855,9 @@ func (c *ConnectionManager) addConnectionImpl(
 				"error closing evicted inbound connection",
 				"peer_addr", existingPeerAddr,
 			)
+			if existing.ntcBufferTracker != nil {
+				existing.ntcBufferTracker.close(c)
+			}
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
@@ -845,6 +906,9 @@ func (c *ConnectionManager) addConnectionImpl(
 				"error closing replaced connection",
 				"peer_addr", existingPeerAddr,
 			)
+			if existing.ntcBufferTracker != nil {
+				existing.ntcBufferTracker.close(c)
+			}
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
@@ -857,15 +921,23 @@ func (c *ConnectionManager) addConnectionImpl(
 		}
 	}
 
-	c.connections[connId] = &connectionInfo{
-		conn:      conn,
-		onClose:   onClose,
-		isInbound: isInbound,
-		isNtC:     isNtC,
-		peerAddr:  peerAddr,
-		ipKey:     ipKey,
+	info := &connectionInfo{
+		conn:         conn,
+		onClose:      onClose,
+		isInbound:    isInbound,
+		isNtC:        isNtC,
+		trustedLocal: trustedLocal,
+		peerAddr:     peerAddr,
+		ipKey:        ipKey,
+		done:         make(chan struct{}),
 	}
-	info := c.connections[connId]
+	if isNtC {
+		info.ntcBufferTracker = &ntcBufferTracker{
+			conn:         conn,
+			trustedLocal: trustedLocal,
+		}
+	}
+	c.connections[connId] = info
 	if isInbound && !isNtC && c.tracksInboundPeerAddresses() {
 		if peerKey := NormalizePeerAddr(peerAddr); peerKey != "" {
 			c.inboundPeerAddrs[peerKey]++
@@ -879,7 +951,31 @@ func (c *ConnectionManager) addConnectionImpl(
 		if onClose != nil {
 			defer onClose()
 		}
-		err := <-conn.ErrorChan()
+		// This watcher is the only receiver of conn.ErrorChan(): the channel
+		// delivers each error to one receiver, so a protocol handler that also
+		// received from it could take the error before this goroutine, which
+		// owns teardown. Handlers wait on info.done instead.
+		var err error
+		if info.ntcBufferTracker != nil {
+			ticker := time.NewTicker(ntcBufferedBytesSampleInterval)
+			defer ticker.Stop()
+		sampleLoop:
+			for {
+				select {
+				case <-ticker.C:
+					info.ntcBufferTracker.sample(c)
+				case err = <-conn.ErrorChan():
+					break sampleLoop
+				}
+			}
+		} else {
+			err = <-conn.ErrorChan()
+		}
+		info.closeErr = err
+		close(info.done)
+		if info.ntcBufferTracker != nil {
+			info.ntcBufferTracker.close(c)
+		}
 		// Remove connection (also releases IP slot)
 		if !c.RemoveConnection(connId, conn) {
 			return
@@ -990,6 +1086,9 @@ func (c *ConnectionManager) RemoveConnection(
 	if info != nil && info.ipKey != "" {
 		c.releaseIPSlot(info.ipKey)
 	}
+	if info.ntcBufferTracker != nil {
+		info.ntcBufferTracker.close(c)
+	}
 	if info.onClose != nil {
 		info.onClose()
 	}
@@ -1054,6 +1153,34 @@ func (c *ConnectionManager) GetConnectionById(
 		return info.conn
 	}
 	return nil // nil indicates connection not found
+}
+
+// GetConnectionWithDone returns the connection and a channel closed once the
+// manager has consumed the connection's error, or nil, nil when the connection
+// is not registered.
+func (c *ConnectionManager) GetConnectionWithDone(
+	connId ouroboros.ConnectionId,
+) (*ouroboros.Connection, <-chan struct{}) {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	if info, exists := c.connections[connId]; exists {
+		return info.conn, info.done
+	}
+	return nil, nil
+}
+
+// GetConnectionWithDoneAndError returns the connection, its teardown signal,
+// and an accessor for the error consumed by the manager. Call the accessor
+// after done is closed so the error write is synchronized with the read.
+func (c *ConnectionManager) GetConnectionWithDoneAndError(
+	connId ouroboros.ConnectionId,
+) (*ouroboros.Connection, <-chan struct{}, func() error) {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	if info, exists := c.connections[connId]; exists {
+		return info.conn, info.done, func() error { return info.closeErr }
+	}
+	return nil, nil, nil
 }
 
 // LeiosFetchConnectionIds returns the IDs of connections that currently have a

@@ -96,19 +96,19 @@ func TestParityMetrics_RecordCheck_MatchIncrementsOnlyChecksTotal(
 		t,
 		float64(0),
 		promtestutil.ToFloat64(
-			metrics.divergenceTotal.WithLabelValues("protocol_params"),
+			metrics.divergenceTotal.WithLabelValues("protocol_params", ReferenceCardanoNode),
 		),
 	)
 	assert.Equal(
 		t,
 		float64(0),
 		promtestutil.ToFloat64(
-			metrics.divergenceTotal.WithLabelValues("stake_distribution"),
+			metrics.divergenceTotal.WithLabelValues("stake_distribution", ReferenceCardanoNode),
 		),
 	)
 	assert.Equal(
 		t, float64(0),
-		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo")),
+		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode)),
 	)
 }
 
@@ -133,19 +133,19 @@ func TestParityMetrics_RecordCheck_DivergenceIncrementsOnlyAffectedFields(
 		t,
 		float64(1),
 		promtestutil.ToFloat64(
-			metrics.divergenceTotal.WithLabelValues("protocol_params"),
+			metrics.divergenceTotal.WithLabelValues("protocol_params", ReferenceCardanoNode),
 		),
 	)
 	assert.Equal(
 		t,
 		float64(0),
 		promtestutil.ToFloat64(
-			metrics.divergenceTotal.WithLabelValues("stake_distribution"),
+			metrics.divergenceTotal.WithLabelValues("stake_distribution", ReferenceCardanoNode),
 		),
 	)
 	assert.Equal(
 		t, float64(1),
-		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo")),
+		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode)),
 	)
 }
 
@@ -168,19 +168,19 @@ func TestParityMetrics_RecordCheck_StakeDistributionDivergenceIncrements(
 		t,
 		float64(1),
 		promtestutil.ToFloat64(
-			metrics.divergenceTotal.WithLabelValues("stake_distribution"),
+			metrics.divergenceTotal.WithLabelValues("stake_distribution", ReferenceCardanoNode),
 		),
 	)
 	assert.Equal(
 		t,
 		float64(0),
 		promtestutil.ToFloat64(
-			metrics.divergenceTotal.WithLabelValues("protocol_params"),
+			metrics.divergenceTotal.WithLabelValues("protocol_params", ReferenceCardanoNode),
 		),
 	)
 	assert.Equal(
 		t, float64(0),
-		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo")),
+		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode)),
 	)
 }
 

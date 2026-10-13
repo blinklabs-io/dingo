@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package blockfrost
 
@@ -42,7 +42,7 @@ func poolExtendedMetadataKey(url string, hash []byte) string {
 // returns the anchor plus the schema's error object; otherwise every
 // off-chain field is populated. This logic is duplicated rather than
 // factored out of PoolMetadata because that function is owned by the pool
-// detail/metadata feature (#2936/#2995) and is not modified here.
+// detail/metadata feature and is not modified here.
 func buildPoolExtendedMetadata(
 	metadataURL string,
 	metadataHash []byte,

@@ -15,26 +15,407 @@
 package leader
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
+	"github.com/blinklabs-io/dingo/consensus/praos"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ledgerpkg "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	ledgerpkg "github.com/blinklabs-io/dingo/ledger"
 )
+
+const (
+	sigmaAuditEpoch      = uint64(11)
+	sigmaAuditStartSlot  = uint64(950400)
+	sigmaAuditSlotCount  = uint64(6)
+	sigmaAuditPoolStake  = uint64(59_000_000)
+	sigmaAuditTotalStake = uint64(1_000_000_000)
+)
+
+// recordingStakeProvider records the snapshot epoch each half of the sigma
+// ratio was queried with, so a test can prove both come from the SAME stake
+// snapshot generation. A numerator taken from a later generation than the
+// denominator is exactly the one-sided sigma drift reported.
+type recordingStakeProvider struct {
+	poolStakeEpochs  []uint64
+	totalStakeEpochs []uint64
+	poolStake        uint64
+	totalStake       uint64
+}
+
+// GetPoolAndTotalActiveStake records the snapshot epoch for BOTH halves on
+// every call. Since the pair is read through one method, so the
+// two recorded slices are necessarily the same length and carry the same
+// epochs -- which is itself the property TestComputeScheduleDrawsSigmaInputs\
+// FromSameSnapshotEpoch asserts.
+func (p *recordingStakeProvider) GetPoolAndTotalActiveStake(
+	epoch uint64,
+	_ []byte,
+) (uint64, uint64, error) {
+	p.poolStakeEpochs = append(p.poolStakeEpochs, epoch)
+	p.totalStakeEpochs = append(p.totalStakeEpochs, epoch)
+	return p.poolStake, p.totalStake, nil
+}
+
+// sigmaAuditEpochProvider is a minimal EpochInfoProvider. exactCoeff, when
+// non-nil, also makes it an ActiveSlotCoeffRatProvider.
+type sigmaAuditEpochProvider struct {
+	exactCoeff *big.Rat
+	floatCoeff float64
+}
+
+func (p *sigmaAuditEpochProvider) CurrentEpoch() uint64 { return sigmaAuditEpoch }
+
+func (p *sigmaAuditEpochProvider) EpochNonce(context.Context, uint64) []byte {
+	return coeffTestNonce
+}
+
+func (p *sigmaAuditEpochProvider) NextEpochNonceReadyEpoch() (uint64, bool) {
+	return 0, false
+}
+
+func (p *sigmaAuditEpochProvider) EpochSlotRange(
+	uint64,
+) (EpochSlotRange, error) {
+	return EpochSlotRange{
+		StartSlot: sigmaAuditStartSlot,
+		SlotCount: sigmaAuditSlotCount,
+	}, nil
+}
+
+func (p *sigmaAuditEpochProvider) EpochForSlot(uint64) (uint64, error) {
+	return sigmaAuditEpoch, nil
+}
+
+func (p *sigmaAuditEpochProvider) ActiveSlotCoeff() float64 {
+	return p.floatCoeff
+}
+
+func (p *sigmaAuditEpochProvider) ConsensusModeForEpoch(
+	uint64,
+) (consensus.ConsensusMode, error) {
+	return consensus.ConsensusModeCPraos, nil
+}
+
+// ActiveSlotCoeffRat is only reachable through the optional
+// ActiveSlotCoeffRatProvider assertion, and only when exactCoeff is set.
+func (p *sigmaAuditEpochProvider) ActiveSlotCoeffRat() *big.Rat {
+	return p.exactCoeff
+}
+
+func newSigmaAuditElection(
+	stake StakeDistributionProvider,
+	epochs *sigmaAuditEpochProvider,
+	logger *slog.Logger,
+) *Election {
+	return NewElection(
+		coeffTestPoolID,
+		vrfSeedSource(coeffTestVRFSeed),
+		stake,
+		epochs,
+		nil,
+		logger,
+	)
+}
+
+// TestComputeScheduleDrawsSigmaInputsFromSameSnapshotEpoch proves the pool
+// stake numerator and the total active stake denominator are both read from
+// the Praos-selected stake snapshot generation for the scheduled epoch
+// (praos.StakeSnapshotEpoch, i.e. mark[E-1] = stake at end of E-2, the
+// reference node's "set" snapshot / nesPd). Mixing generations would inflate
+// or deflate sigma one-sidedly.
+func TestComputeScheduleDrawsSigmaInputsFromSameSnapshotEpoch(t *testing.T) {
+	stake := &recordingStakeProvider{
+		poolStake:  sigmaAuditPoolStake,
+		totalStake: sigmaAuditTotalStake,
+	}
+	election := newSigmaAuditElection(
+		stake,
+		&sigmaAuditEpochProvider{floatCoeff: 0.05},
+		slog.New(slog.DiscardHandler),
+	)
+
+	schedule, err := election.computeSchedule(
+		context.Background(), sigmaAuditEpoch,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, schedule)
+
+	wantSnapshotEpoch := praos.StakeSnapshotEpoch(sigmaAuditEpoch)
+	require.Equal(t, []uint64{wantSnapshotEpoch}, stake.poolStakeEpochs)
+	require.Equal(t, []uint64{wantSnapshotEpoch}, stake.totalStakeEpochs)
+	require.Equal(t, sigmaAuditPoolStake, schedule.PoolStake)
+	require.Equal(t, sigmaAuditTotalStake, schedule.TotalStake)
+}
+
+// TestComputeScheduleWipesTheSeedItTook proves the election holds the VRF seed
+// only for the duration of a schedule computation: every copy the seed source
+// handed out is zeroed once the computation returns, and the election keeps
+// no copy of its own to scan for.
+func TestComputeScheduleWipesTheSeedItTook(t *testing.T) {
+	t.Parallel()
+
+	var issued [][]byte
+	source := func() []byte {
+		seed := append([]byte(nil), coeffTestVRFSeed...)
+		issued = append(issued, seed)
+		return seed
+	}
+	election := NewElection(
+		coeffTestPoolID,
+		source,
+		&recordingStakeProvider{
+			poolStake:  sigmaAuditPoolStake,
+			totalStake: sigmaAuditTotalStake,
+		},
+		&sigmaAuditEpochProvider{floatCoeff: 0.05},
+		nil,
+		slog.New(slog.DiscardHandler),
+	)
+	require.Empty(t, issued, "construction must not take a seed")
+
+	schedule, err := election.computeSchedule(
+		context.Background(), sigmaAuditEpoch,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, schedule)
+
+	require.Len(t, issued, 1)
+	require.Equal(
+		t,
+		make([]byte, len(coeffTestVRFSeed)),
+		issued[0],
+		"the seed copy must be wiped after the schedule is computed",
+	)
+}
+
+// TestComputeSchedulePrefersExactGenesisActiveSlotCoeff proves the election
+// threads the exact Shelley genesis active slot coefficient into the schedule
+// calculation when the epoch provider can supply it, instead of the float64
+// value returned by ActiveSlotCoeff().
+func TestComputeSchedulePrefersExactGenesisActiveSlotCoeff(t *testing.T) {
+	exact := big.NewRat(1, 3)
+	election := newSigmaAuditElection(
+		&recordingStakeProvider{
+			poolStake:  sigmaAuditPoolStake,
+			totalStake: sigmaAuditTotalStake,
+		},
+		&sigmaAuditEpochProvider{
+			exactCoeff: exact,
+			floatCoeff: 1.0 / 3.0,
+		},
+		slog.New(slog.DiscardHandler),
+	)
+
+	schedule, err := election.computeSchedule(
+		context.Background(), sigmaAuditEpoch,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, schedule)
+	require.NotNil(t, schedule.Threshold)
+
+	want, err := leaderthreshold.Threshold(
+		sigmaAuditPoolStake,
+		sigmaAuditTotalStake,
+		exact,
+		consensus.ConsensusModeCPraos,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 0, schedule.Threshold.Cmp(want),
+		"threshold must come from the exact genesis rational, not float64")
+}
+
+// TestComputeScheduleWithoutExactCoeffUsesFloatFallback keeps providers that
+// cannot supply an exact rational working unchanged.
+func TestComputeScheduleWithoutExactCoeffUsesFloatFallback(t *testing.T) {
+	election := newSigmaAuditElection(
+		&recordingStakeProvider{
+			poolStake:  sigmaAuditPoolStake,
+			totalStake: sigmaAuditTotalStake,
+		},
+		&sigmaAuditEpochProvider{floatCoeff: 0.05},
+		slog.New(slog.DiscardHandler),
+	)
+
+	schedule, err := election.computeSchedule(
+		context.Background(), sigmaAuditEpoch,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, schedule)
+	require.NotNil(t, schedule.Threshold)
+
+	want, err := leaderthreshold.Threshold(
+		sigmaAuditPoolStake,
+		sigmaAuditTotalStake,
+		new(big.Rat).SetFloat64(0.05),
+		consensus.ConsensusModeCPraos,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 0, schedule.Threshold.Cmp(want))
+}
+
+// TestComputeScheduleLogsAuditableSigmaInputs pins the "leader schedule
+// calculated" record as a single, self-contained audit of every input to the
+// leader check, so a reported schedule divergence can be diffed against the
+// reference node's `query stake-snapshot` / `query protocol-state` without
+// re-running the node with extra instrumentation.
+func TestComputeScheduleLogsAuditableSigmaInputs(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	exact := big.NewRat(1, 20)
+	election := newSigmaAuditElection(
+		&recordingStakeProvider{
+			poolStake:  sigmaAuditPoolStake,
+			totalStake: sigmaAuditTotalStake,
+		},
+		&sigmaAuditEpochProvider{exactCoeff: exact, floatCoeff: 0.05},
+		logger,
+	)
+
+	schedule, err := election.computeSchedule(
+		context.Background(), sigmaAuditEpoch,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, schedule)
+
+	record := findLogRecord(t, &buf, "leader schedule calculated")
+	require.EqualValues(t, sigmaAuditEpoch, record["epoch"])
+	require.EqualValues(
+		t,
+		praos.StakeSnapshotEpoch(sigmaAuditEpoch),
+		record["snapshot_epoch"],
+	)
+	require.Equal(t, "mark", record["snapshot_type"])
+	require.EqualValues(t, sigmaAuditStartSlot, record["epoch_start_slot"])
+	require.EqualValues(t, sigmaAuditSlotCount, record["epoch_slot_count"])
+	require.EqualValues(t, sigmaAuditPoolStake, record["pool_stake"])
+	require.EqualValues(t, sigmaAuditTotalStake, record["total_stake"])
+	require.Equal(t, hex.EncodeToString(coeffTestNonce), record["epoch_nonce"])
+	require.Equal(t, "1/20", record["active_slot_coeff"])
+	require.Equal(t, "cpraos", record["consensus_mode"])
+	require.Equal(
+		t,
+		schedule.Threshold.Text(16),
+		record["leader_threshold"],
+	)
+}
+
+// findLogRecord returns the first JSON log record whose "msg" matches.
+func findLogRecord(
+	t *testing.T,
+	buf *bytes.Buffer,
+	msg string,
+) map[string]any {
+	t.Helper()
+	scanner := bufio.NewScanner(bytes.NewReader(buf.Bytes()))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var record map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			continue
+		}
+		if record["msg"] == msg {
+			return record
+		}
+	}
+	require.NoError(t, scanner.Err())
+	t.Fatalf("no log record with msg %q in:\n%s", msg, buf.String())
+	return nil
+}
+
+// generationStakeProvider models a store whose snapshot is re-captured
+// between reads: every call returns the NEXT generation. Both generations
+// carry the same sigma with different absolute values, so a pair assembled
+// from two different calls is detectable as a sigma matching neither.
+type generationStakeProvider struct {
+	calls int
+}
+
+const (
+	sigmaGenOnePoolStake  = uint64(59_000_000)
+	sigmaGenOneTotalStake = uint64(1_000_000_000)
+)
+
+func (p *generationStakeProvider) GetPoolAndTotalActiveStake(
+	_ uint64,
+	_ []byte,
+) (uint64, uint64, error) {
+	generation := uint64(1 << p.calls)
+	p.calls++
+	return sigmaGenOnePoolStake * generation,
+		sigmaGenOneTotalStake * generation,
+		nil
+}
+
+// TestComputeScheduleReadsSigmaPairInOneProviderCall is the regression test
+// driven through the real schedule computation.
+//
+// computeSchedule used to call GetPoolStake and GetTotalActiveStake in
+// sequence (election.go:773 and :804), each opening its own db.MetadataTxn in
+// the forging adapter. A snapshot re-capture landing between the two produced
+// a schedule whose numerator and denominator came from different writes: a
+// sigma reproducible from neither snapshot alone.
+//
+// The provider here advances a generation on every call, which is what a
+// re-capture between reads looks like from the caller's side. Two assertions
+// pin the fix:
+//
+//   - exactly ONE paired read happens, so there is no window between halves;
+//   - the schedule's stake pair is generation one entire, so sigma is exact.
+//
+// Under the two-call code the numerator comes from generation one and the
+// denominator from generation two, halving sigma, and both assertions fail.
+func TestComputeScheduleReadsSigmaPairInOneProviderCall(t *testing.T) {
+	stake := &generationStakeProvider{}
+	election := newSigmaAuditElection(
+		stake,
+		&sigmaAuditEpochProvider{floatCoeff: 0.05},
+		slog.New(slog.DiscardHandler),
+	)
+
+	schedule, err := election.computeSchedule(
+		context.Background(), sigmaAuditEpoch,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, schedule)
+
+	require.Equal(t, 1, stake.calls,
+		"the sigma numerator and denominator must be read in ONE paired "+
+			"call; a second read is a torn-sigma window (dingo #3815)")
+
+	require.Equal(t, sigmaGenOnePoolStake, schedule.PoolStake,
+		"numerator must come from the first snapshot generation")
+	require.Equal(t, sigmaGenOneTotalStake, schedule.TotalStake,
+		"denominator must come from the SAME generation as the numerator")
+
+	// The ratio itself, cross-multiplied so the check is exact rather than
+	// float. This is the assertion that fails on a torn pair even if the
+	// absolute values above were ever relaxed.
+	require.Equal(t,
+		schedule.PoolStake*sigmaGenOneTotalStake,
+		schedule.TotalStake*sigmaGenOnePoolStake,
+		"sigma must equal the fixture's ratio exactly",
+	)
+}
 
 // electionTestNonce is a 32-byte epoch nonce for election tests.
 var electionTestNonce = func() []byte {
@@ -119,7 +500,7 @@ func (m *mockEpochProvider) CurrentEpoch() uint64 {
 	return m.currentEpoch.Load()
 }
 
-func (m *mockEpochProvider) EpochNonce(epoch uint64) []byte {
+func (m *mockEpochProvider) EpochNonce(_ context.Context, epoch uint64) []byte {
 	m.epochNonceMu.RLock()
 	nonce, ok := m.epochNonces[epoch]
 	m.epochNonceMu.RUnlock()
@@ -257,10 +638,16 @@ func waitForSchedule(
 	return schedule
 }
 
+// vrfSeedSource serves a private copy of seed per call, as the node's
+// credentials do, so a test can tell whether the election wipes what it took.
+func vrfSeedSource(seed []byte) func() []byte {
+	return func() []byte { return append([]byte(nil), seed...) }
+}
+
 func TestNewElection(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
-	vrfKey := electionTestVRFSeed
+	vrfKey := vrfSeedSource(electionTestVRFSeed)
 
 	stakeProvider := newMockStakeProvider()
 	epochProvider := newMockEpochProvider()
@@ -278,7 +665,6 @@ func TestNewElection(t *testing.T) {
 
 	require.NotNil(t, election)
 	assert.Equal(t, poolId, election.poolId)
-	assert.Equal(t, vrfKey, election.poolVrfSkey)
 	assert.NotNil(t, election.logger)
 }
 
@@ -294,7 +680,7 @@ func TestElectionStartStop(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -340,7 +726,7 @@ func TestElectionStopPreventsStaleMonitorFromStoppingALaterStart(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -395,7 +781,7 @@ func TestElectionStopDoesNotDeadlockOnMonitorSelectRace(t *testing.T) {
 		eventBus := event.NewEventBus(nil, nil)
 		election := NewElection(
 			poolId,
-			electionTestVRFSeed,
+			vrfSeedSource(electionTestVRFSeed),
 			stakeProvider,
 			epochProvider,
 			eventBus,
@@ -470,7 +856,7 @@ func TestElectionStopWaitsForInFlightScheduleComputation(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		blocking,
 		epochProvider,
 		eventBus,
@@ -522,7 +908,7 @@ func TestElectionScheduleEarlyEpochs(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -573,7 +959,7 @@ func TestElectionUsesEpochSlotRangeForSchedule(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -613,7 +999,7 @@ func TestElectionLoadsPersistedSchedule(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -661,7 +1047,7 @@ func TestElectionIgnoresStalePersistedSchedule(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -701,7 +1087,7 @@ func TestElectionPersistsComputedSchedule(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -749,7 +1135,7 @@ func TestElectionPrecomputesNextEpochAtStartupWhenNonceReady(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -795,7 +1181,7 @@ func TestElectionZeroPoolStake(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -834,7 +1220,7 @@ func TestElectionShouldProduceBlock(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -873,7 +1259,7 @@ func TestElectionNextLeaderSlot(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -935,7 +1321,7 @@ func TestElectionShouldProduceBlock_UsesEpochForSlot(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -977,7 +1363,7 @@ func TestElectionShouldProduceBlock_ReturnsFalseOnEpochResolveError(
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		newMockStakeProvider(),
 		epochProvider,
 		eventBus,
@@ -1011,7 +1397,7 @@ func TestElectionNextLeaderSlot_UsesEpochForSlot(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		newMockStakeProvider(),
 		epochProvider,
 		eventBus,
@@ -1052,7 +1438,7 @@ func TestElectionEpochTransition(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1123,7 +1509,7 @@ func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1180,7 +1566,7 @@ func TestElectionRollbackKeepsCurrentSchedule(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1234,7 +1620,7 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1289,7 +1675,7 @@ func TestElectionConcurrentAccess(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1342,7 +1728,7 @@ func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
 	defer release.Do(func() { close(blocked.release) })
 	e := NewElection(
 		pool,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		blocked,
 		newMockEpochProvider(),
 		bus,
@@ -1478,7 +1864,7 @@ func TestComputeScheduleDeclinesUnresolvableConsensusMode(t *testing.T) {
 
 	election := NewElection(
 		poolId,
-		electionTestVRFSeed,
+		vrfSeedSource(electionTestVRFSeed),
 		stakeProvider,
 		epochProvider,
 		eventBus,
@@ -1493,4 +1879,20 @@ func TestComputeScheduleDeclinesUnresolvableConsensusMode(t *testing.T) {
 	require.ErrorContains(t, err, "era shape unavailable")
 	require.Nil(t, schedule,
 		"no schedule may be produced from an unresolved consensus mode")
+}
+
+func TestComputeScheduleRejectsMissingVRFSeedProvider(t *testing.T) {
+	t.Parallel()
+	stake := &recordingStakeProvider{
+		poolStake:  sigmaAuditPoolStake,
+		totalStake: sigmaAuditTotalStake,
+	}
+	election := newSigmaAuditElection(
+		stake,
+		&sigmaAuditEpochProvider{floatCoeff: 0.05},
+		slog.New(slog.DiscardHandler),
+	)
+	election.vrfSeed = nil
+	_, err := election.computeSchedule(context.Background(), sigmaAuditEpoch)
+	require.ErrorContains(t, err, "pool VRF seed is unavailable")
 }

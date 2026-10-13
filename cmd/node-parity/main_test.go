@@ -90,7 +90,7 @@ func TestRequireAddrs(t *testing.T) {
 
 // TestRequireAtPoint covers --at-slot/--at-hash's validation: neither flag
 // set means live-tip-agreement mode (nil, nil); both must be set together,
-// since a historical point (blinklabs-io/dingo#382) is ambiguous by slot
+// since a historical point is ambiguous by slot
 // alone (see Tip.point); and --at-hash must be valid hex.
 func TestRequireAtPoint(t *testing.T) {
 	t.Run("neither set means live mode", func(t *testing.T) {
@@ -128,8 +128,8 @@ func TestRequireAtPoint(t *testing.T) {
 		_, err := requireAtPoint()
 		require.Error(t, err)
 	})
-	// TestRequireAtPoint/wrong-length hash is rejected covers the
-	// blinklabs-io/dingo#4183 review finding: valid hex that isn't exactly
+	// TestRequireAtPoint/wrong-length hash is rejected covers
+	// that valid hex that isn't exactly
 	// 32 bytes used to reach gouroboros as an opaque decode error instead of
 	// a clear CLI validation message.
 	t.Run("valid hex but wrong length hash is rejected", func(t *testing.T) {

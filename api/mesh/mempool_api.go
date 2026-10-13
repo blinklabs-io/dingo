@@ -8,15 +8,14 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package mesh
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -87,10 +86,8 @@ func (s *Server) handleMempoolTransaction(
 		mempoolTx.Type, mempoolTx.Cbor,
 	)
 	if err != nil {
-		writeError(w, wrapErr(
-			ErrInternal,
-			fmt.Errorf("decode mempool tx: %w", err),
-		))
+		s.logger.Error("failed to decode mempool transaction", "error", err)
+		writeError(w, ErrInternal)
 		return
 	}
 

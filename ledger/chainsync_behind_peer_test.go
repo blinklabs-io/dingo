@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//	http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -69,7 +70,7 @@ func newBehindPeerFixture(t *testing.T) *behindPeerFixture {
 	t.Helper()
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -92,7 +93,10 @@ func newBehindPeerFixture(t *testing.T) *behindPeerFixture {
 		})
 		prevHash = hash
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), blocks),
+	)
 
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
@@ -121,7 +125,7 @@ func newBehindPeerFixture(t *testing.T) *behindPeerFixture {
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	ls.config.EventBus = bus
 	resyncCh := make(chan event.ChainsyncResyncEvent, 8)

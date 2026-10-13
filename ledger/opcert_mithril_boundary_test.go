@@ -15,12 +15,13 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
@@ -37,12 +38,14 @@ func TestMithrilBoundaryOpCertCertifiedBaselineIgnoresStaleHistory(
 	poolKeyHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(make([]byte, 28)))
 	const boundarySlot = uint64(100)
 	require.NoError(t, db.UpdatePoolOpCertSequence(
+		context.Background(),
 		poolKeyHash,
 		500,
 		boundarySlot-1,
 		nil,
 	))
 	require.NoError(t, db.UpdatePoolOpCertSequence(
+		context.Background(),
 		poolKeyHash,
 		489,
 		boundarySlot,
@@ -51,6 +54,7 @@ func TestMithrilBoundaryOpCertCertifiedBaselineIgnoresStaleHistory(
 	ledgerState := &LedgerState{db: db, mithrilLedgerSlot: boundarySlot}
 
 	stored, found, err := ledgerState.latestOpCertCounterForValidation(
+		context.Background(),
 		poolKeyHash,
 		nil,
 	)
@@ -70,7 +74,7 @@ func TestMithrilBoundaryOpCertCertifiedBaselineIgnoresStaleHistory(
 	)
 }
 
-func TestMithrilBoundaryOpCertPoolWithoutCertifiedCounterAllowsFirst(
+func TestMithrilBoundaryOpCertPoolWithoutCertifiedCounterUsesZeroBaseline(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -82,20 +86,37 @@ func TestMithrilBoundaryOpCertPoolWithoutCertifiedCounterAllowsFirst(
 	poolKeyHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(make([]byte, 28)))
 	const boundarySlot = uint64(100)
 	require.NoError(t, db.UpdatePoolOpCertSequence(
+		context.Background(),
 		poolKeyHash,
 		1,
 		boundarySlot-1,
 		nil,
 	))
+	// The certified map was imported and names another pool only, so this
+	// pool is absent from the reference counter state rather than unknown.
+	require.NoError(t, db.UpdatePoolOpCertSequence(
+		context.Background(),
+		lcommon.PoolKeyHash(lcommon.NewBlake2b224([]byte("certified-other"))),
+		9,
+		boundarySlot,
+		nil,
+	))
 	ledgerState := &LedgerState{db: db, mithrilLedgerSlot: boundarySlot}
 
 	stored, found, err := ledgerState.latestOpCertCounterForValidation(
+		context.Background(),
 		poolKeyHash,
 		nil,
 	)
 	require.NoError(t, err)
 	require.False(t, found)
-	require.NoError(t, validateOpCertCounter(stored, found, 490, true))
+	require.NoError(t, validateOpCertCounter(stored, found, 1, true))
+	require.ErrorContains(
+		t,
+		validateOpCertCounter(stored, found, 2, true),
+		"gapped rotation",
+	)
+	require.NoError(t, validateOpCertCounter(stored, found, 490, false))
 }
 
 // TestLatestOpCertSequenceRespectsMithrilBoundary pins that
@@ -133,12 +154,14 @@ func TestLatestOpCertSequenceRespectsMithrilBoundary(t *testing.T) {
 
 	const boundarySlot = uint64(100)
 	require.NoError(t, db.UpdatePoolOpCertSequence(
+		context.Background(),
 		poolKeyHash,
 		500,
 		boundarySlot-1,
 		nil,
 	))
 	require.NoError(t, db.UpdatePoolOpCertSequence(
+		context.Background(),
 		poolKeyHash,
 		489,
 		boundarySlot,
@@ -167,6 +190,7 @@ func TestMithrilBoundaryOpCertContiguousRotationIsEnforced(t *testing.T) {
 	poolKeyHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(make([]byte, 28)))
 	const boundarySlot = uint64(100)
 	require.NoError(t, db.UpdatePoolOpCertSequence(
+		context.Background(),
 		poolKeyHash,
 		490,
 		boundarySlot+1,
@@ -175,6 +199,7 @@ func TestMithrilBoundaryOpCertContiguousRotationIsEnforced(t *testing.T) {
 	ledgerState := &LedgerState{db: db, mithrilLedgerSlot: boundarySlot}
 
 	stored, found, err := ledgerState.latestOpCertCounterForValidation(
+		context.Background(),
 		poolKeyHash,
 		nil,
 	)
@@ -187,4 +212,65 @@ func TestMithrilBoundaryOpCertContiguousRotationIsEnforced(t *testing.T) {
 		validateOpCertCounter(stored, found, 492, true),
 		"gapped rotation",
 	)
+}
+
+// TestLatestOpCertSequenceMithrilWithoutCertifiedCounterMapFailsClosed pins
+// the forging-side reader to the same refusal block application takes on a
+// Mithril-restored database that never imported the certified counter map:
+// startup and the forge loop cannot judge the loaded counter against a
+// baseline this node does not hold.
+func TestLatestOpCertSequenceMithrilWithoutCertifiedCounterMapFailsClosed(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	var poolID [28]byte
+	for i := range poolID {
+		poolID[i] = byte(i + 1)
+	}
+	poolKeyHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
+	require.NoError(t, db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash: poolKeyHash.Bytes(),
+			VrfKeyHash:  make([]byte, 32),
+		},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKeyHash.Bytes(),
+			VrfKeyHash:  make([]byte, 32),
+			AddedSlot:   1,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+		nil,
+	))
+	const boundarySlot = uint64(100)
+	require.NoError(t, db.UpdatePoolOpCertSequence(
+		context.Background(),
+		poolKeyHash,
+		5,
+		boundarySlot-1,
+		nil,
+	))
+	ledgerState := &LedgerState{db: db, mithrilLedgerSlot: boundarySlot}
+
+	_, _, err = ledgerState.LatestOpCertSequence(poolID)
+	require.ErrorIs(t, err, errOpCertBaselineNotImported)
+
+	// A counter observed after the boundary is known state and needs no
+	// certified baseline.
+	require.NoError(t, db.UpdatePoolOpCertSequence(
+		context.Background(),
+		poolKeyHash,
+		6,
+		boundarySlot+1,
+		nil,
+	))
+	sequence, found, err := ledgerState.LatestOpCertSequence(poolID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(6), sequence)
 }

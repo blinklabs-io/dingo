@@ -58,11 +58,21 @@ var (
 	// cache with their original index, so a point another fork has since
 	// overwritten still looks valid; rolling back to it truncates to a stale
 	// index and moves the tip to a block the chain does not have, splicing a
-	// continuation onto a parent that is absent from the chain (issue #3005).
+	// continuation onto a parent that is absent from the chain.
 	// It wraps models.ErrBlockNotFound so existing callers keep treating an
 	// unusable rollback target as "point not found" and re-intersect.
 	ErrRollbackPointNotOnChain = fmt.Errorf(
 		"%w: rollback point is not on this chain",
+		models.ErrBlockNotFound,
+	)
+	// ErrNoBlockBeforeSlot is returned by Chain.BlockBeforeSlot when the
+	// chain holds no block before the requested slot. A block lookup that
+	// fails during the search returns its own error instead, so a caller can
+	// tell an empty prefix from a predecessor it could not read. It wraps
+	// models.ErrBlockNotFound so existing callers still treat both as not
+	// found.
+	ErrNoBlockBeforeSlot = fmt.Errorf(
+		"%w: no block before slot",
 		models.ErrBlockNotFound,
 	)
 	ErrIteratorChainTip = errors.New(

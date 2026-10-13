@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -61,6 +63,45 @@ var errCertifiedEndorserBlockUnavailable = errors.New(
 	"certified Leios endorser block unavailable",
 )
 
+// errLeiosCertificateWithoutAnnouncement is the verdict on a certifying ranking
+// block whose parent announced no endorser block: there is nothing for the
+// certificate to certify, so the block is invalid, as in the reference
+// Forker.applyBlock (LeiosCertificateWithoutAnnouncement). It is not
+// errCertifiedEndorserBlockUnavailable, which is retried while a closure that
+// exists is fetched; no closure exists here, so retrying would only hold the
+// pipeline on the block until the stuck-pipeline halt.
+var errLeiosCertificateWithoutAnnouncement = errors.New(
+	"certifying ranking block's parent announced no endorser block",
+)
+
+// ErrLeiosInvalidCertificate is the verdict on a certifying ranking block whose
+// certificate does not verify against its parent's announcement, as in the
+// reference Forker.applyBlock (LeiosInvalidCertificate). A
+// LedgerStateConfig.ValidateLeiosCertificate implementation wraps it only for
+// a verdict on the certificate itself; the ledger rejects the block for that
+// error alone and retries any other.
+var ErrLeiosInvalidCertificate = errors.New("invalid Leios certificate")
+
+// rejectLeiosCertifyingBlock marks a verdict on a certifying ranking block as a
+// rejected block. The block is already on the primary chain, so a plain error
+// would restart the pipeline onto it until the stuck-pipeline halt; the
+// headerValidationError lets the pipeline rewind past it and re-intersect, the
+// path every other rejected block takes.
+func (ls *LedgerState) rejectLeiosCertifyingBlock(
+	block ledger.Block,
+	cause error,
+) error {
+	point := ocommon.Point{
+		Slot: block.SlotNumber(),
+		Hash: block.Hash().Bytes(),
+	}
+	return &headerValidationError{
+		BlockPoint: point,
+		Cause:      cause,
+		Source:     ls.deferredHeaderSource(point),
+	}
+}
+
 const certifiedEndorserBlockRetryDelay = time.Second
 
 // decodeEndorserTxEnvelope unwraps one endorser-block transaction entry and
@@ -71,13 +112,18 @@ const certifiedEndorserBlockRetryDelay = time.Second
 // (LeiosTx = encodeBytes(txCbor)). A non-byte-string entry — major type != 2 —
 // is already the bare transaction. elems[0] is the transaction body, which is
 // both the transaction-offset payload and, hashed, the transaction id.
+// Both decodes read bytes a peer delivered over leios-fetch, so they go
+// through safedecode.Cbor: a decoder panic becomes the error this function
+// already returns instead of unwinding into whatever goroutine is applying
+// the endorser block. The function decodes into locals and returns them, so
+// there is no shared state a contained panic could leave half-updated.
 func decodeEndorserTxEnvelope(
 	raw cbor.RawMessage,
 ) (txCbor []byte, elems []cbor.RawMessage, err error) {
 	txCbor = []byte(raw)
 	if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
-		var inner []byte
-		if _, err := cbor.Decode(txCbor, &inner); err != nil {
+		inner, _, err := safedecode.Cbor[[]byte](txCbor)
+		if err != nil {
 			return nil, nil, fmt.Errorf(
 				"unwrap CBOR-in-CBOR entry: %w",
 				err,
@@ -85,7 +131,8 @@ func decodeEndorserTxEnvelope(
 		}
 		txCbor = inner
 	}
-	if _, err := cbor.Decode(txCbor, &elems); err != nil {
+	elems, _, err = safedecode.Cbor[[]cbor.RawMessage](txCbor)
+	if err != nil {
 		return nil, nil, fmt.Errorf("decode envelope: %w", err)
 	}
 	if len(elems) < 2 {
@@ -122,13 +169,10 @@ func endorserBlockTxIds(rawTxs []cbor.RawMessage) ([][]byte, error) {
 	return ids, nil
 }
 
-// applyEndorserBlock decodes a Leios endorser block's standalone transactions,
-// persists them as a standalone blob, and — on the CIP-conformant path
-// (LeiosApplyEndorserBlockTxs) — applies them to the ledger ahead of the ranking
-// block that references it, so the endorser-resident outputs the ranking block's
-// transactions spend are present in the UTxO set. On the Haskell-conformant path
-// (the Musashi prototype) the certified endorser block is applied with full
-// effects but without validation or consumed-input recovery.
+// applyEndorserBlock decodes a certified Leios endorser block's standalone
+// transactions, prepares their standalone blob, validates and applies them in
+// order ahead of the certifying ranking block's own transactions, then persists
+// the blob, with full effects but without consumed-input recovery.
 // It returns the number of transactions applied to the UTxO (or zero when every
 // transaction was already applied).
 //
@@ -143,18 +187,34 @@ func endorserBlockTxIds(rawTxs []cbor.RawMessage) ([][]byte, error) {
 // endorser block to the chain.
 //
 // It returns the number of transactions applied and the Conway donation total
-// from accepted endorser-block transactions. Decode/build failures happen
-// before storage is mutated and callers may treat them as best-effort. Once
-// the endorser blob or transaction rows start writing, any error is wrapped in
+// from accepted endorser-block transactions. Malformed peer transaction bytes
+// are deterministic validation failures. Local build failures happen before
+// storage is mutated and remain retryable. Once the endorser blob or
+// transaction rows start writing, any error is wrapped in
 // leiosEndorserBlockStorageError so callers can abort the outer transaction
 // instead of committing a partial endorser-block application.
 func (ls *LedgerState) applyEndorserBlock(
+	ctx context.Context,
 	txn *database.Txn,
 	rbPoint ocommon.Point,
 	rbBlockNumber uint64,
 	ebSlot uint64,
 	ebHashBytes []byte,
 	rawTxs []cbor.RawMessage,
+) (int, uint64, error) {
+	ls.publishUntickedClosureAfterCommit(ctx, txn, rbPoint)
+	return ls.applyEndorserBlockInContext(ctx, txn, rbPoint, rbBlockNumber, ebSlot, ebHashBytes, rawTxs, nil)
+}
+
+func (ls *LedgerState) applyEndorserBlockInContext(
+	ctx context.Context,
+	txn *database.Txn,
+	rbPoint ocommon.Point,
+	rbBlockNumber uint64,
+	ebSlot uint64,
+	ebHashBytes []byte,
+	rawTxs []cbor.RawMessage,
+	contextSlot *uint64,
 ) (int, uint64, error) {
 	if len(rawTxs) == 0 {
 		return 0, 0, nil
@@ -176,129 +236,297 @@ func (ls *LedgerState) applyEndorserBlock(
 	for i, raw := range rawTxs {
 		txCbor, elems, err := decodeEndorserTxEnvelope(raw)
 		if err != nil {
-			return 0, 0, fmt.Errorf("endorser tx %d: %w", i, err)
+			return 0, 0, &leiosEndorserBlockValidationError{err: fmt.Errorf(
+				"endorser tx %d: %w",
+				i,
+				err,
+			)}
 		}
 		// An endorser block referenced by a Dijkstra ranking block is
 		// Dijkstra-era, so decode its transactions as Dijkstra directly.
 		// DetermineTransactionType is heuristic and cannot reliably identify a
 		// bare standalone transaction without block/era context (it returns
 		// "unknown transaction type" for these), so it must not be used here.
-		tx, err := ledger.NewTransactionFromCbor(ledger.TxTypeDijkstra, txCbor)
+		// Peer-supplied transaction bytes, decoded before any storage is
+		// mutated, so the guard cannot convert a crash into a partially
+		// applied endorser block: every return below this loop's decode
+		// failure leaves the ledger untouched.
+		tx, err := safedecode.Transaction(ledger.TxTypeDijkstra, txCbor)
 		if err != nil {
-			return 0, 0, fmt.Errorf("decode endorser tx %d: %w", i, err)
+			return 0, 0, &leiosEndorserBlockValidationError{err: fmt.Errorf(
+				"decode endorser tx %d: %w",
+				i,
+				err,
+			)}
 		}
 		txs[i] = tx
 		bodyCbors[i] = []byte(elems[0])
 	}
 
-	// Reject repeated endorser transactions before recording ledger data. The
-	// CIP path compacts the block to transactions that still need UTxO apply;
-	// the Musashi path keeps the blob intact for serving while using the indexes
-	// to suppress duplicate ledger effects.
-	keepIndexes, err := ls.deduplicateEndorserBlockTransactionIndexes(txs, txn)
+	// Repeated endorser transactions are kept in the blob, which is served
+	// whole, but their ledger effects are recorded once.
+	keepIndexes, err := ls.deduplicateEndorserBlockTransactionIndexes(
+		ctx,
+		txs,
+		txn,
+	)
 	if err != nil {
 		return 0, 0, err
 	}
-	if ls.config.LeiosApplyEndorserBlockTxs {
-		if len(keepIndexes) == 0 {
-			return 0, 0, nil
-		}
-		keptTxs := make([]lcommon.Transaction, 0, len(keepIndexes))
-		keptBodies := make([][]byte, 0, len(keepIndexes))
-		for _, idx := range keepIndexes {
-			keptTxs = append(keptTxs, txs[idx])
-			keptBodies = append(keptBodies, bodyCbors[idx])
-		}
-		txs = keptTxs
-		bodyCbors = keptBodies
-	}
-
 	// Build the endorser-block blob and its offsets, then persist the blob
 	// under (ebSlot, ebHash) so cold-extract can resolve the DOFF refs.
 	blob, offsets, err := buildEndorserBlockBlob(txs, bodyCbors, ebSlot, ebHash)
 	if err != nil {
+		// The production provider bounds a complete closure well below the
+		// builder's uint32 offset limit. Its other error requires a decoded
+		// output to lack preserved CBOR and fail local re-encoding. Both are
+		// local construction failures, so keep them retryable rather than
+		// assigning a peer verdict.
 		return 0, 0, fmt.Errorf("build endorser block blob: %w", err)
 	}
-	// Persist the endorser-block blob. Which transaction commits it depends on
-	// the apply path (see DATABASE.md, "Leios endorser-block storage", for the
-	// full rationale):
-	//   - Musashi/no-validation path (LeiosApplyEndorserBlockTxs false): commit
-	//     in its own blob transaction (nil txn) to avoid overflowing the shared
-	//     50-block chunk transaction with ErrTxnTooBig on a dense Leios backlog;
-	//     the blob is never read back within the chunk, so an independent commit
-	//     is safe.
-	//   - CIP/validating path (LeiosApplyEndorserBlockTxs true): keep the blob in
-	//     the shared txn so a later block spending an endorser-produced output can
-	//     resolve it via read-your-writes.
-	blobTxn := txn
-	if !ls.config.LeiosApplyEndorserBlockTxs {
-		blobTxn = nil
+	applied, donation, err := ls.validateAndApplyEndorserBlockTransactions(
+		ctx,
+		txn,
+		rbPoint,
+		rbBlockNumber,
+		ebSlot,
+		contextSlot,
+		offsets,
+		txs,
+		keepIndexes,
+	)
+	if err != nil {
+		return 0, 0, err
 	}
-	if err := ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, blobTxn); err != nil {
+	// The blob commits in its own blob transaction (nil txn) so a dense Leios
+	// backlog cannot overflow the shared 50-block chunk transaction with
+	// ErrTxnTooBig; offset reads use a fresh blob snapshot if the shared LRU
+	// misses. See DATABASE.md, "Leios endorser-block storage".
+	if err := ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, nil); err != nil {
 		return 0, 0, &leiosEndorserBlockStorageError{
 			err: fmt.Errorf("store endorser block blob: %w", err),
 		}
 	}
+	txn.MarkBlockCborCommittedSeparately(ebSlot, ebHash)
+	return applied, donation, nil
+}
 
-	delta := NewLedgerDelta(
-		rbPoint,
-		uint(dijkstra.EraIdDijkstra),
-		rbBlockNumber,
+type leiosEndorserBlockValidationError struct {
+	err error
+}
+
+func (e *leiosEndorserBlockValidationError) Error() string {
+	return e.err.Error()
+}
+
+func (e *leiosEndorserBlockValidationError) Unwrap() error {
+	return e.err
+}
+
+func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
+	ctx context.Context,
+	txn *database.Txn,
+	rbPoint ocommon.Point,
+	rbBlockNumber uint64,
+	referenceSlot uint64,
+	contextSlot *uint64,
+	offsets *database.BlockIngestionResult,
+	txs []lcommon.Transaction,
+	indexes []int,
+) (int, uint64, error) {
+	snapshot := ls.txValidationSnapshot()
+	created := make(map[utxoref.Key]lcommon.Utxo, len(indexes)*2)
+	consumed := make(map[utxoref.Key]struct{}, len(indexes)*2)
+	applyEvents := make([]TransactionEvent, 0, len(indexes))
+	var (
+		donation            uint64
+		expandedIndexOffset uint64
 	)
-	defer delta.Release()
-	delta.Offsets = offsets
-	if ls.config.LeiosApplyEndorserBlockTxs {
-		for i, tx := range txs {
-			delta.addTransaction(tx, i)
+	for _, idx := range indexes {
+		tx := txs[idx]
+		if err := ls.loadLeiosSpentInputs(
+			ctx,
+			txn,
+			tx,
+			consumed,
+			created,
+		); err != nil {
+			return 0, 0, fmt.Errorf(
+				"load endorser tx %d input state: %w",
+				idx,
+				err,
+			)
 		}
-	} else {
-		for _, idx := range keepIndexes {
-			delta.addTransaction(txs[idx], idx)
+		validationEra, err := resolveValidationEra(
+			tx,
+			snapshot.currentEra,
+			snapshot.eraList,
+		)
+		if err != nil {
+			if isSemanticTxValidationError(err) {
+				return 0, 0, &leiosEndorserBlockValidationError{err: err}
+			}
+			return 0, 0, err
 		}
-	}
-
-	// Haskell-conformant path (Musashi prototype-2026w29): apply the certified
-	// endorser block's transactions with their full effects — produced outputs,
-	// consumed inputs, certificates, and governance — but WITHOUT validation or
-	// consumed-input recovery. This mirrors the reference ledger's
-	// applyLeiosClosure (ruleApplyTxValidation ValidateNone in
-	// Ouroboros.Consensus.Shelley.Ledger.Leios): the endorser block was admitted
-	// to the chain by its Leios certificate, so its transactions are folded onto
-	// the ledger state without re-validation, and a consumed input that is not
-	// present is left as a no-op instead of driving the consumed-utxo recovery
-	// loop. Applying the produced outputs keeps the UTxO set — and the
-	// stake distribution derived from it — complete, matching the reference;
-	// recording metadata only (the previous behavior) diverged the UTxO and made
-	// downstream transactions and the leader-election stake snapshot treat inputs
-	// the endorser block should have produced as missing (the "utxo not found"
-	// repair loop and "pool has no stake in epoch snapshot" rejection). The delta
-	// is recorded under the ranking block's point, so a rollback of the ranking
-	// block removes these effects.
-	if !ls.config.LeiosApplyEndorserBlockTxs {
-		delta.skipConsumedInputRecovery = true
-		if err := delta.applyWithoutRecordingDonations(ls, txn); err != nil {
-			return 0, 0, &leiosEndorserBlockStorageError{
-				err: fmt.Errorf(
-					"apply endorser block transactions: %w",
+		if validationEra.ValidateTxFunc != nil {
+			pp := snapshot.currentPParams
+			isCurrentEraPParams := true
+			if validationEra.Id != snapshot.currentEra.Id &&
+				snapshot.prevEraPParams != nil {
+				pp = snapshot.prevEraPParams
+				isCurrentEraPParams = false
+			}
+			synthetic := syntheticV2CostModelForValidation(
+				pp,
+				isCurrentEraPParams,
+				snapshot.syntheticV2CostModelInEffect,
+			)
+			lv := (&LedgerView{
+				ctx:               ctx,
+				txn:               txn,
+				ls:                ls,
+				intraBlockUtxos:   created,
+				consumedUtxos:     consumed,
+				horizonAnchorSlot: referenceSlot,
+				epochStartSlot:    snapshot.currentEpochStartSlot,
+			}).pinCommitteeState(snapshot.currentEpoch, pp).
+				pinSyntheticV2CostModel(synthetic)
+			err = validationEra.ValidateTxFunc(
+				tx,
+				referenceSlot,
+				lv,
+				pp,
+			)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return 0, 0, ctxErr
+			}
+			if faultErr := storageFaultOrErr(lv, nil); faultErr != nil {
+				return 0, 0, fmt.Errorf(
+					"validate endorser tx %d storage state: %w",
+					idx,
+					faultErr,
+				)
+			}
+			if err != nil {
+				if isSemanticTxValidationError(err) {
+					return 0, 0, &leiosEndorserBlockValidationError{err: fmt.Errorf(
+						"endorser tx %d failed validation: %w",
+						idx,
+						err,
+					)}
+				}
+				return 0, 0, fmt.Errorf(
+					"validate endorser tx %d: %w",
+					idx,
 					err,
-				),
+				)
 			}
 		}
-		return len(delta.Transactions), delta.donation, nil
-	}
 
-	// CIP-conformant path: apply the endorser transactions as a delta recorded
-	// under the ranking block's point (so a rollback removes them), with offsets
-	// pointing into the endorser-block blob.
-	if err := delta.applyWithoutRecordingDonations(ls, txn); err != nil {
-		return 0, 0, &leiosEndorserBlockStorageError{
-			err: fmt.Errorf("apply endorser block transactions: %w", err),
+		delta := NewLedgerDelta(
+			rbPoint,
+			uint(dijkstra.EraIdDijkstra),
+			rbBlockNumber,
+		)
+		delta.Offsets = offsets
+		delta.expandedIndexOffset = expandedIndexOffset
+		delta.closureContextSlot = contextSlot
+		delta.skipConsumedInputRecovery = true
+		delta.stageApplyEvents = func(events []TransactionEvent) {
+			applyEvents = append(applyEvents, events...)
+		}
+		delta.addTransaction(tx, idx)
+		err = delta.applyWithoutRecordingDonations(ctx, ls, txn)
+		if err == nil {
+			donation, err = addUint64(donation, delta.donation)
+		}
+		delta.Release()
+		if err != nil {
+			return 0, 0, &leiosEndorserBlockStorageError{err: fmt.Errorf(
+				"apply endorser block transaction %d: %w",
+				idx,
+				err,
+			)}
+		}
+		levels := TransactionLevelsForApply(tx)
+		// Every transaction has its enclosing top-level body.
+		expandedIndexOffset += uint64(len(levels) - 1) //nolint:gosec
+		for _, utxo := range tx.Produced() {
+			created[utxoref.ForUtxo(utxo)] = utxo
+		}
+		for _, input := range tx.Consumed() {
+			consumed[utxoref.ForInput(input)] = struct{}{}
 		}
 	}
-	return len(txs), delta.donation, nil
+	if len(applyEvents) > 0 {
+		if contextSlot != nil {
+			pending := &pendingLeiosClosure{
+				point: ocommon.Point{
+					Slot: rbPoint.Slot,
+					Hash: bytes.Clone(rbPoint.Hash),
+				},
+				events: applyEvents,
+			}
+			txn.AfterCommit(func() {
+				ls.Lock()
+				ls.untickedClosure = pending
+				ls.Unlock()
+			})
+		} else {
+			txn.AfterCommit(func() {
+				if ls.beforeTransactionApplyPublish != nil {
+					ls.beforeTransactionApplyPublish()
+				}
+				for _, event := range applyEvents {
+					ls.publishTransactionEvent(ctx, event)
+				}
+			})
+		}
+	}
+	return len(indexes), donation, nil
+}
+
+func (ls *LedgerState) loadLeiosSpentInputs(
+	ctx context.Context,
+	txn *database.Txn,
+	tx lcommon.Transaction,
+	consumed map[utxoref.Key]struct{},
+	created map[utxoref.Key]lcommon.Utxo,
+) error {
+	for _, input := range tx.Consumed() {
+		key := utxoref.ForInput(input)
+		if _, alreadyConsumed := consumed[key]; alreadyConsumed {
+			continue
+		}
+		if _, alreadyLoaded := created[key]; alreadyLoaded {
+			continue
+		}
+		stored, err := ls.db.UtxoByRefIncludingSpent(
+			ctx,
+			input.Id().Bytes(),
+			input.Index(),
+			txn,
+		)
+		if err != nil {
+			return err
+		}
+		if stored == nil {
+			continue
+		}
+		output, err := stored.Decode()
+		if err != nil {
+			return fmt.Errorf("decode input state: %w", err)
+		}
+		if output == nil {
+			return errors.New("decode input state: nil output")
+		}
+		created[key] = lcommon.Utxo{Id: input, Output: output}
+	}
+	return nil
 }
 
 func (ls *LedgerState) deduplicateEndorserBlockTransactionIndexes(
+	ctx context.Context,
 	txs []lcommon.Transaction,
 	txn *database.Txn,
 ) ([]int, error) {
@@ -309,7 +537,7 @@ func (ls *LedgerState) deduplicateEndorserBlockTransactionIndexes(
 	for i, tx := range txs {
 		hashes[i] = tx.Hash().Bytes()
 	}
-	existing, err := ls.db.GetTransactionsByHashes(hashes, txn)
+	existing, err := ls.db.GetTransactionsByHashes(ctx, hashes, txn)
 	if err != nil {
 		return nil, fmt.Errorf("dedup endorser transactions: %w", err)
 	}
@@ -359,6 +587,9 @@ func buildEndorserBlockBlob(
 	ebSlot uint64,
 	ebHash [lcommon.Blake2b256Size]byte,
 ) ([]byte, *database.BlockIngestionResult, error) {
+	if err := validateTransactionOutputIndexes(txs); err != nil {
+		return nil, nil, fmt.Errorf("validate endorser block output indexes: %w", err)
+	}
 	var buf bytes.Buffer
 	result := &database.BlockIngestionResult{
 		TxOffsets:   make(map[[32]byte]database.CborOffset, len(txs)),
@@ -376,42 +607,54 @@ func buildEndorserBlockBlob(
 		return uint32(off), uint32(len(b)), nil
 	}
 	for i, tx := range txs {
-		var txHash [32]byte
-		copy(txHash[:], tx.Hash().Bytes())
-		off, length, err := writeRange(bodyCbors[i])
-		if err != nil {
-			return nil, nil, err
-		}
-		result.TxOffsets[txHash] = database.CborOffset{
-			BlockSlot:  ebSlot,
-			BlockHash:  ebHash,
-			ByteOffset: off,
-			ByteLength: length,
-		}
-		for _, utxo := range tx.Produced() {
-			outCbor := utxo.Output.Cbor()
-			if len(outCbor) == 0 {
-				enc, err := cbor.Encode(utxo.Output)
-				if err != nil {
-					return nil, nil, fmt.Errorf(
-						"encode endorser output: %w",
-						err,
-					)
-				}
-				outCbor = enc
+		levels := TransactionLevelsForApply(tx)
+		for levelIdx, level := range levels {
+			// The last level is always the enclosing transaction, and its
+			// Cbor() is the whole [body, witnesses, isValid, aux] envelope
+			// whether or not it carries sub-transactions. Store its body
+			// element, as BlockIndexer.TxOffsets does under the same hash.
+			// Only sub-transaction levels expose their own body bytes.
+			bodyCbor := level.Cbor()
+			if levelIdx == len(levels)-1 {
+				bodyCbor = bodyCbors[i]
 			}
-			off, length, err := writeRange(outCbor)
+			off, length, err := writeRange(bodyCbor)
 			if err != nil {
 				return nil, nil, err
 			}
-			result.UtxoOffsets[database.UtxoRef{
-				TxId:      txHash,
-				OutputIdx: utxo.Id.Index(),
-			}] = database.CborOffset{
+			var levelHash [32]byte
+			copy(levelHash[:], level.Hash().Bytes())
+			result.TxOffsets[levelHash] = database.CborOffset{
 				BlockSlot:  ebSlot,
 				BlockHash:  ebHash,
 				ByteOffset: off,
 				ByteLength: length,
+			}
+			for _, utxo := range level.Produced() {
+				outCbor := utxo.Output.Cbor()
+				if len(outCbor) == 0 {
+					enc, err := cbor.Encode(utxo.Output)
+					if err != nil {
+						return nil, nil, fmt.Errorf(
+							"encode endorser output: %w",
+							err,
+						)
+					}
+					outCbor = enc
+				}
+				off, length, err := writeRange(outCbor)
+				if err != nil {
+					return nil, nil, err
+				}
+				result.UtxoOffsets[database.UtxoRef{
+					TxId:      levelHash,
+					OutputIdx: utxo.Id.Index(),
+				}] = database.CborOffset{
+					BlockSlot:  ebSlot,
+					BlockHash:  ebHash,
+					ByteOffset: off,
+					ByteLength: length,
+				}
 			}
 		}
 	}
@@ -439,19 +682,18 @@ func buildEndorserBlockBlob(
 //   - Near the head (within the wait window): the relay co-produces and
 //     diffuses the endorser block with its ranking block, so it is already
 //     being pushed. Only the references that applying THIS batch actually
-//     reads are waited for (see leiosApplyReadsOwnAnnouncement and
-//     splitTipWaitByApplyDependency); the rest are dispatched as background
-//     prefetch and never block the pipeline. The waits that remain run
-//     concurrently under one shared window and dispatch an active by-point
-//     fetch up front, so a batch costs at most one diffusion window rather
-//     than one per missing endorser block.
+//     reads are waited for (see splitTipWaitByApplyDependency); the rest
+//     are dispatched as background prefetch and never block the pipeline.
+//     The waits that remain run concurrently under one shared window and
+//     dispatch an active by-point fetch up front, so a batch costs at most
+//     one diffusion window rather than one per missing endorser block.
 //   - Historical backlog (well below the head, e.g. during a from-scratch
 //     catch-up): the relay does not diffuse these, but it does serve any
 //     endorser block by point on demand, so actively fetch them -- in parallel
 //     across the available relay connections -- and apply the endorser-resident
 //     outputs instead of leaving the UTxO set incomplete and trusting the
-//     chain. On the Musashi certificate-driven path a certified closure is
-//     mandatory: an incomplete all-peer fetch returns an error before its
+//     chain. Only certified closures are fetched there, and a certified closure
+//     is mandatory: an incomplete all-peer fetch returns an error before its
 //     certifying ranking block can commit. This is what lets a from-scratch
 //     sync build a complete ledger state instead of exposing a latent gap when
 //     near-tip header validation begins.
@@ -474,41 +716,40 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			}
 		}
 	}
-	// On the Haskell-conformant (Musashi) path, settled-backlog fetches are
-	// certificate-driven; on the CIP path they stay announcement-driven, so the
-	// CIP backfill is unchanged.
-	certDrivenHistorical := !ls.config.LeiosApplyEndorserBlockTxs
-	if certDrivenHistorical {
-		// Resolve CertRB parents that fall outside this batch from the block
-		// store, so a certifying ranking block at a batch boundary still fetches
-		// its endorser block. The parent (an already-applied ancestor) is stored.
-		for _, info := range infos {
-			if !info.certifies {
-				continue
-			}
-			if _, ok := annByHash[info.prevHash]; ok {
-				continue
-			}
-			if ls.db == nil {
-				continue
-			}
-			parent, err := ls.BlockByHash([]byte(info.prevHash))
-			if err != nil {
-				continue
-			}
-			if ebHash, _, ok := leiosAnnouncementFromBlockCbor(parent.Cbor); ok {
-				annByHash[info.prevHash] = leiosEbRef{
-					slot: parent.Slot,
-					hash: ebHash,
-				}
+	// Certificate validation precedes both asynchronous historical backfill
+	// and the apply-time certified fetch. Invalid certificates therefore never
+	// trigger certified endorser-block work, including during replay. Resolve a
+	// parent announcement from this batch before falling back to persisted data.
+	for _, block := range blocks {
+		if err := ls.validateDijkstraLeiosCertificate(ctx, block, annByHash); err != nil {
+			return fmt.Errorf("validate Dijkstra Leios certificate: %w", err)
+		}
+	}
+	// Resolve CertRB parents that fall outside this batch from the block
+	// store, so a certifying ranking block at a batch boundary still fetches
+	// its endorser block. The parent (an already-applied ancestor) is stored.
+	for _, info := range infos {
+		if !info.certifies {
+			continue
+		}
+		if _, ok := annByHash[info.prevHash]; ok {
+			continue
+		}
+		if ls.db == nil {
+			continue
+		}
+		parent, err := ls.BlockByHash(ctx, []byte(info.prevHash))
+		if err != nil {
+			continue
+		}
+		if ebHash, ok := leiosAnnouncementFromBlockCbor(parent.Cbor); ok {
+			annByHash[info.prevHash] = leiosEbRef{
+				slot: parent.Slot,
+				hash: ebHash,
 			}
 		}
 	}
-	required, err := requiredCertifiedEndorserBlocks(
-		infos,
-		annByHash,
-		certDrivenHistorical,
-	)
+	required, err := requiredCertifiedEndorserBlocks(infos, annByHash)
 	if err != nil {
 		return err
 	}
@@ -525,7 +766,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// unavailable certified closure reports WHY it is unavailable. Without it the
 	// only field evidence for a wedged pipeline was the bare
 	// "certified Leios endorser block unavailable" line -- the fetch failures
-	// were logged at Debug and dropped in production (dingo #3552).
+	// were logged at Debug and dropped in production.
 	fetchErrs := make(map[string]error, len(required))
 	ensureRequiredAvailable := func() error {
 		for _, r := range required {
@@ -562,9 +803,9 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// certified closure is mandatory whether or not the best-effort
 	// announcement window is configured, and returning "unavailable" without
 	// having tried to fetch it is what left the pipeline restarting on an
-	// endorser block nobody had asked any peer for (dingo #3552).
+	// endorser block it had not fetched from any peer.
 	fetchMissingRequired := func(poll time.Duration) {
-		if !certDrivenHistorical || ls.leiosBackfill == nil {
+		if ls.leiosBackfill == nil {
 			return
 		}
 		batchCtx, cancel := context.WithTimeout(ctx, leiosBackfillMaxWait)
@@ -585,8 +826,8 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	}
 
 	// A zero wait disables best-effort announcement waiting, but a certified
-	// Musashi closure remains mandatory: committing its CertRB without the
-	// closure would permanently omit transaction and certificate effects.
+	// closure remains mandatory: committing its CertRB without the closure
+	// would permanently omit transaction and certificate effects.
 	if ls.config.EndorserBlockWaitSlots == 0 {
 		fetchMissingRequired(leiosCertifiedFetchPoll)
 		return ensureRequiredAvailable()
@@ -621,45 +862,19 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 		wallSlot,
 		wallErr == nil,
 		ls.config.EndorserBlockWaitSlots,
-		certDrivenHistorical,
 		cached,
 	)
-	// Historical backlog: start a by-point fetch for each referenced endorser
-	// block, then wait for it to land in the cache. The fetches run concurrently
-	// in the background pool, so this does not serialize catch-up on fetch
-	// latency the way a per-chunk barrier did.
+	// Historical backlog: start a by-point fetch for each certified closure.
+	// The fetches run concurrently in the background pool; the mandatory ones
+	// are completed by fetchMissingRequired below.
 	if len(backfill) > 0 && ls.leiosBackfill != nil {
 		for _, r := range backfill {
 			ls.leiosBackfill.spawn(ctx, r)
 		}
-		if !certDrivenHistorical {
-			// CIP path: every referenced endorser block is best-effort, so wait
-			// for whatever the spawned fetches land and move on.
-			for _, r := range backfill {
-				if endorserBlockAvailableAt(
-					ls.config.EndorserBlockProvider,
-					r.hash.Bytes(),
-					r.slot,
-				) {
-					continue
-				}
-				ls.leiosBackfill.awaitFetch(
-					ctx,
-					r,
-					poll,
-					leiosBackfillMaxWait,
-				)
-			}
-		}
 	}
-	// Near the head: split the references by whether applying THIS batch
-	// actually reads them, and block only on the ones it does. See
-	// leiosApplyReadsOwnAnnouncement for the contract.
-	blockingWait, prefetch := splitTipWaitByApplyDependency(
-		tipWait,
-		required,
-		certDrivenHistorical,
-	)
+	// Near the head: block only on the references applying THIS batch reads.
+	// See splitTipWaitByApplyDependency for the contract.
+	blockingWait, prefetch := splitTipWaitByApplyDependency(tipWait, required)
 	// Best-effort references: never block the ledger pipeline on them. The
 	// fetch is dispatched in the background (deduped and concurrency-bounded by
 	// the backfiller) so the endorser block is in cache by the time something
@@ -673,83 +888,33 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// Blocking references: one shared diffusion window for the whole batch,
 	// with an active by-point fetch dispatched up front for each one.
 	ls.awaitEndorserBlocks(ctx, blockingWait, timeout, poll)
-	// CIP path only: application reads these references and nothing re-applies
-	// an endorser block that lands after the batch, so a fetch still in flight
-	// when the window elapsed is waited out rather than abandoned. See
-	// awaitInFlightEndorserFetches; timeout is the reporting threshold, not the
-	// bound.
-	if !certDrivenHistorical {
-		ls.awaitInFlightEndorserFetches(
-			ctx,
-			blockingWait,
-			timeout,
-			poll,
-			leiosTipFetchHardBound,
-		)
-	}
-	// Musashi path: a certified closure is mandatory, so each required endorser
-	// block still missing after the diffusion waits gets a bounded retry across
-	// the connected peers rather than the single attempt per pipeline restart it
-	// used to get. awaitFetch returns as soon as the in-flight marker clears,
-	// which a fetch skipped as "connection busy" does within microseconds -- so
-	// before this the pipeline aborted the chunk, restarted, re-read and
-	// re-decoded the batch, and made at most one endorser block of progress per
-	// restart, or none at all when every connection was unusable (dingo #3552).
+	// A certified closure is mandatory, so each required endorser block still
+	// missing after the diffusion waits gets a bounded retry across the
+	// connected peers rather than a single attempt per pipeline restart.
+	// awaitFetch returns as soon as the in-flight marker clears, which a fetch
+	// skipped as "connection busy" does within microseconds, so one attempt per
+	// restart made at most one endorser block of progress per restart, or none
+	// at all when every connection was unusable.
 	fetchMissingRequired(poll)
 	return ensureRequiredAvailable()
-}
-
-// leiosApplyReadsOwnAnnouncement reports whether ledger application of a
-// ranking block reads that block's OWN endorser-block announcement, as opposed
-// to only the certified closure announced by a certifying block's parent. It
-// is the apply-path contract that decides whether the pre-apply gate may block
-// on a reference, and it mirrors leiosEndorserBlockForApply exactly -- the two
-// must stay in step, since blocking on a reference application never reads buys
-// nothing, and not blocking on one it does read silently drops the endorser
-// block's transactions.
-//
-//   - CIP-conformant path (LeiosApplyEndorserBlockTxs true): true. Application
-//     resolves the block's own announcement and applies the endorser-resident
-//     transactions ahead of the ranking block whose transactions spend their
-//     outputs. Nothing re-applies them later -- the endorser-block arrival
-//     handler drives Leios voting only, not ledger application -- so an
-//     announcement skipped here is omitted from the UTxO set permanently and
-//     the ranking block's spends fall through to the interim trust path.
-//     The wait is therefore load-bearing and is kept.
-//   - Haskell-conformant (Musashi prototype) path: false. Application resolves
-//     only the certified closure: the endorser block announced by a certifying
-//     ranking block's PARENT. A block's own announcement is never read when
-//     that block is applied; it becomes relevant only later, if and when a
-//     descendant certifies it, at which point it is a mandatory reference in
-//     its own right (requiredCertifiedEndorserBlocks) and is fetched and waited
-//     for then. Blocking this batch on it buys nothing: on expiry the gate
-//     applied the block unchanged, having stalled every block queued behind it
-//     on the single ledger pipeline for the whole diffusion window.
-func leiosApplyReadsOwnAnnouncement(applyEndorserBlockTxs bool) bool {
-	return applyEndorserBlockTxs
 }
 
 // splitTipWaitByApplyDependency partitions the near-head references into the
 // ones ledger application of this batch depends on (blocking) and the ones it
 // does not (prefetch, dispatched in the background and never waited on).
 //
-// required is the set of mandatory certified closures for this batch. Those are
-// always blocking: committing a certifying ranking block without its closure
-// would permanently omit the endorser block's transaction and certificate
-// effects, and ensureRequiredAvailable fails the chunk rather than allow it.
-//
-// On the CIP path required is empty and every reference is read at apply time
-// (see leiosApplyReadsOwnAnnouncement), so everything stays blocking and the
-// only change is that the waits now share one window instead of running back to
-// back. On the Musashi path the non-required references are announcements this
-// batch never reads, so they are demoted to background prefetch.
+// Application reads only certified closures: the endorser block announced by a
+// certifying ranking block's PARENT. A block's own announcement is never read
+// when that block is applied; it becomes relevant only if a descendant
+// certifies it, at which point it is a mandatory reference in its own right
+// (requiredCertifiedEndorserBlocks). So required -- this batch's mandatory
+// certified closures -- is the blocking set, and every other near-head
+// reference is prefetch. Blocking on an announcement application never reads
+// would stall every block queued behind it on the single ledger pipeline for
+// the whole diffusion window and buy nothing.
 func splitTipWaitByApplyDependency(
 	tipWait, required []leiosEbRef,
-	certDrivenHistorical bool,
 ) (blocking, prefetch []leiosEbRef) {
-	if leiosApplyReadsOwnAnnouncement(!certDrivenHistorical) {
-		return tipWait, nil
-	}
 	requiredKeys := make(map[string]struct{}, len(required))
 	for _, r := range required {
 		requiredKeys[leiosEbRefKey(r)] = struct{}{}
@@ -793,9 +958,7 @@ func (ls *LedgerState) awaitEndorserBlocks(
 			continue
 		}
 		// The fetch is bound to ctx, not to the wait window, so a fetch that
-		// outlives the window is not abandoned. On its own that is not enough
-		// for the CIP path -- see awaitInFlightEndorserFetches, which is what
-		// makes a late fetch actually reach this batch's application.
+		// outlives the window is not abandoned.
 		if ls.leiosBackfill != nil {
 			ls.leiosBackfill.spawn(ctx, r)
 		}
@@ -803,188 +966,6 @@ func (ls *LedgerState) awaitEndorserBlocks(
 		go func(r leiosEbRef) {
 			defer wg.Done()
 			ls.waitForEndorserBlock(ctx, r.slot, r.hash, timeout, poll)
-		}(r)
-	}
-	wg.Wait()
-}
-
-// leiosTipFetchHardBound bounds how long the CIP apply path will hold a batch
-// waiting for its own in-flight by-point fetch. It is the same backstop the
-// backfiller uses, and deliberately so: the code this replaces issued a
-// SYNCHRONOUS FetchEndorserBlockByPoint after the diffusion window, which swept
-// every peer and was bounded only by the leios-fetch timeout, so waiting for
-// the fetch to actually finish is parity rather than a new cost. In practice
-// awaitFetch returns as soon as the in-flight marker clears, so this is reached
-// only if a fetch neither caches nor completes.
-const leiosTipFetchHardBound = leiosBackfillMaxWait
-
-// awaitInFlightEndorserFetches waits for this batch's own by-point fetches to
-// FINISH, for references whose absence would otherwise be permanent.
-//
-// It exists because the diffusion window and the fetch are different clocks.
-// The window bounds how long to wait for the network to PUSH an endorser block
-// to us; it says nothing about how long our own PULL of it takes. The wait
-// dispatches that pull up front, so when the window expires the fetch is often
-// still in flight and moments from completing.
-//
-// That distinction only matters where nothing re-reads the endorser block
-// later. On the certificate-driven path a missing closure is mandatory and is
-// retried by fetchMissingRequired, and an announcement this batch does not read
-// is picked up by whichever later batch certifies it. On the CIP path neither
-// is true: application reads each ranking block's own announcement, nothing
-// re-applies an endorser block that lands afterwards, and the ranking block's
-// spends fall through to the interim trust path permanently.
-//
-// The bound is the FETCH's completion, not a second diffusion window. An
-// earlier version of this waited one further window and returned even if the
-// fetch was still running, which lost exactly the transactions it was added to
-// protect, just one window later. awaitFetch returns as soon as the endorser
-// block is cached or the in-flight marker clears, so a fetch that fails fast
-// costs nothing; hardBound (leiosTipFetchHardBound in production) is only a
-// backstop against a fetch that neither caches nor clears. softWarn is a
-// reporting threshold, not a deadline: crossing it means this batch is holding
-// the ledger pipeline on a slow fetch, which is worth a log line, and it is the
-// signal an operator needs to distinguish this from the pre-fetch stall.
-//
-// When the fetch finishes without caching -- no peer holds the endorser block
-// -- application proceeds without it. That is the long-standing behaviour of
-// this path and is NOT changed here: failing the chunk instead would turn an
-// unfetchable endorser block into an unbounded pipeline retry, which is a wedge
-// this codebase has hit before. The loss is real but it is pre-existing and
-// orthogonal to the regression this function fixes.
-//
-// The waits run concurrently, so k references cost one wait, not k.
-func (ls *LedgerState) awaitInFlightEndorserFetches(
-	ctx context.Context,
-	refs []leiosEbRef,
-	softWarn, poll, hardBound time.Duration,
-) {
-	if ls.leiosBackfill == nil {
-		return
-	}
-	var wg sync.WaitGroup
-	for _, r := range refs {
-		if endorserBlockAvailableAt(
-			ls.config.EndorserBlockProvider,
-			r.hash.Bytes(),
-			r.slot,
-		) {
-			continue
-		}
-		wg.Add(1)
-		go func(r leiosEbRef) {
-			defer wg.Done()
-			start := time.Now()
-			outcome := ls.leiosBackfill.awaitFetch(
-				ctx,
-				r,
-				poll,
-				hardBound,
-			)
-			elapsed := time.Since(start)
-			cached := outcome == leiosFetchWaitCached
-			// This grace phase is apply-path wait time too, and it is the
-			// LONGEST one the pipeline can incur (up to hardBound), so it
-			// belongs in the same histogram as the diffusion window rather
-			// than being invisible to monitoring.
-			//
-			// Classified from the wait's OWN termination cause, not from
-			// re-reading the cache and the context afterwards: by then a
-			// bound that expired just before a shutdown looks like a
-			// cancellation, and a fetch that completed without caching looks
-			// like a timeout.
-			switch outcome {
-			case leiosFetchWaitCached:
-				ls.metrics.observeLeiosEbWait(
-					elapsed,
-					leiosEbWaitOutcomeArrived,
-				)
-			case leiosFetchWaitUnavailable:
-				ls.metrics.observeLeiosEbWait(
-					elapsed,
-					leiosEbWaitOutcomeUnavailable,
-				)
-			case leiosFetchWaitCancelled:
-				ls.metrics.observeLeiosEbWait(
-					elapsed,
-					leiosEbWaitOutcomeCancelled,
-				)
-			case leiosFetchWaitDeadline:
-				ls.metrics.observeLeiosEbWait(
-					elapsed,
-					leiosEbWaitOutcomeTimeout,
-				)
-			}
-			if cached && elapsed < softWarn {
-				return
-			}
-			if cached {
-				ls.config.Logger.Warn(
-					"endorser block fetch outlived the diffusion window; held block application until it landed",
-					"component",
-					"ledger",
-					"slot",
-					r.slot,
-					"eb_hash",
-					r.hash.String(),
-					"waited_seconds",
-					elapsed.Seconds(),
-				)
-				return
-			}
-			if outcome == leiosFetchWaitCancelled {
-				// The pass was cancelled, not the fetch exhausted. Nothing
-				// was learned about whether any peer holds the endorser
-				// block, so saying it "could not be fetched" would be a
-				// false diagnosis emitted on every shutdown.
-				ls.config.Logger.Debug(
-					"endorser block fetch cancelled before it completed",
-					"component", "ledger",
-					"slot", r.slot,
-					"eb_hash", r.hash.String(),
-					"waited_seconds", elapsed.Seconds(),
-					"error", ctx.Err(),
-				)
-				return
-			}
-			// Two very different outcomes reach here, and only one is
-			// anomalous. awaitFetch returns either because the all-peers
-			// fetch CLEARED its in-flight marker without caching -- no peer
-			// holds this endorser block -- or because it neither cached nor
-			// cleared before hardBound. The first is the expected,
-			// long-standing behaviour of this path (see the function comment
-			// above); the code this replaced logged its equivalent at Debug,
-			// and on a CIP node where endorser blocks are routinely
-			// unfetchable a WARN per reference is normal operation escalated
-			// to alertable volume. The second means a fetch is wedged and the
-			// pipeline was held for the full backstop, which is worth waking
-			// someone for. The in-flight marker is what distinguishes them,
-			// so read it rather than inferring from elapsed time.
-			if outcome == leiosFetchWaitDeadline {
-				ls.config.Logger.Warn(
-					"endorser block fetch neither completed nor cached within the hard bound; applying its ranking block without the endorser-resident transactions",
-					"component",
-					"ledger",
-					"slot",
-					r.slot,
-					"eb_hash",
-					r.hash.String(),
-					"waited_seconds",
-					elapsed.Seconds(),
-				)
-				return
-			}
-			ls.config.Logger.Debug(
-				"endorser block could not be fetched; applying its ranking block without the endorser-resident transactions",
-				"component",
-				"ledger",
-				"slot",
-				r.slot,
-				"eb_hash",
-				r.hash.String(),
-				"waited_seconds",
-				elapsed.Seconds(),
-			)
 		}(r)
 	}
 	wg.Wait()
@@ -999,11 +980,10 @@ type leiosEbRef struct {
 
 // leiosEbRefKey returns a stable per-(slot, hash) dedup key for r, not hash
 // alone. The manifest is content-addressed, so the same hash can legitimately
-// be a distinct requirement at two different slots at once (issue #3513
-// review); every dedup/in-flight-tracking map keyed on an endorser-block
-// reference in this file uses this key, so a second, slot-distinct reference
-// to an already-seen hash is never collapsed into (or suppressed by) the
-// first.
+// be a distinct requirement at two different slots at once; every
+// dedup/in-flight-tracking map keyed on an endorser-block reference in this
+// file uses this key, so a second, slot-distinct reference to an already-seen
+// hash is never collapsed into (or suppressed by) the first.
 func leiosEbRefKey(r leiosEbRef) string {
 	return fmt.Sprintf("%d:%s", r.slot, r.hash.Bytes())
 }
@@ -1012,7 +992,7 @@ func leiosEbRefKey(r leiosEbRef) string {
 // endorser block identified by hash bound to exactly the given slot -- not
 // merely present under some slot. The manifest is content-addressed, so the
 // same hash can be a live, independently required occurrence at more than
-// one slot at once (issue #3513); every call site here already knows the
+// one slot at once; every call site here already knows the
 // slot its own reference requires (leiosEbRef pairs them), and the provider
 // itself resolves exactly that (slot, hash) occurrence rather than
 // whichever one happens to be cached for the hash. Without this, a stale
@@ -1047,22 +1027,18 @@ type leiosBlockInfo struct {
 }
 
 // requiredCertifiedEndorserBlocks returns the certified parent EBs whose
-// transactions are consensus ledger effects on the Haskell-conformant Musashi
-// path. Current announcements remain best-effort until a later block certifies
-// them. A certifying block whose parent announcement cannot be resolved is
-// rejected: proceeding would commit a ledger state known to be incomplete.
+// transactions are consensus ledger effects. Current announcements remain
+// best-effort until a later block certifies them. A certifying block whose
+// parent announcement cannot be resolved is not committed: proceeding would
+// commit a ledger state known to be incomplete.
 // Deduped by leiosEbRefKey (slot, hash), not hash alone: two certifying
 // blocks in the same batch can legitimately require the same hash at
-// different slots (issue #3513 review), and a hash-only dedup would drop the
+// different slots, and a hash-only dedup would drop the
 // second requirement from the result entirely.
 func requiredCertifiedEndorserBlocks(
 	infos []leiosBlockInfo,
 	annByHash map[string]leiosEbRef,
-	certDrivenHistorical bool,
 ) ([]leiosEbRef, error) {
-	if !certDrivenHistorical {
-		return nil, nil
-	}
 	required := make([]leiosEbRef, 0)
 	seen := make(map[string]struct{})
 	for _, info := range infos {
@@ -1112,38 +1088,129 @@ func leiosBlockInfoFrom(blk ledger.Block) leiosBlockInfo {
 	return info
 }
 
+func (ls *LedgerState) validateDijkstraLeiosCertificate(
+	ctx context.Context,
+	block ledger.Block,
+	batchAnnouncements map[string]leiosEbRef,
+) error {
+	dijkstraBlock, ok := block.(*dijkstra.DijkstraBlock)
+	if !ok {
+		return nil
+	}
+	certifier, ok := dijkstraBlock.Header().(leiosEndorserBlockCertifier)
+	if !ok {
+		return errors.New("dijkstra header has no Leios certification accessor")
+	}
+	certified, flagPresent := certifier.LeiosCertified()
+	certificate := dijkstraBlock.BlockBody.LeiosCertificate
+	if !flagPresent {
+		if certificate != nil {
+			return ls.rejectLeiosCertifyingBlock(
+				block,
+				errors.New("certificate body is present without a certified header flag"),
+			)
+		}
+		return nil
+	}
+	if certified != (certificate != nil) {
+		return ls.rejectLeiosCertifyingBlock(
+			block,
+			fmt.Errorf(
+				"certified header flag is %t but certificate body presence is %t",
+				certified,
+				certificate != nil,
+			),
+		)
+	}
+	if !certified {
+		return nil
+	}
+	if ls.config.ValidateLeiosCertificate == nil {
+		return errors.New("no Dijkstra Leios certificate validator configured")
+	}
+	var (
+		ebHash    lcommon.Blake2b256
+		ebSlot    uint64
+		announced bool
+		err       error
+	)
+	if batchAnnouncement, ok := batchAnnouncements[string(block.PrevHash().Bytes())]; ok {
+		ebHash, ebSlot, announced = batchAnnouncement.hash, batchAnnouncement.slot, true
+	} else {
+		ebHash, ebSlot, announced, err = ls.leiosCertifiedAnnouncementFromParent(
+			ctx,
+			block.PrevHash().Bytes(),
+		)
+		if err != nil {
+			return fmt.Errorf("%w: resolve certified parent announcement: %w", errCertifiedEndorserBlockUnavailable, err)
+		}
+	}
+	if !announced {
+		// The parent resolved and announced nothing, which is a verdict on
+		// this block. A parent that does not resolve stays a retry above.
+		return ls.rejectLeiosCertifyingBlock(
+			block,
+			errLeiosCertificateWithoutAnnouncement,
+		)
+	}
+	if ls.config.EndorserBlockValidation != nil {
+		switch ls.config.EndorserBlockValidation(ebHash.Bytes(), ebSlot) {
+		case EndorserBlockValidationPending:
+			return fmt.Errorf(
+				"%w: endorser block semantic validation is pending",
+				errCertifiedEndorserBlockUnavailable,
+			)
+		case EndorserBlockValidationInvalid:
+			return ls.rejectLeiosCertifyingBlock(
+				block,
+				errors.New("certified endorser block is semantically invalid"),
+			)
+		case EndorserBlockValidationUnknown,
+			EndorserBlockValidationValid:
+		}
+	}
+	epochInfo, err := ls.epochForSlot(ebSlot)
+	if err != nil {
+		return fmt.Errorf("resolve certified endorser-block epoch: %w", err)
+	}
+	if err := ls.config.ValidateLeiosCertificate(
+		epochInfo.EpochId,
+		block.PrevHash().Bytes(),
+		certificate.Signers,
+		certificate.AggregatedSignature,
+	); err != nil {
+		if errors.Is(err, ErrLeiosInvalidCertificate) {
+			return ls.rejectLeiosCertifyingBlock(block, err)
+		}
+		// This node could not check the certificate (an unavailable vote
+		// manager, a committee or database read failure), which says nothing
+		// about the block. Rejecting it would rewind past a block that may be
+		// valid, so it is retried like any other local failure.
+		return fmt.Errorf("verify Leios certificate: %w", err)
+	}
+	return nil
+}
+
 // classifyEndorserBlockFetches decides which endorser blocks to fetch for a
 // batch of ranking blocks, by where each block sits relative to the live head:
 //
 //   - Near the head (within waitSlots of wallSlot): current announcements are
-//     fetched on both paths. On the Haskell-conformant path, a certifying block's
-//     parent announcement is fetched as well, because prototype-2026w29 permits
-//     one ranking block to certify its parent's EB and announce a new EB.
-//   - Settled backlog (more than waitSlots below the head): the policy depends
-//     on certDrivenHistorical.
-//
-// certDrivenHistorical selects the settled-backlog policy, following the
-// endorser-block ledger path (LeiosApplyEndorserBlockTxs):
-//
-//   - true (Haskell-conformant path, e.g. Musashi): certificate-driven. Fetch a
-//     settled endorser block only once a certifying ranking block certifies it
-//     — the certified endorser block is the one announced by the CertRB's
-//     parent (prevHash), per prototype-2026w29. Uncertified historical
-//     announcements are skipped because their transactions are not applied on
-//     this path; only certified endorser blocks affect the ledger or the merged
-//     node-to-client view, and the relay does not reliably serve uncertified
-//     ones.
-//   - false (CIP-conformant path): announcement-driven, like the near-head
-//     case. Endorser transactions are applied to the UTxO, so every referenced
-//     endorser block is fetched to build a complete set. This preserves the
-//     CIP-path backfill unchanged.
+//     fetched, since a descendant may certify them and voting needs them, and
+//     so is a certifying block's parent announcement, because one ranking
+//     block may certify its parent's EB and announce a new EB.
+//   - Settled backlog (more than waitSlots below the head): certificate-driven.
+//     A settled endorser block is fetched only once a certifying ranking block
+//     certifies it -- the one announced by the CertRB's parent (prevHash).
+//     Uncertified historical announcements are skipped: their transactions
+//     never reach the ledger or the merged node-to-client view, and relays do
+//     not reliably serve them.
 //
 // annByHash resolves a CertRB's parent announcement (block hash -> announced
 // endorser block); the caller supplies parents outside the batch. cached
 // reports whether an endorser block is already available *at r's slot*, so a
 // stale occurrence of the hash under a different slot is not mistaken for
-// availability and is fetched like any other missing reference (issue #3513
-// review). backfillSeen/tipWaitSeen (via appendRef's leiosEbRefKey) dedup by
+// availability and is fetched like any other missing reference.
+// backfillSeen/tipWaitSeen (via appendRef's leiosEbRefKey) dedup by
 // (slot, hash), not hash alone, for the same reason: two blocks in the batch
 // can legitimately require the same hash at different slots, and a
 // hash-only dedup would drop the second requirement's fetch entirely. When
@@ -1156,7 +1223,6 @@ func classifyEndorserBlockFetches(
 	wallSlot uint64,
 	wallKnown bool,
 	waitSlots uint64,
-	certDrivenHistorical bool,
 	cached func(r leiosEbRef) bool,
 ) (backfill, tipWait []leiosEbRef) {
 	backfillSeen := make(map[string]struct{})
@@ -1172,10 +1238,9 @@ func classifyEndorserBlockFetches(
 	for _, info := range infos {
 		historical := wallKnown && wallSlot > info.slot &&
 			wallSlot-info.slot > waitSlots
-		if certDrivenHistorical && info.certifies {
-			// The certified EB is always the parent's announcement. Near the
-			// head this is independent of the current block's own announcement:
-			// prototype-2026w29 permits a block to contain both.
+		if info.certifies {
+			// The certified EB is always the parent's announcement, independent
+			// of the current block's own announcement: a block may contain both.
 			if r, ok := annByHash[info.prevHash]; ok {
 				if historical {
 					appendRef(&backfill, backfillSeen, r)
@@ -1184,21 +1249,14 @@ func classifyEndorserBlockFetches(
 				}
 			}
 		}
-		if historical && certDrivenHistorical {
-			// Historical Musashi replay applies certified EBs only; do not fetch
-			// the current block's uncertified announcement.
+		if historical || !info.announces {
 			continue
 		}
-		if !info.announces {
-			continue
-		}
-		r := leiosEbRef{slot: info.slot, hash: info.ebHash}
-		if historical {
-			// CIP-conformant settled backlog: fetch every referenced block.
-			appendRef(&backfill, backfillSeen, r)
-		} else {
-			appendRef(&tipWait, tipWaitSeen, r)
-		}
+		appendRef(
+			&tipWait,
+			tipWaitSeen,
+			leiosEbRef{slot: info.slot, hash: info.ebHash},
+		)
 	}
 	return backfill, tipWait
 }
@@ -1209,56 +1267,59 @@ func classifyEndorserBlockFetches(
 // the header extension. Used to resolve a CertRB's parent announcement.
 func leiosAnnouncementFromBlockCbor(
 	blockCbor []byte,
-) (lcommon.Blake2b256, uint64, bool) {
-	var top []cbor.RawMessage
-	if _, err := cbor.Decode(blockCbor, &top); err != nil || len(top) == 0 {
-		return lcommon.Blake2b256{}, 0, false
+) (lcommon.Blake2b256, bool) {
+	top, err := safedecode.Guard(func() ([]cbor.RawMessage, error) {
+		var top []cbor.RawMessage
+		_, err := cbor.Decode(blockCbor, &top)
+		return top, err
+	})
+	if err != nil || len(top) == 0 {
+		return lcommon.Blake2b256{}, false
 	}
-	var header dijkstra.DijkstraBlockHeader
-	if _, err := cbor.Decode(top[0], &header); err != nil {
-		return lcommon.Blake2b256{}, 0, false
+	header, err := safedecode.Guard(func() (dijkstra.DijkstraBlockHeader, error) {
+		var header dijkstra.DijkstraBlockHeader
+		_, err := cbor.Decode(top[0], &header)
+		return header, err
+	})
+	if err != nil {
+		return lcommon.Blake2b256{}, false
 	}
-	ebHash, ebSize, ok := header.LeiosAnnouncement()
+	ebHash, _, ok := header.LeiosAnnouncement()
 	if !ok {
-		return lcommon.Blake2b256{}, 0, false
+		return lcommon.Blake2b256{}, false
 	}
-	return ebHash, ebSize, true
+	return ebHash, true
 }
 
 // leiosEndorserBlockForApply selects the EB whose transactions affect this
-// ranking block. The forward/CIP path applies the block's own announcement. The
-// Musashi prototype-2026w29 path applies only a certified closure: the EB
-// announced by the certifying block's parent. A w29 CertRB may also announce a
+// ranking block. Only a certified closure is ever applied: the EB announced by
+// the certifying block's parent. A ranking block without a certificate applies
+// no EB, including one it announces itself, and a CertRB may also announce a
 // new EB, so its current announcement must not be mistaken for the certified
 // one.
 // The returned expectedSlot is the slot the referenced endorser block must be
 // bound to: the endorser block shares its announcing ranking block's slot
-// (see leiosEbRef), which is this block's own slot on the CIP path or the
-// certifying block's parent's slot on the Musashi path. Callers must check a
-// provider result against it (endorserBlockAvailableAt) rather than trust
-// whatever slot the provider itself reports, since the manifest is
+// (see leiosEbRef), which is the certifying block's parent's slot. Callers
+// must check a provider result against it (endorserBlockAvailableAt) rather
+// than trust whatever slot the provider itself reports, since the manifest is
 // content-addressed and the same hash can legitimately recur at a different
-// slot (issue #3513 review).
+// slot.
 func (ls *LedgerState) leiosEndorserBlockForApply(
+	ctx context.Context,
 	block ledger.Block,
-) (hash lcommon.Blake2b256, expectedSlot, size uint64, announced bool, err error) {
-	if ls.config.LeiosApplyEndorserBlockTxs {
-		ref, ok := block.Header().(leiosEndorserBlockReferencer)
-		if !ok {
-			return lcommon.Blake2b256{}, 0, 0, false, nil
-		}
-		hash, size, announced = ref.LeiosAnnouncement()
-		return hash, block.SlotNumber(), size, announced, nil
-	}
+) (hash lcommon.Blake2b256, expectedSlot uint64, announced bool, err error) {
 	certifier, ok := block.Header().(leiosEndorserBlockCertifier)
 	if !ok {
-		return lcommon.Blake2b256{}, 0, 0, false, nil
+		return lcommon.Blake2b256{}, 0, false, nil
 	}
 	certified, present := certifier.LeiosCertified()
 	if !present || !certified {
-		return lcommon.Blake2b256{}, 0, 0, false, nil
+		return lcommon.Blake2b256{}, 0, false, nil
 	}
-	return ls.leiosCertifiedAnnouncementFromParent(block.PrevHash().Bytes())
+	return ls.leiosCertifiedAnnouncementFromParent(
+		ctx,
+		block.PrevHash().Bytes(),
+	)
 }
 
 // leiosCertifiedAnnouncementFromParent resolves the endorser block a certifying
@@ -1267,17 +1328,49 @@ func (ls *LedgerState) leiosEndorserBlockForApply(
 // the same reference from a retained parent hash alone, without holding the
 // certifying block, and cannot drift from what apply selects.
 func (ls *LedgerState) leiosCertifiedAnnouncementFromParent(
+	ctx context.Context,
 	prevHash []byte,
-) (hash lcommon.Blake2b256, expectedSlot, size uint64, announced bool, err error) {
-	parent, perr := ls.BlockByHash(prevHash)
+) (hash lcommon.Blake2b256, expectedSlot uint64, announced bool, err error) {
+	if ls.db == nil {
+		return lcommon.Blake2b256{}, 0, false, errors.New(
+			"resolve certifying block parent: database unavailable",
+		)
+	}
+	parent, perr := ls.BlockByHash(ctx, prevHash)
 	if perr != nil {
-		return lcommon.Blake2b256{}, 0, 0, false, fmt.Errorf(
+		return lcommon.Blake2b256{}, 0, false, fmt.Errorf(
 			"resolve certifying block parent: %w",
 			perr,
 		)
 	}
-	hash, size, announced = leiosAnnouncementFromBlockCbor(parent.Cbor)
-	return hash, parent.Slot, size, announced, nil
+	// A parent whose stored bytes are not a block says nothing about what it
+	// announced, so it must not read as "announced nothing", which rejects the
+	// certifying block.
+	if err := leiosStoredBlockDecodes(parent.Cbor); err != nil {
+		return lcommon.Blake2b256{}, 0, false, fmt.Errorf(
+			"resolve certifying block parent: decode stored block: %w",
+			err,
+		)
+	}
+	hash, announced = leiosAnnouncementFromBlockCbor(parent.Cbor)
+	return hash, parent.Slot, announced, nil
+}
+
+// leiosStoredBlockDecodes reports whether blockCbor is a non-empty CBOR array,
+// the outer shape of every stored block.
+func leiosStoredBlockDecodes(blockCbor []byte) error {
+	top, err := safedecode.Guard(func() ([]cbor.RawMessage, error) {
+		var top []cbor.RawMessage
+		_, err := cbor.Decode(blockCbor, &top)
+		return top, err
+	})
+	if err != nil {
+		return err
+	}
+	if len(top) == 0 {
+		return errors.New("empty block array")
+	}
+	return nil
 }
 
 // leiosBackfillConcurrency bounds how many historical endorser blocks are
@@ -1349,7 +1442,7 @@ func newLeiosBackfiller(cfg LedgerStateConfig) *leiosBackfiller {
 // requirement's spawn find the first already in flight and silently no-op,
 // and then let awaitFetch's "not in flight" skip-fast fire the moment the
 // *first* requirement's fetch cleared the (shared) key, even though the
-// second requirement's slot was never fetched at all (issue #3513 review).
+// second requirement's slot was never fetched at all.
 // ctx bounds the spawned fetch: it is the block-processing context, so a
 // shutdown or a pipeline restart stops the fetch instead of leaving it running
 // against a connection the node is tearing down.
@@ -1693,7 +1786,7 @@ const (
 // If it finished without caching (every peer's response was flaky/incomplete,
 // e.g. a single connection that cannot serve a large endorser block's tail),
 // return promptly. The caller distinguishes best-effort announcements from
-// mandatory certified Musashi closures: the former may advance, while the
+// mandatory certified closures: the former may advance, while the
 // latter abort the chunk and are retried by the ledger pipeline.
 // leiosBackfillMaxWait is a backstop against a fetch that neither caches nor
 // clears (the fetch itself is bounded by the leios-fetch timeout, so this is
@@ -1741,4 +1834,85 @@ func (b *leiosBackfiller) awaitFetch(
 		case <-ticker.C:
 		}
 	}
+}
+
+// applyUntickedBoundaryClosure folds a prototype closure onto the parent's
+// ledger before NEWEPOCH, retaining the certifying RB point for rollback.
+func (ls *LedgerState) applyUntickedBoundaryClosure(
+	ctx context.Context,
+	txn *database.Txn,
+	block ledger.Block,
+	parentPoint ocommon.Point,
+) error {
+	if err := ls.validateBlockCheckpoint(block); err != nil {
+		return err
+	}
+	if !bytes.Equal(block.PrevHash().Bytes(), parentPoint.Hash) {
+		return fmt.Errorf("%w: boundary closure does not extend the ledger tip", errStaleChainIterator)
+	}
+	if err := ls.validateDijkstraLeiosCertificate(ctx, block, nil); err != nil {
+		return err
+	}
+	hash, slot, referenced, err := ls.leiosEndorserBlockForApply(ctx, block)
+	if err != nil {
+		return err
+	}
+	if !referenced {
+		return nil
+	}
+	if ls.config.EndorserBlockProvider == nil {
+		return errCertifiedEndorserBlockUnavailable
+	}
+	txs, found := ls.config.EndorserBlockProvider(hash.Bytes(), slot)
+	if !found {
+		return errCertifiedEndorserBlockUnavailable
+	}
+	point := ocommon.Point{Slot: block.SlotNumber(), Hash: block.Hash().Bytes()}
+	_, donation, err := ls.applyEndorserBlockInContext(ctx, txn, point, block.BlockNumber(), slot, hash.Bytes(), txs, &parentPoint.Slot)
+	if err != nil {
+		if validationErr, ok := errors.AsType[*leiosEndorserBlockValidationError](err); ok {
+			return ls.rejectLeiosCertifyingBlock(block, validationErr)
+		}
+		return err
+	}
+	if donation > 0 {
+		ls.RLock()
+		epoch := ls.currentEpoch.EpochId
+		ls.RUnlock()
+		if err := ls.db.Metadata().AddNetworkDonation(point.Slot, epoch, donation, txn.Metadata()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type pendingLeiosClosure struct {
+	point  ocommon.Point
+	events []TransactionEvent
+}
+
+// publishUntickedClosureAfterCommit keeps transaction Apply notifications with
+// the certifying RB's commit, including when a failed body is retried.
+func (ls *LedgerState) publishUntickedClosureAfterCommit(ctx context.Context, txn *database.Txn, point ocommon.Point) {
+	ls.RLock()
+	pending := ls.untickedClosure
+	ls.RUnlock()
+	if pending == nil || !pointMatches(pending.point, point) {
+		return
+	}
+	txn.AfterCommit(func() {
+		ls.Lock()
+		if ls.untickedClosure != pending {
+			ls.Unlock()
+			return
+		}
+		ls.untickedClosure = nil
+		ls.Unlock()
+		if ls.beforeTransactionApplyPublish != nil {
+			ls.beforeTransactionApplyPublish()
+		}
+		for _, evt := range pending.events {
+			ls.publishTransactionEvent(ctx, evt)
+		}
+	})
 }

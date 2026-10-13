@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -26,6 +27,10 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
 
 // migrationSQL contains immutable, versioned migration resources.
@@ -34,26 +39,55 @@ import (
 var migrationSQL embed.FS
 
 const (
-	initialSchemaRelease                          = "v1alpha1"
-	leiosKeySchemaRelease                         = "leios-key-registration"
-	tokenRegistrySchemaRelease                    = "token-registry-metadata"
-	accountBaselineSchemaRelease                  = "account-import-baseline"
-	leiosSnapshotKeySchemaRelease                 = "leios-snapshot-keys"
-	governanceRatificationHistorySchemaRelease    = "governance-ratification-history"
-	accountDepositSchemaRelease                   = "account-import-deposit"
-	committeeCredentialTagsSchemaRelease          = "committee-credential-tags"
-	committeeTermStartPresenceSchemaRelease       = "committee-term-start-presence"
-	rewardSeedFailureSchemaRelease                = "reward-seed-failure"
-	importedPoolBlockCountSchemaRelease           = "imported-pool-block-count"
-	poolDepositHeldSchemaRelease                  = "pool-registration-deposit-held"
-	pointerAddressStakeSchemaRelease              = "pointer-address-stake"
-	collateralAssociationSchemaRelease            = "collateral-transaction-associations"
-	rewardStakeVersionRestampSchemaRelease        = "reward-stake-calculation-version-restamp"
-	governanceProposalOptionalAnchorSchemaRelease = "governance-proposal-optional-anchor"
-	governanceProposalDroppedSchemaRelease        = "governance-proposal-dropped-epoch"
-	rewardSnapshotExcludedStakeSchemaRelease      = "reward-snapshot-excluded-active-stake"
-	assetNameHexColumnDropSchemaRelease           = "asset-name-hex-column-drop"
+	initialSchemaRelease                                = "v1alpha1"
+	leiosKeySchemaRelease                               = "leios-key-registration"
+	tokenRegistrySchemaRelease                          = "token-registry-metadata"
+	accountBaselineSchemaRelease                        = "account-import-baseline"
+	leiosSnapshotKeySchemaRelease                       = "leios-snapshot-keys"
+	governanceRatificationHistorySchemaRelease          = "governance-ratification-history"
+	accountDepositSchemaRelease                         = "account-import-deposit"
+	committeeCredentialTagsSchemaRelease                = "committee-credential-tags"
+	committeeTermStartPresenceSchemaRelease             = "committee-term-start-presence"
+	rewardSeedFailureSchemaRelease                      = "reward-seed-failure"
+	importedPoolBlockCountSchemaRelease                 = "imported-pool-block-count"
+	poolDepositHeldSchemaRelease                        = "pool-registration-deposit-held"
+	pointerAddressStakeSchemaRelease                    = "pointer-address-stake"
+	collateralAssociationSchemaRelease                  = "collateral-transaction-associations"
+	rewardStakeVersionRestampSchemaRelease              = "reward-stake-calculation-version-restamp"
+	governanceProposalOptionalAnchorSchemaRelease       = "governance-proposal-optional-anchor"
+	governanceProposalDroppedSchemaRelease              = "governance-proposal-dropped-epoch"
+	rewardSnapshotExcludedStakeSchemaRelease            = "reward-snapshot-excluded-active-stake"
+	committeeZeroQuorumSchemaRelease                    = "committee-zero-quorum"
+	assetNameHexColumnDropSchemaRelease                 = "asset-name-hex-column-drop"
+	alonzoPParamsUnitSchemaRelease                      = "alonzo-pparams-unit-provenance"
+	assetAmountFingerprintIndexDropSchemaRelease        = "asset-amount-fingerprint-index-drop"
+	governanceVoteHistorySchemaRelease                  = "governance-vote-history"
+	rewardAdaPotsImportedFeesSchemaRelease              = "reward-ada-pots-imported-epoch-fees"
+	mithrilRewardRepairCoverageSchemaRelease            = "mithril-reward-repair-coverage"
+	leiosKeyAgeSchemaRelease                            = "leios-key-registration-effective-epoch"
+	leiosImportedKeyAgeSchemaRelease                    = "leios-imported-key-age-unknown"
+	leiosKeyRegistrationEpochSchemaRelease              = "leios-key-registration-epoch"
+	leiosSnapshotRegistrationEpochBackfillSchemaRelease = "leios-snapshot-registration-epoch-backfill"
+	rewardOutputFoldedSchemaRelease                     = "reward-account-output-folded"
+	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
+	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
+	drepExpiryHistorySchemaRelease                      = "drep-expiry-history"
+	drepDormancyStateSchemaRelease                      = "drep-dormancy-state"
+	drepDelegatorStateSchemaRelease                     = "drep-delegator-state"
+	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
+	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
+	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
+	poolRelayTypeSchemaRelease                          = "pool-relay-type"
+	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
 )
+
+const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
+
+// alonzoEraID is the pparams.era_id value Alonzo rows carry. A migration is a
+// frozen historical artifact, so it holds its own copy rather than importing
+// gouroboros' alonzo.EraIdAlonzo: the two must agree, and a future upstream
+// renumbering must not silently reclassify rows this backfill already read.
+const alonzoEraID = 4
 
 // schemaVersions names every migration in ascending version order.
 var schemaVersions = []struct {
@@ -108,6 +142,88 @@ var schemaVersions = []struct {
 		Name:    assetNameHexColumnDropSchemaRelease,
 		Dir:     "v19",
 	},
+	{
+		Version: 20,
+		Name:    alonzoPParamsUnitSchemaRelease,
+		Dir:     "v20",
+	},
+	{
+		Version: 21,
+		Name:    assetAmountFingerprintIndexDropSchemaRelease,
+		Dir:     "v21",
+	},
+	{
+		Version: 22,
+		Name:    governanceVoteHistorySchemaRelease,
+		Dir:     "v22",
+	},
+	{
+		Version: 23,
+		Name:    committeeZeroQuorumSchemaRelease,
+		Dir:     "v23",
+	},
+	{
+		Version: 24,
+		Name:    rewardAdaPotsImportedFeesSchemaRelease,
+		Dir:     "v24",
+	},
+	{
+		Version: 25,
+		Name:    mithrilRewardRepairCoverageSchemaRelease,
+		Dir:     "v25",
+	},
+	{
+		Version: 26,
+		Name:    leiosKeyAgeSchemaRelease,
+		Dir:     "v26",
+	},
+	{
+		Version: 27,
+		Name:    leiosImportedKeyAgeSchemaRelease,
+		Dir:     "v27",
+	},
+	{
+		Version: 28,
+		Name:    leiosKeyRegistrationEpochSchemaRelease,
+		Dir:     "v28",
+	},
+	{
+		Version: 29,
+		Name:    leiosSnapshotRegistrationEpochBackfillSchemaRelease,
+		Dir:     "v29",
+	},
+	{
+		Version: 30,
+		Name:    rewardOutputFoldedSchemaRelease,
+		Dir:     "v30",
+	},
+	{
+		Version: 31,
+		Name:    rewardCreditRoundTableSchemaRelease,
+		Dir:     "v31",
+	},
+	{
+		Version: 32,
+		Name:    rewardLeaderDeficitSchemaRelease,
+		Dir:     "v32",
+	},
+	{
+		Version: 33,
+		Name:    governanceProposalOrderSchemaRelease,
+		Dir:     "v33",
+	},
+	{Version: 34, Name: "leios-transaction-ledger-context", Dir: "v34"},
+	{Version: 35, Name: accountDRepClearSchemaRelease, Dir: "v35"},
+	{
+		Version: 36,
+		Name:    committeeHotAuthorizationPruneOrderSchemaRelease,
+		Dir:     "v36",
+	},
+	{Version: 37, Name: drepExpiryHistorySchemaRelease, Dir: "v37"},
+	{Version: 38, Name: poolRelayTypeSchemaRelease, Dir: "v38"},
+	{Version: 39, Name: midnightRollbackJournalSchemaRelease, Dir: "v39"},
+	{Version: 40, Name: drepDormancyStateSchemaRelease, Dir: "v40"},
+	{Version: 41, Name: drepDelegatorStateSchemaRelease, Dir: "v41"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -216,9 +332,465 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = governanceProposalDroppedBackfill
 		}
+		if version.Name == alonzoPParamsUnitSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = alonzoPParamsUnitBackfill
+		}
+		if version.Name == rewardAdaPotsImportedFeesSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = importedRewardRepairBackfill
+		}
+		if version.Name == mithrilRewardRepairCoverageSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = mithrilRewardRepairCoverageBackfill
+		}
+		if version.Name == rewardCreditRoundTableSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = rewardCreditRoundBackfill
+		}
+		if version.Name == accountDRepClearSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = accountDRepClearBackfill
+		}
 		ret = append(ret, migration)
 	}
 	return ret, nil
+}
+
+func accountDRepClearBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	if batch.Cursor != "" {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT cbor, added_slot FROM pparams
+WHERE era_id = ? ORDER BY added_slot ASC, id ASC`), conway.EraIdConway)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("read Conway protocol parameters: %w", err)
+	}
+	var boundary uint64
+	foundBoundary := false
+	if err := func() error {
+		defer rows.Close()
+		for rows.Next() {
+			var data []byte
+			var addedSlot int64
+			if err := rows.Scan(&data, &addedSlot); err != nil {
+				return err
+			}
+			var fields []cbor.RawMessage
+			if _, err := cbor.Decode(data, &fields); err != nil {
+				return fmt.Errorf(
+					"decode Conway protocol parameters at slot %d: %w",
+					addedSlot,
+					err,
+				)
+			}
+			if len(fields) <= 12 {
+				return fmt.Errorf(
+					"decode Conway protocol parameters at slot %d: missing protocol version",
+					addedSlot,
+				)
+			}
+			var version common.ProtocolParametersProtocolVersion
+			if _, err := cbor.Decode(fields[12], &version); err != nil {
+				return fmt.Errorf(
+					"decode Conway protocol version at slot %d: %w",
+					addedSlot,
+					err,
+				)
+			}
+			if version.Major == 10 {
+				if addedSlot < 0 {
+					return fmt.Errorf(
+						"negative PV10 boundary slot %d", addedSlot,
+					)
+				}
+				boundary = uint64(addedSlot)
+				foundBoundary = true
+				break
+			}
+		}
+		return rows.Err()
+	}(); err != nil {
+		return BatchResult{}, err
+	}
+	if !foundBoundary {
+		return BatchResult{Cursor: "checked", Done: true}, nil
+	}
+
+	var rawBoundary string
+	err = batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT value FROM sync_state WHERE sync_key = ?`),
+		"mithril_ledger_slot").Scan(&rawBoundary)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, errors.New(
+			"PV10 DRep clear history is unavailable; resync is required",
+		)
+	}
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("read Mithril boundary: %w", err)
+	}
+	mithrilBoundary, err := strconv.ParseUint(rawBoundary, 10, 64)
+	if err != nil || mithrilBoundary < boundary {
+		return BatchResult{}, errors.New(
+			"PV10 DRep clear history is unavailable; resync is required",
+		)
+	}
+	var incomplete int64
+	if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+WITH registration_event AS (
+    SELECT credential_tag, staking_key, added_slot FROM stake_registration
+    UNION ALL SELECT credential_tag, staking_key, added_slot
+        FROM stake_registration_delegation
+    UNION ALL SELECT credential_tag, staking_key, added_slot
+        FROM stake_vote_registration_delegation
+    UNION ALL SELECT credential_tag, staking_key, added_slot
+        FROM vote_registration_delegation
+    UNION ALL SELECT credential_tag, staking_key, added_slot FROM registration
+), deregistration_event AS (
+    SELECT credential_tag, staking_key, added_slot FROM stake_deregistration
+    UNION ALL SELECT credential_tag, staking_key, added_slot FROM deregistration
+)
+SELECT COUNT(*) FROM account a
+WHERE a.created_slot <= ?
+  AND NOT EXISTS (
+      SELECT 1 FROM account_import_baseline b
+      WHERE b.credential_tag = a.credential_tag
+        AND b.staking_key = a.staking_key
+        AND b.added_slot = ?
+  )
+  AND (a.active = TRUE OR NOT EXISTS (
+      SELECT 1 FROM deregistration_event d
+      WHERE d.credential_tag = a.credential_tag
+        AND d.staking_key = a.staking_key
+        AND d.added_slot <= ?
+        AND d.added_slot > COALESCE((
+            SELECT MAX(r.added_slot) FROM registration_event r
+            WHERE r.credential_tag = a.credential_tag
+              AND r.staking_key = a.staking_key
+              AND r.added_slot <= ?
+        ), -1)
+  ))`), mithrilBoundary, mithrilBoundary, mithrilBoundary,
+		mithrilBoundary).Scan(&incomplete); err != nil {
+		return BatchResult{}, fmt.Errorf("verify Mithril account baseline: %w", err)
+	}
+	if incomplete != 0 {
+		return BatchResult{}, fmt.Errorf(
+			"mithril account baseline is incomplete for %d credentials; resync is required",
+			incomplete,
+		)
+	}
+	return BatchResult{Cursor: "checked", Done: true}, nil
+}
+
+// rewardCreditRoundBackfill moves the legacy JSON round list into its indexed
+// table before normal readers switch to the table. The list is small in usual
+// operation, but the cursor makes the copy resumable if a database already
+// accumulated many rounds.
+func rewardCreditRoundBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var raw string
+	err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
+		models.PendingRewardCreditRoundsKey,
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{Done: true}, nil
+	}
+	if err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"read legacy reward credit rounds: %w",
+			err,
+		)
+	}
+	rounds := make([]models.RewardCreditRound, 0)
+	if err := json.Unmarshal([]byte(raw), &rounds); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"decode legacy reward credit rounds: %w",
+			err,
+		)
+	}
+	if rounds == nil {
+		rounds = make([]models.RewardCreditRound, 0)
+	}
+	start := 0
+	if batch.Cursor != "" {
+		parsed, err := strconv.Atoi(batch.Cursor)
+		if err != nil || parsed < 0 || parsed > len(rounds) {
+			return BatchResult{}, fmt.Errorf(
+				"invalid reward credit round backfill cursor %q",
+				batch.Cursor,
+			)
+		}
+		start = parsed
+	}
+	end := min(start+batch.Limit, len(rounds))
+	for _, round := range rounds[start:end] {
+		if round.SnapshotEpoch > uint64(1<<63-1) ||
+			round.BoundarySlot > uint64(1<<63-1) {
+			return BatchResult{}, fmt.Errorf(
+				"legacy reward credit round exceeds SQL integer range: epoch %d slot %d",
+				round.SnapshotEpoch,
+				round.BoundarySlot,
+			)
+		}
+		if _, err := batch.Tx.ExecContext(
+			ctx,
+			batch.Rebind(`INSERT INTO reward_credit_round (snapshot_epoch, boundary_slot) VALUES (?, ?)`),
+			int64(round.SnapshotEpoch),
+			int64(round.BoundarySlot),
+		); err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"copy legacy reward credit round: %w",
+				err,
+			)
+		}
+	}
+	if end == len(rounds) {
+		if _, err := batch.Tx.ExecContext(
+			ctx,
+			batch.Rebind(`DELETE FROM sync_state WHERE sync_key = ?`),
+			models.PendingRewardCreditRoundsKey,
+		); err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"remove legacy reward credit rounds: %w",
+				err,
+			)
+		}
+		return BatchResult{
+			Cursor: strconv.Itoa(end),
+			Rows:   int64(end - start),
+			Done:   true,
+		}, nil
+	}
+	return BatchResult{Cursor: strconv.Itoa(end), Rows: int64(end - start)}, nil
+}
+
+// importedRewardRepairBackfill marks legacy Mithril databases whose imported
+// reward-pot row predates the anchor fee basis. The original anchor ledger
+// state is no longer present in metadata, so serving those databases before
+// reconciling from a newer certified snapshot would preserve incorrect reward
+// balances. The marker is consumed only after a successful in-place Mithril
+// catch-up; no database files or chain history are discarded.
+func importedRewardRepairBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var rawSlot string
+	err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
+		"mithril_ledger_slot",
+	).Scan(&rawSlot)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && rawSlot == "") {
+		return BatchResult{Done: true}, nil
+	}
+	if err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"read Mithril ledger anchor for reward repair: %w", err,
+		)
+	}
+	anchorSlot, err := strconv.ParseUint(rawSlot, 10, 64)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"parse Mithril ledger anchor %q for reward repair: %w",
+			rawSlot, err,
+		)
+	}
+	var needsRepair bool
+	if err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT EXISTS (
+    SELECT 1 FROM reward_ada_pots
+    WHERE captured_slot = ? AND imported_epoch_fees IS NULL
+)`),
+		anchorSlot,
+	).Scan(&needsRepair); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"check imported reward-pot repair eligibility: %w", err,
+		)
+	}
+	if !needsRepair {
+		return BatchResult{Done: true}, nil
+	}
+	var existing string
+	err = batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
+		mithrilRewardRepairPendingKey,
+	).Scan(&existing)
+	if err == nil {
+		if existing != "1" {
+			if _, err := batch.Tx.ExecContext(
+				ctx,
+				batch.Rebind(`UPDATE sync_state SET value = ? WHERE sync_key = ?`),
+				"1", mithrilRewardRepairPendingKey,
+			); err != nil {
+				return BatchResult{}, fmt.Errorf(
+					"update Mithril reward repair marker: %w", err,
+				)
+			}
+		}
+		return BatchResult{Rows: 1, Done: true}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, fmt.Errorf(
+			"read Mithril reward repair marker: %w", err,
+		)
+	}
+	if _, err := batch.Tx.ExecContext(
+		ctx,
+		batch.Rebind(`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`),
+		mithrilRewardRepairPendingKey,
+		"1",
+	); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"set Mithril reward repair marker: %w", err,
+		)
+	}
+	return BatchResult{Rows: 1, Done: true}, nil
+}
+
+// mithrilRewardRepairCoverageBackfill catches legacy Mithril databases whose
+// anchor reward-pot row was not written by older import paths. Version 24 can
+// identify the common case by its row, but a missing row must not make an
+// already-imported database look repaired: the anchor itself is durable proof
+// that its reward state came from Mithril and needs reconciliation unless the
+// imported epoch now carries the fee basis added in version 24.
+func mithrilRewardRepairCoverageBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var rawSlot string
+	err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
+		"mithril_ledger_slot",
+	).Scan(&rawSlot)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && rawSlot == "") {
+		return BatchResult{Done: true}, nil
+	}
+	if err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"read Mithril ledger anchor for reward repair coverage: %w", err,
+		)
+	}
+	anchorSlot, err := strconv.ParseUint(rawSlot, 10, 64)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"parse Mithril ledger anchor %q for reward repair coverage: %w",
+			rawSlot, err,
+		)
+	}
+	var hasFeeBasis bool
+	if err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT EXISTS (
+    SELECT 1 FROM reward_ada_pots
+    WHERE captured_slot = ? AND imported_epoch_fees IS NOT NULL
+)`),
+		anchorSlot,
+	).Scan(&hasFeeBasis); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"check Mithril imported fee basis for reward repair: %w", err,
+		)
+	}
+	if hasFeeBasis {
+		return BatchResult{Done: true}, nil
+	}
+	var existing string
+	err = batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
+		mithrilRewardRepairPendingKey,
+	).Scan(&existing)
+	if err == nil {
+		if existing != "1" {
+			if _, err := batch.Tx.ExecContext(
+				ctx,
+				batch.Rebind(`UPDATE sync_state SET value = ? WHERE sync_key = ?`),
+				"1", mithrilRewardRepairPendingKey,
+			); err != nil {
+				return BatchResult{}, fmt.Errorf(
+					"update Mithril reward repair marker: %w", err,
+				)
+			}
+		}
+		return BatchResult{Rows: 1, Done: true}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, fmt.Errorf(
+			"read Mithril reward repair marker: %w", err,
+		)
+	}
+	if _, err := batch.Tx.ExecContext(
+		ctx,
+		batch.Rebind(`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`),
+		mithrilRewardRepairPendingKey,
+		"1",
+	); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"set Mithril reward repair marker: %w", err,
+		)
+	}
+	return BatchResult{Rows: 1, Done: true}, nil
+}
+
+func alonzoPParamsUnitBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var existing string
+	err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM node_settings_gate WHERE name = ?`),
+		nodesettings.AlonzoPParamsUnitGateName,
+	).Scan(&existing)
+	switch {
+	case err == nil:
+		return BatchResult{Done: true}, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return BatchResult{}, fmt.Errorf(
+			"read Alonzo protocol-parameter unit marker: %w",
+			err,
+		)
+	}
+
+	var alonzoRows int64
+	if err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT COUNT(*) FROM pparams WHERE era_id = ?`),
+		alonzoEraID,
+	).Scan(&alonzoRows); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"classify persisted Alonzo protocol parameters: %w",
+			err,
+		)
+	}
+	unit := nodesettings.AlonzoPParamsUnitWordV1
+	if alonzoRows > 0 {
+		unit = nodesettings.AlonzoPParamsUnitLegacyByteV0
+	}
+	if _, err := batch.Tx.ExecContext(
+		ctx,
+		batch.Rebind(`INSERT INTO node_settings_gate (
+    name, value, recorded_epoch, recorded_slot
+) VALUES (?, ?, 0, 0)`),
+		nodesettings.AlonzoPParamsUnitGateName,
+		unit,
+	); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"record Alonzo protocol-parameter unit marker: %w",
+			err,
+		)
+	}
+	return BatchResult{Rows: 1, Done: true}, nil
 }
 
 // governanceProposalDroppedBackfill records every proposal this database
@@ -713,10 +1285,13 @@ const (
 	restampCursorRewardPhase = "R"
 )
 
+// Version 2 changed sigma_a only; this migration cannot certify newer SNAP rules.
+const rewardSigmaCalculationVersion uint = 2
+
 // rewardStakeVersionRestampBackfill re-stamps snapshot rows a prior
 // RewardStakeCalculationVersion bump left behind, in two phases encoded in
 // the cursor ("P:<id>" then "R:<id>"), so upgrading in place only forces a
-// rebootstrap for the epochs the version bump actually changed (dingo #4026).
+// rebootstrap for the epochs the version bump actually changed.
 //
 // pool_stake_snapshot's stored values never depended on calculation version
 // -- see the TotalActiveStake comment in ledger/snapshot/rotation.go -- so
@@ -804,8 +1379,8 @@ func restampPoolStakeSnapshotBatch(
 	lastID int64,
 ) (int64, int64, bool, error) {
 	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(
-		"SELECT id FROM pool_stake_snapshot WHERE id > ? AND calculation_version <> ? ORDER BY id LIMIT ?",
-	), lastID, models.RewardStakeCalculationVersion, batch.Limit)
+		"SELECT id FROM pool_stake_snapshot WHERE id > ? AND calculation_version < ? ORDER BY id LIMIT ?",
+	), lastID, rewardSigmaCalculationVersion, batch.Limit)
 	if err != nil {
 		return 0, 0, false, err
 	}
@@ -829,7 +1404,7 @@ func restampPoolStakeSnapshotBatch(
 			batch.Rebind(
 				"UPDATE pool_stake_snapshot SET calculation_version = ? WHERE id = ?",
 			),
-			models.RewardStakeCalculationVersion, id,
+			rewardSigmaCalculationVersion, id,
 		); err != nil {
 			return 0, 0, false, err
 		}
@@ -855,9 +1430,9 @@ FROM reward_snapshot
 LEFT JOIN epoch_summary ON epoch_summary.epoch = reward_snapshot.epoch
 WHERE reward_snapshot.id > ?
   AND reward_snapshot.snapshot_type = 'mark'
-  AND reward_snapshot.calculation_version <> ?
+  AND reward_snapshot.calculation_version < ?
 ORDER BY reward_snapshot.id LIMIT ?`),
-		lastID, models.RewardStakeCalculationVersion, batch.Limit,
+		lastID, rewardSigmaCalculationVersion, batch.Limit,
 	)
 	if err != nil {
 		return 0, 0, false, err
@@ -890,7 +1465,7 @@ ORDER BY reward_snapshot.id LIMIT ?`),
 			batch.Rebind(
 				"UPDATE reward_snapshot SET calculation_version = ? WHERE id = ?",
 			),
-			models.RewardStakeCalculationVersion, id,
+			rewardSigmaCalculationVersion, id,
 		); err != nil {
 			return 0, 0, false, err
 		}
@@ -1008,6 +1583,16 @@ func translateSchemaSQLInSchema(
 				value,
 				"DROP INDEX IF EXISTS `idx_asset_name_hex`",
 				"DROP INDEX `idx_asset_name_hex` ON `asset`",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `idx_asset_amount`",
+				"DROP INDEX `idx_asset_amount` ON `asset`",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `idx_asset_fingerprint`",
+				"DROP INDEX `idx_asset_fingerprint` ON `asset`",
 			)
 			if strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
 				for column := range mysqlForeignKeyColumns[schemaTableName(statement)] {

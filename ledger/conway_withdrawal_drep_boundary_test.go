@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -67,7 +68,7 @@ func TestConwayWithdrawalDRepGateCredentialBoundary(t *testing.T) {
 			Active:        true,
 		},
 	} {
-		require.NoError(t, db.CreateAccount(nil, account))
+		require.NoError(t, db.CreateAccount(context.Background(), nil, account))
 	}
 
 	ls := &LedgerState{db: db}
@@ -81,7 +82,7 @@ func TestConwayWithdrawalDRepGateCredentialBoundary(t *testing.T) {
 		tx := mockledger.NewTransactionBuilder()
 		tx.WithValid(true)
 		tx.WithWithdrawals(withdrawals)
-		txn := db.Transaction(false)
+		txn := db.Transaction(context.Background(), false)
 		var validationErr error
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			validationErr = conway.UtxoValidateWithdrawals(

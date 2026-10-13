@@ -16,11 +16,131 @@ package sqlstore
 
 import (
 	"context"
+	"encoding/binary"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/require"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
+
+// TestGetAccountsByCredentialGroupedByTag verifies the grouped-by-tag,
+// single-column-IN rewrite of GetAccountsByCredential: it must return exactly
+// the accounts named by the caller's refs, for both credential tags, across
+// chunk boundaries, and it must still honor includeInactive. A per-ref
+// (credential_tag = ? AND staking_key = ?) OR ... predicate and the grouped
+// form agree on results; this pins the result shape independently of which
+// one is in use.
+func TestGetAccountsByCredentialGroupedByTag(t *testing.T) {
+	store := newManagementTestStore(t)
+
+	// Larger than the SQLite dialect's 999-parameter limit, so the grouped
+	// IN list for each tag must itself be chunked (twice over per tag).
+	const perTag = 1200
+	refs := make([]models.StakeCredentialRef, 0, perTag*2)
+	for tag := range uint8(2) {
+		for i := range perTag {
+			key := make([]byte, 28)
+			key[0] = tag
+			binary.BigEndian.PutUint32(key[24:], uint32(i))
+			require.NoError(t, store.ImportAccount(&models.Account{
+				StakingKey:    key,
+				CredentialTag: tag,
+				Active:        true,
+			}, nil))
+			refs = append(
+				refs,
+				models.StakeCredentialRef{Tag: tag, Key: key},
+			)
+		}
+	}
+
+	inactiveKey := make([]byte, 28)
+	inactiveKey[0] = 0
+	binary.BigEndian.PutUint32(inactiveKey[24:], uint32(perTag))
+	require.NoError(t, store.ImportAccount(&models.Account{
+		StakingKey:    inactiveKey,
+		CredentialTag: 0,
+		Active:        false,
+	}, nil))
+	inactiveRef := models.StakeCredentialRef{Tag: 0, Key: inactiveKey}
+
+	// Two refs are left unrequested so the result must be exactly the
+	// requested set, not "every account of that tag".
+	requested := append(
+		append([]models.StakeCredentialRef{}, refs[:len(refs)-2]...),
+		inactiveRef,
+	)
+
+	accounts, err := store.GetAccountsByCredential(requested, false, nil)
+	require.NoError(t, err)
+	// The inactive account is filtered out by includeInactive=false.
+	require.Len(t, accounts, len(requested)-1)
+	for _, ref := range refs[:len(refs)-2] {
+		account, ok := accounts[ref.MapKey()]
+		require.True(t, ok, "missing account for tag %d", ref.Tag)
+		require.Equal(t, ref.Tag, account.CredentialTag)
+		require.Equal(t, ref.Key, account.StakingKey)
+	}
+	_, ok := accounts[inactiveRef.MapKey()]
+	require.False(
+		t,
+		ok,
+		"inactive account leaked through with includeInactive=false",
+	)
+	for _, ref := range refs[len(refs)-2:] {
+		_, ok := accounts[ref.MapKey()]
+		require.False(t, ok, "unrequested account leaked into the result")
+	}
+
+	withInactive, err := store.GetAccountsByCredential(
+		[]models.StakeCredentialRef{inactiveRef},
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Contains(t, withInactive, inactiveRef.MapKey())
+}
+
+// TestAccountsByCredentialChunkQueryShape pins the query form
+// GetAccountsByCredential emits: a single-column staking_key IN (...)
+// predicate, never a per-ref (credential_tag = ? AND staking_key = ?)
+// OR ... predicate. This is the regression guard the result-only tests
+// above can't provide — reverting the query to the old per-ref OR form is
+// still correct (same rows come back, just slower), so no assertion on
+// returned data can distinguish the two. An EXPLAIN QUERY PLAN assertion
+// isn't durable here either: the plan SQLite picks depends on table size
+// and whether ANALYZE has run, not on which predicate form generated it.
+// Asserting on the generated SQL text instead pins our intent directly.
+func TestAccountsByCredentialChunkQueryShape(t *testing.T) {
+	keys := [][]byte{
+		{0x01, 0x02},
+		{0x03, 0x04},
+		{0x05, 0x06},
+	}
+
+	query, args := accountsByCredentialChunkQuery(1, keys, false)
+	require.Contains(t, query, "staking_key IN (")
+	require.NotContains(t, query, " OR ")
+	require.Contains(t, query, "credential_tag = ?")
+	require.Contains(t, query, "AND active = TRUE")
+	require.Equal(t, []any{uint8(1), keys[0], keys[1], keys[2]}, args)
+
+	queryInactive, argsInactive := accountsByCredentialChunkQuery(
+		0,
+		keys,
+		true,
+	)
+	require.Contains(t, queryInactive, "staking_key IN (")
+	require.NotContains(t, queryInactive, " OR ")
+	require.NotContains(t, queryInactive, "active = TRUE")
+	require.Equal(
+		t,
+		[]any{uint8(0), keys[0], keys[1], keys[2]},
+		argsInactive,
+	)
+}
 
 // snapshotStakingKey returns a distinct 28-byte stake credential.
 func snapshotStakingKey(marker byte) []byte {
@@ -329,24 +449,112 @@ func TestDeactivateAccountsClearsBaseline(t *testing.T) {
 	key := snapshotStakingKey(0x83)
 	poolA := []byte{0xaa, 0xaa}
 	importSnapshotAccount(t, store, key, poolA, nil, 0, 100)
+	execAccountSQL(t, store, `
+INSERT INTO registration (staking_key, credential_tag, added_slot)
+VALUES (?, 0, 200)`, key)
+	execAccountSQL(t, store, `
+UPDATE account SET active = TRUE, added_slot = 200
+WHERE credential_tag = 0 AND staking_key = ?`, key)
 
 	require.NoError(
 		t,
 		store.DeactivateAccounts(nil, []models.StakeCredentialRef{
 			models.NewStakeCredentialRef(0, key),
-		}),
+		}, 300),
 	)
 	execAccountSQL(t, store, `
-UPDATE account SET added_slot = 200
+UPDATE account SET added_slot = 400
 WHERE credential_tag = 0 AND staking_key = ?`, key)
 
-	require.NoError(t, store.RestoreAccountStateAtSlot(150, nil))
+	require.NoError(t, store.RestoreAccountStateAtSlot(350, nil))
 
 	got, err := store.GetAccountByCredential(0, key, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.False(t, got.Active)
 	require.Empty(t, got.Pool)
+}
+
+func TestRestoreAccountStateAtSlotPreservesPV10DRepClear(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	key := snapshotStakingKey(0x84)
+	drep := []byte{0xdd, 0xdd}
+	importSnapshotAccount(t, store, key, nil, nil, 0, 100)
+	execAccountSQL(t, store, `
+INSERT INTO vote_delegation (
+    staking_key, credential_tag, drep, drep_type, added_slot
+) VALUES (?, 0, ?, 0, 200)`, key, drep)
+	execAccountSQL(t, store, `
+UPDATE account SET drep = ?, drep_type = 0, added_slot = 200
+WHERE credential_tag = 0 AND staking_key = ?`, drep, key)
+
+	cleared, err := store.ClearDanglingDRepDelegations(300, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, cleared)
+	execAccountSQL(t, store, `
+UPDATE account SET pool = ?, added_slot = 400
+WHERE credential_tag = 0 AND staking_key = ?`, []byte{0xaa}, key)
+
+	require.NoError(t, store.RestoreAccountStateAtSlot(350, nil))
+	got, err := store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Empty(t, got.Drep)
+
+	require.NoError(t, store.RestoreAccountStateAtSlot(250, nil))
+	got, err = store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, drep, got.Drep)
+	var futureClears int
+	require.NoError(t, store.readDB.QueryRow(`
+SELECT COUNT(*) FROM account_drep_clear WHERE added_slot > 250`).Scan(
+		&futureClears,
+	))
+	require.Zero(t, futureClears)
+}
+
+func TestRestoreAccountStateAtSlotSameSlotCertificateFollowsPV10Clear(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	key := snapshotStakingKey(0x85)
+	oldDRep := []byte{0xdd, 0x01}
+	newDRep := []byte{0xdd, 0x02}
+	importSnapshotAccount(t, store, key, nil, oldDRep, 0, 100)
+
+	cleared, err := store.ClearDanglingDRepDelegations(300, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, cleared)
+	execAccountSQL(t, store, `
+INSERT INTO vote_delegation (
+    staking_key, credential_tag, drep, drep_type, added_slot
+) VALUES (?, 0, ?, 0, 300)`, key, newDRep)
+	execAccountSQL(t, store, `
+UPDATE account SET drep = ?, drep_type = 0, added_slot = 400
+WHERE credential_tag = 0 AND staking_key = ?`, newDRep, key)
+
+	require.NoError(t, store.RestoreAccountStateAtSlot(350, nil))
+	got, err := store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, newDRep, got.Drep)
+}
+
+func TestClearDanglingDRepDelegationsJournalFailureKeepsDelegation(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	key := snapshotStakingKey(0x86)
+	drep := []byte{0xdd, 0x03}
+	importSnapshotAccount(t, store, key, nil, drep, 0, 100)
+	execAccountSQL(t, store, `DROP TABLE account_drep_clear`)
+
+	_, err := store.ClearDanglingDRepDelegations(300, nil)
+	require.Error(t, err)
+	got, err := store.GetAccountByCredential(0, key, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, drep, got.Drep)
 }
 
 // A failing baseline write must not leave the account row behind. The pair is
@@ -386,7 +594,7 @@ func TestDeactivateAccountsBaselineFailureKeepsAccountActive(t *testing.T) {
 
 	require.Error(t, store.DeactivateAccounts(nil, []models.StakeCredentialRef{
 		models.NewStakeCredentialRef(0, key),
-	}))
+	}, 100))
 
 	got, err := store.GetAccountByCredential(0, key, true, nil)
 	require.NoError(t, err)
@@ -409,4 +617,52 @@ func TestWriteAccountImportBaselineRequiresTransaction(t *testing.T) {
 			Active:        true,
 		},
 	))
+}
+
+func TestAddAccountRewardsByCredentialRespectsSQLiteParameterLimit(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	stakingKey := bytesRepeat(0x61, 28)
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey: stakingKey,
+		Active:     true,
+	}))
+
+	ctx := context.Background()
+	conn, err := store.writeDB.Conn(ctx)
+	require.NoError(t, err)
+	_, err = sqlite.Limit(
+		conn,
+		sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER,
+		store.dialect.ParameterLimit(),
+	)
+	require.NoError(t, err)
+	tx, err := conn.BeginTx(ctx, store.dialect.BeginOptions(false))
+	require.NoError(t, err)
+	txn := &sqlTxn{owner: store, tx: tx, ctx: ctx}
+	t.Cleanup(func() {
+		require.NoError(t, txn.Rollback())
+		require.NoError(t, conn.Close())
+	})
+
+	credits := make([]models.AccountRewardCredit, 200)
+	for index := range credits {
+		sourceHash := make([]byte, 32)
+		binary.BigEndian.PutUint64(sourceHash[24:], uint64(index+1))
+		credits[index] = models.AccountRewardCredit{
+			StakingKey:    stakingKey,
+			SourceHash:    sourceHash,
+			Amount:        1,
+			Slot:          100,
+			CredentialTag: 0,
+		}
+	}
+	require.NoError(t, store.AddAccountRewardsByCredential(credits, txn))
+	require.NoError(t, txn.Commit())
+
+	account, err := store.GetAccountByCredential(0, stakingKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(len(credits)), uint64(account.Reward))
 }

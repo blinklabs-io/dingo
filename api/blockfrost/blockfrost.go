@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package blockfrost
 
@@ -263,6 +263,8 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleAccountTransactions,
 	)
 
+	b.registerUnsupportedLiterals(mux)
+
 	// Catch-all for any path not matched above. Registered
 	// last so more specific patterns still take precedence;
 	// ServeMux resolves by pattern specificity, not
@@ -272,7 +274,13 @@ func (b *Blockfrost) handler() http.Handler {
 	// Wrap handler with a request body size limit (1 MB)
 	// as defense-in-depth against oversized payloads.
 	const maxRequestBodyBytes int64 = 1 << 20 // 1 MB
-	limited := http.MaxBytesHandler(mux, maxRequestBodyBytes)
+	routed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if b.writeUnsupportedMethod(w, r) {
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+	limited := http.MaxBytesHandler(routed, maxRequestBodyBytes)
 	return httpcors.Handler(
 		limited,
 		httpcors.Config{

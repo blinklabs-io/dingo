@@ -74,6 +74,7 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 	apiKey := koiosAPIKey(cmd)
 	baseURL := koiosBaseURL(cmd)
 	allowInsecure := koiosAllowInsecureHTTP(cmd)
+	allowPrivate := koiosAllowPrivateAddresses(cmd)
 	accounts := accountsEnabled(cmd)
 
 	logger := slog.Default()
@@ -129,18 +130,19 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 					"from", fromClosed, "through", toClosed)
 
 				fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
-					Network:              network,
-					APIKey:               apiKey,
-					BaseURL:              baseURL,
-					AllowInsecureHTTP:    allowInsecure,
-					CachePath:            cachePath,
-					Concurrency:          concurrency,
-					FromEpoch:            fromClosed,
-					ThroughEpoch:         toClosed,
-					AccountsEnabled:      accounts,
-					GraceHours:           graceHours,
-					AccountChunkSize:     accountChunkSize,
-					AccountChunkMaxBytes: accountChunkMaxBytes,
+					Network:               network,
+					APIKey:                apiKey,
+					BaseURL:               baseURL,
+					AllowInsecureHTTP:     allowInsecure,
+					AllowPrivateAddresses: allowPrivate,
+					CachePath:             cachePath,
+					Concurrency:           concurrency,
+					FromEpoch:             fromClosed,
+					ThroughEpoch:          toClosed,
+					AccountsEnabled:       accounts,
+					GraceHours:            graceHours,
+					AccountChunkSize:      accountChunkSize,
+					AccountChunkMaxBytes:  accountChunkMaxBytes,
 					// Reuse the already-open, long-lived Dingo connection
 					// above (unused when accounts is false) rather than
 					// opening a second one — watch already keeps dingo open

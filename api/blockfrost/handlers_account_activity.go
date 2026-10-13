@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package blockfrost
 
@@ -31,34 +31,23 @@ func (b *Blockfrost) handleAccountUTXOs(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
-	if !ok {
-		return
-	}
-	items, total, err := b.node.AccountUTXOs(
-		r.PathValue("stake_address"),
-		params,
+	handlePaginatedAccountRequest(
+		b, w, r, b.node.AccountUTXOs,
+		func(item AccountUTXOInfo) AccountUTXOResponse {
+			return AccountUTXOResponse{
+				Address:             item.Address,
+				TxHash:              item.TxHash,
+				TxIndex:             int(item.TxIndex),
+				OutputIndex:         int(item.OutputIndex),
+				Amount:              convertAddressAmounts(item.Amount),
+				Block:               item.Block,
+				DataHash:            item.DataHash,
+				InlineDatum:         item.InlineDatum,
+				ReferenceScriptHash: item.ReferenceScriptHash,
+			}
+		},
+		"failed to retrieve account UTxOs",
 	)
-	if err != nil {
-		b.writeAccountError(w, err, "failed to retrieve account UTxOs")
-		return
-	}
-	SetPaginationHeaders(w, total, params)
-	resp := make([]AccountUTXOResponse, 0, len(items))
-	for _, item := range items {
-		resp = append(resp, AccountUTXOResponse{
-			Address:             item.Address,
-			TxHash:              item.TxHash,
-			TxIndex:             int(item.TxIndex),
-			OutputIndex:         int(item.OutputIndex),
-			Amount:              convertAddressAmounts(item.Amount),
-			Block:               item.Block,
-			DataHash:            item.DataHash,
-			InlineDatum:         item.InlineDatum,
-			ReferenceScriptHash: item.ReferenceScriptHash,
-		})
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAccountWithdrawals handles
@@ -68,26 +57,13 @@ func (b *Blockfrost) handleAccountWithdrawals(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
-	if !ok {
-		return
-	}
-	items, total, err := b.node.AccountWithdrawals(
-		r.PathValue("stake_address"),
-		params,
+	handlePaginatedAccountRequest(
+		b, w, r, b.node.AccountWithdrawals,
+		func(item AccountWithdrawalInfo) AccountWithdrawalResponse {
+			return AccountWithdrawalResponse(item)
+		},
+		"failed to retrieve account withdrawals",
 	)
-	if err != nil {
-		b.writeAccountError(
-			w, err, "failed to retrieve account withdrawals",
-		)
-		return
-	}
-	SetPaginationHeaders(w, total, params)
-	resp := make([]AccountWithdrawalResponse, 0, len(items))
-	for _, item := range items {
-		resp = append(resp, AccountWithdrawalResponse(item))
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAccountTransactions handles
@@ -102,49 +78,12 @@ func (b *Blockfrost) handleAccountTransactions(
 	if !ok {
 		return
 	}
-	params := AccountTransactionsParams{Pagination: pagination}
-
-	query := r.URL.Query()
-	if raw := query.Get("from"); raw != "" {
-		pos, err := parseBlockRangePosition(raw)
-		if err != nil {
-			writeError(
-				w,
-				http.StatusBadRequest,
-				"Bad Request",
-				"querystring/from must be a block number, "+
-					`optionally suffixed with ":index".`,
-			)
-			return
-		}
-		params.From = &pos
-	}
-	if raw := query.Get("to"); raw != "" {
-		pos, err := parseBlockRangePosition(raw)
-		if err != nil {
-			writeError(
-				w,
-				http.StatusBadRequest,
-				"Bad Request",
-				"querystring/to must be a block number, "+
-					`optionally suffixed with ":index".`,
-			)
-			return
-		}
-		params.To = &pos
-	}
-	if params.From != nil && params.To != nil &&
-		blockRangeInverted(*params.From, *params.To) {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Bad Request",
-			"querystring/from must be lower than or equal to querystring/to.",
-		)
+	params, ok := parseTransactionRangeOrWriteError(w, r, pagination)
+	if !ok {
 		return
 	}
 
-	items, total, err := b.node.AccountTransactions(
+	items, total, err := b.node.AccountTransactions(r.Context(),
 		r.PathValue("stake_address"),
 		params,
 	)
@@ -166,6 +105,53 @@ func (b *Blockfrost) handleAccountTransactions(
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// parseTransactionRangeOrWriteError parses the optional inclusive from/to
+// block-range query parameters shared by the account and address transaction
+// endpoints, writing a Blockfrost 400 when one is malformed or inverted.
+func parseTransactionRangeOrWriteError(
+	w http.ResponseWriter,
+	r *http.Request,
+	pagination PaginationParams,
+) (TransactionRangeParams, bool) {
+	params := TransactionRangeParams{Pagination: pagination}
+	query := r.URL.Query()
+	for _, bound := range []struct {
+		name string
+		dest **BlockRangePosition
+	}{
+		{"from", &params.From},
+		{"to", &params.To},
+	} {
+		raw := query.Get(bound.name)
+		if raw == "" {
+			continue
+		}
+		pos, err := parseBlockRangePosition(raw)
+		if err != nil {
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"querystring/"+bound.name+" must be a block number, "+
+					`optionally suffixed with ":index".`,
+			)
+			return TransactionRangeParams{}, false
+		}
+		*bound.dest = &pos
+	}
+	if params.From != nil && params.To != nil &&
+		blockRangeInverted(*params.From, *params.To) {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"querystring/from must be lower than or equal to querystring/to.",
+		)
+		return TransactionRangeParams{}, false
+	}
+	return params, true
 }
 
 // parseBlockRangePosition parses the Blockfrost account-transactions

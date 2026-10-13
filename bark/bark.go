@@ -32,6 +32,7 @@ import (
 	"connectrpc.com/grpcreflect"
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
+	lifecycleconnect "github.com/blinklabs-io/bark/proto/v1alpha1/lifecycle/lifecyclev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
@@ -50,6 +51,9 @@ const (
 	// DefaultMaxFetchBlockRefs bounds the storage/signing work and response
 	// growth driven by one anonymous ArchiveService request.
 	DefaultMaxFetchBlockRefs = 100
+	// DefaultMaxArchiveConcurrentFetches is the default for
+	// BarkConfig.ArchiveMaxConcurrentFetches.
+	DefaultMaxArchiveConcurrentFetches = 16
 	// DefaultRequestReadTimeout bounds request headers and bodies while leaving
 	// response writes unbounded for long-lived server streams.
 	DefaultRequestReadTimeout = 60 * time.Second
@@ -62,7 +66,7 @@ type Bark struct {
 	// draining an in-flight request that itself calls Acquire) — see
 	// Acquire's doc comment for why its config.DB read deliberately does
 	// NOT take mu, to avoid exactly that deadlock.
-	mu           sync.Mutex
+	mu           lifecycleMutex
 	server       *http.Server
 	config       BarkConfig
 	listenerAddr net.Addr
@@ -70,18 +74,83 @@ type Bark struct {
 	// identity must also appear here before a destructive DatabaseService RPC
 	// is authorized.
 	operatorFingerprints map[string]struct{}
+	// lifecycleOperatorFingerprints is immutable after construction and is
+	// used only for LifecycleService Stop and Restart authorization.
+	lifecycleOperatorFingerprints map[string]struct{}
 	// dbGate guards config.DB across a live Restore/Truncate's close-and-
 	// replace window: PauseDB write-locks it before the old database is
 	// closed, ResumeDB publishes the replacement and unlocks it. Acquire
 	// read-locks it (via TryRLock, never blocking) for the duration of one
 	// request. See Acquire's doc comment for the full race this prevents.
 	dbGate sync.RWMutex
+	// archiveSlots holds one token per in-flight ArchiveService.FetchBlock.
+	archiveSlots chan struct{}
+	// beforePreflight is a test hook, nil in production, called at the start
+	// of startServer so a test can hold Start inside its TLS/listen
+	// preflight while another goroutine races it.
+	beforePreflight func()
+}
+
+// lifecycleMutex keeps preflight and publication atomic while allowing Stop
+// to abandon its wait when the caller's shutdown budget expires.
+type lifecycleMutex struct {
+	once  sync.Once
+	token chan struct{}
+}
+
+func (m *lifecycleMutex) init() {
+	m.once.Do(
+		func() { m.token = make(chan struct{}, 1); m.token <- struct{}{} },
+	)
+}
+
+func (m *lifecycleMutex) Lock() {
+	m.init()
+	<-m.token
+}
+
+func (m *lifecycleMutex) TryLock() bool {
+	m.init()
+	select {
+	case <-m.token:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *lifecycleMutex) Unlock() {
+	m.init()
+	select {
+	case m.token <- struct{}{}:
+	default:
+		panic("unlock of unlocked lifecycleMutex")
+	}
+}
+
+func (m *lifecycleMutex) lockContext(ctx context.Context) error {
+	m.init()
+	select {
+	case <-m.token:
+		return nil
+	default:
+	}
+	select {
+	case <-m.token:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type BarkConfig struct {
 	Logger    *slog.Logger
 	DB        *database.Database
 	Lifecycle *dblifecycle.Service
+	// Node, if set, mounts the LifecycleService (remote Stop, Restart and
+	// GetStatus). Like Lifecycle it requires TLS and a client CA. Stop and
+	// Restart require LifecycleOperatorCertificateFingerprints.
+	Node NodeControl
 	// SnapshotDir is the base directory the DatabaseService's CreateSnapshot/
 	// Restore RPCs write to and read from — required when Lifecycle is set.
 	// There is no separate snapshot catalog store (see database.go's doc
@@ -124,11 +193,24 @@ type BarkConfig struct {
 	// are matched case-insensitively. Read-only DatabaseService calls require a
 	// verified client certificate but do not require membership in this list.
 	OperatorCertificateFingerprints []string
-	Host                            string
-	Port                            uint
+	// LifecycleOperatorCertificateFingerprints is the independent
+	// authorization policy for LifecycleService Stop and Restart. GetStatus
+	// requires a verified client certificate but not membership in this list.
+	LifecycleOperatorCertificateFingerprints []string
+	Host                                     string
+	// Port is the TCP port to listen on. 0 selects a free port, which Addr
+	// reports once Start has bound it.
+	Port uint
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
+	// ArchiveMaxConcurrentFetches bounds how many ArchiveService.FetchBlock
+	// requests run at once; a request over the limit is refused immediately
+	// rather than queued. ArchiveService takes no client credentials, so this
+	// and DefaultMaxFetchBlockRefs are what bound the work anyone who can
+	// reach the listener can cause. Zero selects
+	// DefaultMaxArchiveConcurrentFetches; a negative value is invalid.
+	ArchiveMaxConcurrentFetches int
 }
 
 // ErrDBUnavailable is returned by Acquire when there is currently no
@@ -241,15 +323,34 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 			err,
 		)
 	}
+	if cfg.ArchiveMaxConcurrentFetches < 0 {
+		return nil, errors.New(
+			"bark: ArchiveMaxConcurrentFetches must not be negative",
+		)
+	}
+	if cfg.ArchiveMaxConcurrentFetches == 0 {
+		cfg.ArchiveMaxConcurrentFetches = DefaultMaxArchiveConcurrentFetches
+	}
+	lifecycleOperatorFingerprints, err := normalizeOperatorCertificateFingerprints(
+		cfg.LifecycleOperatorCertificateFingerprints,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"bark: invalid lifecycle operator certificate fingerprint: %w",
+			err,
+		)
+	}
 	if cfg.Host == "" {
 		cfg.Host = "0.0.0.0"
 	}
-	if cfg.Port == 0 {
-		cfg.Port = 9091
-	}
 	return &Bark{
-		config:               cfg,
-		operatorFingerprints: operatorFingerprints,
+		config:                        cfg,
+		operatorFingerprints:          operatorFingerprints,
+		lifecycleOperatorFingerprints: lifecycleOperatorFingerprints,
+		archiveSlots: make(
+			chan struct{},
+			cfg.ArchiveMaxConcurrentFetches,
+		),
 	}, nil
 }
 
@@ -258,9 +359,12 @@ func barkListenAddr(host string, port uint) string {
 }
 
 func (b *Bark) Start(ctx context.Context) error {
+	// mu is held through the TLS/listen preflight and until the server is
+	// published, so Stop and a concurrent Start observe either no server or
+	// a fully started one.
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.server != nil {
-		b.mu.Unlock()
 		return errors.New("server already started")
 	}
 
@@ -272,30 +376,34 @@ func (b *Bark) Start(ctx context.Context) error {
 	// mux/interceptor wiring at all, so requiring TLS/a client CA in the
 	// constructor would reject a composition path that was never actually
 	// exposed over the network in the first place.
-	if b.config.Lifecycle != nil && b.config.TlsClientCAFilePath == "" {
-		b.mu.Unlock()
+	authRequired := b.config.Lifecycle != nil || b.config.Node != nil
+	if authRequired && b.config.TlsClientCAFilePath == "" {
 		return errors.New(
-			"bark: TlsClientCAFilePath is required to start with lifecycle set — " +
-				"the DatabaseService's destructive RPCs (CreateSnapshot/" +
-				"DeleteSnapshot/VerifySnapshot/Restore/Truncate/CancelOperation) " +
-				"must not be mounted without a way to authenticate callers",
+			"bark: TlsClientCAFilePath is required to start the authenticated " +
+				"DatabaseService or LifecycleService",
 		)
 	}
-	if b.config.Lifecycle != nil &&
+	if authRequired &&
 		(b.config.TlsCertFilePath == "" || b.config.TlsKeyFilePath == "") {
-		b.mu.Unlock()
 		return errors.New(
 			"bark: TlsCertFilePath and TlsKeyFilePath are required to start " +
-				"with lifecycle set — mTLS client-certificate verification has " +
-				"no meaning without the server's own TLS listener",
+				"the authenticated DatabaseService or LifecycleService — mTLS " +
+				"client-certificate verification has no meaning without the " +
+				"server's own TLS listener",
 		)
 	}
 	if b.config.Lifecycle != nil && len(b.operatorFingerprints) == 0 {
-		b.mu.Unlock()
 		return errors.New(
 			"bark: at least one OperatorCertificateFingerprint is required to " +
-				"start with lifecycle set — verified client identity alone does " +
-				"not authorize destructive DatabaseService RPCs",
+				"start the authenticated DatabaseService — " +
+				"verified client identity alone does not authorize destructive RPCs",
+		)
+	}
+	if b.config.Node != nil && len(b.lifecycleOperatorFingerprints) == 0 {
+		return errors.New(
+			"bark: at least one LifecycleOperatorCertificateFingerprint is required " +
+				"to start the authenticated LifecycleService — verified client identity " +
+				"alone does not authorize Stop or Restart",
 		)
 	}
 
@@ -329,6 +437,26 @@ func (b *Bark) Start(ctx context.Context) error {
 		)
 		mux.Handle(databasePath, databaseHandler)
 		serviceNames = append(serviceNames, databaseconnect.DatabaseServiceName)
+	}
+
+	if b.config.Node != nil {
+		lifecyclePath, lifecycleHandler := lifecycleconnect.NewLifecycleServiceHandler(
+			&lifecycleServiceHandler{node: b.config.Node},
+			connect.WithOptions(
+				commonHandlerOptions,
+				connect.WithInterceptors(newOperatorAuthInterceptor(
+					b.config.Logger,
+					destructiveLifecycleProcedures,
+					readOnlyLifecycleProcedures,
+					b.lifecycleOperatorFingerprints,
+				)),
+			),
+		)
+		mux.Handle(lifecyclePath, lifecycleHandler)
+		serviceNames = append(
+			serviceNames,
+			lifecycleconnect.LifecycleServiceName,
+		)
 	}
 
 	mux.Handle(
@@ -377,15 +505,10 @@ func (b *Bark) Start(ctx context.Context) error {
 			IdleTimeout:       120 * time.Second,
 		}
 	}
-	b.server = server
-	b.mu.Unlock()
-
 	if err := b.startServer(server); err != nil {
-		b.mu.Lock()
-		b.server = nil
-		b.mu.Unlock()
 		return err
 	}
+	b.server = server
 
 	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
 		<-ctx.Done()
@@ -428,8 +551,11 @@ func unencryptedHTTP2Protocols() *http.Protocols {
 // detection. It validates TLS configuration, binds the listening
 // socket and pre-loads any TLS keypair synchronously so port and
 // certificate errors surface before returning, then serves in a
-// background goroutine.
+// background goroutine. The caller must hold b.mu.
 func (b *Bark) startServer(server *http.Server) error {
+	if b.beforePreflight != nil {
+		b.beforePreflight()
+	}
 	if (b.config.TlsCertFilePath != "") != (b.config.TlsKeyFilePath != "") {
 		return errors.New(
 			"failed to start bark gRPC server: both tls cert and key must be specified",
@@ -498,9 +624,7 @@ func (b *Bark) startServer(server *http.Server) error {
 		return fmt.Errorf("failed to start bark gRPC %s server: %w",
 			serverType, err)
 	}
-	b.mu.Lock()
 	b.listenerAddr = ln.Addr()
-	b.mu.Unlock()
 	go func() {
 		var serveErr error
 		if useTLS {
@@ -546,7 +670,9 @@ func (b *Bark) handleServeExit(
 }
 
 func (b *Bark) Stop(ctx context.Context) error {
-	b.mu.Lock()
+	if err := b.mu.lockContext(ctx); err != nil {
+		return err
+	}
 	defer b.mu.Unlock()
 
 	if b.server != nil {

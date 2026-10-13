@@ -13,7 +13,7 @@ type Querier interface {
 	AddNetworkDonation(ctx context.Context, arg AddNetworkDonationParams) error
 	BackfillNodeSettingsNetwork(ctx context.Context, arg BackfillNodeSettingsNetworkParams) (int64, error)
 	ClaimOffchainMetadataFetch(ctx context.Context, arg ClaimOffchainMetadataFetchParams) (int64, error)
-	ClearSyncState(ctx context.Context) error
+	CountPParamsByEra(ctx context.Context, eraID sql.NullInt64) (int64, error)
 	CountTransactionsByMetadataLabel(ctx context.Context, label sql.NullString) (int64, error)
 	CountTransactionsByPaymentCred(ctx context.Context, paymentKey []byte) (int64, error)
 	CountTransactionsInSlotRange(ctx context.Context, arg CountTransactionsInSlotRangeParams) (int64, error)
@@ -23,6 +23,7 @@ type Querier interface {
 	CreateMidnightAriadneRollback(ctx context.Context, arg CreateMidnightAriadneRollbackParams) (int64, error)
 	CreateMidnightAssetCreate(ctx context.Context, arg CreateMidnightAssetCreateParams) (int64, error)
 	CreateMidnightAssetSpend(ctx context.Context, arg CreateMidnightAssetSpendParams) (int64, error)
+	CreateMidnightCandidateRemoval(ctx context.Context, arg CreateMidnightCandidateRemovalParams) error
 	CreateMidnightDeregistration(ctx context.Context, arg CreateMidnightDeregistrationParams) (int64, error)
 	CreateMidnightRegistration(ctx context.Context, arg CreateMidnightRegistrationParams) (int64, error)
 	CreatePoolStakeSnapshot(ctx context.Context, arg CreatePoolStakeSnapshotParams) (int64, error)
@@ -43,13 +44,20 @@ type Querier interface {
 	DeleteImportedPoolBlockCountsAfterSlot(ctx context.Context, capturedSlot int64) error
 	DeleteImportedPoolBlockCountsForEpoch(ctx context.Context, epoch int64) error
 	DeleteMidnightAriadneParamsByEpoch(ctx context.Context, epoch int64) error
+	DeleteMidnightAriadneRollbacksAfterBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightAriadneRollbacksBeforeBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightAriadneRollbacksByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightAssetCreatesByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightAssetSpendsByBlock(ctx context.Context, blockNumber int64) error
+	DeleteMidnightCandidateRemovalsAfterBlock(ctx context.Context, blockNumber int64) error
+	DeleteMidnightCandidateRemovalsBeforeBlock(ctx context.Context, blockNumber int64) error
+	DeleteMidnightCandidateRemovalsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightCommitteeCandidateRegistrationsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightDeregistrationsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightEpochCandidatesByBlock(ctx context.Context, blockNumber int64) error
+	DeleteMidnightEpochTransitionsAfterBlock(ctx context.Context, blockNumber int64) error
+	DeleteMidnightEpochTransitionsBeforeBlock(ctx context.Context, blockNumber int64) error
+	DeleteMidnightEpochTransitionsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightGovernanceDatumsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightRegistrationsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteNetworkDonationsAfterSlot(ctx context.Context, slot int64) error
@@ -60,13 +68,13 @@ type Querier interface {
 	DeletePoolStakeSnapshotsBeforeEpoch(ctx context.Context, epoch int64) error
 	DeletePoolStakeSnapshotsForEpoch(ctx context.Context, arg DeletePoolStakeSnapshotsForEpochParams) error
 	DeleteProvisionalRewardSnapshot(ctx context.Context, arg DeleteProvisionalRewardSnapshotParams) error
-	DeleteRewardAccountOutputsAfterSlot(ctx context.Context, arg DeleteRewardAccountOutputsAfterSlotParams) error
+	DeleteRewardAccountOutputsAfterSlot(ctx context.Context, capturedSlot int64) error
 	DeleteRewardAccountOutputsBeforeEpoch(ctx context.Context, epoch int64) error
 	DeleteRewardAccountOutputsForEpoch(ctx context.Context, epoch int64) error
 	DeleteRewardAdaPotsAfterSlot(ctx context.Context, capturedSlot int64) error
 	DeleteRewardPoolInputsAfterSlot(ctx context.Context, arg DeleteRewardPoolInputsAfterSlotParams) error
 	DeleteRewardPoolInputsForEpoch(ctx context.Context, epoch int64) error
-	DeleteRewardPoolOutputsAfterSlot(ctx context.Context, arg DeleteRewardPoolOutputsAfterSlotParams) error
+	DeleteRewardPoolOutputsAfterSlot(ctx context.Context, capturedSlot int64) error
 	DeleteRewardPoolOutputsForEpoch(ctx context.Context, epoch int64) error
 	DeleteRewardSeedFailure(ctx context.Context, arg DeleteRewardSeedFailureParams) error
 	DeleteRewardSeedFailuresAfterSlot(ctx context.Context, capturedSlot int64) error
@@ -77,6 +85,7 @@ type Querier interface {
 	DeleteSyncState(ctx context.Context, syncKey string) error
 	DeleteTransactionMetadataLabelsAfterSlot(ctx context.Context, slot sql.NullInt64) error
 	FindMidnightAriadneRollbacksByBlock(ctx context.Context, blockNumber int64) ([]MidnightAriadneRollback, error)
+	FindMidnightCandidateRemovalsByBlock(ctx context.Context, blockNumber int64) ([]MidnightCandidateRemoval, error)
 	FindUnspentMidnightAssetCreates(ctx context.Context) ([]MidnightAssetCreate, error)
 	FindUnspentMidnightRegistrations(ctx context.Context) ([]MidnightRegistration, error)
 	GetAccountByCredential(ctx context.Context, arg GetAccountByCredentialParams) (Account, error)
@@ -142,6 +151,7 @@ type Querier interface {
 	GetMidnightAssetSpendsByBlock(ctx context.Context, blockNumber int64) ([]MidnightAssetSpend, error)
 	GetMidnightDeregistrationsByBlock(ctx context.Context, blockNumber int64) ([]MidnightDeregistration, error)
 	GetMidnightEpochCandidatesByEpoch(ctx context.Context, epoch int64) (MidnightEpochCandidate, error)
+	GetMidnightEpochTransitionByBlock(ctx context.Context, blockNumber int64) (MidnightEpochTransition, error)
 	GetMidnightRegistrationsByBlock(ctx context.Context, blockNumber int64) ([]MidnightRegistration, error)
 	GetNetworkStateAsOfSlot(ctx context.Context, slot int64) (NetworkState, error)
 	GetNodeSettings(ctx context.Context) (GetNodeSettingsRow, error)
@@ -152,13 +162,14 @@ type Querier interface {
 	GetPParams(ctx context.Context, arg GetPParamsParams) ([]Pparam, error)
 	GetPoolStakeSnapshot(ctx context.Context, arg GetPoolStakeSnapshotParams) (PoolStakeSnapshot, error)
 	GetPoolStakeSnapshotsByEpoch(ctx context.Context, arg GetPoolStakeSnapshotsByEpochParams) ([]PoolStakeSnapshot, error)
-	GetRewardAccountOutputs(ctx context.Context, epoch int64) ([]RewardAccountOutput, error)
+	GetRewardAccountOutputs(ctx context.Context, epoch int64) ([]GetRewardAccountOutputsRow, error)
 	GetRewardAdaPots(ctx context.Context, epoch int64) (RewardAdaPot, error)
 	GetRewardPoolInputs(ctx context.Context, epoch int64) ([]RewardPoolInput, error)
 	GetRewardPoolOutputs(ctx context.Context, epoch int64) ([]RewardPoolOutput, error)
 	GetRewardSeedFailure(ctx context.Context, arg GetRewardSeedFailureParams) (string, error)
 	GetRewardSnapshot(ctx context.Context, arg GetRewardSnapshotParams) (RewardSnapshot, error)
 	GetRewardStakeInputs(ctx context.Context, epoch int64) ([]RewardStakeInput, error)
+	GetRewardStakeInputsInPoolKeyHashRange(ctx context.Context, arg GetRewardStakeInputsInPoolKeyHashRangeParams) ([]RewardStakeInput, error)
 	GetScript(ctx context.Context, hash []byte) (Script, error)
 	GetScriptLockedSupply(ctx context.Context) ([]sql.NullString, error)
 	GetSyncState(ctx context.Context, syncKey string) (string, error)
@@ -189,6 +200,7 @@ type Querier interface {
 	InsertNodeSettingsGateIfAbsent(ctx context.Context, arg InsertNodeSettingsGateIfAbsentParams) (int64, error)
 	InsertOffchainMetadataPointer(ctx context.Context, arg InsertOffchainMetadataPointerParams) (int64, error)
 	InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnapshotParams) (int64, error)
+	ListPParamsByEra(ctx context.Context, eraID sql.NullInt64) ([]Pparam, error)
 	// Reconciles the table against a completed snapshot: every row the snapshot
 	// carried was stamped with its timestamp, so anything older was not in the
 	// snapshot and is no longer published upstream.
@@ -229,8 +241,10 @@ type Querier interface {
 	SumTransactionFeesInSlotRange(ctx context.Context, arg SumTransactionFeesInSlotRangeParams) ([]interface{}, error)
 	UpdateDRepActivity(ctx context.Context, arg UpdateDRepActivityParams) (int64, error)
 	UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFallbackRewardSnapshotParams) (int64, error)
+	UpdatePParamsCbor(ctx context.Context, arg UpdatePParamsCborParams) error
 	UpsertMidnightAriadneParams(ctx context.Context, arg UpsertMidnightAriadneParamsParams) (int64, error)
 	UpsertMidnightEpochCandidates(ctx context.Context, arg UpsertMidnightEpochCandidatesParams) (int64, error)
+	UpsertMidnightEpochTransition(ctx context.Context, arg UpsertMidnightEpochTransitionParams) error
 	UpsertNodeSettingsGate(ctx context.Context, arg UpsertNodeSettingsGateParams) error
 	// A later sync is authoritative for the whole subject: every property column
 	// is overwritten from the incoming row, so a property the registry has since

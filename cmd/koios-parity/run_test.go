@@ -60,13 +60,12 @@ func withGlobalFlags(t *testing.T, network, cachePath string) {
 	})
 }
 
-// TestRunCommandReportDirUnwritableReturnsError is a regression test for the
-// reviewer finding that an unwritable/uncreatable --report-dir (os.MkdirAll
-// failure) was only logged, letting runCommand return nil as long as the
-// parity check itself was PASS. --report-dir here has a *file* (not a
-// directory) as one of its path components, so os.MkdirAll fails
-// deterministically regardless of user/permission bits (unlike chmod-based
-// tricks, which root ignores).
+// TestRunCommandReportDirUnwritableReturnsError is a regression test that an
+// unwritable/uncreatable --report-dir (os.MkdirAll failure) was only logged,
+// letting runCommand return nil as long as the parity check itself was PASS.
+// --report-dir here has a *file* (not a directory) as one of its path
+// components, so os.MkdirAll fails deterministically regardless of
+// user/permission bits (unlike chmod-based tricks, which root ignores).
 func TestRunCommandReportDirUnwritableReturnsError(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "blocker-file")
 	require.NoError(t, os.WriteFile(blocker, []byte("not a directory"), 0o644))
@@ -84,8 +83,8 @@ func TestRunCommandReportDirUnwritableReturnsError(t *testing.T) {
 	require.ErrorContains(t, err, "create report dir")
 }
 
-// TestRunCommandReportFileCreateFailureReturnsError is a regression test for
-// the reviewer finding that a report-file creation failure (os.Create) was
+// TestRunCommandReportFileCreateFailureReturnsError is a regression test
+// that a report-file creation failure (os.Create) was
 // only logged. The target report path is pre-created as a directory, so
 // os.Create deterministically fails with "is a directory" regardless of
 // permission bits.
@@ -154,8 +153,8 @@ func (f *fakeReportWriteCloser) Write(p []byte) (int, error) {
 
 func (f *fakeReportWriteCloser) Close() error { return f.closeErr }
 
-// TestWriteParityReportBuildFailure is a regression test for the reviewer
-// finding that a BuildJSONReport failure was only logged, not returned.
+// TestWriteParityReportBuildFailure is a regression test that a
+// BuildJSONReport failure was only logged, not returned.
 // create/build are injected specifically so this (and the two tests below)
 // can force each failure mode deterministically — reproducing a genuine
 // BuildJSONReport/WriteJSONReport/Close failure through a live runCommand +
@@ -177,8 +176,8 @@ func TestWriteParityReportBuildFailure(t *testing.T) {
 	require.ErrorContains(t, err, "build report")
 }
 
-// TestWriteParityReportWriteFailure is a regression test for the reviewer
-// finding that a WriteJSONReport failure was only logged, not returned.
+// TestWriteParityReportWriteFailure is a regression test that a
+// WriteJSONReport failure was only logged, not returned.
 func TestWriteParityReportWriteFailure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "report.json")
@@ -196,7 +195,7 @@ func TestWriteParityReportWriteFailure(t *testing.T) {
 }
 
 // TestWriteParityReportCloseFailureAfterSuccessfulWrite is a regression test
-// for the reviewer's "any file close error" callout: a Close failure after a
+// for any file close error: a Close failure after a
 // perfectly successful build+write must still surface as a non-nil error,
 // since a report that failed to flush/close cleanly cannot be trusted as
 // complete on disk.

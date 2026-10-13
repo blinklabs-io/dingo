@@ -28,6 +28,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// ReferenceCardanoNode and ReferenceKoios are divergenceTotal's "reference"
+// label values: which oracle Dingo's ledger state was compared against.
+// check/watch compare against a live cardano-node; from-genesis compares
+// against Koios, because cardano-node cannot fill the reference role for a
+// from-genesis replay (see from_genesis.go's command doc).
+const (
+	ReferenceCardanoNode = "cardano_node"
+	ReferenceKoios       = "koios"
+)
+
 // parityMetrics holds this process's Prometheus counters. Metric names and
 // label sets are deliberately small and closed: never a pool ID, tx hash,
 // or TxIn label, which would make cardinality unbounded by the size of the
@@ -42,6 +52,12 @@ type parityMetrics struct {
 	checksSkippedTotal *prometheus.CounterVec
 	// divergenceTotal's "field" is closed to the three fields
 	// nodeparity.Diff reports: protocol_params, stake_distribution, utxo.
+	// Its "reference" says which oracle Dingo was compared against --
+	// cardano_node for check/watch, koios for from-genesis. Without it a
+	// responder reading NodeParityDivergence cannot tell which side to go
+	// look at, and the two references fail in very different ways: a
+	// cardano-node disagreement is a consensus question, a Koios one can
+	// equally be that oracle's own data.
 	divergenceTotal *prometheus.CounterVec
 	// checkErrorsTotal counts Check calls that failed outright (a dial or
 	// query error), as opposed to a completed cycle that found a
@@ -100,8 +116,8 @@ func newParityMetricsIn(
 	}, []string{"reason"})
 	divergenceTotal := factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "node_parity_divergence_total",
-		Help: "Ledger-state divergences found between dingo and cardano-node, by field.",
-	}, []string{"field"})
+		Help: "Ledger-state divergences found between dingo and its reference oracle, by field and reference.",
+	}, []string{"field", "reference"})
 	// A CounterVec exposes no series at all for a label value until
 	// something increments it. NodeParityNotChecking's alert expression
 	// sums rate(checks_skipped_total) into rate(checks_total): if no skip
@@ -117,7 +133,9 @@ func newParityMetricsIn(
 		checksSkippedTotal.WithLabelValues(reason)
 	}
 	for _, field := range []string{"protocol_params", "stake_distribution", "utxo"} {
-		divergenceTotal.WithLabelValues(field)
+		for _, ref := range []string{ReferenceCardanoNode, ReferenceKoios} {
+			divergenceTotal.WithLabelValues(field, ref)
+		}
 	}
 	fullCheckTriggersTotal := factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "node_parity_full_check_triggers_total",
@@ -160,6 +178,94 @@ func (m *parityMetrics) recordSkip(reason string) {
 	m.checksSkippedTotal.WithLabelValues(reason).Inc()
 }
 
+// fromGenesisFields are the three checks a from-genesis epoch runs, and the
+// only values epochChecksIncompleteTotal's "field" label takes. Same three
+// names divergenceTotal's "field" uses, so one dashboard can put "diverged"
+// and "could not run" side by side for the same check.
+var fromGenesisFields = []string{
+	"protocol_params", "stake_distribution", "utxo",
+}
+
+// fromGenesisMetrics is from-genesis's own counter set, deliberately NOT
+// parityMetrics. The two subcommands measure different things at different
+// cadences, and sharing one set made both wrong:
+//
+//   - checks_total counts check/watch cycles, which fire per block. A
+//     from-genesis epoch takes minutes to hours, growing with the UTxO set
+//     it has to reconstruct, so folding epochs into that counter made a
+//     healthy replay look stalled to NodeParityNotChecking, whose window is
+//     sized for block cadence.
+//   - checks_skipped_total's "reason" is closed to the tip-sandwich failure
+//     mode, and a discarded cycle is a whole cycle. from-genesis has no tip
+//     sandwich and fails per field, so putting field names in that label
+//     both broke the label's contract and counted one degraded epoch as up
+//     to three skipped "cycles".
+//
+// Registering a separate set also keeps a from-genesis process from
+// exposing a permanently-zero checks_total, which NodeParityNotChecking
+// would read as a dead tool.
+type fromGenesisMetrics struct {
+	// epochsTotal counts epochs where at least one of the three checks
+	// reached a trustworthy verdict. An epoch whose every check was
+	// untrusted verified nothing, so counting it here would inflate the
+	// denominator an operator reads as "epochs actually validated".
+	epochsTotal prometheus.Counter
+	// epochChecksIncompleteTotal counts checks that could not be trusted,
+	// by field -- most often Koios being unreachable or rate-limited.
+	// Distinct from a divergence: "the reference was unavailable" and
+	// "Dingo answered the wrong value" are very different pages.
+	epochChecksIncompleteTotal *prometheus.CounterVec
+	// divergenceTotal is the same series check/watch use, tagged
+	// reference=koios. Shared on purpose: a divergence is a divergence
+	// whichever mode found it, and the alert rules key on this name.
+	divergenceTotal *prometheus.CounterVec
+}
+
+// newFromGenesisMetrics registers from-genesis's counters under a registry
+// wrapped with a "network" const label, exactly as newParityMetrics does for
+// check/watch.
+func newFromGenesisMetrics(network string) *fromGenesisMetrics {
+	return newFromGenesisMetricsIn(network, prometheus.DefaultRegisterer)
+}
+
+// newFromGenesisMetricsIn is newFromGenesisMetrics with the registerer
+// injectable, for the same reason newParityMetricsIn has one: the
+// process-wide default allows a metric name to be registered only once.
+func newFromGenesisMetricsIn(
+	network string, base prometheus.Registerer,
+) *fromGenesisMetrics {
+	registry := prometheus.WrapRegistererWith(
+		prometheus.Labels{"network": network},
+		base,
+	)
+	factory := promauto.With(registry)
+	incomplete := factory.NewCounterVec(prometheus.CounterOpts{
+		Name: "node_parity_epoch_checks_incomplete_total",
+		Help: "from-genesis epoch checks that could not be trusted (most often the Koios reference being unavailable), by field.",
+	}, []string{"field"})
+	divergenceTotal := factory.NewCounterVec(prometheus.CounterOpts{
+		Name: "node_parity_divergence_total",
+		Help: "Ledger-state divergences found between dingo and its reference oracle, by field and reference.",
+	}, []string{"field", "reference"})
+	// Pre-materialize, for the reason newParityMetricsIn documents at
+	// length: a CounterVec exposes no series until something increments
+	// it, and an alert expression combining two vectors drops any series
+	// missing from either side, so an alert on a never-yet-incremented
+	// label could never fire.
+	for _, field := range fromGenesisFields {
+		incomplete.WithLabelValues(field)
+		divergenceTotal.WithLabelValues(field, ReferenceKoios)
+	}
+	return &fromGenesisMetrics{
+		epochsTotal: factory.NewCounter(prometheus.CounterOpts{
+			Name: "node_parity_epochs_total",
+			Help: "from-genesis epochs where at least one check reached a trustworthy verdict.",
+		}),
+		epochChecksIncompleteTotal: incomplete,
+		divergenceTotal:            divergenceTotal,
+	}
+}
+
 // recordCheckError increments checkErrorsTotal for a Check call that failed
 // outright (a dial or query error).
 func (m *parityMetrics) recordCheckError() {
@@ -171,13 +277,13 @@ func (m *parityMetrics) recordCheckError() {
 func (m *parityMetrics) recordCheck(diff nodeparity.Diff) {
 	m.checksTotal.Inc()
 	if diff.ProtocolParamsDiff != "" {
-		m.divergenceTotal.WithLabelValues("protocol_params").Inc()
+		m.divergenceTotal.WithLabelValues("protocol_params", ReferenceCardanoNode).Inc()
 	}
 	if len(diff.StakeDistribution) > 0 {
-		m.divergenceTotal.WithLabelValues("stake_distribution").Inc()
+		m.divergenceTotal.WithLabelValues("stake_distribution", ReferenceCardanoNode).Inc()
 	}
 	if len(diff.UTxO) > 0 {
-		m.divergenceTotal.WithLabelValues("utxo").Inc()
+		m.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode).Inc()
 	}
 }
 
@@ -199,13 +305,13 @@ func (m *parityMetrics) recordIncrementalBlock(diff nodeparity.Diff) {
 	}
 	m.incrementalMismatchTotal.Inc()
 	if diff.ProtocolParamsDiff != "" {
-		m.divergenceTotal.WithLabelValues("protocol_params").Inc()
+		m.divergenceTotal.WithLabelValues("protocol_params", ReferenceCardanoNode).Inc()
 	}
 	if len(diff.StakeDistribution) > 0 {
-		m.divergenceTotal.WithLabelValues("stake_distribution").Inc()
+		m.divergenceTotal.WithLabelValues("stake_distribution", ReferenceCardanoNode).Inc()
 	}
 	if len(diff.UTxO) > 0 {
-		m.divergenceTotal.WithLabelValues("utxo").Inc()
+		m.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode).Inc()
 	}
 }
 

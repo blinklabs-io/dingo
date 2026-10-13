@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/settingsresolve"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"go.uber.org/automaxprocs/maxprocs"
 )
 
@@ -199,11 +200,14 @@ func effectiveRunMode(cmd *cobra.Command, cfg *config.Config) config.RunMode {
 		// starts a metrics listener and an optional pprof debug listener.
 		return config.RunModeSync
 	case "mithril":
-		// Only `mithril sync` binds the metrics/debug listeners; the
-		// read-only `mithril list` / `mithril show` (and bare `mithril`)
-		// query the aggregator and start nothing.
-		if cmd.Name() == "sync" {
+		// `mithril sync` binds the metrics/debug listeners and `mithril
+		// serve` binds only the artifact server; `list`, `show`,
+		// `snapshot create` and bare `mithril` start nothing.
+		switch cmd.Name() {
+		case "sync":
 			return config.RunModeSync
+		case "serve":
+			return config.RunModeMithrilServe
 		}
 		return config.RunModeMithril
 	case "database":
@@ -258,6 +262,27 @@ func closeProfileFile(stderr io.Writer, f *os.File, kind string) {
 	}
 }
 
+func rejectUnsupportedDevnetRootFlags(cmd *cobra.Command) error {
+	var unsupported []string
+	rootFlags := cmd.Root().PersistentFlags()
+	// Devnet-local flags can shadow root flags with the same name, such as --data-dir.
+	localFlags := cmd.LocalNonPersistentFlags()
+	rootFlags.VisitAll(func(flag *pflag.Flag) {
+		if flag.Name != "debug" &&
+			localFlags.Lookup(flag.Name) == nil &&
+			cmd.Flags().Changed(flag.Name) {
+			unsupported = append(unsupported, "--"+flag.Name)
+		}
+	})
+	if len(unsupported) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"dingo devnet does not support root flags: %s",
+		strings.Join(unsupported, ", "),
+	)
+}
+
 func main() {
 	// run's body executes as a normal function return -- not os.Exit --
 	// specifically so its deferred CPU-profile cleanup always runs before
@@ -309,11 +334,12 @@ func run() int {
 			"Starting CPU profiling to %q\n",
 			cpuprofile,
 		) //nolint:gosec // stderr output, no XSS risk
+		//nolint:gosec // the operator supplies this local profiling output path
 		f, err := os.OpenFile(
 			cpuprofile,
 			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
 			0o600,
-		) //nolint:gosec // user-specified profiling output path
+		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create CPU profile: %v\n", err)
 			return 1
@@ -343,7 +369,8 @@ Configuration Precedence (highest to lowest):
 
 Plugins:
   Provider selectors use --blob, --metadata, --mempool,
-  --blockfrost-provider, --mesh-provider, and --utxorpc-provider.
+  --blockfrost-provider, --kupo-provider, --mesh-provider, and
+  --utxorpc-provider.
   Provider configuration uses the plugins YAML tree or generic
   DINGO_PLUGINS_* environment variables. Run 'dingo list' to see providers.
 
@@ -414,6 +441,12 @@ Database Workers:
 		if isInformationalCommand(top) {
 			return nil
 		}
+		// The devnet command builds an isolated runtime config and invokes this
+		// binary again. Loading the caller's config here would make that shortcut
+		// depend on whatever node configuration happens to be in the working dir.
+		if top != nil && top.Name() == "devnet" {
+			return rejectUnsupportedDevnetRootFlags(cmd)
+		}
 
 		cfg, err := config.LoadConfig(configFile)
 		if err != nil {
@@ -483,6 +516,7 @@ Database Workers:
 	rootCmd.AddCommand(loadCommand())
 	rootCmd.AddCommand(listCommand())
 	rootCmd.AddCommand(versionCommand())
+	rootCmd.AddCommand(devnetCommand())
 	rootCmd.AddCommand(mithrilCommand())
 	rootCmd.AddCommand(syncCommand())
 	rootCmd.AddCommand(databaseCommand())
@@ -497,11 +531,12 @@ Database Workers:
 	// Finalize memory profiling before exit
 	if memprofile != "" {
 		memprofile = filepath.Clean(memprofile)
+		//nolint:gosec // the operator supplies this local profiling output path
 		f, err := os.OpenFile(
 			memprofile,
 			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
 			0o600,
-		) //nolint:gosec // user-specified profiling output path
+		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create memory profile: %v\n", err)
 		} else {

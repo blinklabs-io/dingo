@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package mesh
 
@@ -117,9 +117,11 @@ func AllErrors() []*Error {
 	}
 }
 
-// wrapErr creates a new Error with additional details.
+// wrapErr creates a new Error with additional details. An internal error
+// carries none: its cause is database or ledger text that belongs in the
+// server log, so a client sees only the stable code and description.
 func wrapErr(base *Error, detail error) *Error {
-	if detail == nil {
+	if detail == nil || base.Code == ErrInternal.Code {
 		return base
 	}
 	return &Error{

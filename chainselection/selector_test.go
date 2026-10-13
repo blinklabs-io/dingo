@@ -22,19 +22,664 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
+
+// newRollbackEvent builds the PeerRollbackEvent the chainsync client publishes
+// for a MsgRollBackward: the rollback point plus the peer's advertised tip.
+func newRollbackEvent(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+) event.Event {
+	return event.NewEvent(
+		PeerRollbackEventType,
+		PeerRollbackEvent{
+			ConnectionId: connId,
+			Point:        point,
+			Tip:          tip,
+		},
+	)
+}
+
+// A connection recycle deletes the peer's tracked tip (RemovePeer). The
+// replacement connection re-intersects and the server answers the first
+// MsgRequestNext with MsgRollBackward to the intersection point, carrying its
+// current tip. That rollback is the only chainsync traffic until the network
+// mints its next block, so if it does not restore the peer to chain selection
+// the node has no selectable peer for a whole block interval -- on a producer
+// whose sole upstream was recycled, that is a total chain-selection outage
+// ("chain selection stalled: no selectable peer" until the next RollForward).
+func TestHandlePeerRollbackRegistersPeerAfterConnectionRecycle(t *testing.T) {
+	connId := newTestConnectionId(1)
+	live := true
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+		ConnectionLive: func(ouroboros.ConnectionId) bool {
+			return live
+		},
+	})
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 2614270, Hash: []byte("local-tip")},
+		BlockNumber: 2614270,
+	}
+	cs.SetLocalTip(localTip)
+	deliveredTip := ochainsync.Tip{
+		Point:       localTip.Point,
+		BlockNumber: localTip.BlockNumber,
+	}
+	require.True(t, cs.UpdatePeerTip(connId, deliveredTip, nil))
+	cs.EvaluateAndSwitch()
+	require.NotNil(t, cs.GetBestPeer())
+
+	// The leios-fetch failover recycles the whole muxed connection.
+	cs.RemovePeer(connId)
+	require.Nil(t, cs.GetBestPeer())
+	require.Equal(t, 0, cs.PeerCount())
+
+	// The replacement connection intersects at the local tip and rolls back
+	// to it, advertising the peer's current tip.
+	advertisedTip := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 2614276,
+			Hash: []byte("peer-advertised"),
+		},
+		BlockNumber: 2614276,
+	}
+	cs.HandlePeerRollbackEvent(
+		newRollbackEvent(connId, localTip.Point, advertisedTip),
+	)
+
+	require.Equal(t, 1, cs.PeerCount(), "peer must be tracked again")
+	peerTip := cs.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	assert.Equal(t, advertisedTip, peerTip.Tip)
+	assert.Equal(t, localTip.Point, peerTip.SelectionTip().Point)
+
+	best := cs.GetBestPeer()
+	require.NotNil(
+		t,
+		best,
+		"peer registered from the post-intersect rollback must be selectable "+
+			"without waiting for the next RollForward",
+	)
+	assert.Equal(t, connId, *best)
+}
+
+// A rollback can race the ConnectionClosedEvent that removed the peer. The
+// roll-forward path drops tip updates from closed connections; registration
+// from a rollback must do the same rather than resurrect a dead peer.
+func TestHandlePeerRollbackDoesNotRegisterClosedConnection(t *testing.T) {
+	connId := newTestConnectionId(1)
+	var outcomes []RollbackRegistrationOutcome
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+		ConnectionLive: func(ouroboros.ConnectionId) bool {
+			return false
+		},
+		OnRollbackRegistration: func(o RollbackRegistrationOutcome) {
+			outcomes = append(outcomes, o)
+		},
+	})
+
+	cs.HandlePeerRollbackEvent(
+		newRollbackEvent(
+			connId,
+			ocommon.Point{Slot: 100, Hash: []byte("intersect")},
+			ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 110, Hash: []byte("tip")},
+				BlockNumber: 110,
+			},
+		),
+	)
+
+	assert.Equal(t, 0, cs.PeerCount())
+	assert.Nil(t, cs.GetBestPeer())
+	assert.Equal(
+		t,
+		[]RollbackRegistrationOutcome{RollbackRegistrationClosedConnection},
+		outcomes,
+	)
+}
+
+// A peer registered from a rollback has delivered nothing, so it must never
+// displace a peer that has delivered headers, in either map iteration order.
+func TestRollbackRegisteredPeerDoesNotOutrankDeliveredFrontier(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		rollbackFirst   bool
+		deliveredConnId int
+		rollbackConnId  int
+	}{
+		{name: "delivered peer first", deliveredConnId: 1, rollbackConnId: 2},
+		{
+			name:            "rollback peer first",
+			rollbackFirst:   true,
+			deliveredConnId: 2,
+			rollbackConnId:  1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deliveredConn := newTestConnectionId(tc.deliveredConnId)
+			rollbackConn := newTestConnectionId(tc.rollbackConnId)
+			cs := NewChainSelector(ChainSelectorConfig{
+				SecurityParam:             2160,
+				DisableEventSubscriptions: true,
+			})
+			deliveredTip := ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: 2614270,
+					Hash: []byte("delivered"),
+				},
+				BlockNumber: 2614270,
+			}
+			register := func() {
+				cs.HandlePeerRollbackEvent(
+					newRollbackEvent(
+						rollbackConn,
+						ocommon.Point{
+							Slot: 2614260,
+							Hash: []byte("intersect"),
+						},
+						ochainsync.Tip{
+							Point: ocommon.Point{
+								Slot: 2614999,
+								Hash: []byte("advertised"),
+							},
+							// A far-ahead advertisement must not buy
+							// selection: only delivered frontiers rank.
+							BlockNumber: 2614999,
+						},
+					),
+				)
+			}
+			if tc.rollbackFirst {
+				register()
+				require.True(
+					t,
+					cs.UpdatePeerTip(deliveredConn, deliveredTip, nil),
+				)
+			} else {
+				require.True(
+					t,
+					cs.UpdatePeerTip(deliveredConn, deliveredTip, nil),
+				)
+				register()
+			}
+
+			cs.EvaluateAndSwitch()
+			best := cs.GetBestPeer()
+			require.NotNil(t, best)
+			assert.Equal(t, deliveredConn, *best)
+			assert.Equal(t, 2, cs.PeerCount())
+		})
+	}
+}
+
+// Registration runs the same plausibility bound the roll-forward path applies
+// to a new peer, so a newcomer cannot inject a far-ahead advertised tip while
+// the node has no applied local tip to bound it against.
+func TestHandlePeerRollbackRejectsImplausibleAdvertisedTipAtBootstrap(
+	t *testing.T,
+) {
+	existingConn := newTestConnectionId(1)
+	newConn := newTestConnectionId(2)
+	var outcomes []RollbackRegistrationOutcome
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             10,
+		DisableEventSubscriptions: true,
+		OnRollbackRegistration: func(o RollbackRegistrationOutcome) {
+			outcomes = append(outcomes, o)
+		},
+	})
+	require.True(t, cs.UpdatePeerTip(existingConn, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("bootstrap")},
+		BlockNumber: 100,
+	}, nil))
+
+	cs.HandlePeerRollbackEvent(
+		newRollbackEvent(
+			newConn,
+			ocommon.Point{Slot: 100, Hash: []byte("bootstrap")},
+			ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: 9_000_000,
+					Hash: []byte("inflated"),
+				},
+				BlockNumber: 9_000_000,
+			},
+		),
+	)
+
+	assert.Equal(t, 1, cs.PeerCount())
+	assert.Nil(t, cs.GetPeerTip(newConn))
+	assert.Equal(
+		t,
+		[]RollbackRegistrationOutcome{RollbackRegistrationImplausibleTip},
+		outcomes,
+	)
+}
+
+// Registration respects the tracked-peer capacity bound, refusing rather than
+// growing the table past MaxTrackedPeers when nothing can be evicted.
+func TestHandlePeerRollbackRefusesRegistrationAtCapacity(t *testing.T) {
+	existingConn := newTestConnectionId(1)
+	newConn := newTestConnectionId(2)
+	var outcomes []RollbackRegistrationOutcome
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             10,
+		MaxTrackedPeers:           1,
+		DisableEventSubscriptions: true,
+		OnRollbackRegistration: func(o RollbackRegistrationOutcome) {
+			outcomes = append(outcomes, o)
+		},
+	})
+	tip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("delivered")},
+		BlockNumber: 100,
+	}
+	require.True(t, cs.UpdatePeerTip(existingConn, tip, nil))
+	cs.EvaluateAndSwitch()
+	// The single tracked peer is the best peer, which evictLeastRecentPeerLocked
+	// refuses to evict.
+	require.NotNil(t, cs.GetBestPeer())
+
+	cs.HandlePeerRollbackEvent(
+		newRollbackEvent(
+			newConn,
+			ocommon.Point{Slot: 100, Hash: []byte("delivered")},
+			tip,
+		),
+	)
+
+	assert.Equal(t, 1, cs.PeerCount())
+	assert.Nil(t, cs.GetPeerTip(newConn))
+	assert.Equal(
+		t,
+		[]RollbackRegistrationOutcome{RollbackRegistrationAtCapacity},
+		outcomes,
+	)
+	assert.Equal(t, existingConn, *cs.GetBestPeer())
+}
+
+// The behind-filter exemption lasts only until the peer delivers a header:
+// once it has a real delivered frontier it is filtered like any other peer.
+func TestRollbackRegisteredPeerLosesExemptionAfterFirstHeader(t *testing.T) {
+	connId := newTestConnectionId(1)
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             10,
+		DisableEventSubscriptions: true,
+	})
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1000, Hash: []byte("local")},
+		BlockNumber: 1000,
+	})
+
+	cs.HandlePeerRollbackEvent(
+		newRollbackEvent(
+			connId,
+			ocommon.Point{Slot: 990, Hash: []byte("intersect")},
+			ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 1010, Hash: []byte("tip")},
+				BlockNumber: 1010,
+			},
+		),
+	)
+	require.NotNil(
+		t,
+		cs.GetBestPeer(),
+		"a peer that has delivered nothing yet is not 'behind'",
+	)
+
+	// The peer then delivers a header from far behind the local tip. It is a
+	// real delivered frontier now, so the implausibly-behind filter applies.
+	behindTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 10, Hash: []byte("far-behind")},
+		BlockNumber: 10,
+	}
+	require.True(t, cs.UpdatePeerTip(connId, behindTip, nil))
+	cs.EvaluateAndSwitch()
+
+	assert.Nil(t, cs.GetBestPeer())
+	peerTip := cs.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	assert.False(t, peerTip.awaitingFirstHeader)
+}
+
+// A rollback for a tracked peer keeps its existing ApplyRollback path: the
+// registration branch must not change how an already-tracked peer is handled.
+func TestHandlePeerRollbackTrackedPeerStillAppliesRollback(t *testing.T) {
+	connId := newTestConnectionId(1)
+	var outcomes []RollbackRegistrationOutcome
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             10,
+		DisableEventSubscriptions: true,
+		OnRollbackRegistration: func(o RollbackRegistrationOutcome) {
+			outcomes = append(outcomes, o)
+		},
+	})
+	delivered := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("delivered")},
+		BlockNumber: 100,
+	}
+	require.True(t, cs.UpdatePeerTip(connId, delivered, nil))
+
+	rollbackPoint := ocommon.Point{Slot: 90, Hash: []byte("rollback")}
+	advertised := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 105, Hash: []byte("advertised")},
+		BlockNumber: 105,
+	}
+	cs.HandlePeerRollbackEvent(
+		newRollbackEvent(connId, rollbackPoint, advertised),
+	)
+
+	peerTip := cs.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	assert.Equal(t, advertised, peerTip.Tip)
+	assert.Equal(t, rollbackPoint, peerTip.SelectionTip().Point)
+	assert.False(
+		t,
+		peerTip.awaitingFirstHeader,
+		"an already-tracked peer keeps its delivered-frontier semantics",
+	)
+	assert.Empty(t, outcomes, "no registration attempt for a tracked peer")
+	assert.Equal(t, 1, cs.PeerCount())
+}
+
+// A peer registered from a rollback has delivered nothing, so it is not a
+// plausibility reference: not for its own first header (which would otherwise
+// be bounded by a reference of 0 and rejected) and not for another peer's
+// (which would otherwise turn the bootstrap case into a reference of 0).
+func TestRollbackRegisteredPeerIsNotAPlausibilityReference(t *testing.T) {
+	rollbackConn := newTestConnectionId(1)
+	otherConn := newTestConnectionId(2)
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             10,
+		DisableEventSubscriptions: true,
+	})
+	// No local tip has been applied, so the catch-up relaxation cannot rescue
+	// a rejected frontier: the reference bound is the only thing under test.
+	cs.HandlePeerRollbackEvent(
+		newRollbackEvent(
+			rollbackConn,
+			ocommon.Point{Slot: 5000, Hash: []byte("intersect")},
+			ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 5001, Hash: []byte("tip")},
+				BlockNumber: 5001,
+			},
+		),
+	)
+	require.Equal(t, 1, cs.PeerCount())
+
+	// Another peer's first delivered header is still bootstrapped, not bounded
+	// by the registered peer's zero delivered frontier.
+	assert.True(t, cs.UpdatePeerTip(otherConn, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 5000, Hash: []byte("other")},
+		BlockNumber: 5000,
+	}, nil))
+
+	// And the registered peer's own first header is bounded like a new peer's,
+	// against the delivered frontier of the peers that have delivered one.
+	assert.True(t, cs.UpdatePeerTip(rollbackConn, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 5001, Hash: []byte("first-header")},
+		BlockNumber: 5001,
+	}, nil))
+	peerTip := cs.GetPeerTip(rollbackConn)
+	require.NotNil(t, peerTip)
+	assert.Equal(t, uint64(5001), peerTip.SelectionTip().BlockNumber)
+	assert.False(t, peerTip.awaitingFirstHeader)
+}
+
+// A peer registered from a rollback has delivered no header, so it must not
+// raise the Genesis exit horizon: its ObservedTip is the intersection point the
+// node itself proposed, and crediting that as delivered evidence would let any
+// peer that re-intersects at the local tip and advertises a tip within the
+// Genesis window force an immediate Genesis-to-Praos transition, dropping the
+// density protection that mode exists to provide.
+func TestRollbackRegisteredPeerDoesNotForceGenesisExit(t *testing.T) {
+	connId := newTestConnectionId(1)
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             100,
+		GenesisMode:               true,
+		GenesisWindowSlots:        300,
+		DisableEventSubscriptions: true,
+	})
+	localPoint := ocommon.Point{Slot: 5000, Hash: []byte("local")}
+	cs.SetLocalTip(ochainsync.Tip{Point: localPoint, BlockNumber: 5000})
+	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
+
+	// Intersects at the local tip and advertises a tip inside the Genesis
+	// window of it, without delivering anything.
+	cs.HandlePeerRollbackEvent(
+		newRollbackEvent(connId, localPoint, ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 5100, Hash: []byte("advertised")},
+			BlockNumber: 5100,
+		}),
+	)
+	require.Equal(t, 1, cs.PeerCount())
+
+	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode())
+
+	// Once the peer actually delivers headers up to its advertisement, the
+	// horizon is real and the node exits Genesis as before.
+	deliveredTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 5100, Hash: []byte("advertised")},
+		BlockNumber: 5100,
+	}
+	require.True(t, cs.UpdatePeerTip(connId, deliveredTip, nil))
+	assert.Equal(t, SelectionModePraos, cs.SelectionMode())
+}
+
+// ConnectionLive is supplied by the composition layer and reaches into the
+// connection manager, so the registration path must evaluate it before taking
+// cs.mutex. Holding the selector lock across that callback lets connection
+// teardown ordering block -- or re-enter -- the chain-selection event path.
+//
+// The callback here re-enters the selector on the registration check and
+// blocks until that re-entry completes, so if HandlePeerRollbackEvent held
+// cs.mutex the whole handler would deadlock and the timeout below would fire.
+func TestHandlePeerRollbackEvaluatesLivenessWithoutSelectorLock(t *testing.T) {
+	connId := newTestConnectionId(1)
+	var calls atomic.Int32
+	reentered := make(chan struct{})
+	var cs *ChainSelector
+	cs = NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+		ConnectionLive: func(ouroboros.ConnectionId) bool {
+			// Only the first call is the registration check; later calls come
+			// from the evaluation path, which holds the lock by design.
+			if calls.Add(1) != 1 {
+				return true
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = cs.PeerCount()
+				_ = cs.GetAllPeerTips()
+			}()
+			select {
+			case <-done:
+				close(reentered)
+			case <-time.After(5 * time.Second):
+			}
+			return true
+		},
+	})
+
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		cs.HandlePeerRollbackEvent(
+			newRollbackEvent(
+				connId,
+				ocommon.Point{Slot: 2614270, Hash: []byte("intersect")},
+				ochainsync.Tip{
+					Point: ocommon.Point{
+						Slot: 2614276,
+						Hash: []byte("peer-tip"),
+					},
+					BlockNumber: 2614276,
+				},
+			),
+		)
+	}()
+
+	select {
+	case <-handled:
+	case <-time.After(20 * time.Second):
+		t.Fatal(
+			"HandlePeerRollbackEvent deadlocked: ConnectionLive must be " +
+				"evaluated before cs.mutex is taken",
+		)
+	}
+	select {
+	case <-reentered:
+	default:
+		t.Fatal(
+			"the selector lock was held while ConnectionLive ran: a callback " +
+				"that touches the selector could not make progress",
+		)
+	}
+	assert.Equal(t, 1, cs.PeerCount())
+}
+
+// The registration outcome is reported after cs.mutex is released, so a
+// subscriber can read selector state (for example to log the resulting peer
+// count) from the callback without deadlocking. This is the same invariant as
+// the liveness check above, for the other callback the registration path
+// invokes: no configured callback may run with the selector lock held.
+func TestHandlePeerRollbackReportsOutcomeWithoutSelectorLock(t *testing.T) {
+	connId := newTestConnectionId(1)
+	var observedPeers atomic.Int32
+	var observedOutcome atomic.Value
+	var cs *ChainSelector
+	cs = NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+		ConnectionLive:            func(ouroboros.ConnectionId) bool { return true },
+		OnRollbackRegistration: func(o RollbackRegistrationOutcome) {
+			observedOutcome.Store(o)
+			// Blocks forever if the outcome were reported under cs.mutex.
+			// #nosec G115 -- a tracked-peer count fits int32 in this test.
+			observedPeers.Store(int32(cs.PeerCount()))
+		},
+	})
+
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		cs.HandlePeerRollbackEvent(
+			newRollbackEvent(
+				connId,
+				ocommon.Point{Slot: 2614270, Hash: []byte("intersect")},
+				ochainsync.Tip{
+					Point: ocommon.Point{
+						Slot: 2614276,
+						Hash: []byte("peer-tip"),
+					},
+					BlockNumber: 2614276,
+				},
+			),
+		)
+	}()
+
+	select {
+	case <-handled:
+	case <-time.After(20 * time.Second):
+		t.Fatal(
+			"HandlePeerRollbackEvent deadlocked: OnRollbackRegistration must " +
+				"be reported outside cs.mutex",
+		)
+	}
+	assert.Equal(
+		t,
+		RollbackRegistrationRegistered,
+		observedOutcome.Load(),
+	)
+	assert.Equal(
+		t,
+		int32(1),
+		observedPeers.Load(),
+		"the callback must observe the peer it was told about",
+	)
+}
+
+// The anti-flap incumbent pin exists to stop the chainsync+blockfetch pipeline
+// from flapping between peers on sibling head-forks. A peer registered from a
+// rollback has no head to fork from: its selection block number is 0, meaning
+// "nothing delivered yet". Without an explicit release the pin's longer-chain
+// escape (challenger more than catchUpPinHeadMargin blocks ahead) cannot fire
+// for a challenger at block 1 or 2, so the node would keep the pipeline on a
+// connection that has delivered no header while a peer with a real delivered
+// frontier is available.
+func TestRollbackRegisteredIncumbentDoesNotPinOutDeliveredChallenger(
+	t *testing.T,
+) {
+	rollbackConn := newTestConnectionId(1)
+	deliveredConn := newTestConnectionId(2)
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+	})
+	// A local tip has been applied, so the pin is armed.
+	localPoint := ocommon.Point{Slot: 1, Hash: []byte("local")}
+	cs.SetLocalTip(ochainsync.Tip{Point: localPoint, BlockNumber: 1})
+
+	// The recycled connection re-intersects at the local tip and becomes the
+	// incumbent, because nothing better is tracked.
+	cs.HandlePeerRollbackEvent(
+		newRollbackEvent(rollbackConn, localPoint, tip(4, 4, "advertised")),
+	)
+	best := cs.GetBestPeer()
+	require.NotNil(t, best)
+	require.Equal(t, rollbackConn, *best)
+	incumbentTip := cs.GetPeerTip(rollbackConn)
+	require.NotNil(t, incumbentTip)
+	require.True(t, incumbentTip.awaitingFirstHeader)
+	require.Equal(t, uint64(0), incumbentTip.SelectionTip().BlockNumber)
+
+	// Another peer delivers a real header, inside the head margin of the
+	// incumbent's zero selection block number.
+	require.True(
+		t,
+		cs.UpdatePeerTip(deliveredConn, tip(2, 2, "delivered"), nil),
+	)
+	cs.EvaluateAndSwitch()
+
+	best = cs.GetBestPeer()
+	require.NotNil(t, best)
+	assert.Equal(
+		t,
+		deliveredConn,
+		*best,
+		"a delivered frontier must take the pipeline from a header-less "+
+			"rollback incumbent",
+	)
+}
+
+// forkTipAt builds a tip whose block number equals its slot, so a sequence of
+// calls describes a dense chain fragment.
+func forkTipAt(slot uint64, hash string) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       ocommon.Point{Slot: slot, Hash: []byte(hash)},
+		BlockNumber: slot,
+	}
+}
 
 func newTestConnectionId(n int) ouroboros.ConnectionId {
 	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
@@ -85,7 +730,29 @@ func markSelectorPeerStale(
 	if threshold == 0 {
 		threshold = defaultStaleTipThreshold
 	}
-	peerTip.LastUpdated = time.Now().Add(-(threshold + time.Millisecond))
+	peerTip.LastUpdated = peerTip.now().Add(-(threshold + time.Millisecond))
+}
+
+// advancePastStale moves clk just past threshold and requires connId to be
+// stale by it. The peer's staleness reads clk, so the result does not depend
+// on how much wall-clock time the test has taken.
+func advancePastStale(
+	t *testing.T,
+	cs *ChainSelector,
+	clk *fakeClock,
+	connId ouroboros.ConnectionId,
+	threshold time.Duration,
+) {
+	t.Helper()
+	clk.Advance(threshold + time.Millisecond)
+	peerTip := cs.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	require.True(
+		t,
+		peerTip.IsStale(threshold),
+		"peer %s should be stale",
+		connId,
+	)
 }
 
 func updatePeerTipWithPraosView(
@@ -605,6 +1272,8 @@ func TestChainSelectorDoesNotRestoreStaleIncumbent(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		StaleTipThreshold: 20 * time.Millisecond,
 	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
 
 	equalTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 120, Hash: []byte("equal-tip")},
@@ -614,12 +1283,7 @@ func TestChainSelectorDoesNotRestoreStaleIncumbent(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
 
-	require.Eventually(t, func() bool {
-		cs.mutex.RLock()
-		defer cs.mutex.RUnlock()
-		peerTip := cs.peerTips[incumbentConn]
-		return peerTip != nil && peerTip.IsStale(20*time.Millisecond)
-	}, time.Second, 5*time.Millisecond)
+	advancePastStale(t, cs, clk, incumbentConn, 20*time.Millisecond)
 
 	cs.UpdatePeerTip(challengerConn, equalTip, nil)
 	switched := cs.EvaluateAndSwitch()
@@ -873,6 +1537,8 @@ func TestChainSelectorStalePeerFiltering(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		StaleTipThreshold: 100 * time.Millisecond,
 	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
 
 	connId1 := newTestConnectionId(1)
 	connId2 := newTestConnectionId(2)
@@ -888,11 +1554,7 @@ func TestChainSelectorStalePeerFiltering(t *testing.T) {
 
 	cs.UpdatePeerTip(connId1, tip1, nil)
 
-	// Wait for peer1 to become stale (exceed threshold)
-	require.Eventually(t, func() bool {
-		peerTip := cs.GetPeerTip(connId1)
-		return peerTip != nil && peerTip.IsStale(100*time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "peer1 should become stale")
+	advancePastStale(t, cs, clk, connId1, 100*time.Millisecond)
 
 	cs.UpdatePeerTip(connId2, tip2, nil)
 
@@ -907,6 +1569,8 @@ func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
 		EventBus:          eventBus,
 		StaleTipThreshold: 50 * time.Millisecond,
 	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
 
 	connId1 := newTestConnectionId(1)
 	connId2 := newTestConnectionId(2)
@@ -933,12 +1597,8 @@ func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
 	// Drain the events from the initial selection
 	drainChainSwitchesUntilBest(t, evtCh, connId1)
 
-	// Wait for peer1 to become "very stale" (2x threshold = 100ms)
-	// cleanupStalePeers uses 2x StaleTipThreshold for removal
-	require.Eventually(t, func() bool {
-		peerTip := cs.GetPeerTip(connId1)
-		return peerTip != nil && peerTip.IsStale(100*time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "peer1 should become very stale")
+	// cleanupStalePeers removes peers stale by 2x StaleTipThreshold.
+	advancePastStale(t, cs, clk, connId1, 100*time.Millisecond)
 
 	// Keep peer2 fresh
 	cs.UpdatePeerTip(connId2, tip2, nil)
@@ -1084,6 +1744,8 @@ func TestChainSelectorTouchPeerActivityRevivesStaleBestPeer(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		StaleTipThreshold: 50 * time.Millisecond,
 	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
 
 	bestConn := newTestConnectionId(1)
 	freshConn := newTestConnectionId(2)
@@ -1102,10 +1764,7 @@ func TestChainSelectorTouchPeerActivityRevivesStaleBestPeer(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, bestConn, *cs.GetBestPeer())
 
-	require.Eventually(t, func() bool {
-		peerTip := cs.GetPeerTip(bestConn)
-		return peerTip != nil && peerTip.IsStale(50*time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "best peer should become stale")
+	advancePastStale(t, cs, clk, bestConn, 50*time.Millisecond)
 
 	cs.UpdatePeerTip(freshConn, freshTip, nil)
 	cs.EvaluateAndSwitch()
@@ -1122,6 +1781,8 @@ func TestChainSelectorTouchPeerActivitySwitchesToLongerChain(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		StaleTipThreshold: 50 * time.Millisecond,
 	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
 
 	revivedConn := newTestConnectionId(1)
 	incumbentConn := newTestConnectionId(2)
@@ -1140,10 +1801,7 @@ func TestChainSelectorTouchPeerActivitySwitchesToLongerChain(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, revivedConn, *cs.GetBestPeer())
 
-	require.Eventually(t, func() bool {
-		peerTip := cs.GetPeerTip(revivedConn)
-		return peerTip != nil && peerTip.IsStale(50*time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "revived peer should become stale")
+	advancePastStale(t, cs, clk, revivedConn, 50*time.Millisecond)
 
 	cs.UpdatePeerTip(incumbentConn, incumbentTip, nil)
 	cs.EvaluateAndSwitch()
@@ -1162,6 +1820,7 @@ func TestChainSelectorTouchPeerActivitySwitchesToLongerChain(t *testing.T) {
 }
 
 func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
+	t.Parallel()
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
@@ -1169,6 +1828,9 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 		EventBus:          eventBus,
 		StaleTipThreshold: 50 * time.Millisecond,
 	})
+
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
 
 	revivedConn := newTestConnectionId(1)
 	incumbentConn := newTestConnectionId(2)
@@ -1191,10 +1853,7 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 
 	drainChainSwitchesUntilBest(t, evtCh, revivedConn)
 
-	require.Eventually(t, func() bool {
-		peerTip := cs.GetPeerTip(revivedConn)
-		return peerTip != nil && peerTip.IsStale(50*time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "revived peer should become stale")
+	advancePastStale(t, cs, clk, revivedConn, 50*time.Millisecond)
 
 	cs.UpdatePeerTip(incumbentConn, incumbentTip, nil)
 	cs.EvaluateAndSwitch()
@@ -1818,6 +2477,322 @@ func TestUpdatePeerTipAcceptsDuringCatchUp(t *testing.T) {
 		accepted,
 		"peer far beyond both thresholds should still be rejected",
 	)
+}
+
+// TestUpdatePeerTipFarBehindHonestPeerPermanentlyRejectedAlone pins the
+// lone-claim bound: a frontier beyond the localTip+2*K catch-up ceiling that no
+// other connection corroborates stays rejected when the same claim is repeated,
+// because a rejected frontier is never recorded as a reference and a repeat
+// does not advance the connection's run. The gap is more than 4M blocks at
+// K=432, as on a from-genesis Preview sync.
+func TestUpdatePeerTipFarBehindHonestPeerPermanentlyRejectedAlone(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 432, // Preview k
+	})
+
+	// Local tip: from-genesis sync, far behind the real network tip.
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000000, Hash: []byte("local")},
+		BlockNumber: 175516,
+	})
+
+	// Another already-tracked peer whose own recorded frontier is also
+	// near the local tip (itself stalled or freshly (re)connected) -- this
+	// is what makes the reference stale and puts every later peer through
+	// the catch-up branch rather than the ordinary Case 2 check.
+	staleConn := newTestConnectionId(1)
+	cs.UpdatePeerTip(staleConn, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000100, Hash: []byte("stale")},
+		BlockNumber: 175000,
+	}, nil)
+
+	// The honest peer: its real, current tip is genuinely millions of
+	// blocks ahead, not the result of any reorg or spoof.
+	honestConn := newTestConnectionId(2)
+	honestTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 200000000, Hash: []byte("honest")},
+		BlockNumber: 4687076,
+	}
+
+	accepted := cs.UpdatePeerTip(honestConn, honestTip, nil)
+	assert.False(
+		t,
+		accepted,
+		"a single far-ahead honest peer must not yet be trusted without corroboration",
+	)
+
+	// The peer keeps reporting the same real tip (chainsync has no way to
+	// report anything else) and is rejected every single time: it never
+	// became "known", so every update re-runs the same stale Case 2
+	// comparison against the same stale reference. This is the ratchet.
+	for range 5 {
+		accepted = cs.UpdatePeerTip(honestConn, honestTip, nil)
+		assert.False(
+			t,
+			accepted,
+			"an uncorroborated far tip must stay rejected on every retry",
+		)
+	}
+	assert.Nil(
+		t,
+		cs.GetPeerTip(honestConn),
+		"a permanently-rejected peer must never be tracked",
+	)
+}
+
+// TestUpdatePeerTipFarBehindCorroboratedAcrossPeersBreaksRatchet is the
+// positive side of the same scenario: a second, independent connection
+// reporting close to the same far tip corroborates the first, and both are
+// then accepted. Without corroboration widening the catch-up ceiling, a
+// second honest peer gains nothing -- it is rejected by the exact same
+// stale reference as the first, and the node can never recover regardless
+// of how many honest peers connect.
+func TestUpdatePeerTipFarBehindCorroboratedAcrossPeersBreaksRatchet(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 432, // Preview k
+	})
+
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000000, Hash: []byte("local")},
+		BlockNumber: 175516,
+	})
+
+	staleConn := newTestConnectionId(1)
+	cs.UpdatePeerTip(staleConn, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000100, Hash: []byte("stale")},
+		BlockNumber: 175000,
+	}, nil)
+
+	honestConn1 := newTestConnectionId(2)
+	honestTip1 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 200000000, Hash: []byte("honest1")},
+		BlockNumber: 4687076,
+	}
+	accepted := cs.UpdatePeerTip(honestConn1, honestTip1, nil)
+	assert.False(t, accepted, "first honest peer is rejected alone")
+
+	// A second, independent connection reports a tip within K of the
+	// first's claim -- independent agreement the selector cannot fake by
+	// itself.
+	honestConn2 := newTestConnectionId(3)
+	honestTip2 := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 200000100, Hash: []byte("honest2")},
+		BlockNumber: 4687076 + 100,
+	}
+	accepted = cs.UpdatePeerTip(honestConn2, honestTip2, nil)
+	assert.True(
+		t,
+		accepted,
+		"a far tip corroborated by an independent connection must be accepted",
+	)
+	require.NotNil(t, cs.GetPeerTip(honestConn2))
+
+	// The first peer's next update is no longer measured against the
+	// stale reference: honestConn2 is now tracked with a live frontier
+	// near the real tip, so the ordinary Case 2 check (not the catch-up
+	// branch) accepts it directly. The ratchet is broken.
+	accepted = cs.UpdatePeerTip(honestConn1, honestTip1, nil)
+	assert.True(
+		t,
+		accepted,
+		"the first peer must be accepted once corroborated",
+	)
+	require.NotNil(t, cs.GetPeerTip(honestConn1))
+}
+
+// TestUpdatePeerTipFarDeliveredFrontierCorroboration drives the corroboration
+// path the way chainsync does: the advertised tip is the real network tip and
+// the delivered header is just past the localTip+2*K catch-up ceiling. Two
+// connections delivering within K of each other corroborate; two delivering
+// more than K apart do not.
+func TestUpdatePeerTipFarDeliveredFrontierCorroboration(t *testing.T) {
+	t.Parallel()
+
+	const (
+		securityParam = 432
+		localBlock    = 175516
+		networkBlock  = 4687076
+	)
+	blockTip := func(block uint64) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: block * 20,
+				Hash: fmt.Appendf(nil, "block-%d", block),
+			},
+			BlockNumber: block,
+		}
+	}
+	newSelector := func() *ChainSelector {
+		cs := NewChainSelector(ChainSelectorConfig{
+			SecurityParam: securityParam,
+		})
+		cs.SetLocalTip(blockTip(localBlock))
+		// A tracked peer whose frontier is behind the local tip makes every
+		// reference stale, so later peers take the catch-up branch.
+		require.True(t, cs.UpdatePeerTip(
+			newTestConnectionId(1),
+			blockTip(localBlock-500),
+			nil,
+		))
+		return cs
+	}
+	advertised := blockTip(networkBlock)
+	pastCeiling := uint64(localBlock + 2*securityParam + 36)
+
+	t.Run("within K corroborates", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		first := newTestConnectionId(2)
+		second := newTestConnectionId(3)
+		assert.False(t, cs.updatePeerTipObserved(
+			first, advertised, blockTip(pastCeiling), nil,
+		), "an uncorroborated far delivered frontier must be rejected")
+		assert.True(t, cs.updatePeerTipObserved(
+			second, advertised, blockTip(pastCeiling+50), nil,
+		), "a delivered frontier within K of another connection's must be accepted")
+		assert.True(t, cs.updatePeerTipObserved(
+			first, advertised, blockTip(pastCeiling+1), nil,
+		), "the first claimant must be accepted on its next header")
+	})
+
+	t.Run(
+		"corroborated exactly K below keeps the claimant's next header",
+		func(t *testing.T) {
+			t.Parallel()
+			cs := newSelector()
+			first := newTestConnectionId(2)
+			second := newTestConnectionId(3)
+			claim := pastCeiling + securityParam
+			assert.False(t, cs.updatePeerTipObserved(
+				first, advertised, blockTip(claim), nil,
+			))
+			assert.True(t, cs.updatePeerTipObserved(
+				second, advertised, blockTip(claim-securityParam), nil,
+			), "a delivered frontier exactly K below another connection's must corroborate it")
+			assert.True(t, cs.updatePeerTipObserved(
+				first, advertised, blockTip(claim+1), nil,
+			), "the corroborated claimant must be accepted on its next header even though it is more than K above the accepted frontier")
+			require.NotNil(t, cs.GetPeerTip(first))
+			third := newTestConnectionId(4)
+			assert.False(t, cs.updatePeerTipObserved(
+				third,
+				advertised,
+				blockTip(claim+securityParam+2),
+				nil,
+			), "the claimant's allowance must not widen the bound for another connection")
+		},
+	)
+
+	t.Run("more than K apart does not corroborate", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(2), advertised, blockTip(pastCeiling), nil,
+		))
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(3),
+			advertised,
+			blockTip(pastCeiling+securityParam+1),
+			nil,
+		), "frontiers more than K apart must not corroborate each other")
+	})
+
+	t.Run("a closed claimant no longer corroborates", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		first := newTestConnectionId(2)
+		assert.False(t, cs.updatePeerTipObserved(
+			first, advertised, blockTip(pastCeiling), nil,
+		))
+		cs.RemovePeer(first)
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(3), advertised, blockTip(pastCeiling+1), nil,
+		), "a removed connection's far claim must not corroborate a new one")
+	})
+
+	t.Run(
+		"a corroborated claimant is bounded by its claim plus K",
+		func(t *testing.T) {
+			t.Parallel()
+			cs := newSelector()
+			first := newTestConnectionId(2)
+			second := newTestConnectionId(3)
+			claim := pastCeiling + securityParam
+			assert.False(t, cs.updatePeerTipObserved(
+				first, advertised, blockTip(claim), nil,
+			))
+			assert.True(t, cs.updatePeerTipObserved(
+				second, advertised, blockTip(claim-securityParam), nil,
+			))
+			assert.False(t, cs.updatePeerTipObserved(
+				first, advertised, blockTip(claim+securityParam+1), nil,
+			), "a corroborated claimant must be rejected more than K past its own claim")
+			assert.True(t, cs.updatePeerTipObserved(
+				first, advertised, blockTip(claim+securityParam), nil,
+			), "a corroborated claimant must be accepted exactly K past its own claim")
+		},
+	)
+
+	t.Run("claims are bounded by the tracked-peer limit", func(t *testing.T) {
+		t.Parallel()
+		const maxPeers = 3
+		cs := NewChainSelector(ChainSelectorConfig{
+			SecurityParam:   securityParam,
+			MaxTrackedPeers: maxPeers,
+		})
+		cs.SetLocalTip(blockTip(localBlock))
+		require.True(t, cs.UpdatePeerTip(
+			newTestConnectionId(1),
+			blockTip(localBlock-500),
+			nil,
+		))
+		// Claims spaced 2*K apart never corroborate each other.
+		var lastClaim uint64
+		for i := range maxPeers {
+			lastClaim = pastCeiling + uint64(i)*2*securityParam
+			assert.False(t, cs.updatePeerTipObserved(
+				newTestConnectionId(2+i), advertised, blockTip(lastClaim), nil,
+			))
+		}
+		overflowClaim := pastCeiling + 20*securityParam
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(10), advertised, blockTip(overflowClaim), nil,
+		))
+		assert.Len(t, cs.farTipClaims, maxPeers)
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(11), advertised, blockTip(overflowClaim+1), nil,
+		), "a claim dropped at capacity must not corroborate a later one")
+		assert.True(t, cs.updatePeerTipObserved(
+			newTestConnectionId(12), advertised, blockTip(lastClaim+1), nil,
+		), "a frontier within K of a recorded claim must corroborate it while the claim table is full")
+		assert.Len(t, cs.farTipClaims, maxPeers)
+	})
+
+	t.Run("an accepted connection no longer holds a claim", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		first := newTestConnectionId(2)
+		second := newTestConnectionId(3)
+		assert.False(t, cs.updatePeerTipObserved(
+			first, advertised, blockTip(pastCeiling), nil,
+		))
+		assert.True(t, cs.updatePeerTipObserved(
+			second, advertised, blockTip(pastCeiling+1), nil,
+		))
+		assert.NotContains(t, cs.farTipClaims, second)
+		assert.True(t, cs.updatePeerTipObserved(
+			first, advertised, blockTip(pastCeiling+2), nil,
+		))
+		assert.Empty(t, cs.farTipClaims)
+	})
 }
 
 func TestUpdatePeerTipAcceptsNextObservedBlockWhenAdvertisedTipIsFarAhead(
@@ -2765,4 +3740,2671 @@ func TestChainSelectorRecoverEvaluationPanicToleratesPanickingLogger(
 			panic("evaluation boom")
 		}()
 	}, "a panicking Logger must not escape recoverEvaluationPanic")
+}
+
+// tipAt builds a chainsync tip with a distinct hash per block number.
+func behindPeerTipAt(blockNumber uint64) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: blockNumber * 2,
+			Hash: []byte("behind-peer-" + string(rune('a'+blockNumber%26))),
+		},
+		BlockNumber: blockNumber,
+	}
+}
+
+// A block producer with a single configured upstream must keep that upstream
+// usable while it is behind on our own chain. The intersect ladder resolves a
+// peer this far back to a rung past K, which the chainsync layer used to treat
+// as an over-K fork and evict; chain selection itself has no such notion, and
+// this pins the invariant the eviction was breaking: one behind-but-inside-K
+// peer stays registered and selectable, so the producer never reaches the
+// "chain selection stalled: no selectable peer" state, and it is selected
+// immediately once it overtakes us.
+func TestValencyOneUpstreamBehindStaysSelectable(t *testing.T) {
+	const securityParam = 108
+	const localBlock = 115195
+	// 65 blocks behind: the point at which the intersect ladder's first rung
+	// past K (128 at K=108) starts manufacturing an over-K rollback, while
+	// the peer is still well inside K.
+	const behindBlock = localBlock - 65
+
+	cs := NewChainSelector(ChainSelectorConfig{})
+	cs.SetSecurityParam(securityParam)
+	cs.SetLocalTip(behindPeerTipAt(localBlock))
+
+	connId := newTestConnectionId(1)
+	require.True(t, cs.UpdatePeerTip(connId, behindPeerTipAt(behindBlock), nil))
+
+	require.Equal(t, 1, cs.PeerCount(), "the only upstream must be retained")
+	best := cs.SelectBestChain()
+	require.NotNil(
+		t,
+		best,
+		"a sole upstream inside K must remain selectable, otherwise the "+
+			"producer stalls with no selectable peer",
+	)
+	assert.Equal(t, connId, *best)
+
+	// The peer catches up and overtakes us; it must be selected.
+	require.True(
+		t,
+		cs.UpdatePeerTip(connId, behindPeerTipAt(localBlock+5), nil),
+	)
+	cs.SetLocalTip(behindPeerTipAt(localBlock))
+	best = cs.SelectBestChain()
+	require.NotNil(t, best)
+	assert.Equal(t, connId, *best)
+}
+
+// A sole upstream further behind than K is not worth syncing from, so chain
+// selection declines to select it — but it must still be retained, because it
+// is the only peer we have and it becomes selectable again the moment it
+// catches back up to within K. Evicting it instead (the over-K chainsync
+// denial) leaves the node with no upstream at all.
+func TestValencyOneUpstreamBeyondKIsRetainedNotEvicted(t *testing.T) {
+	const securityParam = 108
+	const localBlock = 115195
+	// The lag observed in the field: 119 blocks, past K.
+	const behindBlock = localBlock - 119
+
+	cs := NewChainSelector(ChainSelectorConfig{})
+	cs.SetSecurityParam(securityParam)
+	cs.SetLocalTip(behindPeerTipAt(localBlock))
+
+	connId := newTestConnectionId(1)
+	require.True(t, cs.UpdatePeerTip(connId, behindPeerTipAt(behindBlock), nil))
+
+	assert.Equal(t, 1, cs.PeerCount(), "the only upstream must be retained")
+	assert.Nil(
+		t,
+		cs.SelectBestChain(),
+		"a peer more than K behind is not a useful sync source",
+	)
+
+	// It catches up to within K and becomes usable again without any
+	// reconnect, denial cooldown, or operator intervention.
+	require.True(
+		t,
+		cs.UpdatePeerTip(connId, behindPeerTipAt(localBlock-10), nil),
+	)
+	best := cs.SelectBestChain()
+	require.NotNil(t, best)
+	assert.Equal(t, connId, *best)
+}
+
+// TestChainSelectorByronEBBBeatsRegularIncumbentAtEqualBlockNumber exercises
+// normal multi-peer selection: an incumbent peer
+// on a Byron regular tip, and a second peer that delivers the EBB successor
+// sharing the same protocol block number, the way Byron routes an EBB and
+// its predecessor. Without the era-aware tiebreak this is exactly
+// TestIncumbentAdvantageNoSwitchAtEqualBlockNumber's shape (Praos alone
+// calls it ChainEqual and keeps the incumbent); the Byron EBB tiebreak must
+// override that and switch to the peer with the boundary block.
+func TestChainSelectorByronEBBBeatsRegularIncumbentAtEqualBlockNumber(
+	t *testing.T,
+) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	connId1 := newTestConnectionId(1)
+	connId2 := newTestConnectionId(2)
+
+	const blockNumber = 50
+
+	mainHeader := &byron.ByronMainBlockHeader{}
+	mainHeader.ConsensusData.Difficulty.Value = blockNumber
+	mainView, ok := GetPraosTiebreakerView(mainHeader)
+	require.False(t, ok, "Byron header has no Praos select view")
+
+	accepted := cs.updatePeerTipObservedPraosView(
+		connId1,
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 100, Hash: []byte("regular-tip")},
+			BlockNumber: blockNumber,
+		},
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 100, Hash: []byte("regular-tip")},
+			BlockNumber: blockNumber,
+		},
+		nil,
+		mainView,
+	)
+	require.True(t, accepted)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId1, *cs.GetBestPeer(),
+		"the first (and only) peer must be selected")
+
+	ebbHeader := &byron.ByronEpochBoundaryBlockHeader{}
+	ebbHeader.ConsensusData.Difficulty.Value = blockNumber
+	ebbView, ok := GetPraosTiebreakerView(ebbHeader)
+	require.False(t, ok, "Byron header has no Praos select view")
+
+	accepted = cs.updatePeerTipObservedPraosView(
+		connId2,
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 101, Hash: []byte("ebb-tip")},
+			BlockNumber: blockNumber,
+		},
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 101, Hash: []byte("ebb-tip")},
+			BlockNumber: blockNumber,
+		},
+		nil,
+		ebbView,
+	)
+	require.True(t, accepted)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, connId2, *cs.GetBestPeer(),
+		"the peer reporting the Byron EBB successor must win over the "+
+			"regular-tip incumbent at the same block number")
+}
+
+const (
+	// previewSecurityParam is Preview's k, the value in the reproduction.
+	previewSecurityParam = 432
+
+	// canonicalAdvertisedBlock and canonicalAdvertisedSlot are the tip both
+	// public roots advertised in the reproduction.
+	canonicalAdvertisedBlock = 4625199
+	canonicalAdvertisedSlot  = 121697834
+)
+
+// canonicalAdvertisedTip is the identical tip advertised by both canonical
+// peers.
+func canonicalAdvertisedTip() ochainsync.Tip {
+	return tip(
+		canonicalAdvertisedBlock,
+		canonicalAdvertisedSlot,
+		"canonical-preview-tip",
+	)
+}
+
+// deliveredFrontier builds a delivered-header frontier. Both peers are on the
+// same chain, so the same block number always carries the same slot and hash.
+func deliveredFrontier(block uint64) ochainsync.Tip {
+	return tip(block, 600000+block, "hdr-"+itoa(block))
+}
+
+func itoa(v uint64) string {
+	if v == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(buf[i:])
+}
+
+// chainSwitchBarrierTimeout bounds the wait for the barrier below. It is a
+// deadlock bound, not a settling delay: the barrier is already queued behind
+// whatever the selector decided by the time the wait starts, so the normal
+// cost is one lane hand-off.
+const chainSwitchBarrierTimeout = 30 * time.Second
+
+// chainSwitchBarrier is a sentinel published through the chain-switch ordered
+// lane so a test can tell "no switch was decided" from "the switch has not
+// been delivered yet".
+//
+// ChainSelector.publishSelection routes chain switches through
+// EventBus.PublishOrdered, so the call that drove
+// the decision returns before the lane worker has handed the event to any
+// subscriber. A lane is a FIFO drained by exactly one worker, so a sentinel
+// enqueued after those switches is delivered after them: receiving it back is
+// proof that every switch published earlier on this goroutine has already
+// reached the subscription. Its Data type is not ChainSwitchEvent, so it is
+// skipped rather than counted as a decision. Same construction as
+// switchBarrier in ouroboros/tests_test.go.
+type chainSwitchBarrier struct{}
+
+// collectChainSwitchEvents returns every ChainSwitchEvent the selector has
+// published so far, bounded by the barrier above. A non-blocking drain is not
+// a bound: it reports a switch that has been published but not yet delivered
+// as no switch at all, which turns this file's assertions into a race against
+// the lane worker.
+func collectChainSwitchEvents(
+	t *testing.T,
+	bus *event.EventBus,
+	ch <-chan event.Event,
+) []ChainSwitchEvent {
+	t.Helper()
+	require.True(
+		t,
+		bus.PublishOrdered(
+			ChainSwitchEventType,
+			event.NewEvent(ChainSwitchEventType, chainSwitchBarrier{}),
+		),
+		"event bus refused the chain-switch barrier",
+	)
+	var out []ChainSwitchEvent
+	for {
+		evt := testutil.RequireReceive(
+			t,
+			ch,
+			chainSwitchBarrierTimeout,
+			"chain-switch barrier",
+		)
+		switch data := evt.Data.(type) {
+		case chainSwitchBarrier:
+			return out
+		case ChainSwitchEvent:
+			out = append(out, data)
+		default:
+			// Only the selector and the barrier above publish on this
+			// lane, so anything else is a bug in one of them. Skipping it
+			// would still terminate -- the barrier is behind it in the
+			// same FIFO -- but it would drop a switch decision the
+			// assertions below then read as "never switched".
+			t.Fatalf("unexpected %T on the chain_switch lane", evt.Data)
+		}
+	}
+}
+
+// peerSelectable exposes the selectability gate for assertions.
+func peerSelectable(
+	t *testing.T,
+	cs *ChainSelector,
+	connId ouroboros.ConnectionId,
+) bool {
+	t.Helper()
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	peerTip, ok := cs.peerTips[connId]
+	require.True(t, ok, "peer must be tracked")
+	return cs.isPeerSelectableLocked(connId, peerTip)
+}
+
+// TestSameChainFrontierLeadKeepsLaggingIncumbentSelectable pins the
+// eligibility half of the interaction. The observed-frontier k-behind filter
+// in isPeerSelectableLocked measures the DELIVERED frontier against the best
+// delivered frontier. Two canonical peers advertising the identical tip
+// differed by 742 delivered blocks (> Preview k=432), which marked the
+// incumbent ineligible and skipped the anti-flap pin entirely.
+func TestSameChainFrontierLeadKeepsLaggingIncumbentSelectable(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: previewSecurityParam,
+	})
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	cs.SetLocalTip(deliveredFrontier(27900))
+
+	advertised := canonicalAdvertisedTip()
+	require.True(t, cs.updatePeerTipObserved(
+		incumbent,
+		advertised,
+		deliveredFrontier(28029),
+		nil,
+	))
+	require.True(t, cs.updatePeerTipObserved(
+		challenger,
+		advertised,
+		deliveredFrontier(28029),
+		nil,
+	))
+
+	// Walk the challenger's delivered frontier forward in steps within k so
+	// the implausible-frontier bound accepts each one, until it leads by the
+	// 742 blocks observed in the reproduction.
+	for _, block := range []uint64{28461, 28771} {
+		require.True(t, cs.updatePeerTipObserved(
+			challenger,
+			advertised,
+			deliveredFrontier(block),
+			nil,
+		))
+	}
+
+	require.Equal(
+		t,
+		uint64(742),
+		cs.GetPeerTip(challenger).SelectionTip().BlockNumber-
+			cs.GetPeerTip(incumbent).SelectionTip().BlockNumber,
+		"scenario must reproduce the observed 742-block frontier gap",
+	)
+
+	assert.True(
+		t,
+		peerSelectable(t, cs, incumbent),
+		"a peer advertising the same canonical tip must stay selectable when it trails only in delivered headers",
+	)
+}
+
+// TestCanonicalPeersWithCrossingFrontiersDoNotFlap is the regression test for
+// the reported failure: equal canonical advertised tips with delivered
+// frontiers that repeatedly cross, including a gap larger than k. The active
+// connection must not change, and no peer-to-peer ChainSwitchEvent may be
+// published — that event is what drives the ledger's fresh-cursor close of a
+// selected peer that is ahead of the local tip
+// (ledger.chainSwitchNeedsFreshCursorLocked returns false for an empty
+// PreviousConnectionId, so only a peer-to-peer switch can trigger it).
+func TestCanonicalPeersWithCrossingFrontiersDoNotFlap(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Stop)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:      eventBus,
+		SecurityParam: previewSecurityParam,
+	})
+	_, switchCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	rootA := newTestConnectionId(1)
+	rootB := newTestConnectionId(2)
+	advertised := canonicalAdvertisedTip()
+
+	cs.SetLocalTip(deliveredFrontier(27900))
+
+	// Both roots have delivered the same header; A is established first and
+	// becomes the incumbent.
+	require.True(t, cs.updatePeerTipObserved(
+		rootA,
+		advertised,
+		deliveredFrontier(27900),
+		nil,
+	))
+	require.NotNil(t, cs.GetBestPeer())
+	require.Equal(t, rootA, *cs.GetBestPeer())
+	require.True(t, cs.updatePeerTipObserved(
+		rootB,
+		advertised,
+		deliveredFrontier(27900),
+		nil,
+	))
+	require.Equal(t, rootA, *cs.GetBestPeer())
+
+	// Delivered frontiers now cross repeatedly. Every step keeps the two
+	// advertised tips identical, so no step is a chain-quality change; the
+	// last two crossings exceed k in both directions.
+	steps := []struct {
+		conn  ouroboros.ConnectionId
+		block uint64
+		note  string
+	}{
+		{rootB, 28029, "challenger leads by 129 (beyond the head margin)"},
+		{rootA, 28100, "incumbent retakes the lead"},
+		{rootB, 28461, "challenger leads by 361, still within k"},
+		{rootB, 28842, "challenger leads by 742, beyond k"},
+		{rootA, 28532, "incumbent catches up"},
+		{rootA, 28964, "incumbent retakes the lead"},
+		{rootB, 29274, "challenger leads by 310"},
+		{rootB, 29706, "challenger leads by 742, beyond k again"},
+	}
+	for _, step := range steps {
+		require.True(
+			t,
+			cs.updatePeerTipObserved(
+				step.conn,
+				advertised,
+				deliveredFrontier(step.block),
+				nil,
+			),
+			"delivered frontier %d must be accepted: %s",
+			step.block,
+			step.note,
+		)
+		best := cs.GetBestPeer()
+		require.NotNil(t, best, "selection must not stall: %s", step.note)
+		assert.Equal(
+			t,
+			rootA,
+			*best,
+			"active peer must not flap on delivered-frontier lead: %s",
+			step.note,
+		)
+	}
+
+	switchEvents := collectChainSwitchEvents(t, eventBus, switchCh)
+	require.Len(
+		t,
+		switchEvents,
+		1,
+		"only the initial selection may publish a chain switch",
+	)
+	assert.Equal(
+		t,
+		ouroboros.ConnectionId{},
+		switchEvents[0].PreviousConnectionId,
+		"the only switch must be the initial selection, which cannot trigger a fresh-cursor close",
+	)
+}
+
+// TestDivergentPeersStillSwitchOnLongerDeliveredChain is the AC #2 negative
+// case for genuine chain divergence: the two peers advertise the same height
+// and slot but DIFFERENT blocks, so they are not on the same chain. The
+// delivered-frontier lead is then real chain quality and the selector must
+// converge to the longer chain.
+func TestDivergentPeersStillSwitchOnLongerDeliveredChain(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: previewSecurityParam,
+	})
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	cs.SetLocalTip(deliveredFrontier(27900))
+
+	incumbentAdvertised := tip(
+		canonicalAdvertisedBlock,
+		canonicalAdvertisedSlot,
+		"fork-a-tip",
+	)
+	challengerAdvertised := tip(
+		canonicalAdvertisedBlock,
+		canonicalAdvertisedSlot,
+		"fork-b-tip",
+	)
+
+	require.True(t, cs.updatePeerTipObserved(
+		incumbent,
+		incumbentAdvertised,
+		deliveredFrontier(28029),
+		nil,
+	))
+	require.NotNil(t, cs.GetBestPeer())
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	require.True(t, cs.updatePeerTipObserved(
+		challenger,
+		challengerAdvertised,
+		tip(28029, 628029, "fork-b-28029"),
+		nil,
+	))
+	for _, block := range []uint64{28461, 28842} {
+		require.True(t, cs.updatePeerTipObserved(
+			challenger,
+			challengerAdvertised,
+			tip(block, 600000+block, "fork-b-"+itoa(block)),
+			nil,
+		))
+	}
+
+	best := cs.GetBestPeer()
+	require.NotNil(t, best)
+	assert.Equal(
+		t,
+		challenger,
+		*best,
+		"a genuinely divergent longer delivered chain must still win selection",
+	)
+}
+
+// TestContradictedAdvertisedTipDoesNotExemptFrontierLag is the AC #2 negative
+// case for a spoofed advertisement: a peer copies the honest peer's advertised
+// tip but its delivered headers contradict the honest chain at a shared slot.
+// The delivered history is the trusted signal, so the copied advertisement
+// must not buy it the same-chain treatment.
+func TestContradictedAdvertisedTipDoesNotExemptFrontierLag(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: previewSecurityParam,
+	})
+
+	honest := newTestConnectionId(1)
+	spoofer := newTestConnectionId(2)
+	advertised := canonicalAdvertisedTip()
+
+	cs.SetLocalTip(deliveredFrontier(27900))
+
+	// The spoofer delivers a conflicting block at slot 628029.
+	require.True(t, cs.updatePeerTipObserved(
+		spoofer,
+		advertised,
+		tip(28029, 628029, "spoofed-28029"),
+		nil,
+	))
+	// The honest peer delivers the canonical block at the same slot and then
+	// runs its frontier more than k ahead.
+	require.True(t, cs.updatePeerTipObserved(
+		honest,
+		advertised,
+		deliveredFrontier(28029),
+		nil,
+	))
+	for _, block := range []uint64{28461, 28842} {
+		require.True(t, cs.updatePeerTipObserved(
+			honest,
+			advertised,
+			deliveredFrontier(block),
+			nil,
+		))
+	}
+
+	assert.False(
+		t,
+		peerSelectable(t, cs, spoofer),
+		"a peer whose delivered headers contradict the leader must not be exempted by a copied advertised tip",
+	)
+	best := cs.GetBestPeer()
+	require.NotNil(t, best)
+	assert.Equal(t, honest, *best)
+}
+
+// TestSameChainExemptionDoesNotRescueImplausiblyBehindPeer is the AC #2
+// negative case for the implausible-tip bound: the same-chain exemption
+// applies only to the behind-best-frontier filter. A peer whose delivered
+// frontier is more than k behind the APPLIED LOCAL tip is useless and must
+// stay unselectable even when it advertises the canonical tip.
+func TestSameChainExemptionDoesNotRescueImplausiblyBehindPeer(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: previewSecurityParam,
+	})
+
+	stuck := newTestConnectionId(1)
+	advertised := canonicalAdvertisedTip()
+
+	require.True(t, cs.updatePeerTipObserved(
+		stuck,
+		advertised,
+		deliveredFrontier(27000),
+		nil,
+	))
+	// Local tip advances well past the peer's delivered frontier.
+	cs.SetLocalTip(deliveredFrontier(27000 + previewSecurityParam + 1))
+
+	assert.False(
+		t,
+		peerSelectable(t, cs, stuck),
+		"a peer more than k behind the applied local tip must stay unselectable",
+	)
+	cs.EvaluateAndSwitch()
+	assert.Nil(
+		t,
+		cs.GetBestPeer(),
+		"no peer may be selected when the only peer is implausibly behind",
+	)
+}
+
+// TestSameChainPinStillReleasesOnLocalTipStall asserts the progress-aware
+// escape survives the same-chain pin: an incumbent that stops driving local
+// tip progress is released even though it advertises the same canonical tip as
+// the challenger.
+func TestSameChainPinStillReleasesOnLocalTipStall(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: previewSecurityParam,
+	})
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clock)
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+	advertised := canonicalAdvertisedTip()
+
+	cs.SetLocalTip(deliveredFrontier(27900))
+	require.True(t, cs.updatePeerTipObserved(
+		incumbent,
+		advertised,
+		deliveredFrontier(27900),
+		nil,
+	))
+	require.True(t, cs.updatePeerTipObserved(
+		challenger,
+		advertised,
+		deliveredFrontier(27900),
+		nil,
+	))
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	require.True(t, cs.updatePeerTipObserved(
+		challenger,
+		advertised,
+		deliveredFrontier(28332),
+		nil,
+	))
+	require.Equal(
+		t,
+		incumbent,
+		*cs.GetBestPeer(),
+		"same-chain frontier lead alone must not release the pin",
+	)
+
+	// The applied local tip has not moved; past the stall timeout the pin
+	// must release so the node can leave a non-progressing incumbent.
+	clock.Advance(catchUpPinStallTimeout)
+	require.True(t, cs.EvaluateAndSwitch())
+	best := cs.GetBestPeer()
+	require.NotNil(t, best)
+	assert.Equal(
+		t,
+		challenger,
+		*best,
+		"the progress-aware stall escape must still release the same-chain pin",
+	)
+}
+
+// TestDivergentLeaderDoesNotSuppressPeersAgreeingWithAnotherLeader asserts the
+// same-chain check scans every peer holding the leading delivered frontier, not
+// one arbitrary representative. With two equally tall leaders on different
+// chains, a trailing peer that agrees with one of them must stay selectable
+// regardless of map iteration order.
+func TestDivergentLeaderDoesNotSuppressPeersAgreeingWithAnotherLeader(
+	t *testing.T,
+) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: previewSecurityParam,
+	})
+
+	trailing := newTestConnectionId(1)
+	honestLeader := newTestConnectionId(2)
+	divergentLeader := newTestConnectionId(3)
+
+	canonical := canonicalAdvertisedTip()
+	divergent := tip(
+		canonicalAdvertisedBlock,
+		canonicalAdvertisedSlot,
+		"divergent-tip",
+	)
+
+	cs.SetLocalTip(deliveredFrontier(27900))
+
+	require.True(t, cs.updatePeerTipObserved(
+		trailing,
+		canonical,
+		deliveredFrontier(28029),
+		nil,
+	))
+	for _, block := range []uint64{28029, 28461, 28842} {
+		require.True(t, cs.updatePeerTipObserved(
+			honestLeader,
+			canonical,
+			deliveredFrontier(block),
+			nil,
+		))
+		require.True(t, cs.updatePeerTipObserved(
+			divergentLeader,
+			divergent,
+			tip(block, 600000+block, "divergent-"+itoa(block)),
+			nil,
+		))
+	}
+
+	assert.True(
+		t,
+		peerSelectable(t, cs, trailing),
+		"a peer agreeing with one of the leading frontiers must stay selectable",
+	)
+}
+
+// TestUnadvertisedTipIsNotSameChainEvidence pins the empty-hash guard in
+// sameAdvertisedTip. Two peers that have not told us where their chains end
+// both carry a zero advertised tip, which is identical but says nothing: it is
+// the absence of an advertisement, not agreement on one. Without the guard the
+// zero tips compare equal and every such pair is granted the same-chain
+// exemption, so a peer that has advertised nothing and trails the leading
+// frontier by more than k would stay selectable on no evidence at all.
+func TestUnadvertisedTipIsNotSameChainEvidence(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: previewSecurityParam,
+	})
+
+	trailing := newTestConnectionId(1)
+	leader := newTestConnectionId(2)
+	var unadvertised ochainsync.Tip
+
+	cs.SetLocalTip(deliveredFrontier(27900))
+
+	require.True(t, cs.updatePeerTipObserved(
+		trailing,
+		unadvertised,
+		deliveredFrontier(28029),
+		nil,
+	))
+	for _, block := range []uint64{28029, 28461, 28771} {
+		require.True(t, cs.updatePeerTipObserved(
+			leader,
+			unadvertised,
+			deliveredFrontier(block),
+			nil,
+		))
+	}
+
+	// The gap is the reproduction's, and neither peer is filtered out by the
+	// k-behind-the-applied-local-tip check, so the behind-best-frontier filter
+	// is the only thing under test here.
+	require.Equal(
+		t,
+		uint64(742),
+		cs.GetPeerTip(leader).SelectionTip().BlockNumber-
+			cs.GetPeerTip(trailing).SelectionTip().BlockNumber,
+	)
+
+	assert.False(
+		t,
+		peerSelectable(t, cs, trailing),
+		"a zero advertised tip is an absent advertisement, not agreement, and must not exempt a peer from the behind-best-frontier filter",
+	)
+}
+
+// peerActivityStallBuffer stands in for the production
+// event.DefaultSubscriberBuffer (1024) used by the node's
+// chainselection.peer_activity subscription. The mechanism under test is
+// buffer-size independent: a handler that stops returning stops draining, and
+// the buffer only decides how long that takes to become visible. In the
+// Preview run the 1024-slot buffer took 12h31m of
+// keepalive traffic to fill, which is exactly why the buffer is shrunk here
+// rather than the events slowed down.
+const peerActivityStallBuffer = 4
+
+// blockedConsumer is a downstream EventBus consumer that parks inside its
+// handler until the test releases it, modelling the ledger's
+// chainselection.chain_switch subscriber blocked on ls.chainsyncMutex while
+// the chainsync pipeline is not making progress.
+type blockedConsumer struct {
+	release   chan struct{}
+	closeOnce sync.Once
+	delivered atomic.Int64
+	entered   atomic.Int64
+}
+
+func newBlockedConsumer(t *testing.T) *blockedConsumer {
+	t.Helper()
+	return &blockedConsumer{release: make(chan struct{})}
+}
+
+func (b *blockedConsumer) handle(event.Event) {
+	b.entered.Add(1)
+	<-b.release
+	b.delivered.Add(1)
+}
+
+func (b *blockedConsumer) unblock() {
+	b.closeOnce.Do(func() { close(b.release) })
+}
+
+// newStalledSelectionFixture builds a ChainSelector with one tracked best peer
+// and a downstream chainselection.chain_selection consumer that never returns.
+// chain_selection is published by publishSelectionEvents on every accepted
+// TouchPeerActivity that has a best peer, so it is the deterministic member of
+// the same synchronous fan-out that also carries chain_switch.
+func newStalledSelectionFixture(
+	t *testing.T,
+) (*event.EventBus, *ChainSelector, *blockedConsumer, ouroboros.ConnectionId) {
+	t.Helper()
+
+	bus := event.NewEventBus(nil, nil)
+	consumer := newBlockedConsumer(t)
+	// LIFO cleanup: the consumer is released before the bus is stopped, or
+	// EventBus.shutdown would wait forever on the parked dispatch goroutine.
+	t.Cleanup(bus.Stop)
+	t.Cleanup(consumer.unblock)
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:          bus,
+		StaleTipThreshold: time.Hour,
+	})
+
+	connId := newTestConnectionId(1)
+	cs.UpdatePeerTip(connId, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("best")},
+		BlockNumber: 50,
+	}, nil)
+	cs.EvaluateAndSwitch()
+	require.NotNil(t, cs.GetBestPeer(), "fixture needs a selected best peer")
+
+	// Subscribed only after the setup publishes above have drained, so the
+	// fixture itself cannot park on its own blocked consumer.
+	//
+	// SubscriberBackpressureBlock models a downstream that stays blocked:
+	// under the default Detach the wait ends at event.channelDeliveryTimeout
+	// and the subscriber is dropped, which is what the 92b2e3e6 build in the
+	// issue did not do at all and is a different failure (permanent silent
+	// loss) rather than the stall under test here.
+	bus.SubscribeFuncWithBufferPolicy(
+		ChainSelectionEventType,
+		1,
+		event.SubscriberBackpressureBlock,
+		consumer.handle,
+	)
+	return bus, cs, consumer, connId
+}
+
+// A blocked downstream consumer must not stop the internal
+// chainselection.peer_activity subscriber from draining. The Preview run in
+// shows the opposite: the handler stopped returning,
+// its 1024-slot buffer filled over the next 12h31m, and from then on every
+// keepalive response parked a protocol goroutine inside EventBus.Publish
+// (ouroboros/keepalive.go) with 299 of them blocked by the end of the log.
+func TestPeerActivityHandlerKeepsDrainingWhileDownstreamConsumerBlocks(
+	t *testing.T,
+) {
+	bus, cs, consumer, connId := newStalledSelectionFixture(t)
+
+	var handled atomic.Int64
+	// Mirrors the node's subscribeChainSelectorEvents wiring for
+	// chainselection.peer_activity, with the blocking policy so a stalled
+	// handler is measured rather than the detach timer.
+	bus.SubscribeFuncWithBufferPolicy(
+		PeerActivityEventType,
+		peerActivityStallBuffer,
+		event.SubscriberBackpressureBlock,
+		func(evt event.Event) {
+			cs.HandlePeerActivityEvent(evt)
+			handled.Add(1)
+		},
+	)
+
+	// Enough touches to overrun the subscriber buffer several times over.
+	const touches = peerActivityStallBuffer * 4
+	published := make(chan struct{})
+	go func() {
+		defer close(published)
+		for range touches {
+			bus.Publish(
+				PeerActivityEventType,
+				event.NewEvent(
+					PeerActivityEventType,
+					PeerActivityEvent{ConnectionId: connId},
+				),
+			)
+		}
+	}()
+
+	// The negative case: a blocked downstream must not park the keepalive-side
+	// publishers. Every publish has to return.
+	testutil.RequireReceive(t, published, 10*time.Second,
+		"keepalive publishers parked on the peer_activity subscriber: a "+
+			"blocked downstream consumer must not park protocol goroutines",
+	)
+	testutil.WaitForCondition(t, func() bool {
+		return handled.Load() == touches
+	}, 10*time.Second,
+		"the internal peer_activity subscriber stopped draining while a "+
+			"downstream consumer was blocked",
+	)
+	require.Zero(t, consumer.delivered.Load(),
+		"fixture invariant: the downstream consumer is still blocked",
+	)
+
+	// Releasing the downstream consumer must still deliver the selection
+	// events the activity path produced: they are deferred, not discarded.
+	consumer.unblock()
+	testutil.WaitForCondition(t, func() bool {
+		return consumer.delivered.Load() > 0
+	}, 10*time.Second,
+		"selection events produced by the activity path were never delivered",
+	)
+}
+
+// Deferring publication must not reorder chain switches: a subscriber that
+// acts on chainselection.chain_switch (the ledger repoints its chainsync
+// cursor at NewConnectionId) ends up on the wrong peer if an older switch is
+// delivered after a newer one.
+//
+// What this pins is publisher order, which is the whole of what the lane
+// promises. All eight switches are decided and published from this goroutine,
+// so decision order and publish order coincide here. They do not in general:
+// every producer decides under cs.mutex and publishes after releasing it, so
+// two goroutines can decide in one order and enqueue in the other, and no lane
+// prevents that (wolf31o2 review). See publishSelection.
+func TestChainSwitchEventsPreservePublishOrder(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+
+	_, evtCh := bus.SubscribeWithBuffer(ChainSwitchEventType, 64)
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:          bus,
+		StaleTipThreshold: time.Hour,
+	})
+
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+
+	const switches = 8
+	want := make([]ouroboros.ConnectionId, 0, switches)
+	blockNumber := uint64(50)
+	for i := range switches {
+		conn := connA
+		if i%2 == 1 {
+			conn = connB
+		}
+		blockNumber++
+		cs.UpdatePeerTip(conn, ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 100 + blockNumber,
+				Hash: []byte(conn.String()),
+			},
+			BlockNumber: blockNumber,
+		}, nil)
+		cs.EvaluateAndSwitch()
+		want = append(want, conn)
+	}
+
+	got := make([]ouroboros.ConnectionId, 0, switches)
+	for range switches {
+		evt := testutil.RequireReceive(t, evtCh, 10*time.Second,
+			"chain switch event was never delivered",
+		)
+		data, ok := evt.Data.(ChainSwitchEvent)
+		require.True(t, ok, "expected ChainSwitchEvent, got %T", evt.Data)
+		got = append(got, data.NewConnectionId)
+	}
+	require.Equal(t, want, got,
+		"chain switch events must be delivered in publish order",
+	)
+}
+
+// peerBlockNumber reads a tracked peer's current delivered-frontier block
+// number.
+func peerBlockNumber(
+	t *testing.T,
+	cs *ChainSelector,
+	connId ouroboros.ConnectionId,
+) uint64 {
+	t.Helper()
+	pt := cs.GetPeerTip(connId)
+	require.NotNil(t, pt, "peer must be tracked")
+	return pt.SelectionTip().BlockNumber
+}
+
+// TestSwitchBackCooldownBoundsOscillationFrequency reproduces the storm with
+// two peers whose delivered frontiers repeatedly leapfrog each other by more
+// than catchUpPinHeadMargin -- plausible on ordinary per-header delivery
+// jitter near the tip, since a single newly delivered header can itself cross
+// a margin of a couple of blocks -- and asserts the active connection does
+// not flap between them faster than once per SwitchBackCooldown, while a
+// challenger that was never the very recently abandoned incumbent is still
+// adopted immediately.
+func TestSwitchBackCooldownBoundsOscillationFrequency(t *testing.T) {
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	cs := NewChainSelector(ChainSelectorConfig{})
+	installFakeClock(cs, clk)
+
+	peerA := newTestConnectionId(1)
+	peerB := newTestConnectionId(2)
+
+	cs.SetLocalTip(tip(5000, 5000, "local"))
+
+	// A becomes the incumbent (first ever selection: never debounced).
+	require.True(t, cs.updatePeerTipObserved(
+		peerA,
+		tip(5001, 5001, "a-0"),
+		tip(5001, 5001, "a-0"),
+		nil,
+	))
+	require.NotNil(t, cs.GetBestPeer())
+	require.Equal(t, peerA, *cs.GetBestPeer())
+
+	// B leapfrogs A by more than the margin. A was never abandoned before, so
+	// this first hand-off proceeds normally -- the fix must not block a
+	// genuinely new challenger.
+	require.True(t, cs.updatePeerTipObserved(
+		peerB,
+		tip(5001+catchUpPinHeadMargin+1, 5010, "b-0"),
+		tip(5001+catchUpPinHeadMargin+1, 5010, "b-0"),
+		nil,
+	))
+	require.NotNil(t, cs.GetBestPeer())
+	require.Equal(t, peerB, *cs.GetBestPeer(),
+		"a genuinely longer challenger must be adopted")
+
+	// Now reproduce the storm: whichever peer is NOT currently active
+	// leapfrogs the active one by margin+1 every iteration -- a genuine
+	// crossing each time -- with no wall-clock time passing between updates
+	// (the pathological case: bursty near-instantaneous header delivery).
+	// Every attempted hand-off tries to switch back to the peer the active
+	// connection most recently left.
+	switches := 0
+	for i := range 20 {
+		active := *cs.GetBestPeer()
+		challenger := peerA
+		if active == peerA {
+			challenger = peerB
+		}
+		next := peerBlockNumber(t, cs, active) + catchUpPinHeadMargin + 1
+		slot := 10_000 + uint64(i)
+		hash := fmt.Sprintf("burst-%d", i)
+		require.True(t, cs.updatePeerTipObserved(
+			challenger,
+			tip(next, slot, hash),
+			tip(next, slot, hash),
+			nil,
+		))
+		if *cs.GetBestPeer() == challenger {
+			switches++
+		}
+	}
+	assert.Equal(
+		t,
+		0,
+		switches,
+		"switch-back debounce must suppress every immediate reversal in the burst",
+	)
+	assert.Equal(
+		t,
+		peerB,
+		*cs.GetBestPeer(),
+		"active connection must not flap during the burst",
+	)
+
+	// The cooldown is a rate limit, not a permanent pin: once it elapses, a
+	// persistent lead is still adopted.
+	clk.Advance(defaultSwitchBackCooldown)
+	final := peerBlockNumber(t, cs, peerB) + catchUpPinHeadMargin + 1
+	require.True(t, cs.updatePeerTipObserved(
+		peerA,
+		tip(final, 20_000, "a-final"),
+		tip(final, 20_000, "a-final"),
+		nil,
+	))
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(
+		t,
+		peerA,
+		*cs.GetBestPeer(),
+		"a persistent lead must still win once the cooldown has elapsed",
+	)
+}
+
+// TestSwitchBackCooldownBoundsStallEscapeOscillation reproduces a second,
+// structurally similar storm: once the applied local tip stalls,
+// localTipStalledLocked stays true on every subsequent evaluation until
+// progress resumes, so before this fix the progress-stall escape released
+// the pin unconditionally forever -- providing no hysteresis at all,
+// regardless of catchUpPinHeadMargin, for as long as the stall lasted. Live
+// Preview reports showed exactly this: the local tip flatlined (confirmed by
+// two direct metric reads with zero movement) while three connections
+// oscillated sub-second-to-few-seconds apart, including a direct
+// back-and-forth between the same two peers ~227ms apart -- well inside
+// SwitchBackCooldown, which the first fix (gating only the longer-chain
+// escape) did not protect because the stall escape released the pin before
+// that gate was ever reached. The switching itself is what prevents any
+// blockfetch batch from completing, so the stall never clears on its own: a
+// self-sustaining livelock.
+func TestSwitchBackCooldownBoundsStallEscapeOscillation(t *testing.T) {
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	cs := NewChainSelector(ChainSelectorConfig{})
+	installFakeClock(cs, clk)
+
+	peerA := newTestConnectionId(1)
+	peerB := newTestConnectionId(2)
+	peerC := newTestConnectionId(3)
+
+	cs.SetLocalTip(tip(5000, 5000, "local"))
+	require.True(t, cs.updatePeerTipObserved(
+		peerA,
+		tip(5001, 5001, "a-0"),
+		tip(5001, 5001, "a-0"),
+		nil,
+	))
+	require.Equal(t, peerA, *cs.GetBestPeer())
+
+	// The applied local tip never advances again: past the stall timeout,
+	// localTipStalledLocked is true on every following evaluation for the
+	// rest of the test.
+	clk.Advance(catchUpPinStallTimeout + time.Second)
+
+	// B edges A by a single block -- well within catchUpPinHeadMargin, so
+	// only the (now-engaged) stall escape can release the pin here; the
+	// longer-chain escape does not apply at this margin. This first switch
+	// must still happen promptly: a genuinely new candidate is never
+	// debounced, so the stall escape's liveness guarantee is unaffected.
+	require.True(t, cs.updatePeerTipObserved(
+		peerB,
+		tip(5002, 5002, "b-0"),
+		tip(5002, 5002, "b-0"),
+		nil,
+	))
+	require.Equal(t, peerB, *cs.GetBestPeer(),
+		"the stall escape must still release the pin for a new candidate")
+
+	// Reproduce the storm: A and B keep leapfrogging by a single block, well
+	// within the margin, driven entirely by the unconditional stall escape.
+	switches := 0
+	for i := range 20 {
+		active := *cs.GetBestPeer()
+		challenger := peerA
+		if active == peerA {
+			challenger = peerB
+		}
+		next := peerBlockNumber(t, cs, active) + 1
+		slot := 10_000 + uint64(i)
+		hash := fmt.Sprintf("stall-burst-%d", i)
+		require.True(t, cs.updatePeerTipObserved(
+			challenger,
+			tip(next, slot, hash),
+			tip(next, slot, hash),
+			nil,
+		))
+		if *cs.GetBestPeer() == challenger {
+			switches++
+		}
+	}
+	assert.Equal(
+		t,
+		0,
+		switches,
+		"switch-back debounce must suppress every immediate reversal driven by the stall escape",
+	)
+
+	// A genuinely new peer (never recently active) is still subject to the
+	// GLOBAL discretionary rate limit (switchBackRateLimitedLocked): the
+	// burst loop above never advanced the clock, so the last discretionary
+	// hand-off (the very first A->B switch) is still inside its cooldown
+	// window, and C's arrival must not be exempted from it merely because C
+	// itself was never the specific connection just abandoned. Exempting
+	// "never seen as active" outright is exactly the gap that let a small
+	// rotating set of real peers evade the per-connection debounce forever
+	// (see TestSwitchBackRateLimitBoundsThreeWayRotation). Unambiguously
+	// ahead of BOTH A and B (not merely tied with whichever one the burst
+	// loop last bumped), so selectBestChainLocked's upstream pick cannot land
+	// back on A or B by a map-iteration-order tiebreak among equal-height
+	// peers.
+	next := max(
+		peerBlockNumber(t, cs, peerA),
+		peerBlockNumber(t, cs, peerB),
+	) + 50
+	require.True(t, cs.updatePeerTipObserved(
+		peerC,
+		tip(next, 99_999, "c-0"),
+		tip(next, 99_999, "c-0"),
+		nil,
+	))
+	assert.Equal(t, peerB, *cs.GetBestPeer(),
+		"a new candidate arriving inside the global cooldown window must still be rate-limited")
+
+	// Once the global cooldown elapses, the new candidate is adopted.
+	clk.Advance(defaultSwitchBackCooldown)
+	require.True(t, cs.updatePeerTipObserved(
+		peerC,
+		tip(next+1, 100_000, "c-1"),
+		tip(next+1, 100_000, "c-1"),
+		nil,
+	))
+	assert.Equal(t, peerC, *cs.GetBestPeer(),
+		"a genuinely new candidate must still be adopted once the global cooldown elapses")
+
+	// The cooldown is a rate limit, not a permanent freeze: once it elapses
+	// again, a connection abandoned earlier is reclaimable too.
+	clk.Advance(defaultSwitchBackCooldown)
+	next = peerBlockNumber(t, cs, peerC) + 1
+	require.True(t, cs.updatePeerTipObserved(
+		peerA,
+		tip(next, 999_999, "a-final"),
+		tip(next, 999_999, "a-final"),
+		nil,
+	))
+	assert.Equal(t, peerA, *cs.GetBestPeer(),
+		"a previously abandoned connection must be reclaimable once the cooldown elapses")
+}
+
+// TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger asserts that the
+// per-connection debounce (switchBackDebouncedLocked) does not, on its own,
+// single out a third peer that was never the active connection: peerC is not
+// blocked by recentlyLeft, since it has no entry there. It IS still bounded
+// by the global discretionary rate limit (switchBackRateLimitedLocked), which
+// applies regardless of which connection is involved -- exempting a
+// "never-before-active" peer outright is exactly the gap that let a small
+// rotating set of real peers dodge the per-connection debounce forever (see
+// TestSwitchBackRateLimitBoundsThreeWayRotation). So peerC's switch is
+// delayed until the global cooldown elapses, not blocked forever and not
+// adopted mid-cooldown.
+func TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger(t *testing.T) {
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	cs := NewChainSelector(ChainSelectorConfig{})
+	installFakeClock(cs, clk)
+
+	peerA := newTestConnectionId(1)
+	peerB := newTestConnectionId(2)
+	peerC := newTestConnectionId(3)
+
+	cs.SetLocalTip(tip(5000, 5000, "local"))
+	require.True(t, cs.updatePeerTipObserved(
+		peerA,
+		tip(5001, 5001, "a-0"),
+		tip(5001, 5001, "a-0"),
+		nil,
+	))
+	require.Equal(t, peerA, *cs.GetBestPeer())
+
+	// B takes over (A is now within its cooldown window).
+	require.True(t, cs.updatePeerTipObserved(
+		peerB,
+		tip(5001+catchUpPinHeadMargin+1, 5010, "b-0"),
+		tip(5001+catchUpPinHeadMargin+1, 5010, "b-0"),
+		nil,
+	))
+	require.Equal(t, peerB, *cs.GetBestPeer())
+
+	// C, a peer that has never been active, genuinely outruns B by more than
+	// the margin. The per-connection debounce alone would not block it (C has
+	// no recentlyLeft entry), but the global discretionary rate limit still
+	// applies: the A->B switch just above was itself a discretionary release,
+	// and no time has passed since, so C's arrival mid-cooldown must still be
+	// rate-limited.
+	require.True(t, cs.updatePeerTipObserved(
+		peerC,
+		tip(5001+2*(catchUpPinHeadMargin+1), 5020, "c-0"),
+		tip(5001+2*(catchUpPinHeadMargin+1), 5020, "c-0"),
+		nil,
+	))
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, peerB, *cs.GetBestPeer(),
+		"a new candidate arriving inside the global cooldown window must still be rate-limited")
+
+	// Once the global cooldown elapses, C is adopted -- the rate limit delays
+	// a genuinely new candidate, it does not exempt or permanently block it.
+	clk.Advance(defaultSwitchBackCooldown)
+	require.True(t, cs.updatePeerTipObserved(
+		peerC,
+		tip(5001+2*(catchUpPinHeadMargin+1)+1, 5021, "c-1"),
+		tip(5001+2*(catchUpPinHeadMargin+1)+1, 5021, "c-1"),
+		nil,
+	))
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, peerC, *cs.GetBestPeer(),
+		"a genuinely new candidate must still be adopted once the global cooldown elapses")
+}
+
+// TestSwitchBackRateLimitBoundsThreeWayRotation reproduces the live incident
+// this global rate limit exists for: not two peers alternating, but three (or
+// more) real peer connections whose delivered frontiers take turns
+// marginally leading each other under ordinary network jitter. Observed live:
+// the active connection flipped among the same three peer connections roughly
+// every ~2 seconds indefinitely, with applied block height completely frozen
+// throughout.
+//
+// switchBackDebouncedLocked alone (per-connection: "was THIS challenger the
+// specific connection just abandoned") does not bound this. With three
+// peers rotating A -> B -> C -> A -> ..., by the time evaluation cycles back
+// to a given connection it is essentially never "the one most recently left"
+// -- some other peer was left more recently -- so the per-connection debounce
+// never engages for it, even under realistic (non-zero) inter-arrival jitter.
+// Driving that rotation with each hop's target advancing the clock by just
+// over half of switchBackCooldown (so a specific peer's own recurrence
+// interval -- two hops later -- safely clears its per-connection cooldown)
+// demonstrates the gap directly: every single hop succeeds, so the number of
+// switches equals the number of hops and the active connection never holds
+// still for as long as switchBackCooldown.
+//
+// switchBackRateLimitedLocked (this fix) bounds the AGGREGATE hand-off rate
+// to at most one per switchBackCooldown regardless of which peer is
+// challenging or how many distinct peers are rotating, so it closes this gap
+// even though every individual hop still looks, pairwise, like a "genuinely
+// new" challenger.
+func TestSwitchBackRateLimitBoundsThreeWayRotation(t *testing.T) {
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	cs := NewChainSelector(ChainSelectorConfig{})
+	installFakeClock(cs, clk)
+
+	peers := []ouroboros.ConnectionId{
+		newTestConnectionId(1),
+		newTestConnectionId(2),
+		newTestConnectionId(3),
+	}
+
+	cs.SetLocalTip(tip(5000, 5000, "local"))
+	require.True(t, cs.updatePeerTipObserved(
+		peers[0],
+		tip(5001, 5001, "p0-0"),
+		tip(5001, 5001, "p0-0"),
+		nil,
+	))
+	require.Equal(t, peers[0], *cs.GetBestPeer())
+
+	// Hop spacing is chosen so a specific peer's OWN recurrence interval (two
+	// hops later, in a strict 3-way rotation) exceeds switchBackCooldown --
+	// clearing the per-connection debounce on every single hop -- while
+	// consecutive hops themselves remain well inside the cooldown, exactly
+	// the "bursty relative to a single pair, spaced-out relative to any one
+	// peer" cadence real network jitter produces.
+	hopSpacing := defaultSwitchBackCooldown/2 + 100*time.Millisecond
+	require.Less(
+		t,
+		defaultSwitchBackCooldown,
+		2*hopSpacing,
+		"test setup: a peer's own recurrence interval must clear its per-connection cooldown",
+	)
+
+	const rounds = 30
+	switches := 0
+	var lastSwitchAt time.Time
+	activeIdx := 0
+	block := uint64(5001)
+	for i := range rounds {
+		clk.Advance(hopSpacing)
+		challengerIdx := (activeIdx + 1) % len(peers)
+		block += catchUpPinHeadMargin + 1
+		slot := 10_000 + uint64(i)
+		hash := fmt.Sprintf("rotation-%d", i)
+		require.True(t, cs.updatePeerTipObserved(
+			peers[challengerIdx],
+			tip(block, slot, hash),
+			tip(block, slot, hash),
+			nil,
+		))
+		if *cs.GetBestPeer() == peers[challengerIdx] {
+			if !lastSwitchAt.IsZero() {
+				assert.GreaterOrEqual(
+					t,
+					clk.now.Sub(lastSwitchAt),
+					defaultSwitchBackCooldown,
+					"two discretionary switches happened less than a cooldown apart at round %d",
+					i,
+				)
+			}
+			lastSwitchAt = clk.now
+			switches++
+			activeIdx = challengerIdx
+		}
+	}
+
+	// Without the global rate limit, every one of the 30 hops succeeds (each
+	// challenger clears the per-connection debounce by construction), so the
+	// active connection would never hold still. With it, successive switches
+	// are at least a cooldown apart, so over `rounds*hopSpacing` of simulated
+	// time the count is bounded well below the hop count.
+	maxExpectedSwitches := int(
+		time.Duration(rounds)*hopSpacing/defaultSwitchBackCooldown,
+	) + 1
+	assert.Less(
+		t,
+		switches,
+		rounds,
+		"the global rate limit must reject at least some hops in the rotation",
+	)
+	assert.LessOrEqual(
+		t,
+		switches,
+		maxExpectedSwitches,
+		"switch count must stay within the global cooldown's rate bound",
+	)
+	assert.Greater(
+		t,
+		switches,
+		0,
+		"the rate limit must still allow forward progress, not freeze selection entirely",
+	)
+}
+
+// fakeClock is a deterministic, mutable clock for exercising the progress-aware
+// stall escape without sleeping.
+type fakeClock struct {
+	now time.Time
+}
+
+func (c *fakeClock) Now() time.Time { return c.now }
+
+func (c *fakeClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
+
+// installFakeClock swaps the selector's nowFn for a deterministic clock and
+// seeds the initial time. Must be called before any SetLocalTip that should
+// record progress at a known instant.
+func installFakeClock(cs *ChainSelector, c *fakeClock) {
+	cs.mutex.Lock()
+	cs.nowFn = c.Now
+	cs.mutex.Unlock()
+}
+
+// tip is a small helper to build a chainsync tip.
+func tip(block, slot uint64, hash string) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       ocommon.Point{Slot: slot, Hash: []byte(hash)},
+		BlockNumber: block,
+	}
+}
+
+// TestPinNoSwitchOnMicroForkDuringCatchUp asserts that while the node is in
+// deep catch-up (gap > catchUpPinBlockThreshold), the active connection does
+// NOT flap across micro-forking equal-tip / 1-block-ahead peers.
+func TestPinNoSwitchOnMicroForkDuringCatchUp(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	// Local tip far behind both peers: catch-up regime.
+	cs.SetLocalTip(tip(1000, 1000, "local"))
+
+	// Incumbent established at block 1200 (gap 200 > threshold 100).
+	cs.UpdatePeerTip(incumbent, tip(1200, 1200, "inc-1200"), nil)
+	require.NotNil(t, cs.GetBestPeer())
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	// Challenger leapfrogs to a sibling at the same height, then one block
+	// ahead, repeatedly. These are head micro-forks; the active connection
+	// must remain pinned to the incumbent.
+	cs.UpdatePeerTip(challenger, tip(1200, 1201, "chal-1200"), nil)
+	assert.Equal(t, incumbent, *cs.GetBestPeer(),
+		"must not switch on same-height sibling during catch-up")
+
+	cs.UpdatePeerTip(challenger, tip(1201, 1202, "chal-1201"), nil)
+	assert.Equal(t, incumbent, *cs.GetBestPeer(),
+		"must not switch on 1-block micro-fork during catch-up")
+
+	// Incumbent leapfrogs back ahead; still pinned to incumbent.
+	cs.UpdatePeerTip(incumbent, tip(1202, 1203, "inc-1202"), nil)
+	assert.Equal(t, incumbent, *cs.GetBestPeer())
+
+	// Confirm the pin is in the catch-up regime.
+	cs.mutex.RLock()
+	catchingUp := cs.catchingUpLocked(nil)
+	cs.mutex.RUnlock()
+	assert.True(t, catchingUp, "expected catch-up regime for this scenario")
+}
+
+// TestPinNoSwitchOnSiblingHeadForkAtTip asserts that at/near the live tip
+// (gap < catchUpPinBlockThreshold), the active connection still does NOT flap
+// across same-height sibling head-forks. This is the Part 2 tip-hold case.
+func TestPinNoSwitchOnSiblingHeadForkAtTip(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	// Local tip at the head: gap is tiny, NOT catch-up.
+	cs.SetLocalTip(tip(5000, 5000, "local"))
+
+	cs.UpdatePeerTip(incumbent, tip(5001, 5001, "inc-5001"), nil)
+	require.NotNil(t, cs.GetBestPeer())
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	// Sibling head-fork at the same height (different hash/slot). With no VRF
+	// data the Praos comparison is ChainEqual, so this is held by the existing
+	// equal-tip preservation — the active connection must not flap.
+	cs.UpdatePeerTip(challenger, tip(5001, 5002, "chal-5001"), nil)
+	assert.Equal(t, incumbent, *cs.GetBestPeer(),
+		"must not switch on same-height sibling at the tip")
+
+	// Challenger one block ahead (head micro-fork): selectBestChain prefers the
+	// taller challenger, and the anti-flap pin holds the incumbent.
+	cs.UpdatePeerTip(challenger, tip(5002, 5003, "chal-5002"), nil)
+	assert.Equal(t, incumbent, *cs.GetBestPeer(),
+		"must not switch on 1-block head micro-fork at the tip")
+	cs.UpdatePeerTip(challenger, tip(5003, 5004, "chal-5003"), nil)
+	assert.Equal(t, incumbent, *cs.GetBestPeer())
+
+	// Confirm we are NOT in the catch-up regime (tip-hold path exercised).
+	cs.mutex.RLock()
+	catchingUp := cs.catchingUpLocked(nil)
+	cs.mutex.RUnlock()
+	assert.False(t, catchingUp, "expected tip-hold (non-catch-up) regime")
+}
+
+// TestPinSwitchesToGenuinelyLongerChainCatchUp asserts the longer-chain escape
+// fires during catch-up: a challenger beyond catchUpPinHeadMargin is a real
+// longer chain and the active connection switches to it.
+func TestPinSwitchesToGenuinelyLongerChainCatchUp(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	cs.SetLocalTip(tip(1000, 1000, "local"))
+	cs.UpdatePeerTip(incumbent, tip(1200, 1200, "inc-1200"), nil)
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	// Challenger genuinely longer: ahead by more than catchUpPinHeadMargin.
+	cs.UpdatePeerTip(
+		challenger,
+		tip(1200+catchUpPinHeadMargin+1, 1300, "chal-long"),
+		nil,
+	)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, challenger, *cs.GetBestPeer(),
+		"must converge to a genuinely longer chain during catch-up")
+}
+
+// TestPinSwitchesToGenuinelyLongerChainAtTip asserts the longer-chain escape
+// also fires at the tip.
+func TestPinSwitchesToGenuinelyLongerChainAtTip(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	cs.SetLocalTip(tip(5000, 5000, "local"))
+	cs.UpdatePeerTip(incumbent, tip(5001, 5001, "inc-5001"), nil)
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	cs.UpdatePeerTip(
+		challenger,
+		tip(5001+catchUpPinHeadMargin+1, 5100, "chal-long"),
+		nil,
+	)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, challenger, *cs.GetBestPeer(),
+		"must converge to a genuinely longer chain at the tip")
+}
+
+// TestPinAtMarginBoundary verifies the exact margin boundary: a challenger
+// exactly catchUpPinHeadMargin ahead stays pinned, one block more releases.
+func TestPinAtMarginBoundary(t *testing.T) {
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	// Exactly at the margin: pinned.
+	cs := NewChainSelector(ChainSelectorConfig{})
+	cs.SetLocalTip(tip(5000, 5000, "local"))
+	cs.UpdatePeerTip(incumbent, tip(5001, 5001, "inc"), nil)
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+	cs.UpdatePeerTip(
+		challenger,
+		tip(5001+catchUpPinHeadMargin, 5050, "chal-at"),
+		nil,
+	)
+	assert.Equal(t, incumbent, *cs.GetBestPeer(),
+		"challenger exactly at the margin must stay pinned")
+
+	// One block past the margin: released.
+	cs2 := NewChainSelector(ChainSelectorConfig{})
+	cs2.SetLocalTip(tip(5000, 5000, "local"))
+	cs2.UpdatePeerTip(incumbent, tip(5001, 5001, "inc"), nil)
+	require.Equal(t, incumbent, *cs2.GetBestPeer())
+	cs2.UpdatePeerTip(
+		challenger,
+		tip(5001+catchUpPinHeadMargin+1, 5050, "chal-past"),
+		nil,
+	)
+	assert.Equal(t, challenger, *cs2.GetBestPeer(),
+		"challenger one block past the margin must release the pin")
+}
+
+// TestPinProgressStallEscape asserts the progress-aware escape: when the
+// applied local tip stops advancing for catchUpPinStallTimeout, the pin
+// releases and the active connection switches to the challenger sibling.
+func TestPinProgressStallEscape(t *testing.T) {
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	cs := NewChainSelector(ChainSelectorConfig{})
+	installFakeClock(cs, clk)
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	// Record forward progress at t0. The challenger runs one block ahead of
+	// the incumbent (a head micro-fork within catchUpPinHeadMargin), so it is
+	// the canonically Praos-better chain (higher block number). Only the
+	// anti-flap pin keeps the incumbent active; once the pin releases the
+	// taller challenger is selected.
+	cs.SetLocalTip(tip(5000, 5000, "local"))
+	cs.UpdatePeerTip(incumbent, tip(5001, 5001, "inc-5001"), nil)
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	// Challenger one block ahead (head micro-fork): pinned (no progress yet,
+	// but not yet stalled).
+	cs.UpdatePeerTip(challenger, tip(5002, 5002, "chal-5002"), nil)
+	assert.Equal(t, incumbent, *cs.GetBestPeer())
+
+	// Repeated same-or-lower local tip updates must NOT reset the stall clock.
+	cs.SetLocalTip(tip(5000, 5000, "local-again"))
+	cs.mutex.RLock()
+	progressAt := cs.localTipProgressAt
+	cs.mutex.RUnlock()
+	assert.Equal(t, clk.now, progressAt,
+		"same-tip SetLocalTip must not reset the stall clock")
+
+	// Just under the timeout: still pinned.
+	clk.Advance(catchUpPinStallTimeout - time.Second)
+	cs.UpdatePeerTip(challenger, tip(5002, 5003, "chal-5002b"), nil)
+	assert.Equal(t, incumbent, *cs.GetBestPeer(),
+		"must stay pinned before the stall timeout elapses")
+
+	// Past the timeout: the applied tip has stalled, the pin releases and the
+	// taller challenger is selected.
+	clk.Advance(2 * time.Second)
+	cs.UpdatePeerTip(challenger, tip(5003, 5004, "chal-5003"), nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, challenger, *cs.GetBestPeer(),
+		"stall escape must release the pin after the timeout")
+}
+
+// TestPinStallClockResetsOnForwardProgress asserts that forward progress
+// re-arms the stall clock, so a healthy, advancing incumbent stays pinned
+// indefinitely across sibling head-forks.
+func TestPinStallClockResetsOnForwardProgress(t *testing.T) {
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	cs := NewChainSelector(ChainSelectorConfig{})
+	installFakeClock(cs, clk)
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	cs.SetLocalTip(tip(5000, 5000, "local"))
+	cs.UpdatePeerTip(incumbent, tip(5001, 5001, "inc"), nil)
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+	// Challenger one block ahead (head micro-fork) so the pin is what holds
+	// the incumbent (selectBestChain prefers the taller challenger).
+	cs.UpdatePeerTip(challenger, tip(5002, 5002, "chal"), nil)
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	// Advance almost to the timeout, then apply a new block (forward progress).
+	clk.Advance(catchUpPinStallTimeout - time.Second)
+	cs.SetLocalTip(tip(5001, 5005, "local-advance"))
+
+	// Advance another near-timeout window. Because progress re-armed the
+	// clock, the incumbent is still pinned.
+	clk.Advance(catchUpPinStallTimeout - time.Second)
+	cs.UpdatePeerTip(challenger, tip(5002, 5006, "chal-b"), nil)
+	assert.Equal(t, incumbent, *cs.GetBestPeer(),
+		"forward progress must re-arm the stall clock and keep the pin")
+}
+
+// TestPinStallClockResetsOnPostRollbackProgress asserts that progress tracking
+// compares against the previous applied local tip, not the all-time high-water
+// mark. After 1000 -> 990 rollback, 991 is forward progress and must re-arm the
+// stall clock.
+func TestPinStallClockResetsOnPostRollbackProgress(t *testing.T) {
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	cs := NewChainSelector(ChainSelectorConfig{})
+	installFakeClock(cs, clk)
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	cs.SetLocalTip(tip(1000, 1000, "local"))
+	cs.UpdatePeerTip(incumbent, tip(1001, 1001, "inc"), nil)
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+	cs.UpdatePeerTip(challenger, tip(1002, 1002, "chal"), nil)
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	clk.Advance(catchUpPinStallTimeout - time.Second)
+	cs.SetLocalTip(tip(990, 1003, "local-rollback"))
+	cs.mutex.RLock()
+	rollbackProgressAt := cs.localTipProgressAt
+	cs.mutex.RUnlock()
+	assert.Equal(t, time.Unix(1_700_000_000, 0), rollbackProgressAt,
+		"rollback must not reset the stall clock")
+
+	cs.SetLocalTip(tip(991, 1004, "local-reapply"))
+	cs.mutex.RLock()
+	reapplyProgressAt := cs.localTipProgressAt
+	cs.mutex.RUnlock()
+	assert.Equal(t, clk.now, reapplyProgressAt,
+		"post-rollback forward progress must reset the stall clock")
+
+	clk.Advance(2 * time.Second)
+	cs.UpdatePeerTip(challenger, tip(1002, 1005, "chal-b"), nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, incumbent, *cs.GetBestPeer(),
+		"post-rollback forward progress must keep the pin while moving again")
+}
+
+// TestPinReleasesWhenIncumbentNoLongerSelectable asserts that an ineligible
+// incumbent releases the pin even on a head micro-fork.
+func TestPinReleasesWhenIncumbentNoLongerSelectable(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	cs.SetLocalTip(tip(5000, 5000, "local"))
+	cs.UpdatePeerTip(incumbent, tip(5001, 5001, "inc"), nil)
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+	// Challenger one block ahead (head micro-fork): the pin holds the
+	// incumbent while it is selectable.
+	cs.UpdatePeerTip(challenger, tip(5002, 5002, "chal"), nil)
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	// Incumbent becomes ineligible: pin must release.
+	cs.SetConnectionEligible(incumbent, false)
+	switched := cs.EvaluateAndSwitch()
+	assert.True(t, switched)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, challenger, *cs.GetBestPeer(),
+		"ineligible incumbent must release the pin")
+}
+
+// TestPinInactiveWithoutLocalTip asserts near-genesis behavior is unchanged:
+// when SetLocalTip has never been called, the pin is inactive and a 1-block
+// lead switches the active connection (matching the legacy behavior asserted
+// by TestIncumbentAdvantageSwitchesOnOneBlockLead).
+func TestPinInactiveWithoutLocalTip(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	// No SetLocalTip: localTip.BlockNumber == 0, pin inactive.
+	cs.UpdatePeerTip(incumbent, tip(50, 100, "inc"), nil)
+	require.NotNil(t, cs.GetBestPeer())
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	// 1-block lead: must switch because the pin is inactive near genesis.
+	cs.UpdatePeerTip(challenger, tip(51, 101, "chal"), nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, challenger, *cs.GetBestPeer(),
+		"pin must be inactive without a local tip (near-genesis)")
+
+	// Confirm catchingUpLocked is false with no local tip.
+	cs.mutex.RLock()
+	catchingUp := cs.catchingUpLocked(nil)
+	stalled := cs.localTipStalledLocked()
+	cs.mutex.RUnlock()
+	assert.False(t, catchingUp)
+	assert.False(t, stalled,
+		"stall must be false before any forward progress is recorded")
+}
+
+// loneFarChain builds the delivery a far-behind node sees from one peer: a
+// connected header chain, one block and twenty slots per header, whose
+// advertised tip is the real network tip.
+type loneFarChain struct {
+	localBlock uint64
+	k          uint64
+}
+
+func (c loneFarChain) tip(block uint64) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: block * 20,
+			Hash: fmt.Appendf(nil, "block-%d", block),
+		},
+		BlockNumber: block,
+	}
+}
+
+func (c loneFarChain) prevHash(block uint64) []byte {
+	return fmt.Appendf(nil, "block-%d", block-1)
+}
+
+func (c loneFarChain) first() uint64 {
+	return c.localBlock + 2*c.k + 36
+}
+
+func (c loneFarChain) newSelector(t *testing.T) *ChainSelector {
+	t.Helper()
+	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: c.k})
+	cs.SetLocalTip(c.tip(c.localBlock))
+	// A lagging peer makes every reference stale, so the ahead peer takes the
+	// catch-up branch.
+	require.True(t, cs.UpdatePeerTip(
+		newTestConnectionId(1), c.tip(c.localBlock-500), nil,
+	))
+	return cs
+}
+
+// deliver feeds one header the way the roll-forward handler publishes it.
+func (c loneFarChain) deliver(
+	cs *ChainSelector,
+	conn ouroboros.ConnectionId,
+	block uint64,
+	prevHash []byte,
+) bool {
+	observed := c.tip(block)
+	cs.HandlePeerTipUpdateEvent(event.NewEvent(
+		PeerTipUpdateEventType,
+		PeerTipUpdateEvent{
+			ConnectionId:     conn,
+			Tip:              c.tip(4687076),
+			ObservedTip:      observed,
+			PraosView:        PraosTiebreakerViewFromTip(observed, nil, PraosTiebreakerConfigUnknown()),
+			ObservedPrevHash: prevHash,
+		},
+	))
+	return cs.GetPeerTip(conn) != nil
+}
+
+func newLoneFarChain() loneFarChain {
+	return loneFarChain{localBlock: 175516, k: 432}
+}
+
+// TestLoneFarFrontierAcceptsConnectedChain covers a far-behind node whose only
+// ahead peer serves the real chain: more than K connected headers are accepted,
+// fewer are not.
+func TestLoneFarFrontierAcceptsConnectedChain(t *testing.T) {
+	t.Parallel()
+
+	c := newLoneFarChain()
+	cs := c.newSelector(t)
+	conn := newTestConnectionId(2)
+	first := c.first()
+	for i := range c.k {
+		require.False(
+			t,
+			c.deliver(cs, conn, first+i, c.prevHash(first+i)),
+			"header %d of the run must not be accepted yet", i+1,
+		)
+	}
+	require.True(
+		t,
+		c.deliver(cs, conn, first+c.k, c.prevHash(first+c.k)),
+		"the connected header after K+1 consecutive headers must be accepted",
+	)
+	require.NotNil(t, cs.GetPeerTip(conn))
+	// The peer keeps making progress: the next connected headers stay accepted.
+	for i := c.k + 1; i < c.k+20; i++ {
+		require.True(
+			t,
+			c.deliver(cs, conn, first+i, c.prevHash(first+i)),
+			"header %d after acceptance must stay accepted", i,
+		)
+	}
+}
+
+// A frontier admitted from one peer's connected run is not independent
+// evidence for an unrelated peer. Losing that first peer must not leave the
+// unrelated peer with an ordinary frontier it can advance by K at a time.
+func TestLoneFarFrontierDoesNotAdmitUnlinkedPeer(t *testing.T) {
+	t.Parallel()
+
+	c := newLoneFarChain()
+	cs := c.newSelector(t)
+	lone := newTestConnectionId(2)
+	first := c.first()
+	for i := range c.k + 1 {
+		c.deliver(cs, lone, first+i, c.prevHash(first+i))
+	}
+	require.NotNil(t, cs.GetPeerTip(lone))
+
+	last := c.tip(first + c.k)
+	unlinked := c.tip(last.BlockNumber + 1)
+	other := newTestConnectionId(3)
+	assert.False(t, c.deliverHeader(
+		cs, other, unlinked, []byte("unrelated-parent"), false,
+	))
+	assert.Nil(t, cs.GetPeerTip(other))
+
+	broken := c.tip(last.BlockNumber + 1)
+	broken.Point.Hash = []byte("broken-lone-frontier")
+	assert.False(t, c.deliverHeader(
+		cs, lone, broken, []byte("unrelated-parent"), false,
+	))
+	assert.Nil(t, cs.GetPeerTip(lone))
+
+	advanced := c.tip(unlinked.BlockNumber + c.k)
+	assert.False(t, c.deliverHeader(
+		cs, other, advanced, []byte("another-unrelated-parent"), false,
+	))
+	assert.Nil(t, cs.GetPeerTip(other))
+}
+
+// When every delivered frontier is lone, the local tip stays the reference: an
+// unrelated peer is not admitted as though it were the selector's first peer.
+func TestLoneFarFrontierOnlyKeepsLocalReference(t *testing.T) {
+	t.Parallel()
+
+	c := newLoneFarChain()
+	cs := c.newSelector(t)
+	// newTestConnectionId builds fresh address pointers, so the lagging
+	// peer's map key is read back rather than rebuilt.
+	var lagging ouroboros.ConnectionId
+	cs.mutex.RLock()
+	require.Len(t, cs.peerTips, 1)
+	for conn := range cs.peerTips {
+		lagging = conn
+	}
+	cs.mutex.RUnlock()
+
+	lone := newTestConnectionId(2)
+	first := c.first()
+	for i := range c.k + 1 {
+		c.deliver(cs, lone, first+i, c.prevHash(first+i))
+	}
+	require.NotNil(t, cs.GetPeerTip(lone))
+	cs.RemovePeer(lagging)
+	require.Nil(t, cs.GetPeerTip(lagging))
+
+	unlinked := c.tip(first + c.k + 1)
+	other := newTestConnectionId(3)
+	assert.False(t, c.deliverHeader(
+		cs, other, unlinked, []byte("unrelated-parent"), false,
+	))
+	assert.Nil(t, cs.GetPeerTip(other))
+	assert.NotNil(t, cs.GetPeerTip(lone))
+}
+
+// TestLoneFarFrontierFabricatedNumbersStayRejected covers a lone peer that
+// advances its claimed block number without delivering a connected chain.
+func TestLoneFarFrontierFabricatedNumbersStayRejected(t *testing.T) {
+	t.Parallel()
+
+	c := newLoneFarChain()
+	first := c.first()
+	t.Run("advancing numbers with no parent hash", func(t *testing.T) {
+		t.Parallel()
+		cs := c.newSelector(t)
+		conn := newTestConnectionId(2)
+		for i := range 5 * c.k {
+			require.False(t, c.deliver(cs, conn, first+i, nil))
+		}
+	})
+	t.Run("advancing numbers with an unrelated parent hash", func(t *testing.T) {
+		t.Parallel()
+		cs := c.newSelector(t)
+		conn := newTestConnectionId(2)
+		for i := range 5 * c.k {
+			require.False(t, c.deliver(
+				cs, conn, first+i, fmt.Appendf(nil, "forged-%d", i),
+			))
+		}
+	})
+	t.Run("repeated header", func(t *testing.T) {
+		t.Parallel()
+		cs := c.newSelector(t)
+		conn := newTestConnectionId(2)
+		for range 5 * c.k {
+			require.False(t, c.deliver(cs, conn, first, c.prevHash(first)))
+		}
+	})
+	t.Run("jumps of K+1 and of two blocks", func(t *testing.T) {
+		t.Parallel()
+		for _, step := range []uint64{2, c.k + 1} {
+			cs := c.newSelector(t)
+			conn := newTestConnectionId(2)
+			for i := range 5 * c.k {
+				block := first + i*step
+				require.False(t, c.deliver(
+					cs, conn, block, c.prevHash(block),
+				), "step %d", step)
+			}
+		}
+	})
+	t.Run("linked parents with skipped block numbers", func(t *testing.T) {
+		t.Parallel()
+		for _, step := range []uint64{2, c.k + 1} {
+			cs := c.newSelector(t)
+			conn := newTestConnectionId(2)
+			prev := c.prevHash(first)
+			for i := range 5 * c.k {
+				block := first + i*step
+				require.False(t, c.deliver(cs, conn, block, prev),
+					"step %d", step)
+				prev = c.tip(block).Point.Hash
+			}
+		}
+	})
+	t.Run("regression restarts the run", func(t *testing.T) {
+		t.Parallel()
+		cs := c.newSelector(t)
+		conn := newTestConnectionId(2)
+		for round := range 4 {
+			for i := range c.k {
+				require.False(t, c.deliver(
+					cs, conn, first+i, c.prevHash(first+i),
+				), "round %d header %d", round, i)
+			}
+		}
+	})
+	t.Run("slot does not advance", func(t *testing.T) {
+		t.Parallel()
+		cs := c.newSelector(t)
+		conn := newTestConnectionId(2)
+		for i := range 3 * c.k {
+			block := first + i
+			observed := c.tip(block)
+			observed.Point.Slot = c.tip(first).Point.Slot
+			cs.HandlePeerTipUpdateEvent(event.NewEvent(
+				PeerTipUpdateEventType,
+				PeerTipUpdateEvent{
+					ConnectionId:     conn,
+					Tip:              c.tip(4687076),
+					ObservedTip:      observed,
+					ObservedPrevHash: c.prevHash(block),
+				},
+			))
+			require.Nil(t, cs.GetPeerTip(conn), "header %d", i)
+		}
+	})
+	t.Run("height beyond the slot distance from the local tip", func(t *testing.T) {
+		t.Parallel()
+		cs := c.newSelector(t)
+		conn := newTestConnectionId(2)
+		// Connected, but one slot per header from the local tip while the
+		// block number sits far above what that many slots can hold.
+		base := c.tip(c.localBlock)
+		for i := range 3 * c.k {
+			block := c.localBlock + 100000 + i
+			observed := ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: base.Point.Slot + 1 + i,
+					Hash: fmt.Appendf(nil, "block-%d", block),
+				},
+				BlockNumber: block,
+			}
+			cs.HandlePeerTipUpdateEvent(event.NewEvent(
+				PeerTipUpdateEventType,
+				PeerTipUpdateEvent{
+					ConnectionId:     conn,
+					Tip:              c.tip(4687076),
+					ObservedTip:      observed,
+					ObservedPrevHash: c.prevHash(block),
+				},
+			))
+			require.Nil(t, cs.GetPeerTip(conn), "header %d", i)
+		}
+	})
+}
+
+// TestLoneFarFrontierRevokedWhenChainBreaks covers a lone peer accepted on its
+// connected chain whose next delivery does not continue it.
+func TestLoneFarFrontierRevokedWhenChainBreaks(t *testing.T) {
+	t.Parallel()
+
+	c := newLoneFarChain()
+	first := c.first()
+	accept := func(t *testing.T) (*ChainSelector, ouroboros.ConnectionId, uint64) {
+		t.Helper()
+		cs := c.newSelector(t)
+		conn := newTestConnectionId(2)
+		var last uint64
+		for i := range c.k + 1 {
+			last = first + i
+			c.deliver(cs, conn, last, c.prevHash(last))
+		}
+		require.NotNil(t, cs.GetPeerTip(conn))
+		require.NotNil(t, cs.GetBestPeer())
+		require.Equal(t, conn, *cs.GetBestPeer())
+		return cs, conn, last
+	}
+	breaks := map[string]func(last uint64) (uint64, []byte){
+		"unrelated parent": func(last uint64) (uint64, []byte) {
+			return last + 1, []byte("forged")
+		},
+		"skipped block": func(last uint64) (uint64, []byte) {
+			return last + 2, c.prevHash(last + 2)
+		},
+		"linked parent with a skipped block number": func(last uint64) (uint64, []byte) {
+			return last + 2, c.tip(last).Point.Hash
+		},
+		"unknown parent": func(last uint64) (uint64, []byte) {
+			return last + 1, nil
+		},
+	}
+	for name, mk := range breaks {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cs, conn, last := accept(t)
+			block, prev := mk(last)
+			assert.False(t, c.deliver(cs, conn, block, prev),
+				"a delivery that does not continue the chain must be refused")
+			assert.Nil(t, cs.GetPeerTip(conn),
+				"the connection must lose its standing")
+			assert.Nil(t, cs.GetBestPeer(),
+				"the revoked peer must no longer be selected")
+			// Standing is rebuilt from scratch, not resumed.
+			assert.False(t, c.deliver(cs, conn, last+1, c.prevHash(last+1)))
+			assert.Nil(t, cs.GetPeerTip(conn))
+		})
+	}
+
+	t.Run("removing the peer clears its claim", func(t *testing.T) {
+		t.Parallel()
+		cs, conn, _ := accept(t)
+		cs.RemovePeer(conn)
+		assert.Nil(t, cs.GetPeerTip(conn))
+		assert.Nil(t, cs.GetBestPeer())
+		cs.mutex.Lock()
+		defer cs.mutex.Unlock()
+		assert.NotContains(t, cs.farTipClaims, conn)
+	})
+}
+
+// deliverHeader feeds an arbitrary header, with its parent hash and header
+// type, the way the roll-forward handler publishes it.
+func (c loneFarChain) deliverHeader(
+	cs *ChainSelector,
+	conn ouroboros.ConnectionId,
+	observed ochainsync.Tip,
+	prevHash []byte,
+	boundary bool,
+) bool {
+	cs.HandlePeerTipUpdateEvent(event.NewEvent(
+		PeerTipUpdateEventType,
+		PeerTipUpdateEvent{
+			ConnectionId:     conn,
+			Tip:              c.tip(4687076),
+			ObservedTip:      observed,
+			PraosView:        PraosTiebreakerViewFromTip(observed, nil, PraosTiebreakerConfigUnknown()),
+			ObservedPrevHash: prevHash,
+			ObservedBoundary: boundary,
+		},
+	))
+	return cs.GetPeerTip(conn) != nil
+}
+
+// boundaryAfter returns the Byron epoch boundary block that follows parent:
+// its parent's block number and a later slot.
+func (c loneFarChain) boundaryAfter(parent ochainsync.Tip) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: parent.Point.Slot + 5,
+			Hash: fmt.Appendf(nil, "ebb-after-%d", parent.BlockNumber),
+		},
+		BlockNumber: parent.BlockNumber,
+	}
+}
+
+// mainAfterBoundary returns the first block after boundary: one block above
+// it, at the boundary's own slot.
+func (c loneFarChain) mainAfterBoundary(boundary ochainsync.Tip) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: boundary.Point.Slot,
+			Hash: fmt.Appendf(nil, "block-%d", boundary.BlockNumber+1),
+		},
+		BlockNumber: boundary.BlockNumber + 1,
+	}
+}
+
+// TestLoneFarFrontierThroughEpochBoundaryBlocks covers a lone honest peer
+// whose chain crosses Byron epoch boundaries: the boundary block repeats its
+// parent's block number and the next block may share its slot.
+func TestLoneFarFrontierThroughEpochBoundaryBlocks(t *testing.T) {
+	t.Parallel()
+
+	c := newLoneFarChain()
+	first := c.first()
+
+	t.Run("a boundary block does not count toward the run", func(t *testing.T) {
+		t.Parallel()
+		cs := c.newSelector(t)
+		conn := newTestConnectionId(2)
+		var last ochainsync.Tip
+		for i := range c.k {
+			last = c.tip(first + i)
+			require.False(t, c.deliver(cs, conn, last.BlockNumber, c.prevHash(last.BlockNumber)))
+		}
+		ebb := c.boundaryAfter(last)
+		require.False(t, c.deliverHeader(cs, conn, ebb, last.Point.Hash, true),
+			"the boundary block must not complete the run")
+		next := c.mainAfterBoundary(ebb)
+		require.True(t, c.deliverHeader(cs, conn, next, ebb.Point.Hash, false),
+			"the K+1th ordinary block after a boundary block must be accepted")
+	})
+
+	accepted := func(t *testing.T) (*ChainSelector, ouroboros.ConnectionId, ochainsync.Tip) {
+		t.Helper()
+		cs := c.newSelector(t)
+		conn := newTestConnectionId(2)
+		var last ochainsync.Tip
+		for i := range c.k + 1 {
+			last = c.tip(first + i)
+			c.deliver(cs, conn, last.BlockNumber, c.prevHash(last.BlockNumber))
+		}
+		require.NotNil(t, cs.GetPeerTip(conn))
+		return cs, conn, last
+	}
+
+	t.Run("an accepted frontier keeps its standing across a boundary", func(t *testing.T) {
+		t.Parallel()
+		cs, conn, last := accepted(t)
+		ebb := c.boundaryAfter(last)
+		require.True(t, c.deliverHeader(cs, conn, ebb, last.Point.Hash, true))
+		next := c.mainAfterBoundary(ebb)
+		require.True(t, c.deliverHeader(cs, conn, next, ebb.Point.Hash, false))
+		after := c.tip(next.BlockNumber + 1)
+		after.Point.Slot = next.Point.Slot + 20
+		require.True(t, c.deliverHeader(cs, conn, after, next.Point.Hash, false))
+		require.NotNil(t, cs.GetBestPeer())
+		assert.Equal(t, conn, *cs.GetBestPeer())
+	})
+
+	breaks := map[string]func(last ochainsync.Tip) (ochainsync.Tip, []byte, bool){
+		"same block number without the boundary type": func(last ochainsync.Tip) (ochainsync.Tip, []byte, bool) {
+			return c.boundaryAfter(last), last.Point.Hash, false
+		},
+		"boundary type with a new block number": func(last ochainsync.Tip) (ochainsync.Tip, []byte, bool) {
+			ebb := c.boundaryAfter(last)
+			ebb.BlockNumber++
+			return ebb, last.Point.Hash, true
+		},
+		"boundary type at the parent's slot": func(last ochainsync.Tip) (ochainsync.Tip, []byte, bool) {
+			ebb := c.boundaryAfter(last)
+			ebb.Point.Slot = last.Point.Slot
+			return ebb, last.Point.Hash, true
+		},
+		"boundary type with an unrelated parent": func(last ochainsync.Tip) (ochainsync.Tip, []byte, bool) {
+			return c.boundaryAfter(last), []byte("forged"), true
+		},
+		"ordinary block sharing its ordinary parent's slot": func(last ochainsync.Tip) (ochainsync.Tip, []byte, bool) {
+			next := c.tip(last.BlockNumber + 1)
+			next.Point.Slot = last.Point.Slot
+			return next, last.Point.Hash, false
+		},
+		"ordinary block at an earlier slot than its parent": func(last ochainsync.Tip) (ochainsync.Tip, []byte, bool) {
+			next := c.tip(last.BlockNumber + 1)
+			next.Point.Slot = last.Point.Slot - 1
+			return next, last.Point.Hash, false
+		},
+	}
+	for name, mk := range breaks {
+		t.Run("revoked: "+name, func(t *testing.T) {
+			t.Parallel()
+			cs, conn, last := accepted(t)
+			observed, prev, boundary := mk(last)
+			assert.False(t, c.deliverHeader(cs, conn, observed, prev, boundary))
+			assert.Nil(t, cs.GetPeerTip(conn))
+		})
+	}
+
+	t.Run("revoked: block after a boundary at an earlier slot", func(t *testing.T) {
+		t.Parallel()
+		cs, conn, last := accepted(t)
+		ebb := c.boundaryAfter(last)
+		require.True(t, c.deliverHeader(cs, conn, ebb, last.Point.Hash, true))
+		next := c.mainAfterBoundary(ebb)
+		next.Point.Slot = ebb.Point.Slot - 1
+		assert.False(t, c.deliverHeader(cs, conn, next, ebb.Point.Hash, false))
+		assert.Nil(t, cs.GetPeerTip(conn))
+	})
+
+	t.Run("revoked: consecutive boundary blocks cannot stall the chain", func(t *testing.T) {
+		t.Parallel()
+		cs, conn, last := accepted(t)
+		ebb := c.boundaryAfter(last)
+		require.True(t, c.deliverHeader(cs, conn, ebb, last.Point.Hash, true))
+		second := c.boundaryAfter(ebb)
+		second.Point.Hash = []byte("ebb-second")
+		assert.False(t, c.deliverHeader(cs, conn, second, ebb.Point.Hash, true))
+		assert.Nil(t, cs.GetPeerTip(conn))
+	})
+
+	t.Run("a lone entry is not a witness for another claim", func(t *testing.T) {
+		t.Parallel()
+		cs, conn, _ := accepted(t)
+		cs.mutex.Lock()
+		defer cs.mutex.Unlock()
+		claim := cs.farTipClaims[conn]
+		require.True(t, claim.lone)
+		other := newTestConnectionId(3)
+		far := c.tip(claim.block + 1)
+		require.False(t, cs.corroborateFarTipClaimLocked(
+			other, far, deliveredLink{prevHash: []byte("x")},
+		))
+		assert.True(t, cs.farTipClaims[conn].lone)
+		assert.False(t, cs.farTipClaims[conn].corroborated)
+
+		// Re-entering with the lone connection's own next header keeps the mark.
+		cs.corroborateFarTipClaimLocked(conn, far, deliveredLink{
+			prevHash: claim.hash,
+		})
+		assert.True(t, cs.farTipClaims[conn].lone,
+			"a lone claim that re-enters must stay lone")
+	})
+}
+
+// TestLoneFarFrontierRollbackCannotMoveHeight audits every way a peer can
+// re-point the selector's last-delivered state for its connection: none may
+// carry an accepted lone frontier, or a run, to a height the peer chose.
+func TestLoneFarFrontierRollbackCannotMoveHeight(t *testing.T) {
+	t.Parallel()
+
+	c := newLoneFarChain()
+	first := c.first()
+	const extra = 6
+	accepted := func(t *testing.T) (*ChainSelector, ouroboros.ConnectionId) {
+		t.Helper()
+		cs := c.newSelector(t)
+		conn := newTestConnectionId(2)
+		for i := range c.k + 1 + extra {
+			c.deliver(cs, conn, first+i, c.prevHash(first+i))
+		}
+		require.NotNil(t, cs.GetPeerTip(conn))
+		return cs, conn
+	}
+	rollback := func(cs *ChainSelector, conn ouroboros.ConnectionId, point ocommon.Point) {
+		cs.HandlePeerRollbackEvent(event.NewEvent(
+			PeerRollbackEventType,
+			PeerRollbackEvent{
+				ConnectionId: conn,
+				Point:        point,
+				Tip:          c.tip(4687076),
+			},
+		))
+	}
+	frontier := first + c.k + extra
+	// A header naming point as its parent, height blocks above the local tip.
+	child := func(point ocommon.Point, block uint64) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: point.Slot + 20,
+				Hash: fmt.Appendf(nil, "child-%d", block),
+			},
+			BlockNumber: block,
+		}
+	}
+
+	unknown := map[string]func() ocommon.Point{
+		"unknown point": func() ocommon.Point {
+			return ocommon.Point{Slot: c.tip(frontier).Point.Slot, Hash: []byte("never-delivered")}
+		},
+		"point below the accepted frontier outside the retained history": func() ocommon.Point {
+			return c.tip(first + 5).Point
+		},
+		"intersect replay at a local chain point": func() ocommon.Point {
+			return c.tip(c.localBlock).Point
+		},
+	}
+	for name, mk := range unknown {
+		for _, jump := range []uint64{1, 5000} {
+			t.Run(fmt.Sprintf("%s then +%d is revoked", name, jump), func(t *testing.T) {
+				t.Parallel()
+				cs, conn := accepted(t)
+				point := mk()
+				rollback(cs, conn, point)
+				observed := child(point, frontier+jump)
+				assert.False(t, c.deliverHeader(cs, conn, observed, point.Hash, false))
+				assert.Nil(t, cs.GetPeerTip(conn))
+				// The refused header must not leave a run behind.
+				again := child(observed.Point, observed.BlockNumber+1)
+				assert.False(t, c.deliverHeader(cs, conn, again, observed.Point.Hash, false))
+			})
+		}
+		// The unknown height says nothing about where the frontier went, so
+		// a header within the allowance does not continue it either: clearing
+		// the mark there would let the peer drop its far chain unchallenged.
+		within := name + " then a header within the allowance is revoked"
+		t.Run(within, func(t *testing.T) {
+			t.Parallel()
+			cs, conn := accepted(t)
+			point := mk()
+			rollback(cs, conn, point)
+			observed := child(point, c.localBlock+1)
+			assert.False(t, c.deliverHeader(
+				cs, conn, observed, point.Hash, false))
+			assert.Nil(t, cs.GetPeerTip(conn))
+			cs.mutex.Lock()
+			_, marked := cs.farTipClaims[conn]
+			cs.mutex.Unlock()
+			assert.False(t, marked, "removal drops the claim")
+		})
+	}
+
+	known := map[string]uint64{
+		"current point":            frontier,
+		"earlier point in history": frontier - 3,
+	}
+	for name, block := range known {
+		point := c.tip(block).Point
+		t.Run(name+" then a jump is revoked", func(t *testing.T) {
+			t.Parallel()
+			cs, conn := accepted(t)
+			rollback(cs, conn, point)
+			require.NotNil(t, cs.GetPeerTip(conn), "a rollback alone keeps standing")
+			assert.False(t, c.deliverHeader(
+				cs, conn, child(point, block+5000), point.Hash, false))
+			assert.Nil(t, cs.GetPeerTip(conn))
+		})
+		t.Run(name+" then the next block keeps standing", func(t *testing.T) {
+			t.Parallel()
+			cs, conn := accepted(t)
+			rollback(cs, conn, point)
+			assert.True(t, c.deliverHeader(
+				cs, conn, child(point, block+1), point.Hash, false))
+			require.NotNil(t, cs.GetBestPeer())
+			assert.Equal(t, conn, *cs.GetBestPeer())
+		})
+	}
+
+	t.Run("removal then re-add rebuilds the run from nothing", func(t *testing.T) {
+		t.Parallel()
+		cs, conn := accepted(t)
+		cs.RemovePeer(conn)
+		next := frontier + 1
+		assert.False(t, c.deliver(cs, conn, next, c.prevHash(next)))
+		for i := uint64(1); i < c.k; i++ {
+			assert.False(t, c.deliver(cs, conn, next+i, c.prevHash(next+i)), "header %d", i)
+		}
+		assert.True(t, c.deliver(cs, conn, next+c.k, c.prevHash(next+c.k)))
+	})
+
+	t.Run("an unknown last block continues nothing", func(t *testing.T) {
+		t.Parallel()
+		link := deliveredLink{prevHash: []byte("p")}
+		observed := ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 10, Hash: []byte("h")},
+			BlockNumber: 1,
+		}
+		assert.Equal(t, stepBroken, link.step(0, 5, []byte("p"), false, observed))
+	})
+
+	t.Run("a boundary continues its parent's height", func(t *testing.T) {
+		t.Parallel()
+		link := deliveredLink{prevHash: []byte("p"), boundary: true}
+		observed := ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 10, Hash: []byte("h")},
+			BlockNumber: 1,
+		}
+		assert.Equal(t, stepBoundary, link.step(1, 5, []byte("p"), false, observed))
+	})
+}
+
+func TestChainSelectorForkSwitchReportsRollbackPoint(t *testing.T) {
+	t.Parallel()
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Stop)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:      eventBus,
+		SecurityParam: 10,
+	})
+	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+
+	// Both peers share slots 1-2 and fork at slot 3; B ends up longer.
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "a3"), forkTipAt(4, "a4"),
+	} {
+		cs.UpdatePeerTip(connA, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+	drainChainSwitchesUntilBest(t, evtCh, connA)
+
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "b3"), forkTipAt(4, "b4"),
+		forkTipAt(5, "b5"),
+	} {
+		cs.UpdatePeerTip(connB, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+
+	evt := testutil.RequireReceive(
+		t, evtCh, 5*time.Second, "fork switch event",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	require.Equal(t, connB, switchEvt.NewConnectionId)
+	require.NotNil(t, switchEvt.RollbackPoint, "rollback point missing")
+	assert.Equal(t, uint64(2), switchEvt.RollbackPoint.Slot)
+	assert.Equal(t, []byte("c2"), switchEvt.RollbackPoint.Hash)
+}
+
+func TestChainSelectorForkSwitchWithoutSharedPointHasNoRollbackPoint(
+	t *testing.T,
+) {
+	t.Parallel()
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Stop)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:      eventBus,
+		SecurityParam: 10,
+	})
+	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+
+	// The fragments share no (slot, hash) point, so the selector cannot
+	// establish an intersection and must not report one.
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "a1"), forkTipAt(2, "a2"), forkTipAt(3, "a3"),
+	} {
+		cs.UpdatePeerTip(connA, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+	drainChainSwitchesUntilBest(t, evtCh, connA)
+
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "b1"), forkTipAt(2, "b2"), forkTipAt(3, "b3"), forkTipAt(4, "b4"),
+	} {
+		cs.UpdatePeerTip(connB, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+
+	evt := testutil.RequireReceive(
+		t, evtCh, 5*time.Second, "fork switch event",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	require.Equal(t, connB, switchEvt.NewConnectionId)
+	require.Equal(t, connA, switchEvt.PreviousConnectionId)
+	assert.Nil(t, switchEvt.RollbackPoint)
+}
+
+func TestChainSelectorRemoveBestPeerReportsRollbackPoint(t *testing.T) {
+	t.Parallel()
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Stop)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:      eventBus,
+		SecurityParam: 10,
+	})
+	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "a3"),
+		forkTipAt(4, "a4"),
+	} {
+		cs.UpdatePeerTip(connA, tip, nil)
+	}
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "b3"),
+	} {
+		cs.UpdatePeerTip(connB, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+	drainChainSwitchesUntilBest(t, evtCh, connA)
+
+	cs.RemovePeer(connA)
+
+	evt := testutil.RequireReceive(
+		t, evtCh, 5*time.Second, "disconnect switch event",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	require.Equal(t, connB, switchEvt.NewConnectionId)
+	require.NotNil(t, switchEvt.RollbackPoint, "rollback point missing")
+	assert.Equal(t, uint64(2), switchEvt.RollbackPoint.Slot)
+	assert.Equal(t, []byte("c2"), switchEvt.RollbackPoint.Hash)
+}
+
+func TestChainSelectorStaleBestPeerReportsRollbackPoint(t *testing.T) {
+	t.Parallel()
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Stop)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:          eventBus,
+		SecurityParam:     10,
+		StaleTipThreshold: 50 * time.Millisecond,
+	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
+	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "a3"),
+		forkTipAt(4, "a4"),
+	} {
+		cs.UpdatePeerTip(connA, tip, nil)
+	}
+	bTips := []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "b3"),
+	}
+	for _, tip := range bTips {
+		cs.UpdatePeerTip(connB, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+	drainChainSwitchesUntilBest(t, evtCh, connA)
+
+	advancePastStale(t, cs, clk, connA, 100*time.Millisecond)
+	cs.UpdatePeerTip(connB, bTips[len(bTips)-1], nil)
+	cs.cleanupStalePeers()
+
+	evt := testutil.RequireReceive(
+		t, evtCh, 5*time.Second, "stale cleanup switch event",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	require.Equal(t, connB, switchEvt.NewConnectionId)
+	require.NotNil(t, switchEvt.RollbackPoint, "rollback point missing")
+	assert.Equal(t, uint64(2), switchEvt.RollbackPoint.Slot)
+	assert.Equal(t, []byte("c2"), switchEvt.RollbackPoint.Hash)
+}
+
+func TestUpdatePeerTipReportsObservedFrontierRejection(t *testing.T) {
+	t.Parallel()
+	var reasons []PeerTipRejection
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+		OnPeerTipRejected: func(r PeerTipRejection) {
+			reasons = append(reasons, r)
+		},
+	})
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
+		BlockNumber: 50000,
+	})
+	require.True(t, cs.UpdatePeerTip(
+		newTestConnectionId(2),
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 100500, Hash: []byte("ok")},
+			BlockNumber: 50500,
+		},
+		nil,
+	))
+	assert.Empty(t, reasons, "an accepted tip must not be reported")
+
+	accepted := cs.UpdatePeerTip(
+		newTestConnectionId(1),
+		ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: math.MaxUint64,
+				Hash: []byte("spoof"),
+			},
+			BlockNumber: math.MaxUint64,
+		},
+		nil,
+	)
+
+	require.False(t, accepted)
+	assert.Equal(
+		t,
+		[]PeerTipRejection{PeerTipRejectedObservedFrontier},
+		reasons,
+	)
+}
+
+func TestHandlePeerRollbackReportsAdvertisedTipRejection(t *testing.T) {
+	t.Parallel()
+	var reasons []PeerTipRejection
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             10,
+		DisableEventSubscriptions: true,
+		OnPeerTipRejected: func(r PeerTipRejection) {
+			reasons = append(reasons, r)
+		},
+	})
+	require.True(t, cs.UpdatePeerTip(
+		newTestConnectionId(1),
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 100, Hash: []byte("bootstrap")},
+			BlockNumber: 100,
+		},
+		nil,
+	))
+
+	cs.HandlePeerRollbackEvent(newRollbackEvent(
+		newTestConnectionId(2),
+		ocommon.Point{Slot: 100, Hash: []byte("bootstrap")},
+		ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 9_000_000,
+				Hash: []byte("inflated"),
+			},
+			BlockNumber: 9_000_000,
+		},
+	))
+
+	assert.Equal(
+		t,
+		[]PeerTipRejection{PeerTipRejectedAdvertisedTip},
+		reasons,
+	)
 }

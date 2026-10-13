@@ -12,18 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package leios implements the CIP-0164 stake-truncated voting committee,
+// Package leios implements the Dijkstra top-N voting committee,
 // stake-quorum vote tallying, and endorser-block certificate construction
 // and validation.
 //
-// Voting committees are computed deterministically from the active stake
-// distribution. The normal CIP-0164 construction orders pools by stake
-// descending and selects a prefix through the cumulative-stake coverage target
-// (the Dijkstra CommitteeStakeCoverage protocol parameter, sigma_c). The
-// interoperable Musashi prototype construction instead includes every
-// non-zero-stake pool and orders them by stake ascending. Both constructions
-// break equal-stake ties by pool key hash ascending and assign voter_id from
-// the pool's position in the resulting order.
+// Voting committees are computed deterministically from the mark stake
+// snapshot. Pools are ordered by stake descending, with pool key hash
+// ascending as the tie-breaker, and the first LeiosCommitteeSize pools are
+// selected. Registered zero-stake pools remain candidates and can occupy a
+// seat when the configured size exceeds the number of positive-stake pools.
+// Voter IDs follow the selected order.
 //
 // Votes carry a BLS12-381 MinSig signature (48-byte signatures in G1,
 // 96-byte public keys in G2). Normal votes sign the slot and endorser-block

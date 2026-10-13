@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package mesh
 
@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -59,7 +60,7 @@ func convertBlock(
 	block models.Block,
 	txs []models.Transaction,
 	addrNetworkID uint8,
-	slotToTimestamp func(uint64) int64,
+	timestamp int64,
 ) *Block {
 	meshTxs := make([]*Transaction, 0, len(txs))
 	for i := range txs {
@@ -94,7 +95,7 @@ func convertBlock(
 			Hash:  blockHash,
 		},
 		ParentBlockIdentifier: parentID,
-		Timestamp:             slotToTimestamp(block.Slot),
+		Timestamp:             timestamp,
 		Transactions:          meshTxs,
 	}
 }
@@ -369,7 +370,7 @@ func decodeTxCbor(
 			fmt.Errorf("hex decode: %w", err),
 		)
 	}
-	txType, err := gledger.DetermineTransactionType(
+	txType, err := safedecode.TransactionType(
 		txBytes,
 	)
 	if err != nil {
@@ -380,7 +381,7 @@ func decodeTxCbor(
 			),
 		)
 	}
-	tx, err := gledger.NewTransactionFromCbor(
+	tx, err := safedecode.Transaction(
 		txType, txBytes,
 	)
 	if err != nil {

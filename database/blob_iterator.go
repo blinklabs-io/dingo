@@ -27,7 +27,15 @@ import (
 const (
 	// blobIteratorBatchSize controls how many block keys are fetched per
 	// batch from the blob iterator. This avoids loading the entire chain
-	// into memory while keeping I/O efficient.
+	// into memory while keeping I/O efficient, and it bounds how long a
+	// single blob read transaction and store pin are held open.
+	//
+	// fetchBatch opens a fresh iterator per batch and seeks it past the last
+	// key taken, so the backend has to bound the listing at that key rather
+	// than scan the prefix from its start: badger seeks the LSM tree, s3
+	// passes StartAfter, gcs passes Query.StartOffset. A backend that lists
+	// from the head of the prefix instead makes the per-batch reopen cost a
+	// full prefix scan.
 	blobIteratorBatchSize = 1000
 )
 

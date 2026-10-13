@@ -1,0 +1,531 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package peergov
+
+import (
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"testing"
+	"time"
+
+	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func starvationConnId(i int) ouroboros.ConnectionId {
+	return ouroboros.ConnectionId{
+		LocalAddr: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 3001},
+		RemoteAddr: &net.TCPAddr{
+			IP:   net.IPv4(10, 1, byte(i/250), byte(i%250+1)),
+			Port: 3001,
+		},
+	}
+}
+
+func starvationPeer(
+	i int,
+	source PeerSource,
+	state PeerState,
+	isClient bool,
+) *Peer {
+	addr := fmt.Sprintf("10.1.%d.%d:3001", i/250, i%250+1)
+	return &Peer{
+		Address:           addr,
+		NormalizedAddress: addr,
+		Source:            source,
+		State:             state,
+		FirstSeen:         time.Now(),
+		Connection: &PeerConnection{
+			Id:       starvationConnId(i),
+			IsClient: isClient,
+		},
+	}
+}
+
+func newStarvationGovernor(cfg PeerGovernorConfig) *PeerGovernor {
+	cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	cfg.PromRegistry = prometheus.NewRegistry()
+	return NewPeerGovernor(cfg)
+}
+
+func hotCountBySource(pg *PeerGovernor, source PeerSource) int {
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	n := 0
+	for _, p := range pg.peers {
+		if p != nil && p.Source == source && p.State == PeerStateHot {
+			n++
+		}
+	}
+	return n
+}
+
+// Starting a chainsync client marks the peer hot; that must not push the
+// hot count past the active target or the per-source quota.
+func TestSetPeerHotByConnIdRespectsActiveTarget(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		TargetNumberOfActivePeers: 3,
+		ActivePeersGossipQuota:    20,
+	})
+	const n = 10
+	pg.mu.Lock()
+	for i := range n {
+		pg.peers = append(
+			pg.peers,
+			starvationPeer(i, PeerSourceP2PGossip, PeerStateWarm, true),
+		)
+	}
+	pg.mu.Unlock()
+	for i := range n {
+		pg.SetPeerHotByConnId(starvationConnId(i))
+	}
+	assert.Equal(
+		t, 3, hotCountBySource(pg, PeerSourceP2PGossip),
+		"chainsync start must not promote past TargetNumberOfActivePeers",
+	)
+}
+
+func TestSetPeerHotByConnIdRespectsSourceQuota(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		TargetNumberOfActivePeers: 20,
+		ActivePeersGossipQuota:    2,
+	})
+	const n = 10
+	pg.mu.Lock()
+	for i := range n {
+		pg.peers = append(
+			pg.peers,
+			starvationPeer(i, PeerSourceP2PGossip, PeerStateWarm, true),
+		)
+	}
+	pg.mu.Unlock()
+	for i := range n {
+		pg.SetPeerHotByConnId(starvationConnId(i))
+	}
+	assert.Equal(
+		t, 2, hotCountBySource(pg, PeerSourceP2PGossip),
+		"chainsync start must not promote past ActivePeersGossipQuota",
+	)
+}
+
+func TestSetPeerHotByConnIdRespectsInboundHotQuota(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		TargetNumberOfActivePeers: 20,
+		InboundHotQuota:           2,
+	})
+	const n = 10
+	pg.mu.Lock()
+	for i := range n {
+		p := starvationPeer(i, PeerSourceInboundConn, PeerStateWarm, true)
+		p.PerformanceScore = 1
+		p.FirstSeen = time.Now().Add(-time.Hour)
+		p.ChainSyncLastUpdate = time.Now()
+		p.TipSlotDeltaInit = true
+		pg.peers = append(pg.peers, p)
+	}
+	pg.mu.Unlock()
+	for i := range n {
+		pg.SetPeerHotByConnId(starvationConnId(i))
+	}
+	assert.Equal(
+		t, 2, hotCountBySource(pg, PeerSourceInboundConn),
+		"chainsync start must not promote past InboundHotQuota",
+	)
+}
+
+// Inbound hot peers must not consume the outbound active target, and a
+// local root must still be promoted when the target is full.
+func TestSetPeerHotByConnIdLocalRootAndInboundIndependence(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		TargetNumberOfActivePeers: 1,
+		ActivePeersGossipQuota:    20,
+	})
+	inbound := starvationPeer(2, PeerSourceInboundConn, PeerStateWarm, true)
+	inbound.PerformanceScore = 1
+	inbound.FirstSeen = time.Now().Add(-time.Hour)
+	inbound.ChainSyncLastUpdate = time.Now()
+	inbound.TipSlotDeltaInit = true
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		starvationPeer(0, PeerSourceP2PGossip, PeerStateHot, true),
+		starvationPeer(1, PeerSourceTopologyLocalRoot, PeerStateWarm, true),
+		inbound,
+	}
+	pg.mu.Unlock()
+	pg.SetPeerHotByConnId(starvationConnId(1))
+	pg.SetPeerHotByConnId(starvationConnId(2))
+	assert.Equal(
+		t, 1, hotCountBySource(pg, PeerSourceTopologyLocalRoot),
+		"local roots are never held back by the active target",
+	)
+	assert.Equal(
+		t, 1, hotCountBySource(pg, PeerSourceInboundConn),
+		"an eligible inbound peer is promoted while the outbound target is full",
+	)
+}
+
+// Outbound peers at/over target must not cause inbound peers to be closed.
+func TestEnforcePeerLimitsNeverPrunesInbound(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		TargetNumberOfActivePeers:      2,
+		TargetNumberOfEstablishedPeers: 3,
+		TargetNumberOfKnownPeers:       500,
+		// Room for every warm inbound peer: this test is about the outbound
+		// targets, not the inbound warm bound.
+		InboundWarmTarget: 100,
+	})
+	const inbound = 30
+	pg.mu.Lock()
+	idx := 0
+	for range 2 {
+		pg.peers = append(
+			pg.peers,
+			starvationPeer(idx, PeerSourceP2PGossip, PeerStateHot, true),
+		)
+		idx++
+	}
+	for range 3 {
+		pg.peers = append(
+			pg.peers,
+			starvationPeer(idx, PeerSourceP2PGossip, PeerStateWarm, true),
+		)
+		idx++
+	}
+	for i := range inbound {
+		state := PeerStateWarm
+		if i < 6 {
+			state = PeerStateHot
+		}
+		pg.peers = append(
+			pg.peers,
+			starvationPeer(idx, PeerSourceInboundConn, state, false),
+		)
+		idx++
+	}
+	removed := 0
+	pg.enforcePeerLimits(&removed)
+	remainingInbound := 0
+	for _, p := range pg.peers {
+		if p != nil && p.Source == PeerSourceInboundConn {
+			remainingInbound++
+		}
+	}
+	remainingOutbound := len(pg.peers) - remainingInbound
+	pg.mu.Unlock()
+
+	assert.Equal(t, inbound, remainingInbound,
+		"inbound peers must not be removed for outbound targets")
+	assert.Equal(t, 5, remainingOutbound,
+		"outbound peers are at target and must stay")
+	assert.Zero(t, removed)
+	assert.Zero(t, testutil.ToFloat64(
+		pg.metrics.inboundPrunedByReason.WithLabelValues("limit_exceeded"),
+	))
+}
+
+// Warm inbound peers have their own bound, InboundWarmTarget. Past it, the
+// peers that have not consumed from this node most recently are removed
+// first; hot inbound peers are not touched.
+func TestEnforcePeerLimitsBoundsWarmInboundByTarget(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		TargetNumberOfActivePeers:      20,
+		TargetNumberOfEstablishedPeers: 50,
+		TargetNumberOfKnownPeers:       500,
+		InboundWarmTarget:              3,
+	})
+	now := time.Now()
+	pg.mu.Lock()
+	for i := range 2 {
+		pg.peers = append(
+			pg.peers,
+			starvationPeer(i, PeerSourceInboundConn, PeerStateHot, false),
+		)
+	}
+	// Warm inbound peers 2..7; a higher index served more recently, and
+	// peer 2 never served at all.
+	for i := 2; i < 8; i++ {
+		peer := starvationPeer(i, PeerSourceInboundConn, PeerStateWarm, false)
+		if i > 2 {
+			peer.LastServedActivity = now.Add(-time.Duration(10-i) * time.Minute)
+		}
+		pg.peers = append(pg.peers, peer)
+	}
+	removed := 0
+	pg.enforcePeerLimits(&removed)
+	var warm []string
+	hot := 0
+	for _, p := range pg.peers {
+		if p == nil || p.Source != PeerSourceInboundConn {
+			continue
+		}
+		switch p.State {
+		case PeerStateWarm:
+			warm = append(warm, p.Address)
+		case PeerStateHot:
+			hot++
+		}
+	}
+	pg.mu.Unlock()
+
+	assert.ElementsMatch(t,
+		[]string{"10.1.0.6:3001", "10.1.0.7:3001", "10.1.0.8:3001"},
+		warm,
+		"the most recently serving warm inbound peers must be kept",
+	)
+	assert.Equal(t, 2, hot, "hot inbound peers are not bounded here")
+	assert.Equal(t, 3, removed)
+	assert.InDelta(t, 3, testutil.ToFloat64(
+		pg.metrics.inboundPrunedByReason.WithLabelValues("limit_exceeded"),
+	), 0)
+}
+
+// When outbound is over target, only outbound peers are removed.
+func TestEnforcePeerLimitsRemovesOutboundOnlyWhenOverTarget(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		TargetNumberOfActivePeers:      2,
+		TargetNumberOfEstablishedPeers: 3,
+		TargetNumberOfKnownPeers:       500,
+	})
+	pg.mu.Lock()
+	for i := range 6 {
+		pg.peers = append(
+			pg.peers,
+			starvationPeer(i, PeerSourceP2PGossip, PeerStateHot, true),
+		)
+	}
+	for i := range 10 {
+		pg.peers = append(
+			pg.peers,
+			starvationPeer(100+i, PeerSourceInboundConn, PeerStateWarm, false),
+		)
+	}
+	removed := 0
+	pg.enforcePeerLimits(&removed)
+	hotOut, inbound := 0, 0
+	for _, p := range pg.peers {
+		switch {
+		case p == nil:
+		case p.Source == PeerSourceInboundConn:
+			inbound++
+		case p.State == PeerStateHot:
+			hotOut++
+		}
+	}
+	pg.mu.Unlock()
+	require.Equal(t, 10, inbound)
+	assert.Equal(t, 2, hotOut)
+	assert.Equal(t, 4, removed)
+}
+
+func inboundIdlePeer(i int, age time.Duration) *Peer {
+	p := starvationPeer(i, PeerSourceInboundConn, PeerStateWarm, false)
+	p.FirstSeen = time.Now().Add(-age)
+	p.LastActivity = time.Now().Add(-age)
+	p.ConnectedAt = time.Now().Add(-age)
+	return p
+}
+
+func pruneInbound(pg *PeerGovernor) int {
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	removed := 0
+	pg.pruneInboundWarmPeersLocked(time.Now(), &removed)
+	return removed
+}
+
+// An inbound peer consuming our chain (server-side activity) is useful even
+// though nothing refreshes LastActivity, and must not be pruned as idle.
+func TestInboundPruneSparesPeerWithServedActivity(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		InboundPruneAfter: time.Minute,
+	})
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		inboundIdlePeer(0, time.Hour), // served recently
+		inboundIdlePeer(1, time.Hour), // idle in both directions
+	}
+	pg.mu.Unlock()
+	pg.RecordServedActivityByConnId(starvationConnId(0))
+
+	assert.Equal(t, 1, pruneInbound(pg))
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1)
+	assert.Equal(t, "10.1.0.1:3001", peers[0].Address,
+		"the served peer stays; the idle peer is pruned")
+}
+
+// Served activity that has itself gone stale no longer protects the peer.
+func TestInboundPruneStaleServedActivityStillPrunes(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		InboundPruneAfter: time.Minute,
+	})
+	pg.mu.Lock()
+	p := inboundIdlePeer(0, time.Hour)
+	p.LastServedActivity = time.Now().Add(-30 * time.Minute)
+	pg.peers = []*Peer{p}
+	pg.mu.Unlock()
+	assert.Equal(t, 1, pruneInbound(pg))
+}
+
+// Flapping cooldown is decided before the idle check and is unaffected by
+// served activity.
+func TestInboundPruneFlappingStillPrunedDespiteServedActivity(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		InboundPruneAfter: time.Hour,
+		InboundCooldown:   time.Minute,
+	})
+	now := time.Now()
+	pg.mu.Lock()
+	p := inboundIdlePeer(0, time.Second)
+	p.InboundShortLivedCount = 5
+	p.LastInboundDisconnect = now
+	p.LastInboundSessionDuration = time.Second
+	p.LastServedActivity = now
+	pg.peers = []*Peer{p}
+	flapping, _ := pg.inboundFlappingStateLocked(p, now)
+	pg.mu.Unlock()
+	require.True(t, flapping, "fixture must be flapping")
+	assert.Equal(t, 1, pruneInbound(pg))
+}
+
+// A peer whose current inbound session has already lasted past
+// minStableConnectionDuration is not flapping now, whatever its earlier short
+// sessions were; one still on a short session is.
+func TestInboundFlappingIgnoresPeerOnStableSession(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		InboundPruneAfter: time.Hour,
+		InboundCooldown:   5 * time.Minute,
+	})
+	now := time.Now()
+	flapper := func(i int, sessionAge time.Duration) *Peer {
+		p := inboundIdlePeer(i, time.Minute)
+		p.InboundShortLivedCount = 2
+		p.LastInboundDisconnect = now.Add(-sessionAge)
+		p.LastInboundSessionDuration = 10 * time.Second
+		p.InboundConnectedAt = now.Add(-sessionAge)
+		return p
+	}
+	pg.mu.Lock()
+	stable := flapper(0, minStableConnectionDuration+time.Minute)
+	fresh := flapper(1, time.Second)
+	pg.peers = []*Peer{stable, fresh}
+	stableFlapping, _ := pg.inboundFlappingStateLocked(stable, now)
+	freshFlapping, _ := pg.inboundFlappingStateLocked(fresh, now)
+	pg.mu.Unlock()
+
+	assert.False(t, stableFlapping,
+		"a peer on a session past the stability threshold is not flapping")
+	assert.True(t, freshFlapping,
+		"a peer still on a short session after short ones is flapping")
+	assert.Equal(t, 1, pruneInbound(pg))
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1)
+	assert.Equal(t, "10.1.0.1:3001", peers[0].Address)
+}
+
+// An inbound peer promoted during refill must not use up an outbound slot,
+// even when it ranks ahead of the outbound candidates.
+func TestReconcileRefillInboundPromotionKeepsOutboundSlots(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		TargetNumberOfActivePeers:      2,
+		MinHotPeers:                    2,
+		TargetNumberOfEstablishedPeers: 50,
+		TargetNumberOfKnownPeers:       500,
+		ActivePeersGossipQuota:         20,
+		InboundHotQuota:                2,
+		InboundPruneAfter:              time.Hour,
+		// Refill recomputes scores; keep the inbound peer eligible.
+		InboundHotScoreThreshold: 0.1,
+	})
+	now := time.Now()
+	pg.mu.Lock()
+	// The inbound peer sits in an under-valency group, so it ranks first.
+	inbound := starvationPeer(0, PeerSourceInboundConn, PeerStateWarm, true)
+	inbound.PerformanceScore = 1
+	inbound.FirstSeen = now.Add(-time.Hour)
+	inbound.LastActivity = now
+	inbound.ChainSyncLastUpdate = now
+	inbound.TipSlotDeltaInit = true
+	inbound.GroupID = "group-a"
+	inbound.Valency = 1
+	pg.peers = append(pg.peers, inbound)
+	for i := 1; i <= 3; i++ {
+		p := starvationPeer(i, PeerSourceP2PGossip, PeerStateWarm, true)
+		p.LastActivity = now
+		p.PerformanceScore = 0.9
+		pg.peers = append(pg.peers, p)
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	require.Equal(t, 1, hotCountBySource(pg, PeerSourceInboundConn),
+		"fixture: the inbound peer must be promoted")
+	assert.Equal(t, 2, hotCountBySource(pg, PeerSourceP2PGossip),
+		"outbound refill must still reach the active target")
+}
+
+// Inbound hot peers must not occupy outbound refill slots.
+func TestReconcileRefillExcludesInboundHot(t *testing.T) {
+	t.Parallel()
+	pg := newStarvationGovernor(PeerGovernorConfig{
+		TargetNumberOfActivePeers:      4,
+		MinHotPeers:                    4,
+		TargetNumberOfEstablishedPeers: 50,
+		TargetNumberOfKnownPeers:       500,
+		ActivePeersGossipQuota:         20,
+		InboundHotQuota:                2,
+		InboundPruneAfter:              time.Hour,
+	})
+	now := time.Now()
+	pg.mu.Lock()
+	idx := 0
+	add := func(src PeerSource, st PeerState, client bool) {
+		p := starvationPeer(idx, src, st, client)
+		p.LastActivity = now
+		p.PerformanceScore = 0.9
+		pg.peers = append(pg.peers, p)
+		idx++
+	}
+	add(PeerSourceP2PGossip, PeerStateHot, true)
+	add(PeerSourceInboundConn, PeerStateHot, true)
+	add(PeerSourceInboundConn, PeerStateHot, true)
+	for range 5 {
+		add(PeerSourceP2PGossip, PeerStateWarm, true)
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	assert.Equal(t, 4, hotCountBySource(pg, PeerSourceP2PGossip),
+		"outbound refill must reach the active target regardless of inbound hot")
+}

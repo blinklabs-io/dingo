@@ -8,9 +8,8 @@ name: publish
 #     -> go-test (Linux, quick)           1 runner,  ~8 min
 #       -> go-test (Linux)
 #          go-test (Linux, race)
-#          go-test (Windows)
-#          go-test (macOS)               4 runners, 5-35 min
-#         -> create-draft-release        tag only, needs all four
+#          go-test (macOS)               3 runners, 5-35 min
+#         -> create-draft-release        tag only, needs all three
 #         -> build-<os>, build-images    gated on the SAME OS's tests
 #           -> build-image-manifest
 #             -> finalize-release        tag only
@@ -19,13 +18,14 @@ name: publish
 # pull-request only. Previously a merge started go-test.yml's five jobs and
 # this workflow's ten independently, sixteen runners at once, and the images
 # and binaries published without waiting for any of them. Now the same merge
-# peaks at about five concurrent jobs and nothing is pushed until the tests
+# peaks at about five concurrent jobs and nothing is published until tests
 # that cover it are green.
 #
 # The difference between a main push and a release tag is signing and
 # publishing the final artifacts. Both run every stage above and both push
 # branch- or version-tagged images; only a tag creates a GitHub release,
-# uploads binary archives, attests them, and finalizes the release.
+# uploads binary archives and a CBOR conformance report, attests the binaries,
+# and finalizes the release.
 #
 # The stages are duplicated from go-test.yml rather than factored into a
 # reusable workflow, because `needs:` cannot cross workflow files and a called
@@ -88,18 +88,17 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: golangci-lint (root)
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-      - name: golangci-lint (internal/test/antithesis)
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-        with:
-          working-directory: internal/test/antithesis
-      - name: golangci-lint (examples/dingo-gov-lens)
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-        with:
-          working-directory: examples/dingo-gov-lens
-      - name: golangci-lint (root, GOOS=windows)
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-        env:
-          GOOS: windows
+      # Unpinned like golangci-lint above, so a new analyzer release's findings
+      # are fixed when it lands. Both run through the Makefile so this job and
+      # `make lint` use the same build tags, flags, and package set.
+      - name: install nilaway and modernize
+        run: |
+          go install go.uber.org/nilaway/cmd/nilaway@latest
+          go install golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@latest
+      - name: nilaway
+        run: make nilaway
+      - name: modernize
+        run: make modernize
       - name: config-parity
         run: make config-parity
 
@@ -123,23 +122,25 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
-          # This job runs `go run ...@latest`, so third-party code executes in
-          # the workspace. Do not leave GITHUB_TOKEN in the local git config.
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
-        with:
-          go-version: 1.26.x
-          cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-1.26.x-
+      # The action is pinned; the scanner it installs and the vulnerability
+      # database it reads are not, so a new advisory fails the job instead of
+      # waiting behind a stale scanner. The toolchain floats for the same
+      # reason. govulncheck exits non-zero only for vulnerabilities this module
+      # actually calls, so unreachable findings it also prints do not fail the
+      # job. GOFLAGS carries the build tags `make govulncheck` passes, which
+      # the action has no input for. setup-go forces GOTOOLCHAIN=local, so the
+      # step overrides it to honor go.mod's patched toolchain floor when the
+      # setup-go release manifest lags a Go security release.
       - name: govulncheck
-        run: make govulncheck
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0 https://github.com/golang/govulncheck-action/releases/tag/v1.1.0
+        env:
+          GOFLAGS: -tags=dingo_extra_plugins
+          GOTOOLCHAIN: auto
+        with:
+          go-version-input: 1.26.x
+          check-latest: true
+          repo-checkout: false
 
   # Stage 2. The cheap gate: whole suite on SQLite, no race, no services.
   # Decides whether it is worth spending four runners on the stage below.
@@ -166,6 +167,11 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 https://github.com/actions/setup-node/releases/tag/v7.1.0
+        with:
+          node-version: '22.x'
+      - name: npm-test
+        run: npm test
       - name: go-build-minimal
         run: go build ./cmd/dingo
       - name: sqlc-generation-drift
@@ -176,8 +182,9 @@ jobs:
   # Stage 3. Linux with Postgres, MySQL and MinIO (fake s3) services. Keeps
   # the real PostgreSQL, MySQL and S3 coverage that the release gate has
   # always had, uninstrumented: the conformance package alone approaches the
-  # 30m package timeout when PostgreSQL and MySQL run alongside SQLite under
+  # per-package timeout when PostgreSQL and MySQL run alongside SQLite under
   # -race, so service-backed coverage and race coverage are separate jobs.
+  # See go-test.yml's go-test step for why that timeout is 60m.
   go-test-linux:
     name: go-test (Linux)
     needs: [go-test-linux-quick]
@@ -187,33 +194,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: dingo_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-      mysql:
-        image: mysql:8
-        env:
-          MYSQL_ROOT_PASSWORD: mysql
-          MYSQL_USER: mysql
-          MYSQL_PASSWORD: mysql
-          MYSQL_DATABASE: dingo_test
-        options: >-
-          --health-cmd "sh -c 'mysqladmin ping -h 127.0.0.1 -u root -p$MYSQL_ROOT_PASSWORD'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 3306:3306
       minio:
         image: blinklabs/minio:main
         options: >-
@@ -225,6 +205,8 @@ jobs:
           - 9000:9000
           - 9001:9001
     env:
+      DINGO_CI_PG_CONTAINER: dingo-ci-postgres-${{ github.run_id }}-${{ github.run_attempt }}-go-test-linux-${{ matrix.go-version }}
+      DINGO_CI_MYSQL_CONTAINER: dingo-ci-mysql-${{ github.run_id }}-${{ github.run_attempt }}-go-test-linux-${{ matrix.go-version }}
       POSTGRES_HOST: localhost
       POSTGRES_PORT: '5432'
       POSTGRES_USER: postgres
@@ -242,6 +224,46 @@ jobs:
       AWS_REGION: us-east-1
       DINGO_TEST_S3_BUCKET: dingo-test
     steps:
+      - name: start-test-databases
+        run: |
+          set -euo pipefail
+          docker run --detach --name "$DINGO_CI_PG_CONTAINER" \
+            --publish 5432:5432 \
+            --env POSTGRES_USER=postgres --env POSTGRES_PASSWORD=postgres \
+            --env POSTGRES_DB=dingo_test \
+            --health-cmd pg_isready --health-interval 10s \
+            --health-timeout 5s --health-retries 5 \
+            postgres:16 postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
+          docker run --detach --name "$DINGO_CI_MYSQL_CONTAINER" \
+            --publish 3306:3306 \
+            --env MYSQL_ROOT_PASSWORD=mysql --env MYSQL_USER=mysql \
+            --env MYSQL_PASSWORD=mysql --env MYSQL_DATABASE=dingo_test \
+            --health-cmd 'mysqladmin ping -h 127.0.0.1 -u root -p"$MYSQL_ROOT_PASSWORD"' \
+            --health-interval 10s --health-timeout 5s --health-start-period 10s \
+            --health-retries 4 \
+            mysql:8 --innodb-file-per-table=OFF --innodb-flush-log-at-trx-commit=0 \
+            --sync-binlog=0 --skip-log-bin
+          for container in "$DINGO_CI_PG_CONTAINER" "$DINGO_CI_MYSQL_CONTAINER"; do
+            for attempt in {1..60}; do
+              if ! status="$(docker inspect --format '{{.State.Status}} {{.State.Health.Status}}' "$container")"; then
+                echo "Cannot inspect database container $container" >&2
+                docker logs "$container"
+                exit 1
+              fi
+              case "$status" in
+                'running healthy') break ;;
+                'running starting')
+                  if (( attempt == 60 )); then
+                    echo "Database container $container did not become healthy" >&2
+                    docker logs "$container"
+                    exit 1
+                  fi
+                  sleep 1
+                  ;;
+                *) docker logs "$container"; exit 1 ;;
+              esac
+            done
+          done
       - name: setup-s3-bucket
         run: |
             curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
@@ -281,11 +303,25 @@ jobs:
           ./database/plugin/metadata/sqlstore
           ./database/plugin/metadata/postgres
           ./database/plugin/metadata/mysql
+          ./internal/node
           -timeout 10m
       - name: go-test-live-lifecycle
         run: make test-live-lifecycle
       - name: go-test
-        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 60m ./...
+      - name: stop-test-databases
+        if: always()
+        run: |
+          set -euo pipefail
+          names="$(docker ps --all --format '{{.Names}}')"
+          for container in "$DINGO_CI_PG_CONTAINER" "$DINGO_CI_MYSQL_CONTAINER"; do
+            while IFS= read -r name; do
+              if [ "$name" = "$container" ]; then
+                docker rm --force "$container"
+              fi
+            done <<< "$names"
+          done
+
 
   # Stage 3. Optional service backends are deliberately unconfigured here, so
   # internal/test/conformance replays its vectors against SQLite only. Same
@@ -318,42 +354,11 @@ jobs:
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: go-test-race
-        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 60m ./...
 
-  # Stage 3. Platform coverage on the merge and release path, not only on a
-  # pull request: a merge conflict, a stale base, or a force-push can land a
-  # tree no pull request ever tested on these platforms.
-  go-test-windows:
-    name: go-test (Windows)
-    needs: [go-test-linux-quick]
-    strategy:
-      matrix:
-        go-version: [1.26.x]
-    runs-on: windows-latest
-    timeout-minutes: 90
-    env:
-      CGO_ENABLED: 0
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
-        with:
-          go-version: ${{ matrix.go-version }}
-          cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~\AppData\Local\go-build
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.go-version }}-
-      - name: go-build
-        run: go build ./...
-      - name: go-test
-        run: go test -v -ldflags="-s -w" -timeout 30m ./...
-
+  # Stage 3. macOS coverage on the merge and release path, not only on a pull
+  # request: a merge conflict, a stale base, or a force-push can land a tree
+  # no pull request ever tested on this platform.
   go-test-macos:
     name: go-test (macOS)
     needs: [go-test-linux-quick]
@@ -385,8 +390,31 @@ jobs:
       - name: go-test
         run: go test -v -ldflags="-s -w" -timeout 30m ./...
 
-  # A release draft is created only once every platform is green, so a tag
+  # A release draft is created only once the supported platforms are green,
+  # so a tag
   # cannot reach a half-published state the way v0.70.3 did.
+  validate-release-tag:
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    outputs:
+      release_tag: ${{ steps.validate.outputs.release_tag }}
+      package_version: ${{ steps.validate.outputs.package_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate release tag
+        id: validate
+        env:
+          CANDIDATE_RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          package_version="$(.github/scripts/validate-release-tag.sh "$CANDIDATE_RELEASE_TAG")"
+          {
+            echo "release_tag=$CANDIDATE_RELEASE_TAG"
+            echo "package_version=$package_version"
+          } >> "$GITHUB_OUTPUT"
+
   create-draft-release:
     name: create-draft-release
     runs-on: ubuntu-latest
@@ -395,13 +423,17 @@ jobs:
       - govulncheck
       - go-test-linux
       - go-test-linux-race
-      - go-test-windows
       - go-test-macos
-    if: github.ref_type == 'tag'
+      - validate-release-tag
+    if: >-
+      github.ref_type == 'tag'
+      && needs.validate-release-tag.result == 'success'
     permissions:
       contents: write
     outputs:
       RELEASE_ID: ${{ steps.create-release.outputs.result }}
+    env:
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
     steps:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0 https://github.com/actions/github-script/releases/tag/v9.0.0
         id: create-release
@@ -449,7 +481,7 @@ jobs:
 
             return response.data.id;
 
-  # Stage 4. One build job per runner OS, each gated on that OS's own tests,
+  # Stage 4. One build job per remaining runner OS, each gated on its own tests,
   # replacing a 7-entry matrix of one-target jobs. See
   # .github/scripts/build-targets.sh.
   #
@@ -501,70 +533,37 @@ jobs:
           # Empty on a main push, which tells the script to skip packaging.
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: .github/scripts/build-targets.sh
+      - name: Checkout CBOR conformance corpus
+        if: github.ref_type == 'tag'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          repository: etorreborre/cardano-cbor-dataset
+          ref: 94260f96bc419bf66be0b5d1dd121695e889662e
+          path: .conformance/cardano-cbor-dataset
+          persist-credentials: false
+      - name: Generate CBOR conformance report
+        if: github.ref_type == 'tag'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          report_date="$(date -u +%Y%m%d)"
+          report_name="dingo-${RELEASE_TAG#v}-${report_date}-cbor-conformance.json"
+          go run ./internal/cborconformance/cmd \
+            -dataset .conformance/cardano-cbor-dataset/dataset/conway-123-100 \
+            -output "dist/${report_name}"
       - name: Upload release assets
         if: github.ref_type == 'tag'
         env:
           RELEASE_ID: ${{ needs.create-draft-release.outputs.RELEASE_ID }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           RELEASE_UPLOAD_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUIRE_CONFORMANCE_REPORT: 'true'
         run: .github/scripts/upload-release-assets.sh
       - name: Attest binaries
         if: github.ref_type == 'tag'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2 https://github.com/actions/attest/releases/tag/v4.2.2
         with:
           subject-path: dist/*/${{ env.APPLICATION_NAME }}
-
-  build-windows:
-    name: build (Windows)
-    needs: [go-test-windows, create-draft-release]
-    if: >-
-      always()
-      && needs.go-test-windows.result == 'success'
-      && (github.ref_type != 'tag' || needs.create-draft-release.result == 'success')
-    runs-on: windows-latest
-    timeout-minutes: 60
-    permissions:
-      attestations: write
-      contents: write
-      id-token: write
-    steps:
-      - run: git config --global --add safe.directory "$PWD"
-        shell: bash
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
-        with:
-          go-version: 1.26.x
-          cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~\AppData\Local\go-build
-          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-1.26.x-
-      - name: Build binaries
-        env:
-          BUILD_TARGETS: windows/amd64 windows/arm64
-          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-        run: .github/scripts/build-targets.sh
-        shell: bash
-      - name: Upload release assets
-        if: github.ref_type == 'tag'
-        env:
-          RELEASE_ID: ${{ needs.create-draft-release.outputs.RELEASE_ID }}
-          REPOSITORY_OWNER: ${{ github.repository_owner }}
-          RELEASE_UPLOAD_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: .github/scripts/upload-release-assets.sh
-        shell: bash
-      - name: Attest binaries
-        if: github.ref_type == 'tag'
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2 https://github.com/actions/attest/releases/tag/v4.2.2
-        with:
-          subject-path: dist/*/${{ env.APPLICATION_NAME }}.exe
 
   build-macos:
     name: build (macOS)
@@ -599,7 +598,7 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: Build binaries
         env:
-          BUILD_TARGETS: darwin/arm64
+          BUILD_TARGETS: darwin/amd64 darwin/arm64
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: .github/scripts/build-targets.sh
       - name: Upload release assets
@@ -650,7 +649,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0 https://github.com/docker/setup-buildx-action/releases/tag/v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1 https://github.com/docker/setup-buildx-action/releases/tag/v4.4.1
       - name: Login to Docker Hub
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0 https://github.com/docker/login-action/releases/tag/v4.6.0
         with:
@@ -680,7 +679,7 @@ jobs:
             type=semver,pattern={{version}}
       - name: Build images
         id: push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0 https://github.com/docker/build-push-action/releases/tag/v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0 https://github.com/docker/build-push-action/releases/tag/v7.4.0
         with:
           outputs: "type=registry,push=true"
           platforms: linux/${{ matrix.arch }}
@@ -703,9 +702,7 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
-      # Antithesis instrumented image (amd64 only, reuses build cache)
       - id: antithesis-meta
-        if: matrix.arch == 'amd64'
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0 https://github.com/docker/metadata-action/releases/tag/v6.2.0
         with:
           images: |
@@ -713,7 +710,7 @@ jobs:
             ghcr.io/${{ github.repository }}
           flavor: |
             latest=false
-            suffix=-antithesis
+            suffix=-antithesis-${{ matrix.arch }}
           tags: |
             # Only version, no revision
             type=match,pattern=v(.*)-(.*),group=1
@@ -722,12 +719,11 @@ jobs:
             # semver
             type=semver,pattern={{version}}
       - name: Build and push antithesis image
-        if: matrix.arch == 'amd64'
         id: antithesis-push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0 https://github.com/docker/build-push-action/releases/tag/v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0 https://github.com/docker/build-push-action/releases/tag/v7.4.0
         with:
           outputs: "type=registry,push=true"
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           target: antithesis
           tags: ${{ steps.antithesis-meta.outputs.tags }}
           labels: ${{ steps.antithesis-meta.outputs.labels }}
@@ -735,14 +731,14 @@ jobs:
             VERSION=${{ github.ref_type == 'tag' && github.ref_name || '' }}
             COMMIT_HASH=${{ github.sha }}
       - name: Attest antithesis Docker Hub image
-        if: matrix.arch == 'amd64' && github.ref_type == 'tag'
+        if: github.ref_type == 'tag'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2 https://github.com/actions/attest/releases/tag/v4.2.2
         with:
           subject-name: docker.io/blinklabs/dingo
           subject-digest: ${{ steps.antithesis-push.outputs.digest }}
           push-to-registry: true
       - name: Attest antithesis GHCR image
-        if: matrix.arch == 'amd64' && github.ref_type == 'tag'
+        if: github.ref_type == 'tag'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2 https://github.com/actions/attest/releases/tag/v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
@@ -752,6 +748,9 @@ jobs:
   build-image-manifest:
     name: build-image-manifest
     needs: [build-images]
+    # build-images overrides its skipped release-only dependency on main; this
+    # job must also override that propagated skip before checking its result.
+    if: always() && needs.build-images.result == 'success'
     permissions:
       contents: read
       packages: write
@@ -759,7 +758,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0 https://github.com/docker/setup-buildx-action/releases/tag/v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1 https://github.com/docker/setup-buildx-action/releases/tag/v4.4.1
       - name: Login to Docker Hub
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0 https://github.com/docker/login-action/releases/tag/v4.6.0
         with:
@@ -786,10 +785,27 @@ jobs:
             type=ref,event=branch
             # semver
             type=semver,pattern={{version}}
+      - id: antithesis-meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0 https://github.com/docker/metadata-action/releases/tag/v6.2.0
+        with:
+          images: |
+            blinklabs/dingo
+            ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+            suffix=-antithesis
+          tags: |
+            # Only version, no revision
+            type=match,pattern=v(.*)-(.*),group=1
+            # branch
+            type=ref,event=branch
+            # semver
+            type=semver,pattern={{version}}
       - name: manifest-create
         shell: bash
         env:
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          ANTITHESIS_IMAGE_TAGS: ${{ steps.antithesis-meta.outputs.tags }}
         run: |
           set -euo pipefail
           while IFS= read -r image_tag; do
@@ -799,6 +815,13 @@ jobs:
               "${image_tag}-amd64" \
               "${image_tag}-arm64"
           done <<< "$IMAGE_TAGS"
+          while IFS= read -r image_tag; do
+            [ -n "$image_tag" ] || continue
+            docker buildx imagetools create \
+              --tag "$image_tag" \
+              "${image_tag}-amd64" \
+              "${image_tag}-arm64"
+          done <<< "$ANTITHESIS_IMAGE_TAGS"
       # Checkout repo so README.md is available for next step
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
@@ -822,7 +845,6 @@ jobs:
     needs:
       - create-draft-release
       - build-linux
-      - build-windows
       - build-macos
       - build-images
       - build-image-manifest
@@ -831,7 +853,6 @@ jobs:
       && github.ref_type == 'tag'
       && needs.create-draft-release.result == 'success'
       && needs.build-linux.result == 'success'
-      && needs.build-windows.result == 'success'
       && needs.build-macos.result == 'success'
       && needs.build-images.result == 'success'
       && needs.build-image-manifest.result == 'success'
@@ -851,8 +872,504 @@ jobs:
               core.setFailed(error.message);
             }
 
-      # This updates the documentation on pkg.go.dev and the latest version available via the Go module proxy
-      ### TODO: this is broken
-      #- name: Pull new module version
-      #  if: startsWith(github.ref, 'refs/tags/')
-      #  uses: andrewslotin/go-proxy-pull-action@e5aea3b8b3478fc5b76befda4390513868ed2dc8 # v1.4.0 https://github.com/andrewslotin/go-proxy-pull-action/releases/tag/v1.4.0
+      # Requesting the tag's .info from the module proxy makes it fetch the new
+      # version, which is also what pkg.go.dev indexes. Bounded and non-fatal:
+      # the release is already published, and the proxy fetches on first use.
+      - name: Refresh Go module proxy
+        if: github.ref_type == 'tag'
+        continue-on-error: true
+        env:
+          TAG: ${{ github.ref_name }}
+        run: >-
+          curl --fail --silent --show-error --max-time 30
+          --retry 3 --retry-max-time 120
+          "https://proxy.golang.org/github.com/blinklabs-io/dingo/@v/${TAG}.info"
+
+  npm-release:
+    runs-on: ubuntu-latest
+    needs: [finalize-release, validate-release-tag]
+    if: >-
+      github.ref_type == 'tag'
+      && !contains(github.ref_name, '-')
+      && !contains(github.ref_name, '+')
+      && needs.finalize-release.result == 'success'
+      && needs.validate-release-tag.result == 'success'
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
+      PACKAGE_VERSION: ${{ needs.validate-release-tag.outputs.package_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 https://github.com/actions/setup-node/releases/tag/v7.1.0
+        with:
+          node-version: '24.x'
+          registry-url: https://registry.npmjs.org
+      - name: Install npm CLI for trusted publishing
+        run: npm install --global npm@11.5.1
+      - name: Stamp package version
+        run: >-
+          npm version "${PACKAGE_VERSION}" --no-git-tag-version
+          --ignore-scripts --allow-same-version
+      - name: Embed finalized release checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          asset_dir="$RUNNER_TEMP/dingo-release-assets"
+          mkdir -p "$asset_dir"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$asset_dir" --pattern "dingo-${RELEASE_TAG}-*.tar.gz"
+          ASSET_DIR="$asset_dir" node npm/generate-checksums.js
+      - name: Validate package installation and invocation
+        run: npm test
+      - name: Validate finalized release asset
+        run: |
+          set -euo pipefail
+          archive="$(npm pack --silent)"
+          install_root="$(mktemp -d)"
+          trap 'rm -rf "$install_root" "$archive"' EXIT
+          npm install --prefix "$install_root" --no-audit --no-fund "./$archive"
+          "$install_root/node_modules/.bin/dingo" --help >/dev/null
+      - name: Publish to NPM
+        run: npm publish --access public
+
+  # Bump the dingo formula in the blinklabs-io/homebrew-cardano tap.
+  #
+  # Deliberately NON-BLOCKING: it runs only after the release is fully
+  # published, nothing depends on it, and `continue-on-error: true` keeps the
+  # workflow green even if the tap PR cannot be opened. A broken tap must never
+  # hold back a shipped release.
+  #
+  # Authenticates to the tap with the org-level ORG_PROJECT_PAT secret, a token
+  # with `contents: write` and `pull-requests: write` on
+  # blinklabs-io/homebrew-cardano. The default GITHUB_TOKEN only scopes to this
+  # repository and cannot push a branch or open a PR on the tap. When the secret
+  # is absent (e.g. forks), the job no-ops instead of failing.
+  update-homebrew:
+    runs-on: ubuntu-latest
+    needs: [finalize-release, validate-release-tag]
+    if: >-
+      always()
+      && github.ref_type == 'tag'
+      && needs.finalize-release.result == 'success'
+      && needs.validate-release-tag.result == 'success'
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      TAP_REPO: blinklabs-io/homebrew-cardano
+      HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
+    steps:
+      - name: Check tap token
+        id: gate
+        run: |
+          if [ -z "${HOMEBREW_TAP_GITHUB_TOKEN}" ]; then
+            echo "HOMEBREW_TAP_GITHUB_TOKEN not set; skipping homebrew tap update."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Compute release facts
+        id: facts
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tarball_url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${RELEASE_TAG}.tar.gz"
+          # GitHub source tarballs for a tag are byte-stable, so this sha256
+          # pins the exact release the formula builds from.
+          sha256="$(curl -fsSL "$tarball_url" | sha256sum | cut -d' ' -f1)"
+          {
+            echo "tarball_url=$tarball_url"
+            echo "sha256=$sha256"
+            # Match the release build convention (the Makefile slices the
+            # first 7 chars of the full commit SHA) so the Homebrew build stamps
+            # the same 7-char version.CommitHash as the released binaries.
+            echo "short_commit=${COMMIT_SHA:0:7}"
+          } >> "$GITHUB_OUTPUT"
+      - name: Checkout homebrew tap
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          repository: ${{ env.TAP_REPO }}
+          token: ${{ env.HOMEBREW_TAP_GITHUB_TOKEN }}
+          path: homebrew-tap
+      - name: Prepare tap release branch
+        id: tap-branch
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          cd homebrew-tap
+          base_commit="$(git rev-parse HEAD)"
+          branch="dingo-${RELEASE_TAG}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
+            git switch --track -c "$branch" "origin/$branch"
+          else
+            git switch -c "$branch"
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "base_commit=$base_commit" >> "$GITHUB_OUTPUT"
+      - name: Update formula
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          TARBALL_URL: ${{ steps.facts.outputs.tarball_url }}
+          SHA256: ${{ steps.facts.outputs.sha256 }}
+          SHORT_COMMIT: ${{ steps.facts.outputs.short_commit }}
+        run: |
+          set -euo pipefail
+          formula="homebrew-tap/Formula/dingo.rb"
+          # Move the three release-pinned fields together, exactly as the
+          # formula documents: the source tarball url, its sha256, and the
+          # CommitHash stamped into the version package (version.Version comes
+          # from the formula's own #{version}, so it needs no edit here).
+          formula_tmp="${formula}.tmp"
+          sed -E \
+            -e "s#^  url \".*\"#  url \"${TARBALL_URL}\"#" \
+            -e "s#^  sha256 \".*\"#  sha256 \"${SHA256}\"#" \
+            -e "s#(version\.CommitHash=)[0-9a-f]+#\1${SHORT_COMMIT}#" \
+            "$formula" > "$formula_tmp"
+          mv "$formula_tmp" "$formula"
+          # sed exits 0 even when a pattern matches nothing. If the tap renames
+          # a field or changes its indentation a substitution silently no-ops,
+          # the next step sees a clean tree and ships a stale formula. Assert
+          # each expected value is present so a missed edit fails the job loudly.
+          for expected in "${TARBALL_URL}" "${SHA256}" "version.CommitHash=${SHORT_COMMIT}"; do
+            if ! grep -qF -- "$expected" "$formula"; then
+              echo "::error::formula field not updated: $expected"
+              exit 1
+            fi
+          done
+          echo "::group::Updated formula"
+          cat "$formula"
+          echo "::endgroup::"
+      - name: Open tap pull request
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ env.HOMEBREW_TAP_GITHUB_TOKEN }}
+          BASE_COMMIT: ${{ steps.tap-branch.outputs.base_commit }}
+          RELEASE_BRANCH: ${{ steps.tap-branch.outputs.branch }}
+        run: |
+          set -euo pipefail
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/dingo.rb
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(dingo): release ${RELEASE_TAG}"
+            git push -u origin "$RELEASE_BRANCH"
+          fi
+          if [ -z "$(gh pr list --repo "$TAP_REPO" --head "$RELEASE_BRANCH" --state open --json number --jq '.[].number')" ]; then
+            if git diff --quiet "$BASE_COMMIT"...HEAD; then
+              echo "Formula already up to date for ${RELEASE_TAG}; nothing to do."
+              exit 0
+            fi
+            gh pr create --repo "$TAP_REPO" --base main --head "$RELEASE_BRANCH" \
+              --title "chore(dingo): release ${RELEASE_TAG}" \
+              --body "Automated formula bump for [dingo ${RELEASE_TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG})."
+          else
+            echo "Open PR already exists for ${RELEASE_BRANCH}; tap branch is current."
+          fi
+
+  # Keep the maintained Ansible role aligned with each published Dingo release.
+  # This consumer PR must not block a shipped release. ORG_PROJECT_PAT needs
+  # contents: write and pull-requests: write on the consumer repository.
+  update-ansible:
+    runs-on: ubuntu-latest
+    needs: [finalize-release, validate-release-tag]
+    if: >-
+      always()
+      && github.ref_type == 'tag'
+      && needs.finalize-release.result == 'success'
+      && needs.validate-release-tag.result == 'success'
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      CONSUMER_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
+      CONSUMER_REPOSITORY: blinklabs-io/ansible-cardano
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
+      PACKAGE_VERSION: ${{ needs.validate-release-tag.outputs.package_version }}
+    steps:
+      - name: Check Ansible repository token
+        id: gate
+        run: |
+          if [ -z "${CONSUMER_GITHUB_TOKEN}" ]; then
+            echo "ORG_PROJECT_PAT not set; skipping Ansible role update."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Checkout Ansible repository
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          repository: ${{ env.CONSUMER_REPOSITORY }}
+          token: ${{ env.CONSUMER_GITHUB_TOKEN }}
+          path: consumer
+      - name: Prepare consumer release branch
+        id: consumer-branch
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          cd consumer
+          base_commit="$(git rev-parse HEAD)"
+          branch="dingo-${RELEASE_TAG}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
+            git switch --track -c "$branch" "origin/$branch"
+          else
+            git switch -c "$branch"
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "base_commit=$base_commit" >> "$GITHUB_OUTPUT"
+      - name: Update Ansible role version
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          version="$PACKAGE_VERSION"
+          file="consumer/roles/dingo/defaults/main.yml"
+          sed -i -E "s/^dingo_version: '[^']*'/dingo_version: '${version}'/" "$file"
+          grep -qF "dingo_version: '${version}'" "$file"
+      - name: Open consumer pull request
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ env.CONSUMER_GITHUB_TOKEN }}
+          BASE_COMMIT: ${{ steps.consumer-branch.outputs.base_commit }}
+          RELEASE_BRANCH: ${{ steps.consumer-branch.outputs.branch }}
+        run: |
+          set -euo pipefail
+          cd consumer
+          git add roles/dingo/defaults/main.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(dingo): release ${RELEASE_TAG}"
+            git push -u origin "$RELEASE_BRANCH"
+          fi
+          if [ -z "$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$RELEASE_BRANCH" --state open --json number --jq '.[].number')" ]; then
+            if git diff --quiet "$BASE_COMMIT"...HEAD; then
+              echo "${CONSUMER_REPOSITORY} already includes ${RELEASE_TAG}; nothing to do."
+              exit 0
+            fi
+            gh pr create --repo "$CONSUMER_REPOSITORY" --base main --head "$RELEASE_BRANCH" \
+              --title "chore(dingo): update to ${RELEASE_TAG}" \
+              --body "Automated Dingo consumer update for [${RELEASE_TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG})."
+          else
+            echo "Open PR already exists for ${RELEASE_BRANCH}; consumer branch is current."
+          fi
+
+  # Keep the cardano-up package aligned with each published Dingo release.
+  # This consumer PR must not block a shipped release. ORG_PROJECT_PAT needs
+  # contents: write and pull-requests: write on the consumer repository.
+  update-cardano-up-package:
+    runs-on: ubuntu-latest
+    needs: [finalize-release, validate-release-tag]
+    if: >-
+      always()
+      && github.ref_type == 'tag'
+      && needs.finalize-release.result == 'success'
+      && needs.validate-release-tag.result == 'success'
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      CONSUMER_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
+      CONSUMER_REPOSITORY: blinklabs-io/cardano-up-packages
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
+      PACKAGE_VERSION: ${{ needs.validate-release-tag.outputs.package_version }}
+    steps:
+      - name: Check cardano-up repository token
+        id: gate
+        run: |
+          if [ -z "${CONSUMER_GITHUB_TOKEN}" ]; then
+            echo "ORG_PROJECT_PAT not set; skipping cardano-up package update."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Checkout cardano-up repository
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          repository: ${{ env.CONSUMER_REPOSITORY }}
+          token: ${{ env.CONSUMER_GITHUB_TOKEN }}
+          path: consumer
+      - name: Prepare consumer release branch
+        id: consumer-branch
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          cd consumer
+          base_commit="$(git rev-parse HEAD)"
+          branch="dingo-${RELEASE_TAG}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
+            git switch --track -c "$branch" "origin/$branch"
+          else
+            git switch -c "$branch"
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "base_commit=$base_commit" >> "$GITHUB_OUTPUT"
+      - name: Add cardano-up package version
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          version="$PACKAGE_VERSION"
+          package_dir="consumer/packages/dingo"
+          latest="$(find "$package_dir" -maxdepth 1 -type f -name 'dingo-*.yaml' | sort -V | tail -n 1)"
+          if [ -z "$latest" ] || [ ! -f "$latest" ]; then
+            echo "::error::No Dingo package manifest is available to use as a template."
+            exit 1
+          fi
+          target="${package_dir}/dingo-${version}.yaml"
+          if [ ! -f "$target" ]; then
+            cp "$latest" "$target"
+            sed -i -E "s/^version: .*/version: ${version}/" "$target"
+          fi
+          grep -qF "version: ${version}" "$target"
+          grep -qF 'releases/download/v{{ .Package.Version }}/dingo-v{{ .Package.Version }}-' "$target"
+      - name: Open consumer pull request
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ env.CONSUMER_GITHUB_TOKEN }}
+          BASE_COMMIT: ${{ steps.consumer-branch.outputs.base_commit }}
+          RELEASE_BRANCH: ${{ steps.consumer-branch.outputs.branch }}
+        run: |
+          set -euo pipefail
+          cd consumer
+          git add "packages/dingo/dingo-${PACKAGE_VERSION#v}.yaml"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(dingo): release ${RELEASE_TAG}"
+            git push -u origin "$RELEASE_BRANCH"
+          fi
+          if [ -z "$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$RELEASE_BRANCH" --state open --json number --jq '.[].number')" ]; then
+            if git diff --quiet "$BASE_COMMIT"...HEAD; then
+              echo "${CONSUMER_REPOSITORY} already includes ${RELEASE_TAG}; nothing to do."
+              exit 0
+            fi
+            gh pr create --repo "$CONSUMER_REPOSITORY" --base main --head "$RELEASE_BRANCH" \
+              --title "chore(dingo): update to ${RELEASE_TAG}" \
+              --body "Automated Dingo consumer update for [${RELEASE_TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG})."
+          else
+            echo "Open PR already exists for ${RELEASE_BRANCH}; consumer branch is current."
+          fi
+
+  # Keep the Helm chart aligned with each published Dingo release. This
+  # consumer PR must not block a shipped release. ORG_PROJECT_PAT needs
+  # contents: write and pull-requests: write on the consumer repository.
+  update-helm-chart:
+    runs-on: ubuntu-latest
+    needs: [finalize-release, validate-release-tag]
+    if: >-
+      always()
+      && github.ref_type == 'tag'
+      && needs.finalize-release.result == 'success'
+      && needs.validate-release-tag.result == 'success'
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      CONSUMER_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
+      CONSUMER_REPOSITORY: blinklabs-io/helm-charts
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
+      PACKAGE_VERSION: ${{ needs.validate-release-tag.outputs.package_version }}
+    steps:
+      - name: Check Helm repository token
+        id: gate
+        run: |
+          if [ -z "${CONSUMER_GITHUB_TOKEN}" ]; then
+            echo "ORG_PROJECT_PAT not set; skipping Helm chart update."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Checkout Helm repository
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          repository: ${{ env.CONSUMER_REPOSITORY }}
+          token: ${{ env.CONSUMER_GITHUB_TOKEN }}
+          path: consumer
+      - name: Prepare consumer release branch
+        id: consumer-branch
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          cd consumer
+          base_commit="$(git rev-parse HEAD)"
+          branch="dingo-${RELEASE_TAG}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
+            git switch --track -c "$branch" "origin/$branch"
+          else
+            git switch -c "$branch"
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "base_commit=$base_commit" >> "$GITHUB_OUTPUT"
+      - name: Update Helm chart version
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          version="$PACKAGE_VERSION"
+          chart="consumer/charts/dingo/Chart.yaml"
+          values="consumer/charts/dingo/values.yaml"
+          if ! grep -qF "appVersion: \"${version}\"" "$chart" || \
+            ! grep -qF "tag: \"${version}\"" "$values"; then
+            chart_version="$(sed -n -E 's/^version:[[:space:]]*(.*)$/\1/p' "$chart" | head -n 1 | sed -E 's/[[:space:]]+$//')"
+            chart_version="${chart_version#\"}"
+            chart_version="${chart_version%\"}"
+            chart_version="${chart_version#\'}"
+            chart_version="${chart_version%\'}"
+            if [[ ! "$chart_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+              echo "Unsupported chart version in ${chart}: ${chart_version}" >&2
+              exit 1
+            fi
+            major="${BASH_REMATCH[1]}"
+            minor="${BASH_REMATCH[2]}"
+            patch="${BASH_REMATCH[3]}"
+            next_chart_version="${major}.${minor}.$((patch + 1))"
+            sed -i -E \
+              -e "s/^version: .*/version: ${next_chart_version}/" \
+              -e "s/^appVersion: .*/appVersion: \"${version}\"/" \
+              "$chart"
+            sed -i -E "s/^  tag: .*/  tag: \"${version}\"/" "$values"
+            grep -qE "^version: ${next_chart_version}$" "$chart"
+          fi
+          grep -qF "appVersion: \"${version}\"" "$chart"
+          grep -qF "tag: \"${version}\"" "$values"
+      - name: Open consumer pull request
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ env.CONSUMER_GITHUB_TOKEN }}
+          BASE_COMMIT: ${{ steps.consumer-branch.outputs.base_commit }}
+          RELEASE_BRANCH: ${{ steps.consumer-branch.outputs.branch }}
+        run: |
+          set -euo pipefail
+          cd consumer
+          git add charts/dingo/Chart.yaml charts/dingo/values.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(dingo): release ${RELEASE_TAG}"
+            git push -u origin "$RELEASE_BRANCH"
+          fi
+          if [ -z "$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$RELEASE_BRANCH" --state open --json number --jq '.[].number')" ]; then
+            if git diff --quiet "$BASE_COMMIT"...HEAD; then
+              echo "${CONSUMER_REPOSITORY} already includes ${RELEASE_TAG}; nothing to do."
+              exit 0
+            fi
+            gh pr create --repo "$CONSUMER_REPOSITORY" --base main --head "$RELEASE_BRANCH" \
+              --title "chore(dingo): update to ${RELEASE_TAG}" \
+              --body "Automated Dingo consumer update for [${RELEASE_TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG})."
+          else
+            echo "Open PR already exists for ${RELEASE_BRANCH}; consumer branch is current."
+          fi

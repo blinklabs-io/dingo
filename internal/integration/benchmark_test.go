@@ -15,18 +15,18 @@
 package integration
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"github.com/stretchr/testify/require"
-
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/internal/blockverify"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/require"
 )
 
 // loadImmutableBlocks loads numBlocks real blocks -- hash, type, slot, and
@@ -239,7 +239,7 @@ func benchmarkStorageBackend(
 	}
 
 	for i := range 10 {
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		key := fmt.Appendf(nil, "block-%d", i)
 		blob := txn.DB().Blob()
 		if blob == nil || txn.Blob() == nil {
@@ -259,7 +259,7 @@ func benchmarkStorageBackend(
 
 	for b.Loop() {
 		// Process 10 blocks of data
-		txn := db.Transaction(false)
+		txn := db.Transaction(context.Background(), false)
 		blob := txn.DB().Blob()
 		if blob == nil || txn.Blob() == nil {
 			txn.Rollback()
@@ -315,7 +315,7 @@ func benchmarkTestLoad(
 	}
 
 	for i := range 200 {
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		key := fmt.Appendf(nil, "block-%d", i)
 		blob := txn.DB().Blob()
 		if blob == nil || txn.Blob() == nil {
@@ -335,7 +335,7 @@ func benchmarkTestLoad(
 
 	for b.Loop() {
 		// Load first 200 blocks
-		txn := db.Transaction(false)
+		txn := db.Transaction(context.Background(), false)
 		blob := txn.DB().Blob()
 		if blob == nil || txn.Blob() == nil {
 			txn.Rollback()

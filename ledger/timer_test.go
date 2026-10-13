@@ -137,7 +137,7 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 
 // TestScheduler_ChangeIntervalDeliveredWhenNotParked verifies that a single,
 // non-retried ChangeInterval call is not silently dropped when run() is not
-// currently parked in its own select -- dingo#4155. Before Start(), run() has
+// currently parked in its own select. Before Start(), run() has
 // not even been launched, which is the most extreme case of "not parked in
 // the select": with the old unbuffered updateIntervalChan and its
 // non-blocking select/default send, this call took the default branch,
@@ -170,9 +170,9 @@ func TestScheduler_ChangeIntervalDeliveredWhenNotParked(t *testing.T) {
 // TestScheduler_ChangeIntervalDeliveredDuringTick verifies that a single
 // ChangeInterval call made while run() is inside tick(), rather than parked
 // in its select, is applied once tick() returns. This is the production
-// shape of dingo#4155. A task whose previous run still holds its lock makes
-// tick() call runFailFunc synchronously on run()'s goroutine; blocking there
-// holds run() inside tick() for the duration of the call.
+// shape of the dropped interval change. A task whose previous run still holds
+// its lock makes tick() call runFailFunc synchronously on run()'s goroutine;
+// blocking there holds run() inside tick() for the duration of the call.
 func TestScheduler_ChangeIntervalDeliveredDuringTick(t *testing.T) {
 	t.Parallel()
 
@@ -407,7 +407,7 @@ func TestScheduler_ChangeInterval_RejectsInvalidDuration(t *testing.T) {
 
 	// Positive duration must not return an error.
 	// The scheduler is not started, so nothing ever drains the queued
-	// value, but ChangeInterval still queues it (dingo#4155) and returns
+	// value, but ChangeInterval still queues it and returns
 	// successfully; validation succeeds independent of whether the
 	// scheduler is running.
 	err = timer.ChangeInterval(100 * time.Millisecond)
@@ -514,7 +514,7 @@ func TestScheduler_StopDoesNotRaceChangeInterval(t *testing.T) {
 	timer.Start()
 
 	// ChangeInterval's send is non-blocking (updateIntervalChan has a
-	// capacity-1 buffer, coalesced rather than dropped -- dingo#4155), so
+	// capacity-1 buffer, coalesced rather than dropped), so
 	// goroutines spinning as fast as possible maximize the chance run's
 	// interval-update case actually wins the race against Stop reading
 	// st.ticker concurrently. Several concurrent callers (not just one)

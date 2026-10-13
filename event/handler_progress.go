@@ -14,7 +14,10 @@
 
 package event
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // handlerProgressWarnInterval is the stall threshold: how long a SubscribeFunc
 // handler may stay inside a single event before the subscription becomes
@@ -38,7 +41,7 @@ var handlerProgressWarnInterval = 30 * time.Second
 // just after a sample has been stuck for a hair under one interval at the next
 // one, is skipped, and waits a whole further period. Sampling twice per
 // interval bounds the first report at 1.5 intervals, which is what event/doc.go
-// and ARCHITECTURE.md state (wolf31o2 review).
+// and ARCHITECTURE.md state.
 //
 // The repeat rate is unaffected: warnStuckHandler still suppresses a report
 // within one interval of the last one for the same invocation.
@@ -139,7 +142,7 @@ func (c *channelSubscriber) warnStuckHandler(
 // Exported so the node can surface the condition alongside its other health
 // signals: a required internal consumer that has stopped returning is a node
 // fault, and waiting for its buffer to fill turns a 30-second symptom into a
-// half-day one (blinklabs-io/dingo#3550).
+// half-day one.
 func (e *EventBus) StuckHandlerCount() int {
 	if e == nil {
 		return 0
@@ -153,6 +156,22 @@ func (e *EventBus) StuckHandlerCount() int {
 		}
 	}
 	return count
+}
+
+// runningHandlerTypes returns the sorted, de-duplicated event types of
+// subscriptions whose handler is currently running. Subscriptions stay in
+// channelSubsById until their dispatch goroutine exits, so this still sees the
+// handlers a shutdown is waiting on.
+func (e *EventBus) runningHandlerTypes() []EventType {
+	now := time.Now()
+	var types []EventType
+	for _, sub := range e.channelSubscriberSnapshot() {
+		if _, _, running := sub.handlerStuckFor(now); running {
+			types = append(types, sub.eventType)
+		}
+	}
+	slices.Sort(types)
+	return slices.Compact(types)
 }
 
 // observeHandlerProgress materializes the zero-valued handler-stall series for
@@ -196,7 +215,7 @@ func (e *EventBus) channelSubscriberSnapshot() []*channelSubscriber {
 // buffer capacity, so it can only fire once the buffer is already full. That
 // makes the time to first signal a function of the buffer size and the event
 // rate rather than of the fault: the chainselection.peer_activity handler in
-// blinklabs-io/dingo#3550 stopped returning 12h31m before its 1024-slot buffer
+// a Preview run stopped returning 12h31m before its 1024-slot buffer
 // filled and said so. This watchdog observes the handler itself, so the first
 // report arrives within one and a half intervals of the handler ceasing to
 // make progress -- see handlerProgressTick -- no matter how much headroom the

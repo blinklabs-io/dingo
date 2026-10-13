@@ -14,40 +14,30 @@
 
 package database
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // DeleteNetworkDonationsAfterSlot removes donation records added after the
 // given slot. This is used during chain rollbacks, alongside
 // DeleteNetworkStateAfterSlot.
 func (d *Database) DeleteNetworkDonationsAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.metadata.DeleteNetworkDonationsAfterSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete network donations after slot %d: %w",
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		if err := d.metadata.DeleteNetworkDonationsAfterSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete network donations after slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }

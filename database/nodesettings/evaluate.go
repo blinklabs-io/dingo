@@ -34,7 +34,7 @@ type Mismatch struct {
 }
 
 // String renders the operator-facing message. It uses the gate's Label so
-// the existing wording in database/storage_mode_test.go keeps matching.
+// the existing wording in database/tests_test.go keeps matching.
 func (m Mismatch) String() string {
 	return fmt.Sprintf(
 		"%s was %q but configured as %q (%s)",

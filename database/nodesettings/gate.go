@@ -55,6 +55,18 @@ const (
 // something rather than filling in for free.
 const NoStartEra = "none"
 
+// AlonzoPParamsUnitGateName is the node_settings_gate row that records the
+// unit used by persisted Alonzo protocol parameters.
+const AlonzoPParamsUnitGateName = "alonzo_pparams_unit"
+
+// AlonzoPParamsUnitWordV1 records Alonzo parameters whose lovelace-per-UTxO
+// value retains the genesis word unit until the Babbage transition.
+const AlonzoPParamsUnitWordV1 = "word-v1"
+
+// AlonzoPParamsUnitLegacyByteV0 records Alonzo parameters whose
+// lovelace-per-UTxO value was converted to bytes before persistence.
+const AlonzoPParamsUnitLegacyByteV0 = "legacy-byte-v0"
+
 // EncodeLatchBool renders a LatchBool value. carried is the associated
 // setting, such as a pledge leverage factor, and is empty for gates that
 // carry nothing.
@@ -75,7 +87,7 @@ type Gate struct {
 	// Label is the operator-facing name used in error messages. It defaults
 	// to Name when empty. storage_mode and network must label themselves
 	// "storage mode" and "network" to preserve the message wording that
-	// existing tests in database/storage_mode_test.go assert against.
+	// existing tests in database/tests_test.go assert against.
 	Label string
 	// Class selects the enforcement rule.
 	Class Class
@@ -141,7 +153,7 @@ func Gates() []Gate {
 		{
 			Name: "storage_mode",
 			// "storage mode", not "storage_mode": existing tests in
-			// database/storage_mode_test.go assert this wording.
+			// database/tests_test.go assert this wording.
 			Label:            "storage mode",
 			Class:            LatchEnum,
 			Ordered:          []string{"api", "core"},

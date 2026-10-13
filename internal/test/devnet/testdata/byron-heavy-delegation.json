@@ -1,0 +1,13 @@
+{
+  "bootStakeholders": {
+    "61e780b8e94dd7dd1d2719d1155375daa7a7909980a8e431b4c92f72": 0
+  },
+  "heavyDelegation": {
+    "61e780b8e94dd7dd1d2719d1155375daa7a7909980a8e431b4c92f72": {
+      "cert": "baa66139929d04ce027f3d9bdb4c6a46ee8c311b22a0209bc070677bc49d3f66dbff02588e5bc7e6fd6942475b409b6ea7a909a177eae83f1cf4fdb26dd7b807",
+      "delegatePk": "IBLLkMpg6OXY2vZuInLSIz4EhtVX6MZhQe2JIBd9fretra2tra2tra2tra2tra2tra2tra2tra2tra2tra2trQ==",
+      "issuerPk": "wFDFY3pE+oYp//PMzOIwDLNipj2Z2V/FQUUmb0MyRFqurq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urg==",
+      "omega": 0
+    }
+  }
+}

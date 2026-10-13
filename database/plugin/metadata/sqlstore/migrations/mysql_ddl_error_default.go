@@ -1,3 +1,5 @@
+//go:build !dingo_extra_plugins
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build !dingo_extra_plugins
 
 package migrations
 
@@ -56,7 +56,7 @@ func isMySQLDDLAlreadyAppliedOnConn(
 	// when the phase replays after a crash between the DDL and the phase
 	// advance. 1061/1826 are duplicate index/constraint.
 	if strings.Contains(message, "error 1060") {
-		return mysqlColumnAlreadyPresentDefault(ctx, conn, statement)
+		return mysqlColumnAlreadyPresent(ctx, conn, statement)
 	}
 	if !strings.Contains(message, "error 1061") &&
 		!strings.Contains(message, "error 1826") {
@@ -95,27 +95,6 @@ LIMIT 1`, definition[3], definition[2]).Scan(&nonUnique); err != nil {
 		return false
 	}
 	return (definition[1] != "") == (nonUnique == 0)
-}
-
-// mysqlColumnAlreadyPresentDefault confirms the column an ADD COLUMN
-// statement names is already in the schema before the duplicate-column error
-// is treated as an idempotent replay.
-func mysqlColumnAlreadyPresentDefault(
-	ctx context.Context,
-	conn ddlExecer,
-	statement string,
-) bool {
-	table, column, definition, ok := parseAddColumnStatement(statement)
-	if !ok {
-		return false
-	}
-	var reported sql.NullString
-	return conn.QueryRowContext(ctx, `
-SELECT data_type
-FROM information_schema.columns
-WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
-LIMIT 1`, table, column).Scan(&reported) == nil &&
-		mysqlColumnTypeMatches(reported, definition)
 }
 
 func mysqlIndexExistsDefault(

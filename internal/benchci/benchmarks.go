@@ -15,11 +15,12 @@
 package benchci
 
 // CuratedBenchmarks lists the fixed-GOMAXPROCS benchmarks tracked across
-// issue #1895's four dimensions: block validation throughput, sync speed,
-// network throughput, and resource usage. Keep this in sync with the
-// Makefile bench-ci target's first `go test -bench` regex.
+// the four tracked dimensions: block validation throughput, sync speed,
+// network throughput, and resource usage, plus ledger query latency. Keep
+// this in sync with the Makefile bench-ci target's first `go test -bench`
+// regex.
 var CuratedBenchmarks = []string{
-	// Block validation throughput (ledger/benchmark_test.go).
+	// Block validation throughput (ledger/state_test.go).
 	"BenchmarkBlockProcessingThroughput",
 	"BenchmarkBlockProcessingThroughputPredecoded",
 	"BenchmarkBlockBatchProcessingThroughput",
@@ -40,24 +41,40 @@ var CuratedBenchmarks = []string{
 	"BenchmarkBlockfetchNearTipQueuedHeaderPredecoded", // ledger/benchmark_test.go
 	"BenchmarkBlockfetchVerifiedHeaderDispatch",        // ledger/benchmark_test.go
 	"BenchmarkBlockfetchClientBlockMetrics",            // ouroboros/blockfetch_test.go
-	"BenchmarkUpdateConnectionMetrics",                 // connmanager/benchmark_test.go
-	"BenchmarkHasInboundPeerAddress",                   // connmanager/benchmark_test.go
-	"BenchmarkReconcile",                               // peergov/benchmark_test.go
-	"BenchmarkPublishSubscribers",                      // event/benchmark_test.go
+	"BenchmarkUpdateConnectionMetrics",                 // connmanager/tests_test.go
+	"BenchmarkHasInboundPeerAddress",                   // connmanager/tests_test.go
+	"BenchmarkReconcile",                               // peergov/tests_test.go
+	"BenchmarkPublishSubscribers",                      // event/backpressure_ext_test.go
 
 	// Resource usage.
 	"BenchmarkBlockMemoryUsage",             // ledger/benchmark_test.go
-	"BenchmarkHotCacheGet",                  // database/cbor_cache_bench_test.go
-	"BenchmarkHotCachePut",                  // database/cbor_cache_bench_test.go
-	"BenchmarkHotCacheGetMiss",              // database/cbor_cache_bench_test.go
-	"BenchmarkBlockLRUCacheGet",             // database/cbor_cache_bench_test.go
-	"BenchmarkBlockLRUCachePut",             // database/cbor_cache_bench_test.go
-	"BenchmarkTieredCacheHotHit",            // database/cbor_cache_bench_test.go
-	"BenchmarkCachedBlockExtract",           // database/cbor_cache_bench_test.go
-	"BenchmarkCborOffsetEncode",             // database/cbor_cache_bench_test.go
-	"BenchmarkCborOffsetDecode",             // database/cbor_cache_bench_test.go
+	"BenchmarkHotCacheGet",                  // database/cbor_cache_test.go
+	"BenchmarkHotCachePut",                  // database/cbor_cache_test.go
+	"BenchmarkHotCacheGetMiss",              // database/cbor_cache_test.go
+	"BenchmarkBlockLRUCacheGet",             // database/cbor_cache_test.go
+	"BenchmarkBlockLRUCachePut",             // database/cbor_cache_test.go
+	"BenchmarkTieredCacheHotHit",            // database/cbor_cache_test.go
+	"BenchmarkCachedBlockExtract",           // database/cbor_cache_test.go
+	"BenchmarkCborOffsetEncode",             // database/cbor_cache_test.go
+	"BenchmarkCborOffsetDecode",             // database/cbor_cache_test.go
 	"BenchmarkStorageModeIngest",            // ledger/benchmark_test.go
 	"BenchmarkStorageModeIngestSteadyState", // ledger/benchmark_test.go
+
+	// Query latency. Each of these seeds the record it queries from the
+	// immutable fixture and fails if the query does not hit, so a
+	// benchcheck delta here is a query-cost change rather than a miss
+	// timed under a RealData name (ledger/benchmark_test.go).
+	"BenchmarkUtxoLookupByAddressRealData",
+	"BenchmarkUtxoLookupByRefRealData",
+	"BenchmarkTransactionHistoryQueriesRealData",
+	"BenchmarkAccountLookupByStakeKeyRealData",
+	"BenchmarkPoolLookupByKeyHashRealData",
+	"BenchmarkDRepLookupByKeyHashRealData",
+	"BenchmarkDatumLookupByHashRealData",
+	"BenchmarkProtocolParametersLookupByEpochRealData",
+	"BenchmarkBlockNonceLookupRealData",
+	"BenchmarkStakeRegistrationLookupsRealData",
+	"BenchmarkPoolRegistrationLookupsRealData",
 }
 
 // LockContentionBenchmarks lists the GOMAXPROCS lock-contention sweep
@@ -65,22 +82,22 @@ var CuratedBenchmarks = []string{
 // second `go test -bench` invocation. BenchmarkBlockLRUParallel* is the
 // literal LRU-cache incident (a single mutex made the cache ~8x slower at 16
 // cores before sharding). BenchmarkTipSnapshotReadOnly and
-// BenchmarkTipSnapshotReadUnderWriter are the dedicated #2601 sentinel: they
+// BenchmarkTipSnapshotReadUnderWriter are the dedicated sentinel: they
 // exercise the exact atomic.Pointer[consensusSnapshot]/[tipSnapshot]
-// read-under-concurrent-writer pattern that #2601 fixed (a plain RWMutex on
-// that path scaled backwards -- ~591ns at 16 cores with a concurrent writer
-// vs ~133ns read-only). BenchmarkConcurrentQueries is kept alongside them as
-// a broader database-query-under-concurrency check, not a substitute. Keep
-// this list in sync with that invocation's -bench regex.
+// read-under-concurrent-writer pattern that the copy-on-write snapshots fixed
+// (a plain RWMutex on that path scaled backwards -- ~591ns at 16 cores with a
+// concurrent writer vs ~133ns read-only). BenchmarkConcurrentQueries is kept
+// alongside them as a broader database-query-under-concurrency check, not a
+// substitute. Keep this list in sync with that invocation's -bench regex.
 var LockContentionBenchmarks = []string{
-	"BenchmarkBlockLRUParallelReadHeavy",     // database/block_lru_cache_parallel_bench_test.go
-	"BenchmarkBlockLRUParallelBalanced",      // database/block_lru_cache_parallel_bench_test.go
-	"BenchmarkBlockLRUParallelReadOnly",      // database/block_lru_cache_parallel_bench_test.go
-	"BenchmarkHotCacheParallelGet",           // database/cbor_cache_bench_test.go
-	"BenchmarkTryReserveInboundSlotParallel", // connmanager/benchmark_test.go
+	"BenchmarkBlockLRUParallelReadHeavy",     // database/block_lru_cache_test.go
+	"BenchmarkBlockLRUParallelBalanced",      // database/block_lru_cache_test.go
+	"BenchmarkBlockLRUParallelReadOnly",      // database/block_lru_cache_test.go
+	"BenchmarkHotCacheParallelGet",           // database/cbor_cache_test.go
+	"BenchmarkTryReserveInboundSlotParallel", // connmanager/tests_test.go
 	"BenchmarkConcurrentQueries",             // ledger/benchmark_test.go
-	"BenchmarkTipSnapshotReadOnly",           // ledger/snapshot_parallel_bench_test.go
-	"BenchmarkTipSnapshotReadUnderWriter",    // ledger/snapshot_parallel_bench_test.go
+	"BenchmarkTipSnapshotReadOnly",           // ledger/benchmark_test.go
+	"BenchmarkTipSnapshotReadUnderWriter",    // ledger/benchmark_test.go
 }
 
 // TrackedBenchmarks is the full set of benchmarks compared for CI regression

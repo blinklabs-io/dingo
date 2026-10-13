@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"math"
 	"math/big"
 	"testing"
@@ -35,12 +36,76 @@ func TestProcessEpochSkipsPreConwayProtocolParameters(t *testing.T) {
 	t.Parallel()
 
 	pparams := &shelley.ShelleyProtocolParameters{}
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		PParams: pparams,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, out)
 	assert.Same(t, pparams, out.UpdatedPParams)
+}
+
+func TestProcessEpochExtendsDRepsWhenNoLiveProposals(t *testing.T) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	credential := testBytes(28, 0x71)
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    credential,
+		ExpiryEpoch:   20,
+		Active:        true,
+	}))
+
+	processBoundary := func() {
+		txn := db.MetadataTxn(context.Background(), true)
+		defer txn.Release()
+		_, err := ProcessEpoch(context.Background(), &EpochInput{
+			DB:           db,
+			Txn:          txn,
+			PrevEpoch:    4,
+			NewEpoch:     5,
+			BoundarySlot: 500,
+			PParams:      conwayPParamsFixture(10),
+			UpdateFn: func(
+				pparams lcommon.ProtocolParameters,
+				_ any,
+			) (lcommon.ProtocolParameters, error) {
+				return pparams, nil
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, txn.Commit())
+	}
+
+	processBoundary()
+	processBoundary()
+	drep, err := store.GetDrepByCredential(0, credential, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(21), drep.ExpiryEpoch)
+}
+
+func TestRatificationPreconditionAcceptsZeroCommitteeQuorum(t *testing.T) {
+	t.Parallel()
+
+	action := &lcommon.UpdateCommitteeGovAction{
+		Type:   uint(lcommon.GovActionTypeUpdateCommittee),
+		Quorum: cbor.Rat{Rat: big.NewRat(0, 1)},
+	}
+	actionCbor, err := cbor.Encode(action)
+	require.NoError(t, err)
+	proposal := &models.GovernanceProposal{
+		ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
+		GovActionCbor: actionCbor,
+	}
+
+	remaining, err := ratificationEnactmentPrecondition(
+		conwayPParamsFixture(10),
+		nil,
+		proposal,
+		0,
+	)
+	require.NoError(t, err)
+	assert.Zero(t, remaining)
 }
 
 func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
@@ -63,11 +128,16 @@ func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 		Reward:     types.Uint64(5),
 		Active:     true,
 	}))
-
-	err = refundProposalDeposit(db, nil, &models.GovernanceProposal{
-		Deposit:       7,
-		ReturnAddress: rewardAddrBytes,
-	}, 123)
+	err = refundProposalDeposit(
+		context.Background(),
+		db,
+		nil,
+		&models.GovernanceProposal{
+			Deposit:       7,
+			ReturnAddress: rewardAddrBytes,
+		},
+		123,
+	)
 	require.NoError(t, err)
 
 	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
@@ -101,8 +171,14 @@ func TestRefundProposalDeposit_DistinguishesSameTxActionIndex(t *testing.T) {
 		Deposit:       11,
 		ReturnAddress: rewardAddrBytes,
 	}
-	require.NoError(t, refundProposalDeposit(db, nil, first, 123))
-	require.NoError(t, refundProposalDeposit(db, nil, second, 123))
+	require.NoError(
+		t,
+		refundProposalDeposit(context.Background(), db, nil, first, 123),
+	)
+	require.NoError(
+		t,
+		refundProposalDeposit(context.Background(), db, nil, second, 123),
+	)
 
 	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
@@ -161,7 +237,7 @@ WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?`,
 }
 
 // TestProcessEpochExpiresProposalWithoutRefundingDeposit pins the first half
-// of the expire/drop split (dingo#4411): marking a proposal expired must not
+// of the expire/drop split: marking a proposal expired must not
 // itself refund its deposit. cardano-ledger does not return an expired
 // governance action's deposit until one full epoch after it is marked
 // expired -- refunding it immediately inflated the very next mark snapshot's
@@ -189,23 +265,35 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 		Reward:     types.Uint64(5),
 		Active:     true,
 	}))
+	drepCredential := testBytes(28, 0x52)
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+		Credential:  drepCredential,
+		Active:      true,
+		ExpiryEpoch: 20,
+	}))
 	txHash := testBytes(32, 3)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        txHash,
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeInfo),
-		ProposedEpoch: 1,
-		ExpiresEpoch:  4,
-		AnchorURL:     "https://example.invalid/expired",
-		AnchorHash:    testBytes(32, 4),
-		Deposit:       7,
-		ReturnAddress: rewardAddrBytes,
-		AddedSlot:     100,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        txHash,
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeInfo),
+				ProposedEpoch: 1,
+				ExpiresEpoch:  4,
+				AnchorURL:     "https://example.invalid/expired",
+				AnchorHash:    testBytes(32, 4),
+				Deposit:       7,
+				ReturnAddress: rewardAddrBytes,
+				AddedSlot:     100,
+			},
+			nil,
+		),
+	)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    4,
@@ -221,6 +309,11 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, txn.Commit())
+	drep, err := db.GetDrepByCredential(context.Background(), 0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(21), drep.ExpiryEpoch,
+		"a proposal expiring in the previous epoch must not suppress the dormancy bump")
 
 	assert.Equal(t, 1, out.ExpiredCount)
 	assert.Equal(t, 0, out.DroppedCount)
@@ -234,7 +327,12 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 		"marking a proposal expired must not refund its deposit yet",
 	)
 
-	proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+	proposal, err := db.GetGovernanceProposal(
+		context.Background(),
+		txHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, proposal.ExpiredEpoch)
 	require.NotNil(t, proposal.ExpiredSlot)
@@ -245,9 +343,9 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 }
 
 // TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch is the
-// regression test for dingo#4411: a proposal marked expired at epoch E must
-// have its deposit refunded only when ProcessEpoch runs for epoch E+1, not
-// immediately.
+// regression test for the early proposal-deposit refund: a proposal marked
+// expired at epoch E must have its deposit refunded only when ProcessEpoch runs
+// for epoch E+1, not immediately.
 func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
 	t *testing.T,
 ) {
@@ -271,24 +369,30 @@ func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
 		Active:     true,
 	}))
 	txHash := testBytes(32, 3)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        txHash,
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeInfo),
-		ProposedEpoch: 1,
-		ExpiresEpoch:  4,
-		AnchorURL:     "https://example.invalid/expired",
-		AnchorHash:    testBytes(32, 4),
-		Deposit:       7,
-		ReturnAddress: rewardAddrBytes,
-		AddedSlot:     100,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        txHash,
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeInfo),
+				ProposedEpoch: 1,
+				ExpiresEpoch:  4,
+				AnchorURL:     "https://example.invalid/expired",
+				AnchorHash:    testBytes(32, 4),
+				Deposit:       7,
+				ReturnAddress: rewardAddrBytes,
+				AddedSlot:     100,
+			},
+			nil,
+		),
+	)
 
 	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
 		t.Helper()
-		txn := db.MetadataTxn(true)
+		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -325,7 +429,12 @@ func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(12), uint64(account.Reward))
 
-	proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+	proposal, err := db.GetGovernanceProposal(
+		context.Background(),
+		txHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, proposal.ExpiredEpoch)
 	assert.Equal(t, uint64(5), *proposal.ExpiredEpoch)
@@ -336,9 +445,9 @@ func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
 }
 
 // TestProcessEpochReplayedExpireBoundaryDoesNotDropInSameEpoch covers the
-// crash-replay half of dingo#4411. A boundary that is reprocessed reruns
-// against the expiry the first pass already wrote, so the drop step's own
-// `expired_epoch < NewEpoch` bound -- not merely its position ahead of the
+// crash-replay half of the early-refund fix. A boundary that is reprocessed
+// reruns against the expiry the first pass already wrote, so the drop step's
+// own `expired_epoch < NewEpoch` bound -- not merely its position ahead of the
 // expiry step -- is what keeps the refund out of the epoch that expired it.
 func TestProcessEpochReplayedExpireBoundaryDoesNotDropInSameEpoch(
 	t *testing.T,
@@ -354,24 +463,30 @@ func TestProcessEpochReplayedExpireBoundaryDoesNotDropInSameEpoch(
 		Active:     true,
 	}))
 	txHash := testBytes(32, 0x72)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        txHash,
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeInfo),
-		ProposedEpoch: 1,
-		ExpiresEpoch:  4,
-		AnchorURL:     "https://example.invalid/replay-expire",
-		AnchorHash:    testBytes(32, 0x73),
-		Deposit:       7,
-		ReturnAddress: rewardAddrBytes,
-		AddedSlot:     100,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        txHash,
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeInfo),
+				ProposedEpoch: 1,
+				ExpiresEpoch:  4,
+				AnchorURL:     "https://example.invalid/replay-expire",
+				AnchorHash:    testBytes(32, 0x73),
+				Deposit:       7,
+				ReturnAddress: rewardAddrBytes,
+				AddedSlot:     100,
+			},
+			nil,
+		),
+	)
 
 	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
 		t.Helper()
-		txn := db.MetadataTxn(true)
+		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -407,7 +522,12 @@ func TestProcessEpochReplayedExpireBoundaryDoesNotDropInSameEpoch(
 		uint64(account.Reward),
 		"a reprocessed expire boundary must not refund the deposit",
 	)
-	proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+	proposal, err := db.GetGovernanceProposal(
+		context.Background(),
+		txHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Nil(t, proposal.DroppedEpoch)
 
@@ -450,20 +570,32 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 	ratifiedSlot := uint64(400)
 	winnerHash := testBytes(32, 0x93)
 	siblingHash := testBytes(32, 0x94)
-	require.NoError(t, db.SetGovernanceProposal(buildNoConfidenceProposal(
-		t, winnerHash, 0, 10, 30, winnerAddr, 100,
-		nil, nil, &ratifiedEpoch, &ratifiedSlot,
-	), nil))
-	require.NoError(t, db.SetGovernanceProposal(buildNoConfidenceProposal(
-		t, siblingHash, 0, 12, 25, siblingAddr, 101,
-		nil, nil, nil, nil,
-	), nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(),
+			buildNoConfidenceProposal(
+				t, winnerHash, 0, 10, 30, winnerAddr, 100,
+				nil, nil, &ratifiedEpoch, &ratifiedSlot,
+			),
+			nil,
+		),
+	)
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(),
+			buildNoConfidenceProposal(
+				t, siblingHash, 0, 4, 25, siblingAddr, 101,
+				nil, nil, nil, nil,
+			),
+			nil,
+		),
+	)
 
 	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
 		t.Helper()
-		txn := db.MetadataTxn(true)
+		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -483,6 +615,7 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 	}
 
 	out := runEpoch(5, 500)
+	assert.Equal(t, 1, out.EnactedCount)
 	assert.Equal(t, 1, out.OrphanedCount)
 
 	winner, err := store.GetAccountByCredential(0, winnerCred, false, nil)
@@ -522,25 +655,31 @@ func TestProcessEpochReplaysBoundaryDroppedProposalAfterStakeRewardReset(
 	stakeCred := testBytes(28, 0x20)
 	rewardAddrBytes := buildRewardAddr(t, stakeCred)
 	txHash := testBytes(32, 0x21)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        txHash,
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeInfo),
-		ProposedEpoch: 1,
-		ExpiresEpoch:  4,
-		AnchorURL:     "https://example.invalid/replay-expired",
-		AnchorHash:    testBytes(32, 0x22),
-		Deposit:       25,
-		ReturnAddress: rewardAddrBytes,
-		AddedSlot:     100,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        txHash,
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeInfo),
+				ProposedEpoch: 1,
+				ExpiresEpoch:  4,
+				AnchorURL:     "https://example.invalid/replay-expired",
+				AnchorHash:    testBytes(32, 0x22),
+				Deposit:       25,
+				ReturnAddress: rewardAddrBytes,
+				AddedSlot:     100,
+			},
+			nil,
+		),
+	)
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
 	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
 		t.Helper()
-		txn := db.MetadataTxn(true)
+		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -606,25 +745,31 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	rewardAddrBytes, err := rewardAddr.Bytes()
 	require.NoError(t, err)
 	txHash := testBytes(32, 3)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        txHash,
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeInfo),
-		ProposedEpoch: 1,
-		ExpiresEpoch:  4,
-		AnchorURL:     "https://example.invalid/expired",
-		AnchorHash:    testBytes(32, 4),
-		Deposit:       7,
-		ReturnAddress: rewardAddrBytes,
-		AddedSlot:     100,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        txHash,
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeInfo),
+				ProposedEpoch: 1,
+				ExpiresEpoch:  4,
+				AnchorURL:     "https://example.invalid/expired",
+				AnchorHash:    testBytes(32, 4),
+				Deposit:       7,
+				ReturnAddress: rewardAddrBytes,
+				AddedSlot:     100,
+			},
+			nil,
+		),
+	)
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
 	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
 		t.Helper()
-		txn := db.MetadataTxn(true)
+		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -667,7 +812,12 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	assert.Equal(t, uint64(107), uint64(state.Treasury))
 	assert.Equal(t, uint64(20), uint64(state.Reserves))
 
-	proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+	proposal, err := db.GetGovernanceProposal(
+		context.Background(),
+		txHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, proposal.ExpiredEpoch)
 	require.NotNil(t, proposal.ExpiredSlot)
@@ -675,6 +825,356 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	assert.Equal(t, uint64(500), *proposal.ExpiredSlot)
 	require.NotNil(t, proposal.DroppedEpoch)
 	assert.Equal(t, uint64(6), *proposal.DroppedEpoch)
+}
+
+func TestGovActionPriorityMatchesConwayRATIFYOrder(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		actionType lcommon.GovActionType
+		want       int
+	}{
+		{"no confidence", lcommon.GovActionTypeNoConfidence, 0},
+		{"update committee", lcommon.GovActionTypeUpdateCommittee, 1},
+		{"new constitution", lcommon.GovActionTypeNewConstitution, 2},
+		{"hard fork initiation", lcommon.GovActionTypeHardForkInitiation, 3},
+		{"parameter change", lcommon.GovActionTypeParameterChange, 4},
+		{"treasury withdrawal", lcommon.GovActionTypeTreasuryWithdrawal, 5},
+		{"info", lcommon.GovActionTypeInfo, 6},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			proposal := &models.GovernanceProposal{
+				ActionType: uint8(test.actionType),
+			}
+			assert.Equal(t, test.want, govActionPriority(proposal))
+		})
+	}
+}
+
+func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	pparams := conwayPParamsFixture(10)
+	pparams.MinCommitteeSize = 1
+	pparams.DRepVotingThresholds.PpGovGroup = newRat(0, 1)
+	pparams.DRepVotingThresholds.PpEconomicGroup = newRat(1, 1)
+	pparams.DRepVotingThresholds.TreasuryWithdrawal = newRat(1, 1)
+	updatedThresholds := pparams.DRepVotingThresholds
+	updatedThresholds.PpEconomicGroup = newRat(0, 1)
+	childThresholds := pparams.DRepVotingThresholds
+	childThresholds.TreasuryWithdrawal = newRat(0, 1)
+
+	// Give the child a lexically earlier hash and the same anchor slot so
+	// ancestry, rather than the SQL tie-breaker, determines candidate order.
+	parentHash := testBytes(32, 0x72)
+	childHash := testBytes(32, 0x71)
+	parentActionIndex := uint32(0)
+	parentAction, err := cbor.Encode(&conway.ConwayParameterChangeGovAction{
+		Type: uint(lcommon.GovActionTypeParameterChange),
+		ParamUpdate: conway.ConwayProtocolParameterUpdate{
+			DRepVotingThresholds: &updatedThresholds,
+		},
+	})
+	require.NoError(t, err)
+	poolDeposit := uint(2_000_000)
+	childAction, err := cbor.Encode(&conway.ConwayParameterChangeGovAction{
+		Type: uint(lcommon.GovActionTypeParameterChange),
+		ParamUpdate: conway.ConwayProtocolParameterUpdate{
+			DRepVotingThresholds: &childThresholds,
+			PoolDeposit:          &poolDeposit,
+		},
+	})
+	require.NoError(t, err)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		testBytes(28, 0x77),
+	)
+	require.NoError(t, err)
+	rewardAddrBytes, err := rewardAddr.Bytes()
+	require.NoError(t, err)
+	treasuryAction, err := cbor.Encode(&lcommon.TreasuryWithdrawalGovAction{
+		Type: uint(lcommon.GovActionTypeTreasuryWithdrawal),
+		Withdrawals: map[*lcommon.Address]uint64{
+			&rewardAddr: 1,
+		},
+	})
+	require.NoError(t, err)
+	parent := &models.GovernanceProposal{
+		TxHash:        parentHash,
+		ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+		ProposedEpoch: stabilityTestEpoch - 1,
+		ExpiresEpoch:  stabilityTestEpoch + 10,
+		AnchorURL:     "https://example.invalid/parent",
+		AnchorHash:    testBytes(32, 0x73),
+		ReturnAddress: testBytes(29, 0x74),
+		GovActionCbor: parentAction,
+		AddedSlot:     400,
+	}
+	child := &models.GovernanceProposal{
+		TxHash:          childHash,
+		ActionType:      uint8(lcommon.GovActionTypeParameterChange),
+		ProposedEpoch:   stabilityTestEpoch - 1,
+		ExpiresEpoch:    stabilityTestEpoch + 10,
+		ParentTxHash:    parentHash,
+		ParentActionIdx: &parentActionIndex,
+		AnchorURL:       "https://example.invalid/child",
+		AnchorHash:      testBytes(32, 0x75),
+		ReturnAddress:   testBytes(29, 0x76),
+		GovActionCbor:   childAction,
+		AddedSlot:       400,
+	}
+	treasury := &models.GovernanceProposal{
+		TxHash:        testBytes(32, 0x93),
+		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+		ProposedEpoch: stabilityTestEpoch - 1,
+		ExpiresEpoch:  stabilityTestEpoch + 10,
+		AnchorURL:     "https://example.invalid/treasury",
+		AnchorHash:    testBytes(32, 0x78),
+		ReturnAddress: rewardAddrBytes,
+		GovActionCbor: treasuryAction,
+		AddedSlot:     400,
+	}
+	// Persist the child first to make row-ID order disagree with the
+	// governance ancestry order when both actions enact at the same boundary.
+	require.NoError(t, db.SetGovernanceProposal(t.Context(), child, nil))
+	require.NoError(t, db.SetGovernanceProposal(t.Context(), parent, nil))
+	require.NoError(t, db.SetGovernanceProposal(t.Context(), treasury, nil))
+	parent, err = db.GetGovernanceProposal(t.Context(), parentHash, 0, nil)
+	require.NoError(t, err)
+	child, err = db.GetGovernanceProposal(t.Context(), childHash, 0, nil)
+	require.NoError(t, err)
+	treasury, err = db.GetGovernanceProposal(t.Context(), treasury.TxHash, 0, nil)
+	require.NoError(t, err)
+	drepCred := seedDRepWithStake(t, db, 100)
+	seedDRepYesVote(t, db, parent.ID, drepCred)
+	require.NoError(t, store.SetNetworkState(10, 20, 1, nil))
+	seedHardForkCommitteeAndSPOVotes(t, db, store, parent, child, treasury)
+
+	txn := db.MetadataTxn(t.Context(), true)
+	defer txn.Release()
+	out, err := ProcessEpoch(t.Context(), &EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    stabilityTestEpoch - 1,
+		NewEpoch:     stabilityTestEpoch,
+		BoundarySlot: stabilityTestEpoch * 100,
+		PParams:      pparams,
+		UpdateFn:     eras.PParamsUpdateConway,
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+	assert.Equal(t, 3, out.RatifiedCount)
+
+	parent, err = db.GetGovernanceProposal(t.Context(), parentHash, 0, nil)
+	require.NoError(t, err)
+	child, err = db.GetGovernanceProposal(t.Context(), childHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, parent.RatifiedEpoch)
+	require.NotNil(t, child.RatifiedEpoch)
+	treasury, err = db.GetGovernanceProposal(t.Context(), treasury.TxHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, treasury.RatifiedEpoch)
+	assert.Equal(t, stabilityTestEpoch, *parent.RatifiedEpoch)
+	assert.Equal(t, stabilityTestEpoch, *child.RatifiedEpoch)
+	assert.Equal(t, newRat(1, 1), pparams.DRepVotingThresholds.PpEconomicGroup)
+
+	enactTxn := db.MetadataTxn(t.Context(), true)
+	defer enactTxn.Release()
+	enactOut, err := ProcessEpoch(t.Context(), &EpochInput{
+		DB:           db,
+		Txn:          enactTxn,
+		PrevEpoch:    stabilityTestEpoch,
+		NewEpoch:     stabilityTestEpoch + 1,
+		BoundarySlot: (stabilityTestEpoch + 1) * 100,
+		PParams:      pparams,
+		UpdateFn:     eras.PParamsUpdateConway,
+	})
+	require.NoError(t, err)
+	require.NoError(t, enactTxn.Commit())
+	assert.Equal(t, 3, enactOut.EnactedCount)
+	require.True(t, enactOut.PParamsChanged)
+	updatedPParams, ok := enactOut.UpdatedPParams.(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	assert.Equal(
+		t,
+		newRat(1, 1),
+		updatedPParams.DRepVotingThresholds.PpEconomicGroup,
+	)
+	assert.Equal(
+		t,
+		newRat(0, 1),
+		updatedPParams.DRepVotingThresholds.TreasuryWithdrawal,
+	)
+	assert.Equal(t, poolDeposit, updatedPParams.PoolDeposit)
+
+	parent, err = db.GetGovernanceProposal(t.Context(), parentHash, 0, nil)
+	require.NoError(t, err)
+	child, err = db.GetGovernanceProposal(t.Context(), childHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, parent.EnactedEpoch)
+	require.NotNil(t, child.EnactedEpoch)
+	assert.Equal(t, stabilityTestEpoch+1, *parent.EnactedEpoch)
+	assert.Equal(t, stabilityTestEpoch+1, *child.EnactedEpoch)
+	root, err := db.GetLastEnactedGovernanceProposal(
+		t.Context(),
+		[]uint8{uint8(lcommon.GovActionTypeParameterChange)}, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, root)
+	assert.Equal(t, childHash, root.TxHash)
+
+	// Replaying the committed boundary must reconstruct the same ordered
+	// parameter result from the persisted enacted proposals.
+	replayTxn := db.MetadataTxn(t.Context(), true)
+	defer replayTxn.Release()
+	replayOut, err := ProcessEpoch(t.Context(), &EpochInput{
+		DB:           db,
+		Txn:          replayTxn,
+		PrevEpoch:    stabilityTestEpoch,
+		NewEpoch:     stabilityTestEpoch + 1,
+		BoundarySlot: (stabilityTestEpoch + 1) * 100,
+		PParams:      pparams,
+		UpdateFn:     eras.PParamsUpdateConway,
+	})
+	require.NoError(t, err)
+	require.NoError(t, replayTxn.Commit())
+	assert.Zero(t, replayOut.EnactedCount)
+	require.True(t, replayOut.PParamsChanged)
+	replayPParams := replayOut.UpdatedPParams
+	replayedPParams, ok := replayPParams.(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	assert.Equal(
+		t,
+		newRat(1, 1),
+		replayedPParams.DRepVotingThresholds.PpEconomicGroup,
+	)
+	assert.Equal(
+		t,
+		newRat(0, 1),
+		replayedPParams.DRepVotingThresholds.TreasuryWithdrawal,
+	)
+	assert.Equal(t, poolDeposit, replayedPParams.PoolDeposit)
+}
+
+func TestProcessEpochOrdersParameterChangesBeforeTreasuryWithdrawals(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		insertTreasury bool
+	}{
+		{name: "treasury inserted first", insertTreasury: true},
+		{name: "parameter change inserted first", insertTreasury: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			db, store := newTallyTestDB(t)
+			pparams := conwayPParamsFixture(10)
+			pparams.MinCommitteeSize = 1
+			pparams.DRepVotingThresholds.PpGovGroup = newRat(0, 1)
+			pparams.DRepVotingThresholds.TreasuryWithdrawal = newRat(1, 1)
+			updatedThresholds := pparams.DRepVotingThresholds
+			updatedThresholds.TreasuryWithdrawal = newRat(0, 1)
+			parentAction, err := cbor.Encode(
+				&conway.ConwayParameterChangeGovAction{
+					Type: uint(lcommon.GovActionTypeParameterChange),
+					ParamUpdate: conway.ConwayProtocolParameterUpdate{
+						DRepVotingThresholds: &updatedThresholds,
+					},
+				},
+			)
+			require.NoError(t, err)
+			stakeCred := testBytes(28, 0x82)
+			rewardAddr, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeNoneKey,
+				lcommon.AddressNetworkTestnet,
+				nil,
+				stakeCred,
+			)
+			require.NoError(t, err)
+			rewardAddrBytes, err := rewardAddr.Bytes()
+			require.NoError(t, err)
+			treasuryAction, err := cbor.Encode(
+				&lcommon.TreasuryWithdrawalGovAction{
+					Type:        uint(lcommon.GovActionTypeTreasuryWithdrawal),
+					Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 1},
+				},
+			)
+			require.NoError(t, err)
+			require.NoError(t, store.SetNetworkState(10, 20, 1, nil))
+
+			parentSlot, treasurySlot := uint64(200), uint64(100)
+			if !test.insertTreasury {
+				parentSlot, treasurySlot = treasurySlot, parentSlot
+			}
+			parent := &models.GovernanceProposal{
+				TxHash:        testBytes(32, 0x83),
+				ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+				ProposedEpoch: stabilityTestEpoch - 1,
+				ExpiresEpoch:  stabilityTestEpoch + 10,
+				AnchorURL:     "https://example.invalid/priority-parent",
+				AnchorHash:    testBytes(32, 0x84),
+				ReturnAddress: testBytes(29, 0x85),
+				GovActionCbor: parentAction,
+				AddedSlot:     parentSlot,
+			}
+			treasury := &models.GovernanceProposal{
+				TxHash:        testBytes(32, 0x86),
+				ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+				ProposedEpoch: stabilityTestEpoch - 1,
+				ExpiresEpoch:  stabilityTestEpoch + 10,
+				AnchorURL:     "https://example.invalid/priority-withdrawal",
+				AnchorHash:    testBytes(32, 0x87),
+				ReturnAddress: rewardAddrBytes,
+				GovActionCbor: treasuryAction,
+				AddedSlot:     treasurySlot,
+			}
+			ordered := []*models.GovernanceProposal{parent, treasury}
+			if test.insertTreasury {
+				ordered[0], ordered[1] = treasury, parent
+			}
+			for _, proposal := range ordered {
+				require.NoError(t, db.SetGovernanceProposal(t.Context(), proposal, nil))
+			}
+			parent, err = db.GetGovernanceProposal(t.Context(), parent.TxHash, 0, nil)
+			require.NoError(t, err)
+			treasury, err = db.GetGovernanceProposal(t.Context(), treasury.TxHash, 0, nil)
+			require.NoError(t, err)
+			seedHardForkCommitteeAndSPOVotes(t, db, store, parent, treasury)
+
+			txn := db.MetadataTxn(t.Context(), true)
+			defer txn.Release()
+			out, err := ProcessEpoch(t.Context(), &EpochInput{
+				DB:           db,
+				Txn:          txn,
+				PrevEpoch:    stabilityTestEpoch - 1,
+				NewEpoch:     stabilityTestEpoch,
+				BoundarySlot: stabilityTestEpoch * 100,
+				PParams:      pparams,
+				UpdateFn:     eras.PParamsUpdateConway,
+			})
+			require.NoError(t, err)
+			require.NoError(t, txn.Commit())
+			assert.Equal(t, 2, out.RatifiedCount)
+			parent, err = db.GetGovernanceProposal(t.Context(), parent.TxHash, 0, nil)
+			require.NoError(t, err)
+			treasury, err = db.GetGovernanceProposal(t.Context(), treasury.TxHash, 0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, parent.RatifiedEpoch)
+			require.NotNil(t, treasury.RatifiedEpoch)
+		})
+	}
 }
 
 // TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify
@@ -696,23 +1196,29 @@ func TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify(
 	require.NoError(t, err)
 
 	txHash := testBytes(32, 0x61)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        txHash,
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeParameterChange),
-		ProposedEpoch: stabilityTestEpoch - 1,
-		ExpiresEpoch:  stabilityTestEpoch + 10,
-		AnchorURL:     "https://example.invalid/bootstrap-boundary",
-		AnchorHash:    testBytes(32, 0x62),
-		ReturnAddress: testBytes(29, 0x63),
-		GovActionCbor: actionCbor,
-		AddedSlot:     100,
-		Deposit:       1_000,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        txHash,
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+				ProposedEpoch: stabilityTestEpoch - 1,
+				ExpiresEpoch:  stabilityTestEpoch + 10,
+				AnchorURL:     "https://example.invalid/bootstrap-boundary",
+				AnchorHash:    testBytes(32, 0x62),
+				ReturnAddress: testBytes(29, 0x63),
+				GovActionCbor: actionCbor,
+				AddedSlot:     100,
+				Deposit:       1_000,
+			},
+			nil,
+		),
+	)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    stabilityTestEpoch - 1,
@@ -730,7 +1236,12 @@ func TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify(
 	require.NoError(t, txn.Commit())
 
 	assert.Equal(t, 0, out.RatifiedCount)
-	proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+	proposal, err := db.GetGovernanceProposal(
+		context.Background(),
+		txHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Nil(t, proposal.RatifiedEpoch)
 	assert.Nil(t, proposal.RatifiedSlot)
@@ -777,13 +1288,13 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 			require.NoError(t, err)
 
 			txHash := testBytes(32, 0xA1)
-			require.NoError(t, db.SetGovernanceProposal(
+			require.NoError(t, db.SetGovernanceProposal(context.Background(),
 				&models.GovernanceProposal{
 					TxHash:        txHash,
 					ActionIndex:   0,
 					ActionType:    uint8(lcommon.GovActionTypeNoConfidence),
 					ProposedEpoch: 4,
-					ExpiresEpoch:  10,
+					ExpiresEpoch:  4,
 					AnchorURL:     "https://example.invalid/no-confidence",
 					AnchorHash:    testBytes(32, 0xA2),
 					ReturnAddress: testBytes(29, 0xA3),
@@ -793,9 +1304,9 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 				nil,
 			))
 
-			txn := db.MetadataTxn(true)
+			txn := db.MetadataTxn(context.Background(), true)
 			defer txn.Release()
-			out, err := ProcessEpoch(&EpochInput{
+			out, err := ProcessEpoch(context.Background(), &EpochInput{
 				DB:           db,
 				Txn:          txn,
 				PrevEpoch:    4,
@@ -818,12 +1329,87 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 				out.RatifiedCount,
 				"ProcessEpoch must run the governance ratification path",
 			)
-			proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+			proposal, err := db.GetGovernanceProposal(
+				context.Background(),
+				txHash,
+				0,
+				nil,
+			)
 			require.NoError(t, err)
 			require.NotNil(t, proposal.RatifiedEpoch)
 			assert.Equal(t, uint64(5), *proposal.RatifiedEpoch)
+			assert.Nil(
+				t,
+				proposal.ExpiredEpoch,
+				"a proposal ratified at its final boundary must not also expire",
+			)
 		})
 	}
+}
+
+// An action ratified at the boundary that closes its final epoch has
+// expires_epoch below the new epoch, so it does not count as a live proposal
+// for the dormant-epoch bump into that new epoch.
+func TestProcessEpochDormancyBumpIgnoresActionRatifiedAtFinalBoundary(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, _ := newTallyTestDB(t)
+	drepCredential := testBytes(28, 0x71)
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+		Credential:  drepCredential,
+		Active:      true,
+		ExpiryEpoch: 20,
+	}))
+	actionCbor, err := cbor.Encode(&lcommon.NoConfidenceGovAction{
+		Type: uint(lcommon.GovActionTypeNoConfidence),
+	})
+	require.NoError(t, err)
+	txHash := testBytes(32, 0x72)
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
+		TxHash:        txHash,
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeNoConfidence),
+		ProposedEpoch: 4,
+		ExpiresEpoch:  4,
+		AnchorURL:     "https://example.invalid/dormancy-final-boundary",
+		AnchorHash:    testBytes(32, 0x73),
+		ReturnAddress: testBytes(29, 0x74),
+		GovActionCbor: actionCbor,
+		AddedSlot:     400,
+	},
+		nil,
+	))
+
+	txn := db.MetadataTxn(context.Background(), true)
+	defer txn.Release()
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    4,
+		NewEpoch:     5,
+		BoundarySlot: 500,
+		PParams: &conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 10,
+			},
+		},
+		UpdateFn: func(
+			pparams lcommon.ProtocolParameters,
+			_ any,
+		) (lcommon.ProtocolParameters, error) {
+			return pparams, nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+	require.Equal(t, 1, out.RatifiedCount)
+
+	drep, err := db.GetDrepByCredential(context.Background(), 0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(21), drep.ExpiryEpoch)
 }
 
 func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
@@ -890,7 +1476,7 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 			require.NoError(t, err)
 
 			txHash := testBytes(32, byte(0xB0+index))
-			require.NoError(t, db.SetGovernanceProposal(
+			require.NoError(t, db.SetGovernanceProposal(context.Background(),
 				&models.GovernanceProposal{
 					TxHash:        txHash,
 					ActionIndex:   0,
@@ -905,7 +1491,12 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 				},
 				nil,
 			))
-			proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+			proposal, err := db.GetGovernanceProposal(
+				context.Background(),
+				txHash,
+				0,
+				nil,
+			)
 			require.NoError(t, err)
 			drepCred := seedDRepWithStake(t, db, 100)
 			seedDRepYesVote(t, db, proposal.ID, drepCred)
@@ -939,9 +1530,9 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 				activePParams lcommon.ProtocolParameters,
 			) *EpochOutput {
 				t.Helper()
-				txn := db.MetadataTxn(true)
+				txn := db.MetadataTxn(context.Background(), true)
 				defer txn.Release()
-				out, processErr := ProcessEpoch(&EpochInput{
+				out, processErr := ProcessEpoch(context.Background(), &EpochInput{
 					DB:           db,
 					Txn:          txn,
 					PrevEpoch:    prevEpoch,
@@ -961,7 +1552,12 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 				pparams,
 			)
 			require.Equal(t, 1, ratification.RatifiedCount)
-			stored, err := db.GetGovernanceProposal(txHash, 0, nil)
+			stored, err := db.GetGovernanceProposal(
+				context.Background(),
+				txHash,
+				0,
+				nil,
+			)
 			require.NoError(t, err)
 			require.NotNil(t, stored.RatifiedEpoch)
 			require.Equal(t, stabilityTestEpoch, *stored.RatifiedEpoch)
@@ -975,7 +1571,12 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 			updated, ok := enactment.UpdatedPParams.(*gdijkstra.DijkstraProtocolParameters)
 			require.True(t, ok)
 			test.assert(t, updated)
-			stored, err = db.GetGovernanceProposal(txHash, 0, nil)
+			stored, err = db.GetGovernanceProposal(
+				context.Background(),
+				txHash,
+				0,
+				nil,
+			)
 			require.NoError(t, err)
 			require.NotNil(t, stored.EnactedEpoch)
 			require.Equal(t, stabilityTestEpoch+1, *stored.EnactedEpoch)
@@ -984,7 +1585,7 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 }
 
 // TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten
-// covers blinklabs-io/dingo#3825's PR review (wolf31o2): a real ratify+enact
+// pins: a real ratify+enact
 // cycle through ProcessEpoch, not EnactProposal called in isolation, must
 // still surface PlutusV2CostModelWritten on the resulting EpochOutput --
 // proving applyEnactmentResult's OR into EpochOutput actually connects to
@@ -1007,7 +1608,7 @@ func TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten(
 	require.NoError(t, err)
 
 	txHash := testBytes(32, 0xE0)
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		&models.GovernanceProposal{
 			TxHash:        txHash,
 			ActionIndex:   0,
@@ -1022,7 +1623,12 @@ func TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten(
 		},
 		nil,
 	))
-	proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+	proposal, err := db.GetGovernanceProposal(
+		context.Background(),
+		txHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	drepCred := seedDRepWithStake(t, db, 100)
 	seedDRepYesVote(t, db, proposal.ID, drepCred)
@@ -1049,9 +1655,9 @@ func TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten(
 		activePParams lcommon.ProtocolParameters,
 	) *EpochOutput {
 		t.Helper()
-		txn := db.MetadataTxn(true)
+		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, processErr := ProcessEpoch(&EpochInput{
+		out, processErr := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    prevEpoch,
@@ -1112,28 +1718,34 @@ func TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset(
 	ratifiedEpoch := uint64(4)
 	ratifiedSlot := uint64(400)
 	txHash := testBytes(32, 0x31)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        txHash,
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
-		ProposedEpoch: 3,
-		ExpiresEpoch:  10,
-		RatifiedEpoch: &ratifiedEpoch,
-		RatifiedSlot:  &ratifiedSlot,
-		AnchorURL:     "https://example.invalid/replay-withdrawal",
-		AnchorHash:    testBytes(32, 0x32),
-		Deposit:       0,
-		ReturnAddress: rewardAddrBytes,
-		GovActionCbor: withdrawalCbor,
-		AddedSlot:     100,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        txHash,
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+				ProposedEpoch: 3,
+				ExpiresEpoch:  10,
+				RatifiedEpoch: &ratifiedEpoch,
+				RatifiedSlot:  &ratifiedSlot,
+				AnchorURL:     "https://example.invalid/replay-withdrawal",
+				AnchorHash:    testBytes(32, 0x32),
+				Deposit:       0,
+				ReturnAddress: rewardAddrBytes,
+				GovActionCbor: withdrawalCbor,
+				AddedSlot:     100,
+			},
+			nil,
+		),
+	)
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
 	runEpoch := func() *EpochOutput {
 		t.Helper()
-		txn := db.MetadataTxn(true)
+		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    4,
@@ -1232,41 +1844,53 @@ func TestProcessEpochUnclaimedDepositDoesNotIncreaseWithdrawalCapacity(
 
 	ratifiedEpoch := uint64(4)
 	ratifiedSlot := uint64(400)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        testBytes(32, 8),
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeNewConstitution),
-		ProposedEpoch: 3,
-		ExpiresEpoch:  10,
-		RatifiedEpoch: &ratifiedEpoch,
-		RatifiedSlot:  &ratifiedSlot,
-		AnchorURL:     "https://example.invalid/proposal-a",
-		AnchorHash:    testBytes(32, 9),
-		Deposit:       50,
-		ReturnAddress: missingReturnAddrBytes,
-		GovActionCbor: constitutionCbor,
-		AddedSlot:     100,
-	}, nil))
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        testBytes(32, 10),
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
-		ProposedEpoch: 3,
-		ExpiresEpoch:  10,
-		RatifiedEpoch: &ratifiedEpoch,
-		RatifiedSlot:  &ratifiedSlot,
-		AnchorURL:     "https://example.invalid/proposal-b",
-		AnchorHash:    testBytes(32, 11),
-		Deposit:       0,
-		ReturnAddress: withdrawAddrBytes,
-		GovActionCbor: withdrawalCbor,
-		AddedSlot:     101,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        testBytes(32, 8),
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeNewConstitution),
+				ProposedEpoch: 3,
+				ExpiresEpoch:  10,
+				RatifiedEpoch: &ratifiedEpoch,
+				RatifiedSlot:  &ratifiedSlot,
+				AnchorURL:     "https://example.invalid/proposal-a",
+				AnchorHash:    testBytes(32, 9),
+				Deposit:       50,
+				ReturnAddress: missingReturnAddrBytes,
+				GovActionCbor: constitutionCbor,
+				AddedSlot:     100,
+			},
+			nil,
+		),
+	)
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        testBytes(32, 10),
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+				ProposedEpoch: 3,
+				ExpiresEpoch:  10,
+				RatifiedEpoch: &ratifiedEpoch,
+				RatifiedSlot:  &ratifiedSlot,
+				AnchorURL:     "https://example.invalid/proposal-b",
+				AnchorHash:    testBytes(32, 11),
+				Deposit:       0,
+				ReturnAddress: withdrawAddrBytes,
+				GovActionCbor: withdrawalCbor,
+				AddedSlot:     101,
+			},
+			nil,
+		),
+	)
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    4,
@@ -1283,10 +1907,20 @@ func TestProcessEpochUnclaimedDepositDoesNotIncreaseWithdrawalCapacity(
 	require.NoError(t, err)
 	require.NoError(t, txn.Commit())
 	assert.Equal(t, 1, out.EnactedCount)
-	constitution, err := db.GetGovernanceProposal(testBytes(32, 8), 0, nil)
+	constitution, err := db.GetGovernanceProposal(
+		context.Background(),
+		testBytes(32, 8),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.NotNil(t, constitution.EnactedEpoch)
-	withdrawal, err := db.GetGovernanceProposal(testBytes(32, 10), 0, nil)
+	withdrawal, err := db.GetGovernanceProposal(
+		context.Background(),
+		testBytes(32, 10),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Nil(t, withdrawal.EnactedEpoch)
 	assert.Nil(t, withdrawal.RatifiedEpoch)
@@ -1330,10 +1964,16 @@ func TestRefundProposalDepositReturnsInactiveRewardAccountToTreasury(
 	require.NoError(t, err)
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
-	err = refundProposalDeposit(db, nil, &models.GovernanceProposal{
-		Deposit:       7,
-		ReturnAddress: rewardAddrBytes,
-	}, 123)
+	err = refundProposalDeposit(
+		context.Background(),
+		db,
+		nil,
+		&models.GovernanceProposal{
+			Deposit:       7,
+			ReturnAddress: rewardAddrBytes,
+		},
+		123,
+	)
 	require.NoError(t, err)
 
 	active, err := store.GetAccountByCredential(0, stakeCred, false, nil)
@@ -1371,13 +2011,22 @@ func TestRewardCreditsRollbackBySlot(t *testing.T) {
 		Active:     true,
 	}))
 
-	err = refundProposalDeposit(db, nil, &models.GovernanceProposal{
-		Deposit:       7,
-		ReturnAddress: rewardAddrBytes,
-	}, 123)
+	err = refundProposalDeposit(
+		context.Background(),
+		db,
+		nil,
+		&models.GovernanceProposal{
+			Deposit:       7,
+			ReturnAddress: rewardAddrBytes,
+		},
+		123,
+	)
 	require.NoError(t, err)
 
-	require.NoError(t, db.DeleteAccountRewardsAfterSlot(122, nil))
+	require.NoError(
+		t,
+		db.DeleteAccountRewardsAfterSlot(context.Background(), 122, nil),
+	)
 	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
@@ -1396,21 +2045,56 @@ func TestCountActiveDRepsFiltersExpiredDReps(t *testing.T) {
 		},
 		{
 			Credential:  testBytes(28, 2),
-			ExpiryEpoch: 10,
+			ExpiryEpoch: 99,
 			Active:      true,
 		},
 		{
 			Credential:  testBytes(28, 3),
-			ExpiryEpoch: 11,
+			ExpiryEpoch: 100,
+			Active:      true,
+		},
+		{
+			Credential:  testBytes(28, 4),
+			ExpiryEpoch: 101,
 			Active:      true,
 		},
 	} {
 		require.NoError(t, store.CreateDrep(nil, &drep))
 	}
 
-	count, err := countActiveDReps(db, nil, 10)
-	require.NoError(t, err)
-	assert.Equal(t, 2, count)
+	for _, test := range []struct {
+		epoch uint64
+		count int
+	}{
+		{epoch: 99, count: 4},
+		{epoch: 100, count: 3},
+		{epoch: 101, count: 2},
+	} {
+		count, err := countActiveDReps(
+			context.Background(),
+			db,
+			nil,
+			test.epoch,
+		)
+		require.NoError(t, err)
+		assert.Equal(
+			t,
+			test.count,
+			count,
+			"active DRep count at epoch %d",
+			test.epoch,
+		)
+		state, err := LoadDRepVotingState(
+			context.Background(),
+			db,
+			nil,
+			test.epoch,
+			false,
+		)
+		require.NoError(t, err)
+		assert.Len(t, state.Dreps, test.count,
+			"voting DRep set at epoch %d", test.epoch)
+	}
 }
 
 func TestCommitteeNoConfidenceStateUsesEnactedCommitteeRoot(t *testing.T) {
@@ -1425,17 +2109,44 @@ func TestCommitteeNoConfidenceStateUsesEnactedCommitteeRoot(t *testing.T) {
 	}))
 }
 
+func TestCommitteeAbsentUsesEnactedStateAndGenesis(t *testing.T) {
+	t.Parallel()
+
+	genesis := &conway.ConwayGenesis{
+		Committee: conway.ConwayGenesisCommittee{
+			Members: map[string]int{"keyHash-committee-member": 500},
+		},
+	}
+	emptyGenesis := &conway.ConwayGenesis{
+		Committee: conway.ConwayGenesisCommittee{
+			Members: map[string]int{},
+		},
+	}
+	require.True(t, committeeAbsent(nil, nil, false))
+	require.False(t, committeeAbsent(nil, genesis, false))
+	require.False(t, committeeAbsent(nil, emptyGenesis, false))
+	require.False(t, committeeAbsent(nil, nil, true))
+	require.False(t, committeeAbsent(&models.GovernanceProposal{
+		ActionType: uint8(lcommon.GovActionTypeUpdateCommittee),
+	}, nil, false))
+	require.True(t, committeeAbsent(&models.GovernanceProposal{
+		ActionType: uint8(lcommon.GovActionTypeNoConfidence),
+	}, genesis, true))
+}
+
 func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 	t.Parallel()
 
 	const currentEpoch = uint64(10)
 	uintPtr := func(value uint64) *uint64 { return &value }
 	tests := []struct {
-		name         string
-		termLimit    uint64
-		memberExpiry *uint64
-		actionType   lcommon.GovActionType
-		wantRatified bool
+		name          string
+		termLimit     uint64
+		memberExpiry  *uint64
+		actionType    lcommon.GovActionType
+		wantRatified  bool
+		zeroQuorum    bool
+		wantEnactment bool
 	}{
 		{
 			name:         "within limit",
@@ -1443,6 +2154,15 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 			memberExpiry: uintPtr(14),
 			actionType:   lcommon.GovActionTypeUpdateCommittee,
 			wantRatified: true,
+		},
+		{
+			name:          "zero quorum ratifies and enacts",
+			termLimit:     5,
+			memberExpiry:  uintPtr(14),
+			actionType:    lcommon.GovActionTypeUpdateCommittee,
+			wantRatified:  true,
+			zeroQuorum:    true,
+			wantEnactment: true,
 		},
 		{
 			name:         "exact boundary",
@@ -1496,10 +2216,14 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 					)
 					members[credential] = *test.memberExpiry
 				}
+				quorum := newRat(2, 3)
+				if test.zeroQuorum {
+					quorum = newRat(0, 1)
+				}
 				action = &lcommon.UpdateCommitteeGovAction{
 					Type:       uint(test.actionType),
 					CredEpochs: members,
-					Quorum:     newRat(2, 3),
+					Quorum:     quorum,
 				}
 			case lcommon.GovActionTypeNoConfidence:
 				action = &lcommon.NoConfidenceGovAction{
@@ -1512,7 +2236,7 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 			require.NoError(t, err)
 
 			txHash := testBytes(32, byte(0x80+testIndex))
-			require.NoError(t, db.SetGovernanceProposal(
+			require.NoError(t, db.SetGovernanceProposal(context.Background(),
 				&models.GovernanceProposal{
 					TxHash:        txHash,
 					ActionIndex:   0,
@@ -1535,15 +2259,22 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 			pparams.DRepVotingThresholds.MotionNoConfidence = newRat(0, 1)
 			pparams.PoolVotingThresholds.MotionNoConfidence = newRat(0, 1)
 
-			txn := db.MetadataTxn(true)
+			txn := db.MetadataTxn(context.Background(), true)
 			defer txn.Release()
-			out, err := ProcessEpoch(&EpochInput{
+			out, err := ProcessEpoch(context.Background(), &EpochInput{
 				DB:           db,
 				Txn:          txn,
 				PrevEpoch:    currentEpoch - 1,
 				NewEpoch:     currentEpoch,
 				BoundarySlot: 500,
 				PParams:      pparams,
+				ConwayGenesis: &conway.ConwayGenesis{
+					Committee: conway.ConwayGenesisCommittee{
+						Members: map[string]int{
+							"keyHash-genesis-committee-member": 20,
+						},
+					},
+				},
 				UpdateFn: func(
 					pparams lcommon.ProtocolParameters,
 					_ any,
@@ -1559,18 +2290,53 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 			} else {
 				assert.Equal(t, 0, out.RatifiedCount)
 			}
-			proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+			proposal, err := db.GetGovernanceProposal(
+				context.Background(),
+				txHash,
+				0,
+				nil,
+			)
 			require.NoError(t, err)
 			if test.wantRatified {
 				require.NotNil(t, proposal.RatifiedEpoch)
 				assert.Equal(t, currentEpoch, *proposal.RatifiedEpoch)
+				if test.wantEnactment {
+					nextTxn := db.MetadataTxn(context.Background(), true)
+					nextOut, nextErr := ProcessEpoch(context.Background(), &EpochInput{
+						DB:           db,
+						Txn:          nextTxn,
+						PrevEpoch:    currentEpoch,
+						NewEpoch:     currentEpoch + 1,
+						BoundarySlot: 600,
+						PParams:      out.UpdatedPParams,
+						UpdateFn: func(
+							pparams lcommon.ProtocolParameters,
+							_ any,
+						) (lcommon.ProtocolParameters, error) {
+							return pparams, nil
+						},
+					})
+					require.NoError(t, nextErr)
+					require.NoError(t, nextTxn.Commit())
+					nextTxn.Release()
+					require.Equal(t, 1, nextOut.EnactedCount)
+					proposal, err = db.GetGovernanceProposal(
+						context.Background(),
+						txHash,
+						0,
+						nil,
+					)
+					require.NoError(t, err)
+					require.NotNil(t, proposal.EnactedEpoch)
+					assert.Equal(t, currentEpoch+1, *proposal.EnactedEpoch)
+				}
 			} else {
 				assert.Nil(t, proposal.RatifiedEpoch)
 				assert.Nil(t, proposal.RatifiedSlot)
 				assert.Nil(t, proposal.EnactedEpoch)
 				assert.Nil(t, proposal.ExpiredEpoch)
 				assert.Nil(t, proposal.DeletedSlot)
-				active, err := db.GetActiveGovernanceProposals(currentEpoch, nil)
+				active, err := db.GetActiveGovernanceProposals(context.Background(), currentEpoch, nil)
 				require.NoError(t, err)
 				require.Len(t, active, 1)
 				assert.Equal(t, txHash, active[0].TxHash)
@@ -1691,20 +2457,20 @@ func TestProcessEpochEnactedChildPreserved(t *testing.T) {
 	childHash := testBytes(32, 52)
 	parentIdx := uint32(0)
 
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, parentHash, 0, 10, 30, returnAddr, 100,
 			nil, nil, &ratifiedEpoch, &ratifiedSlot),
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, childHash, 0, 12, 15, returnAddr, 101,
 			parentHash, &parentIdx, nil, nil),
 		nil,
 	))
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    4,
@@ -1721,7 +2487,12 @@ func TestProcessEpochEnactedChildPreserved(t *testing.T) {
 	assert.Equal(t, 1, out.EnactedCount)
 	assert.Equal(t, 0, out.OrphanedCount)
 
-	child, err := db.GetGovernanceProposal(childHash, 0, nil)
+	child, err := db.GetGovernanceProposal(
+		context.Background(),
+		childHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Nil(t, child.ExpiredEpoch)
 	require.Nil(t, child.ExpiredSlot)
@@ -1760,7 +2531,7 @@ func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 	parentHash := testBytes(32, 55)
 	childHash := testBytes(32, 56)
 
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(
 			t,
 			parentHash,
@@ -1776,7 +2547,7 @@ func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 		),
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(
 			t,
 			childHash,
@@ -1795,9 +2566,9 @@ func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 
 	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
 		t.Helper()
-		txn := db.MetadataTxn(true)
+		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -1820,7 +2591,12 @@ func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 	// The sibling lost to an enactment, which cardano-ledger settles in the
 	// enacting tick, so its deposit is returned now rather than at the next
 	// tick's drop step.
-	child, err := db.GetGovernanceProposal(childHash, 0, nil)
+	child, err := db.GetGovernanceProposal(
+		context.Background(),
+		childHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, child.ExpiredEpoch)
 	require.NotNil(t, child.DroppedEpoch)
@@ -1872,17 +2648,17 @@ func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 	grandchildHash := testBytes(32, 60)
 	parentIdx := uint32(0)
 
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, parentHash, 0, 10, 10, returnAddr, 100,
 			nil, nil, &ratifiedEpoch, &ratifiedSlot),
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, childHash, 0, 12, 20, returnAddr, 101,
 			nil, nil, nil, nil),
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, grandchildHash, 0, 14, 30, returnAddr, 102,
 			childHash, &parentIdx, nil, nil),
 		nil,
@@ -1890,9 +2666,9 @@ func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 
 	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
 		t.Helper()
-		txn := db.MetadataTxn(true)
+		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -1914,7 +2690,7 @@ func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 	assert.Equal(t, 2, out.OrphanedCount)
 
 	for _, hash := range [][]byte{childHash, grandchildHash} {
-		p, err := db.GetGovernanceProposal(hash, 0, nil)
+		p, err := db.GetGovernanceProposal(context.Background(), hash, 0, nil)
 		require.NoError(t, err)
 		require.NotNil(t, p.ExpiredEpoch,
 			"proposal %x should be orphaned", hash)
@@ -1962,20 +2738,20 @@ func TestProcessEpochOrphanExcludedFromActiveProposals(t *testing.T) {
 	parentHash := testBytes(32, 62)
 	childHash := testBytes(32, 63)
 
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, parentHash, 0, 10, 5, returnAddr, 100,
 			nil, nil, &ratifiedEpoch, &ratifiedSlot),
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, childHash, 0, 12, 5, returnAddr, 101,
 			nil, nil, nil, nil),
 		nil,
 	))
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	_, err := ProcessEpoch(&EpochInput{
+	_, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    4,
@@ -1989,7 +2765,7 @@ func TestProcessEpochOrphanExcludedFromActiveProposals(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, txn.Commit())
 
-	active, err := db.GetActiveGovernanceProposals(5, nil)
+	active, err := db.GetActiveGovernanceProposals(context.Background(), 5, nil)
 	require.NoError(t, err)
 	for _, p := range active {
 		assert.NotEqual(t, childHash, p.TxHash,
@@ -2018,20 +2794,20 @@ func TestProcessEpochOrphanedSiblingRestoredOnRollback(t *testing.T) {
 	parentHash := testBytes(32, 65)
 	childHash := testBytes(32, 66)
 
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, parentHash, 0, 10, 10, returnAddr, 100,
 			nil, nil, &ratifiedEpoch, &ratifiedSlot),
 		nil,
 	))
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildNoConfidenceProposal(t, childHash, 0, 12, 20, returnAddr, 101,
 			nil, nil, nil, nil),
 		nil,
 	))
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	_, err := ProcessEpoch(&EpochInput{
+	_, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    4,
@@ -2045,7 +2821,12 @@ func TestProcessEpochOrphanedSiblingRestoredOnRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, txn.Commit())
 
-	child, err := db.GetGovernanceProposal(childHash, 0, nil)
+	child, err := db.GetGovernanceProposal(
+		context.Background(),
+		childHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(
 		t,
@@ -2053,10 +2834,21 @@ func TestProcessEpochOrphanedSiblingRestoredOnRollback(t *testing.T) {
 		"child must be orphaned before rollback",
 	)
 
-	require.NoError(t, db.DeleteGovernanceProposalsAfterSlot(499, nil))
-	require.NoError(t, db.DeleteAccountRewardsAfterSlot(499, nil))
+	require.NoError(
+		t,
+		db.DeleteGovernanceProposalsAfterSlot(context.Background(), 499, nil),
+	)
+	require.NoError(
+		t,
+		db.DeleteAccountRewardsAfterSlot(context.Background(), 499, nil),
+	)
 
-	child, err = db.GetGovernanceProposal(childHash, 0, nil)
+	child, err = db.GetGovernanceProposal(
+		context.Background(),
+		childHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Nil(
 		t,
@@ -2092,13 +2884,13 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 	parentIdx := uint32(0)
 
 	// Parent expires at epoch 4 (ExpiresEpoch < NewEpoch=5).
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildInfoProposal(t, parentHash, 0, 4, 10, returnAddr, 100,
 			nil, nil, nil, nil),
 		nil,
 	))
 	// Child expires at epoch 15 but references parent.
-	require.NoError(t, db.SetGovernanceProposal(
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
 		buildInfoProposal(t, childHash, 0, 15, 20, returnAddr, 101,
 			parentHash, &parentIdx, nil, nil),
 		nil,
@@ -2106,9 +2898,9 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 
 	runEpoch := func(newEpoch, boundarySlot uint64) *EpochOutput {
 		t.Helper()
-		txn := db.MetadataTxn(true)
+		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -2130,7 +2922,12 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 	assert.Equal(t, 1, out.ExpiredCount)
 	assert.Equal(t, 1, out.OrphanedCount)
 
-	child, err := db.GetGovernanceProposal(childHash, 0, nil)
+	child, err := db.GetGovernanceProposal(
+		context.Background(),
+		childHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, child.ExpiredEpoch)
 	assert.Equal(t, uint64(5), *child.ExpiredEpoch)
@@ -2154,4 +2951,148 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(30), uint64(account.Reward))
+}
+
+// The RATIFY and EXPIRY verdicts must be computable from a read-only view of
+// the boundary state, so they can be taken from a snapshot after the boundary
+// commits, and must equal what the boundary itself applies.
+func TestDecideRatificationOnReadOnlySnapshotMatchesBoundary(t *testing.T) {
+	t.Parallel()
+
+	const currentEpoch = uint64(741)
+	const newEpoch = currentEpoch + 1
+
+	db, store := newTallyTestDB(t)
+	hardFork := seedHardForkInitiationProposal(
+		t, db, currentEpoch, 11, 1, 0x90,
+	)
+	hardFork.ReturnAddress = append([]byte{0xE0}, testBytes(28, 0x97)...)
+	// Its final RATIFY chance: EXPIRY must not also classify it expired.
+	hardFork.ExpiresEpoch = currentEpoch
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), hardFork, nil),
+	)
+	coldCred := testBytes(28, 0x91)
+	hotCred := testBytes(28, 0x92)
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
+			{ColdCredHash: coldCred, ExpiresEpoch: newEpoch + 10},
+		}, nil),
+	)
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
+		ColdCredential: coldCred,
+		HotCredential:  hotCred,
+		CertificateID:  1,
+		AddedSlot:      1,
+	})
+	yesPool := testBytes(28, 0x93)
+	seedPoolWithStake(
+		t, store, yesPool, testBytes(29, 0x95), 6_283, newEpoch,
+	)
+	seedPoolWithStake(
+		t, store, testBytes(28, 0x94), testBytes(29, 0x96), 3_717, newEpoch,
+	)
+	for _, vote := range []*models.GovernanceVote{
+		{VoterType: models.VoterTypeCC, VoterCredential: hotCred},
+		{VoterType: models.VoterTypeSPO, VoterCredential: yesPool},
+	} {
+		vote.ProposalID = hardFork.ID
+		vote.Vote = models.VoteYes
+		vote.AddedSlot = 2
+		require.NoError(
+			t,
+			db.SetGovernanceVote(context.Background(), vote, nil),
+		)
+	}
+	returnAddr := buildRewardAddr(t, testBytes(28, 0x98))
+	expiringHash := testBytes(32, 0x99)
+	childHash := testBytes(32, 0x9a)
+	expiringIdx := uint32(0)
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
+		buildInfoProposal(t, expiringHash, 0, currentEpoch-1, 3,
+			returnAddr, 10, nil, nil, nil, nil),
+		nil,
+	))
+	require.NoError(t, db.SetGovernanceProposal(context.Background(),
+		buildInfoProposal(t, childHash, 0, newEpoch+5, 3,
+			returnAddr, 11, expiringHash, &expiringIdx, nil, nil),
+		nil,
+	))
+
+	input := func(txn *EpochInput) *EpochInput {
+		txn.DB = db
+		txn.PrevEpoch = currentEpoch
+		txn.NewEpoch = newEpoch
+		txn.BoundarySlot = newEpoch * 100
+		txn.PParams = stabilityConwayPParams(9)
+		txn.UpdateFn = func(
+			pparams lcommon.ProtocolParameters,
+			_ any,
+		) (lcommon.ProtocolParameters, error) {
+			return pparams, nil
+		}
+		return txn
+	}
+
+	readTxn := db.MetadataTxn(context.Background(), false)
+	in := input(&EpochInput{Txn: readTxn})
+	conwayPParams, err := conwayGovernanceProtocolParameters(in.PParams)
+	require.NoError(t, err)
+	decision, err := decideRatification(
+		context.Background(),
+		in, &EpochOutput{UpdatedPParams: in.PParams}, conwayPParams, 0,
+	)
+	readTxn.Release()
+	require.NoError(t, err)
+	identities := func(proposals []*models.GovernanceProposal) []string {
+		ret := make([]string, 0, len(proposals))
+		for _, p := range proposals {
+			ret = append(ret, proposalIdentityKey(p))
+		}
+		return ret
+	}
+	require.Equal(t, []string{proposalIdentityKey(hardFork)},
+		identities(decision.Ratified))
+	require.Equal(t,
+		[]string{proposalIdentityKey(&models.GovernanceProposal{
+			TxHash: expiringHash,
+		})},
+		identities(decision.Expired))
+
+	stored, err := db.GetGovernanceProposal(
+		context.Background(),
+		hardFork.TxHash,
+		0,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Nil(t, stored.RatifiedEpoch, "deciding wrote a ratified mark")
+
+	writeTxn := db.MetadataTxn(context.Background(), true)
+	defer writeTxn.Release()
+	out, err := ProcessEpoch(context.Background(), input(&EpochInput{Txn: writeTxn}))
+	require.NoError(t, err)
+	require.NoError(t, writeTxn.Commit())
+	require.Equal(t, 1, out.RatifiedCount)
+	require.Equal(t, 1, out.ExpiredCount)
+	require.Equal(t, 1, out.OrphanedCount)
+	stored, err = db.GetGovernanceProposal(
+		context.Background(),
+		hardFork.TxHash,
+		0,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored.RatifiedEpoch)
+	require.Equal(t, newEpoch, *stored.RatifiedEpoch)
+	child, err := db.GetGovernanceProposal(
+		context.Background(),
+		childHash,
+		0,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, child.ExpiredEpoch)
 }

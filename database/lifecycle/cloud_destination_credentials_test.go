@@ -1,3 +1,5 @@
+//go:build dingo_extra_plugins
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,8 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build dingo_extra_plugins
-
 // This file exercises the real S3/GCS CloudDestination implementations
 // (destination_s3.go, destination_gcs.go) against a real bucket, unlike
 // destination_test.go's fakeCloudDestination, which only covers the
@@ -21,7 +21,7 @@
 // FetchCloudManifest/DeleteCloudSnapshot) without ever touching an actual
 // cloud SDK client. It was previously possible for the real S3/GCS client
 // code to have zero test coverage of its own; these tests close that gap
-// the same way internal/integration/cloud_test.go's TestCloudPluginS3/GCS
+// the same way internal/integration/storage_migration_test.go's TestCloudPluginS3/GCS
 // do for the blob-store plugins, following the exact same
 // credentials-detection and DINGO_TEST_S3_BUCKET/DINGO_TEST_GCS_BUCKET
 // convention so both suites behave identically in CI and locally.
@@ -56,7 +56,7 @@ var cloudCredentialsTestRegistry = func() *lifecycle.DestinationRegistry {
 	return r
 }()
 
-// hasS3Credentials mirrors internal/integration/cloud_test.go's helper of
+// hasS3Credentials mirrors internal/integration/storage_migration_test.go's helper of
 // the same name exactly, since that package's unexported helper can't be
 // imported from here.
 func hasS3Credentials() bool {
@@ -73,7 +73,7 @@ func hasS3Credentials() bool {
 	return false
 }
 
-// hasGCSCredentials mirrors internal/integration/cloud_test.go's helper of
+// hasGCSCredentials mirrors internal/integration/storage_migration_test.go's helper of
 // the same name exactly.
 func hasGCSCredentials() bool {
 	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "" {
@@ -99,7 +99,8 @@ func hasGCSCredentials() bool {
 // SnapshotLister/CloudManifestFetcher/CloudDeleter method this package
 // actually calls in production.
 func TestCloudDestinationS3RoundTrip(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: this real cloud restore opens and reopens an on-disk
+	// Badger store while other lifecycle tests may exercise the same provider.
 
 	if !hasS3Credentials() {
 		t.Skip("S3 credentials not found, skipping test")
@@ -114,7 +115,8 @@ func TestCloudDestinationS3RoundTrip(t *testing.T) {
 // TestCloudDestinationGCSRoundTrip is TestCloudDestinationS3RoundTrip's
 // GCS counterpart, against gcsDestination.
 func TestCloudDestinationGCSRoundTrip(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: this real cloud restore opens and reopens an on-disk
+	// Badger store while other lifecycle tests may exercise the same provider.
 
 	if !hasGCSCredentials() {
 		t.Skip("GCS credentials not found, skipping test")
@@ -167,6 +169,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 		baseURI,
 		"",
 		"",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err, "SnapshotToCloud (local write + cloud upload)")
 
@@ -174,6 +177,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 		ctx,
 		cloudCredentialsTestRegistry,
 		baseURI,
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err, "ListCloudSnapshots")
 	require.True(t, ok, "cloud destination must report listing support")
@@ -196,13 +200,14 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 		ctx,
 		cloudCredentialsTestRegistry,
 		snapshotURI,
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err, "FetchCloudManifest")
 	require.True(t, ok, "cloud destination must report manifest-fetch support")
 	require.Equal(t, manifest.Checksum, fetched.Checksum)
 
 	// Restore accepts the cloud URI directly (downloads, then runs the same
-	// validation as a local restore) — this exercises DownloadDir plus the
+	// validation as a local restore) — this exercises DownloadFiles plus the
 	// full manifest/tip/commit-timestamp consistency checks against real
 	// downloaded data, not just a local round-trip.
 	restoredDir := filepath.Join(t.TempDir(), "restored")
@@ -213,6 +218,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 		snapshotURI,
 		restoredDir,
 		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err, "Restore from cloud URI")
 	require.Equal(t, manifest.CommitTimestamp, restoreMan.CommitTimestamp)
@@ -241,6 +247,10 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 		ctx,
 		cloudCredentialsTestRegistry,
 		snapshotURI,
+		lifecycle.WithManifestKey(testTrustKey),
 	)
-	require.Error(t, err, "manifest must no longer be fetchable after delete")
+	require.ErrorIs(
+		t, err, lifecycle.ErrCloudSnapshotNotFound,
+		"manifest must no longer be fetchable after delete",
+	)
 }

@@ -19,8 +19,12 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -30,9 +34,12 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/netguard"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gconway "github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -130,7 +137,7 @@ func startFakeArchive(
 			if a.oversize {
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(
-					bytes.Repeat([]byte{0xFF}, maxArchiveBlockSize+1),
+					bytes.Repeat([]byte{0xFF}, defaultMaxArchiveBlockSize+1),
 				)
 				return
 			}
@@ -183,9 +190,30 @@ func newBarkBlobStoreForTest(
 	httpClient *http.Client,
 ) *BlobStoreBark {
 	t.Helper()
+	base, err := url.Parse(baseURL)
+	require.NoError(t, err)
+	localHost := base.Hostname()
 	store, err := NewBarkBlobStore(BlobStoreBarkConfig{
 		BaseUrl:    baseURL,
 		HTTPClient: httpClient,
+		lookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+		},
+		dialContext: func(
+			ctx context.Context,
+			network string,
+			address string,
+		) (net.Conn, error) {
+			_, port, splitErr := net.SplitHostPort(address)
+			if splitErr != nil {
+				return nil, splitErr
+			}
+			return (&net.Dialer{}).DialContext(
+				ctx,
+				network,
+				net.JoinHostPort(localHost, port),
+			)
+		},
 	}, db.Blob())
 	require.NoError(t, err)
 	return store
@@ -196,10 +224,11 @@ func newBarkBlobStoreForTest(
 func TestValidateArchiveURL(t *testing.T) {
 	t.Parallel()
 
-	allowedHosts := archiveDownloadHosts(
+	allowedOrigins, err := archiveDownloadOrigins(
 		"https://archive.example.com:9091",
 		[]string{"https://s3.example.com/block"},
 	)
+	require.NoError(t, err)
 	cases := []struct {
 		name    string
 		url     string
@@ -207,9 +236,27 @@ func TestValidateArchiveURL(t *testing.T) {
 	}{
 		{
 			name: "valid expected host",
-			url:  "https://archive.example.com/block?sig=abc",
+			url:  "https://archive.example.com:9091/block?sig=abc",
 		},
 		{name: "valid HTTPS", url: "https://s3.example.com/block?sig=abc"},
+		{
+			name: "explicit default HTTPS port",
+			url:  "https://s3.example.com:443/block?sig=abc",
+		},
+		{
+			name: "numeric equivalent default HTTPS port",
+			url:  "https://s3.example.com:0443/block?sig=abc",
+		},
+		{
+			name:    "wrong port on expected host",
+			url:     "https://archive.example.com/block?sig=abc",
+			wantErr: "not allowed",
+		},
+		{
+			name:    "wrong port on allowed host",
+			url:     "https://s3.example.com:444/block?sig=abc",
+			wantErr: "not allowed",
+		},
 		{
 			name:    "non-HTTPS external",
 			url:     "http://s3.example.com/block",
@@ -234,7 +281,7 @@ func TestValidateArchiveURL(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := validateArchiveURL(c.url, allowedHosts)
+			err := validateArchiveURL(c.url, allowedOrigins)
 			if c.wantErr == "" {
 				require.NoError(t, err)
 			} else {
@@ -243,6 +290,270 @@ func TestValidateArchiveURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestArchiveDownloadOriginsAllowsAuthenticatedServiceURL(t *testing.T) {
+	t.Parallel()
+
+	origins, err := archiveDownloadOrigins(
+		"https://bark:secret@archive.example.com:9091/api",
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Contains(
+		t,
+		origins,
+		"https://archive.example.com:9091",
+	)
+}
+
+func TestArchiveDownloadOriginsAnchorsHTTPServiceAtHTTPS(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		baseURL    string
+		wantOrigin string
+	}{
+		{
+			name:       "explicit port",
+			baseURL:    "http://archive.example.com:9091/api",
+			wantOrigin: "https://archive.example.com:9091",
+		},
+		{
+			name:       "default port",
+			baseURL:    "http://archive.example.com/api",
+			wantOrigin: "https://archive.example.com:443",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origins, err := archiveDownloadOrigins(tc.baseURL, nil)
+			require.NoError(t, err)
+			assert.Contains(t, origins, tc.wantOrigin)
+		})
+	}
+}
+
+func TestArchiveHTTPClientValidatesRedirectOrigin(t *testing.T) {
+	t.Parallel()
+
+	allowedOrigins, err := archiveDownloadOrigins(
+		"https://archive.example.com",
+		[]string{"cdn.example.com:8443"},
+	)
+	require.NoError(t, err)
+	client := archiveDownloadHTTPClient(
+		&http.Client{Transport: &http.Transport{}},
+		allowedOrigins,
+		func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("not used")
+		},
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+		},
+	)
+	allowed, err := http.NewRequest(
+		http.MethodGet,
+		"https://cdn.example.com:8443/block",
+		nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, client.CheckRedirect(allowed, nil))
+
+	disallowed, err := http.NewRequest(
+		http.MethodGet,
+		"https://cdn.example.com/block",
+		nil,
+	)
+	require.NoError(t, err)
+	err = client.CheckRedirect(disallowed, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not allowed")
+}
+
+func TestArchiveHTTPClientValidatesRedirectAfterCallerPolicy(t *testing.T) {
+	t.Parallel()
+
+	allowedOrigins, err := archiveDownloadOrigins(
+		"https://archive.example.com",
+		nil,
+	)
+	require.NoError(t, err)
+	client := archiveDownloadHTTPClient(
+		&http.Client{
+			Transport: &http.Transport{},
+			CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+				redirectURL, parseErr := url.Parse(
+					"https://evil.example.com/block",
+				)
+				if parseErr != nil {
+					return parseErr
+				}
+				req.URL = redirectURL
+				return nil
+			},
+		},
+		allowedOrigins,
+		func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("not used")
+		},
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+		},
+	)
+	redirect, err := http.NewRequest(
+		http.MethodGet,
+		"https://archive.example.com/block",
+		nil,
+	)
+	require.NoError(t, err)
+	err = client.CheckRedirect(redirect, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not allowed")
+}
+
+type customRoundTripper struct{}
+
+func (customRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("custom transport called")
+}
+
+func TestArchiveHTTPClientReplacesCustomTransport(t *testing.T) {
+	t.Parallel()
+
+	allowedOrigins, err := archiveDownloadOrigins(
+		"https://archive.example.com",
+		nil,
+	)
+	require.NoError(t, err)
+	original := &http.Client{Transport: customRoundTripper{}}
+	client := archiveDownloadHTTPClient(original, allowedOrigins, nil, nil)
+
+	transport, ok := client.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.Nil(t, transport.Proxy)
+	assert.NotNil(t, transport.DialContext)
+	assert.IsType(t, customRoundTripper{}, original.Transport)
+}
+
+func TestArchiveHTTPClientRejectsPrivateResolvedAddress(t *testing.T) {
+	t.Parallel()
+
+	allowedOrigins, err := archiveDownloadOrigins(
+		"https://archive.example.com",
+		nil,
+	)
+	require.NoError(t, err)
+	dialed := false
+	client := archiveDownloadHTTPClient(
+		&http.Client{Transport: &http.Transport{}},
+		allowedOrigins,
+		func(context.Context, string, string) (net.Conn, error) {
+			dialed = true
+			return nil, errors.New("unexpected dial")
+		},
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+		},
+	)
+	transport := client.Transport.(*http.Transport)
+	_, err = transport.DialContext(
+		context.Background(),
+		"tcp",
+		"archive.example.com:443",
+	)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, netguard.ErrBlockedDestination)
+	assert.False(t, dialed)
+}
+
+func TestArchiveHTTPClientDisablesProxy(t *testing.T) {
+	t.Parallel()
+
+	allowedOrigins, err := archiveDownloadOrigins(
+		"https://archive.example.com",
+		nil,
+	)
+	require.NoError(t, err)
+	client := archiveDownloadHTTPClient(
+		&http.Client{
+			Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+		},
+		allowedOrigins,
+		func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("not used")
+		},
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+		},
+	)
+	assert.Nil(t, client.Transport.(*http.Transport).Proxy)
+}
+
+func TestArchiveDownloadHTTPClientDiscardsCallerDialer(t *testing.T) {
+	t.Parallel()
+
+	allowedOrigins, err := archiveDownloadOrigins(
+		"https://archive.example.com",
+		nil,
+	)
+	require.NoError(t, err)
+	callerDialed := false
+	client := archiveDownloadHTTPClient(
+		&http.Client{Transport: &http.Transport{
+			DialContext: func(
+				context.Context,
+				string,
+				string,
+			) (net.Conn, error) {
+				callerDialed = true
+				return nil, errors.New("caller dialer used")
+			},
+		}},
+		allowedOrigins,
+		nil,
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+		},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = client.Transport.(*http.Transport).DialContext(
+		ctx,
+		"tcp",
+		"archive.example.com:443",
+	)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.False(t, callerDialed)
+}
+
+func TestArchiveServiceClientAllowsConfiguredLocalEndpoint(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	baseURL, archiveServer, httpClient := startFakeArchive(t, nil)
+	archiveServer.serveNotFound = true
+	store, err := NewBarkBlobStore(BlobStoreBarkConfig{
+		BaseUrl:    baseURL,
+		HTTPClient: httpClient,
+	}, db.Blob())
+	require.NoError(t, err)
+	slot := uint64(1)
+	hash := strings.Repeat("00", 32)
+
+	_, err = store.archiveClient.FetchBlock(
+		context.Background(),
+		connect.NewRequest(&archive.FetchBlockRequest{
+			Blocks: []*archive.BlockRef{{
+				Slot: &slot,
+				Hash: &hash,
+			}},
+		}),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, archiveServer.fetchCalls)
 }
 
 // TestGetBlock_RejectsNonHTTPS verifies that a non-HTTPS download URL returned
@@ -339,7 +650,7 @@ func TestGetBlock_RejectsRedirect(t *testing.T) {
 }
 
 // TestGetBlock_CapsResponseSize verifies that a download response larger than
-// maxArchiveBlockSize is rejected rather than fully buffered into memory.
+// defaultMaxArchiveBlockSize is rejected rather than fully buffered into memory.
 func TestGetBlock_CapsResponseSize(t *testing.T) {
 	t.Parallel()
 
@@ -359,6 +670,72 @@ func TestGetBlock_CapsResponseSize(t *testing.T) {
 	_, _, err := store.GetBlock(rTxn, slot, hash)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "limit")
+}
+
+// TestGetBlock_BoundedByConfiguredBlockSize pins that the download bound is the
+// limit the store was configured with, not the compile-time default: a block one
+// byte over the configured limit is refused and one at the limit is accepted.
+func TestGetBlock_BoundedByConfiguredBlockSize(t *testing.T) {
+	t.Parallel()
+
+	block := archiveBlockFixtures(t, 2)[1]
+	hash := block.Hash()
+	size := uint64(len(block.Cbor()))
+	require.Less(
+		t,
+		size,
+		uint64(defaultMaxArchiveBlockSize),
+		"the fixture must fit the default so only the configured limit can refuse it",
+	)
+
+	for _, tc := range []struct {
+		name    string
+		limit   uint64
+		wantErr bool
+	}{
+		{name: "one byte over the limit", limit: size - 1, wantErr: true},
+		{name: "at the limit", limit: size},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			blocks, configure := serveArchiveBlock(t, block)
+			baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+			configure(fakeArch)
+			store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+			store.config.MaxBlockSize = func() uint64 { return tc.limit }
+			rTxn := store.NewTransaction(false)
+			t.Cleanup(func() { _ = rTxn.Rollback() })
+
+			_, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
+			if tc.wantErr {
+				require.ErrorContains(t, err, "limit")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestGetBlock_RejectsTruncatedArchiveBlock pins that a download cut short of
+// the block it announced is refused rather than accepted as the block.
+func TestGetBlock_RejectsTruncatedArchiveBlock(t *testing.T) {
+	t.Parallel()
+
+	block := archiveBlockFixtures(t, 2)[1]
+	hash := block.Hash()
+	db := newTestDB(t)
+	blocks, configure := serveArchiveBlock(t, block)
+	baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+	configure(fakeArch)
+	fakeArch.substituteBody = block.Cbor()[:len(block.Cbor())/2]
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	_, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
+	require.ErrorIs(t, err, ErrArchiveBlockUndecodable)
 }
 
 // archiveBlockFixtures returns count real Conway blocks whose CBOR
@@ -510,15 +887,14 @@ func generatedUnclassifiableBabbageBlock(t *testing.T) ([]byte, uint) {
 	return blocks[0].Cbor(), gledger.BlockTypeBabbage
 }
 
-// TestGetBlock_RejectsArchiveBlockTypeMismatch covers an archive that serves
-// valid block bytes while misreporting their era.
-//
-// The block hash for Shelley and later is taken over the header alone, and
-// adjacent eras share that header layout, so the same bytes decode under more
-// than one era with an identical hash and slot. The hash check therefore
-// cannot police the era, and without an independent derivation the archive
-// would dictate BlockMetadata.Type.
-func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
+// TestGetBlock_AcceptsArchiveBlockTypeMismatch covers an archive that serves
+// genuine block bytes under an adjacent, layout-compatible era. The block
+// hash for Shelley and later covers the header alone, and adjacent eras share
+// its layout, so the bytes decode under the claimed era with an identical
+// hash and slot. The returned bytes are therefore still the requested block;
+// only BlockMetadata.Type follows the claim, the residual
+// internal/blockverify.TestHashAcceptsAdjacentEraMisclassification pins too.
+func TestGetBlock_AcceptsArchiveBlockTypeMismatch(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -526,7 +902,6 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 		block    func(*testing.T) ([]byte, uint)
 		claimed  archive.BlockType
 		claimedN uint
-		wantErr  error
 	}{
 		{
 			name: "babbage served as conway",
@@ -539,7 +914,6 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 			},
 			claimed:  archive.BlockType_BLOCK_TYPE_CONWAY,
 			claimedN: gledger.BlockTypeConway,
-			wantErr:  ErrArchiveBlockTypeMismatch,
 		},
 		{
 			name: "shelley served as mary",
@@ -552,7 +926,6 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 			},
 			claimed:  archive.BlockType_BLOCK_TYPE_MARY,
 			claimedN: gledger.BlockTypeMary,
-			wantErr:  ErrArchiveBlockTypeMismatch,
 		},
 	}
 	for _, tc := range tests {
@@ -565,16 +938,14 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 			require.NoError(t, err,
 				"fixture must decode in its genuine era")
 			hash := decoded.Hash()
-			if tc.wantErr == ErrArchiveBlockTypeMismatch {
-				// The misreported era must still decode, otherwise the test
-				// would pass for the wrong reason.
-				_, err = gledger.NewBlockFromCbor(tc.claimedN, raw)
-				require.NoError(
-					t,
-					err,
-					"cross-era decode must succeed for this test to be meaningful",
-				)
-			}
+			// The misreported era must still decode, otherwise the test
+			// would pass for the wrong reason.
+			_, err = gledger.NewBlockFromCbor(tc.claimedN, raw)
+			require.NoError(
+				t,
+				err,
+				"cross-era decode must succeed for this test to be meaningful",
+			)
 
 			db := newTestDB(t)
 			baseURL, fakeArch, httpClient := startFakeArchive(
@@ -589,28 +960,32 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 			rTxn := store.NewTransaction(false)
 			t.Cleanup(func() { _ = rTxn.Rollback() })
 
-			_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
-			require.ErrorIs(t, err, tc.wantErr)
+			cbor, meta, err := store.GetBlock(
+				rTxn,
+				decoded.SlotNumber(),
+				hash[:],
+			)
+			require.NoError(t, err)
+			assert.Equal(t, raw, cbor)
+			assert.Equal(t, tc.claimedN, meta.Type)
 		})
 	}
 }
 
-// TestGetBlock_RejectsByronMainArchiveBlock covers the one era whose body
-// cannot be fully bound to its header.
-//
-// gouroboros validates a Byron main block's transaction, delegation, and
-// update proofs but not ssc_proof, so an alteration confined to the SSC
-// payload changes no value this package checks: the hash, slot, height, and
-// previous hash all come from the untouched header. Rather than serve bytes
-// whose body is only partly authenticated, the fetch is refused.
-func TestGetBlock_RejectsByronMainArchiveBlock(t *testing.T) {
+// TestGetBlock_AcceptsByronMainArchiveBlock verifies that the decoded body,
+// including its SSC proof, is authenticated before archive data is served.
+func TestGetBlock_AcceptsByronMainArchiveBlock(t *testing.T) {
 	t.Parallel()
 
-	raw, trueType := realEraBlock(t, "Block_Byron_regular")
-	require.Equal(t, uint(gledger.BlockTypeByronMain), trueType,
-		"fixture must be a Byron main block")
+	raw, err := os.ReadFile(filepath.Join(
+		"..", "ledger", "testdata", "mainnet-byron-4471207.cbor",
+	))
+	require.NoError(t, err)
+	trueType := uint(gledger.BlockTypeByronMain)
 	decoded, err := gledger.NewBlockFromCbor(trueType, raw)
 	require.NoError(t, err)
+	require.EqualValues(t, 4_471_207, decoded.SlotNumber())
+	require.Len(t, decoded.Transactions(), 2)
 	hash := decoded.Hash()
 
 	db := newTestDB(t)
@@ -626,14 +1001,18 @@ func TestGetBlock_RejectsByronMainArchiveBlock(t *testing.T) {
 	rTxn := store.NewTransaction(false)
 	t.Cleanup(func() { _ = rTxn.Rollback() })
 
-	_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
-	require.ErrorIs(t, err, ErrArchiveBlockNotFullyAuthenticated)
+	blockCbor, meta, err := store.GetBlock(
+		rTxn, decoded.SlotNumber(), hash[:],
+	)
+	require.NoError(t, err)
+	assert.Equal(t, raw, blockCbor)
+	assert.Equal(t, uint(gledger.BlockTypeByronMain), meta.Type)
+	assert.Equal(t, decoded.BlockNumber(), meta.Height)
+	assert.Equal(t, prevHash[:], meta.PrevHash)
 }
 
-// TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock is the boundary of that
-// restriction. An epoch boundary block carries no transactions and no SSC
-// payload, so a single body hash covers the whole body and the block is fully
-// bound to its header. Refusing it too would give up history for no gain.
+// TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock verifies that archive
+// decoding also authenticates Byron epoch boundary blocks.
 func TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock(t *testing.T) {
 	t.Parallel()
 
@@ -663,15 +1042,10 @@ func TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock(t *testing.T) {
 	assert.Equal(t, uint(gledger.BlockTypeByronEbb), meta.Type)
 }
 
-// TestGetBlock_RejectsUnclassifiableEra pins the fail-closed behaviour when a
-// block's era cannot be derived from its header.
-//
-// The generated Babbage block carries a structurally valid header with a
-// protocol version that DetermineBlockType does not map, which stands in for a
-// block from an era this node does not know. Trusting the archive's claim in
-// that case would hand era selection straight back to it, so the fetch is
-// refused. A node that cannot classify a block could not process it anyway.
-func TestGetBlock_RejectsUnclassifiableEra(t *testing.T) {
+// TestGetBlock_AcceptsUnclassifiableEra covers a genuine block whose header
+// announces a protocol major (99) that gledger.DetermineBlockType maps to no
+// era. The era is the claimed type the bytes decode under, not that field.
+func TestGetBlock_AcceptsUnclassifiableEra(t *testing.T) {
 	t.Parallel()
 
 	raw, trueType := generatedUnclassifiableBabbageBlock(t)
@@ -694,10 +1068,164 @@ func TestGetBlock_RejectsUnclassifiableEra(t *testing.T) {
 	rTxn := store.NewTransaction(false)
 	t.Cleanup(func() { _ = rTxn.Rollback() })
 
-	// Even though the archive reported the fixture's own era, the era cannot
-	// be confirmed from the header, so the block is not accepted.
-	_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
-	require.ErrorIs(t, err, ErrArchiveBlockTypeMismatch)
+	cbor, meta, err := store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+	require.NoError(t, err)
+	assert.Equal(t, raw, cbor)
+	assert.Equal(t, trueType, meta.Type)
+}
+
+// TestGetBlock_AcceptsHardForkBoundaryProtocolMajor covers a genuine Babbage
+// block whose header announces Conway's protocol major, as a producer does
+// once it is ready for the next hard fork. The archive's Babbage claim must
+// be accepted even though gledger.DetermineBlockType would not map that
+// header to Babbage.
+func TestGetBlock_AcceptsHardForkBoundaryProtocolMajor(t *testing.T) {
+	t.Parallel()
+
+	blocks, err := fixtures.GenerateBabbageChainWithProtocolVersion(
+		1, lcommon.Blake2b256{}, 2, 1,
+		gconway.MinProtocolVersionConway, 0,
+		1,
+	)
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	raw := blocks[0].Cbor()
+	trueType := uint(gledger.BlockTypeBabbage)
+
+	decoded, err := gledger.NewBlockFromCbor(trueType, raw)
+	require.NoError(t, err, "fixture must decode as a genuine Babbage block")
+	hash := decoded.Hash()
+
+	db := newTestDB(t)
+	baseURL, fakeArch, httpClient := startFakeArchive(
+		t, map[string][]byte{hex.EncodeToString(hash[:]): raw},
+	)
+	fakeArch.blockType = archive.BlockType_BLOCK_TYPE_BABBAGE
+	fakeArch.height = decoded.BlockNumber()
+	prevHash := decoded.PrevHash()
+	fakeArch.prevHash = prevHash[:]
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	cbor, meta, err := store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+	require.NoError(t, err)
+	assert.Equal(t, raw, cbor)
+	assert.Equal(t, uint(trueType), meta.Type)
+}
+
+// TestGetBlock_RejectsMisreportedEraThatChangesTheBlock covers an archive
+// that misreports a block's era in a way that would change the block the node
+// accepts: a claimed era whose decoder cannot read the bytes, and a body
+// re-encoded under the genuine header and served as an adjacent era. Both
+// must be rejected; the only misreport that succeeds is the layout-compatible
+// one TestGetBlock_AcceptsArchiveBlockTypeMismatch pins, which returns the
+// genuine bytes.
+func TestGetBlock_RejectsMisreportedEraThatChangesTheBlock(t *testing.T) {
+	t.Parallel()
+
+	babbage := func(t *testing.T) ([]byte, uint) {
+		return generatedEraBlock(
+			t,
+			fixtures.GenerateBabbageChain,
+			gledger.BlockTypeBabbage,
+		)
+	}
+	tests := []struct {
+		name    string
+		block   func(*testing.T) ([]byte, uint)
+		claimed archive.BlockType
+		tamper  bool
+	}{
+		{
+			name:    "babbage served as alonzo",
+			block:   babbage,
+			claimed: archive.BlockType_BLOCK_TYPE_ALONZO,
+		},
+		{
+			name: "shelley served as babbage",
+			block: func(t *testing.T) ([]byte, uint) {
+				return generatedEraBlock(
+					t,
+					fixtures.GenerateShelleyChain,
+					gledger.BlockTypeShelley,
+				)
+			},
+			claimed: archive.BlockType_BLOCK_TYPE_BABBAGE,
+		},
+		{
+			name:    "babbage served as byron main",
+			block:   babbage,
+			claimed: archive.BlockType_BLOCK_TYPE_BYRON_MAIN,
+		},
+		{
+			name:    "babbage with a re-encoded body served as conway",
+			block:   babbage,
+			claimed: archive.BlockType_BLOCK_TYPE_CONWAY,
+			tamper:  true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			raw, trueType := tc.block(t)
+			decoded, err := gledger.NewBlockFromCbor(trueType, raw)
+			require.NoError(t, err, "fixture must decode in its genuine era")
+			hash := decoded.Hash()
+			served := raw
+			if tc.tamper {
+				served = reencodeBlockBody(t, raw)
+				// The re-encoded block keeps its header, so only the body hash
+				// can tell it apart: it must decode once that check is skipped.
+				_, err = gledger.NewBlockFromCbor(
+					gledger.BlockTypeConway,
+					served,
+					lcommon.VerifyConfig{SkipBodyHashValidation: true},
+				)
+				require.NoError(t, err)
+			}
+
+			db := newTestDB(t)
+			baseURL, fakeArch, httpClient := startFakeArchive(
+				t, map[string][]byte{hex.EncodeToString(hash[:]): served},
+			)
+			fakeArch.blockType = tc.claimed
+			fakeArch.height = decoded.BlockNumber()
+			prevHash := decoded.PrevHash()
+			fakeArch.prevHash = prevHash[:]
+
+			store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+			rTxn := store.NewTransaction(false)
+			t.Cleanup(func() { _ = rTxn.Rollback() })
+
+			body, _, err := store.GetBlock(
+				rTxn,
+				decoded.SlotNumber(),
+				hash[:],
+			)
+			require.ErrorIs(t, err, ErrArchiveBlockUndecodable)
+			require.Nil(t, body)
+		})
+	}
+}
+
+// reencodeBlockBody re-encodes a Shelley-family block's invalid-transactions
+// list as an indefinite-length array. The header, and so the block hash, is
+// unchanged; the decoded content is unchanged; only the body hash no longer
+// matches the bytes.
+func reencodeBlockBody(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var parts []cbor.RawMessage
+	_, err := cbor.Decode(raw, &parts)
+	require.NoError(t, err)
+	require.Len(t, parts, 5, "expected a five-element block array")
+	require.Equal(t, cbor.RawMessage{0x80}, parts[4])
+	parts[4] = cbor.RawMessage{0x9f, 0xff}
+	out, err := cbor.Encode(parts)
+	require.NoError(t, err)
+	return out
 }
 
 // TestGetBlock_RejectsArchiveBlockForDifferentPoint is the core regression for

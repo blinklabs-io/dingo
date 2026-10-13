@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package blockfrost
 
@@ -18,22 +18,40 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestParsePaginationDefaultValues(t *testing.T) {
-	t.Parallel()
+func FuzzParsePagination(f *testing.F) {
+	f.Add("")
+	f.Add("count=0&page=0&order=ASC")
+	f.Add("count=101&page=-1&order=desc")
+	f.Add("count=abc&page=1&order=asc")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v0/test", nil)
-	params, err := ParsePagination(req)
-	require.NoError(t, err)
+	f.Fuzz(func(t *testing.T, rawQuery string) {
+		if len(rawQuery) > 16*1024 {
+			t.Skip("query input is too large for fast fuzzing")
+		}
 
-	assert.Equal(t, DefaultPaginationCount, params.Count)
-	assert.Equal(t, DefaultPaginationPage, params.Page)
-	assert.Equal(t, PaginationOrderAsc, params.Order)
+		req := &http.Request{URL: &url.URL{RawQuery: rawQuery}}
+		params, err := ParsePagination(req)
+		if err != nil {
+			return
+		}
+		if params.Count < 1 || params.Count > MaxPaginationCount {
+			t.Fatalf("count = %d, want 1..%d", params.Count, MaxPaginationCount)
+		}
+		if params.Page < 1 {
+			t.Fatalf("page = %d, want >= 1", params.Page)
+		}
+		if params.Order != PaginationOrderAsc &&
+			params.Order != PaginationOrderDesc {
+			t.Fatalf("order = %q, want asc or desc", params.Order)
+		}
+	})
 }
 
 func TestParsePaginationValid(t *testing.T) {
@@ -77,20 +95,6 @@ func TestParsePaginationClampsUnboundedPage(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodGet,
 		"/api/v0/test?page=9223372036854775807",
-		nil,
-	)
-	params, err := ParsePagination(req)
-	require.NoError(t, err)
-
-	assert.Equal(t, MaxPaginationPage, params.Page)
-}
-
-func TestParsePaginationClampsPageAboveMax(t *testing.T) {
-	t.Parallel()
-
-	req := httptest.NewRequest(
-		http.MethodGet,
-		"/api/v0/test?page=21474837",
 		nil,
 	)
 	params, err := ParsePagination(req)

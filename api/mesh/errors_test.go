@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package mesh
 
@@ -130,18 +130,27 @@ func TestWrapErr(t *testing.T) {
 
 	t.Run("detail is attached", func(t *testing.T) {
 		wrapped := wrapErr(
+			ErrInvalidRequest, errors.New("bad field"),
+		)
+
+		require.Equal(t, ErrInvalidRequest.Code, wrapped.Code)
+		require.Equal(t, ErrInvalidRequest.Message, wrapped.Message)
+		require.Equal(
+			t, ErrInvalidRequest.Description, wrapped.Description,
+		)
+		require.Equal(
+			t, ErrInvalidRequest.Retriable, wrapped.Retriable,
+		)
+		require.Equal(t, "bad field", wrapped.Details["error"])
+	})
+
+	t.Run("internal cause is withheld", func(t *testing.T) {
+		wrapped := wrapErr(
 			ErrInternal, errors.New("disk on fire"),
 		)
 
-		require.Equal(t, ErrInternal.Code, wrapped.Code)
-		require.Equal(t, ErrInternal.Message, wrapped.Message)
-		require.Equal(
-			t, ErrInternal.Description, wrapped.Description,
-		)
-		require.Equal(
-			t, ErrInternal.Retriable, wrapped.Retriable,
-		)
-		require.Equal(t, "disk on fire", wrapped.Details["error"])
+		require.Same(t, ErrInternal, wrapped)
+		require.Nil(t, wrapped.Details)
 	})
 
 	t.Run("base error is not mutated", func(t *testing.T) {

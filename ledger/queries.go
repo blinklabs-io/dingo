@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -24,15 +25,19 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gshelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	protocol "github.com/blinklabs-io/gouroboros/protocol"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -84,11 +89,11 @@ func checkLocalStateQueryItemLimit(query string, items int) error {
 }
 
 // QueryPoint pins a Query call to a specific historical block instead of
-// live-right-now (blinklabs-io/dingo#382). The zero value (Slot 0, no Hash)
-// means no pin -- the existing, default behavior of answering from whatever
-// is live right now -- matching the same "0 accepts the live/published
-// value" convention SlotToTimeWithHorizonFrom's horizonAnchorSlot already
-// uses elsewhere in this package.
+// live-right-now. The zero value (Slot 0, no Hash) means no pin -- the
+// existing, default behavior of answering from whatever is live right now --
+// matching the same "0 accepts the live/published value" convention
+// SlotToTimeWithHorizonFrom's horizonAnchorSlot already uses elsewhere in this
+// package.
 //
 // Hash is required whenever Slot is non-zero: identifying a historical
 // point by slot alone is ambiguous across a rollback (a fork switch can
@@ -112,9 +117,9 @@ func (p QueryPoint) pinned() bool {
 // this node cannot answer historically -- either because retained history
 // (a stake snapshot, a spent-UTxO row) has already been pruned past it, or
 // because the requested field's historical reconstruction is not
-// implemented for a point that far from the live tip
-// (blinklabs-io/dingo#382). errors.Is distinguishes this from a generic
-// query failure or ErrPointNotOnChain.
+// implemented for a point that far from the live tip.
+// errors.Is distinguishes this from a generic query failure or
+// ErrPointNotOnChain.
 var ErrHistoricalStateUnavailable = errors.New(
 	"historical ledger state unavailable for the requested point",
 )
@@ -132,8 +137,8 @@ var ErrPointNotOnChain = errors.New(
 
 // verifyPointOnChain confirms this node's current canonical chain has a
 // block at at.Slot whose hash is at.Hash, so a pinned query can't silently
-// reconstruct against a fork the caller never acquired
-// (blinklabs-io/dingo#382). Only called when at.pinned().
+// reconstruct against a fork the caller never acquired.
+// Only called when at.pinned().
 //
 // txn bounds both the tip read and the block lookup to one transaction, so
 // the two describe the same moment: database.BlockBySlot on its own has no
@@ -185,9 +190,8 @@ func (ls *LedgerState) verifyPointOnChain(
 
 // VerifyPointOnChain validates at against this node's current chain, the
 // same way Query does for a pinned point, but callable at Acquire time
-// (blinklabs-io/dingo#4156) rather than deferred to the first Query. An
-// unpinned at (the live/no-pin zero value) always succeeds -- there is
-// nothing to validate.
+// rather than deferred to the first Query. An unpinned at (the live/no-pin zero
+// value) always succeeds -- there is nothing to validate.
 //
 // Ordinary LocalStateQuery clients (a real cardano-node included) validate
 // a specific-point Acquire synchronously, replying with a graceful
@@ -205,11 +209,11 @@ func (ls *LedgerState) verifyPointOnChain(
 // to gouroboros's own olocalstatequery.ErrAcquireFailurePointNotOnChain /
 // ErrAcquireFailurePointTooOld so the server replies gracefully instead of
 // closing the connection.
-func (ls *LedgerState) VerifyPointOnChain(at QueryPoint) error {
+func (ls *LedgerState) VerifyPointOnChain(ctx context.Context, at QueryPoint) error {
 	if !at.pinned() {
 		return nil
 	}
-	txn := ls.db.Transaction(false)
+	txn := ls.db.Transaction(ctx, false)
 	defer txn.Release()
 	return ls.verifyPointOnChain(txn, at)
 }
@@ -217,11 +221,25 @@ func (ls *LedgerState) VerifyPointOnChain(at QueryPoint) error {
 // resolveAsOfEpoch resolves at to the epoch that governed it -- unpinned
 // (at.pinned() false) means live, resolving the live tip's own epoch
 // instead. Shared by every query handler that reconstructs epoch-keyed
-// historical state (blinklabs-io/dingo#382) -- PoolStakeDistribution,
-// queryShelleyCurrentProtocolParams, queryShelleyEpochNo -- so the
-// live-vs-pinned epoch lookup is written once rather than once per handler.
-// A slot with no covering epoch record (a chain that has applied no blocks
-// yet) resolves to epoch 0, matching epochAtTip's existing convention.
+// historical state -- PoolStakeDistribution,
+// queryShelleyCurrentProtocolParams, queryShelleyEpochNo, queryHardFork,
+// queryShelleyStakeDistribution -- so the live-vs-pinned epoch lookup is
+// written once rather than once per handler.
+//
+// found is false only on the pinned path, when at.Slot has no covering
+// epoch record at all: a pinned point whose slot genuinely falls outside
+// every epoch record's range previously fell through to epoch 0 here, and
+// a caller that then looked up epoch 0's row got a real, successful answer
+// for the wrong epoch -- Byron/epoch-0 era, protocol params, or
+// circulating supply, silently substituted for whatever epoch the point
+// actually belonged to. Callers must reject with
+// ErrHistoricalStateUnavailable when found is false rather than proceeding
+// with epoch 0.
+//
+// The unpinned path's current == nil case is a different, legitimate
+// convention (epochAtTip's own, matched here): a chain that has applied no
+// blocks yet genuinely has no current epoch other than 0, so found is true
+// there -- only the pinned path's "no covering row" case is the bug.
 //
 // Takes the whole QueryPoint, not a bare slot: a point pinned at slot 0
 // (a real, validated chain point -- see QueryPoint.pinned()'s own doc
@@ -231,25 +249,35 @@ func (ls *LedgerState) VerifyPointOnChain(at QueryPoint) error {
 func (ls *LedgerState) resolveAsOfEpoch(
 	txn *database.Txn,
 	at QueryPoint,
-) (uint64, error) {
+) (epoch uint64, found bool, err error) {
 	if !at.pinned() {
 		_, current, err := ls.epochAtTip(txn)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		if current == nil {
-			return 0, nil
+			return 0, true, nil
 		}
-		return current.EpochId, nil
+		return current.EpochId, true, nil
 	}
-	epoch, err := ls.db.GetEpochBySlot(at.Slot, txn)
+	epochRow, err := ls.db.GetEpochBySlot(at.Slot, txn)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	if epoch == nil {
-		return 0, nil
+	if epochRow == nil {
+		return 0, false, nil
 	}
-	return epoch.EpochId, nil
+	return epochRow.EpochId, true, nil
+}
+
+// errEpochNotResolved is returned by resolveAsOfEpoch's callers when it
+// reports found=false -- see that function's doc comment.
+func errEpochNotResolved(at QueryPoint) error {
+	return fmt.Errorf(
+		"%w: no epoch record covers slot %d",
+		ErrHistoricalStateUnavailable,
+		at.Slot,
+	)
 }
 
 // queryShelleyEpochNo answers GetEpochNo: the epoch containing at (unpinned
@@ -269,22 +297,205 @@ func (ls *LedgerState) resolveAsOfEpoch(
 // inside the same snapshot verifyPointOnChain already validated at
 // against, so a rollback landing between validation and this read cannot
 // make the two disagree about which chain they're describing.
-func (ls *LedgerState) queryShelleyEpochNo(
-	at QueryPoint,
+func (ls *LedgerState) queryShelleyEpochNo(ctx context.Context, at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
 	if !at.pinned() {
+		row, err := ls.snapshotEpoch(txn, at)
+		if err != nil {
+			return nil, err
+		}
+		if row != nil {
+			return []any{row.EpochId}, nil
+		}
 		return []any{ls.loadConsensusSnapshot().currentEpoch.EpochId}, nil
 	}
 	if txn == nil {
-		txn = ls.db.Transaction(false)
+		txn = ls.db.Transaction(ctx, false)
 		defer txn.Release()
 	}
-	epoch, err := ls.resolveAsOfEpoch(txn, at)
+	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
 		return nil, err
 	}
+	if !found {
+		return nil, errEpochNotResolved(at)
+	}
 	return []any{epoch}, nil
+}
+
+// VerifyPointQueryable checks that at, once Acquired, is guaranteed to be
+// answerable by every point-aware query type below -- not just that it is
+// still on this node's chain (verifyPointOnChain), but that it is not older
+// than the strictest per-query-type retention floor (UTxO whole/by-ref via
+// checkUtxoRetentionWindow, stake/pool distribution via
+// PoolStakeDistribution's own recency check, current protocol parameters
+// via queryShelleyCurrentProtocolParams's persisted-row lookup, current era
+// via queryHardFork's HardForkCurrentEraQuery case, which independently
+// returns ErrHistoricalStateUnavailable and so must be covered here too).
+//
+// Called from the LocalStateQuery server's Acquire handler
+// (ouroboros/localstatequery.go), not from Query itself: the Ouroboros
+// LocalStateQuery wire protocol has no way to fail an individual query
+// after a successful Acquire -- confirmed against gouroboros' own
+// StateMap, whose Querying state has exactly one transition (Result) and
+// no Failure transition at all, unlike Acquiring (which supports
+// AcquireFailurePointTooOld/PointNotOnChain). A point Acquire allowed but
+// a later query could not actually answer therefore has no protocol-legal
+// way to report that: the connection simply drops ("protocol is shutting
+// down" client-side) instead of returning a clean rejection, for any of
+// the retention-bounded query types above, whenever their own floor is
+// stricter than whatever check an earlier, successful call on the same
+// connection happened to exercise.
+//
+// Real cardano-node never hits this: its own historical retention is one
+// uniform window (the security parameter k) shared by every query type, so
+// a successful Acquire there already guarantees every query answers.
+// Checking every one of Dingo's independent, differently-sized retention
+// windows here, upfront, gives Dingo that same guarantee instead of
+// discovering the gap mid-query. The cost is symmetric: a connection that
+// only ever intended to ask a genuinely unbounded query (queryShelleyEpochNo)
+// at a point older than UTxO's or stake distribution's own floor is now
+// also refused at Acquire, even though that specific query alone could
+// have answered -- accepted deliberately, since the protocol gives no way
+// to know in advance which query type a session will ask, and refusing a
+// point upfront is a well-defined, protocol-legal AcquireFailure, unlike
+// discovering the same gap mid-query.
+//
+// Unpinned (at.pinned() false) always succeeds: the live tip trivially
+// satisfies every retention window.
+//
+// Snapshot guarantee: pass the read transaction a QueryView holds (as
+// AcquireQueryView does) and this check and every later query in the session
+// read one snapshot, so a retention prune or rollback committed after the
+// check cannot make an acquired point stop answering. Called with a nil txn
+// the check runs in its own transaction, which closes before the caller
+// records the point, and proves nothing about later reads.
+//
+// Pruning itself still runs concurrently with the check. The caller pins the
+// point with PinAcquiredPoint first; checkAnnouncedPruneFloors below then
+// refuses a point a concurrent prune has already committed to removing, and a
+// prune that announces after the pin lands sees the pin and retains the point.
+// Protocol-parameter rows are not age-pruned at all -- only
+// DeletePParamsAfterSlot removes them, on rollback, which verifyPointOnChain
+// already covers.
+func (ls *LedgerState) VerifyPointQueryable(
+	ctx context.Context,
+	txn *database.Txn,
+	at QueryPoint,
+) error {
+	if !at.pinned() {
+		return nil
+	}
+	if txn == nil {
+		txn = ls.db.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	if err := ls.verifyPointOnChain(txn, at); err != nil {
+		return err
+	}
+	if err := ls.checkMithrilTrustBoundary(at); err != nil {
+		return err
+	}
+	if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
+		return err
+	}
+	if err := ls.verifyStakeDistributionRetentionOnly(txn, at); err != nil {
+		return err
+	}
+	if _, err := ls.queryShelleyCurrentProtocolParams(ctx, at, txn); err != nil {
+		return err
+	}
+	// GetStakeSnapshots needs the go snapshot two epochs before at's, one
+	// epoch further back than verifyStakeDistributionRetentionOnly checks,
+	// and GetAccountState needs a network_state row at or before at even
+	// where totalCirculatingSupply would not read one.
+	if _, _, err := ls.stakeSnapshotsAsOf(
+		ls.loadConsensusSnapshot(), at, txn,
+	); err != nil {
+		return err
+	}
+	if _, err := ls.queryShelleyAccountState(ctx, at, txn); err != nil {
+		return err
+	}
+	// queryHardFork's HardForkCurrentEraQuery case (GetCurrentEra) is
+	// point-aware and returns ErrHistoricalStateUnavailable when
+	// resolveAsOfEpoch can't resolve at to an epoch -- exercised here for
+	// the same reason every other check above is: Querying has no Failure
+	// transition, so a rejection surfacing from Query instead of here
+	// drops the connection rather than returning a clean AcquireFailure.
+	if _, err := ls.queryHardFork(ctx, &olocalstatequery.HardForkQuery{Query: &olocalstatequery.HardForkCurrentEraQuery{}},
+		at, txn,
+	); err != nil {
+		return err
+	}
+	return ls.checkAnnouncedPruneFloors(txn, at)
+}
+
+// checkMithrilTrustBoundary rejects a point below the latest Mithril import's
+// ledger slot. The import writes the snapshot's state, not the history that
+// led to it: blocks below the slot carry no certificate, transaction or reward
+// journal rows, and a catch-up import deactivates accounts the snapshot no
+// longer holds without recording when. The snapshot slot itself is exact.
+func (ls *LedgerState) checkMithrilTrustBoundary(at QueryPoint) error {
+	boundary := ls.mithrilLedgerSlotSnapshot()
+	if boundary == 0 || at.Slot >= boundary {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: pinned slot %d is below the Mithril snapshot slot %d this "+
+			"database was imported at",
+		ErrHistoricalStateUnavailable,
+		at.Slot,
+		boundary,
+	)
+}
+
+// checkAnnouncedPruneFloors rejects at when a pruning path has already
+// announced a floor above it. The persisted and epoch-relative checks above
+// cover pruning that has finished; this covers a prune that announced its
+// floor but whose delete has not committed, which those checks cannot yet see.
+//
+// It is only race-free when the caller registered its pin (PinAcquiredPoint)
+// before calling VerifyPointQueryable: see acquiredPointPins.
+func (ls *LedgerState) checkAnnouncedPruneFloors(
+	txn *database.Txn,
+	at QueryPoint,
+) error {
+	if ls.db.StorageMode() == types.StorageModeAPI {
+		return nil
+	}
+	utxoFloor, poolFloor := ls.announcedPruneFloors()
+	if utxoFloor > 0 && at.Slot < utxoFloor {
+		return fmt.Errorf(
+			"%w: pinned slot %d is below the consumed-UTxO prune floor "+
+				"(slot %d) a concurrent cleanup has already announced",
+			ErrHistoricalStateUnavailable,
+			at.Slot,
+			utxoFloor,
+		)
+	}
+	if poolFloor > 0 {
+		targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errEpochNotResolved(at)
+		}
+		if snap := praos.StakeSnapshotEpoch(targetEpoch); snap < poolFloor {
+			return fmt.Errorf(
+				"%w: pinned slot %d needs the mark snapshot from epoch %d, "+
+					"below the pool-snapshot prune floor (epoch %d) a "+
+					"concurrent cleanup has already announced",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+				snap,
+				poolFloor,
+			)
+		}
+	}
+	return nil
 }
 
 // Query answers a decoded LocalStateQuery message against Dingo's live
@@ -293,21 +504,19 @@ func (ls *LedgerState) queryShelleyEpochNo(
 // When at is pinned, Query first verifies at against this node's current
 // chain (verifyPointOnChain) before dispatching, so every point-sensitive
 // query type below shares one fork-safety check rather than repeating it.
-// at is threaded through only as far as the query types that actually honor
-// it today: stake distribution (queryShelleyStakeDistribution/
-// queryShelleyPoolDistr2, via PoolStakeDistribution's epoch-snapshot
-// lookup and, for circulating supply, GetNetworkStateAsOfSlot), current
-// protocol parameters (queryShelleyCurrentProtocolParams, which answers a
-// pin in the live tip's current epoch from the live snapshot and any other
-// epoch from that epoch's persisted pparams row when one exists, returning
-// ErrHistoricalStateUnavailable only when no such row was ever recorded or
-// it was pruned after a rollback), and epoch number (queryShelleyEpochNo,
-// unconditionally safe). Every other
-// query type ignores at and continues answering from live state; #382's
-// full scope (every query pinnable at any historical point) remains out of
-// scope for what cross-node validation via node-parity actually needs.
-func (ls *LedgerState) Query(query any, at QueryPoint) (any, error) {
-	return ls.query(query, at, 0)
+// at reaches every query type that reads ledger or consensus state, each of
+// which answers as of at; queryShelleyLeaf's doc comment audits every case,
+// and only genesis config and the ledger peer snapshot are live by design.
+//
+// Query reads current state on every call, so successive calls may observe
+// different blocks. A session that needs consistent reads across calls uses
+// AcquireQueryView instead, which answers every query from one snapshot.
+func (ls *LedgerState) Query(
+	ctx context.Context,
+	query any,
+	at QueryPoint,
+) (any, error) {
+	return ls.query(ctx, query, at, 0)
 }
 
 // QueryWithProtocolVersion answers a LocalStateQuery using the negotiated
@@ -315,66 +524,134 @@ func (ls *LedgerState) Query(query any, at QueryPoint) (any, error) {
 // A zero version preserves the direct-call behavior used by non-network
 // callers and selects the current result layout only where the result itself
 // is constructed as such.
-func (ls *LedgerState) QueryWithProtocolVersion(
-	query any,
+func (ls *LedgerState) QueryWithProtocolVersion(ctx context.Context, query any,
 	at QueryPoint,
 	protocolVersion uint16,
 ) (any, error) {
-	return ls.query(query, at, protocolVersion)
+	return ls.query(ctx, query, at, protocolVersion)
+}
+
+// snapshotEpoch returns the epoch record covering the tip of the read
+// transaction a QueryView holds, so an unpinned query answers for the epoch
+// the view froze rather than the live one, which may have moved on since
+// acquire. It returns nil when there is no held transaction, the point is
+// pinned (those queries resolve their own epoch), or no record covers the tip;
+// callers then answer from the live consensus snapshot.
+func (ls *LedgerState) snapshotEpoch(
+	txn *database.Txn,
+	at QueryPoint,
+) (*models.Epoch, error) {
+	if txn == nil || at.pinned() {
+		return nil, nil
+	}
+	_, epoch, err := ls.epochAtTip(txn)
+	return epoch, err
+}
+
+// readTxn returns txn when the caller already holds a read transaction, such
+// as a QueryView's snapshot, and otherwise opens one. The returned release
+// is always safe to defer: it is a no-op for a transaction the caller owns.
+func (ls *LedgerState) readTxn(
+	ctx context.Context,
+	txn *database.Txn,
+) (*database.Txn, func()) {
+	if txn != nil {
+		return txn, func() {}
+	}
+	opened := ls.db.Transaction(ctx, false)
+	return opened, opened.Release
 }
 
 func (ls *LedgerState) query(
+	ctx context.Context,
 	query any,
 	at QueryPoint,
 	protocolVersion uint16,
 ) (any, error) {
-	// txn is nil on the live (unpinned) path -- every handler below falls
-	// back to opening its own transaction in that case, unchanged from
-	// before this point-pinning existed. When pinned, this one transaction
-	// is reused for both verifyPointOnChain and whichever handler below
-	// honors at, so the validated point and the historical read it guards
-	// come from the same consistent snapshot: a rollback committing between
-	// the two cannot make the handler answer for a point that already left
-	// the canonical chain.
-	var txn *database.Txn
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// The latest boundary's mark snapshot and RATIFY marks may still be
+	// written by its background job; answer ledger-state queries from the
+	// state it decided, and before any pinned read opens.
+	if _, ok := query.(*olocalstatequery.BlockQuery); ok {
+		if err := ls.WaitEpochBoundaryJob(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return ls.queryInTxn(ctx, query, at, protocolVersion, nil)
+}
+
+// queryInTxn dispatches query. txn is the read transaction every handler
+// reads through: a QueryView passes the snapshot it holds, so all of a
+// session's queries see one consistent state. When txn is nil (the direct,
+// unacquired path) each handler falls back to opening its own transaction,
+// except that a pinned point opens one here, reused for both
+// verifyPointOnChain and whichever handler honors at, so the validated point
+// and the historical read it guards come from the same snapshot: a rollback
+// committing between the two cannot make the handler answer for a point that
+// already left the canonical chain.
+func (ls *LedgerState) queryInTxn(
+	ctx context.Context,
+	query any,
+	at QueryPoint,
+	protocolVersion uint16,
+	txn *database.Txn,
+) (any, error) {
+	return ls.queryInTxnWithTransition(ctx, query, at, protocolVersion, txn, nil)
+}
+
+func (ls *LedgerState) queryInTxnWithTransition(
+	ctx context.Context,
+	query any,
+	at QueryPoint,
+	protocolVersion uint16,
+	txn *database.Txn,
+	transitionInfo *hardfork.TransitionInfo,
+) (any, error) {
 	if at.pinned() {
-		txn = ls.db.Transaction(false)
-		defer txn.Release()
+		var release func()
+		txn, release = ls.readTxn(ctx, txn)
+		defer release()
 		if err := ls.verifyPointOnChain(txn, at); err != nil {
 			return nil, err
 		}
 	}
 	switch q := query.(type) {
 	case *olocalstatequery.BlockQuery:
-		return ls.queryBlock(q, at, txn, protocolVersion)
+		return ls.queryBlock(ctx, q, at, txn, protocolVersion, transitionInfo)
 	case *olocalstatequery.SystemStartQuery:
-		return ls.querySystemStart()
+		return ls.querySystemStart(ctx)
 	case *olocalstatequery.ChainBlockNoQuery:
-		return ls.queryChainBlockNo()
+		return ls.queryChainBlockNo(at, txn)
 	case *olocalstatequery.ChainPointQuery:
-		return ls.queryChainPoint()
+		return ls.queryChainPoint(at, txn)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
 }
 
-func (ls *LedgerState) queryBlock(
-	query *olocalstatequery.BlockQuery,
+func (ls *LedgerState) queryBlock(ctx context.Context, query *olocalstatequery.BlockQuery,
 	at QueryPoint,
 	txn *database.Txn,
 	protocolVersion uint16,
+	transitionInfo *hardfork.TransitionInfo,
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkQuery:
-		return ls.queryHardFork(q)
+		return ls.queryHardForkWithTransition(ctx, q, at, txn, transitionInfo)
 	case *olocalstatequery.ShelleyQuery:
-		return ls.queryShelley(q, at, txn, protocolVersion)
+		return ls.queryShelley(ctx, q, at, txn, protocolVersion)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
 }
 
-func (ls *LedgerState) querySystemStart() (any, error) {
+func (ls *LedgerState) querySystemStart(ctx context.Context) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
 		return nil, errors.New(
@@ -398,14 +675,14 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 	return ret, nil
 }
 
-// dispatch switch, which is what lets that switch return each case's
-// result directly; this handler happens to never fail, unlike its
-// siblings, but a special-cased signature here would break that
-// uniformity for no real benefit.
-//
-//nolint:unparam // (any, error) matches every other case in Query's
-func (ls *LedgerState) queryChainBlockNo() (any, error) {
-	tip := ls.loadTipSnapshot().currentTip
+func (ls *LedgerState) queryChainBlockNo(
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	tip, err := ls.queryTip(at, txn)
+	if err != nil {
+		return nil, err
+	}
 	// WithOrigin BlockNo: [0] at genesis, [1, blockNo] once a block exists.
 	if len(tip.Point.Hash) == 0 {
 		return []any{0}, nil
@@ -413,19 +690,149 @@ func (ls *LedgerState) queryChainBlockNo() (any, error) {
 	return []any{1, tip.BlockNumber}, nil
 }
 
-//nolint:unparam // see queryChainBlockNo's identical note just above.
-func (ls *LedgerState) queryChainPoint() (any, error) {
-	return cloneTip(ls.loadTipSnapshot().currentTip).Point, nil
+func (ls *LedgerState) queryChainPoint(
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	tip, err := ls.queryTip(at, txn)
+	if err != nil {
+		return nil, err
+	}
+	return tip.Point, nil
 }
 
-func (ls *LedgerState) queryHardFork(
+// queryTip returns the point a chain-tip query answers for. A pinned view
+// reports its requested point; an unpinned view reports its snapshot tip; a
+// direct unpinned query reports the live in-memory tip.
+func (ls *LedgerState) queryTip(
+	at QueryPoint,
+	txn *database.Txn,
+) (ochainsync.Tip, error) {
+	if at.pinned() {
+		metadata, err := database.BlockMetadataByPointLocalTxn(
+			txn,
+			ocommon.NewPoint(at.Slot, at.Hash),
+		)
+		if err != nil {
+			return ochainsync.Tip{}, err
+		}
+		return ochainsync.Tip{
+			Point:       ocommon.NewPoint(at.Slot, at.Hash),
+			BlockNumber: metadata.Height,
+		}, nil
+	}
+	if txn == nil {
+		return cloneTip(ls.loadTipSnapshot().currentTip), nil
+	}
+	return ls.db.GetTip(txn)
+}
+
+// queryShelleyLedgerTip answers GetLedgerTip: the acquired point when one is
+// pinned (Query has already verified it is on the chain), otherwise the live
+// tip.
+func (ls *LedgerState) queryShelleyLedgerTip(at QueryPoint) (any, error) {
+	if at.pinned() {
+		return []any{ocommon.NewPoint(at.Slot, at.Hash)}, nil
+	}
+	return []any{cloneTip(ls.loadTipSnapshot().currentTip).Point}, nil
+}
+
+// queryHardFork answers HardFork queries. at is Query's pinned point
+// (unpinned = live); only HardForkCurrentEraQuery honors it --
+// HardForkEraHistoryQuery answers the whole era-boundary table as known up
+// to the live tip, which is not itself a point-relative value the way a
+// single era ID is.
+//
+// HardForkCurrentEraQuery previously always answered with dingo's live era
+// regardless of at, a real point-pinning gap left open by the original
+// scope decision (queryShelleyCurrentProtocolParams and friends, not this
+// HardFork-mini-protocol query type). This mattered more than its own
+// query type suggests: gouroboros's client-side GetCurrentProtocolParams
+// (and several other era-dispatching client calls) queries
+// HardForkCurrentEraQuery first specifically to decide which era-shaped
+// struct to decode the *next* query's reply into. Even though
+// queryShelleyCurrentProtocolParams itself correctly resolves and encodes
+// the pinned point's own era-shaped parameters, a client told the wrong
+// era by this handler picks the wrong decode target for that correct
+// reply -- "cbor: cannot unmarshal array into Go value of type
+// babbage.BabbageProtocolParameters (cannot decode CBOR array to struct
+// with different number of elements)" when the pinned point's real era
+// differs from dingo's live one -- e.g. pinning at genesis (slot 0)
+// against a dingo instance already many eras past it
+// (node-parity --from-genesis validation).
+func (ls *LedgerState) queryHardFork(ctx context.Context, query *olocalstatequery.HardForkQuery,
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	return ls.queryHardForkWithTransition(ctx, query, at, txn, nil)
+}
+
+func (ls *LedgerState) queryHardForkWithTransition(
+	ctx context.Context,
 	query *olocalstatequery.HardForkQuery,
+	at QueryPoint,
+	txn *database.Txn,
+	transitionInfo *hardfork.TransitionInfo,
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
-		return ls.loadConsensusSnapshot().currentEra.Id, nil
+		if !at.pinned() {
+			row, err := ls.snapshotEpoch(txn, at)
+			if err != nil {
+				return nil, err
+			}
+			if row != nil {
+				if era := eras.GetEraById(row.EraId); era != nil {
+					return era.Id, nil
+				}
+			}
+			return ls.loadConsensusSnapshot().currentEra.Id, nil
+		}
+		if txn == nil {
+			txn = ls.db.Transaction(ctx, false)
+			defer txn.Release()
+		}
+		targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, errEpochNotResolved(at)
+		}
+		epochRow, err := ls.db.GetEpoch(targetEpoch, txn)
+		if err != nil {
+			return nil, err
+		}
+		if epochRow == nil {
+			return nil, fmt.Errorf(
+				"%w: current era at slot %d (epoch %d) cannot be "+
+					"resolved -- no epoch record exists for epoch %d",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+				targetEpoch,
+				targetEpoch,
+			)
+		}
+		era := eras.GetEraById(epochRow.EraId)
+		if era == nil {
+			return nil, fmt.Errorf(
+				"%w: current era at slot %d (epoch %d) cannot be "+
+					"resolved -- epoch %d names unknown era %d",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+				targetEpoch,
+				targetEpoch,
+				epochRow.EraId,
+			)
+		}
+		return era.Id, nil
 	case *olocalstatequery.HardForkEraHistoryQuery:
-		return ls.queryHardForkEraHistory()
+		// The held snapshot answers pinned and unpinned queries alike, so the
+		// table does not change within an acquired session.
+		if transitionInfo != nil {
+			return ls.queryHardForkEraHistory(ctx, txn, *transitionInfo)
+		}
+		return ls.queryHardForkEraHistory(ctx, txn)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
@@ -470,10 +877,20 @@ func checkedSlotAdd(
 type eraBoundData struct {
 	epochs []models.Epoch
 	start  []any // [picosecondsBigInt, slot, epoch] or nil if era is empty
-	end    []any // same shape; nil for empty eras and populated current era
+	// end is either a bound tuple or nil for HFC EraUnbounded, which CBOR
+	// encodes as null. An empty era is identified by a nil start instead.
+	end any
 }
 
-func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
+func (ls *LedgerState) queryHardForkEraHistory(
+	ctx context.Context,
+	txn *database.Txn,
+	acquiredTransition ...hardfork.TransitionInfo,
+) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Read the tip, current era, and transition info from the lock-free
 	// snapshots so this (potentially slow) DB-querying path never contends
 	// with the ledger write lock.
@@ -481,6 +898,25 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	tipSlot := tipState.currentTip.Point.Slot
 	currentEraId := consensusState.currentEra.Id
 	transitionInfo := consensusState.transitionInfo
+	if len(acquiredTransition) > 0 {
+		transitionInfo = acquiredTransition[0]
+	}
+	if txn != nil {
+		// A QueryView describes the tip and era it froze. The transition
+		// forecast is captured by QueryView because it has no stored form.
+		tip, err := ls.db.GetTip(txn)
+		if err != nil {
+			return nil, err
+		}
+		tipSlot = tip.Point.Slot
+		row, err := ls.snapshotEpoch(txn, QueryPoint{})
+		if err != nil {
+			return nil, err
+		}
+		if row != nil {
+			currentEraId = row.EraId
+		}
+	}
 
 	shape := ls.eraShape()
 	if len(shape.Eras) == 0 {
@@ -494,13 +930,25 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 		)
 	}
 
-	perEra := make([]eraBoundData, len(shape.Eras))
+	currentIdx, ok := shape.EraIndex(currentEraId)
+	if !ok {
+		return nil, fmt.Errorf(
+			"era history: current era %d is absent from shape",
+			currentEraId,
+		)
+	}
+	hasKnownSuccessor := transitionInfo.State == hardfork.TransitionKnown &&
+		currentIdx+1 < len(shape.Eras)
+	perEraLen := currentIdx + 1
+	if hasKnownSuccessor {
+		perEraLen++
+	}
+	perEra := make([]eraBoundData, perEraLen)
 	timespan := big.NewInt(0)
-	currentIdx := -1
 
-	for i, entry := range shape.Eras {
+	for i, entry := range shape.Eras[:currentIdx+1] {
 		eraDesc := activeEras[i]
-		epochs, dbErr := ls.db.GetEpochsByEra(entry.EraID, nil)
+		epochs, dbErr := ls.db.GetEpochsByEra(entry.EraID, txn)
 		if dbErr != nil {
 			return nil, dbErr
 		}
@@ -522,9 +970,8 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 			)
 		}
 
-		if entry.EraID == currentEraId {
+		if i == currentIdx {
 			// Defer End to the BuildSummary step below.
-			currentIdx = i
 			continue
 		}
 
@@ -555,7 +1002,7 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 			continue
 		}
 		pp, ppErr := ls.loadPersistedProtocolParameters(
-			lastEp.EpochId, eraDesc, nil,
+			lastEp.EpochId, eraDesc, txn,
 		)
 		if ppErr != nil {
 			return nil, fmt.Errorf(
@@ -589,7 +1036,7 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 
 	// Compute the current era's End via hardfork.BuildSummary, mirroring the
 	// Haskell HFC TransitionKnown/Unknown/Impossible semantics.
-	if currentIdx >= 0 {
+	if perEra[currentIdx].start != nil {
 		end, err := ls.currentEraEnd(
 			shape, perEra[currentIdx], currentIdx, tipSlot, transitionInfo,
 		)
@@ -597,39 +1044,47 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 			return nil, err
 		}
 		perEra[currentIdx].end = end
+
+		if hasKnownSuccessor {
+			boundedEnd, ok := end.([]any)
+			if !ok {
+				return nil, errors.New(
+					"hardfork: known transition has unbounded current era",
+				)
+			}
+			successor, err := eraHistorySuccessor(
+				shape, currentIdx+1, boundedEnd, tipSlot,
+			)
+			if err != nil {
+				return nil, err
+			}
+			perEra[currentIdx+1] = successor
+		}
 	}
 
-	retData := make([]any, 0, len(shape.Eras))
-	for i, entry := range shape.Eras {
+	retData := make([]any, 0, len(perEra))
+	for i, data := range perEra {
+		entry := shape.Eras[i]
 		tmpParams := eraParamsCBOR(entry.Params)
-		if perEra[i].start == nil || perEra[i].end == nil {
-			retData = append(retData, []any{
-				[]any{0, 0, 0},
-				[]any{0, 0, 0},
-				tmpParams,
-			})
+		if data.start == nil {
 			continue
 		}
 		retData = append(retData, []any{
-			perEra[i].start, perEra[i].end, tmpParams,
+			data.start, data.end, tmpParams,
 		})
 	}
 	return cbor.IndefLengthList(retData), nil
 }
 
 // currentEraEnd computes the open era's End tuple (picosecondRelTime, slot,
-// epoch) from the HFC Summary, with a pre-check that falls back to
-// TransitionUnknown when TransitionKnown's KnownEpoch is missing from the DB
-// (e.g. a race or rollback). Without the fallback, serving the
-// BuildSummary-computed boundary would over-claim certainty about an epoch
-// the node hasn't actually seen.
+// epoch) from the HFC Summary.
 func (ls *LedgerState) currentEraEnd(
 	shape hardfork.Shape,
 	era eraBoundData,
 	idx int,
 	tipSlot uint64,
 	ti hardfork.TransitionInfo,
-) ([]any, error) {
+) (any, error) {
 	firstEp := era.epochs[0]
 	startRel, ok := era.start[0].(*big.Int)
 	if !ok {
@@ -637,15 +1092,11 @@ func (ls *LedgerState) currentEraEnd(
 			"current era start[0] has unexpected type %T", era.start[0],
 		)
 	}
-
-	// dingo sets TransitionImpossible when evaluateTransitionImpossible has
-	// confirmed the current epoch's end is within the safe-zone horizon
-	// (safeEndSlot >= epochEndSlot). The intended answer is the current
-	// epoch end. BuildSummary's TransitionImpossible branch, however,
-	// applies the safe zone from current.Start (= the *first* epoch of
-	// the era) and can return an EraEnd behind the tip for a long-running
-	// era. Serve the confirmed epoch-end directly instead.
-	if ti.State == hardfork.TransitionImpossible {
+	// BuildSummary cannot bound a TransitionImpossible era whose final
+	// safe zone is zero. The confirmed epoch history still supplies a finite
+	// end for the era reached so far.
+	if ti.State == hardfork.TransitionImpossible &&
+		shape.Eras[idx].Params.SafeZoneSlots == 0 {
 		endRel := new(big.Int).Set(startRel)
 		for _, ep := range era.epochs {
 			endRel.Add(
@@ -664,26 +1115,7 @@ func (ls *LedgerState) currentEraEnd(
 				lastEp.EpochId, lastEp.StartSlot, lastEp.LengthInSlots, err,
 			)
 		}
-		return []any{
-			endRel,
-			endSlot,
-			lastEp.EpochId + 1,
-		}, nil
-	}
-
-	effectiveTI := ti
-	if ti.State == hardfork.TransitionKnown {
-		found := false
-		for _, ep := range era.epochs {
-			if ep.EpochId == ti.KnownEpoch &&
-				ep.EpochId > firstEp.EpochId {
-				found = true
-				break
-			}
-		}
-		if !found {
-			effectiveTI = hardfork.NewTransitionUnknown()
-		}
+		return []any{endRel, endSlot, lastEp.EpochId + 1}, nil
 	}
 
 	curr := hardfork.EraSummary{
@@ -695,20 +1127,70 @@ func (ls *LedgerState) currentEraEnd(
 		},
 		Params: shape.Eras[idx].Params,
 	}
-	summ, err := hardfork.BuildSummary(shape, nil, curr, tipSlot, effectiveTI)
+	summ, err := hardfork.BuildSummary(shape, nil, curr, tipSlot, ti)
 	if err != nil {
 		return nil, err
 	}
 	endBound := summ.Eras[0].End
 	if endBound == nil {
-		return nil, errors.New(
-			"hardfork: current era End unbounded (SafeZoneSlots==0)",
-		)
+		return nil, nil
 	}
 	return []any{
 		durationToPicoseconds(endBound.RelativeTime),
 		endBound.Slot,
 		endBound.Epoch,
+	}, nil
+}
+
+func eraHistorySuccessor(
+	shape hardfork.Shape,
+	idx int,
+	start []any,
+	tipSlot uint64,
+) (eraBoundData, error) {
+	startRel, ok := start[0].(*big.Int)
+	if !ok {
+		return eraBoundData{}, fmt.Errorf(
+			"successor era start[0] has unexpected type %T", start[0],
+		)
+	}
+	startSlot, ok := start[1].(uint64)
+	if !ok {
+		return eraBoundData{}, fmt.Errorf(
+			"successor era start[1] has unexpected type %T", start[1],
+		)
+	}
+	startEpoch, ok := start[2].(uint64)
+	if !ok {
+		return eraBoundData{}, fmt.Errorf(
+			"successor era start[2] has unexpected type %T", start[2],
+		)
+	}
+	entry := shape.Eras[idx]
+	startBound := hardfork.Bound{
+		RelativeTime: picosecondsToDuration(startRel),
+		Slot:         startSlot,
+		Epoch:        startEpoch,
+	}
+	successor := hardfork.SuccessorEra(
+		startBound,
+		entry.EraID,
+		entry.Params,
+		tipSlot,
+	)
+	end := successor.End
+	if end == nil {
+		return eraBoundData{
+			start: []any{new(big.Int).Set(startRel), startSlot, startEpoch},
+		}, nil
+	}
+	return eraBoundData{
+		start: []any{new(big.Int).Set(startRel), startSlot, startEpoch},
+		end: []any{
+			durationToPicoseconds(end.RelativeTime),
+			end.Slot,
+			end.Epoch,
+		},
 	}, nil
 }
 
@@ -738,13 +1220,12 @@ func picosecondsToDuration(p *big.Int) time.Duration {
 	return time.Duration(ns.Int64())
 }
 
-func (ls *LedgerState) queryShelley(
-	query *olocalstatequery.ShelleyQuery,
+func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery.ShelleyQuery,
 	at QueryPoint,
 	txn *database.Txn,
 	protocolVersion uint16,
 ) (any, error) {
-	return ls.queryShelleyLeaf(query.Query, at, txn, protocolVersion)
+	return ls.queryShelleyLeaf(ctx, query.Query, at, txn, protocolVersion)
 }
 
 // queryShelleyLeaf dispatches a decoded Shelley block-query leaf and returns
@@ -753,7 +1234,7 @@ func (ls *LedgerState) queryShelley(
 // re-runs the wrapped inner query through it. at is Query's pinned point
 // (Slot 0 = live).
 //
-// #382 point-pinning coverage audit (every case below, classified):
+// Point-pinning coverage audit (every case below, classified):
 //
 // Honors at today: ShelleyStakeDistributionQuery and ShelleyPoolDistr2Query
 // (both via PoolStakeDistribution, resolving at to its epoch and reading
@@ -768,119 +1249,136 @@ func (ls *LedgerState) queryShelley(
 // ShelleyUtxoByTxinQuery (queryShelleyUtxoByTxIn, resolving each requested
 // ref's per-row AddedSlot/DeletedSlot against at.Slot -- safe back to
 // checkUtxoRetentionWindow's retention floor, rejected with
-// ErrHistoricalStateUnavailable beyond it; blinklabs-io/dingo#1900's
-// node-parity incremental mode is the real caller this closes a gap for),
-// and ShelleyUtxoWholeQuery (queryShelleyUtxoWhole, same
-// AddedSlot/DeletedSlot predicate as ShelleyUtxoByTxinQuery applied to the
-// whole table via IterateUtxosAsOf instead of a bounded ref list, and the
-// same checkUtxoRetentionWindow floor -- unlike a per-ref lookup this has
-// no indexed shortcut, so a pinned call costs a full-table scan; accepted
-// deliberately, since node-parity's periodic full checks were reporting a
-// spurious UTxO "divergence" on essentially every run that took long
-// enough for the live tip to move during the walk before this closed the
-// gap -- confirmed live against a real Preview cardano-node, every flagged
-// row's own AddedSlot was strictly after the pinned slot).
+// ErrHistoricalStateUnavailable beyond it; the node-parity
+// incremental mode is the real caller this closes a gap for), and
+// ShelleyUtxoWholeQuery (queryShelleyUtxoWhole, same AddedSlot/DeletedSlot
+// predicate as ShelleyUtxoByTxinQuery applied to the whole table via
+// IterateUtxosAsOf instead of a bounded ref list, and the same
+// checkUtxoRetentionWindow floor -- unlike a per-ref lookup this has no indexed
+// shortcut, so a pinned call costs a full-table scan; accepted deliberately,
+// since node-parity's periodic full checks were reporting a spurious UTxO
+// "divergence" on essentially every run that took long enough for the live tip
+// to move during the walk before this closed the gap -- confirmed live against
+// a real Preview cardano-node, every flagged row's own AddedSlot was strictly
+// after the pinned slot), ShelleyUtxoByAddressQuery
+// (queryShelleyUtxoByAddress, the same predicate and retention floor through
+// GetUtxosByAddressAsOf), ShelleyAccountStateQuery (queryShelleyAccountState,
+// the network_state row in effect at at.Slot), ShelleyStakeSnapshotsQuery
+// (queryShelleyStakeSnapshots, the mark/set/go rows of at's epoch, rejected
+// once the go snapshot leaves the pool-snapshot retention window, with the
+// PV11 zero-pool rule taken from that epoch's persisted protocol parameters),
+// ShelleyStakePoolsQuery (queryShelleyStakePools, the pools active at
+// at.Slot through GetActivePoolKeyHashesAtSlot), and
+// ShelleyStakeDelegDepositsQuery (queryShelleyStakeDelegDeposits, each
+// credential's latest registration event at or before at.Slot, or its
+// snapshot import baseline when that is at least as new),
+// ShelleyFilteredDelegationAndRewardAccountsQuery and
+// ShelleyFilteredVoteDelegateesQuery (both through
+// GetAccountsByCredentialAtSlot: the accounts registered at at.Slot with the
+// pool, DRep and reward balance they held), ShelleyDRepStateQuery
+// (queryShelleyDRepStateAt: the DReps registered at at.Slot with the anchor,
+// expiry and deposit they had, from certificates and drep_expiry_history, and
+// their delegators as GetAccountsByCredentialAtSlot reads accounts), and
+// ShelleyGetProposalsQuery (the proposals set at at.Slot from the lifecycle
+// slots, with votes from governance_vote_history), and
+// ShelleyDebugChainDepStateQuery (queryShelleyDebugChainDepState: the epoch
+// rows of at's epoch, the nonce fold stopped at at.Slot, the lab from the
+// acquired block's parent hash, and the op-cert counters observed at or
+// before at.Slot). Pool and stake certificate rows, the import baseline, the
+// reward journal, DRep certificates and expiry history, proposal lifecycle
+// slots, vote history, epoch rows and op-cert rows are removed only by
+// rollback, so none of these needs a retention floor; for a point older than
+// the three epochs of block nonce rows kept, the nonce fold recomputes from
+// the stored blocks.
+//
+// Also honors at: ShelleyLedgerTipQuery (answers at itself when pinned), and
+// ShelleyProposedProtocolParamsUpdatesQuery (resolves at's era like
+// HardForkCurrentEraQuery: an empty map from Conway on, refused earlier).
 //
 // Intentionally live-only, not a gap: ShelleyGenesisConfigQuery
 // (genesis is an immutable chain-wide constant with no historical variant),
 // ShelleyGetLedgerPeerSnapshotQuery (peer/networking bootstrap data, not
 // ledger state at all).
 //
-// Not point-aware, real gap, out of scope for this pass: every remaining
-// case answers unconditionally from live state regardless of at, because
-// making it historically correct needs storage or reconstruction logic
-// that does not exist yet --
-//   - ShelleyUtxoByAddressQuery: same underlying utxo table and
-//     AddedSlot/DeletedSlot columns as ShelleyUtxoByTxinQuery, so the same
-//     historical predicate could extend here, filtered instead of
-//     cursor-paginated -- no current caller needs it (only GetUTxOByTxIn
-//     and the whole-set query are used for cross-node comparison), so not
-//     built.
-//   - ShelleyFilteredDelegationAndRewardAccountsQuery,
-//     ShelleyStakeDelegDepositsQuery, ShelleyDRepStateQuery,
-//     ShelleyFilteredVoteDelegateesQuery, ShelleyStakePoolsQuery,
-//     ShelleyGetProposalsQuery: each reads live per-credential/per-pool/
-//     per-proposal state with no historical-by-point record; would need new
-//     historical tracking analogous to GetUtxoRefsAsOfAfter's added/deleted
-//     slot columns, not attempted.
-//   - ShelleyAccountStateQuery: chain-wide treasury/reserves totals, same
-//     class of gap as protocol parameters (no historical-by-epoch record).
-//   - ShelleyStakeSnapshotsQuery: its per-epoch mark/set/go reads are
-//     structurally identical to PoolStakeDistribution's and could resolve
-//     at the same way, but its zero-pool-omission rule
-//     (omitZeroPools, protocol-version-gated) reads
-//     GetProtocolVersion(consensus.currentPParams) -- the *live* protocol
-//     version. Pinning the snapshot epoch without also resolving the
-//     protocol version that was active at that epoch would answer with
-//     the right stake but a version-dependent inclusion rule from the
-//     wrong point, so this has the same missing-historical-storage
-//     dependency as ShelleyCurrentProtocolParamsQuery and was left alone
-//     for the same reason.
-//   - ShelleyDebugChainDepStateQuery: consensus nonce/opcert state.
-//     computeCandidateNonceAsOf already takes an arbitrary end-slot
-//     internally (a possible future entry point), but OpCertCounters
-//     reads live per-pool operational-certificate counters with no
-//     historical tracking, so the reply as a whole cannot be pinned
-//     without that piece too.
+// Not point-aware, real gap: ShelleyStakePoolParamsQuery reads live pool
+// registration rows, which carry no per-point history.
+//
+// Not answered, so the call fails with "unsupported query type":
+// ShelleyPoolStateQuery, ShelleyPoolDistrQuery and
+// ShelleyNonMyopicMemberRewardsQuery, whose request filters the pinned
+// gouroboros version cannot decode (the request is rejected before it reaches
+// this switch); ShelleyRewardInfoPoolsQuery, ShelleyRewardProvenanceQuery,
+// ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which need
+// reward-calculation and full epoch state that is not tracked.
 //
 // Not applicable: ShelleyCborQuery (a combinator, not a leaf query --
 // forwards at to whatever it wraps).
-func (ls *LedgerState) queryShelleyLeaf(
-	query any,
+func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	at QueryPoint,
 	txn *database.Txn,
 	protocolVersion uint16,
 ) (any, error) {
 	switch q := query.(type) {
 	case *olocalstatequery.ShelleyCborQuery:
-		return ls.queryShelleyCbor(q, at, txn, protocolVersion)
+		return ls.queryShelleyCbor(ctx, q, at, txn, protocolVersion)
 	case *olocalstatequery.ShelleyEpochNoQuery:
-		return ls.queryShelleyEpochNo(at, txn)
+		return ls.queryShelleyEpochNo(ctx, at, txn)
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
-		return ls.queryShelleyCurrentProtocolParams(at, txn)
+		return ls.queryShelleyCurrentProtocolParams(ctx, at, txn)
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
-		return ls.queryShelleyGenesisConfig(protocolVersion)
+		return ls.queryShelleyGenesisConfig(ctx, protocolVersion)
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:
-		return ls.queryShelleyUtxoByAddress(q.Addrs)
+		return ls.queryShelleyUtxoByAddress(ctx, q.Addrs, at, txn)
 	case *olocalstatequery.ShelleyUtxoByTxinQuery:
-		return ls.queryShelleyUtxoByTxIn(q.TxIns, at, txn)
+		return ls.queryShelleyUtxoByTxIn(ctx, q.TxIns, at, txn)
 	case *olocalstatequery.ShelleyFilteredDelegationAndRewardAccountsQuery:
 		return ls.queryShelleyFilteredDelegationAndRewardAccounts(
+			ctx,
 			q.Creds.Items(),
+			at,
+			txn,
 		)
 	case *olocalstatequery.ShelleyStakeDelegDepositsQuery:
-		return ls.queryShelleyStakeDelegDeposits(q.Creds.Items())
+		return ls.queryShelleyStakeDelegDeposits(ctx, q.Creds.Items(), at, txn)
 	case *olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery:
-		return ls.queryLedgerPeerSnapshot(q.PeerKind)
+		return ls.queryLedgerPeerSnapshot(ctx, q.PeerKind, txn)
 	case *olocalstatequery.ShelleyStakePoolsQuery:
-		return ls.queryShelleyStakePools()
+		return ls.queryShelleyStakePools(ctx, at, txn)
 	case *olocalstatequery.ShelleyDRepStateQuery:
-		return ls.queryShelleyDRepState(q.Credentials.Items())
+		return ls.queryShelleyDRepState(ctx, q.Credentials.Items(), at, txn)
 	case *olocalstatequery.ShelleyAccountStateQuery:
-		return ls.queryShelleyAccountState()
+		return ls.queryShelleyAccountState(ctx, at, txn)
 	case *olocalstatequery.ShelleyStakeSnapshotsQuery:
-		return ls.queryShelleyStakeSnapshots(q)
+		return ls.queryShelleyStakeSnapshots(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyFilteredVoteDelegateesQuery:
-		return ls.queryShelleyFilteredVoteDelegatees(q.Credentials.Items())
+		return ls.queryShelleyFilteredVoteDelegatees(
+			ctx,
+			q.Credentials.Items(),
+			at,
+			txn,
+		)
 	case *olocalstatequery.ShelleyGetProposalsQuery:
-		return ls.queryShelleyGetProposals(q.ActionIds.Items())
+		return ls.queryShelleyGetProposals(ctx, q.ActionIds.Items(), at, txn)
 	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
-		return ls.queryShelleyDebugChainDepState()
+		return ls.queryShelleyDebugChainDepState(ctx, at, txn)
 	case *olocalstatequery.ShelleyPoolDistr2Query:
-		return ls.queryShelleyPoolDistr2(q, at, txn)
+		return ls.queryShelleyPoolDistr2(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyStakeDistributionQuery:
-		return ls.queryShelleyStakeDistribution(at, txn)
+		return ls.queryShelleyStakeDistribution(ctx, at, txn)
 	case *olocalstatequery.ShelleyUtxoWholeQuery:
-		return ls.queryShelleyUtxoWhole(at, txn)
-	// TODO (#394)
+		return ls.queryShelleyUtxoWhole(ctx, at, txn)
+	case *olocalstatequery.ShelleyLedgerTipQuery:
+		return ls.queryShelleyLedgerTip(at)
+	case *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery:
+		return ls.queryShelleyProposedProtocolParamsUpdates(ctx, q, at, txn)
+	case *olocalstatequery.ShelleyStakePoolParamsQuery:
+		return ls.queryShelleyStakePoolParams(ctx, q.PoolIds.Items())
+	// TODO: implement the remaining Shelley ledger queries below.
 	/*
-		case *olocalstatequery.ShelleyLedgerTipQuery:
 		case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
-		case *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery:
 		case *olocalstatequery.ShelleyDebugEpochStateQuery:
 		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
-		case *olocalstatequery.ShelleyStakePoolParamsQuery:
 		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
 		case *olocalstatequery.ShelleyPoolStateQuery:
 		case *olocalstatequery.ShelleyPoolDistrQuery:
@@ -890,18 +1388,45 @@ func (ls *LedgerState) queryShelleyLeaf(
 	}
 }
 
+// queryShelleyProposedProtocolParamsUpdates answers GetProposedPParamsUpdates
+// with an empty map when the acquired point is in Conway or later: Conway
+// replaced update proposals with governance actions, so the ledger holds none
+// to report. Earlier eras do carry proposals, which this query does not read,
+// so a point in one of them is refused.
+func (ls *LedgerState) queryShelleyProposedProtocolParamsUpdates(
+	ctx context.Context,
+	q *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery,
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	eraID, err := ls.queryHardFork(
+		ctx,
+		&olocalstatequery.HardForkQuery{
+			Query: &olocalstatequery.HardForkCurrentEraQuery{},
+		},
+		at,
+		txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if id, ok := eraID.(uint); !ok || id < eras.ConwayEraDesc.Id {
+		return nil, fmt.Errorf("unsupported query type: %T", q)
+	}
+	return []any{map[any]any{}}, nil
+}
+
 // queryShelleyCbor answers the GetCBOR query combinator. It runs the wrapped
 // inner query and returns its result re-encoded as raw serialised CBOR
 // (CBOR-in-CBOR, tag 24), matching cardano-node. cardano-cli wraps several
 // queries this way (e.g. `query stake-snapshot`), so the whole class of
-// GetCBOR-wrapped queries flows through here. See issue #2917.
-func (ls *LedgerState) queryShelleyCbor(
-	q *olocalstatequery.ShelleyCborQuery,
+// GetCBOR-wrapped queries flows through here.
+func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery.ShelleyCborQuery,
 	at QueryPoint,
 	txn *database.Txn,
 	protocolVersion uint16,
 ) (any, error) {
-	inner, err := ls.queryShelleyLeaf(q.Query, at, txn, protocolVersion)
+	inner, err := ls.queryShelleyLeaf(ctx, q.Query, at, txn, protocolVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -969,29 +1494,67 @@ func (ls *LedgerState) queryShelleyCbor(
 // type "mark" keyed by its epoch, so set/go for the current epoch are read
 // from the mark snapshots at epoch-1 and epoch-2.
 func (ls *LedgerState) queryShelleyStakeSnapshots(
+	ctx context.Context,
 	q *olocalstatequery.ShelleyStakeSnapshotsQuery,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	pools, all := q.PoolFilter()
 	consensus := ls.loadConsensusSnapshot()
 	epoch := consensus.currentEpoch.EpochId
+	var pinnedPParams lcommon.ProtocolParameters
+	var row *models.Epoch
+	if at.pinned() {
+		var release func()
+		txn, release = ls.readTxn(ctx, txn)
+		defer release()
+		var err error
+		epoch, pinnedPParams, err = ls.stakeSnapshotsAsOf(consensus, at, txn)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Taken from the caller's own transaction, before readTxn
+		// substitutes one: a QueryView reports the epoch it froze, while
+		// the direct path keeps the live epoch.
+		var err error
+		row, err = ls.snapshotEpoch(txn, QueryPoint{})
+		if err != nil {
+			return nil, err
+		}
+		if row != nil {
+			epoch = row.EpochId
+		}
+	}
 	setEpoch, hasSet := priorEpoch(epoch, 1)
 	goEpoch, hasGo := priorEpoch(epoch, 2)
 
 	// From protocol version 11, GetStakeSnapshots omits any pool whose
 	// mark/set/go stake are all zero, regardless of the reason (unregistered,
 	// no delegations, or zero stake) and regardless of whether the pool was
-	// explicitly requested (cardano-ledger issue 5581). Below PV11 an
+	// explicitly requested (cardano-ledger behavior). Below PV11 an
 	// explicitly requested pool is always returned, even with zero stake.
+	//
+	// The protocol version is the frozen epoch's, so a QueryView that spans
+	// a PV11 boundary keeps one pool filter for the whole session.
 	omitZeroPools := false
-	if pv, err := GetProtocolVersion(consensus.currentPParams); err == nil {
+	pparams := pinnedPParams
+	if !at.pinned() {
+		var err error
+		pparams, err = ls.snapshotProtocolParameters(consensus, row, txn)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if pv, err := GetProtocolVersion(pparams); err == nil {
 		omitZeroPools = pv.Major >= 11
 	}
 
 	// Read the mark/set/go snapshots under a single read transaction so all
 	// three epochs come from one consistent view even if an epoch boundary
 	// fires mid-query.
-	txn := ls.db.Transaction(false)
-	defer txn.Release()
+	txn, release := ls.readTxn(ctx, txn)
+	defer release()
 	metaTxn := txn.Metadata()
 
 	var poolSnapshots map[ledger.Blake2b224]*olocalstatequery.PoolStakeSnapshot
@@ -1018,7 +1581,10 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 		)
 		for _, byPool := range []map[string]uint64{mark, set, snapshotGo} {
 			for hash := range byPool {
-				key := ledger.NewBlake2b224([]byte(hash))
+				key, err := lcommon.NewBlake2b224Checked([]byte(hash))
+				if err != nil {
+					return nil, fmt.Errorf("pool stake snapshot: %w", err)
+				}
 				if _, ok := poolSnapshots[key]; ok {
 					continue
 				}
@@ -1094,6 +1660,68 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 		TotalStakeGo:   goTotal,
 	}
 	return []any{result}, nil
+}
+
+// stakeSnapshotsAsOf resolves the epoch a pinned GetStakeSnapshots answers
+// for and the protocol parameters in force in it, which decide the PV11
+// zero-pool rule. The query reads the mark rows of that epoch and the two
+// before it, so the oldest of the three must still be inside the pool-snapshot
+// retention window; checkAsOfEpochRecency only guarantees the one before.
+func (ls *LedgerState) stakeSnapshotsAsOf(
+	consensus *consensusSnapshot,
+	at QueryPoint,
+	txn *database.Txn,
+) (uint64, lcommon.ProtocolParameters, error) {
+	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
+	if err != nil {
+		return 0, nil, err
+	}
+	if !found {
+		return 0, nil, errEpochNotResolved(at)
+	}
+	liveEpoch, _, err := ls.resolveAsOfEpoch(txn, QueryPoint{})
+	if err != nil {
+		return 0, nil, err
+	}
+	apiMode := ls.db.StorageMode() == types.StorageModeAPI
+	if err := checkAsOfEpochRecency(epoch, liveEpoch, apiMode); err != nil {
+		return 0, nil, err
+	}
+	oldest := epoch
+	if goEpoch, ok := priorEpoch(epoch, 2); ok {
+		oldest = goEpoch
+	} else if setEpoch, ok := priorEpoch(epoch, 1); ok {
+		oldest = setEpoch
+	}
+	if !apiMode && liveEpoch >= stakeSnapshotRetentionEpochs &&
+		oldest < liveEpoch-stakeSnapshotRetentionEpochs {
+		return 0, nil, fmt.Errorf(
+			"%w: GetStakeSnapshots as of epoch %d needs the snapshot of "+
+				"epoch %d, below the retained pool-snapshot window "+
+				"(rows below epoch %d have been pruned)",
+			ErrHistoricalStateUnavailable,
+			epoch,
+			oldest,
+			liveEpoch-stakeSnapshotRetentionEpochs,
+		)
+	}
+	if epoch == consensus.currentEpoch.EpochId {
+		return epoch, consensus.currentPParams, nil
+	}
+	result, err := ls.historicalProtocolParameters(consensus, epoch, at, txn)
+	if err != nil {
+		return 0, nil, err
+	}
+	if values, ok := result.([]any); ok && len(values) == 1 {
+		if pparams, ok := values[0].(lcommon.ProtocolParameters); ok {
+			return epoch, pparams, nil
+		}
+	}
+	return 0, nil, fmt.Errorf(
+		"unexpected protocol parameters result %T for epoch %d",
+		result,
+		epoch,
+	)
 }
 
 // snapshotTypeMark is the physical snapshot type dingo persists at each
@@ -1182,8 +1810,7 @@ func (ls *LedgerState) markStakeForPools(
 // cardano-node 11.0.1 on a fresh devnet, where every pool's set/go stake is 0
 // yet the set/go totals are reported as 1). Emitting a literal 0 makes
 // cardano-cli fail with "Encountered zero while trying to construct a NonZero
-// value". Per-pool stakes are plain Coin and are left un-clamped. See issue
-// #2917.
+// value". Per-pool stakes are plain Coin and are left un-clamped.
 func (ls *LedgerState) totalActiveStake(
 	epoch uint64,
 	exists bool,
@@ -1213,7 +1840,7 @@ func (ls *LedgerState) totalActiveStake(
 // really is the sum of delegated stake -- confirmed against the real
 // cardano-ledger source (calculatePoolDistr/SnapShot.ssTotalActiveStake,
 // IntersectMBO/cardano-ledger) -- and Dingo already gets that right; an
-// earlier attempt at blinklabs-io/dingo#3824 wrongly "fixed" GetPoolDistr2's
+// earlier attempt wrongly "fixed" GetPoolDistr2's
 // total to use this instead, which was reverted.
 //
 // GetStakeDistribution is a different, older query, and a real cardano-node
@@ -1234,13 +1861,21 @@ func (ls *LedgerState) totalActiveStake(
 //
 // asOfSlot, when non-nil, reads reserves as they stood at or before that
 // slot (GetNetworkStateAsOfSlot) instead of the always-latest row
-// (GetNetworkState) -- what a historical GetStakeDistribution answer needs
-// (blinklabs-io/dingo#382), since network_state already carries one row per
-// slot its reserves/treasury actually changed, not just the current value.
-// nil (the live case) is not the same as a zero slot: a real historical
-// caller who happens to name slot 0 still passes a non-nil pointer to it,
-// exactly the same "whole QueryPoint, not a bare uint64" caution
-// resolveAsOfEpoch's doc comment explains for other pinned-point callers.
+// (GetNetworkState) -- what a historical GetStakeDistribution answer needs,
+// since network_state already carries one row per slot its reserves/treasury
+// actually changed, not just the current value. nil (the live case) is not the
+// same as a zero slot: a real historical caller who happens to name slot 0
+// still passes a non-nil pointer to it, exactly the same "whole QueryPoint, not
+// a bare uint64" caution resolveAsOfEpoch's doc comment explains for other
+// pinned-point callers.
+//
+// circulatingSupplyGenesis (below) decides whether this function reads
+// network_state at all -- shared with
+// verifyStakeDistributionRetentionOnly's own network_state floor
+// (ledger/pool_stake_distribution.go) so the two conditions cannot drift
+// apart: an unconditional floor there would reject a point every one of
+// this function's real callers would have answered just fine via the
+// totalActiveStake fallback below.
 func (ls *LedgerState) totalCirculatingSupply(
 	epoch uint64,
 	asOfSlot *uint64,
@@ -1250,11 +1885,8 @@ func (ls *LedgerState) totalCirculatingSupply(
 	fallback := func() (uint64, error) {
 		return ls.totalActiveStake(epoch, exists, txn)
 	}
-	if ls.config.CardanoNodeConfig == nil {
-		return fallback()
-	}
-	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if genesis == nil || genesis.MaxLovelaceSupply == 0 {
+	genesis := ls.circulatingSupplyGenesis()
+	if genesis == nil {
 		return fallback()
 	}
 	var state *models.NetworkState
@@ -1298,9 +1930,32 @@ func (ls *LedgerState) totalCirculatingSupply(
 	return circulation, nil
 }
 
-func (ls *LedgerState) queryShelleyGenesisConfig(
-	protocolVersion uint16,
+// circulatingSupplyGenesis returns the genesis config totalCirculatingSupply
+// needs to read network_state at all, or nil when it takes its
+// totalActiveStake fallback instead -- no CardanoNodeConfig, no
+// ShelleyGenesis, or a genesis with no MaxLovelaceSupply, matching only a
+// hand-built LedgerState a test constructs rather than one backing a real
+// node, which always has both. Shared with
+// verifyStakeDistributionRetentionOnly (ledger/pool_stake_distribution.go)
+// so its own network_state floor cannot silently drift stricter than what
+// totalCirculatingSupply itself actually requires.
+func (ls *LedgerState) circulatingSupplyGenesis() *gshelley.ShelleyGenesis {
+	if ls.config.CardanoNodeConfig == nil {
+		return nil
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.MaxLovelaceSupply == 0 {
+		return nil
+	}
+	return genesis
+}
+
+func (ls *LedgerState) queryShelleyGenesisConfig(ctx context.Context, protocolVersion uint16,
 ) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if protocolVersion == 0 ||
 		protocolVersion < 21+protocol.ProtocolVersionNtCOffset {
@@ -1389,27 +2044,12 @@ func genesisConfigResult(
 			MinPoolCost: int(pp.MinPoolCost),
 		},
 	}
-	initialFunds, err := cbor.Encode([]any{})
-	if err != nil {
-		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
-			"encode compact genesis initial funds: %w", err,
-		)
-	}
-	staking, err := cbor.Encode([]any{[]any{}, map[any]any{}})
-	if err != nil {
-		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
-			"encode compact genesis staking: %w", err,
-		)
-	}
-	// The current ledger compactGenesis erases these two startup-only fields.
-	// Keep the raw values available only through the legacy path.
-	result.InitialFunds = initialFunds
-	result.Staking = staking
-	if genesis.ExtraConfig == nil {
-		result.ExtraConfig, err = cbor.Encode([]any{})
-	} else {
-		result.ExtraConfig, err = cbor.Encode([]any{genesis.ExtraConfig})
-	}
+	// The current ledger compactGenesis erases initial funds and staking to
+	// empty maps: funds is a map, and staking a record of a pools map and a
+	// stake map. The raw values stay available only through the legacy path.
+	result.InitialFunds = cbor.RawMessage{0xa0}
+	result.Staking = cbor.RawMessage{0x82, 0xa0, 0xa0}
+	result.ExtraConfig, err = shelleyExtraConfigCBOR(genesis, networkID)
 	if err != nil {
 		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
 			"encode genesis extra config: %w", err,
@@ -1423,12 +2063,39 @@ func genesisConfigResult(
 // query unconditionally while balancing a transaction (e.g. `transaction
 // build`), so leaving it unhandled tears down the local-state-query
 // connection.
-func (ls *LedgerState) queryShelleyStakePools() (any, error) {
-	keyHashes, err := ls.db.GetActivePoolKeyHashes(nil)
+//
+// A pinned at answers with the pools active at at.Slot, through the same
+// GetActivePoolKeyHashesAtSlot the unpinned path runs at the tip. Pool
+// registration and retirement rows are removed only by rollback, so no
+// retention floor applies.
+func (ls *LedgerState) queryShelleyStakePools(
+	ctx context.Context,
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	if !at.pinned() {
+		keyHashes, err := ls.db.GetActivePoolKeyHashes(ctx, txn)
+		if err != nil {
+			return nil, err
+		}
+		return stakePoolsResult(keyHashes)
+	}
+	txn, release := ls.readTxn(ctx, txn)
+	defer release()
+	keyHashes, err := ls.db.Metadata().
+		GetActivePoolKeyHashesAtSlot(at.Slot, txn.Metadata())
+	if errors.Is(err, types.ErrNoEpochData) {
+		return nil, fmt.Errorf(
+			"%w: stake pools as of slot %d: %w",
+			ErrHistoricalStateUnavailable,
+			at.Slot,
+			err,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
-	return stakePoolsResult(keyHashes), nil
+	return stakePoolsResult(keyHashes)
 }
 
 // queryShelleyDRepState answers GetDRepState: the registration state of the
@@ -1436,15 +2103,26 @@ func (ls *LedgerState) queryShelleyStakePools() (any, error) {
 // the Haskell ledger's "empty set means all" semantics). cardano-cli issues
 // this while balancing a transaction, so leaving it unhandled tears down the
 // connection. The result is a bare CBOR map of stake credential -> {expiry
-// epoch, optional anchor, deposit}.
+// epoch, optional anchor, deposit}. A malformed stored credential fails the
+// whole query: returning a map that silently omits one active DRep would
+// claim to be the complete state for this point.
+//
+// A pinned at answers as the DReps stood at at.Slot; see
+// queryShelleyDRepStateAt.
 func (ls *LedgerState) queryShelleyDRepState(
+	ctx context.Context,
 	creds []lcommon.Credential,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	if err := checkLocalStateQueryItemLimit(
 		"GetDRepState",
 		len(creds),
 	); err != nil {
 		return nil, err
+	}
+	if at.pinned() {
+		return ls.queryShelleyDRepStateAt(ctx, creds, at.Slot, txn)
 	}
 	result := make(olocalstatequery.DRepStateResult)
 	var dreps []*models.Drep
@@ -1454,15 +2132,15 @@ func (ls *LedgerState) queryShelleyDRepState(
 	// below, bounded by the query item limit checked above.
 	var allDeposits map[string]uint64
 	if len(creds) == 0 {
-		all, err := ls.db.GetActiveDreps(nil)
+		all, err := ls.db.GetActiveDreps(ctx, txn)
 		if err != nil {
 			return nil, err
 		}
-		allDelegators, err = ls.allDRepDelegators()
+		allDelegators, err = ls.allDRepDelegators(ctx, txn)
 		if err != nil {
 			return nil, err
 		}
-		allDeposits, err = ls.db.GetDrepLastRegistrationDeposits(nil)
+		allDeposits, err = ls.db.GetDrepLastRegistrationDeposits(ctx, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -1474,10 +2152,11 @@ func (ls *LedgerState) queryShelleyDRepState(
 				return nil, err
 			}
 			drep, err := ls.db.GetDrepByCredential(
+				ctx,
 				credentialTag,
 				cred.Credential[:],
 				false,
-				nil,
+				txn,
 			)
 			if err != nil {
 				if errors.Is(err, models.ErrDrepNotFound) {
@@ -1501,7 +2180,7 @@ func (ls *LedgerState) queryShelleyDRepState(
 		// DRepState.drepDeposit and `query drep-state` serialises that
 		// stored field; nothing on the reference query path consults
 		// ppDRepDeposit.
-		deposit, err := ls.drepRecordedDeposit(drep, allDeposits)
+		deposit, err := ls.drepRecordedDeposit(ctx, drep, allDeposits, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -1513,18 +2192,26 @@ func (ls *LedgerState) queryShelleyDRepState(
 			}.MapKey()]
 		} else {
 			var err error
-			delegators, err = ls.drepDelegators(drep)
+			delegators, err = ls.drepDelegators(ctx, drep, txn)
 			if err != nil {
 				return nil, err
 			}
 		}
+		credential, err := lcommon.NewBlake2b224Checked(drep.Credential)
+		if err != nil {
+			return nil, fmt.Errorf("drep state: %w", err)
+		}
 		key := olocalstatequery.StakeCredential{
 			Tag:   uint64(drep.CredentialTag),
-			Bytes: ledger.NewBlake2b224(drep.Credential),
+			Bytes: credential,
+		}
+		anchor, err := drepAnchor(drep)
+		if err != nil {
+			return nil, err
 		}
 		result[key] = olocalstatequery.DRepStateEntry{
 			Expiry:     drep.ExpiryEpoch,
-			Anchor:     drepAnchor(drep),
+			Anchor:     anchor,
 			Deposit:    deposit,
 			Delegators: delegators,
 		}
@@ -1532,6 +2219,98 @@ func (ls *LedgerState) queryShelleyDRepState(
 	// The result map is wrapped in the single-element result array cardano-cli
 	// expects (verified against cardano-node: an empty result is the CBOR
 	// `81 a0`, i.e. [ {} ]).
+	return []any{result}, nil
+}
+
+// queryShelleyDRepStateAt is queryShelleyDRepState at a pinned slot: the
+// DReps registered then, with the anchor, expiry and registration deposit they
+// had and the stake credentials delegating to them. Certificates, the
+// drep_expiry_history journal and the account history it reads are removed
+// only by rollback, so no retention floor applies.
+func (ls *LedgerState) queryShelleyDRepStateAt(
+	ctx context.Context,
+	creds []lcommon.Credential,
+	slot uint64,
+	txn *database.Txn,
+) (any, error) {
+	refs := make([]models.StakeCredentialRef, 0, len(creds))
+	for _, cred := range creds {
+		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, models.StakeCredentialRef{
+			Tag: credentialTag,
+			Key: cred.Credential[:],
+		})
+	}
+	txn, release := ls.readTxn(ctx, txn)
+	defer release()
+	dreps, err := ls.db.GetDrepsAtSlot(ctx, refs, slot, txn)
+	if err != nil {
+		return nil, err
+	}
+	result := make(olocalstatequery.DRepStateResult)
+	// An empty filter would mean every DRep, not none.
+	if len(refs) > 0 && len(dreps) == 0 {
+		return []any{result}, nil
+	}
+	var filter []models.StakeCredentialRef
+	if len(refs) > 0 {
+		filter = make([]models.StakeCredentialRef, 0, len(dreps))
+		for _, drep := range dreps {
+			filter = append(filter, models.StakeCredentialRef{
+				Tag: drep.CredentialTag,
+				Key: drep.Credential,
+			})
+		}
+	}
+	delegatorRefs, err := ls.db.GetDRepDelegatorsAtSlot(ctx, filter, slot, txn)
+	if err != nil {
+		return nil, err
+	}
+	// An absent deposit is reported as 0, as drepRecordedDeposit does.
+	deposits, err := ls.db.GetDrepRegistrationDepositsAtSlot(ctx, filter, slot, txn)
+	if err != nil {
+		return nil, err
+	}
+	for _, drep := range dreps {
+		deposit := deposits[models.DrepDepositKey(
+			drep.CredentialTag,
+			drep.Credential,
+		)]
+		var delegators []olocalstatequery.StakeCredential
+		for _, ref := range delegatorRefs[models.StakeCredentialRef{
+			Tag: drep.CredentialTag,
+			Key: drep.Credential,
+		}.MapKey()] {
+			credential, err := lcommon.NewBlake2b224Checked(ref.Key)
+			if err != nil {
+				return nil, fmt.Errorf("drep delegator: %w", err)
+			}
+			delegators = append(delegators, olocalstatequery.StakeCredential{
+				Tag:   uint64(ref.Tag),
+				Bytes: credential,
+			})
+		}
+		credential, err := lcommon.NewBlake2b224Checked(drep.Credential)
+		if err != nil {
+			return nil, fmt.Errorf("drep state: %w", err)
+		}
+		anchor, err := drepAnchor(drep)
+		if err != nil {
+			return nil, err
+		}
+		result[olocalstatequery.StakeCredential{
+			Tag:   uint64(drep.CredentialTag),
+			Bytes: credential,
+		}] = olocalstatequery.DRepStateEntry{
+			Expiry:     drep.ExpiryEpoch,
+			Anchor:     anchor,
+			Deposit:    deposit,
+			Delegators: delegators,
+		}
+	}
 	return []any{result}, nil
 }
 
@@ -1550,9 +2329,9 @@ func (ls *LedgerState) queryShelleyDRepState(
 // registered DRep without one is a state the reference cannot hold;
 // validation reads the same row through LedgerView.DRepRegistration, which
 // reports the same recorded amount.
-func (ls *LedgerState) drepRecordedDeposit(
-	drep *models.Drep,
+func (ls *LedgerState) drepRecordedDeposit(ctx context.Context, drep *models.Drep,
 	deposits map[string]uint64,
+	txn *database.Txn,
 ) (uint64, error) {
 	if deposits != nil {
 		return deposits[models.DrepDepositKey(
@@ -1561,9 +2340,10 @@ func (ls *LedgerState) drepRecordedDeposit(
 		)], nil
 	}
 	recorded, err := ls.db.GetDrepLastRegistrationDeposit(
+		ctx,
 		drep.CredentialTag,
 		drep.Credential,
-		nil,
+		txn,
 	)
 	if err != nil {
 		return 0, err
@@ -1585,11 +2365,13 @@ func (ls *LedgerState) drepRecordedDeposit(
 // count on every empty GetDRepState request.
 const allDRepDelegatorsBatchSize = 10_000
 
-func (ls *LedgerState) allDRepDelegators() (
+func (ls *LedgerState) allDRepDelegators(ctx context.Context, txn *database.Txn) (
 	map[string][]olocalstatequery.StakeCredential,
 	error,
 ) {
-	refs, err := ls.db.Metadata().GetActiveAccountCredentials(nil)
+	txn, release := ls.readTxn(ctx, txn)
+	defer release()
+	refs, err := ls.db.Metadata().GetActiveAccountCredentials(txn.Metadata())
 	if err != nil {
 		return nil, err
 	}
@@ -1597,7 +2379,7 @@ func (ls *LedgerState) allDRepDelegators() (
 	for start := 0; start < len(refs); start += allDRepDelegatorsBatchSize {
 		end := min(start+allDRepDelegatorsBatchSize, len(refs))
 		batch := refs[start:end]
-		accounts, err := ls.db.GetAccountsByCredential(batch, false, nil)
+		accounts, err := ls.db.GetAccountsByCredential(ctx, batch, false, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -1611,11 +2393,15 @@ func (ls *LedgerState) allDRepDelegators() (
 				Tag: uint8(account.DrepType),
 				Key: account.Drep,
 			}.MapKey()
+			credential, err := lcommon.NewBlake2b224Checked(ref.Key)
+			if err != nil {
+				return nil, fmt.Errorf("drep delegator: %w", err)
+			}
 			ret[drepKey] = append(
 				ret[drepKey],
 				olocalstatequery.StakeCredential{
 					Tag:   uint64(ref.Tag),
-					Bytes: ledger.NewBlake2b224(ref.Key),
+					Bytes: credential,
 				},
 			)
 		}
@@ -1643,8 +2429,35 @@ func (ls *LedgerState) allDRepDelegators() (
 // in the single-element result array, so the wire shape is
 // [ [treasury, reserves] ] (both are signed; a misconfigured network can drive
 // reserves negative).
-func (ls *LedgerState) queryShelleyAccountState() (any, error) {
-	state, err := ls.db.Metadata().GetNetworkState(nil)
+//
+// A pinned at reads the network_state row in effect at at.Slot. Those rows
+// are removed only by rollback, never by retention cleanup, so any point with
+// a row at or before it is answerable. A pinned point older than every row is
+// rejected rather than answered with the live path's zeros.
+func (ls *LedgerState) queryShelleyAccountState(
+	ctx context.Context,
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	txn, release := ls.readTxn(ctx, txn)
+	defer release()
+	var state *models.NetworkState
+	var err error
+	if at.pinned() {
+		state, err = ls.db.Metadata().
+			GetNetworkStateAsOfSlot(at.Slot, txn.Metadata())
+		if err == nil && state == nil {
+			return nil, fmt.Errorf(
+				"%w: treasury and reserves as of slot %d cannot be "+
+					"reconstructed -- no network_state row exists at or "+
+					"before that slot",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+			)
+		}
+	} else {
+		state, err = ls.db.Metadata().GetNetworkState(txn.Metadata())
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1687,12 +2500,15 @@ func (ls *LedgerState) queryShelleyAccountState() (any, error) {
 // order so the resulting CBOR set (tag 258) is canonical — cardano clients
 // reject an unsorted set with "Canonicity violation".
 func (ls *LedgerState) drepDelegators(
+	ctx context.Context,
 	drep *models.Drep,
+	txn *database.Txn,
 ) ([]olocalstatequery.StakeCredential, error) {
 	refs, err := ls.db.GetDRepDelegators(
+		ctx,
 		drep.CredentialTag,
 		drep.Credential,
-		nil,
+		txn,
 	)
 	if err != nil {
 		return nil, err
@@ -1702,9 +2518,13 @@ func (ls *LedgerState) drepDelegators(
 	}
 	out := make([]olocalstatequery.StakeCredential, len(refs))
 	for i, ref := range refs {
+		credential, err := lcommon.NewBlake2b224Checked(ref.Key)
+		if err != nil {
+			return nil, fmt.Errorf("drep delegator: %w", err)
+		}
 		out[i] = olocalstatequery.StakeCredential{
 			Tag:   uint64(ref.Tag),
-			Bytes: ledger.NewBlake2b224(ref.Key),
+			Bytes: credential,
 		}
 	}
 	return out, nil
@@ -1712,13 +2532,19 @@ func (ls *LedgerState) drepDelegators(
 
 // drepAnchor maps a stored DRep's anchor metadata to the wire type, or nil
 // when the DRep has no anchor.
-func drepAnchor(drep *models.Drep) *lcommon.GovAnchor {
+func drepAnchor(drep *models.Drep) (*lcommon.GovAnchor, error) {
 	if drep.AnchorURL == "" && len(drep.AnchorHash) == 0 {
-		return nil
+		return nil, nil
 	}
-	anchor := &lcommon.GovAnchor{Url: drep.AnchorURL}
-	copy(anchor.DataHash[:], drep.AnchorHash)
-	return anchor
+	dataHash, err := lcommon.NewBlake2b256Checked(drep.AnchorHash)
+	if err != nil {
+		return nil, fmt.Errorf("drep anchor: %w", err)
+	}
+	anchor := &lcommon.GovAnchor{
+		Url:      drep.AnchorURL,
+		DataHash: dataHash,
+	}
+	return anchor, nil
 }
 
 // stakePoolsResult builds the GetStakePools wire result from a list of pool
@@ -1727,29 +2553,53 @@ func drepAnchor(drep *models.Drep) *lcommon.GovAnchor {
 // strict about both: a plain (untagged) array fails to decode with "expected
 // tag", and an unsorted set fails with "Canonicity violation while decoding
 // Set". The hashes are therefore emitted in ascending byte order.
-func stakePoolsResult(keyHashes [][]byte) []any {
+func stakePoolsResult(keyHashes [][]byte) ([]any, error) {
 	slices.SortFunc(keyHashes, bytes.Compare)
 	poolIds := make(cbor.Set, 0, len(keyHashes))
 	for _, kh := range keyHashes {
-		var id ledger.PoolId
-		copy(id[:], kh)
-		poolIds = append(poolIds, id)
+		hash, err := lcommon.NewBlake2b224Checked(kh)
+		if err != nil {
+			return nil, fmt.Errorf("stake pool id: %w", err)
+		}
+		poolIds = append(poolIds, ledger.PoolId(hash))
 	}
-	return []any{poolIds}
+	return []any{poolIds}, nil
 }
 
 func (ls *LedgerState) queryShelleyUtxoByAddress(
+	ctx context.Context,
 	addrs []ledger.Address,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	if len(addrs) == 0 {
 		return []any{ret}, nil
 	}
-	utxos, err := ls.db.UtxosByAddress(
-		addrs,
-		database.MaxUtxosByAddressResults,
-		nil,
-	)
+	var utxos []models.Utxo
+	var err error
+	if at.pinned() {
+		var release func()
+		txn, release = ls.readTxn(ctx, txn)
+		defer release()
+		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
+			return nil, err
+		}
+		utxos, err = ls.db.UtxosByAddressAsOf(
+			ctx,
+			addrs,
+			at.Slot,
+			database.MaxUtxosByAddressResults,
+			txn,
+		)
+	} else {
+		utxos, err = ls.db.UtxosByAddress(
+			ctx,
+			addrs,
+			database.MaxUtxosByAddressResults,
+			txn,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1758,8 +2608,12 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		if err != nil {
 			return nil, err
 		}
+		txId, err := lcommon.NewBlake2b256Checked(utxo.TxId)
+		if err != nil {
+			return nil, fmt.Errorf("utxo by address tx id: %w", err)
+		}
 		utxoId := olocalstatequery.UtxoId{
-			Hash: ledger.NewBlake2b256(utxo.TxId),
+			Hash: txId,
 			Idx:  int(utxo.OutputIdx),
 		}
 		ret[utxoId] = txOut
@@ -1783,8 +2637,15 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 // filtered out. The delegations map only contains accounts whose `Pool`
 // is currently set; an account that is registered but undelegated will
 // appear in the rewards map only.
+//
+// A pinned at answers as the accounts stood at at.Slot. The certificate
+// history, import baseline and reward journal it reads are removed only by
+// rollback, so no retention floor applies.
 func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
+	ctx context.Context,
 	creds []olocalstatequery.StakeCredential,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	if err := checkLocalStateQueryItemLimit(
 		"GetFilteredDelegationsAndRewardAccounts",
@@ -1815,25 +2676,52 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 		seen[key] = struct{}{}
 		stakeCreds = append(stakeCreds, ref)
 	}
-	accounts, err := ls.db.GetAccountsByCredential(stakeCreds, false, nil)
+	pending := make(map[string]uint64)
+	txn, release := ls.readTxn(ctx, txn)
+	defer release()
+	accounts, err := ls.accountsByCredentialAt(ctx, stakeCreds, at, txn)
 	if err != nil {
 		return nil, err
+	}
+	// The as-of reward balance already carries the pending credits visible
+	// at the slot.
+	if !at.pinned() {
+		for key, account := range accounts {
+			amount, err := ls.pendingRewardCredit(
+				txn, account.CredentialTag, account.StakingKey,
+			)
+			if err != nil {
+				return nil, err
+			}
+			pending[key] = amount
+		}
 	}
 	for _, cred := range creds {
 		credentialTag, err := models.CredentialTagFromUint64(cred.Tag)
 		if err != nil {
 			return nil, err
 		}
-		account, ok := accounts[models.StakeCredentialRef{
+		mapKey := models.StakeCredentialRef{
 			Tag: credentialTag,
 			Key: cred.Bytes[:],
-		}.MapKey()]
+		}.MapKey()
+		account, ok := accounts[mapKey]
 		if !ok {
 			continue
 		}
-		rewards[cred] = uint64(account.Reward)
+		balance, overflow := addRewardUint64(
+			uint64(account.Reward), pending[mapKey],
+		)
+		if overflow {
+			return nil, errors.New("reward account balance overflow")
+		}
+		rewards[cred] = balance
 		if len(account.Pool) > 0 {
-			delegations[cred] = ledger.NewBlake2b224(account.Pool)
+			poolId, err := lcommon.NewBlake2b224Checked(account.Pool)
+			if err != nil {
+				return nil, fmt.Errorf("delegation pool id: %w", err)
+			}
+			delegations[cred] = poolId
 		}
 	}
 	return []any{[]any{delegations, rewards}}, nil
@@ -1843,8 +2731,15 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 // registration deposit currently locked by each requested active stake
 // credential. The latest registration event carries the historical deposit
 // actually paid, which may differ from the current protocol parameter.
+//
+// A pinned at reads the state at at.Slot instead. Certificate rows and the
+// import baseline are removed only by rollback, so no retention floor
+// applies.
 func (ls *LedgerState) queryShelleyStakeDelegDeposits(
+	ctx context.Context,
 	creds []olocalstatequery.StakeCredential,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	if err := checkLocalStateQueryItemLimit(
 		"GetStakeDelegDeposits",
@@ -1858,18 +2753,17 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 		if err != nil {
 			return nil, err
 		}
-		history, err := ls.db.GetAccountRegistrationHistoryByCredential(
+		registered, deposit, err := ls.stakeRegistrationAsOf(
+			ctx,
 			credentialTag,
 			cred.Bytes[:],
-			1,
-			0,
-			"desc",
-			nil,
+			at,
+			txn,
 		)
 		if err != nil {
 			return nil, err
 		}
-		if len(history) == 0 || history[0].Action != "registered" {
+		if !registered {
 			continue
 		}
 		// StakeDelegDeposits has no representation for an unknown deposit,
@@ -1877,8 +2771,8 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 		// local-state-query wire behaviour. Value conservation reads the same
 		// row through LedgerView.StakeCredentialDeposit, where the nil is
 		// preserved and falls back to KeyDeposit.
-		if history[0].Deposit != nil {
-			ret[cred] = *history[0].Deposit
+		if deposit != nil {
+			ret[cred] = *deposit
 		} else {
 			ret[cred] = 0
 		}
@@ -1886,11 +2780,98 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 	return []any{ret}, nil
 }
 
+// stakeRegistrationAsOf reports whether a stake credential is registered,
+// and with what deposit, at the tip or at a pinned at. The newest
+// registration certificate decides, unless the credential's snapshot import
+// baseline is newer, or as new and the certificate is not a deregistration:
+// an imported credential has no certificate for the registration the
+// snapshot carried.
+func (ls *LedgerState) stakeRegistrationAsOf(
+	ctx context.Context,
+	credentialTag uint8,
+	stakingKey []byte,
+	at QueryPoint,
+	txn *database.Txn,
+) (bool, *uint64, error) {
+	var latest *models.AccountRegistrationHistoryRow
+	if at.pinned() {
+		row, err := ls.db.GetLatestAccountRegistrationAtOrBefore(
+			ctx,
+			credentialTag,
+			stakingKey,
+			at.Slot,
+			txn,
+		)
+		if err != nil {
+			return false, nil, err
+		}
+		latest = row
+	} else {
+		history, err := ls.db.GetAccountRegistrationHistoryByCredential(
+			ctx,
+			credentialTag,
+			stakingKey,
+			1,
+			0,
+			"desc",
+			txn,
+		)
+		if err != nil {
+			return false, nil, err
+		}
+		if len(history) > 0 {
+			latest = &history[0]
+		}
+	}
+	imported, err := ls.db.GetAccountImportRegistrationByCredential(
+		ctx,
+		credentialTag,
+		stakingKey,
+		txn,
+	)
+	if err != nil {
+		return false, nil, err
+	}
+	// A certificate in the baseline's own slot supersedes it only when it is
+	// a deregistration: DATABASE.md's account_import_baseline rule, which
+	// LedgerView.StakeCredentialDeposit reaches through the live account
+	// row's active flag instead.
+	if imported != nil &&
+		(!at.pinned() || imported.AddedSlot <= at.Slot) &&
+		(latest == nil || imported.AddedSlot > latest.AddedSlot ||
+			(imported.AddedSlot == latest.AddedSlot &&
+				latest.Action == "registered")) {
+		return true, imported.Deposit, nil
+	}
+	if latest == nil || latest.Action != "registered" {
+		return false, nil, nil
+	}
+	return true, latest.Deposit, nil
+}
+
+// accountsByCredentialAt returns the registered accounts among refs, live or
+// as they stood at a pinned at.
+func (ls *LedgerState) accountsByCredentialAt(
+	ctx context.Context,
+	refs []models.StakeCredentialRef,
+	at QueryPoint,
+	txn *database.Txn,
+) (map[string]*models.Account, error) {
+	if at.pinned() {
+		return ls.db.GetAccountsByCredentialAtSlot(ctx, refs, at.Slot, txn)
+	}
+	return ls.db.GetAccountsByCredential(ctx, refs, false, txn)
+}
+
 // queryShelleyFilteredVoteDelegatees returns the current DRep delegation for
 // each requested active stake credential. Credentials without a vote
-// delegation are omitted.
+// delegation are omitted. A pinned at answers at at.Slot, as
+// queryShelleyFilteredDelegationAndRewardAccounts does.
 func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
+	ctx context.Context,
 	creds []lcommon.Credential,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	if err := checkLocalStateQueryItemLimit(
 		"GetFilteredVoteDelegatees",
@@ -1921,7 +2902,7 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 		seen[key] = struct{}{}
 		refs = append(refs, ref)
 	}
-	accounts, err := ls.db.GetAccountsByCredential(refs, false, nil)
+	accounts, err := ls.accountsByCredentialAt(ctx, refs, at, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -1969,11 +2950,25 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 
 // queryShelleyGetProposals returns the active Conway governance proposals,
 // optionally filtered by action ID.
+//
+// A pinned at answers with the proposals set and votes as they stood at
+// at.Slot. Proposal lifecycle slots and the vote history are removed only by
+// rollback, so no retention floor applies.
 func (ls *LedgerState) queryShelleyGetProposals(
+	ctx context.Context,
 	actionIds []lcommon.GovActionId,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
-	epoch := ls.loadConsensusSnapshot().currentEpoch.EpochId
-	proposals, err := ls.db.GetActiveGovernanceProposals(epoch, nil)
+	// GetProposals returns the Conway proposals set, which keeps an action
+	// RATIFY classified expired until the boundary that drops it.
+	var proposals []*models.GovernanceProposal
+	var err error
+	if at.pinned() {
+		proposals, err = ls.db.GetGovernanceProposalSetAtSlot(ctx, at.Slot, txn)
+	} else {
+		proposals, err = ls.db.GetGovernanceProposalSet(ctx, txn)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1998,7 +2993,7 @@ func (ls *LedgerState) queryShelleyGetProposals(
 				continue
 			}
 		}
-		state, err := ls.governanceProposalState(proposal, id)
+		state, err := ls.governanceProposalState(ctx, proposal, id, at, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -2008,8 +3003,11 @@ func (ls *LedgerState) queryShelleyGetProposals(
 }
 
 func (ls *LedgerState) governanceProposalState(
+	ctx context.Context,
 	proposal *models.GovernanceProposal,
 	id lcommon.GovActionId,
+	at QueryPoint,
+	txn *database.Txn,
 ) (olocalstatequery.GovActionState, error) {
 	rewardAccount, err := lcommon.NewAddressFromBytes(proposal.ReturnAddress)
 	if err != nil {
@@ -2018,8 +3016,17 @@ func (ls *LedgerState) governanceProposalState(
 			err,
 		)
 	}
-	anchor := lcommon.GovAnchor{Url: proposal.AnchorURL}
-	copy(anchor.DataHash[:], proposal.AnchorHash)
+	dataHash, err := lcommon.NewBlake2b256Checked(proposal.AnchorHash)
+	if err != nil {
+		return olocalstatequery.GovActionState{}, fmt.Errorf(
+			"governance proposal anchor: %w",
+			err,
+		)
+	}
+	anchor := lcommon.GovAnchor{
+		Url:      proposal.AnchorURL,
+		DataHash: dataHash,
+	}
 	procedure, err := cbor.Encode([]any{
 		proposal.Deposit,
 		rewardAccount,
@@ -2045,7 +3052,12 @@ func (ls *LedgerState) governanceProposalState(
 		ProposedIn:        proposal.ProposedEpoch,
 		ExpiresAfter:      proposal.ExpiresEpoch,
 	}
-	votes, err := ls.db.GetGovernanceVotes(proposal.ID, nil)
+	var votes []*models.GovernanceVote
+	if at.pinned() {
+		votes, err = ls.db.GetGovernanceVotesAtSlot(ctx, proposal.ID, at.Slot, txn)
+	} else {
+		votes, err = ls.db.GetGovernanceVotes(ctx, proposal.ID, txn)
+	}
 	if err != nil {
 		return olocalstatequery.GovActionState{}, err
 	}
@@ -2056,11 +3068,26 @@ func (ls *LedgerState) governanceProposalState(
 		choice := lcommon.Vote(vote.Vote)
 		switch vote.VoterType {
 		case models.VoterTypeCC:
-			state.CommitteeVotes[stakeCredentialFromVote(vote)] = choice
+			cred, err := stakeCredentialFromVote(vote)
+			if err != nil {
+				return olocalstatequery.GovActionState{}, err
+			}
+			state.CommitteeVotes[cred] = choice
 		case models.VoterTypeDRep:
-			state.DRepVotes[stakeCredentialFromVote(vote)] = choice
+			cred, err := stakeCredentialFromVote(vote)
+			if err != nil {
+				return olocalstatequery.GovActionState{}, err
+			}
+			state.DRepVotes[cred] = choice
 		case models.VoterTypeSPO:
-			state.SPOVotes[ledger.NewBlake2b224(vote.VoterCredential)] = choice
+			spoId, err := lcommon.NewBlake2b224Checked(vote.VoterCredential)
+			if err != nil {
+				return olocalstatequery.GovActionState{}, fmt.Errorf(
+					"governance vote: %w",
+					err,
+				)
+			}
+			state.SPOVotes[spoId] = choice
 		default:
 			return olocalstatequery.GovActionState{}, fmt.Errorf(
 				"unsupported governance voter type: %d",
@@ -2073,11 +3100,18 @@ func (ls *LedgerState) governanceProposalState(
 
 func stakeCredentialFromVote(
 	vote *models.GovernanceVote,
-) olocalstatequery.StakeCredential {
+) (olocalstatequery.StakeCredential, error) {
+	credential, err := lcommon.NewBlake2b224Checked(vote.VoterCredential)
+	if err != nil {
+		return olocalstatequery.StakeCredential{}, fmt.Errorf(
+			"governance vote: %w",
+			err,
+		)
+	}
 	return olocalstatequery.StakeCredential{
 		Tag:   uint64(vote.VoterCredentialTag),
-		Bytes: ledger.NewBlake2b224(vote.VoterCredential),
-	}
+		Bytes: credential,
+	}, nil
 }
 
 // queryShelleyUtxoByTxIn answers GetUTxOByTxIn: the live outputs named by
@@ -2090,10 +3124,10 @@ func stakeCredentialFromVote(
 // unspent or was spent strictly after at.Slot. The utxo table already
 // tracks both slots per row (AddedSlot, DeletedSlot -- see
 // database.UtxosByRefsAsOf), so this is a real, exact historical query,
-// not an approximation (blinklabs-io/dingo#382).
+// not an approximation.
 //
 // Before this existed, this handler ignored at entirely and always
-// answered from live state: node-parity's incremental mode (#1900) proved
+// answered from live state: node-parity's incremental mode proved
 // this live, both via a direct probe (acquire an older point, then query a
 // ref created by a later block through the same still-acquired session --
 // Dingo returned the newer output) and via a held-acquisition repro
@@ -2106,8 +3140,7 @@ func stakeCredentialFromVote(
 // node's spent-UTxO retention floor: see its doc comment for why answering
 // past that floor risks a silently wrong "absent" result instead of an
 // honest rejection.
-func (ls *LedgerState) queryShelleyUtxoByTxIn(
-	txIns []ledger.ShelleyTransactionInput,
+func (ls *LedgerState) queryShelleyUtxoByTxIn(ctx context.Context, txIns []ledger.ShelleyTransactionInput,
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
@@ -2126,15 +3159,20 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 	var err error
 	if at.pinned() {
 		if txn == nil {
-			txn = ls.db.Transaction(false)
+			txn = ls.db.Transaction(ctx, false)
 			defer txn.Release()
 		}
 		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 			return nil, err
 		}
-		utxos, err = ls.db.UtxosByRefsAsOf(refs, at.Slot, txn)
+		utxos, err = ls.db.UtxosByRefsAsOf(
+			ctx,
+			refs,
+			at.Slot,
+			txn,
+		)
 	} else {
-		utxos, err = ls.db.UtxosByRefs(refs, txn)
+		utxos, err = ls.db.UtxosByRefs(ctx, refs, txn)
 	}
 	if err != nil {
 		return nil, err
@@ -2144,8 +3182,12 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 		if err != nil {
 			return nil, err
 		}
+		txId, err := lcommon.NewBlake2b256Checked(utxo.TxId)
+		if err != nil {
+			return nil, fmt.Errorf("utxo by tx in tx id: %w", err)
+		}
 		utxoId := olocalstatequery.UtxoId{
-			Hash: ledger.NewBlake2b256(utxo.TxId),
+			Hash: txId,
 			Idx:  int(utxo.OutputIdx),
 		}
 		ret[utxoId] = txOut
@@ -2180,6 +3222,18 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 //     transition changing the stability-window formula (Byron's small 2k
 //     vs every Shelley+ era's much larger 3k/f) -- see
 //     persistConsumedUtxoPruneFloor's doc comment for both cases in detail.
+//     This bound is skipped entirely (utxoPruningDeferredForCatchup) while
+//     this node is still catching up to a known upstream target, mirroring
+//     cleanupConsumedUtxos' own defer condition: cleanup never runs during
+//     catch-up, so nothing has actually been pruned yet, and computing
+//     this bound from the live tip anyway would be too STRICT rather than
+//     too lenient -- rejecting an Acquire the node had already promised was
+//     answerable, moments earlier, for a row that was never deleted (a
+//     from-genesis replay's tip advances far faster than real block
+//     cadence, so this window used to open within single-digit epochs of
+//     starting, tearing down the whole LocalStateQuery connection with no
+//     graceful per-query failure available; a residual
+//     race between Acquire and Query remains).
 //   - The durably persisted floor (readConsumedUtxoPruneFloor) recording
 //     the highest slot cleanup has ever actually begun pruning up to. This
 //     is exactly right for what's already been pruned, but reads zero on a
@@ -2208,7 +3262,8 @@ func (ls *LedgerState) checkUtxoRetentionWindow(
 	}
 	var retentionFloor uint64
 	stabilityWindow := ls.calculateStabilityWindow()
-	if stabilityWindow != 0 && tip.Point.Slot > stabilityWindow {
+	if stabilityWindow != 0 && tip.Point.Slot > stabilityWindow &&
+		!ls.utxoPruningDeferredForCatchup(tip.Point.Slot, stabilityWindow) {
 		retentionFloor = tip.Point.Slot - stabilityWindow
 	}
 	persistedFloor, err := ls.readConsumedUtxoPruneFloor(txn)
@@ -2224,7 +3279,7 @@ func (ls *LedgerState) checkUtxoRetentionWindow(
 	}
 	if at.Slot < retentionFloor {
 		return fmt.Errorf(
-			"%w: GetUTxOByTxIn pinned to slot %d is older than this "+
+			"%w: UTxO query pinned to slot %d is older than this "+
 				"node's spent-UTxO retention floor (slot %d, tip %d) -- "+
 				"a UTxO spent and pruned before that floor cannot be "+
 				"reliably reconstructed as of the pinned point",

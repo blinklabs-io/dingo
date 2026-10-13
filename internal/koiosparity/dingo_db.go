@@ -97,6 +97,29 @@ type DingoEpochData struct {
 	RewardAdaPotsPresent bool
 }
 
+// DingoRewardSnapshotSummary holds the reward_snapshot completeness fields
+// checkEpoch's paramEpochPositiveStakeProven route needs. See
+// GetRewardSnapshot on RewardParitySource for what the two fields prove.
+type DingoRewardSnapshotSummary struct {
+	// TotalPoolCount is reward_snapshot.total_pool_count: the number of
+	// pools reward_pool_input actually holds rows for at this epoch boundary
+	// -- the reduced, positive-stake set rewardStakeDistribution and any
+	// degraded-registration exclusion left behind (rotation.go's
+	// buildRewardStateInputs) -- unlike epoch_summary.TotalPoolCount, which
+	// counts every delegated pool regardless of stake and can never equal
+	// this on a network with any zero-stake-but-delegated pool.
+	TotalPoolCount uint64
+	// ExcludedActiveStake is reward_snapshot.excluded_active_stake: nonzero
+	// when a degraded pool's stake was excluded from reward_pool_input.
+	// ExcludedActiveStakeKnown is false for a snapshot
+	// captured before that tracking existed, meaning "unknown", not "known
+	// zero" -- see models.RewardSnapshot.ExcludedActiveStake's doc comment.
+	// A caller must treat unknown the same as nonzero: proving completeness
+	// from TotalPoolCount alone would silently re-admit the degraded-pool gap.
+	ExcludedActiveStake      uint64
+	ExcludedActiveStakeKnown bool
+}
+
 // DingoPoolEpochData holds per-pool reward-input data assembled for one Koios
 // reporting epoch. It is built from up to three separate Dingo rows spread
 // across two different reward_pool_input epochs plus one reward_pool_output
@@ -121,7 +144,7 @@ type DingoPoolEpochData struct {
 	// reward-calculation basis. A mark snapshot records the pool parameters
 	// as of its own boundary, and those are the ones in force for the epoch
 	// that snapshot is the basis for, so cost and margin align here rather
-	// than with BlocksProduced at the param epoch (dingo #3484).
+	// than with BlocksProduced at the param epoch.
 	DelegatedStake string // lovelace decimal string
 	DelegatorCount uint64
 	FixedCost      string // lovelace decimal string (reward_pool_input.cost)
@@ -180,7 +203,7 @@ type DingoPoolEpochData struct {
 	// the two differ by exactly the pool's unspendable member rewards — a
 	// reward computed for a credential the ledger correctly never credits.
 	// Comparing it against Koios reported a value_mismatch for any pool
-	// holding one, against a ledger that was right (dingo #3797).
+	// holding one, against a ledger that was right.
 	//
 	// Subtracting reward_pool_output.unspendable from member_reward_total
 	// would not be equivalent: that column accumulates unspendable leader
@@ -197,7 +220,7 @@ type DingoPoolEpochData struct {
 	// reward computed for a credential that deregisters in the meantime is
 	// still marked spendable, and only the application flips it. Koios reports
 	// rewards that were actually distributed, so comparing earlier makes Dingo
-	// read high by the forfeitures that have not happened yet (dingo #3852). A
+	// read high by the forfeitures that have not happened yet. A
 	// difference before the boundary is a timing statement, not a divergence.
 	//
 	// The sense is deliberately negative so the zero value compares strictly.
@@ -299,7 +322,7 @@ const mithrilLedgerSlotSyncKey = "mithril_ledger_slot"
 // sync_state/epoch tables into the first Koios reporting epoch this Dingo
 // database could plausibly have genuinely computed local reward state for
 // — see DatabaseSource.GetEarliestAvailableEpoch's doc comment for the
-// derivation and dingo #4172 for why this is needed at all. ctx is forwarded
+// derivation and why this is needed at all. ctx is forwarded
 // to the DB driver so a cancelled context aborts the query.
 func (d *DingoDB) GetEarliestAvailableEpoch(
 	ctx context.Context,
@@ -436,7 +459,7 @@ func (d *DingoDB) GetEpochData(
 // row at or before it for that epoch's era.
 //
 // Two properties of Dingo's `pparams` table shape this query, and getting
-// either wrong silently reads back the wrong parameter set (dingo #3931):
+// either wrong silently reads back the wrong parameter set:
 //
 //   - It holds one row per parameter CHANGE, not one per epoch. Preview has
 //     roughly a dozen rows spanning 400+ epochs, so the row for a given epoch
@@ -494,9 +517,9 @@ func (d *DingoDB) GetProtocolParams(
 	// See isSyntheticV2CostModel's doc comment and
 	// syntheticV2CostModelClearedEpochSyncKey for why this is read here
 	// rather than skipped: without it, a PlutusV2 model Dingo still holds
-	// only because HardForkBabbage fabricated it (dingo #3825) reads as a
+	// only because HardForkBabbage fabricated it reads as a
 	// real value and compareCostModels has no way to tell it apart from an
-	// actual divergence (dingo #4127).
+	// actual divergence.
 	var clearedEpochVal sql.NullString
 	if err := queryRow(
 		`SELECT value FROM sync_state WHERE sync_key = ?`,
@@ -534,7 +557,7 @@ func (d *DingoDB) GetProtocolParams(
 }
 
 // syntheticV2CostModelClearedEpochSyncKey is the sync-state key DingoDB reads
-// over its own raw SQL connection (dingo #3825). Unlike mithrilLedgerSlotSyncKey
+// over its own raw SQL connection. Unlike mithrilLedgerSlotSyncKey
 // above it is bound to the owning package's constant rather than re-typed as a
 // literal: this package already depends on database (DatabaseSource reads the
 // same marker through database.SyntheticV2CostModelClearedEpoch), so a
@@ -559,8 +582,7 @@ const syntheticV2CostModelClearedEpochSyncKey = database.SyntheticV2CostModelCle
 //     the row for the epoch *after* the one it describes — see
 //     ledger/snapshot/rotation.go's buildRewardStateInputs, which stamps it
 //     from evt.PreviousEpoch, not from the row's own Epoch. Only
-//     BlocksProduced is read there; Margin/FixedCost are stake-epoch fields
-//     (dingo #3484).
+//     BlocksProduced is read there; Margin/FixedCost are stake-epoch fields.
 //
 // See koiosStakeEpoch/koiosParamEpoch in check.go and ARCHITECTURE.md's Koios
 // Parity Tracker "Epoch alignment" section for the full derivation.
@@ -705,6 +727,46 @@ WHERE ret.epoch <= ?
 		retired[hex.EncodeToString(poolHash)] = struct{}{}
 	}
 	return retired, rows.Err()
+}
+
+// GetRewardSnapshot implements RewardParitySource against the reward_snapshot
+// table directly. excluded_active_stake is nullable TEXT: NULL is scanned as
+// unset (ExcludedActiveStakeKnown = false) rather than as zero, matching
+// DatabaseSource's handling of models.RewardSnapshot.ExcludedActiveStake's
+// nil-pointer convention — see DingoRewardSnapshotSummary's doc comment for
+// why the two must not be conflated.
+func (d *DingoDB) GetRewardSnapshot(
+	ctx context.Context,
+	epoch uint64,
+) (*DingoRewardSnapshotSummary, error) {
+	var totalPoolCount uint64
+	var excluded sql.NullString
+	err := d.queryRow(
+		ctx,
+		`SELECT total_pool_count, excluded_active_stake FROM reward_snapshot WHERE epoch = ? AND snapshot_type = ?`,
+		epoch,
+		snapshotTypeMark,
+	).Scan(&totalPoolCount, &excluded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reward_snapshot epoch %d: %w", epoch, err)
+	}
+	out := &DingoRewardSnapshotSummary{TotalPoolCount: totalPoolCount}
+	if excluded.Valid {
+		value, parseErr := strconv.ParseUint(excluded.String, 10, 64)
+		if parseErr != nil {
+			return nil, fmt.Errorf(
+				"parse reward_snapshot.excluded_active_stake epoch %d: %w",
+				epoch,
+				parseErr,
+			)
+		}
+		out.ExcludedActiveStake = value
+		out.ExcludedActiveStakeKnown = true
+	}
+	return out, nil
 }
 
 func (d *DingoDB) GetPoolEpochDataMap(
@@ -918,7 +980,7 @@ func (d *DingoDB) GetPoolEpochDataMap(
 // Presence is epoch-level. A pool with no spendable member row legitimately
 // earned nothing, but only if the table holds the epoch at all —
 // cleanupOldSnapshots retains reward_account_output without bound in api
-// storage mode and, since dingo #4188, in core mode too when the node's
+// storage mode and in core mode too when the node's
 // koios-parity observer is enabled; it prunes the table to a 4-epoch window
 // otherwise, so an empty read must not be reported as a pool-wide zero.
 func (d *DingoDB) addSpendableMemberRewards(
@@ -1023,8 +1085,8 @@ func rebind(query, dialect string) string {
 
 // GetRewardAccountOutputs returns every per-account reward calculation
 // output row Dingo committed for epoch, straight from reward_account_output.
-// Not yet consumed by any comparison — #3097 (per-account exact parity) is
-// what wires this up; it exists on DingoDB now so the standalone-CLI and
+// Not yet consumed by any comparison — the per-account exact-parity comparison
+// is what wires this up; it exists on DingoDB now so the standalone-CLI and
 // in-process (DatabaseSource) implementations of RewardParitySource stay
 // symmetric. ctx is forwarded to the DB driver so a cancelled context aborts
 // the query.

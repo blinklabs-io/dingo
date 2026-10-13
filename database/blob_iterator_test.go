@@ -162,11 +162,6 @@ func TestBlobBlockIterator_SlotRanges(t *testing.T) {
 	}
 }
 
-// ptr returns a pointer to the given value.
-//
-//go:fix inline
-func ptr[T any](v T) *T { return new(v) }
-
 func TestBlobBlockIterator_Progress(t *testing.T) {
 	t.Parallel()
 

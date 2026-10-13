@@ -68,7 +68,7 @@ func (s *Store) SetTip(tip ochainsync.Tip, txn types.Txn) error {
 	if err != nil {
 		return err
 	}
-	queries := s.operationalQueries(db)
+	queries := s.operationalQueriesCached(db)
 	slot, err := checkedInt64(tip.Point.Slot)
 	if err != nil {
 		return fmt.Errorf("set tip slot: %w", err)
@@ -181,7 +181,7 @@ func (s *Store) GetNetworkState(
 // GetNetworkStateAsOfSlot resolves the most recent network-state row with
 // Slot <= the supplied slot, rather than GetNetworkState's always-latest
 // row -- see ledger's totalCirculatingSupply for why a historical
-// GetStakeDistribution answer needs this instead (blinklabs-io/dingo#382).
+// GetStakeDistribution answer needs this instead.
 // A slot older than every row ever written (e.g. before the first recorded
 // treasury/reserves change) returns (nil, nil), the same "not found" shape
 // GetNetworkState already uses.
@@ -279,7 +279,7 @@ func (s *Store) DeleteSyncState(key string, txn types.Txn) error {
 // COLLATION, not byte order, so a case- or locale-insensitive collation could
 // include keys that lack the byte prefix (or exclude keys that have it), and a
 // synthesized range upper bound over a non-ASCII prefix can be invalid UTF-8.
-// The deferred-header retention markers this enumerates (issue #3727) must be
+// The deferred-header retention markers this enumerates must be
 // matched exactly or a restart could miss a marker and fail to pin a snapshot.
 func (s *Store) ListSyncStateKeysByPrefix(
 	prefix string,
@@ -316,18 +316,6 @@ func (s *Store) ListSyncStateKeysByPrefix(
 		return nil, fmt.Errorf("list sync state keys: %w", err)
 	}
 	return keys, nil
-}
-
-func (s *Store) ClearSyncState(txn types.Txn) error {
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return fmt.Errorf("clear sync state: %w", err)
-	}
-	queries := s.operationalQueries(db)
-	if err := queries.ClearSyncState(ctx); err != nil {
-		return fmt.Errorf("clear sync state: %w", err)
-	}
-	return nil
 }
 
 func (s *Store) GetEpoch(
@@ -584,7 +572,7 @@ func (s *Store) SetBlockNonce(
 	if err != nil {
 		return err
 	}
-	queries := s.operationalQueries(db)
+	queries := s.operationalQueriesCached(db)
 	slot, err := checkedInt64(slotNumber)
 	if err != nil {
 		return err
@@ -601,6 +589,57 @@ func (s *Store) SetBlockNonce(
 			},
 		},
 	)
+}
+
+// SetBlockNonces writes a block-nonce batch with one multi-row SQLite upsert.
+func (s *Store) SetBlockNonces(
+	nonces []models.BlockNonce,
+	txn types.Txn,
+) error {
+	if len(nonces) == 0 {
+		return nil
+	}
+	if s.dialect.Name() != "sqlite" {
+		for _, nonce := range nonces {
+			if err := s.SetBlockNonce(
+				nonce.Hash,
+				nonce.Slot,
+				nonce.Nonce,
+				nonce.IsCheckpoint,
+				txn,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	batchSize := max(s.dialect.ParameterLimit()/4, 1)
+	for start := 0; start < len(nonces); start += batchSize {
+		end := min(start+batchSize, len(nonces))
+		values := make([]string, end-start)
+		args := make([]any, 0, (end-start)*4)
+		for i, nonce := range nonces[start:end] {
+			slot, err := checkedInt64(nonce.Slot)
+			if err != nil {
+				return err
+			}
+			values[i] = "(?, ?, ?, ?)"
+			args = append(args, nonce.Hash, slot, nonce.Nonce, nonce.IsCheckpoint)
+		}
+		query := `INSERT INTO block_nonce (hash, slot, nonce, is_checkpoint)
+VALUES ` + strings.Join(values, ",") + `
+ON CONFLICT (hash, slot) DO UPDATE SET
+    nonce = excluded.nonce,
+    is_checkpoint = block_nonce.is_checkpoint OR excluded.is_checkpoint`
+		if _, err := s.execCached(ctx, db, query, args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) GetBlockNonce(
@@ -1011,6 +1050,103 @@ func (s *Store) GetPParamUpdates(
 	return ret, nil
 }
 
+func (s *Store) HasPParamsForEra(
+	eraID uint,
+	txn types.Txn,
+) (bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return false, err
+	}
+	sqlEraID, err := checkedInt64(uint64(eraID))
+	if err != nil {
+		return false, err
+	}
+	count, err := s.operationalQueries(db).CountPParamsByEra(
+		ctx,
+		sql.NullInt64{Int64: sqlEraID, Valid: true},
+	)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// ListPParamsForEra returns every persisted protocol-parameter row for one
+// era in ascending row order. Unlike GetPParams it neither filters by epoch
+// nor collapses to the latest row: the Alonzo unit repair
+// (database/alonzo_pparams_unit.go) has to inspect and rewrite all of them,
+// because every historical row is served to clients that query that epoch.
+func (s *Store) ListPParamsForEra(
+	eraID uint,
+	txn types.Txn,
+) ([]models.PParams, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlEraID, err := checkedInt64(uint64(eraID))
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.operationalQueries(db).ListPParamsByEra(
+		ctx,
+		sql.NullInt64{Int64: sqlEraID, Valid: true},
+	)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]models.PParams, 0, len(rows))
+	for _, row := range rows {
+		addedSlot, err := checkedUint64(row.AddedSlot.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("list pparams for era: %w", err)
+		}
+		epoch, err := checkedUint64(row.Epoch.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("list pparams for era: %w", err)
+		}
+		rowEraID, err := checkedUint(row.EraID.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("list pparams for era: %w", err)
+		}
+		ret = append(ret, models.PParams{
+			Cbor:      row.Cbor,
+			ID:        uint(row.ID),
+			AddedSlot: addedSlot,
+			Epoch:     epoch,
+			EraId:     rowEraID,
+		})
+	}
+	return ret, nil
+}
+
+// UpdatePParamsCbor replaces one protocol-parameter row's CBOR in place,
+// keyed by the row id ListPParamsForEra returned. It exists for the Alonzo
+// unit repair and deliberately cannot move a row between eras, epochs, or
+// slots.
+func (s *Store) UpdatePParamsCbor(
+	id uint,
+	params []byte,
+	txn types.Txn,
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlID, err := checkedInt64(uint64(id))
+	if err != nil {
+		return err
+	}
+	return s.operationalQueries(db).UpdatePParamsCbor(
+		ctx,
+		sqlitequery.UpdatePParamsCborParams{
+			Cbor: params,
+			ID:   sqlID,
+		},
+	)
+}
+
 func (s *Store) SetPParams(
 	params []byte,
 	slot, epoch uint64,
@@ -1201,6 +1337,29 @@ func (s *Store) DeleteNetworkDonationsAfterSlot(
 		return fmt.Errorf(
 			"delete network donations after slot %d: %w",
 			slot,
+			err,
+		)
+	}
+	return nil
+}
+
+func (s *Store) DeleteNetworkDonationsForEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return fmt.Errorf("delete network donations for epoch: %w", err)
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
+DELETE FROM network_donation WHERE epoch = ?`), sqlEpoch); err != nil {
+		return fmt.Errorf(
+			"delete network donations for epoch %d: %w",
+			epoch,
 			err,
 		)
 	}

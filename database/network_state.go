@@ -14,41 +14,31 @@
 
 package database
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // DeleteNetworkStateAfterSlot removes network state records added
 // after the given slot. This is used during chain rollbacks.
 func (d *Database) DeleteNetworkStateAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.metadata.DeleteNetworkStateAfterSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete network state after slot %d: %w",
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		if err := d.metadata.DeleteNetworkStateAfterSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete network state after slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetSyncState retrieves a sync state value by key.
@@ -144,20 +134,4 @@ func (d *Database) ListSyncStateKeysByPrefix(
 		)
 	}
 	return keys, nil
-}
-
-// ClearSyncState removes all sync state entries.
-func (d *Database) ClearSyncState(txn *Txn) error {
-	var err error
-	if txn == nil {
-		err = d.metadata.ClearSyncState(nil)
-	} else {
-		err = d.metadata.ClearSyncState(txn.Metadata())
-	}
-	if err != nil {
-		return fmt.Errorf(
-			"Database.ClearSyncState: %w", err,
-		)
-	}
-	return nil
 }

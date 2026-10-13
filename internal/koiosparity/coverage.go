@@ -26,10 +26,10 @@ const (
 )
 
 // KoiosFieldCoverage documents one field in the Koios endpoints used by the
-// epoch/pool/account checker. #3097 wired up exact per-account comparison
+// epoch/pool/account checker. Exact per-account comparison is wired up
 // (CompareAccountEpoch, /account_reward_history) against Dingo's committed
-// reward_account_output rows; #3099's chunked/resumable large-account fetch
-// is still open and does not change which fields are compared, only how
+// reward_account_output rows; the chunked/resumable large-account fetch
+// does not change which fields are compared, only how
 // reliably the account universe is fetched.
 type KoiosFieldCoverage struct {
 	Endpoint   string        `json:"endpoint"`
@@ -349,7 +349,7 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Reason:   "Dingo has no persisted annualised return-on-stake aggregate",
 	},
 
-	// /epoch_params (dingo #3931): CompareEpochProtocolParams compares the
+	// /epoch_params: CompareEpochProtocolParams compares the
 	// effective pparams row for the epoch — resolved from the epoch's own era,
 	// since the table holds one row per parameter change — against every
 	// parameter below classified exact-match. Numeric comparison goes through
@@ -550,10 +550,11 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Reason:   "a Shelley-era parameter absent from every live era's struct; cached for reference",
 	},
 	{
-		Endpoint: "/epoch_params",
-		Field:    "coins_per_utxo_size",
-		Class:    CoverageUnsupported,
-		Reason:   "Koios reports Alonzo's per-word figure where Dingo stores per-byte (34482 vs 4310 on preview epochs 0-2); cached for reference pending its own investigation",
+		Endpoint:   "/epoch_params",
+		Field:      "coins_per_utxo_size",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams era-native coins-per-UTxO unit",
+		Reason:     "exact equality in the era-native unit: words in Alonzo and bytes from Babbage onward",
 	},
 
 	// cost_models is modeled and compared; the fields after it are documented
@@ -723,7 +724,7 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
 	},
 
-	// /account_reward_history (#3097): CompareAccountEpoch compares every
+	// /account_reward_history: CompareAccountEpoch compares every
 	// reference row against reward_account_output exactly, per aggregated
 	// (stake_address, type) total — member/leader rows only, since
 	// koiosAccountRewardTypesOutOfScope filters out reward mechanisms

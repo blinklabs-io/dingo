@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"slices"
 	"strconv"
@@ -28,12 +29,14 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -277,19 +280,16 @@ func fetchGapBlocksFromPeer(
 	return blocks, nil
 }
 
-// deleteBlobBlocksAboveSlot removes every block from the blob store
-// whose slot is greater than the given threshold AND drops any
-// metadata indexed for those blocks (transactions, UTxOs, governance
-// proposals/votes), and restores any UTxOs that the rejected gap
-// blocks had marked spent. Used to clean up rejected gap blocks from
-// a previous failed Mithril resume so the next BlocksRecent query and
-// any slot-ordered iterator (chainsync replay, etc.) cannot resurface
-// them, and so leftover metadata from the discarded fork cannot
-// shadow the refetched chain.
-func deleteBlobBlocksAboveSlot(
+// deleteBlobBlocksAboveSlotExcept removes blocks above slot unless their
+// hashes are preserved for replay. It drops derived metadata above slot and
+// restores UTxOs spent by removed blocks.
+func deleteBlobBlocksAboveSlotExcept(
+	ctx context.Context,
 	db *database.Database,
 	slot uint64,
+	preserved map[string]struct{},
 ) error {
+	ctx = context.WithoutCancel(ctx)
 	if slot == ^uint64(0) {
 		return nil
 	}
@@ -307,16 +307,19 @@ func deleteBlobBlocksAboveSlot(
 		if next == nil {
 			break
 		}
+		if _, keep := preserved[string(next.Hash)]; keep {
+			continue
+		}
 		stale = append(stale, ocommon.Point{
 			Slot: next.Slot,
 			Hash: append([]byte(nil), next.Hash...),
 		})
 	}
 	iter.Close()
-	if len(stale) == 0 {
+	if len(stale) == 0 && len(preserved) == 0 {
 		return nil
 	}
-	txn := db.Transaction(true)
+	txn := db.Transaction(ctx, true)
 	return txn.Do(func(txn *database.Txn) error {
 		for _, p := range stale {
 			block, err := database.BlockByPointTxn(txn, p)
@@ -340,25 +343,26 @@ func deleteBlobBlocksAboveSlot(
 		// the refetched chain would inherit stale UTxO consumption,
 		// duplicate tx records, and orphan governance proposals/votes
 		// from the previous run's gap-block processing.
-		if err := db.UtxosDeleteRolledback(slot, txn); err != nil {
+		if err := db.UtxosDeleteRolledback(ctx, slot, txn); err != nil {
 			return fmt.Errorf(
 				"delete rolled-back UTxOs above slot %d: %w",
 				slot, err,
 			)
 		}
-		if err := db.TransactionsDeleteRolledback(slot, txn); err != nil {
+		if err := db.TransactionsDeleteRolledback(ctx, slot, txn); err != nil {
 			return fmt.Errorf(
 				"delete rolled-back transactions above slot %d: %w",
 				slot, err,
 			)
 		}
-		if err := db.UtxosUnspend(slot, txn); err != nil {
+		if err := db.UtxosUnspend(ctx, slot, txn); err != nil {
 			return fmt.Errorf(
 				"restore UTxOs spent above slot %d: %w",
 				slot, err,
 			)
 		}
 		if err := db.DeleteGovernanceVotesAfterSlot(
+			ctx,
 			slot, txn,
 		); err != nil {
 			return fmt.Errorf(
@@ -367,6 +371,7 @@ func deleteBlobBlocksAboveSlot(
 			)
 		}
 		if err := db.DeleteGovernanceProposalsAfterSlot(
+			ctx,
 			slot, txn,
 		); err != nil {
 			return fmt.Errorf(
@@ -530,7 +535,7 @@ func processGapBlocks(
 		// Gap blocks were already parsed and body-hash validated by the
 		// blockfetch client when fetched from the relay. We only need a
 		// second decode here to extract transactions and offsets.
-		parsedBlock, err := gledger.NewBlockFromCbor(
+		parsedBlock, err := models.DecodeBlockCbor(
 			block.Type,
 			block.Cbor,
 			lcommon.VerifyConfig{SkipBodyHashValidation: true},
@@ -542,28 +547,24 @@ func processGapBlocks(
 			)
 		}
 		txs := parsedBlock.Transactions()
+		point := ocommon.NewPoint(block.Slot, block.Hash)
 		if len(txs) == 0 {
 			continue
 		}
-		indexer := database.NewBlockIndexer(
-			block.Slot, block.Hash,
-		)
-		offsets, err := indexer.ComputeOffsets(
-			block.Cbor, parsedBlock,
-		)
-		if err != nil {
-			return fmt.Errorf(
-				"computing offsets for gap block at slot %d: %w",
-				block.Slot, err,
-			)
-		}
-		point := ocommon.NewPoint(block.Slot, block.Hash)
 		epoch, err := gapBlockEpoch(epochs, block.Slot)
 		if err != nil {
 			return fmt.Errorf(
 				"resolving epoch for gap block at slot %d: %w",
 				block.Slot,
 				err,
+			)
+		}
+		indexer := database.NewBlockIndexer(block.Slot, block.Hash)
+		offsets, err := indexer.ComputeOffsets(block.Cbor, parsedBlock)
+		if err != nil {
+			return fmt.Errorf(
+				"computing offsets for gap block at slot %d: %w",
+				block.Slot, err,
 			)
 		}
 		blockPParams, cached := pparamsCache[epoch.EpochId]
@@ -592,9 +593,16 @@ func processGapBlocks(
 			pparamsCache[epoch.EpochId] = blockPParams
 		}
 		blockConwayPParams := (*conway.ConwayProtocolParameters)(nil)
-		if epoch.EraId == conway.EraIdConway && blockPParams != nil {
-			conwayPParams, ok := blockPParams.(*conway.ConwayProtocolParameters)
-			if !ok {
+		switch params := blockPParams.(type) {
+		case *conway.ConwayProtocolParameters:
+			blockConwayPParams = params
+		case *dijkstra.DijkstraProtocolParameters:
+			if params != nil {
+				blockConwayPParams = &params.ConwayProtocolParameters
+			}
+		case nil:
+		default:
+			if epoch.EraId >= conway.EraIdConway {
 				return fmt.Errorf(
 					"unexpected protocol params %T for gap block at slot %d (epoch %d)",
 					blockPParams,
@@ -602,9 +610,9 @@ func processGapBlocks(
 					epoch.EpochId,
 				)
 			}
-			blockConwayPParams = conwayPParams
 		}
 		if err := processGapBlockTransactions(
+			ctx,
 			db,
 			logger,
 			point,
@@ -631,6 +639,7 @@ func processGapBlocks(
 }
 
 func processGapBlockTransactions(
+	ctx context.Context,
 	db *database.Database,
 	logger *slog.Logger,
 	point ocommon.Point,
@@ -641,60 +650,73 @@ func processGapBlockTransactions(
 	pparams lcommon.ProtocolParameters,
 	conwayPParams *conway.ConwayProtocolParameters,
 ) error {
-	txn := db.Transaction(true)
+	txn := db.Transaction(ctx, true)
 	defer txn.Release()
+	protocolMajor := uint64(0)
+	if versioned, ok := pparams.(lcommon.PoolRuleProtocolParameters); ok {
+		protocolMajor = uint64(versioned.ProtocolMajorVersion())
+	}
+	var storageIndexOffset uint64
 	for i, tx := range txs {
 		// Gap blocks are already reflected in the Mithril snapshot's
 		// UTxO set, so input UTxOs are already consumed. Store the TX
 		// record and blob offsets without re-consuming inputs.
-		if err := db.SetGapBlockTransaction(
-			tx,
-			point,
-			uint32(i), // #nosec G115 -- tx index within a block
-			gapCertDeposits(logger, tx, point, eraId, pparams),
-			offsets,
-			txn,
-		); err != nil {
-			return fmt.Errorf("storing TX: %w", err)
-		}
-		if !tx.IsValid() {
-			continue
-		}
-		hasGovernance := len(tx.ProposalProcedures()) > 0 ||
-			len(tx.VotingProcedures()) > 0
-		if !hasGovernance {
-			continue
-		}
-		if conwayPParams == nil {
-			return errors.New(
-				"missing Conway protocol parameters for governance gap block processing",
-			)
-		}
-		if err := governance.ProcessProposals(
-			tx,
-			point,
-			epochId,
-			conwayPParams.GovActionValidityPeriod,
-			db,
-			txn,
-		); err != nil {
+		levels := dledger.TransactionLevelsForApply(tx)
+		childCount := uint64(len(levels)) - 1
+		storageBaseIndex := uint64(i) + storageIndexOffset
+		storageParentIndex := storageBaseIndex + childCount
+		if storageParentIndex > math.MaxUint32 {
 			return fmt.Errorf(
-				"processing governance proposals: %w",
-				err,
+				"expanded transaction index out of range: %d",
+				storageParentIndex,
 			)
 		}
-		if err := governance.ProcessVotes(
-			tx,
-			point,
-			epochId,
-			conwayPParams.DRepInactivityPeriod,
-			db,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"processing governance votes: %w",
-				err,
-			)
+		storageIndexOffset += childCount
+		for levelIndex, level := range levels {
+			if err := db.SetGapBlockTransaction(
+				ctx,
+				level,
+				point,
+				uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec
+				gapCertDeposits(logger, level, point, eraId, pparams),
+				offsets,
+				txn,
+				protocolMajor,
+			); err != nil {
+				return fmt.Errorf(
+					"storing transaction body %d: %w",
+					levelIndex,
+					err,
+				)
+			}
+			if !level.IsValid() {
+				continue
+			}
+			if !governance.TransactionHasGovernanceEffects(level) {
+				continue
+			}
+			if conwayPParams == nil &&
+				governance.HistoricalTransactionRequiresConwayParameters(level) {
+				return errors.New(
+					"missing Conway protocol parameters for governance gap block processing",
+				)
+			}
+			govActionLifetime := uint64(0)
+			if conwayPParams != nil {
+				govActionLifetime = conwayPParams.GovActionValidityPeriod
+			}
+			if err := governance.ProcessHistoricalTransactionEffects(
+				ctx,
+				level,
+				point,
+				uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec
+				epochId,
+				govActionLifetime,
+				db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("processing body %d transaction governance: %w", levelIndex, err)
+			}
 		}
 	}
 	if err := txn.Commit(); err != nil {

@@ -1,8 +1,23 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package node
 
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -11,28 +26,249 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
+	"github.com/blinklabs-io/dingo/plugin"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	fxcbor "github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func FuzzCborArrayHeaderLen(f *testing.F) {
+	f.Add([]byte(nil))
+	f.Add([]byte{0x80})
+	f.Add([]byte{0x98, 0x02})
+	f.Add([]byte{0x9f, 0xff})
+	f.Add([]byte{0xa0})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		headerLen, err := cborArrayHeaderLen(data)
+		if err != nil {
+			return
+		}
+		if headerLen < 1 || headerLen > 9 {
+			t.Fatalf("header length = %d, want 1..9", headerLen)
+		}
+		if headerLen > len(data) {
+			t.Fatalf(
+				"header length %d exceeds input length %d",
+				headerLen,
+				len(data),
+			)
+		}
+		if data[0]&gcbor.CborTypeMask != gcbor.CborTypeArray {
+			t.Fatalf("accepted non-array CBOR major type: 0x%x", data[0])
+		}
+	})
+}
+
+func FuzzExtractHeaderCbor(f *testing.F) {
+	addBlockSeed(f, []byte{0x01}, []byte{0x02})
+	addBlockSeed(f, []byte{0x82, 0x00, 0x01}, []byte{0x80})
+	f.Add([]byte(nil))
+	f.Add([]byte{0x80})
+	f.Add([]byte{0x81, 0x01})
+
+	f.Fuzz(func(t *testing.T, blockCbor []byte) {
+		if len(blockCbor) > 64*1024 {
+			t.Skip("block CBOR input is too large for fast fuzzing")
+		}
+
+		header, err := extractHeaderCbor(blockCbor)
+		if err != nil {
+			return
+		}
+		if len(header) == 0 {
+			t.Fatalf("extractHeaderCbor returned an empty header")
+		}
+
+		headerLen, err := cborArrayHeaderLen(blockCbor)
+		if err != nil {
+			t.Fatalf(
+				"cborArrayHeaderLen rejected block accepted by extractHeaderCbor: %v",
+				err,
+			)
+		}
+		if !bytes.HasPrefix(blockCbor[headerLen:], header) {
+			t.Fatalf(
+				"extracted header %x is not the first element after array header",
+				header,
+			)
+		}
+	})
+}
+
+func FuzzRawBlockTransactionValidity(f *testing.F) {
+	addInvalidTxSeed(f, []uint{})
+	addInvalidTxSeed(f, []uint{0, 1, 42})
+	addInvalidTxSeedWithBodies(f, 2, []uint{1, 0})
+	addInvalidTxSeedWithBodies(f, 3, []uint{0, 0, 2})
+	f.Add([]byte(nil))
+	f.Add([]byte{0x80})
+
+	f.Fuzz(func(t *testing.T, blockCbor []byte) {
+		if len(blockCbor) > 64*1024 {
+			t.Skip("block CBOR input is too large for fast fuzzing")
+		}
+
+		offsets, err := lcommon.ExtractTransactionOffsets(blockCbor)
+		if err != nil || offsets == nil {
+			return
+		}
+		validity, err := rawBlockTransactionValidity(offsets)
+		if err != nil {
+			return
+		}
+		if len(validity) != len(offsets.Transactions) {
+			t.Fatalf(
+				"validity flags = %d, want one per transaction (%d)",
+				len(validity),
+				len(offsets.Transactions),
+			)
+		}
+		// Only a strictly ascending list reads as a plain set of indexes.
+		ascending := true
+		for i := 1; i < len(offsets.InvalidTransactions); i++ {
+			if offsets.InvalidTransactions[i] <= offsets.InvalidTransactions[i-1] {
+				ascending = false
+				break
+			}
+		}
+		if !ascending {
+			return
+		}
+		listed := make(map[int]bool, len(offsets.InvalidTransactions))
+		for _, index := range offsets.InvalidTransactions {
+			listed[int(index)] = true // #nosec G115 -- bounded by the check above
+		}
+		for i, valid := range validity {
+			if valid == listed[i] {
+				t.Fatalf("transaction %d valid=%t, listed=%t", i, valid, listed[i])
+			}
+		}
+	})
+}
+
+func FuzzTxBodyMapValueRange(f *testing.F) {
+	addTxBodyMapSeed(f, map[uint64]any{
+		0: uint64(1),
+		7: []byte{0xde, 0xad, 0xbe, 0xef},
+	}, 7)
+	addTxBodyMapSeed(f, map[uint64]any{
+		2: []uint64{1, 2, 3},
+	}, 2)
+	f.Add([]byte(nil), uint32(0), uint64(0))
+	f.Add([]byte{0xa0}, uint32(0), uint64(0))
+
+	f.Fuzz(func(t *testing.T, bodyCbor []byte, bodyOffset uint32, key uint64) {
+		if len(bodyCbor) > 64*1024 {
+			t.Skip("tx body CBOR input is too large for fast fuzzing")
+		}
+
+		valueOffset, valueLen, found, err := txBodyMapValueRange(
+			bodyCbor,
+			bodyOffset,
+			key,
+		)
+		if err != nil || !found {
+			return
+		}
+		if valueOffset < bodyOffset {
+			t.Fatalf(
+				"value offset %d precedes body offset %d",
+				valueOffset,
+				bodyOffset,
+			)
+		}
+		relativeOffset := uint64(valueOffset - bodyOffset)
+		end := relativeOffset + uint64(valueLen)
+		if end > uint64(len(bodyCbor)) {
+			t.Fatalf(
+				"value range [%d:%d] exceeds tx body length %d",
+				relativeOffset,
+				end,
+				len(bodyCbor),
+			)
+		}
+	})
+}
+
+func addBlockSeed(f *testing.F, header, body []byte) {
+	blockCbor, err := fxcbor.Marshal([]gcbor.RawMessage{
+		gcbor.RawMessage(header),
+		gcbor.RawMessage(body),
+	})
+	if err != nil {
+		f.Fatalf("marshal block seed: %v", err)
+	}
+	f.Add(blockCbor)
+}
+
+func addInvalidTxSeed(f *testing.F, invalidTxs []uint) {
+	blockCbor, err := gcbor.Encode([]any{
+		uint64(0),
+		[]any{},
+		[]any{},
+		map[uint64]any{},
+		invalidTxs,
+	})
+	if err != nil {
+		f.Fatalf("marshal invalid tx seed: %v", err)
+	}
+	f.Add(blockCbor)
+}
+
+func addInvalidTxSeedWithBodies(f *testing.F, count int, invalidTxs []uint) {
+	bodies := make([]any, count)
+	witnesses := make([]any, count)
+	for i := range bodies {
+		bodies[i] = map[uint64]any{
+			0: []any{},
+			1: []any{[]any{[]byte{0x60, byte(i)}, uint64(1)}},
+			2: uint64(i),
+		}
+		witnesses[i] = map[uint64]any{}
+	}
+	blockCbor, err := gcbor.Encode([]any{
+		uint64(0),
+		bodies,
+		witnesses,
+		map[uint64]any{},
+		invalidTxs,
+	})
+	if err != nil {
+		f.Fatalf("marshal invalid tx seed: %v", err)
+	}
+	f.Add(blockCbor)
+}
+
+func addTxBodyMapSeed(f *testing.F, body map[uint64]any, key uint64) {
+	bodyCbor, err := gcbor.Encode(body)
+	if err != nil {
+		f.Fatalf("marshal tx body seed: %v", err)
+	}
+	f.Add(bodyCbor, uint32(12), key)
+}
 
 func TestExtractHeaderCbor(t *testing.T) {
 	t.Parallel()
@@ -97,6 +333,21 @@ func TestDecodeImmutableBlockBatchPreservesOrder(t *testing.T) {
 	}
 }
 
+func TestDecodeImmutableBlockBatchReportsRealDecodeError(t *testing.T) {
+	t.Parallel()
+
+	blocks := immutableDecodeBenchmarkBlocks(t)
+	blocks[len(blocks)/2].Cbor = []byte{0xff}
+
+	_, err := decodeImmutableBlockBatch(
+		context.Background(),
+		blocks,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		1,
+	)
+	require.Error(t, err)
+}
+
 func TestDecodeImmutableBlockBatchCancellation(t *testing.T) {
 	t.Parallel()
 	blocks := immutableDecodeBenchmarkBlocks(t)
@@ -114,14 +365,57 @@ func TestDecodeImmutableBlockBatchCancellation(t *testing.T) {
 func TestDecodeImmutableBlockBatchDecodeErrorCancelsWorkers(t *testing.T) {
 	t.Parallel()
 	blocks := immutableDecodeBenchmarkBlocks(t)
-	blocks[len(blocks)/2].Cbor = []byte{0xff}
-	_, err := decodeImmutableBlockBatch(
-		context.Background(),
-		blocks,
-		lcommon.VerifyConfig{SkipBodyHashValidation: true},
-		8,
-	)
-	require.Error(t, err)
+	decodeErr := errors.New("decode failed")
+	cancelObserved := make(chan struct{})
+	var cancelOnce sync.Once
+	const workerCount = 8
+	// The first job fails only once the other workers are parked in the
+	// decoder, so the failure always has a live observer. Counting parked
+	// workers rather than handing tokens to job 0 keeps the barrier lossless:
+	// workers released by the cancellation pick up further jobs and re-enter
+	// the decoder, and those late arrivals must neither block nor be dropped.
+	var parked atomic.Int64
+	allParked := make(chan struct{})
+	decoder := func(
+		ctx context.Context,
+		index int,
+		_ immutable.Block,
+		_ lcommon.VerifyConfig,
+	) (gledger.Block, error) {
+		if index == 0 {
+			<-allParked
+			return nil, decodeErr
+		}
+		if parked.Add(1) == workerCount-1 {
+			close(allParked)
+		}
+		<-ctx.Done()
+		cancelOnce.Do(func() { close(cancelObserved) })
+		return nil, ctx.Err()
+	}
+	resultCh := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_, err := decodeImmutableBlockBatchWithDecoder(
+			ctx,
+			blocks,
+			lcommon.VerifyConfig{SkipBodyHashValidation: true},
+			workerCount,
+			decoder,
+		)
+		resultCh <- err
+	}()
+	select {
+	case <-cancelObserved:
+	// Failsafe only: a cancellation that never reaches the workers would
+	// otherwise hang until the package test timeout with no goroutine dump.
+	case <-time.After(30 * time.Second):
+		cancel()
+		require.Fail(t, "worker cancellation was not observed")
+	}
+	err := <-resultCh
+	require.ErrorIs(t, err, decodeErr)
 }
 
 func BenchmarkDecodeImmutableBlockBatch(b *testing.B) {
@@ -305,7 +599,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -325,7 +619,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 		ebbHeader.SlotNumber(),
 		ebbHeader.Hash().Bytes(),
 	)
-	importedEbb, err := cm.BlockByPoint(ebbPoint, nil)
+	importedEbb, err := cm.BlockByPoint(context.Background(), ebbPoint, nil)
 	require.NoError(t, err)
 	require.NotNil(t, importedEbb)
 	assert.Equal(t, ebbPoint.Hash, importedEbb.Hash)
@@ -334,7 +628,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 		nextHeader.SlotNumber(),
 		nextHeader.Hash().Bytes(),
 	)
-	importedNext, err := cm.BlockByPoint(nextPoint, nil)
+	importedNext, err := cm.BlockByPoint(context.Background(), nextPoint, nil)
 	require.NoError(t, err)
 	require.NotNil(t, importedNext)
 	assert.Equal(t, ebbPoint.Hash, importedNext.PrevHash)
@@ -410,7 +704,7 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -449,7 +743,11 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 	assert.Equal(t, expectedPoint.Slot, offset.BlockSlot)
 	assert.Equal(t, expectedPoint.Hash, offset.BlockHash[:])
 
-	storedBlock, err := database.BlockByPoint(db, expectedPoint)
+	storedBlock, err := database.BlockByPoint(
+		context.Background(),
+		db,
+		expectedPoint,
+	)
 	require.NoError(t, err)
 	end := uint64(offset.ByteOffset) + uint64(offset.ByteLength)
 	require.LessOrEqual(t, end, uint64(len(storedBlock.Cbor)))
@@ -528,7 +826,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 		"testdata",
 	)
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -549,7 +847,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 	// for the resume check exercised below. If a future change
 	// makes AddRawBlocks decode the body, swap this for a real
 	// raw block from the immutable testdata directory.
-	err = cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+	err = cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
 		{
 			Slot:        immutableTipSlot + 5,
 			Hash:        bytes.Repeat([]byte{0x42}, 32),
@@ -626,6 +924,7 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 	require.NotNil(t, captured.ChainManager)
 	require.NotNil(t, capturedHook)
 	require.True(t, captured.TrustedReplay)
+	require.NotNil(t, captured.ValidateLeiosCertificate)
 	require.True(t, captured.ManualBlockProcessing)
 }
 
@@ -723,6 +1022,7 @@ func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 				hookCalled = true
 				rollbackErr = loadConfig.ChainManager.PrimaryChain().
 					ValidateRollback(
+						context.Background(),
 						ocommon.NewPoint(0, nil),
 					)
 				return stopAfterRollbackValidation
@@ -914,9 +1214,10 @@ func TestLoadCaptureFailureTrackerCleanReturnsNil(t *testing.T) {
 
 // TestLoadCaptureFailureTrackerSurfacesFailures verifies that a recorded capture
 // failure surfaces as an error that preserves the first cause and names every
-// failed epoch. This is the load-mode safety net for #1959: the ledger
-// suppresses the authoritative capture error and load has no event-driven
-// fallback, so without this the missing mark/reward snapshot would be silent.
+// failed epoch. This is the load-mode safety net for the epoch-0 genesis
+// snapshot: the ledger suppresses the authoritative capture error and load has
+// no event-driven fallback, so without this the missing mark/reward snapshot
+// would be silent.
 func TestLoadCaptureFailureTrackerSurfacesFailures(t *testing.T) {
 	t.Parallel()
 	tracker := &loadCaptureFailureTracker{}
@@ -1003,7 +1304,7 @@ func TestCaptureLoadGenesisSnapshot_RelayWarnsAndContinues(t *testing.T) {
 }
 
 // TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking verifies
-// finding B (#1959): replaying a genesis with Shelley-genesis staking (as
+// replaying a genesis with Shelley-genesis staking (as
 // devnets configure) through `dingo load` must seed the epoch-0 "mark"
 // RewardSnapshot the same way the normal node.Run startup path does via
 // CaptureGenesisSnapshot, or the first reward round applied at the epoch-3
@@ -1039,21 +1340,24 @@ func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
 	db := newTestDB(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	currentTip := cm.PrimaryChain().Tip()
 	stubSlot := immutableTip.Slot + 5
 	stubHash := bytes.Repeat([]byte{0xAB}, 32)
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
-		{
-			Slot:        stubSlot,
-			Hash:        stubHash,
-			BlockNumber: currentTip.BlockNumber + 1,
-			Type:        0,
-			PrevHash:    currentTip.Point.Hash,
-			Cbor:        []byte{0x80},
-		},
-	}))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot:        stubSlot,
+				Hash:        stubHash,
+				BlockNumber: currentTip.BlockNumber + 1,
+				Type:        0,
+				PrevHash:    currentTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point:       ocommon.NewPoint(stubSlot, stubHash),
 		BlockNumber: currentTip.BlockNumber + 1,
@@ -1271,5 +1575,86 @@ func requireChunkTrio(t *testing.T, name, dir string) {
 		require.NoError(t, os.WriteFile(
 			filepath.Join(dir, name+ext), data, 0o640,
 		))
+	}
+}
+
+// TestLoadWithDBPropagatesApplyRowBatching verifies that `dingo load`, which
+// replays blocks without validating them, honours the operator's
+// ledgerApplyRowBatchingEnabled setting as serve mode does.
+func TestLoadWithDBPropagatesApplyRowBatching(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stop := errors.New("stop after ledger config capture")
+	run := func(enabled bool) ledger.LedgerStateConfig {
+		db := newTestDB(t)
+		var captured ledger.LedgerStateConfig
+		old := newLedgerStateForLoad
+		newLedgerStateForLoad = func(cfg ledger.LedgerStateConfig) (*ledger.LedgerState, error) {
+			captured = cfg
+			return nil, stop
+		}
+		t.Cleanup(func() { newLedgerStateForLoad = old })
+		err := LoadWithDB(
+			context.Background(),
+			&config.Config{
+				Network:                       "preview",
+				LedgerApplyRowBatchingEnabled: enabled,
+			},
+			logger,
+			"unused",
+			db,
+		)
+		require.ErrorIs(t, err, stop)
+		return captured
+	}
+	require.True(t, run(true).ApplyRowBatchingEnabled)
+	require.False(t, run(false).ApplyRowBatchingEnabled)
+}
+
+func TestLoadWithDBDefaultConfigCertifiesLegacySnapshots(t *testing.T) {
+	dataDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sqlDB, err := sql.Open("sqlite", filepath.Join(dataDir, "metadata.sqlite")+
+		"?_pragma=synchronous(OFF)&_pragma=journal_mode(MEMORY)")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runner := migrations.Runner{
+		DB: sqlDB, Dialect: "sqlite", Registry: registry[:34],
+		Locker: migrations.NewProcessLocker(), Logger: logger,
+	}
+	require.NoError(t, runner.Run(t.Context()))
+	for _, query := range []string{
+		`INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots) VALUES (658, 280000000, 6, 1, 432000)`,
+		`INSERT INTO pool_stake_snapshot (epoch, snapshot_type, pool_key_hash, total_stake, delegator_count, captured_slot, calculation_version) VALUES (658, 'mark', X'010203', '123456789', 1, 279999999, 2)`,
+		`INSERT INTO reward_snapshot (epoch, snapshot_type, total_active_stake, total_pool_count, total_delegators, captured_slot, boundary_slot, protocol_version, calculation_version) VALUES (658, 'mark', '123456789', 1, 1, 279999999, 280000000, 9, 2)`,
+	} {
+		_, err := sqlDB.ExecContext(t.Context(), query)
+		require.NoError(t, err)
+	}
+	params := mockledger.NewMockConwayProtocolParams()
+	params.ProtocolVersion.Major = 9
+	raw, err := gcbor.Encode(&params)
+	require.NoError(t, err)
+	_, err = sqlDB.ExecContext(t.Context(),
+		`INSERT INTO pparams (era_id, epoch, added_slot, cbor) VALUES (6, 658, 280000000, ?)`, raw)
+	require.NoError(t, err)
+
+	stopAfterOpen := errors.New("stop after certified database open")
+	old := newLedgerStateForLoad
+	newLedgerStateForLoad = func(ledger.LedgerStateConfig) (*ledger.LedgerState, error) {
+		return nil, stopAfterOpen
+	}
+	t.Cleanup(func() { newLedgerStateForLoad = old })
+	cfg := &config.Config{DatabasePath: dataDir}
+	cfg.Plugins.Storage.Blob = plugin.Selection{Provider: "badger"}
+	cfg.Plugins.Storage.Metadata = plugin.Selection{Provider: "sqlite"}
+	err = LoadWithDB(t.Context(), cfg, logger, "unused", nil)
+	require.ErrorIs(t, err, stopAfterOpen)
+	for _, table := range []string{"pool_stake_snapshot", "reward_snapshot"} {
+		var version uint
+		require.NoError(t, sqlDB.QueryRowContext(t.Context(),
+			"SELECT calculation_version FROM "+table).Scan(&version))
+		require.Equal(t, models.RewardStakeCalculationVersion, version)
 	}
 }

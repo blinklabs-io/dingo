@@ -24,14 +24,14 @@ import (
 )
 
 // TestRequiredCostModelFailsClosedOnMissingEntry is a regression test for
-// issue #3528: a missing Plutus cost model must return a configuration
-// error rather than silently reaching script evaluation. Before
+// fail-closed configuration: a missing Plutus cost model must return a
+// configuration error rather than silently reaching script evaluation. Before
 // requiredCostModel existed, ledger/eras/{alonzo,babbage,conway}.go indexed
 // pp.CostModels[key] directly; a missing key returns Go's zero value (a nil
 // slice) rather than an error, and plutigo's costModelFromList treats a
-// nil/short cost-model slice as "use the built-in default cost model"
-// instead of failing -- silently evaluating scripts under the wrong,
-// not-this-network's cost parameters.
+// nil/short cost-model slice as "use the built-in default cost model" instead
+// of failing -- silently evaluating scripts under the wrong, not-this-network's
+// cost parameters.
 func TestRequiredCostModelFailsClosedOnMissingEntry(t *testing.T) {
 	t.Run("missing key returns a configuration error", func(t *testing.T) {
 		_, err := requiredCostModel(nil, 2, "PlutusV3")
@@ -53,7 +53,7 @@ func TestRequiredCostModelFailsClosedOnMissingEntry(t *testing.T) {
 	t.Run(
 		"present, short-but-real-for-its-era model is accepted",
 		func(t *testing.T) {
-			// Regression test for a human-review finding: requiredCostModel
+			// Regression test: requiredCostModel
 			// must NOT reject a cost model just because it is shorter than
 			// plutigo's current (protocol-version-11) parameter table
 			// (lang.GetParamNamesForVersion). The parameter count has grown
@@ -89,7 +89,7 @@ func TestRequiredCostModelFailsClosedOnMissingEntry(t *testing.T) {
 }
 
 // TestRequiredCostModelAcceptsRealAlonzoGenesisModel is a regression test
-// for a human-review finding: requiredCostModel's earlier length floor
+// for requiredCostModel's earlier length floor
 // (checked against plutigo's current, protocol-version-11 parameter table)
 // rejected the PlutusV1 cost model this repository's own shipped mainnet
 // genesis carries, stalling replay from genesis at the first Alonzo-era

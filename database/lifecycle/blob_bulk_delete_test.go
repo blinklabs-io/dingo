@@ -305,6 +305,7 @@ func newCountingTestDB(t *testing.T) (*database.Database, *countingBlobStore) {
 	require.NoError(t, err)
 
 	db, err := database.New(
+		context.Background(),
 		config,
 		database.Stores{Blob: counting, Metadata: metadataStore},
 	)
@@ -316,11 +317,10 @@ func newCountingTestDB(t *testing.T) (*database.Database, *countingBlobStore) {
 	return db, counting
 }
 
-// TestDeleteBlocksAfterSkipsSparseGapWithoutPerIDLookups guards against
-// cubic-dev-ai finding #2: the original loop probed every numeric ID in
-// (afterID, tipID] one at a time (via db.BlockByIndex, one blob Get per
-// ID), so a Mithril-bootstrap-style sparse gap of unimported IDs turned a
-// small deletion into one remote lookup per absent ID -- for a
+// TestDeleteBlocksAfterSkipsSparseGapWithoutPerIDLookups verifies sparse
+// ranges skip absent numeric IDs instead of issuing one remote lookup per
+// ID. A Mithril-bootstrap-style gap of unimported IDs can otherwise turn a
+// small deletion into one blob lookup per absent ID -- for a
 // cloud-backed store that is a catastrophic number of remote calls for a
 // deep truncate spanning a large gap. The fix seeks the ordered "bi" index
 // once per batch and walks forward only over entries that actually exist,
@@ -433,6 +433,7 @@ func newErroringIteratorTestDB(
 	require.NoError(t, err)
 
 	db, err := database.New(
+		context.Background(),
 		config,
 		database.Stores{
 			Blob: &erroringIteratorBlobStore{
@@ -559,6 +560,7 @@ func newMidWalkErrorTestDB(
 	require.NoError(t, err)
 
 	db, err := database.New(
+		context.Background(),
 		config,
 		database.Stores{
 			Blob: &midWalkErrorBlobStore{
@@ -848,6 +850,7 @@ func newCloudLikeTestDB(t *testing.T) *database.Database {
 	require.NoError(t, err)
 
 	db, err := database.New(
+		context.Background(),
 		config,
 		database.Stores{
 			Blob:     &cloudLikeBlobStore{BlobStore: realBlob},
@@ -863,8 +866,8 @@ func newCloudLikeTestDB(t *testing.T) *database.Database {
 }
 
 // TestDeleteBlocksAfterHonestlyReportsProgressOnCloudLikeMidBatchFailureAndResumeIsSafe
-// guards against cubic-dev-ai finding #1: for a cloud-backed blob store
-// (GCS/S3), individual Delete calls are not rollback-able -- once issued,
+// verifies cloud-backed deletion progress and safe resumption: individual
+// Delete calls on GCS or S3 are not rollback-able -- once issued,
 // they are permanent regardless of what happens to the rest of the batch
 // afterward (see gcsTxn/s3Txn's Commit/Rollback, both no-ops). The
 // original code assumed txn.Do's rollback always undid a failed batch and
@@ -1030,6 +1033,7 @@ func newPartialCommitTestDB(
 		cloudLikeBlobStore: &cloudLikeBlobStore{BlobStore: realBlob},
 	}
 	db, err := database.New(
+		context.Background(),
 		config,
 		database.Stores{
 			Blob:     blobStore,

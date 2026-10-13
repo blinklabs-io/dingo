@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -25,11 +26,15 @@ import (
 // is nil a write transaction is opened, committed on success and
 // rolled back on error via Txn.Do; pass an existing write txn to
 // participate in a wider unit of work.
-func (d *Database) CreateDrep(txn *Txn, drep *models.Drep) error {
+func (d *Database) CreateDrep(
+	ctx context.Context,
+	txn *Txn,
+	drep *models.Drep,
+) error {
 	if txn != nil {
 		return d.governanceStore().CreateDrep(txn.Metadata(), drep)
 	}
-	return d.MetadataTxn(true).Do(func(t *Txn) error {
+	return d.MetadataTxn(ctx, true).Do(func(t *Txn) error {
 		return d.governanceStore().CreateDrep(t.Metadata(), drep)
 	})
 }
@@ -38,47 +43,35 @@ func (d *Database) CreateDrep(txn *Txn, drep *models.Drep) error {
 // registered only after the slot are deleted; remaining DReps have their
 // anchor and active status restored.
 func (d *Database) RestoreDrepStateAtSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().RestoreDrepStateAtSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to restore DRep state at slot %d: %w",
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		if err := d.governanceStore().RestoreDrepStateAtSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to restore DRep state at slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetDrep returns a drep by credential hash only (no tag filter).
 // Use for the protocol validation path where only a hash is available.
 func (d *Database) GetDrep(
+	ctx context.Context,
 	cred []byte,
 	includeInactive bool,
 	txn *Txn,
 ) (*models.Drep, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	ret, err := d.governanceStore().
@@ -94,13 +87,14 @@ func (d *Database) GetDrep(
 
 // GetDrepByCredential returns a drep by the full credential identity (tag + hash).
 func (d *Database) GetDrepByCredential(
+	ctx context.Context,
 	credentialTag uint8,
 	cred []byte,
 	includeInactive bool,
 	txn *Txn,
 ) (*models.Drep, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	ret, err := d.governanceStore().GetDrepByCredential(
@@ -117,10 +111,11 @@ func (d *Database) GetDrepByCredential(
 
 // GetActiveDreps returns all active DReps
 func (d *Database) GetActiveDreps(
+	ctx context.Context,
 	txn *Txn,
 ) ([]*models.Drep, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.governanceStore().GetActiveDreps(txn.Metadata())
@@ -130,12 +125,13 @@ func (d *Database) GetActiveDreps(
 // against the most recent registration certificate for the DRep
 // credential, or nil when no recorded deposit exists.
 func (d *Database) GetDrepLastRegistrationDeposit(
+	ctx context.Context,
 	credentialTag uint8,
 	credential []byte,
 	txn *Txn,
 ) (*uint64, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.governanceStore().GetDrepLastRegistrationDeposit(
@@ -150,6 +146,7 @@ func (d *Database) GetDrepLastRegistrationDeposit(
 // registration metadata (added_slot, anchor_url, anchor_hash, active)
 // is never overwritten by the vote-replay recovery path.
 func (d *Database) InsertDrepIfAbsent(
+	ctx context.Context,
 	credentialTag uint8,
 	cred []byte,
 	slot uint64,
@@ -158,34 +155,20 @@ func (d *Database) InsertDrepIfAbsent(
 	active bool,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().InsertDrepIfAbsent(
-		credentialTag,
-		cred,
-		slot,
-		url,
-		hash,
-		active,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf("failed to insert DRep if absent: %w", err)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		if err := d.governanceStore().InsertDrepIfAbsent(
+			credentialTag,
+			cred,
+			slot,
+			url,
+			hash,
+			active,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to insert DRep if absent: %w", err)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetDRepVotingPower calculates the voting power for a DRep by summing
@@ -196,13 +179,14 @@ func (d *Database) InsertDrepIfAbsent(
 // (byte-identical to the pre-CIP query), >0 = exclude accounts whose
 // expiration_epoch is nonzero and less than expiryEpoch.
 func (d *Database) GetDRepVotingPower(
+	ctx context.Context,
 	credentialTag uint8,
 	drepCredential []byte,
 	expiryEpoch uint64,
 	txn *Txn,
 ) (uint64, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.governanceStore().GetDRepVotingPower(
@@ -218,12 +202,13 @@ func (d *Database) GetDRepVotingPower(
 // `delegators` member of the GetDRepState ledger query result. credentialTag
 // distinguishes key (0) from script (1) DRep credentials sharing the same hash.
 func (d *Database) GetDRepDelegators(
+	ctx context.Context,
 	credentialTag uint8,
 	drepCredential []byte,
 	txn *Txn,
 ) ([]models.StakeCredentialRef, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.governanceStore().GetDRepDelegators(
@@ -233,16 +218,72 @@ func (d *Database) GetDRepDelegators(
 	)
 }
 
+// GetDRepDelegatorsAtSlot returns the stake credentials delegating to each
+// of dreps (every DRep when empty) at slot, keyed by the DRep's
+// StakeCredentialRef.MapKey().
+func (d *Database) GetDRepDelegatorsAtSlot(
+	ctx context.Context,
+	dreps []models.StakeCredentialRef,
+	slot uint64,
+	txn *Txn,
+) (map[string][]models.StakeCredentialRef, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetDRepDelegatorsAtSlot(
+		dreps,
+		slot,
+		txn.Metadata(),
+	)
+}
+
+// GetDrepsAtSlot returns the given DReps (every DRep when refs is empty)
+// that were registered at slot, as they stood there.
+func (d *Database) GetDrepsAtSlot(
+	ctx context.Context,
+	refs []models.StakeCredentialRef,
+	slot uint64,
+	txn *Txn,
+) ([]*models.Drep, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetDrepsAtSlot(refs, slot, txn.Metadata())
+}
+
+// GetDrepRegistrationDepositsAtSlot returns the deposit recorded against
+// the latest registration at or before slot of each of refs (every DRep when
+// empty), keyed by models.DrepDepositKey.
+func (d *Database) GetDrepRegistrationDepositsAtSlot(
+	ctx context.Context,
+	refs []models.StakeCredentialRef,
+	slot uint64,
+	txn *Txn,
+) (map[string]uint64, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetDrepRegistrationDepositsAtSlot(
+		refs,
+		slot,
+		txn.Metadata(),
+	)
+}
+
 // GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower; see
 // the metadata-store interface for the contract. expiryEpoch is the
 // CIP-0163 gate; see GetDRepVotingPower.
 func (d *Database) GetDRepVotingPowerBatch(
+	ctx context.Context,
 	drepCredentials []models.StakeCredentialRef,
 	expiryEpoch uint64,
 	txn *Txn,
 ) (map[string]uint64, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	result, err := d.governanceStore().GetDRepVotingPowerBatch(
@@ -265,12 +306,13 @@ func (d *Database) GetDRepVotingPowerBatch(
 // delegation type. expiryEpoch is the CIP-0163 gate; see
 // GetDRepVotingPower.
 func (d *Database) GetDRepVotingPowerByType(
+	ctx context.Context,
 	drepTypes []uint64,
 	expiryEpoch uint64,
 	txn *Txn,
 ) (map[uint64]uint64, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	result, err := d.governanceStore().GetDRepVotingPowerByType(
@@ -292,51 +334,127 @@ func (d *Database) GetDRepVotingPowerByType(
 // UpdateDRepActivity updates the DRep's last activity epoch and
 // recalculates the expiry epoch.
 func (d *Database) UpdateDRepActivity(
+	ctx context.Context,
 	credentialTag uint8,
 	drepCredential []byte,
 	activityEpoch uint64,
 	inactivityPeriod uint64,
+	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().UpdateDRepActivity(
-		credentialTag,
-		drepCredential,
-		activityEpoch,
-		inactivityPeriod,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to update DRep activity: %w",
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		if err := d.governanceStore().UpdateDRepActivity(
+			credentialTag,
+			drepCredential,
+			activityEpoch,
+			inactivityPeriod,
+			slot,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to update DRep activity: %w",
+				err,
+			)
 		}
-		owned = false
+		return nil
+	})
+}
+
+// BumpDormantDRepExpiries extends active DRep expiries at an empty Conway
+// governance boundary. Replaying the same boundary slot is idempotent.
+func (d *Database) BumpDormantDRepExpiries(
+	ctx context.Context,
+	slot uint64,
+	txn *Txn,
+) (int, error) {
+	var affected int
+	err := d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		var err error
+		affected, err = d.governanceStore().BumpDormantDRepExpiries(
+			slot,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to bump dormant DRep expiries: %w", err)
+		}
+		return nil
+	})
+	return affected, err
+}
+
+func (d *Database) GetDormantDRepEpochs(ctx context.Context, txn *Txn) (uint64, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
 	}
-	return nil
+	return d.governanceStore().GetDormantDRepEpochs(txn.Metadata())
+}
+
+func (d *Database) ResetDormantDRepEpochs(ctx context.Context, slot uint64, txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		if err := d.governanceStore().ResetDormantDRepEpochs(
+			slot,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to reset dormant DRep epoch count: %w", err)
+		}
+		return nil
+	})
+}
+
+func (d *Database) SetImportedDormantDRepEpochs(
+	ctx context.Context,
+	dormantEpochs uint64,
+	txn *Txn,
+) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		if err := d.governanceStore().SetImportedDormantDRepEpochs(
+			dormantEpochs,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to import dormant DRep epoch count: %w", err)
+		}
+		return nil
+	})
+}
+
+// RecordDRepActivityEpoch sets a DRep's last activity epoch without touching
+// its expiry. Historical replay below a Mithril anchor uses it: the snapshot's
+// DRepState expiry already reflects the dormant-epoch rules replay does not
+// run, so recomputing expiry from a historical vote or certificate would
+// replace a correct value with a stale one.
+func (d *Database) RecordDRepActivityEpoch(
+	ctx context.Context,
+	credentialTag uint8,
+	drepCredential []byte,
+	activityEpoch uint64,
+	txn *Txn,
+) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		if err := d.governanceStore().RecordDRepActivityEpoch(
+			credentialTag,
+			drepCredential,
+			activityEpoch,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to record DRep activity epoch: %w",
+				err,
+			)
+		}
+		return nil
+	})
 }
 
 // GetExpiredDReps returns all active DReps whose expiry epoch is at
 // or before the given epoch.
 func (d *Database) GetExpiredDReps(
+	ctx context.Context,
 	epoch uint64,
 	txn *Txn,
 ) ([]*models.Drep, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.governanceStore().GetExpiredDReps(epoch, txn.Metadata())
@@ -347,10 +465,11 @@ func (d *Database) GetExpiredDReps(
 // listing all active DReps does not need one query per DRep. Credentials
 // with no registration_drep row are absent from the map.
 func (d *Database) GetDrepLastRegistrationDeposits(
+	ctx context.Context,
 	txn *Txn,
 ) (map[string]uint64, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.governanceStore().GetDrepLastRegistrationDeposits(txn.Metadata())

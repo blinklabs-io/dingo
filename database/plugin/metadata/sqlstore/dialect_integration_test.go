@@ -1,5 +1,19 @@
 //go:build dingo_db_integration
 
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package sqlstore
 
 import (
@@ -25,6 +39,22 @@ import (
 )
 
 func TestPostgresSQLStoreIntegration(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testSQLStoreIntegration(t, "pgx", dsn, "postgres", schema)
+}
+
+func TestPostgresRewardLiveStakeBatchBoundaries(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testRewardLiveStakeBatchBoundaries(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+// newPostgresIntegrationSchema creates a throwaway schema and returns a DSN
+// whose search_path selects it.
+func newPostgresIntegrationSchema(t *testing.T) (string, string) {
+	t.Helper()
 	dsn := os.Getenv("DINGO_POSTGRES_DSN")
 	if dsn == "" {
 		dsn = "postgres://postgres:dingo@127.0.0.1:55432/dingo_test?sslmode=disable"
@@ -39,16 +69,98 @@ func TestPostgresSQLStoreIntegration(t *testing.T) {
 		_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
 		_ = admin.Close()
 	})
-	testSQLStoreIntegration(
+	return postgresDSNWithSearchPath(t, dsn, schema), schema
+}
+
+func TestPostgresPParamUpdateOrdering(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testPParamUpdateOrdering(
 		t,
-		"pgx",
-		postgresDSNWithSearchPath(t, dsn, schema),
-		"postgres",
-		schema,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLPParamUpdateOrdering(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testPParamUpdateOrdering(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
+func TestPostgresUtxoOrderingAssetFilter(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testUtxoOrderingAssetFilter(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLUtxoOrderingAssetFilter(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testUtxoOrderingAssetFilter(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
 	)
 }
 
 func TestMySQLSQLStoreIntegration(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testSQLStoreIntegration(t, "mysql", dsn, "mysql", database)
+}
+
+func TestMySQLRewardLiveStakeBatchBoundaries(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testRewardLiveStakeBatchBoundaries(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
+func TestMySQLClearDanglingDRepDelegations(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	store := newIntegrationSQLStore(t, "mysql", dsn, "mysql", database)
+	drep := bytes.Repeat([]byte{0xD1}, 28)
+	stake := bytes.Repeat([]byte{0xD2}, 28)
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    drep,
+		AddedSlot:     10,
+		Active:        false,
+	}))
+	require.NoError(t, store.ImportAccount(&models.Account{
+		StakingKey:    stake,
+		CredentialTag: 0,
+		Drep:          drep,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     10,
+		CreatedSlot:   10,
+		Active:        true,
+	}, nil))
+
+	cleared, err := store.ClearDanglingDRepDelegations(20, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, cleared)
+	account, err := store.GetAccountByCredential(0, stake, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Empty(t, account.Drep)
+
+	db, ctx, err := store.dbFromTxn(nil)
+	require.NoError(t, err)
+	var clearCount int
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT count(*) FROM account_drep_clear
+WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?`,
+		0, stake, 20,
+	).Scan(&clearCount))
+	require.Equal(t, 1, clearCount)
+}
+
+// newMySQLIntegrationDatabase creates a throwaway database and returns a DSN
+// that selects it.
+func newMySQLIntegrationDatabase(t *testing.T) (string, string) {
+	t.Helper()
 	dsn := os.Getenv("DINGO_MYSQL_DSN")
 	if dsn == "" {
 		dsn = "root:dingo@tcp(127.0.0.1:53306)/dingo_test?parseTime=true"
@@ -63,13 +175,7 @@ func TestMySQLSQLStoreIntegration(t *testing.T) {
 		_, _ = admin.Exec("DROP DATABASE `" + database + "`")
 		_ = admin.Close()
 	})
-	testSQLStoreIntegration(
-		t,
-		"mysql",
-		mysqlDSNWithDatabase(t, dsn, database),
-		"mysql",
-		database,
-	)
+	return mysqlDSNWithDatabase(t, dsn, database), database
 }
 
 func postgresDSNWithSearchPath(t *testing.T, dsn, schema string) string {
@@ -90,10 +196,12 @@ func mysqlDSNWithDatabase(t *testing.T, dsn, database string) string {
 	return parsed.FormatDSN()
 }
 
-func testSQLStoreIntegration(
+// newIntegrationSQLStore opens, migrates and starts a store against an
+// external PostgreSQL or MySQL database.
+func newIntegrationSQLStore(
 	t *testing.T,
 	driver, dsn, dialectName, lockNamespace string,
-) {
+) *Store {
 	t.Helper()
 	db, err := OpenDB(driver, dsn, dialectName, false)
 	require.NoError(t, err)
@@ -123,13 +231,24 @@ func testSQLStoreIntegration(
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	require.NoError(t, store.Start(context.Background()))
 	require.True(t, store.Ready())
+	return store
+}
+
+func testSQLStoreIntegration(
+	t *testing.T,
+	driver, dsn, dialectName, lockNamespace string,
+) {
+	t.Helper()
+	store := newIntegrationSQLStore(t, driver, dsn, dialectName, lockNamespace)
+	db, dialect := store.writeDB, store.dialect
 	testBatchedTransactionWrites(t, store)
+	testLimitOffset(t, store)
 
 	txn := store.Transaction(t.Context())
 	require.NoError(t, store.SetCommitTimestamp(42, txn))
 	require.NoError(t, store.SetNetworkState(11, 22, 33, txn))
 	require.NoError(t, txn.Commit())
-	timestamp, err := store.GetCommitTimestamp()
+	timestamp, err := store.GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, int64(42), timestamp)
 	state, err := store.GetNetworkState(nil)
@@ -138,11 +257,11 @@ func testSQLStoreIntegration(
 	require.Equal(t, types.Uint64(22), state.Reserves)
 	require.Equal(t, uint64(33), state.Slot)
 
-	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
+	require.NoError(t, store.SetNodeSettings(context.Background(), &types.NodeSettings{
 		StorageMode: types.StorageModeCore,
 		Network:     "integration",
 	}))
-	settings, err := store.GetNodeSettings()
+	settings, err := store.GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "integration", settings.Network)
 	// Simulate a legacy singleton row whose network was left empty.  The
@@ -152,11 +271,11 @@ func testSQLStoreIntegration(
 		dialect.Rebind("UPDATE node_settings SET network = '' WHERE id = 1"),
 	)
 	require.NoError(t, err)
-	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
+	require.NoError(t, store.SetNodeSettings(context.Background(), &types.NodeSettings{
 		StorageMode: types.StorageModeCore,
 		Network:     "legacy-fixed",
 	}))
-	settings, err = store.GetNodeSettings()
+	settings, err = store.GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "legacy-fixed", settings.Network)
 	checkpoint := &models.BackfillCheckpoint{
@@ -484,11 +603,11 @@ func testBatchedTransactionWrites(t *testing.T, store *Store) {
 		var err error
 		if historical {
 			err = store.SetTransactionBatchedHistorical(
-				transaction, point, uint32(id), nil, false, true, batch, txn,
+				transaction, point, uint32(id), nil, false, true, batch, txn, 0,
 			)
 		} else {
 			err = store.SetTransactionBatched(
-				transaction, point, uint32(id), nil, false, batch, txn,
+				transaction, point, uint32(id), nil, false, batch, txn, 0,
 			)
 		}
 		require.NoError(t, err)

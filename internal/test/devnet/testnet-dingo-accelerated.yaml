@@ -1,9 +1,8 @@
 # DevNet configurator spec: accelerated all-dingo network (3 pools).
 #
-# Mirrors testnet-dingo.yaml but with compressed consensus timing so one
-# scenario timeline — readiness, propagation, agreement, an epoch
-# transition, a peer interruption, and a relay restart — fits the
-# reference-runner budget in internal/test/devnet/README.md. The canonical
+# Mirrors testnet-dingo.yaml with compressed consensus timing so the
+# accelerated timeline and two governance epoch boundaries fit the runner
+# budget in internal/test/devnet/README.md. The canonical
 # testnet-dingo.yaml stays the configuration for soak and canary runs;
 # this file is not a replacement for it.
 #
@@ -52,6 +51,18 @@ protocolParams:
 --- # Alonzo Genesis Override
 
 --- # Conway Genesis Override
+dRepVotingThresholds:
+  committeeNormal: 0.0
+  committeeNoConfidence: 0.0
+  hardForkInitiation: 0.0
+  motionNoConfidence: 0.0
+poolVotingThresholds:
+  committeeNormal: 0.51
+  committeeNoConfidence: 0.51
+  hardForkInitiation: 0.51
+  motionNoConfidence: 0.51
+committeeMinSize: 7
+committeeMaxTermLength: 146
 
 --- # Node Config Override
 TestShelleyHardForkAtEpoch: 0

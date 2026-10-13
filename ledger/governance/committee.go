@@ -1,3 +1,17 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package governance
 
 import (
@@ -8,127 +22,104 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// ResolveCommitteeProposal resolves the applicable pending UpdateCommittee
-// proposal for a cold credential. Only proposals extending the current
-// committee-purpose root participate; among competing siblings the newest
-// proposal wins. A credential in the winning proposal's removal set is absent.
+// ResolveCommitteeProposal resolves a cold credential as a potential future
+// committee member: one that a pending UpdateCommittee proposal extending the
+// current committee-purpose root would add. cardano-ledger's GOVCERT accepts a
+// certificate from such a credential when any pending committee proposal names
+// it among its new members (isPotentialFutureMember), whatever other proposals
+// do with it, so a proposal removing the credential does not cancel another
+// that adds it. Among the proposals that add it, the newest supplies the
+// returned expiry epoch and term start slot.
 func ResolveCommitteeProposal(
 	proposals []*models.GovernanceProposal,
 	root *models.GovernanceProposal,
 	coldCredential lcommon.Credential,
 	pparams lcommon.ProtocolParameters,
 ) (*lcommon.CommitteeMember, uint64, error) {
-	var selected *models.GovernanceProposal
-	var selectedAction *lcommon.UpdateCommitteeGovAction
-	for _, proposal := range proposals {
+	var (
+		selected *models.GovernanceProposal
+		expiry   uint64
+	)
+	consider := func(
+		proposal *models.GovernanceProposal,
+		inLineage bool,
+	) error {
 		if proposal == nil ||
 			lcommon.GovActionType(
 				proposal.ActionType,
 			) != lcommon.GovActionTypeUpdateCommittee ||
-			!committeeProposalInLineage(proposals, proposal, root, nil) {
-			continue
+			!inLineage {
+			return nil
 		}
 		action, err := DecodeGovActionForPParams(
 			proposal.GovActionCbor, proposal.ActionType, pparams,
 		)
 		if err != nil {
-			return nil, 0, fmt.Errorf("decode committee proposal: %w", err)
+			return fmt.Errorf("decode committee proposal: %w", err)
 		}
 		update, ok := action.(*lcommon.UpdateCommitteeGovAction)
 		if !ok {
-			return nil, 0, fmt.Errorf("unexpected committee action %T", action)
+			return fmt.Errorf("unexpected committee action %T", action)
 		}
-		if !committeeActionMentionsCredential(update, coldCredential) {
-			continue
+		proposedExpiry, adds := committeeActionAddsCredential(
+			update,
+			coldCredential,
+		)
+		if !adds {
+			return nil
 		}
 		if selected == nil || proposal.AddedSlot > selected.AddedSlot ||
 			(proposal.AddedSlot == selected.AddedSlot && proposal.ID > selected.ID) {
-			selected, selectedAction = proposal, update
+			selected, expiry = proposal, proposedExpiry
+		}
+		return nil
+	}
+	for _, proposal := range proposals {
+		if err := consider(
+			proposal,
+			proposal != nil &&
+				committeeProposalInLineage(proposals, proposal, root, nil),
+		); err != nil {
+			return nil, 0, err
 		}
 	}
 	if selected == nil && root == nil {
 		// Some imported histories do not carry a reconstructable enacted root.
-		// Preserve their rootless pending proposals, while still selecting only
-		// the newest proposal rather than the storage order's oldest match.
-		// With a root present, a proposal outside its lineage cannot enact, so
-		// the fallback must not reach for one.
+		// Preserve their rootless pending proposals. With a root present, a
+		// proposal outside its lineage cannot enact, so the fallback must not
+		// reach for one.
 		for _, proposal := range proposals {
-			if proposal == nil ||
-				lcommon.GovActionType(
-					proposal.ActionType,
-				) != lcommon.GovActionTypeUpdateCommittee {
-				continue
-			}
-			action, err := DecodeGovActionForPParams(
-				proposal.GovActionCbor, proposal.ActionType, pparams,
-			)
-			if err != nil {
-				return nil, 0, fmt.Errorf("decode committee proposal: %w", err)
-			}
-			update, ok := action.(*lcommon.UpdateCommitteeGovAction)
-			if !ok {
-				return nil, 0, fmt.Errorf(
-					"unexpected committee action %T",
-					action,
-				)
-			}
-			if !committeeActionMentionsCredential(update, coldCredential) {
-				continue
-			}
-			if selected == nil || proposal.AddedSlot > selected.AddedSlot ||
-				(proposal.AddedSlot == selected.AddedSlot && proposal.ID > selected.ID) {
-				selected, selectedAction = proposal, update
+			if err := consider(proposal, true); err != nil {
+				return nil, 0, err
 			}
 		}
 	}
 	if selected == nil {
 		return nil, 0, nil
 	}
-	// selectedAction is only ever assigned alongside selected, and only with
-	// a non-nil update: committeeActionMentionsCredential returns false for a
-	// nil action, so a nil update takes the continue in both loops. The
-	// selected == nil return above therefore also rules out a nil
-	// selectedAction, a correlation nilaway cannot make.
-	//nolint:nilaway // non-nil whenever selected is; see above
-	for _, credential := range selectedAction.Credentials {
-		if credential.CredType == coldCredential.CredType &&
-			credential.Credential == coldCredential.Credential {
-			return nil, 0, nil
-		}
-	}
-	for credential, expiry := range selectedAction.CredEpochs {
-		if credential != nil &&
-			credential.CredType == coldCredential.CredType &&
-			credential.Credential == coldCredential.Credential {
-			return &lcommon.CommitteeMember{
-				ColdKey: coldCredential.Credential, ExpiryEpoch: uint64(expiry),
-			}, selected.AddedSlot, nil
-		}
-	}
-	return nil, 0, nil
+	return &lcommon.CommitteeMember{
+		ColdKey:     coldCredential.Credential,
+		ExpiryEpoch: expiry,
+	}, selected.AddedSlot, nil
 }
 
-func committeeActionMentionsCredential(
+// committeeActionAddsCredential reports whether an UpdateCommittee action names
+// the exact tagged cold credential among its new members, with its expiry.
+func committeeActionAddsCredential(
 	action *lcommon.UpdateCommitteeGovAction,
 	coldCredential lcommon.Credential,
-) bool {
+) (uint64, bool) {
 	if action == nil {
-		return false
+		return 0, false
 	}
-	for _, credential := range action.Credentials {
-		if credential.CredType == coldCredential.CredType &&
-			credential.Credential == coldCredential.Credential {
-			return true
-		}
-	}
-	for credential := range action.CredEpochs {
+	for credential, expiry := range action.CredEpochs {
 		if credential != nil &&
 			credential.CredType == coldCredential.CredType &&
 			credential.Credential == coldCredential.Credential {
-			return true
+			return expiry, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 func committeeProposalExtends(

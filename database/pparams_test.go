@@ -8,22 +8,232 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package database
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestGetPParams_PicksRowMatchingRequestedEra pins the previous-era
+// pparams lookup performed by ledger.LedgerState.computePParams at
+// every era boundary. Before the fix, the eras-DevNet log showed it
+// failing at every inter-era walkback (epoch 1 / Allegra, epoch 2 /
+// Mary, epoch 3 / Alonzo) with "cbor: cannot unmarshal CBOR array into
+// Go value of type [shelley/mary/alonzo].ProtocolParameters (cannot
+// decode CBOR array to struct with different number of elements)".
+//
+// Reproduction:
+//
+//   - The epoch-rollover path writes pparams once via the
+//     ComputeAndApplyPParamUpdates code path (era = old era) and a
+//     second time via ledger.transitionToEra (era = new era), both at
+//     the same `startEpoch` value, the OLD epoch's id. Without the
+//     era filter, the metadata plugin's GetPParams returned "the most
+//     recent row at epoch <= X ordered by epoch DESC, id DESC LIMIT
+//     1" — so the row that won the read was the LATEST inserted row,
+//     which is the new-era-shape one.
+//   - When ledger walks epochCache backwards looking for the previous
+//     era's pparams, it picks `prevEra.DecodePParamsFunc` based on the
+//     cache entry's recorded EraId. Without the filter the read
+//     returned CBOR for a *different* era's struct shape and the
+//     decode failed.
+//
+// Field counts of the relevant pparams structs (per gouroboros v0.166.1):
+//
+//	shelley.ShelleyProtocolParameters:        17 fields
+//	allegra.AllegraProtocolParameters: alias = shelley
+//	mary.MaryProtocolParameters:              18 fields  (+ MinPoolCost)
+//	alonzo.AlonzoProtocolParameters:          27 fields  (+ Plutus)
+//
+// The fix folds an era_id filter into GetPParams itself: the SQL
+// `WHERE era_id = ?` makes the returned row match the era the caller
+// has chosen its decoder for. The two scenarios below seed both rows
+// at the same epoch and confirm the filter picks the right one.
+func TestGetPParams_PicksRowMatchingRequestedEra(t *testing.T) {
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	txn := db.Transaction(context.Background(), true)
+
+	// Step 1: simulate the old era's epoch-rollover write. At the
+	// boundary between Allegra (epoch 1) and Mary (epoch 2), the
+	// rollover code writes pparams with the Allegra (old) era id. The
+	// shape is Allegra's = Shelley's, 17 fields.
+	allegraPP := &shelley.ShelleyProtocolParameters{
+		MinFeeA:          44,
+		MinFeeB:          155381,
+		MaxBlockBodySize: 65536,
+		MaxTxSize:        16384,
+		ProtocolMajor:    3, // Allegra
+	}
+	allegraCbor, err := cbor.Encode(allegraPP)
+	require.NoError(t, err)
+	const boundaryEpoch uint64 = 1
+	const boundarySlot uint64 = 75
+	require.NoError(t, db.SetPParams(
+		allegraCbor, boundarySlot, boundaryEpoch,
+		ledger.EraIdAllegra, txn,
+	))
+
+	// Step 2: simulate ledger.transitionToEra writing the new era's
+	// pparams at the SAME `startEpoch`. The caller in state.go passes
+	// `snapshotEpoch.EpochId` (the old epoch id), then transitionToEra
+	// stores the post-hard-fork new-era-shape pparams against that old
+	// epoch number. For the Allegra→Mary transition the shape is Mary's
+	// = 18 fields.
+	maryPP := &mary.MaryProtocolParameters{
+		MinFeeA:          44,
+		MinFeeB:          155381,
+		MaxBlockBodySize: 65536,
+		MaxTxSize:        16384,
+		ProtocolMajor:    4, // Mary
+		MinPoolCost:      340000000,
+	}
+	maryCbor, err := cbor.Encode(maryPP)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		maryCbor, boundarySlot+1, boundaryEpoch,
+		ledger.EraIdMary, txn,
+	))
+	require.NoError(t, txn.Commit())
+
+	// Step 3: emulate ledger.computePParams's previous-era walkback.
+	// It found epochCache[i] with EraId == EraIdAllegra at EpochId ==
+	// boundaryEpoch and asks the database for that epoch's pparams,
+	// passing the Allegra decoder.
+	allegraDecode := func(data []byte) (lcommon.ProtocolParameters, error) {
+		var pp shelley.ShelleyProtocolParameters // = Allegra alias
+		if _, err := cbor.Decode(data, &pp); err != nil {
+			return nil, err
+		}
+		return &pp, nil
+	}
+	got, err := db.GetPParams(
+		boundaryEpoch, ledger.EraIdAllegra, allegraDecode, nil,
+	)
+	require.NoError(
+		t, err,
+		"GetPParams must return CBOR matching the era the caller "+
+			"intends to decode for. Without the era filter the read "+
+			"returned the latest insert at this epoch — here the "+
+			"Mary-shape row stored by transitionToEra — and the "+
+			"Allegra decoder failed on element count.",
+	)
+	allegraGot, ok := got.(*shelley.ShelleyProtocolParameters)
+	require.Truef(
+		t, ok,
+		"expected *shelley.ShelleyProtocolParameters (Allegra), got %T",
+		got,
+	)
+	require.Equal(
+		t, uint(3), allegraGot.ProtocolMajor,
+		"the row returned must be the Allegra-shape one (ProtocolMajor "+
+			"= 3); receiving anything else means GetPParams returned a "+
+			"different era's row and the caller silently decoded into "+
+			"the wrong struct, leaving fields zero-valued",
+	)
+}
+
+// TestGetPParams_MaryToAlonzo_PicksMaryRow is the same scenario at the
+// Mary→Alonzo boundary — where the field count actually diverges
+// enough that an unfiltered query manifested as a hard decode error
+// rather than silent zeroing. Without filtering by era, GetPParams
+// would return the Alonzo-shape row (27 fields) and the Mary decoder
+// fail on element count.
+func TestGetPParams_MaryToAlonzo_PicksMaryRow(t *testing.T) {
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	txn := db.Transaction(context.Background(), true)
+
+	// Mary epoch-rollover write at boundary epoch 2.
+	maryPP := &mary.MaryProtocolParameters{
+		MinFeeA:          44,
+		MinFeeB:          155381,
+		MaxBlockBodySize: 65536,
+		MaxTxSize:        16384,
+		ProtocolMajor:    4, // Mary
+		MinPoolCost:      340000000,
+	}
+	maryCbor, err := cbor.Encode(maryPP)
+	require.NoError(t, err)
+	const boundaryEpoch uint64 = 2
+	const boundarySlot uint64 = 150
+	require.NoError(t, db.SetPParams(
+		maryCbor, boundarySlot, boundaryEpoch,
+		ledger.EraIdMary, txn,
+	))
+
+	// Alonzo transitionToEra write at the same epoch, 27-field shape.
+	alonzoCbor := encodeAlonzoLikeFixedFieldCount(t, 27)
+	require.NoError(t, db.SetPParams(
+		alonzoCbor, boundarySlot+1, boundaryEpoch,
+		ledger.EraIdAlonzo, txn,
+	))
+	require.NoError(t, txn.Commit())
+
+	// Mary decoder over the row claimed to belong to Mary. With the
+	// bug the most-recent insert at this epoch is the 27-element Alonzo
+	// row — the 18-field Mary struct decode fails on element count.
+	maryDecode := func(data []byte) (lcommon.ProtocolParameters, error) {
+		var pp mary.MaryProtocolParameters
+		if _, err := cbor.Decode(data, &pp); err != nil {
+			return nil, err
+		}
+		return &pp, nil
+	}
+	got, err := db.GetPParams(
+		boundaryEpoch, ledger.EraIdMary, maryDecode, nil,
+	)
+	require.NoErrorf(
+		t, err,
+		"Mary walkback must NOT receive Alonzo CBOR — that's the exact "+
+			"decode failure the eras-DevNet log shows. err=%v", err,
+	)
+	maryGot, ok := got.(*mary.MaryProtocolParameters)
+	require.Truef(
+		t, ok,
+		"expected *mary.MaryProtocolParameters, got %T", got,
+	)
+	require.Equal(t, uint(4), maryGot.ProtocolMajor)
+	require.Equal(t, uint64(340000000), maryGot.MinPoolCost)
+}
+
+// encodeAlonzoLikeFixedFieldCount produces a CBOR array of `n` integers
+// — the test only needs a CBOR blob whose top-level array has the same
+// length as Alonzo's pparams struct so the Mary-shape decoder rejects
+// it on element count. Building a real alonzo.AlonzoProtocolParameters
+// would drag in costmodel/exunit fixtures the test doesn't care about.
+func encodeAlonzoLikeFixedFieldCount(t *testing.T, n int) []byte {
+	t.Helper()
+	arr := make([]int, n)
+	for i := range arr {
+		arr[i] = i
+	}
+	out, err := cbor.Encode(arr)
+	require.NoError(t, err)
+	return out
+}
 
 func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 	t *testing.T,
@@ -35,7 +245,7 @@ func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
 	// Store 3 pparam updates from 3 different genesis keys submitted in
@@ -46,11 +256,7 @@ func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 		{0x07, 0x08, 0x09},
 	}
 	minFeeA := uint(100)
-	updateCbor, err := cbor.Encode(
-		&shelley.ShelleyProtocolParameterUpdate{
-			MinFeeA: &minFeeA,
-		},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 
 	for i, gk := range genesisKeys {
@@ -91,6 +297,7 @@ func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 	// Try to apply with quorum = 5 (only 3 proposals, below
 	// quorum)
 	result, _, err := db.ComputeAndApplyPParamUpdates(
+		context.Background(),
 		400, // slot
 		4,   // epoch
 		2,   // era
@@ -121,7 +328,7 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
 	// Store 5 pparam updates from 5 different genesis keys submitted in
@@ -130,11 +337,7 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 		{0x01}, {0x02}, {0x03}, {0x04}, {0x05},
 	}
 	minFeeA := uint(100)
-	updateCbor, err := cbor.Encode(
-		&shelley.ShelleyProtocolParameterUpdate{
-			MinFeeA: &minFeeA,
-		},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 
 	for i, gk := range genesisKeys {
@@ -149,7 +352,11 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 	}
 
 	currentPParams := &shelley.ShelleyProtocolParameters{
-		MinFeeA: 44,
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+		MinFeeA:            44,
 	}
 	currentPParamsCbor, err := cbor.Encode(currentPParams)
 	require.NoError(t, err)
@@ -172,6 +379,7 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 
 	// Apply with quorum = 5 (exactly 5 proposals, meets quorum)
 	_, _, err = db.ComputeAndApplyPParamUpdates(
+		context.Background(),
 		400,
 		4,
 		2,
@@ -207,7 +415,7 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 }
 
 // TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten covers
-// blinklabs-io/dingo#3825's PR review (wolf31o2): on a network that forks
+// the case where, on a network that forks
 // into Babbage before receiving a real PlutusV2 cost model, that model can
 // arrive through this classic Shelley-style update system rather than
 // CIP-1694 governance (as it did on real mainnet, well before Conway
@@ -226,21 +434,26 @@ func TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten(
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
-	updateCbor, err := cbor.Encode(
-		&alonzo.AlonzoProtocolParameterUpdate{
-			CostModels: map[uint][]int64{1: {205665, 812, 1}},
-		},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{
+		18: map[uint][]int64{1: {205665, 812, 1}},
+	})
 	require.NoError(t, err)
 	require.NoError(t, db.SetPParamUpdate(
 		[]byte{0x01}, updateCbor, 300, 3, txn,
 	))
 
 	currentPParams := &alonzo.AlonzoProtocolParameters{
-		CostModels: map[uint][]int64{0: {1, 2, 3}},
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+		CostModels:         map[uint][]int64{0: {1, 2, 3}},
+		// From protocol version 9 a cost-model update is not checked for
+		// its parameter count, so the short fixture model is enactable.
+		ProtocolMajor: 9,
 	}
 	decodeFunc := func(data []byte) (any, error) {
 		var update alonzo.AlonzoProtocolParameterUpdate
@@ -263,7 +476,11 @@ func TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten(
 	}
 
 	_, plutusV2CostModelWritten, err := db.ComputeAndApplyPParamUpdates(
-		400, 4, 2, 1,
+		context.Background(),
+		400,
+		4,
+		2,
+		1,
 		currentPParams,
 		decodeFunc,
 		updateFunc,
@@ -289,15 +506,11 @@ func TestComputeAndApplyPParamUpdates_FalseWhenUpdateDoesNotWritePlutusV2CostMod
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
 	minFeeA := uint(100)
-	updateCbor, err := cbor.Encode(
-		&alonzo.AlonzoProtocolParameterUpdate{
-			MinFeeA: &minFeeA,
-		},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 	require.NoError(t, db.SetPParamUpdate(
 		[]byte{0x01}, updateCbor, 300, 3, txn,
@@ -327,7 +540,11 @@ func TestComputeAndApplyPParamUpdates_FalseWhenUpdateDoesNotWritePlutusV2CostMod
 	}
 
 	_, plutusV2CostModelWritten, err := db.ComputeAndApplyPParamUpdates(
-		400, 4, 2, 1,
+		context.Background(),
+		400,
+		4,
+		2,
+		1,
 		currentPParams,
 		decodeFunc,
 		updateFunc,
@@ -351,11 +568,7 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 	defer db.Close()
 
 	minFeeA := uint(100)
-	updateCbor, err := cbor.Encode(
-		&shelley.ShelleyProtocolParameterUpdate{
-			MinFeeA: &minFeeA,
-		},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 	for i := range 5 {
 		require.NoError(t, db.SetPParamUpdate(
@@ -364,7 +577,11 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 	}
 
 	currentPParams := &shelley.ShelleyProtocolParameters{
-		MinFeeA: 44,
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+		MinFeeA:            44,
 	}
 	decodeFunc := func(data []byte) (any, error) {
 		var update shelley.ShelleyProtocolParameterUpdate
@@ -381,6 +598,7 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 	}
 
 	result, _, err := db.ComputeAndApplyPParamUpdates(
+		context.Background(),
 		400, 4, 2, 5,
 		currentPParams,
 		decodeFunc, updateFunc,
@@ -422,11 +640,7 @@ func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
 	defer db.Close()
 
 	minFeeA := uint(100)
-	updateCbor, err := cbor.Encode(
-		&shelley.ShelleyProtocolParameterUpdate{
-			MinFeeA: &minFeeA,
-		},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 	for i := range 5 {
 		require.NoError(t, db.SetPParamUpdate(
@@ -436,7 +650,11 @@ func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
 
 	currentPParams := lcommon.ProtocolParameters(
 		&shelley.ShelleyProtocolParameters{
-			MinFeeA: 44,
+			// Block sizes the votedFuturePParams guard accepts.
+			MaxBlockBodySize:   65536,
+			MaxTxSize:          16384,
+			MaxBlockHeaderSize: 1100,
+			MinFeeA:            44,
 		},
 	)
 	decodeFunc := func(data []byte) (any, error) {
@@ -454,6 +672,7 @@ func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
 	}
 
 	require.NoError(t, db.ApplyPParamUpdates(
+		context.Background(),
 		400, 4, 2, 5,
 		&currentPParams,
 		decodeFunc, updateFunc,
@@ -493,7 +712,7 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
 	// Enacting for epoch 4 uses proposals submitted in epoch 3. Store 5
@@ -514,11 +733,7 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 	}
 	for i := range 5 {
 		innerMinFeeA := uint(100)
-		updateCbor, innerErr := cbor.Encode(
-			&shelley.ShelleyProtocolParameterUpdate{
-				MinFeeA: &innerMinFeeA,
-			},
-		)
+		updateCbor, innerErr := cbor.Encode(map[uint64]any{0: innerMinFeeA})
 		require.NoError(t, innerErr)
 		err := db.SetPParamUpdate(
 			[]byte{byte(10 + i)},
@@ -531,7 +746,11 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 	}
 
 	currentPParams := &shelley.ShelleyProtocolParameters{
-		MinFeeA: 44,
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+		MinFeeA:            44,
 	}
 	currentPParamsCbor, err := cbor.Encode(currentPParams)
 	require.NoError(t, err)
@@ -555,6 +774,7 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 	// Quorum = 5: submission epoch 3 has 5 proposals (meets quorum) and is
 	// what enacts for target epoch 4; the epoch-2 decoys are excluded.
 	_, _, err = db.ComputeAndApplyPParamUpdates(
+		context.Background(),
 		400,
 		4,
 		2,
@@ -583,7 +803,7 @@ func TestComputeAndApplyPParamUpdates_NoUpdates(
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
 	currentPParams := &shelley.ShelleyProtocolParameters{
@@ -602,6 +822,7 @@ func TestComputeAndApplyPParamUpdates_NoUpdates(
 	}
 
 	result, _, err := db.ComputeAndApplyPParamUpdates(
+		context.Background(),
 		400, 4, 2, 5,
 		currentPParams,
 		decodeFunc, updateFunc,
@@ -627,7 +848,7 @@ func TestComputeAndApplyPParamUpdates_DuplicateGenesis(
 	require.NoError(t, err)
 	defer db.Close()
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Commit() //nolint:errcheck
 
 	// Store 5 updates but from only 2 unique genesis keys
@@ -638,11 +859,7 @@ func TestComputeAndApplyPParamUpdates_DuplicateGenesis(
 	}
 	for i, gk := range genesisKeys {
 		innerMinFeeA := uint(100)
-		updateCbor, innerErr := cbor.Encode(
-			&shelley.ShelleyProtocolParameterUpdate{
-				MinFeeA: &innerMinFeeA,
-			},
-		)
+		updateCbor, innerErr := cbor.Encode(map[uint64]any{0: innerMinFeeA})
 		require.NoError(t, innerErr)
 		err := db.SetPParamUpdate(
 			gk,
@@ -680,6 +897,7 @@ func TestComputeAndApplyPParamUpdates_DuplicateGenesis(
 
 	// Only 2 unique genesis keys, quorum is 5
 	result, _, err := db.ComputeAndApplyPParamUpdates(
+		context.Background(),
 		400, 4, 2, 5,
 		currentPParams,
 		decodeFunc, updateFunc,
@@ -751,9 +969,7 @@ func TestForecastPParamUpdates_QuorumMetNoPersist(t *testing.T) {
 	defer db.Close()
 
 	newMinFeeA := uint(100)
-	updateCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameterUpdate{
-		MinFeeA: &newMinFeeA,
-	})
+	updateCbor, err := cbor.Encode(map[uint64]any{0: newMinFeeA})
 	require.NoError(t, err)
 	// Two unique genesis keys submitted in epoch 3 (enacted for epoch 4).
 	for _, gk := range [][]byte{{0x01}, {0x02}} {
@@ -763,7 +979,13 @@ func TestForecastPParamUpdates_QuorumMetNoPersist(t *testing.T) {
 		)
 	}
 
-	currentPParams := &shelley.ShelleyProtocolParameters{MinFeeA: 44}
+	currentPParams := &shelley.ShelleyProtocolParameters{
+		MinFeeA: 44,
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+	}
 	decodeFunc, updateFunc := shelleyForecastFuncs()
 
 	result, err := db.ForecastPParamUpdates(
@@ -819,9 +1041,7 @@ func TestForecastPParamUpdates_QuorumNotMet(t *testing.T) {
 	defer db.Close()
 
 	newMinFeeA := uint(100)
-	updateCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameterUpdate{
-		MinFeeA: &newMinFeeA,
-	})
+	updateCbor, err := cbor.Encode(map[uint64]any{0: newMinFeeA})
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -862,22 +1082,20 @@ func TestPParamEnactmentPendingShortCircuitsTheWriter(t *testing.T) {
 	defer db.Close()
 
 	minFeeA := uint(100)
-	updateCbor, err := cbor.Encode(
-		&shelley.ShelleyProtocolParameterUpdate{MinFeeA: &minFeeA},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 
 	// Epoch 0 has no submission epoch at all.
-	pending, err := db.pparamEnactmentPending(0, 1)
+	pending, err := db.pparamEnactmentPending(context.Background(), 0, 1)
 	require.NoError(t, err)
 	require.False(t, pending)
 
 	// Nothing recorded for the submission epoch.
-	pending, err = db.pparamEnactmentPending(4, 3)
+	pending, err = db.pparamEnactmentPending(context.Background(), 4, 3)
 	require.NoError(t, err)
 	require.False(t, pending)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	for i, gk := range [][]byte{
 		{0x01, 0x02, 0x03},
 		{0x04, 0x05, 0x06},
@@ -890,18 +1108,18 @@ func TestPParamEnactmentPendingShortCircuitsTheWriter(t *testing.T) {
 
 	// Two unique proposals against a quorum of three: still nothing to enact,
 	// so the writer must not be taken.
-	pending, err = db.pparamEnactmentPending(4, 3)
+	pending, err = db.pparamEnactmentPending(context.Background(), 4, 3)
 	require.NoError(t, err)
 	require.False(t, pending)
 
-	txn = db.Transaction(true)
+	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, db.SetPParamUpdate(
 		[]byte{0x07, 0x08, 0x09}, updateCbor, 302, 3, txn,
 	))
 	require.NoError(t, txn.Commit())
 
 	// Quorum met: an enactment will be written, so the writer is warranted.
-	pending, err = db.pparamEnactmentPending(4, 3)
+	pending, err = db.pparamEnactmentPending(context.Background(), 4, 3)
 	require.NoError(t, err)
 	require.True(t, pending)
 }

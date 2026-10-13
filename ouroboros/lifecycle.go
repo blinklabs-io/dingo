@@ -121,8 +121,9 @@ func (o *Ouroboros) subscribeTracked(
 }
 
 // Close releases everything this Ouroboros owns that outlives it: EventBus
-// subscriptions, Prometheus collectors, and the background Leios
-// endorser-block persistence writer.
+// subscriptions, Prometheus collectors, the background Leios endorser-block
+// persistence writer, and the ledger snapshots held by acquired
+// LocalStateQuery sessions.
 //
 // It exists because Ouroboros takes its dependencies at construction and so
 // cannot be retained across a live snapshot/restore. That operation discards
@@ -135,6 +136,13 @@ func (o *Ouroboros) subscribeTracked(
 // Close is idempotent, so Run()'s deferred shutdown and an explicit
 // live-restore teardown can both call it.
 func (o *Ouroboros) Close() error {
+	o.leiosValidationMu.Lock()
+	o.leiosValidationClosed = true
+	if o.leiosValidationCancel != nil {
+		o.leiosValidationCancel()
+	}
+	o.leiosValidationMu.Unlock()
+	o.leiosValidationWG.Wait()
 	// Cancel admission-recovery publication before waiting for EventBus
 	// handlers. A timer that fired concurrently with Close must not keep
 	// shutdown waiting on an ordered-lane enqueue.
@@ -154,6 +162,7 @@ func (o *Ouroboros) Close() error {
 		}
 	}
 	o.StopLeiosPersistWriter()
+	o.closeLocalStateQuerySessions()
 	o.registerer.unregisterAll()
 	return nil
 }

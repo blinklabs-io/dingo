@@ -1,3 +1,5 @@
+//go:build dingo_extra_plugins
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,8 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build dingo_extra_plugins
-
 package conformance
 
 import (
@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,7 +41,7 @@ import (
 // An earlier version of this constructor used a single fixed "conformance"
 // schema and stable os.TempDir() path shared across every call, every
 // process, and every machine running this suite against the same server.
-// That sharing was unsafe on two fronts a reviewer caught: concurrent
+// That sharing was unsafe on two fronts: concurrent
 // `go test` invocations (a local run alongside CI, or two CI shards)
 // truncated or dropped each other's in-progress backend, since Reset and
 // teardown for one process's manager operated on state another process's
@@ -63,7 +64,7 @@ import (
 // actually fixes the concurrency/staleness problem. Neither is torn down
 // by an individual manager's Close -- a sibling manager elsewhere in this
 // same process may still be using them -- TestMain
-// (conformance_main_test.go) drops the schema and removes the blob
+// (conformance_postgres_test.go) drops the schema and removes the blob
 // directory once, after every test in this process has finished.
 var (
 	postgresProcessSchema = fmt.Sprintf(
@@ -187,26 +188,67 @@ func newPostgresResetter(dsn, schema string) (*backendResetter, error) {
 			db *sql.DB,
 			qualified []string,
 		) error {
-			// PostgreSQL takes every table in one statement, so this is a
-			// single implicit-commit DDL round trip regardless of how many
-			// tables the vector dirtied.
-			if _, err := db.ExecContext(
-				ctx,
-				"TRUNCATE TABLE "+strings.Join(qualified, ", ")+" CASCADE",
-			); err != nil {
-				return fmt.Errorf(
-					"truncate postgres schema %q: %w",
-					schema,
-					err,
-				)
-			}
-			return nil
+			return deletePostgresTables(ctx, db, schema, qualified)
 		},
 	}, nil
 }
 
+// deletePostgresTables empties exactly the given tables in one statement.
+//
+// DELETE rather than TRUNCATE, even though PostgreSQL's TRUNCATE already
+// takes every table in one statement: TRUNCATE rewrites each table's
+// relation file, so its cost is per table and does not fall when the table
+// holds only what one vector wrote. Measured on a postgres:16 container
+// configured like the CI service, 12 dirty tables cost 501ms as one
+// TRUNCATE ... CASCADE against 22ms as this statement.
+//
+// One statement rather than a transaction of them, because the schema's
+// foreign keys are NOT DEFERRABLE, so SET CONSTRAINTS cannot postpone their
+// checks and sequential deletes would have to run in dependency order.
+// Data-modifying CTEs all execute to completion within the one statement and
+// their referential-integrity triggers fire once it ends, by which point
+// every branch has deleted, so no ordering is needed. Their output is
+// deliberately unread: a WITH branch that modifies data runs whether or not
+// the primary query references it.
+//
+// The former TRUNCATE ... CASCADE reset could reach a table outside the
+// managed list through a foreign key into one that is in it. The only tables
+// outside the list are schema_migrations and node_settings_gate; neither
+// references a managed table.
+func deletePostgresTables(
+	ctx context.Context,
+	db *sql.DB,
+	schema string,
+	qualified []string,
+) error {
+	var stmt strings.Builder
+	stmt.WriteString("WITH ")
+	for i, table := range qualified {
+		if i > 0 {
+			stmt.WriteString(", ")
+		}
+		// The alias is a decimal index this function generated; the table
+		// name was quoted by pgQuoteQualified. Neither is caller input.
+		stmt.WriteString("d")
+		stmt.WriteString(strconv.Itoa(i))
+		stmt.WriteString(" AS (DELETE FROM ")
+		stmt.WriteString(table)
+		stmt.WriteString(")")
+	}
+	stmt.WriteString(" SELECT 1")
+	// #nosec G202 -- see above; no element of this string is caller input.
+	if _, err := db.ExecContext(ctx, stmt.String()); err != nil {
+		return fmt.Errorf(
+			"clear postgres schema %q: %w",
+			schema,
+			err,
+		)
+	}
+	return nil
+}
+
 // listPostgresConformanceTables returns schema's base tables, excluding
-// schema_migrations.
+// schema_migrations and node_settings_gate.
 //
 // schema_migrations is the migration runner's own bookkeeping table
 // (database/plugin/metadata/sqlstore/migrations/runner.go), not conformance
@@ -215,6 +257,17 @@ func newPostgresResetter(dsn, schema string) (*backendResetter, error) {
 // already-migrated schema would see an empty schema_migrations, decide every
 // migration still needed to run, and fail with a duplicate column/table error
 // partway through re-applying already-applied DDL.
+//
+// node_settings_gate is the same kind of bookkeeping: it records what the
+// database is (network, storage mode, genesis hashes, plugin selection, and
+// the Alonzo protocol-parameter unit migration v20 seeds), none of which a
+// vector writes and none of which a Reset invalidates. Emptying it drops that
+// v20 marker, and database.checkAlonzoPParamsUnit fails closed without it, so
+// the first Reset made every later construction against the same database --
+// which the remote backends share across the whole process -- fail with
+// "alonzo protocol-parameter unit marker is missing". The one gate a Reset
+// does invalidate is blob_store_id, and only on SQLite, whose blob wipe drops
+// that row on its own (see forgetSqliteBlobStoreID).
 func listPostgresConformanceTables(
 	ctx context.Context,
 	db *sql.DB,
@@ -223,7 +276,8 @@ func listPostgresConformanceTables(
 	rows, err := db.QueryContext(
 		ctx,
 		`SELECT table_name FROM information_schema.tables
-WHERE table_schema = $1 AND table_type = 'BASE TABLE' AND table_name <> 'schema_migrations'`,
+WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+  AND table_name NOT IN ('schema_migrations', 'node_settings_gate')`,
 		schema,
 	)
 	if err != nil {

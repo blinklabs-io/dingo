@@ -140,7 +140,7 @@ func CalculateEtaVAlonzo(
 	// See CalculateEtaVShelley for the rationale: TPraos folds bnonce ∈
 	// Seed into the rolling nonce, where bnonce is BLAKE2b-256 of the
 	// raw VRF certificate output. Folding the raw certificate bytes
-	// directly produces nonces that disagree with peers (#2125).
+	// directly produces nonces that disagree with peers.
 	contribution := lcommon.Blake2b256Hash(h.Body.NonceVrf.Output).Bytes()
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,
@@ -195,9 +195,7 @@ func ValidateTxAlonzo(
 			)
 		}
 	}
-	if err := validateMIRAccumulatedRewards(
-		tx, slot, ls, tmpPparams.ProtocolMajorVersion(),
-	); err != nil {
+	if err := validateShelleyDelegCerts(tx, slot, ls, pp); err != nil {
 		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
@@ -207,23 +205,8 @@ func ValidateTxAlonzo(
 	if err = ValidateTxSize(tx, tmpPparams.MaxTxSize); err != nil {
 		return err
 	}
-	// Validate fee covers base cost + execution unit prices
-	var pricesMem, pricesSteps *big.Rat
-	if tmpPparams.ExecutionCosts.MemPrice != nil {
-		pricesMem = tmpPparams.ExecutionCosts.MemPrice.ToBigRat()
-	}
-	if tmpPparams.ExecutionCosts.StepPrice != nil {
-		pricesSteps = tmpPparams.ExecutionCosts.StepPrice.ToBigRat()
-	}
-	if err = ValidateTxFee(
-		tx,
-		tmpPparams.MinFeeA,
-		tmpPparams.MinFeeB,
-		pricesMem,
-		pricesSteps,
-	); err != nil {
-		return err
-	}
+	// The fee minimum, including declared execution units, is enforced by
+	// alonzo.UtxoValidationRules (FeeTooSmall); do not price it again here.
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
@@ -276,6 +259,7 @@ func ValidateTxAlonzo(
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
 			script.StrictValidityUpperBoundForTransaction(tx),
+			uint(tmpPparams.ProtocolMajor),
 		)
 		if err != nil {
 			return err
@@ -307,13 +291,15 @@ func ValidateTxAlonzo(
 			if err != nil {
 				return err
 			}
-			evalContext, err := cek.NewEvalContext(
+			evalContext, err := plutusEvalContext(
+				ls,
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
 				costModel,
+				false,
 			)
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
@@ -376,6 +362,9 @@ func EvaluateTxAlonzo(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	if err := checkEvaluationCanceled(ls); err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
 	tmpPparams, ok := pp.(*alonzo.AlonzoProtocolParameters)
 	if !ok {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
@@ -383,6 +372,9 @@ func EvaluateTxAlonzo(
 	// Resolve inputs
 	resolvedInputs := []lcommon.Utxo{}
 	for _, tmpInput := range tx.Inputs() {
+		if err := checkEvaluationCanceled(ls); err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 		tmpUtxo, err := ls.UtxoById(tmpInput)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
@@ -395,6 +387,9 @@ func EvaluateTxAlonzo(
 	// Resolve reference inputs
 	resolvedRefInputs := []lcommon.Utxo{}
 	for _, tmpRefInput := range tx.ReferenceInputs() {
+		if err := checkEvaluationCanceled(ls); err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 		tmpUtxo, err := ls.UtxoById(tmpRefInput)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
@@ -432,12 +427,16 @@ func EvaluateTxAlonzo(
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
 			script.StrictValidityUpperBoundForTransaction(tx),
+			uint(tmpPparams.ProtocolMajor),
 		)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
 		}
 	}
 	for _, redeemerPair := range txInfoV1.Redeemers {
+		if err := checkEvaluationCanceled(ls); err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 		purpose := redeemerPair.Key
 		if purpose == nil {
 			return 0, lcommon.ExUnits{}, nil, errors.New(
@@ -464,24 +463,30 @@ func EvaluateTxAlonzo(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
-			evalContext, err := cek.NewEvalContext(
+			evalContext, err := plutusEvalContext(
+				ls,
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
 				costModel,
+				false,
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 			}
-			usedBudget, err := s.Evaluate(
+			usedBudget, err := s.EvaluateContext(
+				evaluationContext(ls),
 				datum,
 				redeemer.Data,
 				sc.ToPlutusData(),
-				tmpPparams.MaxTxExUnits,
+				remainingExUnits(tmpPparams.MaxTxExUnits, retTotalExUnits),
 				evalContext,
 			)
+			if cancelErr := checkEvaluationCanceled(ls); cancelErr != nil {
+				return 0, lcommon.ExUnits{}, nil, cancelErr
+			}
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}

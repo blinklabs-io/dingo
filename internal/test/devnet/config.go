@@ -51,14 +51,19 @@ type shelleyGenesisOverride struct {
 	SecurityParam    uint64  `yaml:"securityParam"`
 }
 
+type nodeConfigOverride struct {
+	DijkstraHardForkAtEpoch *uint64 `yaml:"TestDijkstraHardForkAtEpoch"`
+}
+
 // DevNetConfig holds the parsed configuration values from testnet.yaml.
 type DevNetConfig struct {
-	PoolCount        int
-	NetworkMagic     uint32
-	EpochLength      uint64
-	SlotLength       float64
-	ActiveSlotsCoeff float64
-	SecurityParam    uint64
+	PoolCount               int
+	NetworkMagic            uint32
+	EpochLength             uint64
+	SlotLength              float64
+	ActiveSlotsCoeff        float64
+	SecurityParam           uint64
+	DijkstraHardForkAtEpoch *uint64
 }
 
 // SlotDuration returns the wall-clock duration of a single slot.
@@ -144,13 +149,24 @@ func LoadDevNetConfigFrom(path string) (*DevNetConfig, error) {
 		)
 	}
 
+	var node nodeConfigOverride
+	if len(docs) > 6 {
+		if err := yaml.Unmarshal(docs[6], &node); err != nil {
+			return nil, fmt.Errorf(
+				"LoadDevNetConfigFrom: parsing node config overrides (doc 6): %w",
+				err,
+			)
+		}
+	}
+
 	return &DevNetConfig{
-		PoolCount:        params.PoolCount,
-		NetworkMagic:     params.NetworkMagic,
-		EpochLength:      shelley.EpochLength,
-		SlotLength:       shelley.SlotLength,
-		ActiveSlotsCoeff: shelley.ActiveSlotsCoeff,
-		SecurityParam:    shelley.SecurityParam,
+		PoolCount:               params.PoolCount,
+		NetworkMagic:            params.NetworkMagic,
+		EpochLength:             shelley.EpochLength,
+		SlotLength:              shelley.SlotLength,
+		ActiveSlotsCoeff:        shelley.ActiveSlotsCoeff,
+		SecurityParam:           shelley.SecurityParam,
+		DijkstraHardForkAtEpoch: node.DijkstraHardForkAtEpoch,
 	}, nil
 }
 

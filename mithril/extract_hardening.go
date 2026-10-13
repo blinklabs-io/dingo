@@ -47,12 +47,79 @@ var (
 	)
 )
 
+// ErrExtractLimitExceeded reports an archive with more entries, a larger
+// member, more expanded bytes, or a higher expansion ratio than allowed.
+var ErrExtractLimitExceeded = errors.New(
+	"mithril: archive exceeds extraction limits",
+)
+
+// ErrExtractUnexpectedMember reports an archive entry the consumer of that
+// archive does not read.
+var ErrExtractUnexpectedMember = errors.New(
+	"mithril: unexpected archive member",
+)
+
+const (
+	// maxArchiveEntries bounds the tar entries of one archive. Directories and
+	// empty files count: they cost inodes while adding nothing to the byte
+	// budget. A full v1 snapshot holds three files per immutable, about
+	// 40,000 entries on mainnet today.
+	maxArchiveEntries = 1 << 20
+
+	// Expanded bytes are bounded by the compressed bytes read so far, times
+	// maxExpansionRatio, plus expansionFloor. Chain data compresses a few
+	// fold; the zstd best case on zeros is about 32000:1, which this refuses.
+	maxExpansionRatio = 256
+	expansionFloor    = 64 << 20
+)
+
+// archiveLimits bounds the shape of one archive while it is extracted. A zero
+// numeric field keeps the default.
+type archiveLimits struct {
+	maxEntries     int
+	maxMemberBytes int64
+	maxTotalBytes  int64
+	maxExpansion   int64
+	expansionFloor int64
+	// allow reports whether a cleaned, slash-separated entry name is one the
+	// archive's consumer reads. Nil admits every name.
+	allow func(name string) bool
+	// digests maps an entry name to its expected SHA-256 (hex). A listed
+	// entry is hashed as it is written and refused on a mismatch.
+	digests map[string]string
+}
+
+// withArchiveLimits narrows the default archive shape limits for one
+// extraction.
+func withArchiveLimits(l archiveLimits) ExtractOption {
+	return func(c *extractConfig) {
+		c.limits.allow = l.allow
+		c.limits.digests = l.digests
+		if l.maxEntries > 0 {
+			c.limits.maxEntries = l.maxEntries
+		}
+		if l.maxMemberBytes > 0 {
+			c.limits.maxMemberBytes = l.maxMemberBytes
+		}
+		if l.maxTotalBytes > 0 {
+			c.limits.maxTotalBytes = l.maxTotalBytes
+		}
+		if l.maxExpansion > 0 {
+			c.limits.maxExpansion = l.maxExpansion
+		}
+		if l.expansionFloor > 0 {
+			c.limits.expansionFloor = l.expansionFloor
+		}
+	}
+}
+
 // extractConfig holds the resolved destination policy for one extraction.
 type extractConfig struct {
 	merge             bool
 	replace           bool
 	maxZstdWindowSize uint64
 	maxZstdMemory     uint64
+	limits            archiveLimits
 }
 
 // ExtractOption configures how ExtractArchive treats its destination.
@@ -100,6 +167,13 @@ func newExtractConfig(opts []ExtractOption) extractConfig {
 	cfg := extractConfig{
 		maxZstdWindowSize: maxZstdWindowSize,
 		maxZstdMemory:     maxZstdDecoderMemory,
+		limits: archiveLimits{
+			maxEntries:     maxArchiveEntries,
+			maxMemberBytes: maxExtractFileSize,
+			maxTotalBytes:  maxTotalExtractSize,
+			maxExpansion:   maxExpansionRatio,
+			expansionFloor: expansionFloor,
+		},
 	}
 	for _, opt := range opts {
 		opt(&cfg)

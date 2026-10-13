@@ -32,7 +32,7 @@ const handlerProgressTestType EventType = "test.handler_progress"
 
 // A subscriber whose handler has stopped returning is invisible until its
 // buffer fills, because the only stall report the bus has is raised by a
-// publisher that had to wait for capacity. In blinklabs-io/dingo#3550 the
+// publisher that had to wait for capacity. In one Preview run the
 // chainselection.peer_activity handler stopped returning at 18:02 and the
 // first "event delivery stalled" line appeared 12h31m later, once 1024
 // keepalive events had piled up behind it. The handler being stuck is the

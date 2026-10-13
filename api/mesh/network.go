@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package mesh
 
@@ -83,7 +83,12 @@ func (s *Server) handleNetworkStatus(
 	}
 
 	tip := s.config.Chain.Tip()
-	tipTimestamp := s.slotToTimestamp(tip.Point.Slot)
+	tipTimestamp, err := s.slotToTimestamp(tip.Point.Slot)
+	if err != nil {
+		s.logger.Error("failed to resolve tip timestamp", "error", err)
+		writeError(w, ErrInternal)
+		return
+	}
 	synced := false
 	if progress, ok := s.config.LedgerState.(MeshSyncProgress); ok {
 		synced = progress.SyncProgress() == 1

@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
 // PartialCommitError is returned when blob commits but metadata fails.
@@ -55,9 +56,10 @@ func (e PartialCommitError) Is(target error) bool {
 // Txn is a wrapper that coordinates both metadata and blob transactions.
 // Metadata and blob are first-class siblings, not nested.
 type Txn struct {
-	db          *Database
-	blobTxn     types.Txn
-	metadataTxn types.Txn
+	db           *Database
+	blobTxn      types.Txn
+	metadataTxn  types.Txn
+	writeContext *txnContext
 	// blobStore is the blob store this transaction opened blobTxn on, and
 	// the store every blob operation inside the transaction must use. It
 	// is set once at construction and never cleared, so it stays readable
@@ -83,6 +85,13 @@ type Txn struct {
 	readWrite      bool
 	afterCommit    []func()
 	dispatching    bool
+	// separatelyCommittedBlocks lets blob reads bypass this transaction's stale
+	// snapshot; it is guarded by lock.
+	separatelyCommittedBlocks map[blockKey]struct{}
+	// readSnapshotAdmissionHeld keeps one coordinated snapshot slot for this
+	// transaction's lifetime. Releasing only after the read transaction ends
+	// caps established snapshots as well as callers waiting to construct one.
+	readSnapshotAdmissionHeld bool
 
 	// onFinish holds the callbacks registered through OnFinish, and
 	// onFinishArmed reports whether any were ever registered so the terminal
@@ -159,8 +168,16 @@ func (t *Txn) releaseCommitBarrierLocked() {
 // (which cancellableBarrier panics on). Callers must hold t.lock.
 func (t *Txn) finishLocked() {
 	t.finished = true
+	if t.writeContext != nil {
+		t.writeContext.release()
+	}
+	t.separatelyCommittedBlocks = nil
 	t.releaseCommitBarrierLocked()
 	t.releaseBlobPinLocked()
+	if t.readSnapshotAdmissionHeld {
+		t.readSnapshotAdmissionHeld = false
+		t.db.releaseReadSnapshotAdmission()
+	}
 }
 
 // releaseBlobPinLocked drops this transaction's pin on the blob store it
@@ -178,7 +195,20 @@ func (t *Txn) releaseBlobPinLocked() {
 	pin.release()
 }
 
-func NewTxn(db *Database, readWrite bool) *Txn {
+func NewTxn(ctx context.Context, db *Database, readWrite bool) *Txn {
+	return NewTxnContext(ctx, db, readWrite)
+}
+
+// NewTxnContext creates a coordinated transaction whose metadata operations
+// are canceled with ctx until Commit begins. Commit then completes independently
+// of caller cancellation. Blob operations do not accept contexts, so callers
+// doing long mixed-store scans must also check ctx between blob reads.
+//
+//nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
+func NewTxnContext(ctx context.Context, db *Database, readWrite bool) *Txn {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
 	pinBlobStoreForTxn(t, db)
@@ -190,20 +220,10 @@ func NewTxn(db *Database, readWrite bool) *Txn {
 		// avoid contending with the SQLite write connection. This
 		// prevents chainsync FindIntersect and snapshot calculations
 		// from blocking on concurrent block processing.
-		//
-		// context.Background(): NewTxn itself takes no ctx, and none of
-		// its own callers (Database.Transaction and its ~100 call sites
-		// across ledger/api/mempool) have one to offer yet either -- this
-		// is the current propagation boundary between the metadata
-		// store's own ctx-aware Transaction/ReadTransaction and the rest
-		// of the node, not a gap within the metadata store itself.
-		// Threading a real ctx from callers into this boundary is a
-		// separate, distinctly larger change than this metadata-store
-		// specific one.
 		if readWrite {
-			t.metadataTxn = ms.Transaction(context.Background())
+			t.metadataTxn = ms.Transaction(t.metadataWriteContext(ctx))
 		} else {
-			t.metadataTxn = ms.ReadTransaction(context.Background())
+			t.metadataTxn = ms.ReadTransaction(ctx)
 		}
 		if t.metadataTxn == nil {
 			db.logger.Warn(
@@ -214,9 +234,108 @@ func NewTxn(db *Database, readWrite bool) *Txn {
 	return t
 }
 
+// NewReadSnapshotContext creates a coordinated read transaction and returns
+// the metadata tip that anchors it. PauseCommitsContext brackets construction
+// with both the logical destructive-transition barrier and the physical commit
+// barrier, so neither a multi-transaction rollback nor a combined write can
+// change blob data between opening the metadata and blob views. Both holds are
+// released as soon as the views are fixed; they are not held for the lifetime
+// of the read.
+//
+// The metadata store's read-pool connection is reserved BEFORE those holds are
+// taken, when the store supports it (types.ReadReserver). Beginning the read
+// transaction is what waits for that pool, so reserving first keeps an
+// exhausted-pool wait outside both barriers. Admission remains held until the
+// returned transaction finishes and is capped below the pool size: a streamed
+// HTTP response can otherwise occupy every connection for as long as its
+// clients take to read, starving rollback's operational metadata reads. The
+// transaction is still BEGUN inside the barrier, so the commit boundary the
+// two views share is unchanged; a store that does not implement ReadReserver
+// keeps the previous behavior exactly.
+//
+//nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
+func NewReadSnapshotContext(
+	ctx context.Context,
+	db *Database,
+) (*Txn, ochainsync.Tip, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ms := db.Metadata()
+	var reservation types.ReadReservation
+	admissionHeld := false
+	if reserver, ok := ms.(types.ReadReserver); ok {
+		if err := db.acquireReadSnapshotAdmission(
+			ctx,
+			reserver.ReadSnapshotLimit(),
+		); err != nil {
+			return nil, ochainsync.Tip{}, fmt.Errorf(
+				"admit read snapshot: %w",
+				err,
+			)
+		}
+		admissionHeld = true
+		defer func() {
+			if admissionHeld {
+				db.releaseReadSnapshotAdmission()
+			}
+		}()
+		reserved, err := reserver.ReserveRead(ctx)
+		if err != nil {
+			return nil, ochainsync.Tip{}, fmt.Errorf(
+				"reserve metadata read connection for read snapshot: %w",
+				err,
+			)
+		}
+		reservation = reserved
+	}
+	// Release is a no-op once Begin has handed the connection to the
+	// transaction, so this covers every path that gives up before then --
+	// including the barrier acquire below failing on a cancelled ctx.
+	if reservation != nil {
+		defer reservation.Release()
+	}
+
+	resume, err := db.PauseCommitsContext(ctx)
+	if err != nil {
+		return nil, ochainsync.Tip{}, fmt.Errorf(
+			"pause commits for read snapshot: %w",
+			err,
+		)
+	}
+	defer resume()
+
+	t := &Txn{db: db}
+	t.readSnapshotAdmissionHeld = admissionHeld
+	admissionHeld = false
+	pinBlobStoreForTxn(t, db)
+	var tip ochainsync.Tip
+	if ms != nil {
+		if reservation != nil {
+			t.metadataTxn = reservation.Begin()
+		} else {
+			t.metadataTxn = ms.ReadTransaction(ctx)
+		}
+		if t.metadataTxn == nil {
+			return nil, tip, errors.Join(types.ErrNilTxn, t.Rollback())
+		}
+		var err error
+		tip, err = ms.GetTip(t.metadataTxn)
+		if err != nil {
+			return nil, tip, fmt.Errorf(
+				"anchor metadata read snapshot: %w",
+				errors.Join(err, t.Rollback()),
+			)
+		}
+	}
+	if bs := t.blobStore; bs != nil {
+		t.blobTxn = bs.NewTransaction(false)
+	}
+	return t, tip, nil
+}
+
 func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
-	acquireCommitBarrier(t, false)
 	pinBlobStoreForTxn(t, db)
 	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(readWrite)
@@ -224,7 +343,15 @@ func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
 	return t
 }
 
-func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
+//nolint:contextcheck // Preserve the public nil-context compatibility boundary.
+func NewMetadataOnlyTxn(
+	ctx context.Context,
+	db *Database,
+	readWrite bool,
+) *Txn {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
 	// A metadata-only transaction opens no blob transaction, but it still
@@ -234,12 +361,10 @@ func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
 	// hold.
 	pinBlobStoreForTxn(t, db)
 	if ms := db.Metadata(); ms != nil {
-		// See NewTxn's matching comment: context.Background() here is the
-		// current propagation boundary, not a metadata-store-internal gap.
 		if readWrite {
-			t.metadataTxn = ms.Transaction(context.Background())
+			t.metadataTxn = ms.Transaction(t.metadataWriteContext(ctx))
 		} else {
-			t.metadataTxn = ms.ReadTransaction(context.Background())
+			t.metadataTxn = ms.ReadTransaction(ctx)
 		}
 		if t.metadataTxn == nil {
 			db.logger.Warn(
@@ -280,14 +405,21 @@ func (t *Txn) DB() *Database {
 // would let a concurrent SetBlobStore swap hand recovery a different store
 // than the one being recovered from -- silently failing to find data that is
 // only in the old store, or (if the store were ever a writable target here)
-// repairing the wrong one (blinklabs-io/dingo#1900 review).
+// repairing the wrong one.
 //
 // The returned Txn's blobTxn/blobStore are the same values as t's, marked
 // sharedBlob so Release/Rollback tears down only the metadata transaction
 // opened here, not the borrowed blob handle -- t (or whatever constructed
 // it) still owns that and keeps using it afterward. Only valid for a
 // read-only t; the only current caller's t is always BlobTxn(false).
-func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
+//
+//nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
+func (t *Txn) withMetadataForRecovery(
+	ctx context.Context,
+) (*Txn, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	aug := &Txn{
 		db: t.db,
 		// readWrite carried over from t, not defaulted to false: it is
@@ -297,7 +429,7 @@ func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
 		// same store. Forcing it false here would make a write-capable
 		// caller's repair commit independently of the caller's own
 		// transaction, so a later rollback of that caller would no
-		// longer undo the repair (blinklabs-io/dingo#1900 review).
+		// longer undo the repair.
 		readWrite:  t.readWrite,
 		blobTxn:    t.blobTxn,
 		blobStore:  t.blobStore,
@@ -305,20 +437,30 @@ func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
 	}
 	if t.db != nil {
 		if ms := t.db.Metadata(); ms != nil {
-			// Must be acquired before opening the metadata transaction
-			// below, not just around its eventual Commit -- see
-			// acquireCommitBarrier's own doc comment. Only actually
-			// takes the lock when aug.readWrite is true (checked
-			// internally), matching NewMetadataOnlyTxn's identical call.
-			acquireCommitBarrier(aug, true)
 			if aug.readWrite {
-				aug.metadataTxn = ms.Transaction(context.Background())
+				if err := t.db.commitBarrier.RLockContext(ctx); err != nil {
+					return nil, nil, fmt.Errorf(
+						"acquire metadata recovery barrier: %w",
+						err,
+					)
+				}
+				aug.barrierHeld = true
+			}
+			if aug.readWrite {
+				aug.metadataTxn = ms.Transaction(aug.metadataWriteContext(ctx))
 			} else {
-				aug.metadataTxn = ms.ReadTransaction(context.Background())
+				aug.metadataTxn = ms.ReadTransaction(ctx)
+			}
+			if aug.metadataTxn == nil {
+				cleanupErr := aug.Rollback()
+				if err := ctx.Err(); err != nil {
+					return nil, nil, errors.Join(err, cleanupErr)
+				}
+				return nil, nil, errors.Join(types.ErrNilTxn, cleanupErr)
 			}
 		}
 	}
-	return aug, aug.Release
+	return aug, aug.Release, nil
 }
 
 // withBlobForRecovery returns a Txn that adds a fresh blob transaction to
@@ -326,9 +468,8 @@ func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
 // Txn (t.Blob() == nil) but needs blob access for a rare fallback path --
 // currently only ResolveUtxoCborWithRecovery's call into
 // utxoRecoveryBlockForTx/recoverUtxoCbor, which fetches the producing
-// block's raw CBOR from the blob store (cubic review: this case was
-// previously left with no blob handle at all, so BlockByPointTxn returned
-// ErrNilTxn instead of reconstructing the CBOR).
+// block's raw CBOR from the blob store. Without that handle,
+// BlockByPointTxn returned ErrNilTxn instead of reconstructing the CBOR.
 //
 // This needs no sharedBlob-style ownership guard on the blob side:
 // NewMetadataOnlyTxn already pins t's blob store (BlobStore-dependent
@@ -344,11 +485,8 @@ func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
 // aug.metadataTxn, on the other hand, *is* borrowed from t -- the mirror
 // image of withMetadataForRecovery's borrowed blobTxn, marked
 // sharedMetadata for the identical reason: Commit/rollback must not act
-// on a metadata handle this Txn doesn't own (cubic review: an earlier
-// version of this function left sharedMetadata unset, so releasing aug
-// rolled back -- and so finished -- t's own metadata transaction,
-// discarding a write-capable caller's uncommitted metadata as a side
-// effect of a call that only meant to add blob access).
+// on a metadata handle this Txn doesn't own. Without the marker, releasing
+// aug would roll back t's metadata transaction and discard uncommitted writes.
 //
 // aug.readWrite is hardcoded false regardless of t's own readWrite: aug's
 // cleanup is always aug.Release, which unconditionally rolls back
@@ -360,9 +498,8 @@ func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
 // its own. A write-capable t made aug.readWrite true too, which put
 // repairUtxoBlob on the first branch -- writing into aug.blobTxn as if
 // its eventual commit were someone else's job, when aug.blobTxn's only
-// possible fate is the rollback above. The repair was silently discarded
-// every time, regardless of whether t itself ever committed (cubic
-// review). Forcing false here routes every repair through
+// possible fate is the rollback above. A write-capable augmented transaction
+// would silently discard every repair. Forcing false here routes every repair through
 // repairUtxoBlob's independent-writer branch instead, which commits on
 // its own.
 func (t *Txn) withBlobForRecovery() (*Txn, func()) {
@@ -410,6 +547,36 @@ func (t *Txn) IsCommitted() bool {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 	return t.committed
+}
+
+// MarkBlockCborCommittedSeparately marks a block written outside this
+// transaction so reads can use a fresh blob snapshot if the shared cache misses.
+func (t *Txn) MarkBlockCborCommittedSeparately(slot uint64, hash [32]byte) {
+	if t == nil {
+		return
+	}
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	if t.finished {
+		return
+	}
+	if t.separatelyCommittedBlocks == nil {
+		t.separatelyCommittedBlocks = make(map[blockKey]struct{})
+	}
+	t.separatelyCommittedBlocks[blockKey{slot: slot, hash: hash}] = struct{}{}
+}
+
+func (t *Txn) blockCborCommittedSeparately(slot uint64, hash [32]byte) bool {
+	if t == nil {
+		return false
+	}
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	if t.finished {
+		return false
+	}
+	_, ok := t.separatelyCommittedBlocks[blockKey{slot: slot, hash: hash}]
+	return ok
 }
 
 // AfterCommit registers fn to run after this transaction commits durably.
@@ -752,6 +919,11 @@ func (t *Txn) Commit() error {
 	if !t.readWrite {
 		return t.rollback()
 	}
+	if t.writeContext != nil {
+		if err := t.writeContext.beginCommit(); err != nil {
+			return errors.Join(err, t.rollback())
+		}
+	}
 	// Update the commit timestamp in both DBs if using both. Skipped
 	// entirely when sharedBlob (mirrors the guard below): t.blobTxn is
 	// borrowed from another Txn (see withMetadataForRecovery) that still
@@ -759,7 +931,7 @@ func (t *Txn) Commit() error {
 	// here -- left staged but never actually committed by this call --
 	// would either sit uncommitted until the owner's own Commit runs, or
 	// be overwritten by the owner's own timestamp; neither is this Txn's
-	// to decide (chrisguiney review; not reachable by any caller today,
+	// to decide (not reachable by any caller today,
 	// since the only current sharedBlob wrapper is only ever
 	// Released/Rolled back, never committed).
 	var commitTimestamp int64
@@ -833,7 +1005,7 @@ func (t *Txn) Commit() error {
 	// Commit metadata transaction. Guarded by !t.sharedMetadata for the
 	// same ownership reason as the blob-commit guard above: committing a
 	// borrowed metadataTxn here would commit its owner's transaction out
-	// from under it (cubic review; withBlobForRecovery).
+	// from under it.
 	if t.metadataTxn != nil && !t.sharedMetadata {
 		if err := t.metadataTxn.Commit(); err != nil {
 			_ = t.metadataTxn.Rollback()

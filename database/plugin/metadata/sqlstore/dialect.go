@@ -34,9 +34,29 @@ type Dialect interface {
 	SetBulkMode(context.Context, Execer) error
 	RestoreNormalMode(context.Context, Execer) error
 	UpdatePlannerStats(context.Context, Execer) error
+	// OptimizePlannerStats runs the backend's incremental statistics
+	// maintenance. supported is false, with no statement issued, for a
+	// backend that has none; UpdatePlannerStats (a full ANALYZE) is unchanged.
+	OptimizePlannerStats(context.Context, Execer) (supported bool, err error)
+	// HasIncrementalPlannerStats reports whether OptimizePlannerStats does
+	// anything on this backend, without issuing a statement.
+	HasIncrementalPlannerStats() bool
 	DropIndexSQL(name, table string) string
 	CreateIndexSQL(name, table string, columns []string) string
 	CanDropIndex(name, table string) bool
+	UpdateFromJoinSQL(
+		target, source, joinCondition string,
+		assignments []JoinAssignment,
+	) string
+}
+
+// JoinAssignment sets an UPDATE target's Column to Expr, an expression that
+// typically references a joined source table's column of the same or a
+// different name. Column is always unqualified; UpdateFromJoinSQL's
+// implementation decides whether and how to qualify it for its engine.
+type JoinAssignment struct {
+	Column string
+	Expr   string
 }
 
 // Execer is implemented by *sql.DB, *sql.Conn, and *sql.Tx.
@@ -53,6 +73,8 @@ type dialect struct {
 	setBulk        func(context.Context, Execer) error
 	restore        func(context.Context, Execer) error
 	analyze        func(context.Context, Execer) error
+	optimize       func(context.Context, Execer) error
+	updateFromJoin func(string, string, string, []JoinAssignment) string
 }
 
 func (d dialect) Name() string {
@@ -88,6 +110,20 @@ func (d dialect) UpdatePlannerStats(ctx context.Context, exec Execer) error {
 	return d.analyze(ctx, exec)
 }
 
+func (d dialect) OptimizePlannerStats(
+	ctx context.Context,
+	exec Execer,
+) (bool, error) {
+	if d.optimize == nil {
+		return false, nil
+	}
+	return true, d.optimize(ctx, exec)
+}
+
+func (d dialect) HasIncrementalPlannerStats() bool {
+	return d.optimize != nil
+}
+
 func (d dialect) DropIndexSQL(name, table string) string {
 	if d.name == "mysql" {
 		return "DROP INDEX " + d.QuoteIdentifier(
@@ -109,6 +145,55 @@ func (d dialect) CanDropIndex(name, table string) bool {
 		return true
 	}
 	return !mysqlForeignKeyIndexes[table][name]
+}
+
+// UpdateFromJoinSQL builds "UPDATE target SET ... " restricted to rows that
+// join against source on joinCondition, in whichever syntax this dialect's
+// engine requires. source names a table or CTE already defined earlier in
+// the same statement (typically by a preceding WITH clause); this method
+// only builds the final UPDATE clause, not the CTE that defines source.
+func (d dialect) UpdateFromJoinSQL(
+	target, source, joinCondition string,
+	assignments []JoinAssignment,
+) string {
+	return d.updateFromJoin(target, source, joinCondition, assignments)
+}
+
+// standardUpdateFromJoinSQL builds the UPDATE ... SET ... FROM ... WHERE
+// <joinCondition> form SQLite (3.33+) and PostgreSQL both accept. Assignment
+// targets stay unqualified: both engines reject a table-qualified target
+// ("UPDATE t SET t.col = ..." is a syntax error on both), unlike MySQL's
+// JOIN form below.
+func standardUpdateFromJoinSQL(
+	target, source, joinCondition string,
+	assignments []JoinAssignment,
+) string {
+	sets := make([]string, len(assignments))
+	for i, a := range assignments {
+		sets[i] = a.Column + " = " + a.Expr
+	}
+	return "UPDATE " + target + " SET " + strings.Join(sets, ", ") +
+		" FROM " + source + " WHERE " + joinCondition
+}
+
+// mysqlUpdateFromJoinSQL builds MySQL's UPDATE ... JOIN ... ON ... SET ...
+// form: MySQL has no UPDATE ... FROM syntax at all. Unlike
+// standardUpdateFromJoinSQL, every assignment target is qualified with
+// target -- source commonly projects columns with the same names as
+// target's own (a "latest known value" CTE joined back onto the table it
+// summarizes, for instance), and an unqualified "SET col = ..." is
+// ambiguous whenever the joined source carries a same-named column (MySQL
+// error 1052).
+func mysqlUpdateFromJoinSQL(
+	target, source, joinCondition string,
+	assignments []JoinAssignment,
+) string {
+	sets := make([]string, len(assignments))
+	for i, a := range assignments {
+		sets[i] = target + "." + a.Column + " = " + a.Expr
+	}
+	return "UPDATE " + target + " JOIN " + source + " ON " + joinCondition +
+		" SET " + strings.Join(sets, ", ")
 }
 
 func (d dialect) CreateIndexSQL(name, table string, columns []string) string {
@@ -156,11 +241,18 @@ var mysqlDeferredIndexPrefixColumns = map[string]map[string]bool{
 	},
 	"transaction": {"block_hash": true},
 	"asset": {
-		"policy_id": true, "fingerprint": true,
-		"amount": true,
+		"policy_id": true,
 	},
-	"certs":           {"block_hash": true},
-	"witness_scripts": {"script_hash": true},
+	"asset_mint_burn": {
+		"policy_id": true, "name": true, "fingerprint": true,
+	},
+	"address_transaction": {
+		"staking_key": true,
+		"payment_key": true,
+	},
+	"certs":                      {"block_hash": true},
+	"witness_scripts":            {"script_hash": true},
+	"transaction_metadata_label": {"label": true},
 }
 
 var mysqlForeignKeyIndexes = map[string]map[string]bool{
@@ -205,6 +297,15 @@ func SQLiteDialect() Dialect {
 			"PRAGMA wal_autocheckpoint = 10000",
 		),
 		analyze: execStatements("ANALYZE"),
+		// 0x10002 is the "run ANALYZE" bit plus "consider every table": a
+		// plain PRAGMA optimize only looks at tables the issuing connection
+		// has already queried, which a freshly opened connection has not,
+		// and it samples rows (analysis_limit) where this form measures them
+		// all. Tables without statistics are always analyzed; tables that
+		// have them are re-analyzed only after growing roughly 25-fold, so a
+		// repeat run is effectively free.
+		optimize:       execStatements("PRAGMA optimize(0x10002)"),
+		updateFromJoin: standardUpdateFromJoinSQL,
 	}
 }
 
@@ -232,7 +333,8 @@ func PostgresDialect() Dialect {
 			"SET session_replication_role = DEFAULT",
 			"SET synchronous_commit = DEFAULT",
 		),
-		analyze: execStatements("ANALYZE"),
+		analyze:        execStatements("ANALYZE"),
+		updateFromJoin: standardUpdateFromJoinSQL,
 	}
 }
 
@@ -265,6 +367,7 @@ func MySQLDialect() Dialect {
 			// supplies it where planner refresh is needed.
 			return nil
 		},
+		updateFromJoin: mysqlUpdateFromJoinSQL,
 	}
 }
 

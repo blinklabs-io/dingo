@@ -157,7 +157,7 @@ func TestQueryShelleyPoolDistr2_ReportsStakeFractionAndVrf(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
+	result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -244,7 +244,7 @@ func TestQueryShelleyPoolDistr2_FilterReportsOnlyRequestedPools(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2QueryFor(pkhA), QueryPoint{})
+	result, err := ls.Query(t.Context(), poolDistr2QueryFor(pkhA), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -301,7 +301,7 @@ func TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot(
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2QueryFor(pkhA, unknownPkh), QueryPoint{})
+	result, err := ls.Query(t.Context(), poolDistr2QueryFor(pkhA, unknownPkh), QueryPoint{})
 	require.NoError(t, err,
 		"a pool the snapshot does not hold is omitted, not an error")
 	distr := decodePoolDistr2Result(t, result)
@@ -322,7 +322,7 @@ func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
+	result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err,
 		"an empty snapshot reports an empty distribution, not an error")
 	distr := decodePoolDistr2Result(t, result)
@@ -342,9 +342,9 @@ func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
 // Returning an error instead would not fail this one query. The LocalStateQuery
 // server propagates a query error as a protocol error, so the node drops the
 // connection and cardano-cli reports only a closed bearer -- which is exactly
-// the opaque failure #2997 was filed for. Because the unfiltered form of this
-// query covers every pool in the snapshot, one unregistered pool anywhere on
-// the chain would take leadership-schedule down for every operator.
+// the opaque failure operators reported for cardano-cli. Because the unfiltered
+// form of this query covers every pool in the snapshot, one unregistered pool
+// anywhere on the chain would take leadership-schedule down for every operator.
 //
 // The fixture therefore pairs the orphan with a healthy pool and asserts the
 // healthy one still answers. Asserting only the orphan's absence would pass
@@ -387,7 +387,7 @@ func TestQueryShelleyPoolDistr2_OmitsPoolWithoutRegistrationRatherThanAborting(
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
+	result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err,
 		"an unregistered pool must not abort the protocol and drop the "+
 			"client's connection")
@@ -466,7 +466,7 @@ func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
+	result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -559,7 +559,7 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 		nil,
 	))
 
-	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
+	result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 	entry, ok := distr.Pools[lcommon.PoolId(pkh)]
@@ -657,7 +657,7 @@ func TestQueryShelleyPoolDistr2_EpochComesFromTheTransactionNotTheSnapshot(
 	ls.currentEpoch = models.Epoch{EpochId: staleEpoch}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
+	result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -739,7 +739,7 @@ func TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady(
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
+	result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	distr := decodePoolDistr2Result(t, result)
 
@@ -806,7 +806,7 @@ func TestQueryShelleyPoolDistr2_ViaGetCBOR(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2CborQuery(), QueryPoint{})
+	result, err := ls.Query(t.Context(), poolDistr2CborQuery(), QueryPoint{})
 	require.NoError(t, err, "GetCBOR-wrapped GetPoolDistr2 must not error")
 
 	arr, ok := result.([]any)

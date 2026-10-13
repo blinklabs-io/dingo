@@ -16,6 +16,7 @@ package event_test
 
 import (
 	"maps"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The tests in this file cover blinklabs-io/dingo#2932: neither the
+// The tests in this file cover event backpressure: neither the
 // per-subscriber channel nor the shared async queue may discard events under
 // sustained load, and backpressure must not wedge shutdown.
 
@@ -141,8 +142,10 @@ func TestPublishAsyncBlocksWhenQueueFull(t *testing.T) {
 	// Enough to fill the subscriber buffer, occupy every async worker, and
 	// saturate the queue.
 	total := event.AsyncQueueSize + event.AsyncWorkerPoolSize + 8
+	started := make(chan struct{})
 	enqueued := make(chan bool, 1)
 	go func() {
+		close(started)
 		for i := range total {
 			if !eb.PublishAsync(testEvtType, event.NewEvent(testEvtType, i)) {
 				enqueued <- false
@@ -152,6 +155,14 @@ func TestPublishAsyncBlocksWhenQueueFull(t *testing.T) {
 		enqueued <- true
 	}()
 
+	testutil.RequireReceive(
+		t, started, time.Second, "publisher did not start",
+	)
+	testutil.WaitForCondition(t, func() bool {
+		return len(subCh) == cap(subCh)
+	}, testutil.AsyncWait,
+		"the subscriber buffer must fill while nothing drains it",
+	)
 	testutil.RequireNoReceive(
 		t,
 		enqueued,
@@ -202,8 +213,9 @@ func TestPublishUnblocksOnStop(t *testing.T) {
 
 	const testEvtType event.EventType = "test.backpressure.stop"
 
-	eb := event.NewEventBus(nil, nil)
-	_, _ = eb.SubscribeWithBuffer(testEvtType, 1)
+	reg := prometheus.NewRegistry()
+	eb := event.NewEventBus(reg, nil)
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, 1)
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, "fill"))
 
 	published := make(chan struct{})
@@ -212,6 +224,24 @@ func TestPublishUnblocksOnStop(t *testing.T) {
 		eb.Publish(testEvtType, event.NewEvent(testEvtType, "blocked"))
 	}()
 
+	// Wait for the blocked-delivery metric rather than merely checking the
+	// buffer is full: the buffer was already full from the fill above, so a
+	// one-time length check cannot prove the second Publish actually reached
+	// its blocking path.
+	require.Eventually(t, func() bool {
+		return counterValue(
+			t,
+			reg,
+			"event_delivery_blocked_total",
+			map[string]string{
+				"type": string(testEvtType),
+				"kind": "in-memory",
+			},
+		) >= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"the blocked Publish should be counted before Stop is exercised",
+	)
+	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
 	testutil.RequireNoReceive(
 		t,
 		published,
@@ -246,10 +276,11 @@ func TestPublishUnblocksOnUnsubscribe(t *testing.T) {
 
 	const testEvtType event.EventType = "test.backpressure.unsubscribe"
 
-	eb := event.NewEventBus(nil, nil)
+	reg := prometheus.NewRegistry()
+	eb := event.NewEventBus(reg, nil)
 	defer eb.Stop()
 
-	subId, _ := eb.SubscribeWithBuffer(testEvtType, 1)
+	subId, subCh := eb.SubscribeWithBuffer(testEvtType, 1)
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, "fill"))
 
 	published := make(chan struct{})
@@ -258,6 +289,24 @@ func TestPublishUnblocksOnUnsubscribe(t *testing.T) {
 		eb.Publish(testEvtType, event.NewEvent(testEvtType, "blocked"))
 	}()
 
+	// Wait for the blocked-delivery metric rather than merely checking the
+	// buffer is full: the buffer was already full from the fill above, so a
+	// one-time length check cannot prove the second Publish actually reached
+	// its blocking path.
+	require.Eventually(t, func() bool {
+		return counterValue(
+			t,
+			reg,
+			"event_delivery_blocked_total",
+			map[string]string{
+				"type": string(testEvtType),
+				"kind": "in-memory",
+			},
+		) >= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"the blocked Publish should be counted before Unsubscribe is exercised",
+	)
+	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
 	testutil.RequireNoReceive(
 		t,
 		published,
@@ -283,12 +332,14 @@ func TestPublishAsyncUnblocksOnStop(t *testing.T) {
 	const testEvtType event.EventType = "test.async.stop.unblock"
 
 	eb := event.NewEventBus(nil, nil)
-	_, _ = eb.SubscribeWithBuffer(testEvtType, 1)
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, 1)
 
 	// Fill the subscriber, park every async worker, then saturate the queue.
 	total := event.AsyncQueueSize + event.AsyncWorkerPoolSize + 8
+	started := make(chan struct{})
 	result := make(chan bool, 1)
 	go func() {
+		close(started)
 		for i := range total {
 			if !eb.PublishAsync(testEvtType, event.NewEvent(testEvtType, i)) {
 				result <- false
@@ -298,6 +349,14 @@ func TestPublishAsyncUnblocksOnStop(t *testing.T) {
 		result <- true
 	}()
 
+	testutil.RequireReceive(
+		t, started, time.Second, "publisher did not start",
+	)
+	testutil.WaitForCondition(t, func() bool {
+		return len(subCh) == cap(subCh)
+	}, testutil.AsyncWait,
+		"the subscriber buffer must fill while nothing drains it",
+	)
 	testutil.RequireNoReceive(
 		t,
 		result,
@@ -505,4 +564,43 @@ func counterValue(
 		}
 	}
 	return -1
+}
+
+const publishBatchSize = 128
+
+func BenchmarkPublishSubscribers(b *testing.B) {
+	testType := event.EventType("bench.publish")
+	testEvent := event.NewEvent(testType, 1)
+	for _, subscribers := range []int{1, 10, 100, 500} {
+		b.Run(strconv.Itoa(subscribers), func(b *testing.B) {
+			eb := event.NewEventBus(nil, nil)
+			b.Cleanup(eb.Close)
+			subChans := make([]<-chan event.Event, 0, subscribers)
+			for range subscribers {
+				_, subCh := eb.Subscribe(testType)
+				subChans = append(subChans, subCh)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			remaining := b.N
+			for remaining > 0 {
+				batchSize := min(remaining, publishBatchSize)
+				for range batchSize {
+					eb.Publish(testType, testEvent)
+				}
+				b.StopTimer()
+				// Drain every published event so later iterations keep measuring
+				// subscriber fan-out instead of the dropped-event fast path.
+				for _, subCh := range subChans {
+					for range batchSize {
+						<-subCh
+					}
+				}
+				remaining -= batchSize
+				if remaining > 0 {
+					b.StartTimer()
+				}
+			}
+		})
+	}
 }

@@ -351,7 +351,7 @@ func (l *pipeLikeListener) Close() error {
 func (l *pipeLikeListener) Addr() net.Addr { return l.addr }
 
 // TestResolvedListeners_PreservesUnixSentinelForPipeListener is a
-// regression test for a P2 review finding: ResolvedListeners, when
+// regression test: ResolvedListeners, when
 // rewriting a caller-supplied listener's config to point at its resolved
 // address, must not blindly overwrite ListenNetwork with
 // listener.Addr().Network(). On Windows, a caller-supplied named-pipe

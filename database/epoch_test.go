@@ -8,13 +8,14 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package database
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -90,11 +91,8 @@ func seedEpochTxn(
 // TestEpochBySlot_MatchesLegacyLinearScan proves the GetEpochBySlot-based
 // EpochBySlot (database/epoch.go) returns the same epoch as the old
 // fetch-all-and-scan implementation for a contiguous, non-overlapping
-// epoch table -- the only shape real callers (account-expiry truncate
-// recompute) ever see, per the invariant documented on EpochBySlot. This
-// is the "revert-verify" for the cubic-dev-ai P2 finding on
-// database/epoch.go: the swap to GetEpochBySlot is behavior-preserving
-// for every slot a caller can legitimately pass.
+// epoch table, the shape used by account-expiry truncate recomputation.
+// GetEpochBySlot must return the same epoch for every valid slot.
 func TestEpochBySlot_MatchesLegacyLinearScan(t *testing.T) {
 	t.Parallel()
 
@@ -207,7 +205,7 @@ func TestGetEpochBySlot_IsBoundedQuery(t *testing.T) {
 	db := openTestDB(t)
 
 	const epochCount = 50
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	for i := range uint64(epochCount) {
 		seedEpochTxn(t, db, i, i*100, 100, txn)
 	}

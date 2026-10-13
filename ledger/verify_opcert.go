@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -43,6 +44,13 @@ const (
 	// the immutable-tip counter, or its issuer is unknown at that point. The
 	// peer message is accepted, but networking must not process or relay it.
 	LeiosAnnouncementStaleOCIN
+)
+
+// errOpCertBaselineNotImported reports a Mithril-restored database that holds
+// no certified operational-certificate counter at its trust boundary, so a
+// pool with no later observation has no known counter at all.
+var errOpCertBaselineNotImported = errors.New(
+	"certified opcert counter baseline missing at the Mithril trust boundary",
 )
 
 // opCertFromHeader extracts the operational certificate from a Praos/TPraos
@@ -142,13 +150,13 @@ func opCertNoGapRuleApplies(eraId uint8) bool {
 // gap check must be scoped by era rather than by validation mode. See
 // opCertNoGapRuleApplies.
 //
-// When the pool has no recorded counter (found is false) there is no baseline
-// to compare against — a genuine first sighting, or a pool that last forged
-// before this node's local history begins (e.g. a Mithril-restored start) — so
-// the candidate is accepted and becomes the baseline. Enforcing a baseline of
-// zero here would falsely reject a valid high-counter block and stall the
-// chain; the honest chain we follow already enforced monotonicity at that
-// pool's real baseline.
+// When the pool has no recorded counter (found is false), the reference rules
+// use zero as the baseline for a registered active pool. Header validation
+// establishes producer eligibility before block application reaches this
+// stateful check. Mithril-restored counters are read from the certified
+// boundary by latestOpCertCounterForValidation and therefore retain their
+// actual baseline; a restored database that never imported them fails that
+// read rather than reaching here with found false.
 func validateOpCertCounter(
 	stored uint64,
 	found bool,
@@ -204,7 +212,10 @@ func (ls *LedgerState) leiosAnnouncementOCINStaleness(
 			"security parameter unavailable for leios announcement validation",
 		)
 	}
-	immutablePoint, found, err := primaryChain.PointAtDepth(k)
+	immutablePoint, found, err := primaryChain.PointAtDepth(
+		context.Background(),
+		k,
+	)
 	if err != nil {
 		return LeiosAnnouncementFreshOCIN, fmt.Errorf(
 			"resolve immutable tip for leios announcement: %w",
@@ -216,6 +227,7 @@ func (ls *LedgerState) leiosAnnouncementOCINStaleness(
 	}
 	poolKeyHash := lcommon.PoolKeyHash(header.IssuerVkey().Hash())
 	stored, found, err := ls.db.LatestPoolOpCertSequenceAtOrBefore(
+		context.Background(),
 		poolKeyHash,
 		immutablePoint.Slot,
 		nil,

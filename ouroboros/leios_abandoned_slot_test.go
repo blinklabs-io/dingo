@@ -55,6 +55,7 @@ func newLeiosFetchConversation(
 		gouroboros.WithConnection(mockConn),
 		gouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
 		gouroboros.WithNodeToNode(true),
+		gouroboros.WithLeiosFetchConfig(leiosfetch.NewConfig()),
 	)
 	require.NoError(t, err)
 
@@ -79,7 +80,7 @@ func leiosFetchHandshake() []ouroboros_mock.ConversationEntry {
 }
 
 // TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable reproduces the
-// Dingo #3622 path. A response lost after the peer accepts a BlockTxsRequest
+// abandoned-slot path. A response lost after the peer accepts a BlockTxsRequest
 // leaves the request slot abandoned. The same connection must fail in bounded
 // time so backfill can move to another peer, whose MsgBlockTxs response then
 // makes the certified endorser block available to both ledger and serving.

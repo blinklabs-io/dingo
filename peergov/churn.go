@@ -72,8 +72,15 @@ func (p *PeerGovernor) gossipChurn() {
 	// Demote the lowest-scoring peers
 	demoted := 0
 	eligibleUpstreams := p.countEligibleUpstreamsLocked()
+	// availableReplacements caps how many hot slots routine rotation may
+	// vacate. It is counted once, before any demotion, with the same
+	// eligibility promoteWarmNonRootPeersLocked applies below, so every
+	// such demotion is backfilled and the hot count cannot drain.
+	availableReplacements := p.countPromotableWarmNonRootPeersLocked()
 	skippedLastEligibleUpstream := false
 	skippedUpstreamAddress := ""
+	skippedLastEligibleUpstreamCount := 0
+	skippedNoReplacementCount := 0
 	for i := 0; i < len(hotNonRoot) && demoted < churnCount; i++ {
 		peer := hotNonRoot[i]
 		targetState, canDemote := p.demotionTarget(peer.Source)
@@ -84,7 +91,7 @@ func (p *PeerGovernor) gossipChurn() {
 			chainSelectionState(
 				p.bootstrapExited,
 				peer.Source,
-				peer.Connection,
+				p.selectionConnLocked(peer),
 			).eligible
 		// Never close the node's last eligible upstream connection.
 		// Demoting it to cold would leave the node with no chainsync
@@ -95,6 +102,17 @@ func (p *PeerGovernor) gossipChurn() {
 		if demotionRemovesEligibleUpstream && eligibleUpstreams <= 1 {
 			skippedLastEligibleUpstream = true
 			skippedUpstreamAddress = peer.Address
+			skippedLastEligibleUpstreamCount++
+			continue
+		}
+		// Routine rotation of a healthy peer waits for a replacement. A
+		// peer below MinScoreThreshold is dropped regardless: holding it
+		// hot at MinHotPeers would never raise the redial deficit, so no
+		// replacement would ever be dialed.
+		if targetState == PeerStateCold &&
+			peer.PerformanceScore >= p.config.MinScoreThreshold &&
+			demoted >= availableReplacements {
+			skippedNoReplacementCount++
 			continue
 		}
 		oldSource := peer.Source
@@ -184,6 +202,19 @@ func (p *PeerGovernor) gossipChurn() {
 		}
 	} else {
 		p.lastEligibleUpstreamSkipLogged = false
+	}
+
+	if p.metrics != nil {
+		if skippedNoReplacementCount > 0 {
+			p.metrics.churnDemotionsSkippedByReason.WithLabelValues(
+				"no_replacement",
+			).Add(float64(skippedNoReplacementCount))
+		}
+		if skippedLastEligibleUpstreamCount > 0 {
+			p.metrics.churnDemotionsSkippedByReason.WithLabelValues(
+				"last_eligible_upstream",
+			).Add(float64(skippedLastEligibleUpstreamCount))
+		}
 	}
 
 	// Now promote warm peers to fill slots
@@ -322,6 +353,36 @@ func (p *PeerGovernor) publicRootChurn() {
 	p.publishPendingEvents(events)
 }
 
+// isPromotableWarmNonRootPeerLocked reports whether peer is a warm
+// gossip/ledger peer that promoteWarmNonRootPeersLocked may promote: it
+// has a client connection and a score at or above MinScoreThreshold. A
+// responder-only inbound connection does not qualify: reconcile's refill
+// never promotes it, and a hot peer without a client connection is
+// demoted by reconcile's inactivity check. Must be called with p.mu held.
+func (p *PeerGovernor) isPromotableWarmNonRootPeerLocked(peer *Peer) bool {
+	return peer != nil &&
+		peer.State == PeerStateWarm &&
+		(peer.Source == PeerSourceP2PGossip ||
+			peer.Source == PeerSourceP2PLedger) &&
+		p.usableClientLocked(peer) &&
+		peer.PerformanceScore >= p.config.MinScoreThreshold
+}
+
+// countPromotableWarmNonRootPeersLocked returns how many peers
+// promoteWarmNonRootPeersLocked could promote right now. gossipChurn uses
+// it to cap routine demotions, and the redial path uses it to decide
+// whether the warm pool can close a hot-set deficit on its own. Must be
+// called with p.mu held.
+func (p *PeerGovernor) countPromotableWarmNonRootPeersLocked() int {
+	count := 0
+	for _, peer := range p.peers {
+		if p.isPromotableWarmNonRootPeerLocked(peer) {
+			count++
+		}
+	}
+	return count
+}
+
 // promoteWarmNonRootPeers promotes the highest-scoring warm non-root peers to hot.
 //
 //nolint:unused // Used by tests
@@ -343,11 +404,7 @@ func (p *PeerGovernor) promoteWarmNonRootPeersLocked(count int) []pendingEvent {
 		return events
 	}
 
-	// Collect warm non-root peers
-	warmNonRoot := p.filterPeers(func(peer *Peer) bool {
-		return peer.State == PeerStateWarm &&
-			(peer.Source == PeerSourceP2PGossip || peer.Source == PeerSourceP2PLedger)
-	})
+	warmNonRoot := p.filterPeers(p.isPromotableWarmNonRootPeerLocked)
 	if len(warmNonRoot) == 0 {
 		return events
 	}
@@ -361,49 +418,43 @@ func (p *PeerGovernor) promoteWarmNonRootPeersLocked(count int) []pendingEvent {
 	promoted := 0
 	for i := 0; i < len(warmNonRoot) && promoted < count; i++ {
 		peer := warmNonRoot[i]
-		// Only promote if connection exists and score is above threshold
-		if peer.Connection == nil {
-			continue // Skip peers without active connections
+		p.recordPeerStateChange(peer.State, PeerStateHot)
+		peer.State = PeerStateHot
+		peer.LastActivity = time.Now()
+		promoted++
+		p.config.Logger.Debug(
+			"gossip churn: promoted peer to hot",
+			"address", peer.Address,
+			"source", peer.Source.String(),
+			"old_state", "warm",
+			"new_state", "hot",
+			"score", peer.PerformanceScore,
+			"reason", "gossip churn promotion",
+		)
+		if p.metrics != nil {
+			p.metrics.warmNonRootPeersPromotions.Inc()
+			p.metrics.churnPromotionsBySource.WithLabelValues(
+				peer.Source.String(),
+			).Inc()
 		}
-		if peer.PerformanceScore >= p.config.MinScoreThreshold {
-			p.recordPeerStateChange(peer.State, PeerStateHot)
-			peer.State = PeerStateHot
-			peer.LastActivity = time.Now()
-			promoted++
-			p.config.Logger.Debug(
-				"gossip churn: promoted peer to hot",
-				"address", peer.Address,
-				"source", peer.Source.String(),
-				"old_state", "warm",
-				"new_state", "hot",
-				"score", peer.PerformanceScore,
-				"reason", "gossip churn promotion",
-			)
-			if p.metrics != nil {
-				p.metrics.warmNonRootPeersPromotions.Inc()
-				p.metrics.churnPromotionsBySource.WithLabelValues(
-					peer.Source.String(),
-				).Inc()
-			}
-			events = append(events, pendingEvent{
-				PeerPromotedEventType,
-				PeerStateChangeEvent{
-					Address: peer.Address,
-					Reason:  "gossip churn promotion",
-				},
-			})
-			events = append(events, pendingEvent{
-				PeerChurnEventType,
-				PeerChurnEvent{
-					Address:  peer.Address,
-					Source:   peer.Source.String(),
-					OldState: "warm",
-					NewState: "hot",
-					Score:    peer.PerformanceScore,
-					Reason:   "gossip churn promotion",
-				},
-			})
-		}
+		events = append(events, pendingEvent{
+			PeerPromotedEventType,
+			PeerStateChangeEvent{
+				Address: peer.Address,
+				Reason:  "gossip churn promotion",
+			},
+		})
+		events = append(events, pendingEvent{
+			PeerChurnEventType,
+			PeerChurnEvent{
+				Address:  peer.Address,
+				Source:   peer.Source.String(),
+				OldState: "warm",
+				NewState: "hot",
+				Score:    peer.PerformanceScore,
+				Reason:   "gossip churn promotion",
+			},
+		})
 	}
 	return events
 }
@@ -462,8 +513,8 @@ func (p *PeerGovernor) promoteFromWarmPublicRootsLocked(
 	for i := 0; i < len(warmPublicRoots) && promoted < count; i++ {
 		peer := warmPublicRoots[i]
 		// Only promote if connection exists and score is above threshold
-		if peer.Connection == nil {
-			continue // Skip peers without active connections
+		if peer.Connection == nil || p.isPeerDeniedLocked(peer) {
+			continue // Skip disconnected or denied roots
 		}
 		if peer.PerformanceScore >= p.config.MinScoreThreshold {
 			p.recordPeerStateChange(peer.State, PeerStateHot)

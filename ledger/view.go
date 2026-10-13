@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -55,13 +57,14 @@ var ErrNotImplemented = errors.New("not implemented")
 // a genuine storage fault (a timeout, a lost connection) cannot propagate
 // through the interface and would otherwise silently become a false
 // (unregistered/does-not-exist) verdict that the calling ledger rule cannot
-// distinguish from the real thing (blinklabs-io/dingo#1649). Every
-// ValidateTxFunc/EvaluateTxFunc call site that builds a LedgerView must check
-// storageFaultOrErr after the rule returns, and prefer this fault over
-// whatever verdict the rule produced from the false negative.
+// distinguish from the real thing. Every ValidateTxFunc/EvaluateTxFunc call
+// site that builds a LedgerView must check storageFaultOrErr after the rule
+// returns, and prefer this fault over whatever verdict the rule produced from
+// the false negative.
 var ErrLedgerViewStorageFault = errors.New("ledger view storage fault")
 
 type LedgerView struct {
+	ctx context.Context
 	ls  *LedgerState
 	txn *database.Txn
 	// Committee proposal resolution must use the same immutable consensus
@@ -73,6 +76,10 @@ type LedgerView struct {
 	intraBlockUtxos map[utxoref.Key]lcommon.Utxo
 	// consumedUtxos tracks inputs consumed by pending mempool transactions.
 	consumedUtxos map[utxoref.Key]struct{}
+	// pendingState holds the pending or already selected transactions that
+	// change ledger state beyond the UTxO set. validationState layers them
+	// over this view; the view's own reads never consult it.
+	pendingState *utxoref.StateOverlay
 	// utxoMemoMu guards utxoMemo. Production views are built per transaction
 	// or query and used from one goroutine; the lock keeps a future shared
 	// view safe at negligible cost next to the database read it saves.
@@ -80,28 +87,37 @@ type LedgerView struct {
 	// utxoMemo caches successful UtxoById database resolutions for the
 	// lifetime of this view. Era rules resolve the same input from several
 	// independent call sites while validating one transaction (60 reads for
-	// 4 distinct refs on a Preprod fixture, issue #4226). Misses, decode
-	// errors and ErrNilDecodedOutput are never cached, and the memo is
-	// consulted only after consumedUtxos and intraBlockUtxos, so an overlay
-	// entry added between calls still takes precedence. Every caller shares
-	// the cached Output and must not mutate it. Lazily allocated; never
-	// shared across views.
+	// 4 distinct refs on a Preprod fixture). Misses, decode errors and
+	// ErrNilDecodedOutput are never cached, and the memo is consulted only
+	// after consumedUtxos and intraBlockUtxos, so an overlay entry added
+	// between calls still takes precedence. Every caller shares the cached
+	// Output and must not mutate it. Lazily allocated; never shared across
+	// views.
 	utxoMemo map[utxoref.Key]lcommon.Utxo
+	// prefetchedUtxos holds the live UTxOs a block's transactions reference,
+	// resolved with one batch query before the first transaction is
+	// validated (see prefetchBlockUtxos). It is owned by block application,
+	// shared read-only by that block's per-transaction views, and consulted
+	// only after the overlays and the memo. Block application deletes a
+	// transaction's inputs and collateral, including those of Dijkstra
+	// sub-transactions, once that transaction is applied, so a later
+	// transaction cannot be answered with an output that is already spent.
+	// A miss falls through to the database read.
+	prefetchedUtxos map[utxoref.Key]lcommon.Utxo
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	// Currently unreachable from production: ledgerProcessBlock's sole
 	// caller (ledger/state.go) hardcodes skipPhase2Validation=false,
-	// because issue #3528 made Phase 2 always evaluate whenever per-tx
-	// validation runs at all. Retained rather than deleted because it is
-	// a narrower, more targeted mechanism than the coarse
-	// shouldValidateBlock=false gate TrustedReplay currently uses to skip
-	// per-tx validation (phase 1 and phase 2 together): a future
-	// TrustedReplay caller that wants phase-1 UTXO checks re-run while
-	// still trusting the producer's isValid flag for phase 2 has this
-	// already built, wired through every era's phase2ValidationSkipper
-	// call site, and tested (TestLedgerViewSkipPhase2Validation and the
-	// per-era skip tests) -- only the production call site's hardcoded
-	// false needs to change to use it.
+	// because Phase 2 always evaluates whenever per-tx validation runs at all.
+	// Retained rather than deleted because it is a narrower, more targeted
+	// mechanism than the coarse shouldValidateBlock=false gate TrustedReplay
+	// currently uses to skip per-tx validation (phase 1 and phase 2 together):
+	// a future TrustedReplay caller that wants phase-1 UTXO checks re-run while
+	// still trusting the producer's isValid flag for phase 2 has this already
+	// built, wired through every era's phase2ValidationSkipper call site, and
+	// tested (TestLedgerViewSkipPhase2Validation and the per-era skip tests) --
+	// only the production call site's hardcoded false needs to change to use
+	// it.
 	skipPhase2Validation bool
 	// horizonAnchorSlot is the slot the era forecast horizon is measured
 	// from when this view converts slots to time. Block application sets it
@@ -132,13 +148,27 @@ type LedgerView struct {
 	// run long enough (evaluating scripts) that the writer publishes a
 	// newer snapshot in the meantime, which would let this disagree with pp
 	// -- the exact protocol parameters this operation is actually
-	// evaluating against. See blinklabs-io/dingo#3962's PR review.
+	// evaluating against.
 	syntheticV2CostModel bool
+	// byronParamsFromBlock is set for block application, where a Byron
+	// block's rules must read the parameters its update state adopted for
+	// the block's own epoch, passed as pparams. ByronProtocolParameters then
+	// refuses rather than answer with the parameters adopted as of the tip,
+	// which belong to an earlier epoch once a block crosses a boundary.
+	byronParamsFromBlock bool
 	// storageErr is the first non-not-found storage error observed by one of
 	// this view's boolean LedgerState predicates. It is sticky: only the
 	// first recorded error is kept, matching the single LedgerView built per
 	// ValidateTxFunc/EvaluateTxFunc call. See ErrLedgerViewStorageFault.
 	storageErr error
+}
+
+// EvaluationContext returns the context governing this ledger operation.
+func (lv *LedgerView) EvaluationContext() context.Context {
+	if lv.ctx == nil {
+		return context.Background()
+	}
+	return lv.ctx
 }
 
 // recordStorageErr records the first non-not-found error observed by a
@@ -149,6 +179,12 @@ func (lv *LedgerView) recordStorageErr(err error) {
 	if lv.storageErr == nil {
 		lv.storageErr = err
 	}
+}
+
+func (lv *LedgerView) storageFault(format string, err error) error {
+	wrapped := fmt.Errorf(format, err)
+	lv.recordStorageErr(wrapped)
+	return wrapped
 }
 
 // StorageErr returns the first non-not-found storage error recorded by a
@@ -212,64 +248,159 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 
-// PendingMIRRewardDeltas returns, for each stake credential, the signed sum of
-// MIR reward deltas already committed this epoch at or before uptoSlot. Every
-// transaction's certificates are written to the database immediately after
-// that transaction validates (see ledgerProcessBlock), before the next
-// transaction in the same block validates, so this query already reflects
-// every prior transaction's MIR certificates this epoch, same block or
-// earlier -- only certificates within the transaction currently being
-// validated are not yet visible here, and validateMIRAccumulatedRewards folds
-// those in memory as it walks the transaction's own certificate list.
+// PlutusEvalContextCache forwards the underlying LedgerState's shared
+// PlutusEvalContextCache so that a *LedgerView (the value passed to
+// ValidateTx*/EvaluateTx*) satisfies eras.PlutusEvalContextCacheProvider.
+// Returns nil for a bare-constructed LedgerView with no ls (test-only),
+// which era script evaluation already treats as "no cache available".
+func (lv *LedgerView) PlutusEvalContextCache() *eras.PlutusEvalContextCache {
+	if lv.ls == nil {
+		return nil
+	}
+	return lv.ls.PlutusEvalContextCache()
+}
+
+// var _ eras.PlutusEvalContextCacheProvider = (*LedgerView)(nil) makes any
+// future drift in the PlutusEvalContextCacheProvider method signature a
+// compile error instead of a silent fallback to uncached EvalContext
+// construction.
+var _ eras.PlutusEvalContextCacheProvider = (*LedgerView)(nil)
+
+// MIRDelegState returns the move instantaneous rewards DELEG state that a
+// certificate at slot is checked against: the chain account pots, the
+// distributions and pot transfers committed this epoch at or before slot, and
+// the epoch's too-late cutoff. additive selects how repeated distributions to
+// one credential fold, per eras.MIRDelegState.Pending.
+//
+// Every transaction's certificates are written to the database immediately
+// after that transaction validates (see ledgerProcessBlock), before the next
+// transaction in the same block validates, so this already reflects every
+// prior transaction's MIR certificates this epoch, same block or earlier.
+// Certificates within the transaction being validated are folded in memory by
+// the eras package as it walks the certificate list.
 //
 // The epoch start slot comes from lv.epochStartSlot, pinned from the same
-// snapshot pp was captured from at every real validation call site (see
-// epochStartSlot's field doc comment and IsVrfKeyInUse, which pins it for the
-// same reason), never a fresh read of LedgerState.currentEpoch: that field is
-// writer-owned working state (see its doc comment in state.go), and
-// re-reading it independently, later in the same validation call, could
-// observe an epoch rollover that a concurrent writer committed after the
-// rest of this validation was pinned to an earlier snapshot -- silently
-// reporting zero pending deltas for a transaction that is still, in truth,
-// inside the earlier epoch.
-func (lv *LedgerView) PendingMIRRewardDeltas(
-	uptoSlot uint64,
-) (map[eras.MIRCredentialKey]*big.Int, error) {
+// snapshot pp was captured from (see its field doc comment), never a fresh
+// read of LedgerState.currentEpoch, which a concurrent writer could advance
+// mid-validation.
+func (lv *LedgerView) MIRDelegState(
+	slot uint64,
+	additive bool,
+) (eras.MIRDelegState, error) {
+	ret := eras.MIRDelegState{
+		DeltaReserves: new(big.Int),
+		DeltaTreasury: new(big.Int),
+		Pending:       make(map[eras.MIRCredentialKey]*big.Int),
+	}
+	cutoff, err := lv.ls.mirCertificateCutoff(slot)
+	if err != nil {
+		return ret, err
+	}
+	ret.Cutoff = cutoff
+	ret.Treasury, ret.Reserves, err = lv.ls.readNetworkState(lv.txn)
+	if err != nil {
+		return ret, err
+	}
 	epochStartSlot := lv.epochStartSlot
-	if uptoSlot < epochStartSlot {
-		return nil, nil
+	if slot < epochStartSlot {
+		return ret, nil
 	}
 	effects, err := lv.ls.db.GetMIRCertsInSlotRange(
-		epochStartSlot, uptoSlot+1, lv.txn,
+		lv.EvaluationContext(),
+		epochStartSlot, slot+1, lv.txn,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get MIR certs in slot range: %w", err)
+		return ret, lv.storageFault("get MIR certs in slot range: %w", err)
 	}
-	totals := make(map[eras.MIRCredentialKey]*big.Int)
 	for _, effect := range effects {
+		if effect.OtherPot > 0 {
+			amount := new(big.Int).SetUint64(effect.OtherPot)
+			source, target := ret.DeltaReserves, ret.DeltaTreasury
+			if effect.Pot == mirPotTreasury {
+				source, target = target, source
+			}
+			source.Sub(source, amount)
+			target.Add(target, amount)
+			continue
+		}
 		for _, reward := range effect.Rewards {
 			if reward.Amount == nil {
 				continue
 			}
+			credential, err := lcommon.NewBlake2b224Checked(
+				reward.Credential,
+			)
+			if err != nil {
+				return ret, fmt.Errorf("MIR reward credential: %w", err)
+			}
 			key := eras.MIRCredentialKey{
 				Tag:        reward.CredentialTag,
-				Credential: lcommon.NewBlake2b224(reward.Credential),
+				Credential: credential,
 				Pot:        effect.Pot,
 			}
-			if existing, ok := totals[key]; ok {
-				totals[key] = new(big.Int).Add(existing, reward.Amount)
+			if existing, ok := ret.Pending[key]; ok && additive {
+				ret.Pending[key] = new(big.Int).Add(existing, reward.Amount)
 			} else {
-				totals[key] = new(big.Int).Set(reward.Amount)
+				ret.Pending[key] = new(big.Int).Set(reward.Amount)
 			}
 		}
 	}
-	return totals, nil
+	return ret, nil
 }
 
-// var _ eras.MIRPendingRewardsProvider = (*LedgerView)(nil) makes any future
-// drift in the MIRPendingRewardsProvider method signature a compile error
-// instead of a silent runtime no-op for the MIRProducesNegativeUpdate check.
-var _ eras.MIRPendingRewardsProvider = (*LedgerView)(nil)
+// var _ eras.MIRDelegStateProvider = (*LedgerView)(nil) makes any future
+// drift in the MIRDelegStateProvider method signature a compile error instead
+// of a silent runtime no-op for every MIR DELEG predicate that reads it.
+var _ eras.MIRDelegStateProvider = (*LedgerView)(nil)
+
+// PendingInstantaneousRewards returns the instantaneous rewards pending for
+// cred in the pot named by source (0 reserves, 1 treasury): the sum of the
+// distributions committed earlier in the current epoch, or nil when there are
+// none. The gouroboros DELEG rule reads it only from protocol version 5, where
+// repeated distributions add, so the fold is always additive.
+//
+// The range is open-ended because a transaction's certificates are stored
+// only after it validates and a rollback deletes them, so everything stored
+// in the epoch precedes the transaction being validated.
+func (lv *LedgerView) PendingInstantaneousRewards(
+	source uint,
+	cred lcommon.Credential,
+) (*big.Int, error) {
+	effects, err := lv.ls.db.GetMIRCertsInSlotRange(
+		lv.EvaluationContext(), lv.epochStartSlot, math.MaxInt64, lv.txn,
+	)
+	if err != nil {
+		return nil, lv.storageFault("get MIR certs in slot range: %w", err)
+	}
+	var total *big.Int
+	for _, effect := range effects {
+		if effect.Pot != source || effect.OtherPot > 0 {
+			continue
+		}
+		for _, reward := range effect.Rewards {
+			if reward.Amount == nil ||
+				uint(reward.CredentialTag) != cred.CredType ||
+				!bytes.Equal(reward.Credential, cred.Credential[:]) {
+				continue
+			}
+			if total == nil {
+				total = new(big.Int)
+			}
+			total.Add(total, reward.Amount)
+		}
+	}
+	return total, nil
+}
+
+// The gouroboros DELEG rule discovers this capability with a runtime type
+// assertion and, without it, rejects a negative delta an earlier transaction
+// covers, so signature drift must fail to build.
+var _ lcommon.PendingInstantaneousRewardsState = (*LedgerView)(nil)
+
+// The genesis key delegation predicates discover this capability with a
+// runtime type assertion and skip when it misses, so signature drift would
+// silently disable them rather than fail to build.
+var _ eras.GenesisDelegStateProvider = (*LedgerView)(nil)
 
 // The Conway committee certificate and voter rules discover this capability
 // with a runtime type assertion and fail closed when it misses, so signature
@@ -280,7 +411,20 @@ var _ eras.MIRPendingRewardsProvider = (*LedgerView)(nil)
 // ledger/common.CommitteeCredentialState, so this also proves *LedgerView
 // satisfies the upstream capability. Point it at the upstream type once the
 // gouroboros pin exports it.
-var _ eras.CommitteeCredentialState = (*LedgerView)(nil)
+var (
+	_ eras.CommitteeCredentialState = (*LedgerView)(nil)
+	_ lcommon.CommitteeVotingState  = (*LedgerView)(nil)
+)
+
+// gouroboros ledger/common.CommitteeHotCredentialMembers is
+// the optional plural capability that lets upstream committee-vote
+// validation resolve every cold credential currently authorizing a shared
+// hot credential, rather than the single arbitrary witness
+// CommitteeHotCredentialMember can express. Without it, a vote cast under a
+// hot credential two cold credentials share can be wrongly rejected as
+// unknown when one sharer's authorization is touched by the same
+// transaction and the singular fallback happened to report that one.
+var _ lcommon.CommitteeHotCredentialMembers = (*LedgerView)(nil)
 
 // Keep the optional Conway governance capability wired to the concrete view
 // used for transaction validation. Without this interface, gouroboros falls
@@ -294,16 +438,24 @@ var _ lcommon.GovPurposeRootsState = (*LedgerView)(nil)
 // consensus-level break. Make it a compile error instead.
 var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
 
+// PPUP and MIR rules discover these optional capabilities through the
+// transaction-scoped LedgerView passed to ValidateTx.
+var (
+	_ lcommon.GenesisDelegationState                    = (*LedgerView)(nil)
+	_ lcommon.ClassicProtocolParameterUpdateWindowState = (*LedgerView)(nil)
+)
+
 // Byron redeem and bootstrap witness verification asserts this capability at
 // runtime and fails the transaction when it is absent, so drift in
 // ByronProtocolMagic would reject every Byron transaction carrying those
 // witnesses rather than fail to build.
 var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
 
-// Byron minimum-fee validation requires the fee policy from Byron genesis.
-// Pin the optional capability to the concrete validation view so interface
-// drift fails at build time instead of disabling the rule.
-var _ eras.ByronFeePolicyProvider = (*LedgerView)(nil)
+// Byron minimum-fee and maximum-size validation read the adopted Byron
+// protocol parameters through this capability. Pin it to the concrete
+// validation view so interface drift fails at build time instead of disabling
+// the rules.
+var _ eras.ByronProtocolParametersProvider = (*LedgerView)(nil)
 
 // UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
 // type assertion and, unlike the assertions above, degrades rather than fails
@@ -332,9 +484,21 @@ func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 	return lv.ls.ByronProtocolMagic()
 }
 
-func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
-	return lv.ls.ByronFeePolicy()
+func (lv *LedgerView) ByronProtocolParameters() (
+	*eras.ByronProtocolParameters,
+	error,
+) {
+	if lv.byronParamsFromBlock {
+		return nil, errByronBlockParamsNotPassed
+	}
+	return lv.ls.ByronProtocolParameters()
 }
+
+// errByronBlockParamsNotPassed reports a Byron block applied without its
+// adopted protocol parameters.
+var errByronBlockParamsNotPassed = errors.New(
+	"byron block application must pass the block's adopted protocol parameters",
+)
 
 func (lv *LedgerView) UtxoById(
 	utxoId lcommon.TransactionInput,
@@ -369,27 +533,38 @@ func (lv *LedgerView) UtxoById(
 	}
 	lv.utxoMemoMu.Unlock()
 
+	if utxo, ok := lv.prefetchedUtxos[key]; ok {
+		return utxo, nil
+	}
+
 	lv.ls.utxoByRefReads.Add(1)
 	utxo, err := lv.ls.db.UtxoByRef(
+		lv.EvaluationContext(),
 		utxoId.Id().Bytes(),
 		utxoId.Index(),
 		lv.txn,
 	)
 	if err != nil {
+		if !errors.Is(err, database.ErrUtxoNotFound) {
+			lv.recordStorageErr(err)
+		}
 		// Not memoized: a ref that is missing now may resolve later.
 		return lcommon.Utxo{}, err
 	}
 	tmpOutput, err := utxo.Decode()
 	if err != nil {
+		lv.recordStorageErr(err)
 		return lcommon.Utxo{}, err
 	}
 	if tmpOutput == nil {
-		return lcommon.Utxo{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"decoded output is nil for utxo %s#%d: %w",
 			utxoId.Id().String(),
 			utxoId.Index(),
 			ErrNilDecodedOutput,
 		)
+		lv.recordStorageErr(err)
+		return lcommon.Utxo{}, err
 	}
 	result := lcommon.Utxo{
 		Id:     utxoId,
@@ -407,14 +582,24 @@ func (lv *LedgerView) UtxoById(
 func (lv *LedgerView) PoolRegistration(
 	pkh lcommon.PoolKeyHash,
 ) ([]lcommon.PoolRegistrationCertificate, error) {
-	return lv.ls.db.GetPoolRegistrations(pkh, lv.txn)
+	registrations, err := lv.ls.db.GetPoolRegistrations(pkh, lv.txn)
+	if err != nil {
+		return nil, lv.storageFault("get pool registrations: %w", err)
+	}
+	return registrations, nil
 }
 
 func (lv *LedgerView) StakeRegistration(
 	stakingKey []byte,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	// stakingKey = lcommon.NewBlake2b224(stakingKey)
-	return lv.ls.db.GetStakeRegistrationsByCredential(0, stakingKey, lv.txn)
+	registrations, err := lv.ls.db.GetStakeRegistrationsByCredential(
+		0, stakingKey, lv.txn,
+	)
+	if err != nil {
+		return nil, lv.storageFault("get stake registrations: %w", err)
+	}
+	return registrations, nil
 }
 
 // StakeRegistrationByCredential returns stake registration certificates for the
@@ -426,11 +611,25 @@ func (lv *LedgerView) StakeRegistrationByCredential(
 	if err != nil {
 		return nil, err
 	}
-	return lv.ls.db.GetStakeRegistrationsByCredential(
+	registrations, err := lv.ls.db.GetStakeRegistrationsByCredential(
 		credentialTag,
 		cred.Credential[:],
 		lv.txn,
 	)
+	if err != nil {
+		return nil, lv.storageFault("get stake registrations: %w", err)
+	}
+	return registrations, nil
+}
+
+// validationState returns the state an era validator reads: the view itself,
+// or the view with the pending transactions' withdrawals, certificates,
+// deposits and proposals applied.
+func (lv *LedgerView) validationState(
+	resolve utxoref.ProtocolParametersResolver,
+	generation uint64,
+) (lcommon.LedgerState, error) {
+	return lv.pendingState.View(lv, resolve, generation)
 }
 
 // IsStakeCredentialRegistered checks if a stake credential is currently registered
@@ -442,6 +641,7 @@ func (lv *LedgerView) IsStakeCredentialRegistered(
 		return false
 	}
 	account, err := lv.ls.db.GetAccountByCredential(
+		lv.EvaluationContext(),
 		credentialTag,
 		cred.Credential[:],
 		false,
@@ -479,6 +679,7 @@ func (lv *LedgerView) StakeCredentialDeposit(
 		return nil, err
 	}
 	account, err := lv.ls.db.GetAccountByCredential(
+		lv.EvaluationContext(),
 		credentialTag,
 		cred.Credential[:],
 		false,
@@ -488,12 +689,13 @@ func (lv *LedgerView) StakeCredentialDeposit(
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, lv.storageFault("get stake credential account: %w", err)
 	}
 	if account == nil || !account.Active {
 		return nil, nil
 	}
 	history, err := lv.ls.db.GetAccountRegistrationHistoryByCredential(
+		lv.EvaluationContext(),
 		credentialTag,
 		cred.Credential[:],
 		1,
@@ -502,15 +704,16 @@ func (lv *LedgerView) StakeCredentialDeposit(
 		lv.txn,
 	)
 	if err != nil {
-		return nil, err
+		return nil, lv.storageFault("get stake registration history: %w", err)
 	}
 	importRegistration, err := lv.ls.db.GetAccountImportRegistrationByCredential(
+		lv.EvaluationContext(),
 		credentialTag,
 		cred.Credential[:],
 		lv.txn,
 	)
 	if err != nil {
-		return nil, err
+		return nil, lv.storageFault("get imported stake registration: %w", err)
 	}
 	// The import baseline represents state after the snapshot point. Treat it
 	// as the latest registration when no certificate history is newer, without
@@ -536,78 +739,24 @@ func (lv *LedgerView) StakeCredentialDeposit(
 func (lv *LedgerView) PoolCurrentState(
 	pkh lcommon.PoolKeyHash,
 ) (*lcommon.PoolRegistrationCertificate, *uint64, error) {
-	pool, err := lv.ls.db.GetPool(pkh, false, lv.txn)
+	pool, err := lv.ls.db.GetPool(lv.EvaluationContext(), pkh, false, lv.txn)
 	if err != nil {
 		if errors.Is(err, models.ErrPoolNotFound) {
 			pool = &models.Pool{}
 		} else {
-			return nil, nil, err
+			return nil, nil, lv.storageFault("get pool: %w", err)
 		}
 	}
 	var currentReg *lcommon.PoolRegistrationCertificate
-	var hasReg bool
-	var regLatestSlot uint64
-	var regLatestCertID uint
-	if len(pool.Registration) > 0 {
-		var latestIdx int
-		for i, reg := range pool.Registration {
-			// Use CertificateID for deterministic disambiguation when slots are equal
-			if reg.AddedSlot > regLatestSlot ||
-				(reg.AddedSlot == regLatestSlot && reg.CertificateID > regLatestCertID) {
-				regLatestSlot = reg.AddedSlot
-				regLatestCertID = reg.CertificateID
-				latestIdx = i
-			}
-		}
-		hasReg = true
-		reg := pool.Registration[latestIdx]
-		tmp := lcommon.PoolRegistrationCertificate{
-			CertType: uint(lcommon.CertificateTypePoolRegistration),
-			Operator: lcommon.PoolKeyHash(
-				lcommon.NewBlake2b224(pool.PoolKeyHash),
-			),
-			VrfKeyHash: lcommon.VrfKeyHash(
-				lcommon.NewBlake2b256(pool.VrfKeyHash),
-			),
-			Pledge: uint64(pool.Pledge),
-			Cost:   uint64(pool.Cost),
-		}
-		if pool.Margin != nil {
-			tmp.Margin = cbor.Rat{Rat: pool.Margin.Rat}
-		}
-		tmp.RewardAccount = lcommon.AddrKeyHash(
-			lcommon.NewBlake2b224(pool.RewardAccount),
-		)
-		for _, owner := range reg.Owners {
-			tmp.PoolOwners = append(
-				tmp.PoolOwners,
-				lcommon.AddrKeyHash(lcommon.NewBlake2b224(owner.KeyHash)),
+	reg, regLatestSlot, regLatestCertID, hasReg := latestPoolRegistration(pool)
+	if hasReg {
+		var err error
+		currentReg, err = poolRegistrationCertificate(pool, reg)
+		if err != nil {
+			return nil, nil, lv.storageFault(
+				"decode stored pool registration: %w", err,
 			)
 		}
-		for _, relay := range reg.Relays {
-			r := lcommon.PoolRelay{}
-			if relay.Port != 0 {
-				port := uint32(relay.Port) // #nosec G115
-				r.Port = &port
-			}
-			if relay.Hostname != "" {
-				r.Type = lcommon.PoolRelayTypeSingleHostName
-				hostname := relay.Hostname
-				r.Hostname = &hostname
-			} else if relay.Ipv4 != nil || relay.Ipv6 != nil {
-				r.Type = lcommon.PoolRelayTypeSingleHostAddress
-				r.Ipv4 = relay.Ipv4
-				r.Ipv6 = relay.Ipv6
-			}
-			tmp.Relays = append(tmp.Relays, r)
-		}
-		if reg.MetadataUrl != "" {
-			tmp.PoolMetadata = &lcommon.PoolMetadata{
-				Url:  reg.MetadataUrl,
-				Hash: lcommon.PoolMetadataHash(reg.MetadataHash),
-			}
-		}
-		currentReg = &tmp
 	}
 	// pendingEpoch reports the target epoch of the pool's latest retirement
 	// certificate -- the one most recently added by (AddedSlot,
@@ -645,6 +794,103 @@ func (lv *LedgerView) PoolCurrentState(
 	return currentReg, pendingEpoch, nil
 }
 
+// latestPoolRegistration selects the pool's most recent registration row,
+// returning its slot and certificate ID alongside it.
+func latestPoolRegistration(
+	pool *models.Pool,
+) (reg *models.PoolRegistration, slot uint64, certID uint, ok bool) {
+	var latestIdx int
+	for i, candidate := range pool.Registration {
+		// Use CertificateID for deterministic disambiguation when slots are equal
+		if candidate.AddedSlot > slot ||
+			(candidate.AddedSlot == slot && candidate.CertificateID > certID) {
+			slot = candidate.AddedSlot
+			certID = candidate.CertificateID
+			latestIdx = i
+		}
+	}
+	if len(pool.Registration) == 0 {
+		return nil, 0, 0, false
+	}
+	return &pool.Registration[latestIdx], slot, certID, true
+}
+
+// poolRegistrationCertificate rebuilds the registration certificate from the
+// pool row and one of its registration rows.
+func poolRegistrationCertificate(
+	pool *models.Pool,
+	reg *models.PoolRegistration,
+) (*lcommon.PoolRegistrationCertificate, error) {
+	operator, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
+	if err != nil {
+		return nil, fmt.Errorf("pool current state operator: %w", err)
+	}
+	vrfKeyHash, err := lcommon.NewBlake2b256Checked(pool.VrfKeyHash)
+	if err != nil {
+		return nil, fmt.Errorf("pool current state VRF key hash: %w", err)
+	}
+	rewardAccount, err := lcommon.NewBlake2b224Checked(pool.RewardAccount)
+	if err != nil {
+		return nil, fmt.Errorf("pool current state reward account: %w", err)
+	}
+	cert := lcommon.PoolRegistrationCertificate{
+		CertType:   uint(lcommon.CertificateTypePoolRegistration),
+		Operator:   lcommon.PoolKeyHash(operator),
+		VrfKeyHash: lcommon.VrfKeyHash(vrfKeyHash),
+		Pledge:     uint64(pool.Pledge),
+		Cost:       uint64(pool.Cost),
+	}
+	if pool.Margin != nil {
+		cert.Margin = cbor.Rat{Rat: pool.Margin.Rat}
+	}
+	cert.RewardAccount = lcommon.AddrKeyHash(rewardAccount)
+	for _, owner := range reg.Owners {
+		ownerKeyHash, err := lcommon.NewBlake2b224Checked(owner.KeyHash)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"pool current state owner key hash: %w",
+				err,
+			)
+		}
+		cert.PoolOwners = append(
+			cert.PoolOwners,
+			lcommon.AddrKeyHash(ownerKeyHash),
+		)
+	}
+	for _, relay := range reg.Relays {
+		r := lcommon.PoolRelay{}
+		if relay.Type != nil {
+			r.Type = *relay.Type
+		}
+		if relay.Port != 0 {
+			port := uint32(relay.Port) // #nosec G115
+			r.Port = &port
+		}
+		if relay.Hostname != "" {
+			if relay.Type == nil {
+				r.Type = lcommon.PoolRelayTypeSingleHostName
+				if relay.Port == 0 {
+					r.Type = lcommon.PoolRelayTypeMultiHostName
+				}
+			}
+			hostname := relay.Hostname
+			r.Hostname = &hostname
+		} else if relay.Ipv4 != nil || relay.Ipv6 != nil {
+			r.Type = lcommon.PoolRelayTypeSingleHostAddress
+			r.Ipv4 = relay.Ipv4
+			r.Ipv6 = relay.Ipv6
+		}
+		cert.Relays = append(cert.Relays, r)
+	}
+	if reg.MetadataUrl != "" {
+		cert.PoolMetadata = &lcommon.PoolMetadata{
+			Url:  reg.MetadataUrl,
+			Hash: lcommon.PoolMetadataHash(reg.MetadataHash),
+		}
+	}
+	return &cert, nil
+}
+
 // EpochForSlot returns the epoch containing the given slot, satisfying
 // gouroboros' optional common.EpochState capability.
 //
@@ -652,8 +898,8 @@ func (lv *LedgerView) PoolCurrentState(
 // to a weaker check when the ledger state cannot supply one. Without this the
 // pool-deposit decision cannot tell a retired pool from a registered one, so a
 // registration for an already-retired pool is charged no deposit and the
-// transaction fails value conservation by exactly that amount
-// (issue #3908); the retirement-epoch bound on pool retirement certificates is
+// transaction fails value conservation by exactly that amount;
+// the retirement-epoch bound on pool retirement certificates is
 // skipped for the same reason.
 func (lv *LedgerView) EpochForSlot(slot uint64) (uint64, error) {
 	epoch, err := lv.ls.epochForSlot(slot)
@@ -661,6 +907,51 @@ func (lv *LedgerView) EpochForSlot(slot uint64) (uint64, error) {
 		return 0, err
 	}
 	return epoch.EpochId, nil
+}
+
+// A view that loses this capability does not fail: the retirement-epoch bound
+// and the pool-deposit decision silently take their degraded paths.
+var _ lcommon.EpochState = (*LedgerView)(nil)
+
+func (lv *LedgerView) GenesisDelegateKeyHashes(
+	slot uint64,
+) ([]lcommon.Blake2b224, error) {
+	return lv.ls.genesisDelegateKeyHashes(slot, lv.metadataTxn())
+}
+
+// GenesisDelegState implements eras.GenesisDelegStateProvider.
+func (lv *LedgerView) GenesisDelegState(
+	slot uint64,
+) (eras.GenesisDelegState, error) {
+	return lv.ls.genesisDelegState(slot, lv.metadataTxn())
+}
+
+func (lv *LedgerView) GenesisDelegateForGenesisKey(
+	genesisKeyHash lcommon.Blake2b224,
+	slot uint64,
+) (lcommon.Blake2b224, bool, error) {
+	return lv.ls.genesisDelegateForGenesisKey(
+		genesisKeyHash,
+		slot,
+		lv.metadataTxn(),
+	)
+}
+
+func (lv *LedgerView) GenesisUpdateQuorum() (uint, error) {
+	return lv.ls.GenesisUpdateQuorum()
+}
+
+func (lv *LedgerView) ProtocolParameterUpdateWindow(
+	slot uint64,
+) (uint64, uint64, error) {
+	return lv.ls.ProtocolParameterUpdateWindow(slot)
+}
+
+func (lv *LedgerView) metadataTxn() types.Txn {
+	if lv.txn == nil {
+		return nil
+	}
+	return lv.txn.Metadata()
 }
 
 // IsPoolRegistered checks if a pool is currently registered
@@ -699,19 +990,27 @@ func (lv *LedgerView) IsVrfKeyInUse(
 	vrfKeyHash lcommon.Blake2b256,
 ) (bool, lcommon.PoolKeyHash, error) {
 	pool, err := lv.ls.db.GetPoolByVrfKeyHash(
+		lv.EvaluationContext(),
 		vrfKeyHash.Bytes(),
 		lv.epochStartSlot,
 		lv.txn,
 	)
 	if err != nil {
-		return false, lcommon.PoolKeyHash{}, err
+		return false, lcommon.PoolKeyHash{}, lv.storageFault(
+			"get pool by VRF key hash: %w", err,
+		)
 	}
 	if pool == nil {
 		return false, lcommon.PoolKeyHash{}, nil
 	}
-	return true, lcommon.PoolKeyHash(
-		lcommon.NewBlake2b224(pool.PoolKeyHash),
-	), nil
+	poolKeyHash, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
+	if err != nil {
+		return false, lcommon.PoolKeyHash{}, lv.storageFault(
+			"decode stored VRF key owner pool key hash: %w",
+			err,
+		)
+	}
+	return true, lcommon.PoolKeyHash(poolKeyHash), nil
 }
 
 // SlotToTime returns the current time for a given slot based on known epochs.
@@ -721,7 +1020,7 @@ func (lv *LedgerView) IsVrfKeyInUse(
 // forecast horizon stays in force, matching cardano-ledger's
 // TimeTranslationPastHorizon failure, but it is measured from this view's
 // horizon anchor so a block being applied is judged against its own
-// predecessor rather than a tip that has not been published yet (issue #3844).
+// predecessor rather than a tip that has not been published yet.
 func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
 	return lv.ls.SlotToTimeWithHorizonFrom(lv.horizonAnchorSlot, slot)
 }
@@ -742,15 +1041,26 @@ func (lv *LedgerView) CalculateRewards(
 	return nil, ErrNotImplemented
 }
 
-// GetAdaPots returns the current Ada pots.
-// TODO: implement the complete Ada pots retrieval. Treasury and reserves are
-// tracked in network_state, but this interface also needs the current fee and
-// reward pots as one coherent validation snapshot.
+// GetAdaPots returns the current Ada pots, or a zero AdaPots when they cannot
+// be produced.
+//
+// It exists to satisfy common.RewardState, which gives it no way to report an
+// error, so an unavailable value is indistinguishable here from genuinely
+// zero pots. Every caller that can handle the difference must use
+// GetAdaPotsWithError; this one returns a zero value because a ledger rule
+// reaching it through the interface would otherwise kill the node.
 func (lv *LedgerView) GetAdaPots() lcommon.AdaPots {
-	panic(ErrNotImplemented)
+	adaPots, err := lv.GetAdaPotsWithError()
+	if err != nil {
+		return lcommon.AdaPots{}
+	}
+	return adaPots
 }
 
 // GetAdaPotsWithError returns the current Ada pots.
+// TODO: implement the complete Ada pots retrieval. Treasury and reserves are
+// tracked in network_state, but this interface also needs the current fee and
+// reward pots as one coherent validation snapshot.
 func (lv *LedgerView) GetAdaPotsWithError() (lcommon.AdaPots, error) {
 	return lcommon.AdaPots{}, ErrNotImplemented
 }
@@ -779,6 +1089,7 @@ func (lv *LedgerView) IsRewardAccountRegistered(
 		return false
 	}
 	account, err := lv.ls.db.GetAccountByCredential(
+		lv.EvaluationContext(),
 		credentialTag,
 		cred.Credential[:],
 		false,
@@ -815,6 +1126,7 @@ func (lv *LedgerView) RewardAccountBalance(
 		return nil, err
 	}
 	account, err := lv.ls.db.GetAccountByCredential(
+		lv.EvaluationContext(),
 		credentialTag,
 		cred.Credential[:],
 		false,
@@ -824,12 +1136,24 @@ func (lv *LedgerView) RewardAccountBalance(
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, lv.storageFault("get reward account: %w", err)
 	}
 	if account == nil {
 		return nil, nil
 	}
-	balance := uint64(account.Reward)
+	pending, err := lv.ls.pendingRewardCredit(
+		lv.txn, credentialTag, cred.Credential[:],
+	)
+	if err != nil {
+		return nil, lv.storageFault("get pending reward credit: %w", err)
+	}
+	balance, overflow := addRewardUint64(uint64(account.Reward), pending)
+	if overflow {
+		return nil, lv.storageFault(
+			"decode stored reward account balance: %w",
+			errors.New("balance overflows uint64"),
+		)
+	}
 	return &balance, nil
 }
 
@@ -856,9 +1180,8 @@ func (lv *LedgerView) CostModels() map[lcommon.PlutusLanguage]lcommon.CostModel 
 // SyntheticV2CostModelInEffect reports whether the PlutusV2 cost model
 // currently in force is still HardForkBabbage's fabricated default rather
 // than real governance/protocol-update data -- see
-// LedgerState.syntheticV2CostModel (blinklabs-io/dingo#3825,
-// blinklabs-io/dingo#3962). ledger/eras validation code (which cannot import
-// this package) type-asserts its lcommon.LedgerState parameter against a
+// LedgerState.syntheticV2CostModel. ledger/eras validation code (which cannot
+// import this package) type-asserts its lcommon.LedgerState parameter against a
 // locally declared interface with this exact method signature to reach it
 // without a package cycle.
 //
@@ -961,7 +1284,7 @@ func extractRawCostModels(
 // in which case it returns a shallow copy with the PlutusV2 cost model (map
 // key 1) removed.
 //
-// See LedgerState.syntheticV2CostModel (blinklabs-io/dingo#3825): the real
+// See LedgerState.syntheticV2CostModel: the real
 // struct backing pp always carries HardForkBabbage's fabricated PlutusV2
 // cost model once real data hasn't yet replaced it, because internal script
 // validation needs it (a real V2 script can arrive before a real update
@@ -978,7 +1301,8 @@ func extractRawCostModels(
 //
 // logger receives a warning when synthetic is true but pp's concrete type
 // matches none of the cases below: unlike every other branch, that combination
-// returns pp unfiltered, silently reintroducing #3825 for a future era type
+// returns pp unfiltered, silently reintroducing the extra PlutusV2 cost model
+// in the reply for a future era type
 // this switch hasn't been taught yet. logger may be nil (e.g. in tests that
 // don't care about this diagnostic).
 func withoutSyntheticV2CostModel(
@@ -1055,44 +1379,34 @@ func withoutV2CostModelKey(
 // CommitteeStateAvailable reports whether this view can authoritatively answer
 // committee credential queries for its snapshot.
 //
-// Availability is derived from whether a committee was ever seated, not from
-// the store being reachable and not from the currently seated set. Only two
-// paths ever write committee_member: UpdateCommittee enactment
-// (ledger/governance/enact.go) and Mithril snapshot import
-// (ledgerstate/import.go). Dingo does not seed the Conway genesis committee --
-// genesis.Committee.Threshold is read for the CC quorum, but
-// genesis.Committee.Members is never persisted (blinklabs-io/dingo#3785). A
-// node synced from genesis therefore holds no committee rows at all for the
-// whole Conway era until the first UpdateCommittee enacts, while the real
-// chain has the genesis committee seated from the hard fork. Claiming
-// authority there would reject an authorization from a real committee member,
-// because the lookup returns no member.
-//
-// Removal is a soft delete: both SoftDeleteAllCommitteeMembers on NoConfidence
-// and SoftDeleteCommitteeMembers on UpdateCommittee removal set deleted_slot
-// and leave the row. So the include-deleted set separates the two empty
-// states exactly. No rows at all means never populated, which is the
-// genesis-synced ambiguity and reports false. Rows that are all soft-deleted
-// mean the committee was seated and is now authoritatively empty, which
-// reports true so a former member's authorization or resignation fails closed,
-// as the real chain rejects it.
-//
-// Once #3785 lands, the no-rows case becomes unambiguously authoritative too
-// and this can report true unconditionally.
+// Persisted history establishes authority even after every member is removed.
+// An explicitly empty Conway genesis committee is also authoritative, though
+// genesis initialization has no members to persist. Without either source,
+// an empty store alone cannot establish non-membership.
 func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
 	if lv == nil || lv.ls == nil || lv.ls.db == nil {
 		return false, nil
 	}
 	// Include-deleted rather than the seated set, so an authoritatively empty
 	// committee after a NoConfidence enactment still reports available.
-	// GetCommitteeActiveCount is not a substitute for either: it counts
-	// hot-key authorizations, so a seated committee that has authorized no hot
-	// keys would report zero.
-	members, err := lv.ls.db.GetCommitteeMembersIncludeDeleted(lv.txn)
+	// GetCommitteeAuthorizedCount is not a substitute for either: it counts
+	// only members with a hot key, so a seated committee that has authorized
+	// no hot keys would report zero.
+	members, err := lv.ls.db.GetCommitteeMembersIncludeDeleted(
+		lv.EvaluationContext(),
+		lv.txn,
+	)
 	if err != nil {
-		return false, fmt.Errorf("get committee members: %w", err)
+		return false, lv.storageFault("get committee members: %w", err)
 	}
-	return len(members) > 0, nil
+	if len(members) > 0 {
+		return true, nil
+	}
+	if cfg := lv.ls.config.CardanoNodeConfig; cfg != nil {
+		genesis := cfg.ConwayGenesis()
+		return genesis != nil && len(genesis.Committee.Members) == 0, nil
+	}
+	return false, nil
 }
 
 // CommitteeMember preserves the legacy hash-only contract. It returns nil
@@ -1148,13 +1462,22 @@ func (lv *LedgerView) legacyCommitteeCredentialMember(
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee cold credential: %w", err)
 	}
-	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.txn)
+	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
 	if err != nil {
-		return nil, fmt.Errorf("get committee members: %w", err)
+		return nil, lv.storageFault("get committee members: %w", err)
 	}
 	for _, found := range dbMembers {
-		if found.ColdCredentialTag != coldTag ||
-			!bytes.Equal(found.ColdCredHash, coldCredential.Credential[:]) {
+		if found == nil {
+			continue
+		}
+		storedCold, err := lv.decodeStoredCommitteeCredential(
+			"cold", found.ColdCredentialTag, found.ColdCredHash,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if storedCold.CredType != uint(coldTag) ||
+			storedCold.Credential != coldCredential.Credential {
 			continue
 		}
 		member := &lcommon.CommitteeMember{
@@ -1162,7 +1485,7 @@ func (lv *LedgerView) legacyCommitteeCredentialMember(
 			ExpiryEpoch: found.ExpiresEpoch,
 		}
 		if err := lv.populateCommitteeMemberStatus(
-			coldCredential, found.TermStartSlot, member, false,
+			coldCredential, found.TermStartSlot, member,
 		); err != nil {
 			return nil, err
 		}
@@ -1171,8 +1494,15 @@ func (lv *LedgerView) legacyCommitteeCredentialMember(
 	return nil, nil
 }
 
-// CommitteeCredentialMember resolves a seated or pending proposed committee
-// member by full tagged cold credential identity.
+// CommitteeCredentialMember resolves a committee member by full tagged cold
+// credential identity: its latest seated term, or else a potential future
+// member that a pending UpdateCommittee proposal would add.
+//
+// A seated member's resignation stays in force for as long as it is seated,
+// even while a pending proposal would re-elect it: cardano-ledger keeps a
+// seated member's committee state across every epoch boundary, and GOVCERT
+// rejects any further certificate from a resigned cold credential
+// (ConwayCommitteeHasPreviouslyResigned).
 func (lv *LedgerView) CommitteeCredentialMember(
 	coldCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
@@ -1180,14 +1510,23 @@ func (lv *LedgerView) CommitteeCredentialMember(
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee cold credential: %w", err)
 	}
-	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.txn)
+	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
 	if err != nil {
-		return nil, fmt.Errorf("get committee members: %w", err)
+		return nil, lv.storageFault("get committee members: %w", err)
 	}
 	var found *models.CommitteeMember
 	for _, member := range dbMembers {
-		if member.ColdCredentialTag == coldTag &&
-			bytes.Equal(member.ColdCredHash, coldCredential.Credential[:]) {
+		if member == nil {
+			continue
+		}
+		storedCold, err := lv.decodeStoredCommitteeCredential(
+			"cold", member.ColdCredentialTag, member.ColdCredHash,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if storedCold.CredType == uint(coldTag) &&
+			storedCold.Credential == coldCredential.Credential {
 			if found == nil || member.TermStartSlot > found.TermStartSlot ||
 				(member.TermStartSlot == found.TermStartSlot && member.AddedSlot > found.AddedSlot) ||
 				(member.TermStartSlot == found.TermStartSlot && member.AddedSlot == found.AddedSlot && member.ID > found.ID) {
@@ -1206,75 +1545,58 @@ func (lv *LedgerView) CommitteeCredentialMember(
 		coldCredential,
 		found.TermStartSlot,
 		member,
-		false,
 	); err != nil {
 		return nil, err
-	}
-	// A re-election may replace a resigned term before enactment. The old
-	// historical row remains authoritative for its term, but must not mask the
-	// pending successor when validation asks for this cold credential.
-	if member.Resigned {
-		proposed, err := lv.proposedCommitteeMember(coldCredential)
-		if err != nil {
-			return nil, err
-		}
-		if proposed != nil {
-			return proposed, nil
-		}
-		return member, nil
 	}
 	return member, nil
 }
 
 // populateCommitteeMemberStatus fills in resignation and hot-key authorization
-// for a term starting at termStartSlot.
-//
-// A pending term is one a proposal has not yet enacted. Its termStartSlot is
-// the proposal's own added slot, so a resignation recorded during the member's
-// previous term sits at or after it and would otherwise be read as a
-// resignation from a term that has not begun. A resignation belongs to the term
-// it occurred in, so a pending term is never resigned and a re-elected member
-// can still authorize a hot credential.
+// from the certificates recorded at or after windowStartSlot, the first slot
+// from which cardano-ledger still holds this credential's committee state. A
+// resignation ends the credential's certificates within that window, so it
+// takes precedence over any authorization.
 func (lv *LedgerView) populateCommitteeMemberStatus(
 	coldCredential lcommon.Credential,
-	termStartSlot uint64,
+	windowStartSlot uint64,
 	member *lcommon.CommitteeMember,
-	pending bool,
 ) error {
 	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
 	if err != nil {
 		return fmt.Errorf("invalid committee cold credential: %w", err)
 	}
-	if !pending {
-		resigned, err := lv.ls.db.IsCommitteeMemberResigned(
-			coldTag,
-			coldCredential.Credential[:],
-			termStartSlot,
-			lv.txn,
-		)
-		if err != nil {
-			return fmt.Errorf(
-				"check committee member resignation: %w",
-				err,
-			)
-		}
-		member.Resigned = resigned
-		if resigned {
-			return nil
-		}
-	}
-	authorization, err := lv.ls.db.GetCommitteeMember(
+	resigned, err := lv.ls.db.IsCommitteeMemberResigned(
+		lv.EvaluationContext(),
 		coldTag,
 		coldCredential.Credential[:],
-		termStartSlot,
+		windowStartSlot,
+		lv.txn,
+	)
+	if err != nil {
+		return lv.storageFault("check committee member resignation: %w", err)
+	}
+	member.Resigned = resigned
+	if resigned {
+		return nil
+	}
+	authorization, err := lv.ls.db.GetCommitteeMember(
+		lv.EvaluationContext(),
+		coldTag,
+		coldCredential.Credential[:],
+		windowStartSlot,
 		lv.txn,
 	)
 	if err != nil && !errors.Is(err, models.ErrCommitteeMemberNotFound) {
-		return fmt.Errorf("get committee hot credential: %w", err)
+		return lv.storageFault("get committee hot credential: %w", err)
 	}
 	if authorization != nil {
-		hotKey := lcommon.NewBlake2b224(authorization.HotCredential)
-		member.HotKey = &hotKey
+		_, hotCredential, err := lv.decodeStoredCommitteeAuthorization(
+			authorization,
+		)
+		if err != nil {
+			return err
+		}
+		member.HotKey = &hotCredential.Credential
 	}
 	return nil
 }
@@ -1282,39 +1604,46 @@ func (lv *LedgerView) populateCommitteeMemberStatus(
 func (lv *LedgerView) proposedCommitteeMember(
 	coldCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
-	epoch, pparams := lv.committeeSnapshot()
-	proposals, err := lv.ls.db.GetActiveGovernanceProposals(
-		epoch,
+	_, pparams := lv.committeeSnapshot()
+	// GOVCERT's isPotentialFutureMember reads the whole proposals set, which
+	// keeps an expired UpdateCommittee until the boundary that drops it.
+	proposals, err := lv.ls.db.GetGovernanceProposalSet(
+		lv.EvaluationContext(),
 		lv.txn,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get active governance proposals: %w", err)
+		return nil, lv.storageFault("get governance proposal set: %w", err)
 	}
 	// NoConfidence and UpdateCommittee chain off the same committee root, so
 	// the root must be the latest enacted member of the pair. Querying only
 	// UpdateCommittee returns a stale root once a NoConfidence is enacted,
 	// which drops every pending member chained off it.
 	root, err := lv.ls.db.GetLastEnactedGovernanceProposal(
+		lv.EvaluationContext(),
 		governancePurposeActionTypes(
 			uint8(lcommon.GovActionTypeUpdateCommittee),
 		),
 		lv.txn,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get committee proposal root: %w", err)
+		return nil, lv.storageFault("get committee proposal root: %w", err)
 	}
 	member, termStart, err := governance.ResolveCommitteeProposal(
 		proposals, root, coldCredential, pparams,
 	)
 	if err != nil {
-		return nil, err
+		return nil, lv.storageFault(
+			"decode stored committee proposal: %w", err,
+		)
 	}
 	if member != nil {
+		// A credential that is not seated holds committee state only for the
+		// current epoch: cardano-ledger drops it at every boundary (Conway
+		// EPOCH, updateCommitteeState), including a resignation.
 		if err := lv.populateCommitteeMemberStatus(
 			coldCredential,
-			termStart,
+			max(termStart, lv.epochStartSlot),
 			member,
-			true,
 		); err != nil {
 			return nil, err
 		}
@@ -1334,7 +1663,7 @@ func (lv *LedgerView) committeeSnapshot() (
 }
 
 // CommitteeHotCredentialMember resolves a committee authorization by exact
-// tagged hot credential identity.
+// tagged hot credential identity, preferring a seated member.
 //
 // Deliberately not filtered by term expiry. The Conway GOV rule resolves a
 // committee voter against the authorization map, which excludes only resigned
@@ -1343,38 +1672,288 @@ func (lv *LedgerView) committeeSnapshot() (
 // tally and in the committeeMinSize active count, so skipping an expired
 // member here would raise UnknownVoterError on a vote cardano-ledger accepts.
 // A resigned member is excluded, matching the upstream authorization set.
+//
+// A cold credential that is not seated authorizes a hot credential only for
+// the rest of the epoch its authorization was recorded in; see
+// committeeHotAuthorizations.
 func (lv *LedgerView) CommitteeHotCredentialMember(
 	hotCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
+	authorizations, err := lv.committeeHotAuthorizations(hotCredential, true)
+	if err != nil || len(authorizations) == 0 {
+		return nil, err
+	}
+	return authorizations[0].member, nil
+}
+
+// CommitteeHotCredentialMembers returns every current cold-credential
+// authorization for this exact tagged hot credential. The Conway certificate
+// overlay uses the full set when same-transaction certificates move one shared
+// hot credential without invalidating another cold credential's authorization.
+func (lv *LedgerView) CommitteeHotCredentialMembers(
+	hotCredential lcommon.Credential,
+) ([]*lcommon.CommitteeMember, error) {
+	authorizations, err := lv.committeeHotAuthorizations(hotCredential, false)
+	if err != nil {
+		return nil, err
+	}
+	members := make([]*lcommon.CommitteeMember, 0, len(authorizations))
+	for _, authorization := range authorizations {
+		members = append(members, authorization.member)
+	}
+	return members, nil
+}
+
+// CommitteeHotCredentialColdCredentials returns every cold credential whose
+// committee state currently authorizes this exact tagged hot credential,
+// seated or not and regardless of expiry, omitting resigned members. It
+// implements the lookup half of gOuroboros common.CommitteeVotingState; the
+// PV11 elected-voter rule applies the enacted-committee filter through
+// CommitteeCredentialIsElected.
+func (lv *LedgerView) CommitteeHotCredentialColdCredentials(
+	hotCredential lcommon.Credential,
+) ([]lcommon.Credential, error) {
+	authorizations, err := lv.committeeHotAuthorizations(hotCredential, false)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]lcommon.Credential, 0, len(authorizations))
+	for _, authorization := range authorizations {
+		ret = append(ret, authorization.cold)
+	}
+	return ret, nil
+}
+
+type committeeHotAuthorization struct {
+	cold   lcommon.Credential
+	member *lcommon.CommitteeMember
+}
+
+func (lv *LedgerView) decodeStoredCommitteeCredential(
+	role string,
+	tag uint8,
+	hash []byte,
+) (lcommon.Credential, error) {
+	if _, err := models.CredentialTagFromUint(uint(tag)); err != nil {
+		return lcommon.Credential{}, lv.storageFault(
+			"decode stored committee "+role+" credential: %w",
+			fmt.Errorf("credential tag: %w", err),
+		)
+	}
+	checked, err := lcommon.NewBlake2b224Checked(hash)
+	if err != nil {
+		return lcommon.Credential{}, lv.storageFault(
+			"decode stored committee "+role+" credential: %w",
+			fmt.Errorf("credential hash: %w", err),
+		)
+	}
+	return lcommon.Credential{
+		CredType:   uint(tag),
+		Credential: checked,
+	}, nil
+}
+
+func (lv *LedgerView) decodeStoredCommitteeAuthorization(
+	authorization *models.AuthCommitteeHot,
+) (lcommon.Credential, lcommon.Credential, error) {
+	cold, err := lv.decodeStoredCommitteeCredential(
+		"cold", authorization.ColdCredentialTag, authorization.ColdCredential,
+	)
+	if err != nil {
+		return lcommon.Credential{}, lcommon.Credential{}, err
+	}
+	hot, err := lv.decodeStoredCommitteeCredential(
+		"hot", authorization.HotCredentialTag, authorization.HotCredential,
+	)
+	if err != nil {
+		return lcommon.Credential{}, lcommon.Credential{}, err
+	}
+	return cold, hot, nil
+}
+
+// committeeHotAuthorizations returns the cold credentials whose committee
+// state currently authorizes hotCredential, seated members first.
+//
+// cardano-ledger keeps one csCommitteeCreds entry per cold credential and, at
+// every epoch boundary, replaces the map with its intersection with the
+// enacted committee (Conway EPOCH, updateCommitteeState). A seated member's
+// entry is its latest certificate of the current term. A cold credential that
+// is not seated has an entry only because GOVCERT accepted a certificate
+// naming a pending UpdateCommittee member, and that entry is dropped at the
+// next boundary. Its authorization therefore counts only when it was recorded
+// at or after the current epoch's first slot and no resignation followed it.
+func (lv *LedgerView) committeeHotAuthorizations(
+	hotCredential lcommon.Credential,
+	firstOnly bool,
+) ([]committeeHotAuthorization, error) {
 	hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
 	}
-	authorizations, err := lv.ls.db.GetActiveCommitteeMembers(lv.txn)
-	if err != nil {
-		return nil, fmt.Errorf("get active committee hot credentials: %w", err)
+	type coldKey struct {
+		tag  uint8
+		hash lcommon.Blake2b224
 	}
-	for _, authorization := range authorizations {
-		if authorization.HotCredentialTag != hotTag ||
-			!bytes.Equal(
-				authorization.HotCredential,
-				hotCredential.Credential[:],
-			) {
+	var ret []committeeHotAuthorization
+	seen := make(map[coldKey]struct{})
+	seatedAuthorizations, err := lv.ls.db.GetActiveCommitteeMembers(
+		lv.EvaluationContext(),
+		lv.txn,
+	)
+	if err != nil {
+		return nil, lv.storageFault("get active committee hot credentials: %w", err)
+	}
+	for _, authorization := range seatedAuthorizations {
+		if authorization == nil {
 			continue
 		}
-		member, err := lv.CommitteeCredentialMember(lcommon.Credential{
-			CredType:   uint(authorization.ColdCredentialTag),
-			Credential: lcommon.NewBlake2b224(authorization.ColdCredential),
-		})
+		cold, storedHot, err := lv.decodeStoredCommitteeAuthorization(
+			authorization,
+		)
 		if err != nil {
 			return nil, err
 		}
-		if member == nil || member.Resigned {
+		if storedHot.CredType != uint(hotTag) ||
+			storedHot.Credential != hotCredential.Credential {
 			continue
 		}
-		return member, nil
+		key := coldKey{
+			tag:  authorization.ColdCredentialTag,
+			hash: cold.Credential,
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		member, err := lv.CommitteeCredentialMember(cold)
+		if err != nil {
+			return nil, err
+		}
+		if member == nil || member.Resigned || member.HotKey == nil ||
+			*member.HotKey != hotCredential.Credential {
+			continue
+		}
+		seen[key] = struct{}{}
+		ret = append(ret, committeeHotAuthorization{cold: cold, member: member})
+		if firstOnly {
+			return ret, nil
+		}
 	}
-	return nil, nil
+	seated, err := lv.ls.db.GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
+	if err != nil {
+		return nil, lv.storageFault("get committee members: %w", err)
+	}
+	seatedColds := make(map[coldKey]struct{}, len(seated))
+	for _, member := range seated {
+		if member == nil {
+			continue
+		}
+		storedCold, err := lv.decodeStoredCommitteeCredential(
+			"cold", member.ColdCredentialTag, member.ColdCredHash,
+		)
+		if err != nil {
+			return nil, err
+		}
+		seatedColds[coldKey{
+			tag:  member.ColdCredentialTag,
+			hash: storedCold.Credential,
+		}] = struct{}{}
+	}
+	authorizations, err := lv.ls.db.GetCommitteeHotAuthorizationsSince(
+		lv.EvaluationContext(),
+		lv.epochStartSlot,
+		lv.txn,
+	)
+	if err != nil {
+		return nil, lv.storageFault("get committee hot credentials: %w", err)
+	}
+	for _, authorization := range authorizations {
+		if authorization == nil {
+			continue
+		}
+		cold, storedHot, err := lv.decodeStoredCommitteeAuthorization(
+			authorization,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if storedHot.CredType != uint(hotTag) ||
+			storedHot.Credential != hotCredential.Credential {
+			continue
+		}
+		key := coldKey{
+			tag:  authorization.ColdCredentialTag,
+			hash: cold.Credential,
+		}
+		if _, ok := seatedColds[key]; ok {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		resigned, err := lv.ls.db.IsCommitteeMemberResigned(
+			lv.EvaluationContext(),
+			authorization.ColdCredentialTag,
+			authorization.ColdCredential,
+			authorization.AddedSlot,
+			lv.txn,
+		)
+		if err != nil {
+			return nil, lv.storageFault(
+				"check committee member resignation: %w", err,
+			)
+		}
+		if resigned {
+			continue
+		}
+		hotKey := hotCredential.Credential
+		seen[key] = struct{}{}
+		ret = append(ret, committeeHotAuthorization{
+			cold: cold,
+			member: &lcommon.CommitteeMember{
+				ColdKey: cold.Credential,
+				HotKey:  &hotKey,
+			},
+		})
+		if firstOnly {
+			return ret, nil
+		}
+	}
+	return ret, nil
+}
+
+// CommitteeCredentialIsElected reports whether an exact tagged cold credential
+// is seated in the enacted committee of this view's snapshot. It implements
+// the membership half of gOuroboros common.CommitteeVotingState. Expired
+// members stay seated until an enacted action removes them, and members that
+// appear only in pending UpdateCommittee proposals are not elected, matching
+// cardano-ledger's authorizedElectedHotCommitteeCredentials.
+func (lv *LedgerView) CommitteeCredentialIsElected(
+	coldCredential lcommon.Credential,
+) (bool, error) {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return false, fmt.Errorf("invalid committee cold credential: %w", err)
+	}
+	members, err := lv.ls.db.GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
+	if err != nil {
+		return false, lv.storageFault("get elected committee members: %w", err)
+	}
+	for _, member := range members {
+		if member == nil {
+			continue
+		}
+		storedCold, err := lv.decodeStoredCommitteeCredential(
+			"cold", member.ColdCredentialTag, member.ColdCredHash,
+		)
+		if err != nil {
+			return false, err
+		}
+		if storedCold.CredType == uint(coldTag) &&
+			storedCold.Credential == coldCredential.Credential {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // CommitteeMembers returns all seated committee members.
@@ -1383,9 +1962,9 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 // CommitteeCredentialMember per seat, which would reload the whole set for
 // every member. Resignations are fetched for the whole set in one query.
 func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
-	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.txn)
+	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
 	if err != nil {
-		return nil, fmt.Errorf("get committee members: %w", err)
+		return nil, lv.storageFault("get committee members: %w", err)
 	}
 	// A credential is (tag, hash). Several rows for one credential are its
 	// successive terms, and only the latest is seated. Counting hashes alone
@@ -1401,9 +1980,15 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 		if m == nil {
 			continue
 		}
+		storedCold, err := lv.decodeStoredCommitteeCredential(
+			"cold", m.ColdCredentialTag, m.ColdCredHash,
+		)
+		if err != nil {
+			return nil, err
+		}
 		key := credentialKey{
 			tag:  m.ColdCredentialTag,
-			hash: string(m.ColdCredHash),
+			hash: string(storedCold.Credential[:]),
 		}
 		if tagsByHash[key.hash] == nil {
 			tagsByHash[key.hash] = make(map[uint8]struct{}, 1)
@@ -1434,26 +2019,34 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 			TermStartSlot: found.TermStartSlot,
 		})
 	}
-	resigned, err := lv.ls.db.GetResignedCommitteeMembers(credentials, lv.txn)
+	resigned, err := lv.ls.db.GetResignedCommitteeMembers(
+		lv.EvaluationContext(),
+		credentials,
+		lv.txn,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("get resigned committee members: %w", err)
+		return nil, lv.storageFault("get resigned committee members: %w", err)
 	}
 
 	members := make([]lcommon.CommitteeMember, 0, len(order))
 	for _, key := range order {
+		found := latest[key]
+		if found == nil {
+			continue
+		}
+		// Validate before the ambiguity filter, or a malformed hash seated
+		// under both tags is dropped silently instead of failing.
+		coldCredential, err := lv.decodeStoredCommitteeCredential(
+			"cold", found.ColdCredentialTag, found.ColdCredHash,
+		)
+		if err != nil {
+			return nil, err
+		}
 		// The legacy list shape cannot carry a credential tag, so a hash
 		// seated under both tags stays ambiguous and is omitted rather than
 		// aliasing a key member onto a script member.
 		if len(tagsByHash[key.hash]) != 1 {
 			continue
-		}
-		found := latest[key]
-		if found == nil {
-			continue
-		}
-		coldCredential := lcommon.Credential{
-			CredType:   uint(found.ColdCredentialTag),
-			Credential: lcommon.NewBlake2b224(found.ColdCredHash),
 		}
 		member := &lcommon.CommitteeMember{
 			ColdKey:     coldCredential.Credential,
@@ -1478,17 +2071,23 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 			continue
 		}
 		authorization, err := lv.ls.db.GetCommitteeMember(
+			lv.EvaluationContext(),
 			found.ColdCredentialTag,
 			found.ColdCredHash,
 			found.TermStartSlot,
 			lv.txn,
 		)
 		if err != nil && !errors.Is(err, models.ErrCommitteeMemberNotFound) {
-			return nil, fmt.Errorf("get committee hot credential: %w", err)
+			return nil, lv.storageFault("get committee hot credential: %w", err)
 		}
 		if authorization != nil {
-			hotKey := lcommon.NewBlake2b224(authorization.HotCredential)
-			member.HotKey = &hotKey
+			_, hotCredential, err := lv.decodeStoredCommitteeAuthorization(
+				authorization,
+			)
+			if err != nil {
+				return nil, err
+			}
+			member.HotKey = &hotCredential.Credential
 		}
 		members = append(members, *member)
 	}
@@ -1542,9 +2141,12 @@ func (lv *LedgerView) drepRegistrationDeposit(
 	if lv.ls != nil && lv.ls.config.Logger != nil {
 		lv.ls.config.Logger.Warn(
 			"registered DRep has no recorded registration deposit; substituting the current protocol parameter",
-			"component", "ledger",
-			"drep_credential", hex.EncodeToString(credential[:]),
-			"substituted_deposit", deposit,
+			"component",
+			"ledger",
+			"drep_credential",
+			hex.EncodeToString(credential[:]),
+			"substituted_deposit",
+			deposit,
 		)
 	}
 	return &deposit
@@ -1605,6 +2207,7 @@ func (lv *LedgerView) DRepRegistration(
 		return nil, err
 	}
 	drep, err := lv.ls.db.GetDrepByCredential(
+		lv.EvaluationContext(),
 		credentialTag,
 		credential.Credential[:],
 		false,
@@ -1614,15 +2217,16 @@ func (lv *LedgerView) DRepRegistration(
 		if errors.Is(err, models.ErrDrepNotFound) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("get drep: %w", err)
+		return nil, lv.storageFault("get drep: %w", err)
 	}
 	deposit, err := lv.ls.db.GetDrepLastRegistrationDeposit(
+		lv.EvaluationContext(),
 		drep.CredentialTag,
 		credential.Credential[:],
 		lv.txn,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get drep last registration deposit: %w", err)
+		return nil, lv.storageFault("get drep last registration deposit: %w", err)
 	}
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
@@ -1633,9 +2237,12 @@ func (lv *LedgerView) DRepRegistration(
 	}
 	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
-			return nil, fmt.Errorf(
-				"invalid DRep anchor hash length: expected 32, got %d",
-				len(drep.AnchorHash),
+			return nil, lv.storageFault(
+				"decode stored DRep anchor: %w",
+				fmt.Errorf(
+					"hash length %d, want 32",
+					len(drep.AnchorHash),
+				),
 			)
 		}
 		var dataHash [32]byte
@@ -1650,9 +2257,9 @@ func (lv *LedgerView) DRepRegistration(
 
 // DRepRegistrations returns all active DRep registrations.
 func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
-	dreps, err := lv.ls.db.GetActiveDreps(lv.txn)
+	dreps, err := lv.ls.db.GetActiveDreps(lv.EvaluationContext(), lv.txn)
 	if err != nil {
-		return nil, fmt.Errorf("get active dreps: %w", err)
+		return nil, lv.storageFault("get active dreps: %w", err)
 	}
 	// One batched read rather than a deposit query per DRep, because
 	// mainnet has thousands of active DReps, and scoped to the same active
@@ -1667,12 +2274,21 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	// either tree calls the plural form outside gouroboros's own test
 	// mocks. The batching bounds the cost of a caller that does appear
 	// rather than one that exists today.
-	deposits, err := lv.ls.db.GetDrepLastRegistrationDeposits(lv.txn)
+	deposits, err := lv.ls.db.GetDrepLastRegistrationDeposits(
+		lv.EvaluationContext(),
+		lv.txn,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("get drep last registration deposits: %w", err)
+		return nil, lv.storageFault("get drep last registration deposits: %w", err)
 	}
 	registrations := make([]lcommon.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
+		credential, err := lcommon.NewBlake2b224Checked(drep.Credential)
+		if err != nil {
+			return nil, lv.storageFault(
+				"decode stored DRep registrations credential: %w", err,
+			)
+		}
 		deposit, ok := deposits[models.DrepDepositKey(
 			drep.CredentialTag,
 			drep.Credential,
@@ -1684,18 +2300,21 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.Credential{
 				CredType:   uint(drep.CredentialTag),
-				Credential: lcommon.NewBlake2b224(drep.Credential),
+				Credential: lcommon.Blake2b224(credential),
 			},
 			Deposit: lv.drepRegistrationDeposit(
-				lcommon.NewBlake2b224(drep.Credential),
+				credential,
 				depositPtr,
 			),
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {
-				return nil, fmt.Errorf(
-					"invalid DRep anchor hash length: expected 32, got %d",
-					len(drep.AnchorHash),
+				return nil, lv.storageFault(
+					"decode stored DRep anchor: %w",
+					fmt.Errorf(
+						"hash length %d, want 32",
+						len(drep.AnchorHash),
+					),
 				)
 			}
 			var dataHash [32]byte
@@ -1724,6 +2343,7 @@ func (lv *LedgerView) DRepDelegation(
 		return nil, err
 	}
 	account, err := lv.ls.db.GetAccountByCredential(
+		lv.EvaluationContext(),
 		credentialTag,
 		cred.Credential[:],
 		false,
@@ -1733,26 +2353,62 @@ func (lv *LedgerView) DRepDelegation(
 		if errors.Is(err, models.ErrAccountNotFound) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("get account for drep delegation: %w", err)
+		return nil, lv.storageFault("get account for drep delegation: %w", err)
 	}
 	if account == nil {
 		return nil, nil
 	}
-	// No DRep delegation: an empty credential together with the default
-	// key-hash type. An always-abstain / always-no-confidence delegation
-	// carries no credential but a non-default type, so it is a delegation.
-	if len(account.Drep) == 0 &&
-		account.DrepType == models.DrepTypeAddrKeyHash {
-		return nil, nil
+	var (
+		drepType   int
+		credential []byte
+	)
+	switch account.DrepType {
+	case models.DrepTypeAddrKeyHash:
+		if len(account.Drep) == 0 {
+			return nil, nil
+		}
+		drepType = lcommon.DrepTypeAddrKeyHash
+		credential = account.Drep
+	case models.DrepTypeScriptHash:
+		if len(account.Drep) == 0 {
+			return nil, lv.storageFault(
+				"decode stored DRep delegation credential: %w",
+				errors.New("script credential is empty"),
+			)
+		}
+		drepType = lcommon.DrepTypeScriptHash
+		credential = account.Drep
+	case models.DrepTypeAlwaysAbstain,
+		models.DrepTypeAlwaysNoConfidence:
+		if len(account.Drep) != 0 {
+			return nil, lv.storageFault(
+				"decode stored DRep delegation: %w",
+				fmt.Errorf("type %d carries a credential", account.DrepType),
+			)
+		}
+		if account.DrepType == models.DrepTypeAlwaysAbstain {
+			drepType = lcommon.DrepTypeAbstain
+		} else {
+			drepType = lcommon.DrepTypeNoConfidence
+		}
+	default:
+		return nil, lv.storageFault(
+			"decode stored DRep delegation: %w",
+			fmt.Errorf("unknown type %d", account.DrepType),
+		)
 	}
-	// DrepType is a small ledger enum (0-3); guard the narrowing conversion
-	// so an out-of-range value degrades to "no DRep" rather than wrapping.
-	if account.DrepType > uint64(math.MaxInt) {
-		return nil, nil
+	if credential != nil {
+		checked, err := lcommon.NewBlake2b224Checked(credential)
+		if err != nil {
+			return nil, lv.storageFault(
+				"decode stored DRep delegation credential: %w", err,
+			)
+		}
+		credential = checked[:]
 	}
 	return &lcommon.Drep{
-		Type:       int(account.DrepType),
-		Credential: account.Drep,
+		Type:       drepType,
+		Credential: credential,
 	}, nil
 }
 
@@ -1767,9 +2423,13 @@ func (lv *LedgerView) DRepDelegation(
 func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {
 	constitution, err := lv.ls.db.GetConstitution(lv.txn)
 	if err != nil {
-		return nil, fmt.Errorf("get constitution: %w", err)
+		return nil, lv.storageFault("get constitution: %w", err)
 	}
-	return governance.ConstitutionFromModel(constitution)
+	ret, err := governance.ConstitutionFromModel(constitution)
+	if err != nil {
+		return nil, lv.storageFault("decode stored constitution: %w", err)
+	}
+	return ret, nil
 }
 
 // TreasuryValue returns the treasury value visible to this ledger view. A view
@@ -1793,10 +2453,13 @@ func (lv *LedgerView) TreasuryValue() (uint64, error) {
 		state, err = lv.ls.db.Metadata().GetNetworkState(lv.txn.Metadata())
 	}
 	if err != nil {
-		return 0, fmt.Errorf("get treasury network state: %w", err)
+		return 0, lv.storageFault("get treasury network state: %w", err)
 	}
 	if state == nil {
-		return 0, errors.New("treasury network state is unavailable")
+		return 0, lv.storageFault(
+			"get treasury network state: %w",
+			errors.New("network state is unavailable"),
+		)
 	}
 	return uint64(state.Treasury), nil
 }
@@ -1808,10 +2471,11 @@ func (lv *LedgerView) GovActionById(
 ) (*lcommon.GovActionState, error) {
 	txn := lv.txn
 	if txn == nil {
-		txn = lv.ls.db.MetadataTxn(false)
+		txn = lv.ls.db.MetadataTxn(lv.EvaluationContext(), false)
 		defer txn.Release()
 	}
 	proposal, err := lv.ls.db.GetGovernanceProposal(
+		lv.EvaluationContext(),
 		id.TransactionId[:],
 		id.GovActionIdx,
 		txn,
@@ -1820,10 +2484,14 @@ func (lv *LedgerView) GovActionById(
 		if errors.Is(err, models.ErrGovernanceProposalNotFound) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("get governance proposal: %w", err)
+		return nil, lv.storageFault("get governance proposal: %w", err)
 	}
-	// Expired proposals are no longer members of their purpose tree.
-	if proposal.ExpiredEpoch != nil {
+	// The Conway GOV rule resolves votes and parents against the proposals
+	// set, which loses an expired action only when EPOCH removes it one
+	// boundary after RATIFY classified it (DroppedEpoch). The expiry mark
+	// itself must not hide it: a vote is refused by gasExpiresAfter
+	// arithmetic on ExpirySlot, and a child may still name it as parent.
+	if proposal.DroppedEpoch != nil {
 		return nil, nil
 	}
 	// The current enacted root must remain resolvable because content-aware
@@ -1845,7 +2513,9 @@ func (lv *LedgerView) GovActionById(
 		lv.ls.GetCurrentPParams(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("decode governance proposal action: %w", err)
+		return nil, lv.storageFault(
+			"decode stored governance proposal action: %w", err,
+		)
 	}
 	var expirySlot uint64
 	if proposal.EnactedEpoch == nil {
@@ -1870,11 +2540,14 @@ func (lv *LedgerView) governanceProposalIsPurposeRoot(
 	if len(actionTypes) == 0 {
 		return false, nil
 	}
-	root, err := lv.ls.db.GetLastEnactedGovernanceProposal(actionTypes, txn)
+	root, err := lv.ls.db.GetLastEnactedGovernanceProposal(
+		lv.EvaluationContext(),
+		actionTypes,
+		txn,
+	)
 	if err != nil {
-		return false, fmt.Errorf(
-			"get governance proposal purpose root: %w",
-			err,
+		return false, lv.storageFault(
+			"get governance proposal purpose root: %w", err,
 		)
 	}
 	return root != nil &&
@@ -1910,7 +2583,7 @@ func governancePurposeActionTypes(actionType uint8) []uint8 {
 func (lv *LedgerView) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
 	txn := lv.txn
 	if txn == nil {
-		txn = lv.ls.db.MetadataTxn(false)
+		txn = lv.ls.db.MetadataTxn(lv.EvaluationContext(), false)
 		defer txn.Release()
 	}
 	parameterChange, err := lv.governancePurposeRoot(
@@ -1920,7 +2593,7 @@ func (lv *LedgerView) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
 		txn,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get parameter-change purpose root: %w", err)
+		return nil, lv.storageFault("get parameter-change purpose root: %w", err)
 	}
 	hardFork, err := lv.governancePurposeRoot(
 		governancePurposeActionTypes(
@@ -1929,7 +2602,7 @@ func (lv *LedgerView) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
 		txn,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get hard-fork purpose root: %w", err)
+		return nil, lv.storageFault("get hard-fork purpose root: %w", err)
 	}
 	committee, err := lv.governancePurposeRoot(
 		governancePurposeActionTypes(
@@ -1938,7 +2611,7 @@ func (lv *LedgerView) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
 		txn,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get committee purpose root: %w", err)
+		return nil, lv.storageFault("get committee purpose root: %w", err)
 	}
 	constitution, err := lv.governancePurposeRoot(
 		governancePurposeActionTypes(
@@ -1947,7 +2620,7 @@ func (lv *LedgerView) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
 		txn,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get constitution purpose root: %w", err)
+		return nil, lv.storageFault("get constitution purpose root: %w", err)
 	}
 	return &lcommon.GovPurposeRoots{
 		PParamUpdate: parameterChange,
@@ -1962,6 +2635,7 @@ func (lv *LedgerView) governancePurposeRoot(
 	txn *database.Txn,
 ) (*lcommon.GovActionId, error) {
 	proposal, err := lv.ls.db.GetLastEnactedGovernanceProposal(
+		lv.EvaluationContext(),
 		actionTypes,
 		txn,
 	)
@@ -1972,9 +2646,13 @@ func (lv *LedgerView) governancePurposeRoot(
 		return nil, nil
 	}
 	if len(proposal.TxHash) != len(lcommon.Blake2b256{}) {
-		return nil, fmt.Errorf(
-			"invalid governance proposal transaction hash length: %d",
-			len(proposal.TxHash),
+		return nil, lv.storageFault(
+			"decode stored governance proposal root: %w",
+			fmt.Errorf(
+				"transaction hash length %d, want %d",
+				len(proposal.TxHash),
+				len(lcommon.Blake2b256{}),
+			),
 		)
 	}
 	var transactionID lcommon.Blake2b256
@@ -1990,44 +2668,55 @@ func (lv *LedgerView) governanceProposalExpirySlot(
 	txn *database.Txn,
 ) (uint64, error) {
 	if proposal.ExpiresEpoch < proposal.ProposedEpoch {
-		return 0, fmt.Errorf(
-			"governance proposal expiry epoch %d precedes proposed epoch %d",
-			proposal.ExpiresEpoch,
-			proposal.ProposedEpoch,
+		return 0, lv.storageFault(
+			"decode stored governance proposal expiry: %w",
+			fmt.Errorf(
+				"expiry epoch %d precedes proposed epoch %d",
+				proposal.ExpiresEpoch,
+				proposal.ProposedEpoch,
+			),
 		)
 	}
 	epoch, err := lv.ls.db.GetEpoch(proposal.ProposedEpoch, txn)
 	if err != nil {
-		return 0, fmt.Errorf(
-			"get governance proposal epoch %d: %w",
-			proposal.ProposedEpoch,
-			err,
+		return 0, lv.storageFault(
+			"get governance proposal epoch: %w",
+			fmt.Errorf("epoch %d: %w", proposal.ProposedEpoch, err),
 		)
 	}
 	if epoch == nil {
-		return 0, fmt.Errorf(
-			"governance proposal epoch %d not found",
-			proposal.ProposedEpoch,
+		return 0, lv.storageFault(
+			"decode stored governance proposal expiry: %w",
+			fmt.Errorf("epoch %d not found", proposal.ProposedEpoch),
 		)
 	}
 	if epoch.LengthInSlots == 0 {
-		return 0, fmt.Errorf(
-			"governance proposal epoch %d has zero length",
-			proposal.ProposedEpoch,
+		return 0, lv.storageFault(
+			"decode stored governance proposal expiry: %w",
+			fmt.Errorf("epoch %d has zero length", proposal.ProposedEpoch),
 		)
 	}
 	epochDelta := proposal.ExpiresEpoch - proposal.ProposedEpoch
 	if epochDelta == math.MaxUint64 {
-		return 0, errors.New("governance proposal expiry slot overflows")
+		return 0, lv.storageFault(
+			"decode stored governance proposal expiry: %w",
+			errors.New("expiry slot overflows"),
+		)
 	}
 	epochCount := epochDelta + 1
 	epochLength := uint64(epoch.LengthInSlots)
 	if epochCount > math.MaxUint64/epochLength {
-		return 0, errors.New("governance proposal expiry slot overflows")
+		return 0, lv.storageFault(
+			"decode stored governance proposal expiry: %w",
+			errors.New("expiry slot overflows"),
+		)
 	}
 	span := epochCount * epochLength
 	if epoch.StartSlot > math.MaxUint64-(span-1) {
-		return 0, errors.New("governance proposal expiry slot overflows")
+		return 0, lv.storageFault(
+			"decode stored governance proposal expiry: %w",
+			errors.New("expiry slot overflows"),
+		)
 	}
 	return epoch.StartSlot + span - 1, nil
 }
@@ -2035,6 +2724,7 @@ func (lv *LedgerView) governanceProposalExpirySlot(
 // GovActionExists returns whether a governance action exists.
 func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
 	proposal, err := lv.ls.db.GetGovernanceProposal(
+		lv.EvaluationContext(),
 		id.TransactionId[:],
 		id.GovActionIdx,
 		lv.txn,
@@ -2060,10 +2750,11 @@ func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
 		}
 		return false
 	}
-	// Voting procedures may target only pending actions. GovActionById also
-	// resolves the current enacted purpose root for content-aware predecessor
-	// rules, so it cannot be used as the existence predicate here.
-	return proposal.EnactedEpoch == nil && proposal.ExpiredEpoch == nil
+	// Voting procedures may target only members of the proposals set.
+	// GovActionById also resolves the current enacted purpose root for
+	// content-aware predecessor rules, so it cannot be used as the existence
+	// predicate here.
+	return proposal.EnactedEpoch == nil && proposal.DroppedEpoch == nil
 }
 
 // StakeDistribution represents the stake distribution at an epoch boundary.
@@ -2085,7 +2776,7 @@ func (lv *LedgerView) GetStakeDistribution(
 		(*lv.txn).Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get pool stake snapshots: %w", err)
+		return nil, lv.storageFault("get pool stake snapshots: %w", err)
 	}
 
 	dist := &StakeDistribution{
@@ -2129,11 +2820,23 @@ func (lv *LedgerView) GetLeiosKeys(
 		(*lv.txn).Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get pool stake snapshots: %w", err)
+		return nil, lv.storageFault("get pool stake snapshots: %w", err)
+	}
+	maxKeyAgeEpochs, err := lv.ls.maxLeiosKeyAgeEpochs()
+	if err != nil {
+		return nil, fmt.Errorf("resolve maximum Leios key age: %w", err)
 	}
 	for _, snapshot := range snapshots {
 		if len(snapshot.LeiosKeyPublic) == 0 ||
 			len(snapshot.LeiosKeyPossessionProof) == 0 {
+			continue
+		}
+		// Reference ledger state carries a registration epoch with each BLS key.
+		// A snapshot without that epoch cannot establish key eligibility.
+		registrationEpoch := snapshot.LeiosKeyRegistrationEpoch
+		if registrationEpoch == nil ||
+			*registrationEpoch > epoch ||
+			epoch-*registrationEpoch >= maxKeyAgeEpochs {
 			continue
 		}
 		out[hex.EncodeToString(snapshot.PoolKeyHash)] = &lcommon.LeiosKey{
@@ -2146,6 +2849,36 @@ func (lv *LedgerView) GetLeiosKeys(
 		}
 	}
 	return out, nil
+}
+
+func (ls *LedgerState) maxLeiosKeyAgeEpochs() (uint64, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("cardano configuration unavailable")
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.MaxKESEvolutions <= 0 {
+		return 0, errors.New("invalid MaxKESEvolutions")
+	}
+	slotsPerKESPeriod := ls.SlotsPerKESPeriod()
+	slotsPerEpoch := ls.SlotsPerEpoch()
+	if slotsPerKESPeriod == 0 || slotsPerEpoch == 0 {
+		return 0, errors.New("invalid KES-period or epoch length")
+	}
+	maxSlots := new(big.Int).Mul(
+		big.NewInt(int64(genesis.MaxKESEvolutions)),
+		new(big.Int).SetUint64(slotsPerKESPeriod),
+	)
+	divisor := new(big.Int).SetUint64(slotsPerEpoch)
+	epochs, remainder := new(big.Int), new(big.Int)
+	epochs.QuoRem(maxSlots, divisor, remainder)
+	if remainder.Sign() > 0 {
+		epochs.Add(epochs, big.NewInt(1))
+	}
+	epochs.Add(epochs, big.NewInt(2))
+	if !epochs.IsUint64() {
+		return 0, errors.New("maximum Leios key age overflows uint64")
+	}
+	return epochs.Uint64(), nil
 }
 
 // GetPoolStake returns the stake for a specific pool from the snapshot.
@@ -2161,7 +2894,7 @@ func (lv *LedgerView) GetPoolStake(
 		(*lv.txn).Metadata(),
 	)
 	if err != nil {
-		return 0, fmt.Errorf("get pool stake snapshot: %w", err)
+		return 0, lv.storageFault("get pool stake snapshot: %w", err)
 	}
 	if snapshot == nil {
 		return 0, nil
@@ -2171,11 +2904,15 @@ func (lv *LedgerView) GetPoolStake(
 
 // GetTotalActiveStake returns the total stake from the requested mark snapshot.
 func (lv *LedgerView) GetTotalActiveStake(epoch uint64) (uint64, error) {
-	return lv.ls.db.Metadata().GetTotalActiveStake(
+	total, err := lv.ls.db.Metadata().GetTotalActiveStake(
 		epoch,
 		"mark",
 		(*lv.txn).Metadata(),
 	)
+	if err != nil {
+		return 0, lv.storageFault("get total active stake: %w", err)
+	}
+	return total, nil
 }
 
 // GetDRepVotingPower returns the voting power for a DRep by summing the
@@ -2192,14 +2929,35 @@ func (lv *LedgerView) GetDRepVotingPower(
 	// expiryEpoch 0: this point-in-time API query is not gated by the
 	// CIP-0163 epoch-boundary tally (see ledger/governance for that path).
 	power, err := lv.ls.db.GetDRepVotingPower(
+		lv.EvaluationContext(),
 		credentialTag,
 		drepCredential,
 		0,
 		lv.txn,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("get drep voting power: %w", err)
+		return 0, lv.storageFault("get drep voting power: %w", err)
 	}
+	// Fold in any active governance proposal's deposit escrowed to a return
+	// account delegating to this DRep, matching the deposit-inclusive tally
+	// governance.LoadDRepVotingState uses for ratification and the
+	// Blockfrost adapter's DRep voting-power reads (CIP-1694).
+	drepDepositPower, _, err := governance.ActiveProposalDepositDRepPower(
+		lv.EvaluationContext(),
+		lv.ls.db,
+		lv.txn,
+		lv.ls.CurrentEpoch(),
+		0,
+	)
+	if err != nil {
+		return 0, lv.storageFault(
+			"get active proposal deposit voting power: %w", err,
+		)
+	}
+	power += drepDepositPower[models.StakeCredentialRef{
+		Tag: credentialTag,
+		Key: drepCredential,
+	}.MapKey()]
 	return power, nil
 }
 
@@ -2208,19 +2966,20 @@ func (lv *LedgerView) GetDRepVotingPower(
 func (lv *LedgerView) GetExpiredDReps(
 	epoch uint64,
 ) ([]*models.Drep, error) {
-	dreps, err := lv.ls.db.GetExpiredDReps(epoch, lv.txn)
+	dreps, err := lv.ls.db.GetExpiredDReps(lv.EvaluationContext(), epoch, lv.txn)
 	if err != nil {
-		return nil, fmt.Errorf("get expired dreps: %w", err)
+		return nil, lv.storageFault("get expired dreps: %w", err)
 	}
 	return dreps, nil
 }
 
-// GetCommitteeActiveCount returns the number of active (non-resigned)
-// committee members.
-func (lv *LedgerView) GetCommitteeActiveCount() (int, error) {
-	count, err := lv.ls.db.GetCommitteeActiveCount(lv.txn)
+// GetCommitteeAuthorizedCount returns the number of seated, non-resigned
+// committee members that hold a current hot-key authorization. Members
+// without a hot key are not counted and term expiry is not applied.
+func (lv *LedgerView) GetCommitteeAuthorizedCount() (int, error) {
+	count, err := lv.ls.db.GetCommitteeAuthorizedCount(lv.EvaluationContext(), lv.txn)
 	if err != nil {
-		return 0, fmt.Errorf("get committee active count: %w", err)
+		return 0, lv.storageFault("get committee authorized count: %w", err)
 	}
 	return count, nil
 }

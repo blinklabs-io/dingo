@@ -103,30 +103,6 @@ func TestBlockTombstoneMarker(t *testing.T) {
 	}
 }
 
-func TestParseBlockBlobKeyRoundTrip(t *testing.T) {
-	const slot uint64 = 0x0102030405060708
-	hash := bytes.Repeat([]byte{0xAB}, 32)
-
-	key := types.BlockBlobKey(slot, hash)
-	if len(key) != types.BlockBlobKeySize {
-		t.Fatalf(
-			"encoded key length %d, want %d",
-			len(key),
-			types.BlockBlobKeySize,
-		)
-	}
-	gotSlot, gotHash, err := types.ParseBlockBlobKey(key)
-	if err != nil {
-		t.Fatalf("ParseBlockBlobKey: %v", err)
-	}
-	if gotSlot != slot {
-		t.Fatalf("slot = %d, want %d", gotSlot, slot)
-	}
-	if !bytes.Equal(gotHash, hash) {
-		t.Fatalf("hash = %x, want %x", gotHash, hash)
-	}
-}
-
 func TestParseBlockBlobKeyRejectsMalformed(t *testing.T) {
 	cases := []struct {
 		name string

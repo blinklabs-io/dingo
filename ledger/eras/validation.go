@@ -8,23 +8,27 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package eras
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
 	"math/big"
 
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
@@ -34,8 +38,73 @@ var ErrExUnitsOverflow = errors.New(
 	"execution units overflow int64",
 )
 
+type semanticRuleValidationError struct {
+	err error
+}
+
+func (e *semanticRuleValidationError) Error() string { return e.err.Error() }
+func (e *semanticRuleValidationError) Unwrap() error { return e.err }
+
+type localRuleValidationError struct {
+	err error
+}
+
+func (e *localRuleValidationError) Error() string { return e.err.Error() }
+func (e *localRuleValidationError) Unwrap() error { return e.err }
+
+// IsSemanticRuleValidationError reports whether an error came from a
+// deterministic era validation rule. Callers use the rule boundary rather
+// than concrete error types so new ledger verdicts inherit the right
+// disposition without classifying errors from injected validators.
+func IsSemanticRuleValidationError(err error) bool {
+	var semanticErr *semanticRuleValidationError
+	return errors.As(err, &semanticErr)
+}
+
+func semanticRuleValidationErrorFor(err error) error {
+	if err == nil {
+		return nil
+	}
+	var localErr *localRuleValidationError
+	if errors.As(err, &localErr) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, hardfork.ErrPastHorizon) {
+		return err
+	}
+	var validationErr *lcommon.ValidationError
+	if errors.As(err, &validationErr) &&
+		validationErr.Type == lcommon.ValidationErrorTypeConfiguration {
+		return err
+	}
+	return &semanticRuleValidationError{err: err}
+}
+
+func localRuleValidationErrorFor(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &localRuleValidationError{err: err}
+}
+
 type phase2ValidationSkipper interface {
 	SkipPhase2Validation() bool
+}
+
+type evaluationContextProvider interface {
+	EvaluationContext() context.Context
+}
+
+func evaluationContext(ls lcommon.LedgerState) context.Context {
+	provider, ok := stateCapability[evaluationContextProvider](ls)
+	if !ok || provider.EvaluationContext() == nil {
+		return context.Background()
+	}
+	return provider.EvaluationContext()
+}
+
+func checkEvaluationCanceled(ls lcommon.LedgerState) error {
+	return evaluationContext(ls).Err()
 }
 
 // MinPoolMarginProvider is satisfied by the dingo ledger state to expose the
@@ -70,10 +139,23 @@ type CommitteeCredentialState interface {
 	) (*lcommon.CommitteeMember, error)
 }
 
+// stateCapability returns ls as T, or else the provider beneath ls's
+// validation adapters as T. An adapter such as the state that layers pending
+// transactions over a ledger view exposes the LedgerState methods but not the
+// view's optional capabilities, so asserting on ls alone reads a capability
+// the ledger has as absent.
+func stateCapability[T any](ls lcommon.LedgerState) (T, bool) {
+	if capability, ok := ls.(T); ok {
+		return capability, true
+	}
+	capability, ok := lcommon.UnwrapLedgerState(ls).(T)
+	return capability, ok
+}
+
 // minPoolMarginFromLedgerState returns the CIP-23 minimum pool margin the ledger
 // state enforces, or nil when the state does not provide one (feature disabled).
 func minPoolMarginFromLedgerState(ls lcommon.LedgerState) *big.Rat {
-	provider, ok := ls.(MinPoolMarginProvider)
+	provider, ok := stateCapability[MinPoolMarginProvider](ls)
 	if !ok {
 		return nil
 	}
@@ -129,13 +211,62 @@ const (
 func shouldSkipPhase2Validation(
 	ls lcommon.LedgerState,
 ) bool {
-	skipper, ok := ls.(phase2ValidationSkipper)
+	skipper, ok := stateCapability[phase2ValidationSkipper](ls)
 	return ok && skipper.SkipPhase2Validation()
+}
+
+func protocolMajorVersion(pp lcommon.ProtocolParameters) uint {
+	versioned, ok := pp.(interface{ ProtocolMajorVersion() uint })
+	if !ok {
+		return 0
+	}
+	return versioned.ProtocolMajorVersion()
+}
+
+// CommitteeMemberAlreadyResignedError indicates a committee cold-key
+// resignation certificate for a member already resigned, in ledger state or
+// by an earlier certificate of the same transaction.
+//
+// Reference: ConwayCommitteeHasPreviouslyResigned in GOVCERT,
+// eras/conway/impl/src/Cardano/Ledger/Conway/Rules/GovCert.hs.
+type CommitteeMemberAlreadyResignedError struct {
+	ColdCredential lcommon.Credential
+}
+
+func (e CommitteeMemberAlreadyResignedError) Error() string {
+	return fmt.Sprintf(
+		"committee member already resigned: %x",
+		e.ColdCredential.Credential[:],
+	)
+}
+
+// committeeCredentialKey is a comparable identity for a committee cold
+// credential. Credential embeds cbor.DecodeStoreCbor, which is not itself
+// comparable, so a full tagged identity must be projected out to use as a map
+// key; a hash-only key would conflate a key-hash and script-hash credential
+// that happen to share hash bytes.
+type committeeCredentialKey struct {
+	credType   uint
+	credential lcommon.CredentialHash
+}
+
+func committeeCredentialKeyFor(
+	credential lcommon.Credential,
+) committeeCredentialKey {
+	return committeeCredentialKey{
+		credType:   credential.CredType,
+		credential: credential.Credential,
+	}
 }
 
 // validateCommitteeCertificates preserves the full cold credential identity
 // when the ledger state exposes Dingo's tag-aware capability. Other state
 // implementations retain the upstream hash-only behavior.
+//
+// Committee certificates are processed sequentially within the transaction:
+// a resignation certificate is tracked in resignedInTx so a later certificate
+// for the same credential sees it, rather than every certificate querying
+// only the pre-transaction snapshot.
 func validateCommitteeCertificates(
 	tx lcommon.Transaction,
 	slot uint64,
@@ -148,7 +279,14 @@ func validateCommitteeCertificates(
 	if !tx.IsValid() {
 		return nil
 	}
-	state, ok := ls.(CommitteeCredentialState)
+	if _, ok := tx.(*gdijkstra.DijkstraTransaction); ok {
+		if err := gdijkstra.UtxoValidateCommitteeCertificates(
+			tx, slot, ls, pp,
+		); err != nil {
+			return err
+		}
+	}
+	state, ok := stateCapability[CommitteeCredentialState](ls)
 	if !ok {
 		return conway.UtxoValidateCommitteeCertificates(tx, slot, ls, pp)
 	}
@@ -173,6 +311,7 @@ func validateCommitteeCertificates(
 		member, err := state.CommitteeCredentialMember(coldCredential)
 		return member, true, err
 	}
+	resignedInTx := make(map[committeeCredentialKey]bool)
 	for _, cert := range tx.Certificates() {
 		var (
 			credential lcommon.Credential
@@ -190,6 +329,7 @@ func validateCommitteeCertificates(
 		default:
 			continue
 		}
+		key := committeeCredentialKeyFor(credential)
 		member, authoritative, err := committeeMember(credential)
 		if err != nil {
 			// A failed lookup is never authorization: fail closed.
@@ -201,11 +341,26 @@ func validateCommitteeCertificates(
 		if member == nil {
 			if !authoritative {
 				// Dingo holds no committee state for this snapshot, so
-				// non-membership cannot be established. Rejecting here would
-				// reject a real genesis committee member, because Dingo does
-				// not seed the Conway genesis committee
-				// (blinklabs-io/dingo#3785). See
+				// non-membership cannot be established beyond what this
+				// transaction's own certificates have already done. An
+				// earlier certificate's resignation must still be honored,
+				// or a resign-then-resign or resign-then-authorize sequence
+				// within one transaction would pass uninspected whenever
+				// committee state happens to be unavailable. See
 				// LedgerView.CommitteeStateAvailable.
+				if resignedInTx[key] {
+					if authorize {
+						return conway.ResignedCommitteeMemberHotKeyError{
+							ColdKey: credential.Credential,
+						}
+					}
+					return CommitteeMemberAlreadyResignedError{
+						ColdCredential: credential,
+					}
+				}
+				if !authorize {
+					resignedInTx[key] = true
+				}
 				continue
 			}
 			return conway.NotCommitteeMemberError{
@@ -213,18 +368,36 @@ func validateCommitteeCertificates(
 				Operation:  operation,
 			}
 		}
-		if authorize && member.Resigned {
-			return conway.ResignedCommitteeMemberHotKeyError{
-				ColdKey: credential.Credential,
+		resigned := member.Resigned || resignedInTx[key]
+		if resigned {
+			if authorize {
+				return conway.ResignedCommitteeMemberHotKeyError{
+					ColdKey: credential.Credential,
+				}
 			}
+			return CommitteeMemberAlreadyResignedError{
+				ColdCredential: credential,
+			}
+		}
+		if !authorize {
+			resignedInTx[key] = true
 		}
 	}
 	return nil
 }
 
-// validateUnknownVoters preserves the full hot credential identity for
-// committee voters. DRep and stake-pool checks intentionally mirror the
-// upstream rule so replacing it does not change their behavior.
+// validateUnknownVoters rejects a vote cast by a voter that does not exist
+// (Conway GOV, VotersDoNotExist). cardano-ledger resolves every voter against
+// the certificate state after the transaction's own certificates (Conway
+// LEDGER passes certStateAfterCERTS to GOV), so a DRep, stake pool or
+// committee hot credential registered or authorized earlier in the same
+// transaction is known, and a DRep deregistered or a hot credential replaced
+// or resigned there is not. Dijkstra sub-transactions are resolved in order
+// before the top-level transaction, each seeing the certificates of the
+// levels before it. Credentials keep their key/script tags throughout, and a
+// committee hot credential is known while any cold credential authorizes it:
+// the mapping from hot to cold credential is not unique
+// (authorizedHotCommitteeCredentials).
 func validateUnknownVoters(
 	tx lcommon.Transaction,
 	slot uint64,
@@ -232,93 +405,108 @@ func validateUnknownVoters(
 	pp lcommon.ProtocolParameters,
 ) error {
 	// Votes belong to the GOV state transition, which a phase-2-invalid
-	// transaction does not apply.
+	// transaction does not apply. This must precede the upstream Dijkstra
+	// call, which resolves protocol parameters and ledger-state levels before
+	// it reaches any validity check.
 	if !tx.IsValid() {
 		return nil
 	}
-	state, ok := ls.(CommitteeCredentialState)
+	if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
+		if err := gdijkstra.UtxoValidateUnknownVoters(tx, slot, ls, pp); err != nil {
+			return err
+		}
+	}
+	state, ok := stateCapability[CommitteeCredentialState](ls)
 	if !ok {
+		if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
+			return nil
+		}
 		return conway.UtxoValidateUnknownVoters(tx, slot, ls, pp)
 	}
-	votes := tx.VotingProcedures()
-	if len(votes) == 0 {
-		return nil
+	overlay := newVoterOverlay(ls, state)
+	for _, level := range governanceLevels(tx) {
+		overlay.applyCertificates(level.certificates)
+		if err := overlay.validateVoters(level.votes); err != nil {
+			return err
+		}
 	}
-	// Resolved on the first committee voter rather than up front, so a
-	// transaction with only DRep or pool votes never pays for the query. The
-	// second result reports whether the answer is authoritative.
-	var availabilityKnown, available bool
-	committeeHotMember := func(
-		hotCredential lcommon.Credential,
-	) (*lcommon.CommitteeMember, bool, error) {
-		if !availabilityKnown {
-			resolved, err := state.CommitteeStateAvailable()
-			if err != nil {
-				return nil, false, err
-			}
-			available, availabilityKnown = resolved, true
-		}
-		if !available {
-			return nil, false, nil
-		}
-		member, err := state.CommitteeHotCredentialMember(hotCredential)
-		return member, true, err
+	return nil
+}
+
+// ParameterChangeProtocolVersionError indicates that a ParameterChange
+// governance action set protocol-version key 14, which the reference
+// excludes from PParamsUpdate entirely.
+type ParameterChangeProtocolVersionError struct {
+	ProposalIndex int
+}
+
+func (e ParameterChangeProtocolVersionError) Error() string {
+	return fmt.Sprintf(
+		"proposal %d: ParameterChange must not set protocol-version (key 14); only HardForkInitiation can change protocol version",
+		e.ProposalIndex,
+	)
+}
+
+// parameterChangeSetsProtocolVersionKey reports whether a ParameterChange's
+// raw CBOR param-update map contains key 14 (protocolVersion) at all,
+// independent of what it decoded to. A present-but-null value decodes a
+// pointer field to the same nil the field takes when the key is absent
+// entirely, so the decoded pointer alone cannot distinguish "not requested"
+// from "requested null" -- the same distinction
+// conwayCurrentTreasuryValuePresent draws for transaction-body key 21. The
+// reference rejects a ParameterChange carrying key 14 whatever value it
+// holds, so presence, not a specific decoded value, is what must be
+// rejected.
+func parameterChangeSetsProtocolVersionKey(paramUpdateCbor []byte) bool {
+	if len(paramUpdateCbor) == 0 {
+		// No raw CBOR to inspect (e.g. an update built in Go without going
+		// through decode). The caller's decoded-pointer check already
+		// covers this case.
+		return false
 	}
-	for voter := range votes {
-		if voter == nil {
-			continue
+	var fields map[uint]cbor.RawMessage
+	if _, err := cbor.Decode(paramUpdateCbor, &fields); err != nil {
+		// The type already decoded successfully from this CBOR, so a
+		// failure here means the raw bytes and typed value disagree. Fail
+		// closed rather than silently admit the proposal.
+		return true
+	}
+	_, ok := fields[14]
+	return ok
+}
+
+// validateParameterChangeExcludesProtocolVersion rejects a Conway or
+// Dijkstra ParameterChange governance action that carries protocol-version
+// key 14. The reference excludes protocol version from PParamsUpdate: a
+// protocol change must go through HardForkInitiation instead, which carries
+// separate SPO/DRep threshold semantics and, at PV9, bootstrap restrictions
+// that a same-purpose ParameterChange would otherwise bypass. Rejecting here,
+// before ProcessProposals, keeps a malformed proposal from ever being persisted
+// or reaching enactment.
+func validateParameterChangeExcludesProtocolVersion(
+	tx lcommon.Transaction,
+	_ uint64,
+	_ lcommon.LedgerState,
+	_ lcommon.ProtocolParameters,
+) error {
+	for i, proposal := range tx.ProposalProcedures() {
+		var setsProtocolVersion bool
+		switch action := proposal.GovAction().(type) {
+		case *conway.ConwayParameterChangeGovAction:
+			setsProtocolVersion = action != nil &&
+				(action.ParamUpdate.ProtocolVersion != nil ||
+					parameterChangeSetsProtocolVersionKey(
+						action.ParamUpdate.Cbor(),
+					))
+		case *gdijkstra.DijkstraParameterChangeGovAction:
+			setsProtocolVersion = action != nil &&
+				(action.ParamUpdate.ProtocolVersion != nil ||
+					parameterChangeSetsProtocolVersionKey(
+						action.ParamUpdate.Cbor(),
+					))
 		}
-		switch voter.Type {
-		case lcommon.VoterTypeDRepKeyHash,
-			lcommon.VoterTypeDRepScriptHash:
-			credentialType := uint(lcommon.CredentialTypeAddrKeyHash)
-			if voter.Type == lcommon.VoterTypeDRepScriptHash {
-				credentialType = lcommon.CredentialTypeScriptHash
-			}
-			registration, err := ls.DRepRegistration(
-				lcommon.Credential{
-					CredType:   credentialType,
-					Credential: lcommon.Blake2b224(voter.Hash),
-				},
-			)
-			if err != nil {
-				return err
-			}
-			if registration == nil {
-				return conway.UnknownVoterError{Voter: *voter}
-			}
-		case lcommon.VoterTypeStakingPoolKeyHash:
-			if !ls.IsPoolRegistered(lcommon.PoolKeyHash(voter.Hash)) {
-				return conway.UnknownVoterError{Voter: *voter}
-			}
-		case lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
-			lcommon.VoterTypeConstitutionalCommitteeHotScriptHash:
-			credentialType := uint(lcommon.CredentialTypeAddrKeyHash)
-			if voter.Type ==
-				lcommon.VoterTypeConstitutionalCommitteeHotScriptHash {
-				credentialType = uint(lcommon.CredentialTypeScriptHash)
-			}
-			hotCredential := lcommon.Credential{
-				CredType:   credentialType,
-				Credential: lcommon.Blake2b224(voter.Hash),
-			}
-			member, authoritative, err := committeeHotMember(hotCredential)
-			if err != nil {
-				// A failed lookup is never a known voter: fail closed.
-				return conway.CommitteeMemberLookupError{
-					Credential: hotCredential.Credential,
-					Err:        err,
-				}
-			}
-			// An unauthoritative nil member cannot establish an unknown
-			// voter (blinklabs-io/dingo#3785). See
-			// LedgerView.CommitteeStateAvailable.
-			if (member == nil && authoritative) ||
-				(member != nil && member.Resigned) {
-				return conway.UnknownVoterError{Voter: *voter}
-			}
-		default:
-			return conway.UnknownVoterError{Voter: *voter}
+		if setsProtocolVersion {
+			return ParameterChangeProtocolVersionError{ProposalIndex: i}
 		}
 	}
 	return nil
@@ -541,6 +729,17 @@ func resolveUtxoValidationSkipIndex(
 	return found
 }
 
+// remainingExUnits returns the part of limit not yet consumed, floored at zero
+// in each dimension. Evaluating each redeemer against it keeps the
+// transaction's total work within the limit instead of granting every
+// redeemer the whole limit.
+func remainingExUnits(limit, used lcommon.ExUnits) lcommon.ExUnits {
+	return lcommon.ExUnits{
+		Memory: max(limit.Memory-used.Memory, 0),
+		Steps:  max(limit.Steps-used.Steps, 0),
+	}
+}
+
 // SafeAddExUnits adds two ExUnits values with
 // overflow detection. Returns an error if either
 // the Memory or Steps sum would exceed
@@ -696,10 +895,11 @@ func validatePreAlonzoTx(
 	minFeeA uint,
 	minFeeB uint,
 ) error {
-	errs := make([]error, 0, len(rules)+2)
+	errs := make([]error, 0, len(rules)+3)
 	for _, rule := range rules {
 		errs = append(errs, rule.validationFunc(tx, slot, ls, pp))
 	}
+	errs = append(errs, validateShelleyDelegCerts(tx, slot, ls, pp))
 	errs = append(errs, ValidateTxSize(tx, maxTxSize))
 	errs = append(errs, ValidateTxFee(tx, minFeeA, minFeeB, nil, nil))
 	return errors.Join(errs...)
@@ -876,6 +1076,10 @@ func ceilRatToUint64(val *big.Rat) uint64 {
 	)
 	if r.Sign() > 0 {
 		q.Add(q, big.NewInt(1))
+	}
+	// Only overflow saturates: a negative result is not the largest value.
+	if q.Sign() < 0 {
+		return 0
 	}
 	if !q.IsUint64() {
 		return math.MaxUint64

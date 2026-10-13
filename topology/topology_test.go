@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package topology_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -25,6 +26,49 @@ import (
 	"github.com/blinklabs-io/dingo/topology"
 	"github.com/stretchr/testify/require"
 )
+
+func FuzzNewTopologyConfigFromReader(f *testing.F) {
+	for _, tc := range topologyTests {
+		f.Add(tc.jsonData)
+	}
+	f.Add(
+		`{"localRoots":[],"publicRoots":[],"bootstrapPeers":[],"useLedgerAfterSlot":0}`,
+	)
+
+	f.Fuzz(func(t *testing.T, input string) {
+		if len(input) > 1024*1024 {
+			t.Skip("topology corpus input is too large for fast fuzzing")
+		}
+
+		cfg, err := topology.NewTopologyConfigFromReader(
+			strings.NewReader(input),
+		)
+		if err != nil {
+			return
+		}
+		if cfg == nil {
+			return
+		}
+
+		encoded, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("json.Marshal(parsed topology): %v", err)
+		}
+
+		roundTrip, err := topology.NewTopologyConfigFromReader(
+			bytes.NewReader(encoded),
+		)
+		if err != nil {
+			t.Fatalf("NewTopologyConfigFromReader(marshaled topology): %v", err)
+		}
+		if roundTrip == nil {
+			return
+		}
+		if !reflect.DeepEqual(roundTrip, cfg) {
+			t.Fatalf("round-trip topology = %#v, want %#v", roundTrip, cfg)
+		}
+	})
+}
 
 type topologyTestDefinition struct {
 	jsonData       string
@@ -79,8 +123,9 @@ var topologyTests = []topologyTestDefinition{
 							Port:    3001,
 						},
 					},
-					Advertise: false,
-					Valency:   1,
+					Advertise:   false,
+					Valency:     1,
+					WarmValency: 1,
 				},
 			},
 			PublicRoots: []topology.TopologyConfigP2PPublicRoot{
@@ -154,9 +199,10 @@ var topologyTests = []topologyTestDefinition{
 							Port:    3001,
 						},
 					},
-					Advertise: false,
-					Trustable: false,
-					Valency:   1,
+					Advertise:   false,
+					Trustable:   false,
+					Valency:     1,
+					WarmValency: 1,
 				},
 			},
 			PublicRoots: []topology.TopologyConfigP2PPublicRoot{
@@ -393,7 +439,7 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
     }
   ]
 }`,
-			wantErr: "localRoots[0].warmValency must be <= localRoots[0].valency",
+			wantErr: "localRoots[0].warmValency must be <= len(localRoots[0].accessPoints)",
 		},
 		{
 			name: "local root valency exceeds access points",
@@ -442,7 +488,7 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
     }
   ]
 }`,
-			wantErr: "publicRoots[0].warmValency must be <= publicRoots[0].valency",
+			wantErr: "publicRoots[0].warmValency must be <= len(publicRoots[0].accessPoints)",
 		},
 		{
 			name: "public root valency exceeds access points",
@@ -507,7 +553,7 @@ func TestNewTopologyConfigFromReader_AllowsEmptyAccessPointsWithValency(t *testi
 	require.NoError(t, err)
 }
 
-func TestNewTopologyConfigFromReader_AllowsWarmValencyBelowValency(t *testing.T) {
+func TestNewTopologyConfigFromReader_RejectsWarmValencyBelowValency(t *testing.T) {
 	jsonData := `{
 	"localRoots": [
 		{
@@ -522,10 +568,12 @@ func TestNewTopologyConfigFromReader_AllowsWarmValencyBelowValency(t *testing.T)
 }`
 
 	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "warmValency must be >= valency")
 }
 
-func TestNewTopologyConfigFromReader_RejectsWarmValencyAboveValency(t *testing.T) {
+func TestNewTopologyConfigFromReader_RejectsWarmValencyAboveAccessPointCount(
+	t *testing.T,
+) {
 	jsonData := `{
 	"localRoots": [
 		{
@@ -540,7 +588,7 @@ func TestNewTopologyConfigFromReader_RejectsWarmValencyAboveValency(t *testing.T
 
 	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "localRoots[0].warmValency must be <= localRoots[0].valency")
+	require.Contains(t, err.Error(), "localRoots[0].warmValency must be <= len(localRoots[0].accessPoints)")
 }
 
 func TestNewPeerSnapshotConfigFromReader_ParsesButValidateRejectsMissingRelayPort(

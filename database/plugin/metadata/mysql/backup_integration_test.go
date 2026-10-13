@@ -1,3 +1,5 @@
+//go:build dingo_extra_plugins && dingo_db_integration
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build dingo_extra_plugins && dingo_db_integration
 
 package mysql
 
@@ -30,7 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mysqlIntegrationDSN mirrors sqlstore/dialect_integration_test.go's
+// mysqlIntegrationDSN mirrors ../sqlstore/dialect_integration_test.go's
 // TestMySQLSQLStoreIntegration default: same env var, same fallback.
 func mysqlIntegrationDSN(t *testing.T) string {
 	t.Helper()
@@ -44,7 +44,7 @@ func mysqlIntegrationDSN(t *testing.T) string {
 // createIsolatedDatabase creates a uniquely named database on the server
 // dsn points at and returns a DSN pointed at it, so concurrent test runs
 // (and the src/dst databases within a single test) never see each other's
-// tables -- mirrors dialect_integration_test.go's mysqlDSNWithDatabase.
+// tables -- mirrors database/plugin/metadata/sqlstore/dialect_integration_test.go's mysqlDSNWithDatabase.
 func createIsolatedDatabase(t *testing.T, dsn, namePrefix string) string {
 	t.Helper()
 	admin, err := sql.Open("mysql", dsn)
@@ -100,7 +100,7 @@ func TestBackupToRestoreFromIntegration(t *testing.T) {
 	require.NoError(t, dstStore.RestoreFrom(context.Background(), dumpPath))
 	require.NoError(t, dstStore.Start(context.Background()))
 
-	restoredTimestamp, err := dstStore.GetCommitTimestamp()
+	restoredTimestamp, err := dstStore.GetCommitTimestamp(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, int64(4242), restoredTimestamp)
 }
@@ -198,7 +198,7 @@ func TestResetThenRestoreIntegration(t *testing.T) {
 
 	require.NoError(t, dstStore.RestoreFrom(context.Background(), dumpPath))
 	require.NoError(t, dstStore.Start(context.Background()))
-	restoredTimestamp, err := dstStore.GetCommitTimestamp()
+	restoredTimestamp, err := dstStore.GetCommitTimestamp(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, int64(777), restoredTimestamp)
 }
@@ -230,12 +230,41 @@ func TestResetRefusesWhenTargetHasData(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "already contains data")
 
-	restoredTimestamp, err := store.GetCommitTimestamp()
+	restoredTimestamp, err := store.GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t, int64(999), restoredTimestamp,
 		"a refused Reset must not have touched the existing data",
 	)
+}
+
+func TestResetRefusesWhenDormantDRepStateIsPopulated(t *testing.T) {
+	baseDSN := mysqlIntegrationDSN(t)
+	dsn := createIsolatedDatabase(t, baseDSN, "mysqlbackup_dormancy")
+	store, err := openStore(
+		context.Background(),
+		Config{DSN: dsn},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	require.NoError(t, store.Start(context.Background()))
+
+	admin, err := sql.Open("mysql", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	_, err = admin.Exec(
+		"UPDATE drep_dormancy_state SET dormant_epochs = 1 WHERE id = 1",
+	)
+	require.NoError(t, err)
+	parsed, err := mysqldriver.ParseDSN(dsn)
+	require.NoError(t, err)
+
+	err = refuseIfTargetHasData(
+		context.Background(), admin, parsed.DBName,
+		[]string{drepDormancyStateTableName},
+	)
+	require.ErrorContains(t, err, "already contains data")
 }
 
 // TestResetToleratesView guards a real gap: databaseIsEmpty/resetDatabase

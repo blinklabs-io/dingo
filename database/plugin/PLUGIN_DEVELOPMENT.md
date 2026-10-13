@@ -129,8 +129,9 @@ unreachable-endpoint, bad-credential, and resource-cleanup checks. See
 for what each check covers, the environment variables each cloud/database
 backend reads, and CI availability.
 
-Add a new plugin's conformance test as a thin `conformance_test.go` in its
-own package, in-package so it can use the plugin's real constructor:
+Add a new plugin's conformance test as a thin in-package test in its own
+package, so it can use the plugin's real constructor, in the `_test.go` file
+named for the implementation file it exercises:
 
 ```go
 func TestBlobStoreConformance(t *testing.T) {

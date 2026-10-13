@@ -43,6 +43,7 @@ func TestCheckedInSpecsAreValid(t *testing.T) {
 		{"testnet-dingo.yaml", 3},
 		{"testnet-accelerated.yaml", 2},
 		{"testnet-dingo-accelerated.yaml", 3},
+		{"testnet-dingo-leios.yaml", 3},
 	} {
 		t.Run(spec.file, func(t *testing.T) {
 			cfg, err := LoadDevNetConfigFrom(spec.file)
@@ -52,6 +53,17 @@ func TestCheckedInSpecsAreValid(t *testing.T) {
 			require.Equal(t, uint32(42), cfg.NetworkMagic)
 		})
 	}
+}
+
+func TestLeiosSpecActivatesDijkstraAtGenesis(t *testing.T) {
+	cfg, err := LoadDevNetConfigFrom("testnet-dingo-leios.yaml")
+	require.NoError(t, err)
+	require.NotNil(t, cfg.DijkstraHardForkAtEpoch)
+	require.Zero(t, *cfg.DijkstraHardForkAtEpoch)
+	require.Equal(t, uint64(300), cfg.EpochLength)
+	require.Equal(t, 500*time.Millisecond, cfg.SlotDuration())
+	require.Equal(t, uint64(3), cfg.SecurityParam)
+	require.Equal(t, uint64(240), cfg.NonceStabilityWindowSlots())
 }
 
 // The accelerated specs exist to make a full scenario fit the reference
@@ -96,10 +108,11 @@ func TestAcceleratedTxPumpQuarantineFitsRunnerBudget(t *testing.T) {
 					args = append(args, "--conformance")
 				}
 				slots := launchedTxPumpWindow(t, script, args...)
-				require.Positive(
+				require.GreaterOrEqual(
 					t,
 					slots,
-					"accelerated runs must retain output quarantine",
+					cfg.BlockFetchStabilityWindowSlots(),
+					"quarantine must cover 3k/f slots, the window an early fork can still remove outputs in",
 				)
 				require.Equal(t, "${DEVNET_TXPUMP_CONFIRMATION_SLOTS:-600}",
 					environments[profile.service]["TXPUMP_CONFIRMATION_SLOTS"],
@@ -193,6 +206,29 @@ func TestCanonicalSpecsKeepCanonicalTiming(t *testing.T) {
 			require.Equal(t, uint64(40), cfg.SecurityParam)
 			require.Equal(t, time.Second, cfg.SlotDuration())
 		})
+	}
+}
+
+func TestKoiosParityServicesUseOptInProfile(t *testing.T) {
+	composeData, err := os.ReadFile("docker-compose.yml")
+	require.NoError(t, err)
+
+	var compose struct {
+		Services map[string]struct {
+			Profiles []string `yaml:"profiles"`
+		} `yaml:"services"`
+	}
+	require.NoError(t, yaml.Unmarshal(composeData, &compose))
+
+	for _, service := range []string{
+		"dingo-preview",
+		"koios-parity-prometheus",
+		"koios-parity-grafana",
+	} {
+		definition, ok := compose.Services[service]
+		require.True(t, ok, "Compose service %s must exist", service)
+		require.Equal(t, []string{"koios-parity"}, definition.Profiles,
+			"Preview observability must stay opt-in and separate from the generated DevNet profiles")
 	}
 }
 
@@ -342,6 +378,14 @@ func TestComposeTxPumpSubmitsOneTransactionPerBatch(t *testing.T) {
 			require.Equal(t, "${DEVNET_TXPUMP_CONFIRMATION_SLOTS:-600}",
 				environment["TXPUMP_CONFIRMATION_SLOTS"],
 				"direct Compose use must retain the canonical default")
+			if service == "txpump-dingo" {
+				require.Equal(
+					t,
+					"${DEVNET_TXPUMP_TRANSACTION_ERA:-conway}",
+					environment["TXPUMP_TRANSACTION_ERA"],
+					"Dingo Leios profile must select Dijkstra transactions explicitly",
+				)
+			}
 		})
 	}
 }

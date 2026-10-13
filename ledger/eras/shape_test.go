@@ -26,10 +26,44 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestStabilityWindowForEra_RejectsActiveSlotsCoeffAbove1 verifies that
+// StabilityWindowForEra treats ActiveSlotsCoeff > 1 as malformed.
+//
+// ActiveSlotsCoeff is the "active slot coefficient" f in the Praos
+// stability-window formula ceil(3*k/f). The protocol requires f in (0, 1].
+// An f > 1 silently shrinks the safe zone below the protocol floor — a bad
+// genesis file should be rejected, not accepted with a subtle security
+// regression.
+func TestStabilityWindowForEra_RejectsActiveSlotsCoeffAbove1(t *testing.T) {
+	shelley := `{
+		"activeSlotsCoeff": 2.0,
+		"securityParam": 432,
+		"slotLength": 1,
+		"epochLength": 432000,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
+	)
+	_, err := eras.StabilityWindowForEra(cfg, eras.ShelleyEraDesc.Id)
+	assert.Error(
+		t,
+		err,
+		"StabilityWindowForEra must reject ActiveSlotsCoeff > 1 (would silently shrink safe zone)",
+	)
+}
+
 // Full mainnet-ish config with both genesis files present.
 func newTestCfg(t *testing.T) *cardano.CardanoNodeConfig {
 	t.Helper()
-	byron := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
+	byron := `{
+		"avvmDistr": {},
+		"blockVersionData": {"heavyDelThd":"300000000000","maxBlockSize":"2000000","maxHeaderSize":"2000000","maxProposalSize":"700","maxTxSize":"4096","mpcThd":"20000000000000","scriptVersion":0,"slotDuration":"20000","softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000","updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"},
+		"protocolConsts":{"k":432,"protocolMagic":164},"startTime":1788739200,
+		"bootStakeholders":{},"heavyDelegation":{},"nonAvvmBalances":{}
+	}`
 	shelley := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -276,23 +310,54 @@ func TestBuildShape_NextEraTrigger_AtEpochOverride(t *testing.T) {
 	assert.Equal(t, hardfork.TriggerAtVersion, shelley.NextEraTrigger.Kind)
 }
 
-// TestXHardForkAtEpoch is ignored when ExperimentalHardForksEnabled is not
-// set: HardForkEpoch returns false, so we fall through to AtVersion.
-func TestBuildShape_NextEraTrigger_NoOverrideWithoutExperimentalFlag(
+// cardano-node honours TestShelley..ConwayHardForkAtEpoch without
+// ExperimentalHardForksEnabled, so the override must reach the shape when the
+// flag is unset. Otherwise the era falls back to AtVersion and dingo stays in
+// Alonzo at an epoch where cardano-node enters Babbage.
+func TestBuildShape_NextEraTrigger_OverrideWithoutExperimentalFlag(
 	t *testing.T,
 ) {
 	cfg := newTestCfg(t)
-	override := uint64(5)
-	cfg.TestShelleyHardForkAtEpoch = &override
+	override := uint64(2)
+	cfg.TestBabbageHardForkAtEpoch = &override
 	// ExperimentalHardForksEnabled left nil.
 
 	shape, err := eras.BuildShape(cfg)
 	require.NoError(t, err)
 
-	byron := shape.Eras[0]
-	require.Equal(t, "Byron", byron.EraName)
-	assert.Equal(t, hardfork.TriggerAtVersion, byron.NextEraTrigger.Kind,
-		"without ExperimentalHardForksEnabled, override must be ignored")
+	alonzo, ok := shape.EraForID(eras.AlonzoEraDesc.Id)
+	require.True(t, ok)
+	assert.Equal(t, hardfork.TriggerAtEpoch, alonzo.NextEraTrigger.Kind,
+		"without ExperimentalHardForksEnabled, the override must still apply")
+	assert.Equal(t, override, alonzo.NextEraTrigger.Epoch)
+}
+
+// TestDijkstraHardForkAtEpoch is the one override cardano-node gates on
+// ExperimentalHardForksEnabled.
+func TestBuildShape_DijkstraOverrideRequiresExperimentalFlag(t *testing.T) {
+	override := uint64(7)
+	for _, tc := range []struct {
+		name string
+		flag *bool
+		want hardfork.TriggerKind
+	}{
+		{"flag unset", nil, hardfork.TriggerAtVersion},
+		{"flag false", new(false), hardfork.TriggerAtVersion},
+		{"flag true", new(true), hardfork.TriggerAtEpoch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newTestCfg(t)
+			cfg.ExperimentalHardForksEnabled = tc.flag
+			cfg.TestDijkstraHardForkAtEpoch = &override
+
+			shape, err := eras.BuildShapeWithDijkstra(cfg, true)
+			require.NoError(t, err)
+
+			conway, ok := shape.EraForID(eras.ConwayEraDesc.Id)
+			require.True(t, ok)
+			assert.Equal(t, tc.want, conway.NextEraTrigger.Kind)
+		})
+	}
 }
 
 // Multiple TestXHardForkAtEpoch overrides: each affects only the era

@@ -39,7 +39,7 @@ var addColumnPattern = regexp.MustCompile(
 // testDBPragmas relaxes durability for throwaway per-test SQLite databases:
 // each one is created, migrated, asserted against, and deleted inside a
 // single test, so an fsync'd rollback journal buys nothing and is expensive
-// on a contended CI runner (dingo#4171). No test in this package kills a
+// on a contended CI runner. No test in this package kills a
 // connection mid-transaction, simulates crash recovery, or inspects a
 // journal/WAL file -- "interruption" tests resume from a schema_migrations
 // row an in-process UPDATE or a returned error puts into the dirty state, not
@@ -188,6 +188,57 @@ func TestRunnerFreshDatabaseAndIdempotentRerun(t *testing.T) {
 	require.Equal(t, string(PhaseComplete), phase)
 	require.False(t, dirty)
 	require.True(t, completed.Valid)
+}
+
+func TestImportedLeiosKeyMigrationKeepsAgeUnknown(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	_, err := db.Exec(`CREATE TABLE pool_registration (
+		id INTEGER PRIMARY KEY,
+		certificate_id INTEGER,
+		added_slot INTEGER,
+		leios_key_public BLOB,
+		leios_key_possession_proof BLOB
+	)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO pool_registration (
+		id, certificate_id, added_slot, leios_key_public,
+		leios_key_possession_proof
+	) VALUES
+		(1, NULL, 100, X'01', X'02'),
+		(2, 7, 100, X'03', X'04'),
+		(3, NULL, 0, X'05', X'06'),
+		(4, NULL, 100, NULL, NULL),
+		(5, 0, 100, X'07', X'08')`)
+	require.NoError(t, err)
+	registry, err := SQLiteRegistry()
+	require.NoError(t, err)
+	for _, statement := range registry[26].SQL["sqlite"].Expand {
+		_, err := db.Exec(statement)
+		require.NoError(t, err)
+	}
+	rows, err := db.Query(`
+SELECT id, leios_key_registration_age_unknown
+FROM pool_registration ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var got []struct {
+		id      int
+		unknown bool
+	}
+	for rows.Next() {
+		var row struct {
+			id      int
+			unknown bool
+		}
+		require.NoError(t, rows.Scan(&row.id, &row.unknown))
+		got = append(got, row)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []struct {
+		id      int
+		unknown bool
+	}{{1, true}, {2, false}, {3, false}, {4, false}, {5, true}}, got)
 }
 
 func TestRatificationHistoryMigrationBackfillsExistingMarker(t *testing.T) {
@@ -446,6 +497,118 @@ func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
 	require.Zero(t, count)
 }
 
+// An already-present column is accepted as the result of an interrupted
+// ADD COLUMN only when it matches the whole declared definition: type,
+// nullability and default. A definition carrying a constraint the guard
+// cannot read back from the catalog is never accepted.
+func TestRunnerAddColumnReplayVerifiesDefinition(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		existing string
+		declared string
+		wantErr  bool
+	}{
+		{
+			"identical",
+			"integer NOT NULL DEFAULT 0",
+			"integer NOT NULL DEFAULT 0",
+			false,
+		},
+		{
+			"boolean spelling",
+			"boolean NOT NULL DEFAULT false",
+			"boolean NOT NULL DEFAULT FALSE",
+			false,
+		},
+		{"nullable no default", "text", "text", false},
+		{
+			"quoted whitespace default",
+			"text NOT NULL DEFAULT 'needs review'",
+			"text NOT NULL DEFAULT 'needs review'",
+			false,
+		},
+		{
+			"escaped quoted whitespace default",
+			"text NOT NULL DEFAULT 'it''s under review'",
+			"text NOT NULL DEFAULT 'it''s under review'",
+			false,
+		},
+		{
+			"quoted literal case",
+			"text NOT NULL DEFAULT 'abc'",
+			"text NOT NULL DEFAULT 'ABC'",
+			true,
+		},
+		{
+			"declared not null, existing nullable",
+			"integer DEFAULT 0",
+			"integer NOT NULL DEFAULT 0",
+			true,
+		},
+		{
+			"declared nullable, existing not null",
+			"integer NOT NULL DEFAULT 0",
+			"integer DEFAULT 0",
+			true,
+		},
+		{
+			"declared default, existing none",
+			"integer NOT NULL",
+			"integer NOT NULL DEFAULT 0",
+			true,
+		},
+		{
+			"declared none, existing default",
+			"integer NOT NULL DEFAULT 0",
+			"integer NOT NULL",
+			true,
+		},
+		{
+			"different default",
+			"integer NOT NULL DEFAULT 1",
+			"integer NOT NULL DEFAULT 0",
+			true,
+		},
+		{"unverifiable constraint", "integer UNIQUE", "integer UNIQUE", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := openTestDB(t)
+			migration := Migration{
+				Version:          1,
+				Name:             "add_column_definition",
+				BackfillRevision: "1",
+				SQL: map[string]SQL{
+					"sqlite": {
+						Expand: []string{
+							"CREATE TABLE item (id INTEGER PRIMARY KEY, n " + tc.existing + ")",
+							"ALTER TABLE item ADD COLUMN n " + tc.declared,
+						},
+					},
+				},
+			}
+			err := testRunner(db, migration).Run(context.Background())
+			if tc.wantErr {
+				require.ErrorContains(t, err, "statement 2")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestNormalizeColumnDefaultPreservesPostgresStringLiteral(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "A::B", normalizeColumnDefault("('A::B'::text)"))
+	require.NotEqual(
+		t,
+		normalizeColumnDefault("'ABC'::text"),
+		normalizeColumnDefault("'abc'::text"),
+	)
+}
+
 // Every ALTER TABLE ADD COLUMN the shipped registries produce has to be
 // recognizable to the replay guard in each dialect's quoting, or an upgrade
 // interrupted between the committed DDL and its phase advance would still fail
@@ -453,8 +616,8 @@ func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
 // dialect, so this pins the guard against that translation drifting.
 func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 	t.Parallel()
-	// v2 adds four columns, v5 two, v7/v8 one each, and v17 one more.
-	const shippedAddColumns = 15
+	// v2 adds four columns, v5 adds two, and later migrations add fifteen.
+	const shippedAddColumns = 22
 	// The replay guard compares the type the statement declares with the type
 	// the live schema reports, so every shipped ADD COLUMN has to declare a
 	// type whose two spellings are already known to agree after
@@ -468,6 +631,9 @@ func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 		"bigint":  {},
 		"integer": {},
 		"text":    {},
+		// MySQL's translation of TEXT NOT NULL DEFAULT '0'; information_schema
+		// reports it as varchar.
+		"varchar": {},
 	}
 	for _, dialect := range []struct {
 		name string
@@ -705,7 +871,7 @@ func TestRunnerRestoresSQLiteForeignKeysAfterCancellation(t *testing.T) {
 // DDL/state writes (13 migrations, each a separate transaction); sharing it
 // avoids redoing that work in every one of the ~13 parallel subtests, and
 // testDBPragmas removes the per-write fsync from both the shared baseline and
-// each subtest's own per-version replay (dingo#4171). The per-migration
+// each subtest's own per-version replay. The per-migration
 // replay under test -- resetting one version to PhaseExpand and calling
 // Run() again -- still runs against each subtest's own independent copy, so
 // the coverage this test exists for is unchanged.
@@ -720,7 +886,7 @@ func TestRunnerReplaysEveryShippedVersionFromExpand(t *testing.T) {
 	// later one has run. A single shared "migrated to latest" baseline worked
 	// for every version before v19 only because versions 1-18 are all purely
 	// additive (ADD COLUMN/CREATE TABLE/CREATE INDEX): replaying an old
-	// version's DDL against the newest schema was harmless. v19 (dingo#4464)
+	// version's DDL against the newest schema was harmless. v19
 	// drops a column and index a later replay can no longer see, so
 	// replaying v1's CREATE INDEX on `asset`(`name_hex`) against a database
 	// that already ran v19 fails with "no such column" -- a state v1 can
@@ -812,4 +978,104 @@ func openTestDBFromBaseline(t *testing.T, baseline []byte) *sql.DB {
 		require.NoError(t, db.Close())
 	})
 	return db
+}
+
+func TestRunnerPrerequisiteRefusalPreservesSchema(t *testing.T) {
+	t.Parallel()
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
+			db := openTestDB(t)
+			runner := testRunner(db, testMigration(nil))
+			if existing {
+				require.NoError(t, runner.Run(t.Context()))
+			}
+			schema := func() string {
+				t.Helper()
+				var value string
+				require.NoError(
+					t,
+					db.QueryRow(`SELECT COALESCE(group_concat(sql), '')
+FROM (SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name)`).Scan(&value),
+				)
+				return value
+			}
+			beforeSchema := schema()
+			conn, err := db.Conn(t.Context())
+			require.NoError(t, err)
+			var beforeStates map[int]state
+			if existing {
+				beforeStates, err = runner.readStates(t.Context(), conn)
+				require.NoError(t, err)
+			}
+			require.NoError(t, conn.Close())
+			backfillCalled := false
+			runner.Registry = append(runner.Registry, Migration{
+				Version:          2,
+				Name:             "new_column",
+				BackfillRevision: "1",
+				SQL: map[string]SQL{"sqlite": {
+					Expand: []string{
+						"ALTER TABLE item ADD COLUMN upgraded BOOLEAN NOT NULL DEFAULT FALSE",
+					},
+				}},
+				Backfill: func(context.Context, Batch) (BatchResult, error) {
+					backfillCalled = true
+					return BatchResult{Done: true}, nil
+				},
+			})
+			refusal := errors.New("startup prerequisite refused")
+			calls := 0
+			runner.BeforeUpgrade = func(ctx context.Context, conn *sql.Conn) error {
+				calls++
+				var present int
+				err := conn.QueryRowContext(
+					ctx,
+					"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'item'",
+				).Scan(&present)
+				require.NoError(t, err)
+				require.Equal(t, existing, present != 0)
+				return refusal
+			}
+			require.ErrorIs(t, runner.Run(t.Context()), refusal)
+			require.Equal(t, 1, calls)
+			require.Equal(
+				t,
+				beforeSchema,
+				schema(),
+				"refusal must preserve every schema object",
+			)
+			require.False(
+				t,
+				backfillCalled,
+				"refusal must precede all migration execution",
+			)
+			if existing {
+				conn, err := db.Conn(t.Context())
+				require.NoError(t, err)
+				afterStates, err := runner.readStates(t.Context(), conn)
+				require.NoError(t, err)
+				require.NoError(t, conn.Close())
+				require.Equal(
+					t,
+					beforeStates,
+					afterStates,
+					"refusal must preserve migration progress",
+				)
+			}
+			runner.BeforeUpgrade = func(context.Context, *sql.Conn) error { return nil }
+			require.NoError(t, runner.Run(t.Context()))
+			require.True(
+				t,
+				backfillCalled,
+				"accepted prerequisites must allow the pending upgrade",
+			)
+			var upgraded bool
+			require.NoError(
+				t,
+				db.QueryRow("SELECT upgraded FROM item LIMIT 1").
+					Scan(&upgraded),
+			)
+			require.False(t, upgraded)
+		})
+	}
 }

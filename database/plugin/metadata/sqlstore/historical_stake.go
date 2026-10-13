@@ -5,6 +5,12 @@
 // You may obtain a copy of the License at
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //nolint:rowserrcheck,sqlclosecheck // Cursors are explicitly closed and close errors are propagated before dependent queries.
 package sqlstore
@@ -21,8 +27,57 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gconway "github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
+
+// boundarySnapshotAfterEnactment follows Dijkstra EPOCH, whose SNAP runs after
+// POOLREAP, governance credits and HARDFORK. Earlier eras run SNAP first.
+func boundarySnapshotAfterEnactment(
+	ctx context.Context,
+	db queryer,
+	boundarySlot uint64,
+) (bool, error) {
+	if boundarySlot == 0 {
+		return false, nil
+	}
+	var eraID uint
+	err := db.QueryRowContext(ctx, `SELECT era_id FROM epoch WHERE start_slot <= ? ORDER BY start_slot DESC LIMIT 1`, boundarySlot).
+		Scan(&eraID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("resolve snapshot boundary era: %w", err)
+	}
+	if eraID >= gdijkstra.EraIdDijkstra {
+		return true, nil
+	}
+	// At the transition SNAP precedes era translation, so epoch still names
+	// Conway. Enacted parameters already carry the incoming major version.
+	var raw []byte
+	var parameterEra uint
+	err = db.QueryRowContext(ctx, `SELECT era_id, cbor FROM pparams WHERE added_slot <= ? ORDER BY added_slot DESC, id DESC LIMIT 1`, boundarySlot).Scan(&parameterEra, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("resolve snapshot boundary parameters: %w", err)
+	}
+	if parameterEra >= gdijkstra.EraIdDijkstra {
+		return true, nil
+	}
+	if parameterEra != gconway.EraIdConway || len(raw) == 0 {
+		return false, nil
+	}
+	var params gconway.ConwayProtocolParameters
+	if _, err := gcbor.Decode(raw, &params); err != nil {
+		return false, fmt.Errorf("decode snapshot boundary parameters: %w", err)
+	}
+	return params.ProtocolVersion.Major >= lcommon.ProtocolVersionDijkstra, nil
+}
 
 type historicalStakeSource struct {
 	table      string
@@ -44,26 +99,35 @@ type historicalWithdrawal struct {
 // historicalRewards evaluates future reward credits only for the selected
 // credentials.  Filters are split into bounded batches so the generated
 // predicate stays below SQLite/PostgreSQL/MySQL parameter limits.
-func historicalRewards(
+func (s *Store) historicalRewards(
 	ctx context.Context,
 	db queryer,
 	slot uint64,
 	selected map[historicalRewardKey]struct{},
 ) (map[historicalRewardKey]uint64, error) {
-	return historicalRewardsAtBoundary(ctx, db, slot, 0, selected)
+	return s.historicalRewardsAtBoundary(ctx, db, slot, 0, selected)
 }
 
 // historicalRewardsAtBoundary reconstructs the reward balance observed at an
 // epoch SNAP boundary. Boundary credits marked PostSnapshot are still future
 // credits relative to SNAP and must be removed, while unmarked credits at the
-// boundary are already visible to the snapshot.
-func historicalRewardsAtBoundary(
+// boundary are already visible to the snapshot. A pending round applied at or
+// before that point contributes its credits that are not written yet.
+func (s *Store) historicalRewardsAtBoundary(
 	ctx context.Context,
 	db queryer,
 	slot uint64,
 	boundarySlot uint64,
 	selected map[historicalRewardKey]struct{},
 ) (map[historicalRewardKey]uint64, error) {
+	hasPending, err := pendingRewardCreditOutputsExist(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	visibleAt := slot
+	if boundarySlot > 0 {
+		visibleAt = boundarySlot
+	}
 	keys := make([]historicalRewardKey, 0, len(selected))
 	for key := range selected {
 		keys = append(keys, key)
@@ -91,6 +155,20 @@ func historicalRewardsAtBoundary(
 		if err != nil {
 			return nil, err
 		}
+		if hasPending {
+			pending, err := s.pendingCreditsForCredentials(
+				ctx, db, visibleAt, batchSelected,
+			)
+			if err != nil {
+				return nil, err
+			}
+			for ref, amount := range pending {
+				if ^uint64(0)-batch[ref] < amount {
+					return nil, errors.New("historical reward credit overflow")
+				}
+				batch[ref] += amount
+			}
+		}
 		maps.Copy(ret, batch)
 	}
 	return ret, nil
@@ -112,6 +190,10 @@ func historicalRewardsBatch(
 	}
 	base := make(map[historicalRewardKey]uint64)
 	predicate, predicateArgs := historicalRewardCredentialPredicate(selected)
+	deltaPredicate, deltaPredicateArgs := historicalRewardCredentialPredicateFor(
+		selected,
+		"d",
+	)
 	rows, err := db.QueryContext(
 		ctx,
 		"SELECT credential_tag, staking_key, reward FROM account WHERE "+predicate,
@@ -157,12 +239,11 @@ func historicalRewardsBatch(
 	if boundarySlot > 0 {
 		withdrawalOp = ">="
 	}
-	withdrawalArgs := append([]any{withdrawalValue}, predicateArgs...)
-	rows, err = db.QueryContext(ctx, `
-SELECT credential_tag, staking_key, id, added_slot, previous_reward
-FROM account_reward_delta
-WHERE withdrawal = TRUE AND added_slot `+withdrawalOp+` ? AND (`+predicate+`)
-	ORDER BY credential_tag, staking_key, added_slot, id`, withdrawalArgs...)
+	withdrawalArgs := append([]any{withdrawalValue}, deltaPredicateArgs...)
+	rows, err = db.QueryContext(
+		ctx,
+		historicalRewardWithdrawalQuery(withdrawalOp, deltaPredicate),
+		withdrawalArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -206,23 +287,34 @@ WHERE withdrawal = TRUE AND added_slot `+withdrawalOp+` ? AND (`+predicate+`)
 
 	total := make(map[historicalRewardKey]uint64)
 	beforeWithdrawal := make(map[historicalRewardKey]uint64)
-	futureRewardPredicate := "added_slot > ?"
-	creditArgs := make([]any, 0, 1+len(predicateArgs))
+	includePostSnapshot := false
+	creditArgs := make([]any, 0, 2+len(deltaPredicateArgs))
 	creditArgs = append(creditArgs, slotValue)
 	if boundarySlot > 0 {
 		boundaryValue, boundaryErr := checkedInt64(boundarySlot)
 		if boundaryErr != nil {
 			return nil, boundaryErr
 		}
-		futureRewardPredicate = "(added_slot > ? OR (added_slot = ? AND post_snapshot = TRUE))"
-		creditArgs = []any{boundaryValue, boundaryValue}
+		afterEnactment, err := boundarySnapshotAfterEnactment(
+			ctx,
+			db,
+			boundarySlot,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if afterEnactment {
+			creditArgs = []any{boundaryValue}
+		} else {
+			includePostSnapshot = true
+			creditArgs = []any{boundaryValue, boundaryValue}
+		}
 	}
-	creditArgs = append(creditArgs, predicateArgs...)
-	rows, err = db.QueryContext(ctx, `
-SELECT credential_tag, staking_key, id, added_slot, amount
-FROM account_reward_delta
-WHERE withdrawal = FALSE AND `+futureRewardPredicate+` AND (`+predicate+`)
-	ORDER BY credential_tag, staking_key, added_slot, id`, creditArgs...)
+	creditArgs = append(creditArgs, deltaPredicateArgs...)
+	rows, err = db.QueryContext(
+		ctx,
+		historicalRewardCreditQuery(includePostSnapshot, deltaPredicate),
+		creditArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -292,6 +384,58 @@ WHERE withdrawal = FALSE AND `+futureRewardPredicate+` AND (`+predicate+`)
 	return ret, nil
 }
 
+// historicalRewardEffectiveSlot is the slot a reward delta counts at: the
+// Leios transaction context slot when one exists, else the delta's own slot.
+// The LEFT JOINs in the queries below supply lc and tx. The transaction hash
+// index is unique and leios_transaction_context is keyed by transaction_id, so
+// each delta row joins at most one context row.
+const historicalRewardEffectiveSlot = "COALESCE(lc.slot, d.added_slot)"
+
+const historicalRewardDeltaJoins = `
+FROM account_reward_delta d
+LEFT JOIN "transaction" tx ON tx.hash = d.tx_hash
+LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id`
+
+// historicalRewardCreditQuery selects the credits that land after the
+// snapshot slot. The first argument is the slot, repeated a second time when
+// includePostSnapshot is set, followed by the credential predicate arguments.
+//
+// "NOT d.withdrawal" is deliberate: SQLite never uses an index for a negated
+// boolean column, so the planner drives from the credential index without
+// depending on sqlite_stat1, which a from-genesis sync never populates.
+// Rewriting it as "withdrawal = FALSE" lets the planner pick the withdrawal
+// index, which matches nearly every row.
+func historicalRewardCreditQuery(
+	includePostSnapshot bool,
+	credentialPredicate string,
+) string {
+	slotPredicate := historicalRewardEffectiveSlot + " > ?"
+	if includePostSnapshot {
+		slotPredicate = "(" + historicalRewardEffectiveSlot + " > ? OR (" +
+			historicalRewardEffectiveSlot +
+			" = ? AND d.post_snapshot = TRUE))"
+	}
+	return `
+SELECT d.credential_tag, d.staking_key, d.id, ` + historicalRewardEffectiveSlot + `, d.amount` +
+		historicalRewardDeltaJoins + `
+WHERE NOT d.withdrawal AND ` + slotPredicate + ` AND (` + credentialPredicate + `)
+ORDER BY d.credential_tag, d.staking_key, d.added_slot, d.id`
+}
+
+// historicalRewardWithdrawalQuery selects withdrawals at or after the slot.
+// operator is ">" or ">=". withdrawal = TRUE stays an index driver here
+// because only a small fraction of deltas are withdrawals.
+func historicalRewardWithdrawalQuery(
+	operator string,
+	credentialPredicate string,
+) string {
+	return `
+SELECT d.credential_tag, d.staking_key, d.id, ` + historicalRewardEffectiveSlot + `, d.previous_reward` +
+		historicalRewardDeltaJoins + `
+WHERE d.withdrawal = TRUE AND ` + historicalRewardEffectiveSlot + ` ` + operator + ` ? AND (` + credentialPredicate + `)
+ORDER BY d.credential_tag, d.staking_key, d.added_slot, d.id`
+}
+
 // historicalRewardCredentialPredicate builds a bounded, deterministic filter
 // for the credentials participating in one historical stake request.  Reward
 // reconstruction used to scan every account and reward delta in the database,
@@ -300,8 +444,24 @@ WHERE withdrawal = FALSE AND `+futureRewardPredicate+` AND (`+predicate+`)
 func historicalRewardCredentialPredicate(
 	selected map[historicalRewardKey]struct{},
 ) (string, []any) {
+	return historicalRewardCredentialPredicateFor(selected, "")
+}
+
+// historicalRewardCredentialPredicateFor is
+// historicalRewardCredentialPredicate with the columns qualified by alias.
+// Keys are grouped per credential tag into one IN list, so SQLite can search
+// the (credential_tag, staking_key) index per group instead of evaluating a
+// long OR of conjunctions against every row of a different index.
+func historicalRewardCredentialPredicateFor(
+	selected map[historicalRewardKey]struct{},
+	alias string,
+) (string, []any) {
 	if len(selected) == 0 {
 		return "1 = 0", nil
+	}
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
 	}
 	keys := make([]historicalRewardKey, 0, len(selected))
 	for key := range selected {
@@ -313,11 +473,24 @@ func historicalRewardCredentialPredicate(
 		}
 		return keys[i].key < keys[j].key
 	})
-	parts := make([]string, 0, len(keys))
-	args := make([]any, 0, len(keys)*2)
-	for _, key := range keys {
-		parts = append(parts, "(credential_tag = ? AND staking_key = ?)")
-		args = append(args, key.tag, []byte(key.key))
+	var parts []string
+	args := make([]any, 0, len(keys)+2)
+	for start := 0; start < len(keys); {
+		end := start
+		for end < len(keys) && keys[end].tag == keys[start].tag {
+			end++
+		}
+		parts = append(parts, fmt.Sprintf(
+			"(%scredential_tag = ? AND %sstaking_key IN (%s))",
+			prefix,
+			prefix,
+			strings.TrimSuffix(strings.Repeat("?,", end-start), ","),
+		))
+		args = append(args, keys[start].tag)
+		for _, key := range keys[start:end] {
+			args = append(args, []byte(key.key))
+		}
+		start = end
 	}
 	return strings.Join(parts, " OR "), args
 }
@@ -484,7 +657,7 @@ FROM active_delegator_stake`,
 		if err := rows.Err(); err != nil {
 			return nil, nil, err
 		}
-		rewardsByCredential, err := historicalRewardsAtBoundary(
+		rewardsByCredential, err := s.historicalRewardsAtBoundary(
 			ctx, db, slot, boundarySlot, selected,
 		)
 		if err != nil {
@@ -586,7 +759,7 @@ FROM active_delegator_stake`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		rewardsByCredential, err := historicalRewards(ctx, db, slot, selected)
+		rewardsByCredential, err := s.historicalRewards(ctx, db, slot, selected)
 		if err != nil {
 			return nil, fmt.Errorf("calculate historical rewards: %w", err)
 		}
@@ -731,7 +904,7 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		rewardsByCredential, err := historicalRewardsAtBoundary(
+		rewardsByCredential, err := s.historicalRewardsAtBoundary(
 			ctx, db, slot, boundarySlot, selected,
 		)
 		if err != nil {
@@ -778,7 +951,15 @@ func (s *Store) historicalStakeCTE(
 	predicate string,
 	predicateArgs []any,
 ) (string, []any, error) {
-	query, args := activeDelegationSQL(slot)
+	reapSlot := slot
+	afterEnactment, err := boundarySnapshotAfterEnactment(ctx, db, boundarySlot)
+	if err != nil {
+		return "", nil, err
+	}
+	if afterEnactment {
+		reapSlot = boundarySlot
+	}
+	query, args := activeDelegationSQL(slot, reapSlot)
 	// Stake held at a pointer address reaches its credential only in the eras
 	// that count it, and only through the position recorded in utxo_pointer.
 	// When it is not counted the query is exactly what it was before pointer
@@ -833,8 +1014,8 @@ active_delegator_stake AS (
  LEFT JOIN utxo
    ON utxo.credential_tag = active_delegation.credential_tag
   AND utxo.staking_key = active_delegation.staking_key
-  AND utxo.added_slot <= ?
-  AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)
+  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)), utxo.added_slot) <= ?
+  AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" spent_tx ON spent_tx.id = lc.transaction_id WHERE spent_tx.hash = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
 ` + expiryJoin + `
  WHERE ` + expiryPredicate + predicate
 	args = append(args, slot, slot)
@@ -859,8 +1040,8 @@ active_delegator_stake AS (
   AND pointer_resolution.staking_key = active_delegation.staking_key
  JOIN utxo
    ON utxo.id = pointer_resolution.utxo_id
-  AND utxo.added_slot <= ?
-  AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)
+  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)), utxo.added_slot) <= ?
+  AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" spent_tx ON spent_tx.id = lc.transaction_id WHERE spent_tx.hash = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
 ` + expiryJoin + `
  WHERE ` + expiryPredicate + predicate
 		args = append(args, slot, slot)
@@ -885,7 +1066,25 @@ func byteSliceArgs(values [][]byte) []any {
 	return ret
 }
 
-func activeDelegationSQL(slot uint64) (string, []any) {
+// activeDelegationSQL resolves, for each credential, which pool its most
+// recent surviving delegation certificate names as of slot.
+//
+// A delegation certificate is not the last word on the delegation: POOLREAP
+// removes the delegations pointing at a pool reaped at an epoch boundary
+// (ClearDelegationsToRetiredPool) and writes no certificate of its own, so a
+// certificate predating a reap that still stands at slot must not put the
+// credential back on that pool if the pool later re-registered and the
+// credential never re-delegated. The active_delegation CTE's NOT EXISTS
+// clause below ports poolReapedAfterDelegation's rollback-path guard
+// (account.go) into this historical-reconstruction path, which had no
+// equivalent guard: live incident, Preview epoch 646/647, pools
+// 2bf19282e11384ccf60c9a3b0f5b6e00e74aed2cbd8bc9837ccc0966 and
+// 881f9bc5415bb7381dc4b6571ab662eff5277d78d778d05614cdf0d4 each retired and
+// later re-registered, and one-time delegators from before the reap who never
+// re-delegated had their stake wrongly resurrected onto the pool by this
+// query, producing a stake-distribution mismatch against Koios of exactly
+// the reaped credentials' stake (dingo node-parity issue, epoch 647).
+func activeDelegationSQL(slot uint64, reapSlot uint64) (string, []any) {
 	args := make(
 		[]any,
 		0,
@@ -900,11 +1099,11 @@ func activeDelegationSQL(slot uint64) (string, []any) {
 	for _, source := range historicalDelegationSources {
 		delegationParts = append(delegationParts, fmt.Sprintf(`
 SELECT event.credential_tag, event.staking_key, event.pool_key_hash,
-       event.added_slot, tx.block_index, certs.cert_index
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.id), event.added_slot) AS added_slot, event.added_slot AS ownership_slot, tx.block_index, certs.cert_index
 FROM %[1]s event
 JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
 JOIN "transaction" tx ON tx.id = certs.transaction_id
-WHERE event.added_slot <= ?`, source.table))
+WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`, source.table))
 		args = append(args, source.certType, slot)
 	}
 	allHistoryTables := make(
@@ -921,7 +1120,7 @@ WHERE event.added_slot <= ?`, source.table))
 	}
 	delegationParts = append(delegationParts, `
 SELECT account.credential_tag, account.staking_key, account.pool,
-       account.added_slot, 0, 0
+       account.added_slot, account.added_slot, 0, 0
 FROM account
 WHERE account.added_slot <= ? AND account.active = TRUE
   AND account.pool IS NOT NULL AND length(account.pool) > 0`+
@@ -937,12 +1136,12 @@ WHERE account.added_slot <= ? AND account.active = TRUE
 	)
 	for _, source := range historicalRegistrationSources {
 		registrationParts = append(registrationParts, fmt.Sprintf(`
-SELECT event.credential_tag, event.staking_key, %d AS registered, event.added_slot,
-       tx.block_index, certs.cert_index
+SELECT event.credential_tag, event.staking_key, %d AS registered, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.id), event.added_slot) AS added_slot,
+       event.added_slot AS ownership_slot, tx.block_index, certs.cert_index
 FROM %s event
 JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
 JOIN "transaction" tx ON tx.id = certs.transaction_id
-WHERE event.added_slot <= ?`,
+WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`,
 			source.registered,
 			source.table,
 		))
@@ -959,7 +1158,7 @@ WHERE event.added_slot <= ?`,
 	registrationParts = append(registrationParts, `
 SELECT account.credential_tag, account.staking_key,
        CASE WHEN account.active THEN 1 ELSE 0 END,
-       account.created_slot, 0, 0
+       account.created_slot, account.created_slot, 0, 0
 FROM account
 WHERE account.created_slot <= ?`+
 		noHistorySQL("account", registrationTables))
@@ -972,7 +1171,7 @@ WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
 ), ranked_delegation AS (
  SELECT *, ROW_NUMBER() OVER (
    PARTITION BY credential_tag, staking_key
-   ORDER BY added_slot DESC, block_index DESC, cert_index DESC
+   ORDER BY added_slot DESC, ownership_slot DESC, block_index DESC, cert_index DESC
  ) rn FROM delegation_events
 ), latest_delegation AS (
  SELECT * FROM ranked_delegation WHERE rn = 1
@@ -980,7 +1179,7 @@ WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
 ), ranked_registration AS (
  SELECT *, ROW_NUMBER() OVER (
    PARTITION BY credential_tag, staking_key
-   ORDER BY added_slot DESC, block_index DESC, cert_index DESC
+   ORDER BY added_slot DESC, ownership_slot DESC, block_index DESC, cert_index DESC
  ) rn FROM registration_events
 ), latest_registration AS (
  SELECT * FROM ranked_registration WHERE rn = 1
@@ -994,11 +1193,60 @@ WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
  WHERE registration.registered = 1
    AND (delegation.added_slot > registration.added_slot
      OR (delegation.added_slot = registration.added_slot
+       AND delegation.ownership_slot > registration.ownership_slot)
+     OR (delegation.added_slot = registration.added_slot
+       AND delegation.ownership_slot = registration.ownership_slot
        AND delegation.block_index > registration.block_index)
      OR (delegation.added_slot = registration.added_slot
+       AND delegation.ownership_slot = registration.ownership_slot
        AND delegation.block_index = registration.block_index
        AND delegation.cert_index >= registration.cert_index))
-)`, args
+   AND NOT EXISTS (
+       SELECT 1
+       FROM pool_retirement rt
+       JOIN pool p ON p.id = rt.pool_id
+       JOIN epoch e ON e.epoch_id = rt.epoch
+       LEFT JOIN certs c ON c.id = rt.certificate_id
+       LEFT JOIN "transaction" t ON t.id = c.transaction_id
+       WHERE p.pool_key_hash = delegation.pool_key_hash
+         AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = rt.certificate_id), rt.added_slot) <= ?
+         AND e.start_slot > delegation.added_slot
+         AND e.start_slot <= ?
+         AND NOT EXISTS (
+             SELECT 1
+             FROM pool_registration pr
+             LEFT JOIN certs c2 ON c2.id = pr.certificate_id
+             LEFT JOIN "transaction" t2 ON t2.id = c2.transaction_id
+             WHERE pr.pool_id = rt.pool_id
+               AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) < e.start_slot
+               AND (
+                   pr.added_slot > rt.added_slot
+                   OR (pr.added_slot = rt.added_slot
+                       AND COALESCE(t2.block_index, 0) > COALESCE(t.block_index, 0))
+                   OR (pr.added_slot = rt.added_slot
+                       AND COALESCE(t2.block_index, 0) = COALESCE(t.block_index, 0)
+                       AND COALESCE(c2.cert_index, 0) > COALESCE(c.cert_index, 0))
+               )
+         )
+         AND NOT EXISTS (
+             SELECT 1
+             FROM pool_retirement rt2
+             LEFT JOIN certs c3 ON c3.id = rt2.certificate_id
+             LEFT JOIN "transaction" t3 ON t3.id = c3.transaction_id
+             WHERE rt2.pool_id = rt.pool_id
+               AND rt2.id <> rt.id
+               AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = rt2.certificate_id), rt2.added_slot) < e.start_slot
+               AND (
+                   rt2.added_slot > rt.added_slot
+                   OR (rt2.added_slot = rt.added_slot
+                       AND COALESCE(t3.block_index, 0) > COALESCE(t.block_index, 0))
+                   OR (rt2.added_slot = rt.added_slot
+                       AND COALESCE(t3.block_index, 0) = COALESCE(t.block_index, 0)
+                       AND COALESCE(c3.cert_index, 0) > COALESCE(c.cert_index, 0))
+               )
+         )
+   )
+)`, append(args, slot, reapSlot)
 }
 
 // historicalExpirationSQL reconstructs each active-delegation credential's
@@ -1031,10 +1279,10 @@ WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
 // keyed on consensus chain state, not per-node config. That is a guarantee
 // about rows already written, not about whether a row is written at all:
 // account_withdrawal_witness inserts are separately elided when
-// DelegatorInactivityEnabled is off (issue #2919), which is the same
+// DelegatorInactivityEnabled is off, which is the same
 // network-wide setting this function's caller already requires to match, so
 // it introduces no new divergence. See ARCHITECTURE.md's CIP-0163 section
-// (issue #2920) before adding any other deletion path for these tables.
+// before adding any other deletion path for these tables.
 func historicalExpirationSQL(
 	ctx context.Context,
 	db queryer,
@@ -1060,19 +1308,22 @@ LIMIT 1`).Scan(&value)
 	parts := []string{}
 	for _, table := range accountWitnessTables {
 		parts = append(parts, `
-SELECT witness.credential_tag, witness.staking_key, witness.added_slot
+SELECT witness.credential_tag, witness.staking_key,
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs c ON c.transaction_id = lc.transaction_id WHERE c.id = witness.certificate_id), witness.added_slot) AS added_slot
 FROM `+table+` witness
 JOIN active_delegation active
   ON active.credential_tag = witness.credential_tag
  AND active.staking_key = witness.staking_key`)
 	}
 	parts = append(parts, `
-SELECT witness.credential_tag, witness.staking_key, witness.added_slot
+SELECT witness.credential_tag, witness.staking_key,
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot) AS added_slot
 FROM account_withdrawal_witness witness
 JOIN active_delegation active
   ON active.credential_tag = witness.credential_tag
  AND active.staking_key = witness.staking_key`, `
-SELECT witness.credential_tag, witness.staking_key, witness.added_slot
+SELECT witness.credential_tag, witness.staking_key,
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot) AS added_slot
 FROM account_reward_delta witness
 JOIN active_delegation active
   ON active.credential_tag = witness.credential_tag
@@ -1162,4 +1413,66 @@ func noHistorySQL(alias string, tables []string) string {
  )`, table, alias, alias)
 	}
 	return ret.String()
+}
+
+// GetEpochBoundaryDelegatedPoolKeyHashes returns every pool key hash the
+// boundary reconstruction attributes stake to at snapshotSlot, whether or not
+// that pool is still registered. It is the historical-path counterpart of
+// GetDelegatedPoolKeyHashes and serves the same sigma_a denominator; see that
+// function for why the denominator must not be enumerated from the active pool
+// set.
+//
+// It reconstructs from the same CTE the stake fetch uses, with the pool
+// predicate relaxed to "has a delegation at all", and applies neither the
+// expiry nor the inactivity gate: the result only widens the set of pools the
+// stake fetch is asked about, and that fetch applies both.
+func (s *Store) GetEpochBoundaryDelegatedPoolKeyHashes(
+	snapshotSlot uint64,
+	boundarySlot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	if boundarySlot <= snapshotSlot {
+		boundarySlot = 0
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetEpochBoundaryDelegatedPoolKeyHashes: resolve db: %w",
+			err,
+		)
+	}
+	query, args, err := s.historicalStakeCTE(
+		ctx,
+		db,
+		snapshotSlot,
+		boundarySlot,
+		0,
+		0,
+		"active_delegation.pool_key_hash IS NOT NULL",
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, query+`
+SELECT DISTINCT pool_key_hash FROM active_delegator_stake`, args...)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetEpochBoundaryDelegatedPoolKeyHashes: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	ret := [][]byte{}
+	for rows.Next() {
+		var hash []byte
+		if err := rows.Scan(&hash); err != nil {
+			return nil, err
+		}
+		if len(hash) == 0 {
+			continue
+		}
+		ret = append(ret, hash)
+	}
+	return ret, rows.Err()
 }

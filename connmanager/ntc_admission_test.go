@@ -1,3 +1,17 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package connmanager
 
 import (
@@ -34,7 +48,7 @@ func TestNtCAdmissionSlotReleasedBeforeCloseCallback(t *testing.T) {
 		},
 	})
 	conn := newUnstartedConnection(t)
-	release := manager.reserveNtCSlot(nil)
+	release := manager.reserveNtCSlot(nil, false)
 	require.NotNil(t, release)
 	require.True(
 		t,
@@ -139,6 +153,75 @@ func requireNtCAdmissionRejected(t *testing.T, listener net.Listener) {
 		io.EOF,
 		"over-limit NtC connection must close before handshake",
 	)
+}
+
+func TestTrustedLocalNtCAdmissionIsIsolatedFromRemotePeers(t *testing.T) {
+	t.Parallel()
+	manager := NewConnectionManager(ConnectionManagerConfig{
+		MaxNtCConns:             1,
+		MaxNtCConnectionsPerIP:  1,
+		MaxTrustedLocalNtCConns: 2,
+	})
+	remote := &net.TCPAddr{IP: net.ParseIP("198.51.100.10"), Port: 3002}
+	firstLocal := manager.reserveNtCSlot(nil, true)
+	secondLocal := manager.reserveNtCSlot(nil, true)
+	require.NotNil(t, firstLocal)
+	require.NotNil(t, secondLocal)
+	require.Nil(t, manager.reserveNtCSlot(nil, true), "local cap must remain bounded")
+	remoteSlot := manager.reserveNtCSlot(remote, false)
+	require.NotNil(t, remoteSlot, "local clients must not consume the remote quota")
+	require.Nil(t, manager.reserveNtCSlot(&net.TCPAddr{IP: net.ParseIP("203.0.113.3"), Port: 3003}, false),
+		"the remote quota must still be enforced")
+	require.Equal(t, 1, manager.ntcCount)
+	require.Equal(t, 2, manager.trustedLocalNtCCount)
+	remoteSlot()
+	firstLocal()
+	secondLocal()
+	require.Zero(t, manager.ntcCount)
+	require.Zero(t, manager.trustedLocalNtCCount)
+}
+
+func TestNtCBufferedBytesAreTrackedByPerConnectionDelta(t *testing.T) {
+	t.Parallel()
+	manager := NewConnectionManager(ConnectionManagerConfig{})
+	tracker := &ntcBufferTracker{trustedLocal: true}
+
+	tracker.record(manager, 128)
+	require.Equal(t, float64(128), manager.ntcBufferedBytes(true))
+
+	tracker.record(manager, 80)
+	require.Equal(t, float64(80), manager.ntcBufferedBytes(true))
+
+	tracker.close(manager)
+	require.Zero(t, manager.ntcBufferedBytes(true))
+	tracker.record(manager, 128)
+	require.Zero(t, manager.ntcBufferedBytes(true))
+}
+
+func TestTrustedLocalFlagIsSetBeforeConnectionRegistration(t *testing.T) {
+	t.Parallel()
+	manager := NewConnectionManager(ConnectionManagerConfig{})
+	conn := newUnstartedConnection(t)
+	require.True(t, manager.addConnectionImplWithTrust(
+		conn,
+		true,
+		true,
+		"local",
+		"",
+		nil,
+		true,
+	))
+
+	manager.connectionsMutex.Lock()
+	info := manager.connections[conn.Id()]
+	manager.connectionsMutex.Unlock()
+	require.NotNil(t, info)
+	require.True(t, info.trustedLocal)
+	require.NotNil(t, info.ntcBufferTracker)
+	require.True(t, info.ntcBufferTracker.trustedLocal)
+
+	conn.ErrorChan() <- nil
+	waitForConnectionManagerWatchers(t, manager)
 }
 
 func TestNtCAdmissionPendingAndEstablished(t *testing.T) {
@@ -266,7 +349,7 @@ func TestNtCAdmissionConcurrentReservations(t *testing.T) {
 					address[testCase.addressByte] = byte(index)
 					release := manager.reserveNtCSlot(&net.TCPAddr{
 						IP: address, Port: index + 1000,
-					})
+					}, false)
 					if release != nil {
 						accepted.Add(1)
 						releases <- release

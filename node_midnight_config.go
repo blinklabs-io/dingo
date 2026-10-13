@@ -57,10 +57,17 @@ func (n *Node) midnightIndexerConfig() midnightindexer.Config {
 		},
 		BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
 			return database.ForEachBlockInRangeDB(
+				n.ctx,
 				n.db,
 				startSlot,
 				endSlot,
-				fn,
+				func(block models.Block) error {
+					// ID zero identifies synthetic storage blobs, not chain blocks.
+					if block.ID == 0 {
+						return nil
+					}
+					return fn(block)
+				},
 			)
 		},
 		// Read the applied ledger tip straight from metadata rather than

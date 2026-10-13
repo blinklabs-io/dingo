@@ -17,6 +17,7 @@ package chain
 import (
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -347,8 +348,7 @@ func (c *Chain) finishCallerTxnAdd(txn *database.Txn) {
 		return
 	}
 	c.mutex.Lock()
-	for i := len(adds) - 1; i >= 0; i-- {
-		add := adds[i]
+	for _, add := range slices.Backward(adds) {
 		if c.tipBlockIndex != add.tipIndex+1 ||
 			c.mutationGeneration != add.generation+1 {
 			slog.Default().Error(

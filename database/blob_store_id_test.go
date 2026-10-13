@@ -30,7 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestDatabaseAt mirrors newTestDatabase (test_database_test.go) but
+// newTestDatabaseAt mirrors newTestDatabase (tests_test.go) but
 // resolves the blob and metadata stores from independently supplied
 // directories, so a test can pair a metadata store with a blob store it was
 // never initialised with -- something a single shared config.DataDir cannot
@@ -74,7 +74,11 @@ func newTestDatabaseAt(
 		_ = host.Stop(context.Background())
 		return nil, err
 	}
-	db, err := New(config, Stores{Blob: blobStore, Metadata: metadataStore})
+	db, err := New(
+		context.Background(),
+		config,
+		Stores{Blob: blobStore, Metadata: metadataStore},
+	)
 	if err != nil {
 		_ = host.Stop(context.Background())
 		return nil, err
@@ -129,7 +133,7 @@ func TestBlobStoreIDIsMintedOnceAndStable(t *testing.T) {
 		Network:     "preprod",
 	})
 	require.NoError(t, err)
-	gates, err := db.Metadata().GetNodeSettingsGates()
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	first := gates["blob_store_id"]
 	require.NotEmpty(t, first)
@@ -141,7 +145,7 @@ func TestBlobStoreIDIsMintedOnceAndStable(t *testing.T) {
 		Network:     "preprod",
 	})
 	require.NoError(t, err)
-	gates, err = reopened.Metadata().GetNodeSettingsGates()
+	gates, err = reopened.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, first, gates["blob_store_id"])
 	require.NoError(t, closeTestDatabase(reopened))
@@ -161,7 +165,7 @@ func TestBlobStoreIDMismatchIsFatal(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, closeTestDatabase(db))
 
-	_, err = New(&Config{
+	_, err = New(context.Background(), &Config{
 		DataDir:     metaDir,
 		StorageMode: "core",
 		Network:     "preprod",

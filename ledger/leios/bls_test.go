@@ -27,24 +27,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestLeiosVoteDSTMatchesReferenceMinSigPoPDST pins LeiosVoteDST against
-// cardano-crypto-class's minSigPoPDST (Cardano.Crypto.DSIGN.BLS12381.
-// Internal), the identical string that module uses for both ordinary
-// signing and possession-proof verification. This is a deliberate
-// single-DST design, not an oversight -- see LeiosVoteDST's comment. A
-// PR once "fixed" this into a separate, IETF-textbook-style
-// "BLS_POP_"-prefixed DST, which is spec-plausible but does not match
-// what the reference implementation actually does, and would have made
-// every correctly-registered pool's on-chain proof of possession fail
-// verification here. This test exists so that regression doesn't happen
-// silently again.
-func TestLeiosVoteDSTMatchesReferenceMinSigPoPDST(t *testing.T) {
+func TestLeiosDSTsMatchReferenceMinSigDomains(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(
 		t,
 		"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_",
 		LeiosVoteDST,
+	)
+	assert.Equal(
+		t,
+		"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_",
+		LeiosPoPDST,
 	)
 }
 
@@ -266,15 +260,13 @@ func TestVerifyAggregateSignatureNoKeys(t *testing.T) {
 	assert.Error(t, VerifyAggregateSignature(nil, msg, sig))
 }
 
-// testLeiosKey builds a LeiosKey whose possession proof is a genuine
-// signature over its own public key under LeiosVoteDST -- the same DST
-// VerifyLeiosKeyProofOfPossession checks against (see that DST's comment
-// for why this is one shared DST, not two).
+// testLeiosKey builds a LeiosKey with a proof over its public key under the
+// dedicated proof-of-possession domain.
 func testLeiosKey(t *testing.T, scalar byte) *lcommon.LeiosKey {
 	t.Helper()
 	key := testSigningKey(t, scalar)
 	pub := key.PublicKeyBytes()
-	proof, err := SignVote(key, pub)
+	proof, err := signWithDST(key, pub, LeiosPoPDST)
 	require.NoError(t, err)
 	return &lcommon.LeiosKey{PublicKey: pub, PossessionProof: proof}
 }
@@ -318,13 +310,9 @@ func TestVerifyLeiosKeyProofOfPossessionMismatchedKeyAndProof(t *testing.T) {
 	)
 }
 
-// TestVerifyLeiosKeyProofOfPossessionRejectsVoteSignatureAsProof guards
-// against reusing an ordinary vote signature (over an RB hash) as if it
-// were a possession proof (over the public key itself): both are signed
-// under the same LeiosVoteDST (see that constant's comment), so the two
-// message spaces never colliding is the only thing that separates them --
-// this pins that a vote message can never coincidentally equal a
-// serialized public key.
+// TestVerifyLeiosKeyProofOfPossessionRejectsVoteDomainProof pins the
+// dedicated BLS_POP domain and rejects proofs made with the vote BLS_SIG
+// domain, even when the message is the serialized public key.
 func TestVerifyLeiosKeyProofOfPossessionRejectsVoteSignatureAsProof(
 	t *testing.T,
 ) {
@@ -332,8 +320,7 @@ func TestVerifyLeiosKeyProofOfPossessionRejectsVoteSignatureAsProof(
 
 	key := testSigningKey(t, 7)
 	pub := key.PublicKeyBytes()
-	rbHash := lcommon.NewBlake2b256([]byte("not-a-pubkey-message"))
-	voteSig, err := SignVote(key, PrototypeVoteMessageBytes(rbHash))
+	voteSig, err := SignVote(key, pub)
 	require.NoError(t, err)
 	assert.Error(t, VerifyLeiosKeyProofOfPossession(&lcommon.LeiosKey{
 		PublicKey:       pub,

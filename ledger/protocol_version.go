@@ -8,15 +8,16 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package ledger
 
 import (
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
@@ -56,6 +57,13 @@ func GetProtocolVersion(
 ) (ProtocolVersion, error) {
 	if pparams == nil {
 		return ProtocolVersion{}, errors.New("protocol parameters are nil")
+	}
+	value := reflect.ValueOf(pparams)
+	if value.Kind() == reflect.Pointer && value.IsNil() {
+		return ProtocolVersion{}, fmt.Errorf(
+			"protocol parameters are a nil %T pointer",
+			pparams,
+		)
 	}
 	switch pp := pparams.(type) {
 	case *shelley.ShelleyProtocolParameters:

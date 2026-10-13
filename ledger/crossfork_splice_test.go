@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -26,9 +27,11 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	omockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/assert"
@@ -37,7 +40,7 @@ import (
 )
 
 // TestChainsyncRollbackToAbandonedForkDoesNotSpliceChain is the ledger-level
-// regression for issue #3005.
+// regression for the cross-fork splice.
 //
 // After the node abandons a fork, the rolled-back blocks stay resolvable
 // through the chain manager's retained block cache with the block indexes the
@@ -59,9 +62,13 @@ func TestChainsyncRollbackToAbandonedForkDoesNotSpliceChain(t *testing.T) {
 	abandonedPoint := fixture.currentTip.Point
 
 	// Abandon the block at slot 20 and replace its index with a fork block.
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
 	forkHash := testHashBytes("splice-fork-block")
 	require.NoError(t, ls.chain.AddRawBlocks(
+		context.Background(),
 		[]chain.RawBlock{
 			{
 				Slot:        21,
@@ -78,7 +85,11 @@ func TestChainsyncRollbackToAbandonedForkDoesNotSpliceChain(t *testing.T) {
 	// The abandoned block is still resolvable by point, and still claims the
 	// block index the fork block now holds. That is the precondition for the
 	// splice.
-	cached, err := ls.chain.BlockByPoint(abandonedPoint, nil)
+	cached, err := ls.chain.BlockByPoint(
+		context.Background(),
+		abandonedPoint,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), cached.ID)
 
@@ -94,7 +105,11 @@ func TestChainsyncRollbackToAbandonedForkDoesNotSpliceChain(t *testing.T) {
 		ls.chain.Tip(),
 		"rollback to an abandoned fork block must leave the chain tip alone",
 	)
-	tipBlock, err := ls.chain.BlockByPoint(ls.chain.Tip().Point, nil)
+	tipBlock, err := ls.chain.BlockByPoint(
+		context.Background(),
+		ls.chain.Tip().Point,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.True(
 		t,
@@ -115,8 +130,12 @@ func TestValidateRollbackRejectsAbandonedForkPoint(t *testing.T) {
 	ls := fixture.ls
 	abandonedPoint := fixture.currentTip.Point
 
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
 	require.NoError(t, ls.chain.AddRawBlocks(
+		context.Background(),
 		[]chain.RawBlock{
 			{
 				Slot:        21,
@@ -250,7 +269,7 @@ func TestContinuationAuditReportsUnresolvableProducer(t *testing.T) {
 		"audit must stay silent until a rollback arms it",
 	)
 
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "test rollback")
 	// Armed, but block validation is off (historical catch-up): the probes
 	// are skipped so bulk sync does not pay for them.
 	ls.auditContinuationBlock(e, false)
@@ -288,7 +307,7 @@ func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "prior rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "prior rollback")
 	require.NotNil(t, ls.continuationAudit.Load())
 
 	ls.Lock()
@@ -300,7 +319,7 @@ func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
 
 	require.NoError(
 		t,
-		ls.rollbackChainAndStateDeferred(fixture.currentTip.Point, nil),
+		ls.rollbackChainAndStateDeferred(context.Background(), fixture.currentTip.Point, nil),
 	)
 
 	assert.Nil(
@@ -309,6 +328,42 @@ func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
 		"a rollback ahead of the applied ledger must disarm any prior audit",
 	)
 	assert.Equal(t, fixture.ancestorTip, ls.currentTip)
+}
+
+// TestRollbackAheadOfLedgerDoesNotPersistIntent covers genesis and snapshot
+// catch-up, where the primary chain may already contain blocks beyond the
+// applied ledger tip. A rollback to that primary-chain point does not move the
+// ledger, so it must not leave a durable undo intent for a later restart.
+func TestRollbackAheadOfLedgerDoesNotPersistIntent(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	subID, _ := bus.SubscribeWithBuffer(TransactionEventType, 1)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, subID) })
+
+	durableTip := ochainsync.Tip{}
+	ls.Lock()
+	ls.currentTip = durableTip
+	ls.currentTipBlockNonce = nil
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	require.NoError(t, ls.db.SetTip(durableTip, nil))
+	emitted, err := ls.validateAndEmitRollbackUndoEmitted(context.Background(),
+		fixture.ancestorTip.Point,
+	)
+	require.NoError(t, err)
+	assert.False(t, emitted)
+	_, _, pending, err := loadRollbackIntent(ls.db)
+	require.NoError(t, err)
+	assert.False(
+		t,
+		pending,
+		"validation must not create an intent ahead of the applied tip",
+	)
 }
 
 // TestContinuationAuditAcceptsProducerInSameWindow guards the audit against
@@ -322,7 +377,7 @@ func TestContinuationAuditAcceptsProducerInSameWindow(t *testing.T) {
 	ls := fixture.ls
 	var logBuf strings.Builder
 	ls.config.Logger = slog.New(slog.NewJSONHandler(&logBuf, nil))
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "test rollback")
 
 	producerTxId := testHashBytes("in-window-producer")
 	producerBlock := &spliceAuditBlock{
@@ -400,7 +455,7 @@ func armRearmFixture(
 	ls := fixture.ls
 	var logBuf strings.Builder
 	ls.config.Logger = slog.New(slog.NewJSONHandler(&logBuf, nil))
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "first rollback")
 
 	producerTxId := testHashBytes("rearm-in-flight-producer")
 	producerBlock := &spliceAuditBlock{
@@ -431,7 +486,7 @@ func armRearmFixture(
 		"producer must be recorded before the rearm",
 	)
 
-	ls.armContinuationAudit(rearmPoint, "second rollback")
+	ls.armContinuationAudit(context.Background(), rearmPoint, "second rollback")
 
 	spenderBlock := &spliceAuditBlock{
 		slot: 40,
@@ -458,14 +513,15 @@ func armRearmFixture(
 	return ls, logBuf.String(), producerTxId
 }
 
-// TestContinuationAuditRearmPreservesInFlightProducer is the regression for
-// issue #4102. Fork churn re-arms the audit repeatedly, and every rollback
-// target in that issue's run sat ahead of the blocks the previous window had
-// already vetted. Such a rollback truncates nothing those blocks occupy, so
-// they stay on the primary chain -- unapplied, because ledger apply lags
-// blockfetch by design, and never re-fetched, because the chain still has
-// them. Forgetting them at the rearm therefore leaves the next audited spend
-// of their outputs with no way to resolve, which is the false report.
+// TestContinuationAuditRearmPreservesInFlightProducer is the regression for the
+// audit re-arming during early replay. Fork churn re-arms the audit repeatedly,
+// and every rollback target in the failing run sat ahead of the blocks the
+// previous window had already vetted. Such a rollback truncates nothing those
+// blocks occupy, so they stay on the primary chain -- unapplied, because ledger
+// apply lags blockfetch by design, and never re-fetched, because the chain
+// still has them. Forgetting them at the rearm therefore leaves the next
+// audited spend of their outputs with no way to resolve, which is the false
+// report.
 func TestContinuationAuditRearmPreservesInFlightProducer(t *testing.T) {
 	t.Parallel()
 
@@ -529,7 +585,7 @@ func TestContinuationAuditRearmDoesNotRaceWithBlockfetchAudit(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	ls.config.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "initial rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "initial rollback")
 
 	// Built up front: the mock builders assert through t, which a
 	// non-test goroutine may not do.
@@ -576,7 +632,7 @@ func TestContinuationAuditRearmDoesNotRaceWithBlockfetchAudit(t *testing.T) {
 		defer wg.Done()
 		for range iterations {
 			ls.chainsyncMutex.Lock()
-			ls.armContinuationAudit(fixture.ancestorTip.Point, "rearm")
+			ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "rearm")
 			ls.chainsyncMutex.Unlock()
 		}
 	}()
@@ -619,28 +675,38 @@ func lateProducerFixture(
 			),
 		},
 	}
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
-		Slot:        producerBlock.slot,
-		Hash:        producerHash,
-		BlockNumber: fixture.currentTip.BlockNumber + 1,
-		Type:        1,
-		PrevHash:    fixture.currentTip.Point.Hash,
-		Cbor:        []byte{0x80},
-	}}))
-	if !producerOnChain {
-		// Abandon it and let a replacement take the block index it held.
-		// The blob store is append-only, so the abandoned block stays
-		// resolvable by hash.
-		require.NoError(t, ls.chain.Rollback(fixture.currentTip.Point))
-		require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
-			Slot:        31,
-			Hash:        testHashBytes("late-replacement-block"),
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
+			Slot:        producerBlock.slot,
+			Hash:        producerHash,
 			BlockNumber: fixture.currentTip.BlockNumber + 1,
 			Type:        1,
 			PrevHash:    fixture.currentTip.Point.Hash,
 			Cbor:        []byte{0x80},
-		}}))
+		}}),
+	)
+	if !producerOnChain {
+		// Abandon it and let a replacement take the block index it held.
+		// The blob store is append-only, so the abandoned block stays
+		// resolvable by hash.
+		require.NoError(
+			t,
+			ls.chain.Rollback(context.Background(), fixture.currentTip.Point),
+		)
+		require.NoError(
+			t,
+			ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
+				Slot:        31,
+				Hash:        testHashBytes("late-replacement-block"),
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+				Type:        1,
+				PrevHash:    fixture.currentTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			}}),
+		)
 		retained, err := ls.chain.BlockByPoint(
+			context.Background(),
 			ocommon.NewPoint(producerBlock.slot, producerHash),
 			nil,
 		)
@@ -657,11 +723,11 @@ func lateProducerFixture(
 		)
 	}
 
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "first rollback")
 	// The rearm happens while the producer body is between the chain and the
 	// audit, so its producers are not in the snapshot. Slot 35 is above the
 	// body at 30: this rollback did not truncate it.
-	ls.armContinuationAudit(
+	ls.armContinuationAudit(context.Background(),
 		ocommon.NewPoint(35, testHashBytes("late-rearm-point")),
 		"second rollback",
 	)
@@ -760,7 +826,7 @@ func TestContinuationAuditCarryForwardRejectsAbandonedForkPoint(t *testing.T) {
 	ls := fixture.ls
 	abandonedPoint := fixture.currentTip.Point
 
-	ls.armContinuationAudit(abandonedPoint, "first rollback")
+	ls.armContinuationAudit(context.Background(), abandonedPoint, "first rollback")
 	prior := ls.continuationAudit.Load()
 	require.NotNil(t, prior)
 	producerTxId := testHashBytes("abandoned-fork-producer")
@@ -768,22 +834,32 @@ func TestContinuationAuditCarryForwardRejectsAbandonedForkPoint(t *testing.T) {
 	require.True(t, ok)
 
 	// Abandon the fork point and let a replacement take its block index.
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
-		Slot:        21,
-		Hash:        testHashBytes("carry-forward-fork-block"),
-		BlockNumber: fixture.ancestorTip.BlockNumber + 1,
-		Type:        1,
-		PrevHash:    fixture.ancestorTip.Point.Hash,
-		Cbor:        []byte{0x80},
-	}}))
-	retained, err := ls.chain.BlockByPoint(abandonedPoint, nil)
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
+			Slot:        21,
+			Hash:        testHashBytes("carry-forward-fork-block"),
+			BlockNumber: fixture.ancestorTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		}}),
+	)
+	retained, err := ls.chain.BlockByPoint(
+		context.Background(),
+		abandonedPoint,
+		nil,
+	)
 	require.NoError(t, err)
 	indexed, err := ls.db.BlockPointByIndex(retained.ID, nil)
 	require.NoError(t, err)
 	require.NotEqual(t, abandonedPoint.Slot, indexed.Slot)
 
-	ls.armContinuationAudit(
+	ls.armContinuationAudit(context.Background(),
 		ocommon.NewPoint(25, testHashBytes("carry-forward-rearm")),
 		"second rollback",
 	)
@@ -808,13 +884,13 @@ func TestContinuationAuditRecordGoesToPublishedWindow(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "first rollback")
 	stale := ls.continuationAudit.Load()
 	require.NotNil(t, stale)
 
 	// The rearm the blockfetch drain does not see. Its point is the primary
 	// chain tip, so the audited body at slot 20 survives it.
-	ls.armContinuationAudit(fixture.currentTip.Point, "second rollback")
+	ls.armContinuationAudit(context.Background(), fixture.currentTip.Point, "second rollback")
 	published := ls.continuationAudit.Load()
 	require.NotSame(t, stale, published)
 
@@ -850,9 +926,9 @@ func TestContinuationAuditRecordRejectsOffChainRacedBody(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "first rollback")
 	stale := ls.continuationAudit.Load()
-	ls.armContinuationAudit(fixture.currentTip.Point, "second rollback")
+	ls.armContinuationAudit(context.Background(), fixture.currentTip.Point, "second rollback")
 	published := ls.continuationAudit.Load()
 	require.NotSame(t, stale, published)
 
@@ -966,7 +1042,7 @@ func TestContinuationAuditRearmDisarmsOnFailedForkPointRead(t *testing.T) {
 	ls := fixture.ls
 	var logBuf strings.Builder
 	ls.config.Logger = slog.New(slog.NewJSONHandler(&logBuf, nil))
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "first rollback")
 	prior := ls.continuationAudit.Load()
 	require.NotNil(t, prior)
 	producerTxId := testHashBytes("membership-failure-carried-producer")
@@ -976,7 +1052,7 @@ func TestContinuationAuditRearmDisarmsOnFailedForkPointRead(t *testing.T) {
 	injected := failContinuationAuditMembership(ls)
 	// Slot 35 is above the producer at 30, so a read that succeeded would
 	// carry it forward.
-	ls.armContinuationAudit(
+	ls.armContinuationAudit(context.Background(),
 		ocommon.NewPoint(35, testHashBytes("membership-failure-rearm")),
 		"second rollback",
 	)
@@ -997,8 +1073,8 @@ func TestContinuationAuditLateBodyDisarmsOnFailedMembershipRead(t *testing.T) {
 	ls := fixture.ls
 	var logBuf strings.Builder
 	ls.config.Logger = slog.New(slog.NewJSONHandler(&logBuf, nil))
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
-	ls.armContinuationAudit(
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "first rollback")
+	ls.armContinuationAudit(context.Background(),
 		ocommon.NewPoint(35, testHashBytes("membership-failure-late-rearm")),
 		"second rollback",
 	)
@@ -1041,9 +1117,9 @@ func TestContinuationAuditRacedBodyDisarmsOnFailedMembershipRead(t *testing.T) {
 	ls := fixture.ls
 	var logBuf strings.Builder
 	ls.config.Logger = slog.New(slog.NewJSONHandler(&logBuf, nil))
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "first rollback")
 	stale := ls.continuationAudit.Load()
-	ls.armContinuationAudit(fixture.currentTip.Point, "second rollback")
+	ls.armContinuationAudit(context.Background(), fixture.currentTip.Point, "second rollback")
 	require.NotSame(t, stale, ls.continuationAudit.Load())
 
 	producerTxId := testHashBytes("membership-failure-raced-producer")
@@ -1078,7 +1154,7 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 		t.Parallel()
 		fixture := newChainsyncRollbackFixture(t)
 		ls := fixture.ls
-		ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
+		ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "rollback")
 		prior, gen := ls.takeContinuationAuditForRewind()
 
 		ls.settleAuditAfterRewind(prior, gen, false, target)
@@ -1090,10 +1166,10 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 		t.Parallel()
 		fixture := newChainsyncRollbackFixture(t)
 		ls := fixture.ls
-		ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
+		ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "rollback")
 		prior, gen := ls.takeContinuationAuditForRewind()
 		// The arm the rewind could not see, at a point the rewind kept.
-		ls.armContinuationAudit(fixture.ancestorTip.Point, "concurrent")
+		ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "concurrent")
 		armed := ls.continuationAudit.Load()
 		require.NotSame(t, prior, armed)
 
@@ -1111,11 +1187,11 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 		t.Parallel()
 		fixture := newChainsyncRollbackFixture(t)
 		ls := fixture.ls
-		ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
+		ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "rollback")
 		prior, gen := ls.takeContinuationAuditForRewind()
 		// A window armed during the rewind, above the rewind target: the
 		// truncation deleted the block its fork point names.
-		ls.armContinuationAudit(
+		ls.armContinuationAudit(context.Background(),
 			ocommon.NewPoint(40, testHashBytes("above-the-target")),
 			"concurrent",
 		)
@@ -1130,7 +1206,7 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 		t.Parallel()
 		fixture := newChainsyncRollbackFixture(t)
 		ls := fixture.ls
-		ls.armContinuationAudit(
+		ls.armContinuationAudit(context.Background(),
 			ocommon.NewPoint(target.Slot, testHashBytes("competing-hash")),
 			"concurrent",
 		)
@@ -1144,7 +1220,7 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 		t.Parallel()
 		fixture := newChainsyncRollbackFixture(t)
 		ls := fixture.ls
-		ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
+		ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "rollback")
 		prior, gen := ls.takeContinuationAuditForRewind()
 
 		ls.settleAuditAfterRewind(prior, gen, true, target)
@@ -1175,7 +1251,7 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 		{
 			name: "an arm and a disarm landed in the gap",
 			clear: func(ls *LedgerState) {
-				ls.armContinuationAudit(
+				ls.armContinuationAudit(context.Background(),
 					ocommon.NewPoint(40, testHashBytes("gap-arm")),
 					"concurrent",
 				)
@@ -1187,7 +1263,7 @@ func TestSettleAuditAfterRewind(t *testing.T) {
 			t.Parallel()
 			fixture := newChainsyncRollbackFixture(t)
 			ls := fixture.ls
-			ls.armContinuationAudit(fixture.ancestorTip.Point, "rollback")
+			ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "rollback")
 			prior, gen := ls.takeContinuationAuditForRewind()
 			require.NotNil(t, prior)
 
@@ -1225,7 +1301,7 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 	) *chainsyncRollbackFixture {
 		t.Helper()
 		fixture := newChainsyncRollbackFixture(t)
-		bus := event.NewEventBus(nil, nil)
+		bus := newTestEventBus(t, nil)
 		t.Cleanup(bus.Stop)
 		fixture.ls.config.EventBus = bus
 		if deep {
@@ -1233,11 +1309,11 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 		} else {
 			require.NoError(
 				t,
-				fixture.ls.chain.Rollback(fixture.ancestorTip.Point),
+				fixture.ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
 			)
 			require.NoError(
 				t,
-				fixture.ls.chain.AddRawBlocks([]chain.RawBlock{{
+				fixture.ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
 					Slot:        fixture.currentTip.Point.Slot + 5,
 					Hash:        testHashBytes("reconcile-audit-fork"),
 					BlockNumber: fixture.currentTip.BlockNumber + 1,
@@ -1247,7 +1323,7 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 				}}),
 			)
 		}
-		fixture.ls.armContinuationAudit(
+		fixture.ls.armContinuationAudit(context.Background(),
 			fixture.ls.chain.Tip().Point,
 			"rollback",
 		)
@@ -1260,7 +1336,10 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 		fixture := divergedLedger(t, false)
 		ls := fixture.ls
 
-		require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+		require.NoError(
+			t,
+			ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()),
+		)
 
 		require.Equal(t, fixture.ancestorTip, ls.chain.Tip())
 		assert.Nil(t, ls.continuationAudit.Load())
@@ -1275,7 +1354,10 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 
 		// The reconciliation lands after the rewind's post-descent tip
 		// read, so the rewind reports nothing truncated.
-		require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+		require.NoError(
+			t,
+			ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()),
+		)
 		ls.settleAuditAfterRewind(
 			prior,
 			gen,
@@ -1297,7 +1379,7 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 		armed := ls.continuationAudit.Load()
 		chainTip := ls.chain.Tip()
 
-		err := ls.reconcilePrimaryChainTipWithLedgerTip()
+		err := ls.reconcilePrimaryChainTipWithLedgerTip(context.Background())
 
 		require.ErrorIs(t, err, chain.ErrRollbackExceedsSecurityParam)
 		require.Equal(t, chainTip, ls.chain.Tip())
@@ -1307,7 +1389,40 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 			ls.continuationAudit.Load(),
 			"a refused rewind deletes nothing the window describes",
 		)
+		_, _, pending, err := loadRollbackIntent(ls.db)
+		require.NoError(t, err)
+		assert.False(t, pending, "a refused rewind must not leave a new intent")
 	})
+}
+
+func TestReconcileRefusedRewindRestoresPreviousRollbackIntent(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	oldBlock, err := database.BlockByPoint(
+		context.Background(),
+		fixture.ls.db,
+		fixture.currentTip.Point,
+	)
+	require.NoError(t, err)
+	priorBlocks := []models.Block{oldBlock}
+	require.NoError(t, persistRollbackIntent(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+		priorBlocks,
+	))
+	putPrimaryChainOnForkBeyondK(t, fixture, "reconcile-prior-intent")
+	chainTip := fixture.ls.chain.Tip()
+
+	err = fixture.ls.reconcilePrimaryChainTipWithLedgerTip(context.Background())
+	require.ErrorIs(t, err, chain.ErrRollbackExceedsSecurityParam)
+	require.Equal(t, chainTip, fixture.ls.chain.Tip())
+
+	intentPoint, intentBlocks, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, fixture.currentTip.Point, intentPoint)
+	require.Equal(t, priorBlocks, intentBlocks)
 }
 
 // TestPrimaryChainTipRegressed pins which tip movements a recovery rewind may
@@ -1370,7 +1485,7 @@ func TestContinuationAuditCarriesEndorserRefsItDidNotTruncate(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "first rollback")
 	prior := ls.continuationAudit.Load()
 	require.NotNil(t, prior)
 	kept := continuationAuditEndorserRef{
@@ -1385,7 +1500,7 @@ func TestContinuationAuditCarriesEndorserRefsItDidNotTruncate(t *testing.T) {
 	prior.queueEndorserRef(kept)
 	prior.queueEndorserRef(truncated)
 
-	ls.armContinuationAudit(
+	ls.armContinuationAudit(context.Background(),
 		ocommon.NewPoint(35, testHashBytes("endorser-carry-rearm")),
 		"second rollback",
 	)
@@ -1423,7 +1538,7 @@ func TestContinuationAuditProducerKeepsLowestSlot(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "first rollback")
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 
@@ -1450,7 +1565,7 @@ func TestContinuationAuditBudgetIsBounded(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 	ls.config.Logger = slog.New(slog.NewJSONHandler(&strings.Builder{}, nil))
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "test rollback")
 
 	empty := &spliceAuditBlock{
 		slot: 30,
@@ -1480,7 +1595,7 @@ func TestContinuationAuditIgnoresAbandonedFetchedBodies(t *testing.T) {
 	ls := fixture.ls
 	var logBuf strings.Builder
 	ls.config.Logger = slog.New(slog.NewJSONHandler(&logBuf, nil))
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "test rollback")
 
 	missing := mustSpliceAuditInput(t, testHashBytes("stale-producer"), 0)
 	stale := &spliceAuditBlock{
@@ -1572,7 +1687,7 @@ func TestContinuationAuditStopsWhenItsWindowIsReplacedMidBody(t *testing.T) {
 	ls := fixture.ls
 	var logBuf strings.Builder
 	ls.config.Logger = slog.New(slog.NewJSONHandler(&logBuf, nil))
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "first rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "first rollback")
 	stale := ls.continuationAudit.Load()
 	require.NotNil(t, stale)
 
@@ -1580,14 +1695,17 @@ func TestContinuationAuditStopsWhenItsWindowIsReplacedMidBody(t *testing.T) {
 	// redirection accepts it as a producer.
 	const bodySlot = 30
 	bodyHash := testHashBytes("mid-body-rearm-block")
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
-		Slot:        bodySlot,
-		Hash:        bodyHash,
-		BlockNumber: fixture.currentTip.BlockNumber + 1,
-		Type:        1,
-		PrevHash:    fixture.currentTip.Point.Hash,
-		Cbor:        []byte{0x80},
-	}}))
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
+			Slot:        bodySlot,
+			Hash:        bodyHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		}}),
+	)
 
 	// Two transactions, the second spending the first's output: the only
 	// producer this body needs is itself.
@@ -1617,7 +1735,7 @@ func TestContinuationAuditStopsWhenItsWindowIsReplacedMidBody(t *testing.T) {
 	// Slot 35 is above the body: the rollback this rearm follows left it on
 	// the chain, which is why its producers are still legitimate.
 	body.rearm = func() {
-		ls.armContinuationAudit(
+		ls.armContinuationAudit(context.Background(),
 			ocommon.NewPoint(35, testHashBytes("mid-body-rearm-point")),
 			"second rollback",
 		)
@@ -1696,7 +1814,7 @@ func TestContinuationAuditRearmDoesNotRaceWithEndorserRefQueue(t *testing.T) {
 	) ([]cbor.RawMessage, bool) {
 		return nil, false
 	}
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "initial rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "initial rollback")
 
 	// Built up front: the mock builders assert through t, which a
 	// non-test goroutine may not do.
@@ -1756,7 +1874,7 @@ func TestContinuationAuditRearmDoesNotRaceWithEndorserRefQueue(t *testing.T) {
 		defer wg.Done()
 		for range iterations {
 			ls.chainsyncMutex.Lock()
-			ls.armContinuationAudit(fixture.ancestorTip.Point, "rearm")
+			ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "rearm")
 			ls.chainsyncMutex.Unlock()
 		}
 	}()
@@ -1794,7 +1912,7 @@ func TestContinuationAuditRearmDoesNotRaceWithEndorserRefDrain(t *testing.T) {
 	) ([]cbor.RawMessage, bool) {
 		return nil, false
 	}
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "initial rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "initial rollback")
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 
@@ -1834,7 +1952,7 @@ func TestContinuationAuditRearmDoesNotRaceWithEndorserRefDrain(t *testing.T) {
 			ls.continuationAuditMutex.Lock()
 			ls.publishContinuationAudit(window)
 			ls.continuationAuditMutex.Unlock()
-			ls.armContinuationAudit(fixture.ancestorTip.Point, "rearm")
+			ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "rearm")
 			ls.chainsyncMutex.Unlock()
 		}
 	}()

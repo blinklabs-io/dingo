@@ -198,8 +198,8 @@ func TestAccountsEnabledExplicitTrueFlagWinsOverEnvFalse(t *testing.T) {
 	require.True(t, accountsEnabled(cmd))
 }
 
-// TestResolveGraceHoursRejectsNegative is a regression test for the reviewer
-// finding that a negative --grace-hours reached FetchAccountRewardsForEpoch's
+// TestResolveGraceHoursRejectsNegative is a regression test that a
+// negative --grace-hours reached FetchAccountRewardsForEpoch's
 // zero-row/lag gate, where graceHours <= 0 disables the grace/reference-lag
 // protection the same way an explicit, documented 0 does — but silently,
 // without the operator ever having opted out. resolveGraceHours must reject
@@ -232,8 +232,8 @@ func TestResolveGraceHoursAcceptsZeroAndPositive(t *testing.T) {
 }
 
 // TestSubcommandsRejectNegativeGraceHours is an end-to-end regression test
-// for the reviewer finding on cmd/koios-parity/fetch.go: fetch, check, run,
-// and watch all expose --grace-hours (per this PR's description) and must
+// that fetch, check, run,
+// and watch all expose --grace-hours and must
 // all reject a negative value before it ever reaches the fetch/check
 // library calls, not just fetch. Each RunE is invoked directly (bypassing
 // cobra's Execute/os.Exit) with --skip-fetch/--skip-check/--interval set so

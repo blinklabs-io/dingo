@@ -27,11 +27,22 @@ import (
 // chain-intersection check.
 //
 // It lives under sync_state but is NOT part of the ephemeral sync_status
-// lifecycle: ClearSyncState (run on sync completion) wipes every sync_state
-// entry, so this marker must be written AFTER the completion clear so it
+// lifecycle: Mithril completion cleanup removes transient sync_state
+// entries, so this marker must be written AFTER the completion clear so it
 // survives across runs. Only the Mithril completion path clears sync_state, so
 // nothing in normal `dingo serve` operation removes it.
 const syncKeyImmutableMax = "mithril_immutable_max"
+
+// RewardStateRepairPendingKey marks a legacy imported database whose reward
+// state must be reconciled against a newer certified ledger snapshot before
+// it can serve. The metadata migration writes it only when it finds the old
+// imported reward-pot row at the recorded Mithril anchor.
+const RewardStateRepairPendingKey = "mithril_reward_repair_pending"
+
+// RewardStateRepairActiveKey marks a reward-state repair whose first database
+// write has begun. It is ephemeral and is cleared with sync_status when the
+// import completes.
+const RewardStateRepairActiveKey = "mithril_reward_repair_active"
 
 // setImmutableImportMarker records num as the highest immutable file number
 // imported by a Mithril sync.
@@ -53,12 +64,12 @@ func setImmutableImportMarker(db *database.Database, num uint64) error {
 // delegator inactivity, whose per-account expiration state is absent from the
 // cardano-ledger snapshot and cannot be recovered after import.
 //
-// Databases bootstrapped before the immutable-import marker existed (pre-v0.62.0,
-// #2694) carry only the older mithril_ledger_slot trust boundary, so we fall
-// back to it. That boundary is written solely by the Mithril import completion
-// path (updateMithrilReadyState, sync_import.go) and never by a genesis sync, so
-// keying on its presence cannot misclassify a genesis-synced database as
-// bootstrapped.
+// Databases bootstrapped before the immutable-import marker existed
+// (pre-v0.62.0) carry only the older mithril_ledger_slot trust boundary, so we
+// fall back to it. That boundary is written solely by the Mithril import
+// completion path (updateMithrilReadyState, sync_import.go) and never by a
+// genesis sync, so keying on its presence cannot misclassify a genesis-synced
+// database as bootstrapped.
 func WasBootstrapped(db *database.Database) (bool, error) {
 	if _, ok, err := getImmutableImportMarker(db); err != nil || ok {
 		return ok, err
@@ -72,6 +83,30 @@ func WasBootstrapped(db *database.Database) (bool, error) {
 		)
 	}
 	return val != "", nil
+}
+
+// RewardStateRepairPending reports whether startup must reconcile a legacy
+// imported reward state before serving the database.
+func RewardStateRepairPending(db *database.Database) (bool, error) {
+	value, err := db.GetSyncState(RewardStateRepairPendingKey, nil)
+	if err != nil {
+		return false, fmt.Errorf(
+			"reading Mithril reward repair marker: %w", err,
+		)
+	}
+	return value == "1", nil
+}
+
+// RewardStateRepairActive reports whether an interrupted reward-state repair
+// is the operation represented by the current in-progress sync status.
+func RewardStateRepairActive(db *database.Database) (bool, error) {
+	value, err := db.GetSyncState(RewardStateRepairActiveKey, nil)
+	if err != nil {
+		return false, fmt.Errorf(
+			"reading Mithril reward repair activity marker: %w", err,
+		)
+	}
+	return value == "1", nil
 }
 
 // getImmutableImportMarker returns the recorded highest imported immutable file
@@ -101,7 +136,7 @@ func getImmutableImportMarker(
 // syncKeyCatchUpActive marks a catch-up import as having begun writing to the
 // database. Unlike syncKeyImmutableMax it IS part of the ephemeral sync
 // lifecycle: set alongside the in-progress sync_status when a catch-up starts
-// mutating, wiped by ClearSyncState on completion. Its only purpose is to
+// mutating, deleted by completion cleanup. Its only purpose is to
 // route an interrupted catch-up back through catch-up semantics on the next
 // run — a markerless catch-up (pre-marker database) leaves no other trace, and
 // resuming it as a plain bootstrap would skip the reconcile pass and leave

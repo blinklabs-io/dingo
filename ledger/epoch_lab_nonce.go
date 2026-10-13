@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 
@@ -35,7 +36,7 @@ import (
 // Using the last block's own hash shifts the carried lab by one block and
 // diverges the computed epoch nonce from the network at every self-computed
 // boundary, so every leader-VRF check in the following epoch fails with "issue
-// verifying proof" (#2734, eta_1349 wedge). koios preview proof:
+// verifying proof" (eta_1349 wedge). koios preview proof:
 //
 //	eta_1348 lab = prevHash(04f75b4e, last block of 1346) = 43edf2  (imported, correct)
 //	eta_1349 lab = prevHash(94d3083a, last block of 1347) = 08a8dd12
@@ -46,12 +47,13 @@ import (
 // forward unchanged; that value is already a prevHash-shape nonce (or, at
 // genesis, NeutralNonce/nil).
 func (ls *LedgerState) epochLabNonce(
+	ctx context.Context,
 	txn *database.Txn,
 	epochStartSlot uint64,
 	epochEndSlot uint64,
 	carriedLabNonce []byte,
 ) ([]byte, error) {
-	lastBlock, err := ls.canonicalBlockBeforeSlot(txn, epochEndSlot)
+	lastBlock, err := ls.canonicalBlockBeforeSlot(ctx, txn, epochEndSlot)
 	if err != nil {
 		if !errors.Is(err, models.ErrBlockNotFound) {
 			return nil, fmt.Errorf("lookup boundary block: %w", err)
@@ -97,6 +99,7 @@ func (ls *LedgerState) epochLabNonce(
 }
 
 func (ls *LedgerState) canonicalBlockBeforeSlot(
+	ctx context.Context,
 	txn *database.Txn,
 	slot uint64,
 ) (models.Block, error) {
@@ -104,12 +107,12 @@ func (ls *LedgerState) canonicalBlockBeforeSlot(
 		return models.Block{}, errors.New("ledger state is nil")
 	}
 	if ls.chain != nil {
-		return ls.chain.BlockBeforeSlot(slot)
+		return ls.chain.BlockBeforeSlot(ctx, slot)
 	}
 	if ls.db == nil && txn == nil {
 		return models.Block{}, models.ErrBlockNotFound
 	}
-	return lookupBlockBeforeSlot(ls.db, txn, slot)
+	return lookupBlockBeforeSlot(ctx, ls.db, txn, slot)
 }
 
 func cloneNonce(nonce []byte) []byte {

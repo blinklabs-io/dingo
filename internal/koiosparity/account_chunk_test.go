@@ -103,7 +103,7 @@ func TestChunkAddressesByCountAndSizeCountBoundary(t *testing.T) {
 
 // TestChunkAddressesByCountAndSizeByteBoundary proves the encoded-body-size
 // bound caps addresses per chunk even when the count bound is effectively
-// unlimited, matching dingo #3099's "shape requests by encoded size too"
+// unlimited, matching the "shape requests by encoded size too"
 // requirement.
 func TestChunkAddressesByCountAndSizeByteBoundary(t *testing.T) {
 	t.Parallel()
@@ -178,7 +178,7 @@ func TestChunkAddressesByCountAndSizeZeroMaxCountUsesDefault(t *testing.T) {
 }
 
 // TestChunkAddressesByCountAndSizeDeterministicAcrossRepeatedCalls proves the
-// property dingo #3099's content-addressed chunk-hash resume mechanism
+// property the content-addressed chunk-hash resume mechanism
 // actually depends on: the same underlying address *set*, fed in a
 // different order, must still produce identical chunk boundaries once
 // sorted — matching what every real caller does (fetchAccountRewardsForEpoch

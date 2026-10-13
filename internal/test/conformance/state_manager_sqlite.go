@@ -88,8 +88,7 @@ func sqliteResetFileURI(databasePath string) string {
 //  2. DELETE does not reset AUTOINCREMENT, and the recreate path did, so
 //     sqlite_sequence has to be cleared for the same tables. A table can also
 //     hold an advanced sequence while holding no rows, which the row probe
-//     cannot see; sqliteAdvancedAutoIncrementTables reports those, the same
-//     role mysqlAdvancedAutoIncrementTables plays for MySQL.
+//     cannot see; sqliteAdvancedAutoIncrementTables reports those.
 //  3. SQLite has no CASCADE on DELETE, so this connection disables foreign
 //     keys rather than ordering the deletes. Correct here because the whole
 //     managed set is emptied together; a partial reset is never issued.
@@ -99,9 +98,15 @@ func newSqliteResetter(databasePath string) (*backendResetter, error) {
 	// hoists it ahead of the rest of the _pragma list regardless of DSN
 	// order; anything ahead of it would otherwise run with no busy handler
 	// installed.
+	//
+	// synchronous(OFF): this connection deletes rows once per vector in a
+	// database that is discarded with the run. The store under test keeps its
+	// own connections and settings, and journal_mode is left alone because
+	// the store's WAL mode is shared file state.
 	dsn := sqliteResetFileURI(databasePath) +
 		"?_pragma=busy_timeout(30000)" +
-		"&_pragma=foreign_keys(0)"
+		"&_pragma=foreign_keys(0)" +
+		"&_pragma=synchronous(OFF)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -126,10 +131,11 @@ func newSqliteResetter(databasePath string) (*backendResetter, error) {
 
 // listSqliteConformanceTables returns the managed base tables: everything in
 // this file except SQLite's own sqlite_* bookkeeping (sqlite_sequence in
-// particular, which truncateSqliteTables maintains rather than empties) and
-// the migration runner's schema_migrations ledger. Emptying that ledger would
-// make the next construction re-run every migration, which is the cost this
-// path exists to avoid.
+// particular, which truncateSqliteTables maintains rather than empties), the
+// migration runner's schema_migrations ledger, and node_settings_gate.
+// Emptying that ledger would make the next construction re-run every
+// migration, which is the cost this path exists to avoid; see
+// listPostgresConformanceTables for why node_settings_gate is excluded too.
 func listSqliteConformanceTables(
 	ctx context.Context,
 	db *sql.DB,
@@ -140,6 +146,7 @@ func listSqliteConformanceTables(
 		 WHERE type = 'table'
 		   AND name NOT LIKE 'sqlite_%'
 		   AND name <> 'schema_migrations'
+		   AND name <> 'node_settings_gate'
 		 ORDER BY name`,
 	)
 	if err != nil {
@@ -263,8 +270,7 @@ type sqliteRowQuerier interface {
 // still gets its sequence cleared. Without this, the dirty-only row probe
 // would skip such a table and the next insert would continue from the previous
 // vector's high water mark rather than from 1, which the close-and-reopen path
-// this replaces always gave. It is the SQLite counterpart to
-// mysqlAdvancedAutoIncrementTables.
+// this replaces always gave.
 func sqliteAdvancedAutoIncrementTables(
 	ctx context.Context,
 	db *sql.DB,
@@ -333,9 +339,40 @@ func installSqliteResetHooks(m *DingoStateManager, dataDir string) error {
 		return resetter.reset(context.Background())
 	}
 	m.wipeBlob = func() error {
-		return dropSqliteBackendBlobs(m)
+		if err := dropSqliteBackendBlobs(m); err != nil {
+			return err
+		}
+		return forgetSqliteBlobStoreID(context.Background(), resetter.db)
 	}
 	m.closeExtra = resetter.Close
+	return nil
+}
+
+// forgetSqliteBlobStoreID drops the persisted blob_store_id gate, the one
+// node_settings_gate row a Reset invalidates.
+//
+// listSqliteConformanceTables excludes that table, so its rows now survive a
+// Reset -- correct for every gate that describes the database itself, but not
+// for this one. The gate records the identity minted into the blob store's own
+// reserved key (database/blob_store_id.go), and dropSqliteBackendBlobs above
+// just discarded that key along with everything else, so the next construction
+// mints a fresh identity. Keeping the old row would make that read as a
+// metadata store paired with a blob store it was never initialised with, which
+// is precisely what the Frozen gate exists to reject.
+//
+// The remote backends need no equivalent: they set no wipeBlob at all, sharing
+// one blob directory across every vector by design, so their identity survives
+// and still matches the row.
+func forgetSqliteBlobStoreID(ctx context.Context, db *sql.DB) error {
+	// The gate name is the literal database/nodesettings.Gates() registers;
+	// database/commit_timestamp.go and database/lifecycle/manifest.go spell
+	// it the same way.
+	if _, err := db.ExecContext(
+		ctx,
+		`DELETE FROM node_settings_gate WHERE name = 'blob_store_id'`,
+	); err != nil {
+		return fmt.Errorf("clear sqlite blob store id gate: %w", err)
+	}
 	return nil
 }
 

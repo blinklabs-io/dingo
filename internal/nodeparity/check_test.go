@@ -131,7 +131,7 @@ func TestTip_Point_InvalidHashErrors(t *testing.T) {
 }
 
 // TestCheck_ExplicitPointDialsCardanoOnlyOnce is the regression test for a
-// blinklabs-io/dingo#4183 review finding: Check used to dial a
+// bug in which Check used to dial a
 // cardano-node "tip" connection unconditionally, even in explicit
 // historical mode (at != nil), where it is never used at all -- tipsAgree
 // only runs in live-tip mode. Every triggered incremental full checkpoint

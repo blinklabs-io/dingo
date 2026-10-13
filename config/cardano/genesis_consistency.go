@@ -47,19 +47,21 @@ func (c *CardanoNodeConfig) validateGenesisConsistency() error {
 	if err := c.validateSecurityParameters(); err != nil {
 		return err
 	}
-	if c.byronGenesis == nil || c.shelleyGenesis == nil {
-		return nil
+	if c.byronGenesis != nil && c.shelleyGenesis != nil {
+		byronStart := int64(c.byronGenesis.StartTime)
+		shelleyStart := c.shelleyGenesis.SystemStart.Unix()
+		if byronStart != shelleyStart {
+			return fmt.Errorf(
+				"genesis system start mismatch: Byron startTime %d does not match Shelley systemStart %d (%s); slot-to-time conversion is anchored on the Shelley systemStart and would be wrong for Byron-era slots",
+				byronStart,
+				shelleyStart,
+				c.shelleyGenesis.SystemStart.UTC().Format(time.RFC3339),
+			)
+		}
 	}
-	byronStart := int64(c.byronGenesis.StartTime)
-	shelleyStart := c.shelleyGenesis.SystemStart.Unix()
-	if byronStart != shelleyStart {
-		return fmt.Errorf(
-			"genesis system start mismatch: Byron startTime %d does not match Shelley systemStart %d (%s); slot-to-time conversion is anchored on the Shelley systemStart and would be wrong for Byron-era slots",
-			byronStart,
-			shelleyStart,
-			c.shelleyGenesis.SystemStart.UTC().Format(time.RFC3339),
-		)
-	}
+	// The nonce-window invariant is defined by Shelley genesis alone. Check it
+	// after the optional Byron/Shelley timestamp comparison so existing error
+	// precedence is preserved for multi-era configurations.
 	if err := c.validateEpochLengthFitsNonceWindow(); err != nil {
 		return err
 	}
@@ -73,8 +75,8 @@ func (c *CardanoNodeConfig) validateGenesisConsistency() error {
 // configuration error and fails closed -- but only once header
 // verification actually runs, repeated on every single header, with
 // nothing naming the genesis field as the cause. A non-deferred failure
-// on every post-Byron header (issue #3528 made header crypto verification
-// unconditional) recycles the peer connection indefinitely rather than
+// on every post-Byron header (header crypto verification
+// is unconditional) recycles the peer connection indefinitely rather than
 // stalling once with a diagnosable error. Failing here, once, at load
 // time, gives an operator a clear message instead of a silent sync stall.
 func (c *CardanoNodeConfig) validateMaxKESEvolutionsPresent() error {

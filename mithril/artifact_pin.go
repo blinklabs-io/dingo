@@ -27,7 +27,7 @@ import (
 // so an interrupted import resumes against the same artifact instead of
 // whatever the aggregator has published since.
 //
-// It is part of the ephemeral sync lifecycle: ClearSyncState (run on sync
+// It is part of the ephemeral sync lifecycle: completion cleanup (run on sync
 // completion) wipes it, so its presence means "a sync run is mid-flight against
 // this artifact" and never survives a completed sync. That is the opposite of
 // syncKeyImmutableMax, which is deliberately written after the completion clear.
@@ -84,7 +84,7 @@ func setPinnedArtifact(db *database.Database, pin pinnedArtifact) error {
 
 // getPinnedArtifact returns the artifact an interrupted sync run pinned. ok is
 // false when no run is mid-flight against a pinned artifact — a completed sync
-// (ClearSyncState wiped it) or a database whose in-progress marker predates
+// (completion cleanup deleted it) or a database whose in-progress marker predates
 // artifact pinning.
 func getPinnedArtifact(
 	db *database.Database,

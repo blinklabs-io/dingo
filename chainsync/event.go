@@ -37,6 +37,12 @@ const (
 	// has not received any headers within the stall timeout.
 	ClientStalledEventType event.EventType = "chainsync.client_stalled"
 
+	// ClientPatienceExhaustedEventType is emitted when a chainsync client
+	// exhausts its Genesis Limit on Patience bucket. It is distinct from
+	// ClientStalledEventType: the peer was still sending headers, but too
+	// slowly for the progress it advertised.
+	ClientPatienceExhaustedEventType event.EventType = "chainsync.client_patience_exhausted"
+
 	// ForkDetectedEventType is emitted when two clients report
 	// different block hashes for the same slot.
 	ForkDetectedEventType event.EventType = "chainsync.fork_detected"
@@ -73,6 +79,19 @@ type ClientSyncedEvent struct {
 type ClientStalledEvent struct {
 	ConnId ouroboros.ConnectionId
 	Slot   uint64
+}
+
+// ClientPatienceExhaustedEvent is published when a client exhausts its
+// Genesis Limit on Patience bucket.
+type ClientPatienceExhaustedEvent struct {
+	ConnId ouroboros.ConnectionId
+	// BestBlockNumber is the highest block number the peer delivered.
+	BestBlockNumber uint64
+	// TipBlockNumber and TipSlot are the peer's advertised tip.
+	TipBlockNumber uint64
+	TipSlot        uint64
+	// HeadersDelivered counts the headers received from the peer.
+	HeadersDelivered uint64
 }
 
 // ForkDetectedEvent is published when two clients report

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -41,16 +42,16 @@ type StakeDistributionProvider interface {
 	// snapshot. Reading them through two separate transactions lets a
 	// snapshot re-capture land between them and yields a sigma whose
 	// numerator and denominator come from different writes -- a leader
-	// schedule that is not reproducible from either snapshot alone
-	// (dingo #3815). The pair is returned by one method precisely so that
-	// no implementation can express the torn read.
+	// schedule that is not reproducible from either snapshot alone.
+	// The pair is returned by one method precisely so that no implementation
+	// can express the torn read.
 	//
 	// The denominator MUST come from the same store accessor the header
 	// verification path resolves it through
 	// (Metadata().GetTotalActiveStake), so that a node cannot forge against
-	// one denominator and validate against another (dingo #3814). See the
-	// reference-rule commentary below this interface for what that value
-	// is and why it must not be re-derived per code path.
+	// one denominator and validate against another. See the reference-rule
+	// commentary below this interface for what that value is and why it must
+	// not be re-derived per code path.
 	GetPoolAndTotalActiveStake(
 		epoch uint64,
 		poolKeyHash []byte,
@@ -59,9 +60,8 @@ type StakeDistributionProvider interface {
 
 // The sigma denominator, per the cardano-ledger reference implementation
 // (IntersectMBO/cardano-ledger@9bac33a, master, 2026-09-03). Written down
-// here because two prior investigations (dingo #2798 and #3626) were sent to
-// the wrong cause by a stale comment that called this "the sum of all pool
-// stakes".
+// here because two prior investigations were sent to the wrong cause by a stale
+// comment that called this "the sum of all pool stakes".
 //
 // The reference computes the denominator as a sum over resolved stake
 // CREDENTIALS, not over the per-pool distribution:
@@ -109,7 +109,7 @@ type StakeDistributionProvider interface {
 //
 // Dingo relies on the same invariant, maintained at the same point: see
 // ledger/poolreap.go, which calls ClearDelegationsToRetiredPool for each
-// reaped pool (dingo #3794 -- failing to clear inflates the total active
+// reaped pool (failing to clear inflates the total active
 // stake above the network's and makes every other pool's threshold too
 // small). Dingo also runs its SNAP stake read before POOLREAP, matching
 // EPOCH's sub-rule order (Conway/Rules/Epoch.hs:289-294; dingo
@@ -118,7 +118,7 @@ type StakeDistributionProvider interface {
 // Consequences for this package: summing the numerators is the correct
 // denominator ONLY while that invariant holds. It is therefore not a safe
 // thing to derive independently in a second code path -- hence the single
-// accessor required below (dingo #3814).
+// accessor required below.
 //
 // One thing the reference does NOT do: there is no stake-credential
 // inactivity gate. CIP-0163-style inactivity in the reference is DRep
@@ -133,7 +133,7 @@ type EpochInfoProvider interface {
 	CurrentEpoch() uint64
 
 	// EpochNonce returns the nonce for the given epoch.
-	EpochNonce(epoch uint64) []byte
+	EpochNonce(context.Context, uint64) []byte
 
 	// NextEpochNonceReadyEpoch reports the next epoch number when the
 	// upcoming epoch's nonce is already stable and its leader schedule can
@@ -243,8 +243,11 @@ const maxCachedSchedules = 3
 // runs without holding the election lock so that ShouldProduceBlock remains
 // a fast, lock-free lookup on the forger's hot path.
 type Election struct {
-	poolId      lcommon.PoolKeyHash
-	poolVrfSkey []byte
+	poolId lcommon.PoolKeyHash
+	// vrfSeed hands out a fresh copy of the pool's VRF seed. The election
+	// keeps no copy of its own: each schedule computation takes one, uses it
+	// for that epoch's proofs, and wipes it.
+	vrfSeed func() []byte
 
 	stakeProvider StakeDistributionProvider
 	epochProvider EpochInfoProvider
@@ -269,10 +272,11 @@ type Election struct {
 	wg sync.WaitGroup
 }
 
-// NewElection creates a new leader election manager for a stake pool.
+// NewElection creates a new leader election manager for a stake pool. vrfSeed
+// returns a copy of the pool's VRF seed that the election wipes after use.
 func NewElection(
 	poolId lcommon.PoolKeyHash,
-	poolVrfSkey []byte,
+	vrfSeed func() []byte,
 	stakeProvider StakeDistributionProvider,
 	epochProvider EpochInfoProvider,
 	eventBus *event.EventBus,
@@ -283,7 +287,7 @@ func NewElection(
 	}
 	return &Election{
 		poolId:        poolId,
-		poolVrfSkey:   poolVrfSkey,
+		vrfSeed:       vrfSeed,
 		stakeProvider: stakeProvider,
 		epochProvider: epochProvider,
 		eventBus:      eventBus,
@@ -668,7 +672,7 @@ func (e *Election) RefreshScheduleForEpoch(
 			"error", err,
 		)
 	} else if schedule != nil {
-		valid, reason, err := e.validatePersistedSchedule(epoch, schedule)
+		valid, reason, err := e.validatePersistedSchedule(ctx, epoch, schedule)
 		if err != nil {
 			e.logger.Warn(
 				"failed to validate persisted leader schedule",
@@ -728,6 +732,7 @@ func (e *Election) loadPersistedSchedule(
 }
 
 func (e *Election) validatePersistedSchedule(
+	ctx context.Context,
 	epoch uint64,
 	schedule *Schedule,
 ) (bool, string, error) {
@@ -736,9 +741,9 @@ func (e *Election) validatePersistedSchedule(
 	}
 
 	// Reject schedules whose compute path is no longer compatible with the
-	// running build — pre-PR persisted schedules were derived without the
-	// per-era consensus mode and would mis-pick leader slots if reused.
-	// Pre-format-version entries decode to FormatVersion == 0.
+	// running build — persisted schedules from before the format version were
+	// derived without the per-era consensus mode and would mis-pick leader
+	// slots if reused. Pre-format-version entries decode to FormatVersion == 0.
 	if schedule.FormatVersion != ScheduleFormatVersion {
 		return false, fmt.Sprintf(
 			"schedule format version mismatch: got %d want %d",
@@ -747,7 +752,7 @@ func (e *Election) validatePersistedSchedule(
 		), nil
 	}
 
-	expectedNonce := e.epochProvider.EpochNonce(epoch)
+	expectedNonce := e.epochProvider.EpochNonce(ctx, epoch)
 	if len(expectedNonce) == 0 {
 		return false, "epoch nonce unavailable", nil
 	}
@@ -779,7 +784,7 @@ func (e *Election) validatePersistedSchedule(
 	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
 	// One atomic read: revalidating a persisted schedule against a torn
 	// (numerator, denominator) pair could accept a schedule that matches
-	// neither snapshot, or discard a still-valid one (dingo #3815).
+	// neither snapshot, or discard a still-valid one.
 	poolStake, totalStake, err := e.stakeProvider.GetPoolAndTotalActiveStake(
 		snapshotEpoch,
 		e.poolId[:],
@@ -842,8 +847,8 @@ func (e *Election) computeSchedule(
 
 	// Read the sigma numerator and denominator together. Two separate
 	// reads let a snapshot re-capture land between them, producing a
-	// schedule computed from a sigma that exists in no single snapshot
-	// (dingo #3815). The zero-stake short circuit below therefore happens
+	// schedule computed from a sigma that exists in no single snapshot.
+	// The zero-stake short circuit below therefore happens
 	// after the pair is in hand rather than between the two reads.
 	stakeLookupStart := time.Now()
 	poolStake, totalStake, err := e.stakeProvider.GetPoolAndTotalActiveStake(
@@ -895,7 +900,7 @@ func (e *Election) computeSchedule(
 	// Get epoch nonce. The nonce may not be available yet if the slot clock
 	// fired the epoch transition before block processing computed the nonce.
 	// In that case, skip this schedule — the next epoch transition will retry.
-	epochNonce := e.epochProvider.EpochNonce(currentEpoch)
+	epochNonce := e.epochProvider.EpochNonce(ctx, currentEpoch)
 	if len(epochNonce) == 0 {
 		e.logger.Info(
 			"epoch nonce not yet available, skipping schedule",
@@ -932,12 +937,20 @@ func (e *Election) computeSchedule(
 		return nil, fmt.Errorf("resolve active slot coefficient: %w", err)
 	}
 
+	if e.vrfSeed == nil {
+		return nil, errors.New("pool VRF seed is unavailable")
+	}
+	seed := e.vrfSeed()
+	defer clear(seed)
+	if len(seed) == 0 {
+		return nil, errors.New("pool VRF seed is unavailable")
+	}
 	vrfEvalStart := time.Now()
 	schedule, err := calc.CalculateSchedule(
 		currentEpoch,
 		epochRange,
 		e.poolId,
-		e.poolVrfSkey,
+		seed,
 		poolStake,
 		totalStake,
 		epochNonce,
@@ -956,7 +969,7 @@ func (e *Election) computeSchedule(
 	// schedule that disagrees with `cardano-cli query leadership-schedule` can
 	// be diffed against the reference node's `query stake-snapshot` and
 	// `query protocol-state` from logs alone, without re-running with extra
-	// instrumentation (dingo #2798). Never log per slot.
+	// instrumentation. Never log per slot.
 	e.logger.Info(
 		"leader schedule calculated",
 		"component", "leader",

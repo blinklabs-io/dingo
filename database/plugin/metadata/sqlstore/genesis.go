@@ -5,6 +5,12 @@
 // You may obtain a copy of the License at
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package sqlstore
 
@@ -24,6 +30,24 @@ func (s *Store) SetGenesisStaking(
 	pools map[string]lcommon.PoolRegistrationCertificate,
 	stakeDelegations map[string]string,
 	keyDeposit uint64,
+	blockHash []byte,
+	txn types.Txn,
+) error {
+	return s.SetGenesisStakingWithDeposits(
+		pools,
+		stakeDelegations,
+		keyDeposit,
+		0,
+		blockHash,
+		txn,
+	)
+}
+
+func (s *Store) SetGenesisStakingWithDeposits(
+	pools map[string]lcommon.PoolRegistrationCertificate,
+	stakeDelegations map[string]string,
+	keyDeposit uint64,
+	poolDeposit uint64,
 	_ []byte,
 	txn types.Txn,
 ) error {
@@ -41,6 +65,14 @@ func (s *Store) SetGenesisStaking(
 			Cost:                       types.Uint64(certificate.Cost),
 			Margin:                     &types.Rat{Rat: certificate.Margin.Rat},
 		}
+		if certificate.LeiosKey != nil {
+			pool.LeiosKeyPublic = append(
+				[]byte(nil), certificate.LeiosKey.PublicKey...,
+			)
+			pool.LeiosKeyPossessionProof = append(
+				[]byte(nil), certificate.LeiosKey.PossessionProof...,
+			)
+		}
 		registration := &models.PoolRegistration{
 			PoolKeyHash:                certificate.Operator[:],
 			VrfKeyHash:                 certificate.VrfKeyHash[:],
@@ -50,6 +82,15 @@ func (s *Store) SetGenesisStaking(
 			Cost:                       types.Uint64(certificate.Cost),
 			Margin:                     &types.Rat{Rat: certificate.Margin.Rat},
 			AddedSlot:                  0,
+			DepositAmount:              types.Uint64(poolDeposit),
+		}
+		if certificate.LeiosKey != nil {
+			registration.LeiosKeyPublic = append(
+				[]byte(nil), certificate.LeiosKey.PublicKey...,
+			)
+			registration.LeiosKeyPossessionProof = append(
+				[]byte(nil), certificate.LeiosKey.PossessionProof...,
+			)
 		}
 		if certificate.PoolMetadata != nil {
 			registration.MetadataUrl = certificate.PoolMetadata.Url
@@ -62,9 +103,11 @@ func (s *Store) SetGenesisStaking(
 			)
 		}
 		for _, relay := range certificate.Relays {
+			relayType := relay.Type
 			model := models.PoolRegistrationRelay{
 				Ipv4: relay.Ipv4,
 				Ipv6: relay.Ipv6,
+				Type: &relayType,
 			}
 			if relay.Port != nil {
 				model.Port = uint(*relay.Port)
@@ -261,6 +304,25 @@ WHERE NOT EXISTS (
 		}
 		if err != nil {
 			return err
+		}
+		if len(drepCredential) > 0 {
+			if drepType > models.DrepTypeScriptHash {
+				return fmt.Errorf(
+					"genesis DRep credential has non-credential type: %d",
+					drepType,
+				)
+			}
+			if err := addDrepDelegator(
+				ctx,
+				db,
+				uint8(drepType),
+				drepCredential,
+				tag,
+				stakeKey,
+				0,
+			); err != nil {
+				return fmt.Errorf("create genesis DRep delegator: %w", err)
+			}
 		}
 		refs = append(refs, models.NewStakeCredentialRef(tag, stakeKey))
 	}

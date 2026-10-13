@@ -126,10 +126,3 @@ func TestEpochNonceNonCommutative(t *testing.T) {
 		"nonce combination should not be commutative",
 	)
 }
-
-func mustDecodeHex(t *testing.T, s string) []byte {
-	t.Helper()
-	b, err := hex.DecodeString(s)
-	require.NoError(t, err)
-	return b
-}

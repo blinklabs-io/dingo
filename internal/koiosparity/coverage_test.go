@@ -66,7 +66,7 @@ func TestKoiosCoverageMatrixIsComplete(t *testing.T) {
 		"/pool_history",
 		KoiosPoolHistoryItem{},
 	)
-	// dingo #3099: KoiosAccountRewardHistoryItem was not previously enforced
+	// KoiosAccountRewardHistoryItem was not previously enforced
 	// here, so a future field added to it would go unclassified without any
 	// test failing — close that gap the same way every other response
 	// struct is already guarded.
@@ -76,7 +76,7 @@ func TestKoiosCoverageMatrixIsComplete(t *testing.T) {
 		"/account_reward_history",
 		KoiosAccountRewardHistoryItem{},
 	)
-	// dingo #3931: /epoch_params. The response struct models the scalar
+	// /epoch_params. The response struct models the scalar
 	// parameters this checker fetches; the documented fields it deliberately
 	// does not model (cost_models, nonce/block_hash/extra_entropy, and the
 	// Conway governance block) are pinned explicitly below so they cannot be

@@ -15,14 +15,12 @@
 package event
 
 import (
-	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -110,66 +108,6 @@ func stallWarningsForPublishers(
 	sub.Close()
 	requirePublishersUnpark(t, &wg)
 	return got
-}
-
-// A stalled subscriber must still be reported often enough to be actionable,
-// and the report must say how many publishers are parked on it -- that count
-// is what distinguishes ordinary backpressure from a wedged subscriber.
-func TestDeliverStallWarningReportsBlockedPublishers(t *testing.T) {
-	origInterval := deliveryStallWarnInterval
-	deliveryStallWarnInterval = 20 * time.Millisecond
-	t.Cleanup(func() { deliveryStallWarnInterval = origInterval })
-
-	var buf lockedBuffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
-		Level: slog.LevelWarn,
-	}))
-	sub := newChannelSubscriber("test", 1, logger)
-	require.NoError(t, sub.Deliver(NewEvent("test.stalled", "fill")))
-
-	const blockedPublishers = 3
-	var wg sync.WaitGroup
-	for i := range blockedPublishers {
-		wg.Go(func() {
-			_ = sub.Deliver(NewEvent("test.stalled", i))
-		})
-	}
-
-	// Every warning carries the field, so asserting the key is present
-	// proves nothing about the number. Wait for all publishers to park, then
-	// require the reported count to be the number actually parked.
-	require.Eventually(t, func() bool {
-		return sub.stallWaiters.Load() == blockedPublishers
-	}, 2*time.Second, time.Millisecond,
-		"every publisher should park on the stalled subscriber",
-	)
-	want := fmt.Sprintf("blocked_publishers=%d", blockedPublishers)
-	require.Eventually(t, func() bool {
-		return strings.Contains(buf.String(), want)
-	}, 2*time.Second, 5*time.Millisecond,
-		"the warning should report the number of publishers actually parked",
-	)
-
-	sub.Close()
-	requirePublishersUnpark(t, &wg)
-}
-
-// requirePublishersUnpark fails unless every parked publisher returns, using
-// the repository channel helper rather than a hand-rolled select so the
-// timeout contract is the shared one.
-func requirePublishersUnpark(t *testing.T, wg *sync.WaitGroup) {
-	t.Helper()
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		wg.Wait()
-	}()
-	testutil.RequireReceive(
-		t,
-		drained,
-		5*time.Second,
-		"blocked publishers did not unpark after Close",
-	)
 }
 
 func countStallWarnings(logs string) int {

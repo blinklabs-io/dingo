@@ -149,6 +149,7 @@ CREATE TABLE pool_stake_snapshot (
     captured_slot INTEGER NOT NULL,
     leios_key_public BLOB,
     leios_key_possession_proof BLOB,
+    leios_key_registration_epoch INTEGER,
     calculation_version INTEGER NOT NULL DEFAULT 0,
     reward_account_auto_vote INTEGER NOT NULL DEFAULT 0,
     reward_account_auto_vote_resolved BOOLEAN NOT NULL DEFAULT FALSE,
@@ -173,7 +174,8 @@ CREATE TABLE reward_ada_pots (
     reserves TEXT NOT NULL,
     fees TEXT NOT NULL,
     rewards TEXT NOT NULL,
-    captured_slot INTEGER NOT NULL
+    captured_slot INTEGER NOT NULL,
+    imported_epoch_fees TEXT
 );
 
 CREATE TABLE reward_snapshot (
@@ -257,6 +259,7 @@ CREATE TABLE reward_pool_output (
     optimal_reward TEXT NOT NULL,
     total_reward TEXT NOT NULL,
     leader_reward TEXT NOT NULL,
+    leader_reward_deficit TEXT NOT NULL DEFAULT '0',
     member_reward_total TEXT NOT NULL,
     owner_stake TEXT NOT NULL,
     undistributed TEXT NOT NULL,
@@ -278,6 +281,7 @@ CREATE TABLE reward_account_output (
     guarded BOOLEAN NOT NULL DEFAULT FALSE,
     captured_slot INTEGER NOT NULL,
     boundary_slot INTEGER NOT NULL,
+    folded BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE (
         epoch, credential_tag, staking_key, pool_key_hash, reward_type
     )
@@ -358,6 +362,21 @@ CREATE TABLE midnight_ariadne_rollbacks (
     previous_exists BOOLEAN NOT NULL,
     previous_datum BLOB,
     UNIQUE (block_number, epoch)
+);
+
+CREATE TABLE midnight_candidate_removals (
+    id INTEGER PRIMARY KEY,
+    block_number INTEGER NOT NULL,
+    tx_hash BLOB NOT NULL,
+    output_index INTEGER NOT NULL,
+    datum BLOB,
+    UNIQUE (block_number, tx_hash, output_index)
+);
+
+CREATE TABLE midnight_epoch_transitions (
+    block_number INTEGER PRIMARY KEY,
+    previous_epoch INTEGER NOT NULL,
+    previous_exists INTEGER NOT NULL
 );
 
 CREATE TABLE midnight_epoch_candidates (
@@ -482,6 +501,10 @@ CREATE TABLE drep (
     UNIQUE (credential_tag, credential)
 );
 
+CREATE TABLE drep_expiry_epoch_event (
+    added_slot INTEGER PRIMARY KEY
+);
+
 CREATE TABLE registration_drep (
     anchor_url TEXT,
     drep_credential BLOB,
@@ -528,3 +551,49 @@ CREATE TABLE transaction_metadata_label (
     json_value TEXT,
     UNIQUE (transaction_id, label)
 );
+
+-- Closure effects belong to the certifying RB for rollback, but execute on
+-- its parent's unticked ledger state for epoch snapshots and fee accounting.
+CREATE TABLE IF NOT EXISTS `leios_transaction_context` (
+    `transaction_id` integer PRIMARY KEY NOT NULL,
+    `slot` integer NOT NULL,
+    FOREIGN KEY (`transaction_id`) REFERENCES `transaction`(`id`) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS `idx_leios_transaction_context_slot`
+    ON `leios_transaction_context`(`slot`);
+CREATE TABLE IF NOT EXISTS `drep_expiry_history` (
+    `id` integer PRIMARY KEY AUTOINCREMENT,
+    `credential_tag` integer NOT NULL,
+    `credential` blob NOT NULL,
+    `added_slot` integer NOT NULL,
+    `last_activity_epoch` integer NOT NULL,
+    `expiry_epoch` integer NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS `idx_drep_expiry_history_credential_slot`
+    ON `drep_expiry_history`(`credential_tag`,`credential`,`added_slot`);
+CREATE INDEX IF NOT EXISTS `idx_drep_expiry_history_added_slot`
+    ON `drep_expiry_history`(`added_slot`);
+CREATE TABLE IF NOT EXISTS `drep_dormancy_state` (
+    `id` integer PRIMARY KEY CHECK (`id` = 1),
+    `dormant_epochs` integer NOT NULL
+);
+CREATE TABLE IF NOT EXISTS `drep_dormancy_history` (
+    `id` integer PRIMARY KEY AUTOINCREMENT,
+    `added_slot` integer NOT NULL,
+    `previous_dormant_epochs` integer NOT NULL
+);
+CREATE INDEX IF NOT EXISTS `idx_drep_dormancy_history_slot`
+    ON `drep_dormancy_history`(`added_slot`);
+CREATE TABLE IF NOT EXISTS `drep_delegator` (
+    `id` integer PRIMARY KEY AUTOINCREMENT,
+    `drep_credential_tag` integer NOT NULL,
+    `drep_credential` blob NOT NULL,
+    `stake_credential_tag` integer NOT NULL,
+    `stake_credential` blob NOT NULL,
+    `added_slot` integer NOT NULL,
+    `removed_slot` integer
+);
+CREATE INDEX IF NOT EXISTS `idx_drep_delegator_active`
+    ON `drep_delegator`(`drep_credential_tag`,`drep_credential`,`removed_slot`);
+CREATE INDEX IF NOT EXISTS `idx_drep_delegator_rollback`
+    ON `drep_delegator`(`added_slot`,`removed_slot`);

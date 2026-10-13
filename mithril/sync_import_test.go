@@ -16,20 +16,294 @@ package mithril
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/node"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/forging"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+// TestUpdateMithrilReadyStateKeepsDeferredIndexPendingMarker pins the
+// interaction between the deferred-index rebuild and the sync-state clear
+// that ends a Mithril sync.
+//
+// mithril sync rebuilds only the critical subset and deliberately leaves
+// deferred.SyncStateKey set so the first serve finishes the lazy manifest.
+// Completion cleanup must leave that marker untouched so the lazy indexes
+// are still built when the Mithril-bootstrapped database starts serving.
+func TestUpdateMithrilReadyStateKeepsDeferredIndexPendingMarker(t *testing.T) {
+	t.Parallel()
+	db := newMithrilTestDB(t)
+	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
+	require.True(t, ok, "sqlite metadata store must manage deferred indexes")
+
+	// The Mithril sequence: drop the manifest, bulk load, rebuild the
+	// critical subset only.
+	require.NoError(t, manager.DropDeferredIndexes())
+	require.NoError(t, manager.BuildCriticalDeferredIndexes())
+	pending, err := manager.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(
+		t, pending,
+		"precondition: the critical rebuild leaves the lazy remainder pending",
+	)
+
+	ledgerStateHash := bytes.Repeat([]byte{0x55}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, ledgerStateHash),
+	}, nil))
+	require.NoError(t, db.SetSyncState("sync_status", "bootstrap", nil))
+	require.NoError(
+		t,
+		db.SetSyncState(
+			metadata.PlannerStatsBackfillSyncKey,
+			"v1:30:30:checkpoint",
+			nil,
+		),
+	)
+
+	require.NoError(t, updateMithrilReadyState(
+		context.Background(),
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		30,
+		ledgerStateHash,
+		"",
+		true,
+	))
+
+	pending, err = manager.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(
+		t, pending,
+		"the deferred-index pending marker must survive sync-state cleanup "+
+			"so the first serve builds the lazy manifest entries",
+	)
+	marker, err := db.GetSyncState(deferred.SyncStateKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, deferred.SyncStateValue, marker)
+	statsMarker, err := db.GetSyncState(
+		metadata.PlannerStatsBackfillSyncKey,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "v1:30:30:checkpoint", statsMarker)
+
+	// The clear still does its job for everything else.
+	status, err := db.GetSyncState("sync_status", nil)
+	require.NoError(t, err)
+	require.Empty(t, status, "sync_status must still be cleared")
+}
+
+// TestUpdateMithrilReadyStateKeepsForgeFence pins that the sync-state clear
+// ending a Mithril import leaves every pool's last-forged-slot fence in place.
+// The fence is written by the forger during normal operation and guards a
+// slot whose block may already have been signed and diffused, so a producer
+// that re-bootstraps from a snapshot must still refuse it afterwards.
+func TestUpdateMithrilReadyStateKeepsForgeFence(t *testing.T) {
+	t.Parallel()
+	db := newMithrilTestDB(t)
+
+	poolA := lcommon.PoolKeyHash{0xA1}
+	poolB := lcommon.PoolKeyHash{0xB2}
+	const fenceA, fenceB = uint64(12_345), uint64(777)
+	storeA := forging.NewSyncStateForgeFenceStore(db.Metadata(), poolA)
+	storeB := forging.NewSyncStateForgeFenceStore(db.Metadata(), poolB)
+	require.NoError(t, storeA.StoreLastForgedSlot(fenceA))
+	require.NoError(t, storeB.StoreLastForgedSlot(fenceB))
+
+	ledgerStateHash := bytes.Repeat([]byte{0x77}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, ledgerStateHash),
+	}, nil))
+	require.NoError(t, db.SetSyncState("sync_status", "bootstrap", nil))
+
+	require.NoError(t, updateMithrilReadyState(
+		context.Background(),
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		30,
+		ledgerStateHash,
+		"",
+		true,
+	))
+
+	// A store built after the import is what a restarted node reads.
+	for _, tc := range []struct {
+		pool lcommon.PoolKeyHash
+		want uint64
+	}{{poolA, fenceA}, {poolB, fenceB}} {
+		restarted := forging.NewSyncStateForgeFenceStore(db.Metadata(), tc.pool)
+		slot, found, err := restarted.LoadLastForgedSlot()
+		require.NoError(t, err)
+		require.True(t, found, "the fence must survive the import")
+		require.Equal(t, tc.want, slot)
+		// A forge at or below the surviving fence cannot lower it.
+		require.NoError(t, restarted.StoreLastForgedSlot(tc.want-1))
+		slot, _, err = restarted.LoadLastForgedSlot()
+		require.NoError(t, err)
+		require.Equal(t, tc.want, slot)
+	}
+
+	status, err := db.GetSyncState("sync_status", nil)
+	require.NoError(t, err)
+	require.Empty(t, status, "sync_status must still be cleared")
+}
+
+// newMithrilFileTestDB is newMithrilTestDB with a data directory, so the
+// SQLite catalog can be inspected directly.
+func newMithrilFileTestDB(t *testing.T) *database.Database {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+	return db
+}
+
+// TestMithrilSyncLeavesLazyManifestForTheFirstServe walks the composition a
+// Mithril-bootstrapped node actually takes: sync drops the manifest, rebuilds
+// the critical subset, and calls updateMithrilReadyState; the first
+// `dingo serve` then calls node.RepairDeferredIndexes, which finishes the
+// manifest only if the pending marker survived the sync's sync-state clear.
+//
+// Without the marker carried across the clear, RepairDeferredIndexes takes its
+// no-cycle-pending branch, every lazy manifest entry stays absent for the life
+// of the database, and Node.startDeferredIndexMaintenance reads the same wiped
+// marker and logs "deferred-index maintenance not needed".
+func TestMithrilSyncLeavesLazyManifestForTheFirstServe(t *testing.T) {
+	t.Parallel()
+	db := newMithrilFileTestDB(t)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	lazy := dbtest.LazyManifestIndex(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// The sync: drop for the bulk load, rebuild the critical subset only.
+	deferredIndexes := node.WithDeferredIndexes(db, logger)
+	require.NoError(t, deferredIndexes.BuildCritical())
+	require.False(
+		t,
+		dbtest.MetadataIndexExists(t, raw, lazy),
+		"precondition: %s is lazy and the critical rebuild skips it",
+		lazy,
+	)
+
+	ledgerStateHash := bytes.Repeat([]byte{0x66}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, ledgerStateHash),
+	}, nil))
+	require.NoError(t, updateMithrilReadyState(
+		context.Background(),
+		db, logger, nil, 30, ledgerStateHash, "", true,
+	))
+
+	// The first serve on a core-mode node.
+	require.NoError(t, node.RepairDeferredIndexes(db, logger))
+
+	require.True(
+		t,
+		dbtest.MetadataIndexExists(t, raw, lazy),
+		"the first serve after a Mithril sync must finish the lazy "+
+			"manifest entry %s",
+		lazy,
+	)
+	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
+	require.True(t, ok)
+	pending, err := manager.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.False(
+		t, pending,
+		"the full rebuild clears the marker it consumed",
+	)
+}
+
+type fenceUntouchedMetadata struct {
+	metadata.MetadataStore
+}
+
+func (m fenceUntouchedMetadata) GetSyncState(
+	key string,
+	txn dbtypes.Txn,
+) (string, error) {
+	if strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
+		return "", errors.New(
+			"import must not snapshot a concurrently changing forge fence",
+		)
+	}
+	return m.MetadataStore.GetSyncState(key, txn)
+}
+
+func (m fenceUntouchedMetadata) DeleteSyncState(
+	key string,
+	txn dbtypes.Txn,
+) error {
+	if strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
+		return errors.New("import must not delete a forge fence")
+	}
+	return m.MetadataStore.DeleteSyncState(key, txn)
+}
+
+func TestUpdateMithrilReadyStateLeavesForgeFenceUntouched(t *testing.T) {
+	t.Parallel()
+	base := newMithrilTestDB(t)
+	pool := lcommon.PoolKeyHash{0xA1}
+	fence := forging.NewSyncStateForgeFenceStore(base.Metadata(), pool)
+	require.NoError(t, fence.StoreLastForgedSlot(12_345))
+	require.NoError(t, base.SetSyncState("sync_status", "bootstrap", nil))
+	db, err := database.New(context.Background(), nil, database.Stores{
+		Blob: base.Blob(), Metadata: fenceUntouchedMetadata{base.Metadata()},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	hash := bytes.Repeat([]byte{0x77}, 32)
+	require.NoError(
+		t,
+		base.SetTip(ochainsync.Tip{Point: ocommon.NewPoint(30, hash)}, nil),
+	)
+	require.NoError(
+		t,
+		updateMithrilReadyState(
+			context.Background(),
+			db,
+			slog.New(slog.DiscardHandler),
+			nil,
+			30,
+			hash,
+			"",
+			true,
+		),
+	)
+	status, err := base.GetSyncState("sync_status", nil)
+	require.NoError(t, err)
+	require.Empty(t, status)
+	slot, found, err := fence.LoadLastForgedSlot()
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(12_345), slot)
+}
 
 func newMithrilTestDB(t *testing.T) *database.Database {
 	t.Helper()
@@ -124,6 +398,31 @@ func TestEnsureMithrilBackfillCheckpointReopensCompleted(t *testing.T) {
 	require.True(t, cp.UpdatedAt.After(startedAt))
 }
 
+func TestResetMithrilBackfillCheckpointReplaysFromFirstBlock(t *testing.T) {
+	t.Parallel()
+
+	db := newMithrilTestDB(t)
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      node.BackfillPhase,
+			LastSlot:   1042527,
+			TotalSlots: 2000000,
+			StartedAt:  time.Now().Add(-time.Hour),
+			UpdatedAt:  time.Now().Add(-time.Minute),
+			Completed:  true,
+		},
+		nil,
+	))
+
+	require.NoError(t, resetMithrilBackfillCheckpoint(db))
+	cp, err := db.Metadata().GetBackfillCheckpoint(node.BackfillPhase, nil)
+	require.NoError(t, err)
+	require.NotNil(t, cp)
+	require.Zero(t, cp.LastSlot)
+	require.Zero(t, cp.TotalSlots)
+	require.False(t, cp.Completed)
+}
+
 func TestUpdateMithrilReadyStateKeepsTrustBoundaryAtStableLedgerTip(
 	t *testing.T,
 ) {
@@ -146,6 +445,7 @@ func TestUpdateMithrilReadyStateKeepsTrustBoundaryAtStableLedgerTip(
 	}, nil))
 
 	require.NoError(t, updateMithrilReadyState(
+		context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,
@@ -185,6 +485,7 @@ func TestSetStableMithrilLedgerTipUsesCertifiedBlockNumber(t *testing.T) {
 	}, nil))
 
 	require.NoError(t, setStableMithrilLedgerTip(
+		context.Background(),
 		db,
 		30,
 		ledgerStateHash,
@@ -214,6 +515,7 @@ func TestSetStableMithrilLedgerTipRejectsPointOutsideCertifiedChain(
 	}, nil))
 
 	err := setStableMithrilLedgerTip(
+		context.Background(),
 		db,
 		30,
 		bytes.Repeat([]byte{0x25}, 32),
@@ -233,6 +535,7 @@ func TestUpdateMithrilReadyStateStoresTrustBoundaryFromLedgerState(
 	}, nil))
 
 	require.NoError(t, updateMithrilReadyState(
+		context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,
@@ -266,6 +569,7 @@ func TestUpdateMithrilReadyStateClearsStaleTrustBoundaryHash(
 	))
 
 	require.NoError(t, updateMithrilReadyState(
+		context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,

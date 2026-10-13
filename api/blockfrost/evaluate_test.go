@@ -2,10 +2,20 @@
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package blockfrost
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +28,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -452,6 +463,25 @@ func TestHandleTransactionEvaluateFailureIsNotReportedAsMalformed(
 	assert.Equal(t, "Transaction could not be evaluated.", resp.Message)
 }
 
+func TestHandleTransactionEvaluatePropagatesCancellation(t *testing.T) {
+	t.Parallel()
+
+	node := evaluateTestNode()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/utils/txs/evaluate",
+		strings.NewReader(hex.EncodeToString(rawEvaluateTxCbor)),
+	).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+
+	newTestBlockfrost(node).handleTransactionEvaluate(w, req)
+
+	require.ErrorIs(t, node.transactionEvaluationCtx.Err(), context.Canceled)
+}
+
 // stubEvaluator stands in for the ledger at the evaluation boundary, so a
 // single EvaluateTx result can be classified in isolation.
 type stubEvaluator struct {
@@ -460,7 +490,10 @@ type stubEvaluator struct {
 	calls   int
 }
 
-func (s *stubEvaluator) EvaluateTx(tx lcommon.Transaction) (
+func (s *stubEvaluator) EvaluateTxContext(
+	_ context.Context,
+	tx lcommon.Transaction,
+) (
 	uint64,
 	lcommon.ExUnits,
 	map[lcommon.RedeemerKey]lcommon.ExUnits,
@@ -493,7 +526,7 @@ func TestTransactionEvaluateStorageFailureIsNotAnEvaluationFailure(
 			}
 			adapter := &NodeAdapter{evaluator: evaluator}
 
-			result, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+			result, err := adapter.TransactionEvaluate(t.Context(), submitTestTxCbor(t))
 
 			require.Error(t, err)
 			assert.Nil(t, result)
@@ -525,7 +558,7 @@ func TestTransactionEvaluateScriptFailureStaysAnEvaluationFailure(
 	evaluator := &stubEvaluator{err: evalErr}
 	adapter := &NodeAdapter{evaluator: evaluator}
 
-	_, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+	_, err := adapter.TransactionEvaluate(t.Context(), submitTestTxCbor(t))
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrTransactionEvaluation)
@@ -549,7 +582,7 @@ func TestTransactionEvaluateReturnsExecutionUnits(t *testing.T) {
 	}
 	adapter := &NodeAdapter{evaluator: evaluator}
 
-	result, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+	result, err := adapter.TransactionEvaluate(t.Context(), submitTestTxCbor(t))
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, evaluator.calls)
@@ -565,7 +598,7 @@ func TestTransactionEvaluateWithoutEvaluatorIsUnavailable(t *testing.T) {
 
 	adapter := &NodeAdapter{}
 
-	_, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+	_, err := adapter.TransactionEvaluate(t.Context(), submitTestTxCbor(t))
 
 	require.ErrorIs(t, err, ErrLedgerUnavailable)
 }
@@ -604,4 +637,32 @@ func TestHandleTransactionEvaluateStorageFailureReturns503(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	assert.Equal(t, "Service Unavailable", resp.Error)
 	assert.Equal(t, "ledger state unavailable", resp.Message)
+}
+
+func TestTransactionEvaluateOverloadIsReportedAsOverload(t *testing.T) {
+	t.Parallel()
+
+	adapter := &NodeAdapter{
+		evaluator: &stubEvaluator{err: ledger.ErrEvaluationBusy},
+	}
+
+	_, err := adapter.TransactionEvaluate(t.Context(), submitTestTxCbor(t))
+
+	require.ErrorIs(t, err, ErrEvaluationOverloaded)
+	assert.NotErrorIs(t, err, ErrTransactionEvaluation)
+}
+
+func TestHandleTransactionEvaluateOverloadReturns429(t *testing.T) {
+	t.Parallel()
+
+	node := &mockNode{transactionEvaluationErr: ErrEvaluationOverloaded}
+	w := postEvaluate(
+		t,
+		node,
+		"/api/v0/utils/txs/evaluate",
+		"application/cbor",
+		hex.EncodeToString(rawEvaluateTxCbor),
+	)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
 }

@@ -93,17 +93,18 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 
 		slog.Info("koios-parity: fetch phase starting", "network", network)
 		fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
-			Network:              network,
-			APIKey:               koiosAPIKey(cmd),
-			BaseURL:              koiosBaseURL(cmd),
-			AllowInsecureHTTP:    koiosAllowInsecureHTTP(cmd),
-			CachePath:            cachePath,
-			Concurrency:          concurrency,
-			AccountsEnabled:      accounts,
-			AccountsSource:       accountsSource,
-			GraceHours:           graceHours,
-			AccountChunkSize:     accountChunkSize,
-			AccountChunkMaxBytes: accountChunkMaxBytes,
+			Network:               network,
+			APIKey:                koiosAPIKey(cmd),
+			BaseURL:               koiosBaseURL(cmd),
+			AllowInsecureHTTP:     koiosAllowInsecureHTTP(cmd),
+			AllowPrivateAddresses: koiosAllowPrivateAddresses(cmd),
+			CachePath:             cachePath,
+			Concurrency:           concurrency,
+			AccountsEnabled:       accounts,
+			AccountsSource:        accountsSource,
+			GraceHours:            graceHours,
+			AccountChunkSize:      accountChunkSize,
+			AccountChunkMaxBytes:  accountChunkMaxBytes,
 		}, logger)
 		if fetchErr != nil {
 			return fmt.Errorf("fetch: %w", fetchErr)

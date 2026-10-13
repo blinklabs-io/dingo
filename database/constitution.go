@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -24,36 +25,23 @@ import (
 // slot and clears deleted_slot for any that were soft-deleted after that
 // slot. This is used during chain rollbacks.
 func (d *Database) DeleteConstitutionsAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().DeleteConstitutionsAfterSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete constitutions after slot %d: %w",
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		if err := d.governanceStore().DeleteConstitutionsAfterSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete constitutions after slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetConstitution returns the current constitution

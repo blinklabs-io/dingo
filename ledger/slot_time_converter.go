@@ -230,7 +230,7 @@ func (c *SlotTimeConverter) SlotToTime(slot uint64) (time.Time, error) {
 // commits, while the reference measures the safe zone from the applied block's
 // immediate predecessor. applySafeZone snaps up to an epoch boundary, so a tip
 // trailing by a single block can cost a full epoch of horizon and reject a
-// canonical block (issue #3844).
+// canonical block.
 //
 // The near-now extrapolation SlotToTime applies is deliberately absent: it
 // exists so the operational slot clock can tick while the ledger is behind the

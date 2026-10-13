@@ -45,8 +45,8 @@ const defaultFallbackInterval = 2 * time.Minute
 // default, so runWatchCycle self-cancelled via its own context deadline
 // before a comparison could ever complete -- indistinguishable in the logs
 // from the unrelated node-side "protocol is shutting down" failure this tool
-// was originally built to route around (blinklabs-io/dingo#1900 audit
-// finding). 20 minutes gives comfortable headroom above the measured
+// was originally built to route around (an audit finding).
+// 20 minutes gives comfortable headroom above the measured
 // 7-9 minute walk without --fallback-interval also needing to grow to match
 // (it keeps its own, much smaller, "also check on this schedule regardless
 // of block activity" meaning -- see its own flag help).
@@ -392,8 +392,8 @@ func resetFallbackTimer(fallback *time.Timer, interval time.Duration) {
 // comparison self-cancel via this very deadline before it could ever
 // complete -- a real whole-UTxO walk measured 7-9+ minutes against a
 // Preview-scale node, far longer than --fallback-interval's own 2m default
-// (see defaultCheckTimeout's doc comment; blinklabs-io/dingo#1900 audit
-// finding). --check-timeout is sized for that real cost; --fallback-interval
+// (see defaultCheckTimeout's doc comment).
+// --check-timeout is sized for that real cost; --fallback-interval
 // keeps its own, separate meaning of "also trigger a check on this schedule
 // regardless of block activity."
 func runWatchCycle(
@@ -504,8 +504,8 @@ func handleIncrementalBlockCheck(
 // OnBlockCheck only ever fires for a block that was actually decoded and
 // queried, and OnFullCheck only for this mode's own full checkpoints, so
 // neither one previously let this failure class reach
-// node_parity_check_errors_total at all (blinklabs-io/dingo#1900
-// incremental-mode audit finding). RunIncremental itself already logs the
+// node_parity_check_errors_total at all. RunIncremental
+// itself already logs the
 // error and reconnects with backoff (reportSessionEnd), so this only records
 // the metric.
 func handleIncrementalSessionError(err error, metrics *parityMetrics) {

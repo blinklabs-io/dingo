@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package ledger
 
@@ -113,9 +113,8 @@ func HeaderProtocolMajor(header lcommon.BlockHeader) (uint, bool) {
 //
 // The check is skipped on testnets (isMainnet == false) while the
 // current pparams major version is below Dijkstra (12). This mirrors
-// the relaxation introduced in cardano-ledger PR 5785 to support
-// ephemeral testnets that enable experimental hard forks or rebuild
-// chains in much older eras.
+// the relaxation that cardano-ledger allows to support ephemeral testnets that
+// enable experimental hard forks or rebuild chains in much older eras.
 //
 // Byron-era headers are also skipped, as they have no ProtVer field.
 func ValidateHeaderProtocolVersion(

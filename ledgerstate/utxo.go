@@ -176,8 +176,8 @@ func decodeTxInFromBytes(
 ) ([]byte, uint32, error) {
 	// Binary format: 32-byte hash + 2-byte big-endian index.
 	// Preview UTxO-HD snapshots encode the trailing Word16 in
-	// network order; decoding it as little-endian inflates #1 to
-	// #256 and corrupts imported UTxO keys.
+	// network order; decoding it as little-endian inflates index 1 to
+	// index 256 and corrupts imported UTxO keys.
 	if len(data) == 34 {
 		txHash := make([]byte, 32)
 		copy(txHash, data[:32])
@@ -469,10 +469,15 @@ func parseMempackTxOut(
 	if err != nil {
 		return nil, fmt.Errorf("decoding MemPack TxOut: %w", err)
 	}
+	outputCbor, err := encodeMempackTxOut(decoded)
+	if err != nil {
+		return nil, fmt.Errorf("encoding MemPack TxOut as CBOR: %w", err)
+	}
 
 	result := &ParsedUTxO{
 		TxHash:      txHash,
 		OutputIndex: outputIndex,
+		Cbor:        outputCbor,
 		Address:     decoded.Address,
 		Amount:      decoded.Lovelace,
 		Assets:      decoded.Assets,
@@ -603,6 +608,7 @@ func parseCborTxOut(
 	result := &ParsedUTxO{
 		TxHash:      txHash,
 		OutputIndex: outputIndex,
+		Cbor:        append([]byte(nil), txOutData...),
 		Address:     addrBytes,
 		Amount:      txOut.Amount().Uint64(),
 	}
@@ -908,6 +914,7 @@ func UTxOToModel(u *ParsedUTxO, slot uint64) models.Utxo {
 	utxo := models.Utxo{
 		TxId:          u.TxHash,
 		OutputIdx:     u.OutputIndex,
+		Cbor:          u.Cbor,
 		PaymentKey:    u.PaymentKey,
 		StakingKey:    u.StakingKey,
 		CredentialTag: u.CredentialTag,

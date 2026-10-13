@@ -15,10 +15,45 @@
 package types_test
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/types"
 )
+
+func FuzzParseBlockBlobKey(f *testing.F) {
+	f.Add([]byte(nil))
+	f.Add([]byte("bp"))
+	f.Add(types.BlockBlobKey(0, make([]byte, 32)))
+	f.Add(types.BlockBlobKey(42, bytes.Repeat([]byte{0xab}, 32)))
+
+	f.Fuzz(func(t *testing.T, key []byte) {
+		slot, hash, err := types.ParseBlockBlobKey(key)
+		if err != nil {
+			if len(key) == types.BlockBlobKeySize &&
+				bytes.HasPrefix(key, []byte(types.BlockBlobKeyPrefix)) {
+				t.Fatalf(
+					"ParseBlockBlobKey rejected a well-shaped key: %v",
+					err,
+				)
+			}
+			return
+		}
+
+		if len(hash) != 32 {
+			t.Fatalf("parsed hash length = %d, want 32", len(hash))
+		}
+
+		encoded := types.BlockBlobKey(slot, hash)
+		if !bytes.Equal(encoded, key) {
+			t.Fatalf(
+				"BlockBlobKey(ParseBlockBlobKey(key)) = %x, want %x",
+				encoded,
+				key,
+			)
+		}
+	})
+}
 
 func TestPoolCredentialStakeKey(t *testing.T) {
 	poolKeyHash := []byte{0x01, 0x02}

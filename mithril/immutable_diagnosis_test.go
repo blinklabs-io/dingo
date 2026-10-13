@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,6 +26,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type redactionTestError struct {
+	name  string
+	cause error
+}
+
+func (e *redactionTestError) Error() string {
+	return fmt.Sprintf("%s: %v", e.name, e.cause)
+}
+
+func (e *redactionTestError) Unwrap() error { return e.cause }
+
+type redactionIntermediateError struct {
+	cause error
+}
+
+func (e *redactionIntermediateError) Error() string {
+	return fmt.Sprintf("intermediate: %v", e.cause)
+}
+
+func (e *redactionIntermediateError) Unwrap() error { return e.cause }
 
 func TestRedactLocationURI(t *testing.T) {
 	for _, tc := range []struct {
@@ -65,6 +87,50 @@ func TestRedactLocationURI(t *testing.T) {
 			assert.NotContains(t, got, "secret")
 			assert.NotContains(t, got, "deadbeef")
 		})
+	}
+}
+
+func TestRedactLocationErrorPreservesIntermediateWrappers(t *testing.T) {
+	t.Parallel()
+
+	const location = "https://cdn.example/archive.tar.zst?" +
+		"X-Amz-Credential=credential&X-Amz-Signature=signature"
+	transportErr := errors.New("transport failure")
+	urlErr := &url.Error{
+		Op:  "Get",
+		URL: location,
+		Err: transportErr,
+	}
+	inner := &redactionIntermediateError{cause: urlErr}
+	outer := &redactionTestError{name: "outer", cause: inner}
+
+	redacted := redactLocationError(outer, "")
+	require.ErrorIs(t, redacted, transportErr)
+	assert.Same(t, outer, errors.Unwrap(redacted))
+	assert.Same(t, inner, errors.Unwrap(outer))
+	assert.Same(t, urlErr, errors.Unwrap(inner))
+	var gotOuter *redactionTestError
+	require.ErrorAs(t, redacted, &gotOuter)
+	assert.Same(t, outer, gotOuter)
+	var gotInner *redactionIntermediateError
+	require.ErrorAs(t, redacted, &gotInner)
+	assert.Same(t, inner, gotInner)
+	var gotURLErr *url.Error
+	require.ErrorAs(t, redacted, &gotURLErr)
+	assert.NotSame(t, urlErr, gotURLErr)
+	assert.Equal(t, "https://cdn.example/archive.tar.zst", gotURLErr.URL)
+	require.ErrorIs(t, gotURLErr, transportErr)
+
+	assert.Contains(t, redacted.Error(), "https://cdn.example/archive.tar.zst")
+	assert.Contains(t, gotURLErr.Error(), "https://cdn.example/archive.tar.zst")
+	for _, secret := range []string{
+		"X-Amz-Credential",
+		"credential",
+		"X-Amz-Signature",
+		"signature",
+	} {
+		assert.NotContains(t, redacted.Error(), secret)
+		assert.NotContains(t, gotURLErr.Error(), secret)
 	}
 }
 

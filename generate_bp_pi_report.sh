@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUTPUT_FILE="${1:-benchmark_results_bp_pi.md}"
+OUTPUT_FILE="${1:-docs/benchmarks/benchmark_results_bp_pi.md}"
 CACHE_DIR="${CACHE_DIR:-/tmp/dingo-bp-pi-go-cache}"
 GOMAXPROCS_VALUE="${GOMAXPROCS_VALUE:-4}"
 BENCH_TIME="${BENCH_TIME:-5s}"

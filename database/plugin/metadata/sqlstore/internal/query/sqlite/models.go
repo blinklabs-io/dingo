@@ -123,6 +123,40 @@ type Drep struct {
 	Active            sql.NullBool
 }
 
+type DrepDelegator struct {
+	ID                 int64
+	DrepCredentialTag  int64
+	DrepCredential     []byte
+	StakeCredentialTag int64
+	StakeCredential    []byte
+	AddedSlot          int64
+	RemovedSlot        sql.NullInt64
+}
+
+type DrepDormancyHistory struct {
+	ID                    int64
+	AddedSlot             int64
+	PreviousDormantEpochs int64
+}
+
+type DrepDormancyState struct {
+	ID            int64
+	DormantEpochs int64
+}
+
+type DrepExpiryEpochEvent struct {
+	AddedSlot int64
+}
+
+type DrepExpiryHistory struct {
+	ID                int64
+	CredentialTag     int64
+	Credential        []byte
+	AddedSlot         int64
+	LastActivityEpoch int64
+	ExpiryEpoch       int64
+}
+
 type Epoch struct {
 	Nonce               []byte
 	EvolvingNonce       []byte
@@ -166,6 +200,11 @@ type ImportedPoolBlockCount struct {
 	CapturedSlot   int64
 }
 
+type LeiosTransactionContext struct {
+	TransactionID int64
+	Slot          int64
+}
+
 type MidnightAriadneParam struct {
 	ID    int64
 	Epoch int64
@@ -205,6 +244,14 @@ type MidnightAssetSpend struct {
 	BlockTimestampMs int64
 }
 
+type MidnightCandidateRemoval struct {
+	ID          int64
+	BlockNumber int64
+	TxHash      []byte
+	OutputIndex int64
+	Datum       []byte
+}
+
 type MidnightCommitteeCandidateRegistration struct {
 	ID           int64
 	TxHash       []byte
@@ -232,6 +279,12 @@ type MidnightEpochCandidate struct {
 	Epoch          int64
 	BlockNumber    int64
 	CandidatesCbor []byte
+}
+
+type MidnightEpochTransition struct {
+	BlockNumber    int64
+	PreviousEpoch  int64
+	PreviousExists int64
 }
 
 type MidnightGovernanceDatum struct {
@@ -310,6 +363,7 @@ type PoolStakeSnapshot struct {
 	CapturedSlot                  int64
 	LeiosKeyPublic                []byte
 	LeiosKeyPossessionProof       []byte
+	LeiosKeyRegistrationEpoch     sql.NullInt64
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -354,16 +408,18 @@ type RewardAccountOutput struct {
 	Guarded       bool
 	CapturedSlot  int64
 	BoundarySlot  int64
+	Folded        bool
 }
 
 type RewardAdaPot struct {
-	ID           int64
-	Epoch        int64
-	Treasury     string
-	Reserves     string
-	Fees         string
-	Rewards      string
-	CapturedSlot int64
+	ID                int64
+	Epoch             int64
+	Treasury          string
+	Reserves          string
+	Fees              string
+	Rewards           string
+	CapturedSlot      int64
+	ImportedEpochFees sql.NullString
 }
 
 type RewardPoolInput struct {
@@ -392,6 +448,7 @@ type RewardPoolOutput struct {
 	OptimalReward       string
 	TotalReward         string
 	LeaderReward        string
+	LeaderRewardDeficit string
 	MemberRewardTotal   string
 	OwnerStake          string
 	Undistributed       string

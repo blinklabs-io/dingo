@@ -42,9 +42,12 @@ const sqliteFileMetricNamePrefix = "dingo_database_sql_"
 // checkpoint modes (including the automatic checkpoint
 // wal_autocheckpoint(10000) triggers -- see sqliteCommonPragmas in
 // shared_sqlstore.go) all backfill WAL frames into metadata.sqlite but
-// never ftruncate the -wal file itself, so between checkpointWAL's periodic
-// TRUNCATE attempts (see shared_sqlstore.go) this gauge only grows. Measured
-// live against a sustained write workload, it held steady at 42007552 bytes
+// do not shrink the -wal file themselves. journal_size_limit(67108864) can
+// shrink it to 64 MiB when SQLite resets the WAL, while checkpointWAL's
+// periodic TRUNCATE attempts (see shared_sqlstore.go) can bring it to zero.
+// Neither bounds an active WAL or one that cannot reset while a reader holds
+// an old snapshot. Measured live against a sustained write workload before
+// the size limit, the file held steady at 42007552 bytes
 // across PASSIVE/FULL/RESTART checkpoints alike, with busy=0 and
 // checkpointed==log (fully checkpointed) each time, and only returned to 0
 // after an explicit TRUNCATE checkpoint. A successful periodic TRUNCATE
@@ -70,11 +73,12 @@ func registerSQLiteFileMetrics(
 			"(metadata.sqlite-wal). Sampled live from the filesystem on "+
 			"each scrape. Not a checkpoint-health signal on its own: "+
 			"PASSIVE/FULL/RESTART checkpoints never shrink the file, only "+
-			"a periodic TRUNCATE checkpoint attempt does, so a steady "+
+			"journal_size_limit can cap it at 64MiB after a WAL reset and "+
+			"a periodic TRUNCATE checkpoint can bring it to zero. Neither "+
+			"bounds an active WAL or one held by a reader, so a steady "+
 			"non-zero value (~40MB or more at the configured "+
-			"wal_autocheckpoint threshold) is expected, though a "+
-			"successful attempt can bring it back down and a persistent "+
-			"reader can keep it at that floor.",
+			"wal_autocheckpoint threshold) is expected and a persistent "+
+			"reader can keep it above either limit.",
 		func() float64 {
 			info, err := os.Stat(walPath)
 			if err != nil {

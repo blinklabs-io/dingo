@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 func integrationMigrationLocker(

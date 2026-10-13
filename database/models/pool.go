@@ -98,15 +98,20 @@ type PoolRegistration struct {
 	MetadataHash               []byte
 	LeiosKeyPublic             []byte
 	LeiosKeyPossessionProof    []byte
-	Owners                     []PoolRegistrationOwner
-	Relays                     []PoolRegistrationRelay
-	Pledge                     types.Uint64
-	Cost                       types.Uint64
-	CertificateID              uint
-	ID                         uint
-	PoolID                     uint
-	AddedSlot                  uint64
-	DepositAmount              types.Uint64
+	LeiosKeyRegistrationEpoch  *uint64
+	// LeiosKeyRegistrationAgeUnknown marks imported pool parameters whose
+	// original registration slot is unavailable. AddedSlot is the import slot
+	// for those rows and must not restart the voting-key TTL.
+	LeiosKeyRegistrationAgeUnknown bool
+	Owners                         []PoolRegistrationOwner
+	Relays                         []PoolRegistrationRelay
+	Pledge                         types.Uint64
+	Cost                           types.Uint64
+	CertificateID                  uint
+	ID                             uint
+	PoolID                         uint
+	AddedSlot                      uint64
+	DepositAmount                  types.Uint64
 }
 
 type PoolRegistrationOwner struct {
@@ -117,9 +122,15 @@ type PoolRegistrationOwner struct {
 }
 
 type PoolRegistrationRelay struct {
-	Ipv4               *net.IP
-	Ipv6               *net.IP
-	Hostname           string
+	Ipv4 *net.IP
+	Ipv6 *net.IP
+	// Type preserves the relay constructor. It is nil for legacy rows written
+	// before the relay-type migration, where callers infer it from the fields.
+	Type     *int
+	Hostname string
+	// PoolKeyHash is the owning pool's key hash. It is filled by
+	// GetActivePoolRelays and is not stored on the relay row.
+	PoolKeyHash        []byte `gorm:"-"`
 	ID                 uint
 	PoolRegistrationID uint
 	PoolID             uint

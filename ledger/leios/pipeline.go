@@ -221,8 +221,8 @@ func stageFor(
 
 // ProduceDecision is the answer to "may an endorser block be produced for
 // this slot right now?", returned by MayProduceEndorserBlock. It is the
-// stable seam consumed by the forge-loop integration (issue #1862); this
-// package does not itself forge EBs.
+// stable seam consumed by the forge-loop integration; this package does not
+// itself forge EBs.
 type ProduceDecision struct {
 	// Allowed reports whether production is permitted at the current slot.
 	Allowed bool
@@ -236,8 +236,8 @@ type ProduceDecision struct {
 
 // EligibleEb is a certified endorser block eligible for ranking-block
 // inclusion, returned by EligibleCertifiedEbs. The actual RB embedding is
-// out of scope for issue #1861 (no ranking-block CDDL exists yet); this
-// type is the interface a future RB builder consumes.
+// out of scope (no ranking-block CDDL exists yet); this type is the interface a
+// future RB builder consumes.
 type EligibleEb struct {
 	SlotNo            uint64
 	EndorserBlockHash lcommon.Blake2b256
@@ -323,7 +323,7 @@ type PipelineManager struct {
 	// endorser block it is not tracking: a quorum event is built inside
 	// VoteManager's lock and published after it is released, so a
 	// rollback can be processed in between and the event that arrives
-	// afterwards describes a chain that no longer exists (#3600).
+	// afterwards describes a chain that no longer exists.
 	// Entries are dropped past the rollback point by handleRollback and
 	// past InstanceTTLSlots by pruneExpiredLocked, which bounds the map
 	// to the canonical blocks of one instance-TTL window.
@@ -650,7 +650,7 @@ func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
 
 // MayProduceEndorserBlock reports whether an endorser block may be forged
 // for the given slot at the current slot. It is the producer-facing seam
-// for the forge loop (#1862); this package does not forge.
+// for the forge loop; this package does not forge.
 func (m *PipelineManager) MayProduceEndorserBlock(
 	slot uint64,
 ) (ProduceDecision, error) {

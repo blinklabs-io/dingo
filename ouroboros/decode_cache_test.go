@@ -23,15 +23,447 @@ import (
 	"time"
 
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
+
+// benchConwayBlockFixture and benchConwayHeaderFixture mirror
+// conwayBlockFixtureBytes/conwayHeaderFixtureBytes but accept testing.TB so
+// the same real fixture loading works from both Test and Benchmark
+// functions.
+func benchConwayBlockFixture(b *testing.B) (blockType uint, raw []byte) {
+	b.Helper()
+	blocks, err := testfixtures.GenerateConwayChain(1)
+	if err != nil {
+		b.Fatalf("generate fixture: %v", err)
+	}
+	if len(blocks) != 1 {
+		b.Fatalf("expected one generated block, got %d", len(blocks))
+	}
+	return uint(blocks[0].Type()), blocks[0].Cbor()
+}
+
+func benchConwayHeaderFixture(b *testing.B) (headerType uint, raw []byte) {
+	b.Helper()
+	blocks, err := testfixtures.GenerateConwayChain(1)
+	if err != nil {
+		b.Fatalf("generate fixture: %v", err)
+	}
+	if len(blocks) != 1 {
+		b.Fatalf("expected one generated block, got %d", len(blocks))
+	}
+	return uint(blocks[0].Type()), blocks[0].Header().Cbor()
+}
+
+// --- Blocks -----------------------------------------------------------
+
+// BenchmarkBlockDecodeDirect is the baseline: decode every delivery
+// directly, no cache, no hashing, no locking. Every other block benchmark
+// below should be read relative to this number.
+func BenchmarkBlockDecodeDirect(b *testing.B) {
+	o := testOuroborosForDecodeCache(b)
+	blockType, raw := benchConwayBlockFixture(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := o.decodeBlockfetchBlock(blockType, raw); err != nil {
+			b.Fatalf("decode: %v", err)
+		}
+	}
+}
+
+// BenchmarkBlockDecodeCacheAllDuplicate is the best case for the cache: every
+// delivery is byte-identical (the real-world "several peers relay the same
+// block" scenario). Only the first call should actually decode.
+func BenchmarkBlockDecodeCacheAllDuplicate(b *testing.B) {
+	o := testOuroborosForDecodeCache(b)
+	blockType, raw := benchConwayBlockFixture(b)
+	decodeFn := func() (gledger.Block, error) {
+		return o.decodeBlockfetchBlock(blockType, raw)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		// Hash inside the timed loop: the real entry point
+		// (blockfetchClientBlockRaw) hashes every delivery's bytes before
+		// the cache lookup, even when -- as here -- the bytes are
+		// byte-identical to the previous delivery. Precomputing the key
+		// once outside the loop would omit that per-delivery cost from the
+		// reported numbers.
+		key := hashDecodeInput(blockType, raw)
+		if _, err, _ := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
+			b.Fatalf("decode: %v", err)
+		}
+	}
+}
+
+// BenchmarkBlockDecodeCacheAllUnique is the worst case for the cache: every
+// delivery is a genuine miss (no duplication ever happens), so this measures
+// the pure tax the cache adds -- hashing plus locking plus bookkeeping --
+// with zero benefit, on top of the same real decode cost every iteration.
+// Compare directly against BenchmarkBlockDecodeDirect: the delta is the cost
+// of adding this cache when duplicates never occur.
+func BenchmarkBlockDecodeCacheAllUnique(b *testing.B) {
+	o := testOuroborosForDecodeCache(b)
+	blockType, raw := benchConwayBlockFixture(b)
+	decodeFn := func() (gledger.Block, error) {
+		return o.decodeBlockfetchBlock(blockType, raw)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		key := hashDecodeInput(blockType, raw)
+		// Perturb the key per iteration so every call is a genuine miss,
+		// while decodeFn still does the same real decode work each time --
+		// isolating cache overhead from decode cost.
+		key[0] ^= byte(i)
+		key[1] ^= byte(i >> 8)
+		key[2] ^= byte(i >> 16)
+		if _, err, _ := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
+			b.Fatalf("decode: %v", err)
+		}
+	}
+}
+
+// BenchmarkBlockDecodeConcurrentDirect is the concurrent baseline:
+// many simulated peer connections decoding in parallel with no shared state
+// at all, so it should scale cleanly with GOMAXPROCS.
+func BenchmarkBlockDecodeConcurrentDirect(b *testing.B) {
+	o := testOuroborosForDecodeCache(b)
+	blockType, raw := benchConwayBlockFixture(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			// testing.TB's FailNow/Fatal family must only be called from the
+			// goroutine running the benchmark, not from a RunParallel worker
+			// goroutine (it would only runtime.Goexit that one goroutine,
+			// not reliably fail the benchmark). Error/Errorf are safe from
+			// any goroutine.
+			if _, err := o.decodeBlockfetchBlock(blockType, raw); err != nil {
+				b.Errorf("decode: %v", err)
+			}
+		}
+	})
+}
+
+// BenchmarkBlockDecodeConcurrentCacheAllUnique is the concurrency-specific
+// worst case: many simulated peer connections all hitting the shared cache
+// lock at once, with every call a genuine miss (no benefit from caching at
+// all). This isolates lock contention cost under real concurrent peer load,
+// which BenchmarkBlockDecodeCacheAllUnique (single-goroutine) cannot show.
+func BenchmarkBlockDecodeConcurrentCacheAllUnique(b *testing.B) {
+	o := testOuroborosForDecodeCache(b)
+	blockType, raw := benchConwayBlockFixture(b)
+	decodeFn := func() (gledger.Block, error) {
+		return o.decodeBlockfetchBlock(blockType, raw)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	var counter atomic.Int64
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			// atomic: RunParallel's callback runs concurrently across
+			// goroutines, so a plain counter++ here is a data race.
+			n := counter.Add(1)
+			key := hashDecodeInput(blockType, raw)
+			key[0] ^= byte(n)
+			key[1] ^= byte(n >> 8)
+			key[2] ^= byte(n >> 16)
+			key[3] ^= byte(n >> 24)
+			if _, err, _ := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
+				b.Errorf("decode: %v", err)
+			}
+		}
+	})
+}
+
+// --- Headers ------------------------------------------------------------
+//
+// Headers are the case most likely to be a losing trade (small, cheap to
+// decode, so the hashing+locking tax is proportionally larger).
+
+func BenchmarkHeaderDecodeDirect(b *testing.B) {
+	o := testOuroborosForDecodeCache(b)
+	headerType, raw := benchConwayHeaderFixture(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := o.decodeChainsyncHeader(headerType, raw); err != nil {
+			b.Fatalf("decode: %v", err)
+		}
+	}
+}
+
+func BenchmarkHeaderDecodeCacheAllDuplicate(b *testing.B) {
+	o := testOuroborosForDecodeCache(b)
+	headerType, raw := benchConwayHeaderFixture(b)
+	decodeFn := func() (gledger.BlockHeader, error) {
+		return o.decodeChainsyncHeader(headerType, raw)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		// Hash inside the timed loop -- see BenchmarkBlockDecodeCacheAllDuplicate.
+		key := hashDecodeInput(headerType, raw)
+		if _, err, _ := o.headerDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
+			b.Fatalf("decode: %v", err)
+		}
+	}
+}
+
+func BenchmarkHeaderDecodeCacheAllUnique(b *testing.B) {
+	o := testOuroborosForDecodeCache(b)
+	headerType, raw := benchConwayHeaderFixture(b)
+	decodeFn := func() (gledger.BlockHeader, error) {
+		return o.decodeChainsyncHeader(headerType, raw)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		key := hashDecodeInput(headerType, raw)
+		key[0] ^= byte(i)
+		key[1] ^= byte(i >> 8)
+		key[2] ^= byte(i >> 16)
+		if _, err, _ := o.headerDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
+			b.Fatalf("decode: %v", err)
+		}
+	}
+}
+
+func BenchmarkHeaderDecodeConcurrentDirect(b *testing.B) {
+	o := testOuroborosForDecodeCache(b)
+	headerType, raw := benchConwayHeaderFixture(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			// See BenchmarkBlockDecodeConcurrentDirect on why Errorf, not
+			// Fatalf, is required inside a RunParallel worker goroutine.
+			if _, err := o.decodeChainsyncHeader(headerType, raw); err != nil {
+				b.Errorf("decode: %v", err)
+			}
+		}
+	})
+}
+
+func BenchmarkHeaderDecodeConcurrentCacheAllUnique(b *testing.B) {
+	o := testOuroborosForDecodeCache(b)
+	headerType, raw := benchConwayHeaderFixture(b)
+	decodeFn := func() (gledger.BlockHeader, error) {
+		return o.decodeChainsyncHeader(headerType, raw)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	var counter atomic.Int64
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			// atomic: see BenchmarkBlockDecodeConcurrentCacheAllUnique.
+			n := counter.Add(1)
+			key := hashDecodeInput(headerType, raw)
+			key[0] ^= byte(n)
+			key[1] ^= byte(n >> 8)
+			key[2] ^= byte(n >> 16)
+			key[3] ^= byte(n >> 24)
+			if _, err, _ := o.headerDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
+				b.Errorf("decode: %v", err)
+			}
+		}
+	})
+}
+
+// BenchmarkBlockDecodeCacheMixedRatio sits between the two extremes already
+// covered above (BenchmarkBlockDecodeCacheAllDuplicate: 100% duplicate,
+// BenchmarkBlockDecodeCacheAllUnique: 0% duplicate). Real peer traffic is
+// neither: a handful of distinct in-flight blocks, each delivered by several
+// peers. This cycles through 5 distinct keys (derived from the same real
+// block bytes) so 4 out of every 5 calls are a cache hit, giving a more
+// representative estimate of steady-state overhead/benefit than either pure
+// extreme does alone.
+func BenchmarkBlockDecodeCacheMixedRatio(b *testing.B) {
+	o := testOuroborosForDecodeCache(b)
+	blockType, raw := benchConwayBlockFixture(b)
+	decodeFn := func() (gledger.Block, error) {
+		return o.decodeBlockfetchBlock(blockType, raw)
+	}
+	// Five distinct real inputs (copies of the fixture bytes, each with one
+	// byte perturbed), hashed inside the timed loop below -- not five
+	// precomputed keys derived by flipping a byte of an already-hashed
+	// digest. The real entry point always hashes the actual delivery bytes
+	// it was just handed, so this measures that per-delivery hashing cost
+	// on genuinely different byte content, matching production instead of
+	// precomputing the (cheaper) key lookup alone before ResetTimer.
+	const distinctInputs = 5
+	rawVariants := make([][]byte, distinctInputs)
+	for i := range rawVariants {
+		variant := make([]byte, len(raw))
+		copy(variant, raw)
+		variant[0] ^= byte(i)
+		rawVariants[i] = variant
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		key := hashDecodeInput(blockType, rawVariants[i%distinctInputs])
+		if _, err, _ := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
+			b.Fatalf("decode: %v", err)
+		}
+	}
+}
+
+func TestDecodeCacheConcurrentHash(t *testing.T) {
+	generators := map[string]func(
+		uint64, common.Blake2b256, uint64, uint64, int,
+	) ([]gledger.Block, error){
+		"shelley":  fixtures.GenerateShelleyChain,
+		"allegra":  fixtures.GenerateAllegraChain,
+		"mary":     fixtures.GenerateMaryChain,
+		"alonzo":   fixtures.GenerateAlonzoChain,
+		"babbage":  fixtures.GenerateBabbageChain,
+		"conway":   fixtures.GenerateConwayChain,
+		"dijkstra": fixtures.GenerateDijkstraChain,
+	}
+	for name, generate := range generators {
+		t.Run(name, func(t *testing.T) {
+			blocks, err := generate(1, common.Blake2b256{}, 2, 20, 1)
+			require.NoError(t, err)
+			require.Len(t, blocks, 1)
+			block := blocks[0]
+			testDecodedHashPublication(t, 0, uint(block.Type()),
+				block.Cbor(), block.Header().Cbor(), block.Hash())
+		})
+	}
+	t.Run("byron_ebb", func(t *testing.T) {
+		raw := byronEbbFixtureCbor(t)
+		block, err := gledger.NewBlockFromCbor(gledger.BlockTypeByronEbb, raw)
+		require.NoError(t, err)
+		testDecodedHashPublication(t, 0, gledger.BlockTypeByronEbb,
+			raw, block.Header().Cbor(), block.Hash())
+		t.Run("full_block_header_fallback", func(t *testing.T) {
+			testDecodedHashPublication(t, 0, gledger.BlockTypeByronEbb,
+				raw, raw, block.Hash())
+		})
+	})
+	t.Run("musashi", func(t *testing.T) {
+		raw := readHexFixture(t, musashiType7BlockFixture)
+		headerRaw := readHexFixture(t, musashiType7HeaderFixture)
+		oracle := testOuroborosForDecodeCache(t)
+		oracle.config.NetworkMagic = musashiNetworkMagic
+		block, err := oracle.decodeBlockfetchBlock(gledger.BlockTypeConway, raw)
+		require.NoError(t, err)
+		testDecodedHashPublication(t, musashiNetworkMagic,
+			gledger.BlockTypeConway, raw, headerRaw, block.Hash())
+	})
+}
+
+func testDecodedHashPublication(
+	t *testing.T,
+	networkMagic uint32,
+	blockType uint,
+	blockRaw, headerRaw []byte,
+	expected common.Blake2b256,
+) {
+	t.Helper()
+	t.Run("header", func(t *testing.T) {
+		ob := testOuroborosForDecodeCache(t)
+		ob.config.NetworkMagic = networkMagic
+		testConcurrentCachedHash(t, ob.headerDecodeCache,
+			hashDecodeInput(blockType, headerRaw),
+			func() (gledger.BlockHeader, error) {
+				return ob.decodeChainsyncHeader(blockType, headerRaw)
+			}, expected)
+	})
+	t.Run("block", func(t *testing.T) {
+		ob := testOuroborosForDecodeCache(t)
+		ob.config.NetworkMagic = networkMagic
+		testConcurrentCachedHash(t, ob.blockDecodeCache,
+			hashDecodeInput(blockType, blockRaw),
+			func() (gledger.Block, error) {
+				return ob.decodeBlockfetchBlock(blockType, blockRaw)
+			}, expected)
+	})
+}
+
+func testConcurrentCachedHash[T gledger.BlockHeader](
+	t *testing.T,
+	cache *decodeCache[T],
+	key decodeCacheKey,
+	decode func() (T, error),
+	expected common.Blake2b256,
+) {
+	t.Helper()
+	const readers = 8
+	decodeStarted := make(chan struct{})
+	releaseDecode := make(chan struct{})
+	startHash := make(chan struct{})
+	ready := make(chan struct{}, readers)
+	done := make(chan struct{}, readers)
+	finishDecode := sync.OnceFunc(func() { close(releaseDecode) })
+	beginHash := sync.OnceFunc(func() { close(startHash) })
+	defer finishDecode()
+	defer beginHash()
+	var decodeCalls atomic.Int64
+	values := make([]T, readers)
+	errors := make([]error, readers)
+	hashes := make([]common.Blake2b256, readers)
+	for reader := range readers {
+		go func() {
+			values[reader], errors[reader], _ = cache.getOrDecodeSizedWithErrorRetention(key, 0, true, func() (T, error) {
+				if decodeCalls.Add(1) == 1 {
+					close(decodeStarted)
+				}
+				<-releaseDecode
+				return decode()
+			})
+			ready <- struct{}{}
+			<-startHash
+			if errors[reader] == nil {
+				hashes[reader] = values[reader].Hash()
+			}
+			done <- struct{}{}
+		}()
+	}
+	testutil.RequireReceive(t, decodeStarted, 5*time.Second, "decode leader")
+	require.Eventually(t, func() bool {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		return len(cache.inFlight[key]) == readers-1
+	}, 5*time.Second, time.Millisecond, "all followers must wait for decode")
+	finishDecode()
+	for range readers {
+		testutil.RequireReceive(t, ready, 5*time.Second, "cache result")
+	}
+	beginHash()
+	for range readers {
+		testutil.RequireReceive(t, done, 5*time.Second, "concurrent hash")
+	}
+	for reader := range readers {
+		require.NoError(t, errors[reader])
+		require.Same(t, values[0], values[reader])
+		require.Equal(t, expected, hashes[reader])
+		if block, ok := any(values[reader]).(gledger.Block); ok {
+			require.Equal(t, expected, block.Header().Hash())
+		}
+	}
+	cached, err, decoded := cache.getOrDecodeSizedWithErrorRetention(key, 0, true, decode)
+	require.NoError(t, err)
+	require.False(t, decoded)
+	require.Same(t, values[0], cached)
+	require.Equal(t, expected, cached.Hash())
+	require.EqualValues(t, 1, decodeCalls.Load())
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	require.Empty(t, cache.inFlight)
+}
 
 // decodeCacheTestConnId returns a ConnectionId with valid net.Addr values
 // (mirrors testConnId in blockfetch_test.go). The real chainsync/blockfetch
@@ -102,17 +534,17 @@ func countingDecoder(
 func TestDecodeCacheHitAvoidsRedecode(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	key := decodeCacheKey{0x01}
 	decodeFn, calls := countingDecoder(42, nil, 0)
 
-	value, err, decoded := c.getOrDecode(key, decodeFn)
+	value, err, decoded := c.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn)
 	require.NoError(t, err)
 	require.Equal(t, 42, value)
 	require.True(t, decoded, "first call for a new key must be a real decode")
 	require.EqualValues(t, 1, calls.Load())
 
-	value, err, decoded = c.getOrDecode(key, decodeFn)
+	value, err, decoded = c.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn)
 	require.NoError(t, err)
 	require.Equal(t, 42, value)
 	require.False(
@@ -132,14 +564,14 @@ func TestDecodeCacheHitAvoidsRedecode(t *testing.T) {
 func TestDecodeCacheDifferentKeysDecodeIndependently(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	keyA := decodeCacheKey{0xAA}
 	keyB := decodeCacheKey{0xBB}
 	decodeA, callsA := countingDecoder(1, nil, 0)
 	decodeB, callsB := countingDecoder(2, nil, 0)
 
-	valueA, errA, decodedA := c.getOrDecode(keyA, decodeA)
-	valueB, errB, decodedB := c.getOrDecode(keyB, decodeB)
+	valueA, errA, decodedA := c.getOrDecodeSizedWithErrorRetention(keyA, 0, true, decodeA)
+	valueB, errB, decodedB := c.getOrDecodeSizedWithErrorRetention(keyB, 0, true, decodeB)
 
 	require.NoError(t, errA)
 	require.NoError(t, errB)
@@ -161,12 +593,12 @@ func TestDecodeCacheDifferentKeysDecodeIndependently(t *testing.T) {
 func TestDecodeCacheFailureIsCachedAndNotRetried(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	key := decodeCacheKey{0x02}
 	wantErr := errors.New("malformed input")
 	decodeFn, calls := countingDecoder(0, wantErr, 0)
 
-	_, err, decoded := c.getOrDecode(key, decodeFn)
+	_, err, decoded := c.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn)
 	require.ErrorIs(t, err, wantErr)
 	require.True(t, decoded)
 	require.EqualValues(t, 1, calls.Load())
@@ -174,7 +606,7 @@ func TestDecodeCacheFailureIsCachedAndNotRetried(t *testing.T) {
 	// A second submission of the identical (bad) bytes must reuse the
 	// cached failure, not re-attempt a decode that -- since decoding is a
 	// pure function of its input -- can only ever fail the same way again.
-	_, err, decoded = c.getOrDecode(key, decodeFn)
+	_, err, decoded = c.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn)
 	require.ErrorIs(t, err, wantErr)
 	require.False(t, decoded)
 	require.EqualValues(t, 1, calls.Load())
@@ -186,7 +618,7 @@ func TestDecodeCacheFailureIsCachedAndNotRetried(t *testing.T) {
 func TestDecodeCachePrunesExpiredEntries(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	key := decodeCacheKey{0x03}
 	decodeCacheInsertForTest(
 		c, key, 7, time.Now().Add(-decodeCacheTTL-time.Second),
@@ -214,7 +646,7 @@ func TestDecodeCachePrunesExpiredEntries(t *testing.T) {
 func TestDecodeCacheExpiredEntryIsNotServedOnLookup(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	key := decodeCacheKey{0x09}
 	decodeCacheInsertForTest(
 		c, key, 111, time.Now().Add(-decodeCacheTTL-time.Second),
@@ -222,7 +654,7 @@ func TestDecodeCacheExpiredEntryIsNotServedOnLookup(t *testing.T) {
 	require.Equal(t, 1, decodeCacheLen(c))
 
 	decodeFn, calls := countingDecoder(222, nil, 0)
-	value, err, decoded := c.getOrDecode(key, decodeFn)
+	value, err, decoded := c.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn)
 	require.NoError(t, err)
 	require.True(
 		t, decoded,
@@ -236,7 +668,7 @@ func TestDecodeCacheExpiredEntryIsNotServedOnLookup(t *testing.T) {
 
 	// The fresh decode is now the current cached entry: a second lookup
 	// immediately afterward must be a normal hit again.
-	value, err, decoded = c.getOrDecode(key, decodeFn)
+	value, err, decoded = c.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn)
 	require.NoError(t, err)
 	require.False(t, decoded)
 	require.Equal(t, 222, value)
@@ -249,7 +681,7 @@ func TestDecodeCacheExpiredEntryIsNotServedOnLookup(t *testing.T) {
 func TestDecodeCachePrunesBySizeWhenOverCapacity(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	now := time.Now()
 	// Insert one more than the cap, all fresh (no TTL pruning triggers),
 	// with strictly increasing insertedAt so eviction order is
@@ -285,6 +717,107 @@ func TestDecodeCachePrunesBySizeWhenOverCapacity(t *testing.T) {
 	)
 }
 
+func TestDecodeCachePrunesByRetainedBytes(t *testing.T) {
+	t.Parallel()
+
+	c := newDecodeCacheWithByteLimit[int](10)
+	keyA := decodeCacheKey{0xA1}
+	keyB := decodeCacheKey{0xB1}
+	keyLarge := decodeCacheKey{0xC1}
+	decode := func(value int) func() (int, error) {
+		return func() (int, error) { return value, nil }
+	}
+
+	_, _, decoded := c.getOrDecodeSizedWithErrorRetention(keyA, 6, true, decode(1))
+	require.True(t, decoded)
+	_, _, decoded = c.getOrDecodeSizedWithErrorRetention(keyB, 6, true, decode(2))
+	require.True(t, decoded)
+
+	c.mu.Lock()
+	require.LessOrEqual(t, c.retainedBytes, c.maxRetainedBytes)
+	_, keyAPresent := c.entries[keyA]
+	_, keyBPresent := c.entries[keyB]
+	c.mu.Unlock()
+	require.False(t, keyAPresent, "oldest retained entry is evicted first")
+	require.True(t, keyBPresent)
+
+	_, _, decoded = c.getOrDecodeSizedWithErrorRetention(keyLarge, 11, true, decode(3))
+	require.True(t, decoded)
+	require.Equal(t, 1, decodeCacheLen(c), "an entry over budget is served but not retained")
+	c.remove(keyB)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	require.Zero(t, c.retainedBytes, "explicit invalidation releases its byte charge")
+	require.Empty(t, c.entries)
+}
+
+func TestOversizedRejectedDecodePreservesUsefulCacheEntry(t *testing.T) {
+	t.Parallel()
+	c := newDecodeCacheWithByteLimit[int](10)
+	usefulKey := decodeCacheKey{0xD1}
+	rejectedKey := decodeCacheKey{0xD2}
+	_, err, decoded := c.getOrDecodeSizedWithErrorRetention(
+		usefulKey,
+		6,
+		false,
+		func() (int, error) { return 1, nil },
+	)
+	require.NoError(t, err)
+	require.True(t, decoded)
+	_, err, decoded = c.getOrDecodeSizedWithErrorRetention(
+		rejectedKey,
+		11,
+		false,
+		func() (int, error) { return 0, errors.New("invalid maximum-size block") },
+	)
+	require.ErrorContains(t, err, "invalid maximum-size block")
+	require.True(t, decoded)
+	require.Equal(t, 1, decodeCacheLen(c))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, usefulRetained := c.entries[usefulKey]
+	_, rejectedRetained := c.entries[rejectedKey]
+	require.True(t, usefulRetained)
+	require.False(t, rejectedRetained)
+	require.Equal(t, 6, c.retainedBytes)
+}
+
+func TestDecodeCacheChargeForRawSaturates(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, int(^uint(0)>>1), decodeCacheChargeForRaw(int(^uint(0)>>1)))
+	require.Equal(t, decodeCacheEntryOverhead, decodeCacheChargeForRaw(0))
+	require.Equal(t, 10*decodeCacheRawSizeFactor+decodeCacheEntryOverhead,
+		decodeCacheChargeForRaw(10))
+}
+
+func TestHasCborArrayEnvelope(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, hasCborArrayEnvelope([]byte{0x80}))
+	require.True(t, hasCborArrayEnvelope([]byte{0x9f}))
+	require.False(t, hasCborArrayEnvelope(nil))
+	require.False(t, hasCborArrayEnvelope([]byte{0x60}))
+}
+
+func TestInvalidateBlockDecodeCacheRemovesRejectedEntry(t *testing.T) {
+	t.Parallel()
+
+	o := testOuroborosForDecodeCache(t)
+	raw := []byte{0x84, 0x01}
+	key := hashDecodeInput(7, raw)
+	_, _, decoded := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 516, true, func() (gledger.Block, error) {
+		return nil, nil
+	})
+	require.True(t, decoded)
+	require.Equal(t, 1, decodeCacheLen(o.blockDecodeCache))
+	o.InvalidateBlockDecodeCache(7, raw)
+	require.Zero(t, decodeCacheLen(o.blockDecodeCache))
+	o.blockDecodeCache.mu.Lock()
+	require.Zero(t, o.blockDecodeCache.retainedBytes)
+	o.blockDecodeCache.mu.Unlock()
+}
+
 // TestDecodeCacheConcurrentCallersShareOneDecode is the core correctness
 // property: many goroutines submitting the identical key at the same time
 // must trigger exactly one real decode, and every goroutine -- whether it
@@ -293,7 +826,7 @@ func TestDecodeCachePrunesBySizeWhenOverCapacity(t *testing.T) {
 func TestDecodeCacheConcurrentCallersShareOneDecode(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	key := decodeCacheKey{0x04}
 	const wantValue = 123
 	const numCallers = 50
@@ -308,7 +841,7 @@ func TestDecodeCacheConcurrentCallersShareOneDecode(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			results[idx], errs[idx], _ = c.getOrDecode(key, decodeFn)
+			results[idx], errs[idx], _ = c.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn)
 		}(i)
 	}
 	wg.Wait()
@@ -336,7 +869,7 @@ func TestDecodeCacheConcurrentCallersShareOneDecode(t *testing.T) {
 func TestDecodeCacheConcurrentDifferentKeysDoNotSerialize(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	keyA := decodeCacheKey{0xA1}
 	keyB := decodeCacheKey{0xB1}
 
@@ -359,11 +892,11 @@ func TestDecodeCacheConcurrentDifferentKeysDoNotSerialize(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _, _ = c.getOrDecode(keyA, blockingDecoder(1))
+		_, _, _ = c.getOrDecodeSizedWithErrorRetention(keyA, 0, true, blockingDecoder(1))
 	}()
 	go func() {
 		defer wg.Done()
-		_, _, _ = c.getOrDecode(keyB, blockingDecoder(2))
+		_, _, _ = c.getOrDecodeSizedWithErrorRetention(keyB, 0, true, blockingDecoder(2))
 	}()
 
 	select {
@@ -383,12 +916,12 @@ func TestDecodeCacheConcurrentDifferentKeysDoNotSerialize(t *testing.T) {
 }
 
 // TestDecodeCacheNoGoroutineLeakOnFailure covers the failure-fan-out case
-// discussed for #489: when N callers are waiting on one in-flight decode and
+// when N callers are waiting on one in-flight decode and
 // it fails, every waiter must be woken with that failure, not left hanging.
 func TestDecodeCacheNoGoroutineLeakOnFailure(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	key := decodeCacheKey{0x05}
 	wantErr := errors.New("bad bytes")
 	release := make(chan struct{})
@@ -402,7 +935,7 @@ func TestDecodeCacheNoGoroutineLeakOnFailure(t *testing.T) {
 	for i := range numWaiters {
 		go func(idx int) {
 			defer wg.Done()
-			_, err, _ := c.getOrDecode(key, func() (int, error) {
+			_, err, _ := c.getOrDecodeSizedWithErrorRetention(key, 0, true, func() (int, error) {
 				leaderOnce.Do(func() { close(leaderStarted) })
 				<-release
 				return 0, wantErr
@@ -445,22 +978,22 @@ func TestDecodeCacheNoGoroutineLeakOnFailure(t *testing.T) {
 }
 
 // TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey is the regression
-// test for dingo #3511: decodeFn panicking (CBOR decode on adversarial bytes
-// can, in principle, panic instead of erroring) used to leave the key's
-// in-flight claim held and any concurrent waiters parked forever, since
-// nothing ever closed their channels or released the claim; a later fix made
-// getOrDecode recover and release waiters but still re-raised the panic to
-// the leader's own caller, letting a decoder panic escape uncontained into
-// the calling protocol worker. This confirms the current behavior: every
-// caller -- the leader that actually ran decodeFn included -- gets back a
-// normal error instead of a panic, the in-flight claim is released, and --
-// since the panic is now a cached failure like any other -- a later call for
-// the identical bytes fails fast without invoking decodeFn (and therefore
-// without panicking) again.
+// test for panic containment: decodeFn panicking (CBOR decode on adversarial
+// bytes can, in principle, panic instead of erroring) used to leave the key's
+// in-flight claim held and any concurrent waiters parked forever, since nothing
+// ever closed their channels or released the claim; a later fix made
+// getOrDecode recover and release waiters but still re-raised the panic to the
+// leader's own caller, letting a decoder panic escape uncontained into the
+// calling protocol worker. This confirms the current behavior: every caller --
+// the leader that actually ran decodeFn included -- gets back a normal error
+// instead of a panic, the in-flight claim is released, and -- since the panic
+// is now a cached failure like any other -- a later call for the identical
+// bytes fails fast without invoking decodeFn (and therefore without panicking)
+// again.
 func TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	key := decodeCacheKey{0x06}
 	release := make(chan struct{})
 	leaderStarted := make(chan struct{})
@@ -473,7 +1006,7 @@ func TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey(t *testing.T) {
 	for i := range numWaiters {
 		go func(idx int) {
 			defer wg.Done()
-			_, err, _ := c.getOrDecode(key, func() (int, error) {
+			_, err, _ := c.getOrDecodeSizedWithErrorRetention(key, 0, true, func() (int, error) {
 				leaderOnce.Do(func() { close(leaderStarted) })
 				<-release
 				panic("simulated decode panic")
@@ -514,7 +1047,7 @@ func TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey(t *testing.T) {
 	// The panic is now a cached failure like any other: a later call for
 	// the identical key must return it immediately without invoking
 	// decodeFn (and therefore without panicking) again.
-	_, err, decoded := c.getOrDecode(key, func() (int, error) {
+	_, err, decoded := c.getOrDecodeSizedWithErrorRetention(key, 0, true, func() (int, error) {
 		t.Fatal("decodeFn must not run again for an already-cached panic")
 		return 0, nil
 	})
@@ -532,17 +1065,17 @@ func TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey(t *testing.T) {
 // claim would never be released, and every current and future waiter for
 // these exact bytes would block forever. This confirms a panic(nil)
 // decodeFn is still detected and still finishes the entry and wakes waiters,
-// exactly like panicking with any other value, and (dingo #3511) that
+// exactly like panicking with any other value, and that
 // getOrDecode itself returns a normal error instead of re-raising.
 func TestDecodeCachePanicNilDuringDecodeDoesNotStrandWaitersOrKey(
 	t *testing.T,
 ) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	key := decodeCacheKey{0x0E}
 
-	_, err, decoded := c.getOrDecode(key, func() (int, error) {
+	_, err, decoded := c.getOrDecodeSizedWithErrorRetention(key, 0, true, func() (int, error) {
 		panic(nil)
 	})
 	require.True(t, decoded)
@@ -559,7 +1092,7 @@ func TestDecodeCachePanicNilDuringDecodeDoesNotStrandWaitersOrKey(
 		"the in-flight claim must be released even when decodeFn panics with nil",
 	)
 
-	_, err2, decoded2 := c.getOrDecode(key, func() (int, error) {
+	_, err2, decoded2 := c.getOrDecodeSizedWithErrorRetention(key, 0, true, func() (int, error) {
 		t.Fatal("decodeFn must not run again for an already-cached panic")
 		return 0, nil
 	})
@@ -573,8 +1106,8 @@ func TestDecodeCachePanicNilDuringDecodeDoesNotStrandWaitersOrKey(
 }
 
 // TestDecodeWithPanicSafeMetricsRecordsMissOnPanic is the regression test for
-// dingo #3511: a decodeFn panic must be fully contained by getOrDecode (see
-// TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey above), so
+// panic containment: a decodeFn panic must be fully contained by getOrDecode
+// (see TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey above), so
 // decodeWithPanicSafeMetrics returns normally to
 // blockfetchClientBlockRaw/chainsyncClientRollForwardRaw with a plain error
 // instead of letting the panic escape into the calling protocol worker, and
@@ -582,13 +1115,11 @@ func TestDecodeCachePanicNilDuringDecodeDoesNotStrandWaitersOrKey(
 func TestDecodeWithPanicSafeMetricsRecordsMissOnPanic(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	key := decodeCacheKey{0x08}
 	var outcomes []bool
 
-	_, err := decodeWithPanicSafeMetrics(
-		c,
-		key,
+	_, err := decodeWithPanicSafeMetricsSized(c, key, 0, true,
 		func() (int, error) { panic("simulated decode panic") },
 		func(isMiss bool) { outcomes = append(outcomes, isMiss) },
 	)
@@ -611,9 +1142,7 @@ func TestDecodeWithPanicSafeMetricsRecordsMissOnPanic(t *testing.T) {
 	// call for the same key must not invoke decodeFn again, but must still
 	// be recorded as a miss (not a hit) -- see
 	// TestDecodeWithPanicSafeMetricsNeverRecordsAFailureAsAHit.
-	_, err = decodeWithPanicSafeMetrics(
-		c,
-		key,
+	_, err = decodeWithPanicSafeMetricsSized(c, key, 0, true,
 		func() (int, error) {
 			t.Fatal("decodeFn must not run again for an already-cached panic")
 			return 0, nil
@@ -638,7 +1167,7 @@ func TestDecodeWithPanicSafeMetricsRecordsMissOnPanic(t *testing.T) {
 func TestDecodeWithPanicSafeMetricsNeverRecordsAFailureAsAHit(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	failKey := decodeCacheKey{0x0C}
 	okKey := decodeCacheKey{0x0D}
 	wantErr := errors.New("bad bytes")
@@ -646,19 +1175,16 @@ func TestDecodeWithPanicSafeMetricsNeverRecordsAFailureAsAHit(t *testing.T) {
 	record := func(isMiss bool) { outcomes = append(outcomes, isMiss) }
 
 	// Fresh failure: a genuine miss, correctly true regardless of the fix.
-	_, err := decodeWithPanicSafeMetrics(
-		c, failKey, func() (int, error) { return 0, wantErr }, record,
-	)
+	_, err := decodeWithPanicSafeMetricsSized(c, failKey, 0, true, func() (int, error) { return 0, wantErr }, record)
 	require.ErrorIs(t, err, wantErr)
 
 	// Repeat of the identical bad bytes: served from the cached failure
 	// (decoded=false internally), but must still be a miss, not a hit --
 	// this is the specific case the fix addresses.
-	_, err = decodeWithPanicSafeMetrics(
-		c, failKey, func() (int, error) {
-			t.Fatal("decodeFn must not run again for a cached failure")
-			return 0, nil
-		}, record,
+	_, err = decodeWithPanicSafeMetricsSized(c, failKey, 0, true, func() (int, error) {
+		t.Fatal("decodeFn must not run again for a cached failure")
+		return 0, nil
+	}, record,
 	)
 	require.ErrorIs(t, err, wantErr)
 	require.Equal(
@@ -670,15 +1196,12 @@ func TestDecodeWithPanicSafeMetricsNeverRecordsAFailureAsAHit(t *testing.T) {
 	// matching getOrDecode's own decoded contract -- the fix must not touch
 	// this case.
 	outcomes = nil
-	_, err = decodeWithPanicSafeMetrics(
-		c, okKey, func() (int, error) { return 7, nil }, record,
-	)
+	_, err = decodeWithPanicSafeMetricsSized(c, okKey, 0, true, func() (int, error) { return 7, nil }, record)
 	require.NoError(t, err)
-	_, err = decodeWithPanicSafeMetrics(
-		c, okKey, func() (int, error) {
-			t.Fatal("decodeFn must not run again for a cache hit")
-			return 0, nil
-		}, record,
+	_, err = decodeWithPanicSafeMetricsSized(c, okKey, 0, true, func() (int, error) {
+		t.Fatal("decodeFn must not run again for a cache hit")
+		return 0, nil
+	}, record,
 	)
 	require.NoError(t, err)
 	require.Equal(t, []bool{true, false}, outcomes)
@@ -710,7 +1233,7 @@ func TestDecodeCacheWaiterGetsResultEvenIfItsEntryIsEvictedBeforeItWakes(
 ) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	key := decodeCacheKey{0x77}
 	release := make(chan struct{})
 	leaderStarted := make(chan struct{})
@@ -718,7 +1241,7 @@ func TestDecodeCacheWaiterGetsResultEvenIfItsEntryIsEvictedBeforeItWakes(
 	leaderDone := make(chan struct{})
 	go func() {
 		defer close(leaderDone)
-		_, _, _ = c.getOrDecode(key, func() (int, error) {
+		_, _, _ = c.getOrDecodeSizedWithErrorRetention(key, 0, true, func() (int, error) {
 			close(leaderStarted)
 			<-release
 			return 999, nil
@@ -732,8 +1255,7 @@ func TestDecodeCacheWaiterGetsResultEvenIfItsEntryIsEvictedBeforeItWakes(
 	var gotDecoded bool
 	go func() {
 		defer close(waiterDone)
-		gotValue, gotErr, gotDecoded = c.getOrDecode(
-			key,
+		gotValue, gotErr, gotDecoded = c.getOrDecodeSizedWithErrorRetention(key, 0, true,
 			func() (int, error) {
 				t.Error("the waiter must not run decodeFn itself")
 				return 0, nil
@@ -796,7 +1318,7 @@ func TestDecodeCacheWaiterGetsResultEvenIfItsEntryIsEvictedBeforeItWakes(
 func TestDecodeCacheStressConcurrentChurnWithSharedKeys(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	const numSharedKeys = 8
 	sharedKeys := make([]decodeCacheKey, numSharedKeys)
 	for i := range sharedKeys {
@@ -824,8 +1346,7 @@ func TestDecodeCacheStressConcurrentChurnWithSharedKeys(t *testing.T) {
 					// decode -- while eviction churn runs alongside it.
 					idx := i % numSharedKeys
 					want := (idx + 1) * 1000
-					value, err, _ := c.getOrDecode(
-						sharedKeys[idx],
+					value, err, _ := c.getOrDecodeSizedWithErrorRetention(sharedKeys[idx], 0, true,
 						func() (int, error) { return want, nil },
 					)
 					if err != nil || value != want {
@@ -841,8 +1362,7 @@ func TestDecodeCacheStressConcurrentChurnWithSharedKeys(t *testing.T) {
 					key[2] = byte(i)
 					key[3] = byte(i >> 8)
 					want := g*100000 + i
-					value, err, _ := c.getOrDecode(
-						key,
+					value, err, _ := c.getOrDecodeSizedWithErrorRetention(key, 0, true,
 						func() (int, error) { return want, nil },
 					)
 					if err != nil || value != want {
@@ -877,8 +1397,8 @@ func testOuroborosForDecodeCache(tb testing.TB) *Ouroboros {
 	tb.Helper()
 	return &Ouroboros{
 		config:            OuroborosConfig{},
-		blockDecodeCache:  newDecodeCache[gledger.Block](),
-		headerDecodeCache: newDecodeCache[gledger.BlockHeader](),
+		blockDecodeCache:  newDecodeCacheWithByteLimit[gledger.Block](decodeCacheMaxBytes),
+		headerDecodeCache: newDecodeCacheWithByteLimit[gledger.BlockHeader](decodeCacheMaxBytes),
 	}
 }
 
@@ -911,12 +1431,12 @@ func TestBlockDecodeCacheIntegrationRealConwayBlock(t *testing.T) {
 		return o.decodeBlockfetchBlock(blockType, raw)
 	}
 
-	block1, err, decoded1 := o.blockDecodeCache.getOrDecode(key, decodeOnce)
+	block1, err, decoded1 := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeOnce)
 	require.NoError(t, err)
 	require.True(t, decoded1)
 	require.NotNil(t, block1)
 
-	block2, err, decoded2 := o.blockDecodeCache.getOrDecode(key, decodeOnce)
+	block2, err, decoded2 := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeOnce)
 	require.NoError(t, err)
 	require.False(t, decoded2, "identical real block bytes must hit the cache")
 	require.NotNil(t, block2)
@@ -940,12 +1460,12 @@ func TestHeaderDecodeCacheIntegrationRealConwayHeader(t *testing.T) {
 		return o.decodeChainsyncHeader(headerType, raw)
 	}
 
-	header1, err, decoded1 := o.headerDecodeCache.getOrDecode(key, decodeOnce)
+	header1, err, decoded1 := o.headerDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeOnce)
 	require.NoError(t, err)
 	require.True(t, decoded1)
 	require.NotNil(t, header1)
 
-	header2, err, decoded2 := o.headerDecodeCache.getOrDecode(key, decodeOnce)
+	header2, err, decoded2 := o.headerDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeOnce)
 	require.NoError(t, err)
 	require.False(t, decoded2, "identical real header bytes must hit the cache")
 	require.NotNil(t, header2)
@@ -957,7 +1477,7 @@ func TestHeaderDecodeCacheIntegrationRealConwayHeader(t *testing.T) {
 }
 
 // TestBlockDecodeCacheCorruptedDeliveryDoesNotContaminateGoodEntry covers the
-// "4 peers, one sends a corrupted copy" scenario discussed for #489: a
+// "4 peers, one sends a corrupted copy" scenario: a
 // tampered copy of a real block hashes to a different key than the genuine
 // bytes, so it is decoded (and fails) completely independently, and can
 // never poison the cache entry the honest bytes produce.
@@ -979,8 +1499,7 @@ func TestBlockDecodeCacheCorruptedDeliveryDoesNotContaminateGoodEntry(
 		"corrupted bytes must hash to a different cache key than the original",
 	)
 
-	goodBlock, goodErr, _ := o.blockDecodeCache.getOrDecode(
-		goodKey,
+	goodBlock, goodErr, _ := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(goodKey, 0, true,
 		func() (gledger.Block, error) {
 			return o.decodeBlockfetchBlock(blockType, goodRaw)
 		},
@@ -991,8 +1510,7 @@ func TestBlockDecodeCacheCorruptedDeliveryDoesNotContaminateGoodEntry(
 	// The corrupted delivery decodes (and most likely fails) on its own,
 	// independent entry -- it must not be able to overwrite or be confused
 	// with the good entry already cached above.
-	_, badErr, badDecoded := o.blockDecodeCache.getOrDecode(
-		badKey,
+	_, badErr, badDecoded := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(badKey, 0, true,
 		func() (gledger.Block, error) {
 			return o.decodeBlockfetchBlock(blockType, badRaw)
 		},
@@ -1005,8 +1523,7 @@ func TestBlockDecodeCacheCorruptedDeliveryDoesNotContaminateGoodEntry(
 
 	// Whatever the outcome for the corrupted bytes, the good entry must be
 	// completely unaffected.
-	goodBlockAgain, goodErrAgain, decodedAgain := o.blockDecodeCache.getOrDecode(
-		goodKey,
+	goodBlockAgain, goodErrAgain, decodedAgain := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(goodKey, 0, true,
 		func() (gledger.Block, error) {
 			return o.decodeBlockfetchBlock(blockType, goodRaw)
 		},
@@ -1039,8 +1556,7 @@ func TestHeaderDecodeCacheCorruptedDeliveryDoesNotContaminateGoodEntry(
 	badKey := hashDecodeInput(headerType, badRaw)
 	require.NotEqual(t, goodKey, badKey)
 
-	goodHeader, goodErr, _ := o.headerDecodeCache.getOrDecode(
-		goodKey,
+	goodHeader, goodErr, _ := o.headerDecodeCache.getOrDecodeSizedWithErrorRetention(goodKey, 0, true,
 		func() (gledger.BlockHeader, error) {
 			return o.decodeChainsyncHeader(headerType, goodRaw)
 		},
@@ -1048,8 +1564,7 @@ func TestHeaderDecodeCacheCorruptedDeliveryDoesNotContaminateGoodEntry(
 	require.NoError(t, goodErr)
 	require.NotNil(t, goodHeader)
 
-	_, badErr, badDecoded := o.headerDecodeCache.getOrDecode(
-		badKey,
+	_, badErr, badDecoded := o.headerDecodeCache.getOrDecodeSizedWithErrorRetention(badKey, 0, true,
 		func() (gledger.BlockHeader, error) {
 			return o.decodeChainsyncHeader(headerType, badRaw)
 		},
@@ -1060,8 +1575,7 @@ func TestHeaderDecodeCacheCorruptedDeliveryDoesNotContaminateGoodEntry(
 		"the corrupted bytes must be a genuine cache miss",
 	)
 
-	goodHeaderAgain, goodErrAgain, decodedAgain := o.headerDecodeCache.getOrDecode(
-		goodKey,
+	goodHeaderAgain, goodErrAgain, decodedAgain := o.headerDecodeCache.getOrDecodeSizedWithErrorRetention(goodKey, 0, true,
 		func() (gledger.BlockHeader, error) {
 			return o.decodeChainsyncHeader(headerType, goodRaw)
 		},
@@ -1102,11 +1616,11 @@ func TestBlockfetchClientBlockRawRoutesThroughSharedCache(t *testing.T) {
 	require.NoError(t, o.blockfetchClientBlockRaw(ctx, blockType, raw))
 
 	require.InDelta(
-		t, 1, testutil.ToFloat64(o.decodeCacheMetrics.blockCacheMisses), 0,
+		t, 1, promtestutil.ToFloat64(o.decodeCacheMetrics.blockCacheMisses), 0,
 		"the first delivery must be a real decode",
 	)
 	require.InDelta(
-		t, 1, testutil.ToFloat64(o.decodeCacheMetrics.blockCacheHits), 0,
+		t, 1, promtestutil.ToFloat64(o.decodeCacheMetrics.blockCacheHits), 0,
 		"the second, identical delivery must be served from the cache",
 	)
 }
@@ -1132,11 +1646,11 @@ func TestChainsyncClientRollForwardRawRoutesThroughSharedCache(t *testing.T) {
 	)
 
 	require.InDelta(
-		t, 1, testutil.ToFloat64(o.decodeCacheMetrics.headerCacheMisses), 0,
+		t, 1, promtestutil.ToFloat64(o.decodeCacheMetrics.headerCacheMisses), 0,
 		"the first delivery must be a real decode",
 	)
 	require.InDelta(
-		t, 1, testutil.ToFloat64(o.decodeCacheMetrics.headerCacheHits), 0,
+		t, 1, promtestutil.ToFloat64(o.decodeCacheMetrics.headerCacheHits), 0,
 		"the second, identical delivery must be served from the cache",
 	)
 }
@@ -1165,14 +1679,46 @@ func TestBlockfetchClientBlockRawRecordsRepeatedFailureAsMissesNotHits(
 	require.Error(t, o.blockfetchClientBlockRaw(ctx, blockType, badRaw))
 
 	require.InDelta(
-		t, 2, testutil.ToFloat64(o.decodeCacheMetrics.blockCacheMisses), 0,
+		t, 2, promtestutil.ToFloat64(o.decodeCacheMetrics.blockCacheMisses), 0,
 		"both calls represent a failed decode and must count as misses",
 	)
 	require.Zero(
 		t,
-		testutil.ToFloat64(o.decodeCacheMetrics.blockCacheHits),
+		promtestutil.ToFloat64(o.decodeCacheMetrics.blockCacheHits),
 		"a failed decode -- fresh or replayed from the cached failure -- must never count as a hit",
 	)
+}
+
+func TestBlockfetchClientBlockRawRetainsMalformedEnvelopeFailure(t *testing.T) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
+	blockType, _ := conwayBlockFixtureBytes(t)
+	badEnvelope := []byte{0x81, 0x00}
+	ctx := blockfetch.CallbackContext{}
+
+	require.Error(t, o.blockfetchClientBlockRaw(ctx, blockType, badEnvelope))
+	require.Equal(t, 1, decodeCacheLen(o.blockDecodeCache))
+	require.Error(t, o.blockfetchClientBlockRaw(ctx, blockType, badEnvelope))
+	require.Equal(t, 1, decodeCacheLen(o.blockDecodeCache))
+}
+
+func TestChainsyncClientRollForwardRawRetainsMalformedEnvelopeFailure(
+	t *testing.T,
+) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
+	headerType, _ := conwayHeaderFixtureBytes(t)
+	badEnvelope := []byte{0x81, 0x00}
+	ctx := ochainsync.CallbackContext{ConnectionId: decodeCacheTestConnId()}
+
+	require.Error(t, o.chainsyncClientRollForwardRaw(
+		ctx, headerType, badEnvelope, ochainsync.Tip{},
+	))
+	require.Equal(t, 1, decodeCacheLen(o.headerDecodeCache))
+	require.Error(t, o.chainsyncClientRollForwardRaw(
+		ctx, headerType, badEnvelope, ochainsync.Tip{},
+	))
+	require.Equal(t, 1, decodeCacheLen(o.headerDecodeCache))
 }
 
 // TestDecodeCacheConcurrentWaitersOnFailureAreAllRecordedAsMisses proves the
@@ -1188,7 +1734,7 @@ func TestDecodeCacheConcurrentWaitersOnFailureAreAllRecordedAsMisses(
 ) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	key := decodeCacheKey{0x0A}
 	wantErr := errors.New("bad bytes")
 	release := make(chan struct{})
@@ -1206,7 +1752,7 @@ func TestDecodeCacheConcurrentWaitersOnFailureAreAllRecordedAsMisses(
 	for i := range numWaiters {
 		go func(idx int) {
 			defer wg.Done()
-			_, err, decoded := c.getOrDecode(key, func() (int, error) {
+			_, err, decoded := c.getOrDecodeSizedWithErrorRetention(key, 0, true, func() (int, error) {
 				leaderOnce.Do(func() { close(leaderStarted) })
 				<-release
 				return 0, wantErr
@@ -1261,12 +1807,12 @@ func TestBlockDecodeCacheWorksWithMusashiLeiosDecodeBranch(t *testing.T) {
 		return o.decodeBlockfetchBlock(blockType, raw)
 	}
 
-	block1, err, decoded1 := o.blockDecodeCache.getOrDecode(key, decodeFn)
+	block1, err, decoded1 := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn)
 	require.NoError(t, err)
 	require.True(t, decoded1)
 	require.NotNil(t, block1)
 
-	block2, err, decoded2 := o.blockDecodeCache.getOrDecode(key, decodeFn)
+	block2, err, decoded2 := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn)
 	require.NoError(t, err)
 	require.False(
 		t,
@@ -1372,19 +1918,19 @@ func TestDecodeCacheOutcomeMetricsCountHitsAndMissesCorrectly(t *testing.T) {
 	keyB := decodeCacheKey{0x20}
 	decodeFn := func() (gledger.Block, error) { return nil, nil }
 
-	_, _, decodedA1 := o.blockDecodeCache.getOrDecode(keyA, decodeFn)
+	_, _, decodedA1 := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(keyA, 0, true, decodeFn)
 	o.recordBlockDecodeCacheOutcome(decodedA1)
-	_, _, decodedA2 := o.blockDecodeCache.getOrDecode(keyA, decodeFn)
+	_, _, decodedA2 := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(keyA, 0, true, decodeFn)
 	o.recordBlockDecodeCacheOutcome(decodedA2)
-	_, _, decodedB1 := o.blockDecodeCache.getOrDecode(keyB, decodeFn)
+	_, _, decodedB1 := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(keyB, 0, true, decodeFn)
 	o.recordBlockDecodeCacheOutcome(decodedB1)
 
 	require.InDelta(
-		t, 2, testutil.ToFloat64(o.decodeCacheMetrics.blockCacheMisses), 0,
+		t, 2, promtestutil.ToFloat64(o.decodeCacheMetrics.blockCacheMisses), 0,
 		"keyA's first call and keyB's first call are both misses",
 	)
 	require.InDelta(
-		t, 1, testutil.ToFloat64(o.decodeCacheMetrics.blockCacheHits), 0,
+		t, 1, promtestutil.ToFloat64(o.decodeCacheMetrics.blockCacheHits), 0,
 		"keyA's second call is a hit",
 	)
 }
@@ -1416,8 +1962,7 @@ func TestBlockDecodeCacheConcurrentCallersShareOneRealDecode(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			results[idx], errs[idx], _ = o.blockDecodeCache.getOrDecode(
-				key,
+			results[idx], errs[idx], _ = o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true,
 				decodeFn,
 			)
 		}(i)
@@ -1444,7 +1989,7 @@ func TestBlockDecodeCacheConcurrentCallersShareOneRealDecode(t *testing.T) {
 func TestDecodeCacheNeverExceedsCapDuringSustainedChurn(t *testing.T) {
 	t.Parallel()
 
-	c := newDecodeCache[int]()
+	c := newDecodeCacheWithByteLimit[int](decodeCacheMaxBytes)
 	decodeFn := func() (int, error) { return 1, nil }
 
 	for i := range decodeCacheMaxEntries * 3 {
@@ -1452,7 +1997,7 @@ func TestDecodeCacheNeverExceedsCapDuringSustainedChurn(t *testing.T) {
 		key[0] = byte(i)
 		key[1] = byte(i >> 8)
 		key[2] = byte(i >> 16)
-		_, _, _ = c.getOrDecode(key, decodeFn)
+		_, _, _ = c.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn)
 		require.LessOrEqual(
 			t,
 			decodeCacheLen(c),
@@ -1475,11 +2020,11 @@ func TestBlockDecodeCacheHandlesEmptyInputWithoutPanicking(t *testing.T) {
 		return o.decodeBlockfetchBlock(0, nil)
 	}
 
-	_, err, decoded := o.blockDecodeCache.getOrDecode(key, decodeFn)
+	_, err, decoded := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn)
 	require.True(t, decoded)
 	require.Error(t, err, "empty input should fail to decode, not panic")
 
-	_, err2, decoded2 := o.blockDecodeCache.getOrDecode(key, decodeFn)
+	_, err2, decoded2 := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn)
 	require.False(
 		t,
 		decoded2,

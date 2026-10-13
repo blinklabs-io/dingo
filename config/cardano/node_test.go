@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,14 +24,42 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
+
+func FuzzNewCardanoNodeConfigFromReader(f *testing.F) {
+	f.Add("")
+	f.Add("Protocol: Cardano\nRequiresNetworkMagic: RequiresMagic\n")
+	f.Add("PeerSharing: true\nTargetNumberOfActivePeers: 20\n")
+
+	f.Fuzz(func(t *testing.T, data string) {
+		if len(data) > 64*1024 {
+			t.Skip("config input is too large for fast fuzzing")
+		}
+
+		cfg, err := NewCardanoNodeConfigFromReader(bytes.NewBufferString(data))
+		if err != nil {
+			return
+		}
+		if cfg == nil {
+			t.Fatalf(
+				"NewCardanoNodeConfigFromReader returned nil without an error",
+			)
+		}
+
+		encoded, err := yaml.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("yaml.Marshal(parsed config): %v", err)
+		}
+		if _, err := NewCardanoNodeConfigFromReader(bytes.NewReader(encoded)); err != nil {
+			t.Fatalf("reparse marshaled config: %v", err)
+		}
+	})
+}
 
 const (
 	testDataDir = "testdata"
 )
-
-//go:fix inline
-func ptrBool(v bool) *bool { return new(v) }
 
 //go:fix inline
 func ptrUint64(v uint64) *uint64 { return new(v) }
@@ -108,6 +136,51 @@ func TestCardanoNodeConfig(t *testing.T) {
 			t.Fatalf("got nil instead of ConwayGenesis")
 		}
 	})
+}
+
+// TestPBFTSignatureLimit pins ouroboros-consensus's Word64 limit
+// floor(threshold * k), computed in Double: 0.57 * 100 is
+// 56.99999999999999 in Double, so the limit is 56 where an exact rational
+// would give 57, and a negative product wraps.
+func TestPBFTSignatureLimit(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     string
+		k          uint64
+		limit      uint64
+		configured bool
+		wantError  bool
+	}{
+		{name: "absent", config: "{}\n", k: 10},
+		{name: "0.10", config: "PBftSignatureThreshold: 0.10\n", k: 10, limit: 1, configured: true},
+		{name: "0.22", config: "PBftSignatureThreshold: 0.22\n", k: 10, limit: 2, configured: true},
+		{name: "0.50", config: "PBftSignatureThreshold: 0.50\n", k: 10, limit: 5, configured: true},
+		{name: "above one", config: "PBftSignatureThreshold: 1.1\n", k: 10, limit: 11, configured: true},
+		{name: "exponent", config: "PBftSignatureThreshold: 1e-1\n", k: 10, limit: 1, configured: true},
+		{name: "integer", config: "PBftSignatureThreshold: 1\n", k: 10, limit: 10, configured: true},
+		{name: "double rounding", config: "PBftSignatureThreshold: 0.57\n", k: 100, limit: 56, configured: true},
+		{name: "mainnet default spelled out", config: "PBftSignatureThreshold: 0.22\n", k: 2160, limit: 475, configured: true},
+		{name: "negative wraps", config: "PBftSignatureThreshold: -0.1\n", k: 10, limit: ^uint64(0), configured: true},
+		{name: "string", config: "PBftSignatureThreshold: invalid\n", wantError: true},
+		{name: "quoted", config: "PBftSignatureThreshold: \"0.5\"\n", wantError: true},
+		{name: "infinite", config: "PBftSignatureThreshold: .inf\n", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config, err := NewCardanoNodeConfigFromReader(
+				bytes.NewBufferString(test.config),
+			)
+			if test.wantError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			limit, configured, err := config.PBFTSignatureLimit(test.k)
+			require.NoError(t, err)
+			require.Equal(t, test.limit, limit)
+			require.Equal(t, test.configured, configured)
+		})
+	}
 }
 
 func TestCardanoNodeConfigMissingGenesisHashes(t *testing.T) {
@@ -431,25 +504,46 @@ func TestHardForkEpoch(t *testing.T) {
 		}
 	})
 
-	t.Run("disabled ignores all epochs", func(t *testing.T) {
-		cfg := &CardanoNodeConfig{
-			ExperimentalHardForksEnabled: new(false),
-			TestShelleyHardForkAtEpoch:   ptrUint64(0),
-			TestConwayHardForkAtEpoch:    ptrUint64(0),
-		}
-		_, ok := cfg.HardForkEpoch("shelley")
-		assert.False(t, ok,
-			"should not report configured when disabled")
-	})
+	// cardano-node's parseHardForkProtocol reads TestShelley..Conway
+	// HardForkAtEpoch unconditionally and only reads the Dijkstra override
+	// when ExperimentalHardForksEnabled is set.
+	for _, flag := range []struct {
+		name string
+		val  *bool
+	}{
+		{"flag unset", nil},
+		{"flag false", new(false)},
+	} {
+		t.Run(flag.name+" still schedules Shelley through Conway", func(t *testing.T) {
+			cfg := &CardanoNodeConfig{
+				ExperimentalHardForksEnabled: flag.val,
+				TestShelleyHardForkAtEpoch:   ptrUint64(1),
+				TestAllegraHardForkAtEpoch:   ptrUint64(2),
+				TestMaryHardForkAtEpoch:      ptrUint64(3),
+				TestAlonzoHardForkAtEpoch:    ptrUint64(4),
+				TestBabbageHardForkAtEpoch:   ptrUint64(5),
+				TestConwayHardForkAtEpoch:    ptrUint64(6),
+			}
+			for want, era := range []string{
+				"shelley", "allegra", "mary",
+				"alonzo", "babbage", "conway",
+			} {
+				epoch, ok := cfg.HardForkEpoch(era)
+				assert.True(t, ok, "era %s should be scheduled", era)
+				assert.Equal(t, uint64(want+1), epoch, "era %s", era)
+			}
+		})
 
-	t.Run("nil flag ignores all epochs", func(t *testing.T) {
-		cfg := &CardanoNodeConfig{
-			TestShelleyHardForkAtEpoch: ptrUint64(0),
-		}
-		_, ok := cfg.HardForkEpoch("shelley")
-		assert.False(t, ok,
-			"should not report configured when flag is nil")
-	})
+		t.Run(flag.name+" does not schedule Dijkstra", func(t *testing.T) {
+			cfg := &CardanoNodeConfig{
+				ExperimentalHardForksEnabled: flag.val,
+				TestDijkstraHardForkAtEpoch:  ptrUint64(0),
+			}
+			_, ok := cfg.HardForkEpoch("dijkstra")
+			assert.False(t, ok,
+				"Dijkstra must require ExperimentalHardForksEnabled")
+		})
+	}
 
 	t.Run("partial configuration", func(t *testing.T) {
 		cfg := &CardanoNodeConfig{
@@ -558,28 +652,38 @@ func TestCanonicalizeByronGenesisJSON(t *testing.T) {
 // TestDeclaredVersusScheduledHardForkEpoch pins the distinction between the two
 // questions the TestXHardForkAtEpoch fields answer.
 //
-// preview ships TestShelleyHardForkAtEpoch: 0 with
-// ExperimentalHardForksEnabled: False, so a caller that needs to know whether
-// the network begins after Byron cannot use HardForkEpoch -- it reports nothing
-// scheduled, correctly, because cardano-node does not honour the override
-// without the flag. DeclaredHardForkEpoch reports what the file says.
+// cardano-node honours TestShelley..ConwayHardForkAtEpoch whatever
+// ExperimentalHardForksEnabled says, so for those eras the declaration is the
+// schedule. Only TestDijkstraHardForkAtEpoch is ignored without the flag, so
+// that is the one field whose declaration and schedule can differ.
 func TestDeclaredVersusScheduledHardForkEpoch(t *testing.T) {
 	t.Parallel()
 
 	t.Run("declared with the flag off", func(t *testing.T) {
 		cfg := &CardanoNodeConfig{
-			TestShelleyHardForkAtEpoch: new(uint64),
+			TestShelleyHardForkAtEpoch:  new(uint64),
+			TestDijkstraHardForkAtEpoch: new(uint64),
 		}
 
 		epoch, declared := cfg.DeclaredHardForkEpoch("shelley")
 		require.True(t, declared, "the declaration must be visible")
 		require.Equal(t, uint64(0), epoch)
 
-		_, scheduled := cfg.HardForkEpoch("shelley")
+		epoch, scheduled := cfg.HardForkEpoch("shelley")
+		require.True(
+			t,
+			scheduled,
+			"Shelley is scheduled without ExperimentalHardForksEnabled",
+		)
+		require.Equal(t, uint64(0), epoch)
+
+		_, declared = cfg.DeclaredHardForkEpoch("dijkstra")
+		require.True(t, declared, "the declaration must be visible")
+		_, scheduled = cfg.HardForkEpoch("dijkstra")
 		require.False(
 			t,
 			scheduled,
-			"nothing is scheduled without ExperimentalHardForksEnabled",
+			"Dijkstra is not scheduled without ExperimentalHardForksEnabled",
 		)
 	})
 
@@ -613,4 +717,63 @@ func TestDeclaredVersusScheduledHardForkEpoch(t *testing.T) {
 		_, declared := cfg.DeclaredHardForkEpoch("nosucherathere")
 		require.False(t, declared)
 	})
+}
+
+// A genesis file replaced after it was read must not change what is parsed:
+// the reader serves the devnet document on the first read of a name and an
+// unparseable one on every later read, so a loader that reads a name twice
+// fails here.
+func TestLoadGenesisDocumentsParsesTheHashedBytes(t *testing.T) {
+	t.Parallel()
+
+	reads := map[string]int{}
+	read := func(name string) ([]byte, error) {
+		reads[name]++
+		if reads[name] > 1 {
+			return []byte("{ replaced"), nil
+		}
+		return os.ReadFile(filepath.Join("devnet", name))
+	}
+	c := &CardanoNodeConfig{
+		ByronGenesisFile:    "byron-genesis.json",
+		ShelleyGenesisFile:  "shelley-genesis.json",
+		AlonzoGenesisFile:   "alonzo-genesis.json",
+		ConwayGenesisFile:   "conway-genesis.json",
+		DijkstraGenesisFile: "dijkstra-genesis.json",
+	}
+	require.NoError(
+		t,
+		c.loadGenesisDocuments(read),
+		"genesis must be parsed from the bytes that were hashed",
+	)
+	require.Equal(t, map[string]int{
+		"byron-genesis.json":    1,
+		"shelley-genesis.json":  1,
+		"alonzo-genesis.json":   1,
+		"conway-genesis.json":   1,
+		"dijkstra-genesis.json": 1,
+	}, reads)
+
+	shelleyBytes, err := os.ReadFile("devnet/shelley-genesis.json")
+	require.NoError(t, err)
+	require.Equal(t, blake2b256Hex(shelleyBytes), c.ShelleyGenesisHash)
+	require.NotNil(t, c.ShelleyGenesis())
+	require.NotNil(t, c.AlonzoGenesis())
+	require.NotNil(t, c.DijkstraGenesis())
+}
+
+func TestReadHashedGenesisReturnsTransformedBuffer(t *testing.T) {
+	t.Parallel()
+	source := []byte("original")
+	transformed := []byte("hashed and parsed")
+	hash := ""
+	returned, err := readHashedGenesis(
+		func(string) ([]byte, error) { return source, nil },
+		"test",
+		"genesis.json",
+		&hash,
+		func([]byte) ([]byte, error) { return transformed, nil },
+	)
+	require.NoError(t, err)
+	require.Equal(t, transformed, returned)
 }

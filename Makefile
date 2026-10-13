@@ -27,6 +27,8 @@ SQLC_VERSION=v1.31.1
 SQLC=go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
 # The scanner floats along with the advisory database it reads; a pin parks a
 # new advisory behind a stale version instead of forcing it to be fixed.
+# Use automatic toolchain selection so the module's newer toolchain
+# requirement is honored when the installed Go patch lags.
 GOVULNCHECK=go run golang.org/x/vuln/cmd/govulncheck@latest
 PROTOC_SHA256_osx_aarch_64=a7b51b2113862690fa52c62f8891a6037bafb9db88d4f9924c486de9d9bb89d5
 PROTOC_SHA256_osx_x86_64=f9caa5b4d0b537acffb0ffd7d53225511a5574ef903fca550ea9e7600987f13b
@@ -36,15 +38,33 @@ PROTOC_SHA256=$(PROTOC_SHA256_$(PROTOC_OS)_$(PROTOC_ARCH))
 
 # Set version strings: use env vars if set, else git
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
-COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
+# Slice exactly the first 7 chars of the full commit SHA. `git rev-parse
+# --short=7` only sets a 7-char minimum and lengthens the abbreviation on an
+# ambiguous prefix -- more likely under the release job's fetch-depth: 0 full
+# history -- which would diverge from the Homebrew formula bump. The formula
+# slices the first 7 of github.sha the same way, so both paths stamp an
+# identical, deterministic version.CommitHash.
+COMMIT_HASH ?= $(shell git rev-parse HEAD | cut -c1-7)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
 BUILD_TAGS ?= dingo_extra_plugins
+CGO_ENABLED ?= 0
 GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
+# nilaway and modernize accept -tags but ignore it ("no effect"); their package
+# loader reads build tags from GOFLAGS only, so pass them there or every
+# BUILD_TAGS-gated file goes unanalyzed.
+comma := ,
+empty :=
+space := $(empty) $(empty)
+ANALYZER_GOFLAGS=$(strip $(GOFLAGS) $(if $(strip $(BUILD_TAGS)),-tags=$(subst $(space),$(comma),$(strip $(BUILD_TAGS))),))
+# Cover all blinklabs-io modules dingo depends on (gouroboros, plutigo, bursa,
+# bark, ouroboros-mock, ...) without descending into third-party/stdlib deps.
+NILAWAY_FLAGS ?= -include-pkgs=github.com/blinklabs-io
 # Generated sqlc and protobuf packages are validated by their generators;
 # run modernize only against hand-written packages to avoid generator drift.
+MODERNIZE_FLAGS ?=
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity config-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint nilaway modernize import-boundaries docs-parity config-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-storage-scale bench-ci bench-leios-db bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -77,22 +97,31 @@ format: mod-tidy ## Run mod-tidy, then format code
 golines: ## Enforce 80-character line limit
 	golines -w --ignore-generated --chain-split-dots --max-len=80 --reformat-tags .
 
-# golangci-lint covers one module for one GOOS per run. The loop reaches every
-# nested module, and the GOOS=windows run reaches files behind
-# `//go:build windows`, which the host build excludes. CI runs the same scopes
-# in the `lint` job of .github/workflows/go-test.yml and of
-# .github/workflows/publish.yml; internal/docsparity's
+# golangci-lint covers one module per run. The loop reaches every nested
+# module. CI runs the same scopes in the `lint` jobs of
+# .github/workflows/go-test.yml and .github/workflows/publish.yml;
+# internal/docsparity's
 # TestLintCoversEveryGoModule fails until every go.mod has a step in both.
 lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and modernize
 	@for dir in $(GO_MODULE_DIRS); do \
 		echo "golangci-lint run ./... ($$dir)"; \
 		(cd $$dir && golangci-lint run ./...) || exit 1; \
 	done
-	GOOS=windows golangci-lint run ./...
+	$(MAKE) nilaway modernize
+
+# CI runs these same targets in the lint job.
+#
+# nilaway's live heap on this tree is about 12 GB, and without a limit its peak
+# passes the 16 GB of a hosted runner and the runner is killed. GOMEMLIMIT
+# makes the collector hold it near the floor at the cost of run time.
+nilaway: export GOMEMLIMIT ?= 10GiB
+nilaway: ## Fail on NilAway findings in production code
 	# Test fixtures establish preconditions with testify assertions that nilaway
 	# cannot track across calls; analyze production code here.
-	nilaway $(GO_TAG_FLAGS) -exclude-test-files ./...
-	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
+	GOFLAGS="$(ANALYZER_GOFLAGS)" nilaway $(NILAWAY_FLAGS) -exclude-test-files ./...
+
+modernize: ## Fail on modernize findings in hand-written packages
+	GOFLAGS="$(ANALYZER_GOFLAGS)" modernize $(MODERNIZE_FLAGS) $(MODERNIZE_PACKAGES)
 
 import-boundaries: ## Check reviewed package import boundaries
 	go test ./internal/architecture
@@ -123,7 +152,7 @@ sql-check: sql ## Run sql, then fail when checked-in sqlc output is stale
 	git diff --exit-code -- database/plugin/metadata/sqlstore/internal/query
 
 govulncheck: ## Fail on known vulnerabilities reachable from source, including the Go toolchain/stdlib
-	$(GOVULNCHECK) $(GO_TAG_FLAGS) ./...
+	GOTOOLCHAIN=auto $(GOVULNCHECK) $(GO_TAG_FLAGS) ./...
 
 $(PROTOC):
 	mkdir -p $(TOOLS_BIN) $(PROTOC_DIR)
@@ -148,8 +177,15 @@ test-live-lifecycle: ## Run the live two-node lifecycle integration tests with r
 bench: mod-tidy ## Run mod-tidy, then benchmarks
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench=. -benchmem ./...
 
+bench-storage-scale: ## Run the scale-parameterised storage benchmarks (DINGO_BENCH_SCALE, DINGO_BENCH_BLOCKS, see DATABASE.md)
+	DINGO_BENCH_SCALE=$${DINGO_BENCH_SCALE:-1m} DINGO_BENCH_BLOCKS=$${DINGO_BENCH_BLOCKS:-100k} go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkStorageScale(Utxo|BlobBlocks)' -benchtime=100x -benchmem -timeout=0 ./internal/integration
+	DINGO_BENCH_SCALE=$${DINGO_BENCH_SCALE:-1m} DINGO_BENCH_BLOCKS=$${DINGO_BENCH_BLOCKS:-100k} go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkStorageScaleSnapshotPause' -benchtime=1x -benchmem -timeout=0 ./internal/integration
+
+bench-leios-db: ## Run the LeiosDB workload benchmark against the default storage providers
+	go run $(GO_TAG_FLAGS) ./cmd/leios-db-bench
+
 bench-ci: mod-tidy ## Run mod-tidy, then the curated CI benchmark suite (count=10) plus a GOMAXPROCS lock-contention sweep
-	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^Benchmark(BlockProcessingThroughput|BlockProcessingThroughputPredecoded|BlockBatchProcessingThroughput|RawBlockBatchProcessingThroughput|VerifyBlockHeader|TransactionValidation|ChainSyncFromGenesis|RealBlockProcessing|EraTransitionPerformanceRealData|TestLoad|BlockfetchNearTipThroughput|BlockfetchNearTipThroughputPredecoded|BlockfetchNearTipFlushOnlyPredecoded|BlockfetchNearTipQueuedHeaderPredecoded|BlockfetchVerifiedHeaderDispatch|BlockfetchClientBlockMetrics|UpdateConnectionMetrics|HasInboundPeerAddress|Reconcile|PublishSubscribers|BlockMemoryUsage|HotCacheGet|HotCachePut|HotCacheGetMiss|BlockLRUCacheGet|BlockLRUCachePut|TieredCacheHotHit|CachedBlockExtract|CborOffsetEncode|CborOffsetDecode|StorageModeIngest|StorageModeIngestSteadyState)$$' -benchmem -count=10 -timeout=90m ./...
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^Benchmark(BlockProcessingThroughput|BlockProcessingThroughputPredecoded|BlockBatchProcessingThroughput|RawBlockBatchProcessingThroughput|VerifyBlockHeader|TransactionValidation|ChainSyncFromGenesis|RealBlockProcessing|EraTransitionPerformanceRealData|TestLoad|BlockfetchNearTipThroughput|BlockfetchNearTipThroughputPredecoded|BlockfetchNearTipFlushOnlyPredecoded|BlockfetchNearTipQueuedHeaderPredecoded|BlockfetchVerifiedHeaderDispatch|BlockfetchClientBlockMetrics|UpdateConnectionMetrics|HasInboundPeerAddress|Reconcile|PublishSubscribers|BlockMemoryUsage|HotCacheGet|HotCachePut|HotCacheGetMiss|BlockLRUCacheGet|BlockLRUCachePut|TieredCacheHotHit|CachedBlockExtract|CborOffsetEncode|CborOffsetDecode|StorageModeIngest|StorageModeIngestSteadyState|UtxoLookupByAddressRealData|UtxoLookupByRefRealData|TransactionHistoryQueriesRealData|AccountLookupByStakeKeyRealData|PoolLookupByKeyHashRealData|DRepLookupByKeyHashRealData|DatumLookupByHashRealData|ProtocolParametersLookupByEpochRealData|BlockNonceLookupRealData|StakeRegistrationLookupsRealData|PoolRegistrationLookupsRealData)$$' -benchmem -count=10 -timeout=90m ./...
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^Benchmark(BlockLRUParallelReadHeavy|BlockLRUParallelBalanced|BlockLRUParallelReadOnly|HotCacheParallelGet|TryReserveInboundSlotParallel|ConcurrentQueries|TipSnapshotReadOnly|TipSnapshotReadUnderWriter)$$' -benchmem -count=10 -cpu=1,4,8,16 -timeout=30m ./...
 
 bench-mempool-revalidation: ## Benchmark FIFO admission during normal and degenerate rebuilds
@@ -183,7 +219,7 @@ test-devnet: ## Run the default all-Dingo DevNet integration tests
 # Build our program binaries
 # Depends on GO_FILES to determine when rebuild is needed
 $(BINARIES): mod-tidy $(GO_FILES)
-	CGO_ENABLED=0 \
+	CGO_ENABLED=$(CGO_ENABLED) \
 	go build \
 		$(GO_TAG_FLAGS) \
 		$(GO_LDFLAGS) \

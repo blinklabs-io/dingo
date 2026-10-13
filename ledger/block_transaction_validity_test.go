@@ -16,12 +16,13 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -95,7 +96,7 @@ func (t *validityOutcomeStateTx) Produced() []lcommon.Utxo {
 		return nil
 	}
 	return []lcommon.Utxo{{
-		Id: shelley.NewShelleyTransactionInput(
+		Id: shelley.MustNewShelleyTransactionInput(
 			t.Hash().String(),
 			len(t.Outputs()),
 		),
@@ -177,12 +178,18 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 				},
 			}
 
-			require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
-				TxId: regularInputID, OutputIdx: 0, AddedSlot: 1,
-			}))
-			require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
-				TxId: collateralInputID, OutputIdx: 0, AddedSlot: 1,
-			}))
+			require.NoError(
+				t,
+				db.CreateUtxo(context.Background(), nil, &models.Utxo{
+					TxId: regularInputID, OutputIdx: 0, AddedSlot: 1,
+				}),
+			)
+			require.NoError(
+				t,
+				db.CreateUtxo(context.Background(), nil, &models.Utxo{
+					TxId: collateralInputID, OutputIdx: 0, AddedSlot: 1,
+				}),
+			)
 			initialTip := ochainsync.Tip{Point: ocommon.Point{
 				Slot: 1, Hash: []byte("unchanged-tip"),
 			}}
@@ -241,9 +248,10 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 				txs: []lcommon.Transaction{tx},
 				era: gdijkstra.EraDijkstra,
 			}
-			processErr := db.Transaction(true).
+			processErr := db.Transaction(context.Background(), true).
 				Do(func(txn *database.Txn) error {
 					_, err := ls.ledgerProcessBlock(
+						context.Background(),
 						txn,
 						ocommon.NewPoint(10, block.Hash().Bytes()),
 						block,
@@ -308,8 +316,8 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 }
 
 // TestLedgerProcessBlockHistoricalValidationRunsPhase2 verifies the
-// configuration decision at the real block-application boundary. Issue
-// #3528: a historical-sync/TrustedReplay phase-2 skip shortcut used to live
+// configuration decision at the real block-application boundary. A
+// historical-sync/TrustedReplay phase-2 skip shortcut used to live
 // at this call site, but historicalBlockValidationDecision forces
 // shouldValidateBlock (and so all per-tx validation, phase 1 and phase 2)
 // to false whenever TrustedReplay is set, making a "skip phase 2 only"
@@ -398,9 +406,10 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 				txs: []lcommon.Transaction{tx},
 				era: gdijkstra.EraDijkstra,
 			}
-			processErr := db.Transaction(true).
+			processErr := db.Transaction(context.Background(), true).
 				Do(func(txn *database.Txn) error {
 					_, err := ls.ledgerProcessBlock(
+						context.Background(),
 						txn,
 						ocommon.NewPoint(10, block.Hash().Bytes()),
 						block,
@@ -494,26 +503,28 @@ func TestLedgerProcessBlockEnforcesTransactionValidationOutcomes(
 				txs:    []lcommon.Transaction{tx},
 			}
 
-			err = db.Transaction(true).Do(func(txn *database.Txn) error {
-				_, err := ls.ledgerProcessBlock(
-					txn,
-					ocommon.NewPoint(1, block.Hash().Bytes()),
-					block,
-					true,
-					false,
-					false,
-					nil,
-					envelopeParent{origin: true},
-					nil,
-					testEra,
-					nil,
-					nil,
-					0,
-					0,
-					false,
-				)
-				return err
-			})
+			err = db.Transaction(context.Background(), true).
+				Do(func(txn *database.Txn) error {
+					_, err := ls.ledgerProcessBlock(
+						context.Background(),
+						txn,
+						ocommon.NewPoint(1, block.Hash().Bytes()),
+						block,
+						true,
+						false,
+						false,
+						nil,
+						envelopeParent{origin: true},
+						nil,
+						testEra,
+						nil,
+						nil,
+						0,
+						0,
+						false,
+					)
+					return err
+				})
 			require.True(
 				t,
 				called,

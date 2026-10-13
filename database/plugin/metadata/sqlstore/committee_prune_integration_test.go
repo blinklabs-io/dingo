@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
-
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )

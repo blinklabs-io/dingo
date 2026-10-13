@@ -8,13 +8,14 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package blockfrost
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -94,12 +95,14 @@ func (b *Blockfrost) handleRoot(
 	})
 }
 
-// handleNotFound handles any request that doesn't match a
-// registered route, including unimplemented endpoints.
+// handleNotFound distinguishes documented unsupported operations from unknown paths.
 func (b *Blockfrost) handleNotFound(
 	w http.ResponseWriter,
-	_ *http.Request,
+	r *http.Request,
 ) {
+	if b.writeUnsupportedOperation(w, r) {
+		return
+	}
 	writeError(
 		w,
 		http.StatusNotFound,
@@ -190,8 +193,12 @@ func (b *Blockfrost) handleBlock(
 // hashes from the latest block.
 func (b *Blockfrost) handleLatestBlockTxs(
 	w http.ResponseWriter,
-	_ *http.Request,
+	r *http.Request,
 ) {
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
 	hashes, err := b.node.LatestBlockTxHashes()
 	if err != nil {
 		b.logger.Error(
@@ -206,10 +213,21 @@ func (b *Blockfrost) handleLatestBlockTxs(
 		)
 		return
 	}
-	if hashes == nil {
-		hashes = []string{}
+	SetPaginationHeaders(w, len(hashes), params)
+	page := make([]string, 0)
+	offset, ok := paginationOffset(params)
+	if ok && offset < len(hashes) {
+		count := min(params.Count, len(hashes)-offset)
+		page = make([]string, count)
+		for i := range count {
+			index := offset + i
+			if params.Order == PaginationOrderDesc {
+				index = len(hashes) - 1 - index
+			}
+			page[i] = hashes[index]
+		}
 	}
-	writeJSON(w, http.StatusOK, hashes)
+	writeJSON(w, http.StatusOK, page)
 }
 
 // handleLatestEpoch handles GET /api/v0/epochs/latest and
@@ -959,7 +977,7 @@ func (b *Blockfrost) handleAddressUTXOs(
 		return
 	}
 	address := r.PathValue("address")
-	utxos, total, err := b.node.AddressUTXOs(address, params)
+	utxos, total, err := b.node.AddressUTXOs(r.Context(), address, params)
 	if err != nil {
 		b.logger.Error(
 			"failed to get address utxos",
@@ -998,12 +1016,16 @@ func (b *Blockfrost) handleAddressTransactions(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
+	pagination, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
+	params, ok := parseTransactionRangeOrWriteError(w, r, pagination)
 	if !ok {
 		return
 	}
 	address := r.PathValue("address")
-	txs, total, err := b.node.AddressTransactions(address, params)
+	txs, total, err := b.node.AddressTransactions(r.Context(), address, params)
 	if err != nil {
 		b.logger.Error(
 			"failed to get address transactions",
@@ -1018,7 +1040,7 @@ func (b *Blockfrost) handleAddressTransactions(
 		return
 	}
 
-	SetPaginationHeaders(w, total, params)
+	SetPaginationHeaders(w, total, pagination)
 	resp := make([]AddressTransactionResponse, 0, len(txs))
 	for _, tx := range txs {
 		resp = append(resp, AddressTransactionResponse{
@@ -1252,7 +1274,7 @@ func (b *Blockfrost) handleTransactionSubmit(
 		return
 	}
 
-	hash, err := b.node.TransactionSubmit(txCbor)
+	hash, err := b.node.TransactionSubmit(r.Context(), txCbor)
 	if err != nil {
 		// Classify node conditions before the rejection: admission runs
 		// ledger validation against storage, so a storage fault arrives on
@@ -2181,132 +2203,81 @@ func (b *Blockfrost) handleAccount(
 	writeJSON(w, http.StatusOK, AccountResponse(account))
 }
 
-func (b *Blockfrost) handleAccountAssociatedAddresses(
+func handlePaginatedAccountRequest[Item, Response any](
+	b *Blockfrost,
 	w http.ResponseWriter,
 	r *http.Request,
+	fetch func(context.Context, string, PaginationParams) ([]Item, int, error),
+	convert func(Item) Response,
+	errorMessage string,
 ) {
 	params, ok := parsePaginationOrWriteError(w, r)
 	if !ok {
 		return
 	}
-	items, total, err := b.node.AccountAssociatedAddresses(
-		r.PathValue("stake_address"),
-		params,
-	)
+	items, total, err := fetch(r.Context(), r.PathValue("stake_address"), params)
 	if err != nil {
-		b.writeAccountError(
-			w, err, "failed to retrieve account addresses",
-		)
+		b.writeAccountError(w, err, errorMessage)
 		return
 	}
 	SetPaginationHeaders(w, total, params)
-	resp := make(
-		[]AccountAssociatedAddressResponse,
-		0,
-		len(items),
-	)
-	for _, item := range items {
-		resp = append(
-			resp,
-			AccountAssociatedAddressResponse(item),
-		)
+	resp := make([]Response, len(items))
+	for i, item := range items {
+		resp[i] = convert(item)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (b *Blockfrost) handleAccountAssociatedAddresses(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	handlePaginatedAccountRequest(
+		b, w, r, b.node.AccountAssociatedAddresses,
+		func(item AccountAssociatedAddressInfo) AccountAssociatedAddressResponse {
+			return AccountAssociatedAddressResponse(item)
+		},
+		"failed to retrieve account addresses",
+	)
 }
 
 func (b *Blockfrost) handleAccountDelegationHistory(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
-	if !ok {
-		return
-	}
-	items, total, err := b.node.AccountDelegationHistory(
-		r.PathValue("stake_address"),
-		params,
+	handlePaginatedAccountRequest(
+		b, w, r, b.node.AccountDelegationHistory,
+		func(item AccountDelegationHistoryInfo) AccountDelegationHistoryResponse {
+			return AccountDelegationHistoryResponse(item)
+		},
+		"failed to retrieve account delegation history",
 	)
-	if err != nil {
-		b.writeAccountError(
-			w, err, "failed to retrieve account delegation history",
-		)
-		return
-	}
-	SetPaginationHeaders(w, total, params)
-	resp := make(
-		[]AccountDelegationHistoryResponse,
-		0,
-		len(items),
-	)
-	for _, item := range items {
-		resp = append(
-			resp,
-			AccountDelegationHistoryResponse(item),
-		)
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 func (b *Blockfrost) handleAccountRegistrationHistory(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
-	if !ok {
-		return
-	}
-	items, total, err := b.node.AccountRegistrationHistory(
-		r.PathValue("stake_address"),
-		params,
+	handlePaginatedAccountRequest(
+		b, w, r, b.node.AccountRegistrationHistory,
+		func(item AccountRegistrationHistoryInfo) AccountRegistrationHistoryResponse {
+			return AccountRegistrationHistoryResponse(item)
+		},
+		"failed to retrieve account registration history",
 	)
-	if err != nil {
-		b.writeAccountError(
-			w, err, "failed to retrieve account registration history",
-		)
-		return
-	}
-	SetPaginationHeaders(w, total, params)
-	resp := make(
-		[]AccountRegistrationHistoryResponse,
-		0,
-		len(items),
-	)
-	for _, item := range items {
-		resp = append(
-			resp,
-			AccountRegistrationHistoryResponse(item),
-		)
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 func (b *Blockfrost) handleAccountRewardHistory(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
-	if !ok {
-		return
-	}
-	items, total, err := b.node.AccountRewardHistory(
-		r.PathValue("stake_address"),
-		params,
+	handlePaginatedAccountRequest(
+		b, w, r, b.node.AccountRewardHistory,
+		func(item AccountRewardHistoryInfo) AccountRewardHistoryResponse {
+			return AccountRewardHistoryResponse(item)
+		},
+		"failed to retrieve account reward history",
 	)
-	if err != nil {
-		b.writeAccountError(
-			w, err, "failed to retrieve account reward history",
-		)
-		return
-	}
-	SetPaginationHeaders(w, total, params)
-	resp := make([]AccountRewardHistoryResponse, 0, len(items))
-	for _, item := range items {
-		resp = append(
-			resp,
-			AccountRewardHistoryResponse(item),
-		)
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 func (b *Blockfrost) writeAccountError(

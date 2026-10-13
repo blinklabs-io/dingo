@@ -49,9 +49,6 @@ ON CONFLICT (sync_key) DO UPDATE SET value = excluded.value;
 DELETE FROM sync_state
 WHERE sync_key = ?;
 
--- name: ClearSyncState :exec
-DELETE FROM sync_state;
-
 -- name: GetEpoch :one
 SELECT id, epoch_id, start_slot, nonce, evolving_nonce, candidate_nonce,
        last_epoch_block_nonce, era_id, slot_length, length_in_slots
@@ -160,6 +157,22 @@ FROM pparams
 WHERE epoch <= ? AND era_id = ?
 ORDER BY epoch DESC, id DESC
 LIMIT 1;
+
+-- name: CountPParamsByEra :one
+SELECT COUNT(*)
+FROM pparams
+WHERE era_id = ?;
+
+-- name: ListPParamsByEra :many
+SELECT cbor, id, added_slot, epoch, era_id
+FROM pparams
+WHERE era_id = ?
+ORDER BY id;
+
+-- name: UpdatePParamsCbor :exec
+UPDATE pparams
+SET cbor = ?
+WHERE id = ?;
 
 -- name: GetPParamUpdates :many
 SELECT genesis_hash, cbor, id, added_slot, epoch
@@ -311,20 +324,20 @@ WHERE deleted_slot > ?;
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id;
 
 -- name: SavePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
     stake_denominator = excluded.stake_denominator,
@@ -332,6 +345,7 @@ ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     captured_slot = excluded.captured_slot,
     leios_key_public = excluded.leios_key_public,
     leios_key_possession_proof = excluded.leios_key_possession_proof,
+    leios_key_registration_epoch = excluded.leios_key_registration_epoch,
     calculation_version = excluded.calculation_version,
     reward_account_auto_vote = excluded.reward_account_auto_vote,
     reward_account_auto_vote_resolved =
@@ -342,6 +356,7 @@ RETURNING id;
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -351,6 +366,7 @@ WHERE epoch = ? AND snapshot_type = ? AND pool_key_hash = ?;
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -407,18 +423,21 @@ WHERE epoch > ?;
 
 -- name: SaveRewardAdaPots :one
 INSERT INTO reward_ada_pots (
-    epoch, treasury, reserves, fees, rewards, captured_slot
-) VALUES (?, ?, ?, ?, ?, ?)
+    epoch, treasury, reserves, fees, rewards, captured_slot,
+    imported_epoch_fees
+) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch) DO UPDATE SET
     treasury = excluded.treasury,
     reserves = excluded.reserves,
     fees = excluded.fees,
     rewards = excluded.rewards,
-    captured_slot = excluded.captured_slot
+    captured_slot = excluded.captured_slot,
+    imported_epoch_fees = excluded.imported_epoch_fees
 RETURNING id;
 
 -- name: GetRewardAdaPots :one
-SELECT id, epoch, treasury, reserves, fees, rewards, captured_slot
+SELECT id, epoch, treasury, reserves, fees, rewards, captured_slot,
+    imported_epoch_fees
 FROM reward_ada_pots
 WHERE epoch = ?;
 
@@ -588,6 +607,15 @@ FROM reward_stake_input
 WHERE epoch = ?
 ORDER BY pool_key_hash ASC, credential_tag ASC, staking_key ASC;
 
+-- name: GetRewardStakeInputsInPoolKeyHashRange :many
+SELECT pool_key_hash, staking_key, id, epoch, credential_tag, stake, owner,
+       registered, captured_slot, boundary_slot
+FROM reward_stake_input
+WHERE epoch = ?
+  AND pool_key_hash >= ?
+  AND pool_key_hash <= ?
+ORDER BY pool_key_hash ASC, credential_tag ASC, staking_key ASC;
+
 -- name: DeleteRewardPoolInputsForEpoch :exec
 DELETE FROM reward_pool_input WHERE epoch = ?;
 
@@ -597,14 +625,16 @@ DELETE FROM reward_stake_input WHERE epoch = ?;
 -- name: SaveRewardPoolOutput :one
 INSERT INTO reward_pool_output (
     apparent_performance, pool_key_hash, epoch, optimal_reward,
-    total_reward, leader_reward, member_reward_total, owner_stake,
+    total_reward, leader_reward, leader_reward_deficit,
+    member_reward_total, owner_stake,
     undistributed, unspendable, captured_slot, boundary_slot
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
     apparent_performance = excluded.apparent_performance,
     optimal_reward = excluded.optimal_reward,
     total_reward = excluded.total_reward,
     leader_reward = excluded.leader_reward,
+    leader_reward_deficit = excluded.leader_reward_deficit,
     member_reward_total = excluded.member_reward_total,
     owner_stake = excluded.owner_stake,
     undistributed = excluded.undistributed,
@@ -615,7 +645,8 @@ RETURNING id;
 
 -- name: GetRewardPoolOutputs :many
 SELECT apparent_performance, pool_key_hash, id, epoch, optimal_reward,
-       total_reward, leader_reward, member_reward_total, owner_stake,
+       total_reward, leader_reward, leader_reward_deficit,
+       member_reward_total, owner_stake,
        undistributed, unspendable, captured_slot, boundary_slot
 FROM reward_pool_output
 WHERE epoch = ?
@@ -678,12 +709,10 @@ DELETE FROM reward_stake_input
 WHERE captured_slot > ? OR boundary_slot > ?;
 
 -- name: DeleteRewardPoolOutputsAfterSlot :exec
-DELETE FROM reward_pool_output
-WHERE captured_slot > ? OR boundary_slot > ?;
+DELETE FROM reward_pool_output WHERE captured_slot > ?;
 
 -- name: DeleteRewardAccountOutputsAfterSlot :exec
-DELETE FROM reward_account_output
-WHERE captured_slot > ? OR boundary_slot > ?;
+DELETE FROM reward_account_output WHERE captured_slot > ?;
 
 -- name: DeleteRewardStakeInputsBeforeEpoch :exec
 DELETE FROM reward_stake_input WHERE epoch < ?;
@@ -845,6 +874,49 @@ DELETE FROM midnight_ariadne_rollbacks WHERE block_number = ?;
 
 -- name: DeleteMidnightAriadneRollbacksBeforeBlock :exec
 DELETE FROM midnight_ariadne_rollbacks WHERE block_number < ?;
+
+-- name: DeleteMidnightAriadneRollbacksAfterBlock :exec
+DELETE FROM midnight_ariadne_rollbacks WHERE block_number > ?;
+
+-- name: CreateMidnightCandidateRemoval :exec
+INSERT INTO midnight_candidate_removals (
+    block_number, tx_hash, output_index, datum
+) VALUES (?, ?, ?, ?)
+ON CONFLICT DO NOTHING;
+
+-- name: FindMidnightCandidateRemovalsByBlock :many
+SELECT id, block_number, tx_hash, output_index, datum
+FROM midnight_candidate_removals
+WHERE block_number = ?
+ORDER BY id ASC;
+
+-- name: DeleteMidnightCandidateRemovalsByBlock :exec
+DELETE FROM midnight_candidate_removals WHERE block_number = ?;
+
+-- name: DeleteMidnightCandidateRemovalsBeforeBlock :exec
+DELETE FROM midnight_candidate_removals WHERE block_number < ?;
+
+-- name: DeleteMidnightCandidateRemovalsAfterBlock :exec
+DELETE FROM midnight_candidate_removals WHERE block_number > ?;
+
+-- name: UpsertMidnightEpochTransition :exec
+INSERT INTO midnight_epoch_transitions (block_number, previous_epoch, previous_exists)
+VALUES (?, ?, ?)
+ON CONFLICT (block_number) DO NOTHING;
+
+-- name: GetMidnightEpochTransitionByBlock :one
+SELECT block_number, previous_epoch, previous_exists
+FROM midnight_epoch_transitions
+WHERE block_number = ?;
+
+-- name: DeleteMidnightEpochTransitionsByBlock :exec
+DELETE FROM midnight_epoch_transitions WHERE block_number = ?;
+
+-- name: DeleteMidnightEpochTransitionsBeforeBlock :exec
+DELETE FROM midnight_epoch_transitions WHERE block_number < ?;
+
+-- name: DeleteMidnightEpochTransitionsAfterBlock :exec
+DELETE FROM midnight_epoch_transitions WHERE block_number > ?;
 
 -- name: UpsertMidnightEpochCandidates :one
 INSERT INTO midnight_epoch_candidates (epoch, block_number, candidates_cbor)

@@ -142,13 +142,16 @@ func TestGetTechnicalCommitteeDatum_AtOrBefore(t *testing.T) {
 	for i, blockNumber := range []uint64{10, 20, 30} {
 		require.NoError(
 			t,
-			db.InsertMidnightGovernanceDatum(&models.MidnightGovernanceDatum{
-				DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
-				TxHash:      []byte{byte(i), 1, 2, 3},
-				OutputIndex: 0,
-				Datum:       []byte{byte('a' + i)},
-				BlockNumber: blockNumber,
-			}),
+			db.InsertMidnightGovernanceDatum(
+				context.Background(),
+				&models.MidnightGovernanceDatum{
+					DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
+					TxHash:      []byte{byte(i), 1, 2, 3},
+					OutputIndex: 0,
+					Datum:       []byte{byte('a' + i)},
+					BlockNumber: blockNumber,
+				},
+			),
 		)
 	}
 	addr := startTestServerWithConfig(
@@ -194,23 +197,29 @@ func TestGetCouncilDatum_DistinctFromTechnicalCommittee(t *testing.T) {
 	db := newTestDatabase(t)
 	require.NoError(
 		t,
-		db.InsertMidnightGovernanceDatum(&models.MidnightGovernanceDatum{
-			DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
-			TxHash:      []byte{1, 2, 3, 4},
-			OutputIndex: 0,
-			Datum:       []byte("tc"),
-			BlockNumber: 10,
-		}),
+		db.InsertMidnightGovernanceDatum(
+			context.Background(),
+			&models.MidnightGovernanceDatum{
+				DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
+				TxHash:      []byte{1, 2, 3, 4},
+				OutputIndex: 0,
+				Datum:       []byte("tc"),
+				BlockNumber: 10,
+			},
+		),
 	)
 	require.NoError(
 		t,
-		db.InsertMidnightGovernanceDatum(&models.MidnightGovernanceDatum{
-			DatumType:   models.MidnightGovernanceDatumTypeCouncil,
-			TxHash:      []byte{5, 6, 7, 8},
-			OutputIndex: 0,
-			Datum:       []byte("council"),
-			BlockNumber: 10,
-		}),
+		db.InsertMidnightGovernanceDatum(
+			context.Background(),
+			&models.MidnightGovernanceDatum{
+				DatumType:   models.MidnightGovernanceDatumTypeCouncil,
+				TxHash:      []byte{5, 6, 7, 8},
+				OutputIndex: 0,
+				Datum:       []byte("council"),
+				BlockNumber: 10,
+			},
+		),
 	)
 	addr := startTestServerWithConfig(
 		t,
@@ -236,10 +245,13 @@ func TestGetAriadneParameters_AtOrBefore(t *testing.T) {
 	for i, epoch := range []uint64{1, 2, 3} {
 		require.NoError(
 			t,
-			db.UpsertMidnightAriadneParams(&models.MidnightAriadneParams{
-				Epoch: epoch,
-				Datum: []byte{byte('a' + i)},
-			}),
+			db.UpsertMidnightAriadneParams(
+				context.Background(),
+				&models.MidnightAriadneParams{
+					Epoch: epoch,
+					Datum: []byte{byte('a' + i)},
+				},
+			),
 		)
 	}
 	addr := startTestServerWithConfig(
@@ -339,11 +351,14 @@ func TestGetEpochCandidates_CandidatesAndStakeDistribution(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.UpsertMidnightEpochCandidates(&models.MidnightEpochCandidates{
-			Epoch:          7,
-			BlockNumber:    700,
-			CandidatesCbor: blob,
-		}),
+		db.UpsertMidnightEpochCandidates(
+			context.Background(),
+			&models.MidnightEpochCandidates{
+				Epoch:          7,
+				BlockNumber:    700,
+				CandidatesCbor: blob,
+			},
+		),
 	)
 
 	// Registration provenance is looked up separately from the snapshot, by
@@ -467,11 +482,14 @@ func TestGetEpochCandidates_MissingRegistrationLeavesProvenanceZero(
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		db.UpsertMidnightEpochCandidates(&models.MidnightEpochCandidates{
-			Epoch:          9,
-			BlockNumber:    900,
-			CandidatesCbor: blob,
-		}),
+		db.UpsertMidnightEpochCandidates(
+			context.Background(),
+			&models.MidnightEpochCandidates{
+				Epoch:          9,
+				BlockNumber:    900,
+				CandidatesCbor: blob,
+			},
+		),
 	)
 	// Deliberately no InsertMidnightCommitteeCandidateRegistration call.
 

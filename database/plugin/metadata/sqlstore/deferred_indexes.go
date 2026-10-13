@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
@@ -28,6 +29,9 @@ import (
 var (
 	_ metadata.DeferredIndexManager               = (*Store)(nil)
 	_ metadata.MissingCriticalDeferredIndexLister = (*Store)(nil)
+	_ metadata.MissingDeferredIndexLister         = (*Store)(nil)
+	_ metadata.ContextDeferredIndexBuilder        = (*Store)(nil)
+	_ metadata.DeferredIndexProgressBuilder       = (*Store)(nil)
 )
 
 // withDeferredIndexWrite runs fn in one write transaction, with every
@@ -43,10 +47,21 @@ var (
 func (s *Store) withDeferredIndexWrite(
 	fn func(db queryer, ctx context.Context) error,
 ) error {
+	return s.withDeferredIndexWriteContext(context.Background(), fn)
+}
+
+// withDeferredIndexWriteContext is withDeferredIndexWrite bound to a
+// caller-owned context, so a cancelled caller interrupts the DDL rather than
+// waiting out a multi-million-row index build.
+func (s *Store) withDeferredIndexWriteContext(
+	ctx context.Context,
+	fn func(db queryer, ctx context.Context) error,
+) error {
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
-	return s.withWriteTransaction(
+	return s.withWriteTransactionContext(
+		ctx,
 		nil,
 		func(db queryer, ctx context.Context) error {
 			if err := s.ensureRetainedIndexes(ctx, db); err != nil {
@@ -126,20 +141,62 @@ func isMySQLForeignKeyIndexError(err error) bool {
 // rollback traffic begins. The recovery marker stays set until the full
 // manifest is restored.
 func (s *Store) BuildCriticalDeferredIndexes() error {
-	return s.buildDeferredIndexes(deferred.CriticalManifest(), false)
+	return s.buildDeferredIndexes(
+		context.Background(),
+		deferred.CriticalManifest(),
+		false,
+	)
 }
 
 // BuildDeferredIndexes restores the full manifest and clears the durable
 // recovery marker in the same transaction.
 func (s *Store) BuildDeferredIndexes() error {
-	return s.buildDeferredIndexes(deferred.Manifest, true)
+	return s.buildDeferredIndexes(
+		context.Background(),
+		deferred.Manifest,
+		true,
+	)
+}
+
+// BuildDeferredIndexesContext is BuildDeferredIndexes bound to ctx. Restore
+// runs the full manifest rebuild inside a cancellable operation, and an
+// uninterruptible build there would outlive the cancellation by however long
+// the largest index takes.
+func (s *Store) BuildDeferredIndexesContext(ctx context.Context) error {
+	return s.buildDeferredIndexes(ctx, deferred.Manifest, true)
+}
+
+// BuildDeferredIndexesContextWithProgress is the cancellable full-manifest
+// rebuild used by restore so operators can see which index is taking time.
+func (s *Store) BuildDeferredIndexesContextWithProgress(
+	ctx context.Context,
+	before func(string),
+	after func(string, time.Duration),
+) error {
+	return s.buildDeferredIndexesWithProgress(
+		ctx, deferred.Manifest, true, before, after,
+	)
 }
 
 func (s *Store) buildDeferredIndexes(
+	buildCtx context.Context,
 	indexes []deferred.Index,
 	clearPending bool,
 ) error {
-	return s.withDeferredIndexWrite(
+	return s.buildDeferredIndexesWithProgress(
+		buildCtx, indexes, clearPending, nil, nil,
+	)
+}
+
+func (s *Store) buildDeferredIndexesWithProgress(
+	buildCtx context.Context,
+	indexes []deferred.Index,
+	clearPending bool,
+	before func(string),
+	after func(string, time.Duration),
+) error {
+	return s.withDeferredIndexWriteContext(
+		buildCtx,
 		func(db queryer, ctx context.Context) error {
 			for _, index := range indexes {
 				exists, err := s.deferredIndexExists(ctx, db, index)
@@ -153,6 +210,10 @@ func (s *Store) buildDeferredIndexes(
 				if exists {
 					continue
 				}
+				if before != nil {
+					before(index.Name)
+				}
+				started := time.Now()
 				statement := s.dialect.CreateIndexSQL(
 					index.Name,
 					index.Table,
@@ -167,6 +228,9 @@ func (s *Store) buildDeferredIndexes(
 						index.Name,
 						err,
 					)
+				}
+				if after != nil {
+					after(index.Name, time.Since(started))
 				}
 			}
 			if clearPending {
@@ -264,6 +328,40 @@ func (s *Store) MissingCriticalDeferredIndexes() ([]string, error) {
 	db := s.instrumentedQueryer(s.readDB)
 	var missing []string
 	for _, index := range deferred.CriticalManifest() {
+		exists, err := s.deferredIndexExists(ctx, db, index)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"check deferred index %s: %w",
+				index.Name,
+				err,
+			)
+		}
+		if !exists {
+			missing = append(missing, index.Name)
+		}
+	}
+	return missing, nil
+}
+
+// MissingDeferredIndexes reports every manifest entry absent from the schema,
+// in manifest order, using the read connection and no DDL. The full-manifest
+// repair paths use it to name what a rebuild is about to build before it
+// starts; the rebuild itself is silent while it runs.
+func (s *Store) MissingDeferredIndexes() ([]string, error) {
+	return s.MissingDeferredIndexesContext(context.Background())
+}
+
+// MissingDeferredIndexesContext reports every manifest entry absent from the
+// schema using the caller's cancellation context and no DDL.
+func (s *Store) MissingDeferredIndexesContext(
+	ctx context.Context,
+) ([]string, error) {
+	if err := s.ensureReady(); err != nil {
+		return nil, err
+	}
+	db := s.instrumentedQueryer(s.readDB)
+	var missing []string
+	for _, index := range deferred.Manifest {
 		exists, err := s.deferredIndexExists(ctx, db, index)
 		if err != nil {
 			return nil, fmt.Errorf(

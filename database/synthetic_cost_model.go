@@ -20,7 +20,7 @@ import (
 )
 
 // SyntheticV2CostModelSyncKey is the durable sync_state marker key backing
-// LedgerState.syntheticV2CostModel (blinklabs-io/dingo#3825): whether the
+// LedgerState.syntheticV2CostModel: whether the
 // PlutusV2 cost model currently in force is still HardForkBabbage's
 // fabricated default rather than real governance/protocol-update data.
 // Shared between ledger (which writes it during forward processing) and
@@ -112,8 +112,7 @@ func SetSyntheticV2CostModelClearedEpoch(
 // ledger.LedgerState.rollback (bounded rollback during normal sync) and
 // database/lifecycle.Truncate (offline/live disaster-recovery truncate, which
 // may go far deeper), so both apply the exact same bookkeeping regardless of
-// which path performs the truncation. See blinklabs-io/dingo#3825's PR
-// review.
+// which path performs the truncation.
 func RecomputeSyntheticV2CostModelMarkerAfterTruncate(
 	d *Database,
 	txn *Txn,
@@ -154,7 +153,7 @@ func RecomputeSyntheticV2CostModelMarkerAfterTruncate(
 	// ledger.resolveSyntheticV2CostModel already uses for exactly that
 	// case: it re-derives from the live PlutusV2 cost model itself,
 	// correctly yielding "true" for the fabricated default and "false" for
-	// any other value, real or not. See blinklabs-io/dingo#3825's PR review.
+	// any other value, real or not.
 	if err := d.DeleteSyncState(
 		SyntheticV2CostModelClearedEpochSyncKey, txn,
 	); err != nil {

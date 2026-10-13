@@ -1,3 +1,5 @@
+//go:build dingo_extra_plugins
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build dingo_extra_plugins
 
 package mysql
 
@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -396,23 +397,28 @@ func resetDatabase(ctx context.Context, db *sql.DB, database string) error {
 	return nil
 }
 
-// migrationsTableName is sqlstore/migrations' own bookkeeping table --
-// every real Start() populates it with one row per applied migration, so
-// it's the one table a freshly migrated, otherwise-empty database is
-// expected to already have data in.
-const migrationsTableName = "schema_migrations"
+const (
+	// migrationsTableName is sqlstore/migrations' bookkeeping table.
+	migrationsTableName = "schema_migrations"
+	// nodeSettingsGateTableName receives the v20 Alonzo-unit provenance
+	// marker while migrations bootstrap an otherwise-empty database.
+	nodeSettingsGateTableName = "node_settings_gate"
+	// drepDormancyStateTableName receives the zero-epoch baseline row while
+	// migrations bootstrap an otherwise-empty database.
+	drepDormancyStateTableName = "drep_dormancy_state"
+)
 
 // refuseIfTargetHasData errors out, before resetDatabase drops anything,
-// if any table other than migrationsTableName already contains a row.
-// dingo's own migrations never insert into a domain table -- only
-// schema_migrations records bookkeeping rows (verified: no migration file
-// under sqlstore/migrations/v1 contains an INSERT INTO a domain table) --
-// so a database restoreMetadataStore's brief resolve-and-start just
-// finished migrating has zero rows in everything else. A nonzero count
-// anywhere else means this target isn't that: most plausibly a live
-// node's own database, pointed at by a reused or misconfigured DSN, whose
-// accumulated real data resetDatabase's unconditional DROP TABLE would
-// otherwise destroy with no way back.
+// if any table contains data other than migration bookkeeping. Migration
+// v20 seeds node_settings_gate with the Alonzo per-word provenance marker,
+// and the DRep dormancy-state migration seeds drep_dormancy_state with a zero
+// epoch count. Those exact
+// rows are bootstrap data; any other row/value remains evidence of a
+// previously used target. A nonzero count anywhere else means this target
+// is most plausibly a live node's own database,
+// pointed at by a reused or misconfigured DSN, whose accumulated real data
+// resetDatabase's unconditional DROP TABLE would otherwise destroy with no
+// way back.
 //
 // Skipped entirely when metadata.ResetOfPopulatedTargetAllowed(ctx) -- see
 // its doc comment: a live node restoring itself from its own earlier
@@ -438,10 +444,23 @@ func refuseIfTargetHasData(
 		) + "." + mysqlQuoteIdentifier(
 			name,
 		)
+		query := "SELECT EXISTS (SELECT 1 FROM " + quoted + ")"
+		var args []any
+		switch name {
+		case nodeSettingsGateTableName:
+			query = "SELECT EXISTS (SELECT 1 FROM " + quoted +
+				" WHERE NOT (name = ? AND value = ?" +
+				" AND recorded_epoch = 0 AND recorded_slot = 0))"
+			args = []any{
+				nodesettings.AlonzoPParamsUnitGateName,
+				nodesettings.AlonzoPParamsUnitWordV1,
+			}
+		case drepDormancyStateTableName:
+			query = "SELECT EXISTS (SELECT 1 FROM " + quoted +
+				" WHERE NOT (id = 1 AND dormant_epochs = 0))"
+		}
 		var hasData int
-		err := db.QueryRowContext(
-			ctx, "SELECT EXISTS (SELECT 1 FROM "+quoted+")",
-		).Scan(&hasData)
+		err := db.QueryRowContext(ctx, query, args...).Scan(&hasData)
 		if err != nil {
 			return fmt.Errorf("check table %s for data: %w", quoted, err)
 		}

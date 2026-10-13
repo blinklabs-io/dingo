@@ -31,7 +31,7 @@ import (
 )
 
 // TestChainSelectorChainsyncLockOrderDoesNotDeadlock is the regression guard
-// for blinklabs-io/dingo#4070: chainselection.ChainSelector.mutex and
+// for a lock-order deadlock: chainselection.ChainSelector.mutex and
 // chainsync.State.clientConnIdMutex are taken in opposite order on two paths
 // that production (node.go) wires together via function-valued callbacks.
 //

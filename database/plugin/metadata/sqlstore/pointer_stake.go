@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//	http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -32,7 +32,7 @@ import (
 // the output with a NULL staking_key and its value never reached the stake
 // distribution, understating the delegated stake of any account holding funds
 // at a pointer address. That tightens the pool's Praos leader threshold and
-// makes the node reject blocks the network accepted (dingo #3854, #3811).
+// makes the node reject blocks the network accepted.
 //
 // The position is persisted in utxo_pointer when the output is written; which
 // credential it designates is decided when stake is computed, because that is
@@ -135,7 +135,8 @@ LIMIT 1`,
 // dangling by construction, and dropping it leaves the output unattributed
 // exactly as a pointer to an unoccupied position is. Returning an error here
 // would instead fail the enclosing setUtxo and stall ingestion of a block the
-// network accepted, which is the failure #3854 exists to avoid.
+// network accepted, which is the failure pointer-address stake attribution must
+// avoid.
 func persistUtxoPointer(
 	ctx context.Context,
 	db queryer,
@@ -278,7 +279,7 @@ func (s *Store) GetPointerStakeInputsForPools(
 	ret := make([]*models.RewardStakeInput, 0)
 	for start := 0; start < len(poolKeyHashes); start += 400 {
 		end := min(start+400, len(poolKeyHashes))
-		query, args := activeDelegationSQL(slot)
+		query, args := activeDelegationSQL(slot, slot)
 		resolution, resolutionArgs, err := pointerResolutionSQL(slot)
 		if err != nil {
 			return nil, err

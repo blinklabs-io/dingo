@@ -8,13 +8,14 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package blockfrost
 
 import (
+	"context"
 	"fmt"
 	"slices"
 
@@ -58,14 +59,17 @@ import (
 // would not reduce it. The response is bare pool ID strings, so slicing
 // the resulting hash slice in memory before conversion is cheap relative
 // to that query.
-func (a *NodeAdapter) PoolsList(
+func (a *NodeAdapter) PoolsList(ctx context.Context,
 	params PaginationParams,
 ) ([]string, int, error) {
 	db := a.ledgerState.Database()
-	txn := db.Transaction(false)
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 
-	poolKeyHashes, err := db.GetActivePoolKeyHashesOrdered(txn)
+	poolKeyHashes, err := db.GetActivePoolKeyHashesOrdered(
+		ctx,
+		txn,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get active pool key hashes ordered: %w",
@@ -86,8 +90,11 @@ func (a *NodeAdapter) PoolsList(
 
 	ret := make([]string, 0, end-start)
 	for _, pkh := range poolKeyHashes[start:end] {
-		poolID := lcommon.PoolId(lcommon.NewBlake2b224(pkh))
-		ret = append(ret, poolID.String())
+		poolKeyHash, err := lcommon.NewBlake2b224Checked(pkh)
+		if err != nil {
+			return nil, 0, fmt.Errorf("active pool key hash: %w", err)
+		}
+		ret = append(ret, lcommon.PoolId(poolKeyHash).String())
 	}
 	return ret, total, nil
 }

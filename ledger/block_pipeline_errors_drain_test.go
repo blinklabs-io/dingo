@@ -24,11 +24,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/pipeline"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -139,7 +141,7 @@ func buildNoNonceValidateBatch(t *testing.T, numBlocks int) []models.Block {
 }
 
 // TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors is a
-// regression test for issue #1894's block-processing-pipeline deadlock:
+// regression test for the block-processing-pipeline deadlock:
 // gouroboros' pipeline.StageWorkerPool.worker pushes every non-nil
 // validate-stage error onto a fixed-size errorsChan (default capacity 1000,
 // PipelineConfig.PrefetchBufferSize) *before* forwarding the item onward,
@@ -176,36 +178,15 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 	// confirmed to reproduce the pre-fix hang deterministically.
 	const numBlocks = 4000
 
-	errLog := &capturedErrorLog{}
-	ls := &LedgerState{
-		epochCache: []models.Epoch{
-			{
-				EpochId:       0,
-				StartSlot:     0,
-				LengthInSlots: 432000,
-				Nonce:         nil, // no Praos nonce -- every eta0 lookup fails
-			},
-		},
-		config: LedgerStateConfig{
-			CardanoNodeConfig:            newTestShelleyGenesisCfg(t),
-			Logger:                       errLog.logger(),
-			BlockPipelineValidateEnabled: true,
-		},
-	}
-	ls.metrics.init(prometheus.NewRegistry())
-	ls.publishSnapshotsLocked()
-
-	ls.blockPipeline = pipeline.NewBlockPipeline(
-		pipeline.WithDecodeWorkers(2),
-		pipeline.WithValidateWorkers(2),
-		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
-		pipeline.WithSlotsPerKesPeriod(129600),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+	ls, errLog, stopAndDrain := newNoNonceValidatePipelineLedger(
+		t,
+		// Submit waits once MaxPendingBlocks sequences are outstanding past
+		// the last completed one, and completion stalls while nothing reads
+		// Results(), so the default 2160 would block Submit before errorsChan
+		// could fill. Disabling it leaves errorsChan as the only thing that
+		// can stop this batch.
+		pipeline.WithMaxPendingBlocks(0),
 	)
-	require.NoError(t, ls.blockPipeline.Start(t.Context()))
-	ls.blockPipelineErrorsDone = make(chan struct{})
-	go ls.drainBlockPipelineErrors()
-	stopAndDrain := stopAndDrainBlockPipeline(t, ls)
 	defer stopAndDrain()
 
 	rawBatch := buildNoNonceValidateBatch(t, numBlocks)
@@ -218,8 +199,7 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 		// Results() entry once it sees the first validation failure rather
 		// than stopping early -- see its doc comment), but the interesting
 		// part is that every one of numBlocks Submit() calls completed
-		// without blocking forever, since decodeReadChainBatch submits the
-		// entire batch before it starts draining Results().
+		// without blocking forever on the errors channel.
 		_, _ = ls.decodeReadChainBatch(t.Context(), rawBatch)
 	}()
 
@@ -264,6 +244,264 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 	)
 }
 
+// newNoNonceValidatePipelineLedger returns a LedgerState whose started block
+// pipeline, built with opts appended to the defaults, validates blocks
+// against an epoch with no cached Praos nonce, so every eta0 lookup fails.
+// It also returns the captured error log and an idempotent function that
+// stops the pipeline and waits for its error drain; see
+// stopAndDrainBlockPipeline.
+func newNoNonceValidatePipelineLedger(
+	t *testing.T,
+	opts ...pipeline.PipelineOption,
+) (*LedgerState, *capturedErrorLog, func()) {
+	t.Helper()
+	errLog := &capturedErrorLog{}
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 432000,
+				Nonce:         nil,
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig:            newTestShelleyGenesisCfg(t),
+			Logger:                       errLog.logger(),
+			BlockPipelineValidateEnabled: true,
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.publishSnapshotsLocked()
+
+	ls.blockPipeline = pipeline.NewBlockPipeline(
+		append([]pipeline.PipelineOption{
+			pipeline.WithDecodeWorkers(2),
+			pipeline.WithValidateWorkers(2),
+			pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
+			pipeline.WithSlotsPerKesPeriod(129600),
+			pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+		}, opts...)...,
+	)
+	require.NoError(t, ls.blockPipeline.Start(t.Context()))
+	ls.blockPipelineErrorsDone = make(chan struct{})
+	go ls.drainBlockPipelineErrors()
+	return ls, errLog, stopAndDrainBlockPipeline(t, ls)
+}
+
+type decodeBatchResult struct {
+	decoded []gledger.Block
+	err     error
+}
+
+// goDecodeBatch runs decodeReadChainBatchWithError in a goroutine and
+// returns the channel its result arrives on.
+func goDecodeBatch(
+	t *testing.T,
+	ls *LedgerState,
+	rawBatch []models.Block,
+) <-chan decodeBatchResult {
+	t.Helper()
+	done := make(chan decodeBatchResult, 1)
+	go func() {
+		decoded, err := ls.decodeReadChainBatchWithError(t.Context(), rawBatch)
+		done <- decodeBatchResult{decoded: decoded, err: err}
+	}()
+	return done
+}
+
+// TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks submits more
+// validation-failing blocks than the pipeline's default MaxPendingBlocks.
+// Submit waits for completions that only happen once Results() is consumed,
+// so decodeReadChainBatch must read results while it is still submitting
+// rather than after the whole batch is in.
+func TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const numBlocks = pipeline.DefaultMaxPendingBlocks * 2
+
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+
+	res := testutil.RequireReceive(
+		t,
+		goDecodeBatch(t, ls, buildNoNonceValidateBatch(t, numBlocks)),
+		testutil.AsyncWait,
+		"decodeReadChainBatch blocked in Submit on a batch larger than "+
+			"MaxPendingBlocks while Results() was unread",
+	)
+	// Returning is not enough: a Submit failure after a prefix also returns.
+	// Every block's eta0 lookup fails as deferred, so the whole batch must
+	// come back decoded.
+	require.NoError(t, res.err)
+	require.Len(t, res.decoded, numBlocks)
+}
+
+// TestDecodeReadChainBatchSubmitErrorDrainsSubmittedResults fails Submit
+// after a prefix of the batch went in. The prefix's results must be read off
+// the shared results channel before the error is returned; otherwise the next
+// call would take them for its own submissions.
+func TestDecodeReadChainBatchSubmitErrorDrainsSubmittedResults(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const submitOK = 5
+	errSubmit := errors.New("injected submit failure")
+
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+
+	calls := 0
+	ls.blockPipelineSubmit = func(
+		ctx context.Context,
+		blockType uint,
+		rawCbor []byte,
+		tip ocommon.Tip,
+	) error {
+		calls++
+		if calls > submitOK {
+			return errSubmit
+		}
+		return ls.blockPipeline.Submit(ctx, blockType, rawCbor, tip)
+	}
+
+	res := testutil.RequireReceive(
+		t,
+		goDecodeBatch(t, ls, buildNoNonceValidateBatch(t, submitOK+3)),
+		testutil.AsyncWait,
+		"decodeReadChainBatch did not return after a Submit error",
+	)
+	require.ErrorIs(t, res.err, errSubmit)
+	require.Nil(t, res.decoded)
+
+	// A fresh submission must come back as the first result: anything left
+	// over from the failed batch would be read here instead.
+	probe := buildNoNonceValidateBatch(t, submitOK+1)[submitOK]
+	require.NoError(t, ls.blockPipeline.Submit(
+		t.Context(),
+		probe.Type,
+		probe.Cbor,
+		ocommon.Tip{
+			Point:       ocommon.NewPoint(probe.Slot, probe.Hash),
+			BlockNumber: probe.Number,
+		},
+	))
+	item := testutil.RequireReceive(
+		t,
+		ls.blockPipeline.Results(),
+		testutil.AsyncWait,
+		"probe block result",
+	)
+	require.NoError(t, item.DecodeError())
+	require.Equal(t, probe.Slot, item.Block().SlotNumber())
+}
+
+// TestDecodeReadChainBatchSubmitErrorDrainTimesOut fails Submit after a
+// prefix whose results never arrive, as when a fatal apply-stage error
+// cancels the pipeline without closing Results(). The drain of that prefix
+// must give up after CloseBlockPipelineDrainTimeout instead of blocking.
+//
+// Not t.Parallel: shrinks the package-level CloseBlockPipelineDrainTimeout.
+func TestDecodeReadChainBatchSubmitErrorDrainTimesOut(t *testing.T) {
+	orig := CloseBlockPipelineDrainTimeout
+	CloseBlockPipelineDrainTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { CloseBlockPipelineDrainTimeout = orig })
+
+	errSubmit := errors.New("injected submit failure")
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+
+	calls := 0
+	ls.blockPipelineSubmit = func(
+		context.Context,
+		uint,
+		[]byte,
+		ocommon.Tip,
+	) error {
+		calls++
+		if calls > 1 {
+			return errSubmit
+		}
+		// Reported as submitted, but nothing reaches the pipeline, so its
+		// result never arrives.
+		return nil
+	}
+
+	res := testutil.RequireReceive(
+		t,
+		goDecodeBatch(t, ls, buildNoNonceValidateBatch(t, 3)),
+		testutil.AsyncWait,
+		"drain after a Submit error did not time out",
+	)
+	require.ErrorIs(t, res.err, errSubmit)
+	require.ErrorContains(
+		t,
+		res.err,
+		"drain submitted block pipeline results: timeout",
+	)
+	require.Nil(t, res.decoded)
+}
+
+// TestDecodeReadChainBatchJoinsSubmitterOnReturn returns from the batch call
+// while its submitting goroutine is blocked inside Submit, by stopping the
+// pipeline (which closes Results()). The call must cancel the submit context
+// and not return until the goroutine has exited.
+func TestDecodeReadChainBatchJoinsSubmitterOnReturn(t *testing.T) {
+	t.Parallel()
+
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	var exited atomic.Bool
+	var proceedOnce sync.Once
+	release := func() { proceedOnce.Do(func() { close(proceed) }) }
+	defer release()
+	ls.blockPipelineSubmit = func(
+		ctx context.Context,
+		_ uint,
+		_ []byte,
+		_ ocommon.Tip,
+	) error {
+		close(entered)
+		<-ctx.Done() // only returns if the batch call cancels its context
+		<-proceed
+		exited.Store(true)
+		return ctx.Err()
+	}
+
+	done := goDecodeBatch(t, ls, buildNoNonceValidateBatch(t, 3))
+	testutil.RequireReceive(
+		t,
+		entered,
+		testutil.AsyncWait,
+		"submitter did not start",
+	)
+	stopAndDrain()
+
+	// The submitter is parked until proceed is closed, so a call that
+	// returns now has not joined it.
+	testutil.RequireNoReceive(
+		t,
+		done,
+		200*time.Millisecond,
+		"decodeReadChainBatch returned before its submitter exited",
+	)
+	release()
+	res := testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"decodeReadChainBatch did not cancel its submit context",
+	)
+	require.Error(t, res.err)
+	require.True(t, exited.Load(), "submitter must have exited at return")
+}
+
 // stopAndDrainBlockPipeline returns an idempotent function that stops ls's
 // block pipeline and waits for drainBlockPipelineErrors to exit. Stop()
 // closes errorsChan, which is what ends the drain goroutine's range loop, so
@@ -289,35 +527,16 @@ func stopAndDrainBlockPipeline(
 	}
 }
 
-// TestDrainBlockPipelineErrorsApplyPendingLimitIsNotUnexpected is a
-// regression test for a flake on main: the deadlock regression test above
-// intermittently failed with a few hundred "unexpected" pipeline errors and
-// no way to see what they were, because recordBlockPipelineError routed
-// pipeline.ErrPendingLimitExceeded to the default branch.
-//
-// That error is not a block failure. gouroboros' apply stage buffers
-// out-of-order items until their sequence number comes up; when one stage
-// worker falls behind its siblings, the earliest sequence number stalls and
-// every later item piles into that buffer. Past MaxPendingBlocks,
-// ApplyStage.ProcessWithStatus still buffers the item -- "to prevent
-// sequence gaps", per its own comment -- and additionally returns
-// ErrPendingLimitExceeded as a backpressure signal, which the apply runner
-// forwards to errorsChan. Every one of those blocks is still applied in
-// sequence. Counting them as unexpected therefore both fails this package
-// under CI scheduling pressure and, in production, logs a burst at ERROR
-// level while inflating a counter whose help text tells operators a nonzero
-// value means a decode, validation, or apply problem.
-//
-// The stall is a scheduling accident on CI, so this test creates it on
-// purpose: the eta0 provider blocks the first submitted block (sequence 0)
-// inside the validate stage until every other block in the batch has
-// already passed through it. validatedChan is FIFO and holds the whole
-// batch, so the apply stage sees all numBlocks-1 later items -- each of them
-// out of order -- before it ever sees sequence 0. MaxPendingBlocks is
+// TestDecodeReadChainBatchStalledSequenceBackpressuresSubmit covers a stage
+// worker falling behind its siblings: the eta0 provider holds the first
+// submitted block (sequence 0) in the validate stage, so the apply stage can
+// complete nothing. Submit must wait once MaxPendingBlocks later sequences
+// are outstanding rather than overflow the apply stage's out-of-order
+// buffer, and the batch must finish, with no pipeline error beyond the
+// expected eta0 ones, once the held block is released. MaxPendingBlocks is
 // lowered from the production default (2160, Cardano's k) only so the batch
-// can stay small; nothing else about the pipeline, the drain, or the
-// classification path is substituted.
-func TestDrainBlockPipelineErrorsApplyPendingLimitIsNotUnexpected(
+// can stay small.
+func TestDecodeReadChainBatchStalledSequenceBackpressuresSubmit(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -346,21 +565,13 @@ func TestDrainBlockPipelineErrorsApplyPendingLimitIsNotUnexpected(
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 
-	// held gates slot 0 (the first block submitted, and therefore the
-	// pipeline item with sequence number 0) inside the validate stage.
 	held := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(held) }) }
-	// othersDone fires once every other block in the batch has been through
-	// the provider, which is the point at which all of them are queued on
-	// validatedChan ahead of slot 0.
-	othersDone := make(chan struct{})
 	var others atomic.Int64
 	eta0Provider := func(slot uint64) (string, error) {
 		if slot != 0 {
-			if others.Add(1) == numBlocks-1 {
-				close(othersDone)
-			}
+			others.Add(1)
 			return ls.blockPipelineEta0Provider(slot)
 		}
 		select {
@@ -397,12 +608,22 @@ func TestDrainBlockPipelineErrorsApplyPendingLimitIsNotUnexpected(
 		_, _ = ls.decodeReadChainBatch(t.Context(), rawBatch)
 	}()
 
-	testutil.RequireReceive(
+	// Sequence 0 plus maxPending later sequences may be outstanding, so
+	// exactly maxPending blocks other than the held one reach the provider.
+	require.Eventually(
 		t,
-		othersDone,
+		func() bool { return others.Load() >= maxPending },
 		testutil.AsyncWait,
-		"every block after the first should have reached the validate "+
-			"stage while the first one was held there",
+		5*time.Millisecond,
+		"blocks behind the held one should reach the validate stage",
+	)
+	require.Never(
+		t,
+		func() bool { return others.Load() > maxPending },
+		100*time.Millisecond,
+		5*time.Millisecond,
+		"Submit admitted more than MaxPendingBlocks blocks behind a stalled "+
+			"sequence",
 	)
 	release()
 	testutil.RequireReceive(
@@ -417,35 +638,9 @@ func TestDrainBlockPipelineErrorsApplyPendingLimitIsNotUnexpected(
 	require.Zero(
 		t,
 		promtestutil.ToFloat64(ls.metrics.blockPipelineUnexpectedErrors),
-		"an apply-stage pending-buffer overflow is backpressure, not an "+
-			"unexpected pipeline error; ERROR log records captured from "+
-			"recordBlockPipelineError:%s",
+		"a stalled sequence must not surface a pipeline error; ERROR log "+
+			"records captured from recordBlockPipelineError:%s",
 		errLog.summary(),
-	)
-	// Sequence 0 is released only once every other item has been through
-	// the provider, so the apply stage buffers essentially the whole batch
-	// before it can apply anything and the overflow signal fires for every
-	// item after the maxPending'th. The count is bounded on both sides
-	// rather than fixed: the gate observes items entering the provider, and
-	// the one item still inside the validate worker when it fires may be
-	// enqueued on validatedChan either side of the released sequence 0,
-	// which moves the total by exactly one.
-	pendingLimitErrors := promtestutil.ToFloat64(
-		ls.metrics.blockPipelineApplyPendingLimitErrors,
-	)
-	require.GreaterOrEqual(
-		t,
-		pendingLimitErrors,
-		float64(numBlocks-2-maxPending),
-		"every out-of-order block buffered past MaxPendingBlocks should be "+
-			"counted as apply-stage backpressure",
-	)
-	require.LessOrEqual(
-		t,
-		pendingLimitErrors,
-		float64(numBlocks-1-maxPending),
-		"no block before the maxPending'th should be counted as apply-stage "+
-			"backpressure",
 	)
 	require.Equal(
 		t,
@@ -456,7 +651,7 @@ func TestDrainBlockPipelineErrorsApplyPendingLimitIsNotUnexpected(
 }
 
 // TestRecordBlockPipelineErrorClassificationDeferredIsNotUnexpected is a
-// regression test for the observability gap flagged on PR #3232:
+// regression test for an observability gap:
 // errHeaderVerificationDeferred (the pipeline's epoch cache has not yet
 // caught up with an already-committed block -- ARCHITECTURE.md's
 // "resolves once the epoch cache catches up" case) must be counted
@@ -586,13 +781,10 @@ func TestRecordBlockPipelineErrorClassification(t *testing.T) {
 	)
 }
 
-// TestRecordBlockPipelineErrorClassificationPendingLimitIsNotUnexpected
-// pins the classification of pipeline.ErrPendingLimitExceeded on its own,
-// independently of the concurrency needed to provoke it: the apply stage
-// buffers the item regardless and applies it in sequence, so the signal
-// reports stage-worker scheduling lag and must not be counted or logged
-// alongside genuine decode/validate/apply failures.
-func TestRecordBlockPipelineErrorClassificationPendingLimitIsNotUnexpected(
+// TestRecordBlockPipelineErrorClassificationPendingLimitIsUnexpected pins
+// pipeline.ErrPendingLimitExceeded as unexpected: the apply stage drops the
+// block and cancels the pipeline when it reports it.
+func TestRecordBlockPipelineErrorClassificationPendingLimitIsUnexpected(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -602,62 +794,13 @@ func TestRecordBlockPipelineErrorClassificationPendingLimitIsNotUnexpected(
 	}
 	ls.metrics.init(prometheus.NewRegistry())
 
-	ls.recordBlockPipelineError(pipeline.ErrPendingLimitExceeded)
-	require.Equal(
-		t,
-		float64(1),
-		promtestutil.ToFloat64(
-			ls.metrics.blockPipelineApplyPendingLimitErrors,
-		),
-		"an apply-stage pending-buffer overflow must count as its own "+
-			"backpressure case",
-	)
-	require.Zero(
-		t,
-		promtestutil.ToFloat64(ls.metrics.blockPipelineUnexpectedErrors),
-		"an apply-stage pending-buffer overflow must not count as unexpected",
-	)
-	require.Zero(
-		t,
-		promtestutil.ToFloat64(ls.metrics.blockPipelineExpectedEta0Errors),
-	)
-	require.Zero(
-		t,
-		promtestutil.ToFloat64(
-			ls.metrics.blockPipelineDeferredEpochCacheErrors,
-		),
-	)
-
-	// Wrapped by an intermediate layer, it must still classify the same way.
 	ls.recordBlockPipelineError(
 		fmt.Errorf("apply stage: %w", pipeline.ErrPendingLimitExceeded),
 	)
 	require.Equal(
 		t,
-		float64(2),
-		promtestutil.ToFloat64(
-			ls.metrics.blockPipelineApplyPendingLimitErrors,
-		),
-	)
-	require.Zero(
-		t,
-		promtestutil.ToFloat64(ls.metrics.blockPipelineUnexpectedErrors),
-	)
-
-	// The neighbouring apply-stage invariant violation is a genuine
-	// problem and must still land in the unexpected bucket.
-	ls.recordBlockPipelineError(pipeline.ErrBlockNotValidated)
-	require.Equal(
-		t,
 		float64(1),
 		promtestutil.ToFloat64(ls.metrics.blockPipelineUnexpectedErrors),
-	)
-	require.Equal(
-		t,
-		float64(2),
-		promtestutil.ToFloat64(
-			ls.metrics.blockPipelineApplyPendingLimitErrors,
-		),
 	)
 }
 
@@ -704,12 +847,6 @@ func TestRecordBlockPipelineErrorClassificationShutdownIsNotUnexpected(
 	require.Zero(
 		t,
 		promtestutil.ToFloat64(ls.metrics.blockPipelineExpectedEta0Errors),
-	)
-	require.Zero(
-		t,
-		promtestutil.ToFloat64(
-			ls.metrics.blockPipelineApplyPendingLimitErrors,
-		),
 	)
 
 	// A genuine failure must still land in the unexpected bucket.

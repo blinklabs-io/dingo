@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -28,13 +29,13 @@ import (
 )
 
 // TestLedgerProcessBlockRejectsOpCertCounterAbovePersistableBound is the
-// apply-path half of #3991's third acceptance criterion: a counter above
+// apply-path half of the persistable-counter contract: a counter above
 // 2^63-1 must fail through ledgerProcessBlock, and the test must fail
 // without eras.ValidateOpCertPersistableCounter's guard at state.go. That
-// guard was unreachable at the gouroboros pin #3991 fixed against, because
-// every opCertFromHeader path decoded the counter as uint32; the module is
-// now at a release past gouroboros #2256, so a counter this wide is
-// representable and the guard is finally exercisable.
+// guard was unreachable at the gouroboros pin the guard was written against,
+// because every opCertFromHeader path decoded the counter as uint32; the module
+// is now at a release that widened the header counter, so a counter this wide
+// is representable and the guard is finally exercisable.
 //
 // The guard runs unconditionally, ahead of the era-scoped monotonicity/no-gap
 // rule, so shouldValidate is false here to isolate it: this proves the width
@@ -79,26 +80,28 @@ func TestLedgerProcessBlockRejectsOpCertCounterAbovePersistableBound(
 		},
 	}
 
-	err := db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
-			txn,
-			ocommon.Point{Slot: 10},
-			block,
-			false,
-			false,
-			false,
-			nil,
-			envelopeParent{},
-			nil,
-			eras.BabbageEraDesc,
-			nil,
-			nil,
-			0,
-			0,
-			false,
-		)
-		return err
-	})
+	err := db.Transaction(context.Background(), true).
+		Do(func(txn *database.Txn) error {
+			_, err := ls.ledgerProcessBlock(
+				context.Background(),
+				txn,
+				ocommon.Point{Slot: 10},
+				block,
+				false,
+				false,
+				false,
+				nil,
+				envelopeParent{},
+				nil,
+				eras.BabbageEraDesc,
+				nil,
+				nil,
+				0,
+				0,
+				false,
+			)
+			return err
+		})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "pool_opcert_sequence")
 

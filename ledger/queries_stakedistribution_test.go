@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"math/big"
 	"strings"
 	"testing"
@@ -68,10 +69,10 @@ func stakeDistributionQuery() *olocalstatequery.BlockQuery {
 // seedLiveStakeFixture registers a pool with a known VRF hash and gives it
 // stake via a real delegated account and UTxO -- the data
 // GetStakeDistribution's live reconstruction (ledger/snapshot's Calculator)
-// actually reads after blinklabs-io/dingo#4152's fix, unlike
-// seedPoolDistr2Fixture (queries_pooldistr2_test.go), which only writes a
-// PoolStakeSnapshot row: the periodic mark/set/go snapshot GetPoolDistr2
-// reads, and GetStakeDistribution no longer does.
+// actually reads after the move to live stake, unlike seedPoolDistr2Fixture
+// (queries_pooldistr2_test.go), which only writes a PoolStakeSnapshot row: the
+// periodic mark/set/go snapshot GetPoolDistr2 reads, and GetStakeDistribution
+// no longer does.
 func seedLiveStakeFixture(
 	t *testing.T,
 	db *database.Database,
@@ -83,6 +84,7 @@ func seedLiveStakeFixture(
 	t.Helper()
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: vrfKeyHash},
 		&models.PoolRegistration{
@@ -95,15 +97,18 @@ func seedLiveStakeFixture(
 	))
 	stakingKey := make([]byte, 28)
 	copy(stakingKey, poolKeyHash)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: stakingKey,
-		Pool:       pkh.Bytes(),
-		AddedSlot:  slot,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: stakingKey,
+			Pool:       pkh.Bytes(),
+			AddedSlot:  slot,
+			Active:     true,
+		}),
+	)
 	txId := make([]byte, 32)
 	copy(txId, poolKeyHash)
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       txId,
 		OutputIdx:  0,
 		StakingKey: stakingKey,
@@ -116,8 +121,8 @@ func seedLiveStakeFixture(
 // TestQueryShelleyStakeDistribution_ReportsFractionAndVrf covers
 // GetStakeDistribution's live reconstruction: unlike GetPoolDistr2
 // (queryShelleyPoolDistr2), which reads the periodic mark snapshot, this
-// query reads live stake (blinklabs-io/dingo#4152), so its fixture is real
-// delegated accounts and UTxOs rather than a PoolStakeSnapshot row.
+// query reads live stake, so its fixture is real delegated accounts and UTxOs
+// rather than a PoolStakeSnapshot row.
 func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
 	t.Parallel()
 
@@ -150,7 +155,7 @@ func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
 	// depending on totalCirculatingSupply's own fallback path, which
 	// answers from the mark-snapshot total-active-stake table -- a
 	// different, unrelated number now that this query's own numerator is
-	// live stake, not the mark snapshot (blinklabs-io/dingo#4152).
+	// live stake, not the mark snapshot.
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
@@ -173,7 +178,7 @@ func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
 		Point: ocommon.NewPoint(1, tipHash),
 	}, nil))
 
-	result, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+	result, err := ls.Query(t.Context(), stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	dist := decodeStakeDistributionResult(t, result)
 	require.Len(t, dist.Results, 2)
@@ -240,7 +245,7 @@ func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
 		Point: ocommon.NewPoint(1, tipHash),
 	}, nil))
 
-	result, err := ls.Query(stakeDistributionCborQuery(), QueryPoint{})
+	result, err := ls.Query(t.Context(), stakeDistributionCborQuery(), QueryPoint{})
 	require.NoError(
 		t,
 		err,
@@ -280,20 +285,19 @@ func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
 }
 
 // TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal
-// covers blinklabs-io/dingo#3824: a live devnet run against a real
-// cardano-node found GetStakeDistribution's reported fraction inflated 2x,
-// because it shared GetPoolDistr2's denominator (sum of delegated stake).
-// Confirmed with real cardano-node's own raw wire bytes (not just the
-// decoded fraction) that its GetStakeDistribution reply genuinely uses total
-// circulation instead -- a real, deliberate difference between the two
-// queries, not a bug in either one. GetPoolDistr2's own denominator is
-// correct as sum-of-delegated (matching real cardano-ledger's
-// calculatePoolDistr/SnapShot.ssTotalActiveStake) and must not change --
-// this test proves the two queries now correctly disagree on the same
+// pins: a live devnet run against a real cardano-node found
+// GetStakeDistribution's reported fraction inflated 2x, because it shared
+// GetPoolDistr2's denominator (sum of delegated stake). Confirmed with real
+// cardano-node's own raw wire bytes (not just the decoded fraction) that its
+// GetStakeDistribution reply genuinely uses total circulation instead -- a
+// real, deliberate difference between the two queries, not a bug in either one.
+// GetPoolDistr2's own denominator is correct as sum-of-delegated (matching real
+// cardano-ledger's calculatePoolDistr/SnapShot.ssTotalActiveStake) and must not
+// change -- this test proves the two queries now correctly disagree on the same
 // underlying data, rather than being kept artificially consistent.
 //
 // The two queries also now read from different sources for the numerator
-// itself (blinklabs-io/dingo#4152: GetPoolDistr2 from the mark snapshot,
+// itself (GetPoolDistr2 from the mark snapshot,
 // GetStakeDistribution from live stake), so this fixture seeds both a
 // PoolStakeSnapshot row (for GetPoolDistr2) and a live delegated
 // account/UTxO (for GetStakeDistribution) naming the same two pools with
@@ -350,7 +354,7 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 
 	// GetPoolDistr2 must be unaffected: still sum-of-delegated (2_000_000),
 	// so each pool is 1/2.
-	poolDistr2Result, err := ls.Query(poolDistr2Query(), QueryPoint{})
+	poolDistr2Result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	poolDistr2 := decodePoolDistr2Result(t, poolDistr2Result)
 	entryA2, ok := poolDistr2.Pools[lcommon.PoolId(pkhA)]
@@ -361,7 +365,7 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 
 	// GetStakeDistribution must use circulation (4_000_000) instead, so each
 	// pool is 1/4 -- not 1/2.
-	stakeDistResult, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+	stakeDistResult, err := ls.Query(t.Context(), stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	stakeDist := decodeStakeDistributionResult(t, stakeDistResult)
 	entryA, ok := stakeDist.Results[lcommon.PoolId(pkhA)]
@@ -374,7 +378,7 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 }
 
 // TestQueryShelleyStakeDistribution_PinnedAtLiveTip_Succeeds covers
-// node-parity's own usage (blinklabs-io/dingo#1900): Check pins every
+// node-parity's own usage: Check pins every
 // query, including GetStakeDistribution, to whatever point the two nodes
 // just agreed was live -- so a pin naming exactly the current tip must
 // succeed rather than being rejected as an unsupported historical pin.
@@ -402,8 +406,7 @@ func TestQueryShelleyStakeDistribution_PinnedAtLiveTip_Succeeds(t *testing.T) {
 		Point: ocommon.NewPoint(50, tipHash),
 	}, nil))
 
-	result, err := ls.Query(
-		stakeDistributionQuery(),
+	result, err := ls.Query(t.Context(), stakeDistributionQuery(),
 		QueryPoint{Slot: 50, Hash: tipHash},
 	)
 	require.NoError(
@@ -418,7 +421,7 @@ func TestQueryShelleyStakeDistribution_PinnedAtLiveTip_Succeeds(t *testing.T) {
 }
 
 // TestQueryShelleyStakeDistribution_PinnedBehindLiveTip_UsesHistoricalCirculatingSupply
-// covers the real #382 fix this handler no longer works around: a pin naming
+// covers the real pinning fix this handler no longer works around: a pin naming
 // a real, on-chain point behind the live tip is now answered, and with the
 // circulating supply that was actually true at that point
 // (GetNetworkStateAsOfSlot), not whatever reserves are live now. Reserves
@@ -468,8 +471,7 @@ func TestQueryShelleyStakeDistribution_PinnedBehindLiveTip_UsesHistoricalCircula
 	// reserves for the slot-100 pin instead of the historical row above.
 	require.NoError(t, db.Metadata().SetNetworkState(0, 2_000_000, 200, nil))
 
-	result, err := ls.Query(
-		stakeDistributionQuery(),
+	result, err := ls.Query(t.Context(), stakeDistributionQuery(),
 		QueryPoint{Slot: 100, Hash: pastHash},
 	)
 	require.NoError(t, err, "a real historical pin must now be answered")
@@ -487,7 +489,7 @@ func TestQueryShelleyStakeDistribution_PinnedBehindLiveTip_UsesHistoricalCircula
 	// The live (unpinned) query is unaffected: it still reads the latest
 	// NetworkState row, giving pool A a 1/6 fraction against 6_000_000
 	// circulation.
-	liveResult, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+	liveResult, err := ls.Query(t.Context(), stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	liveDist := decodeStakeDistributionResult(t, liveResult)
 	liveEntryA, ok := liveDist.Results[lcommon.PoolId(pkhA)]
@@ -543,8 +545,7 @@ func TestQueryShelleyStakeDistribution_PinnedBeforeAnyNetworkStateRow_Rejected(
 	// so GetNetworkStateAsOfSlot(100) finds nothing.
 	require.NoError(t, db.Metadata().SetNetworkState(0, 2_000_000, 200, nil))
 
-	_, err := ls.Query(
-		stakeDistributionQuery(),
+	_, err := ls.Query(t.Context(), stakeDistributionQuery(),
 		QueryPoint{Slot: 100, Hash: pastHash},
 	)
 	require.Error(t, err)
@@ -552,7 +553,7 @@ func TestQueryShelleyStakeDistribution_PinnedBeforeAnyNetworkStateRow_Rejected(
 }
 
 // TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration
-// covers a CodeRabbit finding on blinklabs-io/dingo#4237: a pool that
+// verifies that a pool that
 // re-registers with a new VRF key after a pinned query's slot must still be
 // reported with the key it held at that slot, not its current one. Before
 // this fix, poolVrfKeyHashes always resolved through
@@ -576,6 +577,7 @@ func TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration
 	// Re-registers the same pool with a new VRF key at slot 150 -- after the
 	// slot-100 pin below, but before the live tip.
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: poolAHash, VrfKeyHash: vrfNew},
 		&models.PoolRegistration{
@@ -599,8 +601,7 @@ func TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration
 	}, nil))
 	require.NoError(t, db.Metadata().SetNetworkState(0, 2_000_000, 100, nil))
 
-	result, err := ls.Query(
-		stakeDistributionQuery(),
+	result, err := ls.Query(t.Context(), stakeDistributionQuery(),
 		QueryPoint{Slot: 100, Hash: pastHash},
 	)
 	require.NoError(t, err)
@@ -614,7 +615,7 @@ func TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration
 
 	// The live (unpinned) query is unaffected: it must report the pool's
 	// current key, since dingo validates incoming blocks against it.
-	liveResult, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+	liveResult, err := ls.Query(t.Context(), stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	liveDist := decodeStakeDistributionResult(t, liveResult)
 	liveEntryA, ok := liveDist.Results[lcommon.PoolId(pkhA)]
@@ -625,7 +626,7 @@ func TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration
 // TestQueryShelleyStakeDistribution_EmptySnapshot covers a chain with no
 // stake yet (and no epoch data synced at all -- a completely fresh
 // database): the query must return an empty, non-nil map rather than
-// failing (blinklabs-io/dingo#4152: the live reconstruction's
+// failing (the live reconstruction's
 // getActivePoolsAtSlot returns types.ErrNoEpochData in exactly this case,
 // which queryShelleyStakeDistribution must treat the same way
 // queryLedgerPeerSnapshot already does -- an empty result, not an error).
@@ -635,7 +636,7 @@ func TestQueryShelleyStakeDistribution_EmptySnapshot(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.queryShelleyStakeDistribution(QueryPoint{}, nil)
+	result, err := ls.queryShelleyStakeDistribution(t.Context(), QueryPoint{}, nil)
 	require.NoError(t, err)
 	dist := decodeStakeDistributionResult(t, result)
 	assert.Empty(t, dist.Results)

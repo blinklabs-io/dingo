@@ -339,6 +339,9 @@ func (s *Store) GetAccountByCredential(
 		return nil, err
 	}
 	q := s.operationalQueries(db)
+	if s.readCanUseWriteCache(txn) {
+		q = s.operationalQueriesCached(db)
+	}
 	params := sqlitequery.GetActiveAccountByCredentialParams{
 		CredentialTag: int64(credentialTag),
 		StakingKey:    stakeKey,
@@ -675,34 +678,6 @@ SELECT credential_tag, staking_key FROM account WHERE active = TRUE`)
 	return ret, rows.Err()
 }
 
-// clearAccountImportBaselines tombstones the baselines of the credentials the
-// predicate matches. Mithril reconciliation deactivates a credential precisely
-// because the newer snapshot's live set does not hold it, which is a statement
-// about the imported baseline and not about any certificate. Leaving the
-// baseline active would let a later rollback restore the account the caller
-// just tombstoned.
-func (s *Store) clearAccountImportBaselines(
-	ctx context.Context,
-	db queryer,
-	predicate string,
-	args ...any,
-) error {
-	if err := requireAccountBaselineTransaction(db); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(
-		ctx,
-		s.dialect.Rebind(`
-UPDATE account_import_baseline SET active = FALSE, pool = NULL, drep = NULL,
-    drep_type = 0
-WHERE active = TRUE AND (`+predicate+")"),
-		args...,
-	); err != nil {
-		return fmt.Errorf("clear account import baselines: %w", err)
-	}
-	return nil
-}
-
 // ClearDelegationsToRetiredPool removes every account delegation pointing at a
 // pool reaped at an epoch boundary, the delegation half of the Shelley POOLREAP
 // transition (domain-restrict the delegation map by the retired pools, Shelley
@@ -777,13 +752,72 @@ WHERE pool_key_hash = ?`,
 	)
 }
 
-// DeactivateAccounts tombstones the given credentials and their import
-// baselines. The two writes and every chunk of them share one transaction: an
-// account tombstoned while its baseline stays active is contradictory state
-// that lets a later rollback restore exactly the account this call removed.
+// RestoreImportedAccountStates rewrites an account's registration and
+// delegation to its import baseline when that baseline was established at or
+// after minBaselineSlot, and returns the number of rows it changed.
+//
+// Historical API backfill replays certificates over accounts a Mithril
+// snapshot imported at its anchor, but certificates are not the only rule
+// that moves a delegation: POOLREAP clears delegations to a reaped pool
+// (Shelley/Rules/PoolReap.hs, removeStakePoolDelegations) and the PV10
+// HARDFORK rule clears delegations to an unregistered DRep
+// (Conway/Rules/HardFork.hs, updateDRepDelegations). Backfill runs neither,
+// so replay can leave a delegation the snapshot no longer holds. Once replay
+// has reached the anchor, the snapshot is the ledger state there. reward is
+// not touched: historical backfill never debits it.
+func (s *Store) RestoreImportedAccountStates(
+	minBaselineSlot uint64,
+	txn types.Txn,
+) (int, error) {
+	slot, err := checkedInt64(minBaselineSlot)
+	if err != nil {
+		return 0, fmt.Errorf("restore imported account states: %w", err)
+	}
+	var restored int
+	err = s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			const baseline = `FROM account_import_baseline b
+WHERE b.credential_tag = account.credential_tag
+  AND b.staking_key = account.staking_key`
+			result, err := db.ExecContext(ctx, s.dialect.Rebind(`
+UPDATE account SET
+    pool = (SELECT b.pool `+baseline+`),
+    drep = (SELECT b.drep `+baseline+`),
+    drep_type = (SELECT b.drep_type `+baseline+`),
+    active = (SELECT b.active `+baseline+`),
+    added_slot = (SELECT b.added_slot `+baseline+`)
+WHERE EXISTS (
+    SELECT 1 `+baseline+`
+      AND b.added_slot >= ?
+      AND ((account.pool IS NULL) <> (b.pool IS NULL)
+        OR account.pool <> b.pool
+        OR (account.drep IS NULL) <> (b.drep IS NULL)
+        OR account.drep <> b.drep
+        OR account.drep_type <> b.drep_type
+        OR account.active <> b.active)
+)`), slot)
+			if err != nil {
+				return fmt.Errorf("restore imported account states: %w", err)
+			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("restore imported account states: %w", err)
+			}
+			restored = int(affected)
+			return nil
+		},
+	)
+	return restored, err
+}
+
+// DeactivateAccounts records the newer snapshot's inactive state for the given
+// credentials. The account and authoritative baseline writes share one
+// transaction so historical reads cannot resurrect the prior imported state.
 func (s *Store) DeactivateAccounts(
 	txn types.Txn,
 	refs []models.StakeCredentialRef,
+	atSlot uint64,
 ) error {
 	if len(refs) == 0 {
 		return nil
@@ -791,6 +825,10 @@ func (s *Store) DeactivateAccounts(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			slot, err := checkedInt64(atSlot)
+			if err != nil {
+				return err
+			}
 			chunkSize := s.dialect.ParameterLimit() / 2
 			for start := 0; start < len(refs); start += chunkSize {
 				end := min(start+chunkSize, len(refs))
@@ -807,18 +845,30 @@ func (s *Store) DeactivateAccounts(
 				if _, err := db.ExecContext(
 					ctx,
 					s.dialect.Rebind(`
-UPDATE account SET active = FALSE
+UPDATE account SET active = FALSE, pool = NULL, drep = NULL, drep_type = 0,
+    added_slot = ?
 WHERE active = TRUE AND (`+predicate+")"),
-					args...,
+					append([]any{slot}, args...)...,
 				); err != nil {
 					return fmt.Errorf("DeactivateAccounts: %w", err)
 				}
-				if err := s.clearAccountImportBaselines(
-					ctx,
-					db,
-					predicate,
+				if _, err := db.ExecContext(ctx, `
+INSERT INTO account_import_baseline (
+    credential_tag, staking_key, pool, drep, drep_type, active, added_slot,
+    deposit_amount
+)
+SELECT credential_tag, staking_key, NULL, NULL, 0, FALSE, ?, NULL
+FROM account WHERE `+predicate+`
+ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
+    pool = excluded.pool,
+    drep = excluded.drep,
+    drep_type = excluded.drep_type,
+    active = excluded.active,
+    added_slot = excluded.added_slot,
+    deposit_amount = excluded.deposit_amount`, append(
+					[]any{slot},
 					args...,
-				); err != nil {
+				)...); err != nil {
 					return fmt.Errorf("DeactivateAccounts: %w", err)
 				}
 			}
@@ -896,6 +946,238 @@ WHERE mir.pot = 1 AND reward.credential_tag = ?
 	return ret, nil
 }
 
+// accountVoteDelegationTables are the certificate tables that set an
+// account's DRep delegation.
+var accountVoteDelegationTables = []string{
+	"vote_delegation",
+	"vote_registration_delegation",
+	"stake_vote_delegation",
+	"stake_vote_registration_delegation",
+}
+
+// accountStateAtSlot is one account's registration, pool and DRep state at a
+// slot, as derived from the certificate history and import baseline that
+// survive at that slot.
+type accountStateAtSlot struct {
+	// absent means nothing at or before the slot created the account.
+	absent   bool
+	active   bool
+	pool     []byte
+	drep     []byte
+	drepType uint64
+	// setPool and setDrep are false when nothing at or before the slot
+	// determines the value, so the live value stands.
+	setPool    bool
+	setDrep    bool
+	latestSlot uint64
+}
+
+// deriveAccountStateAtSlot derives an account's state at slot without writing
+// anything. RestoreAccountStateAtSlot writes the result back on rollback;
+// GetAccountsByCredentialAtSlot answers queries at a past slot with it.
+func deriveAccountStateAtSlot(
+	ctx context.Context,
+	db queryer,
+	tag uint8,
+	key []byte,
+	createdSlot uint64,
+	slot uint64,
+) (accountStateAtSlot, error) {
+	var state accountStateAtSlot
+	registration, hasRegistration, err := latestAccountEvent(
+		ctx,
+		db,
+		accountRegistrationStateTables,
+		tag,
+		key,
+		slot,
+		"",
+	)
+	if err != nil {
+		return state, err
+	}
+	if !hasRegistration && createdSlot > slot {
+		state.absent = true
+		return state, nil
+	}
+	baseline, hasBaseline, err := readAccountImportBaseline(ctx, db, tag, key)
+	if err != nil {
+		return state, err
+	}
+	baselineAtSlot := hasBaseline && baseline.position.slot <= slot
+	deregistration, hasDeregistration, err := latestAccountEvent(
+		ctx,
+		db,
+		accountDeregistrationStateTables,
+		tag,
+		key,
+		slot,
+		"",
+	)
+	if err != nil {
+		return state, err
+	}
+	pool, hasPool, err := latestAccountEvent(
+		ctx,
+		db,
+		[]string{
+			"stake_delegation",
+			"stake_registration_delegation",
+			"stake_vote_delegation",
+			"stake_vote_registration_delegation",
+		},
+		tag,
+		key,
+		slot,
+		"pool_key_hash",
+	)
+	if err != nil {
+		return state, err
+	}
+	drep, hasDrep, err := latestAccountEvent(
+		ctx,
+		db,
+		accountVoteDelegationTables,
+		tag,
+		key,
+		slot,
+		"drep",
+	)
+	if err != nil {
+		return state, err
+	}
+	clear, hasClear, err := latestDRepClear(ctx, db, tag, key, slot)
+	if err != nil {
+		return state, err
+	}
+	// A snapshot baseline is the complete state at its slot. It supersedes
+	// older certificates and boundary clears, and wins ties because imports
+	// record the ledger state after processing that slot.
+	usePoolBaseline := hasBaseline && baselineWinsAccountEvent(
+		baseline.position,
+		baselineAtSlot,
+		pool.position,
+		hasPool,
+	)
+	if usePoolBaseline {
+		pool = accountRestoreEvent{
+			position: baseline.position,
+			value:    baseline.pool,
+		}
+		hasPool = true
+	}
+	useDRepBaseline := hasBaseline && baselineWinsAccountEvent(
+		baseline.position,
+		baselineAtSlot,
+		drep.position,
+		hasDrep,
+	)
+	if useDRepBaseline {
+		drep = accountRestoreEvent{
+			position:  baseline.position,
+			value:     baseline.drep,
+			valueType: baseline.drepType,
+		}
+		hasDrep = true
+	}
+	activeEvent := registration
+	priorActive := hasRegistration
+	baselineActiveSource := false
+	if hasBaseline && baselineWinsAccountEvent(
+		baseline.position,
+		baselineAtSlot,
+		registration.position,
+		hasRegistration,
+	) {
+		activeEvent.position = baseline.position
+		priorActive = baseline.active
+		baselineActiveSource = true
+	} else if !hasRegistration {
+		priorActive = true
+	}
+	registrationWins := !hasDeregistration
+	if hasDeregistration {
+		if baselineActiveSource {
+			registrationWins = activeEvent.position.slot >=
+				deregistration.position.slot
+		} else {
+			registrationWins = compareCertificatePosition(
+				activeEvent.position,
+				deregistration.position,
+			) > 0
+		}
+	}
+	state.active = priorActive && registrationWins
+	// A delegation certificate is not the last word on the delegation:
+	// POOLREAP removes the delegations pointing at a pool reaped at an epoch
+	// boundary and writes no certificate of its own, so a certificate
+	// predating a reap that still stands at the slot must not put the account
+	// back on that pool. Before the reap the certificate is authoritative
+	// again, and the boundary check excludes that case.
+	if hasPool && len(pool.value) > 0 {
+		reaped, err := poolReapedAfterDelegation(
+			ctx,
+			db,
+			pool.value,
+			pool.position.slot,
+			slot,
+		)
+		if err != nil {
+			return state, err
+		}
+		if reaped {
+			pool.value = nil
+		}
+	}
+	// pool/drep are only known from a certificate, from the baseline, or
+	// from the account being deregistered.
+	state.setPool = hasRegistration || hasBaseline || hasPool || !state.active
+	state.setDrep = hasRegistration || hasBaseline || hasDrep || hasClear ||
+		!state.active
+	if !state.active || hasDeregistration &&
+		hasPool &&
+		compareCertificatePosition(
+			deregistration.position,
+			pool.position,
+		) > 0 {
+		pool.value = nil
+	}
+	if !state.active || hasDeregistration &&
+		hasDrep &&
+		compareCertificatePosition(
+			deregistration.position,
+			drep.position,
+		) > 0 {
+		drep.value = nil
+		drep.valueType = 0
+	}
+	if state.active && hasClear &&
+		(!hasDrep || clear.position.slot > drep.position.slot) {
+		drep.value = nil
+		drep.valueType = 0
+	}
+	state.pool = pool.value
+	state.drep = drep.value
+	state.drepType = drep.valueType
+	state.latestSlot = activeEvent.position.slot
+	for _, event := range []accountRestoreEvent{
+		deregistration,
+		pool,
+		drep,
+		clear,
+	} {
+		if event.position.slot > state.latestSlot {
+			state.latestSlot = event.position.slot
+		}
+	}
+	// A baseline established after the slot (a slot before the snapshot)
+	// must not leave the row claiming a modification slot ahead of it.
+	if state.latestSlot > slot {
+		state.latestSlot = slot
+	}
+	return state, nil
+}
+
 func (s *Store) RestoreAccountStateAtSlot(
 	slot uint64,
 	txn types.Txn,
@@ -937,212 +1219,45 @@ FROM account WHERE added_slot > ?`,
 			}
 			refs := make([]models.StakeCredentialRef, 0, len(accounts))
 			for _, account := range accounts {
-				registration, hasRegistration, err := latestAccountEvent(
+				ref := models.NewStakeCredentialRef(account.tag, account.key)
+				refs = append(refs, ref)
+				state, err := deriveAccountStateAtSlot(
 					ctx,
 					db,
-					accountRegistrationStateTables,
 					account.tag,
 					account.key,
+					account.createdSlot,
 					slot,
-					"",
 				)
 				if err != nil {
 					return err
 				}
-				ref := models.NewStakeCredentialRef(account.tag, account.key)
-				refs = append(refs, ref)
-				var baseline accountImportBaseline
-				hasBaseline := false
-				if !hasRegistration {
-					if account.createdSlot > slot {
-						if _, err := db.ExecContext(ctx, `
+				if state.absent {
+					if _, err := db.ExecContext(ctx, `
 DELETE FROM account
 WHERE credential_tag = ? AND staking_key = ?`,
-							account.tag,
-							account.key,
-						); err != nil {
-							return err
-						}
-						if err := deleteAccountImportBaseline(
-							ctx,
-							db,
-							account.tag,
-							account.key,
-						); err != nil {
-							return err
-						}
-						continue
+						account.tag,
+						account.key,
+					); err != nil {
+						return err
 					}
-					// No registration certificate is reachable at or before
-					// the rollback slot, so the account predates every
-					// certificate this database holds: an imported or
-					// genesis-delegated account. Its import baseline stands in
-					// for the missing registration certificate, and the same
-					// derivation below then applies whichever certificates do
-					// survive the rollback.
-					baseline, hasBaseline, err = readAccountImportBaseline(
+					if err := deleteAccountImportBaseline(
 						ctx,
 						db,
 						account.tag,
 						account.key,
-					)
-					if err != nil {
+					); err != nil {
 						return err
 					}
-					registration = accountRestoreEvent{
-						position: baseline.position,
-					}
-				}
-				deregistration, hasDeregistration, err := latestAccountEvent(
-					ctx,
-					db,
-					accountDeregistrationStateTables,
-					account.tag,
-					account.key,
-					slot,
-					"",
-				)
-				if err != nil {
-					return err
-				}
-				pool, hasPool, err := latestAccountEvent(
-					ctx,
-					db,
-					[]string{
-						"stake_delegation",
-						"stake_registration_delegation",
-						"stake_vote_delegation",
-						"stake_vote_registration_delegation",
-					},
-					account.tag,
-					account.key,
-					slot,
-					"pool_key_hash",
-				)
-				if err != nil {
-					return err
-				}
-				drep, hasDrep, err := latestAccountEvent(
-					ctx,
-					db,
-					[]string{
-						"vote_delegation",
-						"vote_registration_delegation",
-						"stake_vote_delegation",
-						"stake_vote_registration_delegation",
-					},
-					account.tag,
-					account.key,
-					slot,
-					"drep",
-				)
-				if err != nil {
-					return err
-				}
-				// An account with a baseline but no delegation certificate at
-				// or before the rollback slot delegates exactly as the
-				// snapshot recorded; without a baseline there is nothing to
-				// derive the pool or DRep from, and the live values are left
-				// alone.
-				if hasBaseline {
-					if !hasPool {
-						pool = accountRestoreEvent{
-							position: baseline.position,
-							value:    baseline.pool,
-						}
-						hasPool = len(pool.value) > 0
-					}
-					if !hasDrep {
-						drep = accountRestoreEvent{
-							position:  baseline.position,
-							value:     baseline.drep,
-							valueType: baseline.drepType,
-						}
-						hasDrep = len(drep.value) > 0 || drep.valueType != 0
-					}
-				}
-				// A registration certificate proves the account was registered
-				// at its position; a baseline carries whatever the snapshot
-				// recorded. Without either, absence of a surviving
-				// deregistration is the only evidence available.
-				priorActive := true
-				if hasBaseline {
-					priorActive = baseline.active
-				}
-				active := priorActive &&
-					(!hasDeregistration ||
-						compareCertificatePosition(
-							registration.position,
-							deregistration.position,
-						) > 0)
-				// A delegation certificate is not the last word on the
-				// delegation: POOLREAP removes the delegations pointing at a
-				// pool reaped at an epoch boundary and writes no certificate
-				// of its own, so a certificate predating a reap that still
-				// stands at the rollback slot must not put the account back on
-				// that pool. Rolling back past the reap is the other
-				// direction, and the boundary check below excludes it, so the
-				// certificate is authoritative again there.
-				if hasPool && len(pool.value) > 0 {
-					reaped, err := poolReapedAfterDelegation(
-						ctx,
-						db,
-						pool.value,
-						pool.position.slot,
-						slot,
-					)
-					if err != nil {
-						return err
-					}
-					if reaped {
-						pool.value = nil
-					}
-				}
-				// Only rewrite pool/drep when their value at the rollback slot
-				// is actually known: from a certificate, from the baseline, or
-				// from the account being deregistered.
-				setPool := hasRegistration || hasBaseline || hasPool || !active
-				setDrep := hasRegistration || hasBaseline || hasDrep || !active
-				if !active || hasDeregistration &&
-					hasPool &&
-					compareCertificatePosition(
-						deregistration.position,
-						pool.position,
-					) > 0 {
-					pool.value = nil
-				}
-				if !active || hasDeregistration &&
-					hasDrep &&
-					compareCertificatePosition(
-						deregistration.position,
-						drep.position,
-					) > 0 {
-					drep.value = nil
-					drep.valueType = 0
-				}
-				latestSlot := registration.position.slot
-				for _, event := range []accountRestoreEvent{
-					deregistration,
-					pool,
-					drep,
-				} {
-					if event.position.slot > latestSlot {
-						latestSlot = event.position.slot
-					}
-				}
-				// A baseline established after the rollback target (a rollback
-				// to before the snapshot slot) must not leave the row claiming
-				// a modification slot ahead of the tip.
-				if latestSlot > slot {
-					latestSlot = slot
+					continue
 				}
 				assignments := []string{"active = ?", "added_slot = ?"}
-				args := []any{active, latestSlot}
-				if setPool {
+				args := []any{state.active, state.latestSlot}
+				if state.setPool {
 					assignments = append(assignments, "pool = ?")
-					args = append(args, nullBytes(pool.value))
+					args = append(args, nullBytes(state.pool))
 				}
-				if setDrep {
+				if state.setDrep {
 					assignments = append(
 						assignments,
 						"drep = ?",
@@ -1150,8 +1265,8 @@ WHERE credential_tag = ? AND staking_key = ?`,
 					)
 					args = append(
 						args,
-						nullBytes(drep.value),
-						drep.valueType,
+						nullBytes(state.drep),
+						state.drepType,
 					)
 				}
 				args = append(args, account.tag, account.key)
@@ -1163,6 +1278,15 @@ WHERE credential_tag = ? AND staking_key = ?`,
 					return err
 				}
 			}
+			if _, err := db.ExecContext(ctx, `
+DELETE FROM account_drep_clear WHERE added_slot > ?`, slot); err != nil {
+				return err
+			}
+			if err := s.recordRewardEligibilityRecheck(
+				ctx, db, refs,
+			); err != nil {
+				return err
+			}
 			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
 		},
 	)
@@ -1172,6 +1296,43 @@ type accountRestoreEvent struct {
 	position  accountCertificatePosition
 	value     []byte
 	valueType uint64
+}
+
+func baselineWinsAccountEvent(
+	baseline accountCertificatePosition,
+	baselineAtSlot bool,
+	event accountCertificatePosition,
+	hasEvent bool,
+) bool {
+	// A rollback below an import boundary retains its baseline only as a
+	// fallback for state no surviving certificate can derive; latestSlot is
+	// clamped to the rollback target below.
+	if !baselineAtSlot {
+		return !hasEvent
+	}
+	return !hasEvent || baseline.slot >= event.slot
+}
+
+func latestDRepClear(
+	ctx context.Context,
+	db queryer,
+	tag uint8,
+	key []byte,
+	slot uint64,
+) (accountRestoreEvent, bool, error) {
+	var event accountRestoreEvent
+	err := db.QueryRowContext(ctx, `
+SELECT added_slot FROM account_drep_clear
+WHERE credential_tag = ? AND staking_key = ? AND added_slot <= ?
+ORDER BY added_slot DESC
+LIMIT 1`, tag, key, slot).Scan(&event.position.slot)
+	if errors.Is(err, sql.ErrNoRows) {
+		return accountRestoreEvent{}, false, nil
+	}
+	if err != nil {
+		return accountRestoreEvent{}, false, err
+	}
+	return event, true, nil
 }
 
 // poolReapedAfterDelegation reports whether poolKeyHash was reaped at an epoch
@@ -1414,6 +1575,279 @@ UPDATE account SET reward = ? WHERE id = ?`,
 		},
 	)
 }
+
+// maxRewardCreditBatchSize caps credit batches. The journal insert binds five
+// parameters per credit, so the actual batch is also limited by the dialect.
+const (
+	maxRewardCreditBatchSize            = 200
+	rewardCreditJournalInsertArgsPerRow = 5
+)
+
+type rewardCreditJournalKey struct {
+	sourceHash    string
+	credentialTag uint8
+	stakingKey    string
+	slot          uint64
+}
+
+func (s *Store) AddAccountRewardsByCredential(
+	credits []models.AccountRewardCredit,
+	txn types.Txn,
+) error {
+	if len(credits) == 0 {
+		return nil
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			batchSize := min(
+				maxRewardCreditBatchSize,
+				s.dialect.ParameterLimit()/rewardCreditJournalInsertArgsPerRow,
+			)
+			if batchSize == 0 {
+				return fmt.Errorf(
+					"dialect parameter limit %d cannot fit reward credit insert",
+					s.dialect.ParameterLimit(),
+				)
+			}
+			for start := 0; start < len(credits); start += batchSize {
+				end := min(start+batchSize, len(credits))
+				if err := s.addAccountRewardCreditBatch(
+					ctx, db, credits[start:end],
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	)
+}
+
+// addAccountRewardCreditBatch is AddAccountRewardByCredential for a bounded
+// batch. Batches run in order, so a credential repeated across batches sees
+// the balance the earlier batch wrote.
+func (s *Store) addAccountRewardCreditBatch(
+	ctx context.Context,
+	db queryer,
+	credits []models.AccountRewardCredit,
+) error {
+	type pendingCredit struct {
+		key    rewardCreditJournalKey
+		credit models.AccountRewardCredit
+	}
+	pending := make([]pendingCredit, 0, len(credits))
+	seen := make(map[rewardCreditJournalKey]struct{}, len(credits))
+	for _, credit := range credits {
+		if credit.Amount == 0 {
+			continue
+		}
+		if credit.SourceHash == nil {
+			credit.SourceHash = []byte{}
+		}
+		key := rewardCreditJournalKey{
+			sourceHash:    string(credit.SourceHash),
+			credentialTag: credit.CredentialTag,
+			stakingKey:    string(credit.StakingKey),
+			slot:          credit.Slot,
+		}
+		// The journal's unique key makes a repeated credit a no-op.
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		pending = append(pending, pendingCredit{key: key, credit: credit})
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	// IN lists on the leading columns of idx_account_reward_delta_w_tx_s_slot
+	// and idx_account_credential; a derived-table join here was planned as a
+	// scan of the joined table per batch.
+	hashes := make([]any, 0, len(pending))
+	seenHash := make(map[string]struct{}, len(pending))
+	for _, item := range pending {
+		if _, ok := seenHash[item.key.sourceHash]; ok {
+			continue
+		}
+		seenHash[item.key.sourceHash] = struct{}{}
+		hashes = append(hashes, item.credit.SourceHash)
+	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
+SELECT tx_hash, credential_tag, staking_key, added_slot
+FROM account_reward_delta
+WHERE withdrawal = FALSE AND tx_hash IN (`+bindPlaceholders(len(hashes))+`)`),
+		hashes...,
+	)
+	if err != nil {
+		return fmt.Errorf("look up applied reward credits: %w", err)
+	}
+	applied := make(map[rewardCreditJournalKey]struct{})
+	for rows.Next() {
+		var hash, key []byte
+		var tag, slot int64
+		if err := rows.Scan(&hash, &tag, &key, &slot); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan applied reward credit: %w", err)
+		}
+		applied[rewardCreditJournalKey{
+			sourceHash:    string(hash),
+			credentialTag: uint8(tag), //nolint:gosec // stored from uint8
+			stakingKey:    string(key),
+			slot:          uint64(slot), //nolint:gosec // stored from uint64
+		}] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate applied reward credits: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	type accountCredit struct {
+		ref    models.StakeCredentialRef
+		amount uint64
+		slot   uint64
+	}
+	byAccount := make(map[string]accountCredit)
+	order := make([]string, 0, len(pending))
+	fresh := pending[:0]
+	for _, item := range pending {
+		if _, ok := applied[item.key]; ok {
+			continue
+		}
+		fresh = append(fresh, item)
+		ref := models.NewStakeCredentialRef(
+			item.credit.CredentialTag, item.credit.StakingKey,
+		)
+		entry, ok := byAccount[ref.MapKey()]
+		if !ok {
+			entry = accountCredit{ref: ref}
+			order = append(order, ref.MapKey())
+		}
+		if entry.amount > ^uint64(0)-item.credit.Amount {
+			return fmt.Errorf(
+				"account reward overflow for stake key %x",
+				item.credit.StakingKey,
+			)
+		}
+		entry.amount += item.credit.Amount
+		// The live-stake refresh stamps the last credit's slot, as the
+		// one-at-a-time path's final refresh does.
+		entry.slot = item.credit.Slot
+		byAccount[ref.MapKey()] = entry
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+
+	type accountRow struct {
+		id     int64
+		reward uint64
+	}
+	accounts := make(map[string]accountRow, len(order))
+	keysByTag := make(map[uint8][]any)
+	for _, mapKey := range order {
+		ref := byAccount[mapKey].ref
+		keysByTag[ref.Tag] = append(keysByTag[ref.Tag], ref.Key)
+	}
+	for tag, keys := range keysByTag {
+		accountRows, err := db.QueryContext(ctx, s.dialect.Rebind(`
+SELECT id, staking_key, reward FROM account
+WHERE credential_tag = ? AND active = TRUE
+  AND staking_key IN (`+bindPlaceholders(len(keys))+`)`),
+			append([]any{tag}, keys...)...,
+		)
+		if err != nil {
+			return fmt.Errorf("look up credited accounts: %w", err)
+		}
+		for accountRows.Next() {
+			var id int64
+			var key []byte
+			var reward sql.NullString
+			if err := accountRows.Scan(&id, &key, &reward); err != nil {
+				_ = accountRows.Close()
+				return fmt.Errorf("scan credited account: %w", err)
+			}
+			current, err := parseNullUint64("account reward", reward)
+			if err != nil {
+				_ = accountRows.Close()
+				return err
+			}
+			mapKey := models.NewStakeCredentialRef(tag, key).MapKey()
+			accounts[mapKey] = accountRow{id: id, reward: current}
+		}
+		if err := accountRows.Err(); err != nil {
+			_ = accountRows.Close()
+			return fmt.Errorf("iterate credited accounts: %w", err)
+		}
+		if err := accountRows.Close(); err != nil {
+			return err
+		}
+	}
+	for _, mapKey := range order {
+		entry := byAccount[mapKey]
+		account, ok := accounts[mapKey]
+		if !ok {
+			return models.ErrAccountNotFound
+		}
+		if account.reward > ^uint64(0)-entry.amount {
+			return fmt.Errorf(
+				"account reward overflow for stake key %x", entry.ref.Key,
+			)
+		}
+	}
+
+	values := make([]string, len(fresh))
+	insertArgs := make([]any, 0, len(fresh)*5)
+	for index, item := range fresh {
+		slot, err := checkedInt64(item.credit.Slot)
+		if err != nil {
+			return err
+		}
+		values[index] = "(?, ?, ?, ?, NULL, ?, FALSE)"
+		insertArgs = append(
+			insertArgs,
+			item.credit.StakingKey,
+			item.credit.CredentialTag,
+			item.credit.SourceHash,
+			strconv.FormatUint(item.credit.Amount, 10),
+			slot,
+		)
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO account_reward_delta (
+    staking_key, credential_tag, tx_hash, amount, previous_reward,
+    added_slot, withdrawal
+) VALUES `+strings.Join(values, ", ")+`
+ON CONFLICT (
+    withdrawal, tx_hash, credential_tag, staking_key, added_slot
+) DO NOTHING`,
+		insertArgs...,
+	); err != nil {
+		return fmt.Errorf("journal reward credits: %w", err)
+	}
+	for _, mapKey := range order {
+		entry := byAccount[mapKey]
+		account := accounts[mapKey]
+		if _, err := s.execCached(
+			ctx, db, rewardCreditAccountUpdateQuery,
+			strconv.FormatUint(account.reward+entry.amount, 10),
+			account.id,
+		); err != nil {
+			return fmt.Errorf("credit account reward: %w", err)
+		}
+		if err := s.refreshRewardLiveStakeAggregate(
+			ctx, db, entry.ref, entry.slot,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+const rewardCreditAccountUpdateQuery = `UPDATE account SET reward = ? WHERE id = ?`
 
 func (s *Store) AddPostSnapshotAccountRewardByCredential(
 	credentialTag uint8,
@@ -1678,6 +2112,81 @@ DELETE FROM account_withdrawal_witness WHERE added_slot > ?`,
 					slot,
 				); err != nil {
 					return err
+				}
+			}
+			return nil
+		},
+	)
+}
+
+// DeleteAccountRewardJournalForCredentialsAfterSlot deletes
+// account_reward_delta/account_withdrawal_witness rows with added_slot >
+// slot for exactly the given credentials, without reversing any balance.
+//
+// The caller has just overwritten account.reward from the snapshot, so the
+// current balance is not the one the journal rows were applied against, and
+// reversing them by subtraction can underflow. Clear only the stale journal
+// rows; replay inserts fresh ones against the snapshot balance.
+//
+// A credential cert-state import did not write this run must not appear in
+// refs: nothing else touches its account.reward, so deleting its journal
+// here would let replay double-apply a credit already reflected in its
+// current balance.
+func (s *Store) DeleteAccountRewardJournalForCredentialsAfterSlot(
+	slot uint64,
+	refs []models.StakeCredentialRef,
+	txn types.Txn,
+) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	// Grouped by credential_tag and queried as a single-column staking_key
+	// IN (...), matching idx_account_reward_delta_credential
+	// (credential_tag, staking_key) for the delta delete, the same grouping
+	// GetAccountsByCredential uses and for the same reason. The witness
+	// table's credential index (idx_account_withdrawal_witness_credential_slot)
+	// orders staking_key before credential_tag instead, so this shape does
+	// not drive it the same way; its delete still only inspects the rows
+	// added_slot already narrows to.
+	byTag := make(map[uint8][][]byte, 2)
+	for _, ref := range refs {
+		byTag[ref.Tag] = append(byTag[ref.Tag], ref.Key)
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			// One bound parameter is reserved for added_slot and one for
+			// credential_tag; the rest of the chunk is the staking_key IN
+			// list.
+			chunkSize := max(1, s.dialect.ParameterLimit()-2)
+			for tag, keys := range byTag {
+				for start := 0; start < len(keys); start += chunkSize {
+					end := min(start+chunkSize, len(keys))
+					chunk := keys[start:end]
+					placeholders := strings.TrimSuffix(
+						strings.Repeat("?,", len(chunk)), ",",
+					)
+					args := make([]any, 0, 2+len(chunk))
+					args = append(args, slotValue, tag)
+					for _, key := range chunk {
+						args = append(args, key)
+					}
+					if _, err := db.ExecContext(ctx, s.dialect.Rebind(
+						"DELETE FROM account_reward_delta WHERE added_slot > ? "+
+							"AND credential_tag = ? AND staking_key IN ("+placeholders+")",
+					), args...); err != nil {
+						return err
+					}
+					if _, err := db.ExecContext(ctx, s.dialect.Rebind(
+						"DELETE FROM account_withdrawal_witness WHERE added_slot > ? "+
+							"AND credential_tag = ? AND staking_key IN ("+placeholders+")",
+					), args...); err != nil {
+						return err
+					}
 				}
 			}
 			return nil

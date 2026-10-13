@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -119,4 +120,38 @@ func TestComparePraosTipsDijkstraVRFTiebreak(t *testing.T) {
 
 	got = ComparePraosTips(candidate, ours, candidateView, oursView)
 	assert.Equal(t, ChainBBetter, got, "VRF tiebreak must be symmetric")
+}
+
+// TestGetPraosTiebreakerView_Byron pins that a Byron header of either kind
+// yields (view, false): no Praos select view (Byron has no opcert/VRF), but
+// the view's Byron field still identifies the header's kind so
+// ComparePraosTips can apply the era-aware EBB tiebreak.
+func TestGetPraosTiebreakerView_Byron(t *testing.T) {
+	mainHeader := &byron.ByronMainBlockHeader{}
+	mainHeader.ConsensusData.Difficulty.Value = 50
+	mainHeader.ConsensusData.SlotId.Epoch = 1
+	view, ok := GetPraosTiebreakerView(mainHeader)
+	require.False(t, ok, "Byron header has no Praos select view")
+	assert.Equal(t, ByronBlockKindMain, view.Byron)
+	assert.Equal(t, mainHeader.SlotNumber(), view.Slot)
+	assert.False(t, view.hasIssuerIssueNo())
+
+	ebbHeader := &byron.ByronEpochBoundaryBlockHeader{}
+	ebbHeader.ConsensusData.Difficulty.Value = 50
+	ebbHeader.ConsensusData.Epoch = 1
+	view, ok = GetPraosTiebreakerView(ebbHeader)
+	require.False(t, ok, "Byron header has no Praos select view")
+	assert.Equal(t, ByronBlockKindEBB, view.Byron)
+	assert.Equal(t, ebbHeader.SlotNumber(), view.Slot)
+	assert.False(t, view.hasIssuerIssueNo())
+}
+
+// TestGetPraosTiebreakerView_ShelleyByronKindUnset confirms a Shelley-family
+// header never reports a Byron kind, so the EBB tiebreak stays inert for
+// every era this repository already relies on it for.
+func TestGetPraosTiebreakerView_ShelleyByronKindUnset(t *testing.T) {
+	header := dijkstraHeaderForView(t)
+	view, ok := GetPraosTiebreakerView(header)
+	require.True(t, ok)
+	assert.Equal(t, ByronBlockKindNone, view.Byron)
 }

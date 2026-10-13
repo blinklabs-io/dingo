@@ -57,9 +57,23 @@ type BlockEvent struct {
 type BlockfetchEvent struct {
 	ConnectionId ouroboros.ConnectionId // Connection ID associated with event
 	Block        ledger.Block
+	RawBlock     []byte        // Original block CBOR used to invalidate rejected decode-cache entries
 	Point        ocommon.Point // Chain point for block
 	Type         uint          // Block type ID
 	BatchDone    bool          // Set to true for a BatchDone event
+	// RequestId identifies the RequestRange call this event belongs to, from
+	// gouroboros' CallbackContext.RequestId (numbered from 1 in send order,
+	// per connection). A BatchDone event releases the ledger's in-flight
+	// entry for this request rather than the connection's oldest one, since
+	// pipelining keeps more than one request outstanding per connection.
+	// Zero means unnumbered and falls back to the oldest entry.
+	RequestId uint64
+	// RangeErr carries a BatchDone event's terminal outcome. gouroboros'
+	// RangeDoneFunc reports every pipelined request's resolution -- success,
+	// NoBlocks, or any transport/protocol failure -- exactly once through this
+	// same callback, so a BatchDone event is no longer necessarily a success.
+	// nil means the range completed successfully.
+	RangeErr error
 }
 
 // ChainsyncEvent represents either a RollForward or RollBackward chainsync event.
@@ -120,9 +134,9 @@ type ConnectionClosedEvent struct {
 	Error        error
 }
 
-// ConnectionRecycleRequestedEvent is emitted by the ledger when header or block
-// crypto verification fails on a peer connection. Node wiring translates this to
-// a connmanager recycle request, keeping ledger/ free of connmanager/ imports.
+// ConnectionRecycleRequestedEvent is emitted by the ledger when a peer
+// connection must be replaced. Node wiring translates this to a connmanager
+// recycle request, keeping ledger/ free of connmanager/ imports.
 type ConnectionRecycleRequestedEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	Reason       string

@@ -28,8 +28,8 @@ func TestMergeTLSFieldByField(t *testing.T) {
 		KeyFilePath:  new("/base/key.pem"),
 	}
 	// Overriding only certFilePath must not blow away the inherited
-	// keyFilePath -- this is the "per-field merge" requirement from
-	// dingo#2998.
+	// keyFilePath -- this is the "per-field merge" requirement of the API
+	// TLS defaults.
 	override := TLSPolicy{CertFilePath: new("/override/cert.pem")}
 	merged := MergeTLS(base, override)
 	require.NotNil(t, merged.Mode)

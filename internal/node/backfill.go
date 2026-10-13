@@ -19,12 +19,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	ouroboros_cbor "github.com/blinklabs-io/gouroboros/cbor"
@@ -66,12 +68,18 @@ type BackfillProgress struct {
 // It is triggered automatically during Mithril sync when
 // storageMode is "api".
 type Backfill struct {
-	db           *database.Database
-	nodeCfg      *cardano.CardanoNodeConfig
-	logger       *slog.Logger
-	epochs       []models.Epoch
-	pparamsCache map[uint64]lcommon.ProtocolParameters
-	batchSize    int
+	db             *database.Database
+	nodeCfg        *cardano.CardanoNodeConfig
+	logger         *slog.Logger
+	epochs         []models.Epoch
+	pparamsCache   map[uint64]lcommon.ProtocolParameters
+	batchSize      int
+	computeOffsets func(
+		uint64,
+		[]byte,
+		[]byte,
+		gledger.Block,
+	) (*database.BlockIngestionResult, error)
 
 	// Running state tracked across blocks.
 	currentPParams lcommon.ProtocolParameters
@@ -96,6 +104,7 @@ type Backfill struct {
 	// endSlot optionally bounds historical metadata replay. Mithril imports
 	// use the stable ledger-state anchor here so blocks from the artifact's
 	// volatile suffix are left for the normal validating ledger pipeline.
+	// When unset, Run falls back to the recorded anchor.
 	endSlot    uint64
 	endSlotSet bool
 	// useRunningTotalsFinalization is enabled only by the Mithril API import
@@ -130,6 +139,18 @@ type Backfill struct {
 	delegatorInactivityEnabled bool
 
 	onProgress func(BackfillProgress)
+
+	// Protocol-parameter resolution state. resolveNext indexes the first
+	// epoch in epochs not resolved yet; resolvePP and resolveEraId are the
+	// parameters and era of the last resolved epoch.
+	resolveStarted bool
+	resolveNext    int
+	resolvePP      lcommon.ProtocolParameters
+	resolveEraId   uint
+	resolveQuorum  int
+	// pparamsAdoptFromEpoch is the first epoch whose recorded pparams row is
+	// kept rather than derived: the epoch before the Mithril anchor's.
+	pparamsAdoptFromEpoch uint64
 }
 
 // NewBackfill creates a new Backfill instance.
@@ -195,7 +216,8 @@ func (b *Backfill) SetImmutableUtxoOffsetsTipSlot(slot uint64) {
 
 // SetEndSlot limits backfill to blocks at or below slot. The checkpoint is
 // completed at that boundary; later blocks are intentionally handled by the
-// normal ledger replay path.
+// normal ledger replay path. Without it, Run stops at the recorded Mithril
+// ledger anchor (the mithril_ledger_slot sync-state key) when one exists.
 func (b *Backfill) SetEndSlot(slot uint64) {
 	b.endSlot = slot
 	b.endSlotSet = true
@@ -331,135 +353,183 @@ func (b *Backfill) bootstrapEraChain(
 	return nil
 }
 
-// resolvePParams walks all epochs from genesis up to and
-// including targetEpoch, computing protocol parameters at
-// each step. At era transitions it calls HardForkFunc; at
-// regular epoch boundaries it applies any stored pparam
-// update proposals. Results are cached and stored in the DB.
-func (b *Backfill) resolvePParams(
+// resolvePParamsThrough resolves the protocol parameters of every epoch up to
+// and including targetEpoch that is not resolved yet, in epoch order, and
+// caches them for replay. Each epoch follows the live rollover: the classic
+// updates agreed for the boundary into it are enacted under the era they were
+// proposed in, and then, when the epoch starts a new era, the hard fork
+// translates the updated parameters (ledger/chainsync.go rollover steps 4 and
+// 9). Replay stores an epoch's proposals as it goes, so an epoch is resolved
+// only when replay reaches it; txn is the batch those proposals were written
+// in, or nil before replay starts.
+func (b *Backfill) resolvePParamsThrough(
+	ctx context.Context,
 	targetEpoch uint64,
+	txn *database.Txn,
 ) error {
 	if b.nodeCfg == nil {
-		b.logger.Warn(
-			"no node config, skipping pparams resolution",
-			"component", "backfill",
-		)
-		return nil
-	}
-
-	// On networks like preview, the first epoch may
-	// start at a later era. Bootstrap through all
-	// intermediate eras to build the pparams chain.
-	if len(b.epochs) > 0 && b.epochs[0].EraId > 1 {
-		if err := b.bootstrapEraChain(
-			b.epochs[0].EraId,
-		); err != nil {
-			return fmt.Errorf(
-				"bootstrapping era chain: %w", err,
+		if !b.resolveStarted {
+			b.resolveStarted = true
+			b.logger.Warn(
+				"no node config, skipping pparams resolution",
+				"component", "backfill",
 			)
 		}
+		return nil
 	}
-
-	quorum := b.updateQuorum()
-	prevEraId := b.currentEraId
-	for i := range b.epochs {
-		ep := &b.epochs[i]
+	if !b.resolveStarted {
+		b.resolveStarted = true
+		// On networks like preview, the first epoch may start at a later
+		// era. Bootstrap through all intermediate eras to build the pparams
+		// chain.
+		if len(b.epochs) > 0 && b.epochs[0].EraId > 1 {
+			if err := b.bootstrapEraChain(
+				b.epochs[0].EraId,
+			); err != nil {
+				return fmt.Errorf(
+					"bootstrapping era chain: %w", err,
+				)
+			}
+		}
+		b.resolvePP = b.currentPParams
+		b.resolveEraId = b.currentEraId
+		b.resolveQuorum = b.updateQuorum()
+	}
+	for ; b.resolveNext < len(b.epochs); b.resolveNext++ {
+		ep := &b.epochs[b.resolveNext]
 		if ep.EpochId > targetEpoch {
 			break
 		}
-		// Era transition: hard fork produces new pparams
-		if ep.EraId != prevEraId {
-			era := eras.GetEraById(ep.EraId)
-			if era != nil && era.HardForkFunc != nil {
-				newPP, err := era.HardForkFunc(
-					b.nodeCfg, b.currentPParams,
-				)
-				if err != nil {
-					return fmt.Errorf(
-						"hard fork to era %d at epoch %d: %w",
-						ep.EraId, ep.EpochId, err,
-					)
-				}
-				// Store genesis pparams for this era
-				ppCbor, encErr := ouroboros_cbor.Encode(
-					&newPP,
-				)
-				if encErr != nil {
-					return fmt.Errorf(
-						"encode pparams for era %d: %w",
-						ep.EraId, encErr,
-					)
-				}
-				if err := b.db.SetPParams(
-					ppCbor, ep.StartSlot,
-					ep.EpochId, ep.EraId, nil,
-				); err != nil {
-					return fmt.Errorf(
-						"store pparams for epoch %d: %w",
-						ep.EpochId, err,
-					)
-				}
-				b.currentPParams = newPP
-			}
-			prevEraId = ep.EraId
-			b.currentEraId = ep.EraId
-		} else if b.currentPParams != nil {
-			// Same era: apply pparam update proposals
-			era := eras.GetEraById(ep.EraId)
-			if era != nil &&
-				era.DecodePParamsUpdateFunc != nil &&
-				era.PParamsUpdateFunc != nil {
-				newPP, _, ppErr := b.db.ComputeAndApplyPParamUpdates(
-					ep.StartSlot, ep.EpochId,
-					ep.EraId, quorum,
-					b.currentPParams,
-					era.DecodePParamsUpdateFunc,
-					era.PParamsUpdateFunc, nil, nil,
-				)
-				if ppErr != nil {
-					b.logger.Warn(
-						"pparam update resolution failed",
-						"component", "backfill",
-						"epoch", ep.EpochId,
-						"error", ppErr,
-					)
-				} else {
-					b.currentPParams = newPP
-				}
-			}
-		}
-		// Store pparams for first epoch if bootstrapped
-		if i == 0 && b.currentPParams != nil {
-			ppCbor, encErr := ouroboros_cbor.Encode(
-				&b.currentPParams,
+		if err := b.resolveEpochPParams(
+			ctx,
+			b.resolveNext == 0,
+			ep,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"resolving pparams for epoch %d: %w",
+				ep.EpochId, err,
 			)
-			if encErr != nil {
-				return fmt.Errorf(
-					"encode pparams for first epoch %d: %w",
-					ep.EpochId, encErr,
-				)
-			}
-			if err := b.db.SetPParams(
-				ppCbor, ep.StartSlot,
-				ep.EpochId, ep.EraId, nil,
-			); err != nil {
-				return fmt.Errorf(
-					"store pparams for first epoch %d: %w",
-					ep.EpochId, err,
-				)
-			}
 		}
-		b.pparamsCache[ep.EpochId] = b.currentPParams
-		b.lastEpochId = ep.EpochId
 	}
 	return nil
 }
 
-// processEpochBoundary handles the transition to a new
-// epoch during block iteration. If resolvePParams already
-// cached pparams for this epoch, use them directly. Only
-// falls back to computing when no cache entry exists
-// (e.g. nodeCfg was nil during resolve).
+func (b *Backfill) resolveEpochPParams(
+	ctx context.Context,
+	firstEpoch bool,
+	ep *models.Epoch,
+	txn *database.Txn,
+) error {
+	// The Mithril import records the parameters of its epoch and the one
+	// before, which include governance-enacted changes derivation cannot
+	// reproduce, and GetPParams prefers the newest row for an epoch, so those
+	// epochs keep the recorded row. Earlier rows can only be ones backfill
+	// derived, possibly by an older build, and are derived again.
+	if ep.EpochId >= b.pparamsAdoptFromEpoch {
+		stored, hasStored, err := b.storedEpochPParams(
+			ep.EpochId, ep.EraId, txn,
+		)
+		if err != nil {
+			return fmt.Errorf("reading stored pparams: %w", err)
+		}
+		if hasStored {
+			b.resolvePP = stored
+			b.resolveEraId = ep.EraId
+			b.pparamsCache[ep.EpochId] = stored
+			return nil
+		}
+	}
+	if b.resolvePP != nil {
+		sourceEra := eras.GetEraById(b.resolveEraId)
+		if sourceEra != nil &&
+			sourceEra.DecodePParamsUpdateFunc != nil &&
+			sourceEra.PParamsUpdateFunc != nil {
+			newPP, _, err := b.db.ComputeAndApplyPParamUpdates(
+				ctx,
+				ep.StartSlot, ep.EpochId,
+				sourceEra.Id, b.resolveQuorum,
+				b.resolvePP,
+				sourceEra.DecodePParamsUpdateFunc,
+				sourceEra.PParamsUpdateFunc, nil, txn,
+			)
+			if err != nil {
+				return fmt.Errorf("applying pparam updates: %w", err)
+			}
+			b.resolvePP = newPP
+		}
+	}
+	if ep.EraId != b.resolveEraId {
+		era := eras.GetEraById(ep.EraId)
+		if era != nil && era.HardForkFunc != nil {
+			newPP, err := era.HardForkFunc(b.nodeCfg, b.resolvePP)
+			if err != nil {
+				return fmt.Errorf(
+					"hard fork to era %d: %w", ep.EraId, err,
+				)
+			}
+			if err := b.storeEpochPParams(ep, newPP, txn); err != nil {
+				return err
+			}
+			b.resolvePP = newPP
+		}
+		b.resolveEraId = ep.EraId
+	} else if firstEpoch && b.resolvePP != nil {
+		if err := b.storeEpochPParams(ep, b.resolvePP, txn); err != nil {
+			return err
+		}
+	}
+	b.pparamsCache[ep.EpochId] = b.resolvePP
+	return nil
+}
+
+func (b *Backfill) storeEpochPParams(
+	ep *models.Epoch,
+	pp lcommon.ProtocolParameters,
+	txn *database.Txn,
+) error {
+	ppCbor, err := ouroboros_cbor.Encode(&pp)
+	if err != nil {
+		return fmt.Errorf("encode pparams for era %d: %w", ep.EraId, err)
+	}
+	if err := b.db.SetPParams(
+		ppCbor, ep.StartSlot, ep.EpochId, ep.EraId, txn,
+	); err != nil {
+		return fmt.Errorf("store pparams: %w", err)
+	}
+	return nil
+}
+
+// storedEpochPParams returns the protocol parameters recorded for exactly
+// epochID, if any.
+func (b *Backfill) storedEpochPParams(
+	epochID uint64,
+	eraID uint,
+	txn *database.Txn,
+) (lcommon.ProtocolParameters, bool, error) {
+	var metaTxn dbtypes.Txn
+	if txn != nil {
+		metaTxn = txn.Metadata()
+	}
+	rows, err := b.db.Metadata().GetPParams(epochID, eraID, metaTxn)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(rows) == 0 || rows[0].Epoch != epochID {
+		return nil, false, nil
+	}
+	era := eras.GetEraById(eraID)
+	if era == nil || era.DecodePParamsFunc == nil {
+		// Byron has no parameter decoder, and backfill derives none for it.
+		return nil, false, nil
+	}
+	pp, err := era.DecodePParamsFunc(rows[0].Cbor)
+	if err != nil {
+		return nil, false, fmt.Errorf("decoding stored pparams: %w", err)
+	}
+	return pp, true, nil
+}
+
 func (b *Backfill) processEpochBoundary(
 	epochId uint64, eraId uint,
 ) {
@@ -617,70 +687,58 @@ func (b *Backfill) calculateCertDeposits(
 	return certDeposits
 }
 
-// processBlockGovernance calls governance processing for valid Conway-era
-// transactions that have proposals, votes, or DRep activity certificates.
-func (b *Backfill) processBlockGovernance(
+func backfillConwayProtocolParameters(
+	pp lcommon.ProtocolParameters,
+) *conway.ConwayProtocolParameters {
+	switch p := pp.(type) {
+	case *conway.ConwayProtocolParameters:
+		if p != nil {
+			return p
+		}
+	case *dijkstra.DijkstraProtocolParameters:
+		if p != nil {
+			return &p.ConwayProtocolParameters
+		}
+	}
+	return nil
+}
+
+func (b *Backfill) processBlockGovernanceLevel(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
+	txIndex uint32,
 	epochId uint64,
-	pp lcommon.ProtocolParameters,
+	conwayPP *conway.ConwayProtocolParameters,
 	txn *database.Txn,
 ) error {
 	if !tx.IsValid() {
 		return nil
 	}
-	proposals := tx.ProposalProcedures()
-	votes := tx.VotingProcedures()
-	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
+	if !governance.TransactionHasGovernanceEffects(tx) {
 		return nil
 	}
-	var conwayPP *conway.ConwayProtocolParameters
-	switch p := pp.(type) {
-	case *conway.ConwayProtocolParameters:
-		conwayPP = p
-	case *dijkstra.DijkstraProtocolParameters:
-		if p != nil {
-			conwayPP = &p.ConwayProtocolParameters
-		}
+	if conwayPP == nil &&
+		governance.HistoricalTransactionRequiresConwayParameters(tx) {
+		return errors.New(
+			"missing Conway protocol parameters for governance backfill",
+		)
 	}
-	if conwayPP == nil {
-		return nil
+	var proposalLifetime uint64
+	if conwayPP != nil {
+		proposalLifetime = conwayPP.GovActionValidityPeriod
 	}
-	if len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			tx, point, epochId,
-			conwayPP.GovActionValidityPeriod,
-			b.db, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"governance proposals: %w", err,
-			)
-		}
-	}
-	if len(votes) > 0 {
-		if err := governance.ProcessVotes(
-			tx, point, epochId,
-			conwayPP.DRepInactivityPeriod,
-			b.db, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"governance votes: %w", err,
-			)
-		}
-	}
-	if hasDRepActivityCerts {
-		if err := governance.ProcessDRepActivityCertificates(
-			tx,
-			epochId,
-			conwayPP.DRepInactivityPeriod,
-			b.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"DRep activity certificates: %w", err,
-			)
-		}
+	if err := governance.ProcessHistoricalTransactionEffects(
+		ctx,
+		tx,
+		point,
+		txIndex,
+		epochId,
+		proposalLifetime,
+		b.db,
+		txn,
+	); err != nil {
+		return fmt.Errorf("governance transaction effects: %w", err)
 	}
 	return nil
 }
@@ -728,7 +786,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 		b.immutableUtxoOffsetsTipSet = true
 	}
 
-	tipBlocks, err := database.BlocksRecent(b.db, 1)
+	// A cancelled ctx still reaches the nothing-to-backfill return below;
+	// the iteration loop is where cancellation stops real work.
+	tipBlocks, err := database.BlocksRecent(context.WithoutCancel(ctx), b.db, 1)
 	if err != nil {
 		return fmt.Errorf("reading chain tip: %w", err)
 	}
@@ -758,8 +818,21 @@ func (b *Backfill) Run(ctx context.Context) error {
 		return nil
 	}
 	tipSlot := tipBlocks[0].Slot
-	if b.endSlotSet && b.endSlot < tipSlot {
-		tipSlot = b.endSlot
+	endSlot, endSlotSet := b.endSlot, b.endSlotSet
+	if !endSlotSet {
+		// `dingo serve` resumes an interrupted Mithril API backfill without
+		// an end slot. The blob store also holds the blocks after the ledger
+		// anchor, and ledger replay applies those itself: a historical pass
+		// over them would journal their withdrawals without the debit, and
+		// replay would then skip the debit as already applied.
+		anchor, anchorErr := b.db.MithrilTrustBoundarySlotStrict(nil)
+		if anchorErr != nil {
+			return fmt.Errorf("reading Mithril ledger anchor: %w", anchorErr)
+		}
+		endSlot, endSlotSet = anchor, anchor > 0
+	}
+	if endSlotSet && endSlot < tipSlot {
+		tipSlot = endSlot
 	}
 
 	// Load epoch boundaries for slot-to-epoch mapping.
@@ -767,11 +840,28 @@ func (b *Backfill) Run(ctx context.Context) error {
 		return fmt.Errorf("loading epoch data: %w", err)
 	}
 
-	// Resolve protocol parameters for all epochs. This seeds
-	// genesis pparams at era transitions and applies stored
-	// pparam update proposals from any previous run.
-	tipEpochId, _ := b.slotToEpoch(tipSlot)
-	if err := b.resolvePParams(tipEpochId); err != nil {
+	// Resolve protocol parameters through the epoch replay starts in. Later
+	// epochs are resolved as replay reaches them, after the proposals of the
+	// epoch before are stored.
+	if endSlotSet {
+		for i := range b.epochs {
+			ep := &b.epochs[i]
+			if endSlot >= ep.StartSlot &&
+				endSlot < ep.StartSlot+uint64(ep.LengthInSlots) {
+				if ep.EpochId > 0 {
+					b.pparamsAdoptFromEpoch = ep.EpochId - 1
+				}
+				break
+			}
+		}
+	}
+	var resolveThrough uint64
+	if cp != nil && cp.LastSlot > 0 {
+		resolveThrough, _ = b.slotToEpoch(cp.LastSlot)
+	} else if len(b.epochs) > 0 {
+		resolveThrough = b.epochs[0].EpochId
+	}
+	if err := b.resolvePParamsThrough(ctx, resolveThrough, nil); err != nil {
 		return fmt.Errorf(
 			"resolving protocol parameters: %w", err,
 		)
@@ -882,7 +972,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 	ensureBatchTxn := func() {
 		if batchTxn == nil {
-			batchTxn = b.db.Transaction(true)
+			batchTxn = b.db.Transaction(ctx, true)
 		}
 	}
 	rollbackBatch := func() {
@@ -968,16 +1058,21 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 		// Detect epoch boundary and update pparams
 		if isNewEpoch {
+			if err := b.resolvePParamsThrough(ctx, epochId, batchTxn); err != nil {
+				saveCommittedCheckpoint()
+				return fmt.Errorf(
+					"resolving protocol parameters for epoch %d: %w",
+					epochId, err,
+				)
+			}
 			b.processEpochBoundary(epochId, eraId)
 		}
 
 		pp := b.getPParams(epochId)
 
-		// Process block. Nesting avoids early-continue so
-		// every path reaches the common tail below.
 		var blockTxCount int
 
-		parsedBlock, parseErr := gledger.NewBlockFromCbor(
+		parsedBlock, parseErr := models.DecodeBlockCbor(
 			blk.BlockType,
 			blk.Cbor,
 			lcommon.VerifyConfig{SkipBodyHashValidation: true},
@@ -986,11 +1081,10 @@ func (b *Backfill) Run(ctx context.Context) error {
 		intervalStats.BlockReadDecode += time.Since(readDecodeStart)
 		intervalStats.Blocks++
 		if parseErr != nil {
-			b.logger.Warn(
-				"skipping unparseable block",
-				"component", "backfill",
-				"slot", blk.Slot,
-				"error", parseErr,
+			saveCommittedCheckpoint()
+			return fmt.Errorf(
+				"parsing block at slot %d: %w",
+				blk.Slot, parseErr,
 			)
 		} else {
 			point := ocommon.NewPoint(
@@ -1011,26 +1105,23 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 			txs := parsedBlock.Transactions()
 			if len(txs) > 0 {
-				indexer := database.NewBlockIndexer(
-					blk.Slot, blk.Hash,
-				)
 				offsetStart := time.Now()
-				offsets, oErr := indexer.ComputeOffsets(
-					blk.Cbor, parsedBlock,
+				offsets, oErr := b.computeBlockOffsets(
+					blk.Slot, blk.Hash, blk.Cbor, parsedBlock,
 				)
 				// Track CBOR offset discovery for txs and produced UTxOs.
 				intervalStats.OffsetComputation += time.Since(offsetStart)
 				if oErr != nil {
-					b.logger.Warn(
-						"skipping block with offset error",
-						"component", "backfill",
-						"slot", blk.Slot,
-						"error", oErr,
+					saveCommittedCheckpoint()
+					return fmt.Errorf(
+						"computing offsets for block at slot %d: %w",
+						blk.Slot, oErr,
 					)
 				} else {
 					// Store transaction metadata into the shared batch
 					// instead of committing once per block.
 					if pErr := b.processBlockTxsBatched(
+						ctx,
 						txs, point, epochId, eraId,
 						pp, offsets, acc, batchTxn,
 						&intervalStats, isFreshStart,
@@ -1104,6 +1195,26 @@ func (b *Backfill) Run(ctx context.Context) error {
 		saveCommittedCheckpoint()
 		return err
 	}
+	// Replay has reached the anchor, where the snapshot is the ledger state.
+	// Restore before the rebuild, which attributes stake from account.pool.
+	if endSlotSet {
+		restored, err := b.db.RestoreImportedAccountStates(ctx, endSlot, nil)
+		if err != nil {
+			saveCommittedCheckpoint()
+			return fmt.Errorf(
+				"restoring imported account state after backfill: %w",
+				err,
+			)
+		}
+		if restored > 0 {
+			b.logger.Info(
+				"restored imported account state at backfill anchor",
+				"component", "backfill",
+				"anchor_slot", endSlot,
+				"accounts", restored,
+			)
+		}
+	}
 	var rebuildErr error
 	if b.useRunningTotalsFinalization {
 		// Historical replay intentionally leaves the imported snapshot live UTxO
@@ -1111,9 +1222,13 @@ func (b *Backfill) Run(ctx context.Context) error {
 		// ledger-state importer already maintained one running total per live
 		// credential, so merge the final account/delegation state into those
 		// totals instead of scanning every live UTxO again.
-		rebuildErr = b.db.RebuildRewardLiveStakeFromRunningTotals(tipSlot, nil)
+		rebuildErr = b.db.RebuildRewardLiveStakeFromRunningTotals(
+			ctx,
+			tipSlot,
+			nil,
+		)
 	} else {
-		rebuildErr = b.db.RebuildRewardLiveStake(tipSlot, nil)
+		rebuildErr = b.db.RebuildRewardLiveStake(ctx, tipSlot, nil)
 	}
 	if err := rebuildErr; err != nil {
 		saveCommittedCheckpoint()
@@ -1157,9 +1272,24 @@ func (b *Backfill) Run(ctx context.Context) error {
 	return nil
 }
 
+func (b *Backfill) computeBlockOffsets(
+	slot uint64,
+	hash, blockCbor []byte,
+	block gledger.Block,
+) (*database.BlockIngestionResult, error) {
+	if b.computeOffsets != nil {
+		return b.computeOffsets(slot, hash, blockCbor, block)
+	}
+	return database.NewBlockIndexer(slot, hash).ComputeOffsets(
+		blockCbor,
+		block,
+	)
+}
+
 // processBlockTxsBatched stores transactions into an existing database
 // transaction and accumulates batchable metadata rows for a later flush.
 func (b *Backfill) processBlockTxsBatched(
+	ctx context.Context,
 	txs []lcommon.Transaction,
 	point ocommon.Point,
 	epochId uint64,
@@ -1178,55 +1308,73 @@ func (b *Backfill) processBlockTxsBatched(
 	if opts.SkipProducedUtxoOffsetWrites {
 		b.skippedBlocks++
 	}
-	for i, tx := range txs {
-		updateEpoch, paramUpdates := tx.ProtocolParameterUpdates()
-		certDeposits := b.calculateCertDeposits(
-			tx, eraId, pp,
-		)
-		if opts.SkipProducedUtxoOffsetWrites {
-			// Counter is informational; Produced() is cheap (slice length).
-			b.skippedUtxoRefs += uint64(len(tx.Produced()))
-		}
-		setTxStart := time.Now()
-		if err := b.db.SetTransactionBatchedWithOpts(
-			tx, point, uint32(i), // #nosec G115
-			updateEpoch, paramUpdates,
-			certDeposits, offsets, acc, txn,
-			database.BatchedTxIngestOpts{
-				SkipProducedUtxoOffsetWrites: opts.SkipProducedUtxoOffsetWrites,
-				// Only skip consumed-input recovery on fresh backfill starts.
-				// Resumed runs may have inconsistencies from interrupted batches
-				// that need repair via the recovery path.
-				SkipConsumedInputRecovery: isFreshStart,
-				Stats:                     stats,
-				// Mirrors the live-apply path (ledger/delta.go): derived from
-				// the operator's real gate setting via
-				// SetDelegatorInactivityEnabled, not hardcoded, so a future
-				// caller of this path is correct by construction rather than
-				// relying on the Mithril-only invariant enforced separately by
-				// checkMithrilInactivityCompat (cmd/dingo/serve.go) and
-				// errMithrilInactivityIncompatible (cmd/dingo/mithril.go).
-				SkipWithdrawalWitnessWrite: !b.delegatorInactivityEnabled,
-				// Historical replay follows the snapshot's complete reward
-				// state, not the balance at each historical slot. Preserve
-				// withdrawal history without applying the live-path balance
-				// sufficiency check.
-				HistoricalBackfill: true,
-			},
-		); err != nil {
-			return fmt.Errorf("storing TX: %w", err)
-		}
-		if stats != nil {
-			// Track end-to-end batched transaction ingestion.
-			stats.SetTransactionBatched += time.Since(setTxStart)
-		}
-		if err := b.processBlockGovernance(
-			tx, point, epochId, pp, txn,
-		); err != nil {
+	var storageIndexOffset uint64
+	for txIndex, tx := range txs {
+		levels := dledger.TransactionLevelsForApply(tx)
+		childCount := uint64(len(levels)) - 1
+		storageBaseIndex := uint64(txIndex) + storageIndexOffset
+		storageParentIndex := storageBaseIndex + childCount
+		if storageParentIndex > math.MaxUint32 {
 			return fmt.Errorf(
-				"governance at slot %d tx %d: %w",
-				point.Slot, i, err,
+				"expanded transaction index out of range: %d",
+				storageParentIndex,
 			)
+		}
+		storageIndexOffset += childCount
+		for levelIndex, level := range levels {
+			storageIndex := storageBaseIndex + uint64(levelIndex)
+			updateEpoch, paramUpdates := level.ProtocolParameterUpdates()
+			conwayPP := backfillConwayProtocolParameters(pp)
+			protocolMajor := uint64(0)
+			if versioned, ok := pp.(lcommon.PoolRuleProtocolParameters); ok {
+				protocolMajor = uint64(versioned.ProtocolMajorVersion())
+			}
+			if opts.SkipProducedUtxoOffsetWrites {
+				b.skippedUtxoRefs += uint64(len(level.Produced()))
+			}
+			setTxStart := time.Now()
+			if err := b.db.SetTransactionBatchedWithOpts(
+				ctx,
+				level, point, uint32(storageIndex), //nolint:gosec
+				updateEpoch, paramUpdates,
+				b.calculateCertDeposits(level, eraId, pp), offsets, acc, txn,
+				database.BatchedTxIngestOpts{
+					SkipProducedUtxoOffsetWrites: opts.SkipProducedUtxoOffsetWrites,
+					SkipConsumedInputRecovery:    isFreshStart,
+					Stats:                        stats,
+					SkipWithdrawalWitnessWrite:   !b.delegatorInactivityEnabled,
+					HistoricalBackfill:           true,
+					ProtocolMajor:                protocolMajor,
+				},
+			); err != nil {
+				return fmt.Errorf(
+					"storing transaction body %d at slot %d tx %d: %w",
+					levelIndex,
+					point.Slot,
+					txIndex,
+					err,
+				)
+			}
+			if stats != nil {
+				stats.SetTransactionBatched += time.Since(setTxStart)
+			}
+			if err := b.processBlockGovernanceLevel(
+				ctx,
+				level,
+				point,
+				uint32(storageIndex), //nolint:gosec
+				epochId,
+				conwayPP,
+				txn,
+			); err != nil {
+				return fmt.Errorf(
+					"governance at slot %d tx %d body %d: %w",
+					point.Slot,
+					txIndex,
+					levelIndex,
+					err,
+				)
+			}
 		}
 	}
 	return nil

@@ -95,7 +95,7 @@ func (s *service) internalError(op string, err error) error {
 // GetTechnicalCommitteeDatum returns the newest Technical Committee datum at
 // or before the requested block number.
 func (s *service) GetTechnicalCommitteeDatum(
-	_ context.Context,
+	ctx context.Context,
 	req *midnight.TechnicalCommitteeDatumRequest,
 ) (*midnight.TechnicalCommitteeDatumResponse, error) {
 	if err := s.checkDatabase(); err != nil {
@@ -123,7 +123,7 @@ func (s *service) GetTechnicalCommitteeDatum(
 // GetCouncilDatum returns the newest Council datum at or before the
 // requested block number.
 func (s *service) GetCouncilDatum(
-	_ context.Context,
+	ctx context.Context,
 	req *midnight.CouncilDatumRequest,
 ) (*midnight.CouncilDatumResponse, error) {
 	if err := s.checkDatabase(); err != nil {
@@ -151,7 +151,7 @@ func (s *service) GetCouncilDatum(
 // GetAriadneParameters returns the newest Ariadne parameters at or before
 // the requested epoch.
 func (s *service) GetAriadneParameters(
-	_ context.Context,
+	ctx context.Context,
 	req *midnight.AriadneParametersRequest,
 ) (*midnight.AriadneParametersResponse, error) {
 	if err := s.checkDatabase(); err != nil {
@@ -175,7 +175,7 @@ func (s *service) GetAriadneParameters(
 
 // GetEpochNonce returns the stored epoch nonce for the requested epoch.
 func (s *service) GetEpochNonce(
-	_ context.Context,
+	ctx context.Context,
 	req *midnight.EpochNonceRequest,
 ) (*midnight.EpochNonceResponse, error) {
 	if err := s.checkDatabase(); err != nil {
@@ -195,7 +195,7 @@ func (s *service) GetEpochNonce(
 // requested epoch along with the pool stake distribution captured at the
 // same epoch boundary.
 func (s *service) GetEpochCandidates(
-	_ context.Context,
+	ctx context.Context,
 	req *midnight.EpochCandidatesRequest,
 ) (*midnight.EpochCandidatesResponse, error) {
 	if err := s.checkDatabase(); err != nil {
@@ -337,13 +337,13 @@ func (s *service) candidateRegistrationsFor(
 
 // GetBlockByHash returns metadata for the block with the requested hash.
 func (s *service) GetBlockByHash(
-	_ context.Context,
+	ctx context.Context,
 	req *midnight.BlockByHashRequest,
 ) (*midnight.BlockByHashResponse, error) {
 	if err := s.checkBlockBackends(); err != nil {
 		return nil, err
 	}
-	blk, err := s.db.BlockByHash(req.GetBlockHash())
+	blk, err := s.db.BlockByHash(ctx, req.GetBlockHash())
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, status.Error(codes.NotFound, "block not found")
@@ -385,13 +385,13 @@ func (s *service) GetBlockByHash(
 
 // GetLatestBlock returns the current chain tip.
 func (s *service) GetLatestBlock(
-	_ context.Context,
+	ctx context.Context,
 	_ *midnight.LatestBlockRequest,
 ) (*midnight.LatestBlockResponse, error) {
 	if err := s.checkBlockBackends(); err != nil {
 		return nil, err
 	}
-	blocks, err := s.db.BlocksRecent(1)
+	blocks, err := s.db.BlocksRecent(ctx, 1)
 	if err != nil {
 		return nil, s.internalError("get latest block", err)
 	}
@@ -409,20 +409,20 @@ func (s *service) GetLatestBlock(
 // block is not yet at or beyond the requested stability offset behind the
 // chain tip (or the tip as of AsOfTimestampUnixMillis, when set).
 func (s *service) GetStableBlock(
-	_ context.Context,
+	ctx context.Context,
 	req *midnight.StableBlockRequest,
 ) (*midnight.StableBlockResponse, error) {
 	if err := s.checkBlockBackends(); err != nil {
 		return nil, err
 	}
-	blk, err := s.db.BlockByHash(req.GetBlockHash())
+	blk, err := s.db.BlockByHash(ctx, req.GetBlockHash())
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, status.Error(codes.NotFound, "block not found")
 		}
 		return nil, s.internalError("get block by hash", err)
 	}
-	tip, err := s.resolveTipBlock(req.GetAsOfTimestampUnixMillis())
+	tip, err := s.resolveTipBlock(ctx, req.GetAsOfTimestampUnixMillis())
 	if err != nil {
 		switch {
 		case errors.Is(err, models.ErrBlockNotFound):
@@ -449,13 +449,13 @@ func (s *service) GetStableBlock(
 // AsOfTimestampUnixMillis, when set), or an empty response when no block is
 // stable yet.
 func (s *service) GetLatestStableBlock(
-	_ context.Context,
+	ctx context.Context,
 	req *midnight.LatestStableBlockRequest,
 ) (*midnight.LatestStableBlockResponse, error) {
 	if err := s.checkBlockBackends(); err != nil {
 		return nil, err
 	}
-	tip, err := s.resolveTipBlock(req.GetAsOfTimestampUnixMillis())
+	tip, err := s.resolveTipBlock(ctx, req.GetAsOfTimestampUnixMillis())
 	if err != nil {
 		switch {
 		case errors.Is(err, models.ErrBlockNotFound):
@@ -470,7 +470,7 @@ func (s *service) GetLatestStableBlock(
 	if tip.Number < offset {
 		return &midnight.LatestStableBlockResponse{}, nil
 	}
-	blk, err := s.db.BlockByNumber(tip.Number - offset)
+	blk, err := s.db.BlockByNumber(ctx, tip.Number-offset)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return &midnight.LatestStableBlockResponse{}, nil
@@ -486,9 +486,9 @@ func (s *service) GetLatestStableBlock(
 
 // resolveTipBlock returns the current chain tip, or, when asOfMillis is
 // non-zero, the latest block at or before that wall-clock time.
-func (s *service) resolveTipBlock(asOfMillis uint64) (models.Block, error) {
+func (s *service) resolveTipBlock(ctx context.Context, asOfMillis uint64) (models.Block, error) {
 	if asOfMillis == 0 {
-		blocks, err := s.db.BlocksRecent(1)
+		blocks, err := s.db.BlocksRecent(ctx, 1)
 		if err != nil {
 			return models.Block{}, err
 		}
@@ -513,7 +513,7 @@ func (s *service) resolveTipBlock(asOfMillis uint64) (models.Block, error) {
 			err,
 		)
 	}
-	return s.db.BlockBeforeSlot(slot + 1)
+	return s.db.BlockBeforeSlot(ctx, slot+1)
 }
 
 // buildBlock converts a stored block into the shared MidnightState Block

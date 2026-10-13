@@ -1,3 +1,5 @@
+//go:build dingo_extra_plugins
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build dingo_extra_plugins
 
 package mysql
 
@@ -251,12 +251,13 @@ func openStore(
 		return nil, err
 	}
 	store, err := sqlstore.New(sqlstore.Config{
-		WriteDB:     db,
-		ReadDB:      db,
-		Dialect:     sqlstore.MySQLDialect(),
-		Logger:      deps.Logger,
-		StorageMode: deps.StorageMode,
-		Migrations:  registry,
+		GenesisStakingEmpty: deps.GenesisStakingEmpty,
+		WriteDB:             db,
+		ReadDB:              db,
+		Dialect:             sqlstore.MySQLDialect(),
+		Logger:              deps.Logger,
+		StorageMode:         deps.StorageMode,
+		Migrations:          registry,
 		MigrationLocker: migrations.NewAdvisoryLocker(
 			"mysql",
 			0x64696e676f6d6574,

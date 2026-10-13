@@ -15,6 +15,7 @@
 package chain
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -28,7 +29,6 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type ChainId uint64
@@ -69,6 +69,32 @@ type ChainManager struct {
 	// is atomic because a chain stamps under its own c.mutex, not under
 	// cm.mutex.
 	headerSeq atomic.Uint64
+	// headerQueueFullObserver, when set, is called for every header the
+	// primary chain rejects with ErrHeaderQueueFull.
+	headerQueueFullObserver atomic.Pointer[func()]
+}
+
+// SetHeaderQueueFullObserver installs fn to be called once for every header
+// the primary chain rejects with ErrHeaderQueueFull, replacing a previous
+// observer; nil removes it. Fork chains are not reported, so a counter fed by
+// fn describes the same queue as PrimaryChain().HeaderCount. The call is made
+// with the chain's lock held, so fn must not block or call back into a chain.
+func (cm *ChainManager) SetHeaderQueueFullObserver(fn func()) {
+	if fn == nil {
+		cm.headerQueueFullObserver.Store(nil)
+		return
+	}
+	cm.headerQueueFullObserver.Store(&fn)
+}
+
+// notifyHeaderQueueFull reports one ErrHeaderQueueFull rejection.
+func (cm *ChainManager) notifyHeaderQueueFull() {
+	if cm == nil {
+		return
+	}
+	if fn := cm.headerQueueFullObserver.Load(); fn != nil {
+		(*fn)()
+	}
 }
 
 // nextHeaderSeq stamps the next chain-mutation sequence number shared by every
@@ -79,6 +105,7 @@ func (cm *ChainManager) nextHeaderSeq() uint64 {
 }
 
 func NewManager(
+	ctx context.Context,
 	db *database.Database,
 	eventBus *event.EventBus,
 	promRegistry ...prometheus.Registerer,
@@ -87,6 +114,13 @@ func NewManager(
 	if len(promRegistry) > 0 {
 		registry = promRegistry[0]
 	}
+	blockCache, err := newBlockCache(
+		DefaultBlockCacheCapacity,
+		registry,
+	)
+	if err != nil {
+		return nil, err
+	}
 	cm := &ChainManager{
 		db:       db,
 		eventBus: eventBus,
@@ -94,20 +128,20 @@ func NewManager(
 		chainRollbackEvents: make(
 			map[ChainId][]uint64,
 		),
-		blockCache: newBlockCache(
-			DefaultBlockCacheCapacity,
-			registry,
-		),
+		blockCache: blockCache,
 	}
 	if registry != nil {
-		cm.rollbackPointNotOnChain = promauto.With(registry).NewCounter(
-			prometheus.CounterOpts{
-				Name: "dingo_chain_rollback_point_not_on_chain_total",
-				Help: "rollback targets rejected because the chain no longer holds the resolved block at its retained index",
-			},
-		)
+		counter := prometheus.NewCounter(prometheus.CounterOpts{
+			Name: rollbackPointNotOnChainMetricName,
+			Help: "rollback targets rejected because the chain no longer holds the resolved block at its retained index",
+		})
+		registered, err := registerPrometheusMetric(registry, counter)
+		if err != nil {
+			return nil, fmt.Errorf("register rollback point metric: %w", err)
+		}
+		cm.rollbackPointNotOnChain = registered
 	}
-	if err := cm.loadPrimaryChain(); err != nil {
+	if err := cm.loadPrimaryChain(ctx); err != nil {
 		return nil, err
 	}
 	return cm, nil
@@ -191,7 +225,10 @@ func (cm *ChainManager) Chain(id ChainId) *Chain {
 }
 
 // NewChain creates a new Chain that forks from the primary chain at the specified point. This is useful for managing outbound ChainSync clients
-func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
+func (cm *ChainManager) NewChain(
+	ctx context.Context,
+	point ocommon.Point,
+) (*Chain, error) {
 	primaryChain, err := cm.primaryChain()
 	if err != nil {
 		return nil, err
@@ -203,7 +240,7 @@ func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
 	if cm.primaryChainLocked() != primaryChain {
 		return nil, errors.New("primary chain changed during fork creation")
 	}
-	intersectBlock, err := cm.blockByPoint(point, nil)
+	intersectBlock, err := cm.blockByPoint(ctx, point, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -231,6 +268,7 @@ func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
 
 // NewChainFromIntersect creates a new Chain that forks the primary chain at the latest common point.
 func (cm *ChainManager) NewChainFromIntersect(
+	ctx context.Context,
 	points []ocommon.Point,
 ) (*Chain, error) {
 	primaryChain, err := cm.primaryChain()
@@ -264,8 +302,11 @@ func (cm *ChainManager) NewChainFromIntersect(
 				foundOrigin = true
 				continue
 			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			// Lookup block in database
-			intersectBlock, err = cm.blockByPoint(point, txn)
+			intersectBlock, err = cm.blockByPoint(ctx, point, txn)
 			if err != nil {
 				if errors.Is(err, models.ErrBlockNotFound) {
 					continue
@@ -307,15 +348,17 @@ func (cm *ChainManager) NewChainFromIntersect(
 }
 
 func (cm *ChainManager) BlockByPoint(
+	ctx context.Context,
 	point ocommon.Point,
 	txn *database.Txn,
 ) (models.Block, error) {
 	cm.mutex.RLock()
 	defer cm.mutex.RUnlock()
-	return cm.blockByPoint(point, txn)
+	return cm.blockByPoint(ctx, point, txn)
 }
 
 func (cm *ChainManager) blockByPoint(
+	ctx context.Context,
 	point ocommon.Point,
 	txn *database.Txn,
 ) (models.Block, error) {
@@ -330,7 +373,7 @@ func (cm *ChainManager) blockByPoint(
 		var tmpBlock models.Block
 		var err error
 		if txn == nil {
-			tmpBlock, err = database.BlockByPoint(cm.db, point)
+			tmpBlock, err = database.BlockByPoint(ctx, cm.db, point)
 		} else {
 			tmpBlock, err = database.BlockByPointTxn(txn, point)
 		}
@@ -346,6 +389,7 @@ func (cm *ChainManager) blockByPoint(
 }
 
 func (cm *ChainManager) blockByHash(
+	ctx context.Context,
 	blockHash []byte,
 ) (models.Block, error) {
 	// Check in-memory cache (block cache has its own locking).
@@ -358,7 +402,7 @@ func (cm *ChainManager) blockByHash(
 	// which only holds rolled-back primary blocks and ephemeral
 	// non-primary blocks).
 	if cm.db != nil {
-		blk, err := database.BlockByHash(cm.db, blockHash)
+		blk, err := database.BlockByHash(ctx, cm.db, blockHash)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
 				return models.Block{}, models.ErrBlockNotFound
@@ -375,6 +419,7 @@ func (cm *ChainManager) blockByHash(
 // storage is protected by the manager lock here, and callers that need a
 // chain-level read lock acquire it before entering this helper.
 func (cm *ChainManager) blockByIndexLocked(
+	ctx context.Context,
 	blockIndex uint64,
 	txn *database.Txn,
 ) (models.Block, error) {
@@ -397,7 +442,7 @@ func (cm *ChainManager) blockByIndexLocked(
 	// internal chain reconciliation paths do.
 	if primaryChain := cm.primaryChainLocked(); primaryChain != nil &&
 		!primaryChain.persistent {
-		return primaryChain.blockByIndexLocked(blockIndex)
+		return primaryChain.blockByIndexLocked(ctx, blockIndex)
 	}
 	return models.Block{}, models.ErrBlockNotFound
 }
@@ -416,7 +461,7 @@ func (cm *ChainManager) blockAtOrAfterIndex(
 	return block, err
 }
 
-func (cm *ChainManager) loadPrimaryChain() error {
+func (cm *ChainManager) loadPrimaryChain(ctx context.Context) error {
 	persistent := (cm.db != nil)
 	chain := &Chain{
 		id:         primaryChainId,
@@ -425,7 +470,7 @@ func (cm *ChainManager) loadPrimaryChain() error {
 		persistent: persistent,
 	}
 	if persistent {
-		recentBlocks, err := database.BlocksRecent(cm.db, 1)
+		recentBlocks, err := database.BlocksRecent(ctx, cm.db, 1)
 		if err != nil {
 			return err
 		}
@@ -458,41 +503,48 @@ func (cm *ChainManager) loadPrimaryChain() error {
 // same signal NtC clients rely on for a live rollback. Previously this
 // deleted blocks directly with no depth bound and no rollback/iterator
 // signal, silently truncating the chain out from under downstream
-// consumers (issue #3516).
+// consumers.
 //
 // Do not call this before SetLedger: it returns ErrSecurityParamNotConfigured
 // rather than silently pruning without a bound. RewindPrimaryChainAtStartup
 // is for that case.
+//
+// This rewinds chain state only. A caller that follows it with a ledger
+// metadata rollback must bracket both calls with
+// database.Database.BeginDestructiveTransition, so a coordinated read snapshot
+// cannot open between the two physical transactions and observe metadata that
+// still describes blocks the chain has already deleted.
 func (cm *ChainManager) RewindPrimaryChainToPoint(
+	ctx context.Context,
 	point ocommon.Point,
 ) error {
 	primaryChain, err := cm.persistentPrimaryChain()
 	if err != nil {
 		return err
 	}
-	return primaryChain.Rollback(point)
+	return primaryChain.Rollback(ctx, point)
 }
 
 // RewindPrimaryChainAtStartup prunes the persistent primary chain back to
 // the specified point without requiring the security parameter K to be
 // configured, for reconciling the primary chain against the ledger's own
-// applied tip during startup -- before SetLedger has run (issue #3516
-// review). It still publishes ChainRollbackEvent/ChainForkEvent and
-// wakes/marks chain iterators exactly once, the same as
-// RewindPrimaryChainToPoint; it only skips the K bound, since a startup
-// gap between two already-durable local stores is not the untrusted-peer
-// scenario that bound protects against. Never call this for a rollback an
-// untrusted peer requested -- use RewindPrimaryChainToPoint (or
-// SecurityParamConfigured to check readiness first) for anything reachable
-// from chainsync.
+// applied tip during startup -- before SetLedger has run. It still publishes
+// ChainRollbackEvent/ChainForkEvent and wakes/marks chain iterators exactly
+// once, the same as RewindPrimaryChainToPoint; it only skips the K bound, since
+// a startup gap between two already-durable local stores is not the
+// untrusted-peer scenario that bound protects against. Never call this for a
+// rollback an untrusted peer requested -- use RewindPrimaryChainToPoint (or
+// SecurityParamConfigured to check readiness first) for anything reachable from
+// chainsync.
 func (cm *ChainManager) RewindPrimaryChainAtStartup(
+	ctx context.Context,
 	point ocommon.Point,
 ) error {
 	primaryChain, err := cm.persistentPrimaryChain()
 	if err != nil {
 		return err
 	}
-	return primaryChain.RollbackUnbounded(point)
+	return primaryChain.RollbackUnbounded(ctx, point)
 }
 
 // SecurityParamConfigured reports whether SetLedger has configured the
@@ -501,14 +553,10 @@ func (cm *ChainManager) RewindPrimaryChainAtStartup(
 // to choose between RewindPrimaryChainAtStartup and
 // RewindPrimaryChainToPoint.
 //
-// This reads securityParam without cm.mutex, matching SetLedger's own
-// unguarded write: both rely on SetLedger completing, during single-
-// threaded startup composition, before any goroutine that could reach
-// either side of this field exists (node.go constructs the ouroboros
-// layer -- and with it every chainsync-reachable goroutine -- only after
-// SetLedger returns).
+// It takes the manager read lock because SetLedger can run again while the
+// node is serving. Callers must not hold cm.mutex.
 func (cm *ChainManager) SecurityParamConfigured() bool {
-	return cm.securityParam > 0
+	return cm.SecurityParam() > 0
 }
 
 // persistentPrimaryChain resolves the primary chain for
@@ -553,6 +601,11 @@ func (cm *ChainManager) addBlock(
 func (cm *ChainManager) removeBlockByIndex(
 	blockIndex uint64,
 ) (models.Block, error) {
+	// This per-block deletion is one step of a logical primary-chain
+	// rollback, and deliberately takes no destructive-transition barrier:
+	// rollbackLocked calls it once per block, so acquiring the barrier here
+	// would release it between blocks. The ledger rollback caller holds it
+	// across the whole chain-delete -> metadata-truncate sequence instead.
 	// Record removed block event for each non-primary chain
 	for chainId := range cm.chains {
 		if chainId == primaryChainId {

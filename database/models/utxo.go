@@ -30,6 +30,10 @@ var (
 	ErrNilUtxoWithOrderingQuery = errors.New(
 		"nil UtxoWithOrderingQuery",
 	)
+	ErrNilUtxoHistoryQuery      = errors.New("nil UtxoHistoryQuery")
+	ErrInvalidUtxoHistoryStatus = errors.New(
+		"invalid UTxO history status",
+	)
 	ErrEmptyAssetPolicyID       = errors.New("empty asset policy id")
 	ErrEmptyUtxoAddressPattern  = errors.New("empty UTxO address pattern")
 	ErrExactAddressRequiresCbor = errors.New(
@@ -326,6 +330,53 @@ type UtxoWithOrdering struct {
 	TxBlockIndex uint32
 }
 
+// UtxoWithHistory includes the chain positions needed to expose a UTxO's
+// complete lifecycle. CreatedBlockHash can be empty for snapshot-imported
+// UTxOs that have no producing transaction row. SpentBlockHash is empty for
+// live outputs.
+type UtxoWithHistory struct {
+	Utxo
+	TxSlot           uint64
+	TxBlockIndex     uint32
+	CreatedBlockHash []byte
+	SpentBlockHash   []byte
+}
+
+// UtxoHistoryStatus selects outputs by lifecycle state.
+type UtxoHistoryStatus uint8
+
+const (
+	// UtxoHistoryStatusAll returns both live and spent outputs.
+	UtxoHistoryStatusAll UtxoHistoryStatus = iota
+	// UtxoHistoryStatusUnspent returns only live outputs.
+	UtxoHistoryStatusUnspent
+	// UtxoHistoryStatusSpent returns only spent outputs.
+	UtxoHistoryStatusSpent
+)
+
+// UtxoHistoryQuery selects historical UTxOs in producing-chain order.
+// Created and spent slot bounds are inclusive. A non-nil AssetName matches
+// that exact asset name; nil matches every name under AssetPolicyID. Spent
+// bounds imply a spent-output predicate even when Status is All.
+type UtxoHistoryQuery struct {
+	MatchAllAddresses bool
+	AddressPatterns   []UtxoAddressPattern
+	FilterByAsset     bool
+	AssetPolicyID     []byte
+	AssetName         []byte
+	TransactionID     []byte
+	OutputIndex       *uint32
+	MetadataLabel     *uint64
+	CreatedAfter      *uint64
+	CreatedBefore     *uint64
+	SpentAfter        *uint64
+	SpentBefore       *uint64
+	Status            UtxoHistoryStatus
+	Descending        bool
+	After             *UtxoOrderingCursor
+	Limit             int
+}
+
 // UtxoOrderingCursor is the keyset position for SearchUtxos.
 //
 // Text form (non-empty): slot:block_index:output_idx:tx_id.
@@ -338,6 +389,17 @@ type UtxoOrderingCursor struct {
 	BlockIndex uint32
 	OutputIdx  uint32
 	TxId       []byte
+}
+
+// UtxoAddressPage contains matches and the last fully examined candidate.
+// Progress includes nonmatches so an empty page can still resume a bounded
+// scan without repeating candidates or skipping unexamined ones.
+// Next is nil only when the candidate set was exhausted. Pages observe live
+// ledger state independently; they do not form a cross-request snapshot.
+type UtxoAddressPage struct {
+	Utxos   []UtxoWithOrdering
+	Next    *UtxoOrderingCursor
+	Scanned int
 }
 
 // UtxoWithOrderingQuery drives GetUtxosByAddressWithOrdering (single MetadataStore entry).
@@ -432,7 +494,7 @@ func UtxoLedgerToModel(
 	// the position of a registration certificate rather than a credential,
 	// and resolving that position is the ledger's job. Keep the position so
 	// the stake computation can resolve it against the certificate history
-	// at the slot it is evaluating (dingo #3854).
+	// at the slot it is evaluating.
 	if pointer, ok := outAddr.StakingPayload().(lcommon.AddressPayloadPointer); ok {
 		ret.Pointer = &UtxoPointer{
 			Slot:      pointer.Slot,

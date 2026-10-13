@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -90,9 +91,19 @@ type RatifiableHardForkInitiation struct {
 // on the voting deadline (currentSlot >= epochEnd - 2*stabilityWindow);
 // before that point, the answer can flip when new votes arrive.
 //
+// It is a prediction, not a preview of the boundary's own arithmetic. The
+// SPO denominator it tallies against is mark[CurrentEpoch], while the
+// boundary into CurrentEpoch+1 will tally mark[CurrentEpoch+1], a snapshot
+// SNAP does not capture until that boundary runs -- see
+// predictedBoundaryStakeEpochFor for why the two cannot be the same read and
+// what a stake shift between them costs. Every other input here is likewise
+// the current epoch's (active DReps, committee state, roots), where the
+// boundary uses the new epoch's.
+//
 // Returns nil with no error when no HardForkInitiation is currently
 // ratifiable, or when the chain is pre-Conway.
 func EvaluateRatifiableHardForkInitiation(
+	ctx context.Context,
 	in StabilityCheckInputs,
 ) (*RatifiableHardForkInitiation, error) {
 	if in.DB == nil {
@@ -109,6 +120,7 @@ func EvaluateRatifiableHardForkInitiation(
 	}
 
 	proposals, err := in.DB.GetActiveGovernanceProposals(
+		ctx,
 		in.CurrentEpoch, in.Txn,
 	)
 	if err != nil {
@@ -133,18 +145,24 @@ func EvaluateRatifiableHardForkInitiation(
 	tallyCtx := &TallyContext{
 		DB:                    in.DB,
 		Txn:                   in.Txn,
-		StakeEpoch:            stakeEpochFor(in.CurrentEpoch),
+		StakeEpoch:            predictedBoundaryStakeEpochFor(in.CurrentEpoch),
 		CurrentEpoch:          in.CurrentEpoch,
 		MajorVersion:          conwayPParams.ProtocolVersion.Major,
 		DelegatorInactivityOn: in.DelegatorInactivityOn,
 	}
 
-	activeDRepCount, err := countActiveDReps(in.DB, in.Txn, in.CurrentEpoch)
+	activeDRepCount, err := countActiveDReps(
+		ctx,
+		in.DB,
+		in.Txn,
+		in.CurrentEpoch,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("count active dreps: %w", err)
 	}
 
 	committeeState, err := LoadCommitteeVotingState(
+		ctx,
 		in.DB, in.Txn, in.CurrentEpoch,
 	)
 	if err != nil {
@@ -153,6 +171,7 @@ func EvaluateRatifiableHardForkInitiation(
 	tallyCtx.CommitteeState = committeeState
 
 	committeeRoot, err := in.DB.GetLastEnactedGovernanceProposal(
+		ctx,
 		purposeActionTypes(purposeCommittee), in.Txn,
 	)
 	if err != nil {
@@ -161,6 +180,7 @@ func EvaluateRatifiableHardForkInitiation(
 	committeeNoConfidence := committeeNoConfidenceState(committeeRoot)
 
 	ccQuorum, err := conwayRatifyQuorum(
+		ctx,
 		nil, in.DB, in.Txn, in.ConwayGenesis,
 	)
 	if err != nil {
@@ -171,6 +191,7 @@ func EvaluateRatifiableHardForkInitiation(
 	// must descend from the most recently enacted HardForkInitiation, or
 	// from genesis if none has enacted yet.
 	hardForkRoot, err := in.DB.GetLastEnactedGovernanceProposal(
+		ctx,
 		purposeActionTypes(purposeHardFork), in.Txn,
 	)
 	if err != nil {
@@ -192,17 +213,21 @@ func EvaluateRatifiableHardForkInitiation(
 			}
 			continue
 		}
-		tally, err := TallyProposal(tallyCtx, proposal)
+		tally, err := TallyProposal(ctx, tallyCtx, proposal)
 		if err != nil {
 			return nil, fmt.Errorf("tally proposal: %w", err)
 		}
 		decision := ShouldRatify(RatifyInputs{
-			Tally:                 tally,
-			PParams:               conwayPParams,
-			GovAction:             action,
-			CurrentEpoch:          in.CurrentEpoch,
-			ActiveDRepCount:       activeDRepCount,
-			ActiveCCCount:         committeeState.ActiveMemberCount,
+			Tally:           tally,
+			PParams:         conwayPParams,
+			GovAction:       action,
+			CurrentEpoch:    in.CurrentEpoch,
+			ActiveDRepCount: activeDRepCount,
+			ActiveCCCount:   committeeState.ActiveMemberCount,
+			CommitteeAbsent: committeeAbsent(
+				committeeRoot, in.ConwayGenesis,
+				committeeState.CommitteePresent,
+			),
 			CCQuorum:              ccQuorum,
 			MajorVersion:          conwayPParams.ProtocolVersion.Major,
 			CommitteeNoConfidence: committeeNoConfidence,

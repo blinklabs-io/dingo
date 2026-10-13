@@ -15,7 +15,6 @@
 package conformance
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -23,32 +22,278 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	"github.com/blinklabs-io/gouroboros/ledger/allegra"
-	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
-	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
-	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
-	"github.com/blinklabs-io/gouroboros/ledger/mary"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	"github.com/stretchr/testify/require"
 )
 
-// entryPointEraList is the era table these tests cover. Dijkstra is included
-// deliberately: it is off by default at runtime but its ValidateTxFunc is a
-// production entry point, and per-era rule duplication means an entry point
-// that is only covered for Conway proves nothing about the others.
-func entryPointEraList() []eras.EraDesc {
-	return eras.ActiveEras(true)
+// vectorEntryPointEvidence records one vector's trip through the production
+// entry points, preserving per-vector identity so an aggregate cannot hide a
+// vector whose validation path never ran.
+type vectorEntryPointEvidence struct {
+	// Err is a replay failure (decode, initial state, epoch boundary). It is
+	// a test failure: it means the vector produced no entry-point evidence.
+	Err error
+
+	Path     string
+	Title    string
+	TxEvents int
+	Routings []entryPointRouting
+}
+
+// replayEntryPoints replays the corpus against sm, routing every transaction
+// event through the production era entry point resolved from the vector's own
+// protocol parameters.
+//
+// It is a separate replay from the shared harness's, because the harness has
+// no hook for a caller-supplied validator and never reaches Dingo's entry
+// points. State advancement mirrors the harness: successful transactions are
+// applied, epoch events cross the boundary, and a rollback event restores the
+// initial state and re-applies the journaled transactions at or below the
+// target slot. The one modelled difference is that only transactions are
+// journaled, not epoch events, so a rollback that follows an epoch boundary
+// is reported as an error rather than replayed -- no corpus vector does that
+// today.
+func replayEntryPoints(
+	sm *DingoStateManager,
+	testdataRoot string,
+	entries []eraEntryPoint,
+) ([]vectorEntryPointEvidence, error) {
+	paths, err := collectEntryPointVectors(testdataRoot)
+	if err != nil {
+		return nil, err
+	}
+	loader := conformance.NewPParamsLoaderFromTestdata(testdataRoot)
+	provider := NewDingoStateProvider(sm)
+	observer := newObservedLedgerState(provider)
+
+	evidence := make([]vectorEntryPointEvidence, 0, len(paths))
+	for _, path := range paths {
+		ev := replayVectorEntryPoints(sm, loader, observer, entries, path)
+		// The corpus is extracted to a fresh temp directory per process, so
+		// the absolute path is not a stable subtest name. Report the path
+		// relative to the corpus root instead.
+		if rel, err := filepath.Rel(testdataRoot, path); err == nil {
+			ev.Path = rel
+		}
+		evidence = append(evidence, ev)
+	}
+	return evidence, nil
+}
+
+// appliedTx is a journaled transaction, retained so a rollback event can
+// re-apply the transactions at or below its target slot.
+type appliedTx struct {
+	tx   common.Transaction
+	slot uint64
+}
+
+func replayVectorEntryPoints(
+	sm *DingoStateManager,
+	loader *conformance.PParamsLoader,
+	observer *observedLedgerState,
+	entries []eraEntryPoint,
+	path string,
+) vectorEntryPointEvidence {
+	ev := vectorEntryPointEvidence{Path: path}
+
+	vector, err := conformance.DecodeTestVector(path)
+	if err != nil {
+		ev.Err = fmt.Errorf("decode vector: %w", err)
+		return ev
+	}
+	ev.Title = vector.Title
+
+	initialState, err := conformance.ParseInitialState(vector.InitialState)
+	if err != nil {
+		ev.Err = fmt.Errorf("parse initial state: %w", err)
+		return ev
+	}
+	pp, err := loader.LoadForVector(vector, initialState)
+	if err != nil {
+		ev.Err = fmt.Errorf("load protocol parameters: %w", err)
+		return ev
+	}
+	if err := sm.Reset(); err != nil {
+		ev.Err = fmt.Errorf("reset state: %w", err)
+		return ev
+	}
+	if err := sm.LoadInitialState(initialState, pp); err != nil {
+		ev.Err = fmt.Errorf("load initial state: %w", err)
+		return ev
+	}
+
+	epoch := initialState.CurrentEpoch
+	var applied []appliedTx
+	var epochCrossed bool
+
+	for idx, event := range vector.Events {
+		switch event.Type {
+		case conformance.EventTypeTransaction:
+			ev.TxEvents++
+			tx, err := decodeVectorTransaction(event.TxBytes)
+			if err != nil {
+				// The harness tolerates a decode failure on an
+				// expected-failure event; so does this pass, but the event is
+				// not counted as one that reached an entry point.
+				if event.Success {
+					ev.Err = fmt.Errorf(
+						"event %d: decode transaction: %w",
+						idx,
+						err,
+					)
+					return ev
+				}
+				ev.TxEvents--
+				continue
+			}
+			routing, err := routeVectorTransaction(
+				entries, observer, tx, event.Slot, pp, idx,
+			)
+			if err != nil {
+				ev.Err = err
+				return ev
+			}
+			ev.Routings = append(ev.Routings, routing)
+			if event.Success {
+				if err := sm.ApplyTransaction(tx, event.Slot); err != nil {
+					ev.Err = fmt.Errorf("event %d: apply: %w", idx, err)
+					return ev
+				}
+				applied = append(applied, appliedTx{tx: tx, slot: event.Slot})
+			}
+		case conformance.EventTypePassEpoch:
+			epoch += event.EpochDelta
+			if err := sm.ProcessEpochBoundary(epoch); err != nil {
+				ev.Err = fmt.Errorf("event %d: epoch boundary: %w", idx, err)
+				return ev
+			}
+			pp = sm.GetProtocolParameters()
+			epochCrossed = true
+		case conformance.EventTypeRollback:
+			if epochCrossed {
+				// The harness restores initialProtocolParams and replays its
+				// journaled epoch events on rollback. This pass journals only
+				// transactions, so it can neither undo an enacted parameter
+				// change nor re-cross a boundary. No vector in the corpus
+				// rolls back after an epoch event, so rather than model a
+				// path nothing exercises -- and silently route later
+				// transactions through an era selected from stale parameters
+				// -- fail loudly if one ever appears.
+				ev.Err = fmt.Errorf(
+					"event %d: rollback after an epoch boundary is not modelled by this replay; journal epoch events and restore the vector's initial protocol parameters before relying on it",
+					idx,
+				)
+				return ev
+			}
+			retained, err := rollbackEntryPointReplay(
+				sm, initialState, pp, applied, event.RollbackSlot,
+			)
+			if err != nil {
+				ev.Err = fmt.Errorf("event %d: rollback: %w", idx, err)
+				return ev
+			}
+			applied = retained
+			epoch = initialState.CurrentEpoch
+		case conformance.EventTypePassTick:
+			// No state effect; the harness only advances its slot cursor.
+		}
+	}
+	return ev
+}
+
+// routeVectorTransaction resolves the era entry point from the active
+// protocol parameters and routes tx through it.
+func routeVectorTransaction(
+	entries []eraEntryPoint,
+	observer *observedLedgerState,
+	tx common.Transaction,
+	slot uint64,
+	pp common.ProtocolParameters,
+	eventIndex int,
+) (entryPointRouting, error) {
+	major, err := protocolMajorVersion(pp)
+	if err != nil {
+		return entryPointRouting{}, fmt.Errorf(
+			"event %d: resolve protocol major version: %w",
+			eventIndex,
+			err,
+		)
+	}
+	entry, ok := entryPointForProtocolVersion(entries, major)
+	if !ok {
+		return entryPointRouting{}, fmt.Errorf(
+			"event %d: no era covers protocol major version %d",
+			eventIndex,
+			major,
+		)
+	}
+	if entry.Name != entryPointCorpusDecodeEra {
+		// decodeVectorTransaction decodes the corpus as Conway. A vector whose
+		// parameters place it in another era would be handed to that era's
+		// entry point as a Conway transaction, so fail loudly instead of
+		// reporting coverage the run does not have.
+		return entryPointRouting{}, fmt.Errorf(
+			"event %d: protocol major version %d selects era %s but the corpus is decoded as %s; add a decoder for %s before claiming its entry point is covered",
+			eventIndex,
+			major,
+			entry.Name,
+			entryPointCorpusDecodeEra,
+			entry.Name,
+		)
+	}
+	return routeTransaction(
+		entry,
+		entryPointFuncName(entry),
+		tx,
+		slot,
+		observer,
+		pp,
+		eventIndex,
+	), nil
+}
+
+// rollbackEntryPointReplay mirrors the shared harness's rollback: reset,
+// reload the vector's initial state, and re-apply the journaled transactions
+// at or below the target slot. Re-applied transactions are not routed again;
+// they already produced their evidence on first execution.
+//
+// pp is the vector's initial protocol parameters. replayVectorEntryPoints
+// refuses a rollback that follows an epoch boundary, so the parameters still
+// active here are the ones LoadForVector produced, which is what the harness
+// restores explicitly from its own initialProtocolParams.
+func rollbackEntryPointReplay(
+	sm *DingoStateManager,
+	initialState *conformance.ParsedInitialState,
+	pp common.ProtocolParameters,
+	applied []appliedTx,
+	targetSlot uint64,
+) ([]appliedTx, error) {
+	retained := make([]appliedTx, 0, len(applied))
+	for _, entry := range applied {
+		if entry.slot <= targetSlot {
+			retained = append(retained, entry)
+		}
+	}
+	if err := sm.Reset(); err != nil {
+		return nil, fmt.Errorf("reset: %w", err)
+	}
+	if err := sm.LoadInitialState(initialState, pp); err != nil {
+		return nil, fmt.Errorf("reload initial state: %w", err)
+	}
+	for _, entry := range retained {
+		if err := sm.ApplyTransaction(entry.tx, entry.slot); err != nil {
+			return nil, fmt.Errorf("replay slot %d: %w", entry.slot, err)
+		}
+	}
+	return retained, nil
 }
 
 // entryPointCorpusRun is the memoized entry-point replay. It is a second
 // replay of the corpus, separate from sqliteCorpusResults: the shared
 // ouroboros-mock harness validates with its own upstream rule list and offers
 // no hook for a caller-supplied validator, so there is no way to observe
-// Dingo's entry points from inside the harness pass. corpus_test.go's
+// Dingo's entry points from inside the harness pass. tests_cc29688c_test.go's
 // "replay once per backend" reasoning still holds for storage-dialect
 // coverage; what this pass buys is different, and is not obtainable from the
 // harness replay at any count.
@@ -253,309 +498,5 @@ func reportEntryPointCoverage(t *testing.T, run entryPointCorpusRun) {
 				entry.Name,
 			)
 		}
-	}
-}
-
-// TestEntryPointExecutionFaultDetectsBypassedValidator proves the detector
-// used by TestConformanceVectorsExerciseDingoEraEntryPoints actually
-// discriminates: it accepts the production entry point and rejects both a
-// no-op validator and one that returns the vector fixture's own verdict
-// without consulting ledger state.
-//
-// Without this, the coverage assertion above would be unfalsifiable, which is
-// the same failure mode as the aggregate pass rate it exists to backstop.
-func TestEntryPointExecutionFaultDetectsBypassedValidator(t *testing.T) {
-	root, err := corpusTestdataRoot()
-	require.NoError(t, err)
-	entries, err := dingoEraEntryPoints(entryPointEraList())
-	require.NoError(t, err)
-
-	sm, err := NewDingoStateManager()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sm.Close() })
-
-	probe := loadEntryPointProbeTransaction(t, root, sm)
-	observer := newObservedLedgerState(NewDingoStateProvider(sm))
-	major, err := protocolMajorVersion(probe.pp)
-	require.NoError(t, err)
-	production, ok := entryPointForProtocolVersion(entries, major)
-	require.True(t, ok, "no era covers protocol major version %d", major)
-
-	route := func(validate validateTxFunc) entryPointRouting {
-		entry := production
-		entry.Validate = validate
-		return routeTransaction(
-			entry,
-			entryPointFuncName(production),
-			probe.tx,
-			probe.slot,
-			observer,
-			probe.pp,
-			0,
-		)
-	}
-
-	t.Run("production entry point is accepted", func(t *testing.T) {
-		routing := route(production.Validate)
-		require.NoError(t, entryPointExecutionFault(routing))
-		require.Positive(
-			t,
-			routing.LookedUpInputs,
-			"%s must resolve the transaction's declared inputs",
-			entryPointFuncName(production),
-		)
-	})
-
-	t.Run("no-op validator is detected", func(t *testing.T) {
-		routing := route(func(
-			common.Transaction,
-			uint64,
-			common.LedgerState,
-			common.ProtocolParameters,
-		) error {
-			return nil
-		})
-		require.Error(
-			t,
-			entryPointExecutionFault(routing),
-			"a validator that accepts everything without reading state must "+
-				"be reported as a bypassed validation path",
-		)
-	})
-
-	t.Run("fixture-only verdict is detected", func(t *testing.T) {
-		// The worst case for an outcome-based check: a validator that returns
-		// exactly the verdict the vector fixture declares. Every accept/reject
-		// comparison against the corpus would agree with it.
-		routing := route(func(
-			common.Transaction,
-			uint64,
-			common.LedgerState,
-			common.ProtocolParameters,
-		) error {
-			if probe.expectSuccess {
-				return nil
-			}
-			return errors.New("vector fixture says this transaction fails")
-		})
-		require.Error(
-			t,
-			entryPointExecutionFault(routing),
-			"a verdict copied from the vector fixture must be reported as a "+
-				"bypassed validation path",
-		)
-	})
-
-	t.Run(
-		"rejecting validator that reads no state is detected",
-		func(t *testing.T) {
-			routing := route(func(
-				common.Transaction,
-				uint64,
-				common.LedgerState,
-				common.ProtocolParameters,
-			) error {
-				return errors.New("rejected without looking")
-			})
-			require.Error(
-				t,
-				entryPointExecutionFault(routing),
-				"returning an error is not evidence the validation path ran",
-			)
-		},
-	)
-}
-
-// entryPointProbe is a single real corpus transaction plus the state it was
-// loaded against, used to exercise the detector.
-type entryPointProbe struct {
-	tx            common.Transaction
-	pp            common.ProtocolParameters
-	path          string
-	slot          uint64
-	expectSuccess bool
-}
-
-// loadEntryPointProbeTransaction loads the first corpus vector carrying a
-// transaction with at least one declared input, and leaves sm holding that
-// vector's initial state. Using real vector data rather than a constructed
-// transaction is deliberate: the detector must be shown to work on the same
-// input the coverage assertion runs on.
-func loadEntryPointProbeTransaction(
-	t *testing.T,
-	root string,
-	sm *DingoStateManager,
-) entryPointProbe {
-	t.Helper()
-	paths, err := collectEntryPointVectors(root)
-	require.NoError(t, err)
-	loader := conformance.NewPParamsLoaderFromTestdata(root)
-
-	for _, path := range paths {
-		vector, err := conformance.DecodeTestVector(path)
-		if err != nil {
-			continue
-		}
-		initialState, err := conformance.ParseInitialState(vector.InitialState)
-		if err != nil {
-			continue
-		}
-		pp, err := loader.LoadForVector(vector, initialState)
-		if err != nil {
-			continue
-		}
-		for _, event := range vector.Events {
-			if event.Type != conformance.EventTypeTransaction {
-				continue
-			}
-			tx, err := decodeVectorTransaction(event.TxBytes)
-			if err != nil || len(tx.Inputs()) == 0 {
-				continue
-			}
-			require.NoError(t, sm.Reset())
-			require.NoError(t, sm.LoadInitialState(initialState, pp))
-			return entryPointProbe{
-				tx:            tx,
-				pp:            pp,
-				path:          filepath.Base(path),
-				slot:          event.Slot,
-				expectSuccess: event.Success,
-			}
-		}
-	}
-	t.Fatal("no corpus vector carries a transaction with declared inputs")
-	return entryPointProbe{}
-}
-
-// TestDingoEraEntryPointsRejectInputlessTransaction covers every era in the
-// registry, not just the era the corpus happens to contain.
-//
-// The corpus is Conway-only, and validation rules are duplicated per era, so
-// Conway coverage says nothing about ValidateTxShelley or ValidateTxDijkstra.
-// A transaction with no inputs is invalid in every era (Byron's own
-// InputSetEmpty rule, and UtxoValidateInputSetEmptyUtxo from Shelley onward),
-// which makes it a rule the whole table can be held to. The paired no-op
-// assertion is what makes this a detector rather than a restatement: the same
-// input is accepted by a validator that does nothing.
-func TestDingoEraEntryPointsRejectInputlessTransaction(t *testing.T) {
-	entries, err := dingoEraEntryPoints(entryPointEraList())
-	require.NoError(t, err)
-
-	sm, err := NewDingoStateManager()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sm.Close() })
-	observer := newObservedLedgerState(NewDingoStateProvider(sm))
-
-	probes := inputlessEraProbes()
-	for _, entry := range entries {
-		t.Run(entry.Name, func(t *testing.T) {
-			probe, ok := probes[entry.Name]
-			require.Truef(
-				t,
-				ok,
-				"era %s has no input-less transaction probe; add one so its "+
-					"production entry point is covered",
-				entry.Name,
-			)
-			require.Empty(t, probe.tx.Inputs())
-
-			routing := routeTransaction(
-				entry,
-				entryPointFuncName(entry),
-				probe.tx,
-				0,
-				observer,
-				probe.pp,
-				0,
-			)
-			require.NoErrorf(
-				t,
-				entryPointExecutionFault(routing),
-				"%s accepted a transaction with no inputs",
-				entryPointFuncName(entry),
-			)
-
-			bypassed := entry
-			bypassed.Validate = func(
-				common.Transaction,
-				uint64,
-				common.LedgerState,
-				common.ProtocolParameters,
-			) error {
-				return nil
-			}
-			bypassedRouting := routeTransaction(
-				bypassed,
-				entryPointFuncName(entry),
-				probe.tx,
-				0,
-				observer,
-				probe.pp,
-				0,
-			)
-			require.Errorf(
-				t,
-				entryPointExecutionFault(bypassedRouting),
-				"a no-op replacement for %s must be detected",
-				entryPointFuncName(entry),
-			)
-		})
-	}
-}
-
-// eraProbe is an era-appropriate transaction and the protocol parameters its
-// entry point requires.
-type eraProbe struct {
-	tx common.Transaction
-	pp common.ProtocolParameters
-}
-
-// inputlessEraProbes returns one input-less transaction per era, keyed by era
-// name.
-//
-// From Shelley onward each entry point type-asserts its own parameter type,
-// so the parameters have to match or the entry point returns
-// eras.ErrIncompatibleProtocolParams before reaching any rule -- which would
-// satisfy the input-less assertion for the wrong reason.
-//
-// Byron is the exception and carries nil: ValidateTxByron never asserts on
-// pp, and gouroboros has no Byron protocol-parameters type to supply. It runs
-// its structural rules unconditionally (byronValidateInputsNotEmpty is what
-// rejects the probe) and its UTxO-aware rules whenever a ledger state is
-// given, passing pp through to rules that ignore it.
-func inputlessEraProbes() map[string]eraProbe {
-	return map[string]eraProbe{
-		byron.EraNameByron: {
-			tx: &byron.ByronTransaction{},
-			pp: nil,
-		},
-		shelley.EraNameShelley: {
-			tx: &shelley.ShelleyTransaction{},
-			pp: &shelley.ShelleyProtocolParameters{},
-		},
-		allegra.EraNameAllegra: {
-			tx: &allegra.AllegraTransaction{},
-			pp: &allegra.AllegraProtocolParameters{},
-		},
-		mary.EraNameMary: {
-			tx: &mary.MaryTransaction{},
-			pp: &mary.MaryProtocolParameters{},
-		},
-		alonzo.EraNameAlonzo: {
-			tx: &alonzo.AlonzoTransaction{},
-			pp: &alonzo.AlonzoProtocolParameters{},
-		},
-		babbage.EraNameBabbage: {
-			tx: &babbage.BabbageTransaction{},
-			pp: &babbage.BabbageProtocolParameters{},
-		},
-		conway.EraNameConway: {
-			tx: &conway.ConwayTransaction{},
-			pp: &conway.ConwayProtocolParameters{},
-		},
-		dijkstra.EraNameDijkstra: {
-			tx: &dijkstra.DijkstraTransaction{},
-			pp: &dijkstra.DijkstraProtocolParameters{},
-		},
 	}
 }

@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -27,6 +28,7 @@ import (
 // TranslateRatifiedGovActions rewrites ratified-but-not-yet-enacted governance
 // actions that must survive an era boundary in the target era's CBOR shape.
 func TranslateRatifiedGovActions(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	fromEraId uint,
@@ -36,7 +38,10 @@ func TranslateRatifiedGovActions(
 		toEraId != gdijkstra.EraIdDijkstra {
 		return nil
 	}
-	proposals, err := db.GetRatifiedGovernanceProposals(txn)
+	proposals, err := db.GetRatifiedGovernanceProposals(
+		ctx,
+		txn,
+	)
 	if err != nil {
 		return err
 	}
@@ -57,7 +62,7 @@ func TranslateRatifiedGovActions(
 			)
 		}
 		proposal.GovActionCbor = translated
-		if err := db.SetGovernanceProposal(proposal, txn); err != nil {
+		if err := db.SetGovernanceProposal(ctx, proposal, txn); err != nil {
 			return fmt.Errorf(
 				"persist translated governance proposal %x#%d: %w",
 				proposal.TxHash,

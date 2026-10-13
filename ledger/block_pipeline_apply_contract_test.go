@@ -32,12 +32,11 @@ import (
 // The tests in this file pin the properties of
 // github.com/blinklabs-io/gouroboros/pipeline.ApplyStage that
 // ARCHITECTURE.md's "Why dingo's ledger apply is not wired into
-// pipeline.ApplyFunc" decision (issue #3227) rests on. They deliberately
-// assert upstream behavior rather than dingo behavior: the decision is only
-// sound while ApplyFunc keeps this contract, so a gouroboros bump that
-// changes it must fail here rather than silently invalidate a recorded
-// architecture decision. If one of these fails, revisit the decision, not
-// the test.
+// pipeline.ApplyFunc" decision rests on. They deliberately assert upstream
+// behavior rather than dingo behavior: the decision is only sound while
+// ApplyFunc keeps this contract, so a gouroboros bump that changes it must fail
+// here rather than silently invalidate a recorded architecture decision. If one
+// of these fails, revisit the decision, not the test.
 
 // applyContractRecorder records every ApplyFunc invocation, in call order,
 // and detects any concurrent overlap between invocations.
@@ -186,13 +185,14 @@ func TestPipelineApplyFuncIsSerialAndInSubmissionOrder(t *testing.T) {
 }
 
 // TestPipelineApplyFuncErrorDoesNotStopLaterBlocks is the decisive contract
-// fact behind #3227's decision. ApplyStage records a failing item's error on
-// the item and pushes it onto the (log-only) errors channel, then goes right
-// on to apply every following block. A ledger cannot do that: block N+1's
-// state depends on block N, so a failure at N must stop the batch. There is no
-// option on the stage to make it stop, and the error never reaches the
-// submitter synchronously, so dingo's errRestartLedgerPipeline /
-// errStaleChainIterator retry contract cannot be expressed through ApplyFunc.
+// fact behind the decision not to wire ledger apply into pipeline.ApplyFunc.
+// ApplyStage records a failing item's error on the item and pushes it onto the
+// (log-only) errors channel, then goes right on to apply every following block.
+// A ledger cannot do that: block N+1's state depends on block N, so a failure
+// at N must stop the batch. There is no option on the stage to make it stop,
+// and the error never reaches the submitter synchronously, so dingo's
+// errRestartLedgerPipeline / errStaleChainIterator retry contract cannot be
+// expressed through ApplyFunc.
 func TestPipelineApplyFuncErrorDoesNotStopLaterBlocks(t *testing.T) {
 	const numBlocks = 8
 	const failSeq = 2
@@ -287,15 +287,16 @@ func TestPipelineApplyFuncSkipsUndecodableBlockButAppliesTheNext(t *testing.T) {
 }
 
 // TestPipelineWaitForDrainCoversApplyFunc pins the third contract fact, the
-// one that ties #3227 to #3840. drainBlockPipelineBeforeRollback bounds its
-// WaitForDrain at BlockPipelineRollbackDrainTimeout and, on timeout, logs and
-// *proceeds with the rollback anyway*. That is safe today because a nil
-// ApplyFunc means the only work the barrier covers is decode and
-// re-sequencing, and the real ledger apply stays behind the reader
-// goroutine's in-order readChainResult handshake. If ApplyFunc did the ledger
-// apply, WaitForDrain would be covering database work, so a timeout would let
-// a rollback run while blocks were still being applied to the ledger --
-// exactly the "mutation survives a rollback" class of #3771/#3840.
+// one that ties that decision to superseded-batch discards.
+// drainBlockPipelineBeforeRollback bounds its WaitForDrain at
+// BlockPipelineRollbackDrainTimeout and, on timeout, logs and *proceeds with
+// the rollback anyway*. That is safe today because a nil ApplyFunc means the
+// only work the barrier covers is decode and re-sequencing, and the real ledger
+// apply stays behind the reader goroutine's in-order readChainResult handshake.
+// If ApplyFunc did the ledger apply, WaitForDrain would be covering database
+// work, so a timeout would let a rollback run while blocks were still being
+// applied to the ledger -- exactly the "mutation survives a rollback" class of
+// blockfetch wedges.
 func TestPipelineWaitForDrainCoversApplyFunc(t *testing.T) {
 	blockStarted := make(chan struct{})
 	blockRelease := make(chan struct{})

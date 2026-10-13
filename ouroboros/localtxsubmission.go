@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -24,6 +25,13 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
+)
+
+// errLocalTxSubmissionMempoolUnavailable is returned by the LocalTxSubmission
+// callback when this Ouroboros was built without a mempool. It is a fault of
+// the node, not of the submitted transaction, so it carries no CBOR rejection.
+var errLocalTxSubmissionMempoolUnavailable = errors.New(
+	"local-tx-submission: mempool unavailable",
 )
 
 func (o *Ouroboros) localtxsubmissionServerConnOpts() []olocaltxsubmission.LocalTxSubmissionOptionFunc {
@@ -70,8 +78,12 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 			"local-tx-submission: unexpected transaction content type",
 		)
 	}
+	if o.mempool == nil {
+		return errLocalTxSubmissionMempoolUnavailable
+	}
 	// Add transaction to mempool
 	err := o.mempool.AddTransaction(
+		context.Background(),
 		uint(tx.EraId),
 		rawTx,
 	)
@@ -154,6 +166,7 @@ func isLocalTxSubmissionInfrastructureError(err error) bool {
 	var fullErr *mempool.MempoolFullError
 	return errors.Is(err, mempool.ErrNilValidator) ||
 		errors.Is(err, mempool.ErrMempoolStopped) ||
+		errors.Is(err, mempool.ErrPendingStateMoved) ||
 		errors.As(err, &fullErr)
 }
 

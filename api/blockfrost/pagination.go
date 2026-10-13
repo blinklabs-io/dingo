@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package blockfrost
 
@@ -196,4 +196,14 @@ func paginationOffset(params PaginationParams) (int, bool) {
 		return 0, false
 	}
 	return (params.Page - 1) * params.Count, true
+}
+
+// paginateSlice returns the page of items selected by params, or an empty
+// non-nil slice when the page lies beyond the end.
+func paginateSlice[T any](items []T, params PaginationParams) []T {
+	offset, ok := paginationOffset(params)
+	if !ok || offset >= len(items) {
+		return []T{}
+	}
+	return items[offset:min(offset+params.Count, len(items))]
 }

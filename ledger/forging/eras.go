@@ -201,10 +201,11 @@ func splitTxCbor(txCbor []byte) (body, witnesses cbor.RawMessage, err error) {
 }
 
 // dijkstraBlockTransactionCbor returns the Dijkstra block-body form of a
-// transaction. Local tx submission may admit the 4-field mempool shape
-// [body, witnesses, is_valid, aux], but Dijkstra blocks store inline
-// transactions as [body, witnesses, aux] and express phase-2 failures through
-// the block body's invalid_transactions set.
+// transaction. Local tx submission uses [body, witnesses, is_valid, aux],
+// while Dijkstra blocks use [body, witnesses, aux, is_valid]. Dijkstra
+// removed the block-body invalid transaction index field but keeps validity
+// per transaction. Older mempool encodings without the validity flag are
+// normalized to that form.
 func dijkstraBlockTransactionCbor(
 	txCbor []byte,
 ) (cbor.RawMessage, error) {
@@ -214,7 +215,15 @@ func dijkstraBlockTransactionCbor(
 	}
 	switch len(parts) {
 	case 3:
-		return cbor.RawMessage(txCbor), nil
+		blockTxCbor, err := cbor.Encode([]cbor.RawMessage{
+			parts[0], parts[1], parts[2], {0xf5},
+		})
+		if err != nil {
+			return nil, fmt.Errorf(
+				"encode Dijkstra block transaction: %w", err,
+			)
+		}
+		return cbor.RawMessage(blockTxCbor), nil
 	case 4:
 		var isValid bool
 		if _, decErr := cbor.Decode(parts[2], &isValid); decErr != nil {
@@ -229,17 +238,17 @@ func dijkstraBlockTransactionCbor(
 			parts[0],
 			parts[1],
 			parts[3],
+			parts[2],
 		})
 		if err != nil {
 			return nil, fmt.Errorf(
-				"encode Dijkstra block transaction: %w",
-				err,
+				"encode Dijkstra block transaction: %w", err,
 			)
 		}
 		return cbor.RawMessage(blockTxCbor), nil
 	default:
 		return nil, fmt.Errorf(
-			"expected 3-4 element Dijkstra tx array, got %d",
+			"expected 3 or 4 element mempool transaction, got %d",
 			len(parts),
 		)
 	}
@@ -276,8 +285,9 @@ func decodeBlockFromCbor(era eraKind, blockCbor []byte) (ledger.Block, error) {
 // transaction_bodies, transaction_witnesses, auxiliary_data_set,
 // invalid_transactions — and shows its CBOR shape, so a structural
 // encoder/decoder mismatch (e.g. a field serialized as a map where the
-// decoder expects an array, the failure mode in issue #2063) is visible
-// at a glance instead of hidden behind a generic unmarshal error.
+// decoder expects an array, the failure mode of a forged block that does not
+// round-trip) is visible at a glance instead of hidden behind a generic
+// unmarshal error.
 //
 // Array fan-out and nesting depth are capped to keep the dump bounded;
 // this runs only on the (expected-never) decode-failure path. Any error

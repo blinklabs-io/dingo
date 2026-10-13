@@ -40,7 +40,7 @@ func newSyntheticCostModelTestDatabase(t *testing.T) *Database {
 }
 
 // TestRecomputeSyntheticV2CostModelMarkerAfterTruncate_UndoesClearWhenRollbackCrossesBack
-// covers blinklabs-io/dingo#3825's PR review (wolf31o2): a rollback to
+// covers the case where a rollback to
 // before the epoch that confirmed real PlutusV2 cost-model data must undo
 // that confirmation, since the surviving chain (possibly a fork that never
 // re-enacts it) can no longer prove the write happened.

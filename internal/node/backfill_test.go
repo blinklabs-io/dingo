@@ -17,16 +17,27 @@ package node
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -63,7 +74,32 @@ func newFileTestDB(t *testing.T) *database.Database {
 	return db
 }
 
-func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
+func addValidBackfillBlocks(t *testing.T, db *database.Database, count int) {
+	t.Helper()
+	addValidBackfillBlocksFrom(t, db, 0, count)
+}
+
+func addValidBackfillBlocksFrom(
+	t *testing.T,
+	db *database.Database,
+	startSlot uint64,
+	count int,
+) {
+	t.Helper()
+	blocks, err := testfixtures.GenerateConwayChainAt(1, startSlot, count)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+}
+
+func TestBackfillProcessBlockGovernanceRecordsDRepActivityFromCertificateOnly(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -74,7 +110,7 @@ func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 	credentialBytes := bytes.Repeat([]byte{0xAB}, 28)
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], credentialBytes)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag:     0,
 		Credential:        credentialBytes,
 		AddedSlot:         10,
@@ -95,25 +131,170 @@ func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 	pparams := mockledger.NewMockConwayProtocolParams()
 	pparams.DRepInactivityPeriod = 20
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return backfill.processBlockGovernance(
+		return backfill.processBlockGovernanceLevel(context.Background(),
 			tx,
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
+			0,
 			100,
 			&pparams,
 			txn,
 		)
 	}))
 
-	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	drep, err := db.GetDrepByCredential(context.Background(),
+		0,
+		credentialBytes,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
-	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+	// Backfill replays blocks below a Mithril anchor, whose DRepState expiry
+	// already counts the dormant epochs replay never sees, so the activity
+	// epoch is recorded and the stored expiry is kept rather than renewed to
+	// 100 + 20 as the live ledger would.
+	assert.Equal(t, uint64(25), drep.ExpiryEpoch)
 }
 
-func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
+func TestBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
+	t *testing.T,
+) {
+	t.Parallel()
+	testBackfillReplaysRegistrationBeforeHistoricalWithdrawal(t, newTestDB)
+}
+
+func testBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
+	t *testing.T,
+	newDB func(*testing.T) *database.Database,
+) {
+	db := newDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	backfill.SetDelegatorInactivityEnabled(false)
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Release()
+
+	stakeKeyBytes := bytes.Repeat([]byte{0x51}, lcommon.AddressHashSize)
+	stakeKey := lcommon.NewBlake2b224(stakeKeyBytes)
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: stakeKey,
+	}
+	registration := &lcommon.StakeRegistrationCertificate{
+		CertType:        uint(lcommon.CertificateTypeStakeRegistration),
+		StakeCredential: credential,
+	}
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x52}, lcommon.AddressHashSize),
+		stakeKeyBytes,
+	)
+	require.NoError(t, err)
+	_, err = db.GetAccountByCredential(context.Background(), 0, stakeKeyBytes, true, nil)
+	require.ErrorIs(t, err, models.ErrAccountNotFound)
+
+	makeTransaction := func(
+		id byte,
+		certificates []lcommon.Certificate,
+		withdrawals map[*lcommon.Address]uint64,
+	) lcommon.Transaction {
+		idBytes := bytes.Repeat([]byte{id}, 32)
+		input, inputErr := mockledger.NewTransactionInputBuilder().
+			WithTxId(bytes.Repeat([]byte{id + 1}, 32)).
+			WithIndex(0).
+			Build()
+		require.NoError(t, inputErr)
+		output, outputErr := mockledger.NewTransactionOutputBuilder().
+			WithAddress(address.String()).
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, outputErr)
+
+		tx := mockledger.NewTransactionBuilder().WithCertificates(certificates...)
+		tx.WithId(idBytes)
+		tx.WithInputs(input)
+		tx.WithOutputs(output)
+		tx.WithWithdrawals(withdrawals)
+		tx.WithValid(true)
+		built, buildErr := tx.Build()
+		require.NoError(t, buildErr)
+		return built
+	}
+	makeOffsets := func(
+		tx lcommon.Transaction,
+		slot uint64,
+	) *database.BlockIngestionResult {
+		var txHash [32]byte
+		copy(txHash[:], tx.Hash().Bytes())
+		utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
+		for _, produced := range tx.Produced() {
+			var producedTxID [32]byte
+			copy(producedTxID[:], produced.Id.Id().Bytes())
+			utxoOffsets[database.UtxoRef{
+				TxId:      producedTxID,
+				OutputIdx: produced.Id.Index(),
+			}] = database.CborOffset{BlockSlot: slot, ByteLength: 1}
+		}
+		return &database.BlockIngestionResult{
+			TxOffsets: map[[32]byte]database.CborOffset{
+				txHash: {BlockSlot: slot, ByteLength: 1},
+			},
+			UtxoOffsets: utxoOffsets,
+		}
+	}
+	process := func(
+		tx lcommon.Transaction,
+		slot uint64,
+	) error {
+		return backfill.processBlockTxsBatched(context.Background(),
+			[]lcommon.Transaction{tx},
+			ocommon.Point{
+				Slot: slot,
+				Hash: bytes.Repeat([]byte{byte(slot)}, 32),
+			},
+			0,
+			eras.ConwayEraDesc.Id,
+			nil,
+			makeOffsets(tx, slot),
+			acc,
+			txn,
+			nil,
+			true,
+		)
+	}
+
+	registrationTx := makeTransaction(
+		0x61,
+		[]lcommon.Certificate{registration},
+		nil,
+	)
+	require.NoError(t, process(registrationTx, 100))
+
+	withdrawalTx := makeTransaction(
+		0x63,
+		nil,
+		map[*lcommon.Address]uint64{&address: 1},
+	)
+	require.NoError(t, process(withdrawalTx, 200))
+	require.NoError(t, db.FlushBatch(acc, txn))
+	require.NoError(t, txn.Commit())
+
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeKeyBytes, true, nil)
+	require.NoError(t, err)
+	assert.True(t, account.Active)
+	count, err := db.CountAccountWithdrawalHistoryByCredential(
+		context.Background(),
+		0, stakeKeyBytes, nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
+
+func TestBackfillProcessBlockGovernanceRecordsDRepActivityInDijkstra(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
@@ -122,7 +303,7 @@ func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
 	credentialBytes := bytes.Repeat([]byte{0xBC}, 28)
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], credentialBytes)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag:     0,
 		Credential:        credentialBytes,
 		AddedSlot:         10,
@@ -146,26 +327,433 @@ func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
 		ConwayProtocolParameters: conwayPParams,
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return backfill.processBlockGovernance(
+		return backfill.processBlockGovernanceLevel(context.Background(),
 			tx,
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
+			0,
 			100,
-			pparams,
+			&pparams.ConwayProtocolParameters,
 			txn,
 		)
 	}))
 
-	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	drep, err := db.GetDrepByCredential(context.Background(),
+		0,
+		credentialBytes,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
-	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+	// Backfill replays blocks below a Mithril anchor, whose DRepState expiry
+	// already counts the dormant epochs replay never sees, so the activity
+	// epoch is recorded and the stored expiry is kept rather than renewed to
+	// 100 + 20 as the live ledger would.
+	assert.Equal(t, uint64(25), drep.ExpiryEpoch)
 }
 
-func closeTestDB(db *database.Database) error {
-	return dbtest.CloseDatabase(db)
+func TestBackfillProcessBlockGovernanceCleansDeregistrationVotes(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	drepCredential := bytes.Repeat([]byte{0xA7}, 28)
+	stakeCredential := bytes.Repeat([]byte{0xC9}, 28)
+	require.NoError(t, db.Metadata().ImportDrep(
+		&models.Drep{
+			CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+			Credential:    drepCredential,
+			AddedSlot:     900,
+			Active:        true,
+			Delegators: []models.StakeCredentialRef{{
+				Tag: uint8(lcommon.CredentialTypeAddrKeyHash),
+				Key: stakeCredential,
+			}},
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  uint8(lcommon.CredentialTypeAddrKeyHash),
+			DrepCredential: drepCredential,
+			AddedSlot:      900,
+			DepositAmount:  types.Uint64(500),
+		},
+		nil,
+	))
+	proposalHash := bytes.Repeat([]byte{0xB8}, 32)
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    stakeCredential,
+		CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		Drep:          drepCredential,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     950,
+		CreatedSlot:   950,
+		Active:        true,
+	}, nil))
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
+		TxHash:        proposalHash,
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 100,
+		ExpiresEpoch:  120,
+		AddedSlot:     900,
+	}, nil))
+	proposal, err := db.GetGovernanceProposal(context.Background(), proposalHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, proposal)
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+		ProposalID:         proposal.ID,
+		VoterType:          uint8(models.VoterTypeDRep),
+		VoterCredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		VoterCredential:    drepCredential,
+		Vote:               uint8(models.VoteYes),
+		AddedSlot:          900,
+	}, nil))
+
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], drepCredential)
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithCertificates(&lcommon.DeregistrationDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: credentialHash,
+		},
+	})
+	tx.WithValid(true)
+	pparams := mockledger.NewMockConwayProtocolParams()
+
+	point := ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32))
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot:  point.Slot,
+				BlockHash:  blockHash,
+				ByteLength: 1,
+			},
+		},
+	}
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(context.Background(), []lcommon.Transaction{tx},
+			point,
+			100,
+			eras.ConwayEraDesc.Id,
+			&pparams,
+			offsets,
+			acc,
+			txn,
+			nil,
+			false,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
+	require.NoError(t, err)
+	require.Empty(t, votes, "backfill must apply DRep deregistration cleanup")
+	account, err := db.GetAccountByCredential(context.Background(), uint8(lcommon.CredentialTypeAddrKeyHash),
+		stakeCredential,
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Nil(t, account.Drep, "backfill must clear deregistered DRep delegations")
+}
+
+// Replay reads Conway parameters only for proposals (action lifetime) and
+// votes. A transaction that only registers or deregisters DReps applies while
+// no parameters are available; one that reads them must still fail.
+func TestBackfillProcessBlockGovernanceLevelWithoutConwayParameters(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	drepCredential := bytes.Repeat([]byte{0xA1}, lcommon.Blake2b224Size)
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], drepCredential)
+	deregistration := func() lcommon.Transaction {
+		tx := mockledger.NewTransactionBuilder()
+		tx.WithId(bytes.Repeat([]byte{0xA2}, lcommon.Blake2b256Size))
+		tx.WithCertificates(&lcommon.DeregistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: credentialHash,
+			},
+		})
+		tx.WithValid(true)
+		return tx
+	}
+	proposal := func() lcommon.Transaction {
+		rewardAddress, err := lcommon.NewAddressFromBytes(
+			append([]byte{0xE1}, bytes.Repeat([]byte{0xA6}, lcommon.Blake2b224Size)...),
+		)
+		require.NoError(t, err)
+		tx := mockledger.NewTransactionBuilder()
+		tx.WithId(bytes.Repeat([]byte{0xA3}, lcommon.Blake2b256Size))
+		tx.WithProposalProcedures(conway.ConwayProposalProcedure{
+			PPDeposit:       1,
+			PPRewardAccount: rewardAddress,
+			PPGovAction: conway.ConwayGovAction{
+				Type:   uint(lcommon.GovActionTypeInfo),
+				Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)},
+			},
+			PPAnchor: lcommon.GovAnchor{
+				Url:      "https://example.com/no-params",
+				DataHash: [32]byte{0xA7},
+			},
+		})
+		tx.WithValid(true)
+		return tx
+	}
+	point := ocommon.NewPoint(1000, bytes.Repeat([]byte{0xA4}, 32))
+
+	for _, test := range []struct {
+		name    string
+		tx      func() lcommon.Transaction
+		wantErr string
+	}{
+		{name: "deregistration only", tx: deregistration},
+		{
+			name:    "proposal",
+			tx:      proposal,
+			wantErr: "missing Conway protocol parameters",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			backfill := NewBackfill(db, nil, slog.Default())
+			require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+				CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+				Credential:    drepCredential,
+				AddedSlot:     900,
+				Active:        true,
+			}))
+			require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
+				TxHash:        bytes.Repeat([]byte{0xA5}, 32),
+				ActionType:    uint8(lcommon.GovActionTypeInfo),
+				ProposedEpoch: 100,
+				ExpiresEpoch:  120,
+				AddedSlot:     900,
+			},
+				nil,
+			))
+			proposal, err := db.GetGovernanceProposal(context.Background(), bytes.Repeat([]byte{0xA5}, 32), 0, nil)
+			require.NoError(t, err)
+			require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+				ProposalID:         proposal.ID,
+				VoterType:          uint8(models.VoterTypeDRep),
+				VoterCredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+				VoterCredential:    drepCredential,
+				Vote:               uint8(models.VoteYes),
+				AddedSlot:          900,
+			}, nil))
+			txn := db.Transaction(context.Background(), true)
+			defer txn.Release()
+			err = backfill.processBlockGovernanceLevel(context.Background(), test.tx(), point, 0, 100, nil, txn)
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.NoError(t, txn.Commit())
+			votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
+			require.NoError(t, err)
+			assert.Empty(t, votes)
+		})
+	}
+}
+
+func TestBackfillTransactionsUseBabbageProtocolMajorForDRepCertificates(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	drepOne := bytes.Repeat([]byte{0x71}, lcommon.Blake2b224Size)
+	drepTwo := bytes.Repeat([]byte{0x72}, lcommon.Blake2b224Size)
+	stakeCredential := bytes.Repeat([]byte{0x73}, lcommon.Blake2b224Size)
+	for _, credential := range [][]byte{drepOne, drepTwo} {
+		require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+			CredentialTag: 0,
+			Credential:    credential,
+			AddedSlot:     1,
+			Active:        true,
+		}))
+	}
+	delegation := func(id byte, drep []byte) lcommon.Transaction {
+		credentialHash := lcommon.NewBlake2b224(stakeCredential)
+		tx := mockledger.NewTransactionBuilder().WithCertificates(
+			&lcommon.VoteDelegationCertificate{
+				CertType:        uint(lcommon.CertificateTypeVoteDelegation),
+				StakeCredential: lcommon.Credential{CredType: 0, Credential: credentialHash},
+				Drep:            lcommon.Drep{Type: lcommon.DrepTypeAddrKeyHash, Credential: drep},
+			},
+		)
+		tx.WithId(bytes.Repeat([]byte{id}, lcommon.Blake2b256Size))
+		tx.WithValid(true)
+		return tx
+	}
+	first := delegation(0x74, drepOne)
+	move := delegation(0x75, drepTwo)
+	credentialHash := lcommon.NewBlake2b224(drepOne)
+	deregistration := mockledger.NewTransactionBuilder().WithCertificates(
+		&lcommon.DeregistrationDrepCertificate{
+			CertType:       uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{CredType: 0, Credential: credentialHash},
+			Amount:         500,
+		},
+	)
+	deregistration.WithId(bytes.Repeat([]byte{0x76}, lcommon.Blake2b256Size))
+	deregistration.WithValid(true)
+	txs := []lcommon.Transaction{first, move, deregistration}
+	point := ocommon.Point{
+		Slot: 1000,
+		Hash: bytes.Repeat([]byte{0x77}, lcommon.Blake2b256Size),
+	}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	txOffsets := make(map[[32]byte]database.CborOffset, len(txs))
+	for i, tx := range txs {
+		var txHash [32]byte
+		copy(txHash[:], tx.Hash().Bytes())
+		txOffsets[txHash] = database.CborOffset{
+			BlockSlot:  point.Slot,
+			BlockHash:  blockHash,
+			ByteOffset: uint32(i),
+			ByteLength: 1,
+		}
+	}
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Release()
+	pparams := &babbage.BabbageProtocolParameters{ProtocolMajor: 9}
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(context.Background(),
+			txs,
+			point,
+			100,
+			babbage.EraIdBabbage,
+			pparams,
+			&database.BlockIngestionResult{
+				TxOffsets:   txOffsets,
+				UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+			},
+			acc,
+			txn,
+			nil,
+			false,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Nil(t, account.Drep, "PV9 DRep deregistration clears the stale reverse delegation")
+}
+
+func TestBackfillKeepsImportedDormancyAndExpiryForHistoricalDRepRegistration(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	drepCredential := bytes.Repeat([]byte{0x79}, lcommon.Blake2b224Size)
+	require.NoError(t, db.SetImportedDormantDRepEpochs(context.Background(), 3, nil))
+
+	pparams := &conway.ConwayProtocolParameters{
+		ProtocolVersion:         lcommon.ProtocolParametersProtocolVersion{Major: 9},
+		DRepDeposit:             500,
+		DRepInactivityPeriod:    20,
+		GovActionValidityPeriod: 20,
+	}
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, bytes.Repeat([]byte{0x7A}, lcommon.Blake2b224Size)...),
+	)
+	require.NoError(t, err)
+	var anchorHash [32]byte
+	copy(anchorHash[:], bytes.Repeat([]byte{0x7B}, lcommon.Blake2b256Size))
+	proposal := conway.ConwayProposalProcedure{
+		PPDeposit:       1,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: conway.ConwayGovAction{
+			Type:   uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)},
+		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.com/backfill-dormancy",
+			DataHash: anchorHash,
+		},
+	}
+	credentialHash := lcommon.NewBlake2b224(drepCredential)
+	tx := mockledger.NewTransactionBuilder().WithCertificates(
+		&lcommon.RegistrationDrepCertificate{
+			CertType:       uint(lcommon.CertificateTypeRegistrationDrep),
+			DrepCredential: lcommon.Credential{CredType: 0, Credential: credentialHash},
+			Amount:         500,
+		},
+	)
+	tx.WithId(bytes.Repeat([]byte{0x7C}, lcommon.Blake2b256Size))
+	tx.WithType(gledger.TxTypeConway)
+	tx.WithValid(true)
+	tx.WithProposalProcedures(proposal)
+	point := ocommon.Point{
+		Slot: 100,
+		Hash: bytes.Repeat([]byte{0x7D}, lcommon.Blake2b256Size),
+	}
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(context.Background(),
+			[]lcommon.Transaction{tx},
+			point,
+			100,
+			uint(conway.EraIdConway),
+			pparams,
+			&database.BlockIngestionResult{
+				TxOffsets: map[[32]byte]database.CborOffset{
+					txHash: {BlockSlot: point.Slot, BlockHash: blockHash, ByteLength: 1},
+				},
+				UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+			},
+			acc,
+			txn,
+			nil,
+			false,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+
+	drep, err := db.GetDrepByCredential(context.Background(), 0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
+	// Replay below the anchor neither resets the imported dormancy counter nor
+	// recomputes the expiry the snapshot recorded.
+	dormantEpochs, err := db.GetDormantDRepEpochs(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), dormantEpochs)
 }
 
 func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
@@ -364,16 +952,7 @@ func TestRun_IncompleteCheckpointAtZeroStartsAtSlotZero(t *testing.T) {
 	}
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
 
-	for _, slot := range []uint64{0, 1} {
-		hash := make([]byte, 32)
-		hash[0] = byte(slot + 1)
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot: slot,
-			Hash: hash,
-			Cbor: []byte{0x82, 0x01},
-			Type: 1,
-		}, nil))
-	}
+	addValidBackfillBlocks(t, db, 2)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	bf := NewBackfill(db, nil, logger)
@@ -401,22 +980,21 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 		},
 		nil,
 	))
-	for _, slot := range []uint64{0, 1, 2} {
-		hash := make([]byte, 32)
-		hash[0] = byte(slot + 1)
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot: slot,
-			Hash: hash,
-			Cbor: []byte{0x82, 0x01},
-			Type: 1,
-		}, nil))
-	}
+	addValidBackfillBlocks(t, db, 2)
+	malformedHash := make([]byte, 32)
+	malformedHash[0] = 3
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 2,
+		Hash: malformedHash,
+		Cbor: []byte{0xff},
+		Type: 1,
+	}, nil))
 
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	bf := NewBackfill(db, nil, logger)
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	bf.SetEndSlot(1)
 
+	// If iteration crosses the configured end slot, parsing the malformed
+	// block at slot 2 fails the run instead of leaving it for ledger replay.
 	require.NoError(t, bf.Run(context.Background()))
 	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
 		BackfillPhase,
@@ -426,9 +1004,705 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 	require.True(t, checkpoint.Completed)
 	require.Equal(t, uint64(1), checkpoint.LastSlot)
 	require.Equal(t, uint64(1), checkpoint.TotalSlots)
-	require.Contains(t, logs.String(), `"slot":0`)
-	require.Contains(t, logs.String(), `"slot":1`)
-	require.NotContains(t, logs.String(), `"slot":2`)
+}
+
+// TestRun_ResumeStopsAtRecordedMithrilAnchor covers a Mithril API backfill
+// resumed by `dingo serve`, which calls Run without SetEndSlot. Blocks after
+// the recorded ledger anchor belong to ledger replay: a historical pass over
+// them journals each withdrawal without debiting the reward balance, and the
+// replay then finds the journal row and skips the debit as well.
+func TestRun_ResumeStopsAtRecordedMithrilAnchor(t *testing.T) {
+	t.Parallel()
+	testRun_ResumeStopsAtRecordedMithrilAnchor(t, newTestDB)
+}
+
+func testRun_ResumeStopsAtRecordedMithrilAnchor(
+	t *testing.T,
+	newDB func(*testing.T) *database.Database,
+) {
+	db := newDB(t)
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(2)
+	require.NoError(t, err)
+	require.Len(t, blocks, 2)
+	for _, block := range blocks {
+		require.NotEmpty(t, block.Transactions())
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+	anchor := blocks[0].SlotNumber()
+	require.NoError(t, db.SetSyncState(
+		"mithril_ledger_slot",
+		strconv.FormatUint(anchor, 10),
+		nil,
+	))
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:     BackfillPhase,
+			StartedAt: now,
+			UpdatedAt: now,
+		},
+		nil,
+	))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, bf.Run(context.Background()))
+
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, checkpoint.Completed)
+	assert.Equal(t, anchor, checkpoint.LastSlot)
+	assert.Equal(t, anchor, checkpoint.TotalSlots)
+	for _, tx := range blocks[0].Transactions() {
+		stored, err := db.Metadata().GetTransactionByHash(
+			tx.Hash().Bytes(),
+			nil,
+		)
+		require.NoError(t, err)
+		assert.NotNil(t, stored, "anchor block transaction was not backfilled")
+	}
+	for _, tx := range blocks[1].Transactions() {
+		stored, err := db.Metadata().GetTransactionByHash(
+			tx.Hash().Bytes(),
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Nil(t, stored, "post-anchor transaction was backfilled")
+	}
+}
+
+// TestRun_RestoresSnapshotAccountDelegationAtAnchor covers delegation state
+// the snapshot holds but certificate replay cannot reproduce. POOLREAP clears
+// delegations to a retired pool and the PV10 HARDFORK rule clears delegations
+// to an unregistered DRep; backfill runs neither, so replaying the historical
+// delegation certificate re-points the imported account. At the anchor the
+// snapshot is authoritative: a stale pool rejoins that pool's stake if it
+// re-registers (dingo #3794), and a stale DRep lets a PV10/PV11 withdrawal
+// validate that cardano-node rejects.
+func TestRun_RestoresSnapshotAccountDelegationAtAnchor(t *testing.T) {
+	t.Parallel()
+	testRun_RestoresSnapshotAccountDelegationAtAnchor(t, newTestDB)
+}
+
+func testRun_RestoresSnapshotAccountDelegationAtAnchor(
+	t *testing.T,
+	newDB func(*testing.T) *database.Database,
+) {
+	db := newDB(t)
+	addValidBackfillBlocks(t, db, 3)
+	const anchor = uint64(2)
+	require.NoError(t, db.SetSyncState(
+		"mithril_ledger_slot",
+		strconv.FormatUint(anchor, 10),
+		nil,
+	))
+
+	stakeKey := bytes.Repeat([]byte{0x71}, lcommon.AddressHashSize)
+	importTxn := db.MetadataTxn(context.Background(), true)
+	require.NoError(t, importTxn.Do(func(txn *database.Txn) error {
+		return db.Metadata().ImportAccount(&models.Account{
+			StakingKey: stakeKey,
+			AddedSlot:  anchor,
+			Reward:     5_000,
+			Active:     true,
+		}, txn.Metadata())
+	}))
+
+	retiredPool := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0x72}, lcommon.AddressHashSize)),
+	)
+	unregisteredDRep := bytes.Repeat([]byte{0x73}, lcommon.AddressHashSize)
+	delegation := &lcommon.StakeVoteDelegationCertificate{
+		CertType: uint(lcommon.CertificateTypeStakeVoteDelegation),
+		StakeCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(stakeKey),
+		},
+		PoolKeyHash: retiredPool,
+		Drep: lcommon.Drep{
+			Type:       lcommon.DrepTypeAddrKeyHash,
+			Credential: unregisteredDRep,
+		},
+	}
+	input, err := mockledger.NewTransactionInputBuilder().
+		WithTxId(bytes.Repeat([]byte{0x74}, 32)).
+		WithIndex(0).
+		Build()
+	require.NoError(t, err)
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x77}, lcommon.AddressHashSize),
+		stakeKey,
+	)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(address.String()).
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	builder := mockledger.NewTransactionBuilder().WithCertificates(delegation)
+	builder.WithId(bytes.Repeat([]byte{0x75}, 32))
+	builder.WithInputs(input)
+	builder.WithOutputs(output)
+	builder.WithValid(true)
+	tx, err := builder.Build()
+	require.NoError(t, err)
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
+	for _, produced := range tx.Produced() {
+		var producedTxID [32]byte
+		copy(producedTxID[:], produced.Id.Id().Bytes())
+		utxoOffsets[database.UtxoRef{
+			TxId:      producedTxID,
+			OutputIdx: produced.Id.Index(),
+		}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
+	}
+
+	// Replay the delegation the way an earlier, interrupted run of the same
+	// backfill would have, then resume from the checkpoint after it.
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.DisableNonceComputation()
+	acc := db.NewBatchAccumulator()
+	replayTxn := db.Transaction(context.Background(), true)
+	require.NoError(t, bf.processBlockTxsBatched(
+		context.Background(),
+		[]lcommon.Transaction{tx},
+		ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x76}, 32)},
+		0,
+		eras.ConwayEraDesc.Id,
+		&conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 10,
+			},
+		},
+		&database.BlockIngestionResult{
+			TxOffsets: map[[32]byte]database.CborOffset{
+				txHash: {BlockSlot: 1, ByteLength: 1},
+			},
+			UtxoOffsets: utxoOffsets,
+		},
+		acc,
+		replayTxn,
+		nil,
+		false,
+	))
+	require.NoError(t, db.FlushBatch(acc, replayTxn))
+	require.NoError(t, replayTxn.Commit())
+	replayTxn.Release()
+	replayed, err := db.GetAccountByCredential(context.Background(), 0, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, retiredPool.Bytes(), replayed.Pool)
+	require.Equal(t, unregisteredDRep, replayed.Drep)
+
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:     BackfillPhase,
+			LastSlot:  1,
+			StartedAt: now,
+			UpdatedAt: now,
+		},
+		nil,
+	))
+	require.NoError(t, bf.Run(context.Background()))
+
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeKey, true, nil)
+	require.NoError(t, err)
+	assert.True(t, account.Active)
+	assert.Empty(t, account.Pool, "retired-pool delegation survived backfill")
+	assert.Empty(t, account.Drep, "unregistered-DRep delegation survived backfill")
+	assert.Equal(t, models.DrepTypeAddrKeyHash, account.DrepType)
+	assert.Equal(t, uint64(5_000), uint64(account.Reward))
+}
+
+// TestRun_KeepsSnapshotDRepExpiryAtAnchor covers DRep expiry, which the
+// snapshot records after rules backfill does not replay. In Conway a
+// registration (PV10+), an update, or a vote sets expiry to
+// epoch + drepActivity - numDormantEpochs; a transaction with proposals then
+// adds the accumulated dormant epochs to every DRep's expiry, and EPOCH counts
+// an epoch dormant when no proposal is active (Conway/Rules/GovCert.hs,
+// Certs.hs updateDormantDRepExpiry, Epoch.hs updateNumDormantEpochs).
+//
+// DRep A registers at epoch 500 with drepActivity 20 and no dormant epochs
+// (520); epochs 501-503 are dormant and a proposal at 504 adds 3, so the
+// snapshot records 523. DRep B votes at epoch 510 (530); epochs 517-519 are
+// dormant and a proposal at 520 adds 3, so the snapshot records 533. Replay
+// sees only the registration and the vote, so rewriting expiry from them
+// leaves 520 and 530.
+func TestRun_KeepsSnapshotDRepExpiryAtAnchor(t *testing.T) {
+	t.Parallel()
+	testRun_KeepsSnapshotDRepExpiryAtAnchor(t, newTestDB)
+}
+
+func testRun_KeepsSnapshotDRepExpiryAtAnchor(
+	t *testing.T,
+	newDB func(*testing.T) *database.Database,
+) {
+	db := newDB(t)
+	addValidBackfillBlocks(t, db, 3)
+	const anchor = uint64(2)
+	require.NoError(t, db.SetSyncState(
+		"mithril_ledger_slot",
+		strconv.FormatUint(anchor, 10),
+		nil,
+	))
+
+	drepA := bytes.Repeat([]byte{0x81}, lcommon.AddressHashSize)
+	drepB := bytes.Repeat([]byte{0x82}, lcommon.AddressHashSize)
+	importTxn := db.MetadataTxn(context.Background(), true)
+	require.NoError(t, importTxn.Do(func(txn *database.Txn) error {
+		for _, imported := range []struct {
+			credential []byte
+			expiry     uint64
+		}{{drepA, 523}, {drepB, 533}} {
+			if err := db.Metadata().ImportDrep(
+				&models.Drep{
+					Credential:  imported.credential,
+					AddedSlot:   anchor,
+					ExpiryEpoch: imported.expiry,
+					Active:      true,
+				},
+				&models.RegistrationDrep{
+					DrepCredential: imported.credential,
+					AddedSlot:      anchor,
+					DepositAmount:  500_000_000,
+				},
+				txn.Metadata(),
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	proposalTxHash := bytes.Repeat([]byte{0x83}, 32)
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
+		TxHash:        proposalTxHash,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 509,
+		ExpiresEpoch:  515,
+		AnchorHash:    bytes.Repeat([]byte{0x84}, 32),
+		Deposit:       1,
+		ReturnAddress: append([]byte{0xE0}, bytes.Repeat([]byte{0x85}, 28)...),
+		AddedSlot:     1,
+	}, nil))
+
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x86}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion:      lcommon.ProtocolParametersProtocolVersion{Major: 10},
+		DRepDeposit:          500_000_000,
+		DRepInactivityPeriod: 20,
+	}
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.DisableNonceComputation()
+	replay := func(
+		id byte,
+		epoch uint64,
+		configure func(*mockledger.MockTransaction),
+	) {
+		t.Helper()
+		input, err := mockledger.NewTransactionInputBuilder().
+			WithTxId(bytes.Repeat([]byte{id + 1}, 32)).
+			WithIndex(0).
+			Build()
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress(address.String()).
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, err)
+		builder := mockledger.NewTransactionBuilder()
+		configure(builder)
+		builder.WithId(bytes.Repeat([]byte{id}, 32))
+		builder.WithInputs(input)
+		builder.WithOutputs(output)
+		builder.WithValid(true)
+		tx, err := builder.Build()
+		require.NoError(t, err)
+		var txHash [32]byte
+		copy(txHash[:], tx.Hash().Bytes())
+		offsets := &database.BlockIngestionResult{
+			TxOffsets: map[[32]byte]database.CborOffset{
+				txHash: {BlockSlot: 1, ByteLength: 1},
+			},
+			UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+		}
+		for _, produced := range tx.Produced() {
+			var producedTxID [32]byte
+			copy(producedTxID[:], produced.Id.Id().Bytes())
+			offsets.UtxoOffsets[database.UtxoRef{
+				TxId:      producedTxID,
+				OutputIdx: produced.Id.Index(),
+			}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
+		}
+		acc := db.NewBatchAccumulator()
+		txn := db.Transaction(context.Background(), true)
+		defer txn.Release()
+		require.NoError(t, bf.processBlockTxsBatched(
+			context.Background(),
+			[]lcommon.Transaction{tx},
+			ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{id + 2}, 32)},
+			epoch,
+			eras.ConwayEraDesc.Id,
+			pp,
+			offsets,
+			acc,
+			txn,
+			nil,
+			false,
+		))
+		require.NoError(t, db.FlushBatch(acc, txn))
+		require.NoError(t, txn.Commit())
+	}
+	replay(0x90, 500, func(builder *mockledger.MockTransaction) {
+		builder.WithCertificates(&lcommon.RegistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(drepA),
+			},
+			Amount: 500_000_000,
+		})
+	})
+	var voterHash [28]byte
+	copy(voterHash[:], drepB)
+	var actionTxHash [32]byte
+	copy(actionTxHash[:], proposalTxHash)
+	replay(0xa0, 510, func(builder *mockledger.MockTransaction) {
+		builder.WithVotingProcedures(lcommon.VotingProcedures{
+			&lcommon.Voter{
+				Type: lcommon.VoterTypeDRepKeyHash,
+				Hash: voterHash,
+			}: {
+				&lcommon.GovActionId{TransactionId: actionTxHash}: {
+					Vote: models.VoteYes,
+				},
+			},
+		})
+	})
+
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:     BackfillPhase,
+			LastSlot:  1,
+			StartedAt: now,
+			UpdatedAt: now,
+		},
+		nil,
+	))
+	require.NoError(t, bf.Run(context.Background()))
+
+	for _, want := range []struct {
+		credential   []byte
+		expiry       uint64
+		lastActivity uint64
+	}{{drepA, 523, 500}, {drepB, 533, 510}} {
+		drep, err := db.GetDrep(context.Background(), want.credential, true, nil)
+		require.NoError(t, err)
+		require.NotNil(t, drep)
+		assert.True(t, drep.Active)
+		assert.Equal(t, want.expiry, drep.ExpiryEpoch,
+			"DRep %x expiry was rewritten by historical replay",
+			want.credential[:1],
+		)
+		assert.Equal(t, want.lastActivity, drep.LastActivityEpoch)
+	}
+}
+
+// TestRun_SettlesReplayedProposalsTheSnapshotDoesNotHold covers governance
+// proposals replayed below the anchor. The snapshot holds every proposal live
+// at the anchor; any other replayed proposal was already enacted, expired or
+// dropped on chain, with its deposit refunded or its action paid, and those
+// effects are in the snapshot. Left unmarked, such a row reads as live: the
+// next boundaries expire it and refund its deposit again, and one still
+// inside its lifetime stays eligible for ratification.
+func TestRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(t *testing.T) {
+	t.Parallel()
+	testRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(t, newTestDB)
+}
+
+func testRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(
+	t *testing.T,
+	newDB func(*testing.T) *database.Database,
+) {
+	db := newDB(t)
+	addValidBackfillBlocks(t, db, 3)
+	const anchor = uint64(2)
+	const anchorEpoch = uint64(510)
+	require.NoError(t, db.SetSyncState(
+		"mithril_ledger_slot",
+		strconv.FormatUint(anchor, 10),
+		nil,
+	))
+
+	rewardAccount, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE0}, bytes.Repeat([]byte{0x91}, 28)...),
+	)
+	require.NoError(t, err)
+	rewardAccountBytes, err := rewardAccount.Bytes()
+	require.NoError(t, err)
+	liveTxHash := bytes.Repeat([]byte{0xb0}, 32)
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
+		TxHash:        liveTxHash,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 508,
+		ExpiresEpoch:  514,
+		AnchorHash:    bytes.Repeat([]byte{0x92}, 32),
+		Deposit:       100_000,
+		ReturnAddress: rewardAccountBytes,
+		AddedSlot:     anchor,
+	}, nil))
+
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x93}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion:         lcommon.ProtocolParametersProtocolVersion{Major: 10},
+		GovActionValidityPeriod: 6,
+		DRepInactivityPeriod:    20,
+	}
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.DisableNonceComputation()
+	replayProposal := func(txHash []byte, epoch uint64) {
+		t.Helper()
+		input, err := mockledger.NewTransactionInputBuilder().
+			WithTxId(append([]byte{0x01}, txHash[1:]...)).
+			WithIndex(0).
+			Build()
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress(address.String()).
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, err)
+		builder := mockledger.NewTransactionBuilder().WithProposalProcedures(
+			&conway.ConwayProposalProcedure{
+				PPDeposit:       100_000,
+				PPRewardAccount: rewardAccount,
+				PPGovAction: conway.ConwayGovAction{
+					Type: uint(lcommon.GovActionTypeInfo),
+					Action: &lcommon.InfoGovAction{
+						Type: uint(lcommon.GovActionTypeInfo),
+					},
+				},
+				PPAnchor: lcommon.GovAnchor{
+					DataHash: [32]byte(bytes.Repeat([]byte{0x92}, 32)),
+				},
+			},
+		)
+		builder.WithId(txHash)
+		builder.WithInputs(input)
+		builder.WithOutputs(output)
+		builder.WithValid(true)
+		tx, err := builder.Build()
+		require.NoError(t, err)
+		var hash [32]byte
+		copy(hash[:], tx.Hash().Bytes())
+		offsets := &database.BlockIngestionResult{
+			TxOffsets: map[[32]byte]database.CborOffset{
+				hash: {BlockSlot: 1, ByteLength: 1},
+			},
+			UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+		}
+		for _, produced := range tx.Produced() {
+			var producedTxID [32]byte
+			copy(producedTxID[:], produced.Id.Id().Bytes())
+			offsets.UtxoOffsets[database.UtxoRef{
+				TxId:      producedTxID,
+				OutputIdx: produced.Id.Index(),
+			}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
+		}
+		acc := db.NewBatchAccumulator()
+		txn := db.Transaction(context.Background(), true)
+		defer txn.Release()
+		require.NoError(t, bf.processBlockTxsBatched(
+			context.Background(),
+			[]lcommon.Transaction{tx},
+			ocommon.Point{Slot: 1, Hash: append([]byte{0x02}, txHash[1:]...)},
+			epoch,
+			eras.ConwayEraDesc.Id,
+			pp,
+			offsets,
+			acc,
+			txn,
+			nil,
+			false,
+		))
+		require.NoError(t, db.FlushBatch(acc, txn))
+		require.NoError(t, txn.Commit())
+	}
+	expiredTxHash := bytes.Repeat([]byte{0xb1}, 32)
+	settledTxHash := bytes.Repeat([]byte{0xb2}, 32)
+	replayProposal(expiredTxHash, 500)
+	replayProposal(settledTxHash, 508)
+	replayProposal(liveTxHash, 508)
+
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:     BackfillPhase,
+			LastSlot:  1,
+			StartedAt: now,
+			UpdatedAt: now,
+		},
+		nil,
+	))
+	require.NoError(t, bf.Run(context.Background()))
+
+	txHashes := func(proposals []*models.GovernanceProposal) [][]byte {
+		ret := make([][]byte, 0, len(proposals))
+		for _, proposal := range proposals {
+			ret = append(ret, proposal.TxHash)
+		}
+		return ret
+	}
+	active, err := db.GetActiveGovernanceProposals(context.Background(), anchorEpoch, nil)
+	require.NoError(t, err)
+	assert.Equal(t, [][]byte{liveTxHash}, txHashes(active))
+	expiring, err := db.GetExpiringGovernanceProposals(context.Background(), anchorEpoch+1, nil)
+	require.NoError(t, err)
+	assert.Empty(t, txHashes(expiring), "replayed proposal would expire again")
+	awaitingDrop, err := db.GetExpiredAwaitingDropGovernanceProposals(
+		context.Background(),
+		anchorEpoch+2,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Empty(t, txHashes(awaitingDrop), "replayed proposal would be refunded again")
+	for _, txHash := range [][]byte{expiredTxHash, settledTxHash} {
+		stored, err := db.GetGovernanceProposal(context.Background(), txHash, 0, nil)
+		require.NoError(t, err)
+		assert.NotNil(t, stored, "replayed proposal history was dropped")
+	}
+}
+
+// TestRun_KeepsImportedProtocolParameters covers resolvePParams, which derives
+// parameters from genesis and hard forks and writes them per epoch. The
+// snapshot's parameters for its epoch include governance-enacted changes that
+// derivation cannot reproduce, and GetPParams prefers the newest row for an
+// epoch, so a derived row written for an epoch the import already recorded
+// replaces the snapshot's. Two shapes reach that write: an import whose era
+// bounds could not be extracted records only the anchor epoch (the first-epoch
+// write), and an anchor in an era's first epoch (the hard-fork write).
+func TestRun_KeepsImportedProtocolParameters(t *testing.T) {
+	t.Parallel()
+	testRun_KeepsImportedProtocolParameters(t, newTestDB)
+}
+
+func testRun_KeepsImportedProtocolParameters(
+	t *testing.T,
+	newDB func(*testing.T) *database.Database,
+) {
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		cardano.EmbeddedConfigPath("preview"),
+		"preview",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	decodeConway := eras.ConwayEraDesc.DecodePParamsFunc
+	for _, tc := range []struct {
+		name        string
+		priorEpoch  bool
+		priorEraID  uint
+		anchorEpoch uint64
+	}{
+		{name: "single imported epoch", anchorEpoch: 901},
+		{
+			name:        "anchor in era first epoch",
+			priorEpoch:  true,
+			priorEraID:  eras.BabbageEraDesc.Id,
+			anchorEpoch: 901,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newDB(t)
+			if tc.priorEpoch {
+				require.NoError(t, db.SetEpoch(
+					0, tc.anchorEpoch-1, nil, nil, nil, nil,
+					tc.priorEraID, 1000, 10, nil,
+				))
+			}
+			require.NoError(t, db.SetEpoch(
+				10, tc.anchorEpoch, nil, nil, nil, nil,
+				eras.ConwayEraDesc.Id, 1000, 10, nil,
+			))
+			imported := mockledger.NewMockConwayProtocolParams()
+			imported.MinFeeA = 12345
+			importedCbor, err := cbor.Encode(&imported)
+			require.NoError(t, err)
+			require.NoError(t, db.SetPParams(
+				importedCbor, 10, tc.anchorEpoch, eras.ConwayEraDesc.Id, nil,
+			))
+			addValidBackfillBlocksFrom(t, db, 10, 3)
+			require.NoError(t, db.SetSyncState("mithril_ledger_slot", "12", nil))
+
+			bf := NewBackfill(
+				db,
+				nodeCfg,
+				slog.New(slog.NewTextHandler(io.Discard, nil)),
+			)
+			bf.DisableNonceComputation()
+			require.NoError(t, bf.Run(context.Background()))
+
+			pp, err := db.GetPParams(
+				tc.anchorEpoch,
+				eras.ConwayEraDesc.Id,
+				decodeConway,
+				nil,
+			)
+			require.NoError(t, err)
+			conwayPP, ok := pp.(*conway.ConwayProtocolParameters)
+			require.True(t, ok, "anchor epoch parameters are %T", pp)
+			assert.Equal(t, uint(12345), conwayPP.MinFeeA,
+				"imported anchor-epoch parameters were replaced")
+			if tc.priorEpoch {
+				rows, err := db.Metadata().GetPParams(
+					tc.anchorEpoch-1,
+					tc.priorEraID,
+					nil,
+				)
+				require.NoError(t, err)
+				require.Len(t, rows, 1, "derived parameters were not written")
+				assert.Equal(t, tc.anchorEpoch-1, rows[0].Epoch)
+			}
+		})
+	}
+}
+
+// TestStoredEpochPParamsIgnoresEraWithoutDecoder keeps resolvePParams from
+// failing on a stored row for an era with no parameter decoder (Byron), which
+// backfill never derives parameters for anyway.
+func TestStoredEpochPParamsIgnoresEraWithoutDecoder(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetPParams([]byte{0x80}, 0, 0, eras.ByronEraDesc.Id, nil))
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	pp, ok, err := bf.storedEpochPParams(0, eras.ByronEraDesc.Id, nil)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Nil(t, pp)
 }
 
 // TestRun_EmitsFinalProgressForShortRun ensures final interval metrics are
@@ -449,16 +1723,7 @@ func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
 	}
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
 
-	for _, slot := range []uint64{0, 1} {
-		hash := make([]byte, 32)
-		hash[0] = byte(slot + 1)
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot: slot,
-			Hash: hash,
-			Cbor: []byte{0x82, 0x01},
-			Type: 1,
-		}, nil))
-	}
+	addValidBackfillBlocks(t, db, 2)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	bf := NewBackfill(db, nil, logger)
@@ -474,14 +1739,51 @@ func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
 }
 
 // TestRun_IncompleteCheckpointAtZeroVisitsSlotZero proves the iterator
-// actually starts at slot 0 (rather than LastSlot+1 = 1). Asserting only
-// the final cp.LastSlot is too weak: it's left at 1 in both the correct
-// resume-from-zero case and the buggy skip-slot-zero case. We verify
-// directly by feeding intentionally-unparseable CBOR for both blocks and
-// observing the per-block "skipping unparseable block" log line for
-// slot 0 — that log fires from inside the iteration loop and so only
-// emits when the iterator visits that slot.
+// starts at slot 0 rather than LastSlot+1 when a checkpoint records
+// LastSlot 0, which is ambiguous between "slot 0 completed" and "an initial
+// checkpoint was written before any block did".
+//
+// Asserting the final cp.LastSlot is too weak: it lands on 1 whether or not
+// slot 0 was visited. The malformed block at slot 0 is what makes the
+// difference observable, because fail-closed backfill names the slot it
+// stopped on: a run that skips slot 0 processes the valid block at slot 1
+// and returns no error at all.
 func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   0,
+			TotalSlots: 1,
+			StartedAt:  now,
+			UpdatedAt:  now,
+			Completed:  false,
+		},
+		nil,
+	))
+
+	hash := make([]byte, 32)
+	hash[0] = 1
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 0,
+		Hash: hash,
+		Cbor: []byte{0x82, 0x01},
+		Type: 1,
+	}, nil))
+	addValidBackfillBlocksFrom(t, db, 1, 1)
+
+	bf := NewBackfill(db, nil, slog.New(
+		slog.NewTextHandler(io.Discard, nil),
+	))
+	err := bf.Run(context.Background())
+	require.ErrorContains(t, err, "parsing block at slot 0")
+}
+
+func TestRun_MalformedBlockDoesNotAdvanceCheckpoint(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
@@ -497,39 +1799,133 @@ func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
 	}
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
 
-	for _, slot := range []uint64{0, 1} {
-		hash := make([]byte, 32)
-		hash[0] = byte(slot + 1)
+	addValidBackfillBlocks(t, db, 4)
+	hash := make([]byte, 32)
+	hash[0] = 5
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 4,
+		Hash: hash,
+		Cbor: []byte{0xff},
+		Type: 1,
+	}, nil))
+
+	bf := NewBackfill(db, nil, slog.Default())
+	require.NoError(t, bf.SetBatchSize(2))
+	err := bf.Run(context.Background())
+	require.ErrorContains(t, err, "parsing block at slot 4")
+
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	assert.Equal(t, uint64(3), checkpoint.LastSlot)
+	assert.False(t, checkpoint.Completed)
+}
+
+// TestRun_MidBatchFailureKeepsLastFlushedCheckpoint fails on the third block
+// of a batch of three, after two blocks are buffered but unflushed. The
+// checkpoint must stay at the last flushed batch; the failing blocks in the
+// boundary-aligned tests above cannot tell that apart from persisting
+// cp.LastSlot, which has already advanced past the flush.
+func TestRun_MidBatchFailureKeepsLastFlushedCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   0,
+			TotalSlots: 1,
+			StartedAt:  now,
+			UpdatedAt:  now,
+		},
+		nil,
+	))
+
+	// Slots 0-2 flush as the first batch; slots 3 and 4 stay buffered when
+	// the malformed block at slot 5 fails.
+	addValidBackfillBlocks(t, db, 5)
+	hash := make([]byte, 32)
+	hash[0] = 6
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 5,
+		Hash: hash,
+		Cbor: []byte{0xff},
+		Type: 1,
+	}, nil))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, bf.SetBatchSize(3))
+	err := bf.Run(context.Background())
+	require.ErrorContains(t, err, "parsing block at slot 5")
+
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	assert.Equal(t, uint64(2), checkpoint.LastSlot)
+	assert.False(t, checkpoint.Completed)
+}
+
+func TestRun_OffsetFailureKeepsLastCommittedCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(2)
+	require.NoError(t, err)
+	require.Len(t, blocks, 2)
+	for _, block := range blocks {
+		blockCbor := block.Cbor()
 		require.NoError(t, db.BlockCreate(models.Block{
-			Slot: slot,
-			Hash: hash,
-			Cbor: []byte{0x82, 0x01},
-			Type: 1,
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   blockCbor,
+			Type:   uint(block.Type()),
 		}, nil))
 	}
 
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-	bf := NewBackfill(db, nil, logger)
-
-	require.NoError(t, bf.Run(context.Background()))
-
-	// One unparseable-block warning per visited slot proves the
-	// iterator's slot boundary directly. Both must appear; missing
-	// slot 0 means resume started at 1 and silently skipped the
-	// first block.
-	output := logs.String()
-	assert.Contains(t, output, `"msg":"skipping unparseable block"`)
-	assert.Contains(
+	bf := NewBackfill(db, nil, slog.Default())
+	require.NoError(t, bf.SetBatchSize(1))
+	offsetFailure := errors.New("injected offset computation failure")
+	bf.computeOffsets = func(
+		slot uint64,
+		hash, blockCbor []byte,
+		block gledger.Block,
+	) (*database.BlockIngestionResult, error) {
+		if slot == blocks[1].SlotNumber() {
+			return nil, offsetFailure
+		}
+		return database.NewBlockIndexer(slot, hash).ComputeOffsets(
+			blockCbor,
+			block,
+		)
+	}
+	err = bf.Run(context.Background())
+	require.ErrorContains(
 		t,
-		output,
-		`"slot":0`,
-		"iterator must visit slot 0 when resuming from a checkpoint with LastSlot=0",
+		err,
+		fmt.Sprintf(
+			"computing offsets for block at slot %d",
+			blocks[1].SlotNumber(),
+		),
 	)
-	assert.Contains(t, output, `"slot":1`,
-		"iterator must also visit slot 1")
+	assert.ErrorIs(t, err, offsetFailure)
+
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	assert.Equal(t, blocks[0].SlotNumber(), checkpoint.LastSlot)
+	assert.False(t, checkpoint.Completed)
 }
 
 // TestBackfill_AutoDetectsImmutableUtxoOffsetsTip ensures that without an
@@ -560,11 +1956,8 @@ func TestBackfill_AutoDetectsImmutableUtxoOffsetsTip(t *testing.T) {
 	assert.True(t, bf.immutableUtxoOffsetsTipSet)
 }
 
-// TestBackfill_ExplicitZeroOverridesAutoDetect addresses the reviewer
-// concern that SetImmutableUtxoOffsetsTipSlot(0) is documented as disabling
-// the optimisation. The override bit must beat auto-detection so callers
-// that intentionally need offset repair below the immutable-copy tip cannot
-// have the optimisation silently re-enabled behind their back.
+// TestBackfill_ExplicitZeroOverridesAutoDetect verifies that an explicit zero
+// disables immutable-offset skipping even when the database has a stored tip.
 func TestBackfill_ExplicitZeroOverridesAutoDetect(t *testing.T) {
 	t.Parallel()
 
@@ -658,4 +2051,218 @@ func TestRun_CancelledContext_WithBlocks(t *testing.T) {
 		"Run should return error on cancelled context with blocks",
 	)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xe0}, bytes.Repeat([]byte{0x42}, 28)...),
+	)
+	require.NoError(t, err)
+	proposal := dijkstra.DijkstraProposalProcedure{
+		PPDeposit:       42,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: dijkstra.DijkstraGovAction{
+			Type: uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{
+				Type: uint(lcommon.GovActionTypeInfo),
+			},
+		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.invalid/dijkstra-backfill-child",
+			DataHash: [32]byte(bytes.Repeat([]byte{0x24}, 32)),
+		},
+	}
+	proposalCbor, err := cbor.Encode(proposal)
+	require.NoError(t, err)
+	childBody, err := cbor.Encode(map[uint]any{
+		0:  []any{},
+		1:  []any{map[uint]any{0: append([]byte{0x60}, bytes.Repeat([]byte{0x25}, 28)...), 1: uint64(1_000_000)}},
+		20: []cbor.RawMessage{proposalCbor},
+	})
+	require.NoError(t, err)
+	childTx, err := cbor.Encode([]any{
+		cbor.RawMessage(childBody), map[uint]any{}, nil,
+	})
+	require.NoError(t, err)
+	rootBody, err := cbor.Encode(map[uint]any{
+		0:  []any{},
+		1:  []any{},
+		2:  uint64(0),
+		23: cbor.NewSetType([]cbor.RawMessage{childTx}, true),
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(rootBody), map[uint]any{}, nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	dijkstraTx := tx.(*dijkstra.DijkstraTransaction)
+	childHash := dijkstraTx.Body.TxSubTransactions.Items()[0].Body.Id()
+	rootHash := tx.Hash()
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber:  1,
+					Slot:         1000,
+					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
+				},
+			},
+		},
+		BlockBody: dijkstra.DijkstraBlockBody{
+			Transactions: []dijkstra.DijkstraTransaction{*dijkstraTx},
+		},
+	}
+	blockBodyCbor, err := block.BlockBody.MarshalCBOR()
+	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodySize = uint64(len(blockBodyCbor))
+	blockCbor, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	block.SetCbor(blockCbor)
+	point := ocommon.Point{
+		Slot: 1000,
+		Hash: bytes.Repeat([]byte{0x26}, 32),
+	}
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot:   point.Slot,
+		Hash:   point.Hash,
+		Number: 1,
+		Cbor:   blockCbor,
+		Type:   uint(block.Type()),
+	}, nil))
+	offsets, err := database.NewBlockIndexer(point.Slot, point.Hash).ComputeOffsets(
+		blockCbor,
+		block,
+	)
+	require.NoError(t, err)
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			GovActionValidityPeriod: 20,
+			DRepInactivityPeriod:    20,
+		},
+	}
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(context.Background(), []lcommon.Transaction{tx},
+			point,
+			12,
+			dijkstra.EraIdDijkstra,
+			pparams,
+			offsets,
+			acc,
+			txn,
+			nil,
+			true,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+
+	childRow, err := db.Metadata().GetTransactionByHash(childHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), childRow.BlockIndex)
+	rootRow, err := db.Metadata().GetTransactionByHash(rootHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), rootRow.BlockIndex)
+	childUtxo, err := db.Metadata().GetUtxo(childHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, childUtxo)
+	rootUtxo, err := db.Metadata().GetUtxo(rootHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, rootUtxo)
+	proposalRow, err := db.GetGovernanceProposal(context.Background(), childHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, childHash.Bytes(), proposalRow.TxHash)
+}
+
+// Backfill replays history that the imported snapshot's account balances
+// already include, so a direct deposit in a replayed body must not credit the
+// account a second time.
+func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	stakeKey := bytes.Repeat([]byte{0x42}, 28)
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		AddedSlot:     1,
+		Reward:        5,
+		Active:        true,
+	}))
+	body, err := cbor.Encode(map[uint]any{
+		0: []any{},
+		1: []any{},
+		2: uint64(0),
+		25: map[cbor.ByteString]uint64{
+			cbor.NewByteString(append([]byte{0xe0}, stakeKey...)): 20,
+		},
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(body), map[uint]any{}, nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	dijkstraTx := tx.(*dijkstra.DijkstraTransaction)
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber:  1,
+					Slot:         1000,
+					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
+				},
+			},
+		},
+		BlockBody: dijkstra.DijkstraBlockBody{
+			Transactions: []dijkstra.DijkstraTransaction{*dijkstraTx},
+		},
+	}
+	blockBodyCbor, err := block.BlockBody.MarshalCBOR()
+	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodySize = uint64(len(blockBodyCbor))
+	blockCbor, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	block.SetCbor(blockCbor)
+	point := ocommon.Point{Slot: 1000, Hash: bytes.Repeat([]byte{0x26}, 32)}
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: point.Slot, Hash: point.Hash, Number: 1, Cbor: blockCbor,
+		Type: uint(block.Type()),
+	}, nil))
+	offsets, err := database.NewBlockIndexer(point.Slot, point.Hash).ComputeOffsets(
+		blockCbor,
+		block,
+	)
+	require.NoError(t, err)
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(context.Background(), []lcommon.Transaction{tx}, point, 12, dijkstra.EraIdDijkstra,
+			&dijkstra.DijkstraProtocolParameters{}, offsets, acc, txn, nil, true,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(5), uint64(account.Reward))
+}
+
+func closeTestDB(db *database.Database) error {
+	return dbtest.CloseDatabase(db)
 }
