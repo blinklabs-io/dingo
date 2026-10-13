@@ -436,6 +436,24 @@ func assetOutputTx(
 	return tx, ocommon.Point{Slot: 400 + uint64(seed), Hash: txID}, policyID, assetName
 }
 
+func TestSetTransactionPersistsAssetUtxoAddress(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	tx, point, _, _ := assetOutputTx(t, 0x51)
+	require.NoError(t, store.SetTransaction(
+		tx, point, 0, nil, true, nil, 0,
+	))
+
+	var address string
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT ua.address FROM utxo_address ua "+
+			"JOIN utxo u ON u.id = ua.utxo_id "+
+			"WHERE u.tx_id = ? AND u.output_idx = 0",
+		tx.Hash().Bytes(),
+	).Scan(&address))
+	require.Equal(t, tx.Outputs()[0].Address().String(), address)
+}
+
 func tableCounts(
 	t *testing.T,
 	store *Store,
@@ -522,8 +540,10 @@ func TestBatchedProducedAssetRowsWaitForFlush(t *testing.T) {
 		tableCounts(t, store, txn, "asset")["asset"],
 		"new UTxO asset rows must remain staged with the transaction batch",
 	)
+	require.Zero(t, tableCounts(t, store, txn, "utxo_address")["utxo_address"])
 	require.NoError(t, store.FlushBatch(acc, txn))
 	require.Equal(t, 3, tableCounts(t, store, txn, "asset")["asset"])
+	require.Equal(t, 3, tableCounts(t, store, txn, "utxo_address")["utxo_address"])
 	for _, ref := range assets {
 		stored, err := store.GetAssetByPolicyAndName(
 			lcommon.NewBlake2b224(ref.policyID), ref.name, txn,
