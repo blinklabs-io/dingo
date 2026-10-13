@@ -105,3 +105,56 @@ func TestMassBehindLocalTipRecycleKeepsSomeHonestPeers(t *testing.T) {
 		"other honest peers must not be recycled in the same window",
 	)
 }
+
+// A connection whose re-intersection is already scheduled or fired is being
+// recycled anyway. Its in-flight far-behind headers must not take the
+// cross-connection window, or another stale peer waits a further cooldown
+// with nothing recycled. Once the window lapses a second peer is recycled.
+func TestBehindLocalTipRecycleWindowSkipsConnectionAlreadyResyncing(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		tipBlock = uint64(10000)
+		k        = uint64(432)
+	)
+	f := newForecastHorizonFixture(t, "10.0.0.1:3001")
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
+	f.setLocalTip(tipBlock, k)
+	f.setBestPeer(false)
+	other := newTestConnId("127.0.0.1:6020", "10.1.0.1:3001")
+	require.True(t, f.o.chainsyncState.AddClientConnId(other))
+
+	deliver := func(conn ouroboros.ConnectionId, b byte) {
+		t.Helper()
+		block := tipBlock - 500
+		require.NoError(t, f.o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{ConnectionId: conn},
+			0,
+			newTestBlockHeader(block, block, b),
+			peerTipAt(tipBlock+50000),
+		))
+	}
+	requireResyncOf := func(conn ouroboros.ConnectionId, msg string) {
+		t.Helper()
+		evt := testutil.RequireReceive(t, resyncCh, testutil.AsyncWait, msg)
+		data, ok := evt.Data.(event.ChainsyncResyncEvent)
+		require.True(t, ok)
+		require.Equal(t, event.ChainsyncResyncReasonBehindLocalTip, data.Reason)
+		require.Equal(t, conn, data.ConnectionId, msg)
+	}
+
+	deliver(f.conn, 0x01)
+	requireResyncOf(f.conn, "the first far-behind peer is recycled")
+
+	// The connection has not closed yet, and the window has lapsed.
+	f.o.behindTipRecycleMu.Lock()
+	f.o.behindTipRecycleAt = time.Now().Add(
+		-chainsyncBehindTipRecycleCooldown - time.Second,
+	)
+	f.o.behindTipRecycleMu.Unlock()
+	deliver(f.conn, 0x02)
+	deliver(other, 0x03)
+	requireResyncOf(other, "a second stale peer is recycled after the window")
+}

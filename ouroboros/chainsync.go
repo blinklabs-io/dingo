@@ -1287,7 +1287,11 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			v.BlockNumber(),
 			tip.BlockNumber,
 		) {
-			if !o.claimBehindTipRecycle(time.Now()) {
+			// A connection with a scheduled or fired re-intersection is
+			// already being recycled; its in-flight headers must not take
+			// the shared window from another stale peer.
+			if o.futureHeaderResyncPending(ctx.ConnectionId) ||
+				!o.claimBehindTipRecycle(time.Now()) {
 				return nil
 			}
 			o.config.Logger.Debug(
