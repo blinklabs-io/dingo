@@ -11722,7 +11722,7 @@ func (ls *LedgerState) durableAppliedFloor() (ocommon.Point, bool, error) {
 	if err != nil {
 		return ocommon.Point{}, false, err
 	}
-	if !ok || row.Slot == 0 || len(row.Hash) == 0 {
+	if !ok || len(row.Hash) == 0 {
 		return ocommon.Point{}, false, nil
 	}
 	return ocommon.NewPoint(row.Slot, row.Hash), true, nil
@@ -11742,6 +11742,9 @@ func (ls *LedgerState) enforceDurableTipFloor(ctx context.Context) error {
 	ls.RLock()
 	currentTip := ls.currentTip
 	ls.RUnlock()
+	if currentTip.Point.Slot == 0 && len(currentTip.Point.Hash) == 0 {
+		return nil
+	}
 	if currentTip.Point.Slot < floor.Slot ||
 		(currentTip.Point.Slot == floor.Slot &&
 			bytes.Equal(currentTip.Point.Hash, floor.Hash)) {
@@ -12347,7 +12350,7 @@ func (ls *LedgerState) GetIntersectPoint(
 	if err != nil {
 		return nil, err
 	}
-	if ret.Slot > 0 || foundOrigin {
+	if len(ret.Hash) > 0 || foundOrigin {
 		return &ret, nil
 	}
 	return nil, nil

@@ -2020,6 +2020,28 @@ func TestChainFromIntersect(t *testing.T) {
 	}
 }
 
+func TestChainFromSlotZeroIntersect(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, dbConfig)
+	require.NoError(t, err)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.PrimaryChain().AddBlock(
+		context.Background(), testBlocks[0], nil,
+	))
+	point := ocommon.NewPoint(
+		testBlocks[0].MockSlot,
+		decodeHex(testBlocks[0].MockHash),
+	)
+
+	fork, err := cm.NewChainFromIntersect(
+		context.Background(), []ocommon.Point{point},
+	)
+	require.NoError(t, err)
+	require.Equal(t, point, fork.Tip().Point)
+}
+
 func TestRecentPointsNoDatabase(t *testing.T) {
 	t.Parallel()
 
