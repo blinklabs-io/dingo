@@ -2618,6 +2618,56 @@ type MetadataStore interface {
 		txn types.Txn,
 	) (int, error)
 
+	// ListScriptHashes returns the hashes of the stored scripts in the order
+	// they were first recorded (oldest first, or newest first when
+	// descending). A limit of zero or less applies no limit.
+	ListScriptHashes(
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([][]byte, error)
+
+	// CountScripts returns the number of stored scripts.
+	CountScripts(txn types.Txn) (int, error)
+
+	// GetScriptRedeemers returns the redeemers that executed a script in
+	// chain order (oldest first, or newest first when descending). API
+	// storage mode only, and only for transactions applied after the
+	// redeemer_script index existed. A limit of zero or less applies no
+	// limit.
+	GetScriptRedeemers(
+		hash lcommon.ScriptHash,
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.ScriptRedeemerRef, error)
+
+	// CountScriptRedeemers returns the number of redeemers that executed a
+	// script.
+	CountScriptRedeemers(hash lcommon.ScriptHash, txn types.Txn) (int, error)
+
+	// GetScriptReferenceUtxos returns the live UTxOs carrying the script as a
+	// reference script, in the order the outputs were recorded (oldest
+	// first, or newest first when descending). API storage mode only, and
+	// only for outputs recorded after the utxo_reference_script index
+	// existed. A limit of zero or less applies no limit.
+	GetScriptReferenceUtxos(
+		hash lcommon.ScriptHash,
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.Utxo, error)
+
+	// CountScriptReferenceUtxos returns the number of live UTxOs carrying the
+	// script as a reference script.
+	CountScriptReferenceUtxos(
+		hash lcommon.ScriptHash,
+		txn types.Txn,
+	) (int, error)
+
 	// GetScript retrieves a script by its hash.
 	GetScript(
 		lcommon.ScriptHash,

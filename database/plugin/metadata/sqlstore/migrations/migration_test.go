@@ -96,6 +96,7 @@ var releasedMigrationChecksums = map[string]map[int]string{
 		39: "1fce79bd3389762cab860c79fd89898c7ab1deda738b6cadef22a84b8a1c1e5d",
 		40: "7d02fe97892437d174408ac667917e2546349e1bd7f0471ed3a1ec9e0ed476f4",
 		41: "9d1166709cbf7ff6931b954ae97cbc5c8d2a9de9349ecab98376baec50cede02",
+		42: "e1fbb6b7a64e6932dd67b5452ca190af235bb196303c6b7b2e9aec5b443f11cc",
 	},
 	"postgres": {
 		1:  "21d634f2dd7b1675438cded1804a9ff2808dda0f1d10517a93f2a0422a80e1b9",
@@ -139,6 +140,7 @@ var releasedMigrationChecksums = map[string]map[int]string{
 		39: "c06f90bcd308d436e2b0ad060e741a76a979f02e3acbc541a5cb76e5181c884b",
 		40: "b9d1630c8b79fcd5972b4887ce0edd4e8711294c340ff9d69cd092eb6aaec48d",
 		41: "fbea17035d4cef2604b08b9b89c5c095d995fbbda41b74b6edf1d60987d9424d",
+		42: "fe7e0ee098b80911ba9cf22f169021388d33ddb935680ad5a88f92e03e35e9b8",
 	},
 	"mysql": {
 		1:  "c7fcf43f66c587e3ce22212f7bc6c5464b270394fff2d80bf064471dc424370f",
@@ -182,6 +184,7 @@ var releasedMigrationChecksums = map[string]map[int]string{
 		39: "e23bf16b7854a030e0cbdba21194fcf031d7a1f7ea96f66e5f186654ae304a01",
 		40: "da188fd7d2f89a9a0d911ca4ccb3102ea984b444081df1f791615f305c8df9f3",
 		41: "042dd363ae898449445d8f4e14cbb908948ec763f622af06819c9f1f3d7a0b92",
+		42: "4d9f94c5f13a3f726df7b6e88e501a1ea0b7ac9070db1e09946f2c4d929fed0c",
 	},
 }
 

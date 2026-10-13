@@ -283,6 +283,10 @@ type Utxo struct {
 	DatumHash               []byte // Optional datum hash (32 bytes)
 	Datum                   []byte // Inline datum CBOR, not stored in metadata DB
 	ScriptRef               []byte // Reference script bytes, not stored in metadata DB
+	// ReferenceScriptHash is the hash of the script the output carries as a
+	// reference script. It is not a utxo column; API storage mode indexes it
+	// in utxo_reference_script.
+	ReferenceScriptHash []byte
 	// SpentAtTxId, ReferencedByTxId, and CollateralByTxId are nullable FKs to
 	// transaction(hash); they are unset until a UTxO is spent/referenced.
 	// They use types.NullableHash so an empty value serializes to SQL NULL
@@ -504,6 +508,10 @@ func UtxoLedgerToModel(
 	}
 	if dh := utxo.Output.DatumHash(); dh != nil {
 		ret.DatumHash = append([]byte(nil), dh[:]...)
+	}
+	if scriptRef := utxo.Output.ScriptRef(); scriptRef != nil {
+		hash := scriptRef.Hash()
+		ret.ReferenceScriptHash = hash.Bytes()
 	}
 	if multiAsset := utxo.Output.Assets(); multiAsset != nil {
 		assets, err := ConvertMultiAssetToModels(multiAsset)

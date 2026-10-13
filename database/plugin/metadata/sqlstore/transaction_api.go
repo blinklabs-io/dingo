@@ -149,6 +149,18 @@ func (s *Store) applyTransactionAPIDetails(
 	); err != nil {
 		return err
 	}
+	if err := s.storeRedeemerScripts(
+		ctx,
+		db,
+		rows,
+		transactionID,
+		transaction,
+		slot,
+		index,
+		transactionIsNew,
+	); err != nil {
+		return err
+	}
 	if err := storeTransactionIndexedScripts(
 		ctx,
 		db,
