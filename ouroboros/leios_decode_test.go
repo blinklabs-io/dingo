@@ -123,7 +123,7 @@ func TestDecodeLeiosAnnouncementHeaderNonPanickingOutcomesUnchanged(
 		t.Parallel()
 		raw := readHexFixture(t, musashiType8HeaderFixture)
 		wrapped, err := cbor.Encode([]any{
-			uint8(gledger.BlockTypeDijkstra), cbor.RawMessage(raw),
+			uint8(gledger.EraIdDijkstra), cbor.RawMessage(raw),
 		})
 		require.NoError(t, err)
 
@@ -136,7 +136,7 @@ func TestDecodeLeiosAnnouncementHeaderNonPanickingOutcomesUnchanged(
 		t.Parallel()
 		raw := readHexFixture(t, musashiType8HeaderFixture)
 		wrapped, err := cbor.Encode([]any{
-			uint8(gledger.BlockTypeConway), cbor.RawMessage(raw),
+			uint8(gledger.EraIdConway), cbor.RawMessage(raw),
 		})
 		require.NoError(t, err)
 

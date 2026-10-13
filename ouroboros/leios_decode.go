@@ -93,7 +93,7 @@ func decodeLeiosAnnouncementHeader(
 		if err == nil && bytesRead == len(data) && len(parts) == 2 {
 			var era uint8
 			if _, err := cbor.Decode(parts[0], &era); err == nil {
-				if uint(era) != gledger.BlockTypeDijkstra {
+				if era != gledger.EraIdDijkstra {
 					return nil, fmt.Errorf(
 						"unexpected era in Leios announcement header: %d",
 						era,
