@@ -66,20 +66,26 @@ func queueClearEvent(
 	}
 }
 
-// resyncRecorder collects ChainsyncResyncEvents. drain blocks on a barrier
-// published after the handler calls, so every earlier request has arrived.
-type resyncRecorder struct {
+// queueClearResyncRecorder collects ChainsyncResyncEvents. drain blocks on a
+// barrier published after the handler calls, so every earlier request has
+// arrived.
+type queueClearResyncRecorder struct {
 	bus *event.EventBus
 	ch  <-chan event.Event
 }
 
-func newResyncRecorder(t *testing.T, bus *event.EventBus) *resyncRecorder {
+func newQueueClearResyncRecorder(
+	t *testing.T,
+	bus *event.EventBus,
+) *queueClearResyncRecorder {
 	t.Helper()
 	_, ch := bus.Subscribe(event.ChainsyncResyncEventType)
-	return &resyncRecorder{bus: bus, ch: ch}
+	return &queueClearResyncRecorder{bus: bus, ch: ch}
 }
 
-func (r *resyncRecorder) drain(t *testing.T) []event.ChainsyncResyncEvent {
+func (r *queueClearResyncRecorder) drain(
+	t *testing.T,
+) []event.ChainsyncResyncEvent {
 	t.Helper()
 	const barrier = "test barrier"
 	r.bus.Publish(
@@ -117,7 +123,7 @@ func TestQueueClearDoesNotCascadeIntoPersistentFork(t *testing.T) {
 			bus := event.NewEventBus(nil, nil)
 			t.Cleanup(func() { bus.Stop() })
 			fixture.ls.config.EventBus = bus
-			rec := newResyncRecorder(t, bus)
+			rec := newQueueClearResyncRecorder(t, bus)
 
 			tipHdr := fixture.currentTip
 			advertised := ochainsync.Tip{
@@ -139,8 +145,12 @@ func TestQueueClearDoesNotCascadeIntoPersistentFork(t *testing.T) {
 			// resync: a shorter competing header that does not extend the
 			// tip, so Praos refuses it and only the queue clear remains.
 			stray := mockHeader{
-				hash:        lcommon.NewBlake2b256(testHashBytes("shorter-competitor")),
-				prevHash:    lcommon.NewBlake2b256(testHashBytes("competitor-parent")),
+				hash: lcommon.NewBlake2b256(
+					testHashBytes("shorter-competitor"),
+				),
+				prevHash: lcommon.NewBlake2b256(
+					testHashBytes("competitor-parent"),
+				),
 				blockNumber: tipHdr.BlockNumber - 1,
 				slot:        tipHdr.Point.Slot,
 			}
@@ -154,9 +164,13 @@ func TestQueueClearDoesNotCascadeIntoPersistentFork(t *testing.T) {
 				maxCount = max(maxCount, fixture.ls.headerMismatchCount)
 			}
 			for _, e := range rec.drain(t) {
-				require.Falsef(t, sameConnectionId(e.ConnectionId, fixture.connId),
+				require.Falsef(
+					t,
+					sameConnectionId(e.ConnectionId, fixture.connId),
 					"honest peer resynced (reason %q, max mismatches %d)",
-					e.Reason, maxCount)
+					e.Reason,
+					maxCount,
+				)
 			}
 		})
 	}
