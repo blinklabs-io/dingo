@@ -120,6 +120,7 @@ func TestConfigLogClassesAreUnambiguous(t *testing.T) {
 // below. None of them may appear in a rendered log line.
 var sentinelSecrets = []string{
 	"SENTINEL-KOIOS-API-KEY",
+	"SENTINEL-METRICS-AUTH-TOKEN",
 	"SENTINEL-BARK-PASSWORD",
 	"SENTINEL-BARK-HOST-PASSWORD",
 	"SENTINEL-MITHRIL-KEY",
@@ -157,7 +158,8 @@ func sentinelSecretConfig() *Config {
 			Enabled: true,
 			APIKey:  "SENTINEL-KOIOS-API-KEY",
 		},
-		BarkBaseUrl: "https://bark:SENTINEL-BARK-PASSWORD@bark.example/api",
+		MetricsAuthToken: "SENTINEL-METRICS-AUTH-TOKEN",
+		BarkBaseUrl:      "https://bark:SENTINEL-BARK-PASSWORD@bark.example/api",
 		BarkBlockDownloadHosts: []string{
 			"https://blocks:SENTINEL-BARK-HOST-PASSWORD@blocks.example",
 			"https://plain.example",

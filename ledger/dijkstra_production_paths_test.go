@@ -918,3 +918,95 @@ func TestDijkstraMalformedRequiredGuardsRejectedBeforeStateChange(
 		}
 	}
 }
+
+// A malformed ParameterChange is rejected while decoding the transaction or
+// block, before mempool admission or either block ingestion path can mutate
+// ledger state.
+func TestDijkstraMalformedParameterChangeRejectedByProductionDecoders(
+	t *testing.T,
+) {
+	t.Parallel()
+	skipBodyHash := lcommon.VerifyConfig{SkipBodyHashValidation: true}
+	proposalField := func(t *testing.T, update map[uint]any) cbor.RawMessage {
+		t.Helper()
+		rewardAccount := append([]byte{0xe0}, make([]byte, 28)...)
+		raw, err := cbor.Encode([]any{[]any{
+			uint64(1_000_000_000),
+			rewardAccount,
+			[]any{
+				uint64(lcommon.GovActionTypeParameterChange),
+				nil,
+				update,
+				nil,
+			},
+			[]any{"https://example.invalid/update", make([]byte, 32)},
+		}})
+		require.NoError(t, err)
+		return raw
+	}
+
+	tests := []struct {
+		name       string
+		update     map[uint]any
+		diagnostic string
+	}{
+		{
+			name: "Dijkstra rational outside its domain",
+			update: map[uint]any{
+				39: cbor.Tag{Number: 30, Content: []any{int64(2), int64(1)}},
+			},
+			diagnostic: "minPoolMargin",
+		},
+		{
+			name: "inherited cost-model language outside Word8",
+			update: map[uint]any{
+				18: map[uint]any{256: []int64{1}},
+			},
+			diagnostic: "exceeds Word8 maximum 255",
+		},
+		{
+			name: "present null field alongside valid field",
+			update: map[uint]any{
+				3:  uint64(16_384),
+				39: nil,
+			},
+			diagnostic: "tag 39",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			f := newPathFixture(
+				t,
+				[]pathAccount{{key: 0x42, reward: 5}},
+				[]pathTx{{top: pathLevel{}}},
+			)
+			txCbor, blockCbor := f.withBodyField(
+				0,
+				-1,
+				20,
+				proposalField(t, test.update),
+			)
+
+			require.ErrorContains(t, f.mempoolAddRaw(txCbor), test.diagnostic)
+			for name, decode := range map[string]func() (gledger.Block, error){
+				"peer block decoder": func() (gledger.Block, error) {
+					return models.DecodeDijkstraPeerBlock(blockCbor, skipBodyHash)
+				},
+				"stored block decoder": func() (gledger.Block, error) {
+					return models.DecodeBlockCbor(
+						gledger.BlockTypeDijkstra,
+						blockCbor,
+						skipBodyHash,
+					)
+				},
+			} {
+				block, err := decode()
+				require.ErrorContains(t, err, test.diagnostic, name)
+				require.Nil(t, block, name)
+			}
+			require.Equal(t, uint64(5), f.reward(0x42))
+			require.True(t, f.inputUnspent(0))
+		})
+	}
+}

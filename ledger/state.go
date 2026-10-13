@@ -431,6 +431,179 @@ func blockApplyCandidatePoint(
 	)
 }
 
+// leiosAnnouncementBatchEnd keeps an announcing ranking block at the front of
+// a one-block apply chunk. The validator can then inspect it while its exact
+// parent is still the published ledger tip, without delaying ChainSync for
+// headers that may never be selected or fetched.
+func leiosAnnouncementBatchEnd(
+	blocks []ledger.Block,
+	start, end int,
+	inLiveValidationRegion func(uint64) bool,
+) int {
+	for offset, candidate := range blocks[start:end] {
+		if !inLiveValidationRegion(candidate.Header().SlotNumber()) {
+			continue
+		}
+		announcer, ok := candidate.Header().(leiosEndorserBlockReferencer)
+		if !ok {
+			continue
+		}
+		if _, _, announced := announcer.LeiosAnnouncement(); !announced {
+			continue
+		}
+		if offset == 0 {
+			return start + 1
+		}
+		return start + offset
+	}
+	return end
+}
+
+func (ls *LedgerState) validateLeiosAnnouncementBeforeApply(
+	ctx context.Context,
+	block ledger.Block,
+	inLiveValidationRegion bool,
+) error {
+	if !inLiveValidationRegion || ls.config.ValidateLeiosAnnouncement == nil {
+		return nil
+	}
+	announcer, ok := block.Header().(leiosEndorserBlockReferencer)
+	if !ok {
+		return nil
+	}
+	if _, _, announced := announcer.LeiosAnnouncement(); !announced {
+		return nil
+	}
+	return ls.config.ValidateLeiosAnnouncement(ctx, block.Header())
+}
+
+func (ls *LedgerState) waitForLeiosBeforeApply(
+	ctx context.Context,
+	blocks []ledger.Block,
+	epoch models.Epoch,
+	validateAnnouncement bool,
+) error {
+	precheck := blocksBeforeEpochEnd(blocks, epoch)
+	if len(precheck) == 0 {
+		return nil
+	}
+	if err := ls.validateLeiosAnnouncementBeforeApply(
+		ctx,
+		precheck[0],
+		validateAnnouncement,
+	); err != nil {
+		ls.config.Logger.Debug(
+			"Leios announcement not validated before block apply",
+			"component", "ledger",
+			"slot", precheck[0].SlotNumber(),
+			"error", err,
+		)
+	}
+	return ls.ensureReferencedEndorserBlocks(ctx, precheck)
+}
+
+type blockApplyStateSnapshot struct {
+	epoch                models.Epoch
+	era                  eras.EraDesc
+	pparams              lcommon.ProtocolParameters
+	prevEraPParams       lcommon.ProtocolParameters
+	syntheticV2CostModel bool
+	tip                  ochainsync.Tip
+	nonce                []byte
+	checkpointWritten    bool
+	validationEnabled    bool
+	chainsyncState       ChainsyncState
+	chainTipSlot         uint64
+	mithrilSlot          uint64
+}
+
+func (ls *LedgerState) prepareBlockApplySnapshot(
+	ctx context.Context,
+	blocks []ledger.Block,
+	selectionEpoch models.Epoch,
+	validateAnnouncement bool,
+) (blockApplyStateSnapshot, error) {
+	if err := ls.waitForLeiosBeforeApply(
+		ctx,
+		blocks,
+		selectionEpoch,
+		validateAnnouncement,
+	); err != nil {
+		return blockApplyStateSnapshot{}, err
+	}
+	snapshot := ls.captureBlockApplyStateSnapshot()
+	if !validateAnnouncement {
+		precheck := blocksBeforeEpochEnd(blocks, selectionEpoch)
+		if len(precheck) > 0 &&
+			ls.config.ValidateLeiosAnnouncement != nil &&
+			ls.blockApplySnapshotInLiveValidationRegion(
+				snapshot,
+				precheck[0].SlotNumber(),
+			) {
+			if err := ls.validateLeiosAnnouncementBeforeApply(
+				ctx,
+				precheck[0],
+				true,
+			); err != nil {
+				ls.config.Logger.Debug(
+					"Leios announcement not validated before block apply",
+					"component", "ledger",
+					"slot", precheck[0].SlotNumber(),
+					"error", err,
+				)
+			}
+			snapshot = ls.captureBlockApplyStateSnapshot()
+		}
+	}
+	return snapshot, nil
+}
+
+func (ls *LedgerState) captureBlockApplyStateSnapshot() blockApplyStateSnapshot {
+	ls.RLock()
+	snapshot := blockApplyStateSnapshot{
+		epoch:                ls.currentEpoch,
+		era:                  ls.currentEra,
+		pparams:              ls.currentPParams,
+		prevEraPParams:       ls.prevEraPParams,
+		syntheticV2CostModel: ls.syntheticV2CostModel,
+		tip:                  cloneTip(ls.currentTip),
+		nonce:                slices.Clone(ls.currentTipBlockNonce),
+		checkpointWritten:    ls.checkpointWrittenForEpoch,
+		validationEnabled:    ls.validationEnabled,
+		chainsyncState:       ls.chainsyncState,
+		mithrilSlot:          ls.mithrilLedgerSlot,
+	}
+	if ls.chain != nil {
+		snapshot.chainTipSlot = ls.chain.Tip().Point.Slot
+	}
+	ls.RUnlock()
+	return snapshot
+}
+
+func (ls *LedgerState) blockApplySnapshotInLiveValidationRegion(
+	snapshot blockApplyStateSnapshot,
+	blockSlot uint64,
+) bool {
+	stabilityWindow := ls.calculateStabilityWindowForEra(snapshot.era.Id)
+	referenceSlot := snapshot.chainTipSlot
+	if wallSlot, err := ls.CurrentSlot(); err == nil && wallSlot > referenceSlot {
+		referenceSlot = wallSlot
+	}
+	var cutoffSlot uint64
+	if referenceSlot >= stabilityWindow {
+		cutoffSlot = referenceSlot - stabilityWindow
+	}
+	_, live := historicalBlockValidationDecision(
+		snapshot.validationEnabled,
+		ls.config.TrustedReplay,
+		snapshot.chainsyncState,
+		blockSlot,
+		cutoffSlot,
+		snapshot.mithrilSlot,
+	)
+	return live
+}
+
 // blocksBeforeEpochEnd returns the leading blocks that the block-apply
 // callback applies before it stops for an epoch rollover. It uses the same
 // stop condition as blockApplyCandidatePoint and the callback: a block at or
@@ -719,6 +892,11 @@ type LedgerStateConfig struct {
 	// the endorser-resident outputs of older ranking blocks instead of trusting
 	// the chain and leaving the UTxO set incomplete. Nil disables backfill.
 	EndorserBlockFetcher EndorserBlockFetcherFunc
+	// ValidateLeiosAnnouncement validates a cached endorser block while the
+	// announcing header's parent is still the applied ledger tip. Header
+	// admission remains independent: an unavailable or invalid endorser block
+	// receives no vote but does not invalidate its ranking block.
+	ValidateLeiosAnnouncement func(context.Context, ledger.BlockHeader) error
 	// EndorserBlockWaitSlots is the number of slots that block processing
 	// waits at the chain tip for a Dijkstra ranking block's referenced
 	// endorser block to finish fetching before applying it. It is sourced from
@@ -1317,6 +1495,7 @@ type LedgerState struct {
 	// activeBlockfetchRequestDone and shadowBlockfetchRequestDone are the
 	// blockfetchRequestsInFlight entries of the active batch's and the shadow
 	// peer's requests, so teardown releases those requests by identity.
+	chainsyncCapacityChanged            chan struct{}
 	activeBlockfetchRequestDone         chan struct{}
 	shadowBlockfetchRequestDone         chan struct{}
 	blockfetchShadowRequestsInFlight    map[string]struct{}
@@ -1427,9 +1606,9 @@ type LedgerState struct {
 	// when non-zero.
 	maxDeferredHeaderMarkers int
 	// admissionVerified maps the slot of each block whose header passed full
-	// admission verification to its hash key, until block-pipeline replay
-	// consumes it. Guarded by admissionVerifiedMu.
-	admissionVerified   map[uint64]string
+	// admission verification to its point and ledger generation, until
+	// block-pipeline replay consumes it. Guarded by admissionVerifiedMu.
+	admissionVerified   map[uint64]admissionVerifiedRecord
 	admissionVerifiedMu sync.Mutex
 	// maxAdmissionVerified overrides defaultMaxAdmissionVerified when
 	// non-zero.
@@ -2385,18 +2564,14 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	}
 	// Setup event handlers only after startup nonce repair is complete, so a
 	// Mithril-bootstrapped node cannot process chainsync/blockfetch events with
-	// stale gap-block nonces. ChainSync and chain-update can burst at bulk-sync
-	// rates, so they opt into the large EventQueueSize buffer.
+	// stale gap-block nonces. ChainSync uses a protocol-window-sized buffer so
+	// its publisher backpressures before admitted headers can outrun the chain
+	// queue. Chain updates retain the large EventQueueSize buffer.
 	// Blockfetch events retain fully decoded blocks, so keep that lossless queue
 	// to one commit batch and let EventBus backpressure bound decoded CBOR while
 	// the chain store catches up. Sparser streams use the default.
 	if ls.config.EventBus != nil {
-		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
-			ChainsyncEventType,
-			event.EventQueueSize,
-			event.SubscriberBackpressureBlock,
-			ls.handleEventChainsync,
-		)
+		ls.subscribeChainsyncEvents(ls.handleEventChainsync)
 		ls.chainsyncAwaitReplySubID = ls.config.EventBus.SubscribeFunc(
 			ChainsyncAwaitReplyEventType,
 			ls.handleEventChainsyncAwaitReply,
@@ -2524,6 +2699,17 @@ func (ls *LedgerState) subscribeBlockfetchEvents(
 	)
 }
 
+func (ls *LedgerState) subscribeChainsyncEvents(
+	handler event.EventHandlerFunc,
+) {
+	ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
+		ChainsyncEventType,
+		ChainsyncEventBufferSize,
+		event.SubscriberBackpressureBlock,
+		handler,
+	)
+}
+
 // rollbackBelowConsumedUtxoPruneFloor reports whether rolling back to point
 // would leave the live UTxO set short of outputs the consumed-UTxO sweep has
 // already removed, and returns the floor it compared against.
@@ -2614,6 +2800,9 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 	ctx context.Context,
 ) error {
 	var committedRollbackErr error
+	if err := ls.db.EnsureBlockInventory(); err != nil {
+		return fmt.Errorf("initialize block inventory for recovery: %w", err)
+	}
 	// Load current ledger tip
 	tmpTip, err := ls.db.GetTip(nil)
 	if err != nil {
@@ -8266,12 +8455,55 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 		var tipForLog ochainsync.Tip
 		var checker ForgedBlockChecker
 		var parentEnvelope envelopeParent
-		var parentEnvelopeSet bool
-		for i = 0; i < len(nextBatch); i += batchSize {
+		for i = 0; i < len(nextBatch); {
+			// Capture only the state needed to find the next live announcing
+			// block. The canonical apply snapshot is deliberately taken after
+			// any bounded Leios wait below.
+			ls.RLock()
+			selectionEpoch := ls.currentEpoch
+			selectionEraID := ls.currentEra.Id
+			selectionValidationEnabled := ls.validationEnabled
+			selectionChainsyncState := ls.chainsyncState
+			chainTip := ls.chain.Tip()
+			selectionMithrilSlot := ls.mithrilLedgerSlot
+			ls.RUnlock()
+
+			stabilityWindow := ls.calculateStabilityWindowForEra(selectionEraID)
+			referenceSlot := chainTip.Point.Slot
+			if wallSlot, err := ls.CurrentSlot(); err == nil &&
+				wallSlot > referenceSlot {
+				referenceSlot = wallSlot
+			}
+			var cutoffSlot uint64
+			if referenceSlot >= stabilityWindow {
+				cutoffSlot = referenceSlot - stabilityWindow
+			}
+			inLiveValidationRegion := func(slot uint64) bool {
+				_, live := historicalBlockValidationDecision(
+					selectionValidationEnabled,
+					ls.config.TrustedReplay,
+					selectionChainsyncState,
+					slot,
+					cutoffSlot,
+					selectionMithrilSlot,
+				)
+				return live
+			}
 			end = min(
 				len(nextBatch),
 				i+batchSize,
 			)
+			if ls.config.ValidateLeiosAnnouncement != nil {
+				end = leiosAnnouncementBatchEnd(
+					nextBatch,
+					i,
+					end,
+					inLiveValidationRegion,
+				)
+			}
+			validateLiveLeiosAnnouncement := inLiveValidationRegion(
+				nextBatch[i].SlotNumber(),
+			) && ls.config.ValidateLeiosAnnouncement != nil
 			// Starts the dingo_ledger_block_apply_batch_latency_seconds
 			// window for this chunk: everything from here through
 			// updateTipMetrics reflecting its new tip below, including the
@@ -8291,72 +8523,55 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// is re-checked on the pass after the rollover publishes its epoch:
 			// checking it now would resolve a certificate against an epoch
 			// that is not in the epoch cache yet.
-			ls.RLock()
-			precheckEpoch := ls.currentEpoch
-			ls.RUnlock()
-			if precheck := blocksBeforeEpochEnd(
+			applySnapshot, err := ls.prepareBlockApplySnapshot(
+				ctx,
 				nextBatch[i:end],
-				precheckEpoch,
-			); len(precheck) > 0 {
-				if err := ls.ensureReferencedEndorserBlocks(
-					ctx,
-					precheck,
-				); err != nil {
-					completeReadResult()
-					// A block the pre-check rejects is already on the
-					// primary chain, so a plain restart would re-read it.
-					// Rewind past it as a rejected block.
-					recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
-						err,
-					)
-					if recoverErr != nil {
-						return fmt.Errorf(
-							"recover rejected Leios certifying block: %w",
-							recoverErr,
-						)
-					}
-					if recovered {
-						return errRestartLedgerPipeline
-					}
+				selectionEpoch,
+				validateLiveLeiosAnnouncement,
+			)
+			if err != nil {
+				completeReadResult()
+				// A block the pre-check rejects is already on the
+				// primary chain, so a plain restart would re-read it.
+				// Rewind past it as a rejected block.
+				recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
+					err,
+				)
+				if recoverErr != nil {
 					return fmt.Errorf(
-						"ensure referenced Leios endorser blocks: %w",
-						err,
+						"recover rejected Leios certifying block: %w",
+						recoverErr,
 					)
 				}
+				if recovered {
+					return errRestartLedgerPipeline
+				}
+				return fmt.Errorf(
+					"prepare block apply snapshot: %w",
+					err,
+				)
 			}
 
-			// Capture snapshots of state needed during transaction.
-			// Acquire read lock to prevent race with RecoverCommitTimestampConflict
-			// which can trigger rollback() and loadTip() that mutate these fields.
-			ls.RLock()
-			snapshotEpoch := ls.currentEpoch
-			snapshotEra := ls.currentEra
-			snapshotPParams := ls.currentPParams
-			snapshotPrevEraPParams := ls.prevEraPParams
-			snapshotSyntheticV2CostModel := ls.syntheticV2CostModel
-			snapshotTip := ls.currentTip
-			snapshotTipHash := ls.currentTip.Point.Hash
-			snapshotNonce := ls.currentTipBlockNonce
-			localCheckpointWritten := ls.checkpointWrittenForEpoch
-			snapshotValidationEnabled := ls.validationEnabled
-			snapshotChainsyncState := ls.chainsyncState
-			chainTip := ls.chain.Tip()
-			chainTipSlot := chainTip.Point.Slot
-			snapshotMithrilSlot := ls.mithrilLedgerSlot
-			ls.RUnlock()
+			snapshotEpoch := applySnapshot.epoch
+			snapshotEra := applySnapshot.era
+			snapshotPParams := applySnapshot.pparams
+			snapshotPrevEraPParams := applySnapshot.prevEraPParams
+			snapshotSyntheticV2CostModel := applySnapshot.syntheticV2CostModel
+			snapshotTip := applySnapshot.tip
+			snapshotTipHash := slices.Clone(applySnapshot.tip.Point.Hash)
+			snapshotNonce := applySnapshot.nonce
+			localCheckpointWritten := applySnapshot.checkpointWritten
+			snapshotValidationEnabled := applySnapshot.validationEnabled
+			snapshotChainsyncState := applySnapshot.chainsyncState
+			snapshotMithrilSlot := applySnapshot.mithrilSlot
 
-			// Compute stability window and cutoff slot outside the callback
-			// to avoid reading ls fields without the lock. Use the wall-clock
-			// slot as a reference when it exceeds the local chain tip. When
-			// syncing from genesis the local chain tip starts at 0, which
-			// would make cutoffSlot 0 and validate ALL historical blocks.
-			stabilityWindow := ls.calculateStabilityWindowForEra(snapshotEra.Id)
-			referenceSlot := chainTipSlot
+			stabilityWindow = ls.calculateStabilityWindowForEra(snapshotEra.Id)
+			referenceSlot = applySnapshot.chainTipSlot
 			if wallSlot, err := ls.CurrentSlot(); err == nil &&
 				wallSlot > referenceSlot {
 				referenceSlot = wallSlot
 			}
-			var cutoffSlot uint64
+			cutoffSlot = 0
 			if referenceSlot >= stabilityWindow {
 				cutoffSlot = referenceSlot - stabilityWindow
 			}
@@ -8391,53 +8606,50 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			var pendingByronPBFT bool
 			// Track expected previous hash for batch processing - updated after each block
 			expectedPrevHash := snapshotTipHash
-			if !parentEnvelopeSet {
-				var parentBlockType uint
-				var parentBlockTypeLoaded bool
-				var parentBlock models.Block
-				if len(snapshotTip.Point.Hash) > 0 {
-					if storedBlock, err := database.BlockByPoint(
-						ctx,
-						ls.db,
-						snapshotTip.Point,
-					); err == nil {
-						parentBlock = storedBlock
-						parentBlockType = storedBlock.Type
-						parentBlockTypeLoaded = true
-					} else {
-						ls.config.Logger.Debug(
-							"could not load persisted parent block type for envelope validation",
-							"component", "ledger",
-							"slot", snapshotTip.Point.Slot,
-							"error", err,
-						)
-					}
-				}
-				parentEnvelope = envelopeParentFromTip(
-					snapshotTip.Point.Slot,
-					snapshotTip.BlockNumber,
-					snapshotTip.Point.Hash,
-					parentBlockType,
-					parentBlockTypeLoaded,
-				)
-				if parentBlockTypeLoaded {
-					positioned, err := parentEnvelope.withStoredByronPosition(
-						parentBlock,
+			var parentBlockType uint
+			var parentBlockTypeLoaded bool
+			var parentBlock models.Block
+			if len(snapshotTip.Point.Hash) > 0 {
+				if storedBlock, err := database.BlockByPoint(
+					ctx,
+					ls.db,
+					snapshotTip.Point,
+				); err == nil {
+					parentBlock = storedBlock
+					parentBlockType = storedBlock.Type
+					parentBlockTypeLoaded = true
+				} else {
+					ls.config.Logger.Debug(
+						"could not load persisted parent block type for envelope validation",
+						"component", "ledger",
+						"slot", snapshotTip.Point.Slot,
+						"error", err,
 					)
-					if err != nil {
-						ls.config.Logger.Debug(
-							"could not position persisted Byron parent for envelope validation",
-							"component",
-							"ledger",
-							"slot",
-							snapshotTip.Point.Slot,
-							"error",
-							err,
-						)
-					}
-					parentEnvelope = positioned
 				}
-				parentEnvelopeSet = true
+			}
+			parentEnvelope = envelopeParentFromTip(
+				snapshotTip.Point.Slot,
+				snapshotTip.BlockNumber,
+				snapshotTip.Point.Hash,
+				parentBlockType,
+				parentBlockTypeLoaded,
+			)
+			if parentBlockTypeLoaded {
+				positioned, err := parentEnvelope.withStoredByronPosition(
+					parentBlock,
+				)
+				if err != nil {
+					ls.config.Logger.Debug(
+						"could not position persisted Byron parent for envelope validation",
+						"component",
+						"ledger",
+						"slot",
+						snapshotTip.Point.Slot,
+						"error",
+						err,
+					)
+				}
+				parentEnvelope = positioned
 			}
 			// Flag to enable validation after transaction commits (set inside callback,
 			// applied after commit to avoid mutating in-memory state on txn failure)
@@ -8917,6 +9129,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 			}
 			finishValidationTransition()
+			i = end
 			if needsEpochRollover {
 				break
 			}
@@ -11694,12 +11907,20 @@ func (ls *LedgerState) primaryChainContainsBlockID(
 	blockID uint64,
 	point ocommon.Point,
 ) (bool, error) {
+	return ls.primaryChainContainsBlockIDTxn(blockID, point, nil)
+}
+
+func (ls *LedgerState) primaryChainContainsBlockIDTxn(
+	blockID uint64,
+	point ocommon.Point,
+	txn *database.Txn,
+) (bool, error) {
 	// Blob presence by point is not authoritative: abandoned-fork blocks remain
 	// in the append-only blob store. The current primary chain is identified by
 	// its block-index entry, so compare the point encoded at this ID with the
 	// requested point. Reading only the index value avoids loading the indexed
 	// block's CBOR a second time while chainsyncMutex is held.
-	indexedPoint, err := ls.db.BlockPointByIndex(blockID, nil)
+	indexedPoint, err := ls.db.BlockPointByIndex(blockID, txn)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return false, nil
@@ -11722,7 +11943,7 @@ func (ls *LedgerState) durableAppliedFloor() (ocommon.Point, bool, error) {
 	if err != nil {
 		return ocommon.Point{}, false, err
 	}
-	if !ok || row.Slot == 0 || len(row.Hash) == 0 {
+	if !ok || len(row.Hash) == 0 {
 		return ocommon.Point{}, false, nil
 	}
 	return ocommon.NewPoint(row.Slot, row.Hash), true, nil
@@ -11742,6 +11963,9 @@ func (ls *LedgerState) enforceDurableTipFloor(ctx context.Context) error {
 	ls.RLock()
 	currentTip := ls.currentTip
 	ls.RUnlock()
+	if currentTip.Point.Slot == 0 && len(currentTip.Point.Hash) == 0 {
+		return nil
+	}
 	if currentTip.Point.Slot < floor.Slot ||
 		(currentTip.Point.Slot == floor.Slot &&
 			bytes.Equal(currentTip.Point.Hash, floor.Hash)) {
@@ -12338,6 +12562,17 @@ func (ls *LedgerState) GetIntersectPoint(
 				}
 				return fmt.Errorf("failed to get block: %w", err)
 			}
+			onPrimary, err := ls.primaryChainContainsBlockIDTxn(
+				tmpBlock.ID,
+				point,
+				txn,
+			)
+			if err != nil {
+				return fmt.Errorf("check block on primary chain: %w", err)
+			}
+			if !onPrimary {
+				continue
+			}
 			// Update return value
 			ret.Slot = tmpBlock.Slot
 			ret.Hash = tmpBlock.Hash
@@ -12347,7 +12582,7 @@ func (ls *LedgerState) GetIntersectPoint(
 	if err != nil {
 		return nil, err
 	}
-	if ret.Slot > 0 || foundOrigin {
+	if len(ret.Hash) > 0 || foundOrigin {
 		return &ret, nil
 	}
 	return nil, nil
@@ -13789,6 +14024,19 @@ func isSemanticTxValidationError(err error) bool {
 		eras.IsSemanticRuleValidationError(err)
 }
 
+// LeiosValidationParentHash returns the canonical ledger-point hash named by
+// an announcing header. The first block uses a null prev_hash on the wire, but
+// the typed header accessor represents it as a zero Blake2b-256 value while
+// the ledger origin point has an empty hash. Block number zero proves this is
+// that origin representation; every later block retains its exact 32 bytes.
+func LeiosValidationParentHash(header ledger.BlockHeader) []byte {
+	parentHash := header.PrevHash()
+	if header.BlockNumber() == 0 && parentHash == (lcommon.Blake2b256{}) {
+		return make([]byte, 0)
+	}
+	return parentHash.Bytes()
+}
+
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 	consensusState, tipState := ls.loadStateSnapshots()
 	tipSlot := tipState.currentTip.Point.Slot
@@ -14100,7 +14348,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 		ctx = context.Background() //nolint:contextcheck // literal-nil fallback
 	}
 	slot := header.SlotNumber()
-	parentHash := header.PrevHash().Bytes()
+	parentHash := LeiosValidationParentHash(header)
 	parentIsCurrentTip := func() bool {
 		_, currentTip := ls.loadStateSnapshots()
 		return bytes.Equal(currentTip.currentTip.Point.Hash, parentHash)

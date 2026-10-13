@@ -300,7 +300,8 @@ func midnightYAMLFieldSet(field string) bool {
 // subsystem.
 type ChainsyncConfig struct {
 	// MaxClients is the maximum number of concurrent chainsync client
-	// connections. Default: 3.
+	// connections. Zero selects an automatic limit: at least 3 and large enough
+	// for every configured local-root access point.
 	MaxClients int `yaml:"maxClients"   envconfig:"DINGO_CHAINSYNC_MAX_CLIENTS"`
 	// StallTimeout is the duration after which a client with no
 	// activity is considered stalled. Default: "2m".
@@ -473,6 +474,12 @@ type TokenRegistryConfig struct {
 	// operators running a mirror. Empty selects by network: the Cardano
 	// Foundation registry for mainnet, the IOG testnet registry otherwise.
 	SourceURL string `yaml:"sourceUrl"             envconfig:"DINGO_TOKEN_REGISTRY_SOURCE_URL"`
+	// ManifestURL identifies the signed manifest that authenticates each
+	// snapshot. It is required when the sync is enabled.
+	ManifestURL string `yaml:"manifestUrl"           envconfig:"DINGO_TOKEN_REGISTRY_MANIFEST_URL"`
+	// TrustedManifestKey is the hex-encoded Ed25519 public key used to verify
+	// signed manifests. It is required when the sync is enabled.
+	TrustedManifestKey string `yaml:"trustedManifestKey"    envconfig:"DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY"`
 	// Interval controls how often the registry is re-checked. Each check
 	// is a conditional request, so an unchanged registry costs no download.
 	// Values below one minute are raised to it.
@@ -507,6 +514,9 @@ type TokenRegistryConfig struct {
 	// AllowPrivateAddresses permits syncing from private, loopback, and
 	// link-local addresses. Leave false for the default SSRF guard.
 	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_TOKEN_REGISTRY_ALLOW_PRIVATE_ADDRESSES"`
+	// AllowRollback permits a correctly signed manifest sequence below the
+	// currently stored sequence. Accepting it lowers the stored sequence.
+	AllowRollback bool `yaml:"allowRollback"          envconfig:"DINGO_TOKEN_REGISTRY_ALLOW_ROLLBACK"`
 }
 
 // DefaultChainsyncConfig returns the default chainsync configuration.
@@ -514,7 +524,6 @@ type TokenRegistryConfig struct {
 // fallback in internal/node/node.go.
 func DefaultChainsyncConfig() ChainsyncConfig {
 	return ChainsyncConfig{
-		MaxClients:   3,
 		StallTimeout: "2m",
 		Strategy:     "primary",
 	}
@@ -692,7 +701,11 @@ type Config struct {
 	// BindAddr; operators must set this field explicitly to expose
 	// metrics on a wildcard or remote-scrape address.
 	MetricsBindAddr string `yaml:"metricsBindAddr" envconfig:"DINGO_METRICS_BIND_ADDR"`
-	MetricsPort     uint   `yaml:"metricsPort"    split_words:"true"`
+	// MetricsAuthToken enables Bearer authentication on the Prometheus
+	// listener. It has no CLI flag because process arguments are public to
+	// other users on many systems.
+	MetricsAuthToken string `yaml:"metricsAuthToken" envconfig:"DINGO_METRICS_AUTH_TOKEN"`
+	MetricsPort      uint   `yaml:"metricsPort"    split_words:"true"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
