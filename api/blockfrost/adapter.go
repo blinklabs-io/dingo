@@ -296,41 +296,53 @@ func (a *NodeAdapter) LatestBlock() (
 func (a *NodeAdapter) BlockByHashOrNumber(
 	id string,
 ) (BlockInfo, error) {
-	var block models.Block
+	block, err := a.resolveBlock(context.Background(), id)
+	if err != nil {
+		return BlockInfo{}, err
+	}
+	return a.blockInfoFromBlock(block)
+}
+
+// resolveBlock loads the block named by a 64-character hex hash or a decimal
+// height. Errors wrap ErrInvalidBlockID for a malformed identifier and
+// ErrBlockNotFound for one that names no stored block.
+func (a *NodeAdapter) resolveBlock(
+	ctx context.Context,
+	id string,
+) (models.Block, error) {
 	if len(id) == 64 {
 		hash, err := hex.DecodeString(id)
 		if err != nil {
-			return BlockInfo{}, fmt.Errorf(
+			return models.Block{}, fmt.Errorf(
 				"decode block hash %q: %w",
 				id,
 				ErrInvalidBlockID,
 			)
 		}
-		var getErr error
-		block, getErr = a.ledgerState.BlockByHash(context.Background(), hash)
-		if getErr != nil {
-			if errors.Is(getErr, models.ErrBlockNotFound) {
-				return BlockInfo{}, fmt.Errorf(
+		block, err := a.ledgerState.BlockByHash(ctx, hash)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return models.Block{}, fmt.Errorf(
 					"block %s: %w",
 					id,
 					ErrBlockNotFound,
 				)
 			}
-			return BlockInfo{}, getErr
+			return models.Block{}, err
 		}
-		return a.blockInfoFromBlock(block)
+		return block, nil
 	}
 
 	height, err := strconv.ParseUint(id, 10, 64)
 	if err != nil {
-		return BlockInfo{}, fmt.Errorf(
+		return models.Block{}, fmt.Errorf(
 			"parse block height %q: %w",
 			id,
 			ErrInvalidBlockID,
 		)
 	}
 	if height > math.MaxUint64-database.BlockInitialIndex {
-		return BlockInfo{}, fmt.Errorf(
+		return models.Block{}, fmt.Errorf(
 			"block height %q overflows internal index: %w",
 			id,
 			ErrInvalidBlockID,
@@ -339,21 +351,21 @@ func (a *NodeAdapter) BlockByHashOrNumber(
 	// Blockfrost accepts Cardano block height here. Dingo's blob block index
 	// is 1-based while Cardano block heights are 0-based, so translate height
 	// to the internal index before lookup.
-	block, err = a.ledgerState.Database().BlockByIndex(
+	block, err := a.ledgerState.Database().BlockByIndex(
 		height+database.BlockInitialIndex,
 		nil,
 	)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
-			return BlockInfo{}, fmt.Errorf(
+			return models.Block{}, fmt.Errorf(
 				"block %s: %w",
 				id,
 				ErrBlockNotFound,
 			)
 		}
-		return BlockInfo{}, err
+		return models.Block{}, err
 	}
-	return a.blockInfoFromBlock(block)
+	return block, nil
 }
 
 func (a *NodeAdapter) blockInfoFromBlock(

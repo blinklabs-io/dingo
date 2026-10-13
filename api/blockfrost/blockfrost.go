@@ -83,8 +83,24 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleLatestBlockTxs,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/blocks/latest/txs/cbor",
+		b.handleLatestBlockTransactionsCBOR,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/blocks/{hash_or_number}",
 		b.handleBlock,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/blocks/{hash_or_number}/{section}",
+		b.handleBlockSection,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/blocks/{hash_or_number}/txs/cbor",
+		b.handleBlockTransactionsCBOR,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/blocks/epoch/{epoch_number}/slot/{slot_number}",
+		b.handleBlockByEpochSlot,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/epochs/latest",
