@@ -289,6 +289,50 @@ func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 	return err
 }
 
+// ValidateChainSelectionHeaderCryptoWithGeneration validates a header and
+// returns the immutable ledger-state generation used by that validation. A
+// concurrent publication makes the verdict non-reusable and is reported as a
+// deferred result so callers can retry it at ledger admission.
+func (ls *LedgerState) ValidateChainSelectionHeaderCryptoWithGeneration(
+	header ledger.BlockHeader,
+) (uint64, error) {
+	return ls.withStableHeaderVerificationContext(func() error {
+		return ls.ValidateChainSelectionHeaderCrypto(header)
+	})
+}
+
+func (ls *LedgerState) withStableHeaderVerificationContext(
+	verify func() error,
+) (uint64, error) {
+	beforeConsensus := ls.loadConsensusSnapshot()
+	beforeTip := ls.loadTipSnapshot()
+	if ls.txValidationTransitions.Load() != 0 ||
+		beforeConsensus == nil || beforeTip == nil ||
+		beforeConsensus.generation != beforeTip.generation {
+		return 0, fmt.Errorf(
+			"%w: ledger verification context is unavailable",
+			errHeaderVerificationDeferred,
+		)
+	}
+	if err := verify(); err != nil {
+		return 0, err
+	}
+	ls.txValidationCommitMutex.RLock()
+	defer ls.txValidationCommitMutex.RUnlock()
+	afterConsensus := ls.loadConsensusSnapshot()
+	afterTip := ls.loadTipSnapshot()
+	if ls.txValidationTransitions.Load() != 0 ||
+		beforeConsensus != afterConsensus || beforeTip != afterTip ||
+		afterConsensus == nil || afterTip == nil ||
+		afterConsensus.generation != afterTip.generation {
+		return 0, fmt.Errorf(
+			"%w: ledger verification context changed",
+			errHeaderVerificationDeferred,
+		)
+	}
+	return beforeConsensus.generation, nil
+}
+
 // headerApplied reports whether the ledger has applied header: its point is on
 // the chain and the published ledger tip has reached its slot. An unpublished
 // tip counts as not applied, so the header is verified.

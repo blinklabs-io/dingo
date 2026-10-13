@@ -81,9 +81,10 @@ type BlockfetchEvent struct {
 type ChainsyncEvent struct {
 	ConnectionId ouroboros.ConnectionId // Connection ID associated with event
 	BlockHeader  ledger.BlockHeader
-	// HeaderCryptoVerified is set only when the exact BlockHeader passed the
-	// chain-selection crypto verifier before this event was published.
-	HeaderCryptoVerified bool
+	// HeaderCryptoVerificationGeneration identifies the immutable ledger
+	// context in which the exact BlockHeader passed the chain-selection crypto
+	// verifier. Zero means no reusable verdict.
+	HeaderCryptoVerificationGeneration uint64
 	// ArrivalTime is recorded immediately when the ChainSync callback receives
 	// a roll-forward header. It lets ledger admission judge the peer's clock at
 	// arrival even if event delivery or header processing is delayed.

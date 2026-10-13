@@ -128,7 +128,9 @@ func TestChainsyncClientRollForwardCarriesHeaderCryptoVerdict(t *testing.T) {
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool { return true },
 	})
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
-	o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) error { return nil }
+	o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+		return 42, nil
+	}
 	connID := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -145,7 +147,7 @@ func TestChainsyncClientRollForwardCarriesHeaderCryptoVerdict(t *testing.T) {
 	evt := testutil.RequireReceive(t, ledgerCh, 2*time.Second, "ledger event")
 	data, ok := evt.Data.(ledger.ChainsyncEvent)
 	require.True(t, ok)
-	require.True(t, data.HeaderCryptoVerified)
+	require.EqualValues(t, 42, data.HeaderCryptoVerificationGeneration)
 }
 
 func TestChainsyncClientRollForwardCarriesPolicyTargetWithAdmittedEvent(
@@ -796,8 +798,8 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 	o.chainsyncState = state
 	o.eventBus = bus
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
-	o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) error {
-		return errors.New("boom: invalid VRF proof")
+	o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+		return 0, errors.New("boom: invalid VRF proof")
 	}
 
 	header := newTestBlockHeader(200, 1, 0xcc)
@@ -881,7 +883,7 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 	// the real verifier's own error classification, without the readiness gate,
 	// must still get fast-sync-safe (deferred, not excluded) behavior.
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
-	o.chainSelectionVerifyHeaderCrypto = ls.ValidateChainSelectionHeaderCrypto
+	o.chainSelectionVerifyHeaderCrypto = ls.ValidateChainSelectionHeaderCryptoWithGeneration
 
 	var hash gledger.Blake2b256
 	hash[0] = 0xdd
@@ -924,7 +926,7 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 	evt := testutil.RequireReceive(t, ledgerCh, time.Second, "ledger event")
 	data, ok := evt.Data.(ledger.ChainsyncEvent)
 	require.True(t, ok)
-	require.False(t, data.HeaderCryptoVerified)
+	require.Zero(t, data.HeaderCryptoVerificationGeneration)
 }
 
 // TestChainsyncClientRollForwardCompetingPeersOnlyVerifiedHeaderCounted
@@ -966,11 +968,11 @@ func TestChainsyncClientRollForwardCompetingPeersOnlyVerifiedHeaderCounted(
 	o.chainsyncState = state
 	o.eventBus = bus
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
-	o.chainSelectionVerifyHeaderCrypto = func(h gledger.BlockHeader) error {
+	o.chainSelectionVerifyHeaderCrypto = func(h gledger.BlockHeader) (uint64, error) {
 		if h.Hash() == badHeader.Hash() {
-			return errors.New("boom: invalid VRF proof")
+			return 0, errors.New("boom: invalid VRF proof")
 		}
-		return nil
+		return 42, nil
 	}
 
 	goodHeader := newTestBlockHeader(300, 1, 0xff)
@@ -2061,8 +2063,8 @@ func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 		f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool {
 			return true
 		}
-		f.o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) error {
-			return errors.New("bad vrf")
+		f.o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+			return 0, errors.New("bad vrf")
 		}
 		f.now = f.now.Add(40 * time.Second)
 		f.rollForward(t, newTestBlockHeader(100, 1, 0xaa))

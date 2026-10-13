@@ -4014,7 +4014,7 @@ func TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow(
 		},
 	}
 
-	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, false)
+	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, 0)
 	require.NoError(t, err)
 	require.False(
 		t,
@@ -4116,7 +4116,7 @@ func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 	// nil pending: pendingPublishes.add publishes immediately on a nil
 	// receiver, which is what lets the subscription above observe the
 	// resync request synchronously.
-	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, false)
+	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, 0)
 	require.NoError(t, err)
 	require.False(t, resolved)
 
@@ -4238,7 +4238,7 @@ func TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch(
 		},
 	}
 
-	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, false)
+	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, 0)
 	require.NoError(t, err)
 	require.False(t, resolved)
 
@@ -5875,6 +5875,7 @@ func TestChainsyncHeaderVerificationReusesIngressVerdict(t *testing.T) {
 		},
 	}
 	ls.publishSnapshotsLocked()
+	verificationGeneration := ls.loadConsensusSnapshot().generation
 	t.Cleanup(func() {
 		if ls.chainsyncBlockfetchTimeoutTimer != nil {
 			ls.chainsyncBlockfetchTimeoutTimer.Stop()
@@ -5882,10 +5883,10 @@ func TestChainsyncHeaderVerificationReusesIngressVerdict(t *testing.T) {
 	})
 
 	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
-		ConnectionId:         testRecycleConnId(),
-		BlockHeader:          header,
-		HeaderCryptoVerified: true,
-		Point:                point,
+		ConnectionId:                       testRecycleConnId(),
+		BlockHeader:                        header,
+		HeaderCryptoVerificationGeneration: verificationGeneration,
+		Point:                              point,
 		Tip: ochainsync.Tip{
 			Point: ocommon.NewPoint(
 				point.Slot+1,
@@ -5897,6 +5898,76 @@ func TestChainsyncHeaderVerificationReusesIngressVerdict(t *testing.T) {
 	require.Equal(t, 1, testChain.HeaderCount())
 	require.True(t, testChain.FirstHeaderMatchesPoint(point))
 	require.True(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
+	require.True(t, ls.queuedHeaderCryptoVerdictCurrent(point))
+	ls.publishSnapshotsLocked()
+	require.False(
+		t,
+		ls.queuedHeaderCryptoVerdictCurrent(point),
+		"a later ledger publication must invalidate the queued verdict",
+	)
+}
+
+func TestChainsyncHeaderVerificationRejectsStaleIngressVerdict(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	header := mockHeader{slot: 1000, blockNumber: 100}
+	ls := &LedgerState{
+		validationEnabled: true,
+		chain:             cm.PrimaryChain(),
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			LengthInSlots: 2_000,
+			Nonce:         make([]byte, 32),
+		}},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) (uint64, error) {
+				return 0, nil
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+	verificationGeneration := ls.loadConsensusSnapshot().generation
+	t.Cleanup(func() {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		}
+	})
+
+	event := ChainsyncEvent{
+		ConnectionId:                       testRecycleConnId(),
+		BlockHeader:                        header,
+		HeaderCryptoVerificationGeneration: verificationGeneration,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+	}
+	// A rollback or concurrent block apply publishes a new verification
+	// context before the asynchronous event reaches ledger admission.
+	ls.publishSnapshotsLocked()
+
+	err = ls.handleEventChainsyncBlockHeader(event)
+	require.ErrorContains(t, err, "block header crypto verification failed")
+
+	event.HeaderCryptoVerificationGeneration =
+		ls.loadConsensusSnapshot().generation
+	finishTransition := ls.beginTxValidationTransition()
+	err = ls.handleEventChainsyncBlockHeader(event)
+	finishTransition()
+	require.NoError(t, err)
+	require.False(
+		t,
+		ls.chain.FirstVerifiedHeaderMatchesPoint(event.Point),
+		"a durable state transition without a publication must queue the header unverified",
+	)
 }
 
 func TestChainsyncHeaderVerificationRejectsMismatchedIngressVerdict(
@@ -5920,9 +5991,9 @@ func TestChainsyncHeaderVerificationRejectsMismatchedIngressVerdict(
 	ls.publishSnapshotsLocked()
 
 	err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
-		ConnectionId:         testRecycleConnId(),
-		BlockHeader:          header,
-		HeaderCryptoVerified: true,
+		ConnectionId:                       testRecycleConnId(),
+		BlockHeader:                        header,
+		HeaderCryptoVerificationGeneration: ls.loadConsensusSnapshot().generation,
 		Point: ocommon.NewPoint(
 			header.SlotNumber(),
 			[]byte("different-header-hash"),
@@ -8001,7 +8072,7 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -8103,7 +8174,7 @@ func TestTryResolveForkGenesisRejectsLongerSparseCandidate(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 
 	require.NoError(t, err)
@@ -8222,7 +8293,7 @@ func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 
 	require.NoError(t, err)
@@ -8400,7 +8471,7 @@ func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 	require.NoError(t, err)
 	// The not-fit error was handled (a resync was requested), even though
@@ -8477,7 +8548,7 @@ func TestTryResolveForkPropagatesAncestorLookupError(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 
 	require.False(t, resolved)
@@ -8618,7 +8689,7 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -8698,7 +8769,7 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -8787,7 +8858,7 @@ func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -18524,28 +18595,23 @@ func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 	})
 }
 
-// TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader covers the second
-// way an announcing header reaches the header queue. A header that does not
-// fit the current tip is queued by tryResolveFork rather than by the direct
-// admission path, and that branch returns before the caller's ordinary
-// bookkeeping runs. Emitting from the chain's own header-queue mutation is
-// what keeps this path covered.
+// TestForkResolutionInvalidatesTheIncomingHeaderVerdict covers the second way
+// an announcing header reaches the header queue. A header that does not fit
+// the current tip is queued by tryResolveFork after the rollback publishes a
+// new ledger generation, so its pre-rollback verdict must not arm a vote.
 //
 // tryResolveFork re-queues a whole fork path: the header this event delivered,
 // plus earlier headers replayed from recorded peer history. Only the delivered
-// one carries a crypto verdict, so only it may be admitted verified, and only
-// a verified admission announces (see addForkPathHeader). Both halves are
-// asserted here at that composition site.
-func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
+// one carries a pre-rollback crypto verdict, which is stale by the time the
+// path is queued. Both a stale and an absent verdict are asserted here.
+func TestForkResolutionInvalidatesTheIncomingHeaderVerdict(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		cryptoVerified bool
-		wantAnnounce   bool
 	}{
 		{
-			name:           "verified incoming header announces",
+			name:           "pre-rollback verdict does not announce",
 			cryptoVerified: true,
-			wantAnnounce:   true,
 		},
 		{
 			name:           "unverified incoming header does not announce",
@@ -18562,13 +18628,12 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 			// needed.
 			fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 
-			ebHash := lcommon.NewBlake2b256([]byte("fork-announced-eb"))
 			header := announcingHeader(
 				fixture.currentTip.Point.Slot+10,
 				"fork-announcing-header",
 				lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
 				fixture.ancestorTip.BlockNumber+1,
-				ebHash,
+				lcommon.NewBlake2b256([]byte("fork-announced-eb")),
 			)
 			// The header does not fit the current tip; that failure is the
 			// condition tryResolveFork exists to handle.
@@ -18579,6 +18644,11 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 				&notFitErr,
 			)
 			advertisedSlot := ^uint64(0)
+			verificationGeneration := uint64(0)
+			if tc.cryptoVerified {
+				verificationGeneration =
+					fixture.ls.loadConsensusSnapshot().generation
+			}
 
 			resolved, err := fixture.ls.tryResolveFork(
 				ChainsyncEvent{
@@ -18598,7 +18668,7 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 				},
 				notFitErr,
 				nil,
-				tc.cryptoVerified,
+				verificationGeneration,
 			)
 			require.NoError(t, err)
 			require.True(t, resolved)
@@ -18617,34 +18687,11 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 			require.True(t, ok, "got %T", invalidation.Data)
 			assert.Equal(t, chain.HeaderInvalidationRollback, invalid.Reason)
 
-			if !tc.wantAnnounce {
-				testutil.RequireNoReceive(
-					t,
-					ch,
-					500*time.Millisecond,
-					"an unverified fork header must not arm a vote",
-				)
-				return
-			}
-
-			announcement := testutil.RequireReceive(
-				t, ch, testutil.AsyncWait, "announcement from fork resolution",
-			)
-			announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
-			require.True(t, ok, "got %T", announcement.Data)
-			assert.Equal(t, header.hash, announced.RbHash)
-			assert.Equal(t, ebHash, announced.EbHash)
-			assert.Greater(
-				t,
-				announced.Seq,
-				invalid.Seq,
-				"the fork header is admitted after the rollback that made room for it",
-			)
 			testutil.RequireNoReceive(
 				t,
 				ch,
-				300*time.Millisecond,
-				"the incoming fork header must be announced exactly once",
+				500*time.Millisecond,
+				"an unverified fork header must not arm a vote",
 			)
 		})
 	}

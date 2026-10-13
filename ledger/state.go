@@ -1427,9 +1427,9 @@ type LedgerState struct {
 	// when non-zero.
 	maxDeferredHeaderMarkers int
 	// admissionVerified maps the slot of each block whose header passed full
-	// admission verification to its hash key, until block-pipeline replay
-	// consumes it. Guarded by admissionVerifiedMu.
-	admissionVerified   map[uint64]string
+	// admission verification to its point and ledger generation, until
+	// block-pipeline replay consumes it. Guarded by admissionVerifiedMu.
+	admissionVerified   map[uint64]admissionVerifiedRecord
 	admissionVerifiedMu sync.Mutex
 	// maxAdmissionVerified overrides defaultMaxAdmissionVerified when
 	// non-zero.
