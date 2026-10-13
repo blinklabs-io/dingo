@@ -17,8 +17,10 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"math"
@@ -131,6 +133,10 @@ func syncDirTree(root string) error {
 type RestoreStorageConfig struct {
 	Blob     map[string]any
 	Metadata map[string]any
+	// ActiveDataDir identifies the currently active local directory during a
+	// live restore. Cloud blob restores use its marker to retain the namespace
+	// that Commit may reclaim or Rollback must preserve.
+	ActiveDataDir string
 	// Logger, when set, receives the restore's deferred-index repair
 	// progress. A full manifest rebuild on a multi-million-row table takes
 	// minutes and is otherwise silent. Nil disables that reporting; nothing
@@ -152,6 +158,14 @@ var restoreWorkDirPrefixes = []string{
 	".dingo-restore-payloads-",
 	".dingo-cloud-snapshot-",
 	".dingo-verify-snapshot-",
+}
+
+const restoreRecoveryFileName = "recovery.json"
+
+// RestoreRecoveryDir returns the durable recovery directory associated with
+// a live restore target.
+func RestoreRecoveryDir(targetDataDir string) string {
+	return targetDataDir + ".remote-rollback"
 }
 
 // CleanStaleRestoreWorkDirs removes restore work directories older than a
@@ -447,9 +461,25 @@ func restoreValidated(
 	); err != nil {
 		return Manifest{}, err
 	}
+	var blobNamespace string
+	if manifest.BlobPlugin == "s3" || manifest.BlobPlugin == "gcs" {
+		blobNamespace, err = blob.NewNamespace()
+		if err != nil {
+			return Manifest{}, err
+		}
+		if err := blob.WriteNamespace(stagingDir, blobNamespace); err != nil {
+			return Manifest{}, err
+		}
+	}
 
 	rollback, err := prepareRestore(
-		ctx, host, manifest, snapshotDir, stagingDir, storageConfig,
+		ctx,
+		host,
+		manifest,
+		snapshotDir,
+		stagingDir,
+		storageConfig,
+		retainRecovery != nil,
 	)
 	if err != nil {
 		return Manifest{}, err
@@ -465,18 +495,23 @@ func restoreValidated(
 			}
 		}
 	}
+	activated := false
 	defer func() {
 		if err == nil {
 			if retainRecovery != nil {
 				retainRollback()
 				return
 			}
-			_ = os.RemoveAll(rollback.dir)
+			_ = rollback.removeDir()
 			return
 		}
 		if !rollback.metadataMutated && !rollback.blobMutated {
-			_ = os.RemoveAll(rollback.dir)
+			_ = rollback.removeDir()
 			return
+		}
+		rollbackTargetDir := stagingDir
+		if activated {
+			rollbackTargetDir = targetDataDir
 		}
 		rollbackErr := rollback.restore(
 			context.WithoutCancel(
@@ -484,12 +519,15 @@ func restoreValidated(
 			),
 			host,
 			manifest,
-			stagingDir,
+			rollbackTargetDir,
 			storageConfig,
 		)
 		if rollbackErr == nil {
-			_ = os.RemoveAll(rollback.dir)
-			return
+			rollback.dispositionComplete = true
+			rollbackErr = rollback.removeDir()
+			if rollbackErr == nil {
+				return
+			}
 		}
 		retainRollback()
 		err = errors.Join(
@@ -502,6 +540,11 @@ func restoreValidated(
 			),
 		)
 	}()
+	if rollback.durable {
+		if err := rollback.persist(manifest); err != nil {
+			return Manifest{}, err
+		}
+	}
 
 	rollback.metadataMutated = rollback.metadataPath != ""
 	if err := restoreMetadataStore(
@@ -514,7 +557,15 @@ func restoreValidated(
 	); err != nil {
 		return Manifest{}, err
 	}
-	rollback.blobMutated = rollback.blobPath != ""
+	// File-backed metadata restore recreates stagingDir. Restore the marker
+	// before opening the blob provider so it resolves the same namespace that
+	// prepareRestore checked.
+	if blobNamespace != "" {
+		if err := blob.WriteNamespace(stagingDir, blobNamespace); err != nil {
+			return Manifest{}, err
+		}
+	}
+	rollback.blobMutated = rollback.blobPath != "" || rollback.cloudBlob
 	if err := restoreBlobStore(
 		ctx,
 		host,
@@ -562,6 +613,7 @@ func restoreValidated(
 			"activate restored data directory: %w", err,
 		)
 	}
+	activated = true
 
 	// The rename above changed the parent directory's own entries
 	// (removing stagingDir's name, adding targetDataDir's); fsync it so
@@ -726,11 +778,16 @@ func requireEmptyOrAbsent(dir string) error {
 // Badger/SQLite restores need no entry here because their entire replacement
 // remains inside the disposable staging directory until the final rename.
 type restoreRollback struct {
-	dir             string
-	metadataPath    string
-	blobPath        string
-	metadataMutated bool
-	blobMutated     bool
+	dir                 string
+	metadataPath        string
+	blobPath            string
+	newBlobNamespace    string
+	oldBlobNamespace    string
+	cloudBlob           bool
+	durable             bool
+	metadataMutated     bool
+	blobMutated         bool
+	dispositionComplete bool
 }
 
 // RestoreRecovery retains the original external stores after a successful
@@ -770,7 +827,15 @@ func (r *RestoreRecovery) Commit() error {
 	if r.done {
 		return nil
 	}
-	if err := os.RemoveAll(r.rollback.dir); err != nil {
+	if !r.rollback.dispositionComplete {
+		if err := r.rollback.removeOriginalBlobNamespace(
+			context.Background(), r.host, r.manifest, r.storageConfig,
+		); err != nil {
+			return err
+		}
+		r.rollback.dispositionComplete = true
+	}
+	if err := r.rollback.removeDir(); err != nil {
 		return fmt.Errorf("remove restore rollback directory: %w", err)
 	}
 	r.done = true
@@ -789,21 +854,26 @@ func (r *RestoreRecovery) Rollback(ctx context.Context) error {
 	if r.done {
 		return nil
 	}
-	if err := r.rollback.restore(
-		context.WithoutCancel(ctx),
-		r.host,
-		r.manifest,
-		r.targetDataDir,
-		r.storageConfig,
-	); err != nil {
-		return fmt.Errorf(
-			"automatic restore rollback failed; original backups preserved at %q: %w",
-			r.rollback.dir,
-			err,
-		)
+	if !r.rollback.dispositionComplete {
+		if err := r.rollback.restore(
+			context.WithoutCancel(ctx),
+			r.host,
+			r.manifest,
+			r.targetDataDir,
+			r.storageConfig,
+		); err != nil {
+			return fmt.Errorf(
+				"automatic restore rollback failed; original backups preserved at %q: %w",
+				r.rollback.dir,
+				err,
+			)
+		}
+		r.rollback.dispositionComplete = true
+	}
+	if err := r.rollback.removeDir(); err != nil {
+		return fmt.Errorf("remove restore rollback directory: %w", err)
 	}
 	r.done = true
-	_ = os.RemoveAll(r.rollback.dir)
 	return nil
 }
 
@@ -845,16 +915,36 @@ func prepareRestore(
 	snapshotDir string,
 	targetDataDir string,
 	storageConfig RestoreStorageConfig,
+	durable bool,
 ) (restoreRollback, error) {
-	rollbackDir, err := os.MkdirTemp(
-		filepath.Dir(targetDataDir), ".dingo-restore-rollback-",
-	)
+	var rollbackDir string
+	var err error
+	if durable {
+		rollbackDir = RestoreRecoveryDir(targetDataDir)
+		if err := RecoverInterruptedRestore(
+			ctx,
+			host,
+			rollbackDir,
+			targetDataDir,
+			storageConfig,
+			true,
+		); err != nil {
+			return restoreRollback{}, fmt.Errorf(
+				"dispose completed restore recovery: %w", err,
+			)
+		}
+		err = os.Mkdir(rollbackDir, 0o700)
+	} else {
+		rollbackDir, err = os.MkdirTemp(
+			filepath.Dir(targetDataDir), ".dingo-restore-rollback-",
+		)
+	}
 	if err != nil {
 		return restoreRollback{}, fmt.Errorf(
 			"create restore rollback directory: %w", err,
 		)
 	}
-	rollback := restoreRollback{dir: rollbackDir}
+	rollback := restoreRollback{dir: rollbackDir, durable: durable}
 	cleanupOnError := func(err error) (restoreRollback, error) {
 		_ = os.RemoveAll(rollbackDir)
 		return restoreRollback{}, err
@@ -946,6 +1036,20 @@ func prepareRestore(
 			manifest.BlobPlugin, err,
 		))
 	}
+	blobNamespace, err := blob.ReadNamespace(targetDataDir)
+	if err != nil {
+		_ = stopBlobCapabilityUncancelable(ctx, host)
+		return cleanupOnError(err)
+	}
+	rollback.newBlobNamespace = blobNamespace
+	rollback.cloudBlob = manifest.BlobPlugin == "s3" || manifest.BlobPlugin == "gcs"
+	if rollback.cloudBlob && storageConfig.ActiveDataDir != "" {
+		rollback.oldBlobNamespace, err = blob.ReadNamespace(storageConfig.ActiveDataDir)
+		if err != nil {
+			_ = stopBlobCapabilityUncancelable(ctx, host)
+			return cleanupOnError(err)
+		}
+	}
 	if _, ok := blobStore.(blob.Restorer); !ok {
 		_ = stopBlobCapabilityUncancelable(ctx, host)
 		return cleanupOnError(fmt.Errorf(
@@ -977,6 +1081,7 @@ func prepareRestore(
 		))
 	}
 	if _, resettable := blobStore.(blob.Resettable); resettable &&
+		blobNamespace == "" &&
 		metadata.ResetOfPopulatedTargetAllowed(ctx) {
 		backuper, ok := blobStore.(blob.Backuper)
 		if !ok {
@@ -1030,7 +1135,23 @@ func (r *restoreRollback) restore(
 	storageConfig RestoreStorageConfig,
 ) error {
 	var errs []error
-	if r.blobMutated && r.blobPath != "" {
+	if r.blobMutated && r.cloudBlob {
+		_ = stopBlobCapabilityUncancelable(ctx, host)
+		selectErr := selectBlobNamespace(r.dir, r.newBlobNamespace)
+		if selectErr != nil {
+			errs = append(
+				errs,
+				fmt.Errorf("select staged blob namespace: %w", selectErr),
+			)
+		}
+		if selectErr == nil || blob.NamespacePublished(selectErr) {
+			if err := resetBlobStore(
+				ctx, host, manifest, r.dir, storageConfig.Blob,
+			); err != nil {
+				errs = append(errs, fmt.Errorf("remove staged blob namespace: %w", err))
+			}
+		}
+	} else if r.blobMutated && r.blobPath != "" {
 		_ = stopBlobCapabilityUncancelable(ctx, host)
 		if err := restoreBlobStore(
 			ctx,
@@ -1063,7 +1184,243 @@ func (r *restoreRollback) restore(
 			)
 		}
 	}
+	if len(errs) == 0 && r.cloudBlob {
+		if err := selectBlobNamespace(targetDataDir, r.oldBlobNamespace); err != nil {
+			errs = append(errs, fmt.Errorf("restore original blob namespace marker: %w", err))
+		}
+	}
 	return errors.Join(errs...)
+}
+
+func resetBlobStore(
+	ctx context.Context,
+	host *plugin.Host,
+	manifest Manifest,
+	targetDataDir string,
+	providerConfig map[string]any,
+) error {
+	store, err := plugin.Resolve[blob.BlobStore](
+		ctx,
+		host,
+		plugin.CapabilityStorageBlob,
+		manifest.BlobPlugin,
+		providerConfig,
+		blob.ProviderDependencies{DataDir: targetDataDir, RunMode: "load"},
+	)
+	if err != nil {
+		return fmt.Errorf("resolve blob plugin %q: %w", manifest.BlobPlugin, err)
+	}
+	resettable, ok := store.(blob.Resettable)
+	if !ok {
+		_ = stopBlobCapabilityUncancelable(ctx, host)
+		return fmt.Errorf("blob plugin %q does not support reset", manifest.BlobPlugin)
+	}
+	resetErr := resettable.Reset(ctx)
+	stopErr := stopBlobCapabilityUncancelable(ctx, host)
+	if resetErr != nil {
+		return fmt.Errorf("reset blob plugin %q: %w", manifest.BlobPlugin, resetErr)
+	}
+	if stopErr != nil {
+		return fmt.Errorf("stop blob plugin after reset: %w", stopErr)
+	}
+	return nil
+}
+
+type restoreRecoveryRecord struct {
+	BlobPlugin       string `json:"blobPlugin"`
+	MetadataPlugin   string `json:"metadataPlugin"`
+	StorageMode      string `json:"storageMode"`
+	NewBlobNamespace string `json:"newBlobNamespace,omitempty"`
+	OldBlobNamespace string `json:"oldBlobNamespace,omitempty"`
+	CloudBlob        bool   `json:"cloudBlob"`
+	MetadataMutated  bool   `json:"metadataMutated"`
+}
+
+func (r *restoreRollback) persist(manifest Manifest) error {
+	if err := syncDirTree(r.dir); err != nil {
+		return fmt.Errorf("sync restore recovery directory: %w", err)
+	}
+	record := restoreRecoveryRecord{
+		BlobPlugin:       manifest.BlobPlugin,
+		MetadataPlugin:   manifest.MetadataPlugin,
+		StorageMode:      manifest.StorageMode,
+		NewBlobNamespace: r.newBlobNamespace,
+		OldBlobNamespace: r.oldBlobNamespace,
+		CloudBlob:        r.cloudBlob,
+		MetadataMutated:  r.metadataPath != "",
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("encode restore recovery record: %w", err)
+	}
+	tmp, err := os.CreateTemp(r.dir, restoreRecoveryFileName+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create restore recovery record: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) //nolint:errcheck
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("set restore recovery record permissions: %w", err)
+	}
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write restore recovery record: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync restore recovery record: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close restore recovery record: %w", err)
+	}
+	if err := os.Rename(tmpName, filepath.Join(r.dir, restoreRecoveryFileName)); err != nil {
+		return fmt.Errorf("activate restore recovery record: %w", err)
+	}
+	if err := syncDir(r.dir); err != nil {
+		return fmt.Errorf("sync restore recovery record directory: %w", err)
+	}
+	if err := syncDir(filepath.Dir(r.dir)); err != nil {
+		return fmt.Errorf("sync restore recovery parent directory: %w", err)
+	}
+	return nil
+}
+
+func (r *restoreRollback) removeDir() error {
+	if err := os.RemoveAll(r.dir); err != nil {
+		return err
+	}
+	if r.durable {
+		return syncDir(filepath.Dir(r.dir))
+	}
+	return nil
+}
+
+func readRestoreRecovery(dir string) (restoreRollback, Manifest, error) {
+	file, err := os.Open(filepath.Join(dir, restoreRecoveryFileName))
+	if err != nil {
+		return restoreRollback{}, Manifest{}, err
+	}
+	defer file.Close() //nolint:errcheck
+	data, err := io.ReadAll(io.LimitReader(file, 4097))
+	if err != nil {
+		return restoreRollback{}, Manifest{}, fmt.Errorf(
+			"read restore recovery record: %w", err,
+		)
+	}
+	if len(data) > 4096 {
+		return restoreRollback{}, Manifest{}, errors.New(
+			"restore recovery record exceeds 4096 bytes",
+		)
+	}
+	var record restoreRecoveryRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return restoreRollback{}, Manifest{}, fmt.Errorf(
+			"decode restore recovery record: %w", err,
+		)
+	}
+	if record.BlobPlugin == "" || record.MetadataPlugin == "" {
+		return restoreRollback{}, Manifest{}, errors.New(
+			"restore recovery record is missing provider names",
+		)
+	}
+	return restoreRollback{
+			dir:              dir,
+			metadataPath:     filepath.Join(dir, MetadataBackupFileName),
+			newBlobNamespace: record.NewBlobNamespace,
+			oldBlobNamespace: record.OldBlobNamespace,
+			cloudBlob:        record.CloudBlob,
+			metadataMutated:  record.MetadataMutated,
+			blobMutated:      record.CloudBlob,
+			durable:          true,
+		}, Manifest{
+			BlobPlugin:     record.BlobPlugin,
+			MetadataPlugin: record.MetadataPlugin,
+			StorageMode:    record.StorageMode,
+		}, nil
+}
+
+// RecoverInterruptedRestore disposes a durable live-restore recovery record.
+// accept keeps the restored external stores and reclaims the prior blob
+// namespace. Otherwise both external stores are returned to their prior state.
+func RecoverInterruptedRestore(
+	ctx context.Context,
+	host *plugin.Host,
+	recoveryDir string,
+	targetDataDir string,
+	storageConfig RestoreStorageConfig,
+	accept bool,
+) error {
+	rollback, manifest, err := readRestoreRecovery(recoveryDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if removeErr := os.RemoveAll(recoveryDir); removeErr != nil {
+				return fmt.Errorf(
+					"remove incomplete restore recovery directory: %w",
+					removeErr,
+				)
+			}
+			return nil
+		}
+		return err
+	}
+	if accept {
+		err = rollback.removeOriginalBlobNamespace(
+			context.WithoutCancel(ctx), host, manifest, storageConfig,
+		)
+	} else {
+		err = rollback.restore(
+			context.WithoutCancel(ctx),
+			host,
+			manifest,
+			targetDataDir,
+			storageConfig,
+		)
+	}
+	if err != nil {
+		return err
+	}
+	if err := rollback.removeDir(); err != nil {
+		return fmt.Errorf("remove restore recovery directory: %w", err)
+	}
+	return nil
+}
+
+func (r *restoreRollback) removeOriginalBlobNamespace(
+	ctx context.Context,
+	host *plugin.Host,
+	manifest Manifest,
+	storageConfig RestoreStorageConfig,
+) error {
+	if !r.cloudBlob || r.oldBlobNamespace == "" {
+		return nil
+	}
+	_ = stopBlobCapabilityUncancelable(ctx, host)
+	selectErr := selectBlobNamespace(r.dir, r.oldBlobNamespace)
+	if selectErr != nil && !blob.NamespacePublished(selectErr) {
+		return fmt.Errorf("select original blob namespace: %w", selectErr)
+	}
+	if err := resetBlobStore(ctx, host, manifest, r.dir, storageConfig.Blob); err != nil {
+		return errors.Join(
+			selectErr,
+			fmt.Errorf("remove original blob namespace: %w", err),
+		)
+	}
+	return selectErr
+}
+
+func selectBlobNamespace(dir, namespace string) error {
+	if namespace != "" {
+		return blob.WriteNamespace(dir, namespace)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create blob namespace directory: %w", err)
+	}
+	err := os.Remove(filepath.Join(dir, blob.NamespaceFileName))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove blob namespace marker: %w", err)
+	}
+	return syncDir(dir)
 }
 
 // restoreMetadataStore resolves the manifest-recorded metadata plugin

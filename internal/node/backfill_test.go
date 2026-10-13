@@ -141,6 +141,7 @@ func TestBackfillProcessBlockGovernanceRecordsDRepActivityFromCertificateOnly(
 			100,
 			&pparams,
 			txn,
+			nil,
 		)
 	}))
 
@@ -335,8 +336,9 @@ func TestBackfillProcessBlockGovernanceRecordsDRepActivityInDijkstra(t *testing.
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
 			0,
 			100,
-			&pparams.ConwayProtocolParameters,
+			pparams,
 			txn,
+			nil,
 		)
 	}))
 
@@ -562,7 +564,7 @@ func TestBackfillProcessBlockGovernanceLevelWithoutConwayParameters(
 			}, nil))
 			txn := db.Transaction(context.Background(), true)
 			defer txn.Release()
-			err = backfill.processBlockGovernanceLevel(context.Background(), test.tx(), point, 0, 100, nil, txn)
+			err = backfill.processBlockGovernanceLevel(context.Background(), test.tx(), point, 0, 100, nil, txn, nil)
 			if test.wantErr != "" {
 				require.ErrorContains(t, err, test.wantErr)
 				return

@@ -508,7 +508,7 @@ func TestEnableLeiosVotingRetriesFailedImmediateReplay(t *testing.T) {
 	defer eventBus.Unsubscribe(leios.VoteEmittedEventType, subID)
 	ebHash := lcommon.NewBlake2b256([]byte("startup-replay-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("startup-replay-rb"))
-	voteManager.HandleEndorserBlock(501, ebHash)
+	voteManager.HandleValidatedEndorserBlock(501, rbHash, ebHash)
 	voteManager.ObserveAnnouncement(501, rbHash, ebHash)
 
 	n := &Node{

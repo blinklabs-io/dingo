@@ -317,6 +317,7 @@ func (o *Ouroboros) chainsyncServerConnOpts(
 
 func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
+		ochainsync.WithAwaitReplyFunc(o.chainsyncClientAwaitReply),
 		ochainsync.WithRollForwardRawFunc(
 			o.instrumentChainsyncRollForwardRaw(
 				o.chainsyncClientRollForwardRaw,
@@ -325,14 +326,10 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		ochainsync.WithRollBackwardFunc(
 			o.instrumentChainsyncRollBackward(o.chainsyncClientRollBackward),
 		),
-		// Pipeline enough headers to keep one blockfetch batch (500
-		// blocks) ready while the previous batch processes. A depth
-		// of 10 is sufficient; higher values flood the header queue
-		// and waste CPU parsing headers that are immediately dropped.
-		ochainsync.WithPipelineLimit(10),
-		// Recv queue at 2x pipeline limit to absorb bursts without
-		// blocking the protocol goroutine.
-		ochainsync.WithRecvQueueSize(20),
+		// Keep the request window large enough to cover network latency. The
+		// ledger's header-capacity gate bounds admission and verification work.
+		ochainsync.WithPipelineLimit(ochainsync.DefaultPipelineLimit),
+		ochainsync.WithRecvQueueSize(ochainsync.DefaultRecvQueueSize),
 		// Increase the intersect timeout from the 5s default. The
 		// upstream peer may need time to process FindIntersect when
 		// under load (e.g. fast DevNet block production or initial
@@ -340,6 +337,41 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		ochainsync.WithIntersectTimeout(30 * time.Second),
 		ochainsync.WithBlockTimeout(o.config.ChainsyncBlockTimeout),
 	}
+}
+
+// chainsyncClientAwaitReply publishes the protocol's explicit idle proof after
+// gouroboros has fenced every preceding pipelined chain update.
+func (o *Ouroboros) chainsyncClientAwaitReply(
+	ctx ochainsync.CallbackContext,
+) error {
+	if o.chainsyncState == nil {
+		return nil
+	}
+	client := o.chainsyncState.GetTrackedClient(ctx.ConnectionId)
+	if client == nil {
+		return nil
+	}
+	o.chainsyncState.MarkClientSynced(ctx.ConnectionId)
+	if client.ObservabilityOnly ||
+		!o.shouldPublishChainsyncToLedger(ctx.ConnectionId) {
+		return nil
+	}
+	if o.config.ChainsyncObserveAwaitReply != nil {
+		o.config.ChainsyncObserveAwaitReply(ctx.ConnectionId, client.Cursor)
+	}
+	if o.eventBus == nil {
+		return nil
+	}
+	o.eventBus.Publish(
+		ledger.ChainsyncAwaitReplyEventType,
+		event.NewEvent(
+			ledger.ChainsyncAwaitReplyEventType,
+			ledger.ChainsyncAwaitReplyEvent{
+				ConnectionId: ctx.ConnectionId,
+			},
+		),
+	)
+	return nil
 }
 
 func normalizeIntersectPoints(points []ocommon.Point) []ocommon.Point {
@@ -1241,6 +1273,18 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			ctx.ConnectionId,
 			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
 		)
+		if ingressEligible && o.chainsyncHeaderBackpressure != nil {
+			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+			defer cancelAdmission()
+			admittedHeadroom := ledger.ChainsyncEventBufferSize + 1 +
+				o.maxTrackedChainsyncClients()
+			if err := o.chainsyncHeaderBackpressure(
+				admissionCtx,
+				admittedHeadroom,
+			); err != nil {
+				return fmt.Errorf("chainsync: await header capacity: %w", err)
+			}
+		}
 		o.config.Logger.Debug(
 			"chainsync: header received",
 			"component", "ouroboros",
@@ -1315,7 +1359,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// observation and recycles the connection.
 		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
 			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
-			verifyErr := o.chainSelectionVerifyHeaderCrypto(v)
+			verificationGeneration, verifyErr := o.chainSelectionVerifyHeaderCrypto(v)
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) &&
 				o.chainsyncHeaderAdmission != nil {
 				// Admission waited for the horizon, so it has since moved
@@ -1324,7 +1368,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				if err != nil || !admitted {
 					return err
 				}
-				verifyErr = o.chainSelectionVerifyHeaderCrypto(v)
+				verificationGeneration, verifyErr = o.chainSelectionVerifyHeaderCrypto(v)
+			}
+			if verifyErr == nil {
+				chainsyncEvent.HeaderCryptoVerificationGeneration = verificationGeneration
 			}
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) {
 				// The header cannot be validated yet, so it must not extend
@@ -1367,6 +1414,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 							},
 						),
 					)
+					if o.chainsyncState != nil {
+						o.chainsyncState.SetClientObservabilityOnly(
+							ctx.ConnectionId,
+							true,
+						)
+					}
 					ingressEligible = false
 				}
 			}
@@ -1535,17 +1588,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			bytes.Equal(point.Hash, tip.Point.Hash) {
 			if o.chainsyncState != nil {
 				o.chainsyncState.MarkClientSynced(ctx.ConnectionId)
-			}
-			if ingressEligible && o.eventBus != nil {
-				o.eventBus.Publish(
-					ledger.ChainsyncAwaitReplyEventType,
-					event.NewEvent(
-						ledger.ChainsyncAwaitReplyEventType,
-						ledger.ChainsyncAwaitReplyEvent{
-							ConnectionId: ctx.ConnectionId,
-						},
-					),
-				)
 			}
 		}
 		// Update ChainSync performance metrics for peer scoring

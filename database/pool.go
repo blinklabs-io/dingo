@@ -93,7 +93,9 @@ func (d *Database) ImportPool(
 }
 
 // UpdatePoolOpCertSequence records an observed op-cert sequence for a pool
-// and updates the pool's denormalized maximum.
+// and updates the pool's denormalized maximum. The first counter written for
+// a (pool, slot) wins; a different counter at that slot returns an opcert
+// counter conflict error and rolls back the write transaction.
 func (d *Database) UpdatePoolOpCertSequence(
 	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
