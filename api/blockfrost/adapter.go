@@ -147,6 +147,10 @@ type NodeAdapter struct {
 	ledgerState *ledger.LedgerState
 	submitter   TransactionSubmitter
 	evaluator   transactionEvaluator
+	// slotTime overrides the ledger's slot-to-time conversion. It is nil in
+	// production. The ledger converter needs the epoch cache a running node
+	// builds, which a store-backed test adapter has no way to populate.
+	slotTime func(slot uint64) (time.Time, error)
 }
 
 // NewNodeAdapter creates a NodeAdapter that queries the
@@ -3817,6 +3821,19 @@ func (a *NodeAdapter) AddressTransactions(
 		)
 	}
 
+	ret, err := a.transactionPositionInfos(ctx, txs)
+	if err != nil {
+		return nil, 0, err
+	}
+	return ret, total, nil
+}
+
+// transactionPositionInfos resolves the block height and block time of each
+// transaction. Heights are looked up once per distinct block.
+func (a *NodeAdapter) transactionPositionInfos(
+	ctx context.Context,
+	txs []models.Transaction,
+) ([]AddressTransactionInfo, error) {
 	blockNumbers := make(map[string]uint64, len(txs))
 	ret := make([]AddressTransactionInfo, 0, len(txs))
 	for _, tx := range txs {
@@ -3825,7 +3842,7 @@ func (a *NodeAdapter) AddressTransactions(
 		if !ok {
 			block, err := a.ledgerState.BlockByHash(ctx, tx.BlockHash)
 			if err != nil {
-				return nil, 0, fmt.Errorf(
+				return nil, fmt.Errorf(
 					"get block for transaction %x: %w",
 					tx.Hash,
 					err,
@@ -3837,7 +3854,7 @@ func (a *NodeAdapter) AddressTransactions(
 
 		blockTime, err := a.transactionBlockTime(tx)
 		if err != nil {
-			return nil, 0, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"get block time for transaction %x: %w",
 				tx.Hash,
 				err,
@@ -3850,7 +3867,7 @@ func (a *NodeAdapter) AddressTransactions(
 			BlockTime:   blockTime,
 		})
 	}
-	return ret, total, nil
+	return ret, nil
 }
 
 // MetadataTransactions returns paginated transaction metadata values for the
@@ -5662,10 +5679,17 @@ func (a *NodeAdapter) protocolParamsForSlot(
 	return pparams, nil
 }
 
+func (a *NodeAdapter) slotToTime(slot uint64) (time.Time, error) {
+	if a.slotTime != nil {
+		return a.slotTime(slot)
+	}
+	return a.ledgerState.SlotToTime(slot)
+}
+
 func (a *NodeAdapter) transactionBlockTime(
 	tx models.Transaction,
 ) (int64, error) {
-	blockTime, err := a.ledgerState.SlotToTime(tx.Slot)
+	blockTime, err := a.slotToTime(tx.Slot)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"convert slot %d to block time for transaction %x: %w",

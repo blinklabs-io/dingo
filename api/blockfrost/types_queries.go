@@ -14,6 +14,8 @@
 
 package blockfrost
 
+import "encoding/json"
+
 // BlockTransactionCBORResponse is one entry of the block transaction CBOR
 // listings.
 type BlockTransactionCBORResponse struct {
@@ -55,4 +57,33 @@ type AddressTotalResponse struct {
 	ReceivedSum []AddressAmountResponse `json:"received_sum"`
 	SentSum     []AddressAmountResponse `json:"sent_sum"`
 	TxCount     int                     `json:"tx_count"`
+}
+
+// AssetListItemResponse is one entry of an asset listing.
+type AssetListItemResponse struct {
+	Asset    string `json:"asset"`
+	Quantity string `json:"quantity"`
+}
+
+// AssetHistoryResponse is one mint or burn event of an asset.
+type AssetHistoryResponse struct {
+	TxHash string `json:"tx_hash"`
+	Action string `json:"action"`
+	Amount string `json:"amount"`
+}
+
+// AssetUTXOResponse is one current UTxO holding an asset. InlineDatumJSON is
+// null for an output without an inline datum.
+type AssetUTXOResponse struct {
+	Address             string                  `json:"address"`
+	TxHash              string                  `json:"tx_hash"`
+	OutputIndex         int                     `json:"output_index"`
+	Amount              []AddressAmountResponse `json:"amount"`
+	Block               string                  `json:"block"`
+	BlockHeight         uint64                  `json:"block_height"`
+	BlockTime           int64                   `json:"block_time"`
+	DataHash            *string                 `json:"data_hash"`
+	InlineDatum         *string                 `json:"inline_datum"`
+	InlineDatumJSON     json.RawMessage         `json:"inline_datum_json"`
+	ReferenceScriptHash *string                 `json:"reference_script_hash"`
 }

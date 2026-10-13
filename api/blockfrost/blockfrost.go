@@ -131,8 +131,12 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleAsset,
 	)
 	mux.HandleFunc(
-		"GET /api/v0/assets/{asset}/addresses",
-		b.handleAssetAddresses,
+		"GET /api/v0/assets",
+		b.handleAssets,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/assets/{asset}/{section}",
+		b.handleAssetSection,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/pools",

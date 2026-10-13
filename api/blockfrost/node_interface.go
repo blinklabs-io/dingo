@@ -26,6 +26,7 @@ import (
 type BlockfrostNode interface {
 	BlockQueryNode
 	AddressQueryNode
+	AssetQueryNode
 
 	// ChainTip returns the current chain tip info.
 	ChainTip() (ChainTipInfo, error)
