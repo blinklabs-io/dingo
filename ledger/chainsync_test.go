@@ -5324,6 +5324,119 @@ func TestHandleEventChainsyncRollbackToBlockTipDoesNotPublishLedgerRollback(
 	)
 }
 
+func TestHandleEventChainsyncRollbackToStalePointAheadRequestsResync(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+	resyncCh := subscribeChainsyncResync(t, bus)
+
+	staleBlock := chain.RawBlock{
+		Slot:        fixture.currentTip.Point.Slot + 5,
+		Hash:        testHashBytes("rollback-ahead-stale-block"),
+		BlockNumber: fixture.currentTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    fixture.currentTip.Point.Hash,
+		Cbor:        []byte{0x80},
+	}
+	require.NoError(t, fixture.ls.chain.AddRawBlocks(
+		context.Background(),
+		[]chain.RawBlock{staleBlock},
+	))
+	require.NoError(t, fixture.ls.chain.Rollback(
+		context.Background(),
+		fixture.currentTip.Point,
+	))
+
+	queuedHeader := mockHeader{
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("rollback-ahead-queued-header"),
+		),
+		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 10,
+	}
+	require.NoError(
+		t,
+		fixture.ls.chain.AddBlockHeader(context.Background(), queuedHeader),
+	)
+	require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+
+	rollbackPoint := ocommon.NewPoint(staleBlock.Slot, staleBlock.Hash)
+	require.NoError(t, fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        rollbackPoint,
+		},
+		nil,
+	))
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"expected chainsync resync event",
+	)
+	assert.Equal(t, fixture.connId, resync.ConnectionId)
+	assert.Equal(t, event.ChainsyncResyncReasonRollbackAhead, resync.Reason)
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+}
+
+func TestHandleEventChainsyncRollbackToQueuedHeaderTrimsSuffix(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+	resyncCh := subscribeChainsyncResync(t, bus)
+
+	first := mockHeader{
+		hash:        lcommon.NewBlake2b256(testHashBytes("rollback-queued-first")),
+		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 5,
+	}
+	second := mockHeader{
+		hash:        lcommon.NewBlake2b256(testHashBytes("rollback-queued-second")),
+		prevHash:    first.hash,
+		blockNumber: first.blockNumber + 1,
+		slot:        first.slot + 5,
+	}
+	require.NoError(
+		t,
+		fixture.ls.chain.AddBlockHeader(context.Background(), first),
+	)
+	require.NoError(
+		t,
+		fixture.ls.chain.AddBlockHeader(context.Background(), second),
+	)
+
+	firstPoint := ocommon.NewPoint(first.slot, first.hash.Bytes())
+	require.NoError(t, fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{ConnectionId: fixture.connId, Point: firstPoint},
+		nil,
+	))
+
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, 1, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, firstPoint, fixture.ls.chain.HeaderTip().Point)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		200*time.Millisecond,
+		"queued-header rollback must not request a chainsync resync",
+	)
+}
+
 // TestRollbackAtCurrentTipIsNoop pins the ls.rollback contract that
 // the no-op fix relies on: calling rollback with the point the ledger
 // already sits at must neither mutate state nor publish a "local
