@@ -1515,8 +1515,6 @@ power_adjustments AS (
            last_activity_epoch amount FROM drep WHERE FALSE`
 		amountArgs = append(amountArgs, models.RewardStakeCalculationVersion)
 		for _, adjustment := range page.PowerAdjustments {
-			ctes += " UNION ALL "
-			ctes += "SELECT ? credential, ? credential_tag, ? predefined, ? amount"
 			amount, err := checkedInt64(adjustment.Amount)
 			if err != nil {
 				return nil, 0, fmt.Errorf("DRep power adjustment: %w", err)
@@ -1532,6 +1530,10 @@ power_adjustments AS (
 			adjustmentArgs = append(adjustmentArgs, adjustment.Credential,
 				adjustment.CredentialTag, predefined, amount)
 		}
+		ctes += strings.Repeat(
+			" UNION ALL SELECT ? credential, ? credential_tag, ? predefined, ? amount",
+			len(page.PowerAdjustments),
+		)
 		ctes += `),
 ranked AS (
     SELECT classified.*,

@@ -1126,7 +1126,11 @@ func (m *mockNode) PoolsExtended(
 	if params.Order == PaginationOrderDesc {
 		slices.Reverse(pools)
 	}
-	return paginateSlice(pools, params), len(pools), m.poolsErr
+	offset, ok := paginationOffset(params)
+	if !ok || offset >= len(pools) {
+		return []PoolExtendedInfo{}, len(pools), m.poolsErr
+	}
+	return pools[offset:min(offset+params.Count, len(pools))], len(pools), m.poolsErr
 }
 
 func (m *mockNode) PoolsList(ctx context.Context,
