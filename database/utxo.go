@@ -1894,6 +1894,13 @@ func (d *Database) restoreRolledBackAssetUtxoAddresses(
 	slot uint64,
 	txn *Txn,
 ) error {
+	resolveTxn := txn
+	cleanup := func() {}
+	if txn.Blob() == nil {
+		resolveTxn, cleanup = txn.withBlobForRecovery()
+	}
+	defer cleanup()
+
 	const batchSize = 128
 	var afterID uint
 	for {
@@ -1904,7 +1911,7 @@ func (d *Database) restoreRolledBackAssetUtxoAddresses(
 		if err != nil {
 			return err
 		}
-		rows, err := d.resolveUtxoAddresses(ctx, utxos, txn)
+		rows, err := d.resolveUtxoAddresses(ctx, utxos, resolveTxn)
 		if err != nil {
 			return err
 		}

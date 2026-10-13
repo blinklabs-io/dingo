@@ -205,10 +205,12 @@ func TestBackfillLiveAssetUtxoAddressesFailsClosed(t *testing.T) {
 
 func TestRollbackRestoresLegacyAssetAddressAtomically(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		validCbor bool
+		name         string
+		validCbor    bool
+		metadataOnly bool
 	}{
 		{name: "restores address", validCbor: true},
+		{name: "metadata-only transaction", validCbor: true, metadataOnly: true},
 		{name: "invalid CBOR keeps UTxO spent"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -240,12 +242,22 @@ INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, 20, 0)`,
 UPDATE utxo SET deleted_slot = 20, spent_at_tx_id = ?`, spenderHash)
 			require.NoError(t, err)
 
-			err = db.RollbackMetadataAfterSlot(
-				t.Context(),
-				ocommon.NewPoint(10, []byte("rollback")),
-				0,
-				nil,
-			)
+			if tc.metadataOnly {
+				db.cborCache = nil
+				txn := NewMetadataOnlyTxn(t.Context(), db, true)
+				t.Cleanup(txn.Release)
+				err = db.TransactionsDeleteRolledback(t.Context(), 10, txn)
+				if err == nil {
+					err = txn.Commit()
+				}
+			} else {
+				err = db.RollbackMetadataAfterSlot(
+					t.Context(),
+					ocommon.NewPoint(10, []byte("rollback")),
+					0,
+					nil,
+				)
+			}
 			if !tc.validCbor {
 				require.Error(t, err)
 				var deletedSlot uint64
