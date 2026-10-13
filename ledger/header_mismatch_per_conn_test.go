@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"testing"
@@ -25,6 +26,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
@@ -121,9 +123,9 @@ func declinedMismatchHeader(seed string, tip ochainsync.Tip) mockHeader {
 	}
 }
 
-// headerMismatchCount is shared by every connection, so nineteen mismatches
-// delivered by a fork peer must not let one mismatch from an honest peer
-// trip the persistent-fork resync against that honest peer.
+// Mismatches are counted per connection, so nineteen mismatches delivered by
+// a fork peer must not let one mismatch from an honest peer trip the
+// persistent-fork resync against that honest peer.
 func TestDeadForkSharedMismatchCounterDoesNotBlameHonestPeer(t *testing.T) {
 	t.Parallel()
 
@@ -145,7 +147,7 @@ func TestDeadForkSharedMismatchCounterDoesNotBlameHonestPeer(t *testing.T) {
 			deadForkEvent(forkConn, h, advertised)))
 	}
 	require.Equal(t, headerMismatchResyncThreshold-1,
-		fixture.ls.headerMismatchCount,
+		fixture.ls.headerMismatchCounts[connIdKey(forkConn)],
 		"fork peer's mismatches must accumulate for the scenario to hold")
 
 	h := declinedMismatchHeader("honest-0", fixture.currentTip)
@@ -187,4 +189,80 @@ func TestPersistentForkResyncsConnectionOwningMismatches(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, persistent)
+}
+
+// Two fork peers whose mismatches interleave must each accumulate their own
+// count; neither may reset the other's.
+func TestPersistentForkResyncsInterleavedForkPeers(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+	rec := newResyncRecorder(t, bus)
+
+	forkA := deadForkConnId(3002)
+	forkB := deadForkConnId(3003)
+	advertised := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100000, testHashBytes("far-tip")),
+		BlockNumber: 5000,
+	}
+	for i := range headerMismatchResyncThreshold {
+		for name, connId := range map[string]ouroboros.ConnectionId{
+			"a": forkA,
+			"b": forkB,
+		} {
+			h := declinedMismatchHeader(
+				fmt.Sprintf("%s-%d", name, i), fixture.currentTip)
+			require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
+				deadForkEvent(connId, h, advertised)))
+		}
+	}
+
+	resynced := map[string]int{}
+	for _, e := range rec.drain(t) {
+		if e.Reason == event.ChainsyncResyncReasonPersistentFork {
+			resynced[connIdKey(e.ConnectionId)]++
+		}
+	}
+	require.Positive(t, resynced[connIdKey(forkA)], "fork peer A not resynced")
+	require.Positive(t, resynced[connIdKey(forkB)], "fork peer B not resynced")
+}
+
+// A failed fork resolution undoes only its own increment, so it must not
+// erase another connection's accumulated count.
+func TestResolveErrorKeepsOtherConnectionMismatchCount(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	forkConn := deadForkConnId(3002)
+	otherConn := deadForkConnId(3003)
+	fixture.ls.headerMismatchCounts = map[string]int{
+		connIdKey(otherConn): 7,
+	}
+	ancestorLookupErr := errors.New("ancestor lookup failed")
+	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		return models.Block{}, ancestorLookupErr
+	}
+
+	header := mockHeader{
+		hash: lcommon.NewBlake2b256(testHashBytes("resolve-err-fork")),
+		prevHash: lcommon.NewBlake2b256(
+			testHashBytes("resolve-err-ancestor"),
+		),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 10,
+	}
+	err := fixture.ls.handleEventChainsyncBlockHeader(deadForkEvent(
+		forkConn,
+		header,
+		ochainsync.Tip{
+			Point:       ocommon.NewPoint(header.slot, header.hash.Bytes()),
+			BlockNumber: header.blockNumber,
+		},
+	))
+	require.ErrorIs(t, err, ancestorLookupErr)
+	require.Equal(t, 7, fixture.ls.headerMismatchCounts[connIdKey(otherConn)])
+	require.Zero(t, fixture.ls.headerMismatchCounts[connIdKey(forkConn)])
 }

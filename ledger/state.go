@@ -1827,8 +1827,7 @@ type LedgerState struct {
 	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
 
 	// Header mismatch tracking for fork detection and re-sync
-	headerMismatchCount       int // consecutive header mismatch count for headerMismatchConnId
-	headerMismatchConnId      ouroboros.ConnectionId
+	headerMismatchCounts      map[string]int // consecutive header mismatches keyed by connIdKey
 	bufferedHeaderEvents      map[string][]ChainsyncEvent
 	peerHeaderHistory         map[string]*peerHeaderChain
 	peerHeaderHistoryBytes    int

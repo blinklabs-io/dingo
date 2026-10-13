@@ -8230,7 +8230,7 @@ func TestHandleEventChainsyncBlockHeaderIgnoresObservedPredecessor(
 			fixture.ls.config.ClearSeenHeadersFromFunc = func(uint64) {
 				clearCalls++
 			}
-			fixture.ls.headerMismatchCount = 7
+			fixture.ls.headerMismatchCounts = map[string]int{connIdKey(fixture.connId): 7}
 			err := fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 				ConnectionId: fixture.connId,
 				Point: ocommon.NewPoint(
@@ -8249,7 +8249,7 @@ func TestHandleEventChainsyncBlockHeaderIgnoresObservedPredecessor(
 
 			require.NoError(t, err)
 			assert.Equal(t, 2, fixture.ls.chain.HeaderCount())
-			assert.Equal(t, 7, fixture.ls.headerMismatchCount)
+			assert.Equal(t, 7, fixture.ls.headerMismatchCounts[connIdKey(fixture.connId)])
 			assert.Zero(t, clearCalls)
 			assert.True(
 				t,
@@ -8331,7 +8331,7 @@ func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
 		t,
 		bytes.Equal(fixture.currentNonce, fixture.ls.currentTipBlockNonce),
 	)
-	assert.Zero(t, fixture.ls.headerMismatchCount)
+	assert.Empty(t, fixture.ls.headerMismatchCounts)
 	assert.Zero(t, fixture.ls.chain.HeaderCount())
 
 	dbTip, err := fixture.ls.db.GetTip(nil)
@@ -8410,7 +8410,7 @@ func TestHandleEventChainsyncBlockHeaderRestoresMismatchCountOnAncestorLookupErr
 	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
 		return models.Block{}, ancestorLookupErr
 	}
-	fixture.ls.headerMismatchCount = 7
+	fixture.ls.headerMismatchCounts = map[string]int{connIdKey(fixture.connId): 7}
 
 	forkHash := testHashBytes("handler-lookup-error-fork-block")
 	header := mockHeader{
@@ -8442,7 +8442,7 @@ func TestHandleEventChainsyncBlockHeaderRestoresMismatchCountOnAncestorLookupErr
 
 	require.ErrorIs(t, err, ancestorLookupErr)
 	require.NotErrorIs(t, err, models.ErrBlockNotFound)
-	assert.Equal(t, 7, fixture.ls.headerMismatchCount)
+	assert.Equal(t, 7, fixture.ls.headerMismatchCounts[connIdKey(fixture.connId)])
 }
 
 func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
@@ -8802,7 +8802,7 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 		resync.Reason,
 	)
 
-	assert.Zero(t, fixture.ls.headerMismatchCount)
+	assert.Empty(t, fixture.ls.headerMismatchCounts)
 	_, ok := fixture.ls.bufferedHeaderEvents[connIdKey(fixture.connId)]
 	assert.False(t, ok)
 }
@@ -9227,7 +9227,7 @@ func TestRecoverAfterLocalRollbackResetsStateWithoutTrackedClients(
 	fixture.ls.headerPipelineConnId = fixture.connId
 	fixture.ls.selectedBlockfetchConnId = fixture.connId
 	fixture.ls.activeBlockfetchConnId = fixture.connId
-	fixture.ls.headerMismatchCount = 3
+	fixture.ls.headerMismatchCounts = map[string]int{connIdKey(fixture.connId): 3}
 	fixture.ls.rollbackHistory = []rollbackRecord{
 		{
 			point: ocommon.Point{
@@ -9260,7 +9260,7 @@ func TestRecoverAfterLocalRollbackResetsStateWithoutTrackedClients(
 	require.False(t, result.Recovered)
 	assert.False(t, result.SkipConnectionClose)
 	assert.Zero(t, fixture.ls.chain.HeaderCount())
-	assert.Zero(t, fixture.ls.headerMismatchCount)
+	assert.Empty(t, fixture.ls.headerMismatchCounts)
 	assert.Nil(t, fixture.ls.rollbackHistory)
 	assert.Nil(t, fixture.ls.bufferedHeaderEvents)
 	assert.True(
@@ -9335,7 +9335,7 @@ func TestRecoverAfterLocalRollbackSkipsConnectionCloseWhenPrimaryChainTipPastRol
 		[]byte(nil),
 		fixture.ancestorNonce...,
 	)
-	fixture.ls.headerMismatchCount = 7
+	fixture.ls.headerMismatchCounts = map[string]int{connIdKey(fixture.connId): 7}
 	fixture.ls.lastLocalRollbackSeq = 1
 	fixture.ls.lastLocalRollbackPoint = ocommon.Point{
 		Slot: fixture.ancestorTip.Point.Slot,
@@ -9356,7 +9356,7 @@ func TestRecoverAfterLocalRollbackSkipsConnectionCloseWhenPrimaryChainTipPastRol
 		result.PrimaryChainTipSlot,
 	)
 	assert.Equal(t, 1, fixture.ls.chain.HeaderCount())
-	assert.Equal(t, 7, fixture.ls.headerMismatchCount)
+	assert.Equal(t, 7, fixture.ls.headerMismatchCounts[connIdKey(fixture.connId)])
 }
 
 // Reproduces a chainsync recovery hang seen during multi-pool DevNet
@@ -9483,7 +9483,7 @@ func TestHandleEventChainsyncBlockHeaderIgnoresStaleRollForwardBehindTip(
 	})
 	require.NoError(t, err)
 	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
-	assert.Zero(t, fixture.ls.headerMismatchCount)
+	assert.Empty(t, fixture.ls.headerMismatchCounts)
 	assert.Zero(t, fixture.ls.chain.HeaderCount())
 
 	testutil.RequireNoReceive(
@@ -10120,7 +10120,7 @@ func TestHandleEventChainsyncBlockHeaderIgnoresHistoricalPrimaryHeader(
 	})
 
 	require.NoError(t, err)
-	assert.Zero(t, fixture.ls.headerMismatchCount)
+	assert.Empty(t, fixture.ls.headerMismatchCounts)
 	assert.Zero(t, fixture.ls.chain.HeaderCount())
 	assert.Equal(
 		t,
@@ -10860,8 +10860,8 @@ func TestStartQueuedBlockfetchAfterForkRestartClearsShadowState(t *testing.T) {
 // then delivers a chainsync header at the SAME slot 20 with a
 // different hash whose prevHash is the ancestor at slot 10. The
 // existing handler treated the equal-slot case as stale and bailed
-// before incrementing headerMismatchCount or invoking tryResolveFork.
-// Asserting that headerMismatchCount becomes 1 demonstrates the
+// before incrementing headerMismatchCounts or invoking tryResolveFork.
+// Asserting that headerMismatchCounts becomes 1 demonstrates the
 // header took the not-stale branch and reached the fork-resolution
 // gate where chainselection can apply the reference implementation's
 // Praos select-view rules.
@@ -10938,12 +10938,12 @@ func TestHandleEventChainsyncBlockHeaderRoutesSlotBattleToForkResolution(
 	//     RollbackChainsyncState.
 	//   - declines because the reference implementation's Praos
 	//     equal-length tiebreaker is not armed for this peer/header
-	//     pair -> headerMismatchCount stays at 1 because nothing in
+	//     pair -> headerMismatchCounts stays at 1 because nothing in
 	//     tryResolveFork's success branches reset it.
 	//
 	// The stale-drop early return takes neither path: chain stays
 	// put, chainsyncState stays SyncingChainsyncState, AND
-	// headerMismatchCount stays at zero. Asserting "at least one of
+	// headerMismatchCounts stays at zero. Asserting "at least one of
 	// those three witnesses changed" pins the routing without
 	// over-specifying which side of the tiebreak this particular
 	// pair of hashes lands on.
@@ -10952,18 +10952,18 @@ func TestHandleEventChainsyncBlockHeaderRoutesSlotBattleToForkResolution(
 		fixture.ls.chain.Tip().Point.Hash,
 	)
 	rolledBack := fixture.ls.chainsyncState == RollbackChainsyncState
-	mismatchTracked := fixture.ls.headerMismatchCount > 0
+	mismatchTracked := len(fixture.ls.headerMismatchCounts) > 0
 	assert.Truef(
 		t,
 		chainAdvanced || rolledBack || mismatchTracked,
 		"slot-battle header took the stale-drop early return: "+
 			"chain.Tip() unchanged, chainsyncState still Syncing, "+
-			"and headerMismatchCount=%d. The handler dropped the "+
+			"and headerMismatchCounts=%v. The handler dropped the "+
 			"peer's competing same-slot forge before "+
 			"chainselection could pick a winner; chains will then "+
 			"diverge at every slot battle and the divergence will "+
 			"fold into the evolving nonce.",
-		fixture.ls.headerMismatchCount,
+		fixture.ls.headerMismatchCounts,
 	)
 }
 
@@ -13562,7 +13562,7 @@ func TestHandleEventChainsyncBlockHeaderIgnoresStaleHeaderBehindChainTip(
 		},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 0, fixture.ls.headerMismatchCount)
+	assert.Empty(t, fixture.ls.headerMismatchCounts)
 	assert.Equal(t, 0, fixture.ls.chain.HeaderCount())
 	assert.Equal(
 		t,
@@ -13602,7 +13602,7 @@ func TestHandleEventChainsyncBlockHeaderSkipsMithrilBoundaryHeaderVerification(
 		},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 0, fixture.ls.headerMismatchCount)
+	assert.Empty(t, fixture.ls.headerMismatchCounts)
 	assert.Equal(t, 0, fixture.ls.chain.HeaderCount())
 	assert.Equal(
 		t,
