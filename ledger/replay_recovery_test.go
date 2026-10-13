@@ -2970,6 +2970,59 @@ func TestReplayRecoveryRejectsDeterministicProposalReturnAccountDoesNotExist(
 	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
+func TestIsConwayGovPredFailureError(t *testing.T) {
+	t.Parallel()
+
+	addr, err := lcommon.NewAddress(
+		"stake_test1ur03nykas2c79sl38zwwsqrsrnzfxqx70nn3k7h40j60ajsle7at7",
+	)
+	require.NoError(t, err)
+
+	verdicts := []error{
+		conway.ProtocolParameterUpdateEmptyError{},
+		conway.ProtocolParameterUpdateFieldZeroError{},
+		conway.ConwayProtocolParameterUpdateError{},
+		conway.CommitteeMemberAlreadyExpiredError{},
+		conway.EmptyTreasuryWithdrawalsError{},
+		conway.ZeroTreasuryWithdrawalAmountError{},
+		conway.BootstrapDisallowedGovActionError{},
+		conway.WrongNetworkProposalAddressError{},
+		conway.MalformedGovActionError{},
+		conway.ConflictingCommitteeUpdateError{},
+		conway.InvalidGuardrailsScriptHashError{},
+		conway.BadHardForkProtocolVersionError{},
+		conway.InvalidGovActionAncestorError{},
+		conway.ProposalDepositIncorrectError{},
+		conway.ProposalReturnAccountDoesNotExistError{Address: addr},
+		conway.TreasuryWithdrawalReturnAccountsDoNotExistError{},
+		conway.UnknownGovActionIdError{},
+		conway.UnknownVoterError{},
+		conway.VotingOnExpiredGovActionError{},
+		conway.BootstrapVotingRestrictionError{},
+		conway.StakePoolVotingRestrictionError{},
+		conway.CCVotingRestrictionError{},
+		conway.UnelectedCommitteeVoterError{},
+	}
+	for _, verdict := range verdicts {
+		assert.True(t, isConwayGovPredFailureError(verdict), "%T", verdict)
+	}
+	assert.True(
+		t,
+		isConwayGovPredFailureError(fmt.Errorf("wrapped: %w", verdicts[0])),
+	)
+
+	stateErrors := []error{
+		conway.CommitteeExpiryEpochUnavailableError{},
+		conway.ConstitutionLookupError{},
+		conway.MalformedConstitutionError{},
+		conway.CommitteeMemberLookupError{},
+		conway.CommitteeStateUnavailableError{},
+	}
+	for _, stateErr := range stateErrors {
+		assert.False(t, isConwayGovPredFailureError(stateErr), "%T", stateErr)
+	}
+}
+
 // A duplicate-input failure reaching the deterministic branch while the node
 // is at tip takes that branch rather than recoverAtTipFromTxValidationError's
 // escalating-depth schedule. Deepening the rewind cannot change a verdict that
