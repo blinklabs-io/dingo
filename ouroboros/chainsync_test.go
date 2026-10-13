@@ -852,11 +852,13 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 	o.eventBus = bus
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
 	var verifiedConn ouroboros.ConnectionId
+	verificationCalls := 0
 	o.chainSelectionVerifyHeaderCrypto = func(
 		connId ouroboros.ConnectionId,
 		_ gledger.BlockHeader,
 	) (uint64, error) {
 		verifiedConn = connId
+		verificationCalls++
 		return 0, errors.New("boom: invalid VRF proof")
 	}
 
@@ -907,6 +909,26 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 		200*time.Millisecond,
 		"an excluded peer's AwaitReply must not reach the ledger",
 	)
+
+	secondHeader := newTestBlockHeader(201, 2, 0xcd)
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: conn},
+		0,
+		secondHeader,
+		ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				secondHeader.SlotNumber(),
+				secondHeader.Hash().Bytes(),
+			),
+			BlockNumber: 2,
+		},
+	))
+	require.Equal(t, 1, verificationCalls,
+		"a failed connection must not regain verification eligibility")
+	client := state.GetTrackedClient(conn)
+	require.NotNil(t, client)
+	require.Equal(t, dchainsync.ClientStatusFailed, client.Status)
+	require.True(t, client.ObservabilityOnly)
 }
 
 // TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification

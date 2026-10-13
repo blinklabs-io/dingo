@@ -1420,10 +1420,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 						),
 					)
 					if o.chainsyncState != nil {
-						o.chainsyncState.SetClientObservabilityOnly(
-							ctx.ConnectionId,
-							true,
-						)
+						o.chainsyncState.MarkClientFailed(ctx.ConnectionId)
 					}
 					ingressEligible = false
 				}
