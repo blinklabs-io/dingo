@@ -724,13 +724,24 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		// Recognize malformed registrations by shape too: otherwise a staged
 		// map with more decodable entries can replace the current map.
 		isPoolParams := len(pools) > 0 || hasPoolParamsEntries(ps[m.idx])
-		if bestIdx < 0 ||
-			(len(ps) != 4 && isPoolParams && !bestIsPoolParams) {
+		if bestIdx < 0 || (isPoolParams && !bestIsPoolParams) {
 			bestPools = pools
 			bestWarning = warning
 			bestIdx = m.idx
 			bestIsPoolParams = isPoolParams
 		}
+	}
+	// An empty poolParams map has no entries to recognize by shape, so a
+	// lone staged map would otherwise be read as the current one. A
+	// registered pool always has a deposit, so a pool-keyed map that follows
+	// an empty map and has none is futurePoolParams. The four-field layout is
+	// excluded: UTxO-HD snapshots put the current pools at index 1 behind an
+	// empty map and keep each deposit inside the pool record, so there the
+	// two cases cannot be told apart.
+	if len(ps) != 4 && bestIsPoolParams && bestIdx > 0 &&
+		isEmptyCborMap(ps[bestIdx-1]) &&
+		!poolsHaveDeposits(bestPools, ps, bestIdx) {
+		bestPools, bestWarning, bestIdx = nil, nil, bestIdx-1
 	}
 	var mapErrs []error
 	if bestWarning != nil {
@@ -783,6 +794,37 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		mapErrs = append(mapErrs, err)
 	}
 	return bestPools, retirements, errors.Join(mapErrs...)
+}
+
+func isEmptyCborMap(data []byte) bool {
+	entries, err := decodeMapEntries(data)
+	return err == nil && len(entries) == 0
+}
+
+// poolsHaveDeposits reports whether any PState map other than the one at
+// poolParamsIdx holds a deposit for one of pools.
+func poolsHaveDeposits(
+	pools []ParsedPool,
+	ps [][]byte,
+	poolParamsIdx int,
+) bool {
+	for i, elem := range ps {
+		if i == poolParamsIdx {
+			continue
+		}
+		deposits, _ := parsePoolUint64Map(elem)
+		if !looksLikeDeposits(deposits) {
+			continue
+		}
+		for j := range pools {
+			if _, ok := deposits[hex.EncodeToString(
+				pools[j].PoolKeyHash,
+			)]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func hasPoolParamsEntries(data []byte) bool {

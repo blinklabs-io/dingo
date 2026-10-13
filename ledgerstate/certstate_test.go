@@ -2015,21 +2015,6 @@ func TestParsePStateFuturePoolParamsLargerThanCurrent(t *testing.T) {
 	require.Len(t, pools[0].FutureParams.Owners, 3)
 }
 
-func TestParsePStateRejectsFutureParamsWithoutCurrentPool(t *testing.T) {
-	t.Parallel()
-
-	poolHash := bytes.Repeat([]byte{0x11}, 28)
-	pools, _, err := parsePStateWithRetirements(encodeTestPState(
-		t,
-		encodeCborMap(t),
-		encodeCborMap(t, poolHash, testPoolParams(0x11)),
-		encodeCborMap(t),
-		encodeCborMap(t),
-	))
-	require.ErrorContains(t, err, "unregistered pool")
-	require.Empty(t, pools)
-}
-
 // A staged re-registration with no registered pool cannot be applied, so the
 // parse must report it instead of dropping it.
 func TestParsePStateRejectsFuturePoolParamsForUnregisteredPool(t *testing.T) {
@@ -2183,4 +2168,28 @@ func TestParsePStateRejectsInvalidFutureRewardAccount(t *testing.T) {
 	require.ErrorContains(t, err, "future pool params")
 	require.Len(t, pools, 1)
 	require.Nil(t, pools[0].FutureParams)
+}
+
+// The Conway PState layout is not four fields. An empty poolParams map with a
+// populated futurePoolParams map must still fail: a staged entry has no pool
+// to re-register.
+func TestParsePStateConwayRejectsFutureParamsWithoutCurrentPool(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	emptyMap := encodeCborMap(t)
+	pstate, err := cbor.Encode([]any{
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(encodeCborMap(t, poolHash, testPoolParams(0x11))),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(emptyMap),
+	})
+	require.NoError(t, err)
+
+	pools, _, err := parsePStateConwayWithRetirements(pstate)
+	require.ErrorContains(t, err, "future pool params")
+	require.Empty(t, pools)
 }
