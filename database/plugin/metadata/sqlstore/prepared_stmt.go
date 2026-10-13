@@ -43,6 +43,7 @@ var hotStatements = func() []string {
 		getLiveUtxoByRefQuery,
 		getUtxoIncludingSpentByRefQuery,
 		transactionInsertSQL,
+		committeeHotAuthorizationDeleteIDQuery,
 		consumeUtxoSQL,
 		consumeUtxoSQLiteReturningSQL,
 		getUtxoSpendStateQuery,
