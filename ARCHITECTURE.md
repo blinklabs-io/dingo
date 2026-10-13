@@ -28,6 +28,9 @@ configured port is nonzero, so core-mode nodes and disabled ports resolve
 none of them. Failures unwind providers in reverse order. Normal shutdown
 orders APIs, mempool, ledger/database, then storage.
 Database receives provider-owned stores through `database.Stores`.
+Before API providers start, API-mode database startup runs the one-time,
+cancellable backfill for rendered addresses of live asset UTxOs; a sync_state
+marker skips the scan after it completes.
 Storage lifecycle contexts cross the provider boundary. In particular, Badger
 stops scheduling value-log GC before close and prevents a successful rewrite
 from chaining another pass. Because Badger cannot cancel a rewrite already in
@@ -2970,7 +2973,7 @@ does not keep serving as if it were valid, without writing back to the row.
 `/pools/extended` needs the same classification for every active pool on a
 page, not one pool at a time, so it does not call `PoolMetadata` per pool
 (that would be one query per row). Instead `NodeAdapter.PoolsExtended`
-resolves every active pool's registered metadata URL in a single
+resolves only the requested page's registered metadata URLs in a single
 `MetadataStore.GetOffchainMetadataBatch` call, then applies the same
 pending/failed/fetched classification (including the `offchainFetchError`
 mapping and the read-time `ValidatePoolMetadata` fallback) as pure,

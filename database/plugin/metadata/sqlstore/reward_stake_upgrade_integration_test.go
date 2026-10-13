@@ -120,7 +120,7 @@ func TestRewardStakeUpgradeStartCertifiesBeforeMigrations(t *testing.T) {
 		db.QueryRowContext(t.Context(), `SELECT MAX(version) FROM schema_migrations`).
 			Scan(&version),
 	)
-	require.Equal(t, 41, version)
+	require.Equal(t, 42, version)
 	for _, table := range []string{"pool_stake_snapshot", "reward_snapshot"} {
 		require.NoError(
 			t,
