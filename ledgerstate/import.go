@@ -665,6 +665,9 @@ func ImportLedgerState(
 		if err := cfg.Database.DeleteRewardStateAfterSlot(slot, txn); err != nil {
 			return fmt.Errorf("deleting post-anchor reward state: %w", err)
 		}
+		if err := cfg.Database.RestorePoolStateAtSlot(ctx, slot, txn); err != nil {
+			return fmt.Errorf("restoring post-anchor pool state: %w", err)
+		}
 		if err := cfg.Database.DeleteBlockNoncesAfterPoint(
 			ocommon.Point{Slot: slot, Hash: cfg.State.Tip.BlockHash},
 			txn,

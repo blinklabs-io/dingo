@@ -127,6 +127,59 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 	), "zero snapshot donations replace the anchor epoch's local row")
 }
 
+func TestImportLedgerStateSweepsPostAnchorOpCertSequences(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+	const (
+		belowSlot  = uint64(99_500)
+		anchorSlot = uint64(100_000)
+		aboveSlot  = uint64(101_000)
+	)
+	poolKeyHash := testPoolKeyHash(bytes.Repeat([]byte{0x7a}, 28))
+	require.NoError(t, db.Metadata().UpdatePoolOpCertSequence(
+		poolKeyHash, 7, belowSlot, nil,
+	))
+	require.NoError(t, db.Metadata().UpdatePoolOpCertSequence(
+		poolKeyHash, 8, aboveSlot, nil,
+	))
+
+	nonce := make([]byte, 32)
+	require.NoError(t, ImportLedgerState(
+		context.Background(),
+		ImportConfig{
+			Database: db,
+			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			State: &RawLedgerState{
+				Epoch:               anchorSlot / 1_000,
+				EraIndex:            EraConway,
+				EraBounds:           make([]EraBound, EraConway+1),
+				EpochNonce:          nonce,
+				EvolvingNonce:       nonce,
+				CandidateNonce:      nonce,
+				LastEpochBlockNonce: nonce,
+				Tip: &SnapshotTip{
+					Slot:      anchorSlot,
+					BlockHash: make([]byte, 32),
+				},
+			},
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, importTestEpochLength, nil
+			},
+		},
+	))
+
+	sequence, found, err := db.LatestPoolOpCertSequence(
+		context.Background(), poolKeyHash, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(7), sequence)
+}
+
 func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
 	t.Parallel()
 
@@ -146,6 +199,10 @@ func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
 	require.NoError(t, db.Metadata().SetNetworkState(3, 4, aboveSlot, nil))
 	require.NoError(t, db.Metadata().SetBlockNonce(
 		bytes.Repeat([]byte{0x5a}, 32), aboveSlot, nonce, true, nil,
+	))
+	poolKeyHash := testPoolKeyHash(bytes.Repeat([]byte{0x7b}, 28))
+	require.NoError(t, db.Metadata().UpdatePoolOpCertSequence(
+		poolKeyHash, 8, aboveSlot, nil,
 	))
 
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
@@ -188,4 +245,15 @@ func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
 		"SELECT COUNT(*) FROM block_nonce WHERE slot > ?", anchorSlot,
 	).Scan(&count))
 	require.Equal(t, 1, count, "nonce sweep must roll back with the failed delete")
+	sequence, found, err := db.LatestPoolOpCertSequence(
+		context.Background(), poolKeyHash, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(
+		t,
+		uint64(8),
+		sequence,
+		"op-cert sweep must roll back with the failed delete",
+	)
 }
