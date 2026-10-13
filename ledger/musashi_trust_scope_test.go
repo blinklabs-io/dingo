@@ -135,7 +135,9 @@ func TestDijkstraTxValidationErrorsArePrototypeOnly(t *testing.T) {
 func TestDijkstraEraGateUsesCurrentEra(t *testing.T) {
 	t.Parallel()
 
-	raw := newTestDijkstraBlockCbor(t, 100, 1, 1, 0, []byte{1})
+	raw := newTestDijkstraBlockCbor(
+		t, 100, 1, 1, 0, make64ByteVRFFirstByteLedger(1),
+	)
 	block, err := gledger.NewBlockFromCbor(gledger.BlockTypeDijkstra, raw)
 	require.NoError(t, err)
 	assert.Equal(t, uint8(dijkstra.EraIdDijkstra), block.Era().Id)

@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,6 +24,13 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
+
+func newTestEventBus(t testing.TB, logger *slog.Logger) *event.EventBus {
+	t.Helper()
+	bus := event.NewEventBus(nil, logger)
+	t.Cleanup(bus.Close)
+	return bus
+}
 
 // TestBlockfetchSubscriptionRemainsLosslessPastDeliveryTimeout verifies the
 // production LedgerState subscription policy, not only EventBus in isolation.
@@ -33,7 +41,7 @@ func TestBlockfetchSubscriptionRemainsLosslessPastDeliveryTimeout(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	defer bus.Stop()
 
 	started := make(chan struct{})

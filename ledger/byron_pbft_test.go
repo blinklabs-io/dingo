@@ -389,6 +389,9 @@ type byronPBFTBodyOverride struct {
 	// blockVersion replaces the version the header declares, which is the
 	// protocol version its issuer endorses.
 	blockVersion *byron.ByronBlockVersion
+	// skipBodyProofValidation returns a decoded malformed block for a test that
+	// verifies the receiving path rejects it.
+	skipBodyProofValidation bool
 }
 
 func newSignedByronPBFTBlockWithBody(
@@ -528,8 +531,14 @@ func newSignedByronPBFTBlockWithBody(
 	blockParts[1] = cbor.RawMessage(bodyCbor)
 	blockCbor, err := cbor.Encode(blockParts)
 	require.NoError(t, err)
-	rebuilt, err := byron.NewByronMainBlockFromCbor(blockCbor)
+	rebuilt, err := byron.NewByronMainBlockFromCbor(
+		blockCbor,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+	)
 	require.NoError(t, err)
+	if override == nil || !override.skipBodyProofValidation {
+		require.NoError(t, rebuilt.ValidateBodyProof())
+	}
 	require.Equal(t, previousHash, rebuilt.PrevHash())
 	require.Equal(t, delegationPayload, rebuilt.Body.DlgPayload)
 	return rebuilt
@@ -2714,4 +2723,85 @@ func TestByronAdoptedUpdateChangesSizeLimitsAtAdoptionPoint(t *testing.T) {
 			check(firstAfter, 1, test.afterErr)
 		})
 	}
+}
+
+// Applying the first block of a from-genesis chain finds that block already on
+// the primary chain, so the chain tip is not origin. The ledger tip is, and an
+// epoch 0 EBB there is held to the first-block rules.
+func TestValidateByronPBFTHeaderLedgerApplyFirstEbb(t *testing.T) {
+	t.Parallel()
+
+	genesisHashValue := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	newLedger := func(
+		t *testing.T,
+		ebb *byron.ByronEpochBoundaryBlock,
+	) *LedgerState {
+		t.Helper()
+		ls, primaryChain := newByronGenesisAnchorTestLedger(
+			t,
+			genesisHashValue.String(),
+		)
+		require.NoError(
+			t,
+			primaryChain.AddRawBlocks(context.Background(), []chain.RawBlock{
+				{
+					Slot:        0,
+					Hash:        ebb.Hash().Bytes(),
+					BlockNumber: 0,
+					Type:        gledger.BlockTypeByronEbb,
+					Cbor:        []byte{0x80},
+				},
+			}),
+		)
+		require.NotEmpty(t, primaryChain.Tip().Point.Hash)
+		return ls
+	}
+	newEbb := func(
+		prev lcommon.Blake2b256,
+		epoch uint64,
+	) *byron.ByronEpochBoundaryBlock {
+		ebb := &byron.ByronEpochBoundaryBlock{
+			BlockHeader: &byron.ByronEpochBoundaryBlockHeader{PrevBlock: prev},
+		}
+		ebb.BlockHeader.ConsensusData.Epoch = epoch
+		return ebb
+	}
+
+	t.Run("accepts the genesis-anchored EBB", func(t *testing.T) {
+		t.Parallel()
+		ebb := newEbb(genesisHashValue, 0)
+		ls := newLedger(t, ebb)
+		ls.SetTipForTesting(ochainsync.Tip{})
+		require.NoError(
+			t,
+			ls.validateByronPBFTHeaderCrypto(context.Background(), ebb),
+		)
+	})
+	t.Run("rejects a prev hash that is not the genesis hash", func(
+		t *testing.T,
+	) {
+		t.Parallel()
+		ebb := newEbb(lcommon.Blake2b256Hash([]byte("wrong prev hash")), 0)
+		ls := newLedger(t, ebb)
+		ls.SetTipForTesting(ochainsync.Tip{})
+		err := ls.validateByronPBFTHeaderCrypto(context.Background(), ebb)
+		require.ErrorContains(
+			t,
+			err,
+			"does not match configured Byron genesis hash",
+		)
+	})
+	t.Run("keeps rejecting a genesis hash once the ledger has a block", func(
+		t *testing.T,
+	) {
+		t.Parallel()
+		ebb := newEbb(genesisHashValue, 0)
+		ls := newLedger(t, ebb)
+		ls.SetTipForTesting(ochainsync.Tip{
+			Point:       ocommon.NewPoint(5, bytes.Repeat([]byte{0xaa}, 32)),
+			BlockNumber: 1,
+		})
+		err := ls.validateByronPBFTHeaderCrypto(context.Background(), ebb)
+		require.ErrorContains(t, err, "previous hash is a genesis hash")
+	})
 }

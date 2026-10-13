@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -105,6 +106,47 @@ func TestRecyclerComponentsLeavesChainSelectorNilWhenUnset(t *testing.T) {
 		},
 	)
 	assert.True(t, ok)
+}
+
+func TestChainsyncObservePeerTipIsSynchronousDuringGenesisSelection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:   true,
+			SecurityParam: 10,
+		},
+	)
+	n := &Node{chainSelector: selector}
+	connId := newNodeTestConnId(1)
+	point := ocommon.NewPoint(42, []byte("genesis-frontier"))
+	tip := ochainsync.Tip{Point: point, BlockNumber: 7}
+
+	disposition := n.chainsyncObservePeerTip(
+		chainselection.PeerTipUpdateEvent{
+			ConnectionId: connId,
+			Tip:          tip,
+			ObservedTip:  tip,
+		},
+	)
+	require.Equal(t, chainselection.PeerTipUpdateAccepted, disposition)
+	peerTip := selector.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	require.Equal(t, point, peerTip.ObservedTip.Point)
+
+	origin := ocommon.NewPointOrigin()
+	require.True(t, n.chainsyncObservePeerRollback(
+		chainselection.PeerRollbackEvent{
+			ConnectionId: connId,
+			Point:        origin,
+			Tip:          tip,
+		},
+	))
+	peerTip = selector.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	require.Equal(t, origin, peerTip.ObservedTip.Point)
 }
 
 func TestRecyclerComponentsSkipsWhenLifecycleOpHoldsLock(t *testing.T) {
@@ -367,7 +409,7 @@ func TestChainsyncObserveHooksAreSynchronousInGenesisModeWithoutCorroboration(
 			Point:       ocommon.NewPoint(100, []byte("h1")),
 			BlockNumber: 1,
 		}
-		observed := n.chainsyncObservePeerTip(
+		disposition := n.chainsyncObservePeerTip(
 			chainselection.PeerTipUpdateEvent{
 				ConnectionId: conn,
 				Tip:          tip,
@@ -382,14 +424,50 @@ func TestChainsyncObserveHooksAreSynchronousInGenesisModeWithoutCorroboration(
 			},
 		)
 		if !genesis {
-			assert.False(t, observed, "Praos mode keeps the async path")
+			assert.Equal(t, chainselection.PeerTipUpdateUnhandled, disposition,
+				"Praos mode keeps the async path")
 			assert.False(t, rolledBack, "Praos mode keeps the async path")
 			assert.Equal(t, 0, n.chainSelector.PeerCount())
 			continue
 		}
-		assert.True(t, observed, "tip observation must be synchronous")
+		assert.Equal(t, chainselection.PeerTipUpdateAccepted, disposition)
 		assert.True(t, rolledBack, "rollback observation must be synchronous")
 		assert.Equal(t, 1, n.chainSelector.PeerCount(),
 			"the peer must be tracked before the eagerness wait")
 	}
+}
+
+func TestChainsyncObservePeerTipReportsSelectorRejection(t *testing.T) {
+	t.Parallel()
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:     true,
+			SecurityParam:   5,
+			MaxTrackedPeers: 1,
+		},
+	)
+	n := &Node{chainSelector: selector}
+	update := func(connId ouroboros.ConnectionId) chainselection.PeerTipUpdateEvent {
+		tip := ochainsync.Tip{
+			Point:       ocommon.NewPoint(100, []byte(connId.String())),
+			BlockNumber: 1,
+		}
+		return chainselection.PeerTipUpdateEvent{
+			ConnectionId: connId,
+			Tip:          tip,
+			ObservedTip:  tip,
+		}
+	}
+
+	first := update(newNodeTestConnId(1))
+	second := update(newNodeTestConnId(2))
+	require.Equal(t,
+		chainselection.PeerTipUpdateAccepted,
+		n.chainsyncObservePeerTip(first),
+	)
+	assert.Equal(t,
+		chainselection.PeerTipUpdateRejected,
+		n.chainsyncObservePeerTip(second),
+	)
+	assert.Nil(t, selector.GetPeerTip(second.ConnectionId))
 }

@@ -202,8 +202,8 @@ func TestLimitOnEagernessKeepsGenesisDensityPrecedence(t *testing.T) {
 }
 
 // The limit is a function of the candidate set, not of map iteration order.
-// A forks at block 10, C at block 20, and B runs to 20 on the shared chain:
-// with 2k+1 retention B holds both fork points, C holds neither of A's.
+// A forks at block 10, C at block 20, and B runs to 20 on the shared chain.
+// The Genesis window plus k+1 frontier retains block 10 in every candidate.
 func TestLimitOnEagernessIndependentOfCandidateOrder(t *testing.T) {
 	t.Parallel()
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -224,8 +224,8 @@ func TestLimitOnEagernessIndependentOfCandidateOrder(t *testing.T) {
 	for range 100 {
 		require.Equal(t, first, cs.EagernessLimit())
 	}
-	assert.False(t, first.Intersected,
-		"C retains no point A holds, so no point is common to every fragment")
+	require.True(t, first.Intersected)
+	assert.Equal(t, loeTip("c", 10).Point, first.Point)
 	// A and B agreed up to block 10 while C was still short, and the limit
 	// stays k past that last common point rather than k past the local tip.
 	assert.Equal(t, uint64(10+loeTestK), first.BlockNumber)
@@ -358,6 +358,37 @@ func TestAwaitEagernessLimitReturnsOnContextCancel(t *testing.T) {
 	}
 }
 
+func TestAwaitEagernessLimitRejectsUntrackedSenderAtEntry(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	require.ErrorIs(
+		t,
+		cs.AwaitEagernessLimit(
+			t.Context(),
+			newTestConnectionId(1),
+			1,
+			nil,
+		),
+		ErrEagernessPeerUntracked,
+	)
+}
+
+func TestAwaitEagernessLimitAllowsUntrackedSenderWhenInactive(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: loeTestK,
+	})
+	require.NoError(t, cs.AwaitEagernessLimit(
+		t.Context(),
+		newTestConnectionId(1),
+		1,
+		nil,
+	))
+}
+
 // Once the candidates have shared a point, a later loss of that point from a
 // window must not hand the limit to the applied ledger tip: that tip follows
 // the selected peer's blocks, so the cap would move with the chain it bounds.
@@ -413,6 +444,24 @@ func TestAwaitEagernessLimitReleasesWhenCompetitorRemoved(t *testing.T) {
 	requireStillBlocked(t, done)
 	cs.RemovePeer(b)
 	requireAdmitted(t, done)
+}
+
+func TestAwaitEagernessLimitRejectsHeaderWhenSenderIsRemoved(t *testing.T) {
+	t.Parallel()
+	cs, sender, _ := newLoEScenario(true, 16, 20)
+	done := awaitAsync(t.Context(), cs, sender, 16)
+	requireStillBlocked(t, done)
+	require.Eventually(t, func() bool {
+		return cs.EagernessPaused(sender)
+	}, 10*time.Second, time.Millisecond)
+
+	cs.RemovePeer(sender)
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, ErrEagernessPeerUntracked)
+	case <-time.After(2 * time.Second):
+		t.Fatal("removed eagerness waiter did not return")
+	}
 }
 
 type atomicClock struct{ nanos atomic.Int64 }
@@ -522,11 +571,11 @@ func TestEagernessAnchorIgnoresExcludedRequesterHead(t *testing.T) {
 // between, and rejects an absent slot and a same-slot point with another hash.
 func TestCandidateFragmentContainsPoint(t *testing.T) {
 	t.Parallel()
-	var entries []ochainsync.Tip
+	var points []ocommon.Point
 	for block := uint64(1); block <= 9; block++ {
-		entries = append(entries, loeTip("c", block))
+		points = append(points, loeTip("c", block).Point)
 	}
-	f := CandidateFragment{entries: entries}
+	f := CandidateFragment{points: points, baseBlock: 1}
 	for _, block := range []uint64{1, 2, 5, 8, 9} {
 		assert.True(
 			t,

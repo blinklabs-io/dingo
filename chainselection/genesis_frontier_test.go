@@ -99,7 +99,7 @@ func TestGenesisWitnessRequiresCandidateTip(t *testing.T) {
 	cs.peerTips[stale].Touch()
 	staleTip := cs.peerTips[stale]
 	fastTip := cs.peerTips[fast]
-	confirms := fastTip.confirmsRecentChain(staleTip)
+	confirms := fastTip.confirmsRecentChainWithin(staleTip, 0)
 	cs.mutex.Unlock()
 	require.False(
 		t,
@@ -302,7 +302,7 @@ func TestGenesisWitnessSuffixRejectsUnknownHeightAfterDeepRollback(
 	cs.mutex.RLock()
 	fastTip := cs.peerTips[fast]
 	witnessTip := cs.peerTips[witness]
-	confirms := fastTip.confirmsRecentChain(witnessTip)
+	confirms := fastTip.confirmsRecentChainWithin(witnessTip, 0)
 	witnessBlock := witnessTip.SelectionTip().BlockNumber
 	cs.mutex.RUnlock()
 	require.True(t, confirms, "the witness still holds the candidate tip")

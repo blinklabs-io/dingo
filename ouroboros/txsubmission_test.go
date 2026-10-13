@@ -1118,7 +1118,7 @@ func addTxSubmissionTestFixtures(
 	for _, fixture := range fixtures {
 		require.NoError(
 			t,
-			m.AddTransaction(txsubmissionRelayTestEraId, fixture.body),
+			m.AddTransaction(context.Background(), txsubmissionRelayTestEraId, fixture.body),
 		)
 	}
 }
@@ -1460,7 +1460,7 @@ func TestTxSubmissionServerInitRelaysMempoolTransactionEndToEnd(t *testing.T) {
 
 	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
 	require.NoError(t, err)
-	require.NoError(t, h.mB.AddTransaction(txsubmissionRelayTestEraId, txBytes))
+	require.NoError(t, h.mB.AddTransaction(context.Background(), txsubmissionRelayTestEraId, txBytes))
 	wantTx, err := gledger.NewTransactionFromCbor(
 		txsubmissionRelayTestEraId,
 		txBytes,
@@ -1548,11 +1548,11 @@ func TestTxSubmissionDAGBackpressureResumesAfterRemoval(t *testing.T) {
 
 	require.NoError(
 		t,
-		h.mA.AddTransaction(txsubmissionRelayTestEraId, seed.body),
+		h.mA.AddTransaction(context.Background(), txsubmissionRelayTestEraId, seed.body),
 	)
 	require.NoError(
 		t,
-		h.mB.AddTransaction(txsubmissionRelayTestEraId, offered.body),
+		h.mB.AddTransaction(context.Background(), txsubmissionRelayTestEraId, offered.body),
 	)
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
@@ -1585,14 +1585,14 @@ func TestTxSubmissionDuplicateOfferIsChargedToPeer(t *testing.T) {
 
 	require.NoError(
 		t,
-		h.mA.AddTransaction(txsubmissionRelayTestEraId, offered.body),
+		h.mA.AddTransaction(context.Background(), txsubmissionRelayTestEraId, offered.body),
 	)
 	before, ok := h.mA.GetTransaction(offered.hash)
 	require.True(t, ok)
 	require.Zero(t, limiter.WaitDuration(h.connA.Id(), 1))
 	require.NoError(
 		t,
-		h.mB.AddTransaction(txsubmissionRelayTestEraId, offered.body),
+		h.mB.AddTransaction(context.Background(), txsubmissionRelayTestEraId, offered.body),
 	)
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
@@ -1636,12 +1636,12 @@ func TestTxSubmissionAdmissionWaitsForRetainedSize(t *testing.T) {
 
 	require.NoError(
 		t,
-		h.mA.AddTransaction(txsubmissionRelayTestEraId, seed.body),
+		h.mA.AddTransaction(context.Background(), txsubmissionRelayTestEraId, seed.body),
 	)
 	require.Equal(t, headroom, h.mA.AdmissionHeadroomBytes())
 	require.NoError(
 		t,
-		h.mB.AddTransaction(txsubmissionRelayTestEraId, offered.body),
+		h.mB.AddTransaction(context.Background(), txsubmissionRelayTestEraId, offered.body),
 	)
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
@@ -1678,7 +1678,7 @@ func TestTxSubmissionServerInitExitsCleanlyOnPeerDisconnect(t *testing.T) {
 
 	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
 	require.NoError(t, err)
-	require.NoError(t, h.mB.AddTransaction(txsubmissionRelayTestEraId, txBytes))
+	require.NoError(t, h.mB.AddTransaction(context.Background(), txsubmissionRelayTestEraId, txBytes))
 
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
@@ -1732,7 +1732,7 @@ func TestTxSubmissionClientRequestTxsExpiredTransactionNotServed(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		o.mempool.AddTransaction(txsubmissionRelayTestEraId, txBytes),
+		o.mempool.AddTransaction(context.Background(), txsubmissionRelayTestEraId, txBytes),
 	)
 	wantTx, err := gledger.NewTransactionFromCbor(
 		txsubmissionRelayTestEraId,

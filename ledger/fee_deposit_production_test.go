@@ -385,7 +385,7 @@ var (
 				defer cancel()
 				require.NoError(t, pool.Stop(ctx))
 			})
-			err = pool.AddTransaction(c.txType, c.txCbor)
+			err = pool.AddTransaction(context.Background(), c.txType, c.txCbor)
 			if err != nil {
 				require.Empty(t, pool.Transactions())
 				return err
@@ -624,7 +624,7 @@ func dijkstraFeeProdBatch(
 	keyAddr, err := lcommon.NewAddressFromBytes(fx.keyAddr)
 	require.NoError(t, err)
 	input := func(id []byte) shelley.ShelleyTransactionInput {
-		return shelley.NewShelleyTransactionInput(hex.EncodeToString(id), 0)
+		return shelley.MustNewShelleyTransactionInput(hex.EncodeToString(id), 0)
 	}
 	output := func(amount uint64) gdijkstra.DijkstraTransactionOutput {
 		return gdijkstra.DijkstraTransactionOutput{

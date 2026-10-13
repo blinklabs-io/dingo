@@ -550,13 +550,12 @@ func (n *Node) newOuroborosConfig(
 		EnableLeios:             enableLeiosNetworking,
 		// Bounds how long a LocalStateQuery session holds one ledger snapshot.
 		LocalStateQueryViewMaxLifetime: n.config.LocalStateQueryViewMaxLifetimeDuration(),
-		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
-		// extension ahead of the IOG Leios prototype. The prototype relays do
-		// not run a protocol-20 responder and reset the connection if we
-		// initiate it, so disable it on the Leios prototype network; there
-		// votes are diffused inline over leios-notify. Keep it available for
-		// non-prototype Leios peers (e.g. dingo-to-dingo) that support it.
-		EnableLeiosVotes: enableLeiosNetworking && !n.config.isMusashiNetwork(),
+		// Current prototype votes sign their announcing ranking-block hash and
+		// diffuse inline over leios-notify. Do not initiate protocol 20: its
+		// client requests legacy slot-plus-EB-hash votes, and an idle exact-count
+		// request eventually times out the shared bearer. The responder remains
+		// wired for legacy peers whose requests can be satisfied by legacy votes.
+		EnableLeiosVotes: false,
 		// Request endorser-block transaction bodies over leios-fetch, driven by
 		// the peer's transactions offer (MsgBlockTxsOffer) — the relay's signal
 		// that the EB's transactions are ready. Fetching before that offer
@@ -571,6 +570,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncApplyEligible:       n.chainsyncApplyEligible,
 		ChainsyncAwaitEagerness:      n.chainsyncAwaitEagerness,
 		ChainsyncObservePeerTip:      n.chainsyncObservePeerTip,
+		ChainsyncObserveAwaitReply:   n.chainsyncObserveAwaitReply,
 		ChainsyncSyncTarget:          n.chainsyncSyncTarget,
 		ChainsyncObservePeerRollback: n.chainsyncObservePeerRollback,
 		// On the Musashi prototype network every mini-protocol shares one muxer
@@ -2628,6 +2628,26 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 	chainsyncCfg := chainsync.DefaultConfig()
 	if n.config.chainsyncMaxClients > 0 {
 		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
+	} else {
+		if topologyConfig := n.config.topologyConfig; topologyConfig != nil {
+			rootCount := 0
+			addRoots := func(count int) {
+				if count > math.MaxInt-rootCount {
+					rootCount = math.MaxInt
+					return
+				}
+				rootCount += count
+			}
+			for _, root := range topologyConfig.LocalRoots {
+				addRoots(len(root.AccessPoints))
+			}
+			for _, root := range topologyConfig.PublicRoots {
+				addRoots(len(root.AccessPoints))
+			}
+			if rootCount > chainsyncCfg.MaxClients {
+				chainsyncCfg.MaxClients = rootCount
+			}
+		}
 	}
 	if n.config.chainsyncStallTimeout > 0 {
 		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout

@@ -465,6 +465,16 @@ func (cs *ChainSelector) genesisWindowSlotsLocked() uint64 {
 	return DefaultGenesisWindowSlots
 }
 
+// candidatePointCapacityLocked retains enough delivered points for a complete
+// Genesis window and a k+1-header eagerness suffix without duplicating hashes.
+func (cs *ChainSelector) candidatePointCapacityLocked(trackHashes bool) uint64 {
+	window := cs.genesisWindowSlotsLocked()
+	if !trackHashes {
+		return window
+	}
+	return safeAddUint64(window, safeAddUint64(cs.securityParam, 1))
+}
+
 // bestKnownGenesisSlotLocked returns the exit horizon: the network tip slot the
 // local tip must catch up to (within the window) before leaving Genesis mode.
 //
@@ -569,6 +579,7 @@ func (cs *ChainSelector) advanceSelectionModeWithBestKnownBlockLocked(
 	// frontier so it does not linger for the full window on every tracked peer.
 	for _, peerTip := range cs.peerTips {
 		peerTip.observedPoints = nil
+		peerTip.observedPointBaseBlock = 0
 	}
 	cs.lastCorroborationFailedConn = nil
 	cs.config.Logger.Info(
@@ -649,6 +660,19 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 	praosView PraosTiebreakerView,
 	link deliveredLink,
 ) bool {
+	return cs.updatePeerTipObservedLinkedDisposition(
+		connId, tip, observedTip, vrfOutput, praosView, link,
+	) == PeerTipUpdateAccepted
+}
+
+func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+	vrfOutput []byte,
+	praosView PraosTiebreakerView,
+	link deliveredLink,
+) PeerTipUpdateDisposition {
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(connId) {
 		cs.config.Logger.Debug(
@@ -657,10 +681,10 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 			"block_number", tip.BlockNumber,
 			"slot", tip.Point.Slot,
 		)
-		return false
+		return PeerTipUpdateRejected
 	}
 	shouldEvaluate := false
-	accepted := true
+	disposition := PeerTipUpdateAccepted
 	var evictedConn *ouroboros.ConnectionId
 	var modeChanged bool
 	var revoke bool
@@ -671,13 +695,20 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 
 		if cs.loneFrontierBrokenLocked(connId, observedTip, link) {
 			revoke = true
-			accepted = false
+			disposition = PeerTipUpdateRejected
 			return
 		}
 		if !cs.checkPeerTipPlausibleLocked(
 			connId, tip, observedTip, link,
 		) {
-			accepted = false
+			disposition = PeerTipUpdateRejected
+			if claim, ok := cs.farTipClaims[connId]; ok &&
+				claim.block == observedTip.BlockNumber &&
+				claim.slot == observedTip.Point.Slot &&
+				bytes.Equal(claim.hash, observedTip.Point.Hash) &&
+				claim.boundary == link.boundary {
+				disposition = PeerTipUpdatePending
+			}
 			return
 		}
 
@@ -691,18 +722,20 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 			)
 			peerTip.recordObservedPoint(
 				observedTip.Point,
+				observedTip.BlockNumber,
 				cs.genesisWindowSlotsLocked(),
+				cs.candidatePointCapacityLocked(trackHashes),
 				trackHashes,
 			)
 			peerTip.recordObservedTipHistory(
 				observedTip,
-				cs.candidateFragmentCapacityLocked(),
+				safeAddUint64(cs.securityParam, 1),
 			)
 		} else {
 			var ok bool
 			evictedConn, ok = cs.makeRoomForNewPeerLocked(connId)
 			if !ok {
-				accepted = false
+				disposition = PeerTipUpdateRejected
 				return
 			}
 			peerTip := &PeerChainTip{
@@ -717,12 +750,14 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 			}
 			peerTip.recordObservedPoint(
 				observedTip.Point,
+				observedTip.BlockNumber,
 				cs.genesisWindowSlotsLocked(),
+				cs.candidatePointCapacityLocked(trackHashes),
 				trackHashes,
 			)
 			peerTip.recordObservedTipHistory(
 				observedTip,
-				cs.candidateFragmentCapacityLocked(),
+				safeAddUint64(cs.securityParam, 1),
 			)
 			cs.peerTips[connId] = peerTip
 		}
@@ -781,15 +816,15 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 	if revoke {
 		cs.RemovePeer(connId)
 	}
-	if !accepted {
-		return false
+	if disposition != PeerTipUpdateAccepted {
+		return disposition
 	}
 
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
 	}
 
-	return true
+	return PeerTipUpdateAccepted
 }
 
 // checkPeerTipPlausibleLocked reports whether a tip observation from connId
@@ -1018,6 +1053,10 @@ func (cs *ChainSelector) corroborateFarTipClaimLocked(
 	observedTip ochainsync.Tip,
 	link deliveredLink,
 ) bool {
+	if !cs.blockWithinSlotDistanceLocked(observedTip) {
+		delete(cs.farTipClaims, connId)
+		return false
+	}
 	claimed := observedTip.BlockNumber
 	if cs.farTipClaims == nil {
 		cs.farTipClaims = make(map[ouroboros.ConnectionId]farTipClaim)
@@ -1037,7 +1076,6 @@ func (cs *ChainSelector) corroborateFarTipClaimLocked(
 		run:          1,
 	}
 	switch {
-	case !cs.blockWithinSlotDistanceLocked(observedTip):
 	case !exists:
 	case len(observedTip.Point.Hash) > 0 &&
 		bytes.Equal(observedTip.Point.Hash, prev.hash):
@@ -1301,6 +1339,27 @@ func (cs *ChainSelector) TouchPeerActivity(connId ouroboros.ConnectionId) {
 	}()
 
 	cs.publishSelectionEvents(switchEvent, selectionEvent, corroborationEvent)
+}
+
+// SetPeerIdling records an explicit ChainSync MsgAwaitReply at point. A later
+// roll-forward or rollback clears it; a delayed event for an older point is
+// ignored.
+func (cs *ChainSelector) SetPeerIdling(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) {
+	cs.mutex.Lock()
+	peerTip := cs.peerTips[connId]
+	matched := peerTip != nil &&
+		peerTip.ObservedTip.Point.Slot == point.Slot &&
+		bytes.Equal(peerTip.ObservedTip.Point.Hash, point.Hash)
+	if matched {
+		peerTip.idling = true
+	}
+	cs.mutex.Unlock()
+	if matched {
+		cs.EvaluateAndSwitch()
+	}
 }
 
 // evictLeastRecentPeerLocked removes the peer with the oldest LastUpdated
@@ -2811,7 +2870,21 @@ func (cs *ChainSelector) HandlePeerTipUpdateEvent(evt event.Event) {
 		)
 		return
 	}
-	cs.updatePeerTipObservedLinked(
+	cs.AcceptPeerTipUpdate(e)
+}
+
+// AcceptPeerTipUpdate synchronously applies a peer tip update and reports
+// whether the selector accepted the candidate.
+func (cs *ChainSelector) AcceptPeerTipUpdate(e PeerTipUpdateEvent) bool {
+	return cs.ObservePeerTipUpdate(e) == PeerTipUpdateAccepted
+}
+
+// ObservePeerTipUpdate synchronously applies a peer tip update and reports
+// whether it was accepted, retained as a pending far-tip claim, or rejected.
+func (cs *ChainSelector) ObservePeerTipUpdate(
+	e PeerTipUpdateEvent,
+) PeerTipUpdateDisposition {
+	return cs.updatePeerTipObservedLinkedDisposition(
 		e.ConnectionId,
 		e.Tip,
 		e.ObservedTip,

@@ -116,6 +116,13 @@ func advanceStreaming(
 	require.True(t, cs.updatePeerTipObserved(connId, advertised, observed, nil))
 }
 
+func markIdle(t *testing.T, cs *ChainSelector, connId ouroboros.ConnectionId) {
+	t.Helper()
+	peerTip := cs.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	cs.SetPeerIdling(connId, peerTip.ObservedTip.Point)
+}
+
 // hold pauses connId at the limit for the rest of the test.
 func hold(t *testing.T, cs *ChainSelector, connId ouroboros.ConnectionId) {
 	t.Helper()
@@ -290,6 +297,7 @@ func TestLimitOnEagernessIdleDeadForkIsRemovedWhileKeepaliveTouches(
 	honest := newTestConnectionId(2)
 	feedStandoff(f.cs, dead, "c", 1, 10, sharedSlot)
 	feedStandoff(f.cs, dead, "x", 11, 12, sparseSlot)
+	markIdle(t, f.cs, dead)
 	feedStandoff(f.cs, honest, "c", 1, 10, sharedSlot)
 	feedStandoff(f.cs, honest, "h", 11, 16, denseSlot)
 	hold(t, f.cs, honest)
@@ -306,7 +314,8 @@ func TestLimitOnEagernessIdleDeadForkIsRemovedWhileKeepaliveTouches(
 	require.Len(t, got, 1, "the idle dead fork must be removed exactly once")
 	assert.Equal(t, dead, got[0].ConnectionId)
 	assert.Equal(t, honest, got[0].DominatingConnectionId)
-	assert.True(t, got[0].EagernessStandoff)
+	assert.False(t, got[0].EagernessStandoff,
+		"explicit idling is classified by the provable rule")
 }
 
 // A peer whose advertised tip is ahead of what it has delivered is still
@@ -335,6 +344,7 @@ func TestLimitOnEagernessIdleDenserForkIsNotRemovedByHeldPeer(t *testing.T) {
 	held := newTestConnectionId(2)
 	feedStandoff(f.cs, idle, "c", 1, 10, sharedSlot)
 	feedStandoff(f.cs, idle, "d", 11, 14, denseSlot)
+	markIdle(t, f.cs, idle)
 	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
 	feedStandoff(f.cs, held, "s", 11, 16, func(b uint64) uint64 {
 		return sharedSlot(10) + (b-10)*300
@@ -348,10 +358,9 @@ func TestLimitOnEagernessIdleDenserForkIsNotRemovedByHeldPeer(t *testing.T) {
 	assert.False(t, got[0].EagernessStandoff, "removed by the provable rule")
 }
 
-// A peer that stopped at an older tip on the held peer's own chain is a
-// prefix, not a fork, but it pins the limit at its tip just as an idle fork
-// does. Upstream's idling rule removes it too.
-func TestLimitOnEagernessIdlePrefixPeerIsRemovedWhileKeepaliveTouches(
+// A peer that stopped at an older tip on the held peer's own chain is a prefix,
+// not a competing fork, so the density disconnector leaves it undecided.
+func TestLimitOnEagernessIdlePrefixDoesNotTriggerForkStandoff(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -360,22 +369,18 @@ func TestLimitOnEagernessIdlePrefixPeerIsRemovedWhileKeepaliveTouches(
 	behind := newTestConnectionId(1)
 	held := newTestConnectionId(2)
 	feedStandoff(f.cs, behind, "c", 1, 10, sharedSlot)
+	markIdle(t, f.cs, behind)
 	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
 	feedStandoff(f.cs, held, "h", 11, 16, denseSlot)
 	hold(t, f.cs, held)
 
-	var got []GenesisDensityDisconnect
 	for range 20 {
 		f.mu.Lock()
 		f.now = f.now.Add(50 * time.Second)
 		f.mu.Unlock()
 		f.cs.TouchPeerActivity(behind)
-		got = append(got, f.evaluate()...)
+		assert.Empty(t, f.evaluate())
 	}
-	require.Len(t, got, 1, "the idle prefix peer must be removed exactly once")
-	assert.Equal(t, behind, got[0].ConnectionId)
-	assert.Equal(t, held, got[0].DominatingConnectionId)
-	assert.True(t, got[0].EagernessStandoff)
 }
 
 // A peer behind on the held peer's chain that is still streaming toward its
@@ -410,6 +415,7 @@ func TestLimitOnEagernessIdleDenserForkIsKeptWhenHeldWindowIncomplete(
 	held := newTestConnectionId(2)
 	feedStandoff(f.cs, idle, "c", 1, 10, sharedSlot)
 	feedStandoff(f.cs, idle, "d", 11, 18, denseSlot)
+	markIdle(t, f.cs, idle)
 	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
 	feedStandoff(f.cs, held, "s", 11, 16, sparseSlot)
 	hold(t, f.cs, held)
@@ -429,6 +435,7 @@ func TestLimitOnEagernessSparserIdleForkIsRemovedWhenHeldWindowIncomplete(
 	held := newTestConnectionId(2)
 	feedStandoff(f.cs, idle, "c", 1, 10, sharedSlot)
 	feedStandoff(f.cs, idle, "d", 11, 14, sparseSlot)
+	markIdle(t, f.cs, idle)
 	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
 	feedStandoff(f.cs, held, "h", 11, 16, sparseSlot)
 	hold(t, f.cs, held)
@@ -437,7 +444,8 @@ func TestLimitOnEagernessSparserIdleForkIsRemovedWhenHeldWindowIncomplete(
 	require.Len(t, got, 1)
 	assert.Equal(t, idle, got[0].ConnectionId)
 	assert.Equal(t, held, got[0].DominatingConnectionId)
-	assert.True(t, got[0].EagernessStandoff)
+	assert.False(t, got[0].EagernessStandoff,
+		"explicit idling is classified by the provable rule")
 	assert.Equal(t, uint64(6), got[0].DominatingDensity)
 	assert.Equal(t, uint64(4), got[0].MaxDensity)
 }
@@ -452,6 +460,7 @@ func TestLimitOnEagernessEquallyDenseIdleForkIsRemovedWhenHeldWindowIncomplete(
 	held := newTestConnectionId(2)
 	feedStandoff(f.cs, idle, "c", 1, 10, sharedSlot)
 	feedStandoff(f.cs, idle, "d", 11, 16, denseSlot)
+	markIdle(t, f.cs, idle)
 	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
 	feedStandoff(f.cs, held, "h", 11, 16, sparseSlot)
 	hold(t, f.cs, held)
@@ -459,5 +468,7 @@ func TestLimitOnEagernessEquallyDenseIdleForkIsRemovedWhenHeldWindowIncomplete(
 	got := f.evaluate()
 	require.Len(t, got, 1)
 	assert.Equal(t, idle, got[0].ConnectionId)
+	assert.False(t, got[0].EagernessStandoff,
+		"explicit idling is classified by the provable rule")
 	assert.Equal(t, got[0].DominatingDensity, got[0].MaxDensity)
 }

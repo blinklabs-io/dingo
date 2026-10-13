@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
+	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 	"github.com/stretchr/testify/require"
 )
@@ -552,6 +553,104 @@ func TestFetchEndorserBlockByPointReportsNoPeerAfterDisconnect(t *testing.T) {
 		},
 	)
 	require.ErrorIs(t, err, ledger.ErrEndorserBlockFetchNoPeer)
+}
+
+func TestFetchEndorserBlockByPointPrefersExactOfferSource(t *testing.T) {
+	t.Parallel()
+
+	tx, manifestRaw, point, bitmap := leiosCertifiedRecoveryFixture(
+		t,
+		0x55,
+		376041,
+	)
+	wrongTx, err := cbor.Encode("wrong transaction")
+	require.NoError(t, err)
+	wrongConn, _ := newLeiosFetchConversation(
+		t,
+		append(
+			leiosFetchHandshake(),
+			ouroboros_mock.ConversationEntryInput{
+				ProtocolId:  leiosfetch.ProtocolId,
+				MessageType: leiosfetch.MessageTypeBlockTxsRequest,
+			},
+			ouroboros_mock.ConversationEntryOutput{
+				ProtocolId: leiosfetch.ProtocolId,
+				IsResponse: true,
+				Messages: []protocol.Message{
+					leiosfetch.NewMsgBlockTxsFull(
+						point,
+						bitmap,
+						[]cbor.RawMessage{wrongTx},
+					),
+				},
+			},
+		),
+	)
+	offeredConn, offeredDone := newLeiosFetchConversation(
+		t,
+		append(
+			leiosFetchHandshake(),
+			ouroboros_mock.ConversationEntryInput{
+				ProtocolId:  leiosfetch.ProtocolId,
+				MessageType: leiosfetch.MessageTypeBlockTxsRequest,
+			},
+			ouroboros_mock.ConversationEntryOutput{
+				ProtocolId: leiosfetch.ProtocolId,
+				IsResponse: true,
+				Messages: []protocol.Message{
+					leiosfetch.NewMsgBlockTxsFull(
+						point,
+						bitmap,
+						[]cbor.RawMessage{tx},
+					),
+				},
+			},
+		),
+	)
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	require.True(t, cm.AddConnection(wrongConn, false, "wrong"))
+	require.True(t, cm.AddConnection(offeredConn, false, "offered"))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm,
+		EnableLeios: true,
+	})
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		manifestRaw,
+		nil,
+		leiosStoreAuthoritative,
+	))
+	// Without the exact-offer preference, positive affinity puts this peer first.
+	// Its response is well-formed but does not match the manifest, so observing a
+	// failure here proves the wrong peer received the first request.
+	wrongGuard := o.leiosFetchGuardFor(wrongConn.Id())
+	wrongGuard.markFetchOK()
+	require.NoError(t, o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{ConnectionId: offeredConn.Id()},
+		oleiosnotify.NewMsgBlockTxsOffer(point),
+	))
+
+	err = o.fetchEndorserBlockByPointWithConnections(
+		t.Context(),
+		point.Slot,
+		point.Hash,
+		[]gouroboros.ConnectionId{wrongConn.Id(), offeredConn.Id()},
+		cm.GetConnectionById,
+	)
+	require.NoError(t, err)
+	require.Zero(t, wrongGuard.consecutiveFailures.Load())
+	requireLeiosFetchConversationDone(t, offeredDone)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.True(t, data.completeTxCache())
 }
 
 // TestFetchEndorserBlockByPointHonoursCallerBudget verifies the by-point fetch

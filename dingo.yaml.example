@@ -19,8 +19,11 @@
 # cardanoConfig: "./config/cardano/preview/config.json"
 
 # Longest a node-to-client LocalStateQuery session may hold one acquired
-# ledger snapshot. A snapshot past this age is closed and the session's next
-# query fails. Each held snapshot pins a database read transaction.
+# ledger snapshot. A snapshot past this age is closed, and the session's next
+# query reopens one at the same block. If that block was rolled back, or has
+# fallen behind a retention floor, while the snapshot was closed, the query
+# fails and the client's connection is closed. Each held snapshot pins a
+# database read transaction.
 # Default: "5m"
 # CLI: --local-state-query-view-max-lifetime
 # Env: DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME
@@ -178,13 +181,21 @@
 # CLI: --metrics-port
 # metricsPort: 12798
 
-# Address for the unauthenticated Prometheus listener. This is deliberately
-# independent of bindAddr and stays on loopback by default. Set a wildcard or
-# remote-reachable address only when scrapers need it and an external network
-# control protects the endpoint. The container image sets
-# DINGO_METRICS_BIND_ADDR=0.0.0.0, which takes precedence over this setting.
+# Address for the Prometheus listener. This is deliberately independent of
+# bindAddr and stays on loopback by default. Set a wildcard or remote-reachable
+# address only when scrapers need it; the environment variable takes precedence
+# over this setting.
 # CLI: --metrics-bind-addr  Env: DINGO_METRICS_BIND_ADDR
 # metricsBindAddr: "127.0.0.1"
+
+# Optional Bearer token required by the Prometheus listener. Prefer the
+# environment variable so the token does not live in a shared config file.
+# There is no CLI flag because arguments may be visible to other users.
+# Remote traffic remains plain HTTP. Require a TLS reverse proxy or an
+# authenticated encrypted tunnel to protect the token in transit; use network
+# isolation as an additional access control.
+# Env: DINGO_METRICS_AUTH_TOKEN
+# metricsAuthToken: ""
 
 # TCP port for the liveness/readiness probe listener. 0 disables it.
 # Binds bindAddr, like the relay listener: a kubelet or
@@ -247,6 +258,20 @@
 # enabled. Mostly useful for local debugging.
 # CLI: --tracing-stdout  Env: DINGO_TRACING_STDOUT
 # tracingStdout: false
+
+# OTLP HTTP collector URL for spans, for example http://localhost:4318.
+# Setting it enables tracing. Empty leaves tracing to the tracing setting and
+# the destination to the OTEL_EXPORTER_OTLP_* env vars.
+# CLI: --tracing-endpoint  Env: DINGO_TRACING_ENDPOINT
+# tracingEndpoint: ""
+
+# service.name resource attribute on exported spans.
+# CLI: --tracing-service-name  Env: DINGO_TRACING_SERVICE_NAME
+# tracingServiceName: dingo
+
+# Fraction of new traces sampled, from 0 to 1.
+# CLI: --tracing-sample-ratio  Env: DINGO_TRACING_SAMPLE_RATIO
+# tracingSampleRatio: 1
 
 # Internal/private address to bind for listening for Ouroboros NtC
 # privateBindAddr: "127.0.0.1"
@@ -891,9 +916,9 @@
 # Multi-client ChainSync (header synchronization) configuration
 # chainsync:
   # Maximum number of concurrent ChainSync client connections
-  # Default: 3
+  # Default: 0 (automatic: at least 3, and one per local-root access point)
   # CLI: --chainsync-max-clients  Env: DINGO_CHAINSYNC_MAX_CLIENTS
-  # maxClients: 3
+  # maxClients: 0
   # Duration with no activity after which a ChainSync client is
   # considered stalled and eligible for failover/recycling
   # Default: "2m"

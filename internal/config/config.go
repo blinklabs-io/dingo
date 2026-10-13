@@ -300,7 +300,8 @@ func midnightYAMLFieldSet(field string) bool {
 // subsystem.
 type ChainsyncConfig struct {
 	// MaxClients is the maximum number of concurrent chainsync client
-	// connections. Default: 3.
+	// connections. Zero selects an automatic limit: at least 3 and large enough
+	// for every configured local-root access point.
 	MaxClients int `yaml:"maxClients"   envconfig:"DINGO_CHAINSYNC_MAX_CLIENTS"`
 	// StallTimeout is the duration after which a client with no
 	// activity is considered stalled. Default: "2m".
@@ -514,7 +515,6 @@ type TokenRegistryConfig struct {
 // fallback in internal/node/node.go.
 func DefaultChainsyncConfig() ChainsyncConfig {
 	return ChainsyncConfig{
-		MaxClients:   3,
 		StallTimeout: "2m",
 		Strategy:     "primary",
 	}
@@ -692,7 +692,11 @@ type Config struct {
 	// BindAddr; operators must set this field explicitly to expose
 	// metrics on a wildcard or remote-scrape address.
 	MetricsBindAddr string `yaml:"metricsBindAddr" envconfig:"DINGO_METRICS_BIND_ADDR"`
-	MetricsPort     uint   `yaml:"metricsPort"    split_words:"true"`
+	// MetricsAuthToken enables Bearer authentication on the Prometheus
+	// listener. It has no CLI flag because process arguments are public to
+	// other users on many systems.
+	MetricsAuthToken string `yaml:"metricsAuthToken" envconfig:"DINGO_METRICS_AUTH_TOKEN"`
+	MetricsPort      uint   `yaml:"metricsPort"    split_words:"true"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
@@ -744,9 +748,17 @@ type Config struct {
 	SkipRewardLiveStakeBackfillCheck bool `yaml:"skipRewardLiveStakeBackfillCheck"                                                             split_words:"true"`
 	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
 	// collector listening, the OTLP exporter logs noisy connection errors.
-	// Spans are sent via OTLP HTTP; configure the destination with the
-	// standard OTEL_EXPORTER_OTLP_* env vars.
+	// Spans are sent via OTLP HTTP; the destination defaults to the
+	// standard OTEL_EXPORTER_OTLP_* env vars unless TracingEndpoint is set.
 	Tracing bool `yaml:"tracing"                             envconfig:"DINGO_TRACING_ENABLED"`
+	// TracingEndpoint is the OTLP HTTP collector URL (for example
+	// http://localhost:4318). Setting it enables tracing; empty leaves tracing
+	// to Tracing and the destination to the OTEL_EXPORTER_OTLP_* env vars.
+	TracingEndpoint string `yaml:"tracingEndpoint"                     envconfig:"DINGO_TRACING_ENDPOINT"`
+	// TracingServiceName is the service.name resource attribute on exported spans.
+	TracingServiceName string `yaml:"tracingServiceName"                  envconfig:"DINGO_TRACING_SERVICE_NAME"`
+	// TracingSampleRatio is the fraction of new traces sampled, from 0 to 1.
+	TracingSampleRatio float64 `yaml:"tracingSampleRatio"                  envconfig:"DINGO_TRACING_SAMPLE_RATIO"`
 	// TracingStdout redirects spans to stdout instead of OTLP. Requires
 	// Tracing to also be enabled. Mostly useful for local debugging.
 	TracingStdout   bool     `yaml:"tracingStdout"                       envconfig:"DINGO_TRACING_STDOUT"`
@@ -1421,6 +1433,8 @@ func newDefaultConfig() *Config {
 		StrictUtxoValidation:                true,
 		Tracing:                             false,
 		TracingStdout:                       false,
+		TracingServiceName:                  "dingo",
+		TracingSampleRatio:                  1,
 		Network:                             "preview",
 		NetworkMagic:                        0,
 		MetricsPort:                         12798,
@@ -1928,6 +1942,10 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.KoiosParity.GraceHours == 0 {
 		c.KoiosParity.GraceHours = 24
+	}
+	// A collector endpoint turns tracing on; see TracingEndpoint.
+	if c.TracingEndpoint != "" {
+		c.Tracing = true
 	}
 }
 

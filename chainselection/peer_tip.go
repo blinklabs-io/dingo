@@ -52,27 +52,22 @@ type PeerChainTip struct {
 	VRFOutput       []byte // VRF output from tip block for tie-breaking
 	PraosView       PraosTiebreakerView
 	LastUpdated     time.Time
-	// observedSlots is the recent observed slot frontier used for Genesis
-	// density. observedPoints is the same frontier with block hashes, used
-	// for Genesis corroboration (detecting whether other peers report the
-	// same blocks). The two slices are maintained in lockstep: index i of
-	// observedPoints is the (slot, hash) for observedSlots[i].
-	observedSlots      []uint64
-	observedPoints     []ocommon.Point
-	observedTipHistory []ochainsync.Tip
+	// observedSlots is the recent slot-window frontier used for Genesis
+	// density. observedPoints is the entry-bounded hash frontier used for
+	// corroboration and GDD; it may retain older sparse points so a common
+	// intersection is not lost merely because a peer advanced past the window.
+	observedSlots  []uint64
+	observedPoints []ocommon.Point
+	// observedPointBaseBlock is the block number of observedPoints[0]. The
+	// remaining entries are consecutive block numbers, which lets density
+	// comparisons align two frontiers without scanning a full Genesis window.
+	observedPointBaseBlock uint64
+	observedTipHistory     []ochainsync.Tip
+	idling                 bool
 	// nowFn is the owning ChainSelector's clock, so LastUpdated and IsStale
 	// share one time source with the selector. Nil for a PeerChainTip built
 	// by NewPeerChainTip, which then uses time.Now.
 	nowFn func() time.Time
-}
-
-// deliveredAdvertisedTip reports whether the latest delivered header is the
-// tip the peer advertises, so it has nothing further to send.
-func (p *PeerChainTip) deliveredAdvertisedTip() bool {
-	return !p.awaitingFirstHeader &&
-		p.Tip.BlockNumber == p.ObservedTip.BlockNumber &&
-		p.Tip.Point.Slot == p.ObservedTip.Point.Slot &&
-		bytes.Equal(p.Tip.Point.Hash, p.ObservedTip.Point.Hash)
 }
 
 // now returns nowFn(), or time.Now when nowFn is unset.
@@ -179,6 +174,7 @@ func (p *PeerChainTip) UpdateTipWithObservedPraosView(
 	p.ObservedTip = observedTip
 	p.observedTipSet = true
 	p.awaitingFirstHeader = false
+	p.idling = false
 	p.VRFOutput = vrfOutput
 	p.PraosView = praosView
 	p.LastUpdated = p.now()
@@ -197,6 +193,7 @@ func (p *PeerChainTip) ApplyRollback(
 	p.Tip = tip
 	p.ObservedTip = ochainsync.Tip{Point: clonePoint(point)}
 	p.observedTipSet = true
+	p.idling = false
 	if point.Slot == 0 && len(point.Hash) == 0 {
 		p.observedTipHistory = nil
 	} else {
@@ -227,24 +224,40 @@ func (p *PeerChainTip) ApplyRollback(
 	p.VRFOutput = nil
 	p.PraosView = PraosTiebreakerView{}
 	p.LastUpdated = p.now()
-	if point.Slot == 0 || len(p.observedSlots) == 0 {
+	if point.Slot == 0 {
 		p.observedSlots = nil
 		p.observedPoints = nil
+		p.observedPointBaseBlock = 0
 		return
 	}
-
-	keepUntil := 0
-	for keepUntil < len(p.observedSlots) &&
-		p.observedSlots[keepUntil] <= point.Slot {
-		keepUntil++
-	}
-	if keepUntil == 0 {
+	keepSlots := sort.Search(len(p.observedSlots), func(i int) bool {
+		return p.observedSlots[i] > point.Slot
+	})
+	p.observedSlots = p.observedSlots[:keepSlots]
+	pointIdx := sort.Search(len(p.observedPoints), func(i int) bool {
+		return p.observedPoints[i].Slot >= point.Slot
+	})
+	keepPoints := 0
+	pointMatched := pointIdx < len(p.observedPoints) &&
+		p.observedPoints[pointIdx].Slot == point.Slot &&
+		bytes.Equal(p.observedPoints[pointIdx].Hash, point.Hash)
+	if pointMatched {
+		keepPoints = pointIdx + 1
+	} else if len(p.observedPoints) > 0 {
+		// A rollback outside the retained candidate fragment gives no proof
+		// that the old slot frontier belongs to the new chain.
 		p.observedSlots = nil
-		p.observedPoints = nil
-		return
+		keepSlots = 0
 	}
-	p.observedSlots = p.observedSlots[:keepUntil]
-	p.trimObservedPointsTo(keepUntil)
+	clear(p.observedPoints[keepPoints:])
+	p.observedPoints = p.observedPoints[:keepPoints]
+	if keepSlots == 0 {
+		p.observedSlots = nil
+	}
+	if keepPoints == 0 {
+		p.observedPoints = nil
+		p.observedPointBaseBlock = 0
+	}
 }
 
 // recordObservedTipHistory retains enough delivered tips to restore the exact
@@ -281,27 +294,26 @@ func (p *PeerChainTip) recordObservedTipHistory(
 	}
 }
 
-// trimObservedPointsTo keeps observedPoints aligned with observedSlots after a
-// slot-frontier trim. observedPoints may be shorter than observedSlots for
-// peers whose frontier predates hash tracking; only trim when it is at least
-// as long.
-func (p *PeerChainTip) trimObservedPointsTo(keepUntil int) {
-	if keepUntil <= len(p.observedPoints) {
-		p.observedPoints = p.observedPoints[:keepUntil]
-	}
-}
+// isIdling reports whether this peer explicitly sent MsgAwaitReply after its
+// last delivered header.
+func (p *PeerChainTip) isIdling() bool { return p != nil && p.idling }
 
 // recordObservedPoint records a (slot, hash) point into the observed frontier
-// used for Genesis density (observedSlots, always maintained in Genesis) and
-// corroboration (observedPoints, the block hashes), keeping the two in lockstep
-// and bounded to the density window.
+// used for Genesis density (observedSlots) and corroboration/GDD
+// (observedPoints). Slots are bounded by the density window; hash-bearing
+// points are independently bounded by entry count so sparse candidates retain
+// their common intersection. The point frontier keeps consecutive block
+// heights; a gap starts a new frontier so density comparison fails undecidable
+// instead of assuming missing observations are adjacent.
 //
 // trackHashes gates the hash frontier: it is stored only in Genesis mode.
 // When false the hash frontier is dropped, so normal
 // Praos operation does not retain per-peer window-length hash history.
 func (p *PeerChainTip) recordObservedPoint(
 	point ocommon.Point,
+	blockNumber uint64,
 	window uint64,
+	maxPoints uint64,
 	trackHashes bool,
 ) {
 	if p == nil {
@@ -309,11 +321,15 @@ func (p *PeerChainTip) recordObservedPoint(
 	}
 	if !trackHashes {
 		p.observedPoints = nil
+		p.observedPointBaseBlock = 0
+	} else if maxPoints == 0 {
+		maxPoints = 1
 	}
 	slot := point.Slot
 	if slot == 0 {
 		p.observedSlots = nil
 		p.observedPoints = nil
+		p.observedPointBaseBlock = 0
 		return
 	}
 
@@ -323,29 +339,51 @@ func (p *PeerChainTip) recordObservedPoint(
 	for len(p.observedSlots) > 0 &&
 		p.observedSlots[len(p.observedSlots)-1] > slot {
 		p.observedSlots = p.observedSlots[:len(p.observedSlots)-1]
-		if trackHashes {
-			p.trimObservedPointsTo(len(p.observedSlots))
-		}
 	}
 	switch {
 	case len(p.observedSlots) == 0 ||
 		p.observedSlots[len(p.observedSlots)-1] < slot:
 		p.observedSlots = append(p.observedSlots, slot)
-		if trackHashes {
+	}
+	if trackHashes {
+		var tailBlock uint64
+		if len(p.observedPoints) > 0 {
+			// #nosec G115 -- the retained slice is bounded by maxPoints.
+			tailBlock = p.observedPointBaseBlock +
+				uint64(len(p.observedPoints)-1)
+		}
+		switch {
+		case len(p.observedPoints) == 0:
+			p.observedPointBaseBlock = blockNumber
+			p.observedPoints = append(p.observedPoints, clonePoint(point))
+		case p.observedPoints[len(p.observedPoints)-1].Slot == slot &&
+			blockNumber == tailBlock:
+			p.observedPoints[len(p.observedPoints)-1] = clonePoint(point)
+		case p.observedPoints[len(p.observedPoints)-1].Slot < slot &&
+			blockNumber > p.observedPointBaseBlock &&
+			blockNumber-p.observedPointBaseBlock ==
+				uint64(len(p.observedPoints)):
+			p.observedPoints = append(p.observedPoints, clonePoint(point))
+		default:
+			// A height gap or non-tail replacement cannot be represented by one
+			// base height. Start a new contiguous frontier so intersection is
+			// undecidable until enough linked headers have been observed again.
+			clear(p.observedPoints)
+			p.observedPoints = p.observedPoints[:0]
+			p.observedPointBaseBlock = blockNumber
 			p.observedPoints = append(p.observedPoints, clonePoint(point))
 		}
-	case trackHashes && len(p.observedPoints) == len(p.observedSlots):
-		// Same slot re-reported: keep the latest hash so corroboration
-		// compares against the current frontier block.
-		p.observedPoints[len(p.observedPoints)-1] = clonePoint(point)
+		if uint64(len(p.observedPoints)) > maxPoints {
+			excess := uint64(len(p.observedPoints)) - maxPoints
+			clear(p.observedPoints[:excess])
+			p.observedPoints = p.observedPoints[excess:]
+			p.observedPointBaseBlock += excess
+		}
 	}
 
 	if window == 0 {
 		if len(p.observedSlots) > 1 {
 			p.observedSlots = p.observedSlots[len(p.observedSlots)-1:]
-		}
-		if len(p.observedPoints) > 1 {
-			p.observedPoints = p.observedPoints[len(p.observedPoints)-1:]
 		}
 		return
 	}
@@ -363,11 +401,6 @@ func (p *PeerChainTip) recordObservedPoint(
 	}
 	if pruneIdx > 0 {
 		p.observedSlots = p.observedSlots[pruneIdx:]
-		if pruneIdx <= len(p.observedPoints) {
-			p.observedPoints = p.observedPoints[pruneIdx:]
-		} else {
-			p.observedPoints = nil
-		}
 	}
 }
 
@@ -444,12 +477,25 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 // relies on the observed frontier being populated per header (dense) during
 // chainsync, so two peers on the same chain share every block in their
 // overlap.
-func (p *PeerChainTip) confirmsRecentChain(witness *PeerChainTip) bool {
+func (p *PeerChainTip) confirmsRecentChainWithin(
+	witness *PeerChainTip,
+	window uint64,
+) bool {
 	if p == nil || witness == nil ||
 		len(p.observedPoints) == 0 || len(witness.observedPoints) == 0 {
 		return false
 	}
 	candidate := p.observedPoints
+	if window > 0 {
+		hi := candidate[len(candidate)-1].Slot
+		var cutoff uint64 = 1
+		if hi > window {
+			cutoff = hi - window + 1
+		}
+		candidate = candidate[sort.Search(len(candidate), func(i int) bool {
+			return candidate[i].Slot >= cutoff
+		}):]
+	}
 	lo := candidate[0].Slot
 	hi := candidate[len(candidate)-1].Slot
 	witnessPoints := witness.observedPoints

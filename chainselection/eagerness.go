@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"errors"
 	"slices"
 	"time"
 
@@ -25,6 +26,11 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
+
+// ErrEagernessPeerUntracked means the sender is no longer a tracked candidate
+// when its header reaches the Limit on Eagerness gate. The caller must discard
+// the header.
+var ErrEagernessPeerUntracked = errors.New("eagerness peer untracked")
 
 // EagernessLimit is the Limit on Eagerness: the highest block number chain
 // selection may reach while the cap is active.
@@ -100,8 +106,7 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 	// lone fragment's head was never shared with any of them.
 	forced := false
 	for connId, peerTip := range cs.peerTips {
-		if peerTip.awaitingFirstHeader ||
-			len(peerTip.observedTipHistory) == 0 {
+		if peerTip.awaitingFirstHeader {
 			continue
 		}
 		if !cs.peerLiveEligibleNonStaleLocked(connId, peerTip) {
@@ -110,11 +115,15 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 			}
 			forced = true
 		}
-		// A read-only view: it is never returned or retained.
-		fragments = append(
-			fragments,
-			CandidateFragment{entries: peerTip.observedTipHistory},
-		)
+		// A read-only view: callers hold the selector lock, so the retained
+		// frontier does not need to be copied for this calculation.
+		fragment := CandidateFragment{
+			points:    peerTip.observedPoints,
+			baseBlock: peerTip.observedPointBaseBlock,
+		}
+		if fragment.Len() > 0 {
+			fragments = append(fragments, fragment)
+		}
 	}
 	if len(fragments) == 0 {
 		if include == nil {
@@ -142,7 +151,13 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 	// fork point with the first and still share nothing with each other; only
 	// a candidate every fragment retains is accepted. Without that check the
 	// result would depend on which fragment map iteration put first.
-	common := fragments[0].entries[len(fragments[0].entries)-1]
+	first := fragments[0]
+	last := len(first.points) - 1
+	// #nosec G115 -- last is bounded by the retained fragment length.
+	common := ochainsync.Tip{
+		Point:       clonePoint(first.points[last]),
+		BlockNumber: first.baseBlock + uint64(last),
+	}
 	for _, other := range fragments[1:] {
 		tip, ok := fragments[0].intersectTip(other)
 		if !ok {
@@ -182,19 +197,18 @@ func (cs *ChainSelector) eagernessAnchorValue() *eagernessAnchor {
 }
 
 // containsPoint reports whether the fragment retains point. Entries are in
-// strictly ascending slot order (recordObservedTipHistory drops any entry at or
-// after a new tip's slot), so a binary search finds the only candidate. The
-// limit is recomputed on every delivered header under the selector lock, and
-// a linear scan of 2k+1 entries per candidate dominated that cost.
+// strictly ascending slot order, so a binary search finds the only candidate.
+// The limit is recomputed on every delivered header under the selector lock,
+// so this lookup must stay logarithmic in the retained frontier size.
 func (f CandidateFragment) containsPoint(point ocommon.Point) bool {
 	i, found := slices.BinarySearchFunc(
-		f.entries,
+		f.points,
 		point.Slot,
-		func(entry ochainsync.Tip, slot uint64) int {
-			return cmp.Compare(entry.Point.Slot, slot)
+		func(entry ocommon.Point, slot uint64) int {
+			return cmp.Compare(entry.Slot, slot)
 		},
 	)
-	return found && bytes.Equal(f.entries[i].Point.Hash, point.Hash)
+	return found && bytes.Equal(f.points[i].Hash, point.Hash)
 }
 
 // SelectedTip returns the tip of the currently selected peer's chain truncated
@@ -216,10 +230,19 @@ func (cs *ChainSelector) SelectedTip() (ochainsync.Tip, bool) {
 	if !limit.Active || tip.BlockNumber <= limit.BlockNumber {
 		return cloneObservedTip(tip), true
 	}
-	for _, historyTip := range slices.Backward(peerTip.observedTipHistory) {
-		if historyTip.BlockNumber <= limit.BlockNumber {
-			return cloneObservedTip(historyTip), true
-		}
+	fragment := CandidateFragment{
+		points:    peerTip.observedPoints,
+		baseBlock: peerTip.observedPointBaseBlock,
+	}
+	if fragment.Len() > 0 && limit.BlockNumber >= fragment.baseBlock {
+		offset := min(
+			limit.BlockNumber-fragment.baseBlock,
+			uint64(fragment.Len()-1), // #nosec G115 -- fragment length is bounded.
+		)
+		return ochainsync.Tip{
+			Point:       clonePoint(fragment.points[offset]),
+			BlockNumber: fragment.baseBlock + offset,
+		}, true
 	}
 	return cloneObservedTip(cs.localTip), true
 }
@@ -256,20 +279,6 @@ func (cs *ChainSelector) indistinguishableUnderEagernessLocked(
 	return min(a.BlockNumber, limit) == min(b.BlockNumber, limit)
 }
 
-// candidateFragmentCapacityLocked is how many delivered points a peer's
-// candidate fragment retains. k+1 is enough to restore any rollback within k.
-// While Genesis selection is active the fragment keeps 2k+1: a candidate more
-// than k past the point where it forked from another is the one the Limit on
-// Eagerness must hold back, and a k+1 window would already have dropped that
-// fork point.
-func (cs *ChainSelector) candidateFragmentCapacityLocked() uint64 {
-	capacity := safeAddUint64(cs.securityParam, 1)
-	if cs.mode == SelectionModeGenesis {
-		capacity = safeAddUint64(cs.securityParam, capacity)
-	}
-	return capacity
-}
-
 // eagernessPollInterval is how often AwaitEagernessLimit re-evaluates the
 // limit. The limit also moves with the applied ledger tip, which has no change
 // notification, so waiting on selector events alone would miss it.
@@ -277,8 +286,9 @@ const eagernessPollInterval = 100 * time.Millisecond
 
 // AwaitEagernessLimit blocks until a header numbered blockNumber, delivered by
 // connId, is within the Limit on Eagerness, and returns the context's error if
-// it is cancelled first. It returns immediately when the cap is inactive, when
-// connId is not a tracked peer, or when the header is within the limit.
+// it is cancelled first. It returns ErrEagernessPeerUntracked when connId is not
+// tracked at entry or disappears while waiting. It returns immediately when
+// the cap is inactive or the header is within the limit.
 //
 // appliedTip, when non-nil, supplies the applied ledger tip that the limit is
 // measured from before the candidates have shared a point, and is re-read on
@@ -297,7 +307,13 @@ func (cs *ChainSelector) AwaitEagernessLimit(
 	blockNumber uint64,
 	appliedTip func() ochainsync.Tip,
 ) error {
-	if cs.withinEagernessLimit(connId, blockNumber, appliedTip) {
+	within, tracked := cs.eagernessAdmissionStatus(
+		connId, blockNumber, appliedTip,
+	)
+	if !tracked {
+		return ErrEagernessPeerUntracked
+	}
+	if within {
 		return nil
 	}
 	defer cs.pauseEagerness(connId)()
@@ -308,9 +324,13 @@ func (cs *ChainSelector) AwaitEagernessLimit(
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if cs.withinEagernessLimit(
+			within, tracked := cs.eagernessAdmissionStatus(
 				connId, blockNumber, appliedTip,
-			) {
+			)
+			if !tracked {
+				return ErrEagernessPeerUntracked
+			}
+			if within {
 				return nil
 			}
 		}
@@ -354,6 +374,17 @@ func (cs *ChainSelector) withinEagernessLimit(
 	blockNumber uint64,
 	appliedTip func() ochainsync.Tip,
 ) bool {
+	within, tracked := cs.eagernessAdmissionStatus(
+		connId, blockNumber, appliedTip,
+	)
+	return !tracked || within
+}
+
+func (cs *ChainSelector) eagernessAdmissionStatus(
+	connId ouroboros.ConnectionId,
+	blockNumber uint64,
+	appliedTip func() ochainsync.Tip,
+) (within, tracked bool) {
 	// Read outside the lock: the ledger tip is the ledger's to guard.
 	var applied ochainsync.Tip
 	if appliedTip != nil {
@@ -361,12 +392,15 @@ func (cs *ChainSelector) withinEagernessLimit(
 	}
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
-	if _, tracked := cs.peerTips[connId]; !tracked {
-		return true
-	}
 	if appliedTip == nil {
 		applied = cs.localTip
 	}
 	limit := cs.computeEagernessLimitLocked(&connId, applied)
-	return !limit.Active || blockNumber <= limit.BlockNumber
+	if !limit.Active {
+		return true, true
+	}
+	if _, tracked := cs.peerTips[connId]; !tracked {
+		return false, false
+	}
+	return blockNumber <= limit.BlockNumber, true
 }

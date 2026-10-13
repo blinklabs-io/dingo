@@ -100,6 +100,15 @@ func TestIPKeyFromAddr(t *testing.T) {
 			expected: "::/64",
 		},
 		{
+			name: "IPv6 scoped address",
+			addr: &net.TCPAddr{
+				IP:   net.ParseIP("fe80::1"),
+				Port: 3000,
+				Zone: "eth0",
+			},
+			expected: "fe80::/64",
+		},
+		{
 			name: "IPv4-mapped IPv6 treated as IPv4",
 			addr: &net.TCPAddr{
 				IP:   net.ParseIP("::ffff:192.168.1.1"),
