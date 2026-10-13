@@ -266,3 +266,25 @@ func TestResolveErrorKeepsOtherConnectionMismatchCount(t *testing.T) {
 	require.Equal(t, 7, fixture.ls.headerMismatchCounts[connIdKey(otherConn)])
 	require.Zero(t, fixture.ls.headerMismatchCounts[connIdKey(forkConn)])
 }
+
+// A closed connection's mismatch count is dropped with the rest of its
+// per-connection state, so the map does not outlive the connections in it.
+func TestConnectionClosedDropsOnlyItsMismatchCount(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	closedConn := deadForkConnId(3002)
+	otherConn := deadForkConnId(3003)
+	fixture.ls.headerMismatchCounts = map[string]int{
+		connIdKey(closedConn): 5,
+		connIdKey(otherConn):  3,
+	}
+
+	fixture.ls.handleConnectionClosedEvent(event.NewEvent(
+		ConnectionClosedEventType,
+		ConnectionClosedEvent{ConnectionId: closedConn},
+	))
+
+	require.NotContains(t, fixture.ls.headerMismatchCounts, connIdKey(closedConn))
+	require.Equal(t, 3, fixture.ls.headerMismatchCounts[connIdKey(otherConn)])
+}

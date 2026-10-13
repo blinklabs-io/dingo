@@ -1493,6 +1493,7 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	delete(ls.bufferedHeaderEvents, connIdKey(e.ConnectionId))
 	ls.bufferedHeaderMutex.Unlock()
 	ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
+	delete(ls.headerMismatchCounts, connIdKey(e.ConnectionId))
 	// Cancel in-flight blockfetch if the dead connection owns it.
 	// Without this, chainsyncBlockfetchReadyChan stays non-nil and
 	// new headers from reconnected peers are queued behind a batch
