@@ -7217,14 +7217,16 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	)
 	require.Error(t, twoBoundaryErr)
 	require.True(t, IsHeaderVerificationWithheld(twoBoundaryErr))
-	// The same epoch span extends the held tip when it links to lateAnchor.
+	// A multi-epoch direct extension uses the normal local-chain verifier.
 	ls.removePeerForkNoncePrefix(connIdKey(ouroboros.ConnectionId{}))
 	ls.config.PeerHeaderLookupFunc = peerLookup(lateAnchor)
 	extensionNumber := lateAnchor.block.BlockNumber() + 1
-	extension := createTestBlockWithNonceAtSlotsAndBlockNumber(t, [32]byte{88}, ls.epochCache[2].Nonce, 2*targetEpochStart, 2*targetEpochStart+100, lateAnchor.block.Hash().Bytes(), &extensionNumber, tamperNone)
+	extension := createTestBlockWithNonceAtSlotsAndBlockNumber(t, [32]byte{88}, ls.epochCache[2].Nonce, 2*targetEpochStart, 2*targetEpochStart+100, lateAnchor.block.Hash().Bytes(), &extensionNumber, tamperVRFProof)
 	extensionErr := ls.ValidatePeerChainSelectionHeaderCrypto(ouroboros.ConnectionId{}, extension.block.Header())
-	require.True(t, IsHeaderVerificationDeferred(extensionErr))
+	require.Error(t, extensionErr)
+	require.ErrorContains(t, extensionErr, "VRF")
 	require.False(t, IsHeaderVerificationWithheld(extensionErr))
+	require.False(t, IsHeaderVerificationDeferred(extensionErr))
 	pastHorizonFork := createTestBlockWithNonceAtSlotsAndBlockNumber(t, [32]byte{94}, sourceNonce, 1_000_000, 1_000_100, anchorPoint.Hash, &forkBlockNumber, tamperNone)
 	pastHorizonForkErr := ls.ValidatePeerChainSelectionHeaderCrypto(ouroboros.ConnectionId{}, pastHorizonFork.block.Header())
 	require.ErrorIs(t, pastHorizonForkErr, ErrHeaderBeyondForecastHorizon)

@@ -911,6 +911,7 @@ func TestChainsyncClientRollForwardWithholdsUnauthenticatedCandidate(
 	defer bus.Close()
 	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
 	_, recycleCh := bus.Subscribe(ledger.ConnectionRecycleRequestedEventType)
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	state := dchainsync.NewState(bus, nil)
 	conn := newTestConnId("127.0.0.1:6013", "1.1.1.4:3001")
 	require.True(t, state.AddClientConnId(conn))
@@ -958,6 +959,12 @@ func TestChainsyncClientRollForwardWithholdsUnauthenticatedCandidate(
 		t.Fatal("missing local ancestry must not recycle the peer")
 	case <-time.After(200 * time.Millisecond):
 	}
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		200*time.Millisecond,
+		"withheld ancestry must remain on the connection for later headers",
+	)
 	_, _, found := state.LookupObservedHeader(conn, header.Hash().Bytes())
 	require.True(t, found, "withheld ancestry must remain reconstructable")
 }

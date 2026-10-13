@@ -1348,7 +1348,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			if verifyErr != nil {
 				if ledger.IsHeaderVerificationWithheld(verifyErr) {
 					selectionEligible = false
-					o.scheduleFutureHeaderResync(ctx.ConnectionId, time.Now())
 				} else if ledger.IsHeaderVerificationDeferred(verifyErr) {
 					o.config.Logger.Debug(
 						"chainsync: header verification deferred for chain selection",

@@ -106,7 +106,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 	}
 	if targetEpoch.EpochId != sourceEpoch.EpochId+1 {
 		if tip := ls.chain.Tip().Point; tip.Slot == ancestor.Slot && bytes.Equal(tip.Hash, ancestor.Hash) {
-			return nil, models.Epoch{}, false, errHeaderVerificationDeferred
+			return nil, models.Epoch{}, false, nil
 		}
 		return nil, models.Epoch{}, false, fmt.Errorf(
 			"%w: candidate fork spans epoch %d to %d",
