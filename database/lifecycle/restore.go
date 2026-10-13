@@ -1325,19 +1325,19 @@ func readRestoreRecovery(dir string) (restoreRollback, Manifest, error) {
 		)
 	}
 	return restoreRollback{
-		dir:              dir,
-		metadataPath:     filepath.Join(dir, MetadataBackupFileName),
-		newBlobNamespace: record.NewBlobNamespace,
-		oldBlobNamespace: record.OldBlobNamespace,
-		cloudBlob:        record.CloudBlob,
-		metadataMutated:  record.MetadataMutated,
-		blobMutated:      record.CloudBlob,
-		durable:          true,
-	}, Manifest{
-		BlobPlugin:     record.BlobPlugin,
-		MetadataPlugin: record.MetadataPlugin,
-		StorageMode:    record.StorageMode,
-	}, nil
+			dir:              dir,
+			metadataPath:     filepath.Join(dir, MetadataBackupFileName),
+			newBlobNamespace: record.NewBlobNamespace,
+			oldBlobNamespace: record.OldBlobNamespace,
+			cloudBlob:        record.CloudBlob,
+			metadataMutated:  record.MetadataMutated,
+			blobMutated:      record.CloudBlob,
+			durable:          true,
+		}, Manifest{
+			BlobPlugin:     record.BlobPlugin,
+			MetadataPlugin: record.MetadataPlugin,
+			StorageMode:    record.StorageMode,
+		}, nil
 }
 
 // RecoverInterruptedRestore disposes a durable live-restore recovery record.
