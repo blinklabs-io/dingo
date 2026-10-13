@@ -248,7 +248,19 @@ func TestPrepareDevnetStateExportsFundedFaucet(t *testing.T) {
 			for _, name := range []string{"faucet.skey", "faucet.vkey", "faucet.addr"} {
 				require.NoError(t, os.Remove(filepath.Join(runDir, "cardano", "keys", name)))
 			}
+			producerFiles := []string{"vrf.skey", "kes.skey", "opcert.cert"}
+			for _, name := range producerFiles {
+				require.NoError(t, os.WriteFile(
+					filepath.Join(runDir, "cardano", "keys", name),
+					[]byte("custom producer "+name), 0o600,
+				))
+			}
 			require.NoError(t, prepareDevnetState(runDir, true, false, start.Add(time.Hour)))
+			for _, name := range producerFiles {
+				data, err := os.ReadFile(filepath.Join(runDir, "cardano", "keys", name))
+				require.NoError(t, err)
+				require.Equal(t, "custom producer "+name, string(data), "resume replaced %s", name)
+			}
 			assertDevnetFaucet(t, runDir)
 			genesisAfter, err := os.ReadFile(genesisPath)
 			require.NoError(t, err)

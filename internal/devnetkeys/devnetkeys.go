@@ -31,6 +31,21 @@ var localKeys embed.FS
 // into dir with owner-only permissions. Replacement is atomic on Unix; Windows
 // uses os.Root.Rename and does not guarantee atomic replacement.
 func InstallLocalTestKeys(dir string) error {
+	return installLocalTestKeys(dir, []string{
+		"vrf.skey", "kes.skey", "opcert.cert",
+		"faucet.skey", "faucet.vkey", "faucet.addr",
+	})
+}
+
+// InstallLocalTestFaucet copies only the bundled faucet credentials into dir
+// with owner-only permissions, preserving existing producer credentials.
+func InstallLocalTestFaucet(dir string) error {
+	return installLocalTestKeys(dir, []string{
+		"faucet.skey", "faucet.vkey", "faucet.addr",
+	})
+}
+
+func installLocalTestKeys(dir string, names []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating local DevNet key directory: %w", err)
 	}
@@ -57,10 +72,7 @@ func InstallLocalTestKeys(dir string) error {
 	if err := dirFile.Close(); err != nil {
 		return fmt.Errorf("closing local DevNet key directory: %w", err)
 	}
-	for _, name := range []string{
-		"vrf.skey", "kes.skey", "opcert.cert",
-		"faucet.skey", "faucet.vkey", "faucet.addr",
-	} {
+	for _, name := range names {
 		data, err := localKeys.ReadFile("keys/" + name)
 		if err != nil {
 			return fmt.Errorf(
