@@ -3008,7 +3008,9 @@ fallback:
   `barkBlockDownloadHosts` allowlist entry. An HTTP Bark RPC base anchors the
   corresponding HTTPS download origin. The same check runs on redirects,
   and every resolved address is rejected if it is private or special-use before
-  dialing. The client ignores ambient proxy settings, and response bodies are
+  dialing, unless `barkBlockDownloadAllowPrivateAddresses` is set for an
+  archive store on a private network; that default-off opt-in lifts only the
+  address check. The client ignores ambient proxy settings, and response bodies are
   capped before buffering at the largest block the chain admits for any era
   (`LedgerState.MaxBlockSize`: the live header and body limits, or the Byron
   genesis block size when larger; a 128 KiB default when neither is known).

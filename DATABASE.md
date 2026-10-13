@@ -3167,7 +3167,8 @@ older than the ledger stability window:
   `barkBaseUrl` or a configured `barkBlockDownloadHosts` entry. An HTTP Bark
   RPC base anchors the corresponding HTTPS download origin. The same check
   applies after each redirect. Every resolved address must be public before
-  dialing, and the download transport ignores ambient proxy settings. The
+  dialing unless `barkBlockDownloadAllowPrivateAddresses` is enabled, and the
+  download transport ignores ambient proxy settings either way. The
   operator-configured Bark RPC client remains separate so an explicitly chosen
   internal service endpoint is still reachable. Downloads are also size-limited
   to the largest block the chain admits for any era (`LedgerState.MaxBlockSize`:

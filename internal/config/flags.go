@@ -437,6 +437,11 @@ var flagSpecs = []flagSpec{
 		"bark-block-download-hosts",
 		"allowed HTTPS origins for Bark block downloads (ports matched exactly)",
 	),
+	boolFlag(
+		"BarkBlockDownloadAllowPrivateAddresses",
+		"bark-block-download-allow-private-addresses",
+		"allow Bark block downloads from private, loopback, and special-use addresses",
+	),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
 	stringFlag(
 		"BarkHost",

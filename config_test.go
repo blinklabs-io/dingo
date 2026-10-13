@@ -1124,6 +1124,22 @@ func TestWithKoiosParityAccountsExplicitFalseDisablesEndToEnd(t *testing.T) {
 	assert.False(t, *cfg.koiosParity.Accounts)
 }
 
+func TestBarkBlockDownloadAllowPrivateAddressesReachesRuntime(t *testing.T) {
+	t.Parallel()
+
+	for _, allow := range []bool{false, true} {
+		cfg, err := NewConfigFromInternal(
+			&internalconfig.Config{
+				BarkBlockDownloadAllowPrivateAddresses: allow,
+			},
+			nil, nil, nil, nil,
+		)
+		require.NoError(t, err)
+		require.Equal(t, allow, cfg.barkBlockDownloadAllowPrivateAddresses)
+		require.Equal(t, allow, cfg.BarkBlockDownloadAllowPrivateAddresses())
+	}
+}
+
 // TestTokenRegistryConfigReachesRuntimeFromYAML covers the path YAML, env, and
 // CLI all land on: internal config only. The syncer reads the runtime mirror,
 // so without syncCompatFields carrying it across, an operator's tokenRegistry
