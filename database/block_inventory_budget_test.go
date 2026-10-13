@@ -15,9 +15,11 @@
 package database
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -115,7 +117,8 @@ func TestBlockInventoryClearsOverBudgetStaleIndex(t *testing.T) {
 		}
 		require.NoError(t, txn.Commit())
 	}
-	insertTestBlock(t, db, 500_000, randomHash(t), []byte{0x80})
+	liveHash := randomHash(t)
+	insertTestBlock(t, db, 500_000, liveHash, []byte{0x80})
 	txn := NewBlobOnlyTxn(db, true)
 	require.NoError(t, txn.BlobStore().Delete(txn.Blob(), blockInventoryKey))
 	require.NoError(t, txn.Commit())
@@ -126,4 +129,36 @@ func TestBlockInventoryClearsOverBudgetStaleIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), count)
 	require.Equal(t, uint64(500_000), oldest)
+
+	// The record alone does not prove the clear: every stale index key must
+	// be gone, leaving only the live block's.
+	liveKey, err := blockInventoryIndexKey(500_000, liveHash)
+	require.NoError(t, err)
+	keys := blockInventoryIndexKeys(t, db)
+	// Compare the count, not the slice: a failure would print every key.
+	require.Equal(t, 1, len(keys), "block inventory index keys remain")
+	require.Equal(t, liveKey, keys[0])
+}
+
+// blockInventoryIndexKeys returns every key under the block inventory index
+// prefix, in key order.
+func blockInventoryIndexKeys(t *testing.T, db *Database) [][]byte {
+	t.Helper()
+	txn := NewBlobOnlyTxn(db, false)
+	defer txn.Rollback() //nolint:errcheck
+	store := txn.BlobStore()
+	require.NotNil(t, store)
+	it := store.NewIterator(txn.Blob(), types.BlobIteratorOptions{
+		Prefix: blockInventoryIndexPrefix,
+	})
+	require.NotNil(t, it)
+	defer it.Close()
+	var keys [][]byte
+	for it.Seek(blockInventoryIndexPrefix); it.ValidForPrefix(blockInventoryIndexPrefix); it.Next() {
+		item := it.Item()
+		require.NotNil(t, item)
+		keys = append(keys, bytes.Clone(item.Key()))
+	}
+	require.NoError(t, it.Err())
+	return keys
 }
