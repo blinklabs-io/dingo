@@ -26,6 +26,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -101,6 +103,46 @@ func TestRecyclerComponentsLeavesChainSelectorNilWhenUnset(t *testing.T) {
 		},
 	)
 	assert.True(t, ok)
+}
+
+func TestChainsyncObservePeerTipIsSynchronousDuringGenesisSelection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:   true,
+			SecurityParam: 10,
+		},
+	)
+	n := &Node{chainSelector: selector}
+	connId := newNodeTestConnId(1)
+	point := ocommon.NewPoint(42, []byte("genesis-frontier"))
+	tip := ochainsync.Tip{Point: point, BlockNumber: 7}
+
+	require.True(t, n.chainsyncObservePeerTip(
+		chainselection.PeerTipUpdateEvent{
+			ConnectionId: connId,
+			Tip:          tip,
+			ObservedTip:  tip,
+		},
+	))
+	peerTip := selector.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	require.Equal(t, point, peerTip.ObservedTip.Point)
+
+	origin := ocommon.NewPointOrigin()
+	require.True(t, n.chainsyncObservePeerRollback(
+		chainselection.PeerRollbackEvent{
+			ConnectionId: connId,
+			Point:        origin,
+			Tip:          tip,
+		},
+	))
+	peerTip = selector.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	require.Equal(t, origin, peerTip.ObservedTip.Point)
 }
 
 func TestRecyclerComponentsSkipsWhenLifecycleOpHoldsLock(t *testing.T) {

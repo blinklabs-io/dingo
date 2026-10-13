@@ -2920,6 +2920,112 @@ func TestReplayRecoveryRejectsDeterministicMalformedScriptWitnesses(
 	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
+// A proposal return-account failure reads reward-account registration, so
+// resolving one of the transaction's UTxO inputs cannot change the verdict.
+func TestReplayRecoveryRejectsDeterministicProposalReturnAccountDoesNotExist(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	badAddr, err := lcommon.NewAddress(
+		"stake_test1ur03nykas2c79sl38zwwsqrsrnzfxqx70nn3k7h40j60ajsle7at7",
+	)
+	require.NoError(t, err)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			160,
+			testHashBytes("proposal-return-account-block"),
+		),
+		TxHash: testHashBytes("proposal-return-account-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: testHashBytes("unresolved-producer")},
+		},
+		Cause: fmt.Errorf(
+			"conway utxo validation rule 8: %w",
+			conway.ProposalReturnAccountDoesNotExistError{Address: badAddr},
+		),
+	})
+	require.NoError(t, err)
+	require.True(
+		t,
+		recovered,
+		"a proposal return account rejection must rewind past the block rather than search for a missing-input producer",
+	)
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	assert.Nil(t, ls.lastAtTipRecovery)
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"a proposal return account rejection must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
+}
+
+func TestIsConwayGovPredFailureError(t *testing.T) {
+	t.Parallel()
+
+	addr, err := lcommon.NewAddress(
+		"stake_test1ur03nykas2c79sl38zwwsqrsrnzfxqx70nn3k7h40j60ajsle7at7",
+	)
+	require.NoError(t, err)
+
+	verdicts := []error{
+		conway.ProtocolParameterUpdateEmptyError{},
+		conway.ProtocolParameterUpdateFieldZeroError{},
+		conway.ConwayProtocolParameterUpdateError{},
+		conway.CommitteeMemberAlreadyExpiredError{},
+		conway.EmptyTreasuryWithdrawalsError{},
+		conway.ZeroTreasuryWithdrawalAmountError{},
+		conway.BootstrapDisallowedGovActionError{},
+		conway.WrongNetworkProposalAddressError{},
+		conway.MalformedGovActionError{},
+		conway.ConflictingCommitteeUpdateError{},
+		conway.InvalidGuardrailsScriptHashError{},
+		conway.BadHardForkProtocolVersionError{},
+		conway.ProposalDepositIncorrectError{},
+		conway.ProposalReturnAccountDoesNotExistError{Address: addr},
+		conway.TreasuryWithdrawalReturnAccountsDoNotExistError{},
+		conway.UnknownGovActionIdError{},
+		conway.UnknownVoterError{},
+		conway.VotingOnExpiredGovActionError{},
+		conway.BootstrapVotingRestrictionError{},
+		conway.StakePoolVotingRestrictionError{},
+		conway.CCVotingRestrictionError{},
+		conway.UnelectedCommitteeVoterError{},
+	}
+	for _, verdict := range verdicts {
+		assert.True(t, isConwayGovPredFailureError(verdict), "%T", verdict)
+	}
+	assert.True(
+		t,
+		isConwayGovPredFailureError(fmt.Errorf("wrapped: %w", verdicts[0])),
+	)
+
+	stateErrors := []error{
+		conway.CommitteeExpiryEpochUnavailableError{},
+		conway.ConstitutionLookupError{},
+		conway.MalformedConstitutionError{},
+		conway.CommitteeMemberLookupError{},
+		conway.CommitteeStateUnavailableError{},
+		conway.InvalidGovActionAncestorError{},
+		conway.ConstitutionLookupError{
+			Err: conway.MalformedGovActionError{},
+		},
+	}
+	for _, stateErr := range stateErrors {
+		assert.False(t, isConwayGovPredFailureError(stateErr), "%T", stateErr)
+	}
+}
+
 // A duplicate-input failure reaching the deterministic branch while the node
 // is at tip takes that branch rather than recoverAtTipFromTxValidationError's
 // escalating-depth schedule. Deepening the rewind cannot change a verdict that

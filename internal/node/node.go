@@ -16,6 +16,8 @@ package node
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,6 +27,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -281,11 +284,38 @@ func newMetricsServer(cfg *config.Config) *http.Server {
 	metricsMux.Handle("/metrics", promhttp.Handler())
 	return &http.Server{
 		Addr:              cfg.MetricsListenAddress(),
-		Handler:           metricsMux,
+		Handler:           MetricsAuthHandler(cfg.MetricsAuthToken, metricsMux),
 		ReadHeaderTimeout: 60 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+}
+
+// MetricsAuthHandler requires a configured Bearer token before serving
+// Prometheus metrics. An empty token preserves unauthenticated loopback and
+// externally protected deployments.
+func MetricsAuthHandler(token string, next http.Handler) http.Handler {
+	if token == "" {
+		return next
+	}
+	tokenHash := sha256.Sum256([]byte(token))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scheme, provided, ok := strings.Cut(
+			r.Header.Get("Authorization"), " ",
+		)
+		ok = ok && strings.EqualFold(scheme, "Bearer")
+		provided = strings.TrimLeft(provided, " ")
+		providedHash := sha256.Sum256([]byte(provided))
+		if !ok || subtle.ConstantTimeCompare(
+			providedHash[:],
+			tokenHash[:],
+		) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func newPprofDebugServer(cfg *config.Config) *http.Server {
@@ -847,9 +877,12 @@ func buildDingoConfig(
 		),
 		dingo.WithTokenRegistryConfig(
 			dingo.TokenRegistryConfig{
-				Enabled:   cfg.TokenRegistry.Enabled,
-				SourceURL: cfg.TokenRegistry.SourceURL,
-				Interval:  cfg.TokenRegistry.Interval,
+				Enabled:     cfg.TokenRegistry.Enabled,
+				SourceURL:   cfg.TokenRegistry.SourceURL,
+				ManifestURL: cfg.TokenRegistry.ManifestURL,
+				TrustedManifestKey: cfg.TokenRegistry.
+					TrustedManifestKey,
+				Interval: cfg.TokenRegistry.Interval,
 				RequestTimeout: cfg.TokenRegistry.
 					RequestTimeout,
 				UserAgent: cfg.TokenRegistry.UserAgent,
@@ -868,6 +901,7 @@ func buildDingoConfig(
 				StoreLogos: cfg.TokenRegistry.StoreLogos,
 				AllowPrivateAddresses: cfg.TokenRegistry.
 					AllowPrivateAddresses,
+				AllowRollback: cfg.TokenRegistry.AllowRollback,
 			},
 		),
 		dingo.WithMidnightConfig(dingo.MidnightConfig{

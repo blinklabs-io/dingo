@@ -120,8 +120,8 @@ func TestChainsyncClientRollForwardWithholdsHeaderPastForecastHorizon(
 	t.Parallel()
 
 	f := newForecastHorizonFixture(t, "10.0.0.20:3001")
-	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) error {
-		return beyondForecastHorizonErr()
+	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
+		return 0, beyondForecastHorizonErr()
 	}
 
 	f.rollForward(t, newTestBlockHeader(400, 1, 0xa1))
@@ -163,11 +163,11 @@ func TestChainsyncClientRollForwardRewaitsForecastHorizonBeforeObserving(
 		admissions.Add(1)
 		return true, nil
 	}
-	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) error {
+	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		if verifications.Add(1) == 1 {
-			return beyondForecastHorizonErr()
+			return 0, beyondForecastHorizonErr()
 		}
-		return nil
+		return 42, nil
 	}
 
 	f.rollForward(t, newTestBlockHeader(400, 1, 0xa2))
@@ -304,8 +304,8 @@ func TestChainsyncClientRollForwardResyncsDisconnectedHeader(t *testing.T) {
 // It also lets header verification pass, so a header that is not resynced
 // proceeds to chain selection instead of reaching an unset seam.
 func (f forecastHorizonFixture) setLocalTip(tipBlock, k uint64) {
-	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) error {
-		return nil
+	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
+		return 42, nil
 	}
 	f.o.chainsyncLocalTipBlock = func() (uint64, uint64) {
 		return tipBlock, k

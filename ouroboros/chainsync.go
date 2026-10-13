@@ -317,6 +317,7 @@ func (o *Ouroboros) chainsyncServerConnOpts(
 
 func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
+		ochainsync.WithAwaitReplyFunc(o.chainsyncClientAwaitReply),
 		ochainsync.WithRollForwardRawFunc(
 			o.instrumentChainsyncRollForwardRaw(
 				o.chainsyncClientRollForwardRaw,
@@ -340,6 +341,41 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		ochainsync.WithIntersectTimeout(30 * time.Second),
 		ochainsync.WithBlockTimeout(o.config.ChainsyncBlockTimeout),
 	}
+}
+
+// chainsyncClientAwaitReply publishes the protocol's explicit idle proof after
+// gouroboros has fenced every preceding pipelined chain update.
+func (o *Ouroboros) chainsyncClientAwaitReply(
+	ctx ochainsync.CallbackContext,
+) error {
+	if o.chainsyncState == nil {
+		return nil
+	}
+	client := o.chainsyncState.GetTrackedClient(ctx.ConnectionId)
+	if client == nil {
+		return nil
+	}
+	o.chainsyncState.MarkClientSynced(ctx.ConnectionId)
+	if client.ObservabilityOnly ||
+		!o.shouldPublishChainsyncToLedger(ctx.ConnectionId) {
+		return nil
+	}
+	if o.config.ChainsyncObserveAwaitReply != nil {
+		o.config.ChainsyncObserveAwaitReply(ctx.ConnectionId, client.Cursor)
+	}
+	if o.eventBus == nil {
+		return nil
+	}
+	o.eventBus.Publish(
+		ledger.ChainsyncAwaitReplyEventType,
+		event.NewEvent(
+			ledger.ChainsyncAwaitReplyEventType,
+			ledger.ChainsyncAwaitReplyEvent{
+				ConnectionId: ctx.ConnectionId,
+			},
+		),
+	)
+	return nil
 }
 
 func normalizeIntersectPoints(points []ocommon.Point) []ocommon.Point {
@@ -1244,7 +1280,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			ctx.ConnectionId,
 			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
 		)
-		patienceResume = ingressEligible
 		o.config.Logger.Debug(
 			"chainsync: header received",
 			"component", "ouroboros",
@@ -1320,7 +1355,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		selectionEligible := ingressEligible
 		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
 			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
-			verifyErr := o.chainSelectionVerifyHeaderCrypto(ctx.ConnectionId, v)
+			verificationGeneration, verifyErr := o.chainSelectionVerifyHeaderCrypto(
+				ctx.ConnectionId,
+				v,
+			)
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) &&
 				o.chainsyncHeaderAdmission != nil {
 				// Admission waited for the horizon, so it has since moved
@@ -1329,7 +1367,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				if err != nil || !admitted {
 					return err
 				}
-				verifyErr = o.chainSelectionVerifyHeaderCrypto(ctx.ConnectionId, v)
+				verificationGeneration, verifyErr = o.chainSelectionVerifyHeaderCrypto(
+					ctx.ConnectionId,
+					v,
+				)
+			}
+			if verifyErr == nil {
+				chainsyncEvent.HeaderCryptoVerificationGeneration = verificationGeneration
 			}
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) {
 				// The header cannot be validated yet, so it must not extend
@@ -1375,11 +1419,18 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 							},
 						),
 					)
+					if o.chainsyncState != nil {
+						o.chainsyncState.SetClientObservabilityOnly(
+							ctx.ConnectionId,
+							true,
+						)
+					}
 					ingressEligible = false
 				}
 			}
 		}
 		patienceGrant = selectionEligible
+		patienceResume = ingressEligible
 		// Observe the tip for chain selection FIRST, so the apply-eligibility
 		// decision below reflects this header. Only ingress-eligible peers are
 		// observed; random inbound peers reporting ephemeral tips are filtered
@@ -1547,17 +1598,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			bytes.Equal(point.Hash, tip.Point.Hash) {
 			if o.chainsyncState != nil {
 				o.chainsyncState.MarkClientSynced(ctx.ConnectionId)
-			}
-			if ingressEligible && o.eventBus != nil {
-				o.eventBus.Publish(
-					ledger.ChainsyncAwaitReplyEventType,
-					event.NewEvent(
-						ledger.ChainsyncAwaitReplyEventType,
-						ledger.ChainsyncAwaitReplyEvent{
-							ConnectionId: ctx.ConnectionId,
-						},
-					),
-				)
 			}
 		}
 		// Update ChainSync performance metrics for peer scoring

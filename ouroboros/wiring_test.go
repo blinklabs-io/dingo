@@ -298,7 +298,7 @@ func TestNewOuroborosWiresPeerRelativeHeaderVerification(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, o.Close()) })
 	blocks, err := testfixtures.GenerateConwayChain(2)
 	require.NoError(t, err)
-	err = o.chainSelectionVerifyHeaderCrypto(conn, blocks[1].Header())
+	_, err = o.chainSelectionVerifyHeaderCrypto(conn, blocks[1].Header())
 	require.True(t, queried, "the composed verifier must query this peer's ancestry")
 	require.True(t, ledger.IsHeaderVerificationWithheld(err))
 }

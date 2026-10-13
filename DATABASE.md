@@ -1837,12 +1837,15 @@ which is how a subject the upstream registry has dropped stops being served —
 an upsert-only sync could never retire one. It runs only after a snapshot has
 applied in full, since pruning against a partial snapshot would delete live
 subjects the failed run never reached. The sync passes one metadata transaction
-through the snapshot stamp, every upsert batch, the prune, and the ETag/source
-identity writes; a limit, store, state, or commit failure therefore leaves the
-previously served rows and validator state unchanged on SQLite, PostgreSQL, and
-MySQL. Archive ingestion completes into a bounded temporary staging file before
-that transaction begins, so download and parsing do not hold a backend writer
-lock. `GetTokenRegistryEntry` looks a subject up for the API and returns `nil`
+through the snapshot stamp, every upsert batch, the prune, and the authenticated
+manifest sequence, digest, validator, and source-identity writes; a limit,
+signature, rollback, digest, store, state, or commit failure therefore leaves
+the previously served rows and authenticated manifest state unchanged on
+SQLite, PostgreSQL, and MySQL. These values use the existing `sync_state` table,
+so no schema migration is required. Archive ingestion and exact compressed-byte
+hashing complete into a bounded temporary staging file before that transaction
+begins, so download and parsing do not hold a backend writer lock.
+`GetTokenRegistryEntry` looks a subject up for the API and returns `nil`
 for an unknown subject rather than an error, so the endpoint serves a null
 `metadata` field. Subjects are lower-cased on both write and read, so a registry
 that publishes an upper-case subject still matches a lookup built from
@@ -2258,8 +2261,10 @@ certificate write path therefore prunes superseded rows for the credential it
 just wrote, in batches bounded per certificate so no single applied block turns
 into a large delete. Every 24 hours, store-level maintenance finds candidate
 credentials on the read connection, closes that cursor, and applies the same
-indexed bounded deletes one credential at a time until no superseded rows
-remain. Closing the discovery cursor before deleting prevents the maintenance
+bounded deletes one credential at a time until no superseded rows remain. Each
+selected row is deleted by its integer primary key, so delete planning does not
+depend on table cardinality statistics staying current while imports grow the
+table. Closing the discovery cursor before deleting prevents the maintenance
 sweep from holding a read snapshot while it drains the history. This second
 path is required for a credential that stops re-authorizing: its old rows must
 drain even though no later certificate will revisit that partition.
@@ -2326,6 +2331,11 @@ maintenance sweep opens a write transaction before it calls the same helper.
 Rollback already owns that connection before it takes the mutex exclusively to
 invalidate the cached slot. The prune holds its read lock across the delete, so
 horizon selection and deletion stay ordered without a lock cycle.
+
+SQLite deletes the selected authorization IDs individually using cached
+primary-key statements, avoiding stale-statistics table scans. PostgreSQL and
+MySQL delete the selected IDs in one bounded batch to avoid one network round
+trip per row.
 
 The partition is the tagged credential, so a script-hash credential never prunes
 a key-hash credential sharing its 28 bytes. `committee_member` is not pruned:

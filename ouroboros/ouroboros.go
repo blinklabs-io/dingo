@@ -234,7 +234,7 @@ type Ouroboros struct {
 	chainSelectionVerifyHeaderCrypto       func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
-	) error
+	) (uint64, error)
 	chainsyncScheduleAt chainsyncScheduleAtFunc
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
@@ -448,6 +448,9 @@ type OuroborosConfig struct {
 	// revokes corroboration is not yet processed). Returning false (or nil hook)
 	// falls back to the async PeerTipUpdateEvent path.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
+	// ChainsyncObserveAwaitReply records the peer's explicit protocol-idle
+	// frontier. It runs after gouroboros fences preceding pipelined updates.
+	ChainsyncObserveAwaitReply func(ouroboros.ConnectionId, ocommon.Point)
 	// ChainsyncSyncTarget snapshots the policy-bounded target for one observed
 	// peer-tip event. Its result is carried with that event into ledger
 	// admission; ledger must not reread mutable selector state.
@@ -712,7 +715,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			return o.ledgerState.Tip().BlockNumber, uint64(k)
 		}
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
-		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidatePeerChainSelectionHeaderCrypto
+		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidatePeerChainSelectionHeaderCryptoWithGeneration
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond

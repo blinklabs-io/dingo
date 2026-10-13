@@ -385,12 +385,12 @@ func TestDijkstraBlockApplicationScopesGovernanceToDeclaredValidity(
 	t.Run("replay and rollback reapply", func(t *testing.T) {
 		t.Parallel()
 		valid := newDijkstraHardForkReplayFixture(t, true)
-		var badVersion conway.BadHardForkProtocolVersionError
-		require.ErrorAs(
+		require.ErrorIs(
 			t,
 			replayDijkstraHardForkBlock(t, valid),
-			&badVersion,
+			errRestartLedgerPipeline,
 		)
+		require.True(t, pointMatches(valid.ls.chain.Tip().Point, ocommon.Point{}))
 
 		invalid := newDijkstraHardForkReplayFixture(t, false)
 		require.NoError(t, replayDijkstraHardForkBlock(t, invalid))

@@ -2778,16 +2778,24 @@ Operators may lower the four aggregate limits with
 negative values fail configuration validation.
 Parsed entries are written to a bounded, process-local temporary staging file;
 no more than one mapping is retained during ingestion. A mapping that fails to
-parse is skipped and counted rather than failing the snapshot, since one bad
-file out of thousands should not cost the whole sync. Exhausting any aggregate
-limit rejects the artifact and removes the staging file.
+parse is skipped and counted while the rest of the archive is inspected. A
+nonzero skipped count rejects the staged result for application, so API readers
+continue to see the previous complete snapshot. Exhausting any aggregate limit
+rejects the artifact and removes the staging file.
 
-Re-downloading that artifact on every interval would be indefensible, so the
-sync records the HTTP entity tag of the last successfully applied snapshot in
-`sync_state` under `token_registry_etag` and sends it as `If-None-Match`. An
-unchanged registry answers `304` and costs one request with no body. The tag is
-written only after the whole snapshot has been applied, so an interrupted sync
-retries in full rather than recording progress it did not make.
+Every archive is named by a signed manifest. The operator pins the manifest
+publisher's Ed25519 public key; the signature binds a monotonic sequence, the
+HTTPS archive URL, its exact compressed size, and its BLAKE2b-256 digest.
+Manifest and archive requests require HTTPS at the initial URL and through
+every redirect, even when private mirror addresses are allowed. Archive bytes
+are counted and hashed through EOF before the metadata transaction begins.
+
+The last applied manifest sequence and digest are stored with the snapshot
+rows in one metadata transaction. A lower sequence is rejected unless the
+operator explicitly enables rollback, and a different digest at the same
+sequence is always rejected. An interrupted, partially parsed, incorrectly
+signed, or digest-mismatched snapshot cannot advance that authenticated state.
+An unchanged authenticated manifest costs only the small manifest request.
 
 Upserting alone cannot retire anything, so each snapshot is also reconciled
 against the table. Every row a snapshot carries is stamped with that snapshot's
@@ -2797,19 +2805,20 @@ retires a subject the registry has delisted, and a subject that remains in the
 archive but has lost every property (which the parser yields as an empty entry
 the sync skips). The prune runs only on a fully applied snapshot — never on a
 `304`, which applies none, and never after a failed one, where it would delete
-live subjects the failed run had not reached yet. Two further cases defer it:
+live subjects the failed run had not reached yet. Two further cases keep the
+previous snapshot:
 an archive carrying no `mappings/*.json` files at all (what an upstream layout
 change or a mirror serving the wrong repository looks like, as opposed to a
 genuinely empty registry, which does carry mapping files), and a snapshot in
-which any mapping was skipped as malformed or oversized — a skipped mapping
-does not re-stamp its row, so reconciling would delete metadata that is still
-good. Both log a warning rather than failing.
+which any mapping was skipped as malformed or oversized. Both log a warning
+and leave every row and its authenticated state unchanged.
 
 The recorded `sync_state` describes the snapshot **the table currently holds**,
 not a per-source cache — there is one `token_registry_entry` table, so there is
-one set of state, and all of it moves together on a successful apply. Three
-keys: the entity tag, a fingerprint of the `(source URL, logo mode)` pair that
-produced it, and the high-water snapshot stamp.
+one set of state, and all of it moves together on a successful apply. Five
+keys record the manifest entity tag, a fingerprint of the source URL, manifest
+URL, trusted key, and logo mode, the high-water snapshot stamp, the manifest
+sequence, and the archive digest.
 
 The fingerprint is what makes the tag safe to replay. A validator only
 describes the table while the table still holds what that source served under
@@ -2827,11 +2836,12 @@ exactly the subjects the new snapshot dropped. Each snapshot takes the later of
 the wall clock and the recorded stamp, so the sequence stays strictly
 increasing across process boundaries.
 
-The stamp, all row-upsert batches, reconciliation prune, entity tag, and source
-identity are applied through one metadata transaction. Until commit, API
-readers continue to see the previous complete snapshot. An expansion limit,
-entry limit, store error, state error, cancellation, or commit failure rolls
-the transaction back, so neither rows nor validator state advance. The
+The stamp, all row-upsert batches, reconciliation prune, manifest sequence,
+archive digest, entity tag, and source identity are applied through one
+metadata transaction. Until commit, API readers continue to see the previous
+complete snapshot. A skipped mapping, expansion limit, entry limit, store
+error, state error, cancellation, or commit failure rolls the transaction back,
+so neither rows nor authenticated state advance. The
 snapshot stamp is truncated to a
 whole second, because MySQL's `datetime` column carries no fractional seconds:
 an unrounded stamp would be stored rounded while the prune compared against
@@ -2879,12 +2889,13 @@ base64 logo payloads are roughly 90% of registry bytes and most consumers only
 need name, ticker, and decimals. The whole sync is disabled by default, since
 enabling it commits the node to that download.
 
-Operators configure source URL, interval, request timeout, user agent, max
-bytes, max entry bytes, logo storage, and private-address allowance through the
-`tokenRegistry` YAML block, matching `DINGO_TOKEN_REGISTRY_*` environment
-variables, or `--token-registry-*` CLI flags. An empty source URL selects by
-network: the Cardano Foundation registry for mainnet, the IOG testnet registry
-otherwise.
+Operators configure the manifest URL, trusted manifest key, source URL,
+interval, request timeout, limits, logo storage, private-address allowance,
+and intentional rollback permission through the `tokenRegistry` YAML block,
+matching `DINGO_TOKEN_REGISTRY_*` environment variables, or
+`--token-registry-*` CLI flags. Enabling the worker requires an explicit
+manifest URL and trusted key. An empty source URL still selects the expected
+archive URL by network, which the signed manifest must name exactly.
 
 `tokenRegistry.headerSecrets` adds request headers (for example
 `Authorization`) for an authenticated mirror. It is YAML and environment only,
@@ -5436,14 +5447,24 @@ an incomplete path.
 **Per-peer candidate chain fragments** (`chainselection.CandidateFragment`)
 materialize each peer's delivered-header history as a first-class value —
 Dingo's analogue of the upstream consensus interface
-`readCandidateChains :: STM m (Map peer (AnchoredFragment header))`. This is a
-separate structure from the density frontier above (`observedSlots`/
-`observedPoints`, bounded to the Genesis window): each tracked peer's
-`PeerChainTip` also records one delivered point per header
-(`recordObservedTipHistory`), bounded to `k+1` entries — enough that any valid
-rollback within `k` is representable — and trimmed on rollback
-(`PeerChainTip.ApplyRollback`); `CandidateFragment` snapshots that history into
-an independently owned, ordered value with an explicit `Anchor` (its oldest
+`readCandidateChains :: STM m (Map peer (AnchoredFragment header))`. It
+snapshots the hash-bearing density frontier (`observedPoints`) instead of
+duplicating every hash in another long-lived history. In Genesis mode that
+frontier has capacity for a full Genesis window plus `k+1` headers, so an
+intersection and a rival offering more than `k` later headers can coexist. Its
+entry count per peer is bounded by `GenesisWindowSlots + k + 1`, and
+`maxTrackedPeers` bounds the aggregate. A separate `observedTipHistory` stays
+bounded to `k+1` entries for rollback restoration and is trimmed on rollback
+(`PeerChainTip.ApplyRollback`). Outside Genesis hash-frontier tracking is
+disabled and fragments snapshot that short rollback history instead.
+Each frontier stores its first block number; consecutive block heights align
+two chains for a binary search of their last equal point. A height gap starts a
+new frontier, leaving the comparison undecidable until continuity is rebuilt.
+Window density and suffix counts use binary searches over ordered slots, so a
+density pass is logarithmic in retained points per peer pair while holding the
+selector lock.
+`CandidateFragment` copies the applicable frontier into an independently
+owned, ordered value with an explicit `Anchor` (its oldest
 retained point, which — per the upstream contract — need not intersect the
 primary chain or any other peer's fragment) and a `HeadPoint`. `ChainSelector`
 exposes the current set with `CandidateFragments()` (all tracked peers) and
@@ -5473,18 +5494,18 @@ once per `GenesisDensityEvaluationInterval` (one second, as upstream's
 of tracked peers. For each ordered pair of live, eligible, non-stale
 candidates it takes the `CandidateFragment.Intersect` of the two fragments and
 counts blocks in `(intersection, intersection + window]`, where the window is
-the Genesis window (`3k/f`). Peer B is disconnected when B's head has reached
-the window end, so its window is complete, and the blocks peer A has delivered
-in that window exceed B's. Upstream `densityDisconnect`
+the Genesis window (`3k/f`). Upstream `densityDisconnect`
 (ouroboros-consensus `Ouroboros/Consensus/Genesis/Governor.hs`) guards on
 `offersMoreThanK || lb0 == ub0`, so it disconnects a peer with an incomplete
-window only for a rival offering more than k headers after the intersection; fragments retain at most k+1 headers and the intersection must
-lie in both, so no rival here can offer that, and a peer whose window is
-incomplete is never disconnected. A peer that has delivered up to its
-advertised tip is incomplete, not complete: that tip can still advance, so an
-honest peer at its own tip on a short fork is kept. The dominating peer
-contributes at most k blocks, so a sparse peer with k or more blocks in its
-window is not detected.
+window only for a rival offering more than `k` headers after the intersection.
+Otherwise the peer's window must be complete. The rival must meet or exceed
+the peer's upper density bound; for an idling peer that has sent
+`MsgAwaitReply`, its delivered density is the bound because it has no pending
+headers. The selector records that state only from gouroboros's ordered
+`AwaitReplyFunc` callback, which passes the delivered frontier synchronously
+after fencing earlier pipelined updates. Retaining the full fragment makes the
+`offersMoreThanK` branch observable instead of reducing every comparison to
+the complete-window case.
 Pairs with no shared point in the retained fragments, and pairs
 where either peer is a prefix of the other (a peer that is only behind), are
 not decidable and never trigger a disconnect. A peer is reported once, and
@@ -7038,6 +7059,11 @@ protocol, so a mismatched reply is a protocol violation that ends the session;
 Dingo's own reply check is a second line behind it.
 
 The selected pool manages pending transactions:
+
+After a chain-update overlay rebuild fails because the ledger snapshot moved,
+the mempool coalesces subsequent chain events and retries at most once per 30
+seconds, even if no further event arrives. Successful rebuilds retain the
+normal queue-drain behavior.
 
 ```
                         Mempool
@@ -9565,11 +9591,10 @@ Dingo provides four client-facing APIs plus Bark. All are optional and gated by 
 `internal/node.Run` starts three auxiliary HTTP listeners, binding each with
 `bindAuxiliaryListener` and serving it with `serveAuxiliaryListenerOn` (bind
 or serve failures are logged, never fatal):
-Prometheus metrics on `metricsBindAddr:metricsPort` (loopback by default;
-remote scraping requires setting `metricsBindAddr`, which the container image
-does through `DINGO_METRICS_BIND_ADDR=0.0.0.0` so orchestrator probes and
-scrapers reach it; `metricsPort` `0` disables it here and in `dingo mithril
-sync`), pprof on `debugPort`
+Prometheus metrics on `metricsBindAddr:metricsPort` (loopback by default in the
+binary and container image; remote scraping requires setting
+`metricsBindAddr`; `metricsAuthToken` optionally requires Bearer authentication;
+`metricsPort` `0` disables it here and in `dingo mithril sync`), pprof on `debugPort`
 when enabled, and the health listener on `healthPort` (default `12799`, `0` disables).
 
 The health listener is **not** gated on storage mode. The four API
@@ -9739,7 +9764,11 @@ Blockfrost, Kupo, Mesh, and UTxO RPC use the root `bindAddr`, whose default is
 `0.0.0.0`. MCP overrides it with `plugins.api.mcp.config.host`, defaulting to
 `127.0.0.1`; an explicitly empty MCP host falls back to `bindAddr`.
 `metricsBindAddr` and `debugBindAddr` separately configure Prometheus and pprof;
-both default to loopback. `corsAllowedOrigins` remains a shared root setting,
+both default to loopback. `metricsAuthToken` protects both the ordinary and
+Mithril-sync Prometheus listeners when configured. The listener remains plain
+HTTP, so remote Bearer authentication requires a TLS reverse proxy or an
+authenticated encrypted tunnel; network isolation is an additional access
+control. `corsAllowedOrigins` remains a shared root setting,
 but MCP rejects its wildcard and applies the origin checks described above.
 
 ### API listener lifecycle (`internal/apilistener`)
@@ -14011,6 +14040,12 @@ exhaustiveness test decides what a configuration log contains, so a nested
 ## Stake Snapshots
 
 Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Set distribution — stake at the end of epoch E-2 — to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and MIR; Conway and earlier eras run SNAP before POOLREAP and governance enactment, while Dijkstra runs it after those rules and HARDFORK — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
+
+Pool registrations used by reward inputs and captured Leios keys follow that
+era-specific SNAP point. Conway and earlier use the ending epoch's parameter
+window, which defers same-epoch re-registrations until after SNAP. Dijkstra
+uses the incoming epoch boundary after POOLREAP, so re-registrations already
+promoted before SNAP are selected for the captured inputs.
 
 Live stake and persisted consensus snapshots carry a shared calculation version. At startup the node compares every live aggregate row with canonical account and unspent-UTxO state and atomically rebuilds it if necessary. If a Mark/Set/Go snapshot or authoritative Mark metadata has an older version, startup stops with a rebootstrap error: after consumed-UTxO tombstones have been pruned, regenerating a historical SNAP from current state would be unsafe.
 
