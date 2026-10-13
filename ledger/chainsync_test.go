@@ -5846,6 +5846,91 @@ func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 	assert.Equal(t, "header_verification_failure", got.Reason)
 }
 
+func TestChainsyncHeaderVerificationReusesIngressVerdict(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	testChain := cm.PrimaryChain()
+	header := mockHeader{slot: 1000, blockNumber: 100}
+	point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
+	ls := &LedgerState{
+		validationEnabled: true,
+		chain:             testChain,
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			LengthInSlots: 2_000,
+			Nonce:         make([]byte, 32),
+		}},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) (uint64, error) {
+				return 0, nil
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+	t.Cleanup(func() {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		}
+	})
+
+	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId:         testRecycleConnId(),
+		BlockHeader:          header,
+		HeaderCryptoVerified: true,
+		Point:                point,
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				point.Slot+1,
+				[]byte("unbound-tip"),
+			),
+			BlockNumber: header.BlockNumber() + 1,
+		},
+	}))
+	require.Equal(t, 1, testChain.HeaderCount())
+	require.True(t, testChain.FirstHeaderMatchesPoint(point))
+	require.True(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
+}
+
+func TestChainsyncHeaderVerificationRejectsMismatchedIngressVerdict(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	header := mockHeader{slot: 1000, blockNumber: 100}
+	ls := &LedgerState{
+		validationEnabled: true,
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			LengthInSlots: 2_000,
+			Nonce:         make([]byte, 32),
+		}},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId:         testRecycleConnId(),
+		BlockHeader:          header,
+		HeaderCryptoVerified: true,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			[]byte("different-header-hash"),
+		),
+	})
+	require.ErrorContains(t, err, "block header crypto verification failed")
+}
+
 func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 	t *testing.T,
 ) {

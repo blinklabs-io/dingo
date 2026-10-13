@@ -4300,11 +4300,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// A missing epoch nonce for any other slot (e.g. Byron->Shelley, where
 	// it may not be fully computed yet) defers verification rather than
 	// skipping it outright.
-	headerCryptoVerified := false
+	headerCryptoVerified := e.HeaderCryptoVerified &&
+		e.BlockHeader != nil &&
+		pointMatches(e.Point, ocommon.NewPoint(
+			e.BlockHeader.SlotNumber(),
+			e.BlockHeader.Hash().Bytes(),
+		))
 	headerValidationRequired, headerTrusted := ls.chainsyncHeaderCryptoPolicy(
 		e.Point.Slot,
 	)
-	if headerValidationRequired {
+	if headerValidationRequired && !headerCryptoVerified {
 		if err := ls.verifyBlockHeaderOnlyCrypto(e.BlockHeader); err != nil {
 			if IsHeaderVerificationDeferred(err) {
 				ls.config.Logger.Debug(
@@ -4348,6 +4353,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			headerCryptoVerified = true
 			headerTrusted = true
 		}
+	} else if headerCryptoVerified {
+		headerTrusted = true
 	}
 
 	// A header past the forecast horizon cannot be validated until the

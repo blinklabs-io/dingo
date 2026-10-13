@@ -117,6 +117,37 @@ func TestChainsyncClientRollForwardRecordsHeaderArrival(t *testing.T) {
 	require.False(t, data.ArrivalTime.After(after))
 }
 
+func TestChainsyncClientRollForwardCarriesHeaderCryptoVerdict(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	o := newOuroboros(OuroborosConfig{
+		EventBus:                 bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool { return true },
+	})
+	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) error { return nil }
+	connID := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connID},
+		0,
+		header,
+		tip,
+	))
+	evt := testutil.RequireReceive(t, ledgerCh, 2*time.Second, "ledger event")
+	data, ok := evt.Data.(ledger.ChainsyncEvent)
+	require.True(t, ok)
+	require.True(t, data.HeaderCryptoVerified)
+}
+
 func TestChainsyncClientRollForwardCarriesPolicyTargetWithAdmittedEvent(
 	t *testing.T,
 ) {
@@ -825,6 +856,7 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 
 	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
 	_, recycleCh := bus.Subscribe(ledger.ConnectionRecycleRequestedEventType)
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
 	state := dchainsync.NewState(bus, nil)
 	conn := newTestConnId("127.0.0.1:6011", "1.1.1.3:3001")
 	require.True(t, state.AddClientConnId(conn))
@@ -889,6 +921,10 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 		)
 	case <-time.After(200 * time.Millisecond):
 	}
+	evt := testutil.RequireReceive(t, ledgerCh, time.Second, "ledger event")
+	data, ok := evt.Data.(ledger.ChainsyncEvent)
+	require.True(t, ok)
+	require.False(t, data.HeaderCryptoVerified)
 }
 
 // TestChainsyncClientRollForwardCompetingPeersOnlyVerifiedHeaderCounted

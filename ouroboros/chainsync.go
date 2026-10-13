@@ -1326,6 +1326,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 				verifyErr = o.chainSelectionVerifyHeaderCrypto(v)
 			}
+			if verifyErr == nil {
+				chainsyncEvent.HeaderCryptoVerified = true
+			}
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) {
 				// The header cannot be validated yet, so it must not extend
 				// this peer's candidate or reach blockfetch. Withhold it
