@@ -1336,6 +1336,8 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrdering(
 	return refs, nil
 }
 
+const matchingUtxoRefBatchSize = 128
+
 // MatchingUtxoRefsByAddressWithOrderingBounded scans exact-address candidates
 // in one transaction until it has q.Limit matches, exhausts the result set, or
 // reaches either work budget. exhausted reports whether the exact total is
@@ -1359,7 +1361,7 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrderingBounded(
 		return nil, false, errors.New("bounded reference scan requires an exact-address query and transaction")
 	}
 	scanQuery := *q
-	scanQuery.Limit = min(128, maxCandidates)
+	scanQuery.Limit = min(matchingUtxoRefBatchSize, maxCandidates)
 	scanQuery.SkipAssets = true
 	scanQuery.Offset = 0
 	scanQuery.Descending = false
@@ -1370,7 +1372,7 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrderingBounded(
 		if err := ctx.Err(); err != nil {
 			return nil, false, err
 		}
-		scanQuery.Limit = min(128, maxCandidates-candidates)
+		scanQuery.Limit = min(matchingUtxoRefBatchSize, maxCandidates-candidates)
 		batch, err := d.utxoStore().GetUtxosByAddressWithOrdering(
 			&scanQuery,
 			txn.Metadata(),

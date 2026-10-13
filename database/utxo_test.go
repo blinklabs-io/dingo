@@ -1416,17 +1416,17 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedBudgets(t *testing.T) {
 	t.Run("cancellation after first batch", func(t *testing.T) {
 		txn := NewTxnContext(t.Context(), db, false)
 		defer txn.Release()
-		// One outer check, two per row in the 128-row first batch,
-		// then the next outer check and first row check: 1 + 128*2 + 2.
+		// One outer check, two per row in the first batch, then the next
+		// outer check and first row check.
 		ctx := &cancelAfterContext{
-			cancelAfter: 259,
+			cancelAfter: 1 + matchingUtxoRefBatchSize*2 + 2,
 			done:        make(chan struct{}),
 		}
 		_, _, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
 			ctx, query, txn, total, len(encoded)*total,
 		)
 		require.ErrorIs(t, err, context.Canceled)
-		assert.Greater(t, ctx.checks, 128*2)
+		assert.Greater(t, ctx.checks, matchingUtxoRefBatchSize*2)
 	})
 
 	t.Run("historical cancellation between CBOR loads", func(t *testing.T) {
