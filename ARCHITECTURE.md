@@ -14000,6 +14000,12 @@ exhaustiveness test decides what a configuration log contains, so a nested
 
 Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Set distribution — stake at the end of epoch E-2 — to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and MIR; Conway and earlier eras run SNAP before POOLREAP and governance enactment, while Dijkstra runs it after those rules and HARDFORK — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
 
+Pool registrations used by reward inputs and captured Leios keys follow that
+era-specific SNAP point. Conway and earlier use the ending epoch's parameter
+window, which defers same-epoch re-registrations until after SNAP. Dijkstra
+uses the incoming epoch boundary after POOLREAP, so re-registrations already
+promoted before SNAP are selected for the captured inputs.
+
 Live stake and persisted consensus snapshots carry a shared calculation version. At startup the node compares every live aggregate row with canonical account and unspent-UTxO state and atomically rebuilds it if necessary. If a Mark/Set/Go snapshot or authoritative Mark metadata has an older version, startup stops with a rebootstrap error: after consumed-UTxO tombstones have been pruned, regenerating a historical SNAP from current state would be unsafe.
 
 Calculation version 3 includes Dijkstra boundary credits in its Mark snapshot.
