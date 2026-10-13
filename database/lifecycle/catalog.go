@@ -15,6 +15,7 @@
 package lifecycle
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -55,6 +56,18 @@ type SnapshotEntry struct {
 // so a caller can log or surface it instead of the catalog silently
 // looking one snapshot smaller than it should.
 func ListSnapshots(baseDir string, opts ...ManifestOption) ([]SnapshotEntry, error) {
+	return ListSnapshotsContext(context.Background(), baseDir, opts...)
+}
+
+// ListSnapshotsContext scans the local snapshot directory using ctx.
+func ListSnapshotsContext(
+	ctx context.Context,
+	baseDir string,
+	opts ...ManifestOption,
+) ([]SnapshotEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if _, err := manifestByteLimit(opts); err != nil {
 		return nil, err
 	}
@@ -69,6 +82,9 @@ func ListSnapshots(baseDir string, opts ...ManifestOption) ([]SnapshotEntry, err
 	result := []SnapshotEntry{}
 	var problems []error
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !entry.IsDir() {
 			continue
 		}

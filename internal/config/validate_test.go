@@ -1383,6 +1383,11 @@ func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
 			wantErr: "snapshotCloudDestination",
 		},
 		{
+			name:    "credentialed typoed scheme",
+			dest:    "s33://user:secret@bucket/prefix?token=private#fragment",
+			wantErr: "snapshotCloudDestination",
+		},
+		{
 			name:    "missing scheme separator",
 			dest:    "s3bucket/prefix",
 			wantErr: "snapshotCloudDestination",
@@ -1408,6 +1413,9 @@ func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
 			}
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
+			for _, secret := range []string{"user", "secret", "private", "fragment"} {
+				assert.NotContains(t, err.Error(), secret)
+			}
 		})
 	}
 }

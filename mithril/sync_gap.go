@@ -319,7 +319,7 @@ func deleteBlobBlocksAboveSlotExcept(
 	if len(stale) == 0 && len(preserved) == 0 {
 		return nil
 	}
-	txn := db.Transaction(ctx, true)
+	txn := db.BlockTransaction(ctx)
 	return txn.Do(func(txn *database.Txn) error {
 		for _, p := range stale {
 			block, err := database.BlockByPointTxn(txn, p)
