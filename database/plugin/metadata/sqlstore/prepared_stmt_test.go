@@ -512,6 +512,14 @@ func TestCacheableForDialect(t *testing.T) {
 			"mysql reward account select, no returning",
 			"mysql", rewardLiveStakeAccountQuery, true,
 		},
+		{
+			"mysql governance vote upsert with returning",
+			"mysql", governanceVoteUpsertQuery, false,
+		},
+		{
+			"mysql governance vote lookup",
+			"mysql", governanceVotePreviousQuery, true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -603,6 +611,24 @@ func TestPrepareHotStatementsSkipsReturningIDQueryOnMySQL(t *testing.T) {
 		ok,
 		"expected a non-RETURNING hot statement to still be cached on MySQL",
 	)
+	_, ok = mysqlStore.lookupCachedStmt(governanceVoteUpsertQuery)
+	require.False(t, ok, "expected governanceVoteUpsertQuery to be uncached on MySQL")
+}
+
+func TestSetGovernanceVoteStatementsAreCached(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	statements := []string{
+		governanceVotePreviousQuery,
+		governanceVoteUpsertQuery,
+		governanceVoteHistoryInsertQuery,
+	}
+	for _, query := range statements {
+		stmt, ok := store.lookupCachedStmt(query)
+		require.True(t, ok, "expected governance vote statement to be cached")
+		require.NotNil(t, stmt)
+	}
 }
 
 // TestRefreshRewardLiveStakeAggregateCachesAccountAndUpsertStatements proves

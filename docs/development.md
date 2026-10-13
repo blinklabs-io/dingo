@@ -22,6 +22,24 @@ The Makefile also provides `make lint`, `make docs-parity`,
 `make config-parity`, and `make sql-check`. After changing SQL queries, run
 `make sql` to regenerate the checked-in code before `make sql-check`.
 
+## Pull-request CI selection
+
+Pull requests that change only root-level Markdown files or Markdown files
+under `docs/` run documentation parity checks, then skip lint, vulnerability
+scanning, the full Go test suite, binary builds, and Docker builds. All other
+paths run the full staged pipeline, including Go package documentation
+(`doc.go`), configuration, fixtures, dependencies, and CI scripts. Mixed
+documentation and code changes also run the full pipeline.
+
+The `changes` job runs the classifier from the workflow commit in a separate
+checkout and compares the PR checkout's merge base with its head using Git,
+including both sides of renames. An empty diff or a failed comparison runs
+full CI.
+Manual CI runs, main-branch publishing, and release tags always run full CI.
+The workflow still starts for documentation-only PRs so existing required job
+checks can report skipped instead of remaining pending. Commit-message checks
+continue to run.
+
 ## Conformance profiles
 
 Dingo reports compatibility in separate layers; a green ledger result is not

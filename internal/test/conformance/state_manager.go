@@ -959,6 +959,7 @@ func (m *DingoStateManager) ApplyTransaction(
 		return fmt.Errorf("resolve protocol major: %w", err)
 	}
 
+	var proposalsValidated bool
 	for levelIndex, level := range levels {
 		storageIndex := idx + uint32(levelIndex) //nolint:gosec
 		if err := governance.ResetDormantDRepExpiryBeforeCertificates(
@@ -1045,6 +1046,8 @@ func (m *DingoStateManager) ApplyTransaction(
 			protocolMajor,
 			m.db,
 			txn,
+			m.protocolParams,
+			&proposalsValidated,
 		); err != nil {
 			return fmt.Errorf("process transaction body %d governance effects: %w", levelIndex, err)
 		}
