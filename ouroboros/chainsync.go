@@ -1413,7 +1413,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 			}
 		}
-		patienceGrant = ingressEligible
 		// Observe the tip for chain selection FIRST, so the apply-eligibility
 		// decision below reflects this header. Only ingress-eligible peers are
 		// observed; random inbound peers reporting ephemeral tips are filtered
@@ -1461,6 +1460,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				peerTipUpdate = &update
 			}
 		}
+		patienceGrant = ingressEligible
 		// Apply-eligibility, evaluated after observation so it reflects this
 		// header. A peer can be ingress-eligible yet not apply-eligible (an
 		// uncorroborated Genesis fast source): its tips are observed but its

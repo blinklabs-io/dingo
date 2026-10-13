@@ -2180,6 +2180,25 @@ func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 			"a peer whose headers are not verified is not held to patience",
 		)
 	})
+	t.Run("selector rejection", func(t *testing.T) {
+		t.Parallel()
+		f := newPatienceRollForwardFixture(t, true)
+		f.o.config.ChainsyncObservePeerTip = func(
+			chainselection.PeerTipUpdateEvent,
+		) bool {
+			return false
+		}
+		f.o.config.ChainsyncResolvePeerTip = func(
+			chainselection.PeerTipUpdateEvent,
+			bool,
+		) {
+		}
+		f.now = f.now.Add(40 * time.Second)
+		f.rollForward(t, newTestBlockHeader(100, 1, 0xaa))
+		tc := f.state.GetTrackedClient(f.conn)
+		require.Zero(t, tc.Patience.BestBlockNumber)
+		require.InDelta(t, 60, tc.Patience.Tokens, 1e-9)
+	})
 }
 
 // The tests in this file drive Dingo's real ChainSync server callbacks over a
