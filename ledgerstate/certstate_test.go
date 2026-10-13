@@ -2193,3 +2193,77 @@ func TestParsePStateConwayRejectsFutureParamsWithoutCurrentPool(
 	require.ErrorContains(t, err, "future pool params")
 	require.Empty(t, pools)
 }
+
+// futurePoolParams values carry the operator; psStakePools values do not.
+func testFuturePoolParams(poolHash []byte, seed byte) []any {
+	return append([]any{poolHash}, testPoolParams(seed)...)
+}
+
+func encodeRealPState(t *testing.T, vrf, pools, future, retiring []byte) []byte {
+	t.Helper()
+	pstate, err := cbor.Encode([]any{
+		cbor.RawMessage(vrf),
+		cbor.RawMessage(pools),
+		cbor.RawMessage(future),
+		cbor.RawMessage(retiring),
+	})
+	require.NoError(t, err)
+	return pstate
+}
+
+// The ledger's four-field PState is [psVRFKeyHashes, psStakePools,
+// psFutureStakePoolParams, psRetiring]. A staged entry with no current pool
+// must fail in either position the staged map can take.
+func TestParsePStateRejectsStagedParamsWithoutCurrentPoolInFourFieldLayouts(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	empty := encodeCborMap(t)
+	future := encodeCborMap(t, poolHash, testFuturePoolParams(poolHash, 0x11))
+
+	for name, pstate := range map[string][]byte{
+		"staged at index 1": encodeRealPState(t, empty, future, empty, empty),
+		"staged at index 2": encodeRealPState(t, empty, empty, future, empty),
+		"older layout, staged at index 1": encodeTestPState(
+			t, empty, future, empty, empty,
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			pools, _, err := parsePStateWithRetirements(pstate)
+			require.ErrorContains(t, err, "future pool params")
+			require.Empty(t, pools)
+		})
+	}
+}
+
+// The same layout with a current pool imports it and stages the update.
+func TestParsePStateDecodesStagedParamsInRealFourFieldLayout(t *testing.T) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	staged := testFuturePoolParams(poolHash, 0x11)
+	staged[5] = []any{
+		uint64(0),
+		[]any{uint64(0), bytes.Repeat([]byte{0x77}, 28)},
+	}
+
+	pools, _, err := parsePStateWithRetirements(encodeRealPState(
+		t,
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, poolHash, staged),
+		encodeCborMap(t),
+	))
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.Equal(t, bytes.Repeat([]byte{0x13}, 28), pools[0].RewardAccount)
+	require.NotNil(t, pools[0].FutureParams)
+	require.Equal(
+		t,
+		bytes.Repeat([]byte{0x77}, 28),
+		pools[0].FutureParams.RewardAccount,
+	)
+}

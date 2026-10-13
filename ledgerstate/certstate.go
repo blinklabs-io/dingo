@@ -15,6 +15,7 @@
 package ledgerstate
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -731,6 +732,16 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 			bestIsPoolParams = isPoolParams
 		}
 	}
+	// Four-field PStates are [psVRFKeyHashes, psStakePools,
+	// psFutureStakePoolParams, psRetiring] or the older [poolParams,
+	// futurePoolParams, retiring, deposits]. The first pool-keyed map is
+	// current only at index 0, or at index 1 when its values omit the
+	// operator as psStakePools does; futurePoolParams values carry it. A
+	// pool-keyed map anywhere else is staged, and the current map is empty.
+	if len(ps) == 4 && bestIsPoolParams && bestIdx > 0 &&
+		(bestIdx > 1 || poolMapCarriesOperator(ps[bestIdx])) {
+		bestPools, bestWarning, bestIdx = nil, nil, bestIdx-1
+	}
 	// An empty poolParams map has no entries to recognize by shape, so a
 	// lone staged map would otherwise be read as the current one. A
 	// registered pool always has a deposit, so a pool-keyed map that follows
@@ -794,6 +805,31 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		mapErrs = append(mapErrs, err)
 	}
 	return bestPools, retirements, errors.Join(mapErrs...)
+}
+
+// poolMapCarriesOperator reports whether every value in a pool-keyed map
+// starts with the operator key hash, as futurePoolParams values do.
+func poolMapCarriesOperator(data []byte) bool {
+	entries, err := decodeMapEntries(data)
+	if err != nil || len(entries) == 0 {
+		return false
+	}
+	for _, entry := range entries {
+		var key []byte
+		if _, err := cbor.Decode(entry.KeyRaw, &key); err != nil {
+			return false
+		}
+		fields, err := decodeRawArray(entry.ValueRaw)
+		if err != nil || len(fields) == 0 {
+			return false
+		}
+		var operator []byte
+		if _, err := cbor.Decode(fields[0], &operator); err != nil ||
+			!bytes.Equal(operator, key) {
+			return false
+		}
+	}
+	return true
 }
 
 func isEmptyCborMap(data []byte) bool {
