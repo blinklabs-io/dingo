@@ -453,6 +453,16 @@ func (cs *ChainSelector) genesisWindowSlotsLocked() uint64 {
 	return DefaultGenesisWindowSlots
 }
 
+// candidatePointCapacityLocked retains enough delivered points for a complete
+// Genesis window and a k+1-header eagerness suffix without duplicating hashes.
+func (cs *ChainSelector) candidatePointCapacityLocked(trackHashes bool) uint64 {
+	window := cs.genesisWindowSlotsLocked()
+	if !trackHashes {
+		return window
+	}
+	return safeAddUint64(window, safeAddUint64(cs.securityParam, 1))
+}
+
 // bestKnownGenesisSlotLocked returns the exit horizon: the network tip slot the
 // local tip must catch up to (within the window) before leaving Genesis mode.
 //
@@ -608,6 +618,7 @@ func (cs *ChainSelector) advanceSelectionModeWithBestKnownBlockLocked(
 	// frontier so it does not linger for the full window on every tracked peer.
 	for _, peerTip := range cs.peerTips {
 		peerTip.observedPoints = nil
+		peerTip.observedPointBaseBlock = 0
 	}
 	cs.lastCorroborationFailedConn = nil
 	cs.config.Logger.Info(
@@ -730,7 +741,9 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 			)
 			peerTip.recordObservedPoint(
 				observedTip.Point,
+				observedTip.BlockNumber,
 				cs.genesisWindowSlotsLocked(),
+				cs.candidatePointCapacityLocked(trackHashes),
 				trackHashes,
 			)
 			peerTip.recordObservedTipHistory(
@@ -756,7 +769,9 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 			}
 			peerTip.recordObservedPoint(
 				observedTip.Point,
+				observedTip.BlockNumber,
 				cs.genesisWindowSlotsLocked(),
+				cs.candidatePointCapacityLocked(trackHashes),
 				trackHashes,
 			)
 			peerTip.recordObservedTipHistory(
@@ -1337,6 +1352,27 @@ func (cs *ChainSelector) TouchPeerActivity(connId ouroboros.ConnectionId) {
 	}()
 
 	cs.publishSelectionEvents(switchEvent, selectionEvent, corroborationEvent)
+}
+
+// SetPeerIdling records an explicit ChainSync MsgAwaitReply at point. A later
+// roll-forward or rollback clears it; a delayed event for an older point is
+// ignored.
+func (cs *ChainSelector) SetPeerIdling(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) {
+	cs.mutex.Lock()
+	peerTip := cs.peerTips[connId]
+	matched := peerTip != nil &&
+		peerTip.ObservedTip.Point.Slot == point.Slot &&
+		bytes.Equal(peerTip.ObservedTip.Point.Hash, point.Hash)
+	if matched {
+		peerTip.idling = true
+	}
+	cs.mutex.Unlock()
+	if matched {
+		cs.EvaluateAndSwitch()
+	}
 }
 
 // evictLeastRecentPeerLocked removes the peer with the oldest LastUpdated

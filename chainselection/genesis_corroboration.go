@@ -164,7 +164,10 @@ func (cs *ChainSelector) corroboratingPeersLocked(
 		if !cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
-		if !candidateTip.confirmsRecentChain(peerTip) ||
+		if !candidateTip.confirmsRecentChainWithin(
+			peerTip,
+			cs.genesisWindowSlotsLocked(),
+		) ||
 			!cs.witnessSupportsSuffixLocked(candidateTip, peerTip) {
 			continue
 		}
