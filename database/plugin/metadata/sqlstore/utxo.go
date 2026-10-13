@@ -80,6 +80,11 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 			); err != nil {
 				return err
 			}
+			if err := s.persistUtxoReferenceScript(
+				ctx, db, utxo.ID, utxo.ReferenceScriptHash,
+			); err != nil {
+				return err
+			}
 			for i := range utxo.Assets {
 				asset := &utxo.Assets[i]
 				asset.UtxoID = utxo.ID
@@ -608,6 +613,12 @@ func (s *Store) importUtxos(
 				// already imported keeps the same position.
 				if err := persistUtxoPointer(
 					ctx, db, id, item.Pointer,
+				); err != nil {
+					return err
+				}
+				// #nosec G115 -- row ids are positive
+				if err := s.persistUtxoReferenceScript(
+					ctx, db, uint(id), item.ReferenceScriptHash,
 				); err != nil {
 					return err
 				}

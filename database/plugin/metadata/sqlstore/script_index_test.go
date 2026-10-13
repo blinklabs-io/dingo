@@ -502,3 +502,35 @@ func TestGetScriptRedeemersOrdersByChainPosition(t *testing.T) {
 	require.Zero(t, total)
 	_ = types.StorageModeAPI
 }
+
+// Outputs that reach the store outside block application -- a ledger-state
+// snapshot import, a recovered spent input, a single created output -- carry
+// their reference script into the index the same way applied outputs do.
+func TestReferenceScriptIndexedOnImportAndCreate(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	hash := lcommon.NewBlake2b224(bytes.Repeat([]byte{0x7c}, 28))
+	newUtxo := func(seed byte) models.Utxo {
+		return models.Utxo{
+			TxId:                bytes.Repeat([]byte{seed}, 32),
+			OutputIdx:           0,
+			PaymentKey:          bytes.Repeat([]byte{0x7d}, 28),
+			AddedSlot:           1,
+			Amount:              5,
+			ReferenceScriptHash: hash.Bytes(),
+		}
+	}
+	require.NoError(t, store.ImportUtxos([]models.Utxo{newUtxo(0x71)}, nil))
+	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(
+		[]models.Utxo{newUtxo(0x72)}, nil,
+	))
+	created := newUtxo(0x73)
+	require.NoError(t, store.CreateUtxo(nil, &created))
+
+	utxos, err := store.GetScriptReferenceUtxos(hash, 0, 0, false, nil)
+	require.NoError(t, err)
+	require.Len(t, utxos, 3)
+	for i, seed := range []byte{0x71, 0x72, 0x73} {
+		require.Equal(t, bytes.Repeat([]byte{seed}, 32), utxos[i].TxId)
+	}
+}
