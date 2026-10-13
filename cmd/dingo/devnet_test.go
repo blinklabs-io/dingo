@@ -16,13 +16,18 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
@@ -221,4 +226,72 @@ func requirePathMissing(t *testing.T, path string) {
 	t.Helper()
 	_, err := os.Lstat(path)
 	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestPrepareDevnetStateExportsFundedFaucet(t *testing.T) {
+	t.Parallel()
+	for _, persistent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("persistent=%t", persistent), func(t *testing.T) {
+			t.Parallel()
+			runDir := t.TempDir()
+			start := time.Now().UTC().Truncate(time.Second)
+			require.NoError(t, prepareDevnetState(runDir, persistent, false, start))
+			assertDevnetFaucet(t, runDir)
+			if !persistent {
+				return
+			}
+			genesisPath := filepath.Join(runDir, "cardano", "shelley-genesis.json")
+			genesisBefore, err := os.ReadFile(genesisPath)
+			require.NoError(t, err)
+			sentinel := filepath.Join(runDir, "data", "keep")
+			require.NoError(t, os.WriteFile(sentinel, []byte("chain"), 0o600))
+			for _, name := range []string{"faucet.skey", "faucet.vkey", "faucet.addr"} {
+				require.NoError(t, os.Remove(filepath.Join(runDir, "cardano", "keys", name)))
+			}
+			require.NoError(t, prepareDevnetState(runDir, true, false, start.Add(time.Hour)))
+			assertDevnetFaucet(t, runDir)
+			genesisAfter, err := os.ReadFile(genesisPath)
+			require.NoError(t, err)
+			require.Equal(t, genesisBefore, genesisAfter)
+			require.FileExists(t, sentinel)
+		})
+	}
+}
+
+func assertDevnetFaucet(t *testing.T, runDir string) {
+	t.Helper()
+	readKey := func(name, keyType string) []byte {
+		data, err := os.ReadFile(filepath.Join(runDir, "cardano", "keys", name))
+		require.NoError(t, err)
+		var envelope struct {
+			Type    string `json:"type"`
+			CborHex string `json:"cborHex"`
+		}
+		require.NoError(t, json.Unmarshal(data, &envelope))
+		require.Equal(t, keyType, envelope.Type)
+		keyCBOR, err := hex.DecodeString(envelope.CborHex)
+		require.NoError(t, err)
+		require.Len(t, keyCBOR, 34)
+		require.Equal(t, []byte{0x58, 0x20}, keyCBOR[:2])
+		return keyCBOR[2:]
+	}
+	seed := readKey("faucet.skey", "PaymentSigningKeyShelley_ed25519")
+	publicKey := readKey("faucet.vkey", "PaymentVerificationKeyShelley_ed25519")
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	require.Equal(t, publicKey, []byte(privateKey.Public().(ed25519.PublicKey)))
+	hash := common.Blake2b224Hash(publicKey)
+	address, err := common.NewAddressFromParts(common.AddressTypeKeyNone, 0, hash.Bytes(), nil)
+	require.NoError(t, err)
+	addressFile, err := os.ReadFile(filepath.Join(runDir, "cardano", "keys", "faucet.addr"))
+	require.NoError(t, err)
+	require.Equal(t, address.String(), strings.TrimSpace(string(addressFile)))
+	addressBytes, err := address.Bytes()
+	require.NoError(t, err)
+	genesisData, err := os.ReadFile(filepath.Join(runDir, "cardano", "shelley-genesis.json"))
+	require.NoError(t, err)
+	var genesis struct {
+		InitialFunds map[string]uint64 `json:"initialFunds"`
+	}
+	require.NoError(t, json.Unmarshal(genesisData, &genesis))
+	require.Equal(t, uint64(900_000_000_000), genesis.InitialFunds[hex.EncodeToString(addressBytes)])
 }
