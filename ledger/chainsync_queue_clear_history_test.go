@@ -25,6 +25,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 
+	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
@@ -247,4 +248,47 @@ func TestPeerHeaderHistoryUnappliedRetentionStaysByteBounded(t *testing.T) {
 	require.LessOrEqual(t, history.retainedBytes,
 		maxPeerHeaderHistoryUnappliedBytesPerConn)
 	require.Greater(t, len(history.order), 0)
+}
+
+// Every ingress-eligible chainsync client records the headers it delivers, so
+// the total budget must hold a full queue of production-sized headers from
+// each of the default number of clients without evicting any connection's
+// ancestry back to the local tip.
+func TestPeerHeaderHistoryTotalBudgetHoldsDefaultClientsAtQueueDepth(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	tip := fixture.currentTip
+	count := fixture.ls.chain.MaxQueuedHeaders() - 1
+	advertised := ochainsync.Tip{Point: tip.Point}
+	cbor := make([]byte, 900)
+	conns := make([]ouroboros.ConnectionId, chainsync.DefaultMaxClients)
+	headers := make([][]mockHeader, len(conns))
+	for i := range conns {
+		conns[i] = testChainsyncConnId(6500+i, 3001)
+		headers[i] = queueClearHeaders(
+			fmt.Sprintf("client%d", i),
+			tip.Point.Hash, tip.BlockNumber, tip.Point.Slot, count,
+		)
+	}
+	for idx := range count {
+		for i, connId := range conns {
+			fixture.ls.recordPeerHeaderHistory(queueClearEvent(
+				connId,
+				sizedMockHeader{mockHeader: headers[i][idx], cbor: cbor},
+				advertised,
+			))
+		}
+	}
+	for i, connId := range conns {
+		history := fixture.ls.peerHeaderHistory[connIdKey(connId)]
+		require.NotNil(t, history)
+		require.Equal(t, count, len(history.order))
+		require.Equal(t, hex.EncodeToString(headers[i][0].hash.Bytes()),
+			history.order[0])
+	}
+	require.LessOrEqual(t, fixture.ls.peerHeaderHistoryBytes,
+		maxPeerHeaderHistoryBytesTotal)
 }
