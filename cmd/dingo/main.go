@@ -15,14 +15,17 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/pprof"
 	"strings"
+	"syscall"
 
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
@@ -423,7 +426,6 @@ Database Workers:
 			}
 		},
 	}
-
 	// Global flags
 	rootCmd.PersistentFlags().
 		BoolVarP(&globalFlags.debug, "debug", "D", false, "enable debug logging")
@@ -523,7 +525,7 @@ Database Workers:
 
 	// Execute cobra command
 	exitCode := 0
-	if err := rootCmd.Execute(); err != nil {
+	if err := executeWithSignalContext(rootCmd); err != nil {
 		slog.Error(err.Error())
 		exitCode = 1
 	}
@@ -550,4 +552,16 @@ Database Workers:
 	}
 
 	return exitCode
+}
+
+func executeWithSignalContext(cmd *cobra.Command) error {
+	parent := cmd.Context()
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, stop := signal.NotifyContext(
+		parent, syscall.SIGINT, syscall.SIGTERM,
+	)
+	defer stop()
+	return cmd.ExecuteContext(ctx)
 }
