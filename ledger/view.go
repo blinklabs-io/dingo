@@ -734,7 +734,7 @@ func (lv *LedgerView) StakeCredentialDeposit(
 	return history[0].Deposit, nil
 }
 
-// It returns the most recent active pool registration certificate
+// PoolCurrentState returns the epoch-effective pool registration certificate
 // and the epoch of any pending retirement for the given pool key hash.
 func (lv *LedgerView) PoolCurrentState(
 	pkh lcommon.PoolKeyHash,
@@ -748,16 +748,29 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 	}
 	var currentReg *lcommon.PoolRegistrationCertificate
-	reg, regLatestSlot, regLatestCertID, hasReg := latestPoolRegistration(pool)
-	if hasReg {
-		var err error
-		currentReg, err = poolRegistrationCertificate(pool, reg)
+	if len(pool.PoolKeyHash) > 0 {
+		regs, err := lv.ls.db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
+			[]lcommon.PoolKeyHash{pkh},
+			lv.epochStartSlot,
+			lv.committeeEpoch,
+			math.MaxInt64,
+			lv.metadataTxn(),
+		)
 		if err != nil {
 			return nil, nil, lv.storageFault(
-				"decode stored pool registration: %w", err,
+				"get epoch-effective pool registration: %w", err,
 			)
 		}
+		if len(regs) > 0 {
+			currentReg, err = poolRegistrationCertificate(pool, &regs[0])
+			if err != nil {
+				return nil, nil, lv.storageFault(
+					"decode stored pool registration: %w", err,
+				)
+			}
+		}
 	}
+	_, regLatestSlot, regLatestCertID, hasLatestReg := latestPoolRegistration(pool)
 	// pendingEpoch reports the target epoch of the pool's latest retirement
 	// certificate -- the one most recently added by (AddedSlot,
 	// CertificateID), not the maximum epoch value across every retirement
@@ -783,7 +796,7 @@ func (lv *LedgerView) PoolCurrentState(
 				hasRet = true
 			}
 		}
-		registrationSupersedesRetirement := hasReg &&
+		registrationSupersedesRetirement := hasLatestReg &&
 			(regLatestSlot > retLatestSlot ||
 				(regLatestSlot == retLatestSlot && regLatestCertID > retLatestCertID))
 		if hasRet && !registrationSupersedesRetirement {
@@ -825,11 +838,11 @@ func poolRegistrationCertificate(
 	if err != nil {
 		return nil, fmt.Errorf("pool current state operator: %w", err)
 	}
-	vrfKeyHash, err := lcommon.NewBlake2b256Checked(pool.VrfKeyHash)
+	vrfKeyHash, err := lcommon.NewBlake2b256Checked(reg.VrfKeyHash)
 	if err != nil {
 		return nil, fmt.Errorf("pool current state VRF key hash: %w", err)
 	}
-	rewardAccount, err := lcommon.NewBlake2b224Checked(pool.RewardAccount)
+	rewardAccount, err := lcommon.NewBlake2b224Checked(reg.RewardAccount)
 	if err != nil {
 		return nil, fmt.Errorf("pool current state reward account: %w", err)
 	}
@@ -837,11 +850,11 @@ func poolRegistrationCertificate(
 		CertType:   uint(lcommon.CertificateTypePoolRegistration),
 		Operator:   lcommon.PoolKeyHash(operator),
 		VrfKeyHash: lcommon.VrfKeyHash(vrfKeyHash),
-		Pledge:     uint64(pool.Pledge),
-		Cost:       uint64(pool.Cost),
+		Pledge:     uint64(reg.Pledge),
+		Cost:       uint64(reg.Cost),
 	}
-	if pool.Margin != nil {
-		cert.Margin = cbor.Rat{Rat: pool.Margin.Rat}
+	if reg.Margin != nil {
+		cert.Margin = cbor.Rat{Rat: reg.Margin.Rat}
 	}
 	cert.RewardAccount = lcommon.AddrKeyHash(rewardAccount)
 	for _, owner := range reg.Owners {
@@ -1007,6 +1020,35 @@ func (lv *LedgerView) IsVrfKeyInUse(
 	if err != nil {
 		return false, lcommon.PoolKeyHash{}, lv.storageFault(
 			"decode stored VRF key owner pool key hash: %w",
+			err,
+		)
+	}
+	return true, lcommon.PoolKeyHash(poolKeyHash), nil
+}
+
+// IsFutureVrfKeyInUse checks the VRF key retained by a pool's latest deferred
+// parameter update in the view's current epoch.
+func (lv *LedgerView) IsFutureVrfKeyInUse(
+	vrfKeyHash lcommon.Blake2b256,
+) (bool, lcommon.PoolKeyHash, error) {
+	pool, err := lv.ls.db.GetFuturePoolByVrfKeyHash(
+		lv.EvaluationContext(),
+		vrfKeyHash.Bytes(),
+		lv.epochStartSlot,
+		lv.txn,
+	)
+	if err != nil {
+		return false, lcommon.PoolKeyHash{}, lv.storageFault(
+			"get future pool by VRF key hash: %w", err,
+		)
+	}
+	if pool == nil {
+		return false, lcommon.PoolKeyHash{}, nil
+	}
+	poolKeyHash, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
+	if err != nil {
+		return false, lcommon.PoolKeyHash{}, lv.storageFault(
+			"decode stored future VRF key owner pool key hash: %w",
 			err,
 		)
 	}

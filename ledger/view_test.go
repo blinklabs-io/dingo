@@ -5283,20 +5283,11 @@ func TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish(
 	require.NoError(t, dbtest.CloseDatabase(db))
 }
 
-// TestLedgerViewIsVrfKeyInUseRejectsSameOperatorReuseOfSupersededFutureKey
-// is the LedgerView-level regression test for the PV11+ follow-up:
-// pool P cycles A -> B -> C within one epoch, then attempts to
-// reuse B again. IsVrfKeyInUse must report B as still claimed by P (even
-// though B is neither P's effective key, A, nor its current pending key,
-// C), which is the signal gouroboros's validatePoolRegistration needs to
-// compare against PoolCurrentState and reject the reuse: PoolCurrentState
-// returns P's latest registration (C), which does not equal the requested
-// key (B).
-// TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey pins release of a
-// superseded future VRF key at the LedgerView production entry point: once a
-// pool's same-epoch registration is itself superseded by a later same-epoch
-// registration, IsVrfKeyInUse must report it free, not still claimed.
-func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
+// TestLedgerViewSeparatesCurrentAndFuturePoolState pins the state split used
+// by the pool rule: the epoch-effective registration stays current while the
+// latest same-epoch re-registration is future state, including when it
+// restores the current key.
+func TestLedgerViewSeparatesCurrentAndFuturePoolState(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -5316,7 +5307,6 @@ func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
 	)
 	keyA := lcommon.NewBlake2b256([]byte{0xd2, 0x01})
 	keyB := lcommon.NewBlake2b256([]byte{0xd2, 0x02})
-	keyC := lcommon.NewBlake2b256([]byte{0xd2, 0x03})
 
 	applyRegistration := func(
 		slot uint64,
@@ -5368,7 +5358,6 @@ func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
 
 	applyRegistration(10, 0x01, keyA) // pre-epoch: P's active key
 	applyRegistration(50, 0x02, keyB) // this epoch: P: A -> B
-	applyRegistration(70, 0x03, keyC) // this epoch: P: B -> C, supersedes B
 
 	// Pinned directly on the view, mirroring how real validation call
 	// sites (NewView, ledgerProcessBlock, validateTxCore) pin
@@ -5376,18 +5365,38 @@ func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
 	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
 	lv.epochStartSlot = 30
 
-	inUse, _, err := lv.IsVrfKeyInUse(keyB)
-	require.NoError(t, err)
-	assert.False(t, inUse,
-		"a superseded same-epoch future key must be freed once a "+
-			"later same-epoch registration replaces it")
-
-	// P's current (latest) registration is genuinely C, not B: B was
-	// never P's effective key and is no longer its pending one.
 	current, _, err := lv.PoolCurrentState(poolKeyHash)
 	require.NoError(t, err)
 	require.NotNil(t, current)
-	assert.Equal(t, keyC, current.VrfKeyHash)
+	assert.Equal(t, keyA, current.VrfKeyHash)
+
+	inUse, owner, err := lv.IsVrfKeyInUse(keyB)
+	require.NoError(t, err)
+	assert.False(t, inUse)
+	assert.Empty(t, owner)
+
+	inUse, owner, err = lv.IsFutureVrfKeyInUse(keyB)
+	require.NoError(t, err)
+	assert.True(t, inUse)
+	assert.Equal(t, poolKeyHash, owner)
+
+	// Restoring A supersedes B in future state without changing the
+	// epoch-effective registration.
+	applyRegistration(70, 0x03, keyA)
+
+	current, _, err = lv.PoolCurrentState(poolKeyHash)
+	require.NoError(t, err)
+	require.NotNil(t, current)
+	assert.Equal(t, keyA, current.VrfKeyHash)
+
+	inUse, _, err = lv.IsFutureVrfKeyInUse(keyB)
+	require.NoError(t, err)
+	assert.False(t, inUse)
+
+	inUse, owner, err = lv.IsFutureVrfKeyInUse(keyA)
+	require.NoError(t, err)
+	assert.True(t, inUse)
+	assert.Equal(t, poolKeyHash, owner)
 
 	require.NoError(t, dbtest.CloseDatabase(db))
 }

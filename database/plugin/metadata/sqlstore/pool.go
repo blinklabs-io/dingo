@@ -525,42 +525,9 @@ func (s *Store) GetPool(
 // key hash as of the given epoch's start slot, or nil if no active pool
 // claims it.
 //
-// This method backs LedgerView.IsVrfKeyInUse, whose contract is to report
-// only currently registered pools. Retired registrations remain in the
-// history but must not reserve their old VRF key indefinitely -- handled
-// below by activePoolOrNil, unchanged from before.
-//
-// A "claim" is either of two things cardano-ledger's POOL rule tracks
-// separately:
-//
-//  1. The pool whose EFFECTIVE registration -- not necessarily its most
-//     recent one -- has this key. The POOL rule inserts a pool's first-ever
-//     registration into psStakePools immediately, but defers any subsequent
-//     re-registration through psFutureStakePoolParams until the next epoch
-//     boundary, so a pool that re-registers with a new VRF key mid-epoch
-//     must keep reserving its OLD key until epochStartSlot advances past
-//     that re-registration. This mirrors GetPoolVrfKeyHashAtSlot /
-//     GetPoolEarliestVrfKeyHashAtSlot's forward-direction resolution of the
-//     same rule (see electingVrfKeyHashWithCache in ledger/verify_header.go)
-//     -- this is the reverse lookup, given a key, finding the pool.
-//  2. The pool whose LATEST registration this epoch (added_slot >=
-//     epochStartSlot) used this key. psFutureStakePoolParams holds only the
-//     current pending value, not every key a pool cycled through -- a pool
-//     re-registering A -> B -> C within one epoch frees B the moment C
-//     supersedes it, since B was never placed in psStakePools and is no
-//     longer pending. Only the earliest registration in the epoch (A here,
-//     handled by tier 1 as the still-effective key) and the latest pending
-//     one (C) remain reserved. LedgerView.IsVrfKeyInUse's caller
-//     (gouroboros's validatePoolRegistration) already special-cases
-//     "owningPool == cert.Operator" by comparing against PoolCurrentState,
-//     which is not this pool's effective key but its latest registration --
-//     exactly what is needed here, since the reused key must not match
-//     that latest registration for the reuse to be rejected. This method
-//     only needs to report the claim; it does not decide the outcome.
-//
-// (1) takes priority when both would resolve to a claim (cross-pool
-// conflicts are the more common, more clearly "in use" case); (2) is
-// consulted only when (1) finds nothing.
+// This method backs LedgerView.IsVrfKeyInUse and returns only the registration
+// effective in psStakePools for the view's epoch. GetFuturePoolByVrfKeyHash
+// exposes the latest deferred same-epoch registration separately.
 //
 // Retirement precedence (a later re-registration can cancel an earlier
 // retirement, and an already-effective retirement invalidates a
@@ -581,6 +548,26 @@ func (s *Store) GetPoolByVrfKeyHash(
 	epochStartSlot uint64,
 	txn types.Txn,
 ) (*models.Pool, error) {
+	return s.getPoolByVrfKeyHash(vrfKeyHash, epochStartSlot, false, txn)
+}
+
+// GetFuturePoolByVrfKeyHash returns the latest deferred same-epoch owner of a
+// VRF key, excluding a pool's first registration because it is effective
+// immediately.
+func (s *Store) GetFuturePoolByVrfKeyHash(
+	vrfKeyHash []byte,
+	epochStartSlot uint64,
+	txn types.Txn,
+) (*models.Pool, error) {
+	return s.getPoolByVrfKeyHash(vrfKeyHash, epochStartSlot, true, txn)
+}
+
+func (s *Store) getPoolByVrfKeyHash(
+	vrfKeyHash []byte,
+	epochStartSlot uint64,
+	future bool,
+	txn types.Txn,
+) (*models.Pool, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -588,6 +575,10 @@ func (s *Store) GetPoolByVrfKeyHash(
 	slotValue, err := checkedInt64(epochStartSlot)
 	if err != nil {
 		return nil, fmt.Errorf("GetPoolByVrfKeyHash: %w", err)
+	}
+	claimTier := 0
+	if future {
+		claimTier = 1
 	}
 	// Ranked, not a single winner picked in SQL: a pool_registration row
 	// naming this key can belong to a pool that has since retired (its own
@@ -700,12 +691,14 @@ active_owner AS (
 ),
 -- Only the latest same-epoch registration per pool reserves its key --
 -- an earlier same-epoch registration that a later one has already
--- superseded is neither this pool's effective key (tier 1 covers that,
+-- superseded is neither this pool's effective key (active_owner covers that,
 -- resolved before the epoch began) nor its current pending key, so it
 -- must not still claim this candidate the way an unqualified scan over
 -- every same-epoch pool_registration row would.
 latest_same_epoch_registration AS (
-    SELECT pr.pool_id, pr.vrf_key_hash,
+    SELECT pr.pool_id, pr.vrf_key_hash, pr.added_slot,
+           COALESCE(t.block_index, 0) blk_idx,
+           COALESCE(c.cert_index, 0) cert_idx,
            ROW_NUMBER() OVER (
                PARTITION BY pr.pool_id
                ORDER BY pr.added_slot DESC,
@@ -722,11 +715,15 @@ same_epoch_claimant AS (
     SELECT DISTINCT lser.pool_id
     FROM latest_same_epoch_registration lser
     JOIN pool_active pa ON pa.pool_id = lser.pool_id
+    JOIN earliest ea ON ea.pool_id = lser.pool_id AND ea.rn = 1
     WHERE lser.vrf_key_hash = ? AND lser.rn = 1
+      AND (lser.added_slot != ea.added_slot
+        OR lser.blk_idx != ea.blk_idx
+        OR lser.cert_idx != ea.cert_idx)
 )
-SELECT pool_id, 0 AS tier FROM active_owner
+SELECT pool_id, 0 AS tier FROM active_owner WHERE ? = 0
 UNION
-SELECT pool_id, 1 AS tier FROM same_epoch_claimant
+SELECT pool_id, 1 AS tier FROM same_epoch_claimant WHERE ? = 1
 ORDER BY tier, pool_id`,
 		vrfKeyHash,
 		slotValue,
@@ -734,6 +731,8 @@ ORDER BY tier, pool_id`,
 		vrfKeyHash,
 		slotValue,
 		vrfKeyHash,
+		claimTier,
+		claimTier,
 	)
 	if err != nil {
 		return nil, err
