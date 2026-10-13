@@ -1499,6 +1499,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
+		if o.chainsyncState != nil {
+			o.chainsyncState.RecordClientDelivery(ctx.ConnectionId, point)
+		}
 		// Header-sync strategy gate: cross-peer deduplication (isNew) has run
 		// above; the configured strategy now decides whether this eligible
 		// peer is permitted to drive ledger ingress. Primary lets any eligible
@@ -1514,7 +1517,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			) {
 			// The staged candidate for this point is not resolved here: it
 			// follows the connection whose copy reaches the ledger.
-			o.chainsyncState.RecordClientDelivery(ctx.ConnectionId, point)
 			dropReason := "duplicate"
 			if isNew {
 				dropReason = "not ingress driver"
@@ -1538,9 +1540,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// the observed tips. The header was recorded WITHOUT dedup above, so a
 		// later corroborated peer can still publish this point.
 		if !applyEligible {
-			if o.chainsyncState != nil {
-				o.chainsyncState.RecordClientDelivery(ctx.ConnectionId, point)
-			}
 			o.config.Logger.Debug(
 				"chainsync: header withheld (not apply eligible)",
 				"component", "ouroboros",
@@ -1590,7 +1589,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			chainsyncEvent.PeerTipAdmission = func(admitted bool) {
 				if admitted {
 					if o.chainsyncState != nil {
-						o.chainsyncState.UpdateClientTipWithoutDedup(
+						o.chainsyncState.AdmitClientTip(
 							ctx.ConnectionId,
 							point,
 							tip,

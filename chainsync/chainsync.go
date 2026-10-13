@@ -1028,8 +1028,28 @@ func (s *State) UpdateClientTipWithoutDedup(
 	return s.updateTrackedClientTip(connId, point, tip)
 }
 
-// RecordClientDelivery counts a suppressed header delivered by a tracked
-// client without moving its admitted cursor or tip. A delivery refreshes the
+// AdmitClientTip records an admitted cursor and tip after RecordClientDelivery
+// has already accounted for the header's delivery.
+func (s *State) AdmitClientTip(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists {
+		return false
+	}
+	point.Hash = cloneBytes(point.Hash)
+	tip.Point.Hash = cloneBytes(tip.Point.Hash)
+	tc.Cursor = point
+	tc.Tip = tip
+	return true
+}
+
+// RecordClientDelivery counts a header delivered by a tracked client without
+// moving its admitted cursor or tip. A delivery refreshes the
 // stall clock only when it advances the client's delivery watermark, so replay
 // of one valid header cannot keep an otherwise stalled client eligible.
 func (s *State) RecordClientDelivery(

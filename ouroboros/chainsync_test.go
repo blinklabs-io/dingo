@@ -4560,6 +4560,89 @@ func TestChainsyncClientRollForwardSuppressedHeaderAdvancesActivityOnce(
 	}
 }
 
+func TestChainsyncClientRollForwardRecordsDeliveryBeforeLedgerBackpressure(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	_, ledgerCh := bus.SubscribeWithBuffer(ledger.ChainsyncEventType, 1)
+	bus.Publish(
+		ledger.ChainsyncEventType,
+		event.NewEvent(ledger.ChainsyncEventType, "occupy buffer"),
+	)
+	now := time.Unix(2, 0)
+	state := dchainsync.NewStateWithConfig(
+		bus,
+		nil,
+		dchainsync.Config{
+			MaxClients:   1,
+			StallTimeout: time.Minute,
+			Now:          func() time.Time { return now },
+		},
+	)
+	conn := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	require.True(t, state.AddClientConnId(conn))
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncObservePeerTip: func(chainselection.PeerTipUpdateEvent) bool {
+			return true
+		},
+	})
+	o.chainsyncState = state
+	o.eventBus = bus
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	point := ocommon.NewPoint(100, header.Hash().Bytes())
+	tip := ochainsync.Tip{Point: point, BlockNumber: 1}
+	done := make(chan error, 1)
+	go func() {
+		done <- o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{ConnectionId: conn},
+			0,
+			header,
+			tip,
+		)
+	}()
+
+	require.Eventually(t, func() bool {
+		client := state.GetTrackedClient(conn)
+		return client != nil && client.HeadersRecv == 1 &&
+			client.LastActivity.Equal(now)
+	}, time.Second, time.Millisecond)
+	blocked := state.GetTrackedClient(conn)
+	require.NotNil(t, blocked)
+	assert.Equal(t, ocommon.Point{}, blocked.Cursor)
+	select {
+	case err := <-done:
+		require.Failf(t, "roll forward returned before ledger capacity", "%v", err)
+	default:
+	}
+
+	<-ledgerCh
+	var chainsyncEvent ledger.ChainsyncEvent
+	select {
+	case evt := <-ledgerCh:
+		var ok bool
+		chainsyncEvent, ok = evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+	case <-time.After(time.Second):
+		t.Fatal("ledger event was not published after capacity became available")
+	}
+	require.NoError(t, <-done)
+	require.NotNil(t, chainsyncEvent.PeerTipAdmission)
+	chainsyncEvent.PeerTipAdmission(true)
+	admitted := state.GetTrackedClient(conn)
+	require.NotNil(t, admitted)
+	assert.Equal(t, point, admitted.Cursor)
+	assert.Equal(t, uint64(1), admitted.HeadersRecv)
+	assert.Equal(t, now, admitted.LastActivity)
+}
+
 func TestChainsyncClientRollForwardReplaysDuplicateFromEquivalentSelectedPeerSeenElsewhere(
 	t *testing.T,
 ) {

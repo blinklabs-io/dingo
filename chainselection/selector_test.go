@@ -454,6 +454,60 @@ func TestRejectedFarTipCannotCorroborateAnotherPendingPeer(t *testing.T) {
 	assert.False(t, selector.pendingFarTipClaims[otherConn].corroborated)
 }
 
+func TestPreparePeerTipAdmissionDoesNotReplayUnchangedFarClaim(t *testing.T) {
+	t.Parallel()
+
+	rejections := 0
+	selector := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2,
+		DisableEventSubscriptions: true,
+		OnPeerTipRejected: func(PeerTipRejection) {
+			rejections++
+		},
+	})
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local")},
+		BlockNumber: 10,
+	}
+	selector.SetLocalTip(localTip)
+	reference := newTestConnectionId(38)
+	require.True(t, selector.UpdatePeerTip(reference, localTip, nil))
+	far := PeerTipUpdateEvent{
+		ConnectionId: newTestConnectionId(39),
+		AdmissionID:  1,
+		Tip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 105, Hash: []byte("far")},
+			BlockNumber: 15,
+		},
+		ObservedTip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 105, Hash: []byte("far")},
+			BlockNumber: 15,
+		},
+		ObservedPrevHash: []byte("unknown"),
+	}
+	require.True(t, selector.PreparePeerTipAdmission(far))
+	require.Contains(t, selector.pendingFarTipClaims, far.ConnectionId)
+
+	rejections = 0
+	normal := PeerTipUpdateEvent{
+		ConnectionId: newTestConnectionId(40),
+		AdmissionID:  1,
+		Tip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 101, Hash: []byte("normal")},
+			BlockNumber: 11,
+		},
+		ObservedTip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 101, Hash: []byte("normal")},
+			BlockNumber: 11,
+		},
+		ObservedPrevHash: []byte("normal-parent"),
+	}
+	require.True(t, selector.PreparePeerTipAdmission(normal))
+	assert.Zero(t, rejections,
+		"an unrelated admission must not replay unchanged far-tip evidence")
+
+}
+
 func TestHandlePeerRollbackDoesNotPromoteAdvertisedTipBeforeHeaderAdmission(
 	t *testing.T,
 ) {

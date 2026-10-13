@@ -924,7 +924,7 @@ func (cs *ChainSelector) PreparePeerTipAdmission(
 			prevHash: update.ObservedPrevHash,
 			boundary: update.ObservedBoundary,
 		}
-		plausible := cs.checkPeerTipPlausibleWithClaimsLocked(
+		plausible, claimsChanged := cs.checkPeerTipPlausibleWithClaimsTrackedLocked(
 			update.ConnectionId,
 			update.Tip,
 			update.ObservedTip,
@@ -952,7 +952,7 @@ func (cs *ChainSelector) PreparePeerTipAdmission(
 		}
 		cs.pendingPeerTips[update.ConnectionId] = pending
 		switch {
-		case len(cs.pendingFarTipClaims) > 0:
+		case claimsChanged:
 			// Far-frontier evidence can change another connection's pending
 			// plausibility, so replay the exceptional cross-peer state.
 			cs.rebuildPendingAdmissionStateLocked()
@@ -1481,6 +1481,21 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsLocked(
 	claims map[ouroboros.ConnectionId]farTipClaim,
 	includePending bool,
 ) bool {
+	plausible, _ := cs.checkPeerTipPlausibleWithClaimsTrackedLocked(
+		connId, tip, observedTip, link, claims, includePending,
+	)
+	return plausible
+}
+
+func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+	link deliveredLink,
+	claims map[ouroboros.ConnectionId]farTipClaim,
+	includePending bool,
+) (bool, bool) {
+	claimsChanged := false
 	// Reject implausible delivered frontiers that jump too far ahead of a
 	// trusted reference point. Before any local block has been applied,
 	// retain the advertised-tip bound as well: the first peer bootstraps the
@@ -1647,10 +1662,15 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsLocked(
 			// or this connection has delivered a connected header chain
 			// (see corroborateFarTipClaimLocked). A single claim, honest or
 			// fabricated, cannot break the ratchet by itself.
-			if observedReject &&
-				cs.corroborateFarTipClaimLocked(connId, observedTip, link, claims) {
-				observedReject = false
-				maxPlausibleBlock = observedBlock
+			if observedReject {
+				corroborated, changed := cs.corroborateFarTipClaimTrackedLocked(
+					connId, observedTip, link, claims,
+				)
+				claimsChanged = claimsChanged || changed
+				if corroborated {
+					observedReject = false
+					maxPlausibleBlock = observedBlock
+				}
 			}
 		}
 		// Case 3: len(peerTips)==0 && peer not known → bootstrap
@@ -1679,17 +1699,20 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsLocked(
 				}
 				cs.config.OnPeerTipRejected(reason)
 			}
-			return false
+			return false, claimsChanged
 		}
 		// Accepted: this connection no longer needs to be tracked as a
 		// pending far-tip claim, whether or not it ever was one. A claim
 		// accepted on its own chain keeps its entry, which marks the
 		// connection's frontier for revocation (loneFrontierBrokenLocked).
 		if claim, ok := claims[connId]; !ok || !claim.lone {
-			delete(claims, connId)
+			if ok {
+				delete(claims, connId)
+				claimsChanged = true
+			}
 		}
 	}
-	return true
+	return true, claimsChanged
 }
 
 // corroborateFarTipClaimLocked records connId's delivered frontier, which
@@ -1730,10 +1753,23 @@ func (cs *ChainSelector) corroborateFarTipClaimLocked(
 	link deliveredLink,
 	claims map[ouroboros.ConnectionId]farTipClaim,
 ) bool {
+	corroborated, _ := cs.corroborateFarTipClaimTrackedLocked(
+		connId, observedTip, link, claims,
+	)
+	return corroborated
+}
+
+func (cs *ChainSelector) corroborateFarTipClaimTrackedLocked(
+	connId ouroboros.ConnectionId,
+	observedTip ochainsync.Tip,
+	link deliveredLink,
+	claims map[ouroboros.ConnectionId]farTipClaim,
+) (bool, bool) {
 	claimed := observedTip.BlockNumber
 	if claims == nil {
-		return false
+		return false, false
 	}
+	changed := false
 	// Bounded like peerTips: connection churn must not grow this map without
 	// limit. A claim that does not fit is still compared against the recorded
 	// ones, so a full table cannot keep its own claims from being
@@ -1765,6 +1801,7 @@ func (cs *ChainSelector) corroborateFarTipClaimLocked(
 		}
 	}
 	if exists || len(claims) < cs.maxTrackedPeers {
+		changed = !exists || !farTipClaimEqual(prev, updated)
 		claims[connId] = updated
 	}
 	corroborated := false
@@ -1777,20 +1814,36 @@ func (cs *ChainSelector) corroborateFarTipClaimLocked(
 			lo, hi = hi, lo
 		}
 		if safeAddUint64(lo, cs.securityParam) >= hi {
-			other.corroborated = true
-			claims[otherConn] = other
+			if !other.corroborated {
+				other.corroborated = true
+				claims[otherConn] = other
+				changed = true
+			}
 			corroborated = true
 		}
 	}
 	if corroborated {
-		return true
+		return true, changed
 	}
 	if updated.run > cs.securityParam {
-		updated.lone = true
-		claims[connId] = updated
-		return true
+		if !updated.lone {
+			updated.lone = true
+			claims[connId] = updated
+			changed = true
+		}
+		return true, changed
 	}
-	return false
+	return false, changed
+}
+
+func farTipClaimEqual(a, b farTipClaim) bool {
+	return a.block == b.block &&
+		a.slot == b.slot &&
+		bytes.Equal(a.hash, b.hash) &&
+		a.boundary == b.boundary &&
+		a.corroborated == b.corroborated &&
+		a.lone == b.lone &&
+		a.run == b.run
 }
 
 // blockWithinSlotDistanceLocked reports whether observedTip's block number is
