@@ -5638,11 +5638,12 @@ it. Dingo implements this as a **corroboration gate**
   applies; a result showing local state has not caught up to
   the header's slot (`IsHeaderVerificationDeferred`) still leaves the header
   eligible — both preserve legitimate catch-up behavior. Missing or unsafe
-  fork ancestry withholds the header and schedules re-intersection without
-  penalizing the peer. Bounded-history exhaustion and multi-epoch extensions
+  fork ancestry excludes the header from observation and schedules
+  re-intersection without recycling the peer. Headers past the forecast
+  horizon are likewise excluded from observation until admission can forecast
+  their slots. Bounded-history exhaustion and multi-epoch extensions
   of the held tip defer verification until block application catches up.
-  Headers past the forecast horizon remain withheld until admission can
-  forecast their slots. A header whose
+  A header whose
   point (slot and hash) is on the chain (`Chain.HoldsPoint`) at or below the
   ledger tip returns success without re-verification: it was fully verified
   when applied, and re-judging it against pool snapshots the 3-epoch
