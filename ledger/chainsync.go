@@ -4470,6 +4470,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			ls.chainsyncBlockfetchMutex.Lock()
 			ls.clearQueuedHeaders()
 			ls.chainsyncBlockfetchMutex.Unlock()
+			// The persistent-fork threshold is per connection: another
+			// connection's mismatches must not count toward this one.
+			// An unset owner holds no count: every reset zeroes it.
+			if ls.headerMismatchConnId.LocalAddr != nil ||
+				ls.headerMismatchConnId.RemoteAddr != nil {
+				if !sameConnectionId(ls.headerMismatchConnId, e.ConnectionId) {
+					ls.headerMismatchCount = 0
+				}
+			}
+			ls.headerMismatchConnId = e.ConnectionId
 			ls.headerMismatchCount++
 			ls.config.Logger.Debug(
 				"block header does not fit chain tip",

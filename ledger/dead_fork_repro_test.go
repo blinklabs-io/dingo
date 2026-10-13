@@ -1,0 +1,190 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ledger
+
+import (
+	"fmt"
+	"net"
+	"testing"
+
+	ouroboros "github.com/blinklabs-io/gouroboros"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+)
+
+func deadForkConnId(remotePort int) ouroboros.ConnectionId {
+	return ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: remotePort},
+	}
+}
+
+// deadForkHeaders builds count contiguous mock headers extending from, one
+// block and 10 slots apart, named so two seeds never collide.
+func deadForkHeaders(
+	seed string,
+	prevHash []byte,
+	prevBlock uint64,
+	prevSlot uint64,
+	count int,
+) []mockHeader {
+	out := make([]mockHeader, 0, count)
+	for i := range count {
+		hash := testHashBytes(fmt.Sprintf("%s-%d", seed, i))
+		out = append(out, mockHeader{
+			hash:        lcommon.NewBlake2b256(hash),
+			prevHash:    lcommon.NewBlake2b256(prevHash),
+			blockNumber: prevBlock + uint64(i) + 1,
+			slot:        prevSlot + uint64(i+1)*10,
+		})
+		prevHash = hash
+	}
+	return out
+}
+
+func deadForkEvent(
+	connId ouroboros.ConnectionId,
+	h mockHeader,
+	advertised ochainsync.Tip,
+) ChainsyncEvent {
+	return ChainsyncEvent{
+		ConnectionId: connId,
+		BlockHeader:  h,
+		Point:        ocommon.NewPoint(h.slot, h.hash.Bytes()),
+		Tip:          advertised,
+	}
+}
+
+// resyncRecorder collects ChainsyncResyncEvents. drain blocks on a barrier
+// published after the handler calls, so every earlier request has arrived.
+type resyncRecorder struct {
+	bus *event.EventBus
+	ch  <-chan event.Event
+}
+
+func newResyncRecorder(t *testing.T, bus *event.EventBus) *resyncRecorder {
+	t.Helper()
+	_, ch := bus.Subscribe(event.ChainsyncResyncEventType)
+	return &resyncRecorder{bus: bus, ch: ch}
+}
+
+func (r *resyncRecorder) drain(t *testing.T) []event.ChainsyncResyncEvent {
+	t.Helper()
+	const barrier = "test barrier"
+	r.bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{Reason: barrier},
+		),
+	)
+	var out []event.ChainsyncResyncEvent
+	for {
+		evt := testutil.RequireReceive(
+			t, r.ch, testutil.AsyncWait, "resync barrier",
+		)
+		e, ok := evt.Data.(event.ChainsyncResyncEvent)
+		require.True(t, ok)
+		if e.Reason == barrier {
+			return out
+		}
+		out = append(out, e)
+	}
+}
+
+// declinedMismatchHeader builds a header Praos declines (shorter than the tip)
+// that does not extend the tip: it counts one mismatch and, in non-genesis
+// mode, resolves to no resync.
+func declinedMismatchHeader(seed string, tip ochainsync.Tip) mockHeader {
+	return mockHeader{
+		hash:        lcommon.NewBlake2b256(testHashBytes(seed)),
+		prevHash:    lcommon.NewBlake2b256(testHashBytes(seed + "-parent")),
+		blockNumber: tip.BlockNumber - 1,
+		slot:        tip.Point.Slot,
+	}
+}
+
+// headerMismatchCount is shared by every connection, so nineteen mismatches
+// delivered by a fork peer must not let one mismatch from an honest peer
+// trip the persistent-fork resync against that honest peer.
+func TestDeadForkSharedMismatchCounterDoesNotBlameHonestPeer(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+	rec := newResyncRecorder(t, bus)
+
+	forkConn := deadForkConnId(3002)
+	honestConn := fixture.connId
+	advertised := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100000, testHashBytes("far-tip")),
+		BlockNumber: 5000,
+	}
+	for i := range headerMismatchResyncThreshold - 1 {
+		h := declinedMismatchHeader(fmt.Sprintf("fork-%d", i), fixture.currentTip)
+		require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
+			deadForkEvent(forkConn, h, advertised)))
+	}
+	require.Equal(t, headerMismatchResyncThreshold-1,
+		fixture.ls.headerMismatchCount,
+		"fork peer's mismatches must accumulate for the scenario to hold")
+
+	h := declinedMismatchHeader("honest-0", fixture.currentTip)
+	require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
+		deadForkEvent(honestConn, h, advertised)))
+
+	for _, e := range rec.drain(t) {
+		require.Falsef(t, sameConnectionId(e.ConnectionId, honestConn),
+			"honest peer received %q resync caused by fork peer's mismatches",
+			e.Reason)
+	}
+}
+
+// A connection's own mismatches must still reach the persistent-fork resync.
+func TestPersistentForkResyncsConnectionOwningMismatches(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+	rec := newResyncRecorder(t, bus)
+
+	advertised := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100000, testHashBytes("far-tip")),
+		BlockNumber: 5000,
+	}
+	for i := range headerMismatchResyncThreshold {
+		h := declinedMismatchHeader(fmt.Sprintf("own-%d", i), fixture.currentTip)
+		require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
+			deadForkEvent(fixture.connId, h, advertised)))
+	}
+
+	var persistent int
+	for _, e := range rec.drain(t) {
+		if e.Reason == event.ChainsyncResyncReasonPersistentFork &&
+			sameConnectionId(e.ConnectionId, fixture.connId) {
+			persistent++
+		}
+	}
+	require.Equal(t, 1, persistent)
+}
