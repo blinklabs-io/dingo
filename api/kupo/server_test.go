@@ -774,7 +774,10 @@ func TestHandlerArmsWriteDeadlineOnEachWrite(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(&mockNode{
-		matches: []Match{{TransactionID: strings.Repeat("ab", 32)}},
+		matches: []Match{
+			{TransactionID: strings.Repeat("ab", 32)},
+			{TransactionID: strings.Repeat("cd", 32), OutputIndex: 1},
+		},
 	})
 	w := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
 	server.handler().ServeHTTP(
@@ -783,7 +786,13 @@ func TestHandlerArmsWriteDeadlineOnEachWrite(t *testing.T) {
 	)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	require.NotEmpty(t, w.deadlines)
+	// "[", match, ",", match, "]\n": each write must follow its own fresh
+	// deadline, so arming once for the whole response fails here.
+	want := make([]string, 0, 10)
+	for range 5 {
+		want = append(want, "deadline", "write")
+	}
+	assert.Equal(t, want, w.events)
 	for _, deadline := range w.deadlines {
 		assert.False(t, deadline.IsZero())
 	}
@@ -791,10 +800,17 @@ func TestHandlerArmsWriteDeadlineOnEachWrite(t *testing.T) {
 
 type deadlineRecorder struct {
 	*httptest.ResponseRecorder
+	events    []string
 	deadlines []time.Time
 }
 
 func (w *deadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	w.events = append(w.events, "deadline")
 	w.deadlines = append(w.deadlines, deadline)
 	return nil
+}
+
+func (w *deadlineRecorder) Write(p []byte) (int, error) {
+	w.events = append(w.events, "write")
+	return w.ResponseRecorder.Write(p)
 }
