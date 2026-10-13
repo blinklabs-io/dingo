@@ -41,7 +41,7 @@ func TestPoolRegistrationIdentityMigrationKeepsSyntheticReplayIdempotent(
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 42)
+	require.Len(t, registry, 43)
 	run := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -51,7 +51,7 @@ func TestPoolRegistrationIdentityMigrationKeepsSyntheticReplayIdempotent(
 		}
 		require.NoError(t, runner.Run(ctx))
 	}
-	run(registry[:41])
+	run(registry[:42])
 
 	poolKeyHash := []byte{0x42}
 	result, err := db.ExecContext(ctx, `
