@@ -5957,8 +5957,7 @@ func TestChainsyncHeaderVerificationRejectsStaleIngressVerdict(t *testing.T) {
 	err = ls.handleEventChainsyncBlockHeader(event)
 	require.ErrorContains(t, err, "block header crypto verification failed")
 
-	event.HeaderCryptoVerificationGeneration =
-		ls.loadConsensusSnapshot().generation
+	event.HeaderCryptoVerificationGeneration = ls.loadConsensusSnapshot().generation
 	finishTransition := ls.beginTxValidationTransition()
 	err = ls.handleEventChainsyncBlockHeader(event)
 	finishTransition()
@@ -6390,7 +6389,14 @@ func TestBlockfetchSkipsHeaderCryptoForVerifiedNonHeadQueuedHeader(
 			}
 			require.NoError(t, ls.chain.AddVerifiedBlockHeader(context.Background(), head))
 			if tc.verified {
-				require.NoError(t, ls.chain.AddVerifiedBlockHeader(context.Background(), fetched))
+				require.NoError(
+					t,
+					ls.chain.AddBlockHeaderWithCryptoVerificationGeneration(
+						context.Background(),
+						fetched,
+						ls.loadConsensusSnapshot().generation,
+					),
+				)
 			} else {
 				require.NoError(t, ls.chain.AddBlockHeader(context.Background(), fetched))
 			}
@@ -18646,8 +18652,7 @@ func TestForkResolutionInvalidatesTheIncomingHeaderVerdict(t *testing.T) {
 			advertisedSlot := ^uint64(0)
 			verificationGeneration := uint64(0)
 			if tc.cryptoVerified {
-				verificationGeneration =
-					fixture.ls.loadConsensusSnapshot().generation
+				verificationGeneration = fixture.ls.loadConsensusSnapshot().generation
 			}
 
 			resolved, err := fixture.ls.tryResolveFork(
