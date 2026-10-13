@@ -619,8 +619,8 @@ func TestLeiosPersistAsyncCoalescesManifestThenComplete(t *testing.T) {
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 	txsRaw := []cbor.RawMessage{
-		mustCbor(t, "tx0"),
-		mustCbor(t, "tx1"),
+		testDijkstraTx(t, 0),
+		testDijkstraTx(t, 1),
 	}
 
 	o := newTestOuroborosWithLeiosDB(t)
@@ -669,7 +669,7 @@ func TestLeiosVerifiedEbSlotRestoresFromPersistedManifest(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point,
 		blockRaw,
-		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		[]cbor.RawMessage{testDijkstraTx(t, 0)},
 		leiosStoreAuthoritative,
 	))
 	o.StopLeiosPersistWriter()
@@ -700,7 +700,7 @@ func TestLeiosVerifiedEbSlotRestoredByNewOuroboros(t *testing.T) {
 	require.NoError(t, first.storeLeiosEndorserBlock(
 		point,
 		blockRaw,
-		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		[]cbor.RawMessage{testDijkstraTx(t, 0)},
 		leiosStoreAuthoritative,
 	))
 	first.StopLeiosPersistWriter()
@@ -733,8 +733,8 @@ func TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently(
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 30, 1)
 	second := ocommon.Point{Slot: point.Slot + 1, Hash: point.Hash}
-	txs1 := []cbor.RawMessage{mustCbor(t, "tx0")}
-	txs2 := []cbor.RawMessage{mustCbor(t, "tx1")}
+	txs1 := []cbor.RawMessage{testDijkstraTx(t, 0)}
+	txs2 := []cbor.RawMessage{testDijkstraTx(t, 1)}
 
 	o := newTestOuroborosWithLeiosDB(t)
 	require.NoError(

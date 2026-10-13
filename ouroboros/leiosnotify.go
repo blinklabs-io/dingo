@@ -852,6 +852,9 @@ func (o *Ouroboros) watchLeiosTxFetchCandidate(
 		if candidate.state.CompareAndSwap(
 			leiosTxFetchQueued,
 			leiosTxFetchCanceled,
+		) || candidate.state.CompareAndSwap(
+			leiosTxFetchRunning,
+			leiosTxFetchCanceled,
 		) {
 			o.cancelLeiosTxFetchCandidate(key, candidate)
 		}
@@ -2460,14 +2463,23 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	// same lock (announcementsMu before leiosMu) across its own check and
 	// insertion for the same reason.
 	o.leiosAnnouncementsMu.Lock()
-	err := o.recordLeiosAnnouncementLocked(
-		raw,
-		ebHash,
-		ebSize,
-		header,
-		source,
-		relay,
-	)
+	var err error
+	if data, ok := o.lookupLeiosEndorserBlock(
+		header.SlotNumber(),
+		ebHash.Bytes(),
+	); ok && data != nil {
+		err = validateLeiosEndorserBlockBinding(header, data)
+	}
+	if err == nil {
+		err = o.recordLeiosAnnouncementLocked(
+			raw,
+			ebHash,
+			ebSize,
+			header,
+			source,
+			relay,
+		)
+	}
 	// bindLeiosEndorserBlockSlot's reconciliation runs while
 	// leiosAnnouncementsMu is still held, for the atomicity reasons above; its
 	// returned publish step runs only after the unlock below, so vote,

@@ -248,7 +248,12 @@ type Ouroboros struct {
 	// ChainSync serve merged RB+EB blocks without coupling the chain
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
-	leiosMu             sync.RWMutex
+	// leiosSelectedHeaders retains the exact selected announcing header while
+	// ledger apply waits for its independently fetched endorser body. It is
+	// keyed by occurrence and parent so overlapping validations cannot replace
+	// one another's authority.
+	leiosSelectedHeaders map[string]map[string]map[string]selectedLeiosHeader
+	leiosMu              sync.RWMutex
 	// leiosMaxVerifiedEbSlot is the highest slot for which an endorser block
 	// has been corroborated -- see publishLeiosEndorserBlock. It is proof that
 	// a ranking block exists at that slot, which the forge gate uses as a
@@ -684,6 +689,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			headerDecodeCacheMaxBytes,
 		),
 		leiosEndorserBlocks: make(map[string]*leiosEndorserBlockData),
+		leiosSelectedHeaders: make(
+			map[string]map[string]map[string]selectedLeiosHeader,
+		),
 		leiosClosureWaiters: make(map[string][]chan struct{}),
 		leiosServeWaiters: make(
 			map[ouroboros.ConnectionId][]leiosServeWaiter,

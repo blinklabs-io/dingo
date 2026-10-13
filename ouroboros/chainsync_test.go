@@ -422,7 +422,7 @@ func TestChainsyncHeaderBackpressurePrecedesAdmissionAndCrypto(t *testing.T) {
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
 		cryptoCalls.Add(1)
-		return 42, nil
+		return 0, nil
 	}
 
 	header := newTestBlockHeader(100, 1, 0xaa)
