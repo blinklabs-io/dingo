@@ -596,6 +596,13 @@ func isDeterministicTxValidationError(err error) bool {
 // whose validation rules do not resolve transaction inputs. State access and
 // availability errors are deliberately excluded.
 func isConwayGovPredFailureError(err error) bool {
+	if errorIsType[conway.CommitteeExpiryEpochUnavailableError](err) ||
+		errorIsType[conway.ConstitutionLookupError](err) ||
+		errorIsType[conway.MalformedConstitutionError](err) ||
+		errorIsType[conway.CommitteeMemberLookupError](err) ||
+		errorIsType[conway.CommitteeStateUnavailableError](err) {
+		return false
+	}
 	return errorIsType[conway.ProtocolParameterUpdateEmptyError](err) ||
 		errorIsType[conway.ProtocolParameterUpdateFieldZeroError](err) ||
 		errorIsType[conway.ConwayProtocolParameterUpdateError](err) ||
@@ -608,7 +615,6 @@ func isConwayGovPredFailureError(err error) bool {
 		errorIsType[conway.ConflictingCommitteeUpdateError](err) ||
 		errorIsType[conway.InvalidGuardrailsScriptHashError](err) ||
 		errorIsType[conway.BadHardForkProtocolVersionError](err) ||
-		errorIsType[conway.InvalidGovActionAncestorError](err) ||
 		errorIsType[conway.ProposalDepositIncorrectError](err) ||
 		errorIsType[conway.ProposalReturnAccountDoesNotExistError](err) ||
 		errorIsType[conway.TreasuryWithdrawalReturnAccountsDoNotExistError](err) ||

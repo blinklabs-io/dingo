@@ -2991,7 +2991,6 @@ func TestIsConwayGovPredFailureError(t *testing.T) {
 		conway.ConflictingCommitteeUpdateError{},
 		conway.InvalidGuardrailsScriptHashError{},
 		conway.BadHardForkProtocolVersionError{},
-		conway.InvalidGovActionAncestorError{},
 		conway.ProposalDepositIncorrectError{},
 		conway.ProposalReturnAccountDoesNotExistError{Address: addr},
 		conway.TreasuryWithdrawalReturnAccountsDoNotExistError{},
@@ -3017,6 +3016,10 @@ func TestIsConwayGovPredFailureError(t *testing.T) {
 		conway.MalformedConstitutionError{},
 		conway.CommitteeMemberLookupError{},
 		conway.CommitteeStateUnavailableError{},
+		conway.InvalidGovActionAncestorError{},
+		conway.ConstitutionLookupError{
+			Err: conway.MalformedGovActionError{},
+		},
 	}
 	for _, stateErr := range stateErrors {
 		assert.False(t, isConwayGovPredFailureError(stateErr), "%T", stateErr)
