@@ -3884,8 +3884,31 @@ checks the manager's current connection under the cursor lock and moves an old
 owner's outstanding reservation into the retry queue. Chainsync client cleanup
 remains specific to each connection mode.
 
-For the current respun prototype, the notify vote dialect is specifically the three-field `(announcing_rb_hash, voter_id, signature)` form. The selected-chain `chain.update` path records an announcement only after its ranking block is adopted; merely observing an eligible ChainSync header cannot make a local vote eligible. A bounded TTL queue holds votes that race ahead of adoption and retains a bounded set of alternate signatures per voter, so an invalid first candidate cannot suppress a later valid vote. Local votes use that same LeiosNotify stream; each outbound response reserves its log entry and commits the per-peer cursor only after gouroboros reports a successful send. Failed or aborted sends release the reservation into a counted retry set retained across reconnects; a reconnect advances through every pending retry on its stream rather than clearing only the first failed entry. The transitional offered-ID and four-field forms remain decode-compatible only.
 For the current respun prototype, the notify vote dialect is specifically the three-field `(announcing_rb_hash, voter_id, signature)` form. Announcements are armed from the ordered `chain.header` stream rather than from `chain.update`: a ranking-block header whose VRF/KES this node verified, admitted to the primary chain's header queue and inside the vote window, arms a local vote before its block has been fetched, validated or applied. A header admitted *without* verification -- the deferred-epoch-nonce, validation-disabled and Mithril-covered paths, which reach `Chain.AddBlockHeader` rather than `AddVerifiedBlockHeader` -- arms nothing, so a chainsync peer cannot make this node sign a vote for a ranking block it never authenticated and so occupy the `(slot, voter_id)` the honest block's vote needs; an unverified header is announced only once its block is applied, through the idempotent `chain.update` backstop. `ChainHeaderInvalidationEvent`, on the same stream and therefore never reordered against announcements, retracts announcements whose ranking blocks left the chain, and a rollback prunes by comparing its `Seq` against each announcement record's, so an announcement sequenced after the rollback is not dropped by it. A bounded TTL queue holds votes that race ahead of adoption and retains a bounded set of alternate signatures per voter, so an invalid first candidate cannot suppress a later valid vote. Local votes use that same LeiosNotify stream; each outbound response reserves its log entry and commits the per-peer cursor only after gouroboros reports a successful send. Failed or aborted sends release the reservation into a counted retry set retained across reconnects; a reconnect advances through every pending retry on its stream rather than clearing only the first failed entry. The transitional offered-ID and four-field forms remain decode-compatible only.
+
+Apply-boundary validation checks the exact endorser block
+announced by that ranking-block header while the header's parent is still the
+applied ledger tip. A remote block waits for its `(slot, hash)` closure only
+after selection, full block fetch and admission to the ledger apply stream;
+announcing blocks form one-block apply chunks so the exact parent remains the
+published ledger tip during validation. Competing or queued headers therefore
+cannot each consume a diffusion-window wait. A locally forged header takes the
+same path after block self-validation and before adoption. A confirmed semantic
+failure rejects the locally forged ranking block before adoption; unavailable
+parent or storage state leaves adoption eligible for later validation. Every
+other validation error rejects the local forge, so an unclassified failure
+cannot publish an unchecked announcement. The composition adapter marks
+confirmed transaction failures for the forger without introducing a dependency
+from forging to the parent ledger package.
+Endorser manifests and
+transactions arrive independently on the asynchronous LeiosNotify and
+LeiosFetch workers, so this wait does not serialize the fetch that satisfies
+it. The wait is bounded by the configured diffusion window and observes node
+shutdown cancellation. A missing, late, wrong-sized, or ledger-invalid
+closure fails apply-boundary validation; the remote ranking-block header remains
+admitted. Prototype VoteManager votes attest to authenticated announcements
+and acquisition, and may be emitted before this semantic validation. The
+LeiosVoteHandler validation path remains separate.
 
 Manifest and transaction offers reserve a per-connection fetch slot before
 claiming their `(slot, hash)` occurrence. A full connection publishes no claim;

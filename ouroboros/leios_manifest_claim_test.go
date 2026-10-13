@@ -605,11 +605,12 @@ func requireLeiosTxFetchClaim(
 }
 
 type leiosTxOfferTestRequester struct {
-	txs      []cbor.RawMessage
-	perRound time.Duration
-	limit    int
-	requests int
-	lastNeed int
+	txs            []cbor.RawMessage
+	perRound       time.Duration
+	immediateFirst bool
+	limit          int
+	requests       int
+	lastNeed       int
 }
 
 func (r *leiosTxOfferTestRequester) BlockRequest(
@@ -624,7 +625,7 @@ func (r *leiosTxOfferTestRequester) BlockTxsRequest(
 	point ocommon.Point,
 	bitmaps map[uint16]uint64,
 ) (protocol.Message, error) {
-	if r.perRound > 0 {
+	if r.perRound > 0 && !(r.immediateFirst && r.requests == 0) {
 		timer := time.NewTimer(r.perRound)
 		defer timer.Stop()
 		select {
@@ -717,7 +718,8 @@ func TestLeiosTxsOfferDeadlineWithoutWaiterReleasesClaim(t *testing.T) {
 	o, point, txs := testLeiosTxOfferDeadlineFixture(t, 466)
 	o.leiosTxFetchAttemptTimeoutOverride = 40 * time.Millisecond
 	owner := &leiosTxOfferTestRequester{
-		txs: txs, perRound: 10 * time.Millisecond, limit: 1,
+		txs: txs, perRound: 10 * time.Millisecond, immediateFirst: true,
+		limit: 1,
 	}
 	guard := &leiosFetchGuard{}
 	guard.inflight.Store(1)

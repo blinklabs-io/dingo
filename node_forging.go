@@ -1046,13 +1046,25 @@ func (n *Node) initBlockForger(
 		LeiosVerifiedEbSlot: func() uint64 {
 			return n.ouroboros().MaxVerifiedEndorserBlockSlot()
 		},
-		BlockValidator:                  blockValidator,
-		ForgeFence:                      forgeFence,
-		PromRegistry:                    n.config.promRegistry,
-		LeiosProduceChecker:             leiosChecker,
-		LeiosEBBroadcaster:              leiosEBCaster,
-		LeiosMempool:                    leiosMempool,
-		LeiosTxValidator:                n.ledgerState,
+		BlockValidator:      blockValidator,
+		ForgeFence:          forgeFence,
+		PromRegistry:        n.config.promRegistry,
+		LeiosProduceChecker: leiosChecker,
+		LeiosEBBroadcaster:  leiosEBCaster,
+		LeiosMempool:        leiosMempool,
+		LeiosTxValidator:    n.ledgerState,
+		LeiosAnnouncementValidator: func(
+			ctx context.Context,
+			header lcommon.BlockHeader,
+		) error {
+			o := n.ouroboros()
+			if o == nil {
+				return errOuroborosNotStarted
+			}
+			return classifyLeiosAnnouncementValidationError(
+				o.ValidateLeiosEndorserBlockForHeader(ctx, header),
+			)
+		},
 		LeiosCertificateProvider:        leiosCerts,
 		LeiosParentAnnouncementProvider: leiosParent,
 		OpCertLedgerView: blockProducerLedgerView{
@@ -1085,6 +1097,19 @@ func (n *Node) initBlockForger(
 	)
 
 	return nil
+}
+
+func classifyLeiosAnnouncementValidationError(err error) error {
+	switch {
+	case errors.Is(err, ledger.ErrInvalidLeiosEndorserBlockTransactions):
+		return errors.Join(forging.ErrInvalidLeiosAnnouncement, err)
+	case errors.Is(err, ledger.ErrLeiosValidationParentUnavailable),
+		errors.Is(err, ledger.ErrLeiosValidationParentSuperseded),
+		errors.Is(err, ledger.ErrLedgerViewStorageFault):
+		return errors.Join(forging.ErrLeiosAnnouncementUnavailable, err)
+	default:
+		return err
+	}
 }
 
 type mempoolTxView struct {
