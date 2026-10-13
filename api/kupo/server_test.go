@@ -20,13 +20,17 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type mockNode struct {
@@ -702,4 +706,95 @@ func TestStopWaitsForInProgressStart(t *testing.T) {
 	if err := <-stopDone; err != nil {
 		t.Fatal(err)
 	}
+}
+
+type endlessMatchNode struct {
+	mockNode
+	closed chan struct{}
+}
+
+func (n *endlessMatchNode) Matches(
+	context.Context,
+	MatchQuery,
+) (MatchIterator, error) {
+	return &endlessMatchIterator{closed: n.closed}, nil
+}
+
+// endlessMatchIterator never ends on its own, so only the response writer
+// failing can end the stream and release the snapshot Close stands for.
+type endlessMatchIterator struct {
+	closed chan struct{}
+	next   uint32
+}
+
+func (*endlessMatchIterator) Tip() Point { return Point{SlotNo: 1} }
+
+func (i *endlessMatchIterator) Next() (Match, bool, error) {
+	i.next++
+	return Match{
+		TransactionID: strings.Repeat("ab", 32),
+		OutputIndex:   i.next,
+		Address:       "addr_test1" + strings.Repeat("q", 98),
+		Value:         Value{Coins: 1},
+	}, true, nil
+}
+
+func (i *endlessMatchIterator) Close() { close(i.closed) }
+
+func TestMatchesStreamReleasesSnapshotWhenClientStopsReading(t *testing.T) {
+	t.Parallel()
+
+	node := &endlessMatchNode{closed: make(chan struct{})}
+	server := newTestServer(node)
+	server.responseWriteTimeout = 200 * time.Millisecond
+	httpServer := httptest.NewServer(server.handler())
+	t.Cleanup(httpServer.Close)
+
+	conn, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	_, err = io.WriteString(
+		conn,
+		"GET /matches HTTP/1.1\r\nHost: kupo\r\n\r\n",
+	)
+	require.NoError(t, err)
+
+	// The client never reads, so the server's writes block once the socket
+	// buffers fill; the stream must end on the write deadline rather than
+	// holding its snapshot for as long as the connection stays open.
+	testutil.RequireReceive(
+		t,
+		node.closed,
+		testutil.AsyncWait,
+		"match snapshot release",
+	)
+}
+
+func TestHandlerArmsWriteDeadlineOnEachWrite(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer(&mockNode{
+		matches: []Match{{TransactionID: strings.Repeat("ab", 32)}},
+	})
+	w := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	server.handler().ServeHTTP(
+		w,
+		httptest.NewRequest(http.MethodGet, "/matches", nil),
+	)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotEmpty(t, w.deadlines)
+	for _, deadline := range w.deadlines {
+		assert.False(t, deadline.IsZero())
+	}
+}
+
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (w *deadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
 }
