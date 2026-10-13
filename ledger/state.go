@@ -1317,6 +1317,7 @@ type LedgerState struct {
 	// activeBlockfetchRequestDone and shadowBlockfetchRequestDone are the
 	// blockfetchRequestsInFlight entries of the active batch's and the shadow
 	// peer's requests, so teardown releases those requests by identity.
+	chainsyncCapacityChanged            chan struct{}
 	activeBlockfetchRequestDone         chan struct{}
 	shadowBlockfetchRequestDone         chan struct{}
 	blockfetchShadowRequestsInFlight    map[string]struct{}
@@ -2385,18 +2386,14 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	}
 	// Setup event handlers only after startup nonce repair is complete, so a
 	// Mithril-bootstrapped node cannot process chainsync/blockfetch events with
-	// stale gap-block nonces. ChainSync and chain-update can burst at bulk-sync
-	// rates, so they opt into the large EventQueueSize buffer.
+	// stale gap-block nonces. ChainSync uses a protocol-window-sized buffer so
+	// its publisher backpressures before admitted headers can outrun the chain
+	// queue. Chain updates retain the large EventQueueSize buffer.
 	// Blockfetch events retain fully decoded blocks, so keep that lossless queue
 	// to one commit batch and let EventBus backpressure bound decoded CBOR while
 	// the chain store catches up. Sparser streams use the default.
 	if ls.config.EventBus != nil {
-		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
-			ChainsyncEventType,
-			event.EventQueueSize,
-			event.SubscriberBackpressureBlock,
-			ls.handleEventChainsync,
-		)
+		ls.subscribeChainsyncEvents(ls.handleEventChainsync)
 		ls.chainsyncAwaitReplySubID = ls.config.EventBus.SubscribeFunc(
 			ChainsyncAwaitReplyEventType,
 			ls.handleEventChainsyncAwaitReply,
@@ -2519,6 +2516,17 @@ func (ls *LedgerState) subscribeBlockfetchEvents(
 	ls.blockfetchSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
 		BlockfetchEventType,
 		blockfetchCommitBatchSize,
+		event.SubscriberBackpressureBlock,
+		handler,
+	)
+}
+
+func (ls *LedgerState) subscribeChainsyncEvents(
+	handler event.EventHandlerFunc,
+) {
+	ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBufferPolicy(
+		ChainsyncEventType,
+		ChainsyncEventBufferSize,
 		event.SubscriberBackpressureBlock,
 		handler,
 	)

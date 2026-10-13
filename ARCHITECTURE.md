@@ -534,6 +534,8 @@ sequenceDiagram
 
     Note over Peer,DB: Stage 1 — Header Discovery (ChainSync)
     Peer->>OB: RollForward(header, tip)
+    OB->>LS: await bounded header capacity
+    LS->>ChM: wait for header queue drain
     OB->>EB: publish ChainsyncEvent(header)
     EB->>LS: handleEventChainsyncBlockHeader()
     LS->>LS: verify header crypto (VRF/KES/OpCert)
@@ -595,6 +597,22 @@ it can only be a chain's first block, so it is held to the genesis anchor
 rather than rejected as following an existing block. An epoch-0 EBB verified
 while the ledger tip is at origin, as during ledger apply when the primary
 chain already holds it, is held to the same anchor.
+
+The ChainSync client uses gouroboros's default 75-request pipeline and receive
+queue to cover network latency. Before future-header admission or header
+cryptography, an eligible peer applies backpressure once BlockFetch is active
+or pending and queued headers plus admitted ledger events reach the working
+bound (`min(4 * BlockfetchBatchSize, MaxQueuedHeaders)`). The initial fill may
+reach that bound so the far-behind path can start BlockFetch. The lossless
+`ledger.chainsync` subscriber holds one protocol window; headroom also covers
+its active handler and one blocked publisher per configured ChainSync client.
+Startup rejects a client count whose admitted headroom would exceed the
+chain's minimum queue capacity. BlockFetch draining one batch releases the
+event-driven wait; abandoning a fetch also wakes the waiter to recheck whether
+any fetch is still active or pending. Idle fetch state bypasses the gate so the
+next header can restart BlockFetch. Connection teardown releases it immediately. This keeps
+several batches ready without admitting and verifying headers up to the
+chain's larger emergency capacity.
 
 While the local header tip is at least `blockfetchMinBatchGapSlots` behind the
 peer tip, BlockFetch starts only once `blockfetchMinBatchHeaders` headers are
@@ -2161,11 +2179,13 @@ paths, where the point is to report before the goroutine unwinds.
   per event type and covers only publishes that are themselves sequenced;
   concurrent publishers still race to enqueue. Per-type lanes also isolate a
   slow subscriber to its own event type, unlike the shared pool
-- Default subscriber buffers of 1024 events, with opt-in 100000-entry burst
-  buffers for high-volume ledger chainsync and chain-update paths. The
-  payload-heavy ledger blockfetch path uses an eight-entry buffer and relies
-  on lossless backpressure once one chain-store commit batch is queued. That
-  backpressure does not reach the gouroboros blockfetch receive goroutine:
+- Default subscriber buffers of 1024 events. The lossless `ledger.chainsync`
+  subscriber uses the 75-entry `ChainsyncEventBufferSize` protocol window,
+  while the mempool's `chain.update` subscriber opts into a 100000-entry burst
+  buffer. The payload-heavy ledger blockfetch path uses an eight-entry buffer
+  and relies on lossless backpressure once one chain-store commit batch is
+  queued. That backpressure does not reach the gouroboros blockfetch receive
+  goroutine:
   `ouroboros.blockfetchClientBlock` and `blockfetchClientRangeDone` append
   each event to a per-connection forward queue
   (`ouroboros/blockfetch_forward.go`), and one forwarder goroutine per

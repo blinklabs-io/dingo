@@ -41,6 +41,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
+	dchainsync "github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
@@ -113,6 +114,161 @@ func buildBodySizedChain(
 		prevHash = hash
 	}
 	return testChain
+}
+
+func TestAwaitChainsyncHeaderCapacityBoundsAdmittedWork(t *testing.T) {
+	t.Parallel()
+
+	const admittedHeadroom = ChainsyncEventBufferSize + 1 +
+		dchainsync.DefaultMaxClients
+	capacity := BlockfetchBatchSize * 4
+	belowLimit := &LedgerState{
+		chain: buildBodySizedChain(t, capacity-1, 1),
+	}
+	initialFillCtx, cancelInitialFill := context.WithTimeout(
+		t.Context(),
+		time.Second,
+	)
+	defer cancelInitialFill()
+	require.NoError(t, belowLimit.AwaitChainsyncHeaderCapacity(
+		initialFillCtx,
+		admittedHeadroom,
+	))
+
+	chainManager, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	atLimitChain := chainManager.PrimaryChain()
+	blocks, err := testfixtures.GenerateConwayChain(capacity - admittedHeadroom)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, atLimitChain.AddBlockHeader(
+			context.Background(),
+			block.Header(),
+		))
+	}
+	atLimit := &LedgerState{chain: atLimitChain, activeBlockfetchRequestDone: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		done <- atLimit.AwaitChainsyncHeaderCapacity(
+			context.Background(),
+			admittedHeadroom,
+		)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"capacity gate should stop work at the bounded threshold",
+	)
+	for i := range BlockfetchBatchSize - 1 {
+		require.NoError(t, atLimitChain.AddBlock(
+			context.Background(),
+			blocks[i],
+			nil,
+		))
+	}
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"capacity gate should retain one-batch hysteresis",
+	)
+	require.NoError(t, atLimitChain.AddBlock(
+		context.Background(),
+		blocks[BlockfetchBatchSize-1],
+		nil,
+	))
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		done,
+		time.Second,
+		"a drained header batch should resume ChainSync",
+	))
+}
+
+func TestAwaitChainsyncHeaderCapacityResumesAfterFetchCleanup(t *testing.T) {
+	t.Parallel()
+	ls := &LedgerState{
+		chain:                       buildBodySizedChain(t, BlockfetchBatchSize*4, 1),
+		activeBlockfetchRequestDone: make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() { done <- ls.AwaitChainsyncHeaderCapacity(t.Context(), ChainsyncEventBufferSize+1) }()
+	testutil.WaitForCondition(t, func() bool {
+		ls.chainsyncBlockfetchMutex.Lock()
+		defer ls.chainsyncBlockfetchMutex.Unlock()
+		return ls.chainsyncCapacityChanged != nil
+	}, time.Second, "capacity waiter registered")
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.chainsyncBlockfetchMutex.Unlock()
+	require.NoError(t, testutil.RequireReceive(t, done, time.Second, "abandoned fetch releases capacity waiter"))
+	require.NoError(t, ls.AwaitChainsyncHeaderCapacity(t.Context(), ChainsyncEventBufferSize+1))
+}
+
+func TestAwaitChainsyncHeaderCapacityRejectsExhaustedBudget(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{chain: &chain.Chain{}}
+	capacity := chain.DefaultMaxQueuedHeaders - BlockfetchBatchSize*4
+	require.ErrorContains(t, ls.AwaitChainsyncHeaderCapacity(
+		context.Background(),
+		capacity+1,
+	), "must be between 0")
+	require.NoError(t, ls.AwaitChainsyncHeaderCapacity(
+		context.Background(),
+		capacity,
+	))
+}
+
+func TestChainsyncEventSubscriberBackpressuresAtProtocolWindow(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	entered := make(chan struct{})
+	var enteredOnce sync.Once
+	ls := &LedgerState{config: LedgerStateConfig{EventBus: bus}}
+	ls.subscribeChainsyncEvents(func(event.Event) {
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+	})
+	evt := event.NewEvent(ChainsyncEventType, ChainsyncEvent{})
+	require.NoError(t, bus.PublishBlocking(ChainsyncEventType, evt))
+	testutil.RequireReceive(
+		t,
+		entered,
+		time.Second,
+		"chainsync handler should consume the first event",
+	)
+	for range ChainsyncEventBufferSize {
+		require.NoError(t, bus.PublishBlocking(ChainsyncEventType, evt))
+	}
+	blocked := make(chan error, 1)
+	go func() {
+		blocked <- bus.PublishBlocking(ChainsyncEventType, evt)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		blocked,
+		50*time.Millisecond,
+		"the event after one active handler and a full protocol window must block",
+	)
+	close(release)
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		blocked,
+		time.Second,
+		"draining the subscriber should release its publisher",
+	))
 }
 
 func TestStartQueuedBlockfetchCutsRangesByEstimatedBytes(t *testing.T) {

@@ -1700,6 +1700,62 @@ func (ls *LedgerState) allowedQueuedHeaders() int {
 	)
 }
 
+// ValidateChainsyncHeaderCapacity checks that admitted ChainSync work fits
+// between the working header target and the chain's minimum queue capacity.
+func ValidateChainsyncHeaderCapacity(admittedHeadroom int) error {
+	workingHeaders := min(
+		BlockfetchBatchSize*4,
+		chain.DefaultMaxQueuedHeaders,
+	)
+	maxHeadroom := chain.DefaultMaxQueuedHeaders - workingHeaders
+	if admittedHeadroom < 0 || admittedHeadroom > maxHeadroom {
+		return fmt.Errorf(
+			"chainsync admitted headroom %d must be between 0 and %d",
+			admittedHeadroom,
+			maxHeadroom,
+		)
+	}
+	return nil
+}
+
+// AwaitChainsyncHeaderCapacity pauses ChainSync before header admission when
+// a running BlockFetch leaves too little room for admitted EventBus work. The
+// initial fill may reach the working header target so BlockFetch can start.
+// Once a fetch is active or pending, the wait resumes after it drains one
+// batch, retaining several ready batches without reaching the hard queue cap.
+func (ls *LedgerState) AwaitChainsyncHeaderCapacity(
+	ctx context.Context,
+	admittedHeadroom int,
+) error {
+	if ls == nil || ls.chain == nil {
+		return nil
+	}
+	if err := ValidateChainsyncHeaderCapacity(admittedHeadroom); err != nil {
+		return err
+	}
+	capacity := ls.allowedQueuedHeaders()
+	for {
+		ls.chainsyncBlockfetchMutex.Lock()
+		started := ls.activeBlockfetchRequestDone != nil || ls.blockfetchContinuationPending
+		if ls.chainsyncCapacityChanged == nil {
+			ls.chainsyncCapacityChanged = make(chan struct{})
+		}
+		changed := ls.chainsyncCapacityChanged
+		ls.chainsyncBlockfetchMutex.Unlock()
+		if !started {
+			return nil
+		}
+		pauseAt := capacity - admittedHeadroom
+		if ls.chain.HeaderCount() < pauseAt {
+			return nil
+		}
+		resumeAt := max(pauseAt-BlockfetchBatchSize, 0)
+		if err := ls.chain.WaitForHeaderCountBelowOrSignal(ctx, resumeAt+1, changed); err != nil {
+			return err
+		}
+	}
+}
+
 // farFromTipHeaderGate returns how many headers must be queued before a
 // blockfetch starts while the header is far from the peer tip. With the low
 // watermark enabled it is one blockfetch range, so the first range after a
@@ -6683,6 +6739,7 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 	ls.metrics.setContinuationPending(true)
 	ls.blockfetchContinuationMu.Lock()
 	if ls.closed.Load() {
+		ls.signalChainsyncCapacityChangedLocked()
 		ls.blockfetchContinuationPending = false
 		ls.metrics.setContinuationPending(false)
 		ls.blockfetchContinuationMu.Unlock()
@@ -6708,11 +6765,13 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 		pending.drainChain(ls.chain)
 		ls.chainsyncBlockfetchMutex.Lock()
 		if ls.closed.Load() {
+			ls.signalChainsyncCapacityChangedLocked()
 			ls.blockfetchContinuationPending = false
 			ls.metrics.setContinuationPending(false)
 			ls.chainsyncBlockfetchMutex.Unlock()
 			return
 		}
+		ls.signalChainsyncCapacityChangedLocked()
 		ls.blockfetchContinuationPending = false
 		ls.metrics.setContinuationPending(false)
 		err := ls.startQueuedBlockfetchOnLocked(connId, &pending)
@@ -9824,7 +9883,15 @@ func (ls *LedgerState) blockfetchRequestRangeStart(
 	return requestId, nil
 }
 
+func (ls *LedgerState) signalChainsyncCapacityChangedLocked() {
+	if ls.chainsyncCapacityChanged != nil {
+		close(ls.chainsyncCapacityChanged)
+		ls.chainsyncCapacityChanged = nil
+	}
+}
+
 func (ls *LedgerState) blockfetchRequestRangeCleanup() {
+	ls.signalChainsyncCapacityChangedLocked()
 	// A normal BatchDone releases its own request before reaching cleanup,
 	// which makes the release of that same entry here a no-op. Timeout,
 	// disconnect, and winner-takes-batch cleanup paths have no later
