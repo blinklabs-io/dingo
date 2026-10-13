@@ -2122,6 +2122,37 @@ func TestParsePStateRejectsDistributionEntryAsFutureParams(t *testing.T) {
 	require.Nil(t, pools[0].FutureParams)
 }
 
+func TestParsePStateAcceptsSnapshotEntryAsFutureParams(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	vrfHash := bytes.Repeat([]byte{0x22}, 32)
+	rewardHash := bytes.Repeat([]byte{0x33}, 28)
+	ownerHash := bytes.Repeat([]byte{0x44}, 28)
+	snapshotParams := []any{
+		uint64(42),
+		[]uint64{1, 1},
+		[]any{ownerHash},
+		uint64(0),
+		vrfHash,
+		uint64(500_000_000),
+		uint64(340_000_000),
+		[]uint64{1, 20},
+		uint64(0),
+		[]any{uint64(0), rewardHash},
+	}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, poolHash, snapshotParams),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.NotNil(t, pools[0].FutureParams)
+	require.Equal(t, vrfHash, pools[0].FutureParams.VrfKeyHash)
+}
+
 func TestParsePStateRejectsInvalidFutureRewardAccount(t *testing.T) {
 	t.Parallel()
 	poolHash := bytes.Repeat([]byte{0x11}, 28)

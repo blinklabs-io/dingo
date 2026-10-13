@@ -326,7 +326,7 @@ func parseCertPoolParamsMap(data []byte) ([]ParsedPool, error) {
 }
 
 func parseCertPoolRegistrationMap(data []byte) ([]ParsedPool, error) {
-	return parseCertPoolParamsMapWith(data, parsePoolParams)
+	return parseCertPoolParamsMapWith(data, parsePoolRegistration)
 }
 
 func parseCertPoolParamsMapWith(
@@ -1436,7 +1436,7 @@ func parsePoolParamsOrDistr(
 	poolKeyHash []byte,
 	data []byte,
 ) (*ParsedPool, error) {
-	pool, err := parsePoolParams(poolKeyHash, data)
+	pool, err := parsePoolRegistration(poolKeyHash, data)
 	if err == nil {
 		return pool, nil
 	}
@@ -1448,15 +1448,6 @@ func parsePoolParamsOrDistr(
 	if !errors.Is(err, ErrNotPoolParams) {
 		return nil, err
 	}
-	// The snapshot layout carries the full parameters; try it before
-	// degrading to the VRF-only reading, which discards them.
-	if fields, arrErr := decodeRawArray(data); arrErr == nil {
-		if pool, snapErr := parseSnapshotPoolParams(
-			poolKeyHash, fields,
-		); snapErr == nil {
-			return pool, nil
-		}
-	}
 	pool, distrErr := parsePoolDistrEntry(poolKeyHash, data)
 	if distrErr == nil {
 		return pool, nil
@@ -1466,6 +1457,25 @@ func parsePoolParamsOrDistr(
 		err,
 		distrErr,
 	)
+}
+
+func parsePoolRegistration(
+	poolKeyHash []byte,
+	data []byte,
+) (*ParsedPool, error) {
+	pool, err := parsePoolParams(poolKeyHash, data)
+	if err == nil || !errors.Is(err, ErrNotPoolParams) {
+		return pool, err
+	}
+	fields, fieldsErr := decodeRawArray(data)
+	if fieldsErr != nil {
+		return nil, err
+	}
+	pool, snapshotErr := parseSnapshotPoolParams(poolKeyHash, fields)
+	if snapshotErr == nil {
+		return pool, nil
+	}
+	return nil, err
 }
 
 // snapshotPoolParamsFields is the field count of the UTxO-HD snapshot pool
