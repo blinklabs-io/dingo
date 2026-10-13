@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -26,6 +27,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -287,4 +289,120 @@ func TestConnectionClosedDropsOnlyItsMismatchCount(t *testing.T) {
 
 	require.NotContains(t, fixture.ls.headerMismatchCounts, connIdKey(closedConn))
 	require.Equal(t, 3, fixture.ls.headerMismatchCounts[connIdKey(otherConn)])
+}
+
+// The blockfetch continuation and batch-done handler request a resync while
+// holding only chainsyncBlockfetchMutex, so the count map must not rely on
+// chainsyncMutex, which the header handler holds while it counts.
+func TestHeaderMismatchCountsSafeAgainstBlockfetchResync(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	forkConn := deadForkConnId(3002)
+	blockfetchConn := deadForkConnId(3003)
+	advertised := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100000, testHashBytes("far-tip")),
+		BlockNumber: 5000,
+	}
+	const rounds = 200
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			var pending pendingPublishes
+			fixture.ls.chainsyncBlockfetchMutex.Lock()
+			fixture.ls.requestChainsyncResync(
+				blockfetchConn, "blockfetch continuation", &pending)
+			fixture.ls.chainsyncBlockfetchMutex.Unlock()
+			pending.flush()
+		}
+	}()
+	for i := range rounds {
+		h := declinedMismatchHeader(fmt.Sprintf("race-%d", i), fixture.currentTip)
+		fixture.ls.chainsyncMutex.Lock()
+		err := fixture.ls.handleEventChainsyncBlockHeader(
+			deadForkEvent(forkConn, h, advertised))
+		fixture.ls.chainsyncMutex.Unlock()
+		require.NoError(t, err)
+	}
+	close(stop)
+	<-done
+}
+
+// An active-connection switch says nothing about another connection's
+// consecutive mismatches, so it must not reset them.
+func TestConnectionSwitchKeepsOtherConnectionMismatchCount(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	previous := fixture.connId
+	next := deadForkConnId(3003)
+	forkConn := deadForkConnId(3002)
+	fixture.ls.lastActiveConnId = &previous
+	fixture.ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &next
+	}
+	fixture.ls.headerMismatchCounts = map[string]int{
+		connIdKey(forkConn): headerMismatchResyncThreshold - 1,
+	}
+
+	fixture.ls.chainsyncMutex.Lock()
+	active, configured := fixture.ls.detectConnectionSwitch(nil)
+	fixture.ls.chainsyncMutex.Unlock()
+
+	require.True(t, configured)
+	require.NotNil(t, active)
+	require.True(t, sameConnectionId(*active, next))
+	require.Equal(t, headerMismatchResyncThreshold-1,
+		fixture.ls.headerMismatchCounts[connIdKey(forkConn)])
+}
+
+// An over-K fork resolution resyncs only the connection that delivered the
+// header, so only that connection's count is reset.
+func TestOverKForkResyncKeepsOtherConnectionMismatchCount(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	putPrimaryChainOnForkBeyondK(t, fixture, "over-k-per-conn")
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+	otherConn := deadForkConnId(3003)
+	fixture.ls.headerMismatchCounts = map[string]int{
+		connIdKey(fixture.connId): 3,
+		connIdKey(otherConn):      7,
+	}
+
+	localTip := fixture.ls.chain.Tip()
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(testHashBytes("over-k-per-conn-block")),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: localTip.BlockNumber + 1,
+		slot:        localTip.Point.Slot + 10,
+	}
+	err := fixture.ls.chain.AddBlockHeader(context.Background(), header)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+	point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
+	resolved, err := fixture.ls.tryResolveFork(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        point,
+			BlockHeader:  header,
+			Tip:          ochainsync.Tip{Point: point, BlockNumber: header.BlockNumber()},
+		},
+		notFitErr,
+		nil,
+		0,
+	)
+	require.NoError(t, err)
+	require.True(t, resolved)
+	require.NotContains(t, fixture.ls.headerMismatchCounts, connIdKey(fixture.connId))
+	require.Equal(t, 7, fixture.ls.headerMismatchCounts[connIdKey(otherConn)])
 }
