@@ -67,6 +67,7 @@ import (
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
+	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
@@ -325,6 +326,66 @@ func TestChainsyncConfigLimitOnPatienceDefaults(t *testing.T) {
 	assert.Equal(t, chainsync.PatienceConfig{Enabled: true},
 		n.chainsyncConfig().Patience,
 		"enabled by default; zero capacity and rate select package defaults")
+}
+
+func TestChainsyncConfigFitsConfiguredLocalRoots(t *testing.T) {
+	t.Parallel()
+	topologyConfig := &topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{
+			{
+				AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+					{Address: "relay-a.example.com", Port: 3001},
+					{Address: "relay-b.example.com", Port: 3001},
+				},
+			},
+			{
+				AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+					{Address: "relay-c.example.com", Port: 3001},
+					{Address: "relay-d.example.com", Port: 3001},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name             string
+		configured       int
+		expectedCapacity int
+	}{
+		{name: "default", expectedCapacity: 4},
+		{name: "lower explicit limit", configured: 2, expectedCapacity: 2},
+		{name: "higher explicit limit", configured: 6, expectedCapacity: 6},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			opts := []ConfigOptionFunc{WithTopologyConfig(topologyConfig)}
+			if test.configured != 0 {
+				opts = append(opts, WithChainsyncMaxClients(test.configured))
+			}
+			n := &Node{config: NewConfig(opts...)}
+			assert.Equal(t, test.expectedCapacity, n.chainsyncConfig().MaxClients)
+		})
+	}
+	for _, count := range []int{1, 2} {
+		n := &Node{config: NewConfig(WithTopologyConfig(&topology.TopologyConfig{
+			LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
+				AccessPoints: make([]topology.TopologyConfigP2PAccessPoint, count),
+			}},
+		}))}
+		assert.Equal(t, chainsync.DefaultMaxClients, n.chainsyncConfig().MaxClients)
+	}
+	mixed := &topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
+			AccessPoints: make([]topology.TopologyConfigP2PAccessPoint, 2),
+		}},
+		PublicRoots: []topology.TopologyConfigP2PPublicRoot{{
+			AccessPoints: make([]topology.TopologyConfigP2PAccessPoint, 2),
+		}},
+	}
+	assert.Equal(t, 4, (&Node{config: NewConfig(WithTopologyConfig(mixed))}).chainsyncConfig().MaxClients)
+	n := &Node{config: NewConfig()}
+	assert.Equal(t, chainsync.DefaultMaxClients, n.chainsyncConfig().MaxClients)
 }
 
 // TestLiveTruncateKeepsLimitOnPatience pins that the chainsync state rebuilt
@@ -3395,6 +3456,32 @@ func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 	active = config.GetActiveConnectionFunc()
 	n.liveLifecycleMu.Unlock()
 	assert.Nil(t, active)
+}
+
+func TestLedgerStateConfigReportsRetrySelectionUnavailableDuringLifecycle(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	n := &Node{
+		chainsyncState: chainsync.NewStateWithConfig(
+			nil,
+			nil,
+			chainsync.DefaultConfig(),
+		),
+		config: Config{cfg: &internalconfig.Config{}},
+	}
+	config := n.ledgerStateConfig()
+	n.liveLifecycleMu.Lock()
+	_, found, available := config.SelectBlockfetchRetryPeerFunc(
+		[]ouroboros.ConnectionId{newNodeTestConnId(3001)},
+		ocommon.NewPoint(100, []byte("header")),
+		5*time.Second,
+	)
+	n.liveLifecycleMu.Unlock()
+
+	assert.False(t, found)
+	assert.False(t, available)
 }
 
 // TestLedgerStateConfigForwardsBlockPipelineFlags is the second half of the

@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -38,6 +39,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -119,7 +121,7 @@ type Consumer interface {
 // Service is the domain-owned mempool capability consumed by node wiring,
 // networking, forging, ledger, and APIs.
 type Service interface {
-	AddTransaction(uint, []byte) error
+	AddTransaction(context.Context, uint, []byte) error
 	GetTransaction(string) (MempoolTransaction, bool)
 	Transactions() []MempoolTransaction
 	TransactionsBounded(
@@ -1061,34 +1063,67 @@ func (m *Mempool) processChainEvents(
 	defer func() {
 		m.eventBus.Unsubscribe(chain.ChainUpdateEventType, chainUpdateSubId)
 	}()
-	lastValidationTime := time.Now()
-	var ok bool
-	for {
-		select {
-		case _, ok = <-chainUpdateChan:
-			if !ok {
-				return
-			}
-		case <-m.done:
-			return
-		case <-ctx.Done():
-			return
-		}
-		// Only purge once every 30 seconds when there are more blocks available
-		if time.Since(lastValidationTime) < 30*time.Second &&
-			len(chainUpdateChan) > 0 {
-			continue
-		}
-		// Rebuild overlay: re-validate each pending TX in order against
-		// a fresh overlay, removing TXs that no longer validate. Log
-		// and continue on error — the next chain update will try
-		// again rather than crashing the node.
-		if err := m.rebuildOverlay(ctx); err != nil {
+	runChainUpdateWorker(
+		ctx,
+		m.done,
+		chainUpdateChan,
+		30*time.Second,
+		func() error {
+			return m.rebuildOverlay(ctx)
+		},
+		func(err error) {
 			m.logger.Error(
 				"mempool overlay rebuild failed",
 				"component", "mempool",
 				"error", err,
 			)
+		},
+	)
+}
+
+func runChainUpdateWorker(
+	ctx context.Context,
+	done <-chan struct{},
+	chainUpdateChan <-chan event.Event,
+	revalidationInterval time.Duration,
+	rebuild func() error,
+	onError func(error),
+) {
+	lastValidationTime := time.Now()
+	var retryTimer *time.Timer
+	var retryTimerChan <-chan time.Time
+	defer func() {
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
+	}()
+	for {
+		select {
+		case _, ok := <-chainUpdateChan:
+			if !ok {
+				return
+			}
+			if retryTimerChan != nil {
+				continue
+			}
+			// Preserve the queue-drain behavior on healthy rebuilds, while a
+			// failed rebuild is retried only after its cooldown expires.
+			if time.Since(lastValidationTime) < revalidationInterval &&
+				len(chainUpdateChan) > 0 {
+				continue
+			}
+		case <-retryTimerChan:
+			retryTimer = nil
+			retryTimerChan = nil
+		case <-done:
+			return
+		case <-ctx.Done():
+			return
+		}
+		if err := rebuild(); err != nil {
+			onError(err)
+			retryTimer = time.NewTimer(revalidationInterval)
+			retryTimerChan = retryTimer.C
 		}
 		lastValidationTime = time.Now()
 	}
@@ -1621,7 +1656,27 @@ func (m *Mempool) removeExpiredTransactions() {
 	}
 }
 
-func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
+func (m *Mempool) AddTransaction(
+	ctx context.Context,
+	txType uint,
+	txBytes []byte,
+) (err error) {
+	_, span := tracing.Start(ctx, "mempool.add_transaction")
+	defer func() {
+		result := "accepted"
+		switch {
+		case errors.Is(err, ErrNilValidator),
+			errors.Is(err, ErrMempoolStopped):
+			// Infrastructure faults, not verdicts on the transaction.
+			result = "unavailable"
+		case err != nil:
+			result = "rejected"
+		}
+		span.SetAttributes(
+			attribute.String("mempool.validation_result", result),
+		)
+		tracing.End(span, err)
+	}()
 	if m.validator == nil {
 		// Wrap the package sentinel rather than building a fresh error, so
 		// callers can classify this the same way they classify the other
@@ -1661,7 +1716,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	for attempt := 0; ; attempt++ {
 		var seen *utxoOverlay
 		addEvent, evictedEvents, seen, err = m.addTransactionAttempt(
-			context.Background(), txType, txBytes, tmpTx, txHash,
+			ctx, txType, txBytes, tmpTx, txHash,
 		)
 		if !errors.Is(err, ErrPendingStateMoved) {
 			break
@@ -1669,7 +1724,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		if attempt == maxAdmissionReconciles {
 			return fmt.Errorf("validate transaction: %w", ErrPendingStateMoved)
 		}
-		if err := m.reconcileOverlay(context.Background(), seen); err != nil {
+		if err := m.reconcileOverlay(ctx, seen); err != nil {
 			if errors.Is(err, errValidationSnapshotChanged) {
 				return fmt.Errorf(
 					"reconcile pending transactions: %w: %w",

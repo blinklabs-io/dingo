@@ -30,12 +30,14 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -315,6 +317,7 @@ func (o *Ouroboros) chainsyncServerConnOpts(
 
 func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
+		ochainsync.WithAwaitReplyFunc(o.chainsyncClientAwaitReply),
 		ochainsync.WithRollForwardRawFunc(
 			o.instrumentChainsyncRollForwardRaw(
 				o.chainsyncClientRollForwardRaw,
@@ -338,6 +341,41 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		ochainsync.WithIntersectTimeout(30 * time.Second),
 		ochainsync.WithBlockTimeout(o.config.ChainsyncBlockTimeout),
 	}
+}
+
+// chainsyncClientAwaitReply publishes the protocol's explicit idle proof after
+// gouroboros has fenced every preceding pipelined chain update.
+func (o *Ouroboros) chainsyncClientAwaitReply(
+	ctx ochainsync.CallbackContext,
+) error {
+	if o.chainsyncState == nil {
+		return nil
+	}
+	client := o.chainsyncState.GetTrackedClient(ctx.ConnectionId)
+	if client == nil {
+		return nil
+	}
+	o.chainsyncState.MarkClientSynced(ctx.ConnectionId)
+	if client.ObservabilityOnly ||
+		!o.shouldPublishChainsyncToLedger(ctx.ConnectionId) {
+		return nil
+	}
+	if o.config.ChainsyncObserveAwaitReply != nil {
+		o.config.ChainsyncObserveAwaitReply(ctx.ConnectionId, client.Cursor)
+	}
+	if o.eventBus == nil {
+		return nil
+	}
+	o.eventBus.Publish(
+		ledger.ChainsyncAwaitReplyEventType,
+		event.NewEvent(
+			ledger.ChainsyncAwaitReplyEventType,
+			ledger.ChainsyncAwaitReplyEvent{
+				ConnectionId: ctx.ConnectionId,
+			},
+		),
+	)
+	return nil
 }
 
 func normalizeIntersectPoints(points []ocommon.Point) []ocommon.Point {
@@ -1075,7 +1113,15 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	ctx ochainsync.CallbackContext,
 	point ocommon.Point,
 	tip ochainsync.Tip,
-) error {
+) (err error) {
+	_, span := tracing.Start(
+		context.Background(),
+		"chainsync.roll_backward",
+		attribute.String("connection.id", ctx.ConnectionId.String()),
+		tracing.Uint64("block.slot", point.Slot),
+		attribute.String("block.hash", hex.EncodeToString(point.Hash)),
+	)
+	defer func() { tracing.End(span, err) }()
 	if !o.reconcileChainsyncIngressAdmission(
 		ctx.ConnectionId,
 		o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
@@ -1180,11 +1226,19 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 	blockData any,
 	tip ochainsync.Tip,
 	arrivalTime time.Time,
-) error {
+) (err error) {
 	switch v := blockData.(type) {
 	case gledger.BlockHeader:
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
+		_, span := tracing.Start(
+			context.Background(),
+			"chainsync.roll_forward",
+			attribute.String("connection.id", ctx.ConnectionId.String()),
+			tracing.Uint64("block.slot", blockSlot),
+			attribute.String("block.hash", hex.EncodeToString(blockHash)),
+		)
+		defer func() { tracing.End(span, err) }()
 		point := ocommon.NewPoint(blockSlot, blockHash)
 		// Genesis Limit on Patience: the peer is charged up to the header's
 		// network arrival, not for this node's decoding, admission waits,
@@ -1349,6 +1403,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 							},
 						),
 					)
+					if o.chainsyncState != nil {
+						o.chainsyncState.SetClientObservabilityOnly(
+							ctx.ConnectionId,
+							true,
+						)
+					}
 					ingressEligible = false
 				}
 			}
@@ -1517,17 +1577,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			bytes.Equal(point.Hash, tip.Point.Hash) {
 			if o.chainsyncState != nil {
 				o.chainsyncState.MarkClientSynced(ctx.ConnectionId)
-			}
-			if ingressEligible && o.eventBus != nil {
-				o.eventBus.Publish(
-					ledger.ChainsyncAwaitReplyEventType,
-					event.NewEvent(
-						ledger.ChainsyncAwaitReplyEventType,
-						ledger.ChainsyncAwaitReplyEvent{
-							ConnectionId: ctx.ConnectionId,
-						},
-					),
-				)
 			}
 		}
 		// Update ChainSync performance metrics for peer scoring

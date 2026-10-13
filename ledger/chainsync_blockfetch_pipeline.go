@@ -227,6 +227,7 @@ func (ls *LedgerState) tryPromoteQueuedBlockfetchLocked() bool {
 		ls.chainsyncBlockfetchTimeoutTimer.Stop()
 		ls.chainsyncBlockfetchTimeoutTimer = nil
 	}
+	ls.activeBlockfetchTimeout = 0
 	ls.chainsyncBlockfetchTimerGeneration++
 	ls.chainsyncBlockfetchReadyMutex.Lock()
 	if ls.chainsyncBlockfetchReadyChan != nil {

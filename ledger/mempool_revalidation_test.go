@@ -178,8 +178,8 @@ func TestMempoolRevalidationKeepsDescendantOfConfirmedParent(t *testing.T) {
 					require.NoError(t, pool.Stop(ctx))
 				})
 				txType := uint(conway.EraIdConway)
-				require.NoError(t, pool.AddTransaction(txType, parentCbor))
-				require.NoError(t, pool.AddTransaction(txType, childCbor))
+				require.NoError(t, pool.AddTransaction(context.Background(), txType, parentCbor))
+				require.NoError(t, pool.AddTransaction(context.Background(), txType, childCbor))
 				require.Len(t, pool.Transactions(), 2)
 
 				if confirmParent {
