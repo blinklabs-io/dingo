@@ -41,6 +41,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/protocol"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
@@ -2368,6 +2369,17 @@ func TestValidateLeiosEndorserBlockForHeaderAcceptsForgedGenesisParent(
 		leiosStoreAuthoritative,
 	))
 
+	tipHash := make([]byte, lcommon.Blake2b256Size)
+	tipHash[0] = 1
+	setTestLedgerTip(t, o, ochainsync.Tip{
+		Point: ocommon.NewPoint(1, tipHash),
+	})
+	require.ErrorIs(
+		t,
+		o.ValidateLeiosEndorserBlockForHeader(t.Context(), header),
+		ledger.ErrLeiosValidationParentUnavailable,
+	)
+	setTestLedgerTip(t, o, ochainsync.Tip{})
 	require.NoError(t, o.ValidateLeiosEndorserBlockForHeader(t.Context(), header))
 	require.Equal(t, 1, validationLedger.txValidated)
 }
