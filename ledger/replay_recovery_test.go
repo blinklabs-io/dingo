@@ -2304,6 +2304,15 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	)
 }
 
+func TestReplayRecoveryHoldDoesNotAdvanceOriginToSlotZeroFloor(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, replayHoldUsesDurableFloor(
+		ocommon.NewPointOrigin(),
+		ocommon.NewPoint(0, testHashBytes("applied-slot-zero")),
+	))
+}
+
 // newReplayRecoveryAuditLedger builds the fallback topology with an
 // unresolved producer. When primaryAhead is false, the primary chain is
 // already below the ledger tip, matching the held-recovery path.

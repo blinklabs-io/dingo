@@ -10192,6 +10192,12 @@ func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, ocommon.NewPoint(0, genesisHash), *intersect)
+	abandonedIntersect, err := ls.GetIntersectPoint(
+		t.Context(),
+		[]ocommon.Point{ocommon.NewPoint(0, abandonedHash)},
+	)
+	require.NoError(t, err)
+	require.Nil(t, abandonedIntersect)
 
 	assert.True(t, ls.headerAlreadyOnPrimaryChain(
 		ChainsyncEvent{Point: ocommon.NewPoint(0, genesisHash)},
