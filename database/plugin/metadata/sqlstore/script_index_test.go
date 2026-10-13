@@ -385,6 +385,49 @@ func TestSetTransactionIndexesRedeemerScripts(t *testing.T) {
 	require.Equal(t, uint8(lcommon.RedeemerTagMint), refs[0].Tag)
 }
 
+// A spend redeemer's index points into the transaction's inputs sorted by
+// (transaction id, output index), not into their order in the body. A body may
+// list its inputs in any order.
+func TestSetTransactionIndexesRedeemerScriptsUsesSortedInputs(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+
+	scriptHash := lcommon.NewBlake2b224(bytes.Repeat([]byte{0x7a}, 28))
+	lockedTx := bytes.Repeat([]byte{0x53}, 32)
+	insertUtxoInTxn(t, store, &models.Utxo{
+		TxId: lockedTx, OutputIdx: 0, PaymentKey: scriptHash.Bytes(),
+		PaymentScript: true, AddedSlot: 1, Amount: 5,
+	}, true)
+	insertUtxoInTxn(t, store, &models.Utxo{
+		TxId: lockedTx, OutputIdx: 1,
+		PaymentKey: bytes.Repeat([]byte{0x7b}, 28), AddedSlot: 1, Amount: 5,
+	}, true)
+	lockedInput, err := mockledger.NewTransactionInputBuilder().
+		WithTxId(lockedTx).WithIndex(0).Build()
+	require.NoError(t, err)
+	keyInput, err := mockledger.NewTransactionInputBuilder().
+		WithTxId(lockedTx).WithIndex(1).Build()
+	require.NoError(t, err)
+
+	txn := store.Transaction(context.Background())
+	t.Cleanup(func() { _ = txn.Rollback() })
+
+	tx, point := redeemerTx(t, redeemerTxOptions{
+		seed:   0x62,
+		inputs: []lcommon.TransactionInput{keyInput, lockedInput},
+		redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+			{Tag: lcommon.RedeemerTagSpend, Index: 0}: redeemerValue(10),
+		},
+	})
+	require.NoError(t, store.SetTransaction(tx, point, 0, nil, true, txn, 0))
+
+	refs, err := store.GetScriptRedeemers(scriptHash, 0, 0, false, txn)
+	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	require.Equal(t, uint8(lcommon.RedeemerTagSpend), refs[0].Tag)
+	require.Equal(t, uint32(0), refs[0].Index)
+}
+
 func TestGetScriptRedeemersOrdersByChainPosition(t *testing.T) {
 	t.Parallel()
 	store, db := newManagementTestStoreWithRawDB(t)

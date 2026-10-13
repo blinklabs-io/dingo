@@ -41,7 +41,9 @@ func (s *Store) redeemerScriptHashes(
 	if witnesses == nil || witnesses.Redeemers() == nil {
 		return nil, nil
 	}
-	inputs := transaction.Inputs()
+	// A spend redeemer indexes the inputs in ledger set order, which a body
+	// need not list them in.
+	inputs := gscript.SortInputs(transaction.Inputs())
 	var mint lcommon.MultiAsset[lcommon.MultiAssetTypeMint]
 	if assetMint := transaction.AssetMint(); assetMint != nil {
 		mint = *assetMint

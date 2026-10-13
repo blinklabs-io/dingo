@@ -5220,6 +5220,9 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 		mint = *decodedTx.AssetMint()
 	}
 
+	// A spend redeemer indexes the inputs in ledger set order, which a body
+	// need not list them in.
+	spendInputs := gscript.SortInputs(decodedTx.Inputs())
 	for _, redeemer := range tx.Redeemers {
 		key := lcommon.RedeemerKey{
 			Tag:   lcommon.RedeemerTag(redeemer.Tag),
@@ -5228,7 +5231,7 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 		purpose, err := gscript.BuildScriptPurpose(
 			key,
 			resolvedInputs,
-			decodedTx.Inputs(),
+			spendInputs,
 			mint,
 			decodedTx.Certificates(),
 			decodedTx.Withdrawals(),

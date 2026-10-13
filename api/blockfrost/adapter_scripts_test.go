@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/plutigo/data"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -445,4 +446,56 @@ func TestNodeAdapterScriptUTXOs(t *testing.T) {
 		PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
 	)
 	require.ErrorIs(t, err, ErrScriptNotFound)
+}
+
+// A spend redeemer's index points into the transaction's inputs sorted by
+// (transaction id, output index), not into their order in the body.
+func TestTransactionRedeemerMetadataUsesSortedInputs(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	scriptHash := bytes.Repeat([]byte{0x9a}, lcommon.AddressHashSize)
+	scriptAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptNone,
+		lcommon.AddressNetworkTestnet,
+		scriptHash,
+		nil,
+	)
+	require.NoError(t, err)
+	keyAddr, _, _ := testKeyAddress(t, 0x9b, 0)
+	spent := fill32(0x9c)
+	storePointerOutputCbor(t, db, spent, 0, scriptAddr, 1_000_000)
+	storePointerOutputCbor(t, db, spent, 1, keyAddr, 1_000_000)
+
+	scriptInput, err := mockledger.NewTransactionInputBuilder().
+		WithTxId(spent).WithIndex(0).Build()
+	require.NoError(t, err)
+	keyInput, err := mockledger.NewTransactionInputBuilder().
+		WithTxId(spent).WithIndex(1).Build()
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(keyAddr.String()).WithLovelace(1_000_000).Build()
+	require.NoError(t, err)
+	decoded, err := mockledger.NewTransactionBuilder().
+		WithId(fill32(0x9d)).
+		WithInputs(keyInput, scriptInput).
+		WithOutputs(output).
+		Build()
+	require.NoError(t, err)
+	row := &models.Transaction{
+		Inputs: []models.Utxo{
+			{TxId: spent, OutputIdx: 1},
+			{TxId: spent, OutputIdx: 0},
+		},
+		Redeemers: []models.Redeemer{
+			{Tag: uint8(lcommon.RedeemerTagSpend), Index: 0},
+		},
+	}
+
+	metadata, err := adapter.transactionRedeemerMetadata(
+		fill32(0x9d), row, decoded, lcommon.ProtocolVersionConway,
+	)
+	require.NoError(t, err)
+	key := lcommon.RedeemerKey{Tag: lcommon.RedeemerTagSpend, Index: 0}
+	require.Contains(t, metadata, key)
+	require.Equal(t, hex.EncodeToString(scriptHash), metadata[key].ScriptHash)
 }
