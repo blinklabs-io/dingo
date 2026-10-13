@@ -2315,7 +2315,11 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 // limit; if the oldest of those headers were evicted, clearing the queue would
 // leave in-flight headers whose ancestry walk can no longer reach the local
 // tip, and the honest connection would be resynced. The byte budgets still
-// bound the total retained, and MaxQueuedHeaders bounds the count.
+// bound the total retained, and MaxQueuedHeaders bounds the count: fork
+// recovery re-queues the whole path from the local tip, so while a peer
+// extends one chain, a header older than its newest MaxQueuedHeaders records
+// lies only on paths the queue cannot hold. That includes the header a full
+// queue rejects after it was recorded here.
 func (ls *LedgerState) oldestPeerHeaderUnapplied(
 	history *peerHeaderChain,
 ) bool {
