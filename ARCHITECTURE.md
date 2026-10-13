@@ -5436,14 +5436,24 @@ an incomplete path.
 **Per-peer candidate chain fragments** (`chainselection.CandidateFragment`)
 materialize each peer's delivered-header history as a first-class value —
 Dingo's analogue of the upstream consensus interface
-`readCandidateChains :: STM m (Map peer (AnchoredFragment header))`. This is a
-separate structure from the density frontier above (`observedSlots`/
-`observedPoints`, bounded to the Genesis window): each tracked peer's
-`PeerChainTip` also records one delivered point per header
-(`recordObservedTipHistory`), bounded to `k+1` entries — enough that any valid
-rollback within `k` is representable — and trimmed on rollback
-(`PeerChainTip.ApplyRollback`); `CandidateFragment` snapshots that history into
-an independently owned, ordered value with an explicit `Anchor` (its oldest
+`readCandidateChains :: STM m (Map peer (AnchoredFragment header))`. It
+snapshots the hash-bearing density frontier (`observedPoints`) instead of
+duplicating every hash in another long-lived history. In Genesis mode that
+frontier has capacity for a full Genesis window plus `k+1` headers, so an
+intersection and a rival offering more than `k` later headers can coexist. Its
+entry count per peer is bounded by `GenesisWindowSlots + k + 1`, and
+`maxTrackedPeers` bounds the aggregate. A separate `observedTipHistory` stays
+bounded to `k+1` entries for rollback restoration and is trimmed on rollback
+(`PeerChainTip.ApplyRollback`). Outside Genesis hash-frontier tracking is
+disabled and fragments snapshot that short rollback history instead.
+Each frontier stores its first block number; consecutive block heights align
+two chains for a binary search of their last equal point. A height gap starts a
+new frontier, leaving the comparison undecidable until continuity is rebuilt.
+Window density and suffix counts use binary searches over ordered slots, so a
+density pass is logarithmic in retained points per peer pair while holding the
+selector lock.
+`CandidateFragment` copies the applicable frontier into an independently
+owned, ordered value with an explicit `Anchor` (its oldest
 retained point, which — per the upstream contract — need not intersect the
 primary chain or any other peer's fragment) and a `HeadPoint`. `ChainSelector`
 exposes the current set with `CandidateFragments()` (all tracked peers) and
@@ -5473,18 +5483,18 @@ once per `GenesisDensityEvaluationInterval` (one second, as upstream's
 of tracked peers. For each ordered pair of live, eligible, non-stale
 candidates it takes the `CandidateFragment.Intersect` of the two fragments and
 counts blocks in `(intersection, intersection + window]`, where the window is
-the Genesis window (`3k/f`). Peer B is disconnected when B's head has reached
-the window end, so its window is complete, and the blocks peer A has delivered
-in that window exceed B's. Upstream `densityDisconnect`
+the Genesis window (`3k/f`). Upstream `densityDisconnect`
 (ouroboros-consensus `Ouroboros/Consensus/Genesis/Governor.hs`) guards on
 `offersMoreThanK || lb0 == ub0`, so it disconnects a peer with an incomplete
-window only for a rival offering more than k headers after the intersection; fragments retain at most k+1 headers and the intersection must
-lie in both, so no rival here can offer that, and a peer whose window is
-incomplete is never disconnected. A peer that has delivered up to its
-advertised tip is incomplete, not complete: that tip can still advance, so an
-honest peer at its own tip on a short fork is kept. The dominating peer
-contributes at most k blocks, so a sparse peer with k or more blocks in its
-window is not detected.
+window only for a rival offering more than `k` headers after the intersection.
+Otherwise the peer's window must be complete. The rival must meet or exceed
+the peer's upper density bound; for an idling peer that has sent
+`MsgAwaitReply`, its delivered density is the bound because it has no pending
+headers. The selector records that state only from gouroboros's ordered
+`AwaitReplyFunc` callback, which passes the delivered frontier synchronously
+after fencing earlier pipelined updates. Retaining the full fragment makes the
+`offersMoreThanK` branch observable instead of reducing every comparison to
+the complete-window case.
 Pairs with no shared point in the retained fragments, and pairs
 where either peer is a prefix of the other (a peer that is only behind), are
 not decidable and never trigger a disconnect. A peer is reported once, and
