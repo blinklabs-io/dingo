@@ -2202,6 +2202,9 @@ func (n *Node) buildChainSelectorConfig(
 			if ls == nil {
 				return 0, false
 			}
+			if ls.IsByronEra() {
+				return 0, false
+			}
 			slot, err := ls.CurrentSlot()
 			return slot, err == nil
 		},

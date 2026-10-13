@@ -12923,6 +12923,11 @@ func (ls *LedgerState) CurrentEpoch() uint64 {
 	return ls.loadConsensusSnapshot().currentEpoch.EpochId
 }
 
+// IsByronEra reports whether the applied ledger is still in the Byron era.
+func (ls *LedgerState) IsByronEra() bool {
+	return ls.loadConsensusSnapshot().currentEra.Id == eras.ByronEraDesc.Id
+}
+
 // ConsensusModeForEpoch returns the Praos consensus variant that
 // governs leader eligibility for the given epoch. Shelley/Allegra/
 // Mary/Alonzo run TPraos; Babbage/Conway run CPraos. Anything else

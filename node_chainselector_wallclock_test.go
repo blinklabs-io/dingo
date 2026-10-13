@@ -36,6 +36,27 @@ func TestBuildChainSelectorConfigWallClockSlot(t *testing.T) {
 	assert.Zero(t, slot)
 }
 
+func TestBuildChainSelectorConfigWallClockSlotUnavailableInByron(
+	t *testing.T,
+) {
+	t.Parallel()
+	cardanoNodeCfg := newNodeTestCardanoNodeCfg(t)
+	shelleyEpoch := uint64(100)
+	cardanoNodeCfg.TestShelleyHardForkAtEpoch = &shelleyEpoch
+	n, _ := newLiveLifecycleTestNodeWithGenesis(
+		t,
+		4,
+		cardanoNodeCfg,
+		disabledLiveLifecycleTestWorkerPoolCfg,
+	)
+	require.True(t, n.ledgerState.IsByronEra(), "fixture must remain in Byron")
+
+	cfg := n.buildChainSelectorConfig(2160, true, 0)
+	slot, ok := cfg.WallClockSlot()
+	assert.False(t, ok)
+	assert.Zero(t, slot)
+}
+
 func TestCleanupFailedStartupWithdrawsWallClockLedgerBeforeClose(
 	t *testing.T,
 ) {

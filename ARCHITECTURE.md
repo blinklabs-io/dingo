@@ -5461,10 +5461,9 @@ cleanup closes the ledger; the rule is inactive while that hook is unset or repo
 slot, and outside Genesis mode. It deliberately uses the extrapolated
 `CurrentSlot` rather than `WallClockSlotFromConfirmedHistory`: during catch-up
 the wall clock lies past the confirmed history's forecast horizon, which is
-exactly when the rule is needed. Slot lengths only shorten across eras, so
-while the ledger is still in Byron the extrapolated slot under-reports the true
-one. That lowers the cutoff: the rule can miss a dead fork there, but any peer
-it excludes is stale by the true wall clock as well. The trade-off is that if
+exactly when the rule is needed. The hook reports no slot while the applied
+ledger is still in Byron, so the Genesis stale-tip rule becomes active only
+after the applied ledger crosses into Shelley. The trade-off is that if
 the honest network stalls for longer than one Genesis window, a syncing
 Genesis-mode node waits rather than following a chain that old; a stall that
 long already violates the chain-growth assumption Genesis selection rests on.
