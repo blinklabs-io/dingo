@@ -15,6 +15,7 @@
 package chainselection
 
 import (
+	"sort"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -40,8 +41,9 @@ type GenesisDensityDisconnect struct {
 	// DominatingDensity is the blocks the dominating peer has delivered in
 	// the window.
 	DominatingDensity uint64
-	// MaxDensity is the blocks ConnectionId has in the window. Its head has
-	// reached the window end, so this is also the most it can ever have.
+	// MaxDensity is the density bound ConnectionId was compared against. For
+	// an idling peer this is its delivered density; otherwise it includes all
+	// still-possible slots through the window end.
 	MaxDensity uint64
 }
 
@@ -50,23 +52,21 @@ type GenesisDensityDisconnect struct {
 // bound is what it has delivered. The upper bound adds every slot between its
 // head and windowEnd unless the head already reached windowEnd.
 //
-// A peer that has delivered up to its advertised tip still gets the trailing
-// slots: its tip can move forward, so an honest peer sitting at its own tip on
-// a short fork is not complete. ouroboros-consensus densityDisconnect only
-// disconnects such a peer for a rival offering more than k blocks after the
-// anchor, which a k+1 header fragment that still holds the intersection can
-// never show.
+// A peer that has not sent MsgAwaitReply still gets the trailing slots: its tip
+// can move forward, so advertised-tip equality alone does not make it idle.
 func fragmentWindowBounds(
 	points []ocommon.Point,
 	after uint64,
 	windowEnd uint64,
 ) (uint64, uint64) {
-	var lower uint64
-	for _, p := range points {
-		if p.Slot > after && p.Slot <= windowEnd {
-			lower++
-		}
-	}
+	first := sort.Search(len(points), func(i int) bool {
+		return points[i].Slot > after
+	})
+	pastWindow := sort.Search(len(points), func(i int) bool {
+		return points[i].Slot > windowEnd
+	})
+	// #nosec G115 -- both indexes are within points and pastWindow >= first.
+	lower := uint64(pastWindow - first)
 	head := points[len(points)-1].Slot
 	if head >= windowEnd {
 		return lower, lower
@@ -79,13 +79,12 @@ func fragmentWindowBounds(
 // GenesisDensityEvaluationInterval, and marks them so they are reported once.
 //
 // For each pair of eligible candidates that fork from a common intersection I,
-// peer B is provably sparser than peer A when B's head has reached I+window
-// and the blocks A has delivered in (I, I+window] exceed B's. Candidates that
-// do not intersect within their retained fragments, pairs where either peer
-// is a prefix of the other (a peer that is merely behind), and peers whose
-// window is incomplete are undecidable and never disconnected. A peer is only
-// disconnected for a rival that is itself still a candidate, so the last
-// remaining peer is never disconnected.
+// peer B is provably sparser than peer A when A meets B's density bound and
+// either B's window is complete or A offers more than k headers after I. An
+// explicit MsgAwaitReply lowers B's bound to its delivered density. Candidates
+// that do not intersect within their retained fragments and prefix pairs are
+// undecidable. A peer is only disconnected for a rival that is itself still a
+// candidate, so the last remaining peer is never disconnected.
 //
 // Callers must hold cs.mutex.
 func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisconnect {
@@ -107,9 +106,10 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 
 	window := cs.genesisWindowSlotsLocked()
 	type candidate struct {
-		connId   ouroboros.ConnectionId
-		fragment CandidateFragment
-		points   []ocommon.Point
+		connId    ouroboros.ConnectionId
+		points    []ocommon.Point
+		baseBlock uint64
+		idling    bool
 	}
 	candidates := make([]candidate, 0, len(cs.peerTips))
 	for connId, peerTip := range cs.peerTips {
@@ -117,14 +117,14 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 			!cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
-		fragment := candidateFragmentFromHistory(peerTip.observedTipHistory)
-		if fragment.Len() == 0 {
+		if len(peerTip.observedPoints) == 0 {
 			continue
 		}
 		candidates = append(candidates, candidate{
-			connId:   connId,
-			fragment: fragment,
-			points:   fragment.Points(),
+			connId:    connId,
+			points:    peerTip.observedPoints,
+			baseBlock: peerTip.observedPointBaseBlock,
+			idling:    peerTip.isIdling(),
 		})
 	}
 
@@ -139,10 +139,15 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 			if _, done := cs.genesisDensityDisconnected[a.connId]; done {
 				continue
 			}
-			intersection, ok := a.fragment.Intersect(b.fragment)
+			intersection, ok := intersectPointFrontiers(
+				a.points,
+				a.baseBlock,
+				b.points,
+				b.baseBlock,
+			)
 			if !ok ||
-				intersection.Slot == a.fragment.HeadPoint().Slot ||
-				intersection.Slot == b.fragment.HeadPoint().Slot {
+				intersection.Slot == a.points[len(a.points)-1].Slot ||
+				intersection.Slot == b.points[len(b.points)-1].Slot {
 				continue
 			}
 			windowEnd := safeAddUint64(intersection.Slot, window)
@@ -152,16 +157,20 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 			minDensity, maxDensity := fragmentWindowBounds(
 				b.points, intersection.Slot, windowEnd,
 			)
-			// ouroboros-consensus densityDisconnect lets a peer whose window
-			// is incomplete lose only to a rival offering more than k headers
-			// after the intersection, so honest peers on a short fork near
-			// the tip are kept. A retained fragment holds at most k+1 headers
-			// including the intersection, so no rival here can offer more
-			// than k and only a complete window is decidable.
-			if minDensity != maxDensity {
+			rivalStart := sort.Search(len(a.points), func(i int) bool {
+				return a.points[i].Slot > intersection.Slot
+			})
+			// #nosec G115 -- rivalStart is an index within a.points.
+			rivalBlocks := uint64(len(a.points) - rivalStart)
+			offersMoreThanK := rivalBlocks > cs.securityParam
+			if !offersMoreThanK && minDensity != maxDensity {
 				continue
 			}
-			if dominating <= maxDensity {
+			comparisonBound := maxDensity
+			if b.idling {
+				comparisonBound = minDensity
+			}
+			if dominating < comparisonBound {
 				continue
 			}
 			// Mark now rather than after the pass: density is compared at
@@ -180,7 +189,7 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 				Intersection:           intersection,
 				WindowSlots:            window,
 				DominatingDensity:      dominating,
-				MaxDensity:             maxDensity,
+				MaxDensity:             comparisonBound,
 			})
 			break
 		}

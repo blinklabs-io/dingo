@@ -611,6 +611,51 @@ func TestChainsyncBacklogBoundsConcurrentPeerPublishers(t *testing.T) {
 	}
 }
 
+func TestChainsyncAwaitReplyPublishesDeliveredFrontier(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, awaitCh := bus.Subscribe(ledger.ChainsyncAwaitReplyEventType)
+	state := dchainsync.NewState(bus, nil)
+	connId := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	require.True(t, state.AddClientConnId(connId))
+	point := ocommon.NewPoint(123, []byte("delivered"))
+	require.True(t, state.UpdateClientTipWithoutDedup(
+		connId,
+		point,
+		ochainsync.Tip{Point: point, BlockNumber: 10},
+	))
+
+	var observedPoint ocommon.Point
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncObserveAwaitReply: func(
+			_ ouroboros.ConnectionId,
+			point ocommon.Point,
+		) {
+			observedPoint = point
+		},
+	})
+	o.chainsyncState = state
+	cfg := ochainsync.NewConfig(o.chainsyncClientConnOpts()...)
+	require.NotNil(t, cfg.AwaitReplyFunc)
+	require.NoError(t, cfg.AwaitReplyFunc(ochainsync.CallbackContext{
+		ConnectionId: connId,
+	}))
+	assert.Equal(t, point, observedPoint)
+
+	evt := testutil.RequireReceive(
+		t,
+		awaitCh,
+		time.Second,
+		"AwaitReply callback should publish the delivered frontier",
+	)
+	data, ok := evt.Data.(ledger.ChainsyncAwaitReplyEvent)
+	require.True(t, ok)
+	assert.Equal(t, connId, data.ConnectionId)
+}
+
 func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
 	t.Parallel()
 

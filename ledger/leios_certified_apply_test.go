@@ -175,6 +175,7 @@ func (f *leiosCertApplyFixture) block(
 			AggregatedSignature: make([]byte, 48),
 		}
 	}
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
 	bodyCbor, err := block.BlockBody.MarshalCBOR()
 	require.NoError(t, err)
 	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
