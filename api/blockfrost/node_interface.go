@@ -25,6 +25,7 @@ import (
 // and enables testing with mock implementations.
 type BlockfrostNode interface {
 	BlockQueryNode
+	AddressQueryNode
 
 	// ChainTip returns the current chain tip info.
 	ChainTip() (ChainTipInfo, error)

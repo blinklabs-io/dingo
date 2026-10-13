@@ -3356,12 +3356,19 @@ func (a *NodeAdapter) exactAddressBalance(
 func (a *NodeAdapter) Address(
 	address string,
 ) (AddressInfo, error) {
+	return a.addressSummary(context.Background(), address)
+}
+
+// parseQueryAddress parses an address or bare payment credential for an
+// address query and rejects one encoded for another network. ErrInvalidAddress
+// drives the HTTP 400 mapping (errors.Is in the handler); the parse error is
+// kept alongside it so logs retain the reason.
+func (a *NodeAdapter) parseQueryAddress(
+	address string,
+) (lcommon.Address, bool, error) {
 	addr, isPaymentCred, err := parseAddressOrPaymentCred(address)
 	if err != nil {
-		// ErrInvalidAddress drives the HTTP 400 mapping
-		// (errors.Is in the handler); the parse error is kept
-		// alongside it so logs retain the reason.
-		return AddressInfo{}, fmt.Errorf(
+		return lcommon.Address{}, false, fmt.Errorf(
 			"parse address %q: %w: %w",
 			address,
 			ErrInvalidAddress,
@@ -3373,17 +3380,28 @@ func (a *NodeAdapter) Address(
 	// this check a foreign-network address would return this network's
 	// balances. Bare payment credentials carry no network id.
 	if !isPaymentCred && addr.NetworkId() != uint(a.networkID()) {
-		return AddressInfo{}, fmt.Errorf(
+		return lcommon.Address{}, false, fmt.Errorf(
 			"address %q network mismatch: %w",
 			address,
 			ErrInvalidAddress,
 		)
 	}
+	return addr, isPaymentCred, nil
+}
+
+func (a *NodeAdapter) addressSummary(
+	ctx context.Context,
+	address string,
+) (AddressInfo, error) {
+	addr, isPaymentCred, err := a.parseQueryAddress(address)
+	if err != nil {
+		return AddressInfo{}, err
+	}
 
 	// Read every query from one snapshot so a block committed
 	// mid-request cannot mix two chain states in the response.
 	db := a.ledgerState.Database()
-	txn := db.Transaction(context.Background(), false)
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 
 	// Full addresses use exact matching so UTxOs at other address
@@ -3418,13 +3436,13 @@ func (a *NodeAdapter) Address(
 			// address carrying the payment credential.
 			var txCount int
 			txCount, err = db.CountTransactionsByPaymentCred(
-				context.Background(),
+				ctx,
 				addr.PaymentKeyHash().Bytes(),
 				txn,
 			)
 			hasTransactions = txCount > 0
 		} else {
-			hasTransactions, err = db.HasTransactionsByAddress(context.Background(), addr, txn)
+			hasTransactions, err = db.HasTransactionsByAddress(ctx, addr, txn)
 		}
 		if err != nil {
 			return AddressInfo{}, fmt.Errorf(
@@ -3491,6 +3509,20 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 	address string,
 	params PaginationParams,
 ) ([]AddressUTXOInfo, int, error) {
+	return a.addressUTXOs(ctx, address, params, nil)
+}
+
+// assetFilter restricts a UTxO listing to outputs holding one asset.
+type assetFilter struct {
+	policyID  []byte
+	assetName []byte
+}
+
+func (a *NodeAdapter) addressUTXOs(ctx context.Context,
+	address string,
+	params PaginationParams,
+	filter *assetFilter,
+) ([]AddressUTXOInfo, int, error) {
 	addr, err := lcommon.NewAddress(address)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3518,14 +3550,16 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 	// references (no assets, no full rows) for that pass, and materialize
 	// full UTxO data via UtxosByRefs for just the requested page, instead
 	// of loading the address's entire UTxO history in full.
+	query := &models.UtxoWithOrderingQuery{
+		AddressPatterns: []models.UtxoAddressPattern{pattern},
+	}
+	if filter != nil {
+		query.FilterByAsset = true
+		query.AssetPolicyID = filter.policyID
+		query.AssetName = filter.assetName
+	}
 	refs, err := a.ledgerState.Database().
-		MatchingUtxoRefsByAddressWithOrdering(
-			ctx,
-			&models.UtxoWithOrderingQuery{
-				AddressPatterns: []models.UtxoAddressPattern{pattern},
-			},
-			txn,
-		)
+		MatchingUtxoRefsByAddressWithOrdering(ctx, query, txn)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get address UTxOs for %q: %w",

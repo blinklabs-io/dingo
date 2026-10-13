@@ -31,3 +31,28 @@ type BlockAddressResponse struct {
 	Address      string                            `json:"address"`
 	Transactions []BlockAddressTransactionResponse `json:"transactions"`
 }
+
+// AddressExtendedAmountResponse is one balance entry of an extended address.
+type AddressExtendedAmountResponse struct {
+	Unit                  string `json:"unit"`
+	Quantity              string `json:"quantity"`
+	Decimals              *int   `json:"decimals"`
+	HasNFTOnchainMetadata bool   `json:"has_nft_onchain_metadata"`
+}
+
+// AddressExtendedResponse represents a Blockfrost extended address object.
+type AddressExtendedResponse struct {
+	Address      string                          `json:"address"`
+	Amount       []AddressExtendedAmountResponse `json:"amount"`
+	StakeAddress *string                         `json:"stake_address"`
+	Type         string                          `json:"type"`
+	Script       bool                            `json:"script"`
+}
+
+// AddressTotalResponse represents the Blockfrost address totals object.
+type AddressTotalResponse struct {
+	Address     string                  `json:"address"`
+	ReceivedSum []AddressAmountResponse `json:"received_sum"`
+	SentSum     []AddressAmountResponse `json:"sent_sum"`
+	TxCount     int                     `json:"tx_count"`
+}

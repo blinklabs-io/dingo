@@ -175,6 +175,22 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleAddressTransactions,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/txs",
+		b.handleAddressTransactionHashes,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/extended",
+		b.handleAddressExtended,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/total",
+		b.handleAddressTotal,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/utxos/{asset}",
+		b.handleAddressAssetUTXOs,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/metadata/txs/labels/{label}",
 		b.handleMetadataTransactions,
 	)
