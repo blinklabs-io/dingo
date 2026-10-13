@@ -51,15 +51,15 @@ type AssetMintBurn struct {
 	TxIndex     uint32
 }
 
-// ConvertMintToAssetMintBurnModels converts a transaction's mint field into a
-// slice of AssetMintBurn models, one per (policy, asset name) pair with a
-// non-zero net quantity. Returns nil when there is nothing minted or burned.
 // MintedAsset identifies an asset with a recorded mint or burn event.
 type MintedAsset struct {
 	PolicyId []byte
 	Name     []byte
 }
 
+// ConvertMintToAssetMintBurnModels converts a transaction's mint field into a
+// slice of AssetMintBurn models, one per (policy, asset name) pair with a
+// non-zero net quantity. Returns nil when there is nothing minted or burned.
 func ConvertMintToAssetMintBurnModels(
 	mint *lcommon.MultiAsset[lcommon.MultiAssetTypeMint],
 	txHash []byte,
