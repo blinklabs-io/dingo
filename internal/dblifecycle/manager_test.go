@@ -622,10 +622,8 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 	const startupProbeName = "epoch-startup-probe"
 	startupProbeDir := filepath.Join(snapshotDir, startupProbeName)
 	require.NoError(t, os.Mkdir(startupProbeDir, 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(startupProbeDir, "probe"), []byte("probe"), 0o600,
-	))
 	writeManagerTestManifest(t, startupProbeDir)
+	require.NoError(t, lifecycle.EnsureSnapshotCatalog(snapshotDir))
 
 	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
 		SnapshotEnabled:          true,
@@ -691,6 +689,17 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 	require.NoDirExists(t, filepath.Join(cloudPrefixDir, "epoch-1"))
 	require.DirExists(t, filepath.Join(cloudPrefixDir, "epoch-2"))
 	require.DirExists(t, filepath.Join(cloudPrefixDir, "epoch-3"))
+	available, _, err := lifecycle.ListAvailableSnapshotPageContext(
+		t.Context(), snapshotDir, cloudDest, 10, nil,
+	)
+	require.NoError(t, err)
+	ids := make([]string, 0, len(available))
+	for _, entry := range available {
+		ids = append(ids, entry.Entry.ID)
+	}
+	require.ElementsMatch(
+		t, []string{startupProbeName, "epoch-2", "epoch-3"}, ids,
+	)
 }
 
 // failingCloudDestination always fails UploadDir, simulating a cloud
@@ -1200,9 +1209,6 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 	const startupProbeName = "epoch-startup-probe"
 	startupProbeDir := filepath.Join(snapshotDir, startupProbeName)
 	require.NoError(t, os.Mkdir(startupProbeDir, 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(startupProbeDir, "probe"), []byte("probe"), 0o600,
-	))
 	writeManagerTestManifest(t, startupProbeDir)
 	// The probe's own upload must not consume flakyCloudFailed's one
 	// simulated failure -- pre-mark it "already failed" so the probe's
@@ -1364,9 +1370,6 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 	const startupProbeName = "epoch-startup-probe"
 	startupProbeDir := filepath.Join(snapshotDir, startupProbeName)
 	require.NoError(t, os.Mkdir(startupProbeDir, 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(startupProbeDir, "probe"), []byte("probe"), 0o600,
-	))
 	writeManagerTestManifest(t, startupProbeDir)
 	flakyCloud2Mu.Lock()
 	flakyCloud2Failed = true
@@ -1757,17 +1760,37 @@ func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(
 	cloudBackingDir := t.TempDir()
 	setManagerFakeCloudBackingDir(t, cloudBackingDir)
 	const baseCloudDest = "managerfaketest://bucket/shared-prefix"
+	const nodePrefix = "node-a"
+	effectiveCloudDest := lifecycle.EffectiveCloudDestination(
+		baseCloudDest, nodePrefix,
+	)
+	require.NoError(t, lifecycle.EnsureSnapshotCatalog(snapshotDir))
+	manualSourceDir := filepath.Join(t.TempDir(), "manual-source")
+	manualCfg := testConfig(manualSourceDir)
+	manualCfg.DatabaseLifecycle.SnapshotCloudDestination = baseCloudDest
+	manualCfg.DatabaseLifecycle.SnapshotCloudDestinationPrefix = nodePrefix
+	manualCfg.DatabaseLifecycle.SnapshotTrustKeyFile = testSnapshotTrustKeyFile(t)
+	manualSvc := dblifecycle.NewService(
+		manualCfg, testDestinationRegistry, nil,
+	)
+	manualDB, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: manualSourceDir},
+	)
+	require.NoError(t, err)
+	require.NoError(t, dbtest.CloseDatabase(manualDB))
+	manualDir := filepath.Join(snapshotDir, "manual")
+	_, err = manualSvc.Snapshot(t.Context(), manualDir, "", "")
+	require.NoError(t, err)
 
 	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
 		SnapshotEnabled:                true,
 		SnapshotDir:                    snapshotDir,
 		SnapshotEveryNEpochs:           1,
 		SnapshotCloudDestination:       baseCloudDest,
-		SnapshotCloudDestinationPrefix: "node-a",
+		SnapshotCloudDestinationPrefix: nodePrefix,
 		SnapshotTrustKeyFile:           testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
-	defer m.Stop()
 
 	publishEpochTransition(eb, 5)
 
@@ -1792,6 +1815,21 @@ func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(
 		filepath.Join(cloudBackingDir, "shared-prefix", "epoch-5"),
 		"must not upload directly under the shared base destination, bypassing the per-node prefix",
 	)
+	m.Stop()
+	require.NoError(t, lifecycle.RemoveSnapshotContext(t.Context(), manualDir))
+	require.NoError(t, lifecycle.RemoveSnapshotContext(
+		t.Context(), filepath.Join(snapshotDir, "epoch-5"),
+	))
+	available, _, err := lifecycle.ListAvailableSnapshotPageContext(
+		t.Context(), snapshotDir, effectiveCloudDest, 10, nil,
+	)
+	require.NoError(t, err)
+	ids := make([]string, 0, len(available))
+	for _, entry := range available {
+		require.Contains(t, entry.Location, "://")
+		ids = append(ids, entry.Entry.ID)
+	}
+	require.ElementsMatch(t, []string{"manual", "epoch-5"}, ids)
 }
 
 func TestManagerRejectsUnsafeCloudDestinationPrefix(t *testing.T) {
@@ -1847,7 +1885,7 @@ func TestManagerWarnsWhenCloudDestinationConfiguredWithoutPrefix(t *testing.T) {
 		SnapshotEnabled:          true,
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
-		SnapshotCloudDestination: "managerfaketest://bucket/prefix",
+		SnapshotCloudDestination: "managerfaketest://user:secret@bucket/prefix?token=private#fragment",
 		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
@@ -1859,6 +1897,9 @@ func TestManagerWarnsWhenCloudDestinationConfiguredWithoutPrefix(t *testing.T) {
 		"snapshotCloudDestinationPrefix",
 		"must warn when a cloud destination is configured without a distinguishing per-node prefix",
 	)
+	for _, secret := range []string{"user", "secret", "private", "fragment"} {
+		require.NotContains(t, logBuf.String(), secret)
+	}
 }
 
 // TestManagerDoesNotWarnWhenCloudDestinationPrefixIsSet is the negative
@@ -1906,13 +1947,15 @@ func TestManagerDoesNotWarnWhenCloudDestinationPrefixIsSet(t *testing.T) {
 // copies gone), not leave the survived local copy behind forever either.
 func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 	db := newManagerTestDB(t)
-	eb := event.NewEventBus(nil, nil)
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logBuf, nil))
+	eb := event.NewEventBus(nil, logger)
 	defer eb.Stop()
 
 	snapshotDir := t.TempDir()
 	cloudBackingDir := t.TempDir()
 	setFlakyDeleteCloudBackingDir(t, cloudBackingDir)
-	const cloudDest = "managerfaketest-flakydelete://bucket/prefix"
+	const cloudDest = "managerfaketest-flakydelete://user:secret@bucket/prefix?token=private#fragment"
 	cloudPrefixDir := filepath.Join(cloudBackingDir, "prefix")
 
 	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
@@ -1922,7 +1965,7 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 		SnapshotRetention:        2,
 		SnapshotCloudDestination: cloudDest,
 		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
-	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -1977,4 +2020,7 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 		"once the cloud outage clears, a later pruning pass must finish "+
 			"removing both the local and cloud copies of the retried epoch",
 	)
+	for _, secret := range []string{"user", "secret", "private", "fragment"} {
+		require.NotContains(t, logBuf.String(), secret)
+	}
 }

@@ -26,6 +26,12 @@ import (
 )
 
 const (
+	// ChainsyncEventBufferSize bounds headers admitted by protocol callbacks
+	// but not yet reflected in the chain header queue. Keep it aligned with
+	// the peer request window so one network pipeline can drain without a
+	// round trip while EventBus backpressure stops further admission.
+	ChainsyncEventBufferSize = ochainsync.DefaultPipelineLimit
+
 	BlockfetchEventType                 event.EventType = "ledger.blockfetch"
 	BlockEventType                      event.EventType = "ledger.block"
 	ChainsyncEventType                  event.EventType = "ledger.chainsync"
@@ -81,6 +87,10 @@ type BlockfetchEvent struct {
 type ChainsyncEvent struct {
 	ConnectionId ouroboros.ConnectionId // Connection ID associated with event
 	BlockHeader  ledger.BlockHeader
+	// HeaderCryptoVerificationGeneration identifies the immutable ledger
+	// context in which the exact BlockHeader passed the chain-selection crypto
+	// verifier. Zero means no reusable verdict.
+	HeaderCryptoVerificationGeneration uint64
 	// ArrivalTime is recorded immediately when the ChainSync callback receives
 	// a roll-forward header. It lets ledger admission judge the peer's clock at
 	// arrival even if event delivery or header processing is delayed.
