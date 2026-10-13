@@ -692,7 +692,11 @@ type Config struct {
 	// BindAddr; operators must set this field explicitly to expose
 	// metrics on a wildcard or remote-scrape address.
 	MetricsBindAddr string `yaml:"metricsBindAddr" envconfig:"DINGO_METRICS_BIND_ADDR"`
-	MetricsPort     uint   `yaml:"metricsPort"    split_words:"true"`
+	// MetricsAuthToken enables Bearer authentication on the Prometheus
+	// listener. It has no CLI flag because process arguments are public to
+	// other users on many systems.
+	MetricsAuthToken string `yaml:"metricsAuthToken" envconfig:"DINGO_METRICS_AUTH_TOKEN"`
+	MetricsPort      uint   `yaml:"metricsPort"    split_words:"true"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
