@@ -660,7 +660,7 @@ func TestBackfillFinalRelayGetsRemainingBudgetAfterPromotion(t *testing.T) {
 		func(_ context.Context, id ouroboros.ConnectionId, _ *leiosfetch.Client, _ ocommon.Point, deadline time.Time) error {
 			attempts = append(attempts, id)
 			if id == peers[1].Id() {
-				require.Equal(t, overall, deadline)
+				require.True(t, overall.Equal(deadline))
 			}
 			return errLeiosBackfillConnBusy
 		},
