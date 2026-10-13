@@ -184,6 +184,19 @@ retain their pagination and matching semantics. See the
 [MCP guide](docs/mcp/README.md#metadata-and-query-semantics) for page bounds and
 live-state consistency semantics.
 
+Blockfrost asset-holder pages aggregate live quantities in metadata storage.
+`utxo_address` keeps each asset-bearing UTxO's canonical rendered address as
+bytes so every backend groups exact pointer and bootstrap identities and
+orders equal quantities with the same bytewise address order as the API.
+Migration v42 adds
+the table; startup backfills only live asset-bearing UTxOs in cancellable
+batches before APIs become available and fails if their output CBOR cannot be
+resolved. New UTxO writes persist the address in the same metadata transaction.
+SQLite uses an exact unsigned 64-bit aggregate that returns a fixed-width
+decimal key; PostgreSQL and MySQL use decimal aggregation with an explicit
+overflow check. Holder count and LIMIT/OFFSET page reads share the request's
+read transaction and never hydrate unrelated output CBOR.
+
 The blob-store reference can be replaced while the database is live.
 `Database.SetBlobStore` installs the new store and returns the one it replaced
 together with a drain func. Operations already in flight keep running against

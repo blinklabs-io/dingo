@@ -148,6 +148,9 @@ var utxoStoreMethods = []string{
 	"GetUtxoPaymentScriptByCredential",
 	"GetScriptLockedSupply",
 	"GetUtxosByAssets",
+	"GetAssetHolders",
+	"GetLiveAssetUtxosMissingAddress",
+	"SetUtxoAddress",
 	"IterateLiveUtxos",
 	"IterateUtxosAsOf",
 }

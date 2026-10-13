@@ -70,6 +70,9 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 				return err
 			}
 			utxo.ID = uint(id)
+			if err := persistUtxoAddress(ctx, db, id, utxo); err != nil {
+				return err
+			}
 			// A pointer address carries its stake reference as a
 			// position rather than a credential, so it lives in
 			// utxo_pointer rather than in a utxo column. Writing the
@@ -609,6 +612,9 @@ func (s *Store) importUtxos(
 				if err := persistUtxoPointer(
 					ctx, db, id, item.Pointer,
 				); err != nil {
+					return err
+				}
+				if err := persistUtxoAddress(ctx, db, id, &item); err != nil {
 					return err
 				}
 				for j := range item.Assets {
@@ -2556,6 +2562,90 @@ func (s *Store) GetUtxosByAssets(
 		return nil, err
 	}
 	return ret, nil
+}
+
+func persistUtxoAddress(
+	ctx context.Context,
+	db queryer,
+	utxoID int64,
+	utxo *models.Utxo,
+) error {
+	if len(utxo.Assets) == 0 {
+		return nil
+	}
+	address := utxo.Address
+	if len(address) == 0 && len(utxo.Cbor) > 0 {
+		output, err := utxo.Decode()
+		if err != nil {
+			return fmt.Errorf("decode UTxO address: %w", err)
+		}
+		address = []byte(output.Address().String())
+	}
+	if len(address) == 0 {
+		return errors.New("persist asset UTxO address: address is unavailable")
+	}
+	_, err := db.ExecContext(ctx, `
+INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)
+ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address`, utxoID, address)
+	if err != nil {
+		return fmt.Errorf("persist UTxO address: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetLiveAssetUtxosMissingAddress(
+	afterID uint,
+	limit int,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	if limit <= 0 {
+		return nil, errors.New("missing UTxO address limit must be positive")
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
+		`SELECT `+qualifiedSQLiteUtxoColumns+` FROM utxo
+WHERE utxo.deleted_slot = 0
+	AND utxo.id > ?
+  AND EXISTS (SELECT 1 FROM asset WHERE asset.utxo_id = utxo.id)
+  AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
+ORDER BY utxo.id LIMIT ?`,
+	), afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := make([]models.Utxo, 0, limit)
+	for rows.Next() {
+		row, err := scanSQLiteUtxo(rows)
+		if err != nil {
+			return nil, err
+		}
+		utxo, err := utxoFromSQLite(row)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, *utxo)
+	}
+	return ret, rows.Err()
+}
+
+func (s *Store) SetUtxoAddress(
+	utxoID uint,
+	address []byte,
+	txn types.Txn,
+) error {
+	if len(address) == 0 {
+		return errors.New("UTxO address must not be empty")
+	}
+	return s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
+		_, err := db.ExecContext(ctx, `
+INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)
+ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address`, utxoID, address)
+		return err
+	})
 }
 
 func (s *Store) IterateLiveUtxos(

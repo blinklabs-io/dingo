@@ -1490,6 +1490,98 @@ func (d *Database) UtxosByAddressAtSlot(
 	})
 }
 
+// AssetHolders returns one exact metadata-aggregated holder page.
+func (d *Database) AssetHolders(
+	ctx context.Context,
+	query models.AssetHolderQuery,
+	txn *Txn,
+) ([]models.AssetHolder, int, error) {
+	if ctx == nil {
+		return nil, 0, errors.New("asset holders: context must not be nil")
+	}
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	return d.utxoStore().GetAssetHolders(query, txn.Metadata())
+}
+
+func (d *Database) backfillLiveAssetUtxoAddresses(ctx context.Context) error {
+	const batchSize = 128
+	var afterID uint
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		nextID, count, err := d.backfillLiveAssetUtxoAddressBatch(
+			ctx, afterID, batchSize,
+		)
+		if err != nil {
+			return err
+		}
+		afterID = nextID
+		if count == 0 {
+			return nil
+		}
+	}
+}
+
+func (d *Database) backfillLiveAssetUtxoAddressBatch(
+	ctx context.Context,
+	afterID uint,
+	limit int,
+) (uint, int, error) {
+	nextID := afterID
+	count := 0
+	err := d.Transaction(ctx, true).Do(func(txn *Txn) error {
+		utxos, err := d.utxoStore().GetLiveAssetUtxosMissingAddress(
+			afterID,
+			limit,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return err
+		}
+		count = len(utxos)
+		for i := range utxos {
+			if err := loadCbor(&utxos[i], txn); err != nil {
+				return fmt.Errorf(
+					"load UTxO %x#%d: %w",
+					utxos[i].TxId,
+					utxos[i].OutputIdx,
+					err,
+				)
+			}
+			output, err := utxos[i].Decode()
+			if err != nil {
+				return fmt.Errorf(
+					"decode UTxO %x#%d: %w",
+					utxos[i].TxId,
+					utxos[i].OutputIdx,
+					err,
+				)
+			}
+			address := []byte(output.Address().String())
+			if len(address) == 0 {
+				return errors.New("decoded UTxO address is empty")
+			}
+			if err := d.utxoStore().SetUtxoAddress(
+				utxos[i].ID,
+				address,
+				txn.Metadata(),
+			); err != nil {
+				return err
+			}
+			nextID = utxos[i].ID
+		}
+		return nil
+	})
+	if err != nil {
+		return afterID, 0, err
+	}
+	return nextID, count, nil
+}
+
 func filterUtxosByAddressPatterns(
 	utxos []models.Utxo,
 	patterns []models.UtxoAddressPattern,

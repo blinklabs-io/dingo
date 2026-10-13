@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -375,6 +376,7 @@ func TestNodeAdapterAssetAddressesHydratesFilteredAssets(t *testing.T) {
 			TxId:       txHash,
 			OutputIdx:  0,
 			PaymentKey: payment,
+			Address:    []byte(addr.String()),
 			AddedSlot:  1,
 			Amount:     types.Uint64(1_000_000),
 			Assets: []models.Asset{{
@@ -456,6 +458,7 @@ func TestNodeAdapterAssetAddressesStreamsWidelyHeldAsset(t *testing.T) {
 			TxId:       txHash,
 			OutputIdx:  uint32(i), //nolint:gosec // bounded test fixture
 			PaymentKey: payment,
+			Address:    []byte(addr.String()),
 			AddedSlot:  1,
 			Amount:     types.Uint64(1_000_000),
 			Assets: []models.Asset{{
@@ -496,6 +499,182 @@ func TestNodeAdapterAssetAddressesStreamsWidelyHeldAsset(t *testing.T) {
 		strconv.Itoa(database.DefaultPublicUtxoResultLimit+1),
 		holders[0].Quantity,
 	)
+}
+
+func seedAssetHolderRows(
+	t *testing.T,
+	raw *sql.DB,
+	policyID []byte,
+	assetName []byte,
+	addresses []string,
+	amounts []string,
+) {
+	t.Helper()
+	require.Len(t, amounts, len(addresses))
+	txn, err := raw.Begin()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = txn.Rollback() })
+	utxoStmt, err := txn.Prepare(`
+INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_script)
+VALUES (?, 1, 0, '1', 0, FALSE)`)
+	require.NoError(t, err)
+	defer utxoStmt.Close()
+	addressStmt, err := txn.Prepare(`
+INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`)
+	require.NoError(t, err)
+	defer addressStmt.Close()
+	assetStmt, err := txn.Prepare(`
+INSERT INTO asset (name, policy_id, utxo_id, amount) VALUES (?, ?, ?, ?)`)
+	require.NoError(t, err)
+	defer assetStmt.Close()
+	for i := range addresses {
+		txID := make([]byte, 32)
+		binary.BigEndian.PutUint64(txID[24:], uint64(i+1))
+		result, err := utxoStmt.Exec(txID)
+		require.NoError(t, err)
+		utxoID, err := result.LastInsertId()
+		require.NoError(t, err)
+		_, err = addressStmt.Exec(utxoID, []byte(addresses[i]))
+		require.NoError(t, err)
+		_, err = assetStmt.Exec(assetName, policyID, utxoID, amounts[i])
+		require.NoError(t, err)
+	}
+	require.NoError(t, txn.Commit())
+}
+
+func TestNodeAdapterAssetAddressesPagesHighCardinalityInMetadata(t *testing.T) {
+	t.Parallel()
+
+	adapter, raw, _ := newDBBackedAdapter(t)
+	policyID := bytes.Repeat([]byte{0x48}, lcommon.AddressHashSize)
+	assetName := []byte("MANY")
+	addresses := make([]string, database.ExactAddressCandidateScanLimit+1)
+	amounts := make([]string, len(addresses))
+	for i := range addresses {
+		payment := make([]byte, lcommon.AddressHashSize)
+		binary.BigEndian.PutUint64(payment[20:], uint64(i+1))
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkTestnet,
+			payment,
+			nil,
+		)
+		require.NoError(t, err)
+		addresses[i] = addr.String()
+		amounts[i] = "1"
+	}
+	seedAssetHolderRows(t, raw, policyID, assetName, addresses, amounts)
+	slices.Sort(addresses)
+
+	holders, total, err := adapter.AssetAddresses(
+		context.Background(),
+		hex.EncodeToString(policyID),
+		assetName,
+		PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, len(addresses), total)
+	require.Len(t, holders, 2)
+	assert.Equal(t, addresses[0], holders[0].Address)
+	assert.Equal(t, addresses[1], holders[1].Address)
+}
+
+func TestNodeAdapterAssetAddressesPreservesExactAddressTieOrder(t *testing.T) {
+	t.Parallel()
+
+	adapter, raw, _ := newDBBackedAdapter(t)
+	payment := bytes.Repeat([]byte{0x39}, lcommon.AddressHashSize)
+	pointerA := testPointerAddress(t, payment, 0x01)
+	pointerB := testPointerAddress(t, payment, 0x02)
+	bootstrapA, err := lcommon.NewByronAddressFromParts(
+		lcommon.ByronAddressTypePubkey,
+		bytes.Repeat([]byte{0x3a}, lcommon.AddressHashSize),
+		lcommon.ByronAddressAttributes{},
+	)
+	require.NoError(t, err)
+	bootstrapB, err := lcommon.NewByronAddressFromParts(
+		lcommon.ByronAddressTypePubkey,
+		bytes.Repeat([]byte{0x3b}, lcommon.AddressHashSize),
+		lcommon.ByronAddressAttributes{},
+	)
+	require.NoError(t, err)
+	addresses := []string{
+		pointerA.String(), pointerB.String(), bootstrapA.String(), bootstrapB.String(),
+	}
+	want := slices.Clone(addresses)
+	slices.Sort(want)
+	policyID := bytes.Repeat([]byte{0x49}, lcommon.AddressHashSize)
+	assetName := []byte("TIES")
+	seedAssetHolderRows(
+		t,
+		raw,
+		policyID,
+		assetName,
+		addresses,
+		[]string{"1", "1", "1", "1"},
+	)
+
+	holders, total, err := adapter.AssetAddresses(
+		context.Background(),
+		hex.EncodeToString(policyID),
+		assetName,
+		PaginationParams{Count: 4, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 4, total)
+	for i := range want {
+		assert.Equal(t, want[i], holders[i].Address)
+	}
+}
+
+func TestNodeAdapterAssetAddressesOrdersExactUint64Quantities(t *testing.T) {
+	t.Parallel()
+
+	adapter, raw, _ := newDBBackedAdapter(t)
+	policyID := bytes.Repeat([]byte{0x4a}, lcommon.AddressHashSize)
+	assetName := []byte("LARGE")
+	seedAssetHolderRows(
+		t,
+		raw,
+		policyID,
+		assetName,
+		[]string{"addr_b", "addr_a"},
+		[]string{"9223372036854775809", "9223372036854775808"},
+	)
+	holders, total, err := adapter.AssetAddresses(
+		context.Background(),
+		hex.EncodeToString(policyID),
+		assetName,
+		PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	require.Len(t, holders, 2)
+	assert.Equal(t, "9223372036854775808", holders[0].Quantity)
+	assert.Equal(t, "9223372036854775809", holders[1].Quantity)
+}
+
+func TestNodeAdapterAssetAddressesRejectsQuantityOverflow(t *testing.T) {
+	t.Parallel()
+
+	adapter, raw, _ := newDBBackedAdapter(t)
+	policyID := bytes.Repeat([]byte{0x4b}, lcommon.AddressHashSize)
+	assetName := []byte("OVERFLOW")
+	seedAssetHolderRows(
+		t,
+		raw,
+		policyID,
+		assetName,
+		[]string{"addr_same", "addr_same"},
+		[]string{"18446744073709551615", "1"},
+	)
+	_, _, err := adapter.AssetAddresses(
+		context.Background(),
+		hex.EncodeToString(policyID),
+		assetName,
+		PaginationParams{Count: 1, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.ErrorContains(t, err, "quantity overflow")
 }
 
 // TestNodeAdapterAddressUTXOsAssetsSurviveRefFetch proves native assets
@@ -620,6 +799,14 @@ INSERT INTO utxo (
 	require.NoError(t, err)
 	utxoID, err := result.LastInsertId()
 	require.NoError(t, err)
+	if len(utxo.Address) > 0 {
+		_, err = raw.Exec(`
+INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
+			utxoID,
+			utxo.Address,
+		)
+		require.NoError(t, err)
+	}
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
 		_, err = raw.Exec(`

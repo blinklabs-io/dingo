@@ -910,6 +910,16 @@ type UtxoStore interface {
 		assetName []byte,
 		txn types.Txn,
 	) ([]models.Utxo, error)
+	GetAssetHolders(
+		models.AssetHolderQuery,
+		types.Txn,
+	) ([]models.AssetHolder, int, error)
+	GetLiveAssetUtxosMissingAddress(
+		uint,
+		int,
+		types.Txn,
+	) ([]models.Utxo, error)
+	SetUtxoAddress(uint, []byte, types.Txn) error
 
 	// GetUtxosDeletedBeforeSlot retrieves UTxOs deleted before the given slot, up to the specified limit.
 	GetUtxosDeletedBeforeSlot(

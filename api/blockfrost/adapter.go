@@ -1148,72 +1148,26 @@ func (a *NodeAdapter) AssetAddresses(
 	db := a.ledgerState.Database()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
-	query := &models.UtxoWithOrderingQuery{
-		MatchAllAddresses: true,
-		FilterByAsset:     true,
-		OnlyFilteredAsset: true,
-		AssetPolicyID:     policyIDBytes,
-		AssetName:         assetName,
+	offset, ok := paginationOffset(params)
+	if !ok {
+		return nil, 0, ErrInvalidPaginationParameters
 	}
-	quantities := make(map[string]uint64)
-	utxosScanned := 0
-	cborBytes := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, 0, err
-		}
-		query.Limit = min(
-			128,
-			database.ExactAddressCandidateScanLimit-utxosScanned+1,
-		)
-		ordered, err := db.UtxosByAddressWithOrdering(ctx, query, txn)
-		if err != nil {
-			return nil, 0, fmt.Errorf(
-				"get asset UTxOs for %s%x: %w",
-				policyID,
-				assetName,
-				err,
-			)
-		}
-		if len(ordered) == 0 {
-			break
-		}
-		utxosScanned += len(ordered)
-		if utxosScanned > database.ExactAddressCandidateScanLimit {
-			return nil, 0, models.ErrUtxoQueryBudgetExceeded
-		}
-		utxos := make([]models.Utxo, len(ordered))
-		for i := range ordered {
-			utxos[i] = ordered[i].Utxo
-		}
-		batchCborBytes, err := addAssetHolderQuantities(
-			quantities,
-			policyIDBytes,
+	rows, total, err := db.AssetHolders(ctx, models.AssetHolderQuery{
+		PolicyID:   policyIDBytes,
+		AssetName:  assetName,
+		Descending: params.Order == PaginationOrderDesc,
+		Limit:      params.Count,
+		Offset:     offset,
+	}, txn)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get asset holders for %s%x: %w",
+			policyID,
 			assetName,
-			utxos,
+			err,
 		)
-		if err != nil {
-			return nil, 0, fmt.Errorf(
-				"build asset holders for %s%x: %w",
-				policyID,
-				assetName,
-				err,
-			)
-		}
-		cborBytes += batchCborBytes
-		if cborBytes > database.DefaultPublicUtxoCborBudget {
-			return nil, 0, models.ErrUtxoQueryBudgetExceeded
-		}
-		last := ordered[len(ordered)-1]
-		query.After = &models.UtxoOrderingCursor{
-			Slot:       last.TxSlot,
-			BlockIndex: last.TxBlockIndex,
-			OutputIdx:  last.OutputIdx,
-			TxId:       last.TxId,
-		}
 	}
-	holders := assetHoldersFromQuantities(quantities, params)
-	if len(holders) == 0 {
+	if total == 0 {
 		return nil, 0, fmt.Errorf(
 			"asset %s%x: %w",
 			policyID,
@@ -1221,8 +1175,14 @@ func (a *NodeAdapter) AssetAddresses(
 			ErrAssetNotFound,
 		)
 	}
-	total := len(holders)
-	return paginateSlice(holders, params), total, nil
+	holders := make([]AssetHolderInfo, len(rows))
+	for i := range rows {
+		holders[i] = AssetHolderInfo{
+			Address:  string(rows[i].Address),
+			Quantity: strconv.FormatUint(rows[i].Quantity, 10),
+		}
+	}
+	return holders, total, nil
 }
 
 type assetHolderQuantity struct {

@@ -89,6 +89,153 @@ func seedExactAddressUtxo(
 	)
 }
 
+func seedLegacyAssetUtxosWithoutAddress(
+	t *testing.T,
+	db *Database,
+	raw *sql.DB,
+	count int,
+	outputCbor []byte,
+) {
+	t.Helper()
+	metadataTxn, err := raw.Begin()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = metadataTxn.Rollback() })
+	blobTxn := db.BlobTxn(true)
+	t.Cleanup(blobTxn.Release)
+	for i := range count {
+		txID := make([]byte, 32)
+		binary.BigEndian.PutUint64(txID[24:], uint64(i+1))
+		result, err := metadataTxn.Exec(`
+INSERT INTO utxo (
+    tx_id, added_slot, deleted_slot, amount, output_idx, payment_script
+) VALUES (?, 1, 0, '1', 0, FALSE)`, txID)
+		require.NoError(t, err)
+		utxoID, err := result.LastInsertId()
+		require.NoError(t, err)
+		_, err = metadataTxn.Exec(`
+INSERT INTO asset (name, policy_id, utxo_id, amount)
+VALUES ('asset', 'policy', ?, '1')`, utxoID)
+		require.NoError(t, err)
+		if outputCbor != nil {
+			require.NoError(t, db.Blob().SetUtxo(
+				blobTxn.Blob(), txID, 0, outputCbor,
+			))
+		}
+	}
+	require.NoError(t, metadataTxn.Commit())
+	require.NoError(t, blobTxn.Commit())
+}
+
+func TestBackfillLiveAssetUtxoAddressesBatchesAndResumes(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x51}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	outputCbor, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1,
+	})
+	require.NoError(t, err)
+	seedLegacyAssetUtxosWithoutAddress(t, db, raw, 129, outputCbor)
+
+	nextID, processed, err := db.backfillLiveAssetUtxoAddressBatch(
+		context.Background(), 0, 128,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 128, processed)
+	require.NotZero(t, nextID)
+	var count int
+	require.NoError(t, raw.QueryRow(`SELECT COUNT(*) FROM utxo_address`).Scan(&count))
+	require.Equal(t, 128, count)
+	pending, err := db.utxoStore().GetLiveAssetUtxosMissingAddress(
+		nextID,
+		128,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+
+	require.NoError(t, db.backfillLiveAssetUtxoAddresses(context.Background()))
+	require.NoError(t, raw.QueryRow(`SELECT COUNT(*) FROM utxo_address`).Scan(&count))
+	require.Equal(t, 129, count)
+	var distinct int
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(DISTINCT address) FROM utxo_address`,
+	).Scan(&distinct))
+	require.Equal(t, 1, distinct)
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(
+		t,
+		db.backfillLiveAssetUtxoAddresses(canceled),
+		context.Canceled,
+	)
+}
+
+func TestBackfillLiveAssetUtxoAddressesFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		outputCbor []byte
+	}{
+		{name: "missing CBOR"},
+		{name: "invalid CBOR", outputCbor: []byte{0xff}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			raw := rawSQLiteMetadataFixture(t, db)
+			seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, tc.outputCbor)
+
+			err := db.backfillLiveAssetUtxoAddresses(context.Background())
+			require.Error(t, err)
+			var count int
+			require.NoError(t, raw.QueryRow(
+				`SELECT COUNT(*) FROM utxo_address`,
+			).Scan(&count))
+			require.Zero(t, count)
+		})
+	}
+}
+
+func TestCreateAssetUtxoRequiresAddressIdentity(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+	utxo := &models.Utxo{
+		TxId: bytes.Repeat([]byte{0x61}, 32),
+		Assets: []models.Asset{{
+			Name: []byte("asset"), PolicyId: []byte("policy"), Amount: 1,
+		}},
+	}
+	require.ErrorContains(
+		t,
+		db.CreateUtxo(context.Background(), nil, utxo),
+		"address is unavailable",
+	)
+	var count int
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM utxo WHERE tx_id = ?`, utxo.TxId,
+	).Scan(&count))
+	require.Zero(t, count)
+
+	imported := *utxo
+	imported.ID = 0
+	imported.TxId = bytes.Repeat([]byte{0x62}, 32)
+	require.ErrorContains(
+		t,
+		db.utxoStore().ImportUtxos([]models.Utxo{imported}, nil),
+		"address is unavailable",
+	)
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM utxo WHERE tx_id = ?`, imported.TxId,
+	).Scan(&count))
+	require.Zero(t, count)
+}
+
 // seedExactAddressUtxoWithHash is seedExactAddressUtxo with an explicit
 // 32-byte transaction hash, for callers seeding more than 256 rows: a
 // single repeated hashByte collides past that count, since it is the

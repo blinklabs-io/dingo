@@ -17,6 +17,7 @@ package database
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
@@ -394,6 +395,9 @@ func (d *Database) init(ctx context.Context) error {
 	// Check immutable settings have not changed since initial sync
 	if err := d.CheckNodeSettings(ctx); err != nil {
 		return err
+	}
+	if err := d.backfillLiveAssetUtxoAddresses(ctx); err != nil {
+		return fmt.Errorf("backfill live asset UTxO addresses: %w", err)
 	}
 	return nil
 }
