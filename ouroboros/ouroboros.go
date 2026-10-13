@@ -215,8 +215,9 @@ type Ouroboros struct {
 	// any observed-tip, dedup, or ledger mutation. Resync timers recover the
 	// protocol cursor after a deliberate beyond-skew drop without recycling
 	// the connection; one earliest-onset timer is retained per connection.
-	chainsyncHeaderAdmission chainsyncHeaderAdmissionFunc
-	chainsyncHeaderSlotTime  func(uint64) (time.Time, error)
+	chainsyncHeaderBackpressure func(context.Context, int) error
+	chainsyncHeaderAdmission    chainsyncHeaderAdmissionFunc
+	chainsyncHeaderSlotTime     func(uint64) (time.Time, error)
 	// chainsyncLocalTipBlock returns the local tip's block number and the
 	// security parameter k. Tests override it without a LedgerState.
 	chainsyncLocalTipBlock func() (tipBlock, k uint64)
@@ -235,7 +236,7 @@ type Ouroboros struct {
 	// tests exercising a single protocol handler can override either seam
 	// directly instead of standing up a full LedgerState.
 	chainSelectionShouldVerifyHeaderCrypto func(slot uint64) bool
-	chainSelectionVerifyHeaderCrypto       func(header gledger.BlockHeader) error
+	chainSelectionVerifyHeaderCrypto       func(header gledger.BlockHeader) (uint64, error)
 	chainsyncScheduleAt                    chainsyncScheduleAtFunc
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
@@ -251,7 +252,12 @@ type Ouroboros struct {
 	// ChainSync serve merged RB+EB blocks without coupling the chain
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
-	leiosMu             sync.RWMutex
+	// leiosSelectedHeaders retains the exact selected announcing header while
+	// ledger apply waits for its independently fetched endorser body. It is
+	// keyed by occurrence and parent so overlapping validations cannot replace
+	// one another's authority.
+	leiosSelectedHeaders map[string]map[string]map[string]selectedLeiosHeader
+	leiosMu              sync.RWMutex
 	// leiosMaxVerifiedEbSlot is the highest slot for which an endorser block
 	// has been corroborated -- see publishLeiosEndorserBlock. It is proof that
 	// a ranking block exists at that slot, which the forge gate uses as a
@@ -449,6 +455,9 @@ type OuroborosConfig struct {
 	// revokes corroboration is not yet processed). Returning false (or nil hook)
 	// falls back to the async PeerTipUpdateEvent path.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
+	// ChainsyncObserveAwaitReply records the peer's explicit protocol-idle
+	// frontier. It runs after gouroboros fences preceding pipelined updates.
+	ChainsyncObserveAwaitReply func(ouroboros.ConnectionId, ocommon.Point)
 	// ChainsyncSyncTarget snapshots the policy-bounded target for one observed
 	// peer-tip event. Its result is carried with that event into ledger
 	// admission; ledger must not reread mutable selector state.
@@ -614,6 +623,11 @@ func NewOuroboros(cfg OuroborosConfig) (*Ouroboros, error) {
 	if err := cfg.validateDependencies(); err != nil {
 		return nil, err
 	}
+	maxClients := cfg.ChainsyncState.MaxClients()
+	admittedHeadroom := ledger.ChainsyncEventBufferSize + 1 + maxClients
+	if err := ledger.ValidateChainsyncHeaderCapacity(admittedHeadroom); err != nil {
+		return nil, fmt.Errorf("invalid chainsync capacity: %w", err)
+	}
 	return newOuroboros(cfg), nil
 }
 
@@ -679,6 +693,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			headerDecodeCacheMaxBytes,
 		),
 		leiosEndorserBlocks: make(map[string]*leiosEndorserBlockData),
+		leiosSelectedHeaders: make(
+			map[string]map[string]map[string]selectedLeiosHeader,
+		),
 		leiosClosureWaiters: make(map[string][]chan struct{}),
 		leiosServeWaiters: make(
 			map[ouroboros.ConnectionId][]leiosServeWaiter,
@@ -706,6 +723,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	o.blockfetchRangeBytes = func(ocommon.Point, ocommon.Point) uint64 { return 0 }
 	if o.ledgerState != nil {
 		o.blockfetchRangeBytes = o.ledgerState.BlockfetchRangeExpectedBytes
+		o.chainsyncHeaderBackpressure = o.ledgerState.AwaitChainsyncHeaderCapacity
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
 		o.chainsyncLocalTipBlock = func() (uint64, uint64) {
@@ -713,7 +731,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			return o.ledgerState.Tip().BlockNumber, uint64(k)
 		}
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
-		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCrypto
+		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCryptoWithGeneration
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond

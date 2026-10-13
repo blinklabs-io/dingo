@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -103,6 +104,23 @@ type nthDeleteFailingBlobStore struct {
 	err     error
 }
 
+type swapOnIteratorBlobStore struct {
+	blob.BlobStore
+	db          *database.Database
+	replacement blob.BlobStore
+	once        sync.Once
+}
+
+func (s *swapOnIteratorBlobStore) NewIterator(
+	txn dbtypes.Txn,
+	opts dbtypes.BlobIteratorOptions,
+) dbtypes.BlobIterator {
+	s.once.Do(func() {
+		s.db.SetBlobStore(s.replacement)
+	})
+	return s.BlobStore.NewIterator(txn, opts)
+}
+
 func (s *nthDeleteFailingBlobStore) DeleteBlock(
 	txn dbtypes.Txn,
 	slot uint64,
@@ -120,6 +138,81 @@ func rawBlockTip(b chain.RawBlock) ochainsync.Tip {
 		Point:       ocommon.NewPoint(b.Slot, b.Hash),
 		BlockNumber: b.BlockNumber,
 	}
+}
+
+func TestRecoverCommitTimestampConflictInitializesBlockInventory(t *testing.T) {
+	t.Parallel()
+
+	raw, db := commitTimestampRecoveryFixture(t)
+	store := db.Blob()
+	txn := store.NewTransaction(true)
+	require.NoError(t, store.Delete(
+		txn,
+		[]byte("dingo:block-inventory:v1"),
+	))
+	require.NoError(t, txn.Commit())
+
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	ls := &LedgerState{
+		db:    db,
+		chain: cm.PrimaryChain(),
+		config: LedgerStateConfig{
+			ChainManager: cm,
+			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	require.NoError(t, ls.RecoverCommitTimestampConflict(context.Background()))
+	count, oldest, err := db.CountBlocksAndOldestSlot(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), count)
+	require.Equal(t, raw[0].Slot, oldest)
+}
+
+func TestCleanupOrphanedBlobsUsesOnePinnedStore(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	replacementDB, err := dbtest.NewDatabase(
+		t,
+		&database.Config{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
+	orphan := makeTestBlock(2, 2)
+	require.NoError(t, db.BlockCreate(orphan, nil))
+	require.NoError(t, replacementDB.BlockCreate(orphan, nil))
+
+	original := db.Blob()
+	db.SetBlobStore(&swapOnIteratorBlobStore{
+		BlobStore:   original,
+		db:          db,
+		replacement: replacementDB.Blob(),
+	})
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	require.NoError(t, ls.cleanupOrphanedBlobs(1))
+
+	readOriginal := original.NewTransaction(false)
+	defer readOriginal.Rollback() //nolint:errcheck
+	_, _, err = original.GetBlock(
+		readOriginal,
+		orphan.Slot,
+		orphan.Hash,
+	)
+	require.Error(t, err, "orphan must be removed from the scanned store")
+	_, err = database.BlockByPoint(
+		context.Background(),
+		replacementDB,
+		ocommon.NewPoint(orphan.Slot, orphan.Hash),
+	)
+	require.NoError(t, err, "replacement store must not be mutated")
 }
 
 // TestRecoverCommitTimestampConflictRewindsChainManagerTip reproduces the

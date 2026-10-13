@@ -156,8 +156,8 @@ func Snapshot(
 	// this point on: the Mkdir above guarantees this call exclusively
 	// created dir, so nothing else can be concurrently writing into it.
 	defer func() {
-		if err != nil {
-			_ = os.RemoveAll(dir)
+		if err != nil && !errors.Is(err, ErrSnapshotCatalogUpdate) {
+			_ = RemoveSnapshotContext(context.WithoutCancel(ctx), dir)
 		}
 	}()
 
@@ -477,7 +477,7 @@ func Snapshot(
 	if err := ctx.Err(); err != nil {
 		return Manifest{}, err
 	}
-	if err := WriteManifest(dir, manifest, opts...); err != nil {
+	if err := writeManifest(ctx, dir, manifest, opts...); err != nil {
 		return Manifest{}, err
 	}
 	// WriteManifest computes the checksum (and fills in FormatVersion) on
