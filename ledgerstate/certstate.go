@@ -322,6 +322,17 @@ func parsePStateConwayWithRetirements(
 // params for the CertState import path. Handles both definite
 // and indefinite-length maps.
 func parseCertPoolParamsMap(data []byte) ([]ParsedPool, error) {
+	return parseCertPoolParamsMapWith(data, parsePoolParamsOrDistr)
+}
+
+func parseCertPoolRegistrationMap(data []byte) ([]ParsedPool, error) {
+	return parseCertPoolParamsMapWith(data, parsePoolParams)
+}
+
+func parseCertPoolParamsMapWith(
+	data []byte,
+	parse func([]byte, []byte) (*ParsedPool, error),
+) ([]ParsedPool, error) {
 	entries, err := decodeMapEntries(data)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -340,7 +351,7 @@ func parseCertPoolParamsMap(data []byte) ([]ParsedPool, error) {
 			continue
 		}
 
-		pool, err := parsePoolParamsOrDistr(
+		pool, err := parse(
 			poolKeyHash, entry.ValueRaw,
 		)
 		if err != nil {
@@ -706,6 +717,9 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 	var bestWarning error
 	bestIdx := -1
 	bestIsPoolParams := false
+	fixedEmptyCurrent := len(ps) == 4 &&
+		isEmptyCborMap(ps[0]) &&
+		!hasDijkstraPoolParamsEntries(ps[1])
 	for _, m := range maps {
 		pools, warning := parseCertPoolParamsMap(ps[m.idx])
 		parsed = append(parsed, parsedMap{m.idx, pools, warning})
@@ -713,7 +727,8 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		// Recognize malformed registrations by shape too: otherwise a staged
 		// map with more decodable entries can replace the current map.
 		isPoolParams := len(pools) > 0 || hasPoolParamsEntries(ps[m.idx])
-		if bestIdx < 0 || (isPoolParams && !bestIsPoolParams) {
+		if bestIdx < 0 ||
+			(isPoolParams && !bestIsPoolParams && !fixedEmptyCurrent) {
 			bestPools = pools
 			bestWarning = warning
 			bestIdx = m.idx
@@ -740,7 +755,8 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 			!hasPoolParamsEntries(ps[p.idx]) {
 			continue
 		}
-		if err := mergeFuturePoolParams(bestPools, p.pools, p.warning); err != nil {
+		future, warning := parseCertPoolRegistrationMap(ps[p.idx])
+		if err := mergeFuturePoolParams(bestPools, future, warning); err != nil {
 			mapErrs = append(mapErrs, err)
 		}
 		break
@@ -783,6 +799,33 @@ func hasPoolParamsEntries(data []byte) bool {
 			continue
 		}
 		if _, err := decodeRawArray(entry.ValueRaw); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func isEmptyCborMap(data []byte) bool {
+	entries, err := decodeMapEntries(data)
+	return err == nil && len(entries) == 0
+}
+
+func hasDijkstraPoolParamsEntries(data []byte) bool {
+	entries, err := decodeMapEntries(data)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		var key []byte
+		if _, err := cbor.Decode(entry.KeyRaw, &key); err != nil || len(key) != poolKeyHashLen {
+			continue
+		}
+		params, err := decodeRawArray(entry.ValueRaw)
+		if err != nil || len(params) <= 1 || len(params[1]) == 0 {
+			continue
+		}
+		if (len(params[1]) == 1 && params[1][0] == 0xf6) ||
+			params[1][0]>>5 == 4 {
 			return true
 		}
 	}
@@ -1251,12 +1294,17 @@ func parsePoolParamsWithoutOperator(
 		)
 	}
 
-	if rewardAccount, rewardAccountTag, ok := parseRewardAccount(
+	rewardAccount, rewardAccountTag, ok := parseRewardAccount(
 		params[4+leiosOffset],
-	); ok {
-		pool.RewardAccount = rewardAccount
-		pool.RewardAccountCredentialTag = rewardAccountTag
+	)
+	if !ok {
+		return nil, true, fmt.Errorf(
+			"decoding reward account for pool %x",
+			poolKeyHash,
+		)
 	}
+	pool.RewardAccount = rewardAccount
+	pool.RewardAccountCredentialTag = rewardAccountTag
 
 	owners, err := parsePoolOwners(params[5+leiosOffset])
 	if err != nil {
