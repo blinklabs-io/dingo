@@ -517,7 +517,6 @@ type castTransaction struct {
 	txHash      string
 	certIndex   int
 	blockHeight uint64
-	blockTime   int64
 }
 
 // slotBlock is a decoded block cached while resolving a page of votes.
@@ -659,19 +658,10 @@ func (a *NodeAdapter) castTransactions(
 			if !matched {
 				continue
 			}
-			blockTime, err := a.ledgerState.SlotToTime(row.CastSlot)
-			if err != nil {
-				return nil, fmt.Errorf(
-					"get block time for slot %d: %w",
-					row.CastSlot,
-					err,
-				)
-			}
 			found = &castTransaction{
 				txHash:      hex.EncodeToString(tx.Hash().Bytes()),
 				certIndex:   index,
 				blockHeight: block.number,
-				blockTime:   blockTime.Unix(),
 			}
 		}
 		if found == nil {

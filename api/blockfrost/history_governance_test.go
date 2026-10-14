@@ -319,6 +319,11 @@ func TestGovernanceListsRejectInvalidPaginationBeforeQuery(t *testing.T) {
 		"/api/v0/epochs/1/blocks",
 	} {
 		for _, query := range []string{"count=0", "count=101", "page=0", "order=sideways"} {
+			if path == "/api/v0/epochs/1/stakes" && query == "order=sideways" {
+				// The stakes schema defines no order; see
+				// TestHandleUnorderedEpochListsIgnoreOrder.
+				continue
+			}
 			t.Run(path+"?"+query, func(t *testing.T) {
 				t.Parallel()
 				node := &mockNode{}

@@ -192,6 +192,34 @@ func TestHandleEpochStakes(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, get(t, node, "/api/v0/epochs/12/stakes").Code)
 }
 
+// The Blockfrost schema defines only count and page for these lists, so order
+// is ignored like any other undefined query parameter: neither applied nor
+// validated.
+func TestHandleUnorderedEpochListsIgnoreOrder(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		path   string
+		params func(*mockNode) PaginationParams
+	}{
+		{"/api/v0/epochs/1/stakes", func(n *mockNode) PaginationParams { return n.epochStakes.params }},
+		{"/api/v0/epochs/1/stakes/pool1xyz", func(n *mockNode) PaginationParams { return n.epochPoolStakes.params }},
+		{"/api/v0/epochs/1/next", func(n *mockNode) PaginationParams { return n.epochsAfter.params }},
+		{"/api/v0/epochs/1/previous", func(n *mockNode) PaginationParams { return n.epochsBefore.params }},
+	} {
+		for _, order := range []string{"desc", "sideways"} {
+			t.Run(tc.path+"?order="+order, func(t *testing.T) {
+				t.Parallel()
+				node := &mockNode{}
+				recorder := get(t, node, tc.path+"?count=5&order="+order)
+				require.Equal(t, http.StatusOK, recorder.Code)
+				params := tc.params(node)
+				assert.Equal(t, PaginationOrderAsc, params.Order)
+				assert.Equal(t, 5, params.Count)
+			})
+		}
+	}
+}
+
 func TestHandleEpochPoolStakes(t *testing.T) {
 	t.Parallel()
 	node := &mockNode{}
@@ -516,6 +544,69 @@ func TestNodeAdapterEpochBlocks(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidPoolID)
 	_, _, err = fx.adapter.EpochBlocks(ctx, 9, PaginationParams{Count: 1, Page: 1})
 	assert.ErrorIs(t, err, ErrEpochNotFound)
+}
+
+// Nonce pruning keeps an epoch's checkpoint row and deletes the rest, so a
+// pruned epoch still lists one block. The block lists must report that
+// history as unavailable rather than serve the short list as complete.
+func TestNodeAdapterBlockListsRefuseUnretainedHistory(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	asc := PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc}
+	hexOf := func(b byte) string { return hex.EncodeToString(fill32(b)) }
+
+	t.Run("pruned epoch", func(t *testing.T) {
+		t.Parallel()
+		fx := newEpochFixture(t)
+		poolID := fx.addPool(t, fx.poolA, nil)
+		// Epoch 1 keeps only its checkpoint; epoch 2 is retained in full.
+		_, err := fx.raw.Exec(`UPDATE block_nonce SET is_checkpoint = TRUE WHERE slot IN (90000, 172850)`)
+		require.NoError(t, err)
+		_, err = fx.raw.Exec(`DELETE FROM block_nonce WHERE slot IN (100000, 110000)`)
+		require.NoError(t, err)
+		_, err = fx.raw.Exec(
+			`INSERT INTO block_nonce (hash, nonce, slot, is_checkpoint) VALUES (?, ?, 172870, FALSE)`,
+			fill32(0x15), fill32(0x00),
+		)
+		require.NoError(t, err)
+
+		_, _, err = fx.adapter.EpochBlocks(ctx, 1, asc)
+		assert.ErrorIs(t, err, ErrHistoryNotRetained)
+		_, _, err = fx.adapter.EpochPoolBlocks(ctx, 1, poolID, asc)
+		assert.ErrorIs(t, err, ErrHistoryNotRetained)
+		_, _, err = fx.adapter.PoolBlocks(ctx, poolID, asc)
+		assert.ErrorIs(t, err, ErrHistoryNotRetained)
+
+		hashes, total, err := fx.adapter.EpochBlocks(ctx, 2, asc)
+		require.NoError(t, err)
+		assert.Equal(t, 2, total)
+		assert.Equal(t, []string{hexOf(0x14), hexOf(0x15)}, hashes)
+
+		hashes, total, err = fx.adapter.EpochBlocks(ctx, 0, asc)
+		require.NoError(t, err, "an epoch with no blocks is empty, not pruned")
+		assert.Equal(t, 0, total)
+		assert.Empty(t, hashes)
+	})
+
+	t.Run("bootstrap anchor", func(t *testing.T) {
+		t.Parallel()
+		fx := newEpochFixture(t)
+		poolID := fx.addPool(t, fx.poolA, nil)
+		meta := fx.adapter.ledgerState.Database().Metadata()
+		require.NoError(t, meta.SetSyncState("mithril_ledger_slot", "100000", nil))
+
+		_, _, err := fx.adapter.EpochBlocks(ctx, 1, asc)
+		assert.ErrorIs(t, err, ErrHistoryNotRetained)
+		_, _, err = fx.adapter.EpochPoolBlocks(ctx, 0, poolID, asc)
+		assert.ErrorIs(t, err, ErrHistoryNotRetained)
+		_, _, err = fx.adapter.PoolBlocks(ctx, poolID, asc)
+		assert.ErrorIs(t, err, ErrHistoryNotRetained)
+
+		hashes, total, err := fx.adapter.EpochPoolBlocks(ctx, 2, poolID, asc)
+		require.NoError(t, err)
+		assert.Equal(t, 1, total)
+		assert.Equal(t, []string{hexOf(0x14)}, hashes)
+	})
 }
 
 func TestNodeAdapterEpochStakes(t *testing.T) {

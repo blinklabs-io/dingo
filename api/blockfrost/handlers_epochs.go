@@ -70,7 +70,7 @@ func (b *Blockfrost) handleEpochNext(
 	servePage(
 		b,
 		w,
-		r,
+		withoutOrder(r),
 		func(ctx context.Context, params PaginationParams) ([]EpochInfo, int, error) {
 			return b.node.EpochsAfter(ctx, epoch, params)
 		},
@@ -91,7 +91,7 @@ func (b *Blockfrost) handleEpochPrevious(
 	servePage(
 		b,
 		w,
-		r,
+		withoutOrder(r),
 		func(ctx context.Context, params PaginationParams) ([]EpochInfo, int, error) {
 			return b.node.EpochsBefore(ctx, epoch, params)
 		},
@@ -112,7 +112,7 @@ func (b *Blockfrost) handleEpochStakes(
 	servePage(
 		b,
 		w,
-		r,
+		withoutOrder(r),
 		func(ctx context.Context, params PaginationParams) ([]EpochStakeInfo, int, error) {
 			return b.node.EpochStakes(ctx, epoch, params)
 		},
@@ -136,7 +136,7 @@ func (b *Blockfrost) handleEpochPoolStakes(
 	servePage(
 		b,
 		w,
-		r,
+		withoutOrder(r),
 		func(ctx context.Context, params PaginationParams) ([]EpochPoolStakeInfo, int, error) {
 			return b.node.EpochPoolStakes(
 				ctx, epoch, r.PathValue("pool_id"), params,

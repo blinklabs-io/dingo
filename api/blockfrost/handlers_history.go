@@ -74,6 +74,20 @@ func (b *Blockfrost) writeHistoryError(
 	}
 }
 
+// withoutOrder drops the order parameter from a list whose Blockfrost schema
+// defines only count and page, so it is ignored like any other undefined
+// query parameter rather than validated or applied.
+func withoutOrder(r *http.Request) *http.Request {
+	query := r.URL.Query()
+	if !query.Has("order") {
+		return r
+	}
+	query.Del("order")
+	clone := r.Clone(r.Context())
+	clone.URL.RawQuery = query.Encode()
+	return clone
+}
+
 // servePage serves a paginated list: it parses the pagination query, fetches
 // one page, sets the pagination headers from the reported total and writes
 // the converted items. A nil item slice encodes as an empty array.

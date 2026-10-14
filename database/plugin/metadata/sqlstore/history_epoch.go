@@ -16,6 +16,7 @@
 package sqlstore
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -135,6 +136,36 @@ func (s *Store) GetPoolBlockHashesInSlotRange(
 		order,
 		txn,
 	)
+}
+
+func (s *Store) GetEarliestNonCheckpointBlockSlot(
+	fromSlot uint64,
+	txn types.Txn,
+) (uint64, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	from, err := checkedInt64(fromSlot)
+	if err != nil {
+		return 0, false, err
+	}
+	var slot sql.NullInt64
+	if err := db.QueryRowContext(
+		ctx,
+		"SELECT MIN(slot) FROM block_nonce WHERE slot >= ? AND is_checkpoint = FALSE",
+		from,
+	).Scan(&slot); err != nil {
+		return 0, false, fmt.Errorf("earliest non-checkpoint block: %w", err)
+	}
+	if !slot.Valid {
+		return 0, false, nil
+	}
+	ret, err := checkedUint64(slot.Int64)
+	if err != nil {
+		return 0, false, err
+	}
+	return ret, true, nil
 }
 
 func (s *Store) blockHashesInSlotRange(

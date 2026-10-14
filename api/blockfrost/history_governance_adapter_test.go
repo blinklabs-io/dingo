@@ -446,6 +446,38 @@ func TestNodeAdapterVotesReportUnrecoverableTransaction(t *testing.T) {
 	assert.ErrorIs(t, err, ErrHistoryNotRetained)
 }
 
+// Only committee votes carry a block time, so a cast slot the node cannot
+// convert to a time fails that list alone.
+func TestNodeAdapterVotesConvertBlockTimeOnlyForCommitteeVotes(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	const farSlot = uint64(1) << 40
+	_, err := fx.adapter.ledgerState.SlotToTime(farSlot)
+	require.Error(t, err, "the slot must lie past the conversion horizon")
+	proposal := fx.addProposal(t, 0x01, 0, lcommon.GovActionTypeInfo, []byte{0x81, 0x06}, 10)
+	target := govID(t, 0x01, 0)
+	serveBlocks(fx, map[uint64]*slotBlock{
+		farSlot: {number: 9, txs: []lcommon.Transaction{newTx(0xa1, true, procedures(
+			voter(lcommon.VoterTypeDRepKeyHash, 0xd1), target, uint8(1),
+			voter(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash, 0xcc), target, uint8(1),
+		))}},
+	})
+	fx.addVote(t, proposal, models.VoterTypeDRep, 0, 0xd1, models.VoteYes, farSlot, false)
+	fx.addVote(t, proposal, models.VoterTypeCC, 0, 0xcc, models.VoteYes, farSlot, false)
+
+	rows, total, err := fx.adapter.GovernanceProposalVotes(
+		ctx, GovActionRef{TxHash: fill32(0x01), Index: 0}, asc,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	assert.Len(t, rows, 2)
+
+	_, _, err = fx.adapter.CommitteeVotes(ctx, nil, false, asc)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrHistoryNotRetained)
+}
+
 func TestNodeAdapterDRepVotesAndPoolVotes(t *testing.T) {
 	t.Parallel()
 	fx := newEpochFixture(t)
@@ -777,6 +809,46 @@ func TestNodeAdapterCommitteeVotes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, total)
 	assert.Empty(t, rows)
+}
+
+// A database that pruned a superseded hot-key authorization still holds the
+// votes that key cast, but no cold credential they map to. A cold-credential
+// list must report that history as unavailable rather than omit them.
+func TestNodeAdapterCommitteeColdVotesRefusePrunedAuthorizations(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	proposal := fx.addProposal(t, 0x01, 0, lcommon.GovActionTypeInfo, []byte{0x81, 0x06}, 10)
+	// Hot key 0x1a's authorization by cold 0x0a was pruned; only 0x1b's
+	// remains.
+	fx.authorizeHot(t, 0, 0x0a, 0, 0x1b, 40)
+	hotA := voter(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash, 0x1a)
+	hotB := voter(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash, 0x1b)
+	serveBlocks(fx, map[uint64]*slotBlock{
+		100: {number: 7, txs: []lcommon.Transaction{newTx(0xa1, true, procedures(hotA, govID(t, 0x01, 0), uint8(1)))}},
+		200: {number: 8, txs: []lcommon.Transaction{newTx(0xa2, true, procedures(hotB, govID(t, 0x01, 0), uint8(0)))}},
+	})
+	fx.addVote(t, proposal, models.VoterTypeCC, 0, 0x1a, models.VoteYes, 100, false)
+	fx.addVote(t, proposal, models.VoterTypeCC, 0, 0x1b, models.VoteNo, 200, false)
+
+	cold := &CommitteeCredentialRef{Hash: bytes32of(28, 0x0a)}
+	_, _, err := fx.adapter.CommitteeVotes(ctx, cold, true, asc)
+	assert.ErrorIs(t, err, ErrHistoryNotRetained)
+
+	// Hot-credential and unfiltered lists do not depend on the mapping.
+	rows, total, err := fx.adapter.CommitteeVotes(ctx, &CommitteeCredentialRef{Hash: bytes32of(28, 0x1a)}, false, asc)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	assert.Len(t, rows, 1)
+	_, total, err = fx.adapter.CommitteeVotes(ctx, nil, false, asc)
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+
+	// Once every vote maps to an authorization the cold list is complete.
+	fx.authorizeHot(t, 0, 0x0a, 0, 0x1a, 20)
+	_, total, err = fx.adapter.CommitteeVotes(ctx, cold, true, asc)
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
 }
 
 // Blockfrost's vote cert_index is db-sync's voting_procedure.index: the

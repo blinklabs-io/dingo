@@ -63,6 +63,15 @@ type HistoryStore interface {
 		txn types.Txn,
 	) ([][]byte, int, error)
 
+	// GetEarliestNonCheckpointBlockSlot returns the lowest slot at or after
+	// fromSlot holding a non-checkpoint block_nonce row. Nonce pruning deletes
+	// only those rows, so the slot bounds the history the block lists cover.
+	// The bool is false when no such row exists.
+	GetEarliestNonCheckpointBlockSlot(
+		fromSlot uint64,
+		txn types.Txn,
+	) (uint64, bool, error)
+
 	// GetEpochStakes returns the registered, delegated credentials captured
 	// by the reward snapshot labelled epoch, ordered by pool then credential.
 	// A nil poolKeyHash selects every pool.
@@ -179,6 +188,12 @@ type HistoryStore interface {
 		order string,
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, int, error)
+
+	// HasUnattributedCommitteeVotes reports whether any stored committee vote
+	// was cast by a hot credential no authorization row maps to a cold
+	// credential. Votes outlive the authorizations a pruned table dropped,
+	// and a cold-credential vote list cannot be complete while one exists.
+	HasUnattributedCommitteeVotes(txn types.Txn) (bool, error)
 
 	// GetGovernanceVotesPage pages the stored votes matching filter,
 	// ordered by the slot that cast the current vote value, along with the

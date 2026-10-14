@@ -10274,7 +10274,10 @@ transactions endpoints. It uses an adapter pattern to translate between
 Dingo's internal state and Blockfrost response types and supports
 Blockfrost-style pagination headers. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
-shared strict pagination parser (count 1–100, page 1–21474836).
+shared strict pagination parser (count 1–100, page 1–21474836). The epoch
+next, previous and stakes lists, whose Blockfrost schema defines only count and
+page, drop `order` before parsing, so it is ignored like any other undefined
+query parameter.
 The root document is served only at the literal `/` path (`GET /{$}`).
 Documented operations without a handler return `501`; unknown paths fall
 through to a catch-all `404` handler instead of the root document.
@@ -10304,7 +10307,11 @@ written, when an account has no retained stake-history row although its history
 predates the oldest retained snapshot (an account with some retained rows lists
 those), when the block that cast a governance vote is not held, and when a pool
 history epoch has no ready epoch summary or lies at or below a Mithril anchor
-without imported block counts. A votes page releases its read transaction
+without imported block counts, and when an epoch or pool block list reaches a
+Mithril anchor or a range whose non-checkpoint `block_nonce` rows were pruned
+(`database.BlockHistoryRetained`), and when a cold-credential committee vote
+list meets a vote whose hot key no retained authorization maps to a cold
+credential. A votes page releases its read transaction
 before decoding the blocks that cast its votes, since each block read takes a
 pooled read connection of its own. API storage mode
 retains `reward_stake_input`, non-checkpoint `block_nonce` rows and superseded

@@ -435,6 +435,27 @@ func (a *NodeAdapter) GovernanceCommittee(
 	return ret, nil
 }
 
+// checkCommitteeVotesAttributed reports ErrHistoryNotRetained while a stored
+// committee vote has no authorization mapping its hot credential to a cold
+// one: a cold-credential list would silently omit it.
+func (a *NodeAdapter) checkCommitteeVotesAttributed(ctx context.Context) error {
+	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
+	defer txn.Release()
+	unattributed, err := db.Metadata().HasUnattributedCommitteeVotes(
+		txn.Metadata(),
+	)
+	if err != nil {
+		return fmt.Errorf("check committee vote attribution: %w", err)
+	}
+	if unattributed {
+		return fmt.Errorf(
+			"committee hot-key authorizations: %w", ErrHistoryNotRetained,
+		)
+	}
+	return nil
+}
+
 // CommitteeVotes returns the votes cast by committee members. A cold
 // credential selects the votes of every hot credential it has authorized; a
 // hot one selects only its own.
@@ -455,6 +476,9 @@ func (a *NodeAdapter) CommitteeVotes(
 			CredentialTag: tag, Credential: credential.Hash,
 		}
 		if cold {
+			if err := a.checkCommitteeVotesAttributed(ctx); err != nil {
+				return nil, 0, err
+			}
 			filter.AuthorizedBy = &selected
 		} else {
 			filter.VoterCredentials = []models.CommitteeCredential{selected}
@@ -476,6 +500,14 @@ func (a *NodeAdapter) CommitteeVotes(
 			"cc_hot", false, row.Vote.VoterCredential,
 			row.Vote.VoterCredentialTag == 1,
 		)
+		// Committee votes are the only vote list that carries a block time,
+		// so the conversion runs here rather than in castTransactions.
+		blockTime, err := a.ledgerState.SlotToTime(row.CastSlot)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"get block time for slot %d: %w", row.CastSlot, err,
+			)
+		}
 		info := CommitteeVoteInfo{
 			TxHash:         casts[i].txHash,
 			VoterHotID:     hotID,
@@ -485,7 +517,7 @@ func (a *NodeAdapter) CommitteeVotes(
 			GovernanceType: governanceTypeName(row.ProposalActionType),
 			Vote:           voteName(row.Vote.Vote),
 			BlockHeight:    casts[i].blockHeight,
-			BlockTime:      casts[i].blockTime,
+			BlockTime:      blockTime.Unix(),
 		}
 		if row.Vote.AnchorURL != "" {
 			url := row.Vote.AnchorURL

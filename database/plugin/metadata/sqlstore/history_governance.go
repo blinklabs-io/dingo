@@ -17,6 +17,7 @@ package sqlstore
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -198,6 +199,29 @@ FROM update_drep item
 JOIN certs c ON c.id = item.certificate_id
 JOIN "transaction" tx ON tx.id = c.transaction_id
 WHERE item.credential_tag = ? AND item.credential = ?`
+
+func (s *Store) HasUnattributedCommitteeVotes(
+	txn types.Txn,
+) (bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return false, err
+	}
+	var found int
+	err = db.QueryRowContext(ctx, `SELECT 1 FROM governance_vote v
+WHERE v.voter_type = ?
+  AND NOT EXISTS (SELECT 1 FROM auth_committee_hot a
+    WHERE a.hot_credential_tag = v.voter_credential_tag
+      AND a.host_credential = v.voter_credential)
+LIMIT 1`, models.VoterTypeCC).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("find unattributed committee votes: %w", err)
+	}
+	return true, nil
+}
 
 // GetDRepUpdates returns a DRep's registration, update and deregistration
 // certificates in chain order, along with the unpaginated count.

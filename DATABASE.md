@@ -192,10 +192,13 @@ slot range, counting a Leios closure transaction at its
 `leios_transaction_context` slot, and epoch and pool block lists read
 `block_nonce` joined to `pool_opcert_sequence`. API storage mode keeps every
 non-checkpoint `block_nonce` row for those lists (one row per block); core mode
-prunes them outside the three-epoch nonce window, and a database pruned before
-this rule applied lists only the blocks it still holds. Pool history adds a
-bootstrap snapshot's imported block counts for epochs at or below the Mithril
-anchor, as the pool detail endpoint does. Account address totals sum lovelace
+prunes them outside the three-epoch nonce window, keeping each epoch's
+checkpoint rows. `database.BlockHistoryRetained` refuses a list whose range
+reaches a bootstrap anchor or lies before the epoch of the earliest
+non-checkpoint row (`GetEarliestNonCheckpointBlockSlot`), so a database pruned
+before this rule applied answers "not retained" rather than a short list. Pool
+history adds a bootstrap snapshot's imported block counts for epochs at or
+below the Mithril anchor, as the pool detail endpoint does. Account address totals sum lovelace
 without a width bound. Epoch stakes, pool history and delegators, and account
 stake history read the reward snapshot tables; the snapshot labelled E is the
 distribution active in epoch E+1. Account MIRs, asset balances and address
@@ -2358,7 +2361,9 @@ Blockfrost committee vote endpoints select a cold credential's votes through
 every hot credential it has authorized, and a pruned superseded row would drop
 the votes its hot key cast. The table then grows by one row per certificate
 (648,758 rows on preprod at the slot above). A database that pruned the table
-before this rule applied lists only the votes of the hot keys it still holds.
+before this rule applied can hold votes whose hot key no row maps to a cold
+credential (`HasUnattributedCommitteeVotes`); while one exists the
+cold-credential vote list answers "not retained" rather than omit them.
 
 Retention rule, applied per `(cold_credential_tag, cold_credential)`: keep every
 row with `added_slot` above the horizon, plus the single newest row at or below

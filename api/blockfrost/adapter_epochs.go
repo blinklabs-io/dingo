@@ -21,6 +21,7 @@ import (
 	"math"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -494,6 +495,27 @@ func (a *NodeAdapter) epochSlotRange(
 	return row.StartSlot, end, nil
 }
 
+// checkBlockHistoryRetained reports ErrHistoryNotRetained when block_nonce no
+// longer holds every block in the inclusive slot range, so a block list is
+// never served short as though it were complete.
+func checkBlockHistoryRetained(
+	db *database.Database,
+	txn *database.Txn,
+	startSlot uint64,
+	endSlot uint64,
+) error {
+	retained, err := database.BlockHistoryRetained(
+		db.Metadata(), txn.Metadata(), startSlot, endSlot,
+	)
+	if err != nil {
+		return fmt.Errorf("check block history: %w", err)
+	}
+	if !retained {
+		return ErrHistoryNotRetained
+	}
+	return nil
+}
+
 func hexHashes(hashes [][]byte) []string {
 	ret := make([]string, 0, len(hashes))
 	for _, hash := range hashes {
@@ -519,6 +541,9 @@ func (a *NodeAdapter) EpochBlocks(
 	db := a.ledgerState.Database()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
+	if err := checkBlockHistoryRetained(db, txn, start, end); err != nil {
+		return nil, 0, fmt.Errorf("blocks of epoch %d: %w", epoch, err)
+	}
 	hashes, total, err := db.Metadata().GetBlockHashesInSlotRange(
 		start, end, params.Count, offset, params.Order, txn.Metadata(),
 	)
@@ -551,6 +576,9 @@ func (a *NodeAdapter) EpochPoolBlocks(
 	db := a.ledgerState.Database()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
+	if err := checkBlockHistoryRetained(db, txn, start, end); err != nil {
+		return nil, 0, fmt.Errorf("blocks of epoch %d: %w", epoch, err)
+	}
 	hashes, total, err := db.Metadata().GetPoolBlockHashesInSlotRange(
 		poolKeyHash, start, end, params.Count, offset, params.Order,
 		txn.Metadata(),

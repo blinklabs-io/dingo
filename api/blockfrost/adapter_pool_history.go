@@ -271,6 +271,11 @@ func (a *NodeAdapter) PoolBlocks(
 	db := a.ledgerState.Database()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
+	if err := checkBlockHistoryRetained(
+		db, txn, 0, a.ledgerState.Tip().Point.Slot,
+	); err != nil {
+		return nil, 0, fmt.Errorf("pool blocks: %w", err)
+	}
 	hashes, total, err := db.Metadata().GetPoolBlockHashesInSlotRange(
 		poolKeyHash, 0, noSlotUpperBound, params.Count, offset, params.Order,
 		txn.Metadata(),
