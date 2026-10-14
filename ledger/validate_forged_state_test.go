@@ -504,3 +504,38 @@ func TestValidateForgedBlockStopsOnATipOffTheParentChain(t *testing.T) {
 	require.ErrorIs(t, err, forging.ErrForgedBlockStateChanged)
 	require.Zero(t, calls.Load())
 }
+
+// A verdict reached on a session that stopped being current is not a verdict
+// on the block: the rule failure may come from the state that moved. It is
+// reported as a changed state so the block is retried or skipped, never
+// dropped as invalid.
+func TestValidateForgedBlockDoesNotTrustARuleFailureFromAStaleSession(
+	t *testing.T,
+) {
+	t.Parallel()
+	parent := forgedStateTestHash(0x01)
+	moved := forgedStateTestHash(0x02)
+	rule := errors.New("BadInputsUTxO")
+	ls, _, _ := newForgedStateTestLedger(t, parent, nil)
+	// The state moves while the transaction is being judged, then the rule
+	// fails against what the session saw.
+	ls.Lock()
+	ls.currentEra.ValidateTxFunc = func(
+		lcommon.Transaction,
+		uint64,
+		lcommon.LedgerState,
+		lcommon.ProtocolParameters,
+	) error {
+		setForgedStateTestTip(ls, moved)
+		return rule
+	}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	block := newForgedStateTestBlock(parent)
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	err := ls.validateForgedTxs(ctx, block)
+
+	require.NotErrorIs(t, err, rule)
+}

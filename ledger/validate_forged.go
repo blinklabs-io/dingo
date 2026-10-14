@@ -285,6 +285,11 @@ func (ls *LedgerState) validateForgedTxsOnce(
 					createdUtxos,
 					pendingAccounts,
 				); err != nil {
+					// A rule failure judged against state that moved
+					// during the call is not a verdict on the block.
+					if !stillCurrent() {
+						return errForgedValidationNotCurrent
+					}
 					return fmt.Errorf(
 						"tx %s in forged block at slot %d: %w",
 						tx.Hash(),

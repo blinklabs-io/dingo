@@ -2028,6 +2028,9 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		if validationErr != nil {
 			f.incCouldNotForge()
 			if errors.Is(validationErr, ErrForgedBlockStateChanged) {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				// No verdict was reached, so the block is dropped as
 				// unverified, not as invalid: the slot is lost the way a
 				// build attempt the chain moved under is.

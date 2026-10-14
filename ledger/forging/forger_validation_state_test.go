@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -129,5 +130,44 @@ func TestForgeStillFailsLoudlyOnAGenuineSelfValidationFailure(t *testing.T) {
 		[]string{"ERROR"},
 		forgeLogLevels(t, &logs, forgedValidationFailedMsg),
 	)
+	assert.Empty(t, forgeLogLevels(t, &logs, forgedValidationStaleMsg))
+}
+
+type cancellingForgerValidator struct {
+	cancel context.CancelFunc
+}
+
+func (v *cancellingForgerValidator) ValidateForgedBlock(
+	context.Context,
+	ledger.Block,
+	[]byte,
+) error {
+	v.cancel()
+	return fmt.Errorf("tip moved: %w", ErrForgedBlockStateChanged)
+}
+
+// A forge cycle cancelled during self-validation is a shutdown, not a slot
+// skipped for a moving ledger: the cancellation is returned, and no
+// skip is logged.
+func TestForgeReturnsCancellationDuringSelfValidationState(t *testing.T) {
+	block := newForgerTestBlock(10, 2)
+	broadcaster := &forgerTestBroadcaster{}
+	forger, _ := newForgerWithValidator(
+		t,
+		block,
+		nil,
+		broadcaster,
+		&forgerTestValidator{},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	forger.blockValidator = &cancellingForgerValidator{cancel: cancel}
+	var logs bytes.Buffer
+	forger.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+
+	err := forger.checkAndForgeProduction(ctx)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, broadcaster.calls)
 	assert.Empty(t, forgeLogLevels(t, &logs, forgedValidationStaleMsg))
 }
