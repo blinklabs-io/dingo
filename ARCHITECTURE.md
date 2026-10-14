@@ -11239,6 +11239,12 @@ second sync:
   metadata export. `GetRewardAccountOutputs` is what the per-account
   exact-parity comparison (`compareEpochAccounts`, "Per-account exact parity"
   below) reads Dingo's committed reward state through.
+  `GetProposalDepositRefunds` reads `governance_proposal`,
+  `governance_proposal_drop` and the `account_reward_delta` journal through
+  `GetGovernanceProposalsRefundedAt` and `GetPostSnapshotRewardCreditEvents`
+  (see "Proposal refunds" below). Those tables are deleted only above a
+  rollback or truncate slot, never by age or storage mode, so unlike
+  `reward_account_output` a refund read does not age out.
   - *Core-mode pruning.* `ledger/snapshot/rotation.go`'s
     `cleanupOldSnapshots` keeps `reward_stake_input`/`reward_account_output`
     for only a rolling 4-epoch window in core storage mode (API mode retains
