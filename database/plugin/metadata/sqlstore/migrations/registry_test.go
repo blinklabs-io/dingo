@@ -31,7 +31,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 41)
+	require.Len(t, registry, 43)
 
 	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
 	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
@@ -279,6 +279,14 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, drepDormancyStateSchemaRelease, registry[39].Name)
 	require.Equal(t, 41, registry[40].Version)
 	require.Equal(t, drepDelegatorStateSchemaRelease, registry[40].Name)
+	require.Equal(t, 42, registry[41].Version)
+	require.Equal(t, utxoAddressIdentitySchemaRelease, registry[41].Name)
+	require.Equal(t, 43, registry[42].Version)
+	require.Equal(t, poolRegistrationIdentitySchemaRelease, registry[42].Name)
+	poolIdentitySQL := strings.Join(registry[42].SQL["sqlite"].Expand, "\n")
+	require.Contains(t, poolIdentitySQL, "registration_index")
+	require.Contains(t, poolIdentitySQL,
+		"`pool_id`, `added_slot`, `certificate_id`, `registration_index`")
 }
 
 func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
@@ -296,7 +304,7 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 41)
+			require.Len(t, registry, 43)
 			migration := registry[39]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
@@ -525,13 +533,61 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 41)
+	require.Len(t, registry, 43)
 
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,
 		"CREATE INDEX `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`(255),`sequence`)",
 	)
+}
+
+func TestUtxoAddressIdentityMigrationTranslatesForProviders(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		registry      func() ([]Migration, error)
+		dialect       string
+		idDefinition  string
+		addressType   string
+		foreignKey    string
+		indexFragment string
+	}{
+		{
+			name: "sqlite", registry: SQLiteRegistry, dialect: "sqlite",
+			idDefinition:  "`utxo_id` INTEGER PRIMARY KEY",
+			addressType:   "`address` BLOB NOT NULL",
+			foreignKey:    "FOREIGN KEY (`utxo_id`)",
+			indexFragment: "ON `utxo_address` (`address`)",
+		},
+		{
+			name: "postgres", registry: PostgresRegistry, dialect: "postgres",
+			idDefinition:  "\"utxo_id\" BIGINT PRIMARY KEY",
+			addressType:   "\"address\" BYTEA NOT NULL",
+			foreignKey:    "FOREIGN KEY (\"utxo_id\")",
+			indexFragment: "ON \"utxo_address\" (\"address\")",
+		},
+		{
+			name: "mysql", registry: MySQLRegistry, dialect: "mysql",
+			idDefinition:  "`utxo_id` BIGINT PRIMARY KEY",
+			addressType:   "`address` BLOB NOT NULL",
+			foreignKey:    "FOREIGN KEY (`utxo_id`)",
+			indexFragment: "ON `utxo_address` (`address`(255))",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			registry, err := tc.registry()
+			require.NoError(t, err)
+			expand := registry[41].SQL[tc.dialect].Expand
+			require.Len(t, expand, 2)
+			require.Contains(t, expand[0], tc.idDefinition)
+			require.Contains(t, expand[0], tc.addressType)
+			require.Contains(t, expand[0], tc.foreignKey)
+			require.Contains(t, expand[0], "ON DELETE CASCADE")
+			require.Contains(t, expand[1], tc.indexFragment)
+		})
+	}
 }
 
 func TestRewardCreditRoundMigrationTranslatesForProviders(t *testing.T) {
@@ -632,4 +688,31 @@ func TestSplitSQLPreservesCommentTokenBoundaries(t *testing.T) {
 		"CREATE TABLE thing (id INTEGER)",
 		"SELECT 1",
 	}, statements)
+}
+
+func TestPoolRegistrationIdentityMigrationTranslatesIndexDrop(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		dialect string
+		dropSQL string
+	}{
+		{"sqlite", "DROP INDEX IF EXISTS `idx_pool_reg_pool_slot`"},
+		{"postgres", `DROP INDEX IF EXISTS "idx_pool_reg_pool_slot"`},
+		{"mysql", "DROP INDEX `idx_pool_reg_pool_slot` ON `pool_registration`"},
+	} {
+		t.Run(tc.dialect, func(t *testing.T) {
+			t.Parallel()
+			registry, err := registryForDialect(tc.dialect)
+			require.NoError(t, err)
+			migration := registry[42]
+			require.Equal(t, poolRegistrationIdentitySchemaRelease, migration.Name)
+			expand := migration.SQL[tc.dialect].Expand
+			require.Contains(t, expand, tc.dropSQL)
+			if tc.dialect == "mysql" {
+				require.Contains(t, expand[2],
+					"CREATE UNIQUE INDEX `idx_pool_reg_pool_slot_cert_index`")
+				require.Equal(t, tc.dropSQL, expand[3])
+			}
+		})
+	}
 }

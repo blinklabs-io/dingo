@@ -30,7 +30,10 @@ func TestInstallLocalTestKeysRestrictsExistingPaths(t *testing.T) {
 	require.NoError(t, os.Chmod(dir, 0o777))
 
 	oldFiles := make(map[string]os.FileInfo)
-	for _, name := range []string{"vrf.skey", "kes.skey", "opcert.cert"} {
+	for _, name := range []string{
+		"vrf.skey", "kes.skey", "opcert.cert",
+		"faucet.skey", "faucet.vkey", "faucet.addr",
+	} {
 		path := filepath.Join(dir, name)
 		require.NoError(t, os.WriteFile(path, []byte("old"), 0o600))
 		require.NoError(t, os.Chmod(path, 0o666))
@@ -46,7 +49,10 @@ func TestInstallLocalTestKeysRestrictsExistingPaths(t *testing.T) {
 	dirInfo, err := os.Stat(dir)
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm())
-	for _, name := range []string{"vrf.skey", "kes.skey", "opcert.cert"} {
+	for _, name := range []string{
+		"vrf.skey", "kes.skey", "opcert.cert",
+		"faucet.skey", "faucet.vkey", "faucet.addr",
+	} {
 		want, err := localKeys.ReadFile("keys/" + name)
 		require.NoError(t, err)
 		path := filepath.Join(dir, name)

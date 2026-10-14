@@ -609,6 +609,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 				resp,
 			)
 		}
+		//nolint:contextcheck // Persistence is handed to the Ouroboros-owned worker and must outlive this bounded backfill request.
 		if err := o.storeLeiosEndorserBlock(
 			point,
 			blk.BlockRaw,
@@ -630,6 +631,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		// otherwise return nil on every connection this backfill tries
 		// without any of them ever verifying the entry, since none would
 		// take the !ok branch above.
+		//nolint:contextcheck // Publication may enqueue Ouroboros-lifetime persistence beyond this request's deadline.
 		if publish := o.bindLeiosEndorserBlockSlot(point.Hash, point.Slot); publish != nil {
 			publish()
 		}
@@ -662,6 +664,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	if err := validateLeiosEndorserBlockTxs(data.blockRaw, txs); err != nil {
 		return fmt.Errorf("validate tx references: %w", err)
 	}
+	//nolint:contextcheck // Persistence is handed to the Ouroboros-owned worker and must outlive this bounded backfill request.
 	if err := o.storeLeiosEndorserBlock(
 		point,
 		data.blockRaw,

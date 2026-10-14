@@ -2827,7 +2827,8 @@ const (
 	publishPipeline = ".github/workflows/publish.yml"
 )
 
-// pipelineStages are the jobs both pipelines must define identically. They are
+// pipelineStages share their execution steps; only PRs have a docs-only gate.
+// They are
 // duplicated between the files rather than factored into a reusable workflow
 // because `needs:` cannot cross workflow files, and a called workflow would
 // rename every check context that branch protection matches on. The price of
@@ -2902,12 +2903,12 @@ func jobNeeds(t *testing.T, workflow, name string, job any) []string {
 	}
 }
 
-// TestPipelineStagesMatch checks that every shared stage is defined the same
-// way in both pipelines. A fix applied to the pull-request pipeline and not to
-// the publish one means main is tested differently from the change that was
-// reviewed, which is the failure mode the old split between go-test.yml and
-// publish.yml's `ci` job actually produced: the release gate drifted into
-// running commands no pull request had run.
+// TestPipelineStagesMatch checks that every shared stage runs the same steps
+// in both pipelines, allowing only the PR documentation gate. A fix applied
+// only to the pull-request pipeline means main is tested differently from the
+// reviewed change. The old split between go-test.yml and publish.yml's `ci`
+// job caused that failure: the release gate drifted into running commands no
+// pull request had run.
 func TestPipelineStagesMatch(t *testing.T) {
 	root := repoRoot(t)
 	prJobs := pipelineJobs(t, root, prPipeline)
@@ -2924,6 +2925,17 @@ func TestPipelineStagesMatch(t *testing.T) {
 			t.Errorf("%s has no %s job", publishPipeline, stage)
 			continue
 		}
+		// PRs may skip documentation-only changes; release validation always runs.
+		if stage == "lint" || stage == "govulncheck" {
+			fields := pr.(map[string]any)
+			if !reflect.DeepEqual(fields["needs"], []any{"changes"}) ||
+				fields["if"] != "${{ !cancelled() && "+
+					"needs.changes.outputs.run-ci != 'false' }}" {
+				t.Errorf("%s must use the documentation-only changes gate", stage)
+			}
+			delete(fields, "needs")
+			delete(fields, "if")
+		}
 		if !reflect.DeepEqual(pr, published) {
 			t.Errorf(
 				"job %s differs between %s and %s; the stages are duplicated "+
@@ -2933,6 +2945,91 @@ func TestPipelineStagesMatch(t *testing.T) {
 				prPipeline,
 				publishPipeline,
 			)
+		}
+	}
+}
+
+func TestPullRequestChangeGateRunsDocsParity(t *testing.T) {
+	root := repoRoot(t)
+	jobs := pipelineJobs(t, root, prPipeline)
+	changes, ok := jobs["changes"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s changes job is missing or not a mapping", prPipeline)
+	}
+	steps, ok := changes["steps"].([]any)
+	if !ok {
+		t.Fatalf("%s changes job has no steps", prPipeline)
+	}
+	for _, step := range steps {
+		fields, ok := step.(map[string]any)
+		if ok && fields["run"] == "make docs-parity" {
+			return
+		}
+	}
+	t.Errorf("%s changes job does not run make docs-parity", prPipeline)
+}
+
+func TestPullRequestChangeGateUsesTrustedClassifier(t *testing.T) {
+	root := repoRoot(t)
+	jobs := pipelineJobs(t, root, prPipeline)
+	changes, ok := jobs["changes"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s changes job is missing or not a mapping", prPipeline)
+	}
+	steps, ok := changes["steps"].([]any)
+	if !ok {
+		t.Fatalf("%s changes job has no steps", prPipeline)
+	}
+
+	pullRequestCheckout := -1
+	trustedCheckout := -1
+	detect := -1
+	for idx, step := range steps {
+		fields, ok := step.(map[string]any)
+		if !ok {
+			continue
+		}
+		with, _ := fields["with"].(map[string]any)
+		uses, _ := fields["uses"].(string)
+		if strings.HasPrefix(uses, "actions/checkout@") &&
+			with["path"] == "pull-request" && with["fetch-depth"] == 0 {
+			pullRequestCheckout = idx
+		}
+		if strings.HasPrefix(uses, "actions/checkout@") &&
+			with["path"] == "trusted-ci" &&
+			with["ref"] == "${{ github.event.pull_request.base.sha || github.sha }}" {
+			trustedCheckout = idx
+		}
+		if fields["id"] == "detect" {
+			detect = idx
+			if fields["working-directory"] != "pull-request" ||
+				fields["run"] != `if [[ -f ../trusted-ci/.github/scripts/ci-changes.sh ]]; then
+  bash ../trusted-ci/.github/scripts/ci-changes.sh
+else
+  echo "run-ci=true" >> "$GITHUB_OUTPUT"
+fi
+` {
+				t.Errorf("%s change detector must run trusted-ci's classifier against the pull-request checkout", prPipeline)
+			}
+		}
+	}
+	if pullRequestCheckout < 0 {
+		t.Errorf("%s changes job does not check out PR history into pull-request", prPipeline)
+	}
+	if trustedCheckout < 0 {
+		t.Errorf("%s changes job does not check out the trusted base revision into trusted-ci", prPipeline)
+	}
+	if detect < 0 {
+		t.Errorf("%s changes job has no detect step", prPipeline)
+	} else if pullRequestCheckout > detect || trustedCheckout > detect {
+		t.Errorf("%s changes job runs the classifier before its checkouts", prPipeline)
+	}
+	for _, name := range []string{"docs-parity", "test-change-selection"} {
+		for idx, step := range steps {
+			fields, ok := step.(map[string]any)
+			if ok && fields["name"] == name && idx < detect {
+				t.Errorf("%s changes job runs %s before the trusted classifier", prPipeline, name)
+			}
 		}
 	}
 }
@@ -2988,7 +3085,7 @@ func TestPipelineStagesAreOrdered(t *testing.T) {
 }
 
 // TestReleaseGatesOnGovulncheck checks that a tag cannot publish while
-// govulncheck is failing.
+// govulncheck is failing or Linux race tests have not passed.
 //
 // This was lost once already. `make govulncheck` was the last step of
 // publish.yml's `ci` job and create-draft-release needed `[ci]`, so the gate
@@ -3008,6 +3105,13 @@ func TestReleaseGatesOnGovulncheck(t *testing.T) {
 		t.Fatalf("%s has no create-draft-release job", publishPipeline)
 	}
 	needs := jobNeeds(t, publishPipeline, "create-draft-release", job)
+	if !contains(needs, "go-test-linux-race") {
+		t.Errorf(
+			"%s: create-draft-release does not need go-test-linux-race; "+
+				"a tag could publish before race tests pass",
+			publishPipeline,
+		)
+	}
 	if !contains(needs, "govulncheck") {
 		t.Errorf(
 			"%s: create-draft-release does not need govulncheck; a tag could "+
@@ -3055,28 +3159,22 @@ func TestImageManifestRunsAfterMainBuilds(t *testing.T) {
 	}
 }
 
-// buildGates names, for each build job, every test job for its own runner OS.
-// Gating a build on its own platform and no other is what lets the Linux
-// binaries start while macOS tests are still running.
-//
-// Linux has two suites and a build must wait for both. Naming only one would
-// leave the other free to be dropped from the build's dependencies with this
-// check still green, which is exactly the hole that would let build-linux run
-// without the race suite.
+// buildGates names the normal test suite each platform's build waits for.
+// Race tests run alongside builds after the quick Linux gate passes.
 var buildGates = map[string][]string{
-	"build-linux": {"go-test-linux", "go-test-linux-race"},
+	"build-linux": {"go-test-linux"},
 	"build-macos": {"go-test-macos"},
 }
 
-// otherPlatformTests are the test jobs a given build job must NOT depend on.
-var otherPlatformTests = map[string][]string{
-	"build-linux": {"go-test-macos"},
+// independentTests are suites that run independently of each build.
+var independentTests = map[string][]string{
+	"build-linux": {"go-test-macos", "go-test-linux-race"},
 	"build-macos": {"go-test-linux", "go-test-linux-race"},
 }
 
 // TestBuildsGateOnTheirOwnPlatform checks that each build job waits for its own
-// runner OS's tests and for nothing else's. Depending on another platform is
-// what put the whole build stage behind the slowest and least predictable test
+// runner OS's normal suite without waiting for race or another platform.
+// Waiting for independent suites puts builds behind the slowest test
 // job in the pipeline; depending on none of them is what let images and
 // binaries publish from a commit no suite had covered.
 func TestBuildsGateOnTheirOwnPlatform(t *testing.T) {
@@ -3085,7 +3183,16 @@ func TestBuildsGateOnTheirOwnPlatform(t *testing.T) {
 	for _, workflow := range []string{prPipeline, publishPipeline} {
 		jobs := pipelineJobs(t, root, workflow)
 
-		for _, build := range sortedKeys(buildGates) {
+		gates := maps.Clone(buildGates)
+		independent := maps.Clone(independentTests)
+		imageBuild := "docker"
+		if workflow == publishPipeline {
+			imageBuild = "build-images"
+		}
+		gates[imageBuild] = gates["build-linux"]
+		independent[imageBuild] = independent["build-linux"]
+
+		for _, build := range sortedKeys(gates) {
 			job, ok := jobs[build]
 			if !ok {
 				t.Errorf("%s has no %s job", workflow, build)
@@ -3093,23 +3200,23 @@ func TestBuildsGateOnTheirOwnPlatform(t *testing.T) {
 			}
 			needs := jobNeeds(t, workflow, build, job)
 
-			for _, gate := range buildGates[build] {
+			for _, gate := range gates[build] {
 				if !contains(needs, gate) {
 					t.Errorf(
 						"%s: %s does not need %s; a build must not start "+
-							"until every suite for its own platform passes",
+							"until its normal platform suite passes",
 						workflow,
 						build,
 						gate,
 					)
 				}
 			}
-			for _, foreign := range otherPlatformTests[build] {
+			for _, foreign := range independent[build] {
 				if contains(needs, foreign) {
 					t.Errorf(
-						"%s: %s needs %s, a test job for another platform; "+
+						"%s: %s needs %s, an independent test job; "+
 							"that puts this build behind an unrelated "+
-							"platform's runtime",
+							"suite's runtime",
 						workflow,
 						build,
 						foreign,

@@ -15,6 +15,8 @@
 package chainselection
 
 import (
+	"cmp"
+	"slices"
 	"sort"
 	"time"
 
@@ -45,6 +47,22 @@ type GenesisDensityDisconnect struct {
 	// an idling peer this is its delivered density; otherwise it includes all
 	// still-possible slots through the window end.
 	MaxDensity uint64
+	// EagernessStandoff is true when ConnectionId was removed to resolve two
+	// forks whose header streams were both held at the Limit on Eagerness.
+	EagernessStandoff bool
+}
+
+// densityCandidate is one live candidate's retained Genesis frontier.
+type densityCandidate struct {
+	connId    ouroboros.ConnectionId
+	points    []ocommon.Point
+	baseBlock uint64
+	idling    bool
+	held      bool
+}
+
+func (c densityCandidate) fragment() CandidateFragment {
+	return CandidateFragment{points: c.points, baseBlock: c.baseBlock}
 }
 
 // fragmentWindowBounds returns the lower and upper bound on the number of
@@ -105,28 +123,7 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 	cs.lastGenesisDensityEval = now
 
 	window := cs.genesisWindowSlotsLocked()
-	type candidate struct {
-		connId    ouroboros.ConnectionId
-		points    []ocommon.Point
-		baseBlock uint64
-		idling    bool
-	}
-	candidates := make([]candidate, 0, len(cs.peerTips))
-	for connId, peerTip := range cs.peerTips {
-		if _, done := cs.genesisDensityDisconnected[connId]; done ||
-			!cs.peerCanCorroborateLocked(connId, peerTip) {
-			continue
-		}
-		if len(peerTip.observedPoints) == 0 {
-			continue
-		}
-		candidates = append(candidates, candidate{
-			connId:    connId,
-			points:    peerTip.observedPoints,
-			baseBlock: peerTip.observedPointBaseBlock,
-			idling:    peerTip.isIdling(),
-		})
-	}
+	candidates := cs.densityCandidatesLocked()
 
 	var out []GenesisDensityDisconnect
 	for i := range candidates {
@@ -194,5 +191,108 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 			break
 		}
 	}
+	return append(
+		out,
+		cs.eagernessStandoffDisconnectsLocked(candidates)...,
+	)
+}
+
+// densityCandidatesLocked returns the density candidates in a stable order so
+// a non-transitive comparison cycle has the same survivor on every evaluation.
+func (cs *ChainSelector) densityCandidatesLocked() []densityCandidate {
+	candidates := make([]densityCandidate, 0, len(cs.peerTips))
+	for connId, peerTip := range cs.peerTips {
+		if _, done := cs.genesisDensityDisconnected[connId]; done ||
+			!cs.peerCanCorroborateLocked(connId, peerTip) {
+			continue
+		}
+		if len(peerTip.observedPoints) == 0 {
+			continue
+		}
+		candidates = append(candidates, densityCandidate{
+			connId:    connId,
+			points:    peerTip.observedPoints,
+			baseBlock: peerTip.observedPointBaseBlock,
+			idling:    peerTip.isIdling(),
+			held:      peerTip.eagernessPaused > 0,
+		})
+	}
+	slices.SortFunc(candidates, func(a, b densityCandidate) int {
+		return cmp.Compare(a.connId.String(), b.connId.String())
+	})
+	return candidates
+}
+
+// eagernessStandoffDisconnectsLocked resolves forks whose streams are both
+// held at the Limit on Eagerness. Neither can deliver another header to move
+// the common point, so the peer with fewer blocks in the slots both frontiers
+// cover loses. Equal density follows the selector's transport ordering.
+func (cs *ChainSelector) eagernessStandoffDisconnectsLocked(
+	candidates []densityCandidate,
+) []GenesisDensityDisconnect {
+	var out []GenesisDensityDisconnect
+	for i := range candidates {
+		for j := i + 1; j < len(candidates); j++ {
+			a, b := candidates[i], candidates[j]
+			if !a.held || !b.held {
+				continue
+			}
+			if _, done := cs.genesisDensityDisconnected[a.connId]; done {
+				continue
+			}
+			if _, done := cs.genesisDensityDisconnected[b.connId]; done {
+				continue
+			}
+			fragmentA, fragmentB := a.fragment(), b.fragment()
+			intersection, ok := fragmentA.Intersect(fragmentB)
+			if !ok ||
+				intersection.Slot == fragmentA.HeadPoint().Slot ||
+				intersection.Slot == fragmentB.HeadPoint().Slot {
+				continue
+			}
+			compared := min(
+				fragmentA.HeadPoint().Slot,
+				fragmentB.HeadPoint().Slot,
+			)
+			countA, _ := fragmentWindowBounds(
+				a.points, intersection.Slot, compared,
+			)
+			countB, _ := fragmentWindowBounds(
+				b.points, intersection.Slot, compared,
+			)
+			winner, loser := a, b
+			winnerCount, loserCount := countA, countB
+			switch {
+			case countB > countA:
+				winner, loser = b, a
+				winnerCount, loserCount = countB, countA
+			case countA == countB &&
+				cs.compareTransportLocked(a.connId, b.connId, true) ==
+					ChainBBetter:
+				winner, loser = b, a
+			}
+			cs.markDensityDisconnectedLocked(loser.connId)
+			out = append(out, GenesisDensityDisconnect{
+				ConnectionId:           loser.connId,
+				DominatingConnectionId: winner.connId,
+				Intersection:           intersection,
+				WindowSlots:            compared - intersection.Slot,
+				DominatingDensity:      winnerCount,
+				MaxDensity:             loserCount,
+				EagernessStandoff:      true,
+			})
+		}
+	}
 	return out
+}
+
+func (cs *ChainSelector) markDensityDisconnectedLocked(
+	connId ouroboros.ConnectionId,
+) {
+	if cs.genesisDensityDisconnected == nil {
+		cs.genesisDensityDisconnected = make(
+			map[ouroboros.ConnectionId]struct{},
+		)
+	}
+	cs.genesisDensityDisconnected[connId] = struct{}{}
 }

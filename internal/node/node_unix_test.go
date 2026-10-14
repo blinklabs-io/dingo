@@ -90,6 +90,7 @@ func TestRunDoesNotPreRemoveSocketPath(t *testing.T) {
 				Network: "missing",
 			}
 			err = Run(
+				t.Context(),
 				cfg,
 				slog.New(slog.NewTextHandler(io.Discard, nil)),
 			)

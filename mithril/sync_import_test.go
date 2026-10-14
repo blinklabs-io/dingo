@@ -202,7 +202,7 @@ func TestMithrilSyncLeavesLazyManifestForTheFirstServe(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// The sync: drop for the bulk load, rebuild the critical subset only.
-	deferredIndexes := node.WithDeferredIndexes(db, logger)
+	deferredIndexes := node.WithDeferredIndexes(t.Context(), db, logger)
 	require.NoError(t, deferredIndexes.BuildCritical())
 	require.False(
 		t,
@@ -221,7 +221,7 @@ func TestMithrilSyncLeavesLazyManifestForTheFirstServe(t *testing.T) {
 	))
 
 	// The first serve on a core-mode node.
-	require.NoError(t, node.RepairDeferredIndexes(db, logger))
+	require.NoError(t, node.RepairDeferredIndexes(t.Context(), db, logger))
 
 	require.True(
 		t,
