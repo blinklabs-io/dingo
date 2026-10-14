@@ -27,6 +27,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -567,6 +568,45 @@ VALUES (?, 0, ?, ?, 1, 0, ?)`,
 	require.NoError(t, err)
 	require.Equal(t, uint64(3_000_000), want)
 	require.Equal(t, want, readUtxoStake(t, store, fx.ref))
+}
+
+func TestInsertUtxoBatchConflictAvoidsPerRowInsertAndSelect(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	store := newMigratedSQLiteStoreWithRegistry(t, reg)
+	conflictTxID := bytes.Repeat([]byte{0x51}, 32)
+	newTxID := bytes.Repeat([]byte{0x52}, 32)
+	require.NoError(t, store.ImportUtxos([]models.Utxo{{
+		TxId: conflictTxID, Amount: types.Uint64(1), OutputIdx: 0,
+	}}, nil))
+
+	beforeInserts := counterValue(t, reg, "insert")
+	beforeSelects := counterValue(t, reg, "select")
+	var inserted []bool
+	require.NoError(t, store.withWriteTransaction(nil,
+		func(db queryer, ctx context.Context) error {
+			var err error
+			inserted, err = store.insertUtxoModelsChecked(ctx, db, []*models.Utxo{
+				{TxId: conflictTxID, Amount: types.Uint64(1), OutputIdx: 0},
+				{TxId: newTxID, Amount: types.Uint64(2), OutputIdx: 0},
+			}, true, nil)
+			return err
+		},
+	))
+
+	require.Equal(t, []bool{false, true}, inserted)
+	require.Equal(
+		t,
+		beforeInserts+1,
+		counterValue(t, reg, "insert"),
+		"a conflicting row in a SQLite batch should not issue a second per-row INSERT",
+	)
+	require.Equal(
+		t,
+		beforeSelects,
+		counterValue(t, reg, "select"),
+		"the UPDATE RETURNING path should not SELECT the conflicting row ID",
+	)
 }
 
 // TestSetTransactionReapplyAppliesNoSecondDelta covers the invariant the
