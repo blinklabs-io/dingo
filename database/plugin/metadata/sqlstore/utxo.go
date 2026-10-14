@@ -2690,50 +2690,6 @@ ORDER BY utxo.id LIMIT ?`,
 	return ret, rows.Err()
 }
 
-func (s *Store) GetAssetUtxosDeletedAfterSlotMissingAddress(
-	slot uint64,
-	afterID uint,
-	limit int,
-	txn types.Txn,
-) ([]models.Utxo, error) {
-	if limit <= 0 {
-		return nil, errors.New("missing UTxO address limit must be positive")
-	}
-	sqlSlot, err := checkedInt64(slot)
-	if err != nil {
-		return nil, err
-	}
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
-		`SELECT `+qualifiedSQLiteUtxoColumns+` FROM utxo
-WHERE utxo.deleted_slot > ?
-	AND utxo.id > ?
-  AND EXISTS (SELECT 1 FROM asset WHERE asset.utxo_id = utxo.id)
-  AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
-ORDER BY utxo.id LIMIT ?`,
-	), sqlSlot, afterID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	ret := make([]models.Utxo, 0, limit)
-	for rows.Next() {
-		row, err := scanSQLiteUtxo(rows)
-		if err != nil {
-			return nil, err
-		}
-		utxo, err := utxoFromSQLite(row)
-		if err != nil {
-			return nil, err
-		}
-		ret = append(ret, *utxo)
-	}
-	return ret, rows.Err()
-}
-
 func (s *Store) SetUtxoAddress(
 	utxoID uint,
 	address []byte,

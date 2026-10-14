@@ -2067,10 +2067,6 @@ func (d *Database) TransactionsDeleteRolledback(
 			}
 		}()
 	}
-	if err := d.restoreRolledBackAssetUtxoAddresses(ctx, slot, txn); err != nil {
-		return fmt.Errorf("restore rolled-back asset UTxO addresses: %w", err)
-	}
-
 	// Get transaction hashes that will be deleted
 	txHashes, err := d.transactionStore().GetTransactionHashesAfterSlot(
 		slot,

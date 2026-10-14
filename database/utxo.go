@@ -1880,30 +1880,17 @@ func (d *Database) restoreAssetUtxoAddressesAfterSlot(
 		if err != nil {
 			return err
 		}
-		for i := range utxos {
-			if err := loadCbor(&utxos[i], loadTxn); err != nil {
-				return fmt.Errorf(
-					"load rollback UTxO %x#%d: %w",
-					utxos[i].TxId, utxos[i].OutputIdx, err,
-				)
-			}
-			output, err := utxos[i].Decode()
-			if err != nil {
-				return fmt.Errorf(
-					"decode rollback UTxO %x#%d: %w",
-					utxos[i].TxId, utxos[i].OutputIdx, err,
-				)
-			}
-			address := []byte(output.Address().String())
-			if len(address) == 0 {
-				return errors.New("decoded rollback UTxO address is empty")
-			}
+		rows, err := d.resolveUtxoAddresses(ctx, utxos, loadTxn)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
 			if err := d.utxoStore().SetUtxoAddress(
-				utxos[i].ID, address, txn.Metadata(),
+				row.id, row.address, txn.Metadata(),
 			); err != nil {
 				return err
 			}
-			afterID = utxos[i].ID
+			afterID = row.id
 		}
 		if len(utxos) < batchSize {
 			return nil
@@ -1939,48 +1926,6 @@ func (d *Database) UtxosUnspend(
 		owned = false
 	}
 	return nil
-}
-
-func (d *Database) restoreRolledBackAssetUtxoAddresses(
-	ctx context.Context,
-	slot uint64,
-	txn *Txn,
-) error {
-	resolveTxn := txn
-	cleanup := func() {}
-	if txn.Blob() == nil {
-		resolveTxn, cleanup = txn.withBlobForRecovery()
-	}
-	defer cleanup()
-
-	const batchSize = 128
-	var afterID uint
-	for {
-		utxos, err := d.utxoStore().
-			GetAssetUtxosDeletedAfterSlotMissingAddress(
-				slot, afterID, batchSize, txn.Metadata(),
-			)
-		if err != nil {
-			return err
-		}
-		rows, err := d.resolveUtxoAddresses(ctx, utxos, resolveTxn)
-		if err != nil {
-			return err
-		}
-		for _, row := range rows {
-			if err := d.utxoStore().SetUtxoAddress(
-				row.id,
-				row.address,
-				txn.Metadata(),
-			); err != nil {
-				return err
-			}
-		}
-		if len(rows) == 0 {
-			return nil
-		}
-		afterID = rows[len(rows)-1].id
-	}
 }
 
 // IterateLiveUtxos invokes fn once for each live UTxO row
