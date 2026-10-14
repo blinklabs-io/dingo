@@ -1763,7 +1763,9 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 	// The advertised tip is still an upper bound on what the peer can
 	// deliver, so a peer advertising a tip more than k blocks behind the local
 	// tip can never extend the local chain and is rejected here. An inflated
-	// advertisement only passes this check and is bounded at registration.
+	// advertisement passes this check, but it never becomes the selection
+	// frontier: selection compares the delivered block number, and each
+	// delivered header is bounded by checkPeerTipPlausibleLocked.
 	if peerTip.awaitingFirstHeader {
 		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
 			safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam) <
