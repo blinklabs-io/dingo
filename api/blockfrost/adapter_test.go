@@ -735,40 +735,6 @@ func TestNodeAdapterAddressUTXOsAssetsSurviveRefFetch(t *testing.T) {
 	assert.Equal(t, "9", items[0].Amount[1].Quantity)
 }
 
-func seedAssetHolderRows(
-	t *testing.T,
-	raw *sql.DB,
-	policyID []byte,
-	assetName []byte,
-	addresses []string,
-) {
-	t.Helper()
-	txn, err := raw.Begin()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = txn.Rollback() })
-	for i := range addresses {
-		txID := make([]byte, 32)
-		binary.BigEndian.PutUint64(txID[24:], uint64(i+1))
-		result, err := txn.Exec(`
-INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_script)
-VALUES (?, 1, 0, '1', 0, FALSE)`, txID)
-		require.NoError(t, err)
-		utxoID, err := result.LastInsertId()
-		require.NoError(t, err)
-		_, err = txn.Exec(
-			`INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
-			utxoID, []byte(addresses[i]),
-		)
-		require.NoError(t, err)
-		_, err = txn.Exec(`
-INSERT INTO asset (name, policy_id, utxo_id, amount) VALUES (?, ?, ?, '7')`,
-			assetName, policyID, utxoID,
-		)
-		require.NoError(t, err)
-	}
-	require.NoError(t, txn.Commit())
-}
-
 func TestNodeAdapterAssetAddressesPagesInMetadata(t *testing.T) {
 	t.Parallel()
 	adapter, raw, _ := newDBBackedAdapter(t)
@@ -781,7 +747,11 @@ func TestNodeAdapterAssetAddressesPagesInMetadata(t *testing.T) {
 		addr := testPointerAddress(t, payment, byte(i%128))
 		addresses[i] = addr.String()
 	}
-	seedAssetHolderRows(t, raw, policyID, assetName, addresses)
+	amounts := make([]string, len(addresses))
+	for i := range amounts {
+		amounts[i] = "7"
+	}
+	seedAssetHolderRows(t, raw, policyID, assetName, addresses, amounts)
 	slices.Sort(addresses)
 
 	holders, total, err := adapter.AssetAddresses(
